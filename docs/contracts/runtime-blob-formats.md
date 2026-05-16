@@ -69,6 +69,7 @@ Current kind ids:
   - `0x1003` = `sched_config`
   - `0x1004` = `sched_thresholds`
   - `0x1005` = `sched_rebalance`
+  - `0x1006` = `sched_xgboost` (cascade — see below)
 
 ## Eviction Payloads
 
@@ -318,6 +319,88 @@ Validation rules:
 - `enabled` must be `0` or `1`
 - `interval_ticks` must be non-zero
 - `imbalance_min` must be non-zero
+
+### `sched_xgboost`
+
+Inner magic: `XGBC` (cascade — see "Why two XGBoost formats" below).
+
+The scheduler XGBoost cascade is the only blob whose **storage lives
+Rust-side** (`runtime/src/sched/xgb.rs`) rather than the static dense
+pool used by every other scheduler kind. The trained cascade is ~9 MB
+on the shipping model — too large for the per-slot pool — so the C
+side forwards `SCHED_MODEL_KIND_XGBOOST` calls to the Rust FFI in
+`runtime/src/sched/xgb.rs` and the bytes are owned by Rust heap from
+stage onward.
+
+Outer cascade header:
+
+| Offset | Size | Field | Notes |
+|---|---:|---|---|
+| `0` | 4 | magic | ASCII `XGBC` |
+| `4` | 2 | payload version | currently `1` |
+| `6` | 2 | reserved | must be `0` |
+| `8` | 2 | classifier count | must be 3 for `ai_xgb` |
+| `10` | 2 | reserved | must be `0` |
+| `12` | 4 | reserved | must be `0` |
+
+Then **N back-to-back classifier sections**, each starting with a
+16-byte header:
+
+| Offset (rel.) | Size | Field | Notes |
+|---|---:|---|---|
+| `0` | 4 | tree count (`u32`) | must be non-zero |
+| `4` | 4 | node count (`u32`) | must be non-zero |
+| `8` | 2 | label-class count (`u16`) | bounded by `MAX_LABEL_CLASSES = 64` |
+| `10` | 2 | reserved | must be `0` |
+| `12` | 4 | reserved | must be `0` |
+
+Followed by, in order:
+
+- `tree_count` root indices as `u32` (widened from XGB1's `u16` —
+  see below)
+- `node_count` nodes, each **20 bytes** (widened from XGB1's 16
+  bytes)
+- `n_classes` label values as `i32`
+
+Cascade node layout (XGBC, 20 bytes):
+
+| Offset | Size | Field |
+|---|---:|---|
+| `0` | 2 | feature index (`u16`) |
+| `2` | 2 | flags (`u16`) |
+| `4` | 4 | left child index (`u32`) |
+| `8` | 4 | right child index (`u32`) |
+| `12` | 4 | threshold (`f32`) |
+| `16` | 4 | value (`f32`) |
+
+Validation rules:
+
+- root and child indices must be in range
+- non-leaf feature indices must be `< CASCADE_MAX_FEATURE_IDX[i]` for
+  classifier `i` (113, 114, 115 for the shipping `ai_xgb` cascade —
+  each classifier appends the prior stage's prediction to the input
+  vector, widening it by one)
+- thresholds must be finite
+- leaf values must be finite
+- entire blob must be `≤ MAX_CASCADE_PAYLOAD_BYTES = 128 MB`
+- absolute caps: `MAX_CLASSIFIERS = 8`, `MAX_TREES_CASCADE = 16384`,
+  `MAX_NODES_CASCADE = 2_000_000`. The 3-classifier requirement is
+  `ai_xgb`-specific; the XGBC wire format itself is a generic
+  N-classifier cascade up to the 8-classifier engine cap, so a future
+  scheduler kind could reuse it for a deeper or shallower cascade
+  without bumping the format version.
+
+#### Why two XGBoost formats
+
+The eviction `xgboost` kind uses **XGB1** (16-byte node, `u16`
+children, `MAX_NODES_SINGLE = 65535`); the scheduler `sched_xgboost`
+kind uses **XGBC** (20-byte node, `u32` children, `MAX_NODES_CASCADE
+= 2_000_000`). The split exists because the shipping scheduler
+`core_clf` flattens to ~450 K nodes — well past the `u16` ceiling
+that XGB1 imposes. Eviction models stay small enough that the
+narrower XGB1 layout is correct. The shared in-memory `Node`
+representation in `runtime/src/ml/xgb_tree.rs` holds children as
+`u32` regardless of wire width; only the parsers differ.
 
 ## Current Limits
 
