@@ -942,6 +942,10 @@ pub unsafe fn flush_pending_for_test() -> usize {
 /// Variant of `run_dispatcher` where the caller is not itself one of
 /// the claimed slots (timer-driven flush). All slots in
 /// `batch_indices[0..batch_count]` are signalled via the mailbox.
+///
+/// Scaffolding for #859 — see the section comment above
+/// `flush_pending_for_test`. Removed when #859 lands and the unified
+/// `run_dispatcher` absorbs this path.
 unsafe fn run_dispatcher_external(
     _self_idx: usize,
     batch_indices: &[u8; MAX_BATCH],
@@ -1039,6 +1043,11 @@ unsafe fn run_dispatcher_external(
     }
 }
 
+/// Heterogeneous-batch fallback for the timer-flush path (no
+/// self-slot — the caller isn't one of `batch_indices`).
+///
+/// Scaffolding for #859 — see the section comment above
+/// `flush_pending_for_test`. Removed when #859 lands.
 unsafe fn dispatch_heterogeneous_external(
     batch_indices: &[u8; MAX_BATCH],
     batch_count: usize,
@@ -1099,11 +1108,18 @@ fn decode_engine_error(code: u32) -> EngineError {
 // in `sched::mod`; thin wrapper over the static singleton above)
 // =============================================================================
 
-/// Inference scheduler handle.
+/// Inference scheduler handle — legacy token-based API surface.
 ///
-/// All real state lives in module-static atomics — this struct only
-/// exists to preserve the prior API surface. Calling `submit()` /
-/// `get_result()` now interacts with the shared queue.
+/// **Prefer [`submit_inference_sync`] for new code.** This struct
+/// exists only to preserve the shape of the prior Phase-3 skeleton;
+/// the metadata-only [`InferenceRequest`] it consumes doesn't carry
+/// buffer pointers, so `submit()` / `cancel()` / `get_result()` all
+/// return `NotImplemented`. All real state lives in module-static
+/// atomics; the only methods that do real work are `start()`,
+/// `stop()`, `is_running()`, `stats()`, and `queue_depth()`, which
+/// are thin wrappers over the static singleton's free functions
+/// (`set_batching_enabled`, `batching_enabled`, `stats`,
+/// `queue_depth`).
 pub struct InferenceScheduler {
     _phantom: (),
 }
