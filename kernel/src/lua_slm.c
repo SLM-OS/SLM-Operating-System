@@ -3243,6 +3243,169 @@ static int l_infer_stats(lua_State *L) {
 }
 
 /**
+ * slm.infer_batch_status() — Read-only snapshot of the dynamic-batching
+ * dispatcher (#860). Returns table:
+ *   {enabled, batch_size, timeout_us, queue_depth,
+ *    total_submitted, completed, failed,
+ *    batches_dispatched, batches_full, batches_timeout,
+ *    bypassed_deadline, singleton_dispatches}
+ *
+ * Returns nil on error.
+ */
+static int l_infer_batch_status(lua_State *L) {
+    if (!L) return 0;
+    RustBatchStatus s;
+    if (rust_infer_batch_status(&s) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_createtable(L, 0, 12);
+    lua_pushboolean(L, s.enabled != 0);  lua_setfield(L, -2, "enabled");
+    lua_pushinteger(L, (lua_Integer)s.batch_size);
+    lua_setfield(L, -2, "batch_size");
+    lua_pushinteger(L, (lua_Integer)s.timeout_us);
+    lua_setfield(L, -2, "timeout_us");
+    lua_pushinteger(L, (lua_Integer)s.queue_depth);
+    lua_setfield(L, -2, "queue_depth");
+    lua_pushinteger(L, (lua_Integer)s.total_submitted);
+    lua_setfield(L, -2, "total_submitted");
+    lua_pushinteger(L, (lua_Integer)s.completed);
+    lua_setfield(L, -2, "completed");
+    lua_pushinteger(L, (lua_Integer)s.failed);
+    lua_setfield(L, -2, "failed");
+    lua_pushinteger(L, (lua_Integer)s.batches_dispatched);
+    lua_setfield(L, -2, "batches_dispatched");
+    lua_pushinteger(L, (lua_Integer)s.batches_full);
+    lua_setfield(L, -2, "batches_full");
+    lua_pushinteger(L, (lua_Integer)s.batches_timeout);
+    lua_setfield(L, -2, "batches_timeout");
+    lua_pushinteger(L, (lua_Integer)s.bypassed_deadline);
+    lua_setfield(L, -2, "bypassed_deadline");
+    lua_pushinteger(L, (lua_Integer)s.singleton_dispatches);
+    lua_setfield(L, -2, "singleton_dispatches");
+    return 1;
+}
+
+/**
+ * slm.infer_batch_mode("on"|"off") — admin toggle for batched
+ * dispatch. Returns the resulting mode as a boolean.
+ */
+static int l_infer_batch_mode(lua_State *L) {
+    if (!L) return 0;
+    const char *arg = luaL_checkstring(L, 1);
+    int on = 0;
+    if (strcmp(arg, "on") == 0) {
+        on = 1;
+    } else if (strcmp(arg, "off") != 0) {
+        return luaL_error(L, "infer_batch_mode: argument must be 'on' or 'off'");
+    }
+    rust_infer_batch_set_mode(on);
+    lua_pushboolean(L, rust_infer_batch_get_mode() != 0);
+    return 1;
+}
+
+/**
+ * slm.infer_batch_config({size=N, timeout_us=T}) — configure batch
+ * threshold and partial-batch timeout. Out-of-range values clamp to
+ * the nearest accepted bound: size to [1, 32], timeout_us to
+ * [100, 100000]. Returns the applied table.
+ */
+static int l_infer_batch_config(lua_State *L) {
+    if (!L) return 0;
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_getfield(L, 1, "size");
+    lua_Integer size = luaL_optinteger(L, -1, 0);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "timeout_us");
+    lua_Integer timeout = luaL_optinteger(L, -1, 0);
+    lua_pop(L, 1);
+
+    /* Read current config; only overwrite fields the caller supplied. */
+    RustBatchStatus cur;
+    rust_infer_batch_status(&cur);
+    uint32_t new_size = (size > 0) ? (uint32_t)size : cur.batch_size;
+    uint32_t new_timeout = (timeout > 0) ? (uint32_t)timeout : cur.timeout_us;
+    rust_infer_batch_set_config(new_size, new_timeout);
+
+    RustBatchStatus after;
+    rust_infer_batch_status(&after);
+    lua_createtable(L, 0, 2);
+    lua_pushinteger(L, (lua_Integer)after.batch_size);
+    lua_setfield(L, -2, "size");
+    lua_pushinteger(L, (lua_Integer)after.timeout_us);
+    lua_setfield(L, -2, "timeout_us");
+    return 1;
+}
+
+/**
+ * slm.infer_stress(N, iters) — spawn N concurrent task workers, each
+ * running `iters` MNIST inferences against the batched dispatcher.
+ * Returns a table with the aggregated stress result, or nil on error.
+ *
+ *   {n_workers, iters_per_worker, success, errors,
+ *    wall_us, min_us, avg_us, max_us, req_per_s,
+ *    batches_dispatched, batches_full, batches_timeout,
+ *    bypassed_deadline, singleton_dispatches}
+ */
+static int l_infer_stress(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer n = luaL_checkinteger(L, 1);
+    lua_Integer iters = luaL_optinteger(L, 2, 50);
+    if (n <= 0 || n > 32 || iters <= 0 || iters > 100000) {
+        return luaL_error(L, "infer_stress: N must be 1..32, iters 1..100000");
+    }
+    RustStressResult r;
+    int32_t rc = rust_infer_stress_run((uint32_t)n, (uint32_t)iters, &r);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+
+    lua_Integer success = (lua_Integer)r.success_count;
+    lua_Integer wall_us = (lua_Integer)(r.wall_ns / 1000);
+    lua_Integer avg_us = (success > 0)
+        ? (lua_Integer)((r.total_lat_ns / (uint64_t)success) / 1000)
+        : 0;
+    lua_Integer req_per_s = (r.wall_ns > 0)
+        ? (lua_Integer)((r.success_count * 1000000000ULL) / r.wall_ns)
+        : 0;
+
+    lua_createtable(L, 0, 14);
+    lua_pushinteger(L, (lua_Integer)r.n_workers);
+    lua_setfield(L, -2, "n_workers");
+    lua_pushinteger(L, (lua_Integer)r.iters_per_worker);
+    lua_setfield(L, -2, "iters_per_worker");
+    lua_pushinteger(L, success);
+    lua_setfield(L, -2, "success");
+    lua_pushinteger(L, (lua_Integer)r.error_count);
+    lua_setfield(L, -2, "errors");
+    lua_pushinteger(L, wall_us);
+    lua_setfield(L, -2, "wall_us");
+    lua_pushinteger(L, (lua_Integer)(r.min_lat_ns / 1000));
+    lua_setfield(L, -2, "min_us");
+    lua_pushinteger(L, avg_us);
+    lua_setfield(L, -2, "avg_us");
+    lua_pushinteger(L, (lua_Integer)(r.max_lat_ns / 1000));
+    lua_setfield(L, -2, "max_us");
+    lua_pushinteger(L, req_per_s);
+    lua_setfield(L, -2, "req_per_s");
+    lua_pushinteger(L, (lua_Integer)r.batches_dispatched);
+    lua_setfield(L, -2, "batches_dispatched");
+    lua_pushinteger(L, (lua_Integer)r.batches_full);
+    lua_setfield(L, -2, "batches_full");
+    lua_pushinteger(L, (lua_Integer)r.batches_timeout);
+    lua_setfield(L, -2, "batches_timeout");
+    lua_pushinteger(L, (lua_Integer)r.bypassed_deadline);
+    lua_setfield(L, -2, "bypassed_deadline");
+    lua_pushinteger(L, (lua_Integer)r.singleton_dispatches);
+    lua_setfield(L, -2, "singleton_dispatches");
+    return 1;
+}
+
+/**
  * slm.gpu_status() - Get GPU subsystem status
  * Returns table: {available, name, device, compute_ready, unified_memory, memory_size}
  */
@@ -4378,6 +4541,8 @@ static const luaL_Reg slm_lib_safe[] = {
     {"model_list", l_model_list},
     {"model_info", l_model_info},
     {"infer_stats", l_infer_stats},
+    /* Dynamic batching — read-only status (#860). */
+    {"infer_batch_status", l_infer_batch_status},
     {"gpu_status", l_gpu_status},
     /* Shell integration */
     {"read_line", l_read_line},
@@ -4417,6 +4582,10 @@ static const luaL_Reg slm_lib_admin[] = {
     {"gpu_use_set", l_gpu_use_set},
     /* Admin & telemetry suite (M5) — model launch (instantiates) */
     {"model_launch", l_model_launch},
+    /* Dynamic batching admin (#860). */
+    {"infer_batch_mode", l_infer_batch_mode},
+    {"infer_batch_config", l_infer_batch_config},
+    {"infer_stress", l_infer_stress},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},

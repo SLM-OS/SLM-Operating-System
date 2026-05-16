@@ -197,6 +197,10 @@ without a compile-time guard.
 | `slm.model_pin(index)` | Admin surface only. Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
 | `slm.model_unpin(index)` | Admin surface only. Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
 | `slm.infer_stats()` | Cumulative inference statistics: `{total, total_ns, min_ns, max_ns, last_ns, errors}`. |
+| `slm.infer_batch_status()` | Dynamic-batching dispatcher snapshot: `{enabled, batch_size, timeout_us, queue_depth, total_submitted, completed, failed, batches_dispatched, batches_full, batches_timeout, bypassed_deadline, singleton_dispatches}`. Read-only; safe surface. |
+| `slm.infer_batch_mode(s)` | Admin surface only. `s = "on"` enables batched dispatch; `"off"` disables (default). Returns the resulting mode as a boolean. SLM-OS exposes batching as a runtime-toggleable option (#848); the default is OFF — flip it on for multi-tenant inference workloads. |
+| `slm.infer_batch_config({size=N, timeout_us=T})` | Admin surface only. Configure the batch-size threshold (1..32, default 8) and the partial-batch flush timeout (100..100000 µs, default 5000). Returns `{size, timeout_us}` reflecting the actually-applied values (out-of-range inputs clamp to the nearest bound). Either field may be omitted to keep the current value. |
+| `slm.infer_stress(N, iters)` | Admin surface only. Spawn `N` (1..32) concurrent task workers, each calling `submit_inference_sync` against MNIST for `iters` (1..100000) iterations. Returns a results table: `{n_workers, iters_per_worker, success, errors, wall_us, min_us, avg_us, max_us, req_per_s, batches_dispatched, batches_full, batches_timeout, bypassed_deadline, singleton_dispatches}`. MNIST must be loaded first. The exact ratio of batched vs singleton dispatches depends on the current `infer_batch_mode`/`infer_batch_config`. |
 | `slm.gpu_status()` | GPU subsystem info: `{available, name, device, compute_ready, unified_memory, memory_size}`. `.available` is always set; other fields populated when a driver is present. |
 
 ### Hailo NPU (AI HAT+)
