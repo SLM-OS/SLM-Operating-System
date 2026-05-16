@@ -2969,6 +2969,23 @@ static int model_infer(int argc, char *argv[])
     return 0;
 }
 
+/*
+ * Op-type names indexed by the `op_type` discriminant from
+ * `runtime/src/loader/graph.rs::OpType`. Slot 0 = MatMul .. slot 16
+ * = MaxPool; discriminant 255 (Unknown) falls outside the table and
+ * is labelled inline at the call site. Hoisted to file scope so a
+ * future diagnostic dump (per-op cost stats, op-counter histograms)
+ * can reuse the same lookup without redefining the table.
+ */
+static const char *const slm_op_type_names[] = {
+    "MatMul", "Add", "Relu", "Softmax", "LayerNorm",
+    "Reshape", "Transpose", "Gather", "Concat",
+    "Unsqueeze", "Gemm", "Flatten", "Shape", "Constant",
+    "Cast", "Conv", "MaxPool",
+};
+#define SLM_OP_TYPE_NAME_COUNT \
+    (sizeof(slm_op_type_names) / sizeof(slm_op_type_names[0]))
+
 int cmd_model(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -3137,19 +3154,6 @@ int cmd_model(int argc, char *argv[])
                 shell_puts("model profile: no data\r\n");
                 return 0;
             }
-            /*
-             * Op-type names mirror runtime/src/loader/graph.rs::OpType.
-             * Indexed by the `op_type` discriminant (255 = Unknown
-             * folds onto the last slot via the lookup below).
-             */
-            static const char *op_name[] = {
-                "MatMul", "Add", "Relu", "Softmax", "LayerNorm",
-                "Reshape", "Transpose", "Gather", "Concat",
-                "Unsqueeze", "Gemm", "Flatten", "Shape", "Constant",
-                "Cast", "Conv", "MaxPool",
-            };
-            const size_t op_name_count =
-                sizeof(op_name) / sizeof(op_name[0]);
             shell_puts("Per-op profile (count / avg us / min us / max us)\r\n");
             shell_puts("---------------------------------------------------\r\n");
             int printed = 0;
@@ -3157,9 +3161,13 @@ int cmd_model(int argc, char *argv[])
                 if (entries[i].count == 0) {
                     continue;
                 }
+                /*
+                 * Discriminant 255 (Unknown) and any future
+                 * out-of-table discriminant fall through to "Unknown".
+                 */
                 const char *label;
-                if ((size_t)entries[i].op_type < op_name_count) {
-                    label = op_name[entries[i].op_type];
+                if ((size_t)entries[i].op_type < SLM_OP_TYPE_NAME_COUNT) {
+                    label = slm_op_type_names[entries[i].op_type];
                 } else {
                     label = "Unknown";
                 }

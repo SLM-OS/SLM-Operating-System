@@ -110,6 +110,12 @@ pub const PROFILE_NUM_OPS: usize = 18;
 #[derive(Debug, Clone, Copy)]
 pub struct OpProfileEntry {
     pub op_type: u8,
+    /// Explicit padding for FFI layout parity with
+    /// `RustOpProfileEntry` in `kernel/include/slm_ffi.h`. Treat as
+    /// private — `pub` only because `#[repr(C)]` requires all fields
+    /// be visible to layout consumers; `#[doc(hidden)]` keeps it out
+    /// of rustdoc so consumers aren't tempted to read or write it.
+    #[doc(hidden)]
     pub _pad: [u8; 7],
     pub count: u64,
     pub total_ns: u64,
