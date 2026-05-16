@@ -34,6 +34,13 @@ struct ai_xgb_stats {
 
 static struct ai_xgb_stats ai_xgb_stats;
 
+/* The Rust predictor (`runtime/src/sched/xgb.rs::STATE_DIM`) hard-
+ * codes 108. Pin the C-side `AI_STATE_DIM` against it so a future
+ * drift surfaces at build time, not as silent garbage when the
+ * Rust side reads past the C-allocated buffer. */
+_Static_assert(AI_STATE_DIM == 108,
+    "sched_xgb.c assumes the Rust predictor's STATE_DIM == 108");
+
 static int ai_xgb_init(void)
 {
     ai_xgb_stats.decisions = 0;

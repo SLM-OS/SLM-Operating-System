@@ -771,9 +771,8 @@ pub extern "C" fn rust_run_tests() -> i32 {
     {
         sched::xgb::clear();
         let blob = sched::xgb::build_smoke_blob();
-        let staged_ok = unsafe {
-            sched::xgb::rust_sched_xgb_stage_blob(blob.as_ptr(), blob.len()) == 0
-        };
+        let staged_ok =
+            sched::xgb::rust_sched_xgb_stage_blob(blob.as_ptr(), blob.len()) == 0;
         print_test_result(b"sched_xgb_stage_synthetic\0", staged_ok);
         if !staged_ok { failures += 1; }
 
@@ -789,14 +788,12 @@ pub extern "C" fn rust_run_tests() -> i32 {
         let mut core: i32 = -1;
         let mut prio: i32 = -1;
         let mut preempt: i32 = -1;
-        let predicted = unsafe {
-            sched::xgb::rust_sched_xgb_predict(
-                state.as_ptr(),
-                &mut core as *mut i32,
-                &mut prio as *mut i32,
-                &mut preempt as *mut i32,
-            ) == 0
-        };
+        let predicted = sched::xgb::rust_sched_xgb_predict(
+            state.as_ptr(),
+            &mut core as *mut i32,
+            &mut prio as *mut i32,
+            &mut preempt as *mut i32,
+        ) == 0;
         print_test_result(b"sched_xgb_predict\0", predicted);
         if !predicted { failures += 1; }
 
@@ -811,12 +808,10 @@ pub extern "C" fn rust_run_tests() -> i32 {
         let mut blob_corrupt = sched::xgb::build_smoke_blob();
         let last = blob_corrupt.len() - 1;
         blob_corrupt[last] ^= 0xFF;
-        let rejected = unsafe {
-            sched::xgb::rust_sched_xgb_stage_blob(
-                blob_corrupt.as_ptr(),
-                blob_corrupt.len(),
-            ) != 0
-        };
+        let rejected = sched::xgb::rust_sched_xgb_stage_blob(
+            blob_corrupt.as_ptr(),
+            blob_corrupt.len(),
+        ) != 0;
         print_test_result(b"sched_xgb_rejects_bad_checksum\0", rejected);
         if !rejected { failures += 1; }
 

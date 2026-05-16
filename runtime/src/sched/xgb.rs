@@ -25,7 +25,7 @@
 //! not the encoded class index. The classifier's `label_classes` map
 //! does the inverse-transform that Python's `LabelEncoder` performs.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -127,6 +127,14 @@ const SCHED_MODEL_STAGED: u16 = 1;
 const SCHED_MODEL_ACTIVE: u16 = 2;
 const SCHED_MODEL_ROLLED_BACK: u16 = 3;
 
+// Build-time layout pin against `struct sched_model_status` /
+// `struct sched_model_meta` in `kernel/sched/ai/runtime_model.h`.
+// Either the field order or the implicit pad changes here, the build
+// breaks instead of the C side silently mis-reading the FFI status
+// payload.
+const _: () = assert!(core::mem::size_of::<SchedModelMetaC>() == 20);
+const _: () = assert!(core::mem::size_of::<SchedModelStatusC>() == 76);
+
 // ---------------------------------------------------------------------
 // Slot store. Three slots — staged, active, rollback — match the
 // existing dense-pool semantics so the Lua/shell verbs (`stage`,
@@ -135,7 +143,11 @@ const SCHED_MODEL_ROLLED_BACK: u16 = 3;
 // ---------------------------------------------------------------------
 
 struct Slot {
-    cascade: Option<Box<XgbCascade>>,
+    /// `Arc` (not `Box`) so `predict()` can clone a reference under
+    /// the lock and walk the trees with the lock released — the lock
+    /// would otherwise be held for hundreds of thousands of node
+    /// reads per decision.
+    cascade: Option<Arc<XgbCascade>>,
     meta: SchedModelMetaC,
 }
 
@@ -317,11 +329,12 @@ pub fn validate(bytes: &[u8]) -> Result<(), XgbStageError> {
 
 pub fn stage(bytes: &[u8]) -> Result<(), XgbStageError> {
     let (meta, cascade) = parse_full(bytes)?;
+    let arc = Arc::new(cascade);
     let _g = SpinGuard::new();
     // SAFETY: lock held — exclusive access to STORE.
     unsafe {
         let s = &mut *store_mut();
-        s.staged.cascade = Some(Box::new(cascade));
+        s.staged.cascade = Some(arc);
         s.staged.meta = meta;
         s.state = SCHED_MODEL_STAGED;
     }
@@ -432,6 +445,7 @@ fn compute_derived(state: &[f32; STATE_DIM]) -> [f32; N_DERIVED_FEATURES] {
             n += 1;
         }
     }
+    debug_assert!(n <= MAX_CORES);
     if n > 1 {
         let mut sum = 0.0_f32;
         for i in 0..n {
@@ -505,39 +519,58 @@ pub struct CascadeOutput {
 }
 
 pub fn predict(state: &[f32; STATE_DIM]) -> Option<CascadeOutput> {
-    // Take a snapshot of the active cascade under the lock, then
-    // release the lock before tree-walking. The cascade is held by
-    // an `Arc`-equivalent via `Box`; we clone the `Box` contents into
-    // a stack-temporary view by re-borrowing the existing one. To
-    // keep the lock's critical section short, we copy the trees out.
-    //
-    // Pragmatic implementation: hold the lock for the full tree walk.
-    // This is the same shape the eviction `XGBoostPolicy` takes —
-    // assign_cpu happens at scheduling decisions, which is rare
-    // compared to other kernel hot paths.
-    let _g = SpinGuard::new();
-    let cascade = unsafe { (*store_mut()).active.cascade.as_ref() }?;
+    // Snapshot the active cascade under the lock, release the lock,
+    // then walk the trees. `Arc::clone` is a single refcount bump
+    // so the critical section is O(1) regardless of cascade size.
+    // Without this, every IRQ-context `assign_cpu` on every CPU
+    // would serialise on the lock for the full tree walk
+    // (hundreds of thousands of node reads).
+    let cascade: Arc<XgbCascade> = {
+        let _g = SpinGuard::new();
+        // SAFETY: lock held — exclusive access to STORE.
+        unsafe { (*store_mut()).active.cascade.clone() }
+    }?;
+    debug_assert_eq!(cascade.classifiers.len(), 3);
 
     let derived = compute_derived(state);
 
-    // Build the core-classifier input (113 features).
-    let mut features: Vec<f32> = Vec::with_capacity(PREEMPT_INPUT_LEN);
-    features.extend_from_slice(state);
-    features.extend_from_slice(&derived);
+    // Stack-allocated 115-float feature buffer — avoids the
+    // ~460-byte heap alloc that a `Vec` would do per assign_cpu.
+    // `assign_cpu` runs from IRQ context on hardware-tick paths;
+    // hitting the global Rust heap there pressures the allocator
+    // and lengthens the IRQ-disabled window.
+    let mut features = [0.0_f32; PREEMPT_INPUT_LEN];
+    let mut len: usize = 0;
+    for (dst, src) in features[..STATE_DIM].iter_mut().zip(state.iter()) {
+        *dst = *src;
+    }
+    len += STATE_DIM;
+    for (dst, src) in features[len..len + N_DERIVED_FEATURES]
+        .iter_mut()
+        .zip(derived.iter())
+    {
+        *dst = *src;
+    }
+    len += N_DERIVED_FEATURES;
+    debug_assert_eq!(len, CORE_INPUT_LEN);
 
     let core_clf = &cascade.classifiers[0];
     let core_label =
-        core_clf.predict_label(&features, core_clf.label_classes().len());
+        core_clf.predict_label(&features[..len], core_clf.label_classes().len());
 
-    features.push(core_label as f32);
+    features[len] = core_label as f32;
+    len += 1;
+    debug_assert_eq!(len, PRIORITY_INPUT_LEN);
     let priority_clf = &cascade.classifiers[1];
     let prio_label = priority_clf
-        .predict_label(&features, priority_clf.label_classes().len());
+        .predict_label(&features[..len], priority_clf.label_classes().len());
 
-    features.push(prio_label as f32);
+    features[len] = prio_label as f32;
+    len += 1;
+    debug_assert_eq!(len, PREEMPT_INPUT_LEN);
     let preempt_clf = &cascade.classifiers[2];
     let preempt_label = preempt_clf
-        .predict_label(&features, preempt_clf.label_classes().len());
+        .predict_label(&features[..len], preempt_clf.label_classes().len());
 
     Some(CascadeOutput {
         core: core_label,
@@ -552,16 +585,19 @@ pub fn predict(state: &[f32; STATE_DIM]) -> Option<CascadeOutput> {
 // are documented per function.
 // ---------------------------------------------------------------------
 
-/// SAFETY: `data..data+len` must be a valid readable slice for the
-/// duration of the call.
+/// Validate a candidate blob without mutating the store.
+///
+/// SAFETY (caller contract): `data..data+len` must be a valid
+/// readable slice for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn rust_sched_xgb_validate_blob(
+pub extern "C" fn rust_sched_xgb_validate_blob(
     data: *const u8,
     len: usize,
 ) -> i32 {
     if data.is_null() || len == 0 {
         return -1;
     }
+    // SAFETY: caller-contract; validated above.
     let slice = unsafe { core::slice::from_raw_parts(data, len) };
     match validate(slice) {
         Ok(()) => 0,
@@ -569,17 +605,21 @@ pub unsafe extern "C" fn rust_sched_xgb_validate_blob(
     }
 }
 
-/// SAFETY: `data..data+len` must be a valid readable slice for the
-/// duration of the call. Bytes are copied into Rust-owned heap; the
-/// caller may free its buffer immediately on return.
+/// Parse + stage a blob into the STAGED slot.
+///
+/// SAFETY (caller contract): `data..data+len` must be a valid
+/// readable slice for the duration of the call. Bytes are copied
+/// into Rust-owned heap; the caller may free its buffer immediately
+/// on return.
 #[no_mangle]
-pub unsafe extern "C" fn rust_sched_xgb_stage_blob(
+pub extern "C" fn rust_sched_xgb_stage_blob(
     data: *const u8,
     len: usize,
 ) -> i32 {
     if data.is_null() || len == 0 {
         return -1;
     }
+    // SAFETY: caller-contract; validated above.
     let slice = unsafe { core::slice::from_raw_parts(data, len) };
     match stage(slice) {
         Ok(()) => 0,
@@ -612,14 +652,19 @@ pub extern "C" fn rust_sched_xgb_clear() -> i32 {
 /// SAFETY: `out` must point to a writable `struct sched_model_status`
 /// (`SchedModelStatusC`). Layout is asserted via static-assert on the
 /// C side; mismatches surface at compile time, not at runtime.
+/// SAFETY (caller contract): `out` must point to a writable
+/// `struct sched_model_status` (`SchedModelStatusC`). Layout is
+/// asserted via `const _: () = assert!` at module scope; mismatches
+/// surface at compile time, not at runtime.
 #[no_mangle]
-pub unsafe extern "C" fn rust_sched_xgb_status(
-    out: *mut SchedModelStatusC,
-) -> i32 {
+pub extern "C" fn rust_sched_xgb_status(out: *mut SchedModelStatusC) -> i32 {
     if out.is_null() {
         return -1;
     }
-    unsafe { *out = status(); }
+    // SAFETY: caller-contract; validated above.
+    unsafe {
+        *out = status();
+    }
     0
 }
 
@@ -639,10 +684,10 @@ pub extern "C" fn rust_sched_xgb_is_active() -> i32 {
 /// output pointers and returns 0. Returns -1 if no cascade is active
 /// or any of the pointers is NULL.
 ///
-/// SAFETY: `state` must point to `STATE_DIM` floats; `out_*` must be
-/// non-null and writable.
+/// SAFETY (caller contract): `state` must point to `STATE_DIM`
+/// floats; `out_*` must be non-null and writable.
 #[no_mangle]
-pub unsafe extern "C" fn rust_sched_xgb_predict(
+pub extern "C" fn rust_sched_xgb_predict(
     state: *const f32,
     out_core: *mut i32,
     out_priority: *mut i32,
@@ -655,10 +700,15 @@ pub unsafe extern "C" fn rust_sched_xgb_predict(
     {
         return -1;
     }
-    let buf: &[f32; STATE_DIM] = unsafe {
-        &*(state as *const [f32; STATE_DIM])
+    // SAFETY: caller-contract; non-null + STATE_DIM floats validated
+    // by the FFI documentation. The cast to a fixed-size array
+    // borrow is safe because the caller promised at least STATE_DIM
+    // contiguous floats.
+    let buf: &[f32; STATE_DIM] = unsafe { &*(state as *const [f32; STATE_DIM]) };
+    let Some(out) = predict(buf) else {
+        return -1;
     };
-    let Some(out) = predict(buf) else { return -1 };
+    // SAFETY: caller-contract; out_* validated non-null above.
     unsafe {
         *out_core = out.core;
         *out_priority = out.priority;
