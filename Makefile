@@ -1031,7 +1031,7 @@ endif
 .PHONY: runtime
 runtime:
 	@echo "Building runtime... (cargo features: $(if $(CARGO_FEATURES),$(CARGO_FEATURES),none))"
-	cd runtime && SLM_DEFAULT_EVICTION_POLICY=$(EVICTION_DEFAULT_POLICY) $(if $(RUST_RUSTFLAGS),RUSTFLAGS="$(RUST_RUSTFLAGS)") cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
+	cd runtime && SLM_DEFAULT_EVICTION_POLICY=$(EVICTION_DEFAULT_POLICY) $(if $(RUST_RUSTFLAGS),RUSTFLAGS="$$RUSTFLAGS $(RUST_RUSTFLAGS)") cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
 
 .PHONY: runtime-clean
 runtime-clean:
