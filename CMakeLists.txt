@@ -1848,6 +1848,26 @@ target_link_libraries(slmos.elf PRIVATE kprintf_float)
 
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
+# AI scheduler weight set (#884, sub-ticket of #61).
+#   synthetic — Plan A synthetic-trained MLP/PPO weights (default; preserves
+#               current behaviour).
+#   real      — SLM-OS-fine-tuned weights from sibling repo's --weights-suffix
+#               _real export. Requires ai_weights_*_real.c to be present
+#               (run scripts/import_ai_weights.sh --include-real). Per #848,
+#               both sets are options; neither is "the winner". Switching is
+#               build-time, not runtime — the same vtable, just different
+#               trained values in the const float arrays.
+set(AI_WEIGHTS "synthetic" CACHE STRING "AI scheduler weight set (synthetic|real)")
+set_property(CACHE AI_WEIGHTS PROPERTY STRINGS synthetic real)
+if(NOT AI_WEIGHTS MATCHES "^(synthetic|real)$")
+    message(FATAL_ERROR
+        "AI_WEIGHTS must be 'synthetic' or 'real'; got '${AI_WEIGHTS}'. "
+        "The STRINGS property is advisory for ccmake — this guard "
+        "rejects typos (e.g., 'Real', 'realtime') at configure time "
+        "rather than letting them silently fall through to the "
+        "synthetic baseline.")
+endif()
+
 # Work-stealing scheduler (#59 Phase B, S4 default flip).
 #
 # Default is ON for the platforms where hardware evidence in
@@ -2085,6 +2105,45 @@ endif()
 if(ENABLE_AI_SCHEDULER)
     add_compile_definitions(CONFIG_AI_SCHEDULER=1)
 
+    # Weight-set selection (#884). Same C symbols (ai_mlp_w0, …) across
+    # synthetic and real variants — only the .c filename differs.
+    # Compile-time mutually exclusive: linking both would yield duplicate
+    # symbol errors. The default `synthetic` preserves existing behaviour;
+    # operators opt into `real` via `make kernel AI_WEIGHTS=real` after
+    # `scripts/import_ai_weights.sh --include-real`.
+    if(AI_WEIGHTS STREQUAL "real")
+        # Configure-time existence check for MLP. The MLP fine-tune is
+        # the load-bearing path — without it, `AI_WEIGHTS=real` is
+        # meaningless. PPO is treated per the import script's
+        # documented "optional even with --include-real" stance: fall
+        # back to the synthetic PPO when the _real variant isn't
+        # present, so an MLP-only sibling-repo export still builds.
+        if(NOT EXISTS
+           "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_mlp_real.c")
+            message(FATAL_ERROR
+                "AI_WEIGHTS=real but kernel/sched/ai/ai_weights_mlp_real.c "
+                "is not present. Run: ./scripts/import_ai_weights.sh "
+                "--include-real (after the sibling-repo --weights-suffix "
+                "_real export). See docs/fact-sheets/ai-scheduler.md.")
+        endif()
+        set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp_real.c)
+        if(EXISTS
+           "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_ppo_real.c")
+            set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)
+            message(STATUS "  AI weights: real MLP + real PPO (SLM-OS-fine-tuned, #879)")
+        else()
+            set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo.c)
+            message(STATUS
+                "  AI weights: real MLP + synthetic PPO "
+                "(no ai_weights_ppo_real.c — PPO fine-tune is optional per "
+                "scripts/import_ai_weights.sh --help; build will still link)")
+        endif()
+    else()
+        set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp.c)
+        set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo.c)
+        message(STATUS "  AI weights: synthetic (Plan A baseline)")
+    endif()
+
     add_library(ai_sched STATIC
         kernel/sched/ai/ai_inference.c
         kernel/sched/ai/ai_state.c
@@ -2092,8 +2151,8 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/sched_xgb.c
         kernel/sched/ai/runtime_model.c
         kernel/sched/ai/inference_cpu.c
-        kernel/sched/ai/ai_weights_mlp.c
-        kernel/sched/ai/ai_weights_ppo.c
+        ${_ai_mlp_src}
+        ${_ai_ppo_src}
         kernel/sched/ai/ai_test_helpers.c
         kernel/sched/ai/workloads.c
         kernel/sched/ai/sched_trace_ai.c

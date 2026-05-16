@@ -322,6 +322,74 @@ synthetic-trained baseline weights and the SLM-OS-fine-tuned weights
 (#879) sub-tickets complete. The harness lands here so that work has
 a stable target shape.
 
+### Scheduling-quality matrix (#61, capstone wrap-up)
+
+**Status:** matrix template only — hardware capture pending merge of
+#882 (PR #928), #880 (PR #931), and the sibling-repo PR for #879, plus
+a coordinated session on pi-5-2 / jetson-nano-1.
+
+`bench sched-policy --workload <name> --all` (added in #882, PR #928)
+exercises all four registered policies through a representative task
+mix and reports per-policy scheduling-quality metrics — deadline-miss
+rate, completion-time p50/p99, per-CPU balance coefficient of
+variation, throughput. The capture is one of two `AI_WEIGHTS=` axes:
+
+- `AI_WEIGHTS=synthetic` (default) — Plan A synthetic-trained MLP/PPO,
+  per the existing `kernel/sched/ai/ai_weights_{mlp,ppo}.c`.
+- `AI_WEIGHTS=real` — SLM-OS-fine-tuned variants from sibling-repo
+  PR #879 (`ai_weights_{mlp,ppo}_real.c`). Built from SLM-OS-captured
+  traces collected via `sched aitrace dump` (#880, PR #931).
+
+The full matrix lands here once the hardware capture runs on pi-5-2
+and jetson-nano-1 — held until #882, #880, and #879 have all merged
+so the bench harness, trace ring, and fine-tuned weights are present
+in a single build. QEMU rows are omitted intentionally — emulated
+timing is too noisy to characterize policy quality, and #882 already
+covers QEMU harness mechanics in CI. The matrix template:
+
+| Platform | Policy     | Weights   | DL-miss% | p50 us | p99 us | CPU-cov | Tasks/s |
+|----------|------------|-----------|---------:|-------:|-------:|--------:|--------:|
+| Pi 5     | heuristic  | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | ai_mlp     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | ai_mlp     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | ai_ppo     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | ai_ppo     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | ai_xgb     | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | heuristic  | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | ai_mlp     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | ai_mlp     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | ai_ppo     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | ai_ppo     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Jetson   | ai_xgb     | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+
+Per the [exploratory-OS framing][i848], the matrix is characterization
+data: SLM-OS ships every (policy × weight set) combination as an
+option, and a "winner" depends on the workload. Decision latency is
+known to be ~21× slower for AI policies than for heuristic (41.9 µs
+vs 2 µs on Pi 5; see the table above) — the row to watch is whether
+the longer inference cost is amortized by better scheduling quality
+on real workloads, and per which metric. If fine-tuning produces flat
+or worse results vs. synthetic, that's a real finding (the SLM-OS
+demo workloads may be too small to differentiate trained policies);
+the matrix gets populated with whatever the numbers say.
+
+[i848]: https://github.com/SLM-OS/SLM-Operating-System/issues/848
+
+**Build select:**
+
+```
+# Synthetic baseline (current behaviour, default)
+make kernel PLATFORM=RASPI5 AI_SCHED=ON
+# SLM-OS-fine-tuned (requires `scripts/import_ai_weights.sh --include-real`)
+make kernel PLATFORM=RASPI5 AI_SCHED=ON AI_WEIGHTS=real
+```
+
+The same C symbol names (`ai_mlp_w0`, `ai_mlp_b0`, …) ship in both
+`ai_weights_mlp.c` and `ai_weights_mlp_real.c`; the CMake build picks
+one and only one .c file. Switching weight sets is therefore a build-
+time choice, not runtime. Runtime weight-blob loading via the
+existing `sched_blob_*` infrastructure is a documented follow-up.
+
 ### XGBoost cascade workflow
 
 The XGBoost cascade is loaded at runtime — there is no kernel-image
