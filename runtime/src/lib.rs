@@ -5876,6 +5876,20 @@ extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
         // forward (e.g. our run timed out and the operator started a
         // new one). The inference itself still ran — we just don't
         // contaminate the next run's counters.
+        //
+        // Residual race window (known-and-bounded): the four atomic
+        // writes below are NOT gated. A straggler that passes this
+        // check at the same instant a new run bumps GENERATION and
+        // resets counters will still apply up to those four writes —
+        // a sub-microsecond window. Worst case is a handful of stale
+        // increments leaking into the next run's `total_lat_ns` /
+        // `success_count` / min / max. The stress workload is a
+        // diagnostic, not a load-bearing measurement, so this is
+        // accepted. `WORKERS_DONE` is gated separately below and is
+        // race-free; the join loop therefore never exits early on a
+        // straggler bump. Eliminating the window entirely would mean
+        // moving to per-worker private counters summed at the end —
+        // overkill for the current use case.
         if STRESS_GENERATION.load(Ordering::Acquire) != gen_at_entry {
             return;
         }
