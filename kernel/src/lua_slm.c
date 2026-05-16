@@ -1258,19 +1258,9 @@ static int l_sched_stats(lua_State *L) {
 }
 
 #if defined(CONFIG_AI_SCHEDULER)
-/* AI decision-trace Lua bindings (#880, sub-ticket of #61). The C
- * implementations live in kernel/sched/ai/sched_trace_ai.c; forward-
- * declared here so we don't need to pull sched_trace_ai.h into the
- * lua include surface. */
-extern void sched_trace_ai_start(void);
-extern void sched_trace_ai_stop(void);
-extern void sched_trace_ai_clear(void);
-extern bool sched_trace_ai_is_enabled(void);
-extern uint32_t sched_trace_ai_records_used(void);
-extern uint64_t sched_trace_ai_total_events(void);
-extern uint64_t sched_trace_ai_dropped(void);
-extern size_t sched_trace_ai_dump_size(void);
-extern size_t sched_trace_ai_dump_to_path(const char *path);
+/* AI decision-trace Lua bindings (#880, sub-ticket of #61). C
+ * implementations live in kernel/sched/ai/sched_trace_ai.c. */
+#include "sched_trace_ai.h"
 
 /**
  * slm.sched_aitrace_start() - Begin capturing AI scheduler decisions

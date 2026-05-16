@@ -67,6 +67,17 @@ function operates on (extracted via `ai_extract_state`).
 
 Total: 16 + 16 + 4×4 + 432 = 480 bytes. ✓
 
+`action_core` is the **pre-S5-override** value — the CPU the active
+policy's `assign_cpu` returned, BEFORE `scheduler_add_task`'s proactive
+load-balance override (see `kernel/sched/sched.c` near
+`scheduler_add_task`) potentially redirects the task elsewhere. The
+trace is meant for training the policy that made the choice, so
+recording the policy's actual output (not the post-override target)
+is what the ingester wants. The override outcome is recoverable
+indirectly from the next decision's state vector and from the
+matching COMPLETION's `ran_on_cpu`. Do not try to use `action_core`
+as ground truth for "where the task ultimately ran".
+
 The state vector layout matches the sibling-repo simulator's
 observation space:
 

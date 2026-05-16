@@ -24,6 +24,7 @@
 #include "latency_hist.h"
 #include "rate_ewma.h"
 #include "sched.h"
+#include "sched_trace_ai.h"
 #include "smp.h"
 #include "slm_ffi.h"
 #include "debug.h"
@@ -770,6 +771,5 @@ void sched_ai_init(void)
      * stays inert until `sched aitrace start` flips the enable flag.
      * Failure here just leaves the ring NULL — start/record_decision
      * become no-ops and the shell reports the missing buffer. */
-    extern int sched_trace_ai_init(void);
     (void)sched_trace_ai_init();
 }

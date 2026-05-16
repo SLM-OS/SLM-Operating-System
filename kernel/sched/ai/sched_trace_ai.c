@@ -53,15 +53,15 @@ _Static_assert(PERCPU_ENTRIES * MAX_CPUS == SCHED_TRACE_AI_RING_ENTRIES,
                "ring entries must divide evenly across MAX_CPUS");
 
 struct sched_trace_ai_percpu {
-    /* head: index of the slot the NEXT write will land in
-     * (mod PERCPU_ENTRIES). Monotonic counter — never wrapped at
-     * the variable; only the slot index wraps. */
+    /* Monotonic count of records written by this CPU. Slot index
+     * derives from `total_written % PERCPU_ENTRIES`; readers compute
+     * the same value rather than reading a separately-stored `head`
+     * field (eliminates a cross-CPU write-order race where a reader
+     * could observe total_written++ before head was updated). */
     volatile uint64_t total_written;
-    volatile uint32_t head;
-    volatile uint32_t _pad0;
     /* Cacheline padding so adjacent CPUs' percpu structs don't
-     * false-share the head counter. */
-    uint8_t  _hdrpad[64 - 16];
+     * false-share the counter. */
+    uint8_t  _hdrpad[64 - 8];
     struct sched_trace_ai_record ring[PERCPU_ENTRIES];
 };
 
@@ -72,8 +72,14 @@ static struct sched_trace_ai_percpu *tracer_percpu;  /* MAX_CPUS-element array *
 static volatile uint32_t tracer_enabled;             /* 0 / 1 atomic flag */
 static volatile uint32_t tracer_initialized;
 
-/* ---- Initialization ---- */
-
+/* ---- Initialization ----
+ *
+ * Called from `sched_ai_init()` (boot, CPU 0) and from
+ * `sched_trace_ai_start()` (shell, CPU 0). The check-then-allocate
+ * below is intentionally NOT atomic — both call sites run on CPU 0
+ * in the shell/init task. A future caller from a non-CPU-0 path
+ * (e.g. a Lua/IPC binding scheduled onto a secondary) must add an
+ * external lock or replace the body with a compare-and-swap. */
 int sched_trace_ai_init(void)
 {
     if (tracer_initialized) {
@@ -86,7 +92,7 @@ int sched_trace_ai_init(void)
         return -1;
     }
     memset(tracer_percpu, 0, total);
-    /* Initial cache_clean so secondary CPUs reading their own head
+    /* Initial cache_clean so secondary CPUs reading their own counter
      * see 0 rather than uninitialized garbage. */
     cache_clean_range(tracer_percpu, total);
     tracer_initialized = 1;
@@ -95,11 +101,14 @@ int sched_trace_ai_init(void)
 
 /* ---- Control plane ---- */
 
-static void clear_locked(void)
+/* Zero every per-CPU ring + counter. NOT synchronized against
+ * concurrent hot-path writers — the caller must pause writes (via
+ * the `tracer_enabled` atomic) before invoking. `sched_trace_ai_start`
+ * and `sched_trace_ai_clear` both follow this contract. */
+static void clear_rings_unsynchronized(void)
 {
     if (!tracer_initialized || !tracer_percpu) return;
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        tracer_percpu[i].head = 0;
         tracer_percpu[i].total_written = 0;
         /* Zero the ring so a dump of a freshly-cleared trace
          * doesn't leak prior recording's contents. */
@@ -114,7 +123,17 @@ void sched_trace_ai_start(void)
     if (!tracer_initialized && sched_trace_ai_init() != 0) {
         return;
     }
-    clear_locked();
+    /* Disable first so the clear below isn't racing concurrent
+     * hot-path writers on other CPUs. A narrow residual window still
+     * exists: a writer that already passed the `tracer_enabled`
+     * load in record_decision/completion can be mid-record when the
+     * atomic store flips the flag to 0. That window is bounded by
+     * the IRQ-disabled critical section length (~hundreds of cycles),
+     * so at most one partially-zeroed record per CPU can survive the
+     * clear — acceptable for a trace ring whose ingester tolerates
+     * occasional dropped records. */
+    __atomic_store_n(&tracer_enabled, 0u, __ATOMIC_RELEASE);
+    clear_rings_unsynchronized();
     __atomic_store_n(&tracer_enabled, 1u, __ATOMIC_RELEASE);
 }
 
@@ -126,9 +145,10 @@ void sched_trace_ai_stop(void)
 void sched_trace_ai_clear(void)
 {
     /* Briefly suspend writes so we don't race the clear. Restored
-     * to caller's prior state on exit. */
+     * to caller's prior state on exit. Same residual-window caveat
+     * as `sched_trace_ai_start` applies. */
     uint32_t prev = __atomic_exchange_n(&tracer_enabled, 0u, __ATOMIC_ACQ_REL);
-    clear_locked();
+    clear_rings_unsynchronized();
     __atomic_store_n(&tracer_enabled, prev, __ATOMIC_RELEASE);
 }
 
@@ -189,6 +209,7 @@ uint64_t sched_trace_ai_dropped(void)
  * field so the on-disk record never has trailing garbage. */
 static void copy_policy_name(char *dst, size_t max, const char *src)
 {
+    if (max == 0) return;
     memset(dst, 0, max);
     if (!src) return;
     size_t i = 0;
@@ -252,16 +273,12 @@ void sched_trace_ai_record_decision(struct task *task,
      * sees it without depending on an L2 coherency event. */
     cache_clean_range(r, sizeof(*r));
 
-    /* total_written and head are co-located on the first cacheline
-     * (head + total_written + padding span offset 0..63; the ring
-     * starts at offset 64). A single cache_clean_range here pushes
-     * both counters atomically — cross-CPU readers in the dump path
-     * see a consistent (head, total_written) pair. If the
-     * `_hdrpad` shrinks below 48 bytes a future maintainer must
-     * re-verify this invariant; the _Static_assert at offsetof(ring)
-     * == 64 above guards against that. */
+    /* Bump the per-CPU counter and push it. Slot index is derived
+     * from `total_written % PERCPU_ENTRIES` everywhere it's needed
+     * (both writer and dump reader) — no separately-stored `head`
+     * field, no cross-CPU write-order race between two counter
+     * stores. */
     pc->total_written++;
-    pc->head = (slot + 1u) % PERCPU_ENTRIES;
     cache_clean_range(pc,
                       offsetof(struct sched_trace_ai_percpu, ring));
 
@@ -310,7 +327,6 @@ void sched_trace_ai_record_completion(struct task *task)
 
     cache_clean_range(r, sizeof(*r));
     pc->total_written++;
-    pc->head = (slot + 1u) % PERCPU_ENTRIES;
     cache_clean_range(pc,
                       offsetof(struct sched_trace_ai_percpu, ring));
 
@@ -334,7 +350,6 @@ size_t sched_trace_ai_dump_size(void)
  * `record_count` disagrees with the byte stream. */
 struct trace_snapshot {
     uint64_t total;
-    uint32_t head;
     uint32_t count;
     uint32_t start;
 };
@@ -352,9 +367,16 @@ static void take_snapshot(struct trace_snapshot snap[MAX_CPUS],
                                offsetof(struct sched_trace_ai_percpu, ring));
         uint64_t w = tracer_percpu[i].total_written;
         snap[i].total = w;
-        snap[i].head = tracer_percpu[i].head;
         snap[i].count = (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
-        snap[i].start = (w > PERCPU_ENTRIES) ? snap[i].head : 0u;
+        /* Oldest record sits at the next-write slot, which is
+         * (total_written % PERCPU_ENTRIES) for a wrapped ring. Derive
+         * here rather than reading a separately-stored head field —
+         * keeps the writer's two counter updates collapsed into a
+         * single monotonic counter and removes the cross-CPU write-
+         * order race that would otherwise put `start` one slot
+         * behind `total`. */
+        snap[i].start = (w > PERCPU_ENTRIES)
+            ? (uint32_t)(w % PERCPU_ENTRIES) : 0u;
         used += snap[i].count;
         total += w;
         if (w > PERCPU_ENTRIES) dropped += (w - PERCPU_ENTRIES);
