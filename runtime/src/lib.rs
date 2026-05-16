@@ -784,7 +784,7 @@ pub extern "C" fn rust_run_tests() -> i32 {
         print_test_result(b"sched_xgb_is_active_after_activate\0", is_active);
         if !is_active { failures += 1; }
 
-        let state = [0.0_f32; 108];
+        let state = [0.0_f32; sched::xgb::STATE_DIM];
         let mut core: i32 = -1;
         let mut prio: i32 = -1;
         let mut preempt: i32 = -1;
@@ -835,7 +835,7 @@ pub extern "C" fn rust_run_tests() -> i32 {
         };
         let mut equiv_ok = stage_rc == 0 && activate_rc == 0;
         for k in 0..16u32 {
-            let mut s = [0.0_f32; 108];
+            let mut s = [0.0_f32; sched::xgb::STATE_DIM];
             // Vary each state slightly so we know the loop isn't
             // returning a cached predict result.
             s[0] = k as f32;
@@ -878,7 +878,7 @@ pub extern "C" fn rust_run_tests() -> i32 {
         let mut bin_c: i32 = -1;
         let mut bin_p: i32 = -1;
         let mut bin_e: i32 = -1;
-        let bin_state = [0.0_f32; 108];
+        let bin_state = [0.0_f32; sched::xgb::STATE_DIM];
         let bin_predict_rc = if bin_activate == 0 {
             sched::xgb::rust_sched_xgb_predict(
                 bin_state.as_ptr(),

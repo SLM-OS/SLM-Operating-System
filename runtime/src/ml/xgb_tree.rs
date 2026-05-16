@@ -601,11 +601,22 @@ impl XgbModel {
     /// (see #920).
     pub fn predict_label(&self, features: &[f32], n_classes: usize) -> i32 {
         let idx = if n_classes == 2 {
-            let mut margin = 0.0_f32;
-            for &root in &self.roots {
-                margin += self.eval_tree(root as usize, features);
+            // Empty `roots` is unreachable from `parse_*` (rejected as
+            // `EmptyModel`); guard anyway so `from_parts_for_test`
+            // can't trigger the implicit "no trees → margin 0 → class
+            // 1" fallthrough below. NaN propagated through any leaf
+            // value compares false against `>= 0.0` and lands on
+            // class 0, which matches the eval_tree fallback semantics
+            // for malformed trees.
+            if self.roots.is_empty() {
+                0usize
+            } else {
+                let mut margin = 0.0_f32;
+                for &root in &self.roots {
+                    margin += self.eval_tree(root as usize, features);
+                }
+                if margin >= 0.0 { 1usize } else { 0usize }
             }
-            if margin >= 0.0 { 1usize } else { 0usize }
         } else {
             self.predict_argmax(features, n_classes)
         };
