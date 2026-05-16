@@ -405,6 +405,14 @@ and `test_wildcard_only_delivers_once` pin the contract on every
   runs its lock-held scan, the high-priority message is returned first;
   no starvation deadlock under sustained two-publisher load
   (`test_msg_router_priority_concurrent`, regression for #864 / #67a).
+- **LAST_RECEIVED ack-targeting** — `msg_router_ack` clears exactly the
+  mailbox returned by the most recent `msg_router_receive` call for the
+  component, even when a newer message lands in a different mailbox
+  between the two. Verified single-CPU
+  (`test_msg_router.c::test_msg_router_ack_targets_last_received`) and
+  cross-CPU
+  (`test_integration.c::test_msg_router_ack_targets_last_received_cross_cpu`,
+  cpu_count ≥ 2). Regression for #867 / #67c.
 
 ### Single-slot mailbox limitation
 
