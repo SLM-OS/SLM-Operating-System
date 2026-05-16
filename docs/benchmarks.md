@@ -316,7 +316,9 @@ Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 �
 
 The per-op profiling harness in `runtime/src/inference/engine.rs` wraps every `execute_node` dispatch in CNTPCT timestamps and accumulates per-`OpType` counts and latencies. Enable with `model profile on`, run the workload, then `model profile show` (clear with `model profile reset`). Overhead is negligible: 200-iteration MNIST bench on pi-5-2 measured 3,011 µs/inference both profile-on and profile-off (run-to-run jitter swamps the harness cost).
 
-Baseline before #56 micro-kernel work (Pi 5, BUILD_TYPE=Release, pi-5-2, 200 iterations, MNIST). Per-op figures are reported in microseconds; "calls" is the count of `execute_node` invocations across the run.
+All measurements on Pi 5 (BCM2712 Cortex-A76 @ 2.4 GHz), pi-5-2, `BUILD_TYPE=Release`, `model bench mnist 200`. Per-op figures are microseconds; "calls" is the count of `execute_node` invocations across the run.
+
+**Baseline (pre-#56 — row × scalar `simd_fma_row` inner kernel):**
 
 | Op | Calls | Avg | Min | Max | Notes |
 |----|-------|-----|-----|-----|-------|
@@ -327,11 +329,24 @@ Baseline before #56 micro-kernel work (Pi 5, BUILD_TYPE=Release, pi-5-2, 200 ite
 | Add | 600 | 9 µs | 2 µs | 21 µs | Conv-bias + Gemm-bias adds |
 | Reshape | 400 | 1 µs | 1 µs | 2 µs | |
 
-Total dispatched-op time per inference (`Σ avg × calls / iters`): ~2,985 µs, accounting for ~99% of the 3,011 µs bench latency. The remaining ~26 µs is engine-side overhead (binding lookups, output copy, weight lease, atomic stats).
+Total dispatched-op time per inference: ~2,985 µs → 3,011 µs bench latency. `Conv` is ~95% of inference time. Note this current measurement is higher than the 1.09 ms recorded in the cross-platform table further up the doc (an older build); the #56 PRs report before/after against this current measurement so the deltas are apples-to-apples.
 
-`Conv` consumes ~95% of inference latency — the matmul micro-kernel improvements in #56 PR 2 / PR 3 target the im2col→matmul inner loop inside `conv2d`, so the speedup on this column is what the post-optimization rows track. Note the current Pi 5 baseline is **3.01 ms/inference**, higher than the 1.09 ms recorded in the cross-platform table above (which dates from an earlier build); the #56 PRs land before/after numbers against the current measurement so the delta is apples-to-apples.
+**After PR 2 (4×4 NEON outer-product micro-kernel):**
 
-The Jetson hardware baseline will be captured during PR 2 deployment once the slmos-kexec deploy path is in this agent's reach.
+| Op | Calls | Avg | Min | Max | Δ vs baseline |
+|----|-------|-----|-----|-----|---------------|
+| Conv | 400 | **169 µs** | 141 µs | 199 µs | **8.5× faster** |
+| MatMul | 200 | 22 µs | 22 µs | 25 µs | Unchanged (small matmuls take `matmul_simd`) |
+| Relu | 400 | 19 µs | 7 µs | 31 µs | Unchanged |
+| MaxPool | 400 | 16 µs | 6 µs | 25 µs | Unchanged |
+| Add | 600 | 9 µs | 2 µs | 21 µs | Unchanged |
+| Reshape | 400 | 1 µs | 1 µs | 2 µs | Unchanged |
+
+End-to-end MNIST: **3,011 µs → 483 µs (6.23× faster)**, throughput **332 → 2,070 infer/sec**. The win lands entirely on `Conv` because conv2d → im2col → `matmul_tiled` is the only op that uses the tiled path; small fully-connected matmuls fall through `matmul_inner` to the non-tiled `matmul_simd` form and keep the old row×scalar kernel.
+
+The 4×4 kernel keeps the C accumulator block resident in 4 NEON registers across the full K sweep, issuing 4 FMAs per `vld1q_f32(B)` + 4 × `vdupq_n_f32(A)` cycle — eliminating the per-K-step C load/store pair the row×scalar form pays.
+
+Jetson hardware run deferred until lab tooling for non-SD-card deploy is in this agent's reach; the change is platform-agnostic Rust + NEON intrinsics and cross-builds clean for `PLATFORM=JETSON_ORIN_NANO`.
 
 ### Model Memory Utilization
 
