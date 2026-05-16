@@ -22,11 +22,12 @@ The `<max_rows>` arg must match `AI_MLP_LAYER3_MAX_ROWS` in
 space past 42, bump the value in both places — caller and kernel
 header.
 """
-USAGE = ("usage: _pad_ai_weights.py <file.c> <model> "
-         "<max_rows> <layer3_in>")
 import re
 import sys
 from pathlib import Path
+
+USAGE = ("usage: _pad_ai_weights.py <file.c> <model> "
+         "<max_rows> <layer3_in>")
 
 
 def pad_array(src: str, name: str, want_rows: int, row_stride: int) -> str:
