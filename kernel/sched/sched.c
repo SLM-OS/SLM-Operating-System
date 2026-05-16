@@ -16,6 +16,9 @@
 #include "debug.h"
 #include "platform.h"
 #include "smp.h"
+#if !defined(PLATFORM_X86_64)
+#include "pmu.h"
+#endif
 #include "spinlock.h"
 #include "slm_ffi.h"
 #include "gic.h"
@@ -2430,6 +2433,14 @@ void scheduler_tick(void)
     if (cpu == 0 && (sched.timer_ticks % AI_TOP_TASKS_UPDATE_INTERVAL) == 0) {
         ai_update_top_tasks();
     }
+
+#if !defined(PLATFORM_X86_64)
+    /* Per-CPU cache_pressure sample (#872). Updates this CPU's slot in
+     * `pmu_cache_pressure_q16_per_cpu[]`, which `ai_state.c` reads to
+     * fill the state-vector cache_pressure feature. No-op on a CPU
+     * where the PMU is not yet enabled. */
+    pmu_sample_cache_pressure();
+#endif
 #endif
 
     /* Policy tick callback (stats collection, rebalancing).

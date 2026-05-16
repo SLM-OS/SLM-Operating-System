@@ -17,6 +17,9 @@
 #include "task.h"
 #include "smp.h"
 #include "slm_ffi.h"
+#if !defined(PLATFORM_X86_64)
+#include "pmu.h"
+#endif
 #include <stdint.h>
 
 /* Integer accessors defined in sched.c — float conversion done here.
@@ -64,7 +67,10 @@ static float clamp01(float x)
  * For each core c in [0, AI_STATE_NUM_CORES):
  *   [c*6+0] utilization        running_ticks / total_ticks
  *   [c*6+1] queue_depth        ready_count / 32.0
- *   [c*6+2] cache_pressure     0.0 (future: PMU)
+ *   [c*6+2] cache_pressure     L1D miss rate EWMA, normalized [0,1]
+ *                              (PMU-fed via pmu_sample_cache_pressure;
+ *                              ZERO on PLATFORM_X86_64 — RDPMC tracked
+ *                              separately as #870)
  *   [c*6+3] core_type          1.0 (homogeneous)
  *   [c*6+4] isolated           0 or 1
  *   [c*6+5] current_task_prio  effective_priority / 7.0
@@ -89,7 +95,17 @@ static void extract_per_core(float *out)
 
         f[0] = get_utilization(c);
         f[1] = (float)rq->ready_count / 32.0f;
-        f[2] = 0.0f;  /* cache_pressure — future PMU integration */
+#if !defined(PLATFORM_X86_64)
+        /* cache_pressure (#872): L1D miss-rate EWMA from each CPU's
+         * own PMU sample, taken on `scheduler_tick`. The Q16.16 fixed-
+         * point cache is converted to a [0.0, 1.0] float here so pmu.c
+         * itself stays in -mgeneral-regs-only land. Zero for CPUs whose
+         * PMU sample has never fired (pre-boot, or QEMU TCG where
+         * event counters return 0). */
+        f[2] = (float)pmu_get_cache_pressure_q16((uint32_t)c) / 65536.0f;
+#else
+        f[2] = 0.0f;  /* x86-64 RDPMC sibling tracked as #870 */
+#endif
         f[3] = 1.0f;  /* core_type — homogeneous on Jetson/Pi5 */
         f[4] = (isolated & (1U << c)) ? 1.0f : 0.0f;
 
