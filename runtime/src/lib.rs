@@ -7511,6 +7511,11 @@ pub extern "C" fn rust_inference_test() -> i32 {
 /// embedded MNIST ONNX (rust_inference_test does this in Test 14).
 #[no_mangle]
 pub extern "C" fn rust_batch_inference_test() -> i32 {
+    // Default batch timeout used by the production toggle and restored
+    // between test cases. Kept here so the 5 ms value isn't sprinkled
+    // as a magic literal across the suite.
+    const DEFAULT_BATCH_TIMEOUT_US: u32 = 5_000;
+
     let mut failures: i32 = 0;
 
     unsafe {
@@ -7691,7 +7696,7 @@ pub extern "C" fn rust_batch_inference_test() -> i32 {
     {
         sched::set_batching_enabled(true);
         sched::set_batch_size(8);
-        sched::set_batch_timeout_us(5_000); // 5 ms
+        sched::set_batch_timeout_us(DEFAULT_BATCH_TIMEOUT_US); // 5 ms
         sched::reset_scheduler_stats();
 
         // 1 ms slack < 5 ms timeout → must bypass.
@@ -7770,7 +7775,7 @@ pub extern "C" fn rust_batch_inference_test() -> i32 {
         if !passed { failures += 1; }
 
         sched::set_batching_enabled(false);
-        sched::set_batch_timeout_us(5_000); // restore default
+        sched::set_batch_timeout_us(DEFAULT_BATCH_TIMEOUT_US); // restore default
     }
 
     // Summary

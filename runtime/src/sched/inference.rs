@@ -705,6 +705,13 @@ unsafe fn reserve_slot(
         // We're the first request in this forming batch — start the
         // timer-flush clock. The next dispatcher (or
         // `release_slot_as_solo`) clears this when the queue empties.
+        //
+        // Relaxed is sufficient: the stamp is re-validated under
+        // `SchedGuard` in `try_claim_timeout_flush`, so the unlocked
+        // fast-path observer may briefly see a stale 0 even after
+        // `PENDING_COUNT` already shows > 0 (the Release-store above
+        // is sequenced before this Relaxed store). The next waiter
+        // iteration retries and the locked recheck synchronises.
         BATCH_FIRST_TIME_NS.store(
             crate::kernel_ffi::get_time_ns(),
             Ordering::Relaxed,
@@ -786,6 +793,11 @@ fn release_slot_as_solo(slot_idx: usize) {
                 unsafe { *pending.add(j) = *pending.add(j + 1) };
             }
             PENDING_COUNT.store(n - 1, Ordering::Release);
+            // Defensive: Solo role only fires when `n == 1` so this
+            // condition is always true at the intended call site, but
+            // we keep it explicit so future callers that release a
+            // non-last slot don't accidentally zero the timer for the
+            // remaining batch members.
             if n - 1 == 0 {
                 BATCH_FIRST_TIME_NS.store(0, Ordering::Relaxed);
             }
@@ -849,6 +861,10 @@ unsafe fn run_dispatcher(
         let in_len = SLOTS[idx].input_len.load(Ordering::Relaxed);
         if mi != model_index || in_len != per_input_dim {
             // Heterogeneous batch — dispatch every slot as singleton.
+            // The heterogeneous path doesn't touch SCRATCH_IN/OUT, so
+            // release the scratch lock first to let a concurrent
+            // batched dispatcher proceed.
+            drop(_scratch);
             return dispatch_heterogeneous(batch_indices, batch_count, self_idx);
         }
     }
