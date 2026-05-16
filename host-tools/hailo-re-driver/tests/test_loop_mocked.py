@@ -493,5 +493,99 @@ class WritePendingCorpusCleanupTests(unittest.TestCase):
                 pending_path.unlink(missing_ok=True)
 
 
+class TailLinesTests(unittest.TestCase):
+    """Pin behavioural details of the helper used to surface serial
+    output on replay-step failure. The exact tail count and the
+    empty-string sentinel are part of the operator-visible log format,
+    so worth pinning explicitly."""
+
+    def test_returns_all_lines_when_shorter_than_n(self) -> None:
+        out = loop_mod._tail_lines("alpha\nbeta\ngamma\n", 30)
+        self.assertEqual(out, "alpha\nbeta\ngamma")
+
+    def test_returns_last_n_when_longer(self) -> None:
+        text = "\n".join(f"line {i}" for i in range(100)) + "\n"
+        out = loop_mod._tail_lines(text, 5)
+        self.assertEqual(out, "line 95\nline 96\nline 97\nline 98\nline 99")
+
+    def test_empty_input_returns_sentinel(self) -> None:
+        # Distinguish "captured nothing" from "didn't capture" in the
+        # batch log; future readers shouldn't have to guess.
+        self.assertEqual(loop_mod._tail_lines("", 30), "<empty>")
+
+    def test_no_trailing_newline_in_output(self) -> None:
+        # The caller appends this into a multi-line detail string;
+        # leaving a trailing newline duplicates the blank-line gap.
+        out = loop_mod._tail_lines("a\nb\n", 30)
+        self.assertFalse(out.endswith("\n"), repr(out))
+
+
+class ReplayErrorDetailIncludesSerialTailTests(unittest.TestCase):
+    """Regression net for the Pi 5 boot-stall diagnostic. Without the
+    captured serial tail in the batch log, every \"did not see shell
+    prompt\" failure looks identical and is undiagnosable. The test
+    drives a single iteration with a SlmosRunner that returns a
+    boot-stall ReplayError and asserts the captured stdout's tail
+    shows up in the LoopOutcome detail."""
+
+    def test_replay_error_detail_includes_stdout_tail(self) -> None:
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.qemu_runner import ExtendEvent
+        from hailo_re_driver.slmos_runner import ReplayError
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = Path(d) / "c.jsonl"
+            from hailo_re_driver.corpus import Header
+            corpus_mod.init(corpus_path, Header(
+                format_version=1, hailort_version="4.23.0",
+                fw_version="4.23.0",
+                capture_host="qemu-x86_64",
+                slmos_base_sha="ef" * 20,
+                capture_started_at="2026-05-12T18:30:00Z",
+            ))
+
+            class _BootStallingSlmos:
+                def replay_step(self, corpus_path, seq, *,
+                                fresh_boot: bool = True):
+                    fake_serial = "\n".join(
+                        f"[ {i:>4}] boot line {i}" for i in range(50)
+                    ) + "\n"
+                    return ReplayError(
+                        kind="error",
+                        message="did not see shell prompt after flash+reboot "
+                                "(rc=0)",
+                        stdout=fake_serial,
+                        stderr="",
+                    )
+
+            extend_event = ExtendEvent(
+                kind="extend",
+                request=ExtendRequest(
+                    seq=1, bar=4, offset=0, size=4,
+                    reason="unknown_read",
+                ),
+                raw_line="HAILO_RE_CORPUS_EXTEND seq=1 bar=4 offset=0 "
+                         "size=4 reason=unknown_read",
+            )
+            qemu = _ScriptedQemuRunner([extend_event])
+
+            outcome = loop_mod.run_loop(
+                corpus_path, qemu, _BootStallingSlmos(),  # type: ignore[arg-type]
+                loop_mod.LoopConfig(max_iterations=1, reachable=lambda _s: True),
+            )
+
+            self.assertEqual(outcome.status, "error")
+            # The message line stays first so existing greps keep working.
+            self.assertIn(
+                "did not see shell prompt after flash+reboot",
+                outcome.detail,
+            )
+            # The last 30 lines of fake_serial must be visible.
+            self.assertIn("[   49] boot line 49", outcome.detail)
+            self.assertIn("[   20] boot line 20", outcome.detail)
+            # Earlier lines must NOT be (we only keep 30).
+            self.assertNotIn("[   19] boot line 19", outcome.detail)
+
+
 if __name__ == "__main__":
     unittest.main()

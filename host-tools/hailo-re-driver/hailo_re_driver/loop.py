@@ -206,9 +206,22 @@ def _extend_corpus(
             pass
 
     if isinstance(result, ReplayError):
+        # Surface the tail of the captured serial buffer in the batch
+        # log. Without it, "did not see shell prompt after flash+reboot"
+        # is undiagnosable — the captured 45 s of Pi 5 serial output
+        # tells the operator whether the board hung pre-shell, emitted
+        # a different prompt, kernel-panicked, or just booted slowly.
+        # 30 lines is enough to cover the typical pre-shell window
+        # (kernel banner + driver inits + network init + shell start)
+        # without spamming the batch log on every transient.
+        stdout_tail = _tail_lines(result.stdout, 30)
         return _StepOutcome(
             status="error",
-            detail=f"replay-step failed: {result.message}\nstderr: {result.stderr}",
+            detail=(
+                f"replay-step failed: {result.message}\n"
+                f"stderr: {result.stderr}\n"
+                f"stdout tail (last 30 lines):\n{stdout_tail}"
+            ),
         )
 
     if isinstance(result, ReplayDivergence):
@@ -338,6 +351,20 @@ def _ends_with_newline(path: Path) -> bool:
         except OSError:
             return True  # empty file — nothing to terminate
         return f.read(1) == b"\n"
+
+
+def _tail_lines(text: str, n: int) -> str:
+    """Return the last `n` lines of `text` (or all of it if shorter).
+    Trailing newline normalised away to avoid a doubled blank line when
+    the caller appends to a larger log entry. An empty input becomes
+    the sentinel "<empty>" so a future reader can tell "we did capture
+    but it was blank" apart from "we never tried to capture"."""
+    if not text:
+        return "<empty>"
+    lines = text.splitlines()
+    if len(lines) <= n:
+        return "\n".join(lines)
+    return "\n".join(lines[-n:])
 
 
 # Internal step outcome that carries forward into the top-level LoopOutcome.
