@@ -580,11 +580,76 @@ class ReplayErrorDetailIncludesSerialTailTests(unittest.TestCase):
                 "did not see shell prompt after flash+reboot",
                 outcome.detail,
             )
+            # The header advertises the configured tail length (default 30).
+            self.assertIn("stdout tail (last 30 lines):", outcome.detail)
             # The last 30 lines of fake_serial must be visible.
             self.assertIn("[   49] boot line 49", outcome.detail)
+            # Boundary check: line 20 IS preserved, line 19 is NOT — pins
+            # the exact cutoff at "last 30" so a silent drift to 29 or 31
+            # fails here as well as in the helper-unit test.
             self.assertIn("[   20] boot line 20", outcome.detail)
-            # Earlier lines must NOT be (we only keep 30).
             self.assertNotIn("[   19] boot line 19", outcome.detail)
+
+    def test_replay_error_detail_respects_loopconfig_tail_length(self) -> None:
+        """LoopConfig.replay_error_stdout_tail_lines is the operator-
+        facing knob for noisy investigations. A non-default value must
+        flow through to both the header label and the number of lines
+        preserved — otherwise the knob silently does nothing."""
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.qemu_runner import ExtendEvent
+        from hailo_re_driver.slmos_runner import ReplayError
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = Path(d) / "c.jsonl"
+            from hailo_re_driver.corpus import Header
+            corpus_mod.init(corpus_path, Header(
+                format_version=1, hailort_version="4.23.0",
+                fw_version="4.23.0",
+                capture_host="qemu-x86_64",
+                slmos_base_sha="ef" * 20,
+                capture_started_at="2026-05-12T18:30:00Z",
+            ))
+
+            class _BootStallingSlmos:
+                def replay_step(self, corpus_path, seq, *,
+                                fresh_boot: bool = True):
+                    fake_serial = "\n".join(
+                        f"[ {i:>4}] boot line {i}" for i in range(50)
+                    ) + "\n"
+                    return ReplayError(
+                        kind="error",
+                        message="did not see shell prompt after flash+reboot "
+                                "(rc=0)",
+                        stdout=fake_serial,
+                        stderr="",
+                    )
+
+            extend_event = ExtendEvent(
+                kind="extend",
+                request=ExtendRequest(
+                    seq=1, bar=4, offset=0, size=4,
+                    reason="unknown_read",
+                ),
+                raw_line="HAILO_RE_CORPUS_EXTEND seq=1 bar=4 offset=0 "
+                         "size=4 reason=unknown_read",
+            )
+            qemu = _ScriptedQemuRunner([extend_event])
+
+            outcome = loop_mod.run_loop(
+                corpus_path, qemu, _BootStallingSlmos(),  # type: ignore[arg-type]
+                loop_mod.LoopConfig(
+                    max_iterations=1,
+                    reachable=lambda _s: True,
+                    replay_error_stdout_tail_lines=5,
+                ),
+            )
+
+            self.assertEqual(outcome.status, "error")
+            self.assertIn("stdout tail (last 5 lines):", outcome.detail)
+            self.assertIn("[   49] boot line 49", outcome.detail)
+            self.assertIn("[   45] boot line 45", outcome.detail)
+            # Line 44 sits one slot above the 5-line window — must be gone.
+            self.assertNotIn("[   44] boot line 44", outcome.detail)
 
 
 if __name__ == "__main__":

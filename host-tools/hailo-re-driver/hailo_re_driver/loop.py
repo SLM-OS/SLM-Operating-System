@@ -73,6 +73,13 @@ class LoopConfig:
     reachable: rollback_mod.SHA_REACHABLE = field(
         default_factory=rollback_mod.git_reachable_from_main
     )
+    # How many trailing lines of the captured serial buffer to include
+    # in a batch log when replay-step fails. 30 covers the typical
+    # pre-shell window (kernel banner + driver inits + network init +
+    # shell start) without spamming the wrapper log on every transient.
+    # Bumping this in a future investigation is the easiest knob to
+    # turn for a single failing batch.
+    replay_error_stdout_tail_lines: int = 30
 
 
 def response_to_entry(
@@ -211,16 +218,16 @@ def _extend_corpus(
         # is undiagnosable — the captured 45 s of Pi 5 serial output
         # tells the operator whether the board hung pre-shell, emitted
         # a different prompt, kernel-panicked, or just booted slowly.
-        # 30 lines is enough to cover the typical pre-shell window
-        # (kernel banner + driver inits + network init + shell start)
-        # without spamming the batch log on every transient.
-        stdout_tail = _tail_lines(result.stdout, 30)
+        # Tail-length lives on LoopConfig so a single investigation can
+        # crank it up without editing source.
+        tail_n = cfg.replay_error_stdout_tail_lines
+        stdout_tail = _tail_lines(result.stdout, tail_n)
         return _StepOutcome(
             status="error",
             detail=(
                 f"replay-step failed: {result.message}\n"
                 f"stderr: {result.stderr}\n"
-                f"stdout tail (last 30 lines):\n{stdout_tail}"
+                f"stdout tail (last {tail_n} lines):\n{stdout_tail}"
             ),
         )
 
