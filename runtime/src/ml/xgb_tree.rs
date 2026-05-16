@@ -588,8 +588,27 @@ impl XgbModel {
     /// Convenience: argmax + label-class lookup. Returns the raw label
     /// (e.g. an action id) emitted by the trained classifier. Falls
     /// back to the argmax index itself if `label_classes` is empty.
+    ///
+    /// `n_classes == 2` routes through the binary path: XGBoost's
+    /// `binary:logistic` objective stores one tree per boosting round
+    /// (all contributing to a single class-1 margin), not two — so the
+    /// multiclass `cls = i % n_classes` mapping in `predict_argmax`
+    /// would split a single margin's trees alternately into the two
+    /// class buckets. Sum all trees, threshold the margin at zero
+    /// (`sigmoid(margin) >= 0.5`), then map through `label_classes`.
+    /// `XGBClassifier` picks `binary:logistic` automatically for any
+    /// 2-class fit, so the trigger matches what the trainer emits
+    /// (see #920).
     pub fn predict_label(&self, features: &[f32], n_classes: usize) -> i32 {
-        let idx = self.predict_argmax(features, n_classes);
+        let idx = if n_classes == 2 {
+            let mut margin = 0.0_f32;
+            for &root in &self.roots {
+                margin += self.eval_tree(root as usize, features);
+            }
+            if margin >= 0.0 { 1usize } else { 0usize }
+        } else {
+            self.predict_argmax(features, n_classes)
+        };
         if idx < self.label_classes.len() {
             self.label_classes[idx]
         } else {
@@ -789,17 +808,21 @@ mod tests {
 
     #[test]
     fn parse_cascade_round_trips_two_classifiers() {
+        // The cascade builder writes each classifier with n_classes == 2.
+        // Per #920, that routes through the binary-logistic margin path:
+        // sum all tree leaves, threshold at zero, then label_classes
+        // lookup. The previous multiclass-style expectation was wrong.
         let bytes = build_cascade_two_classifiers();
         let cascade = parse_cascade(&bytes, &[1, 1]).expect("parse cascade");
         assert_eq!(cascade.classifiers.len(), 2);
 
         let features = [0.0_f32; 1];
-        // Classifier 0: class 0 score 0.5 vs class 1 score 0.1 → label 7.
+        // Classifier 0: margin = 0.5 + 0.1 = 0.6 >= 0 → class 1 → label 9.
         assert_eq!(
             cascade.classifiers[0].predict_label(&features, 2),
-            7
+            9
         );
-        // Classifier 1: class 0 score 0.0 vs class 1 score 1.0 → label 200.
+        // Classifier 1: margin = 0.0 + 1.0 = 1.0 >= 0 → class 1 → label 200.
         assert_eq!(
             cascade.classifiers[1].predict_label(&features, 2),
             200
@@ -813,5 +836,58 @@ mod tests {
             parse_cascade(&bytes, &[1]),
             Err(XgbError::BadLength)
         ));
+    }
+
+    /// XGBoost `binary:logistic` stores ONE tree per boosting round
+    /// (all contribute to a single class-1 margin). `predict_label`
+    /// with `n_classes == 2` must sum every tree's leaf value, threshold
+    /// the margin at zero, and look up `label_classes[predicted]` —
+    /// NOT route through `predict_argmax`'s `i % n_classes` split,
+    /// which would alternate trees into separate buckets and produce
+    /// noise. Regression for #920.
+    #[test]
+    fn predict_label_binary_uses_margin_threshold() {
+        // 3 trees, each a single-leaf root contributing +0.4. Sum = +1.2 >= 0
+        // → class 1 → label_classes[1] = 99.
+        let leaf = |v: f32| Node {
+            feature_idx: 0,
+            flags: FLAG_LEAF,
+            left_idx: 0,
+            right_idx: 0,
+            threshold: 0.0,
+            value: v,
+        };
+        let model_pos = XgbModel::from_parts_for_test(
+            alloc::vec![0u32, 1u32, 2u32],
+            alloc::vec![leaf(0.4), leaf(0.4), leaf(0.4)],
+            alloc::vec![7i32, 99i32],
+        );
+        let features = [0.0_f32; 1];
+        assert_eq!(model_pos.predict_label(&features, 2), 99);
+
+        // Same shape, leaves negative → margin -1.2 < 0 → class 0 → label 7.
+        let model_neg = XgbModel::from_parts_for_test(
+            alloc::vec![0u32, 1u32, 2u32],
+            alloc::vec![leaf(-0.4), leaf(-0.4), leaf(-0.4)],
+            alloc::vec![7i32, 99i32],
+        );
+        assert_eq!(model_neg.predict_label(&features, 2), 7);
+
+        // Mixed signs where `predict_argmax` (multiclass-style i % 2)
+        // and the binary margin disagree:
+        //   - Trees 0 (cls 0 by i%2), 2 (cls 0): -0.6, -0.6 → scores[0] = -1.2
+        //   - Tree 1 (cls 1 by i%2): +0.4 → scores[1] = +0.4
+        //   - predict_argmax → class 1 → label 99
+        //   - actual binary margin = -0.6 + 0.4 - 0.6 = -0.8 < 0 → class 0 → label 7
+        // predict_label MUST follow the binary margin, not the argmax.
+        let model_mixed = XgbModel::from_parts_for_test(
+            alloc::vec![0u32, 1u32, 2u32],
+            alloc::vec![leaf(-0.6), leaf(0.4), leaf(-0.6)],
+            alloc::vec![7i32, 99i32],
+        );
+        assert_eq!(model_mixed.predict_label(&features, 2), 7);
+        // Sanity check that predict_argmax does NOT match — confirms
+        // the test is actually exercising the binary-specific path.
+        assert_eq!(model_mixed.predict_argmax(&features, 2), 1);
     }
 }

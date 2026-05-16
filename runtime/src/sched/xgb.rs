@@ -776,6 +776,82 @@ pub fn build_smoke_blob() -> Vec<u8> {
     blob
 }
 
+/// Build a tiny SEMB+XGBC blob whose stage 2 and stage 3 classifiers
+/// are 2-class. Used by the kernel-side `rust_run_tests` regression
+/// for #920: with the multiclass-only `predict_argmax` path (pre-fix),
+/// `predict_label` would split each classifier's trees alternately
+/// into score buckets and pick the wrong label. With the binary
+/// margin-threshold path (post-fix), the cascade returns the labels
+/// pinned below.
+///
+/// Layout per classifier:
+/// - Classifier 0: n_classes=1 (multiclass-trivial), always emits label `42`.
+/// - Classifier 1: n_classes=2, two leaves `[0.5, 0.5]`. Binary margin = 1.0
+///   ≥ 0 → class 1 → label `20`. Argmax-only path would tie-break to
+///   class 0 → label `10`.
+/// - Classifier 2: n_classes=2, two leaves `[-0.6, +0.4]`. Binary margin
+///   = -0.2 < 0 → class 0 → label `30`. Argmax-only path would pick
+///   class 1 (0.4 > -0.6) → label `40`.
+///
+/// Expected post-fix output: `(42, 20, 30)`.
+pub fn build_binary_cascade_smoke_blob() -> Vec<u8> {
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(b"XGBC");
+    payload.extend_from_slice(&1u16.to_le_bytes()); // version
+    payload.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    payload.extend_from_slice(&3u16.to_le_bytes()); // n_classifiers
+    payload.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    payload.extend_from_slice(&0u32.to_le_bytes()); // reserved
+
+    // Helper closure shape: one leaf-only tree per root.
+    let push_classifier =
+        |payload: &mut Vec<u8>, leaves: &[f32], labels: &[i32]| {
+            let n_trees = leaves.len() as u32;
+            let n_nodes = leaves.len() as u32;
+            let n_classes = labels.len() as u16;
+            payload.extend_from_slice(&n_trees.to_le_bytes());
+            payload.extend_from_slice(&n_nodes.to_le_bytes());
+            payload.extend_from_slice(&n_classes.to_le_bytes());
+            payload.extend_from_slice(&0u16.to_le_bytes()); // reserved (u16)
+            payload.extend_from_slice(&0u32.to_le_bytes()); // reserved (u32)
+            // Roots — one per tree, addressed by tree index (each tree
+            // is one node, so root[i] = i).
+            for i in 0..leaves.len() as u32 {
+                payload.extend_from_slice(&i.to_le_bytes());
+            }
+            for &leaf in leaves {
+                payload.extend_from_slice(&0u16.to_le_bytes()); // feature
+                payload.extend_from_slice(&1u16.to_le_bytes()); // FLAG_LEAF
+                payload.extend_from_slice(&0u32.to_le_bytes()); // left
+                payload.extend_from_slice(&0u32.to_le_bytes()); // right
+                payload.extend_from_slice(&0.0_f32.to_le_bytes()); // threshold
+                payload.extend_from_slice(&leaf.to_le_bytes()); // value
+            }
+            for &lbl in labels {
+                payload.extend_from_slice(&lbl.to_le_bytes());
+            }
+        };
+
+    push_classifier(&mut payload, &[1.0_f32], &[42i32]);
+    push_classifier(&mut payload, &[0.5_f32, 0.5_f32], &[10i32, 20i32]);
+    push_classifier(&mut payload, &[-0.6_f32, 0.4_f32], &[30i32, 40i32]);
+
+    let payload_len = payload.len() as u32;
+    let checksum = fnv1a_32(&payload);
+
+    let mut blob: Vec<u8> = Vec::with_capacity(SEMB_OUTER_HEADER_LEN + payload.len());
+    blob.extend_from_slice(&SEMB_MAGIC);
+    blob.extend_from_slice(&SEMB_BLOB_VERSION_V1.to_le_bytes());
+    blob.extend_from_slice(&SCHED_MODEL_KIND_XGBOOST.to_le_bytes());
+    blob.extend_from_slice(&SCHED_MODEL_SCHEMA_V1.to_le_bytes());
+    blob.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    blob.extend_from_slice(&payload_len.to_le_bytes());
+    blob.extend_from_slice(&checksum.to_le_bytes());
+    blob.extend_from_slice(&0u32.to_le_bytes()); // trailing reserved
+    blob.extend_from_slice(&payload);
+    blob
+}
+
 // ---------------------------------------------------------------------
 // Unit tests. Exercise every part of the path: SEMB outer-header
 // round-trip, cascade parse, staged → active dance, derived-feature
