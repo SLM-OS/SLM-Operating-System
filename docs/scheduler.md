@@ -724,6 +724,24 @@ that, the assign_cpu path mirrors `ai_mlp` exactly — same isolation
 check, same priority-adjust + preempt encoding (1 = boost, 2 = reduce,
 preempt bit raises one priority level).
 
+##### Wire format: XGB1 vs XGBC
+
+The shared XGBoost engine in `runtime/src/ml/xgb_tree.rs` parses two
+on-disk formats with the same in-memory `Node` shape:
+
+- **XGB1** — 16-byte node, `u16` children, `MAX_NODES_SINGLE = 65535`.
+  Used by the eviction `xgboost` policy (one classifier, ≤ 65 K nodes).
+- **XGBC** — 20-byte node, `u32` children, `MAX_NODES_CASCADE =
+  2_000_000`. Used by the scheduler `ai_xgb` cascade because the
+  shipping `core_clf` flattens to ~450 K nodes — well past the `u16`
+  ceiling. Layout is N back-to-back classifier sections, each with
+  its own root + node + label-class arrays.
+
+Both share the SEMB outer wrapper. Full byte-level layout is in
+[`docs/contracts/runtime-blob-formats.md`](contracts/runtime-blob-formats.md).
+The Rust-side `XgbModel` and `XgbCascade` types (and the `predict_*`
+helpers) are agnostic to which wire format produced them.
+
 #### Inference Engine Architecture
 
 The inference engine implements a 4-layer feedforward neural network:

@@ -528,6 +528,57 @@ typedef struct {
 } ComponentInfo;
 ```
 
+### XGBoost Scheduler Cascade (Rust → C FFI)
+
+The `ai_xgb` scheduler policy (`SCHED_MODEL_KIND_XGBOOST = 0x1006`)
+stores its 3-classifier cascade Rust-side because the trained model
+(~9 MB) exceeds the static dense pool used by every other
+`SCHED_MODEL_KIND_*`. The C side in `kernel/sched/ai/runtime_model.c`
+forwards the kind id to these Rust entry points; everything else
+(MLP, PPO, config, thresholds, rebalance) stays in the existing
+dense paths.
+
+Declared in `kernel/include/slm_ffi.h`:
+
+```c
+extern int32_t rust_sched_xgb_validate_blob(const uint8_t *data,
+                                            size_t len);
+extern int32_t rust_sched_xgb_stage_blob(const uint8_t *data,
+                                         size_t len);
+extern int32_t rust_sched_xgb_activate(void);
+extern int32_t rust_sched_xgb_rollback(void);
+extern int32_t rust_sched_xgb_clear(void);
+extern int32_t rust_sched_xgb_status(void *out);
+extern int32_t rust_sched_xgb_is_active(void);
+extern int32_t rust_sched_xgb_predict(const float *state,
+                                      int32_t *out_core,
+                                      int32_t *out_priority,
+                                      int32_t *out_preempt);
+```
+
+Return-code convention: `0` on success, `-1` on any error (NULL
+pointer, parse failure, no cascade staged, no rollback slot, etc.).
+The C side has no need to differentiate; Rust callers can pattern-
+match on the `XgbStageError` variant if richer reporting is needed.
+
+`rust_sched_xgb_status` writes a `struct sched_model_status` (76
+bytes — pinned by `_Static_assert` in `kernel/sched/ai/runtime_model.h`
+and a matching `const _: () = assert!` in `runtime/src/sched/xgb.rs`)
+to the supplied buffer.
+
+`rust_sched_xgb_predict`'s `state` pointer must reference at least
+`AI_STATE_DIM = 108` contiguous `float`s and be 4-byte aligned (any
+C `float` array satisfies this naturally). Output pointers must be
+non-NULL; on success the cascade's raw labels — not encoded class
+indices — are written.
+
+Runs from IRQ context on hardware-tick paths. Rust-side `predict()`
+does an `Arc::clone` of the active cascade under the store lock and
+then walks the trees with the lock released, so concurrent
+`assign_cpu` calls on different CPUs don't serialize on hundreds of
+thousands of node reads. The wire format (SEMB outer + XGBC inner)
+is documented in `docs/contracts/runtime-blob-formats.md`.
+
 ---
 
 ## Panic Handling
