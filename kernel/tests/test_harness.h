@@ -229,6 +229,9 @@ int test_suite_cpu_supervisor(void);
 /* MPIDR -> logical CPU id lookup tests (#647) */
 int test_suite_mpidr_lookup(void);
 
+/* ARM PMU primitive smoke tests (#874) */
+int test_suite_pmu(void);
+
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 
