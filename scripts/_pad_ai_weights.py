@@ -16,7 +16,14 @@ Usage: _pad_ai_weights.py <file.c> <model> <max_rows> <layer3_in>
   <model>     "mlp" or "ppo" (selects symbol prefix)
   <max_rows>  Row count to pad to (typically 42 = AI_MLP_LAYER3_MAX_ROWS)
   <layer3_in> Layer 3 input dim (typically 128)
+
+The `<max_rows>` arg must match `AI_MLP_LAYER3_MAX_ROWS` in
+`kernel/sched/ai/ai_weights.h`. If a new platform pushes the action
+space past 42, bump the value in both places — caller and kernel
+header.
 """
+USAGE = ("usage: _pad_ai_weights.py <file.c> <model> "
+         "<max_rows> <layer3_in>")
 import re
 import sys
 from pathlib import Path
@@ -52,7 +59,7 @@ def pad_array(src: str, name: str, want_rows: int, row_stride: int) -> str:
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        sys.exit(__doc__.strip().splitlines()[-1])
+        sys.exit(USAGE)
     path = Path(sys.argv[1])
     model = sys.argv[2]
     max_rows = int(sys.argv[3])

@@ -364,7 +364,7 @@ mechanics in CI.
 to heuristic on every decision. The DL-miss% / p50 / p99 column is the
 heuristic-fallback path's timing under the ai_xgb policy registration;
 a staged-cascade row needs runtime `slm.sched_model_load
-xgb_sched.smb` and is deferred — see [issue #61 follow-up](#).
+xgb_sched.smb` and is deferred to a follow-up of #61.
 
 † Jetson ai_ppo: 24/24 decisions out-of-range → 24 heuristic fallbacks.
 The shipped PPO weights were trained against the 24-action Pi 5 space;

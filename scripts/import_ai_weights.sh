@@ -144,6 +144,23 @@ normalize_real_c() {
     sed -i -E "s/\b${model}_(w|b|bn_gamma|bn_beta|bn_mean|bn_var)([0-9])\b/ai_${model}_\1\2/g" "${target}"
     python3 "${SCRIPT_DIR}/_pad_ai_weights.py" \
         "${target}" "${model}" "${max_rows}" "${layer3_in}"
+    # Post-condition checks. If the sibling-repo export drifts (renamed
+    # include, requoted with `<...>`, dropped the `<model>_` symbol
+    # convention, etc.) the substitutions silently no-op and the kernel
+    # link would fail later with a less informative error. Fail fast
+    # here so the operator gets a clear pointer at the rewrite contract.
+    if ! grep -q '^#include "ai_weights.h"' "${target}"; then
+        echo "Error: include normalization failed for ${target}"
+        echo "  expected: #include \"ai_weights.h\""
+        echo "  got:      $(grep -m1 '^#include' "${target}" || echo '<no include line>')"
+        exit 1
+    fi
+    if grep -E "^const float ${model}_(w|b|bn_)" "${target}" > /dev/null; then
+        echo "Error: symbol rename failed for ${target}"
+        echo "  found stale (non-ai_-prefixed) ${model}_* symbol(s):"
+        grep -E "^const float ${model}_(w|b|bn_)" "${target}" | head -3
+        exit 1
+    fi
 }
 
 # Synthetic baseline (always) — imported as-is, do not normalize, see
