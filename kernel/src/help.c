@@ -1346,6 +1346,32 @@ static const struct help_entry help_entries[] = {
         "Requires `net init` (or DHCP) to have completed first.\n"
     ),
 
+    HELP_TEXT("pmu",
+        "pmu - ARM Performance Monitor Unit probe (non-x86)\n"
+        "\n"
+        "Usage:\n"
+        "  pmu [probe [<iters>]]\n"
+        "\n"
+        "Re-enables the PMU on the calling CPU, runs a tight integer\n"
+        "loop, and prints the cycle counter + the six preset event\n"
+        "counters (L1D miss, L2D miss, INST_RETIRED, branch mispred,\n"
+        "MEM_ACCESS, backend stall). Use to verify that ARMv8-A PMU\n"
+        "access is not trapped by EL3 firmware on the current platform.\n"
+        "\n"
+        "Default iteration count is 100000. Override the second positional\n"
+        "argument to stretch the loop on slow cores or to amplify\n"
+        "low-rate events.\n"
+        "\n"
+        "Examples:\n"
+        "  pmu                 Default probe (100k loop iterations)\n"
+        "  pmu probe 1000000   1M-iteration probe — amplifies event counts\n"
+        "\n"
+        "On Jetson, the probe is the canonical check for NS-EL2 PMU access\n"
+        "under NVIDIA's BL31. If `pmu_enable_self` reports false, MDCR_EL3\n"
+        "trap bits are set and a TF-A patch (parallel to the IRQ-routing\n"
+        "patch in tools/tfa-patches/0004-*) is needed.\n"
+    ),
+
     HELP_TEXT("timdiag",
         "timdiag - Timer / interrupt-delivery diagnostic (non-x86)\n"
         "\n"
