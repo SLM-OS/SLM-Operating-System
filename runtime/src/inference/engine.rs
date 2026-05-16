@@ -469,12 +469,33 @@ impl InferenceEngine {
         output: *mut f32,
         output_len: usize,
     ) -> Result<usize, EngineError> {
+        self.run_batch(1, input, input_len, output, output_len)
+    }
+
+    /// Run inference treating `input` as a stack of `batch_size`
+    /// samples laid out contiguously. Each declared graph input is
+    /// bound with its first dimension overridden to `batch_size`; the
+    /// per-sample element count is `declared_elements / declared_dim0`.
+    ///
+    /// `batch_size == 1` is equivalent to `run()` and is the path the
+    /// existing FFI callers take.
+    pub fn run_batch(
+        &mut self,
+        batch_size: usize,
+        input: *const f32,
+        input_len: usize,
+        output: *mut f32,
+        output_len: usize,
+    ) -> Result<usize, EngineError> {
+        if batch_size == 0 {
+            return Err(EngineError::InvalidInput);
+        }
         // Reset workspace and bindings
         self.workspace.reset();
         self.binding_count = 0;
 
         // Bind graph input(s)
-        self.bind_graph_inputs(input, input_len)?;
+        self.bind_graph_inputs(batch_size, input, input_len)?;
 
         // Bind all weights from the weight table
         self.bind_weights()?;
@@ -489,7 +510,29 @@ impl InferenceEngine {
     }
 
     /// Bind graph input names to the provided input data.
-    fn bind_graph_inputs(&mut self, input: *const f32, input_len: usize) -> Result<(), EngineError> {
+    ///
+    /// When `batch_size > 1`, the first dimension of every graph input
+    /// is overridden from the declared value (usually 1) to
+    /// `batch_size`. The remaining dimensions describe the per-sample
+    /// shape, so `input_len` must equal `batch_size *
+    /// per_sample_elements`. This is the only seam the batched
+    /// dispatcher needs — every downstream op (Conv2D, MatMul, Gemm,
+    /// Softmax, MaxPool, Reshape) already iterates over `input.dim(0)`
+    /// and handles the batch dimension correctly.
+    ///
+    /// ASSUMPTION (load-bearing): every supported model declares the
+    /// batch dimension at index 0 of its first input. The MNIST
+    /// model and every other model SLM-OS loads today follow this
+    /// convention; if a future model puts channels or another
+    /// dimension first, this override silently corrupts the shape.
+    /// Add a per-model "batch_dim_index" property and pass it
+    /// through to break that assumption.
+    fn bind_graph_inputs(
+        &mut self,
+        batch_size: usize,
+        input: *const f32,
+        input_len: usize,
+    ) -> Result<(), EngineError> {
         if input.is_null() || input_len == 0 {
             return Err(EngineError::InvalidInput);
         }
@@ -498,19 +541,42 @@ impl InferenceEngine {
             let name = &self.graph.input_names[i];
             let shape = &self.graph.input_shapes[i];
 
-            // Build shape array from TensorShape
+            // Build shape array from TensorShape, overriding dim 0.
             let mut dims = [0u32; 8];
             let ndim = shape.ndim as usize;
             for d in 0..ndim {
                 dims[d] = shape.dims[d];
             }
+            if batch_size > 1 {
+                if ndim == 0 {
+                    return Err(EngineError::ShapeMismatch);
+                }
+                // Override the leading dimension with the actual batch
+                // size. The declared value is typically 1 (training-
+                // time batch dimension) or a dynamic placeholder.
+                let bs_u32: u32 = u32::try_from(batch_size)
+                    .map_err(|_| EngineError::ShapeOverflow)?;
+                dims[0] = bs_u32;
+            }
 
             let tensor = Tensor::new(input, &dims[..ndim]);
 
-            // Verify element count matches
+            // Verify element count matches the provided buffer. The
+            // `> input_len` check catches under-sized buffers; the
+            // debug_assert pins the stronger invariant that the caller
+            // sized the buffer to exactly `batch_size * per_sample`
+            // elements (oversized buffers technically still work but
+            // are a sign of caller confusion — flag in debug builds).
             if tensor.num_elements() > input_len {
                 return Err(EngineError::InvalidInput);
             }
+            debug_assert_eq!(
+                tensor.num_elements(),
+                input_len,
+                "bind_graph_inputs: input_len ({}) should match batch_size * per_sample ({})",
+                input_len,
+                tensor.num_elements()
+            );
 
             self.bind(*name, tensor);
         }
@@ -1049,16 +1115,56 @@ pub unsafe fn run_inference(
     output: *mut f32,
     output_len: usize,
 ) -> Result<usize, EngineError> {
+    run_inference_inner(model_index, 1, input, input_len, output, output_len)
+}
+
+/// Batched variant of `run_inference`.
+///
+/// Treats the input buffer as `batch_size` samples laid out
+/// contiguously and runs the model's full op pipeline once across the
+/// whole batch. The output buffer receives `batch_size * output_dim`
+/// floats.
+///
+/// The MNIST GPU fast path is single-sample only (its FFI asserts
+/// `input_len == 784`), so batched dispatches always take the CPU
+/// path. This is documented in `docs/architecture.md` and surfaces in
+/// the #858 benchmark matrix.
+///
+/// # Safety
+///
+/// Same preconditions as `run_inference`: buffers are non-null,
+/// 4-byte-aligned, sized to cover `input_len` / `output_len` floats,
+/// and live through the call.
+pub unsafe fn run_inference_batched(
+    model_index: usize,
+    batch_size: usize,
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Result<usize, EngineError> {
+    run_inference_inner(model_index, batch_size, input, input_len, output, output_len)
+}
+
+unsafe fn run_inference_inner(
+    model_index: usize,
+    batch_size: usize,
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Result<usize, EngineError> {
     let _guard = EngineGuard::new();
 
     // Pin the weight block for the duration of the call. If a
     // concurrent `unload` or `swap_model` retargets the registry slot
     // mid-flight, the OLD weight block stays allocated until this
     // lease drops at function exit — no torn reads, no use-after-free.
+    //
+    // EngineGuard releases ENGINE_LOCK on Drop, so we just return.
     let _weight_lease = match registry::WeightLease::acquire(model_index) {
         Some(l) => l,
         None => {
-            engine_unlock();
             record_error();
             return Err(EngineError::ModelNotFound);
         }
@@ -1066,12 +1172,13 @@ pub unsafe fn run_inference(
 
     let start = kernel_ffi::get_time_ns();
 
-    // GPU fast path: when the active model is "mnist" and the GPU
-    // is compute-ready, route the whole graph through the v6 handoff
-    // SLM-OS already pre-uploaded. Falls through to the CPU path on
-    // any error so the user still gets an answer.
+    // GPU fast path: when the active model is "mnist", the GPU is
+    // compute-ready, and the call is a single MNIST sample, route the
+    // whole graph through the v6 handoff. Batched dispatches always
+    // take the CPU path because the GPU FFI's input slot is sized for
+    // exactly one 1×1×28×28 sample.
     let result: Result<usize, EngineError>;
-    if mnist_gpu_fastpath_eligible(model_index) {
+    if batch_size == 1 && mnist_gpu_fastpath_eligible(model_index) {
         // Successful dispatch is the steady-state happy path; logging
         // it every iteration drowns the console at >1 inf/s. The
         // failure path is rare and operator-actionable, so it stays.
@@ -1094,7 +1201,7 @@ pub unsafe fn run_inference(
     result = unsafe {
         let engine = &mut *ENGINE.get();
         match engine.init(model_index) {
-            Ok(()) => engine.run(input, input_len, output, output_len),
+            Ok(()) => engine.run_batch(batch_size, input, input_len, output, output_len),
             Err(e) => Err(e),
         }
     };
