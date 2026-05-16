@@ -56,7 +56,16 @@ x86-64 still reads 0.0 for this slot (sibling work #870).
 
 - **GPU-backed scheduler inference on Pi 5 / x86-64** — path described in `docs/pi5-ai-hat-plan.md` §6 (Hailo MLP on Pi 5). On Pi 5 it remains gated by the AI HAT+ link-training work (#260). On x86-64 it's transitively blocked by SEC2 priv-lock (#185). Jetson GA10B is shipped (see matrix).
 - **Online weight update / training in-kernel** — not implemented. Weights are compile-time frozen. Plan B was to reuse the CACHEUS online-retraining infrastructure but it's separate from the scheduler MLP today.
-- **Full Plan A exported weights real-workload validation** — listed in `docs/future-work.md` §"Real AI Scheduler Weights." The trained weights are integrated; the "realistic-workload benchmark comparison" between AI and heuristic is partially done (`bench sched-policy` exists, with `ai_xgb` row added in #851 once a cascade is staged).
+- **Full Plan A exported weights real-workload validation** — done.
+  `bench sched-policy --workload <name>` (#882, PR #928) drives a
+  representative task mix through every registered policy and reports
+  per-policy scheduling-quality metrics. The harness ships with four
+  workloads (mixed / deadline-heavy / latency-sensitive / cpu-bound).
+  Hardware comparison matrix lands in `docs/benchmarks.md` §"AI vs
+  Heuristic Scheduler Comparison" — see #884 for the multi-platform
+  capture. The "AI weights" axis has two variants: `AI_WEIGHTS=synthetic`
+  (default; Plan A baseline) and `AI_WEIGHTS=real` (SLM-OS-fine-tuned;
+  #879).
 - **On-target bit-equality test against Python `TripleClassifier.predict`** — sibling-repo `expected_actions_xgb.bin` ships 1000 ground-truth `(core, priority, preempt)` triples. Stage the corresponding `xgb_sched.smb`, replay the test vectors through `slm.sched_set_policy("ai_xgb")` from the shell, and diff. A scripted shell verb is the smallest follow-on; the kernel-side `rust_run_tests` covers a 3-classifier synthetic cascade today.
 - **Automatic policy selection per workload** — `sched_set_policy` requires an explicit name. No workload-adaptive auto-switch.
 - **Multi-dim per-task features beyond the fixed 8** — encoded slot is capped at 8 tasks. Tasks beyond that are dropped from the state vector (not prioritized). No plan to expand.

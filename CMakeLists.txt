@@ -1847,6 +1847,18 @@ target_link_libraries(slmos.elf PRIVATE kprintf_float)
 
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
+# AI scheduler weight set (#884, sub-ticket of #61).
+#   synthetic — Plan A synthetic-trained MLP/PPO weights (default; preserves
+#               current behaviour).
+#   real      — SLM-OS-fine-tuned weights from sibling repo's --weights-suffix
+#               _real export. Requires ai_weights_*_real.c to be present
+#               (run scripts/import_ai_weights.sh --include-real). Per #848,
+#               both sets are options; neither is "the winner". Switching is
+#               build-time, not runtime — the same vtable, just different
+#               trained values in the const float arrays.
+set(AI_WEIGHTS "synthetic" CACHE STRING "AI scheduler weight set (synthetic|real)")
+set_property(CACHE AI_WEIGHTS PROPERTY STRINGS synthetic real)
+
 # Work-stealing scheduler (#59 Phase B, S4 default flip).
 #
 # Default is ON for the platforms where hardware evidence in
@@ -2084,6 +2096,22 @@ endif()
 if(ENABLE_AI_SCHEDULER)
     add_compile_definitions(CONFIG_AI_SCHEDULER=1)
 
+    # Weight-set selection (#884). Same C symbols (ai_mlp_w0, …) across
+    # synthetic and real variants — only the .c filename differs.
+    # Compile-time mutually exclusive: linking both would yield duplicate
+    # symbol errors. The default `synthetic` preserves existing behaviour;
+    # operators opt into `real` via `make kernel AI_WEIGHTS=real` after
+    # `scripts/import_ai_weights.sh --include-real`.
+    if(AI_WEIGHTS STREQUAL "real")
+        set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp_real.c)
+        set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)
+        message(STATUS "  AI weights: real (SLM-OS-fine-tuned, #879)")
+    else()
+        set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp.c)
+        set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo.c)
+        message(STATUS "  AI weights: synthetic (Plan A baseline)")
+    endif()
+
     add_library(ai_sched STATIC
         kernel/sched/ai/ai_inference.c
         kernel/sched/ai/ai_state.c
@@ -2091,8 +2119,8 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/sched_xgb.c
         kernel/sched/ai/runtime_model.c
         kernel/sched/ai/inference_cpu.c
-        kernel/sched/ai/ai_weights_mlp.c
-        kernel/sched/ai/ai_weights_ppo.c
+        ${_ai_mlp_src}
+        ${_ai_ppo_src}
         kernel/sched/ai/ai_test_helpers.c
         kernel/sched/ai/workloads.c
         kernel/sched/ai/sched_trace_ai.c

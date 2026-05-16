@@ -7,10 +7,16 @@
 # Validates that dimensions match the expected model architecture.
 #
 # Usage:
-#   ./scripts/import_ai_weights.sh [--source <path>]
+#   ./scripts/import_ai_weights.sh [--source <path>] [--include-real]
 #
 # Default source: ~/projects/slm-os-scheduler-ai/deploy/generated/
 #
+# The optional `--include-real` flag also imports the SLM-OS-fine-tuned
+# weight variants (`ai_weights_mlp_real.c`, `ai_weights_ppo_real.c`)
+# emitted by the sibling repo's `--weights-suffix _real` export
+# (sibling-repo PR for SLM-OS #879). Both variants coexist on disk;
+# the kernel's `AI_WEIGHTS=synthetic|real` build flag picks one at
+# compile time. See `docs/fact-sheets/ai-scheduler.md`.
 
 set -euo pipefail
 
@@ -21,24 +27,37 @@ DEFAULT_SOURCE="${HOME}/projects/slm-os-scheduler-ai/deploy/generated"
 
 # Parse arguments
 SOURCE_DIR="${DEFAULT_SOURCE}"
+INCLUDE_REAL=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source)
             SOURCE_DIR="$2"
             shift 2
             ;;
+        --include-real)
+            INCLUDE_REAL=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--source <path>]"
+            echo "Usage: $0 [--source <path>] [--include-real]"
             echo ""
             echo "Import AI model weights from Plan A export pipeline."
             echo ""
             echo "Options:"
-            echo "  --source <path>  Source directory (default: ${DEFAULT_SOURCE})"
+            echo "  --source <path>   Source directory (default: ${DEFAULT_SOURCE})"
+            echo "  --include-real    Also import _real variants (SLM-OS #879 fine-tune)"
             echo ""
             echo "Expected files in source directory:"
-            echo "  ai_weights_mlp.c   MLP weight arrays"
-            echo "  ai_weights_ppo.c   PPO weight arrays (optional)"
-            echo "  ai_config.h        Platform-specific dimensions"
+            echo "  ai_weights_mlp.c        MLP weight arrays (synthetic baseline)"
+            echo "  ai_weights_ppo.c        PPO weight arrays (synthetic baseline, optional)"
+            echo "  ai_weights_mlp_real.c   MLP fine-tuned (with --include-real)"
+            echo "  ai_weights_ppo_real.c   PPO fine-tuned (with --include-real)"
+            echo "  ai_config.h             Platform-specific dimensions"
+            echo ""
+            echo "Build select:"
+            echo "  make kernel AI_SCHED=ON                       # synthetic baseline (default)"
+            echo "  make kernel AI_SCHED=ON AI_WEIGHTS=synthetic  # explicit synthetic"
+            echo "  make kernel AI_SCHED=ON AI_WEIGHTS=real       # SLM-OS-fine-tuned weights"
             exit 0
             ;;
         *)
@@ -50,8 +69,9 @@ done
 
 echo "AI Weight Import"
 echo "================"
-echo "Source: ${SOURCE_DIR}"
-echo "Target: ${KERNEL_AI_DIR}"
+echo "Source:       ${SOURCE_DIR}"
+echo "Target:       ${KERNEL_AI_DIR}"
+echo "Include real: $([ ${INCLUDE_REAL} -eq 1 ] && echo yes || echo no)"
 echo ""
 
 # Validate source directory exists
@@ -63,7 +83,7 @@ if [ ! -d "${SOURCE_DIR}" ]; then
     exit 1
 fi
 
-# Check for required files
+# Check for required files (synthetic baseline only — real is optional)
 MISSING=0
 for file in ai_weights_mlp.c; do
     if [ ! -f "${SOURCE_DIR}/${file}" ]; then
@@ -78,17 +98,46 @@ if [ ${MISSING} -eq 1 ]; then
     exit 1
 fi
 
+# If --include-real was requested but the files aren't there, that's
+# a hard error — the operator clearly meant to import them.
+if [ ${INCLUDE_REAL} -eq 1 ]; then
+    REAL_MISSING=0
+    for file in ai_weights_mlp_real.c; do
+        if [ ! -f "${SOURCE_DIR}/${file}" ]; then
+            echo "Error: --include-real but ${file} not found in ${SOURCE_DIR}"
+            echo "  Run: python scripts/export_models.py --model mlp \\"
+            echo "         --weights-checkpoint <fine-tuned.pt> --weights-suffix _real"
+            REAL_MISSING=1
+        fi
+    done
+    if [ ${REAL_MISSING} -eq 1 ]; then
+        exit 1
+    fi
+fi
+
 # Copy weight files
 echo "Copying weight files..."
 
+# Synthetic baseline (always)
 if [ -f "${SOURCE_DIR}/ai_weights_mlp.c" ]; then
     cp "${SOURCE_DIR}/ai_weights_mlp.c" "${KERNEL_AI_DIR}/ai_weights_mlp.c"
     echo "  ai_weights_mlp.c -> kernel/sched/ai/"
 fi
-
 if [ -f "${SOURCE_DIR}/ai_weights_ppo.c" ]; then
     cp "${SOURCE_DIR}/ai_weights_ppo.c" "${KERNEL_AI_DIR}/ai_weights_ppo.c"
     echo "  ai_weights_ppo.c -> kernel/sched/ai/"
+fi
+
+# Fine-tuned (only when requested)
+if [ ${INCLUDE_REAL} -eq 1 ]; then
+    if [ -f "${SOURCE_DIR}/ai_weights_mlp_real.c" ]; then
+        cp "${SOURCE_DIR}/ai_weights_mlp_real.c" "${KERNEL_AI_DIR}/ai_weights_mlp_real.c"
+        echo "  ai_weights_mlp_real.c -> kernel/sched/ai/"
+    fi
+    if [ -f "${SOURCE_DIR}/ai_weights_ppo_real.c" ]; then
+        cp "${SOURCE_DIR}/ai_weights_ppo_real.c" "${KERNEL_AI_DIR}/ai_weights_ppo_real.c"
+        echo "  ai_weights_ppo_real.c -> kernel/sched/ai/"
+    fi
 fi
 
 # Copy config header if present
@@ -97,18 +146,26 @@ if [ -f "${SOURCE_DIR}/ai_config.h" ]; then
     echo "  ai_config.h -> kernel/sched/ai/"
 fi
 
-# Validate dimensions by checking for expected array names
+# Validate dimensions by checking for expected array names. Same
+# symbol names across synthetic/real (the sibling-repo export uses
+# `--weights-suffix` only on the filename, not on the C identifiers
+# — see export_models.py::write_nn_weights_c). The kernel build
+# picks one .c via AI_WEIGHTS=synthetic|real so both files declare
+# the same symbols; only one is compiled in.
 echo ""
 echo "Validating weight files..."
 
 ERRORS=0
-for array in ai_mlp_w0 ai_mlp_b0 ai_mlp_w1 ai_mlp_b1 ai_mlp_w2 ai_mlp_b2 ai_mlp_w3 ai_mlp_b3; do
-    if [ -f "${KERNEL_AI_DIR}/ai_weights_mlp.c" ]; then
-        if ! grep -q "${array}" "${KERNEL_AI_DIR}/ai_weights_mlp.c"; then
-            echo "  Warning: ${array} not found in ai_weights_mlp.c"
+for variant in "ai_weights_mlp.c" "ai_weights_mlp_real.c"; do
+    target="${KERNEL_AI_DIR}/${variant}"
+    [ -f "${target}" ] || continue
+    for array in ai_mlp_w0 ai_mlp_b0 ai_mlp_w1 ai_mlp_b1 \
+                 ai_mlp_w2 ai_mlp_b2 ai_mlp_w3 ai_mlp_b3; do
+        if ! grep -q "${array}" "${target}"; then
+            echo "  Warning: ${array} not found in ${variant}"
             ERRORS=1
         fi
-    fi
+    done
 done
 
 if [ ${ERRORS} -eq 0 ]; then
@@ -118,14 +175,9 @@ else
     echo "Warning: some expected arrays are missing. Build may fail."
 fi
 
-# Update CMakeLists.txt to use real weights instead of stub
 echo ""
-echo "Note: To use real weights, update CMakeLists.txt to replace"
-echo "  ai_weights_stub.c -> ai_weights_mlp.c"
-echo "Or keep both and select via #ifdef at compile time."
-echo ""
-echo "Build with:"
-echo "  cmake -B build/kernel -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \\"
-echo "    -DPLATFORM=QEMU_VIRT -DENABLE_AI_SCHEDULER=ON && cmake --build build/kernel"
+echo "Build select:"
+echo "  make kernel AI_SCHED=ON                       # synthetic baseline (default)"
+echo "  make kernel AI_SCHED=ON AI_WEIGHTS=real       # SLM-OS-fine-tuned weights"
 echo ""
 echo "Done."
