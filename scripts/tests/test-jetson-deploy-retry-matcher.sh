@@ -139,6 +139,31 @@ run_case \
     0 \
     0
 
+# Multi-status-line case: labctl may emit benign trailers (reconnect
+# logs, disconnect notices, etc.) after the status line. The matcher
+# must still find `matched]` on its own line via grep's `$` line
+# anchor. Pins the contract so a future regex change doesn't
+# accidentally require `matched]` to be the last line of output.
+run_case \
+    "matched followed by trailer lines → rc=0" \
+    "[Captured 3 lines in 0.5s, pattern 'slmos>' matched]
+content line 1
+slmos>
+[ser2net] connection closed
+[ser2net] reconnect attempt 1" \
+    0 \
+    0
+
+# Multi-status-line negative: timeout status followed by trailer lines.
+# Must NOT trip the matcher just because trailing lines are appended.
+# Belt-and-suspenders coverage for the regex anchor.
+run_case \
+    "timeout followed by trailer lines → rc=1" \
+    "[Captured 0 lines in 90.0s, timeout]
+[ser2net] disconnect" \
+    0 \
+    1
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

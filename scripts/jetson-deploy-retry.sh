@@ -149,9 +149,6 @@ log "  test:     $([[ "$SKIP_TEST" == "1" ]] && echo 'skip (shell-only)' || echo
 log "  started:  $(date -Is)"
 log ""
 
-# attempt_deploy — one full deploy cycle. Returns 0 on PASS, 1 on FAIL.
-#   $1 = attempt index (1-based, for logging)
-#   $2 = per-attempt log file
 # Capture serial output and verify a pattern was actually matched (#935).
 #
 # `labctl serial capture --until PATTERN` exits 0 even when the pattern
@@ -178,15 +175,20 @@ capture_until_match() {
         return 1
     fi
     # labctl prints a status line like `[Captured N lines in T, pattern '...' matched]`
-    # on success or `[Captured 0 lines in T, timeout]` on timeout. Match the
-    # explicit "matched]" suffix — fragile to format changes but lets us
-    # distinguish "saw the pattern" from "ran the clock out."
+    # on success or `[Captured 0 lines in T, timeout]` on timeout. We match
+    # the explicit "matched]" suffix on any line of the capture output —
+    # fragile to format changes but lets us distinguish "saw the pattern"
+    # from "ran the clock out." Status line need not be the last line of
+    # output (labctl may emit benign trailers after it).
     if printf '%s\n' "$out" | grep -qE 'matched\]\s*$'; then
         return 0
     fi
     return 1
 }
 
+# attempt_deploy — one full deploy cycle. Returns 0 on PASS, 1 on FAIL.
+#   $1 = attempt index (1-based, for logging)
+#   $2 = per-attempt log file
 attempt_deploy() {
     local n="$1"
     local log_file="$2"
