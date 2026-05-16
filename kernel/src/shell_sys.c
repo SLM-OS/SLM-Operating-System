@@ -1076,6 +1076,7 @@ static void bench_ipc_latency(void)
 #if defined(CONFIG_AI_SCHEDULER)
 #include "inference_device.h"
 #include "ai_types.h"
+#include "fp_context.h"
 
 static void bench_policy_one(const char *dev_name,
                              enum inference_dtype dtype,
@@ -1142,7 +1143,19 @@ static void bench_xgb_one(uint32_t iters)
         return;
     }
 
+    /* The Rust predictor uses FP/NEON; mirror the FP context
+     * handling that `sched_xgb.c::ai_xgb_assign_cpu` does so a
+     * timer IRQ that fires mid-loop can't observe an unsaved FP
+     * context. The shell-task dispatcher saves on entry, but a
+     * bench loop running for several seconds widens the window
+     * meaningfully. */
+    FP_CONTEXT_SAVE();
+
     float state[AI_STATE_DIM];
+    /* Reused across iterations — we're measuring per-decision
+     * latency, not warming the trees. The state vector is
+     * deliberately constant so the bench reports steady-state
+     * throughput without input-distribution noise. */
     int32_t core = 0, prio = 0, preempt = 0;
     for (size_t i = 0; i < AI_STATE_DIM; i++) state[i] = 0.0f;
 
@@ -1156,6 +1169,8 @@ static void bench_xgb_one(uint32_t iters)
     uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
     uint64_t per_ns = ok > 0 ? total_ns / ok : 0;
     uint64_t per_sec = per_ns > 0 ? 1000000000ULL / per_ns : 0;
+
+    FP_CONTEXT_RESTORE();
 
     shell_printf("  %-10s  %u/%u ok   %lu ns/decision   %lu decisions/sec\r\n",
                  "ai_xgb", ok, iters,
