@@ -1,5 +1,6 @@
 #include "runtime_model.h"
 
+#include "slm_ffi.h"
 #include "spinlock.h"
 #include "string.h"
 
@@ -551,6 +552,13 @@ static int sched_store_role_busy(const struct sched_model_store *store, uint8_t 
 
 int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len)
 {
+    /* XGBoost storage lives Rust-side (cascade is ~9 MB — too large
+     * for the static dense pool). Forward to the FFI and return; the
+     * outer header is parsed Rust-side too, so no work happens here. */
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        return rust_sched_xgb_stage_blob(data, len);
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t stage_flags;
     irq_flags_t flags;
@@ -598,6 +606,10 @@ int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len)
 
 int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len)
 {
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        return rust_sched_xgb_validate_blob(data, len);
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t stage_flags;
 
@@ -619,6 +631,10 @@ int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len)
 
 int sched_model_activate(uint16_t kind_id)
 {
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        return rust_sched_xgb_activate();
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
@@ -657,6 +673,10 @@ int sched_model_activate(uint16_t kind_id)
 
 int sched_model_rollback(uint16_t kind_id)
 {
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        return rust_sched_xgb_rollback();
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
@@ -696,6 +716,10 @@ int sched_model_rollback(uint16_t kind_id)
 
 int sched_model_clear(uint16_t kind_id)
 {
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        return rust_sched_xgb_clear();
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
@@ -727,6 +751,11 @@ int sched_model_clear(uint16_t kind_id)
 
 int sched_model_status(uint16_t kind_id, struct sched_model_status *out)
 {
+    if (kind_id == SCHED_MODEL_KIND_XGBOOST) {
+        if (!out) return -1;
+        return rust_sched_xgb_status(out);
+    }
+
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;

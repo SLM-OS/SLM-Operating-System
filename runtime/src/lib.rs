@@ -763,6 +763,61 @@ pub extern "C" fn rust_run_tests() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // XGBoost cascade scheduler (#855): build a synthetic 3-classifier
+    // cascade in memory, stage + activate via the FFI surface the C
+    // policy uses, predict against a zero state, and assert the raw
+    // labels produced. No trained-model fixtures required — those
+    // ship via `slm.sched_model_stage("xgboost", path)` from FAT.
+    {
+        sched::xgb::clear();
+        let blob = sched::xgb::build_smoke_blob();
+        let staged_ok =
+            sched::xgb::rust_sched_xgb_stage_blob(blob.as_ptr(), blob.len()) == 0;
+        print_test_result(b"sched_xgb_stage_synthetic\0", staged_ok);
+        if !staged_ok { failures += 1; }
+
+        let active_ok = sched::xgb::rust_sched_xgb_activate() == 0;
+        print_test_result(b"sched_xgb_activate\0", active_ok);
+        if !active_ok { failures += 1; }
+
+        let is_active = sched::xgb::rust_sched_xgb_is_active() == 1;
+        print_test_result(b"sched_xgb_is_active_after_activate\0", is_active);
+        if !is_active { failures += 1; }
+
+        let state = [0.0_f32; 108];
+        let mut core: i32 = -1;
+        let mut prio: i32 = -1;
+        let mut preempt: i32 = -1;
+        let predicted = sched::xgb::rust_sched_xgb_predict(
+            state.as_ptr(),
+            &mut core as *mut i32,
+            &mut prio as *mut i32,
+            &mut preempt as *mut i32,
+        ) == 0;
+        print_test_result(b"sched_xgb_predict\0", predicted);
+        if !predicted { failures += 1; }
+
+        // The synthetic cascade emits raw labels (3, 1, 1).
+        let labels_match = predicted && core == 3 && prio == 1 && preempt == 1;
+        print_test_result(b"sched_xgb_labels_match_synthetic\0", labels_match);
+        if !labels_match { failures += 1; }
+
+        // Bad checksum must be rejected by stage and leave the active
+        // cascade untouched.
+        sched::xgb::clear();
+        let mut blob_corrupt = sched::xgb::build_smoke_blob();
+        let last = blob_corrupt.len() - 1;
+        blob_corrupt[last] ^= 0xFF;
+        let rejected = sched::xgb::rust_sched_xgb_stage_blob(
+            blob_corrupt.as_ptr(),
+            blob_corrupt.len(),
+        ) != 0;
+        print_test_result(b"sched_xgb_rejects_bad_checksum\0", rejected);
+        if !rejected { failures += 1; }
+
+        sched::xgb::clear();
+    }
+
     // Summary
     unsafe {
         if failures == 0 {

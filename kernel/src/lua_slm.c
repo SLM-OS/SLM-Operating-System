@@ -2407,6 +2407,7 @@ static int sched_model_kind_id(const char *kind)
     if (strcmp(kind, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
     if (strcmp(kind, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
     if (strcmp(kind, "rebalance") == 0) return SCHED_MODEL_KIND_REBALANCE;
+    if (strcmp(kind, "xgboost") == 0) return SCHED_MODEL_KIND_XGBOOST;
     return 0;
 }
 
