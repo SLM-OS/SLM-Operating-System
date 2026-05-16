@@ -196,6 +196,10 @@ int test_harness_run_all(void)
     total_failures += test_suite_slm_load();
     total_failures += test_suite_slm_shell();
     total_failures += test_suite_slm_runner();
+    /* Dynamic-batching shell verbs (#55 / PR #917): `infer batch ...`
+     * + `bench infer-stress` argument validation. Rust side is
+     * covered by rust_batch_inference_test. */
+    total_failures += test_suite_infer_shell();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
