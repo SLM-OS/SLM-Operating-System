@@ -866,6 +866,18 @@ mod tests {
     }
 
     #[test]
+    fn activate_without_staged_returns_not_present() {
+        reset_store();
+        assert!(matches!(activate(), Err(XgbStageError::NotPresent)));
+    }
+
+    #[test]
+    fn rollback_without_prior_returns_not_present() {
+        reset_store();
+        assert!(matches!(rollback(), Err(XgbStageError::NotPresent)));
+    }
+
+    #[test]
     fn derived_features_match_python_reference() {
         // Construct a state where every derived feature has a
         // hand-computable answer and assert each one.
