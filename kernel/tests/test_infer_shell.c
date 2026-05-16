@@ -73,12 +73,13 @@ static void test_infer_shell_batch_unknown_subcommand(void)
 
 /*
  * `infer batch on` and `infer batch off` round-trip through
- * `rust_infer_batch_get_mode`. Restore to OFF at the end so we
- * don't leak state into other tests.
+ * `rust_infer_batch_get_mode`. Capture the entry-time mode and
+ * restore it at the end so the test doesn't leak state.
  */
 static void test_infer_shell_batch_on_off_round_trip(void)
 {
-    /* Force a known starting state. */
+    int32_t pre_mode = rust_infer_batch_get_mode();
+
     rust_infer_batch_set_mode(0);
     TEST_ASSERT_EQUAL_INT32(0, rust_infer_batch_get_mode());
 
@@ -89,6 +90,8 @@ static void test_infer_shell_batch_on_off_round_trip(void)
     ret = shell_execute("infer batch off");
     TEST_ASSERT_EQUAL_INT(0, ret);
     TEST_ASSERT_EQUAL_INT32(0, rust_infer_batch_get_mode());
+
+    rust_infer_batch_set_mode(pre_mode);
 }
 
 /*
@@ -143,11 +146,15 @@ static void test_infer_shell_batch_config_out_of_range(void)
 }
 
 /*
- * `infer batch config 4 1234` is in range → applied. Restore to
- * defaults at the end.
+ * `infer batch config 4 1234` is in range → applied. Capture the
+ * entry-time config and restore it at the end so the test doesn't
+ * leak state.
  */
 static void test_infer_shell_batch_config_in_range_applies(void)
 {
+    RustBatchStatus pre;
+    rust_infer_batch_status(&pre);
+
     int ret = shell_execute("infer batch config 4 1234");
     TEST_ASSERT_EQUAL_INT(0, ret);
 
@@ -156,9 +163,7 @@ static void test_infer_shell_batch_config_in_range_applies(void)
     TEST_ASSERT_EQUAL_UINT32(4u, s.batch_size);
     TEST_ASSERT_EQUAL_UINT32(1234u, s.timeout_us);
 
-    /* Restore defaults (matches `DEFAULT_BATCH_SIZE` / default
-     * `BATCH_TIMEOUT_US` in runtime/src/sched/inference.rs). */
-    rust_infer_batch_set_config(8, 5000);
+    rust_infer_batch_set_config(pre.batch_size, pre.timeout_us);
 }
 
 /*

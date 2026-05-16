@@ -1388,14 +1388,15 @@ static void test_slm_infer_batch_status_shape(void)
 
 /*
  * Test: slm.infer_batch_mode round-trips through the dispatcher.
- * Admin-only surface. Restores OFF at the end.
+ * Admin-only surface. Captures the entry-time mode and restores it
+ * at the end so the test doesn't leak state.
  */
 static void test_slm_infer_batch_mode_round_trip(void)
 {
     lua_State *L = test_lua_open_admin();
     TEST_ASSERT_NOT_NULL(L);
 
-    /* Force a known starting state. */
+    int32_t pre_mode = rust_infer_batch_get_mode();
     rust_infer_batch_set_mode(0);
 
     const char *code =
@@ -1409,6 +1410,7 @@ static void test_slm_infer_batch_mode_round_trip(void)
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
     test_lua_close(L);
+    rust_infer_batch_set_mode(pre_mode);
 }
 
 /*
@@ -1429,12 +1431,16 @@ static void test_slm_infer_batch_mode_bad_arg(void)
 /*
  * Test: slm.infer_batch_config applies in-range values, returns the
  * applied table, and rejects out-of-range values via luaL_error
- * (pins the S7 fix from PR #917 review). Restores defaults at end.
+ * (pins the S7 fix from PR #917 review). Captures the entry-time
+ * config and restores it at the end so the test doesn't leak state.
  */
 static void test_slm_infer_batch_config(void)
 {
     lua_State *L = test_lua_open_admin();
     TEST_ASSERT_NOT_NULL(L);
+
+    RustBatchStatus pre;
+    rust_infer_batch_status(&pre);
 
     const char *code =
         "local r = slm.infer_batch_config({size=4, timeout_us=1234})\n"
@@ -1451,8 +1457,7 @@ static void test_slm_infer_batch_config(void)
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
     test_lua_close(L);
-    /* Restore defaults. */
-    rust_infer_batch_set_config(8, 5000);
+    rust_infer_batch_set_config(pre.batch_size, pre.timeout_us);
 }
 
 /*
