@@ -2095,6 +2095,7 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/ai_weights_ppo.c
         kernel/sched/ai/ai_test_helpers.c
         kernel/sched/ai/workloads.c
+        kernel/sched/ai/sched_trace_ai.c
         $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/ai/fp_context.S>
         $<$<STREQUAL:${PLATFORM},X86_64>:kernel/sched/ai/fp_context.S>
     )

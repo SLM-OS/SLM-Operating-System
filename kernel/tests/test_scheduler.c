@@ -5009,6 +5009,116 @@ static void test_bench_workload_run_heuristic_mixed(void)
 }
 #endif /* ENABLE_BOOT_TESTS */
 
+/* ============================================================================
+ * AI-decision trace tests (#880, sub-ticket of #61)
+ *
+ * Pin the wire-format constants the sibling-repo ingester depends on,
+ * and round-trip start→record→dump→parse so future layout changes
+ * surface here before the ingester silently mis-parses.
+ * ============================================================================ */
+
+#include "sched_trace_ai.h"
+#include "string.h"
+
+static void test_aitrace_format_constants(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0x53544C53u, SCHED_TRACE_AI_MAGIC);
+    TEST_ASSERT_EQUAL_UINT32(1u, SCHED_TRACE_AI_VERSION);
+    TEST_ASSERT_EQUAL_UINT32(480u, SCHED_TRACE_AI_RECORD_SIZE);
+    TEST_ASSERT_EQUAL_UINT32(108u, SCHED_TRACE_AI_STATE_DIM);
+    /* Compile-time _Static_assert in the header already enforces
+     * sizeof(record) == 480 and sizeof(header) == 32. The runtime
+     * checks below are belt-and-suspenders against a struct-layout
+     * regression that somehow slips through. */
+    TEST_ASSERT_EQUAL_INT(480, (int)sizeof(struct sched_trace_ai_record));
+    TEST_ASSERT_EQUAL_INT(32, (int)sizeof(struct sched_trace_ai_file_header));
+}
+
+static void test_aitrace_start_stop_idempotent(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, sched_trace_ai_init());
+    TEST_ASSERT_EQUAL_INT(0, sched_trace_ai_init());
+
+    sched_trace_ai_stop();
+    TEST_ASSERT_FALSE(sched_trace_ai_is_enabled());
+
+    sched_trace_ai_start();
+    TEST_ASSERT_TRUE(sched_trace_ai_is_enabled());
+
+    sched_trace_ai_stop();
+    TEST_ASSERT_FALSE(sched_trace_ai_is_enabled());
+
+    /* Re-start clears prior records. */
+    sched_trace_ai_start();
+    TEST_ASSERT_EQUAL_UINT64(0u, (uint64_t)sched_trace_ai_total_events());
+    sched_trace_ai_stop();
+}
+
+static void test_aitrace_disabled_record_is_noop(void)
+{
+    sched_trace_ai_init();
+    sched_trace_ai_stop();
+    sched_trace_ai_clear();
+    TEST_ASSERT_EQUAL_UINT64(0u, (uint64_t)sched_trace_ai_total_events());
+
+    sched_trace_ai_record_decision(NULL, "test", 0);
+    sched_trace_ai_record_completion(NULL);
+    TEST_ASSERT_EQUAL_UINT64(0u, (uint64_t)sched_trace_ai_total_events());
+}
+
+static void test_aitrace_dump_roundtrip(void)
+{
+    sched_trace_ai_init();
+    sched_trace_ai_clear();
+    sched_trace_ai_start();
+
+    struct task *self = task_current();
+    TEST_ASSERT_NOT_NULL(self);
+    for (int i = 0; i < 3; i++) {
+        sched_trace_ai_record_decision(self, "heuristic", (uint32_t)i);
+    }
+    sched_trace_ai_stop();
+
+    TEST_ASSERT_TRUE(sched_trace_ai_total_events() >= 3);
+    TEST_ASSERT_TRUE(sched_trace_ai_records_used() >= 3);
+
+    size_t needed = sched_trace_ai_dump_size();
+    TEST_ASSERT_TRUE(needed >= sizeof(struct sched_trace_ai_file_header)
+                              + 3u * SCHED_TRACE_AI_RECORD_SIZE);
+
+    static uint8_t dump_buf[16 * 1024];
+    TEST_ASSERT_TRUE(needed <= sizeof(dump_buf));
+    size_t written = sched_trace_ai_dump_to_buf(dump_buf, sizeof(dump_buf));
+    TEST_ASSERT_EQUAL_INT((int)needed, (int)written);
+
+    struct sched_trace_ai_file_header hdr;
+    memcpy(&hdr, dump_buf, sizeof(hdr));
+    TEST_ASSERT_EQUAL_UINT32(SCHED_TRACE_AI_MAGIC, hdr.magic);
+    TEST_ASSERT_EQUAL_UINT32(SCHED_TRACE_AI_VERSION, hdr.version);
+    TEST_ASSERT_EQUAL_UINT32(SCHED_TRACE_AI_RECORD_SIZE, hdr.record_size);
+    TEST_ASSERT_TRUE(hdr.record_count >= 3u);
+    TEST_ASSERT_EQUAL_UINT32(SCHED_TRACE_AI_STATE_DIM, hdr.state_dim);
+
+    /* First DECISION record after the header — kind + policy_name. */
+    struct sched_trace_ai_record r0;
+    memcpy(&r0, dump_buf + sizeof(hdr), sizeof(r0));
+    TEST_ASSERT_EQUAL_UINT8(SCHED_TRACE_AI_KIND_DECISION, r0.kind);
+    TEST_ASSERT_EQUAL_STRING("heuristic", r0.u.decision.policy_name);
+}
+
+static void test_aitrace_dump_short_buffer_rejected(void)
+{
+    sched_trace_ai_init();
+    sched_trace_ai_clear();
+    sched_trace_ai_start();
+    struct task *self = task_current();
+    sched_trace_ai_record_decision(self, "heuristic", 0);
+    sched_trace_ai_stop();
+
+    uint8_t tiny[16];
+    size_t n = sched_trace_ai_dump_to_buf(tiny, sizeof(tiny));
+    TEST_ASSERT_EQUAL_INT(0, (int)n);
+}
 #endif /* CONFIG_AI_SCHEDULER */
 
 /* ============================================================================
@@ -5287,6 +5397,13 @@ int test_suite_scheduler(void)
 #if defined(ENABLE_BOOT_TESTS)
     RUN_TEST(test_bench_workload_run_heuristic_mixed);
 #endif
+
+    /* #880 — AI-decision trace ring (kernel/sched/ai/sched_trace_ai.c). */
+    RUN_TEST(test_aitrace_format_constants);
+    RUN_TEST(test_aitrace_start_stop_idempotent);
+    RUN_TEST(test_aitrace_disabled_record_is_noop);
+    RUN_TEST(test_aitrace_dump_roundtrip);
+    RUN_TEST(test_aitrace_dump_short_buffer_rejected);
 #endif
 
     return UnityEnd();

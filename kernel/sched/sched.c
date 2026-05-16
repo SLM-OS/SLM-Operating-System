@@ -11,6 +11,9 @@
 #include "sched.h"
 #include "sched_policy.h"
 #include "sched_trace.h"
+#ifdef CONFIG_AI_SCHEDULER
+#include "sched_trace_ai.h"
+#endif
 #include "task.h"
 #include "uart.h"
 #include "debug.h"
@@ -1231,6 +1234,16 @@ void scheduler_add_task(struct task *task)
         target_cpu = task->cpu_affinity;
     } else {
         target_cpu = active_policy->assign_cpu(task);
+
+#ifdef CONFIG_AI_SCHEDULER
+        /* Record the policy's decision before the S5 override below
+         * potentially modifies it — the trace is meant for training
+         * the policy that just made the choice, not the
+         * post-override target. The S5 outcome is recoverable from
+         * later events anyway (the next decision's state vector
+         * reflects the override). */
+        sched_trace_ai_record_decision(task, active_policy->name, target_cpu);
+#endif
 
         /* S5 proactive load-balance override. Only for unpinned tasks,
          * never to isolated CPUs, never when the target is lightly

@@ -7784,8 +7784,23 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
+#if defined(CONFIG_AI_SCHEDULER)
+    if (strcmp(argv[1], "aitrace") == 0) {
+        /* AI-decision trace control (#880). Distinct from `sched trace`,
+         * which captures 16-byte cross-CPU dispatch events (#195). The
+         * AI trace records full 108-dim state vectors + chosen actions
+         * for sibling-repo fine-tuning. */
+        extern int sched_aitrace_cli(int argc, char *argv[]);
+        return sched_aitrace_cli(argc, argv);
+    }
+#endif
+
     shell_puts("Usage: sched [policy [<name>] | stats | compare | "
-              "trace [start|stop|clear|per-cpu]]\r\n");
+              "trace [start|stop|clear|per-cpu]"
+#if defined(CONFIG_AI_SCHEDULER)
+              " | aitrace [start|stop|stats|clear|dump <path>]"
+#endif
+              "]\r\n");
     return 1;
 }
 

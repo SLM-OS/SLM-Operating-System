@@ -16,6 +16,9 @@
 #include "vmm.h"
 #include "elf.h"
 #endif
+#ifdef CONFIG_AI_SCHEDULER
+#include "sched_trace_ai.h"
+#endif
 #include <stddef.h>
 
 /* Task table - NC on Pi 5, BSS fallback otherwise */
@@ -705,6 +708,10 @@ void task_exit(void)
         extern void sched_ai_record_completion(struct task *task);
         sched_ai_record_completion(task);
     }
+    /* Decision-trace completion record (#880, separate from the
+     * sched_ai utilization counter above). No-op when the AI trace
+     * is not active. */
+    sched_trace_ai_record_completion(task);
 #endif
 
     /* Atomically set TASK_TERMINATED and dequeue under rq_lock.

@@ -1257,6 +1257,76 @@ static int l_sched_stats(lua_State *L) {
     return 1;
 }
 
+#if defined(CONFIG_AI_SCHEDULER)
+/* AI decision-trace Lua bindings (#880, sub-ticket of #61). C
+ * implementations live in kernel/sched/ai/sched_trace_ai.c. */
+#include "sched_trace_ai.h"
+
+/**
+ * slm.sched_aitrace_start() - Begin capturing AI scheduler decisions
+ * Returns nothing
+ */
+static int l_sched_aitrace_start(lua_State *L) {
+    (void)L;
+    sched_trace_ai_start();
+    return 0;
+}
+
+/**
+ * slm.sched_aitrace_stop() - Stop capturing
+ */
+static int l_sched_aitrace_stop(lua_State *L) {
+    (void)L;
+    sched_trace_ai_stop();
+    return 0;
+}
+
+/**
+ * slm.sched_aitrace_clear() - Drop all recorded events
+ */
+static int l_sched_aitrace_clear(lua_State *L) {
+    (void)L;
+    sched_trace_ai_clear();
+    return 0;
+}
+
+/**
+ * slm.sched_aitrace_dump(path) - Write the trace to a VFS path
+ * Returns bytes written on success, nil on failure.
+ */
+static int l_sched_aitrace_dump(lua_State *L) {
+    if (!L) return 0;
+    const char *path = luaL_checkstring(L, 1);
+    size_t n = sched_trace_ai_dump_to_path(path);
+    if (n == 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, (lua_Integer)n);
+    }
+    return 1;
+}
+
+/**
+ * slm.sched_aitrace_stats() - Return capture stats
+ * Returns table: {enabled, used, total, dropped, dump_size}
+ */
+static int l_sched_aitrace_stats(lua_State *L) {
+    if (!L) return 0;
+    lua_createtable(L, 0, 5);
+    lua_pushboolean(L, sched_trace_ai_is_enabled());
+    lua_setfield(L, -2, "enabled");
+    lua_pushinteger(L, (lua_Integer)sched_trace_ai_records_used());
+    lua_setfield(L, -2, "used");
+    lua_pushinteger(L, (lua_Integer)sched_trace_ai_total_events());
+    lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)sched_trace_ai_dropped());
+    lua_setfield(L, -2, "dropped");
+    lua_pushinteger(L, (lua_Integer)sched_trace_ai_dump_size());
+    lua_setfield(L, -2, "dump_size");
+    return 1;
+}
+#endif /* CONFIG_AI_SCHEDULER */
+
 /**
  * slm.sched_set_policy(name) - Switch scheduler policy by name
  * Returns true on success, false on failure (unknown policy name)
@@ -4529,6 +4599,11 @@ static const luaL_Reg slm_lib_safe[] = {
     {"sched_policy_list", l_sched_policy_list},
     {"ai_sched_stats", l_ai_sched_stats},
     {"ai_sched_decision", l_ai_sched_decision},
+#if defined(CONFIG_AI_SCHEDULER)
+    /* AI decision-trace ring (#880, sub-ticket of #61). Mutators in
+     * admin lib below; this entry exposes the read-only stats getter. */
+    {"sched_aitrace_stats", l_sched_aitrace_stats},
+#endif
     /* Admin & telemetry suite (M1) */
     {"sched_decision_rate", l_sched_decision_rate},
     {"latency_histogram", l_latency_histogram},
@@ -4606,6 +4681,15 @@ static const luaL_Reg slm_lib_admin[] = {
     {"infer_stress", l_infer_stress},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
+#if defined(CONFIG_AI_SCHEDULER)
+    /* AI decision-trace control (#880, sub-ticket of #61). Mutators
+     * live in the admin lib because start/stop/clear alter recording
+     * state. The stats getter is in the read-only lib above. */
+    {"sched_aitrace_start", l_sched_aitrace_start},
+    {"sched_aitrace_stop", l_sched_aitrace_stop},
+    {"sched_aitrace_clear", l_sched_aitrace_clear},
+    {"sched_aitrace_dump", l_sched_aitrace_dump},
+#endif
     {"task_migrate", l_task_migrate},
     {"task_create", l_task_create},
     {"task_kill", l_task_kill},
