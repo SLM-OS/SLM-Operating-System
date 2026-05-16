@@ -75,7 +75,9 @@ struct __attribute__((packed)) sched_trace_ai_record {
         } decision;
 
         struct __attribute__((packed)) {
-            uint64_t dispatch_ns;       /* offset 16, original DECISION timestamp_ns */
+            uint64_t dispatch_ns;       /* offset 16, original DECISION timestamp_ns; always 0 in v1
+                                         * (kernel doesn't yet track per-task dispatch separately
+                                         * — sibling-repo ingester correlates via task_id). */
             uint64_t completion_ns;     /* offset 24, when task_exit fired */
             uint64_t deadline_ns;       /* offset 32, copy of task->deadline_ns (0 = none) */
             uint32_t latency_to_complete_us; /* offset 40, completion_ns - dispatch_ns */

@@ -28,8 +28,13 @@
 #include "smp.h"
 #include "cache.h"
 #include "pmm.h"
+#include "spinlock.h"   /* irq_save / irq_restore */
 #include "string.h"
 #include "config.h"
+#include "vfs.h"
+#include "littlefs_slm.h"
+#include "shell.h"
+#include "shell_internal.h"
 
 extern uint64_t slm_get_time_ns(void);
 
@@ -201,8 +206,18 @@ void sched_trace_ai_record_decision(struct task *task,
     if (!__atomic_load_n(&tracer_enabled, __ATOMIC_ACQUIRE)) return;
     if (!tracer_percpu) return;
 
+    /* IRQ-disable for the per-CPU critical section. Cheap (single
+     * DAIF write on ARM64; STI/CLI pair on x86) and clearly correct:
+     * keeps a timer IRQ that re-enters the scheduler path from
+     * overwriting the slot we just claimed before `total_written++`
+     * commits. The hook itself doesn't yield. */
+    irq_flags_t irq_flags = irq_save();
+
     uint32_t cpu = cpu_id();
-    if (cpu >= MAX_CPUS) return;  /* defensive */
+    if (cpu >= MAX_CPUS) {  /* defensive */
+        irq_restore(irq_flags);
+        return;
+    }
 
     struct sched_trace_ai_percpu *pc = &tracer_percpu[cpu];
     uint32_t slot = (uint32_t)(pc->total_written % PERCPU_ENTRIES);
@@ -237,10 +252,20 @@ void sched_trace_ai_record_decision(struct task *task,
      * sees it without depending on an L2 coherency event. */
     cache_clean_range(r, sizeof(*r));
 
+    /* total_written and head are co-located on the first cacheline
+     * (head + total_written + padding span offset 0..63; the ring
+     * starts at offset 64). A single cache_clean_range here pushes
+     * both counters atomically — cross-CPU readers in the dump path
+     * see a consistent (head, total_written) pair. If the
+     * `_hdrpad` shrinks below 48 bytes a future maintainer must
+     * re-verify this invariant; the _Static_assert at offsetof(ring)
+     * == 64 above guards against that. */
     pc->total_written++;
     pc->head = (slot + 1u) % PERCPU_ENTRIES;
     cache_clean_range(pc,
                       offsetof(struct sched_trace_ai_percpu, ring));
+
+    irq_restore(irq_flags);
 }
 
 void sched_trace_ai_record_completion(struct task *task)
@@ -248,8 +273,13 @@ void sched_trace_ai_record_completion(struct task *task)
     if (!__atomic_load_n(&tracer_enabled, __ATOMIC_ACQUIRE)) return;
     if (!tracer_percpu || !task) return;
 
+    irq_flags_t irq_flags = irq_save();
+
     uint32_t cpu = cpu_id();
-    if (cpu >= MAX_CPUS) return;
+    if (cpu >= MAX_CPUS) {
+        irq_restore(irq_flags);
+        return;
+    }
 
     struct sched_trace_ai_percpu *pc = &tracer_percpu[cpu];
     uint32_t slot = (uint32_t)(pc->total_written % PERCPU_ENTRIES);
@@ -283,6 +313,8 @@ void sched_trace_ai_record_completion(struct task *task)
     pc->head = (slot + 1u) % PERCPU_ENTRIES;
     cache_clean_range(pc,
                       offsetof(struct sched_trace_ai_percpu, ring));
+
+    irq_restore(irq_flags);
 }
 
 /* ---- Dump ---- */
@@ -294,13 +326,53 @@ size_t sched_trace_ai_dump_size(void)
            (size_t)used * SCHED_TRACE_AI_RECORD_SIZE;
 }
 
+/* Snapshot each CPU's (total_written, head) tuple into a local
+ * array. Used by the dump path so the file header and the records
+ * emitted derive from the same observation point — without the
+ * snapshot, a hot-path write that lands between header computation
+ * and the record-iteration loop produces a file whose
+ * `record_count` disagrees with the byte stream. */
+struct trace_snapshot {
+    uint64_t total;
+    uint32_t head;
+    uint32_t count;
+    uint32_t start;
+};
+
+static void take_snapshot(struct trace_snapshot snap[MAX_CPUS],
+                          uint32_t *used_out,
+                          uint64_t *total_out,
+                          uint64_t *dropped_out)
+{
+    uint32_t used = 0;
+    uint64_t total = 0;
+    uint64_t dropped = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        cache_invalidate_range(&tracer_percpu[i],
+                               offsetof(struct sched_trace_ai_percpu, ring));
+        uint64_t w = tracer_percpu[i].total_written;
+        snap[i].total = w;
+        snap[i].head = tracer_percpu[i].head;
+        snap[i].count = (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
+        snap[i].start = (w > PERCPU_ENTRIES) ? snap[i].head : 0u;
+        used += snap[i].count;
+        total += w;
+        if (w > PERCPU_ENTRIES) dropped += (w - PERCPU_ENTRIES);
+    }
+    *used_out = used;
+    *total_out = total;
+    *dropped_out = dropped;
+}
+
 size_t sched_trace_ai_dump_stream(sched_trace_ai_dump_cb cb, void *ctx)
 {
     if (!cb || !tracer_initialized || !tracer_percpu) return 0;
 
-    uint32_t used = sched_trace_ai_records_used();
-    uint64_t total = sched_trace_ai_total_events();
-    uint64_t dropped = sched_trace_ai_dropped();
+    struct trace_snapshot snap[MAX_CPUS];
+    uint32_t used;
+    uint64_t total;
+    uint64_t dropped;
+    take_snapshot(snap, &used, &total, &dropped);
 
     struct sched_trace_ai_file_header hdr = {
         .magic = SCHED_TRACE_AI_MAGIC,
@@ -315,13 +387,13 @@ size_t sched_trace_ai_dump_stream(sched_trace_ai_dump_cb cb, void *ctx)
     size_t emitted = sizeof(hdr);
 
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i], sizeof(tracer_percpu[i]));
-        uint64_t w = tracer_percpu[i].total_written;
-        uint32_t count = (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
-        if (count == 0) continue;
-        uint32_t start = (w > PERCPU_ENTRIES) ? tracer_percpu[i].head : 0u;
-        for (uint32_t k = 0; k < count; k++) {
-            uint32_t idx = (start + k) % PERCPU_ENTRIES;
+        if (snap[i].count == 0) continue;
+        /* Re-invalidate the ring portion only; the header was
+         * already invalidated by take_snapshot. */
+        cache_invalidate_range(tracer_percpu[i].ring,
+                               sizeof(tracer_percpu[i].ring));
+        for (uint32_t k = 0; k < snap[i].count; k++) {
+            uint32_t idx = (snap[i].start + k) % PERCPU_ENTRIES;
             if (cb(ctx, &tracer_percpu[i].ring[idx],
                    SCHED_TRACE_AI_RECORD_SIZE) < 0) {
                 return 0;
@@ -335,12 +407,21 @@ size_t sched_trace_ai_dump_stream(sched_trace_ai_dump_cb cb, void *ctx)
 size_t sched_trace_ai_dump_to_buf(uint8_t *buf, size_t buflen)
 {
     if (!buf || !tracer_initialized || !tracer_percpu) return 0;
-    size_t need = sched_trace_ai_dump_size();
-    if (buflen < need) return 0;
 
-    uint32_t used = sched_trace_ai_records_used();
-    uint64_t total = sched_trace_ai_total_events();
-    uint64_t dropped = sched_trace_ai_dropped();
+    /* Snapshot first so the header's record_count and the iterated
+     * bytes derive from the same observation. Without this, a
+     * tight `buflen == dump_size()` caller would overflow when a
+     * concurrent hot-path write advances total_written between the
+     * size check and the loop. */
+    struct trace_snapshot snap[MAX_CPUS];
+    uint32_t used;
+    uint64_t total;
+    uint64_t dropped;
+    take_snapshot(snap, &used, &total, &dropped);
+
+    size_t need = sizeof(struct sched_trace_ai_file_header) +
+                  (size_t)used * SCHED_TRACE_AI_RECORD_SIZE;
+    if (buflen < need) return 0;
 
     struct sched_trace_ai_file_header hdr = {
         .magic = SCHED_TRACE_AI_MAGIC,
@@ -353,22 +434,17 @@ size_t sched_trace_ai_dump_to_buf(uint8_t *buf, size_t buflen)
     };
     memcpy(buf, &hdr, sizeof(hdr));
 
-    /* Walk each per-CPU ring in oldest→newest order and copy out.
-     * Records from different CPUs are interleaved by insertion
-     * order within each CPU; the ingester merge-sorts by
-     * timestamp_ns if a strict global order is needed. */
+    /* Walk each per-CPU ring in oldest→newest order using snapshot
+     * counts. Records from different CPUs are interleaved by
+     * insertion order within each CPU; the sibling-repo ingester
+     * merge-sorts by timestamp_ns if a strict global order is needed. */
     uint8_t *out = buf + sizeof(hdr);
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i], sizeof(tracer_percpu[i]));
-        uint64_t w = tracer_percpu[i].total_written;
-        uint32_t count = (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
-        if (count == 0) continue;
-        /* If we wrapped, oldest is at head; otherwise oldest is at 0. */
-        uint32_t start = (w > PERCPU_ENTRIES)
-            ? tracer_percpu[i].head
-            : 0u;
-        for (uint32_t k = 0; k < count; k++) {
-            uint32_t idx = (start + k) % PERCPU_ENTRIES;
+        if (snap[i].count == 0) continue;
+        cache_invalidate_range(tracer_percpu[i].ring,
+                               sizeof(tracer_percpu[i].ring));
+        for (uint32_t k = 0; k < snap[i].count; k++) {
+            uint32_t idx = (snap[i].start + k) % PERCPU_ENTRIES;
             memcpy(out, &tracer_percpu[i].ring[idx],
                    SCHED_TRACE_AI_RECORD_SIZE);
             out += SCHED_TRACE_AI_RECORD_SIZE;
@@ -382,12 +458,8 @@ size_t sched_trace_ai_dump_to_buf(uint8_t *buf, size_t buflen)
  * Lives here (vs in shell_sys.c) so the file-write dependency on
  * LittleFS / VFS is co-located with the trace API rather than
  * scattered across the shell. Called from shell_sys.c via extern.
- */
-
-#include "vfs.h"
-#include "littlefs_slm.h"
-#include "shell.h"
-#include "shell_internal.h"
+ * (VFS / LittleFS / shell headers are pulled in at the top of this
+ * translation unit.) */
 
 struct aitrace_dump_ctx {
     struct lfs_mount *mnt;
