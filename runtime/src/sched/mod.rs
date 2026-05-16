@@ -28,6 +28,11 @@ pub use deadline::{
 pub use inference::{
     InferenceScheduler, InferenceRequest, InferenceResult,
     InferenceConfig, RequestState, SchedulerError, SchedulerStats,
+    submit_inference_sync, batching_enabled, set_batching_enabled,
+    batch_size, set_batch_size, batch_timeout_us, set_batch_timeout_us,
+    stats as scheduler_stats, reset_stats as reset_scheduler_stats,
+    queue_depth as scheduler_queue_depth,
+    MAX_BATCH, MAX_INPUT_DIM, MAX_OUTPUT_DIM,
 };
 
 // Re-export heterogeneous scheduling types

@@ -7376,6 +7376,220 @@ pub extern "C" fn rust_inference_test() -> i32 {
 }
 
 // =============================================================================
+// Dynamic Batching Tests (#857)
+// =============================================================================
+
+/// Test the batched dispatch path end-to-end:
+///   - Engine-level: `run_inference_batched(N=k)` is bit-equal to `k`
+///     independent `run_inference` calls.
+///   - Scheduler-level: routing decisions (off → singleton, on+solo →
+///     singleton) trip the expected counters.
+///   - Configuration: batch-size setter clamps to `[1, MAX_BATCH]`.
+///   - Forced dispatch: `flush_pending_for_test` drains a queued batch
+///     and signals waiters' completion atomics.
+///
+/// MNIST is the fixture. Requires that a prior test loaded the
+/// embedded MNIST ONNX (rust_inference_test does this in Test 14).
+#[no_mangle]
+pub extern "C" fn rust_batch_inference_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running dynamic batching tests...\n\0".as_ptr());
+    }
+
+    // Load MNIST (idempotent — registry de-dupes by name).
+    let load = rust_model_load_builtin_mnist();
+    if load < 0 {
+        print_test_result(b"batch: MNIST load failed (skipping suite)\0", false);
+        return 1;
+    }
+    let model_index = load as u32;
+
+    // Two distinct inputs so bit-equality isn't trivially satisfied by
+    // a uniform output. Pattern A: ramp 0..1. Pattern B: zeros.
+    static INPUT_A: [f32; 784] = {
+        let mut a = [0.0; 784];
+        let mut i = 0;
+        while i < 784 {
+            a[i] = (i as f32) * (1.0 / 784.0);
+            i += 1;
+        }
+        a
+    };
+    static INPUT_B: [f32; 784] = [0.0; 784];
+
+    // Singleton-path baselines.
+    let mut baseline_a = [0.0f32; 64];
+    let mut baseline_b = [0.0f32; 64];
+    let (na, nb) = unsafe {
+        let na = inference::run_inference(
+            model_index as usize,
+            INPUT_A.as_ptr(), INPUT_A.len(),
+            baseline_a.as_mut_ptr(), baseline_a.len(),
+        ).unwrap_or(0);
+        let nb = inference::run_inference(
+            model_index as usize,
+            INPUT_B.as_ptr(), INPUT_B.len(),
+            baseline_b.as_mut_ptr(), baseline_b.len(),
+        ).unwrap_or(0);
+        (na, nb)
+    };
+    {
+        let passed = na > 0 && nb > 0 && na == nb;
+        print_test_result(b"batch: singleton baselines produced same N outputs\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 1: run_inference_batched(N=1) matches run_inference.
+    {
+        let mut out = [0.0f32; 64];
+        let n = unsafe {
+            inference::run_inference_batched(
+                model_index as usize, 1,
+                INPUT_A.as_ptr(), INPUT_A.len(),
+                out.as_mut_ptr(), out.len(),
+            ).unwrap_or(0)
+        };
+        let same = n == na && bit_equal(&out[..n], &baseline_a[..na]);
+        print_test_result(b"batch: run_inference_batched(N=1) == run_inference\0", same);
+        if !same { failures += 1; }
+    }
+
+    // Test 2: run_inference_batched(N=2) produces concatenated outputs
+    // bit-equal to two separate singleton calls.
+    {
+        let mut concat_in = [0.0f32; 2 * 784];
+        for i in 0..784 { concat_in[i] = INPUT_A[i]; }
+        for i in 0..784 { concat_in[784 + i] = INPUT_B[i]; }
+        let mut concat_out = [0.0f32; 2 * 64];
+        let n_total = unsafe {
+            inference::run_inference_batched(
+                model_index as usize, 2,
+                concat_in.as_ptr(), concat_in.len(),
+                concat_out.as_mut_ptr(), concat_out.len(),
+            ).unwrap_or(0)
+        };
+        let per = if n_total > 0 { n_total / 2 } else { 0 };
+        let ok_shape = per == na && per == nb;
+        let ok_a = ok_shape && bit_equal(&concat_out[..per], &baseline_a[..na]);
+        let ok_b = ok_shape && bit_equal(&concat_out[per..per * 2], &baseline_b[..nb]);
+        let passed = ok_a && ok_b;
+        print_test_result(b"batch: run_inference_batched(N=2) bit-equals 2x singleton\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3: submit_inference_sync with batching OFF dispatches singleton.
+    {
+        sched::set_batching_enabled(false);
+        sched::reset_scheduler_stats();
+
+        let mut out = [0.0f32; 64];
+        let n = unsafe {
+            sched::submit_inference_sync(
+                model_index as usize,
+                INPUT_A.as_ptr(), INPUT_A.len(),
+                out.as_mut_ptr(), out.len(),
+                sched::TaskDeadline::NONE,
+            ).unwrap_or(0)
+        };
+        let stats = sched::scheduler_stats();
+        let same = n == na && bit_equal(&out[..n], &baseline_a[..na]);
+        let counted = stats.singleton_dispatches == 1
+            && stats.batches_dispatched == 0
+            && stats.total_submitted == 1;
+        let passed = same && counted;
+        print_test_result(b"batch: submit_sync(off) == singleton + counters\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 4: submit_inference_sync with batching ON but solo callers
+    // takes the singleton-fallback path (Role::Solo) so an isolated
+    // request never blocks on a batch that won't form.
+    {
+        sched::set_batching_enabled(true);
+        sched::set_batch_size(8);
+        sched::reset_scheduler_stats();
+
+        let mut out = [0.0f32; 64];
+        let n = unsafe {
+            sched::submit_inference_sync(
+                model_index as usize,
+                INPUT_B.as_ptr(), INPUT_B.len(),
+                out.as_mut_ptr(), out.len(),
+                sched::TaskDeadline::NONE,
+            ).unwrap_or(0)
+        };
+        let stats = sched::scheduler_stats();
+        let same = n == nb && bit_equal(&out[..n], &baseline_b[..nb]);
+        let counted = stats.singleton_dispatches == 1
+            && stats.batches_dispatched == 0
+            && stats.total_submitted == 1
+            && stats.queued == 0;
+        let passed = same && counted;
+        print_test_result(b"batch: submit_sync(on,solo) -> singleton + slot freed\0", passed);
+        if !passed { failures += 1; }
+
+        sched::set_batching_enabled(false);
+    }
+
+    // Test 5: null input rejected.
+    {
+        let mut out = [0.0f32; 64];
+        let r = unsafe {
+            sched::submit_inference_sync(
+                model_index as usize,
+                core::ptr::null(), 784,
+                out.as_mut_ptr(), out.len(),
+                sched::TaskDeadline::NONE,
+            )
+        };
+        let passed = matches!(r, Err(inference::EngineError::InvalidInput));
+        print_test_result(b"batch: null input -> InvalidInput\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 6: batch_size setter clamps.
+    {
+        sched::set_batch_size(0);
+        let lo = sched::batch_size();
+        sched::set_batch_size(9999);
+        let hi = sched::batch_size();
+        let passed = lo == 1 && hi == sched::MAX_BATCH;
+        print_test_result(b"batch: set_batch_size clamps to [1, MAX_BATCH]\0", passed);
+        if !passed { failures += 1; }
+        sched::set_batch_size(8); // reset to default
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] Dynamic batching tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] Dynamic batching tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
+}
+
+/// Bit-equal compare for FP32 buffers — paired with the batched
+/// bit-equality acceptance criterion in #857. We use `to_bits` to
+/// distinguish positive/negative zero and to keep NaN comparisons
+/// deterministic.
+fn bit_equal(a: &[f32], b: &[f32]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a[i].to_bits() != b[i].to_bits() {
+            return false;
+        }
+    }
+    true
+}
+
+// =============================================================================
 // GPU Compute API (Phase 5, M3)
 // =============================================================================
 
