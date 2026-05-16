@@ -5713,14 +5713,21 @@ pub extern "C" fn rust_infer_batch_get_mode() -> i32 {
     if sched::batching_enabled() { 1 } else { 0 }
 }
 
+/// Upper bound on the partial-batch flush timeout exposed via the FFI.
+/// `sched::set_batch_timeout_us` applies the matching lower bound (100 µs).
+const MAX_BATCH_TIMEOUT_US: u32 = 100_000;
+
 /// Configure batch size + timeout.
 ///
 /// Bounds: `1 ≤ batch_size ≤ MAX_BATCH`, `100 µs ≤ timeout_us ≤ 100_000 µs`
-/// (out-of-range values clamp to the nearest bound). Returns 0 on success.
+/// (out-of-range values clamp to the nearest bound — upper bound on
+/// `timeout_us` is enforced here, lower bound on `timeout_us` and the
+/// full clamp on `batch_size` are enforced by the underlying setters).
+/// Returns 0 on success.
 #[no_mangle]
 pub extern "C" fn rust_infer_batch_set_config(batch_size: u32, timeout_us: u32) -> i32 {
     sched::set_batch_size(batch_size as usize);
-    sched::set_batch_timeout_us(timeout_us.min(100_000));
+    sched::set_batch_timeout_us(timeout_us.min(MAX_BATCH_TIMEOUT_US));
     0
 }
 
@@ -5749,13 +5756,6 @@ pub extern "C" fn rust_infer_batch_status(out: *mut RustBatchStatus) -> i32 {
     };
     unsafe { *out = status; }
     0
-}
-
-/// Reset the scheduler stats counters. Useful before a stress run so
-/// the post-run snapshot reflects only that run's activity.
-#[no_mangle]
-pub extern "C" fn rust_infer_batch_reset_stats() {
-    sched::reset_scheduler_stats();
 }
 
 // -----------------------------------------------------------------------------
@@ -5792,10 +5792,23 @@ pub struct RustStressResult {
     pub singleton_dispatches: u64,
 }
 
+// Base join-deadline budget for a stress run: 30 s of headroom plus a
+// per-iteration allowance. Sized so MNIST's ~1 ms/inference (QEMU)
+// and ~3 ms (Pi 5 / Jetson without batching) leave ~30× safety
+// margin — a timeout therefore indicates a real regression in the
+// dispatcher rather than under-budgeting.
+const STRESS_JOIN_BASE_NS: u64 = 30_000_000_000;
+const STRESS_JOIN_PER_ITER_NS: u64 = 100_000_000;
+
 // Stress workload shared state — file-static atomics. The stress
 // workload is single-run at a time (the shell + Lua entry points
-// serialise via the global `STRESS_BUSY` flag).
+// serialise via the global `STRESS_BUSY` flag). `STRESS_GENERATION`
+// is incremented at the top of every run; workers cache the current
+// generation at entry and a stale-generation check on the back-edge
+// drops straggler writes if a prior run's join deadline expired and
+// a fresh run started before the straggler finished.
 static STRESS_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static STRESS_GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static STRESS_WORKERS_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static STRESS_ITERS_PER_WORKER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static STRESS_MODEL_INDEX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -5805,9 +5818,36 @@ static STRESS_LAT_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 static STRESS_LAT_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
 static STRESS_LAT_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Atomically minimise `atom` against `candidate`. Used by stress
+/// workers to track the per-iteration latency floor; identical pattern
+/// to the max helper below.
+fn atomic_min_u64(atom: &core::sync::atomic::AtomicU64, candidate: u64) {
+    use core::sync::atomic::Ordering;
+    let mut cur = atom.load(Ordering::Relaxed);
+    while candidate < cur {
+        match atom.compare_exchange_weak(cur, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => cur = v,
+        }
+    }
+}
+
+/// Atomically maximise `atom` against `candidate`.
+fn atomic_max_u64(atom: &core::sync::atomic::AtomicU64, candidate: u64) {
+    use core::sync::atomic::Ordering;
+    let mut cur = atom.load(Ordering::Relaxed);
+    while candidate > cur {
+        match atom.compare_exchange_weak(cur, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => cur = v,
+        }
+    }
+}
+
 /// Worker-task entry point. Runs `STRESS_ITERS_PER_WORKER` inferences
 /// against `STRESS_MODEL_INDEX` and signals completion via
-/// `STRESS_WORKERS_DONE`.
+/// `STRESS_WORKERS_DONE`. Cached `gen` at entry isolates this worker
+/// from a later run that bumps `STRESS_GENERATION` — see W1 fix below.
 extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
     use core::sync::atomic::Ordering;
 
@@ -5818,6 +5858,7 @@ extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
     let mut output: [f32; 64] = [0.0; 64];
     let iters = STRESS_ITERS_PER_WORKER.load(Ordering::Acquire);
     let model_index = STRESS_MODEL_INDEX.load(Ordering::Acquire) as usize;
+    let gen_at_entry = STRESS_GENERATION.load(Ordering::Acquire);
 
     for _ in 0..iters {
         let start = kernel_ffi::get_time_ns();
@@ -5830,23 +5871,18 @@ extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
             )
         };
         let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        // Drop the write if a later run has rolled the generation
+        // forward (e.g. our run timed out and the operator started a
+        // new one). The inference itself still ran — we just don't
+        // contaminate the next run's counters.
+        if STRESS_GENERATION.load(Ordering::Acquire) != gen_at_entry {
+            return;
+        }
+
         STRESS_LAT_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
-        // min via CAS loop.
-        let mut cur = STRESS_LAT_MIN.load(Ordering::Relaxed);
-        while elapsed < cur {
-            match STRESS_LAT_MIN.compare_exchange_weak(cur, elapsed, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(v) => cur = v,
-            }
-        }
-        // max via CAS loop.
-        cur = STRESS_LAT_MAX.load(Ordering::Relaxed);
-        while elapsed > cur {
-            match STRESS_LAT_MAX.compare_exchange_weak(cur, elapsed, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(v) => cur = v,
-            }
-        }
+        atomic_min_u64(&STRESS_LAT_MIN, elapsed);
+        atomic_max_u64(&STRESS_LAT_MAX, elapsed);
         if r.is_ok() {
             STRESS_SUCCESS.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -5854,7 +5890,12 @@ extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
         }
     }
 
-    STRESS_WORKERS_DONE.fetch_add(1, Ordering::Release);
+    // Last-chance generation check before signalling done — a straggler
+    // from a timed-out run must not bump WORKERS_DONE for the current
+    // run.
+    if STRESS_GENERATION.load(Ordering::Acquire) == gen_at_entry {
+        STRESS_WORKERS_DONE.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Run a concurrent stress workload.
@@ -5914,6 +5955,11 @@ pub unsafe extern "C" fn rust_infer_stress_run(
     // Snapshot pre-run counters so we can compute deltas.
     let pre = sched::scheduler_stats();
 
+    // Bump the generation FIRST so any straggler workers from a prior
+    // timed-out run will observe a generation mismatch and abandon
+    // their writes before we reset the shared counters.
+    STRESS_GENERATION.fetch_add(1, Ordering::AcqRel);
+
     // Reset worker-shared counters.
     STRESS_WORKERS_DONE.store(0, Ordering::Release);
     STRESS_SUCCESS.store(0, Ordering::Release);
@@ -5941,18 +5987,13 @@ pub unsafe extern "C" fn rust_infer_stress_run(
         return -4;
     }
 
-    // Join: spin-yield until all spawned workers signal done.
-    //
-    // Generous deadline so a regression in the dispatcher can't hang
-    // the shell forever: 30 s of headroom plus an iteration budget
-    // (one second per 10 iterations on top, which fits MNIST's
-    // ~1 ms/inference on QEMU and the ~3 ms/inference worst case on
-    // Pi 5/Jetson without batching). On timeout we return -5 so the
-    // operator can recover; in-flight workers will still finish and
-    // signal the busy guard, but `out` won't be populated.
+    // Join: spin-yield until all spawned workers signal done. On
+    // timeout we return -5 and rely on the generation counter (bumped
+    // at the top of each run) to keep straggler workers from
+    // contaminating the next run's counters.
     let join_deadline_ns = kernel_ffi::get_time_ns().saturating_add(
-        30_000_000_000u64.saturating_add(
-            (iters_per_worker as u64).saturating_mul(100_000_000), // 100 ms/iter
+        STRESS_JOIN_BASE_NS.saturating_add(
+            (iters_per_worker as u64).saturating_mul(STRESS_JOIN_PER_ITER_NS),
         ),
     );
     extern "C" {

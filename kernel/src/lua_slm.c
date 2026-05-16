@@ -3322,6 +3322,19 @@ static int l_infer_batch_config(lua_State *L) {
     lua_Integer timeout = luaL_optinteger(L, -1, 0);
     lua_pop(L, 1);
 
+    /* Reject out-of-range values explicitly so callers don't end up
+     * silently truncated through the uint32_t cast below. The FFI
+     * still clamps internally, but a 5e10 value at the script layer
+     * is almost certainly a typo. 0 = keep current. */
+    if (size < 0 || size > 32) {
+        return luaL_error(L,
+            "infer_batch_config: size must be 0..32 (0 = keep current)");
+    }
+    if (timeout < 0 || timeout > 100000) {
+        return luaL_error(L,
+            "infer_batch_config: timeout_us must be 0..100000 (0 = keep current)");
+    }
+
     /* Read current config; only overwrite fields the caller supplied. */
     RustBatchStatus cur;
     rust_infer_batch_status(&cur);
@@ -3402,6 +3415,11 @@ static int l_infer_stress(lua_State *L) {
     lua_setfield(L, -2, "bypassed_deadline");
     lua_pushinteger(L, (lua_Integer)r.singleton_dispatches);
     lua_setfield(L, -2, "singleton_dispatches");
+    /* Surface the partial-spawn case explicitly — `n_workers` already
+     * reflects the actual count, but a boolean field is easier for
+     * Lua callers to assert on. */
+    lua_pushboolean(L, r.n_workers < (uint32_t)n);
+    lua_setfield(L, -2, "partial_spawn");
     return 1;
 }
 

@@ -796,9 +796,6 @@ extern int32_t rust_infer_batch_set_config(uint32_t batch_size, uint32_t timeout
  * success, -1 if `out` is null. */
 extern int32_t rust_infer_batch_status(RustBatchStatus *out);
 
-/* Reset the SchedulerStats counters. */
-extern void rust_infer_batch_reset_stats(void);
-
 /* Run the concurrent stress workload. Spawns `n_workers` tasks each
  * running `iters_per_worker` MNIST inferences against the batched
  * dispatcher, joins, and writes the aggregated result into `out`.

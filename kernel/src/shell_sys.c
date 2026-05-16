@@ -1841,9 +1841,11 @@ int cmd_bench(int argc, char *argv[])
         }
         if (argc >= 4) {
             uint32_t n;
-            if (shell_parse_uint(argv[3], &n) == 0 && n > 0 && n <= 100000) {
-                iters = n;
+            if (shell_parse_uint(argv[3], &n) != 0 || n == 0 || n > 100000) {
+                shell_puts("bench infer-stress: iters must be 1..100000\r\n");
+                return 1;
             }
+            iters = n;
         }
 
         /* Ensure MNIST is loaded — the stress runner refuses without it. */
@@ -1873,6 +1875,11 @@ int cmd_bench(int argc, char *argv[])
         if (rc != 0) {
             shell_printf("  Stress run failed: rc=%d\r\n", (int)rc);
             return 1;
+        }
+        if (res.n_workers < n_workers) {
+            shell_printf("  WARNING: only %u of %u workers spawned "
+                         "(task-table likely exhausted)\r\n",
+                         res.n_workers, n_workers);
         }
 
         uint64_t completed = res.success_count;
@@ -3091,11 +3098,7 @@ static const char *const slm_op_type_names[] = {
  */
 int cmd_infer(int argc, char *argv[])
 {
-    if (argc < 2 || strcmp(argv[1], "batch") != 0) {
-        shell_puts("Usage: infer batch <on|off|config <size> <timeout_us>|status>\r\n");
-        return 1;
-    }
-    if (argc < 3) {
+    if (argc < 3 || strcmp(argv[1], "batch") != 0) {
         shell_puts("Usage: infer batch <on|off|config <size> <timeout_us>|status>\r\n");
         return 1;
     }
