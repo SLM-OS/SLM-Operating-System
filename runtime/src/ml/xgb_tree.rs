@@ -163,9 +163,20 @@ pub fn parse_single(bytes: &[u8], max_feature_idx: usize) -> Result<XgbModel, Xg
         return Err(XgbError::TooManyNodes);
     }
 
-    let roots_len = tree_count * 2;
-    let nodes_len = node_count * NODE_LEN_V1;
-    let expected_len = SINGLE_HEADER_LEN + roots_len + nodes_len;
+    // `MAX_TREES_SINGLE * 2` and `MAX_NODES_SINGLE * 16` both fit
+    // comfortably in usize on every supported platform, but use
+    // `checked_*` for consistency with `parse_classifier_section`
+    // and to guard against a future cap bump.
+    let roots_len = tree_count
+        .checked_mul(2)
+        .ok_or(XgbError::BadLength)?;
+    let nodes_len = node_count
+        .checked_mul(NODE_LEN_V1)
+        .ok_or(XgbError::BadLength)?;
+    let expected_len = SINGLE_HEADER_LEN
+        .checked_add(roots_len)
+        .and_then(|n| n.checked_add(nodes_len))
+        .ok_or(XgbError::BadLength)?;
     if bytes.len() != expected_len {
         return Err(XgbError::BadLength);
     }
@@ -487,20 +498,34 @@ impl XgbModel {
     /// Multiclass convenience: trees are interleaved one-per-class
     /// per boosting round (XGBoost's standard layout). Returns the
     /// argmax class index (0..n_classes), or 0 on empty.
+    ///
+    /// Stack-allocates the per-class score buffer (sized to
+    /// `MAX_LABEL_CLASSES`) to avoid a heap allocation on every call
+    /// — `predict_argmax` is called three times per AI-scheduler
+    /// `assign_cpu` (one per cascade classifier), which runs from
+    /// IRQ context on hardware-tick paths.
     pub fn predict_argmax(&self, features: &[f32], n_classes: usize) -> usize {
         if n_classes == 0 {
             return 0;
         }
-        let mut scores = vec![0.0_f32; n_classes];
+        // Cap to the parse-time MAX_LABEL_CLASSES (parser rejects
+        // n_classes > 64 so this clamp is defence-in-depth — won't
+        // fire for blobs that came through `parse_cascade`).
+        let n = if n_classes > MAX_LABEL_CLASSES {
+            MAX_LABEL_CLASSES
+        } else {
+            n_classes
+        };
+        let mut scores = [0.0_f32; MAX_LABEL_CLASSES];
         for (i, &root) in self.roots.iter().enumerate() {
-            let cls = i % n_classes;
+            let cls = i % n;
             scores[cls] += self.eval_tree(root as usize, features);
         }
         let mut best = 0usize;
         let mut best_v = scores[0];
-        for (i, &v) in scores.iter().enumerate().skip(1) {
-            if v > best_v {
-                best_v = v;
+        for i in 1..n {
+            if scores[i] > best_v {
+                best_v = scores[i];
                 best = i;
             }
         }
@@ -534,7 +559,7 @@ impl XgbModel {
 }
 
 #[cfg(any(test, feature = "ai_eviction"))]
-pub fn build_test_single_first_feature_split(threshold: f32, left: f32, right: f32) -> Vec<u8> {
+pub(crate) fn build_test_single_first_feature_split(threshold: f32, left: f32, right: f32) -> Vec<u8> {
     // Single-classifier XGB1 payload, 1 tree, 3 nodes.
     let mut out = Vec::with_capacity(SINGLE_HEADER_LEN + 2 + 3 * NODE_LEN_V1);
     out.extend_from_slice(&PAYLOAD_MAGIC_SINGLE_V1);
