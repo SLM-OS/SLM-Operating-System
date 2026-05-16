@@ -7371,7 +7371,8 @@ pub extern "C" fn rust_inference_test() -> i32 {
     // `engine.rs::execute_node` correctly observes the flag.
     //
     // MNIST has Conv, MaxPool, Relu, Reshape, Add, MatMul, and Softmax
-    // nodes; with profiling on, the Conv bucket (index 15) must show
+    // nodes; with profiling on, the Conv bucket (identified by
+    // `OpType::Conv` discriminant, not a fixed slot index) must show
     // a non-zero count after a single inference run, and at least one
     // bucket must have a non-zero `total_ns` so we know the CNTPCT
     // deltas are flowing through. With profiling off, every bucket
