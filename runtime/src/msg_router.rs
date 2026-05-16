@@ -55,20 +55,36 @@ fn puts(s: &[u8]) {
 // Data Structures
 // =============================================================================
 
+/// `Mailbox::ready` state constants.
+///
+/// Currently two-valued (`READY_IDLE` / `READY_FULL`). A future fix
+/// for the concurrent-publisher TOCTOU window noted in
+/// `Mailbox::try_deliver` would extend this to a three-valued protocol
+/// (idle → writing → full) with a CAS into the writing state. Named
+/// constants now so the future change is a constant-substitution, not
+/// a hunt-and-replace of magic 0/1 literals scattered across receive,
+/// ack, and unsubscribe paths.
+const READY_IDLE: u32 = 0;
+const READY_FULL: u32 = 1;
+
 /// Per-subscriber mailbox for message delivery.
 struct Mailbox {
+    /// One of `READY_IDLE` / `READY_FULL`. Released by the producer
+    /// (`try_deliver`) once data + topic + priority + ack are written,
+    /// and reset to `READY_IDLE` by the consumer (`msg_router_ack`).
     ready: AtomicU32,
     ack: AtomicU32,
     data: [u8; MAX_MSG_LEN],
     topic: [u8; TOPIC_NAME_LEN],
-    /// Atomic to prevent reordering: priority must be visible before ready=1.
+    /// Atomic to prevent reordering: priority must be visible before
+    /// `ready = READY_FULL`.
     priority: AtomicU32,
 }
 
 impl Mailbox {
     const fn new() -> Self {
         Self {
-            ready: AtomicU32::new(0),
+            ready: AtomicU32::new(READY_IDLE),
             ack: AtomicU32::new(0),
             data: [0; MAX_MSG_LEN],
             topic: [0; TOPIC_NAME_LEN],
@@ -77,36 +93,71 @@ impl Mailbox {
     }
 
     fn clear(&mut self) {
-        self.ready.store(0, Ordering::Release);
+        self.ready.store(READY_IDLE, Ordering::Release);
         self.ack.store(0, Ordering::Release);
         self.data = [0; MAX_MSG_LEN];
         self.topic = [0; TOPIC_NAME_LEN];
         self.priority.store(0, Ordering::Release);
     }
 
-    /// Deliver a message to this mailbox. Writes data and topic first,
-    /// then priority (Release), then ready=1 (Release) so the receiver
-    /// sees consistent data when it reads ready=1 (Acquire).
+    /// Attempt to deliver a message to this mailbox.
+    ///
+    /// Returns `true` on success, `false` if the mailbox already holds
+    /// an unacked message (`ready == READY_FULL`). The caller is
+    /// expected to retry after yielding so the subscriber has a chance
+    /// to ack. See #869 for the design rationale (option 2 —
+    /// reject-when-busy, publisher retries; preserves zero-loss
+    /// semantics).
+    ///
+    /// Writes data and topic first, then priority (Release), then
+    /// `ready = READY_FULL` (Release) so the receiver sees consistent
+    /// data when it reads ready as `READY_FULL` (Acquire).
     ///
     /// IMPORTANT (memory ordering invariant): the `data` and `topic`
     /// arrays are written with plain (non-atomic) stores, but they are
     /// published to the receiver via the Release on `ready` below.
     /// The receiver's Acquire load on `ready` carries the prior plain
     /// stores into its observation, so this is sound as long as
-    /// `ready.store(1, Release)` remains the single publication point.
-    /// If a future change relaxes that store to `Relaxed`, the data
-    /// will become a true data race and the receiver will see torn /
-    /// stale bytes. Keep ready, priority, and ack as Release stores.
+    /// `ready.store(READY_FULL, Release)` remains the single
+    /// publication point. If a future change relaxes that store to
+    /// `Relaxed`, the data will become a true data race and the
+    /// receiver will see torn / stale bytes. Keep ready, priority,
+    /// and ack as Release stores.
+    ///
+    /// CAVEAT (concurrent publishers): the `ready.load → write → store`
+    /// sequence is not a single atomic operation. Two publishers that
+    /// both observe `ready == READY_IDLE` between their Acquire load
+    /// and their later Release stores will both proceed to write, and
+    /// the second arrival's `ready.store(READY_FULL)` will overwrite
+    /// the first's data
+    /// in-place — the same single-slot-mailbox loss this method is
+    /// meant to prevent. In practice the in-tree caller
+    /// (`publish_internal`) holds MSG_ROUTER_LOCK only across the
+    /// gather phase, not the deliver phase, so two publishers CAN
+    /// arrive here concurrently for different topic→mailbox edges; for
+    /// the SAME mailbox edge they would have had to subscribe a single
+    /// component to a single topic — covered by this check but with
+    /// the residual TOCTOU window noted above. A full fix is the
+    /// queued-mailbox redesign (option 1 in #869), tracked separately.
     ///
     /// # Safety
     /// Caller promises `topic_name` and `data` are NUL-terminated within
     /// `TOPIC_NAME_LEN` and `MAX_MSG_LEN` bytes respectively.
-    unsafe fn deliver(&mut self, topic_name: *const u8, data: *const u8, prio: u8) {
+    unsafe fn try_deliver(
+        &mut self,
+        topic_name: *const u8,
+        data: *const u8,
+        prio: u8,
+    ) -> bool {
+        if self.ready.load(Ordering::Acquire) != READY_IDLE {
+            return false;
+        }
         str_copy(&mut self.data, data, MAX_MSG_LEN);
         str_copy(&mut self.topic, topic_name, TOPIC_NAME_LEN);
         self.ack.store(0, Ordering::Release);
         self.priority.store(prio as u32, Ordering::Release);
-        self.ready.store(1, Ordering::Release);
+        self.ready.store(READY_FULL, Ordering::Release);
+        true
     }
 }
 
@@ -274,6 +325,35 @@ static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none()
 ///    guard per call, and `publish_internal` releases its guard before
 ///    yielding.
 static MSG_ROUTER_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Counter incremented each time `try_deliver` rejects a write because
+/// the target mailbox already holds an unacked message.
+///
+/// On the ack-waiting publish path (`publish_internal`) the publisher
+/// retries after yielding — the counter reflects publisher-side latency
+/// under contention, not lost messages. On the nowait path
+/// (`publish_internal_nowait`) the counter reflects messages the caller
+/// asked to send without blocking that were dropped because the
+/// mailbox was full.
+///
+/// Exposed via `msg_router_flow_control_stats` for the shell `msg stats`
+/// command, so operators can distinguish "publisher waited briefly" from
+/// "data was actually lost." Saturates at u32::MAX; reset to zero by
+/// `msg_router_flow_control_reset`.
+static FLOW_CONTROL_BUSY_RETRIES: AtomicU32 = AtomicU32::new(0);
+static FLOW_CONTROL_NOWAIT_DROPS: AtomicU32 = AtomicU32::new(0);
+
+fn flow_control_bump(counter: &AtomicU32) {
+    /* Saturating increment; the counter is observational, no point in
+     * overflowing back to zero. */
+    let mut prev = counter.load(Ordering::Relaxed);
+    while prev != u32::MAX {
+        match counter.compare_exchange_weak(prev, prev + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(actual) => prev = actual,
+        }
+    }
+}
 
 /// RAII guard for `MSG_ROUTER_LOCK`.
 ///
@@ -674,14 +754,54 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
         // SAFETY: pointer points at a Mailbox inside the TOPICS /
         // WILDCARD_SUBS static arrays (stable storage).
         let mb = &mut *targets[t];
-        mb.deliver(topic_name, data, priority);
-        let start = timer_get_count();
+
+        // Try to deliver, retrying with yield while the mailbox is
+        // busy (a prior message is still unacked). The busy-wait and
+        // post-deliver ack-wait get INDEPENDENT timeout budgets so a
+        // slow prior subscriber consuming the busy-wait budget cannot
+        // cause this publisher to skip its own ack-wait and return
+        // `delivered=0` for a message that DID land in the mailbox.
+        // Worst-case wall time per target is therefore
+        // 2 * ACK_TIMEOUT_SECS — acceptable for an op that was
+        // previously infinitely loss-prone under the same contention.
+        let busy_start = timer_get_count();
+        let mut delivered_this_target = false;
+        loop {
+            if mb.try_deliver(topic_name, data, priority) {
+                delivered_this_target = true;
+                break;
+            }
+            flow_control_bump(&FLOW_CONTROL_BUSY_RETRIES);
+            if timer_get_count().wrapping_sub(busy_start) >= timeout_cycles {
+                /* Subscriber never acked the prior message — abandon
+                 * this target. The publisher's `delivered` count
+                 * correctly excludes this message, distinguishing the
+                 * pre-#869 silent-overwrite case (publisher saw
+                 * delivered=1, subscriber lost the data) from the
+                 * post-fix explicit-failure case (publisher sees
+                 * delivered=0, knows the send didn't land). */
+                break;
+            }
+            sched_yield();
+        }
+        if !delivered_this_target {
+            continue;
+        }
+
+        /* Fresh budget for the ack-wait — the message HAS landed in
+         * the mailbox at this point, and the contract is that
+         * `delivered` counts every target that was both written and
+         * acked. A busy-wait that consumed most of the prior budget
+         * must not cause us to misreport a delivered+acked message
+         * as `delivered=0` (which would mis-credit the NEXT publisher
+         * to the same mailbox on the next round). */
+        let ack_start = timer_get_count();
         loop {
             if mb.ack.load(Ordering::Acquire) != 0 {
                 delivered += 1;
                 break;
             }
-            if timer_get_count().wrapping_sub(start) >= timeout_cycles {
+            if timer_get_count().wrapping_sub(ack_start) >= timeout_cycles {
                 break;
             }
             sched_yield();
@@ -738,8 +858,15 @@ unsafe fn publish_internal_nowait(
     for t in 0..target_count {
         // SAFETY: pointer into stable static storage.
         let mb = &mut *targets[t];
-        mb.deliver(topic_name, data, priority);
-        delivered += 1;
+        if mb.try_deliver(topic_name, data, priority) {
+            delivered += 1;
+        } else {
+            /* Mailbox holds an unacked message — caller opted out of
+             * blocking, so drop and count for observability. Pre-#869
+             * the nowait path silently overwrote the prior message;
+             * post-fix it returns a drop count the caller can monitor. */
+            flow_control_bump(&FLOW_CONTROL_NOWAIT_DROPS);
+        }
     }
     delivered
 }
@@ -860,7 +987,7 @@ pub extern "C" fn msg_router_receive(
                     continue;
                 }
                 let mb = &TOPICS[i].subs[j].mailbox;
-                if mb.ready.load(Ordering::Acquire) != 0 {
+                if mb.ready.load(Ordering::Acquire) == READY_FULL {
                     let prio = mb.priority.load(Ordering::Acquire) as u8;
                     if best_data.is_null() || prio > best_priority {
                         best_priority = prio;
@@ -882,7 +1009,7 @@ pub extern "C" fn msg_router_receive(
                 continue;
             }
             let mb = &WILDCARD_SUBS[i].mailbox;
-            if mb.ready.load(Ordering::Acquire) != 0 {
+            if mb.ready.load(Ordering::Acquire) == READY_FULL {
                 let prio = mb.priority.load(Ordering::Acquire) as u8;
                 if best_data.is_null() || prio > best_priority {
                     best_priority = prio;
@@ -933,15 +1060,15 @@ pub extern "C" fn msg_router_ack(component_idx: i32) {
 
         if lr.wildcard_idx >= 0 && (lr.wildcard_idx as usize) < MAX_WILDCARD_SUBS {
             let mb = &mut WILDCARD_SUBS[lr.wildcard_idx as usize].mailbox;
-            if mb.ready.load(Ordering::Acquire) != 0 {
-                mb.ready.store(0, Ordering::Release);
+            if mb.ready.load(Ordering::Acquire) == READY_FULL {
+                mb.ready.store(READY_IDLE, Ordering::Release);
                 mb.ack.store(1, Ordering::Release);
             }
         } else if lr.topic_idx >= 0 && (lr.topic_idx as usize) < MAX_TOPICS
                && lr.sub_idx >= 0 && (lr.sub_idx as usize) < MAX_SUBSCRIBERS {
             let mb = &mut TOPICS[lr.topic_idx as usize].subs[lr.sub_idx as usize].mailbox;
-            if mb.ready.load(Ordering::Acquire) != 0 {
-                mb.ready.store(0, Ordering::Release);
+            if mb.ready.load(Ordering::Acquire) == READY_FULL {
+                mb.ready.store(READY_IDLE, Ordering::Release);
                 mb.ack.store(1, Ordering::Release);
             }
         }
@@ -1073,4 +1200,40 @@ pub extern "C" fn msg_router_list() {
             }
         }
     }
+}
+
+/// Read the flow-control counters into caller-provided slots.
+///
+/// `busy_retries_out` receives the count of times `try_deliver` was
+/// rejected on the ack-waiting publish path (publisher then yielded
+/// and retried — no data lost). `nowait_drops_out` receives the count
+/// of times the nowait publish path dropped a message because the
+/// target mailbox held an unacked prior message (caller opted out of
+/// blocking, so the drop is by contract). Either pointer may be NULL.
+///
+/// Counters saturate at u32::MAX. Use `msg_router_flow_control_reset`
+/// to zero them.
+///
+/// # Safety
+/// `busy_retries_out` and `nowait_drops_out`, when non-NULL, must
+/// point to writable `u32` storage owned by the caller for the duration
+/// of the call.
+#[no_mangle]
+pub unsafe extern "C" fn msg_router_flow_control_stats(
+    busy_retries_out: *mut u32,
+    nowait_drops_out: *mut u32,
+) {
+    if !busy_retries_out.is_null() {
+        *busy_retries_out = FLOW_CONTROL_BUSY_RETRIES.load(Ordering::Relaxed);
+    }
+    if !nowait_drops_out.is_null() {
+        *nowait_drops_out = FLOW_CONTROL_NOWAIT_DROPS.load(Ordering::Relaxed);
+    }
+}
+
+/// Reset both flow-control counters to zero.
+#[no_mangle]
+pub extern "C" fn msg_router_flow_control_reset() {
+    FLOW_CONTROL_BUSY_RETRIES.store(0, Ordering::Relaxed);
+    FLOW_CONTROL_NOWAIT_DROPS.store(0, Ordering::Relaxed);
 }

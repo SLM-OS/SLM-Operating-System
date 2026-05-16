@@ -120,6 +120,14 @@ static struct {
 /* msg_router #67c: cross-CPU LAST_RECEIVED ack-targeting test. */
 #define NC_MSGAR_TRIGGER     31  /* main → helper: publish /b now */
 #define NC_MSGAR_HELPER_DONE 32  /* helper → main: publish complete */
+/* msg_router #869: same-mailbox concurrent-publisher zero-loss test. */
+#define NC_MSGSM_A_DELIVERED 33  /* pub_a's total delivered count */
+#define NC_MSGSM_B_DELIVERED 34  /* pub_b's total delivered count */
+#define NC_MSGSM_SUB_A_SEEN  35  /* subscriber's count of A-payloads */
+#define NC_MSGSM_SUB_B_SEEN  36  /* subscriber's count of B-payloads */
+#define NC_MSGSM_PUB_A_DONE  37
+#define NC_MSGSM_PUB_B_DONE  38
+#define NC_MSGSM_SUB_DONE    39
 
 static void nc_sync_clear(uint32_t start, uint32_t count)
 {
@@ -1969,6 +1977,241 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
 }
 
 /* ============================================================================
+ * Regression: msg_router same-mailbox zero-loss under concurrent
+ * publishers (#869)
+ *
+ * Two publishers on different CPUs target the SAME topic — and therefore
+ * the SAME subscriber mailbox — while a subscriber on a third CPU drains
+ * messages and acks each. Pre-#869 the mailbox was single-slot:
+ * publisher A's deliver() set ready=1; publisher B's concurrent deliver()
+ * overwrote the data in place while ready was still 1. The subscriber
+ * saw only one of the two messages, but BOTH publishers observed the
+ * subscriber's ack and reported delivered=1 — silent data loss with no
+ * observable error.
+ *
+ * After #869, deliver() refuses to overwrite an unacked mailbox; the
+ * publisher waits for ack and retries. Both messages reach the subscriber.
+ *
+ * Test invariant:
+ *   subscriber A-payload count + B-payload count
+ *     == pub_a_delivered + pub_b_delivered
+ *
+ * On main pre-fix this invariant fails — the publisher counts can
+ * exceed what the subscriber actually saw. Post-fix they match exactly.
+ *
+ * Requires cpu_count >= 4 (publisher A on CPU 1, publisher B on CPU 2,
+ * subscriber on CPU 3, plus shell on CPU 0).
+ *
+ * IMPORTANT — QEMU vs hardware: this test passes on QEMU virt regardless
+ * of whether the fix is present, because QEMU's serial TCG scheduler
+ * interleaves the publishers and subscriber deterministically and never
+ * opens the race window in the first place. The test's primary value is
+ * on real Pi 5 / Jetson SMP hardware where publishers genuinely run
+ * concurrently. A green QEMU run is structural only — do NOT conclude
+ * from it that the underlying mailbox semantics are correct without a
+ * hardware run. The matching same-CPU contract canary in
+ * test_msg_router.c (`test_publish_nowait_basic_contract`) DOES fire on
+ * QEMU and is the day-to-day regression guard.
+ * ============================================================================ */
+
+#define SM_C_COMPONENT 24
+#define SM_TOPIC       ((const uint8_t *)"/sm")
+#define SM_MESSAGES    5
+#define SM_PRIO        0
+
+static volatile uint32_t sm_a_delivered = 0;
+static volatile uint32_t sm_b_delivered = 0;
+static volatile uint32_t sm_sub_a_seen  = 0;
+static volatile uint32_t sm_sub_b_seen  = 0;
+static volatile uint32_t sm_pub_a_done  = 0;
+static volatile uint32_t sm_pub_b_done  = 0;
+static volatile uint32_t sm_sub_done    = 0;
+
+static void sm_publisher_a(void *arg)
+{
+    (void)arg;
+    delay(50000);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < SM_MESSAGES; i++) {
+        uint8_t payload[4] = { 'A', (uint8_t)('0' + i), 0, 0 };
+        int delivered = msg_router_publish_priority(SM_TOPIC, payload, SM_PRIO);
+        if (delivered > 0) total += (uint32_t)delivered;
+    }
+    sm_a_delivered = total;
+    sm_pub_a_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGSM_A_DELIVERED) = total;
+    NC_SYNC(NC_MSGSM_PUB_A_DONE) = 1;
+#else
+    cache_clean((void *)&sm_a_delivered);
+    cache_clean((void *)&sm_pub_a_done);
+#endif
+}
+
+static void sm_publisher_b(void *arg)
+{
+    (void)arg;
+    delay(50000);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < SM_MESSAGES; i++) {
+        uint8_t payload[4] = { 'B', (uint8_t)('0' + i), 0, 0 };
+        int delivered = msg_router_publish_priority(SM_TOPIC, payload, SM_PRIO);
+        if (delivered > 0) total += (uint32_t)delivered;
+    }
+    sm_b_delivered = total;
+    sm_pub_b_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGSM_B_DELIVERED) = total;
+    NC_SYNC(NC_MSGSM_PUB_B_DONE) = 1;
+#else
+    cache_clean((void *)&sm_b_delivered);
+    cache_clean((void *)&sm_pub_b_done);
+#endif
+}
+
+static void sm_subscriber(void *arg)
+{
+    (void)arg;
+    uint8_t topic_buf[16];
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;
+    uint32_t a = 0;
+    uint32_t b = 0;
+
+    while (a + b < SM_MESSAGES * 2u) {
+        if ((timer_get_count() - start) >= limit) break;
+        const uint8_t *data = msg_router_receive(SM_C_COMPONENT, topic_buf);
+        if (data) {
+            if (data[0] == 'A') {
+                a++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGSM_SUB_A_SEEN) = a;
+#endif
+            } else if (data[0] == 'B') {
+                b++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGSM_SUB_B_SEEN) = b;
+#endif
+            }
+            sm_sub_a_seen = a;
+            sm_sub_b_seen = b;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+            cache_clean((void *)&sm_sub_a_seen);
+            cache_clean((void *)&sm_sub_b_seen);
+#endif
+            msg_router_ack(SM_C_COMPONENT);
+        } else {
+            yield();
+        }
+    }
+
+    sm_sub_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGSM_SUB_DONE) = 1;
+#else
+    cache_clean((void *)&sm_sub_done);
+#endif
+}
+
+static void test_msg_router_same_mailbox_zero_loss(void)
+{
+    /* shell on 0, pub_a on 1, pub_b on 2, sub on 3 */
+    if (cpu_count < 4) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 4");
+        return;
+    }
+
+    msg_router_init();
+    sm_a_delivered = 0;
+    sm_b_delivered = 0;
+    sm_sub_a_seen = 0;
+    sm_sub_b_seen = 0;
+    sm_pub_a_done = 0;
+    sm_pub_b_done = 0;
+    sm_sub_done = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MSGSM_A_DELIVERED, 7);
+#else
+    cache_clean((void *)&sm_a_delivered);
+    cache_clean((void *)&sm_b_delivered);
+    cache_clean((void *)&sm_sub_a_seen);
+    cache_clean((void *)&sm_sub_b_seen);
+    cache_clean((void *)&sm_pub_a_done);
+    cache_clean((void *)&sm_pub_b_done);
+    cache_clean((void *)&sm_sub_done);
+#endif
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(SM_TOPIC, SM_C_COMPONENT));
+
+    struct task *sub   = task_create("sm_sub",   sm_subscriber, NULL);
+    struct task *pub_a = task_create("sm_pub_a", sm_publisher_a, NULL);
+    struct task *pub_b = task_create("sm_pub_b", sm_publisher_b, NULL);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_NOT_NULL(pub_a);
+    TEST_ASSERT_NOT_NULL(pub_b);
+
+    scheduler_add_task_to_cpu(pub_a, 1);
+    scheduler_add_task_to_cpu(pub_b, 2);
+    scheduler_add_task_to_cpu(sub, 3);
+
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 15;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSGSM_PUB_A_DONE) &&
+            NC_SYNC(NC_MSGSM_PUB_B_DONE) &&
+            NC_SYNC(NC_MSGSM_SUB_DONE)) break;
+#else
+        cache_invalidate((void *)&sm_pub_a_done);
+        cache_invalidate((void *)&sm_pub_b_done);
+        cache_invalidate((void *)&sm_sub_done);
+        if (sm_pub_a_done && sm_pub_b_done && sm_sub_done) break;
+#endif
+        yield();
+    }
+
+    msg_router_unsubscribe_all(SM_C_COMPONENT);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_PUB_A_DONE), "pub_a hung");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_PUB_B_DONE), "pub_b hung");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_SUB_DONE),   "subscriber hung");
+    uint32_t a_seen = NC_SYNC(NC_MSGSM_SUB_A_SEEN);
+    uint32_t b_seen = NC_SYNC(NC_MSGSM_SUB_B_SEEN);
+    uint32_t a_del  = NC_SYNC(NC_MSGSM_A_DELIVERED);
+    uint32_t b_del  = NC_SYNC(NC_MSGSM_B_DELIVERED);
+#else
+    cache_invalidate((void *)&sm_pub_a_done);
+    cache_invalidate((void *)&sm_pub_b_done);
+    cache_invalidate((void *)&sm_sub_done);
+    cache_invalidate((void *)&sm_sub_a_seen);
+    cache_invalidate((void *)&sm_sub_b_seen);
+    cache_invalidate((void *)&sm_a_delivered);
+    cache_invalidate((void *)&sm_b_delivered);
+    TEST_ASSERT_MESSAGE(sm_pub_a_done, "pub_a hung");
+    TEST_ASSERT_MESSAGE(sm_pub_b_done, "pub_b hung");
+    TEST_ASSERT_MESSAGE(sm_sub_done,   "subscriber hung");
+    uint32_t a_seen = sm_sub_a_seen;
+    uint32_t b_seen = sm_sub_b_seen;
+    uint32_t a_del  = sm_a_delivered;
+    uint32_t b_del  = sm_b_delivered;
+#endif
+
+    /* Invariant: every message a publisher counted as delivered must
+     * have been seen by the subscriber. With single-slot semantics the
+     * publisher counts can exceed the subscriber-seen counts because
+     * two deliveries collapse into one acked mailbox state. */
+    TEST_ASSERT_MESSAGE(a_del == SM_MESSAGES,
+        "pub_a: not every publish returned delivered>0");
+    TEST_ASSERT_MESSAGE(b_del == SM_MESSAGES,
+        "pub_b: not every publish returned delivered>0");
+    TEST_ASSERT_MESSAGE(a_seen == SM_MESSAGES,
+        "subscriber lost A-payloads (mailbox overwrite bug)");
+    TEST_ASSERT_MESSAGE(b_seen == SM_MESSAGES,
+        "subscriber lost B-payloads (mailbox overwrite bug)");
+}
+
+/* ============================================================================
  * smp_notify_cpu (Prereq #3) — direct functional tests
  *
  * `scheduler_add_task_to_cpu()` invokes `smp_notify_cpu(cpu)` after
@@ -2131,6 +2374,9 @@ int test_suite_integration(void)
 
     /* Regression: msg_router LAST_RECEIVED ack-targeting (#67c / #867) */
     RUN_TEST(test_msg_router_ack_targets_last_received_cross_cpu);
+
+    /* Regression: msg_router same-mailbox zero-loss (#869) */
+    RUN_TEST(test_msg_router_same_mailbox_zero_loss);
 
     /* Prereq #3: smp_notify_cpu abstraction */
     RUN_TEST(test_smp_notify_cpu_safe);
