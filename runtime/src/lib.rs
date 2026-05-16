@@ -5813,6 +5813,7 @@ extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
 ///  -2 — MNIST not loaded
 ///  -3 — stress workload already running
 ///  -4 — task spawn failure
+///  -5 — join deadline exceeded (workers didn't finish in time)
 ///
 /// # Safety
 ///
@@ -5885,15 +5886,29 @@ pub unsafe extern "C" fn rust_infer_stress_run(
     }
 
     // Join: spin-yield until all spawned workers signal done.
-    // The yield budget is generous — each worker runs
-    // `iters_per_worker` MNIST inferences (~1 ms each on QEMU CPU).
+    //
+    // Generous deadline so a regression in the dispatcher can't hang
+    // the shell forever: 30 s of headroom plus an iteration budget
+    // (one second per 10 iterations on top, which fits MNIST's
+    // ~1 ms/inference on QEMU and the ~3 ms/inference worst case on
+    // Pi 5/Jetson without batching). On timeout we return -5 so the
+    // operator can recover; in-flight workers will still finish and
+    // signal the busy guard, but `out` won't be populated.
+    let join_deadline_ns = kernel_ffi::get_time_ns().saturating_add(
+        30_000_000_000u64.saturating_add(
+            (iters_per_worker as u64).saturating_mul(100_000_000), // 100 ms/iter
+        ),
+    );
+    extern "C" {
+        #[link_name = "yield"]
+        fn sched_yield();
+    }
     loop {
         if STRESS_WORKERS_DONE.load(Ordering::Acquire) >= spawned {
             break;
         }
-        extern "C" {
-            #[link_name = "yield"]
-            fn sched_yield();
+        if kernel_ffi::get_time_ns() >= join_deadline_ns {
+            return -5;
         }
         sched_yield();
     }
