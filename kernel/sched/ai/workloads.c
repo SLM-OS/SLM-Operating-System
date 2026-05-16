@@ -37,6 +37,8 @@
 #include "cache.h"
 #include "timer.h"
 #include "string.h"
+#include "preempt_point.h"
+#include "debug.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -44,6 +46,8 @@
 /* slm_get_time_ns prototype lives in kernel/include/util.h on most
  * platforms; declare locally to keep the include surface narrow. */
 extern uint64_t slm_get_time_ns(void);
+
+#define BENCH_WL_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 /* ---- Workload templates ---- */
 
@@ -85,28 +89,28 @@ static const struct bench_workload bench_workloads_table[] = {
     {
         .name = "mixed",
         .templates = wl_mixed_tpls,
-        .n_templates = sizeof(wl_mixed_tpls) / sizeof(wl_mixed_tpls[0]),
+        .n_templates = BENCH_WL_ARRAY_SIZE(wl_mixed_tpls),
         .n_tasks_total = 24,
         .arrival_spacing_us = 300,
     },
     {
         .name = "deadline-heavy",
         .templates = wl_deadline_tpls,
-        .n_templates = sizeof(wl_deadline_tpls) / sizeof(wl_deadline_tpls[0]),
+        .n_templates = BENCH_WL_ARRAY_SIZE(wl_deadline_tpls),
         .n_tasks_total = 24,
         .arrival_spacing_us = 200,
     },
     {
         .name = "latency-sensitive",
         .templates = wl_latency_tpls,
-        .n_templates = sizeof(wl_latency_tpls) / sizeof(wl_latency_tpls[0]),
+        .n_templates = BENCH_WL_ARRAY_SIZE(wl_latency_tpls),
         .n_tasks_total = 24,
         .arrival_spacing_us = 150,
     },
     {
         .name = "cpu-bound",
         .templates = wl_cpu_bound_tpls,
-        .n_templates = sizeof(wl_cpu_bound_tpls) / sizeof(wl_cpu_bound_tpls[0]),
+        .n_templates = BENCH_WL_ARRAY_SIZE(wl_cpu_bound_tpls),
         .n_tasks_total = 16,
         .arrival_spacing_us = 0,
     },
@@ -115,7 +119,7 @@ static const struct bench_workload bench_workloads_table[] = {
 const struct bench_workload *bench_workload_find(const char *name)
 {
     if (!name) return 0;
-    for (uint32_t i = 0; i < sizeof(bench_workloads_table)/sizeof(bench_workloads_table[0]); i++) {
+    for (uint32_t i = 0; i < BENCH_WL_ARRAY_SIZE(bench_workloads_table); i++) {
         if (strcmp(name, bench_workloads_table[i].name) == 0) {
             return &bench_workloads_table[i];
         }
@@ -125,12 +129,12 @@ const struct bench_workload *bench_workload_find(const char *name)
 
 uint32_t bench_workload_count(void)
 {
-    return (uint32_t)(sizeof(bench_workloads_table)/sizeof(bench_workloads_table[0]));
+    return (uint32_t)BENCH_WL_ARRAY_SIZE(bench_workloads_table);
 }
 
 const struct bench_workload *bench_workload_get(uint32_t idx)
 {
-    if (idx >= sizeof(bench_workloads_table)/sizeof(bench_workloads_table[0])) return 0;
+    if (idx >= BENCH_WL_ARRAY_SIZE(bench_workloads_table)) return 0;
     return &bench_workloads_table[idx];
 }
 
@@ -155,6 +159,12 @@ struct __attribute__((aligned(64))) bench_wl_slot {
 };
 static struct bench_wl_slot wl_slots[BENCH_WORKLOAD_MAX_TASKS] __attribute__((aligned(64)));
 
+/* Re-entry guard. `bench_workload_run` mutates the module-static
+ * `wl_slots` array; a concurrent second caller (Lua, IPC, future
+ * non-shell entry point) would silently corrupt records. Mirrors the
+ * `in_split` pattern documented in kernel/CLAUDE.md §"Buddy Allocator". */
+static volatile bool bench_workload_in_flight = false;
+
 static void workload_busy_wait_us(uint32_t us)
 {
     if (us == 0) return;
@@ -163,6 +173,13 @@ static void workload_busy_wait_us(uint32_t us)
     uint64_t start = timer_get_count();
     while ((timer_get_count() - start) < target_cycles) {
         __asm__ volatile("" ::: "memory");
+        /* Cheap when the local quantum hasn't expired; falls into
+         * schedule() when ≥10 ms has elapsed (COOP_PREEMPT builds).
+         * Required by the kernel/CLAUDE.md §"Preemption Model"
+         * policy because the longest workload template's busy-wait
+         * (cpu-bound = 4000 us) can otherwise monopolize a CPU.
+         * Call site is lock-free per the preempt_point.h contract. */
+        slm_preempt_point();
     }
 }
 
@@ -283,10 +300,18 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     if (wl->n_tasks_total == 0 || wl->n_tasks_total > BENCH_WORKLOAD_MAX_TASKS) return -1;
     if (wl->n_templates == 0) return -1;
 
+    if (bench_workload_in_flight) {
+        panic("bench_workload_run: reentrant invocation (wl_slots is single-owner)");
+    }
+    bench_workload_in_flight = true;
+
     /* Snapshot active policy so we can restore on the way out. */
     const struct sched_policy_ops *prev = sched_find_policy(sched_get_policy());
 
-    if (sched_set_policy(policy) < 0) return -1;
+    if (sched_set_policy(policy) < 0) {
+        bench_workload_in_flight = false;
+        return -1;
+    }
 
     /* Clear records. The dispatch loop below fills in dispatch_ns /
      * runtime_us / deadline_ns per slot and then cache_cleans the
@@ -315,26 +340,29 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     for (uint32_t i = 0; i < wl->n_tasks_total; i++) {
         const struct bench_wl_template *tpl = &wl->templates[i % wl->n_templates];
 
-        uint64_t now_ns = slm_get_time_ns();
-        wl_slots[i].rec.dispatch_ns = now_ns;
-        wl_slots[i].rec.runtime_us = tpl->est_runtime_us;
-        if (tpl->deadline_slack_us > 0) {
-            wl_slots[i].rec.deadline_ns =
-                now_ns + (uint64_t)tpl->deadline_slack_us * 1000ULL;
-        }
-        /* Push slot to PoC so the worker (which may run on a
-         * different CPU with an incoherent L2) sees these fields. */
-        cache_clean_range(&wl_slots[i], sizeof(wl_slots[i]));
-
+        /* Create the worker first — task_create_with_priority does not
+         * queue it, so the worker can't run until scheduler_add_task
+         * below. Allocator + zeroing can take a non-trivial slice on
+         * Pi 5, so capture dispatch_ns AFTER creation to honor the
+         * header's "at scheduler_add_task time" contract. */
         struct task *t = task_create_with_priority(
             "wl_bench", workload_task_body,
             (void *)(uintptr_t)i, tpl->priority);
         if (!t) break;  /* Task table exhausted — report whatever we got. */
         created[i] = t;
 
+        uint64_t now_ns = slm_get_time_ns();
+        wl_slots[i].rec.dispatch_ns = now_ns;
+        wl_slots[i].rec.runtime_us = tpl->est_runtime_us;
         if (tpl->deadline_slack_us > 0) {
+            wl_slots[i].rec.deadline_ns =
+                now_ns + (uint64_t)tpl->deadline_slack_us * 1000ULL;
             task_set_deadline(t, wl_slots[i].rec.deadline_ns);
         }
+        /* Push slot to PoC so the worker (which may run on a
+         * different CPU with an incoherent L2) sees these fields. */
+        cache_clean_range(&wl_slots[i], sizeof(wl_slots[i]));
+
         scheduler_add_task(t);
         dispatched++;
 
@@ -430,6 +458,7 @@ int bench_workload_run(const struct sched_policy_ops *policy,
 
     if (prev) (void)sched_set_policy(prev);
 
+    bench_workload_in_flight = false;
     return 0;
 }
 

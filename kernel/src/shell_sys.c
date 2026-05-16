@@ -1079,6 +1079,7 @@ static void bench_ipc_latency(void)
 #if defined(CONFIG_AI_SCHEDULER)
 #include "inference_device.h"
 #include "ai_types.h"
+#include "../sched/ai/ai_policy_hailo.h"
 
 static void bench_policy_one(const char *dev_name,
                              enum inference_dtype dtype,
@@ -1247,10 +1248,13 @@ static void bench_sched_workload_dispatch(const struct bench_workload *wl,
             if (!p) continue;
             /* Skip ai_hailo when no HEF is loaded — without a model it
              * falls back to heuristic on every assign_cpu and produces
-             * a row that's indistinguishable from heuristic. */
+             * a row that's indistinguishable from heuristic. Print a
+             * notice so a future bench operator doesn't wonder why a
+             * four-policy comparison shows three rows. */
             if (p->name && strcmp(p->name, "ai_hailo") == 0) {
-                extern inference_model_handle_t ai_policy_hailo_get_model_handle(void);
                 if (ai_policy_hailo_get_model_handle() == INF_INVALID_HANDLE) {
+                    shell_puts("ai_hailo      | (skipped — no HEF loaded; "
+                               "`hailo load <hef>` first)\r\n");
                     continue;
                 }
             }
