@@ -1128,6 +1128,40 @@ static void bench_policy_one(const char *dev_name,
                  (unsigned long)per_ns, (unsigned long)per_sec);
 }
 
+static void bench_xgb_one(uint32_t iters)
+{
+    /* XGBoost cascade benchmark. Doesn't go through the
+     * inference_device registry — predictions route directly through
+     * the Rust FFI in `runtime/src/sched/xgb.rs`. The cascade must
+     * have been staged + activated via `slm.sched_model_*` before
+     * this bench produces meaningful numbers; otherwise predict()
+     * returns -1 and we report "no cascade active". */
+    if (!rust_sched_xgb_is_active()) {
+        shell_puts("  ai_xgb      (no cascade active — "
+                   "`slm.sched_model_stage('xgboost', path)` first)\r\n");
+        return;
+    }
+
+    float state[AI_STATE_DIM];
+    int32_t core = 0, prio = 0, preempt = 0;
+    for (size_t i = 0; i < AI_STATE_DIM; i++) state[i] = 0.0f;
+
+    uint64_t t0 = timer_get_count();
+    uint32_t ok = 0;
+    for (uint32_t i = 0; i < iters; i++) {
+        if (rust_sched_xgb_predict(state, &core, &prio, &preempt) == 0) ok++;
+    }
+    uint64_t t1 = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+    uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
+    uint64_t per_ns = ok > 0 ? total_ns / ok : 0;
+    uint64_t per_sec = per_ns > 0 ? 1000000000ULL / per_ns : 0;
+
+    shell_printf("  %-10s  %u/%u ok   %lu ns/decision   %lu decisions/sec\r\n",
+                 "ai_xgb", ok, iters,
+                 (unsigned long)per_ns, (unsigned long)per_sec);
+}
+
 static void bench_sched_policy(void)
 {
     /* CPU-MLP is built-in; use INF_BUILTIN_HANDLE. Hailo needs a
@@ -1141,6 +1175,9 @@ static void bench_sched_policy(void)
     bench_policy_one("cpu-mlp", INF_DTYPE_FP32,
                      AI_STATE_DIM, (uint32_t)AI_SCHED_N_ACTIONS,
                      INF_BUILTIN_HANDLE, 1000);
+
+    /* XGBoost cascade — predict via the Rust FFI directly. */
+    bench_xgb_one(1000);
 
     /* Hailo-8 runs only if a .hef has been loaded (handle != INVALID).
      * The policy stashes the handle via ai_policy_hailo_set_model; we

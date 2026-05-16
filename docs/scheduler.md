@@ -30,6 +30,10 @@ The scheduler uses a **hybrid priority/deadline** approach:
 │   │  │  heuristic   │ │   ai_mlp     │ │   ai_ppo     │       │   │
 │   │  │ (default)    │ │ (Phase AI)   │ │ (Phase AI)   │       │   │
 │   │  └──────────────┘ └──────────────┘ └──────────────┘       │   │
+│   │  ┌──────────────┐ ┌──────────────┐                        │   │
+│   │  │   ai_xgb     │ │   ai_hailo   │                        │   │
+│   │  │ (cascade)    │ │ (NPU offload)│                        │   │
+│   │  └──────────────┘ └──────────────┘                        │   │
 │   ├─────────────────────────────────────────────────────────────┤   │
 │   │  Scheduler Core (sched.c) — unchanged                       │   │
 │   │  - Per-CPU Run Queues (priority-ordered)                    │   │
@@ -688,10 +692,37 @@ cmake -B build/kernel-test \
 When enabled:
 - Defines `CONFIG_AI_SCHEDULER=1` globally
 - Builds `libai_sched.a` — a separate static library compiled **without** `-mgeneral-regs-only` (same pattern as Lua), enabling FP/NEON for inference math
-- Registers `ai_mlp` and `ai_ppo` policies at boot via `sched_ai_init()`
-- Adds ~1 MB to binary size (mostly weight arrays; stub weights are all zeros)
+- Registers `ai_mlp`, `ai_ppo`, `ai_xgb`, and (non-x86) `ai_hailo` policies at boot via `sched_ai_init()`
+- Adds ~1 MB to binary size (mostly weight arrays; stub weights are all zeros). The XGBoost cascade (~9 MB) is **runtime-loaded only** — never linked into the kernel image.
 
-**Files:** `kernel/sched/ai/` — `ai_types.h`, `ai_weights.h`, `ai_weights_stub.c`, `ai_inference.{c,h}`, `ai_state.{c,h}`, `sched_ai.c`, `fp_context.S`
+**Files:** `kernel/sched/ai/` — `ai_types.h`, `ai_weights.h`, `ai_weights_stub.c`, `ai_inference.{c,h}`, `ai_state.{c,h}`, `sched_ai.c`, `sched_xgb.c`, `runtime_model.{c,h}`, `fp_context.S`
+
+#### `ai_xgb` cascade policy (#855)
+
+`ai_xgb` runs a 3-classifier XGBoost cascade — `core` then `priority`
+then `preempt` — emitted by the sibling `slm-os-scheduler-ai` repo's
+`scripts/export_models.py` (#850). The cascade is shipped as a single
+SEMB-wrapped binary blob (`xgb_sched.smb`, ~9 MB on the trained
+model) and loaded at runtime via the existing scheduler-blob workflow:
+
+```
+slm.sched_model_stage("xgboost", "/sd/xgb_sched.smb")
+slm.sched_model_activate("xgboost")
+slm.sched_set_policy("ai_xgb")
+```
+
+Storage lives Rust-side in `runtime/src/sched/xgb.rs` because the
+cascade is too large for the static MLP/PPO dense pool. The C policy
+in `kernel/sched/ai/sched_xgb.c` is a thin FFI wrapper around the
+Rust predictor — same FP-context save/restore + heuristic-fallback
+shape as `sched_policy_ai_mlp`.
+
+CPU-id clamping: the cascade was trained on a 6-core space; on Pi 5
+(`cpu_count == 4`) the core classifier can emit 4 or 5. The policy
+clamps via modulo and continues, with a one-shot WARN. Other than
+that, the assign_cpu path mirrors `ai_mlp` exactly — same isolation
+check, same priority-adjust + preempt encoding (1 = boost, 2 = reduce,
+preempt bit raises one priority level).
 
 #### Inference Engine Architecture
 
