@@ -991,6 +991,10 @@ set(TEST_SOURCES
     # as test_slm_shell.c — the slm_runner library only links on ARM64
     # because rust_slm_session_open / rust_slm_prompt are ARM64-only.
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_slm_runner.c>
+    # Dynamic-batching shell verb tests (#55 / PR #917). ARM64-only —
+    # the underlying rust_infer_batch_* / rust_infer_stress_run FFI
+    # is gated like the rest of the inference stack.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_infer_shell.c>
     # SLM GPU dispatch counter FFI tests (PR #831). Cross-platform —
     # `slm_runtime_dispatch_stats` / `_reset` are defined for every
     # platform (Jetson has the real impl, others share the stub at

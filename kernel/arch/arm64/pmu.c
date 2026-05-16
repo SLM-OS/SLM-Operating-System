@@ -300,11 +300,6 @@ bool pmu_is_ready(void)
     return pmu_ready_per_cpu[cpu];
 }
 
-/* Q16.16 fixed-point unit value (represents 1.0). pmu.c stays in
- * `-mgeneral-regs-only` land by keeping cache_pressure as Q16.16;
- * ai_state.c (FP-clean) divides by 65536.0f to get the float. */
-#define PMU_Q16_ONE (1u << 16)
-
 /*
  * Per-CPU cache_pressure cache, stored as Q16.16 fixed point so the
  * AI scheduler can pull a [0.0, 1.0] value without doing FP from pmu.c

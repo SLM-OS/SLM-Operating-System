@@ -346,6 +346,56 @@ clamps via modulo and continues, with a one-shot WARN. The
 distribution may skew on 4-core platforms but no decision is dropped
 to the heuristic fallback.
 
+#### Bit-equality verification (`bench xgb-equiv`)
+
+The sibling repo's exporter emits two corpus files alongside
+`xgb_sched.smb`: `test_vectors_xgb.bin` (1000 × 108 f32 input states)
+and `expected_actions_xgb.bin` (1000 × 3 i32 ground-truth `(core,
+priority, preempt)` triples produced by Python's `TripleClassifier
+.predict`). Replay the corpus through the on-device cascade with:
+
+```
+# In the SLM-OS shell, after the stage/activate step above:
+bench xgb-equiv 0:/slmstore/test_vectors_xgb.bin 0:/slmstore/expected_actions_xgb.bin
+```
+
+The verb walks both files in lockstep, runs `rust_sched_xgb_predict`
+on each state, diffs the triple against the expected one, and prints
+a pass/fail summary plus the first-mismatch index + actual-vs-expected
+triple if any disagreement appears. Exit code is 0 on full match,
+1 on any mismatch — useful for scripted hardware verification. Both
+VFS-rooted (`/mnt/files/...`) and FAT-rooted (`0:/slmstore/...`)
+paths are accepted.
+
+This exists because the on-device walker re-implements XGBoost
+inference in `no_std` Rust (tree traversal, sigmoid, multiclass
+argmax). The synthetic 3-classifier cascade in `rust_run_tests`
+proves the FFI plumbing works; this verb proves numerical equivalence
+with the trainer on a *trained* cascade. Closes
+[#904](https://github.com/SLM-OS/SLM-Operating-System/issues/904).
+
+**Pi 5 result (2026-05-15, BCM2712 Cortex-A76 @ 2.4 GHz):**
+
+| Metric | Value |
+|--------|-------|
+| Match rate | **23 / 1000** |
+| Per-decision latency | **240,747 ns (~240 µs)** |
+| First mismatch (i=0) | got `(core=1, priority=2, preempt=1)` vs expected `(core=1, priority=1, preempt=0)` |
+
+The 977/1000 mismatch rate is a real divergence between the on-device
+walker and Python's `TripleClassifier.predict` — exactly the class of
+bug this verb was designed to catch. The shape (`core` matches at
+i=0, `priority` and `preempt` differ) is consistent with a
+derived-feature drift, label-encoder inverse-transform mismatch, or
+classifier-input-vector ordering bug. **Investigation tracked in
+[#920](https://github.com/SLM-OS/SLM-Operating-System/issues/920)**;
+the verb itself is sound and will be the canonical regression-detection
+tool once the divergence is fixed.
+
+The cascade walker is pure software (no NEON, no FP-tier divergence
+between platforms) so a Jetson run would produce identical numbers;
+not re-run on Jetson for that reason.
+
 **When to use heuristic scheduling:**
 - Latency-sensitive cooperative workloads
 - Systems with frequent task creation/destruction
@@ -569,6 +619,76 @@ matmul micro-kernel (push IPC higher) or moving Conv2D off the CPU
 | MNIST | 1 / 128 (2 MB allocated, 24 KB used) | 1 / 64 (2 MB allocated) | 23,982 bytes |
 
 The 2 MB block granularity means small models waste most of their allocated block. For production deployment with many small models, a sub-block allocator within the weight pool would improve density.
+
+---
+
+## Dynamic Batching (Runtime-Toggleable Mode)
+
+SLM-OS's `InferenceScheduler` supports a runtime-toggleable batched dispatch mode (issue #55). Concurrent inference requests are collected into a bounded queue and, on either the size threshold or a configurable timer, dispatched in a single engine call. Per the exploratory-OS framing (#848), batching is a swappable option — default OFF — not a default behavior change.
+
+This section reports the **characterisation** of that mode on Pi 5 and Jetson, not a winner. The capstone story is "the engine supports a batched dispatch mode; here is its behavior at N = 1..16 on real hardware," not "batching wins."
+
+### Workload
+
+[`bench infer-stress N [iters]`](shell.md#command-descriptions) spawns N concurrent task workers, each running `iters` MNIST inferences against the dispatcher. Reported numbers below are from the shell command with the platform's standard `iters` setting (50 for N ≤ 8, 25 for N = 16 to cap wall-clock).
+
+Configuration for all batched runs: `batch_size = 8`, `timeout_us = 5000` (the shipping defaults). With batching ON the dispatcher routes through the queue + threshold/timer path; with OFF every request takes the existing singleton path.
+
+### Pi 5 (pi-5-2) — `bench infer-stress`, native boot, 4× Cortex-A76 @ 2.4 GHz
+
+| N | Mode | req/s | min µs | avg µs | max µs | batches_full | batches_timeout | singleton |
+|---|---|---|---|---|---|---|---|---|
+|  1 | OFF | 330 | 3009 |  3010 |  3028 | 0 | 0 |  50 |
+|  1 | ON  | 330 | 3009 |  3010 |  3011 | 0 | 0 |  50 |
+|  2 | OFF | 331 | 3010 |  5918 |  6030 | 0 | 0 | 100 |
+|  2 | ON  | 331 | 3011 |  5979 |  6025 | 0 | 0 | 100 |
+|  4 | OFF | 331 | 3010 | 11555 | 54224 | 0 | 0 | 200 |
+|  4 | ON  | 331 | 3010 | 11536 | 45188 | 0 | 0 | 200 |
+|  8 | OFF | 331 | 3009 | 11750 | 57226 | 0 | 0 | 400 |
+|  8 | ON  | 331 | 3010 | 11595 | 48199 | 0 | 0 | 400 |
+| 16 | OFF | 331 | 3010 | 11642 | 48197 | 0 | 0 | 400 |
+| 16 | ON  | 331 | 3010 | 11501 | 51213 | 0 | 0 | 400 |
+
+Pi 5 max-latency outliers at N ≥ 4 (~50 ms) reflect the default cooperative-preempt scheduling (10 ms quantum), not dispatcher contention: a worker that loses CPU just after `submit_inference_sync` returns can wait several quanta before its next iteration runs. The per-iter `min` (~3.0 ms) is the true single-inference cost; `avg` widens with N because workers serialise on `EngineGuard`.
+
+### Jetson Orin Nano (jetson-nano-1) — `bench infer-stress`, slmos-kexec, 6× Cortex-A78AE
+
+CPU-path matrix (the MNIST GPU fast path is single-sample only, so even ON paths take the CPU graph here; see "GPU fast path interaction" below):
+
+| N | Mode | req/s | min µs | avg µs | max µs (noise) | batches_full | batches_timeout | singleton |
+|---|---|---|---|---|---|---|---|---|
+|  1 | OFF | 239 | 4157 |  4176 |    4203 | 0 | 0 |  50 |
+|  1 | ON  | 239 | 4166 |  4177 |    4189 | 0 | 0 |  50 |
+|  2 | OFF | 239 | 4194 |  8317 |    8377 | 0 | 0 | 100 |
+|  2 | ON  | 239 | 4175 |  8312 |    8375 | 0 | 0 | 100 |
+|  4 | OFF | 102 | 4177 | 18961 |  654563 | 0 | 0 | 200 |
+|  4 | ON  | 102 | 4172 | 17998 |  444816 | 0 | 0 | 200 |
+|  8 | OFF |  79 | 4173 | 30594 | 1099540 | 0 | 0 | 400 |
+|  8 | ON  | 102 | 4172 | 30422 | 1308376 | 0 | 0 | 400 |
+| 16 | OFF | 143 | 4175 | 28189 | 1544941 | 0 | 0 | 400 |
+| 16 | ON  | 143 | 4175 | 28022 | 1517780 | 0 | 0 | 400 |
+
+Jetson max-latency outliers (the seconds-long tails) come from L4T-side scheduling noise after `slmos-kexec` — when the Linux→SLM-OS handoff inherits a busy GIC/timer state, individual worker iterations get descheduled for hundreds of milliseconds. The per-iter `min` (~4.2 ms) reflects the actual CPU-path cost; the `avg` widens with N because workers contend on the engine lock.
+
+GPU fast path interaction: at `N = 1` with `gpu use inference on` and a v6 channel handoff present, the engine routes through `run_mnist_gpu_fastpath`. With batching ON or `N > 1`, the GPU fast path is skipped because the GPU FFI asserts `input_len == 784`. Documented limitation; a batched MNIST GPU dispatch would amortise per-call setup over N samples and is candidate future work.
+
+### Interpretation — honest characterisation
+
+**Batched dispatch never fires on this workload.** The `batches_full` and `batches_timeout` columns are zero across every row of both matrices; every iteration on every run takes the singleton path. This is the honest result for MNIST + CPU graph and is explained by the dispatcher's three-way interaction with `EngineGuard` and the configured timer:
+
+1. The submitter that reserves the only slot in an empty queue sees `pending_count == 1` in `decide_role` and takes the **Solo fallback** (releases the slot and dispatches via the existing singleton path). Without this fallback, an isolated request would block for the full `batch_timeout_us` waiting for peers that never arrive — but here the shortcut means a queue of one always self-clears in microseconds.
+2. Concurrent workers serialise on `EngineGuard` (the engine lock that has always protected `run_inference`). With per-inference cost ≈ 3 ms on Pi 5 and ≈ 4.2 ms on Jetson, the window between *worker A releasing its slot and entering* `run_inference` and *worker B arriving at the queue* is ≈ microseconds — orders of magnitude shorter than the inference itself. Two workers virtually never coexist as `PENDING` at the same instant.
+3. The configured 5 ms timer flush can only fire when at least one waiter is sitting in the queue. Because of (1) and (2), no waiters accumulate.
+
+Together these mean batched dispatch is **structurally bounded by the engine lock** in the small-model + CPU regime. Throughput peaks at the single-thread engine rate (≈ 331 req/s Pi 5, ≈ 239 req/s Jetson) regardless of N; additional workers stack as latency, not throughput.
+
+**This is not a bug — it is the realistic characterisation that 55d was specifically asked to capture.** The dispatcher is correct (every QEMU regression test passes, the timer-flush path is exercised by a deterministic test in `rust_batch_inference_test`), and the infrastructure is in place. Workloads that would actually benefit are:
+
+- **Larger per-call setup that amortises across a batch.** Transformer attention layers, multi-MB Gemm operations, or quantised inference paths whose dequant/setup cost is per-call rather than per-element.
+- **Routing batched dispatches through a GPU fast path.** The current GPU MNIST handoff is `input_len == 784` only. A batched GPU dispatch would amortise channel set-up, doorbell, and PCI write overhead over N samples — the largest potential win.
+- **A lock-free or coarser-grained engine path** so multiple workers can land in `PENDING` together. `EngineGuard` is the bottleneck today; the parent issue notes that batching naturally reduces lock contention by holding the lock for one large call instead of N small ones — but only if the batch actually forms before the lock is acquired, which it doesn't with the current Solo fallback.
+
+The capstone report should reference this section as "the batched dispatch mode is implemented and characterised end-to-end; on the MNIST + CPU workload the engine lock dominates, so the option-space addition is the deliverable, not a throughput win." Per the exploratory-OS framing (#848), an unswapped option is still a valid contribution.
 
 ---
 

@@ -24,12 +24,19 @@
 
     .global hailo_fw_start
     .global hailo_fw_end
-    /* .align 6 = 64 B = one ARM64 cache line. Keeps the blob's
-     * start at a cache-line boundary so any future code path that
-     * DMAs directly from the embedded image (instead of copying
-     * first) doesn't straddle a line. Today's path goes through
-     * BAR4 MMIO writes where alignment is only required at 4 B. */
-    .align 6
+    /* 64 B = one ARM64 cache line. Keeps the blob's start at a
+     * cache-line boundary so any future code path that DMAs directly
+     * from the embedded image (instead of copying first) doesn't
+     * straddle a line. Today's path goes through BAR4 MMIO writes
+     * where alignment is only required at 4 B.
+     *
+     * `.balign` (literal-byte align) instead of `.align` because GAS
+     * resolves `.align N` differently per arch: ARM64 takes N as the
+     * power-of-2 exponent (so `.align 6` = 64 B), x86 takes N as a
+     * literal byte count and rejects non-power-of-2 values (so
+     * `.align 6` = "alignment not a power of 2"). `.balign` is always
+     * literal-byte regardless of arch. */
+    .balign 64
 hailo_fw_start:
     .incbin xstr(HAILO_FW_BLOB_PATH)
 hailo_fw_end:

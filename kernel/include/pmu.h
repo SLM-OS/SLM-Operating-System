@@ -163,11 +163,17 @@ void pmu_sample_cache_pressure(void);
  * a plain per-CPU u32 cache that the writer updates with relaxed
  * stores. Returns 0.0 for an uninitialised slot.
  *
- * Returned as a fixed-point uint32_t scaled by 1<<16 to avoid pulling
- * FP into pmu.c (which is compiled with -mgeneral-regs-only like the
- * rest of the kernel; FP conversion lives in `ai_state.c`).
+ * Returned as a fixed-point uint32_t scaled by PMU_Q16_ONE to avoid
+ * pulling FP into pmu.c (which is compiled with -mgeneral-regs-only
+ * like the rest of the kernel; FP conversion lives in `ai_state.c`).
  */
 uint32_t pmu_get_cache_pressure_q16(uint32_t cpu);
+
+/* Q16.16 fixed-point unit value (represents 1.0 — the saturation
+ * cap for pmu_get_cache_pressure_q16). Exposed so callers and
+ * regression tests can reference the cap symbolically instead of
+ * inlining the literal. */
+#define PMU_Q16_ONE (1u << 16)
 
 #endif /* !PLATFORM_X86_64 */
 

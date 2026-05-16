@@ -40,6 +40,7 @@ from .qemu_runner import (
 from .slmos_runner import (
     ReplayDivergence,
     ReplayError,
+    ReplayRefused,
     ReplayResponse,
     SlmosRunner,
 )
@@ -73,6 +74,13 @@ class LoopConfig:
     reachable: rollback_mod.SHA_REACHABLE = field(
         default_factory=rollback_mod.git_reachable_from_main
     )
+    # How many trailing lines of the captured serial buffer to include
+    # in a batch log when replay-step fails. 30 covers the typical
+    # pre-shell window (kernel banner + driver inits + network init +
+    # shell start) without spamming the wrapper log on every transient.
+    # Bumping this in a future investigation is the easiest knob to
+    # turn for a single failing batch.
+    replay_error_stdout_tail_lines: int = 30
 
 
 def response_to_entry(
@@ -206,9 +214,37 @@ def _extend_corpus(
             pass
 
     if isinstance(result, ReplayError):
+        # Surface the tail of the captured serial buffer in the batch
+        # log. Without it, "did not see shell prompt after flash+reboot"
+        # is undiagnosable — the captured 45 s of Pi 5 serial output
+        # tells the operator whether the board hung pre-shell, emitted
+        # a different prompt, kernel-panicked, or just booted slowly.
+        # Tail-length lives on LoopConfig so a single investigation can
+        # crank it up without editing source.
+        tail_n = cfg.replay_error_stdout_tail_lines
+        stdout_tail = _tail_lines(result.stdout, tail_n)
         return _StepOutcome(
             status="error",
-            detail=f"replay-step failed: {result.message}\nstderr: {result.stderr}",
+            detail=(
+                f"replay-step failed: {result.message}\n"
+                f"stderr: {result.stderr}\n"
+                f"stdout tail (last {tail_n} lines):\n{stdout_tail}"
+            ),
+        )
+
+    if isinstance(result, ReplayRefused):
+        # State-condition refuse from the kernel — surface the exact
+        # kernel line and the classified reason so the operator can
+        # diagnose (corpus inconsistency, target seq drift, etc.)
+        # instead of seeing a generic transient. The wrapper still
+        # counts this against MAX_TRANSIENT_FAILURES for now; a future
+        # change may treat refuses as fatal-fast.
+        return _StepOutcome(
+            status="error",
+            detail=(
+                f"replay-step refused: reason={result.reason} "
+                f"line={result.raw_line!r}"
+            ),
         )
 
     if isinstance(result, ReplayDivergence):
@@ -338,6 +374,20 @@ def _ends_with_newline(path: Path) -> bool:
         except OSError:
             return True  # empty file — nothing to terminate
         return f.read(1) == b"\n"
+
+
+def _tail_lines(text: str, n: int) -> str:
+    """Return the last `n` lines of `text` (or all of it if shorter).
+    Trailing newline normalised away to avoid a doubled blank line when
+    the caller appends to a larger log entry. An empty input becomes
+    the sentinel "<empty>" so a future reader can tell "we did capture
+    but it was blank" apart from "we never tried to capture"."""
+    if not text:
+        return "<empty>"
+    lines = text.splitlines()
+    if len(lines) <= n:
+        return "\n".join(lines)
+    return "\n".join(lines[-n:])
 
 
 # Internal step outcome that carries forward into the top-level LoopOutcome.
