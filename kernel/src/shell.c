@@ -187,6 +187,9 @@ const shell_cmd_t builtin_commands[] = {
     {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe",           false, SHELL_CAT_HARDWARE},
 #endif
     {"peek",      cmd_peek,      "Read physical memory (peek <phys-hex> [count])",            false, SHELL_CAT_HARDWARE},
+#if !defined(PLATFORM_X86_64)
+    {"pmu",       cmd_pmu,       "PMU probe (pmu [probe [<iters>]])",                         true,  SHELL_CAT_HARDWARE},
+#endif
     {"poke",      cmd_poke,      "Write 32-bit word (poke <phys-hex> <val-hex>)",             true,  SHELL_CAT_HARDWARE},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"rcediag",   cmd_rcediag,   "Camera RTCPU (RCE) HSP-VM HELLO+PROTOCOL+RESUME handshake", false, SHELL_CAT_HARDWARE},

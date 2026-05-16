@@ -31,6 +31,9 @@
 #include "runtime_blob_file.h"
 #include "vmm.h"
 #include "smp.h"
+#if !defined(PLATFORM_X86_64)
+#include "pmu.h"
+#endif
 #include "cpu_supervisor.h"
 #include "ipc.h"
 #include "timer.h"
@@ -8268,6 +8271,120 @@ int cmd_timdiag(int argc, char *argv[])
 
     shell_puts("\r\n=== End Diagnostic ===\r\n");
     return 0;
+}
+
+/*
+ * pmu - PMU diagnostic shell command (#875).
+ *
+ * Probes the ARMv8-A Performance Monitor Unit on the calling CPU.
+ * Prints PMCR_EL0 state, runs a tight loop, then dumps the cycle
+ * counter and the six preset event counters. The expected outcome on
+ * working hardware (Pi 5 / Jetson when not trapped by EL3 firmware) is:
+ *
+ *   - Cycle counter advances by ~100K-1M cycles per iteration.
+ *   - INST_RETIRED (events[2]) is roughly proportional to loop size.
+ *   - L1D miss / branch mispred counters are non-zero.
+ *
+ * On Jetson under stock NVIDIA BL31, MDCR_EL3.TPM / TPMCR may trap
+ * PMU access to EL3. The probe surfaces that as `pmu_enable_self`
+ * returning false (PMCR_EL0.E bit failed to stick) and every counter
+ * reading 0.
+ */
+int cmd_pmu(int argc, char *argv[])
+{
+    const char *what = (argc >= 2) ? argv[1] : "probe";
+
+    shell_puts("\r\n=== PMU Probe ===\r\n");
+    shell_printf("Platform: %s\r\n", PLATFORM_NAME);
+    shell_printf("Calling CPU: %u\r\n", cpu_id());
+
+    bool enabled = pmu_enable_self();
+    shell_printf("pmu_enable_self() -> %s\r\n",
+                 enabled ? "true (PMCR_EL0.E stuck)"
+                         : "false (likely EL3 trap; check MDCR_EL3.TPM/TPMCR)");
+    shell_printf("pmu_is_ready()    -> %s\r\n",
+                 pmu_is_ready() ? "true" : "false");
+
+    if (!enabled) {
+        shell_puts("\r\nPMU writes are not taking effect. Subsequent reads "
+                   "will return 0.\r\n=== End PMU Probe ===\r\n");
+        return -1;
+    }
+
+    /* Read PMCR_EL0 back so we can confirm bit-for-bit what we asked
+     * for actually stuck. Helps disambiguate "writes silently ignored"
+     * from "writes partially applied". */
+    uint64_t pmcr = 0;
+    __asm__ volatile("mrs %0, pmcr_el0" : "=r"(pmcr));
+    shell_printf("PMCR_EL0          = 0x%08x\r\n", (uint32_t)pmcr);
+    shell_printf("  N (counters)    = %u\r\n",
+                 (uint32_t)((pmcr >> 11) & 0x1F));
+    shell_printf("  IMP (impl id)   = 0x%02x\r\n",
+                 (uint32_t)((pmcr >> 24) & 0xFF));
+
+    pmu_reset();
+    uint64_t c0 = pmu_read_cycles();
+    struct pmu_snapshot s0;
+    pmu_read_all(&s0);
+
+    /* Configurable iteration count for stretching the loop on slow
+     * cores. Default is 100K which keeps the probe under 1 ms on
+     * Cortex-A76 / Cortex-A78AE at typical clock rates. */
+    uint32_t iters = 100000;
+    if (argc >= 3) {
+        for (const char *p = argv[2]; *p; p++) {
+            if (*p < '0' || *p > '9') { iters = 100000; break; }
+            iters = iters * 10 + (uint32_t)(*p - '0');
+        }
+    }
+
+    /* Volatile sink so the loop doesn't get optimised away. */
+    static volatile uint64_t pmu_probe_sink;
+    for (uint32_t i = 0; i < iters; i++) {
+        pmu_probe_sink = pmu_probe_sink + (uint64_t)i;
+    }
+
+    struct pmu_snapshot s1;
+    pmu_read_all(&s1);
+    uint64_t c1 = pmu_read_cycles();
+
+    shell_printf("\r\nIterations: %u (%s)\r\n", iters, what);
+    shell_printf("Cycle counter:\r\n");
+    shell_printf("  before   = 0x%08x%08x\r\n",
+                 (uint32_t)(c0 >> 32), (uint32_t)c0);
+    shell_printf("  after    = 0x%08x%08x\r\n",
+                 (uint32_t)(c1 >> 32), (uint32_t)c1);
+    shell_printf("  delta    = %lu\r\n",
+                 (unsigned long)(c1 - c0));
+
+    static const char * const evt_names[PMU_NUM_EVENT_COUNTERS] = {
+        "L1D_CACHE_REFILL",
+        "L2D_CACHE_REFILL",
+        "INST_RETIRED   ",
+        "BR_MIS_PRED    ",
+        "MEM_ACCESS     ",
+        "STALL_BACKEND  ",
+    };
+    shell_puts("\r\nEvent counters (delta over loop):\r\n");
+    for (uint32_t i = 0; i < PMU_NUM_EVENT_COUNTERS; i++) {
+        uint32_t delta = s1.events[i] - s0.events[i];
+        shell_printf("  [%u] %s = %u\r\n", i, evt_names[i], delta);
+    }
+
+    /* Quick verdict line — helps the operator triage at a glance. */
+    if (s1.events[2] == 0 && (c1 - c0) > 0) {
+        shell_puts("\r\nVERDICT: cycle counter works but event counters "
+                   "return zero — likely QEMU TCG (no event modelling) or "
+                   "a partial-trap configuration.\r\n");
+    } else if (s1.events[2] > 0) {
+        shell_puts("\r\nVERDICT: PMU is fully live on this CPU.\r\n");
+    } else {
+        shell_puts("\r\nVERDICT: PMU is not advancing — check EL3 firmware "
+                   "trap configuration.\r\n");
+    }
+
+    shell_puts("=== End PMU Probe ===\r\n");
+    return enabled ? 0 : -1;
 }
 
 #if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
