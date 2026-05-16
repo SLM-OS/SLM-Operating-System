@@ -562,9 +562,12 @@ The C side has no need to differentiate; Rust callers can pattern-
 match on the `XgbStageError` variant if richer reporting is needed.
 
 `rust_sched_xgb_status` writes a `struct sched_model_status` (76
-bytes — pinned by `_Static_assert` in `kernel/sched/ai/runtime_model.h`
-and a matching `const _: () = assert!` in `runtime/src/sched/xgb.rs`)
-to the supplied buffer.
+bytes — pinned by `_Static_assert(sizeof(struct sched_model_status)
+== 76, ...)` in `kernel/sched/ai/runtime_model.h` and a matching
+`const _: () = assert!(core::mem::size_of::<SchedModelStatusC>() ==
+76)` in `runtime/src/sched/xgb.rs`) to the supplied buffer. Both
+asserts also cover the 20-byte `sched_model_meta` / `SchedModelMetaC`
+that nests inside it.
 
 `rust_sched_xgb_predict`'s `state` pointer must reference at least
 `AI_STATE_DIM = 108` contiguous `float`s and be 4-byte aligned (any

@@ -384,7 +384,11 @@ Validation rules:
 - leaf values must be finite
 - entire blob must be `≤ MAX_CASCADE_PAYLOAD_BYTES = 128 MB`
 - absolute caps: `MAX_CLASSIFIERS = 8`, `MAX_TREES_CASCADE = 16384`,
-  `MAX_NODES_CASCADE = 2_000_000`
+  `MAX_NODES_CASCADE = 2_000_000`. The 3-classifier requirement is
+  `ai_xgb`-specific; the XGBC wire format itself is a generic
+  N-classifier cascade up to the 8-classifier engine cap, so a future
+  scheduler kind could reuse it for a deeper or shallower cascade
+  without bumping the format version.
 
 #### Why two XGBoost formats
 
