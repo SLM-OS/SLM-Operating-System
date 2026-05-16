@@ -74,12 +74,16 @@ impl Drop for OpsGuard {
 /// Prefetch one cache line into L1 for a future read (aarch64 `prfm
 /// pldl1keep`). On other targets this is a no-op.
 ///
-/// Used by `matmul_tiled` and the 4×4 micro-kernel to hide L1 miss
-/// latency on the B-row stride. `prfm pldl1keep` is part of the ARMv8
-/// mandatory base ISA and is a hint, not a fault-on-miss: an address
-/// that's out of bounds, unmapped, or even invalid produces no fault,
-/// no architectural state change, and (worst case) just wastes the
-/// instruction slot.
+/// Only call site as of #56 PR 3 is `matmul_tiled`, which issues four
+/// of these once per 4-row group to warm the next A-block. The
+/// in-kernel B-row variant was tried and reverted (see the comment
+/// in `matmul_4x4_kernel_neon` and `docs/benchmarks.md` for the
+/// experiment record).
+///
+/// `prfm pldl1keep` is part of the ARMv8 mandatory base ISA and is a
+/// hint, not a fault-on-miss: an address that's out of bounds,
+/// unmapped, or even invalid produces no fault, no architectural
+/// state change, and (worst case) just wastes the instruction slot.
 ///
 /// `locality = "keep"` (PLDL1KEEP) tells the prefetcher the line
 /// should be kept in L1 after first use; the alternative `pldl1strm`
@@ -96,6 +100,14 @@ impl Drop for OpsGuard {
 #[inline(always)]
 #[cfg(target_arch = "aarch64")]
 unsafe fn prefetch_l1_read(addr: *const i8) {
+    // `readonly` (not `nomem`) is intentional: it lets the compiler
+    // assume the asm doesn't write memory but still treats it as
+    // reading memory, so the prefetch can't be reordered past an
+    // aliasing store. `nomem` would invite the compiler to hoist the
+    // prefetch above stores that might invalidate the same cache
+    // line — saving zero cycles and risking re-fetching the wrong
+    // line. `pure` is intentionally omitted so distinct-address
+    // prefetches are not deduplicated.
     core::arch::asm!(
         "prfm pldl1keep, [{0}]",
         in(reg) addr,
