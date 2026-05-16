@@ -7441,17 +7441,32 @@ pub extern "C" fn rust_inference_test() -> i32 {
                 inference::op_profile_snapshot(on_buf.as_mut_ptr(),
                                                inference::PROFILE_NUM_OPS)
             };
-            // Conv bucket is index 15 (see `op_type_to_index`); MNIST
-            // has 2 conv layers, so a single inference records >=2
-            // Conv invocations.
-            let conv_count = on_buf[15].count;
+            // Find the Conv bucket by `op_type` discriminant rather than
+            // a fixed slot index — that way a reorder of
+            // `engine.rs::op_type_to_index` can't silently break this
+            // check by leaving the test happily counting the wrong
+            // bucket. The slot-0/slot-17 label-ordering invariant is
+            // still covered by `profile: reset/snapshot baseline`.
+            let conv_discriminant = loader::graph::OpType::Conv as u8;
+            let conv_count = on_buf.iter()
+                .find(|e| e.op_type == conv_discriminant)
+                .map(|e| e.count)
+                .unwrap_or(0);
             let total_count: u64 = on_buf.iter().map(|e| e.count).sum();
+            // Non-Conv ops must also have fired — MNIST has MaxPool,
+            // Relu, Reshape, Add, MatMul, Softmax in addition to its 2
+            // Conv layers, so the bucket sum should exceed `conv_count`
+            // by a healthy margin. The +2 lower bound catches a
+            // hypothetical regression where only Conv records (e.g. an
+            // early-return in `execute_node` that skips the hook for
+            // non-Conv ops).
+            let non_conv_count = total_count.saturating_sub(conv_count);
             let total_ns_nonzero =
                 on_buf.iter().any(|e| e.count > 0 && e.total_ns > 0);
             let on_ok = on_run.is_ok()
                 && on_n == inference::PROFILE_NUM_OPS
                 && conv_count >= 2
-                && total_count >= conv_count
+                && non_conv_count >= 2
                 && total_ns_nonzero;
             print_test_result(
                 b"profile: enabled run records Conv ops\0", on_ok);
