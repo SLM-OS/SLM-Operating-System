@@ -766,4 +766,10 @@ void sched_ai_init(void)
 #ifndef PLATFORM_X86_64
     sched_register_policy(&sched_policy_ai_hailo);
 #endif
+    /* AI decision-trace ring (#880). Allocates ~1.9 MB from PMM,
+     * stays inert until `sched aitrace start` flips the enable flag.
+     * Failure here just leaves the ring NULL — start/record_decision
+     * become no-ops and the shell reports the missing buffer. */
+    extern int sched_trace_ai_init(void);
+    (void)sched_trace_ai_init();
 }

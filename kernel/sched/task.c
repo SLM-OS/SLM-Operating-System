@@ -705,6 +705,13 @@ void task_exit(void)
         extern void sched_ai_record_completion(struct task *task);
         sched_ai_record_completion(task);
     }
+    /* Decision-trace completion record (#880, separate from the
+     * sched_ai utilization counter above). No-op when the AI trace
+     * is not active. */
+    {
+        extern void sched_trace_ai_record_completion(struct task *task);
+        sched_trace_ai_record_completion(task);
+    }
 #endif
 
     /* Atomically set TASK_TERMINATED and dequeue under rq_lock.
