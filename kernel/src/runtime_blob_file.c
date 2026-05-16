@@ -14,9 +14,34 @@
 
 #define RUNTIME_BLOB_FAT_VOL "0:"
 
-static int runtime_blob_is_fat_path(const char *path)
+/* `0:/...` predicate. Promoted from file-static to public symbol so
+ * shell-side verbs (#904 `bench xgb-equiv`) can route reads through
+ * `runtime_blob_read_fat_buf` for corpus files that don't fit in
+ * the LittleFS mount on Pi 5. */
+int runtime_blob_is_fat_path(const char *path)
 {
     return path && path[0] == '0' && path[1] == ':' && path[2] == '/';
+}
+
+/* Forward decl: `runtime_blob_read_fat_buf` (public wrapper below)
+ * delegates to the file-static workhorse defined a few lines down. */
+static int runtime_blob_read_fat_path(const char *path,
+                                      char *resolved_out,
+                                      size_t resolved_out_cap,
+                                      uint8_t **buf_out,
+                                      size_t *buf_len_out,
+                                      size_t *pages_out);
+
+/* Public wrapper around the file-static `runtime_blob_read_fat_path`.
+ * Drops the `resolved_out` echo argument since shell verbs don't need
+ * it. See `runtime_blob_file.h` for ownership / return-code contract. */
+int runtime_blob_read_fat_buf(const char *path,
+                              uint8_t **buf_out,
+                              size_t *buf_len_out,
+                              size_t *pages_out)
+{
+    return runtime_blob_read_fat_path(path, NULL, 0, buf_out,
+                                      buf_len_out, pages_out);
 }
 
 static int runtime_blob_read_fat_path(const char *path,

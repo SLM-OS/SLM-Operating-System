@@ -815,6 +815,49 @@ pub extern "C" fn rust_run_tests() -> i32 {
         print_test_result(b"sched_xgb_rejects_bad_checksum\0", rejected);
         if !rejected { failures += 1; }
 
+        // Equivalence-loop smoke (mirrors the `bench xgb-equiv` shell verb
+        // from #904). Stage the synthetic cascade, run predict against
+        // 16 distinct state vectors, and assert every triple matches the
+        // (3, 1, 1) the build_smoke_blob fixture is hard-coded to emit.
+        // The hardware bench uses the same loop shape against a trained
+        // cascade + the sibling-repo `expected_actions_xgb.bin` corpus.
+        sched::xgb::clear();
+        let blob2 = sched::xgb::build_smoke_blob();
+        // Fail-fast: if staging or activation breaks, fail the equiv
+        // test with locality rather than letting predict's -1 cascade
+        // into a misleading "loop mismatched" diagnostic.
+        let stage_rc =
+            sched::xgb::rust_sched_xgb_stage_blob(blob2.as_ptr(), blob2.len());
+        let activate_rc = if stage_rc == 0 {
+            sched::xgb::rust_sched_xgb_activate()
+        } else {
+            -1
+        };
+        let mut equiv_ok = stage_rc == 0 && activate_rc == 0;
+        for k in 0..16u32 {
+            let mut s = [0.0_f32; 108];
+            // Vary each state slightly so we know the loop isn't
+            // returning a cached predict result.
+            s[0] = k as f32;
+            s[42] = (k as f32) * 0.1;
+            s[107] = -(k as f32);
+            let mut c: i32 = -1;
+            let mut p: i32 = -1;
+            let mut e: i32 = -1;
+            let rc = sched::xgb::rust_sched_xgb_predict(
+                s.as_ptr(),
+                &mut c as *mut i32,
+                &mut p as *mut i32,
+                &mut e as *mut i32,
+            );
+            if rc != 0 || c != 3 || p != 1 || e != 1 {
+                equiv_ok = false;
+                break;
+            }
+        }
+        print_test_result(b"sched_xgb_equiv_loop_synthetic\0", equiv_ok);
+        if !equiv_ok { failures += 1; }
+
         sched::xgb::clear();
     }
 
