@@ -68,6 +68,50 @@ impl Drop for OpsGuard {
 }
 
 // =============================================================================
+// Software prefetch helper (#56 PR 3)
+// =============================================================================
+
+/// Prefetch one cache line into L1 for a future read (aarch64 `prfm
+/// pldl1keep`). On other targets this is a no-op.
+///
+/// Used by `matmul_tiled` and the 4×4 micro-kernel to hide L1 miss
+/// latency on the B-row stride. `prfm pldl1keep` is part of the ARMv8
+/// mandatory base ISA and is a hint, not a fault-on-miss: an address
+/// that's out of bounds, unmapped, or even invalid produces no fault,
+/// no architectural state change, and (worst case) just wastes the
+/// instruction slot.
+///
+/// `locality = "keep"` (PLDL1KEEP) tells the prefetcher the line
+/// should be kept in L1 after first use; the alternative `pldl1strm`
+/// hints that the line is streaming and can be evicted. Matmul
+/// accumulators stay in L1 long enough that "keep" is the right
+/// hint.
+///
+/// # Safety
+///
+/// `addr` is treated as a hint — the caller does not need to
+/// guarantee the address is mapped or readable. The function is
+/// `unsafe` only because it takes a raw pointer; calling it with a
+/// non-canonical address on aarch64 is fine.
+#[inline(always)]
+#[cfg(target_arch = "aarch64")]
+unsafe fn prefetch_l1_read(addr: *const i8) {
+    core::arch::asm!(
+        "prfm pldl1keep, [{0}]",
+        in(reg) addr,
+        options(nostack, readonly, preserves_flags),
+    );
+}
+
+#[inline(always)]
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn prefetch_l1_read(_addr: *const i8) {
+    // No portable prefetch in core for x86-64-unknown-none here; the
+    // x86-64 C SSE kernels can issue PREFETCHT0 themselves once #847
+    // wires them up. RISC-V and other archs: no-op.
+}
+
+// =============================================================================
 // FP16 helpers
 // =============================================================================
 
@@ -795,6 +839,24 @@ unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
                     // 4×4-aligned interior — fastest path.
                     let mut ib = 0;
                     while ib < i_blocks {
+                        // Prefetch the head of the next 4-row group's
+                        // A rows (#56 PR 3). Each 4×4 kernel call
+                        // sweeps `kn` elements of A starting at
+                        // A[(ii+ib+next)*k + kk]; prefetching the
+                        // first cache line of each of the 4 rows
+                        // hides the cold-line miss when we move to
+                        // the next `ib` group. The prefetched
+                        // address may walk past the M dimension on
+                        // the last iteration — `prfm` ignores that.
+                        let next_ib = ib + 4;
+                        if next_ib < i_blocks {
+                            let a_next = ap.add((ii + next_ib) * k + kk);
+                            prefetch_l1_read(a_next as *const i8);
+                            prefetch_l1_read(a_next.add(k) as *const i8);
+                            prefetch_l1_read(a_next.add(2 * k) as *const i8);
+                            prefetch_l1_read(a_next.add(3 * k) as *const i8);
+                        }
+
                         let mut jb = 0;
                         while jb < j_blocks {
                             matmul_4x4_kernel_neon(
@@ -926,6 +988,18 @@ unsafe fn matmul_4x4_kernel_neon(
     let ap3 = ap_block.add(3 * k_stride);
 
     for kki in 0..kn {
+        // Note (#56 PR 3): an in-loop B-row prefetch was tried here
+        // (`prfm pldl1keep` with PFDIST_K = 4 / 8 / 16 lookaheads) and
+        // measured ~3% SLOWER on Pi 5 / Cortex-A76, MNIST 200-iter
+        // bench: 483 µs → 500 µs avg. The address arithmetic
+        // (`bp_block + (kki + PFDIST_K) * n_stride`) added a multiply
+        // and a compare per K-step that the Cortex-A76 hardware
+        // prefetcher already covers — the matmul tile working set
+        // (12 KB) fits in 64 KB L1D with comfortable headroom. The
+        // in-loop prefetch is intentionally NOT included. The
+        // tile-level A-row prefetch in `matmul_tiled` runs only once
+        // per 4-row group and remained neutral-to-positive, so it
+        // was kept.
         let b_row = vld1q_f32(bp_block.add(kki * n_stride));
 
         let a0 = vdupq_n_f32(*ap_block.add(kki));
