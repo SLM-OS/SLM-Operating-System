@@ -38,6 +38,47 @@ pub const CASCADE_NODE_LEN_V1: usize = 20;
 
 pub const FLAG_LEAF: u16 = 1;
 
+// Header field offsets — keep these in sync with the writer in
+// `slm-os-scheduler-ai/scripts/export_models.py` (see `_wrap_semb`,
+// `_build_xgbc_payload`, `_build_classifier_section`).
+//
+// XGB1 single-classifier header (16 bytes):
+//   [0..4]   magic = "XGB1"
+//   [4..6]   version (u16)
+//   [6..8]   reserved (u16)
+//   [8..10]  tree_count (u16)
+//   [10..12] node_count (u16)
+//   [12..16] reserved (u32)
+const OFF_VERSION: usize = 4;
+const OFF_SINGLE_RESERVED_U16: usize = 6;
+const OFF_SINGLE_TREE_COUNT: usize = 8;
+const OFF_SINGLE_NODE_COUNT: usize = 10;
+const OFF_SINGLE_RESERVED_U32: usize = 12;
+
+// XGBC cascade header (16 bytes):
+//   [0..4]   magic = "XGBC"
+//   [4..6]   version (u16)
+//   [6..8]   reserved (u16)
+//   [8..10]  n_classifiers (u16)
+//   [10..12] reserved (u16)
+//   [12..16] reserved (u32)
+const OFF_CASCADE_RESERVED_U16_LO: usize = 6;
+const OFF_CASCADE_N_CLASSIFIERS: usize = 8;
+const OFF_CASCADE_RESERVED_U16_HI: usize = 10;
+const OFF_CASCADE_RESERVED_U32: usize = 12;
+
+// XGBC per-classifier section header (16 bytes, relative to section start):
+//   [0..4]   tree_count (u32)
+//   [4..8]   node_count (u32)
+//   [8..10]  n_classes (u16)
+//   [10..12] reserved (u16)
+//   [12..16] reserved (u32)
+const OFF_CLF_TREE_COUNT: usize = 0;
+const OFF_CLF_NODE_COUNT: usize = 4;
+const OFF_CLF_N_CLASSES: usize = 8;
+const OFF_CLF_RESERVED_U16: usize = 10;
+const OFF_CLF_RESERVED_U32: usize = 12;
+
 const MAX_TREES_SINGLE: usize = 4096;
 /// XGB1 per-classifier node ceiling — bounded by the u16 wire field.
 const MAX_NODES_SINGLE: usize = 65_535;
@@ -143,16 +184,18 @@ pub fn parse_single(bytes: &[u8], max_feature_idx: usize) -> Result<XgbModel, Xg
     if bytes[0..4] != PAYLOAD_MAGIC_SINGLE_V1 {
         return Err(XgbError::BadMagic);
     }
-    let version = read_u16_le(bytes, 4);
+    let version = read_u16_le(bytes, OFF_VERSION);
     if version != PAYLOAD_VERSION_V1 {
         return Err(XgbError::UnsupportedVersion);
     }
-    if read_u16_le(bytes, 6) != 0 || read_u32_le(bytes, 12) != 0 {
+    if read_u16_le(bytes, OFF_SINGLE_RESERVED_U16) != 0
+        || read_u32_le(bytes, OFF_SINGLE_RESERVED_U32) != 0
+    {
         return Err(XgbError::NonZeroReserved);
     }
 
-    let tree_count = read_u16_le(bytes, 8) as usize;
-    let node_count = read_u16_le(bytes, 10) as usize;
+    let tree_count = read_u16_le(bytes, OFF_SINGLE_TREE_COUNT) as usize;
+    let node_count = read_u16_le(bytes, OFF_SINGLE_NODE_COUNT) as usize;
     if tree_count == 0 || node_count == 0 {
         return Err(XgbError::EmptyModel);
     }
@@ -218,18 +261,18 @@ pub fn parse_cascade(
     if bytes[0..4] != PAYLOAD_MAGIC_CASCADE_V1 {
         return Err(XgbError::BadMagic);
     }
-    let version = read_u16_le(bytes, 4);
+    let version = read_u16_le(bytes, OFF_VERSION);
     if version != PAYLOAD_VERSION_V1 {
         return Err(XgbError::UnsupportedVersion);
     }
-    if read_u16_le(bytes, 6) != 0
-        || read_u16_le(bytes, 10) != 0
-        || read_u32_le(bytes, 12) != 0
+    if read_u16_le(bytes, OFF_CASCADE_RESERVED_U16_LO) != 0
+        || read_u16_le(bytes, OFF_CASCADE_RESERVED_U16_HI) != 0
+        || read_u32_le(bytes, OFF_CASCADE_RESERVED_U32) != 0
     {
         return Err(XgbError::NonZeroReserved);
     }
 
-    let n = read_u16_le(bytes, 8) as usize;
+    let n = read_u16_le(bytes, OFF_CASCADE_N_CLASSIFIERS) as usize;
     if n == 0 {
         return Err(XgbError::EmptyModel);
     }
@@ -268,10 +311,12 @@ fn parse_classifier_section(
     if bytes.len() < header_end {
         return Err(XgbError::TooShort);
     }
-    let tree_count = read_u32_le(bytes, start) as usize;
-    let node_count = read_u32_le(bytes, start + 4) as usize;
-    let n_classes = read_u16_le(bytes, start + 8) as usize;
-    if read_u16_le(bytes, start + 10) != 0 || read_u32_le(bytes, start + 12) != 0 {
+    let tree_count = read_u32_le(bytes, start + OFF_CLF_TREE_COUNT) as usize;
+    let node_count = read_u32_le(bytes, start + OFF_CLF_NODE_COUNT) as usize;
+    let n_classes = read_u16_le(bytes, start + OFF_CLF_N_CLASSES) as usize;
+    if read_u16_le(bytes, start + OFF_CLF_RESERVED_U16) != 0
+        || read_u32_le(bytes, start + OFF_CLF_RESERVED_U32) != 0
+    {
         return Err(XgbError::NonZeroReserved);
     }
     if tree_count == 0 || node_count == 0 {
@@ -464,6 +509,14 @@ impl XgbModel {
     /// index is out of slice range. Callers are still expected to
     /// pass the right-shape slice; this is defence-in-depth, not a
     /// substitute for shaping the input correctly.
+    ///
+    /// Indexing `self.nodes[idx]` is unchecked. Parser-built models
+    /// are safe by construction: `validate_node` rejects any
+    /// `left_idx`/`right_idx >= node_count`, and `parse_roots_*`
+    /// rejects any root index that would put us out of range on the
+    /// first iteration. Test-only callers using `from_parts_for_test`
+    /// must preserve that invariant — keep all root/child indices
+    /// strictly less than `nodes.len()` or this will panic.
     pub fn eval_tree(&self, root_idx: usize, features: &[f32]) -> f32 {
         let mut idx = root_idx;
         for _ in 0..MAX_TREE_DEPTH {
@@ -549,7 +602,7 @@ impl XgbModel {
     /// `runtime_xgboost.rs`) without going through the parser's
     /// child-bounds check.
     #[cfg(test)]
-    pub(crate) fn from_parts_for_test(
+    fn from_parts_for_test(
         roots: Vec<u32>,
         nodes: Vec<Node>,
         label_classes: Vec<i32>,
