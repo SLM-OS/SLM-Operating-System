@@ -414,6 +414,16 @@ void secondary_init(uint32_t logical_cpu_id)
     timer_percpu_init();
     DEBUG_PRINT("CPU %u: timer percpu done", logical_cpu_id);
 
+#if !defined(PLATFORM_X86_64)
+    /* Initialize PMU on this CPU (#874). PMU sysregs are per-CPU, so
+     * every CPU must run pmu_enable_self() — primary CPU does it from
+     * kernel_main, secondaries from here. */
+    {
+        extern bool pmu_enable_self(void);
+        (void)pmu_enable_self();
+    }
+#endif
+
     /* Signal the primary CPU that we're online.
      * Use atomic store-release (STLR) to ensure the write is globally
      * visible. On platforms where DC CVAC doesn't propagate through

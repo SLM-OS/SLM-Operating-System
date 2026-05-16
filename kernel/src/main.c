@@ -414,6 +414,20 @@ void kernel_main(void *dtb)
     INFO("Initializing timer...");
     timer_init();
 
+#if !defined(PLATFORM_X86_64)
+    /* Initialize PMU on the primary CPU (#874). Secondary CPUs do the
+     * same from secondary_init. Safe to call before scheduler_init — the
+     * PMU sysregs are per-CPU and have no dependencies on other kernel
+     * subsystems. */
+    {
+        extern bool pmu_enable_self(void);
+        bool pmu_ok = pmu_enable_self();
+        if (!pmu_ok) {
+            WARN("PMU enable failed on primary CPU (likely EL3 trap)");
+        }
+    }
+#endif
+
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.
      * Must be after vmm_init() so the write targets NC memory (DRAM),
