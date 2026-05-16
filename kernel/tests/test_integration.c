@@ -78,8 +78,11 @@ static struct {
  * per-core L2. Cacheable BSS variables written by one CPU are invisible to
  * others. NC memory bypasses L1/L2 entirely — writes are instantly visible.
  *
- * 32 uint32_t slots at NC_MEM_SIZE - 768 (below bench stealing region at -512).
- * Each test zeroes its slots before use; tasks write, CPU 0 polls.
+ * NC_SYNC region runs from NC_MEM_SIZE - 768 up to INTEG_NC_DONE at
+ * NC_MEM_SIZE - 384, so 384 bytes / 4 = 96 uint32_t slots are available
+ * (slot 0..95). Slots 0..30 are currently in use (high-water mark below;
+ * update when adding new slot families). Each test zeroes its slots
+ * before use; tasks write, CPU 0 polls.
  */
 #if defined(PLATFORM_HAS_NC_MEMORY)
 #define NC_SYNC_BASE    (NC_MEM_BASE + NC_MEM_SIZE - 768)
@@ -1234,6 +1237,8 @@ static void test_work_stealing_distributes_load(void)
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const uint8_t *topic_name, int component_idx);
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+extern int msg_router_publish_priority(const uint8_t *topic_name,
+                                       const uint8_t *data, uint8_t priority);
 extern const uint8_t *msg_router_receive(int component_idx, uint8_t *topic_out);
 extern void msg_router_ack(int component_idx);
 extern void msg_router_unsubscribe_all(int component_idx);
@@ -1465,9 +1470,6 @@ static void ms_publisher(void *arg)
         int delivered = msg_router_publish(MS_TOPIC, payload);
         if (delivered > 0) {
             total += (uint32_t)delivered;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            NC_SYNC(NC_MSGMS_DELIVERED) = total;
-#endif
         }
     }
     ms_delivered_total = total;
@@ -1607,9 +1609,6 @@ static void test_msg_router_multi_subscriber(void)
  * acked (no starvation deadlock), subscriber receives exactly N hi + N lo,
  * total receive count matches.
  * ============================================================================ */
-
-extern int msg_router_publish_priority(const uint8_t *topic_name,
-                                       const uint8_t *data, uint8_t priority);
 
 #define PR_C_COMPONENT 22
 #define PR_MESSAGES    3
