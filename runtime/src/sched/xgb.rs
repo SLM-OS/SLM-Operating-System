@@ -259,6 +259,11 @@ pub enum XgbStageError {
     Checksum,
     PayloadInvalid,
     BadClassifierCount,
+    /// `activate()` called with no staged blob, or `rollback()` called
+    /// with no rollback slot. C-side surfaces both as `-1` (same as
+    /// any other error), but Rust callers can pattern-match for
+    /// clearer logging.
+    NotPresent,
 }
 
 fn parse_outer_header(bytes: &[u8]) -> Result<(SchedModelMetaC, &[u8]), XgbStageError> {
@@ -346,7 +351,7 @@ pub fn activate() -> Result<(), XgbStageError> {
     unsafe {
         let s = &mut *store_mut();
         if !s.staged.present() {
-            return Err(XgbStageError::BadLength);
+            return Err(XgbStageError::NotPresent);
         }
         // Move active into rollback (drops the prior rollback), then
         // staged into active. Manual swaps because Slot isn't Copy.
@@ -365,7 +370,7 @@ pub fn rollback() -> Result<(), XgbStageError> {
     unsafe {
         let s = &mut *store_mut();
         if !s.rollback.present() {
-            return Err(XgbStageError::BadLength);
+            return Err(XgbStageError::NotPresent);
         }
         // Swap active and rollback in place.
         let (a_c, a_m) = (s.active.cascade.take(), s.active.meta);
@@ -649,13 +654,12 @@ pub extern "C" fn rust_sched_xgb_clear() -> i32 {
     0
 }
 
-/// SAFETY: `out` must point to a writable `struct sched_model_status`
-/// (`SchedModelStatusC`). Layout is asserted via static-assert on the
-/// C side; mismatches surface at compile time, not at runtime.
 /// SAFETY (caller contract): `out` must point to a writable
-/// `struct sched_model_status` (`SchedModelStatusC`). Layout is
-/// asserted via `const _: () = assert!` at module scope; mismatches
-/// surface at compile time, not at runtime.
+/// `struct sched_model_status` (`SchedModelStatusC`). Layout is pinned
+/// on both sides — `const _: () = assert!` in this module
+/// (`size_of::<SchedModelStatusC>() == 76`) and `_Static_assert` in
+/// `kernel/sched/ai/runtime_model.h` — so any future reorder breaks
+/// the build instead of silently mis-reading the status payload.
 #[no_mangle]
 pub extern "C" fn rust_sched_xgb_status(out: *mut SchedModelStatusC) -> i32 {
     if out.is_null() {
@@ -685,7 +689,9 @@ pub extern "C" fn rust_sched_xgb_is_active() -> i32 {
 /// or any of the pointers is NULL.
 ///
 /// SAFETY (caller contract): `state` must point to `STATE_DIM`
-/// floats; `out_*` must be non-null and writable.
+/// contiguous `f32`s and be 4-byte aligned (any `float state[N]` on
+/// the C side satisfies this naturally). `out_*` must be non-null and
+/// writable.
 #[no_mangle]
 pub extern "C" fn rust_sched_xgb_predict(
     state: *const f32,
@@ -727,8 +733,6 @@ pub extern "C" fn rust_sched_xgb_predict(
 /// emits raw labels (3, 1, 1) regardless of input. Each classifier is
 /// 1 tree of 1 leaf with `n_classes == 1`.
 pub fn build_smoke_blob() -> Vec<u8> {
-    use core::convert::TryFrom;
-
     let mut payload: Vec<u8> = Vec::new();
     payload.extend_from_slice(b"XGBC");
     payload.extend_from_slice(&1u16.to_le_bytes()); // version
@@ -754,7 +758,9 @@ pub fn build_smoke_blob() -> Vec<u8> {
         payload.extend_from_slice(&label.to_le_bytes()); // label[0]
     }
 
-    let payload_len = u32::try_from(payload.len()).unwrap();
+    // Synthetic blob is <200 bytes; `as u32` truncation is safe and
+    // avoids a panic path reachable from the kernel test harness.
+    let payload_len = payload.len() as u32;
     let checksum = fnv1a_32(&payload);
 
     let mut blob: Vec<u8> = Vec::with_capacity(SEMB_OUTER_HEADER_LEN + payload.len());

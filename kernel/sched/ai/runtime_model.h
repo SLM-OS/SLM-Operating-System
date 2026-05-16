@@ -49,6 +49,17 @@ struct sched_model_status {
     struct sched_model_meta rollback;
 };
 
+/* Byte-for-byte layout pin against `SchedModelMetaC` / `SchedModelStatusC`
+ * in `runtime/src/sched/xgb.rs`. The Rust side has the matching
+ * `const _: () = assert!(size_of::<...>() == N)` asserts at module scope;
+ * keeping both halves of the pin live means any future struct reorder
+ * (here or in xgb.rs) breaks the build instead of silently mis-reading
+ * the FFI status payload at runtime. */
+_Static_assert(sizeof(struct sched_model_meta) == 20,
+    "struct sched_model_meta must be 20 bytes for SchedModelMetaC FFI layout");
+_Static_assert(sizeof(struct sched_model_status) == 76,
+    "struct sched_model_status must be 76 bytes for SchedModelStatusC FFI layout");
+
 struct sched_runtime_mlp_model {
     uint16_t feature_version;
     uint16_t action_version;

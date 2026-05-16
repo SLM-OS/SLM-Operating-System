@@ -99,11 +99,16 @@ static uint32_t ai_xgb_assign_cpu(struct task *task)
         return sched_policy_heuristic.assign_cpu(task);
     }
 
-    /* CPU-id clamping. The cascade was trained on a 6-core space; on
-     * Pi 5 (cpu_count == 4) the core classifier can emit 4 or 5.
-     * Clamp via modulo and continue — refusing the prediction would
-     * thrash to heuristic on every Pi 5 dispatch. WARN once per
-     * session so the operator notices the deployment mismatch.
+    /* CPU-id clamping. The cascade was trained on a 6-core space
+     * (see `slm-os-scheduler-ai/training/xgboost/train.py`'s
+     * `MAX_CORES`); on Pi 5 (cpu_count == 4) the core classifier
+     * can emit 4 or 5. Clamp via modulo and continue — refusing
+     * the prediction would thrash to heuristic on every Pi 5
+     * dispatch. WARN once per session so the operator notices the
+     * deployment mismatch. The WARN's "wider topology" phrasing
+     * assumes the trainer's arity (6); if a future blob is
+     * mistrained the message will still fire and the warning will
+     * (correctly) point at the cascade.
      *
      * Negative core labels would indicate a corrupt label_classes
      * map or a Rust-side bug; treat as a hard fallback. */
@@ -137,11 +142,13 @@ static uint32_t ai_xgb_assign_cpu(struct task *task)
     /* Apply priority adjustment using the same encoding as sched_ai.c:
      *   1 = boost, 2 = reduce. Other values are no-ops. */
     if (prio_label == 1) {
-        if (task->effective_priority < TASK_PRIORITY_CRITICAL)
+        if (task->effective_priority < TASK_PRIORITY_CRITICAL) {
             task->effective_priority++;
+        }
     } else if (prio_label == 2) {
-        if (task->effective_priority > TASK_PRIORITY_IDLE)
+        if (task->effective_priority > TASK_PRIORITY_IDLE) {
             task->effective_priority--;
+        }
     }
 
     /* Preempt: boost priority so pick_next_task prefers this task. */
