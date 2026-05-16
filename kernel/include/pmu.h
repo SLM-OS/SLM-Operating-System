@@ -125,6 +125,37 @@ void pmu_read_all(struct pmu_snapshot *out);
  */
 bool pmu_is_ready(void);
 
+/*
+ * Sample the calling CPU's cache pressure (L1D miss rate) and update
+ * its per-CPU EWMA. Must run on the CPU being sampled — PMU sysregs
+ * are per-CPU. The scheduler tick (`scheduler_tick` in sched.c) is the
+ * canonical caller; each CPU updates its own slot on every tick.
+ *
+ * Does NOT reset PMU counters — it tracks deltas against the previous
+ * snapshot. The per-op profile harness (#871) calls `pmu_reset` at
+ * the start of each `execute_node`; this sampler is robust to that
+ * (subtraction with 32-bit wrap is wrap-safe in uint32_t arithmetic)
+ * but a reset between two consecutive ticks will cause that tick's
+ * sample to under-report by one execute_node's worth of misses. The
+ * AI policy already tolerates this kind of noise.
+ *
+ * No-op on PLATFORM_X86_64 and on a CPU where pmu_enable_self() has
+ * not run yet.
+ */
+void pmu_sample_cache_pressure(void);
+
+/*
+ * Read the most recent per-CPU cache_pressure EWMA for `cpu`,
+ * normalized to [0.0, 1.0]. Safe to call from any CPU — the array is
+ * a plain per-CPU u32 cache that the writer updates with relaxed
+ * stores. Returns 0.0 for an uninitialised slot.
+ *
+ * Returned as a fixed-point uint32_t scaled by 1<<16 to avoid pulling
+ * FP into pmu.c (which is compiled with -mgeneral-regs-only like the
+ * rest of the kernel; FP conversion lives in `ai_state.c`).
+ */
+uint32_t pmu_get_cache_pressure_q16(uint32_t cpu);
+
 #endif /* !PLATFORM_X86_64 */
 
 #endif /* SLM_PMU_H */
