@@ -2111,10 +2111,12 @@ if(ENABLE_AI_SCHEDULER)
     # operators opt into `real` via `make kernel AI_WEIGHTS=real` after
     # `scripts/import_ai_weights.sh --include-real`.
     if(AI_WEIGHTS STREQUAL "real")
-        # Configure-time existence check so AI_WEIGHTS=real without the
-        # imported _real.c files surfaces a discoverable error pointing
-        # at the import script, rather than a generic
-        # "cannot find source file" from the build phase.
+        # Configure-time existence check for MLP. The MLP fine-tune is
+        # the load-bearing path — without it, `AI_WEIGHTS=real` is
+        # meaningless. PPO is treated per the import script's
+        # documented "optional even with --include-real" stance: fall
+        # back to the synthetic PPO when the _real variant isn't
+        # present, so an MLP-only sibling-repo export still builds.
         if(NOT EXISTS
            "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_mlp_real.c")
             message(FATAL_ERROR
@@ -2124,8 +2126,17 @@ if(ENABLE_AI_SCHEDULER)
                 "_real export). See docs/fact-sheets/ai-scheduler.md.")
         endif()
         set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp_real.c)
-        set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)
-        message(STATUS "  AI weights: real (SLM-OS-fine-tuned, #879)")
+        if(EXISTS
+           "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_ppo_real.c")
+            set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)
+            message(STATUS "  AI weights: real MLP + real PPO (SLM-OS-fine-tuned, #879)")
+        else()
+            set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo.c)
+            message(STATUS
+                "  AI weights: real MLP + synthetic PPO "
+                "(no ai_weights_ppo_real.c — PPO fine-tune is optional per "
+                "scripts/import_ai_weights.sh --help; build will still link)")
+        endif()
     else()
         set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp.c)
         set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo.c)
