@@ -531,7 +531,7 @@ This section reports the **characterisation** of that mode on Pi 5 and Jetson, n
 
 ### Workload
 
-`bench infer-stress N [iters]` spawns N concurrent task workers, each running `iters` MNIST inferences against the dispatcher. Reported numbers below are from the shell command with the platform's standard `iters` setting (50 for N ≤ 8, 25 for N = 16 to cap wall-clock).
+[`bench infer-stress N [iters]`](shell.md#command-descriptions) spawns N concurrent task workers, each running `iters` MNIST inferences against the dispatcher. Reported numbers below are from the shell command with the platform's standard `iters` setting (50 for N ≤ 8, 25 for N = 16 to cap wall-clock).
 
 Configuration for all batched runs: `batch_size = 8`, `timeout_us = 5000` (the shipping defaults). With batching ON the dispatcher routes through the queue + threshold/timer path; with OFF every request takes the existing singleton path.
 
@@ -549,6 +549,8 @@ Configuration for all batched runs: `batch_size = 8`, `timeout_us = 5000` (the s
 |  8 | ON  | 331 | 3010 | 11595 | 48199 | 0 | 0 | 400 |
 | 16 | OFF | 331 | 3010 | 11642 | 48197 | 0 | 0 | 400 |
 | 16 | ON  | 331 | 3010 | 11501 | 51213 | 0 | 0 | 400 |
+
+Pi 5 max-latency outliers at N ≥ 4 (~50 ms) reflect the default cooperative-preempt scheduling (10 ms quantum), not dispatcher contention: a worker that loses CPU just after `submit_inference_sync` returns can wait several quanta before its next iteration runs. The per-iter `min` (~3.0 ms) is the true single-inference cost; `avg` widens with N because workers serialise on `EngineGuard`.
 
 ### Jetson Orin Nano (jetson-nano-1) — `bench infer-stress`, slmos-kexec, 6× Cortex-A78AE
 
