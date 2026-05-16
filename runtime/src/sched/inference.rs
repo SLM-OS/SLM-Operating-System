@@ -47,12 +47,18 @@ pub const MAX_BATCH: usize = 32;
 const _: () = assert!(MAX_BATCH <= 255, "PENDING stores slot indices as u8");
 
 /// Maximum per-request input length supported by the batched path.
-/// Sized for MNIST (1 × 1 × 28 × 28 = 784). Requests with `input_len`
-/// greater than this fall back to the singleton path.
+/// Sized for MNIST (1 × 1 × 28 × 28 = 784).
+///
+/// LIMITATION: requests with `input_len > MAX_INPUT_DIM` silently
+/// degrade to the singleton path (no error surfaced — the caller's
+/// inference still runs, just without the chance to be batched). Bump
+/// this constant (and re-evaluate the `SCRATCH_IN` slab size) when
+/// adding a model with a larger input shape.
 pub const MAX_INPUT_DIM: usize = 784;
 
 /// Maximum per-request output length supported by the batched path.
 /// 64 matches the existing `rust_infer_*` FFI output buffer convention.
+/// Same silent-singleton-fallback semantics as `MAX_INPUT_DIM` apply.
 pub const MAX_OUTPUT_DIM: usize = 64;
 
 const DEFAULT_BATCH_SIZE: usize = 8;
@@ -656,6 +662,15 @@ fn release_slot_as_solo(slot_idx: usize) {
         }
     }
     debug_assert!(found, "solo slot must be in pending list");
+    if !found {
+        // Release-build defence: if invariant violated, leave the slot
+        // alone rather than transitioning a slot we don't actually own
+        // back to IDLE. The slot will still get cleaned up if its true
+        // owner drops a `DONE_*` result through `wait_for_slot`. The
+        // worst case is a leaked PENDING slot until reboot — better
+        // than corrupting another submitter's view of the table.
+        return;
+    }
     SLOTS[slot_idx].state.store(SLOT_IDLE, Ordering::Release);
 }
 
@@ -875,15 +890,23 @@ unsafe fn wait_for_slot(slot_idx: usize) -> Result<usize, EngineError> {
 
 // =============================================================================
 // Internal: timer flush hook (used by #859)
+//
+// The three functions below — `flush_pending_for_test`,
+// `run_dispatcher_external`, and `dispatch_heterogeneous_external` —
+// are dead code in #857 (no caller). They exist so #859 (timer flush
+// + deadline-aware bypass) can wire them up without churning #857's
+// API surface. The unified design that lands in #859 replaces them
+// with a single `run_dispatcher` callable from both the size-threshold
+// path and the waiter-driven timer-flush path; expect this entire
+// block to be removed when #859 merges.
 // =============================================================================
 
-/// Force-flush the currently pending batch. Called by the timer-flush
-/// path landing in #859 — gated behind the SCHED_LOCK so a forming
-/// batch isn't simultaneously claimed by both the timer and a fresh
-/// submitter. Returns the number of dispatched slots, or 0 if the
-/// queue was empty.
-///
-/// Reserved for #859; not wired into a real timer yet.
+/// Force-flush the currently pending batch. Reserved for #859 — not
+/// reachable from #857 production paths; only used by the test helper
+/// in `rust_batch_inference_test`. Gated behind `SCHED_LOCK` so a
+/// forming batch isn't simultaneously claimed by both the timer and a
+/// fresh submitter. Returns the number of dispatched slots, or 0 if
+/// the queue was empty.
 #[doc(hidden)]
 pub unsafe fn flush_pending_for_test() -> usize {
     let (indices, count, run) = {
@@ -1118,14 +1141,18 @@ impl InferenceScheduler {
         batching_enabled()
     }
 
-    /// Submit a metadata-only request handle. Real submission (with
-    /// buffer pointers) goes through `submit_inference_sync`.
-    pub fn submit(&mut self, request: InferenceRequest) -> Result<u64, SchedulerError> {
-        if !batching_enabled() {
-            return Err(SchedulerError::NotRunning);
-        }
-        STAT_TOTAL_SUBMITTED.fetch_add(1, Ordering::Relaxed);
-        Ok(request.id)
+    /// Token-based submit — NOT implemented end-to-end.
+    ///
+    /// The metadata-only `InferenceRequest` doesn't carry buffer
+    /// pointers, so this entry point has no way to deposit a request
+    /// into the queue. Real submission goes through
+    /// `submit_inference_sync` (which takes the buffers directly).
+    /// The previous shipping shape — silently incrementing
+    /// `total_submitted` and returning `Ok(request.id)` while
+    /// dropping the request on the floor — has been removed because
+    /// it would lose work for any caller who actually used it.
+    pub fn submit(&mut self, _request: InferenceRequest) -> Result<u64, SchedulerError> {
+        Err(SchedulerError::NotImplemented)
     }
 
     pub fn cancel(&mut self, _request_id: u64) -> Result<(), SchedulerError> {
