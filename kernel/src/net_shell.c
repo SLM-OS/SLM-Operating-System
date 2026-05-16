@@ -628,7 +628,11 @@ static const shell_cmd_t net_commands[] = {
     {"netstat",  cmd_netstat,  "Network statistics",                                   false, SHELL_CAT_NETWORK},
     {"ping",     cmd_ping,     "Send ICMP echo request",                               true,  SHELL_CAT_NETWORK},
 #if defined(NET_SSHD)
+    {"adduser",  cmd_adduser,  "Add SSH user (adduser <name> <password>)",             true,  SHELL_CAT_NETWORK},
+    {"deluser",  cmd_deluser,  "Remove SSH user (deluser <name>)",                     true,  SHELL_CAT_NETWORK},
+    {"passwd",   cmd_passwd,   "Change SSH user password (passwd <name> <new>)",       true,  SHELL_CAT_NETWORK},
     {"sshd",     cmd_sshd,     "SSH daemon (start|stop|status|fingerprint|regenerate-host-key)", true, SHELL_CAT_NETWORK},
+    {"whoami",   cmd_whoami,   "Print current user (console / ssh)",                   false, SHELL_CAT_NETWORK},
 #endif
     {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",                      true,  SHELL_CAT_NETWORK},
     {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true,  SHELL_CAT_NETWORK},

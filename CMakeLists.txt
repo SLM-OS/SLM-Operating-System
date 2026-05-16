@@ -467,11 +467,15 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
     add_compile_definitions(NET_SSHD_AUTOSTART=1)
 endif()
 
-# #199c demo: wolfSSH user-auth callback that accepts every login. The
-# kernel logs a WARNING on every autostart while this is wired. #199d
-# (#896) lands real scrypt-against-/etc/passwd auth and flips this OFF
-# in a one-line CMake diff — no source change needed in sshd.c.
-option(NET_SSHD_DEMO_ALLOW_ALL "wolfSSH allow-all user-auth stub (#199c demo)" ON)
+# Selects which user-auth callback wolfSSH sees:
+#   OFF (default since #199d landed) — scrypt-against-/mnt/files/etc/passwd
+#                                      via `sshd_userauth_passwd`. Bootstrap
+#                                      gate refuses every attempt until the
+#                                      operator runs `passwd <name> <pw>`.
+#   ON  (#199c demo path / debugging) — `sshd_userauth_allow_all` accepts
+#                                      every login; sshd_autostart prints
+#                                      a loud WARNING on every boot.
+option(NET_SSHD_DEMO_ALLOW_ALL "wolfSSH allow-all user-auth stub (debugging only)" OFF)
 if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_DEMO_ALLOW_ALL)
     add_compile_definitions(NET_SSHD_DEMO_ALLOW_ALL=1)
 endif()
@@ -1865,6 +1869,7 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
         kernel/lib/wolfcrypt/src/asn.c
         kernel/lib/wolfcrypt/src/sp_int.c
         kernel/lib/wolfcrypt/src/wolfmath.c
+        kernel/lib/wolfcrypt/src/pwdbased.c
     )
 
     add_library(wolfcrypt STATIC ${WOLFCRYPT_SOURCES})
@@ -1936,6 +1941,8 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
         kernel/net/ssh/host_key.c
         kernel/net/ssh/shell_io_ssh.c
         kernel/net/ssh/sshd_autostart.c
+        kernel/net/ssh/passwd.c
+        kernel/net/ssh/passwd_shell.c
     )
     target_include_directories(slmos.elf PRIVATE
         ${CMAKE_SOURCE_DIR}/kernel/net/ssh)

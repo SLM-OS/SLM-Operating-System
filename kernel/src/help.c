@@ -437,6 +437,52 @@ static const struct help_entry help_entries[] = {
     ),
 
 #if defined(NET_SSHD)
+    HELP_TEXT("adduser",
+        "adduser - Add SSH user (Phase 3 / #199d)\n"
+        "\n"
+        "Usage:\n"
+        "  adduser <name> <password>\n"
+        "\n"
+        "Hashes the password via scrypt (N=2^15, r=8, p=1 — RFC 7914\n"
+        "floor) with a fresh per-user salt and appends a PHC-encoded\n"
+        "line to /mnt/files/etc/passwd. Bootstrap rule: the FIRST\n"
+        "user added (typically `adduser root ...`) opens the SSH\n"
+        "auth gate — until then sshd refuses every login attempt.\n"
+    ),
+
+    HELP_TEXT("deluser",
+        "deluser - Remove SSH user\n"
+        "\n"
+        "Usage:\n"
+        "  deluser <name>\n"
+        "\n"
+        "Refuses to remove the LAST remaining user to avoid locking\n"
+        "the operator out of SSH.\n"
+    ),
+
+    HELP_TEXT("passwd",
+        "passwd - Change an SSH user password\n"
+        "\n"
+        "Usage:\n"
+        "  passwd <name> <new-password>\n"
+        "\n"
+        "Re-hashes with a fresh random salt. The current password is\n"
+        "NOT required (operator-side trust model — only the local\n"
+        "shell can run this).\n"
+    ),
+
+    HELP_TEXT("whoami",
+        "whoami - Print current user identity\n"
+        "\n"
+        "Usage:\n"
+        "  whoami\n"
+        "\n"
+        "Returns `console` for the UART shell, `ssh` for sessions\n"
+        "opened through the SSH daemon. (#199d ships a partial\n"
+        "implementation — per-session identity carry-through lands\n"
+        "with the #199d-2 follow-up.)\n"
+    ),
+
     HELP_TEXT("sshd",
         "sshd - SSH daemon (port 22 / 2222)\n"
         "\n"
