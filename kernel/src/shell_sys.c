@@ -3098,6 +3098,89 @@ int cmd_model(int argc, char *argv[])
         return rust_infer_bench((uint32_t)idx, iters);
     }
 
+    /*
+     * `model profile <on|off|reset|show>` — per-operator profiler hook
+     * for #56. `show` is the most useful subcommand: it prints a table
+     * of (op, count, avg, min, max) so a benchmark run can be sliced
+     * down to its dominant kernels. Workflow:
+     *   model profile reset && model bench mnist 200 && model profile show
+     * The on/off knobs are exposed so an operator can leave profiling
+     * armed across multiple bench runs (or compare profiled vs
+     * unprofiled steady-state latency).
+     */
+    if (strcmp(subcmd, "profile") == 0) {
+        if (argc < 3) {
+            shell_puts("Usage: model profile <on|off|reset|show>\r\n");
+            return -1;
+        }
+        const char *action = argv[2];
+        if (strcmp(action, "on") == 0) {
+            rust_infer_profile_enable(1);
+            shell_puts("model profile: ON\r\n");
+            return 0;
+        }
+        if (strcmp(action, "off") == 0) {
+            rust_infer_profile_enable(0);
+            shell_puts("model profile: off\r\n");
+            return 0;
+        }
+        if (strcmp(action, "reset") == 0) {
+            rust_infer_profile_reset();
+            shell_puts("model profile: cleared\r\n");
+            return 0;
+        }
+        if (strcmp(action, "show") == 0) {
+            RustOpProfileEntry entries[RUST_INFER_PROFILE_NUM_OPS];
+            int n = rust_infer_profile_snapshot(
+                entries, RUST_INFER_PROFILE_NUM_OPS);
+            if (n <= 0) {
+                shell_puts("model profile: no data\r\n");
+                return 0;
+            }
+            /*
+             * Op-type names mirror runtime/src/loader/graph.rs::OpType.
+             * Indexed by the `op_type` discriminant (255 = Unknown
+             * folds onto the last slot via the lookup below).
+             */
+            static const char *op_name[] = {
+                "MatMul", "Add", "Relu", "Softmax", "LayerNorm",
+                "Reshape", "Transpose", "Gather", "Concat",
+                "Unsqueeze", "Gemm", "Flatten", "Shape", "Constant",
+                "Cast", "Conv", "MaxPool",
+            };
+            shell_puts("Per-op profile (count / avg us / min us / max us)\r\n");
+            shell_puts("---------------------------------------------------\r\n");
+            int printed = 0;
+            for (int i = 0; i < n; i++) {
+                if (entries[i].count == 0) {
+                    continue;
+                }
+                const char *label;
+                if (entries[i].op_type < 17u) {
+                    label = op_name[entries[i].op_type];
+                } else {
+                    label = "Unknown";
+                }
+                unsigned long avg_us = (unsigned long)(
+                    entries[i].total_ns / entries[i].count / 1000u);
+                shell_printf("  %-10s  %8lu  %6lu  %6lu  %6lu\r\n",
+                    label,
+                    (unsigned long)entries[i].count,
+                    avg_us,
+                    (unsigned long)(entries[i].min_ns / 1000u),
+                    (unsigned long)(entries[i].max_ns / 1000u));
+                printed++;
+            }
+            if (printed == 0) {
+                shell_puts("  (no ops sampled — is profiling enabled?)\r\n");
+            }
+            return 0;
+        }
+        shell_printf("model profile: unknown action '%s' "
+                     "(want on|off|reset|show)\r\n", action);
+        return -1;
+    }
+
     if (strcmp(subcmd, "pin") == 0) {
         if (argc < 3) {
             shell_puts("Usage: model pin <name|idx>\r\n");

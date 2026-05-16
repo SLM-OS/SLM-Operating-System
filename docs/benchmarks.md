@@ -312,6 +312,27 @@ Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 o
 
 Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 µs. The 8 µs max jitter demonstrates deterministic inference suitable for real-time edge deployment.
 
+### Per-operator Profile (#56)
+
+The per-op profiling harness in `runtime/src/inference/engine.rs` wraps every `execute_node` dispatch in CNTPCT timestamps and accumulates per-`OpType` counts and latencies. Enable with `model profile on`, run the workload, then `model profile show` (clear with `model profile reset`). Overhead is negligible: 200-iteration MNIST bench on pi-5-2 measured 3,011 µs/inference both profile-on and profile-off (run-to-run jitter swamps the harness cost).
+
+Baseline before #56 micro-kernel work (Pi 5, BUILD_TYPE=Release, pi-5-2, 200 iterations, MNIST). Per-op figures are reported in microseconds; "calls" is the count of `execute_node` invocations across the run.
+
+| Op | Calls | Avg | Min | Max | Notes |
+|----|-------|-----|-----|-----|-------|
+| Conv | 400 | **1,433 µs** | 1,048 µs | 1,818 µs | Dominant — two conv layers × 200 iters |
+| MatMul | 200 | 22 µs | 22 µs | 24 µs | Output Gemm decomposes to one MatMul |
+| Relu | 400 | 19 µs | 7 µs | 31 µs | |
+| MaxPool | 400 | 15 µs | 6 µs | 24 µs | |
+| Add | 600 | 9 µs | 2 µs | 21 µs | Conv-bias + Gemm-bias adds |
+| Reshape | 400 | 1 µs | 1 µs | 2 µs | |
+
+Total dispatched-op time per inference (`Σ avg × calls / iters`): ~2,985 µs, accounting for ~99% of the 3,011 µs bench latency. The remaining ~26 µs is engine-side overhead (binding lookups, output copy, weight lease, atomic stats).
+
+`Conv` consumes ~95% of inference latency — the matmul micro-kernel improvements in #56 PR 2 / PR 3 target the im2col→matmul inner loop inside `conv2d`, so the speedup on this column is what the post-optimization rows track. Note the current Pi 5 baseline is **3.01 ms/inference**, higher than the 1.09 ms recorded in the cross-platform table above (which dates from an earlier build); the #56 PRs land before/after numbers against the current measurement so the delta is apples-to-apples.
+
+The Jetson hardware baseline will be captured during PR 2 deployment once the slmos-kexec deploy path is in this agent's reach.
+
 ### Model Memory Utilization
 
 | Model | Weight Blocks | Workspace Blocks | Actual Weights |

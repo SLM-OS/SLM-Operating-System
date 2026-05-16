@@ -728,6 +728,51 @@ extern int rust_infer_stats(RustInferStats *stats);
 extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 
 /*
+ * Per-operator profile entry (#56). Layout must match
+ * `runtime/src/inference/engine.rs::OpProfileEntry`.
+ * `op_type` is the same discriminant the Rust engine stores in
+ * `GraphNode.op_type` — see slm_op_type_name() for a label.
+ */
+typedef struct {
+    uint8_t  op_type;
+    uint8_t  _pad[7];
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+} RustOpProfileEntry;
+
+/*
+ * Number of profile buckets (one per OpType, plus Unknown).
+ * Mirrors PROFILE_NUM_OPS in the Rust side; if the enum gains a
+ * variant, bump both at once.
+ */
+#define RUST_INFER_PROFILE_NUM_OPS 18
+
+/*
+ * Enable or disable per-operator profiling.
+ *   enabled == 0  -> profiling off (default, near-zero overhead).
+ *   enabled != 0  -> profiling on; each op pays two CNTPCT reads
+ *                    plus three atomic updates per invocation.
+ * Returns 0.
+ */
+extern int rust_infer_profile_enable(uint32_t enabled);
+
+/*
+ * Reset every bucket to zero. Call before a measurement window so
+ * warm-up samples don't pollute the average.
+ */
+extern int rust_infer_profile_reset(void);
+
+/*
+ * Snapshot the per-operator profile into `out` (must be sized for at
+ * least `max_entries` RustOpProfileEntry slots). Returns the number
+ * of rows written, or -1 if `out` is NULL.
+ */
+extern int rust_infer_profile_snapshot(RustOpProfileEntry *out,
+                                       uint32_t max_entries);
+
+/*
  * Square FP32 matmul benchmark (128×128×128, N iterations). Prints
  * latency and achieved GFLOPS. Exercises the NEON-tiled FP32 kernel
  * on aarch64; scalar fallback on other archs.
