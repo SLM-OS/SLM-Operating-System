@@ -783,7 +783,7 @@ The AI policy observes kernel state through a fixed 108-float vector matching th
 |---------|--------|-------|
 | utilization | running_ticks / total_ticks | [0, 1] |
 | queue_depth | ready_count / 32 | [0, ~1] |
-| cache_pressure | 0.0 (future: PMU) | [0, 1] |
+| cache_pressure | L1D miss rate EWMA via PMU (#872); 0.0 on x86-64 (#870) | [0, 1] |
 | core_type | 1.0 (homogeneous) | {0, 1} |
 | isolated | sched_get_isolated_cores() bit | {0, 1} |
 | current_task_prio | effective_priority / 7 | [0, 1] |

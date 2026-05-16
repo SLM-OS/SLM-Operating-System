@@ -300,4 +300,118 @@ bool pmu_is_ready(void)
     return pmu_ready_per_cpu[cpu];
 }
 
+/* Q16.16 fixed-point unit value (represents 1.0). pmu.c stays in
+ * `-mgeneral-regs-only` land by keeping cache_pressure as Q16.16;
+ * ai_state.c (FP-clean) divides by 65536.0f to get the float. */
+#define PMU_Q16_ONE (1u << 16)
+
+/*
+ * Per-CPU cache_pressure cache, stored as Q16.16 fixed point so the
+ * AI scheduler can pull a [0.0, 1.0] value without doing FP from pmu.c
+ * (compiled -mgeneral-regs-only).
+ *
+ * Saturation point: at the chosen ceiling of 100K L1D misses per 1M
+ * cycles (≈ one miss every 10 cycles), real-time cache_pressure
+ * saturates at 1.0. The cycle-relative unit is intentional — it
+ * normalizes across clock rates so a slower CPU under the same
+ * relative pressure doesn't get a misleadingly low value. In
+ * absolute terms this corresponds to ~100M misses/sec at 1 GHz
+ * (Cortex-A76) and ~150M misses/sec at 1.5 GHz (Cortex-A78AE).
+ * Tune by editing the `saturation` constant in
+ * `pmu_sample_cache_pressure` below.
+ *
+ * Cross-CPU access model: the writer (`pmu_sample_cache_pressure`)
+ * runs on the calling CPU and only writes that CPU's own slot. The
+ * READER (`pmu_get_cache_pressure_q16`, called from
+ * `ai_state.c::extract_per_core` to fill the per-core feature
+ * vector) reads every CPU's slot from a single calling CPU. The
+ * array is in cacheable BSS, so on Pi 5 / Jetson (where DC CIVAC
+ * doesn't propagate through per-core L2 — see `kernel/CLAUDE.md`
+ * "Non-Cacheable Shared Memory") the read may return stale values
+ * for a few ticks. This is acceptable for the AI scheduler feature
+ * input — the policy already tolerates noisy inputs, and the EWMA
+ * smooths out single-sample noise. Matches the existing lock-free
+ * `ready_count` cross-CPU read pattern in
+ * `ai_state.c::extract_global`.
+ */
+static volatile uint32_t pmu_cache_pressure_q16_per_cpu[MAX_CPUS];
+
+/* Per-CPU tracking state for the EWMA. Only the owning CPU writes or
+ * reads its own slot — no cross-CPU access for this array. */
+static struct {
+    uint32_t last_misses;
+    uint64_t last_cycles;
+    bool primed;
+} pmu_cp_state[MAX_CPUS];
+
+/* EWMA smoothing factor: new sample weight = 1/4, prior weight = 3/4.
+ * Picked so a one-tick miss-rate spike doesn't dominate the AI feature,
+ * matching the noise tolerance the policy expects from sibling
+ * features in `ai_state.c`. */
+#define PMU_CP_SHIFT 2
+
+void pmu_sample_cache_pressure(void)
+{
+    uint32_t cpu = cpu_id();
+    if (cpu >= MAX_CPUS || !pmu_ready_per_cpu[cpu]) {
+        return;
+    }
+
+    /* Read L1D refill (event 0) and cycles. The "miss rate" we feed the
+     * AI scheduler is misses-per-million-cycles, normalised to a
+     * saturation ceiling — units roughly track misses/sec on a 1 GHz
+     * core, but cycle-relative so a slower CPU doesn't get artificially
+     * lower pressure. */
+    uint32_t misses = pmu_read_evcntr(0);
+    uint64_t cycles = pmu_read_cycles();
+
+    if (!pmu_cp_state[cpu].primed) {
+        pmu_cp_state[cpu].last_misses = misses;
+        pmu_cp_state[cpu].last_cycles = cycles;
+        pmu_cp_state[cpu].primed = true;
+        return;
+    }
+
+    /* Wrap-safe deltas: L1D refill is 32-bit and may wrap; cycles are
+     * 64-bit (LC=1) and won't realistically wrap between ticks. */
+    uint32_t miss_delta = misses - pmu_cp_state[cpu].last_misses;
+    uint64_t cycle_delta = cycles - pmu_cp_state[cpu].last_cycles;
+    pmu_cp_state[cpu].last_misses = misses;
+    pmu_cp_state[cpu].last_cycles = cycles;
+
+    if (cycle_delta == 0) {
+        return;  /* shouldn't happen between two ticks, but defensive */
+    }
+
+    /* misses_per_1M_cycles. Saturation ceiling is 100K-per-1M-cycles
+     * (i.e., one miss every 10 cycles ≈ extremely memory-bound). At
+     * that point we report 1.0; below that, scale linearly. */
+    uint64_t mpm = ((uint64_t)miss_delta * 1000000ULL) / cycle_delta;
+    const uint64_t saturation = 100000ULL;  /* tunable */
+    uint64_t q16;
+    if (mpm >= saturation) {
+        q16 = PMU_Q16_ONE;  /* 1.0 */
+    } else {
+        q16 = (mpm * PMU_Q16_ONE) / saturation;
+    }
+
+    /* EWMA: new = (old * 3 + sample) / 4. Use the Q16 representation
+     * directly. */
+    uint32_t prior = pmu_cache_pressure_q16_per_cpu[cpu];
+    uint64_t blended = (((uint64_t)prior * ((1u << PMU_CP_SHIFT) - 1u))
+                        + q16) >> PMU_CP_SHIFT;
+    if (blended > PMU_Q16_ONE) {
+        blended = PMU_Q16_ONE;
+    }
+    pmu_cache_pressure_q16_per_cpu[cpu] = (uint32_t)blended;
+}
+
+uint32_t pmu_get_cache_pressure_q16(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return 0;
+    }
+    return pmu_cache_pressure_q16_per_cpu[cpu];
+}
+
 #endif /* !PLATFORM_X86_64 */
