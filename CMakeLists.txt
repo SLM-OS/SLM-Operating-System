@@ -2111,6 +2111,18 @@ if(ENABLE_AI_SCHEDULER)
     # operators opt into `real` via `make kernel AI_WEIGHTS=real` after
     # `scripts/import_ai_weights.sh --include-real`.
     if(AI_WEIGHTS STREQUAL "real")
+        # Configure-time existence check so AI_WEIGHTS=real without the
+        # imported _real.c files surfaces a discoverable error pointing
+        # at the import script, rather than a generic
+        # "cannot find source file" from the build phase.
+        if(NOT EXISTS
+           "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_mlp_real.c")
+            message(FATAL_ERROR
+                "AI_WEIGHTS=real but kernel/sched/ai/ai_weights_mlp_real.c "
+                "is not present. Run: ./scripts/import_ai_weights.sh "
+                "--include-real (after the sibling-repo --weights-suffix "
+                "_real export). See docs/fact-sheets/ai-scheduler.md.")
+        endif()
         set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp_real.c)
         set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)
         message(STATUS "  AI weights: real (SLM-OS-fine-tuned, #879)")

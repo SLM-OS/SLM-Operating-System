@@ -343,7 +343,9 @@ variation, throughput. The capture is one of two `AI_WEIGHTS=` axes:
 The full matrix lands here once the hardware capture runs on pi-5-2
 and jetson-nano-1 — held until #882, #880, and #879 have all merged
 so the bench harness, trace ring, and fine-tuned weights are present
-in a single build. The matrix template:
+in a single build. QEMU rows are omitted intentionally — emulated
+timing is too noisy to characterize policy quality, and #882 already
+covers QEMU harness mechanics in CI. The matrix template:
 
 | Platform | Policy     | Weights   | DL-miss% | p50 us | p99 us | CPU-cov | Tasks/s |
 |----------|------------|-----------|---------:|-------:|-------:|--------:|--------:|
