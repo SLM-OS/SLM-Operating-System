@@ -1845,6 +1845,9 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
         kernel/lib/wolfcrypt/src/wc_encrypt.c
         kernel/lib/wolfcrypt/src/kdf.c
         kernel/lib/wolfcrypt/src/misc.c
+        kernel/lib/wolfcrypt/src/asn.c
+        kernel/lib/wolfcrypt/src/sp_int.c
+        kernel/lib/wolfcrypt/src/wolfmath.c
     )
 
     add_library(wolfcrypt STATIC ${WOLFCRYPT_SOURCES})

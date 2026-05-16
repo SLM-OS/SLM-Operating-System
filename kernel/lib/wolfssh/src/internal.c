@@ -9942,7 +9942,13 @@ struct wolfSSH_sigKeyBlockFull {
                 const char *primeName;
                 word32 primeNameSz;
             } ecc;
-
+#endif
+/* SLM-OS local patch (#199a / PR #902): the upstream wolfSSH 1.4.18
+ * source nests the Ed25519 `ed` struct inside `#ifndef WOLFSSH_NO_ECDSA`,
+ * which makes it impossible to build with Ed25519 host keys but
+ * without ECDSA NIST-curve support. Move the Ed25519 block to its
+ * own top-level ifdef so the two algorithms are independently
+ * selectable. Upstream filed as TBD. */
 #ifndef WOLFSSH_NO_ED25519
             struct {
                 ed25519_key key;
@@ -9953,7 +9959,6 @@ struct wolfSSH_sigKeyBlockFull {
                 word32 qSz;
                 byte qPad;
             } ed;
-#endif
 #endif
         } sk;
 };

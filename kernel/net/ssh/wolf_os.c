@@ -83,32 +83,13 @@ int slm_wolfcrypt_seed(unsigned char *output, unsigned int sz)
 }
 
 /* ---------------------------------------------------------------- */
-/* Time hook                                                         */
+/* Time hook — provided by lua_stubs.c                               */
 /* ---------------------------------------------------------------- */
-
 /*
- * USER_TIME pulls our `time` / `XTIME` into wolfSSL. The actual
- * macro substitution happens inside wolfcrypt: `XTIME(t)` ends up
- * calling `time(t)` (a function name, not the standard libc symbol —
- * wolfSSL uses the name without a header so we control the
- * declaration). Return value: monotonic seconds since boot.
- *
- * `time_t` here is the toolchain's freestanding header definition.
- * We pull it in via <time.h>; the bare-metal aarch64 toolchain
- * provides this header with `time_t = long` and no library symbol,
- * so the declaration here is fine.
- */
-#include <time.h>
-
-time_t time(time_t *out)
-{
-    /* CNTPCT-based monotonic seconds. timer_get_frequency() returns
-     * the counter Hz; integer division gives whole seconds. */
-    uint64_t cnt  = timer_get_count();
-    uint64_t freq = timer_get_frequency();
-    time_t   secs = (freq != 0) ? (time_t)(cnt / freq) : (time_t)0;
-    if (out != NULL) {
-        *out = secs;
-    }
-    return secs;
-}
+ * wolfSSL's USER_TIME mode calls a `time(time_t *)` function. The
+ * kernel already exposes `time()` from `kernel/src/lua_stubs.c:703`
+ * for Lua's `os.time()` — both consumers want monotonic seconds and
+ * the lua_stubs implementation does exactly that. We deliberately do
+ * NOT redefine `time()` here to avoid a multiple-definition link
+ * error; the wolfSSL build picks up the lua_stubs symbol via the
+ * common linker namespace. */

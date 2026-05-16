@@ -32,7 +32,8 @@ extern "C" {
 #define NO_STDIO_FILESYSTEM
 #define NO_WRITEV
 #define NO_WOLFSSL_DIR
-#define WOLFSSL_USER_IO         /* SSH provides its own socket send/recv */
+#define WOLFSSL_USER_IO         /* wolfSSL: user-provided socket send/recv */
+#define WOLFSSH_USER_IO         /* wolfSSH: same, gates default BSD IO in io.c */
 
 /* Custom memory + time + entropy hooks come from kernel/net/ssh/wolf_os.c. */
 #define XMALLOC_USER
@@ -155,7 +156,10 @@ extern "C" {
 #define NO_PKCS8
 #define NO_PKCS11
 #define NO_PKCS12
-#define NO_ASN
+/* NO_ASN omitted — wolfSSH unconditionally references CA_TYPE /
+ * CERT_TYPE / PRIVATEKEY_TYPE constants from asn.h. Vendoring asn.c
+ * keeps the link clean; the runtime ASN.1 paths aren't reached
+ * because OpenSSH-format keys are not PEM/PKCS#8. */
 #define NO_ASN_TIME
 #define NO_PEM
 #define NO_CERTS
