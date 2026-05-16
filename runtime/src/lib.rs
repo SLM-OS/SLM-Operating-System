@@ -26,6 +26,7 @@ use linked_list_allocator::LockedHeap;
 
 pub mod kernel_ffi;
 pub mod log;
+pub mod ml;
 pub mod mm;
 pub mod sched;
 pub mod component;
