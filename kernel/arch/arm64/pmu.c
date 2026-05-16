@@ -99,6 +99,21 @@ static inline uint64_t pmu_read_pmcr(void)
     return v;
 }
 
+/* PMEVTYPER<n>_EL0 / PMCCFILTR_EL0 filter bits (ARM ARM D13.2.125):
+ *   bit 31  P    — when set, exclude EL1 events
+ *   bit 30  U    — when set, exclude EL0 events
+ *   bit 29  NSK  — when set, toggle P semantics in NS state
+ *   bit 28  NSU  — when set, toggle U semantics in NS state
+ *   bit 27  NSH  — when set, INCLUDE NS-EL2 events (under VHE: kernel)
+ *   bit 26  M    — when set, exclude EL3 events
+ *
+ * Default (all filter bits 0) counts NS-EL1 + NS-EL0 only — NOT
+ * NS-EL2. SLM-OS runs at NS-EL2 with E2H=1+TGE=1 (VHE) on Pi 5 and
+ * Jetson; QEMU virt runs at EL1. We unconditionally set NSH=1 so
+ * EL2 events are captured under VHE. On EL1-only platforms NSH is
+ * harmless (no EL2 to filter). */
+#define PMU_FILTER_NSH (1u << 27)
+
 /*
  * Program PMEVTYPER<idx>_EL0 to track `event_id`. ARM exposes the
  * registers as 32 independent sysregs (PMEVTYPER0..30, plus the cycle-
@@ -109,7 +124,9 @@ static inline uint64_t pmu_read_pmcr(void)
  */
 static void pmu_write_evtyper(uint32_t idx, uint32_t event_id)
 {
-    uint64_t v = (uint64_t)event_id;
+    /* Include NS-EL2 events so the counters actually tick under
+     * VHE. See PMU_FILTER_NSH comment above. */
+    uint64_t v = (uint64_t)(event_id | PMU_FILTER_NSH);
     switch (idx) {
     case 0: __asm__ volatile("msr pmevtyper0_el0, %0" :: "r"(v) : "memory"); break;
     case 1: __asm__ volatile("msr pmevtyper1_el0, %0" :: "r"(v) : "memory"); break;
@@ -138,12 +155,53 @@ static uint32_t pmu_read_evcntr(uint32_t idx)
 
 bool pmu_enable_self(void)
 {
+    /*
+     * Step 0: MDCR_EL2.HPMN partition setup. HPMN[4:0] defines how
+     * many event counters are owned by the non-secure partition.
+     * Counters [HPMN, N-1] are EL2-only when running at NS-EL1 and
+     * always read as zero from NS-EL1 if not in the NS partition.
+     * On warm boot under TF-A (Pi 5 + Jetson) MDCR_EL2 may reset
+     * with HPMN=0 — all counters end up in the EL2-only half and
+     * even at NS-EL2 the cycle counter ticks but every event
+     * counter reads RAZ.
+     *
+     * Set HPMN = PMU_NUM_EVENT_COUNTERS so all six counters are in
+     * the non-secure partition. Clear HPMD (don't disable cycle
+     * counter in prohibited regions). Leave TPM/TPMCR alone — those
+     * trap NS-EL1 to EL2; since we run at NS-EL2 directly they don't
+     * affect us, and clearing them would weaken protection if EL0
+     * userspace ever runs.
+     *
+     * Only safe to do at EL2. At EL1 the MSR traps to EL2, so we
+     * detect EL by reading CurrentEL. Pi 5 (EL2+VHE) and Jetson
+     * (EL2+VHE) both take this path; QEMU virt runs at EL1 and
+     * skips it (MDCR_EL2 is firmware's responsibility there).
+     */
+    uint64_t current_el;
+    __asm__ volatile("mrs %0, currentel" : "=r"(current_el));
+    current_el = (current_el >> 2) & 0x3;
+    if (current_el >= 2) {
+        uint64_t mdcr_el2;
+        __asm__ volatile("mrs %0, mdcr_el2" : "=r"(mdcr_el2));
+        /* Clear HPMN[4:0] and set to PMU_NUM_EVENT_COUNTERS. */
+        mdcr_el2 = (mdcr_el2 & ~(uint64_t)0x1F) | (uint64_t)PMU_NUM_EVENT_COUNTERS;
+        __asm__ volatile("msr mdcr_el2, %0" :: "r"(mdcr_el2) : "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+
     /* Step 1+2: hard reset both counter banks AND enable. The C/P bits
      * are write-1-to-act, so OR-ing them with E in a single write
      * resets and starts the counters in one go. LC=1 puts the cycle
      * counter into 64-bit mode (no 32-bit wrap).
      */
     pmu_write_pmcr(PMCR_EL0_E | PMCR_EL0_P | PMCR_EL0_C | PMCR_EL0_LC);
+
+    /* PMCCFILTR_EL0 governs the cycle counter the same way
+     * PMEVTYPER<n>_EL0 governs event counters. Set NSH=1 so EL2
+     * cycles count under VHE. Other filter bits stay 0 (count
+     * EL0 + EL1, exclude EL3). */
+    __asm__ volatile("msr pmccfiltr_el0, %0"
+                     :: "r"((uint64_t)PMU_FILTER_NSH) : "memory");
 
     /* Step 3: kernel-only access. We never expose PMU reads to EL0
      * userspace (no app code at EL0 reads them today). Clear EN, SW,

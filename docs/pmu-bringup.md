@@ -35,35 +35,90 @@ wiring).
   relax under `PLATFORM_QEMU_VIRT`; hardware verification is the
   authoritative check.
 
-## Per-platform verdicts
+## Per-platform verdicts (hardware-verified 2026-05-15)
 
 | Platform | Cycle counter | Event counters | EL3 trap? | Notes |
 |----------|---------------|----------------|-----------|-------|
-| QEMU virt (TCG) | works | not modelled | no | Plumbing-only |
-| Pi 5 (Cortex-A76) | TBD on hardware | TBD on hardware | no | TF-A clears MDCR_EL3 (`armstub8-2712.S:164`); expect full access |
-| Jetson Orin Nano (Cortex-A78AE) | TBD on hardware | TBD on hardware | unknown | NVIDIA BL31 — verified by `pmu probe` per #875 |
+| QEMU virt (TCG) | works | not modelled | no | Plumbing-only — TCG doesn't emulate architectural events |
+| Pi 5 (Cortex-A76) | ✅ verified on pi-5-2 | ✅ verified on pi-5-2 | no | Needed NSH=1 in PMEVTYPER + MDCR_EL2.HPMN=6 in `pmu_enable_self` |
+| Jetson Orin Nano (Cortex-A78AE) | ✅ verified on jetson-nano-1 | ✅ verified on jetson-nano-1 | no | **Works at NS-EL2 under stock NVIDIA BL31 — no TF-A patch needed** |
 
-Hardware verdicts will be filled in as each board is captured. The
-capstone deliverable (#871's before/after-#56 row in
-`docs/benchmarks.md`) only requires Pi 5; Jetson is a bonus row when
-verification passes.
+### Pi 5 reference output (pi-5-2)
 
-## If Jetson PMU traps to EL3
+```
+=== PMU Probe ===
+Platform: Raspberry Pi 5
+pmu_enable_self() -> true (PMCR_EL0.E stuck)
+PMCR_EL0          = 0x410b3041   (IMP=ARM, IDCODE=0x0b → A76, N=6)
+PMCNTENSET_EL0    = 0x8000003f   (cycle + 6 events enabled)
+CurrentEL         = 2
+MDCR_EL2          = 0x00000006   (HPMN=6)
 
-The fallback is a TF-A patch parallel to
-`tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch`. The
-required EL3 register state:
+Iterations: 100000
+Cycle delta      = 551536        (≈5.5 cycles/iter)
+[2] INST_RETIRED = 600108        (≈6 instr/iter)
+[4] MEM_ACCESS   = 200021        (≈2 accesses/iter)
+[3] BR_MIS_PRED  = 9
+VERDICT: PMU is fully live on this CPU.
+```
+
+### Jetson reference output (jetson-nano-1)
+
+```
+=== PMU Probe ===
+Platform: Jetson Orin Nano
+PMCR_EL0          = 0x41223041   (IMP=ARM, IDCODE=0x22 → A78AE, N=6)
+PMCNTENSET_EL0    = 0x8000003f
+CurrentEL         = 2
+MDCR_EL2          = 0x00000006
+
+Iterations: 100000
+Cycle delta      = 500340        (≈5.0 cycles/iter)
+[2] INST_RETIRED = 600036        (≈6 instr/iter)
+[4] MEM_ACCESS   = 199990        (≈2 accesses/iter)
+[5] STALL_BACKEND = 416794       (vs Pi 5's 213855 — A78AE microarch differs)
+VERDICT: PMU is fully live on this CPU.
+```
+
+A78AE retires the same instruction count in ~10% fewer cycles than
+A76 (500k vs 552k) on this microbenchmark, but accumulates 2× more
+backend-stall cycles — consistent with A78AE's wider issue and
+deeper memory pipeline. Both platforms get the full six-event
+preset.
+
+## What hardware verification surfaced
+
+Two issues in the original #874 primitives that only manifested on
+real hardware (not under QEMU TCG):
+
+1. **PMEVTYPER<n>_EL0 / PMCCFILTR_EL0 NSH bit** — with NSH=0 (the
+   default after PMCR_EL0.P reset), counters DO NOT count NS-EL2
+   events. SLM-OS runs at NS-EL2 with VHE on both Pi 5 and Jetson;
+   every event counter read RAZ until NSH=1 was set.
+2. **MDCR_EL2.HPMN partition** — warm boot under TF-A can leave
+   HPMN=0, putting all counters in the EL2-only half. Even from
+   NS-EL2 itself this caused RAZ reads on the event counters (cycle
+   counter has separate gating).
+
+Both fixed in commit `1fa7aac2` on the #874 branch.
+
+## What's not needed
+
+Stock NVIDIA BL31 on Jetson Orin Nano allows NS-EL2 PMU access
+without any of the bits originally listed as fallbacks:
+
+- `MDCR_EL3.TPM` is not set by BL31 (no trap to EL3 needed).
+- `MDCR_EL3.TPMCR` is not set by BL31.
+- No TF-A patch parallel to
+  `tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch`
+  is required for PMU access. The IRQ-routing patch covers a
+  separate concern (GIC group config), unrelated to PMU.
+
+If a future Jetson L4T BSP revision changes this, the fallback
+recipe was:
 
 - `MDCR_EL3.TPM = 0` — do not trap PMU sysreg accesses to EL3.
 - `MDCR_EL3.TPMCR = 0` — do not trap PMCR_EL0 specifically.
-- `MDCR_EL2.HPMN = 6` — make all six event counters accessible from
-  NS-EL2 (HPMN ≥ N means "every counter is in the non-secure
-  partition").
 
-Without these, even a successful `pmu_enable_self` returns nonzero
-PMCR_EL0.E but reads from `pmccntr_el0` / `pmevcntr*_el0` either trap
-or return zero. The `pmu probe` shell command's verdict line
-distinguishes the two cases.
-
-Filing the TF-A patch is out of scope for #875 — the deliverable is
-the diagnostic and the documented next step.
+But on the BL31 revision present 2026-05-15 these bits are already
+permissive at NS-EL2 entry.
