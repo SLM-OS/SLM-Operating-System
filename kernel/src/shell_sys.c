@@ -1161,6 +1161,160 @@ static void bench_sched_policy(void)
                          hailo_h, 1000);
     }
 }
+
+/* --- Scheduling-quality workload comparison (#882, sub-ticket of #61) ---
+ *
+ * `bench sched-policy --workload <name> [--policy <p>|--all]` exercises
+ * a representative task mix through `scheduler_add_task` so different
+ * policies can be compared on real scheduling quality (deadline-miss
+ * rate, completion-time p50/p99, CPU-balance, throughput) rather than
+ * only inference-only decision latency.
+ *
+ * Workload definitions + the run loop live in
+ * `kernel/sched/ai/workloads.c`; this layer is the shell-side parser
+ * and pretty-printer.
+ *
+ * Per the exploratory-OS framing (#848) the harness reports
+ * characterization data; no winning policy is declared.
+ */
+#include "workloads.h"
+
+static void bench_sched_workload_print_header(const struct bench_workload *wl)
+{
+    shell_printf("\r\nWorkload: %s  (%u tasks, %u-template mix, "
+                 "%u us spacing, %u CPUs)\r\n",
+                 wl->name, (unsigned)wl->n_tasks_total,
+                 (unsigned)wl->n_templates,
+                 (unsigned)wl->arrival_spacing_us,
+                 (unsigned)cpu_count);
+    shell_puts("Policy        | Done    | DL-tasks | DL-miss% | p50 us | "
+               "p99 us | max us | CPU-cov | Tasks/s\r\n");
+    shell_puts("--------------+---------+----------+----------+--------+"
+               "--------+--------+---------+--------\r\n");
+}
+
+static void bench_sched_workload_print_row(const char *policy_name,
+                                           const struct bench_workload_result *r)
+{
+    /* Deadline-miss percent (one decimal) with safe divide. */
+    uint32_t dl_pct_x10 = 0;
+    if (r->deadline_tasks > 0) {
+        dl_pct_x10 = (uint32_t)(((uint64_t)r->deadline_misses * 1000ULL)
+                                 / (uint64_t)r->deadline_tasks);
+    }
+    /* Throughput milli-units → "N.NNN" decimal. */
+    uint64_t tp_int = r->throughput_milli / 1000ULL;
+    uint64_t tp_frac = r->throughput_milli % 1000ULL;
+    shell_printf(
+        "%-13s | %3u/%-3u | %8u | %4u.%u%%   | %6lu | %6lu | %6lu | %3u.%03u | %lu.%03lu\r\n",
+        policy_name,
+        (unsigned)r->tasks_completed,
+        (unsigned)r->tasks_dispatched,
+        (unsigned)r->deadline_tasks,
+        (unsigned)(dl_pct_x10 / 10u),
+        (unsigned)(dl_pct_x10 % 10u),
+        (unsigned long)r->completion_p50_us,
+        (unsigned long)r->completion_p99_us,
+        (unsigned long)r->completion_max_us,
+        (unsigned)(r->cpu_balance_milli_cov / 1000u),
+        (unsigned)(r->cpu_balance_milli_cov % 1000u),
+        (unsigned long)tp_int, (unsigned long)tp_frac);
+}
+
+static int bench_sched_workload_one(const struct sched_policy_ops *policy,
+                                    const struct bench_workload *wl)
+{
+    struct bench_workload_result r;
+    int rc = bench_workload_run(policy, wl, &r);
+    if (rc < 0) {
+        shell_printf("%-13s | (setup error)\r\n", policy->name);
+        return rc;
+    }
+    bench_sched_workload_print_row(policy->name, &r);
+    return 0;
+}
+
+static void bench_sched_workload_dispatch(const struct bench_workload *wl,
+                                          const char *policy_filter,
+                                          bool all_policies)
+{
+    bench_sched_workload_print_header(wl);
+
+    if (all_policies) {
+        int count = sched_policy_count();
+        for (int i = 0; i < count; i++) {
+            const struct sched_policy_ops *p = sched_policy_get(i);
+            if (!p) continue;
+            /* Skip ai_hailo when no HEF is loaded — without a model it
+             * falls back to heuristic on every assign_cpu and produces
+             * a row that's indistinguishable from heuristic. */
+            if (p->name && p->name[0] == 'a' && p->name[1] == 'i' &&
+                p->name[2] == '_' && p->name[3] == 'h') {
+                extern inference_model_handle_t ai_policy_hailo_get_model_handle(void);
+                if (ai_policy_hailo_get_model_handle() == INF_INVALID_HANDLE) continue;
+            }
+            (void)bench_sched_workload_one(p, wl);
+        }
+    } else if (policy_filter) {
+        const struct sched_policy_ops *p = sched_find_policy(policy_filter);
+        if (!p) {
+            shell_printf("Unknown policy: %s (try heuristic, ai_mlp, ai_ppo, ai_xgb)\r\n",
+                         policy_filter);
+            return;
+        }
+        (void)bench_sched_workload_one(p, wl);
+    } else {
+        const struct sched_policy_ops *p = sched_find_policy(sched_get_policy());
+        if (p) (void)bench_sched_workload_one(p, wl);
+    }
+
+    shell_puts("\r\nNote: characterization-only output per #848; no "
+               "winning policy declared.\r\n");
+}
+
+/* Returns 0 if we handled a workload mode (caller should not run the
+ * legacy inference-only path); 1 if no --workload was passed. */
+static int bench_sched_policy_cli(int argc, char *argv[])
+{
+    const char *workload_name = 0;
+    const char *policy_filter = 0;
+    bool all_policies = false;
+
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--workload") == 0 && i + 1 < argc) {
+            workload_name = argv[++i];
+        } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            policy_filter = argv[++i];
+        } else if (strcmp(argv[i], "--all") == 0) {
+            all_policies = true;
+        } else if (strcmp(argv[i], "--list-workloads") == 0) {
+            shell_puts("Workloads:\r\n");
+            for (uint32_t k = 0; k < bench_workload_count(); k++) {
+                const struct bench_workload *wl = bench_workload_get(k);
+                shell_printf("  %-18s  %u tasks, %u templates\r\n",
+                             wl->name, (unsigned)wl->n_tasks_total,
+                             (unsigned)wl->n_templates);
+            }
+            return 0;
+        } else {
+            shell_printf("Unknown sched-policy flag: %s\r\n", argv[i]);
+            shell_puts("Usage: bench sched-policy [--workload <name> "
+                       "[--policy <p>|--all]] [--list-workloads]\r\n");
+            return 0;
+        }
+    }
+
+    if (!workload_name) return 1;
+
+    const struct bench_workload *wl = bench_workload_find(workload_name);
+    if (!wl) {
+        shell_printf("Unknown workload: %s\r\n", workload_name);
+        shell_puts("Try `bench sched-policy --list-workloads`.\r\n");
+        return 0;
+    }
+    bench_sched_workload_dispatch(wl, policy_filter, all_policies);
+    return 0;
+}
 #endif /* CONFIG_AI_SCHEDULER */
 
 /* --- Scheduler stats snapshot --- */
@@ -1815,7 +1969,12 @@ int cmd_bench(int argc, char *argv[])
         }
 #if defined(CONFIG_AI_SCHEDULER)
     } else if (strcmp(argv[1], "sched-policy") == 0) {
-        bench_sched_policy();
+        /* Workload-driven scheduling-quality mode runs when --workload
+         * is present; otherwise fall through to the legacy inference-
+         * only latency benchmark for backward compatibility. */
+        if (bench_sched_policy_cli(argc, argv) != 0) {
+            bench_sched_policy();
+        }
 #endif
     } else if (strcmp(argv[1], "all") == 0) {
         shell_puts("SLM-OS Performance Benchmarks\r\n");
