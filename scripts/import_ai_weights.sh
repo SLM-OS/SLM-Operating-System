@@ -120,7 +120,51 @@ fi
 # Copy weight files
 echo "Copying weight files..."
 
-# Synthetic baseline (always)
+# The sibling-repo `--weights-suffix _real` export currently emits the
+# .c with:
+#   - `#include "ai_weights_<model>.h"` (no such header in-tree; the
+#     kernel uses `ai_weights.h`)
+#   - symbol names without the `ai_` prefix (`mlp_w0`, not `ai_mlp_w0`)
+#   - the output layer sized to the platform's actual n_actions
+#     (e.g. 24 for Pi 5) rather than the kernel's
+#     `AI_MLP_LAYER3_MAX_ROWS = 42`
+# whereas the in-tree synthetic `ai_weights_mlp.c` already ships with
+# `#include "ai_weights.h"`, `ai_`-prefixed symbols, and 42-row output
+# arrays — that version pre-dates the sibling-repo refactor and was
+# previously hand-normalized. The kernel expects both .c variants to
+# declare identical symbols since `AI_WEIGHTS=synthetic|real` selects
+# one at compile time. Normalize fresh _real imports — until the
+# sibling-repo export script is updated (follow-up to #879), this
+# rewrite IS the contract for the `_real` path. The synthetic .c is
+# imported as-is so that re-running the import script doesn't perturb
+# the in-tree synthetic baseline that previous benchmarks reference.
+normalize_real_c() {
+    local target="$1" model="$2" max_rows="$3" layer3_in="$4"
+    sed -i "s|#include \"ai_weights_${model}.h\"|#include \"ai_weights.h\"|" "${target}"
+    sed -i -E "s/\b${model}_(w|b|bn_gamma|bn_beta|bn_mean|bn_var)([0-9])\b/ai_${model}_\1\2/g" "${target}"
+    python3 "${SCRIPT_DIR}/_pad_ai_weights.py" \
+        "${target}" "${model}" "${max_rows}" "${layer3_in}"
+    # Post-condition checks. If the sibling-repo export drifts (renamed
+    # include, requoted with `<...>`, dropped the `<model>_` symbol
+    # convention, etc.) the substitutions silently no-op and the kernel
+    # link would fail later with a less informative error. Fail fast
+    # here so the operator gets a clear pointer at the rewrite contract.
+    if ! grep -q '^#include "ai_weights.h"' "${target}"; then
+        echo "Error: include normalization failed for ${target}"
+        echo "  expected: #include \"ai_weights.h\""
+        echo "  got:      $(grep -m1 '^#include' "${target}" || echo '<no include line>')"
+        exit 1
+    fi
+    if grep -E "^const float ${model}_(w|b|bn_)" "${target}" > /dev/null; then
+        echo "Error: symbol rename failed for ${target}"
+        echo "  found stale (non-ai_-prefixed) ${model}_* symbol(s):"
+        grep -E "^const float ${model}_(w|b|bn_)" "${target}" | head -3
+        exit 1
+    fi
+}
+
+# Synthetic baseline (always) — imported as-is, do not normalize, see
+# comment above.
 if [ -f "${SOURCE_DIR}/ai_weights_mlp.c" ]; then
     cp "${SOURCE_DIR}/ai_weights_mlp.c" "${KERNEL_AI_DIR}/ai_weights_mlp.c"
     echo "  ai_weights_mlp.c -> kernel/sched/ai/"
@@ -130,15 +174,17 @@ if [ -f "${SOURCE_DIR}/ai_weights_ppo.c" ]; then
     echo "  ai_weights_ppo.c -> kernel/sched/ai/"
 fi
 
-# Fine-tuned (only when requested)
+# Fine-tuned (only when requested) — normalize on import.
 if [ ${INCLUDE_REAL} -eq 1 ]; then
     if [ -f "${SOURCE_DIR}/ai_weights_mlp_real.c" ]; then
         cp "${SOURCE_DIR}/ai_weights_mlp_real.c" "${KERNEL_AI_DIR}/ai_weights_mlp_real.c"
-        echo "  ai_weights_mlp_real.c -> kernel/sched/ai/"
+        normalize_real_c "${KERNEL_AI_DIR}/ai_weights_mlp_real.c" mlp 42 128
+        echo "  ai_weights_mlp_real.c -> kernel/sched/ai/  (include/symbol/pad normalized)"
     fi
     if [ -f "${SOURCE_DIR}/ai_weights_ppo_real.c" ]; then
         cp "${SOURCE_DIR}/ai_weights_ppo_real.c" "${KERNEL_AI_DIR}/ai_weights_ppo_real.c"
-        echo "  ai_weights_ppo_real.c -> kernel/sched/ai/"
+        normalize_real_c "${KERNEL_AI_DIR}/ai_weights_ppo_real.c" ppo 42 128
+        echo "  ai_weights_ppo_real.c -> kernel/sched/ai/  (include/symbol/pad normalized)"
     fi
 fi
 
