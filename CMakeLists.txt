@@ -458,11 +458,28 @@ if(ENABLE_NETWORKING AND NET_SSHD)
     add_compile_definitions(NET_SSHD=1)
 endif()
 
-# SSH daemon auto-start at boot. Default OFF for the entire #199
-# chain — the bootstrap gate added in #199d (#896) is what makes a
-# default-on flip safe, and #199e (#895) is where the flip happens.
-# Until then, the daemon is opt-in via shell command (`sshd start`).
-option(NET_SSHD_AUTOSTART "Start sshd at boot (unauthenticated until #199d/#199e)" OFF)
+# SSH daemon auto-start at boot. Flipped to default ON in #199e
+# (#895) — the bootstrap gate from #199d (#896) makes this safe:
+# `sshd_userauth_passwd` refuses every connection until at least one
+# user has been provisioned via `adduser` on the console (see
+# `kernel/net/ssh/passwd.c::passwd_any_users`). A boot with
+# NET_SSHD=ON but no /etc/passwd exposes only a listening port that
+# rejects every login — there's no exploit window.
+#
+# Only flipped ON for the RASPI5 + JETSON lab/demo images so the
+# demo runbook can `ssh root@<ip>` without an extra serial-console
+# step. Everywhere else (QEMU_VIRT, X86_64) keeps it OFF so CI
+# images stay quiet. Operators can still override either way via
+# -DNET_SSHD_AUTOSTART=ON/OFF.
+if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
+    if(NOT DEFINED NET_SSHD_AUTOSTART)
+        set(NET_SSHD_AUTOSTART ON CACHE BOOL
+            "Start sshd at boot (bootstrap-gated: refuses connections "
+            "until first console-side `adduser` / `passwd`)")
+    endif()
+else()
+    option(NET_SSHD_AUTOSTART "Start sshd at boot (bootstrap-gated)" OFF)
+endif()
 if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
     add_compile_definitions(NET_SSHD_AUTOSTART=1)
 endif()
