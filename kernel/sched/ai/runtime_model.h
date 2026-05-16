@@ -11,6 +11,11 @@
 #define SCHED_MODEL_KIND_CONFIG           0x1003u
 #define SCHED_MODEL_KIND_THRESHOLDS       0x1004u
 #define SCHED_MODEL_KIND_REBALANCE        0x1005u
+/* XGBoost 3-classifier cascade (#855). Payload is too large
+ * (~9 MB on the trained model) for the static MLP/PPO dense pool;
+ * storage lives Rust-side and the staged/active/rollback dance
+ * forwards through the Rust FFI in xgb_ffi.rs. */
+#define SCHED_MODEL_KIND_XGBOOST          0x1006u
 #define SCHED_MODEL_BLOB_VERSION_V1       1u
 #define SCHED_MODEL_SCHEMA_VERSION_V1     1u
 #define SCHED_MODEL_FEATURE_VERSION_V1    1u

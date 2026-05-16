@@ -752,10 +752,17 @@ int sched_ai_get_rate_stats(const char *policy_name,
  * Registration
  * ============================================================================ */
 
+/* XGBoost cascade policy — defined in sched_xgb.c. Forward-declared
+ * here (no separate header) because the only external caller is
+ * `sched_ai_init` below; everything else routes through the
+ * `sched_set_policy` name lookup. */
+extern const struct sched_policy_ops sched_policy_ai_xgb;
+
 void sched_ai_init(void)
 {
     sched_register_policy(&sched_policy_ai_mlp);
     sched_register_policy(&sched_policy_ai_ppo);
+    sched_register_policy(&sched_policy_ai_xgb);
 #ifndef PLATFORM_X86_64
     sched_register_policy(&sched_policy_ai_hailo);
 #endif

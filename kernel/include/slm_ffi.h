@@ -419,6 +419,36 @@ extern int32_t rust_eviction_blob_activate(uint16_t kind_id);
 extern int32_t rust_eviction_blob_rollback(uint16_t kind_id);
 extern int32_t rust_eviction_blob_clear(uint16_t kind_id);
 
+/* ==========================================================================
+ * Scheduler XGBoost cascade FFI (#855)
+ *
+ * The XGBoost scheduler policy stores its ~9 MB cascade Rust-side
+ * because the static MLP/PPO dense pool in runtime_model.c is too
+ * narrow. The C-side runtime_model.c forwards `kind_id ==
+ * SCHED_MODEL_KIND_XGBOOST` to these entry points; everything else
+ * stays in the existing dense / config / threshold paths.
+ *
+ * Status struct must stay byte-for-byte aligned with
+ * `runtime/src/sched/xgb.rs::SchedModelStatusC`, which mirrors
+ * `struct sched_model_status` in `kernel/sched/ai/runtime_model.h`.
+ * ========================================================================== */
+extern int32_t rust_sched_xgb_validate_blob(const uint8_t *data, size_t len);
+extern int32_t rust_sched_xgb_stage_blob(const uint8_t *data, size_t len);
+extern int32_t rust_sched_xgb_activate(void);
+extern int32_t rust_sched_xgb_rollback(void);
+extern int32_t rust_sched_xgb_clear(void);
+/* `out` points to `struct sched_model_status` — same layout as the
+ * value returned by the Rust `SchedModelStatusC`. */
+extern int32_t rust_sched_xgb_status(void *out);
+extern int32_t rust_sched_xgb_is_active(void);
+/* Run the cascade against the supplied 108-d state. Writes the raw
+ * (core, priority, preempt) labels to the output pointers. Returns 0
+ * on success, -1 if no cascade is active or any pointer is NULL. */
+extern int32_t rust_sched_xgb_predict(const float *state,
+                                      int32_t *out_core,
+                                      int32_t *out_priority,
+                                      int32_t *out_preempt);
+
 /* Feature-name introspection (#112). */
 extern uint32_t rust_eviction_feature_count(void);
 extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t buf_len);

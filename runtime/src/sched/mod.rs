@@ -16,6 +16,7 @@
 pub mod deadline;
 pub mod heterogeneous;
 pub mod inference;
+pub mod xgb;
 
 // Re-export commonly used types from deadline module
 pub use deadline::{
