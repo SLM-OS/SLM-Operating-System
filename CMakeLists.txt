@@ -1858,6 +1858,14 @@ option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 #               trained values in the const float arrays.
 set(AI_WEIGHTS "synthetic" CACHE STRING "AI scheduler weight set (synthetic|real)")
 set_property(CACHE AI_WEIGHTS PROPERTY STRINGS synthetic real)
+if(NOT AI_WEIGHTS MATCHES "^(synthetic|real)$")
+    message(FATAL_ERROR
+        "AI_WEIGHTS must be 'synthetic' or 'real'; got '${AI_WEIGHTS}'. "
+        "The STRINGS property is advisory for ccmake — this guard "
+        "rejects typos (e.g., 'Real', 'realtime') at configure time "
+        "rather than letting them silently fall through to the "
+        "synthetic baseline.")
+endif()
 
 # Work-stealing scheduler (#59 Phase B, S4 default flip).
 #

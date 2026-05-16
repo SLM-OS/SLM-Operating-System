@@ -144,17 +144,18 @@ broader hardware/networking generalization remains follow-on work.
 - True preemptive multi-core scheduling on both ARM64 hardware platforms; `kernel/sched/preempt.c` + `resched_trampoline` in `vectors.S`.
 - Pi 5 default still ships cooperative pending a broader audit; Jetson default flipped 2026-05-09. See `docs/fact-sheets/preemption.md`.
 
-### Real AI Scheduler Weights — Closed by #61 capstone wrap-up
+### Real AI Scheduler Weights — Wrapped up by #61 sub-tickets
 - ✅ Plan A exported MLP/PPO weights integrated (`kernel/sched/ai/ai_weights_{mlp,ppo}.c`)
 - ✅ Inference-latency target met on Cortex-A76 (41.9 µs < 50 µs; see `docs/benchmarks.md` §"AI Scheduler Inference")
-- ✅ Real-workload comparison harness landed in #882 (PR #928): `bench sched-policy --workload <name> --all`
-- ✅ SLM-OS-trace capture + sibling-repo fine-tune flow landed in #880 (PR #931) + #879 (sibling-repo PR)
-- ✅ `AI_WEIGHTS=synthetic|real` build flag landed in #884 — both weight sets coexist on disk and the build picks one
-- Remaining: **runtime weight-blob loading**. The existing scheduler
-  `sched_blob_*` infrastructure (used today for the XGBoost cascade,
-  PR #885) could support MLP/PPO too. That would let `AI_WEIGHTS`
-  become a runtime knob rather than a build-time choice. Out of
-  scope for the capstone; tracked separately.
+- ☐🎫 Real-workload comparison harness — #882 (PR #928, pending merge): `bench sched-policy --workload <name> --all`
+- ☐🎫 SLM-OS-trace capture — #880 (PR #931, pending merge); ingester + fine-tune in sibling-repo PR for #879 (pending merge)
+- ☐🎫 `AI_WEIGHTS=synthetic|real` build flag — #884 (this PR, pending merge); both weight sets coexist on disk, the build picks one
+- ☐ **Runtime weight-blob loading** — out-of-scope follow-up. The
+  existing scheduler `sched_blob_*` infrastructure (used today for the
+  XGBoost cascade, PR #885) could support MLP/PPO too. That would
+  let `AI_WEIGHTS` become a runtime knob rather than a build-time
+  choice. Out of scope for the capstone; tracked separately. The
+  ☐🎫 entries above flip to ✅ as their PRs merge.
 
 ### XGBoost Inference (2-3 weeks)
 - Tree traversal for cascaded classification

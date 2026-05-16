@@ -324,6 +324,10 @@ a stable target shape.
 
 ### Scheduling-quality matrix (#61, capstone wrap-up)
 
+**Status:** matrix template only — hardware capture pending merge of
+#882 (PR #928), #880 (PR #931), and the sibling-repo PR for #879, plus
+a coordinated session on pi-5-2 / jetson-nano-1.
+
 `bench sched-policy --workload <name> --all` (added in #882, PR #928)
 exercises all four registered policies through a representative task
 mix and reports per-policy scheduling-quality metrics — deadline-miss

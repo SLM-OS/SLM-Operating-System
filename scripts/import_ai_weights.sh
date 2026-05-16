@@ -46,6 +46,8 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --source <path>   Source directory (default: ${DEFAULT_SOURCE})"
             echo "  --include-real    Also import _real variants (SLM-OS #879 fine-tune)"
+            echo "                    (ai_weights_ppo_real.c is optional even with --include-real,"
+            echo "                    matching the synthetic-baseline policy for PPO)"
             echo ""
             echo "Expected files in source directory:"
             echo "  ai_weights_mlp.c        MLP weight arrays (synthetic baseline)"
