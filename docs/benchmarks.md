@@ -428,6 +428,55 @@ The in-kernel B prefetch (variant 2 above) measured **3% slower** (483 → 500 �
 
 Conclusion: software prefetch is a net **no-op on Cortex-A76**. The infrastructure (a portable `prefetch_l1_read` helper and the tile-level hook) is kept in place because (a) the A78AE in Jetson Orin Nano has a different prefetcher and may behave differently, and (b) tighter inner loops on the same path (e.g. an 8×4 micro-kernel) will have more arithmetic per cache line and benefit more.
 
+### Per-operator Profile with PMU columns (#60 / #871)
+
+`model profile show` is extended in #871 with three PMU-derived columns
+appended to the latency columns above:
+
+- **L1D%** — L1 data cache miss rate over the bucket: `cache_misses /
+  cache_references × 100`. Useful for telling memory-bound ops apart
+  from compute-bound ones.
+- **IPC** — instructions retired per cycle: `instructions_retired /
+  cycles`. The compute-density indicator.
+- **mispred%** — branch mispredictions per 100 retired instructions:
+  `branch_mispredictions / instructions_retired × 100`. Surfaces
+  control-flow-heavy ops.
+
+PMU columns are blank (`-`) on QEMU TCG (event counters not modelled)
+and on platforms where the PMU has not been enabled on the calling
+CPU.
+
+#### Before/after-#56 micro-kernel — pi-5-2
+
+The headline question this section answers: **did the #56 NEON-tiled
+matmul micro-kernel reduce cache misses (memory-bound improvement),
+increase IPC (compute-bound improvement), or both?**
+
+| Build | Conv avg | Conv L1D% | Conv IPC | mispred% | Total/inf |
+|-------|---------:|----------:|---------:|---------:|----------:|
+| pre-#56 (baseline) | 1,433 µs | TBD | TBD | TBD | 3,011 µs |
+| post-#56 (micro-kernel) | TBD | TBD | TBD | TBD | TBD |
+
+Pi 5 hardware capture is gated on board availability — pi-5-2 is
+shared across the #55 / #56 / #58 / #67 workstreams. The PMU columns
+will be filled in alongside the standard latency capture on the next
+free window.
+
+**Interpretation note (to be written once data is captured):** the
+PMU columns will tell us whether Conv2D's memory-bound or compute-
+bound bottleneck moved more under #56. Honest framing: if the data
+shows neither IPC nor cache-miss rate improved meaningfully, the
+latency win came from somewhere else (less work done — for example
+loop-tiling reducing redundant loads) and that's still useful to
+know.
+
+#### Jetson (if #875 verifies)
+
+If `pmu probe` on jetson-nano-1 returns "PMU is fully live," a
+parallel Jetson row will be added below pi-5-2's. If access traps to
+EL3 under stock NVIDIA BL31, the row stays blank and the TF-A patch
+follow-up tracks the unlock work separately.
+
 ### Model Memory Utilization
 
 | Model | Weight Blocks | Workspace Blocks | Actual Weights |
