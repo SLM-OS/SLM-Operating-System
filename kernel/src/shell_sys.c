@@ -8322,6 +8322,25 @@ int cmd_pmu(int argc, char *argv[])
     shell_printf("  IMP (impl id)   = 0x%02x\r\n",
                  (uint32_t)((pmcr >> 24) & 0xFF));
 
+    /* Diagnostic: read back PMCNTENSET_EL0, PMUSERENR_EL0, MDCR_EL2.
+     * Helps narrow "writes silently ignored" — e.g., HPMN partitioning
+     * the counters into a region we can't read. */
+    uint64_t pmcnten = 0, pmuser = 0, mdcr_el2 = 0, currentel = 0;
+    __asm__ volatile("mrs %0, pmcntenset_el0" : "=r"(pmcnten));
+    __asm__ volatile("mrs %0, pmuserenr_el0" : "=r"(pmuser));
+    __asm__ volatile("mrs %0, currentel" : "=r"(currentel));
+    shell_printf("PMCNTENSET_EL0    = 0x%08x\r\n", (uint32_t)pmcnten);
+    shell_printf("PMUSERENR_EL0     = 0x%08x\r\n", (uint32_t)pmuser);
+    shell_printf("CurrentEL         = %u\r\n",
+                 (uint32_t)((currentel >> 2) & 0x3));
+    if (((currentel >> 2) & 0x3) >= 2) {
+        __asm__ volatile("mrs %0, mdcr_el2" : "=r"(mdcr_el2));
+        shell_printf("MDCR_EL2          = 0x%08x\r\n",
+                     (uint32_t)mdcr_el2);
+        shell_printf("  HPMN            = %u\r\n",
+                     (uint32_t)(mdcr_el2 & 0x1F));
+    }
+
     pmu_reset();
     uint64_t c0 = pmu_read_cycles();
     struct pmu_snapshot s0;
