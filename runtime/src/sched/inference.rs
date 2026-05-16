@@ -41,6 +41,11 @@ extern "C" {
 /// static scratch slab manageable: 32 × 784 × 4 + 32 × 64 × 4 ≈ 108 KB.
 pub const MAX_BATCH: usize = 32;
 
+// PENDING stores slot indices as u8 to halve the cacheline footprint
+// versus usize; bump to u16 (and revisit cacheline layout) if a future
+// commit grows MAX_BATCH past 255.
+const _: () = assert!(MAX_BATCH <= 255, "PENDING stores slot indices as u8");
+
 /// Maximum per-request input length supported by the batched path.
 /// Sized for MNIST (1 × 1 × 28 × 28 = 784). Requests with `input_len`
 /// greater than this fall back to the singleton path.
@@ -425,6 +430,18 @@ pub fn queue_depth() -> usize {
 ///
 /// Otherwise dispatches directly via `inference::run_inference`.
 ///
+/// # Limitation (until #859 lands)
+///
+/// When `2 ≤ N < batch_size` submitters happen to arrive together
+/// and no further submitter shows up, all `N` waiters sit in
+/// `wait_for_slot` indefinitely — `decide_role` only treats `N == 1`
+/// as the singleton-fallback case. The timer-driven partial-batch
+/// flush in #859 (5 ms after the first request lands) closes this
+/// window. Callers that need a deterministic time-bound today must
+/// either disable batching or run with `batch_size == 1`. The
+/// stress workload added in #860 exercises the threshold-driven
+/// path directly (N == batch_size), so it doesn't hit this case.
+///
 /// Returns the number of output floats written, matching the
 /// underlying engine entrypoint.
 ///
@@ -648,6 +665,20 @@ fn release_slot_as_solo(slot_idx: usize) {
 /// `self_idx` is the dispatcher's own slot — its output is materialised
 /// in place and returned to the caller. All other slots in
 /// `batch_indices[0..batch_count]` are written + signalled.
+///
+/// # Scratch-slab serialisation
+///
+/// Today only the size-threshold path enters this function, and the
+/// `PENDING_COUNT → 0` transition under `SCHED_LOCK` in `decide_role`
+/// serialises any two threshold dispatchers (the second would see an
+/// empty queue and the count couldn't tip until the first finishes).
+/// Once #859 wires a timer-flush dispatcher, the timer caller and a
+/// fresh size-threshold submitter can both exit `SCHED_LOCK` holding
+/// disjoint slot-index lists and race on `SCRATCH_IN` / `SCRATCH_OUT`.
+/// `EngineGuard` serialises the engine call itself but not the
+/// surrounding scratch fill + fan-out. #859 must either hold
+/// `SCHED_LOCK` across the engine call or introduce a separate
+/// `DISPATCH_LOCK` before adding the second entry point.
 unsafe fn run_dispatcher(
     self_idx: usize,
     batch_indices: &[u8; MAX_BATCH],
@@ -714,7 +745,25 @@ unsafe fn run_dispatcher(
 
     match result {
         Ok(total_out) => {
-            // Per-request output is total_out / batch_count.
+            // Per-request output is total_out / batch_count. The engine
+            // must return N * per_sample_output; a non-multiple total
+            // would silently misalign every caller's output buffer, so
+            // refuse it with InternalError and fail every claimed slot
+            // rather than corrupt downstream readers.
+            if total_out % batch_count != 0 {
+                for i in 0..batch_count {
+                    let idx = batch_indices[i] as usize;
+                    let slot = &SLOTS[idx];
+                    slot.result_value
+                        .store(encode_engine_error(EngineError::InternalError), Ordering::Relaxed);
+                    STAT_FAILED.fetch_add(1, Ordering::Relaxed);
+                    if idx != self_idx {
+                        slot.state.store(SLOT_DONE_ERR, Ordering::Release);
+                    }
+                }
+                SLOTS[self_idx].state.store(SLOT_IDLE, Ordering::Release);
+                return Err(EngineError::InternalError);
+            }
             let per_out = total_out / batch_count;
             // Fan-out: copy slice into each caller's output buffer and
             // signal completion. The dispatcher itself includes its
@@ -927,6 +976,18 @@ unsafe fn run_dispatcher_external(
 
     match result {
         Ok(total_out) => {
+            // Same per-slot-divisibility guard as `run_dispatcher`.
+            if total_out % batch_count != 0 {
+                for i in 0..batch_count {
+                    let idx = batch_indices[i] as usize;
+                    let slot = &SLOTS[idx];
+                    slot.result_value
+                        .store(encode_engine_error(EngineError::InternalError), Ordering::Relaxed);
+                    STAT_FAILED.fetch_add(1, Ordering::Relaxed);
+                    slot.state.store(SLOT_DONE_ERR, Ordering::Release);
+                }
+                return Err(EngineError::InternalError);
+            }
             let per_out = total_out / batch_count;
             for i in 0..batch_count {
                 let idx = batch_indices[i] as usize;
