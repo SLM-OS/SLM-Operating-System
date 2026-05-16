@@ -18,11 +18,16 @@
  * delta never exceeds the µs-scale, well below the seconds-scale 32-bit
  * overflow horizon at Pi 5 / Jetson clock rates.
  *
- * Per-CPU init: every CPU must call `pmu_enable_self()` after its MMU
- * is live (so cacheable spinlocks work). Primary CPU calls it from
- * `kernel_main`; secondary CPUs call it from `secondary_init`. Skipping
- * a CPU leaves PMCR_EL0.E=0 for that CPU and every counter on that CPU
- * reads as 0 — the counter never ticks.
+ * Per-CPU init: every CPU must call `pmu_enable_self()` after EL2 setup
+ * has reached a stable state — at NS-EL2/VHE on Pi 5 and Jetson, that
+ * means after the kernel pivots to its own EL2 vector table and HCR_EL2
+ * is configured. Primary CPU calls it from `kernel_main` (after
+ * `timer_init`); secondary CPUs call it from `secondary_init`. The
+ * function takes no locks and does not touch memory beyond a per-CPU
+ * readiness flag; the only EL-related requirement is that MDCR_EL2
+ * writes don't trap (i.e. we're at NS-EL2 directly, not EL1). Skipping
+ * a CPU leaves PMCR_EL0.E=0 for that CPU and every counter reads as 0
+ * — the counter never ticks.
  */
 
 #ifndef SLM_PMU_H
@@ -53,16 +58,23 @@
  * Initialize the PMU on the current CPU.
  *
  * Sequence (kernel/arch/arm64/pmu.c implements the steps):
- *   1. PMCR_EL0   := {LC=1, C=1, P=1, E=1} — reset all counters,
+ *   0. (EL2 only) MDCR_EL2.HPMN := PMU_NUM_EVENT_COUNTERS — put all
+ *      six event counters in the non-secure partition so NS-EL2 reads
+ *      don't return RAZ. Skipped at EL1 (where the write would trap).
+ *   1. PMCR_EL0       := {LC=1, C=1, P=1, E=1} — reset all counters,
  *      enable, put the cycle counter in 64-bit mode where supported.
- *   2. PMUSERENR_EL0  := 0 — kernel-only access (we run at EL1/EL2;
+ *   2. PMCCFILTR_EL0  := NSH=1 — count cycles in NS-EL2 (VHE). Without
+ *      this, the cycle counter stays at 0 under VHE because the default
+ *      filter excludes EL2 events.
+ *   3. PMUSERENR_EL0  := 0 — kernel-only access (we run at EL1/EL2;
  *      no EL0 PMU reads are exposed).
- *   3. PMINTENCLR_EL1 := 0xFFFFFFFF — disable PMU overflow interrupts.
+ *   4. PMINTENCLR_EL1 := 0xFFFFFFFF — disable PMU overflow interrupts.
  *      We use polled reads; interrupt routing on Pi 5 / Jetson at
  *      NS-EL2 is its own bringup and not needed for delta sampling.
- *   4. PMOVSCLR_EL0   := 0xFFFFFFFF — clear pending overflow flags.
- *   5. Program the six event counters per `pmu_default_events`.
- *   6. PMCNTENSET_EL0 := bits 0..5 + bit 31 — enable the six event
+ *   5. PMOVSCLR_EL0   := 0xFFFFFFFF — clear pending overflow flags.
+ *   6. Program the six event counters per `pmu_default_events`; each
+ *      gets PMU_FILTER_NSH OR'd in so they also count NS-EL2 events.
+ *   7. PMCNTENSET_EL0 := bits 0..5 + bit 31 — enable the six event
  *      counters and the cycle counter.
  *
  * Must be called from each CPU after its MMU is live. Safe to call
