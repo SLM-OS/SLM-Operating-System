@@ -293,6 +293,21 @@ static PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 static SCHED_LOCK: AtomicBool = AtomicBool::new(false);
 
+/// Wall-clock nanoseconds when the currently-forming batch's first
+/// request was deposited. Used by the timer-flush waiter loop (#859).
+/// Set when `PENDING_COUNT` transitions 0 → 1, reset when a dispatcher
+/// or `release_slot_as_solo` transitions it back to 0.
+///
+/// 0 = no batch is forming.
+static BATCH_FIRST_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes the actual batched-dispatch work (scratch fill + engine
+/// call + per-slot fan-out) so two dispatchers (a size-threshold caller
+/// and a timer-flush caller from a waiter) can't race on the static
+/// `SCRATCH_IN` / `SCRATCH_OUT` slabs. Held strictly *outside*
+/// `SCHED_LOCK` to keep queue mutations unblocked during dispatch.
+static SCRATCH_LOCK: AtomicBool = AtomicBool::new(false);
+
 /// Runtime-toggleable mode. Default OFF; flipped by the admin toggle
 /// landing in #860.
 static BATCHING_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -337,6 +352,28 @@ impl SchedGuard {
 impl Drop for SchedGuard {
     fn drop(&mut self) {
         SCHED_LOCK.store(false, Ordering::Release);
+    }
+}
+
+struct ScratchGuard;
+
+impl ScratchGuard {
+    fn new() -> Self {
+        while SCRATCH_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // Yield so a contending dispatcher's engine call can make
+            // progress under cooperative scheduling.
+            unsafe { sched_yield() };
+        }
+        ScratchGuard
+    }
+}
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        SCRATCH_LOCK.store(false, Ordering::Release);
     }
 }
 
@@ -420,6 +457,74 @@ pub fn queue_depth() -> usize {
 }
 
 // =============================================================================
+// Test helpers (doc-hidden — used by `rust_batch_inference_test`)
+// =============================================================================
+
+/// Inject a slot into the pending queue without taking the submitter
+/// path. Used by the #859 timer-flush test so the test thread can sit
+/// in `wait_for_slot` with a peer already enqueued, deterministically
+/// trigger the timeout claim, and dispatch a real `[N=2, input_dim]`
+/// batch through the engine. The injected slot's input pointer must
+/// stay live until the slot's state transitions to `DONE_*`.
+#[doc(hidden)]
+pub unsafe fn inject_pending_slot_for_test(
+    model_index: usize,
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Option<usize> {
+    reserve_slot(model_index, input, input_len, output, output_len)
+}
+
+/// Consume a `DONE_*` slot and transition it back to IDLE. Returns the
+/// per-slot output length on success, or the decoded `EngineError` on
+/// the error path. Used by tests that injected a slot via
+/// `inject_pending_slot_for_test` and need to clean up after the
+/// timer-flush dispatcher signalled it.
+#[doc(hidden)]
+pub unsafe fn drain_slot_for_test(slot_idx: usize) -> Result<usize, EngineError> {
+    if slot_idx >= MAX_BATCH {
+        return Err(EngineError::InvalidInput);
+    }
+    let slot = &SLOTS[slot_idx];
+    let s = slot.state.load(Ordering::Acquire);
+    match s {
+        SLOT_DONE_OK => {
+            let n = slot.result_value.load(Ordering::Relaxed) as usize;
+            slot.state.store(SLOT_IDLE, Ordering::Release);
+            Ok(n)
+        }
+        SLOT_DONE_ERR => {
+            let code = slot.result_value.load(Ordering::Relaxed);
+            slot.state.store(SLOT_IDLE, Ordering::Release);
+            Err(decode_engine_error(code))
+        }
+        _ => Err(EngineError::InternalError),
+    }
+}
+
+/// Current state of a slot — exposed only for test polling.
+#[doc(hidden)]
+pub fn slot_state_for_test(slot_idx: usize) -> u32 {
+    if slot_idx >= MAX_BATCH {
+        return u32::MAX;
+    }
+    SLOTS[slot_idx].state.load(Ordering::Acquire)
+}
+
+#[doc(hidden)]
+pub const SLOT_STATE_IDLE: u32 = SLOT_IDLE;
+#[doc(hidden)]
+pub const SLOT_STATE_PENDING: u32 = SLOT_PENDING;
+#[doc(hidden)]
+pub const SLOT_STATE_DISPATCHING: u32 = SLOT_DISPATCHING;
+#[doc(hidden)]
+pub const SLOT_STATE_DONE_OK: u32 = SLOT_DONE_OK;
+#[doc(hidden)]
+pub const SLOT_STATE_DONE_ERR: u32 = SLOT_DONE_ERR;
+
+// =============================================================================
 // Synchronous batched-dispatch helper
 // =============================================================================
 
@@ -464,7 +569,7 @@ pub unsafe fn submit_inference_sync(
     input_len: usize,
     output: *mut f32,
     output_len: usize,
-    _deadline: TaskDeadline,
+    deadline: TaskDeadline,
 ) -> Result<usize, EngineError> {
     STAT_TOTAL_SUBMITTED.fetch_add(1, Ordering::Relaxed);
 
@@ -483,11 +588,25 @@ pub unsafe fn submit_inference_sync(
         return dispatch_singleton(model_index, input, input_len, output, output_len);
     }
 
+    // Deadline-aware bypass (#859). A live deadline whose remaining
+    // slack is less than the configured batch timeout would, in the
+    // worst case, miss the deadline waiting for a batch to form. Skip
+    // the queue entirely for those requests and dispatch as a
+    // singleton.
+    if deadline.deadline_ns != 0 {
+        let slack_ns = deadline.remaining_ns();
+        let timeout_ns = (batch_timeout_us() as u64).saturating_mul(1000);
+        if slack_ns < timeout_ns {
+            STAT_BYPASSED_DEADLINE.fetch_add(1, Ordering::Relaxed);
+            return dispatch_singleton(model_index, input, input_len, output, output_len);
+        }
+    }
+
     // Try to push into the queue. We reserve a slot, then either become
-    // the dispatcher (if we tipped the count to `cfg_size`) or fall
-    // through to the singleton path (if we'd be the only request in
-    // flight — without 55b's timer flush, a lone request would block
-    // forever waiting for peers).
+    // the dispatcher (if we tipped the count to `cfg_size`), become the
+    // timer-flush dispatcher (#859 — fires from `wait_for_slot` once
+    // `BATCH_FIRST_TIME_NS + batch_timeout` elapses), or fall through
+    // to the singleton path (queue full, or we're the only entry).
     let slot_idx = match reserve_slot(model_index, input, input_len, output, output_len) {
         Some(idx) => idx,
         None => {
@@ -582,6 +701,15 @@ unsafe fn reserve_slot(
     let pending = core::ptr::addr_of_mut!(PENDING) as *mut u8;
     *pending.add(n) = idx as u8;
     PENDING_COUNT.store(n + 1, Ordering::Release);
+    if n == 0 {
+        // We're the first request in this forming batch — start the
+        // timer-flush clock. The next dispatcher (or
+        // `release_slot_as_solo`) clears this when the queue empties.
+        BATCH_FIRST_TIME_NS.store(
+            crate::kernel_ffi::get_time_ns(),
+            Ordering::Relaxed,
+        );
+    }
 
     Some(idx)
 }
@@ -628,6 +756,7 @@ fn decide_role(
             indices[i] = unsafe { *pending.add(i) };
         }
         PENDING_COUNT.store(0, Ordering::Release);
+        BATCH_FIRST_TIME_NS.store(0, Ordering::Relaxed);
         // Mark each claimed slot as DISPATCHING.
         for i in 0..n {
             let idx = indices[i] as usize;
@@ -657,6 +786,9 @@ fn release_slot_as_solo(slot_idx: usize) {
                 unsafe { *pending.add(j) = *pending.add(j + 1) };
             }
             PENDING_COUNT.store(n - 1, Ordering::Release);
+            if n - 1 == 0 {
+                BATCH_FIRST_TIME_NS.store(0, Ordering::Relaxed);
+            }
             found = true;
             break;
         }
@@ -675,7 +807,8 @@ fn release_slot_as_solo(slot_idx: usize) {
 }
 
 /// Run the batched dispatch. Called by the slot owner that triggered
-/// the dispatch threshold (or, in #859, the timer flush).
+/// the dispatch threshold or by a waiter that won the timer-flush race
+/// (#859).
 ///
 /// `self_idx` is the dispatcher's own slot — its output is materialised
 /// in place and returned to the caller. All other slots in
@@ -683,23 +816,26 @@ fn release_slot_as_solo(slot_idx: usize) {
 ///
 /// # Scratch-slab serialisation
 ///
-/// Today only the size-threshold path enters this function, and the
-/// `PENDING_COUNT → 0` transition under `SCHED_LOCK` in `decide_role`
-/// serialises any two threshold dispatchers (the second would see an
-/// empty queue and the count couldn't tip until the first finishes).
-/// Once #859 wires a timer-flush dispatcher, the timer caller and a
-/// fresh size-threshold submitter can both exit `SCHED_LOCK` holding
-/// disjoint slot-index lists and race on `SCRATCH_IN` / `SCRATCH_OUT`.
-/// `EngineGuard` serialises the engine call itself but not the
-/// surrounding scratch fill + fan-out. #859 must either hold
-/// `SCHED_LOCK` across the engine call or introduce a separate
-/// `DISPATCH_LOCK` before adding the second entry point.
+/// Two dispatchers can be in flight simultaneously: a size-threshold
+/// dispatcher (from `decide_role`) and a timer-flush dispatcher (from
+/// `wait_for_slot`'s timeout claim). Each claims its slot list under
+/// `SCHED_LOCK`, but the actual scratch fill + engine call + fan-out
+/// happens outside `SCHED_LOCK` so submission can keep flowing. The
+/// `ScratchGuard` acquired at the top of this function serialises the
+/// concurrent dispatchers on `SCRATCH_IN` / `SCRATCH_OUT` and the
+/// per-call stats updates. The engine call itself is also serialised
+/// internally by `EngineGuard`, but `ScratchGuard` is needed because
+/// the scratch fill happens *before* the engine call.
 unsafe fn run_dispatcher(
     self_idx: usize,
     batch_indices: &[u8; MAX_BATCH],
     batch_count: usize,
     kind: DispatchKind,
 ) -> Result<usize, EngineError> {
+    // Serialise concurrent dispatchers on the static scratch slabs.
+    // SchedGuard is NOT held here — submission can continue forming
+    // the next batch while we dispatch.
+    let _scratch = ScratchGuard::new();
     // All claimed slots must agree on model_index — different-model
     // batches aren't supported. The reserve protocol doesn't currently
     // gate on this, so we verify and split if necessary. In practice
@@ -862,8 +998,9 @@ unsafe fn dispatch_heterogeneous(
     self_result
 }
 
-/// Wait on a slot's completion atomic. Used by non-dispatcher
-/// submitters. Returns the result the dispatcher published.
+/// Wait on a slot's completion atomic. Periodically tries to claim the
+/// pending batch as a timer-driven flush (#859) so waiters never block
+/// indefinitely when the batch never reaches the size threshold.
 unsafe fn wait_for_slot(slot_idx: usize) -> Result<usize, EngineError> {
     let slot = &SLOTS[slot_idx];
     loop {
@@ -880,201 +1017,69 @@ unsafe fn wait_for_slot(slot_idx: usize) -> Result<usize, EngineError> {
                 return Err(decode_engine_error(code));
             }
             _ => {
-                // Yield so the dispatcher (which may share this CPU
-                // under cooperative scheduling) can run.
+                // If the batch's flush timeout has elapsed, try to
+                // become the timer-flush dispatcher. The claim happens
+                // under SCHED_LOCK and tolerates a concurrent
+                // size-threshold dispatcher having already drained the
+                // queue (it'll return None, and we'll fall through to
+                // the slot-state read above on the next iteration).
+                if let Some((indices, count)) = try_claim_timeout_flush() {
+                    return run_dispatcher(slot_idx, &indices, count, DispatchKind::Timeout);
+                }
                 sched_yield();
             }
         }
     }
 }
 
-// =============================================================================
-// Internal: timer flush hook (used by #859)
-//
-// The three functions below — `flush_pending_for_test`,
-// `run_dispatcher_external`, and `dispatch_heterogeneous_external` —
-// are dead code in #857 (no caller). They exist so #859 (timer flush
-// + deadline-aware bypass) can wire them up without churning #857's
-// API surface. The unified design that lands in #859 replaces them
-// with a single `run_dispatcher` callable from both the size-threshold
-// path and the waiter-driven timer-flush path; expect this entire
-// block to be removed when #859 merges.
-// =============================================================================
-
-/// Force-flush the currently pending batch. Reserved for #859 — not
-/// reachable from #857 production paths; only used by the test helper
-/// in `rust_batch_inference_test`. Gated behind `SCHED_LOCK` so a
-/// forming batch isn't simultaneously claimed by both the timer and a
-/// fresh submitter. Returns the number of dispatched slots, or 0 if
-/// the queue was empty.
-#[doc(hidden)]
-pub unsafe fn flush_pending_for_test() -> usize {
-    let (indices, count, run) = {
-        let _g = SchedGuard::new();
-        let n = PENDING_COUNT.load(Ordering::Relaxed);
-        if n == 0 {
-            return 0;
-        }
-        let mut indices = [0u8; MAX_BATCH];
-        let pending = core::ptr::addr_of!(PENDING) as *const u8;
-        for i in 0..n {
-            indices[i] = *pending.add(i);
-        }
-        PENDING_COUNT.store(0, Ordering::Release);
-        for i in 0..n {
-            let idx = indices[i] as usize;
-            SLOTS[idx].state.store(SLOT_DISPATCHING, Ordering::Release);
-        }
-        (indices, n, true)
-    };
-    if !run {
-        return 0;
+/// Attempt to claim the currently-forming batch as a timer-flush
+/// dispatcher. Returns `Some(indices, count)` when the batch has been
+/// claimed and the caller should run the dispatch via `run_dispatcher`
+/// with `kind = Timeout`. Returns `None` if the timeout hasn't elapsed
+/// yet, if the queue is empty, or if a peer (size-threshold dispatcher
+/// or another timer-flush winner) has already drained the queue.
+fn try_claim_timeout_flush() -> Option<([u8; MAX_BATCH], usize)> {
+    // First check is unlocked — avoids the SCHED_LOCK round-trip on
+    // every wait iteration. The locked check below re-reads
+    // `BATCH_FIRST_TIME_NS` so there's no TOCTOU hazard against a peer
+    // dispatcher that resets the timer underneath us.
+    let first_ns = BATCH_FIRST_TIME_NS.load(Ordering::Relaxed);
+    if first_ns == 0 {
+        return None;
     }
-    // The "self_idx" for a timer-driven flush isn't a real submitter,
-    // so we synthesise a sentinel that no real slot will match. The
-    // dispatcher signals every claimed slot (including what would have
-    // been self) via DONE_*, and we ignore the returned result.
-    let self_idx = usize::MAX;
-    let _ = run_dispatcher_external(self_idx, &indices, count, DispatchKind::Timeout);
-    count
-}
-
-/// Variant of `run_dispatcher` where the caller is not itself one of
-/// the claimed slots (timer-driven flush). All slots in
-/// `batch_indices[0..batch_count]` are signalled via the mailbox.
-///
-/// Scaffolding for #859 — see the section comment above
-/// `flush_pending_for_test`. Removed when #859 lands and the unified
-/// `run_dispatcher` absorbs this path.
-unsafe fn run_dispatcher_external(
-    _self_idx: usize,
-    batch_indices: &[u8; MAX_BATCH],
-    batch_count: usize,
-    kind: DispatchKind,
-) -> Result<(), EngineError> {
-    if batch_count == 0 {
-        return Ok(());
-    }
-    let model_index = SLOTS[batch_indices[0] as usize]
-        .model_index
-        .load(Ordering::Relaxed);
-    let in_dim = SLOTS[batch_indices[0] as usize]
-        .input_len
-        .load(Ordering::Relaxed);
-    for i in 0..batch_count {
-        let idx = batch_indices[i] as usize;
-        if SLOTS[idx].model_index.load(Ordering::Relaxed) != model_index
-            || SLOTS[idx].input_len.load(Ordering::Relaxed) != in_dim
-        {
-            // Heterogeneous: dispatch each individually.
-            return dispatch_heterogeneous_external(batch_indices, batch_count);
-        }
+    let now = crate::kernel_ffi::get_time_ns();
+    let timeout_ns = (batch_timeout_us() as u64).saturating_mul(1000);
+    if now.saturating_sub(first_ns) < timeout_ns {
+        return None;
     }
 
-    let scratch_in = SCRATCH_IN.0.get() as *mut f32;
-    let scratch_out = SCRATCH_OUT.0.get() as *mut f32;
-    for i in 0..batch_count {
-        let idx = batch_indices[i] as usize;
-        let src = SLOTS[idx].input_ptr.load(Ordering::Relaxed) as *const f32;
-        core::ptr::copy_nonoverlapping(src, scratch_in.add(i * in_dim), in_dim);
+    // Locked claim. Re-validate everything we just read.
+    let _g = SchedGuard::new();
+    let n = PENDING_COUNT.load(Ordering::Relaxed);
+    if n == 0 {
+        return None;
     }
-
-    STAT_RUNNING.fetch_add(batch_count, Ordering::Relaxed);
-    STAT_BATCHES_DISPATCHED.fetch_add(1, Ordering::Relaxed);
-    match kind {
-        DispatchKind::SizeThreshold => STAT_BATCHES_FULL.fetch_add(1, Ordering::Relaxed),
-        DispatchKind::Timeout => STAT_BATCHES_TIMEOUT.fetch_add(1, Ordering::Relaxed),
-    };
-
-    let start = crate::kernel_ffi::get_time_ns();
-    let batched_out_cap = batch_count * MAX_OUTPUT_DIM;
-    let result = crate::inference::engine::run_inference_batched(
-        model_index,
-        batch_count,
-        scratch_in,
-        in_dim * batch_count,
-        scratch_out,
-        batched_out_cap,
-    );
-    let elapsed = crate::kernel_ffi::get_time_ns().saturating_sub(start);
-    STAT_TIME_TOTAL_NS.fetch_add(elapsed, Ordering::Relaxed);
-    STAT_TIME_SAMPLES.fetch_add(1, Ordering::Relaxed);
-    STAT_RUNNING.fetch_sub(batch_count, Ordering::Relaxed);
-
-    match result {
-        Ok(total_out) => {
-            // Same per-slot-divisibility guard as `run_dispatcher`.
-            if total_out % batch_count != 0 {
-                for i in 0..batch_count {
-                    let idx = batch_indices[i] as usize;
-                    let slot = &SLOTS[idx];
-                    slot.result_value
-                        .store(encode_engine_error(EngineError::InternalError), Ordering::Relaxed);
-                    STAT_FAILED.fetch_add(1, Ordering::Relaxed);
-                    slot.state.store(SLOT_DONE_ERR, Ordering::Release);
-                }
-                return Err(EngineError::InternalError);
-            }
-            let per_out = total_out / batch_count;
-            for i in 0..batch_count {
-                let idx = batch_indices[i] as usize;
-                let slot = &SLOTS[idx];
-                let cap = slot.output_len.load(Ordering::Relaxed);
-                let n = per_out.min(cap);
-                let dst = slot.output_ptr.load(Ordering::Relaxed) as *mut f32;
-                core::ptr::copy_nonoverlapping(scratch_out.add(i * per_out), dst, n);
-                slot.result_value.store(n as u32, Ordering::Relaxed);
-                STAT_COMPLETED.fetch_add(1, Ordering::Relaxed);
-                slot.state.store(SLOT_DONE_OK, Ordering::Release);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            let err_code = encode_engine_error(e);
-            for i in 0..batch_count {
-                let idx = batch_indices[i] as usize;
-                let slot = &SLOTS[idx];
-                slot.result_value.store(err_code, Ordering::Relaxed);
-                STAT_FAILED.fetch_add(1, Ordering::Relaxed);
-                slot.state.store(SLOT_DONE_ERR, Ordering::Release);
-            }
-            Err(e)
-        }
+    let first_ns_locked = BATCH_FIRST_TIME_NS.load(Ordering::Relaxed);
+    if first_ns_locked == 0 {
+        return None;
     }
-}
-
-/// Heterogeneous-batch fallback for the timer-flush path (no
-/// self-slot — the caller isn't one of `batch_indices`).
-///
-/// Scaffolding for #859 — see the section comment above
-/// `flush_pending_for_test`. Removed when #859 lands.
-unsafe fn dispatch_heterogeneous_external(
-    batch_indices: &[u8; MAX_BATCH],
-    batch_count: usize,
-) -> Result<(), EngineError> {
-    for i in 0..batch_count {
-        let idx = batch_indices[i] as usize;
-        let slot = &SLOTS[idx];
-        let mi = slot.model_index.load(Ordering::Relaxed);
-        let in_ptr = slot.input_ptr.load(Ordering::Relaxed) as *const f32;
-        let in_len = slot.input_len.load(Ordering::Relaxed);
-        let out_ptr = slot.output_ptr.load(Ordering::Relaxed) as *mut f32;
-        let out_len = slot.output_len.load(Ordering::Relaxed);
-
-        let r = dispatch_singleton(mi, in_ptr, in_len, out_ptr, out_len);
-        match r {
-            Ok(n) => {
-                slot.result_value.store(n as u32, Ordering::Relaxed);
-                slot.state.store(SLOT_DONE_OK, Ordering::Release);
-            }
-            Err(e) => {
-                slot.result_value
-                    .store(encode_engine_error(e), Ordering::Relaxed);
-                slot.state.store(SLOT_DONE_ERR, Ordering::Release);
-            }
-        }
+    let now_locked = crate::kernel_ffi::get_time_ns();
+    if now_locked.saturating_sub(first_ns_locked) < timeout_ns {
+        return None;
     }
-    Ok(())
+    let mut indices = [0u8; MAX_BATCH];
+    let pending = core::ptr::addr_of!(PENDING) as *const u8;
+    for i in 0..n {
+        // SAFETY: SCHED_LOCK held.
+        indices[i] = unsafe { *pending.add(i) };
+    }
+    PENDING_COUNT.store(0, Ordering::Release);
+    BATCH_FIRST_TIME_NS.store(0, Ordering::Relaxed);
+    for i in 0..n {
+        let idx = indices[i] as usize;
+        SLOTS[idx].state.store(SLOT_DISPATCHING, Ordering::Release);
+    }
+    Some((indices, n))
 }
 
 fn encode_engine_error(e: EngineError) -> u32 {
@@ -1108,18 +1113,11 @@ fn decode_engine_error(code: u32) -> EngineError {
 // in `sched::mod`; thin wrapper over the static singleton above)
 // =============================================================================
 
-/// Inference scheduler handle — legacy token-based API surface.
+/// Inference scheduler handle.
 ///
-/// **Prefer [`submit_inference_sync`] for new code.** This struct
-/// exists only to preserve the shape of the prior Phase-3 skeleton;
-/// the metadata-only [`InferenceRequest`] it consumes doesn't carry
-/// buffer pointers, so `submit()` / `cancel()` / `get_result()` all
-/// return `NotImplemented`. All real state lives in module-static
-/// atomics; the only methods that do real work are `start()`,
-/// `stop()`, `is_running()`, `stats()`, and `queue_depth()`, which
-/// are thin wrappers over the static singleton's free functions
-/// (`set_batching_enabled`, `batching_enabled`, `stats`,
-/// `queue_depth`).
+/// All real state lives in module-static atomics — this struct only
+/// exists to preserve the prior API surface. Calling `submit()` /
+/// `get_result()` now interacts with the shared queue.
 pub struct InferenceScheduler {
     _phantom: (),
 }
