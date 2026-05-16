@@ -31,6 +31,9 @@
 #include "runtime_blob_file.h"
 #include "vmm.h"
 #include "smp.h"
+#if !defined(PLATFORM_X86_64)
+#include "pmu.h"
+#endif
 #include "cpu_supervisor.h"
 #include "ipc.h"
 #include "timer.h"
@@ -1076,7 +1079,6 @@ static void bench_ipc_latency(void)
 #if defined(CONFIG_AI_SCHEDULER)
 #include "inference_device.h"
 #include "ai_types.h"
-#include "fp_context.h"
 
 static void bench_policy_one(const char *dev_name,
                              enum inference_dtype dtype,
@@ -1129,59 +1131,6 @@ static void bench_policy_one(const char *dev_name,
                  (unsigned long)per_ns, (unsigned long)per_sec);
 }
 
-static void bench_xgb_one(uint32_t iters)
-{
-    /* XGBoost cascade benchmark. Doesn't go through the
-     * inference_device registry — predictions route directly through
-     * the Rust FFI in `runtime/src/sched/xgb.rs`. The cascade must
-     * have been staged + activated via `slm.sched_model_*` before
-     * this bench produces meaningful numbers; otherwise predict()
-     * returns -1 and we report "no cascade active". */
-    if (!rust_sched_xgb_is_active()) {
-        shell_puts("  ai_xgb      (no cascade active — "
-                   "`slm.sched_model_stage('xgboost', path)` first)\r\n");
-        return;
-    }
-
-    /* The Rust predictor uses FP/NEON; mirror the FP context
-     * handling that `sched_xgb.c::ai_xgb_assign_cpu` does so a
-     * timer IRQ that fires mid-loop can't observe an unsaved FP
-     * context. The shell-task dispatcher saves on entry, but a
-     * bench loop running for several seconds widens the window
-     * meaningfully. */
-    FP_CONTEXT_SAVE();
-
-    float state[AI_STATE_DIM];
-    /* Reused across iterations — we're measuring per-decision
-     * latency, not warming the trees. The state vector is
-     * deliberately constant so the bench reports steady-state
-     * throughput without input-distribution noise. */
-    int32_t core = 0, prio = 0, preempt = 0;
-    for (size_t i = 0; i < AI_STATE_DIM; i++) state[i] = 0.0f;
-
-    uint64_t t0 = timer_get_count();
-    /* `ok` defends against a mid-bench cascade clear (the early-out
-     * above only catches "active at start"). With a healthy active
-     * cascade the predict FFI always returns 0, so ok == iters in
-     * practice; the per-decision divide below uses ok rather than
-     * iters so an unlikely mid-bench failure doesn't skew the result. */
-    uint32_t ok = 0;
-    for (uint32_t i = 0; i < iters; i++) {
-        if (rust_sched_xgb_predict(state, &core, &prio, &preempt) == 0) ok++;
-    }
-    uint64_t t1 = timer_get_count();
-    uint64_t freq = timer_get_frequency();
-    uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
-    uint64_t per_ns = ok > 0 ? total_ns / ok : 0;
-    uint64_t per_sec = per_ns > 0 ? 1000000000ULL / per_ns : 0;
-
-    FP_CONTEXT_RESTORE();
-
-    shell_printf("  %-10s  %u/%u ok   %lu ns/decision   %lu decisions/sec\r\n",
-                 "ai_xgb", ok, iters,
-                 (unsigned long)per_ns, (unsigned long)per_sec);
-}
-
 static void bench_sched_policy(void)
 {
     /* CPU-MLP is built-in; use INF_BUILTIN_HANDLE. Hailo needs a
@@ -1195,9 +1144,6 @@ static void bench_sched_policy(void)
     bench_policy_one("cpu-mlp", INF_DTYPE_FP32,
                      AI_STATE_DIM, (uint32_t)AI_SCHED_N_ACTIONS,
                      INF_BUILTIN_HANDLE, 1000);
-
-    /* XGBoost cascade — predict via the Rust FFI directly. */
-    bench_xgb_one(1000);
 
     /* Hailo-8 runs only if a .hef has been loaded (handle != INVALID).
      * The policy stashes the handle via ai_policy_hailo_set_model; we
@@ -6575,7 +6521,6 @@ static uint16_t sched_model_kind_id(const char *name)
     if (strcmp(name, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
     if (strcmp(name, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
     if (strcmp(name, "rebalance") == 0) return SCHED_MODEL_KIND_REBALANCE;
-    if (strcmp(name, "xgboost") == 0) return SCHED_MODEL_KIND_XGBOOST;
     return 0;
 }
 
@@ -6587,7 +6532,6 @@ static const char *sched_model_kind_name(uint16_t kind_id)
         case SCHED_MODEL_KIND_CONFIG: return "config";
         case SCHED_MODEL_KIND_THRESHOLDS: return "thresholds";
         case SCHED_MODEL_KIND_REBALANCE: return "rebalance";
-        case SCHED_MODEL_KIND_XGBOOST: return "xgboost";
         default: return "unknown";
     }
 }
@@ -6779,7 +6723,7 @@ static int sched_model_autoload_cmd(int argc, char *argv[])
     static const uint16_t kinds[] = {
         SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO,
         SCHED_MODEL_KIND_CONFIG, SCHED_MODEL_KIND_THRESHOLDS,
-        SCHED_MODEL_KIND_REBALANCE, SCHED_MODEL_KIND_XGBOOST
+        SCHED_MODEL_KIND_REBALANCE
     };
 
     if (argc < 4 || strcmp(argv[3], "status") == 0) {
@@ -6887,7 +6831,6 @@ int cmd_sched(int argc, char *argv[])
             if (sched_model_status_one(SCHED_MODEL_KIND_CONFIG) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_THRESHOLDS) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_REBALANCE) != 0) return 1;
-            if (sched_model_status_one(SCHED_MODEL_KIND_XGBOOST) != 0) return 1;
             if (argc < 3) {
                 shell_puts("\r\nUsage:\r\n");
                 shell_puts("  sched model status\r\n");
@@ -8328,6 +8271,143 @@ int cmd_timdiag(int argc, char *argv[])
 
     shell_puts("\r\n=== End Diagnostic ===\r\n");
     return 0;
+}
+
+/*
+ * pmu - PMU diagnostic shell command (#875).
+ *
+ * Probes the ARMv8-A Performance Monitor Unit on the calling CPU.
+ * Prints PMCR_EL0 state, runs a tight loop, then dumps the cycle
+ * counter and the six preset event counters. The expected outcome on
+ * working hardware (Pi 5 / Jetson when not trapped by EL3 firmware) is:
+ *
+ *   - Cycle counter advances by ~100K-1M cycles per iteration.
+ *   - INST_RETIRED (events[2]) is roughly proportional to loop size.
+ *   - L1D miss / branch mispred counters are non-zero.
+ *
+ * On Jetson under stock NVIDIA BL31, MDCR_EL3.TPM / TPMCR may trap
+ * PMU access to EL3. The probe surfaces that as `pmu_enable_self`
+ * returning false (PMCR_EL0.E bit failed to stick) and every counter
+ * reading 0.
+ */
+int cmd_pmu(int argc, char *argv[])
+{
+    const char *what = (argc >= 2) ? argv[1] : "probe";
+
+    shell_puts("\r\n=== PMU Probe ===\r\n");
+    shell_printf("Platform: %s\r\n", PLATFORM_NAME);
+    shell_printf("Calling CPU: %u\r\n", cpu_id());
+
+    bool enabled = pmu_enable_self();
+    shell_printf("pmu_enable_self() -> %s\r\n",
+                 enabled ? "true (PMCR_EL0.E stuck)"
+                         : "false (likely EL3 trap; check MDCR_EL3.TPM/TPMCR)");
+    shell_printf("pmu_is_ready()    -> %s\r\n",
+                 pmu_is_ready() ? "true" : "false");
+
+    if (!enabled) {
+        shell_puts("\r\nPMU writes are not taking effect. Subsequent reads "
+                   "will return 0.\r\n=== End PMU Probe ===\r\n");
+        return -1;
+    }
+
+    /* Read PMCR_EL0 back so we can confirm bit-for-bit what we asked
+     * for actually stuck. Helps disambiguate "writes silently ignored"
+     * from "writes partially applied". */
+    uint64_t pmcr = 0;
+    __asm__ volatile("mrs %0, pmcr_el0" : "=r"(pmcr));
+    shell_printf("PMCR_EL0          = 0x%08x\r\n", (uint32_t)pmcr);
+    shell_printf("  N (counters)    = %u\r\n",
+                 (uint32_t)((pmcr >> 11) & 0x1F));
+    shell_printf("  IMP (impl id)   = 0x%02x\r\n",
+                 (uint32_t)((pmcr >> 24) & 0xFF));
+
+    /* Diagnostic: read back PMCNTENSET_EL0, PMUSERENR_EL0, MDCR_EL2.
+     * Helps narrow "writes silently ignored" — e.g., HPMN partitioning
+     * the counters into a region we can't read. */
+    uint64_t pmcnten = 0, pmuser = 0, mdcr_el2 = 0, currentel = 0;
+    __asm__ volatile("mrs %0, pmcntenset_el0" : "=r"(pmcnten));
+    __asm__ volatile("mrs %0, pmuserenr_el0" : "=r"(pmuser));
+    __asm__ volatile("mrs %0, currentel" : "=r"(currentel));
+    shell_printf("PMCNTENSET_EL0    = 0x%08x\r\n", (uint32_t)pmcnten);
+    shell_printf("PMUSERENR_EL0     = 0x%08x\r\n", (uint32_t)pmuser);
+    shell_printf("CurrentEL         = %u\r\n",
+                 (uint32_t)((currentel >> 2) & 0x3));
+    if (((currentel >> 2) & 0x3) >= 2) {
+        __asm__ volatile("mrs %0, mdcr_el2" : "=r"(mdcr_el2));
+        shell_printf("MDCR_EL2          = 0x%08x\r\n",
+                     (uint32_t)mdcr_el2);
+        shell_printf("  HPMN            = %u\r\n",
+                     (uint32_t)(mdcr_el2 & 0x1F));
+    }
+
+    pmu_reset();
+    uint64_t c0 = pmu_read_cycles();
+    struct pmu_snapshot s0;
+    pmu_read_all(&s0);
+
+    /* Configurable iteration count for stretching the loop on slow
+     * cores. Default is 100K which keeps the probe under 1 ms on
+     * Cortex-A76 / Cortex-A78AE at typical clock rates. Use the shared
+     * `shell_parse_uint` helper rather than an inline parser — it
+     * already rejects non-digit input and detects multiply-overflow,
+     * so a pathological input like `pmu probe 99999999999` falls back
+     * to the default instead of running a wrapped iteration count. */
+    uint32_t iters = 100000;
+    if (argc >= 3) {
+        uint32_t parsed;
+        if (shell_parse_uint(argv[2], &parsed) == 0 && parsed > 0) {
+            iters = parsed;
+        }
+    }
+
+    /* Volatile sink so the loop doesn't get optimised away. */
+    static volatile uint64_t pmu_probe_sink;
+    for (uint32_t i = 0; i < iters; i++) {
+        pmu_probe_sink = pmu_probe_sink + (uint64_t)i;
+    }
+
+    struct pmu_snapshot s1;
+    pmu_read_all(&s1);
+    uint64_t c1 = pmu_read_cycles();
+
+    shell_printf("\r\nIterations: %u (%s)\r\n", iters, what);
+    shell_printf("Cycle counter:\r\n");
+    shell_printf("  before   = 0x%08x%08x\r\n",
+                 (uint32_t)(c0 >> 32), (uint32_t)c0);
+    shell_printf("  after    = 0x%08x%08x\r\n",
+                 (uint32_t)(c1 >> 32), (uint32_t)c1);
+    shell_printf("  delta    = %lu\r\n",
+                 (unsigned long)(c1 - c0));
+
+    static const char * const evt_names[PMU_NUM_EVENT_COUNTERS] = {
+        "L1D_CACHE_REFILL",
+        "L2D_CACHE_REFILL",
+        "INST_RETIRED   ",
+        "BR_MIS_PRED    ",
+        "MEM_ACCESS     ",
+        "STALL_BACKEND  ",
+    };
+    shell_puts("\r\nEvent counters (delta over loop):\r\n");
+    for (uint32_t i = 0; i < PMU_NUM_EVENT_COUNTERS; i++) {
+        uint32_t delta = s1.events[i] - s0.events[i];
+        shell_printf("  [%u] %s = %u\r\n", i, evt_names[i], delta);
+    }
+
+    /* Quick verdict line — helps the operator triage at a glance. */
+    if (s1.events[2] == 0 && (c1 - c0) > 0) {
+        shell_puts("\r\nVERDICT: cycle counter works but event counters "
+                   "return zero — likely QEMU TCG (no event modelling) or "
+                   "a partial-trap configuration.\r\n");
+    } else if (s1.events[2] > 0) {
+        shell_puts("\r\nVERDICT: PMU is fully live on this CPU.\r\n");
+    } else {
+        shell_puts("\r\nVERDICT: PMU is not advancing — check EL3 firmware "
+                   "trap configuration.\r\n");
+    }
+
+    shell_puts("=== End PMU Probe ===\r\n");
+    return enabled ? 0 : -1;
 }
 
 #if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
