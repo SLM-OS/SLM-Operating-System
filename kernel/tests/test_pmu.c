@@ -192,8 +192,8 @@ static void test_pmu_sample_cache_pressure_no_fault(void)
     pmu_sample_cache_pressure();  /* first call: prime the per-CPU state */
     pmu_sample_cache_pressure();  /* second call: takes the delta path */
     pmu_sample_cache_pressure();  /* third call: exercises EWMA blend */
-    TEST_ASSERT_MESSAGE(true,
-        "pmu_sample_cache_pressure must not fault under normal use");
+    /* Surviving all three calls IS the pass condition — no Unity assert
+     * is needed. A fault would crash the kernel before reaching here. */
 }
 
 static void test_pmu_get_cache_pressure_q16_bounded(void)
@@ -207,7 +207,7 @@ static void test_pmu_get_cache_pressure_q16_bounded(void)
      * would surface here as a value > 0x10000. */
     pmu_sample_cache_pressure();
     uint32_t cp = pmu_get_cache_pressure_q16(cpu_id());
-    TEST_ASSERT_MESSAGE(cp <= (1u << 16),
+    TEST_ASSERT_MESSAGE(cp <= PMU_Q16_ONE,
         "pmu_get_cache_pressure_q16 returned a value > 1.0 in Q16.16 — "
         "the EWMA saturation clamp regressed");
 }
