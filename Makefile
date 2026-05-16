@@ -1005,14 +1005,33 @@ test-rpc:
 # Rust target selection based on platform
 ifeq ($(PLATFORM),X86_64)
     RUST_TARGET_FLAG := --target x86_64-unknown-none
+    # Issue #141 workaround: fat LTO (the `lto = true` in Cargo.toml's
+    # release profile) trips the rustc-LLVM "do not know how to soften
+    # this operator's operand!" legalizer crash on `x86_64-unknown-none`
+    # somewhere inside the slm forward path's f16 code. Thin LTO does
+    # not exercise the cross-function legalisation site that triggers
+    # the crash and still recovers most of fat LTO's size win.
+    #
+    # Scope: x86_64-unknown-none ONLY. ARM64 targets keep fat LTO; the
+    # ARM64 legalizer doesn't have the soften lowering gap that x86-64
+    # does. `mathf::sqrtf` / `mathf::tanhf` in runtime/src/inference/
+    # mathf.rs are the call-site workarounds for two specific libm
+    # functions that crash even under thin LTO; the thin-LTO switch
+    # here covers every other soften site the slm feature exposes.
+    #
+    # Revisit once: (a) the upstream LLVM legalizer fix lands, OR
+    # (b) libm 0.2 splits its f16 paths, OR (c) Rust's
+    # `x86_64-unknown-none` target gains a working f16 ABI.
+    RUST_RUSTFLAGS := -C lto=thin
 else
     RUST_TARGET_FLAG :=
+    RUST_RUSTFLAGS :=
 endif
 
 .PHONY: runtime
 runtime:
 	@echo "Building runtime... (cargo features: $(if $(CARGO_FEATURES),$(CARGO_FEATURES),none))"
-	cd runtime && SLM_DEFAULT_EVICTION_POLICY=$(EVICTION_DEFAULT_POLICY) cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
+	cd runtime && SLM_DEFAULT_EVICTION_POLICY=$(EVICTION_DEFAULT_POLICY) $(if $(RUST_RUSTFLAGS),RUSTFLAGS="$(RUST_RUSTFLAGS)") cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
 
 .PHONY: runtime-clean
 runtime-clean:

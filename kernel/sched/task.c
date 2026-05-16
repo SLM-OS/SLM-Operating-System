@@ -898,6 +898,7 @@ void task_destroy(struct task *task)
 #else
     (void)user_l1_pa;
     (void)user_stack_phys;
+    (void)user_asid;
 #endif
 
     /* Note: DEBUG_PRINT removed here to avoid output interleaving issues
