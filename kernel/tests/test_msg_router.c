@@ -14,6 +14,10 @@ extern void msg_router_init(void);
 extern int msg_router_subscribe(const char *topic_name, int component_idx);
 extern void msg_router_unsubscribe_all(int component_idx);
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+extern int msg_router_publish_nowait(const uint8_t *topic_name,
+                                     const uint8_t *data);
+extern const uint8_t *msg_router_receive(int component_idx, uint8_t *topic_out);
+extern void msg_router_ack(int component_idx);
 
 /*
  * Regression for GitHub issue #80: msg_router_publish hangs on Pi 5 when
@@ -207,6 +211,106 @@ static void test_subscribe_max_topics_sixteen(void)
     TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("t16", 16));
 }
 
+/*
+ * Regression for #863 (#67b): wildcard+exact overlap delivers twice.
+ *
+ * A component subscribed via both an exact topic name and a matching
+ * wildcard pattern receives the message TWICE — once per subscription.
+ * Each subscription owns its own independent mailbox, and publish_internal
+ * fans out across every matching mailbox. This is the per-subscription
+ * delivery contract the project documents in docs/ipc.md and the message
+ * router rs source comments; it matches DDS / ROS 2 / ZeroMQ / nanomsg /
+ * Linux notifier chains. Applications that want exactly-once delivery
+ * across overlapping patterns dedupe at the application layer.
+ *
+ * This test pins the contract via `msg_router_publish_nowait`, which
+ * returns the number of mailboxes the message was dropped into without
+ * ack-wait choreography. Using the no-wait variant lets the test run
+ * single-threaded — the full ack-wait publish path is exercised by the
+ * cross-CPU concurrency tests in test_integration.c. The fan-out count
+ * is the contract being asserted; the ack-wait loop is orthogonal.
+ *
+ * Topic budget reminder: TOPIC_NAME_LEN = 16 (NUL-terminated). The names
+ * below are all ≤ 15 bytes.
+ */
+static void test_wildcard_exact_overlap_delivers_twice(void)
+{
+    msg_router_init();
+
+    /* Subscribe one component to BOTH an exact topic and a matching
+     * wildcard pattern. The wildcard prefix is "/sensors/" so it matches
+     * "/sensors/data" as well. */
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/sensors/data", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/sensors/*",    0));
+
+    /* Publish to the exact name. Both the exact mailbox and the wildcard
+     * mailbox match — fan-out should be 2. */
+    int delivered = msg_router_publish_nowait(
+        (const uint8_t *)"/sensors/data", (const uint8_t *)"d1");
+    TEST_ASSERT_EQUAL_INT(2, delivered);
+
+    /* Drain both mailboxes via two receive+ack cycles. Each receive
+     * returns one mailbox; receive's lock-held scan picks one (priority
+     * tie-break order between exact + wildcard at equal priority is
+     * unspecified, so we don't assert WHICH mailbox arrives first — only
+     * that two distinct mailboxes yielded the published message). Both
+     * mailboxes carry the PUBLISHED topic name ("/sensors/data"), since
+     * deliver() copies the publisher's name into the mailbox slot. */
+    uint8_t topic_buf[16];
+    const uint8_t *m1 = msg_router_receive(0, topic_buf);
+    TEST_ASSERT_NOT_NULL(m1);
+    TEST_ASSERT_EQUAL_STRING("/sensors/data", (const char *)topic_buf);
+    TEST_ASSERT_EQUAL_STRING("d1", (const char *)m1);
+    msg_router_ack(0);
+
+    const uint8_t *m2 = msg_router_receive(0, topic_buf);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_STRING("/sensors/data", (const char *)topic_buf);
+    TEST_ASSERT_EQUAL_STRING("d1", (const char *)m2);
+    msg_router_ack(0);
+
+    /* After two acks both mailboxes are cleared — a third receive
+     * returns NULL. Confirms there was no third hidden mailbox and that
+     * ack correctly clears the mailbox it targeted via LAST_RECEIVED. */
+    const uint8_t *m3 = msg_router_receive(0, topic_buf);
+    TEST_ASSERT_NULL(m3);
+
+    msg_router_unsubscribe_all(0);
+}
+
+/*
+ * Regression for #863 (#67b): wildcard-only matches deliver once.
+ *
+ * Companion to the exact+wildcard overlap test above. When a published
+ * topic name matches ONLY the wildcard pattern (not the exact name),
+ * fan-out is 1 — only the wildcard mailbox receives the message.
+ */
+static void test_wildcard_only_delivers_once(void)
+{
+    msg_router_init();
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/sensors/data", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/sensors/*",    0));
+
+    /* /sensors/temp matches only the wildcard, not the exact subscription. */
+    int delivered = msg_router_publish_nowait(
+        (const uint8_t *)"/sensors/temp", (const uint8_t *)"t1");
+    TEST_ASSERT_EQUAL_INT(1, delivered);
+
+    uint8_t topic_buf[16];
+    const uint8_t *m1 = msg_router_receive(0, topic_buf);
+    TEST_ASSERT_NOT_NULL(m1);
+    TEST_ASSERT_EQUAL_STRING("/sensors/temp", (const char *)topic_buf);
+    TEST_ASSERT_EQUAL_STRING("t1", (const char *)m1);
+    msg_router_ack(0);
+
+    /* No second mailbox to drain. */
+    const uint8_t *m2 = msg_router_receive(0, topic_buf);
+    TEST_ASSERT_NULL(m2);
+
+    msg_router_unsubscribe_all(0);
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -217,6 +321,8 @@ int test_suite_msg_router(void)
     RUN_TEST(test_subscribe_idempotent_exact);
     RUN_TEST(test_subscribe_idempotent_wildcard);
     RUN_TEST(test_subscribe_max_topics_sixteen);
+    RUN_TEST(test_wildcard_exact_overlap_delivers_twice);
+    RUN_TEST(test_wildcard_only_delivers_once);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }

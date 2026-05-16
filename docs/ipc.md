@@ -365,6 +365,67 @@ When space/message becomes available:
 
 ---
 
+## Topic-Based Pub/Sub (Message Router)
+
+The message router (`runtime/src/msg_router.rs`) layers a topic-based
+publish/subscribe surface on top of per-subscription mailboxes. Components
+call `msg_router_subscribe(topic, idx)` to register interest in either an
+exact topic name (`/sensors/data`) or a wildcard pattern ending in `*`
+(`/sensors/*`); publishers call `msg_router_publish(topic, data)` and the
+router fans the message out to every matching subscription.
+
+### Per-subscription delivery contract
+
+Each subscription gets its own independent mailbox. A component subscribed
+to a topic via both an exact name and a matching wildcard pattern receives
+the message **twice** — once per subscription. This matches the
+per-subscriber delivery semantics of DDS, ROS 2, ZeroMQ, nanomsg, and Linux
+notifier chains. The publish return value (`delivered`) is the count of
+mailboxes the message fanned out to, so overlapping patterns increase the
+count. Applications that want exactly-once delivery across overlapping
+subscription patterns are responsible for deduplicating at the application
+layer (typically by tagging messages with a sender-side sequence number).
+
+Regression coverage:
+`kernel/tests/test_msg_router.c::test_wildcard_exact_overlap_delivers_twice`
+and `test_wildcard_only_delivers_once` pin the contract on every
+`make test` run.
+
+### Other guarantees pinned by automated tests
+
+- **Cross-CPU publish/receive/ack** — a publisher and subscriber on
+  different CPUs round-trip N messages without router-internal deadlock
+  (`test_integration.c::test_msg_router_cross_cpu`, regression for #66).
+- **Multi-subscriber fan-out under load** — two subscribers on two
+  separate CPUs both receive every message from a third-CPU publisher;
+  every publish returns `delivered == 2`
+  (`test_msg_router_multi_subscriber`, regression for #864 / #67a).
+- **Priority ordering across mailboxes** — when both a high-priority and
+  a low-priority mailbox are ready at the moment `msg_router_receive`
+  runs its lock-held scan, the high-priority message is returned first;
+  no starvation deadlock under sustained two-publisher load
+  (`test_msg_router_priority_concurrent`, regression for #864 / #67a).
+
+### Single-slot mailbox limitation
+
+The current `Mailbox` struct is a single-slot structure (one set of
+`ready`/`ack`/`data` atomics per subscription). If two `publish_internal`
+calls target the *same* mailbox before the subscriber has acked the first
+message, the second `deliver()` overwrites the first message in place;
+the subscriber then sees only the second message. This case requires
+multiple publishers running concurrently against the same mailbox, which
+the standard ack-wait publish path does not produce — its loop blocks on
+ack between iterations, so a single publisher cannot back-to-back deliver
+to one mailbox.
+
+The single-mailbox overwrite drop is a real limitation of the current
+single-slot design and is tracked for post-capstone follow-up as #869.
+The concurrency-stress tests in `test_integration.c` document the
+boundary explicitly so future maintainers don't mistake a deliberate
+limitation for a regression.
+
+---
+
 ## Future Enhancements
 
 ### Phase 3 (Completed)
