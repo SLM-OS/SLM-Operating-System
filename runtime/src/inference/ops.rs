@@ -68,6 +68,62 @@ impl Drop for OpsGuard {
 }
 
 // =============================================================================
+// Software prefetch helper (#56 PR 3)
+// =============================================================================
+
+/// Prefetch one cache line into L1 for a future read (aarch64 `prfm
+/// pldl1keep`). On other targets this is a no-op.
+///
+/// Only call site as of #56 PR 3 is `matmul_tiled`, which issues four
+/// of these once per 4-row group to warm the next A-block. The
+/// in-kernel B-row variant was tried and reverted (see the comment
+/// in `matmul_4x4_kernel_neon` and `docs/benchmarks.md` for the
+/// experiment record).
+///
+/// `prfm pldl1keep` is part of the ARMv8 mandatory base ISA and is a
+/// hint, not a fault-on-miss: an address that's out of bounds,
+/// unmapped, or even invalid produces no fault, no architectural
+/// state change, and (worst case) just wastes the instruction slot.
+///
+/// `locality = "keep"` (PLDL1KEEP) tells the prefetcher the line
+/// should be kept in L1 after first use; the alternative `pldl1strm`
+/// hints that the line is streaming and can be evicted. Matmul
+/// accumulators stay in L1 long enough that "keep" is the right
+/// hint.
+///
+/// # Safety
+///
+/// `addr` is treated as a hint — the caller does not need to
+/// guarantee the address is mapped or readable. The function is
+/// `unsafe` only because it takes a raw pointer; calling it with a
+/// non-canonical address on aarch64 is fine.
+#[inline(always)]
+#[cfg(target_arch = "aarch64")]
+unsafe fn prefetch_l1_read(addr: *const i8) {
+    // `readonly` (not `nomem`) is intentional: it lets the compiler
+    // assume the asm doesn't write memory but still treats it as
+    // reading memory, so the prefetch can't be reordered past an
+    // aliasing store. `nomem` would invite the compiler to hoist the
+    // prefetch above stores that might invalidate the same cache
+    // line — saving zero cycles and risking re-fetching the wrong
+    // line. `pure` is intentionally omitted so distinct-address
+    // prefetches are not deduplicated.
+    core::arch::asm!(
+        "prfm pldl1keep, [{0}]",
+        in(reg) addr,
+        options(nostack, readonly, preserves_flags),
+    );
+}
+
+#[inline(always)]
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn prefetch_l1_read(_addr: *const i8) {
+    // No portable prefetch in core for x86-64-unknown-none here; the
+    // x86-64 C SSE kernels can issue PREFETCHT0 themselves once #847
+    // wires them up. RISC-V and other archs: no-op.
+}
+
+// =============================================================================
 // FP16 helpers
 // =============================================================================
 
@@ -795,6 +851,24 @@ unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
                     // 4×4-aligned interior — fastest path.
                     let mut ib = 0;
                     while ib < i_blocks {
+                        // Prefetch the head of the next 4-row group's
+                        // A rows (#56 PR 3). Each 4×4 kernel call
+                        // sweeps `kn` elements of A starting at
+                        // A[(ii+ib+next)*k + kk]; prefetching the
+                        // first cache line of each of the 4 rows
+                        // hides the cold-line miss when we move to
+                        // the next `ib` group. The prefetched
+                        // address may walk past the M dimension on
+                        // the last iteration — `prfm` ignores that.
+                        let next_ib = ib + 4;
+                        if next_ib < i_blocks {
+                            let a_next = ap.add((ii + next_ib) * k + kk);
+                            prefetch_l1_read(a_next as *const i8);
+                            prefetch_l1_read(a_next.add(k) as *const i8);
+                            prefetch_l1_read(a_next.add(2 * k) as *const i8);
+                            prefetch_l1_read(a_next.add(3 * k) as *const i8);
+                        }
+
                         let mut jb = 0;
                         while jb < j_blocks {
                             matmul_4x4_kernel_neon(
@@ -926,6 +1000,8 @@ unsafe fn matmul_4x4_kernel_neon(
     let ap3 = ap_block.add(3 * k_stride);
 
     for kki in 0..kn {
+        // No in-loop B-row prefetch — tried and reverted (3% Pi 5
+        // regression). See "After PR 3" in `docs/benchmarks.md`.
         let b_row = vld1q_f32(bp_block.add(kki * n_stride));
 
         let a0 = vdupq_n_f32(*ap_block.add(kki));

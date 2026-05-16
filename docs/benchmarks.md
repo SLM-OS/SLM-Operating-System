@@ -348,6 +348,22 @@ The 4×4 kernel keeps the C accumulator block resident in 4 NEON registers acros
 
 Jetson hardware run deferred until lab tooling for non-SD-card deploy is in this agent's reach; the change is platform-agnostic Rust + NEON intrinsics and cross-builds clean for `PLATFORM=JETSON_ORIN_NANO`.
 
+**After PR 3 (software prefetch hints):**
+
+PR 3 adds `prfm pldl1keep` hints to `matmul_tiled`. Two prefetch sites were tested:
+
+1. **Tile-level A-row prefetch** — issued once per 4-row group, ahead of the next ib-block's first call into `matmul_4x4_kernel_neon`. Prefetches the first cache line of each of the next 4 A rows.
+2. **In-kernel B-row prefetch** (initial design, *reverted*) — `prfm pldl1keep` inside the 4×4 kernel's K-loop, 8 K-steps ahead of the consuming `vld1q_f32(B)`.
+
+| Op | Calls | Avg | Min | Max | Δ vs PR 2 |
+|----|-------|-----|-----|-----|-----------|
+| Conv | 400 | **170 µs** | 141 µs | 202 µs | +0.6% (jitter) |
+| End-to-end MNIST | — | **486 µs** | 484 | 513 | +0.6% (jitter) |
+
+The in-kernel B prefetch (variant 2 above) measured **3% slower** (483 → 500 µs) on Cortex-A76 — the address arithmetic for the prefetch target (`bp_block + (kki + PFDIST_K) * n_stride`) added an integer multiply and a compare per K iteration that the A76 hardware prefetcher already covers. The matmul tile working set (~12 KB) fits in the 64 KB L1D with comfortable headroom, so cold-line misses are not a meaningful cost on this CPU. That variant was reverted; only the tile-level A-row prefetch ships.
+
+Conclusion: software prefetch is a net **no-op on Cortex-A76**. The infrastructure (a portable `prefetch_l1_read` helper and the tile-level hook) is kept in place because (a) the A78AE in Jetson Orin Nano has a different prefetcher and may behave differently, and (b) tighter inner loops on the same path (e.g. an 8×4 micro-kernel) will have more arithmetic per cache line and benefit more.
+
 ### Model Memory Utilization
 
 | Model | Weight Blocks | Workspace Blocks | Actual Weights |
