@@ -276,6 +276,35 @@ calling `msg_router_ack()` (which also acquires the lock) would
 deadlock. Mailbox `ready`/`ack` atomics handle cross-CPU sync on the
 individual slot; the lock is only needed for array-level consistency.
 
+The release-before-yield discipline is pinned by the concurrency stress
+tests (#67 / PRs #878 / #888 / #894): a publisher on one CPU and two
+subscribers on two other CPUs round-trip 5 messages without deadlock
+through this exact lock-release point. The same applies to two
+concurrent publishers (different priorities) fanning out to a shared
+subscriber. If you ever refactor `publish_internal` and accidentally
+keep the guard alive across the `sched_yield()` call, every multi-CPU
+publish/ack sequence wedges immediately — `kernel/tests/test_integration.c`
+`test_msg_router_multi_subscriber` and `test_msg_router_priority_concurrent`
+are the regression catch-points.
+
+### Single-slot mailbox limitation (post-capstone follow-up — #869)
+
+`Mailbox` carries a single set of `ready`/`ack`/`data` atomics per
+subscription. Two `publish_internal` calls that target the *same*
+mailbox before the subscriber has acked the first message will see
+the second `deliver()` overwrite the first in place. The standard
+ack-waiting publish path cannot trigger this — its loop blocks on
+ack between iterations — but multiple concurrent publishers writing
+to the same subscriber's mailbox can. A queued mailbox redesign
+(bounded ring per subscription, with per-mailbox lock + sequence
+counter) is the planned fix; see #869 for the queued vs.
+reject-when-busy decision.
+
+This is distinct from the LAST_RECEIVED ack-targeting case
+(`msg_router_ack` clears the right mailbox when the component has
+multiple mailboxes), which works correctly and is pinned by the
+67c tests.
+
 ---
 
 ## SIMD
