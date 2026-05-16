@@ -33,3 +33,8 @@ pub mod gpu_slm;
 pub use tensor::Tensor;
 pub use workspace::BumpAllocator;
 pub use engine::{InferenceEngine, EngineError, InferenceStats, run_inference, get_stats};
+pub use engine::{
+    OpProfileEntry, PROFILE_NUM_OPS,
+    op_profile_set_enabled, op_profile_is_enabled,
+    op_profile_reset, op_profile_snapshot,
+};

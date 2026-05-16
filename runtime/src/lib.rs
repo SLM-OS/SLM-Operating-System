@@ -5709,6 +5709,54 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
     0
 }
 
+/// Enable or disable per-operator profiling (#56).
+///
+/// When enabled, `Engine::execute_node` wraps every op dispatch in
+/// CNTPCT timestamps and updates the per-op bucket in
+/// `inference::engine`'s profile table. When disabled, the engine
+/// takes the same fast path it did before this hook was added.
+///
+/// `enabled`: 0 turns profiling off, any non-zero value turns it on.
+/// Returns 0 unconditionally.
+#[no_mangle]
+pub extern "C" fn rust_infer_profile_enable(enabled: u32) -> i32 {
+    inference::op_profile_set_enabled(enabled != 0);
+    0
+}
+
+/// Reset every bucket in the per-operator profile table to zero.
+/// Useful to drop warmup-iteration samples before a benchmark run.
+#[no_mangle]
+pub extern "C" fn rust_infer_profile_reset() -> i32 {
+    inference::op_profile_reset();
+    0
+}
+
+/// Snapshot the per-operator profile into a caller-supplied buffer.
+///
+/// `out` must point to at least `max_entries` `inference::OpProfileEntry`
+/// slots. The function writes up to `min(max_entries, PROFILE_NUM_OPS)`
+/// rows in fixed op-bucket order and returns the count written.
+/// Returns -1 on null `out`.
+///
+/// # Safety
+///
+/// `out` must be writable for the declared `max_entries`, properly
+/// aligned. The buffer lifetime must cover the call.
+#[no_mangle]
+pub unsafe extern "C" fn rust_infer_profile_snapshot(
+    out: *mut inference::OpProfileEntry,
+    max_entries: u32,
+) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let n = unsafe {
+        inference::op_profile_snapshot(out, max_entries as usize)
+    };
+    n as i32
+}
+
 /// Run inference with zero input and return the argmax class.
 ///
 /// Used by kernel-mode components (compiled with -mgeneral-regs-only)
@@ -7145,6 +7193,52 @@ pub extern "C" fn rust_inference_test() -> i32 {
         // round-to-zero in f32_to_fp16 adds up to 1 ULP more.
         let passed = max_err < 0.01;
         print_test_result(b"fp16: f32_to_fp16 round-trip\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: per-op profile reset/snapshot is sane.
+    //
+    // Validates the #56 harness without needing a loaded model.
+    // After a fresh reset, every bucket is zero. The snapshot writes
+    // exactly `min(max_entries, PROFILE_NUM_OPS)` rows, in the bucket
+    // order defined by `op_type_to_index`, with `op_type == MatMul`
+    // (`0`) at slot 0 and `op_type == Unknown` (`255`) at slot 17.
+    // Together this catches both "snapshot wrote nothing" and "bucket
+    // 17 wrote OpType::Unknown's discriminant" regressions.
+    {
+        inference::op_profile_reset();
+        let mut buf = [inference::OpProfileEntry::EMPTY;
+                       inference::PROFILE_NUM_OPS];
+        let n = unsafe {
+            inference::op_profile_snapshot(buf.as_mut_ptr(),
+                                           inference::PROFILE_NUM_OPS)
+        };
+        let len_ok = n == inference::PROFILE_NUM_OPS;
+        let zeroed_ok = buf.iter().all(|e| {
+            e.count == 0 && e.total_ns == 0 && e.min_ns == 0 && e.max_ns == 0
+        });
+        // Slot 0 is MatMul (discriminant 0); slot 17 is Unknown
+        // (discriminant 255). Both label assertions catch reorderings
+        // of `op_type_to_index` / `index_to_op_type_u8`.
+        let labels_ok = buf[0].op_type == 0 && buf[17].op_type == 255;
+        let passed = len_ok && zeroed_ok && labels_ok;
+        print_test_result(b"profile: reset/snapshot baseline\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: enable flag round-trips, disabled is the default.
+    {
+        let pre = inference::op_profile_is_enabled();
+        inference::op_profile_set_enabled(true);
+        let on = inference::op_profile_is_enabled();
+        inference::op_profile_set_enabled(false);
+        let off = !inference::op_profile_is_enabled();
+        // Restore the prior state so a future test runner that
+        // arms profiling before calling rust_inference_test() isn't
+        // surprised by us flipping it off.
+        inference::op_profile_set_enabled(pre);
+        let passed = on && off;
+        print_test_result(b"profile: enable flag round-trip\0", passed);
         if !passed { failures += 1; }
     }
 
