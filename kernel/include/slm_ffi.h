@@ -784,8 +784,13 @@ extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
  *   backend_stalls        — STALL_BACKEND
  *   cycles                — PMCCNTR_EL0 delta (denominator for IPC)
  *
- * The PMU fields are zero on QEMU (event counters not modelled by TCG)
- * and zero on any platform where `CONFIG_PMU_PROFILE` is undefined.
+ * The PMU fields are zero on PLATFORM_X86_64 (RDPMC sibling tracked
+ * as #870), zero on QEMU TCG ARM (event counters not modelled — the
+ * cycle counter ticks but every event reads 0), and zero on any CPU
+ * where `pmu_enable_self` has not yet run. There is no build-flag
+ * gate: the PMU read overhead is amortized inside the existing
+ * `model profile on/off` runtime toggle (the harness only reads PMU
+ * counters when profiling is enabled).
  */
 typedef struct {
     uint8_t  op_type;
