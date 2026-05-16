@@ -438,6 +438,35 @@ if(ENABLE_NETWORKING AND NET_TELEMETRYD_AUTOSTART)
     add_compile_definitions(NET_TELEMETRYD_AUTOSTART=1)
 endif()
 
+# SSH daemon (Phase 3 of #199). When ON, pulls the vendored
+# wolfSSH + wolfCrypt libraries under kernel/lib/{wolfssh,wolfcrypt}/
+# into the image and exposes the `sshd` shell command family. The
+# crypto-quality RNG infrastructure (`kernel/include/rng.h`) is built
+# unconditionally — the SSH server is the primary consumer but the
+# RNG is useful elsewhere (host-key generation, password salts,
+# session token derivation) and the `rng` shell command is a
+# diagnostics primitive.
+#
+# Default OFF for now: the wolfSSH vendoring + integration lands
+# across follow-up commits on the #893 branch. Until those land, the
+# option only controls compile-time gating of the `sshd` shell verb
+# and the placeholder `kernel/net/ssh/` sources — turning it ON
+# without the vendored libraries in place will fail to link, which
+# is the intended signal.
+option(NET_SSHD "Enable SSH daemon (wolfSSH+wolfCrypt; #199 Phase 3)" OFF)
+if(ENABLE_NETWORKING AND NET_SSHD)
+    add_compile_definitions(NET_SSHD=1)
+endif()
+
+# SSH daemon auto-start at boot. Default OFF for the entire #199
+# chain — the bootstrap gate added in #199d (#896) is what makes a
+# default-on flip safe, and #199e (#895) is where the flip happens.
+# Until then, the daemon is opt-in via shell command (`sshd start`).
+option(NET_SSHD_AUTOSTART "Start sshd at boot (unauthenticated until #199d/#199e)" OFF)
+if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
+    add_compile_definitions(NET_SSHD_AUTOSTART=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     # Three x86-64 layouts — KEXEC_BUILD and BZIMAGE_BUILD are mutually
@@ -509,6 +538,10 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/pmu.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
+    # Per-arch RNG TRNG probes (FEAT_RNG / RDRAND). Compiled unconditionally —
+    # rng_init's jitter path is useful even without SSH and is what the
+    # boot banner reports. See `kernel/include/rng.h`. #199a / #893.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/rng.c>
     # x86-64 architecture files (trampoline32.S handled by custom command below)
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/entry64.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.S>
@@ -525,6 +558,9 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/tss.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/sse_kernels.c>
+    # Per-arch RNG TRNG probe (RDRAND). Compiled unconditionally — see
+    # the matching ARM64 entry above. #199a / #893.
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/rng.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_platform.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_firmware.S>
     # GSP-RM shared core (x86-64 + Jetson — same Ampere architecture)
@@ -895,6 +931,11 @@ set(KERNEL_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_autostart.c>
 
+    # Crypto-quality RNG (jitter-pool common path). The arch-side
+    # TRNG probes live next to the rest of the per-arch source. #893.
+    kernel/src/rng.c
+    kernel/src/rng_shell.c
+
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code
     # lua_slm.c and lua_shell.c are compiled as part of lua library
@@ -969,6 +1010,10 @@ set(TEST_SOURCES
     # SHA-256 NIST-vector tests for the vendored library — Stage 4
     # of #370 too, but platform-neutral (pure computation, no MMIO).
     kernel/tests/test_sha256.c
+    # Crypto-quality RNG tests (#199a / #893). Platform-neutral —
+    # the per-arch TRNG probes are exercised indirectly via the
+    # source-dispatch test; the jitter pool is covered everywhere.
+    kernel/tests/test_rng.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

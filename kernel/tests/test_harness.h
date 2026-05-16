@@ -213,6 +213,10 @@ int test_suite_kernel_cmd(void);
 /* SHA-256 vendored-library vector tests (#370, dynamic-kernel-replace Stage 4) */
 int test_suite_sha256(void);
 
+/* Crypto-quality RNG tests (#199a / #893) — jitter pool, source dispatch,
+ * test-injection, chi-squared self-test. */
+int test_suite_rng(void);
+
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);
 
