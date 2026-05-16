@@ -117,6 +117,9 @@ static struct {
 #define NC_MSGPR_SUB_DONE    28
 #define NC_MSGPR_HI_DELIVERED 29
 #define NC_MSGPR_LO_DELIVERED 30
+/* msg_router #67c: cross-CPU LAST_RECEIVED ack-targeting test. */
+#define NC_MSGAR_TRIGGER     31  /* main → helper: publish /b now */
+#define NC_MSGAR_HELPER_DONE 32  /* helper → main: publish complete */
 
 static void nc_sync_clear(uint32_t start, uint32_t count)
 {
@@ -1808,6 +1811,164 @@ static void test_msg_router_priority_concurrent(void)
 }
 
 /* ============================================================================
+ * Regression: msg_router LAST_RECEIVED ack-targeting under cross-CPU
+ * activity (#67c / #867)
+ *
+ * Cross-CPU variant of test_msg_router_ack_targets_last_received in
+ * test_msg_router.c. The test thread runs on the shell's CPU (CPU 0);
+ * a helper task pinned to CPU 1 publishes /ar/b after a barrier so
+ * the publish lands AFTER the test's receive() but BEFORE its ack().
+ *
+ * Sequence (with cross-CPU helper):
+ *   T0: test (CPU 0): subscribe /ar/a + /ar/b
+ *   T0: test (CPU 0): publish_nowait /ar/a (prio 5) — MA.ready=1
+ *   T0: test (CPU 0): receive — returns /ar/a, sets LAST_RECEIVED[C]
+ *   T0: test (CPU 0): NC_SYNC(TRIGGER) = 1 (signal helper)
+ *   T1: helper (CPU 1): wakes, publish_nowait /ar/b (prio 5) — MB.ready=1
+ *   T1: helper (CPU 1): NC_SYNC(HELPER_DONE) = 1
+ *   T0: test (CPU 0): spin on HELPER_DONE
+ *   T0: test (CPU 0): ack() — clears MA, NOT MB
+ *   T0: test (CPU 0): receive — returns /ar/b
+ *   T0: test (CPU 0): ack(), receive → NULL
+ *
+ * Demonstrates the ack-targeting contract under genuinely concurrent
+ * activity: the publishing CPU is serializing through MSG_ROUTER_LOCK
+ * (SpinGuard) alongside the receive/ack calls. Because publish_internal
+ * (and publish_internal_nowait) releases the lock between gather and
+ * the BSS-static ready/ack atomics, ack() can interleave with helper's
+ * publish without deadlock.
+ *
+ * Requires cpu_count >= 2 (shell + helper). The receive/ack work runs
+ * on the same CPU as the shell, so we don't need a third CPU.
+ * ============================================================================ */
+
+#define AR_COMPONENT 23
+#define AR_TOPIC_A   ((const uint8_t *)"/ar/a")
+#define AR_TOPIC_B   ((const uint8_t *)"/ar/b")
+
+extern int msg_router_publish_nowait(const uint8_t *topic_name,
+                                     const uint8_t *data);
+
+static volatile uint32_t ar_trigger;
+static volatile uint32_t ar_helper_done;
+
+static void ar_helper(void *arg)
+{
+    (void)arg;
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 5;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSGAR_TRIGGER)) break;
+#else
+        cache_invalidate((void *)&ar_trigger);
+        if (ar_trigger) break;
+#endif
+        yield();
+    }
+
+    /* Helper publishes /ar/b at the same priority as the earlier /ar/a
+     * publish. The equal-priority tie-break in receive picks /ar/a
+     * first (subscribed earlier → lower TOPICS[] index), so after ack
+     * clears /ar/a the next receive picks /ar/b. */
+    (void)msg_router_publish_nowait(AR_TOPIC_B, (const uint8_t *)"B1");
+
+    ar_helper_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGAR_HELPER_DONE) = 1;
+#else
+    cache_clean((void *)&ar_helper_done);
+#endif
+}
+
+static void test_msg_router_ack_targets_last_received_cross_cpu(void)
+{
+    /* shell on 0, helper on 1 */
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    msg_router_init();
+    ar_trigger = 0;
+    ar_helper_done = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MSGAR_TRIGGER, 2);
+#else
+    cache_clean((void *)&ar_trigger);
+    cache_clean((void *)&ar_helper_done);
+#endif
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_A, AR_COMPONENT));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_B, AR_COMPONENT));
+
+    /* Spawn helper that will publish /ar/b on CPU 1 when triggered. */
+    struct task *helper = task_create("ar_helper", ar_helper, NULL);
+    TEST_ASSERT_NOT_NULL(helper);
+    scheduler_add_task_to_cpu(helper, 1);
+
+    /* Step 1: publish /ar/a on the test thread (CPU 0). MA.ready=1.
+     * publish_nowait is used so the test thread can continue to
+     * receive/ack itself — the contract being tested is ack-target
+     * routing across CPUs, not the ack-wait loop. */
+    int d_a = msg_router_publish_nowait(AR_TOPIC_A, (const uint8_t *)"A1");
+    TEST_ASSERT_EQUAL_INT(1, d_a);
+
+    /* Step 2: receive returns /ar/a; LAST_RECEIVED[AR_COMPONENT] := MA. */
+    uint8_t topic_buf[16];
+    const uint8_t *m1 = msg_router_receive(AR_COMPONENT, topic_buf);
+    TEST_ASSERT_NOT_NULL(m1);
+    TEST_ASSERT_EQUAL_STRING("/ar/a", (const char *)topic_buf);
+
+    /* Step 3: trigger helper to publish /ar/b from CPU 1, and wait for
+     * confirmation that the publish has landed. After HELPER_DONE we
+     * know MB.ready=1. */
+    ar_trigger = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGAR_TRIGGER) = 1;
+#else
+    cache_clean((void *)&ar_trigger);
+#endif
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 5;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSGAR_HELPER_DONE)) break;
+#else
+        cache_invalidate((void *)&ar_helper_done);
+        if (ar_helper_done) break;
+#endif
+        yield();
+    }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGAR_HELPER_DONE),
+        "helper task did not complete /ar/b publish within timeout");
+#else
+    cache_invalidate((void *)&ar_helper_done);
+    TEST_ASSERT_MESSAGE(ar_helper_done,
+        "helper task did not complete /ar/b publish within timeout");
+#endif
+
+    /* Step 4: ack — targets MA (the receive's source), NOT MB. */
+    msg_router_ack(AR_COMPONENT);
+
+    /* Step 5: receive must return /ar/b. If ack had wrongly cleared MB,
+     * receive's lock-held scan would still pick /ar/a (subscribed
+     * earlier, equal priority). */
+    const uint8_t *m2 = msg_router_receive(AR_COMPONENT, topic_buf);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_STRING("/ar/b", (const char *)topic_buf);
+
+    msg_router_ack(AR_COMPONENT);
+
+    /* Both mailboxes drained. */
+    const uint8_t *m3 = msg_router_receive(AR_COMPONENT, topic_buf);
+    TEST_ASSERT_NULL(m3);
+
+    msg_router_unsubscribe_all(AR_COMPONENT);
+}
+
+/* ============================================================================
  * smp_notify_cpu (Prereq #3) — direct functional tests
  *
  * `scheduler_add_task_to_cpu()` invokes `smp_notify_cpu(cpu)` after
@@ -1967,6 +2128,9 @@ int test_suite_integration(void)
     /* Regression: msg_router concurrency stress (#67a / #864) */
     RUN_TEST(test_msg_router_multi_subscriber);
     RUN_TEST(test_msg_router_priority_concurrent);
+
+    /* Regression: msg_router LAST_RECEIVED ack-targeting (#67c / #867) */
+    RUN_TEST(test_msg_router_ack_targets_last_received_cross_cpu);
 
     /* Prereq #3: smp_notify_cpu abstraction */
     RUN_TEST(test_smp_notify_cpu_safe);
