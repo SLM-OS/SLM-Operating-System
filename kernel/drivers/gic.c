@@ -1008,6 +1008,10 @@ int gic_set_affinity(uint32_t irq, uint32_t cpu_mask)
     }
 
     GICD_IROUTER(irq) = gic_irouter_val_from_cpu(cpu);
+    /* GICv3 spec §8.9.4: callers observing the post-write behavior must
+     * wait for GICD_CTLR.RWP to clear. Cheap when uncontended; bounded
+     * by gic_wait_rwp's timeout if hardware ever wedges. */
+    gic_wait_rwp();
     return 0;
 }
 
@@ -1061,6 +1065,9 @@ void gic_exclude_cpu_from_spis(uint32_t cpu)
             spi_excluded_set(cpu, irq - GIC_SPI_START);
         }
     }
+    /* One RWP poll for the whole batch — the spec only requires RWP to
+     * clear before the next observed effect, not per-write. */
+    gic_wait_rwp();
 
     DEBUG_PRINT("GIC: Excluded CPU %u from SPI routing (aff %llx)",
                 cpu, (unsigned long long)cpu_aff);
@@ -1095,6 +1102,8 @@ void gic_include_cpu_in_spis(uint32_t cpu)
             spi_excluded_clear(cpu, spi_off);
         }
     }
+    /* One RWP poll for the whole batch — see gic_exclude_cpu_from_spis. */
+    gic_wait_rwp();
 
     DEBUG_PRINT("GIC: Included CPU %u in SPI routing", cpu);
 }

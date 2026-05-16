@@ -226,6 +226,49 @@ static void test_gic_exclude_out_of_range_is_noop(void)
     TEST_ASSERT_EQUAL_UINT32(saved, gic_get_affinity(TEST_GIC_SPI));
 }
 
+/*
+ * Test: post-set_affinity read returns the just-written value, never a
+ * stale prior value.
+ *
+ * On GICv3 hardware the distributor latches IROUTER writes asynchronously;
+ * GICD_CTLR.RWP indicates the write is still pending. Before #942 the
+ * driver did not poll RWP, so a back-to-back `set_affinity(A) ->
+ * get_affinity()` sequence could observe the pre-write value on a busy
+ * distributor (Jetson PCIe / GIC contention). After #942, `set_affinity`
+ * waits for RWP to clear before returning.
+ *
+ * This test is monotonic — never times-out-races on QEMU's instant
+ * writes — and matches the contract that "after set_affinity returns 0,
+ * get_affinity returns what was set."
+ */
+static void test_gic_set_affinity_post_write_is_observed(void)
+{
+    uint32_t saved = gic_get_affinity(TEST_GIC_SPI);
+
+    /* Walk every logical CPU. After each set, get must return exactly
+     * the mask we wrote. With pending RWP, on hardware this could
+     * previously return the prior write's value. */
+    for (uint32_t cpu = 0; cpu < cpu_count; cpu++) {
+        int rc = gic_set_affinity(TEST_GIC_SPI, 1u << cpu);
+        TEST_ASSERT_EQUAL_INT(0, rc);
+
+        /* Immediately read — no intervening operation. */
+        uint32_t got = gic_get_affinity(TEST_GIC_SPI);
+        TEST_ASSERT_EQUAL_UINT32(1u << cpu, got);
+    }
+
+    /* Best-effort restore. */
+    if (saved != 0) {
+        uint32_t cpu = 0;
+        while (cpu < 32 && !(saved & (1u << cpu))) {
+            cpu++;
+        }
+        if (cpu < cpu_count) {
+            (void)gic_set_affinity(TEST_GIC_SPI, saved);
+        }
+    }
+}
+
 #endif /* TEST_GIC_ANY_ARM */
 
 int test_suite_gic(void)
@@ -237,6 +280,7 @@ int test_suite_gic(void)
     RUN_TEST(test_gic_set_affinity_rejects_invalid_cpu);
     RUN_TEST(test_gic_exclude_include_round_trip);
     RUN_TEST(test_gic_exclude_out_of_range_is_noop);
+    RUN_TEST(test_gic_set_affinity_post_write_is_observed);
 #endif
     /* On non-ARM platforms (x86-64) the suite is empty — UNITY_END
      * reports zero tests, which is the cleanest "skip" signal. */
