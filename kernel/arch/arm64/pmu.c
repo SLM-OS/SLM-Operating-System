@@ -300,22 +300,44 @@ bool pmu_is_ready(void)
     return pmu_ready_per_cpu[cpu];
 }
 
+/* Q16.16 fixed-point unit value (represents 1.0). pmu.c stays in
+ * `-mgeneral-regs-only` land by keeping cache_pressure as Q16.16;
+ * ai_state.c (FP-clean) divides by 65536.0f to get the float. */
+#define PMU_Q16_ONE (1u << 16)
+
 /*
  * Per-CPU cache_pressure cache, stored as Q16.16 fixed point so the
  * AI scheduler can pull a [0.0, 1.0] value without doing FP from pmu.c
  * (compiled -mgeneral-regs-only).
  *
- * Saturation point: 100M L1D misses per second is a reasonable upper
- * bound for a busy Cortex-A76 (Pi 5) or Cortex-A78AE (Jetson) under a
- * memory-heavy workload — empirically observed in the prior
- * uncalibrated pmu_default_events sweeps. Above that, real-time
- * cache_pressure saturates at 1.0. Tune via the `pmu cache-ceiling`
- * shell command if a future workload pushes past it.
+ * Saturation point: at the chosen ceiling of 100K L1D misses per 1M
+ * cycles (≈ one miss every 10 cycles), real-time cache_pressure
+ * saturates at 1.0. The cycle-relative unit is intentional — it
+ * normalizes across clock rates so a slower CPU under the same
+ * relative pressure doesn't get a misleadingly low value. In
+ * absolute terms this corresponds to ~100M misses/sec at 1 GHz
+ * (Cortex-A76) and ~150M misses/sec at 1.5 GHz (Cortex-A78AE).
+ * Tune by editing the `saturation` constant in
+ * `pmu_sample_cache_pressure` below.
+ *
+ * Cross-CPU access model: the writer (`pmu_sample_cache_pressure`)
+ * runs on the calling CPU and only writes that CPU's own slot. The
+ * READER (`pmu_get_cache_pressure_q16`, called from
+ * `ai_state.c::extract_per_core` to fill the per-core feature
+ * vector) reads every CPU's slot from a single calling CPU. The
+ * array is in cacheable BSS, so on Pi 5 / Jetson (where DC CIVAC
+ * doesn't propagate through per-core L2 — see `kernel/CLAUDE.md`
+ * "Non-Cacheable Shared Memory") the read may return stale values
+ * for a few ticks. This is acceptable for the AI scheduler feature
+ * input — the policy already tolerates noisy inputs, and the EWMA
+ * smooths out single-sample noise. Matches the existing lock-free
+ * `ready_count` cross-CPU read pattern in
+ * `ai_state.c::extract_global`.
  */
 static volatile uint32_t pmu_cache_pressure_q16_per_cpu[MAX_CPUS];
 
-/* Per-CPU tracking state for the EWMA. Each CPU writes its own slot;
- * no cross-CPU contention. */
+/* Per-CPU tracking state for the EWMA. Only the owning CPU writes or
+ * reads its own slot — no cross-CPU access for this array. */
 static struct {
     uint32_t last_misses;
     uint64_t last_cycles;
@@ -368,9 +390,9 @@ void pmu_sample_cache_pressure(void)
     const uint64_t saturation = 100000ULL;  /* tunable */
     uint64_t q16;
     if (mpm >= saturation) {
-        q16 = 0x10000ULL;  /* 1.0 */
+        q16 = PMU_Q16_ONE;  /* 1.0 */
     } else {
-        q16 = (mpm * 0x10000ULL) / saturation;
+        q16 = (mpm * PMU_Q16_ONE) / saturation;
     }
 
     /* EWMA: new = (old * 3 + sample) / 4. Use the Q16 representation
@@ -378,8 +400,8 @@ void pmu_sample_cache_pressure(void)
     uint32_t prior = pmu_cache_pressure_q16_per_cpu[cpu];
     uint64_t blended = (((uint64_t)prior * ((1u << PMU_CP_SHIFT) - 1u))
                         + q16) >> PMU_CP_SHIFT;
-    if (blended > 0x10000ULL) {
-        blended = 0x10000ULL;
+    if (blended > PMU_Q16_ONE) {
+        blended = PMU_Q16_ONE;
     }
     pmu_cache_pressure_q16_per_cpu[cpu] = (uint32_t)blended;
 }
