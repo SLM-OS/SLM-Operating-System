@@ -213,6 +213,19 @@ QEMU numbers vary between runs due to host load and emulation non-determinism. P
 
 ## AI Scheduler Inference
 
+SLM-OS ships **four pluggable scheduler policies** in addition to
+the heuristic baseline. They co-exist as runtime-selectable options
+(see `docs/scheduler.md`) — no policy is "the winner". The capstone
+story is "we built the substrate, here are four characterizations."
+
+| Policy   | Source                               | Wire format               | Decision shape                                  | Loaded via                              |
+|----------|--------------------------------------|---------------------------|--------------------------------------------------|------------------------------------------|
+| `heuristic` | Built-in                          | n/a                       | Round-robin + deadline pressure                  | Always available                         |
+| `ai_mlp` | `slm-os-scheduler-ai` MLP cascade   | C-source weights (515 KB) | Argmax over 42 logits                            | Statically linked + optional runtime blob |
+| `ai_ppo` | `slm-os-scheduler-ai` PPO actor     | C-source weights (515 KB) | Argmax over 42 logits                            | Statically linked + optional runtime blob |
+| `ai_xgb` | `slm-os-scheduler-ai` XGBoost cascade | SEMB+XGBC binary (~9 MB) | 3 classifiers in cascade — `(core, priority, preempt)` | Runtime blob (mandatory; never statically linked) |
+| `ai_hailo` | Hailo-8 INT8 of MLP cascade       | HEF (~1 MB)               | Argmax over 42 INT8 logits                       | NPU offload via `hailo load`             |
+
 Real trained MLP and PPO weights from the Plan A export pipeline (108→256→256→128→42 architecture, ~3 MB per model).
 
 | Metric | Pi 5 (native) | Target |
@@ -222,18 +235,34 @@ Real trained MLP and PPO weights from the Plan A export pipeline (108→256→25
 | Action space | 42 actions (7 cores x 3 priority x 2 preempt) | — |
 | Weight size (MLP) | 3.0 MB | — |
 | Weight size (PPO) | 3.0 MB | — |
+| XGBoost cascade size (runtime blob) | ~9 MB (462 K nodes) | runtime-loaded, never in image |
 | Kernel binary with AI | 1.9 MB (vs 824 KB without) | — |
 
 **Target achieved:** 41.9 us < 50 us on Cortex-A76 @ 2.4 GHz.
 
 ### AI vs Heuristic Scheduler Comparison
 
-| Metric | Heuristic | AI MLP | Ratio |
-|--------|-----------|--------|-------|
-| Decision latency (Pi 5) | ~2 us | 41.9 us | 21x slower |
-| Decision latency (QEMU) | ~2 us | ~1,000 us | 500x slower (emulation) |
-| Fallback rate | N/A | 0-50% (depends on isolation) | — |
-| CPU assignment | Round-robin | Model-driven (trained on workload patterns) | — |
+| Metric | Heuristic | AI MLP | AI XGB | Ratio (XGB / heuristic) |
+|--------|-----------|--------|--------|------|
+| Decision latency (Pi 5) | ~2 us | 41.9 us | _captured by `bench sched-policy`_ | _t.b.d._ |
+| Decision latency (QEMU) | ~2 us | ~1,000 us | _captured by `bench sched-policy`_ | _t.b.d._ |
+| Fallback rate | N/A | 0-50% (depends on isolation) | clamps + isolation-aware fallback | — |
+| CPU assignment | Round-robin | Model-driven | Cascade-driven (`core` then `priority` then `preempt`) | — |
+
+The XGBoost row is collected via `bench sched-policy` after staging
+`xgb_sched.smb`; an empty cell means no cascade was active when the
+bench ran. Sibling-repo simulator runs (Plan A
+`results/eval_summary.csv`, 200 episodes × 8 scenarios) report
+**MLP at ~99.6% mean deadline-compliance vs XGBoost at ~95.3%**
+across all scenarios. The gap is workload-dependent — XGBoost
+matches MLP on `deadline_pressure` and `memory_pressure` (both
+100%) and trails most on the more interleaved workloads
+(`asymmetric`, `light_*`, `heavy_inference`, all 90–93%).
+Informative for option-space comparison, not a selection
+criterion. SLM-OS treats XGBoost as a swappable policy alongside
+MLP/PPO/Hailo per
+[#848](https://github.com/SLM-OS/SLM-Operating-System/issues/848)
+("pluggable policies as first-class").
 
 The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware. This is acceptable for inference-heavy workloads where decisions happen infrequently (component dispatch, not per-tick). The heuristic policy remains the default for latency-sensitive cooperative scheduling.
 
@@ -241,6 +270,30 @@ The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware.
 - Workloads with heterogeneous task requirements (different priority/preemption needs)
 - Systems where optimal CPU placement matters more than scheduling overhead
 - Evaluation of learned scheduling policies against heuristic baselines
+
+### XGBoost cascade workflow
+
+The XGBoost cascade is loaded at runtime — there is no kernel-image
+embedding. End-to-end:
+
+```
+# Sibling repo: emit the binary blob
+$ python scripts/export_models.py --model xgboost --platform jetson_orin_nano
+
+# Copy the resulting deploy/generated/xgb_sched.smb to the SD card
+# (or any path the running shell can read)
+
+# In the SLM-OS shell:
+slm.sched_model_stage("xgboost", "/sd/xgb_sched.smb")
+slm.sched_model_activate("xgboost")
+slm.sched_set_policy("ai_xgb")
+```
+
+CPU-id clamping: the cascade was trained on a 6-core space; on Pi 5
+(4 cores) the core classifier can emit 4 or 5. `sched_xgb_assign_cpu`
+clamps via modulo and continues, with a one-shot WARN. The
+distribution may skew on 4-core platforms but no decision is dropped
+to the heuristic fallback.
 
 **When to use heuristic scheduling:**
 - Latency-sensitive cooperative workloads
