@@ -32,6 +32,9 @@ pub use inference::{
     stats as scheduler_stats, reset_stats as reset_scheduler_stats,
     queue_depth as scheduler_queue_depth,
     MAX_BATCH, MAX_INPUT_DIM, MAX_OUTPUT_DIM,
+    // Test-only helpers — used by `rust_batch_inference_test`.
+    inject_pending_slot_for_test, drain_slot_for_test, slot_state_for_test,
+    SLOT_STATE_DONE_OK, SLOT_STATE_DONE_ERR,
 };
 
 // Re-export heterogeneous scheduling types

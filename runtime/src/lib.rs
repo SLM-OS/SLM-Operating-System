@@ -7351,6 +7351,94 @@ pub extern "C" fn rust_batch_inference_test() -> i32 {
         sched::set_batch_size(8); // reset to default
     }
 
+    // Test 7 (#859): deadline-aware bypass. A request whose remaining
+    // slack is below `batch_timeout_us` skips the queue entirely and
+    // dispatches as a singleton, trip `bypassed_deadline` once.
+    {
+        sched::set_batching_enabled(true);
+        sched::set_batch_size(8);
+        sched::set_batch_timeout_us(5_000); // 5 ms
+        sched::reset_scheduler_stats();
+
+        // 1 ms slack < 5 ms timeout → must bypass.
+        let tight = sched::TaskDeadline::inference_latency_ms(1);
+        let mut out = [0.0f32; 64];
+        let n = unsafe {
+            sched::submit_inference_sync(
+                model_index as usize,
+                INPUT_A.as_ptr(), INPUT_A.len(),
+                out.as_mut_ptr(), out.len(),
+                tight,
+            ).unwrap_or(0)
+        };
+        let stats = sched::scheduler_stats();
+        let correct = n == na && bit_equal(&out[..n], &baseline_a[..na]);
+        let counted = stats.bypassed_deadline == 1
+            && stats.singleton_dispatches == 1
+            && stats.batches_dispatched == 0
+            && stats.queued == 0;
+        let passed = correct && counted;
+        print_test_result(b"batch: tight deadline -> bypass + singleton dispatch\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8 (#859): timer-driven partial-batch flush. Inject one
+    // PENDING peer slot, then submit a real request from this thread.
+    // The submitter enters Role::Waiter (count=2 < batch_size=8) and
+    // wins the timer-flush claim once `batch_timeout_us` elapses; it
+    // becomes the dispatcher of both slots in a single batched call.
+    {
+        sched::set_batching_enabled(true);
+        sched::set_batch_size(8);
+        // Short timeout so the test finishes quickly. Hits the lower
+        // clamp at 100 us.
+        sched::set_batch_timeout_us(100);
+        sched::reset_scheduler_stats();
+
+        // Peer slot: takes INPUT_B and writes into peer_out. Buffers
+        // must stay live until the dispatch completes.
+        let mut peer_out = [0.0f32; 64];
+        let peer_idx = unsafe {
+            sched::inject_pending_slot_for_test(
+                model_index as usize,
+                INPUT_B.as_ptr(), INPUT_B.len(),
+                peer_out.as_mut_ptr(), peer_out.len(),
+            )
+        };
+        let injected = peer_idx.is_some();
+
+        let mut out = [0.0f32; 64];
+        let n = if injected {
+            unsafe {
+                sched::submit_inference_sync(
+                    model_index as usize,
+                    INPUT_A.as_ptr(), INPUT_A.len(),
+                    out.as_mut_ptr(), out.len(),
+                    sched::TaskDeadline::NONE,
+                ).unwrap_or(0)
+            }
+        } else { 0 };
+
+        // After dispatch our slot is IDLE; the peer slot is DONE_OK
+        // (the dispatcher signals it via the mailbox). Drain it.
+        let peer_n = if let Some(pi) = peer_idx {
+            unsafe { sched::drain_slot_for_test(pi).unwrap_or(0) }
+        } else { 0 };
+
+        let stats = sched::scheduler_stats();
+        let correct_main = n == na && bit_equal(&out[..n], &baseline_a[..na]);
+        let correct_peer = peer_n == nb && bit_equal(&peer_out[..peer_n], &baseline_b[..nb]);
+        let counted = stats.batches_timeout == 1
+            && stats.batches_full == 0
+            && stats.batches_dispatched == 1;
+        let passed = injected && correct_main && correct_peer && counted;
+        print_test_result(b"batch: timer flush dispatches partial batch via batched engine\0", passed);
+        if !passed { failures += 1; }
+
+        sched::set_batching_enabled(false);
+        sched::set_batch_timeout_us(5_000); // restore default
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
