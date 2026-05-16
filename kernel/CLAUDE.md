@@ -416,8 +416,13 @@ abandoned exception frame on real ARM64 hardware).
   `spi_excluded_by[cpu][]` so `include` can restore *exactly* the
   SPIs that were on `cpu` rather than the prior `count % (cpu+1) == cpu`
   formula that just stomped a fraction of IROUTERs. Any new GICv3-
-  IROUTER write site must use `gic_irouter_val_from_cpu()`; tests in
-  `kernel/tests/test_gic.c` pin the round-trip. Two follow-on
+  IROUTER write site must use `gic_irouter_val_from_cpu()` and call
+  the existing `gic_wait_rwp()` helper after writes so callers
+  observing the post-write effect (e.g. immediate `get_affinity`,
+  back-to-back IRQ trigger) see the new value rather than a stale
+  one held by `GICD_CTLR.RWP` (#942 hardening). Tests in
+  `kernel/tests/test_gic.c` pin the round-trip and the post-write
+  observability contract. Two follow-on
   fixes were needed before the trampoline path was hardware-stable:
   PR #752 added a NULL-safe entry guard to `maybe_arm_resched_trampoline`
   (Linux's xudc IRQ 198 was firing the moment `mmu_enable` unmasked
