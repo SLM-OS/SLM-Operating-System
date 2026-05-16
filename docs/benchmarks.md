@@ -297,6 +297,56 @@ clamps via modulo and continues, with a one-shot WARN. The
 distribution may skew on 4-core platforms but no decision is dropped
 to the heuristic fallback.
 
+#### Bit-equality verification (`bench xgb-equiv`)
+
+The sibling repo's exporter emits two corpus files alongside
+`xgb_sched.smb`: `test_vectors_xgb.bin` (1000 × 108 f32 input states)
+and `expected_actions_xgb.bin` (1000 × 3 i32 ground-truth `(core,
+priority, preempt)` triples produced by Python's `TripleClassifier
+.predict`). Replay the corpus through the on-device cascade with:
+
+```
+# In the SLM-OS shell, after the stage/activate step above:
+bench xgb-equiv 0:/slmstore/test_vectors_xgb.bin 0:/slmstore/expected_actions_xgb.bin
+```
+
+The verb walks both files in lockstep, runs `rust_sched_xgb_predict`
+on each state, diffs the triple against the expected one, and prints
+a pass/fail summary plus the first-mismatch index + actual-vs-expected
+triple if any disagreement appears. Exit code is 0 on full match,
+1 on any mismatch — useful for scripted hardware verification. Both
+VFS-rooted (`/mnt/files/...`) and FAT-rooted (`0:/slmstore/...`)
+paths are accepted.
+
+This exists because the on-device walker re-implements XGBoost
+inference in `no_std` Rust (tree traversal, sigmoid, multiclass
+argmax). The synthetic 3-classifier cascade in `rust_run_tests`
+proves the FFI plumbing works; this verb proves numerical equivalence
+with the trainer on a *trained* cascade. Closes
+[#904](https://github.com/SLM-OS/SLM-Operating-System/issues/904).
+
+**Pi 5 result (2026-05-15, BCM2712 Cortex-A76 @ 2.4 GHz):**
+
+| Metric | Value |
+|--------|-------|
+| Match rate | **23 / 1000** |
+| Per-decision latency | **240,747 ns (~240 µs)** |
+| First mismatch (i=0) | got `(core=1, priority=2, preempt=1)` vs expected `(core=1, priority=1, preempt=0)` |
+
+The 977/1000 mismatch rate is a real divergence between the on-device
+walker and Python's `TripleClassifier.predict` — exactly the class of
+bug this verb was designed to catch. The shape (`core` matches at
+i=0, `priority` and `preempt` differ) is consistent with a
+derived-feature drift, label-encoder inverse-transform mismatch, or
+classifier-input-vector ordering bug. **Investigation tracked in
+[#920](https://github.com/SLM-OS/SLM-Operating-System/issues/920)**;
+the verb itself is sound and will be the canonical regression-detection
+tool once the divergence is fixed.
+
+The cascade walker is pure software (no NEON, no FP-tier divergence
+between platforms) so a Jetson run would produce identical numbers;
+not re-run on Jetson for that reason.
+
 **When to use heuristic scheduling:**
 - Latency-sensitive cooperative workloads
 - Systems with frequent task creation/destruction

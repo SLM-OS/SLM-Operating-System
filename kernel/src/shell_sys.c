@@ -1079,6 +1079,7 @@ static void bench_ipc_latency(void)
 #if defined(CONFIG_AI_SCHEDULER)
 #include "inference_device.h"
 #include "ai_types.h"
+#include "fp_context.h"
 
 static void bench_policy_one(const char *dev_name,
                              enum inference_dtype dtype,
@@ -1129,6 +1130,202 @@ static void bench_policy_one(const char *dev_name,
     shell_printf("  %-10s  %u/%u ok   %lu ns/decision   %lu decisions/sec\r\n",
                  dev_name, ok, iters,
                  (unsigned long)per_ns, (unsigned long)per_sec);
+}
+
+/*
+ * Read a corpus file from either FAT (`0:/slmstore/...`) or VFS
+ * (`/mnt/files/...`) into a PMM-allocated buffer. Caller frees via
+ * `pmm_free_pages(*buf, *pages)`. On error prints a diagnostic
+ * keyed by `tag` (e.g. "vectors", "actions") and returns -1; on
+ * success returns 0 with `*buf`, `*len`, `*pages` populated. */
+static int xgb_equiv_read_corpus(const char *path,
+                                 const char *tag,
+                                 uint8_t **buf_out,
+                                 size_t *len_out,
+                                 size_t *pages_out)
+{
+    *buf_out = NULL;
+    *len_out = 0;
+    *pages_out = 0;
+
+    if (runtime_blob_is_fat_path(path)) {
+        int rc = runtime_blob_read_fat_buf(path, buf_out, len_out, pages_out);
+        if (rc != RUNTIME_BLOB_FILE_OK) {
+            shell_printf("xgb-equiv: FAT read failed on '%s' (%s, rc=%d)\r\n",
+                         path, tag, rc);
+            return -1;
+        }
+        return 0;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        shell_printf("xgb-equiv: cannot resolve '%s' (%s)\r\n", path, tag);
+        return -1;
+    }
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.size == 0) {
+        shell_printf("xgb-equiv: '%s' (%s) not found or empty\r\n", resolved, tag);
+        return -1;
+    }
+    *len_out = info.size;
+    *pages_out = (*len_out + 4095u) / 4096u;
+    *buf_out = (uint8_t *)pmm_alloc_pages(*pages_out);
+    if (!*buf_out) {
+        shell_printf("xgb-equiv: out of memory (%s)\r\n", tag);
+        return -1;
+    }
+    int rd = vfs_read_path(resolved, (char *)*buf_out, *len_out, 0);
+    if (rd != (int)*len_out) {
+        pmm_free_pages(*buf_out, *pages_out);
+        *buf_out = NULL;
+        shell_printf("xgb-equiv: short read on '%s' (%s, %d/%u)\r\n",
+                     resolved, tag, rd, (unsigned)*len_out);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * `bench xgb-equiv <test-vectors.bin> <expected-actions.bin>`
+ *
+ * Closes #904. Replays the sibling-repo verification corpus
+ * (`test_vectors_xgb.bin` = N × 108 × f32, `expected_actions_xgb.bin` =
+ * N × 3 × i32 holding `(core, priority, preempt)` triples) through the
+ * staged + activated XGBoost cascade and asserts bit-equality with the
+ * Python `TripleClassifier.predict` ground truth. N is derived from the
+ * vectors-file size; both files must agree on N or the verb refuses.
+ *
+ * Exit code:
+ *   0 — all N entries match
+ *   1 — at least one mismatch (first-mismatch index + diff printed)
+ *   anything else — read / size / staging precondition failure
+ */
+static int bench_xgb_equiv(const char *vec_path, const char *exp_path)
+{
+    uint8_t *vec_buf = NULL, *exp_buf = NULL;
+    size_t vec_len = 0, exp_len = 0;
+    size_t vec_pages = 0, exp_pages = 0;
+    int rc = -1;
+
+    if (!rust_sched_xgb_is_active()) {
+        shell_puts("xgb-equiv: no cascade active — stage + activate "
+                   "xgb_sched.smb first via `sched model load xgboost ...`\r\n");
+        return -1;
+    }
+
+    /* Both corpus files. VFS-rooted (`/mnt/files/...`) and FAT-rooted
+     * (`0:/slmstore/...`) paths both accepted — FAT matters on Pi 5
+     * because the LittleFS mount caps at a few tens of MB while the
+     * trained corpus is ~440 KB plus the 9 MB cascade staged
+     * separately. The FAT branch uses the same shared helper that
+     * `runtime_blob_file.c` does for blob loads. */
+    if (xgb_equiv_read_corpus(vec_path, "vectors",
+                              &vec_buf, &vec_len, &vec_pages) != 0) {
+        goto cleanup;
+    }
+    if (xgb_equiv_read_corpus(exp_path, "actions",
+                              &exp_buf, &exp_len, &exp_pages) != 0) {
+        goto cleanup;
+    }
+
+    /* AI_STATE_DIM × f32 per vector, 3 × i32 per action triple. Both
+     * files must encode the same N or the corpus is inconsistent. */
+    const size_t vec_stride = (size_t)AI_STATE_DIM * sizeof(float);
+    const size_t exp_stride = 3u * sizeof(int32_t);
+    if ((vec_len % vec_stride) != 0) {
+        shell_printf("xgb-equiv: '%s' size %u is not a multiple of "
+                     "%u (%d-d f32 vectors)\r\n",
+                     vec_path, (unsigned)vec_len,
+                     (unsigned)vec_stride, AI_STATE_DIM);
+        goto cleanup;
+    }
+    if ((exp_len % exp_stride) != 0) {
+        shell_printf("xgb-equiv: '%s' size %u is not a multiple of "
+                     "%u (3-i32 triples)\r\n",
+                     exp_path, (unsigned)exp_len,
+                     (unsigned)exp_stride);
+        goto cleanup;
+    }
+    size_t n_vec = vec_len / vec_stride;
+    size_t n_exp = exp_len / exp_stride;
+    if (n_vec != n_exp) {
+        shell_printf("xgb-equiv: vector count %u != action count %u\r\n",
+                     (unsigned)n_vec, (unsigned)n_exp);
+        goto cleanup;
+    }
+
+    const float *vectors = (const float *)vec_buf;
+    const int32_t *expected = (const int32_t *)exp_buf;
+
+    /* The Rust predictor uses FP/NEON; bracket the loop with
+     * FP_CONTEXT_SAVE/RESTORE so a timer IRQ that fires mid-bench
+     * can't observe an unsaved FP context. Mirrors the pattern in
+     * `kernel/sched/ai/sched_xgb.c::ai_xgb_assign_cpu`. */
+    FP_CONTEXT_SAVE();
+
+    uint32_t mismatches = 0;
+    int32_t first_idx = -1;
+    int32_t first_got_core = 0, first_got_prio = 0, first_got_preempt = 0;
+    int32_t first_exp_core = 0, first_exp_prio = 0, first_exp_preempt = 0;
+    uint64_t t0 = timer_get_count();
+    for (size_t i = 0; i < n_vec; i++) {
+        const float *state = &vectors[i * AI_STATE_DIM];
+        int32_t got_core = 0, got_prio = 0, got_preempt = 0;
+        if (rust_sched_xgb_predict(state, &got_core, &got_prio, &got_preempt) != 0) {
+            /* predict only fails for NULL pointers or no-active-cascade,
+             * both pre-checked. Treat as a hard mismatch and bail. */
+            mismatches = (uint32_t)(n_vec - i);
+            first_idx = (int32_t)i;
+            break;
+        }
+        int32_t exp_core = expected[i * 3 + 0];
+        int32_t exp_prio = expected[i * 3 + 1];
+        int32_t exp_preempt = expected[i * 3 + 2];
+        if (got_core != exp_core || got_prio != exp_prio || got_preempt != exp_preempt) {
+            if (first_idx < 0) {
+                first_idx = (int32_t)i;
+                first_got_core = got_core;
+                first_got_prio = got_prio;
+                first_got_preempt = got_preempt;
+                first_exp_core = exp_core;
+                first_exp_prio = exp_prio;
+                first_exp_preempt = exp_preempt;
+            }
+            mismatches++;
+        }
+    }
+    uint64_t t1 = timer_get_count();
+
+    FP_CONTEXT_RESTORE();
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
+    uint64_t per_ns = n_vec > 0 ? total_ns / n_vec : 0;
+
+    shell_printf("xgb-equiv: %u/%u match   %lu ns/predict   %s\r\n",
+                 (unsigned)(n_vec - mismatches), (unsigned)n_vec,
+                 (unsigned long)per_ns,
+                 mismatches == 0 ? "PASS" : "FAIL");
+    if (mismatches > 0) {
+        shell_printf("  first mismatch at i=%d:\r\n"
+                     "    got      (core=%d, priority=%d, preempt=%d)\r\n"
+                     "    expected (core=%d, priority=%d, preempt=%d)\r\n",
+                     (int)first_idx,
+                     (int)first_got_core, (int)first_got_prio, (int)first_got_preempt,
+                     (int)first_exp_core, (int)first_exp_prio, (int)first_exp_preempt);
+    }
+
+    rc = mismatches == 0 ? 0 : 1;
+
+cleanup:
+    if (vec_buf) {
+        pmm_free_pages(vec_buf, vec_pages);
+    }
+    if (exp_buf) {
+        pmm_free_pages(exp_buf, exp_pages);
+    }
+    return rc;
 }
 
 static void bench_sched_policy(void)
@@ -1816,6 +2013,18 @@ int cmd_bench(int argc, char *argv[])
 #if defined(CONFIG_AI_SCHEDULER)
     } else if (strcmp(argv[1], "sched-policy") == 0) {
         bench_sched_policy();
+    } else if (strcmp(argv[1], "xgb-equiv") == 0) {
+        if (argc < 4) {
+            shell_puts("Usage: bench xgb-equiv <test-vectors.bin> "
+                       "<expected-actions.bin>\r\n"
+                       "  test-vectors.bin     N x 108 x f32 little-endian\r\n"
+                       "  expected-actions.bin N x 3 x i32 little-endian "
+                       "(core, priority, preempt)\r\n"
+                       "Stage + activate the cascade first via "
+                       "`sched model load xgboost <path>`.\r\n");
+            return 1;
+        }
+        return bench_xgb_equiv(argv[2], argv[3]);
 #endif
     } else if (strcmp(argv[1], "infer-stress") == 0) {
         /* Concurrent inference stress workload (#860).
@@ -1934,7 +2143,7 @@ int cmd_bench(int argc, char *argv[])
         bench_sched_stats();
     } else {
         shell_printf("Unknown benchmark: %s\r\n", argv[1]);
-        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, infer-stress, stats, all\r\n");
+        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, xgb-equiv, infer-stress, stats, all\r\n");
         return 1;
     }
 
