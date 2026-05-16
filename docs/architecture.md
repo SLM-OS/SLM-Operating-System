@@ -436,6 +436,28 @@ The inference engine (`runtime/src/inference/engine.rs`) executes operator graph
 | Gemm | General matrix multiplication (A x B + C) |
 | Flatten | Flatten to 2D (batch, features) |
 
+**Dynamic batched dispatch (runtime-toggleable mode, #55).** The
+engine exposes `run_inference_batched(model, batch_size, in, out)`
+alongside the single-sample `run_inference`. The
+`InferenceScheduler` (`runtime/src/sched/inference.rs`) collects
+concurrent inference requests into a bounded queue (up to
+`MAX_BATCH = 32`), then dispatches them through one
+`run_inference_batched` call once either the configured
+batch-size threshold is reached or a CNTPCT-driven flush timeout
+elapses since the first request landed. Per-request output buffers
+are populated and per-task completion mailboxes are signalled by
+the synchronous dispatcher (the submitter that tipped the threshold
+or won the timer race). A request carrying a `TaskDeadline` whose
+remaining slack is below the configured timeout bypasses the queue
+and dispatches as a singleton. Mode is OFF by default and
+toggleable at runtime via `infer batch on` (shell) or
+`slm.infer_batch_mode("on")` (Lua) — per the exploratory-OS
+framing (#848), batched dispatch is a swappable option, not a
+required behavior. The MNIST GPU fast path remains single-sample
+only; batched dispatches always take the CPU graph path.
+Characterised numbers live in `docs/benchmarks.md` under "Dynamic
+Batching".
+
 ### GPU Compute Framework
 
 The GPU backend (`runtime/src/inference/gpu.rs`) provides a framework for GPU-accelerated inference:
