@@ -416,9 +416,7 @@ the subscriber then sees only the second message. This case requires
 multiple publishers running concurrently against the same mailbox, which
 the standard ack-wait publish path does not produce — its loop blocks on
 ack between iterations, so a single publisher cannot back-to-back deliver
-to one mailbox. Distinct from the LAST_RECEIVED targeting case (multiple
-mailboxes per component), which is pinned by
-`test_msg_router_ack_targets_last_received` and works correctly.
+to one mailbox.
 
 The single-mailbox overwrite drop is a real limitation of the current
 single-slot design and is tracked for post-capstone follow-up as #869.
