@@ -7013,6 +7013,71 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test: 4×4 NEON outer-product micro-kernel correctness (#56 PR 2).
+    //
+    // Uses M=36, K=4, N=36 — both M and N are >TILE/32+ blocks so the
+    // tiled path runs, both are 4-aligned so every iteration of the
+    // inner kernel hits the 4×4 NEON fast path (no edge fallback).
+    // K=4 means one inner-kernel call has exactly 4 K-steps, which
+    // distinguishes a row-ordering bug from a column-ordering bug
+    // (different rows of A see different scalars).
+    //
+    // Operand pattern: A[i,k] = (i+1)*0.1 + k*0.01, B[k,j] = (j+1)*0.1 + k*0.001.
+    // Each (i,j) cell is a distinct sum-of-products — an indexing bug
+    // (swapped row/col, off-by-one stride, broadcast wrong scalar)
+    // surfaces as a single failing cell rather than a uniform multiplier.
+    {
+        const M: usize = 36;
+        const K: usize = 4;
+        const N: usize = 36;
+        static mut A_44: [f32; M * K] = [0.0; M * K];
+        static mut B_44: [f32; K * N] = [0.0; K * N];
+        static mut C_44: [f32; M * N] = [0.0; M * N];
+        static mut C_REF_44: [f32; M * N] = [0.0; M * N];
+
+        unsafe {
+            for i in 0..M {
+                for kk in 0..K {
+                    A_44[i * K + kk] = (i as f32 + 1.0) * 0.1 + (kk as f32) * 0.01;
+                }
+            }
+            for kk in 0..K {
+                for j in 0..N {
+                    B_44[kk * N + j] = (j as f32 + 1.0) * 0.1 + (kk as f32) * 0.001;
+                }
+            }
+            for i in 0..M {
+                for j in 0..N {
+                    let mut acc = 0.0f32;
+                    for kk in 0..K {
+                        acc += A_44[i * K + kk] * B_44[kk * N + j];
+                    }
+                    C_REF_44[i * N + j] = acc;
+                }
+            }
+
+            let a = inference::Tensor::new(
+                core::ptr::addr_of!(A_44) as *const f32, &[M as u32, K as u32]);
+            let b = inference::Tensor::new(
+                core::ptr::addr_of!(B_44) as *const f32, &[K as u32, N as u32]);
+            let mut c = inference::Tensor::new(
+                core::ptr::addr_of_mut!(C_44) as *const f32, &[M as u32, N as u32]);
+            let result = inference::ops::matmul(&a, &b, &mut c);
+            let ok = result.is_ok();
+
+            let mut vals_ok = true;
+            let mut max_err: f32 = 0.0;
+            for i in 0..(M * N) {
+                let err = (C_44[i] - C_REF_44[i]).abs();
+                if err > max_err { max_err = err; }
+                if err > 0.001 { vals_ok = false; break; }
+            }
+            let passed = ok && vals_ok;
+            print_test_result(b"simd: matmul 36x4 * 4x36 (4-aligned 4x4 kernel)\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
     // Test: Tiled matmul (matrices > 32x32 trigger the tiling path)
     {
         // 64x64 × 64x64 matmul — all ones → each element should be 64.0

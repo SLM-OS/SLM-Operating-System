@@ -756,26 +756,103 @@ unsafe fn matmul_inner(ap: *const f32, bp: *const f32, cp: *mut f32,
 }
 
 /// Cache-tiled matmul: splits M, K, N into tiles that fit in L1 cache.
+///
+/// Per-tile inner micro-kernel dispatch (#56 PR 2):
+///
+/// - On aarch64, the 4-aligned interior of each tile is processed by a
+///   register-blocked 4×4 outer-product kernel (`matmul_4x4_kernel_neon`).
+///   That kernel keeps the 16-element C block resident in 4 NEON
+///   registers across the full K sweep, issuing 4 FMAs per (B-load +
+///   4 A-broadcasts) cycle. C is loaded once at block entry and stored
+///   once at block exit, eliminating `kn − 1` memory round-trips per
+///   4×4 block compared to the row×scalar form.
+/// - The right strip (cols past the 4-aligned interior) and bottom
+///   strip (rows past the 4-aligned interior) fall back to the
+///   row×scalar `simd_fma_row` kernel — same path used pre-PR 2.
+/// - On non-aarch64 targets the row×scalar form runs uniformly.
 unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
                        m: usize, k: usize, n: usize, tile: usize) {
     // Tile over K (accumulation dimension) first for cache reuse of C
     let mut kk = 0;
     while kk < k {
         let k_end = core::cmp::min(kk + tile, k);
+        let kn = k_end - kk;
         let mut ii = 0;
         while ii < m {
             let i_end = core::cmp::min(ii + tile, m);
+            let tile_m = i_end - ii;
             let mut jj = 0;
             while jj < n {
                 let j_end = core::cmp::min(jj + tile, n);
-                // Micro-kernel: C[ii..i_end, jj..j_end] += A[ii..i_end, kk..k_end] * B[kk..k_end, jj..j_end]
-                for i in ii..i_end {
-                    for kki in kk..k_end {
-                        let a_ik = *ap.add(i * k + kki);
-                        let b_row = kki * n;
-                        let c_row = i * n;
-                        let tile_n = j_end - jj;
-                        simd_fma_row(cp.add(c_row + jj), bp.add(b_row + jj), a_ik, tile_n);
+                let tile_n = j_end - jj;
+
+                // C[ii..i_end, jj..j_end] += A[ii..i_end, kk..k_end] * B[kk..k_end, jj..j_end]
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let i_blocks = tile_m & !3;
+                    let j_blocks = tile_n & !3;
+
+                    // 4×4-aligned interior — fastest path.
+                    let mut ib = 0;
+                    while ib < i_blocks {
+                        let mut jb = 0;
+                        while jb < j_blocks {
+                            matmul_4x4_kernel_neon(
+                                ap.add((ii + ib) * k + kk),
+                                bp.add(kk * n + jj + jb),
+                                cp.add((ii + ib) * n + jj + jb),
+                                kn, k, n,
+                            );
+                            jb += 4;
+                        }
+                        ib += 4;
+                    }
+
+                    // Right strip: 4-aligned rows, partial cols
+                    // (tile_n - j_blocks ∈ {0,1,2,3}).
+                    if j_blocks < tile_n {
+                        for ir in 0..i_blocks {
+                            for kki in 0..kn {
+                                let a_ik = *ap.add((ii + ir) * k + kk + kki);
+                                simd_fma_row(
+                                    cp.add((ii + ir) * n + jj + j_blocks),
+                                    bp.add((kk + kki) * n + jj + j_blocks),
+                                    a_ik,
+                                    tile_n - j_blocks,
+                                );
+                            }
+                        }
+                    }
+
+                    // Bottom strip: partial rows
+                    // (tile_m - i_blocks ∈ {0,1,2,3}), full tile_n.
+                    for ir in i_blocks..tile_m {
+                        for kki in 0..kn {
+                            let a_ik = *ap.add((ii + ir) * k + kk + kki);
+                            simd_fma_row(
+                                cp.add((ii + ir) * n + jj),
+                                bp.add((kk + kki) * n + jj),
+                                a_ik,
+                                tile_n,
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    // Non-aarch64: keep the original row×scalar form so
+                    // x86-64 + scalar-fallback paths are untouched by
+                    // PR 2 (x86-64 work is tracked in #847).
+                    for i in ii..i_end {
+                        for kki in kk..k_end {
+                            let a_ik = *ap.add(i * k + kki);
+                            simd_fma_row(
+                                cp.add(i * n + jj),
+                                bp.add(kki * n + jj),
+                                a_ik,
+                                tile_n,
+                            );
+                        }
                     }
                 }
                 jj += tile;
@@ -784,6 +861,88 @@ unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
         }
         kk += tile;
     }
+}
+
+/// 4×4 NEON outer-product micro-kernel (#56 PR 2).
+///
+/// Computes the contraction step:
+///   C[ii..ii+4, jj..jj+4] += A[ii..ii+4, kk..kk+kn] * B[kk..kk+kn, jj..jj+4]
+///
+/// Strategy: keep the 4×4 C block resident in `q0..q3` for the whole
+/// K loop. Each iteration loads one B row (4 elements, one `vld1q_f32`),
+/// broadcasts 4 scalars from A's 4 rows (`vdupq_n_f32` ×4), and issues
+/// 4 `vfmaq_f32` accumulations — for 8 ops/cycle of arithmetic against
+/// just one vector load. The row×scalar baseline issues 1 FMA, 1 B-load,
+/// 1 C-load, and 1 C-store per cycle, so per (i, k) pair the new kernel
+/// trades 1 B-load + 4 A-broadcasts + 4 FMAs (and no C traffic) for the
+/// row-scalar's 4 B-loads + 4 C-loads + 4 C-stores + 4 FMAs across the
+/// same 4 output rows.
+///
+/// AAPCS register usage at peak (inside the FMA chain): 4 NEON regs
+/// for C (q0..q3) + 1 for the loaded B row + 4 for the broadcast A
+/// scalars (`vdupq_n_f32` materializes a vector register, not a GP
+/// register) = 9 simultaneously live NEON regs. The Cortex-A76 NEON
+/// register file is 32 wide so there's ample headroom; a future
+/// 4×8 or 8×4 expansion could keep more C state resident.
+///
+/// # Safety
+///
+/// - `ap_block` must be the address of A[ii*k + kk], with at least
+///   `(3 * k_stride) + kn` f32 elements reachable from it.
+/// - `bp_block` must be the address of B[kk*n + jj], with at least
+///   `(kn - 1) * n_stride + 4` f32 elements reachable.
+/// - `cp_block` must be the address of C[ii*n + jj], writable for at
+///   least `3 * n_stride + 4` f32 elements; the kernel both reads and
+///   writes the 4×4 C block.
+/// - `kn` ≤ remaining K, `k_stride == k`, `n_stride == n`.
+/// - Caller is on aarch64 with NEON enabled (mandated by ARMv8-A; the
+///   `target_feature` attribute documents intent).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn matmul_4x4_kernel_neon(
+    ap_block: *const f32,
+    bp_block: *const f32,
+    cp_block: *mut f32,
+    kn: usize,
+    k_stride: usize,
+    n_stride: usize,
+) {
+    use core::arch::aarch64::*;
+
+    let cp1 = cp_block.add(n_stride);
+    let cp2 = cp_block.add(2 * n_stride);
+    let cp3 = cp_block.add(3 * n_stride);
+
+    // Load existing C — accumulating into pre-existing values is the
+    // correct behaviour under K-tiling (later K tiles add to earlier
+    // partial sums) and matches what `simd_fma_row` does.
+    let mut c0 = vld1q_f32(cp_block);
+    let mut c1 = vld1q_f32(cp1);
+    let mut c2 = vld1q_f32(cp2);
+    let mut c3 = vld1q_f32(cp3);
+
+    let ap1 = ap_block.add(k_stride);
+    let ap2 = ap_block.add(2 * k_stride);
+    let ap3 = ap_block.add(3 * k_stride);
+
+    for kki in 0..kn {
+        let b_row = vld1q_f32(bp_block.add(kki * n_stride));
+
+        let a0 = vdupq_n_f32(*ap_block.add(kki));
+        let a1 = vdupq_n_f32(*ap1.add(kki));
+        let a2 = vdupq_n_f32(*ap2.add(kki));
+        let a3 = vdupq_n_f32(*ap3.add(kki));
+
+        c0 = vfmaq_f32(c0, a0, b_row);
+        c1 = vfmaq_f32(c1, a1, b_row);
+        c2 = vfmaq_f32(c2, a2, b_row);
+        c3 = vfmaq_f32(c3, a3, b_row);
+    }
+
+    vst1q_f32(cp_block, c0);
+    vst1q_f32(cp1, c1);
+    vst1q_f32(cp2, c2);
+    vst1q_f32(cp3, c3);
 }
 
 /// Non-tiled SIMD matmul for small matrices.
