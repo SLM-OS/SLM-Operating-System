@@ -77,7 +77,8 @@
  *   7. PMCNTENSET_EL0 := bits 0..5 + bit 31 — enable the six event
  *      counters and the cycle counter.
  *
- * Must be called from each CPU after its MMU is live. Safe to call
+ * Must be called from each CPU after EL2 setup is stable (Pi 5 /
+ * Jetson VHE pivot) or unconditionally at EL1 (QEMU). Safe to call
  * more than once on the same CPU — it re-resets every counter.
  *
  * No-op on PLATFORM_X86_64 (the header guards the entire prototype).
