@@ -13,6 +13,7 @@
 #include "sched.h"
 #include "gic.h"
 #include "timer.h"
+#include "pmu.h"
 #include "smp.h"
 #include "cpu_supervisor.h"
 #include "ipc.h"
@@ -413,6 +414,19 @@ void kernel_main(void *dtb)
     /* Initialize timer (but don't start yet) */
     INFO("Initializing timer...");
     timer_init();
+
+#if !defined(PLATFORM_X86_64)
+    /* Initialize PMU on the primary CPU (#874). Secondary CPUs do the
+     * same from secondary_init. Safe to call before scheduler_init — the
+     * PMU sysregs are per-CPU and have no dependencies on other kernel
+     * subsystems. */
+    {
+        bool pmu_ok = pmu_enable_self();
+        if (!pmu_ok) {
+            WARN("PMU enable failed on primary CPU (likely EL3 trap)");
+        }
+    }
+#endif
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.

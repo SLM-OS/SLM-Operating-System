@@ -734,6 +734,14 @@ extern int rust_infer(uint32_t model_index, const float *input_data,
 extern int rust_inference_test(void);
 
 /*
+ * Run dynamic-batching scheduler tests (#857).
+ * Returns: Number of failures (0 = all passed).
+ *
+ * Depends on the embedded MNIST ONNX model — loads it internally.
+ */
+extern int rust_batch_inference_test(void);
+
+/*
  * Inference statistics structure.
  */
 typedef struct {
@@ -758,7 +766,7 @@ extern int rust_infer_stats(RustInferStats *stats);
 extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 
 /*
- * Per-operator profile entry (#56). Layout must match
+ * Per-operator profile entry (#56 + #871). Layout must match
  * `runtime/src/inference/engine.rs::OpProfileEntry` exactly — see the
  * `_pad` comment there for the explicit-padding rationale.
  *
@@ -766,6 +774,23 @@ extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
  * `runtime/src/loader/graph.rs` (0 = MatMul, 1 = Add, …, 16 = MaxPool,
  * 255 = Unknown). The `model profile show` handler in shell_sys.c
  * does the label lookup inline.
+ *
+ * PMU fields (#871) are sums across the measurement window:
+ *   cache_misses          — L1D refills
+ *   l2_misses             — L2D refills
+ *   instructions_retired  — INST_RETIRED
+ *   branch_mispredictions — BR_MIS_PRED
+ *   cache_references      — MEM_ACCESS (denominator for miss-rate)
+ *   backend_stalls        — STALL_BACKEND
+ *   cycles                — PMCCNTR_EL0 delta (denominator for IPC)
+ *
+ * The PMU fields are zero on PLATFORM_X86_64 (RDPMC sibling tracked
+ * as #870), zero on QEMU TCG ARM (event counters not modelled — the
+ * cycle counter ticks but every event reads 0), and zero on any CPU
+ * where `pmu_enable_self` has not yet run. There is no build-flag
+ * gate: the PMU read overhead is amortized inside the existing
+ * `model profile on/off` runtime toggle (the harness only reads PMU
+ * counters when profiling is enabled).
  */
 typedef struct {
     uint8_t  op_type;
@@ -774,6 +799,13 @@ typedef struct {
     uint64_t total_ns;
     uint64_t min_ns;
     uint64_t max_ns;
+    uint64_t cache_misses;
+    uint64_t l2_misses;
+    uint64_t instructions_retired;
+    uint64_t branch_mispredictions;
+    uint64_t cache_references;
+    uint64_t backend_stalls;
+    uint64_t cycles;
 } RustOpProfileEntry;
 
 /*
@@ -782,6 +814,46 @@ typedef struct {
  * variant, bump both at once.
  */
 #define RUST_INFER_PROFILE_NUM_OPS 18
+
+/*
+ * Read the PMU cycle counter (PMCCNTR_EL0 on ARM64) for the calling CPU.
+ *
+ * Returns 0 on platforms where the PMU is not available (PLATFORM_X86_64
+ * — tracked separately as #870) or where pmu_enable_self has not yet
+ * completed on the calling CPU. On ARM64 the value is the 64-bit cycle
+ * counter; the profile harness in #871 uses the delta between two
+ * adjacent calls as the per-op cycle cost.
+ */
+uint64_t slm_pmu_read_cycles(void);
+
+/*
+ * Read one of the six preset PMU event counters (#874). `idx` order:
+ *   0 = L1D_CACHE_REFILL   (cache_misses bucket)
+ *   1 = L2D_CACHE_REFILL   (l2_misses bucket)
+ *   2 = INST_RETIRED       (instructions_retired bucket)
+ *   3 = BR_MIS_PRED        (branch_mispredictions bucket)
+ *   4 = MEM_ACCESS         (cache_references bucket)
+ *   5 = STALL_BACKEND      (backend_stalls bucket)
+ *
+ * Returns 0 if idx is out of range, the PMU is not available, or PMU
+ * init has not run on the calling CPU.
+ */
+uint32_t slm_pmu_read_event(uint32_t idx);
+
+/*
+ * Reset the cycle counter and all six event counters to zero on the
+ * calling CPU. Called by the profile harness at the start of each
+ * `execute_node` invocation to bound counter-overflow exposure to
+ * single-op windows.
+ */
+void slm_pmu_reset(void);
+
+/*
+ * Has the PMU been enabled on the calling CPU yet? Profile harness
+ * uses this to skip PMU reads cleanly on a CPU where secondary boot
+ * hasn't reached pmu_enable_self. Returns 0 on PLATFORM_X86_64.
+ */
+int slm_pmu_is_ready(void);
 
 /*
  * Enable or disable per-operator profiling.

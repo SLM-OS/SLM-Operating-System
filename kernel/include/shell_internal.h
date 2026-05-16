@@ -85,6 +85,7 @@ int cmd_sched(int argc, char **argv);
 int cmd_eviction(int argc, char **argv);
 #if !defined(PLATFORM_X86_64)
 int cmd_timdiag(int argc, char **argv);
+int cmd_pmu(int argc, char **argv);
 #if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
 int cmd_irqtest(int argc, char **argv);
 #endif

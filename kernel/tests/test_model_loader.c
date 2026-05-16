@@ -233,6 +233,11 @@ int test_suite_inference(void)
     /* Part 1: Rust-side inference tests */
     int failures = rust_inference_test();
 
+    /* Part 1b: Dynamic batching scheduler tests (#857). Runs after
+     * the core inference tests so MNIST is loaded and the engine
+     * warmed up. */
+    failures += rust_batch_inference_test();
+
     /* Part 2: C-side FFI boundary tests */
     UnityBegin("Inference FFI Tests");
 

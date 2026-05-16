@@ -507,6 +507,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/smp_boot.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/user_entry.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/pmu.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
     # x86-64 architecture files (trampoline32.S handled by custom command below)
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/entry64.S>
@@ -932,6 +933,7 @@ set(TEST_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_tcp_telemetry_server.c>
     kernel/tests/test_pmm.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pmu.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kbuf.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_bpmp.c>

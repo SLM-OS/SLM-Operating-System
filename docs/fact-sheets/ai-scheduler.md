@@ -29,6 +29,29 @@ runtime-selectable via `sched_set_policy(name)` — see #848 for the
 | Build gate | `AI_SCHED=ON` → `ENABLE_AI_SCHEDULER=ON` | Same | Same | Same |
 | Observability | `sched stats`, AI-policy counter | Same | Same | Same |
 
+## State-vector `cache_pressure` (#872)
+
+Per-core `cache_pressure` (feature index `c*6+2` in the state vector)
+is now live on ARM64 — it carries the L1D miss-rate EWMA fed from each
+CPU's own PMU sample, normalised to [0.0, 1.0] against a 100K-misses-
+per-million-cycles saturation ceiling. Sampler hooks into
+`scheduler_tick` so every CPU updates its own slot independently;
+`ai_state.c` reads via `pmu_get_cache_pressure_q16()` and converts to
+float in the FP-clean compile unit. Pre-#872 this slot was hardcoded
+to 0.0.
+
+**Distribution-shift caveat (training data).** The shipped MLP / PPO
+weights were trained with `cache_pressure = 0.0` baked in (synthetic
+training pipeline, sibling repo `~/projects/slm-os-scheduler-ai`).
+Flipping the feature to a real value is a mild input-distribution
+shift — the policy still sees the same other 107 features and is
+free to learn-or-ignore the new signal. The exploratory-OS framing
+(#848) accepts the shift rather than gating the feature behind a
+build flag; if `bench sched-policy` regresses materially, a #61
+follow-up will retrain.
+
+x86-64 still reads 0.0 for this slot (sibling work #870).
+
 ## Skipped / Blocked
 
 - **GPU-backed scheduler inference on Pi 5 / x86-64** — path described in `docs/pi5-ai-hat-plan.md` §6 (Hailo MLP on Pi 5). On Pi 5 it remains gated by the AI HAT+ link-training work (#260). On x86-64 it's transitively blocked by SEC2 priv-lock (#185). Jetson GA10B is shipped (see matrix).

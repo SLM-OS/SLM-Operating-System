@@ -428,6 +428,91 @@ The in-kernel B prefetch (variant 2 above) measured **3% slower** (483 → 500 �
 
 Conclusion: software prefetch is a net **no-op on Cortex-A76**. The infrastructure (a portable `prefetch_l1_read` helper and the tile-level hook) is kept in place because (a) the A78AE in Jetson Orin Nano has a different prefetcher and may behave differently, and (b) tighter inner loops on the same path (e.g. an 8×4 micro-kernel) will have more arithmetic per cache line and benefit more.
 
+### Per-operator Profile with PMU columns (#60 / #871)
+
+`model profile show` is extended in #871 with three PMU-derived columns
+appended to the latency columns above:
+
+- **L1D%** — L1 data cache miss rate over the bucket: `cache_misses /
+  cache_references × 100`. Useful for telling memory-bound ops apart
+  from compute-bound ones.
+- **IPC** — instructions retired per cycle: `instructions_retired /
+  cycles`. The compute-density indicator.
+- **mispred%** — branch mispredictions per 100 retired instructions:
+  `branch_mispredictions / instructions_retired × 100`. Surfaces
+  control-flow-heavy ops.
+
+PMU columns are blank (`-`) on QEMU TCG (event counters not modelled)
+and on platforms where the PMU has not been enabled on the calling
+CPU.
+
+#### Captured PMU profile — pi-5-2 + jetson-nano-1 (2026-05-15)
+
+Captured via `model profile on; model bench mnist {200|100}; model profile show`
+after the kernel boots and PMU init completes on every CPU. The
+per-op latency columns mirror the pre-#871 table above; the new
+columns are L1D miss-rate %, IPC (instructions retired per cycle),
+and branch mispredictions per 100 retired instructions.
+
+##### Pi 5 (Cortex-A76, BCM2712 @ ~2.4 GHz, AI_SCHED=ON, 200 iter)
+
+| Op | Calls | Avg µs | Min µs | Max µs | L1D% | IPC | Mispred% |
+|----|------:|-------:|-------:|-------:|-----:|----:|---------:|
+| Conv | 400 | 1,431 | 1,046 | 1,816 | <1 | **2.46** | <1 |
+| MatMul | 200 | 23 | 22 | 24 | <1 | 2.43 | <1 |
+| Relu | 400 | 19 | 7 | 31 | <1 | 2.12 | <1 |
+| MaxPool | 400 | 15 | 6 | 24 | <1 | 2.75 | <1 |
+| Add | 600 | 9 | 2 | 21 | <1 | 1.75 | <1 |
+| Reshape | 400 | 1 | 1 | 2 | <1 | 2.09 | <1 |
+
+Total/inf: 3,008 µs.
+
+##### Jetson Orin Nano (Cortex-A78AE @ 1.5 GHz, 100 iter)
+
+| Op | Calls | Avg µs | Min µs | Max µs | L1D% | IPC | Mispred% |
+|----|------:|-------:|-------:|-------:|-----:|----:|---------:|
+| Conv | 200 | 1,990 | 1,450 | 2,533 | <1 | **3.63** | <1 |
+| MatMul | 100 | 32 | 31 | 34 | <1 | 3.72 | <1 |
+| Relu | 200 | 24 | 9 | 39 | <1 | 3.49 | <1 |
+| MaxPool | 200 | 17 | 7 | 31 | <1 | 5.00 | <1 |
+| Add | 300 | 17 | 2 | 42 | <1 | 1.92 | <1 |
+| Reshape | 200 | 2 | 1 | 3 | <1 | 3.67 | <1 |
+
+Total/inf: 4,181 µs.
+
+Integer division renders L1D% / Mispred% as 0 when the true rate is
+below 1 %; both columns are <1 % across every op on both platforms —
+MNIST weights + working set fit comfortably in L1D after warmup.
+
+##### Interpretation
+
+**Where the latency goes is unambiguous: Conv2D dominates at ~95% of
+inference on both platforms.** L1D miss rate stays below 1% across
+every op on both Cortex-A76 and Cortex-A78AE — MNIST is small enough
+that the working set fits in L1D after warmup, so inference is
+**compute-bound, not memory-bound**. The `cache_pressure` feature
+fed into the AI scheduler (#872) therefore reads low under MNIST and
+will only spike under larger models whose working set spills L2.
+
+The IPC delta between the two cores tells the second-order story:
+Cortex-A78AE retires 1.5× more instructions per cycle than
+Cortex-A76 on Conv2D (3.63 vs 2.46), but Pi 5's higher clock
+(2.4 vs 1.5 GHz) more than compensates — Pi 5 finishes Conv2D in
+1,431 µs vs Jetson's 1,990 µs. A78AE also accumulates ~2× more
+backend-stall cycles than A76 on the same loop (see
+`docs/pmu-bringup.md` reference output) — its wider issue width
+isn't fully utilised by the current matmul kernel, leaving headroom
+for future per-microarch tuning.
+
+**Honest framing on "before/after #56".** The per-op profile harness
+*itself* landed under issue #56 (PR #849), so true pre-#56 PMU
+numbers don't exist on this codebase — we only have post-#56 PMU
+data. What the table demonstrates is that whatever #56's improvements
+were, the workload remains firmly compute-bound on both platforms;
+further latency gains from this point will come from either a wider
+matmul micro-kernel (push IPC higher) or moving Conv2D off the CPU
+(Hailo on Pi 5, GA10B GPU on Jetson).
+
 ### Model Memory Utilization
 
 | Model | Weight Blocks | Workspace Blocks | Actual Weights |

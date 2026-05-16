@@ -160,6 +160,29 @@ uint64_t slm_get_time_ns(void)
 }
 
 /*
+ * PMU FFI wrappers (#871). On PLATFORM_X86_64 the PMU primitives don't
+ * compile (RDPMC tracking is #870); the FFI calls return zero so the
+ * Rust profile harness doesn't need a separate cfg branch — it just
+ * sees "no PMU available" the same way it sees an uninitialised CPU.
+ */
+#if !defined(PLATFORM_X86_64)
+#include "pmu.h"
+
+uint64_t slm_pmu_read_cycles(void) { return pmu_read_cycles(); }
+uint32_t slm_pmu_read_event(uint32_t idx) { return pmu_read_event(idx); }
+void     slm_pmu_reset(void) { pmu_reset(); }
+int      slm_pmu_is_ready(void) { return pmu_is_ready() ? 1 : 0; }
+
+#else /* PLATFORM_X86_64 */
+
+uint64_t slm_pmu_read_cycles(void) { return 0; }
+uint32_t slm_pmu_read_event(uint32_t idx) { (void)idx; return 0; }
+void     slm_pmu_reset(void) { }
+int      slm_pmu_is_ready(void) { return 0; }
+
+#endif
+
+/*
  * Sleep the current task for the given number of milliseconds.
  */
 void slm_sleep_ms(uint32_t ms)

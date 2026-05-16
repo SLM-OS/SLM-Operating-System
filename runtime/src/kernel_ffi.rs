@@ -300,6 +300,22 @@ extern "C" {
     pub fn slm_get_time_ns() -> u64;
 
     // -------------------------------------------------------------------------
+    // PMU (#871) — read primitives for the per-op profile harness
+    // -------------------------------------------------------------------------
+
+    /// Read PMCCNTR_EL0 on ARM64; returns 0 on x86-64 / pre-init CPUs.
+    pub fn slm_pmu_read_cycles() -> u64;
+
+    /// Read one of the six preset event counters; idx in [0,6).
+    pub fn slm_pmu_read_event(idx: u32) -> u32;
+
+    /// Reset every PMU counter on the calling CPU (cycle + events).
+    pub fn slm_pmu_reset();
+
+    /// Returns 1 if PMU init has completed on the calling CPU, else 0.
+    pub fn slm_pmu_is_ready() -> i32;
+
+    // -------------------------------------------------------------------------
     // GPU Cache Coherency
     // -------------------------------------------------------------------------
 

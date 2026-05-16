@@ -121,6 +121,16 @@ pub struct OpProfileEntry {
     pub total_ns: u64,
     pub min_ns: u64,
     pub max_ns: u64,
+    // PMU sums (#871). Zero on x86-64 (#870) and on QEMU TCG (event
+    // counters not modelled). See `kernel/include/slm_ffi.h` for the
+    // bucket-to-event mapping.
+    pub cache_misses: u64,
+    pub l2_misses: u64,
+    pub instructions_retired: u64,
+    pub branch_mispredictions: u64,
+    pub cache_references: u64,
+    pub backend_stalls: u64,
+    pub cycles: u64,
 }
 
 impl OpProfileEntry {
@@ -131,6 +141,13 @@ impl OpProfileEntry {
         total_ns: 0,
         min_ns: 0,
         max_ns: 0,
+        cache_misses: 0,
+        l2_misses: 0,
+        instructions_retired: 0,
+        branch_mispredictions: 0,
+        cache_references: 0,
+        backend_stalls: 0,
+        cycles: 0,
     };
 }
 
@@ -155,6 +172,19 @@ static PROF_MAX_NS: [AtomicU64; PROFILE_NUM_OPS] = {
     const Z: AtomicU64 = AtomicU64::new(0);
     [Z; PROFILE_NUM_OPS]
 };
+// PMU per-bucket accumulators (#871). Same shape as the timing fields;
+// snapshot reads use Relaxed loads, recorder uses fetch_add.
+const fn z_arr() -> [AtomicU64; PROFILE_NUM_OPS] {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; PROFILE_NUM_OPS]
+}
+static PROF_CACHE_MISSES: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_L2_MISSES: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_INST_RETIRED: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_BR_MISPRED: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_CACHE_REFS: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_BACKEND_STALLS: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
+static PROF_CYCLES: [AtomicU64; PROFILE_NUM_OPS] = z_arr();
 
 /// Map an `OpType` discriminant into the `[0, PROFILE_NUM_OPS)` index
 /// space the profile arrays use. `OpType::Unknown` is intentionally
@@ -238,13 +268,61 @@ pub fn op_profile_reset() {
         PROF_TOTAL_NS[i].store(0, Ordering::Relaxed);
         PROF_MIN_NS[i].store(u64::MAX, Ordering::Relaxed);
         PROF_MAX_NS[i].store(0, Ordering::Relaxed);
+        PROF_CACHE_MISSES[i].store(0, Ordering::Relaxed);
+        PROF_L2_MISSES[i].store(0, Ordering::Relaxed);
+        PROF_INST_RETIRED[i].store(0, Ordering::Relaxed);
+        PROF_BR_MISPRED[i].store(0, Ordering::Relaxed);
+        PROF_CACHE_REFS[i].store(0, Ordering::Relaxed);
+        PROF_BACKEND_STALLS[i].store(0, Ordering::Relaxed);
+        PROF_CYCLES[i].store(0, Ordering::Relaxed);
+    }
+}
+
+/// PMU counter snapshot captured at op start (#871). Built from the
+/// FFI `slm_pmu_*` reads after `slm_pmu_reset`, so every field is a
+/// delta-from-zero for the wrapped op.
+///
+/// On x86-64 and on platforms where the PMU has not been enabled on
+/// the calling CPU, every field reads as zero — the harness records
+/// zero per-op deltas and the snapshot consumer sees blank PMU columns
+/// instead of garbage. This matches how QEMU TCG behaves (cycle counter
+/// works but event counters return zero).
+#[derive(Default, Clone, Copy)]
+struct PmuSnapshot {
+    cycles: u64,
+    cache_misses: u64,
+    l2_misses: u64,
+    instructions_retired: u64,
+    branch_mispredictions: u64,
+    cache_references: u64,
+    backend_stalls: u64,
+}
+
+impl PmuSnapshot {
+    fn capture() -> Self {
+        // SAFETY: every FFI call is a pure register read with no
+        // pointer arguments. On platforms without a PMU the C wrappers
+        // return zero.
+        unsafe {
+            Self {
+                cycles: kernel_ffi::slm_pmu_read_cycles(),
+                cache_misses: kernel_ffi::slm_pmu_read_event(0) as u64,
+                l2_misses: kernel_ffi::slm_pmu_read_event(1) as u64,
+                instructions_retired: kernel_ffi::slm_pmu_read_event(2) as u64,
+                branch_mispredictions: kernel_ffi::slm_pmu_read_event(3) as u64,
+                cache_references: kernel_ffi::slm_pmu_read_event(4) as u64,
+                backend_stalls: kernel_ffi::slm_pmu_read_event(5) as u64,
+            }
+        }
     }
 }
 
 /// Record one op invocation. Called from `execute_node` only when
 /// profiling is enabled — the caller does the enable check so that the
-/// disabled path doesn't even read `OP_PROFILE_ENABLED`.
-fn op_profile_record(op_type: OpType, ns: u64) {
+/// disabled path doesn't even read `OP_PROFILE_ENABLED`. The `pmu`
+/// snapshot is the delta captured between `pmu_reset` and the
+/// post-dispatch read.
+fn op_profile_record(op_type: OpType, ns: u64, pmu: &PmuSnapshot) {
     let i = op_type_to_index(op_type);
     PROF_COUNT[i].fetch_add(1, Ordering::Relaxed);
     PROF_TOTAL_NS[i].fetch_add(ns, Ordering::Relaxed);
@@ -266,6 +344,13 @@ fn op_profile_record(op_type: OpType, ns: u64) {
             Err(actual) => cur = actual,
         }
     }
+    PROF_CACHE_MISSES[i].fetch_add(pmu.cache_misses, Ordering::Relaxed);
+    PROF_L2_MISSES[i].fetch_add(pmu.l2_misses, Ordering::Relaxed);
+    PROF_INST_RETIRED[i].fetch_add(pmu.instructions_retired, Ordering::Relaxed);
+    PROF_BR_MISPRED[i].fetch_add(pmu.branch_mispredictions, Ordering::Relaxed);
+    PROF_CACHE_REFS[i].fetch_add(pmu.cache_references, Ordering::Relaxed);
+    PROF_BACKEND_STALLS[i].fetch_add(pmu.backend_stalls, Ordering::Relaxed);
+    PROF_CYCLES[i].fetch_add(pmu.cycles, Ordering::Relaxed);
 }
 
 /// Copy at most `max_entries` rows into `out` (one per op bucket, in
@@ -306,6 +391,13 @@ pub unsafe fn op_profile_snapshot(
             // instead of as a 64-bit poison value.
             min_ns: if count == 0 || min == u64::MAX { 0 } else { min },
             max_ns: PROF_MAX_NS[i].load(Ordering::Relaxed),
+            cache_misses: PROF_CACHE_MISSES[i].load(Ordering::Relaxed),
+            l2_misses: PROF_L2_MISSES[i].load(Ordering::Relaxed),
+            instructions_retired: PROF_INST_RETIRED[i].load(Ordering::Relaxed),
+            branch_mispredictions: PROF_BR_MISPRED[i].load(Ordering::Relaxed),
+            cache_references: PROF_CACHE_REFS[i].load(Ordering::Relaxed),
+            backend_stalls: PROF_BACKEND_STALLS[i].load(Ordering::Relaxed),
+            cycles: PROF_CYCLES[i].load(Ordering::Relaxed),
         };
         unsafe { *out.add(i) = entry; }
     }
@@ -469,12 +561,33 @@ impl InferenceEngine {
         output: *mut f32,
         output_len: usize,
     ) -> Result<usize, EngineError> {
+        self.run_batch(1, input, input_len, output, output_len)
+    }
+
+    /// Run inference treating `input` as a stack of `batch_size`
+    /// samples laid out contiguously. Each declared graph input is
+    /// bound with its first dimension overridden to `batch_size`; the
+    /// per-sample element count is `declared_elements / declared_dim0`.
+    ///
+    /// `batch_size == 1` is equivalent to `run()` and is the path the
+    /// existing FFI callers take.
+    pub fn run_batch(
+        &mut self,
+        batch_size: usize,
+        input: *const f32,
+        input_len: usize,
+        output: *mut f32,
+        output_len: usize,
+    ) -> Result<usize, EngineError> {
+        if batch_size == 0 {
+            return Err(EngineError::InvalidInput);
+        }
         // Reset workspace and bindings
         self.workspace.reset();
         self.binding_count = 0;
 
         // Bind graph input(s)
-        self.bind_graph_inputs(input, input_len)?;
+        self.bind_graph_inputs(batch_size, input, input_len)?;
 
         // Bind all weights from the weight table
         self.bind_weights()?;
@@ -489,7 +602,29 @@ impl InferenceEngine {
     }
 
     /// Bind graph input names to the provided input data.
-    fn bind_graph_inputs(&mut self, input: *const f32, input_len: usize) -> Result<(), EngineError> {
+    ///
+    /// When `batch_size > 1`, the first dimension of every graph input
+    /// is overridden from the declared value (usually 1) to
+    /// `batch_size`. The remaining dimensions describe the per-sample
+    /// shape, so `input_len` must equal `batch_size *
+    /// per_sample_elements`. This is the only seam the batched
+    /// dispatcher needs — every downstream op (Conv2D, MatMul, Gemm,
+    /// Softmax, MaxPool, Reshape) already iterates over `input.dim(0)`
+    /// and handles the batch dimension correctly.
+    ///
+    /// ASSUMPTION (load-bearing): every supported model declares the
+    /// batch dimension at index 0 of its first input. The MNIST
+    /// model and every other model SLM-OS loads today follow this
+    /// convention; if a future model puts channels or another
+    /// dimension first, this override silently corrupts the shape.
+    /// Add a per-model "batch_dim_index" property and pass it
+    /// through to break that assumption.
+    fn bind_graph_inputs(
+        &mut self,
+        batch_size: usize,
+        input: *const f32,
+        input_len: usize,
+    ) -> Result<(), EngineError> {
         if input.is_null() || input_len == 0 {
             return Err(EngineError::InvalidInput);
         }
@@ -498,19 +633,42 @@ impl InferenceEngine {
             let name = &self.graph.input_names[i];
             let shape = &self.graph.input_shapes[i];
 
-            // Build shape array from TensorShape
+            // Build shape array from TensorShape, overriding dim 0.
             let mut dims = [0u32; 8];
             let ndim = shape.ndim as usize;
             for d in 0..ndim {
                 dims[d] = shape.dims[d];
             }
+            if batch_size > 1 {
+                if ndim == 0 {
+                    return Err(EngineError::ShapeMismatch);
+                }
+                // Override the leading dimension with the actual batch
+                // size. The declared value is typically 1 (training-
+                // time batch dimension) or a dynamic placeholder.
+                let bs_u32: u32 = u32::try_from(batch_size)
+                    .map_err(|_| EngineError::ShapeOverflow)?;
+                dims[0] = bs_u32;
+            }
 
             let tensor = Tensor::new(input, &dims[..ndim]);
 
-            // Verify element count matches
+            // Verify element count matches the provided buffer. The
+            // `> input_len` check catches under-sized buffers; the
+            // debug_assert pins the stronger invariant that the caller
+            // sized the buffer to exactly `batch_size * per_sample`
+            // elements (oversized buffers technically still work but
+            // are a sign of caller confusion — flag in debug builds).
             if tensor.num_elements() > input_len {
                 return Err(EngineError::InvalidInput);
             }
+            debug_assert_eq!(
+                tensor.num_elements(),
+                input_len,
+                "bind_graph_inputs: input_len ({}) should match batch_size * per_sample ({})",
+                input_len,
+                tensor.num_elements()
+            );
 
             self.bind(*name, tensor);
         }
@@ -554,14 +712,22 @@ impl InferenceEngine {
         let node = self.graph.nodes[node_idx];
 
         if op_profile_is_enabled() {
+            // Reset PMU counters so the post-op reads are absolute
+            // per-op deltas — no subtraction-with-overflow corner case
+            // even though event counters are only 32-bit. PMU pre-reset
+            // is cheap (one MSR) compared to a typical op latency (µs+).
+            // SAFETY: pure register write on the calling CPU; no-op on
+            // platforms without PMU.
+            unsafe { kernel_ffi::slm_pmu_reset(); }
             let start = kernel_ffi::get_time_ns();
             let result = self.dispatch_node(&node);
             let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+            let pmu = PmuSnapshot::capture();
             // Record the timing even on error so the profile reflects
             // wall-clock cost paid by the engine, not just successful
             // ops. Callers that want success-only numbers can filter
             // by `result.is_ok()` themselves.
-            op_profile_record(node.op_type, elapsed);
+            op_profile_record(node.op_type, elapsed, &pmu);
             result
         } else {
             self.dispatch_node(&node)
@@ -1049,16 +1215,56 @@ pub unsafe fn run_inference(
     output: *mut f32,
     output_len: usize,
 ) -> Result<usize, EngineError> {
+    run_inference_inner(model_index, 1, input, input_len, output, output_len)
+}
+
+/// Batched variant of `run_inference`.
+///
+/// Treats the input buffer as `batch_size` samples laid out
+/// contiguously and runs the model's full op pipeline once across the
+/// whole batch. The output buffer receives `batch_size * output_dim`
+/// floats.
+///
+/// The MNIST GPU fast path is single-sample only (its FFI asserts
+/// `input_len == 784`), so batched dispatches always take the CPU
+/// path. This is documented in `docs/architecture.md` and surfaces in
+/// the #858 benchmark matrix.
+///
+/// # Safety
+///
+/// Same preconditions as `run_inference`: buffers are non-null,
+/// 4-byte-aligned, sized to cover `input_len` / `output_len` floats,
+/// and live through the call.
+pub unsafe fn run_inference_batched(
+    model_index: usize,
+    batch_size: usize,
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Result<usize, EngineError> {
+    run_inference_inner(model_index, batch_size, input, input_len, output, output_len)
+}
+
+unsafe fn run_inference_inner(
+    model_index: usize,
+    batch_size: usize,
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Result<usize, EngineError> {
     let _guard = EngineGuard::new();
 
     // Pin the weight block for the duration of the call. If a
     // concurrent `unload` or `swap_model` retargets the registry slot
     // mid-flight, the OLD weight block stays allocated until this
     // lease drops at function exit — no torn reads, no use-after-free.
+    //
+    // EngineGuard releases ENGINE_LOCK on Drop, so we just return.
     let _weight_lease = match registry::WeightLease::acquire(model_index) {
         Some(l) => l,
         None => {
-            engine_unlock();
             record_error();
             return Err(EngineError::ModelNotFound);
         }
@@ -1066,12 +1272,13 @@ pub unsafe fn run_inference(
 
     let start = kernel_ffi::get_time_ns();
 
-    // GPU fast path: when the active model is "mnist" and the GPU
-    // is compute-ready, route the whole graph through the v6 handoff
-    // SLM-OS already pre-uploaded. Falls through to the CPU path on
-    // any error so the user still gets an answer.
+    // GPU fast path: when the active model is "mnist", the GPU is
+    // compute-ready, and the call is a single MNIST sample, route the
+    // whole graph through the v6 handoff. Batched dispatches always
+    // take the CPU path because the GPU FFI's input slot is sized for
+    // exactly one 1×1×28×28 sample.
     let result: Result<usize, EngineError>;
-    if mnist_gpu_fastpath_eligible(model_index) {
+    if batch_size == 1 && mnist_gpu_fastpath_eligible(model_index) {
         // Successful dispatch is the steady-state happy path; logging
         // it every iteration drowns the console at >1 inf/s. The
         // failure path is rare and operator-actionable, so it stays.
@@ -1094,7 +1301,7 @@ pub unsafe fn run_inference(
     result = unsafe {
         let engine = &mut *ENGINE.get();
         match engine.init(model_index) {
-            Ok(()) => engine.run(input, input_len, output, output_len),
+            Ok(()) => engine.run_batch(batch_size, input, input_len, output, output_len),
             Err(e) => Err(e),
         }
     };

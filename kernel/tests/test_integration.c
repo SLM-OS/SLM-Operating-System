@@ -78,8 +78,11 @@ static struct {
  * per-core L2. Cacheable BSS variables written by one CPU are invisible to
  * others. NC memory bypasses L1/L2 entirely — writes are instantly visible.
  *
- * 32 uint32_t slots at NC_MEM_SIZE - 768 (below bench stealing region at -512).
- * Each test zeroes its slots before use; tasks write, CPU 0 polls.
+ * NC_SYNC region runs from NC_MEM_SIZE - 768 up to INTEG_NC_DONE at
+ * NC_MEM_SIZE - 384, so 384 bytes / 4 = 96 uint32_t slots are available
+ * (slot 0..95). Slots 0..30 are currently in use (high-water mark below;
+ * update when adding new slot families). Each test zeroes its slots
+ * before use; tasks write, CPU 0 polls.
  */
 #if defined(PLATFORM_HAS_NC_MEMORY)
 #define NC_SYNC_BASE    (NC_MEM_BASE + NC_MEM_SIZE - 768)
@@ -100,6 +103,20 @@ static struct {
 #define NC_NOTIFY_SENTINEL   11
 #define NC_STEAL_DONE        12
 #define NC_STEAL_CPU_BASE    13  /* 13-17: steal_cpu_recorded[0-4] */
+/* msg_router #67a: multi-subscriber + priority ordering stress tests. */
+#define NC_MSGMS_A_RECEIVED  18
+#define NC_MSGMS_B_RECEIVED  19
+#define NC_MSGMS_PUB_DONE    20
+#define NC_MSGMS_SUB_A_DONE  21
+#define NC_MSGMS_SUB_B_DONE  22
+#define NC_MSGMS_DELIVERED   23  /* sum of every publish's delivered count */
+#define NC_MSGPR_HI_RECEIVED 24
+#define NC_MSGPR_LO_RECEIVED 25
+#define NC_MSGPR_PUB_HI_DONE 26
+#define NC_MSGPR_PUB_LO_DONE 27
+#define NC_MSGPR_SUB_DONE    28
+#define NC_MSGPR_HI_DELIVERED 29
+#define NC_MSGPR_LO_DELIVERED 30
 
 static void nc_sync_clear(uint32_t start, uint32_t count)
 {
@@ -1220,6 +1237,8 @@ static void test_work_stealing_distributes_load(void)
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const uint8_t *topic_name, int component_idx);
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+extern int msg_router_publish_priority(const uint8_t *topic_name,
+                                       const uint8_t *data, uint8_t priority);
 extern const uint8_t *msg_router_receive(int component_idx, uint8_t *topic_out);
 extern void msg_router_ack(int component_idx);
 extern void msg_router_unsubscribe_all(int component_idx);
@@ -1351,6 +1370,440 @@ static void test_msg_router_cross_cpu(void)
         "publisher did not publish all messages");
     TEST_ASSERT_MESSAGE(msg_x_received == MSG_X_MESSAGES,
         "subscriber did not receive all messages");
+#endif
+}
+
+/* ============================================================================
+ * Regression: msg_router multi-subscriber concurrent delivery (#67a / #864)
+ *
+ * Two components (MS_A, MS_B) subscribe to the same topic. A publisher on
+ * CPU 1 emits N messages. MS_A's receive/ack loop runs on CPU 2; MS_B's on
+ * CPU 3. Assertion: both subscribers see all N messages, every publish
+ * returns delivered == 2, no task deadlocks.
+ *
+ * Why this is interesting: publish_internal serializes per-target ack waits
+ * (gather targets under lock, then deliver + wait-ack per target before
+ * moving to the next). Two subscribers on two CPUs exercise that loop with
+ * genuinely concurrent ack arrivals — the lock-release-before-yield
+ * discipline in runtime/src/msg_router.rs is what prevents the ack-side
+ * (msg_router_ack, which re-takes MSG_ROUTER_LOCK) from deadlocking the
+ * publisher.
+ *
+ * Pattern follows test_msg_router_cross_cpu: NC-sync slots for cross-CPU
+ * counters, CNTPCT-based wall-clock timeout, TEST_IGNORE on cpu_count < 4
+ * (shell + pub + 2 subs).
+ * ============================================================================ */
+
+#define MS_A_COMPONENT 20
+#define MS_B_COMPONENT 21
+#define MS_MESSAGES    5
+#define MS_TOPIC       ((const uint8_t *)"/ms/x")
+
+static volatile uint32_t ms_a_received = 0;
+static volatile uint32_t ms_b_received = 0;
+static volatile uint32_t ms_pub_done = 0;
+static volatile uint32_t ms_sub_a_done = 0;
+static volatile uint32_t ms_sub_b_done = 0;
+static volatile uint32_t ms_delivered_total = 0;
+
+static void ms_subscriber(void *arg)
+{
+    uintptr_t which = (uintptr_t)arg;  /* 0 = A, 1 = B */
+    int component = (which == 0) ? MS_A_COMPONENT : MS_B_COMPONENT;
+    uint8_t topic_buf[16];
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;
+    uint32_t count = 0;
+
+    while (count < MS_MESSAGES) {
+        if ((timer_get_count() - start) >= limit) break;
+        const uint8_t *data = msg_router_receive(component, topic_buf);
+        if (data) {
+            count++;
+            if (which == 0) {
+                ms_a_received = count;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGMS_A_RECEIVED) = count;
+#else
+                cache_clean((void *)&ms_a_received);
+#endif
+            } else {
+                ms_b_received = count;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGMS_B_RECEIVED) = count;
+#else
+                cache_clean((void *)&ms_b_received);
+#endif
+            }
+            msg_router_ack(component);
+        } else {
+            yield();
+        }
+    }
+
+    if (which == 0) {
+        ms_sub_a_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        NC_SYNC(NC_MSGMS_SUB_A_DONE) = 1;
+#else
+        cache_clean((void *)&ms_sub_a_done);
+#endif
+    } else {
+        ms_sub_b_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        NC_SYNC(NC_MSGMS_SUB_B_DONE) = 1;
+#else
+        cache_clean((void *)&ms_sub_b_done);
+#endif
+    }
+}
+
+static void ms_publisher(void *arg)
+{
+    (void)arg;
+    /* Small delay so both subscribers are scheduled and ready to drain. */
+    delay(50000);
+
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < MS_MESSAGES; i++) {
+        uint8_t payload[4] = { (uint8_t)('a' + i), 0, 0, 0 };
+        int delivered = msg_router_publish(MS_TOPIC, payload);
+        if (delivered > 0) {
+            total += (uint32_t)delivered;
+        }
+    }
+    ms_delivered_total = total;
+    ms_pub_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGMS_DELIVERED) = total;
+    NC_SYNC(NC_MSGMS_PUB_DONE) = 1;
+#else
+    cache_clean((void *)&ms_delivered_total);
+    cache_clean((void *)&ms_pub_done);
+#endif
+}
+
+static void test_msg_router_multi_subscriber(void)
+{
+    /* shell on 0, pub on 1, sub_a on 2, sub_b on 3 */
+    if (cpu_count < 4) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 4");
+        return;
+    }
+
+    msg_router_init();
+    ms_a_received = 0;
+    ms_b_received = 0;
+    ms_pub_done = 0;
+    ms_sub_a_done = 0;
+    ms_sub_b_done = 0;
+    ms_delivered_total = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MSGMS_A_RECEIVED, 6);
+#else
+    cache_clean((void *)&ms_a_received);
+    cache_clean((void *)&ms_b_received);
+    cache_clean((void *)&ms_pub_done);
+    cache_clean((void *)&ms_sub_a_done);
+    cache_clean((void *)&ms_sub_b_done);
+    cache_clean((void *)&ms_delivered_total);
+#endif
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_A_COMPONENT));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_B_COMPONENT));
+
+    struct task *sub_a = task_create("ms_sub_a", ms_subscriber, (void *)0);
+    struct task *sub_b = task_create("ms_sub_b", ms_subscriber, (void *)1);
+    struct task *pub = task_create("ms_pub", ms_publisher, NULL);
+    TEST_ASSERT_NOT_NULL(sub_a);
+    TEST_ASSERT_NOT_NULL(sub_b);
+    TEST_ASSERT_NOT_NULL(pub);
+
+    scheduler_add_task_to_cpu(sub_a, 2);
+    scheduler_add_task_to_cpu(sub_b, 3);
+    scheduler_add_task_to_cpu(pub, 1);
+
+    /*
+     * Generous timeout: Pi 5 ships cooperative preempt by default so
+     * ack-wait yield-loops pace at the scheduler tick rate (10 ms).
+     * 5 messages × 2 subscribers × per-ack handoff costs ~hundreds of
+     * milliseconds in the worst case; 15 s leaves abundant headroom.
+     */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 15;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSGMS_PUB_DONE) &&
+            NC_SYNC(NC_MSGMS_SUB_A_DONE) &&
+            NC_SYNC(NC_MSGMS_SUB_B_DONE)) break;
+#else
+        cache_invalidate((void *)&ms_pub_done);
+        cache_invalidate((void *)&ms_sub_a_done);
+        cache_invalidate((void *)&ms_sub_b_done);
+        if (ms_pub_done && ms_sub_a_done && ms_sub_b_done) break;
+#endif
+        yield();
+    }
+
+    msg_router_unsubscribe_all(MS_A_COMPONENT);
+    msg_router_unsubscribe_all(MS_B_COMPONENT);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_PUB_DONE),
+        "publisher did not finish all publishes");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_SUB_A_DONE),
+        "subscriber A did not finish");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_SUB_B_DONE),
+        "subscriber B did not finish");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_A_RECEIVED) == MS_MESSAGES,
+        "subscriber A did not receive all messages");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_B_RECEIVED) == MS_MESSAGES,
+        "subscriber B did not receive all messages");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_DELIVERED) == MS_MESSAGES * 2u,
+        "publisher: not every message reached both subscribers (delivered != 2*N)");
+#else
+    cache_invalidate((void *)&ms_a_received);
+    cache_invalidate((void *)&ms_b_received);
+    cache_invalidate((void *)&ms_pub_done);
+    cache_invalidate((void *)&ms_sub_a_done);
+    cache_invalidate((void *)&ms_sub_b_done);
+    cache_invalidate((void *)&ms_delivered_total);
+    TEST_ASSERT_MESSAGE(ms_pub_done, "publisher did not finish all publishes");
+    TEST_ASSERT_MESSAGE(ms_sub_a_done, "subscriber A did not finish");
+    TEST_ASSERT_MESSAGE(ms_sub_b_done, "subscriber B did not finish");
+    TEST_ASSERT_MESSAGE(ms_a_received == MS_MESSAGES,
+        "subscriber A did not receive all messages");
+    TEST_ASSERT_MESSAGE(ms_b_received == MS_MESSAGES,
+        "subscriber B did not receive all messages");
+    TEST_ASSERT_MESSAGE(ms_delivered_total == MS_MESSAGES * 2u,
+        "publisher: not every message reached both subscribers (delivered != 2*N)");
+#endif
+}
+
+/* ============================================================================
+ * Regression: msg_router priority ordering under concurrent load (#67a / #864)
+ *
+ * Component C subscribes to /pr/lo and /pr/hi. Two publishers run in parallel:
+ *   - pub_lo (CPU 1): publish_priority(/pr/lo, ..., 0)
+ *   - pub_hi (CPU 2): publish_priority(/pr/hi, ..., 5)
+ * C drains on CPU 3.
+ *
+ * What this pins: msg_router_receive's lock-held priority scan
+ * (runtime/src/msg_router.rs:840-917). When both mailboxes are ready,
+ * receive returns /pr/hi first. Each receive call therefore prefers /pr/hi
+ * whenever it's available — /pr/lo only flows through during windows where
+ * pub_hi is between publishes (ack-waiting or briefly between iterations).
+ * Under sustained load every iteration of pub_hi forces this scan to compare
+ * priorities with a ready /pr/lo present.
+ *
+ * Caveat: mailboxes are single-slot. Because each publish_internal call
+ * blocks on ack before returning, this test never has two unacked messages
+ * in the SAME mailbox at once, so the single-slot overwrite issue isn't
+ * exercised here. That case (back-to-back delivery to one mailbox with no
+ * intervening ack) is a real limitation of the current design and is filed
+ * as #869 for post-capstone follow-up — explicitly NOT in scope for this
+ * test. The assertion is about CROSS-MAILBOX priority comparison at receive
+ * time, not within-mailbox queueing.
+ *
+ * Acceptance: both publishers complete all N publishes with every message
+ * acked (no starvation deadlock), subscriber receives exactly N hi + N lo,
+ * total receive count matches.
+ * ============================================================================ */
+
+#define PR_C_COMPONENT 22
+#define PR_MESSAGES    3
+#define PR_TOPIC_HI    ((const uint8_t *)"/pr/hi")
+#define PR_TOPIC_LO    ((const uint8_t *)"/pr/lo")
+#define PR_PRIO_HI     5
+#define PR_PRIO_LO     0
+
+static volatile uint32_t pr_hi_received = 0;
+static volatile uint32_t pr_lo_received = 0;
+static volatile uint32_t pr_pub_hi_done = 0;
+static volatile uint32_t pr_pub_lo_done = 0;
+static volatile uint32_t pr_sub_done = 0;
+static volatile uint32_t pr_hi_delivered = 0;
+static volatile uint32_t pr_lo_delivered = 0;
+
+static void pr_publisher_hi(void *arg)
+{
+    (void)arg;
+    delay(50000);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < PR_MESSAGES; i++) {
+        uint8_t payload[4] = { 'H', (uint8_t)('0' + i), 0, 0 };
+        int delivered = msg_router_publish_priority(PR_TOPIC_HI, payload, PR_PRIO_HI);
+        if (delivered > 0) total += (uint32_t)delivered;
+    }
+    pr_hi_delivered = total;
+    pr_pub_hi_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGPR_HI_DELIVERED) = total;
+    NC_SYNC(NC_MSGPR_PUB_HI_DONE) = 1;
+#else
+    cache_clean((void *)&pr_hi_delivered);
+    cache_clean((void *)&pr_pub_hi_done);
+#endif
+}
+
+static void pr_publisher_lo(void *arg)
+{
+    (void)arg;
+    delay(50000);
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < PR_MESSAGES; i++) {
+        uint8_t payload[4] = { 'L', (uint8_t)('0' + i), 0, 0 };
+        int delivered = msg_router_publish_priority(PR_TOPIC_LO, payload, PR_PRIO_LO);
+        if (delivered > 0) total += (uint32_t)delivered;
+    }
+    pr_lo_delivered = total;
+    pr_pub_lo_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGPR_LO_DELIVERED) = total;
+    NC_SYNC(NC_MSGPR_PUB_LO_DONE) = 1;
+#else
+    cache_clean((void *)&pr_lo_delivered);
+    cache_clean((void *)&pr_pub_lo_done);
+#endif
+}
+
+static void pr_subscriber(void *arg)
+{
+    (void)arg;
+    uint8_t topic_buf[16];
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;
+    uint32_t hi = 0;
+    uint32_t lo = 0;
+
+    while (hi + lo < PR_MESSAGES * 2u) {
+        if ((timer_get_count() - start) >= limit) break;
+        const uint8_t *data = msg_router_receive(PR_C_COMPONENT, topic_buf);
+        if (data) {
+            /* Distinguish via the payload's first byte rather than re-walking
+             * the topic_buf — both are valid signals; payload is cheaper. */
+            if (data[0] == 'H') {
+                hi++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGPR_HI_RECEIVED) = hi;
+#endif
+            } else if (data[0] == 'L') {
+                lo++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                NC_SYNC(NC_MSGPR_LO_RECEIVED) = lo;
+#endif
+            }
+            pr_hi_received = hi;
+            pr_lo_received = lo;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+            cache_clean((void *)&pr_hi_received);
+            cache_clean((void *)&pr_lo_received);
+#endif
+            msg_router_ack(PR_C_COMPONENT);
+        } else {
+            yield();
+        }
+    }
+
+    pr_sub_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSGPR_SUB_DONE) = 1;
+#else
+    cache_clean((void *)&pr_sub_done);
+#endif
+}
+
+static void test_msg_router_priority_concurrent(void)
+{
+    /* shell on 0, pub_lo on 1, pub_hi on 2, sub on 3 */
+    if (cpu_count < 4) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 4");
+        return;
+    }
+
+    msg_router_init();
+    pr_hi_received = 0;
+    pr_lo_received = 0;
+    pr_pub_hi_done = 0;
+    pr_pub_lo_done = 0;
+    pr_sub_done = 0;
+    pr_hi_delivered = 0;
+    pr_lo_delivered = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MSGPR_HI_RECEIVED, 7);
+#else
+    cache_clean((void *)&pr_hi_received);
+    cache_clean((void *)&pr_lo_received);
+    cache_clean((void *)&pr_pub_hi_done);
+    cache_clean((void *)&pr_pub_lo_done);
+    cache_clean((void *)&pr_sub_done);
+    cache_clean((void *)&pr_hi_delivered);
+    cache_clean((void *)&pr_lo_delivered);
+#endif
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_HI, PR_C_COMPONENT));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_LO, PR_C_COMPONENT));
+
+    struct task *sub = task_create("pr_sub", pr_subscriber, NULL);
+    struct task *pub_lo = task_create("pr_pub_lo", pr_publisher_lo, NULL);
+    struct task *pub_hi = task_create("pr_pub_hi", pr_publisher_hi, NULL);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_NOT_NULL(pub_lo);
+    TEST_ASSERT_NOT_NULL(pub_hi);
+
+    scheduler_add_task_to_cpu(pub_lo, 1);
+    scheduler_add_task_to_cpu(pub_hi, 2);
+    scheduler_add_task_to_cpu(sub, 3);
+
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 15;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSGPR_PUB_HI_DONE) &&
+            NC_SYNC(NC_MSGPR_PUB_LO_DONE) &&
+            NC_SYNC(NC_MSGPR_SUB_DONE)) break;
+#else
+        cache_invalidate((void *)&pr_pub_hi_done);
+        cache_invalidate((void *)&pr_pub_lo_done);
+        cache_invalidate((void *)&pr_sub_done);
+        if (pr_pub_hi_done && pr_pub_lo_done && pr_sub_done) break;
+#endif
+        yield();
+    }
+
+    msg_router_unsubscribe_all(PR_C_COMPONENT);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_PUB_HI_DONE), "hi publisher hung");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_PUB_LO_DONE), "lo publisher hung");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_SUB_DONE), "subscriber hung");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_HI_DELIVERED) == PR_MESSAGES,
+        "hi publisher: not every publish was acked");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_LO_DELIVERED) == PR_MESSAGES,
+        "lo publisher: not every publish was acked (priority starvation?)");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_HI_RECEIVED) == PR_MESSAGES,
+        "subscriber: missed at least one /pr/hi message");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_LO_RECEIVED) == PR_MESSAGES,
+        "subscriber: missed at least one /pr/lo message");
+#else
+    cache_invalidate((void *)&pr_hi_received);
+    cache_invalidate((void *)&pr_lo_received);
+    cache_invalidate((void *)&pr_pub_hi_done);
+    cache_invalidate((void *)&pr_pub_lo_done);
+    cache_invalidate((void *)&pr_sub_done);
+    cache_invalidate((void *)&pr_hi_delivered);
+    cache_invalidate((void *)&pr_lo_delivered);
+    TEST_ASSERT_MESSAGE(pr_pub_hi_done, "hi publisher hung");
+    TEST_ASSERT_MESSAGE(pr_pub_lo_done, "lo publisher hung");
+    TEST_ASSERT_MESSAGE(pr_sub_done, "subscriber hung");
+    TEST_ASSERT_MESSAGE(pr_hi_delivered == PR_MESSAGES,
+        "hi publisher: not every publish was acked");
+    TEST_ASSERT_MESSAGE(pr_lo_delivered == PR_MESSAGES,
+        "lo publisher: not every publish was acked (priority starvation?)");
+    TEST_ASSERT_MESSAGE(pr_hi_received == PR_MESSAGES,
+        "subscriber: missed at least one /pr/hi message");
+    TEST_ASSERT_MESSAGE(pr_lo_received == PR_MESSAGES,
+        "subscriber: missed at least one /pr/lo message");
 #endif
 }
 
@@ -1510,6 +1963,10 @@ int test_suite_integration(void)
 
     /* Regression: msg_router cross-CPU publish/receive/ack (#66) */
     RUN_TEST(test_msg_router_cross_cpu);
+
+    /* Regression: msg_router concurrency stress (#67a / #864) */
+    RUN_TEST(test_msg_router_multi_subscriber);
+    RUN_TEST(test_msg_router_priority_concurrent);
 
     /* Prereq #3: smp_notify_cpu abstraction */
     RUN_TEST(test_smp_notify_cpu_safe);
