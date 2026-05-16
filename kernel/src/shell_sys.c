@@ -8348,12 +8348,16 @@ int cmd_pmu(int argc, char *argv[])
 
     /* Configurable iteration count for stretching the loop on slow
      * cores. Default is 100K which keeps the probe under 1 ms on
-     * Cortex-A76 / Cortex-A78AE at typical clock rates. */
+     * Cortex-A76 / Cortex-A78AE at typical clock rates. Use the shared
+     * `shell_parse_uint` helper rather than an inline parser — it
+     * already rejects non-digit input and detects multiply-overflow,
+     * so a pathological input like `pmu probe 99999999999` falls back
+     * to the default instead of running a wrapped iteration count. */
     uint32_t iters = 100000;
     if (argc >= 3) {
-        for (const char *p = argv[2]; *p; p++) {
-            if (*p < '0' || *p > '9') { iters = 100000; break; }
-            iters = iters * 10 + (uint32_t)(*p - '0');
+        uint32_t parsed;
+        if (shell_parse_uint(argv[2], &parsed) == 0 && parsed > 0) {
+            iters = parsed;
         }
     }
 
