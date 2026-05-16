@@ -878,9 +878,12 @@ unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
 /// row-scalar's 4 B-loads + 4 C-loads + 4 C-stores + 4 FMAs across the
 /// same 4 output rows.
 ///
-/// AAPCS register usage: 5 NEON registers (q0..q3 for C, q4 for the B
-/// row); A scalars go through GP regs into `vdupq_n_f32`. Total live ≤
-/// 8, well within the 32-register NEON file.
+/// AAPCS register usage at peak (inside the FMA chain): 4 NEON regs
+/// for C (q0..q3) + 1 for the loaded B row + 4 for the broadcast A
+/// scalars (`vdupq_n_f32` materializes a vector register, not a GP
+/// register) = 9 simultaneously live NEON regs. The Cortex-A76 NEON
+/// register file is 32 wide so there's ample headroom; a future
+/// 4×8 or 8×4 expansion could keep more C state resident.
 ///
 /// # Safety
 ///
