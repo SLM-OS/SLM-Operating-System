@@ -7363,6 +7363,125 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test: the profile hook in `execute_node` actually fires when the
+    // flag is on, and is bypassed when off. The existing "reset/snapshot
+    // baseline" + "enable flag round-trip" tests only exercise the
+    // storage primitives; this test closes the gap by running a real
+    // MNIST inference through the engine and asserting that the gate at
+    // `engine.rs::execute_node` correctly observes the flag.
+    //
+    // MNIST has Conv, MaxPool, Relu, Reshape, Add, MatMul, and Softmax
+    // nodes; with profiling on, the Conv bucket (identified by
+    // `OpType::Conv` discriminant, not a fixed slot index) must show
+    // a non-zero count after a single inference run, and at least one
+    // bucket must have a non-zero `total_ns` so we know the CNTPCT
+    // deltas are flowing through. With profiling off, every bucket
+    // must remain zero across the same run.
+    {
+        static MNIST_PROF_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+        static MNIST_PROF_INPUT: [f32; 784] = [0.0; 784];
+        static mut MNIST_PROF_OUTPUT: [f32; 10] = [0.0; 10];
+
+        loader::registry::init();
+        let load_result =
+            loader::registry::load_model(b"mnist_prof", MNIST_PROF_ONNX);
+
+        if let Ok(idx) = load_result {
+            let pre_enabled = inference::op_profile_is_enabled();
+
+            // ----- Disabled run: no records expected -----
+            inference::op_profile_set_enabled(false);
+            inference::op_profile_reset();
+            let off_run = unsafe {
+                let out_ptr = core::ptr::addr_of_mut!(MNIST_PROF_OUTPUT) as *mut f32;
+                core::ptr::write_bytes(out_ptr, 0, 10);
+                inference::run_inference(
+                    idx,
+                    MNIST_PROF_INPUT.as_ptr(),
+                    MNIST_PROF_INPUT.len(),
+                    out_ptr,
+                    10,
+                )
+            };
+
+            let mut off_buf = [inference::OpProfileEntry::EMPTY;
+                               inference::PROFILE_NUM_OPS];
+            let off_n = unsafe {
+                inference::op_profile_snapshot(off_buf.as_mut_ptr(),
+                                               inference::PROFILE_NUM_OPS)
+            };
+            let off_all_zero = off_buf.iter().all(|e| e.count == 0);
+            let off_ok = off_run.is_ok()
+                && off_n == inference::PROFILE_NUM_OPS
+                && off_all_zero;
+            print_test_result(
+                b"profile: disabled run records nothing\0", off_ok);
+            if !off_ok { failures += 1; }
+
+            // ----- Enabled run: records expected -----
+            inference::op_profile_reset();
+            inference::op_profile_set_enabled(true);
+            let on_run = unsafe {
+                let out_ptr = core::ptr::addr_of_mut!(MNIST_PROF_OUTPUT) as *mut f32;
+                core::ptr::write_bytes(out_ptr, 0, 10);
+                inference::run_inference(
+                    idx,
+                    MNIST_PROF_INPUT.as_ptr(),
+                    MNIST_PROF_INPUT.len(),
+                    out_ptr,
+                    10,
+                )
+            };
+            // Disable promptly so any unrelated post-test ops are not
+            // accidentally folded into the snapshot.
+            inference::op_profile_set_enabled(false);
+
+            let mut on_buf = [inference::OpProfileEntry::EMPTY;
+                              inference::PROFILE_NUM_OPS];
+            let on_n = unsafe {
+                inference::op_profile_snapshot(on_buf.as_mut_ptr(),
+                                               inference::PROFILE_NUM_OPS)
+            };
+            // Find the Conv bucket by `op_type` discriminant rather than
+            // a fixed slot index — that way a reorder of
+            // `engine.rs::op_type_to_index` can't silently break this
+            // check by leaving the test happily counting the wrong
+            // bucket. The slot-0/slot-17 label-ordering invariant is
+            // still covered by `profile: reset/snapshot baseline`.
+            let conv_discriminant = loader::graph::OpType::Conv as u8;
+            let conv_count = on_buf.iter()
+                .find(|e| e.op_type == conv_discriminant)
+                .map(|e| e.count)
+                .unwrap_or(0);
+            let total_count: u64 = on_buf.iter().map(|e| e.count).sum();
+            // Non-Conv ops must also have fired — MNIST has MaxPool,
+            // Relu, Reshape, Add, MatMul, Softmax in addition to its 2
+            // Conv layers, so the bucket sum should exceed `conv_count`
+            // by a healthy margin. The +2 lower bound catches a
+            // hypothetical regression where only Conv records (e.g. an
+            // early-return in `execute_node` that skips the hook for
+            // non-Conv ops).
+            let non_conv_count = total_count.saturating_sub(conv_count);
+            let total_ns_nonzero =
+                on_buf.iter().any(|e| e.count > 0 && e.total_ns > 0);
+            let on_ok = on_run.is_ok()
+                && on_n == inference::PROFILE_NUM_OPS
+                && conv_count >= 2
+                && non_conv_count >= 2
+                && total_ns_nonzero;
+            print_test_result(
+                b"profile: enabled run records Conv ops\0", on_ok);
+            if !on_ok { failures += 1; }
+
+            inference::op_profile_reset();
+            inference::op_profile_set_enabled(pre_enabled);
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"profile: model load for profile test\0", false);
+            failures += 1;
+        }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {

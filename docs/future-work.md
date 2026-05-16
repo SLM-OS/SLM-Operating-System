@@ -44,10 +44,14 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - Measure throughput improvement vs single requests
 
 ### SIMD Optimization
-- Explicit NEON intrinsics for ARM64 (partially done for MatMul)
-- SSE/AVX for x86-64 AI scheduler (done), extend to inference engine
-- Cache-friendly tiling (64x64 or 128x128 blocks) for large matrices
-- Prefetching for weight access patterns
+
+**ARM64 (closed by #56, May 2026):** Explicit NEON intrinsics, 32×32 cache tiling, a 4×4 register-blocked outer-product micro-kernel, and tile-level prefetch hints all shipped. Pi 5 MNIST end-to-end went from 3,011 µs → 483 µs (6.23× faster) on pi-5-2; per-operator profiler (`model profile <on|off|reset|show>`) is in place for future regression detection. Detailed before/after numbers and the prefetch experiment log live in `docs/benchmarks.md` §Per-operator Profile.
+
+**Open follow-ups:**
+
+- **x86-64 SSE/AVX for the inference engine** — tracked separately in **#847**. The Rust `x86_64-unknown-none` target lacks the SSE/AVX target features needed for inline intrinsics, so the work involves shipping the kernels as a C translation unit compiled with `-msse -mavx2 -mfma` and exposed through `extern "C"`. Not a capstone dependency.
+- **Jetson re-measurement** — the #56 changes are platform-agnostic Rust + NEON intrinsics and cross-build cleanly for `PLATFORM=JETSON_ORIN_NANO`, but Jetson's post-#56 MNIST latency has not been measured on hardware (deferred — labctl has no SD-card-bypass deploy path for `slmos-kexec`).
+- **Wider micro-kernels (4×8 / 8×4)** — the Cortex-A76 NEON register file (32 wide) has headroom; the A78AE prefetcher behaves differently from A76 and may benefit more from the tile-level prefetch infrastructure that #887 left in place.
 
 ---
 

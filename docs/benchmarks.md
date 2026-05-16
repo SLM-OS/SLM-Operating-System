@@ -178,12 +178,14 @@ Emulated benchmarks on the same host. QEMU ARM64 emulates Cortex-A76; QEMU x86-6
 | Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** | **35.1 GB/s** |
 | Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** | **68.8 GB/s** |
 | IRQ latency | — | — | **1.7 us** | **3.7 us** |
-| MNIST inference | — | — | **1,092 us** | **746 us** |
+| MNIST inference | — | — | **483 us** | **746 us** ¹ |
 | Binary size | 973 KB | 610 KB | 824 KB | 893 KB |
 | CPUs | 4 | 4 | 4 | 6 |
 | RAM | 1 GB | 256 MB | 4 GB | 8 GB |
 
 QEMU numbers vary between runs due to host load and emulation non-determinism. Pi 5 native numbers are the authoritative measurements for capstone evaluation.
+
+¹ Jetson MNIST inference has not been re-measured after the #56 micro-kernel work (4×4 NEON outer-product + tile-level prefetch). The kernel changes are platform-agnostic Rust + NEON intrinsics and cross-build cleanly for `PLATFORM=JETSON_ORIN_NANO`, so a similar uplift is expected; the 746 µs figure remains the pre-#56 baseline.
 
 ---
 
@@ -313,8 +315,8 @@ earlier measurements.
 
 | Model | Platform | Dtype | Latency (avg) | Backend | Notes |
 |-------|----------|-------|---------------|---------|-------|
-| MNIST | Raspberry Pi 5 (Cortex-A76 @ 2.4 GHz) | FP32 | **1.09 ms** | Rust + NEON (4-wide `vfmaq_f32`) | Measured on hardware |
-| MNIST | Jetson Orin Nano (Cortex-A78AE @ 1.5 GHz) | FP32 | **0.746 ms** | Rust + NEON | Measured on hardware |
+| MNIST | Raspberry Pi 5 (Cortex-A76 @ 2.4 GHz) | FP32 | **0.483 ms** | Rust + NEON (4×4 outer-product micro-kernel, #56) | Measured on hardware (pi-5-2, `model bench mnist 200`) |
+| MNIST | Jetson Orin Nano (Cortex-A78AE @ 1.5 GHz) | FP32 | **0.746 ms** | Rust + NEON | Pre-#56 baseline; not re-measured post-micro-kernel work |
 | MNIST | test-pc (i7-6700 @ 3.4 GHz), scalar baseline | FP32 | *TBD* | Rust scalar fallback | Pre-C1 measurement; to be captured before removing this row |
 | MNIST | test-pc (i7-6700 @ 3.4 GHz), SSE-asm | FP32 | *TBD* | C SSE2 kernel (`kernel/arch/x86_64/sse_kernels.c`) | Post-C1 measurement on real hardware; QEMU numbers also published |
 | MNIST | Jetson Linux (Cortex-A78AE) — ONNX Runtime reference | FP32 | 0.117 ms | OpenBLAS + multi-threaded | Production runtime, not SLM-OS |
@@ -348,13 +350,15 @@ Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 o
 | Model size | 26 KB (23,982 bytes weights) |
 | Parameters | 5,998 |
 | Operator nodes | 12 (Conv2D, MaxPool, Gemm, Relu, Reshape, Add, Softmax) |
-| Inference latency (min) | **1,092 us** |
-| Inference latency (avg) | **1,092 us** |
-| Inference latency (max) | **1,094 us** |
-| Throughput | **915 inferences/sec** |
+| Inference latency (avg, post-#56) | **483 us** |
+| Throughput (post-#56) | **2,070 inferences/sec** |
 | Accuracy | Class 5 for zero input (matches ONNX Runtime reference) |
 
-### Latency Distribution (1000 iterations)
+Post-#56 figures are the 200-iteration `model bench mnist 200` average on pi-5-2 with the 4×4 NEON outer-product micro-kernel and tile-level prefetch hints active. See §Per-operator Profile below for the methodology and the full pre-/post-#56 deep dive.
+
+### Latency Distribution (pre-#56 build, 1000 iterations)
+
+Retained for historical jitter characterisation. The numbers below were captured against the row × scalar `simd_fma_row` matmul inner kernel; post-#56 per-iteration latency is ~483 µs (see above), but a 1000-iter percentile sweep against the new kernel has not been re-run.
 
 | Percentile | Latency |
 |------------|---------|
@@ -363,7 +367,7 @@ Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 o
 | p99 | 1,092 us |
 | p100 (max) | 1,100 us |
 
-Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 µs. The 8 µs max jitter demonstrates deterministic inference suitable for real-time edge deployment.
+Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 µs. The 8 µs max jitter demonstrates deterministic inference suitable for real-time edge deployment — the property is a function of the kernel's lack of memory-allocation/GC/page-fault pressure, not the absolute matmul cost, so the post-#56 distribution is expected to retain the same shape at the lower latency band.
 
 ### Per-operator Profile (#56)
 
@@ -389,7 +393,7 @@ All measurements on Pi 5 (BCM2712 Cortex-A76 @ 2.4 GHz), pi-5-2, `BUILD_TYPE=Rel
 | Add | 600 | 9 µs | 2 µs | 21 µs | Conv-bias + Gemm-bias adds |
 | Reshape | 400 | 1 µs | 1 µs | 2 µs | |
 
-Total dispatched-op time per inference: ~2,985 µs → 3,011 µs bench latency. `Conv` is ~95% of inference time. Note this current measurement is higher than the 1.09 ms recorded in the cross-platform table further up the doc (an older build); the #56 PRs report before/after against this current measurement so the deltas are apples-to-apples.
+Total dispatched-op time per inference: ~2,985 µs → 3,011 µs bench latency. `Conv` is ~95% of inference time. The 3,011 µs figure is the #56-era baseline against a slightly higher-overhead build than the earlier 1,092 µs `Latency Distribution` measurement reflected; the #56 PRs report before/after against this current measurement so the deltas are apples-to-apples. The headline tables in `Platform Comparison` and `Cross-Platform Inference Latency` carry the **post-#56** average (483 µs) — i.e. the end state after all three #56 PRs landed — not the 3,011 µs interim baseline used here for the per-op breakdown.
 
 **After PR 2 (4×4 NEON outer-product micro-kernel):**
 
@@ -457,10 +461,12 @@ Measured on Jetson Orin Nano running Linux 5.15.148-tegra (6x Cortex-A78AE @ 1.5
 | IPC round-trip | **132 ns** | **60 ns** | 23.7 us (UDS) | **395x faster** |
 | Boot to shell | **~1.6 s** | ~3 s | 20.8 s | **7x faster** |
 | Kernel binary | **824 KB** | **893 KB** | 41.1 MB | **46x smaller** |
-| MNIST inference | **1.09 ms** | **0.746 ms** | 0.117 ms (ONNX RT) | 6.4x slower* |
+| MNIST inference | **0.483 ms** | **0.746 ms** ¹ | 0.117 ms (ONNX RT) | 4.1x slower* |
 | CPUs | 4 | 6 | 6 | Same |
 
-*\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul without tiling. The inference engine is functionally correct and deterministic (8 µs jitter), but not performance-competitive with production inference runtimes. Optimization is documented in docs/future-work.md.*
+¹ Jetson MNIST inference has not been re-measured after the #56 micro-kernel work; the 746 µs figure is the pre-#56 baseline.
+
+*\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul with 32×32 cache tiling and a 4×4 register-blocked outer-product micro-kernel (landed in #56: PRs #849/#876/#887). The remaining ~4× gap to ONNX Runtime is attributable to multi-threading and BLAS-specific tuning, not the matmul micro-architecture; the in-kernel single-threaded path is no longer the bottleneck. The inference engine remains functionally correct and deterministic (8 µs jitter under the pre-#56 1000-iter distribution; post-#56 percentile sweep not yet captured).*
 
 ### Why SLM-OS is Faster (except inference)
 

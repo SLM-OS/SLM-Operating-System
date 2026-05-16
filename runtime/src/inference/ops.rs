@@ -117,6 +117,8 @@ unsafe fn prefetch_l1_read(addr: *const i8) {
 
 #[inline(always)]
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)] // call sites are gated to aarch64; kept as the
+                    // portable stub once #847 wires up x86-64 PREFETCHT0.
 unsafe fn prefetch_l1_read(_addr: *const i8) {
     // No portable prefetch in core for x86-64-unknown-none here; the
     // x86-64 C SSE kernels can issue PREFETCHT0 themselves once #847
@@ -832,10 +834,16 @@ unsafe fn matmul_tiled(ap: *const f32, bp: *const f32, cp: *mut f32,
     let mut kk = 0;
     while kk < k {
         let k_end = core::cmp::min(kk + tile, k);
+        // `kn` / `tile_m` only feed the aarch64 4×4 micro-kernel and its
+        // edge-strip fallbacks. On non-aarch64 the row×scalar form
+        // walks `ii..i_end` / `kk..k_end` directly, so the bindings
+        // would be unused there and trip `-D unused-variables`.
+        #[cfg(target_arch = "aarch64")]
         let kn = k_end - kk;
         let mut ii = 0;
         while ii < m {
             let i_end = core::cmp::min(ii + tile, m);
+            #[cfg(target_arch = "aarch64")]
             let tile_m = i_end - ii;
             let mut jj = 0;
             while jj < n {
