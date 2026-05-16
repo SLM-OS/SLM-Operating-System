@@ -1248,10 +1248,11 @@ static void bench_sched_workload_dispatch(const struct bench_workload *wl,
             /* Skip ai_hailo when no HEF is loaded — without a model it
              * falls back to heuristic on every assign_cpu and produces
              * a row that's indistinguishable from heuristic. */
-            if (p->name && p->name[0] == 'a' && p->name[1] == 'i' &&
-                p->name[2] == '_' && p->name[3] == 'h') {
+            if (p->name && strcmp(p->name, "ai_hailo") == 0) {
                 extern inference_model_handle_t ai_policy_hailo_get_model_handle(void);
-                if (ai_policy_hailo_get_model_handle() == INF_INVALID_HANDLE) continue;
+                if (ai_policy_hailo_get_model_handle() == INF_INVALID_HANDLE) {
+                    continue;
+                }
             }
             (void)bench_sched_workload_one(p, wl);
         }

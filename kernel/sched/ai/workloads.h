@@ -52,15 +52,27 @@ struct bench_workload {
     uint32_t arrival_spacing_us;
 };
 
-/* Per-task result record, populated by the worker on completion. */
+/* Per-task slot: combines the worker's input (runtime_us +
+ * dispatch_ns, written by the driver before scheduler_add_task) and
+ * the worker's output (completion_ns, ran_on_cpu, deadline_met,
+ * done). Both halves live in one struct so a single
+ * cache_clean_range(&wl_slots[i], sizeof(wl_slots[i])) on the driver
+ * side covers everything the worker reads from this slot — important
+ * on Pi 5 / Jetson where per-core L2 caches are incoherent (no SMPEN).
+ * See kernel/CLAUDE.md §"Cache Maintenance (Pi 5 / No SMPEN)". */
 struct bench_wl_record {
-    uint64_t completion_ns;   /* end_ns relative to bench start; 0 = not done */
-    uint64_t deadline_ns;     /* absolute deadline copied from task->deadline_ns */
-    uint32_t latency_us;      /* end_ns - dispatch_ns */
+    /* --- Driver-written input (read by worker) --- */
+    uint64_t dispatch_ns;     /* slm_get_time_ns() at scheduler_add_task time */
+    uint32_t runtime_us;      /* template's est_runtime_us — worker busy-waits this long */
+    uint32_t _pad_input;
+    uint64_t deadline_ns;     /* absolute deadline copied from task->deadline_ns; 0 = none */
+    /* --- Worker-written output (read by driver after task exits) --- */
+    uint64_t completion_ns;   /* end_ns; 0 = not yet done */
+    uint32_t latency_us;      /* completion_ns - dispatch_ns */
     uint8_t  ran_on_cpu;
     uint8_t  deadline_met;    /* 1 if completion_ns <= deadline, else 0 */
     uint8_t  done;            /* 1 once worker has finished and written its slot */
-    uint8_t  _pad;
+    uint8_t  _pad_output;
 };
 
 /* Aggregate result of one (policy × workload) bench run. */

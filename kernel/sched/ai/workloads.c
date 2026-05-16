@@ -36,6 +36,7 @@
 #include "smp.h"
 #include "cache.h"
 #include "timer.h"
+#include "string.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -115,10 +116,9 @@ const struct bench_workload *bench_workload_find(const char *name)
 {
     if (!name) return 0;
     for (uint32_t i = 0; i < sizeof(bench_workloads_table)/sizeof(bench_workloads_table[0]); i++) {
-        const char *a = name;
-        const char *b = bench_workloads_table[i].name;
-        while (*a && *b && *a == *b) { a++; b++; }
-        if (*a == 0 && *b == 0) return &bench_workloads_table[i];
+        if (strcmp(name, bench_workloads_table[i].name) == 0) {
+            return &bench_workloads_table[i];
+        }
     }
     return 0;
 }
@@ -140,15 +140,20 @@ const struct bench_workload *bench_workload_get(uint32_t idx)
  * different slots can't false-share. The records array is module
  * static so the worker can find its slot from `arg`. Only one
  * `bench_workload_run` may be in flight at a time (the shell is
- * single-threaded). */
+ * single-threaded).
+ *
+ * The driver's input (`dispatch_ns`, `runtime_us`, `deadline_ns`)
+ * lives in the same struct as the worker's output so a single
+ * cache_clean_range on the slot covers everything the worker reads
+ * before scheduler_add_task hands it off — without this, on Pi 5 a
+ * worker dispatched to a non-CPU-0 core would read stale zeros for
+ * `runtime_us` and busy-wait for zero cycles (incoherent per-core
+ * L2; see kernel/CLAUDE.md §"Cache Maintenance"). */
 struct __attribute__((aligned(64))) bench_wl_slot {
     struct bench_wl_record rec;
     uint8_t  _pad[64 - sizeof(struct bench_wl_record)];
 };
 static struct bench_wl_slot wl_slots[BENCH_WORKLOAD_MAX_TASKS] __attribute__((aligned(64)));
-static uint64_t wl_dispatch_ns[BENCH_WORKLOAD_MAX_TASKS];
-static uint32_t wl_runtime_us[BENCH_WORKLOAD_MAX_TASKS];
-static uint32_t wl_active_count;
 
 static void workload_busy_wait_us(uint32_t us)
 {
@@ -170,13 +175,19 @@ static void workload_task_body(void *arg)
         return;
     }
 
-    /* Busy-spin for the template's runtime. */
-    workload_busy_wait_us(wl_runtime_us[slot]);
+    /* Invalidate this slot so we read the driver's just-cleaned
+     * dispatch_ns / runtime_us / deadline_ns rather than any stale
+     * local L1 contents on Pi 5 / Jetson. */
+    cache_invalidate_range(&wl_slots[slot], sizeof(wl_slots[slot]));
 
-    uint64_t end_ns = slm_get_time_ns();
-    uint64_t dispatch_ns = wl_dispatch_ns[slot];
+    uint32_t runtime_us = wl_slots[slot].rec.runtime_us;
+    uint64_t dispatch_ns = wl_slots[slot].rec.dispatch_ns;
     uint64_t deadline_ns = wl_slots[slot].rec.deadline_ns;
 
+    /* Busy-spin for the template's runtime. */
+    workload_busy_wait_us(runtime_us);
+
+    uint64_t end_ns = slm_get_time_ns();
     wl_slots[slot].rec.completion_ns = end_ns;
     wl_slots[slot].rec.latency_us =
         (uint32_t)((end_ns - dispatch_ns) / 1000ULL);
@@ -188,13 +199,6 @@ static void workload_task_body(void *arg)
 }
 
 /* ---- Quantile + stddev helpers (integer-only) ---- */
-
-static int u64_cmp(const void *a, const void *b)
-{
-    uint64_t aa = *(const uint64_t *)a;
-    uint64_t bb = *(const uint64_t *)b;
-    return (aa > bb) - (aa < bb);
-}
 
 /* Simple insertion sort — N <= 32 so O(N^2) is fine. */
 static void sort_u64(uint64_t *arr, uint32_t n)
@@ -208,7 +212,6 @@ static void sort_u64(uint64_t *arr, uint32_t n)
         }
         arr[j] = key;
     }
-    (void)u64_cmp;  /* future use if we switch to qsort */
 }
 
 /* Quantile interpolation: returns arr[ceil(q*n) - 1] for sorted arr.
@@ -285,21 +288,24 @@ int bench_workload_run(const struct sched_policy_ops *policy,
 
     if (sched_set_policy(policy) < 0) return -1;
 
-    /* Clear records + scratch arrays. */
+    /* Clear records. The dispatch loop below fills in dispatch_ns /
+     * runtime_us / deadline_ns per slot and then cache_cleans the
+     * slot before scheduler_add_task hands the worker off. */
     for (uint32_t i = 0; i < BENCH_WORKLOAD_MAX_TASKS; i++) {
-        wl_slots[i].rec.completion_ns = 0;
+        wl_slots[i].rec.dispatch_ns = 0;
+        wl_slots[i].rec.runtime_us = 0;
         wl_slots[i].rec.deadline_ns = 0;
+        wl_slots[i].rec.completion_ns = 0;
         wl_slots[i].rec.latency_us = 0;
         wl_slots[i].rec.ran_on_cpu = 0xFF;
         wl_slots[i].rec.deadline_met = 0;
         wl_slots[i].rec.done = 0;
-        wl_dispatch_ns[i] = 0;
-        wl_runtime_us[i] = 0;
     }
     cache_clean_range(wl_slots, sizeof(wl_slots));
-    wl_active_count = wl->n_tasks_total;
 
-    for (uint32_t i = 0; i < MAX_CPUS; i++) out->cpu_completions[i] = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        out->cpu_completions[i] = 0;
+    }
 
     uint64_t bench_start_ns = slm_get_time_ns();
 
@@ -308,16 +314,16 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     struct task *created[BENCH_WORKLOAD_MAX_TASKS] = { 0 };
     for (uint32_t i = 0; i < wl->n_tasks_total; i++) {
         const struct bench_wl_template *tpl = &wl->templates[i % wl->n_templates];
-        wl_runtime_us[i] = tpl->est_runtime_us;
 
         uint64_t now_ns = slm_get_time_ns();
-        wl_dispatch_ns[i] = now_ns;
-
+        wl_slots[i].rec.dispatch_ns = now_ns;
+        wl_slots[i].rec.runtime_us = tpl->est_runtime_us;
         if (tpl->deadline_slack_us > 0) {
             wl_slots[i].rec.deadline_ns =
                 now_ns + (uint64_t)tpl->deadline_slack_us * 1000ULL;
         }
-        /* Clean slot before worker reads its template fields. */
+        /* Push slot to PoC so the worker (which may run on a
+         * different CPU with an incoherent L2) sees these fields. */
         cache_clean_range(&wl_slots[i], sizeof(wl_slots[i]));
 
         struct task *t = task_create_with_priority(
@@ -382,8 +388,9 @@ int bench_workload_run(const struct sched_policy_ops *policy,
             out->cpu_completions[wl_slots[i].rec.ran_on_cpu]++;
         }
         latencies[lat_count++] = (uint64_t)wl_slots[i].rec.latency_us;
-        if ((uint64_t)wl_slots[i].rec.latency_us > out->completion_max_us)
+        if ((uint64_t)wl_slots[i].rec.latency_us > out->completion_max_us) {
             out->completion_max_us = wl_slots[i].rec.latency_us;
+        }
         if (wl_slots[i].rec.deadline_ns != 0) {
             out->deadline_tasks++;
             if (!wl_slots[i].rec.deadline_met) out->deadline_misses++;

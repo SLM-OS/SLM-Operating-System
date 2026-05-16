@@ -4928,6 +4928,13 @@ static void test_bench_workload_find_known_names(void)
 
     TEST_ASSERT_NULL(bench_workload_find("does-not-exist"));
     TEST_ASSERT_NULL(bench_workload_find(NULL));
+
+    /* Pin a representative template value so a future edit that
+     * accidentally changes a workload's runtime by an order of
+     * magnitude surfaces here rather than in silent table drift. */
+    TEST_ASSERT_TRUE(mixed->templates[0].est_runtime_us > 0);
+    TEST_ASSERT_TRUE(mixed->templates[0].est_runtime_us < 10000);
+    TEST_ASSERT_TRUE(mixed->arrival_spacing_us < 10000);
 }
 
 static void test_bench_workload_get_enumerates_all(void)
@@ -4995,7 +5002,9 @@ static void test_bench_workload_run_heuristic_mixed(void)
     /* Sum of per-CPU completions == total completions (no records
      * leak past the cpu_completions[] array). */
     uint32_t cpu_sum = 0;
-    for (uint32_t i = 0; i < MAX_CPUS; i++) cpu_sum += r.cpu_completions[i];
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        cpu_sum += r.cpu_completions[i];
+    }
     TEST_ASSERT_EQUAL_UINT32(r.tasks_completed, cpu_sum);
 }
 #endif /* ENABLE_BOOT_TESTS */
