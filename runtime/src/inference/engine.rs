@@ -290,6 +290,14 @@ impl InferenceEngine {
     /// dispatcher needs — every downstream op (Conv2D, MatMul, Gemm,
     /// Softmax, MaxPool, Reshape) already iterates over `input.dim(0)`
     /// and handles the batch dimension correctly.
+    ///
+    /// ASSUMPTION (load-bearing): every supported model declares the
+    /// batch dimension at index 0 of its first input. The MNIST
+    /// model and every other model SLM-OS loads today follow this
+    /// convention; if a future model puts channels or another
+    /// dimension first, this override silently corrupts the shape.
+    /// Add a per-model "batch_dim_index" property and pass it
+    /// through to break that assumption.
     fn bind_graph_inputs(
         &mut self,
         batch_size: usize,
@@ -324,10 +332,22 @@ impl InferenceEngine {
 
             let tensor = Tensor::new(input, &dims[..ndim]);
 
-            // Verify element count matches the provided buffer.
+            // Verify element count matches the provided buffer. The
+            // `> input_len` check catches under-sized buffers; the
+            // debug_assert pins the stronger invariant that the caller
+            // sized the buffer to exactly `batch_size * per_sample`
+            // elements (oversized buffers technically still work but
+            // are a sign of caller confusion — flag in debug builds).
             if tensor.num_elements() > input_len {
                 return Err(EngineError::InvalidInput);
             }
+            debug_assert_eq!(
+                tensor.num_elements(),
+                input_len,
+                "bind_graph_inputs: input_len ({}) should match batch_size * per_sample ({})",
+                input_len,
+                tensor.num_elements()
+            );
 
             self.bind(*name, tensor);
         }

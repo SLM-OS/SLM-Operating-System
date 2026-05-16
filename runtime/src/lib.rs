@@ -7307,8 +7307,13 @@ pub extern "C" fn rust_batch_inference_test() -> i32 {
         };
         let stats = sched::scheduler_stats();
         let same = n == nb && bit_equal(&out[..n], &baseline_b[..nb]);
+        // Stronger than the surface "batches_dispatched == 0": also
+        // pin `batches_full == 0` so a future regression that lets
+        // Solo accidentally enter `run_dispatcher` is caught even if
+        // it didn't bump the umbrella counter.
         let counted = stats.singleton_dispatches == 1
             && stats.batches_dispatched == 0
+            && stats.batches_full == 0
             && stats.total_submitted == 1
             && stats.queued == 0;
         let passed = same && counted;
