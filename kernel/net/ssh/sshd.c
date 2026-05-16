@@ -37,6 +37,10 @@
 #include "host_key.h"
 #include "rng.h"
 #include "sched.h"
+#include "shell.h"
+#include "shell_io.h"
+#include "shell_io_ssh.h"
+#include "shell_session.h"
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
@@ -99,6 +103,29 @@ static volatile uint32_t   g_accepted;
 static volatile uint32_t   g_kex_completed;
 static volatile uint32_t   g_kex_failed;
 static volatile uint32_t   g_active;
+
+/* ---------------------------------------------------------------- */
+/* User authentication callback                                      */
+/* ---------------------------------------------------------------- */
+
+/*
+ * #199c (this sub-ticket): accept any user-auth attempt so the demo
+ * `ssh root@<ip>` reaches a shell prompt. #199d replaces this with
+ * an /etc/passwd + KDF check + rate-limit. The bootstrap gate that
+ * makes a default-on flip safe lives in #199d / #896.
+ *
+ * The `NET_SSHD_AUTOSTART` default stays OFF until #199e — operators
+ * must explicitly `sshd start` to bring up an open daemon during
+ * #199c's lifetime. */
+static int sshd_userauth_allow_all(uint8_t auth_type,
+                                   WS_UserAuthData *data,
+                                   void *ctx)
+{
+    (void)auth_type;
+    (void)data;
+    (void)ctx;
+    return WOLFSSH_USERAUTH_SUCCESS;
+}
 
 /* ---------------------------------------------------------------- */
 /* Host key — VFS-persisted via kernel/net/ssh/host_key.c            */
@@ -330,15 +357,14 @@ static void sshd_session_task(void *arg)
     }
 
     /* Yield-loop on wolfSSH_accept until KEX completes or fatal error. */
+    bool kex_ok = false;
     for (;;) {
         int ret = wolfSSH_accept(c->ssh);
         if (ret == WS_SUCCESS) {
             irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
             g_kex_completed++;
             spin_unlock_irqrestore(&g_mod_lock, flags);
-            uart_printf("[SSHD] conn %u: KEX complete — no shell channel "
-                        "(refused; #199c scope)\r\n",
-                        (unsigned)c->session_id);
+            kex_ok = true;
             break;
         }
         int err = wolfSSH_get_error(c->ssh);
@@ -368,8 +394,66 @@ static void sshd_session_task(void *arg)
         break;
     }
 
-    /* Either way, close the connection for #199a. #199c will instead
-     * branch on success → shell session, failure → close. */
+    if (!kex_ok) {
+        irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+        conn_close_locked(c);
+        spin_unlock_irqrestore(&g_mod_lock, flags);
+        task_exit();
+        return;
+    }
+
+    /* KEX done — bind the wolfSSH stream to a shell_session and run
+     * the normal REPL. The user-auth callback gate (wired in #199d)
+     * gets driven from inside wolfSSH_accept above, so reaching here
+     * means the peer has either authenticated successfully or
+     * wolfSSH's default policy (refuse everything in the current
+     * config) let nothing pass — for #199c we accept all auth so the
+     * demo works; #199d adds the real check.
+     *
+     * #199e flips the default-on flip behind the bootstrap gate after
+     * #199d. */
+    struct shell_session *sess = shell_session_alloc();
+    if (!sess) {
+        const char *msg = "sshd: session pool exhausted\r\n";
+        (void)wolfSSH_stream_send(c->ssh, (uint8_t *)msg,
+                                  (uint32_t)strlen(msg));
+        irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+        conn_close_locked(c);
+        spin_unlock_irqrestore(&g_mod_lock, flags);
+        task_exit();
+        return;
+    }
+
+    struct shell_io *io = shell_io_ssh_create(c->ssh);
+    if (!io) {
+        shell_session_free(sess);
+        irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+        conn_close_locked(c);
+        spin_unlock_irqrestore(&g_mod_lock, flags);
+        task_exit();
+        return;
+    }
+    sess->io = io;
+    shell_session_bind(task_current(), sess);
+
+    /* Banner — straight to the SSH stream. */
+    extern void shell_puts(const char *);
+    shell_puts("\r\n");
+    shell_puts("SLM-OS Debug Shell (ssh)\r\n");
+    shell_puts("Type 'help' for available commands.\r\n");
+    shell_puts("\r\n");
+
+    /* Run the normal REPL. Returns when the peer disconnects (the
+     * shell_io_ssh `is_open` flips false) or the user types `exit`. */
+    shell_run();
+
+    shell_puts("\r\nbye\r\n");
+
+    /* Teardown. */
+    shell_session_unbind(task_current());
+    shell_io_ssh_destroy(io);
+    shell_session_free(sess);
+
     irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
     conn_close_locked(c);
     spin_unlock_irqrestore(&g_mod_lock, flags);
@@ -491,6 +575,7 @@ int sshd_start(uint16_t port)
 
         wolfSSH_SetIORecv(g_ctx, wolf_io_recv);
         wolfSSH_SetIOSend(g_ctx, wolf_io_send);
+        wolfSSH_SetUserAuth(g_ctx, sshd_userauth_allow_all);
 
         /* Convert the SLM-OS-native (seed || pub) layout into the
          * PKCS#8 DER form wolfSSH's WOLFSSH_FORMAT_RAW importer

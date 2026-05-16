@@ -1918,12 +1918,15 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
     target_link_libraries(wolfssh PRIVATE wolfcrypt)
 
     # SLM-OS-side glue: time, RNG seed, lwIP IO callbacks, listener,
-    # accept loop, host-key persistence, shell verb.
+    # accept loop, host-key persistence, shell-session binding,
+    # autostart, shell verb.
     target_sources(slmos.elf PRIVATE
         kernel/net/ssh/wolf_os.c
         kernel/net/ssh/sshd.c
         kernel/net/ssh/sshd_shell.c
         kernel/net/ssh/host_key.c
+        kernel/net/ssh/shell_io_ssh.c
+        kernel/net/ssh/sshd_autostart.c
     )
     target_include_directories(slmos.elf PRIVATE
         ${CMAKE_SOURCE_DIR}/kernel/net/ssh)

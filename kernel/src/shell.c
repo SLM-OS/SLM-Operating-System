@@ -885,6 +885,16 @@ void shell_init(void)
         extern void tcp_telemetry_server_autostart(void);
         tcp_telemetry_server_autostart();
     }
+
+#if defined(NET_SSHD)
+    /* SSH daemon — autostart if NET_SSHD_AUTOSTART or /etc/sshd.conf
+     * says so. Default OFF until #199e (#895) flips it behind the
+     * bootstrap gate from #199d (#896). */
+    {
+        extern void sshd_autostart(void);
+        sshd_autostart();
+    }
+#endif
 #endif
 
     shell_puts("\r\n");
