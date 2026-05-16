@@ -3148,6 +3148,8 @@ int cmd_model(int argc, char *argv[])
                 "Unsqueeze", "Gemm", "Flatten", "Shape", "Constant",
                 "Cast", "Conv", "MaxPool",
             };
+            const size_t op_name_count =
+                sizeof(op_name) / sizeof(op_name[0]);
             shell_puts("Per-op profile (count / avg us / min us / max us)\r\n");
             shell_puts("---------------------------------------------------\r\n");
             int printed = 0;
@@ -3156,7 +3158,7 @@ int cmd_model(int argc, char *argv[])
                     continue;
                 }
                 const char *label;
-                if (entries[i].op_type < 17u) {
+                if ((size_t)entries[i].op_type < op_name_count) {
                     label = op_name[entries[i].op_type];
                 } else {
                     label = "Unknown";

@@ -100,6 +100,12 @@ pub const PROFILE_NUM_OPS: usize = 18;
 /// `GraphNode.op_type` (so the C side can label rows without copying
 /// any strings across the FFI). `count == 0` means the op never ran in
 /// the current measurement window.
+///
+/// Layout MUST match `RustOpProfileEntry` in `kernel/include/slm_ffi.h`.
+/// `#[repr(C)]` on a `(u8, u64, ...)` would natively pad 7 bytes after
+/// `op_type` anyway, but the explicit `_pad` field documents the
+/// guarantee and lets the snapshot writer zero-init the bytes (no
+/// kernel-stack contents leak across the FFI to the shell printer).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct OpProfileEntry {
@@ -212,6 +218,14 @@ pub fn op_profile_is_enabled() -> bool {
 /// Zero every bucket. `min_ns` resets to `u64::MAX` so the first
 /// recorded sample wins the CAS unconditionally; the snapshot getter
 /// reports it as 0 if `count == 0`.
+///
+/// **Not atomic** with respect to a concurrent `op_profile_record`:
+/// a record interleaved with the reset can yield COUNT=0 while
+/// TOTAL/MIN/MAX still carry pre-reset data (or vice-versa). The
+/// intended usage is `reset` → run the workload → `snapshot`; the
+/// engine's `EngineGuard` already serialises ops in practice so an
+/// interleaving is only possible if the operator runs `model profile
+/// reset` mid-bench, which is a user-error pattern.
 pub fn op_profile_reset() {
     for i in 0..PROFILE_NUM_OPS {
         PROF_COUNT[i].store(0, Ordering::Relaxed);
@@ -252,6 +266,16 @@ fn op_profile_record(op_type: OpType, ns: u64) {
 /// fixed `op_type_to_index` order). Returns the number of rows written.
 /// Caller is responsible for sizing `out` to at least `PROFILE_NUM_OPS`
 /// entries when they want the full table.
+///
+/// **Not atomic across rows.** Each row's four fields (count, total,
+/// min, max) are read with independent Relaxed loads, and the
+/// row-to-row loop is not synchronised against
+/// `op_profile_record`. A concurrent record can land between two
+/// rows of the same snapshot. For a diagnostic profiler this is fine
+/// — the inference engine serialises ops through `EngineGuard` so
+/// the only "concurrent" recorder in practice is the very op the
+/// shell command interleaves with, and the loop completes in tens of
+/// nanoseconds. Do not use this snapshot for hard correctness checks.
 ///
 /// # Safety
 ///

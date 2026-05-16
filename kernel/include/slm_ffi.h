@@ -729,9 +729,13 @@ extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 
 /*
  * Per-operator profile entry (#56). Layout must match
- * `runtime/src/inference/engine.rs::OpProfileEntry`.
- * `op_type` is the same discriminant the Rust engine stores in
- * `GraphNode.op_type` — see slm_op_type_name() for a label.
+ * `runtime/src/inference/engine.rs::OpProfileEntry` exactly — see the
+ * `_pad` comment there for the explicit-padding rationale.
+ *
+ * `op_type` is the `OpType` discriminant from
+ * `runtime/src/loader/graph.rs` (0 = MatMul, 1 = Add, …, 16 = MaxPool,
+ * 255 = Unknown). The `model profile show` handler in shell_sys.c
+ * does the label lookup inline.
  */
 typedef struct {
     uint8_t  op_type;
