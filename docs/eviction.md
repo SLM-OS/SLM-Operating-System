@@ -280,24 +280,74 @@ set and returns the average per-call latency in nanoseconds. The
 `test_bench_all_policies` Unity test prints numbers for every
 registered policy so the values land in each `make test` log.
 
-**QEMU baseline** (aarch64 `virt`, cortex-a76, Release build):
+**QEMU baseline** (aarch64 `virt`, cortex-a76, Release build,
+re-captured 2026-05-17 alongside the Pi 5 / Jetson runs below):
 
 | Policy | Default build | Real models (`EVICTION_MODELS=ON`) |
 |--------|---------:|---------:|
-| first_candidate | 55 ns | 58 ns |
-| lru | 71 ns | 72 ns |
-| lfu | 90 ns | 91 ns |
-| arc | 3,989 ns | 3,132 ns |
-| slm | 1,749 ns | 881 ns |
-| xgboost | 18,780 ns | 190,725 ns |
-| mlp | 18,596 ns | 1,583,126 ns |
-| cacheus (ml_only) | 46,381 ns | 1,734,300 ns |
+| first_candidate | 60 ns | 58 ns |
+| lru | 75 ns | 279 ns |
+| lfu | 109 ns | 342 ns |
+| arc | 3,892 ns | 3,764 ns |
+| slm | 1,026 ns | 1,287 ns |
+| xgboost | 23,419 ns | 240,270 ns |
+| mlp | 52,223 ns | 1,877,428 ns |
+| cacheus (ml_only) | 100,313 ns | 2,124,355 ns |
 
-QEMU emulates the int8 MLP forward pass slowly — real silicon will
-be orders of magnitude faster. The sibling project's Python MLP
-reference is ~2 µs per inference at batch=64; native Rust on
-Cortex-A78 is expected to sit in the same ballpark. Pi 5 and Jetson
-numbers are pending a hardware run.
+QEMU TCG numbers fluctuate with host load and TB-cache warmup; treat
+the table as order-of-magnitude rather than tight bounds. The
+re-capture is up an order of magnitude on `mlp` / `cacheus` in the
+default build (stub generators got slower since the M9 capture) and
+~3–4× on `lru` / `lfu` under `EVICTION_MODELS=ON` — neither move
+matters for the < 1 µs target evaluation, which lives on real silicon
+below.
+
+**Pi 5 hardware** (pi-5-2, BCM2712 Cortex-A76 @ 2.4 GHz, Release
+build; captured 2026-05-17 from `test_bench_all_policies` for
+[#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108)):
+
+| Policy | Default build | Real models (`EVICTION_MODELS=ON`) |
+|--------|---------:|---------:|
+| first_candidate | 4 ns | 4 ns |
+| lru | 18 ns | 49 ns |
+| lfu | 25 ns | 58 ns |
+| arc | 497 ns | 497 ns |
+| slm | 157 ns | 167 ns |
+| xgboost | 4,117 ns | 15,029 ns |
+| mlp | 4,157 ns | 129,151 ns |
+| cacheus (ml_only) | 8,999 ns | 145,061 ns |
+
+**Jetson Orin Nano hardware** (jetson-nano-1, Cortex-A78AE @ 1.5 GHz
+under NS-EL2/VHE, Release build; captured 2026-05-17 from
+`test_bench_all_policies` for
+[#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109)):
+
+| Policy | Default build | Real models (`EVICTION_MODELS=ON`) |
+|--------|---------:|---------:|
+| first_candidate | 4 ns | 4 ns |
+| lru | 26 ns | 105 ns |
+| lfu | 33 ns | 69 ns |
+| arc | 621 ns | 627 ns |
+| slm | 221 ns | 227 ns |
+| xgboost | 6,098 ns | 21,956 ns |
+| mlp | 6,170 ns | 174,248 ns |
+| cacheus (ml_only) | 13,311 ns | 197,228 ns |
+
+Cortex-A76 (Pi 5, 2.4 GHz) consistently beats Cortex-A78AE (Jetson,
+1.5 GHz) by roughly the clock ratio (~1.5–1.6×) on the classical
+policies — the ML policies widen the gap somewhat on the
+`EVICTION_MODELS=ON` path (1.4–1.5× on xgboost / cacheus). Real
+silicon is ~10× faster than QEMU TCG on the heavy ML policies (Pi 5
+`EVICTION_MODELS=ON` cacheus is 145 µs vs QEMU's 1,734 µs), confirming
+the M9 prediction that QEMU's TCG-emulated int8 MLP forward pass was
+not representative of hardware. The **< 1 µs Cortex-A78 target from
+the Phase AI-Eviction TODO is missed on every hardware config**:
+xgboost lands at 4–22 µs, mlp at 4–174 µs, cacheus at 9–197 µs. The
+classical policies (`first_candidate`, `lru`, `lfu`, `arc`, `slm`) all
+stay safely under 1 µs on both platforms in both build configs.
+Tree-pruning the XGBoost ensemble and batching the MLP forward pass
+are the two known speed-up levers carried over from the sibling
+project; tracked as a perf follow-up against the M9 deliverable.
 
 ### Memory Overhead (M9)
 
@@ -572,12 +622,20 @@ All suites pass under `make test` on the three supported configs:
   [#953](https://github.com/SLM-OS/SLM-Operating-System/issues/953).
   Decision-gate ticket. Held (`blocked` label) until #932 closes with
   passing equivalence on pi-5-2. Dependencies also include
-  [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108) /
-  [#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109) /
   [#110](https://github.com/SLM-OS/SLM-Operating-System/issues/110)
-  (per-platform latency), [#116](https://github.com/SLM-OS/SLM-Operating-System/issues/116)
+  (x86-64 latency capture; Pi 5 + Jetson captured 2026-05-17 — closes
+  [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108) /
+  [#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109)),
+  [#116](https://github.com/SLM-OS/SLM-Operating-System/issues/116)
   (multi-CPU stress), and the sibling-repo quality harness
   ([slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2)).
+- ☐🎫 ML eviction policies miss the < 1 µs Cortex-A78 target —
+  [#961](https://github.com/SLM-OS/SLM-Operating-System/issues/961).
+  Hardware capture on pi-5-2 / jetson-nano-1 has xgboost at 4–22 µs,
+  mlp at 4–174 µs, cacheus at 9–197 µs (see §"Latency Benchmarks
+  (M9)" above). Levers: prune the 200-tree XGBoost ensemble and batch
+  the int8 MLP forward pass — both carried over from the sibling
+  project's Phase 5 work.
 - ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
   [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
   Replay xgb / mlp / cacheus / arc / lru through the simulator on

@@ -380,7 +380,7 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ CACHEUS adaptive selector with `ml_only` default pool constructor (M5)
 - ✅ `eviction` shell command for runtime introspection and policy switching (M7)
 - ✅ Eviction decisions trigger on pool exhaustion (M6 — replaces the old `OutOfMemory` failure when `AI_EVICTION=ON`)
-- ⏸️🎫 Inference latency < 1 µs on target hardware — bench framework is in place (M9), QEMU numbers are captured, Pi 5 / Jetson runs need hardware deploy — #108, #109
+- ☐🎫 Inference latency < 1 µs on target hardware — MISSED on real silicon (2026-05-17). Pi 5 / Jetson hardware captures landed via #108 / #109; xgboost / mlp / cacheus all exceed 1 µs (4–197 µs depending on platform + build config). Perf follow-up filed as #961 (tree-pruning + batch MLP). Classical policies all comfortably under 1 µs.
 - ✅ All tests pass with `AI_EVICTION=OFF` / `ON` / `MODELS=ON`.
 
 ### Demo
