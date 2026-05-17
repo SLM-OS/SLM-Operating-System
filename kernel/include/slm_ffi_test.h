@@ -47,6 +47,18 @@ int  slm_gpu_dispatch_breaker_test_count(void);
  * Jetson. */
 bool slm_gpu_sched_dispatch_test_within_window(uint64_t now, uint64_t last);
 
+/* Eviction-MLP dispatch rate-limit predicate (PR-6 / #965).
+ *
+ * Same shape and rationale as the sched variant above, but for the
+ * eviction path. Predicates are per-policy because a burst of one
+ * shouldn't suppress dispatches of the other (they have independent
+ * triggers: task_create for sched, alloc_weights eviction for the
+ * eviction MLP). Per-policy limits keep the worst-case combined
+ * IRQ-off load bounded at the sum, ~18% of one CPU, which is still
+ * comfortable under the timer / RX-stall watchdog deadlines that
+ * #651 originally tripped. */
+bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last);
+
 #ifdef __cplusplus
 }
 #endif
