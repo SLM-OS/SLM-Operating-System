@@ -557,32 +557,32 @@ amortizes and the MLP is marginal at small block sizes (see
   #981 item is the on-card config-blob shadow above (cacheus tracking
   classical until `eviction model clear cacheus_config`), not instability.
 
-**GPU dispatch status (as of 2026-05-17) — CPU-only today on every
-platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
-GA10B fastpath covers MNIST/model inference (`gpu use inference on`)
-and the AI scheduler MLP (`gpu use sched on`, hardware-verified on
-jetson-nano-2 since PR-3 of `docs/design/gpu-policy-models.md`,
-landed 2026-04-27) — the eviction MLP is NOT in that set. The
-eviction trait method `EvictionPolicy::has_gpu_backend()` defaults to
-`false` and no production policy overrides it; the matching dispatch
-function `slm_gpu_run_eviction_inference` is named in design notes
-but does not exist in tree. `gpu use eviction <on|off>` is a scaffold
-toggle that prints "scaffold only — no eviction policy declares a GPU
-backend yet" (see `kernel/src/gpu_consumer.c`). The originally-spec'd
-GA10B work is tracked by
-[#964](https://github.com/SLM-OS/SLM-Operating-System/issues/964)
-(PR-5: SASS shaders + Linux producer) and
-[#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965)
-(PR-6: SLM-OS dispatch + flip `has_gpu_backend=true`), both deferred
-because the eviction MLP has no compiled-in weight source (unlike
-`kernel/sched/ai/ai_weights_mlp.c` for the sched MLP). See
-`docs/design/gpu-policy-models.md` §"Sequencing" for the full
-roadmap. On Pi 5 there is no GPU-side path in any form: VideoCore is
-intentionally stubbed and the AI HAT+ (Hailo-8L) is wedged at
-boundary IN ch=2 by
-[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682)
-(closed not-planned — wedge documented but work deferred), plus
-there is no design pass for eviction-on-Hailo.
+**GPU dispatch status (as of 2026-05-17) — Jetson plumbing landed,
+end-to-end GPU bench delta blocked downstream; Pi 5 still CPU-only.**
+The numbers above are all host-CPU paths. PR-6 of
+[`docs/design/gpu-policy-models.md`](design/gpu-policy-models.md)
+wired `MlpPolicy` to dispatch the 9-op pipeline staged by
+`scripts/gpu-kernel-eviction-qnet.c` (PR-5) through the new
+`slm_gpu_run_eviction_inference` FFI; the trait method
+`EvictionPolicy::has_gpu_backend()` now returns `true` for
+`MlpPolicy`, and `gpu use eviction on` engages the GA10B path with
+a 50 ms per-candidate rate limiter and silent CPU fallback.
+Hardware verification on jetson-nano-1 (2026-05-17) confirms the
+kind=EVICTION_QNET handoff scan + channel inherit work end-to-end,
+but the compute dispatch itself faults inside the GR engine
+(`gr_intr=0x00080000` = `FECS_ERROR_PENDING`, `trapped_addr=0x80000000`)
+— the same fault class blocking W-series oplib dispatch through the
+rebuilt PDB after #969 (post-kexec channel-inherit infrastructure)
+landed. Resolution depends on the FECS `CTXSW_CHECKSUM_MISMATCH`
+(mb6=0x21) fix tracked under
+[#844](https://github.com/SLM-OS/SLM-Operating-System/issues/844);
+once that lands, wiring the eviction `ensure_bringup` through
+`ga10b_gmmu_rebuild_for_handoff` is a small follow-up that
+should produce a real GPU bench delta. On Pi 5 there is no
+GPU-side path in any form: VideoCore is intentionally stubbed and
+the AI HAT+ (Hailo-8L) is wedged at boundary IN ch=2 by
+[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682),
+plus there is no design pass for eviction-on-Hailo.
 
 ### Memory Overhead (M9)
 

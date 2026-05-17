@@ -1145,6 +1145,21 @@ int slm_gpu_available(void);
 int slm_gpu_inference_enabled(void);
 
 /*
+ * Per-consumer GPU eviction toggle (PR-6 of gpu-policy-models.md).
+ *
+ * Returns 1 iff the operator has flipped `gpu use eviction on` AND
+ * the eviction subsystem is compiled in. Read by the Rust runtime's
+ * `runtime/src/mm/eviction/mlp.rs::eviction_gpu_eligible` to decide
+ * whether to attempt GPU dispatch in the `select_victim` hot path.
+ *
+ * The sched-MLP side checks the analogous `gpu_consumer_enabled
+ * (GPU_CONSUMER_SCHED)` inline in C (`ai_inference.c::forward_logits`);
+ * eviction needs this Rust-callable wrapper because the eviction
+ * MLP's hot path lives entirely in Rust.
+ */
+int slm_gpu_consumer_eviction_enabled(void);
+
+/*
  * Per-model GPU dispatch toggle.
  *
  * Layered on top of the master `gpu use inference` flag: the Rust
@@ -1298,6 +1313,40 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 int slm_gpu_run_sched_inference(const void *state_bytes,
                                  size_t state_bytes_len,
                                  void *logits_bytes_out);
+
+/*
+ * Eviction-MLP dispatch — PR-6 of docs/design/gpu-policy-models.md.
+ *
+ * Runs the page-eviction MLP forward pass on GA10B by dispatching
+ * the 9-op pipeline staged by `scripts/gpu-kernel-eviction-qnet.c`
+ * (handoff tagged `pipeline_kind == GA10B_PIPELINE_KIND_EVICTION_QNET`,
+ * so it can coexist in DRAM with MNIST and sched-MLP handoffs from
+ * the same kexec generation). One-shot semantic: caller passes the
+ * 27-element fp32 feature vector in `features_bytes` (length
+ * `features_bytes_len`, typically 108 = 27 × 4), the engine writes
+ * the input into the v6 handoff's input buffer, fires the pipeline,
+ * and fills `score_out` with 4 bytes (a single fp32 in [0, 1] — the
+ * sigmoid output of the final layer). Caller ranks candidates by
+ * this score.
+ *
+ * Returns 0 on success, negative rc on failure:
+ *   -1  bad pointer, no v6 handoff present, rate-limited
+ *       (`gpu use eviction on` accepted but no producer ran),
+ *       or try-lock contended by another GPU dispatch
+ *   -2  features_bytes_len exceeds the v6 handoff's input buffer cap
+ *   -3  internal set_input error (kind mismatch in handoff)
+ * On non-Jetson platforms returns -1.
+ *
+ * Admission control matches the sched path: a 50 ms system-wide
+ * rate limit on successful eviction dispatches plus a try-lock so a
+ * burst of `select_victim` calls from concurrent allocators on
+ * different CPUs fan out cleanly into CPU fallbacks rather than
+ * pile up IRQ-off behind the dispatch lock. Failures (including
+ * rate-limit rejection) are silent for the caller — they fall back
+ * to CPU `mlp_predict` in `runtime/src/mm/eviction/mlp.rs`. */
+int slm_gpu_run_eviction_inference(const void *features_bytes,
+                                    size_t features_bytes_len,
+                                    void *score_out);
 
 /*
  * GPU dispatch circuit breaker (#552 mitigation).

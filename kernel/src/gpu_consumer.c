@@ -166,18 +166,33 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
          * `eviction_active_policy_has_gpu_backend()` (which scans
          * both pools' installed policies). When no policy declares
          * a GPU backend, accept-with-warning so operators can still
-         * record intent ahead of the PR-6 dispatch landing. The
-         * shipped policies (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) all
-         * return false from `EvictionPolicy::has_gpu_backend()`
-         * today; this branch will start accepting cleanly the first
-         * time a policy flips that to true. */
+         * record intent. PR-6 (#965) shipped `MlpPolicy` with
+         * `has_gpu_backend = true`, so installing the MLP policy
+         * lets this branch fall through to the perf-note path
+         * instead of the scaffold warning. Classical policies
+         * (LRU/LFU/ARC/SLM/XGBoost/CACHEUS) still return false and
+         * keep the scaffold warning. */
         if (!eviction_active_policy_has_gpu_backend()) {
             if (out_reason) {
-                *out_reason = "scaffold only — no eviction policy "
-                              "declares a GPU backend yet";
+                *out_reason = "scaffold only — active eviction policy "
+                              "has no GPU backend (install mlp to "
+                              "engage GPU dispatch)";
             }
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
+        } else if (out_reason) {
+            /* PR-6 of gpu-policy-models.md: when MlpPolicy (or any
+             * other GPU-backed eviction policy) is active, the next
+             * `select_victim` will try `slm_gpu_run_eviction_inference`
+             * before falling back to CPU. Single-call dispatch is
+             * ~1–2 ms steady-state (smaller than sched-MLP's ~5 ms);
+             * CPU mlp_predict is sub-µs on classical paths but ~129 µs
+             * with `EVICTION_MODELS=ON` real weights. Surface this as
+             * a "note:" line so the latency cliff isn't a surprise on
+             * the first eviction storm after the toggle flips. */
+            *out_reason = "perf note — eviction MLP now dispatches each "
+                          "select_victim via GPU (~1–2 ms); fallback to "
+                          "CPU on dispatch error or kexec without producer";
         }
         break;
 
