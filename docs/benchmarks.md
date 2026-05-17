@@ -482,12 +482,14 @@ not re-run on Jetson for that reason.
 
 #### Eviction equivalence verification (`bench xgb-equiv-evict`)
 
-**Skeleton — consumer side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932).** The verb is wired but not yet
-hardware-verified; final shape will depend on
-[#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448)'s
-runtime-blob envelope rework. See `kernel/src/shell_sys.c`'s
-`bench_xgb_equiv_evict` and `runtime/src/lib.rs`'s
-`rust_eviction_xgb_predict_compare` for the in-tree implementations.
+Consumer side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932),
+bundled into [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+See `kernel/src/shell_sys.c`'s `bench_xgb_equiv_evict` for the verb,
+`runtime/src/lib.rs`'s `rust_eviction_xgb_predict_compare` for the FFI,
+and the `xgb_equiv_evict_*` checks in `rust_eviction_run_tests` for
+a host-side mini-corpus regression that exercises the same FFI path
+against a Rust-built toy model — this catches plumbing regressions
+in `make test` without needing the producer-side `.smb` on hardware.
 
 The eviction-side analog of the scheduler verb above. The
 `slm-os-page-eviction` exporter emits two corpus files alongside
@@ -519,28 +521,23 @@ bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expecte
   in C code. First-mismatch diagnostics print hex patterns; decode with
   `python3 -c 'import struct;print(struct.unpack("<f", bytes.fromhex("HEX"))[0])'`.
 
-**Hardware verification (deferred):** gated on the consumer-side
-work bundling with #448; corresponding pi-5-2 run will populate the
-result row below the moment the new envelope lands.
+**Hardware verification (pending):** consumer-side wiring (FFI,
+shell verb, `eviction blob load/activate`, and host-side mini-corpus
+regression in `rust_run_tests`) is complete; this section will be
+updated with the pi-5-2 result the moment the deploy + replay run
+lands.
 
 | Metric | Value |
 |--------|-------|
-| Match rate | *(deferred — pending #448)* |
-| Per-decision latency | *(deferred)* |
-| First mismatch | *(deferred — expected: none)* |
+| Match rate | *pending pi-5-2 deploy + replay* |
+| Per-decision latency | *pending* |
+| First mismatch | *pending — expected: none (Python's `booster.predict()` ↔ on-device sigmoid agree within `1e-4` per the producer-side parity tests on `slm-os-page-eviction` PR #3)* |
 
 The `slm-os-page-eviction` PR #3 (merged 2026-05-17) emits the
 `evict.smb` blob and verification corpus in the format this verb
 consumes. The producer side is the canonical source of `.smb` blobs
 for any future "graduate this model into the baked path" workflow
 [(#952)](https://github.com/SLM-OS/SLM-Operating-System/issues/952).
-
-**When to use heuristic scheduling:**
-- Latency-sensitive cooperative workloads
-- Systems with frequent task creation/destruction
-- Benchmarking and debugging (deterministic behavior)
-
-The latency includes: FP context save, state vector extraction (108 floats from kernel data), 4-layer forward pass (NEON-optimized matvec), action decode and validation, FP context restore. Measured via `test_ai_inference_latency` (100 iterations, average reported by the test).
 
 ---
 

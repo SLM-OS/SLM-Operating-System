@@ -3594,6 +3594,117 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
         }
 
+        // Eviction equivalence FFI mini-corpus (#932 / #448 consumer bundle).
+        //
+        // Exercises the exact same active-blob -> FFI -> predict path
+        // the shell verb `bench xgb-equiv-evict` walks on hardware, but
+        // against a Rust-built tiny model so the test runs in QEMU
+        // without producer-side fixtures. The producer corpus
+        // (slm-os-page-eviction PR #3's `test_vectors_xgb_evict.bin`
+        // + `expected_evict.bin`) covers Python equivalence; this
+        // covers FFI plumbing (feature-slice marshaling, blob registry
+        // lookup, sigmoid bit-pattern roundtrip, tolerance comparator)
+        // so a regression there fails in `make test` instead of waiting
+        // for a pi-5-2 deploy.
+        {
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+            // 1-tree, 3-node split on feature[0] @ 0.5; leaves
+            // -1.5 / +1.5 -> sigmoid ~ 0.182 / 0.818, well clear of
+            // the 0.5 decision boundary.
+            let payload =
+                mm::eviction::runtime_xgboost::build_test_payload_first_feature_split(
+                    0.5, -1.5, 1.5);
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::XGBoost, &payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"xgb_equiv_evict_mini_corpus_blob_parses\0",
+                   parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                let staged = mm::eviction::stage_parsed(parsed).is_ok();
+                check!(b"xgb_equiv_evict_mini_corpus_blob_stages\0",
+                       staged);
+                let activated = mm::eviction::activate_blob(
+                    mm::eviction::BlobKind::XGBoost).is_ok();
+                check!(b"xgb_equiv_evict_mini_corpus_blob_activates\0",
+                       activated);
+
+                if staged && activated {
+                    // 4 vectors straddling the split threshold.
+                    let mut vectors: [[f32; 27]; 4] = [[0.0; 27]; 4];
+                    vectors[0][0] = 0.0;
+                    vectors[1][0] = 0.4;
+                    vectors[2][0] = 0.6;
+                    vectors[3][0] = 1.0;
+                    // Engine-vs-FFI path is f32-deterministic, so 1e-6
+                    // tolerance catches real divergence while
+                    // tolerating any theoretical 1-ULP rounding from a
+                    // future compiler/libm change.
+                    let tol_bits: u32 = (1.0e-6_f32).to_bits();
+
+                    let model = mm::eviction::runtime_xgboost::parse_payload(
+                        &payload);
+                    let mut compare_all_pass = true;
+                    let mut predict_all_pass = true;
+                    if let Ok(model) = model {
+                        for vec in vectors.iter() {
+                            let expected = model.predict(vec);
+                            let exp_bits = expected.to_bits();
+
+                            // Compare-FFI: tolerance path.
+                            let mut got_bits: u32 = 0;
+                            let cmp_rc = unsafe {
+                                rust_eviction_xgb_predict_compare(
+                                    vec.as_ptr(),
+                                    27,
+                                    exp_bits,
+                                    tol_bits,
+                                    &mut got_bits as *mut u32,
+                                )
+                            };
+                            if cmp_rc != 0 {
+                                compare_all_pass = false;
+                            }
+
+                            // Predict-FFI: bit-exact path.
+                            let mut score: f32 = f32::NAN;
+                            let pred_rc = unsafe {
+                                rust_eviction_xgb_predict(
+                                    vec.as_ptr(),
+                                    27,
+                                    &mut score as *mut f32,
+                                )
+                            };
+                            if pred_rc != 0
+                                || score.to_bits() != exp_bits
+                            {
+                                predict_all_pass = false;
+                            }
+                        }
+                    } else {
+                        compare_all_pass = false;
+                        predict_all_pass = false;
+                    }
+                    check!(b"xgb_equiv_evict_ffi_compare_within_tolerance\0",
+                           compare_all_pass);
+                    check!(b"xgb_equiv_evict_ffi_predict_bit_exact\0",
+                           predict_all_pass);
+
+                    // Bad-arg surface: wrong length -> -1, no UB.
+                    let mut score: f32 = 0.0;
+                    let bad_len_rc = unsafe {
+                        rust_eviction_xgb_predict(
+                            vectors[0].as_ptr(),
+                            26,
+                            &mut score as *mut f32,
+                        )
+                    };
+                    check!(b"xgb_equiv_evict_ffi_rejects_wrong_feature_count\0",
+                           bad_len_rc == -1);
+                }
+            }
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+        }
+
         // MlpPolicy: same smoke tests.
         {
             let mut p = MlpPolicy::new();
