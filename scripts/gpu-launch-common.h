@@ -244,7 +244,7 @@ struct gpu_launch_ctx {
      * handoffs unchanged. When non-zero, the SLM-OS dispatch path
      * authors fresh QMDs into this region per-launch instead of
      * replaying the helper-baked QMDs. See
-     * docs/gpu-qmd-per-dispatch-plan.md.
+     * docs/archive/plans/gpu-qmd-per-dispatch-plan.md.
      *
      * The pool is N × 256 B; SLM-OS rotates through slots
      * round-robin so consecutive launches use distinct GPU VAs. */

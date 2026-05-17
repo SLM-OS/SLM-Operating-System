@@ -18,7 +18,7 @@ and the next power cycle falls back to `config.txt`. SLM-OS arms the
 flag from the shell via `kernel activate`, which issues the BCM
 mailbox `SET_REBOOT_FLAGS` (tag `0x00038064`) + `NOTIFY_REBOOT` (tag
 `0x00030048`) pair and then `psci_system_reset`. See
-[`../../docs/dynamic-kernel-replace-plan.md`](../../docs/dynamic-kernel-replace-plan.md)
+[`../../docs/archive/plans/dynamic-kernel-replace-plan.md`](../../docs/archive/plans/dynamic-kernel-replace-plan.md)
 for the full Stage-5 round-trip and verification log.
 
 `[tryboot]` is **not** a config.txt filter section on Pi 5; the
