@@ -6,9 +6,12 @@ Phase AI-Eviction lands the trait, the classical policies (LRU, LFU,
 ARC, SLM-Heuristic), the trained XGBoost and int8 MLP predictors, and
 the CACHEUS adaptive ensemble.
 
-Source of truth: `docs/TODO - PHASE AI-Eviction.md`. This document
-covers build flags, the ML import flow, and the runtime layout of the
-eviction subsystem.
+This document covers build flags, the ML import flow, and the runtime
+layout of the eviction subsystem. The live tracker for open work is
+the [Open Issues](#open-issues) section below; the original
+Phase AI-Eviction TODO has been archived under
+`docs/archive/todos/TODO - PHASE AI-Eviction.md` and is no longer
+maintained.
 
 ---
 
@@ -544,6 +547,42 @@ the three Python-parity smoke cases are models-only):
 
 All suites pass under `make test` on the three supported configs:
 `DISABLE_EVICTION=ON`, default build, and `EVICTION_MODELS=ON`.
+
+---
+
+## Open Issues
+
+- ☐🎫 XGBoost eviction on-device vs. trainer numerical equivalence —
+  [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932).
+  Adds `bench xgb-equiv-evict` against the producer-side corpus
+  (`evict.smb` + `test_vectors_xgb_evict.bin` + `expected_evict.bin`)
+  landed in `slm-os-page-eviction` PR #3. Consumer side bundled with
+  [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+- ☐🔗🎫 Generalize runtime policy blob formats —
+  [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+  Reshapes the eviction-blob envelope (magic/version negotiation,
+  feature-schema versioning, reserved-field forward-compat, structured
+  reject path). Now absorbs the #932 consumer side: FFI
+  `rust_eviction_xgb_predict`, `bench xgb-equiv-evict` shell verb,
+  `eviction blob load/activate xgboost`, kernel-side mini-corpus
+  regression, and `docs/benchmarks.md` entry. The envelope rework is
+  done only when the bundled #932 hardware verification on pi-5-2
+  passes.
+- ⏸️🔗🎫 Promote XGBoost from opt-in to default eviction policy —
+  [#953](https://github.com/SLM-OS/SLM-Operating-System/issues/953).
+  Decision-gate ticket. Held (`blocked` label) until #932 closes with
+  passing equivalence on pi-5-2. Dependencies also include
+  [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108) /
+  [#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109) /
+  [#110](https://github.com/SLM-OS/SLM-Operating-System/issues/110)
+  (per-platform latency), [#116](https://github.com/SLM-OS/SLM-Operating-System/issues/116)
+  (multi-CPU stress), and the sibling-repo quality harness
+  ([slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2)).
+- ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
+  [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
+  Replay xgb / mlp / cacheus / arc / lru through the simulator on
+  held-out trajectories; report hit-rate, eviction count, tail-latency
+  proxy; CI knob for hit-rate regression. Feeds #953's decision memo.
 
 ---
 
