@@ -482,8 +482,7 @@ not re-run on Jetson for that reason.
 
 #### Eviction equivalence verification (`bench xgb-equiv-evict`)
 
-Consumer side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932),
-bundled into [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+Closes [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932).
 See `kernel/src/shell_sys.c`'s `bench_xgb_equiv_evict` for the verb,
 `runtime/src/lib.rs`'s `rust_eviction_xgb_predict_compare` for the FFI,
 and the `xgb_equiv_evict_*` checks in `rust_eviction_run_tests` for
@@ -525,11 +524,23 @@ bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expecte
 
 | Metric | Value |
 |--------|-------|
-| Match rate | **100 / 100** |
-| Per-decision latency | **1,429,641 ns (~1.43 ms)** |
+| Match rate | **1000 / 1000** (tol = 1e-4) |
+| Per-decision latency | **1,407,823 ns (~1.41 ms)** |
 | First mismatch | none |
 
-Closes the on-device side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932). The result was captured by exporting an `evict.smb` + 100-vector corpus from `slm-os-page-eviction` (XGBoost model carried from `slm-os-page-sim/data/models/xgb_model.json`), staging both onto pi-5-2 via `labctl sdwire update`, activating the runtime blob via `eviction model load/activate xgboost`, and replaying with `bench xgb-equiv-evict`. The ~1.43 ms/inference is the full 200-tree softmax-sigmoid walk in pure software (no NEON path yet); the scheduler verb's ~240 µs comparison is for the much smaller cascade. Latency-side improvement work is tracked separately under [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108).
+Captured by exporting an `evict.smb` + 1000-vector corpus from
+`slm-os-page-eviction` (XGBoost model carried from
+`slm-os-page-sim/data/models/xgb_model.json`), staging both onto
+pi-5-2 via `labctl sdwire update`, activating the runtime blob via
+`eviction model load/activate xgboost`, and replaying with
+`bench xgb-equiv-evict`. A prior 100-vector run during #955's
+landing produced 100/100 at 1.43 ms; this 10× larger corpus run
+is the closing artifact for #932. The ~1.41 ms/inference is the
+full 200-tree softmax-sigmoid walk in pure software (no NEON path
+yet) plus a blob re-parse on every FFI call (parsed model is
+not cached in the registry); latency-side improvement work is
+tracked separately under
+[#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108).
 
 The `slm-os-page-eviction` PR #3 (merged 2026-05-17) emits the
 `evict.smb` blob and verification corpus in the format this verb

@@ -1408,12 +1408,6 @@ cleanup:
  *   0 — all N entries within tolerance
  *   1 — at least one mismatch (first-mismatch index + delta printed)
  *   anything else — read / size / staging precondition failure
- *
- * TODO(#448 handoff): the no-active-blob precondition check below uses
- * a per-call `predict` retry that returns -3 when nothing is staged.
- * Once #448 introduces the structured BlobError reject path described
- * in its scope, swap to that for an attributable "stage xgboost first"
- * message instead of the current generic "no active blob" string.
  */
 #define BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT 27u
 #define BENCH_XGB_EQUIV_EVICT_BYTES_PER_F32 4u

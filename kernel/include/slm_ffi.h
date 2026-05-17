@@ -459,11 +459,6 @@ extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t bu
  * SAFETY contract and the negative return-code meanings.
  *
  * Consumed by `bench xgb-equiv-evict` in shell_sys.c (#932).
- *
- * TODO(#448 handoff): the body of this FFI sits on top of the current
- * eviction blob/policy registry surface. Signature should stay stable
- * across the #448 envelope rework; only the Rust-side internals need
- * updating.
  */
 extern int32_t rust_eviction_xgb_predict(const float *features,
                                           size_t len,

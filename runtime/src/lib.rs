@@ -2167,12 +2167,6 @@ pub extern "C" fn rust_eviction_feature_count() -> u32 {
 /// Python-generated expected corpus within a small tolerance (sigmoid
 /// f32 round-trip; ~1e-4 is conservative).
 ///
-/// TODO(#448 handoff): once #448's envelope/policy interface lands, the
-/// "fetch active blob + parse + predict" body below likely collapses to a
-/// single registry call (e.g. `with_active_policy(BlobKind::XGBoost, ...)`).
-/// The FFI signature itself is independent of envelope shape and should
-/// stay stable — only the internals need rework.
-///
 /// SAFETY (caller contract): `features` must point to `len`
 /// contiguous `f32`s, 4-byte aligned (every `float features[N]` on the
 /// C side satisfies this naturally). `out_score` must be non-null and
@@ -2254,10 +2248,6 @@ pub unsafe extern "C" fn rust_eviction_xgb_predict(
 /// `rust_sched_xgb_predict` integer-label compare; eviction prediction
 /// is a continuous sigmoid score so the threshold-versus-tolerance
 /// shape differs.
-///
-/// TODO(#448 handoff): the body shares the per-call parse pattern with
-/// `rust_eviction_xgb_predict`. When that path collapses (or grows a
-/// shared parsed-model cache), this should reuse the same helper.
 ///
 /// SAFETY (caller contract): same as `rust_eviction_xgb_predict` plus
 /// `out_got_bits` must be non-null and writable.
