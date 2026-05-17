@@ -2309,6 +2309,77 @@ pub unsafe extern "C" fn rust_eviction_xgb_predict_compare(
     }
 }
 
+/// Baked-path counterpart of `rust_eviction_xgb_predict_compare`
+/// (#952 Phase 3 — post-graduation on-device equivalence check).
+///
+/// Calls `mm::eviction::generated::xgb_predict` — the if-else chain
+/// imported from page-sim via `scripts/import_eviction_weights.sh` —
+/// instead of going through the active runtime blob. Used by `bench
+/// xgb-equiv-evict --baked` to verify the compiled baked code
+/// preserves the trained model's predictions on real hardware,
+/// catching toolchain / FP-codegen drift that Python-only
+/// cross-checks can't see (gotcha #5 in the graduation doc).
+///
+/// Return codes mirror the blob variant:
+///   0  — within tolerance
+///   1  — mismatch (got bits written to `out_got_bits` for diag)
+///  -1  — bad arg (null pointer, wrong len)
+///  -2  — `ai_eviction` feature off
+///  -5  — `ai_eviction_models` off (baked model not linked in;
+///        only the 0.5-returning stub is present, so an equivalence
+///        check would be meaningless — see `xgb_stub.rs`)
+///
+/// SAFETY (caller contract): same as `rust_eviction_xgb_predict`
+/// plus `out_got_bits` must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_xgb_predict_baked_compare(
+    features: *const f32,
+    len: usize,
+    expected_bits: u32,
+    tolerance_bits: u32,
+    out_got_bits: *mut u32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (features, len, expected_bits, tolerance_bits, out_got_bits);
+        -2
+    }
+    #[cfg(all(feature = "ai_eviction", not(feature = "ai_eviction_models")))]
+    {
+        let _ = (features, len, expected_bits, tolerance_bits, out_got_bits);
+        -5
+    }
+    #[cfg(all(feature = "ai_eviction", feature = "ai_eviction_models"))]
+    {
+        if features.is_null() || out_got_bits.is_null() {
+            return -1;
+        }
+        if len != 27 {
+            return -1;
+        }
+        let slice: &[f32] = core::slice::from_raw_parts(features, 27);
+        let block: mm::eviction::BlockFeatures = match slice.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return -1,
+        };
+        let score = mm::eviction::generated::xgb_predict(&block);
+        *out_got_bits = score.to_bits();
+
+        let expected = f32::from_bits(expected_bits);
+        let tolerance = f32::from_bits(tolerance_bits);
+        let delta = if score >= expected {
+            score - expected
+        } else {
+            expected - score
+        };
+        if delta.is_nan() || delta > tolerance {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 /// Copy the name of feature `index` into `buf` (NUL-terminated).
 /// Returns bytes written (excl NUL), or 0 if index is out of range
 /// or ai_eviction is off.

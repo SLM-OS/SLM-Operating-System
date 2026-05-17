@@ -59,6 +59,18 @@ pub const AI_HORIZON_NS: u64 = 1_000_000_000;
 /// Used by `eviction features` shell command for runtime introspection
 /// (#112). Names are listed in index order so `FEATURE_NAMES[i]`
 /// documents what `BlockFeatures[i]` represents.
+// Names mirror page-sim's `FeatureConfig.feature_names` exactly — the
+// generated `xgb_policy_generated.rs` const-asserts this array against
+// its `GENERATED_FEATURE_NAMES` (see #952 Phase 2 and
+// `docs/eviction-xgboost-graduation.md` §Feature schema invariants).
+// Six labels were renamed 2026-05-17 to reconcile pre-existing drift:
+//   gpu_mapped               -> is_gpu_mapped
+//   layer_position           -> layer_idx_norm
+//   predicted_reuse_distance -> predicted_reuse_dist
+//   weight_pool_utilization  -> weight_pool_util
+//   workspace_pool_utilization -> workspace_pool_util
+//   total_gpu_mapped_ratio   -> total_gpu_mapped
+// The renames are label-only; indices and meaning are unchanged.
 pub const FEATURE_NAMES: [&str; 27] = [
     // Per-block features (0..14)
     "recency_rank",
@@ -67,20 +79,20 @@ pub const FEATURE_NAMES: [&str; 27] = [
     "time_since_access",
     "time_since_load",
     "ref_count",
-    "gpu_mapped",
+    "is_gpu_mapped",
     "pool_type",
     "is_dirty",
-    "layer_position",
+    "layer_idx_norm",
     "model_priority",
     "model_active_inferences",
     "access_pattern",
-    "predicted_reuse_distance",
+    "predicted_reuse_dist",
     "eviction_cost",
     // Global features (15..26)
-    "weight_pool_utilization",
-    "workspace_pool_utilization",
+    "weight_pool_util",
+    "workspace_pool_util",
     "num_loaded_models",
-    "total_gpu_mapped_ratio",
+    "total_gpu_mapped",
     "pending_loads",
     "avg_model_priority",
     "max_deadline_pressure",
