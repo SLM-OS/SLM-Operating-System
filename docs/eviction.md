@@ -6,9 +6,12 @@ Phase AI-Eviction lands the trait, the classical policies (LRU, LFU,
 ARC, SLM-Heuristic), the trained XGBoost and int8 MLP predictors, and
 the CACHEUS adaptive ensemble.
 
-Source of truth: `docs/TODO - PHASE AI-Eviction.md`. This document
-covers build flags, the ML import flow, and the runtime layout of the
-eviction subsystem.
+This document covers build flags, the ML import flow, and the runtime
+layout of the eviction subsystem. The live tracker for open work is
+the [Open Issues](#open-issues) section below; the original
+Phase AI-Eviction TODO has been archived under
+`docs/archive/todos/TODO - PHASE AI-Eviction.md` and is no longer
+maintained.
 
 ---
 
@@ -562,13 +565,13 @@ All suites pass under `make test` on the three supported configs:
   reject path). Now absorbs the #932 consumer side: FFI
   `rust_eviction_xgb_predict`, `bench xgb-equiv-evict` shell verb,
   `eviction blob load/activate xgboost`, kernel-side mini-corpus
-  regression, and `docs/benchmarks.md` entry. Preferred ordering:
-  land #932's hardware verification (via this bundle) before declaring
-  the envelope rework done.
+  regression, and `docs/benchmarks.md` entry. The envelope rework is
+  done only when the bundled #932 hardware verification on pi-5-2
+  passes.
 - ⏸️🔗🎫 Promote XGBoost from opt-in to default eviction policy —
   [#953](https://github.com/SLM-OS/SLM-Operating-System/issues/953).
-  Decision-gate ticket. Hard-held (`blocked` label) until #932 closes
-  with passing equivalence on pi-5-2. Dependencies also include
+  Decision-gate ticket. Held (`blocked` label) until #932 closes with
+  passing equivalence on pi-5-2. Dependencies also include
   [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108) /
   [#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109) /
   [#110](https://github.com/SLM-OS/SLM-Operating-System/issues/110)
