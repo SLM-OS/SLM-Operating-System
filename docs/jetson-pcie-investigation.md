@@ -53,7 +53,7 @@ behind Tegra PCIe root complex C8 (`pcie@140a0000`), with the
 bridge at bus 0 dev 0 and the endpoint at bus 1 dev 0.
 
 This supersedes an earlier revision of
-`docs/networking-expansion-plan.md`, which targeted an EQOS+RTL8211F
+`docs/archive/plans/networking-expansion-plan.md`, which targeted an EQOS+RTL8211F
 MDI path. That target is accurate for some Jetson Orin Nano Dev Kit
 variants but not for the Super Dev Kit in the lab.
 

@@ -56,7 +56,7 @@ that run on every `make test`:
 ## See also
 
 - `docs/ipc.md` (narrative)
-- `docs/m7-message-router.md` (design doc)
 - `docs/component-development.md` §"Message router hookup"
+- `docs/archive/plans/m7-message-router.md` (original Phase-5 implementation log)
 
 *Last updated: 15 May 2026 (#67 concurrency-test audit)*

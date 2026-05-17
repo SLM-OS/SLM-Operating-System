@@ -2,7 +2,7 @@
 
 EL0/EL1 privilege separation for isolating user-mode components from the kernel.
 
-**Status:** Core syscall dispatch and fault handling implemented. EL0 execution blocked on VMM_FLAG_USER investigation.
+**Status:** Live. Syscall dispatch, fault handling, and EL0 execution are all shipped on ARM64. The VMM_FLAG_USER work that originally blocked EL0 execution closed via the per-task L1 + TTBR0 swap ladder tracked in `docs/archive/plans/pi5-el0-execution-plan.md`. Built-in EL0 component example: `kernel/src/user_hello.c` linked into the kernel via `kernel/src/user_hello_embed.S` and launched through `task_create_user_elf`.
 
 ---
 

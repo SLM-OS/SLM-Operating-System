@@ -156,7 +156,7 @@ the discipline this checklist exists to maintain.
 - [ ] `docs/networking.md` — Platform Support table: change the row
       from "Not implemented" to "Implemented" with the driver file
       reference
-- [ ] `docs/networking-expansion-plan.md` — mark the corresponding
+- [ ] `docs/archive/plans/networking-expansion-plan.md` — mark the corresponding
       Phase as LANDED with the merge commit reference
 - [ ] `docs/architecture.md` — add a row under the Networking Subsystem
       table

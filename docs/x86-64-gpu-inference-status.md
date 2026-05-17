@@ -3,7 +3,7 @@
 **Last updated:** 2026-04-18
 **Owner role:** open
 **Companion docs:**
-- `docs/x86-64-capstone-gaps.md` — top-level capstone gap map (this handoff is the live detail for its §3).
+- `docs/archive/snapshots/x86-64-capstone-gaps.md` — top-level capstone gap map (this handoff is the live detail for its §3).
 - `docs/archive/plans/x86-64-capstone-gap-closure-plan.md` — original Phase E plan (archived).
 - `docs/archive/handoff/x86-64-fwsec-frts-handoff.md` — session-by-session hardware diary that produced the current state (archived; superseded by this doc).
 - `docs/archive/handoff/x86-64-port.md` — architectural reference for the x86-64 port (archived).
@@ -1190,6 +1190,6 @@ In rough priority order:
 ---
 
 *Maintainer note: this document is the live handoff. If it and the
-top-level `docs/x86-64-capstone-gaps.md` disagree, this one wins for
+top-level `docs/archive/snapshots/x86-64-capstone-gaps.md` disagree, this one wins for
 anything GPU-inference-related. File cross-referencing updates to the
 gaps doc.*

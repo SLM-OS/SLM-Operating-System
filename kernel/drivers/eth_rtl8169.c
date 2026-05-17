@@ -16,7 +16,7 @@
  * Stage 5:        lwIP hookup + DHCP.
  * Stage 6:        live regression tests + cache coherence probes.
  *
- * See docs/networking-expansion-plan.md §4 and GitHub issue #25.
+ * See docs/archive/plans/networking-expansion-plan.md §4 and GitHub issue #25.
  */
 
 #include "platform.h"
