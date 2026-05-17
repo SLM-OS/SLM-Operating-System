@@ -349,11 +349,12 @@ Tree-pruning the XGBoost ensemble and batching the MLP forward pass
 are the two known speed-up levers carried over from the sibling
 project; tracked as a perf follow-up against the M9 deliverable.
 
-**GPU dispatch status — CPU-only today on every platform.** The
-numbers above are all host-CPU paths. SLM-OS's Jetson GA10B fastpath
-covers MNIST/model inference (`gpu use inference on`) and the AI
-scheduler MLP (`gpu use sched on`, hardware-verified on jetson-nano-2
-since PR-3 in 2026-04-27) — the eviction MLP is NOT in that set. The
+**GPU dispatch status (as of 2026-05-17) — CPU-only today on every
+platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
+GA10B fastpath covers MNIST/model inference (`gpu use inference on`)
+and the AI scheduler MLP (`gpu use sched on`, hardware-verified on
+jetson-nano-2 since PR-3 of `docs/design/gpu-policy-models.md`,
+landed 2026-04-27) — the eviction MLP is NOT in that set. The
 eviction trait method `EvictionPolicy::has_gpu_backend()` defaults to
 `false` and no production policy overrides it; the matching dispatch
 function `slm_gpu_run_eviction_inference` is named in design notes
@@ -366,13 +367,14 @@ GA10B work is tracked by
 [#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965)
 (PR-6: SLM-OS dispatch + flip `has_gpu_backend=true`), both deferred
 because the eviction MLP has no compiled-in weight source (unlike
-`kernel/sched/ai/ai_weights_mlp_real.c` for the sched MLP). See
+`kernel/sched/ai/ai_weights_mlp.c` for the sched MLP). See
 `docs/design/gpu-policy-models.md` §"Sequencing" for the full
 roadmap. On Pi 5 there is no GPU-side path in any form: VideoCore is
 intentionally stubbed and the AI HAT+ (Hailo-8L) is wedged at
 boundary IN ch=2 by
-[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682),
-plus there is no design pass for eviction-on-Hailo.
+[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682)
+(closed not-planned — wedge documented but work deferred), plus
+there is no design pass for eviction-on-Hailo.
 
 ### Memory Overhead (M9)
 
