@@ -18,6 +18,11 @@
 #include "../include/slm_ffi.h"
 #include "../include/string.h"
 #include "../include/uart.h"
+#include "../include/task.h"
+#include "../include/sched.h"
+#include "../include/smp.h"
+#include "../include/cache.h"
+#include "../include/timer.h"
 #include "test_blob_helpers.h"
 #include <stdint.h>
 
@@ -1223,6 +1228,291 @@ static void test_bench_all_policies(void)
 }
 
 /* ============================================================================
+ * M-SMP: Multi-CPU concurrent alloc/eviction stress test (#116)
+ *
+ * Validates the M6 lock-ordering claim — that the allocator's LOCK
+ * and the eviction registry's REGISTRY_LOCK are never held
+ * simultaneously — by hammering both from different CPUs at once.
+ * Until now this was true by inspection only; nothing in the test
+ * suite exercised it under SMP contention.
+ *
+ * Setup: one worker task per CPU (capped at EV_SMP_MAX_WORKERS),
+ * each pinned to its CPU, looping `alloc_weights -> set_metadata
+ * -> touch -> free` for EV_SMP_ROUNDS rounds. One swapper task on
+ * CPU 0 cycles `rust_eviction_policy_set` through every registered
+ * policy in the background.
+ *
+ * Pass criteria:
+ *   - All workers complete their round budget (no deadlock).
+ *   - `allocated_blocks` returns to 0 (no leaks).
+ *   - No panics (implicit — the test would never finish).
+ *   - Bonus: `evictions_total` advanced (some allocs actually hit
+ *     the eviction slow path). Reported but not asserted — at low
+ *     contention the pool may not fill.
+ *
+ * Skips cleanly when ai_eviction is OFF or cpu_count < 2.
+ * ============================================================================ */
+
+#define EV_SMP_ROUNDS         32u
+#define EV_SMP_MAX_WORKERS    6u   /* Matches Jetson's cpu_count */
+#define EV_SMP_PREFILL_LEAVE  0u   /* Pre-allocate the workspace pool
+                                    * to exhaustion before spawning
+                                    * workers. Every worker alloc
+                                    * then trips the alloc-when-full
+                                    * eviction slow path — the
+                                    * specific code path #116 is
+                                    * here to exercise. Independent
+                                    * of cross-CPU scheduling timing
+                                    * (an earlier prefill_leave=4
+                                    * design saw zero evictions in
+                                    * QEMU: workers freed their just-
+                                    * alloc'd blocks before any other
+                                    * worker hit the boundary). */
+#define EV_SMP_PREFILL_MAX    512u /* MAX_BLOCKS_PER_POOL upper bound */
+
+/* Cacheable sync state. Workers update their done counter; the main
+ * test thread polls with `cache_invalidate` before each read. Cross-
+ * CPU eventual visibility is enough — the swapper does not gate on
+ * any of this state, only on `ev_smp_stop_swapper`. */
+static volatile uint32_t ev_smp_done[EV_SMP_MAX_WORKERS];
+static volatile uint32_t ev_smp_stop_swapper;
+
+static void ev_smp_worker_task(void *arg)
+{
+    uint32_t my_cpu = (uint32_t)(uintptr_t)arg;
+    /* Pool is pre-saturated in test setup, so each alloc here trips
+     * the alloc-when-full eviction slow path; immediate free returns
+     * the freshly-allocated slot for the next alloc (its own or
+     * another worker's). Lock-ordering is what's under test, not
+     * hold-set bookkeeping. */
+    for (uint32_t r = 0; r < EV_SMP_ROUNDS; r++) {
+        ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+        if (!handle_is_null(h)) {
+            /* Ignore individual return values — set_metadata can
+             * legitimately fail if the slot was racily reclaimed by
+             * the eviction path. The lock-ordering invariant under
+             * test is about deadlock/leak, not about success rate. */
+            (void)rust_model_set_metadata(h,
+                (uint8_t)(my_cpu + 1u), (int16_t)r,
+                (uint8_t)(r & 3u));
+            (void)rust_model_touch(h);
+            (void)rust_model_free(h);
+        }
+        ev_smp_done[my_cpu] = r + 1u;
+        cache_clean((void *)&ev_smp_done[my_cpu]);
+        yield();
+    }
+    task_exit();
+}
+
+static void ev_smp_swapper_task(void *arg)
+{
+    (void)arg;
+    static const char *const policies[] = {
+        "first_candidate", "lru", "lfu", "arc",
+        "slm",             "xgboost", "mlp", "cacheus",
+    };
+    const uint32_t n_policies =
+        (uint32_t)(sizeof(policies) / sizeof(policies[0]));
+    uint32_t idx = 0;
+
+    while (1) {
+        cache_invalidate((void *)&ev_smp_stop_swapper);
+        if (ev_smp_stop_swapper) {
+            break;
+        }
+        (void)rust_eviction_policy_set(
+            (const uint8_t *)policies[idx]);
+        idx = (idx + 1u) % n_policies;
+        /* Give workers run time between swaps. 16 yields is enough
+         * to let pinned workers on other CPUs run at least one
+         * round before the next swap on slow platforms. */
+        for (int i = 0; i < 16; i++) {
+            yield();
+        }
+    }
+    /* Restore a known-good default before exiting. */
+    (void)rust_eviction_policy_set((const uint8_t *)"lru");
+    task_exit();
+}
+
+static void test_eviction_smp_alloc_under_concurrent_swap(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+        return;
+    }
+    if (cpu_count < 2u) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2 for SMP test");
+        return;
+    }
+
+    const uint32_t n_workers =
+        (cpu_count < EV_SMP_MAX_WORKERS) ? cpu_count
+                                         : EV_SMP_MAX_WORKERS;
+
+    /* Reset sync state. */
+    for (uint32_t c = 0; c < EV_SMP_MAX_WORKERS; c++) {
+        ev_smp_done[c] = 0;
+        cache_clean((void *)&ev_smp_done[c]);
+    }
+    ev_smp_stop_swapper = 0;
+    cache_clean((void *)&ev_smp_stop_swapper);
+
+    /* Pre-saturate the workspace pool down to EV_SMP_PREFILL_LEAVE
+     * free blocks. This makes the SMP loop hammer the eviction slow
+     * path on every alloc instead of relying on n_workers happening
+     * to peak simultaneously (cross-CPU scheduling makes that
+     * unreliable; an earlier hold-set design saw zero evictions in
+     * QEMU). */
+    static ModelHandle prefill[EV_SMP_PREFILL_MAX];
+    uint32_t prefill_n = 0;
+    while (prefill_n < EV_SMP_PREFILL_MAX) {
+        RustPoolStats ws = rust_workspace_pool_stats();
+        if (ws.free_blocks <= EV_SMP_PREFILL_LEAVE) {
+            break;
+        }
+        ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+        if (handle_is_null(h)) {
+            break;
+        }
+        (void)rust_model_touch(h);
+        prefill[prefill_n++] = h;
+    }
+
+    /* Snapshot stats AFTER prefill, so the evictions delta we report
+     * is purely from the SMP loop, not from any startup churn. */
+    RustPoolStats before = rust_workspace_pool_stats();
+    uart_printf("  ev-smp: prefill workspace pool — "
+                "free=%lu alloc=%lu total=%lu (prefilled %lu)\r\n",
+                (unsigned long)before.free_blocks,
+                (unsigned long)before.allocated_blocks,
+                (unsigned long)before.total_blocks,
+                (unsigned long)prefill_n);
+
+    /* Save current policy so we can restore it. */
+    uint8_t saved_policy[32] = {0};
+    rust_eviction_policy_name(saved_policy, sizeof(saved_policy));
+
+    /* Spawn one worker per CPU, pinned. */
+    struct task *workers[EV_SMP_MAX_WORKERS] = {0};
+    for (uint32_t c = 0; c < n_workers; c++) {
+        char name[8];
+        name[0] = 'e'; name[1] = 'v'; name[2] = 'w';
+        name[3] = '0' + (char)c; name[4] = '\0';
+        workers[c] = task_create(name, ev_smp_worker_task,
+                                 (void *)(uintptr_t)c);
+        TEST_ASSERT_NOT_NULL_MESSAGE(workers[c],
+            "ev-smp: failed to create worker");
+        workers[c]->cpu_affinity = c;
+        scheduler_add_task_to_cpu(workers[c], c);
+    }
+
+    /* Swapper on CPU 0. */
+    struct task *swapper = task_create("ev_swap",
+        ev_smp_swapper_task, NULL);
+    TEST_ASSERT_NOT_NULL_MESSAGE(swapper,
+        "ev-smp: failed to create swapper");
+    swapper->cpu_affinity = 0;
+    scheduler_add_task_to_cpu(swapper, 0);
+
+    /* Wait for all workers to reach EV_SMP_ROUNDS. 30 s budget
+     * covers the worst-case slow path (Jetson EVICTION_MODELS=ON,
+     * cacheus ~150 µs/select_victim) with comfortable headroom. */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 30u;
+    int all_done = 0;
+    while ((timer_get_count() - start) < limit) {
+        int done = 1;
+        for (uint32_t c = 0; c < n_workers; c++) {
+            cache_invalidate((void *)&ev_smp_done[c]);
+            if (ev_smp_done[c] < EV_SMP_ROUNDS) {
+                done = 0;
+                break;
+            }
+        }
+        if (done) {
+            all_done = 1;
+            break;
+        }
+        yield();
+    }
+
+    /* Signal swapper to stop and wait briefly for it to wind down. */
+    ev_smp_stop_swapper = 1;
+    cache_clean((void *)&ev_smp_stop_swapper);
+    uint64_t sw_start = timer_get_count();
+    uint64_t sw_limit = timer_get_frequency() * 2u;
+    while ((timer_get_count() - sw_start) < sw_limit) {
+        cache_invalidate(&swapper->state);
+        if (swapper->state == TASK_TERMINATED) {
+            break;
+        }
+        yield();
+    }
+
+    /* Terminate any straggler tasks before destroying — required
+     * before task_destroy per the in-tree convention (see
+     * kernel/CLAUDE.md §"Leaky tests that block CPU 1"). */
+    for (uint32_t c = 0; c < n_workers; c++) {
+        cache_invalidate(&workers[c]->state);
+        if (workers[c]->state != TASK_TERMINATED) {
+            scheduler_terminate_task(workers[c]);
+        }
+        task_destroy(workers[c]);
+    }
+    cache_invalidate(&swapper->state);
+    if (swapper->state != TASK_TERMINATED) {
+        scheduler_terminate_task(swapper);
+    }
+    task_destroy(swapper);
+
+    /* Free the prefill set so the no-leak assertion below is exact.
+     * Note: some prefill handles may have been evicted out from under
+     * us during the SMP loop — that's expected. `free` on a stale
+     * handle returns an error and we ignore it. */
+    for (uint32_t i = 0; i < prefill_n; i++) {
+        (void)rust_model_free(prefill[i]);
+    }
+
+    /* Restore the pre-test policy. */
+    if (saved_policy[0] != 0) {
+        (void)rust_eviction_policy_set(saved_policy);
+    }
+
+    /* Primary contract: no deadlock. */
+    TEST_ASSERT_MESSAGE(all_done,
+        "ev-smp: workers did not complete within 30s budget "
+        "(probable deadlock between allocator and registry locks)");
+
+    /* All workers reached full round count. */
+    for (uint32_t c = 0; c < n_workers; c++) {
+        TEST_ASSERT_MESSAGE(ev_smp_done[c] == EV_SMP_ROUNDS,
+            "ev-smp: worker did not complete all rounds");
+    }
+
+    /* No leaked blocks in the workspace pool we exercised. */
+    RustPoolStats after = rust_workspace_pool_stats();
+    TEST_ASSERT_MESSAGE(after.allocated_blocks == 0,
+        "ev-smp: leaked allocated blocks after SMP run");
+
+    /* Diagnostic: did any allocs hit the eviction slow path? Not
+     * asserted — pool may be large enough that EV_SMP_ROUNDS rounds
+     * across n_workers CPUs never fills it. The primary invariant
+     * (no deadlock) is the load-bearing assertion. */
+    uint64_t ev_delta = after.evictions_total - before.evictions_total;
+    if (ev_delta > 0) {
+        uart_printf("  ev-smp: %lu evictions during run (n_workers=%lu)\r\n",
+                    (unsigned long)ev_delta,
+                    (unsigned long)n_workers);
+    } else {
+        uart_printf("  ev-smp: no evictions (pool large enough); "
+                    "deadlock-freedom still verified (n_workers=%lu)\r\n",
+                    (unsigned long)n_workers);
+    }
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -1278,6 +1568,9 @@ int test_suite_eviction(void)
 
     /* M9: per-policy latency benchmarks (QEMU baseline numbers). */
     RUN_TEST(test_bench_all_policies);
+
+    /* M-SMP: multi-CPU concurrent alloc/eviction stress test (#116). */
+    RUN_TEST(test_eviction_smp_alloc_under_concurrent_swap);
 
     return UnityEnd();
 }
