@@ -1072,6 +1072,28 @@ static void test_handoff_validate_missing_doorbell_token(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
 }
 
+/* Stale handoffs left in DRAM by prior helper runs that hit one of
+ * the FECS-read failure modes (priv-locked, target=0, /dev/mem
+ * errors) have a zero `inst_block_phys`. The scanner used to return
+ * the first such match by phys address, masking newer fresh handoffs
+ * with a usable inst block written at a higher phys. The validator
+ * now rejects inst_block_phys=0 so the scanner skips past the stale
+ * candidate.
+ *
+ * Observed on jetson-nano-2 (2026-05-16): stale handoff at
+ * 0x1159fa000 (v6, magic GPUH, inst_block_phys=0) was found before
+ * the fresh handoff at 0x13adcc000, causing `nvgpu oplib stage`
+ * to fall all the way through to "no handoff and FECS_CURRENT_CTX
+ * read failed" even though the helper had successfully published. */
+static void test_handoff_validate_stale_zero_inst_block_rejected(void)
+{
+    printf("== test_handoff_validate_stale_zero_inst_block_rejected ==\n");
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.inst_block_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+}
+
 /* ======================================================================
  * Phase 7 SEMAPHORE_RELEASE pushbuffer builder
  *
@@ -1284,7 +1306,7 @@ static void test_compute_sema_release_pb_layout(void)
     uint32_t payload = 0x0000CAFEu;
 
     uint32_t dwords = ga10b_build_compute_sema_release_pushbuffer(
-        pb, sem_va, payload);
+        pb, sem_va, payload, /* flags */ 0u);
     REQUIRE_EQ(dwords, GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS);
 
     /* First pair: SET_OBJECT on subch 1 binding AMPERE_COMPUTE_B.
@@ -1329,7 +1351,8 @@ static void test_compute_sema_release_pb_truncates_va_upper(void)
      * the builder — else a 64-bit pointer with live upper bits would
      * get smuggled into the address register. */
     uint64_t sem_va = 0x1234567890000000ULL;
-    ga10b_build_compute_sema_release_pushbuffer(pb, sem_va, 0x11u);
+    ga10b_build_compute_sema_release_pushbuffer(pb, sem_va, 0x11u,
+                                                /* flags */ 0u);
 
     REQUIRE_EQ(pb[7], 0x90000000u);   /* ADDRESS_LOWER = VA[31:0] */
     REQUIRE_EQ(pb[9], 0x00000078u);   /* ADDRESS_UPPER = VA[39:32] only */
@@ -1341,13 +1364,46 @@ static void test_compute_sema_release_pb_zero_payload(void)
     uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
     memset(pb, 0xAB, sizeof(pb));
 
-    ga10b_build_compute_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
+    ga10b_build_compute_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u,
+                                                /* flags */ 0u);
     REQUIRE_EQ(pb[0],  EXPECT_INC_HDR(1, 1, 0x00u));    /* SET_OBJECT (subch 1) unchanged */
     REQUIRE_EQ(pb[1],  GA10B_AMPERE_COMPUTE_B_CLASS_ID); /* class unchanged */
     REQUIRE_EQ(pb[3],  0u);                             /* zero payload */
     REQUIRE_EQ(pb[7],  0x00000000u);                    /* VA[31:0] */
     REQUIRE_EQ(pb[9],  0x00000020u);                    /* VA[39:32] = 0x20 */
     REQUIRE_EQ(pb[11], 0x00000008u);                    /* EXECUTE unchanged */
+}
+
+/* #838: FLUSH_DISABLE flag flips bit 5 of the EXECUTE word. The
+ * pre-launch diagnostic sema in `ga10b_dispatch_v7_pipeline_inline`
+ * sets this so the host engine fires the release as soon as it
+ * processes the method (no GR-drain wait). All other PB bytes
+ * (SET_OBJECT, payload writes, address writes, EXECUTE-header) stay
+ * byte-identical to the default flags=0 encoding. */
+static void test_compute_sema_release_pb_flush_disable_flag(void)
+{
+    printf("== test_compute_sema_release_pb_flush_disable_flag ==\n");
+    uint32_t pb_default[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    uint32_t pb_flush[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+
+    uint64_t sem_va  = 0x1ffc010000ULL;
+    uint32_t payload = 0xCAFEBABEu;
+
+    ga10b_build_compute_sema_release_pushbuffer(pb_default, sem_va, payload,
+                                                /* flags */ 0u);
+    ga10b_build_compute_sema_release_pushbuffer(pb_flush,   sem_va, payload,
+                                                GA10B_SEMA_FLUSH_DISABLE);
+
+    /* Every dword except pb[11] (EXECUTE bits) is identical. */
+    for (int i = 0; i < 11; i++) {
+        REQUIRE_EQ(pb_default[i], pb_flush[i]);
+    }
+
+    /* Default: OPERATION_RELEASE(0) | STRUCTURE_SIZE_ONE_WORD(1<<3)
+     *        = 0x08. */
+    REQUIRE_EQ(pb_default[11], 0x00000008u);
+    /* FLUSH_DISABLE: above bits + bit 5 (0x20) = 0x28. */
+    REQUIRE_EQ(pb_flush[11],   0x00000028u);
 }
 
 /* ======================================================================
@@ -3188,6 +3244,7 @@ int main(void)
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
     test_handoff_validate_missing_doorbell_token();
+    test_handoff_validate_stale_zero_inst_block_rejected();
 
     test_next_gp_put_wraps_at_ring_boundary();
 
@@ -3200,6 +3257,7 @@ int main(void)
     test_compute_sema_release_pb_layout();
     test_compute_sema_release_pb_truncates_va_upper();
     test_compute_sema_release_pb_zero_payload();
+    test_compute_sema_release_pb_flush_disable_flag();
 
     test_launch_kernel_pb_layout();
     test_launch_kernel_pb_qmd_shift_lower();

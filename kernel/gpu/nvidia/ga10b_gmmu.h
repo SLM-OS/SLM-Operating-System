@@ -23,26 +23,44 @@
 #include <stdint.h>
 
 /* GA10B page-table levels. Default Ampere config is 5-level:
- *   PDE3 (top)  → PDE2 → PDE1 → PDE0 (dual PDE, leaf) → PTE
+ *   L0 (top)  → L1 → L2 → L3 (PDE0 dual) → L4 (PTE)
  *
- * GPU VA bit decomposition (best-guess for 49-bit VAs; may need
- * tuning on hardware — see ga10b_gmmu.c). The high two levels are
- * unequal in nvgpu's modern config; PDE3 covers the top 9 bits and
- * PDE2 the next 10. */
+ * GPU VA bit decomposition per nvgpu canonical
+ * `ga10b_mm_levels[]` in nvgpu-l4t-r36.4.4-gmmu_ga10b_fusa.c:353.
+ * Each level's index extracts a slice of the 49-bit GPU VA.
+ *
+ * The previous values (HI/LO = {48,40}, {39,30}, {29,21}, {20,16},
+ * {15,12}) were a 49-bit-VA placeholder that never got tuned —
+ * they don't match the GA10B hardware decoder, so reads of valid
+ * PDE entries through this walker came back as "unmapped". Fixed
+ * 2026-05-17 by cross-referencing nvgpu's `gk20a_mmu_level`
+ * struct array verbatim. */
 #define GA10B_PDE3_VA_HI    48
-#define GA10B_PDE3_VA_LO    40   /* PDE3 index = bits [48:40], 9 bits */
-#define GA10B_PDE2_VA_HI    39
-#define GA10B_PDE2_VA_LO    30   /* PDE2 index = bits [39:30], 10 bits */
-#define GA10B_PDE1_VA_HI    29
-#define GA10B_PDE1_VA_LO    21   /* PDE1 index = bits [29:21], 9 bits */
-#define GA10B_PDE0_VA_HI    20
-#define GA10B_PDE0_VA_LO    16   /* PDE0 index = bits [20:16], 5 bits — covers 64 KB */
-#define GA10B_PTE_VA_HI     15
-#define GA10B_PTE_VA_LO     12   /* PTE index = bits [15:12], 4 bits — 16 entries × 4 KB = 64 KB region */
+#define GA10B_PDE3_VA_LO    47   /* L0 (top):    bits [48:47], 2 bits — 4 entries × 128 TB */
+#define GA10B_PDE2_VA_HI    46
+#define GA10B_PDE2_VA_LO    38   /* L1:          bits [46:38], 9 bits — 512 entries × 256 GB */
+#define GA10B_PDE1_VA_HI    37
+#define GA10B_PDE1_VA_LO    29   /* L2:          bits [37:29], 9 bits — 512 entries × 512 MB */
+#define GA10B_PDE0_VA_HI    28
+#define GA10B_PDE0_VA_LO    21   /* L3 (dual):   bits [28:21], 8 bits — 256 entries × 2 MB */
+#define GA10B_PTE_VA_HI     20
+#define GA10B_PTE_VA_LO     16   /* L4 (big PTE):bits [20:16], 5 bits — 32 entries × 64 KB */
+/* Small-page PTE-table index range. The dual-PDE0 (L3) carries
+ * separate big-page and small-page children; if the walker
+ * follows the small-page child, the PTE table at L4 is indexed
+ * by bits [20:12] (9 bits → 512 entries × 4 KB). */
+#define GA10B_PTE_SMALL_VA_HI  20
+#define GA10B_PTE_SMALL_VA_LO  12
 #define GA10B_PAGE_SHIFT    12
 
-/* Each PDE/PTE entry is 8 bytes. */
-#define GA10B_GMMU_ENTRY_SIZE   8
+/* Per-level entry sizes. PDE3/PDE2/PDE1 entries are 8 bytes
+ * (single 64-bit value); PDE0 entries are 16 bytes (dual — packs
+ * a big-page child at offset 0..7 and a small-page child at
+ * 8..15); PTE entries are 8 bytes. Constants per nvgpu's
+ * `GA10B_PDE_DEFAULT_ENTRY_SIZE` / `GA10B_PDE0_ENTRY_SIZE` /
+ * `GA10B_PTE_ENTRY_SIZE` in `gmmu_ga10b_fusa.c`. */
+#define GA10B_GMMU_ENTRY_SIZE   8       /* default (PDE3/2/1/PTE) */
+#define GA10B_GMMU_PDE0_SIZE    16      /* dual-PDE0 entry */
 
 /* PDB target (aperture) — from nvgpu's
  * `ram_in_page_dir_base_target_*_f()` constants (instance-block layout). */

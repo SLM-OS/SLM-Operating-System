@@ -248,6 +248,27 @@ bool ga10b_dispatch_verbose_get(void);
  * post-mortem inspection after the channel has been latched dead. */
 void ga10b_dump_inst_blocks_atomic(const char *tag);
 
+/* Dump a 4 KB inst block from a known phys, prefixed with `tag`.
+ * Skips the FECS_CURRENT_CTX / fb_mmu_fault_inst latch — useful
+ * for callers that already have the inst-block phys in hand (e.g.
+ * ga10b_gmmu_rebuild_for_handoff post-write). Same DRAM bounds
+ * check + pointer-scan-for-fault-VA logic as the atomic dumper. */
+void ga10b_dump_inst_block_at(const char *tag, uint64_t inst_phys);
+
+/* #834: write the channel's inst block phys into `gr_fecs_new_ctx_r()`
+ * (0x00409b04) so FECS treats it as the "next" channel to load on
+ * any subsequent ctxsw. Companion shell verb: `nvgpu fecs-newctx`.
+ * Returns 0 on success, -1 if `inst_block_phys` is zero or not
+ * page-aligned. */
+int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys);
+
+/* #834: submit a FECS method via the standard data+push protocol.
+ * Clears mailbox 0, writes method data + push address, polls mb0
+ * for `expected_mb0` (typically `gr_fecs_ctxsw_mailbox_value_pass_v`
+ * = 0x1). Returns 0 on PASS, -1 on TIMEOUT / FAIL. */
+int ga10b_fecs_method_push(uint32_t method_addr, uint32_t method_data,
+                           uint32_t expected_mb0);
+
 /* Phase 7: Submit host-family SEMAPHORE_RELEASE as smoke test.
  * Returns 0 iff the semaphore is observed at its target VA within
  * timeout. PBDMA-decoded; bypasses GR. */
@@ -303,6 +324,14 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
  * name rather than a bare literal. */
 #define GA10B_AMPERE_COMPUTE_B_CLASS_ID  0xC7C0u
 
+/* Flags for `ga10b_build_compute_sema_release_pushbuffer`. */
+#define GA10B_SEMA_FLUSH_DISABLE   (1u << 0)  /* bit 5 of NVC7C0_REPORT_-
+                                                * SEMAPHORE_EXECUTE — fire
+                                                * immediately when the host
+                                                * engine processes the
+                                                * method, do NOT wait for
+                                                * GR pipeline drain. */
+
 /* Phase 7 pushbuffer builder — compute-class variant (pure logic).
  *
  * Writes GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS dwords to `pb`,
@@ -323,12 +352,23 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
  *      [4:3] that must be SEMAPHORE_ONE_WORD (1<<3) for a 32-bit
  *      payload.
  *
+ * `flags` controls optional EXECUTE bits. `0` = the historical
+ * "wait for compute drain then release" behavior (FLUSH_DISABLE=0).
+ * `GA10B_SEMA_FLUSH_DISABLE` flips bit 5 of EXECUTE so the host
+ * engine fires the release as soon as it processes the method —
+ * used by the pre-launch diagnostic sema in
+ * `ga10b_dispatch_v7_pipeline_inline` (#838) to discriminate "host
+ * engine never reached the sema entries" (poll == 0) from "host
+ * engine fired pre-sema but GR never drained" (poll ==
+ * GA10B_SEMA_PRELAUNCH_PAYLOAD).
+ *
  * **Buffer contract:** `pb` must point to at least
  * GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS uint32_t slots. Returns the
  * dword count (always GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS). */
 uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
                                                      uint64_t sem_gpu_va,
-                                                     uint32_t payload);
+                                                     uint32_t payload,
+                                                     uint32_t flags);
 
 /* Submit a prebuilt pushbuffer through the inherited channel and poll
  * the semaphore at `poll_phys` for `expected_payload`. Drives the
@@ -440,6 +480,32 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  * Pre-cleared to zero each iteration, so any reasonable non-zero
  * sentinel works — picked something distinctive for trace clarity. */
 #define GA10B_SEMA_RELEASE_PAYLOAD         0xCAFEDEADu
+
+/* Payload written by the optional pre-launch diagnostic sema in
+ * `ga10b_dispatch_v7_pipeline_inline` (#838). The pre-launch sema
+ * uses FLUSH_DISABLE=1 so it fires immediately when the host engine
+ * processes its method — without waiting for any compute to drain.
+ * Both pre- and post-launch semas target the same sema_gpu_va so a
+ * single CPU poll discriminates:
+ *
+ *   poll == 0                    → host engine never processed the
+ *                                  pre-sema → PBDMA stuck or method
+ *                                  routing broken (subch / class
+ *                                  binding wrong, runlist not
+ *                                  binding the channel, etc.)
+ *   poll == PRELAUNCH (BABE)     → host engine alive, pre-sema fired,
+ *                                  but the post-sema never did → GR
+ *                                  never drained → compute kernel
+ *                                  hangs without latching a fault
+ *                                  (#844: TPC/SM internal stall or
+ *                                  bad QMD).
+ *   poll == RELEASE_PAYLOAD (DEAD) → success path: pre-sema's BABE
+ *                                  was overwritten by post-sema's
+ *                                  DEAD after the kernel drained.
+ *
+ * The two payloads are distinct, non-zero, and pattern-recognisable
+ * in serial captures. */
+#define GA10B_SEMA_PRELAUNCH_PAYLOAD       0xCAFEBABEu
 
 /* Builder for the launch-kernel-with-semaphore pushbuffer. Same QMD
  * dispatch as ga10b_build_launch_kernel_pushbuffer, with a trailing
