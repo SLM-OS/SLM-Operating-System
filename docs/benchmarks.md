@@ -480,12 +480,62 @@ The cascade walker is pure software (no NEON, no FP-tier divergence
 between platforms) so a Jetson run would produce identical numbers;
 not re-run on Jetson for that reason.
 
-**When to use heuristic scheduling:**
-- Latency-sensitive cooperative workloads
-- Systems with frequent task creation/destruction
-- Benchmarking and debugging (deterministic behavior)
+#### Eviction equivalence verification (`bench xgb-equiv-evict`)
 
-The latency includes: FP context save, state vector extraction (108 floats from kernel data), 4-layer forward pass (NEON-optimized matvec), action decode and validation, FP context restore. Measured via `test_ai_inference_latency` (100 iterations, average reported by the test).
+Consumer side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932),
+bundled into [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+See `kernel/src/shell_sys.c`'s `bench_xgb_equiv_evict` for the verb,
+`runtime/src/lib.rs`'s `rust_eviction_xgb_predict_compare` for the FFI,
+and the `xgb_equiv_evict_*` checks in `rust_eviction_run_tests` for
+a host-side mini-corpus regression that exercises the same FFI path
+against a Rust-built toy model — this catches plumbing regressions
+in `make test` without needing the producer-side `.smb` on hardware.
+
+The eviction-side analog of the scheduler verb above. The
+`slm-os-page-eviction` exporter emits two corpus files alongside
+`evict.smb`: `test_vectors_xgb_evict.bin` (N × 27 f32 feature vectors)
+and `expected_evict.bin` (N × f32 sigmoid scores from
+`booster.predict()`). Replay the corpus through the active
+on-device XGBoost eviction blob with:
+
+```
+# In the SLM-OS shell, after the eviction blob is staged + activated:
+eviction model load xgboost 0:/slmstore/evict.smb
+eviction model activate xgboost
+bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expected_evict.bin
+```
+
+**Differences from the scheduler verb:**
+
+- **Sigmoid score, not classification triple.** Eviction prediction
+  returns a continuous probability (P(optimal eviction target)) so
+  per-vector comparison uses an absolute tolerance (`1e-4`) rather
+  than integer equality. Tolerance is well above f32 sigmoid
+  round-trip noise (~1e-6) but well below what any structural bug
+  (missed `base_score` fold, wrong tree-walk path) would produce
+  (≥ 0.01).
+- **Bit-pattern comparison wire.** The FFI
+  (`rust_eviction_xgb_predict_compare`) takes `expected_bits` and
+  `tolerance_bits` as raw `uint32_t` IEEE-754 patterns so `shell_sys.c`
+  (compiled under `-mgeneral-regs-only`) never materialises an `f32`
+  in C code. First-mismatch diagnostics print hex patterns; decode with
+  `python3 -c 'import struct;print(struct.unpack("<f", bytes.fromhex("HEX"))[0])'`.
+
+**Pi 5 result (2026-05-17, BCM2712 Cortex-A76 @ 2.4 GHz):**
+
+| Metric | Value |
+|--------|-------|
+| Match rate | **100 / 100** |
+| Per-decision latency | **1,429,641 ns (~1.43 ms)** |
+| First mismatch | none |
+
+Closes the on-device side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932). The result was captured by exporting an `evict.smb` + 100-vector corpus from `slm-os-page-eviction` (XGBoost model carried from `slm-os-page-sim/data/models/xgb_model.json`), staging both onto pi-5-2 via `labctl sdwire update`, activating the runtime blob via `eviction model load/activate xgboost`, and replaying with `bench xgb-equiv-evict`. The ~1.43 ms/inference is the full 200-tree softmax-sigmoid walk in pure software (no NEON path yet); the scheduler verb's ~240 µs comparison is for the much smaller cascade. Latency-side improvement work is tracked separately under [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108).
+
+The `slm-os-page-eviction` PR #3 (merged 2026-05-17) emits the
+`evict.smb` blob and verification corpus in the format this verb
+consumes. The producer side is the canonical source of `.smb` blobs
+for any future "graduate this model into the baked path" workflow
+[(#952)](https://github.com/SLM-OS/SLM-Operating-System/issues/952).
 
 ---
 

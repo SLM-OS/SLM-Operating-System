@@ -453,6 +453,37 @@ extern int32_t rust_sched_xgb_predict(const float *state,
 extern uint32_t rust_eviction_feature_count(void);
 extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t buf_len);
 
+/*
+ * Run the active XGBoost eviction blob's predict_sigmoid against the
+ * supplied 27-feature vector. See `runtime/src/lib.rs` for the full
+ * SAFETY contract and the negative return-code meanings.
+ *
+ * Consumed by `bench xgb-equiv-evict` in shell_sys.c (#932).
+ *
+ * TODO(#448 handoff): the body of this FFI sits on top of the current
+ * eviction blob/policy registry surface. Signature should stay stable
+ * across the #448 envelope rework; only the Rust-side internals need
+ * updating.
+ */
+extern int32_t rust_eviction_xgb_predict(const float *features,
+                                          size_t len,
+                                          float *out_score);
+
+/*
+ * Tolerance-compare variant: returns 0 (match), 1 (mismatch), or
+ * negative (error) without ever exposing an f32 to the caller. Used by
+ * the `bench xgb-equiv-evict` shell verb so shell_sys.c stays
+ * compatible with `-mgeneral-regs-only` (no visible FP literals or
+ * arithmetic). `expected_bits`/`tolerance_bits` are passed as IEEE-754
+ * u32 patterns; `*out_got_bits` is filled with the predicted score's
+ * u32 pattern for diagnostic printing on mismatch.
+ */
+extern int32_t rust_eviction_xgb_predict_compare(const float *features,
+                                                  size_t len,
+                                                  uint32_t expected_bits,
+                                                  uint32_t tolerance_bits,
+                                                  uint32_t *out_got_bits);
+
 /* Workload replay comparison (#117). */
 typedef struct {
     uint8_t  policy_name[32];

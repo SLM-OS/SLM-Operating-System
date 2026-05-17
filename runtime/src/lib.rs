@@ -2153,6 +2153,172 @@ pub extern "C" fn rust_eviction_feature_count() -> u32 {
     { 0 }
 }
 
+/// Run the active XGBoost eviction blob's `predict_sigmoid` against the
+/// supplied 27-feature vector. Writes the resulting probability into
+/// `*out_score` and returns 0. Returns negative on failure:
+///
+/// - `-1` : NULL pointer or `len != 27`
+/// - `-2` : ai_eviction feature not compiled in
+/// - `-3` : no active XGBoost eviction blob staged
+/// - `-4` : staged blob failed to parse (corrupt or out-of-sync)
+///
+/// The verb-side caller (`bench xgb-equiv-evict` in
+/// `kernel/src/shell_sys.c`) compares the returned score against a
+/// Python-generated expected corpus within a small tolerance (sigmoid
+/// f32 round-trip; ~1e-4 is conservative).
+///
+/// TODO(#448 handoff): once #448's envelope/policy interface lands, the
+/// "fetch active blob + parse + predict" body below likely collapses to a
+/// single registry call (e.g. `with_active_policy(BlobKind::XGBoost, ...)`).
+/// The FFI signature itself is independent of envelope shape and should
+/// stay stable — only the internals need rework.
+///
+/// SAFETY (caller contract): `features` must point to `len`
+/// contiguous `f32`s, 4-byte aligned (every `float features[N]` on the
+/// C side satisfies this naturally). `out_score` must be non-null and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_xgb_predict(
+    features: *const f32,
+    len: usize,
+    out_score: *mut f32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (features, len, out_score);
+        -2
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if features.is_null() || out_score.is_null() {
+            return -1;
+        }
+        // Hardcoded against `runtime/src/mm/eviction/runtime_xgboost.rs::FEATURE_COUNT`.
+        // A model trained against a different feature schema would parse
+        // successfully against the runtime engine (which only checks
+        // node feature_idx bounds) but predict on the wrong slots —
+        // catching here surfaces the mismatch at the verification verb
+        // rather than as silently-wrong scheduling decisions.
+        if len != 27 {
+            return -1;
+        }
+        // SAFETY: caller contract — `features` points to `len` f32s,
+        // aligned. The fixed-size borrow is safe because `len == 27`
+        // checked above.
+        let slice: &[f32] = core::slice::from_raw_parts(features, 27);
+        let block: mm::eviction::BlockFeatures = match slice.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return -1,
+        };
+
+        // Get the active blob, parse, predict. Parsing per call costs
+        // ~µs for a ~30 KB blob; fine for an equivalence-verb that
+        // runs once-per-vector. The production policy
+        // (`XGBoostPolicy::refresh_runtime_cache`) caches the parsed
+        // model by checksum to avoid this cost on the hot path; the
+        // verb intentionally bypasses that cache so each call goes
+        // straight from on-disk bytes to prediction.
+        let parsed = match mm::eviction::active_blob(
+            mm::eviction::BlobKind::XGBoost,
+        ) {
+            Some(b) => b,
+            None => return -3,
+        };
+        let model = match mm::eviction::runtime_xgboost::parse_payload(
+            &parsed.payload,
+        ) {
+            Ok(m) => m,
+            Err(_) => return -4,
+        };
+        let score = model.predict(&block);
+        *out_score = score;
+        0
+    }
+}
+
+/// Compare the active XGBoost eviction blob's prediction against a
+/// reference score within an absolute tolerance, returning a tristate:
+///
+/// - `0`  : prediction is within `tolerance` of `expected`
+/// - `1`  : prediction is outside tolerance (mismatch)
+/// - `<0` : same negative return codes as `rust_eviction_xgb_predict`
+///
+/// `expected_bits` and `tolerance_bits` are passed as raw u32 IEEE-754
+/// bit patterns so the C caller (`bench xgb-equiv-evict` shell verb,
+/// compiled under `-mgeneral-regs-only`) never has to materialise an
+/// f32 in C code. `out_got_bits` always receives the predicted score's
+/// bit pattern on the success paths (rc 0 or 1) for diagnostic
+/// printing of the first mismatch.
+///
+/// This FFI is the eviction-side counterpart to the scheduler's
+/// `rust_sched_xgb_predict` integer-label compare; eviction prediction
+/// is a continuous sigmoid score so the threshold-versus-tolerance
+/// shape differs.
+///
+/// TODO(#448 handoff): the body shares the per-call parse pattern with
+/// `rust_eviction_xgb_predict`. When that path collapses (or grows a
+/// shared parsed-model cache), this should reuse the same helper.
+///
+/// SAFETY (caller contract): same as `rust_eviction_xgb_predict` plus
+/// `out_got_bits` must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_xgb_predict_compare(
+    features: *const f32,
+    len: usize,
+    expected_bits: u32,
+    tolerance_bits: u32,
+    out_got_bits: *mut u32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (features, len, expected_bits, tolerance_bits, out_got_bits);
+        -2
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if features.is_null() || out_got_bits.is_null() {
+            return -1;
+        }
+        if len != 27 {
+            return -1;
+        }
+        let slice: &[f32] = core::slice::from_raw_parts(features, 27);
+        let block: mm::eviction::BlockFeatures = match slice.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return -1,
+        };
+        let parsed = match mm::eviction::active_blob(
+            mm::eviction::BlobKind::XGBoost,
+        ) {
+            Some(b) => b,
+            None => return -3,
+        };
+        let model = match mm::eviction::runtime_xgboost::parse_payload(
+            &parsed.payload,
+        ) {
+            Ok(m) => m,
+            Err(_) => return -4,
+        };
+        let score = model.predict(&block);
+        *out_got_bits = score.to_bits();
+
+        let expected = f32::from_bits(expected_bits);
+        let tolerance = f32::from_bits(tolerance_bits);
+        let delta = if score >= expected {
+            score - expected
+        } else {
+            expected - score
+        };
+        // NaN propagates through `>` as false; treat NaN delta as a
+        // mismatch since it can't be within any finite tolerance.
+        if delta.is_nan() || delta > tolerance {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 /// Copy the name of feature `index` into `buf` (NUL-terminated).
 /// Returns bytes written (excl NUL), or 0 if index is out of range
 /// or ai_eviction is off.
@@ -3424,6 +3590,117 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                        scores.len() == 2 && scores[1] > scores[0]);
                 check!(b"runtime_xgboost_policy_prefers_active_runtime_payload\0",
                        p.select_victim(&cands) == 1);
+            }
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+        }
+
+        // Eviction equivalence FFI mini-corpus (#932 / #448 consumer bundle).
+        //
+        // Exercises the exact same active-blob -> FFI -> predict path
+        // the shell verb `bench xgb-equiv-evict` walks on hardware, but
+        // against a Rust-built tiny model so the test runs in QEMU
+        // without producer-side fixtures. The producer corpus
+        // (slm-os-page-eviction PR #3's `test_vectors_xgb_evict.bin`
+        // + `expected_evict.bin`) covers Python equivalence; this
+        // covers FFI plumbing (feature-slice marshaling, blob registry
+        // lookup, sigmoid bit-pattern roundtrip, tolerance comparator)
+        // so a regression there fails in `make test` instead of waiting
+        // for a pi-5-2 deploy.
+        {
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+            // 1-tree, 3-node split on feature[0] @ 0.5; leaves
+            // -1.5 / +1.5 -> sigmoid ~ 0.182 / 0.818, well clear of
+            // the 0.5 decision boundary.
+            let payload =
+                mm::eviction::runtime_xgboost::build_test_payload_first_feature_split(
+                    0.5, -1.5, 1.5);
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::XGBoost, &payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"xgb_equiv_evict_mini_corpus_blob_parses\0",
+                   parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                let staged = mm::eviction::stage_parsed(parsed).is_ok();
+                check!(b"xgb_equiv_evict_mini_corpus_blob_stages\0",
+                       staged);
+                let activated = mm::eviction::activate_blob(
+                    mm::eviction::BlobKind::XGBoost).is_ok();
+                check!(b"xgb_equiv_evict_mini_corpus_blob_activates\0",
+                       activated);
+
+                if staged && activated {
+                    // 4 vectors straddling the split threshold.
+                    let mut vectors: [[f32; 27]; 4] = [[0.0; 27]; 4];
+                    vectors[0][0] = 0.0;
+                    vectors[1][0] = 0.4;
+                    vectors[2][0] = 0.6;
+                    vectors[3][0] = 1.0;
+                    // Engine-vs-FFI path is f32-deterministic, so 1e-6
+                    // tolerance catches real divergence while
+                    // tolerating any theoretical 1-ULP rounding from a
+                    // future compiler/libm change.
+                    let tol_bits: u32 = (1.0e-6_f32).to_bits();
+
+                    let model = mm::eviction::runtime_xgboost::parse_payload(
+                        &payload);
+                    let mut compare_all_pass = true;
+                    let mut predict_all_pass = true;
+                    if let Ok(model) = model {
+                        for vec in vectors.iter() {
+                            let expected = model.predict(vec);
+                            let exp_bits = expected.to_bits();
+
+                            // Compare-FFI: tolerance path.
+                            let mut got_bits: u32 = 0;
+                            let cmp_rc = unsafe {
+                                rust_eviction_xgb_predict_compare(
+                                    vec.as_ptr(),
+                                    27,
+                                    exp_bits,
+                                    tol_bits,
+                                    &mut got_bits as *mut u32,
+                                )
+                            };
+                            if cmp_rc != 0 {
+                                compare_all_pass = false;
+                            }
+
+                            // Predict-FFI: bit-exact path.
+                            let mut score: f32 = f32::NAN;
+                            let pred_rc = unsafe {
+                                rust_eviction_xgb_predict(
+                                    vec.as_ptr(),
+                                    27,
+                                    &mut score as *mut f32,
+                                )
+                            };
+                            if pred_rc != 0
+                                || score.to_bits() != exp_bits
+                            {
+                                predict_all_pass = false;
+                            }
+                        }
+                    } else {
+                        compare_all_pass = false;
+                        predict_all_pass = false;
+                    }
+                    check!(b"xgb_equiv_evict_ffi_compare_within_tolerance\0",
+                           compare_all_pass);
+                    check!(b"xgb_equiv_evict_ffi_predict_bit_exact\0",
+                           predict_all_pass);
+
+                    // Bad-arg surface: wrong length -> -1, no UB.
+                    let mut score: f32 = 0.0;
+                    let bad_len_rc = unsafe {
+                        rust_eviction_xgb_predict(
+                            vectors[0].as_ptr(),
+                            26,
+                            &mut score as *mut f32,
+                        )
+                    };
+                    check!(b"xgb_equiv_evict_ffi_rejects_wrong_feature_count\0",
+                           bad_len_rc == -1);
+                }
             }
             mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
         }
