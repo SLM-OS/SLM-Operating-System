@@ -547,6 +547,42 @@ All suites pass under `make test` on the three supported configs:
 
 ---
 
+## Open Issues
+
+- ☐🎫 XGBoost eviction on-device vs. trainer numerical equivalence —
+  [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932).
+  Adds `bench xgb-equiv-evict` against the producer-side corpus
+  (`evict.smb` + `test_vectors_xgb_evict.bin` + `expected_evict.bin`)
+  landed in `slm-os-page-eviction` PR #3. Consumer side bundled with
+  [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+- ☐🔗🎫 Generalize runtime policy blob formats —
+  [#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448).
+  Reshapes the eviction-blob envelope (magic/version negotiation,
+  feature-schema versioning, reserved-field forward-compat, structured
+  reject path). Now absorbs the #932 consumer side: FFI
+  `rust_eviction_xgb_predict`, `bench xgb-equiv-evict` shell verb,
+  `eviction blob load/activate xgboost`, kernel-side mini-corpus
+  regression, and `docs/benchmarks.md` entry. Preferred ordering:
+  land #932's hardware verification (via this bundle) before declaring
+  the envelope rework done.
+- ⏸️🔗🎫 Promote XGBoost from opt-in to default eviction policy —
+  [#953](https://github.com/SLM-OS/SLM-Operating-System/issues/953).
+  Decision-gate ticket. Hard-held (`blocked` label) until #932 closes
+  with passing equivalence on pi-5-2. Dependencies also include
+  [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108) /
+  [#109](https://github.com/SLM-OS/SLM-Operating-System/issues/109) /
+  [#110](https://github.com/SLM-OS/SLM-Operating-System/issues/110)
+  (per-platform latency), [#116](https://github.com/SLM-OS/SLM-Operating-System/issues/116)
+  (multi-CPU stress), and the sibling-repo quality harness
+  ([slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2)).
+- ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
+  [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
+  Replay xgb / mlp / cacheus / arc / lru through the simulator on
+  held-out trajectories; report hit-rate, eviction count, tail-latency
+  proxy; CI knob for hit-rate regression. Feeds #953's decision memo.
+
+---
+
 ## References
 
 - Sibling reference crate: `slm-os-page-sim/slm_os_integration/` (zero-
