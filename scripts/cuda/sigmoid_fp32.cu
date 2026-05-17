@@ -95,8 +95,7 @@ static int run_one(int N, const float *inputs)
          *     itself rounds away the sub-ULP differences).
          * Both gates are still 100× tighter than the launcher
          * tolerance the rest of PR-5 depends on. */
-        float tol = 1e-6f;
-        if (1e-5f * fabsf(expected) > tol) tol = 1e-5f * fabsf(expected);
+        float tol = fmaxf(1e-6f, 1e-5f * fabsf(expected));
         if (err > tol) {
             if (reported < 4) {
                 fprintf(stderr,
