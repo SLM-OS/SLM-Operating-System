@@ -334,13 +334,13 @@ under NS-EL2/VHE, Release build; captured 2026-05-17 from
 | cacheus (ml_only) | 13,311 ns | 197,228 ns |
 
 Cortex-A76 (Pi 5, 2.4 GHz) consistently beats Cortex-A78AE (Jetson,
-1.5 GHz) by roughly the clock ratio (~1.5–1.6×) on the classical
-policies — the ML policies widen the gap somewhat on the
-`EVICTION_MODELS=ON` path (1.4–1.5× on xgboost / cacheus). Real
-silicon is ~10× faster than QEMU TCG on the heavy ML policies (Pi 5
-`EVICTION_MODELS=ON` cacheus is 145 µs vs QEMU's 1,734 µs), confirming
-the M9 prediction that QEMU's TCG-emulated int8 MLP forward pass was
-not representative of hardware. The **< 1 µs Cortex-A78 target from
+1.5 GHz) — observed Jetson/Pi 5 ratios sit around 1.3–1.5×, a bit
+better than the raw 1.6× clock ratio thanks to A78AE's wider issue
+width. Real silicon is over an order of magnitude faster than QEMU
+TCG on the heavy ML policies (Pi 5 `EVICTION_MODELS=ON` cacheus is
+145 µs vs the refreshed QEMU number of 2,124 µs in the table above
+— ~15×), confirming the M9 prediction that QEMU's TCG-emulated int8
+MLP forward pass was not representative of hardware. The **< 1 µs Cortex-A78 target from
 the Phase AI-Eviction TODO is missed on every hardware config**:
 xgboost lands at 4–22 µs, mlp at 4–174 µs, cacheus at 9–197 µs. The
 classical policies (`first_candidate`, `lru`, `lfu`, `arc`, `slm`) all
