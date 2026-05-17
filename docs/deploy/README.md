@@ -84,8 +84,8 @@ the Pi 5 tryboot one-shot mechanism. This requires no host SD
 access, no maintenance OS, and no SDWire — only telnet (or
 serial) into the running board. See [`pi5-sdcard.md`](pi5-sdcard.md)
 §"In-place update from a running SLM-OS",
-`../dynamic-kernel-replace-plan.md` for design, and
-`../pi5-stage-promote-rollback-verification.md` for a hardware
+`../archive/plans/dynamic-kernel-replace-plan.md` for design, and
+`../archive/test-runs/pi5-stage-promote-rollback-verification.md` for a hardware
 round-trip log.
 
 ### Post-deploy verification

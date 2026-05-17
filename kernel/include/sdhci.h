@@ -9,7 +9,7 @@
  *   - BCM2712 EMMC2 on Pi 5 (production target, MMIO at
  *     0x10_00FF_F000 — see linux-bcm2712.dtsi:1188).
  *
- * Scope (per `docs/dynamic-kernel-replace-plan.md` §1):
+ * Scope (per `docs/archive/plans/dynamic-kernel-replace-plan.md` §1):
  *   - Legacy 25 MHz SDR only. No HS200, HS400, CQE, TRIM, tuning.
  *   - PIO data path (no ADMA2). FAT32 cluster sizes at admin-write
  *     speed don't justify DMA setup for the first cut.

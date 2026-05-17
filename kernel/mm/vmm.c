@@ -660,7 +660,7 @@ int vmm_create_user_l1(uint64_t *out_pa)
      * Kernel-side mapping changes that go through L2-level edits
      * propagate to all per-task L1s for free. Direct boot-L1 edits
      * do NOT propagate — see "per-task L1 mirroring drift" risk in
-     * docs/pi5-el0-execution-plan.md. */
+     * docs/archive/plans/pi5-el0-execution-plan.md. */
     for (size_t i = 0; i < USER_L1_FIRST; i++) {
         user_l1[i] = l1_table[i];
     }

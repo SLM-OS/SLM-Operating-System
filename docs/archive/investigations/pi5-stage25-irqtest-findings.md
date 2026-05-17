@@ -5,7 +5,7 @@ NS-EL1 IRQ delivery is broken on Pi 5 regardless of which timer PPI
 is selected. The actual production fix is tracked in
 [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) —
 move SLM-OS to EL2 with VHE. See
-[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md).
+[`pi5-el2-vhe-plan.md`](../plans/pi5-el2-vhe-plan.md).
 
 **Issue:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134).
 **Investigation issue:** [#672](https://github.com/SLM-OS/SLM-Operating-System/issues/672) (closed 2026-05-07).
@@ -159,7 +159,7 @@ validated end-to-end is EL2 / `VBAR_EL2` / PPI 26.
 
 Tracked in [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683):
 move SLM-OS to EL2 with VHE on Pi 5. See
-[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the 5-PR refactor
+[`pi5-el2-vhe-plan.md`](../plans/pi5-el2-vhe-plan.md) for the 5-PR refactor
 plan. The trampoline infrastructure (PR #656) remains structurally
 sound but unexercised on Pi 5 until #683 unblocks hardware IRQ
 delivery; `COOP_PREEMPT` is the working preemption mode in the

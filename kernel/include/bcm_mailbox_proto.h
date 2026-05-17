@@ -39,7 +39,7 @@
 /* ---- Tag IDs for the dynamic-kernel-replace path. ---- */
 /* Pinned to include/soc/bcm2835/raspberrypi-firmware.h
  * (raspberrypi/linux rpi-6.12.y). The Pi 5 firmware mailbox subset
- * is the source of truth — see docs/dynamic-kernel-replace-plan.md
+ * is the source of truth — see docs/archive/plans/dynamic-kernel-replace-plan.md
  * Risk 2 for the trace from `reboot "0 tryboot"` to these tags. */
 #define BCM_TAG_SET_REBOOT_FLAGS     0x00038064u
 #define BCM_TAG_NOTIFY_REBOOT        0x00030048u

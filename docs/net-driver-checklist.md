@@ -160,7 +160,7 @@ the discipline this checklist exists to maintain.
       Phase as LANDED with the merge commit reference
 - [ ] `docs/architecture.md` — add a row under the Networking Subsystem
       table
-- [ ] `docs/pi5-platform-audit.md` (for Pi 5) or equivalent platform
+- [ ] `docs/archive/snapshots/pi5-platform-audit.md` (for Pi 5) or equivalent platform
       audit doc — update the Networking row
 - [ ] If the driver introduces a new tunable CMake option, update
       `docs/building.md` and list it in the networking README

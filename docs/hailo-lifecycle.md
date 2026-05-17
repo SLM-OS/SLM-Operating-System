@@ -664,7 +664,7 @@ Write `num_avail` on ch=2. In a healthy run, fw:
 In the wedged path, fw never advances `num_proc` on ch=2. The
 device-side `dev_base[31:16]` stays `0x0000` (HailoRT's working
 trace shows `0x001f`), and `dev_proc` stays `0x00000000` (HailoRT:
-`0x00020002`). See `docs/hailo-support-ticket-draft.md` for the
+`0x00020002`). See `docs/archive/investigations/hailo-support-ticket-draft.md` for the
 full investigation; the wedge is below the host/driver boundary.
 
 ### 6.4 Wait + read result

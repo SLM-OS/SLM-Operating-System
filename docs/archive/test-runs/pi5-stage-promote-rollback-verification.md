@@ -108,5 +108,5 @@ regardless of starting state.
   persistent across natural power cycles, with no firmware
   intervention required.
 - The full dynamic-kernel-replace flow described in
-  `docs/dynamic-kernel-replace-plan.md` works as designed.
+  [`dynamic-kernel-replace-plan.md`](../plans/dynamic-kernel-replace-plan.md) works as designed.
 - **Closes #35.**

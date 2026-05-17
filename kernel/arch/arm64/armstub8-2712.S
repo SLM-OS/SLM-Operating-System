@@ -36,7 +36,7 @@
  *       self-contained but is more code than (a).
  *
  * (a) is the cleaner path because TF-A's PSCI is well-tested.
- * docs/pi5-armstub-track-c.md tracks the work.
+ * docs/archive/investigations/pi5-armstub-track-c.md tracks the work.
  *
  * The stub does NOT enable GIC forwarding (GICD_CTLR, GICC_CTLR) —
  * that is handled by the kernel's gic_init() after exception vectors

@@ -134,7 +134,7 @@ The boundary-trace toolkit (PRs [#780](https://github.com/SLM-OS/SLM-Operating-S
 - Source: `kernel/ai_accel/hailo/` (control protocol implementation, VDMA, context-switch translator)
 - Source: `kernel/inference/inference_device_hailo.c` (backend integration)
 - Plan: `docs/pi5-ai-hat-plan.md` (Phase 8 closeout points here)
-- Review: `docs/hailo-ai-hat-architecture-review.md` (audit findings — some hypotheses there are now disproven; this doc is the current ground truth)
+- Review: `docs/archive/investigations/hailo-ai-hat-architecture-review.md` (audit findings — some hypotheses there are now disproven; this doc is the current ground truth)
 - Lifecycle: `docs/hailo-lifecycle.md` (boundary-channel state machine)
 - Toolchain: `docs/hailo-toolchain.md` (HEF compilation pipeline)
 - Trace toolkit: `scripts/capture-hailo-trace.sh`, `kernel/ai_accel/hailo/hailo_trace.{h,c}`

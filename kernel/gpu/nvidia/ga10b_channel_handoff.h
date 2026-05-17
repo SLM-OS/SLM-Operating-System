@@ -224,7 +224,7 @@ struct ga10b_channel_handoff {
      * minimum for SLM workloads (~370 ops/token for Qwen 2.5
      * 1.5B). MNIST works with much less but the pool is sized
      * once at channel setup so generous default is fine. See
-     * docs/gpu-qmd-per-dispatch-plan.md §3. */
+     * docs/archive/plans/gpu-qmd-per-dispatch-plan.md §3. */
     uint64_t qmd_pool_phys;
     uint64_t qmd_pool_gpu_va;
     uint32_t qmd_pool_size_bytes;
@@ -416,7 +416,7 @@ struct ga10b_pipeline_op {
  * `ga10b_qmd_populate` against a slot in the QMD pool, then submits
  * the freshly-built QMD's GPU VA via `SEND_PCAS_A` instead of
  * `qmd_gpu_va`. The original `qmd_gpu_va` is kept for byte-compare
- * validation (Phase 4 of docs/gpu-qmd-per-dispatch-plan.md).
+ * validation (Phase 4 of docs/archive/plans/gpu-qmd-per-dispatch-plan.md).
  *
  * Block dims are u32 here for wire-format simplicity even though the
  * QMD's CTA_THREAD_DIM fields are 16 bits wide — the encoder masks

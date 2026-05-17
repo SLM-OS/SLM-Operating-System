@@ -372,7 +372,7 @@ bool vmm_is_mapped(uint64_t virt);
  * kernel-side mapping change must go through L2-level edits to
  * propagate to existing per-task L1s; direct boot-L1 edits do NOT
  * propagate. This invariant is documented in
- * docs/pi5-el0-execution-plan.md "Risks" section.
+ * docs/archive/plans/pi5-el0-execution-plan.md "Risks" section.
  *
  * Concurrency precondition: caller must hold the kernel's VMM
  * serialisation contract. SLM-OS does not maintain a vmm-wide lock;

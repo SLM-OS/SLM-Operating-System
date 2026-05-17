@@ -38,7 +38,7 @@ Block devices, VFS, filesystem backends.
 
 - `docs/filesystem.md` (narrative; persistent LFS on boot FAT)
 - `docs/vfs.md` (VFS design)
-- `docs/dynamic-kernel-replace-plan.md` (boot_media + SDHCI + tryboot kernel staging)
+- `docs/archive/plans/dynamic-kernel-replace-plan.md` (boot_media + SDHCI + tryboot kernel staging)
 - `kernel/lib/littlefs/` (LittleFS source)
 - `kernel/lib/fatfs/` (FatFs source)
 - `kernel/drivers/ramdisk.c` (RAM disk)

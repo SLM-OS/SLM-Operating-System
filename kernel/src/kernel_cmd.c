@@ -3,7 +3,7 @@
  *
  * Stage 4 of the dynamic-kernel-replace plan (#370). See
  * `kernel/include/kernel_cmd.h` for the public API and the
- * subcommand contract; `docs/dynamic-kernel-replace-plan.md` for
+ * subcommand contract; `docs/archive/plans/dynamic-kernel-replace-plan.md` for
  * the overall design.
  *
  * Backend wiring goes through `boot_media_acquire/release`
@@ -14,7 +14,7 @@
  * SDHCI backend acquire returns NULL and every subcommand reports
  * "no boot partition" cleanly. The pin matters on Pi 5 — without
  * it, repeated kernel_cmd subcommands wedge the firmware mailbox.
- * See `docs/pi5-sdhci-real-card-verification.md` for the
+ * See `docs/archive/test-runs/pi5-sdhci-real-card-verification.md` for the
  * empirical trace and #371 sub-task 5 for the discovery.
  */
 

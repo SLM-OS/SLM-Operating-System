@@ -57,11 +57,11 @@ mailbox tags are not portable.
 ## See also
 
 - `docs/boot-sequence.md` (narrative)
-- `docs/dynamic-kernel-replace-plan.md` — runtime kernel-replace design, sub-task status
-- `docs/pi5-tryboot-verification.md` — Pi 5 tryboot one-shot mechanism verification
-- `docs/pi5-stage-promote-rollback-verification.md` — full round-trip hardware test log
-- `docs/pi5-sdhci-real-card-verification.md` — BCM2712 EMMC2 SDHCI on real cards
-- `docs/jetson-pcie-regression-check.md` — verifies pcie_core changes are inert on Jetson
+- `docs/archive/plans/dynamic-kernel-replace-plan.md` — runtime kernel-replace design, sub-task status
+- `docs/archive/test-runs/pi5-tryboot-verification.md` — Pi 5 tryboot one-shot mechanism verification
+- `docs/archive/test-runs/pi5-stage-promote-rollback-verification.md` — full round-trip hardware test log
+- `docs/archive/test-runs/pi5-sdhci-real-card-verification.md` — BCM2712 EMMC2 SDHCI on real cards
+- `docs/archive/investigations/jetson-pcie-regression-check.md` — verifies pcie_core changes are inert on Jetson
 - `docs/jetson-cbb-report.md` — CBB permissions by entry path
 
 *Last updated: 8 May 2026*
