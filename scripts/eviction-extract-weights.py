@@ -115,7 +115,13 @@ def parse_array(text, name):
     """
     # Anchor on `pub const NAME:` to avoid matching shorter names that
     # might appear as substrings (e.g. `W_L1` inside `W_L10` if such a
-    # thing existed). The trailing `;` closes the declaration.
+    # thing existed). The trailing `;` closes the declaration and is
+    # load-bearing: the capture group `(\[.*?\])` uses a non-greedy
+    # quantifier that would otherwise stop at the FIRST `]` inside a
+    # 2D array (e.g. `[[1, 2], ...]` would capture only `[[1, 2]`).
+    # The `;` requirement forces the engine to expand `.*?` past
+    # every intermediate `]` until the closing `];` of the whole
+    # declaration is matched, which is what we want.
     pattern = re.compile(
         r"pub\s+const\s+" + re.escape(name)
         + r"\s*:\s*\[[^=]+=\s*(\[.*?\]);",
