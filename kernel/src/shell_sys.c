@@ -4623,6 +4623,50 @@ int cmd_nvgpu(int argc, char *argv[])
         shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
+    if (strcmp(argv[1], "fecs-stop-restart") == 0) {
+        /* #834 probe Y: force FECS to flush its internal "current
+         * channel" state by issuing STOP_CTXSW (method 0x38)
+         * followed by START_CTXSW (0x39).
+         *
+         * Hypothesis: the CTXSW_CHECKSUM_MISMATCH (mb6=0x21) we
+         * see during `nvgpu submit-compute` ctxsw is because FECS
+         * holds a stale "expected CRC" for the previously-current
+         * channel and compares it against the bytes it reads for
+         * OUR channel. STOP_CTXSW makes FECS drop that state;
+         * START_CTXSW re-enables it for the next runlist event.
+         * If the watchdog stops firing on a subsequent
+         * submit-compute, the staleness hypothesis is correct.
+         *
+         * Method values per `gr_fecs_method_push_adr_stop_ctxsw_v` /
+         * `_start_ctxsw_v` in nvgpu-include-nvgpu-hw-ga10b-hw_gr_
+         * ga10b.h. Both poll for `mailbox_value_pass_v` = 0x1. */
+        int s = ga10b_fecs_method_push(0x38u, 0xFFFFFFFFu, 0x1u);
+        int t = ga10b_fecs_method_push(0x39u, 0xFFFFFFFFu, 0x1u);
+        shell_printf("fecs-stop-restart: STOP_CTXSW=%d "
+                     "START_CTXSW=%d\r\n", s, t);
+        return (s == 0 && t == 0) ? 0 : -1;
+    }
+    if (strcmp(argv[1], "fecs-newctx") == 0) {
+        /* #834 probe S: poke `gr_fecs_new_ctx_r()` with the
+         * handoff's channel inst block phys so FECS knows the
+         * "next" channel for any subsequent ctxsw. Followed by
+         * `nvgpu submit-compute`, this tests whether the FECS
+         * watchdog timeout (gr_intr=0x80000) is caused by FECS
+         * trying to save a stale current_ctx (PDB=0 leftover from
+         * Linux's tear-down) rather than load our channel.
+         *
+         * Requires `nvgpu inherit` + `nvgpu channel` first. */
+        const struct ga10b_channel_handoff *h2 =
+            ga10b_bringup_handoff();
+        if (h2 == NULL || h2->inst_block_phys == 0) {
+            shell_puts("fecs-newctx: no handoff loaded "
+                       "(run nvgpu channel first)\r\n");
+            return -1;
+        }
+        int rc = ga10b_fecs_set_new_ctx(h2->inst_block_phys);
+        shell_printf("fecs-newctx: rc=%d\r\n", rc);
+        return rc;
+    }
     if (strcmp(argv[1], "submit-compute") == 0) {
         /* Phase 7 (compute): COMPUTE_B SEMAPHORE_RELEASE smoke test.
          * Requires `nvgpu inherit` + `nvgpu channel` first (same as
@@ -4746,8 +4790,49 @@ int cmd_nvgpu(int argc, char *argv[])
                     goto oplib_stage_call;
                 }
                 if (h != NULL && h->inst_block_phys != 0) {
-                    inst_phys = h->inst_block_phys;
-                } else {
+                    /* #834 fix A: rebuild the helper-published inst
+                     * block's PDB before staging. The helper publishes
+                     * inst_block_phys via FECS_CURRENT_CTX right
+                     * after its isolation sema fires, but post-kexec
+                     * the PT pages backing Linux's PDB tree may have
+                     * been clobbered by SLM-OS PMM — static walks of
+                     * pushbuf_gpu_va against this PDB show
+                     * PDE2[127] INVALID even though the channel was
+                     * fully functional pre-kexec. The dispatch path
+                     * sees the same INVALID translations, and the
+                     * trailing sema-release write lands at an
+                     * unmapped VA.
+                     *
+                     * Rebuilding produces a fresh SLM-OS-allocated
+                     * PDB and re-installs pushbuf/sema/qmd_pool
+                     * mappings from the handoff. Then
+                     * `oplib_pool_stage_to_gpu` adds shader/cbuf
+                     * mappings to the same PDB, putting every VA
+                     * the dispatch needs in one consistent tree.
+                     *
+                     * Non-destructive (per #839 / #842): the rebuild
+                     * preserves engine_fw_magic, subcontext PDB
+                     * pointers, and Linux's other inst-block fields.
+                     * Only the main PDB pointer + RAMFC + the
+                     * subcontext-VEID slot are overridden. */
+                    shell_printf("oplib stage: rebuilding handoff "
+                                 "inst 0x%lx PDB before staging "
+                                 "(#834 fix A)\r\n",
+                                 (unsigned long)h->inst_block_phys);
+                    int rrc =
+                        ga10b_gmmu_rebuild_for_handoff(
+                            h->inst_block_phys, h);
+                    if (rrc < 0) {
+                        shell_printf("oplib stage: rebuild-gmmu "
+                                     "rc=%d — falling through to "
+                                     "boot/FECS/DRAM discovery\r\n",
+                                     rrc);
+                    } else {
+                        inst_phys = h->inst_block_phys;
+                        goto oplib_stage_call;
+                    }
+                }
+                {
                     /* Prefer the boot-time capture from
                      * `ga10b_kexec_handoff_register_reserves` over a
                      * live FECS_CURRENT_CTX read. The live register

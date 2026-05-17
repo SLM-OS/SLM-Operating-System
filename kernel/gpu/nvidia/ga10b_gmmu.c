@@ -26,6 +26,7 @@
 #include "../../include/pmm.h"
 #include "../../include/string.h"
 #include "../../include/timer.h"
+#include "../../include/vmm.h"      /* vmm_map_region, VMM_FLAG_* */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -186,6 +187,32 @@ static void decode_dual_pde_small(uint64_t entry,
     *out_next_phys = lo << 12;
 }
 
+/* Decode the big-page half of a dual PDE (PDE0). Layout per nvgpu's
+ * `gmmu_new_dual_pde_*_big_*_f()` encoders:
+ *   bits[2:0]   = aperture (0=invalid, 2=vid, 4=sys_coh, 6=sys_ncoh)
+ *   bit 3       = volatile
+ *   bits[31:4]  = big_addr = (phys_of_big_PT >> 8) — 28 bits
+ *   pde_v[1][7:0] = high byte of big_addr (extends to ~36 bits of phys)
+ *
+ * Phys reconstruction: phys = ((hi_byte << 28) | low_28_bits) << 8.
+ *
+ * This decoder is used when our walker reads the FIRST 8 bytes of a
+ * 16-byte dual PDE entry (offset 0..7 in the entry) — that's the
+ * big-page child. For 64-KB big-page mappings (the helper's default
+ * for pushbuf/sem/qmd_pool/shaders), this is the correct half. */
+static void decode_dual_pde_big(uint64_t entry,
+                                uint64_t *out_next_phys,
+                                uint8_t *out_aperture,
+                                bool *out_valid)
+{
+    uint8_t aperture = (uint8_t)(entry & 0x7u);
+    *out_aperture = aperture;
+    *out_valid = (aperture != 0);
+    uint64_t lo28 = (entry >> 4) & 0x0fffffffULL;   /* bits [31:4]   */
+    uint64_t hi8  = (entry >> 32) & 0xffULL;        /* pde_v[1][7:0] */
+    *out_next_phys = ((hi8 << 28) | lo28) << 8;
+}
+
 /* Decode a leaf PTE. */
 static void decode_pte(uint64_t entry,
                        uint64_t *out_phys,
@@ -241,19 +268,45 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
     /* Walk PDE3 → PDE2 → PDE1 → PDE0 → PTE. */
     struct {
         int hi, lo;
+        uint8_t entry_size;
     } level_bits[5] = {
-        {GA10B_PDE3_VA_HI, GA10B_PDE3_VA_LO},
-        {GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO},
-        {GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO},
-        {GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO},
-        {GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO},
+        {GA10B_PDE3_VA_HI, GA10B_PDE3_VA_LO, GA10B_GMMU_ENTRY_SIZE},
+        {GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO, GA10B_GMMU_ENTRY_SIZE},
+        {GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO, GA10B_GMMU_ENTRY_SIZE},
+        /* Level 3 entries are dual-PDE0 (16 bytes each — big-page
+         * child at offset 0..7, small-page child at 8..15). The
+         * walker reads the first 8 bytes (big-page child) — fine
+         * for 64-KB big-page mappings which are the helper's
+         * default; small-page-only mappings will appear as "PDE0
+         * invalid" here. A future follow-up should try both. */
+        {GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO, GA10B_GMMU_PDE0_SIZE},
+        {GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO,  GA10B_GMMU_ENTRY_SIZE},
     };
 
     uint64_t cur_table_phys = pdb_phys;
+    /* Tracks whether the dual-PDE0 fell through to its small-page
+     * child. Affects how level 4 indexes the PTE table: big-page
+     * mappings use bits [20:16] (5 bits, 32 entries × 64 KB) while
+     * small-page mappings use bits [20:12] (9 bits, 512 entries ×
+     * 4 KB). Hardware-observed on jetson-nano-2 2026-05-17: the
+     * helper's pushbuf is small-page-mapped, so without this
+     * fallback the walker stalled at PDE0 with "big-side invalid"
+     * even though the small-side child held the right pointer. */
+    bool followed_small_pde0 = false;
 
     for (int lvl = 0; lvl < 5; lvl++) {
-        uint16_t idx = va_index(gpu_va, level_bits[lvl].hi, level_bits[lvl].lo);
-        uint64_t entry_phys = cur_table_phys + (uint64_t)idx * GA10B_GMMU_ENTRY_SIZE;
+        /* L4 index width depends on which PDE0 child we followed.
+         * The level_bits[] table holds the big-page width by
+         * default; override for the small-side case here. */
+        int idx_hi = level_bits[lvl].hi;
+        int idx_lo = level_bits[lvl].lo;
+        if (lvl == 4 && followed_small_pde0) {
+            idx_hi = GA10B_PTE_SMALL_VA_HI;
+            idx_lo = GA10B_PTE_SMALL_VA_LO;
+        }
+        uint16_t idx = va_index(gpu_va, idx_hi, idx_lo);
+        uint64_t entry_phys = cur_table_phys +
+                              (uint64_t)idx * level_bits[lvl].entry_size;
         uint64_t entry = phys_read64(entry_phys);
 
         struct ga10b_gmmu_level_record *rec = &result->levels[lvl];
@@ -287,8 +340,30 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
         uint8_t aperture;
         bool valid;
         if (lvl == 3) {
-            decode_dual_pde_small(entry, &next_phys, &aperture, &valid);
-            rec->dual_pde_followed_small = true;
+            /* PDE0 is a dual entry (16 bytes). First 8 bytes are
+             * the big-page child; bytes 8..15 are the small-page
+             * child. Try big first (cheaper for typical
+             * 64-KB-page workloads); if invalid, read the small-
+             * page child from offset +8 and try again. The
+             * walker's leaf-level indexing follows whichever
+             * child was used. */
+            decode_dual_pde_big(entry, &next_phys, &aperture, &valid);
+            if (!valid) {
+                uint64_t small_entry = phys_read64(entry_phys + 8u);
+                decode_dual_pde_small(small_entry, &next_phys,
+                                       &aperture, &valid);
+                if (valid) {
+                    /* Update record so post-mortem dumps reflect
+                     * which half held the valid pointer. */
+                    rec->entry = small_entry;
+                    followed_small_pde0 = true;
+                    rec->dual_pde_followed_small = true;
+                } else {
+                    rec->dual_pde_followed_small = false;
+                }
+            } else {
+                rec->dual_pde_followed_small = false;
+            }
         } else {
             decode_regular_pde(entry, &next_phys, &aperture, &valid);
         }
@@ -1115,6 +1190,7 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
  * ============================================================ */
 
 #include "ga10b_channel_handoff.h"
+#include "ga10b_bringup.h"          /* ga10b_dump_inst_block_at */
 #include "../../include/uart.h"
 
 /* Inst-block PDB-pointer encoding per
@@ -1170,6 +1246,7 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
  * had set up (e.g., subcontext 0 with a different PDB pointer for
  * a Linux-side use case the channel may still need). */
 #define GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO 166u
+#define GA10B_RAMIN_W_SC_PDB_VALID_LONG_HI 167u
 #define GA10B_RAMIN_W_SC_PDB_BASE(veid)    (168u + 4u * (veid))
 
 /* PBDMA-encoded field values for a default Tegra GA10B channel
@@ -1257,14 +1334,32 @@ static int rebuild_map_range(uint64_t pdb_phys, uint64_t gpu_va_base,
 }
 
 int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
-                                   const struct ga10b_channel_handoff *h)
+                                   const struct ga10b_channel_handoff *h_in)
 {
-    if (h == NULL) {
+    if (h_in == NULL) {
         return -1;
     }
     if (!phys_in_dram(inst_block_phys, 4096)) {
         return -1;
     }
+    /* Cast away const so we can override chid/tsg_id/work_submit_token
+     * downstream (#844 chid-override experiment). The handoff struct
+     * is owned by ga10b_bringup.c's `g_handoff` static; the rebuild
+     * path is the single writer post-inherit, and there are no
+     * concurrent readers during oplib stage. */
+    struct ga10b_channel_handoff *h =
+        (struct ga10b_channel_handoff *)(uintptr_t)h_in;
+
+    /* #844 chid override REVERTED. Tried chid=1 with token =
+     * channel_base(0x1fc) + 1 = 0x1fd; produced GR-poison state
+     * (every register reads 0xbadf1002) consistently across two
+     * runs. Reason unclear — chid=1 might collide with a CHRAM
+     * slot Linux still depends on, or the
+     * `token = channel_base + chid` encoding may have extra bits
+     * we haven't decoded. Reverting to chid=0 (helper's value)
+     * keeps GR in the "clean but PBDMA-doesn't-see-submits"
+     * state, which is a better starting point for the runlist-
+     * entry decode work below. */
 
     /* #788 Stage 6: trace every PMM page the rebuild allocates so
      * the operator can spot which one might be colliding with an
@@ -1273,6 +1368,14 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
      * is overwhelming when not specifically investigating.
      * Toggle on for diagnostic captures. */
     /* ga10b_gmmu_table_alloc_trace_set(true); */
+
+    /* #834 diagnostic — dump the inst block BEFORE we touch it, so
+     * the post-rebuild dump (at function exit) can be diffed against
+     * Linux's published state. Reveals which fields the rebuild
+     * actually changes vs leaves as Linux-published. Especially
+     * relevant when GR poisons on ctxsw and we need to identify
+     * the LAST inst-block field that's still stale. */
+    ga10b_dump_inst_block_at("REBUILD-BEFORE", inst_block_phys);
 
     /* 1. Allocate a fresh PDB page from SLM-OS PMM. Zero it so
      *    every PDE3 entry reads as invalid until `map_one_page`
@@ -1314,6 +1417,38 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
      *    word-131 magic + subcontext-PDB write below. */
     volatile uint32_t *inst = (volatile uint32_t *)(uintptr_t)inst_block_phys;
 
+    /* #834 experiment: zero ALL of the RAMFC region (words 0..127)
+     * before writing our subset.
+     *
+     * The inst-block diff dump (REBUILD-BEFORE vs REBUILD-AFTER on
+     * 2026-05-16) shows Linux leaves several preserved-by-us fields
+     * non-zero: pseudorandom-looking values at words 11, 29, 38 and
+     * a VA-encoded pair at words 23-24, plus a bit-31-set value at
+     * word 27. Some of those plausibly hold stale FECS sequence
+     * numbers / checksums / pointers that contribute to the
+     * gr_intr=0xbadf1002 poison during ctxsw-in.
+     *
+     * Strategy: wipe RAMFC, write exactly the fields we know about,
+     * leave the rest at zero. Two outcomes both informative:
+     *   - GR poison disappears → one of those preserved fields was
+     *     the trigger; binary-search to identify which.
+     *   - GR poison shifts to a different register pattern → FECS
+     *     needed a non-zero value somewhere we just cleared; the
+     *     new error code tells us which.
+     *   - GR poison identical → RAMFC isn't the source; look at GR-
+     *     engine-internal state (gr_ctx, golden image), most likely
+     *     fixable only by getting v10 gr_ctx-extents publishing
+     *     working on the helper side.
+     *
+     * Range chosen as 0..127 (i.e. 512 B) which covers all of RAMFC
+     * proper (0..63 by GA10B_RAMFC_W_* constants) plus a margin past
+     * it. Words 128/129 (PDB lo/hi) and 131 (engine_fw_magic) get
+     * re-written immediately below; words 130 + 134-137 + 166-167
+     * + 168-423 are all explicitly handled by the existing code. */
+    for (uint32_t i = 0; i < 128u; i++) {
+        inst[i] = 0u;
+    }
+
     /* Encode PDB-lo word: aperture (sys_mem_ncoh on Tegra),
      * volatile bit, ver2 page-table format, 64 KB big-page size,
      * and phys[31:12] in bits [31:12] (the bottom 12 bits of phys
@@ -1336,21 +1471,49 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
      * (where the inst block started zero). */
     inst[GA10B_RAMIN_W_ENGINE_FW_MAGIC] = GA10B_RAMIN_VAL_ENGINE_FW_MAGIC;
 
-    /* Subcontext-VEID PDB pointer — GR uses this when running
-     * compute under the channel's subcontext. We point it at the
-     * same fresh PDB as the main PDB so both PBDMA (main) and GR
-     * (subcontext) see the same page-table tree.
+    /* Subcontext-VEID PDB pointer + valid-long bitmap.
      *
-     * Also OR in the subcontext-valid-long bit for our VEID. The
-     * valid_long bits are packed 32 per word starting at word 166;
-     * GA10B_HELPER_SUBCTX_ID (= 1) lives at bit 1 of word 166. We
-     * read-modify-write so other valid-long bits Linux had set are
-     * preserved (Linux may have multiple subcontexts active for
-     * its own channel). */
+     * GR loads the subcontext indexed by VEID when running compute
+     * and dereferences *that* subcontext's pdb pointer (NOT the
+     * main pdb). Each VEID 0..63 has a 4-word slot starting at
+     * `168 + 4*veid`; the valid-long bitmap (1 bit per veid) lives
+     * in words 166 (veids 0..31) and 167 (veids 32..63).
+     *
+     * #844: previously we ONLY rewrote the slot for our VEID (= 1)
+     * and OR-ed in bit 1 of the valid-long lo word, preserving
+     * Linux's other subcontext state. That left two stale-pointer
+     * hazards in the inst block:
+     *
+     *   1. Per-VEID PDB slots for veids ≠ 1: Linux may have
+     *      configured multiple subcontexts (e.g. veid 0 = SYNC) with
+     *      PDB pointers into pages SLM-OS's PMM has since re-used.
+     *      When FECS ctxsws to our channel it can iterate the
+     *      subcontext valid mask and try to load the secondary
+     *      PDBs alongside ours; a dereference of a clobbered page
+     *      poisons GR (0xbadf1002).
+     *
+     *   2. valid-long bits for veids ≠ 1: even if a slot's pointer
+     *      is zero, the corresponding valid bit being set tells GR
+     *      "this subcontext is configured", and the load happens.
+     *
+     * Fix: zero ALL 64 subcontext slots (256 words = inst[168..423])
+     * and BOTH valid-long words; then write our VEID=1 slot fresh
+     * and set just bit 1 of the lo valid-long word. Now only the
+     * subcontext we control is visible to GR. */
+    for (uint32_t veid = 0; veid < 64u; veid++) {
+        uint32_t w = GA10B_RAMIN_W_SC_PDB_BASE(veid);
+        inst[w + 0] = 0u;
+        inst[w + 1] = 0u;
+        inst[w + 2] = 0u;
+        inst[w + 3] = 0u;
+    }
+    inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO] = 0u;
+    inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_HI] = 0u;
+
     uint32_t sc_base = GA10B_RAMIN_W_SC_PDB_BASE(GA10B_HELPER_SUBCTX_ID);
     inst[sc_base + 0] = pdb_lo_word;
     inst[sc_base + 1] = pdb_hi_word;
-    inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO] |=
+    inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO] =
         (1u << GA10B_HELPER_SUBCTX_ID);
 
     /* 2b. Populate RAMFC fields PBDMA reads when fetching submits
@@ -1386,31 +1549,60 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
     inst[GA10B_RAMFC_W_ACQUIRE]       = GA10B_RAMFC_VAL_ACQUIRE_LONG;
     inst[GA10B_RAMFC_W_INTR_NOTIFY]   = GA10B_RAMFC_VAL_INTR_NOTIFY;
     inst[GA10B_RAMFC_W_CONFIG]        = GA10B_RAMFC_VAL_CONFIG_USERD_WB;
+    /* #844: encode SET_CHANNEL_INFO with hw_chid (= channel_base
+     * + chid) rather than the per-runlist chid. FECS validates
+     * RAMFC's chid against the runlist entry's chid (= hw_chid in
+     * our encoding); a mismatch crashes GR during ctxsw with the
+     * same 0xbadf1002 poison signature we see when the internal
+     * doorbell is rung. channel_base = h->work_submit_token
+     * (which the helper publishes as `channel_base + chid` for
+     * chid=0, giving us channel_base directly when h->channel_id
+     * is 0). */
+    const uint32_t ramfc_hw_chid =
+        h->work_submit_token + h->channel_id;
     inst[GA10B_RAMFC_W_SET_CHANNEL_INFO] =
-        GA10B_RAMFC_SET_CHANNEL_INFO(h->channel_id,
+        GA10B_RAMFC_SET_CHANNEL_INFO(ramfc_hw_chid,
                                       GA10B_HELPER_SUBCTX_ID);
 
-    /* engine_wfi block (post-RAMFC, pre-PDB region for the
-     * engine-wait-for-idle save pointer). Only the VEID is written
-     * by `ga10b_ramfc_setup`; ptr_lo/ptr_hi/target stay zero in
-     * the inherited channel because the helper doesn't allocate a
-     * GR ctxsw save buffer (Tegra's nvgpu lazy-allocates it on
-     * first GR engagement, and the helper never engages GR — only
-     * does host-family sema releases on subch 0). */
+    /* engine_wfi block (#844 — clear stale Linux pointers).
+     * Words 132 (target + ptr_lo) and 133 (ptr_hi) point at the
+     * GR ctxsw save buffer Linux nvgpu allocated. Post-kexec
+     * SLM-OS's PMM may have re-allocated those pages, so the
+     * pointer is now dangling. When FECS tries to ctxsw to our
+     * channel, it dereferences `engine_wfi_ptr` to save the
+     * outgoing context — that load/store against clobbered
+     * memory is the likely cause of the `gr_intr=0xbadf1002`
+     * poison we see when word 1 of the TSG header is set to
+     * 0x1 (FECS load attempt).
+     *
+     * Zero target + ptr_hi so nvgpu's "lazy-allocate the
+     * ctxsw save buffer on first engagement" path kicks in.
+     * Word 134 (veid) keeps the helper's subctx (= 1). */
+    inst[132] = 0u;   /* engine_wfi_target + ptr_lo */
+    inst[133] = 0u;   /* engine_wfi_ptr_hi */
     inst[GA10B_RAMIN_W_ENGINE_WFI_VEID] = GA10B_HELPER_SUBCTX_ID;
+    /* Also clear eng_method_buffer_addr (words 136/137). Same
+     * staleness story as engine_wfi: Linux pointed these at a
+     * method-buffer DMA allocation that SLM-OS PMM may have
+     * re-used. nvgpu lazy-allocates when zero. */
+    inst[136] = 0u;   /* eng_method_buffer_addr_lo */
+    inst[137] = 0u;   /* eng_method_buffer_addr_hi */
 
     cache_clean_range((void *)(uintptr_t)inst_block_phys, 4096);
 
-    uart_printf("[rebuild-gmmu] inst_block@0x%lx written (preserving "
-                "Linux-set engine_fw_magic + non-target subcontexts):\n",
-                (unsigned long)inst_block_phys);
+    uart_printf("[rebuild-gmmu] inst_block@0x%lx written "
+                "(non-target subcontexts zeroed; only VEID=%u active):\n",
+                (unsigned long)inst_block_phys,
+                (unsigned)GA10B_HELPER_SUBCTX_ID);
     uart_printf("[rebuild-gmmu]   PDB_lo=0x%08x PDB_hi=0x%08x "
                 "(main + subcontext VEID=%u at word %u)\n",
                 (unsigned)pdb_lo_word, (unsigned)pdb_hi_word,
                 (unsigned)GA10B_HELPER_SUBCTX_ID, (unsigned)sc_base);
-    uart_printf("[rebuild-gmmu]   engine_fw_magic=0x%08x sc_valid_long=0x%08x\n",
+    uart_printf("[rebuild-gmmu]   engine_fw_magic=0x%08x "
+                "sc_valid_long=lo:0x%08x/hi:0x%08x\n",
                 (unsigned)inst[GA10B_RAMIN_W_ENGINE_FW_MAGIC],
-                (unsigned)inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO]);
+                (unsigned)inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO],
+                (unsigned)inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_HI]);
     uart_printf("[rebuild-gmmu]   gp_base=0x%08x gp_base_hi=0x%08x "
                 "(entries=%u → log2=%u)\n",
                 (unsigned)gp_base_lo_val, (unsigned)gp_base_hi_val,
@@ -1425,7 +1617,7 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
                 GA10B_RAMFC_VAL_ACQUIRE_LONG,
                 GA10B_RAMFC_VAL_INTR_NOTIFY,
                 GA10B_RAMFC_VAL_CONFIG_USERD_WB,
-                GA10B_RAMFC_SET_CHANNEL_INFO(h->channel_id,
+                GA10B_RAMFC_SET_CHANNEL_INFO(ramfc_hw_chid,
                                               GA10B_HELPER_SUBCTX_ID),
                 (unsigned)GA10B_HELPER_SUBCTX_ID);
 
@@ -1577,7 +1769,471 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
                 "mapped (%d PT pages allocated)\n",
                 rc, mapped, g_table_alloc_count);
 
+    /* 5. Enable our channel in CHRAM + force a context reload so
+     *    FECS picks up the new PDB on the next scheduling event
+     *    (#844 fix). Without this, dispatches go to FECS_CURRENT_-
+     *    CTX's loaded channel (typically a Linux nvgpu channel
+     *    still on the runlist post-kexec) — diagnosed via #838's
+     *    pre-launch sema diagnostic ("PBDMA advanced but NEITHER
+     *    pre- nor post-sema fired, poll=0").
+     *
+     *    Mirrors nvgpu's `ga10b_channel_enable` (~/slmos-ref/
+     *    nvidia/nvgpu-hal-fifo-channel_ga10b_fusa.c:59).
+     *
+     *    Runlist register block lives at a Tegra-specific BAR0
+     *    offset, NOT the dGPU's hardcoded 0xC000. Discover via the
+     *    top_device_info2 topology table: walk the per-engine
+     *    rows looking for type_enum=GRAPHICS (0), then read the
+     *    GR engine's `runlist_pri_base` from its row[2]. The
+     *    runlist's `channel_config` (offset 0x4 within the block)
+     *    then carries the CHRAM register BAR0 offset.
+     *
+     *    Topology layout per ~/slmos-ref/nvidia/nvgpu-hal-top-
+     *    top_ga10b_fusa.c:60-114 (`ga10b_top_parse_next_dev`):
+     *      - top_device_info_cfg @ BAR0 + 0x224fc
+     *          bits[31:20] = num_rows
+     *          bits[3:0]   = version (must be 2 = init)
+     *      - top_device_info2_r(i) @ BAR0 + 0x22800 + i*4
+     *          3 rows per device:
+     *            row[0]: type_enum @ [30:24], chain_more @ [31]
+     *            row[1]: device_pri_base @ [25:8] << 8, is_engine @ [30]
+     *            row[2]: runlist_pri_base @ [25:10] << 10
+     *      - Zero rows separate devices (skip those tokens). */
+    {
+        const uint64_t BAR0 = 0x17000000ull;
+        const uint32_t TOP_CFG_OFF      = 0x000224fcu;
+        const uint32_t TOP_DEV_INFO2_OFF = 0x00022800u;
+        const uint32_t TYPE_ENUM_GRAPHICS = 0u;
+
+        uint32_t cfg = *(volatile uint32_t *)(uintptr_t)(BAR0 + TOP_CFG_OFF);
+        uint32_t version  = cfg & 0xfu;
+        uint32_t num_rows = (cfg >> 20) & 0xfffu;
+        uint64_t gr_rl_pri_base = 0u;
+
+        if (version != 2u) {
+            uart_printf("[rebuild-gmmu] top_device_info_cfg=0x%08x "
+                        "version=%u != 2 — can't walk topology; "
+                        "CHRAM enable skipped (#844)\n",
+                        (unsigned)cfg, (unsigned)version);
+        } else {
+            for (uint32_t i = 0; i + 2u < num_rows; i++) {
+                uint32_t row0 = *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + TOP_DEV_INFO2_OFF + i * 4u);
+                if (row0 == 0u) continue;
+                uint32_t chain_more = (row0 >> 31) & 0x1u;
+                if (chain_more != 1u) continue;
+                uint32_t type = (row0 >> 24) & 0x7fu;
+                if (type != TYPE_ENUM_GRAPHICS) {
+                    i += 2;   /* skip device's rows 1 + 2 */
+                    continue;
+                }
+                uint32_t row2 = *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + TOP_DEV_INFO2_OFF + (i + 2u) * 4u);
+                gr_rl_pri_base =
+                    (uint64_t)(((row2 >> 10) & 0xffffu)) << 10;
+                uart_printf("[rebuild-gmmu] topology: GR at row %u "
+                            "row0=0x%08x row2=0x%08x "
+                            "runlist_pri_base=0x%lx\n",
+                            (unsigned)i, (unsigned)row0,
+                            (unsigned)row2,
+                            (unsigned long)gr_rl_pri_base);
+                break;
+            }
+        }
+
+        if (gr_rl_pri_base == 0u) {
+            uart_puts("[rebuild-gmmu] couldn't find GR engine in "
+                      "topology table — CHRAM enable skipped (#844)"
+                      "\n");
+        } else {
+            uint64_t channel_cfg_addr =
+                BAR0 + gr_rl_pri_base + 0x4u;
+            uint32_t channel_config =
+                *(volatile uint32_t *)(uintptr_t)channel_cfg_addr;
+            uint32_t chram_bar0_offset =
+                ((channel_config >> 4) & 0x0fffffffu) << 4;
+            /* #844: index CHRAM by `hw_chid = channel_base + chid`,
+             * not by `chid` alone. nvgpu's `gv11b_usermode_doorbell_-
+             * token` formula gives hw_chid = `channel_base + ch->chid`,
+             * and the helper's work_submit_token = 0x1fc for chid=0
+             * implies channel_base = 0x1fc on this Tegra GA10B. The
+             * CHRAM array is indexed by hw_chid (the doorbell's
+             * channel-id namespace), not by per-runlist chid — so
+             * writing CHRAM[chid=0] hits the wrong slot, and FECS
+             * never finds an enabled channel matching the doorbell's
+             * hw_chid encoding.
+             *
+             * Also encode the runlist channel entry's chid field
+             * with `hw_chid` so FECS's entry-lookup uses the same
+             * CHRAM slot. */
+            const uint32_t channel_base_hw = h->work_submit_token;
+            const uint32_t hw_chid =
+                channel_base_hw + h->channel_id;
+            uint64_t chram_chan_addr =
+                BAR0 + (uint64_t)chram_bar0_offset +
+                (uint64_t)hw_chid * 4ull;
+            volatile uint32_t *chram =
+                (volatile uint32_t *)(uintptr_t)chram_chan_addr;
+            /* enable_channel (0x2) then force_ctx_reload (0x200).
+             * The update field accepts one action per write; do two
+             * writes in sequence with a dsb between, matching
+             * nvgpu's bind sequence. */
+            *chram = 0x00000002u;   /* enable_channel */
+            __asm__ volatile("dsb sy" ::: "memory");
+            *chram = 0x00000200u;   /* force_ctx_reload */
+            __asm__ volatile("dsb sy" ::: "memory");
+            uart_printf("[rebuild-gmmu] CHRAM[hw_chid=%u=chid_%u+base_0x%x]"
+                        "@0x%lx enabled + force_ctx_reload "
+                        "(chram_bar0=0x%x from channel_config=0x%08x)"
+                        "\n",
+                        (unsigned)hw_chid,
+                        (unsigned)h->channel_id,
+                        (unsigned)channel_base_hw,
+                        (unsigned long)chram_chan_addr,
+                        (unsigned)chram_bar0_offset,
+                        (unsigned)channel_config);
+
+            /* #844 candidate (3) — REVERTED: clearing all non-ours
+             * CHRAM entries (2047 slots × 0xFFFFFFFF =
+             * update_clear_channel_v) is too destructive. Linux
+             * channels (Xorg display, kworker, etc.) are still
+             * actively bound to GR via these CHRAM entries; the
+             * clear triggers an immediate GR teardown / power-
+             * gate (every register reads 0xbadf1002 poison
+             * post-clear). The "lock FECS to only our channel"
+             * idea needs a less destructive approach — see #844
+             * for the next candidates. */
+
+            /* Force a runlist preempt so FECS unloads the currently-
+             * running Linux channel and re-reads the runlist. After
+             * preempt completes, FECS picks the next runnable
+             * channel (now including ours since we set enable +
+             * force_ctx_reload above). Without this, FECS may
+             * stay loaded with the Linux channel for the lifetime
+             * of SLM-OS — our enable + reload bits become "pending"
+             * but never get acted on. Register at
+             * gr_rl_pri_base + 0x98; value =
+             * runlist_preempt_runlist_preempt_pending_true_f (0x200000)
+             * |  runlist_preempt_type_runlist_f (0x0). */
+            uint64_t preempt_addr =
+                BAR0 + gr_rl_pri_base + 0x98u;
+            *(volatile uint32_t *)(uintptr_t)preempt_addr =
+                0x00200000u;
+            __asm__ volatile("dsb sy" ::: "memory");
+            uart_printf("[rebuild-gmmu] runlist preempt @0x%lx "
+                        "= 0x00200000 (force FECS to re-read "
+                        "runlist & pick our channel)\n",
+                        (unsigned long)preempt_addr);
+
+            /* Poll runlist_submit_info for preempt completion.
+             * `runlist_submit_info_pending_true_f` = 0x8000.
+             * Linux nvgpu uses interrupts for this; we poll
+             * with a short timeout because the preempt should
+             * complete in microseconds. */
+            uint64_t info_addr =
+                BAR0 + gr_rl_pri_base + 0x8cu;
+            volatile uint32_t *info_reg =
+                (volatile uint32_t *)(uintptr_t)info_addr;
+            int preempt_done = 0;
+            for (int i = 0; i < 10000; i++) {
+                uint32_t info = *info_reg;
+                if ((info & 0x8000u) == 0u) {
+                    preempt_done = 1;
+                    break;
+                }
+            }
+            uart_printf("[rebuild-gmmu] preempt %s "
+                        "(info=0x%08x after poll)\n",
+                        preempt_done ? "completed" : "TIMEOUT",
+                        (unsigned)*info_reg);
+
+            /* Diagnostic: dump Linux's existing runlist DRAM so we
+             * know (a) what entry encoding it uses, (b) whether our
+             * channel/TSG is on the runlist, (c) how many entries
+             * to write when we craft our own. Read
+             * `runlist_submit_base_lo/hi` (offsets 0x80/0x84 within
+             * the runlist register block), decode the phys, and
+             * dump the first 4 entries (64 B = a TSG header + up
+             * to 3 channels). Each entry is 16 B (4 dwords) per
+             * ram_rl_entry_size_v() = 0x10. */
+            uint32_t rl_lo = *(volatile uint32_t *)(uintptr_t)
+                (BAR0 + gr_rl_pri_base + 0x80u);
+            uint32_t rl_hi = *(volatile uint32_t *)(uintptr_t)
+                (BAR0 + gr_rl_pri_base + 0x84u);
+            uint64_t rl_phys =
+                ((uint64_t)(rl_lo & 0xfffffc00u)) |
+                ((uint64_t)(rl_hi & 0xffu) << 32);
+            uart_printf("[rebuild-gmmu] runlist base lo=0x%08x "
+                        "hi=0x%08x → phys=0x%lx\n",
+                        (unsigned)rl_lo, (unsigned)rl_hi,
+                        (unsigned long)rl_phys);
+
+            /* Tegra Orin Nano doesn't use the SMMU for the GPU
+             * stream (per the comment at ga10b_gmmu.h:359 — no
+             * `iommus` DT property on the GA10B node), so the
+             * runlist_submit_base register holds a CPU phys
+             * verbatim. SLM-OS's VMM identity-maps the lower part
+             * of DRAM (PA 0x80000000..0x280000000 = 2..10 GB) but
+             * the L1 loop in vmm_setup_platform only covers VAs
+             * 0..8 GB, missing the upper 2 GB of DRAM. Linux
+             * nvgpu allocated the runlist in that upper-DRAM
+             * region (typical for kernel reserved-memory zones),
+             * so dereferencing the runlist phys faults.
+             *
+             * `vmm_map_region` uses 2 MB L2 entries which require
+             * an existing L1 table-descriptor at L1[i]; if L1[i]
+             * is INVALID (the case for L1[8] / L1[9] above the
+             * platform setup loop), it errors out. Install the
+             * L2 table first via `vmm_ensure_kernel_l2_table`,
+             * then call `vmm_map_region` for the runlist's 2 MB
+             * block. Both are idempotent — re-running this path
+             * on a subsequent oplib stage is a no-op. */
+            const uint64_t BLOCK_2M  = 0x200000ull;
+            const uint64_t BLOCK_MASK = BLOCK_2M - 1ull;
+            uint64_t rl_block = rl_phys & ~BLOCK_MASK;
+            int erc = vmm_ensure_kernel_l2_table(rl_block);
+            int mrc = -1;
+            if (erc == 0) {
+                mrc = vmm_map_region(rl_block, rl_block, BLOCK_2M,
+                                     VMM_FLAG_READ | VMM_FLAG_WRITE);
+            }
+            uart_printf("[rebuild-gmmu] vmm_ensure_l2(0x%lx) rc=%d, "
+                        "vmm_map_region(0x%lx, 0x%lx, 2MB) rc=%d\n",
+                        (unsigned long)rl_block, erc,
+                        (unsigned long)rl_block,
+                        (unsigned long)rl_block, mrc);
+
+            if (mrc == 0) {
+                volatile uint32_t *rl =
+                    (volatile uint32_t *)(uintptr_t)rl_phys;
+                uart_printf("[rebuild-gmmu] runlist contents @0x%lx "
+                            "(first 4 × 16 B entries):\n",
+                            (unsigned long)rl_phys);
+                for (uint32_t e = 0; e < 4u; e++) {
+                    uart_printf("[rebuild-gmmu]   rl[%u] (offset 0x%x) "
+                                "0x%08x 0x%08x 0x%08x 0x%08x\n",
+                                (unsigned)e, (unsigned)(e * 16u),
+                                (unsigned)rl[e * 4u + 0u],
+                                (unsigned)rl[e * 4u + 1u],
+                                (unsigned)rl[e * 4u + 2u],
+                                (unsigned)rl[e * 4u + 3u]);
+                }
+            }
+
+            /* #844 — write a fresh runlist containing ONLY our
+             * channel and submit it. Linux's existing runlist
+             * references chids that aren't ours; FECS schedules
+             * Linux channels regardless of our CHRAM/preempt
+             * writes because our channel was never on its runlist.
+             *
+             * Format empirically decoded above:
+             *
+             *   TSG header (16 B):
+             *     word0 = (timeout<<24) | (scale<<16) | length
+             *     word1 = tsgid
+             *     word2 = 0
+             *     word3 = 0
+             *   Channel entry (16 B):
+             *     word0 = (inst_phys[31:12] & 0xfffff) << 12 | chid
+             *     word1 = (inst_phys >> 32) & 0xff
+             *     word2 = (userd_phys[31:8] & 0xffffff) << 8
+             *           | userd_target << 6 | inst_target << 4
+             *           | 0xf  (matches Linux's low-nibble pattern;
+             *                   exact bit meanings TBD — likely
+             *                   includes valid + runqueue_selector)
+             *     word3 = (userd_phys >> 32) & 0xffffffff
+             *
+             * FECS distinguishes TSG from channel by position:
+             * each TSG header is followed by `length` channel
+             * entries. No explicit type bit needed.
+             *
+             * Allocate a 4 KB DRAM page (SLM-OS PMM phys, in the
+             * range L1[2..7] already maps), write the 2 entries,
+             * cache-clean, point runlist_submit_base at it, and
+             * `runlist_submit` length=2. */
+            void *new_rl_page = pmm_alloc_page();
+            if (new_rl_page == NULL) {
+                uart_puts("[rebuild-gmmu] PMM exhausted allocating "
+                          "fresh runlist page — #844 work skipped\n");
+            } else {
+                uint64_t new_rl_phys = (uint64_t)(uintptr_t)new_rl_page;
+                volatile uint32_t *new_rl =
+                    (volatile uint32_t *)(uintptr_t)new_rl_phys;
+                /* Zero entire page so any unused bytes are
+                 * deterministic. */
+                for (int i = 0; i < 1024; i++) new_rl[i] = 0;
+
+                /* TSG header (#844 entry-decode iterations).
+                 *
+                 * Decoded from Linux's runlist that word 0 holds
+                 * timeslice + length, word 1 is a fixed `0x1`
+                 * constant (mystery flag — possibly "valid" or
+                 * "type=tsg"), and word 2 holds the actual tsgid
+                 * (Linux's two TSGs have word2=0 and word2=1,
+                 * which contradicts the slmos-ref macros that
+                 * place tsgid in word 1).
+                 *
+                 * Empirical finding: setting word 1 = 0x1 +
+                 * word 2 = tsg_id_override (matching Linux's
+                 * format) makes FECS recognise the entry — but
+                 * the subsequent ctxsw attempt poisons GR
+                 * (`gr_intr=0xbadf1002` etc.). The poison means
+                 * FECS *tried* to load our channel but something
+                 * inside is invalid; before, FECS ignored the
+                 * entry as malformed and GR stayed clean.
+                 *
+                 * Leaving word 1 = 0 + word 2 = tsg_id_override
+                 * keeps us in the "FECS rejects entry, GR clean"
+                 * state — a better starting point for the next
+                 * iteration. The next focus should be on what's
+                 * invalid inside our channel that crashes GR
+                 * when FECS loads it: probably engine_wfi or
+                 * eng_method_buffer fields preserved from
+                 * Linux pointing at PT pages we may have
+                 * clobbered, OR an unset subcontext-state field. */
+                const uint32_t TSG_ID_OVERRIDE = 2u;
+                new_rl[0] = (0x80u << 24) | (3u << 16) |
+                            (1u << 0);
+                new_rl[1] = 0x00000001u;   /* Linux's "valid/type=tsg" flag */
+                new_rl[2] = TSG_ID_OVERRIDE & 0xfffu;
+                new_rl[3] = 0u;
+
+                /* Channel entry: chid = h->channel_id,
+                 * inst_phys = h->inst_block_phys,
+                 * userd_phys = h->userd_phys.
+                 *
+                 * Type discriminator at bit 11 of word 0: TSG=0,
+                 * channel=1. Decoded empirically from Linux's
+                 * runlist: TSG headers (rl[0], rl[2]) have word 0
+                 * bit 11 = 0; channel entries (rl[1], rl[3]) have
+                 * bit 11 = 1 (e.g. 0x2a925ef0: 0xef0 = chid 0x6f0
+                 * in bits[10:0] + 1 bit 11 = type=channel). This
+                 * reconciles with `runlist_channel_config_num_-
+                 * channels_log2_2k_v() = 11` (CHRAM has 2^11 =
+                 * 2048 entries, so chid is 11 bits, leaving bit
+                 * 11 free for the type discriminator). Our prior
+                 * iteration left bit 11 = 0 → FECS likely
+                 * interpreted the entry as a malformed TSG and
+                 * skipped it. */
+                uint64_t inst_p = h->inst_block_phys;
+                uint64_t userd_p = h->userd_phys;
+                uint32_t inst_lo20 =
+                    (uint32_t)((inst_p >> 12) & 0xfffffu);
+                uint32_t inst_hi = (uint32_t)((inst_p >> 32) & 0xffu);
+                uint32_t userd_lo24 =
+                    (uint32_t)((userd_p >> 8) & 0xffffffu);
+                uint32_t userd_hi = (uint32_t)(userd_p >> 32);
+                /* Runlist channel entry's chid uses hw_chid space
+                 * (channel_base + chid), matching what we wrote
+                 * CHRAM at and what the doorbell value encodes.
+                 * Captured outside the if-else above so it's
+                 * available to this scope. */
+                new_rl[4] = (hw_chid & 0x7ffu) |
+                            (1u << 11) |  /* type = channel */
+                            (inst_lo20 << 12);
+                new_rl[5] = inst_hi;
+                new_rl[6] = (userd_lo24 << 8) |
+                            (3u << 6) |   /* userd_target=ncoh */
+                            (3u << 4) |   /* inst_target=ncoh */
+                            0xfu;
+                new_rl[7] = userd_hi;
+
+                cache_clean_range((void *)(uintptr_t)new_rl_phys, 4096);
+                __asm__ volatile("dsb sy" ::: "memory");
+
+                uart_printf("[rebuild-gmmu] fresh runlist @0x%lx:\n"
+                            "[rebuild-gmmu]   [TSG] 0x%08x 0x%08x "
+                            "0x%08x 0x%08x\n"
+                            "[rebuild-gmmu]   [CHN] 0x%08x 0x%08x "
+                            "0x%08x 0x%08x\n",
+                            (unsigned long)new_rl_phys,
+                            (unsigned)new_rl[0], (unsigned)new_rl[1],
+                            (unsigned)new_rl[2], (unsigned)new_rl[3],
+                            (unsigned)new_rl[4], (unsigned)new_rl[5],
+                            (unsigned)new_rl[6], (unsigned)new_rl[7]);
+
+                /* Disable runlist scheduling while we update the
+                 * base. `runlist_sched_disable_r() = 0x94`,
+                 * disable value = 0x1. */
+                volatile uint32_t *sched_dis =
+                    (volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x94u);
+                *sched_dis = 1u;
+                __asm__ volatile("dsb sy" ::: "memory");
+
+                /* Update runlist_submit_base: lo bits[31:10] =
+                 * phys[31:10] (1 KB aligned); target = 3 (ncoh).
+                 * hi bits[7:0] = phys[39:32]. */
+                uint32_t base_lo =
+                    (uint32_t)((new_rl_phys & 0xfffffc00u)) | 3u;
+                uint32_t base_hi =
+                    (uint32_t)((new_rl_phys >> 32) & 0xffu);
+                *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x80u) = base_lo;
+                *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x84u) = base_hi;
+                __asm__ volatile("dsb sy" ::: "memory");
+
+                /* Re-enable scheduling. */
+                *sched_dis = 0u;
+                __asm__ volatile("dsb sy" ::: "memory");
+
+                /* Submit: length = 2, offset = 0. */
+                *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x88u) =
+                    (0u << 16) | 2u;
+                __asm__ volatile("dsb sy" ::: "memory");
+
+                /* Poll runlist_submit_info for pending=0. */
+                volatile uint32_t *info2 =
+                    (volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x8cu);
+                int submit_done = 0;
+                for (int i = 0; i < 100000; i++) {
+                    if ((*info2 & 0x8000u) == 0u) {
+                        submit_done = 1;
+                        break;
+                    }
+                }
+                uart_printf("[rebuild-gmmu] fresh runlist submit %s "
+                            "(submit_base lo=0x%08x hi=0x%08x, "
+                            "info=0x%08x)\n",
+                            submit_done ? "completed" : "TIMEOUT",
+                            (unsigned)base_lo, (unsigned)base_hi,
+                            (unsigned)*info2);
+
+                /* Force a fresh ctxsw to pick our channel now. */
+                *(volatile uint32_t *)(uintptr_t)
+                    (BAR0 + gr_rl_pri_base + 0x98u) = 0x00200000u;
+                __asm__ volatile("dsb sy" ::: "memory");
+                int preempt2 = 0;
+                for (int i = 0; i < 10000; i++) {
+                    if ((*info2 & 0x8000u) == 0u) {
+                        preempt2 = 1;
+                        break;
+                    }
+                }
+                uart_printf("[rebuild-gmmu] post-submit preempt %s "
+                            "(info=0x%08x)\n",
+                            preempt2 ? "completed" : "TIMEOUT",
+                            (unsigned)*info2);
+            }
+        }
+    }
+
     ga10b_gmmu_table_alloc_trace_set(false);
+
+    /* #834 diagnostic — dump the rebuilt inst block AFTER all writes
+     * (PDB pointers + RAMFC + engine_wfi/eng_method_buffer clears +
+     * subcontext zero-and-rewrite + CHRAM/runlist housekeeping), so a
+     * post-mortem can compare against Linux's pre-rebuild state. The
+     * GR-poison-on-ctxsw hypothesis is that *some* field FECS reads
+     * during context-switch-IN is still pointing at clobbered Linux
+     * pages. With the dump in hand, anything that looks like a
+     * pointer (non-zero high bits, page-aligned, in DRAM range) can
+     * be walked separately to see whether it's still valid. */
+    ga10b_dump_inst_block_at("REBUILD-AFTER", inst_block_phys);
+
     return (rc == 0) ? 0 : -1;
 }
 
