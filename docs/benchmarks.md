@@ -500,8 +500,8 @@ on-device XGBoost eviction blob with:
 
 ```
 # In the SLM-OS shell, after the eviction blob is staged + activated:
-eviction blob load xgboost 0:/slmstore/evict.smb
-eviction blob activate xgboost
+eviction model load xgboost 0:/slmstore/evict.smb
+eviction model activate xgboost
 bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expected_evict.bin
 ```
 
@@ -521,17 +521,15 @@ bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expecte
   in C code. First-mismatch diagnostics print hex patterns; decode with
   `python3 -c 'import struct;print(struct.unpack("<f", bytes.fromhex("HEX"))[0])'`.
 
-**Hardware verification (pending):** consumer-side wiring (FFI,
-shell verb, `eviction blob load/activate`, and host-side mini-corpus
-regression in `rust_run_tests`) is complete; this section will be
-updated with the pi-5-2 result the moment the deploy + replay run
-lands.
+**Pi 5 result (2026-05-17, BCM2712 Cortex-A76 @ 2.4 GHz):**
 
 | Metric | Value |
 |--------|-------|
-| Match rate | *pending pi-5-2 deploy + replay* |
-| Per-decision latency | *pending* |
-| First mismatch | *pending — expected: none (Python's `booster.predict()` ↔ on-device sigmoid agree within `1e-4` per the producer-side parity tests on `slm-os-page-eviction` PR #3)* |
+| Match rate | **100 / 100** |
+| Per-decision latency | **1,429,641 ns (~1.43 ms)** |
+| First mismatch | none |
+
+Closes the on-device side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932). The result was captured by exporting an `evict.smb` + 100-vector corpus from `slm-os-page-eviction` (XGBoost model carried from `slm-os-page-sim/data/models/xgb_model.json`), staging both onto pi-5-2 via `labctl sdwire update`, activating the runtime blob via `eviction model load/activate xgboost`, and replaying with `bench xgb-equiv-evict`. The ~1.43 ms/inference is the full 200-tree softmax-sigmoid walk in pure software (no NEON path yet); the scheduler verb's ~240 µs comparison is for the much smaller cascade. Latency-side improvement work is tracked separately under [#108](https://github.com/SLM-OS/SLM-Operating-System/issues/108).
 
 The `slm-os-page-eviction` PR #3 (merged 2026-05-17) emits the
 `evict.smb` blob and verification corpus in the format this verb

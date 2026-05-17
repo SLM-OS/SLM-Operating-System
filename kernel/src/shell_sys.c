@@ -1523,7 +1523,7 @@ static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
             predict_failed_rc == -2 ? "ai_eviction off" :
             predict_failed_rc == -3 ? "no active XGBoost blob "
                                        "(stage + activate first via "
-                                       "`eviction blob load xgboost ...`)" :
+                                       "`eviction model load xgboost ...`)" :
             predict_failed_rc == -4 ? "blob parse failed" :
             "unknown";
         shell_printf("xgb-equiv-evict: predict FFI failed at i=%d "
@@ -2437,8 +2437,8 @@ int cmd_bench(int argc, char *argv[])
                        "  expected-evict.bin N x f32 sigmoid scores from "
                        "slm-os-page-eviction's exporter\r\n"
                        "Stage + activate the eviction blob first via "
-                       "`eviction blob load xgboost <path>` then "
-                       "`eviction blob activate xgboost`.\r\n");
+                       "`eviction model load xgboost <path>` then "
+                       "`eviction model activate xgboost`.\r\n");
             return 1;
         }
         return bench_xgb_equiv_evict(argv[2], argv[3]);
