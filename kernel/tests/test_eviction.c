@@ -1270,37 +1270,91 @@ static void test_bench_all_policies(void)
                                     * worker hit the boundary). */
 #define EV_SMP_PREFILL_MAX    512u /* MAX_BLOCKS_PER_POOL upper bound */
 
-/* Cacheable sync state. Workers update their done counter; the main
- * test thread polls with `cache_invalidate` before each read. Cross-
- * CPU eventual visibility is enough — the swapper does not gate on
- * any of this state, only on `ev_smp_stop_swapper`. */
+/* Cacheable sync state. Workers update their done counter to signal
+ * "alloc phase complete" so peer workers can synchronize before
+ * bulk-freeing (without the barrier, the first worker to finish
+ * alloc would drain its held[] back into the pool and release
+ * eviction pressure before the slower workers even finished
+ * allocating — observed dropping evictions from ~128 to ~32 on
+ * QEMU). Main thread polls task state, not this counter — see the
+ * wait loop comment for why. */
 static volatile uint32_t ev_smp_done[EV_SMP_MAX_WORKERS];
 static volatile uint32_t ev_smp_stop_swapper;
+static volatile uint32_t ev_smp_n_workers_active;
 
 static void ev_smp_worker_task(void *arg)
 {
     uint32_t my_cpu = (uint32_t)(uintptr_t)arg;
-    /* Pool is pre-saturated in test setup, so each alloc here trips
-     * the alloc-when-full eviction slow path; immediate free returns
-     * the freshly-allocated slot for the next alloc (its own or
-     * another worker's). Lock-ordering is what's under test, not
-     * hold-set bookkeeping. */
+    /* Accumulator: hold every alloc until the end. With the pool
+     * pre-saturated and workers accumulating in parallel, every
+     * worker alloc past the initial prefill capacity forces the
+     * alloc-when-full eviction slow path (of either a prefill
+     * block or another worker's accumulated block). This sustains
+     * eviction pressure across the entire run instead of trickling
+     * down after each worker's first alloc — the previous "free
+     * immediately" design produced ~1 eviction per worker total.
+     *
+     * Stale-handle races are inherent: another worker's alloc may
+     * evict this worker's just-acquired slot before we touch it.
+     * set_metadata / touch / free on a stale handle return
+     * InvalidHandle; we ignore the rc. Generation counters on
+     * BlockSlot make this safe — the FFI never indirects through
+     * a stale (block_id, generation) pair. */
+    ModelHandle held[EV_SMP_ROUNDS];
+    for (uint32_t i = 0; i < EV_SMP_ROUNDS; i++) {
+        held[i].block_index = 0xFFFFu;
+        held[i].pool_id = 0xFFu;
+    }
     for (uint32_t r = 0; r < EV_SMP_ROUNDS; r++) {
         ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+        held[r] = h;
         if (!handle_is_null(h)) {
-            /* Ignore individual return values — set_metadata can
-             * legitimately fail if the slot was racily reclaimed by
-             * the eviction path. The lock-ordering invariant under
-             * test is about deadlock/leak, not about success rate. */
             (void)rust_model_set_metadata(h,
                 (uint8_t)(my_cpu + 1u), (int16_t)r,
                 (uint8_t)(r & 3u));
             (void)rust_model_touch(h);
-            (void)rust_model_free(h);
         }
         ev_smp_done[my_cpu] = r + 1u;
         cache_clean((void *)&ev_smp_done[my_cpu]);
         yield();
+    }
+    /* Barrier: wait until every worker has reached EV_SMP_ROUNDS
+     * before any worker starts bulk-freeing. Without this, the
+     * first worker to finish would drain its held[] back into the
+     * pool, letting lagging workers' final allocs land on free
+     * slots instead of forcing eviction — releasing the pressure
+     * the test is meant to sustain. 5 s budget is generous: each
+     * worker's alloc phase is bounded by ROUNDS *
+     * cacheus_select_victim ≈ 5 ms wall-clock under the slowest
+     * policy. */
+    {
+        uint64_t bar_start = timer_get_count();
+        uint64_t bar_limit = timer_get_frequency() * 5u;
+        while ((timer_get_count() - bar_start) < bar_limit) {
+            int all_alloc_done = 1;
+            for (uint32_t c = 0; c < ev_smp_n_workers_active; c++) {
+                cache_invalidate((void *)&ev_smp_done[c]);
+                if (ev_smp_done[c] < EV_SMP_ROUNDS) {
+                    all_alloc_done = 0;
+                    break;
+                }
+            }
+            if (all_alloc_done) {
+                break;
+            }
+            yield();
+        }
+    }
+
+    /* Bulk-free everything still held. Many will be stale (evicted
+     * out from under us by other workers); free returns
+     * InvalidHandle on those and we ignore it — the current holder
+     * of that slot will free it via its own held[] array, or via
+     * the prefill teardown if no worker re-allocated it. */
+    for (uint32_t i = 0; i < EV_SMP_ROUNDS; i++) {
+        if (!handle_is_null(held[i])) {
+            (void)rust_model_free(held[i]);
+        }
     }
     task_exit();
 }
@@ -1351,13 +1405,16 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
         (cpu_count < EV_SMP_MAX_WORKERS) ? cpu_count
                                          : EV_SMP_MAX_WORKERS;
 
-    /* Reset sync state. */
+    /* Reset sync state. Set n_workers_active BEFORE spawning so
+     * workers can use it in the barrier wait. */
     for (uint32_t c = 0; c < EV_SMP_MAX_WORKERS; c++) {
         ev_smp_done[c] = 0;
         cache_clean((void *)&ev_smp_done[c]);
     }
     ev_smp_stop_swapper = 0;
     cache_clean((void *)&ev_smp_stop_swapper);
+    ev_smp_n_workers_active = n_workers;
+    cache_clean((void *)&ev_smp_n_workers_active);
 
     /* Pre-saturate the workspace pool down to EV_SMP_PREFILL_LEAVE
      * free blocks. This makes the SMP loop hammer the eviction slow
@@ -1416,17 +1473,23 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
     swapper->cpu_affinity = 0;
     scheduler_add_task_to_cpu(swapper, 0);
 
-    /* Wait for all workers to reach EV_SMP_ROUNDS. 30 s budget
-     * covers the worst-case slow path (Jetson EVICTION_MODELS=ON,
-     * cacheus ~150 µs/select_victim) with comfortable headroom. */
+    /* Wait for all workers to fully terminate. Workers do real work
+     * (the bulk-free pass) AFTER the alloc loop reaches EV_SMP_ROUNDS,
+     * so polling `ev_smp_done` would let the main thread proceed to
+     * the leak check while held[] arrays were still being drained.
+     * Polling task state is the honest "everything done" signal.
+     * 30 s budget covers the worst-case slow path (Jetson
+     * EVICTION_MODELS=ON, cacheus ~150 µs/select_victim) with
+     * comfortable headroom: 6 workers × ROUNDS × cacheus_latency ≈
+     * 30 ms of pure select_victim work, dominated by yield overhead. */
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 30u;
     int all_done = 0;
     while ((timer_get_count() - start) < limit) {
         int done = 1;
         for (uint32_t c = 0; c < n_workers; c++) {
-            cache_invalidate((void *)&ev_smp_done[c]);
-            if (ev_smp_done[c] < EV_SMP_ROUNDS) {
+            cache_invalidate(&workers[c]->state);
+            if (workers[c]->state != TASK_TERMINATED) {
                 done = 0;
                 break;
             }
