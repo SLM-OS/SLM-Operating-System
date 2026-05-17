@@ -5,7 +5,7 @@
 use crate::mm::eviction::policy::BlockFeatures;
 
 /// XGBoost prediction: returns P(optimal eviction target)
-pub fn xgb_predict(features: &[f32; 27]) -> f32 {
+pub fn xgb_predict(features: &BlockFeatures) -> f32 {
     let mut sum = 0.0_f32;
 
     // Tree 0
