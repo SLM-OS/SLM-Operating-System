@@ -1253,7 +1253,7 @@ make test
 - **mDNS**: Zero-configuration discovery
 - **TLS**: Secure communications
 
-See `docs/networking-expansion-plan.md` for the full hardware-driver
+See `docs/archive/plans/networking-expansion-plan.md` for the full hardware-driver
 roadmap.
 
 ---

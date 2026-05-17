@@ -26,7 +26,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 
 ## Skipped / Blocked
 
-- **#25 — Jetson internal Ethernet path.** On the Super Developer Kit in the lab, the onboard RJ45 routes through a PCIe RTL8168 behind Tegra PCIe root complex C8, not an active EQOS path. No SLM-OS driver landed yet; see `docs/jetson-pcie-investigation.md` and `docs/networking-expansion-plan.md`.
+- **#25 — Jetson internal Ethernet path.** On the Super Developer Kit in the lab, the onboard RJ45 routes through a PCIe RTL8168 behind Tegra PCIe root complex C8, not an active EQOS path. No SLM-OS driver landed yet; see `docs/jetson-pcie-investigation.md` and `docs/archive/plans/networking-expansion-plan.md`.
 - **#266 — Jetson USB networking** is the shipped Jetson NIC path. Current path is USB CDC-ECM on the validated `jetson-nano-2` lab topology: retained root hub plus downstream RTL8153 after `kexec`. Generic multi-device USB-host work tracked in #384.
 - **#384 — General USB host support beyond the current Jetson NIC path.** Follow-on to the landed Jetson CDC-ECM path: generic multi-device topology, hub traversal, hotplug, alternate settings, and class binding. Plan written at `docs/archive/plans/usb-host-generalization-plan.md`.
 - **#243 — x86-64 Realtek RTL8168/8111 driver for bare-metal.** Works under QEMU x86-64 (virtio-pci); the test-pc dev board has a Realtek NIC that would need a native driver. Not blocking the capstone narrative because QEMU x86-64 demonstrates the full stack.
@@ -43,7 +43,7 @@ Push-only TCP server on port 2325 bridging in-process `tel.*` msg_router topics 
 ## See also
 
 - `docs/networking.md` (narrative)
-- `docs/networking-expansion-plan.md` (phased plan)
+- `docs/archive/plans/networking-expansion-plan.md` (phased plan)
 - `docs/net-driver-checklist.md` (driver implementor's checklist)
 - `docs/net-dma-coherence.md` (DMA coherence model)
 - `docs/design/admin-telemetry-suite.md` §"Network feed" (telemetryd wire protocol)
