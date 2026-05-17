@@ -268,7 +268,7 @@ maybe_start_gpu_helpers() {
     # replayed byte-identical QMDs serves the previous launch's output
     # on the next call. Surfaces as `model_infer_file(N)` returning the
     # prediction of input `N-1` under multi-inference workloads (e.g.
-    # mnist_loop.lua). See docs/gpu-qmd-per-dispatch-plan.md and #558.
+    # mnist_loop.lua). See docs/archive/plans/gpu-qmd-per-dispatch-plan.md and #558.
     #
     # `SLMOS_GEMM_TIER=hmma` (the default since 2026-05-08) opts the
     # FC layer (op 6) into the FP32-activation × FP16-weight

@@ -65,7 +65,7 @@ int bcm_mailbox_get_board_mac(uint8_t mac[6]);
  * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
  * failure. Pair with `bcm_mailbox_notify_reboot()` and a follow-up
  * `psci_system_reset()` to perform a tryboot-armed reboot. See
- * `docs/dynamic-kernel-replace-plan.md` Risk 2 for the trace from
+ * `docs/archive/plans/dynamic-kernel-replace-plan.md` Risk 2 for the trace from
  * `reboot "0 tryboot"` to this tag.
  *
  * Not reentrant — shares the file-static 32-byte property buffer

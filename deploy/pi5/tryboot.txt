@@ -11,7 +11,7 @@
 #
 # Mirror config.txt EXCEPT for the kernel filename — firmware does not
 # merge the two files. See docs/deploy/pi5-sdcard.md for provisioning,
-# docs/dynamic-kernel-replace-plan.md §Stage 5 for the round-trip.
+# docs/archive/plans/dynamic-kernel-replace-plan.md §Stage 5 for the round-trip.
 
 # Tell firmware not to validate the kernel as a Linux image — SLM-OS
 # is bare-metal AArch64 and won't pass Linux header checks.

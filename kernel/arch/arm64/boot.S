@@ -302,7 +302,7 @@ real_start:
      * path Linux on Pi 5 uses and Pi firmware actually validates.
      * NS-EL1 IRQ delivery on BCM2712 / GIC-400 is broken regardless
      * of which timer PPI is selected (see #672, #683, and
-     * docs/pi5-el2-vhe-plan.md).
+     * docs/archive/plans/pi5-el2-vhe-plan.md).
      *
      * If firmware ever delivers SLM-OS at EL1 (the b.ne branch
      * below), boot continues at EL1 — VHE redirection doesn't apply

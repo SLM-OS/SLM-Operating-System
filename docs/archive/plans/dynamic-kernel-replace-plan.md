@@ -22,7 +22,7 @@ platform registers `pcie_stub.c` which declines to install
 `host_ops`, so `pcie_core::scan_bus` never runs and neither the
 bridge-skip nor the `CMD_MEMORY_SPACE` enable can interact with
 the Jetson PCIe path. See
-[`docs/jetson-pcie-regression-check.md`](jetson-pcie-regression-check.md).
+[`jetson-pcie-regression-check.md`](../investigations/jetson-pcie-regression-check.md).
 
 ---
 
@@ -293,7 +293,7 @@ check gated on a nano-resource release from @johnjezl).
   `kernel_2712.img`). Mechanism is `tryboot.txt` (separate file),
   **not** a `[tryboot]` filter section in `config.txt`. Canonical
   configs now live at `deploy/pi5/{config.txt,tryboot.txt}`. See
-  [`docs/pi5-tryboot-verification.md`](pi5-tryboot-verification.md)
+  [`pi5-tryboot-verification.md`](../test-runs/pi5-tryboot-verification.md)
   for the full hardware-test log.
 - ✅ Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
   — #371 sub-task 5. The cfginit / clock-gate code itself landed
@@ -309,7 +309,7 @@ check gated on a nano-resource release from @johnjezl).
   lifetime). Verified post-fix: 5/5 stage→rollback cycles in one
   boot, byte-for-byte SDHCI write content + SHA verification on
   the card, plus 9/9 boot-reliability via `labctl boot_test`. See
-  [`docs/pi5-sdhci-real-card-verification.md`](pi5-sdhci-real-card-verification.md).
+  [`pi5-sdhci-real-card-verification.md`](../test-runs/pi5-sdhci-real-card-verification.md).
 - ✅ Full `stage → activate → promote → rollback` cycle on
   `pi-5-1` — #371 sub-task 6. **Closes #35.** Verified end-to-end
   on `pi-5-1` (EEPROM `pieeprom-2024-09-23.bin`, post-#504 build):
@@ -334,7 +334,7 @@ check gated on a nano-resource release from @johnjezl).
   Jetson-specific code paths. The pre-existing LTSSM=0x03
   link-train failure is a documented Stage-2+ limitation
   unrelated to #389. See
-  [`docs/jetson-pcie-regression-check.md`](jetson-pcie-regression-check.md).
+  [`jetson-pcie-regression-check.md`](../investigations/jetson-pcie-regression-check.md).
 
 ---
 

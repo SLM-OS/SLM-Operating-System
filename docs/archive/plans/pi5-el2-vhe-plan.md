@@ -395,9 +395,9 @@ Specific to PR 5:
 - #672 — investigation that produced this conclusion (NS-EL1 IRQ
   delivery broken regardless of PPI).
 - #134 — original "Pi 5 hardware timer IRQ delivery" issue.
-- `docs/pi5-armstub-track-c.md` — Stage 1 + Stage 2 history (TF-A
+- [`pi5-armstub-track-c.md`](../investigations/pi5-armstub-track-c.md) — Stage 1 + Stage 2 history (TF-A
   patches, `SCR_EL3` clear).
-- `docs/pi5-stage25-irqtest-findings.md` — Stage 2.5 hang
+- [`pi5-stage25-irqtest-findings.md`](../investigations/pi5-stage25-irqtest-findings.md) — Stage 2.5 hang
   investigation that closed the EL1-IRQ-delivery hypothesis space.
 - `docs/jetson-boot.md` — Jetson EL2/VHE bring-up; precedent for the
   refactor.

@@ -49,6 +49,6 @@ Interactive shell, command surface, observability commands, multi-session.
 ## See also
 
 - `docs/shell.md` (narrative)
-- `docs/dynamic-kernel-replace-plan.md` (`kernel` admin command surface)
+- `docs/archive/plans/dynamic-kernel-replace-plan.md` (`kernel` admin command surface)
 
 *Last updated: 28 April 2026*

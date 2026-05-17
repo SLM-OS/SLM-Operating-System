@@ -2,7 +2,7 @@
 
 **Status:** **Closed.** Stage 1 (armstub source + build) and Stage 2 (custom TF-A with `SCR_EL3` + GIC patches) both landed and validated on hardware. Stage 2.5 disconfirmed the original "one-line `DAIF.I` unmask" framing — see [`pi5-stage25-irqtest-findings.md`](pi5-stage25-irqtest-findings.md) for the differential probing that ruled out NS-EL1 IRQ delivery on Pi 5.
 
-The actual production fix is tracked in [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) — move SLM-OS to EL2 with VHE so IRQs route through `VBAR_EL2` (the path Pi firmware actually validates). See [`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the refactor plan.
+The actual production fix is tracked in [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) — move SLM-OS to EL2 with VHE so IRQs route through `VBAR_EL2` (the path Pi firmware actually validates). See [`pi5-el2-vhe-plan.md`](../plans/pi5-el2-vhe-plan.md) for the refactor plan.
 
 This document is retained for the Stage 1 + Stage 2 work product (TF-A patches in `tools/tfa-patches/`, `make tfa-pi5`, custom `bl31.bin` deploy path) which remain useful even under the EL2/VHE direction.
 
@@ -249,7 +249,7 @@ The trampoline infrastructure remains structurally sound but inert.
 **Path forward:** [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683)
 moves SLM-OS to EL2 with VHE so IRQs go through `VBAR_EL2` — the
 path Linux on Pi 5 uses and Pi firmware validates. See
-[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the refactor plan.
+[`pi5-el2-vhe-plan.md`](../plans/pi5-el2-vhe-plan.md) for the refactor plan.
 
 The `irqtest` shell command (`PLATFORM_RASPI5 + PI5_IRQ_DIAG`,
 `kernel/src/shell_sys.c`) stays as the diagnostic harness that

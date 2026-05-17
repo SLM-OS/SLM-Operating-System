@@ -17,7 +17,7 @@
  * dispatch via the gsp_platform cache-clean call after writing.
  *
  * Replaces the helper-baked-QMD-replay path (issue #558). See
- * docs/gpu-qmd-per-dispatch-plan.md for context.
+ * docs/archive/plans/gpu-qmd-per-dispatch-plan.md for context.
  */
 
 #ifndef GPU_NVIDIA_GA10B_QMD_H

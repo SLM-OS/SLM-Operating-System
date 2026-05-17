@@ -976,7 +976,7 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * `ga10b_bringup_read_pipeline_output` for the narrowing rationale
  * (#723). Bounded and acceptable for MNIST workloads; not the right
  * shape for SLM forward-path latency (see
- * docs/gpu-qmd-per-dispatch-plan.md §Status). */
+ * docs/archive/plans/gpu-qmd-per-dispatch-plan.md §Status). */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
@@ -3017,7 +3017,7 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
      * fed into SEND_PCAS_A. Forces SKED to redecode each launch —
      * workaround for the off-by-one staleness that comes from
      * replaying byte-identical helper-baked QMDs. See
-     * docs/gpu-qmd-per-dispatch-plan.md and #558.
+     * docs/archive/plans/gpu-qmd-per-dispatch-plan.md and #558.
      *
      * Falls through to the v5/v6 path on any v7 input that's
      * missing or out of range. The v6 path remains the default until

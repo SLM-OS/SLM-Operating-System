@@ -1333,7 +1333,7 @@ Three landed PRs since 2026-04-22 narrowed the #253 search space substantially. 
 
 **PR #355 — audit findings F-01..F-11 (merged 2026-04-24)**
 
-11 findings from the architecture review (`docs/hailo-ai-hat-architecture-review.md`) addressed:
+11 findings from the architecture review (`docs/archive/investigations/hailo-ai-hat-architecture-review.md`) addressed:
 
 - F-01: Hard-bounded DMA pool with explicit phys/IOVA logging
 - F-02: Descriptor lists moved to NC memory; cache contract tightened
@@ -1396,7 +1396,7 @@ Three new diagnostic capabilities, all in main:
 
 **Open path forward:**
 
-The Hailo support ticket draft at `docs/hailo-support-ticket-draft.md` is now substantially stronger:
+The Hailo support ticket draft at `docs/archive/investigations/hailo-support-ticket-draft.md` is now substantially stronger:
 
 - Three explicit symbol-decode asks: PC=`0x9000018c`, PC=`0x90004520`, plus boot/load PC sequence
 - Comprehensive ruled-out list

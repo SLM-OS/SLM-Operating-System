@@ -232,8 +232,8 @@ slmos> kernel rollback                        # clear flag + remove staged.img
 This requires `tryboot.txt` to be present on the FAT boot
 partition (the first-time provisioning step above installs it
 from `deploy/pi5/tryboot.txt`). See
-`docs/dynamic-kernel-replace-plan.md` for the design and
-`docs/pi5-stage-promote-rollback-verification.md` for a full
+`docs/archive/plans/dynamic-kernel-replace-plan.md` for the design and
+`docs/archive/test-runs/pi5-stage-promote-rollback-verification.md` for a full
 hardware round-trip log.
 
 ---

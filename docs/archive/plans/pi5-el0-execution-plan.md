@@ -215,7 +215,7 @@ PR 4 specific:
 ## References
 
 - `docs/component-isolation.md` — Phase 5 M4 syscall infrastructure.
-- `docs/pi5-el2-vhe-plan.md` — #683 EL2/VHE refactor (predecessor).
+- [`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) — #683 EL2/VHE refactor (predecessor).
 - `kernel/arch/arm64/user_entry.S` — EL0 ERET trampoline.
 - `kernel/include/syscall.h` / `kernel/src/syscall.c` — syscall ABI + dispatch.
 - ARM ARM D8.2 (Translation table descriptor formats) — AP/XN bit definitions.

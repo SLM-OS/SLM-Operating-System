@@ -9351,7 +9351,7 @@ int cmd_irqtest(int argc, char *argv[])
      * the SCR_EL3 routing patch works before Stage 2.5 (which lands
      * SECONDARY_PREEMPT) goes in. So we don't skip the probe. We
      * pause to give the operator a chance to abort if they typed
-     * the command without reading docs/pi5-armstub-track-c.md. */
+     * the command without reading docs/archive/investigations/pi5-armstub-track-c.md. */
     shell_puts("  WARNING: this probe will hang the system if a timer IRQ\r\n"
                "  fires (the IRQ vector calls schedule() from IRQ context\r\n"
                "  without SECONDARY_PREEMPT — see #98). The hang itself IS\r\n"

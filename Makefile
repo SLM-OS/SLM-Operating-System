@@ -308,7 +308,7 @@ _kernel-build: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/M
 # GIC-400 base address).
 #
 # WARNING: Deploying this binary REPLACES TF-A's BL31. PSCI stops
-# working. See docs/pi5-armstub-track-c.md for the integration plan.
+# working. See docs/archive/investigations/pi5-armstub-track-c.md for the integration plan.
 ARMSTUB_BUILD_DIR := build/armstub
 ARMSTUB_SRC      := kernel/arch/arm64/armstub8-2712.S
 ARMSTUB_ELF      := $(ARMSTUB_BUILD_DIR)/armstub8-2712.elf
@@ -320,7 +320,7 @@ ARMSTUB_OBJCOPY  := aarch64-none-elf-objcopy
 armstub-pi5: $(ARMSTUB_BIN)
 	@echo "Built $(ARMSTUB_BIN) ($$(stat -c%s $(ARMSTUB_BIN)) bytes)"
 	@echo "  Deploy: copy to Pi 5 boot partition + add 'armstub=armstub8-2712.bin' to config.txt"
-	@echo "  WARNING: replaces TF-A; see docs/pi5-armstub-track-c.md before booting"
+	@echo "  WARNING: replaces TF-A; see docs/archive/investigations/pi5-armstub-track-c.md before booting"
 
 $(ARMSTUB_BIN): $(ARMSTUB_ELF)
 	@$(ARMSTUB_OBJCOPY) -O binary $< $@

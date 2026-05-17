@@ -36,7 +36,7 @@ This spec is **additive**. It extends existing substrate (policy vtable, evictio
 | Eviction policy trait | `runtime/src/mm/eviction/policy.rs:53-79` | `EvictionPolicy::select_victim(&[BlockMeta]) → usize`, `score()`, `update_feedback()`, `name()` |
 | Eviction policies | `runtime/src/mm/eviction/` | LRU, LFU, MRU, FIFO, ARC, XGBoost, MLP, CACHEUS |
 | Dynamic blob format | `docs/contracts/runtime-blob-formats.md` | `SEMB` outer wrapper, FNV-1a checksum, schema versioned |
-| Policy/model loading | `docs/dynamic-policy-model-loading-plan.md` | `sched model load/activate/rollback/clear`, `eviction model load/activate/...` (eviction phases E1-E5 ✅, scheduler S1-S3 partial). Lua side has `slm.sched_model_*`, `slm.eviction_model_*`. |
+| Policy/model loading | `docs/archive/plans/dynamic-policy-model-loading-plan.md` | `sched model load/activate/rollback/clear`, `eviction model load/activate/...` (eviction phases E1-E5 ✅, scheduler S1-S3 partial). Lua side has `slm.sched_model_*`, `slm.eviction_model_*`. |
 | File upload | `kernel/src/shell_fs.c:568-760` | `xput begin/chunk/finish/abort`, hex over shell, FNV-1a, writes to LittleFS at `/mnt/files/`. 512-byte chunks. |
 | Lua bindings | `kernel/src/lua_slm.c` | 40+ bindings under `slm.*`. Per-session `lua_State *`. Safe vs admin tables. |
 | Lua REPL | `kernel/src/lua_shell.c` | `lua`, `lua-admin`, `lua -e`, `lua <path>`. Per-session persistent state. |
@@ -497,6 +497,6 @@ loose end.
 - `docs/fact-sheets/ai-eviction.md` — eviction trait and feature schema.
 - `docs/fact-sheets/lua.md` — current Lua surface.
 - `docs/contracts/runtime-blob-formats.md` — `SEMB` blob format and checksum scheme.
-- `docs/dynamic-policy-model-loading-plan.md` — runtime model upload/activate/rollback (extended here for general model launch).
-- `docs/dynamic-kernel-replace-plan.md` — kernel replacement via tryboot (out of scope; referenced for context).
+- `docs/archive/plans/dynamic-policy-model-loading-plan.md` — runtime model upload/activate/rollback (extended here for general model launch).
+- `docs/archive/plans/dynamic-kernel-replace-plan.md` — kernel replacement via tryboot (out of scope; referenced for context).
 - `docs/fact-sheets/shell.md` — shell command conventions, xput protocol.

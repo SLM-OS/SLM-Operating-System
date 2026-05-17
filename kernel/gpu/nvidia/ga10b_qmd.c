@@ -8,7 +8,7 @@
  * — keeping this file pure-logic lets host tests exercise the
  * encoder with no platform vtable.
  *
- * Phase 1 of docs/gpu-qmd-per-dispatch-plan.md (issue #558).
+ * Phase 1 of docs/archive/plans/gpu-qmd-per-dispatch-plan.md (issue #558).
  */
 
 #include "ga10b_qmd.h"
