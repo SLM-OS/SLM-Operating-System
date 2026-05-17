@@ -64,6 +64,14 @@ cargo build --target aarch64-unknown-none --features ai_eviction_models
 
 ## Importing Trained Weights
 
+> **Graduating an XGBoost model from experimentation to baked-in
+> default?** See
+> [`eviction-xgboost-graduation.md`](eviction-xgboost-graduation.md) —
+> this section covers the mechanical import; the graduation doc
+> covers the full lifecycle (blob-path experimentation, equivalence
+> verification, on-device baked-path check, and the four gotchas
+> the import alone doesn't surface).
+
 The trained models live in the sibling `slm-os-page-sim` project.
 Run its export pipeline first, then stage the files into the runtime:
 

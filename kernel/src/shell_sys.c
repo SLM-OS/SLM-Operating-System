@@ -1387,14 +1387,19 @@ cleanup:
 }
 
 /*
- * `bench xgb-equiv-evict <test-vectors.bin> <expected-evict.bin>`
+ * `bench xgb-equiv-evict [--baked] <test-vectors.bin> <expected-evict.bin>`
  *
  * Closes #932. Eviction-side analog of `bench xgb-equiv` above.
  * Replays the slm-os-page-eviction verification corpus
  * (`test_vectors_xgb_evict.bin` = N × 27 × f32 features,
  *  `expected_evict.bin`         = N × f32 sigmoid scores from
- *  `booster.predict()`) through the staged + activated XGBoost
- * eviction blob and asserts agreement within float tolerance.
+ *  `booster.predict()`) through either the active runtime blob (the
+ * default, exercises the load-via-`eviction model load` path) or
+ * the compiled-in baked predictor (`--baked`, exercises
+ * `generated::xgb_predict` — the path #952 Phase 3 documents as
+ * the post-graduation on-device equivalence check).
+ *
+ * Both modes assert agreement within float tolerance.
  *
  * Unlike the scheduler verb, this compares *probabilities* not *labels* —
  * the on-device f32 sigmoid roundtrip and Python's f64 intermediates
@@ -1421,7 +1426,8 @@ cleanup:
  * verify_predictions(tolerance=1e-4) in page-eviction. */
 #define BENCH_XGB_EQUIV_EVICT_TOL_BITS 0x38d1b717u
 
-static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
+static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path,
+                                 bool baked)
 {
     uint8_t *vec_buf = NULL, *exp_buf = NULL;
     size_t vec_len = 0, exp_len = 0;
@@ -1486,12 +1492,19 @@ static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
         const float *features =
             &vectors[i * BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT];
         uint32_t got_bits = 0;
-        int32_t rrc = rust_eviction_xgb_predict_compare(
-            features,
-            BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT,
-            expected_bits[i],
-            BENCH_XGB_EQUIV_EVICT_TOL_BITS,
-            &got_bits);
+        int32_t rrc = baked
+            ? rust_eviction_xgb_predict_baked_compare(
+                features,
+                BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT,
+                expected_bits[i],
+                BENCH_XGB_EQUIV_EVICT_TOL_BITS,
+                &got_bits)
+            : rust_eviction_xgb_predict_compare(
+                features,
+                BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT,
+                expected_bits[i],
+                BENCH_XGB_EQUIV_EVICT_TOL_BITS,
+                &got_bits);
         if (rrc < 0) {
             predict_failed_rc = rrc;
             mismatches = (uint32_t)(n_vec - i);
@@ -1519,6 +1532,9 @@ static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
                                        "(stage + activate first via "
                                        "`eviction model load xgboost ...`)" :
             predict_failed_rc == -4 ? "blob parse failed" :
+            predict_failed_rc == -5 ? "ai_eviction_models OFF "
+                                       "(baked predictor not linked in; "
+                                       "rebuild with EVICTION_MODELS=ON)" :
             "unknown";
         shell_printf("xgb-equiv-evict: predict FFI failed at i=%d "
                      "(rc=%d, %s)\r\n",
@@ -1530,8 +1546,9 @@ static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
     uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
     uint64_t per_ns = n_vec > 0 ? total_ns / n_vec : 0;
 
-    shell_printf("xgb-equiv-evict: %u/%u match (tol=1e-4)   "
+    shell_printf("xgb-equiv-evict[%s]: %u/%u match (tol=1e-4)   "
                  "%lu ns/predict   %s\r\n",
+                 baked ? "baked" : "blob",
                  (unsigned)(n_vec - mismatches), (unsigned)n_vec,
                  (unsigned long)per_ns,
                  mismatches == 0 ? "PASS" : "FAIL");
@@ -2424,18 +2441,33 @@ int cmd_bench(int argc, char *argv[])
         }
         return bench_xgb_equiv(argv[2], argv[3]);
     } else if (strcmp(argv[1], "xgb-equiv-evict") == 0) {
-        if (argc < 4) {
-            shell_puts("Usage: bench xgb-equiv-evict <test-vectors.bin> "
-                       "<expected-evict.bin>\r\n"
+        /* Optional `--baked` flag selects the compiled-in predictor
+         * (#952 Phase 3 graduation check). Default is the runtime-
+         * blob path that closes #932. */
+        bool baked = false;
+        int file_arg_idx = 2;
+        if (argc >= 3 && strcmp(argv[2], "--baked") == 0) {
+            baked = true;
+            file_arg_idx = 3;
+        }
+        if (argc < file_arg_idx + 2) {
+            shell_puts("Usage: bench xgb-equiv-evict [--baked] "
+                       "<test-vectors.bin> <expected-evict.bin>\r\n"
                        "  test-vectors.bin   N x 27 x f32 little-endian\r\n"
                        "  expected-evict.bin N x f32 sigmoid scores from "
                        "slm-os-page-eviction's exporter\r\n"
-                       "Stage + activate the eviction blob first via "
-                       "`eviction model load xgboost <path>` then "
-                       "`eviction model activate xgboost`.\r\n");
+                       "  --baked            compare against the compiled-in "
+                       "generated::xgb_predict (the post-graduation check)\r\n"
+                       "                     instead of the active runtime "
+                       "blob. Requires EVICTION_MODELS=ON build.\r\n"
+                       "Default (no --baked): stage + activate the eviction "
+                       "blob first via `eviction model load xgboost <path>` "
+                       "then `eviction model activate xgboost`.\r\n");
             return 1;
         }
-        return bench_xgb_equiv_evict(argv[2], argv[3]);
+        return bench_xgb_equiv_evict(argv[file_arg_idx],
+                                     argv[file_arg_idx + 1],
+                                     baked);
 #endif
     } else if (strcmp(argv[1], "infer-stress") == 0) {
         /* Concurrent inference stress workload (#860).

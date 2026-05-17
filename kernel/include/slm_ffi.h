@@ -479,6 +479,30 @@ extern int32_t rust_eviction_xgb_predict_compare(const float *features,
                                                   uint32_t tolerance_bits,
                                                   uint32_t *out_got_bits);
 
+/*
+ * Baked-path counterpart of `rust_eviction_xgb_predict_compare`
+ * (#952 Phase 3 — post-graduation on-device equivalence check).
+ *
+ * Same wire shape and tolerance semantics; calls
+ * `mm::eviction::generated::xgb_predict` (the baked if-else chain
+ * imported via `scripts/import_eviction_weights.sh`) instead of the
+ * active runtime blob. Used by `bench xgb-equiv-evict --baked` to
+ * verify the compiled baked code preserves predictions on real
+ * hardware after a graduation (see
+ * `docs/eviction-xgboost-graduation.md` Step 5).
+ *
+ * Additional negative return code vs the blob variant:
+ *   -5 — `ai_eviction_models` is OFF; only the stub (constant 0.5)
+ *        is linked in, so an equivalence check would be meaningless.
+ *        Rebuild with `EVICTION_MODELS=ON`.
+ */
+extern int32_t rust_eviction_xgb_predict_baked_compare(
+    const float *features,
+    size_t len,
+    uint32_t expected_bits,
+    uint32_t tolerance_bits,
+    uint32_t *out_got_bits);
+
 /* Workload replay comparison (#117). */
 typedef struct {
     uint8_t  policy_name[32];

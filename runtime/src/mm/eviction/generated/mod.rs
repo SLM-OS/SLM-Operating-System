@@ -14,6 +14,13 @@
 //! The two file sets share a public API — `xgb_predict(&[f32; 27]) -> f32`
 //! and `mlp_predict(&[f32; 27]) -> f32` — so M4's `xgboost.rs` /
 //! `mlp.rs` don't need to know which is linked in.
+//!
+//! Promoting a candidate model from the runtime blob path (loaded via
+//! `eviction model load xgboost <path>` at runtime) into the baked
+//! files here is a documented graduation procedure — see
+//! `docs/eviction-xgboost-graduation.md`. The feature-ordering
+//! invariant called out there (#952 Phase 2) is the one most likely
+//! to silently break a graduation; read it before regenerating.
 
 // XGBoost
 #[cfg(not(feature = "ai_eviction_models"))]
@@ -50,3 +57,68 @@ pub use mlp_policy_f32::mlp_predict_f32;
 /// the stub is active. Runtime code can use this to decide whether to
 /// fall back to classical policies.
 pub const MODELS_AVAILABLE: bool = cfg!(feature = "ai_eviction_models");
+
+// =============================================================================
+// Compile-time feature schema guard (#952 Phase 2)
+//
+// The generated XGBoost predictor is shape-bound to a specific feature
+// layout: it indexes `features[N]` positionally. If page-sim's
+// `FeatureConfig` re-orders or renames any feature without SLM-OS's
+// `extract_features` + `FEATURE_NAMES` following, every baked
+// prediction becomes garbage at runtime with no build error.
+//
+// The generator (slm-os-page-eviction `src/export/xgb_to_rust.py`)
+// emits a `GENERATED_FEATURE_NAMES: [&str; N]` constant alongside
+// `xgb_predict`. This block compares it against the SLM-OS runtime
+// source-of-truth `FEATURE_NAMES`. Mismatch breaks the build with
+// an attributable `panic!` in const context.
+//
+// Only runs when `ai_eviction_models` is on (the stub path has no
+// generator constant to compare against).
+//
+// See `docs/eviction-xgboost-graduation.md` §Feature schema
+// invariants for the recovery procedure when this fails.
+#[cfg(feature = "ai_eviction_models")]
+const _: () = {
+    const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    let expected = crate::mm::eviction::features::FEATURE_NAMES;
+    let actual = xgb_policy_generated::GENERATED_FEATURE_NAMES;
+
+    if expected.len() != actual.len() {
+        panic!(
+            "XGBoost generated feature count differs from runtime \
+             FEATURE_NAMES — re-run import after reconciling \
+             page-sim's FeatureConfig with SLM-OS's extract_features \
+             (see docs/eviction-xgboost-graduation.md §Feature schema \
+             invariants)"
+        );
+    }
+
+    let mut i = 0;
+    while i < expected.len() {
+        if !bytes_equal(expected[i].as_bytes(), actual[i].as_bytes()) {
+            panic!(
+                "XGBoost generated feature name differs from runtime \
+                 FEATURE_NAMES at some index — diff page-sim's \
+                 FeatureConfig.feature_names against \
+                 runtime/src/mm/eviction/features.rs::FEATURE_NAMES \
+                 (see docs/eviction-xgboost-graduation.md §Feature \
+                 schema invariants)"
+            );
+        }
+        i += 1;
+    }
+};
