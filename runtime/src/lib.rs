@@ -2153,6 +2153,172 @@ pub extern "C" fn rust_eviction_feature_count() -> u32 {
     { 0 }
 }
 
+/// Run the active XGBoost eviction blob's `predict_sigmoid` against the
+/// supplied 27-feature vector. Writes the resulting probability into
+/// `*out_score` and returns 0. Returns negative on failure:
+///
+/// - `-1` : NULL pointer or `len != 27`
+/// - `-2` : ai_eviction feature not compiled in
+/// - `-3` : no active XGBoost eviction blob staged
+/// - `-4` : staged blob failed to parse (corrupt or out-of-sync)
+///
+/// The verb-side caller (`bench xgb-equiv-evict` in
+/// `kernel/src/shell_sys.c`) compares the returned score against a
+/// Python-generated expected corpus within a small tolerance (sigmoid
+/// f32 round-trip; ~1e-4 is conservative).
+///
+/// TODO(#448 handoff): once #448's envelope/policy interface lands, the
+/// "fetch active blob + parse + predict" body below likely collapses to a
+/// single registry call (e.g. `with_active_policy(BlobKind::XGBoost, ...)`).
+/// The FFI signature itself is independent of envelope shape and should
+/// stay stable — only the internals need rework.
+///
+/// SAFETY (caller contract): `features` must point to `len`
+/// contiguous `f32`s, 4-byte aligned (every `float features[N]` on the
+/// C side satisfies this naturally). `out_score` must be non-null and
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_xgb_predict(
+    features: *const f32,
+    len: usize,
+    out_score: *mut f32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (features, len, out_score);
+        -2
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if features.is_null() || out_score.is_null() {
+            return -1;
+        }
+        // Hardcoded against `runtime/src/mm/eviction/runtime_xgboost.rs::FEATURE_COUNT`.
+        // A model trained against a different feature schema would parse
+        // successfully against the runtime engine (which only checks
+        // node feature_idx bounds) but predict on the wrong slots —
+        // catching here surfaces the mismatch at the verification verb
+        // rather than as silently-wrong scheduling decisions.
+        if len != 27 {
+            return -1;
+        }
+        // SAFETY: caller contract — `features` points to `len` f32s,
+        // aligned. The fixed-size borrow is safe because `len == 27`
+        // checked above.
+        let slice: &[f32] = core::slice::from_raw_parts(features, 27);
+        let block: mm::eviction::BlockFeatures = match slice.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return -1,
+        };
+
+        // Get the active blob, parse, predict. Parsing per call costs
+        // ~µs for a ~30 KB blob; fine for an equivalence-verb that
+        // runs once-per-vector. The production policy
+        // (`XGBoostPolicy::refresh_runtime_cache`) caches the parsed
+        // model by checksum to avoid this cost on the hot path; the
+        // verb intentionally bypasses that cache so each call goes
+        // straight from on-disk bytes to prediction.
+        let parsed = match mm::eviction::active_blob(
+            mm::eviction::BlobKind::XGBoost,
+        ) {
+            Some(b) => b,
+            None => return -3,
+        };
+        let model = match mm::eviction::runtime_xgboost::parse_payload(
+            &parsed.payload,
+        ) {
+            Ok(m) => m,
+            Err(_) => return -4,
+        };
+        let score = model.predict(&block);
+        *out_score = score;
+        0
+    }
+}
+
+/// Compare the active XGBoost eviction blob's prediction against a
+/// reference score within an absolute tolerance, returning a tristate:
+///
+/// - `0`  : prediction is within `tolerance` of `expected`
+/// - `1`  : prediction is outside tolerance (mismatch)
+/// - `<0` : same negative return codes as `rust_eviction_xgb_predict`
+///
+/// `expected_bits` and `tolerance_bits` are passed as raw u32 IEEE-754
+/// bit patterns so the C caller (`bench xgb-equiv-evict` shell verb,
+/// compiled under `-mgeneral-regs-only`) never has to materialise an
+/// f32 in C code. `out_got_bits` always receives the predicted score's
+/// bit pattern on the success paths (rc 0 or 1) for diagnostic
+/// printing of the first mismatch.
+///
+/// This FFI is the eviction-side counterpart to the scheduler's
+/// `rust_sched_xgb_predict` integer-label compare; eviction prediction
+/// is a continuous sigmoid score so the threshold-versus-tolerance
+/// shape differs.
+///
+/// TODO(#448 handoff): the body shares the per-call parse pattern with
+/// `rust_eviction_xgb_predict`. When that path collapses (or grows a
+/// shared parsed-model cache), this should reuse the same helper.
+///
+/// SAFETY (caller contract): same as `rust_eviction_xgb_predict` plus
+/// `out_got_bits` must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_xgb_predict_compare(
+    features: *const f32,
+    len: usize,
+    expected_bits: u32,
+    tolerance_bits: u32,
+    out_got_bits: *mut u32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (features, len, expected_bits, tolerance_bits, out_got_bits);
+        -2
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if features.is_null() || out_got_bits.is_null() {
+            return -1;
+        }
+        if len != 27 {
+            return -1;
+        }
+        let slice: &[f32] = core::slice::from_raw_parts(features, 27);
+        let block: mm::eviction::BlockFeatures = match slice.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return -1,
+        };
+        let parsed = match mm::eviction::active_blob(
+            mm::eviction::BlobKind::XGBoost,
+        ) {
+            Some(b) => b,
+            None => return -3,
+        };
+        let model = match mm::eviction::runtime_xgboost::parse_payload(
+            &parsed.payload,
+        ) {
+            Ok(m) => m,
+            Err(_) => return -4,
+        };
+        let score = model.predict(&block);
+        *out_got_bits = score.to_bits();
+
+        let expected = f32::from_bits(expected_bits);
+        let tolerance = f32::from_bits(tolerance_bits);
+        let delta = if score >= expected {
+            score - expected
+        } else {
+            expected - score
+        };
+        // NaN propagates through `>` as false; treat NaN delta as a
+        // mismatch since it can't be within any finite tolerance.
+        if delta.is_nan() || delta > tolerance {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 /// Copy the name of feature `index` into `buf` (NUL-terminated).
 /// Returns bytes written (excl NUL), or 0 if index is out of range
 /// or ai_eviction is off.

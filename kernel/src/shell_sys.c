@@ -1386,6 +1386,186 @@ cleanup:
     return rc;
 }
 
+/*
+ * `bench xgb-equiv-evict <test-vectors.bin> <expected-evict.bin>`
+ *
+ * Closes #932. Eviction-side analog of `bench xgb-equiv` above.
+ * Replays the slm-os-page-eviction verification corpus
+ * (`test_vectors_xgb_evict.bin` = N × 27 × f32 features,
+ *  `expected_evict.bin`         = N × f32 sigmoid scores from
+ *  `booster.predict()`) through the staged + activated XGBoost
+ * eviction blob and asserts agreement within float tolerance.
+ *
+ * Unlike the scheduler verb, this compares *probabilities* not *labels* —
+ * the on-device f32 sigmoid roundtrip and Python's f64 intermediates
+ * disagree at ~1e-6 noise floor, so the per-vector compare uses an
+ * absolute tolerance well above that. The threshold matters: too tight
+ * and FP rounding causes spurious FAILs; too loose and a real bug
+ * (missed base-margin fold, wrong tree-walk path) can hide. ~1e-4 is
+ * the analog of slm-os-scheduler-ai PR #4's verification posture.
+ *
+ * Exit code:
+ *   0 — all N entries within tolerance
+ *   1 — at least one mismatch (first-mismatch index + delta printed)
+ *   anything else — read / size / staging precondition failure
+ *
+ * TODO(#448 handoff): the no-active-blob precondition check below uses
+ * a per-call `predict` retry that returns -3 when nothing is staged.
+ * Once #448 introduces the structured BlobError reject path described
+ * in its scope, swap to that for an attributable "stage xgboost first"
+ * message instead of the current generic "no active blob" string.
+ */
+#define BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT 27u
+#define BENCH_XGB_EQUIV_EVICT_BYTES_PER_F32 4u
+
+/* IEEE-754 bit pattern for `1.0e-4_f32`. Hardcoded so shell_sys.c
+ * stays under `-mgeneral-regs-only` (no visible float literal).
+ * Recompute with: `python3 -c 'import struct; print(hex(struct.unpack("<I", struct.pack("<f", 1e-4))[0]))'`.
+ * Tolerance picked to be well above f32 sigmoid round-trip noise
+ * (~1e-6) but well below what any structural bug (missed base
+ * margin, wrong tree walk) would produce (≥ 0.01). Mirror of
+ * verify_predictions(tolerance=1e-4) in page-eviction. */
+#define BENCH_XGB_EQUIV_EVICT_TOL_BITS 0x38d1b717u
+
+static int bench_xgb_equiv_evict(const char *vec_path, const char *exp_path)
+{
+    uint8_t *vec_buf = NULL, *exp_buf = NULL;
+    size_t vec_len = 0, exp_len = 0;
+    size_t vec_pages = 0, exp_pages = 0;
+    int rc = -1;
+
+    /* Both corpus files. Same FAT-vs-VFS dispatch as the scheduler
+     * verb above, via the shared `xgb_equiv_read_corpus` helper. */
+    if (xgb_equiv_read_corpus(vec_path, "vectors",
+                              &vec_buf, &vec_len, &vec_pages) != 0) {
+        goto cleanup;
+    }
+    if (xgb_equiv_read_corpus(exp_path, "expected",
+                              &exp_buf, &exp_len, &exp_pages) != 0) {
+        goto cleanup;
+    }
+
+    /* 27 × f32 per input vector; 1 × f32 per expected score. */
+    const size_t vec_stride =
+        (size_t)BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT *
+        BENCH_XGB_EQUIV_EVICT_BYTES_PER_F32;
+    const size_t exp_stride = BENCH_XGB_EQUIV_EVICT_BYTES_PER_F32;
+    if ((vec_len % vec_stride) != 0) {
+        shell_printf("xgb-equiv-evict: '%s' size %u is not a multiple "
+                     "of %u (27-d f32 vectors)\r\n",
+                     vec_path, (unsigned)vec_len, (unsigned)vec_stride);
+        goto cleanup;
+    }
+    if ((exp_len % exp_stride) != 0) {
+        shell_printf("xgb-equiv-evict: '%s' size %u is not a multiple "
+                     "of 4 (f32 scores)\r\n",
+                     exp_path, (unsigned)exp_len);
+        goto cleanup;
+    }
+    size_t n_vec = vec_len / vec_stride;
+    size_t n_exp = exp_len / exp_stride;
+    if (n_vec != n_exp) {
+        shell_printf("xgb-equiv-evict: vector count %u != "
+                     "score count %u\r\n",
+                     (unsigned)n_vec, (unsigned)n_exp);
+        goto cleanup;
+    }
+
+    /* Treat the input buffer as a flat `const float *` (pointer math
+     * only; no FP arithmetic) and the expected buffer as a `const
+     * uint32_t *` of IEEE-754 bit patterns. The Rust FFI handles all
+     * actual FP. */
+    const float *vectors = (const float *)vec_buf;
+    const uint32_t *expected_bits = (const uint32_t *)exp_buf;
+
+    /* The Rust predictor uses FP/NEON inside the FFI; bracket the
+     * loop with FP_CONTEXT_SAVE/RESTORE so a timer IRQ that fires
+     * mid-bench can't observe an unsaved FP context. */
+    FP_CONTEXT_SAVE();
+
+    uint32_t mismatches = 0;
+    int32_t first_idx = -1;
+    uint32_t first_got_bits = 0, first_exp_bits = 0;
+    uint64_t t0 = timer_get_count();
+    int32_t predict_failed_rc = 0;
+    for (size_t i = 0; i < n_vec; i++) {
+        const float *features =
+            &vectors[i * BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT];
+        uint32_t got_bits = 0;
+        int32_t rrc = rust_eviction_xgb_predict_compare(
+            features,
+            BENCH_XGB_EQUIV_EVICT_FEATURE_COUNT,
+            expected_bits[i],
+            BENCH_XGB_EQUIV_EVICT_TOL_BITS,
+            &got_bits);
+        if (rrc < 0) {
+            predict_failed_rc = rrc;
+            mismatches = (uint32_t)(n_vec - i);
+            first_idx = (int32_t)i;
+            break;
+        }
+        if (rrc == 1) {
+            if (first_idx < 0) {
+                first_idx = (int32_t)i;
+                first_got_bits = got_bits;
+                first_exp_bits = expected_bits[i];
+            }
+            mismatches++;
+        }
+    }
+    uint64_t t1 = timer_get_count();
+
+    FP_CONTEXT_RESTORE();
+
+    if (predict_failed_rc != 0) {
+        const char *why =
+            predict_failed_rc == -1 ? "bad arg" :
+            predict_failed_rc == -2 ? "ai_eviction off" :
+            predict_failed_rc == -3 ? "no active XGBoost blob "
+                                       "(stage + activate first via "
+                                       "`eviction blob load xgboost ...`)" :
+            predict_failed_rc == -4 ? "blob parse failed" :
+            "unknown";
+        shell_printf("xgb-equiv-evict: predict FFI failed at i=%d "
+                     "(rc=%d, %s)\r\n",
+                     (int)first_idx, (int)predict_failed_rc, why);
+        goto cleanup;
+    }
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
+    uint64_t per_ns = n_vec > 0 ? total_ns / n_vec : 0;
+
+    shell_printf("xgb-equiv-evict: %u/%u match (tol=1e-4)   "
+                 "%lu ns/predict   %s\r\n",
+                 (unsigned)(n_vec - mismatches), (unsigned)n_vec,
+                 (unsigned long)per_ns,
+                 mismatches == 0 ? "PASS" : "FAIL");
+    if (mismatches > 0) {
+        /* IEEE-754 hex bit-patterns — shell_printf has no %f on every
+         * platform build, and pretty-printing floats from C under
+         * `-mgeneral-regs-only` would require yet more FP boilerplate.
+         * Decode externally with:
+         *   python3 -c 'import struct;print(struct.unpack("<f", bytes.fromhex("HEX"))[0])'
+         */
+        shell_printf("  first mismatch at i=%d: got=0x%08x exp=0x%08x "
+                     "(IEEE-754 f32 bit-patterns)\r\n",
+                     (int)first_idx,
+                     (unsigned)first_got_bits, (unsigned)first_exp_bits);
+    }
+
+    rc = mismatches == 0 ? 0 : 1;
+
+cleanup:
+    if (vec_buf) {
+        pmm_free_pages(vec_buf, vec_pages);
+    }
+    if (exp_buf) {
+        pmm_free_pages(exp_buf, exp_pages);
+    }
+    return rc;
+}
+
 static void bench_sched_policy(void)
 {
     /* CPU-MLP is built-in; use INF_BUILTIN_HANDLE. Hailo needs a
@@ -2249,6 +2429,19 @@ int cmd_bench(int argc, char *argv[])
             return 1;
         }
         return bench_xgb_equiv(argv[2], argv[3]);
+    } else if (strcmp(argv[1], "xgb-equiv-evict") == 0) {
+        if (argc < 4) {
+            shell_puts("Usage: bench xgb-equiv-evict <test-vectors.bin> "
+                       "<expected-evict.bin>\r\n"
+                       "  test-vectors.bin   N x 27 x f32 little-endian\r\n"
+                       "  expected-evict.bin N x f32 sigmoid scores from "
+                       "slm-os-page-eviction's exporter\r\n"
+                       "Stage + activate the eviction blob first via "
+                       "`eviction blob load xgboost <path>` then "
+                       "`eviction blob activate xgboost`.\r\n");
+            return 1;
+        }
+        return bench_xgb_equiv_evict(argv[2], argv[3]);
 #endif
     } else if (strcmp(argv[1], "infer-stress") == 0) {
         /* Concurrent inference stress workload (#860).

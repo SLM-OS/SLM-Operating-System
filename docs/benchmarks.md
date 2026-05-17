@@ -480,6 +480,61 @@ The cascade walker is pure software (no NEON, no FP-tier divergence
 between platforms) so a Jetson run would produce identical numbers;
 not re-run on Jetson for that reason.
 
+#### Eviction equivalence verification (`bench xgb-equiv-evict`)
+
+**Skeleton — consumer side of [#932](https://github.com/SLM-OS/SLM-Operating-System/issues/932).** The verb is wired but not yet
+hardware-verified; final shape will depend on
+[#448](https://github.com/SLM-OS/SLM-Operating-System/issues/448)'s
+runtime-blob envelope rework. See `kernel/src/shell_sys.c`'s
+`bench_xgb_equiv_evict` and `runtime/src/lib.rs`'s
+`rust_eviction_xgb_predict_compare` for the in-tree implementations.
+
+The eviction-side analog of the scheduler verb above. The
+`slm-os-page-eviction` exporter emits two corpus files alongside
+`evict.smb`: `test_vectors_xgb_evict.bin` (N × 27 f32 feature vectors)
+and `expected_evict.bin` (N × f32 sigmoid scores from
+`booster.predict()`). Replay the corpus through the active
+on-device XGBoost eviction blob with:
+
+```
+# In the SLM-OS shell, after the eviction blob is staged + activated:
+eviction blob load xgboost 0:/slmstore/evict.smb
+eviction blob activate xgboost
+bench xgb-equiv-evict 0:/slmstore/test_vectors_xgb_evict.bin 0:/slmstore/expected_evict.bin
+```
+
+**Differences from the scheduler verb:**
+
+- **Sigmoid score, not classification triple.** Eviction prediction
+  returns a continuous probability (P(optimal eviction target)) so
+  per-vector comparison uses an absolute tolerance (`1e-4`) rather
+  than integer equality. Tolerance is well above f32 sigmoid
+  round-trip noise (~1e-6) but well below what any structural bug
+  (missed `base_score` fold, wrong tree-walk path) would produce
+  (≥ 0.01).
+- **Bit-pattern comparison wire.** The FFI
+  (`rust_eviction_xgb_predict_compare`) takes `expected_bits` and
+  `tolerance_bits` as raw `uint32_t` IEEE-754 patterns so `shell_sys.c`
+  (compiled under `-mgeneral-regs-only`) never materialises an `f32`
+  in C code. First-mismatch diagnostics print hex patterns; decode with
+  `python3 -c 'import struct;print(struct.unpack("<f", bytes.fromhex("HEX"))[0])'`.
+
+**Hardware verification (deferred):** gated on the consumer-side
+work bundling with #448; corresponding pi-5-2 run will populate the
+result row below the moment the new envelope lands.
+
+| Metric | Value |
+|--------|-------|
+| Match rate | *(deferred — pending #448)* |
+| Per-decision latency | *(deferred)* |
+| First mismatch | *(deferred — expected: none)* |
+
+The `slm-os-page-eviction` PR #3 (merged 2026-05-17) emits the
+`evict.smb` blob and verification corpus in the format this verb
+consumes. The producer side is the canonical source of `.smb` blobs
+for any future "graduate this model into the baked path" workflow
+[(#952)](https://github.com/SLM-OS/SLM-Operating-System/issues/952).
+
 **When to use heuristic scheduling:**
 - Latency-sensitive cooperative workloads
 - Systems with frequent task creation/destruction
