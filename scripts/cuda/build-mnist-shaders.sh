@@ -135,20 +135,33 @@ for entry in "${SHADERS[@]}"; do
 
     echo "=== $src ==="
 
-    # 1. Compile to a fat-binary host stub (.1.cubin + .2.cubin).
+    # 1. Compile to a fat-binary host stub.
     (cd "$WORK_DIR" && "$NVCC" -arch="$ARCH" -o "$src" "$src_cu")
 
-    # 2. Extract the device cubin. cuobjdump writes two cubins:
-    #    .1.<arch>.cubin = host stub, .2.<arch>.cubin = device code.
-    (cd "$WORK_DIR" && "$CUOBJDUMP" --extract-elf all "$src")
+    # 2. Extract cubins. cuobjdump writes one host stub + one device
+    # cubin, but the filename pattern differs across toolkit versions:
+    #   CUDA 12.6 (Jetson L4T):  "<src>.{1,2}.<arch>.cubin"
+    #   CUDA 12.0 (Ubuntu repo): "tmpxft_<pid>_00000000-{0,1}.<arch>.cubin"
+    # Rather than enumerate every version's pattern, scan all cubins
+    # produced this iteration and pick the one whose ELF carries a
+    # `.text.<kernel>` section — that's always the device cubin
+    # regardless of filename. Clean the work dir first so we don't
+    # match cubins from earlier iterations.
+    rm -f "$WORK_DIR"/*.cubin
+    (cd "$WORK_DIR" && "$CUOBJDUMP" --extract-elf all "$src" >/dev/null)
 
-    cubin="$WORK_DIR/$src.2.$ARCH.cubin"
-    if [ ! -f "$cubin" ]; then
-        # Some toolkit versions number the device cubin differently.
-        cubin=$(ls "$WORK_DIR/$src".*."$ARCH".cubin 2>/dev/null | tail -1)
-    fi
-    if [ -z "$cubin" ] || [ ! -f "$cubin" ]; then
-        echo "ERROR: no device cubin produced for $src" >&2
+    cubin=""
+    for candidate in "$WORK_DIR"/*."$ARCH".cubin; do
+        [ -f "$candidate" ] || continue
+        if "$READELF" -SW "$candidate" 2>/dev/null | \
+                grep -q '\.text\.'; then
+            cubin="$candidate"
+            break
+        fi
+    done
+    if [ -z "$cubin" ]; then
+        echo "ERROR: no device cubin (with .text.<kernel> section) " \
+             "produced for $src" >&2
         exit 2
     fi
 
@@ -156,15 +169,25 @@ for entry in "${SHADERS[@]}"; do
     #    `.text.<kernel>` section — cuobjdump emits one per
     #    __global__. Match `.text.` (with trailing dot) to skip the
     #    cubin's combined `.text` slot.
-    text_line="$("$READELF" -SW "$cubin" | awk '/\.text\./ {print; exit}')"
-    if [ -z "$text_line" ]; then
+    #
+    # Parse Offset/Size from the RIGHT of the row, not the left.
+    # Reasons:
+    #   - "[Nr]" may be one token "[N]" or two tokens "[" "N]"
+    #     depending on Nr width (single vs multi-digit).
+    #   - The Address column is 8 hex digits on CUDA 12.6 / Jetson
+    #     but 16 hex digits on CUDA 12.0 / Ubuntu. Both shifts
+    #     perturb left-anchored positional parsing.
+    # The right-side columns are stable across toolkit versions:
+    #     ... Off Size ES Flg Lk Inf Al
+    # So Offset = $(NF-6), Size = $(NF-5).
+    line_fields="$("$READELF" -SW "$cubin" | \
+        awk '/\.text\./ { print $(NF-6), $(NF-5); exit }')"
+    if [ -z "$line_fields" ]; then
         echo "ERROR: no .text.<kernel> section in $cubin" >&2
         exit 2
     fi
-
-    # Section header columns: [Nr] Name Type Addr Off Size ...
-    off_hex="$(echo "$text_line" | awk '{print $5}')"
-    size_hex="$(echo "$text_line" | awk '{print $6}')"
+    off_hex="${line_fields% *}"
+    size_hex="${line_fields#* }"
     off_dec=$((16#$off_hex))
     size_dec=$((16#$size_hex))
     echo "  .text section: offset=0x$off_hex size=0x$size_hex"
