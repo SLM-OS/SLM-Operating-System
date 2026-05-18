@@ -5773,6 +5773,27 @@ int cmd_nvgpu(int argc, char *argv[])
         shell_printf("fecs-newctx: rc=%d\r\n", rc);
         return rc;
     }
+    if (strcmp(argv[1], "fecs-forcectx") == 0) {
+        /* #844 probe: write `gr_fecs_current_ctx_r()` (0x00409b00)
+         * directly with our channel's inst phys, displacing whatever
+         * stale Linux value is left there post-kexec. If FECS's
+         * first compute ctxsw is failing because the save-old phase
+         * dereferences Linux's stale current_ctx, this should turn
+         * mb6=0x21 (or mb6=0x5a on non-v10 helpers) into rc=0 on
+         * subsequent `nvgpu submit-compute`.
+         *
+         * Requires `nvgpu inherit` + `nvgpu channel` first. */
+        const struct ga10b_channel_handoff *h3 =
+            ga10b_bringup_handoff();
+        if (h3 == NULL || h3->inst_block_phys == 0) {
+            shell_puts("fecs-forcectx: no handoff loaded "
+                       "(run nvgpu channel first)\r\n");
+            return -1;
+        }
+        int rc = ga10b_fecs_force_current_ctx(h3->inst_block_phys);
+        shell_printf("fecs-forcectx: rc=%d\r\n", rc);
+        return rc;
+    }
     if (strcmp(argv[1], "submit-compute") == 0) {
         /* Phase 7 (compute): COMPUTE_B SEMAPHORE_RELEASE smoke test.
          * Requires `nvgpu inherit` + `nvgpu channel` first (same as
@@ -7584,6 +7605,7 @@ oplib_stage_call:
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | engine-status | engine-clear | "
+              "fecs-newctx | fecs-forcectx | fecs-stop-restart | "
               "submit | submit-compute | launch-kernel | "
               "run-mnist | fecs | gpccs | pmu | run | "
               "gmmu <pushbuf | walk | walk-raw | "

@@ -2253,6 +2253,37 @@ int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys)
     return 0;
 }
 
+int ga10b_fecs_force_current_ctx(uint64_t inst_block_phys)
+{
+    if (inst_block_phys == 0) return -1;
+    if ((inst_block_phys & 0xFFFu) != 0) return -1;
+
+    uint32_t inst_ptr_u32 = (uint32_t)(inst_block_phys >> 12);
+    uint32_t ctx_val = inst_ptr_u32 | (3u << 28) | (1u << 31);
+
+    uint32_t before_cur = bar0_r32(0x00409b00u);
+    uint32_t before_new = bar0_r32(0x00409b04u);
+    uint32_t status_1   = bar0_r32(0x00409400u);
+
+    bar0_w32(0x00409b04u, ctx_val);
+    bar0_w32(0x00409b00u, ctx_val);
+    gsp_platform->mb();
+
+    uint32_t after_cur = bar0_r32(0x00409b00u);
+    uint32_t after_new = bar0_r32(0x00409b04u);
+
+    uart_printf("[fecs-forcectx] arb_busy=%u (status_1=0x%08lx)\n",
+                (unsigned)((status_1 >> 12) & 0x1u),
+                (unsigned long)status_1);
+    uart_printf("[fecs-forcectx] new_ctx(0x409b04):     0x%08lx -> 0x%08lx\n",
+                (unsigned long)before_new, (unsigned long)after_new);
+    uart_printf("[fecs-forcectx] current_ctx(0x409b00): 0x%08lx -> 0x%08lx "
+                "(want 0x%08x for inst=0x%lx)\n",
+                (unsigned long)before_cur, (unsigned long)after_cur,
+                (unsigned)ctx_val, (unsigned long)inst_block_phys);
+    return 0;
+}
+
 /* Decode FECS_CURRENT_CTX and fb_mmu_fault_inst into 40-bit
  * physical addresses and dump both inst blocks atomically — i.e.
  * latch every relevant register up-front before the slow DRAM
