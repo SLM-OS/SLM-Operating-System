@@ -983,6 +983,51 @@ test-ga10b-bringup:
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_ga10b_bringup
 
+# ============================================================================
+# Jetson MNIST helper shaders — cross-build SASS from .cu sources
+# ============================================================================
+# Cross-builds the five MNIST-pipeline SASS shader blobs that
+# `gpu-kernel-mnist` loads at runtime on the Jetson. Compiles each
+# `scripts/cuda/*.cu` source with `nvcc -arch=sm_87`, then carves
+# the `.text.<kernel>` section out of the resulting cubin via
+# `cuobjdump --extract-elf` + `readelf -SW`. Output is byte-identical
+# to a native Jetson build (verified against `jetson-nano-2`).
+#
+# Requires the NVIDIA CUDA Toolkit on $PATH or at /usr/local/cuda/bin
+# — on the dev machine this means a one-time
+#   `sudo apt install nvidia-cuda-toolkit` (Ubuntu/Debian) or the
+# official installer from developer.nvidia.com. The script
+# auto-detects the toolchain and emits a friendly install-hint if it
+# can't find one.
+#
+# After building, scp the SASS files to the Jetson's helper dir:
+#   scp build/cuda/mnist-shaders/*.sass root@<JETSON>:/root/gpu-mnist/
+#
+# See docs/deploy/jetson-helper-setup.md for the full helper-dir
+# bring-up flow (helper binary build, weights staging, etc.).
+MNIST_SHADER_OUT := build/cuda/mnist-shaders
+MNIST_CU_SRCS    := $(addprefix scripts/cuda/, \
+    conv2d_fp32_direct.cu     \
+    add_bias_relu_fp32.cu     \
+    maxpool2d_fp32.cu         \
+    gemm_fp32.cu              \
+    gemm_hmma_fp32a_fp16w.cu)
+
+# `.stamp` is a sentinel touched after a successful build of all five
+# shaders. Depending on the stamp instead of the individual .sass
+# outputs keeps the rule simple while still skipping the rebuild when
+# all sources + script are unchanged.
+$(MNIST_SHADER_OUT)/.stamp: $(MNIST_CU_SRCS) scripts/cuda/build-mnist-shaders.sh
+	@scripts/cuda/build-mnist-shaders.sh $(MNIST_SHADER_OUT)
+	@touch $@
+
+.PHONY: mnist-shaders
+mnist-shaders: $(MNIST_SHADER_OUT)/.stamp
+
+.PHONY: mnist-shaders-clean
+mnist-shaders-clean:
+	rm -rf $(MNIST_SHADER_OUT)
+
 # CE pushbuffer encoding tests. Pure-logic, no MMIO, no kernel deps —
 # compiles ga10b_ce.c standalone (uart_puts / cache_clean_range
 # stubbed inline below). Runs on every host so a wrong class id /
@@ -1572,6 +1617,11 @@ help:
 	@echo ""
 	@echo "Test targets:"
 	@echo "  test           Run all tests in QEMU (exits on completion)"
+	@echo ""
+	@echo "Jetson helper targets (cross-build):"
+	@echo "  mnist-shaders         Build MNIST SASS shaders for gpu-kernel-mnist"
+	@echo "                        (output: $(MNIST_SHADER_OUT)/*.sass; requires CUDA Toolkit)"
+	@echo "  mnist-shaders-clean   Remove $(MNIST_SHADER_OUT)/"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
