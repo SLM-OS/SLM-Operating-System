@@ -715,12 +715,37 @@ void ga10b_kexec_handoff_register_reserves(void)
      * dmabuf in DRAM by scanning for its magic. ~50 ms one-time-only
      * boot cost. A fresh-boot or no-helper test path that doesn't
      * have a kexec'd channel works fine without these reservations —
-     * just leaves PMM with more pages to allocate from. */
+     * just leaves PMM with more pages to allocate from.
+     *
+     * #834: use the kind-aware + validate-filtered scanner here
+     * (NOT the bare magic-match `ga10b_find_handoff_in_range`).
+     * Stale handoff dmabufs from prior helper invocations remain in
+     * DRAM with intact magic but inst_block_phys=0 (the helper's
+     * fallback when gpu_read_fecs_inst_block_phys() fails). With the
+     * unfiltered scanner, this reserve picked up the stale handoff
+     * — at a lower phys than the fresh one — and pinned its
+     * userd/gpfifo/pushbuf/sem buffers, which point at *old*
+     * channels long-since freed. The FRESH channel's buffers, which
+     * the helper actually used and which the GPU writes to, were
+     * left unreserved → PMM clobbered them on first allocation →
+     * silent corruption + boot-to-boot dispatch flakiness +
+     * eventual PMM-free-list page faults from GPU writes into
+     * PMM-owned pages. Observed on jetson-nano-2 (2026-05-16):
+     *   stale 0x12c097000: userd=0x13ae13000 gpfifo=0x12c034000
+     *                       pushbuf=0x13c4a0000 sem=0x129e2b000
+     *   fresh 0x13aee2000: userd=0x10d706000 gpfifo=0x13accd000
+     *                       pushbuf=0x13a9a0000 sem=0x13af83000
+     * All four buffers different — boot reserve pinned the wrong
+     * set entirely. Switching to the kind-aware scanner cascades
+     * the validate-handoff inst_block_phys=0 rejection (commit
+     * a099cd3b) into this code path too. */
     uart_puts("[ga10b-reserve] scanning DRAM for handoff magic + "
               "weights-pool extents...\n");
     uint64_t handoff_phys =
-        ga10b_find_handoff_in_range(0x100000000ull, 0x200000000ull,
-                                     4096ull);
+        ga10b_find_handoff_of_kind_in_range(0x100000000ull,
+                                             0x200000000ull,
+                                             4096ull,
+                                             GA10B_PIPELINE_KIND_MNIST);
     if (handoff_phys == 0) {
         uart_puts("[ga10b-reserve]   handoff not found — skipping "
                   "weights-pool extent reservation\n");

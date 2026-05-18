@@ -253,8 +253,9 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define NVC7C0_REPORT_SEMAPHORE_EXECUTE             0x0168u
 
 /* REPORT_SEMAPHORE_EXECUTE fields */
-#define NVC7C0_SEM_EXECUTE_OP_RELEASE               0x0u   /* bits [1:0] */
+#define NVC7C0_SEM_EXECUTE_OP_RELEASE               0x0u       /* bits [1:0] */
 #define NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD  (1u << 3)  /* bits [4:3] */
+#define NVC7C0_SEM_EXECUTE_FLUSH_DISABLE_TRUE       (1u << 5)  /* bit 5 */
 
 /* ---- COMPUTE_B compute-kernel launch methods --------------------
  * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
@@ -1265,6 +1266,29 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
+    /* `inst_block_phys` must be non-zero. Every v2+ helper sets this
+     * via `gpu_read_fecs_inst_block_phys()` in gpu-launch-common.c;
+     * the field is 0 only when the helper's FECS read failed (priv-
+     * locked, target=0, /dev/mem open/mmap error). A handoff with
+     * inst_block_phys=0 carries no GMMU root, so SLM-OS's rebuild-
+     * gmmu path can't find Linux's page tables — `nvgpu oplib stage`
+     * gives up after falling through to a stale live FECS read.
+     *
+     * Crucially, this rejection also lets `ga10b_find_handoff_of_
+     * kind_in_range` skip past STALE handoffs left behind in DRAM by
+     * prior helper invocations. The scanner finds the first magic+
+     * kind match by address; if an older helper run wrote a struct
+     * at a lower physical address with inst_block_phys=0 (FECS read
+     * failed at that time, common on cold-boot races), and a newer
+     * run wrote a usable handoff at a higher address, the scanner
+     * used to return the stale one. With this check the validator
+     * rejects the stale candidate and the scanner advances to the
+     * fresh one. Observed on jetson-nano-2 (2026-05-16): stale
+     * handoff at 0x1159fa000 was masking the fresh helper handoff
+     * at 0x13adcc000, leaving SLM-OS unable to find any usable
+     * channel — `oplib stage` reported "no handoff and
+     * FECS_CURRENT_CTX read failed". */
+    if (h->inst_block_phys == 0) return -1;
     /* gpfifo_entries must be a non-zero power of two. */
     if (h->gpfifo_entries == 0 ||
         (h->gpfifo_entries & (h->gpfifo_entries - 1)) != 0) return -1;
@@ -1499,6 +1523,24 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
                 (unsigned long)g_handoff.initial_gp_get);
 
     uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
+
+    /* #834: an earlier iteration of this code (reverted) invoked
+     * `ga10b_fecs_method_push(STOP_CTXSW); _push(START_CTXSW);`
+     * here, based on a one-boot success that turned out to be
+     * unreliable. Multi-boot hardware testing (jetson-nano-2,
+     * 2026-05-16) showed the STOP/START sequence reports mb0=PASS
+     * on both methods but does NOT consistently unblock compute
+     * dispatch — about half of fresh kexec boots still hit the
+     * CTXSW_CHECKSUM_MISMATCH watchdog on first submit-compute
+     * even after the unstick.
+     *
+     * The probe still lives as `nvgpu fecs-stop-restart` for
+     * diagnostic use, but it is NOT a reliable automatic fix
+     * for the #834 W-series wedge. A deeper recovery sequence
+     * (likely involving runlist preempt + GR engine reset + the
+     * full channel-recovery path nvgpu uses) is needed before
+     * any auto-invocation here. */
+
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
     return 0;
 }
@@ -1597,7 +1639,8 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
 
 uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
                                                      uint64_t sem_gpu_va,
-                                                     uint32_t payload)
+                                                     uint32_t payload,
+                                                     uint32_t flags)
 {
     /* First pair: SET_OBJECT binding AMPERE_COMPUTE_B to subch 1.
      *
@@ -1627,8 +1670,12 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
     pb[8]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
     pb[9]  = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
     pb[10] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
-    pb[11] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
-             NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
+    uint32_t execute_bits = NVC7C0_SEM_EXECUTE_OP_RELEASE |
+                            NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
+    if (flags & GA10B_SEMA_FLUSH_DISABLE) {
+        execute_bits |= NVC7C0_SEM_EXECUTE_FLUSH_DISABLE_TRUE;
+    }
+    pb[11] = execute_bits;
     return GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS;
 }
 
@@ -2023,6 +2070,123 @@ static void dump_one_inst_block(const char *tag, uint64_t inst_phys)
     if (hits == 0) {
         uart_printf("[%s]  (no 0xc01000-encoded matches)\n", tag);
     }
+}
+
+/* Public wrapper around `dump_one_inst_block` for callers that
+ * already know the inst-block phys (e.g. ga10b_gmmu_rebuild_for_
+ * handoff post-write). Skips the FECS_CURRENT_CTX / fault-inst
+ * latch in `ga10b_dump_inst_blocks_atomic`. */
+void ga10b_dump_inst_block_at(const char *tag, uint64_t inst_phys)
+{
+    dump_one_inst_block(tag, inst_phys);
+}
+
+/* FECS method-push constants used by `ga10b_fecs_method_push`. */
+
+/* FECS mailbox-clear register offset (gv11b/ga10b layout —
+ * `gr_fecs_ctxsw_mailbox_clear_r(0)` per gv11b's hw_gr header;
+ * ga10b inherits the offset). Writing 0xFFFFFFFF clears all bits
+ * of mailbox 0 to zero. */
+#define GA10B_GR_FECS_CTXSW_MAILBOX_CLEAR_0  0x00409840u
+
+/* Poll bound for FECS method completion. Each iteration is a single
+ * BAR0 read (~100 ns on Tegra GA10B), so this caps wall time at
+ * roughly 100 ms — comfortably above the ~1 ms FECS round-trip nvgpu
+ * source comments cite for STOP_CTXSW, while still ensuring a wedged
+ * FECS can't hang the shell task indefinitely. */
+#define GA10B_FECS_METHOD_POLL_ITERATIONS    1000000u
+
+/* #834: submit a FECS method via the standard data+push protocol.
+ * Used for STOP_CTXSW / START_CTXSW / golden-image methods that
+ * Linux's nvgpu issues during ctxsw recovery.
+ *
+ * Protocol per gm20b_gr_falcon (the canonical reference; ga10b
+ * inherits the layout):
+ *   1. Clear mailbox 0 via `gr_fecs_ctxsw_mailbox_clear_r(0)`
+ *      (= 0x00409840 — gv11b/ga10b same offset). Writing
+ *      0xFFFFFFFF clears all bits of mailbox 0 to zero.
+ *   2. Write `data` to `gr_fecs_method_data_r()` (0x00409500).
+ *   3. Write `addr & 0xFFF` to `gr_fecs_method_push_r()`
+ *      (0x00409504). FECS picks up the method.
+ *   4. Poll mailbox 0 (0x00409800) for `expected_mb0` (typically
+ *      PASS = 0x1). Fail value 0x2 also exits early.
+ *
+ * Returns 0 on PASS match, -1 on timeout or FAIL. */
+int ga10b_fecs_method_push(uint32_t method_addr, uint32_t method_data,
+                           uint32_t expected_mb0)
+{
+    bar0_w32(GA10B_GR_FECS_CTXSW_MAILBOX_CLEAR_0, 0xFFFFFFFFu);
+    gsp_platform->mb();
+
+    bar0_w32(0x00409500u, method_data);
+    bar0_w32(0x00409504u, method_addr & 0xFFFu);
+    gsp_platform->mb();
+
+    uint32_t mb0 = 0;
+    int hit = 0;
+    for (uint32_t i = 0; i < GA10B_FECS_METHOD_POLL_ITERATIONS; i++) {
+        mb0 = bar0_r32(0x00409800u);
+        if (mb0 == expected_mb0) { hit = 1; break; }
+        if (mb0 == 0x2u) break;  /* FAIL */
+    }
+
+    uart_printf("[fecs-push] addr=0x%x data=0x%08lx mb0=0x%08lx %s\n",
+                (unsigned)method_addr,
+                (unsigned long)method_data,
+                (unsigned long)mb0,
+                hit ? "OK" : "TIMEOUT_OR_FAIL");
+    return hit ? 0 : -1;
+}
+
+/* #834 experiment: write our channel's inst block phys into
+ * `gr_fecs_new_ctx_r()` (0x00409b04) so FECS knows the "next"
+ * channel ahead of any submit-compute ctxsw.
+ *
+ * Background: on a post-kexec boot, FECS_CURRENT_CTX may point at
+ * an invalid (PDB=0) inst block left over from Linux's nvgpu
+ * tear-down. When PBDMA later schedules our channel for GR work,
+ * FECS tries to save the current (invalid) context first — which
+ * watchdogs out (gr_intr=0x80000, fecs_host_int=0x80001 watchdog +
+ * ctxsw_intr=1, ctxsw_mb6=0x21).
+ *
+ * Writing `gr_fecs_new_ctx` with our channel's inst phys is the
+ * Volta+/Ampere replacement for the gm20b BIND sequence — it tells
+ * FECS "the next channel to load is THIS one". Pre-ctxsw the
+ * arbiter latches this into CURRENT_CTX; post-ctxsw, the bad
+ * Linux state is gone.
+ *
+ * Returns 0 on success, -1 on bad input. Tegra GA10B PDB targets
+ * sys_mem_ncoh (encoded as target=3 in the new_ctx register's
+ * bits[29:28]; the valid bit is bit 31). */
+int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys)
+{
+    if (inst_block_phys == 0) return -1;
+    if ((inst_block_phys & 0xFFFu) != 0) return -1;  /* page-aligned */
+
+    uint32_t inst_ptr_u32 = (uint32_t)(inst_block_phys >> 12);
+    /* bits[27:0]   = inst_phys[39:12]
+     * bits[29:28]  = target (3 = sys_mem_ncoh on Tegra)
+     * bit 31       = valid */
+    uint32_t new_ctx = inst_ptr_u32 | (3u << 28) | (1u << 31);
+
+    /* Latch current value for comparison + diagnostics. */
+    uint32_t before = bar0_r32(0x00409b04u);
+    bar0_w32(0x00409b04u, new_ctx);
+    gsp_platform->mb();
+    uint32_t after = bar0_r32(0x00409b04u);
+    uint32_t current_ctx = bar0_r32(0x00409b00u);
+
+    uart_printf("[fecs-newctx] new_ctx_r(0x409b04): 0x%08lx -> 0x%08lx "
+                "(want 0x%08x for inst=0x%lx)\n",
+                (unsigned long)before, (unsigned long)after,
+                (unsigned)new_ctx, (unsigned long)inst_block_phys);
+    uart_printf("[fecs-newctx] current_ctx_r(0x409b00) post-write: "
+                "0x%08lx (decode: inst=0x%lx target=%u valid=%u)\n",
+                (unsigned long)current_ctx,
+                ((unsigned long)(current_ctx & 0x0FFFFFFFu)) << 12,
+                (unsigned)((current_ctx >> 28) & 0x3u),
+                (unsigned)((current_ctx >> 31) & 1u));
+    return 0;
 }
 
 /* Decode FECS_CURRENT_CTX and fb_mmu_fault_inst into 40-bit
@@ -2473,7 +2637,8 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
      * IRAM upload. No NVK-style MME init needed. */
     uint32_t pb_buf[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
     uint32_t pb_dwords = ga10b_build_compute_sema_release_pushbuffer(
-        pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
+        pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD,
+        /* flags */ 0u);
 
     /* Phase 7 COMPUTE_B also uses the fixed payload — the shader
      * is the SEMAPHORE_RELEASE method itself, not arbitrary code. */
@@ -2587,18 +2752,19 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         b->last_error_phase = 8;
         return -1;
     }
-    /* Capacity check: N kernel-dispatch entries + 1 trailing sema
-     * entry must fit comfortably in the GPFIFO ring AND the
-     * pushbuffer area. nvgpu reserves 2 extra entries per submit
-     * (pre/post fence); we cap at half-ring as a safety margin
-     * mirroring `check_gpfifo_capacity` (`EXTRA_GPFIFO_ENTRIES`
-     * + headroom). With the post-#601 ring of 512, that allows up
-     * to 255 ops per chain — vastly more than the ~8 a typical
-     * MNIST or sched chain requires. */
-    uint32_t total_entries = n + 1u;
+    /* Capacity check: 1 pre-launch diagnostic sema (#838) + N kernel-
+     * dispatch entries + 1 trailing sema entry must fit comfortably
+     * in the GPFIFO ring AND the pushbuffer area. nvgpu reserves 2
+     * extra entries per submit (pre/post fence); we cap at half-ring
+     * as a safety margin mirroring `check_gpfifo_capacity`
+     * (`EXTRA_GPFIFO_ENTRIES` + headroom). With the post-#601 ring
+     * of 512, that allows up to 254 ops per chain — vastly more than
+     * the ~8 a typical MNIST or sched chain requires. */
+    uint32_t total_entries = n + 2u;
     if (total_entries > (g_handoff.gpfifo_entries / 2u)) {
-        uart_printf("[GA10B-P8-v7] %lu entries (%lu ops + 1 sema) "
-                    "exceeds half-ring budget %lu (gpfifo_entries=%lu)\n",
+        uart_printf("[GA10B-P8-v7] %lu entries (1 pre-sema + %lu ops "
+                    "+ 1 post-sema) exceeds half-ring budget %lu "
+                    "(gpfifo_entries=%lu)\n",
                     (unsigned long)total_entries,
                     (unsigned long)n,
                     (unsigned long)(g_handoff.gpfifo_entries / 2u),
@@ -2612,12 +2778,13 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
     uint32_t pb_sema_bytes =
         GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS * 4u;   /* 48 */
     uint64_t total_pb_bytes =
-        (uint64_t)n * pb_kernel_bytes + pb_sema_bytes;
+        (uint64_t)n * pb_kernel_bytes + 2u * (uint64_t)pb_sema_bytes;
     if (total_pb_bytes > g_handoff.pushbuf_size) {
         uart_printf("[GA10B-P8-v7] %llu pushbuf bytes "
-                    "(%lu ops × %u + %u sema) exceeds "
-                    "pushbuf_size=%lu\n",
+                    "(%u pre-sema + %lu ops × %u + %u post-sema) "
+                    "exceeds pushbuf_size=%lu\n",
                     (unsigned long long)total_pb_bytes,
+                    (unsigned)pb_sema_bytes,
                     (unsigned long)n,
                     (unsigned)pb_kernel_bytes,
                     (unsigned)pb_sema_bytes,
@@ -2686,8 +2853,8 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
     volatile uint64_t *gpfifo =
         (volatile uint64_t *)(uintptr_t)g_handoff.gpfifo_phys;
 
-    GA10B_DBG("[GA10B-P8-v7] BULK %lu ops + 1 sema — gp_put=%lu, "
-              "pushbuf_phys=0x%lx pool_phys=0x%lx\n",
+    GA10B_DBG("[GA10B-P8-v7] BULK 1 pre-sema + %lu ops + 1 post-sema "
+              "— gp_put=%lu, pushbuf_phys=0x%lx pool_phys=0x%lx\n",
               (unsigned long)n,
               (unsigned long)gp_put_start,
               (unsigned long)pushbuf_phys,
@@ -2716,7 +2883,47 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
                     (unsigned long)opdbg->shader_size_bytes);
     }
 
-    /* Phase 1: queue all N kernel-dispatch entries. */
+    /* Phase 0: queue a PRE-LAUNCH diagnostic sema (#838). Uses
+     * FLUSH_DISABLE=1 so the host engine fires the release as soon
+     * as it processes the method — without waiting for any compute
+     * to drain. Same `sema_gpu_va` target as the post-launch sema
+     * but a distinct payload (GA10B_SEMA_PRELAUNCH_PAYLOAD = BABE);
+     * the trailing sema's RELEASE_PAYLOAD (DEAD) will overwrite it
+     * on success. The CPU poll loop below reads the final value
+     * and discriminates three cases (poll == 0 → PBDMA never
+     * reached the semas; poll == BABE → host engine alive but GR
+     * never drained; poll == DEAD → success). Removes the "did the
+     * kernel hang or did PBDMA never get there" ambiguity #844
+     * needs to advance. */
+    uint64_t pb_pre_sema_phys = pushbuf_phys;
+    uint64_t pb_pre_sema_gpu_va = pushbuf_gpu_va;
+    uint32_t *pb_pre_sema_cpu = (uint32_t *)(uintptr_t)pb_pre_sema_phys;
+    uint32_t pre_sema_pb_dwords =
+        ga10b_build_compute_sema_release_pushbuffer(
+            pb_pre_sema_cpu, sema_gpu_va,
+            GA10B_SEMA_PRELAUNCH_PAYLOAD,
+            GA10B_SEMA_FLUSH_DISABLE);
+
+    uint32_t pre_e0 = (uint32_t)(pb_pre_sema_gpu_va & 0xFFFFFFFCu);
+    uint32_t pre_e1 = (uint32_t)((pb_pre_sema_gpu_va >> 32) & 0xFFu) |
+                      (pre_sema_pb_dwords << 10);
+    uint64_t pre_sema_entry = ((uint64_t)pre_e1 << 32) | pre_e0;
+    uint32_t pre_sema_gp_idx = gp_put_start & ring_mask;
+    gpfifo[pre_sema_gp_idx] = pre_sema_entry;
+
+    GA10B_DBG("[GA10B-P8-v7]   queue pre_sema_release pb_phys=0x%lx "
+              "pb_gpu_va=0x%lx gp_idx=%lu sema_gpu_va=0x%lx "
+              "(payload=0x%x, FLUSH_DISABLE=1)\n",
+              (unsigned long)pb_pre_sema_phys,
+              (unsigned long)pb_pre_sema_gpu_va,
+              (unsigned long)pre_sema_gp_idx,
+              (unsigned long)sema_gpu_va,
+              (unsigned)GA10B_SEMA_PRELAUNCH_PAYLOAD);
+
+    /* Phase 1: queue all N kernel-dispatch entries. The kernel
+     * pushbuffer area starts AFTER the pre-launch sema's pb block. */
+    uint64_t kernel_pb_base_phys = pushbuf_phys + pb_sema_bytes;
+    uint64_t kernel_pb_base_gpu_va = pushbuf_gpu_va + pb_sema_bytes;
     for (uint32_t i = 0; i < n; i++) {
         const struct ga10b_pipeline_op_v7 *op = &ops_v7[i];
         if (!ga10b_pipeline_op_is_valid(
@@ -2744,11 +2951,12 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
 
         /* Build the dispatch-only pushbuffer at this op's slot in
          * the packed pushbuffer area. Each op gets pb_kernel_bytes
-         * of space starting at offset i * pb_kernel_bytes. */
+         * of space starting at offset i * pb_kernel_bytes (after
+         * the leading pre-sema block). */
         uint64_t pb_op_phys =
-            pushbuf_phys + (uint64_t)i * pb_kernel_bytes;
+            kernel_pb_base_phys + (uint64_t)i * pb_kernel_bytes;
         uint64_t pb_op_gpu_va =
-            pushbuf_gpu_va + (uint64_t)i * pb_kernel_bytes;
+            kernel_pb_base_gpu_va + (uint64_t)i * pb_kernel_bytes;
         uint32_t *pb_op_cpu = (uint32_t *)(uintptr_t)pb_op_phys;
         uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
             pb_op_cpu, slot.gpu_va);
@@ -2756,12 +2964,13 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         /* GPFIFO entry: 8-byte Ampere format. gp_e0 is the lower
          * 32 bits of the pushbuffer GPU VA (PCB-aligned, so bits
          * [1:0] are zero); gp_e1 holds the upper 8 bits of the VA
-         * + the pushbuffer length in dwords. */
+         * + the pushbuffer length in dwords. Slot 0 in the GPFIFO
+         * holds the pre-launch sema, so op[i] lands at slot 1+i. */
         uint32_t gp_e0 = (uint32_t)(pb_op_gpu_va & 0xFFFFFFFCu);
         uint32_t gp_e1 = (uint32_t)((pb_op_gpu_va >> 32) & 0xFFu) |
                          (pb_dwords << 10);
         uint64_t entry = ((uint64_t)gp_e1 << 32) | gp_e0;
-        uint32_t gp_idx = (gp_put_start + i) & ring_mask;
+        uint32_t gp_idx = (gp_put_start + 1u + i) & ring_mask;
         gpfifo[gp_idx] = entry;
 
         GA10B_DBG("[GA10B-P8-v7]   queue op[%lu/%lu] slot=%lu "
@@ -2783,19 +2992,21 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      * the unambiguous "all kernels done, all outputs in DRAM"
      * signal. */
     uint64_t pb_sema_phys =
-        pushbuf_phys + (uint64_t)n * pb_kernel_bytes;
+        kernel_pb_base_phys + (uint64_t)n * pb_kernel_bytes;
     uint64_t pb_sema_gpu_va =
-        pushbuf_gpu_va + (uint64_t)n * pb_kernel_bytes;
+        kernel_pb_base_gpu_va + (uint64_t)n * pb_kernel_bytes;
     uint32_t *pb_sema_cpu = (uint32_t *)(uintptr_t)pb_sema_phys;
     uint32_t sema_pb_dwords =
         ga10b_build_compute_sema_release_pushbuffer(
-            pb_sema_cpu, sema_gpu_va, GA10B_SEMA_RELEASE_PAYLOAD);
+            pb_sema_cpu, sema_gpu_va, GA10B_SEMA_RELEASE_PAYLOAD,
+            /* flags */ 0u);
 
     uint32_t s_e0 = (uint32_t)(pb_sema_gpu_va & 0xFFFFFFFCu);
     uint32_t s_e1 = (uint32_t)((pb_sema_gpu_va >> 32) & 0xFFu) |
                     (sema_pb_dwords << 10);
     uint64_t sema_entry = ((uint64_t)s_e1 << 32) | s_e0;
-    uint32_t sema_gp_idx = (gp_put_start + n) & ring_mask;
+    /* Post-sema lands AFTER (1 pre-sema + n kernel entries). */
+    uint32_t sema_gp_idx = (gp_put_start + 1u + n) & ring_mask;
     gpfifo[sema_gp_idx] = sema_entry;
 
     GA10B_DBG("[GA10B-P8-v7]   queue sema_release pb_phys=0x%lx "
@@ -2862,6 +3073,19 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
     *doorbell = g_handoff.work_submit_token;
     gsp_platform->mb();
 
+    /* #844 NOTE: internal doorbell at 0x17c00090 ring tested with
+     * SET_CHANNEL_INFO encoded as hw_chid=508 (=0x01fc0100) AND
+     * the existing CHRAM[508] + engine_wfi/eng_method_buffer
+     * clears. STILL hits GR-poison 0xbadf1002 during ctxsw, so
+     * SET_CHANNEL_INFO isn't the last missing piece. Most
+     * likely remaining: stale Linux subcontext PDB entries at
+     * inst[168 + 4*veid] for veids ≠ our VEID (= 1) and
+     * Linux's pdb_valid_long bits for those other VEIDs in
+     * inst[166]/[167]. When GR loads our channel it might
+     * iterate subcontexts and dereference Linux's stale PDB
+     * pointers. Next iteration: zero subcontext entries for
+     * veids 0, 2, 3, …, 63 and re-test. */
+
     GA10B_DBG("[GA10B-P8-v7] doorbell rung — polling for sema "
               "(2s timeout)\n");
 
@@ -2916,23 +3140,72 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         return 0;
     }
 
-    /* Diagnostic on timeout: discriminate "PBDMA didn't see our
-     * submit at all" (gp_get unchanged) from "PBDMA consumed
-     * entries but the trailing sema didn't fire" (gp_get advanced
-     * but poll_val never landed). The second case usually means
-     * one of the kernel dispatches faulted internally; re-run with
-     * `gpu debug on` to see per-op QMD/pb authoring traces. */
-    if (final_gp_get != prev_gp_get) {
+    /* Diagnostic on timeout (#838 three-way discriminator):
+     *
+     *   final_gp_get == prev_gp_get  → PBDMA never advanced. Channel
+     *                                   isn't scheduled (runlist?),
+     *                                   doorbell write got lost, or
+     *                                   PBDMA is stalled.
+     *
+     *   poll_val == 0                → PBDMA advanced but the host
+     *                                   engine NEVER processed either
+     *                                   sema. Methods aren't reaching
+     *                                   the compute engine — subch /
+     *                                   class binding wrong, GR not
+     *                                   loaded for this channel, etc.
+     *
+     *   poll_val == PRELAUNCH (BABE) → host engine alive (pre-sema
+     *                                   with FLUSH_DISABLE=1 fired)
+     *                                   but the post-sema waiting
+     *                                   for GR drain never fired —
+     *                                   compute kernel hangs in
+     *                                   SMs without latching a GR
+     *                                   exception. Classic #844 /
+     *                                   QMD or SASS problem.
+     *
+     *   poll_val == RELEASE (DEAD)   → unreachable here (would have
+     *                                   broken out of the poll above).
+     *
+     *   any other value              → wild bug: sema_gpu_va is
+     *                                   mapping to memory some other
+     *                                   agent writes to. */
+    if (final_gp_get == prev_gp_get) {
         uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
-                    "advanced (GP_GET %lu → %lu) but sema didn't "
-                    "fire (poll=0x%lx, want 0x%x)\n",
-                    (unsigned long)prev_gp_get,
+                    "didn't see our submits (GP_GET still %lu, "
+                    "poll=0x%lx)\n",
                     (unsigned long)final_gp_get,
-                    (unsigned long)poll_val,
-                    (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
-    } else {
+                    (unsigned long)poll_val);
+    } else if (poll_val == 0u) {
         uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
-                    "didn't see our submits (GP_GET still %lu)\n",
+                    "advanced (GP_GET %lu → %lu) but NEITHER sema "
+                    "fired (poll=0x0). Host engine never processed "
+                    "either pre-sema (FLUSH_DISABLE=1) or post-sema "
+                    "— methods aren't reaching the compute engine "
+                    "(subch/class binding, GR-not-loaded, etc.)\n",
+                    (unsigned long)prev_gp_get,
+                    (unsigned long)final_gp_get);
+    } else if (poll_val == GA10B_SEMA_PRELAUNCH_PAYLOAD) {
+        uart_printf("[GA10B-P8-v7] BULK poll timeout — pre-sema "
+                    "FIRED (poll=0x%lx == PRELAUNCH 0xCAFEBABE) "
+                    "but post-sema did NOT (want 0x%x). Host "
+                    "engine is alive; compute kernel hangs in SMs "
+                    "without draining GR. See #844 — investigate "
+                    "QMD content / SASS / cbuf layout. "
+                    "(GP_GET %lu → %lu)\n",
+                    (unsigned long)poll_val,
+                    (unsigned)GA10B_SEMA_RELEASE_PAYLOAD,
+                    (unsigned long)prev_gp_get,
+                    (unsigned long)final_gp_get);
+    } else {
+        uart_printf("[GA10B-P8-v7] BULK poll timeout — UNEXPECTED "
+                    "poll value 0x%lx (want 0x%x or PRELAUNCH 0x%x "
+                    "or 0). sema_gpu_va may be mis-mapped or some "
+                    "other agent is writing to the sema page. "
+                    "(GP_GET %lu → %lu)\n",
+                    (unsigned long)poll_val,
+                    (unsigned)GA10B_SEMA_RELEASE_PAYLOAD,
+                    (unsigned)GA10B_SEMA_PRELAUNCH_PAYLOAD,
+                    (unsigned long)prev_gp_get,
                     (unsigned long)final_gp_get);
     }
     ga10b_dump_gr_state("GA10B-P8-v7");
