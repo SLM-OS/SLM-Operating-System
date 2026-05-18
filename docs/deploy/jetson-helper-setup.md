@@ -45,11 +45,14 @@ sudo apt install nvidia-cuda-toolkit
 #     (pick "x86_64 Linux" — cross-builds to sm_87 just fine)
 
 # Build the shaders:
-scripts/cuda/build-mnist-shaders.sh
+make mnist-shaders
 # → build/cuda/mnist-shaders/*.sass
+
+# Or invoke the script directly with a custom output dir:
+scripts/cuda/build-mnist-shaders.sh /custom/path
 ```
 
-The script auto-detects `nvcc` / `cuobjdump` from `$PATH` or `/usr/local/cuda/bin`. Override the output directory by passing it as `$1`. `ARCH=sm_xx` env var overrides the target (default `sm_87` = Orin Nano/NX/AGX).
+The script auto-detects `nvcc` / `cuobjdump` from `$PATH` or `/usr/local/cuda/bin`. `ARCH=sm_xx` env var overrides the target (default `sm_87` = Orin Nano/NX/AGX). `make mnist-shaders-clean` removes the output directory.
 
 ### Option B — Native build on the Jetson
 
