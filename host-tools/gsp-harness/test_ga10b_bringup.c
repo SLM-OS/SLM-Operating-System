@@ -73,6 +73,18 @@ void uart_printf(const char *fmt, ...)
     va_end(ap);
 }
 
+/* ga10b_phys_in_dram lives in ga10b_gmmu.c, which isn't part of this
+ * harness's link set. Test buffers are heap-allocated so a real
+ * Jetson DRAM-range check (0x80000000..0x280000000, minus OP-TEE)
+ * would reject every test phys. Stub it to always-true: callers
+ * downstream are dump helpers that just memcpy/print the buffer,
+ * and the harness controls every phys it passes them. */
+bool ga10b_phys_in_dram(uint64_t phys, size_t bytes)
+{
+    (void)phys; (void)bytes;
+    return true;
+}
+
 static int failures;
 
 #define REQUIRE(expr) do { \
@@ -1057,7 +1069,9 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 8;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 9;                  /* future, not yet defined */
+    h.version = 9;                  /* added in #788/#823: weights-pool extents */
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 10;                 /* future, not in validate allow-list yet */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1733,8 +1747,10 @@ static void test_handoff_v7_layout_size(void)
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
      * v3 was 192, v4 was 200, v5 was 216, v6 was 232, v7 was 256,
-     * and v8 (W1 weights pool) is 280. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 280u);
+     * v8 (W1 weights pool) was 280, v9 (weights extents) added 16 B
+     * → 296, and v10 (per-channel GR ctx, #788 Mode C) added another
+     * 16 B → 312. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 312u);
 }
 
 static void test_handoff_v7_pool_offsets(void)
@@ -1756,10 +1772,13 @@ static void test_pipeline_op_v7_layout(void)
 {
     printf("== test_pipeline_op_v7_layout ==\n");
     /* v7 per-op struct: leading 24 B identical to v6, then 56 B of
-     * QMD construction inputs. Total 80 B per op. Both Linux helper
-     * and SLM-OS depend on the field offsets — silent reorder would
-     * make SLM-OS read e.g. block_x where it expects grid_x. */
-    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op_v7), 80u);
+     * QMD construction inputs, then a 16 B v7.1 tail (shader_phys +
+     * shader_size_bytes + pad) added so SLM-OS can reserve the
+     * shader's pages without walking GMMU from inst_block_phys.
+     * Total 96 B per op. Both Linux helper and SLM-OS depend on the
+     * field offsets — silent reorder would make SLM-OS read e.g.
+     * block_x where it expects grid_x. */
+    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op_v7), 96u);
     /* v6-compatible prefix */
     REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, qmd_gpu_va), 0u);
     REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, output_phys), 8u);
@@ -2487,9 +2506,11 @@ static void test_pipeline_max_ops_constant(void)
      * fail loudly instead. */
     REQUIRE(GA10B_PIPELINE_MAX_OPS >= 8u);
 
-    /* v7 cap: 4096 / 80 = 51 ops. Smaller than v6 because the per-op
-     * struct is bigger. Still comfortably above MNIST's 8 ops. */
-    REQUIRE_EQ((unsigned)GA10B_PIPELINE_V7_MAX_OPS, 51u);
+    /* v7 cap: 4096 / 96 = 42 ops. Smaller than v6 (which has a
+     * smaller per-op struct), and lower than the v7-original 51 since
+     * the v7.1 shader_phys/size tail grew per-op from 80 to 96 B.
+     * Still comfortably above MNIST's 8 ops. */
+    REQUIRE_EQ((unsigned)GA10B_PIPELINE_V7_MAX_OPS, 42u);
     REQUIRE(GA10B_PIPELINE_V7_MAX_OPS * sizeof(struct ga10b_pipeline_op_v7)
             <= 4096u);
     REQUIRE(GA10B_PIPELINE_V7_MAX_OPS >= 8u);
