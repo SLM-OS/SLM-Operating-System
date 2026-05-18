@@ -974,6 +974,7 @@ test-ga10b-bringup:
 	@echo "Building + running GA10B bringup tests..."
 	$(CC) -std=c11 -Wall -Wextra -O2 -g \
 	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+	    -D_GNU_SOURCE \
 	    -DSLM_HOST_HARNESS=1 -DENABLE_GA10B_FIRMWARE=1 \
 	    -o build/host-tools/test_ga10b_bringup \
 	    host-tools/gsp-harness/test_ga10b_bringup.c \

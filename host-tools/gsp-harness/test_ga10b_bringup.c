@@ -73,6 +73,18 @@ void uart_printf(const char *fmt, ...)
     va_end(ap);
 }
 
+/* ga10b_phys_in_dram lives in ga10b_gmmu.c, which isn't part of this
+ * harness's link set. Test buffers are heap-allocated so a real
+ * Jetson DRAM-range check (0x80000000..0x280000000, minus OP-TEE)
+ * would reject every test phys. Stub it to always-true: callers
+ * downstream are dump helpers that just memcpy/print the buffer,
+ * and the harness controls every phys it passes them. */
+bool ga10b_phys_in_dram(uint64_t phys, size_t bytes)
+{
+    (void)phys; (void)bytes;
+    return true;
+}
+
 static int failures;
 
 #define REQUIRE(expr) do { \
