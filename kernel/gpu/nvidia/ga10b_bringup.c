@@ -1017,6 +1017,70 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
         return -1;
     }
 
+    /* Wake the GR engine after kexec.
+     *
+     * The post-kexec GR state on Jetson Orin Nano is "PRI-poisoned":
+     * every BAR0 register in the GR window (0x00400000..0x00408000)
+     * returns the `0xbadf1002` sentinel until the silicon's
+     * PRI-deadlock-recovery latch is tripped by *any* read from that
+     * window. The first read returns the poison value, but the read
+     * itself kicks the engine out of the deadlocked state — a second
+     * read (and every subsequent read or write) returns the real
+     * register value.
+     *
+     * That recovery is internal to the chip (not nvgpu / BPMP /
+     * SLM-OS-driven). It's specific to GA10B's PRI fabric — FECS
+     * scratch, FB MMU, runlist, and PBDMA all stay readable across
+     * kexec because they live in separate PRI domains.
+     *
+     * Empirically determined on jetson-nano-1 (2026-05-18):
+     *   - Without this wake, every later GR access reads back
+     *     `0xbadf1002`. The dispatch path's diagnostic dump shows
+     *     "gr_intr=0xbadf1002" everywhere, and the failure modes
+     *     it reports are masked by the poison rather than reflecting
+     *     real GR state.
+     *   - With this wake, GR-window registers return real values
+     *     (`gr_intr=0x00000000` etc.), exposing the real underlying
+     *     state for downstream diagnostics. The PRI wake does NOT
+     *     fix the deeper "PBDMA doesn't see our submit" wedge that
+     *     the next stages hit — that's #844 territory. Wake is a
+     *     prerequisite for further investigation, not a complete fix.
+     *
+     * Earlier attempts to "wake" GR by writing `mc_enable | bit 12`
+     * were a measurement artifact: it was the *peek of GR before the
+     * poke* that actually woke the engine, not the mc_enable write.
+     * `mc_enable[bit 12]` remains `0` post-wake and the engine still
+     * works — the PRI deadlock recovery is independent of the
+     * master-controller enable state. */
+    {
+        /* The first read returns the poison value but also kicks the
+         * engine out of PRI-deadlock. Subsequent reads then return real
+         * register values. Loop until either:
+         *   - a non-poison read confirms GR is awake, or
+         *   - we hit the iteration cap (means the wake isn't taking,
+         *     which is a hardware state we don't know how to fix).
+         * Empirically takes 1 retry on jetson-nano-1 (read #1 = poison,
+         * read #2 = real value); cap at 16 to be defensive without
+         * stalling on a truly wedged engine. */
+        const uint32_t GA10B_PRI_POISON = 0xbadf1002u;
+        const int      WAKE_MAX_ITERS   = 16;
+        uint32_t value = 0;
+        int      iter  = 0;
+        for (iter = 0; iter < WAKE_MAX_ITERS; iter++) {
+            value = bar0_r32(0x00400100u);   /* gr_intr */
+            if (value != GA10B_PRI_POISON) break;
+        }
+        uart_printf("[GA10B-INHERIT] GR PRI wake: iter=%d "
+                    "final=0x%08lx (poison=0x%08lx)\n",
+                    iter, (unsigned long)value,
+                    (unsigned long)GA10B_PRI_POISON);
+        if (value == GA10B_PRI_POISON) {
+            uart_puts("[GA10B-INHERIT] GR did not wake after "
+                      "PRI-deadlock recovery attempts\n");
+            return -1;
+        }
+    }
+
     /* Read FECS and GPCCS ctxsw mailboxes. */
     uint32_t fecs_mbox0  = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
     uint32_t gpccs_mbox0 = bar0_r32(GR_GPC0_GPCCS_CTXSW_MAILBOX(0));
