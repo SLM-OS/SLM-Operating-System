@@ -64,6 +64,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <signal.h>
 #include <errno.h>
@@ -1004,6 +1005,50 @@ int main(int argc, char **argv)
     }
     printf("[mnist]   final logits at phys 0x%llx (10 fp32 = 40 B)\n",
            (unsigned long long)ops[7].output.phys);
+
+    /* #844 probe: idle FECS w.r.t. our TSG before going to sleep.
+     *
+     * The 8-op MNIST pipeline completion is signaled via sentinel
+     * cells the kernels write to. Sentinel non-zero = kernel done +
+     * output written, but does NOT guarantee FECS has finished its
+     * ctxsw-out save. Without an explicit save-completion barrier
+     * here, FECS may still be mid-save (writing checksum bytes,
+     * golden-context maintenance, etc.) when the user runs
+     * slmos-kexec moments later.
+     *
+     * SLM-OS then inherits whatever in-flight FECS state existed at
+     * the kexec moment. On the first SLM-OS compute submit-compute,
+     * FECS attempts a ctxsw-in: it reads gr_ctx, computes the
+     * checksum, compares to its in-DMEM expected value. If FECS
+     * hadn't fully written the checksum bytes pre-kexec (or had
+     * been doing other internal bookkeeping that left expected-vs-
+     * stored slightly out of sync), the mismatch fires
+     * (CTXSW_CHECKSUM_MISMATCH, mb6=0x21). Per-boot deterministic
+     * because the mismatch state is fixed once kexec freezes
+     * everything.
+     *
+     * TSG_PREEMPT is a synchronous fifo-preempt: nvgpu writes
+     * `fifo_preempt_r() = preempt_id_f(tsgid) | preempt_type_tsg_f()`
+     * and polls `pending_true_f()` to clear before returning. The
+     * preempt forces FECS to complete the save of the currently-
+     * loaded ctx (ours, post-MNIST) and then go idle for this TSG.
+     * After this ioctl returns, gr_ctx contents in DRAM are
+     * complete and FECS-DMEM has a clean "no current ctx" state
+     * for the TSG.
+     *
+     * Reference: nvgpu's gk20a_fifo_preempt_tsg (kept under
+     * nvgpu-gk20a-fifo_gk20a-tx2.c:2499) — same path the kernel
+     * itself uses on channel-disable / TSG-shutdown to provably
+     * idle FECS. */
+    if (ioctl(ctx.tsg_fd, NVGPU_IOCTL_TSG_PREEMPT) == 0) {
+        printf("[mnist] TSG_PREEMPT issued — FECS idled, "
+               "gr_ctx save complete\n");
+    } else {
+        fprintf(stderr,
+                "[mnist] TSG_PREEMPT failed (errno=%d) — kexec may hit "
+                "per-boot FECS variance\n", errno);
+    }
+
     printf("[mnist] Sleeping up to %d s — kexec now.\n", timeout_secs);
 
     for (int remaining = timeout_secs; remaining > 0 && !g_shutdown; ) {
