@@ -1006,10 +1006,23 @@ test-ga10b-bringup:
 # See docs/deploy/jetson-helper-setup.md for the full helper-dir
 # bring-up flow (helper binary build, weights staging, etc.).
 MNIST_SHADER_OUT := build/cuda/mnist-shaders
+MNIST_CU_SRCS    := $(addprefix scripts/cuda/, \
+    conv2d_fp32_direct.cu     \
+    add_bias_relu_fp32.cu     \
+    maxpool2d_fp32.cu         \
+    gemm_fp32.cu              \
+    gemm_hmma_fp32a_fp16w.cu)
+
+# `.stamp` is a sentinel touched after a successful build of all five
+# shaders. Depending on the stamp instead of the individual .sass
+# outputs keeps the rule simple while still skipping the rebuild when
+# all sources + script are unchanged.
+$(MNIST_SHADER_OUT)/.stamp: $(MNIST_CU_SRCS) scripts/cuda/build-mnist-shaders.sh
+	@scripts/cuda/build-mnist-shaders.sh $(MNIST_SHADER_OUT)
+	@touch $@
 
 .PHONY: mnist-shaders
-mnist-shaders:
-	@scripts/cuda/build-mnist-shaders.sh $(MNIST_SHADER_OUT)
+mnist-shaders: $(MNIST_SHADER_OUT)/.stamp
 
 .PHONY: mnist-shaders-clean
 mnist-shaders-clean:

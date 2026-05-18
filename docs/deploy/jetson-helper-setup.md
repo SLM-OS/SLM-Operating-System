@@ -72,9 +72,9 @@ slmos/scripts/cuda/build-mnist-shaders.sh /root/gpu-mnist
 ssh root@<JETSON_IP>
 cd slmos/scripts
 gcc -O2 -o /root/gpu-mnist/gpu-kernel-mnist \
-    gpu-kernel-mnist.c gpu-launch-common.c -lpthread
+    gpu-kernel-mnist.c gpu-launch-common.c
 gcc -O2 -o /root/gpu-mnist/gpu-kernel-sched-mlp \
-    gpu-kernel-sched-mlp.c gpu-launch-common.c -lpthread
+    gpu-kernel-sched-mlp.c gpu-launch-common.c
 ```
 
 `gpu-launch-common.c` ships the helper-side handoff publishing code (the v7 / v8 / v9 / v10 struct writers and the magic-tagged dmabuf scanner). Match the .c sources against `kernel/gpu/nvidia/ga10b_channel_handoff.h` in this repo — they share that header verbatim (the helper copies it into its build directory).
@@ -89,7 +89,7 @@ python3 scripts/mnist-extract-weights.py --out /tmp/mnist-weights/
 scp -r /tmp/mnist-weights root@<JETSON_IP>:/root/gpu-mnist/
 
 # Optional — sched MLP weights:
-python3 scripts/sched-mlp-extract-weights.py --out /tmp/sched-weights/
+python3 scripts/sched-extract-weights.py --out /tmp/sched-weights/
 scp -r /tmp/sched-weights root@<JETSON_IP>:/root/gpu-mnist/
 ```
 
@@ -138,7 +138,8 @@ For comparison when bringing up a fresh Jetson:
 $ ls /root/gpu-mnist/ | grep -vE '\.(cubin|bak|prev|prev2|c|h|cu)$'
 add_bias_relu_fp32
 add_bias_relu_fp32_shader.sass
-build-shaders.sh        # legacy local copy — superseded by scripts/cuda/build-mnist-shaders.sh
+build-shaders.sh        # legacy local copy — delete it; the in-repo
+                        # scripts/cuda/build-mnist-shaders.sh is canonical
 conv2d_fp32_direct
 conv2d_fp32_direct_shader.sass
 cuda/                   # symlink or copy of repo's scripts/cuda/

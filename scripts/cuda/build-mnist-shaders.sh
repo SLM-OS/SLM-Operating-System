@@ -71,7 +71,9 @@ find_tool() {
 
 NVCC="$(find_tool nvcc "${NVCC:-}" 2>/dev/null || true)"
 CUOBJDUMP="$(find_tool cuobjdump "${CUOBJDUMP:-}" 2>/dev/null || true)"
-READELF="$(find_tool readelf "${READELF:-}" 2>/dev/null || true)"
+# readelf is part of binutils — lives in /usr/bin on every reasonable
+# host, no CUDA-dir fallback needed.
+READELF="${READELF:-$(command -v readelf 2>/dev/null || true)}"
 
 if [ -z "$NVCC" ] || [ -z "$CUOBJDUMP" ]; then
     cat >&2 <<EOF
