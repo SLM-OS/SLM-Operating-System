@@ -275,10 +275,11 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
         {GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO, GA10B_GMMU_ENTRY_SIZE},
         /* Level 3 entries are dual-PDE0 (16 bytes each — big-page
          * child at offset 0..7, small-page child at 8..15). The
-         * walker reads the first 8 bytes (big-page child) — fine
-         * for 64-KB big-page mappings which are the helper's
-         * default; small-page-only mappings will appear as "PDE0
-         * invalid" here. A future follow-up should try both. */
+         * walker tries the big-page child first; if its aperture
+         * is invalid, falls through to the small-page child at
+         * offset +8 (see the lvl==3 block below). The leaf-level
+         * index width then follows whichever half was used —
+         * tracked via `followed_small_pde0`. */
         {GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO, GA10B_GMMU_PDE0_SIZE},
         {GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO,  GA10B_GMMU_ENTRY_SIZE},
     };
@@ -684,7 +685,19 @@ static uint64_t read_pdb_phys(uint64_t inst_block_phys)
 /* Map one page at `gpu_va` to `data_phys`. Walks PDE3 → PDE0,
  * allocating intermediate tables on demand; writes the leaf PTE.
  * Does NOT issue dsb sy — caller is expected to issue one after
- * a batch of map_one_page calls so the cost amortizes. */
+ * a batch of map_one_page calls so the cost amortizes.
+ *
+ * Leaf index width matches the SMALL-page child of PDE0. The
+ * encoder always populates the small-side leaf via
+ * `ensure_dual_pde_small_table`, so the index width here MUST
+ * match what a small-side walker uses: bits [20:12] (9 bits,
+ * 512 entries × 4 KB = 2 MB covered per leaf), NOT bits [20:16]
+ * (the big-side 5-bit width). The walker's small-side fallback
+ * (PR #969) decodes via [20:12]; using [20:16] here meant 16
+ * adjacent 4-KB pages collided on the same PTE slot — the final
+ * `map_one_page` won, the others silently disappeared, and any
+ * subsequent walk past the first page of a 64-KB region landed
+ * on an "invalid PTE" entry. */
 static int map_one_page(uint64_t pdb_phys,
                         uint64_t gpu_va,
                         uint64_t data_phys,
@@ -694,7 +707,8 @@ static int map_one_page(uint64_t pdb_phys,
     uint16_t i2 = va_index(gpu_va, GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO);
     uint16_t i1 = va_index(gpu_va, GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO);
     uint16_t i0 = va_index(gpu_va, GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO);
-    uint16_t ip = va_index(gpu_va, GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO);
+    uint16_t ip = va_index(gpu_va, GA10B_PTE_SMALL_VA_HI,
+                                    GA10B_PTE_SMALL_VA_LO);
 
     uint64_t pde2_phys, pde1_phys, pde0_phys, pte_phys;
     if (ensure_regular_pde(pdb_phys, i3, &pde2_phys) < 0) return -1;
