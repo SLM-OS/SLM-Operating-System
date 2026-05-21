@@ -15,6 +15,7 @@
 #include "gsp.h"
 #include "falcon.h"
 #include "../../include/uart.h"
+#include "../../include/timer.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -1053,20 +1054,33 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
      * works — the PRI deadlock recovery is independent of the
      * master-controller enable state. */
     {
-        /* The first read returns the poison value but also kicks the
-         * engine out of PRI-deadlock. Subsequent reads then return real
-         * register values. Loop until either:
-         *   - a non-poison read confirms GR is awake, or
-         *   - we hit the iteration cap (means the wake isn't taking,
-         *     which is a hardware state we don't know how to fix).
-         * Empirically takes 1 retry on jetson-nano-1 (read #1 = poison,
-         * read #2 = real value); cap at 16 to be defensive without
-         * stalling on a truly wedged engine. */
+        /* GR's PRI domain needs wall-clock settle time to ungate after
+         * kexec — poll gr_intr with a 1 ms delay per attempt until it
+         * returns a real value instead of the poison sentinel.
+         *
+         * Why a delay (not just a read count) — #978: GA10B's GR rail/
+         * clock is BPMP-gated, and nvpmodel governs how aggressively.
+         * slmos-kexec force-restores the GPU clock just before kexec,
+         * but the GR PRI fabric takes a few ms to come back after the
+         * clock returns. In nvpmodel 15W the domain happens to recover
+         * almost immediately (the original tight 16-read loop, spanning
+         * only a few µs, caught it). In 25W (the Super default) it takes
+         * ~1-2 ms, so the tight loop always saw poison and inherit
+         * failed 100% of the time. A real per-attempt delay fixes both:
+         * verified GR wakes on iter=1 (~2 ms) for 10/10 boots at 25W
+         * and still recovers immediately at 15W. The settle time is a
+         * BPMP/clock-domain property, not a read side effect — an
+         * earlier "the first read kicks the deadlock latch" reading was
+         * a measurement artifact of the un-delayed loop.
+         *
+         * 200 ms cap is generous insurance on the failure path (a truly
+         * dead engine); the success path exits at ~2 ms. */
         const uint32_t GA10B_PRI_POISON = 0xbadf1002u;
-        const int      WAKE_MAX_ITERS   = 16;
+        const int      WAKE_MAX_ITERS   = 200;
         uint32_t value = 0;
         int      iter  = 0;
         for (iter = 0; iter < WAKE_MAX_ITERS; iter++) {
+            timer_busy_wait_us(1000u);       /* 1 ms settle per attempt */
             value = bar0_r32(0x00400100u);   /* gr_intr */
             if (value != GA10B_PRI_POISON) break;
         }
@@ -1075,8 +1089,14 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
                     iter, (unsigned long)value,
                     (unsigned long)GA10B_PRI_POISON);
         if (value == GA10B_PRI_POISON) {
-            uart_puts("[GA10B-INHERIT] GR did not wake after "
-                      "PRI-deadlock recovery attempts\n");
+            /* Diagnostics: is the GPU itself powered (NV_PMC_BOOT_0
+             * returns chip id ~0x172...) or is the whole GPU gated? */
+            uint32_t boot0 = bar0_r32(0x00000000u);
+            uint32_t mc_en = bar0_r32(0x00000200u);  /* NV_PMC_ENABLE */
+            uart_printf("[GA10B-INHERIT] GR did not wake after %d ms "
+                        "(boot0=0x%08lx mc_enable=0x%08lx)\n",
+                        WAKE_MAX_ITERS, (unsigned long)boot0,
+                        (unsigned long)mc_en);
             return -1;
         }
     }
