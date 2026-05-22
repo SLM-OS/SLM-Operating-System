@@ -51,6 +51,11 @@ const PATH_MAX: usize = 128;
 /// Model priority handed to `set_metadata` for harness blocks.
 const HARNESS_PRIORITY: u8 = 4;
 
+/// Number of file block-slots the `--read` path cycles offsets through,
+/// so reads stay in-bounds for a modest staged file while still hitting
+/// storage. The bytes are irrelevant to fault rate (latency only).
+const HARNESS_READ_SLOTS: u64 = 16;
+
 // -----------------------------------------------------------------------------
 // Trace blob accessors (pure, on the embedded &[u8])
 // -----------------------------------------------------------------------------
@@ -63,7 +68,13 @@ fn rd_i32(b: &[u8], off: usize) -> i32 {
 }
 
 fn trace_valid() -> bool {
-    EVICTION_TRACE.len() >= HEADER_LEN && &EVICTION_TRACE[0..4] == TRACE_MAGIC
+    if EVICTION_TRACE.len() < HEADER_LEN || &EVICTION_TRACE[0..4] != TRACE_MAGIC {
+        return false;
+    }
+    // The directory must be fully present so scenario_dir/scenario_name
+    // can't index past the (trusted, build-time) blob.
+    let n = rd_u32(EVICTION_TRACE, 12) as usize;
+    EVICTION_TRACE.len() >= HEADER_LEN + n * DIR_ENTRY_LEN
 }
 
 /// Number of scenarios in the embedded trace (0 if the blob is invalid).
@@ -284,7 +295,7 @@ fn access(st: &mut CacheState, model_id: u8, layer_idx: i16, pool: u8, ap: u8) -
             // Cycle offsets through the file's first 16 block-slots so
             // reads stay in-bounds for a modest staged file while still
             // hitting storage (the bytes are irrelevant to fault rate).
-            let off = (st.tick % 16).wrapping_mul(st.block_len as u64);
+            let off = (st.tick % HARNESS_READ_SLOTS).wrapping_mul(st.block_len as u64);
             // SAFETY: ptr valid for BLOCK_SIZE; block_len <= BLOCK_SIZE.
             let dst = unsafe { core::slice::from_raw_parts_mut(ptr, st.block_len) };
             let _ = kernel_ffi::vfs_pread(&st.path, off, dst);

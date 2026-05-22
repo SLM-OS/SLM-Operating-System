@@ -433,16 +433,33 @@ s6 adversarial.
 | **mlp** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
 | cacheus | 79 | 76 | 75 | 44 | 81 | 72 | 0 |
 
-The central simulator finding **reproduces on real hardware**: the
-learned policies (xgboost/mlp) beat the classical LRU family on 5 of 7
-scenarios (s0, s1, s2, s4, s5) — e.g. mixed_priority 56% vs 86%. This is
-the differentiation the pre-fix run lacked (every policy then produced
-identical counts). Measured reload latency with `--read` against the SD
-card: **≈55 µs per 2 KB block** (overhead-dominated floor; larger
-blocks add transfer). For context, the learned eviction *inference*
-costs ~15 µs (XGBoost) to ~130 µs (MLP) on this CPU — so against a
-55 µs SD fault, XGBoost amortizes and the MLP is marginal at small
-block sizes (see `docs/design/gpu-policy-models.md` for the GPU path).
+The hardware fault rates **match the simulator's seed-42 run within
+~1–2 percentage points on 5 of 7 scenarios** — not just the same
+ranking, near-exact parity. Comparing hardware % to the simulator's
+fault count / accesses (sim seed 42):
+
+| scenario | LRU hw/sim | xgboost hw/sim | mlp hw/sim |
+|----------|-----------:|---------------:|-----------:|
+| single_inference | 79 / 79 | 55 / 55 | 55 / 56 |
+| multi_model | 82 / 82 | 69 / 70 | 69 / 70 |
+| hot_swap | 75 / 76 | 69 / 69 | 69 / 69 |
+| mixed_priority | 86 / 86 | 56 / 56 | 56 / 56 |
+| gpu_contention | 72 / 73 | 66 / 67 | 66 / 67 |
+
+The central simulator finding reproduces on real hardware: the learned
+policies (xgboost/mlp) beat the classical LRU family on those 5
+scenarios — e.g. mixed_priority 56% vs 86% — which is the
+differentiation the pre-fix run lacked (every policy then produced
+identical counts). This validates that the in-tree (parity-tested)
+ported policies make the same eviction decisions on real ARM hardware
+as the Python simulator.
+
+Measured reload latency with `--read` against the SD card: **≈55 µs per
+2 KB block** (overhead-dominated floor; larger blocks add transfer).
+For context, the learned eviction *inference* costs ~15 µs (XGBoost) to
+~130 µs (MLP) on this CPU — so against a 55 µs SD fault, XGBoost
+amortizes and the MLP is marginal at small block sizes (see
+`docs/design/gpu-policy-models.md` for the GPU path).
 
 **Residual fidelity caveats (not exact-parity with the simulator):**
 - `xgboost` and `mlp` produce identical fault rates here — they agree on
