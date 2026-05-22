@@ -3325,6 +3325,17 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
                     "poll=0x%lx)\n",
                     (unsigned long)final_gp_get,
                     (unsigned long)poll_val);
+        /* #844: triage the channel-not-scheduled mode — is our channel
+         * enabled in CHRAM? on the runlist (on_pbdma/on_eng)? is the
+         * runlist submit pending? */
+        ga10b_gmmu_dump_chram_runlist(&g_handoff);
+        timer_busy_wait_us(8000u);
+        uart_printf("[GA10B-P8-v7]   submit ptrs: gp_put=%lu gp_get=%lu "
+                    "token=0x%lx userd_phys=0x%lx\n",
+                    (unsigned long)g_handoff.initial_gp_put,
+                    (unsigned long)final_gp_get,
+                    (unsigned long)g_handoff.work_submit_token,
+                    (unsigned long)g_handoff.userd_phys);
     } else if (poll_val == 0u) {
         uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
                     "advanced (GP_GET %lu → %lu) but NEITHER sema "

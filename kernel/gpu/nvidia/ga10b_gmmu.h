@@ -469,6 +469,11 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
  * the runlist topology can't be walked. */
 int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h);
 
+/* #844 diagnostic: dump the inherited channel's CHRAM state + GR
+ * runlist scheduling registers (read-only) to triage a GP_GET-stuck
+ * "PBDMA didn't see our submit" failure. */
+void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h);
+
 /* Discover the inherited channel's inst block by walking DRAM and
  * cross-checking each candidate against a known (gpu_va, leaf_phys)
  * pair from the channel handoff. Used as a fallback when

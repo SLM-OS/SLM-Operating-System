@@ -1807,6 +1807,49 @@ int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h)
     return 0;
 }
 
+/* #844 GP_GET-stuck diagnostic: dump the inherited channel's CHRAM
+ * state + the GR runlist scheduling registers, so a "PBDMA didn't see
+ * our submit" failure can be triaged into:
+ *   - channel not enabled in CHRAM (enable=0)               → CHRAM bug
+ *   - enabled but not on_pbdma/on_eng                       → not on runlist
+ *   - on_pbdma=1 but GP_GET stuck                           → USERD/doorbell
+ *   - runlist submit_info pending bit stuck                 → host wedged
+ * Read-only; safe to call from the failure path. */
+void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return;
+    /* The Jetson UARTC TX FIFO drops lines emitted in a tight burst
+     * (the failure dump that precedes this call). Drain it before, and
+     * space our own prints, so the diagnostic actually reaches the
+     * captured serial log. The dispatch already timed out, so the
+     * added ~30 ms is irrelevant. */
+    timer_busy_wait_us(20000u);
+    uint64_t rl = discover_gr_runlist_pri_base();
+    if (rl == 0u) { uart_puts("[chram-diag] no runlist topology\n"); return; }
+    uint32_t hw_chid = h->work_submit_token;
+    uint32_t channel_config = bar0_read32(rl + GA10B_RL_REG_CHANNEL_CONFIG);
+    uint32_t chram_off = ((channel_config >> 4) & 0x0fffffffu) << 4;
+    uint32_t ch = *(volatile uint32_t *)(uintptr_t)
+        (GA10B_BAR0_BASE + (uint64_t)chram_off + (uint64_t)hw_chid * 4ull);
+    uart_printf("[chram-diag] CHRAM[chid=%u]=0x%08x enable=%u next=%u "
+                "busy=%u eng_faulted=%u on_pbdma=%u on_eng=%u\n",
+                (unsigned)hw_chid, (unsigned)ch,
+                (unsigned)((ch >> 1) & 1u), (unsigned)((ch >> 2) & 1u),
+                (unsigned)((ch >> 3) & 1u), (unsigned)((ch >> 5) & 1u),
+                (unsigned)((ch >> 6) & 1u), (unsigned)((ch >> 7) & 1u));
+    timer_busy_wait_us(8000u);
+    uint32_t sb_lo = bar0_read32(rl + GA10B_RL_REG_SUBMIT_BASE_LO);
+    uint32_t sb_hi = bar0_read32(rl + GA10B_RL_REG_SUBMIT_BASE_HI);
+    uint32_t submit = bar0_read32(rl + GA10B_RL_REG_SUBMIT);
+    uint32_t info = bar0_read32(rl + GA10B_RL_REG_SUBMIT_INFO);
+    uint32_t sched = bar0_read32(rl + GA10B_RL_REG_SCHED_DISABLE);
+    uart_printf("[chram-diag] runlist base=0x%02x%08x submit=0x%08x "
+                "info=0x%08x(pending=%u) sched_disable=0x%08x\n",
+                (unsigned)(sb_hi & 0xffu), (unsigned)sb_lo,
+                (unsigned)submit, (unsigned)info,
+                (unsigned)((info >> 15) & 1u), (unsigned)sched);
+}
+
 static void install_fresh_runlist_and_chram(
                                 const struct ga10b_channel_handoff *h)
 {
