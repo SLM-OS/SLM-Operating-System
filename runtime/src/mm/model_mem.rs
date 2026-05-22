@@ -586,6 +586,14 @@ fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire) == 1
 }
 
+/// Public view of `is_initialized` for callers that must avoid a
+/// double `model_mem_init` (which would leak the prior pools). The
+/// weight-cache harness (#979) uses this to size the pool only when
+/// no model has been loaded yet.
+pub fn is_pool_initialized() -> bool {
+    is_initialized()
+}
+
 // =============================================================================
 // Public API
 // =============================================================================

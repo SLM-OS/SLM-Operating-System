@@ -13,6 +13,9 @@ pub mod model_loader;
 #[cfg(feature = "ai_eviction")]
 pub mod eviction;
 
+#[cfg(feature = "ai_eviction")]
+pub mod weight_cache;
+
 pub use model_mem::{
     AllocError, ModelHandle, PoolStats,
     alloc_weights, alloc_workspace, free,

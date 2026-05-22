@@ -2022,6 +2022,93 @@ static void s3_steal_work_task(void *arg)
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
 }
 
+/* ---- bench eviction-e2e (#979): storage-backed eviction harness ---- */
+
+static const char *const EVICT_E2E_POLICIES[] = {
+    "first_candidate", "lru", "lfu", "arc", "slm", "xgboost", "mlp", "cacheus"
+};
+
+static void bench_eviction_e2e_one(const char *policy, const char *path,
+                                   uint32_t pool_mb, uint32_t layers,
+                                   uint32_t hot, uint32_t iters,
+                                   uint32_t block_kb)
+{
+    if (rust_eviction_policy_set((const uint8_t *)policy) != 0) {
+        shell_printf("  %-15s (policy set failed)\r\n", policy);
+        return;
+    }
+    RustEvictionE2EResult r;
+    int rc = rust_eviction_e2e_run((const uint8_t *)path, pool_mb, layers,
+                                   hot, iters, block_kb, &r);
+    if (rc != 0) {
+        shell_printf("  %-15s run failed rc=%d\r\n", policy, rc);
+        return;
+    }
+    uint64_t hitpct = r.accesses ? (r.hits * 100u) / r.accesses : 0u;
+    uint64_t mb = r.bytes_reloaded / (1024u * 1024u);
+    shell_printf("  %-15s %6lu %7lu %4lu%%  %8lu %8lu %8lu  %5luMB\r\n",
+                 policy,
+                 (unsigned long)r.hits, (unsigned long)r.faults,
+                 (unsigned long)hitpct,
+                 (unsigned long)r.p50_ns, (unsigned long)r.p99_ns,
+                 (unsigned long)r.mean_ns, (unsigned long)mb);
+}
+
+static int bench_eviction_e2e_cli(int argc, char *argv[])
+{
+    const char *path = "/mnt/files/evict_weights.bin";
+    const char *policy = 0; /* NULL => all policies */
+    uint32_t pool_mb = 8, layers = 16, hot = 4, iters = 2000, block_kb = 256;
+
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+            path = argv[++i];
+        } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            policy = argv[++i];
+        } else if (strcmp(argv[i], "--pool-mb") == 0 && i + 1 < argc) {
+            pool_mb = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--layers") == 0 && i + 1 < argc) {
+            layers = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--hot") == 0 && i + 1 < argc) {
+            hot = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
+            iters = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--block-kb") == 0 && i + 1 < argc) {
+            block_kb = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--all") == 0) {
+            policy = 0;
+        } else {
+            shell_printf("Unknown eviction-e2e flag: %s\r\n", argv[i]);
+            shell_puts("Usage: bench eviction-e2e [--file <path>] "
+                       "[--policy <p>|--all] [--pool-mb N] [--layers N] "
+                       "[--hot N] [--iters N] [--block-kb N]\r\n");
+            return 1;
+        }
+    }
+
+    shell_printf("Eviction E2E (storage-backed) — file=%s pool=%uMB "
+                 "layers=%u hot=%u iters=%u block=%uKB\r\n",
+                 path, (unsigned)pool_mb, (unsigned)layers, (unsigned)hot,
+                 (unsigned)iters, (unsigned)block_kb);
+    shell_puts("  policy            hits  faults  hit%    p50_ns   "
+               "p99_ns  mean_ns  reloaded\r\n");
+    if (policy) {
+        bench_eviction_e2e_one(policy, path, pool_mb, layers, hot, iters,
+                               block_kb);
+    } else {
+        for (size_t i = 0;
+             i < sizeof(EVICT_E2E_POLICIES) / sizeof(EVICT_E2E_POLICIES[0]);
+             i++) {
+            bench_eviction_e2e_one(EVICT_E2E_POLICIES[i], path, pool_mb,
+                                   layers, hot, iters, block_kb);
+        }
+    }
+    shell_puts("\r\nReload latency is measured (real VFS reads); fault rate "
+               "reflects real eviction. Quality is policy-dependent only when "
+               "the working set exceeds the pool.\r\n");
+    return 0;
+}
+
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -2420,6 +2507,11 @@ int cmd_bench(int argc, char *argv[])
                 shell_printf("    Data integrity: %s\r\n", ok ? "PASS" : "FAIL");
             }
         }
+    } else if (strcmp(argv[1], "eviction-e2e") == 0) {
+        /* Storage-backed eviction harness (#979) — depends on
+         * ai_eviction (on by default), not the AI scheduler, so it
+         * lives outside the CONFIG_AI_SCHEDULER guard below. */
+        return bench_eviction_e2e_cli(argc, argv);
 #if defined(CONFIG_AI_SCHEDULER)
     } else if (strcmp(argv[1], "sched-policy") == 0) {
         /* Workload-driven scheduling-quality mode runs when --workload
@@ -2586,7 +2678,7 @@ int cmd_bench(int argc, char *argv[])
         bench_sched_stats();
     } else {
         shell_printf("Unknown benchmark: %s\r\n", argv[1]);
-        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, xgb-equiv, infer-stress, stats, all\r\n");
+        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, eviction-e2e, xgb-equiv, infer-stress, stats, all\r\n");
         return 1;
     }
 

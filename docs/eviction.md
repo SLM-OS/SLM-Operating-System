@@ -357,6 +357,45 @@ Tree-pruning the XGBoost ensemble and batching the MLP forward pass
 are the two known speed-up levers carried over from the sibling
 project; tracked as a perf follow-up against the M9 deliverable.
 
+### Storage-backed eviction — end-to-end harness (#979)
+
+The latency tables above time `select_victim` on synthetic candidate
+sets; the eviction *quality* numbers (normalised fault rate, page-fault
+reduction) come from the sibling `slm-os-page-sim` simulator. Neither
+exercises a real eviction-and-reload cycle: the production inference
+engine holds a model's weights resident (`engine.rs` reads
+`weight_base + offset`) and never faults, and the `model_mem` eviction
+pools are otherwise only touched by tests.
+
+`bench eviction-e2e` closes that gap **on real hardware**. It drives a
+transformer-shaped weight-access trace through the real weight pool —
+so a residency miss runs a real `alloc_weights` (which evicts a victim
+chosen by the **active policy** when the pool is full) followed by a
+real `vfs_pread` of that block's bytes from a file on storage — and
+reports per-policy fault rate plus **measured** reload latency:
+
+```
+bench eviction-e2e [--file <path>] [--policy <p>|--all]
+                   [--pool-mb N] [--layers N] [--hot N]
+                   [--iters N] [--block-kb N]
+```
+
+The trace keeps a small `hot` working set resident and streams the
+remaining `layers - hot` cold blocks; with the pool sized below the
+working set, frequency-/reuse-aware policies keep the hot set resident
+while LRU's cold scan evicts it. Implementation: `slm_vfs_pread` FFI
+(wraps `vfs_read_path`), `runtime/src/mm/weight_cache.rs` (residency
+index + reload-on-miss + latency counters), and the
+`rust_eviction_e2e_run` FFI.
+
+**Scope (honest).** This is *not* demand-paging during a live LLM
+forward pass — the access sequence is a stylized trace, not real
+inference. That maximal version (rewriting the forward path to fault on
+non-resident weights) is tracked in #980. The harness replaces the
+simulator's abstract fault *count* and the previously-assumed
+"ms-scale fault" cost with hardware measurements; it does not by itself
+make eviction part of inference.
+
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
 GA10B fastpath covers MNIST/model inference (`gpu use inference on`)

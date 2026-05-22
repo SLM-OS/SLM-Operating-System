@@ -1575,6 +1575,47 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
     }
 }
 
+/* End-to-end storage-backed eviction harness (#979).
+ *
+ * Pins the harness contract: a stylized trace drives the real weight
+ * pool (real eviction) + real VFS reads, and the accounting is
+ * self-consistent. `/sys/version` is a real VFS file, so vfs_pread
+ * exercises the real read path. Pool sizing inside the harness is a
+ * no-op here if an earlier test already initialized model_mem — the
+ * invariants below hold regardless of pool size, so the test is
+ * order-independent. Measured reload latency and policy-dependent
+ * fault rates are validated on hardware with a staged file (#979
+ * acceptance), not here. */
+static void test_eviction_e2e_harness_accounts_faults(void)
+{
+    RustEvictionE2EResult r;
+
+    TEST_ASSERT_EQUAL_INT32(0, rust_eviction_policy_set((const uint8_t *)"lru"));
+    int rc = rust_eviction_e2e_run((const uint8_t *)"/sys/version",
+                                   /*pool_mb=*/8u, /*n_layers=*/16u,
+                                   /*hot=*/4u, /*n_iters=*/500u,
+                                   /*block_kb=*/4u, &r);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_EQUAL_UINT64(500u, r.accesses);
+    TEST_ASSERT_EQUAL_UINT64(r.accesses, r.hits + r.faults);
+    TEST_ASSERT_TRUE(r.faults >= 1u);            /* at least one cold miss */
+    TEST_ASSERT_TRUE(r.faults <= r.accesses);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)r.faults * 4u * 1024u, r.bytes_reloaded);
+
+    /* Switching the policy and re-running must not crash and must keep
+     * the same self-consistent accounting. */
+    TEST_ASSERT_EQUAL_INT32(0,
+        rust_eviction_policy_set((const uint8_t *)"mlp"));
+    rc = rust_eviction_e2e_run((const uint8_t *)"/sys/version",
+                               8u, 16u, 4u, 500u, 4u, &r);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_EQUAL_UINT64(500u, r.accesses);
+    TEST_ASSERT_EQUAL_UINT64(r.accesses, r.hits + r.faults);
+
+    /* Restore default policy for subsequent tests. */
+    (void)rust_eviction_policy_set((const uint8_t *)"lru");
+}
+
 /* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
@@ -1631,6 +1672,9 @@ int test_suite_eviction(void)
 
     /* M9: per-policy latency benchmarks (QEMU baseline numbers). */
     RUN_TEST(test_bench_all_policies);
+
+    /* #979: end-to-end storage-backed eviction harness contract. */
+    RUN_TEST(test_eviction_e2e_harness_accounts_faults);
 
     /* M-SMP: multi-CPU concurrent alloc/eviction stress test (#116). */
     RUN_TEST(test_eviction_smp_alloc_under_concurrent_swap);

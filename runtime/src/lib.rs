@@ -1455,6 +1455,90 @@ pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
     }
 }
 
+// -- End-to-end storage-backed eviction harness FFI (#979) --
+
+/// Aggregate result of a `rust_eviction_e2e_run`. Layout mirrors the
+/// C-side `struct eviction_e2e_result` in the shell.
+#[repr(C)]
+pub struct EvictionE2EResult {
+    pub accesses: u64,
+    pub hits: u64,
+    pub faults: u64,
+    pub bytes_reloaded: u64,
+    pub p50_ns: u64,
+    pub p99_ns: u64,
+    pub mean_ns: u64,
+}
+
+/// Run the storage-backed eviction harness: replay a stylized
+/// transformer-derived trace through the real weight pool (real
+/// eviction via the currently-selected policy) and real VFS reads from
+/// `path`, then report fault rate + measured reload latency.
+///
+/// Sizes the weight pool to `pool_mb` only when no model is loaded
+/// (a second `model_mem_init` would leak). Reads `block_kb` KiB per
+/// fault (capped at the 2MB pool block). The trace keeps `hot` layers
+/// hot and streams `n_layers - hot` cold layers, over `n_iters`
+/// accesses. Fills `out`, returns 0; negative on bad args / reset
+/// failure / feature-off.
+///
+/// # Safety
+/// `path` must be a valid null-terminated C string; `out` must point at
+/// a valid `EvictionE2EResult`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_e2e_run(
+    path: *const u8,
+    pool_mb: u32,
+    n_layers: u32,
+    hot: u32,
+    n_iters: u32,
+    block_kb: u32,
+    out: *mut EvictionE2EResult,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (path, pool_mb, n_layers, hot, n_iters, block_kb, out);
+        -100
+    }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        if path.is_null() || out.is_null() || n_iters == 0 {
+            return -1;
+        }
+        // Copy the C path into a bounded, null-terminated buffer
+        // (bounds-before-deref per runtime/CLAUDE.md).
+        let mut buf = [0u8; 128];
+        let mut len = 0usize;
+        while len < 127 {
+            let c = *path.add(len);
+            if c == 0 {
+                break;
+            }
+            buf[len] = c;
+            len += 1;
+        }
+        buf[len] = 0;
+
+        let block_len =
+            core::cmp::min((block_kb.max(1) as usize) * 1024, mm::model_mem::BLOCK_SIZE);
+        if mm::weight_cache::reset(&buf[..=len], block_len, pool_mb) != 0 {
+            return -2;
+        }
+        let r = mm::weight_cache::run_trace(n_layers, hot, n_iters);
+        *out = EvictionE2EResult {
+            accesses: r.accesses,
+            hits: r.hits,
+            faults: r.faults,
+            bytes_reloaded: r.bytes_reloaded,
+            p50_ns: r.p50_ns,
+            p99_ns: r.p99_ns,
+            mean_ns: r.mean_ns,
+        };
+        0
+    }
+}
+
 // -- Latency benchmark FFI (Phase AI-Eviction M9) --
 
 /// Per-policy average `select_victim` latency in nanoseconds,
