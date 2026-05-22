@@ -23,6 +23,9 @@
 #include "../include/smp.h"
 #include "../include/cache.h"
 #include "../include/timer.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../include/gpu_consumer.h"
+#endif
 #include "test_blob_helpers.h"
 #include <stdint.h>
 
@@ -1223,6 +1226,68 @@ static void test_bench_all_policies(void)
     run_one_bench("xgboost");
     run_one_bench("mlp");
     run_one_bench("cacheus");
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* PR-6 of gpu-policy-models.md (#965): re-run with `gpu use
+     * eviction on` so the MLP (and CACHEUS's MLP expert) route
+     * through slm_gpu_run_eviction_inference when a PR-5 v6
+     * handoff has been inherited from Linux pre-kexec. Other
+     * policies run their normal CPU path; the numbers here are
+     * meaningful only for `mlp` and `cacheus` (and only if the
+     * producer staged a handoff before this test kernel booted —
+     * otherwise dispatch returns -1 immediately and the bench
+     * shows the CPU baseline). The toggle is restored to its
+     * prior state before returning so other test suites aren't
+     * disturbed by the leftover gpu_consumer_enabled bit.
+     *
+     * Bench numbers are reported under the "GPU-toggle on" header
+     * regardless of whether dispatch actually succeeded — that's
+     * the operator-facing distinction: did toggling the flag
+     * change the measured per-call cost? The expectation under
+     * the current per-candidate dispatch shape (see mlp.rs module
+     * docs) is mixed-mode: 1 GPU dispatch + 7 rate-limited CPU
+     * fallbacks per select_victim, ≈ ~5 ms / call on Jetson with a
+     * producer present. The classical-policy numbers should be
+     * identical to the toggle-off run. */
+    bool prev_eviction_on = gpu_consumer_enabled(GPU_CONSUMER_EVICTION);
+    const char *reason = NULL;
+    int rc = gpu_consumer_set(GPU_CONSUMER_EVICTION, true, &reason);
+    if (rc == 0) {
+        /* Clear the GPU dispatch circuit breaker (#552 mitigation in
+         * slm_ffi.c). Earlier test suites (notably test_gpu) exercise
+         * kind=0 dispatch which finds the old v2 MNIST handoff from a
+         * prior boot in DRAM, fails 3× on the v3-required launch_kernel
+         * path, and trips the breaker — after which every subsequent
+         * dispatch (including our kind=EVICTION_QNET path) short-
+         * circuits to -1 before ensure_bringup ever runs. Resetting
+         * here gives MlpPolicy a clean shot at the real eviction
+         * handoff staged by scripts/gpu-kernel-eviction-qnet
+         * --preserve-for-kexec. */
+        slm_gpu_dispatch_breaker_reset();
+
+        uart_puts("\r\n");
+        uart_puts("  --- Eviction latency benchmarks (Jetson, "
+                  "`gpu use eviction on`) ---\r\n");
+        if (reason) {
+            uart_printf("  [gpu use eviction] note: %s\r\n", reason);
+        }
+        run_one_bench("first_candidate");
+        run_one_bench("lru");
+        run_one_bench("lfu");
+        run_one_bench("arc");
+        run_one_bench("slm");
+        run_one_bench("xgboost");
+        run_one_bench("mlp");
+        run_one_bench("cacheus");
+        /* Restore prior toggle state. Ignore rc here — even if the
+         * reverse flip fails for any reason the test has already
+         * captured what it needs, and later tests don't depend on
+         * this flag. */
+        (void)gpu_consumer_set(GPU_CONSUMER_EVICTION, prev_eviction_on, NULL);
+    } else {
+        uart_printf("  [BENCH] gpu use eviction on rejected (rc=%d)\r\n", rc);
+    }
+#endif
 
     /* Restore default. */
     rust_eviction_policy_set((const uint8_t *)"lru");
