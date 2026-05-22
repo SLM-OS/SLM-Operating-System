@@ -462,6 +462,13 @@ struct ga10b_channel_handoff;
 int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
                                    const struct ga10b_channel_handoff *h);
 
+/* #844: CHRAM enable + force_ctx_reload for the inherited channel only
+ * (no preempt / no fresh-runlist rebuild). Pairs with FECS
+ * set_current_ctx_invalid so the first post-kexec ctxsw skips the
+ * stale-ctx save and does a fresh load. Returns 0 on success, -1 if
+ * the runlist topology can't be walked. */
+int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h);
+
 /* Discover the inherited channel's inst block by walking DRAM and
  * cross-checking each candidate against a known (gpu_va, leaf_phys)
  * pair from the channel handoff. Used as a fallback when

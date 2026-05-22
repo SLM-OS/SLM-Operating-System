@@ -2826,6 +2826,31 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * take handoff + slot counter as parameters and a stub-submit
  * function pointer).
  */
+/* #844: invalidate FECS current_ctx before the first post-kexec ctxsw.
+ *
+ * Mirrors nvgpu's `gm20b_gr_falcon_set_current_ctx_invalid`
+ * (~/slmos-ref/nvidia/nvgpu-gr-falcon-gm20b-fusa.c:672-676): write
+ * `gr_fecs_current_ctx_r()` (0x00409b00) with valid=false (the whole
+ * register = 0 = `gr_fecs_current_ctx_valid_false_f()`).
+ *
+ * Post-kexec, FECS_CURRENT_CTX holds Linux's stale inst pointer (often
+ * PDB=0). On the first ctxsw, FECS SAVES that "old" context before
+ * loading ours — and the save checksum-fails with ctxsw mailbox6=0x21
+ * (gr_fecs_ctxsw_mailbox_value_ctxsw_checksum_mismatch_v, hw_gr_ga10b.h
+ * :577). Clearing the valid bit tells FECS "there is no old context to
+ * save", so the save phase is skipped and only the LOAD of our channel
+ * runs. This is the canonical nvgpu recovery; SLM-OS's `fecs-forcectx`
+ * did the opposite (wrote valid=TRUE), which still triggered a save. */
+static void ga10b_fecs_set_current_ctx_invalid(void)
+{
+    uint32_t before = bar0_r32(0x00409b00u);
+    bar0_w32(0x00409b00u, 0u);
+    gsp_platform->mb();
+    uart_printf("[GA10B-P8-v7] FECS current_ctx invalidated: "
+                "0x%08lx -> 0x00000000 (#844 skip stale-ctx save)\n",
+                (unsigned long)before);
+}
+
 /* Internal worker — fires N v7 ops + 1 trailing semaphore release
  * through g_handoff's QMD pool + pushbuf + GPFIFO + semaphore.
  *
@@ -2907,6 +2932,16 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         b->last_error_phase = 8;
         return -1;
     }
+
+    /* #844: canonical post-kexec ctxsw recovery (nvgpu sequence),
+     * run before the first GR submit below:
+     *   1. set_current_ctx_invalid → FECS skips SAVING the stale
+     *      current_ctx (the save checksum-fails, mb6=0x21).
+     *   2. force_ctx_reload (CHRAM 0x200) → the upcoming dispatch's
+     *      ctxsw does a fresh LOAD of our channel instead of trusting
+     *      resident state. */
+    ga10b_fecs_set_current_ctx_invalid();
+    ga10b_gmmu_force_ctx_reload(&g_handoff);
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
      * contract as the v3 dispatch fields: the helper allocates

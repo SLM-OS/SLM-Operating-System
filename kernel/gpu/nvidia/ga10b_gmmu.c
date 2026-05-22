@@ -1761,6 +1761,52 @@ static void chram_enable_and_preempt(uint64_t gr_rl_pri_base,
                 (unsigned)info_after);
 }
 
+/* #844: standalone CHRAM enable + force_ctx_reload for our inherited
+ * channel — WITHOUT the runlist preempt or fresh-runlist rebuild that
+ * `chram_enable_and_preempt` / `install_fresh_runlist_and_chram` do.
+ *
+ * Pairs with FECS `set_current_ctx_invalid` (in ga10b_bringup.c): the
+ * invalidate makes FECS skip SAVING the stale post-kexec current_ctx;
+ * this sets the per-channel force_ctx_reload bit so that when the
+ * upcoming dispatch schedules our channel, FECS does a fresh LOAD of
+ * our context image rather than trusting resident state. No separate
+ * preempt is needed — the dispatch's doorbell is the runlist event
+ * that acts on the pending reload. Deliberately does NOT preempt or
+ * rewrite the runlist (that path leaves the channel preempted and
+ * breaks direct submit — see install_fresh_runlist_and_chram).
+ *
+ * Returns 0 on success, -1 if the runlist topology can't be walked. */
+int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return -1;
+    uint64_t gr_rl_pri_base = discover_gr_runlist_pri_base();
+    if (gr_rl_pri_base == 0u) {
+        uart_puts("[fecs-reload] no runlist topology — "
+                  "force_ctx_reload skipped\n");
+        return -1;
+    }
+    uint32_t hw_chid = h->work_submit_token;
+    uint32_t channel_config = bar0_read32(gr_rl_pri_base +
+                                          GA10B_RL_REG_CHANNEL_CONFIG);
+    uint32_t chram_bar0_offset =
+        ((channel_config >> 4) & 0x0fffffffu) << 4;
+    uint64_t chram_chan_addr =
+        GA10B_BAR0_BASE + (uint64_t)chram_bar0_offset +
+        (uint64_t)hw_chid * 4ull;
+    volatile uint32_t *chram =
+        (volatile uint32_t *)(uintptr_t)chram_chan_addr;
+
+    *chram = 0x00000002u;   /* enable_channel */
+    __asm__ volatile("dsb sy" ::: "memory");
+    *chram = 0x00000200u;   /* force_ctx_reload */
+    __asm__ volatile("dsb sy" ::: "memory");
+    uart_printf("[fecs-reload] CHRAM[hw_chid=%u]@0x%lx "
+                "enable+force_ctx_reload (chram_bar0=0x%x)\n",
+                (unsigned)hw_chid, (unsigned long)chram_chan_addr,
+                (unsigned)chram_bar0_offset);
+    return 0;
+}
+
 static void install_fresh_runlist_and_chram(
                                 const struct ga10b_channel_handoff *h)
 {
