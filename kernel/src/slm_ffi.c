@@ -20,6 +20,7 @@
 #include "sched.h"
 #include "ipc.h"
 #include "spinlock.h"
+#include "vfs.h"
 #include "../gpu/gpu.h"
 #include "gpu_consumer.h"
 #include <stdatomic.h>
@@ -157,6 +158,25 @@ uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq)
 uint64_t slm_get_time_ns(void)
 {
     return slm_time_ticks_to_ns(timer_get_count(), timer_get_frequency());
+}
+
+/*
+ * Storage pread for the Rust weight-cache (eviction E2E harness, #979).
+ *
+ * Reads up to `len` bytes from `path` starting at byte `offset` into
+ * `dst`. Thin wrapper over vfs_read_path so the runtime's reload-on-miss
+ * path can pull a weight block from SD/SSD on a residency miss. Returns
+ * the number of bytes read (>= 0) or -1 on bad arguments / lookup /
+ * read failure. Each call resolves the path fresh — acceptable for the
+ * harness, where the measured latency legitimately includes FS overhead;
+ * a production demand-pager would cache the open handle.
+ */
+int slm_vfs_pread(const char *path, uint64_t offset, void *dst, size_t len)
+{
+    if (!path || !dst || len == 0u) {
+        return -1;
+    }
+    return vfs_read_path(path, (char *)dst, len, (size_t)offset);
 }
 
 /*

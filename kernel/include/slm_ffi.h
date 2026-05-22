@@ -103,6 +103,21 @@ uint64_t slm_get_time_ns(void);
 uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
 
 /*
+ * Storage pread for the Rust weight-cache (eviction E2E harness, #979).
+ *
+ * Reads up to `len` bytes from `path` at byte `offset` into `dst`.
+ * Wraps vfs_read_path so the runtime's reload-on-miss path can pull a
+ * weight block from storage on a residency miss.
+ *
+ * @path:   Absolute, null-terminated VFS path
+ * @offset: Byte offset within the file
+ * @dst:    Destination buffer (>= len bytes)
+ * @len:    Maximum bytes to read (must be > 0)
+ * Returns: Bytes read (>= 0), or -1 on bad args / lookup / read failure.
+ */
+int slm_vfs_pread(const char *path, uint64_t offset, void *dst, size_t len);
+
+/*
  * Sleep the current task for the given number of milliseconds.
  *
  * @ms: Sleep duration in milliseconds (0 returns immediately)
@@ -546,6 +561,44 @@ extern int32_t rust_eviction_get_trajectory(
  * harness and the `eviction bench` shell command (future). */
 extern uint64_t rust_eviction_bench_latency_ns(
     const uint8_t *name, uint32_t iterations);
+
+/*
+ * End-to-end storage-backed eviction harness (#979). Layout MUST match
+ * the Rust `EvictionE2EResult` in runtime/src/lib.rs.
+ */
+typedef struct {
+    uint64_t accesses;
+    uint64_t hits;
+    uint64_t faults;
+    uint64_t bytes_reloaded;
+    uint64_t p50_ns;
+    uint64_t p99_ns;
+    uint64_t mean_ns;
+} RustEvictionE2EResult;
+
+/*
+ * Storage-backed eviction harness, trace-replay mode (#979).
+ *
+ * Replays the embedded simulator per-scenario access traces through the
+ * real pools + active eviction policy on the simulator's logical-tick
+ * time base, so per-policy fault rates are comparable to the simulator.
+ *
+ * scenario_count: number of embedded scenarios (-1 if feature off).
+ * scenario_name:  copy scenario `idx` name into `out` (cap bytes);
+ *                 returns name length or -1.
+ * trace:          replay scenario `scenario_idx`; sizes pools to
+ *                 `weight_mb`/`workspace_mb` (128/64 matches the sim's
+ *                 64+32-block cache); `block_kb` bytes read per fault
+ *                 when `do_read != 0`. Fills `out`, returns 0; negative
+ *                 on bad args / reset failure / bad index / feature-off.
+ */
+extern int32_t rust_eviction_e2e_scenario_count(void);
+extern int32_t rust_eviction_e2e_scenario_name(
+    uint32_t idx, uint8_t *out, size_t cap);
+extern int32_t rust_eviction_e2e_trace(
+    uint32_t scenario_idx, uint32_t weight_mb, uint32_t workspace_mb,
+    uint32_t block_kb, uint32_t do_read, const uint8_t *path,
+    RustEvictionE2EResult *out);
 
 /*
  * ==========================================================================

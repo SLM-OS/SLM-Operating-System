@@ -54,6 +54,43 @@ extern "C" {
 /// trained on.
 pub const AI_HORIZON_NS: u64 = 1_000_000_000;
 
+/// One logical simulator tick, expressed in the runtime's ns time base.
+/// The sibling FeatureExtractor uses `horizon_window = 1000` ticks; the
+/// runtime normalises against `AI_HORIZON_NS`. Driving block timestamps
+/// (and the `now` reference) in multiples of this value makes the
+/// runtime's normalised `time_since` equal the simulator's
+/// `tick_diff / 1000` — required for the #979 trace-replay quality
+/// comparison, where a tight replay loop would otherwise make real-ns
+/// `time_since` collapse to ~0 and flatten the recency feature.
+pub const SIM_TICK_NS: u64 = AI_HORIZON_NS / 1000; // 1_000_000 ns
+
+/// Logical-clock override for the trace-replay harness (#979). When
+/// non-zero, `extract_features` uses this as `now` instead of wall-clock
+/// time, so feature-time stays on the simulator's tick base. Zero (the
+/// default) means "use real time" — production behaviour is unchanged.
+static CLOCK_OVERRIDE_NS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Set the feature-extraction clock override (ns). Pass 0 to disable.
+pub fn set_clock_override(ns: u64) {
+    CLOCK_OVERRIDE_NS.store(ns, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clear the clock override (revert to wall-clock).
+pub fn clear_clock_override() {
+    CLOCK_OVERRIDE_NS.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Current feature-extraction clock: the override if set, else wall-clock.
+fn eviction_now() -> u64 {
+    let o = CLOCK_OVERRIDE_NS.load(core::sync::atomic::Ordering::Relaxed);
+    if o != 0 {
+        o
+    } else {
+        kernel_ffi::get_time_ns()
+    }
+}
+
 /// Canonical feature-name array matching the sibling project's
 /// `FeatureConfig.feature_names` (15 per-block + 12 global = 27).
 /// Used by `eviction features` shell command for runtime introspection
@@ -135,7 +172,7 @@ pub fn extract_features(candidates: &[BlockMeta]) -> Vec<BlockFeatures> {
     if candidates.is_empty() {
         return Vec::new();
     }
-    let now = kernel_ffi::get_time_ns();
+    let now = eviction_now();
 
     // Global features (shared across candidates).
     let weight = weight_pool_stats();
@@ -247,7 +284,9 @@ fn build_row(
     // #122: wire slot 11 from the global active-inferences table (#113).
     row[11] = log1pf(super::slm_heuristic::get_active(b.model_id) as f32)
               / log1pf(ACTIVE_INFERENCES_CEILING);
-    row[12] = 0.0;  // access_pattern — BlockMeta doesn't track it; Sequential (0) is the neutral default; /3.0 would still be 0
+    // access_pattern, normalised by the max enum value (3 = BURST), mirroring
+    // the sibling FeatureNormalizer. Threaded through BlockMeta as of #979.
+    row[12] = (b.access_pattern as f32) / 3.0;
     row[13] = predicted_reuse_heuristic(b, time_since_access, layer_norm);
     row[14] = compute_eviction_cost(b);
 
@@ -271,18 +310,36 @@ fn build_row(
     row
 }
 
+// AccessPattern enum values (mirror the sibling `AccessPattern` IntEnum
+// in slm-os-page-sim `src/simulator/block.py`).
+const AP_SEQUENTIAL: u8 = 0;
+const AP_RANDOM: u8 = 1;
+const AP_STRIDED: u8 = 2;
+const AP_BURST: u8 = 3;
+
 /// Heuristic estimate of reuse distance — mirrors the Python
-/// `_predict_reuse_heuristic`. Without an `access_pattern` field we
-/// collapse to the Sequential branch: `time_since / horizon`, clamped
-/// to [0, 1]. When `access_pattern` is threaded through BlockMeta in
-/// a future phase, we can restore the Burst / Strided / Random
-/// branches.
+/// `_predict_reuse_heuristic` (extractor.py:192) branch-for-branch.
+/// `time_since_access_normalised` is `time_since / horizon`, so the
+/// Python `time_since / (horizon * k)` terms become `tsn / k`. Now that
+/// `access_pattern` is threaded through `BlockMeta` (#979), all four
+/// branches are active rather than collapsing to Sequential.
 fn predicted_reuse_heuristic(
-    _b: &BlockMeta,
+    b: &BlockMeta,
     time_since_access_normalised: f32,
     _layer_norm: f32,
 ) -> f32 {
-    time_since_access_normalised.clamp(0.0, 1.0)
+    let tsn = time_since_access_normalised;
+    match b.access_pattern {
+        AP_SEQUENTIAL => tsn.clamp(0.0, 1.0),
+        // Burst: time_since / (horizon * 0.1) = tsn / 0.1 = tsn * 10,
+        // clamped, then halved (low reuse distance for burst).
+        AP_BURST => (tsn * 10.0).min(1.0) * 0.5,
+        // Strided: time_since / (horizon * 0.5) = tsn * 2, clamped.
+        AP_STRIDED => (tsn * 2.0).min(1.0),
+        // Random (and any unknown value): no predictable reuse.
+        AP_RANDOM => 0.8,
+        _ => 0.8,
+    }
 }
 
 /// Normalised eviction cost — mirrors the Python `_compute_eviction_cost`.

@@ -958,6 +958,18 @@ pub extern "C" fn rust_model_mem_init(weight_mb: u32, workspace_mb: u32) -> i32 
     }
 }
 
+/// Re-create the model-memory pools at new sizes (#979). DESTRUCTIVE:
+/// frees the backing pages, invalidating any loaded model. Intended for
+/// diagnostic harnesses (and the eviction-e2e test, which restores the
+/// boot sizes afterward). Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn rust_model_mem_reinit(weight_mb: u32, workspace_mb: u32) -> i32 {
+    match mm::model_mem::model_mem_reinit(weight_mb as usize, workspace_mb as usize) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 /// Run model memory tests.
 ///
 /// Returns number of test failures (0 = all passed).
@@ -1455,6 +1467,139 @@ pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
     }
 }
 
+// -- End-to-end storage-backed eviction harness FFI (#979) --
+
+/// Aggregate result of a `rust_eviction_e2e_run`. Layout mirrors the
+/// C-side `struct eviction_e2e_result` in the shell.
+#[repr(C)]
+pub struct EvictionE2EResult {
+    pub accesses: u64,
+    pub hits: u64,
+    pub faults: u64,
+    pub bytes_reloaded: u64,
+    pub p50_ns: u64,
+    pub p99_ns: u64,
+    pub mean_ns: u64,
+}
+
+/// Number of scenarios in the embedded simulator trace, or -1 when
+/// `ai_eviction` is off / the blob is invalid.
+#[no_mangle]
+pub extern "C" fn rust_eviction_e2e_scenario_count() -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        -1
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::weight_cache::scenario_count() as i32
+    }
+}
+
+/// Copy scenario `idx`'s name (null-terminated) into `out` (cap bytes).
+/// Returns the byte length written (excluding NUL), or -1 on bad args /
+/// feature-off.
+///
+/// # Safety
+/// `out` must be valid for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_e2e_scenario_name(
+    idx: u32,
+    out: *mut u8,
+    cap: usize,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (idx, out, cap);
+        -1
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if out.is_null() || cap == 0 {
+            return -1;
+        }
+        let name = mm::weight_cache::scenario_name(idx);
+        let n = core::cmp::min(name.len(), cap - 1);
+        core::ptr::copy_nonoverlapping(name.as_ptr(), out, n);
+        *out.add(n) = 0;
+        n as i32
+    }
+}
+
+/// Replay one embedded simulator scenario through the real pools + the
+/// currently-selected eviction policy, on the simulator's logical-tick
+/// time base, and report per-policy fault rate + measured reload
+/// latency. Sizes the pools to `weight_mb` / `workspace_mb` (matching
+/// the simulator's 64+32 cache when those are 128 / 64). `block_kb` is
+/// the bytes read from `path` per fault (only when `do_read != 0`).
+///
+/// Fills `out`, returns 0; negative on bad args / reset failure / bad
+/// scenario index / feature-off.
+///
+/// # Safety
+/// `path` must be a valid null-terminated C string; `out` must point at
+/// a valid `EvictionE2EResult`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_e2e_trace(
+    scenario_idx: u32,
+    weight_mb: u32,
+    workspace_mb: u32,
+    block_kb: u32,
+    do_read: u32,
+    path: *const u8,
+    out: *mut EvictionE2EResult,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (scenario_idx, weight_mb, workspace_mb, block_kb, do_read, path, out);
+        -100
+    }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        if out.is_null() {
+            return -1;
+        }
+        // Copy the (optional) C path into a bounded, null-terminated buffer.
+        let mut buf = [0u8; 128];
+        let mut len = 0usize;
+        if !path.is_null() {
+            while len < 127 {
+                let c = *path.add(len);
+                if c == 0 {
+                    break;
+                }
+                buf[len] = c;
+                len += 1;
+            }
+        }
+        buf[len] = 0;
+
+        let block_len =
+            core::cmp::min((block_kb.max(1) as usize) * 1024, mm::model_mem::BLOCK_SIZE);
+        if mm::weight_cache::reset(weight_mb, workspace_mb, &buf[..=len], block_len, do_read != 0)
+            != 0
+        {
+            return -2;
+        }
+        match mm::weight_cache::run_scenario(scenario_idx) {
+            Some(r) => {
+                *out = EvictionE2EResult {
+                    accesses: r.accesses,
+                    hits: r.hits,
+                    faults: r.faults,
+                    bytes_reloaded: r.bytes_reloaded,
+                    p50_ns: r.p50_ns,
+                    p99_ns: r.p99_ns,
+                    mean_ns: r.mean_ns,
+                };
+                0
+            }
+            None => -3,
+        }
+    }
+}
+
 // -- Latency benchmark FFI (Phase AI-Eviction M9) --
 
 /// Per-policy average `select_victim` latency in nanoseconds,
@@ -1540,35 +1685,43 @@ fn build_bench_candidates() -> [mm::eviction::BlockMeta; 8] {
         BlockMeta { block_id: 900, pool_type: PoolType::Weight,
                     model_id: 1, layer_idx:  0, last_access_time:  1_000_000,
                     load_time:  500_000, access_count:  5, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 3 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 3,
+                    access_pattern: 0 },
         BlockMeta { block_id: 901, pool_type: PoolType::Weight,
                     model_id: 1, layer_idx:  1, last_access_time:  2_000_000,
                     load_time:  600_000, access_count: 10, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 3 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 3,
+                    access_pattern: 0 },
         BlockMeta { block_id: 902, pool_type: PoolType::Workspace,
                     model_id: 2, layer_idx: -1, last_access_time:  1_500_000,
                     load_time:  700_000, access_count:  1, ref_count: 0,
-                    gpu_mapped: true,  is_dirty: true,  model_priority: 5 },
+                    gpu_mapped: true,  is_dirty: true,  model_priority: 5,
+                    access_pattern: 3 },
         BlockMeta { block_id: 903, pool_type: PoolType::Weight,
                     model_id: 3, layer_idx:  5, last_access_time:  3_000_000,
                     load_time:  800_000, access_count:  2, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 2 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 2,
+                    access_pattern: 2 },
         BlockMeta { block_id: 904, pool_type: PoolType::Weight,
                     model_id: 3, layer_idx:  6, last_access_time:  4_000_000,
                     load_time:  900_000, access_count:  3, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 2 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 2,
+                    access_pattern: 2 },
         BlockMeta { block_id: 905, pool_type: PoolType::Workspace,
                     model_id: 4, layer_idx: -1, last_access_time:  5_000_000,
                     load_time: 1_000_000, access_count:  7, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 1 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 1,
+                    access_pattern: 3 },
         BlockMeta { block_id: 906, pool_type: PoolType::Weight,
                     model_id: 5, layer_idx:  0, last_access_time:  6_000_000,
                     load_time: 1_100_000, access_count:  4, ref_count: 0,
-                    gpu_mapped: true,  is_dirty: false, model_priority: 4 },
+                    gpu_mapped: true,  is_dirty: false, model_priority: 4,
+                    access_pattern: 0 },
         BlockMeta { block_id: 907, pool_type: PoolType::Weight,
                     model_id: 5, layer_idx:  2, last_access_time:  7_000_000,
                     load_time: 1_200_000, access_count:  6, ref_count: 0,
-                    gpu_mapped: false, is_dirty: false, model_priority: 4 },
+                    gpu_mapped: false, is_dirty: false, model_priority: 4,
+                    access_pattern: 0 },
     ]
 }
 
@@ -2544,6 +2697,7 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
                             gpu_mapped: false,
                             is_dirty: false,
                             model_priority: 0,
+                            access_pattern: 0,
                         })
                         .collect();
                     let victim = policy.select_victim(&candidates);
@@ -2734,6 +2888,7 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 gpu_mapped: false,
                 is_dirty: false,
                 model_priority: 0,
+                access_pattern: 0,
             }
         }
 
@@ -2876,12 +3031,14 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 model_id: 0, layer_idx: 0, last_access_time: 100,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
+                access_pattern: 0,
             },
             eviction::BlockMeta {
                 block_id: 11, pool_type: eviction::PoolType::Workspace,
                 model_id: 0, layer_idx: 0, last_access_time: 50,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
+                access_pattern: 0,
             },
         ];
         let ws_pick = eviction::select_victim(&ws_cands);
@@ -3031,12 +3188,14 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 model_id: 0, layer_idx: 0, last_access_time: 500,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
+                access_pattern: 0,
             },
             mm::eviction::BlockMeta {
                 block_id: 101, pool_type: eviction::PoolType::Weight,
                 model_id: 1, layer_idx: 0, last_access_time: 100,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
+                access_pattern: 0,
             },
         ];
 
@@ -3215,6 +3374,7 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 gpu_mapped: false,
                 is_dirty: false,
                 model_priority: 0,
+                access_pattern: 0,
             }
         }
 

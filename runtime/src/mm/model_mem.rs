@@ -160,6 +160,10 @@ struct BlockSlot {
     gpu_mapped: bool,
     is_dirty: bool,
     model_priority: u8,
+    /// Observed access pattern (sibling `AccessPattern`: 0=SEQUENTIAL,
+    /// 1=RANDOM, 2=STRIDED, 3=BURST). Default 0. Set via
+    /// `set_access_pattern`; feeds the `predicted_reuse_dist` feature.
+    access_pattern: u8,
 }
 
 impl BlockSlot {
@@ -179,6 +183,7 @@ impl BlockSlot {
             gpu_mapped: false,
             is_dirty: false,
             model_priority: 0,
+            access_pattern: 0,
         }
     }
 
@@ -192,6 +197,7 @@ impl BlockSlot {
         self.gpu_mapped = false;
         self.is_dirty = false;
         self.model_priority = 0;
+        self.access_pattern = 0;
     }
 }
 
@@ -426,6 +432,31 @@ impl MemoryPool {
         Ok(())
     }
 
+    /// Stamp a slot's observed access pattern (0=SEQUENTIAL, 1=RANDOM,
+    /// 2=STRIDED, 3=BURST — matches the sibling `AccessPattern`).
+    fn set_access_pattern(&mut self, handle: ModelHandle, pattern: u8) -> Result<(), AllocError> {
+        let slot = self.slot_mut(handle)?;
+        slot.access_pattern = pattern;
+        Ok(())
+    }
+
+    /// Overwrite a slot's eviction-tracking time fields + access count.
+    /// The trace-replay harness (#979) drives these on the simulator's
+    /// logical-tick base so the recency/frequency features match the sim.
+    fn set_eviction_times(
+        &mut self,
+        handle: ModelHandle,
+        load_time: u64,
+        last_access_time: u64,
+        access_count: u32,
+    ) -> Result<(), AllocError> {
+        let slot = self.slot_mut(handle)?;
+        slot.load_time = load_time;
+        slot.last_access_time = last_access_time;
+        slot.access_count = access_count;
+        Ok(())
+    }
+
     /// Snapshot a slot into an eviction-policy `BlockMeta`.
     ///
     /// The `block_id` packs `(pool_id, slot_index)` into a u32 so the
@@ -458,6 +489,7 @@ impl MemoryPool {
             gpu_mapped: slot.gpu_mapped,
             is_dirty: slot.is_dirty,
             model_priority: slot.model_priority,
+            access_pattern: slot.access_pattern,
         })
     }
 
@@ -586,6 +618,14 @@ fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire) == 1
 }
 
+/// Public view of `is_initialized` for callers that must avoid a
+/// double `model_mem_init` (which would leak the prior pools). The
+/// weight-cache harness (#979) uses this to size the pool only when
+/// no model has been loaded yet.
+pub fn is_pool_initialized() -> bool {
+    is_initialized()
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -661,6 +701,62 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
     }
 
     Ok(())
+}
+
+/// Free the PMM pages backing a pool. Caller MUST hold `LOCK`.
+///
+/// # Safety
+/// `pool` must point at a live `MemoryPool` whose `base_addr` /
+/// `block_count` were set by `init` from a `kernel_ffi::alloc_pages`
+/// allocation. `model_mem_init` rejects oversized requests before
+/// allocating, so `block_count` is never clamped below the allocation
+/// — `block_count * (BLOCK_SIZE / 4096)` equals the page count that was
+/// allocated.
+unsafe fn free_pool_backing(pool: *mut MemoryPool) {
+    let base = (*pool).base_addr;
+    let blocks = (*pool).block_count;
+    if base == 0 || blocks == 0 {
+        return;
+    }
+    let pages = blocks * (BLOCK_SIZE / 4096);
+    if let Some(ptr) = core::ptr::NonNull::new(base as *mut u8) {
+        kernel_ffi::free_pages(ptr, pages);
+    }
+}
+
+/// Tear down the current pools and re-create them at new sizes.
+///
+/// **DESTRUCTIVE.** Frees the backing PMM pages, invalidating every
+/// outstanding `ModelHandle` — any model loaded before this call
+/// becomes garbage. Intended only for diagnostic harnesses (the #979
+/// `bench eviction-e2e` path) that must constrain the pool *after* a
+/// boot-time model preload has already sized it. Do not use for
+/// production model swapping.
+///
+/// Idempotent w.r.t. an uninitialized pool: if nothing is initialized
+/// yet, this is just `model_mem_init`.
+pub fn model_mem_reinit(weight_mb: usize, workspace_mb: usize) -> Result<(), AllocError> {
+    if is_initialized() {
+        {
+            let _g = SpinGuard::new();
+            // SAFETY: SpinGuard held — exclusive access to the pool
+            // statics. We free each pool's backing pages, then reset the
+            // pool structs and the eviction tracker so a fresh
+            // model_mem_init starts from a clean slate.
+            unsafe {
+                free_pool_backing(addr_of_mut!(WEIGHT_POOL));
+                free_pool_backing(addr_of_mut!(WORKSPACE_POOL));
+                *addr_of_mut!(WEIGHT_POOL) = MemoryPool::new();
+                *addr_of_mut!(WORKSPACE_POOL) = MemoryPool::new();
+                #[cfg(feature = "ai_eviction")]
+                {
+                    *addr_of_mut!(EVICTED_CONTENT_TRACKER) = None;
+                }
+            }
+            INITIALIZED.store(0, Ordering::Release);
+        }
+    }
+    model_mem_init(weight_mb, workspace_mb)
 }
 
 /// Allocate model memory from the weight pool.
@@ -1119,6 +1215,58 @@ pub fn set_dirty(handle: ModelHandle, dirty: bool) -> Result<(), AllocError> {
         match handle.pool_id {
             POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).set_dirty(handle, dirty),
             POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).set_dirty(handle, dirty),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Stamp a block's observed access pattern (0=SEQUENTIAL, 1=RANDOM,
+/// 2=STRIDED, 3=BURST). Feeds the `predicted_reuse_dist` feature so the
+/// eviction policies see the real workload signal (#979 quality path).
+pub fn set_access_pattern(handle: ModelHandle, pattern: u8) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).set_access_pattern(handle, pattern),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).set_access_pattern(handle, pattern),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Overwrite a block's eviction-tracking time fields + access count.
+/// Used by the #979 trace-replay harness to drive feature-time on the
+/// simulator's logical-tick base. Pair with
+/// `eviction::set_clock_override` so feature extraction's `now` matches.
+pub fn set_eviction_times(
+    handle: ModelHandle,
+    load_time: u64,
+    last_access_time: u64,
+    access_count: u32,
+) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL))
+                .set_eviction_times(handle, load_time, last_access_time, access_count),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL))
+                .set_eviction_times(handle, load_time, last_access_time, access_count),
             _ => Err(AllocError::InvalidHandle),
         }
     }

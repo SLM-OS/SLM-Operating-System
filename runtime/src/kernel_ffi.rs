@@ -300,6 +300,16 @@ extern "C" {
     pub fn slm_get_time_ns() -> u64;
 
     // -------------------------------------------------------------------------
+    // Storage pread (#979) — weight-cache reload-on-miss
+    // -------------------------------------------------------------------------
+
+    /// Read up to `len` bytes from `path` at byte `offset` into `dst`.
+    /// Wraps the kernel's `vfs_read_path`. Returns bytes read (>= 0) or
+    /// -1 on bad args / lookup / read failure. `path` must be a
+    /// null-terminated absolute VFS path.
+    pub fn slm_vfs_pread(path: *const c_char, offset: u64, dst: *mut u8, len: usize) -> i32;
+
+    // -------------------------------------------------------------------------
     // PMU (#871) — read primitives for the per-op profile harness
     // -------------------------------------------------------------------------
 
@@ -523,6 +533,32 @@ pub fn print(s: &[u8]) {
 /// Get current time in nanoseconds since boot.
 pub fn get_time_ns() -> u64 {
     unsafe { slm_get_time_ns() }
+}
+
+/// Read file bytes at `offset` into `dst` via the kernel VFS.
+///
+/// `path` must be null-terminated. Returns `Ok(bytes_read)` or
+/// `Err(KernelError::InvalidParam)` on a bad path / read failure.
+/// Used by the weight-cache reload-on-miss path (#979).
+pub fn vfs_pread(path: &[u8], offset: u64, dst: &mut [u8]) -> KernelResult<usize> {
+    if path.last() != Some(&0) {
+        return Err(KernelError::InvalidParam);
+    }
+    // SAFETY: path is null-terminated (checked above); dst.as_mut_ptr()
+    // is valid for dst.len() bytes — the documented FFI contract.
+    let n = unsafe {
+        slm_vfs_pread(
+            path.as_ptr() as *const c_char,
+            offset,
+            dst.as_mut_ptr(),
+            dst.len(),
+        )
+    };
+    if n < 0 {
+        Err(KernelError::InvalidParam)
+    } else {
+        Ok(n as usize)
+    }
 }
 
 /// Check if GPU is available.

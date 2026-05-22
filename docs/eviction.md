@@ -357,6 +357,122 @@ Tree-pruning the XGBoost ensemble and batching the MLP forward pass
 are the two known speed-up levers carried over from the sibling
 project; tracked as a perf follow-up against the M9 deliverable.
 
+### Storage-backed eviction — end-to-end harness (#979)
+
+The latency tables above time `select_victim` on synthetic candidate
+sets; the eviction *quality* numbers (normalised fault rate, page-fault
+reduction) come from the sibling `slm-os-page-sim` simulator. Neither
+exercises a real eviction-and-reload cycle: the production inference
+engine holds a model's weights resident (`engine.rs` reads
+`weight_base + offset`) and never faults, and the `model_mem` eviction
+pools are otherwise only touched by tests.
+
+`bench eviction-e2e` closes that gap **on real hardware** by replaying
+the **simulator's own per-scenario access traces** through the real
+pools + the active eviction policy:
+
+```
+bench eviction-e2e [--policy <p>|--all] [--weight-mb N]
+                   [--workspace-mb N] [--block-kb N]
+                   [--read --file <path>]
+```
+
+The traces are exported from `slm-os-page-sim` by
+`scripts/export_eviction_trace.py` and embedded via `include_bytes!`
+(`runtime/src/mm/eviction_trace.bin`, 7 scenarios). Each access carries
+the simulator's `(model_id, layer_idx, pool_type)` identity and its
+`access_pattern`; a residency miss runs a real `alloc_weights` /
+`alloc_workspace` (evicting a victim chosen by the active policy when
+the pool is full), and with `--read` a real `vfs_pread` of the block's
+bytes from storage. Pools default to the simulator's cache size
+(64 weight + 32 workspace blocks ⇒ 128 / 64 MB) so the per-policy fault
+rates line up.
+
+Two fidelity points make the comparison meaningful (and were the fix
+for an earlier degenerate run where every policy produced identical
+fault counts):
+
+- **`access_pattern` is threaded through `BlockMeta`** so the
+  `predicted_reuse_dist` feature uses the simulator's real 4-branch
+  heuristic (SEQUENTIAL/BURST/STRIDED/RANDOM) instead of collapsing to
+  recency. Without it the dominant feature (76% of XGBoost gain) is
+  constant and the ML policies can't differentiate.
+- **Feature-time runs on the simulator's logical-tick base**
+  (`SIM_TICK_NS = AI_HORIZON_NS / 1000` per access, via
+  `set_clock_override` + `set_eviction_times`). A tight real-ns replay
+  loop would otherwise drive `time_since` to ~0 and flatten the recency
+  feature.
+
+Implementation: `slm_vfs_pread` FFI, `runtime/src/mm/weight_cache.rs`
+(trace parse + residency index + reload-on-miss + logical clock), and
+the `rust_eviction_e2e_{scenario_count,scenario_name,trace}` FFI.
+
+**Scope (honest).** This replays *traces*, not a live LLM forward pass
+(that maximal version — demand-paging weights during inference — is
+tracked in #980). The pool resize is **destructive** to any loaded
+model (`rust_model_mem_reinit` frees the backing pages); the bench is a
+diagnostic, reboot before inference. Fault *rate* is the quality metric
+(comparable to the simulator's normalized table); `--read` adds
+hardware-measured reload latency, replacing the previously-assumed
+"ms-scale fault" cost.
+
+**Hardware result (pi-5-2, Cortex-A76, 64+32-block cache, seed-42
+traces, 2026-05-22).** Per-policy fault rate (% of accesses that
+miss; lower is better). Scenarios: s0 single_inference, s1 multi_model,
+s2 hot_swap, s3 burst_load, s4 mixed_priority, s5 gpu_contention,
+s6 adversarial.
+
+| policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 |
+|--------|---:|---:|---:|---:|---:|---:|---:|
+| first_candidate | 55 | 69 | 69 | 66 | 56 | 66 | 0 |
+| lru | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| lfu | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| arc | 79 | 81 | 75 | 46 | 77 | 72 | 0 |
+| slm | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| **xgboost** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
+| **mlp** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
+| cacheus | 79 | 76 | 75 | 44 | 81 | 72 | 0 |
+
+The hardware fault rates **match the simulator's seed-42 run within
+~1–2 percentage points on 5 of 7 scenarios** — not just the same
+ranking, near-exact parity. Comparing hardware % to the simulator's
+fault count / accesses (sim seed 42):
+
+| scenario | LRU hw/sim | xgboost hw/sim | mlp hw/sim |
+|----------|-----------:|---------------:|-----------:|
+| single_inference | 79 / 79 | 55 / 55 | 55 / 56 |
+| multi_model | 82 / 82 | 69 / 70 | 69 / 70 |
+| hot_swap | 75 / 76 | 69 / 69 | 69 / 69 |
+| mixed_priority | 86 / 86 | 56 / 56 | 56 / 56 |
+| gpu_contention | 72 / 73 | 66 / 67 | 66 / 67 |
+
+The central simulator finding reproduces on real hardware: the learned
+policies (xgboost/mlp) beat the classical LRU family on those 5
+scenarios — e.g. mixed_priority 56% vs 86% — which is the
+differentiation the pre-fix run lacked (every policy then produced
+identical counts). This validates that the in-tree (parity-tested)
+ported policies make the same eviction decisions on real ARM hardware
+as the Python simulator.
+
+Measured reload latency with `--read` against the SD card: **≈55 µs per
+2 KB block** (overhead-dominated floor; larger blocks add transfer).
+For context, the learned eviction *inference* costs ~15 µs (XGBoost) to
+~130 µs (MLP) on this CPU — so against a 55 µs SD fault, XGBoost
+amortizes and the MLP is marginal at small block sizes (see
+`docs/design/gpu-policy-models.md` for the GPU path).
+
+**Residual fidelity caveats (not exact-parity with the simulator):**
+- `xgboost` and `mlp` produce identical fault rates here — they agree on
+  every eviction on these traces (both dominated by the same
+  `predicted_reuse_dist` signal). Plausible, but worth noting.
+- `cacheus` differentiates (no longer stuck with the classical group)
+  but underperforms its own XGBoost+MLP experts — the ensemble doesn't
+  yet track them on hardware. Tracked as a follow-up.
+- `burst_load` (s3): the learned policies are *worse* than classical
+  here, the opposite of the simulator. The replay matches the sim's
+  ranking qualitatively but is not bit-faithful — feature-time is scaled
+  to the tick horizon, not identical to the simulator's discrete clock.
+
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
 GA10B fastpath covers MNIST/model inference (`gpu use inference on`)

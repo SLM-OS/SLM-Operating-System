@@ -63,7 +63,8 @@ pub use lru::LruPolicy;
 pub use lfu::LfuPolicy;
 pub use slm_heuristic::SlmHeuristicPolicy;
 pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
-pub use features::{extract_features, AI_HORIZON_NS, FEATURE_NAMES};
+pub use features::{extract_features, AI_HORIZON_NS, FEATURE_NAMES, SIM_TICK_NS,
+                   set_clock_override, clear_clock_override};
 pub use xgboost::XGBoostPolicy;
 pub use mlp::MlpPolicy;
 pub use cacheus::{CacheusSelector, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW};

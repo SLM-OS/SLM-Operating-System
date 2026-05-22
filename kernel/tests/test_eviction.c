@@ -42,6 +42,7 @@ typedef struct {
 
 /* Model-memory FFI (existing). */
 extern int         rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb);
+extern int         rust_model_mem_reinit(uint32_t weight_mb, uint32_t workspace_mb);
 extern ModelHandle rust_model_alloc_weights(size_t size);
 extern ModelHandle rust_model_alloc_workspace(size_t size);
 extern int         rust_model_free(ModelHandle handle);
@@ -1575,6 +1576,46 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
     }
 }
 
+/* End-to-end storage-backed eviction harness, trace-replay mode (#979).
+ *
+ * Pins the harness contract: replaying an embedded simulator scenario
+ * through the real pools + active policy on the logical-tick time base
+ * produces self-consistent accounting. Uses small pools so a scenario's
+ * working set overflows and eviction fires; `do_read=0` so no VFS file
+ * is needed in QEMU. The exact sim-matching fault rates are validated on
+ * hardware with the 64+32-block cache (#979 acceptance), not here.
+ * Restores the boot pool sizes at the end so later suites are unaffected
+ * (reinit is destructive to the global pool). */
+static void test_eviction_e2e_harness_accounts_faults(void)
+{
+    int nscen = rust_eviction_e2e_scenario_count();
+    TEST_ASSERT_TRUE(nscen > 0);
+
+    RustEvictionE2EResult r;
+    TEST_ASSERT_EQUAL_INT32(0, rust_eviction_policy_set((const uint8_t *)"lru"));
+    int rc = rust_eviction_e2e_trace(/*scenario=*/0u, /*weight_mb=*/16u,
+                                     /*workspace_mb=*/8u, /*block_kb=*/2u,
+                                     /*do_read=*/0u, (const uint8_t *)"", &r);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_TRUE(r.accesses > 0u);
+    TEST_ASSERT_EQUAL_UINT64(r.accesses, r.hits + r.faults);
+    TEST_ASSERT_TRUE(r.faults >= 1u);            /* at least one cold miss */
+    TEST_ASSERT_TRUE(r.faults <= r.accesses);
+
+    /* Switching the policy and re-running must not crash and must keep
+     * the same self-consistent accounting. */
+    TEST_ASSERT_EQUAL_INT32(0,
+        rust_eviction_policy_set((const uint8_t *)"mlp"));
+    rc = rust_eviction_e2e_trace(0u, 16u, 8u, 2u, 0u, (const uint8_t *)"", &r);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_EQUAL_UINT64(r.accesses, r.hits + r.faults);
+
+    /* Restore default policy + boot pool sizes (QEMU = 256/128) so later
+     * suites that rely on model_mem see the expected pool. */
+    (void)rust_eviction_policy_set((const uint8_t *)"lru");
+    (void)rust_model_mem_reinit(256u, 128u);
+}
+
 /* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
@@ -1631,6 +1672,9 @@ int test_suite_eviction(void)
 
     /* M9: per-policy latency benchmarks (QEMU baseline numbers). */
     RUN_TEST(test_bench_all_policies);
+
+    /* #979: end-to-end storage-backed eviction harness contract. */
+    RUN_TEST(test_eviction_e2e_harness_accounts_faults);
 
     /* M-SMP: multi-CPU concurrent alloc/eviction stress test (#116). */
     RUN_TEST(test_eviction_smp_alloc_under_concurrent_swap);
