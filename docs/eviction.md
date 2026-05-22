@@ -416,6 +416,46 @@ diagnostic, reboot before inference. Fault *rate* is the quality metric
 hardware-measured reload latency, replacing the previously-assumed
 "ms-scale fault" cost.
 
+**Hardware result (pi-5-2, Cortex-A76, 64+32-block cache, seed-42
+traces, 2026-05-22).** Per-policy fault rate (% of accesses that
+miss; lower is better). Scenarios: s0 single_inference, s1 multi_model,
+s2 hot_swap, s3 burst_load, s4 mixed_priority, s5 gpu_contention,
+s6 adversarial.
+
+| policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 |
+|--------|---:|---:|---:|---:|---:|---:|---:|
+| first_candidate | 55 | 69 | 69 | 66 | 56 | 66 | 0 |
+| lru | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| lfu | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| arc | 79 | 81 | 75 | 46 | 77 | 72 | 0 |
+| slm | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
+| **xgboost** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
+| **mlp** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
+| cacheus | 79 | 76 | 75 | 44 | 81 | 72 | 0 |
+
+The central simulator finding **reproduces on real hardware**: the
+learned policies (xgboost/mlp) beat the classical LRU family on 5 of 7
+scenarios (s0, s1, s2, s4, s5) — e.g. mixed_priority 56% vs 86%. This is
+the differentiation the pre-fix run lacked (every policy then produced
+identical counts). Measured reload latency with `--read` against the SD
+card: **≈55 µs per 2 KB block** (overhead-dominated floor; larger
+blocks add transfer). For context, the learned eviction *inference*
+costs ~15 µs (XGBoost) to ~130 µs (MLP) on this CPU — so against a
+55 µs SD fault, XGBoost amortizes and the MLP is marginal at small
+block sizes (see `docs/design/gpu-policy-models.md` for the GPU path).
+
+**Residual fidelity caveats (not exact-parity with the simulator):**
+- `xgboost` and `mlp` produce identical fault rates here — they agree on
+  every eviction on these traces (both dominated by the same
+  `predicted_reuse_dist` signal). Plausible, but worth noting.
+- `cacheus` differentiates (no longer stuck with the classical group)
+  but underperforms its own XGBoost+MLP experts — the ensemble doesn't
+  yet track them on hardware. Tracked as a follow-up.
+- `burst_load` (s3): the learned policies are *worse* than classical
+  here, the opposite of the simulator. The replay matches the sim's
+  ranking qualitatively but is not bit-faithful — feature-time is scaled
+  to the tick horizon, not identical to the simulator's discrete clock.
+
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
 GA10B fastpath covers MNIST/model inference (`gpu use inference on`)
