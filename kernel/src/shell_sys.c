@@ -2022,90 +2022,122 @@ static void s3_steal_work_task(void *arg)
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
 }
 
-/* ---- bench eviction-e2e (#979): storage-backed eviction harness ---- */
+/* ---- bench eviction-e2e (#979): storage-backed eviction harness ----
+ *
+ * Replays the embedded simulator per-scenario access traces through the
+ * real weight/workspace pools + the active eviction policy, on the
+ * simulator's logical-tick time base, and prints a per-policy fault-rate
+ * matrix directly comparable to the simulator's results. With --read it
+ * also performs real VFS reads on each miss so reload latency is
+ * measured. Pools are sized to the simulator's cache (64 weight + 32
+ * workspace blocks => 128 / 64 MB) so the fault rates line up. */
 
 static const char *const EVICT_E2E_POLICIES[] = {
     "first_candidate", "lru", "lfu", "arc", "slm", "xgboost", "mlp", "cacheus"
 };
 
-static void bench_eviction_e2e_one(const char *policy, const char *path,
-                                   uint32_t pool_mb, uint32_t layers,
-                                   uint32_t hot, uint32_t iters,
-                                   uint32_t block_kb)
+static void bench_eviction_e2e_row(const char *policy, int nscen,
+                                   uint32_t weight_mb, uint32_t workspace_mb,
+                                   uint32_t block_kb, uint32_t do_read,
+                                   const char *path)
 {
     if (rust_eviction_policy_set((const uint8_t *)policy) != 0) {
         shell_printf("  %-15s (policy set failed)\r\n", policy);
         return;
     }
-    RustEvictionE2EResult r;
-    int rc = rust_eviction_e2e_run((const uint8_t *)path, pool_mb, layers,
-                                   hot, iters, block_kb, &r);
-    if (rc != 0) {
-        shell_printf("  %-15s run failed rc=%d\r\n", policy, rc);
-        return;
+    shell_printf("  %-15s", policy);
+    uint64_t lat_sum = 0, lat_n = 0;
+    for (int s = 0; s < nscen; s++) {
+        RustEvictionE2EResult r;
+        int rc = rust_eviction_e2e_trace((uint32_t)s, weight_mb, workspace_mb,
+                                         block_kb, do_read,
+                                         (const uint8_t *)path, &r);
+        if (rc != 0) {
+            shell_printf("   ERR");
+            continue;
+        }
+        uint64_t faultpct = r.accesses ? (r.faults * 100u) / r.accesses : 0u;
+        shell_printf("  %3lu%%", (unsigned long)faultpct);
+        if (do_read && r.faults) {
+            lat_sum += r.mean_ns;
+            lat_n += 1;
+        }
     }
-    uint64_t hitpct = r.accesses ? (r.hits * 100u) / r.accesses : 0u;
-    uint64_t mb = r.bytes_reloaded / (1024u * 1024u);
-    shell_printf("  %-15s %6lu %7lu %4lu%%  %8lu %8lu %8lu  %5luMB\r\n",
-                 policy,
-                 (unsigned long)r.hits, (unsigned long)r.faults,
-                 (unsigned long)hitpct,
-                 (unsigned long)r.p50_ns, (unsigned long)r.p99_ns,
-                 (unsigned long)r.mean_ns, (unsigned long)mb);
+    if (do_read && lat_n) {
+        shell_printf("   | reload mean ~%lu ns", (unsigned long)(lat_sum / lat_n));
+    }
+    shell_puts("\r\n");
 }
 
 static int bench_eviction_e2e_cli(int argc, char *argv[])
 {
     const char *path = "/mnt/files/evict_weights.bin";
     const char *policy = 0; /* NULL => all policies */
-    uint32_t pool_mb = 8, layers = 16, hot = 4, iters = 2000, block_kb = 256;
+    uint32_t weight_mb = 128, workspace_mb = 64, block_kb = 2, do_read = 0;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
             path = argv[++i];
         } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
             policy = argv[++i];
-        } else if (strcmp(argv[i], "--pool-mb") == 0 && i + 1 < argc) {
-            pool_mb = (uint32_t)atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--layers") == 0 && i + 1 < argc) {
-            layers = (uint32_t)atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--hot") == 0 && i + 1 < argc) {
-            hot = (uint32_t)atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            iters = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--weight-mb") == 0 && i + 1 < argc) {
+            weight_mb = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--workspace-mb") == 0 && i + 1 < argc) {
+            workspace_mb = (uint32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--block-kb") == 0 && i + 1 < argc) {
             block_kb = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--read") == 0) {
+            do_read = 1;
         } else if (strcmp(argv[i], "--all") == 0) {
             policy = 0;
         } else {
             shell_printf("Unknown eviction-e2e flag: %s\r\n", argv[i]);
-            shell_puts("Usage: bench eviction-e2e [--file <path>] "
-                       "[--policy <p>|--all] [--pool-mb N] [--layers N] "
-                       "[--hot N] [--iters N] [--block-kb N]\r\n");
+            shell_puts("Usage: bench eviction-e2e [--policy <p>|--all] "
+                       "[--weight-mb N] [--workspace-mb N] [--block-kb N] "
+                       "[--read --file <path>]\r\n");
             return 1;
         }
     }
 
-    shell_printf("Eviction E2E (storage-backed) — file=%s pool=%uMB "
-                 "layers=%u hot=%u iters=%u block=%uKB\r\n",
-                 path, (unsigned)pool_mb, (unsigned)layers, (unsigned)hot,
-                 (unsigned)iters, (unsigned)block_kb);
-    shell_puts("  policy            hits  faults  hit%    p50_ns   "
-               "p99_ns  mean_ns  reloaded\r\n");
+    int nscen = rust_eviction_e2e_scenario_count();
+    if (nscen <= 0) {
+        shell_puts("eviction-e2e: no embedded trace (ai_eviction off?)\r\n");
+        return 1;
+    }
+
+    shell_printf("Eviction E2E trace replay — weight=%uMB workspace=%uMB "
+                 "read=%s block=%uKB scenarios=%d\r\n",
+                 (unsigned)weight_mb, (unsigned)workspace_mb,
+                 do_read ? "on" : "off", (unsigned)block_kb, nscen);
+    shell_puts("  NOTE: resizes the model-memory pool — DESTROYS any loaded "
+               "model. Reboot before inference.\r\n");
+
+    /* Scenario legend (columns are indices s0..sN in the matrix). */
+    for (int s = 0; s < nscen; s++) {
+        uint8_t nm[20];
+        rust_eviction_e2e_scenario_name((uint32_t)s, nm, sizeof(nm));
+        shell_printf("  s%d=%s\r\n", s, (char *)nm);
+    }
+    shell_printf("  %-15s", "policy");
+    for (int s = 0; s < nscen; s++) {
+        shell_printf("    s%d", s);
+    }
+    shell_puts("    (cells = fault%, lower = better)\r\n");
+
     if (policy) {
-        bench_eviction_e2e_one(policy, path, pool_mb, layers, hot, iters,
-                               block_kb);
+        bench_eviction_e2e_row(policy, nscen, weight_mb, workspace_mb,
+                               block_kb, do_read, path);
     } else {
         for (size_t i = 0;
              i < sizeof(EVICT_E2E_POLICIES) / sizeof(EVICT_E2E_POLICIES[0]);
              i++) {
-            bench_eviction_e2e_one(EVICT_E2E_POLICIES[i], path, pool_mb,
-                                   layers, hot, iters, block_kb);
+            bench_eviction_e2e_row(EVICT_E2E_POLICIES[i], nscen, weight_mb,
+                                   workspace_mb, block_kb, do_read, path);
         }
     }
-    shell_puts("\r\nReload latency is measured (real VFS reads); fault rate "
-               "reflects real eviction. Quality is policy-dependent only when "
-               "the working set exceeds the pool.\r\n");
+    shell_puts("\r\nFault rate is real eviction over the embedded simulator "
+               "traces; compare ranking to slm-os-page-sim. Reload latency "
+               "(--read) is measured against real storage.\r\n");
     return 0;
 }
 

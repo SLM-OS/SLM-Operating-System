@@ -577,17 +577,27 @@ typedef struct {
 } RustEvictionE2EResult;
 
 /*
- * Run the storage-backed eviction harness: replay a stylized
- * transformer-derived trace through the real weight pool (real eviction
- * via the active policy) and real VFS reads from `path`. Sizes the pool
- * to `pool_mb` only when no model is loaded. Reads `block_kb` KiB per
- * fault (capped at 2 MB). Trace keeps `hot` layers hot and streams
- * `n_layers - hot` cold layers over `n_iters` accesses. Fills `out`,
- * returns 0; negative on bad args / reset failure / feature-off.
+ * Storage-backed eviction harness, trace-replay mode (#979).
+ *
+ * Replays the embedded simulator per-scenario access traces through the
+ * real pools + active eviction policy on the simulator's logical-tick
+ * time base, so per-policy fault rates are comparable to the simulator.
+ *
+ * scenario_count: number of embedded scenarios (-1 if feature off).
+ * scenario_name:  copy scenario `idx` name into `out` (cap bytes);
+ *                 returns name length or -1.
+ * trace:          replay scenario `scenario_idx`; sizes pools to
+ *                 `weight_mb`/`workspace_mb` (128/64 matches the sim's
+ *                 64+32-block cache); `block_kb` bytes read per fault
+ *                 when `do_read != 0`. Fills `out`, returns 0; negative
+ *                 on bad args / reset failure / bad index / feature-off.
  */
-extern int32_t rust_eviction_e2e_run(
-    const uint8_t *path, uint32_t pool_mb, uint32_t n_layers,
-    uint32_t hot, uint32_t n_iters, uint32_t block_kb,
+extern int32_t rust_eviction_e2e_scenario_count(void);
+extern int32_t rust_eviction_e2e_scenario_name(
+    uint32_t idx, uint8_t *out, size_t cap);
+extern int32_t rust_eviction_e2e_trace(
+    uint32_t scenario_idx, uint32_t weight_mb, uint32_t workspace_mb,
+    uint32_t block_kb, uint32_t do_read, const uint8_t *path,
     RustEvictionE2EResult *out);
 
 /*

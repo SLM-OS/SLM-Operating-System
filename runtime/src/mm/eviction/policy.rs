@@ -37,6 +37,10 @@ pub struct BlockMeta {
     pub gpu_mapped: bool,
     pub is_dirty: bool,
     pub model_priority: u8,
+    /// Observed access pattern (matches the sibling `AccessPattern`
+    /// IntEnum: 0=SEQUENTIAL, 1=RANDOM, 2=STRIDED, 3=BURST). Drives the
+    /// `predicted_reuse_dist` feature heuristic in `features.rs`.
+    pub access_pattern: u8,
 }
 
 /// Flat 27-feature vector consumed by the trained ML policies (M4).

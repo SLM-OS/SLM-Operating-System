@@ -22,7 +22,7 @@ pub use model_mem::{
     share, unshare, get_ptr, get_size,
     weight_pool_stats, workspace_pool_stats,
     model_mem_init,
-    touch, set_metadata, set_gpu_mapped, set_dirty,
+    touch, set_metadata, set_gpu_mapped, set_dirty, set_access_pattern,
 };
 
 #[cfg(feature = "ai_eviction")]

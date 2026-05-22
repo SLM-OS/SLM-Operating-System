@@ -1,26 +1,30 @@
-//! End-to-end storage-backed weight cache harness (#979).
+//! End-to-end storage-backed weight-cache harness (#979).
 //!
-//! This module closes the gap between the eviction *policy* machinery
-//! (`super::eviction`, `super::model_mem`) and a real storage reload
-//! path. The production inference engine holds weights resident and
-//! never faults; the eviction pools are otherwise exercised only by
-//! synthetic latency microbenchmarks. Here we drive the **real** pool
-//! (`alloc_weights` → real eviction via `evict_and_retry`/`select_victim`)
-//! plus **real** storage reads (`kernel_ffi::vfs_pread`) over a
-//! transformer-derived weight-access trace, so that:
+//! Closes the gap between the eviction *policy* machinery and a real
+//! storage reload path, on real hardware. The production inference
+//! engine holds weights resident and never faults; the `model_mem`
+//! pools are otherwise exercised only by synthetic latency
+//! microbenchmarks. Here we replay the **simulator's actual per-scenario
+//! access traces** (embedded via `include_bytes!`, exported by
+//! `slm-os-page-sim/scripts/export_eviction_trace.py`) through the real
+//! pools + the active eviction policy, so the per-policy fault rates can
+//! be compared directly against the simulator's results — at real
+//! reload latency.
 //!
-//! - a residency *miss* triggers a real `alloc_weights` (which evicts a
-//!   victim chosen by the active policy when the pool is full), followed
-//!   by a real read of that block's bytes from a file on SD/SSD;
-//! - a residency *hit* returns the resident block with no reload.
+//! Two fidelity requirements make the comparison meaningful:
 //!
-//! The result is a hardware-measurable per-policy fault rate **and**
-//! reload latency — replacing both the simulator's abstract fault count
-//! and the previously-assumed "ms-scale page fault" cost.
+//! 1. **Residency identity = `(model_id, layer_idx, pool_type)`** — the
+//!    exact tuple the simulator keys on (`core.py` `content_key`). The
+//!    trace records carry it, and on a miss `set_metadata` drives the
+//!    same `EvictedContentTracker` feedback the simulator's core does.
+//! 2. **Logical-tick time base** — feature-time is driven on the
+//!    simulator's tick base (`SIM_TICK_NS` per access) via
+//!    `set_clock_override` + `set_eviction_times`, so the recency
+//!    feature doesn't collapse the way it would under a tight real-ns
+//!    replay loop.
 //!
-//! Scope boundary (honest): this is *not* demand-paging during live LLM
-//! inference (that is #980). The access sequence is a stylized,
-//! transformer-shaped trace, not a live forward pass.
+//! Scope (honest): this replays *traces*, not a live LLM forward pass
+//! (that maximal version is #980).
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -28,17 +32,70 @@ use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::kernel_ffi;
+use super::eviction;
 use super::model_mem::{self, ModelHandle, BLOCK_SIZE};
 
-/// Max VFS path length the harness stores (null-terminated).
+/// Embedded simulator trace blob. Format documented in
+/// `export_eviction_trace.py`: magic "EVT1", version u32, seed u32,
+/// n_scenarios u32, then a directory of {name[16], n_accesses u32,
+/// record_offset u32}, then 8-byte records {model_id u8, pool u8,
+/// access_pattern u8, _pad u8, layer_idx i32 LE}.
+static EVICTION_TRACE: &[u8] = include_bytes!("eviction_trace.bin");
+
+const TRACE_MAGIC: &[u8; 4] = b"EVT1";
+const DIR_ENTRY_LEN: usize = 24; // name[16] + n_accesses u32 + offset u32
+const HEADER_LEN: usize = 16; // magic + version + seed + n_scenarios
+const RECORD_LEN: usize = 8;
 const PATH_MAX: usize = 128;
 
-/// Model priority handed to `set_metadata` for harness blocks. Fixed —
-/// the harness varies access patterns, not priorities.
+/// Model priority handed to `set_metadata` for harness blocks.
 const HARNESS_PRIORITY: u8 = 4;
 
 // -----------------------------------------------------------------------------
-// Lock (mirrors the SpinGuard pattern used in model_mem.rs)
+// Trace blob accessors (pure, on the embedded &[u8])
+// -----------------------------------------------------------------------------
+
+fn rd_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+fn rd_i32(b: &[u8], off: usize) -> i32 {
+    i32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+fn trace_valid() -> bool {
+    EVICTION_TRACE.len() >= HEADER_LEN && &EVICTION_TRACE[0..4] == TRACE_MAGIC
+}
+
+/// Number of scenarios in the embedded trace (0 if the blob is invalid).
+pub fn scenario_count() -> u32 {
+    if !trace_valid() {
+        return 0;
+    }
+    rd_u32(EVICTION_TRACE, 12)
+}
+
+/// Scenario name (null-trimmed) for `idx`, or empty slice if out of range.
+pub fn scenario_name(idx: u32) -> &'static [u8] {
+    if idx >= scenario_count() {
+        return &[];
+    }
+    let base = HEADER_LEN + (idx as usize) * DIR_ENTRY_LEN;
+    let name = &EVICTION_TRACE[base..base + 16];
+    let end = name.iter().position(|&c| c == 0).unwrap_or(16);
+    &name[..end]
+}
+
+/// `(n_accesses, record_offset)` for scenario `idx`.
+fn scenario_dir(idx: u32) -> Option<(u32, u32)> {
+    if idx >= scenario_count() {
+        return None;
+    }
+    let base = HEADER_LEN + (idx as usize) * DIR_ENTRY_LEN;
+    Some((rd_u32(EVICTION_TRACE, base + 16), rd_u32(EVICTION_TRACE, base + 20)))
+}
+
+// -----------------------------------------------------------------------------
+// Lock + state (mirrors the SpinGuard pattern used in model_mem.rs)
 // -----------------------------------------------------------------------------
 
 static LOCK: AtomicBool = AtomicBool::new(false);
@@ -61,23 +118,28 @@ impl Drop for SpinGuard {
     }
 }
 
-// -----------------------------------------------------------------------------
-// State
-// -----------------------------------------------------------------------------
+/// A resident block in the harness cache. The harness owns
+/// `access_count` + `load_ns` so feature-time is fully under its control
+/// (independent of the allocator's wall-clock stamps).
+#[derive(Clone, Copy)]
+struct Resident {
+    handle: ModelHandle,
+    access_count: u32,
+    load_ns: u64,
+}
 
-/// Residency index + counters for one harness run. The residency map
-/// keys on `(model_id, layer_idx)` — the harness only uses the weight
-/// pool, so `PoolType` is implicit.
 struct CacheState {
-    residency: BTreeMap<(u8, i16), ModelHandle>,
+    /// Residency index keyed on the simulator tuple
+    /// `(model_id, layer_idx, pool_type)`.
+    residency: BTreeMap<(u8, i16, u8), Resident>,
     path: [u8; PATH_MAX],
     block_len: usize,
+    do_read: bool,
+    tick: u64,
     accesses: u64,
     hits: u64,
     faults: u64,
     bytes_reloaded: u64,
-    /// Per-fault reload latency in ns (for p50/p99). Bounded by the
-    /// trace length, which the caller chooses.
     reload_ns: Vec<u64>,
 }
 
@@ -86,7 +148,7 @@ static mut STATE: Option<CacheState> = None;
 /// Borrow the lazily-initialized state. Caller MUST hold `LOCK`.
 ///
 /// # Safety
-/// `LOCK` must be held; no other reference to `STATE` may be live.
+/// `LOCK` held; no other reference to `STATE` live.
 unsafe fn state_mut() -> &'static mut CacheState {
     let slot = &mut *addr_of_mut!(STATE);
     if slot.is_none() {
@@ -94,6 +156,8 @@ unsafe fn state_mut() -> &'static mut CacheState {
             residency: BTreeMap::new(),
             path: [0u8; PATH_MAX],
             block_len: BLOCK_SIZE,
+            do_read: false,
+            tick: 0,
             accesses: 0,
             hits: 0,
             faults: 0,
@@ -108,7 +172,7 @@ unsafe fn state_mut() -> &'static mut CacheState {
 // Public API
 // -----------------------------------------------------------------------------
 
-/// Aggregated result of a harness run.
+/// Aggregate result of replaying one scenario under one policy.
 #[derive(Clone, Copy)]
 pub struct RunResult {
     pub accesses: u64,
@@ -120,18 +184,30 @@ pub struct RunResult {
     pub mean_ns: u64,
 }
 
-/// Reset the harness for a fresh run: size the pool (only if no model
-/// has been loaded — a second `model_mem_init` would leak the prior
-/// pools), free any blocks this harness still owns, and clear stats.
+/// (Re)size the pools to match the simulator's cache (weight 64 +
+/// workspace 32 blocks by default) and clear harness state for a fresh
+/// run. DESTRUCTIVE: reinit frees the backing pages, invalidating any
+/// loaded model — acceptable for this diagnostic bench. Only reinit
+/// when the current weight-pool size differs, so a sweep reinits once.
 ///
-/// `pool_mb` is honored only when the pool is not already initialized.
-/// `block_len` is the bytes read from storage per fault (0 → 2MB).
 /// Returns 0 on success, negative on failure.
-pub fn reset(path: &[u8], block_len: usize, pool_mb: u32) -> i32 {
-    if !model_mem::is_pool_initialized() {
-        // 2MB-align (round down to even MB); guarantee at least one block.
-        let wmb = core::cmp::max((pool_mb as usize) & !1usize, 2);
-        if model_mem::model_mem_init(wmb, 2).is_err() {
+pub fn reset(
+    weight_mb: u32,
+    workspace_mb: u32,
+    path: &[u8],
+    block_len: usize,
+    do_read: bool,
+) -> i32 {
+    let want_w = core::cmp::max((weight_mb as usize) & !1usize, 2);
+    let want_ws = core::cmp::max((workspace_mb as usize) & !1usize, 2);
+    let want_w_blocks = want_w / 2;
+    let cur_w_blocks = if model_mem::is_pool_initialized() {
+        model_mem::weight_pool_stats().total_blocks
+    } else {
+        0
+    };
+    if cur_w_blocks != want_w_blocks {
+        if model_mem::model_mem_reinit(want_w, want_ws).is_err() {
             return -1;
         }
     }
@@ -139,20 +215,18 @@ pub fn reset(path: &[u8], block_len: usize, pool_mb: u32) -> i32 {
     let _g = SpinGuard::new();
     // SAFETY: LOCK held.
     let st = unsafe { state_mut() };
-
-    // Free blocks we still own so a new run starts from an empty pool.
-    // Stale handles (block already evicted/reused) fail the generation
-    // check in `free` and no-op — only live handles are reclaimed.
-    for (_, h) in st.residency.iter() {
-        let _ = model_mem::free(*h);
+    // Free any blocks we still own (stale handles no-op on generation
+    // mismatch after a reinit).
+    for (_, res) in st.residency.iter() {
+        let _ = model_mem::free(res.handle);
     }
     st.residency.clear();
-
     st.path = [0u8; PATH_MAX];
     let n = core::cmp::min(path.len(), PATH_MAX - 1);
     st.path[..n].copy_from_slice(&path[..n]);
-
     st.block_len = if block_len == 0 { BLOCK_SIZE } else { block_len };
+    st.do_read = do_read;
+    st.tick = 0;
     st.accesses = 0;
     st.hits = 0;
     st.faults = 0;
@@ -161,47 +235,63 @@ pub fn reset(path: &[u8], block_len: usize, pool_mb: u32) -> i32 {
     0
 }
 
-/// Access weight block `(model_id, layer_idx)`. Returns `true` on a
-/// residency hit, `false` on a miss (which triggered a real eviction +
-/// storage reload). This is the heart of the harness: it exercises the
-/// real `alloc_weights` eviction path and a real `vfs_pread`.
-pub fn access(model_id: u8, layer_idx: i16) -> bool {
-    let _g = SpinGuard::new();
-    // SAFETY: LOCK held.
-    let st = unsafe { state_mut() };
-    st.accesses += 1;
-    let key = (model_id, layer_idx);
+/// One access on the simulator tuple `(model_id, layer_idx, pool)` with
+/// the observed `access_pattern`. Returns `true` on a residency hit,
+/// `false` on a miss (which ran a real eviction via the active policy +
+/// an optional real storage read). Feature-time is driven on the
+/// simulator's logical-tick base.
+fn access(st: &mut CacheState, model_id: u8, layer_idx: i16, pool: u8, ap: u8) -> bool {
+    st.tick += 1;
+    let now_ns = st.tick.wrapping_mul(eviction::SIM_TICK_NS);
+    // Drive feature-extraction `now` on the tick base — including the
+    // eviction that may fire inside the alloc below.
+    eviction::set_clock_override(now_ns);
 
-    // Hit path: cached handle must still validate (generation check in
-    // get_ptr). A stale handle means the block was evicted out from
-    // under us — drop it and fall through to the miss path.
-    if let Some(&h) = st.residency.get(&key) {
-        if model_mem::get_ptr(h).is_some() {
-            let _ = model_mem::touch(h);
+    let key = (model_id, layer_idx, pool);
+    st.accesses += 1;
+
+    if let Some(res) = st.residency.get(&key).copied() {
+        if model_mem::get_ptr(res.handle).is_some() {
+            let count = res.access_count.saturating_add(1);
+            let _ = model_mem::set_access_pattern(res.handle, ap);
+            let _ = model_mem::set_eviction_times(res.handle, res.load_ns, now_ns, count);
+            st.residency.insert(
+                key,
+                Resident { handle: res.handle, access_count: count, load_ns: res.load_ns },
+            );
             st.hits += 1;
             return true;
         }
         st.residency.remove(&key);
     }
 
-    // Miss path: real eviction (if the pool is full) + real storage read.
-    let t0 = kernel_ffi::get_time_ns();
-    let h = match model_mem::alloc_weights(st.block_len) {
-        Ok(h) => h,
-        Err(_) => return false, // pool full and every block pinned — give up
+    // Miss: real eviction (if the target pool is full) + real reload.
+    let t0 = kernel_ffi::get_time_ns(); // wall clock — for latency only
+    let alloc = if pool == 0 {
+        model_mem::alloc_weights(st.block_len)
+    } else {
+        model_mem::alloc_workspace(st.block_len)
     };
-    // Label the block so the policy sees real per-block features and the
-    // EvictedContentTracker can credit a re-admit (fault feedback).
+    let h = match alloc {
+        Ok(h) => h,
+        Err(_) => return false, // pool full + all pinned
+    };
     let _ = model_mem::set_metadata(h, model_id, layer_idx, HARNESS_PRIORITY);
-    if let Some(ptr) = model_mem::get_ptr(h) {
-        let off = (layer_idx.max(0) as u64).wrapping_mul(st.block_len as u64);
-        // SAFETY: ptr is valid for BLOCK_SIZE bytes (a fresh 2MB block);
-        // block_len <= BLOCK_SIZE by construction in reset().
-        let dst = unsafe { core::slice::from_raw_parts_mut(ptr, st.block_len) };
-        let _ = kernel_ffi::vfs_pread(&st.path, off, dst);
+    let _ = model_mem::set_access_pattern(h, ap);
+    let _ = model_mem::set_eviction_times(h, now_ns, now_ns, 1);
+    if st.do_read {
+        if let Some(ptr) = model_mem::get_ptr(h) {
+            // Cycle offsets through the file's first 16 block-slots so
+            // reads stay in-bounds for a modest staged file while still
+            // hitting storage (the bytes are irrelevant to fault rate).
+            let off = (st.tick % 16).wrapping_mul(st.block_len as u64);
+            // SAFETY: ptr valid for BLOCK_SIZE; block_len <= BLOCK_SIZE.
+            let dst = unsafe { core::slice::from_raw_parts_mut(ptr, st.block_len) };
+            let _ = kernel_ffi::vfs_pread(&st.path, off, dst);
+        }
     }
-    let _ = model_mem::touch(h);
-    st.residency.insert(key, h);
+    st.residency
+        .insert(key, Resident { handle: h, access_count: 1, load_ns: now_ns });
 
     let t1 = kernel_ffi::get_time_ns();
     st.faults += 1;
@@ -210,32 +300,45 @@ pub fn access(model_id: u8, layer_idx: i16) -> bool {
     false
 }
 
-/// Replay a stylized transformer-derived trace and return aggregate
-/// stats. The trace interleaves a small **hot** working set (layers
-/// `0..hot`, re-accessed every iteration) with a rolling **cold** scan
-/// (layers `hot..n_layers`, streamed once each). With the pool sized
-/// below `n_layers`, this rewards frequency-/reuse-aware policies (which
-/// keep the hot set resident) and penalizes LRU (whose cold scan evicts
-/// the hot blocks) — the same structure the sibling simulator exercises.
-pub fn run_trace(n_layers: u32, hot: u32, n_iters: u32) -> RunResult {
-    let n_layers = n_layers.max(1);
-    let hot = hot.min(n_layers);
-    let cold = n_layers - hot;
-    let mut cold_cursor: u32 = 0;
+/// Replay scenario `idx` from the embedded trace through the active
+/// policy + real pools, returning aggregate stats. Pools must already be
+/// sized via `reset`.
+pub fn run_scenario(idx: u32) -> Option<RunResult> {
+    let (n_acc, rec_off) = scenario_dir(idx)?;
+    let rec_off = rec_off as usize;
 
-    for i in 0..n_iters {
-        let layer: u32 = if cold > 0 && (i % 3 == 2) {
-            // Every third access advances the cold streaming scan.
-            let l = hot + (cold_cursor % cold);
-            cold_cursor += 1;
-            l
-        } else if hot > 0 {
-            i % hot
-        } else {
-            i % n_layers
-        };
-        access(0, layer as i16);
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: LOCK held.
+        let st = unsafe { state_mut() };
+        // Fresh counters/residency for this scenario (pools already sized).
+        for (_, res) in st.residency.iter() {
+            let _ = model_mem::free(res.handle);
+        }
+        st.residency.clear();
+        st.tick = 0;
+        st.accesses = 0;
+        st.hits = 0;
+        st.faults = 0;
+        st.bytes_reloaded = 0;
+        st.reload_ns.clear();
+
+        for a in 0..n_acc as usize {
+            let r = rec_off + a * RECORD_LEN;
+            if r + RECORD_LEN > EVICTION_TRACE.len() {
+                break;
+            }
+            let model_id = EVICTION_TRACE[r];
+            let pool = EVICTION_TRACE[r + 1];
+            let ap = EVICTION_TRACE[r + 2];
+            let layer_idx = rd_i32(EVICTION_TRACE, r + 4) as i16;
+            access(st, model_id, layer_idx, pool, ap);
+        }
     }
+
+    // Revert the clock override so production feature extraction uses
+    // wall-clock again.
+    eviction::clear_clock_override();
 
     let _g = SpinGuard::new();
     // SAFETY: LOCK held.
@@ -246,9 +349,7 @@ pub fn run_trace(n_layers: u32, hot: u32, n_iters: u32) -> RunResult {
         if v.is_empty() {
             0
         } else {
-            // Integer percentile index: (len-1) * q_num / q_den.
-            let idx = ((v.len() as u64 - 1) * q_num / q_den) as usize;
-            v[idx]
+            v[((v.len() as u64 - 1) * q_num / q_den) as usize]
         }
     };
     let mean = if v.is_empty() {
@@ -256,8 +357,7 @@ pub fn run_trace(n_layers: u32, hot: u32, n_iters: u32) -> RunResult {
     } else {
         v.iter().sum::<u64>() / (v.len() as u64)
     };
-
-    RunResult {
+    Some(RunResult {
         accesses: st.accesses,
         hits: st.hits,
         faults: st.faults,
@@ -265,5 +365,5 @@ pub fn run_trace(n_layers: u32, hot: u32, n_iters: u32) -> RunResult {
         p50_ns: pct(50, 100),
         p99_ns: pct(99, 100),
         mean_ns: mean,
-    }
+    })
 }

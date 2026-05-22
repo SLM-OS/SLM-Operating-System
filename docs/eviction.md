@@ -367,34 +367,54 @@ engine holds a model's weights resident (`engine.rs` reads
 `weight_base + offset`) and never faults, and the `model_mem` eviction
 pools are otherwise only touched by tests.
 
-`bench eviction-e2e` closes that gap **on real hardware**. It drives a
-transformer-shaped weight-access trace through the real weight pool —
-so a residency miss runs a real `alloc_weights` (which evicts a victim
-chosen by the **active policy** when the pool is full) followed by a
-real `vfs_pread` of that block's bytes from a file on storage — and
-reports per-policy fault rate plus **measured** reload latency:
+`bench eviction-e2e` closes that gap **on real hardware** by replaying
+the **simulator's own per-scenario access traces** through the real
+pools + the active eviction policy:
 
 ```
-bench eviction-e2e [--file <path>] [--policy <p>|--all]
-                   [--pool-mb N] [--layers N] [--hot N]
-                   [--iters N] [--block-kb N]
+bench eviction-e2e [--policy <p>|--all] [--weight-mb N]
+                   [--workspace-mb N] [--block-kb N]
+                   [--read --file <path>]
 ```
 
-The trace keeps a small `hot` working set resident and streams the
-remaining `layers - hot` cold blocks; with the pool sized below the
-working set, frequency-/reuse-aware policies keep the hot set resident
-while LRU's cold scan evicts it. Implementation: `slm_vfs_pread` FFI
-(wraps `vfs_read_path`), `runtime/src/mm/weight_cache.rs` (residency
-index + reload-on-miss + latency counters), and the
-`rust_eviction_e2e_run` FFI.
+The traces are exported from `slm-os-page-sim` by
+`scripts/export_eviction_trace.py` and embedded via `include_bytes!`
+(`runtime/src/mm/eviction_trace.bin`, 7 scenarios). Each access carries
+the simulator's `(model_id, layer_idx, pool_type)` identity and its
+`access_pattern`; a residency miss runs a real `alloc_weights` /
+`alloc_workspace` (evicting a victim chosen by the active policy when
+the pool is full), and with `--read` a real `vfs_pread` of the block's
+bytes from storage. Pools default to the simulator's cache size
+(64 weight + 32 workspace blocks ⇒ 128 / 64 MB) so the per-policy fault
+rates line up.
 
-**Scope (honest).** This is *not* demand-paging during a live LLM
-forward pass — the access sequence is a stylized trace, not real
-inference. That maximal version (rewriting the forward path to fault on
-non-resident weights) is tracked in #980. The harness replaces the
-simulator's abstract fault *count* and the previously-assumed
-"ms-scale fault" cost with hardware measurements; it does not by itself
-make eviction part of inference.
+Two fidelity points make the comparison meaningful (and were the fix
+for an earlier degenerate run where every policy produced identical
+fault counts):
+
+- **`access_pattern` is threaded through `BlockMeta`** so the
+  `predicted_reuse_dist` feature uses the simulator's real 4-branch
+  heuristic (SEQUENTIAL/BURST/STRIDED/RANDOM) instead of collapsing to
+  recency. Without it the dominant feature (76% of XGBoost gain) is
+  constant and the ML policies can't differentiate.
+- **Feature-time runs on the simulator's logical-tick base**
+  (`SIM_TICK_NS = AI_HORIZON_NS / 1000` per access, via
+  `set_clock_override` + `set_eviction_times`). A tight real-ns replay
+  loop would otherwise drive `time_since` to ~0 and flatten the recency
+  feature.
+
+Implementation: `slm_vfs_pread` FFI, `runtime/src/mm/weight_cache.rs`
+(trace parse + residency index + reload-on-miss + logical clock), and
+the `rust_eviction_e2e_{scenario_count,scenario_name,trace}` FFI.
+
+**Scope (honest).** This replays *traces*, not a live LLM forward pass
+(that maximal version — demand-paging weights during inference — is
+tracked in #980). The pool resize is **destructive** to any loaded
+model (`rust_model_mem_reinit` frees the backing pages); the bench is a
+diagnostic, reboot before inference. Fault *rate* is the quality metric
+(comparable to the simulator's normalized table); `--read` adds
+hardware-measured reload latency, replacing the previously-assumed
+"ms-scale fault" cost.
 
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
