@@ -438,9 +438,12 @@ hardware-measured reload latency, replacing the previously-assumed
 are authoritative — `eviction model clear xgboost` + `... cacheus_config`,
 see deployment gotcha below).** Per-policy fault% (lower is better).
 These are the **deterministic** fault rates (the harness reinitialises
-the pool + tracker and resets the policy per scenario — #981 fix below);
-captured in QEMU and verified **bit-identical on pi-5-2 (Cortex-A76)**
-for every platform-independent policy. Scenarios: s0 single_inference,
+the pool + tracker and resets the policy per scenario — #981 fix below).
+Verified **bit-identical on pi-5-2 (Cortex-A76)** for **all 8 policies**
+with both runtime blobs cleared (`eviction model clear xgboost` +
+`... cacheus_config`), and two back-to-back hardware runs were identical
+(the #981 instability — cacheus's adversarial cell swinging 6%→93% — is
+gone; it now reads a stable 2%). Scenarios: s0 single_inference,
 s1 multi_model, s2 hot_swap, s3 burst_load, s4 mixed_priority, s5
 gpu_contention, s6 adversarial, s7 multimodel_skew.
 
@@ -455,13 +458,12 @@ gpu_contention, s6 adversarial, s7 multimodel_skew.
 | **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 4 | 98 |
 | cacheus | 55 | 69 | 69 | 31 | 55 | 66 | 2 | 98 |
 
-With its experts un-shadowed (xgboost blob cleared, #983), `cacheus`
-tracks its XGBoost+MLP experts. On a card with the autoloaded
-`eviction-cacheus_config.blob` still active it instead tracks the
-classical family (≈76/82/75/54/86/72) — the same runtime-blob shadow
-class as #983; clear it with `eviction model clear cacheus_config`. That
-on-card classical-tracking row is QEMU-inferred, not yet re-measured on
-pi-5-2 with both blobs cleared.
+With its experts un-shadowed (both runtime blobs cleared), `cacheus`
+tracks its XGBoost+MLP experts — verified on pi-5-2. On a card with the
+autoloaded `eviction-cacheus_config.blob` still active it instead tracks
+the classical family (≈76/82/75/54/86/72) — the same runtime-blob shadow
+class as #983; clear it with `eviction model clear cacheus_config` to get
+the row above.
 
 **Reading the matrix — no single policy wins everywhere.** The earlier
 suite was sweep-only (uniform per-block frequency), where recency- and
@@ -496,10 +498,9 @@ policies are *supposed* to diverge, and each policy's character emerges:
 **Parity with the simulator.** Fault% is deterministic and
 platform-independent (it falls out of the trace + the policy's victim
 choices), so the pi-5-2 numbers are **bit-identical to the QEMU run**
-for every deterministic policy (first_candidate, lru, lfu, slm, xgboost,
-mlp), confirming the ported policies make the same decisions on real ARM
-hardware as in emulation. One policy still diverges from the Python
-simulator:
+for **all 8 policies** (with both runtime blobs cleared), confirming the
+ported policies make the same decisions on real ARM hardware as in
+emulation. One policy still diverges from the Python simulator:
 
 - **ARC** diverges sim-vs-hardware: the sim's ARC port degenerates to LRU
   on the loop and skew (100% / 75%), while the SLM-OS ARC port adapts
