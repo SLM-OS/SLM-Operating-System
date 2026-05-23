@@ -211,16 +211,20 @@ pub fn reset(
 ) -> i32 {
     let want_w = core::cmp::max((weight_mb as usize) & !1usize, 2);
     let want_ws = core::cmp::max((workspace_mb as usize) & !1usize, 2);
-    let want_w_blocks = want_w / 2;
-    let cur_w_blocks = if model_mem::is_pool_initialized() {
-        model_mem::weight_pool_stats().total_blocks
-    } else {
-        0
-    };
-    if cur_w_blocks != want_w_blocks {
-        if model_mem::model_mem_reinit(want_w, want_ws).is_err() {
-            return -1;
-        }
+    // Always reinit, not just on a size change. `model_mem_reinit` is what
+    // clears the global `EvictedContentTracker` (and rebuilds the pools
+    // from scratch), so each scenario starts from an identical state. The
+    // tracker holds evicted-content keys stamped with the logical-tick
+    // clock, which the harness resets to 0 at the start of every scenario;
+    // a stale entry from the previous scenario then carries a "future"
+    // timestamp that never expires and feeds nondeterministic feedback to
+    // stateful policies (ARC ghost lists, CACHEUS online weights). This is
+    // the root of the run-to-run instability in #981 (adversarial swung
+    // 6%->93% across back-to-back runs). The per-scenario policy reset in
+    // `run_scenario` handles within-row cross-scenario policy state; this
+    // handles the pool + tracker.
+    if model_mem::model_mem_reinit(want_w, want_ws).is_err() {
+        return -1;
     }
 
     let _g = SpinGuard::new();
@@ -317,6 +321,17 @@ fn access(st: &mut CacheState, model_id: u8, layer_idx: i16, pool: u8, ap: u8) -
 pub fn run_scenario(idx: u32) -> Option<RunResult> {
     let (n_acc, rec_off) = scenario_dir(idx)?;
     let rec_off = rec_off as usize;
+
+    // Reset each pool's active policy so stateful policies start fresh per
+    // scenario, matching the sibling sim's per-run `policy.reset()`
+    // (`slm-os-page-sim/scripts/benchmark.py`). Stateless policies
+    // (LRU/LFU/SLM/first_candidate) rank from the passed-in BlockMeta and
+    // are unaffected; CACHEUS (online weights) and ARC (ghost lists) carry
+    // learned state across scenarios otherwise, making fault counts depend
+    // on run history (#981). Done outside the harness LOCK — `reset` takes
+    // the registry lock, which `access()` also acquires while we hold LOCK.
+    let _ = eviction::with_active_policy_for_pool(eviction::PoolType::Weight, |p| p.reset());
+    let _ = eviction::with_active_policy_for_pool(eviction::PoolType::Workspace, |p| p.reset());
 
     {
         let _g = SpinGuard::new();

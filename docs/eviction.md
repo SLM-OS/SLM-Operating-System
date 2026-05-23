@@ -433,25 +433,35 @@ diagnostic, reboot before inference. Fault *rate* is the quality metric
 hardware-measured reload latency, replacing the previously-assumed
 "ms-scale fault" cost.
 
-**Hardware result (pi-5-2, Cortex-A76, `EVICTION_MODELS=ON`, 64+32-block
-cache, seed-42 traces, 2026-05-22; xgboost runtime blob cleared — see
-deployment gotcha below).** Per-policy fault% (lower is better).
-Scenarios: s0 single_inference, s1 multi_model, s2 hot_swap, s3
-burst_load, s4 mixed_priority, s5 gpu_contention, s6 adversarial, s7
-multimodel_skew.
+**Result (`EVICTION_MODELS=ON`, 64+32-block cache, seed-42 traces,
+2026-05-22; all eviction runtime blobs cleared so the compiled-in models
+are authoritative — `eviction model clear xgboost` + `... cacheus_config`,
+see deployment gotcha below).** Per-policy fault% (lower is better).
+These are the **deterministic** fault rates (the harness reinitialises
+the pool + tracker and resets the policy per scenario — #981 fix below);
+captured in QEMU and verified **bit-identical on pi-5-2 (Cortex-A76)**
+for every platform-independent policy. Scenarios: s0 single_inference,
+s1 multi_model, s2 hot_swap, s3 burst_load, s4 mixed_priority, s5
+gpu_contention, s6 adversarial, s7 multimodel_skew.
 
 | policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 | s7 |
 |--------|---:|---:|---:|---:|---:|---:|---:|---:|
 | first_candidate | 55 | 69 | 69 | 66 | 56 | 66 | 4 | 51 |
 | lru | 79 | 82 | 75 | 54 | 86 | 72 | 100 | 75 |
 | lfu | 79 | 82 | 75 | 54 | 86 | 72 | 100 | **50** |
-| arc | 79 | 81 | 75 | 46 | 77 | 72 | **5** | 59 |
+| arc | 79 | 81 | 75 | 46 | 76 | 72 | **5** | 59 |
 | slm | 79 | 82 | 75 | 54 | 86 | 72 | 100 | 75 |
 | **xgboost** | **55** | **69** | **69** | **31** | **55** | **66** | **2** | 96 |
 | **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 4 | 98 |
-| cacheus | 76 | 82 | 75 | 54 | 86 | 72 | 93\* | 50 |
+| cacheus | 55 | 69 | 69 | 31 | 55 | 66 | 2 | 98 |
 
-\* `cacheus` is unstable on hardware — see residuals below.
+With its experts un-shadowed (xgboost blob cleared, #983), `cacheus`
+tracks its XGBoost+MLP experts. On a card with the autoloaded
+`eviction-cacheus_config.blob` still active it instead tracks the
+classical family (≈76/82/75/54/86/72) — the same runtime-blob shadow
+class as #983; clear it with `eviction model clear cacheus_config`. That
+on-card classical-tracking row is QEMU-inferred, not yet re-measured on
+pi-5-2 with both blobs cleared.
 
 **Reading the matrix — no single policy wins everywhere.** The earlier
 suite was sweep-only (uniform per-block frequency), where recency- and
@@ -488,17 +498,23 @@ platform-independent (it falls out of the trace + the policy's victim
 choices), so the pi-5-2 numbers are **bit-identical to the QEMU run**
 for every deterministic policy (first_candidate, lru, lfu, slm, xgboost,
 mlp), confirming the ported policies make the same decisions on real ARM
-hardware as in emulation. Two policies are *not* deterministic-identical
-to the Python simulator:
+hardware as in emulation. One policy still diverges from the Python
+simulator:
 
 - **ARC** diverges sim-vs-hardware: the sim's ARC port degenerates to LRU
   on the loop and skew (100% / 75%), while the SLM-OS ARC port adapts
   (5% / 59%). So "matches the simulator ranking" holds for LRU/LFU/ML but
   **not** ARC.
-- **cacheus** is an online ensemble with carried state; see residuals.
 
-Because fault% is platform-independent, the QEMU and pi-5-2 matrices are
-the same numbers — a board only adds the reload-*latency* columns below.
+The previously-reported `cacheus` instability (an adversarial cell that
+swung 6%→93% across back-to-back runs) is **fixed** — the harness now
+reinitialises the pool + eviction tracker and resets the active policy at
+the start of every scenario, so stateful policies (CACHEUS online
+weights, ARC ghost lists) start each scenario from an identical state
+(see #981 + the determinism note below). Because fault% is now
+deterministic *and* platform-independent, the QEMU and pi-5-2 matrices
+are the same numbers — a board only adds the reload-*latency* columns
+below.
 
 Measured reload latency with `--read` against the SD card: **≈55 µs per
 2 KB block** (overhead-dominated floor; larger blocks add transfer).
@@ -508,23 +524,30 @@ amortizes and the MLP is marginal at small block sizes (see
 `docs/design/gpu-policy-models.md` for the GPU path).
 
 **Deployment gotcha + residuals:**
-- **The real compiled-in xgboost is shadowed by an autoloaded stub
-  runtime blob.** `eviction-xgboost.blob` (90 B) autoloads at boot and
-  `XGBoostPolicy::score_row` prefers a runtime blob over the compiled-in
-  predictor; the stub returns a constant → ties → degenerates to
-  `first_candidate`. Run `eviction model clear xgboost` (or remove the
-  autoload entry) to engage the real model — the numbers above are
-  post-clear. An earlier capture without `EVICTION_MODELS=ON` *and*
-  without clearing showed xgboost/mlp identical to `first_candidate`;
-  both bugs are now understood.
-- `cacheus` underperforms its own XGBoost+MLP experts on hardware **and
-  is non-deterministic**: on the sweep scenarios it tracks the classical
-  family (76/82/75/54/86/72) rather than its ML experts as it does in
-  QEMU (55/69/69/31/55/66), and across two back-to-back hardware runs the
-  adversarial cell swung 6% → 93%. The autoloaded
-  `eviction-cacheus_config.blob` plus online weight adaptation produces
-  run-dependent behavior — distinct from the (now-cleared) xgboost
-  stub-shadow bug. Tracked in #981; the matrix cell is marked `*`.
+- **The real compiled-in xgboost is shadowed by an autoloaded toy runtime
+  blob (#983).** `eviction-xgboost.blob` (90 B — a 1-tree/3-node
+  `parse_single` toy) autoloads at boot and `XGBoostPolicy::score_row`
+  *unconditionally* prefers a runtime blob over the compiled-in ensemble
+  (`generated::MODELS_AVAILABLE` is not consulted); the toy predicts a
+  near-constant → ties → degenerates to `first_candidate`. Run
+  `eviction model clear xgboost` to engage the real model — the numbers
+  above are post-clear. The same shadow class affects `cacheus`'s
+  XGBoost expert and its `eviction-cacheus_config.blob`; clear both for
+  the compiled-in result. Fix options (precedence gate vs. deployment +
+  warning) are tracked in #983.
+- **CACHEUS instability — FIXED (#981).** Earlier the adversarial cell
+  swung 6%→93% across back-to-back runs because the harness reset only
+  residency per scenario, leaving the global `EvictedContentTracker`
+  (and the pool free-list) carrying state across scenarios and
+  invocations while the logical clock reset to 0 — stale future-dated
+  tracker entries then fed nondeterministic feedback to stateful
+  policies. `weight_cache::reset` now reinitialises the pool + tracker
+  every scenario (`model_mem_reinit` clears both) and `run_scenario`
+  resets the active pool policies, matching the sibling sim's per-run
+  `policy.reset()`. Pinned by
+  `test_eviction_e2e_per_scenario_reset_is_deterministic`. The remaining
+  #981 item is the on-card config-blob shadow above (cacheus tracking
+  classical until `eviction model clear cacheus_config`), not instability.
 
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
