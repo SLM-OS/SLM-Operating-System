@@ -5717,6 +5717,18 @@ int cmd_nvgpu(int argc, char *argv[])
     if (strcmp(argv[1], "rebuild-gmmu") == 0) {
         return cmd_nvgpu_rebuild_gmmu();
     }
+    if (strcmp(argv[1], "runlist-dump") == 0) {
+        /* #844 PBDMA-binding: decode Linux's live runlist word-layout.
+         * Run after `nvgpu inherit` + `nvgpu channel`. */
+        const struct ga10b_channel_handoff *hd = ga10b_bringup_handoff();
+        if (hd == NULL || hd->magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+            shell_puts("runlist-dump: handoff not loaded — "
+                       "run `nvgpu channel` first\r\n");
+            return -1;
+        }
+        ga10b_gmmu_dump_runlist_full(hd);
+        return 0;
+    }
     if (strcmp(argv[1], "engine-clear") == 0) {
         return cmd_nvgpu_engine_clear();
     }

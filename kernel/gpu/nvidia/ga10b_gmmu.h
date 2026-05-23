@@ -474,6 +474,11 @@ int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h);
  * "PBDMA didn't see our submit" failure. */
 void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h);
 
+/* #844 PBDMA-binding: dump Linux's live runlist (raw entries) with
+ * cross-reference to the inherited channel's chid/inst/userd, to learn
+ * the exact GA10B entry word-layout. Read-only. */
+void ga10b_gmmu_dump_runlist_full(const struct ga10b_channel_handoff *h);
+
 /* Discover the inherited channel's inst block by walking DRAM and
  * cross-checking each candidate against a known (gpu_va, leaf_phys)
  * pair from the channel handoff. Used as a fallback when

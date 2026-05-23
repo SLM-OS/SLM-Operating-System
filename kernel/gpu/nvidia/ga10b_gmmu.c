@@ -1850,6 +1850,79 @@ void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h)
                 (unsigned)((info >> 15) & 1u), (unsigned)sched);
 }
 
+/* #844 PBDMA-binding: decode Linux's LIVE runlist to learn the exact
+ * GA10B entry word-layout from a known-good entry (the cached headers
+ * give field shifts but not word assignment). Maps Linux's runlist,
+ * dumps up to 24 entries raw (4 words each), and cross-references each
+ * word against the inherited channel's expected encoded values
+ * (chid, inst_phys>>12, userd_phys>>8) so the operator can see which
+ * word holds which field. Read-only. */
+void ga10b_gmmu_dump_runlist_full(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return;
+    uint64_t rl_pri = discover_gr_runlist_pri_base();
+    if (rl_pri == 0u) { uart_puts("[rl-decode] no runlist topology\n"); return; }
+
+    uint32_t hw_chid = h->work_submit_token;
+    uint64_t inst_p = h->inst_block_phys;
+    uint64_t userd_p = h->userd_phys;
+    uart_printf("[rl-decode] OUR channel: chid=%u(0x%x) inst_phys=0x%lx "
+                "userd_phys=0x%lx  expect inst>>12=0x%lx userd>>8=0x%lx\n",
+                (unsigned)hw_chid, (unsigned)hw_chid,
+                (unsigned long)inst_p, (unsigned long)userd_p,
+                (unsigned long)(inst_p >> 12), (unsigned long)(userd_p >> 8));
+
+    uint32_t rl_lo = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT_BASE_LO);
+    uint32_t rl_hi = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT_BASE_HI);
+    uint32_t submit = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT);
+    uint64_t rl_phys = ((uint64_t)(rl_lo & 0xfffffc00u)) |
+                       ((uint64_t)(rl_hi & 0xffu) << 32);
+    uint32_t n_entries = submit & 0xffffu;   /* length field = entry count */
+    if (n_entries == 0u || n_entries > 24u) n_entries = 24u;
+    uart_printf("[rl-decode] runlist phys=0x%lx submit=0x%08x "
+                "(n_entries=%u)\n",
+                (unsigned long)rl_phys, (unsigned)submit, (unsigned)n_entries);
+
+    const uint64_t BLOCK_2M = 0x200000ull;
+    uint64_t rl_block = rl_phys & ~(BLOCK_2M - 1ull);
+    /* Linux allocates the runlist in upper DRAM that SLM-OS's PMM
+     * region list (what phys_in_dram checks) doesn't cover, so use the
+     * full Jetson DRAM window [0x8000_0000, 0x2_8000_0000) here. */
+    if (rl_block < 0x80000000ull ||
+        (rl_block + BLOCK_2M) > 0x280000000ull) {
+        uart_printf("[rl-decode] runlist phys=0x%lx outside DRAM window "
+                    "— skip\n", (unsigned long)rl_phys);
+        return;
+    }
+    if (vmm_ensure_kernel_l2_table(rl_block) != 0 ||
+        vmm_map_region(rl_block, rl_block, BLOCK_2M,
+                       VMM_FLAG_READ | VMM_FLAG_WRITE) != 0) {
+        uart_printf("[rl-decode] map failed — skip\n");
+        return;
+    }
+
+    volatile uint32_t *rl = (volatile uint32_t *)(uintptr_t)rl_phys;
+    uint32_t exp_inst_lo = (uint32_t)((inst_p >> 12) & 0xfffffu);
+    for (uint32_t e = 0; e < n_entries; e++) {
+        uint32_t w0 = rl[e*4+0], w1 = rl[e*4+1],
+                 w2 = rl[e*4+2], w3 = rl[e*4+3];
+        /* flag the entry that references OUR channel: chid in low 12
+         * bits of some word, or inst_ptr_lo in bits[31:12]. */
+        const char *mark = "";
+        if ((w0 & 0xfffu) == hw_chid || (w1 & 0xfffu) == hw_chid ||
+            (w2 & 0xfffu) == hw_chid)
+            mark = " <- chid match";
+        if (((w0 >> 12) & 0xfffffu) == exp_inst_lo ||
+            ((w1 >> 12) & 0xfffffu) == exp_inst_lo ||
+            ((w2 >> 12) & 0xfffffu) == exp_inst_lo)
+            mark = " <- inst_ptr match";
+        uart_printf("[rl-decode] e%-2u 0x%08x 0x%08x 0x%08x 0x%08x%s\n",
+                    (unsigned)e, (unsigned)w0, (unsigned)w1,
+                    (unsigned)w2, (unsigned)w3, mark);
+        timer_busy_wait_us(3000u);   /* avoid UARTC FIFO drop on the burst */
+    }
+}
+
 static void install_fresh_runlist_and_chram(
                                 const struct ga10b_channel_handoff *h)
 {
