@@ -416,11 +416,11 @@ diagnostic, reboot before inference. Fault *rate* is the quality metric
 hardware-measured reload latency, replacing the previously-assumed
 "ms-scale fault" cost.
 
-**Hardware result (pi-5-2, Cortex-A76, 64+32-block cache, seed-42
-traces, 2026-05-22).** Per-policy fault rate (% of accesses that
-miss; lower is better). Scenarios: s0 single_inference, s1 multi_model,
-s2 hot_swap, s3 burst_load, s4 mixed_priority, s5 gpu_contention,
-s6 adversarial.
+**Hardware result (pi-5-2, Cortex-A76, `AI_SCHED=ON EVICTION_MODELS=ON`,
+64+32-block cache, seed-42 traces, 2026-05-22).** Per-policy fault rate
+(% of accesses that miss; lower is better). Scenarios: s0
+single_inference, s1 multi_model, s2 hot_swap, s3 burst_load, s4
+mixed_priority, s5 gpu_contention, s6 adversarial.
 
 | policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 |
 |--------|---:|---:|---:|---:|---:|---:|---:|
@@ -429,30 +429,26 @@ s6 adversarial.
 | lfu | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
 | arc | 79 | 81 | 75 | 46 | 77 | 72 | 0 |
 | slm | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
-| **xgboost** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
-| **mlp** | **55** | **69** | **69** | 66 | **56** | **66** | 0 |
-| cacheus | 79 | 76 | 75 | 44 | 81 | 72 | 0 |
+| **xgboost** | **55** | **69** | **69** | **31** | **55** | **66** | 0 |
+| **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 0 |
+| cacheus | 76 | 82 | 75 | 54 | 86 | 72 | 0 |
 
-The hardware fault rates **match the simulator's seed-42 run within
-~1–2 percentage points on 5 of 7 scenarios** — not just the same
-ranking, near-exact parity. Comparing hardware % to the simulator's
-fault count / accesses (sim seed 42):
+With real models, the learned policies match the simulator's seed-42 run
+within ~1–2 points on **all six** eviction-bearing scenarios — near-exact
+parity, validating that the in-tree (parity-tested) ported policies make
+the same decisions on real ARM hardware as the Python simulator:
 
 | scenario | LRU hw/sim | xgboost hw/sim | mlp hw/sim |
 |----------|-----------:|---------------:|-----------:|
 | single_inference | 79 / 79 | 55 / 55 | 55 / 56 |
 | multi_model | 82 / 82 | 69 / 70 | 69 / 70 |
 | hot_swap | 75 / 76 | 69 / 69 | 69 / 69 |
-| mixed_priority | 86 / 86 | 56 / 56 | 56 / 56 |
+| burst_load | 54 / 54 | 31 / 32 | 32 / 32 |
+| mixed_priority | 86 / 86 | 55 / 56 | 56 / 56 |
 | gpu_contention | 72 / 73 | 66 / 67 | 66 / 67 |
 
-The central simulator finding reproduces on real hardware: the learned
-policies (xgboost/mlp) beat the classical LRU family on those 5
-scenarios — e.g. mixed_priority 56% vs 86% — which is the
-differentiation the pre-fix run lacked (every policy then produced
-identical counts). This validates that the in-tree (parity-tested)
-ported policies make the same eviction decisions on real ARM hardware
-as the Python simulator.
+The learned policies beat the classical LRU family substantially
+(e.g. mixed_priority 56% vs 86%).
 
 Measured reload latency with `--read` against the SD card: **≈55 µs per
 2 KB block** (overhead-dominated floor; larger blocks add transfer).
@@ -461,17 +457,18 @@ For context, the learned eviction *inference* costs ~15 µs (XGBoost) to
 amortizes and the MLP is marginal at small block sizes (see
 `docs/design/gpu-policy-models.md` for the GPU path).
 
-**Residual fidelity caveats (not exact-parity with the simulator):**
-- `xgboost` and `mlp` produce identical fault rates here — they agree on
-  every eviction on these traces (both dominated by the same
-  `predicted_reuse_dist` signal). Plausible, but worth noting.
-- `cacheus` differentiates (no longer stuck with the classical group)
-  but underperforms its own XGBoost+MLP experts — the ensemble doesn't
-  yet track them on hardware. Tracked as a follow-up.
-- `burst_load` (s3): the learned policies are *worse* than classical
-  here, the opposite of the simulator. The replay matches the sim's
-  ranking qualitatively but is not bit-faithful — feature-time is scaled
-  to the tick horizon, not identical to the simulator's discrete clock.
+**Deployment gotcha + residuals:**
+- **The real compiled-in xgboost is shadowed by an autoloaded stub
+  runtime blob.** `eviction-xgboost.blob` (90 B) autoloads at boot and
+  `XGBoostPolicy::score_row` prefers a runtime blob over the compiled-in
+  predictor; the stub returns a constant → ties → degenerates to
+  `first_candidate`. Run `eviction model clear xgboost` (or remove the
+  autoload entry) to engage the real model — the numbers above are
+  post-clear. An earlier capture without `EVICTION_MODELS=ON` *and*
+  without clearing showed xgboost/mlp identical to `first_candidate`;
+  both bugs are now understood.
+- `cacheus` (76/82/75/54/86/72) still underperforms its own XGBoost+MLP
+  experts — the ensemble doesn't track them on hardware. Tracked in #981.
 
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
