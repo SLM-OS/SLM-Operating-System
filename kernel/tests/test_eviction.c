@@ -1616,6 +1616,42 @@ static void test_eviction_e2e_harness_accounts_faults(void)
     (void)rust_model_mem_reinit(256u, 128u);
 }
 
+/* #981: a stateful policy must produce identical results when the same
+ * scenario is replayed twice. `run_scenario` resets the active pool
+ * policies per scenario (matching the sibling sim's per-run
+ * `policy.reset()`); without that, ARC's ghost lists (and CACHEUS's
+ * online weights) carry across runs and the second replay diverges —
+ * the instability where the adversarial cell swung 6%->93% on hardware.
+ * ARC is used because it is stateful AND available in models-off builds.
+ * Restores the boot pool sizes at the end (reinit is destructive). */
+static void test_eviction_e2e_per_scenario_reset_is_deterministic(void)
+{
+    int nscen = rust_eviction_e2e_scenario_count();
+    if (nscen <= 0) {
+        TEST_IGNORE_MESSAGE("e2e harness unavailable (ai_eviction off)");
+        return;
+    }
+    TEST_ASSERT_EQUAL_INT32(0, rust_eviction_policy_set((const uint8_t *)"arc"));
+
+    /* Set the policy once, then replay each scenario twice. With the
+     * per-scenario reset, run-2 must match run-1 for every scenario. */
+    for (uint32_t s = 0; s < (uint32_t)nscen; s++) {
+        RustEvictionE2EResult a, b;
+        int rc1 = rust_eviction_e2e_trace(s, 16u, 8u, 2u, 0u,
+                                          (const uint8_t *)"", &a);
+        int rc2 = rust_eviction_e2e_trace(s, 16u, 8u, 2u, 0u,
+                                          (const uint8_t *)"", &b);
+        TEST_ASSERT_EQUAL_INT32(0, rc1);
+        TEST_ASSERT_EQUAL_INT32(0, rc2);
+        TEST_ASSERT_EQUAL_UINT64(a.accesses, b.accesses);
+        TEST_ASSERT_EQUAL_UINT64(a.faults, b.faults);
+        TEST_ASSERT_EQUAL_UINT64(a.hits, b.hits);
+    }
+
+    (void)rust_eviction_policy_set((const uint8_t *)"lru");
+    (void)rust_model_mem_reinit(256u, 128u);
+}
+
 /* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
@@ -1675,6 +1711,10 @@ int test_suite_eviction(void)
 
     /* #979: end-to-end storage-backed eviction harness contract. */
     RUN_TEST(test_eviction_e2e_harness_accounts_faults);
+
+    /* #981: per-scenario policy reset → stateful policies are
+     * deterministic across repeated replays. */
+    RUN_TEST(test_eviction_e2e_per_scenario_reset_is_deterministic);
 
     /* M-SMP: multi-CPU concurrent alloc/eviction stress test (#116). */
     RUN_TEST(test_eviction_smp_alloc_under_concurrent_swap);
