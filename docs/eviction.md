@@ -379,7 +379,7 @@ bench eviction-e2e [--policy <p>|--all] [--weight-mb N]
 
 The traces are exported from `slm-os-page-sim` by
 `scripts/export_eviction_trace.py` and embedded via `include_bytes!`
-(`runtime/src/mm/eviction_trace.bin`, 7 scenarios). Each access carries
+(`runtime/src/mm/eviction_trace.bin`, 8 scenarios). Each access carries
 the simulator's `(model_id, layer_idx, pool_type)` identity and its
 `access_pattern`; a residency miss runs a real `alloc_weights` /
 `alloc_workspace` (evicting a victim chosen by the active policy when
@@ -388,9 +388,26 @@ bytes from storage. Pools default to the simulator's cache size
 (64 weight + 32 workspace blocks ⇒ 128 / 64 MB) so the per-policy fault
 rates line up.
 
-Two fidelity points make the comparison meaningful (and were the fix
-for an earlier degenerate run where every policy produced identical
-fault counts):
+**What "fault%" means here.** A *fault* is a **residency miss in the
+fixed-capacity weight/workspace pool** — the requested `(model_id,
+layer_idx, pool)` block was not currently held in the pool, so the
+active policy evicts a victim and the block is brought back in.
+`fault% = faults / accesses`; lower is better. This is **cache-residency
+accounting, not MMU/demand paging** — the block's bytes are always in
+RAM; "resident" means "currently kept in the managed pool." The miss
+path marks the block resident (allocates a slot and inserts it into the
+residency index) **regardless of `--read`**; `--read` only governs
+whether real bytes are physically `vfs_pread`'d into that slot, which
+feeds the *latency* measurement and has zero effect on fault accounting.
+A re-access is therefore a hit until the policy evicts the block again.
+A 100% fault rate means every access missed — e.g. the `adversarial`
+loop of 65 distinct blocks cycled through a 64-slot pool, where LRU
+evicts exactly the block needed next on every step (blocks are loaded
+constantly, but each is kicked out one access too early).
+
+Two fidelity points let the **ML** policies differentiate at all (a
+separate fix from the workload diversity that lets the **classical**
+policies differentiate — see "Reading the matrix" below):
 
 - **`access_pattern` is threaded through `BlockMeta`** so the
   `predicted_reuse_dist` feature uses the simulator's real 4-branch
@@ -416,39 +433,72 @@ diagnostic, reboot before inference. Fault *rate* is the quality metric
 hardware-measured reload latency, replacing the previously-assumed
 "ms-scale fault" cost.
 
-**Hardware result (pi-5-2, Cortex-A76, `AI_SCHED=ON EVICTION_MODELS=ON`,
-64+32-block cache, seed-42 traces, 2026-05-22).** Per-policy fault rate
-(% of accesses that miss; lower is better). Scenarios: s0
-single_inference, s1 multi_model, s2 hot_swap, s3 burst_load, s4
-mixed_priority, s5 gpu_contention, s6 adversarial.
+**Hardware result (pi-5-2, Cortex-A76, `EVICTION_MODELS=ON`, 64+32-block
+cache, seed-42 traces, 2026-05-22; xgboost runtime blob cleared — see
+deployment gotcha below).** Per-policy fault% (lower is better).
+Scenarios: s0 single_inference, s1 multi_model, s2 hot_swap, s3
+burst_load, s4 mixed_priority, s5 gpu_contention, s6 adversarial, s7
+multimodel_skew.
 
-| policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 |
-|--------|---:|---:|---:|---:|---:|---:|---:|
-| first_candidate | 55 | 69 | 69 | 66 | 56 | 66 | 0 |
-| lru | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
-| lfu | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
-| arc | 79 | 81 | 75 | 46 | 77 | 72 | 0 |
-| slm | 79 | 82 | 75 | 54 | 86 | 72 | 0 |
-| **xgboost** | **55** | **69** | **69** | **31** | **55** | **66** | 0 |
-| **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 0 |
-| cacheus | 76 | 82 | 75 | 54 | 86 | 72 | 0 |
+| policy | s0 | s1 | s2 | s3 | s4 | s5 | s6 | s7 |
+|--------|---:|---:|---:|---:|---:|---:|---:|---:|
+| first_candidate | 55 | 69 | 69 | 66 | 56 | 66 | 4 | 51 |
+| lru | 79 | 82 | 75 | 54 | 86 | 72 | 100 | 75 |
+| lfu | 79 | 82 | 75 | 54 | 86 | 72 | 100 | **50** |
+| arc | 79 | 81 | 75 | 46 | 77 | 72 | **5** | 59 |
+| slm | 79 | 82 | 75 | 54 | 86 | 72 | 100 | 75 |
+| **xgboost** | **55** | **69** | **69** | **31** | **55** | **66** | **2** | 96 |
+| **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 4 | 98 |
+| cacheus | 76 | 82 | 75 | 54 | 86 | 72 | 93\* | 50 |
 
-With real models, the learned policies match the simulator's seed-42 run
-within ~1–2 points on **all six** eviction-bearing scenarios — near-exact
-parity, validating that the in-tree (parity-tested) ported policies make
-the same decisions on real ARM hardware as the Python simulator:
+\* `cacheus` is unstable on hardware — see residuals below.
 
-| scenario | LRU hw/sim | xgboost hw/sim | mlp hw/sim |
-|----------|-----------:|---------------:|-----------:|
-| single_inference | 79 / 79 | 55 / 55 | 55 / 56 |
-| multi_model | 82 / 82 | 69 / 70 | 69 / 70 |
-| hot_swap | 75 / 76 | 69 / 69 | 69 / 69 |
-| burst_load | 54 / 54 | 31 / 32 | 32 / 32 |
-| mixed_priority | 86 / 86 | 55 / 56 | 56 / 56 |
-| gpu_contention | 72 / 73 | 66 / 67 | 66 / 67 |
+**Reading the matrix — no single policy wins everywhere.** The earlier
+suite was sweep-only (uniform per-block frequency), where recency- and
+frequency-based policies provably coincide, so every classical policy
+produced *identical* fault counts on every scenario — a table that reads
+as "broken" regardless of correctness. The fixed `adversarial` (cyclic
+scan now larger than the pool) and the new `multimodel_skew`
+(frequency-skewed hot/cold workload) restore the cases where the
+policies are *supposed* to diverge, and each policy's character emerges:
 
-The learned policies beat the classical LRU family substantially
-(e.g. mixed_priority 56% vs 86%).
+- **LRU / SLM-Heuristic** — pure recency; tie at the baseline and fail
+  hardest where recency is the wrong signal (100% on the adversarial
+  loop, 75% on skew). (SLM tracks LRU exactly here because the harness
+  feeds it no priority/active-inference signals — a harness limitation,
+  not a policy verdict.)
+- **LFU** — ties LRU on the uniform sweeps (no frequency signal to
+  exploit) but wins decisively on frequency skew (**50% vs 75%**), its
+  home-field workload.
+- **ARC** — the standout classical adapter: scan-resistance crushes the
+  adversarial loop (**5% vs 100%**) and also helps on burst_load (46 vs
+  54), mixed_priority (77 vs 86), and skew (59 vs 75).
+- **ML (xgboost / mlp)** — win the in-distribution sweeps (55–69% vs
+  79–82%) and the loop (2–4%), but **underperform every classical policy
+  on frequency skew (96–98%)**. This is not a bug: the models were
+  trained on the original sweep-dominated scenarios and never saw
+  frequency skew, so classical LFU's frequency bias beats the learned
+  policy out-of-distribution. It is the eviction analogue of a sorting
+  algorithm that loses on a pre-sorted array — the simple policy's bias
+  happens to match the workload. Retraining with `multimodel_skew` in
+  the dataset is a tracked follow-up opportunity, not a correction.
+
+**Parity with the simulator.** Fault% is deterministic and
+platform-independent (it falls out of the trace + the policy's victim
+choices), so the pi-5-2 numbers are **bit-identical to the QEMU run**
+for every deterministic policy (first_candidate, lru, lfu, slm, xgboost,
+mlp), confirming the ported policies make the same decisions on real ARM
+hardware as in emulation. Two policies are *not* deterministic-identical
+to the Python simulator:
+
+- **ARC** diverges sim-vs-hardware: the sim's ARC port degenerates to LRU
+  on the loop and skew (100% / 75%), while the SLM-OS ARC port adapts
+  (5% / 59%). So "matches the simulator ranking" holds for LRU/LFU/ML but
+  **not** ARC.
+- **cacheus** is an online ensemble with carried state; see residuals.
+
+Because fault% is platform-independent, the QEMU and pi-5-2 matrices are
+the same numbers — a board only adds the reload-*latency* columns below.
 
 Measured reload latency with `--read` against the SD card: **≈55 µs per
 2 KB block** (overhead-dominated floor; larger blocks add transfer).
@@ -467,8 +517,14 @@ amortizes and the MLP is marginal at small block sizes (see
   post-clear. An earlier capture without `EVICTION_MODELS=ON` *and*
   without clearing showed xgboost/mlp identical to `first_candidate`;
   both bugs are now understood.
-- `cacheus` (76/82/75/54/86/72) still underperforms its own XGBoost+MLP
-  experts — the ensemble doesn't track them on hardware. Tracked in #981.
+- `cacheus` underperforms its own XGBoost+MLP experts on hardware **and
+  is non-deterministic**: on the sweep scenarios it tracks the classical
+  family (76/82/75/54/86/72) rather than its ML experts as it does in
+  QEMU (55/69/69/31/55/66), and across two back-to-back hardware runs the
+  adversarial cell swung 6% → 93%. The autoloaded
+  `eviction-cacheus_config.blob` plus online weight adaptation produces
+  run-dependent behavior — distinct from the (now-cleared) xgboost
+  stub-shadow bug. Tracked in #981; the matrix cell is marked `*`.
 
 **GPU dispatch status (as of 2026-05-17) — CPU-only today on every
 platform.** The numbers above are all host-CPU paths. SLM-OS's Jetson
