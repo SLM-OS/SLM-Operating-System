@@ -163,13 +163,41 @@ pub fn stage_parsed(parsed: ParsedBlob) -> Result<BlobKind, StoreError> {
 }
 
 pub fn activate(kind: BlobKind) -> Result<(), StoreError> {
-    let _g = SpinGuard::new();
-    unsafe {
-        let store = &mut *store_mut(kind);
-        let staged = store.staged.take().ok_or(StoreError::NoStagedBlob)?;
-        store.rollback = store.active.take();
-        store.active = Some(staged);
-        store.state = SlotState::Active;
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: _g held — exclusive access to this kind's store slot.
+        unsafe {
+            let store = &mut *store_mut(kind);
+            let staged = store.staged.take().ok_or(StoreError::NoStagedBlob)?;
+            store.rollback = store.active.take();
+            store.active = Some(staged);
+            store.state = SlotState::Active;
+        }
+    }
+
+    // Visibility (#983): a runtime model blob takes precedence over the
+    // compiled-in predictor — `XGBoostPolicy`/`MlpPolicy::score_row` prefer
+    // the runtime cache, and CACHEUS loads its config the same way. When
+    // real models are compiled in (`MODELS_AVAILABLE`), a stale or
+    // placeholder autoload blob would otherwise silently shadow the real
+    // ensemble (the #983 incident: a 90-byte toy XGBoost blob degraded the
+    // policy to `first_candidate`). Announce the override so it is never
+    // silent; clear an unintended one with `eviction model clear <kind>`.
+    // Emitted OUTSIDE the store lock — `log_warn` is UART I/O and must not
+    // run under a spinlock. This is the only activation chokepoint (both
+    // boot autoload and the shell route through here).
+    if super::generated::MODELS_AVAILABLE {
+        match kind {
+            BlobKind::XGBoost => crate::log::log_warn(
+                b"eviction: runtime XGBoost blob active, overriding compiled-in model (clear: eviction model clear xgboost)\n\0",
+            ),
+            BlobKind::Mlp => crate::log::log_warn(
+                b"eviction: runtime MLP blob active, overriding compiled-in model (clear: eviction model clear mlp)\n\0",
+            ),
+            BlobKind::CacheusConfig => crate::log::log_warn(
+                b"eviction: runtime CACHEUS config active, overriding compiled-in ensemble (clear: eviction model clear cacheus_config)\n\0",
+            ),
+        }
     }
     Ok(())
 }

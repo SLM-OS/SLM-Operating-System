@@ -525,17 +525,24 @@ amortizes and the MLP is marginal at small block sizes (see
 `docs/design/gpu-policy-models.md` for the GPU path).
 
 **Deployment gotcha + residuals:**
-- **The real compiled-in xgboost is shadowed by an autoloaded toy runtime
-  blob (#983).** `eviction-xgboost.blob` (90 B — a 1-tree/3-node
-  `parse_single` toy) autoloads at boot and `XGBoostPolicy::score_row`
-  *unconditionally* prefers a runtime blob over the compiled-in ensemble
-  (`generated::MODELS_AVAILABLE` is not consulted); the toy predicts a
-  near-constant → ties → degenerates to `first_candidate`. Run
-  `eviction model clear xgboost` to engage the real model — the numbers
-  above are post-clear. The same shadow class affects `cacheus`'s
-  XGBoost expert and its `eviction-cacheus_config.blob`; clear both for
-  the compiled-in result. Fix options (precedence gate vs. deployment +
-  warning) are tracked in #983.
+- **A runtime model blob shadows the compiled-in predictor (#983).** A
+  runtime blob takes precedence over the compiled-in model
+  (`XGBoostPolicy`/`MlpPolicy::score_row` prefer the runtime cache;
+  CACHEUS loads its config the same way). A stale/placeholder autoload
+  blob — e.g. the 90-byte 1-tree/3-node `parse_single` toy
+  `eviction-xgboost.blob` — therefore silently degrades the policy toward
+  `first_candidate`. **Resolution (#983, option B — keep OTA, make it
+  loud):** `store::activate` now emits a `log_warn` whenever a runtime
+  XGBoost / MLP / CACHEUS blob is activated while real models are
+  compiled in (`MODELS_AVAILABLE`), at the single activation chokepoint
+  that both boot autoload and the shell route through. Runtime OTA model
+  replacement is intentionally preserved (no precedence change), so the
+  override is a logged event, not a silent one. **Deployment:** the toy
+  blobs are not part of the shipped image — they are leftover card state
+  (staged at runtime, persisted into `0:/slmstore/autoload/` +
+  `blob_autoload.conf`). Remove them from any card that has them; the
+  numbers above are with `eviction model clear xgboost` +
+  `... cacheus_config` so the compiled-in models are authoritative.
 - **CACHEUS instability — FIXED (#981).** Earlier the adversarial cell
   swung 6%→93% across back-to-back runs because the harness reset only
   residency per scenario, leaving the global `EvictedContentTracker`
