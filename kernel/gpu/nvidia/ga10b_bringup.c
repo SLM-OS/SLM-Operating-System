@@ -2456,12 +2456,25 @@ static void dump_gpc_tpc_sm(const char *tag, uint32_t gr_exception)
             uint32_t sm_warp   = bar0_r32(0x00504730u);
             uint32_t pc_lo     = bar0_r32(0x00504738u);
             uint32_t pc_hi     = bar0_r32(0x0050473cu);
+            /* warp_esr error code is the low 16 bits
+             * (gr_..._hww_warp_esr_error_v = (r>>0)&0xffff), NOT the low
+             * byte. 0x20 = error_mmu_nack (a GMMU NACK on a warp memory
+             * access — stale TLB), distinct from the <=0xf shader-bug
+             * codes (0x5 misaligned_pc, 0x9 illegal_instr, 0xe oor_addr).
+             * #844 fix is the pre-launch tlb_invalidate above. */
+            uint32_t warp_err = sm_warp & 0xffffu;
+            const char *errname =
+                (warp_err == 0x20u) ? "mmu_nack" :
+                (warp_err == 0x0u)  ? "none" :
+                (warp_err == 0x5u)  ? "misaligned_pc" :
+                (warp_err == 0x9u)  ? "illegal_instr_encoding" :
+                (warp_err == 0xeu)  ? "oor_addr" : "other";
             uart_printf("[%s]   sm0_global_esr=0x%08lx sm0_warp_esr=0x%08lx "
-                        "warp_pc=0x%08lx_%08lx (error_code=0x%02x)\n",
+                        "warp_pc=0x%08lx_%08lx (error=0x%04x %s)\n",
                         tag, (unsigned long)sm_global,
                         (unsigned long)sm_warp,
                         (unsigned long)pc_hi, (unsigned long)pc_lo,
-                        (unsigned)(sm_warp & 0xffu));
+                        (unsigned)warp_err, errname);
         }
     }
 }
@@ -2939,7 +2952,18 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      *      current_ctx (the save checksum-fails, mb6=0x21).
      *   2. force_ctx_reload (CHRAM 0x200) → the upcoming dispatch's
      *      ctxsw does a fresh LOAD of our channel instead of trusting
-     *      resident state. */
+     *      resident state.
+     *
+     * #844 NOTE: a pre-launch all-VA tlb_invalidate(our PDB) was tried
+     * here to fix the intermittent SM mmu_nack fault (warp_esr=0x20 —
+     * the compute "hang"). It DID cut mmu_nack but re-introduced Mode-A
+     * (on_pbdma=0 GP_GET-stuck, 0→5/30, pass 83%→60%): the all-VA
+     * invalidate nukes the host's GPFIFO/pushbuffer translations too, so
+     * PBDMA's fetch is disrupted. This is the THIRD dispatch-time global
+     * GPU op (after runlist-resubmit and STOP_CTXSW) to knock the
+     * inherited channel off PBDMA — the inherited channel is fragile to
+     * any dispatch-time perturbation. Reverted; the clean minimal-
+     * perturbation path is the best (~83%). */
     ga10b_fecs_set_current_ctx_invalid();
     ga10b_gmmu_force_ctx_reload(&g_handoff);
 
