@@ -217,6 +217,12 @@ int test_suite_sha256(void);
  * test-injection, chi-squared self-test. */
 int test_suite_rng(void);
 
+#if defined(NET_SSHD)
+/* SSH daemon (#199a / #893) — sshd_get_stats public API + per-conn
+ * RX ring round-trip / capacity / wrap / pool-cap behaviour. */
+int test_suite_sshd(void);
+#endif
+
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);
 

@@ -51,10 +51,18 @@ extern "C" {
  * `wolfssl/wolfcrypt/types.h:490-494`. */
 
 /* misc.c is compiled as its own translation unit (listed in the
- * CMake source set), so suppress wolfssl's default behaviour of
- * `#include <wolfcrypt/src/misc.c>` from inside other TUs (which
- * also wouldn't find the file under our `kernel/lib/wolfcrypt/`
- * layout anyway). */
+ * CMake source set), so we must keep wolfssl from also pulling it
+ * inline via `#include <wolfcrypt/src/misc.c>` from inside other TUs
+ * (which would multiply-define the symbols and wouldn't find the
+ * file under our `kernel/lib/wolfcrypt/` layout anyway). Two
+ * mechanisms apply; either alone would suffice — both are set for
+ * defence against an upstream refactor that gates only one of them:
+ *
+ *   - `WOLFSSL_MISC_INCLUDED` is the explicit "already included"
+ *     pragma the misc.c header checks at the top.
+ *   - `NO_INLINE` (defined further below) gates the
+ *     `#include misc.c` lines inside random.c and a few other TUs
+ *     under `#ifdef WOLFSSL_HAVE_MIN`-style inline blocks. */
 #define WOLFSSL_MISC_INCLUDED
 
 /* HASHDRBG seed source — wired to SLM-OS rng_get_bytes (which itself
@@ -66,9 +74,9 @@ extern "C" {
 
 /* ----- Inline asm / optimisations ----- */
 
-/* Skip `#include <wolfcrypt/src/misc.c>` from inside other TUs;
- * misc.c is compiled as its own translation unit (CMake source set).
- * The gate inside random.c (and a few other files) is `NO_INLINE`. */
+/* Second leg of the misc.c suppression — see WOLFSSL_MISC_INCLUDED
+ * above. `NO_INLINE` gates the inline-include of misc.c from inside
+ * random.c (and a few other files). */
 #define NO_INLINE
 
 #define WC_NO_HARDEN            /* defer constant-time hardening to #199e audit */
@@ -144,7 +152,6 @@ extern "C" {
 #define NO_MD4
 #define NO_MD5
 #define WOLFSSL_NO_SHA224
-#define NO_SHA256_CLIENT_HSH     /* not a real macro; harmless if absent */
 #define NO_SHA384
 /* NO_SHA512 omitted — Ed25519 (RFC 8032) requires SHA-512 internally. */
 #define WOLFSSL_NO_SHAKE128

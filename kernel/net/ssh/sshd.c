@@ -84,6 +84,11 @@ static uint16_t            g_listen_port;
 static WOLFSSH_CTX        *g_ctx;
 static struct sshd_conn    g_conns[SSHD_MAX_SESSIONS];
 
+/* All four counters mutate under g_mod_lock. Reads (via
+ * sshd_get_stats) are best-effort snapshots that don't lock; the
+ * documented contract is that the values are advisory diagnostics, not
+ * fenced observations. `volatile` keeps the compiler from CSE-ing the
+ * unlocked reads across statements. */
 static volatile uint32_t   g_accepted;
 static volatile uint32_t   g_kex_completed;
 static volatile uint32_t   g_kex_failed;
@@ -247,14 +252,43 @@ static err_t on_tcp_recv(void *arg, struct tcp_pcb *pcb,
         return ERR_OK;
     }
 
-    struct pbuf *q = p;
+    /* Atomically check the ring has room for the entire pbuf chain
+     * before taking ownership. Partial consumption is unsafe: lwIP
+     * advances its receive sequence whenever a pbuf reaches the recv
+     * callback (the wire bytes have been off-loaded), and `tcp_recved`
+     * only controls the sliding window. If we pbuf_free a pbuf
+     * containing N bytes after pushing only M < N of them, the
+     * unpushed (N - M) bytes are silently lost — TCP won't
+     * retransmit them because they were never marked unacked. The
+     * peer keeps sending under the (now-collapsed) window until it
+     * stalls, with our application missing a chunk of the byte
+     * stream.
+     *
+     * The correct lwIP pattern: return ERR_MEM without pbuf_free.
+     * lwIP retains the pbuf in its recv queue and re-delivers via
+     * this callback the next time the window opens (driven by our
+     * own `tcp_recved` calls as `wolf_io_recv` drains the ring). */
+    irq_flags_t flags = spin_lock_irqsave(&c->lock);
+    uint16_t free_now = ring_free_locked(c);
+    spin_unlock_irqrestore(&c->lock, flags);
+
+    size_t total = (size_t)p->tot_len;
+    if (total > (size_t)free_now) {
+        /* Don't pbuf_free — lwIP keeps it and retries. */
+        return ERR_MEM;
+    }
+
     size_t consumed = 0;
-    while (q != NULL) {
+    for (struct pbuf *q = p; q != NULL; q = q->next) {
         size_t pushed = ring_push(c, (const uint8_t *)q->payload,
                                   (size_t)q->len);
         consumed += pushed;
-        if (pushed < q->len) break;   /* ring full — peer will retry */
-        q = q->next;
+        /* By construction (we pre-checked tot_len <= free_now) every
+         * push within this chain succeeds in full. The strict-equal
+         * check is a defensive invariant; failure here would mean
+         * something else is mutating the ring concurrently outside
+         * the lock, which violates the documented model. */
+        if (pushed != q->len) break;
     }
     if (consumed > 0) {
         tcp_recved(pcb, (uint16_t)consumed);
@@ -291,7 +325,9 @@ static void sshd_session_task(void *arg)
     for (;;) {
         int ret = wolfSSH_accept(c->ssh);
         if (ret == WS_SUCCESS) {
+            irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
             g_kex_completed++;
+            spin_unlock_irqrestore(&g_mod_lock, flags);
             uart_printf("[SSHD] conn %u: KEX complete — no shell channel "
                         "(refused; #199c scope)\r\n",
                         (unsigned)c->session_id);
@@ -305,7 +341,9 @@ static void sshd_session_task(void *arg)
             bool closed = c->peer_closed && (ring_used_locked(c) == 0u);
             spin_unlock_irqrestore(&c->lock, flags);
             if (closed) {
+                irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
                 g_kex_failed++;
+                spin_unlock_irqrestore(&g_mod_lock, mflags);
                 uart_printf("[SSHD] conn %u: peer disconnected during KEX\r\n",
                             (unsigned)c->session_id);
                 break;
@@ -313,7 +351,9 @@ static void sshd_session_task(void *arg)
             continue;
         }
         /* Any other error is fatal. */
+        irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
         g_kex_failed++;
+        spin_unlock_irqrestore(&g_mod_lock, mflags);
         uart_printf("[SSHD] conn %u: wolfSSH_accept fatal err=%d (%s)\r\n",
                     (unsigned)c->session_id,
                     err, wolfSSH_get_error_name(c->ssh));
@@ -394,16 +434,7 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     /* Spawn the per-conn task to drive wolfSSH_accept. */
     char name[TASK_NAME_LEN];
-    /* Manual integer formatting — uart_snprintf is overkill here. */
-    name[0] = 's'; name[1] = 's'; name[2] = 'h'; name[3] = 'd'; name[4] = '-';
-    uint32_t id = c->session_id;
-    int      ni = 5;
-    char     digits[8];
-    int      di = 0;
-    if (id == 0u) digits[di++] = '0';
-    while (id > 0u && di < 8) { digits[di++] = (char)('0' + (id % 10u)); id /= 10u; }
-    while (di > 0 && ni < TASK_NAME_LEN - 1) name[ni++] = digits[--di];
-    name[ni] = '\0';
+    uart_snprintf(name, sizeof(name), "sshd-%u", (unsigned)c->session_id);
 
     struct task *t = task_create_with_priority(name, sshd_session_task,
                                                c, TASK_PRIORITY_IDLE);
@@ -513,4 +544,72 @@ void sshd_get_stats(struct sshd_stats *out)
     out->kex_completed        = g_kex_completed;
     out->kex_failed           = g_kex_failed;
     out->active               = g_active;
+}
+
+/* ---------------------------------------------------------------- */
+/* Test hooks                                                        */
+/* ---------------------------------------------------------------- */
+/*
+ * Declared in `sshd_test.h` (kernel/net/ssh/sshd_test.h) and consumed
+ * only by `kernel/tests/test_sshd.c`. Kept always-on rather than
+ * #ifdef-gated because the SSH module itself is already
+ * `NET_SSHD`-gated at the CMake level — these few hundred bytes of
+ * code only exist in builds that ship the daemon, and `--gc-sections`
+ * removes them from production kernels that don't link the test
+ * harness. The hooks rent a slot from `g_conns[]` (the same pool the
+ * real listener uses), so tests must `sshd_test_release_slot` before
+ * the real listener starts, or vice versa.
+ */
+
+void *sshd_test_take_slot(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+    struct sshd_conn *c = alloc_conn_locked();
+    if (c) {
+        c->in_use      = true;
+        c->pcb         = NULL;
+        c->ssh         = NULL;
+        c->rx_head     = 0;
+        c->rx_tail     = 0;
+        c->peer_closed = false;
+        c->session_id  = 0;
+        c->lock        = (spinlock_t)SPINLOCK_INIT;
+    }
+    spin_unlock_irqrestore(&g_mod_lock, flags);
+    return c;
+}
+
+void sshd_test_release_slot(void *handle)
+{
+    struct sshd_conn *c = (struct sshd_conn *)handle;
+    if (!c) return;
+    irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+    c->in_use = false;
+    spin_unlock_irqrestore(&g_mod_lock, flags);
+}
+
+size_t sshd_test_ring_push(void *handle, const void *src, size_t n)
+{
+    return ring_push((struct sshd_conn *)handle, (const uint8_t *)src, n);
+}
+
+size_t sshd_test_ring_pop(void *handle, void *dst, size_t n)
+{
+    return ring_pop((struct sshd_conn *)handle, (uint8_t *)dst, n, NULL);
+}
+
+uint16_t sshd_test_ring_free(void *handle)
+{
+    struct sshd_conn *c = (struct sshd_conn *)handle;
+    if (!c) return 0;
+    irq_flags_t flags = spin_lock_irqsave(&c->lock);
+    uint16_t f = ring_free_locked(c);
+    spin_unlock_irqrestore(&c->lock, flags);
+    return f;
+}
+
+size_t sshd_test_ring_capacity(void)
+{
+    /* One byte reserved to distinguish full from empty (see ring_free_locked). */
+    return SSHD_RX_RING_BYTES - 1u;
 }

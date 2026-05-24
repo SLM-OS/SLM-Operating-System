@@ -1014,6 +1014,11 @@ set(TEST_SOURCES
     # the per-arch TRNG probes are exercised indirectly via the
     # source-dispatch test; the jitter pool is covered everywhere.
     kernel/tests/test_rng.c
+    # SSH daemon tests (#199a / #893). Gated on the same NET_SSHD
+    # condition that compiles the daemon itself; the test_harness side
+    # adds an #if defined(NET_SSHD) around the suite call so non-SSH
+    # builds keep linking.
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<BOOL:${NET_SSHD}>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_sshd.c>
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
