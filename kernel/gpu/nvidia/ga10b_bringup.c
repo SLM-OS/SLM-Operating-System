@@ -225,6 +225,10 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_CPUCTL_ALIAS        0x00409130u
 #define GR_FECS_CTXSW_MAILBOX(i)    (0x00409800u + (i) * 4u)
 #define GR_FECS_CTXSW_MAILBOX_COUNT 18u
+/* FECS ctxsw arbiter ctx pointers (nvgpu gr_fecs_current_ctx_r /
+ * gr_fecs_new_ctx_r). */
+#define GR_FECS_CURRENT_CTX         0x00409b00u
+#define GR_FECS_NEW_CTX             0x00409b04u
 
 /* GR top-level status registers (nvgpu gr_intr_r / gr_exception_r). */
 #define GR_INTR_R                   0x00400100u
@@ -1964,7 +1968,7 @@ static void dump_fecs_state(const char *tag)
                 tag,
                 (unsigned long)bar0_r32(0x00409c18u),
                 (unsigned long)bar0_r32(0x00409818u),
-                (unsigned long)bar0_r32(0x00409b00u),
+                (unsigned long)bar0_r32(GR_FECS_CURRENT_CTX),
                 (unsigned long)bar0_r32(0x00409040u),
                 (unsigned long)bar0_r32(0x00409044u));
     /* Mailbox 6 carries error codes for ctxsw_intr0; the others
@@ -2261,11 +2265,11 @@ int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys)
     uint32_t new_ctx = inst_ptr_u32 | (3u << 28) | (1u << 31);
 
     /* Latch current value for comparison + diagnostics. */
-    uint32_t before = bar0_r32(0x00409b04u);
-    bar0_w32(0x00409b04u, new_ctx);
+    uint32_t before = bar0_r32(GR_FECS_NEW_CTX);
+    bar0_w32(GR_FECS_NEW_CTX, new_ctx);
     gsp_platform->mb();
-    uint32_t after = bar0_r32(0x00409b04u);
-    uint32_t current_ctx = bar0_r32(0x00409b00u);
+    uint32_t after = bar0_r32(GR_FECS_NEW_CTX);
+    uint32_t current_ctx = bar0_r32(GR_FECS_CURRENT_CTX);
 
     uart_printf("[fecs-newctx] new_ctx_r(0x409b04): 0x%08lx -> 0x%08lx "
                 "(want 0x%08x for inst=0x%lx)\n",
@@ -2288,16 +2292,16 @@ int ga10b_fecs_force_current_ctx(uint64_t inst_block_phys)
     uint32_t inst_ptr_u32 = (uint32_t)(inst_block_phys >> 12);
     uint32_t ctx_val = inst_ptr_u32 | (3u << 28) | (1u << 31);
 
-    uint32_t before_cur = bar0_r32(0x00409b00u);
-    uint32_t before_new = bar0_r32(0x00409b04u);
+    uint32_t before_cur = bar0_r32(GR_FECS_CURRENT_CTX);
+    uint32_t before_new = bar0_r32(GR_FECS_NEW_CTX);
     uint32_t status_1   = bar0_r32(0x00409400u);
 
-    bar0_w32(0x00409b04u, ctx_val);
-    bar0_w32(0x00409b00u, ctx_val);
+    bar0_w32(GR_FECS_NEW_CTX, ctx_val);
+    bar0_w32(GR_FECS_CURRENT_CTX, ctx_val);
     gsp_platform->mb();
 
-    uint32_t after_cur = bar0_r32(0x00409b00u);
-    uint32_t after_new = bar0_r32(0x00409b04u);
+    uint32_t after_cur = bar0_r32(GR_FECS_CURRENT_CTX);
+    uint32_t after_new = bar0_r32(GR_FECS_NEW_CTX);
 
     uart_printf("[fecs-forcectx] arb_busy=%u (status_1=0x%08lx)\n",
                 (unsigned)((status_1 >> 12) & 0x1u),
@@ -2322,7 +2326,7 @@ void ga10b_dump_inst_blocks_atomic(const char *tag)
 {
     /* Atomic latch phase — read everything we need in one tight
      * window, before the slow per-byte dump starts. */
-    uint32_t current_ctx = bar0_r32(0x00409b00u);
+    uint32_t current_ctx = bar0_r32(GR_FECS_CURRENT_CTX);
     uint32_t fault_inst_lo = bar0_r32(0x00100e54u);
     uint32_t fault_inst_hi = bar0_r32(0x00100e58u);
     uint32_t fault_addr_lo = bar0_r32(0x00100e4cu);
@@ -2466,9 +2470,13 @@ static void dump_gpc_tpc_sm(const char *tag, uint32_t gr_exception)
             /* warp_esr error code is the low 16 bits
              * (gr_..._hww_warp_esr_error_v = (r>>0)&0xffff), NOT the low
              * byte. 0x20 = error_mmu_nack (a GMMU NACK on a warp memory
-             * access — stale TLB), distinct from the <=0xf shader-bug
-             * codes (0x5 misaligned_pc, 0x9 illegal_instr, 0xe oor_addr).
-             * #844 fix is the pre-launch tlb_invalidate above. */
+             * access — stale inherited TLB), distinct from the <=0xf
+             * shader-bug codes (0x5 misaligned_pc, 0x9 illegal_instr,
+             * 0xe oor_addr). mmu_nack is a known-unresolved #844 mode:
+             * a pre-launch all-VA TLB invalidate was tried and REVERTED
+             * (it cut mmu_nack but re-introduced the on_pbdma=0 stall —
+             * see the #844 NOTE in ga10b_dispatch_v7_pipeline_inline).
+             * This decode is observability only. */
             uint32_t warp_err = sm_warp & 0xffffu;
             const char *errname =
                 (warp_err == 0x20u) ? "mmu_nack" :
@@ -2863,8 +2871,8 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * did the opposite (wrote valid=TRUE), which still triggered a save. */
 static void ga10b_fecs_set_current_ctx_invalid(void)
 {
-    uint32_t before = bar0_r32(0x00409b00u);
-    bar0_w32(0x00409b00u, 0u);
+    uint32_t before = bar0_r32(GR_FECS_CURRENT_CTX);
+    bar0_w32(GR_FECS_CURRENT_CTX, 0u);
     gsp_platform->mb();
     uart_printf("[GA10B-P8-v7] FECS current_ctx invalidated: "
                 "0x%08lx -> 0x00000000 (#844 skip stale-ctx save)\n",

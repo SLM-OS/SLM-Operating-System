@@ -1894,9 +1894,11 @@ void ga10b_gmmu_dump_runlist_full(const struct ga10b_channel_handoff *h)
                     "— skip\n", (unsigned long)rl_phys);
         return;
     }
+    /* Read-only: this is a diagnostic dump of Linux's runlist; never
+     * write through this mapping. */
     if (vmm_ensure_kernel_l2_table(rl_block) != 0 ||
         vmm_map_region(rl_block, rl_block, BLOCK_2M,
-                       VMM_FLAG_READ | VMM_FLAG_WRITE) != 0) {
+                       VMM_FLAG_READ) != 0) {
         uart_printf("[rl-decode] map failed — skip\n");
         return;
     }
@@ -1910,17 +1912,22 @@ void ga10b_gmmu_dump_runlist_full(const struct ga10b_channel_handoff *h)
          * bits of some word, or inst_ptr_lo in bits[31:12]. */
         const char *mark = "";
         if ((w0 & 0xfffu) == hw_chid || (w1 & 0xfffu) == hw_chid ||
-            (w2 & 0xfffu) == hw_chid)
+            (w2 & 0xfffu) == hw_chid) {
             mark = " <- chid match";
+        }
         if (((w0 >> 12) & 0xfffffu) == exp_inst_lo ||
             ((w1 >> 12) & 0xfffffu) == exp_inst_lo ||
-            ((w2 >> 12) & 0xfffffu) == exp_inst_lo)
+            ((w2 >> 12) & 0xfffffu) == exp_inst_lo) {
             mark = " <- inst_ptr match";
+        }
         uart_printf("[rl-decode] e%-2u 0x%08x 0x%08x 0x%08x 0x%08x%s\n",
                     (unsigned)e, (unsigned)w0, (unsigned)w1,
                     (unsigned)w2, (unsigned)w3, mark);
         timer_busy_wait_us(3000u);   /* avoid UARTC FIFO drop on the burst */
     }
+
+    /* Tear down the diagnostic mapping (single 2 MB block). */
+    vmm_unmap_block(rl_block);
 }
 
 static void install_fresh_runlist_and_chram(

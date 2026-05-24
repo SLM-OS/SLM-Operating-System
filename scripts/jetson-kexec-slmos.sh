@@ -1149,11 +1149,9 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
     if [[ -d "$GPU_DEVFREQ" ]]; then
         gpu_max="$(cat "$GPU_DEVFREQ/max_freq" 2>/dev/null || echo '')"
         if [[ -n "$gpu_max" && "$gpu_max" != "0" ]]; then
-            # Order matters: bump max first if we're raising, then
-            # min; lower min first if we're shrinking, then max.
-            # Setting both to the same value is safe in either
-            # order, but always write min last so a stale lower-
-            # max-than-min state can't briefly trip devfreq.
+            # Raise min_freq to the existing max so devfreq holds the
+            # GPU at its ceiling. max_freq already == gpu_max, so this
+            # single write pins min==max.
             echo "$gpu_max" > "$GPU_DEVFREQ/min_freq" 2>/dev/null || \
                 echo "       min_freq write failed" >&2
             gpu_cur="$(cat "$GPU_DEVFREQ/cur_freq" 2>/dev/null || echo '?')"
