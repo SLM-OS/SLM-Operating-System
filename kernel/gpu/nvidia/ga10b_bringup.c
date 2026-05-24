@@ -226,6 +226,10 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_CTXSW_MAILBOX(i)    (0x00409800u + (i) * 4u)
 #define GR_FECS_CTXSW_MAILBOX_COUNT 18u
 
+/* GR top-level status registers (nvgpu gr_intr_r / gr_exception_r). */
+#define GR_INTR_R                   0x00400100u
+#define GR_EXCEPTION_R              0x00400108u
+
 #define GR_GPCCS_CPUCTL             0x0041a100u
 #define GR_GPCCS_DMACTL             0x0041a10cu
 #define GR_GPC0_GPCCS_CTXSW_MAILBOX(i) (0x00502800u + (i) * 4u)
@@ -1077,11 +1081,14 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
          * dead engine); the success path exits at ~2 ms. */
         const uint32_t GA10B_PRI_POISON = 0xbadf1002u;
         const int      WAKE_MAX_ITERS   = 200;
-        uint32_t value = 0;
-        int      iter  = 0;
+        /* Seed with the poison value so a zero-iteration loop (cap ever
+         * set to 0) takes the not-woken failure path rather than a false
+         * success. */
+        uint32_t value = GA10B_PRI_POISON;
+        int      iter;
         for (iter = 0; iter < WAKE_MAX_ITERS; iter++) {
             timer_busy_wait_us(1000u);       /* 1 ms settle per attempt */
-            value = bar0_r32(0x00400100u);   /* gr_intr */
+            value = bar0_r32(GR_INTR_R);
             if (value != GA10B_PRI_POISON) break;
         }
         uart_printf("[GA10B-INHERIT] GR PRI wake: iter=%d "
@@ -1937,8 +1944,8 @@ static void dump_gr_top_level(const char *tag)
                 "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
                 "fecs_intr=0x%08lx\n",
                 tag,
-                (unsigned long)bar0_r32(0x00400100u),
-                (unsigned long)bar0_r32(0x00400108u),
+                (unsigned long)bar0_r32(GR_INTR_R),
+                (unsigned long)bar0_r32(GR_EXCEPTION_R),
                 (unsigned long)bar0_r32(0x00400110u),
                 (unsigned long)bar0_r32(0x00400704u),
                 (unsigned long)bar0_r32(0x00404000u),
@@ -2484,7 +2491,7 @@ static void ga10b_dump_gr_state(const char *tag)
     dump_gr_top_level(tag);
     /* GR exception register again — re-read so the GPC drill-down
      * sees the same snapshot the top-level dump just printed. */
-    dump_gpc_tpc_sm(tag, bar0_r32(0x00400108u));
+    dump_gpc_tpc_sm(tag, bar0_r32(GR_EXCEPTION_R));
     dump_fecs_state(tag);
     dump_mmu_fault(tag);
     dump_pbdma_state(tag);
