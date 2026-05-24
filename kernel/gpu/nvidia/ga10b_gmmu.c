@@ -1761,6 +1761,175 @@ static void chram_enable_and_preempt(uint64_t gr_rl_pri_base,
                 (unsigned)info_after);
 }
 
+/* #844: standalone CHRAM enable + force_ctx_reload for our inherited
+ * channel — WITHOUT the runlist preempt or fresh-runlist rebuild that
+ * `chram_enable_and_preempt` / `install_fresh_runlist_and_chram` do.
+ *
+ * Pairs with FECS `set_current_ctx_invalid` (in ga10b_bringup.c): the
+ * invalidate makes FECS skip SAVING the stale post-kexec current_ctx;
+ * this sets the per-channel force_ctx_reload bit so that when the
+ * upcoming dispatch schedules our channel, FECS does a fresh LOAD of
+ * our context image rather than trusting resident state. No separate
+ * preempt is needed — the dispatch's doorbell is the runlist event
+ * that acts on the pending reload. Deliberately does NOT preempt or
+ * rewrite the runlist (that path leaves the channel preempted and
+ * breaks direct submit — see install_fresh_runlist_and_chram).
+ *
+ * Returns 0 on success, -1 if the runlist topology can't be walked. */
+int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return -1;
+    uint64_t gr_rl_pri_base = discover_gr_runlist_pri_base();
+    if (gr_rl_pri_base == 0u) {
+        uart_puts("[fecs-reload] no runlist topology — "
+                  "force_ctx_reload skipped\n");
+        return -1;
+    }
+    uint32_t hw_chid = h->work_submit_token;
+    uint32_t channel_config = bar0_read32(gr_rl_pri_base +
+                                          GA10B_RL_REG_CHANNEL_CONFIG);
+    uint32_t chram_bar0_offset =
+        ((channel_config >> 4) & 0x0fffffffu) << 4;
+    uint64_t chram_chan_addr =
+        GA10B_BAR0_BASE + (uint64_t)chram_bar0_offset +
+        (uint64_t)hw_chid * 4ull;
+    volatile uint32_t *chram =
+        (volatile uint32_t *)(uintptr_t)chram_chan_addr;
+
+    *chram = 0x00000002u;   /* enable_channel */
+    __asm__ volatile("dsb sy" ::: "memory");
+    *chram = 0x00000200u;   /* force_ctx_reload */
+    __asm__ volatile("dsb sy" ::: "memory");
+    uart_printf("[fecs-reload] CHRAM[hw_chid=%u]@0x%lx "
+                "enable+force_ctx_reload (chram_bar0=0x%x)\n",
+                (unsigned)hw_chid, (unsigned long)chram_chan_addr,
+                (unsigned)chram_bar0_offset);
+    return 0;
+}
+
+/* #844 GP_GET-stuck diagnostic: dump the inherited channel's CHRAM
+ * state + the GR runlist scheduling registers, so a "PBDMA didn't see
+ * our submit" failure can be triaged into:
+ *   - channel not enabled in CHRAM (enable=0)               → CHRAM bug
+ *   - enabled but not on_pbdma/on_eng                       → not on runlist
+ *   - on_pbdma=1 but GP_GET stuck                           → USERD/doorbell
+ *   - runlist submit_info pending bit stuck                 → host wedged
+ * Read-only; safe to call from the failure path. */
+void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return;
+    /* The Jetson UARTC TX FIFO drops lines emitted in a tight burst
+     * (the failure dump that precedes this call). Drain it before, and
+     * space our own prints, so the diagnostic actually reaches the
+     * captured serial log. The dispatch already timed out, so the
+     * added ~30 ms is irrelevant. */
+    timer_busy_wait_us(20000u);
+    uint64_t rl = discover_gr_runlist_pri_base();
+    if (rl == 0u) { uart_puts("[chram-diag] no runlist topology\n"); return; }
+    uint32_t hw_chid = h->work_submit_token;
+    uint32_t channel_config = bar0_read32(rl + GA10B_RL_REG_CHANNEL_CONFIG);
+    uint32_t chram_off = ((channel_config >> 4) & 0x0fffffffu) << 4;
+    uint32_t ch = *(volatile uint32_t *)(uintptr_t)
+        (GA10B_BAR0_BASE + (uint64_t)chram_off + (uint64_t)hw_chid * 4ull);
+    uart_printf("[chram-diag] CHRAM[chid=%u]=0x%08x enable=%u next=%u "
+                "busy=%u eng_faulted=%u on_pbdma=%u on_eng=%u\n",
+                (unsigned)hw_chid, (unsigned)ch,
+                (unsigned)((ch >> 1) & 1u), (unsigned)((ch >> 2) & 1u),
+                (unsigned)((ch >> 3) & 1u), (unsigned)((ch >> 5) & 1u),
+                (unsigned)((ch >> 6) & 1u), (unsigned)((ch >> 7) & 1u));
+    timer_busy_wait_us(8000u);
+    uint32_t sb_lo = bar0_read32(rl + GA10B_RL_REG_SUBMIT_BASE_LO);
+    uint32_t sb_hi = bar0_read32(rl + GA10B_RL_REG_SUBMIT_BASE_HI);
+    uint32_t submit = bar0_read32(rl + GA10B_RL_REG_SUBMIT);
+    uint32_t info = bar0_read32(rl + GA10B_RL_REG_SUBMIT_INFO);
+    uint32_t sched = bar0_read32(rl + GA10B_RL_REG_SCHED_DISABLE);
+    uart_printf("[chram-diag] runlist base=0x%02x%08x submit=0x%08x "
+                "info=0x%08x(pending=%u) sched_disable=0x%08x\n",
+                (unsigned)(sb_hi & 0xffu), (unsigned)sb_lo,
+                (unsigned)submit, (unsigned)info,
+                (unsigned)((info >> 15) & 1u), (unsigned)sched);
+}
+
+/* #844 PBDMA-binding: decode Linux's LIVE runlist to learn the exact
+ * GA10B entry word-layout from a known-good entry (the cached headers
+ * give field shifts but not word assignment). Maps Linux's runlist,
+ * dumps up to 24 entries raw (4 words each), and cross-references each
+ * word against the inherited channel's expected encoded values
+ * (chid, inst_phys>>12, userd_phys>>8) so the operator can see which
+ * word holds which field. Read-only. */
+void ga10b_gmmu_dump_runlist_full(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) return;
+    uint64_t rl_pri = discover_gr_runlist_pri_base();
+    if (rl_pri == 0u) { uart_puts("[rl-decode] no runlist topology\n"); return; }
+
+    uint32_t hw_chid = h->work_submit_token;
+    uint64_t inst_p = h->inst_block_phys;
+    uint64_t userd_p = h->userd_phys;
+    uart_printf("[rl-decode] OUR channel: chid=%u(0x%x) inst_phys=0x%lx "
+                "userd_phys=0x%lx  expect inst>>12=0x%lx userd>>8=0x%lx\n",
+                (unsigned)hw_chid, (unsigned)hw_chid,
+                (unsigned long)inst_p, (unsigned long)userd_p,
+                (unsigned long)(inst_p >> 12), (unsigned long)(userd_p >> 8));
+
+    uint32_t rl_lo = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT_BASE_LO);
+    uint32_t rl_hi = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT_BASE_HI);
+    uint32_t submit = bar0_read32(rl_pri + GA10B_RL_REG_SUBMIT);
+    uint64_t rl_phys = ((uint64_t)(rl_lo & 0xfffffc00u)) |
+                       ((uint64_t)(rl_hi & 0xffu) << 32);
+    uint32_t n_entries = submit & 0xffffu;   /* length field = entry count */
+    if (n_entries == 0u || n_entries > 24u) n_entries = 24u;
+    uart_printf("[rl-decode] runlist phys=0x%lx submit=0x%08x "
+                "(n_entries=%u)\n",
+                (unsigned long)rl_phys, (unsigned)submit, (unsigned)n_entries);
+
+    const uint64_t BLOCK_2M = 0x200000ull;
+    uint64_t rl_block = rl_phys & ~(BLOCK_2M - 1ull);
+    /* Linux allocates the runlist in upper DRAM that SLM-OS's PMM
+     * region list (what phys_in_dram checks) doesn't cover, so use the
+     * full Jetson DRAM window [0x8000_0000, 0x2_8000_0000) here. */
+    if (rl_block < 0x80000000ull ||
+        (rl_block + BLOCK_2M) > 0x280000000ull) {
+        uart_printf("[rl-decode] runlist phys=0x%lx outside DRAM window "
+                    "— skip\n", (unsigned long)rl_phys);
+        return;
+    }
+    /* Read-only: this is a diagnostic dump of Linux's runlist; never
+     * write through this mapping. */
+    if (vmm_ensure_kernel_l2_table(rl_block) != 0 ||
+        vmm_map_region(rl_block, rl_block, BLOCK_2M,
+                       VMM_FLAG_READ) != 0) {
+        uart_printf("[rl-decode] map failed — skip\n");
+        return;
+    }
+
+    volatile uint32_t *rl = (volatile uint32_t *)(uintptr_t)rl_phys;
+    uint32_t exp_inst_lo = (uint32_t)((inst_p >> 12) & 0xfffffu);
+    for (uint32_t e = 0; e < n_entries; e++) {
+        uint32_t w0 = rl[e*4+0], w1 = rl[e*4+1],
+                 w2 = rl[e*4+2], w3 = rl[e*4+3];
+        /* flag the entry that references OUR channel: chid in low 12
+         * bits of some word, or inst_ptr_lo in bits[31:12]. */
+        const char *mark = "";
+        if ((w0 & 0xfffu) == hw_chid || (w1 & 0xfffu) == hw_chid ||
+            (w2 & 0xfffu) == hw_chid) {
+            mark = " <- chid match";
+        }
+        if (((w0 >> 12) & 0xfffffu) == exp_inst_lo ||
+            ((w1 >> 12) & 0xfffffu) == exp_inst_lo ||
+            ((w2 >> 12) & 0xfffffu) == exp_inst_lo) {
+            mark = " <- inst_ptr match";
+        }
+        uart_printf("[rl-decode] e%-2u 0x%08x 0x%08x 0x%08x 0x%08x%s\n",
+                    (unsigned)e, (unsigned)w0, (unsigned)w1,
+                    (unsigned)w2, (unsigned)w3, mark);
+        timer_busy_wait_us(3000u);   /* avoid UARTC FIFO drop on the burst */
+    }
+
+    /* Tear down the diagnostic mapping (single 2 MB block). */
+    vmm_unmap_block(rl_block);
+}
+
 static void install_fresh_runlist_and_chram(
                                 const struct ga10b_channel_handoff *h)
 {

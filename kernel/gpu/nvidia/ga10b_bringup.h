@@ -262,6 +262,26 @@ void ga10b_dump_inst_block_at(const char *tag, uint64_t inst_phys);
  * page-aligned. */
 int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys);
 
+/* #844 probe: force `gr_fecs_current_ctx_r()` (0x00409b00) to point
+ * at our inherited channel's inst block, displacing whatever Linux
+ * left there pre-kexec. Hypothesis: the per-boot variance of
+ * mb6=0x21 / mb6=0x5a on first compute ctxsw comes from FECS trying
+ * to *save* the stale Linux current-ctx before loading ours; if we
+ * tell FECS "your current ctx is already OUR channel", the save
+ * phase is a no-op and only the load phase runs.
+ *
+ * Differs from `ga10b_fecs_set_new_ctx` in writing 0x409b00
+ * (CURRENT_CTX) directly rather than 0x409b04 (NEW_CTX) — gm20b's
+ * `bind_instblk` sequence (`~/slmos-ref/nvidia/nvgpu-gr-falcon-
+ * gm20b-fusa.c:145-200`) writes both, but the arbiter dance between
+ * the two doesn't have ga10b register equivalents in nvgpu
+ * (`bind_instblk = NULL` on ga10b — `~/slmos-ref/nvidia/nvgpu-hal-
+ * init-hal_ga10b.c:792`), so we just write current_ctx directly.
+ *
+ * Returns 0 on success, -1 if `inst_block_phys` is zero or not
+ * page-aligned. Companion shell verb: `nvgpu fecs-forcectx`. */
+int ga10b_fecs_force_current_ctx(uint64_t inst_block_phys);
+
 /* #834: submit a FECS method via the standard data+push protocol.
  * Clears mailbox 0, writes method data + push address, polls mb0
  * for `expected_mb0` (typically `gr_fecs_ctxsw_mailbox_value_pass_v`

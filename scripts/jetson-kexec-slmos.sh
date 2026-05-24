@@ -1123,6 +1123,44 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
         fi
     done
 
+    # Pin GPU devfreq to its max before kexec (#844 follow-up).
+    #
+    # The BPMP writes above keep the GPU clock *domain* enabled but
+    # don't constrain devfreq's frequency choice — at the kexec
+    # moment, the GPU is typically at the idle frequency (306 MHz on
+    # both Super and non-Super Orin Nano) because the helper has
+    # been sleeping with no GR work. Empirical 8-boot probe on
+    # jetson-nano-1 (non-Super, GPU max = 624.75 MHz):
+    #
+    #   - Without pin: 0/8 PASS post-kexec submit-compute
+    #     (every boot wedges at "PBDMA didn't see our submit",
+    #     GR registers PRI-poisoned).
+    #   - With pin to 624.75 MHz: 4/8 PASS.
+    #
+    # Pinning min_freq = max_freq forces devfreq to hold the GPU
+    # at its peak so the post-kexec channel-inherit path doesn't
+    # race a frequency-down transition. Doesn't fully close the
+    # gap to jetson-nano-2's 7/8 (Super, max = 1020 MHz) — there's
+    # a separate DT-level Super-vs-non-Super factor — but it's a
+    # board-agnostic improvement that the kexec script can apply
+    # unconditionally with no permanent state change (devfreq
+    # settings reset on power-cycle).
+    GPU_DEVFREQ=/sys/class/devfreq/17000000.gpu
+    if [[ -d "$GPU_DEVFREQ" ]]; then
+        gpu_max="$(cat "$GPU_DEVFREQ/max_freq" 2>/dev/null || echo '')"
+        if [[ -n "$gpu_max" && "$gpu_max" != "0" ]]; then
+            # Raise min_freq to the existing max so devfreq holds the
+            # GPU at its ceiling. max_freq already == gpu_max, so this
+            # single write pins min==max.
+            echo "$gpu_max" > "$GPU_DEVFREQ/min_freq" 2>/dev/null || \
+                echo "       min_freq write failed" >&2
+            gpu_cur="$(cat "$GPU_DEVFREQ/cur_freq" 2>/dev/null || echo '?')"
+            echo "       pinned GPU devfreq: cur=$gpu_cur min=max=$gpu_max"
+        else
+            echo "       devfreq max_freq unreadable — skipping pin"
+        fi
+    fi
+
     # Verify by reading NV_PMC_BOOT_0 via /dev/mem. This is the
     # same register SLM-OS reads to identify the GPU; if Linux
     # reads 0xB7B000A1 here and SLM-OS reads 0xFFFFFFFF post-

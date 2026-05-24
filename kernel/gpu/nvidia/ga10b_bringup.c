@@ -15,6 +15,7 @@
 #include "gsp.h"
 #include "falcon.h"
 #include "../../include/uart.h"
+#include "../../include/timer.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -224,6 +225,14 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_CPUCTL_ALIAS        0x00409130u
 #define GR_FECS_CTXSW_MAILBOX(i)    (0x00409800u + (i) * 4u)
 #define GR_FECS_CTXSW_MAILBOX_COUNT 18u
+/* FECS ctxsw arbiter ctx pointers (nvgpu gr_fecs_current_ctx_r /
+ * gr_fecs_new_ctx_r). */
+#define GR_FECS_CURRENT_CTX         0x00409b00u
+#define GR_FECS_NEW_CTX             0x00409b04u
+
+/* GR top-level status registers (nvgpu gr_intr_r / gr_exception_r). */
+#define GR_INTR_R                   0x00400100u
+#define GR_EXCEPTION_R              0x00400108u
 
 #define GR_GPCCS_CPUCTL             0x0041a100u
 #define GR_GPCCS_DMACTL             0x0041a10cu
@@ -1053,21 +1062,37 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
      * works — the PRI deadlock recovery is independent of the
      * master-controller enable state. */
     {
-        /* The first read returns the poison value but also kicks the
-         * engine out of PRI-deadlock. Subsequent reads then return real
-         * register values. Loop until either:
-         *   - a non-poison read confirms GR is awake, or
-         *   - we hit the iteration cap (means the wake isn't taking,
-         *     which is a hardware state we don't know how to fix).
-         * Empirically takes 1 retry on jetson-nano-1 (read #1 = poison,
-         * read #2 = real value); cap at 16 to be defensive without
-         * stalling on a truly wedged engine. */
+        /* GR's PRI domain needs wall-clock settle time to ungate after
+         * kexec — poll gr_intr with a 1 ms delay per attempt until it
+         * returns a real value instead of the poison sentinel.
+         *
+         * Why a delay (not just a read count) — #978: GA10B's GR rail/
+         * clock is BPMP-gated, and nvpmodel governs how aggressively.
+         * slmos-kexec force-restores the GPU clock just before kexec,
+         * but the GR PRI fabric takes a few ms to come back after the
+         * clock returns. In nvpmodel 15W the domain happens to recover
+         * almost immediately (the original tight 16-read loop, spanning
+         * only a few µs, caught it). In 25W (the Super default) it takes
+         * ~1-2 ms, so the tight loop always saw poison and inherit
+         * failed 100% of the time. A real per-attempt delay fixes both:
+         * verified GR wakes on iter=1 (~2 ms) for 10/10 boots at 25W
+         * and still recovers immediately at 15W. The settle time is a
+         * BPMP/clock-domain property, not a read side effect — an
+         * earlier "the first read kicks the deadlock latch" reading was
+         * a measurement artifact of the un-delayed loop.
+         *
+         * 200 ms cap is generous insurance on the failure path (a truly
+         * dead engine); the success path exits at ~2 ms. */
         const uint32_t GA10B_PRI_POISON = 0xbadf1002u;
-        const int      WAKE_MAX_ITERS   = 16;
-        uint32_t value = 0;
-        int      iter  = 0;
+        const int      WAKE_MAX_ITERS   = 200;
+        /* Seed with the poison value so a zero-iteration loop (cap ever
+         * set to 0) takes the not-woken failure path rather than a false
+         * success. */
+        uint32_t value = GA10B_PRI_POISON;
+        int      iter;
         for (iter = 0; iter < WAKE_MAX_ITERS; iter++) {
-            value = bar0_r32(0x00400100u);   /* gr_intr */
+            timer_busy_wait_us(1000u);       /* 1 ms settle per attempt */
+            value = bar0_r32(GR_INTR_R);
             if (value != GA10B_PRI_POISON) break;
         }
         uart_printf("[GA10B-INHERIT] GR PRI wake: iter=%d "
@@ -1075,8 +1100,14 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
                     iter, (unsigned long)value,
                     (unsigned long)GA10B_PRI_POISON);
         if (value == GA10B_PRI_POISON) {
-            uart_puts("[GA10B-INHERIT] GR did not wake after "
-                      "PRI-deadlock recovery attempts\n");
+            /* Diagnostics: is the GPU itself powered (NV_PMC_BOOT_0
+             * returns chip id ~0x172...) or is the whole GPU gated? */
+            uint32_t boot0 = bar0_r32(0x00000000u);
+            uint32_t mc_en = bar0_r32(0x00000200u);  /* NV_PMC_ENABLE */
+            uart_printf("[GA10B-INHERIT] GR did not wake after %d ms "
+                        "(boot0=0x%08lx mc_enable=0x%08lx)\n",
+                        WAKE_MAX_ITERS, (unsigned long)boot0,
+                        (unsigned long)mc_en);
             return -1;
         }
     }
@@ -1917,8 +1948,8 @@ static void dump_gr_top_level(const char *tag)
                 "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
                 "fecs_intr=0x%08lx\n",
                 tag,
-                (unsigned long)bar0_r32(0x00400100u),
-                (unsigned long)bar0_r32(0x00400108u),
+                (unsigned long)bar0_r32(GR_INTR_R),
+                (unsigned long)bar0_r32(GR_EXCEPTION_R),
                 (unsigned long)bar0_r32(0x00400110u),
                 (unsigned long)bar0_r32(0x00400704u),
                 (unsigned long)bar0_r32(0x00404000u),
@@ -1937,7 +1968,7 @@ static void dump_fecs_state(const char *tag)
                 tag,
                 (unsigned long)bar0_r32(0x00409c18u),
                 (unsigned long)bar0_r32(0x00409818u),
-                (unsigned long)bar0_r32(0x00409b00u),
+                (unsigned long)bar0_r32(GR_FECS_CURRENT_CTX),
                 (unsigned long)bar0_r32(0x00409040u),
                 (unsigned long)bar0_r32(0x00409044u));
     /* Mailbox 6 carries error codes for ctxsw_intr0; the others
@@ -2234,11 +2265,11 @@ int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys)
     uint32_t new_ctx = inst_ptr_u32 | (3u << 28) | (1u << 31);
 
     /* Latch current value for comparison + diagnostics. */
-    uint32_t before = bar0_r32(0x00409b04u);
-    bar0_w32(0x00409b04u, new_ctx);
+    uint32_t before = bar0_r32(GR_FECS_NEW_CTX);
+    bar0_w32(GR_FECS_NEW_CTX, new_ctx);
     gsp_platform->mb();
-    uint32_t after = bar0_r32(0x00409b04u);
-    uint32_t current_ctx = bar0_r32(0x00409b00u);
+    uint32_t after = bar0_r32(GR_FECS_NEW_CTX);
+    uint32_t current_ctx = bar0_r32(GR_FECS_CURRENT_CTX);
 
     uart_printf("[fecs-newctx] new_ctx_r(0x409b04): 0x%08lx -> 0x%08lx "
                 "(want 0x%08x for inst=0x%lx)\n",
@@ -2253,6 +2284,37 @@ int ga10b_fecs_set_new_ctx(uint64_t inst_block_phys)
     return 0;
 }
 
+int ga10b_fecs_force_current_ctx(uint64_t inst_block_phys)
+{
+    if (inst_block_phys == 0) return -1;
+    if ((inst_block_phys & 0xFFFu) != 0) return -1;
+
+    uint32_t inst_ptr_u32 = (uint32_t)(inst_block_phys >> 12);
+    uint32_t ctx_val = inst_ptr_u32 | (3u << 28) | (1u << 31);
+
+    uint32_t before_cur = bar0_r32(GR_FECS_CURRENT_CTX);
+    uint32_t before_new = bar0_r32(GR_FECS_NEW_CTX);
+    uint32_t status_1   = bar0_r32(0x00409400u);
+
+    bar0_w32(GR_FECS_NEW_CTX, ctx_val);
+    bar0_w32(GR_FECS_CURRENT_CTX, ctx_val);
+    gsp_platform->mb();
+
+    uint32_t after_cur = bar0_r32(GR_FECS_CURRENT_CTX);
+    uint32_t after_new = bar0_r32(GR_FECS_NEW_CTX);
+
+    uart_printf("[fecs-forcectx] arb_busy=%u (status_1=0x%08lx)\n",
+                (unsigned)((status_1 >> 12) & 0x1u),
+                (unsigned long)status_1);
+    uart_printf("[fecs-forcectx] new_ctx(0x409b04):     0x%08lx -> 0x%08lx\n",
+                (unsigned long)before_new, (unsigned long)after_new);
+    uart_printf("[fecs-forcectx] current_ctx(0x409b00): 0x%08lx -> 0x%08lx "
+                "(want 0x%08x for inst=0x%lx)\n",
+                (unsigned long)before_cur, (unsigned long)after_cur,
+                (unsigned)ctx_val, (unsigned long)inst_block_phys);
+    return 0;
+}
+
 /* Decode FECS_CURRENT_CTX and fb_mmu_fault_inst into 40-bit
  * physical addresses and dump both inst blocks atomically — i.e.
  * latch every relevant register up-front before the slow DRAM
@@ -2264,7 +2326,7 @@ void ga10b_dump_inst_blocks_atomic(const char *tag)
 {
     /* Atomic latch phase — read everything we need in one tight
      * window, before the slow per-byte dump starts. */
-    uint32_t current_ctx = bar0_r32(0x00409b00u);
+    uint32_t current_ctx = bar0_r32(GR_FECS_CURRENT_CTX);
     uint32_t fault_inst_lo = bar0_r32(0x00100e54u);
     uint32_t fault_inst_hi = bar0_r32(0x00100e58u);
     uint32_t fault_addr_lo = bar0_r32(0x00100e4cu);
@@ -2405,12 +2467,29 @@ static void dump_gpc_tpc_sm(const char *tag, uint32_t gr_exception)
             uint32_t sm_warp   = bar0_r32(0x00504730u);
             uint32_t pc_lo     = bar0_r32(0x00504738u);
             uint32_t pc_hi     = bar0_r32(0x0050473cu);
+            /* warp_esr error code is the low 16 bits
+             * (gr_..._hww_warp_esr_error_v = (r>>0)&0xffff), NOT the low
+             * byte. 0x20 = error_mmu_nack (a GMMU NACK on a warp memory
+             * access — stale inherited TLB), distinct from the <=0xf
+             * shader-bug codes (0x5 misaligned_pc, 0x9 illegal_instr,
+             * 0xe oor_addr). mmu_nack is a known-unresolved #844 mode:
+             * a pre-launch all-VA TLB invalidate was tried and REVERTED
+             * (it cut mmu_nack but re-introduced the on_pbdma=0 stall —
+             * see the #844 NOTE in ga10b_dispatch_v7_pipeline_inline).
+             * This decode is observability only. */
+            uint32_t warp_err = sm_warp & 0xffffu;
+            const char *errname =
+                (warp_err == 0x20u) ? "mmu_nack" :
+                (warp_err == 0x0u)  ? "none" :
+                (warp_err == 0x5u)  ? "misaligned_pc" :
+                (warp_err == 0x9u)  ? "illegal_instr_encoding" :
+                (warp_err == 0xeu)  ? "oor_addr" : "other";
             uart_printf("[%s]   sm0_global_esr=0x%08lx sm0_warp_esr=0x%08lx "
-                        "warp_pc=0x%08lx_%08lx (error_code=0x%02x)\n",
+                        "warp_pc=0x%08lx_%08lx (error=0x%04x %s)\n",
                         tag, (unsigned long)sm_global,
                         (unsigned long)sm_warp,
                         (unsigned long)pc_hi, (unsigned long)pc_lo,
-                        (unsigned)(sm_warp & 0xffu));
+                        (unsigned)warp_err, errname);
         }
     }
 }
@@ -2420,7 +2499,7 @@ static void ga10b_dump_gr_state(const char *tag)
     dump_gr_top_level(tag);
     /* GR exception register again — re-read so the GPC drill-down
      * sees the same snapshot the top-level dump just printed. */
-    dump_gpc_tpc_sm(tag, bar0_r32(0x00400108u));
+    dump_gpc_tpc_sm(tag, bar0_r32(GR_EXCEPTION_R));
     dump_fecs_state(tag);
     dump_mmu_fault(tag);
     dump_pbdma_state(tag);
@@ -2775,6 +2854,31 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * take handoff + slot counter as parameters and a stub-submit
  * function pointer).
  */
+/* #844: invalidate FECS current_ctx before the first post-kexec ctxsw.
+ *
+ * Mirrors nvgpu's `gm20b_gr_falcon_set_current_ctx_invalid`
+ * (~/slmos-ref/nvidia/nvgpu-gr-falcon-gm20b-fusa.c:672-676): write
+ * `gr_fecs_current_ctx_r()` (0x00409b00) with valid=false (the whole
+ * register = 0 = `gr_fecs_current_ctx_valid_false_f()`).
+ *
+ * Post-kexec, FECS_CURRENT_CTX holds Linux's stale inst pointer (often
+ * PDB=0). On the first ctxsw, FECS SAVES that "old" context before
+ * loading ours — and the save checksum-fails with ctxsw mailbox6=0x21
+ * (gr_fecs_ctxsw_mailbox_value_ctxsw_checksum_mismatch_v, hw_gr_ga10b.h
+ * :577). Clearing the valid bit tells FECS "there is no old context to
+ * save", so the save phase is skipped and only the LOAD of our channel
+ * runs. This is the canonical nvgpu recovery; SLM-OS's `fecs-forcectx`
+ * did the opposite (wrote valid=TRUE), which still triggered a save. */
+static void ga10b_fecs_set_current_ctx_invalid(void)
+{
+    uint32_t before = bar0_r32(GR_FECS_CURRENT_CTX);
+    bar0_w32(GR_FECS_CURRENT_CTX, 0u);
+    gsp_platform->mb();
+    uart_printf("[GA10B-P8-v7] FECS current_ctx invalidated: "
+                "0x%08lx -> 0x00000000 (#844 skip stale-ctx save)\n",
+                (unsigned long)before);
+}
+
 /* Internal worker — fires N v7 ops + 1 trailing semaphore release
  * through g_handoff's QMD pool + pushbuf + GPFIFO + semaphore.
  *
@@ -2856,6 +2960,27 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         b->last_error_phase = 8;
         return -1;
     }
+
+    /* #844: canonical post-kexec ctxsw recovery (nvgpu sequence),
+     * run before the first GR submit below:
+     *   1. set_current_ctx_invalid → FECS skips SAVING the stale
+     *      current_ctx (the save checksum-fails, mb6=0x21).
+     *   2. force_ctx_reload (CHRAM 0x200) → the upcoming dispatch's
+     *      ctxsw does a fresh LOAD of our channel instead of trusting
+     *      resident state.
+     *
+     * #844 NOTE: a pre-launch all-VA tlb_invalidate(our PDB) was tried
+     * here to fix the intermittent SM mmu_nack fault (warp_esr=0x20 —
+     * the compute "hang"). It DID cut mmu_nack but re-introduced Mode-A
+     * (on_pbdma=0 GP_GET-stuck, 0→5/30, pass 83%→60%): the all-VA
+     * invalidate nukes the host's GPFIFO/pushbuffer translations too, so
+     * PBDMA's fetch is disrupted. This is the THIRD dispatch-time global
+     * GPU op (after runlist-resubmit and STOP_CTXSW) to knock the
+     * inherited channel off PBDMA — the inherited channel is fragile to
+     * any dispatch-time perturbation. Reverted; the clean minimal-
+     * perturbation path is the best (~83%). */
+    ga10b_fecs_set_current_ctx_invalid();
+    ga10b_gmmu_force_ctx_reload(&g_handoff);
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
      * contract as the v3 dispatch fields: the helper allocates
@@ -3239,6 +3364,17 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
                     "poll=0x%lx)\n",
                     (unsigned long)final_gp_get,
                     (unsigned long)poll_val);
+        /* #844: triage the channel-not-scheduled mode — is our channel
+         * enabled in CHRAM? on the runlist (on_pbdma/on_eng)? is the
+         * runlist submit pending? */
+        ga10b_gmmu_dump_chram_runlist(&g_handoff);
+        timer_busy_wait_us(8000u);
+        uart_printf("[GA10B-P8-v7]   submit ptrs: gp_put=%lu gp_get=%lu "
+                    "token=0x%lx userd_phys=0x%lx\n",
+                    (unsigned long)g_handoff.initial_gp_put,
+                    (unsigned long)final_gp_get,
+                    (unsigned long)g_handoff.work_submit_token,
+                    (unsigned long)g_handoff.userd_phys);
     } else if (poll_val == 0u) {
         uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
                     "advanced (GP_GET %lu → %lu) but NEITHER sema "

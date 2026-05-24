@@ -5717,6 +5717,18 @@ int cmd_nvgpu(int argc, char *argv[])
     if (strcmp(argv[1], "rebuild-gmmu") == 0) {
         return cmd_nvgpu_rebuild_gmmu();
     }
+    if (strcmp(argv[1], "runlist-dump") == 0) {
+        /* #844 PBDMA-binding: decode Linux's live runlist word-layout.
+         * Run after `nvgpu inherit` + `nvgpu channel`. */
+        const struct ga10b_channel_handoff *hd = ga10b_bringup_handoff();
+        if (hd == NULL || hd->magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+            shell_puts("runlist-dump: handoff not loaded — "
+                       "run `nvgpu channel` first\r\n");
+            return -1;
+        }
+        ga10b_gmmu_dump_runlist_full(hd);
+        return 0;
+    }
     if (strcmp(argv[1], "engine-clear") == 0) {
         return cmd_nvgpu_engine_clear();
     }
@@ -5771,6 +5783,27 @@ int cmd_nvgpu(int argc, char *argv[])
         }
         int rc = ga10b_fecs_set_new_ctx(h2->inst_block_phys);
         shell_printf("fecs-newctx: rc=%d\r\n", rc);
+        return rc;
+    }
+    if (strcmp(argv[1], "fecs-forcectx") == 0) {
+        /* #844 probe: write `gr_fecs_current_ctx_r()` (0x00409b00)
+         * directly with our channel's inst phys, displacing whatever
+         * stale Linux value is left there post-kexec. If FECS's
+         * first compute ctxsw is failing because the save-old phase
+         * dereferences Linux's stale current_ctx, this should turn
+         * mb6=0x21 (or mb6=0x5a on non-v10 helpers) into rc=0 on
+         * subsequent `nvgpu submit-compute`.
+         *
+         * Requires `nvgpu inherit` + `nvgpu channel` first. */
+        const struct ga10b_channel_handoff *h3 =
+            ga10b_bringup_handoff();
+        if (h3 == NULL || h3->inst_block_phys == 0) {
+            shell_puts("fecs-forcectx: no handoff loaded "
+                       "(run nvgpu channel first)\r\n");
+            return -1;
+        }
+        int rc = ga10b_fecs_force_current_ctx(h3->inst_block_phys);
+        shell_printf("fecs-forcectx: rc=%d\r\n", rc);
         return rc;
     }
     if (strcmp(argv[1], "submit-compute") == 0) {
@@ -7584,6 +7617,7 @@ oplib_stage_call:
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | engine-status | engine-clear | "
+              "fecs-newctx | fecs-forcectx | fecs-stop-restart | "
               "submit | submit-compute | launch-kernel | "
               "run-mnist | fecs | gpccs | pmu | run | "
               "gmmu <pushbuf | walk | walk-raw | "
