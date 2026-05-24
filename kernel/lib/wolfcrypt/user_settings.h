@@ -179,6 +179,17 @@ extern "C" {
 #define NO_ERROR_STRINGS
 #define WC_NO_ASYNC_THREADING
 
+/* WLOG / DEBUG_WOLFSSH plumbing is in place (callback in wolf_os.c,
+ * Debugging_ON in sshd.c) but the verbose macros are disabled in
+ * production to keep boot/runtime output clean. To re-enable for
+ * troubleshooting, define DEBUG_WOLFSSH + DEBUG_WOLFSSL +
+ * WOLFSSH_NO_DEFAULT_LOGGING_CB + WOLFSSL_NO_DEFAULT_LOGGING_CB
+ * (note: upstream wolfSSH 1.4.18 has a typo at log.c:52 where the
+ * static-initialiser guard reads `WOLFSSL_NO_DEFAULT_LOGGING_CB`
+ * instead of `WOLFSSH_NO_DEFAULT_LOGGING_CB` — both spellings are
+ * required to suppress the upstream stdio-using DefaultLoggingCb).
+ * WOLFSSH_NO_TIMESTAMP avoids strftime when DEBUG is on. */
+
 #ifdef __cplusplus
 }
 #endif

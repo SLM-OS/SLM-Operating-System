@@ -26,6 +26,9 @@
 
 #include "rng.h"
 #include "timer.h"
+#include "uart.h"
+
+#include <wolfssh/log.h>
 
 /* ---------------------------------------------------------------- */
 /* Heap hooks (XMALLOC_USER)                                         */
@@ -57,6 +60,32 @@ void *XREALLOC(void *p, size_t n, void *heap, int type)
     (void)heap;
     (void)type;
     return wolf_heap_realloc(p, n);
+}
+
+/* ---------------------------------------------------------------- */
+/* wolfSSH WLOG callback                                              */
+/* ---------------------------------------------------------------- */
+
+/* Forward wolfSSH's WLOG output to uart_printf. The default
+ * upstream callback uses fprintf + time + strftime, none of which
+ * work bare-metal — we suppress it via WOLFSSH_NO_DEFAULT_LOGGING_CB
+ * in user_settings.h and register this one at sshd_start time. */
+static const char *wolf_loglevel_str(int level)
+{
+    switch (level) {
+    case WS_LOG_INFO:    return "INFO";
+    case WS_LOG_WARN:    return "WARN";
+    case WS_LOG_ERROR:   return "ERR ";
+    case WS_LOG_DEBUG:   return "DBG ";
+    case WS_LOG_USER:    return "USR ";
+    default:             return "?   ";
+    }
+}
+
+void slm_wolfssh_log_cb(enum wolfSSH_LogLevel level, const char *const msg)
+{
+    uart_printf("[WSSH/%s] %s\r\n", wolf_loglevel_str((int)level),
+                msg != NULL ? msg : "(null)");
 }
 
 /* ---------------------------------------------------------------- */

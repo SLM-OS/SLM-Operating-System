@@ -55,7 +55,12 @@ via `WOLFSSL_USER_SETTINGS`).
 
 | File | Change | Rationale |
 |---|---|---|
-| `src/internal.c` | Move the `ed` (Ed25519) struct out of the `#ifndef WOLFSSH_NO_ECDSA` block where upstream had it nested | Upstream 1.4.18 makes Ed25519 transitively dependent on ECDSA / NIST P-curves, which we don't want. The two algorithms are independently selectable after the patch. |
+| `src/internal.c` (~line 9920) | Move the `ed` (Ed25519) struct out of the `#ifndef WOLFSSH_NO_ECDSA` block where upstream had it nested | Upstream 1.4.18 makes Ed25519 transitively dependent on ECDSA / NIST P-curves, which we don't want. The two algorithms are independently selectable after the patch. |
+| `src/internal.c` (~line 10250) | Move the `case ID_ED25519:` branch in `SendKexGetSigningKey` out of the same `#ifndef WOLFSSH_NO_ECDSA` block | Same defect as above, in a second site. Without this, `SendKexGetSigningKey` returns `WS_INVALID_ALGO_ID` (-1020) on the first ssh-ed25519 KEX attempt. Found via #988 hardware-validation pass. |
+
+## SLM-OS-side workaround
+
+The DER blob passed to `wolfSSH_CTX_UsePrivateKey_buffer` is generated with `wc_Ed25519KeyToDer` (NOT `wc_Ed25519PrivateKeyToDer`) so the PKCS#8 envelope embeds both the 32-byte private seed AND the 32-byte public key. The seed-only DER from the `_Private_` variant is decoded by wolfSSH via `wc_ed25519_import_private_only` which leaves `key->p = 0`. `wc_ed25519_sign_msg` uses `key->p` in the `hram` computation (line ~512 of `wolfcrypt/src/ed25519.c`), so a zero `key->p` produces signatures the client can't verify ("incorrect signature" client-side after a clean KEX). The full priv+pub DER routes through `wc_ed25519_import_private_key` which sets both `key->k` and `key->p` correctly. Found via #988 hardware-validation pass. See `kernel/net/ssh/sshd.c::sshd_start`.
 
 ## Cipher pivot — AES-256-GCM instead of ChaCha20-Poly1305
 
