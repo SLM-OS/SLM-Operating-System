@@ -236,6 +236,17 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_MAILBOX_FAIL        0x00000002u
 #define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
 
+/* GR engine top-level interrupt register. Also serves as the
+ * PRI-deadlock-recovery wake target (see
+ * `ga10b_bringup_inherit`) — any read kicks the GA10B PRI fabric
+ * out of the post-kexec deadlock state on the GR window. */
+#define GR_INTR                     0x00400100u
+
+/* Sentinel value returned by every BAR0 read against a PRI-locked
+ * GR-window register. Distinct from the FB MMU's
+ * "no register here" sentinel (0xbadf5040). */
+#define GA10B_PRI_POISON            0xbadf1002u
+
 /* ---- COMPUTE_B semaphore methods (AMPERE_COMPUTE_B = 0xC7C0) ----
  *
  * These methods decode against the GR/compute engine, not PBDMA, and
@@ -1062,12 +1073,11 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
          * Empirically takes 1 retry on jetson-nano-1 (read #1 = poison,
          * read #2 = real value); cap at 16 to be defensive without
          * stalling on a truly wedged engine. */
-        const uint32_t GA10B_PRI_POISON = 0xbadf1002u;
-        const int      WAKE_MAX_ITERS   = 16;
+        const int WAKE_MAX_ITERS = 16;
         uint32_t value = 0;
         int      iter  = 0;
         for (iter = 0; iter < WAKE_MAX_ITERS; iter++) {
-            value = bar0_r32(0x00400100u);   /* gr_intr */
+            value = bar0_r32(GR_INTR);
             if (value != GA10B_PRI_POISON) break;
         }
         uart_printf("[GA10B-INHERIT] GR PRI wake: iter=%d "
@@ -1917,7 +1927,7 @@ static void dump_gr_top_level(const char *tag)
                 "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
                 "fecs_intr=0x%08lx\n",
                 tag,
-                (unsigned long)bar0_r32(0x00400100u),
+                (unsigned long)bar0_r32(GR_INTR),
                 (unsigned long)bar0_r32(0x00400108u),
                 (unsigned long)bar0_r32(0x00400110u),
                 (unsigned long)bar0_r32(0x00400704u),
