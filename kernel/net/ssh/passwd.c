@@ -326,7 +326,16 @@ static int derive_hash(const char *password,
                        salt, (int)PASSWD_SALT_LEN,
                        log2_n, r, p,
                        (int)PASSWD_HASH_LEN);
-    return (rc == 0) ? PASSWD_OK : PASSWD_E_KDF;
+    if (rc != 0) {
+        /* Log the wolfcrypt error code (e.g. -125 MEMORY_E, -173
+         * BAD_FUNC_ARG) so operators can tell scrypt-failed-due-to-
+         * heap-exhaustion apart from scrypt-failed-due-to-bad-args
+         * without rebuilding. */
+        uart_printf("[PASSWD] wc_scrypt failed: rc=%d (log2_n=%d r=%d p=%d)\r\n",
+                    rc, log2_n, r, p);
+        return PASSWD_E_KDF;
+    }
+    return PASSWD_OK;
 }
 
 static int constant_time_compare(const uint8_t *a, const uint8_t *b, size_t n)

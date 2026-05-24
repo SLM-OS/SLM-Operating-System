@@ -1936,6 +1936,7 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
     # autostart, shell verb.
     target_sources(slmos.elf PRIVATE
         kernel/net/ssh/wolf_os.c
+        kernel/net/ssh/wolf_heap.c
         kernel/net/ssh/sshd.c
         kernel/net/ssh/sshd_shell.c
         kernel/net/ssh/host_key.c

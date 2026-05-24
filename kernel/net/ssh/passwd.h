@@ -36,7 +36,11 @@
 #define PASSWD_SALT_LEN          16u
 #define PASSWD_HASH_LEN          32u
 
-/* scrypt cost parameters — see comment block at top for derivation. */
+/* scrypt cost parameters — RFC 7914 floor / OWASP "second
+ * recommendation". Backed by the dedicated 48 MB wolfssl heap in
+ * `kernel/net/ssh/wolf_heap.c`; XMALLOC there routes through a
+ * pool sized to satisfy the 32 MB working buffer this cost
+ * requires. */
 #define PASSWD_SCRYPT_LOG2_N     15  /* N = 2^15 = 32768  ~= 32 MB */
 #define PASSWD_SCRYPT_R          8
 #define PASSWD_SCRYPT_P          1
