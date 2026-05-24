@@ -329,6 +329,33 @@ pi-5-2 (Pi 5, 4× Cortex-A76) and jetson-nano-1 (Jetson Orin Nano,
 6× Cortex-A78AE). Three `bench sched-policy --workload mixed --all`
 runs per build; median (by DL-miss%) reported.
 
+> **⚠️ Caveat (2026-05-22) — do not read the per-policy DL-miss% below as
+> a ranking.** A focused multi-run probe on pi-5-2 found the
+> scheduling-quality metric is **not reliable for ranking policies**, for
+> two compounding reasons:
+> 1. **Timing noise dominates.** Run standalone (active policy, from
+>    ~idle), every policy spans ~25–100% DL-miss run-to-run on both
+>    `mixed` and `deadline-heavy` (e.g. heuristic on `mixed`: 6.2–75%
+>    across 12 runs; ai_ppo on `deadline-heavy`: 25–100% across 6). The
+>    between-policy difference is below the within-policy noise floor.
+> 2. **`--all` is run-order-confounded.** `--workload <w> --all` runs all
+>    policies back-to-back in one invocation, so each inherits the prior
+>    policy's leftover scheduler state (the MLP/PPO decisions key off
+>    per-CPU load features). This produces *spuriously tight,
+>    differentiated-looking* clusters that do **not** reproduce
+>    standalone — e.g. ai_ppo on `deadline-heavy` looked like a clean
+>    winner (~46%, tight) under `--all` but is 25–100% standalone; ai_mlp
+>    looked like a constant 100% under `--all` but is 37.5–100%
+>    standalone.
+>
+> The table below is retained for provenance, but the single/3-run
+> `--all` cells are **confounded + noise-dominated**; treat scheduling
+> quality as *indistinguishable across policies on this harness*. Decision
+> **latency** (heuristic ~2 µs vs MLP ~42 µs) is unaffected and remains
+> the reliable scheduling metric. A trustworthy quality harness would need
+> standalone-from-idle runs with far more deadline tasks and many dispatch
+> rounds (not a re-gather of this one).
+
 `bench sched-policy --workload <name> --all` (added in #882, PR #928)
 exercises all four registered policies through a representative task
 mix and reports per-policy scheduling-quality metrics — deadline-miss
