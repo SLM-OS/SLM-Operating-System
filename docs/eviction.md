@@ -22,7 +22,7 @@ Eviction is on by default. There are now two user-facing controls:
 | Flag | Adds | Binary cost |
 |------|------|-------------|
 | default build | Trait, registry, classical policies, stub ML predictors (`xgb_stub`, `mlp_stub` return 0.5) | ~30 KB |
-| `EVICTION_MODELS=ON` | Trained XGBoost (~1.3 MB source) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
+| `EVICTION_MODELS=ON` | Trained XGBoost (~140 KB source, 16-tree — see #961) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
 | `DISABLE_EVICTION=ON` | Compiles the eviction framework out entirely | saves the eviction-framework footprint |
 | `EVICTION_DEFAULT_POLICY=<name>` | Chooses the compiled-in default policy (`lru`, `lfu`, `arc`, `slm`, `cacheus`, ...) | none beyond the selected built-in policy set |
 
@@ -164,7 +164,7 @@ deterministic trivial policy.
 
 | Policy | Predictor | Size | Source |
 |--------|-----------|------|--------|
-| `XGBoostPolicy` | `generated::xgb_predict` — 200-tree if-else chain with sigmoid | ~1.3 MB generated Rust (dead-code-eliminated until actually called) | Imported from sibling `data/export/xgb_policy_generated.rs` |
+| `XGBoostPolicy` | `generated::xgb_predict` — 16-tree if-else chain with sigmoid (pruned from 200 per #961) | ~140 KB generated Rust (dead-code-eliminated until actually called) | Imported from sibling `data/export/xgb_policy_generated.rs` |
 | `MlpPolicy` | `generated::mlp_predict` — int8-quantised 4-layer MLP (27→64→32→16→1, sigmoid) | ~20 KB of weights + predict fn | Imported from sibling `data/export/mlp_policy_generated.rs` |
 
 Both policies funnel their input through `features::extract_features`,
@@ -868,9 +868,13 @@ All suites pass under `make test` on the three supported configs:
   [#961](https://github.com/SLM-OS/SLM-Operating-System/issues/961).
   Hardware capture on pi-5-2 / jetson-nano-1 has xgboost at 4–22 µs,
   mlp at 4–174 µs, cacheus at 9–197 µs (see §"Latency Benchmarks
-  (M9)" above). Levers: prune the 200-tree XGBoost ensemble and batch
-  the int8 MLP forward pass — both carried over from the sibling
-  project's Phase 5 work.
+  (M9)" above). Levers: prune the XGBoost ensemble (done — pruned
+  200→16 trees; page-sim 5-seed sweep shows hit-rate preserved, see
+  #961) and batch the int8 MLP forward pass. The 16-tree re-bench on
+  pi-5-2 is still pending. Note: pruning is independent of the
+  default-promotion question — XGBoost still regresses below LRU on
+  the `multimodel_skew` workload at every tree count (#989), so it
+  should not become the default policy yet (#953).
 - ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
   [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
   Replay xgb / mlp / cacheus / arc / lru through the simulator on
