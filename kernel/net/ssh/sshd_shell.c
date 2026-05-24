@@ -46,13 +46,18 @@ static void print_status(void)
 {
     struct sshd_stats st;
     sshd_get_stats(&st);
-    uart_printf("sshd: %s port=%u accepted=%u kex_ok=%u kex_fail=%u active=%u\r\n",
+    uart_printf("sshd: %s port=%u accepted=%u kex_ok=%u kex_fail=%u active=%u",
                 st.running ? "running" : "stopped",
                 (unsigned)st.port,
                 (unsigned)st.connections_accepted,
                 (unsigned)st.kex_completed,
                 (unsigned)st.kex_failed,
                 (unsigned)st.active);
+    if (st.kex_failed > 0u) {
+        uart_printf(" last_err=%d last_cpu=%u",
+                    st.last_kex_err, (unsigned)st.last_kex_cpu);
+    }
+    uart_printf("\r\n");
 }
 
 static int do_start(int argc, char **argv)

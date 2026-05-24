@@ -39,6 +39,12 @@ struct sshd_stats {
     uint32_t kex_completed;          /* connections that reached WS_SUCCESS */
     uint32_t kex_failed;             /* connections that errored during accept */
     uint32_t active;                 /* currently open sessions */
+    /* Diagnostics surfaced for `sshd status` so operators can debug
+     * a KEX failure even when the session task's uart_printf is
+     * silenced by the Jetson cross-CPU UART policy. Last-failure
+     * wins; cleared when kex_failed advances. */
+    int      last_kex_err;           /* wolfSSH_get_error() return value */
+    uint32_t last_kex_cpu;           /* cpu_logical_id() at the fail site */
 };
 
 /* Start the daemon listening on `port`. Returns SSHD_OK on success.

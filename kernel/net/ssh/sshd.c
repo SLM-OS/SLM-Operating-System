@@ -41,6 +41,7 @@
 #include "shell_io.h"
 #include "shell_io_ssh.h"
 #include "shell_session.h"
+#include "smp.h"
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
@@ -103,6 +104,8 @@ static volatile uint32_t   g_accepted;
 static volatile uint32_t   g_kex_completed;
 static volatile uint32_t   g_kex_failed;
 static volatile uint32_t   g_active;
+static volatile int        g_last_kex_err;
+static volatile uint32_t   g_last_kex_cpu;
 
 /* ---------------------------------------------------------------- */
 /* User authentication callback                                      */
@@ -436,6 +439,8 @@ static void sshd_session_task(void *arg)
             if (closed) {
                 irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
                 g_kex_failed++;
+                g_last_kex_err = err;
+                g_last_kex_cpu = cpu_id();
                 spin_unlock_irqrestore(&g_mod_lock, mflags);
                 uart_printf("[SSHD] conn %u: peer disconnected during KEX\r\n",
                             (unsigned)c->session_id);
@@ -446,6 +451,8 @@ static void sshd_session_task(void *arg)
         /* Any other error is fatal. */
         irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
         g_kex_failed++;
+        g_last_kex_err = err;
+        g_last_kex_cpu = cpu_id();
         spin_unlock_irqrestore(&g_mod_lock, mflags);
         uart_printf("[SSHD] conn %u: wolfSSH_accept fatal err=%d (%s)\r\n",
                     (unsigned)c->session_id,
@@ -737,6 +744,8 @@ void sshd_get_stats(struct sshd_stats *out)
     out->kex_completed        = g_kex_completed;
     out->kex_failed           = g_kex_failed;
     out->active               = g_active;
+    out->last_kex_err         = g_last_kex_err;
+    out->last_kex_cpu         = g_last_kex_cpu;
 }
 
 /* ---------------------------------------------------------------- */
