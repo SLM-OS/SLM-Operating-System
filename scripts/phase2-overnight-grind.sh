@@ -118,7 +118,12 @@ log "Claim acquired on $SBC."
 renew_loop() {
     while true; do
         sleep "$CLAIM_RENEW_INTERVAL_S"
-        if ! labctl renew "$SBC" -d "${CLAIM_DURATION_MIN}m" \
+        # Cap the renew call so a hung labctl (stuck TCP, daemon
+        # lock contention) can't silently freeze the renew loop and
+        # let the claim TTL expire. 30 s is generous for a healthy
+        # local-host call (~10 ms) but short enough that we recover
+        # within one renew tick.
+        if ! timeout 30 labctl renew "$SBC" -d "${CLAIM_DURATION_MIN}m" \
                 >/dev/null 2>&1; then
             log "WARN: claim renewal for $SBC failed (will retry next tick)"
         fi

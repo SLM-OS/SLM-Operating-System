@@ -31,19 +31,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from .line_protocols import (
+    DivergenceReport,
+    ExtendResponse,
+    LineProtocolError,
+    parse_any,
+)
+
 # Append-only log of the literal bytes handed to labctl serial send.
 # Lets us triage dropped-char transients (e.g. "0:/corpus.json708" with the
 # 'l ' missing) by comparing what we sent against what the SLM-OS shell saw.
 # Override via env for tests / non-default deployments.
 _SENT_CMDS_LOG = os.environ.get(
     "HAILO_RE_SENT_CMDS_LOG", "/tmp/hailo-re-sent-cmds.log"
-)
-
-from .line_protocols import (
-    DivergenceReport,
-    ExtendResponse,
-    LineProtocolError,
-    parse_any,
 )
 
 
