@@ -2092,8 +2092,19 @@ static int hailo_backend_load_model(struct inference_device *dev,
             slots[i].cfg = (struct hailo_infer_config){
                 .input_bytes      = input_bytes,
                 .output_bytes     = output_bytes,
-                .input_channel    = 0,
-                .output_channel   = 1,
+                /* Boundary channel indices MUST match the packed_vdma
+                 * the CS translator emits in OPEN_BOUNDARY_{INPUT,
+                 * OUTPUT}_CHANNEL: input = config+1 (H2D 2), output =
+                 * config+15 (D2H 16) with the default config channel
+                 * (HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL = 1). Hardcoding
+                 * 0/1 here armed the host VDMA registers on a different
+                 * pair of channels than the firmware was told to wait
+                 * on, so `num_proc` never advanced on the IN channel
+                 * (#682, located via BAR2 diff against HailoRT 2026-05-25). */
+                .input_channel    = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                              HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET),
+                .output_channel   = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                              HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET),
                 .input_data_id    = in_data_id,
                 .output_data_id   = out_data_id,
                 .input_page_size  = in_page_size,

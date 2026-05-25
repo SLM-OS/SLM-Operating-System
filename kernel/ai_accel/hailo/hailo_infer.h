@@ -41,9 +41,15 @@ struct hailo_infer_config {
     uint32_t input_bytes;
     uint32_t output_bytes;
 
-    /* VDMA channel assignments (Hailo-8 uses 0..15). Typical
-     * layout: input on a low-indexed channel, output on a
-     * higher-indexed one. */
+    /* VDMA channel assignments. Hailo-8 fw v4.23 splits the 32 VDMA
+     * channels into H2D [0, 15] (host→device, used for input) and
+     * D2H [16, 31] (device→host, used for output). `input_channel`
+     * MUST land in H2D and `output_channel` in D2H; mismatched
+     * directions silently wedge the engine (#682). Callers should
+     * use the translator's HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+     * HAILO_CS_BOUNDARY_{INPUT,OUTPUT}_CHANNEL_OFFSET so the host
+     * MMIO and the CS OPEN_BOUNDARY RPCs reference the same
+     * channels by construction. */
     uint8_t  input_channel;
     uint8_t  output_channel;
 
