@@ -25,7 +25,6 @@
 #include "kbuf.h"
 #include "rng.h"
 #include "shell_session.h"
-#include "spinlock.h"
 #include "string.h"
 #include "task.h"
 #include "timer.h"
@@ -40,11 +39,17 @@
 
 struct ssh_io_ctx {
     WOLFSSH         *ssh;        /* borrowed — owner is sshd_conn */
-    spinlock_t       lock;       /* serialises stream_send writes */
     volatile bool    closed;     /* set by close() or peer disconnect */
     bool             binary_mode;
     char             read_holdover;
     bool             have_holdover;
+};
+
+/* Allocation wrapper: one kbuf_alloc covers both the shell_io vtable
+ * and the per-session ctx, halving the per-session allocator hops. */
+struct ssh_io_alloc {
+    struct shell_io     io;
+    struct ssh_io_ctx   ctx;
 };
 
 /* ---------------------------------------------------------------- */
@@ -119,12 +124,15 @@ static void io_write(struct shell_io *io, const char *buf, size_t len)
     struct ssh_io_ctx *c = (struct ssh_io_ctx *)io->ctx;
     if (!c || c->closed || len == 0u) return;
 
-    /* Serialise concurrent writers on the same session. The shell
-     * task is the only writer in production today, but commands that
-     * publish from background tasks (`top` watchers, telemetry feeds)
-     * could trip a tear during stream_send's internal MAC append. */
-    irq_flags_t flags = spin_lock_irqsave(&c->lock);
-
+    /* Single-writer contract: the bound shell task is the only writer
+     * on this session. The shell core funnels every output through
+     * `shell_puts` / `shell_io_write` which run from that task. If a
+     * future commit publishes from a background task (telemetry-feed-
+     * over-SSH, async `top`-style watchers), this routine must grow
+     * proper serialisation — a sleeping primitive, NOT
+     * `spin_lock_irqsave`: `wolfSSH_stream_send` runs AES-GCM, MAC,
+     * `tcp_write`, and `tcp_output` per call (potentially milliseconds),
+     * which is well outside the kernel's IRQ-disable budget. */
     size_t off = 0;
     while (off < len) {
         uint32_t chunk = (uint32_t)((len - off) < 1024u ? (len - off) : 1024u);
@@ -137,19 +145,14 @@ static void io_write(struct shell_io *io, const char *buf, size_t len)
         }
         int err = wolfSSH_get_error(c->ssh);
         if (err == WS_WANT_WRITE || err == WS_WANT_READ) {
-            /* The wolf_io_send callback hit pcb->snd_buf == 0. Yield
-             * briefly and retry. */
-            spin_unlock_irqrestore(&c->lock, flags);
+            /* wolf_io_send hit pcb->snd_buf == 0. Yield briefly. */
             sleep_ms(5);
             if (c->closed) return;
-            flags = spin_lock_irqsave(&c->lock);
             continue;
         }
         c->closed = true;
         break;
     }
-
-    spin_unlock_irqrestore(&c->lock, flags);
 }
 
 static void io_flush(struct shell_io *io)
@@ -200,20 +203,19 @@ struct shell_io *shell_io_ssh_create(WOLFSSH *ssh)
 {
     if (!ssh) return NULL;
 
-    /* Pull the shell_io + ctx from the byte-level kernel allocator so
-     * the per-session pair survives an out-of-pool condition cleanly. */
-    struct shell_io   *io = kbuf_alloc(sizeof(*io));
-    struct ssh_io_ctx *c  = kbuf_alloc(sizeof(*c));
-    if (!io || !c) {
-        if (io) kbuf_free(io);
-        if (c)  kbuf_free(c);
-        return NULL;
-    }
+    /* Single kbuf_alloc for the io + ctx pair. The ctx address is
+     * derived from the io address (struct shell_io is the first
+     * member of ssh_io_alloc), so shell_io_ssh_destroy can free both
+     * by handing the outer struct's address back to kbuf. */
+    struct ssh_io_alloc *a = kbuf_alloc(sizeof(*a));
+    if (!a) return NULL;
 
-    c->ssh          = ssh;
-    c->lock         = (spinlock_t)SPINLOCK_INIT;
-    c->closed       = false;
-    c->binary_mode  = false;
+    struct ssh_io_ctx *c  = &a->ctx;
+    struct shell_io   *io = &a->io;
+
+    c->ssh           = ssh;
+    c->closed        = false;
+    c->binary_mode   = false;
     c->have_holdover = false;
     c->read_holdover = 0;
 
@@ -233,7 +235,8 @@ struct shell_io *shell_io_ssh_create(WOLFSSH *ssh)
 void shell_io_ssh_destroy(struct shell_io *io)
 {
     if (!io) return;
-    if (io->ctx) kbuf_free(io->ctx);
+    /* `io` is the first member of `struct ssh_io_alloc`, so the io
+     * pointer aliases the outer allocation. Free the whole thing. */
     kbuf_free(io);
 }
 

@@ -30,6 +30,9 @@
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
 #endif
+#if defined(NET_SSHD)
+#include "sshd_autostart.h"
+#endif
 #include "lua_slm.h"
 #include "string.h"
 #include <stddef.h>
@@ -890,10 +893,7 @@ void shell_init(void)
     /* SSH daemon — autostart if NET_SSHD_AUTOSTART or /etc/sshd.conf
      * says so. Default OFF until #199e (#895) flips it behind the
      * bootstrap gate from #199d (#896). */
-    {
-        extern void sshd_autostart(void);
-        sshd_autostart();
-    }
+    sshd_autostart();
 #endif
 #endif
 

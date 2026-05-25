@@ -109,14 +109,17 @@ static volatile uint32_t   g_active;
 /* ---------------------------------------------------------------- */
 
 /*
- * #199c (this sub-ticket): accept any user-auth attempt so the demo
- * `ssh root@<ip>` reaches a shell prompt. #199d replaces this with
- * an /etc/passwd + KDF check + rate-limit. The bootstrap gate that
- * makes a default-on flip safe lives in #199d / #896.
+ * #199c demo stub: accept any user-auth attempt so `ssh root@<ip>`
+ * reaches a shell prompt. Gated behind NET_SSHD_DEMO_ALLOW_ALL (set
+ * by CMake; defaults to ON during the #199c lifetime) so #199d's
+ * removal of the stub is a one-line `option(... OFF)` flip with no
+ * source diff in this file.
  *
- * The `NET_SSHD_AUTOSTART` default stays OFF until #199e — operators
- * must explicitly `sshd start` to bring up an open daemon during
- * #199c's lifetime. */
+ * The autostart banner (sshd_autostart.c) prints a WARNING on every
+ * boot while this stub is wired, and `NET_SSHD_AUTOSTART` stays OFF
+ * until #199e so operators must explicitly `sshd start` to expose an
+ * allow-all daemon during the #199c → #199d window. */
+#if defined(NET_SSHD_DEMO_ALLOW_ALL) && NET_SSHD_DEMO_ALLOW_ALL
 static int sshd_userauth_allow_all(uint8_t auth_type,
                                    WS_UserAuthData *data,
                                    void *ctx)
@@ -126,6 +129,7 @@ static int sshd_userauth_allow_all(uint8_t auth_type,
     (void)ctx;
     return WOLFSSH_USERAUTH_SUCCESS;
 }
+#endif
 
 /* ---------------------------------------------------------------- */
 /* Host key — VFS-persisted via kernel/net/ssh/host_key.c            */
@@ -437,7 +441,6 @@ static void sshd_session_task(void *arg)
     shell_session_bind(task_current(), sess);
 
     /* Banner — straight to the SSH stream. */
-    extern void shell_puts(const char *);
     shell_puts("\r\n");
     shell_puts("SLM-OS Debug Shell (ssh)\r\n");
     shell_puts("Type 'help' for available commands.\r\n");
@@ -575,7 +578,9 @@ int sshd_start(uint16_t port)
 
         wolfSSH_SetIORecv(g_ctx, wolf_io_recv);
         wolfSSH_SetIOSend(g_ctx, wolf_io_send);
+#if defined(NET_SSHD_DEMO_ALLOW_ALL) && NET_SSHD_DEMO_ALLOW_ALL
         wolfSSH_SetUserAuth(g_ctx, sshd_userauth_allow_all);
+#endif
 
         /* Convert the SLM-OS-native (seed || pub) layout into the
          * PKCS#8 DER form wolfSSH's WOLFSSH_FORMAT_RAW importer
