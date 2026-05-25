@@ -25,6 +25,12 @@ class ParseTraceLineTests(unittest.TestCase):
     the kernel emit helpers in hailo_trace.c enforce."""
 
     def test_parses_mmio_write_32(self) -> None:
+        """The kernel emits the uint32 as integer-as-hex
+        (`%08x` → "12345678" for 0x12345678). The corpus stores wire-
+        byte order (little-endian: that same 0x12345678 hits the bus
+        as the 4-byte sequence 78 56 34 12, recorded as "78563412").
+        Parser byte-swaps so trace ops compare directly against the
+        corpus encoding."""
         line = "[trc] phase=link       mech=MMIO WR32 bar=0 off=0x0098 val=0x12345678"
         op = parse_trace_line(line)
         self.assertIsNotNone(op)
@@ -33,7 +39,7 @@ class ParseTraceLineTests(unittest.TestCase):
         self.assertEqual(op.offset, 0x98)
         self.assertEqual(op.dir, "write")
         self.assertEqual(op.size, 4)
-        self.assertEqual(op.value, "12345678")
+        self.assertEqual(op.value, "78563412")  # LE byte order
         self.assertEqual(op.phase, "link")
 
     def test_parses_mmio_read_32(self) -> None:
@@ -44,16 +50,31 @@ class ParseTraceLineTests(unittest.TestCase):
         self.assertEqual(op.dir, "read")
         self.assertEqual(op.bar, 4)
         self.assertEqual(op.offset, 0x640)
+        # All zeros is a palindrome under byte-swap; still asserts the
+        # field is present + canonical.
         self.assertEqual(op.value, "00000000")
         self.assertEqual(op.phase, "fw_boot")
 
-    def test_value_zero_padded_to_size(self) -> None:
+    def test_value_byte_swapped_for_le_wire_order(self) -> None:
+        """The fix found on the first end-to-end native-flow capture:
+        every BAR0 ATR-programming write (`val=0x00000017`, ...) was
+        silently value-mismatching against the corpus's wire-order
+        encoding (`17000000`, ...) until the parser byte-swapped. Pin
+        the conversion direction so a refactor can't reintroduce it."""
+        line = "[trc] phase=link       mech=MMIO WR32 bar=0 off=0x0700 val=0x00000017"
+        op = parse_trace_line(line)
+        assert op is not None
+        self.assertEqual(op.value, "17000000")
+
+    def test_value_zero_padded_then_swapped(self) -> None:
         """A short hex (`val=0x1` for a 32-bit op) must canonicalise to
-        the corpus's zero-padded form so equality compares cleanly."""
+        '00000001' as integer-as-hex first, THEN byte-swap to
+        '01000000' to match the corpus's wire-order encoding for an
+        integer-1 store."""
         line = "[trc] phase=link       mech=MMIO WR32 bar=0 off=0x0098 val=0x1"
         op = parse_trace_line(line)
         assert op is not None
-        self.assertEqual(op.value, "00000001")
+        self.assertEqual(op.value, "01000000")
 
     def test_value_lowercased(self) -> None:
         """The corpus uses lowercase hex; the trace might emit either
@@ -63,7 +84,9 @@ class ParseTraceLineTests(unittest.TestCase):
         op = parse_trace_line(line)
         assert op is not None
         self.assertEqual(op.offset, 0xAB)
-        self.assertEqual(op.value, "cafebabe")
+        # Lowercased AND byte-swapped: 0xCAFEBABE → "cafebabe" →
+        # bytes "be ba fe ca" → "bebafeca".
+        self.assertEqual(op.value, "bebafeca")
 
     def test_phase_preserved_for_diagnostics(self) -> None:
         line = "[trc] phase=inference  mech=MMIO RD32 bar=2 off=0x0050 val=0x00000003"
@@ -158,7 +181,9 @@ class ParseTraceStreamTests(unittest.TestCase):
         self.assertEqual(len(ops), 3)
         self.assertEqual([op.dir for op in ops], ["write", "read", "write"])
         self.assertEqual([op.offset for op in ops], [0x98, 0x98, 0x1018])
-        self.assertEqual(ops[2].value, "deadbeef")
+        # 0xdeadbeef → byte-swapped to LE wire order:
+        # bytes ef be ad de → "efbeadde".
+        self.assertEqual(ops[2].value, "efbeadde")
         self.assertEqual(ops[2].phase, "fw_boot")
 
     def test_empty_input_yields_nothing(self) -> None:

@@ -93,10 +93,23 @@ def parse_trace_line(line: str) -> Optional[BoundaryTraceOp]:
     # truncates).
     if len(raw_val) > size * 2:
         return None
-    # Pad to canonical LE-hex width so a short-but-otherwise-valid
-    # line ("val=0x1" when size=4) still compares correctly against
-    # the corpus's zero-padded form ("00000001").
-    value = raw_val.zfill(size * 2).lower()
+    # Pad to canonical width first.
+    int_hex = raw_val.zfill(size * 2).lower()
+    # The kernel emits `uart_printf("val=0x%08x", val)` — the uint32's
+    # integer value rendered high-nibble-first ("00000017" for integer
+    # 23). The corpus stores values in WIRE order: little-endian
+    # bytes-as-hex (integer 23 written via writel hits the bus as the
+    # 4-byte sequence 17 00 00 00, rendered "17000000" per
+    # docs/hailo-re-corpus-format.md §Operation entries). Byte-swap so
+    # the trace value matches the corpus's encoding — without this,
+    # every multi-byte op silently value-mismatches. Directly observed
+    # on the first end-to-end native-flow capture against the 4.23.0
+    # grind corpus: all 4 BAR0 ATR-programming writes showed
+    # byte-reversed values until this swap was added.
+    value = "".join(
+        int_hex[2 * (size - 1 - i): 2 * (size - 1 - i) + 2]
+        for i in range(size)
+    )
     return BoundaryTraceOp(
         bar=int(m.group("bar")),
         offset=int(m.group("off"), 16),
