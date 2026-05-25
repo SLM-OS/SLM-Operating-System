@@ -39,6 +39,7 @@
 
 #include "pmm.h"
 #include "spinlock.h"
+#include "string.h"
 #include "uart.h"
 
 /* Sized for scrypt at PASSWD_SCRYPT_LOG2_N=15: 32 MB working
@@ -142,6 +143,16 @@ static void free_locked(void *p)
                     p, (unsigned)b->magic);
         return;
     }
+    /* Double-free detection: the header carries WOLF_HEAP_MAGIC even
+     * after the first free (the freelist treats it as a sentinel), so
+     * the magic check above passes. Without this guard a second free
+     * would re-merge with already-merged neighbours and corrupt the
+     * freelist, potentially aliasing one wolfssl allocation onto
+     * another's working buffer — a key-material leak vector. */
+    if (b->is_free) {
+        uart_printf("[WOLFHEAP] double-free at %p\r\n", p);
+        return;
+    }
     b->is_free = 1u;
 
     /* Merge with successor + predecessor where possible. */
@@ -195,10 +206,7 @@ void *wolf_heap_realloc(void *p, size_t size)
     /* Grow: allocate fresh, copy, free old. */
     void *np = alloc_locked(size);
     if (np != NULL) {
-        size_t copy = b->size;
-        for (size_t i = 0; i < copy; i++) {
-            ((uint8_t *)np)[i] = ((uint8_t *)p)[i];
-        }
+        memcpy(np, p, b->size);
         free_locked(p);
     }
     spin_unlock_irqrestore(&g_lock, flags);

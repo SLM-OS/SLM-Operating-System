@@ -44,28 +44,30 @@ static struct lfs_mount *resolve_passwd_mount(void)
     return (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
 }
 
-static void reset_passwd_file(void)
+/* Single setup helper: wipe any /etc/passwd left over from a prior
+ * test, skip the calling test if /mnt/files isn't mounted on this
+ * build target. The implicit-skip variant means a future test author
+ * who forgets the reset stays on the supported path instead of
+ * inheriting prior-test state. */
+static void prepare_fs_or_skip(void)
 {
     struct lfs_mount *mnt = resolve_passwd_mount();
-    if (!mnt) return;   /* test will skip itself on the assert below */
+    if (!mnt) {
+        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
+        return;   /* unreachable — TEST_IGNORE_MESSAGE longjmps */
+    }
     (void)littlefs_remove(mnt, PASSWD_LFS_PATH);
 }
 
 static void test_any_users_false_when_file_missing(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
     TEST_ASSERT_FALSE(passwd_any_users());
 }
 
 static void test_adduser_verify_roundtrip(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
 
     /* Add a user — exercises rng_get_bytes for the salt, derive_hash
      * over scrypt at N=2^15, the PHC-formatted line write, and the
@@ -83,10 +85,7 @@ static void test_adduser_verify_roundtrip(void)
 
 static void test_verify_wrong_password_returns_E_WRONG(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
     TEST_ASSERT_EQUAL_INT(PASSWD_OK,
         passwd_adduser("bob", "hunter2"));
     TEST_ASSERT_EQUAL_INT(PASSWD_E_WRONG,
@@ -95,10 +94,7 @@ static void test_verify_wrong_password_returns_E_WRONG(void)
 
 static void test_verify_unknown_user_returns_E_NOT_FOUND(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
     TEST_ASSERT_EQUAL_INT(PASSWD_OK,
         passwd_adduser("carol", "secret"));
     TEST_ASSERT_EQUAL_INT(PASSWD_E_NOT_FOUND,
@@ -107,20 +103,14 @@ static void test_verify_unknown_user_returns_E_NOT_FOUND(void)
 
 static void test_adduser_refuses_duplicate(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
     TEST_ASSERT_EQUAL_INT(PASSWD_OK,    passwd_adduser("dave", "first"));
     TEST_ASSERT_EQUAL_INT(PASSWD_E_EXISTS, passwd_adduser("dave", "second"));
 }
 
 static void test_deluser_refuses_last_user(void)
 {
-    reset_passwd_file();
-    if (!resolve_passwd_mount()) {
-        TEST_IGNORE_MESSAGE("/mnt/files not mounted on this target");
-    }
+    prepare_fs_or_skip();
     TEST_ASSERT_EQUAL_INT(PASSWD_OK, passwd_adduser("eve", "onlyone"));
     /* The bootstrap-safety promise: refuse to delete the only
      * remaining user so the daemon can't lock the operator out. */

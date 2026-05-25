@@ -36,9 +36,7 @@
  * single 32 MB working buffer per derivation, which the shared
  * lua_stubs heap (1 MB) can't satisfy — discovered during the
  * #199e hardware-validation pass on pi-5-2. */
-extern void *wolf_heap_alloc(size_t size);
-extern void  wolf_heap_free(void *p);
-extern void *wolf_heap_realloc(void *p, size_t size);
+#include "wolf_heap.h"
 
 void *XMALLOC(size_t n, void *heap, int type)
 {
