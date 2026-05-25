@@ -123,18 +123,154 @@ It is NOT trusted to:
 
 ## SSH
 
-The SSH server (#199) lands across five sub-tickets. This section
-fills out as those land.
+The SSH daemon (#199, Phase 3) is built on a vendored wolfSSH
+1.4.18-stable + wolfCrypt (wolfSSL 5.7.4-stable) under
+`kernel/lib/{wolfssh,wolfcrypt}/`. CMake gates the entire surface
+on `NET_SSHD` (default OFF outside lab targets; default ON on Pi 5
++ Jetson because the bootstrap gate makes that safe).
 
-- **#893** — wolfSSH / wolfCrypt vendoring + lwIP IO + RNG (this PR).
-- **#892** — Ed25519 host-key generation and persistence.
-- **#891** — channel routing + sshd autostart.
-- **#896** — password authentication, user management, bootstrap gate.
-- **#895** — hardening, interop matrix, entropy audit, default-on flip.
+### Threat model
 
-Until #896 lands the bootstrap gate, the daemon is opt-in (no
-default-on auto-start). Until #895 audits the cipher / KDF surface,
-the deployment is "trust the lab network."
+In-scope:
+- Confidentiality + integrity of the SSH session against a passive
+  network observer.
+- Resistance to first-connection MITM via host-key pinning (operator
+  records the SLM-OS-side fingerprint via `sshd fingerprint`).
+- Refusal to permit shell access without a credential.
+
+Out of scope (documented non-goals per #199):
+- Public-key authentication (deferred follow-up).
+- HSM / TPM-backed host keys.
+- SFTP / SCP / X11 forwarding / agent forwarding (stripped from
+  the wolfSSH build).
+- DoS resistance against an unbounded attacker (see Hardening).
+
+### Cryptographic surface
+
+| Primitive | Choice | Justification |
+|---|---|---|
+| Key exchange | curve25519-sha256 | RFC 8731; no NIST curves in the build |
+| Host key | Ed25519 (RFC 8032) | curve25519 family, fast, no NIST primitives |
+| AEAD cipher | AES-256-GCM | RFC 5647; wolfSSH 1.4.18's chosen cipher menu doesn't include chacha20-poly1305@openssh.com — original ticket spec called for ChaCha but the library only ships AES. AES-GCM is OpenSSH's first-choice cipher today |
+| MAC | (implicit, AEAD) | GCM tag is the MAC |
+| Password KDF | scrypt N=2^15, r=8, p=1 | RFC 7914 floor, OWASP second recommendation. argon2id isn't vendored (wolfssl doesn't ship it) |
+| Salt | 16 random bytes per user | `rng_get_bytes` — see RNG section above |
+
+The `user_settings.h` under `kernel/lib/wolfcrypt/` is the single
+source of truth for the feature surface. Enabling additional
+algorithms requires explicit edits there + matching source-set
+additions in `CMakeLists.txt`.
+
+### Constant-time guarantees
+
+Verified by source inspection against the vendored 5.7.4-stable
+wolfCrypt; the audit summary lives in
+[`docs/security.md#constant-time-audit`](#constant-time-audit) below
+and is the responsibility of the maintainer to refresh per upstream
+bump.
+
+- **Curve25519 scalar multiplication**: `fe_operations.c`/`ge_operations.c`
+  paths used by wolfCrypt with `ECC_TIMING_RESISTANT` enabled
+  (set in user_settings.h). The scalar-mul loop processes a fixed
+  254 bits regardless of input.
+- **Ed25519 signature verification**: `wc_ed25519_verify_msg`
+  computes both sides of the comparison and uses
+  `ConstantCompare` on the final 32-byte image.
+- **ChaCha20-Poly1305 / AES-GCM tag check**: wolfCrypt's
+  `ConstantCompare` (in `wolfcrypt/src/misc.c`) is the only call
+  site for the AEAD tag comparison. Inspected — XOR-and-OR
+  reduction over the full 16 bytes; no early exit.
+- **Password hash comparison**: SLM-OS-side
+  `passwd.c::constant_time_compare` uses an XOR-OR accumulator
+  over the full 32-byte derived hash; no first-mismatch short
+  circuit.
+
+### Bootstrap gate
+
+`sshd_userauth_passwd` (`kernel/net/ssh/sshd.c`) returns
+`WOLFSSH_USERAUTH_FAILURE` for every authentication attempt unless
+`passwd_any_users()` returns true. That predicate is true iff at
+least one entry exists in `/mnt/files/etc/passwd`. On a fresh boot
+with `NET_SSHD_AUTOSTART=ON`, the listener accepts connections but
+every login attempt fails — there's no exploit window.
+
+The operator's first action on a fresh image:
+
+```
+slmos> adduser root <password>
+```
+
+is what opens the gate. The boot banner advertises the gate state
+so the operator can tell at a glance whether the daemon is
+accepting logins.
+
+### Host-key persistence
+
+Stored under `/mnt/files/etc/ssh/`:
+
+- `host_ed25519_key` — 32-byte raw seed (SLM-OS-native, not the
+  OpenSSH PEM envelope). Only the kernel reads this.
+- `host_ed25519_key.pub` — OpenSSH-compatible
+  `ssh-ed25519 <base64> SLM-OS\n` line. Drop into
+  `~/.ssh/known_hosts` directly.
+
+Atomic write (`.tmp` + rename); power loss mid-write leaves either
+the prior key or the new key, never a torn half. The fingerprint
+(`sshd fingerprint`) is the SHA-256 of the RFC 4253 ssh-ed25519
+blob, base64-encoded without padding, prefixed with `SHA256:` —
+matches what OpenSSH 6.8+ prompts for on first connection.
+
+### Hardening
+
+DoS resistance is the current gap. Today every wrong-password
+attempt costs ~100 ms of scrypt CPU on Pi 5; there's no per-IP
+rate limit, no connection-rate cap, no pre-auth resource ceiling.
+Follow-ups:
+
+- [ ] Per-source-IP failure backoff (1 s after 3 fails, 10 s
+      after 10, 60 s after 30 — reset on success or 5 min idle).
+- [ ] Connection-rate cap per source IP.
+- [ ] Pre-auth memory + CPU limit; drop a connection after N
+      seconds of stalled auth.
+- [ ] Run hydra at 100 conn/s for 60 s; confirm a concurrent
+      UART shell session stays responsive.
+- [ ] Wire a per-session authenticated-user field on
+      `shell_session` so `whoami` from inside an SSH session
+      returns the actual login name (currently reports "ssh").
+
+### Entropy audit checklist
+
+Run off-target with a multi-MB capture from `rng read`:
+
+- [ ] `ent` battery (Fourchette / Shannon / chi-squared / mean / pi
+      Monte-Carlo / serial correlation). TRNG path expected to pass
+      all five; jitter path expected to pass at acceptable margins.
+- [ ] NIST SP800-90B IID / non-IID conformance tests. Document
+      the chosen entropy estimator and the H_min the source proves.
+- [ ] Stuck-state behaviour: cap RDRAND with `cpufreq` lockstep
+      to provoke `hw_degrade_events` and confirm the fallback to
+      jitter is taken cleanly.
+
+### Constant-time audit
+
+The above section is the *current* claim. Per upstream wolfCrypt
+bump, the auditor must re-walk the four primitives and refresh
+this section.
+
+### Interop matrix
+
+Refreshed per `make kernel NET_SSHD=ON PLATFORM=<target>` deploy
+on the lab boards. Today's known-good set:
+
+| Client | Version | Status |
+|---|---|---|
+| OpenSSH (Linux) | 9.x | Pending hardware validation |
+| OpenSSH (macOS) | bundled | Pending |
+| PuTTY | 0.8x | Pending |
+| Windows Terminal SSH | bundled | Pending |
+| Termius (mobile) | latest | Optional / pending |
+
+Hardware lab time tracked separately; see PR #199e thread.
 
 ---
 

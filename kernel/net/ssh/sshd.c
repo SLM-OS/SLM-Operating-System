@@ -41,11 +41,13 @@
 #include "shell_io.h"
 #include "shell_io_ssh.h"
 #include "shell_session.h"
+#include "smp.h"
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
 #include "timer.h"
 #include "uart.h"
+#include "wolf_os.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -57,6 +59,7 @@
 #include <wolfssh/ssh.h>
 #include <wolfssh/error.h>
 #include <wolfssh/internal.h>
+#include <wolfssh/log.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/ed25519.h>
 #include <wolfssl/wolfcrypt/random.h>
@@ -103,6 +106,8 @@ static volatile uint32_t   g_accepted;
 static volatile uint32_t   g_kex_completed;
 static volatile uint32_t   g_kex_failed;
 static volatile uint32_t   g_active;
+static volatile int        g_last_kex_err;
+static volatile uint32_t   g_last_kex_cpu;
 
 /* ---------------------------------------------------------------- */
 /* User authentication callback                                      */
@@ -436,6 +441,8 @@ static void sshd_session_task(void *arg)
             if (closed) {
                 irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
                 g_kex_failed++;
+                g_last_kex_err = err;
+                g_last_kex_cpu = cpu_id();
                 spin_unlock_irqrestore(&g_mod_lock, mflags);
                 uart_printf("[SSHD] conn %u: peer disconnected during KEX\r\n",
                             (unsigned)c->session_id);
@@ -446,6 +453,8 @@ static void sshd_session_task(void *arg)
         /* Any other error is fatal. */
         irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
         g_kex_failed++;
+        g_last_kex_err = err;
+        g_last_kex_cpu = cpu_id();
         spin_unlock_irqrestore(&g_mod_lock, mflags);
         uart_printf("[SSHD] conn %u: wolfSSH_accept fatal err=%d (%s)\r\n",
                     (unsigned)c->session_id,
@@ -616,6 +625,12 @@ int sshd_start(uint16_t port)
         return SSHD_E_WOLF_INIT;
     }
 
+    /* Route wolfSSH's WLOG output to uart_printf. The callback is
+     * a no-op when DEBUG_WOLFSSH is undefined in user_settings.h
+     * (which is the default — turn it on only for troubleshooting).
+     * Idempotent; safe to set on each sshd_start. */
+    wolfSSH_SetLoggingCb(slm_wolfssh_log_cb);
+
     /* Load (or first-boot-generate-and-persist) the Ed25519 host
      * keypair under /mnt/files/etc/ssh/. See kernel/net/ssh/host_key.c.
      * Re-loaded across sshd_stop/start cycles in case the operator
@@ -658,14 +673,25 @@ int sshd_start(uint16_t port)
             wolfSSH_CTX_free(g_ctx); g_ctx = NULL; return SSHD_E_NO_HOSTKEY;
         }
 
-        /* DER form for Ed25519 PKCS#8 is at most ~85 bytes; 128 gives
-         * a safe margin. wc_Ed25519PrivateKeyToDer returns the length
-         * actually written. The buffer carries the full private seed
-         * on the stack — wipe it on every exit path (secure_zero
-         * defeats dead-store-elim; the stack frame is reclaimed by
-         * the scheduler when sshd_start's caller task returns). */
-        uint8_t der[128];
-        int der_len = wc_Ed25519PrivateKeyToDer(&tmp_key, der, (uint32_t)sizeof(der));
+        /* DER form for Ed25519 PKCS#8 with embedded public key is at
+         * most ~128 bytes; 160 leaves a safe margin. Use
+         * wc_Ed25519KeyToDer (NOT wc_Ed25519PrivateKeyToDer) so the
+         * DER carries both the 32-byte private seed AND the 32-byte
+         * public key — wolfSSH's decoder branches on pubKeyLen and
+         * calls wc_ed25519_import_private_key (which sets BOTH key->k
+         * and key->p). The seed-only DER from
+         * wc_Ed25519PrivateKeyToDer leaves key->p zero, which corrupts
+         * the hram computation inside wc_ed25519_sign_msg (`key->p`
+         * participates in line 512 of ed25519.c), producing signatures
+         * the client can't verify. Found during #988 hardware
+         * validation.
+         *
+         * The buffer carries the full private seed on the stack —
+         * wipe it on every exit path (secure_zero defeats
+         * dead-store-elim; the stack frame is reclaimed by the
+         * scheduler when sshd_start's caller task returns). */
+        uint8_t der[160];
+        int der_len = wc_Ed25519KeyToDer(&tmp_key, der, (uint32_t)sizeof(der));
         wc_ed25519_free(&tmp_key);
         if (der_len <= 0) {
             secure_zero(der, sizeof(der));
@@ -737,6 +763,8 @@ void sshd_get_stats(struct sshd_stats *out)
     out->kex_completed        = g_kex_completed;
     out->kex_failed           = g_kex_failed;
     out->active               = g_active;
+    out->last_kex_err         = g_last_kex_err;
+    out->last_kex_cpu         = g_last_kex_cpu;
 }
 
 /* ---------------------------------------------------------------- */

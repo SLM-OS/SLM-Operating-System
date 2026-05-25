@@ -10317,7 +10317,16 @@ static int SendKexGetSigningKey(WOLFSSH* ssh,
                             sigKeyBlock_ptr->sk.ecc.qSz);
             }
             break;
+        #endif /* WOLFSSH_NO_ECDSA */
 
+        /* SLM-OS local patch (#199e / #988): the upstream wolfSSH
+         * 1.4.18 source nests the ID_ED25519 case inside the
+         * WOLFSSH_NO_ECDSA gate that starts at line 10250, which
+         * makes Ed25519 host keys silently unusable on a build that
+         * has Ed25519 enabled but ECDSA disabled. Move the Ed25519
+         * case outside the ECDSA gate so the two algorithms are
+         * independently selectable. Same defect as the one already
+         * patched in `struct wolfSSH_sigKeyBlockFull` for #199a. */
         #ifndef WOLFSSH_NO_ED25519
         case ID_ED25519:
             WLOG(WS_LOG_DEBUG, "Using Ed25519 Host key");
@@ -10334,7 +10343,7 @@ static int SendKexGetSigningKey(WOLFSSH* ssh,
             if (ret == 0)
                 ret = wc_ed25519_export_public(&sigKeyBlock_ptr->sk.ed.key,
                                                 sigKeyBlock_ptr->sk.ed.q,
-                                                &sigKeyBlock_ptr->sk.ed.qSz );
+                                                &sigKeyBlock_ptr->sk.ed.qSz);
 
             /* Hash in the length of the public key block. */
             if (ret == 0) {
@@ -10368,8 +10377,10 @@ static int SendKexGetSigningKey(WOLFSSH* ssh,
                                     sigKeyBlock_ptr->sk.ed.q,
                                     sigKeyBlock_ptr->sk.ed.qSz);
             break;
-        #endif
-        #endif
+        #endif /* WOLFSSH_NO_ED25519 — SLM-OS patch removed the
+                * original second #endif that closed WOLFSSH_NO_ECDSA
+                * because we moved that closer up to be right after
+                * the ECC block, so Ed25519 is now independent. */
 
             default:
                 ret = WS_INVALID_ALGO_ID;

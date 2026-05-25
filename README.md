@@ -34,6 +34,30 @@ make test                     # Build the test kernel and run the suite
 All three commands accept `PLATFORM=<target>` to switch platforms. Full
 build, run, and debug workflow: [`docs/getting-started.md`](docs/getting-started.md).
 
+### SSH into your bare-metal OS
+
+The Phase 3 SSH daemon (#199) is built in with
+`make kernel NET_SSHD=ON` and auto-starts on Pi 5 and Jetson lab
+images. On first boot the daemon refuses every connection until
+the operator provisions a user from the local console:
+
+```
+slmos> adduser root <password>
+slmos> sshd status            # confirm listener is up on port 2222
+```
+
+Then from your workstation:
+
+```
+ssh -p 2222 root@<board-ip>
+```
+
+KEX is curve25519-sha256, cipher is AES-256-GCM, host key is
+Ed25519 (persisted under `/mnt/files/etc/ssh/host_ed25519_key`,
+fingerprint visible via `sshd fingerprint`). Full design notes:
+[`docs/security.md`](docs/security.md) and
+[`docs/networking.md`](docs/networking.md) §SSH.
+
 ---
 
 ## Repository Layout

@@ -1244,6 +1244,80 @@ make test
 
 ---
 
+## SSH
+
+The Phase 3 SSH daemon (#199) is wired against the same lwIP raw
+TCP API as telnetd, but with a wolfSSH 1.4.18 + wolfCrypt
+(wolfSSL 5.7.4) crypto stack on top. Enabled with
+`make kernel NET_SSHD=ON`.
+
+### Cryptographic surface
+
+| Layer | Choice |
+|---|---|
+| KEX | curve25519-sha256 |
+| Host key | Ed25519 (RFC 8032) |
+| Cipher | AES-256-GCM |
+| MAC | implicit (GCM tag) |
+| Password KDF | scrypt N=2^15, r=8, p=1 (RFC 7914) |
+
+Detailed crypto + entropy threat model: [`docs/security.md`](security.md).
+
+### Operator workflow
+
+```
+slmos> adduser root <password>          # bootstrap — opens the auth gate
+slmos> sshd start [port]                # default 2222; only needed if autostart is OFF
+slmos> sshd status                      # running state + KEX counters
+slmos> sshd fingerprint                 # SHA256:base64 — pin against client's known_hosts
+slmos> sshd regenerate-host-key         # compromise recovery
+```
+
+Then from the workstation:
+
+```
+ssh -p 2222 root@<board-ip>
+```
+
+### Configuration
+
+`/mnt/files/etc/sshd.conf` overrides the compile-time autostart
+default. Same flat `key=value` shape as `telnetd.conf`:
+
+```
+enabled=true
+port=2222
+```
+
+### Bootstrap gate
+
+`sshd_userauth_passwd` refuses every login attempt while
+`passwd_any_users()` is false. On a fresh image with
+`NET_SSHD_AUTOSTART=ON`, the listener accepts connections but no
+login can succeed until the operator runs `adduser` on the local
+console. That's what makes the autostart default-on flip safe on
+Pi 5 / Jetson lab images.
+
+### Concurrency
+
+- `SSHD_MAX_SESSIONS = 4` (raises in lockstep with the
+  `MAX_TCP_SHELL_SESSIONS = 16` shared shell-session pool).
+- One kernel task per connection. `wolfSSH_accept` runs on the
+  per-conn task; after KEX, the same task runs the shell REPL via
+  a `shell_io_ssh` backend over `wolfSSH_stream_read/send`.
+- Per-IP rate limiting is the open #199e gap.
+
+### File layout
+
+| Path | Purpose |
+|---|---|
+| `/mnt/files/etc/passwd` | User database (PHC-style scrypt entries) |
+| `/mnt/files/etc/ssh/host_ed25519_key` | 32-byte raw private seed |
+| `/mnt/files/etc/ssh/host_ed25519_key.pub` | OpenSSH-format public key line |
+| `/mnt/files/etc/sshd.conf` | Autostart config (optional) |
+
+---
+
 ## Future Work
 
 - **Pi 5 NIC driver**: RP1 gigabit Ethernet driver
