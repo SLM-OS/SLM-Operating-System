@@ -31,33 +31,32 @@
 /* Heap hooks (XMALLOC_USER)                                         */
 /* ---------------------------------------------------------------- */
 
-/* Kernel-side byte allocator. Provided by lua_stubs.c — same heap
- * the rest of the kernel uses (Rust-backed bump+free allocator). */
-extern void *malloc(size_t size);
-extern void  free(void *ptr);
-extern void *realloc(void *ptr, size_t size);
+/* Dedicated 48 MB wolfssl heap (kernel/net/ssh/wolf_heap.c). The
+ * scrypt KDF at the RFC 7914 floor (N=2^15, r=8, p=1) needs a
+ * single 32 MB working buffer per derivation, which the shared
+ * lua_stubs heap (1 MB) can't satisfy — discovered during the
+ * #199e hardware-validation pass on pi-5-2. */
+#include "wolf_heap.h"
 
-/* The wolfssl heap and type arguments are advisory — we discard
- * them. Forward to the kernel allocator. */
 void *XMALLOC(size_t n, void *heap, int type)
 {
     (void)heap;
     (void)type;
-    return malloc(n);
+    return wolf_heap_alloc(n);
 }
 
 void XFREE(void *p, void *heap, int type)
 {
     (void)heap;
     (void)type;
-    free(p);
+    wolf_heap_free(p);
 }
 
 void *XREALLOC(void *p, size_t n, void *heap, int type)
 {
     (void)heap;
     (void)type;
-    return realloc(p, n);
+    return wolf_heap_realloc(p, n);
 }
 
 /* ---------------------------------------------------------------- */

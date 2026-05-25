@@ -57,6 +57,10 @@ int cmd_uptime(int argc, char **argv);
 int cmd_canary(int argc, char **argv);
 int cmd_rng(int argc, char **argv);   /* rng_shell.c — #199a / #893 */
 int cmd_sshd(int argc, char **argv);  /* net/ssh/sshd_shell.c — #199a / #893 */
+int cmd_adduser(int argc, char **argv); /* net/ssh/passwd_shell.c — #199d / #896 */
+int cmd_passwd(int argc, char **argv);  /* net/ssh/passwd_shell.c — #199d / #896 */
+int cmd_deluser(int argc, char **argv); /* net/ssh/passwd_shell.c — #199d / #896 */
+int cmd_whoami(int argc, char **argv);  /* net/ssh/passwd_shell.c — #199d / #896 */
 int cmd_clear(int argc, char **argv);
 int cmd_reboot(int argc, char **argv);
 int cmd_sleep(int argc, char **argv);

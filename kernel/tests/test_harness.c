@@ -196,6 +196,8 @@ int test_harness_run_all(void)
     /* SSH host-key persistence (#199b / #892). The TU only compiles
      * when NET_SSHD is on, so it stays inside the same gate. */
     total_failures += test_suite_host_key();
+    /* Password DB + scrypt verify (#199d / #896). */
+    total_failures += test_suite_passwd();
 #endif
     /* `kernel` admin command surface (also relies on sdhci-pci). */
     total_failures += test_suite_kernel_cmd();

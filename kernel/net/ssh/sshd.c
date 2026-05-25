@@ -108,28 +108,83 @@ static volatile uint32_t   g_active;
 /* User authentication callback                                      */
 /* ---------------------------------------------------------------- */
 
+#include "passwd.h"
+
 /*
- * #199c demo stub: accept any user-auth attempt so `ssh root@<ip>`
- * reaches a shell prompt. Gated behind NET_SSHD_DEMO_ALLOW_ALL (set
- * by CMake; defaults to ON during the #199c lifetime) so #199d's
- * removal of the stub is a one-line `option(... OFF)` flip with no
- * source diff in this file.
+ * Two user-auth callbacks live side-by-side, selected at compile time
+ * by `NET_SSHD_DEMO_ALLOW_ALL`:
  *
- * The autostart banner (sshd_autostart.c) prints a WARNING on every
- * boot while this stub is wired, and `NET_SSHD_AUTOSTART` stays OFF
- * until #199e so operators must explicitly `sshd start` to expose an
- * allow-all daemon during the #199c → #199d window. */
+ *   ON  → `sshd_userauth_allow_all` accepts every login; matches the
+ *         #199c demo path. `sshd_autostart` prints a loud WARNING on
+ *         every boot while this is wired.
+ *
+ *   OFF → `sshd_userauth_passwd` verifies (username, password) against
+ *         `/mnt/files/etc/passwd` via the scrypt-based `passwd_verify`
+ *         from #199d. Bootstrap gate: until `passwd_any_users()`
+ *         returns true (operator has run `passwd <name> <pw>` on the
+ *         console at least once), every auth attempt fails with the
+ *         standard FAILURE response. Peer sees "Permission denied
+ *         (password)." — uninformative to an attacker, operator
+ *         diagnoses from the boot banner.
+ *
+ * Rate limiting + per-IP backoff are deferred to #199e. Public-key
+ * auth is out of scope per #199's non-goals.
+ *
+ * The CMake default for `NET_SSHD_DEMO_ALLOW_ALL` flipped from ON to
+ * OFF in this PR so real auth is the default once #199d landed; an
+ * operator who wants the demo bypass can rebuild with
+ * `-DNET_SSHD_DEMO_ALLOW_ALL=ON`.
+ */
 #if defined(NET_SSHD_DEMO_ALLOW_ALL) && NET_SSHD_DEMO_ALLOW_ALL
 static int sshd_userauth_allow_all(uint8_t auth_type,
                                    WS_UserAuthData *data,
                                    void *ctx)
+#else
+static int sshd_userauth_passwd(uint8_t auth_type,
+                                WS_UserAuthData *data,
+                                void *ctx)
+#endif
 {
+#if defined(NET_SSHD_DEMO_ALLOW_ALL) && NET_SSHD_DEMO_ALLOW_ALL
     (void)auth_type;
     (void)data;
     (void)ctx;
     return WOLFSSH_USERAUTH_SUCCESS;
-}
+#else
+    (void)ctx;
+    if (!passwd_any_users()) {
+        return WOLFSSH_USERAUTH_FAILURE;
+    }
+    if (auth_type != WOLFSSH_USERAUTH_PASSWORD || data == NULL) {
+        return WOLFSSH_USERAUTH_FAILURE;
+    }
+    if (data->usernameSz == 0u || data->usernameSz > PASSWD_MAX_USERNAME_LEN) {
+        return WOLFSSH_USERAUTH_FAILURE;
+    }
+    if (data->sf.password.passwordSz == 0u ||
+        data->sf.password.passwordSz > PASSWD_MAX_PASSWORD_LEN) {
+        return WOLFSSH_USERAUTH_FAILURE;
+    }
+
+    char username[PASSWD_MAX_USERNAME_LEN + 1u];
+    char password[PASSWD_MAX_PASSWORD_LEN + 1u];
+    /* Lengths are already bounded by the early-return checks above. */
+    memcpy(username, data->username, data->usernameSz);
+    username[data->usernameSz] = '\0';
+    memcpy(password, data->sf.password.password, data->sf.password.passwordSz);
+    password[data->sf.password.passwordSz] = '\0';
+
+    int rc = passwd_verify(username, password);
+
+    /* Wipe the plaintext password from the stack before returning.
+     * secure_zero is the standard helper (kernel/include/string.h)
+     * — defeats dead-store-elim on the stack copy. */
+    secure_zero(password, sizeof(password));
+
+    return (rc == PASSWD_OK) ? WOLFSSH_USERAUTH_SUCCESS
+                             : WOLFSSH_USERAUTH_FAILURE;
 #endif
+}
 
 /* ---------------------------------------------------------------- */
 /* Host key — VFS-persisted via kernel/net/ssh/host_key.c            */
@@ -580,6 +635,8 @@ int sshd_start(uint16_t port)
         wolfSSH_SetIOSend(g_ctx, wolf_io_send);
 #if defined(NET_SSHD_DEMO_ALLOW_ALL) && NET_SSHD_DEMO_ALLOW_ALL
         wolfSSH_SetUserAuth(g_ctx, sshd_userauth_allow_all);
+#else
+        wolfSSH_SetUserAuth(g_ctx, sshd_userauth_passwd);
 #endif
 
         /* Convert the SLM-OS-native (seed || pub) layout into the
