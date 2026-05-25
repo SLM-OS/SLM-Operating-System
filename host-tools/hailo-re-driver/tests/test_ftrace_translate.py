@@ -167,6 +167,24 @@ class ParseFtraceLineTests(unittest.TestCase):
             with self.subTest(line=comment):
                 self.assertIsNone(parse_ftrace_line(comment, self.BARS))
 
+    def test_rejects_value_wider_than_op_size(self) -> None:
+        """Parity with `boundary_trace.test_rejects_value_wider_than_op_size`.
+        If the kprobe prints more hex digits than the op width can
+        hold (e.g. a misconfigured `%lx` formatter on a 32-bit op),
+        fail loudly — otherwise the diff would compare a too-wide
+        trace value against the corpus's narrower stored value and
+        mysteriously mismatch."""
+        for line in [
+            # 9 hex chars for iowrite32 (max 8):
+            "hailortcli-1 [000] d... 1.0: iowrite32_entry: "
+            "(iowrite32+0x0/0x40) v=0x123456789 addr=0xfc010098",
+            # 17 chars for ioread32:
+            "hailortcli-1 [000] d... 1.0: ioread32_entry: "
+            "(ioread32+0x0/0x40) v=0x12345678abcdef012 addr=0xfc010098",
+        ]:
+            with self.subTest(line=line):
+                self.assertIsNone(parse_ftrace_line(line, self.BARS))
+
     def test_byte_swap_at_smaller_widths(self) -> None:
         """Same width-coverage check the boundary_trace tests pin —
         ioread16 and iowrite8 must both byte-swap into wire order.

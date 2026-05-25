@@ -105,11 +105,17 @@ HAILO_PCI_DIR="/sys/bus/pci/devices/0000:${HAILO_DEV}"
 [[ -d "$HAILO_PCI_DIR" ]] || {
     echo "error: $HAILO_PCI_DIR missing" >&2; exit 1; }
 echo "==> Hailo BARs (will be embedded in output for the translator):" >&2
+# /sys/.../resource has exactly 6 BAR rows + I/O + ROM rows on PCIe;
+# we print all data rows the awk filter matches. The earlier `>&2 |
+# head -7` form looked like a 7-row truncation but actually broke
+# the pipe (>&2 redirected stdout to fd2 BEFORE the pipe could read
+# from it), so head got starved and printed nothing. Just emit
+# everything straight to stderr.
 awk '
 NR>0 {
     printf "    BAR%d: phys=0x%016x size=0x%x\n",
            NR-1, strtonum("0x"$1), strtonum("0x"$2) - strtonum("0x"$1) + 1
-}' "$HAILO_PCI_DIR/resource" >&2 | head -7
+}' "$HAILO_PCI_DIR/resource" >&2
 
 # ---- ftrace setup ---------------------------------------------------------
 
@@ -201,9 +207,22 @@ trap cleanup EXIT INT TERM
 
 echo "==> starting trace + running workload" >&2
 echo 1 > "$TRACE_DIR/tracing_on"
+# TRUST MODEL: $WORKLOAD is an operator-supplied command line that
+# will execute as root (this whole script runs as root for ftrace
+# access). The operator is responsible for the content — no escaping
+# or sandboxing happens here. This tool is meant for lab use by the
+# person physically holding the SD card.
+#
+# Capture the rc WITHOUT letting `set -e` terminate the script.
+# The primary use case is capturing the #682 wedge — i.e. HailoRT
+# *will* return non-zero. If we let set -e fire, the script exits
+# before turning tracing off and dumping the buffer, throwing away
+# the entire reason we ran the capture. Use `|| WORKLOAD_RC=$?` so
+# the assignment runs unconditionally and the trace dump that follows
+# always executes.
+WORKLOAD_RC=0
 # shellcheck disable=SC2086 # WORKLOAD is operator-supplied command line
-bash -c "$WORKLOAD"
-WORKLOAD_RC=$?
+bash -c "$WORKLOAD" || WORKLOAD_RC=$?
 echo 0 > "$TRACE_DIR/tracing_on"
 
 if [[ $WORKLOAD_RC -ne 0 ]]; then
