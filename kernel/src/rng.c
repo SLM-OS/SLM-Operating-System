@@ -187,11 +187,12 @@ static int jitter_read_locked(uint8_t *buf, size_t len)
         off += take;
         g_bytes_since_reseed += take;
 
-        /* Wipe the block from the stack frame before the next iter
-         * even though we're about to overwrite it — a defense-in-depth
-         * habit for crypto state. memset-of-stack here is also what
-         * #199e's reviewer will look for. */
-        for (size_t i = 0; i < sizeof(block); i++) block[i] = 0u;
+        /* Wipe the block from the stack frame before the next iter.
+         * secure_zero uses a volatile pointer so the optimiser cannot
+         * elide the writes — a plain `memset` or hand loop on
+         * about-to-go-out-of-scope storage is dead-store-eliminated
+         * under -O2. */
+        secure_zero(block, sizeof(block));
     }
     return 0;
 }
@@ -210,23 +211,23 @@ static int jitter_read_locked(uint8_t *buf, size_t len)
  *   - A boot constant so two boots with identical timing still
  *     differ in pool state.
  *
- * Returns 0 if at least one of {rng-seed, kaslr-seed} contributed
- * non-zero bytes; negative if the firmware provided nothing. The
- * jitter samples are absorbed unconditionally.
+ * Returns true if at least one of {rng-seed, kaslr-seed} contributed
+ * non-zero bytes; false if the firmware provided nothing. The jitter
+ * samples are absorbed unconditionally regardless of the return.
  */
-static int mix_boot_entropy_locked(void)
+static bool mix_boot_entropy_locked(void)
 {
-    int firmware_seed_used = -1;
+    bool firmware_seed_contributed = false;
 
     const dtb_chosen_t *ch = dtb_get_chosen();
     if (ch != NULL) {
         if (ch->rng_seed_len > 0u && ch->rng_seed_len <= sizeof(ch->rng_seed)) {
             pool_absorb(ch->rng_seed, ch->rng_seed_len);
-            firmware_seed_used = 0;
+            firmware_seed_contributed = true;
         }
         if (ch->kaslr_seed_len > 0u && ch->kaslr_seed_len <= sizeof(ch->kaslr_seed)) {
             pool_absorb(ch->kaslr_seed, ch->kaslr_seed_len);
-            firmware_seed_used = 0;
+            firmware_seed_contributed = true;
         }
     }
 
@@ -243,7 +244,7 @@ static int mix_boot_entropy_locked(void)
     const uint8_t tag[] = { 'S', 'L', 'M', 'O', 'S', '/', 'r', 'n' };
     pool_absorb(tag, sizeof(tag));
 
-    return firmware_seed_used;
+    return firmware_seed_contributed;
 }
 
 int rng_init(void)
@@ -258,7 +259,7 @@ int rng_init(void)
     /* Bootstrap the jitter pool unconditionally — it's the floor source
      * even when TRNG is available, used both as fallback and as
      * additional entropy mixed into the boot banner. */
-    int seed_rc = mix_boot_entropy_locked();
+    bool firmware_seed_contributed = mix_boot_entropy_locked();
 
     /* Probe for hardware TRNG. */
     enum rng_source probed = rng_arch_probe();
@@ -269,8 +270,14 @@ int rng_init(void)
 
     uart_printf("[RNG] init: source=%s firmware_seed=%s\r\n",
                 rng_source_name(g_active),
-                seed_rc == 0 ? "yes" : "no");
-    return seed_rc;
+                firmware_seed_contributed ? "yes" : "no");
+    /* rng_init's documented contract: 0 on success; negative when
+     * boot-time mixing produced insufficient entropy (no firmware seed
+     * AND no jitter — but jitter is always available, so the only
+     * remaining signal is the firmware-seed presence). Return 0 if a
+     * firmware seed contributed; -1 otherwise so the operator can see
+     * a "low-entropy boot" signal in the banner. */
+    return firmware_seed_contributed ? 0 : -1;
 }
 
 /* ---------------------------------------------------------------- */
@@ -431,7 +438,9 @@ int rng_selftest(char *reason, size_t reason_cap)
     uint8_t  buf[SAMPLES];
     uint32_t hist[BINS];
 
-    for (size_t i = 0; i < BINS; i++) hist[i] = 0;
+    for (size_t i = 0; i < BINS; i++) {
+        hist[i] = 0;
+    }
 
     if (rng_get_bytes(buf, sizeof(buf)) != 0) {
         if (reason != NULL && reason_cap > 0u) {

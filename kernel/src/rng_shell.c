@@ -127,9 +127,11 @@ static int do_read(int argc, char **argv)
         return -1;
     }
     hex_dump(buf, n);
-    /* Best-effort wipe so a transient `top` snapshot of this shell's
-     * stack doesn't leak the bytes. */
-    for (size_t i = 0; i < n; i++) buf[i] = 0u;
+    /* Wipe so a transient `top` snapshot of this shell's stack doesn't
+     * leak the bytes. secure_zero defeats dead-store elimination —
+     * the plain `for ... buf[i] = 0u` that lived here previously was
+     * removed at -O2 because `buf` is dead after this function returns. */
+    secure_zero(buf, n);
     return 0;
 }
 

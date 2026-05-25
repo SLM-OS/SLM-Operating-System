@@ -122,7 +122,9 @@ char *strtok_r(char *str, const char *delim, char **saveptr)
     /* Skip leading delimiters. */
     while (*s != '\0') {
         const char *d = delim;
-        while (*d != '\0' && *s != *d) d++;
+        while (*d != '\0' && *s != *d) {
+            d++;
+        }
         if (*d == '\0') break;
         s++;
     }
@@ -132,7 +134,9 @@ char *strtok_r(char *str, const char *delim, char **saveptr)
     /* Find end of token. */
     while (*s != '\0') {
         const char *d = delim;
-        while (*d != '\0' && *s != *d) d++;
+        while (*d != '\0' && *s != *d) {
+            d++;
+        }
         if (*d != '\0') { *s++ = '\0'; *saveptr = s; return tok; }
         s++;
     }

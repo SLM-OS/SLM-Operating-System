@@ -56,7 +56,9 @@ static void test_ring_push_pop_roundtrip(void)
     TEST_ASSERT_NOT_NULL(c);
 
     uint8_t in[64];
-    for (size_t i = 0; i < sizeof(in); i++) in[i] = (uint8_t)(i * 17u + 3u);
+    for (size_t i = 0; i < sizeof(in); i++) {
+        in[i] = (uint8_t)(i * 17u + 3u);
+    }
 
     size_t pushed = sshd_test_ring_push(c, in, sizeof(in));
     TEST_ASSERT_EQUAL_UINT(sizeof(in), pushed);
@@ -157,7 +159,9 @@ static void test_ring_wraps_around(void)
      * non-trivial offset. */
     uint8_t chunk_in[97];
     uint8_t chunk_out[97];
-    for (size_t i = 0; i < sizeof(chunk_in); i++) chunk_in[i] = (uint8_t)(i + 1);
+    for (size_t i = 0; i < sizeof(chunk_in); i++) {
+        chunk_in[i] = (uint8_t)(i + 1);
+    }
 
     size_t iterations = (cap * 2u + sizeof(chunk_in) - 1u) / sizeof(chunk_in);
     for (size_t k = 0; k < iterations; k++) {

@@ -137,6 +137,20 @@ void *memset(void *s, int c, size_t n)
     return s;
 }
 
+/*
+ * Optimisation-resistant memset(0). The volatile-qualified pointer is
+ * the load-bearing piece — it forbids the compiler from eliminating
+ * the writes even when the target object is dead after the call.
+ * See string.h for the rationale (crypto-state wipe).
+ */
+void secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *q = (volatile unsigned char *)p;
+    while (n--) {
+        *q++ = 0u;
+    }
+}
+
 /* Compare memory */
 int memcmp(const void *s1, const void *s2, size_t n)
 {
