@@ -467,6 +467,15 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
     add_compile_definitions(NET_SSHD_AUTOSTART=1)
 endif()
 
+# #199c demo: wolfSSH user-auth callback that accepts every login. The
+# kernel logs a WARNING on every autostart while this is wired. #199d
+# (#896) lands real scrypt-against-/etc/passwd auth and flips this OFF
+# in a one-line CMake diff — no source change needed in sshd.c.
+option(NET_SSHD_DEMO_ALLOW_ALL "wolfSSH allow-all user-auth stub (#199c demo)" ON)
+if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_DEMO_ALLOW_ALL)
+    add_compile_definitions(NET_SSHD_DEMO_ALLOW_ALL=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     # Three x86-64 layouts — KEXEC_BUILD and BZIMAGE_BUILD are mutually
@@ -1918,12 +1927,15 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
     target_link_libraries(wolfssh PRIVATE wolfcrypt)
 
     # SLM-OS-side glue: time, RNG seed, lwIP IO callbacks, listener,
-    # accept loop, host-key persistence, shell verb.
+    # accept loop, host-key persistence, shell-session binding,
+    # autostart, shell verb.
     target_sources(slmos.elf PRIVATE
         kernel/net/ssh/wolf_os.c
         kernel/net/ssh/sshd.c
         kernel/net/ssh/sshd_shell.c
         kernel/net/ssh/host_key.c
+        kernel/net/ssh/shell_io_ssh.c
+        kernel/net/ssh/sshd_autostart.c
     )
     target_include_directories(slmos.elf PRIVATE
         ${CMAKE_SOURCE_DIR}/kernel/net/ssh)
