@@ -168,10 +168,10 @@ static int sshd_userauth_passwd(uint8_t auth_type,
 
     char username[PASSWD_MAX_USERNAME_LEN + 1u];
     char password[PASSWD_MAX_PASSWORD_LEN + 1u];
-    for (uint32_t i = 0; i < data->usernameSz; i++) username[i] = (char)data->username[i];
+    /* Lengths are already bounded by the early-return checks above. */
+    memcpy(username, data->username, data->usernameSz);
     username[data->usernameSz] = '\0';
-    for (uint32_t i = 0; i < data->sf.password.passwordSz; i++)
-        password[i] = (char)data->sf.password.password[i];
+    memcpy(password, data->sf.password.password, data->sf.password.passwordSz);
     password[data->sf.password.passwordSz] = '\0';
 
     int rc = passwd_verify(username, password);

@@ -54,6 +54,15 @@ int cmd_adduser(int argc, char **argv)
     return rc;
 }
 
+/*
+ * No privilege model: any authenticated shell user can change any
+ * other user's password. The whoami / per-session-identity plumbing
+ * lands later in the phase (cited in the file header), and the
+ * "only the current user OR an admin can call passwd" gate goes on
+ * top of that. Until then, treat the shell as a single trust domain
+ * — appropriate for SLM-OS's threat model where reaching the shell
+ * already implies physical or authenticated access.
+ */
 int cmd_passwd(int argc, char **argv)
 {
     if (argc < 3) {

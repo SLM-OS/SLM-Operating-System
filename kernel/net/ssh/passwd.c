@@ -182,7 +182,7 @@ static int parse_line(char *line, struct passwd_entry *out)
 
     size_t un_len = strlen(line);
     if (un_len == 0u || un_len > PASSWD_MAX_USERNAME_LEN) return PASSWD_E_FORMAT;
-    for (size_t i = 0; i <= un_len; i++) out->username[i] = line[i];
+    memcpy(out->username, line, un_len + 1u);
 
     /* p1 now points at "$scrypt$N=N,r=R,p=P$<salt>$<hash>". */
     if (strncmp(p1, "$scrypt$", 8) != 0) return PASSWD_E_FORMAT;
@@ -225,7 +225,9 @@ static int parse_line(char *line, struct passwd_entry *out)
     /* Hash — base64-decode up to the next ':' or '\0'. */
     p1 = salt_end + 1;
     char *hash_end = p1;
-    while (*hash_end && *hash_end != ':' && *hash_end != '\n') hash_end++;
+    while (*hash_end && *hash_end != ':' && *hash_end != '\n') {
+        hash_end++;
+    }
     size_t hlen = b64_decode(p1, (size_t)(hash_end - p1),
                              out->hash, PASSWD_HASH_LEN);
     if (hlen != PASSWD_HASH_LEN) return PASSWD_E_FORMAT;
@@ -312,7 +314,12 @@ static int derive_hash(const char *password,
                        int log2_n, int r, int p,
                        uint8_t out[PASSWD_HASH_LEN])
 {
-    if (log2_n <= 0 || log2_n > 20) return PASSWD_E_KDF;
+    /* Cap at our configured floor — a stored entry that claims a
+     * higher log2_n than we ever produce is either corruption or an
+     * import from foreign tooling we don't support. wc_scrypt would
+     * fail allocation long before log2_n > 20 (~1 GB) on any SLM-OS
+     * platform anyway. */
+    if (log2_n <= 0 || log2_n > PASSWD_SCRYPT_LOG2_N) return PASSWD_E_KDF;
     int rc = wc_scrypt(out,
                        (const uint8_t *)password,
                        (int)strlen(password),
@@ -325,7 +332,9 @@ static int derive_hash(const char *password,
 static int constant_time_compare(const uint8_t *a, const uint8_t *b, size_t n)
 {
     uint8_t diff = 0;
-    for (size_t i = 0; i < n; i++) diff |= (a[i] ^ b[i]);
+    for (size_t i = 0; i < n; i++) {
+        diff |= (a[i] ^ b[i]);
+    }
     return (diff == 0) ? 0 : 1;
 }
 
@@ -347,7 +356,9 @@ static int for_each_entry(char *buf, size_t len,
     int    count = 0;
     while (i < len) {
         size_t start = i;
-        while (i < len && buf[i] != '\n' && buf[i] != '\0') i++;
+        while (i < len && buf[i] != '\n' && buf[i] != '\0') {
+            i++;
+        }
         size_t end = i;
         if (i < len) {
             buf[i++] = '\0';
@@ -357,7 +368,14 @@ static int for_each_entry(char *buf, size_t len,
         if (line[0] == '#') continue; /* comment */
 
         struct passwd_entry e;
-        if (parse_line(line, &e) != PASSWD_OK) continue;
+        if (parse_line(line, &e) != PASSWD_OK) {
+            /* Surface corruption (truncated write, manual edit gone
+             * wrong) so the operator sees the cause instead of just
+             * a generic "user not found" downstream. */
+            uart_printf("[passwd] WARN: skipping malformed line: %s\r\n",
+                        line);
+            continue;
+        }
         if (cb && cb(&e, line, ctx) != 0) return count + 1;
         count++;
     }
@@ -387,7 +405,11 @@ bool passwd_any_users(void)
     struct lfs_mount *mnt = resolve_mount();
     if (!mnt) return false;
 
-    static char buf[PASSWD_FILE_MAX_BYTES];
+    /* Stack-local: the buffer is 2.3 KB on a 256 KB task stack. Was
+     * `static` — that raced under concurrent SSH auth attempts since
+     * passwd_verify ran on per-connection session tasks and shared
+     * the same buffer with this function. */
+    char buf[PASSWD_FILE_MAX_BYTES];
     int n = read_file_all(mnt, buf, sizeof(buf));
     if (n <= 0) return false;
 
@@ -403,7 +425,8 @@ int passwd_verify(const char *username, const char *password)
     struct lfs_mount *mnt = resolve_mount();
     if (!mnt) return PASSWD_E_IO;
 
-    static char buf[PASSWD_FILE_MAX_BYTES];
+    /* Stack-local — was `static` and raced across session tasks. */
+    char buf[PASSWD_FILE_MAX_BYTES];
     int n = read_file_all(mnt, buf, sizeof(buf));
     if (n <= 0) return PASSWD_E_NOT_FOUND;
 
@@ -417,8 +440,9 @@ int passwd_verify(const char *username, const char *password)
                          entry.log2_n, entry.r, entry.p, derived);
     if (rc != PASSWD_OK) return rc;
     int match = constant_time_compare(derived, entry.hash, PASSWD_HASH_LEN);
-    /* Wipe the derived hash from the stack. */
-    for (size_t i = 0; i < PASSWD_HASH_LEN; i++) derived[i] = 0u;
+    /* Wipe the derived hash from the stack — secure_zero defeats the
+     * dead-store elimination the optimiser otherwise applies. */
+    secure_zero(derived, sizeof(derived));
     return (match == 0) ? PASSWD_OK : PASSWD_E_WRONG;
 }
 
@@ -486,8 +510,11 @@ static int rebuild_and_persist(const char *target,
     struct lfs_mount *mnt = resolve_mount();
     if (!mnt) return PASSWD_E_IO;
 
-    static char in_buf[PASSWD_FILE_MAX_BYTES];
-    static char out_buf[PASSWD_FILE_MAX_BYTES];
+    /* Stack-local — see passwd_verify comment for the rationale. The
+     * 4.6 KB combined budget (two PASSWD_FILE_MAX_BYTES buffers) is
+     * comfortable on a 256 KB task stack. */
+    char in_buf[PASSWD_FILE_MAX_BYTES];
+    char out_buf[PASSWD_FILE_MAX_BYTES];
     int n = read_file_all(mnt, in_buf, sizeof(in_buf));
     if (n < 0) n = 0;
 
@@ -527,11 +554,12 @@ static int rebuild_and_persist(const char *target,
 int passwd_adduser(const char *username, const char *password)
 {
     if (!username || !password) return PASSWD_E_BAD_ARG;
-    if (strlen(username) > PASSWD_MAX_USERNAME_LEN) return PASSWD_E_BAD_ARG;
+    size_t un_len = strlen(username);
+    if (un_len > PASSWD_MAX_USERNAME_LEN) return PASSWD_E_BAD_ARG;
     if (strlen(password) > PASSWD_MAX_PASSWORD_LEN) return PASSWD_E_BAD_ARG;
 
     struct passwd_entry e;
-    for (size_t i = 0; i <= strlen(username); i++) e.username[i] = username[i];
+    memcpy(e.username, username, un_len + 1u);
     if (rng_get_bytes(e.salt, PASSWD_SALT_LEN) != 0) return PASSWD_E_KDF;
     e.log2_n = PASSWD_SCRYPT_LOG2_N;
     e.r      = PASSWD_SCRYPT_R;
@@ -545,9 +573,17 @@ int passwd_adduser(const char *username, const char *password)
 int passwd_set(const char *username, const char *new_password)
 {
     if (!username || !new_password) return PASSWD_E_BAD_ARG;
+    /* Same bounds as passwd_adduser — without these `cmd_passwd` would
+     * let a long argv overflow `e.username[33]` and corrupt kernel
+     * stack. Reachable from any authenticated shell user (SSH /
+     * console / telnet). */
+    size_t un_len = strlen(username);
+    size_t pw_len = strlen(new_password);
+    if (un_len > PASSWD_MAX_USERNAME_LEN) return PASSWD_E_BAD_ARG;
+    if (pw_len > PASSWD_MAX_PASSWORD_LEN) return PASSWD_E_BAD_ARG;
 
     struct passwd_entry e;
-    for (size_t i = 0; i <= strlen(username); i++) e.username[i] = username[i];
+    memcpy(e.username, username, un_len + 1u);
     if (rng_get_bytes(e.salt, PASSWD_SALT_LEN) != 0) return PASSWD_E_KDF;
     e.log2_n = PASSWD_SCRYPT_LOG2_N;
     e.r      = PASSWD_SCRYPT_R;
