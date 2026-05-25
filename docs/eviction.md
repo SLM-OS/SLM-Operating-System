@@ -870,11 +870,15 @@ All suites pass under `make test` on the three supported configs:
   mlp at 4–174 µs, cacheus at 9–197 µs (see §"Latency Benchmarks
   (M9)" above). Levers: prune the XGBoost ensemble (done — pruned
   200→16 trees; page-sim 5-seed sweep shows hit-rate preserved, see
-  #961) and batch the int8 MLP forward pass. The 16-tree re-bench on
-  pi-5-2 is still pending. Note: pruning is independent of the
-  default-promotion question — XGBoost still regresses below LRU on
-  the `multimodel_skew` workload at every tree count (#989), so it
-  should not become the default policy yet (#953).
+  #961) and batch the int8 MLP forward pass. The 16-tree baked
+  predictor clears the target: `bench xgb-equiv-evict --baked` on
+  pi-5-2 (Cortex-A76 @ 2.4 GHz) reports ~300 ns/predict (296–303 ns
+  over two runs) at 1000/1000 corpus match — vs ~1.41 ms for the
+  blob path (#959) and 4–22 µs for the M9 per-policy capture. Note:
+  pruning is independent of the default-promotion question — XGBoost
+  still regresses below LRU on the `multimodel_skew` workload at
+  every tree count (#989), so it should not become the default
+  policy yet (#953).
 - ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
   [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
   Replay xgb / mlp / cacheus / arc / lru through the simulator on
