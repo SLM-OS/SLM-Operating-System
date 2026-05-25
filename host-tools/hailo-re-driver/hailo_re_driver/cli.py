@@ -1,10 +1,14 @@
 """Command-line entry points for the driver.
 
-Three commands:
+Four commands:
 
-- `hailo-re-bootstrap`  — run the Phase 1/2 single-step loop.
-- `hailo-re-validate`   — Phase 3 re-validation; stamp validated_at_commit.
-- `hailo-re-diff`       — standalone corpus diff tool.
+- `hailo-re-bootstrap`   — run the Phase 1/2 single-step loop.
+- `hailo-re-validate`    — Phase 3 re-validation; stamp validated_at_commit.
+- `hailo-re-diff`        — standalone corpus diff tool.
+- `hailo-re-native-diff` — diff a SLM-OS native-flow boundary trace
+                            against a corpus, locating the first hard
+                            divergence (most relevant to the #682
+                            reopen criteria).
 """
 
 from __future__ import annotations
@@ -276,4 +280,52 @@ def diff_main(argv: Optional[list[str]] = None) -> int:
     else:
         report = diff_mod.diff_corpora(args.left, args.right)
     print(diff_mod.format_report(report, show_matches=args.show_matches))
+    return 1 if report.diverged else 0
+
+
+# --------------------------------------------------------------------------- #
+# hailo-re-native-diff
+# --------------------------------------------------------------------------- #
+
+
+def native_diff_main(argv: Optional[list[str]] = None) -> int:
+    """Diff a native-flow boundary trace against a corpus.
+
+    Unlike `hailo-re-diff --observed`, this expects a raw capture from
+    the kernel boundary-trace toolkit (`hailo trace ...` plus
+    `scripts/capture-hailo-trace.sh`), not a pre-formatted observed-
+    trace JSONL. The aligner does bounded look-ahead resync, so
+    extra/missing ops on either side don't immediately stop the walk.
+    """
+    from . import native_diff as native_diff_mod
+    from .boundary_trace import parse_trace_stream
+
+    p = argparse.ArgumentParser(
+        prog="hailo-re-native-diff",
+        description=(
+            "Diff a SLM-OS native-flow boundary-trace capture against a "
+            "corpus. Locates the first position where SLM-OS native and "
+            "HailoRT-via-corpus take divergent paths — the actionable "
+            "finding for the #682 reopen criteria."
+        ),
+    )
+    p.add_argument("corpus", type=Path,
+                   help="corpus JSONL (header + ops)")
+    p.add_argument("trace", type=Path,
+                   help="capture-hailo-trace.sh output (mixed serial log; "
+                        "non-MMIO lines are silently skipped)")
+    p.add_argument("--lookahead", type=int, default=8,
+                   help="resync look-ahead window; wider papers over more "
+                        "skew, narrower surfaces more divergences (default: 8)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args(argv)
+    _setup_logging(args.verbose)
+
+    corpus = corpus_mod.load(args.corpus)
+    with args.trace.open() as f:
+        trace_ops = list(parse_trace_stream(f))
+    report = native_diff_mod.diff_native_against_corpus(
+        corpus.ops, trace_ops, lookahead=args.lookahead,
+    )
+    print(native_diff_mod.format_report(report))
     return 1 if report.diverged else 0
