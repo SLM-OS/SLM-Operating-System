@@ -55,6 +55,27 @@ class ParseTraceLineTests(unittest.TestCase):
         self.assertEqual(op.value, "00000000")
         self.assertEqual(op.phase, "fw_boot")
 
+    def test_byte_swap_generalises_to_other_widths(self) -> None:
+        """The kernel only emits WR32/RD32 today, but the byte-swap is
+        size-parameterised. Pin its behaviour at width=16 so a future
+        emit helper for half-word ops can't quietly break the size=2
+        path. (And size=1 is a no-op palindrome — also asserted here
+        as the trivial edge.)"""
+        # WR16: 0x1234 → bytes 34 12 → "3412"
+        op16 = parse_trace_line(
+            "[trc] phase=link       mech=MMIO WR16 bar=0 off=0x0098 val=0x1234"
+        )
+        assert op16 is not None
+        self.assertEqual(op16.size, 2)
+        self.assertEqual(op16.value, "3412")
+        # WR8: 0xab → "ab" (single byte; byte-swap is identity).
+        op8 = parse_trace_line(
+            "[trc] phase=link       mech=MMIO WR8  bar=0 off=0x0098 val=0xab"
+        )
+        assert op8 is not None
+        self.assertEqual(op8.size, 1)
+        self.assertEqual(op8.value, "ab")
+
     def test_value_byte_swapped_for_le_wire_order(self) -> None:
         """The fix found on the first end-to-end native-flow capture:
         every BAR0 ATR-programming write (`val=0x00000017`, ...) was

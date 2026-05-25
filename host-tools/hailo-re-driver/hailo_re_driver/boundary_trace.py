@@ -106,10 +106,8 @@ def parse_trace_line(line: str) -> Optional[BoundaryTraceOp]:
     # on the first end-to-end native-flow capture against the 4.23.0
     # grind corpus: all 4 BAR0 ATR-programming writes showed
     # byte-reversed values until this swap was added.
-    value = "".join(
-        int_hex[2 * (size - 1 - i): 2 * (size - 1 - i) + 2]
-        for i in range(size)
-    )
+    byte_chunks = [int_hex[2 * i: 2 * i + 2] for i in range(size)]
+    value = "".join(reversed(byte_chunks))
     return BoundaryTraceOp(
         bar=int(m.group("bar")),
         offset=int(m.group("off"), 16),
