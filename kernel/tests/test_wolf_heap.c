@@ -98,7 +98,9 @@ static void test_realloc_shrink_returns_same_block(void)
      * must be preserved up to the new size. */
     uint8_t *p = wolf_heap_alloc(512);
     TEST_ASSERT_NOT_NULL(p);
-    for (size_t i = 0; i < 512; i++) p[i] = (uint8_t)i;
+    for (size_t i = 0; i < 512; i++) {
+        p[i] = (uint8_t)i;
+    }
 
     uint8_t *q = wolf_heap_realloc(p, 64);
     TEST_ASSERT_NOT_NULL(q);
@@ -112,7 +114,9 @@ static void test_realloc_grow_copies_payload(void)
 {
     uint8_t *p = wolf_heap_alloc(64);
     TEST_ASSERT_NOT_NULL(p);
-    for (size_t i = 0; i < 64; i++) p[i] = (uint8_t)(0xFFu - i);
+    for (size_t i = 0; i < 64; i++) {
+        p[i] = (uint8_t)(0xFFu - i);
+    }
 
     uint8_t *q = wolf_heap_realloc(p, 4096);
     TEST_ASSERT_NOT_NULL(q);
@@ -164,22 +168,34 @@ static void test_many_small_alloc_free_roundtrip(void)
 static void test_realloc_of_non_wolf_pointer_returns_null(void)
 {
     /* The magic-stamp check in wolf_heap_realloc rejects pointers
-     * the wolf heap didn't issue. Pass a stack address — its first
-     * 4 bytes won't match WOLF_HEAP_MAGIC with overwhelming
-     * probability. The function logs the violation and returns
-     * NULL without corrupting anything. */
-    uint32_t pad_below = 0x12345678u;
-    uint32_t scratch[16];
-    uint32_t pad_above = 0x87654321u;
-    for (size_t i = 0; i < 16; i++) scratch[i] = 0xDEADBEEFu;
+     * the wolf heap didn't issue. Stamp a deliberately-bad magic at
+     * the location the function will probe (one struct-wolf-block
+     * before the user pointer), and confirm the function returns
+     * NULL without touching anything else.
+     *
+     * `_Alignas(16)` matches wolf_heap's alignment guarantee so the
+     * dereference at `fake.pad - sizeof(struct wolf_block)` lands
+     * on the header we control instead of straddling object
+     * boundaries. The header layout — `uint32_t magic` first — is
+     * pinned in wolf_heap.c; if that ever changes, the static_assert
+     * inside that file's struct definition would fire first. */
+    static struct {
+        uint32_t magic;
+        uint32_t is_free;
+        size_t   size;
+        void    *prev;
+        void    *next;
+        _Alignas(16) uint8_t pad[64];
+    } fake = {
+        .magic = 0xBADBADBAu,   /* known-bad, distinct from WOLF_HEAP_MAGIC */
+    };
 
-    void *r = wolf_heap_realloc(&scratch[1], 64);
+    void *r = wolf_heap_realloc(fake.pad, 64);
     TEST_ASSERT_NULL(r);
-    /* The bogus pointer didn't get freed; surrounding stack is
-     * untouched. */
-    TEST_ASSERT_EQUAL_UINT32(0x12345678u, pad_below);
-    TEST_ASSERT_EQUAL_UINT32(0x87654321u, pad_above);
-    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, scratch[0]);
+    /* The bogus pointer wasn't accepted; the magic field is still
+     * the bad value we stamped (the function logged the violation
+     * but didn't mutate). */
+    TEST_ASSERT_EQUAL_UINT32(0xBADBADBAu, fake.magic);
 }
 
 int test_suite_wolf_heap(void)

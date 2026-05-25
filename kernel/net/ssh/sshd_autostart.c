@@ -192,6 +192,17 @@ bool sshd_autostart_test_parse_bool(const char *s)
     return parse_bool(s);
 }
 
+/* Drift detector: if `struct sshd_autostart_cfg` ever grows (or
+ * `struct sshd_autostart_cfg_view` falls behind), this assertion
+ * fires at build time. The test wrapper field-copies between the
+ * two structs explicitly, and a silently-extended private struct
+ * would mean new parser functionality couldn't be exercised
+ * through this hook until the view + wrapper are synced. */
+_Static_assert(sizeof(struct sshd_autostart_cfg)
+               == sizeof(struct sshd_autostart_cfg_view),
+               "sshd_autostart_cfg / sshd_autostart_cfg_view drifted — "
+               "update the view struct + the wrapper field-copy below");
+
 void sshd_autostart_test_parse_config(struct sshd_autostart_cfg_view *cfg,
                                       char *buf, size_t len)
 {
