@@ -29,6 +29,20 @@ void  *memset(void *s, int c, size_t n);
 int    memcmp(const void *s1, const void *s2, size_t n);
 void  *memmove(void *dest, const void *src, size_t n);
 
+/*
+ * Zero `n` bytes at `p` in a way the compiler is not allowed to elide.
+ *
+ * Plain memset / hand-rolled loops on a stack buffer that goes out of
+ * scope are dead-store-eliminated under -O2: the compiler can prove
+ * nothing reads the bytes back so the write is removed. This routine
+ * forces the writes through a `volatile` pointer so they survive the
+ * optimiser pass, matching the semantics of C11 `memset_s` / OpenBSD
+ * `explicit_bzero` / Linux's `memzero_explicit`. Use this when wiping
+ * crypto state (keys, plaintext passwords, DRBG output blocks) from
+ * a stack frame before the caller returns.
+ */
+void   secure_zero(void *p, size_t n);
+
 /* Conversion */
 int    atoi(const char *str);
 

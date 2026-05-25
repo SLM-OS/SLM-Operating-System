@@ -40,6 +40,7 @@
 #include "boot_media.h"
 #include "help.h"
 #include "oplib_pool.h"
+#include "rng.h"
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
 #include "net_driver.h"
@@ -427,6 +428,23 @@ void kernel_main(void *dtb)
         }
     }
 #endif
+
+    /* Initialize the crypto-quality RNG. Probes for an architectural
+     * TRNG (RNDR on Cortex-A78AE / Jetson, RDRAND on x86-64); falls
+     * back to a SHA-256-mixed jitter pool seeded with DTB /chosen
+     * entropy + CNTPCT-jitter samples on platforms without one
+     * (Cortex-A76 / Pi 5, QEMU TCG). Distinct from lwIP's
+     * lwip_rand_slm — the latter is for TCP ISN choices and is
+     * explicitly non-crypto. See `kernel/include/rng.h`. */
+    INFO("Initializing RNG...");
+    if (rng_init() != 0) {
+        /* rng_init still bootstrapped the jitter pool — the non-zero
+         * return only means firmware-supplied /chosen entropy was
+         * absent. On QEMU TCG with a stock DTB this is normal; on Pi 5
+         * / Jetson it can flag a firmware-config regression. The
+         * jitter source's CNTPCT samples remain the floor. */
+        WARN("RNG firmware seed absent — boot entropy is jitter-only");
+    }
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.

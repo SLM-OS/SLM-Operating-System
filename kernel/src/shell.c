@@ -116,6 +116,7 @@ const shell_cmd_t builtin_commands[] = {
     {"dtb",       cmd_dtb,       "Show device tree info",                              false, SHELL_CAT_SYSINFO},
     {"ipc",       cmd_ipc,       "Show IPC statistics",                                false, SHELL_CAT_SYSINFO},
     {"mem",       cmd_mem,       "Show memory statistics",                             false, SHELL_CAT_SYSINFO},
+    {"rng",       cmd_rng,       "Crypto RNG (rng [status|stats|selftest|read <n>])",  false, SHELL_CAT_SYSINFO},
     {"telemetry", cmd_telemetry, "Admin telemetry feed (telemetry [stats|list-topics])", false, SHELL_CAT_SYSINFO},
     {"top",       cmd_top,       "Live dashboard (top [-n <iter>] [refresh_secs])",    false, SHELL_CAT_SYSINFO},
     {"uptime",    cmd_uptime,    "Show system uptime",                                 false, SHELL_CAT_SYSINFO},

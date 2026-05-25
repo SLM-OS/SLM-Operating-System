@@ -438,6 +438,35 @@ if(ENABLE_NETWORKING AND NET_TELEMETRYD_AUTOSTART)
     add_compile_definitions(NET_TELEMETRYD_AUTOSTART=1)
 endif()
 
+# SSH daemon (Phase 3 of #199). When ON, pulls the vendored
+# wolfSSH + wolfCrypt libraries under kernel/lib/{wolfssh,wolfcrypt}/
+# into the image and exposes the `sshd` shell command family. The
+# crypto-quality RNG infrastructure (`kernel/include/rng.h`) is built
+# unconditionally — the SSH server is the primary consumer but the
+# RNG is useful elsewhere (host-key generation, password salts,
+# session token derivation) and the `rng` shell command is a
+# diagnostics primitive.
+#
+# Default OFF for now: the wolfSSH vendoring + integration lands
+# across follow-up commits on the #893 branch. Until those land, the
+# option only controls compile-time gating of the `sshd` shell verb
+# and the placeholder `kernel/net/ssh/` sources — turning it ON
+# without the vendored libraries in place will fail to link, which
+# is the intended signal.
+option(NET_SSHD "Enable SSH daemon (wolfSSH+wolfCrypt; #199 Phase 3)" OFF)
+if(ENABLE_NETWORKING AND NET_SSHD)
+    add_compile_definitions(NET_SSHD=1)
+endif()
+
+# SSH daemon auto-start at boot. Default OFF for the entire #199
+# chain — the bootstrap gate added in #199d (#896) is what makes a
+# default-on flip safe, and #199e (#895) is where the flip happens.
+# Until then, the daemon is opt-in via shell command (`sshd start`).
+option(NET_SSHD_AUTOSTART "Start sshd at boot (unauthenticated until #199d/#199e)" OFF)
+if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
+    add_compile_definitions(NET_SSHD_AUTOSTART=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     # Three x86-64 layouts — KEXEC_BUILD and BZIMAGE_BUILD are mutually
@@ -509,6 +538,10 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/pmu.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
+    # Per-arch RNG TRNG probes (FEAT_RNG / RDRAND). Compiled unconditionally —
+    # rng_init's jitter path is useful even without SSH and is what the
+    # boot banner reports. See `kernel/include/rng.h`. #199a / #893.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/rng.c>
     # x86-64 architecture files (trampoline32.S handled by custom command below)
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/entry64.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.S>
@@ -525,6 +558,9 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/tss.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/sse_kernels.c>
+    # Per-arch RNG TRNG probe (RDRAND). Compiled unconditionally — see
+    # the matching ARM64 entry above. #199a / #893.
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/rng.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_platform.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_firmware.S>
     # GSP-RM shared core (x86-64 + Jetson — same Ampere architecture)
@@ -895,6 +931,11 @@ set(KERNEL_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_autostart.c>
 
+    # Crypto-quality RNG (jitter-pool common path). The arch-side
+    # TRNG probes live next to the rest of the per-arch source. #893.
+    kernel/src/rng.c
+    kernel/src/rng_shell.c
+
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code
     # lua_slm.c and lua_shell.c are compiled as part of lua library
@@ -969,6 +1010,15 @@ set(TEST_SOURCES
     # SHA-256 NIST-vector tests for the vendored library — Stage 4
     # of #370 too, but platform-neutral (pure computation, no MMIO).
     kernel/tests/test_sha256.c
+    # Crypto-quality RNG tests (#199a / #893). Platform-neutral —
+    # the per-arch TRNG probes are exercised indirectly via the
+    # source-dispatch test; the jitter pool is covered everywhere.
+    kernel/tests/test_rng.c
+    # SSH daemon tests (#199a / #893). Gated on the same NET_SSHD
+    # condition that compiles the daemon itself; the test_harness side
+    # adds an #if defined(NET_SSHD) around the suite call so non-SSH
+    # builds keep linking.
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<BOOL:${NET_SSHD}>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_sshd.c>
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
@@ -1759,6 +1809,122 @@ target_compile_definitions(slm_runner PRIVATE
 )
 
 target_link_libraries(slmos.elf PRIVATE slm_runner)
+
+# ==========================================================================
+# wolfCrypt + wolfSSH (Phase 3 SSH — #199, #893)
+#
+# Vendored under kernel/lib/{wolfcrypt,wolfssh}/. See VENDOR.md in
+# each directory for the pinned upstream tags. SLM-OS local config
+# lives in kernel/lib/wolfcrypt/user_settings.h — it's pulled in via
+# -DWOLFSSL_USER_SETTINGS=1 on the wolf static-library compile lines.
+#
+# Built as two separate static libraries so they get relaxed warnings
+# (upstream code uses patterns SLM-OS's -Werror would reject) and
+# their own include path. Same isolation pattern as the `lua` and
+# `nanopb` static libraries above.
+#
+# ARM64 only (matches the rest of the networking story today). x86-64
+# remains "build-clean" but is not the SSH demo target.
+# ==========================================================================
+if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
+    set(WOLFCRYPT_SOURCES
+        kernel/lib/wolfcrypt/src/random.c
+        kernel/lib/wolfcrypt/src/chacha.c
+        kernel/lib/wolfcrypt/src/poly1305.c
+        kernel/lib/wolfcrypt/src/chacha20_poly1305.c
+        kernel/lib/wolfcrypt/src/sha256.c
+        kernel/lib/wolfcrypt/src/sha.c
+        kernel/lib/wolfcrypt/src/sha512.c
+        kernel/lib/wolfcrypt/src/aes.c
+        kernel/lib/wolfcrypt/src/hash.c
+        kernel/lib/wolfcrypt/src/hmac.c
+        kernel/lib/wolfcrypt/src/ed25519.c
+        kernel/lib/wolfcrypt/src/fe_operations.c
+        kernel/lib/wolfcrypt/src/ge_operations.c
+        kernel/lib/wolfcrypt/src/curve25519.c
+        kernel/lib/wolfcrypt/src/coding.c
+        kernel/lib/wolfcrypt/src/error.c
+        kernel/lib/wolfcrypt/src/logging.c
+        kernel/lib/wolfcrypt/src/memory.c
+        kernel/lib/wolfcrypt/src/wc_port.c
+        kernel/lib/wolfcrypt/src/wc_encrypt.c
+        kernel/lib/wolfcrypt/src/kdf.c
+        kernel/lib/wolfcrypt/src/misc.c
+        kernel/lib/wolfcrypt/src/asn.c
+        kernel/lib/wolfcrypt/src/sp_int.c
+        kernel/lib/wolfcrypt/src/wolfmath.c
+    )
+
+    add_library(wolfcrypt STATIC ${WOLFCRYPT_SOURCES})
+    target_include_directories(wolfcrypt PUBLIC
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfcrypt
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfcrypt/include)
+    target_include_directories(wolfcrypt PRIVATE ${KERNEL_INCLUDES})
+    target_compile_definitions(wolfcrypt PUBLIC
+        WOLFSSL_USER_SETTINGS=1)
+    target_compile_options(wolfcrypt PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -mgeneral-regs-only
+        -fno-pie
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-conversion -Wno-pointer-arith -Wno-pedantic
+        -Wno-cast-function-type -Wno-error
+    )
+
+    set(WOLFSSH_SOURCES
+        kernel/lib/wolfssh/src/internal.c
+        kernel/lib/wolfssh/src/io.c
+        kernel/lib/wolfssh/src/log.c
+        # wolfssh's misc.c duplicates ForceZero/ConstantCompare/min/c32toa/ato32
+        # which wolfcrypt's misc.c already defines; including both produces
+        # multiple-definition link errors. wolfcrypt's set is a superset, so
+        # we drop the wolfssh one and let wolfssh inline the helpers from
+        # wolfcrypt at link time.
+        # kernel/lib/wolfssh/src/misc.c
+        kernel/lib/wolfssh/src/port.c
+        kernel/lib/wolfssh/src/ssh.c
+        kernel/lib/wolfssh/src/keygen.c
+    )
+
+    add_library(wolfssh STATIC ${WOLFSSH_SOURCES})
+    target_include_directories(wolfssh PUBLIC
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfssh/include)
+    target_include_directories(wolfssh PRIVATE ${KERNEL_INCLUDES})
+    target_compile_definitions(wolfssh PUBLIC
+        WOLFSSL_USER_SETTINGS=1)
+    target_compile_options(wolfssh PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -mgeneral-regs-only
+        -fno-pie
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-conversion -Wno-pointer-arith -Wno-pedantic
+        -Wno-cast-function-type -Wno-error
+    )
+    target_link_libraries(wolfssh PRIVATE wolfcrypt)
+
+    # SLM-OS-side glue: time, RNG seed, lwIP IO callbacks, listener,
+    # accept loop, shell verb.
+    target_sources(slmos.elf PRIVATE
+        kernel/net/ssh/wolf_os.c
+        kernel/net/ssh/sshd.c
+        kernel/net/ssh/sshd_shell.c
+    )
+    target_include_directories(slmos.elf PRIVATE
+        ${CMAKE_SOURCE_DIR}/kernel/net/ssh)
+    target_link_libraries(slmos.elf PRIVATE wolfssh wolfcrypt)
+endif()
 
 # ==========================================================================
 # nanopb — freestanding protobuf runtime (for .hef parsing)

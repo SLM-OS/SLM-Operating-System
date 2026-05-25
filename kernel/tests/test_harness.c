@@ -188,6 +188,12 @@ int test_harness_run_all(void)
     total_failures += test_suite_sdhci();
     /* SHA-256 vector tests (vendored library, no platform deps). */
     total_failures += test_suite_sha256();
+    /* Crypto-quality RNG (jitter pool + injection coverage). #199a / #893. */
+    total_failures += test_suite_rng();
+#if defined(NET_SSHD)
+    /* SSH daemon — public API + per-conn ring (#199a / #893). */
+    total_failures += test_suite_sshd();
+#endif
     /* `kernel` admin command surface (also relies on sdhci-pci). */
     total_failures += test_suite_kernel_cmd();
     total_failures += test_suite_dtb();

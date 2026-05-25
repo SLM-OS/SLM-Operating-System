@@ -436,6 +436,26 @@ static const struct help_entry help_entries[] = {
         "  - Buddy allocator state\n"
     ),
 
+    HELP_TEXT("rng",
+        "rng - Crypto-quality random number generator\n"
+        "\n"
+        "Usage:\n"
+        "  rng                       Show source, TRNG state, byte counters\n"
+        "  rng status                Same as `rng`\n"
+        "  rng stats                 Compact one-line counter dump\n"
+        "  rng selftest              4 KB pull + chi-squared sanity check\n"
+        "  rng read [N]              Hex-dump N crypto-bytes (1..1024; default 32)\n"
+        "\n"
+        "Source ordering: architectural TRNG (RNDR on Cortex-A78AE,\n"
+        "RDRAND on x86-64) if present, otherwise a SHA-256-mixed\n"
+        "timer-jitter pool seeded with DTB /chosen entropy. Distinct\n"
+        "from `lwip_rand_slm` — the latter is for TCP ISN choices and\n"
+        "is explicitly not cryptographic.\n"
+        "\n"
+        "The selftest is a sanity check, not a statistical claim — the\n"
+        "full SP800-90B audit lives off-target (#199e / #895).\n"
+    ),
+
     HELP_TEXT("tasks",
         "tasks - List all tasks\n"
         "\n"

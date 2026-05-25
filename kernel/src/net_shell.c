@@ -627,6 +627,9 @@ static const shell_cmd_t net_commands[] = {
     {"net",      cmd_net,      "Network control (init/status)",                        true,  SHELL_CAT_NETWORK},
     {"netstat",  cmd_netstat,  "Network statistics",                                   false, SHELL_CAT_NETWORK},
     {"ping",     cmd_ping,     "Send ICMP echo request",                               true,  SHELL_CAT_NETWORK},
+#if defined(NET_SSHD)
+    {"sshd",     cmd_sshd,     "SSH daemon (start [port]|stop|status)",                true,  SHELL_CAT_NETWORK},
+#endif
     {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",                      true,  SHELL_CAT_NETWORK},
     {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true,  SHELL_CAT_NETWORK},
 };
