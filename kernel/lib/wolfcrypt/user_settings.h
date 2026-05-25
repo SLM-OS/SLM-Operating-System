@@ -95,10 +95,12 @@ extern "C" {
 #define HAVE_HKDF
 #define HAVE_CURVE25519
 #define HAVE_ED25519
+#define HAVE_ED25519_MAKE_KEY    /* required for wc_ed25519_make_key (#199b host key) */
 #define HAVE_ED25519_SIGN
 #define HAVE_ED25519_VERIFY
 #define HAVE_ED25519_KEY_IMPORT
 #define HAVE_ED25519_KEY_EXPORT
+#define WOLFSSL_KEY_GEN          /* enables wc_*_make_key paths across algorithms */
 /* wolfSSH 1.4.18's signing-algorithm gate requires all four of
  * HAVE_ED25519, _SIGN, _VERIFY, _KEY_IMPORT, _KEY_EXPORT AND
  * WOLFSSL_ED25519_STREAMING_VERIFY. Without the streaming flag,
