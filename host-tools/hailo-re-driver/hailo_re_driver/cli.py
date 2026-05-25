@@ -289,31 +289,43 @@ def diff_main(argv: Optional[list[str]] = None) -> int:
 
 
 def native_diff_main(argv: Optional[list[str]] = None) -> int:
-    """Diff a native-flow boundary trace against a corpus.
+    """Diff a native-flow trace against a corpus.
 
-    Unlike `hailo-re-diff --observed`, this expects a raw capture from
-    the kernel boundary-trace toolkit (`hailo trace ...` plus
-    `scripts/capture-hailo-trace.sh`), not a pre-formatted observed-
-    trace JSONL. The aligner does bounded look-ahead resync, so
-    extra/missing ops on either side don't immediately stop the walk.
+    Two source formats are supported:
+
+    - `--source slmos` (default): a `capture-hailo-trace.sh` output —
+      mixed serial log with `[trc] phase=... mech=MMIO ...` lines from
+      SLM-OS's kernel boundary-trace toolkit.
+    - `--source ftrace`: a `capture-hailort-ftrace.sh` output — Linux
+      ftrace kprobe lines from `hailo_pci` while real HailoRT runs on
+      Pi OS. Used to close the BAR2 coverage gap in the QEMU-derived
+      corpus (memory: `hailo_re_corpus_bar_coverage`).
+
+    Either source produces `BoundaryTraceOp` tuples that the aligner
+    consumes uniformly. The aligner does bounded look-ahead resync,
+    so extra/missing ops on either side don't immediately stop the walk.
     """
     from . import native_diff as native_diff_mod
-    from .boundary_trace import parse_trace_stream
 
     p = argparse.ArgumentParser(
         prog="hailo-re-native-diff",
         description=(
-            "Diff a SLM-OS native-flow boundary-trace capture against a "
-            "corpus. Locates the first position where SLM-OS native and "
-            "HailoRT-via-corpus take divergent paths — the actionable "
-            "finding for the #682 reopen criteria."
+            "Diff a SLM-OS native-flow trace against a corpus. Locates "
+            "the first position where the trace and the corpus take "
+            "divergent paths — the actionable finding for the #682 "
+            "reopen criteria."
         ),
     )
     p.add_argument("corpus", type=Path,
                    help="corpus JSONL (header + ops)")
     p.add_argument("trace", type=Path,
-                   help="capture-hailo-trace.sh output (mixed serial log; "
-                        "non-MMIO lines are silently skipped)")
+                   help="capture file (see --source for format)")
+    p.add_argument("--source", choices=("slmos", "ftrace"), default="slmos",
+                   help="trace source format. 'slmos' (default) = SLM-OS "
+                        "kernel boundary-trace from capture-hailo-trace.sh. "
+                        "'ftrace' = Linux ftrace kprobe capture from "
+                        "capture-hailort-ftrace.sh against the real "
+                        "hailo_pci driver on Pi OS.")
     p.add_argument("--lookahead", type=int, default=8,
                    help="resync look-ahead window; wider papers over more "
                         "skew, narrower surfaces more divergences (default: 8)")
@@ -333,8 +345,22 @@ def native_diff_main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     corpus = corpus_mod.load(args.corpus)
-    with args.trace.open() as f:
-        trace_ops = list(parse_trace_stream(f))
+    if args.source == "slmos":
+        from .boundary_trace import parse_trace_stream
+        with args.trace.open() as f:
+            trace_ops = list(parse_trace_stream(f))
+    else:  # "ftrace"
+        from .ftrace_translate import parse_ftrace_capture
+        with args.trace.open() as f:
+            bars, ops_iter = parse_ftrace_capture(f)
+        trace_ops = list(ops_iter)
+        # Help the operator confirm the capture saw the BARs they
+        # expected — surface as a one-line summary before the diff.
+        bar_summary = ", ".join(
+            f"BAR{b.bar}=0x{b.phys_base:x}+0x{b.size:x}" for b in bars
+        )
+        print(f"ftrace capture covers: {bar_summary or '(no BARs found!)'}",
+              file=sys.stderr)
     report = native_diff_mod.diff_native_against_corpus(
         corpus.ops, trace_ops, lookahead=args.lookahead,
     )
