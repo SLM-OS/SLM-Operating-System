@@ -46,18 +46,27 @@ static void print_status(void)
 {
     struct sshd_stats st;
     sshd_get_stats(&st);
-    uart_printf("sshd: %s port=%u accepted=%u kex_ok=%u kex_fail=%u active=%u",
+
+    /* Build the whole line into one buffer then emit via a single
+     * uart_puts. Avoids interleaving with another CPU's uart_printf
+     * traffic between the base-status and last-failure-detail
+     * chunks. */
+    char buf[192];
+    int  n = uart_snprintf(buf, sizeof(buf),
+                "sshd: %s port=%u accepted=%u kex_ok=%u kex_fail=%u active=%u",
                 st.running ? "running" : "stopped",
                 (unsigned)st.port,
                 (unsigned)st.connections_accepted,
                 (unsigned)st.kex_completed,
                 (unsigned)st.kex_failed,
                 (unsigned)st.active);
-    if (st.kex_failed > 0u) {
-        uart_printf(" last_err=%d last_cpu=%u",
-                    st.last_kex_err, (unsigned)st.last_kex_cpu);
+    if (st.kex_failed > 0u && n > 0 && (size_t)n < sizeof(buf)) {
+        (void)uart_snprintf(buf + n, sizeof(buf) - (size_t)n,
+                            " last_err=%d last_cpu=%u",
+                            st.last_kex_err, (unsigned)st.last_kex_cpu);
     }
-    uart_printf("\r\n");
+    uart_puts(buf);
+    uart_puts("\r\n");
 }
 
 static int do_start(int argc, char **argv)

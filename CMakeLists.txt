@@ -472,14 +472,14 @@ endif()
 # images stay quiet. Operators can still override either way via
 # -DNET_SSHD_AUTOSTART=ON/OFF.
 if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
-    if(NOT DEFINED NET_SSHD_AUTOSTART)
-        set(NET_SSHD_AUTOSTART ON CACHE BOOL
-            "Start sshd at boot (bootstrap-gated: refuses connections "
-            "until first console-side `adduser` / `passwd`)")
-    endif()
+    set(_sshd_autostart_default ON)
 else()
-    option(NET_SSHD_AUTOSTART "Start sshd at boot (bootstrap-gated)" OFF)
+    set(_sshd_autostart_default OFF)
 endif()
+option(NET_SSHD_AUTOSTART
+       "Start sshd at boot (bootstrap-gated: refuses connections until first console-side `adduser` / `passwd`)"
+       ${_sshd_autostart_default})
+unset(_sshd_autostart_default)
 if(ENABLE_NETWORKING AND NET_SSHD AND NET_SSHD_AUTOSTART)
     add_compile_definitions(NET_SSHD_AUTOSTART=1)
 endif()

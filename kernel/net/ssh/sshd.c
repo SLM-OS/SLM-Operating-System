@@ -47,6 +47,7 @@
 #include "task.h"
 #include "timer.h"
 #include "uart.h"
+#include "wolf_os.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -628,8 +629,6 @@ int sshd_start(uint16_t port)
      * a no-op when DEBUG_WOLFSSH is undefined in user_settings.h
      * (which is the default — turn it on only for troubleshooting).
      * Idempotent; safe to set on each sshd_start. */
-    extern void slm_wolfssh_log_cb(enum wolfSSH_LogLevel level,
-                                   const char *const msg);
     wolfSSH_SetLoggingCb(slm_wolfssh_log_cb);
 
     /* Load (or first-boot-generate-and-persist) the Ed25519 host
