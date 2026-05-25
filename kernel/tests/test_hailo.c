@@ -336,15 +336,22 @@ static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
      * any write to a channel's NUM_AVAIL (offset 2 within the
      * 4-byte dword at CHANNEL_CONTROL_OFFSET) also bumps NUM_PROC
      * (16-bit value at CHANNEL_NUM_PROC_OFFSET=0x04) to match,
-     * simulating the device completing the transfer immediately. */
+     * simulating the device completing the transfer immediately.
+     *
+     * Each 0x20-byte channel window has a HOST sub-block and a
+     * DEVICE sub-block; the driver swaps which half is which based
+     * on direction (H2D = HOST at +0x00, D2H = HOST at +0x10).
+     * Auto-advance fires on the HOST base-dword of either half so
+     * tests can exercise both input (H2D) and output (D2H) channels
+     * end-to-end through the mock. */
     if (bar == HAILO_BAR_VDMA && offset + 4 <= MOCK_BAR2_SIZE) {
         memcpy(&mock_bar2[offset], &value, sizeof(value));
         if (mock_vdma_auto_advance
-         && (offset & 0x1Fu) == 0) {
-            /* Write to the channel-base dword. NUM_AVAIL lives in
-             * bits [31:16] of this dword. Mirror it to NUM_PROC
-             * (16-bit at offset+0x04) so a subsequent poll of
-             * num_proc sees completion. */
+         && ((offset & 0x1Fu) == 0x00u || (offset & 0x1Fu) == 0x10u)) {
+            /* Write to a HOST-sub-block base-dword. NUM_AVAIL lives
+             * in bits [31:16]; mirror it to NUM_PROC (16-bit at
+             * +0x04 within the same sub-block) so a subsequent poll
+             * sees completion. */
             uint16_t num_avail = (uint16_t)(value >> 16);
             memcpy(&mock_bar2[offset + 0x04],
                    &num_avail, sizeof(num_avail));
@@ -5930,7 +5937,7 @@ static void test_infer_rejects_null_args(void)
     infer_setup_running();
     struct hailo_infer_config cfg = {
         .input_bytes = 512, .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 100000,
     };
@@ -5972,13 +5979,99 @@ static void test_infer_rejects_bad_channel(void)
         hailo_infer_run(&cfg, buf, buf, NULL));
 }
 
+static void test_infer_rejects_input_in_d2h_range(void)
+{
+    /* #682: input_channel must land in H2D [0, 15]. Setting it
+     * to a D2H channel (16..31) silently armed the wrong host
+     * MMIO sub-block before the direction-range check; fw waited
+     * on the CS-RPC's channel forever. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = HAILO_VDMA_H2D_CHANNEL_COUNT,   /* 16 — D2H, illegal for input */
+        .output_channel = HAILO_VDMA_H2D_CHANNEL_COUNT + 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_output_in_h2d_range(void)
+{
+    /* #682 symmetry: output_channel must land in D2H [16, 31].
+     * The old default (.output_channel = 1) was in H2D and is the
+     * literal value the production bug shipped with. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel  = 0,
+        .output_channel = HAILO_VDMA_H2D_CHANNEL_COUNT - 1u, /* 15 — H2D, illegal for output */
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_old_default_pair(void)
+{
+    /* Pins the exact (0, 1) value pair that the two hardcoded call
+     * sites used to ship with — `hailo_shell.c:1578-1579` and
+     * `inference_device_hailo.c:2095-2096`. If a future refactor
+     * regresses either site back to "first available" channel
+     * selection, this test fires. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel  = 0,
+        .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_translator_offsets_yield_valid_channels(void)
+{
+    /* Pin the channel-pair the two production-shape call sites
+     * compute from the translator's constants. Any future tweak to
+     * either constant or the default config channel that would push
+     * a boundary into the wrong direction range fails this test
+     * before it can wedge the engine on real hardware. */
+    uint8_t in_ch  = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                               HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET);
+    uint8_t out_ch = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                               HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET);
+    TEST_ASSERT_TRUE(in_ch  <  HAILO_VDMA_H2D_CHANNEL_COUNT);
+    TEST_ASSERT_TRUE(out_ch >= HAILO_VDMA_H2D_CHANNEL_COUNT);
+    TEST_ASSERT_TRUE(out_ch <  HAILO_VDMA_MAX_CHANNELS);
+    TEST_ASSERT_NOT_EQUAL(in_ch, out_ch);
+    /* And the runtime guard accepts them end-to-end. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel  = in_ch,
+        .output_channel = out_ch,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
 static void test_infer_rejects_zero_sizes(void)
 {
     infer_setup_running();
     uint8_t buf[512] = {0};
     struct hailo_infer_config cfg = {
         .input_bytes = 0,   .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 100000,
     };
@@ -5995,7 +6088,7 @@ static void test_infer_rejects_nodev_when_not_running(void)
     boot_setup_probed();   /* state=PROBED, not RUNNING */
     struct hailo_infer_config cfg = {
         .input_bytes = 512, .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 100000,
     };
@@ -6012,7 +6105,7 @@ static void test_infer_end_to_end_via_auto_advance(void)
     infer_setup_running();
     struct hailo_infer_config cfg = {
         .input_bytes = 1024, .output_bytes = 2048,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_data_id = 0x01, .output_data_id = 0x02,
         .input_page_size = 512, .output_page_size = 1024,
         .timeout_us = 100000,
@@ -6037,7 +6130,7 @@ static void test_infer_timeout_without_auto_advance(void)
     mock_vdma_auto_advance = false;
     struct hailo_infer_config cfg = {
         .input_bytes = 512, .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 500,   /* very short so the test finishes fast */
     };
@@ -6056,7 +6149,7 @@ static void test_infer_propagates_tensor_alloc_failure(void)
     mock_dma_force_null = true;
     struct hailo_infer_config cfg = {
         .input_bytes = 512, .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 100000,
     };
@@ -6077,7 +6170,7 @@ static void test_infer_rejects_oversized_output_desc_count(void)
     struct hailo_infer_config cfg = {
         .input_bytes = 512,
         .output_bytes = 1024u * 1024u,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 1,
         .timeout_us = 100000,
     };
@@ -6111,7 +6204,7 @@ static void test_infer_cleanup_on_midflight_failure(void)
     mock_vdma_auto_advance = false;
     struct hailo_infer_config cfg = {
         .input_bytes = 512, .output_bytes = 512,
-        .input_channel = 0, .output_channel = 1,
+        .input_channel = 2, .output_channel = 16,
         .input_page_size = 512, .output_page_size = 512,
         .timeout_us = 500,
     };
@@ -8240,6 +8333,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_infer_rejects_null_args);
     RUN_TEST(test_infer_rejects_same_channels);
     RUN_TEST(test_infer_rejects_bad_channel);
+    RUN_TEST(test_infer_rejects_input_in_d2h_range);
+    RUN_TEST(test_infer_rejects_output_in_h2d_range);
+    RUN_TEST(test_infer_rejects_old_default_pair);
+    RUN_TEST(test_infer_translator_offsets_yield_valid_channels);
     RUN_TEST(test_infer_rejects_zero_sizes);
     RUN_TEST(test_infer_rejects_nodev_when_not_running);
     RUN_TEST(test_infer_end_to_end_via_auto_advance);

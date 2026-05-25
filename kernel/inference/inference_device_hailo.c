@@ -2092,8 +2092,15 @@ static int hailo_backend_load_model(struct inference_device *dev,
             slots[i].cfg = (struct hailo_infer_config){
                 .input_bytes      = input_bytes,
                 .output_bytes     = output_bytes,
-                .input_channel    = 0,
-                .output_channel   = 1,
+                /* Boundary channels MUST match the packed_vdma the CS
+                 * translator emits in OPEN_BOUNDARY_{INPUT,OUTPUT}_CHANNEL
+                 * — see hailo_cs_translator.h. Hardcoded 0/1 here pre-#682
+                 * armed different host VDMA registers than the channels
+                 * the fw was told to wait on. */
+                .input_channel    = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                              HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET),
+                .output_channel   = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                              HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET),
                 .input_data_id    = in_data_id,
                 .output_data_id   = out_data_id,
                 .input_page_size  = in_page_size,

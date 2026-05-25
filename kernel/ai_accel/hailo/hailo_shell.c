@@ -1545,10 +1545,12 @@ static int cmd_hailo(int argc, char *argv[])
     if (argc >= 2 && strcmp(argv[1], "infer") == 0) {
         /* `hailo infer <hex-bytes>` — run an end-to-end inference
          * smoke test with a synthetic tensor of the given size.
-         * Uses channel 0 (input) / 1 (output) and data_id 0 by
-         * default — these would be HEF-derived in a real call.
-         * Fails on Pi 5 today (no active stream context); exercises
-         * the hailo_infer_run pipeline end-to-end in QEMU tests. */
+         * Uses the same boundary-channel constants the CS translator
+         * emits in OPEN_BOUNDARY_{INPUT,OUTPUT} RPCs (config+1 = H2D 2,
+         * config+15 = D2H 16 for the default config channel). data_id
+         * is still a stub — would be HEF-derived in a real call.
+         * Exercises the hailo_infer_run pipeline end-to-end in QEMU
+         * tests. */
         if (argc < 3) {
             shell_puts("usage: hailo infer <hex-bytes>\n");
             return 0;
@@ -1575,8 +1577,10 @@ static int cmd_hailo(int argc, char *argv[])
         struct hailo_infer_config cfg = {
             .input_bytes     = bytes,
             .output_bytes    = bytes,
-            .input_channel   = 0,
-            .output_channel  = 1,
+            .input_channel   = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                         HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET),
+            .output_channel  = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL +
+                                         HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET),
             .input_data_id   = 0,
             .output_data_id  = 0,
             .input_page_size = 512,

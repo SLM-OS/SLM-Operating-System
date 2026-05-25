@@ -64,8 +64,9 @@ static inline uint64_t cntfrq_read(void)
  * TODO(phase-5.4+): no cross-caller serialization. The current
  * sole caller is the shell on CPU 0; a future AI-scheduler policy
  * submitting concurrent inferences would race on the shared VDMA
- * channel state (channels 0 and 1 are hardcoded via the shell
- * command and the static per-channel register banks live in BAR2).
+ * channel state (boundary channels resolve to ch=2 H2D + ch=16 D2H
+ * via the translator's offset constants — see hailo_cs_translator.h
+ * — and the static per-channel register banks live in BAR2).
  * When a second caller arrives, wrap the body in a file-scope
  * spin_lock(&infer_lock) — plain, not irqsave, because the poll
  * waits can run for milliseconds.
@@ -83,6 +84,16 @@ int hailo_infer_run(const struct hailo_infer_config *cfg,
         return HAILO_ERR_INVAL;
     }
     if (cfg->input_channel == cfg->output_channel) return HAILO_ERR_INVAL;
+    /* H2D / D2H direction split — fw v4.23 binds boundary input
+     * channels to [0, 15] and outputs to [16, 31]. A direction
+     * mismatch silently wedges: fw waits for activity on the
+     * channel the CS RPC named (e.g. ch=16 D2H output) while the
+     * host arms HOST registers on a different sub-block (e.g.
+     * ch=1 H2D HOST). See #682 — closed-then-reopened-then-fixed
+     * 2026-05-25 after a side-by-side BAR2 capture confirmed the
+     * channel-direction divergence.  */
+    if (cfg->input_channel  >= HAILO_VDMA_H2D_CHANNEL_COUNT) return HAILO_ERR_INVAL;
+    if (cfg->output_channel <  HAILO_VDMA_H2D_CHANNEL_COUNT) return HAILO_ERR_INVAL;
     if (cfg->input_page_size == 0 || cfg->output_page_size == 0) {
         return HAILO_ERR_INVAL;
     }
