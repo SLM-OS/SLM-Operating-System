@@ -36,8 +36,13 @@
 #   0  success — capture file written to --out
 #   1  bad arguments / preflight failure
 #   2  ftrace setup failed (kernel config missing? not root?)
-#   3  workload returned non-zero
 #   4  trace file empty (nothing got captured — check kprobe targets)
+#
+# Note on workload exit code: the script does NOT exit with the
+# workload's rc. Capturing the #682 wedge means HailoRT *will* return
+# non-zero, and we want the trace dumped regardless. The workload's rc
+# is recorded in the capture file's `# workload_rc:` header line for
+# the operator to inspect.
 
 set -euo pipefail
 
