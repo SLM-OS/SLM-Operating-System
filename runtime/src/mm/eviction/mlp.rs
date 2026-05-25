@@ -5,9 +5,9 @@
 //! quantised 4-layer MLP imported from the sibling project
 //! (27 → 64 → 32 → 16 → 1 with sigmoid on the output).
 //!
-//! The integer-arithmetic path is roughly 4× smaller than the
-//! XGBoost chain (~5 KB of weights vs ~1.3 MB of generated code) and
-//! is the better fit for memory-constrained builds.
+//! The integer-arithmetic path is well over an order of magnitude
+//! smaller than the XGBoost chain (~5 KB of weights vs ~140 KB of
+//! generated code) and is the better fit for memory-constrained builds.
 //!
 //! When `ai_eviction_models` is OFF, `mlp_predict` is the stub that
 //! returns 0.5 for any input — the policy reduces to a constant

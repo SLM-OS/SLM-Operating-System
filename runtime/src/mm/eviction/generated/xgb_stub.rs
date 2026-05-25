@@ -1,8 +1,8 @@
 //! Stub XGBoost predictor used when `ai_eviction_models` is OFF.
 //!
 //! Returns a constant 0.5 so the XGBoost policy (M4) compiles and
-//! links, but produces uninformative scores. The real ~1.3 MB if-else
-//! chain is imported from `slm-os-page-sim` via
+//! links, but produces uninformative scores. The real ~140 KB if-else
+//! chain (16-tree, pruned per #961) is imported from `slm-os-page-sim` via
 //! `scripts/import_eviction_weights.sh` and replaces this file at
 //! `xgb_policy_generated.rs`.
 
