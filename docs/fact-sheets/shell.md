@@ -33,12 +33,14 @@ Interactive shell, command surface, observability commands, multi-session.
 | `telnetd` daemon controls (`start/stop/status/sessions/kick`) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
 | `/etc/telnetd.conf` + `NET_TELNETD_AUTOSTART` | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
 | `slm.telnetd_*` Lua bindings | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
-| SSH (#199) | ⏸️ | ⏸️ | ⏸️ | ⏸️ |
+| SSH daemon (port 2222, `sshd start/stop/status/fingerprint/regenerate-host-key`) | ✅ | ✅ | ✅ (autostart ON) | ✅ (autostart ON) |
+| SSH-session shell (wolfSSH stream → `shell_io_ssh.c` → existing REPL) | ✅ | ✅ | ✅ | ✅ |
+| User management (`adduser` / `passwd` / `deluser` / `whoami`) | ✅ | ✅ | ✅ | ✅ |
 
 ## Skipped / Blocked
 
-- **Unauthenticated telnet on hardware** — Pi 5 and Jetson lab/demo builds default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. Lua sessions opened by telnet land on the safe binding surface (`lua_slm_newstate()`), so admin mutators (`slm.component_run`, `slm.model_load`, `slm.sched_set_policy`, `slm.task_create`, `slm.shell_exec`, `slm.hailo.*`, …) are unreachable from a remote session. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary, and observability bindings remain visible.
-- **SSH** (#199) — deferred until wolfSSH integration; out of current scope.
+- **Unauthenticated telnet on hardware** — Pi 5 and Jetson lab/demo builds default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. Lua sessions opened by telnet land on the safe binding surface (`lua_slm_newstate()`), so admin mutators (`slm.component_run`, `slm.model_load`, `slm.sched_set_policy`, `slm.task_create`, `slm.shell_exec`, `slm.hailo.*`, …) are unreachable from a remote session. That's acceptable only on trusted networks; SSH (#199, shipped) is the authenticated path — `ssh -p 2222 root@<board-ip>` after a one-time console-side `adduser`.
+- **Per-session shell identity (`whoami` returns the SSH login name)** — not yet plumbed. The bootstrap gate works (auth refuses until `passwd_any_users()`) but the per-session identity carry-through into `shell_session` is a follow-up; today `whoami` reports `ssh` rather than the authenticated user.
 - **Jetson multi-session shell over internal Ethernet** — still blocked on #25 (RTL8168 behind PCIe C8). The shipped Jetson networking path is USB CDC-ECM over the retained XHCI root-hub handoff, which carries the multi-session TCP shell + telnet + telnetd controls. UARTC remains the local single-session console.
 - **Command completion** — not implemented. Tab completion (#TBD) is out of scope for the current shell.
 - **Reverse search (Ctrl-R), prefix search, history expansion (`!!` / `!N`), persistent history across reboot** — out of scope for #434; tracked separately if/when needed. Up/down arrow recall + in-place edit of the recalled line is the implemented surface.

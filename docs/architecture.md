@@ -305,6 +305,9 @@ RTL8168 init path). Tracker: #25. Full trail in
 | lwIP Wrapper | `kernel/net/lwip_slm.c` | TCP/IP stack integration + auto-DHCP |
 | OS Abstraction | `kernel/net/sys_arch.c` | lwIP platform layer (IRQ-safe locks) |
 | Shell Commands | `kernel/src/net_shell.c` | ping, ifconfig, netstat |
+| Telnet daemon | `kernel/net/tcp_shell_server.c` + telnet IAC parser | Multi-session network shell on port 2323 (unauthenticated; trusted networks only) |
+| **SSH daemon** | `kernel/net/ssh/{sshd,host_key,passwd,shell_io_ssh,sshd_autostart}.c` + vendored wolfSSH 1.4.18 / wolfCrypt 5.7.4 under `kernel/lib/` | Authenticated encrypted shell on port 2222 (#199). Curve25519 KEX, Ed25519 host key, AES-256-GCM, scrypt-against-`/etc/passwd` auth, bootstrap gate refuses all logins until first console-side `adduser` |
+| **Crypto-quality RNG** | `kernel/src/rng.c` + per-arch RNDR / RDRAND probes | Entropy source for SSH + future crypto consumers; distinct from `lwip_rand_slm` (LCG used only for TCP ISN) |
 
 **Phase 4 Implementation:**
 - lwIP TCP/IP stack for ICMP, TCP, UDP, DHCP
@@ -328,6 +331,23 @@ RTL8168 init path). Tracker: #25. Full trail in
 - Shell commands: `net`, `ping`, `ifconfig`, `netstat`
 - Static IP and DHCP configuration support
 - See `docs/networking.md` for the full driver contract and test matrix
+
+**Phase 3 (#199) — SSH daemon:**
+
+- Vendored wolfSSH 1.4.18-stable + wolfCrypt (wolfSSL 5.7.4-stable)
+  under `kernel/lib/{wolfssh,wolfcrypt}/` (~205K LOC vendored,
+  ~3.5K LOC of SLM-OS glue under `kernel/net/ssh/`)
+- Crypto: curve25519-sha256 KEX, Ed25519 host key (persisted to
+  `/mnt/files/etc/ssh/host_ed25519_key`), AES-256-GCM cipher
+- Password authentication: scrypt N=2^15 against
+  `/mnt/files/etc/passwd` (PHC-style line format, constant-time
+  hash compare, `secure_zero` wipe of plaintext stack copies)
+- Bootstrap gate: SSH refuses every login until at least one user
+  is provisioned via the console-side `adduser` shell verb —
+  closes the gap between boot and first credential
+- `NET_SSHD_AUTOSTART=ON` by default on lab/demo images for
+  RASPI5 + JETSON_ORIN_NANO; OFF elsewhere
+- Detailed design: `docs/ssh.md`. Security audit: `docs/security.md`.
 
 ### Lua Scripting Engine
 

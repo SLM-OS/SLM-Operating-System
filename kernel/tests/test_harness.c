@@ -198,6 +198,10 @@ int test_harness_run_all(void)
     total_failures += test_suite_host_key();
     /* Password DB + scrypt verify (#199d / #896). */
     total_failures += test_suite_passwd();
+    /* Dedicated wolfssl heap (wolf_heap.c) — alloc/free/realloc paths. */
+    total_failures += test_suite_wolf_heap();
+    /* /etc/sshd.conf parser (sshd_autostart.c). */
+    total_failures += test_suite_sshd_autostart();
 #endif
     /* `kernel` admin command surface (also relies on sdhci-pci). */
     total_failures += test_suite_kernel_cmd();
