@@ -3,10 +3,12 @@
  *
  * Subcommands:
  *
- *   sshd                    -> status (alias of `sshd status`)
- *   sshd status             -> running state, port, KEX counters
- *   sshd start [port]       -> bring up the listener; default port 2222
- *   sshd stop               -> tear down the listener + open sessions
+ *   sshd                          -> status (alias of `sshd status`)
+ *   sshd status                   -> running state, port, KEX counters
+ *   sshd start [port]             -> bring up the listener; default port 2222
+ *   sshd stop                     -> tear down the listener + open sessions
+ *   sshd fingerprint              -> SHA-256 of the host public key
+ *   sshd regenerate-host-key      -> remove + recreate the host keypair
  *
  * `sshd_autostart.c` (added in #199c) wraps `sshd_start` behind a
  * config-file driven boot hook parallel to `telnetd_autostart`.
@@ -103,8 +105,10 @@ static int do_regenerate(void)
 {
     uint8_t buf[HOST_KEY_RAW_BUF_LEN];
     int rc = host_key_regenerate(buf);
-    /* Wipe the local stack copy regardless of result. */
-    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = 0u;
+    /* Wipe the local stack copy regardless of result — secure_zero
+     * defeats dead-store elimination, which would otherwise drop the
+     * write since `buf` is dead after the function returns. */
+    secure_zero(buf, sizeof(buf));
     if (rc != HOST_KEY_OK) {
         uart_printf("sshd: regenerate failed (rc=%d)\r\n", rc);
         return rc;

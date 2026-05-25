@@ -14,8 +14,18 @@
 #include "uart.h"
 #include "vfs.h"
 
+#include "lfs.h"   /* LFS_ERR_EXIST for ensure_dirs error filtering */
+
 #include <wolfssl/wolfcrypt/ed25519.h>
 #include <wolfssl/wolfcrypt/random.h>
+
+/* Pin the SLM-OS on-disk layout to wolfSSL's constant. If a future
+ * wolfSSL version were to change ED25519_KEY_SIZE the build would
+ * trip here instead of silently mis-sizing the persisted seed. */
+_Static_assert(ED25519_KEY_SIZE == HOST_KEY_PRIV_LEN,
+               "wolfSSL Ed25519 seed size diverged from SLM-OS layout");
+_Static_assert(ED25519_PUB_KEY_SIZE == HOST_KEY_PUB_LEN,
+               "wolfSSL Ed25519 public-key size diverged from SLM-OS layout");
 
 /* All host-key state lives under /mnt/files/etc/ssh/.
  *
@@ -95,9 +105,10 @@ static void pack_rfc4253(const uint8_t pub[HOST_KEY_PUB_LEN],
     size_t plen = sizeof(prefix) - 1u;   /* 11 */
     size_t pos  = 0;
     out[pos++] = 0; out[pos++] = 0; out[pos++] = 0; out[pos++] = (uint8_t)plen;
-    for (size_t i = 0; i < plen; i++) out[pos++] = (uint8_t)prefix[i];
+    memcpy(out + pos, prefix, plen);
+    pos += plen;
     out[pos++] = 0; out[pos++] = 0; out[pos++] = 0; out[pos++] = (uint8_t)HOST_KEY_PUB_LEN;
-    for (size_t i = 0; i < HOST_KEY_PUB_LEN; i++) out[pos++] = pub[i];
+    memcpy(out + pos, pub, HOST_KEY_PUB_LEN);
 }
 
 /* ---------------------------------------------------------------- */
@@ -112,11 +123,15 @@ static struct lfs_mount *resolve_mount(void)
 
 static int ensure_dirs(struct lfs_mount *mnt)
 {
-    /* Create /etc and /etc/ssh — ignore errors if they already exist
-     * (littlefs returns LFS_ERR_EXIST in that case; littlefs_mkdir
-     * returns 0 on existing too on this codebase). */
-    (void)littlefs_mkdir(mnt, HOSTKEY_DIR_LFS);
-    (void)littlefs_mkdir(mnt, HOSTKEY_SUBDIR_LFS);
+    /* Create /etc and /etc/ssh. LFS_ERR_EXIST means the dir is
+     * already there and we proceed; any other negative return is a
+     * real failure (NOMEM / IO / NOSPC) that the caller needs to see
+     * so it can return HOST_KEY_E_PERSIST with a meaningful cause
+     * rather than letting `write_atomic` blow up later. */
+    int rc = littlefs_mkdir(mnt, HOSTKEY_DIR_LFS);
+    if (rc != 0 && rc != LFS_ERR_EXIST) return rc;
+    rc = littlefs_mkdir(mnt, HOSTKEY_SUBDIR_LFS);
+    if (rc != 0 && rc != LFS_ERR_EXIST) return rc;
     return 0;
 }
 
@@ -127,7 +142,9 @@ static int read_full(struct lfs_mount *mnt, const char *path,
     if (fd < 0) return -1;
     int n = littlefs_file_read(mnt, fd, buf, want);
     littlefs_file_close(mnt, fd);
-    return (n == (int)want) ? 0 : -1;
+    /* Treat any negative `n` (read error) as failure; the cast in the
+     * size-equality comparison only runs once `n` is non-negative. */
+    return (n >= 0 && (size_t)n == want) ? 0 : -1;
 }
 
 static int write_atomic(struct lfs_mount *mnt,
@@ -224,7 +241,8 @@ static size_t format_pub_line(const uint8_t pub[HOST_KEY_PUB_LEN],
     char b64[80];
     size_t b64len = b64_encode(blob, sizeof(blob), b64, /* pad */ true);
     if (pos + b64len > cap) return 0;
-    for (size_t i = 0; i < b64len; i++) out[pos++] = b64[i];
+    memcpy(out + pos, b64, b64len);
+    pos += b64len;
 
     for (size_t i = 0; i < sizeof(k_comment) - 1u; i++) {
         if (pos >= cap) return 0;

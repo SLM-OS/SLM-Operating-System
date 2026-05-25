@@ -19,12 +19,16 @@
  *     when empty (wolfSSH yield-loops on this); `wolf_io_send`
  *     `tcp_write` + `tcp_output` on the pcb.
  *
- * Host key (#199a interim):
+ * Host key:
  *
- *   - Ephemeral Ed25519 keypair generated at `sshd_start` time via
- *     `wc_ed25519_make_key` seeded by the kernel RNG.
- *   - #199b replaces this with a persisted key in
- *     `/mnt/files/etc/ssh/host_ed25519_key`.
+ *   - Ed25519 keypair persisted under
+ *     `/mnt/files/etc/ssh/host_ed25519_key` — see
+ *     kernel/net/ssh/host_key.c for the read/generate/persist flow.
+ *   - `sshd_start` calls `host_key_load_or_generate` once, caches the
+ *     [seed||pub] layout in `g_hostkey_raw`, and re-materialises a
+ *     PKCS#8 DER form for `wolfSSH_CTX_UsePrivateKey_buffer` on each
+ *     start (wolfSSH copies it internally). The cached buffer is
+ *     wiped via `sshd_invalidate_hostkey` so the next start re-loads.
  */
 
 #include "sshd.h"
@@ -119,9 +123,7 @@ void sshd_invalidate_hostkey(void)
      * re-runs the load path. Also tears down the cached CTX so its
      * cached PrivateKey is dropped. */
     irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
-    for (size_t i = 0; i < HOST_KEY_RAW_BUF_LEN; i++) {
-        g_hostkey_raw[i] = 0u;
-    }
+    secure_zero(g_hostkey_raw, sizeof(g_hostkey_raw));
     g_hostkey_raw_len = 0u;
     if (g_ctx) {
         wolfSSH_CTX_free(g_ctx);
@@ -511,18 +513,24 @@ int sshd_start(uint16_t port)
 
         /* DER form for Ed25519 PKCS#8 is at most ~85 bytes; 128 gives
          * a safe margin. wc_Ed25519PrivateKeyToDer returns the length
-         * actually written. */
+         * actually written. The buffer carries the full private seed
+         * on the stack — wipe it on every exit path (secure_zero
+         * defeats dead-store-elim; the stack frame is reclaimed by
+         * the scheduler when sshd_start's caller task returns). */
         uint8_t der[128];
         int der_len = wc_Ed25519PrivateKeyToDer(&tmp_key, der, (uint32_t)sizeof(der));
         wc_ed25519_free(&tmp_key);
         if (der_len <= 0) {
+            secure_zero(der, sizeof(der));
             wolfSSH_CTX_free(g_ctx); g_ctx = NULL; return SSHD_E_NO_HOSTKEY;
         }
 
-        if (wolfSSH_CTX_UsePrivateKey_buffer(g_ctx,
-                                             der,
-                                             (uint32_t)der_len,
-                                             WOLFSSH_FORMAT_RAW) != WS_SUCCESS) {
+        int use_rc = wolfSSH_CTX_UsePrivateKey_buffer(g_ctx,
+                                                     der,
+                                                     (uint32_t)der_len,
+                                                     WOLFSSH_FORMAT_RAW);
+        secure_zero(der, sizeof(der));
+        if (use_rc != WS_SUCCESS) {
             wolfSSH_CTX_free(g_ctx);
             g_ctx = NULL;
             return SSHD_E_NO_HOSTKEY;

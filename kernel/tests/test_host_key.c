@@ -38,10 +38,12 @@ static void test_load_or_generate_produces_keypair(void)
     /* Private + public should both be non-zero with overwhelming
      * probability for a real Ed25519 keypair. */
     int priv_nz = 0, pub_nz = 0;
-    for (size_t i = 0; i < HOST_KEY_PRIV_LEN; i++)
+    for (size_t i = 0; i < HOST_KEY_PRIV_LEN; i++) {
         if (buf[i] != 0u) { priv_nz = 1; break; }
-    for (size_t i = 0; i < HOST_KEY_PUB_LEN; i++)
+    }
+    for (size_t i = 0; i < HOST_KEY_PUB_LEN; i++) {
         if (buf[HOST_KEY_PRIV_LEN + i] != 0u) { pub_nz = 1; break; }
+    }
     TEST_ASSERT_EQUAL_INT(1, priv_nz);
     TEST_ASSERT_EQUAL_INT(1, pub_nz);
 }
