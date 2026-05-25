@@ -14,9 +14,10 @@ dependencies = []
 dev = ["pytest>=7"]
 
 [project.scripts]
-hailo-re-bootstrap = "hailo_re_driver.cli:bootstrap_main"
-hailo-re-validate  = "hailo_re_driver.cli:validate_main"
-hailo-re-diff      = "hailo_re_driver.cli:diff_main"
+hailo-re-bootstrap   = "hailo_re_driver.cli:bootstrap_main"
+hailo-re-validate    = "hailo_re_driver.cli:validate_main"
+hailo-re-diff        = "hailo_re_driver.cli:diff_main"
+hailo-re-native-diff = "hailo_re_driver.cli:native_diff_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
