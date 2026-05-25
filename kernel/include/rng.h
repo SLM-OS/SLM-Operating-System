@@ -140,6 +140,16 @@ enum rng_source rng_arch_probe(void);
 int             rng_arch_read(uint8_t *buf, size_t len);
 
 /*
+ * Per-call TRNG retry budget shared by both arch implementations and
+ * the common path. RDRAND has been observed to return zero ten times
+ * in a row on stressed Skylake; ARM RNDR retries are cheap. 16 leaves
+ * headroom for both. Bump after the #199e entropy audit if any
+ * platform shows a tail in its failure-rate histogram. The single
+ * definition here keeps the two arch impls from drifting.
+ */
+#define RNG_TRNG_RETRY_BUDGET   16u
+
+/*
  * Test hook: force the next rng_get_bytes call(s) to use a specific
  * source. Useful for coverage tests of the jitter path even on hosts
  * that probed RNDR/RDRAND successfully. `src == RNG_SOURCE_NONE`

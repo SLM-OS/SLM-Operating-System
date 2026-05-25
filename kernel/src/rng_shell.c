@@ -96,17 +96,21 @@ static int parse_decimal(const char *s, uint32_t *out)
 static void hex_dump(const uint8_t *buf, size_t len)
 {
     static const char hex[] = "0123456789abcdef";
+    /* Direct uart_putc per nibble — the printf state machine has no
+     * formatting work to do here and skipping it shaves ~1.5 KB of
+     * uart_printf invocations on a max-sized 1024-byte dump. */
     for (size_t i = 0; i < len; i++) {
-        char two[3];
-        two[0] = hex[(buf[i] >> 4) & 0xFu];
-        two[1] = hex[buf[i] & 0xFu];
-        two[2] = '\0';
-        uart_printf("%s", two);
+        uart_putc(hex[(buf[i] >> 4) & 0xFu]);
+        uart_putc(hex[buf[i] & 0xFu]);
         if ((i + 1u) % 32u == 0u) {
-            uart_printf("\r\n");
+            uart_putc('\r');
+            uart_putc('\n');
         }
     }
-    if ((len % 32u) != 0u) uart_printf("\r\n");
+    if ((len % 32u) != 0u) {
+        uart_putc('\r');
+        uart_putc('\n');
+    }
 }
 
 static int do_read(int argc, char **argv)

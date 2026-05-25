@@ -92,13 +92,11 @@ int rng_arch_read(uint8_t *buf, size_t len)
     if (buf == NULL)         return -1;
     if (len == 0u)           return 0;
 
-    enum { RETRY_PER_BLOCK = 16 };
-
     size_t off = 0;
     while (off < len) {
         uint64_t word = 0;
         int      rc   = -1;
-        for (int attempt = 0; attempt < RETRY_PER_BLOCK; attempt++) {
+        for (uint32_t attempt = 0; attempt < RNG_TRNG_RETRY_BUDGET; attempt++) {
             rc = rdrand_read_one(&word);
             if (rc == 0) break;
         }

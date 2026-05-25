@@ -58,12 +58,8 @@
  * forward-secrecy improves on every page-sized request. */
 #define RNG_JITTER_RESEED_BYTES   4096u
 
-/* Retry budget for the TRNG before degrading to jitter for this call.
- * RDRAND has been observed to return zero ten times in a row on
- * stressed Skylake; ARM RNDR retries are cheap. 16 is a generous
- * starting point — bump after #199e entropy audit if any platform
- * shows a tail. */
-#define RNG_TRNG_RETRY_BUDGET     16u
+/* RNG_TRNG_RETRY_BUDGET lives in <rng.h> so both arch impls share the
+ * same constant. */
 
 static spinlock_t            g_rng_lock = SPINLOCK_INIT;
 static enum rng_source       g_active   = RNG_SOURCE_NONE;
@@ -211,23 +207,30 @@ static int jitter_read_locked(uint8_t *buf, size_t len)
  *   - A boot constant so two boots with identical timing still
  *     differ in pool state.
  *
- * Returns true if at least one of {rng-seed, kaslr-seed} contributed
- * non-zero bytes; false if the firmware provided nothing. The jitter
- * samples are absorbed unconditionally regardless of the return.
+ * Reports per-source contribution byte counts via the out-params so
+ * the caller can surface them in the boot banner — easier to diagnose
+ * firmware regressions (e.g. Pi 5 EEPROM updates have been observed
+ * to drop rng-seed while keeping kaslr-seed). `out_rng_seed_bytes`
+ * and `out_kaslr_seed_bytes` may be NULL.
+ *
+ * The jitter samples are absorbed unconditionally regardless of
+ * firmware contribution.
  */
-static bool mix_boot_entropy_locked(void)
+static void mix_boot_entropy_locked(size_t *out_rng_seed_bytes,
+                                    size_t *out_kaslr_seed_bytes)
 {
-    bool firmware_seed_contributed = false;
+    size_t rng_seed_bytes   = 0;
+    size_t kaslr_seed_bytes = 0;
 
     const dtb_chosen_t *ch = dtb_get_chosen();
     if (ch != NULL) {
         if (ch->rng_seed_len > 0u && ch->rng_seed_len <= sizeof(ch->rng_seed)) {
             pool_absorb(ch->rng_seed, ch->rng_seed_len);
-            firmware_seed_contributed = true;
+            rng_seed_bytes = ch->rng_seed_len;
         }
         if (ch->kaslr_seed_len > 0u && ch->kaslr_seed_len <= sizeof(ch->kaslr_seed)) {
             pool_absorb(ch->kaslr_seed, ch->kaslr_seed_len);
-            firmware_seed_contributed = true;
+            kaslr_seed_bytes = ch->kaslr_seed_len;
         }
     }
 
@@ -244,7 +247,8 @@ static bool mix_boot_entropy_locked(void)
     const uint8_t tag[] = { 'S', 'L', 'M', 'O', 'S', '/', 'r', 'n' };
     pool_absorb(tag, sizeof(tag));
 
-    return firmware_seed_contributed;
+    if (out_rng_seed_bytes)   *out_rng_seed_bytes   = rng_seed_bytes;
+    if (out_kaslr_seed_bytes) *out_kaslr_seed_bytes = kaslr_seed_bytes;
 }
 
 int rng_init(void)
@@ -259,7 +263,9 @@ int rng_init(void)
     /* Bootstrap the jitter pool unconditionally — it's the floor source
      * even when TRNG is available, used both as fallback and as
      * additional entropy mixed into the boot banner. */
-    bool firmware_seed_contributed = mix_boot_entropy_locked();
+    size_t rng_seed_bytes = 0;
+    size_t kaslr_seed_bytes = 0;
+    mix_boot_entropy_locked(&rng_seed_bytes, &kaslr_seed_bytes);
 
     /* Probe for hardware TRNG. */
     enum rng_source probed = rng_arch_probe();
@@ -268,16 +274,17 @@ int rng_init(void)
     g_inited = true;
     spin_unlock_irqrestore(&g_rng_lock, flags);
 
-    uart_printf("[RNG] init: source=%s firmware_seed=%s\r\n",
+    uart_printf("[RNG] init: source=%s rng_seed=%uB kaslr_seed=%uB\r\n",
                 rng_source_name(g_active),
-                firmware_seed_contributed ? "yes" : "no");
+                (unsigned)rng_seed_bytes,
+                (unsigned)kaslr_seed_bytes);
     /* rng_init's documented contract: 0 on success; negative when
      * boot-time mixing produced insufficient entropy (no firmware seed
      * AND no jitter — but jitter is always available, so the only
-     * remaining signal is the firmware-seed presence). Return 0 if a
-     * firmware seed contributed; -1 otherwise so the operator can see
-     * a "low-entropy boot" signal in the banner. */
-    return firmware_seed_contributed ? 0 : -1;
+     * remaining signal is the firmware-seed presence). Return 0 if at
+     * least one firmware seed contributed; -1 otherwise so the operator
+     * can see a "low-entropy boot" signal in the banner. */
+    return (rng_seed_bytes > 0u || kaslr_seed_bytes > 0u) ? 0 : -1;
 }
 
 /* ---------------------------------------------------------------- */
