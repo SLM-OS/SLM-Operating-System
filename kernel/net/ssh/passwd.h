@@ -55,7 +55,9 @@ enum passwd_result {
     PASSWD_E_EXISTS        = -6,    /* adduser of existing name */
     PASSWD_E_LAST_USER     = -7,    /* deluser of the only remaining user */
     PASSWD_E_FORMAT        = -8,    /* malformed passwd line */
-    PASSWD_E_KDF           = -9,    /* scrypt failure */
+    PASSWD_E_KDF           = -9,    /* scrypt computation failure */
+    PASSWD_E_COST          = -10,   /* stored entry's cost factor exceeds
+                                       what this build supports */
 };
 
 /* True iff at least one user is provisioned in /mnt/files/etc/passwd.

@@ -226,6 +226,11 @@ int test_suite_sshd(void);
  * as the daemon itself; the TU only compiles when the host_key
  * module does. */
 int test_suite_host_key(void);
+
+/* Password DB + scrypt verify tests (#199d / #896). Exercises the
+ * full /mnt/files/etc/passwd round-trip through the wolf_heap-backed
+ * wolfssl scrypt allocation. */
+int test_suite_passwd(void);
 #endif
 
 /* General-purpose FDT reader tests (kernel/lib/fdt) */

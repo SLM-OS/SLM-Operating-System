@@ -1035,6 +1035,9 @@ set(TEST_SOURCES
     # SSH host-key persistence tests (#199b / #892). Gated on
     # NET_SSHD at the source level (whole TU is #if NET_SSHD).
     kernel/tests/test_host_key.c
+    # Password DB + scrypt verify tests (#199d / #896). Same TU-level
+    # NET_SSHD gate; round-trips through the wolf_heap-backed scrypt.
+    kernel/tests/test_passwd.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

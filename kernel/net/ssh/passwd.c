@@ -318,8 +318,10 @@ static int derive_hash(const char *password,
      * higher log2_n than we ever produce is either corruption or an
      * import from foreign tooling we don't support. wc_scrypt would
      * fail allocation long before log2_n > 20 (~1 GB) on any SLM-OS
-     * platform anyway. */
-    if (log2_n <= 0 || log2_n > PASSWD_SCRYPT_LOG2_N) return PASSWD_E_KDF;
+     * platform anyway. Distinct return code so the operator can tell
+     * a corrupt-cost-field passwd entry apart from a runtime scrypt
+     * failure (heap exhaustion etc.). */
+    if (log2_n <= 0 || log2_n > PASSWD_SCRYPT_LOG2_N) return PASSWD_E_COST;
     int rc = wc_scrypt(out,
                        (const uint8_t *)password,
                        (int)strlen(password),
@@ -587,9 +589,8 @@ int passwd_set(const char *username, const char *new_password)
      * stack. Reachable from any authenticated shell user (SSH /
      * console / telnet). */
     size_t un_len = strlen(username);
-    size_t pw_len = strlen(new_password);
     if (un_len > PASSWD_MAX_USERNAME_LEN) return PASSWD_E_BAD_ARG;
-    if (pw_len > PASSWD_MAX_PASSWORD_LEN) return PASSWD_E_BAD_ARG;
+    if (strlen(new_password) > PASSWD_MAX_PASSWORD_LEN) return PASSWD_E_BAD_ARG;
 
     struct passwd_entry e;
     memcpy(e.username, username, un_len + 1u);

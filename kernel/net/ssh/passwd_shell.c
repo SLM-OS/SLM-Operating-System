@@ -39,6 +39,7 @@ static const char *result_str(int rc)
     case PASSWD_E_LAST_USER:  return "refusing to remove last user";
     case PASSWD_E_FORMAT:     return "passwd file format error";
     case PASSWD_E_KDF:        return "kdf failure";
+    case PASSWD_E_COST:       return "passwd entry cost factor too high (corrupt /etc/passwd?)";
     default:                  return "unknown";
     }
 }
