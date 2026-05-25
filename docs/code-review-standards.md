@@ -96,6 +96,16 @@ when applicable:
   driver ops, build wiring, the 8 mandatory live integration tests,
   platform-specific tests, docs, and the manual smoke test.
 
+- **Crypto state on the stack** — any new code that holds a key,
+  password, scrypt working buffer, or DER-encoded private key in a
+  stack-local: wipe via `secure_zero(buf, sizeof(buf))` from
+  [`kernel/include/string.h`](../kernel/include/string.h), NOT a
+  hand-rolled `for ... = 0u` loop. The optimiser dead-store-
+  eliminates the hand loop because the storage goes out of scope
+  unread; `secure_zero` writes through a `volatile` pointer that
+  defeats the elision. See [`docs/security.md`](security.md) and the
+  precedent set in PRs #902 / #992 / #915 / #916 / #918.
+
 ## Style (suggestions, not blockers)
 
 - Functions > 80 lines: suggest splitting

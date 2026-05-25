@@ -1055,6 +1055,12 @@ set(TEST_SOURCES
     # Password DB + scrypt verify tests (#199d / #896). Same TU-level
     # NET_SSHD gate; round-trips through the wolf_heap-backed scrypt.
     kernel/tests/test_passwd.c
+    # Dedicated wolfssl heap tests (wolf_heap.c) — alloc / free /
+    # realloc paths + magic-stamp + double-free regression.
+    kernel/tests/test_wolf_heap.c
+    # /etc/sshd.conf parser tests (sshd_autostart.c) — decimal / bool
+    # / line parsers exercised in isolation via the test-hook header.
+    kernel/tests/test_sshd_autostart.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

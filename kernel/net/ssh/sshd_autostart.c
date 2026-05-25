@@ -163,3 +163,55 @@ void sshd_autostart(void)
         uart_printf("[SSHD] autostart: sshd_start failed (%d)\r\n", rc);
     }
 }
+
+/* ---------------------------------------------------------------- */
+/* Test hooks                                                        */
+/* ---------------------------------------------------------------- */
+/*
+ * Declared in `sshd_autostart_test.h` and consumed only by
+ * `kernel/tests/test_sshd_autostart.c`. Same shape as sshd_test.h —
+ * thin pass-through wrappers around the file-local parsers so the
+ * unit tests can exercise them in isolation, dead-stripped from
+ * production kernels via --gc-sections.
+ */
+
+#include "sshd_autostart_test.h"
+
+int sshd_autostart_test_parse_decimal_u16(const char *s, uint16_t *out)
+{
+    return parse_decimal_u16(s, out);
+}
+
+bool sshd_autostart_test_token_equals(const char *s, const char *want)
+{
+    return token_equals(s, want);
+}
+
+bool sshd_autostart_test_parse_bool(const char *s)
+{
+    return parse_bool(s);
+}
+
+/* Drift detector: if `struct sshd_autostart_cfg` ever grows (or
+ * `struct sshd_autostart_cfg_view` falls behind), this assertion
+ * fires at build time. The test wrapper field-copies between the
+ * two structs explicitly, and a silently-extended private struct
+ * would mean new parser functionality couldn't be exercised
+ * through this hook until the view + wrapper are synced. */
+_Static_assert(sizeof(struct sshd_autostart_cfg)
+               == sizeof(struct sshd_autostart_cfg_view),
+               "sshd_autostart_cfg / sshd_autostart_cfg_view drifted — "
+               "update the view struct + the wrapper field-copy below");
+
+void sshd_autostart_test_parse_config(struct sshd_autostart_cfg_view *cfg,
+                                      char *buf, size_t len)
+{
+    /* The test-side struct mirrors the file-local layout exactly;
+     * the explicit copy keeps the public ABI insulated from any
+     * future field additions on the private side. */
+    struct sshd_autostart_cfg internal = { .enabled = cfg->enabled,
+                                            .port    = cfg->port };
+    parse_config(&internal, buf, len);
+    cfg->enabled = internal.enabled;
+    cfg->port    = internal.port;
+}

@@ -231,6 +231,14 @@ int test_suite_host_key(void);
  * full /mnt/files/etc/passwd round-trip through the wolf_heap-backed
  * wolfssl scrypt allocation. */
 int test_suite_passwd(void);
+
+/* Dedicated wolfssl heap (#199d/#199e wolf_heap.c) — alloc / free /
+ * realloc / double-free regression + magic-stamp violation. */
+int test_suite_wolf_heap(void);
+
+/* /etc/sshd.conf parser (#199c/#199e sshd_autostart.c) — decimal /
+ * bool / line parsers in isolation. */
+int test_suite_sshd_autostart(void);
 #endif
 
 /* General-purpose FDT reader tests (kernel/lib/fdt) */

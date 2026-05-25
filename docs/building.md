@@ -390,6 +390,33 @@ make kernel DISABLE_EVICTION=ON       # compile eviction out entirely
 stage the generated weight files from the sibling `slm-os-page-sim`
 project. See `docs/eviction.md` for the full workflow.
 
+#### Networking + SSH flags
+
+```bash
+make kernel ENABLE_NETWORKING=ON      # default for QEMU_VIRT/X86_64/RASPI5/JETSON_ORIN_NANO
+make kernel NET_TELNETD_AUTOSTART=ON  # unauthenticated telnet on port 2323 at boot
+make kernel NET_SSHD=ON               # vendored wolfSSH 1.4.18 + wolfCrypt — port 2222
+```
+
+`NET_SSHD=ON` pulls in the vendored wolfSSH / wolfCrypt sources
+(~205K LOC) and the SLM-OS-side glue (`kernel/net/ssh/`). It is
+default ON on `RASPI5` + `JETSON_ORIN_NANO` lab images and OFF
+elsewhere. `NET_SSHD_AUTOSTART` (default ON for those two platforms,
+OFF elsewhere) brings the daemon up at boot; the bootstrap gate
+makes that safe — the daemon refuses every login until at least one
+user has been provisioned via the console-side `adduser` shell
+verb. Full design + threat model: `docs/ssh.md` + `docs/security.md`.
+
+```bash
+make kernel NET_SSHD=ON NET_SSHD_AUTOSTART=ON      # opt in on QEMU
+make kernel NET_SSHD=ON NET_SSHD_DEMO_ALLOW_ALL=ON # debugging: skip password auth
+```
+
+`NET_SSHD_DEMO_ALLOW_ALL` is for development only — it replaces
+the scrypt-against-passwd check with a stub that accepts every
+login. `sshd_autostart` prints a loud WARNING on every boot when
+this is wired.
+
 ### Compiler Flags
 
 Defined in `CMakeLists.txt`. Uses **C23 standard** with strict warnings:

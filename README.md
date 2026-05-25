@@ -55,8 +55,9 @@ ssh -p 2222 root@<board-ip>
 KEX is curve25519-sha256, cipher is AES-256-GCM, host key is
 Ed25519 (persisted under `/mnt/files/etc/ssh/host_ed25519_key`,
 fingerprint visible via `sshd fingerprint`). Full design notes:
-[`docs/security.md`](docs/security.md) and
-[`docs/networking.md`](docs/networking.md) §SSH.
+[`docs/ssh.md`](docs/ssh.md) (design + lifecycle),
+[`docs/security.md`](docs/security.md) (threat model + crypto audit),
+and [`docs/networking.md`](docs/networking.md) §SSH (operator flow).
 
 ---
 
@@ -125,6 +126,9 @@ Core references:
 - [`docs/boot-sequence.md`](docs/boot-sequence.md) — per-platform boot path
 - [`docs/scheduler.md`](docs/scheduler.md) — scheduler design (incl. AI policies)
 - [`docs/eviction.md`](docs/eviction.md) — page eviction (CACHEUS ensemble)
+- [`docs/networking.md`](docs/networking.md) — networking stack (NIC drivers, lwIP, telnetd, sshd)
+- [`docs/ssh.md`](docs/ssh.md) — SSH daemon design + lifecycle (#199)
+- [`docs/security.md`](docs/security.md) — security threat model + crypto / entropy audit
 
 Project-wide and subsystem notes:
 

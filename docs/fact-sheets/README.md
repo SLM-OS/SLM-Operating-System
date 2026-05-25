@@ -46,6 +46,7 @@ that was attempted but blocked.
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |
 | Multi-session shell (TCP + telnet + telnetd) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ | [shell.md](shell.md) |
+| SSH (port 2222, wolfSSH + wolfCrypt, Ed25519 + scrypt auth) | ✅ | ✅ | ✅ (autostart ON) | ✅ (autostart ON) | [networking.md](networking.md) |
 | Generative SLM (Qwen2.5-1.5B Q4_K_M) | ✅ CPU | ✅ CPU | ✅ CPU + partial GPU | 🟡 SSE | [slm-integration.md](slm-integration.md) |
 | Testing / CI | ✅ full | 🟡 HW-in-loop | 🟡 HW-in-loop | ✅ QEMU + HW | [testing.md](testing.md) |
 

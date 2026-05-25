@@ -7,6 +7,7 @@ Test infrastructure: unit tests, integration tests, hardware-in-loop, CI.
 | Sub-capability | QEMU (ARM64) | Pi 5 | Jetson | x86-64 |
 |---|---|---|---|---|
 | `make test` target | ✅ | Build + deploy via labctl | Build + deploy via labctl | ✅ (QEMU with GRUB ISO + `isa-debug-exit`) |
+| `make test NET_SSHD=ON` (SSH stack) | ✅ (58 SSH-suite cases) | Build + labctl | Build + labctl | n/a (no SSH on x86 today) |
 | Test kernel gate | `ENABLE_BOOT_TESTS=ON` | Same | Same | Same |
 | Unit + integration tests | 600+ total | Subset run on hardware | Subset run on hardware | 120+ (specific x86-64 suite) |
 | Test framework | `kernel/tests/*.c` with `TEST_ASSERT_*` macros | Same | Same | Same |
@@ -32,6 +33,23 @@ Test infrastructure: unit tests, integration tests, hardware-in-loop, CI.
 - **Fuzz testing / property-based tests** — none. Unit tests are all deterministic.
 - **Code coverage measurement** — not wired. No lcov/gcov reporting.
 
+## SSH-feature test layout (#199)
+
+Six dedicated suites gated on `NET_SSHD=ON`:
+
+| Suite | Cases | Coverage |
+|---|---|---|
+| `test_rng` | 9 | RNG init / source dispatch / jitter pool / chi-squared self-test |
+| `test_sshd` | 7 | Listener + per-conn ring buffer (via `sshd_test.h` hooks) |
+| `test_host_key` | 6 | Ed25519 gen / persist / load / fingerprint round-trip |
+| `test_passwd` | 10 | scrypt round-trip + length-bound + bootstrap-gate behaviour |
+| `test_wolf_heap` | 11 | Dedicated wolfssl allocator: alloc/free/realloc + magic-stamp violation + double-free guard |
+| `test_sshd_autostart` | 15 | `/etc/sshd.conf` parser internals (decimal / bool / line tokeniser via `sshd_autostart_test.h`) |
+
+All 58 cases pass on `make test NET_SSHD=ON`. Tests use `TEST_IGNORE_MESSAGE` to skip cleanly on targets where `/mnt/files` isn't mounted.
+
+End-to-end hardware validation (full KEX + scrypt auth + REPL over the SSH channel) was performed manually on `jetson-nano-1` and `pi-5-2` during the #199 hardware-validation pass; no automated `make hw-test-ssh` shortcut yet.
+
 ## See also
 
 - `docs/testing.md` (narrative)
@@ -39,5 +57,6 @@ Test infrastructure: unit tests, integration tests, hardware-in-loop, CI.
 - `docs/code-review-standards.md` (post-change checklist)
 - `kernel/tests/` (test source)
 - `docs/testing/` (HW validation logs, live)
+- `docs/ssh.md` (SSH design + test surface)
 
 *Last updated: 25 April 2026*
