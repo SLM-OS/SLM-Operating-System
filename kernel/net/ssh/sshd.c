@@ -219,6 +219,13 @@ static int wolf_io_send(WOLFSSH *ssh, void *buf, uint32_t sz, void *ctx)
 
 static void conn_close_locked(struct sshd_conn *c)
 {
+    /* Idempotent: tolerate a double-call. Reachable when sshd_stop's
+     * pool walk and the session task's own task_exit close race on
+     * g_mod_lock — both end up calling this on the same slot. Without
+     * the early-return, g_active would decrement twice for a single
+     * connection (the > 0 guard keeps the counter from underflowing
+     * but the count still drifts low). */
+    if (!c->in_use) return;
     if (c->ssh) {
         wolfSSH_free(c->ssh);
         c->ssh = NULL;
@@ -266,8 +273,10 @@ static err_t on_tcp_recv(void *arg, struct tcp_pcb *pcb,
      *
      * The correct lwIP pattern: return ERR_MEM without pbuf_free.
      * lwIP retains the pbuf in its recv queue and re-delivers via
-     * this callback the next time the window opens (driven by our
-     * own `tcp_recved` calls as `wolf_io_recv` drains the ring). */
+     * this callback the next time the window opens (driven by the
+     * `tcp_recved` call below — only invoked after a successful
+     * push, so the window only advances by bytes actually accepted
+     * into the ring). */
     irq_flags_t flags = spin_lock_irqsave(&c->lock);
     uint16_t free_now = ring_free_locked(c);
     spin_unlock_irqrestore(&c->lock, flags);
@@ -588,13 +597,29 @@ void sshd_test_release_slot(void *handle)
     spin_unlock_irqrestore(&g_mod_lock, flags);
 }
 
+/* Defensive reset: drop the `in_use` flag on every slot. Tests call
+ * this at their start so a prior test that longjmp'd out of Unity's
+ * assertion path (leaking slots) doesn't cascade into "no slots
+ * available" failures on the next test. The real listener must NOT
+ * be running when this is called — caller responsibility. */
+void sshd_test_release_all_slots(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+    for (size_t i = 0; i < SSHD_MAX_SESSIONS; i++) {
+        g_conns[i].in_use = false;
+    }
+    spin_unlock_irqrestore(&g_mod_lock, flags);
+}
+
 size_t sshd_test_ring_push(void *handle, const void *src, size_t n)
 {
+    if (!handle || !src) return 0;
     return ring_push((struct sshd_conn *)handle, (const uint8_t *)src, n);
 }
 
 size_t sshd_test_ring_pop(void *handle, void *dst, size_t n)
 {
+    if (!handle || !dst) return 0;
     return ring_pop((struct sshd_conn *)handle, (uint8_t *)dst, n, NULL);
 }
 

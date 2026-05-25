@@ -20,6 +20,11 @@
 void    *sshd_test_take_slot(void);
 void     sshd_test_release_slot(void *handle);
 
+/* Drop the `in_use` flag on every slot. Defensive reset called at the
+ * start of each test that takes slots; tolerates earlier tests that
+ * longjmp'd out of an assertion without releasing what they held. */
+void     sshd_test_release_all_slots(void);
+
 /* Direct access to the per-conn RX ring. */
 size_t   sshd_test_ring_push(void *handle, const void *src, size_t n);
 size_t   sshd_test_ring_pop (void *handle, void *dst,       size_t n);

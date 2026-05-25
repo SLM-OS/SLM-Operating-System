@@ -51,6 +51,7 @@ static void test_get_stats_tolerates_null(void)
 
 static void test_ring_push_pop_roundtrip(void)
 {
+    sshd_test_release_all_slots();
     void *c = sshd_test_take_slot();
     TEST_ASSERT_NOT_NULL(c);
 
@@ -71,6 +72,7 @@ static void test_ring_push_pop_roundtrip(void)
 
 static void test_ring_push_to_full_caps_at_capacity(void)
 {
+    sshd_test_release_all_slots();
     void *c = sshd_test_take_slot();
     TEST_ASSERT_NOT_NULL(c);
 
@@ -110,6 +112,7 @@ static void test_ring_push_to_full_caps_at_capacity(void)
 
 static void test_ring_partial_push_returns_pushed_count(void)
 {
+    sshd_test_release_all_slots();
     void *c = sshd_test_take_slot();
     TEST_ASSERT_NOT_NULL(c);
 
@@ -144,6 +147,7 @@ static void test_ring_partial_push_returns_pushed_count(void)
 
 static void test_ring_wraps_around(void)
 {
+    sshd_test_release_all_slots();
     void *c = sshd_test_take_slot();
     TEST_ASSERT_NOT_NULL(c);
 
@@ -170,6 +174,7 @@ static void test_ring_wraps_around(void)
 
 static void test_slot_pool_respects_max_sessions(void)
 {
+    sshd_test_release_all_slots();
     /* Take all available slots, confirm the next one is NULL, then
      * release them. SSHD_MAX_SESSIONS is the cap; the test stops
      * at SSHD_MAX_SESSIONS + 1 to confirm the failure mode. */
