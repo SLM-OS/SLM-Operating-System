@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
@@ -35,6 +36,14 @@ from .line_protocols import (
     ExtendResponse,
     LineProtocolError,
     parse_any,
+)
+
+# Append-only log of the literal bytes handed to labctl serial send.
+# Lets us triage dropped-char transients (e.g. "0:/corpus.json708" with the
+# 'l ' missing) by comparing what we sent against what the SLM-OS shell saw.
+# Override via env for tests / non-default deployments.
+_SENT_CMDS_LOG = os.environ.get(
+    "HAILO_RE_SENT_CMDS_LOG", "/tmp/hailo-re-sent-cmds.log"
 )
 
 
@@ -223,6 +232,17 @@ class SlmosRunner:
     cmd_timeout_s: float = 120.0
     verify_sd_before_flash: bool = True
     transport: Transport = field(default=subprocess_transport)
+    # Per-byte pacing handed to `labctl serial send --interbyte-delay-ms`
+    # to avoid receiver-side UART RX FIFO overrun on the SLM-OS shell.
+    # Pi 5 PL011 RX FIFO is 32 B and at 115200 baud each byte is ~86 µs,
+    # so without pacing a host-side burst can run the FIFO dry before the
+    # shell's RX ISR services it — producing the "dropped contiguous
+    # mid-payload window" transients (e.g. shell saw "0:/corpus.json942"
+    # for a send of "0:/corpus.jsonl 71942" — 'l 71' dropped) we
+    # diagnosed via /tmp/hailo-re-sent-cmds.log. 2 ms is well above the
+    # 86 µs wire time per byte so each byte gets to the ISR before the
+    # next arrives. Set to 0 (or None) to disable.
+    serial_interbyte_delay_ms: Optional[float] = 2.0
 
     def __post_init__(self) -> None:
         # Validate + compile the shell-prompt regex once at construction
@@ -295,7 +315,37 @@ class SlmosRunner:
         # `hailo replay-step` command (docs/hailo-re-replay-step.md §Usage)
         # takes the on-card path as its first argument.
         del corpus_path
-        cmd = f"hailo replay-step {self.corpus_on_card_path} {seq}"
+        # Prepend CR so any stray byte sitting in the shell input buffer
+        # (serial line noise, late echo from prior command) gets flushed as
+        # a separate "Unknown command: <stray>" line BEFORE our real command
+        # lands on a fresh prompt. Without this, transients like
+        # "Unknown command: qhailo" / "ehailo" / "Ghailo" happen when a
+        # spurious char concatenates with our cmd name.
+        #
+        # NOTE: We previously tried splitting this into per-chunk labctl
+        # calls to keep each burst under the PL011 RX FIFO depth, but
+        # that made things drastically worse — the labctl process-spawn
+        # overhead between chunks let TCP/ser2net coalesce *bigger*
+        # bursts on the wire than the original single send, and the
+        # shell echoed each chunk back, doubling traffic. Reverted to a
+        # single send + the diagnostic log; rely on the labctl-side
+        # issue (johnjezl/Embedded-Lab-Control#8) for a real fix
+        # (interbyte-delay or RTS/CTS).
+        cmd = f"\rhailo replay-step {self.corpus_on_card_path} {seq}"
+        # Log the literal bytes we hand to labctl so we can confirm what
+        # Python actually sent when a "dropped char" transient fires
+        # (e.g. shell sees "0:/corpus.json708" with the 'l ' missing).
+        # Best-effort — never fail a send because the diagnostic log
+        # couldn't be written.
+        try:
+            line = (
+                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+                f"seq={seq} len={len(cmd)} hex={cmd.encode().hex()}\n"
+            )
+            with open(_SENT_CMDS_LOG, "a") as f:
+                f.write(line)
+        except OSError:
+            pass
         # labctl --until evaluates the regex against the receive buffer as
         # bytes arrive, so a prefix-only anchor like
         # `^HAILO_RE_CORPUS_RESPONSE` cuts the line off mid-value. Anchor on
@@ -321,14 +371,16 @@ class SlmosRunner:
             r"hailo: replay-step: no entry at seq=\d+|"
             r"hailo: replay-step: seq=\d+ (?:is a write|is already validated|has size=\d+))"
         )
-        return self.transport(
-            [
-                "labctl", "serial", "send", self.sbc, cmd,
-                "--capture", str(self.replay_timeout_s),
-                "--until", until_re,
-            ],
-            self.replay_timeout_s + 5.0,
-        )
+        argv = [
+            "labctl", "serial", "send", self.sbc, cmd,
+            "--capture", str(self.replay_timeout_s),
+            "--until", until_re,
+        ]
+        if self.serial_interbyte_delay_ms:
+            argv.extend(
+                ["--interbyte-delay-ms", str(self.serial_interbyte_delay_ms)]
+            )
+        return self.transport(argv, self.replay_timeout_s + 5.0)
 
     # ----- end-to-end ------------------------------------------------------
 

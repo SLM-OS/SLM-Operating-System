@@ -102,10 +102,90 @@ class ReplayCommandArgvTests(unittest.TestCase):
         argv, _ = rec.calls[0]
         # 4th positional arg is the command string.
         cmd_index = argv.index("send") + 2
+        # Leading CR flushes any stray byte in the shell input buffer onto
+        # its own "Unknown command:" line so it can't concatenate with our
+        # cmd name. See slmos_runner.send_replay_command rationale.
         self.assertEqual(
             argv[cmd_index],
-            "hailo replay-step 0:/corpus.jsonl 42",
+            "\rhailo replay-step 0:/corpus.jsonl 42",
         )
+
+    def test_replay_command_passes_interbyte_delay(self) -> None:
+        """labctl serial send now accepts --interbyte-delay-ms to pace the
+        TX one byte at a time so the receiving UART's RX FIFO can't
+        overrun. The driver must thread this through whenever
+        `serial_interbyte_delay_ms` is set, with the configured value."""
+        rec = _RecordingTransport()
+        runner = SlmosRunner(
+            sbc="pi-5-1",
+            transport=rec,
+            serial_interbyte_delay_ms=2.0,
+        )
+        runner.send_replay_command(Path("/dev/null"), 1)
+        argv, _ = rec.calls[0]
+        self.assertIn("--interbyte-delay-ms", argv)
+        flag_idx = argv.index("--interbyte-delay-ms")
+        self.assertEqual(argv[flag_idx + 1], "2.0")
+
+    def test_replay_command_omits_interbyte_delay_when_zero(self) -> None:
+        """A zero / None pacing config must NOT add the flag, so the
+        per-byte pacing penalty isn't paid when not asked for."""
+        rec = _RecordingTransport()
+        runner = SlmosRunner(
+            sbc="pi-5-1",
+            transport=rec,
+            serial_interbyte_delay_ms=0,
+        )
+        runner.send_replay_command(Path("/dev/null"), 1)
+        argv, _ = rec.calls[0]
+        self.assertNotIn("--interbyte-delay-ms", argv)
+
+    def test_replay_command_prepends_cr_flush(self) -> None:
+        """Regression for `Unknown command: qhailo`/`ehailo`/`Ghailo` class
+        transients. A leading CR forces any stray byte left in the shell's
+        input buffer to execute as its own (failed) command BEFORE our
+        `hailo replay-step` lands on a fresh prompt."""
+        rec = _RecordingTransport()
+        runner = SlmosRunner(sbc="pi-5-1", transport=rec)
+        runner.send_replay_command(Path("/dev/null"), 7)
+        argv, _ = rec.calls[0]
+        cmd_index = argv.index("send") + 2
+        self.assertTrue(
+            argv[cmd_index].startswith("\r"),
+            f"cmd must start with CR to flush stray bytes: {argv[cmd_index]!r}",
+        )
+
+    def test_replay_command_logs_literal_bytes(self) -> None:
+        """The host writes the literal bytes handed to labctl into a log
+        file so dropped-char transients (e.g. "0:/corpus.json708" with
+        'l ' missing) can be triaged by diffing host-side sent bytes
+        against what the SLM-OS shell echoed back. The log is best-effort
+        but must contain the seq and the hex of the exact cmd string."""
+        import os
+        import tempfile
+
+        from hailo_re_driver import slmos_runner as sr_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            log_path = os.path.join(td, "sent.log")
+            original = sr_mod._SENT_CMDS_LOG
+            sr_mod._SENT_CMDS_LOG = log_path
+            try:
+                rec = _RecordingTransport()
+                runner = SlmosRunner(
+                    sbc="pi-5-1",
+                    corpus_on_card_path="0:/corpus.jsonl",
+                    transport=rec,
+                )
+                runner.send_replay_command(Path("/dev/null"), 4242)
+                with open(log_path) as f:
+                    line = f.read()
+            finally:
+                sr_mod._SENT_CMDS_LOG = original
+
+        self.assertIn("seq=4242", line)
+        expected_cmd = "\rhailo replay-step 0:/corpus.jsonl 4242"
+        self.assertIn(f"hex={expected_cmd.encode().hex()}", line)
 
     def test_replay_command_until_regex_matches_full_response_only(self) -> None:
         """`--until` must NOT match a truncated RESPONSE line that
