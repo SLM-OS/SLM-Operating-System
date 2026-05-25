@@ -86,7 +86,14 @@ def parse_trace_line(line: str) -> Optional[BoundaryTraceOp]:
         return None
     size = width_bits // 8
     raw_val = m.group("val")
-    # Pad to canonical LE-hex width so a malformed-but-otherwise-valid
+    # Reject over-wide hex (e.g. "val=0x123456789" for a 4-byte op).
+    # The kernel doesn't emit these today, but if it ever does we want
+    # the line to fail parsing loudly — not silently mismatch against
+    # the corpus's narrower stored value (zfill only pads, never
+    # truncates).
+    if len(raw_val) > size * 2:
+        return None
+    # Pad to canonical LE-hex width so a short-but-otherwise-valid
     # line ("val=0x1" when size=4) still compares correctly against
     # the corpus's zero-padded form ("00000001").
     value = raw_val.zfill(size * 2).lower()

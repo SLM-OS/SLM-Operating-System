@@ -211,6 +211,25 @@ class AsymmetricSkipTests(unittest.TestCase):
         self.assertEqual(skip.side, "corpus")
         self.assertEqual(skip.skipped_ops_count, 2)
 
+    def test_trace_longer_than_corpus_records_trace_side_tail_skip(self) -> None:
+        """Converse of the previous test: the trace runs past the end
+        of the corpus. The leftover trace ops must land as a single
+        `side="trace"` skip, NOT a hard divergence (we just ran the
+        native flow further than the corpus captured)."""
+        corpus = [_c(1, 0, 0x98, "write", "00000001")]
+        trace = [_t(0, 0x98, "write", "00000001"),
+                 _t(0, 0x9c, "write", "00000002"),
+                 _t(0, 0xa0, "write", "00000003")]
+        report = diff_native_against_corpus(corpus, trace)
+        self.assertFalse(report.diverged)
+        self.assertEqual(report.matched_op_count, 1)
+        self.assertEqual(len(report.asymmetric_skips), 1)
+        skip = report.asymmetric_skips[0]
+        self.assertEqual(skip.side, "trace")
+        self.assertEqual(skip.skipped_ops_count, 2)
+        self.assertEqual(skip.corpus_idx, 1)
+        self.assertEqual(skip.trace_idx, 1)
+
 
 class FormatReportTests(unittest.TestCase):
     """The formatted report is meant to be paste-into-ticket

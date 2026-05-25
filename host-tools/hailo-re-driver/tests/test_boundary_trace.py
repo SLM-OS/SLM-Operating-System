@@ -111,6 +111,21 @@ class ParseTraceLineTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNone(parse_trace_line(line))
 
+    def test_rejects_value_wider_than_op_size(self) -> None:
+        """Over-wide hex (e.g. 9 chars for a 4-byte op) must NOT be
+        silently kept — the corpus stores 8 chars and a wider trace
+        value would mysteriously mismatch. Fail parsing loudly so the
+        operator sees the format-divergence, not a confusing value
+        miss in the diff report."""
+        for line in [
+            # 9 hex chars for WR32 (max 8):
+            "[trc] phase=link       mech=MMIO WR32 bar=0 off=0x0098 val=0x123456789",
+            # 17 chars for RD32:
+            "[trc] phase=link       mech=MMIO RD32 bar=0 off=0x0098 val=0x12345678abcdef012",
+        ]:
+            with self.subTest(line=line):
+                self.assertIsNone(parse_trace_line(line))
+
     def test_rejects_zero_or_unaligned_width(self) -> None:
         """`WR0` / `RD7` aren't valid widths. The kernel doesn't emit
         these, but reject them rather than coerce to a nonsense byte

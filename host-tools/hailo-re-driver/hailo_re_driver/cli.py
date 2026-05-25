@@ -321,6 +321,17 @@ def native_diff_main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
     _setup_logging(args.verbose)
 
+    # A non-positive look-ahead would make every shape mismatch an
+    # immediate hard divergence (the inner range(1, lookahead+1) is
+    # empty). Probably not what the operator meant — fail fast with a
+    # specific message instead of producing a confusing report.
+    if args.lookahead <= 0:
+        print(
+            f"--lookahead must be > 0, got {args.lookahead}",
+            file=sys.stderr,
+        )
+        return 2
+
     corpus = corpus_mod.load(args.corpus)
     with args.trace.open() as f:
         trace_ops = list(parse_trace_stream(f))

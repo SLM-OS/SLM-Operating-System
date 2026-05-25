@@ -40,10 +40,16 @@ ordered-divergence question.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
+from typing import List, Literal, Optional, Sequence
 
 from .boundary_trace import BoundaryTraceOp
 from .corpus import OpEntry
+
+
+# Discriminator for `_AsymmetricSkip.side`. `Literal` rather than an enum
+# keeps the report JSON-serialisable trivially while still making typos
+# like `side="tarce"` a type-checker error.
+SkipSide = Literal["trace", "corpus"]
 
 
 def _ops_equal(corpus_op: OpEntry, trace_op: BoundaryTraceOp) -> bool:
@@ -87,7 +93,7 @@ class _AsymmetricSkip:
     via look-ahead. `side` is "trace" (extra ops in trace not in
     corpus) or "corpus" (missing ops from trace that the corpus has)."""
 
-    side: str           # "trace" or "corpus"
+    side: SkipSide
     corpus_idx: int     # corpus index where the skip began
     trace_idx: int      # trace index where the skip began
     skipped_ops_count: int
@@ -249,13 +255,10 @@ def format_report(report: NativeDiffReport) -> str:
     pasted into a Hailo support ticket / GH issue verbatim."""
     lines = [
         "native-flow vs corpus diff",
-        "  matched ops:        %d / corpus=%d trace=%d" % (
-            report.matched_op_count,
-            report.corpus_op_count,
-            report.trace_op_count,
-        ),
-        "  value mismatches:   %d" % len(report.value_mismatches),
-        "  asymmetric skips:   %d" % len(report.asymmetric_skips),
+        f"  matched ops:        {report.matched_op_count} / "
+        f"corpus={report.corpus_op_count} trace={report.trace_op_count}",
+        f"  value mismatches:   {len(report.value_mismatches)}",
+        f"  asymmetric skips:   {len(report.asymmetric_skips)}",
         "",
     ]
     if report.diverged:
@@ -263,20 +266,16 @@ def format_report(report: NativeDiffReport) -> str:
         t = report.first_divergent_trace_op
         assert c is not None and t is not None
         lines.append(
-            "DIVERGED at corpus_idx=%d trace_idx=%d:" % (
-                report.first_divergent_corpus_idx,
-                report.first_divergent_trace_idx,
-            )
+            f"DIVERGED at corpus_idx={report.first_divergent_corpus_idx} "
+            f"trace_idx={report.first_divergent_trace_idx}:"
         )
         lines.append(
-            "  corpus expected: bar=%d off=0x%04x size=%d dir=%-5s value=%s seq=%d" % (
-                c.bar, c.offset, c.size, c.dir, c.value, c.seq,
-            )
+            f"  corpus expected: bar={c.bar} off=0x{c.offset:04x} "
+            f"size={c.size} dir={c.dir:<5} value={c.value} seq={c.seq}"
         )
         lines.append(
-            "  trace observed:  bar=%d off=0x%04x size=%d dir=%-5s value=%s phase=%s" % (
-                t.bar, t.offset, t.size, t.dir, t.value, t.phase,
-            )
+            f"  trace observed:  bar={t.bar} off=0x{t.offset:04x} "
+            f"size={t.size} dir={t.dir:<5} value={t.value} phase={t.phase}"
         )
     else:
         lines.append("clean match (no hard divergence)")
@@ -285,10 +284,9 @@ def format_report(report: NativeDiffReport) -> str:
         lines.append("first 5 value mismatches:")
         for vm in report.value_mismatches[:5]:
             lines.append(
-                "  corpus[%d] bar=%d off=0x%04x dir=%s: expected=%s observed=%s (phase=%s)" % (
-                    vm.corpus_idx, vm.corpus_op.bar, vm.corpus_op.offset,
-                    vm.corpus_op.dir, vm.corpus_op.value,
-                    vm.trace_op.value, vm.trace_op.phase,
-                )
+                f"  corpus[{vm.corpus_idx}] bar={vm.corpus_op.bar} "
+                f"off=0x{vm.corpus_op.offset:04x} dir={vm.corpus_op.dir}: "
+                f"expected={vm.corpus_op.value} observed={vm.trace_op.value} "
+                f"(phase={vm.trace_op.phase})"
             )
     return "\n".join(lines)
