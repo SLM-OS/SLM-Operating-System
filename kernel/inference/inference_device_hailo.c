@@ -1485,13 +1485,23 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #endif
     cs_load_stage_set(51);
 
-    /* Pre-configure handshake (matches ctxsmoke flow + HailoRT
-     * convention). CLEAR_CONFIGURED_APPS drops any apps the
-     * firmware had registered from a prior load; GET_HW_CONSTS
-     * reads hardware constants firmware needs to have handy
-     * before it can validate subsequent context-switch bytes. */
-    context_switch_settle_pings("CLEAR_CONFIGURED_APPS");
-    hailo_core_cpu_settle();
+    /* Pre-configure handshake. CLEAR_CONFIGURED_APPS drops any apps
+     * the firmware had registered from a prior load; GET_HW_CONSTS
+     * reads hardware constants firmware needs to have handy before it
+     * can validate subsequent context-switch bytes.
+     *
+     * No APP-CPU pings between RESET and CLEAR_APPS. HailoRT v4.23's
+     * MobileNet wire capture
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt)
+     * shows CLEAR_APPS issued IMMEDIATELY after CHANGE_STATUS(RESET) at
+     * t=393.529554/393.529681 — 127 µs apart, no RPC between. The
+     * settle_pings call previously here was a SLM-OS-specific
+     * divergence (#1003 disconfirmed it as the SAGE1_MIPI_RX_13 ECC
+     * trigger, but it's still an unjustified divergence). The wall-
+     * clock floor from the prior `hailo_core_cpu_settle()` is also
+     * dropped — HailoRT's 127 µs gap is far below SLM-OS's
+     * HAILO_CORE_CPU_SETTLE_FLOOR_US, so the floor wasn't matching the
+     * reference either. */
     /* #682 (2026-05-09): time CLEAR_APPS — Linux's response is 4.4 ms
      * (longest single RPC in init); if SLM-OS's is much shorter, fw
      * isn't doing the same internal work (likely SAGE init). */
