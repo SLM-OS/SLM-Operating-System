@@ -1553,29 +1553,30 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * load-bearing; next concrete delta is APP-CPU settle pings. */
     context_switch_settle_pings("GET_HW_CONSTS");
     uint32_t hw_consts_len = 0;
-    /* #682 hyp-M (2026-05-09): Linux's HailoRT calls GET_HW_CONSTS
-     * SIX times back-to-back during init (Pi OS inference trace
-     * 2026-05-09, ~165 µs each, no other RPCs interleaved). SLM-OS
-     * called it 1×; an earlier `[Hailo #361]` test of 4× was
-     * disconfirmed but the actual reference count is 6. The body is
-     * empty (20 B request, 51 B response with HW const struct), so
-     * the cost is small and the gain — if any — is whatever fw
-     * state-machine settling 6× back-to-back affords. Per
-     * convention with the settle delay, leave 6× in tree once the
-     * device is operational; revisit / minimize via bisect later. */
-    for (uint32_t hw_consts_iter = 0; hw_consts_iter < 6u; hw_consts_iter++) {
+    /* HailoRT v4.23 calls GET_HW_CONSTS FOUR times back-to-back during
+     * init. Verified across both wire captures
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-{mnist-pi5,mobilenet}.txt):
+     * 4 occurrences of `00 00 00 48` at common_header opcode position,
+     * back-to-back with no other CORE/APP RPCs interleaved.
+     *
+     * Previous comment claimed "SIX times" citing a "Pi OS inference
+     * trace 2026-05-09" — that source isn't reproducible from the
+     * checked-in capture files; the actual wire evidence is 4×. The
+     * `_iter < 4u` count below is bounded by the wire-capture
+     * ground truth. */
+    for (uint32_t hw_consts_iter = 0; hw_consts_iter < 4u; hw_consts_iter++) {
         hailo_core_cpu_settle();
         uint64_t t_hw_start = timer_get_count();
         rc = hailo_control_get_hw_consts(&hw_consts_len);
         uint64_t t_hw_end = timer_get_count();
         uint64_t hw_us = (t_hw_end - t_hw_start) * 1000000ULL
                          / timer_get_frequency();
-        uart_printf("[hailo] GET_HW_CONSTS [%u/6] rc=%d resp_len=%u "
+        uart_printf("[hailo] GET_HW_CONSTS [%u/4] rc=%d resp_len=%u "
                     "latency=%lu us\r\n",
                     (unsigned)(hw_consts_iter + 1u), rc,
                     (unsigned)hw_consts_len, (unsigned long)hw_us);
         if (rc != HAILO_OK) {
-            WARN("hailo backend: GET_HW_CONSTS [%u/6] failed (rc=%d)",
+            WARN("hailo backend: GET_HW_CONSTS [%u/4] failed (rc=%d)",
                  (unsigned)(hw_consts_iter + 1u), rc);
             goto fail;
         }
@@ -1592,8 +1593,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * (u8) + default_initial_credit_size (u32), each as a 4-B
          * BE-length-prefixed param. Only the last iteration is dumped
          * to keep the boot log short — fw response is identical across
-         * the 6 calls per Pi OS trace. */
-        if (hw_consts_iter == 5u && hw_consts_len > 0) {
+         * the 4 calls per the HailoRT wire capture. */
+        if (hw_consts_iter == 3u && hw_consts_len > 0) {
             const uint8_t *body = NULL;
             uint32_t       body_cap = 0;
             hailo_control_get_hw_consts_response_body(&body, &body_cap);

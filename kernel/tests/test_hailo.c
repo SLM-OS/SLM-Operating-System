@@ -7272,16 +7272,17 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     /* Expected core-CPU RPCs per context_switch_load:
      *   1.    CHANGE_STATUS(RESET)
      *   2.    CLEAR_CONFIGURED_APPS    (pre-configure handshake)
-     *   3-8.  GET_HW_CONSTS × 6        (#682 hyp-M — Linux HailoRT
-     *                                    calls it 6× back-to-back)
-     *   9.    SET_NETWORK_GROUP_HEADER
-     *   10-13. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
-     *   14.   CHANGE_STATUS(ENABLED)
+     *   3-6.  GET_HW_CONSTS × 4        (matches HailoRT wire capture
+     *                                    — see hailort-v4.23.0-wire-
+     *                                    capture-{mnist-pi5,mobilenet}.txt)
+     *   7.    SET_NETWORK_GROUP_HEADER
+     *   8-11. SET_CONTEXT_INFO × 4     (ACT/BS/PRE/DYN)
+     *   12.   CHANGE_STATUS(ENABLED)
      * Post-ENABLED the driver also writes num_avail on the CFG VDMA
      * channel (#253 / f160fe0) but that's an MMIO poke, not an RPC, so
      * it doesn't touch mock_control_core_doorbells. */
     uint32_t core_rpcs = mock_control_core_doorbells - core_before;
-    TEST_ASSERT_EQUAL_UINT32(14u, core_rpcs);
+    TEST_ASSERT_EQUAL_UINT32(12u, core_rpcs);
 }
 
 /* #179 failure unwind: if the context-switch sequence fails partway
