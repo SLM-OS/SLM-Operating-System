@@ -147,9 +147,21 @@ int hailo_cs_translate_application_header(
      * so the two sources agree by construction. */
     out->csm_buffer_size = cfg->ccw_desc_page_size;
 
-    /* Control-channel action list path only (no DDR backing). Zero
-     * would be read as a valid DDR pointer and rejected. */
-    out->external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
+    /* Control-channel action list path only (no DDR backing).
+     *
+     * HailoRT v4.23 MNIST wire capture
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt)
+     * shows external_action_list_address = 0x00000000 (bytes 11..14 of
+     * the application_header). SLM-OS previously sent
+     * HAILO_CS_NO_DDR_ACTION_LIST (0xFFFFFFFF) on the strength of a
+     * code comment claiming "0 would be read as a valid DDR pointer
+     * and rejected" — but the wire capture proves fw accepts 0 just
+     * fine on MNIST. Match HailoRT's value.
+     *
+     * The 0xFFFFFFFF sentinel constant is left in the header
+     * (hailo_control.h) in case a future code path needs it, but the
+     * primary load path now sends 0 to match the reference. */
+    out->external_action_list_address = 0;
 
     /* Declare all config channels to firmware so its BURST_CREDITS_TASK
      * knows about them. For single-cfg HEFs that's just one entry;

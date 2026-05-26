@@ -2903,11 +2903,13 @@ static void test_control_core_identify_wire_layout(void)
 static void test_cs_translate_application_header_fills_defaults(void)
 {
     /* The translator derives batch_size=1, dynamic_contexts_count=1,
-     * networks_count=1, csm_buffer_size from cfg, no-DDR sentinel,
-     * config channel populated. boundary_channels_bitmap reflects
-     * ACTUAL boundary channels (config+OFFSETs), not the config
-     * channel itself — a zero-pad HEF has no boundary edges so the
-     * bitmap is zero. */
+     * networks_count=1, csm_buffer_size from cfg, and matches HailoRT
+     * v4.23's MNIST wire capture for the application_header feature
+     * flags (preliminary_run_asap=1, can_fast_batch_switch=1) and
+     * external_action_list_address=0. boundary_channels_bitmap
+     * reflects ACTUAL boundary channels (config+OFFSETs), not the
+     * config channel itself — a zero-pad HEF has no boundary edges so
+     * the bitmap is zero. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
 
@@ -2927,8 +2929,13 @@ static void test_cs_translate_application_header_fills_defaults(void)
     TEST_ASSERT_EQUAL_UINT16(1, hdr.dynamic_contexts_count);
     TEST_ASSERT_EQUAL_UINT16(1, hdr.batch_size);
     TEST_ASSERT_EQUAL_UINT16(512, hdr.csm_buffer_size);
-    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST,
-                             hdr.external_action_list_address);
+    /* HailoRT v4.23 MNIST sends 0 here, not the 0xFFFFFFFF sentinel
+     * the SLM-OS code previously used. See translator commit
+     * "set external_action_list_address=0 in application_header". */
+    TEST_ASSERT_EQUAL_UINT32(0u, hdr.external_action_list_address);
+    /* HailoRT v4.23 MNIST feature-flag bytes are both 1. */
+    TEST_ASSERT_TRUE(hdr.preliminary_run_asap);
+    TEST_ASSERT_TRUE(hdr.can_fast_batch_switch);
     TEST_ASSERT_EQUAL_UINT8(1, hdr.config_channels_count);
     TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[0]);
     /* No boundary pads in this info → no boundary channels. */
