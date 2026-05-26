@@ -1460,6 +1460,19 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * floor catches paths where the pings themselves return faster
      * than the floor. */
     context_switch_settle_pings("RESET");
+    /* HailoRT v4.23 issues GDI TWICE before RESET (mobilenet wire
+     * capture at t=393.529161 + 393.529358, 197 us apart, between the
+     * initial IDENTIFY and CHANGE_STATUS(RESET) at 393.529554). The
+     * shared settle_pings helper only emits 1 GDI; add a second here
+     * to match the reference cadence specifically pre-RESET. */
+    {
+        uint32_t gdi_len = 0;
+        int drc2 = hailo_control_get_device_information(&gdi_len);
+        if (drc2 != HAILO_OK) {
+            WARN("hailo backend: pre-RESET second GDI rc=%d (continuing)",
+                 drc2);
+        }
+    }
     hailo_core_cpu_settle();
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
