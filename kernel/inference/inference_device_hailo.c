@@ -440,7 +440,17 @@ static bool hailo_fw_dump_d2h_notification_once(void)
  * down once the load completes cleanly without ECCs. The previous
  * uniform 10 ms unconditional delay did NOT suppress load-time
  * ECCs, so 10 ms is known too short. Tracking: #761. */
-#define HAILO_CORE_CPU_SETTLE_FLOOR_US       50000u /* 50 ms */
+/* 250 µs floor: matches HailoRT v4.23's measured inter-RPC gap of
+ * ~100-300 µs from the MNIST wire capture
+ * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt).
+ * The 50 ms floor previously used here was justified by "Linux's
+ * HailoRT achieves the gap incidentally via user-space scheduling
+ * latency (seconds between RPCs from vstreams library)" — that
+ * premise is contradicted by the wire capture, which shows Linux
+ * fires RPCs ~200 µs apart, not seconds apart. The original 50 vs
+ * 200 ms bisect (8b2145ad) never tested below 50 ms; it just compared
+ * two large values that were both already 100× slower than Linux. */
+#define HAILO_CORE_CPU_SETTLE_FLOOR_US       250u /* 250 us — matches HailoRT */
 /*
  * Serialization: this anchor is touched only from `context_switch_load`
  * and `hailo_backend_run`, both of which run under the inference-layer
