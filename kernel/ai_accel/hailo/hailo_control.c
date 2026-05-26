@@ -96,7 +96,19 @@ static uint32_t control_sequence = 0;
 
 static inline uint32_t control_next_sequence(void)
 {
-    return __atomic_fetch_add(&control_sequence, 1, __ATOMIC_RELAXED);
+    /* HailoRT v4.23 sends sequence=0 on every control RPC. Verified
+     * across 27 captures in two wire dumps:
+     *   ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt
+     *   ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt
+     * — every `hailo-req` shows bytes 8..11 of the common_header as
+     * `00 00 00 00`. SLM-OS doesn't validate response sequence (the
+     * `control_check_response_header` path matches by opcode and
+     * response_len, not sequence), so incrementing has no consumer
+     * inside SLM-OS and is a pure wire divergence from the reference.
+     * Match the reference. The static counter is kept (zeroed) for
+     * potential future debug correlation if needed. */
+    (void)control_sequence;
+    return 0;
 }
 
 /*
