@@ -114,15 +114,32 @@ int hailo_cs_translate_application_header(
     out->dynamic_contexts_count = 1;
     out->batch_size             = 1;
 
-    /* Phase 8 #253 (2026-04-23): HailoRT sets preliminary_run_asap=1
-     * and can_fast_batch_switch=1 for MNIST on v4.23 (verified via
-     * Pi OS trace ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-mnist-fwctl-pi5.txt).
-     * SLM-OS leaves both at 0. Tested setting them: did not fix the
-     * boundary-submit silence. Most likely they need to be paired
-     * with a corresponding host-side behavior (PRELIMINARY ASAP mode
-     * may require extra ActivateChannel actions in PRELIMINARY that
-     * SLM-OS doesn't emit). Leaving at 0 for now — TODO when
-     * ASAP-mode action emission lands. */
+    /* Match HailoRT v4.23 MNIST cadence: both feature flags set.
+     *
+     * Verified via Pi OS wire capture
+     * ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt
+     * (SET_NETWORK_GROUP_HEADER application_header bytes 2 + 4 = 0x01).
+     *
+     * Historical note: Phase 8 #253 (2026-04-23) tested setting these to
+     * 1 and observed "no fix for boundary-submit silence", concluding
+     * they needed paired ActivateChannel actions in PRELIMINARY that
+     * SLM-OS doesn't emit. That conclusion was confounded by two facts
+     * we know now:
+     *
+     *   1. The 2026-04-23 test ran with the channel-index bug still in
+     *      place (#682 channel-direction mismatch, fixed by PR #999
+     *      2026-05-25). The boundary submit was going to wedge regardless
+     *      of these fields.
+     *   2. The 2026-05-25 byte-diff of SET_CONTEXT_INFO(PRELIMINARY) shows
+     *      SLM-OS's PRELIMINARY action stream is byte-identical to
+     *      HailoRT's (modulo IOVA bytes). HailoRT runs successfully with
+     *      asap=1 + that exact PRELIMINARY, so the hypothesis that ASAP
+     *      mode requires extra actions SLM-OS doesn't emit is empirically
+     *      contradicted — both sides emit the same actions.
+     *
+     * Setting to 1 to match the working reference. */
+    out->preliminary_run_asap  = 1;
+    out->can_fast_batch_switch = 1;
 
     /* csm_buffer_size must match the VDMA descriptor page size —
      * firmware validates this against the host_buffer_info fields
