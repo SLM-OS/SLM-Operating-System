@@ -2922,9 +2922,11 @@ static void dma_dump_hex(const char *region_name,
         size_t take = (size - off) > 16u ? 16u : (size - off);
         /* Build the 16-byte line into a fixed buffer so a single
          * uart_printf emits it — keeps per-line UART contention low
-         * and matches the format Linux's pr_info will produce. Each
-         * hex pair is "xx ", 3 chars; 16 pairs + the trailing space
-         * we strip = up to 48 chars. */
+         * and matches the format Linux's pr_info will produce.
+         *
+         * Buffer sizing: max line is 16 hex pairs (32 chars) + 15
+         * separator spaces + 1 null = 48 chars. line[64] gives 16
+         * bytes of headroom for the format. */
         char line[64];
         size_t lpos = 0;
         for (size_t i = 0; i < take; i++) {
