@@ -7273,6 +7273,7 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     TEST_ASSERT_TRUE(n != 0);
 
     uint32_t core_before = mock_control_core_doorbells;
+    uint32_t app_before  = mock_control_doorbells;
     inference_model_handle_t h = INF_INVALID_HANDLE;
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
 
@@ -7290,6 +7291,26 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
      * it doesn't touch mock_control_core_doorbells. */
     uint32_t core_rpcs = mock_control_core_doorbells - core_before;
     TEST_ASSERT_EQUAL_UINT32(12u, core_rpcs);
+
+    /* Expected APP-CPU RPCs per context_switch_load:
+     *   settle_pings("RESET")               = IDENTIFY + GDI   (2)
+     *   inline 2nd GDI before RESET         = GDI              (1)
+     *   settle_pings("GET_HW_CONSTS")       = IDENTIFY + GDI   (2)
+     *   settle_pings("SET_NETWORK_GROUP_HEADER") = IDENTIFY + GDI (2)
+     *   settle_pings(ctx) × 4 SET_CONTEXT_INFO   = 4×(IDENTIFY+GDI) (8)
+     *   settle_pings("CHANGE_STATUS_ENABLED") = IDENTIFY + GDI (2)
+     * Total = 17 APP doorbells.
+     *
+     * The lone inline GDI between settle_pings("RESET") and
+     * CHANGE_STATUS(RESET) (commit 4e4a9123, matches HailoRT's
+     * IDENTIFY+GDI+GDI pre-RESET cadence) is the only APP RPC that
+     * isn't part of a settle_pings pair. If a refactor consolidates
+     * settle_pings to also issue 2 GDIs, drop the inline call, AND
+     * keep this assertion at 17, the per-callsite cadence stays
+     * correct. If it drops the inline call without paying back the
+     * GDI elsewhere, this assertion catches it. */
+    uint32_t app_rpcs = mock_control_doorbells - app_before;
+    TEST_ASSERT_EQUAL_UINT32(17u, app_rpcs);
 }
 
 /* #179 failure unwind: if the context-switch sequence fails partway

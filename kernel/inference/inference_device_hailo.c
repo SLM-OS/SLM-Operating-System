@@ -424,6 +424,9 @@ static bool hailo_fw_dump_d2h_notification_once(void)
 #define HAILO_HAILORT_GAP_POST_CLEAR_APPS_US   5000u /* HailoRT: 4.5 ms */
 #define HAILO_HAILORT_GAP_POST_DYNAMIC_US      3000u /* HailoRT: 2.8 ms */
 #define HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US 2000u /* HailoRT: 1.6 ms */
+/* HailoRT v4.23 issues GET_HW_CONSTS exactly 4× during load init.
+ * See context_switch_load's GET_HW_CONSTS loop for citation. */
+#define HAILO_GET_HW_CONSTS_LOOP_COUNT         4u
 
 /* #682 hyp-Q (2026-05-09): minimum-gap pre-RPC pacing for every
  * CORE-CPU control call in the load sequence. Each CORE-CPU RPC
@@ -1568,26 +1571,25 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-{mnist-pi5,mobilenet}.txt):
      * 4 occurrences of `00 00 00 48` at common_header opcode position,
      * back-to-back with no other CORE/APP RPCs interleaved.
-     *
-     * Previous comment claimed "SIX times" citing a "Pi OS inference
-     * trace 2026-05-09" — that source isn't reproducible from the
-     * checked-in capture files; the actual wire evidence is 4×. The
-     * `_iter < 4u` count below is bounded by the wire-capture
-     * ground truth. */
-    for (uint32_t hw_consts_iter = 0; hw_consts_iter < 4u; hw_consts_iter++) {
+     * The loop count is HAILO_GET_HW_CONSTS_LOOP_COUNT (declared above). */
+    for (uint32_t hw_consts_iter = 0;
+         hw_consts_iter < HAILO_GET_HW_CONSTS_LOOP_COUNT;
+         hw_consts_iter++) {
         hailo_core_cpu_settle();
         uint64_t t_hw_start = timer_get_count();
         rc = hailo_control_get_hw_consts(&hw_consts_len);
         uint64_t t_hw_end = timer_get_count();
         uint64_t hw_us = (t_hw_end - t_hw_start) * 1000000ULL
                          / timer_get_frequency();
-        uart_printf("[hailo] GET_HW_CONSTS [%u/4] rc=%d resp_len=%u "
+        uart_printf("[hailo] GET_HW_CONSTS [%u/%u] rc=%d resp_len=%u "
                     "latency=%lu us\r\n",
-                    (unsigned)(hw_consts_iter + 1u), rc,
+                    (unsigned)(hw_consts_iter + 1u),
+                    (unsigned)HAILO_GET_HW_CONSTS_LOOP_COUNT, rc,
                     (unsigned)hw_consts_len, (unsigned long)hw_us);
         if (rc != HAILO_OK) {
-            WARN("hailo backend: GET_HW_CONSTS [%u/4] failed (rc=%d)",
-                 (unsigned)(hw_consts_iter + 1u), rc);
+            WARN("hailo backend: GET_HW_CONSTS [%u/%u] failed (rc=%d)",
+                 (unsigned)(hw_consts_iter + 1u),
+                 (unsigned)HAILO_GET_HW_CONSTS_LOOP_COUNT, rc);
             goto fail;
         }
 #ifdef HAILO_WIRE_DEBUG
@@ -1604,7 +1606,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * BE-length-prefixed param. Only the last iteration is dumped
          * to keep the boot log short — fw response is identical across
          * the 4 calls per the HailoRT wire capture. */
-        if (hw_consts_iter == 3u && hw_consts_len > 0) {
+        if (hw_consts_iter == HAILO_GET_HW_CONSTS_LOOP_COUNT - 1u
+            && hw_consts_len > 0) {
             const uint8_t *body = NULL;
             uint32_t       body_cap = 0;
             hailo_control_get_hw_consts_response_body(&body, &body_cap);
