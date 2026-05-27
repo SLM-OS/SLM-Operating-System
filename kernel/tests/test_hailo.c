@@ -3485,10 +3485,12 @@ static void test_cs_translate_batch_switching_mnist_template(void)
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     /* Full MNIST template signature (tightened per PR #348 review):
-     * ccw_action_count=28, ccw_total_bytes=112256, sdk_version
-     * prefix "3.33", plus the 28×28×1 / 1×1×10 shapes set below. */
+     * ccw_action_count=28, ccw_total_bytes=56128, sdk_version
+     * prefix "3.33", plus the 28×28×1 / 1×1×10 shapes set below.
+     * The 56128 value is the corrected total after PR #1008's
+     * Phase-8 reset fix; pre-fix builds saw 112256 (double-counted). */
     info.ccw_action_count = 28;
-    info.ccw_total_bytes  = 112256;
+    info.ccw_total_bytes  = 56128;
     strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
@@ -3576,7 +3578,7 @@ static void test_cs_translate_batch_switching_template_gated(void)
      * input/output shapes are 224×224×3 / 1×1×1000 — a real
      * classifier, not MNIST. Tight detector must still decline. */
     info.ccw_action_count = 28;
-    info.ccw_total_bytes  = 112256;
+    info.ccw_total_bytes  = 56128;
     strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
@@ -3613,7 +3615,7 @@ static void test_cs_translate_batch_switching_template_gated(void)
 }
 
 /* MNIST template gated on sdk_version prefix "3.33" + ccw_total_bytes
- * = 112256. A HEF with matching shape but a mismatched sdk_version
+ * = 56128. A HEF with matching shape but a mismatched sdk_version
  * (e.g. future DFC compiler) must NOT receive the hardcoded
  * sequencer_config byte tables — the detector's third guard. */
 static void test_cs_translate_batch_switching_template_rejects_new_sdk(void)
@@ -3621,7 +3623,7 @@ static void test_cs_translate_batch_switching_template_rejects_new_sdk(void)
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.ccw_action_count = 28;
-    info.ccw_total_bytes  = 112256;
+    info.ccw_total_bytes  = 56128;
     strncpy(info.sdk_version, "4.0.0",  /* != "3.33*" */
             sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
@@ -3656,7 +3658,7 @@ static void test_cs_translate_batch_switching_template_rejects_new_sdk(void)
 }
 
 /* Same shape as MNIST but ccw_total_bytes doesn't match the
- * reference (112256) — detector must decline because the CCW split
+ * reference (56128) — detector must decline because the CCW split
  * across cfg channels is what keys the sequencer_config templates to
  * the specific HEF compile. */
 static void test_cs_translate_batch_switching_template_rejects_new_ccw(void)
@@ -3664,7 +3666,7 @@ static void test_cs_translate_batch_switching_template_rejects_new_ccw(void)
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.ccw_action_count = 28;
-    info.ccw_total_bytes  = 113000;   /* slightly off — same count, different bytes */
+    info.ccw_total_bytes  = 56500;   /* slightly off — same count, different bytes */
     strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input         = true;
@@ -3706,7 +3708,7 @@ static void test_cs_translate_preliminary_dual_cfg_channel(void)
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.ccw_action_count = 28;
-    info.ccw_total_bytes  = 112256;
+    info.ccw_total_bytes  = 56128;
     strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
