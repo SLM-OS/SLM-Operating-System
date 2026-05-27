@@ -2574,6 +2574,44 @@ static int hailo_backend_run(struct inference_device *dev,
     hailo_vdma_snap_channels("pre-IN-submit");
 #endif
 
+#ifdef HAILO_WIRE_DEBUG
+    /* #1001 IOVA reachability probe. Pre-fill IN descriptor list's
+     * `remaining_page_size_status` with a sentinel pattern so we can
+     * distinguish "fw never wrote to our DMA target" (sentinel
+     * survives) from "fw wrote 0" (status reads back as 0 from
+     * zero-init dma_alloc). The existing dump path at
+     * hailo_vdma_dump_desc_status reads the same field post-timeout.
+     * Cache-clean pushes the sentinel to DRAM so fw observes our
+     * value, not a stale L1/L2 copy.
+     *
+     * Result 2026-05-27 on pi-5-1: sentinel survives unchanged across
+     * all 8 IN descriptors. Combined with cfg-channel success
+     * evidence (fw DID write to 0x100xxx IOVAs for CCW upload), this
+     * proves the wedge is at fw decision level (refuses to dispatch
+     * ch=2) rather than PCIe transport level. IOVA pinning would not
+     * help. See docs/hailo-dma-content-diff-plan.md for the next
+     * orthogonal experiment. */
+    {
+        const uint32_t IOVA_PROBE_SENTINEL = 0xABABABABu;
+        uint32_t probe_n = slot->boundary_in_list.desc_count;
+        if (probe_n > 8u) probe_n = 8u;
+        for (uint32_t i = 0; i < probe_n; i++) {
+            slot->boundary_in_list.descs[i].remaining_page_size_status =
+                IOVA_PROBE_SENTINEL;
+        }
+        if (hailo_platform && hailo_platform->cache_clean) {
+            hailo_platform->cache_clean(
+                slot->boundary_in_list.descs,
+                (size_t)probe_n
+                    * sizeof(struct hailo_vdma_descriptor));
+        }
+        uart_printf("[probe] IN desc[0..%u] rps pre-filled with "
+                    "sentinel 0x%08x\r\n",
+                    (unsigned)probe_n,
+                    (unsigned)IOVA_PROBE_SENTINEL);
+    }
+#endif /* HAILO_WIRE_DEBUG */
+
     int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
@@ -2581,6 +2619,27 @@ static int hailo_backend_run(struct inference_device *dev,
     uint64_t t_in_done = timer_get_count();
 #ifdef HAILO_WIRE_DEBUG
     hailo_vdma_snap_channels("post-IN-submit");
+    /* #1001 IOVA probe cleanup: on submit-success, restore the
+     * pre-fill sentinel back to 0 so a subsequent inference doesn't
+     * observe stale 0xABABABAB in the desc rps field and mistake it
+     * for a fw-side artifact. On submit-failure (the wedge path)
+     * we leave the sentinel intact so the dump at
+     * hailo_vdma_dump_desc_status below can confirm fw never wrote.
+     * Matches the pre-fill cap (probe_n ≤ 8u) so the two paths stay
+     * in sync. */
+    if (rc == HAILO_OK) {
+        uint32_t cleanup_n = slot->boundary_in_list.desc_count;
+        if (cleanup_n > 8u) cleanup_n = 8u;
+        for (uint32_t i = 0; i < cleanup_n; i++) {
+            slot->boundary_in_list.descs[i].remaining_page_size_status = 0;
+        }
+        if (hailo_platform && hailo_platform->cache_clean) {
+            hailo_platform->cache_clean(
+                slot->boundary_in_list.descs,
+                (size_t)cleanup_n
+                    * sizeof(struct hailo_vdma_descriptor));
+        }
+    }
 #endif
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
