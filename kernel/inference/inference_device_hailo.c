@@ -956,6 +956,68 @@ static int copy_ccws_for_cfg_channel(
 }
 
 #ifdef HAILO_WIRE_DEBUG
+/* #1005: assembled-CCW fingerprint for offline diff vs HailoRT.
+ *
+ * Called by `context_switch_load` immediately after each per-channel
+ * CCW buffer is filled by `copy_ccws_for_cfg_channel`. Prints:
+ *   - First `HAILO_CCW_DUMP_FINGERPRINT_BYTES` bytes of the buffer (hex)
+ *   - Last `HAILO_CCW_DUMP_FINGERPRINT_BYTES` bytes if the buffer is
+ *     larger than 2× the fingerprint size (avoids head/tail overlap)
+ *   - Per-action summary (channel, proto-action-index, CCWS offset,
+ *     byte size) filtered to `channel_filter`.
+ *
+ * `channel_filter` semantics:
+ *   - Pass HAILO_CCW_DUMP_CHANNEL_ANY to list every action regardless
+ *     of cfg_channel_index. Used for the single-channel primary buffer
+ *     (a verbatim copy of the whole CCWS block — all actions apply).
+ *   - Pass a concrete channel index (typically 0 or 1) to list only
+ *     actions tagged for that channel. Used for both buffers in the
+ *     dual-channel path: primary carries cfg_channel_index=1, secondary
+ *     carries cfg_channel_index=0. */
+#define HAILO_CCW_DUMP_FINGERPRINT_BYTES 64u
+#define HAILO_CCW_DUMP_CHANNEL_ANY       UINT32_MAX
+
+static void hailo_ccw_dump_fingerprint(const char *label,
+                                       const struct hef_info *hef,
+                                       uint32_t channel_filter,
+                                       const void *buf,
+                                       uint32_t bytes)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    if (channel_filter == HAILO_CCW_DUMP_CHANNEL_ANY) {
+        uart_printf("[ccw-dump] %s ch=* bytes=%u\r\n", label, bytes);
+    } else {
+        uart_printf("[ccw-dump] %s ch=%u bytes=%u\r\n",
+                    label, channel_filter, bytes);
+    }
+    uint32_t head_n = bytes < HAILO_CCW_DUMP_FINGERPRINT_BYTES
+                          ? bytes : HAILO_CCW_DUMP_FINGERPRINT_BYTES;
+    uart_printf("[ccw-dump]   head[0..%u]:", head_n);
+    for (uint32_t i = 0; i < head_n; i++) {
+        uart_printf(" %02x", p[i]);
+    }
+    uart_printf("\r\n");
+    if (bytes > 2u * HAILO_CCW_DUMP_FINGERPRINT_BYTES) {
+        uint32_t tail_start = bytes - HAILO_CCW_DUMP_FINGERPRINT_BYTES;
+        uart_printf("[ccw-dump]   tail[%u..%u]:", tail_start, bytes);
+        for (uint32_t i = tail_start; i < bytes; i++) {
+            uart_printf(" %02x", p[i]);
+        }
+        uart_printf("\r\n");
+    }
+    for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
+        const struct hef_ccw_action *a = &hef->ccw_actions[i];
+        if (channel_filter != HAILO_CCW_DUMP_CHANNEL_ANY
+            && a->cfg_channel_index != channel_filter) {
+            continue;
+        }
+        uart_printf("[ccw-action] ch=%u idx=%u off=%u size=%u\r\n",
+                    (unsigned)a->cfg_channel_index, i,
+                    (unsigned)a->data_offset_in_blob,
+                    (unsigned)a->data_size);
+    }
+}
+
 /* #682 hyp-7 diagnostic: snapshot fw's BAR4 SRAM (the ATR0-mapped
  * 16 KB control window) at pre-IN-submit and post-timeout, then
  * dword-diff. If proc never advances AND BAR4 contents are unchanged,
@@ -1146,6 +1208,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
     } else {
         memset(slot->ccw_tensor.cpu_addr, 0, ccw_bytes);
     }
+#ifdef HAILO_WIRE_DEBUG
+    /* #1005: fingerprint the assembled CCW buffer for offline diff vs
+     * HailoRT's CCW upload. The bytes are pure memcpy from the HEF's
+     * CCWS region — any divergence from HailoRT here points at either
+     * the HEF parser extracting wrong (offset, size, cfg_channel_index)
+     * tuples or HailoRT extracting different ones. Single-channel mode
+     * puts the whole CCWS block in this buffer verbatim (filter ANY);
+     * dual-channel mode puts only cfg_channel_index=1 actions here. */
+    hailo_ccw_dump_fingerprint("primary", hef,
+                               use_dual ? 1u : HAILO_CCW_DUMP_CHANNEL_ANY,
+                               slot->ccw_tensor.cpu_addr, ccw_bytes);
+#endif /* HAILO_WIRE_DEBUG */
     hailo_tensor_prepare_for_device(&slot->ccw_tensor);
     cs_load_stage_set(12);
 
@@ -1212,6 +1286,11 @@ static int context_switch_load(struct hailo_model_slot *slot,
             hef, outer, model, /*cfg_channel_index=*/0,
             slot->ccw_tensor_1.cpu_addr, bulk_bytes);
         if (copied_bulk < 0) { rc = copied_bulk; goto fail; }
+#ifdef HAILO_WIRE_DEBUG
+        /* #1005: same fingerprint pattern as the primary buffer above. */
+        hailo_ccw_dump_fingerprint("secondary", hef, 0u,
+                                   slot->ccw_tensor_1.cpu_addr, bulk_bytes);
+#endif /* HAILO_WIRE_DEBUG */
         hailo_tensor_prepare_for_device(&slot->ccw_tensor_1);
         uint32_t bulk_dc =
             desc_count_for(bulk_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
