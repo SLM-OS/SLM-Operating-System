@@ -1364,16 +1364,10 @@ static void test_decode_ccw_partial_ng_dedupes_total_bytes(void)
  * doesn't crash and accumulators stay valid. */
 static void test_decode_ccw_modern_core_op_without_prelim(void)
 {
-    /* Empty core_op body (just a length-prefixed wrapper with no
-     * inner preliminary_config). */
-    uint8_t core[8] = {0};
-    size_t  core_len = 0;
-    /* Empty CoreOp body is zero bytes; emit_lenprefix tolerates n=0. */
-    (void)core; (void)core_len;
-
     uint8_t op_body[64];
     size_t  op_body_len = 0;
-    /* ProtoHEFOp.op.core_op (oneof tag 4), zero-length sub-message. */
+    /* ProtoHEFOp.op.core_op (oneof tag 4), zero-length sub-message —
+     * emit_lenprefix tolerates n=0. */
     emit_lenprefix(op_body, &op_body_len, /*4=core_op*/ 4, NULL, 0);
 
     uint8_t ng[128];

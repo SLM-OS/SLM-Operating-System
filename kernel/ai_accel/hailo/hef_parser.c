@@ -1681,6 +1681,50 @@ static bool decode_fused_layers_metadata_cb(pb_istream_t *stream,
     return pb_decode(stream, ProtoHEFFusedLayersMetadata_fields, &md);
 }
 
+/* Zero every accumulator the legacy NG walkers (preliminary_config /
+ * contexts / fused_layers) populate, so a second walk over the same
+ * data through a different code path (the Phase-8 nested-NG walker
+ * or the modern Op-graph core_op walker) can replace the legacy
+ * walk's output cleanly instead of double-counting.
+ *
+ * `reset_op_count` selects between the two call sites:
+ *   - decode_nested_ng_cb (Phase-8 partial_network_groups): TRUE.
+ *     The nested NG's `ops` field re-runs decode_op_cb, so we have
+ *     to zero op_count first or every NG.ops[] entry gets counted
+ *     twice.
+ *   - decode_core_op_cb (modern Op-graph): FALSE. We are inside one
+ *     iteration of the OUTER NG.ops[] traversal at this point;
+ *     resetting op_count would wipe the count for sibling ops
+ *     already walked in this same NG.
+ *
+ * Single source of truth: any new field added to hef_info that
+ * accumulates across the legacy walk MUST be reset here, otherwise
+ * the nested-vs-modern dedupe will silently diverge. See #1005 for
+ * the bug class — ccw_total_bytes was missed for ~2 weeks in
+ * decode_nested_ng_cb's hand-rolled reset block. */
+static void hef_info_reset_walk_accumulators(struct hef_info *info,
+                                             bool reset_op_count)
+{
+    info->context_actions_count = 0;
+    info->context_actions_truncated = false;
+    if (reset_op_count) {
+        info->op_count = 0;
+    }
+    info->ccw_action_count = 0;
+    info->ccw_actions_truncated = false;
+    info->ccw_total_bytes = 0;
+    info->enable_lcu_count = 0;
+    info->enable_lcu_truncated = false;
+    info->disable_lcu_count = 0;
+    info->disable_lcu_truncated = false;
+    info->trigger_sequencer_count = 0;
+    info->trigger_sequencer_truncated = false;
+    info->wait_sequencer_count = 0;
+    info->wait_sequencer_truncated = false;
+    info->allow_input_dataflow_count = 0;
+    info->allow_input_dataflow_truncated = false;
+}
+
 static bool decode_nested_ng_cb(pb_istream_t *stream,
                                 const pb_field_t *field,
                                 void **arg)
@@ -1707,30 +1751,8 @@ static bool decode_nested_ng_cb(pb_istream_t *stream,
      * inert today, but would surface as spurious "per-kind array
      * exhausted" errors the moment MNIST grows to multi-context
      * or the walk order changes. */
-    struct hef_info *info = nctx->op_ctx->info;
-    info->context_actions_count = 0;
-    info->context_actions_truncated = false;
-    info->op_count = 0;
-    info->ccw_action_count = 0;
-    /* #1005 follow-up: ccw_total_bytes and ccw_actions_truncated were
-     * latent omissions in the Phase-8 reset. With ccw_action_count
-     * deduped but ccw_total_bytes left intact, the second walk's
-     * `+= pending.data_size` doubles the total. MNIST has
-     * partial_network_groups populated, so every load reported
-     * total = 2 × actual (e.g. 112256 vs the 56128 the per-channel
-     * sum showed). Fixed here. */
-    info->ccw_actions_truncated = false;
-    info->ccw_total_bytes = 0;
-    info->enable_lcu_count = 0;
-    info->enable_lcu_truncated = false;
-    info->disable_lcu_count = 0;
-    info->disable_lcu_truncated = false;
-    info->trigger_sequencer_count = 0;
-    info->trigger_sequencer_truncated = false;
-    info->wait_sequencer_count = 0;
-    info->wait_sequencer_truncated = false;
-    info->allow_input_dataflow_count = 0;
-    info->allow_input_dataflow_truncated = false;
+    hef_info_reset_walk_accumulators(nctx->op_ctx->info,
+                                     /*reset_op_count=*/true);
 
     ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
     grp.ops.funcs.decode                = decode_op_cb;
@@ -1780,51 +1802,14 @@ static bool decode_partial_ng_cb(pb_istream_t *stream,
 /* legacy-only HEFs ops[].core_op is absent and the reset never fires.         */
 /* -------------------------------------------------------------------------- */
 
-static bool decode_partial_core_op_cb(pb_istream_t *stream,
-                                      const pb_field_t *field,
-                                      void **arg);
-
+/* decode_core_op_cb and decode_partial_core_op_cb mutually recurse
+ * (CoreOp can contain partial_core_ops, each of which wraps a
+ * CoreOp). Forward-declare core_op_cb so partial_core_op_cb (defined
+ * first below) can refer to it; partial_core_op_cb is only called
+ * from inside core_op_cb's pb_decode and needs no forward decl. */
 static bool decode_core_op_cb(pb_istream_t *stream,
                               const pb_field_t *field,
-                              void **arg)
-{
-    (void)field;
-    struct core_op_ctx *cctx = (struct core_op_ctx *)*arg;
-
-    /* Dedupe legacy vs modern accumulation. Mirrors the reset in
-     * decode_nested_ng_cb (Phase 8). Resets cover everything the
-     * preliminary_config + contexts + fused_layers chains
-     * populate; op_count is intentionally NOT reset because we
-     * are currently INSIDE one repeated-ops[] iteration (resetting
-     * would wipe sibling ops already counted in this NG). */
-    struct hef_info *info = cctx->op_ctx->info;
-    info->context_actions_count = 0;
-    info->context_actions_truncated = false;
-    info->ccw_action_count = 0;
-    info->ccw_actions_truncated = false;
-    info->ccw_total_bytes = 0;
-    info->enable_lcu_count = 0;
-    info->enable_lcu_truncated = false;
-    info->disable_lcu_count = 0;
-    info->disable_lcu_truncated = false;
-    info->trigger_sequencer_count = 0;
-    info->trigger_sequencer_truncated = false;
-    info->wait_sequencer_count = 0;
-    info->wait_sequencer_truncated = false;
-    info->allow_input_dataflow_count = 0;
-    info->allow_input_dataflow_truncated = false;
-
-    ProtoHEFCoreOp core = ProtoHEFCoreOp_init_default;
-    core.preliminary_config.funcs.decode    = decode_preliminary_config_cb;
-    core.preliminary_config.arg             = cctx->ccw_ctx;
-    core.contexts.funcs.decode              = decode_context_cb;
-    core.contexts.arg                       = cctx->walker_ctx;
-    core.fused_layers_metadata.funcs.decode = decode_fused_layers_metadata_cb;
-    core.fused_layers_metadata.arg          = cctx->walker_ctx->edge_ectx;
-    core.partial_core_ops.funcs.decode      = decode_partial_core_op_cb;
-    core.partial_core_ops.arg               = cctx;
-    return pb_decode(stream, ProtoHEFCoreOp_fields, &core);
-}
+                              void **arg);
 
 static bool decode_partial_core_op_cb(pb_istream_t *stream,
                                       const pb_field_t *field,
@@ -1837,6 +1822,31 @@ static bool decode_partial_core_op_cb(pb_istream_t *stream,
     partial.core_op.funcs.decode = decode_core_op_cb;
     partial.core_op.arg          = cctx;
     return pb_decode(stream, ProtoHEFPartialCoreOp_fields, &partial);
+}
+
+static bool decode_core_op_cb(pb_istream_t *stream,
+                              const pb_field_t *field,
+                              void **arg)
+{
+    (void)field;
+    struct core_op_ctx *cctx = (struct core_op_ctx *)*arg;
+
+    /* Dedupe legacy vs modern accumulation. We're inside one
+     * iteration of the OUTER NG.ops[] traversal, so DO NOT reset
+     * op_count (would wipe sibling ops already counted). */
+    hef_info_reset_walk_accumulators(cctx->op_ctx->info,
+                                     /*reset_op_count=*/false);
+
+    ProtoHEFCoreOp core = ProtoHEFCoreOp_init_default;
+    core.preliminary_config.funcs.decode    = decode_preliminary_config_cb;
+    core.preliminary_config.arg             = cctx->ccw_ctx;
+    core.contexts.funcs.decode              = decode_context_cb;
+    core.contexts.arg                       = cctx->walker_ctx;
+    core.fused_layers_metadata.funcs.decode = decode_fused_layers_metadata_cb;
+    core.fused_layers_metadata.arg          = cctx->walker_ctx->edge_ectx;
+    core.partial_core_ops.funcs.decode      = decode_partial_core_op_cb;
+    core.partial_core_ops.arg               = cctx;
+    return pb_decode(stream, ProtoHEFCoreOp_fields, &core);
 }
 
 /* -------------------------------------------------------------------------- */
