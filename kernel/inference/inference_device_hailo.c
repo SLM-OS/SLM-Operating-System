@@ -2619,6 +2619,27 @@ static int hailo_backend_run(struct inference_device *dev,
     uint64_t t_in_done = timer_get_count();
 #ifdef HAILO_WIRE_DEBUG
     hailo_vdma_snap_channels("post-IN-submit");
+    /* #1001 IOVA probe cleanup: on submit-success, restore the
+     * pre-fill sentinel back to 0 so a subsequent inference doesn't
+     * observe stale 0xABABABAB in the desc rps field and mistake it
+     * for a fw-side artifact. On submit-failure (the wedge path)
+     * we leave the sentinel intact so the dump at
+     * hailo_vdma_dump_desc_status below can confirm fw never wrote.
+     * Matches the pre-fill cap (probe_n ≤ 8u) so the two paths stay
+     * in sync. */
+    if (rc == HAILO_OK) {
+        uint32_t cleanup_n = slot->boundary_in_list.desc_count;
+        if (cleanup_n > 8u) cleanup_n = 8u;
+        for (uint32_t i = 0; i < cleanup_n; i++) {
+            slot->boundary_in_list.descs[i].remaining_page_size_status = 0;
+        }
+        if (hailo_platform && hailo_platform->cache_clean) {
+            hailo_platform->cache_clean(
+                slot->boundary_in_list.descs,
+                (size_t)cleanup_n
+                    * sizeof(struct hailo_vdma_descriptor));
+        }
+    }
 #endif
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
