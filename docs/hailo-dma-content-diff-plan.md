@@ -79,27 +79,38 @@ worth having.
 ### Linux side
 
 `hailo_pci` doesn't expose host RAM by default. The PR #997 framework
-adds a kprobe-based trace hook on `hailo_resource_write32` and similar.
-We need a kprobe that triggers AT MATCHING POINTS to SLM-OS's dump
-boundaries — specifically right before the same boundary IN submit.
+adds an in-source trace hook (NOT a kprobe — the v2 patch is a kbuild-
+applied source patch under DKMS).
 
-Two options:
+**Drafted approach: extend the v2 trace-instrumentation patch with a
+sysfs `dma_dump` trigger.** Patch saved at
+`~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-dma-dump.patch`
+(2026-05-27). On `echo 1 > /sys/module/hailo_pci/parameters/dma_dump`
+the module walks every open file context's `descriptors_buffer_list`
+and `mapped_user_buffer_list`, emitting `hailo-trc: [dma-dump:...]`
+lines via `pr_info`. Capture goes to dmesg, not UART — so unlike the
+SLM-OS side the full 112 KB CCWS dump takes <100 ms.
 
-**(a) Extend `hailo_pci` with a debugfs entry `dma_dump`.** A user-space
-trigger (`echo 1 > /sys/kernel/debug/hailo_pci/dma_dump`) calls a kernel
-function that walks the same logical structures and prints them via
-`pr_info`. This requires building a custom `hailo_pci.ko` from source
-with our patch — moderate effort but the trace framework we built for
-#997 already shows this is workable.
+Companion deploy script at
+`~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-dma-dump-capture.sh`
+covers patch apply + DKMS rebuild + dump trigger + dmesg capture in
+one run.
 
-**(b) Drive from user-space via `hailortcli` with extra debug flags.**
-HailoRT can be coaxed into dumping internal state with environment
-variables (`HAILO_DEBUG=1` etc.), but its dumps focus on protocol-level
-state, not raw DMA buffer bytes. Less direct.
+**Status: draft skeleton, deploy-pending.** Several field names
+(`hailo_pcie_board.vdma.controller.file_context_list`,
+`hailo_descriptors_list_buffer.dma_address`, the per-fd context
+tracking inside the controller struct) are inferred from the .c files
+in `~/slmos-ref/hailo/v4.23.0/linux/` since the corresponding headers
+aren't in the reference cache. Expect 1-2 edit-recompile cycles on
+the Pi 5 itself to validate struct field names before first successful
+dump.
 
-(a) is the more reliable path. The PR #783 trace framework + the PR
-#997 kprobe instrumentation chain in `~/slmos-ref/derivatives/...` is
-the template.
+Alternative (deferred): user-space `LD_PRELOAD` shim that hooks the
+HAILO_VDMA_LAUNCH_TRANSFER ioctl in HailoRT. Avoids kernel module
+work entirely but requires reverse-engineering the ioctl arg layout
+to find buffer pointers. Considered, not pursued — the kernel patch
+path is more robust given we already have the v2 instrumentation
+framework working.
 
 ## Hex format
 
