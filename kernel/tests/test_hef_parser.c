@@ -1148,6 +1148,173 @@ static void test_decode_ccw_no_preliminary_config(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Modern Op-graph CCW extraction (issue #1005)                                */
+/*                                                                             */
+/* Recent DFC outputs put preliminary_config under                              */
+/*   NG.ops[].op.core_op.preliminary_config                                    */
+/* instead of (or in addition to) the legacy top-level                          */
+/*   NG.preliminary_config                                                     */
+/* HailoRT's fill_core_ops (hailo-hef-internal.cpp:945-1017) branches on the   */
+/* hailo_net_flow feature and prefers the modern slot when present. The HEF    */
+/* parser must do the same: a HEF where CCW data lives ONLY under              */
+/* ops[].core_op was previously silently dropped (CCW upload uploaded zero    */
+/* actions, fw got a fraction of the model, SAGE1_MIPI_RX_13 ECC events and    */
+/* the #682 IN-channel wedge resulted).                                        */
+/* -------------------------------------------------------------------------- */
+
+/* Wrap a ProtoHEFPreliminaryConfig body as ProtoHEFOp.op.core_op
+ * (oneof tag 4 → ProtoHEFCoreOp.preliminary_config field 2).
+ * Returns the serialized ProtoHEFOp body length. */
+static size_t emit_op_with_core_op_prelim(uint8_t *buf,
+                                          const uint8_t *pre,
+                                          size_t pre_len)
+{
+    uint8_t core[256];
+    size_t  core_len = 0;
+    emit_lenprefix(core, &core_len, /*2=preliminary_config*/ 2, pre, pre_len);
+
+    size_t off = 0;
+    /* ProtoHEFOp.op.core_op is oneof field 4. */
+    emit_lenprefix(buf, &off, /*4=core_op*/ 4, core, core_len);
+    return off;
+}
+
+/* One Op carrying a CoreOp with one Operation/Action/WriteDataCcw —
+ * verify the modern path extracts the action when legacy is absent. */
+static void test_decode_ccw_modern_op_graph(void)
+{
+    const uint8_t payload[] = {
+        0xCA, 0xFE, 0xBA, 0xBE, 0x11, 0x22, 0x33, 0x44,
+    };
+
+    uint8_t act[64];
+    size_t  act_len = emit_action_with_ccw(act, payload, sizeof(payload),
+                                           /*cfg_ch=*/5, /*emit_cfg=*/true);
+    uint8_t op[128];
+    size_t  op_len = emit_operation_with_action(op, act, act_len);
+    uint8_t pre[128];
+    size_t  pre_len = emit_preliminary_config(pre, op, op_len);
+
+    /* Wrap inside ops[].core_op rather than top-level
+     * NG.preliminary_config. */
+    uint8_t op_body[512];
+    size_t  op_body_len = emit_op_with_core_op_prelim(op_body, pre, pre_len);
+
+    uint8_t ng[512];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*8=ops*/ 8, op_body, op_body_len);
+
+    uint8_t blob[1024];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(payload), info.ccw_total_bytes);
+    TEST_ASSERT_TRUE(info.ccw_actions[0].cfg_channel_index_known);
+    TEST_ASSERT_EQUAL_UINT32(5, info.ccw_actions[0].cfg_channel_index);
+    TEST_ASSERT_EQUAL_UINT32(sizeof(payload), info.ccw_actions[0].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(
+        payload,
+        (const uint8_t *)blob + info.ccw_actions[0].data_offset_in_blob,
+        sizeof(payload));
+}
+
+/* When BOTH legacy NG.preliminary_config and modern
+ * ops[].core_op.preliminary_config carry data (some HEFs duplicate
+ * for backwards compat), the modern path is authoritative — the
+ * dedupe-reset in decode_core_op_cb wipes the legacy accumulation
+ * before re-walking. Verify by giving the legacy slot one set of
+ * payload bytes and the modern slot a different set; expect only
+ * the modern set to land in info.ccw_actions[]. */
+static void test_decode_ccw_modern_overrides_legacy(void)
+{
+    const uint8_t legacy_payload[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    const uint8_t modern_payload[] = { 0xFA, 0xCE, 0xC0, 0x01,
+                                        0x55, 0x66, 0x77, 0x88 };
+
+    /* Legacy: one action with legacy_payload. */
+    uint8_t l_act[64];
+    size_t  l_act_len = emit_action_with_ccw(l_act, legacy_payload,
+                                             sizeof(legacy_payload),
+                                             /*cfg_ch=*/1, true);
+    uint8_t l_op[128];
+    size_t  l_op_len = emit_operation_with_action(l_op, l_act, l_act_len);
+    uint8_t l_pre[128];
+    size_t  l_pre_len = emit_preliminary_config(l_pre, l_op, l_op_len);
+
+    /* Modern: one action with modern_payload, cfg_channel=9. */
+    uint8_t m_act[64];
+    size_t  m_act_len = emit_action_with_ccw(m_act, modern_payload,
+                                             sizeof(modern_payload),
+                                             /*cfg_ch=*/9, true);
+    uint8_t m_op[128];
+    size_t  m_op_len = emit_operation_with_action(m_op, m_act, m_act_len);
+    uint8_t m_pre[128];
+    size_t  m_pre_len = emit_preliminary_config(m_pre, m_op, m_op_len);
+    uint8_t op_body[512];
+    size_t  op_body_len = emit_op_with_core_op_prelim(op_body, m_pre, m_pre_len);
+
+    /* Emit NG with legacy field 2 BEFORE modern field 8 (tag order).
+     * decode_core_op_cb's reset relies on this ordering so the legacy
+     * data gets wiped before modern data is recorded. */
+    uint8_t ng[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*2=preliminary_config*/ 2, l_pre, l_pre_len);
+    emit_lenprefix(ng, &ng_len, /*8=ops*/ 8, op_body, op_body_len);
+
+    uint8_t blob[2048];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+
+    /* Modern path wins: exactly one action, the modern one. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(modern_payload), info.ccw_total_bytes);
+    TEST_ASSERT_EQUAL_UINT32(9, info.ccw_actions[0].cfg_channel_index);
+    TEST_ASSERT_EQUAL_UINT32(sizeof(modern_payload),
+                             info.ccw_actions[0].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(
+        modern_payload,
+        (const uint8_t *)blob + info.ccw_actions[0].data_offset_in_blob,
+        sizeof(modern_payload));
+}
+
+/* CoreOp with no preliminary_config is a no-op (e.g. an Op whose
+ * core_op carries only contexts or metadata). Verify the wire
+ * doesn't crash and accumulators stay valid. */
+static void test_decode_ccw_modern_core_op_without_prelim(void)
+{
+    /* Empty core_op body (just a length-prefixed wrapper with no
+     * inner preliminary_config). */
+    uint8_t core[8] = {0};
+    size_t  core_len = 0;
+    /* Empty CoreOp body is zero bytes; emit_lenprefix tolerates n=0. */
+    (void)core; (void)core_len;
+
+    uint8_t op_body[64];
+    size_t  op_body_len = 0;
+    /* ProtoHEFOp.op.core_op (oneof tag 4), zero-length sub-message. */
+    emit_lenprefix(op_body, &op_body_len, /*4=core_op*/ 4, NULL, 0);
+
+    uint8_t ng[128];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*8=ops*/ 8, op_body, op_body_len);
+
+    uint8_t blob[256];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(0, info.ccw_action_count);
+    TEST_ASSERT_FALSE(info.ccw_actions_truncated);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Phase 6.4e: contexts[].operations[].actions[] capture                       */
 /* -------------------------------------------------------------------------- */
 
@@ -1808,6 +1975,11 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_ccw_truncation);
     RUN_TEST(test_decode_ccw_ptr_variant_decoded);
     RUN_TEST(test_decode_ccw_no_preliminary_config);
+
+    /* Issue #1005: modern Op-graph path — ops[].core_op.preliminary_config */
+    RUN_TEST(test_decode_ccw_modern_op_graph);
+    RUN_TEST(test_decode_ccw_modern_overrides_legacy);
+    RUN_TEST(test_decode_ccw_modern_core_op_without_prelim);
 
     /* Phase 6.4e: context operations[].actions[] capture */
     RUN_TEST(test_decode_context_actions_single_action);

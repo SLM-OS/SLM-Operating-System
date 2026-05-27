@@ -340,9 +340,49 @@ static bool decode_pad_cb(pb_istream_t *stream,
  * pb_decode before the frame unwinds, so the pointers stay live
  * for the full sub-decode.
  */
+/* Forward declarations: ccw_ctx is defined further down (next to
+ * the CCW action callbacks at line ~381) and ctx_walker is
+ * defined alongside the Phase-6.4e context walker (line ~1482).
+ * op_ctx and core_op_ctx only need pointer-to-struct, so the
+ * incomplete type declarations here are sufficient. */
+struct ccw_ctx;
+struct ctx_walker;
+
+/* op_ctx threads the same accumulators the legacy NetworkGroup
+ * walker uses into decode_op_cb so the modern Op-graph path
+ * (ProtoHEFOp.op.core_op → ProtoHEFCoreOp.{preliminary_config,
+ * contexts, partial_core_ops, fused_layers_metadata}) can feed
+ * CCW actions, per-context actions, fused-layer pads, and nested
+ * partial cores into hef_info via the existing chains.
+ *
+ * ccw_ctx + walker_ctx are NULL on op_ctx instances built by the
+ * Phase-8 nested NG walker (decode_nested_ng_cb): nested NG path
+ * threads its own ccw_ctx/walker_ctx into the LEGACY NG slots, so
+ * once we recurse through ops[] into core_op we'd reset back to a
+ * walker_ctx that isn't ours. Skip the modern-path wiring there
+ * by leaving these NULL and gating in decode_op_cb. */
 struct op_ctx {
-    struct hef_info *info;
+    struct hef_info     *info;
+    struct ccw_ctx      *ccw_ctx;
+    struct ctx_walker   *walker_ctx;
 };
+
+/* Modern Op-graph path threading. ProtoHEFOp.op oneof tag 4 is
+ * `core_op`; we wire decode_core_op_cb (defined alongside the
+ * Phase-8 nested walkers) to walk its preliminary_config,
+ * contexts, partial_core_ops, and fused_layers_metadata into the
+ * same accumulators the legacy NG walker populates. The type and
+ * forward decl live up here because decode_op_cb is the first
+ * call site. */
+struct core_op_ctx {
+    struct op_ctx     *op_ctx;
+    struct ccw_ctx    *ccw_ctx;
+    struct ctx_walker *walker_ctx;
+};
+
+static bool decode_core_op_cb(pb_istream_t *stream,
+                              const pb_field_t *field,
+                              void **arg);
 
 static bool decode_op_cb(pb_istream_t *stream,
                          const pb_field_t *field,
@@ -359,6 +399,30 @@ static bool decode_op_cb(pb_istream_t *stream,
     op.input_pads.arg           = &input_ctx;
     op.output_pads.funcs.decode = decode_pad_cb;
     op.output_pads.arg          = &output_ctx;
+
+    /* Modern Op-graph path: HEFs DFC emits with hailo_net_flow=true
+     * (every recent DFC build) stash the authoritative
+     * preliminary_config / contexts / partial_core_ops /
+     * fused_layers_metadata under ops[].core_op rather than the
+     * legacy top-level NG slots. HailoRT's fill_core_ops
+     * (hailo-hef-internal.cpp:945-1017) picks the modern branch
+     * when the feature is set; we mirror that by resetting the
+     * legacy-walk accumulators on entry to decode_core_op_cb so
+     * the modern data overwrites the duplicate legacy values
+     * (wire order guarantees legacy decodes first: NG.field 2
+     * before NG.field 8). Skipped when ccw_ctx/walker_ctx are
+     * NULL — the Phase-8 nested NG walker threads its own
+     * accumulators into the LEGACY NG slots and shouldn't recurse
+     * into core_op a second time. */
+    struct core_op_ctx core_ctx = {
+        .op_ctx     = octx,
+        .ccw_ctx    = octx->ccw_ctx,
+        .walker_ctx = octx->walker_ctx,
+    };
+    if (octx->ccw_ctx && octx->walker_ctx) {
+        op.op.core_op.funcs.decode = decode_core_op_cb;
+        op.op.core_op.arg          = &core_ctx;
+    }
 
     if (!pb_decode(stream, ProtoHEFOp_fields, &op)) return false;
 
@@ -1685,6 +1749,88 @@ static bool decode_partial_ng_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* Modern Op-graph walkers — ProtoHEFOp.core_op subtree.                       */
+/*                                                                             */
+/* Wire layout that triggers this path:                                        */
+/*   ProtoHEFNetworkGroup                                                      */
+/*     ├── ops (field 8) — ProtoHEFOp                                          */
+/*     │     ├── input_pads / output_pads                                      */
+/*     │     └── op (oneof, field 4 = core_op) — ProtoHEFCoreOp                */
+/*     │           ├── preliminary_config  (field 2)                           */
+/*     │           ├── contexts            (field 3)                           */
+/*     │           ├── fused_layers_metadata (field 5)                         */
+/*     │           └── partial_core_ops    (field 7) — recurses                */
+/*     └── (legacy slots — fields 1..7 of NG)                                  */
+/*                                                                             */
+/* HailoRT's fill_core_ops (hailo-hef-internal.cpp:945-1017) branches on       */
+/* the hailo_net_flow feature and uses EITHER the modern (ops[].core_op) OR    */
+/* legacy (top-level NG) layout — not both. The wire-order reset in            */
+/* decode_core_op_cb mirrors that: any data the legacy walker accumulated      */
+/* gets zeroed before the modern walk overwrites it, because NG fields         */
+/* decode in tag order (legacy fields 2/3/5 before ops at field 8). On         */
+/* legacy-only HEFs ops[].core_op is absent and the reset never fires.         */
+/* -------------------------------------------------------------------------- */
+
+static bool decode_partial_core_op_cb(pb_istream_t *stream,
+                                      const pb_field_t *field,
+                                      void **arg);
+
+static bool decode_core_op_cb(pb_istream_t *stream,
+                              const pb_field_t *field,
+                              void **arg)
+{
+    (void)field;
+    struct core_op_ctx *cctx = (struct core_op_ctx *)*arg;
+
+    /* Dedupe legacy vs modern accumulation. Mirrors the reset in
+     * decode_nested_ng_cb (Phase 8). Resets cover everything the
+     * preliminary_config + contexts + fused_layers chains
+     * populate; op_count is intentionally NOT reset because we
+     * are currently INSIDE one repeated-ops[] iteration (resetting
+     * would wipe sibling ops already counted in this NG). */
+    struct hef_info *info = cctx->op_ctx->info;
+    info->context_actions_count = 0;
+    info->context_actions_truncated = false;
+    info->ccw_action_count = 0;
+    info->ccw_actions_truncated = false;
+    info->ccw_total_bytes = 0;
+    info->enable_lcu_count = 0;
+    info->enable_lcu_truncated = false;
+    info->disable_lcu_count = 0;
+    info->disable_lcu_truncated = false;
+    info->trigger_sequencer_count = 0;
+    info->trigger_sequencer_truncated = false;
+    info->wait_sequencer_count = 0;
+    info->wait_sequencer_truncated = false;
+    info->allow_input_dataflow_count = 0;
+    info->allow_input_dataflow_truncated = false;
+
+    ProtoHEFCoreOp core = ProtoHEFCoreOp_init_default;
+    core.preliminary_config.funcs.decode    = decode_preliminary_config_cb;
+    core.preliminary_config.arg             = cctx->ccw_ctx;
+    core.contexts.funcs.decode              = decode_context_cb;
+    core.contexts.arg                       = cctx->walker_ctx;
+    core.fused_layers_metadata.funcs.decode = decode_fused_layers_metadata_cb;
+    core.fused_layers_metadata.arg          = cctx->walker_ctx->edge_ectx;
+    core.partial_core_ops.funcs.decode      = decode_partial_core_op_cb;
+    core.partial_core_ops.arg               = cctx;
+    return pb_decode(stream, ProtoHEFCoreOp_fields, &core);
+}
+
+static bool decode_partial_core_op_cb(pb_istream_t *stream,
+                                      const pb_field_t *field,
+                                      void **arg)
+{
+    (void)field;
+    struct core_op_ctx *cctx = (struct core_op_ctx *)*arg;
+
+    ProtoHEFPartialCoreOp partial = ProtoHEFPartialCoreOp_init_default;
+    partial.core_op.funcs.decode = decode_core_op_cb;
+    partial.core_op.arg          = cctx;
+    return pb_decode(stream, ProtoHEFPartialCoreOp_fields, &partial);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -1712,7 +1858,6 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .cap = HEF_PARSER_MAX_STR,
         .truncated = &ng->info->string_truncated,
     };
-    struct op_ctx op_ctx = { .info = ng->info };
     struct ccw_ctx ccw_ctx = {
         .info = ng->info,
         .blob_base = ng->blob_base,
@@ -1725,6 +1870,16 @@ static bool decode_network_group_cb(pb_istream_t *stream,
     struct ctx_walker walker_ctx = {
         .info      = ng->info,
         .edge_ectx = &edge_ctx,
+    };
+    /* op_ctx threads ccw_ctx + walker_ctx pointers so decode_op_cb
+     * can feed the modern Op-graph (ops[].core_op) into the same
+     * accumulators the legacy NG.preliminary_config / NG.contexts
+     * walkers populate below. Declared after ccw_ctx + walker_ctx
+     * so the address-of expressions are valid. */
+    struct op_ctx op_ctx = {
+        .info       = ng->info,
+        .ccw_ctx    = &ccw_ctx,
+        .walker_ctx = &walker_ctx,
     };
     /* Phase 8: `nested` threads op/ccw/walker contexts through the
      * partial_network_groups fallback so DFC 3.33.1 HEFs (which stash
