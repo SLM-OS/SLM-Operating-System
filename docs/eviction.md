@@ -880,8 +880,9 @@ All suites pass under `make test` on the three supported configs:
   `multimodel_skew`); in simulation the retrained K=16 hits
   Belady-optimal on `multimodel_skew` (NFR 1.96 → 0.0) with no
   regression elsewhere, so the #953 default-promotion question
-  becomes defensible. Hardware re-bench of the retrained model is
-  pending.
+  becomes defensible. Hardware re-bench on pi-5-2 confirms equivalence
+  and latency hold: 1000/1000 corpus match at ~270 ns/predict (268–271
+  ns over two runs) — a touch faster than the pre-retrain 16-tree.
 - ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
   [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
   Replay xgb / mlp / cacheus / arc / lru through the simulator on
