@@ -84,19 +84,16 @@ static inline uint32_t hailo_be32_to_cpu(uint32_t v)
     return __builtin_bswap32(v);
 }
 
-/* Sequence counter. Firmware echoes this back in the response header
- * so a response can be correlated with a request; we check it against
- * what we sent. Incremented atomically per send so hailo_control_*
- * callers that race in the request-build phase (before taking
- * control_lock inside send_recv) can't produce colliding sequence
- * numbers — otherwise two CPUs could read the same pre-increment
- * value, send distinct requests with identical seq, and each mistake
- * the other's echoed-back response for their own. */
-static uint32_t control_sequence = 0;
-
 static inline uint32_t control_next_sequence(void)
 {
-    return __atomic_fetch_add(&control_sequence, 1, __ATOMIC_RELAXED);
+    /* HailoRT v4.23 sends sequence=0 on every control RPC. Verified
+     * across 27 captures in two wire dumps
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-{mnist-pi5,mobilenet}.txt):
+     * every `hailo-req` shows bytes 8..11 of the common_header as
+     * `00 00 00 00`. SLM-OS doesn't validate response sequence —
+     * `control_check_response_header` matches by opcode + response_len.
+     * Return 0 to match the reference. */
+    return 0;
 }
 
 /*
@@ -897,14 +894,12 @@ void hailo_control_reset_state_for_tests(void)
 {
     /* Clear every static that gates idempotency — the tests re-boot
      * the mock device between cases and expect each init path
-     * (sequence counter, MSI-pending latch, per-boot IRQ mask
-     * arming, MSI handler registration, post-boot init pipeline)
-     * to fire cleanly. Missing any one of these when a new static
-     * is added causes spurious test failures where the second
-     * test's control_setup_running skips a write or registration
-     * because the first test already set the flag. Add new statics
-     * here as they're introduced. */
-    __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
+     * (MSI-pending latch, per-boot IRQ mask arming, MSI handler
+     * registration, post-boot init pipeline) to fire cleanly. Missing
+     * any one of these when a new static is added causes spurious test
+     * failures where the second test's control_setup_running skips a
+     * write or registration because the first test already set the
+     * flag. Add new statics here as they're introduced. */
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
     control_post_boot_init_done = false;
     control_irq_masks_armed     = false;

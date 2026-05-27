@@ -2903,11 +2903,13 @@ static void test_control_core_identify_wire_layout(void)
 static void test_cs_translate_application_header_fills_defaults(void)
 {
     /* The translator derives batch_size=1, dynamic_contexts_count=1,
-     * networks_count=1, csm_buffer_size from cfg, no-DDR sentinel,
-     * config channel populated. boundary_channels_bitmap reflects
-     * ACTUAL boundary channels (config+OFFSETs), not the config
-     * channel itself — a zero-pad HEF has no boundary edges so the
-     * bitmap is zero. */
+     * networks_count=1, csm_buffer_size from cfg, and matches HailoRT
+     * v4.23's MNIST wire capture for the application_header feature
+     * flags (preliminary_run_asap=1, can_fast_batch_switch=1) and
+     * external_action_list_address=0. boundary_channels_bitmap
+     * reflects ACTUAL boundary channels (config+OFFSETs), not the
+     * config channel itself — a zero-pad HEF has no boundary edges so
+     * the bitmap is zero. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
 
@@ -2927,8 +2929,13 @@ static void test_cs_translate_application_header_fills_defaults(void)
     TEST_ASSERT_EQUAL_UINT16(1, hdr.dynamic_contexts_count);
     TEST_ASSERT_EQUAL_UINT16(1, hdr.batch_size);
     TEST_ASSERT_EQUAL_UINT16(512, hdr.csm_buffer_size);
-    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST,
-                             hdr.external_action_list_address);
+    /* HailoRT v4.23 MNIST sends 0 here, not the 0xFFFFFFFF sentinel
+     * the SLM-OS code previously used. See translator commit
+     * "set external_action_list_address=0 in application_header". */
+    TEST_ASSERT_EQUAL_UINT32(0u, hdr.external_action_list_address);
+    /* HailoRT v4.23 MNIST feature-flag bytes are both 1. */
+    TEST_ASSERT_TRUE(hdr.preliminary_run_asap);
+    TEST_ASSERT_TRUE(hdr.can_fast_batch_switch);
     TEST_ASSERT_EQUAL_UINT8(1, hdr.config_channels_count);
     TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[0]);
     /* No boundary pads in this info → no boundary channels. */
@@ -7266,22 +7273,44 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     TEST_ASSERT_TRUE(n != 0);
 
     uint32_t core_before = mock_control_core_doorbells;
+    uint32_t app_before  = mock_control_doorbells;
     inference_model_handle_t h = INF_INVALID_HANDLE;
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
 
     /* Expected core-CPU RPCs per context_switch_load:
      *   1.    CHANGE_STATUS(RESET)
      *   2.    CLEAR_CONFIGURED_APPS    (pre-configure handshake)
-     *   3-8.  GET_HW_CONSTS × 6        (#682 hyp-M — Linux HailoRT
-     *                                    calls it 6× back-to-back)
-     *   9.    SET_NETWORK_GROUP_HEADER
-     *   10-13. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
-     *   14.   CHANGE_STATUS(ENABLED)
+     *   3-6.  GET_HW_CONSTS × 4        (matches HailoRT wire capture
+     *                                    — see hailort-v4.23.0-wire-
+     *                                    capture-{mnist-pi5,mobilenet}.txt)
+     *   7.    SET_NETWORK_GROUP_HEADER
+     *   8-11. SET_CONTEXT_INFO × 4     (ACT/BS/PRE/DYN)
+     *   12.   CHANGE_STATUS(ENABLED)
      * Post-ENABLED the driver also writes num_avail on the CFG VDMA
      * channel (#253 / f160fe0) but that's an MMIO poke, not an RPC, so
      * it doesn't touch mock_control_core_doorbells. */
     uint32_t core_rpcs = mock_control_core_doorbells - core_before;
-    TEST_ASSERT_EQUAL_UINT32(14u, core_rpcs);
+    TEST_ASSERT_EQUAL_UINT32(12u, core_rpcs);
+
+    /* Expected APP-CPU RPCs per context_switch_load:
+     *   settle_pings("RESET")               = IDENTIFY + GDI   (2)
+     *   inline 2nd GDI before RESET         = GDI              (1)
+     *   settle_pings("GET_HW_CONSTS")       = IDENTIFY + GDI   (2)
+     *   settle_pings("SET_NETWORK_GROUP_HEADER") = IDENTIFY + GDI (2)
+     *   settle_pings(ctx) × 4 SET_CONTEXT_INFO   = 4×(IDENTIFY+GDI) (8)
+     *   settle_pings("CHANGE_STATUS_ENABLED") = IDENTIFY + GDI (2)
+     * Total = 17 APP doorbells.
+     *
+     * The lone inline GDI between settle_pings("RESET") and
+     * CHANGE_STATUS(RESET) (commit 4e4a9123, matches HailoRT's
+     * IDENTIFY+GDI+GDI pre-RESET cadence) is the only APP RPC that
+     * isn't part of a settle_pings pair. If a refactor consolidates
+     * settle_pings to also issue 2 GDIs, drop the inline call, AND
+     * keep this assertion at 17, the per-callsite cadence stays
+     * correct. If it drops the inline call without paying back the
+     * GDI elsewhere, this assertion catches it. */
+    uint32_t app_rpcs = mock_control_doorbells - app_before;
+    TEST_ASSERT_EQUAL_UINT32(17u, app_rpcs);
 }
 
 /* #179 failure unwind: if the context-switch sequence fails partway

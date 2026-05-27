@@ -424,6 +424,9 @@ static bool hailo_fw_dump_d2h_notification_once(void)
 #define HAILO_HAILORT_GAP_POST_CLEAR_APPS_US   5000u /* HailoRT: 4.5 ms */
 #define HAILO_HAILORT_GAP_POST_DYNAMIC_US      3000u /* HailoRT: 2.8 ms */
 #define HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US 2000u /* HailoRT: 1.6 ms */
+/* HailoRT v4.23 issues GET_HW_CONSTS exactly 4× during load init.
+ * See context_switch_load's GET_HW_CONSTS loop for citation. */
+#define HAILO_GET_HW_CONSTS_LOOP_COUNT         4u
 
 /* #682 hyp-Q (2026-05-09): minimum-gap pre-RPC pacing for every
  * CORE-CPU control call in the load sequence. Each CORE-CPU RPC
@@ -440,7 +443,17 @@ static bool hailo_fw_dump_d2h_notification_once(void)
  * down once the load completes cleanly without ECCs. The previous
  * uniform 10 ms unconditional delay did NOT suppress load-time
  * ECCs, so 10 ms is known too short. Tracking: #761. */
-#define HAILO_CORE_CPU_SETTLE_FLOOR_US       50000u /* 50 ms */
+/* 250 µs floor: matches HailoRT v4.23's measured inter-RPC gap of
+ * ~100-300 µs from the MNIST wire capture
+ * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt).
+ * The 50 ms floor previously used here was justified by "Linux's
+ * HailoRT achieves the gap incidentally via user-space scheduling
+ * latency (seconds between RPCs from vstreams library)" — that
+ * premise is contradicted by the wire capture, which shows Linux
+ * fires RPCs ~200 µs apart, not seconds apart. The original 50 vs
+ * 200 ms bisect (8b2145ad) never tested below 50 ms; it just compared
+ * two large values that were both already 100× slower than Linux. */
+#define HAILO_CORE_CPU_SETTLE_FLOOR_US       250u /* 250 us — matches HailoRT */
 /*
  * Serialization: this anchor is touched only from `context_switch_load`
  * and `hailo_backend_run`, both of which run under the inference-layer
@@ -1460,6 +1473,19 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * floor catches paths where the pings themselves return faster
      * than the floor. */
     context_switch_settle_pings("RESET");
+    /* HailoRT v4.23 issues GDI TWICE before RESET (mobilenet wire
+     * capture at t=393.529161 + 393.529358, 197 us apart, between the
+     * initial IDENTIFY and CHANGE_STATUS(RESET) at 393.529554). The
+     * shared settle_pings helper only emits 1 GDI; add a second here
+     * to match the reference cadence specifically pre-RESET. */
+    {
+        uint32_t gdi_len = 0;
+        int drc2 = hailo_control_get_device_information(&gdi_len);
+        if (drc2 != HAILO_OK) {
+            WARN("hailo backend: pre-RESET second GDI rc=%d (continuing)",
+                 drc2);
+        }
+    }
     hailo_core_cpu_settle();
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
@@ -1485,13 +1511,23 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #endif
     cs_load_stage_set(51);
 
-    /* Pre-configure handshake (matches ctxsmoke flow + HailoRT
-     * convention). CLEAR_CONFIGURED_APPS drops any apps the
-     * firmware had registered from a prior load; GET_HW_CONSTS
-     * reads hardware constants firmware needs to have handy
-     * before it can validate subsequent context-switch bytes. */
-    context_switch_settle_pings("CLEAR_CONFIGURED_APPS");
-    hailo_core_cpu_settle();
+    /* Pre-configure handshake. CLEAR_CONFIGURED_APPS drops any apps
+     * the firmware had registered from a prior load; GET_HW_CONSTS
+     * reads hardware constants firmware needs to have handy before it
+     * can validate subsequent context-switch bytes.
+     *
+     * No APP-CPU pings between RESET and CLEAR_APPS. HailoRT v4.23's
+     * MobileNet wire capture
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt)
+     * shows CLEAR_APPS issued IMMEDIATELY after CHANGE_STATUS(RESET) at
+     * t=393.529554/393.529681 — 127 µs apart, no RPC between. The
+     * settle_pings call previously here was a SLM-OS-specific
+     * divergence (#1003 disconfirmed it as the SAGE1_MIPI_RX_13 ECC
+     * trigger, but it's still an unjustified divergence). The wall-
+     * clock floor from the prior `hailo_core_cpu_settle()` is also
+     * dropped — HailoRT's 127 µs gap is far below SLM-OS's
+     * HAILO_CORE_CPU_SETTLE_FLOOR_US, so the floor wasn't matching the
+     * reference either. */
     /* #682 (2026-05-09): time CLEAR_APPS — Linux's response is 4.4 ms
      * (longest single RPC in init); if SLM-OS's is much shorter, fw
      * isn't doing the same internal work (likely SAGE init). */
@@ -1530,30 +1566,30 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * load-bearing; next concrete delta is APP-CPU settle pings. */
     context_switch_settle_pings("GET_HW_CONSTS");
     uint32_t hw_consts_len = 0;
-    /* #682 hyp-M (2026-05-09): Linux's HailoRT calls GET_HW_CONSTS
-     * SIX times back-to-back during init (Pi OS inference trace
-     * 2026-05-09, ~165 µs each, no other RPCs interleaved). SLM-OS
-     * called it 1×; an earlier `[Hailo #361]` test of 4× was
-     * disconfirmed but the actual reference count is 6. The body is
-     * empty (20 B request, 51 B response with HW const struct), so
-     * the cost is small and the gain — if any — is whatever fw
-     * state-machine settling 6× back-to-back affords. Per
-     * convention with the settle delay, leave 6× in tree once the
-     * device is operational; revisit / minimize via bisect later. */
-    for (uint32_t hw_consts_iter = 0; hw_consts_iter < 6u; hw_consts_iter++) {
+    /* HailoRT v4.23 calls GET_HW_CONSTS FOUR times back-to-back during
+     * init. Verified across both wire captures
+     * (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-{mnist-pi5,mobilenet}.txt):
+     * 4 occurrences of `00 00 00 48` at common_header opcode position,
+     * back-to-back with no other CORE/APP RPCs interleaved.
+     * The loop count is HAILO_GET_HW_CONSTS_LOOP_COUNT (declared above). */
+    for (uint32_t hw_consts_iter = 0;
+         hw_consts_iter < HAILO_GET_HW_CONSTS_LOOP_COUNT;
+         hw_consts_iter++) {
         hailo_core_cpu_settle();
         uint64_t t_hw_start = timer_get_count();
         rc = hailo_control_get_hw_consts(&hw_consts_len);
         uint64_t t_hw_end = timer_get_count();
         uint64_t hw_us = (t_hw_end - t_hw_start) * 1000000ULL
                          / timer_get_frequency();
-        uart_printf("[hailo] GET_HW_CONSTS [%u/6] rc=%d resp_len=%u "
+        uart_printf("[hailo] GET_HW_CONSTS [%u/%u] rc=%d resp_len=%u "
                     "latency=%lu us\r\n",
-                    (unsigned)(hw_consts_iter + 1u), rc,
+                    (unsigned)(hw_consts_iter + 1u),
+                    (unsigned)HAILO_GET_HW_CONSTS_LOOP_COUNT, rc,
                     (unsigned)hw_consts_len, (unsigned long)hw_us);
         if (rc != HAILO_OK) {
-            WARN("hailo backend: GET_HW_CONSTS [%u/6] failed (rc=%d)",
-                 (unsigned)(hw_consts_iter + 1u), rc);
+            WARN("hailo backend: GET_HW_CONSTS [%u/%u] failed (rc=%d)",
+                 (unsigned)(hw_consts_iter + 1u),
+                 (unsigned)HAILO_GET_HW_CONSTS_LOOP_COUNT, rc);
             goto fail;
         }
 #ifdef HAILO_WIRE_DEBUG
@@ -1569,8 +1605,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * (u8) + default_initial_credit_size (u32), each as a 4-B
          * BE-length-prefixed param. Only the last iteration is dumped
          * to keep the boot log short — fw response is identical across
-         * the 6 calls per Pi OS trace. */
-        if (hw_consts_iter == 5u && hw_consts_len > 0) {
+         * the 4 calls per the HailoRT wire capture. */
+        if (hw_consts_iter == HAILO_GET_HW_CONSTS_LOOP_COUNT - 1u
+            && hw_consts_len > 0) {
             const uint8_t *body = NULL;
             uint32_t       body_cap = 0;
             hailo_control_get_hw_consts_response_body(&body, &body_cap);
