@@ -1400,6 +1400,69 @@ static int context_switch_load(struct hailo_model_slot *slot,
             rc = HAILO_ERR_IO;
             goto fail;
         }
+        /* #1001 hyp-X (2026-05-27 DMA-content diff): HailoRT pre-programs
+         * EVERY descriptor of the ring with valid `page_size_desc_control
+         * = 0x00020002` + incrementing addresses, even though only
+         * desc[0..1] are active for the 784 B MNIST input. SLM-OS until
+         * now left descs[active..desc_count-1] all-zero, which fw may
+         * read during ring validation / pre-fetch and interpret as
+         * "ring is disabled" — refusing to dispatch ch=2. Test: pre-fill
+         * every unused descriptor with the same shape HailoRT uses,
+         * keeping num_avail=2 so fw only DMAs the 2 active descs.
+         *
+         * Addresses for the pre-fill descs continue the incrementing
+         * pattern past the buffer end — these are not meant to be DMA'd
+         * (num_avail=2 limits fw to descs[0..1]), they just need to be
+         * structurally valid descriptors so fw's ring-state check
+         * doesn't reject. */
+        {
+            const uint32_t descs_used =
+                (in_bytes + HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE - 1u)
+                / HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE;
+            for (uint32_t i = descs_used;
+                 i < slot->boundary_in_list.desc_count;
+                 i++) {
+                uint64_t addr = slot->boundary_in_tensor.iova
+                              + (uint64_t)i
+                                * HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE;
+                hailo_vdma_program_descriptor(
+                    &slot->boundary_in_list.descs[i],
+                    addr,
+                    HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                    HAILO_VDMA_HOST_DMA_DATA_ID);
+            }
+            /* #1001 hyp-Y (2026-05-27): clear LIRQ bits on the last
+             * active descriptor. SLM-OS sets `0x2e` (HOST_IRQ |
+             * REQ_IRQ_PROCESSED | REQ_IRQ_ERR | DESC_VALID); HailoRT
+             * keeps `0x02` (DESC_VALID only) per the 2026-05-27 Linux
+             * DMA-content capture. These bits are HOST-IRQ requests
+             * (whether completion fires an IRQ TO HOST, separate from
+             * fw scheduling), so they THEORETICALLY shouldn't gate fw
+             * dispatch. But last untested wire-level diff. Test:
+             * overwrite to match HailoRT. */
+            if (descs_used > 0u) {
+                uint32_t last_idx = descs_used - 1u;
+                uint32_t ps_ctrl =
+                    slot->boundary_in_list.descs[last_idx]
+                        .page_size_desc_control;
+                slot->boundary_in_list.descs[last_idx]
+                    .page_size_desc_control =
+                    (ps_ctrl & ~0xFFu) | 0x02u;
+                INFO("hailo: hyp-Y cleared IN desc[%u] LIRQ "
+                     "(0x%02x -> 0x02) for #1001",
+                     (unsigned)last_idx, (unsigned)(ps_ctrl & 0xFFu));
+            }
+            if (hailo_platform && hailo_platform->cache_clean) {
+                hailo_platform->cache_clean(
+                    slot->boundary_in_list.descs,
+                    (size_t)slot->boundary_in_list.desc_count
+                        * sizeof(struct hailo_vdma_descriptor));
+            }
+            INFO("hailo: pre-filled IN desc ring [%u..%u] "
+                 "(hyp-X test for #1001)",
+                 (unsigned)descs_used,
+                 (unsigned)slot->boundary_in_list.desc_count - 1u);
+        }
         boundary_in_iova = slot->boundary_in_list.iova;
     }
     cs_load_stage_set(20);
@@ -1450,6 +1513,50 @@ static int context_switch_load(struct hailo_model_slot *slot,
             WARN("hailo backend: boundary OUT program_buffer failed (rc=%d)", prog);
             rc = HAILO_ERR_IO;
             goto fail;
+        }
+        /* #1001 hyp-X (symmetric to the IN side above) — pre-fill the
+         * OUT ring's unused descriptors so fw sees valid entries
+         * across the whole 32-slot ring, matching what HailoRT's
+         * launch_transfer leaves behind. */
+        {
+            const uint32_t descs_used =
+                (out_bytes + HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE - 1u)
+                / HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE;
+            for (uint32_t i = descs_used;
+                 i < slot->boundary_out_list.desc_count;
+                 i++) {
+                uint64_t addr = slot->boundary_out_tensor.iova
+                              + (uint64_t)i
+                                * HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE;
+                hailo_vdma_program_descriptor(
+                    &slot->boundary_out_list.descs[i],
+                    addr,
+                    HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                    HAILO_VDMA_HOST_DMA_DATA_ID);
+            }
+            /* #1001 hyp-Y: same LIRQ clear on OUT side. */
+            if (descs_used > 0u) {
+                uint32_t last_idx = descs_used - 1u;
+                uint32_t ps_ctrl =
+                    slot->boundary_out_list.descs[last_idx]
+                        .page_size_desc_control;
+                slot->boundary_out_list.descs[last_idx]
+                    .page_size_desc_control =
+                    (ps_ctrl & ~0xFFu) | 0x02u;
+                INFO("hailo: hyp-Y cleared OUT desc[%u] LIRQ "
+                     "(0x%02x -> 0x02) for #1001",
+                     (unsigned)last_idx, (unsigned)(ps_ctrl & 0xFFu));
+            }
+            if (hailo_platform && hailo_platform->cache_clean) {
+                hailo_platform->cache_clean(
+                    slot->boundary_out_list.descs,
+                    (size_t)slot->boundary_out_list.desc_count
+                        * sizeof(struct hailo_vdma_descriptor));
+            }
+            INFO("hailo: pre-filled OUT desc ring [%u..%u] "
+                 "(hyp-X test for #1001)",
+                 (unsigned)descs_used,
+                 (unsigned)slot->boundary_out_list.desc_count - 1u);
         }
         boundary_out_iova = slot->boundary_out_list.iova;
     }
