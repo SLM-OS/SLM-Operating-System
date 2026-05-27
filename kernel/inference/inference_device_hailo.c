@@ -2885,6 +2885,145 @@ uint32_t hailo_backend_slots_max(void)
     return (uint32_t)HAILO_MAX_MODELS;
 }
 
+/* -------------------------------------------------------------------------- */
+/* #1001 DMA-content dump (see docs/hailo-dma-content-diff-plan.md)            */
+/*                                                                             */
+/* Dumps every host-RAM region fw could DMA-read from for a loaded model       */
+/* in a hex format matched to what the equivalent Linux-side hailo_pci         */
+/* debugfs entry will emit, so a literal `diff` between the two captures       */
+/* is meaningful. Each region prints:                                          */
+/*   [dma-dump:<region>] iova=0x<hex> size=<dec>                               */
+/*   0x00000000: bb bb bb bb ... (16 bytes/line, lowercase, no ASCII)          */
+/* -------------------------------------------------------------------------- */
+
+static void dma_dump_hex(const char *region_name,
+                         uint64_t iova,
+                         const void *cpu_addr,
+                         size_t size)
+{
+    uart_printf("[dma-dump:%s] iova=0x%llx size=%lu\r\n",
+                region_name, (unsigned long long)iova,
+                (unsigned long)size);
+    if (!cpu_addr || size == 0) {
+        return;
+    }
+
+    /* Invalidate the host cache lines covering this region so we see
+     * fw's most recent DMA writes (matters for the OUT buffer post-
+     * inference; harmless pre-runmodel). Cast-away-const is safe
+     * because cache_invalidate doesn't modify CPU-visible contents,
+     * only the cache-line state. */
+    if (hailo_platform && hailo_platform->cache_invalidate) {
+        hailo_platform->cache_invalidate((void *)cpu_addr, size);
+    }
+
+    const uint8_t *p = (const uint8_t *)cpu_addr;
+    for (size_t off = 0; off < size; off += 16u) {
+        size_t take = (size - off) > 16u ? 16u : (size - off);
+        /* Build the 16-byte line into a fixed buffer so a single
+         * uart_printf emits it — keeps per-line UART contention low
+         * and matches the format Linux's pr_info will produce.
+         *
+         * Buffer sizing: max line is 16 hex pairs (32 chars) + 15
+         * separator spaces + 1 null = 48 chars. line[64] gives 16
+         * bytes of headroom for the format. */
+        char line[64];
+        size_t lpos = 0;
+        for (size_t i = 0; i < take; i++) {
+            uint8_t b = p[off + i];
+            uint8_t hi = (b >> 4) & 0xFu;
+            uint8_t lo = b & 0xFu;
+            line[lpos++] = (char)(hi < 10 ? '0' + hi : 'a' + hi - 10);
+            line[lpos++] = (char)(lo < 10 ? '0' + lo : 'a' + lo - 10);
+            if (i + 1 < take) {
+                line[lpos++] = ' ';
+            }
+        }
+        line[lpos] = '\0';
+        uart_printf("0x%08lx: %s\r\n", (unsigned long)off, line);
+    }
+}
+
+int hailo_backend_dma_dump(inference_model_handle_t h)
+{
+    if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) {
+        return -1;
+    }
+    struct hailo_model_slot *slot = &slots[h - 1];
+
+    /* Take the slot lock long enough to confirm in_use; release before
+     * the long UART dump since the dump can take tens of seconds at
+     * 115200 baud (CCWS alone is ~112 KB → ~40 s). Holding the lock
+     * across UART output would block free_model() and any concurrent
+     * runmodel for that whole window. The slot pointers we read here
+     * (ccw_tensor, *_list.descs, boundary_*_tensor) don't move under
+     * us while in_use stays true; free_model takes the lock to flip
+     * it. If a teardown races our read, we'd dump stale-but-allocated
+     * memory — harmless for a diagnostic. */
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    bool loaded = slot->in_use && slot->cs_loaded;
+    spin_unlock_irqrestore(&slots_lock, flags);
+    if (!loaded) {
+        return -2;
+    }
+
+    /* Descriptor lists: 16 bytes per descriptor, fixed shape. Cfg
+     * ch1 is optional (only HEFs with cfg_channel_index split — MNIST
+     * does). Skip the empty regions to keep the output compact. */
+    dma_dump_hex("cfg_ch0_desc_list",
+                 slot->ccw_list.iova,
+                 slot->ccw_list.descs,
+                 (size_t)slot->ccw_list.desc_count
+                     * sizeof(struct hailo_vdma_descriptor));
+    if (slot->ccw_has_second_channel) {
+        dma_dump_hex("cfg_ch1_desc_list",
+                     slot->ccw_list_1.iova,
+                     slot->ccw_list_1.descs,
+                     (size_t)slot->ccw_list_1.desc_count
+                         * sizeof(struct hailo_vdma_descriptor));
+    }
+    dma_dump_hex("boundary_in_desc_list",
+                 slot->boundary_in_list.iova,
+                 slot->boundary_in_list.descs,
+                 (size_t)slot->boundary_in_list.desc_count
+                     * sizeof(struct hailo_vdma_descriptor));
+    dma_dump_hex("boundary_out_desc_list",
+                 slot->boundary_out_list.iova,
+                 slot->boundary_out_list.descs,
+                 (size_t)slot->boundary_out_list.desc_count
+                     * sizeof(struct hailo_vdma_descriptor));
+
+    /* CCWS data buffers (the bytes fw reads via cfg channels). For
+     * MNIST: cfg ch0 carries 55792 B, cfg ch1 carries 336 B. The two
+     * buffers are independent host allocations. */
+    dma_dump_hex("cfg_ch0_data",
+                 slot->ccw_tensor.iova,
+                 slot->ccw_tensor.cpu_addr,
+                 slot->ccw_tensor.tensor_bytes);
+    if (slot->ccw_has_second_channel) {
+        dma_dump_hex("cfg_ch1_data",
+                     slot->ccw_tensor_1.iova,
+                     slot->ccw_tensor_1.cpu_addr,
+                     slot->ccw_tensor_1.tensor_bytes);
+    }
+
+    /* Boundary IN/OUT buffers (the input image fw reads + the output
+     * logits fw writes). Pre-runmodel both are zero-init; post-
+     * runmodel the OUT buffer would carry results IF fw dispatched.
+     * Useful in both states for the diff. */
+    dma_dump_hex("boundary_in_buf",
+                 slot->boundary_in_tensor.iova,
+                 slot->boundary_in_tensor.cpu_addr,
+                 slot->boundary_in_tensor.tensor_bytes);
+    dma_dump_hex("boundary_out_buf",
+                 slot->boundary_out_tensor.iova,
+                 slot->boundary_out_tensor.cpu_addr,
+                 slot->boundary_out_tensor.tensor_bytes);
+
+    uart_printf("[dma-dump:end] handle=%d\r\n", (int)h);
+    return 0;
+}
+
 void hailo_backend_reset_slots_for_tests(void)
 {
     /* Same two-phase dance as hailo_backend_shutdown — see that
