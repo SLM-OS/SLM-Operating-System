@@ -1712,6 +1712,15 @@ static bool decode_nested_ng_cb(pb_istream_t *stream,
     info->context_actions_truncated = false;
     info->op_count = 0;
     info->ccw_action_count = 0;
+    /* #1005 follow-up: ccw_total_bytes and ccw_actions_truncated were
+     * latent omissions in the Phase-8 reset. With ccw_action_count
+     * deduped but ccw_total_bytes left intact, the second walk's
+     * `+= pending.data_size` doubles the total. MNIST has
+     * partial_network_groups populated, so every load reported
+     * total = 2 × actual (e.g. 112256 vs the 56128 the per-channel
+     * sum showed). Fixed here. */
+    info->ccw_actions_truncated = false;
+    info->ccw_total_bytes = 0;
     info->enable_lcu_count = 0;
     info->enable_lcu_truncated = false;
     info->disable_lcu_count = 0;

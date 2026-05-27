@@ -1283,6 +1283,82 @@ static void test_decode_ccw_modern_overrides_legacy(void)
         sizeof(modern_payload));
 }
 
+/* Phase-8 dedupe regression (#1005 follow-up): a NG with BOTH a
+ * legacy NG.preliminary_config AND a partial_network_groups[]
+ * carrying its own nested NG.preliminary_config must end up with
+ * counts AND ccw_total_bytes matching ONLY the nested walk — not
+ * the sum of both. The original Phase-8 reset zeroed ccw_action_count
+ * but forgot ccw_total_bytes, so MNIST loads (which exercise this
+ * dedupe path) reported total = 2 × actual since the feature
+ * shipped. */
+static void test_decode_ccw_partial_ng_dedupes_total_bytes(void)
+{
+    const uint8_t legacy_payload[]  = { 0x11, 0x22, 0x33, 0x44 };
+    const uint8_t nested_payload[]  = { 0xAA, 0xBB, 0xCC, 0xDD,
+                                         0xEE, 0xFF, 0x00, 0x11 };
+
+    /* Build the legacy preliminary_config (top-level NG.field 2). */
+    uint8_t l_act[64];
+    size_t  l_act_len = emit_action_with_ccw(l_act, legacy_payload,
+                                             sizeof(legacy_payload),
+                                             /*cfg_ch=*/2, true);
+    uint8_t l_op[128];
+    size_t  l_op_len = emit_operation_with_action(l_op, l_act, l_act_len);
+    uint8_t l_pre[128];
+    size_t  l_pre_len = emit_preliminary_config(l_pre, l_op, l_op_len);
+
+    /* Build the nested preliminary_config wrapped in a
+     * partial_network_groups entry:
+     *   PartialNetworkGroup { network_group { preliminary_config {...} } } */
+    uint8_t n_act[64];
+    size_t  n_act_len = emit_action_with_ccw(n_act, nested_payload,
+                                             sizeof(nested_payload),
+                                             /*cfg_ch=*/3, true);
+    uint8_t n_op[128];
+    size_t  n_op_len = emit_operation_with_action(n_op, n_act, n_act_len);
+    uint8_t n_pre[128];
+    size_t  n_pre_len = emit_preliminary_config(n_pre, n_op, n_op_len);
+    uint8_t nested_ng[256];
+    size_t  nested_ng_len = 0;
+    emit_lenprefix(nested_ng, &nested_ng_len,
+                   /*2=preliminary_config*/ 2, n_pre, n_pre_len);
+    uint8_t partial[512];
+    size_t  partial_len = 0;
+    /* PartialNetworkGroup.network_group = field 1. */
+    emit_lenprefix(partial, &partial_len, 1, nested_ng, nested_ng_len);
+
+    /* Top-level NG: legacy preliminary_config (field 2) THEN
+     * partial_network_groups (field 7). Wire-order matters — the
+     * Phase-8 walker's reset depends on legacy decoding before
+     * partial. */
+    uint8_t ng[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*2=preliminary_config*/ 2, l_pre, l_pre_len);
+    emit_lenprefix(ng, &ng_len, /*7=partial_network_groups*/ 7,
+                   partial, partial_len);
+
+    uint8_t blob[2048];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+
+    /* Nested walk wins: exactly one action, with the nested payload
+     * and channel. The total must equal the nested action's data_size
+     * — NOT legacy + nested (which would be 4 + 8 = 12). */
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_FALSE(info.ccw_actions_truncated);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(nested_payload), info.ccw_total_bytes);
+    TEST_ASSERT_EQUAL_UINT32(3, info.ccw_actions[0].cfg_channel_index);
+    TEST_ASSERT_EQUAL_UINT32(sizeof(nested_payload),
+                             info.ccw_actions[0].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(
+        nested_payload,
+        (const uint8_t *)blob + info.ccw_actions[0].data_offset_in_blob,
+        sizeof(nested_payload));
+}
+
 /* CoreOp with no preliminary_config is a no-op (e.g. an Op whose
  * core_op carries only contexts or metadata). Verify the wire
  * doesn't crash and accumulators stay valid. */
@@ -1980,6 +2056,9 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_ccw_modern_op_graph);
     RUN_TEST(test_decode_ccw_modern_overrides_legacy);
     RUN_TEST(test_decode_ccw_modern_core_op_without_prelim);
+    /* Issue #1005 follow-up: Phase-8 partial_network_groups reset
+     * must zero ccw_total_bytes alongside ccw_action_count. */
+    RUN_TEST(test_decode_ccw_partial_ng_dedupes_total_bytes);
 
     /* Phase 6.4e: context operations[].actions[] capture */
     RUN_TEST(test_decode_context_actions_single_action);

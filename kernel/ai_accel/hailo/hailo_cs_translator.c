@@ -363,7 +363,7 @@ static int translate_activation(const struct hef_info *info,
  * partial_clusters / nn_stream_config, which our parser does not
  * currently extract. For now this emits a fixed template keyed to
  * the MNIST HEF we test against, identified by ccw_action_count=28
- * + ccws_total_bytes=112256 + input shape 28x28x1. Any other HEF
+ * + ccws_total_bytes=56128 + input shape 28x28x1. Any other HEF
  * falls through to the pre-template path (DDR_BUFFERING_RESET +
  * CHANGE_BOUNDARY_INPUT_BATCH + BURST_CREDITS_TASK_START only).
  *
@@ -396,7 +396,7 @@ _Static_assert(sizeof(mnist_switch_lcu_batch_template) /
 
 /* MNIST template signature: 28×28×1 input + 1×1×10 output + 28 CCW
  * actions + DFC sdk_version string prefix "3.33" + ccw_total_bytes
- * matching the reference build (112256 B). The MNIST sequencer_config
+ * matching the reference build (56128 B). The MNIST sequencer_config
  * and LCU sweep byte tables below are compiled specifically from
  * this HEF; applying them to a lookalike HEF from a different DFC
  * revision would silently corrupt fw state. The signature is
@@ -405,7 +405,17 @@ _Static_assert(sizeof(mnist_switch_lcu_batch_template) /
  * translator learns to synthesize sequencer_config from the HEF's
  * own compiled actions. */
 #define HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT  28u
-#define HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES   112256u
+/* Sum of the 28 ccw_actions' data_size fields (matches the
+ * per-cfg-channel breakdown emitted by `hailo load`:
+ * cfg_channel[0]=55792 + cfg_channel[1]=336 = 56128). Before the
+ * #1005 follow-up fix to `decode_nested_ng_cb`, the parser
+ * double-accumulated this value to 112256 because MNIST has
+ * partial_network_groups populated and the Phase-8 reset zeroed
+ * the count but forgot the total. The fingerprint constant was
+ * defined against the buggy 112256 number for ~2 weeks; updating
+ * it here in lockstep with the parser fix preserves the MNIST
+ * fast-path match. */
+#define HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES   56128u
 #define HAILO_MNIST_TEMPLATE_SDK_VERSION       "3.33"
 
 static bool hef_matches_mnist_template(const struct hef_info *info)
