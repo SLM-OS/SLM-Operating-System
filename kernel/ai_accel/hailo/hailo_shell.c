@@ -1739,6 +1739,34 @@ static int cmd_hailo(int argc, char *argv[])
         pmm_free_pages(out_buf, out_pages);
         return 0;
     }
+
+    /* `hailo dma-dump <handle>` — emit every host-RAM region fw
+     * could DMA-read from for the loaded model, in a hex format
+     * matched to the Linux-side hailo_pci debugfs entry so a literal
+     * `diff` between the two captures is meaningful. See
+     * docs/hailo-dma-content-diff-plan.md for the rationale. Runs
+     * post-load, pre-runmodel; output goes to UART and takes ~40 s
+     * at 115200 baud because CCWS dominates (112 KB). Gated under
+     * the same CONFIG_AI_SCHEDULER ifdef as the rest of the model-
+     * handle-using verbs (load, runmodel) because the backend
+     * accessor lives in inference_device_hailo.h. */
+    if (argc >= 2 && strcmp(argv[1], "dma-dump") == 0) {
+        if (argc < 3) {
+            shell_puts("usage: hailo dma-dump <handle>\n");
+            return 0;
+        }
+        int32_t handle = 0;
+        for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++) {
+            handle = handle * 10 + (*p - '0');
+        }
+        int rc = hailo_backend_dma_dump(handle);
+        if (rc != 0) {
+            shell_printf("hailo: dma-dump failed (rc=%d) — handle=%d "
+                         "not loaded?\n", rc, handle);
+            return 0;
+        }
+        return 0;
+    }
 #endif /* CONFIG_AI_SCHEDULER */
 
     /* Phase 8: dump per-edge-layer details of first 8 entries. Shows
@@ -1964,7 +1992,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name     = "hailo",
     .handler  = cmd_hailo,
-    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full], replay-step <corpus> <N>, trace [off|phase=...|mech=...])",
+    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full], replay-step <corpus> <N>, dma-dump <handle>, trace [off|phase=...|mech=...])",
     .mutates  = true,   /* probe/fw mutate driver state; status is a whole-command tag */
     .category = SHELL_CAT_HARDWARE,
 };
