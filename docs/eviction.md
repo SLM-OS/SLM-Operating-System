@@ -22,7 +22,7 @@ Eviction is on by default. There are now two user-facing controls:
 | Flag | Adds | Binary cost |
 |------|------|-------------|
 | default build | Trait, registry, classical policies, stub ML predictors (`xgb_stub`, `mlp_stub` return 0.5) | ~30 KB |
-| `EVICTION_MODELS=ON` | Trained XGBoost (~140 KB source, 16-tree — see #961) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
+| `EVICTION_MODELS=ON` | Trained XGBoost (~150 KB source, 16-tree, retrained per #989 on the 8-scenario dataset) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
 | `DISABLE_EVICTION=ON` | Compiles the eviction framework out entirely | saves the eviction-framework footprint |
 | `EVICTION_DEFAULT_POLICY=<name>` | Chooses the compiled-in default policy (`lru`, `lfu`, `arc`, `slm`, `cacheus`, ...) | none beyond the selected built-in policy set |
 
@@ -164,7 +164,7 @@ deterministic trivial policy.
 
 | Policy | Predictor | Size | Source |
 |--------|-----------|------|--------|
-| `XGBoostPolicy` | `generated::xgb_predict` — 16-tree if-else chain with sigmoid (pruned from 200 per #961) | ~140 KB generated Rust (dead-code-eliminated until actually called) | Imported from sibling `data/export/xgb_policy_generated.rs` |
+| `XGBoostPolicy` | `generated::xgb_predict` — 16-tree if-else chain with sigmoid (pruned from 200 per #961; model retrained per #989 on the 8-scenario dataset incl. `multimodel_skew`) | ~150 KB generated Rust (dead-code-eliminated until actually called) | Imported from sibling `data/export/xgb_policy_generated.rs` |
 | `MlpPolicy` | `generated::mlp_predict` — int8-quantised 4-layer MLP (27→64→32→16→1, sigmoid) | ~20 KB of weights + predict fn | Imported from sibling `data/export/mlp_policy_generated.rs` |
 
 Both policies funnel their input through `features::extract_features`,
@@ -874,11 +874,15 @@ All suites pass under `make test` on the three supported configs:
   predictor clears the target: `bench xgb-equiv-evict --baked` on
   pi-5-2 (Cortex-A76 @ 2.4 GHz) reports ~300 ns/predict (296–303 ns
   over two runs) at 1000/1000 corpus match — vs ~1.41 ms for the
-  blob path (#959) and 4–22 µs for the M9 per-policy capture. Note:
-  pruning is independent of the default-promotion question — XGBoost
-  still regresses below LRU on the `multimodel_skew` workload at
-  every tree count (#989), so it should not become the default
-  policy yet (#953).
+  blob path (#959) and 4–22 µs for the M9 per-policy capture. The
+  baked model was subsequently **retrained on the expanded 8-scenario
+  dataset** (#989, root cause: original training data predated
+  `multimodel_skew`); in simulation the retrained K=16 hits
+  Belady-optimal on `multimodel_skew` (NFR 1.96 → 0.0) with no
+  regression elsewhere, so the #953 default-promotion question
+  becomes defensible. Hardware re-bench on pi-5-2 confirms equivalence
+  and latency hold: 1000/1000 corpus match at ~270 ns/predict (268–271
+  ns over two runs) — a touch faster than the pre-retrain 16-tree.
 - ☐🎫 Continuous eviction-quality eval harness (sibling repo) —
   [slm-os-page-eviction#2](https://github.com/SLM-OS/slm-os-page-eviction/issues/2).
   Replay xgb / mlp / cacheus / arc / lru through the simulator on
