@@ -1400,6 +1400,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
             rc = HAILO_ERR_IO;
             goto fail;
         }
+        /* Align boundary IN ring with HailoRT's post-launch_transfer
+         * state — pre-fill descs beyond the active range + drop LIRQ
+         * on the last active. See
+         * `hailo_vdma.c:hailo_vdma_match_hailort_boundary_ring` for
+         * the rationale and disconfirmation history. Net effect on
+         * #1001: no wedge change but eliminates two wire divergences
+         * from SLM-OS↔HailoRT parity. */
+        hailo_vdma_match_hailort_boundary_ring(
+            &slot->boundary_in_list,
+            slot->boundary_in_tensor.iova,
+            in_bytes,
+            HAILO_VDMA_HOST_DMA_DATA_ID);
         boundary_in_iova = slot->boundary_in_list.iova;
     }
     cs_load_stage_set(20);
@@ -1451,6 +1463,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
             rc = HAILO_ERR_IO;
             goto fail;
         }
+        /* Align boundary OUT ring with HailoRT — same shape as the
+         * IN side above. */
+        hailo_vdma_match_hailort_boundary_ring(
+            &slot->boundary_out_list,
+            slot->boundary_out_tensor.iova,
+            out_bytes,
+            HAILO_VDMA_HOST_DMA_DATA_ID);
         boundary_out_iova = slot->boundary_out_list.iova;
     }
     cs_load_stage_set(21);

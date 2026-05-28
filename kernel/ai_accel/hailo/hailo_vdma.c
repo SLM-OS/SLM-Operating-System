@@ -357,6 +357,78 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
     return (int)descs_needed;
 }
 
+/* Make a boundary descriptor ring byte-faithful to HailoRT's
+ * post-`launch_transfer` state, with two changes on top of what
+ * `hailo_vdma_program_buffer` produces:
+ *
+ *   1. Pre-program descs[descs_used..desc_count-1] with valid
+ *      `page_size_desc_control` (DESC_VALID + the same page_size as
+ *      the active descs) and addresses that continue the
+ *      +page_size pattern past the buffer end. fw never DMAs those
+ *      descs because num_avail caps it at the active subset, but
+ *      they're structurally valid (control byte != 0) so any
+ *      ring-state pre-fetch HailoRT may exercise sees the same
+ *      shape SLM-OS now presents.
+ *
+ *   2. Clear LIRQ bits on the last active descriptor (its control
+ *      byte becomes plain DESC_VALID). `hailo_vdma_program_buffer`
+ *      sets `0x2e` (HOST_IRQ | REQ_IRQ_PROCESSED | REQ_IRQ_ERR |
+ *      DESC_VALID); HailoRT keeps `0x02`. Per the 2026-05-27 DMA-
+ *      content byte-diff capture, HailoRT relies on num_proc poll
+ *      (or device-side completion) rather than the per-descriptor
+ *      IRQ-request bits.
+ *
+ * Cache-cleaned to DRAM so fw observes both changes.
+ *
+ * Rationale: 2026-05-27 DMA-content byte-diff between SLM-OS (PR
+ * #1010 dma-dump) and HailoRT (Linux hailo_pci dma_dump hook)
+ * surfaced these two wire-level divergences. Both were tested as
+ * #1001 wedge candidates and both disconfirmed (wedge symptom
+ * byte-identical with and without the changes); retained as
+ * permanent parity to eliminate the divergences from future
+ * investigations and to suppress a fw-side spurious
+ * `event_id=0(ETHERNET_RX_ERROR)` d2h notification that fires
+ * whenever HOST_IRQ bits are set on a last desc. See memory
+ * `hailo_682_root_cause_channel_index.md` for the full chain.
+ *
+ * Caller responsibility: call AFTER `hailo_vdma_program_buffer`,
+ * with the same `buffer_iova` and `buffer_size` so the address
+ * pattern continues seamlessly. */
+void hailo_vdma_match_hailort_boundary_ring(
+        struct hailo_vdma_desc_list *list,
+        uint64_t buffer_iova,
+        uint32_t buffer_size,
+        uint8_t  data_id)
+{
+    if (!list || !list->descs || list->desc_count == 0u) return;
+    if (list->desc_page_size == 0u) return;
+
+    const uint32_t page_size  = list->desc_page_size;
+    const uint32_t descs_used = (buffer_size + page_size - 1u) / page_size;
+
+    /* (1) Pre-fill descs[descs_used..desc_count-1] with a valid shape. */
+    for (uint32_t i = descs_used; i < list->desc_count; i++) {
+        uint64_t addr = buffer_iova + (uint64_t)i * (uint64_t)page_size;
+        hailo_vdma_program_descriptor(&list->descs[i], addr,
+                                      (uint16_t)page_size, data_id);
+    }
+
+    /* (2) Clear LIRQ bits on the last active descriptor. */
+    if (descs_used > 0u) {
+        struct hailo_vdma_descriptor *last = &list->descs[descs_used - 1u];
+        last->page_size_desc_control =
+            (last->page_size_desc_control & ~0xFFu)
+            | (uint32_t)HAILO_VDMA_DESC_DESC_CONTROL;
+    }
+
+    if (hailo_platform && hailo_platform->cache_clean) {
+        hailo_platform->cache_clean(
+            list->descs,
+            (size_t)list->desc_count
+                * sizeof(struct hailo_vdma_descriptor));
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Channel start / stop / submit                                               */
 /* -------------------------------------------------------------------------- */
