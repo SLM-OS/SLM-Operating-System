@@ -1851,18 +1851,9 @@ static void test_decode_allow_input_dataflow_captures_sys_index(void)
     TEST_ASSERT_EQUAL_UINT32(2,  info.allow_input_dataflow_actions[0].connection_type);
 }
 
-/* Emit a varint value at a given field number, with proto wire type
- * 0 (varint). Matches emit_varint_field but kept local for clarity. */
-static void emit_u64_varint_field(uint8_t *buf, size_t *off,
-                                  uint32_t field_no, uint64_t value)
-{
-    emit_tag(buf, off, field_no, /*wt=varint*/ 0);
-    while (value >= 0x80u) {
-        buf[(*off)++] = (uint8_t)(value | 0x80u);
-        value >>= 7;
-    }
-    buf[(*off)++] = (uint8_t)value;
-}
+/* #331: `emit_u64_varint_field` was a copy of `emit_varint_field` —
+ * the latter already takes `uint64_t val`, so the u64 caller below
+ * uses it directly. */
 
 static void test_decode_enable_sequencer_captures_bitmaps_and_l3(void)
 {
@@ -1882,7 +1873,7 @@ static void test_decode_enable_sequencer_captures_bitmaps_and_l3(void)
     uint8_t body[128]; size_t body_len = 0;
     emit_varint_field(body, &body_len, 1, 2);   /* cluster_index */
     emit_varint_field(body, &body_len, 3, 0x1234ABCD);  /* active_apu_bitmap */
-    emit_u64_varint_field(body, &body_len, 4, 0xFEEDFACEDEADBEEFull);  /* active_sc_bitmap */
+    emit_varint_field(body, &body_len, 4, 0xFEEDFACEDEADBEEFull);  /* active_sc_bitmap */
     emit_lenprefix(body, &body_len, 11, l3, l3_len);    /* initial_l3_info */
 
     uint8_t blob[512];
