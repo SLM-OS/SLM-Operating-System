@@ -829,40 +829,34 @@ static int pick_largest_pads(const struct hef_info *info,
 /* slots as having no context-switch resources to release.                      */
 /* -------------------------------------------------------------------------- */
 
-/* CCW + boundary page-size defaults shared between allocation and
- * translate_cfg. The MVP hardcodes both to match ctxsmoke's
- * shell-command sizing on pi-5-1. The matching config-VDMA-channel
- * default lives in hailo_cs_translator.h alongside the boundary-
- * channel offsets and their compile-time range guards. */
-#define HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE   512u
-/* HailoRT v4.23 wire capture on pi-5-1 shows boundary channels use
- * desc_page_size=512 (pios_ACTIVATION.bin / pios_DYNAMIC.bin: low-16
- * of OpenBoundary.host_buffer_info.desc_page_size = 0x0200). 4096
- * is within the HW 4 KB cap but fw appears to cache the
- * (desc_page_size, total_desc_count) pair declared in
- * OpenBoundary and silently refuse transfers whose host-side geometry
- * disagrees. Matching HailoRT's chosen values byte-for-byte is the
- * safest default. */
-#define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE   512u
-/* Output-side boundary desc page size. HailoRT v4.23 on MNIST
- * allocates the output boundary descriptor list at page_size=64
- * (MIN_VDMA_DESCRIPTOR_BUFFER_SIZE) while the input uses 512. See
- * pios_DYNAMIC.bin host_buffer_info.desc_page_size fields for
- * ACTIVATE_BOUNDARY_INPUT vs ACTIVATE_BOUNDARY_OUTPUT — the LE
- * bytes at abs offset 0x22-0x23 of the DYNAMIC stream are
- * 0x40 0x00 (=64) for OUTPUT and 0x00 0x02 (=512) for INPUT.
- * The asymmetry lets tiny output tensors (16 B for MNIST) use the
- * smallest possible descriptor granularity without overcommitting
- * SG table space. Firmware cross-validates the declared page size
- * against the descriptor list's own header and silently wedges
- * the D2H pipe (num_proc stays 0 forever) on a mismatch.
- * Byte-verified on pi-5-1 #253. */
-#define HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE  64u
-/* HailoRT allocates a 32-entry boundary SG list on v4.23 (host_buffer_
- * info.total_desc_count = 32). Our desc_count_for() rounds up to a
- * power of two anyway, so for MNIST-scale transfers (one 784 B frame
- * in a 512 B page = 2 descs) the floor pushes us to 32 explicitly. */
-#define HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT  32u
+/* #337-5: CCW + boundary page-size + desc-count defaults moved to
+ * hailo_cs_translator.h so the "config_channel + 1 / +2" + page-size
+ * invariants live in one file. The detailed #253 byte-verification
+ * notes that pinned these values stay here as historical reference:
+ *
+ *   - HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE (=512): HailoRT v4.23 wire
+ *     capture on pi-5-1 (pios_ACTIVATION.bin / pios_DYNAMIC.bin: low-
+ *     16 of OpenBoundary.host_buffer_info.desc_page_size = 0x0200).
+ *     4096 is within the HW 4 KB cap but fw appears to cache the
+ *     (desc_page_size, total_desc_count) pair declared in
+ *     OpenBoundary and silently refuse transfers whose host-side
+ *     geometry disagrees.
+ *
+ *   - HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE (=64): pios_DYNAMIC.
+ *     bin host_buffer_info.desc_page_size for ACTIVATE_BOUNDARY_OUTPUT
+ *     reads 0x40 0x00 (=64) vs 0x00 0x02 (=512) for INPUT at abs
+ *     offset 0x22-0x23 of the DYNAMIC stream. MIN_VDMA_DESCRIPTOR_
+ *     BUFFER_SIZE. Lets tiny outputs (16 B for MNIST) use the
+ *     smallest descriptor granularity without overcommitting SG
+ *     table space. fw cross-validates the declared page size
+ *     against the descriptor list's own header and silently wedges
+ *     the D2H pipe (num_proc stays 0 forever) on a mismatch.
+ *
+ *   - HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT (=32): HailoRT v4.23 host_
+ *     buffer_info.total_desc_count = 32. Our desc_count_for() rounds
+ *     up to a power of two anyway, so for MNIST-scale transfers
+ *     (one 784 B frame in a 512 B page = 2 descs) the floor pushes
+ *     us to 32 explicitly. */
 
 /* Round `bytes` up to `page_size` and return the descriptor count
  * needed to cover the region, rounded UP to the next power of two
