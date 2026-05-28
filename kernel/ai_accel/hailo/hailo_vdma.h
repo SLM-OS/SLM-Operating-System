@@ -220,6 +220,29 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
                               uint32_t buffer_size,
                               uint8_t  data_id);
 
+/*
+ * Aligns a boundary descriptor ring with HailoRT's post-launch_transfer
+ * state. Call AFTER `hailo_vdma_program_buffer` with the same
+ * (buffer_iova, buffer_size, data_id) tuple. Two changes:
+ *   1. Pre-program descs[descs_used..desc_count-1] with a valid
+ *      (DESC_VALID + page_size + continuing addresses) pattern.
+ *   2. Clear LIRQ bits on the last active descriptor.
+ * Cache-cleaned to DRAM. Safe to call on rings with desc_count == 0
+ * or no active buffer (early-returns).
+ *
+ * Disconfirmed as a #1001 wedge fix on hardware 2026-05-27 — kept
+ * for wire-byte parity with HailoRT and to suppress a fw-side
+ * spurious `event_id=0(ETHERNET_RX_ERROR)` d2h notification that
+ * fires whenever HOST_IRQ bits are set on a last desc. See
+ * `hailo_vdma.c:hailo_vdma_match_hailort_boundary_ring` for the
+ * full rationale.
+ */
+void hailo_vdma_match_hailort_boundary_ring(
+        struct hailo_vdma_desc_list *list,
+        uint64_t buffer_iova,
+        uint32_t buffer_size,
+        uint8_t  data_id);
+
 /* -------------------------------------------------------------------------- */
 /* Channel start / stop / submit                                               */
 /* -------------------------------------------------------------------------- */

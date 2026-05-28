@@ -5550,6 +5550,76 @@ static void test_vdma_program_buffer_rejects_null_list(void)
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
 }
 
+/* #1001 PR #1012: after program_buffer + match_hailort_boundary_ring,
+ * the last active desc loses its LIRQ bits and descs beyond it carry
+ * a continuing-pattern shape matching HailoRT's launch_transfer leftover
+ * state. MNIST shape: 784 B / 512 B page = 2 active descs in a 32-slot
+ * ring. */
+static void test_vdma_match_hailort_boundary_ring_mnist_in(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(32, 512, /*circular=*/false, &list));
+
+    /* Program 2 active descs the same way the load path does. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x10020b4000ULL, /*size=*/784, /*data_id=*/0x05);
+    TEST_ASSERT_EQUAL_INT(2, rc);
+    /* Confirm pre-call state: desc[1] has LAST_DESC_CTRL (0x2e),
+     * desc[2] is zero. */
+    TEST_ASSERT_EQUAL_UINT32((272u << 8) | LAST_DESC_CTRL,  /* 784 - 512 = 272 residue */
+                             list.descs[1].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32(0u, list.descs[2].page_size_desc_control);
+
+    hailo_vdma_match_hailort_boundary_ring(&list,
+        /*iova=*/0x10020b4000ULL, /*size=*/784, /*data_id=*/0x05);
+
+    /* desc[1] LIRQ bits cleared → control byte is just 0x02. Page
+     * size stays 272 (residue). */
+    TEST_ASSERT_EQUAL_UINT32((272u << 8) | 0x02u,
+                             list.descs[1].page_size_desc_control);
+    /* desc[2..31] now carry the continuing-pattern shape: page_size
+     * = 512, control = DESC_VALID, address = iova + i*512. */
+    for (uint32_t i = 2; i < list.desc_count; i++) {
+        TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                                 list.descs[i].page_size_desc_control);
+        TEST_ASSERT_EQUAL_UINT32(
+            (uint32_t)(0x10020b4000ULL + (uint64_t)i * 512ULL) | 0x05u,
+            list.descs[i].addr_l_rsvd_data_id);
+        TEST_ASSERT_EQUAL_UINT32(
+            (uint32_t)((0x10020b4000ULL + (uint64_t)i * 512ULL) >> 32),
+            list.descs[i].addr_h);
+    }
+    /* desc[0] stays as program_buffer wrote it. */
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+/* NULL / zero-shape inputs: helper must early-return cleanly, leaving
+ * the list untouched (or, for NULL, just not crashing). */
+static void test_vdma_match_hailort_boundary_ring_handles_nulls(void)
+{
+    /* NULL list pointer — must not crash. */
+    hailo_vdma_match_hailort_boundary_ring(NULL, 0x1000, 512, 0);
+
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(8, 512, false, &list));
+    /* desc_count > 0 but buffer_size = 0 → descs_used = 0, so loop
+     * pre-fills descs[0..7]. With descs_used==0 the LIRQ-clear block
+     * is skipped (guard). */
+    hailo_vdma_match_hailort_boundary_ring(&list,
+        /*iova=*/0x4000, /*size=*/0, /*data_id=*/0x03);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[7].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
 static void test_vdma_program_buffer_rejects_zero_size(void)
 {
     vdma_setup();
@@ -8339,6 +8409,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_program_buffer_rejects_null_list);
     RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
     RUN_TEST(test_vdma_program_buffer_cache_clean_uses_correct_offset);
+
+    /* #1001 PR #1012: HailoRT-parity ring finalization */
+    RUN_TEST(test_vdma_match_hailort_boundary_ring_mnist_in);
+    RUN_TEST(test_vdma_match_hailort_boundary_ring_handles_nulls);
     RUN_TEST(test_vdma_channel_start_programs_regs);
     RUN_TEST(test_vdma_channel_start_encodes_address_l);
     RUN_TEST(test_vdma_channel_start_rejects_misaligned_iova);
