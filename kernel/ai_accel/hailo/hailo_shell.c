@@ -210,6 +210,14 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
      * major CORE step; SLM-OS sends none. The question is whether the
      * pings silence the CPU_ECC_FATAL events fw fires after RESET. */
     bool inject_pings = false;
+    /* #328: `diag` opts in to the post-ACTIVATION APP-CPU IDENTIFY
+     * probe (and any future ctxsmoke-only diagnostic RPCs). Default
+     * OFF — the historical "permanent diagnostic" added an extra
+     * APP-CPU RPC to every ctxsmoke run on healthy fw, mutating
+     * control-channel state during what's supposed to be a synthesis
+     * smoke test. Set when actively bisecting CORE-vs-channel-wedge
+     * symptoms (e.g., during the #1001 chain). */
+    bool diag_mode = false;
     for (int ai = 3; ai < argc; ai++) {
         if (strncmp(argv[ai], "hwc", 3) == 0) {
             int n = 0;
@@ -218,12 +226,14 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
             if (n >= 1 && n <= 16) hwc_repeat = (uint32_t)n;
         } else if (strcmp(argv[ai], "pings") == 0) {
             inject_pings = true;
+        } else if (strcmp(argv[ai], "diag") == 0) {
+            diag_mode = true;
         }
     }
     shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d) hwc_repeat=%u "
-                 "pings=%d\n",
+                 "pings=%d diag=%d\n",
                  variant, (int)include_out, (int)include_in,
-                 (unsigned)hwc_repeat, (int)inject_pings);
+                 (unsigned)hwc_repeat, (int)inject_pings, (int)diag_mode);
     /* Phase 6.3d/6.4 hardware probe: exercise the three context-
      * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
      * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
@@ -496,19 +506,23 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     hailo_fw_drain_d2h_notifications(4);
 #endif
 
-    /* Diagnostic: probe an APP-CPU opcode (IDENTIFY) right after
-     * ACTIVATION. Hardware-verified on pi-5-1 fw v4.23 that this
-     * returns rc=0 while the next CORE-CPU RPC (BATCH_SWITCHING)
-     * times out — confirming the control channel as a whole is
-     * healthy; firmware's CORE task specifically is busy
-     * processing ACTIVATION's burst-credits reset asynchronously.
-     * Kept as a permanent diagnostic so future regressions can
-     * distinguish "CORE-busy" from "channel-wedged" at a glance. */
-    struct hailo_control_identify_response idr;
-    int irc = hailo_control_identify(&idr);
-    shell_printf("  [--] DIAG: IDENTIFY(APP) rc=%d fw=%u.%u\n",
-                 irc, (unsigned)idr.fw_version.major,
-                 (unsigned)idr.fw_version.minor);
+    /* #328: post-ACTIVATION APP-CPU IDENTIFY probe — gated under
+     * `diag` so default ctxsmoke runs don't mutate control-channel
+     * state with an extra RPC. Hardware-verified on pi-5-1 fw v4.23
+     * (from the original #180 investigation) that this returns rc=0
+     * while the next CORE-CPU RPC (BATCH_SWITCHING) times out —
+     * confirming the control channel as a whole is healthy; fw's
+     * CORE task specifically is busy processing ACTIVATION's burst-
+     * credits reset asynchronously. Run `hailo ctxsmoke <variant>
+     * diag` to re-enable when bisecting a CORE-vs-channel-wedge
+     * regression. */
+    if (diag_mode) {
+        struct hailo_control_identify_response idr;
+        int irc = hailo_control_identify(&idr);
+        shell_printf("  [--] DIAG: IDENTIFY(APP) rc=%d fw=%u.%u\n",
+                     irc, (unsigned)idr.fw_version.major,
+                     (unsigned)idr.fw_version.minor);
+    }
 
     /* #180 experiment A — async-busy test. Give firmware
      * up to 500 ms after ACTIVATION completes before sending

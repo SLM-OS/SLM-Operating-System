@@ -53,6 +53,7 @@
 #include "hef_parser.h"
 #include "debug.h"
 #include "md5.h"
+#include "sched.h"
 #include "spinlock.h"
 #include "uart.h"
 #include <stddef.h>
@@ -305,6 +306,18 @@ static int wait_for_response(uint32_t timeout_us)
         }
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
+        /* #332: yield CPU 0 between polls once the scheduler is up,
+         * so a slow control RPC (boot-time WRITE_MEMORY chunks can
+         * take seconds) doesn't burn CPU 0 indefinitely. The MSI
+         * fast-path above returns BEFORE this point on healthy
+         * platforms, so this only adds latency when polling actually
+         * runs (stub platforms / pre-IRQ-init phases). Pre-scheduler
+         * callers (early boot) fall through to the udelay-only path
+         * because `yield()` would either be a no-op or crash before
+         * `scheduler_init` completes. */
+        if (scheduler_is_initialized()) {
+            yield();
+        }
     }
     return HAILO_ERR_TIMEOUT;
 }

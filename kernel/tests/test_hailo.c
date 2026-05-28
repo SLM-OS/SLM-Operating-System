@@ -737,7 +737,11 @@ static void  mock_cache_invalidate(void *a, size_t n)
     mock_last_cache_invalidate_size = n;
 }
 static void  mock_mb(void)                             {}
-static void  mock_udelay(uint32_t u)                   { (void)u; }
+/* #330: counter so test_msi_fast_path_short_circuits_polling can
+ * verify wait_for_response returned via the MSI pending flag without
+ * entering any udelay-based polling iteration. */
+static uint32_t mock_udelay_calls = 0;
+static void  mock_udelay(uint32_t u)                   { (void)u; mock_udelay_calls++; }
 
 /* mock_register_irq + helpers defined further up; keep the
  * platform-ops struct adjacent to its function pointers here. */
@@ -2653,6 +2657,75 @@ static void test_msi_handler_sets_pending_and_clears_istatus(void)
     TEST_ASSERT_EQUAL_UINT32(0u, after);
 }
 
+/* #330: verify the MSI fast-path in wait_for_response actually
+ * short-circuits the polling loop. The PR #324 review noted that
+ * test_msi_handler_sets_pending_and_clears_istatus above only
+ * asserts the W1C side-effect; a regression that broke the
+ * pending-flag short-circuit (e.g. removed the
+ * __atomic_load_n(control_msi_pending) check) would still pass
+ * that test because the side-effects would happen anyway during
+ * polling.
+ *
+ * This test arms the MSI handler with FW_CONTROL pending, then
+ * issues an IDENTIFY whose response is already pre-loaded into
+ * the fw-sim mock. If the fast-path works, wait_for_response
+ * returns on the very first iteration without calling udelay
+ * even once. If the fast-path is broken, the function falls
+ * through to the polling loop and udelay fires repeatedly until
+ * ISTATUS happens to carry FW_CONTROL again. */
+static void test_msi_fast_path_short_circuits_polling(void)
+{
+    control_setup_running();
+
+    /* Pre-load the mock with a valid IDENTIFY response so the
+     * read-response phase succeeds independently of how we got
+     * past wait_for_response. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    /* Prime: one IDENTIFY first so the MSI handler is registered,
+     * matching the lazy-registration pattern in hailo_control.c.
+     * Reset the udelay counter AFTER this prime call so the test's
+     * delta starts from zero. */
+    struct hailo_control_identify_response prime_resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&prime_resp));
+    TEST_ASSERT_NOT_NULL(mock_registered_irq_handler);
+
+    /* Set control_msi_pending = 1 by invoking the MSI handler with
+     * FW_CONTROL_IRQ pending in ISTATUS. The handler's W1C also
+     * clears the istatus bit. */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    mock_msi_invoke();
+
+    /* Re-arm the fw-sim response (consumed by the prime call) and
+     * reset the udelay counter. */
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+    mock_udelay_calls = 0;
+
+    /* The next IDENTIFY's wait_for_response should see
+     * control_msi_pending == 1 on its very first iteration and
+     * return HAILO_OK without firing any udelay. */
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    /* The canonical regression signal: the polling loop never ran.
+     * A broken fast-path would have called udelay at least once
+     * (typically dozens of times) before ISTATUS came back with
+     * FW_CONTROL set via a different path. */
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_udelay_calls);
+}
+
 /* The MSI handler is registered lazily on the first control send.
  * To exercise it from a test, we need to (a) prime the simulator
  * with a fake response so the send completes synchronously and (b)
@@ -4043,6 +4116,75 @@ static void test_cs_translate_enable_lcu_non_default_variant(void)
     memcpy(&kdc, out.dynamic + 9, 4);
     TEST_ASSERT_EQUAL_UINT32(0xABCD1234, kdc);
     /* Tail at offset 13. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[13]);
+}
+
+/* #329 anchor: every field in ENABLE_LCU_NON_DEFAULT carries a
+ * distinct value so any field-order swap in the struct or in
+ * `translate_enable_lcu`'s composite literal will fail exactly one
+ * byte-level assertion. The existing happy-path tests above either
+ * use a zero (packing collapses with adjacent padding) or share
+ * values across adjacent fields, so a kernel_done_address ↔
+ * network_index swap could pass them with low-bit luck. This test
+ * picks values whose byte patterns are mutually exclusive at every
+ * struct offset:
+ *
+ *   packed_lcu_id       = (7<<4)|1 = 0x71
+ *   network_index       = 0x5A         (NOT 0x00, NOT 0x71)
+ *   kernel_done_address = 0xC3A8       (low byte != network_index)
+ *   kernel_done_count   = 0xDEADBEEF   (all four bytes distinct)
+ *
+ * If anything in the wire layout shifts, the offending byte's
+ * assertion fails immediately with the actual vs expected value
+ * making the swap obvious in the test log. */
+static void test_cs_translate_enable_lcu_non_default_field_anchor(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 1;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index           = 0,
+        .lcu_index               = 1,
+        .cluster_index           = 7,
+        .network_index           = 0x5A,
+        .lcu_kernel_done_address = 0xC3A8,
+        .lcu_kernel_done_count   = 0xDEADBEEFu,
+    };
+    info.context_actions_count = 1;
+    info.context_actions[0].context_index = 0;
+    info.context_actions[0].action_count  = 1;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Wire layout per kernel/ai_accel/hailo/hailo_cs_actions.h:
+     *   off 0..4   common-header (5 B)
+     *   off 5      packed_lcu_id        (u8)
+     *   off 6      network_index        (u8)
+     *   off 7..8   kernel_done_address  (u16 LE)
+     *   off 9..12  kernel_done_count    (u32 LE)
+     *   off 13..   tail (APPLICATION_CHANGE_INTERRUPT)
+     */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)18, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_NON_DEFAULT, out.dynamic[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x71u, out.dynamic[5]);    /* packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(0x5Au, out.dynamic[6]);    /* network_index */
+    uint16_t kda;
+    memcpy(&kda, out.dynamic + 7, 2);
+    TEST_ASSERT_EQUAL_UINT16(0xC3A8u, kda);            /* kernel_done_address */
+    uint32_t kdc;
+    memcpy(&kdc, out.dynamic + 9, 4);
+    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, kdc);        /* kernel_done_count */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
                             out.dynamic[13]);
 }
@@ -8289,6 +8431,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_core_identify_wire_layout);
     RUN_TEST(test_control_registers_msi_on_first_send);
     RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
+    RUN_TEST(test_msi_fast_path_short_circuits_polling);
     RUN_TEST(test_msi_handler_acks_per_channel_src_irq);
     RUN_TEST(test_msi_handler_acks_per_channel_dst_irq);
     RUN_TEST(test_msi_handler_skips_per_channel_when_no_vdma_bits);
@@ -8319,6 +8462,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_preliminary_single_channel);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
+    RUN_TEST(test_cs_translate_enable_lcu_non_default_field_anchor);
     RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);
     RUN_TEST(test_cs_translate_multiple_enable_lcu_preserves_order);
     RUN_TEST(test_cs_translate_disable_lcu_wire_format);
