@@ -117,6 +117,26 @@ This closes the host-observable surface area. Every byte SLM-OS hands to firmwar
 
 None of these can land before the SLM-OS capstone deadline. #1001 is closed and the chain accepted as the most thorough negative result the project can produce on host hardware alone.
 
+### Post-#332 regression confirmation (2026-05-28)
+
+After [#1018](https://github.com/SLM-OS/SLM-Operating-System/pull/1018) closed [#332](https://github.com/SLM-OS/SLM-Operating-System/issues/332) by rewriting the control-RPC `wait_for_response` to use a pi_mutex + MSI-driven blocking wait (`task_sleep_wake`), the wedge was re-verified on `pi-5-1` to rule out any possibility that the lock/wait rework moved the failure point. Sequence:
+
+```
+hailo probe → OK
+hailo boot → IDENTIFY round-trip OK (under new wait_for_response)
+hailo load /mnt/files/user.hef sched → context-switch load OK, all RPCs rc=0
+hailo runmodel 1
+  pre-submit CORE_IDENTIFY rc=0 latency=10022 us   ← #332-changed code, works
+  [vdma] ch=2 TIMEOUT proc_end=0x00000000 base_end=0x00022801   ← wedge
+  IN submit_and_wait rc=-4 (avail=2)
+  IN  desc[0..7] status=0x00  ← fw never touched
+  OUT desc[0..7] status=0x00  ← fw never touched
+```
+
+Byte-identical to the #1001 wedge signature documented above. `hailo_vdma_submit_and_wait` (where the wedge fires) was not modified by #332; `git show` against the merge commit (5a4e3f1c) confirms #332 touched only the control-RPC wait path. The pre-submit `CORE_IDENTIFY` immediately upstream of the wedge flowed cleanly through the new pi_mutex blocking wait at rc=0, confirming the new wait infrastructure works correctly and the wedge is independent of any host-thread state that #332 might have shifted. Two readings — "no control-plane timing change affects the wedge" (negative) and "wedge is purely fw-side, not gated on any pre-VDMA-submit host state" (positive) — both reinforce the chain-exhausted closure.
+
+See [#1001#issuecomment-4570908610](https://github.com/SLM-OS/SLM-Operating-System/issues/1001#issuecomment-4570908610) for the full hardware capture.
+
 ## Reopen criteria
 
 #682 should only be reopened if one of these conditions holds:
