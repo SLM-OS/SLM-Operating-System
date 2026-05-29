@@ -25,6 +25,7 @@ from hailo_re_driver.slmos_runner import (
     ReplayRefused,
     ReplayResponse,
     SlmosRunner,
+    dry_run_transport,
     parse_replay_output,
 )
 
@@ -425,6 +426,75 @@ class SoftRefuseUntilRegexTests(unittest.TestCase):
             "bar=4 offset=0x0"
         )
         self.assertIsNone(rx.search(line))
+
+
+class DryRunTransportTests(unittest.TestCase):
+    """#810: `dry_run_transport` must synthesise enough output for the
+    three labctl commands `SlmosRunner` issues so the loop can advance
+    one iteration cleanly without touching hardware. Pre-fix the
+    transport returned empty stdout for every call, which made
+    `wait_for_shell()` fail at the prompt regex and bubble up as
+    'did not see shell prompt after flash+reboot (rc=0)'.
+    """
+
+    def test_capture_emits_shell_prompt(self) -> None:
+        """`labctl serial capture ... --until slmos>` must produce
+        stdout containing the prompt so `_shell_prompt_re.search`
+        succeeds in `SlmosRunner.replay_step`."""
+        argv = [
+            "labctl", "serial", "capture", "pi-5-1",
+            "--until", "slmos>", "--timeout", "45.0",
+        ]
+        result = dry_run_transport(argv, None)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("slmos>", result.stdout)
+
+    def test_send_emits_synthetic_response_with_seq(self) -> None:
+        """`labctl serial send ... 'hailo replay-step <path> <seq>'`
+        must produce a HAILO_RE_CORPUS_RESPONSE line that
+        `parse_replay_output` classifies as a ReplayResponse, with
+        the seq carried through from argv."""
+        cmd = "\rhailo replay-step 0:/corpus.jsonl 47"
+        argv = [
+            "labctl", "serial", "send", "pi-5-1", cmd,
+            "--capture", "30", "--until", "slmos_sha=[0-9a-f]{40}",
+        ]
+        result = dry_run_transport(argv, None)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("HAILO_RE_CORPUS_RESPONSE", result.stdout)
+        self.assertIn("seq=47", result.stdout)
+        # The downstream parser must classify it as a successful
+        # response (not a divergence, error, or refusal).
+        parsed = parse_replay_output(result.stdout)
+        self.assertIsInstance(parsed, ReplayResponse)
+
+    def test_send_with_no_seq_in_cmd_still_returns_success(self) -> None:
+        """Defensive: if the synthesised command doesn't carry a
+        recognisable replay-step seq, fall back to seq=0 rather than
+        crash. Empty stdout would re-trigger the original #810 bug."""
+        argv = ["labctl", "serial", "send", "pi-5-1", "\rhello"]
+        result = dry_run_transport(argv, None)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("HAILO_RE_CORPUS_RESPONSE", result.stdout)
+        self.assertIn("seq=0", result.stdout)
+
+    def test_sdwire_update_returns_empty_stdout(self) -> None:
+        """flash_and_reboot calls `labctl sdwire update ...`. That
+        path doesn't need synthesised stdout — `SlmosRunner` only
+        checks returncode == 0 from the flash step."""
+        argv = ["labctl", "sdwire", "update", "pi-5-1", "-p", "1",
+                "-c", "/tmp/kernel.bin:kernel_2712.img", "--reboot"]
+        result = dry_run_transport(argv, None)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_stderr_carries_command_log(self) -> None:
+        """The pre-fix behaviour of echoing the would-be argv to
+        stderr was useful for debugging — preserve it."""
+        argv = ["labctl", "serial", "capture", "pi-5-1", "--until", "slmos>"]
+        result = dry_run_transport(argv, None)
+        self.assertIn("[dry-run]", result.stderr)
+        self.assertIn("labctl", result.stderr)
 
 
 if __name__ == "__main__":

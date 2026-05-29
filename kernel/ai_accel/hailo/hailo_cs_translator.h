@@ -134,6 +134,54 @@ _Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
                <= HAILO_CS_PCIE_MAX_D2H,
                "boundary OUTPUT channel must not exceed D2H upper bound");
 
+/* #337-5: CCW + boundary page-size + desc-count defaults. Moved here
+ * (from inference_device_hailo.c) so the "config_channel + 1 / +2"
+ * invariant and the page-size invariants live in one file. Values
+ * are pinned against HailoRT v4.23's MNIST wire capture on pi-5-1:
+ *
+ *   CCW_DESC_PAGE_SIZE        = 512  — MVP cfg-channel page granularity.
+ *   BOUNDARY_PAGE_SIZE        = 512  — INPUT boundary page size; fw
+ *                                       silently refuses transfers
+ *                                       whose host-side geometry
+ *                                       disagrees with the OpenBoundary
+ *                                       advertised value.
+ *   BOUNDARY_OUTPUT_PAGE_SIZE = 64   — OUTPUT boundary page size; the
+ *                                       MIN_VDMA_DESCRIPTOR_BUFFER_SIZE
+ *                                       value lets tiny outputs (16 B
+ *                                       for MNIST) use the smallest
+ *                                       descriptor granularity.
+ *   BOUNDARY_DESC_COUNT       = 32   — HailoRT allocates 32 entries
+ *                                       per boundary SG list on v4.23.
+ *                                       Power-of-2 floor (the alloc API
+ *                                       rounds up anyway).
+ *
+ * See `kernel/inference/inference_device_hailo.c` for the detailed
+ * #253 byte-verification notes that pinned these values. */
+#define HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE         512u
+#define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE         512u
+#define HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE  64u
+#define HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT        32u
+
+/* #337-2: compound literal for `struct hailo_cs_host_buffer_info`
+ * with buffer_type pinned to EXTERNAL_DESC. The four host-side
+ * VDMA descriptor lists SLM-OS programs (cfg ch0/ch1 + boundary
+ * IN/OUT) always use the external-descriptor path; this macro
+ * collapses the buffer_type + named-field noise at every
+ * OpenBoundary / ActivateCfgChannel call site to a single line:
+ *
+ *   .host_buffer_info = HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(
+ *       iova, page_size, desc_count, bytes_in_pattern),
+ *
+ * Caller-side struct initializers wrap this in `{ ... }` per C99
+ * compound-literal rules. */
+#define HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(iova, page, count, pattern) { \
+    .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,              \
+    .dma_address      = (iova),                                          \
+    .desc_page_size   = (page),                                          \
+    .total_desc_count = (count),                                         \
+    .bytes_in_pattern = (pattern),                                       \
+}
+
 struct hailo_cs_translate_cfg {
     /* packed_vdma_channel_id for the config stream (the channel the
      * firmware DMA-pulls CCW payloads through). Typical choice on

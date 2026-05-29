@@ -129,16 +129,58 @@ def subprocess_transport(argv: list[str], timeout: Optional[float]) -> CmdResult
 
 
 def dry_run_transport(argv: list[str], _timeout: Optional[float]) -> CmdResult:
-    """No-op transport: log the command, return success with empty stdout.
+    """No-op transport: log the command, return success with a synthetic
+    stdout that downstream parsers accept.
 
     Used by the CLI's `--dry-run` to surface-check labctl invocations without
     touching hardware. For end-to-end loop simulation (where the SLM-OS side
-    must actually return synthesised RESPONSE lines), use
-    `MockSlmosRunner` with `--mock-slmos-responses`.
+    must actually return real-shape RESPONSE lines for a specific corpus
+    walk), use `MockSlmosRunner` with `--mock-slmos-responses`.
+
+    Per #810, the dry-run transport must synthesise enough output for the
+    three labctl commands `SlmosRunner` issues so the loop can advance
+    one iteration cleanly instead of failing at "did not see shell prompt
+    after flash+reboot":
+
+    * `labctl serial capture <sbc> --until <re>` → emit the `slmos>` prompt
+      so `_shell_prompt_re.search(stdout)` succeeds.
+    * `labctl serial send <sbc> '\\r hailo replay-step <path> <seq>' ...`
+      → emit a synthetic `HAILO_RE_CORPUS_RESPONSE` line with sentinel
+      `value=deadbeef` + 40 zero `slmos_sha` so `parse_replay_output`
+      classifies the iteration as a success without burning the timeout.
+    * Anything else (sdwire update, etc.) → empty stdout, returncode=0.
+
+    The seq embedded in the synthesised RESPONSE is parsed out of the
+    `replay-step <path> <seq>` token in argv so the loop's
+    `last_seq_appended` advances correctly.
     """
+    stdout = ""
+    if len(argv) >= 4 and argv[0] == "labctl" and argv[1] == "serial":
+        if argv[2] == "capture":
+            # The `--until` pattern is typically `slmos>` but can be a
+            # configured prompt regex. Emit a literal `slmos>` — the
+            # default matcher in SlmosRunner uses the same string and
+            # the dry-run path doesn't need to support custom prompts.
+            stdout = "slmos> \n"
+        elif argv[2] == "send":
+            # Locate the `hailo replay-step <path> <seq>` token in argv
+            # to extract the seq. The cmd is a single argv element
+            # (one combined string), so split it ourselves.
+            seq = 0
+            for arg in argv:
+                if "hailo replay-step " in arg:
+                    parts = arg.strip().split()
+                    # ['hailo', 'replay-step', '<path>', '<seq>']
+                    if len(parts) >= 4 and parts[-1].isdigit():
+                        seq = int(parts[-1])
+                    break
+            stdout = (
+                f"HAILO_RE_CORPUS_RESPONSE seq={seq} bar=0 offset=0 "
+                f"size=4 value=deadbeef slmos_sha={'0' * 40}\n"
+            )
     return CmdResult(
         returncode=0,
-        stdout="",
+        stdout=stdout,
         stderr=f"[dry-run] {' '.join(shlex.quote(a) for a in argv)}\n",
     )
 

@@ -257,13 +257,11 @@ static int translate_open_boundary_for_pad(
         uint32_t periph_frame = pad_periph_frame_size(pad);
         struct hailo_cs_act_open_boundary_input_channel body = {
             .packed_vdma_channel_id = packed_vdma,
-            .host_buffer_info = {
-                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-                .dma_address      = cfg->boundary_input_desc_list_iova,
-                .desc_page_size   = cfg->boundary_desc_page_size,
-                .total_desc_count = cfg->boundary_input_total_desc_count,
-                .bytes_in_pattern = periph_frame,
-            },
+            .host_buffer_info = HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(
+                cfg->boundary_input_desc_list_iova,
+                cfg->boundary_desc_page_size,
+                cfg->boundary_input_total_desc_count,
+                periph_frame),
             .stream_index             = stream_index,
             .network_index            = 0,
             .periph_bytes_per_buffer  =
@@ -285,18 +283,16 @@ static int translate_open_boundary_for_pad(
             return HAILO_ERR_INVAL;
         }
         uint32_t periph_frame = pad_periph_frame_size(pad);
+        /* Output: periph frame == core_bytes_per_buffer per
+         * pad_periph_frame_size. bytes_in_pattern = 16 for MNIST's
+         * 1x1x10 (padded) output on the wire. */
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
-            .host_buffer_info = {
-                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-                .dma_address      = cfg->boundary_output_desc_list_iova,
-                .desc_page_size   = cfg_output_page_size(cfg),
-                .total_desc_count = cfg->boundary_output_total_desc_count,
-                /* Output: periph frame == core_bytes_per_buffer per
-                 * pad_periph_frame_size. bytes_in_pattern = 16 for
-                 * MNIST's 1x1x10 (padded) output on the wire. */
-                .bytes_in_pattern = periph_frame,
-            },
+            .host_buffer_info = HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(
+                cfg->boundary_output_desc_list_iova,
+                cfg_output_page_size(cfg),
+                cfg->boundary_output_total_desc_count,
+                periph_frame),
         };
         (void)stream_index;   /* OUTPUT body omits stream_index today. */
         return hailo_cs_builder_append(
@@ -913,13 +909,11 @@ static int translate_preliminary(const struct hef_info *info,
         struct hailo_cs_act_activate_cfg_channel bulk = {
             .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma,
             .config_stream_index    = cfg->cfg_channel_1_stream_index,
-            .host_buffer_info = {
-                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-                .dma_address      = cfg->cfg_channel_1_desc_list_iova,
-                .desc_page_size   = cfg->ccw_desc_page_size,
-                .total_desc_count = cfg->cfg_channel_1_total_desc_count,
-                .bytes_in_pattern = cfg->cfg_channel_1_bytes_in_pattern,
-            },
+            .host_buffer_info = HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(
+                cfg->cfg_channel_1_desc_list_iova,
+                cfg->ccw_desc_page_size,
+                cfg->cfg_channel_1_total_desc_count,
+                cfg->cfg_channel_1_bytes_in_pattern),
         };
         rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                                      &bulk, sizeof(bulk));
@@ -929,13 +923,11 @@ static int translate_preliminary(const struct hef_info *info,
     struct hailo_cs_act_activate_cfg_channel act = {
         .packed_vdma_channel_id = cfg->config_vdma_channel,
         .config_stream_index    = cfg->config_stream_index,
-        .host_buffer_info = {
-            .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-            .dma_address      = cfg->ccw_desc_list_iova,
-            .desc_page_size   = cfg->ccw_desc_page_size,
-            .total_desc_count = cfg->ccw_total_desc_count,
-            .bytes_in_pattern = cfg->ccw_bytes_in_pattern,
-        },
+        .host_buffer_info = HAILO_CS_HOST_BUFFER_INFO_EXTERNAL(
+            cfg->ccw_desc_list_iova,
+            cfg->ccw_desc_page_size,
+            cfg->ccw_total_desc_count,
+            cfg->ccw_bytes_in_pattern),
     };
     rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                                  &act, sizeof(act));
