@@ -1222,7 +1222,30 @@ struct ctx_actions_accum {
  * 7-line tail to one APPEND_TYPED_ACTION line. The `present` pointer
  * is shared across all bindings inside one decode body — none of
  * these action types need per-field "was this set?" detection
- * (defaults are zeros and that's correct). */
+ * (defaults are zeros and that's correct).
+ *
+ * Caller-side contract — `HEF_BIND_U{32,64}`:
+ *   - The caller must have `bool present_discard;` in scope; the
+ *     macro captures it as a free name to share one dummy presence
+ *     slot across every binding in a decode body.
+ *   - These macros expand to a `struct u{32,64}_ctx` *declaration*
+ *     plus two assignments. The locals must remain in scope
+ *     through the matching `pb_decode` call, so a do/while(0) wrapper
+ *     is not possible. Consequently the macro is NOT safe inside an
+ *     unbraced `if`/`for`/`while` body — use only at function-body
+ *     statement scope (top-level inside the decode_*_body, or inside
+ *     an explicit `{ ... }` block).
+ *   - Token-pasted local name is `<field>_ctx`; two bindings for the
+ *     same field name in one scope would collide.
+ *
+ * Caller-side contract — `HEF_APPEND_TYPED_ACTION(info, kind, ...)`:
+ *   - The `hef_info` pointed to by `info_` must expose three siblings
+ *     named after `kind_`: `<kind>_actions[]` (array of action
+ *     structs), `<kind>_count` (counter), and `<kind>_truncated`
+ *     (overflow flag). Add new action kinds with the same naming
+ *     pattern in `hef_parser.h` to keep this macro usable.
+ *   - The `(max_)` argument is the array capacity; on overflow the
+ *     action is dropped and `<kind>_truncated` is set. */
 #define HEF_BIND_U32(sub_, field_, dst_)                                \
     struct u32_ctx field_##_ctx = {                                     \
         .dst = (dst_), .present = &present_discard };                   \
