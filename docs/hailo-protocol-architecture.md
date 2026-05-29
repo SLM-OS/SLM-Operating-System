@@ -1,6 +1,6 @@
 # Hailo NPU Protocol Architecture
 
-**Status:** Reference document, anchored to empirical findings on Hailo-8L AI HAT+ with firmware v4.23 on Raspberry Pi 5, captured 2026-05-12. Re-validate before assuming the same shape for future firmware revisions or different Hailo SoCs.
+**Status:** Reference document, anchored to empirical findings on Hailo-8L AI HAT+ with firmware v4.23 on Raspberry Pi 5. Initial capture 2026-05-12 (§"Empirical evidence" — Linux ftrace + kprobe on `hailo_pcie_write_firmware_control`). Extended 2026-05-28 (§"Update 2026-05-28" — host-side wire byte-diff + DMA-content byte-diff, [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) closed exhausted). Re-validate before assuming the same shape for future firmware revisions or different Hailo SoCs.
 
 ## TL;DR
 
@@ -12,7 +12,7 @@ Hailo's NPU configuration uses **two protocols simultaneously**:
 
 A host that uses only the documented fw_control RPC protocol completes ~90% of the load (firmware accepts every RPC with rc=0) but cannot complete the final channel-to-inference-path binding. The wedge surfaces as: `hailo runmodel <h>` writes `num_avail=2` to ch=2; firmware never advances `num_proc`; timeout after 500 ms.
 
-This is the root cause of [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) (closed 2026-05-12 as Hailo-side architectural limit).
+This is the root cause of [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) (closed 2026-05-12 as Hailo-side architectural limit) and its downstream [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) (closed 2026-05-28 after a second-pass disconfirmation chain — see §"Update 2026-05-28" below for the additional evidence).
 
 ## Empirical evidence
 
@@ -93,6 +93,29 @@ These hypotheses were investigated and **disproven** during the #682 bisection. 
 | HEF-specific MNIST issue | RULED OUT | Wedge reproduces shape-identically across other model attempts; descriptor list shape matches Linux exactly for MNIST. |
 | BAR4 misalignment | RULED OUT | All bar4_write/read paths are 32-bit aligned; verified empirically via wire-debug. |
 | Cache coherency (descriptor list DMA) | RULED OUT | Descriptor list is cleaned via `cache_clean` before submit; HAILO_WIRE_DEBUG dump from DRAM matches programmed values. |
+| IN ring descriptor pre-fill (full ring vs partial) | DISPROVEN (PR #1012, hyp-X) | HailoRT pre-programs all 32 ring slots before any submit; SLM-OS pre-programmed only the first N. Aligning to full-ring pre-fill: null effect, wedge persists. |
+| Last-descriptor LIRQ bit (`0x2e` vs `0x02`) | DISPROVEN (PR #1012, hyp-Y) | HailoRT clears the LIRQ bit on the final descriptor of the transfer; SLM-OS left it set. Aligning to the cleared form: null effect on wedge (side-finding: clearing LIRQ also suppressed the spurious `event_id=0 ETHERNET_RX_ERROR` d2h notification, which is therefore a fw side-effect of LIRQ, not a wedge signal). |
+| DMA buffer content (CCWS + boundary desc-list payload) | RULED OUT (PR #1010, 2026-05-27) | Per the plan in `docs/hailo-dma-content-diff-plan.md` — full host-RAM content dump on both sides; byte-faithful match across cfg-channel CCWS and boundary IN/OUT desc-list payloads. fw rejects ch=2 dispatch on something invisible to host-observable host wire AND host RAM. |
+
+## Update 2026-05-28: DMA content byte-faithful, wedge persists
+
+Between 2026-05-25 and 2026-05-28 the BAR4-RE attempt (PR #795 et seq.) and the DMA-content byte-diff plan (this file's neighbour `hailo-dma-content-diff-plan.md`) were executed end-to-end against [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) — the downstream "host has all observable wedge state matching HailoRT, fw still rejects ch=2" follow-on to #682.
+
+**Ten additional hypotheses** were tested on hardware (`pi-5-1`) during that pass: channel-direction, seq=0, drop-pings, longer-settle, PMCSR cycle, MSI/polled-only, BAR4 padding, IOVA reachability, full-ring pre-program (hyp-X), and last-descriptor LIRQ clear (hyp-Y). All ten disconfirmed.
+
+**Two real wire divergences were found** (full-ring pre-program + LIRQ-clear) and corrected as defensive parity in PR [#1012](https://github.com/SLM-OS/SLM-Operating-System/pull/1012). Neither moved the wedge. They are kept in-tree because byte-parity with HailoRT is independently load-bearing for any future investigation.
+
+**The decisive new evidence** is the DMA-content byte-diff. Prior bisections had only proven the *wire* bytes (MMIO writes into BAR0/BAR2/BAR4) were byte-faithful between SLM-OS and HailoRT. The 2026-05-27 capture extended that to **host-RAM content read via DMA**: CCWS data at the cfg-channel IOVAs, and the full 256-byte boundary descriptor-list payloads (IN + OUT, all 32 slots each). Both byte-faithful to HailoRT. The wedge persists.
+
+This closes the host-observable surface area. Every byte SLM-OS hands to firmware — by MMIO write, by DMA read, in every order, with every observable timing — matches HailoRT. The firmware still refuses to advance `num_proc` on ch=2.
+
+**Remaining paths forward** (all external to the host-observable surface):
+
+- fw-memory inspection via BAR4 windowed reads — extend the PR #997 framework from BAR0/BAR2 to BAR4 and dump fw-internal state pre/post-load.
+- Hailo support escalation — present the byte-faithful evidence and request fw-side debug.
+- Live HailoRT decompilation / dynamic instrumentation under userspace gdb to capture the BAR-write sequence Linux uses for the same load.
+
+None of these can land before the SLM-OS capstone deadline. #1001 is closed and the chain accepted as the most thorough negative result the project can produce on host hardware alone.
 
 ## Reopen criteria
 
@@ -100,10 +123,10 @@ These hypotheses were investigated and **disproven** during the #682 bisection. 
 
 - Hailo publishes the BAR4 configuration protocol (or releases HailoRT source).
 - A new firmware revision exposes additional fw_control opcodes that complete channel binding.
-- A reverse-engineering effort produces a verified mapping from HailoRT operations to BAR4 writes.
+- A reverse-engineering effort produces a verified mapping from HailoRT operations to BAR4 writes **AND** demonstrates that replicating those writes alone unblocks the wedge. (Note: a partial RE attempt was made 2026-05-25 → 2026-05-28; producing byte-faithful host wire + DMA content was not sufficient — see §"Update 2026-05-28". A re-attempt that does not address what fw reads from BAR4 *itself* post-load will reproduce the same exhaustion.)
 - A different host runtime (not HailoRT) is observed completing MNIST inference on Hailo-8L using only documented interfaces.
 
-Mere "I have a new hypothesis about descriptor bytes / settle timing / channel state" is not sufficient — those have been exhaustively bisected and the surface area is closed.
+Mere "I have a new hypothesis about descriptor bytes / settle timing / channel state / wire ordering / DMA content" is not sufficient — those surfaces have been exhaustively bisected across two passes (the 2026-05-12 #682 chain and the 2026-05-28 #1001 chain) and are closed.
 
 ## Capture procedure for future Hailo investigations
 

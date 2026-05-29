@@ -1,5 +1,18 @@
 # Hailo DMA buffer content diff plan (#1001 follow-up)
 
+**Status (2026-05-28):** EXECUTED. SLM-OS side landed in PR
+[#1010](https://github.com/SLM-OS/SLM-Operating-System/pull/1010); the
+matching Linux `hailo_pci` patch landed cross-side during the same session.
+Capture ran 2026-05-27 on `pi-5-1` against HailoRT reference. Outcome:
+**CCWS payload + boundary IN/OUT descriptor-list payloads byte-faithful to
+HailoRT, wedge persists.** This was THE remaining host-observable test
+(see §"Definitive-ness of the result" below) — its conclusion exhausts
+the host-side surface area, and
+[#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) was
+closed 2026-05-28 on that basis. The plan below is retained as
+historical reference and as a template for any future DMA-content
+investigation.
+
 ## Why
 
 Every BAR0/BAR2/BAR4 MMIO write SLM-OS issues during MNIST load + first-frame
@@ -96,7 +109,7 @@ Companion deploy script at
 covers patch apply + DKMS rebuild + dump trigger + dmesg capture in
 one run.
 
-**Status: draft skeleton, deploy-pending.** Several field names
+**Status (originally drafted): draft skeleton, deploy-pending.** Several field names
 (`hailo_pcie_board.vdma.controller.file_context_list`,
 `hailo_descriptors_list_buffer.dma_address`, the per-fd context
 tracking inside the controller struct) are inferred from the .c files

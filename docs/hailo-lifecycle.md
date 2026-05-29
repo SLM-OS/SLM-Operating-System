@@ -929,16 +929,27 @@ chase the same ghosts.
 | hyp-T | VDM QoS programming on PCIe1 RC | **Confirmed** — implemented |
 | hyp-U/V/W | Bridge-error diagnostic + SCB0 widen | **Confirmed** — implemented |
 | hyp-X-1 | Pre-IN-submit IRQ drain | Disconfirmed |
-| hyp-X-3 | Boundary IN ch=2 wedge investigation | **Open — see #682** |
+| hyp-X-3 | Boundary IN ch=2 wedge investigation | **Closed exhausted — see #682 (2026-05-12) and #1001 (2026-05-28)** |
+| hyp-X (#1012) | Pre-program all 32 IN ring slots (HailoRT parity) | Disconfirmed on hardware; kept as defensive wire parity |
+| hyp-Y (#1012) | Clear LIRQ bit on last descriptor (HailoRT parity) | Disconfirmed on hardware; kept as defensive wire parity. Side-finding: clearing LIRQ also suppresses the spurious `event_id=0 ETHERNET_RX_ERROR` d2h notification (LIRQ side-effect, not a wedge signal). |
+| dma-content-diff | Host RAM that fw reads via DMA byte-faithful to HailoRT | Disconfirmed as cause — content matches, wedge persists (PR #1010, 2026-05-27) |
 
-The ch=2 wedge (hyp-X-3) is the current open issue. The host-side
-hypotheses (missing ioctl, wrong descriptor field values, partial vs
-full-ring bind, dynamic vs static bind, alternate interrupt-domain
-on launch) have all been eliminated; the wedge is in fw-side ch=2
-arm logic and currently sits with Hailo support.
+The ch=2 wedge (hyp-X-3) is closed exhausted across two passes. #682
+closed 2026-05-12 after the Linux-side fw_control kprobe showed
+HailoRT uses fw_control only for IDENTIFY and routes primary
+configuration through undocumented BAR4 mmap writes. #1001 closed
+2026-05-28 after a second-pass 10-hypothesis chain plus the
+DMA-content byte-diff proved every host-observable byte — MMIO wire,
+DMA descriptor list, DMA CCWS payload — matches HailoRT and the
+wedge still reproduces. Remaining attack surfaces are external to
+host-observable state (fw-memory BAR4 inspection, Hailo support
+escalation, HailoRT runtime decompilation). See
+`docs/hailo-protocol-architecture.md` §"Update 2026-05-28" for the
+full disconfirmation surface.
 
 ---
 
-*Last updated: 2026-05-10. Reflects the state of the codebase at
-PR #768 (`682/ushim-bind-parity` merged into main). Doc-review fixes
-applied in PR #771.*
+*Last updated: 2026-05-28. Second-pass closure of the ch=2 wedge
+(#1001) appended; §15 glossary expanded with hyp-X / hyp-Y / DMA
+content-diff outcomes. Original lifecycle text last revised 2026-05-10
+at PR #768 (`682/ushim-bind-parity`); doc-review fixes in PR #771.*

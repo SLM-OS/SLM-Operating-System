@@ -2,16 +2,20 @@
 
 **Target:** GeeekPi AI HAT+ (Hailo-8L, 13 TOPS) and AI HAT+ 26 TOPS (Hailo-8) on Raspberry Pi 5, end-to-end to running AI inference workloads from SLM-OS.
 
-**Status (2026-05-12):** Phase 0–7 software-complete. **Phase 8 CLOSED** —
-boundary-input submit blocker tracked in
-[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) was
-investigated to root cause and accepted as a Hailo-side architectural
-limit. SLM-OS gets ~90% through HEF load (last_err=0, all RPCs rc=0,
-descriptors bit-identical to HailoRT), but the final channel-to-inference
-binding lives in an undocumented direct-BAR4-write protocol that
-HailoRT (proprietary userspace) uses and that fw_control RPCs cannot
-fully reproduce. See `docs/hailo-protocol-architecture.md` for the
-empirical finding, vendor comparison, and reopen criteria.
+**Status (2026-05-28):** Phase 0–7 software-complete. **Phase 8 CLOSED
+(twice).** First closure 2026-05-12 ([#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682))
+when fw_control RPCs were proven sufficient for ~90% of HEF load but
+insufficient for the final channel-to-inference binding (Linux capture:
+HailoRT uses fw_control only for IDENTIFY; primary config goes through
+undocumented BAR4 mmap writes). Re-opened in spirit as
+[#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001), a
+second-pass disconfirmation chain (2026-05-25 → 2026-05-28) that proved
+every host-observable byte — MMIO wire, DMA descriptor list, DMA CCWS
+payload — byte-faithful to HailoRT. Wedge persists. #1001 closed
+exhausted 2026-05-28. See `docs/hailo-protocol-architecture.md`
+§"Update 2026-05-28" for the additional disconfirmation surface and
+§"Reopen criteria" for what the chain rules out for any future
+re-attempt.
 
 **Scope honesty (2026-04-24, audit F-04 / F-11):** The current Hailo
 backend should be characterized as a **Hailo-8L / MNIST bring-up
@@ -1567,4 +1571,65 @@ engineering effort under the §9 reopen criteria.
 
 ---
 
-*Last updated: 2026-05-12 (Phase 8 closed, #682 accepted as Hailo-side limit)*
+## 10. Phase 8 second-pass closure — 2026-05-28: DMA content also byte-faithful (#1001)
+
+After §9's 2026-05-12 closure of #682, [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001)
+tracked the downstream observation that even with every host-observable
+RPC and wire byte matching HailoRT, fw still refused to advance
+`num_proc` on the boundary IN channel. The chain re-opened the §9
+"reverse-engineering effort" reopen-criterion as scope.
+
+### What was tried in the second pass
+
+Ten further hypotheses, all tested on `pi-5-1` against a real
+HailoRT-reference capture:
+
+| # | Hypothesis | Outcome |
+|---|---|---|
+| 1 | Channel-index direction (PR #999) | FIX — required, but did not unwedge |
+| 2 | Replay corpus seq=0 vs seq=1 | DISPROVEN |
+| 3 | Drop pre-load CORE-CPU pings | DISPROVEN |
+| 4 | Longer post-BOOT_IRQ settle | DISPROVEN |
+| 5 | PMCSR cycle pre-load | DISPROVEN |
+| 6 | MSI fast-path vs polled completion | DISPROVEN (both wedge) |
+| 7 | BAR4 padding / mirror writes | DISPROVEN |
+| 8 | IOVA reachability (0x100xxx range) | DISCONFIRMED — fw DOES read CCWS at our IOVAs (ch=0 proc=0x006e006d) |
+| 9 | IN ring full pre-program (hyp-X, PR #1012) | DISPROVEN (kept as defensive parity) |
+| 10 | Last-descriptor LIRQ clear (hyp-Y, PR #1012) | DISPROVEN (side-finding: clearing LIRQ also suppresses the spurious `event_id=0 ETHERNET_RX_ERROR` d2h notification, which is a fw side-effect of LIRQ, not a wedge signal) |
+
+### The decisive new evidence
+
+The 2026-05-27 DMA-content byte-diff — planned in
+`docs/hailo-dma-content-diff-plan.md`, executed via PR
+[#1010](https://github.com/SLM-OS/SLM-Operating-System/pull/1010)
+(SLM-OS side) and the matching Linux `hailo_pci` patch — extended
+parity checking from the *wire* (MMIO writes) to the *host RAM that
+fw reads via DMA*:
+
+- CCWS payload at the cfg-channel IOVAs: byte-faithful.
+- Boundary IN descriptor-list payload (16 B × 32 slots = 512 B): byte-faithful.
+- Boundary OUT descriptor-list payload (16 B × 32 slots = 512 B): byte-faithful.
+
+Wedge persists. This is the most comprehensive negative result the
+project can produce on host hardware alone — every byte SLM-OS hands
+to firmware, by any observable path, matches HailoRT.
+
+### Where this leaves the project
+
+Phases 6 and 7 remain deferred. The chain is now exhausted across
+both passes (#682 → #1001). Remaining attack surfaces are all
+external to host-observable state: fw-memory BAR4 inspection
+(extending the PR #997 framework), Hailo vendor escalation, or
+HailoRT runtime decompilation. None are in scope before the
+capstone deadline.
+
+The Phase 8 work is presentable as a capstone result on its own
+terms — a multi-month bring-up against a fully-closed accelerator
+producing byte-faithful wire + DMA conformance to the vendor
+runtime, with a precisely characterized fw-side limit. See
+`docs/hailo-protocol-architecture.md` for the full architectural
+finding.
+
+---
+
+*Last updated: 2026-05-28 (Phase 8 second-pass closure, #1001 closed; DMA-content byte-diff exhausted)*
