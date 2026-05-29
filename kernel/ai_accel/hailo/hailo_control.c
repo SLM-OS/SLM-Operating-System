@@ -36,12 +36,13 @@
  *   on a quiet device. A future MSI path can route each source
  *   separately.
  *
- * - Concurrency: the transport is protected by a spinlock. Today
- *   all callers live on CPU 0 (shell command `hailo fw`), but
- *   future inference submit from an AI scheduler policy could
- *   call from any CPU, and the three statics below (sequence
- *   counter, IRQ-armed flag, on-stack-too-large req/resp buffers)
- *   are shared. Taking the lock also sequences request/response
+ * - Concurrency: the transport is protected by a pi_mutex (#332,
+ *   2026-05-29; originally a plain spinlock). Today all callers live
+ *   on CPU 0 (shell command `hailo fw`), but future inference submit
+ *   from an AI scheduler policy could call from any CPU, and the three
+ *   statics below (sequence counter, IRQ-armed flag, on-stack-too-large
+ *   req/resp buffers) are shared. Taking the lock also sequences
+ *   request/response
  *   round-trips against the firmware, which only services one
  *   control-channel command at a time.
  */
@@ -53,7 +54,10 @@
 #include "hef_parser.h"
 #include "debug.h"
 #include "md5.h"
+#include "pi_mutex.h"
+#include "sched.h"
 #include "spinlock.h"
+#include "task.h"
 #include "uart.h"
 #include <stddef.h>
 #include <string.h>
@@ -99,13 +103,45 @@ static inline uint32_t control_next_sequence(void)
 /*
  * Serializes the whole transport: sequence counter, IRQ-armed flag,
  * the static req/resp wire buffers, and the round-trip against
- * firmware (which services one control command at a time). Plain
- * `spin_lock` — NOT `spin_lock_irqsave` — because wait_for_response
- * polls for up to `timeout_us` and holding IRQs off that long would
- * starve the timer tick. No IRQ handler takes this lock, so the
- * non-irqsave form is safe.
+ * firmware (which services one control command at a time).
+ *
+ * pi_mutex — NOT a spinlock — because wait_for_response now sleeps the
+ * calling task during the up-to-timeout_us wait for fw to respond (see
+ * `wait_for_response_blocking` for the MSI-driven wakeup design, #332).
+ * Sleeping under a plain spinlock would deadlock (CLAUDE.md
+ * "Concurrency"); pi_mutex's wait queue is the correct primitive for a
+ * sleep-capable critical section. Concurrent RPC callers FIFO on the
+ * mutex's wait queue and get priority inheritance for free.
+ *
+ * All RPC traffic flows from post-scheduler contexts (shell, Lua, AI
+ * scheduler hooks). hailo_init / hailo_probe at boot do platform reads
+ * but do not enter hailo_control_send_recv_*, so there is no pre-
+ * scheduler caller to fall back for. A `task_current()` check inside
+ * wait_for_response defensively returns the legacy polling path if the
+ * invariant is ever violated; the lock acquire itself (pi_mutex_lock)
+ * would also fail loudly via the underlying schedule() if `task_current`
+ * were NULL.
  */
-static spinlock_t control_lock = SPINLOCK_INIT;
+static pi_mutex_t control_lock = PI_MUTEX_INIT;
+
+/*
+ * #332 wait-queue state. Single-waiter slot — control_lock serializes
+ * RPC submit end-to-end, so at most one task is ever blocked on a
+ * response. The MSI handler sets `control_msi_pending` and then,
+ * under `control_waiter_lock`, reads `control_waiter` and calls
+ * `task_sleep_wake()` to short-circuit the sleep.
+ *
+ * Lost-wakeup avoidance: the waiter writes `control_waiter = self`
+ * UNDER `control_waiter_lock` and re-checks `control_msi_pending` in
+ * the same critical section before sleeping. If MSI fires between the
+ * lock release and `task_sleep_ms` entry, task_sleep_wake observes
+ * the not-yet-sleeping task and sets TASK_FLAG_WAKEUP_PENDING — the
+ * upcoming task_sleep_ms consumes the flag and returns immediately
+ * without blocking. See `task_sleep_wake` doc-comment for the
+ * generic primitive backing this.
+ */
+static struct task *control_waiter = NULL;
+static spinlock_t   control_waiter_lock = SPINLOCK_INIT;
 
 /*
  * Build the on-wire request bytes: [md5(16)][buffer_len(4)][payload].
@@ -226,6 +262,20 @@ static void control_msi_handler(void *ctx)
 
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
+        /* #332 wake any task blocked in wait_for_response. The
+         * waiter pointer is read under control_waiter_lock; the
+         * task_sleep_wake call itself is IRQ-safe (takes
+         * sleep_queue_lock with spin_lock_irqsave). If no task is
+         * registered, control_waiter is NULL and the call is a
+         * no-op — the polling-fallback path will still observe the
+         * pending flag on its next iteration. */
+        struct task *w;
+        irq_flags_t  wflags = spin_lock_irqsave(&control_waiter_lock);
+        w = control_waiter;
+        spin_unlock_irqrestore(&control_waiter_lock, wflags);
+        if (w) {
+            task_sleep_wake(w);
+        }
     }
 
     /* FW_NOTIFICATION_IRQ: fw posted an event to the D2H
@@ -265,7 +315,7 @@ static void control_msi_handler(void *ctx)
  * Either path returns HAILO_OK as soon as the firmware-control
  * signal appears, or HAILO_ERR_TIMEOUT after `timeout_us`.
  */
-static int wait_for_response(uint32_t timeout_us)
+static int wait_for_response_polling(uint32_t timeout_us)
 {
     const uint32_t poll_interval_us = 100;
     uint32_t elapsed = 0;
@@ -306,6 +356,105 @@ static int wait_for_response(uint32_t timeout_us)
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
     }
+    return HAILO_ERR_TIMEOUT;
+}
+
+/* #332 blocking-wait poll granularity. The outer wait loop sleeps
+ * this long between checks; the MSI handler's task_sleep_wake call
+ * short-circuits the sleep, so this is the worst-case wake latency
+ * on platforms without real MSI delivery (test mocks, future
+ * polled-only ports) and also the worst-case "MSI fired but we just
+ * read the flag" miss-window upper bound.
+ *
+ * 1ms is comfortably above the scheduler-tick granularity on every
+ * supported platform and negligible compared to the typical 100ms-10s
+ * RPC timeouts. Smaller values waste schedule() round-trips; larger
+ * values regress test-stub paths where no MSI fires. */
+#define HAILO_CONTROL_BLOCKING_POLL_MS 1u
+
+/*
+ * #332 blocking response wait. The waiter (calling task) sleeps via
+ * task_sleep_ms in 1ms slices; the MSI handler short-circuits the
+ * sleep via task_sleep_wake (so MSI-armed paths achieve sub-ms wake
+ * latency in practice). control_lock (pi_mutex) is held throughout —
+ * the wait is allowed to sleep because pi_mutex is sleep-safe.
+ *
+ * The sleep is split into 1ms slices rather than one long
+ * task_sleep_ms(timeout_ms) so that platforms without working MSI
+ * (test mocks, or any hardware path where the IRQ never makes it
+ * to the handler) still observe firmware completion through the
+ * polled ISTATUS read at the top of each iteration. On the real Pi 5
+ * MSI path, task_sleep_wake makes the slice loop trivial — the first
+ * sleep returns immediately when the IRQ lands.
+ *
+ * Race-close ordering for the MSI fast-path:
+ *   1. Each iteration begins with an atomic check of
+ *      `control_msi_pending`; if set, consume and return.
+ *   2. Under `control_waiter_lock`: publish `control_waiter = self`,
+ *      then release the lock and sleep. If MSI fires between publish
+ *      and sleep entry, task_sleep_wake observes the not-yet-sleeping
+ *      task and sets TASK_FLAG_WAKEUP_PENDING; the upcoming
+ *      task_sleep_ms consumes the flag and returns immediately.
+ *   3. On wake: clear `control_waiter`, re-check pending and ISTATUS.
+ *
+ * Callers without task context (pre-scheduler boot path) fall back
+ * to wait_for_response_polling; no such callers exist today (see
+ * control_lock comment) but the gate is kept defensive.
+ */
+static int wait_for_response(uint32_t timeout_us)
+{
+    /* Defensive: if the scheduler isn't up or there's no task context
+     * to sleep, fall back to the udelay-polled path. */
+    if (!scheduler_is_initialized()) {
+        return wait_for_response_polling(timeout_us);
+    }
+    struct task *self = task_current();
+    if (!self) {
+        return wait_for_response_polling(timeout_us);
+    }
+
+    uint32_t elapsed_us = 0;
+    const uint32_t poll_us = HAILO_CONTROL_BLOCKING_POLL_MS * 1000u;
+
+    while (elapsed_us < timeout_us) {
+        /* (1) MSI fast-path check. */
+        if (__atomic_load_n(&control_msi_pending, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
+            return HAILO_OK;
+        }
+        /* (1a) polled ISTATUS check — covers MSI-less platforms (test
+         * mock, any future port without register_irq) AND defends
+         * against a missed MSI on real hardware. */
+        uint32_t istatus = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                                  HAILO_BCS_ISTATUS_HOST);
+        if (istatus != 0) {
+            if (istatus & HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT) {
+                hailo_fw_handle_d2h_notification(false);
+            }
+            hailo_platform->write32(HAILO_BAR_CONFIG,
+                                    HAILO_BCS_ISTATUS_HOST, istatus);
+            if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
+                return HAILO_OK;
+            }
+        }
+
+        /* (2) publish waiter + sleep. The publish happens under the
+         * waiter lock so a racing MSI handler always sees a consistent
+         * pointer. */
+        irq_flags_t flags = spin_lock_irqsave(&control_waiter_lock);
+        control_waiter = self;
+        spin_unlock_irqrestore(&control_waiter_lock, flags);
+
+        task_sleep_ms(HAILO_CONTROL_BLOCKING_POLL_MS);
+
+        /* (3) waiter cleanup before the next iteration's checks. */
+        flags = spin_lock_irqsave(&control_waiter_lock);
+        control_waiter = NULL;
+        spin_unlock_irqrestore(&control_waiter_lock, flags);
+
+        elapsed_us += poll_us;
+    }
+
     return HAILO_ERR_TIMEOUT;
 }
 
@@ -769,13 +918,6 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 control_req_wire);
     }
 
-    /* TODO(#332): wait_for_response is a udelay-polled busy wait.
-     * For #281 tier-1 (shell-driven IDENTIFY) this is fine — the
-     * lone caller on CPU 0 just waits. For Phase 5.3+ inference
-     * submit, this should either yield() between polls or route
-     * through the future MSI path so CPU 0 isn't burned for up to
-     * a full timeout_us. Picked up during Phase 7 — surface via
-     * `gh issue list --label sub:ai-runtime`. */
     int rc = wait_for_response(timeout_us);
     if (rc != HAILO_OK) goto out;
 
@@ -850,10 +992,11 @@ out:
 
 /*
  * Public send/receive entry point. Validates, takes control_lock,
- * dispatches to the locked core, releases. No IRQ handler takes
- * this lock, so plain spin_lock — not spin_lock_irqsave — is
- * correct; irqsave is deliberately avoided so wait_for_response
- * can poll for up to timeout_us without starving the timer tick.
+ * dispatches to the locked core, releases. control_lock is a
+ * pi_mutex (#332): wait_for_response sleeps the calling task during
+ * the firmware response wait, and the MSI handler short-circuits the
+ * sleep via task_sleep_wake. pi_mutex's wait queue handles concurrent
+ * RPC callers FIFO; priority inheritance is automatic.
  */
 int hailo_control_send_recv(const void *req_payload,
                             uint32_t    req_len,
@@ -881,12 +1024,12 @@ int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
                                              resp_len);
     if (rc != HAILO_OK) return rc;
 
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
     rc = hailo_control_send_recv_locked(cpu_id,
                                         req_payload, req_len,
                                         resp_payload, resp_capacity,
                                         resp_len, timeout_us);
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -1077,7 +1220,7 @@ static int control_write_memory_chunk(uint32_t address,
                                       uint32_t chunk_size)
 {
     /* Lock spans populate + I/O so the static scratch isn't raced. */
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     control_mem_write_req.common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
     control_mem_write_req.common.flags    = 0;
@@ -1106,7 +1249,7 @@ static int control_write_memory_chunk(uint32_t address,
                                             &resp, sizeof(resp), &resp_len,
                                             /* 1 s */ 1000000u);
     }
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     if (rc != HAILO_OK) return rc;
 
     return control_check_response_header(&resp, resp_len,
@@ -1161,7 +1304,7 @@ static int control_read_memory_chunk(uint32_t address,
                                      uint8_t *data,
                                      uint32_t chunk_size)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     control_mem_read_req.common.version    = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
     control_mem_read_req.common.flags      = 0;
@@ -1194,7 +1337,7 @@ static int control_read_memory_chunk(uint32_t address,
      * out of it before another chunk runs. Snapshot length fields
      * and copy out under the lock. */
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1211,7 +1354,7 @@ static int control_read_memory_chunk(uint32_t address,
                                        HAILO_CONTROL_OPCODE_READ_MEMORY,
                                        "READ_MEMORY");
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1223,18 +1366,18 @@ static int control_read_memory_chunk(uint32_t address,
     if (resp_len < fixed + chunk_size) {
         WARN("hailo: READ_MEMORY response short (%u < %u)",
              resp_len, fixed + chunk_size);
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return HAILO_ERR_BAD_FIRMWARE;
     }
     uint32_t data_length = hailo_be32_to_cpu(control_mem_read_resp.data_length);
     if (data_length != chunk_size) {
         WARN("hailo: READ_MEMORY returned %u bytes, expected %u",
              data_length, chunk_size);
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return HAILO_ERR_BAD_FIRMWARE;
     }
     memcpy(data, control_mem_read_resp.data, chunk_size);
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return HAILO_OK;
 }
 
@@ -1436,7 +1579,7 @@ int hailo_control_config_stream_pcie(
      * needed. We just forbid absurd pcie_channel_index values. */
     if (cfg->pcie_channel_index >= 16) return HAILO_ERR_INVAL;
 
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     uint32_t variant_len;
     if (cfg->is_input) {
@@ -1514,7 +1657,7 @@ int hailo_control_config_stream_pcie(
                                             /* 1 s */ 1000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1526,18 +1669,18 @@ int hailo_control_config_stream_pcie(
                                        HAILO_CONTROL_OPCODE_CONFIG_STREAM,
                                        "CONFIG_STREAM");
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
     if (resp_len < sizeof(control_config_stream_resp)) {
         WARN("hailo: CONFIG_STREAM response short (%u < %u)",
              resp_len, (unsigned)sizeof(control_config_stream_resp));
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return HAILO_ERR_BAD_FIRMWARE;
     }
     *out_dataflow_manager_id = control_config_stream_resp.dataflow_manager_id;
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return HAILO_OK;
 }
 
@@ -1599,7 +1742,7 @@ int hailo_control_set_network_group_header(
     if (!header) return HAILO_ERR_INVAL;
     if (header->config_channels_count > HAILO_CS_MAX_CFG_CHANNELS) return HAILO_ERR_INVAL;
 
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_set_ngh_req_wire *r = &control_set_ngh_req;
     memset(r, 0, sizeof(*r));
@@ -1647,7 +1790,7 @@ int hailo_control_set_network_group_header(
                                             /* 1 s */ 1000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1656,7 +1799,7 @@ int hailo_control_set_network_group_header(
     rc = control_check_response_header(&hdr_copy, resp_len,
                                        HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER,
                                        "SET_NETWORK_GROUP_HEADER");
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -1713,7 +1856,7 @@ int hailo_control_set_context_info_chunk(
     if (network_data_len > HAILO_CS_CONTEXT_CHUNK_MAX_BYTES) return HAILO_ERR_INVAL;
     if (network_data_len > 0 && !network_data) return HAILO_ERR_INVAL;
 
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_set_ctx_info_req_wire *r = &control_set_ctx_info_req;
     memset(&r->prefix, 0, sizeof(r->prefix));
@@ -1766,7 +1909,7 @@ int hailo_control_set_context_info_chunk(
                                             /* 10 s */ 10000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1775,7 +1918,7 @@ int hailo_control_set_context_info_chunk(
     rc = control_check_response_header(&hdr_copy, resp_len,
                                        HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO,
                                        "SET_CONTEXT_INFO");
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -1816,7 +1959,7 @@ int hailo_control_change_context_switch_status(
     uint16_t            dynamic_batch_size,
     uint16_t            batch_count)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_change_status_req_wire *r = &control_change_status_req;
     memset(r, 0, sizeof(*r));
@@ -1850,7 +1993,7 @@ int hailo_control_change_context_switch_status(
                                             /* 1 s */ 1000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1859,7 +2002,7 @@ int hailo_control_change_context_switch_status(
     rc = control_check_response_header(&hdr_copy, resp_len,
                                        HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS,
                                        "CHANGE_CONTEXT_SWITCH_STATUS");
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -1929,7 +2072,7 @@ static int control_send_empty_body_core_rpc(uint32_t opcode,
                                             size_t resp_buf_size,
                                             uint32_t *out_resp_len)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     memset(req, 0, sizeof(*req));
     req->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
@@ -1950,7 +2093,7 @@ static int control_send_empty_body_core_rpc(uint32_t opcode,
                                             /* 1 s */ 1000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -1960,7 +2103,7 @@ static int control_send_empty_body_core_rpc(uint32_t opcode,
     if (rc == HAILO_OK && out_resp_len) {
         *out_resp_len = resp_len;
     }
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -2028,7 +2171,7 @@ static struct hailo_cs_device_info_resp_wire control_device_info_resp;
 
 int hailo_control_get_device_information(uint32_t *out_response_len)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_empty_req_wire *r = &control_device_info_req;
     memset(r, 0, sizeof(*r));
@@ -2052,7 +2195,7 @@ int hailo_control_get_device_information(uint32_t *out_response_len)
                                             /* 1 s */ 1000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -2062,7 +2205,7 @@ int hailo_control_get_device_information(uint32_t *out_response_len)
                                        HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION,
                                        "GET_DEVICE_INFORMATION");
     if (rc == HAILO_OK && out_response_len) *out_response_len = resp_len;
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -2124,7 +2267,7 @@ int hailo_control_run_bist_test(bool     is_top_test,
                                 uint32_t out_resp_cap,
                                 uint32_t *out_resp_len)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_run_bist_req_wire *r = &control_run_bist_req;
     memset(r, 0, sizeof(*r));
@@ -2163,7 +2306,7 @@ int hailo_control_run_bist_test(bool     is_top_test,
                                             /* 5 s */ 5000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -2188,7 +2331,7 @@ int hailo_control_run_bist_test(bool     is_top_test,
             *out_resp_len = 0;
         }
     }
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 
@@ -2310,7 +2453,7 @@ int hailo_control_change_hw_infer_status(
     uint16_t                          batch_count,
     enum hailo_boundary_channel_mode  boundary_mode)
 {
-    spin_lock(&control_lock);
+    pi_mutex_lock(&control_lock);
 
     struct hailo_cs_change_hw_infer_status_req_wire *r = &control_change_hw_infer_req;
     memset(r, 0, sizeof(*r));
@@ -2352,7 +2495,7 @@ int hailo_control_change_hw_infer_status(
                                              * acking */ 5000000u);
     }
     if (rc != HAILO_OK) {
-        spin_unlock(&control_lock);
+        pi_mutex_unlock(&control_lock);
         return rc;
     }
 
@@ -2361,7 +2504,7 @@ int hailo_control_change_hw_infer_status(
     rc = control_check_response_header(&hdr_copy, resp_len,
                                        HAILO_CONTROL_OPCODE_CHANGE_HW_INFER_STATUS,
                                        "CHANGE_HW_INFER_STATUS");
-    spin_unlock(&control_lock);
+    pi_mutex_unlock(&control_lock);
     return rc;
 }
 

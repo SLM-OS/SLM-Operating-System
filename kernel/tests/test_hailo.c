@@ -93,6 +93,13 @@ static uint32_t mock_trigger_writes;
  * body here; the mock's bar4_write doorbell-handler picks it up. */
 #define MOCK_CONTROL_RESP_MAX 512
 static bool     mock_fw_sim_control_enabled;
+/* #332: when true, the simulator returns silently from the no-canned-
+ * response path so wait_for_response runs to its full timeout (real
+ * wall clock under the blocking wait). Used by tests that explicitly
+ * exercise the timeout code path. Default false — boot-path IDENTIFY
+ * and similar "no response was wired" cases get a fast malformed
+ * response so the test budget isn't eaten by wall-clock timeouts. */
+static bool     mock_fw_sim_force_silent_timeout;
 static uint8_t  mock_fw_sim_control_resp[MOCK_CONTROL_RESP_MAX];
 static uint32_t mock_fw_sim_control_resp_len;
 static uint32_t mock_control_doorbells;
@@ -207,6 +214,7 @@ static void mock_reset(void)
     mock_init_calls  = 0;
     mock_fw_sim_enabled = true;
     mock_fw_sim_set_atr1_magic = true;
+    mock_fw_sim_force_silent_timeout = false;
     mock_trigger_writes = 0;
     mock_fw_sim_control_enabled = false;
     memset(mock_fw_sim_control_resp, 0, sizeof(mock_fw_sim_control_resp));
@@ -611,8 +619,35 @@ static void mock_simulate_fw_control_response(void)
             && mock_fw_sim_control_resp_len != 0) {
         body_len = mock_fw_sim_control_resp_len;
         body     = mock_fw_sim_control_resp;
+    } else if (mock_fw_sim_force_silent_timeout) {
+        /* Test explicitly wants to exercise the timeout path. Return
+         * silently so wait_for_response polls / sleeps to its full
+         * timeout. The 3 timeout-test cases keep this semantic. */
+        return;
     } else {
-        /* No canned response, no smart handler — nothing to emit. */
+        /* No canned response, no smart handler — emit nothing into
+         * the response buffer, but still raise the FW_CONTROL_BIT in
+         * ISTATUS and fire the MSI handler. This matches a "fw
+         * responded with a malformed header" path: the wait_for_response
+         * sees the IRQ and returns OK; the caller's response_header
+         * check sees buffer_len=0 and bails out with BAD_FIRMWARE. Pre-
+         * #332 the simulator returned silently here and the wait timed
+         * out by busy-spinning udelay (which is a no-op on the mock,
+         * so the timeout was microseconds). #332 swapped wait_for_response
+         * to a task_sleep_ms-based loop, where the timeout becomes
+         * real wall-clock and dominates the test budget unless we
+         * short-circuit it. Either failure shape is fine for the
+         * boot path (rc != HAILO_OK both ways, hailo_post_boot_verify_identify
+         * just WARNs and continues); BAD_FIRMWARE is also the closer
+         * match to actual fw behaviour than TIMEOUT — fw doesn't go
+         * silent when it doesn't recognise an opcode, it returns an
+         * error frame. Tests that explicitly want the timeout shape
+         * (e.g. test_control_identify_timeout_no_response) set
+         * mock_fw_sim_force_silent_timeout = true to override. */
+        uint32_t istatus = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+        memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST], &istatus,
+               sizeof(istatus));
+        mock_msi_invoke();
         return;
     }
 
@@ -642,6 +677,17 @@ static void mock_simulate_fw_control_response(void)
      * the test (or worse, let it consume the wrong event). */
     uint32_t istatus = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
     memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST], &istatus, sizeof(istatus));
+
+    /* #332: real fw also raises an MSI when it sets ISTATUS.
+     * Without this, the #332 blocking wait would task_sleep_ms its
+     * full timeout — observable in wall-clock test budget — because
+     * the polled-ISTATUS fast-path inside the wait runs only once
+     * per 1ms sleep iteration. Invoking the MSI handler matches
+     * real-hardware semantics and short-circuits the wait. The
+     * handler reads ISTATUS_HOST itself, ACKs (W1C) the bit, and
+     * sets control_msi_pending — leaving the same observable state
+     * the polled path would have produced, just faster. */
+    mock_msi_invoke();
 }
 
 static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
@@ -1897,11 +1943,12 @@ static void test_control_identify_timeout_no_response(void)
      * the mock never writes a response and never sets ISTATUS.
      * hailo_control_send_recv should time out.
      *
-     * Use a very small response body to pass the preamble and
-     * land in the poll loop quickly; leaving mock_fw_sim_control_
-     * enabled == false means mock_simulate_fw_control_response
-     * returns early without writing anything. */
+     * mock_fw_sim_force_silent_timeout = true keeps the
+     * simulator's no-canned-response path silent (no ISTATUS, no
+     * MSI), so the new #332 blocking wait runs to its full
+     * timeout exactly like the old polling path did. */
     mock_fw_sim_control_enabled = false;
+    mock_fw_sim_force_silent_timeout = true;
 
     struct hailo_control_identify_response resp;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
@@ -4752,8 +4799,11 @@ static void test_control_identify_ignores_non_fw_control_irq(void)
 
     /* Leave the control simulator disabled — the real FW_CONTROL
      * bit never fires, so the transport must time out even after
-     * observing the notification. */
+     * observing the notification. mock_fw_sim_force_silent_timeout
+     * keeps the simulator silent so the wait runs to its full
+     * timeout under the #332 blocking-wait path. */
     mock_fw_sim_control_enabled = false;
+    mock_fw_sim_force_silent_timeout = true;
 
     struct hailo_control_identify_response resp;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
@@ -6928,8 +6978,11 @@ static void test_control_config_stream_output_variant(void)
 static void test_control_config_stream_timeout_no_response(void)
 {
     control_setup_running();
-    /* Neither sim enabled: doorbell fires, nothing responds. */
+    /* Neither sim enabled: doorbell fires, nothing responds.
+     * mock_fw_sim_force_silent_timeout keeps the simulator silent so
+     * the #332 blocking wait runs to its full timeout. */
     mock_fw_sim_config_stream_enabled = false;
+    mock_fw_sim_force_silent_timeout = true;
 
     struct hailo_stream_pcie_config cfg;
     make_default_pcie_cfg(&cfg, true);
