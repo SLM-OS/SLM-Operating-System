@@ -739,7 +739,12 @@ static void  mock_cache_invalidate(void *a, size_t n)
 static void  mock_mb(void)                             {}
 /* #330: counter so test_msi_fast_path_short_circuits_polling can
  * verify wait_for_response returned via the MSI pending flag without
- * entering any udelay-based polling iteration. */
+ * entering any udelay-based polling iteration. File-scope and not
+ * reset between tests — currently consulted by exactly one test
+ * (which resets to 0 before its own assertion). If a future test
+ * wants to assert on udelay behavior too, add a `mock_udelay_calls
+ * = 0;` reset in its setup or move the counter into a shared
+ * `reset_mock_counters()` helper. */
 static uint32_t mock_udelay_calls = 0;
 static void  mock_udelay(uint32_t u)                   { (void)u; mock_udelay_calls++; }
 
@@ -2693,7 +2698,14 @@ static void test_msi_fast_path_short_circuits_polling(void)
     mock_fw_sim_control_enabled  = true;
 
     /* Prime: one IDENTIFY first so the MSI handler is registered,
-     * matching the lazy-registration pattern in hailo_control.c.
+     * matching the lazy-registration pattern in hailo_control.c
+     * (the handler is registered on the FIRST control send, not at
+     * backend init). If that contract ever changes — e.g. the
+     * handler is registered earlier at probe time — this prime call
+     * becomes a no-op rather than a contract test; rewrite this
+     * test to assert "first send registers MSI" directly via
+     * `mock_register_irq_calls` if the lazy-registration intent is
+     * what's being verified.
      * Reset the udelay counter AFTER this prime call so the test's
      * delta starts from zero. */
     struct hailo_control_identify_response prime_resp;
