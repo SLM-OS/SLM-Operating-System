@@ -686,7 +686,15 @@ static void mock_simulate_fw_control_response(void)
      * real-hardware semantics and short-circuits the wait. The
      * handler reads ISTATUS_HOST itself, ACKs (W1C) the bit, and
      * sets control_msi_pending — leaving the same observable state
-     * the polled path would have produced, just faster. */
+     * the polled path would have produced, just faster.
+     *
+     * NB: this runs synchronously on the caller's task stack — on
+     * real hardware the MSI would arrive through GIC into an ISR.
+     * The handler is structured to be IRQ-safe (spin_lock_irqsave
+     * throughout, no allocations, no sleeping locks), so the
+     * synchronous test invocation exercises the same code path the
+     * ISR would. task_sleep_wake's IRQ-safety contract is what makes
+     * this work in both contexts. */
     mock_msi_invoke();
 }
 

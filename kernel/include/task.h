@@ -39,6 +39,14 @@
  * by task_sleep_ms before it would have slept. Closes the wake-before-
  * sleep race in the hailo control wait-queue (and any future consumer).
  *
+ * The `flags` field is a `uint8_t`. Permanent-bit set-once-at-creation
+ * (TASK_FLAG_IDLE) and lock-protected transient bits (TASK_FLAG_WAKEUP_PENDING)
+ * coexist because the only concurrent reader of permanent bits checks a
+ * bit that's never modified post-creation. **Any future transient flag
+ * must hold sleep_queue_lock (or equivalent) for both set and clear so
+ * the byte-level RMW does not race a concurrent writer.** Migrating to
+ * atomic bit ops becomes necessary if mixed lock disciplines appear.
+ *
  * New flags MUST document their lifecycle here. Permanent vs transient is
  * not a uniform property of this field. */
 #define TASK_FLAG_IDLE             (1u << 0)   /* per-CPU perpetual idle task */
@@ -505,8 +513,9 @@ void task_wake_sleepers(void);
  * blocking. This closes the wake-before-sleep race.
  *
  * Safe to call from IRQ context (the sleep_queue_lock is acquired with
- * spin_lock_irqsave). Safe to call when the scheduler is not initialized
- * (the task pointer check returns no-op).
+ * spin_lock_irqsave). Caller is responsible for `t` being a live task
+ * pointer; passing NULL is a no-op, but a stale pointer is undefined
+ * behaviour.
  *
  * Originally added to back hailo_control's MSI-driven response wakeup;
  * any consumer that needs to short-circuit a sleeper from outside that

@@ -42,9 +42,8 @@
  *   from an AI scheduler policy could call from any CPU, and the three
  *   statics below (sequence counter, IRQ-armed flag, on-stack-too-large
  *   req/resp buffers) are shared. Taking the lock also sequences
- *   request/response
- *   round-trips against the firmware, which only services one
- *   control-channel command at a time.
+ *   request/response round-trips against the firmware, which only
+ *   services one control-channel command at a time.
  */
 
 #include "hailo.h"
