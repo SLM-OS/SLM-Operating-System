@@ -26,9 +26,23 @@
 #define TASK_PRIORITY_MAX       7
 #define TASK_PRIORITY_MIN       0
 
-/* Task flags (struct task::flags). Set once at task creation; never
- * cleared. Currently only TASK_FLAG_IDLE is defined (#200, 2026-05-03). */
-#define TASK_FLAG_IDLE          (1u << 0)   /* per-CPU perpetual idle task */
+/* Task flags (struct task::flags).
+ *
+ * TASK_FLAG_IDLE (#200, 2026-05-03) is the original write-once-at-creation
+ * bit and remains that shape: set on the per-CPU idle task at creation,
+ * never cleared.
+ *
+ * TASK_FLAG_WAKEUP_PENDING (#332, 2026-05-29) is a transient state bit
+ * manipulated under sleep_queue_lock by task_sleep_ms / task_sleep_wake.
+ * Set by task_sleep_wake when it tries to wake a task that hasn't yet
+ * entered task_sleep_ms's enqueue critical section; consumed and cleared
+ * by task_sleep_ms before it would have slept. Closes the wake-before-
+ * sleep race in the hailo control wait-queue (and any future consumer).
+ *
+ * New flags MUST document their lifecycle here. Permanent vs transient is
+ * not a uniform property of this field. */
+#define TASK_FLAG_IDLE             (1u << 0)   /* per-CPU perpetual idle task */
+#define TASK_FLAG_WAKEUP_PENDING   (1u << 1)   /* task_sleep_wake fired pre-sleep */
 
 /* Task states */
 typedef enum {
@@ -476,6 +490,30 @@ void task_sleep_ms(uint32_t ms);
  * implementation lives in kernel/sched/task_sleep.c (#319).
  */
 void task_wake_sleepers(void);
+
+/*
+ * Early-wake a specific task that is currently in task_sleep_ms (#332).
+ *
+ * If `t` is on the sleep queue, removes it, transitions to TASK_READY,
+ * and re-adds it to its assigned CPU's run queue — same shape as a
+ * deadline-expiry wake but for an arbitrary task at any time.
+ *
+ * If `t` is NOT on the sleep queue (because it has not yet entered
+ * task_sleep_ms's enqueue critical section, or has already woken via
+ * deadline expiry), sets TASK_FLAG_WAKEUP_PENDING. The next task_sleep_ms
+ * call by `t` sees the flag, clears it, and returns immediately without
+ * blocking. This closes the wake-before-sleep race.
+ *
+ * Safe to call from IRQ context (the sleep_queue_lock is acquired with
+ * spin_lock_irqsave). Safe to call when the scheduler is not initialized
+ * (the task pointer check returns no-op).
+ *
+ * Originally added to back hailo_control's MSI-driven response wakeup;
+ * any consumer that needs to short-circuit a sleeper from outside that
+ * task's context can use this. Each consumer is responsible for its
+ * own "is this *my* waiter" matching — task_sleep_wake is generic.
+ */
+void task_sleep_wake(struct task *t);
 
 /*
  * Initialize sleep-queue state. Called once from scheduler_init.

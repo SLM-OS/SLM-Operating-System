@@ -78,6 +78,16 @@ void task_sleep_ms(uint32_t ms)
     uint64_t deadline = timer_get_count() + (freq / 1000) * (uint64_t)ms;
 
     irq_flags_t flags = spin_lock_irqsave(&sleep_queue_lock);
+    /* #332: race-close check. If task_sleep_wake fired between this
+     * task's caller deciding to sleep and reaching here, the wake
+     * lands on TASK_FLAG_WAKEUP_PENDING (the task wasn't on the
+     * sleep queue yet for the wake to remove). Consume the flag and
+     * skip the actual sleep — the caller's condition is already met. */
+    if (self->flags & TASK_FLAG_WAKEUP_PENDING) {
+        self->flags &= (uint8_t)~TASK_FLAG_WAKEUP_PENDING;
+        spin_unlock_irqrestore(&sleep_queue_lock, flags);
+        return;
+    }
     self->wake_time_ns = deadline;
     sleep_queue_add_locked(self);
     self->state = TASK_BLOCKED;
@@ -131,6 +141,57 @@ void task_wake_sleepers(void)
         t->sleep_next = NULL;
         t->wake_time_ns = 0;
         t->state = TASK_READY;
+        scheduler_add_task(t);
+    }
+}
+
+void task_sleep_wake(struct task *t)
+{
+    if (!t) {
+        return;
+    }
+
+    bool removed = false;
+
+    irq_flags_t flags = spin_lock_irqsave(&sleep_queue_lock);
+
+    /* Walk the singly-linked sleep_queue looking for `t`. */
+    struct task **link = &sleep_queue_head;
+    while (*link) {
+        if (*link == t) {
+            *link = t->sleep_next;
+            t->sleep_next = NULL;
+            t->wake_time_ns = 0;
+            t->state = TASK_READY;
+            removed = true;
+            break;
+        }
+        link = &(*link)->sleep_next;
+    }
+
+    if (!removed) {
+        /* Task is not (yet) on the sleep queue. Either it has not
+         * reached task_sleep_ms's enqueue critical section, or it has
+         * already been woken by a previous task_sleep_wake / by
+         * deadline expiry. In the first case, set the pending flag so
+         * the upcoming task_sleep_ms returns immediately. In the
+         * second case, the flag set is harmless — the task is awake
+         * and not about to call task_sleep_ms; the flag would only
+         * affect a *next* task_sleep_ms call from this task, which is
+         * a fresh sleep request that the caller is responsible for
+         * sequencing.
+         *
+         * The single-pending-bit shape is sufficient for the current
+         * single-consumer (hailo control): the consumer guarantees at
+         * most one in-flight wake per sleep cycle. If a future
+         * consumer needs multi-wake counting, this becomes a counter
+         * instead of a flag. */
+        t->flags |= TASK_FLAG_WAKEUP_PENDING;
+    }
+
+    spin_unlock_irqrestore(&sleep_queue_lock, flags);
+
+    if (removed) {
         scheduler_add_task(t);
     }
 }

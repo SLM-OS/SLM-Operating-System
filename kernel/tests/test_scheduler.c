@@ -624,6 +624,120 @@ static void test_task_sleep_ms_multiple_sleepers_wake_in_order(void)
 }
 
 /* ============================================================================
+ * Unit Tests: task_sleep_wake — early-wake API (#332)
+ * ============================================================================ */
+
+/*
+ * task_sleep_wake on a task that is sleeping must wake it well before
+ * its deadline. The waker task fires task_sleep_wake on the sleeper
+ * shortly after the sleeper enters task_sleep_ms; the sleeper must
+ * return in much less than the requested sleep duration.
+ *
+ * Lower bound: ~0 ms (immediate next scheduler dispatch).
+ * Upper bound: a small fraction of the requested 200 ms sleep, with
+ * enough slack for QEMU/coop-preempt jitter. We use 100 ms as a
+ * conservative ceiling (half the requested sleep duration).
+ */
+static volatile struct task *sleep_wake_target = NULL;
+static volatile uint64_t     sleep_wake_woke_at = 0;
+static volatile bool         sleep_wake_finished = false;
+
+static void sleep_wake_sleeper_entry(void *arg)
+{
+    (void)arg;
+    sleep_wake_target = task_current();
+    task_sleep_ms(200);
+    sleep_wake_woke_at = timer_get_count();
+    sleep_wake_finished = true;
+    task_exit();
+}
+
+static void test_task_sleep_wake_early_wake(void)
+{
+    sleep_wake_target = NULL;
+    sleep_wake_woke_at = 0;
+    sleep_wake_finished = false;
+
+    struct task *s = task_create_with_priority("sleep_wake_s",
+                                               sleep_wake_sleeper_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(s);
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(s, 0);
+    irq_restore(flags);
+
+    /* Spin until the sleeper has registered itself, bounded so a
+     * regression that prevents the sleeper from running can't hang
+     * the test. */
+    uint64_t reg_deadline = start + (freq / 1000) * 50;
+    while (sleep_wake_target == NULL) {
+        if (timer_get_count() > reg_deadline) break;
+        yield();
+    }
+    TEST_ASSERT_NOT_NULL((const void *)sleep_wake_target);
+
+    /* Fire the wake. */
+    task_sleep_wake((struct task *)sleep_wake_target);
+
+    /* Wait for the sleeper to finish, bounded. */
+    uint64_t finish_deadline = timer_get_count() + (freq / 1000) * 150;
+    while (!sleep_wake_finished) {
+        if (timer_get_count() > finish_deadline) break;
+        yield();
+    }
+
+    if (s->state != TASK_TERMINATED) scheduler_terminate_task(s);
+    task_destroy(s);
+
+    TEST_ASSERT_TRUE(sleep_wake_finished);
+    uint64_t elapsed_ms = ((sleep_wake_woke_at - start) * 1000) / freq;
+    /* Requested sleep was 200 ms; wake must land well under that. */
+    TEST_ASSERT_LESS_THAN(100, elapsed_ms);
+}
+
+/*
+ * task_sleep_wake on a task that has not yet entered task_sleep_ms
+ * (the wake-before-sleep race) must set TASK_FLAG_WAKEUP_PENDING.
+ * The next task_sleep_ms call must observe the flag, consume it, and
+ * return immediately.
+ *
+ * Drive this by calling task_sleep_wake(self) followed directly by
+ * task_sleep_ms(200): the requested sleep should return in well under
+ * the 200 ms requested.
+ */
+static void test_task_sleep_wake_before_sleep_sets_pending(void)
+{
+    struct task *self = task_current();
+    TEST_ASSERT_NOT_NULL(self);
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+
+    /* Pre-set the wake. self is not on the sleep queue, so this lands
+     * on TASK_FLAG_WAKEUP_PENDING. */
+    task_sleep_wake(self);
+
+    /* The flag should now be visible on self. */
+    TEST_ASSERT_TRUE((self->flags & TASK_FLAG_WAKEUP_PENDING) != 0);
+
+    /* task_sleep_ms must consume the flag and return immediately. */
+    task_sleep_ms(200);
+
+    uint64_t elapsed = timer_get_count() - start;
+    uint64_t elapsed_ms = (elapsed * 1000) / freq;
+
+    /* Should be far below the requested 200 ms. */
+    TEST_ASSERT_LESS_THAN(50, elapsed_ms);
+
+    /* Flag must be cleared so subsequent sleeps work normally. */
+    TEST_ASSERT_TRUE((self->flags & TASK_FLAG_WAKEUP_PENDING) == 0);
+}
+
+/* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
 
@@ -5161,6 +5275,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_sleep_ms_sleeps_at_least_ms);
     RUN_TEST(test_task_sleep_ms_clears_wake_state);
     RUN_TEST(test_task_sleep_ms_multiple_sleepers_wake_in_order);
+    RUN_TEST(test_task_sleep_wake_early_wake);
+    RUN_TEST(test_task_sleep_wake_before_sleep_sets_pending);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);
