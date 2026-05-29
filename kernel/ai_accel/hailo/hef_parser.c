@@ -1206,6 +1206,68 @@ struct ctx_actions_accum {
     struct hef_context_actions *current;    /* NULL if current context overflowed */
 };
 
+/* #331: helpers to compress the per-field proto-callback wiring
+ * boilerplate that was repeated across five decode_*_body functions
+ * (~75 lines of cut-and-paste before extraction).
+ *
+ * Each ProtoHEFAction* sub-message has its own set of u32 fields and
+ * a generated `*_init_default` initializer. Per-field, the original
+ * code allocated a `struct u32_ctx`, wired both `funcs.decode` and
+ * `arg` on the sub-message's field, and then post-decode appended the
+ * staged `out` struct into the per-kind hef_info array with a
+ * truncation check.
+ *
+ * The two macros below preserve that structure but collapse each
+ * per-field 6-line block to one BIND_U32 line and each per-function
+ * 7-line tail to one APPEND_TYPED_ACTION line. The `present` pointer
+ * is shared across all bindings inside one decode body — none of
+ * these action types need per-field "was this set?" detection
+ * (defaults are zeros and that's correct).
+ *
+ * Caller-side contract — `HEF_BIND_U{32,64}`:
+ *   - The caller must have `bool present_discard;` in scope; the
+ *     macro captures it as a free name to share one dummy presence
+ *     slot across every binding in a decode body.
+ *   - These macros expand to a `struct u{32,64}_ctx` *declaration*
+ *     plus two assignments. The locals must remain in scope
+ *     through the matching `pb_decode` call, so a do/while(0) wrapper
+ *     is not possible. Consequently the macro is NOT safe inside an
+ *     unbraced `if`/`for`/`while` body — use only at function-body
+ *     statement scope (top-level inside the decode_*_body, or inside
+ *     an explicit `{ ... }` block).
+ *   - Token-pasted local name is `<field>_ctx`; two bindings for the
+ *     same field name in one scope would collide.
+ *
+ * Caller-side contract — `HEF_APPEND_TYPED_ACTION(info, kind, ...)`:
+ *   - The `hef_info` pointed to by `info_` must expose three siblings
+ *     named after `kind_`: `<kind>_actions[]` (array of action
+ *     structs), `<kind>_count` (counter), and `<kind>_truncated`
+ *     (overflow flag). Add new action kinds with the same naming
+ *     pattern in `hef_parser.h` to keep this macro usable.
+ *   - The `(max_)` argument is the array capacity; on overflow the
+ *     action is dropped and `<kind>_truncated` is set. */
+#define HEF_BIND_U32(sub_, field_, dst_)                                \
+    struct u32_ctx field_##_ctx = {                                     \
+        .dst = (dst_), .present = &present_discard };                   \
+    (sub_).field_.funcs.decode = read_u32_cb;                           \
+    (sub_).field_.arg          = &field_##_ctx
+
+#define HEF_BIND_U64(sub_, field_, dst_)                                \
+    struct u64_ctx field_##_ctx = {                                     \
+        .dst = (dst_), .present = &present_discard };                   \
+    (sub_).field_.funcs.decode = read_u64_cb;                           \
+    (sub_).field_.arg          = &field_##_ctx
+
+#define HEF_APPEND_TYPED_ACTION(info_, kind_, action_, max_)            \
+    do {                                                                \
+        if ((info_)->kind_##_count < (max_)) {                          \
+            (info_)->kind_##_actions[(info_)->kind_##_count] = (action_); \
+            (info_)->kind_##_count++;                                   \
+        } else {                                                        \
+            (info_)->kind_##_truncated = true;                          \
+        }                                                               \
+    } while (0)
+
 /* Decode a ProtoHEFActionEnableLcu sub-message and capture its six
  * scalar fields into hef_info.enable_lcu_actions[]. Called from the
  * oneof inner callback when the enable_lcu branch (tag 8) fires.
@@ -1219,52 +1281,26 @@ struct ctx_actions_accum {
 static bool decode_enable_lcu_body(pb_istream_t *stream,
                                    struct ctx_actions_accum *acc)
 {
-    /* Stage the six fields + presence flags. All fields are uint32
-     * varints per hef.proto:758-777. */
+    /* Stage the six u32 fields. Defaults to zeros — EnableLcu doesn't
+     * need per-field "was this set?" detection. See hef.proto:758-777
+     * for the proto field list. */
     struct hef_enable_lcu_action out;
     memset(&out, 0, sizeof(out));
     out.context_index = acc->current ? acc->current->context_index : 0;
-
-    bool present_discard = false;  /* shared dummy for fields without
-                                      an independent "was this field
-                                      set?" check — EnableLcu scalars
-                                      default-to-zero is fine. */
-
-    struct u32_ctx lcu_idx_ctx   = { .dst = &out.lcu_index,
-                                     .present = &present_discard };
-    struct u32_ctx cluster_ctx   = { .dst = &out.cluster_index,
-                                     .present = &present_discard };
-    struct u32_ctx done_addr_ctx = { .dst = &out.lcu_kernel_done_address,
-                                     .present = &present_discard };
-    struct u32_ctx done_cnt_ctx  = { .dst = &out.lcu_kernel_done_count,
-                                     .present = &present_discard };
-    struct u32_ctx enable_ctx    = { .dst = &out.lcu_enable_address,
-                                     .present = &present_discard };
-    struct u32_ctx net_idx_ctx   = { .dst = &out.network_index,
-                                     .present = &present_discard };
+    bool present_discard = false;
 
     ProtoHEFActionEnableLcu sub = ProtoHEFActionEnableLcu_init_default;
-    sub.lcu_index.funcs.decode               = read_u32_cb;
-    sub.lcu_index.arg                        = &lcu_idx_ctx;
-    sub.cluster_index.funcs.decode           = read_u32_cb;
-    sub.cluster_index.arg                    = &cluster_ctx;
-    sub.lcu_kernel_done_address.funcs.decode = read_u32_cb;
-    sub.lcu_kernel_done_address.arg          = &done_addr_ctx;
-    sub.lcu_kernel_done_count.funcs.decode   = read_u32_cb;
-    sub.lcu_kernel_done_count.arg            = &done_cnt_ctx;
-    sub.lcu_enable_address.funcs.decode      = read_u32_cb;
-    sub.lcu_enable_address.arg               = &enable_ctx;
-    sub.network_index.funcs.decode           = read_u32_cb;
-    sub.network_index.arg                    = &net_idx_ctx;
+    HEF_BIND_U32(sub, lcu_index,               &out.lcu_index);
+    HEF_BIND_U32(sub, cluster_index,           &out.cluster_index);
+    HEF_BIND_U32(sub, lcu_kernel_done_address, &out.lcu_kernel_done_address);
+    HEF_BIND_U32(sub, lcu_kernel_done_count,   &out.lcu_kernel_done_count);
+    HEF_BIND_U32(sub, lcu_enable_address,      &out.lcu_enable_address);
+    HEF_BIND_U32(sub, network_index,           &out.network_index);
 
     if (!pb_decode(stream, ProtoHEFActionEnableLcu_fields, &sub)) return false;
 
-    if (acc->info->enable_lcu_count < HEF_PARSER_MAX_ENABLE_LCU_ACTIONS) {
-        acc->info->enable_lcu_actions[acc->info->enable_lcu_count] = out;
-        acc->info->enable_lcu_count++;
-    } else {
-        acc->info->enable_lcu_truncated = true;
-    }
+    HEF_APPEND_TYPED_ACTION(acc->info, enable_lcu, out,
+                            HEF_PARSER_MAX_ENABLE_LCU_ACTIONS);
     return true;
 }
 
@@ -1277,28 +1313,17 @@ static bool decode_disable_lcu_body(pb_istream_t *stream,
     struct hef_disable_lcu_action out;
     memset(&out, 0, sizeof(out));
     out.context_index = acc->current ? acc->current->context_index : 0;
-
     bool present_discard = false;
-    struct u32_ctx lcu_idx_ctx   = { .dst = &out.lcu_index,          .present = &present_discard };
-    struct u32_ctx cluster_ctx   = { .dst = &out.cluster_index,      .present = &present_discard };
-    struct u32_ctx enable_ctx    = { .dst = &out.lcu_enable_address, .present = &present_discard };
 
     ProtoHEFActionDisableLcu sub = ProtoHEFActionDisableLcu_init_default;
-    sub.lcu_index.funcs.decode          = read_u32_cb;
-    sub.lcu_index.arg                   = &lcu_idx_ctx;
-    sub.cluster_index.funcs.decode      = read_u32_cb;
-    sub.cluster_index.arg               = &cluster_ctx;
-    sub.lcu_enable_address.funcs.decode = read_u32_cb;
-    sub.lcu_enable_address.arg          = &enable_ctx;
+    HEF_BIND_U32(sub, lcu_index,          &out.lcu_index);
+    HEF_BIND_U32(sub, cluster_index,      &out.cluster_index);
+    HEF_BIND_U32(sub, lcu_enable_address, &out.lcu_enable_address);
 
     if (!pb_decode(stream, ProtoHEFActionDisableLcu_fields, &sub)) return false;
 
-    if (acc->info->disable_lcu_count < HEF_PARSER_MAX_DISABLE_LCU_ACTIONS) {
-        acc->info->disable_lcu_actions[acc->info->disable_lcu_count] = out;
-        acc->info->disable_lcu_count++;
-    } else {
-        acc->info->disable_lcu_truncated = true;
-    }
+    HEF_APPEND_TYPED_ACTION(acc->info, disable_lcu, out,
+                            HEF_PARSER_MAX_DISABLE_LCU_ACTIONS);
     return true;
 }
 
@@ -1310,22 +1335,15 @@ static bool decode_wait_sequencer_body(pb_istream_t *stream,
     struct hef_wait_sequencer_action out;
     memset(&out, 0, sizeof(out));
     out.context_index = acc->current ? acc->current->context_index : 0;
-
     bool present_discard = false;
-    struct u32_ctx cluster_ctx = { .dst = &out.cluster_index, .present = &present_discard };
 
     ProtoHEFActionWaitForSequencer sub = ProtoHEFActionWaitForSequencer_init_default;
-    sub.cluster_index.funcs.decode = read_u32_cb;
-    sub.cluster_index.arg          = &cluster_ctx;
+    HEF_BIND_U32(sub, cluster_index, &out.cluster_index);
 
     if (!pb_decode(stream, ProtoHEFActionWaitForSequencer_fields, &sub)) return false;
 
-    if (acc->info->wait_sequencer_count < HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS) {
-        acc->info->wait_sequencer_actions[acc->info->wait_sequencer_count] = out;
-        acc->info->wait_sequencer_count++;
-    } else {
-        acc->info->wait_sequencer_truncated = true;
-    }
+    HEF_APPEND_TYPED_ACTION(acc->info, wait_sequencer, out,
+                            HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS);
     return true;
 }
 
@@ -1339,25 +1357,16 @@ static bool decode_allow_input_dataflow_body(pb_istream_t *stream,
     struct hef_allow_input_dataflow_action out;
     memset(&out, 0, sizeof(out));
     out.context_index = acc->current ? acc->current->context_index : 0;
-
     bool present_discard = false;
-    struct u32_ctx sys_idx_ctx   = { .dst = &out.sys_index,       .present = &present_discard };
-    struct u32_ctx conn_type_ctx = { .dst = &out.connection_type, .present = &present_discard };
 
     ProtoHEFActionAllowInputDataflow sub = ProtoHEFActionAllowInputDataflow_init_default;
-    sub.sys_index.funcs.decode       = read_u32_cb;
-    sub.sys_index.arg                = &sys_idx_ctx;
-    sub.connection_type.funcs.decode = read_u32_cb;
-    sub.connection_type.arg          = &conn_type_ctx;
+    HEF_BIND_U32(sub, sys_index,       &out.sys_index);
+    HEF_BIND_U32(sub, connection_type, &out.connection_type);
 
     if (!pb_decode(stream, ProtoHEFActionAllowInputDataflow_fields, &sub)) return false;
 
-    if (acc->info->allow_input_dataflow_count < HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS) {
-        acc->info->allow_input_dataflow_actions[acc->info->allow_input_dataflow_count] = out;
-        acc->info->allow_input_dataflow_count++;
-    } else {
-        acc->info->allow_input_dataflow_truncated = true;
-    }
+    HEF_APPEND_TYPED_ACTION(acc->info, allow_input_dataflow, out,
+                            HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS);
     return true;
 }
 
@@ -1398,46 +1407,31 @@ static bool decode_enable_sequencer_body(pb_istream_t *stream,
     struct hef_trigger_sequencer_action out;
     memset(&out, 0, sizeof(out));
     out.context_index = acc->current ? acc->current->context_index : 0;
-
     bool present_discard = false;
-    struct u32_ctx cluster_ctx  = { .dst = &out.cluster_index,     .present = &present_discard };
-    struct u32_ctx apu_ctx      = { .dst = &out.active_apu_bitmap, .present = &present_discard };
-    struct u32_ctx ia_ctx       = { .dst = &out.active_ia_bitmap,  .present = &present_discard };
-    struct u64_ctx sc_ctx       = { .dst = &out.active_sc_bitmap,  .present = &present_discard };
-    struct u64_ctx l2_ctx       = { .dst = &out.active_l2_bitmap,  .present = &present_discard };
-    struct u64_ctx l2_off0_ctx  = { .dst = &out.l2_offset_0,       .present = &present_discard };
-    struct u64_ctx l2_off1_ctx  = { .dst = &out.l2_offset_1,       .present = &present_discard };
-    struct l3_info_ctx l3_ctx   = {
+
+    /* L3 info is a nested message — kept out of the macro pattern
+     * because it dispatches into decode_l3_info_cb rather than the
+     * scalar read_u{32,64}_cb path the macros assume. */
+    struct l3_info_ctx l3_ctx = {
         .l3_cut_dst    = &out.initial_l3_cut,
         .l3_offset_dst = &out.initial_l3_offset,
     };
 
     ProtoHEFActionEnableSequencer sub = ProtoHEFActionEnableSequencer_init_default;
-    sub.cluster_index.funcs.decode     = read_u32_cb;
-    sub.cluster_index.arg              = &cluster_ctx;
-    sub.active_apu_bitmap.funcs.decode = read_u32_cb;
-    sub.active_apu_bitmap.arg          = &apu_ctx;
-    sub.active_ia_bitmap.funcs.decode  = read_u32_cb;
-    sub.active_ia_bitmap.arg           = &ia_ctx;
-    sub.active_sc_bitmap.funcs.decode  = read_u64_cb;
-    sub.active_sc_bitmap.arg           = &sc_ctx;
-    sub.active_l2_bitmap.funcs.decode  = read_u64_cb;
-    sub.active_l2_bitmap.arg           = &l2_ctx;
-    sub.l2_write_0.funcs.decode        = read_u64_cb;
-    sub.l2_write_0.arg                 = &l2_off0_ctx;
-    sub.l2_write_1.funcs.decode        = read_u64_cb;
-    sub.l2_write_1.arg                 = &l2_off1_ctx;
-    sub.initial_l3_info.funcs.decode   = decode_l3_info_cb;
-    sub.initial_l3_info.arg            = &l3_ctx;
+    HEF_BIND_U32(sub, cluster_index,     &out.cluster_index);
+    HEF_BIND_U32(sub, active_apu_bitmap, &out.active_apu_bitmap);
+    HEF_BIND_U32(sub, active_ia_bitmap,  &out.active_ia_bitmap);
+    HEF_BIND_U64(sub, active_sc_bitmap,  &out.active_sc_bitmap);
+    HEF_BIND_U64(sub, active_l2_bitmap,  &out.active_l2_bitmap);
+    HEF_BIND_U64(sub, l2_write_0,        &out.l2_offset_0);
+    HEF_BIND_U64(sub, l2_write_1,        &out.l2_offset_1);
+    sub.initial_l3_info.funcs.decode = decode_l3_info_cb;
+    sub.initial_l3_info.arg          = &l3_ctx;
 
     if (!pb_decode(stream, ProtoHEFActionEnableSequencer_fields, &sub)) return false;
 
-    if (acc->info->trigger_sequencer_count < HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS) {
-        acc->info->trigger_sequencer_actions[acc->info->trigger_sequencer_count] = out;
-        acc->info->trigger_sequencer_count++;
-    } else {
-        acc->info->trigger_sequencer_truncated = true;
-    }
+    HEF_APPEND_TYPED_ACTION(acc->info, trigger_sequencer, out,
+                            HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS);
     return true;
 }
 
