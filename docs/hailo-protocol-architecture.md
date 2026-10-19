@@ -1,20 +1,28 @@
 # Hailo NPU Protocol Architecture
 
-**Status:** Reference document, anchored to empirical findings on Hailo-8L AI HAT+ with firmware v4.23 on Raspberry Pi 5. Initial capture 2026-05-12 (§"Empirical evidence" — Linux ftrace + kprobe on `hailo_pcie_write_firmware_control`). Extended 2026-05-28 (§"Update 2026-05-28" — host-side wire byte-diff + DMA-content byte-diff, [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) closed exhausted). Re-validate before assuming the same shape for future firmware revisions or different Hailo SoCs.
+**Status:** Reference document, anchored to empirical findings on Hailo-8L AI HAT+ with firmware v4.23 on Raspberry Pi 5. Initial capture 2026-05-12 (§"Empirical evidence" — Linux ftrace + kprobe on `hailo_pcie_write_firmware_control`). Extended 2026-05-28 (§"Update 2026-05-28" — host-side wire byte-diff + DMA-content byte-diff, [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) closed exhausted). Re-validate before assuming the same shape for future firmware revisions or different Hailo SoCs. Corrected 2026-10-19: the 2026-05-12 "two protocols / BAR4-primary" framing was overturned and is retained below only as history (see §"Correction"). The advisor-readable summary of the whole investigation is [`hailo-inference-wedge.md`](hailo-inference-wedge.md).
 
 ## TL;DR
 
-Hailo's NPU configuration uses **two protocols simultaneously**:
+HailoRT configures the Hailo-8L through the **documented fw_control RPC protocol** (`hailort-control-protocol.h`) plus VDMA channel programming on BAR2. HailoRT's own wire captures of an MNIST load decode the 27 fw_control requests as the full load sequence — CHANGE_CONTEXT_SWITCH_STATUS, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS, SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO ×4 — not IDENTIFY alone. SLM-OS issues the same requests, and they match byte for byte.
 
-1. **fw_control RPC protocol** — documented in `hailort-control-protocol.h`. Opcodes for IDENTIFY, READ_MEMORY, READ_LOG, RESET_NN_CORE, CHANGE_CONTEXT_SWITCH_STATUS, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS, SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO, etc. **All accepted by firmware**, but insufficient on their own to fully wire boundary channels into the inference data path on v4.23.
+SLM-OS completes the load (every RPC rc=0, `last_err=0`) and the firmware consumes the CCW configuration on ch=0. The wedge surfaces at the first inference: `hailo runmodel <h>` writes `num_avail=2` to boundary IN ch=2, the firmware never advances `num_proc`, and the submit times out.
 
-2. **Direct BAR4 memory writes** — undocumented. HailoRT (the proprietary userspace runtime) mmaps the device's PCIe resources and writes configuration directly into specific BAR4 regions. This is the **primary configuration path** — fw is designed around it. No public schema exists for the layout / semantics of these writes.
+Two disconfirmation passes — [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) and [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) (closed 2026-05-28) — showed every host-observable input (MMIO wire bytes, RPC bytes and order, DMA descriptor lists, CCWS payload) matching HailoRT. The remaining divergence is firmware-internal state that the host cannot observe. The cause is undetermined; the investigation is closed as a documented limitation.
 
-A host that uses only the documented fw_control RPC protocol completes ~90% of the load (firmware accepts every RPC with rc=0) but cannot complete the final channel-to-inference-path binding. The wedge surfaces as: `hailo runmodel <h>` writes `num_avail=2` to ch=2; firmware never advances `num_proc`; timeout after 500 ms.
+## Correction: the 2026-05-12 "BAR4-primary" conclusion
 
-This is the root cause of [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) (closed 2026-05-12 as Hailo-side architectural limit) and its downstream [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) (closed 2026-05-28 after a second-pass disconfirmation chain — see §"Update 2026-05-28" below for the additional evidence).
+#682 was first closed on 2026-05-12 on the theory that HailoRT uses fw_control only for IDENTIFY and configures the device through undocumented direct BAR4 writes. That theory rested on the kprobe in §"Empirical evidence", which read an opcode field and reported 100% opcode=0. Later evidence contradicts it:
+
+- HailoRT's own wire captures (the #795 QEMU-stub corpus and the PR #997 ftrace capture) decode the same 27 calls as the full load-time RPC sequence listed in the TL;DR.
+- SLM-OS's request bytes match those captures (PR [#1004](https://github.com/SLM-OS/SLM-Operating-System/pull/1004)).
+- The [#682 reopen comment](https://github.com/SLM-OS/SLM-Operating-System/issues/682#issuecomment-4536835169) explicitly overturned the close reason.
+
+The matching call count (27) suggests the kprobe dereferenced a different field than the opcode; this was never confirmed. The sections below that depend on the BAR4-primary theory (§"Empirical evidence", §"How Hailo's design compares", §"What this means for non-HailoRT hosts") are kept as a record of the interim conclusion and are annotated where they no longer hold.
 
 ## Empirical evidence
+
+> **Superseded (see §"Correction").** The call counts below are real; the opcode reading ("100% IDENTIFY") and the conclusions drawn from it about BAR4 configuration are not.
 
 Captured on `pi-5-1` 2026-05-12 by reloading Linux's `hailo_pcie` kernel module with the SLM-OS v2 trace patch (`~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation-v2.patch`) plus a kprobe on `hailo_pcie_write_firmware_control` that dereferences the request payload's opcode field.
 
@@ -22,7 +30,7 @@ Captured on `pi-5-1` 2026-05-12 by reloading Linux's `hailo_pcie` kernel module 
 
 | Function | Calls | Notes |
 |---|---|---|
-| `hailo_pcie_write_firmware_control` | 27 | **100% opcode=0 (IDENTIFY)** |
+| `hailo_pcie_write_firmware_control` | 27 | Kprobe reported 100% opcode=0 (IDENTIFY) — superseded; wire captures decode these as the full load sequence |
 | `hailo_pcie_read_firmware_control` | 27 | Paired response reads |
 | `hailo_pcie_read_firmware_notification` | 0 | fw never raised FW_NOTIFICATION_IRQ |
 | `hailo_pcie_read_interrupt` | 51,910 | ~1 per inference (IRQ-driven completion) |
@@ -48,12 +56,14 @@ Capture artifacts (local-only, paths reference each developer's machine):
 
 ## How Hailo's design compares to other PCIe accelerator vendors
 
+> **Partly superseded (see §"Correction").** Properties 1 and 2 stand. Properties 3 and 4 below were the 2026-05-12 interim reading; the evidence now shows the documented RPC interface *is* the configuration path HailoRT uses. What remains closed is the firmware's internal state machine — the host has no documented way to see why the firmware declines to service ch=2.
+
 Hailo combines four properties that, taken together, are uncommon among PCIe accelerator vendors:
 
 1. **Closed firmware** — `hailo8_fw.bin` is shipped as a binary blob; no source.
 2. **Closed userspace runtime** — `libhailort.so` is shipped as a binary; no source.
-3. **Undocumented primary configuration protocol** — the BAR4 writes HailoRT issues during `Configure()` and `Activate()` have no public schema.
-4. **Documented RPC interface is intentionally incomplete** — sufficient for inspection (IDENTIFY, READ_MEMORY) and one-shot operations (RESET_NN_CORE), insufficient for primary configuration.
+3. ~~**Undocumented primary configuration protocol** — the BAR4 writes HailoRT issues during `Configure()` and `Activate()` have no public schema.~~ Superseded: HailoRT's wire captures show its load going through the documented RPCs, and no separate BAR4 configuration channel was identified.
+4. ~~**Documented RPC interface is intentionally incomplete** — sufficient for inspection (IDENTIFY, READ_MEMORY) and one-shot operations (RESET_NN_CORE), insufficient for primary configuration.~~ Superseded: HailoRT drives the full load through the documented RPCs. The gap is firmware-internal diagnostics, not the RPC set.
 
 How this compares against other PCIe accelerators:
 
@@ -64,17 +74,17 @@ How this compares against other PCIe accelerators:
 | AMD GPUs (amdgpu / radv / amdkfd) | ✅ | Open-source driver, public ISA + register docs |
 | Google Coral Edge TPU | Partial — `libedgetpu` is closed userspace, but PCIe Coral has open kernel interface | Open-source kernel module + closed userspace |
 | Standard PCIe (NVMe, NICs, USB controllers, …) | ✅ | Datasheet-documented MMIO |
-| **Hailo-8 / Hailo-8L** | ❌ for full functionality — fully exercising the hardware requires HailoRT userspace | **Closed firmware + closed userspace + undocumented primary protocol** |
+| **Hailo-8 / Hailo-8L** | Unproven — SLM-OS reproduces HailoRT's host-visible inputs byte for byte, but inference does not run | **Closed firmware + closed userspace; no host-visible firmware diagnostics** |
 
-Hailo sits alone in the "fully closed black-box accelerator" corner. This is a valid commercial design choice — it lets Hailo iterate the firmware/runtime contract without breaking customers — but it constrains who can drive the hardware to "users running HailoRT on a supported Linux distribution".
+Hailo sits in the "closed black-box accelerator" corner. This is a valid commercial design choice — it lets Hailo iterate the firmware/runtime contract without breaking customers — but when a non-HailoRT host diverges from HailoRT in firmware-internal state, nothing on the host side explains why.
 
 ## What this means for non-HailoRT hosts
 
-Any host that wants to drive a Hailo NPU without HailoRT (SLM-OS, custom embedded runtime, different OS, microcontroller bringup) has three options:
+Any host that wants to drive a Hailo NPU without HailoRT (SLM-OS, custom embedded runtime, different OS, microcontroller bringup) has these options, as of 2026-10:
 
-- **Use the documented fw_control RPC interface.** Reaches ~90% of load. Firmware accepts every RPC. Boundary channels exist, descriptors get programmed, num_avail bumps land. But the final channel-to-inference-binding step lives in the undocumented direct-memory protocol — submit-time wedge results.
-- **Reverse-engineer HailoRT's BAR4 protocol.** Read `~/slmos-ref/hailo/v4.23.0/libhailort/src/`, instrument HailoRT in gdb, capture every BAR4 write during `Configure()` + `Activate()`. Replicate. Weeks of work; produces an officially-unsupported configuration path that may break on the next firmware update.
-- **Wait for Hailo to publish the protocol.** Or release HailoRT source. As of 2026-05-12 neither is publicly committed to.
+- **Use the documented fw_control RPC interface plus VDMA programming.** This is what HailoRT does. SLM-OS gets through the full load and matches every host-visible byte, but the firmware does not service boundary IN ch=2. The cause is firmware-internal and undetermined.
+- **Inspect firmware memory through the ATR/BAR4 window.** Snapshot firmware state at the same lifecycle point under both hosts and diff. Estimated at several weeks; see [`hailo-inference-wedge.md`](hailo-inference-wedge.md) §6.1.
+- **Escalate to Hailo** with the byte-faithful evidence and ask what firmware-side condition gates ch=2 dispatch.
 
 ## Issue #682 ruled-out causes
 
@@ -101,7 +111,7 @@ These hypotheses were investigated and **disproven** during the #682 bisection. 
 
 Between 2026-05-25 and 2026-05-28 the BAR4-RE attempt (PR #795 et seq.) and the DMA-content byte-diff plan (this file's neighbour `hailo-dma-content-diff-plan.md`) were executed end-to-end against [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) — the downstream "host has all observable wedge state matching HailoRT, fw still rejects ch=2" follow-on to #682.
 
-**Ten additional hypotheses** were tested on hardware (`pi-5-1`) during that pass: channel-direction, seq=0, drop-pings, longer-settle, PMCSR cycle, MSI/polled-only, BAR4 padding, IOVA reachability, full-ring pre-program (hyp-X), and last-descriptor LIRQ clear (hyp-Y). All ten disconfirmed.
+**Ten additional hypotheses** were tested on hardware (`pi-5-1`) during that pass: channel-direction, seq=0, drop-pings, longer-settle, PMCSR cycle, MSI/polled-only, BAR4 padding, IOVA reachability, full-ring pre-program (hyp-X), and last-descriptor LIRQ clear (hyp-Y). Channel-direction was a real defect, fixed in PR [#999](https://github.com/SLM-OS/SLM-Operating-System/pull/999), but fixing it did not unwedge inference; the other nine were disconfirmed.
 
 **Two real wire divergences were found** (full-ring pre-program + LIRQ-clear) and corrected as defensive parity in PR [#1012](https://github.com/SLM-OS/SLM-Operating-System/pull/1012). Neither moved the wedge. They are kept in-tree because byte-parity with HailoRT is independently load-bearing for any future investigation.
 
@@ -139,11 +149,11 @@ See [#1001#issuecomment-4570908610](https://github.com/SLM-OS/SLM-Operating-Syst
 
 ## Reopen criteria
 
-#682 should only be reopened if one of these conditions holds:
+The canonical list is [`hailo-inference-wedge.md`](hailo-inference-wedge.md) §6.3. #682 should only be reopened if one of these conditions holds:
 
-- Hailo publishes the BAR4 configuration protocol (or releases HailoRT source).
-- A new firmware revision exposes additional fw_control opcodes that complete channel binding.
-- A reverse-engineering effort produces a verified mapping from HailoRT operations to BAR4 writes **AND** demonstrates that replicating those writes alone unblocks the wedge. (Note: a partial RE attempt was made 2026-05-25 → 2026-05-28; producing byte-faithful host wire + DMA content was not sufficient — see §"Update 2026-05-28". A re-attempt that does not address what fw reads from BAR4 *itself* post-load will reproduce the same exhaustion.)
+- Hailo documents the firmware/host protocol beyond `hailort-control-protocol.h`, releases HailoRT source, or confirms the firmware-side condition through a support channel.
+- A new firmware revision changes boundary-channel behaviour or the documented RPC set.
+- Firmware-memory inspection through the ATR/BAR4 window identifies a specific internal-state word that differs between SLM-OS and HailoRT at the same lifecycle point. (A partial RE attempt 2026-05-25 → 2026-05-28 produced byte-faithful host wire + DMA content and was not sufficient — see §"Update 2026-05-28". A re-attempt that does not look at firmware-internal state will reproduce the same exhaustion.)
 - A different host runtime (not HailoRT) is observed completing MNIST inference on Hailo-8L using only documented interfaces.
 
 Mere "I have a new hypothesis about descriptor bytes / settle timing / channel state / wire ordering / DMA content" is not sufficient — those surfaces have been exhaustively bisected across two passes (the 2026-05-12 #682 chain and the 2026-05-28 #1001 chain) and are closed.
@@ -168,7 +178,7 @@ The boundary-trace toolkit (PRs [#780](https://github.com/SLM-OS/SLM-Operating-S
    echo 0 > /sys/kernel/debug/tracing/tracing_on
    cat /sys/kernel/debug/tracing/trace
    ```
-   The `+28(%x1)` dereferences `command->buffer[8]` (opcode field inside the wire-format common header). Per the empirical capture, HailoRT issues only opcode=0 (IDENTIFY) through this path.
+   The `+28(%x1)` was intended to dereference `command->buffer[8]` (opcode field inside the wire-format common header). It reported opcode=0 for every call, which wire captures later contradicted (see §"Correction"); verify the offset against the struct layout before relying on this probe.
 
 4. **Cross-correlation.** Linux's LINKUP / FW_BOOT / POSTBOOT phase markers fire on both sides cleanly. MODEL_LOAD / INFERENCE phases fire only on SLM-OS — see memory `hailo_trace_toolkit.md` for why.
 
@@ -176,6 +186,7 @@ The boundary-trace toolkit (PRs [#780](https://github.com/SLM-OS/SLM-Operating-S
 
 - Source: `kernel/ai_accel/hailo/` (control protocol implementation, VDMA, context-switch translator)
 - Source: `kernel/inference/inference_device_hailo.c` (backend integration)
+- Summary: `docs/hailo-inference-wedge.md` (advisor-readable write-up of the wedge, methodology, and full hypothesis table)
 - Plan: `docs/pi5-ai-hat-plan.md` (Phase 8 closeout points here)
 - Review: `docs/archive/investigations/hailo-ai-hat-architecture-review.md` (audit findings — some hypotheses there are now disproven; this doc is the current ground truth)
 - Lifecycle: `docs/hailo-lifecycle.md` (boundary-channel state machine)

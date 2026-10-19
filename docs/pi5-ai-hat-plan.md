@@ -2,20 +2,22 @@
 
 **Target:** GeeekPi AI HAT+ (Hailo-8L, 13 TOPS) and AI HAT+ 26 TOPS (Hailo-8) on Raspberry Pi 5, end-to-end to running AI inference workloads from SLM-OS.
 
-**Status (2026-05-28):** Phase 0–7 software-complete. **Phase 8 CLOSED
-(twice).** First closure 2026-05-12 ([#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682))
-when fw_control RPCs were proven sufficient for ~90% of HEF load but
-insufficient for the final channel-to-inference binding (Linux capture:
-HailoRT uses fw_control only for IDENTIFY; primary config goes through
-undocumented BAR4 mmap writes). Re-opened in spirit as
-[#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001), a
-second-pass disconfirmation chain (2026-05-25 → 2026-05-28) that proved
-every host-observable byte — MMIO wire, DMA descriptor list, DMA CCWS
-payload — byte-faithful to HailoRT. Wedge persists. #1001 closed
-exhausted 2026-05-28. See `docs/hailo-protocol-architecture.md`
-§"Update 2026-05-28" for the additional disconfirmation surface and
-§"Reopen criteria" for what the chain rules out for any future
-re-attempt.
+**Status (2026-10-19):** Phase 0–7 software-complete. **Phase 8 CLOSED
+as a documented limitation.** The full write-up is
+[`docs/hailo-inference-wedge.md`](./hailo-inference-wedge.md).
+[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) was
+first closed 2026-05-12 on the theory that HailoRT uses fw_control
+only for IDENTIFY and configures the device through undocumented BAR4
+writes. That close reason was later overturned: HailoRT's own wire
+captures show the full load sequence going through the documented RPCs
+(see §9's correction note). The follow-on
+[#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001)
+chain (2026-05-25 → 2026-05-28) proved every host-observable byte —
+MMIO wire, RPC requests, DMA descriptor lists, DMA CCWS payload —
+byte-faithful to HailoRT. The wedge persists; the remaining divergence
+is firmware-internal state the host cannot observe. #1001 closed
+exhausted 2026-05-28. See `docs/hailo-inference-wedge.md` §6.3 for
+reopen criteria.
 
 **Scope honesty (2026-04-24, audit F-04 / F-11):** The current Hailo
 backend should be characterized as a **Hailo-8L / MNIST bring-up
@@ -1483,6 +1485,22 @@ from #361 work, never instrumented.
 
 ## 9. Phase 8 closeout — 2026-05-12: #682 accepted as Hailo-side architectural limit
 
+> **Correction (2026-10-19).** The root cause stated in this section —
+> HailoRT configures the device through undocumented direct BAR4 writes
+> and uses fw_control only for IDENTIFY — was **overturned**. It rested
+> on a kprobe opcode reading. HailoRT's own wire captures (#795 corpus,
+> PR #997 ftrace) decode the same 27 fw_control calls as the full load
+> sequence (CHANGE_STATUS, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS,
+> SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO ×4), and SLM-OS's bytes
+> match them. The
+> [#682 reopen comment](https://github.com/SLM-OS/SLM-Operating-System/issues/682#issuecomment-4536835169)
+> retracted this close reason. The hypothesis table and "What SLM-OS
+> achieved" list below remain valid; "What turned out to be the answer"
+> and the original reopen criteria are kept only as history. For the
+> current conclusion (identical host-visible inputs, divergent
+> firmware-internal state) and reopen criteria, see §10 and
+> [`docs/hailo-inference-wedge.md`](./hailo-inference-wedge.md).
+
 After the SAGE1_ISP CPU_ECC root cause was fixed (§8 above), the boundary
 IN ch=2 wedge was investigated to root cause and closed as a Hailo-side
 architectural limitation. Full details in
@@ -1502,7 +1520,7 @@ brief summary here.
 | Skip CHANGE_CONTEXT_SWITCH_STATUS(RESET) | DISPROVEN — total ECC count rises 9→20, wedge persists |
 | CPU_ECC on SAGE1_MIPI_RX_13 | NOT THE CAUSE — fw boot-scrub on unused MIPI block, decoupled from wedge timing |
 
-### What turned out to be the answer
+### What turned out to be the answer (superseded — see correction above)
 
 **Experiment B** (Linux-side capture under HailoRT 2026-05-12):
 HailoRT's `hailo_pcie_write_firmware_control` is called only for IDENTIFY
@@ -1542,12 +1560,13 @@ black-box accelerator" corner.
 - ✅ Handles FW_NOTIFICATION IRQ end-to-end matching Linux (PR #793)
 - ✅ Cross-side trace toolkit (PRs #780, #783) reusable for any future
   Hailo bringup
-- ❌ Cannot complete channel-to-inference-path binding — that step is
-  in the undocumented direct-memory protocol HailoRT uses
+- ❌ Cannot get the firmware to service boundary IN ch=2 — cause is
+  firmware-internal and undetermined (originally attributed to an
+  undocumented direct-memory protocol; see correction above)
 
-### Reopen criteria
+### Reopen criteria (superseded — see `docs/hailo-inference-wedge.md` §6.3)
 
-Reopen #682 only if:
+Original 2026-05-12 list, kept as history. Reopen #682 only if:
 
 - Hailo publishes the BAR4 configuration protocol, or
 - Hailo releases HailoRT source, or
@@ -1627,9 +1646,9 @@ The Phase 8 work is presentable as a capstone result on its own
 terms — a multi-month bring-up against a fully-closed accelerator
 producing byte-faithful wire + DMA conformance to the vendor
 runtime, with a precisely characterized fw-side limit. See
-`docs/hailo-protocol-architecture.md` for the full architectural
-finding.
+`docs/hailo-protocol-architecture.md` for the protocol reference and
+`docs/hailo-inference-wedge.md` for the consolidated write-up.
 
 ---
 
-*Last updated: 2026-05-28 (Phase 8 second-pass closure, #1001 closed; DMA-content byte-diff exhausted)*
+*Last updated: 2026-10-19 (§9 BAR4-primary close reason marked overturned; status points to `hailo-inference-wedge.md`)*
