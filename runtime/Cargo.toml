@@ -11,7 +11,9 @@ crate-type = ["staticlib"]  # Produces .a file for linking with C
 [dependencies]
 linked_list_allocator = "0.10"
 bitflags = { version = "2.4", default-features = false }
-libm = "0.2"
+# Exact pin: libm drift can re-trigger the x86-64 rustc "soften operand"
+# ICE (#729); Cargo.lock is gitignored. See rust-toolchain.toml.
+libm = "=0.2.16"
 
 [features]
 default = ["slm"]
