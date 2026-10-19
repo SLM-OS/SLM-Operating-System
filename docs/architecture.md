@@ -108,7 +108,7 @@ This hybrid approach leverages:
 | RP1 UART Driver | `kernel/drivers/uart_rp1_bitbang.c` | Pi 5 UART via RP1 southbridge |
 | x86-64 Boot | `kernel/arch/x86_64/trampoline32.S`, `entry64.S` | Multiboot2 header, 32-bit trampoline to long mode, CR4.OSFXSR/OSXMMEXCPT + CR0.MP for SSE at CPL=0 |
 | x86-64 Main | `kernel/arch/x86_64/platform_x86.c` (`kernel_main_x86`) | x86-64 kernel entry point, dispatches into `kernel_main`; hosts reschedule IPI handler |
-| x86-64 TSS + IST | `kernel/arch/x86_64/tss.c` | Per-CPU TSS with a 4 KiB IST1 stack — LAPIC timer and reschedule IPI use this stack instead of the interrupted task's kernel stack |
+| x86-64 TSS + IST | `kernel/arch/x86_64/tss.c` | Per-CPU TSS with a 4 KiB IST1 stack. The LAPIC timer and reschedule IPI run on the interrupted task's stack (IST=0), because they can `schedule()` from the ISR (#237); IST1 is reserved for non-switching vectors |
 | x86-64 SSE inference kernels | `kernel/arch/x86_64/sse_kernels.c` | Hot inference paths (relu / zero / add_scalar / fma_row) compiled with `-msse -msse2`, called via extern-C from the Rust runtime |
 
 **Supported Platforms:**

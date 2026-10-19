@@ -344,8 +344,17 @@ static void fmt_signed_width(struct fmt_output *out, int64_t value,
  * decimal — no locale plumbing. NaN renders as "nan"/"NAN", ±Inf as
  * "inf"/"INF" matching the case of the conversion letter.
  */
-static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
+static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args_in)
 {
+    /* Work on a local copy so `&args` below is a real `va_list *` on
+     * every ABI. On x86-64 `va_list` is an array of one `__va_list_tag`,
+     * so a va_list *parameter* decays to `__va_list_tag *`, and taking
+     * its address yields a pointer to that pointer, not to the tag.
+     * Passing `(va_list *)&args_in` to kprintf_float_emit made x86
+     * va_arg(double) read garbage (#237). */
+    va_list args;
+    va_copy(args, args_in);
+
     while (*fmt) {
         if (*fmt != '%') {
             if (out->crlf && *fmt == '\n') {
@@ -507,18 +516,12 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
              * explicitly so a future caller doesn't assume it
              * works. */
             (void)arg_is_64bit;
-            /* `va_list` is a struct on AArch64 but an array of one
-             * `__va_list_tag` on x86-64 (System V AMD64 ABI). The
-             * address-of an array yields `T(*)[1]`, which is not the
-             * same type as `va_list *` (= `T**`) under -Werror=
-             * incompatible-pointer-types even though the underlying
-             * pointee is identical. Casting silences the warning
-             * without changing semantics: dereferencing the array-
-             * pointer gets us back to the same `va_list` storage
-             * the caller's `args` refers to. */
+            /* `args` is the local copy made at function entry, so its
+             * address is a genuine `va_list *` on both AArch64 (struct)
+             * and x86-64 (array of one `__va_list_tag`). */
             kprintf_float_emit(out, precision, *fmt,
                                width, left_justify, zero_pad,
-                               (va_list *)&args);
+                               &args);
             break;
 
         case '%':
@@ -527,6 +530,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
 
         case '\0':
             /* Trailing % at end of format string */
+            va_end(args);
             return;
 
         default:
@@ -538,6 +542,8 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
 
         fmt++;
     }
+
+    va_end(args);
 }
 
 /* ========================================================================

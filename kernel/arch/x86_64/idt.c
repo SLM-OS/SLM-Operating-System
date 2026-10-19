@@ -330,14 +330,16 @@ void idt_init(void)
     idt_set_gate(47, isr_47, IDT_INTERRUPT_GATE);
 
     /* Extended vectors (48-63) for LAPIC timer, IPIs, etc. */
+    /* LAPIC timer (48) and reschedule IPI (49) deliberately run on the
+     * interrupted task's stack (IST=0), NOT on IST1. Both handlers can
+     * call schedule() from the ISR, and switch_to saves the live RSP
+     * as the outgoing task's context. On IST1 that RSP points into the
+     * per-CPU IST stack, and the next timer IRQ on that CPU resets RSP
+     * to the IST1 top and overwrites the preempted task's frames. The
+     * schedule() SP-range guard panics on exactly this ("SP is outside
+     * current task's stack", #237). The per-CPU TSS + IST1 stack from
+     * A1 / P1-1 stay installed for future non-switching vectors. */
     idt_set_gate(48, isr_48, IDT_INTERRUPT_GATE);
-    /* LAPIC timer runs on IST1 so a stack-overflowing task cannot
-     * corrupt the timer ISR's frame. Requires tss_install_current_cpu()
-     * to have run on this CPU before interrupts are enabled. A1 / P1-1. */
-    idt[48].ist = 1;
-    /* Reschedule IPI (vector 49) shares IST1 with the timer — both
-     * are "preemption trigger" ISRs. B1 / P2-1. */
-    idt[49].ist = 1;
     idt_set_gate(49, isr_49, IDT_INTERRUPT_GATE);
     idt_set_gate(50, isr_50, IDT_INTERRUPT_GATE);
     idt_set_gate(51, isr_51, IDT_INTERRUPT_GATE);

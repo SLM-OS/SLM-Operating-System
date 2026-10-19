@@ -100,12 +100,16 @@ void ioapic_init(void)
     }
 }
 
-void ioapic_enable_irq(uint32_t irq)
+/*
+ * Map an IRQ number (vector) to its IOAPIC redirection pin, honoring
+ * ACPI ISOs (an ISA IRQ may be redirected to a different pin).
+ * Returns false if the IRQ has no IOAPIC pin.
+ */
+static bool ioapic_resolve_pin(uint32_t irq, uint32_t *pin_out)
 {
-    if (irq < IOAPIC_VECTOR_BASE) return;
+    if (irq < IOAPIC_VECTOR_BASE) return false;
     uint32_t pin = irq - IOAPIC_VECTOR_BASE;
 
-    /* Check ISOs: if this ISA IRQ is redirected to a different pin, use that */
     uint32_t actual_pin = pin;
     uint32_t iso_count = acpi_get_iso_count();
     for (uint32_t i = 0; i < iso_count; i++) {
@@ -117,34 +121,37 @@ void ioapic_enable_irq(uint32_t irq)
         }
     }
 
-    if (actual_pin >= ioapic_max_entries) return;
+    if (actual_pin >= ioapic_max_entries) return false;
+    *pin_out = actual_pin;
+    return true;
+}
 
-    uint32_t low = ioapic_read(IOAPIC_REDTBL(actual_pin));
+void ioapic_enable_irq(uint32_t irq)
+{
+    uint32_t pin;
+    if (!ioapic_resolve_pin(irq, &pin)) return;
+
+    uint32_t low = ioapic_read(IOAPIC_REDTBL(pin));
     low &= ~REDIR_MASKED;
-    ioapic_write(IOAPIC_REDTBL(actual_pin), low);
+    ioapic_write(IOAPIC_REDTBL(pin), low);
 }
 
 void ioapic_disable_irq(uint32_t irq)
 {
-    if (irq < IOAPIC_VECTOR_BASE) return;
-    uint32_t pin = irq - IOAPIC_VECTOR_BASE;
+    uint32_t pin;
+    if (!ioapic_resolve_pin(irq, &pin)) return;
 
-    uint32_t actual_pin = pin;
-    uint32_t iso_count = acpi_get_iso_count();
-    for (uint32_t i = 0; i < iso_count; i++) {
-        uint8_t source;
-        uint32_t global;
-        if (acpi_get_iso(i, &source, &global, NULL) && source == pin) {
-            actual_pin = global;
-            break;
-        }
-    }
-
-    if (actual_pin >= ioapic_max_entries) return;
-
-    uint32_t low = ioapic_read(IOAPIC_REDTBL(actual_pin));
+    uint32_t low = ioapic_read(IOAPIC_REDTBL(pin));
     low |= REDIR_MASKED;
-    ioapic_write(IOAPIC_REDTBL(actual_pin), low);
+    ioapic_write(IOAPIC_REDTBL(pin), low);
+}
+
+/* True iff the IRQ's redirection entry is masked (or it has no pin). */
+bool ioapic_irq_is_masked(uint32_t irq)
+{
+    uint32_t pin;
+    if (!ioapic_resolve_pin(irq, &pin)) return true;
+    return (ioapic_read(IOAPIC_REDTBL(pin)) & REDIR_MASKED) != 0;
 }
 
 #endif /* PLATFORM_X86_64 */

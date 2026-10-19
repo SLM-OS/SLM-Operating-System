@@ -14,7 +14,7 @@ Performance measurements across all supported platforms.
 | QEMU virt | Cortex-A76 (emulated) | 4 | N/A | 1 GB | Primary dev |
 | Raspberry Pi 5 | BCM2712 Cortex-A76 | 4 | 2.4 GHz | 4 GB | Hardware verified |
 | Jetson Orin Nano | Cortex-A78AE | 6 | 1.5 GHz | 8 GB | Blocked (kexec RAS) |
-| x86-64 (QEMU) | max | 4 | N/A | 256 MB | Experimental |
+| x86-64 (QEMU) | max | 4 | N/A | 1 GB | Experimental |
 
 ---
 

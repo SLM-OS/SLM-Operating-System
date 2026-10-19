@@ -269,12 +269,20 @@ static void delay_ms(uint32_t ms)
  */
 extern void tss_install_current_cpu(uint32_t cpu_id);
 
+/* Count of APs that entered ap_entry_64 with a frame pointer that is not
+ * 16-byte aligned, i.e. RSP % 16 != 8 at function entry (SysV ABI).
+ * Read by test_x86_boot.c as a regression check for #237. */
+volatile uint32_t x86_ap_entry_misaligned;
+
 static void ap_entry_64(uint32_t logical_cpu_id)
 {
-    /* Install this AP's TSS + IST1 BEFORE any interrupt can fire.
-     * The shared IDT has LAPIC timer vector 48 flagged ist=1; without
-     * a loaded TR the first tick #TS-faults. Must run before
-     * timer_percpu_init() enables the local LAPIC timer. A1 / P1-1. */
+    if (((uintptr_t)__builtin_frame_address(0) & 15) != 0)
+        __atomic_add_fetch(&x86_ap_entry_misaligned, 1, __ATOMIC_RELAXED);
+
+    /* Install this AP's TSS + IST1 BEFORE any interrupt can fire, so
+     * any IDT vector flagged ist>0 has a loaded TR (a missing TR would
+     * #TS-fault). The timer/resched vectors are ist=0 since #237, but
+     * TR stays loaded for future IST vectors. A1 / P1-1. */
     tss_install_current_cpu(logical_cpu_id);
 
     /* Initialize per-CPU LAPIC */
@@ -728,11 +736,6 @@ void cache_flush_range(void *addr, size_t size)
 {
     (void)addr; (void)size;
 }
-
-/* ---- Lua shell stub (for Makefile.test builds without Lua library) ---- */
-#if !defined(SLM_INTEGRATED_BUILD) || !defined(__LUA_LINKED__)
-void __attribute__((weak)) lua_shell_init(void) {}
-#endif
 
 /* ---- VMM stats stub ---- */
 
