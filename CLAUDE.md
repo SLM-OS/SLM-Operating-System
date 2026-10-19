@@ -169,7 +169,7 @@ systemd-run --user --scope -q \
 
 Caps to apply if you must run QEMU directly:
 
-- `-m 1G` (ARM64) / `-m 256M` (x86-64) — guest RAM. Match `QEMU_MEMORY` in the Makefile.
+- `-m 1G` (ARM64 and x86-64) — guest RAM. Match `QEMU_MEMORY` in the Makefile.
 - `-accel tcg,tb-size=128` — cap the TCG translation buffer at 128 MB (the second line of defense if systemd-run is unavailable for some reason).
 - The `systemd-run` wrapper above — the *only* reliable hard cap on total process memory.
 

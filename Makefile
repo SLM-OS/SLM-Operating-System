@@ -203,7 +203,10 @@ endif
 ifeq ($(PLATFORM),X86_64)
     QEMU_MACHINE := q35
     QEMU_CPU := max
-    QEMU_MEMORY := 256M
+    # 1G, same as ARM64 QEMU: the shared test suite needs the default
+    # 256 + 128 MB model-memory pools plus a 48 MB (order-14, 64 MB
+    # buddy block) FAT32 ramdisk. 256M could satisfy neither (#237).
+    QEMU_MEMORY := 1G
     QEMU_CORES := 4
 else
     QEMU_MACHINE := virt

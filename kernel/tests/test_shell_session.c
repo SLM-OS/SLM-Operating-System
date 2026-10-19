@@ -110,6 +110,9 @@ static void capture_init(struct shell_io *io, struct capture_ctx *c)
     c->open        = true;
     c->next_rx     = -1;
 
+    /* Optional hooks (echo_enabled, read_buf, ...) must be NULL, not
+     * stack garbage (#237). */
+    memset(io, 0, sizeof(*io));
     io->read_char     = capture_read_char;
     io->try_read_char = capture_try_read_char;
     io->write         = capture_write;

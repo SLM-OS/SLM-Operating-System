@@ -977,8 +977,9 @@ no-op.
 
 The x86-64 handler calls `schedule()` directly (NOT `scheduler_tick()`) so
 quantum accounting stays owned by the LAPIC timer. The reschedule IPI is
-gated through IDT entry 49 with `ist=1`, sharing IST1 with the timer —
-see A1 in `docs/archive/plans/x86-64-capstone-gap-closure-plan.md` for the stack rationale.
+gated through IDT entry 49 with `ist=0`, like the timer: both may call
+`schedule()` from the ISR, so they must run on the interrupted task's stack
+rather than IST1 (#237; see `docs/smp.md` §"IPI / Cross-CPU Notification").
 
 ## Periodic load rebalance (`sched_rebalance_tick`)
 
