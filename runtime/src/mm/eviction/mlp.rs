@@ -40,7 +40,24 @@
 //! rather than a pure all-GPU number, and the argmax compares an
 //! fp32 GPU score against int8 CPU scores. Batching
 //! 8 candidates × 27 features into a single dispatch is the proper
-//! shape and is tracked as the follow-up work on top of PR-6.
+//! shape and is tracked in #1020.
+//!
+//! **v1 limitation: dispatch runs under the allocator and registry
+//! locks.** `select_victim` is reached from
+//! `model_mem::evict_and_retry` with the pool allocator `SpinGuard`
+//! held, and through `registry::with_active_policy_for_pool` with
+//! `REGISTRY_LOCK` held. A GPU-routed candidate therefore takes
+//! `g_gpu_dispatch_lock` (try-lock, IRQs off) and busy-polls GA10B
+//! inside both spinlocks — up to the 2 s `ga10b_submit_and_poll`
+//! timeout when GR faults (the 2026-05-17 FECS_ERROR_PENDING case),
+//! during which every other CPU allocating model memory spins. The
+//! existing mitigations bound frequency, not duration: at most one
+//! dispatch per 50 ms window, try-lock instead of a blocking acquire
+//! (no deadlock), and the #552 circuit breaker after repeated
+//! failures. The path is reachable only with both opt-in toggles on,
+//! which requires a GPU. Moving the GPU scoring outside both locks
+//! (score a snapshot, then re-validate under the lock) is part of the
+//! #1020 restructure.
 
 use alloc::vec::Vec;
 
@@ -75,6 +92,9 @@ extern "C" {
 
     /// Master `gpu use inference` toggle (also gates the MNIST
     /// fastpath in `inference/engine.rs`).
+    ///
+    /// SAFETY: no arguments; an acquire atomic-bool read in C with no
+    /// side effects. Callable from any context.
     fn slm_gpu_inference_enabled() -> i32;
 }
 

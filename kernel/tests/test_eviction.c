@@ -1284,7 +1284,9 @@ static void test_bench_all_policies(void)
                     (unsigned long)gpu_attempts,
                     (unsigned long)gpu_ok,
                     (unsigned long)gpu_rl,
-                    (unsigned long)(gpu_attempts - gpu_ok - gpu_rl));
+                    (unsigned long)(gpu_attempts > gpu_ok + gpu_rl
+                                    ? gpu_attempts - gpu_ok - gpu_rl
+                                    : 0));
         run_one_bench("cacheus");
     } else {
         uart_printf("  [BENCH] gpu use inference/eviction on rejected "

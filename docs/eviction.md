@@ -592,6 +592,18 @@ scores of the same model. Bench numbers taken with the toggle on are a
 mixed GPU + CPU cost, not a GPU latency. Batched `27 × N` dispatch is
 tracked in [#1020](https://github.com/SLM-OS/SLM-Operating-System/issues/1020).
 
+**Known limitation — GPU dispatch under spinlocks.** `select_victim`
+runs from `model_mem::evict_and_retry` with the pool allocator lock
+held, and inside `REGISTRY_LOCK`. A GPU-routed candidate then takes the
+GPU dispatch try-lock with IRQs masked and polls GA10B for completion,
+so a faulting dispatch can hold both locks for up to the 2 s poll
+timeout while other CPUs spin on model-memory allocation. The 50 ms
+rate limiter, the try-lock (no deadlock) and the #552 circuit breaker
+bound how often this happens, not how long one occurrence lasts. The
+path is reachable only with both opt-in toggles on, which requires a
+GPU, so no default build is affected. Scoring outside the locks is part
+of the #1020 restructure.
+
 **Observability.** `eviction stats` prints
 `GPU dispatch: attempts N, ok N, fallback N (rate-limited N)` (per
 candidate, since boot) and the current `inference` / `eviction` toggle
