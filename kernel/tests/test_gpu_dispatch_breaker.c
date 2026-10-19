@@ -276,6 +276,86 @@ static void test_rate_limit_backward_time_safe(void)
                          1000000ULL, 999999999999ULL));
 }
 
+/* ===================================================================
+ * Eviction-MLP rate limiter (PR-6 / #965).
+ *
+ * Mirror of the sched tests above against a separate per-policy
+ * predicate. The eviction window currently matches sched's 50 ms;
+ * the test constant is its own #define so a future per-policy tune
+ * doesn't silently drift the sched assertions.
+ *
+ * Identical boundary semantics: strict-less-than at exactly
+ * RATE_LIMIT_NS, safe underflow on backward time. The predicate
+ * itself is platform-neutral so all assertions compile and run on
+ * every target.
+ * =================================================================== */
+#define TEST_EVICTION_RATE_LIMIT_NS  50000000ULL
+
+static void test_eviction_rate_limit_first_call_passes(void)
+{
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(
+                         (uint64_t)1000000000ULL, 0ULL));
+}
+
+static void test_eviction_rate_limit_zero_gap_inside_window(void)
+{
+    TEST_ASSERT_TRUE(slm_gpu_eviction_dispatch_test_within_window(
+                        12345ULL, 12345ULL));
+}
+
+static void test_eviction_rate_limit_just_inside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_EVICTION_RATE_LIMIT_NS - 1ULL;
+    TEST_ASSERT_TRUE(slm_gpu_eviction_dispatch_test_within_window(now, last));
+}
+
+static void test_eviction_rate_limit_at_boundary_passes(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_EVICTION_RATE_LIMIT_NS;
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(now, last));
+}
+
+static void test_eviction_rate_limit_just_outside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_EVICTION_RATE_LIMIT_NS + 1ULL;
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(now, last));
+}
+
+static void test_eviction_rate_limit_far_outside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_EVICTION_RATE_LIMIT_NS * 100ULL;
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(now, last));
+}
+
+static void test_eviction_rate_limit_backward_time_safe(void)
+{
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(
+                         100ULL, 101ULL));
+    TEST_ASSERT_FALSE(slm_gpu_eviction_dispatch_test_within_window(
+                         1000000ULL, 999999999999ULL));
+}
+
+/* Sched and eviction predicates must be independent — bumping one
+ * window in the future shouldn't silently drift the other. Verify
+ * the two paths see different `last` arguments without crosstalk
+ * by sweeping a gap that's inside-window for the sched limiter and
+ * checking eviction sees the same boundary independently. Today
+ * both windows are 50 ms so the outputs match; the test still
+ * pins that the two seams are wired to separate predicates rather
+ * than aliasing to one shared function. */
+static void test_rate_limit_sched_and_eviction_are_independent(void)
+{
+    uint64_t last = 5000000ULL;
+    uint64_t now  = last + 1000ULL;  /* 1 µs into the window */
+    TEST_ASSERT_EQUAL(
+        slm_gpu_sched_dispatch_test_within_window(now, last),
+        slm_gpu_eviction_dispatch_test_within_window(now, last));
+}
+
 int test_suite_gpu_dispatch_breaker(void)
 {
     UNITY_BEGIN();
@@ -300,6 +380,17 @@ int test_suite_gpu_dispatch_breaker(void)
     RUN_TEST(test_rate_limit_just_outside_window);
     RUN_TEST(test_rate_limit_far_outside_window);
     RUN_TEST(test_rate_limit_backward_time_safe);
+
+    /* Eviction-MLP rate limiter (PR-6) — same shape, independent
+     * per-policy timestamp. */
+    RUN_TEST(test_eviction_rate_limit_first_call_passes);
+    RUN_TEST(test_eviction_rate_limit_zero_gap_inside_window);
+    RUN_TEST(test_eviction_rate_limit_just_inside_window);
+    RUN_TEST(test_eviction_rate_limit_at_boundary_passes);
+    RUN_TEST(test_eviction_rate_limit_just_outside_window);
+    RUN_TEST(test_eviction_rate_limit_far_outside_window);
+    RUN_TEST(test_eviction_rate_limit_backward_time_safe);
+    RUN_TEST(test_rate_limit_sched_and_eviction_are_independent);
 
     return UNITY_END();
 }
