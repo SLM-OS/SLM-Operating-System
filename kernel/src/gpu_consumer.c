@@ -53,6 +53,15 @@ bool gpu_consumer_enabled(enum gpu_consumer c)
     return atomic_load_explicit(&g_consumer_enabled[c], memory_order_acquire);
 }
 
+/* Test seam — declared in slm_ffi_test.h. Bypasses validation and
+ * leaves last_change_ms alone (it records operator actions only). */
+void gpu_consumer_test_force(int consumer, bool enabled)
+{
+    if ((unsigned)consumer >= GPU_CONSUMER_COUNT) return;
+    atomic_store_explicit(&g_consumer_enabled[consumer], enabled,
+                          memory_order_release);
+}
+
 uint64_t gpu_consumer_last_change_ms(enum gpu_consumer c)
 {
     if ((unsigned)c >= GPU_CONSUMER_COUNT) return 0;
@@ -123,18 +132,15 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
      *              is returned via `out_reason` to make the gap
      *              visible in `gpu use status`.
      *
-     *   eviction:  SCAFFOLDED ONLY. The eviction trait now exposes
-     *              `EvictionPolicy::has_gpu_backend()` (see
-     *              docs/design/gpu-policy-models.md PR-4) and the
-     *              Rust→C trampoline `eviction_active_policy_has_gpu_backend`
-     *              scans both pools. Every shipped policy
-     *              (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) returns false
-     *              today; the toggle accepts on/off so operators
-     *              can pre-configure intent before a GPU-capable
-     *              eviction policy + matching
-     *              `slm_gpu_run_eviction_inference` dispatch land
-     *              (PR-6). Symmetric accept-with-warning behavior
-     *              to sched. */
+     *   eviction:  WIRED for `mlp` (PR-6, #965). The Rust→C
+     *              trampoline `eviction_active_policy_has_gpu_backend`
+     *              scans both pools for `EvictionPolicy::has_gpu_backend()`;
+     *              only `MlpPolicy` returns true (CACHEUS's embedded
+     *              MLP expert is CPU-only). Dispatch additionally
+     *              requires the master `inference` flag — see
+     *              `eviction_gpu_eligible` in runtime/src/mm/eviction/
+     *              mlp.rs. Other policies get the same accept-with-
+     *              warning behavior as sched. */
     switch (c) {
     case GPU_CONSUMER_SCHED:
         if (!active_sched_policy_has_gpu_backend()) {
@@ -181,18 +187,17 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
         } else if (out_reason) {
-            /* PR-6 of gpu-policy-models.md: when MlpPolicy (or any
-             * other GPU-backed eviction policy) is active, the next
-             * `select_victim` will try `slm_gpu_run_eviction_inference`
-             * before falling back to CPU. Single-call dispatch is
-             * ~1–2 ms steady-state (smaller than sched-MLP's ~5 ms);
-             * CPU mlp_predict is sub-µs on classical paths but ~129 µs
-             * with `EVICTION_MODELS=ON` real weights. Surface this as
-             * a "note:" line so the latency cliff isn't a surprise on
-             * the first eviction storm after the toggle flips. */
-            *out_reason = "perf note — eviction MLP now dispatches each "
-                          "select_victim via GPU (~1–2 ms); fallback to "
-                          "CPU on dispatch error or kexec without producer";
+            /* PR-6 of gpu-policy-models.md: when MlpPolicy is active,
+             * `select_victim` tries `slm_gpu_run_eviction_inference`
+             * per candidate (at most one success per 50 ms window)
+             * before falling back to CPU. No GPU dispatch latency has
+             * been measured for eviction on hardware yet (#965), so
+             * the note states routing, not a number. Routing also
+             * needs the master `gpu use inference` toggle; say so,
+             * since forgetting it silently keeps everything on CPU. */
+            *out_reason = "perf note — eviction mlp tries GPU per "
+                          "candidate (needs `gpu use inference on`; 50 ms "
+                          "rate limit; CPU fallback) — see `eviction stats`";
         }
         break;
 

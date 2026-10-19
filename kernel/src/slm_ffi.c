@@ -496,6 +496,52 @@ bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last)
     return eviction_dispatch_within_rate_limit(now, last);
 }
 
+/* Eviction-MLP GPU dispatch counters (#965 acceptance criterion 4).
+ *
+ * Mirrors the per-op `g_op_dispatch_attempts` / `g_op_dispatch_ok`
+ * pair that `slm gpu` reports, so `eviction stats` can tell GPU-served
+ * scores apart from CPU fallbacks. `attempts` counts every entry into
+ * `slm_gpu_run_eviction_inference` (one per candidate row while both
+ * `gpu use inference` and `gpu use eviction` are on); `ok` counts
+ * dispatches that returned a GPU score; `rate_limited` is the subset
+ * of fallbacks rejected by the 50 ms window before touching the GPU.
+ * `attempts - ok - rate_limited` is the downstream-error fallback
+ * count (no handoff, try-lock contention, breaker, GA10B fault).
+ *
+ * Platform-neutral so the non-Jetson stub records attempts too —
+ * that is what lets the QEMU toggle-matrix tests in test_eviction.c
+ * observe "GPU attempted" without a GPU. Relaxed ordering: same
+ * single-reader-after-the-fact pattern as the per-op counters. */
+static _Atomic uint64_t g_eviction_gpu_attempts;
+static _Atomic uint64_t g_eviction_gpu_ok;
+static _Atomic uint64_t g_eviction_gpu_rate_limited;
+
+void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
+                                     uint64_t *out_ok,
+                                     uint64_t *out_rate_limited)
+{
+    if (out_attempts) {
+        *out_attempts = atomic_load_explicit(&g_eviction_gpu_attempts,
+                                             memory_order_relaxed);
+    }
+    if (out_ok) {
+        *out_ok = atomic_load_explicit(&g_eviction_gpu_ok,
+                                       memory_order_relaxed);
+    }
+    if (out_rate_limited) {
+        *out_rate_limited = atomic_load_explicit(&g_eviction_gpu_rate_limited,
+                                                 memory_order_relaxed);
+    }
+}
+
+void slm_gpu_eviction_dispatch_stats_reset(void)
+{
+    atomic_store_explicit(&g_eviction_gpu_attempts, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_ok, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_rate_limited, 0u,
+                          memory_order_relaxed);
+}
+
 #ifdef PLATFORM_JETSON_ORIN_NANO
 /* Per-kind dispatch lock — serialises every `slm_gpu_*` entry
  * point (run / set_input / set_input_fill / run_with_input and
@@ -1121,10 +1167,14 @@ int slm_gpu_run_eviction_inference(const void *features_bytes,
      * update on success), differing only in the per-policy atomic
      * timestamp and the rate-limit constant. See
      * slm_gpu_run_sched_inference above for the full rationale. */
+    atomic_fetch_add_explicit(&g_eviction_gpu_attempts, 1u,
+                              memory_order_relaxed);
     uint64_t now = slm_get_time_ns();
     uint64_t last = atomic_load_explicit(&g_eviction_dispatch_last_ns,
                                           memory_order_relaxed);
     if (eviction_dispatch_within_rate_limit(now, last)) {
+        atomic_fetch_add_explicit(&g_eviction_gpu_rate_limited, 1u,
+                                  memory_order_relaxed);
         return -1;
     }
 
@@ -1135,6 +1185,20 @@ int slm_gpu_run_eviction_inference(const void *features_bytes,
         atomic_store_explicit(&g_eviction_dispatch_last_ns,
                               slm_get_time_ns(),
                               memory_order_relaxed);
+        /* One-shot log on the first GPU-served score so a serial
+         * capture shows the fastpath actually engaged (otherwise a
+         * silent CPU fallback is indistinguishable from success).
+         * Printed after try_run returns, i.e. outside the dispatch
+         * lock. The counters above carry the ongoing cadence; the
+         * latch is once-per-boot and not cleared by the stats reset. */
+        static atomic_bool logged;
+        atomic_fetch_add_explicit(&g_eviction_gpu_ok, 1u,
+                                  memory_order_relaxed);
+        if (!atomic_exchange_explicit(&logged, true,
+                                      memory_order_relaxed)) {
+            uart_printf("[INFO] eviction GPU fastpath dispatching "
+                        "(kind=EVICTION_QNET)\n");
+        }
     }
     return rc;
 }
@@ -1190,6 +1254,10 @@ int slm_gpu_run_eviction_inference(const void *features_bytes,
                                     void *score_out)
 {
     (void)features_bytes; (void)features_bytes_len; (void)score_out;
+    /* Count the attempt even with no GPU so the toggle-matrix tests
+     * can observe routing on QEMU; every attempt is a fallback. */
+    atomic_fetch_add_explicit(&g_eviction_gpu_attempts, 1u,
+                              memory_order_relaxed);
     return -1;
 }
 void slm_gpu_dispatch_breaker_reset(void) { }

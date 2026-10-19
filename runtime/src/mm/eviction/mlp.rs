@@ -15,22 +15,30 @@
 //!
 //! ## GPU dispatch (PR-6 of docs/design/gpu-policy-models.md)
 //!
-//! When the user flips `gpu use eviction on`, [`MlpPolicy`] tries
+//! When the operator flips both `gpu use inference on` (master) and
+//! `gpu use eviction on`, [`MlpPolicy`] tries
 //! [`slm_gpu_run_eviction_inference`] for each candidate before
 //! falling back to the CPU path. The dispatch consumes the v6 channel
 //! handoff staged by `scripts/gpu-kernel-eviction-qnet.c
 //! --preserve-for-kexec` and inherited across kexec. Dispatch failure
 //! (no producer ran, rate-limit window, try-lock contention, or any
-//! downstream GA10B error) silently falls back to CPU per-candidate.
+//! downstream GA10B error) silently falls back to CPU per-candidate;
+//! `eviction stats` reports attempts / ok / fallback (rate-limited)
+//! so the two cases can be told apart. GPU routing additionally
+//! requires the compiled-in models (`EVICTION_MODELS=ON`) with no
+//! runtime MLP blob active — see `MlpPolicy::gpu_route`.
 //!
 //! **v1 limitation: per-candidate dispatch.** This module dispatches
 //! the GPU once per candidate (8 dispatches per `select_victim` on
 //! the standard candidate set), not once for all candidates. Each
 //! dispatch is gated by the system-wide 50 ms rate limiter
 //! (`g_eviction_dispatch_last_ns` in `slm_ffi.c`), so the common
-//! pattern in practice is "1 GPU dispatch succeeds + remaining
-//! fall back to CPU". The bench latency consequently reflects this
-//! mixed-mode cost rather than a pure all-GPU number. Batching
+//! pattern in practice is "at most 1 GPU dispatch per 50 ms, every
+//! other candidate on CPU" — i.e. 1 GPU + 7 CPU fallbacks for a
+//! `select_victim` that opens a fresh window, 0 + 8 for one inside
+//! it. The bench latency consequently reflects this mixed-mode cost
+//! rather than a pure all-GPU number, and the argmax compares an
+//! fp32 GPU score against int8 CPU scores. Batching
 //! 8 candidates × 27 features into a single dispatch is the proper
 //! shape and is tracked as the follow-up work on top of PR-6.
 
@@ -64,13 +72,23 @@ extern "C" {
     /// this purpose (sched checks the same flag directly in C; the
     /// eviction MLP needs a Rust-callable predicate).
     fn slm_gpu_consumer_eviction_enabled() -> i32;
+
+    /// Master `gpu use inference` toggle (also gates the MNIST
+    /// fastpath in `inference/engine.rs`).
+    fn slm_gpu_inference_enabled() -> i32;
 }
 
-/// `MlpPolicy`'s "should we even try GPU?" gate. Cheap atomic-bool
-/// read in C; mirrored from the sched-side `gpu_consumer_enabled
-/// (GPU_CONSUMER_SCHED)` pattern. False on any non-Jetson build.
+/// `MlpPolicy`'s "should we even try GPU?" gate: the master
+/// `gpu use inference` toggle AND the per-consumer `gpu use eviction`
+/// toggle, per the #965 spec. Either off → CPU only. Both are cheap
+/// atomic-bool reads in C. Neither can be switched on when
+/// `slm_gpu_available()` is 0, so this is false on non-Jetson
+/// production builds (tests force the flags via a seam).
 fn eviction_gpu_eligible() -> bool {
-    unsafe { slm_gpu_consumer_eviction_enabled() != 0 }
+    unsafe {
+        slm_gpu_inference_enabled() != 0
+            && slm_gpu_consumer_eviction_enabled() != 0
+    }
 }
 
 /// Try a GPU dispatch for one candidate's 27-element feature row.
@@ -94,13 +112,28 @@ struct RuntimeCache {
     model: RuntimeMlpModel,
 }
 
-#[derive(Default)]
 pub struct MlpPolicy {
     runtime_cache: Option<RuntimeCache>,
+    /// Whether this instance may route scores to the GPU. `true` for
+    /// the standalone `mlp` policy; `false` for the expert embedded in
+    /// CACHEUS, which reports `has_gpu_backend() == false` and so must
+    /// not dispatch behind the operator's back (see [`Self::cpu_only`]).
+    gpu_capable: bool,
+}
+
+impl Default for MlpPolicy {
+    fn default() -> Self { Self::new() }
 }
 
 impl MlpPolicy {
-    pub fn new() -> Self { Self { runtime_cache: None } }
+    pub fn new() -> Self { Self { runtime_cache: None, gpu_capable: true } }
+
+    /// CPU-only instance for composition inside CACHEUS. CACHEUS has
+    /// no GPU backend in PR-6 (#965 diverges from its spec here): its
+    /// `has_gpu_backend()` stays false, so `gpu use eviction on` warns
+    /// "scaffold only" under CACHEUS, and this constructor keeps that
+    /// warning truthful by never attempting a GPU dispatch.
+    pub fn cpu_only() -> Self { Self { runtime_cache: None, gpu_capable: false } }
 
     fn refresh_runtime_cache(&mut self) {
         let active_checksum = blob_status(BlobKind::Mlp)
@@ -117,6 +150,22 @@ impl MlpPolicy {
         } else {
             self.runtime_cache = None;
         }
+    }
+
+    /// Whether this call may try the GPU. Beyond the operator toggles,
+    /// the CPU fallback must be computing the *same model* the GPU
+    /// runs, because per-candidate dispatch mixes GPU and CPU scores
+    /// inside one argmax. The PR-5 producer bakes the compiled-in
+    /// weights (`generated/mlp_policy_f32.rs`), so GPU routing is
+    /// skipped when the CPU side would score with something else:
+    /// the 0.5 stub (`EVICTION_MODELS=OFF`) or a runtime OTA blob
+    /// (`eviction model load mlp ...`). What remains is fp32 (GPU)
+    /// vs int8 (CPU) quantisation of one model.
+    fn gpu_route(&self) -> bool {
+        self.gpu_capable
+            && generated::MODELS_AVAILABLE
+            && self.runtime_cache.is_none()
+            && eviction_gpu_eligible()
     }
 
     /// CPU-only scoring path. Routes through the runtime blob if
@@ -162,7 +211,7 @@ impl EvictionPolicy for MlpPolicy {
         // independently — when the rate limit kicks in mid-loop,
         // remaining candidates fall back to CPU per-candidate (the
         // try_gpu_score path returns None silently).
-        let use_gpu = eviction_gpu_eligible();
+        let use_gpu = self.gpu_route();
 
         let mut best = 0usize;
         let mut best_score = f32::MIN;
@@ -178,7 +227,7 @@ impl EvictionPolicy for MlpPolicy {
 
     fn score(&mut self, candidates: &[BlockMeta]) -> Vec<f32> {
         self.refresh_runtime_cache();
-        let use_gpu = eviction_gpu_eligible();
+        let use_gpu = self.gpu_route();
         let features = extract_features(candidates);
         features
             .iter()
@@ -197,5 +246,5 @@ impl EvictionPolicy for MlpPolicy {
     /// --preserve-for-kexec`) to have staged a v6 handoff before
     /// kexec; if no handoff is present, `slm_gpu_run_eviction_inference`
     /// silently returns -1 and `score_row` falls back to CPU.
-    fn has_gpu_backend(&self) -> bool { true }
+    fn has_gpu_backend(&self) -> bool { self.gpu_capable }
 }

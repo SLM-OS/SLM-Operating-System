@@ -1343,10 +1343,28 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * different CPUs fan out cleanly into CPU fallbacks rather than
  * pile up IRQ-off behind the dispatch lock. Failures (including
  * rate-limit rejection) are silent for the caller — they fall back
- * to CPU `mlp_predict` in `runtime/src/mm/eviction/mlp.rs`. */
+ * to CPU `mlp_predict` in `runtime/src/mm/eviction/mlp.rs`, and are
+ * counted by `slm_gpu_eviction_dispatch_stats` below. The first
+ * successful dispatch after boot logs
+ * "[INFO] eviction GPU fastpath dispatching". */
 int slm_gpu_run_eviction_inference(const void *features_bytes,
                                     size_t features_bytes_len,
                                     void *score_out);
+
+/*
+ * Eviction-MLP GPU dispatch counters (#965), surfaced by
+ * `eviction stats`. `attempts` = calls into
+ * `slm_gpu_run_eviction_inference`; `ok` = GPU-served scores;
+ * `rate_limited` = fallbacks rejected by the 50 ms window. The
+ * remaining `attempts - ok - rate_limited` fell back on a downstream
+ * error. Attempts are counted on every platform (the non-Jetson stub
+ * counts and fails), so routing is observable under QEMU. Any out
+ * pointer may be NULL.
+ */
+void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
+                                     uint64_t *out_ok,
+                                     uint64_t *out_rate_limited);
+void slm_gpu_eviction_dispatch_stats_reset(void);
 
 /*
  * GPU dispatch circuit breaker (#552 mitigation).
