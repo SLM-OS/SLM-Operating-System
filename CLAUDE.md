@@ -111,7 +111,7 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 - CMake 3.20+
 - QEMU (qemu-system-aarch64 for ARM, qemu-system-x86_64 for x86)
 - grub-mkrescue — for x86-64 ISO creation (test and boot)
-- Rust toolchain with `aarch64-unknown-none` and `x86_64-unknown-none` targets
+- Rust toolchain with `aarch64-unknown-none` and `x86_64-unknown-none` targets — pinned by `rust-toolchain.toml` (rustup installs it automatically on first build)
 
 ### Build Commands
 
