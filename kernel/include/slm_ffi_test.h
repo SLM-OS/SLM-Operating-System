@@ -2,8 +2,9 @@
  * slm_ffi_test.h — test-only seams into slm_ffi internals.
  *
  * These declarations exist so unit tests can drive internal state
- * machines (today: the GPU dispatch circuit breaker in
- * `kernel/tests/test_gpu_dispatch_breaker.c`) without going through
+ * machines (the GPU dispatch circuit breaker in
+ * `kernel/tests/test_gpu_dispatch_breaker.c`, the GPU consumer
+ * toggles in `kernel/tests/test_eviction.c`) without going through
  * a real GPU dispatch. They are deliberately separated from the
  * public `slm_ffi.h` so production translation units that include
  * the FFI header can't reach the seams by accident — only test
@@ -58,6 +59,17 @@ bool slm_gpu_sched_dispatch_test_within_window(uint64_t now, uint64_t last);
  * comfortable under the timer / RX-stall watchdog deadlines that
  * #651 originally tripped. */
 bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last);
+
+/* Force a `gpu_consumer` toggle (`enum gpu_consumer` value) without
+ * `gpu_consumer_set`'s validation (#965 toggle-matrix tests).
+ *
+ * `gpu_consumer_set(c, true)` returns NODEV when `slm_gpu_available()`
+ * is 0, so on QEMU no toggle can be switched on through the public
+ * API. This seam stores the flag directly so tests can exercise the
+ * eviction-MLP routing gate on every platform. Defined in
+ * `kernel/src/gpu_consumer.c`. Out-of-range `consumer` is ignored.
+ * Tests must restore the prior state before returning. */
+void gpu_consumer_test_force(int consumer, bool enabled);
 
 #ifdef __cplusplus
 }

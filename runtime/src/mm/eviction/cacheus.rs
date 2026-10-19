@@ -135,7 +135,7 @@ impl CacheusSelector {
     pub fn ml_only() -> Self {
         let experts: Vec<Box<dyn EvictionPolicy + Send>> = alloc::vec![
             Box::new(XGBoostPolicy::new()),
-            Box::new(MlpPolicy::new()),
+            Box::new(MlpPolicy::cpu_only()),
         ];
         Self::new_with_defaults(
             experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::MlOnly)
@@ -150,7 +150,7 @@ impl CacheusSelector {
             Box::new(LfuPolicy::new()),
             Box::new(SlmHeuristicPolicy::new()),
             Box::new(XGBoostPolicy::new()),
-            Box::new(MlpPolicy::new()),
+            Box::new(MlpPolicy::cpu_only()),
         ];
         Self::new_with_defaults(
             experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::All5)
@@ -221,14 +221,14 @@ impl CacheusSelector {
         let experts: Vec<Box<dyn EvictionPolicy + Send>> = match cfg.expert_pool {
             ExpertPool::MlOnly => alloc::vec![
                 Box::new(XGBoostPolicy::new()),
-                Box::new(MlpPolicy::new()),
+                Box::new(MlpPolicy::cpu_only()),
             ],
             ExpertPool::All5 => alloc::vec![
                 Box::new(LruPolicy::new()),
                 Box::new(LfuPolicy::new()),
                 Box::new(SlmHeuristicPolicy::new()),
                 Box::new(XGBoostPolicy::new()),
-                Box::new(MlpPolicy::new()),
+                Box::new(MlpPolicy::cpu_only()),
             ],
         };
         let n = experts.len();

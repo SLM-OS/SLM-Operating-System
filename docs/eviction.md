@@ -557,30 +557,70 @@ amortizes and the MLP is marginal at small block sizes (see
   #981 item is the on-card config-blob shadow above (cacheus tracking
   classical until `eviction model clear cacheus_config`), not instability.
 
-**GPU dispatch status (as of 2026-05-17) — Jetson plumbing landed,
-end-to-end GPU bench delta blocked downstream; Pi 5 still CPU-only.**
-The numbers above are all host-CPU paths. PR-6 of
+**GPU dispatch status (as of 2026-10-18) — Jetson plumbing landed,
+no GPU-served eviction score observed on hardware yet; Pi 5 still
+CPU-only.** The numbers above are all host-CPU paths. PR-6 of
 [`docs/design/gpu-policy-models.md`](design/gpu-policy-models.md)
-wired `MlpPolicy` to dispatch the 9-op pipeline staged by
-`scripts/gpu-kernel-eviction-qnet.c` (PR-5) through the new
-`slm_gpu_run_eviction_inference` FFI; the trait method
-`EvictionPolicy::has_gpu_backend()` now returns `true` for
-`MlpPolicy`, and `gpu use eviction on` engages the GA10B path with
-a 50 ms per-candidate rate limiter and silent CPU fallback.
-Hardware verification on jetson-nano-1 (2026-05-17) confirms the
-kind=EVICTION_QNET handoff scan + channel inherit work end-to-end,
-but the compute dispatch itself faults inside the GR engine
-(`gr_intr=0x00080000` = `FECS_ERROR_PENDING`, `trapped_addr=0x80000000`)
-— the same fault class blocking W-series oplib dispatch through the
-rebuilt PDB after #969 (post-kexec channel-inherit infrastructure)
-landed. Resolution depends on the FECS `CTXSW_CHECKSUM_MISMATCH`
-(mb6=0x21) fix tracked under
-[#844](https://github.com/SLM-OS/SLM-Operating-System/issues/844);
-once that lands, wiring the eviction `ensure_bringup` through
-`ga10b_gmmu_rebuild_for_handoff` is a small follow-up that
-should produce a real GPU bench delta. On Pi 5 there is no
-GPU-side path in any form: VideoCore is intentionally stubbed and
-the AI HAT+ (Hailo-8L) is wedged at boundary IN ch=2 by
+([#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965))
+wires `MlpPolicy` to the 9-op pipeline staged by
+`scripts/gpu-kernel-eviction-qnet.c --preserve-for-kexec` (PR-5,
+#968) through the `slm_gpu_run_eviction_inference` FFI, and
+`MlpPolicy::has_gpu_backend()` now returns `true`. A candidate is
+offered to the GPU only when **all** of the following hold; otherwise,
+and on any dispatch failure, it is scored on the CPU silently:
+
+- `gpu use inference on` (master toggle) **and** `gpu use eviction on`.
+- The active policy is `mlp`. **CACHEUS has no GPU backend** — its
+  embedded MLP expert is constructed CPU-only (`MlpPolicy::cpu_only`)
+  and `CacheusSelector::has_gpu_backend()` stays `false`, so
+  `gpu use eviction on` under CACHEUS prints the "scaffold only"
+  warning and means it. (#965 asked for CACHEUS's MLP expert on GPU;
+  PR-6 does not do that.)
+- `EVICTION_MODELS=ON` with no runtime MLP blob active. The producer
+  bakes the compiled-in fp32 weights, so GPU routing is skipped when
+  the CPU fallback would score with a different model (the 0.5 stub,
+  or an `eviction model load mlp` blob).
+
+**Design divergence — per-candidate, not batched.** #965 specified one
+dispatch per pool snapshot. PR-6 dispatches once **per candidate row**,
+and every dispatch passes the 50 ms eviction rate limiter
+(`GPU_EVICTION_DISPATCH_RATE_LIMIT_NS`). A `select_victim` over the
+canonical 8 candidates is therefore at most **1 GPU dispatch + 7
+rate-limited CPU fallbacks** (0 + 8 when it starts inside an open
+window), and the argmax compares one fp32 GPU score against int8 CPU
+scores of the same model. Bench numbers taken with the toggle on are a
+mixed GPU + CPU cost, not a GPU latency. Batched `27 × N` dispatch is
+tracked in [#1020](https://github.com/SLM-OS/SLM-Operating-System/issues/1020).
+
+**Observability.** `eviction stats` prints
+`GPU dispatch: attempts N, ok N, fallback N (rate-limited N)` (per
+candidate, since boot) and the current `inference` / `eviction` toggle
+state; `fallback − rate-limited` is the downstream-error count (no
+handoff, try-lock contention, circuit breaker, GA10B fault). The first
+GPU-served score after boot logs
+`[INFO] eviction GPU fastpath dispatching (kind=EVICTION_QNET)` once.
+The QEMU suite pins the toggle matrix (`test_eviction_gpu_*` in
+`kernel/tests/test_eviction.c`: master off + consumer on → CPU, both on
+→ GPU attempted, consumer off → CPU, plus the CACHEUS and runtime-blob
+guards) through the non-Jetson stub, which counts attempts and always
+falls back.
+
+**Hardware status.** On 2026-05-17, jetson-nano-1 found the
+kind=EVICTION_QNET handoff and inherited the channel, but the compute
+dispatch faulted inside the GR engine (`gr_intr=0x00080000` =
+`FECS_ERROR_PENDING`, `trapped_addr=0x80000000`). This is the same fault
+class that blocks W-series oplib dispatch through the rebuilt PDB after
+#969 (post-kexec channel-inherit infrastructure) landed. A fix depends on
+the FECS context-switch work tracked under
+[#844](https://github.com/SLM-OS/SLM-Operating-System/issues/844). Post-kexec
+channel inherit itself succeeds on only about 65% of boots on either board
+(#844), so any future hardware claim needs a multi-boot `boot_test`
+ratio, not a single run. No Jetson GPU latency column exists yet. The
+#965 hardware criteria are still open: the GPU bench delta, the
+boot-test toggle gating, the serial `fastpath dispatching` capture, and
+re-evaluating the 1 µs target. On Pi 5 there is no GPU-side path in any
+form: VideoCore is intentionally stubbed and the AI HAT+ (Hailo-8L) is
+wedged at boundary IN ch=2 by
 [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682),
 plus there is no design pass for eviction-on-Hailo.
 
