@@ -28,14 +28,14 @@ The model memory system provides specialized allocation for AI model weights and
 │  │  Weight Pool (Read-Only)                                    │    │
 │  │  - Model parameters, embeddings, static data                │    │
 │  │  - Long-lived (loaded once, used many times)                │    │
-│  │  - Default: 256 MB aarch64 / 64 MB x86-64 (see Pool Sizing)  │    │
+│  │  - Default: 256 MB on QEMU (see Pool Sizing)                │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Workspace Pool (Read-Write)                                │    │
 │  │  - Activation tensors, KV cache, inference scratch          │    │
 │  │  - Per-inference (allocated, used, freed)                   │    │
-│  │  - Default: 128 MB aarch64 / 32 MB x86-64 (see Pool Sizing)  │    │
+│  │  - Default: 128 MB on QEMU (see Pool Sizing)                │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -43,36 +43,37 @@ The model memory system provides specialized allocation for AI model weights and
 
 ### Pool Sizing
 
-`runtime/src/lib.rs::rust_model_mem_init` selects pool sizes per
-`target_arch` so the request fits available RAM on each test target.
-The C kernel calls the FFI shim during boot; the Rust side picks the
-sizes below.
+Pool sizes come from `MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB` in
+`kernel/include/config.h`; the C boot path passes them to
+`runtime/src/lib.rs::rust_model_mem_init`.
 
-| Target | Weight pool | Workspace pool | Notes |
+| Platform | Weight pool | Workspace pool | Notes |
 |---|---|---|---|
-| `aarch64` (QEMU virt, Pi 5, Jetson) | 256 MB / 128 blocks | 128 MB / 64 blocks | 1 GB QEMU, ≥4 GB hardware. |
-| `x86_64` (QEMU q35, test-pc) | 64 MB / 32 blocks | 32 MB / 16 blocks | QEMU q35 only gets **256 MB total**; the aarch64 sizes oversubscribed PMM and silently left the allocator uninitialized. |
+| Jetson Orin Nano | 1024 MB / 512 blocks | 256 MB / 128 blocks | Weight pool at the 1 GiB buddy ceiling (#578). |
+| Pi 5 | 512 MB / 256 blocks | 256 MB / 128 blocks | Vision-class models. |
+| QEMU virt, x86-64 (q35 + test-pc), host harness | 256 MB / 128 blocks | 128 MB / 64 blocks | Both QEMU targets run with 1 GB guest RAM. |
 
-**Why the x86-64 numbers are so much smaller.** The QEMU q35 test
-machine the project uses for `make test PLATFORM=X86_64` is capped at
-256 MB of guest RAM (see `Makefile`'s `QEMU_MEMORY := 256M` for the
-x86-64 branch). With the kernel image, the buddy allocator's per-page
-metadata, the Rust heap, and the `lwip` reservations all coming out
-of the same pool, requesting 256 MB + 128 MB for model_mem leaves
-nothing — `pmm_alloc_pages(65536)` returned `NULL`, the Rust shim
-returned `-1`, and `INITIALIZED` stayed `0`. Every later
-`rust_model_alloc_weights` quietly returned a null `ModelHandle` and
-tests that didn't check init explicitly silently no-op'd.
+Each pool is one contiguous PMM block, so the request must fit as a
+single power-of-two buddy allocation. The x86-64 QEMU guest was
+previously 256 MB, which could never satisfy 256 + 128 MB: `pmm_alloc_pages`
+returned `NULL`, the Rust shim returned `-1`, and every later
+`rust_model_alloc_weights` returned a null `ModelHandle` (an x86-only
+64 / 32 MB override from f52c9f6f was lost when sizing moved into
+`config.h`). #237 raised the x86 `QEMU_MEMORY` to 1 GB to match ARM64
+QEMU; the same suite also needs a 48 MB FAT32 ramdisk (a 64 MB buddy
+block) on top of the pools.
 
-If a future model demands a larger pool, raise the per-arch numbers
-(both must stay multiples of 2 — the model_mem pool block size is 2
-MB) AND raise `QEMU_MEMORY` in the Makefile to leave the kernel
-headroom. The cross-platform smoke test
+If a future model demands a larger pool, raise the per-platform numbers
+(both must stay multiples of 2, the model_mem pool block size is 2 MB)
+AND raise `QEMU_MEMORY` in the Makefile to leave the kernel headroom.
+The cross-platform smoke test
 (`kernel/tests/test_model_mem_smoke.c::test_pools_initialized_with_blocks`)
-fails loudly if init regressed silently.
+fails loudly if init regressed silently, and
+`test_x86_boot.c::test_vmm_detected_ram` fails if the x86 guest shrinks
+below 256 MB.
 
 On Jetson Orin Nano (≥4 GB RAM, post-OP-TEE carveout) and Pi 5 (4 GB+),
-the aarch64 numbers are conservative — production model loads can
+the QEMU numbers are conservative — production model loads can
 scale them higher when the target is known.
 
 ---

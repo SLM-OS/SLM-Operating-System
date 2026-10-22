@@ -510,18 +510,22 @@ after pushing a task onto the target CPU's run queue. Per-platform:
 | Platform | Implementation | Notes |
 |---|---|---|
 | ARM64 (Pi 5, Jetson, QEMU virt) | `__asm__ volatile("sev")` broadcast | Wakes every CPU in WFE; target CPU's idle loop picks up the task on the next iteration. Broadcast is wasteful (N-1 idle wakeups per task add) but correct and depends on nothing beyond WFE semantics. Defined in `kernel/sched/smp.c`. |
-| x86-64 | LAPIC IPI on `RESCHED_VECTOR` (49) | `kernel/arch/x86_64/platform_x86.c`. Handler calls `schedule()` directly — not `scheduler_tick()` — so quantum accounting stays owned by the local LAPIC timer. Runs on IST1 via the per-CPU TSS. |
+| x86-64 | LAPIC IPI on `RESCHED_VECTOR` (49) | `kernel/arch/x86_64/platform_x86.c`. Handler calls `schedule()` directly — not `scheduler_tick()` — so quantum accounting stays owned by the local LAPIC timer. Runs on the interrupted task's stack (IST=0). |
 
 **x86-64 vector table:**
 
 | Vector | Purpose | IST |
 |---|---|---|
-| 48 | LAPIC timer (100 Hz, `scheduler_tick`) | 1 |
-| 49 | Reschedule IPI — `smp_notify_cpu` target | 1 |
+| 48 | LAPIC timer (100 Hz, `scheduler_tick`) | 0 |
+| 49 | Reschedule IPI — `smp_notify_cpu` target | 0 |
 
-Both share IST1 via the per-CPU TSS (see A1 in
-`docs/archive/plans/x86-64-capstone-gap-closure-plan.md`), so the ISRs cannot be
-corrupted by a task-stack overflow.
+Both run on the interrupted task's kernel stack. A1 in
+`docs/archive/plans/x86-64-capstone-gap-closure-plan.md` originally put them
+on IST1, but both handlers can call `schedule()` from the ISR: on IST1 the
+outgoing task's saved RSP pointed into the shared per-CPU IST stack, which
+the next timer IRQ overwrote. `schedule()`'s SP-range guard panicked on
+exactly this, so #237 moved them back to IST=0. The per-CPU TSS + IST1
+stack are still installed for future vectors that never context-switch.
 
 Both backends short-circuit when `logical_cpu == cpu_id()` (self-IPI
 is redundant — the caller is already running) and when `logical_cpu >=

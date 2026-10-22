@@ -331,6 +331,11 @@ static void hist_io_init(struct shell_io *io, struct hist_io_ctx *c)
     c->output[0]  = '\0';
     c->open       = true;
 
+    /* Zero the vtable first: optional hooks (echo_enabled, read_buf,
+     * ...) must be NULL, not stack garbage. Leaving them uninitialized
+     * made shell_read_command call through junk pointers on x86-64
+     * (#UD at a stack address, #237). */
+    memset(io, 0, sizeof(*io));
     io->read_char     = hist_io_read_char;
     io->try_read_char = hist_io_try_read_char;
     io->write         = hist_io_write;

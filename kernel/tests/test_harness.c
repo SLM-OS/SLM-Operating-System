@@ -88,20 +88,26 @@ void test_harness_init(void)
     uart_puts("\n");
 
 #if defined(PLATFORM_X86_64)
-    /* Production builds wire `pci` and `gpu` shell commands from
-     * shell_init() inside shell_task_entry. The test build never
-     * spawns the shell task — it runs the harness from main_task and
-     * exits via semihosting — so any test that asserts on these
-     * commands' presence (e.g. test_nvidia_gpu_shell_command_registered,
-     * test_x86_gpu_cmd_in_externals) needs the registrations to fire
-     * here. Replicating the shell_init platform block is the smallest
+    /* Production builds wire `pci`, `gpu` and the Lua commands from
+     * shell_init() inside shell_task_entry. The test build does spawn
+     * the shell task, but at TASK_PRIORITY_IDLE on CPU 0 it never gets
+     * scheduled while the harness runs from main_task (no `slmos>`
+     * prompt ever appears in the x86 test log), so shell_init() never
+     * runs. Any test that asserts on these commands' presence (e.g.
+     * test_nvidia_gpu_shell_command_registered,
+     * test_x86_gpu_cmd_in_externals,
+     * test_lua_shell_commands_registered_with_expected_mutation_modes,
+     * the test_shell_session `lua -e` tests) needs the registrations
+     * to fire here. Replicating the shell_init calls is the smallest
      * change that lets both code paths share the same registration
-     * function. */
+     * functions. */
     {
         extern void pci_register_shell_commands(void);
         extern void nvidia_gpu_register_shell_commands(void);
+        extern void lua_shell_init(void);
         pci_register_shell_commands();
         nvidia_gpu_register_shell_commands();
+        lua_shell_init();
     }
 #endif
 }

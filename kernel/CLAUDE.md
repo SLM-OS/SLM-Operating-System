@@ -459,8 +459,10 @@ may have just gained work on its run queue. API in
 - **x86-64** (`kernel/arch/x86_64/platform_x86.c`): LAPIC IPI on
   `RESCHED_VECTOR` (49). The handler calls `schedule()` directly —
   not `scheduler_tick()` — so quantum accounting stays owned by the
-  local timer. Runs on IST1 so a task-stack overflow cannot corrupt
-  the IPI frame.
+  local timer. Runs on the interrupted task's stack (IST=0), as does
+  the LAPIC timer: a vector that can `schedule()` from the ISR must
+  never use an IST stack, or the outgoing task's saved RSP points into
+  the shared IST stack that the next interrupt overwrites (#237).
 
 Both backends short-circuit self-notifications and out-of-range
 `cpu` ids. Replaces the previous

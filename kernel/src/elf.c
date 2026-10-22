@@ -514,7 +514,9 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
 
     /* Set up initial context */
 #if defined(PLATFORM_X86_64)
-    task->context.rsp = sp;
+    /* switch_to jmps (not calls) into elf_entry_wrapper, so reserve the
+     * SysV return-address slot: RSP % 16 == 8 at C function entry (#237). */
+    task->context.rsp = sp - 8;
     task->context.rip = (uint64_t)elf_entry_wrapper;
     task->context.rbp = 0;
     task->context.rflags = 0;
