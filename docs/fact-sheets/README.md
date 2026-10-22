@@ -37,7 +37,7 @@ that was attempted but blocked.
 | Memory management | ✅ | ✅ | ✅ | ✅ | [memory.md](memory.md) |
 | Preemptive multitasking | ✅ HW | ✅ HW (opt-in `SECONDARY_PREEMPT=ON`) / 🟡 cooperative (default) | ✅ HW (default `JETSON_HW_TICK=ON`) / 🟡 cooperative (`JETSON_HW_TICK=OFF`) | ✅ HW | [preemption.md](preemption.md) |
 | Networking | ✅ DHCP + ping | ✅ DHCP + ping | ✅ DHCP + ping (USB CDC-ECM) | ✅ DHCP + ping | [networking.md](networking.md) |
-| GPU / accelerator inference | — | ❌ Hailo-8L NPU blocked at boundary IN ch=2 (#682) | ✅ GA10B HMMA + dispatcher | 🟡 SEC2 priv-lockdown blocks dispatch (#185) | [gpu-inference.md](gpu-inference.md) |
+| GPU / accelerator inference | — | ❌ Hailo-8L NPU blocked at boundary IN ch=2 (#682) — documented limitation, see [hailo-inference-wedge.md](../hailo-inference-wedge.md) | ✅ GA10B HMMA + dispatcher | 🟡 SEC2 priv-lockdown blocks dispatch (#185) | [gpu-inference.md](gpu-inference.md) |
 | Storage / filesystem | ✅ RAM disk + LittleFS | ✅ | ✅ | ✅ | [storage.md](storage.md) |
 | Shell / observability | ✅ | ✅ | ✅ | ✅ | [shell.md](shell.md) |
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
@@ -64,4 +64,4 @@ that was attempted but blocked.
 - [`../design/`](../design/) — design specs and engineering proposals (forward-looking).
 - [`../contracts/`](../contracts/) — stable interface contracts (e.g. runtime blob formats, device-file layout).
 
-*Last updated: 9 May 2026*
+*Last updated: 18 October 2026*
