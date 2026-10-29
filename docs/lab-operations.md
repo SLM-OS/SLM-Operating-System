@@ -46,8 +46,9 @@ This document describes how to interact with the embedded development lab hardwa
 
 ### Jetson Orin Nano boards
 
-Both Jetsons need reprovisioning (state recorded 2026-10-29). The
-target layout for each is an NVMe development install plus a microSD
+State recorded 2026-10-29: `jetson-nano-2` is a working lab install;
+`jetson-nano-1` needs reprovisioning. The target layout for a
+(re)provisioned board is an NVMe development install plus a microSD
 recovery install — see
 [`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
 Network addresses are deliberately not recorded here: labctl is the
@@ -72,13 +73,17 @@ stands for the address it reports.
 | Component | Details |
 |-----------|---------|
 | Board | Jetson Orin Nano Super Developer Kit |
-| Status | 🔴 Needs reprovisioning — currently boots a JetPack install left from an unrelated project (hostname `gradient-desktop`) and is not reachable over SSH at any recorded address |
-| QSPI firmware | Patched BL31 (`tools/tfa-patches/0004-*`) last verified 2026-05-19 — recheck after any reflash |
-| Boot media | microSD per earlier records; NVMe presence not yet confirmed |
+| Status | 🟢 Working lab install (hostname `gradient-desktop`); boots to the Linux login prompt in about 65 s |
+| QSPI firmware | UEFI 36.4.7; patched BL31 (`tools/tfa-patches/0004-*`, built 2026-05-09) |
+| Linux | JetPack R36.4.7, kernel 5.15.148-tegra, 25 W power mode |
+| microSD | 238 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `SLM-OS`, `Linux -> auto-kexec SLM-OS` |
+| NVMe | 119 GB SPCC with a single ext4 `APP` partition and no EFI system partition — unused and not bootable |
+| SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` helpers, `arm_smmu_noshutdown.ko`, patched `nvgpu.ko`, `slmos-autokexec.service` (enabled) all present. Not yet staged: `gpu-kernel-eviction-qnet` (PR-6 producer) |
+| Recovery strap | labctl `recovery_mode` binding on `relay-a` channel 1 (latched, applied before power-on). Must read `released` for a normal boot |
 | Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net), labctl alias `jetson-console` |
 | Power control | Kasa smart plug (via labctl) |
-| Network | Linux uses the on-board Ethernet (enP8p1s0) and WiFi (wlP1p1s0); after kexec, SLM-OS takes its own DHCP lease over the USB RTL8153, so the board has different Linux and SLM-OS addresses — check which one labctl lists before using it |
-| SSH | `ssh root@<JETSON_IP>` (password `slmos`) once reprovisioned |
+| Network | Linux and SLM-OS both use the USB RTL8153 dongle (on-board Ethernet and WiFi are down), so both get the same DHCP reservation — the address labctl lists |
+| SSH | `ssh root@<JETSON_IP>` (key or password `slmos`) |
 | SD card deploy | No SDWire — SSH + kexec workflow (see below) |
 
 ---
@@ -224,7 +229,7 @@ recovery install, QSPI caveats) is covered in
 | Board | Serial (labctl alias / TCP) | Current state (2026-10-29) | Target layout |
 |-------|-----------------------------|----------------------------|---------------|
 | jetson-nano-1 | `jetson-nano-1-console` / 4007 | 🔴 Needs reprovisioning — microSD JetPack boots, NVMe not bootable | NVMe development + microSD recovery |
-| jetson-nano-2 | `jetson-console` / 4004 | 🔴 Needs reprovisioning — unrelated JetPack install, no SSH | NVMe development + microSD recovery |
+| jetson-nano-2 | `jetson-console` / 4004 | 🟢 Working — microSD JetPack with SLM-OS extras | NVMe development + microSD recovery (optional; current single-medium setup works) |
 
 IP addresses: use the ones labctl reports (`labctl status`).
 
@@ -322,12 +327,10 @@ kills the CPU core. See GitHub issue #9 for root-cause analysis.
 After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
 
 1. `labctl power cycle jetson-nano-1` — power cycles back to Linux
-2. Wait for Linux to boot — about 40 s on a provisioned board. On
-   2026-10-29 both boards took several minutes after a cold power
-   cycle before the serial console showed a login prompt (cause not
-   yet established; UEFI network-boot fallback is one known source of
-   multi-minute delays, see `docs/jetson-boot.md` §Troubleshooting),
-   so serial captures after a power cycle should use a long timeout
+2. Wait for Linux to boot — about 65 s from power-on to the login
+   prompt on `jetson-nano-2`. A board still silent well past that is
+   most likely held in USB Force Recovery; see
+   [Troubleshooting](#jetson-silent-console-and-no-network-after-power-on)
 3. SSH is available again
 
 **Note:** Serial input (RX) works via TCU HSP mailbox on the USB-C debug port.
@@ -336,6 +339,55 @@ Serial output uses UARTC at 0x0C280000 with DSB-guarded LSR reads.
 ---
 
 ## Troubleshooting
+
+### Verify live board state first
+
+Board state drifts away from what this document records: reinstalls,
+actuator settings, address changes and other users' sessions all
+change it without touching the repo. Before debugging any "board does
+not respond" symptom, and before any hardware verification run, check
+the live state through labctl rather than trusting the tables above:
+
+1. **Power, ping, serial:** `labctl status` / `labctl health` (MCP:
+   `run_health_check`).
+2. **Actuator bindings:** list them for the board (MCP:
+   `bindings_list`) and read each one's `actuation_status`. A latched
+   `recovery_mode` binding with `desired_state: asserted` holds a Jetson
+   in USB Force Recovery on every power-up — see the next entry.
+3. **Serial port ownership:** a capture that returns `Port already in
+   use` immediately means another console session (for example a
+   forgotten `labctl console`) holds the port.
+4. **The install itself,** once SSH works: `hostname`,
+   `/etc/nv_tegra_release`, `lsblk`, and the SLM-OS extras checklist in
+   [`docs/deploy/jetson-kexec.md`](deploy/jetson-kexec.md#slm-os-extras-on-the-development-install).
+
+Record any difference found in this document (addresses go in labctl
+only).
+
+### Jetson: silent console and no network after power-on
+
+Symptom: labctl reports power on and the serial port opens, but a
+capture after the power cycle shows no boot output at all (at most a
+stray character), and the board never answers ping or SSH. A healthy
+board prints MB1/MB2/UEFI/Linux output from the first second and
+reaches the Linux login prompt about 65 s after power-on
+(`jetson-nano-2`, 2026-10-29).
+
+1. **Recovery strap asserted.** Check `actuation_status <sbc>
+   recovery_mode`. `desired_state: asserted` (relay channel `closed`)
+   means the boot ROM enters USB Force Recovery and waits for a flash
+   host; UEFI and Linux never run, so nothing appears on the console.
+   Release the binding (MCP: `exit_recovery` / `release`) and power-cycle.
+2. **Confirm from the lab host:** `lsusb | grep 0955`. A board in Force
+   Recovery enumerates on its USB-C port as `0955:7523 NVIDIA Corp. APX`
+   (Orin Nano 8 GB) about 3 s after power-on and disappears at power-off.
+   A normally booting board shows no APX device.
+3. **Actuator access:** if `actuator_probe` reports `Permission denied`
+   on `/dev/lab/relay-*`, the labctl process lacks the `dialout` group
+   (group changes need a fresh login, and a long-running `labctl mcp`
+   keeps the groups it started with). Binding state can still be read,
+   but the relay cannot be changed from that process.
+4. Otherwise continue with the serial checks below.
 
 ### No serial output
 
@@ -389,4 +441,4 @@ make kernel-clean && make kernel PLATFORM=RASPI5
 
 *Created: 25 December 2025*
 *Updated: 31 March 2026 — Replaced lab-tools with labctl, added SDWireC/Pi 5 workflow*
-*Updated: 29 October 2026 — Jetson board state refreshed (both need reprovisioning), dual-media provisioning cross-reference, `sync` step in the deploy workflow*
+*Updated: 29 October 2026 — Jetson board state refreshed, dual-media provisioning cross-reference, `sync` step in the deploy workflow; nano-2 corrected to working, live-state and recovery-strap troubleshooting added*

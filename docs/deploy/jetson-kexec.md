@@ -359,11 +359,9 @@ labctl power cycle jetson-nano-1
 ```
 
 Wait for Linux to boot, then SSH is available again. A provisioned
-board takes about 40 s. Considerably longer cold boots (several minutes
-before a login prompt) have been seen when UEFI falls through to
-network boot after failing to find a bootable medium
-(`docs/jetson-boot.md` §Troubleshooting), so serial captures after a
-power cycle should allow for that. SLM-OS itself has no graceful-shutdown-back-to-Linux path — the kexec is a one-way handoff.
+board reaches the login prompt about 65 s after power-on (measured on
+`jetson-nano-2`, 2026-10-29). A board that stays silent well past that
+is most likely held in USB Force Recovery — see Troubleshooting. SLM-OS itself has no graceful-shutdown-back-to-Linux path — the kexec is a one-way handoff.
 
 ---
 
@@ -383,6 +381,15 @@ Full flag list in the script header.
 ---
 
 ## Troubleshooting
+
+### Board silent and off the network after power-on (before any kexec)
+
+Usually the board's labctl `recovery_mode` binding is asserted, which
+holds it in USB Force Recovery: no console output, no network, and a
+`0955:7523 NVIDIA Corp. APX` device on the lab host's USB. Check the
+binding before anything else. The full checklist (live state, recovery
+strap, port ownership, actuator permissions) is in
+[`docs/lab-operations.md` §Troubleshooting](../lab-operations.md#verify-live-board-state-first).
 
 ### kexec succeeds but the Jetson reboots / resets instead of running SLM-OS
 
