@@ -337,6 +337,7 @@ This should be ONE logical operation, not four separate user-visible steps.
 
 When debugging hardware issues, follow this order:
 
+0. **Verify live state before trusting docs.** Board state drifts from what the docs record. Before debugging an unresponsive board or starting a hardware verification run, check labctl: health (power/ping/serial), `bindings_list` + `actuation_status` for every binding on the board (a Jetson `recovery_mode` binding left `asserted` holds the board in USB Force Recovery — silent console, no network), and serial port ownership. Checklist: `docs/lab-operations.md` §"Verify live board state first".
 1. **Identify the boundary.** What is the last known-working state and the first known-broken state? (e.g., "RX works before MMU enable, fails after" — test this FIRST before exploring baud rates, pad configs, or adapter hardware)
 2. **Change one variable at a time.** Do not combine multiple hypotheses in one deploy.
 3. **Use binary search.** If boot works at step A and fails at step Z, test at step M — don't test A+1, A+2, A+3 sequentially.
