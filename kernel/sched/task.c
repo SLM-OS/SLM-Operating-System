@@ -347,7 +347,13 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
 
     /* Set up initial context for first switch */
 #if defined(PLATFORM_X86_64)
-    task->context.rsp = (uint64_t)task->stack_top;
+    /* SysV x86-64 requires RSP % 16 == 8 at function entry (the CALL
+     * that got there pushed an 8-byte return address onto a 16-aligned
+     * stack). switch_to reaches the first C frame (task_entry_trampoline,
+     * via task_entry_wrapper's tail-jmp) without a CALL, so reserve the
+     * return-address slot here. Entering with stack_top itself (16-
+     * aligned) made every SSE spill (`movaps` to the stack) #GP (#237). */
+    task->context.rsp = (uint64_t)task->stack_top - 8;
     task->context.rip = (uint64_t)task_entry_wrapper;
     task->context.rbp = 0;                              /* Frame pointer */
     task->context.rflags = 0;                           /* IF=0: interrupts disabled */

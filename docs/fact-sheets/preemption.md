@@ -12,8 +12,8 @@ Timer-driven scheduler ticks, context switches, per-platform mode.
 | Timer driver | `cntp_*_el0` | `cnthp_*_el2` (the `_EL0` names are RES0 from EL2 with HCR_EL2.{E2H,TGE}=1) | `cnthp_*_el2` (same EL2/VHE register-redirect quirk as Pi 5) | LAPIC MMIO |
 | Tick rate | 100 Hz | 100 Hz hardware (opt-in) / synthesized at yield (default) | 100 Hz hardware (default) / synthesized at yield (`JETSON_HW_TICK=OFF`) | 100 Hz |
 | Timer calibration | QEMU-exact | CNTFRQ_EL0 | CNTFRQ_EL0 | PIT-calibrated |
-| ISR handler | `timer_handler` direct | `timer_handler` direct (opt-in); `coop_preempt_maybe_tick` synth (default) | `timer_handler` direct (default); `coop_preempt_maybe_tick` synth (`JETSON_HW_TICK=OFF`) | `lapic_timer_handler` on IST1 stack |
-| Context switch trigger | From ISR | From ISR via ELR trampoline (opt-in); from `schedule()` (default) | From ISR via ELR trampoline (default); from `schedule()` (`JETSON_HW_TICK=OFF`) | From ISR (IST1 stack protects overflow) |
+| ISR handler | `timer_handler` direct | `timer_handler` direct (opt-in); `coop_preempt_maybe_tick` synth (default) | `timer_handler` direct (default); `coop_preempt_maybe_tick` synth (`JETSON_HW_TICK=OFF`) | `lapic_timer_irq` on the interrupted task's stack (IST=0, #237) |
+| Context switch trigger | From ISR | From ISR via ELR trampoline (opt-in); from `schedule()` (default) | From ISR via ELR trampoline (default); from `schedule()` (`JETSON_HW_TICK=OFF`) | From ISR |
 | ELR-trampoline (defers `schedule()` to task ctx) | — (no need) | `resched_trampoline` + `maybe_arm_resched_trampoline`, accepts both EL1h and EL2h SPSR | Same trampoline; `cpu_logical_map[]` lookup for dual-cluster MPIDRs; NULL-safe pre-`preempt_init` | — |
 | Save: callee-saved GPRs | x19-x30 | Same | Same | RBX/RSP/RBP/R12-R15 |
 | Save: FPU / SIMD | v0-v31, FPCR, FPSR | Same | Same (q0-q31 + FPCR + FPSR saved across IRQ in `vectors.S`) | FXSAVE (512 B) |

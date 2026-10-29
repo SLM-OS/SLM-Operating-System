@@ -242,7 +242,10 @@ static void test_pdpt_4gb_boot_entries(void)
 
 /*
  * Test: vmm_init detected RAM and set x86_detected_ram_end.
- * Must be > 0 and > 1GB (any real or QEMU system has at least 256MB).
+ * `make test` runs q35 with 1 GB (Makefile QEMU_MEMORY); firmware
+ * reserves the top few pages, so the bound is "more than 256 MB".
+ * Fails if the guest RAM shrinks below what the model-memory pools
+ * and the 48 MB FAT32 test ramdisk need (#237).
  */
 extern uintptr_t x86_detected_ram_end;
 
@@ -563,13 +566,18 @@ static void test_pic_responds_to_ocw3(void)
 }
 
 /*
- * Test: PIC mask register is accessible and timer (IRQ 0) is unmasked.
+ * Test: the legacy 8259 PIC is fully masked.
+ *
+ * External IRQs route through the IOAPIC and the scheduler tick is the
+ * LAPIC timer, so pic_disable() remaps the 8259 out of the way and masks
+ * every line. An unmasked PIC line would deliver duplicate interrupts
+ * alongside the IOAPIC. (The original version of this test predates the
+ * LAPIC/IOAPIC migration and expected PIC IRQ 0 unmasked; #237.)
  */
-static void test_pic_timer_unmasked(void)
+static void test_pic_fully_masked(void)
 {
-    uint8_t mask = inb(PIC1_DATA);
-    /* IRQ 0 (timer) should be unmasked (bit 0 = 0) */
-    TEST_ASSERT_TRUE((mask & 0x01) == 0);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, inb(PIC1_DATA));
+    TEST_ASSERT_EQUAL_HEX8(0xFF, inb(PIC2_DATA));
 }
 
 /*
@@ -688,7 +696,7 @@ static void test_platform_defines(void)
     TEST_ASSERT_TRUE(RAM_SIZE > 0);
     TEST_ASSERT_EQUAL_HEX64(0x3F8UL, UART_BASE);
     TEST_ASSERT_EQUAL_INT64(32, TIMER_IRQ);
-    TEST_ASSERT_EQUAL_INT64(1, CPU_MAX);
+    TEST_ASSERT_EQUAL_INT64(8, CPU_MAX);  /* i7-6700 test-pc: 4C/8T */
 }
 
 /*
@@ -741,31 +749,46 @@ static void test_spinlock_irqsave_roundtrip(void)
 }
 
 /*
- * Test: gic_enable_irq/gic_disable_irq work for the timer IRQ.
+ * Test: gic_enable_irq/gic_disable_irq toggle the IOAPIC redirection
+ * mask for TIMER_IRQ (legacy PIT, ISA IRQ 0 → vector 32, ISO-remapped
+ * to pin 2 on q35).
+ *
+ * The PIT pin is normally masked (the tick is the LAPIC timer), so the
+ * original state is restored afterwards and the window runs with IF=0;
+ * a stray vector-32 delivery would just be EOI'd by exception_handler.
  */
 static void test_gic_enable_disable_timer(void)
 {
-    /* Disable timer IRQ */
+    extern bool ioapic_irq_is_masked(uint32_t irq);
+
+    irq_flags_t flags = irq_save();
+    bool was_masked = ioapic_irq_is_masked(TIMER_IRQ);
+
     gic_disable_irq(TIMER_IRQ);
+    bool masked_after_disable = ioapic_irq_is_masked(TIMER_IRQ);
 
-    /* Read PIC1 mask — IRQ 0 (timer) should be masked (bit 0 = 1) */
-    uint8_t mask = inb(0x21);
-    TEST_ASSERT_TRUE((mask & 0x01) != 0);
-
-    /* Re-enable timer IRQ */
     gic_enable_irq(TIMER_IRQ);
+    bool masked_after_enable = ioapic_irq_is_masked(TIMER_IRQ);
 
-    /* IRQ 0 should be unmasked (bit 0 = 0) */
-    mask = inb(0x21);
-    TEST_ASSERT_TRUE((mask & 0x01) == 0);
+    if (was_masked)
+        gic_disable_irq(TIMER_IRQ);
+    irq_restore(flags);
+
+    TEST_ASSERT_TRUE(masked_after_disable);
+    TEST_ASSERT_FALSE(masked_after_enable);
+    TEST_ASSERT_EQUAL(was_masked, ioapic_irq_is_masked(TIMER_IRQ));
 }
 
 /*
- * Test: timer_get_frequency returns TIMER_HZ (100).
+ * Test: timer_get_frequency reports the calibrated TSC rate.
+ *
+ * timer_get_count() is the TSC, so its frequency must be the TSC rate
+ * (CPUID 0x15/0x16 or PIT-calibrated), not the TIMER_HZ (100) fallback
+ * that only applies before calibration. Any TSC runs well above 1 MHz.
  */
 static void test_timer_get_frequency(void)
 {
-    TEST_ASSERT_EQUAL_INT64(100, timer_get_frequency());
+    TEST_ASSERT_TRUE(timer_get_frequency() > 1000000ULL);
 }
 
 /*
@@ -911,6 +934,69 @@ static void test_new_task_runs_and_yields(void)
         sleep_ms(10);
 
     TEST_ASSERT_EQUAL_UINT32(4, sched_regression_worker_ticks);
+}
+
+/*
+ * Test: new tasks start with a SysV-aligned stack (#237).
+ *
+ * SysV x86-64 requires RSP % 16 == 8 at function entry. switch_to
+ * reaches a new task's first C frame via jmp, not call, so task_create
+ * must reserve the return-address slot itself. Before the fix the
+ * initial RSP was the 16-aligned stack_top, so every SSE spill
+ * (`movaps %xmm0, off(%rsp)`) in task context raised #GP — first seen
+ * in kprintf_float_test_format_bits_padded.
+ *
+ * __builtin_frame_address(0) is rbp after `push %rbp; mov %rsp,%rbp`,
+ * so it is 16-aligned exactly when entry RSP % 16 == 8. The probe must
+ * be `noipa`: with plain `noinline`, GCC's IPA stack-alignment pass sees
+ * that this local leaf needs no alignment and lets callers skip the
+ * padding, which makes the probe report misalignment that real
+ * (externally visible) callees never see.
+ */
+static volatile uintptr_t stack_align_frame;
+static volatile uint32_t stack_align_done;
+
+static __attribute__((noipa)) uintptr_t stack_align_probe(void)
+{
+    return (uintptr_t)__builtin_frame_address(0);
+}
+
+static void stack_align_worker(void *arg)
+{
+    (void)arg;
+    stack_align_frame = stack_align_probe();
+    stack_align_done = 1;
+}
+
+static void test_new_task_initial_rsp_sysv_aligned(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    stack_align_frame = 1;
+    stack_align_done = 0;
+    struct task *t = task_create("stack_align", stack_align_worker, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT64(8, t->context.rsp & 15);
+    scheduler_add_task(t);
+
+    for (int i = 0; i < 20 && !stack_align_done; i++)
+        sleep_ms(10);
+
+    TEST_ASSERT_TRUE(stack_align_done);
+    TEST_ASSERT_EQUAL_UINT64(0, stack_align_frame & 15);
+}
+
+/*
+ * Test: APs enter ap_entry_64 with a SysV-aligned stack (#237).
+ * ap_trampoline.S loads a page-aligned stack and must `call` (not jmp)
+ * the C entry; ap_entry_64 counts any misaligned entry.
+ */
+static void test_ap_entry_stack_sysv_aligned(void)
+{
+    extern volatile uint32_t x86_ap_entry_misaligned;
+    TEST_ASSERT_EQUAL_UINT32(0, x86_ap_entry_misaligned);
 }
 
 /*
@@ -1112,11 +1198,14 @@ static void test_tss_loaded(void)
 }
 
 /*
- * Test: IDT entry 48 (LAPIC timer) has ist==1 (A1 / P1-1).
+ * Test: IDT entries 48 (LAPIC timer) and 49 (reschedule IPI) have
+ * ist==0 (#237).
  *
- * This test asserts the IDT wiring is correct: vector 48 must route
- * the ISR through TSS.ist1. Reads the raw 16-byte IDT entry via
- * sidt + pointer arithmetic.
+ * Both handlers may call schedule() from the ISR. On an IST stack the
+ * outgoing task's saved RSP would point into the shared per-CPU IST
+ * stack, which the next delivery overwrites (originally A1 / P1-1 put
+ * vector 48 on IST1). Reads the raw 16-byte IDT entry via sidt +
+ * pointer arithmetic.
  */
 struct a1_idt_entry {
     uint16_t offset_low;
@@ -1128,13 +1217,74 @@ struct a1_idt_entry {
     uint32_t reserved;
 } __attribute__((packed));
 
-static void test_idt48_uses_ist1(void)
+static void test_idt_preempt_vectors_use_task_stack(void)
 {
     struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr;
     __asm__ volatile("sidt %0" : "=m"(idtr));
     const struct a1_idt_entry *idt =
         (const struct a1_idt_entry *)(uintptr_t)idtr.base;
-    TEST_ASSERT_EQUAL_UINT8(1, idt[48].ist & 0x07);
+    TEST_ASSERT_EQUAL_UINT8(0, idt[48].ist & 0x07);
+    TEST_ASSERT_EQUAL_UINT8(0, idt[49].ist & 0x07);
+}
+
+/*
+ * Test: a CPU-bound task that never yields is preempted by the timer
+ * ISR and resumes intact (#237).
+ *
+ * With the timer on IST1, the first preemption saved an IST1 RSP and
+ * schedule()'s SP-range guard panicked (first seen with the `counter`
+ * component). The spinner and this test task (main, pinned to CPU 0
+ * under ENABLE_BOOT_TESTS) share CPU 0, and the spinner busy-waits
+ * without yielding until this task releases it. The release can only
+ * happen if the timer ISR switches away from the spinner, and the
+ * spinner can only report done if it was later resumed intact.
+ */
+static volatile uint32_t preempt_spin_release;
+static volatile uint32_t preempt_spin_released;
+static volatile uint32_t preempt_spin_done;
+
+static void preempt_spin_worker(void *arg)
+{
+    extern uint64_t timer_get_count(void);
+    extern uint64_t timer_get_frequency(void);
+    (void)arg;
+
+    /* 1 s escape hatch so a preemption regression fails the test
+     * instead of wedging CPU 0. */
+    uint64_t end = timer_get_count() + timer_get_frequency();
+    while (!preempt_spin_release && timer_get_count() < end)
+        ;
+    preempt_spin_released = preempt_spin_release;
+    preempt_spin_done = 1;
+}
+
+static void test_timer_preempts_cpu_bound_task(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void scheduler_terminate_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    TEST_ASSERT_EQUAL_UINT32(0, cpu_id());
+
+    preempt_spin_release = 0;
+    preempt_spin_released = 0;
+    preempt_spin_done = 0;
+    struct task *t = task_create("preempt_spin", preempt_spin_worker, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    t->cpu_affinity = 0;
+    scheduler_add_task(t);
+
+    sleep_ms(20);               /* spinner runs; we return only via preemption */
+    preempt_spin_release = 1;
+
+    for (int i = 0; i < 150 && !preempt_spin_done; i++)
+        sleep_ms(10);
+
+    if (!preempt_spin_done)
+        scheduler_terminate_task(t);
+    TEST_ASSERT_TRUE(preempt_spin_done);
+    TEST_ASSERT_TRUE(preempt_spin_released);
 }
 
 /*
@@ -1146,18 +1296,14 @@ static void test_idt48_uses_ist1(void)
  * Skipped when cpu_count < 2.
  */
 /*
- * Note on timer-ISR-runs-on-IST1 dynamic verification:
- *
- * The closure plan proposed a `test_timer_isr_uses_ist1` that swaps
- * the IRQ handler to capture `rsp` during a timer tick and verifies
- * the captured address falls inside `ist1_stack[]`. The attempt
- * broke `test_lapic_timer_running` — the observer doesn't increment
- * `pit_ticks`, so downstream tests that depend on it stall. The
- * structural tests below (test_tss_loaded, test_idt48_uses_ist1,
- * test_tss_per_cpu_distinct) are sufficient: once TR is loaded and
- * idt[48].ist == 1, the CPU architecturally uses IST1 for every
- * delivery of vector 48 — there is no software path that can
- * mis-route the ISR stack after that point.
+ * Note on the timer ISR stack: A1 / P1-1 originally routed vector 48
+ * through IST1. That is incompatible with preempting from the ISR
+ * (schedule() would save an IST1 RSP as the outgoing task's context),
+ * so #237 moved vectors 48/49 back to the task stack.
+ * test_idt_preempt_vectors_use_task_stack pins the IDT wiring and
+ * test_timer_preempts_cpu_bound_task covers the behavior; the TSS
+ * tests here still verify the per-CPU TSS + IST1 installation, which
+ * stays in place for future non-switching vectors.
  */
 
 static void test_tss_per_cpu_distinct(void)
@@ -3140,14 +3286,16 @@ static void test_pci_find_device_not_found(void)
  */
 static void test_pci_multifunction_device(void)
 {
-    /* QEMU i440FX has PIIX3 at 00:01.0 (ISA bridge), 00:01.1 (IDE), 00:01.3 (PM) */
-    uint8_t hdr = pci_config_read8(0, 1, 0, 0x0E);
+    /* `make test` runs QEMU q35 (Makefile QEMU_MACHINE), whose ICH9 sits
+     * at 00:1f.0 (LPC/ISA bridge), 00:1f.2 (SATA), 00:1f.3 (SMBus). The
+     * original version probed i440FX's PIIX3 at 00:01.x (#237). */
+    uint8_t hdr = pci_config_read8(0, 0x1f, 0, 0x0E);
     /* Bit 7 of header type = multi-function */
     TEST_ASSERT_TRUE((hdr & 0x80) != 0);
 
-    /* Function 1 should be valid (IDE controller) */
-    uint16_t vendor_f1 = pci_config_read16(0, 1, 1, 0x00);
-    TEST_ASSERT_TRUE(vendor_f1 != 0xFFFF);
+    /* Function 2 should be valid (ICH9 AHCI SATA controller) */
+    uint16_t vendor_f2 = pci_config_read16(0, 0x1f, 2, 0x00);
+    TEST_ASSERT_TRUE(vendor_f2 != 0xFFFF);
 }
 
 /* ============================================================================
@@ -3707,7 +3855,7 @@ int test_suite_x86_boot(void)
 
     /* PIC tests */
     RUN_TEST(test_pic_responds_to_ocw3);
-    RUN_TEST(test_pic_timer_unmasked);
+    RUN_TEST(test_pic_fully_masked);
     RUN_TEST(test_pic_slave_accessible);
 
     /* PIT timer tests */
@@ -3734,12 +3882,15 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_scheduler_tick_callable);
     RUN_TEST(test_preempt_disabled_cleared_in_task);
     RUN_TEST(test_new_task_runs_and_yields);
+    RUN_TEST(test_new_task_initial_rsp_sysv_aligned);
+    RUN_TEST(test_ap_entry_stack_sysv_aligned);
     RUN_TEST(test_two_tasks_yield_both_advance);
     RUN_TEST(test_new_task_preemptible_on_first_timeslice);
     RUN_TEST(test_sleep_ms_on_bsp);
     RUN_TEST(test_sleep_ms_on_ap);
     RUN_TEST(test_tss_loaded);
-    RUN_TEST(test_idt48_uses_ist1);
+    RUN_TEST(test_idt_preempt_vectors_use_task_stack);
+    RUN_TEST(test_timer_preempts_cpu_bound_task);
     RUN_TEST(test_tss_per_cpu_distinct);
     RUN_TEST(test_resched_ipi_delivers);
     RUN_TEST(test_resched_ipi_self_is_noop);

@@ -148,9 +148,12 @@ ap_lm_entry:
     /* Load logical CPU ID as first argument (RDI) */
     mov     PARAM_CPUID, %edi
 
-    /* Jump to 64-bit AP entry point */
+    /* Call (not jmp) the 64-bit AP entry point: PARAM_STACK is page-
+     * aligned, and the pushed return address gives the SysV
+     * RSP % 16 == 8 at C function entry that SSE spills rely on (#237).
+     * ap_entry_64 never returns. */
     mov     PARAM_ENTRY, %rax
-    jmp     *%rax
+    call    *%rax
 
     /* Should never reach here */
     ud2
