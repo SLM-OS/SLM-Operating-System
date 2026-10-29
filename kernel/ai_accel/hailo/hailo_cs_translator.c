@@ -302,10 +302,10 @@ static int translate_open_boundary_for_pad(
 }
 
 /* Walk pads once per direction, emitting OpenBoundary actions for
- * pads matching `emit_inputs`. stream_index counts boundary pads
- * per direction (0 = first input boundary, etc.). Helper for
- * translate_activation, which calls this twice (outputs then inputs)
- * to match HailoRT's emission order. */
+ * pads matching `emit_inputs`. stream_index is each pad's HEF
+ * sys_index (see the loop body). Helper for translate_activation,
+ * which calls this twice (outputs then inputs) to match HailoRT's
+ * emission order. */
 static int emit_open_boundary_pass(const struct hef_info *info,
                                    const struct hailo_cs_translate_cfg *cfg,
                                    bool emit_inputs,
