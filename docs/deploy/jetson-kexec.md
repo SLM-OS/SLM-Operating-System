@@ -335,7 +335,7 @@ automates the current regression check end-to-end:
 
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
-    --ssh-target root@192.168.4.93 \
+    --ssh-target root@<JETSON_IP> \
     --console-port 4004
 ```
 

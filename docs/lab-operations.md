@@ -50,8 +50,9 @@ Both Jetsons need reprovisioning (state recorded 2026-10-29). The
 target layout for each is an NVMe development install plus a microSD
 recovery install — see
 [`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
-labctl holds the authoritative addresses (`labctl status`); the values
-below are the last known ones.
+Network addresses are deliberately not recorded here: labctl is the
+single source of truth (`labctl status`), and `<JETSON_IP>` below
+stands for the address it reports.
 
 #### `jetson-nano-1`
 
@@ -64,7 +65,6 @@ below are the last known ones.
 | NVMe | Samsung MZVL4512HBLU with a single ext4 `APP` partition and no EFI system partition — its UEFI boot entry returns to the menu |
 | Serial console | `/dev/lab/port-2-3` → TCP localhost:4007 (via ser2net), labctl alias `jetson-nano-1-console` |
 | Power control | Kasa smart plug (via labctl) |
-| Ethernet | `192.168.4.100` (labctl record) |
 | SD card deploy | No SDWire — SSH + kexec workflow (see below) |
 
 #### `jetson-nano-2`
@@ -77,10 +77,8 @@ below are the last known ones.
 | Boot media | microSD per earlier records; NVMe presence not yet confirmed |
 | Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net), labctl alias `jetson-console` |
 | Power control | Kasa smart plug (via labctl) |
-| Ethernet (Linux) | `192.168.4.93` (enP8p1s0) on the previous lab install |
-| WiFi (Linux) | `192.168.4.39` (wlP1p1s0) |
-| Ethernet (SLM-OS) | `192.168.4.5` — DHCP lease SLM-OS obtains over the USB RTL8153; labctl lists this as the board's primary address |
-| SSH | `ssh root@<Linux IP>` (password `slmos`) once reprovisioned |
+| Network | Linux uses the on-board Ethernet (enP8p1s0) and WiFi (wlP1p1s0); after kexec, SLM-OS takes its own DHCP lease over the USB RTL8153, so the board has different Linux and SLM-OS addresses — check which one labctl lists before using it |
+| SSH | `ssh root@<JETSON_IP>` (password `slmos`) once reprovisioned |
 | SD card deploy | No SDWire — SSH + kexec workflow (see below) |
 
 ---
@@ -299,7 +297,7 @@ For the current `jetson-nano-2` USB networking regression check, use:
 
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
-    --ssh-target root@192.168.4.93 \
+    --ssh-target root@<JETSON_IP> \
     --console-port 4004
 ```
 
