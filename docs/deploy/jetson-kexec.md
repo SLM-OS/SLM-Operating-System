@@ -2,7 +2,7 @@
 
 This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs — the UEFI-direct cold-boot path is still WIP (see `docs/archive/investigations/jetson-uefi-direct-result.md` for blockers).
 
-For Jetson hardware, this guide applies regardless of whether Linux is installed on the microSD card (`jetson-nano-2` layout) or an NVMe SSD (`jetson-nano-1` layout) — the kexec-from-Linux flow is identical.
+The kexec-from-Linux flow is identical whether the Linux install lives on the microSD card or an NVMe SSD. [First-time provisioning](#first-time-provisioning-dual-media-layout) describes the recommended lab layout (NVMe development install plus microSD recovery install) and what each needs. SLM-OS itself never gets a partition: it is a file in the Linux root filesystem.
 
 ---
 
@@ -11,8 +11,137 @@ For Jetson hardware, this guide applies regardless of whether Linux is installed
 | Scenario | Guide |
 |---|---|
 | Jetson with L4T already installed | This guide |
-| Fresh Jetson, no OS installed | Flash L4T via NVIDIA SDK Manager first (out of scope here), then this |
+| Fresh Jetson, or reinstalling a lab board | [First-time provisioning](#first-time-provisioning-dual-media-layout) below, then the rest of this guide |
 | Jetson cold-boot directly to SLM-OS (no Linux in the chain) | **Not yet working** — `docs/archive/investigations/jetson-uefi-direct-result.md` |
+
+---
+
+## First-time provisioning: dual-media layout
+
+### SLM-OS has no partition of its own
+
+On Jetson, SLM-OS is a single ELF file (`/root/slmos.elf`) stored in an
+ordinary Linux root filesystem. Linux boots normally, then `slmos-kexec`
+loads the ELF and transfers control with `kexec`. SLM-OS never reads
+the boot media itself: it has no SD or NVMe driver on Jetson
+(`docs/fact-sheets/storage.md`), and its `/mnt/files` is a RAM-disk
+LittleFS (`docs/setup.md` §"Jetson SD-Card Layout"). Provisioning a
+Jetson for SLM-OS therefore means provisioning a Linux install with the
+SLM-OS extras listed below. No disk carries an "SLM-OS partition".
+
+This is also why the Jetson development loop needs neither an SDWire
+nor moving the SD card between the board and the host. Each new build
+reaches the board over SSH (`scp`, then `sync`), and a power cycle
+returns the board to Linux for the next iteration.
+
+### Recommended layout
+
+| Medium | Role | Boot order | Contents |
+|---|---|---|---|
+| NVMe SSD | Development Linux — the kexec launcher | Default | JetPack R36.4.x matching the QSPI firmware, plus every item in [SLM-OS extras](#slm-os-extras-on-the-development-install) |
+| microSD | Recovery Linux | Selected manually from the UEFI boot manager | Stock JetPack with networking and root SSH only. Never kexecs into SLM-OS |
+
+Rationale:
+
+- Every iteration writes a new `slmos.elf` and runs `sync`. NVMe is
+  faster and tolerates repeated writes better than microSD.
+- A stock recovery install means a broken development install (bad
+  helper build, failed module install, full rootfs) never leaves the
+  board unbootable. Booting the SD card gives a working Linux from
+  which the SSD can be repaired or re-flashed.
+- A stock Linux on the same board is a clean baseline for comparing
+  Linux-side GPU and USB behavior against the development install's
+  patched modules.
+
+The `kexec` flow is identical on either medium, so the roles can be
+swapped. A board without an NVMe drive runs the development install
+from microSD and has no recovery install.
+
+### Boot firmware is shared — QSPI caveats
+
+Every boot stage up to and including UEFI lives in the module's QSPI
+flash, not on the SD card or SSD (`docs/jetson-boot.md`). Both media
+boot through the same firmware, which has three consequences:
+
+1. **Flashing rewrites QSPI.** SDK Manager and `l4t_initrd_flash.sh`
+   reflash QSPI along with the rootfs. On a board carrying the patched
+   BL31 from `tools/tfa-patches/0004-*` (required by the default
+   `JETSON_HW_TICK=ON` build), a reflash restores stock BL31. Redeploy
+   the patched BL31 per `tools/tfa-patches/README.md` §"Deploying on
+   Jetson Orin Nano", or build with `JETSON_HW_TICK=OFF` until then.
+2. **Flash the Super configuration.** The board configuration chosen at
+   flash time sets the GPU clock ceiling: a non-Super flash caps the
+   GA10B near 624 MHz versus about 1020 MHz for Super (#844). Every lab
+   board should use `jetson-orin-nano-devkit-super` so GPU results are
+   comparable across boards.
+3. **Match releases.** The rootfs on each medium should match the
+   JetPack release whose firmware is in QSPI (the UEFI banner on serial
+   shows the firmware version). Both lab boards should also run the
+   same release; board-to-board comparisons such as #844 depend on it.
+
+### Flashing the NVMe SSD
+
+The SSD must be flashed with NVIDIA's external-storage flow, which
+creates the full GPT partition set on the NVMe, including the EFI
+system partition that holds L4TLauncher. A rootfs copied onto a single
+ext4 partition is not bootable: the UEFI boot-manager entry for the
+drive silently returns to the menu (observed on `jetson-nano-1`,
+2026-10-29).
+
+Use either SDK Manager (target storage: NVMe) or the BSP's initrd flash
+from `Linux_for_Tegra/` on the host, with the board in USB Force
+Recovery (J14 pins 9-10 shorted at power-on):
+
+```bash
+sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
+    --external-device nvme0n1p1 \
+    -c tools/kernel_flash/flash_l4t_t234_nvme.xml \
+    -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
+    --showlogs --network usb0 \
+    jetson-orin-nano-devkit-super internal
+```
+
+This is the R36 quick-start form; check the flags against the Jetson
+Linux Developer Guide for the BSP release in use. The command writes
+QSPI as well (caveat 1 above).
+
+### Preparing the microSD card
+
+Write NVIDIA's JetPack SD card image for the same release as the SSD.
+A matching release matters here too: the SD image's bootloader-update
+service may apply its own firmware capsule to QSPI on first boot when
+the versions differ, with the same BL31 consequence as caveat 1.
+
+After first boot, enable root SSH login with the lab password, give
+the install a distinct hostname (for example `jetson-nano-1-recovery`)
+so a serial login prompt identifies which medium booted, and record
+its address in labctl.
+
+### Boot order
+
+Leave the NVMe entry first in the UEFI boot order so power cycles land
+in the development install. The recovery install is a one-shot choice
+from the UEFI boot manager (F11 at the boot prompt); permanent order
+changes live in UEFI Setup (ESC) → Boot Maintenance Manager. Both keys
+work over the labctl serial console via `serial_send` with
+`keys=["F11"]` or `keys=["ESC"]`.
+
+### SLM-OS extras on the development install
+
+| Item | Location on the Jetson | Guide |
+|---|---|---|
+| Root SSH login (lab password `slmos`) | `/etc/ssh/sshd_config` | — |
+| Address recorded in labctl | — | labctl is the single source of truth for lab IPs |
+| `kexec-tools` | system package (`apt install kexec-tools` if absent) | — |
+| `slmos-kexec` helper | `/usr/local/bin/slmos-kexec` | [One-time setup](#one-time-setup-install-the-slmos-kexec-helper) below |
+| SMMU preservation module (USB-A/XHCI work) | `/usr/local/lib/slmos/arm_smmu_noshutdown.ko` | One-time setup below |
+| GPU channel helpers, shaders, weights | `/root/gpu-mnist/` | [`jetson-helper-setup.md`](jetson-helper-setup.md) |
+| Patched `nvgpu.ko` | `/lib/modules/$(uname -r)/updates/nvgpu.ko` | `tools/nvgpu-patches/README.md` |
+| Auto-kexec target (optional) | `/etc/systemd/system/slmos-autokexec.*` + extlinux entry | [Auto-kexec entry](#optional-add-an-extlinux-boot-menu-entry-that-auto-kexecs-into-slm-os) below |
+| Patched BL31 | QSPI (shared by both media) | `tools/tfa-patches/README.md` |
+| SLM-OS kernel | `/root/slmos.elf` | [Deploy workflow](#deploy-workflow) below |
+
+The recovery install gets none of these.
 
 ---
 
@@ -151,7 +280,13 @@ round-trip OK`, which is useful when serial capture is unavailable.
 
 ```bash
 scp build/kernel/slmos.elf root@<JETSON_IP>:/root/
+ssh root@<JETSON_IP> sync
 ```
+
+The `sync` is required. The kexec in Step 3 does not flush the page
+cache to disk, and the power cycle in Step 5 discards anything still
+unwritten — so without `sync`, the next Linux boot can come up with the
+*previous* `slmos.elf` and a later run silently tests a stale kernel.
 
 ### Step 3 — kexec
 
@@ -200,7 +335,7 @@ automates the current regression check end-to-end:
 
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
-    --ssh-target root@192.168.4.93 \
+    --ssh-target root@<JETSON_IP> \
     --console-port 4004
 ```
 
@@ -223,7 +358,12 @@ Once work in SLM-OS is finished:
 labctl power cycle jetson-nano-1
 ```
 
-Wait ~40 s for Linux to boot, then SSH is available again. SLM-OS itself has no graceful-shutdown-back-to-Linux path — the kexec is a one-way handoff.
+Wait for Linux to boot, then SSH is available again. A provisioned
+board takes about 40 s. Considerably longer cold boots (several minutes
+before a login prompt) have been seen when UEFI falls through to
+network boot after failing to find a bootable medium
+(`docs/jetson-boot.md` §Troubleshooting), so serial captures after a
+power cycle should allow for that. SLM-OS itself has no graceful-shutdown-back-to-Linux path — the kexec is a one-way handoff.
 
 ---
 
