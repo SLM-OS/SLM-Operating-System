@@ -195,9 +195,9 @@ QEMU uses GICv2 at 0x08000000/0x08010000. The platform.h `#ifdef` handles the di
 
 ### Prerequisites
 
-- ✅ Jetson with JetPack R36.4.7 and Linux on SD card
+- ✅ Jetson with JetPack R36.4.x Linux on NVMe or microSD, provisioned per `docs/deploy/jetson-kexec.md` §First-time provisioning (SLM-OS needs no partition of its own — it is a file in the Linux rootfs)
 - ✅ USB-C cable for serial console (via TCU debug port)
-- ✅ Network access for SSH (192.168.4.93)
+- ✅ Network access for SSH (address from labctl)
 - ✅ labctl configured for power control and serial capture
 
 ### Deploy and Boot (kexec method)
@@ -207,10 +207,11 @@ QEMU uses GICv2 at 0x08000000/0x08010000. The platform.h `#ifdef` handles the di
 make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 # 2. Deploy via SSH
-scp build/kernel/slmos.elf root@192.168.4.93:/root/
+scp build/kernel/slmos.elf root@<JETSON_IP>:/root/
+ssh root@<JETSON_IP> sync   # required — see docs/deploy/jetson-kexec.md Step 2
 
-# 3. Boot via kexec
-ssh root@192.168.4.93 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
+# 3. Boot via kexec (slmos-kexec adds the GPU suspend that raw kexec lacks)
+ssh root@<JETSON_IP> 'slmos-kexec /root/slmos.elf'
 
 # 4. Observe via serial
 labctl serial-capture jetson-nano-2 --timeout 60

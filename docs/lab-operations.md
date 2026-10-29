@@ -44,20 +44,44 @@ This document describes how to interact with the embedded development lab hardwa
 | SD card deploy | No SDWire — preserve the dual-boot maintenance workflow |
 | Notes | Use `docs/deploy/pi5-sdcard.md` and `docs/pi5-dual-boot-setup.md` as the authoritative workflows |
 
-### Jetson Orin Nano (`jetson-nano-2`)
+### Jetson Orin Nano boards
+
+Both Jetsons need reprovisioning (state recorded 2026-10-29). The
+target layout for each is an NVMe development install plus a microSD
+recovery install — see
+[`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
+labctl holds the authoritative addresses (`labctl status`); the values
+below are the last known ones.
+
+#### `jetson-nano-1`
+
+| Component | Details |
+|-----------|---------|
+| Board | Jetson Orin Nano Developer Kit (UEFI banner now reports "Super"; #844 recorded it as a non-Super flash, so it has likely been reflashed since) |
+| Status | 🔴 Needs reprovisioning — boots JetPack from microSD; root password and SSH host key no longer match lab records |
+| QSPI firmware | UEFI 36.4.4 |
+| microSD | JetPack, `root=/dev/mmcblk0p1` |
+| NVMe | Samsung MZVL4512HBLU with a single ext4 `APP` partition and no EFI system partition — its UEFI boot entry returns to the menu |
+| Serial console | `/dev/lab/port-2-3` → TCP localhost:4007 (via ser2net), labctl alias `jetson-nano-1-console` |
+| Power control | Kasa smart plug (via labctl) |
+| Ethernet | `192.168.4.100` (labctl record) |
+| SD card deploy | No SDWire — SSH + kexec workflow (see below) |
+
+#### `jetson-nano-2`
 
 | Component | Details |
 |-----------|---------|
 | Board | Jetson Orin Nano Super Developer Kit |
-| Status | 🟡 Partial — boots to shell at EL2 via UARTC (see `docs/archive/investigations/jetson-el2-bringup.md`) |
-| Linux | Ubuntu 22.04.5, kernel 5.15.148-tegra, JetPack R36.4.7 |
-| Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net) |
+| Status | 🔴 Needs reprovisioning — currently boots a JetPack install left from an unrelated project (hostname `gradient-desktop`) and is not reachable over SSH at any recorded address |
+| QSPI firmware | Patched BL31 (`tools/tfa-patches/0004-*`) last verified 2026-05-19 — recheck after any reflash |
+| Boot media | microSD per earlier records; NVMe presence not yet confirmed |
+| Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net), labctl alias `jetson-console` |
 | Power control | Kasa smart plug (via labctl) |
-| Ethernet | `192.168.4.93` (enP8p1s0) |
-| WiFi | `192.168.4.39` (wlP1p1s0) |
-| SSH | `ssh root@192.168.4.93` (port 22, password: slmos) |
-| SD card deploy | No SDWire — use SSH + kexec workflow (see below) |
-| Boot media | microSD card (no NVMe installed) |
+| Ethernet (Linux) | `192.168.4.93` (enP8p1s0) on the previous lab install |
+| WiFi (Linux) | `192.168.4.39` (wlP1p1s0) |
+| Ethernet (SLM-OS) | `192.168.4.5` — DHCP lease SLM-OS obtains over the USB RTL8153; labctl lists this as the board's primary address |
+| SSH | `ssh root@<Linux IP>` (password `slmos`) once reprovisioned |
+| SD card deploy | No SDWire — SSH + kexec workflow (see below) |
 
 ---
 
@@ -191,12 +215,20 @@ Use these guides instead of trying to force an SDWire workflow onto it:
 The Jetson boards have no SDWire device. All deployment is via SSH + kexec, with serial
 console and power control via labctl. No physical handling is required after initial setup.
 
+SLM-OS has no partition on either boot medium: the kernel is the file
+`/root/slmos.elf` in the Linux root filesystem, and `slmos-kexec`
+launches it from Linux. Provisioning (NVMe development install, microSD
+recovery install, QSPI caveats) is covered in
+[`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
+
 ### Lab Configuration
 
-| Board | IP | Serial | Status |
-|-------|-----|--------|--------|
-| jetson-nano-1 | 192.168.4.20 | tcp:4007 (CP2102) | L4T 36.4.7, SD=JetPack, SSD=SLM-OS |
-| jetson-nano-2 | 192.168.4.93 | tcp:4004 (CP2102) | L4T 36.4.7, SD=SLM-OS+Linux |
+| Board | Serial (labctl alias / TCP) | Current state (2026-10-29) | Target layout |
+|-------|-----------------------------|----------------------------|---------------|
+| jetson-nano-1 | `jetson-nano-1-console` / 4007 | 🔴 Needs reprovisioning — microSD JetPack boots, NVMe not bootable | NVMe development + microSD recovery |
+| jetson-nano-2 | `jetson-console` / 4004 | 🔴 Needs reprovisioning — unrelated JetPack install, no SSH | NVMe development + microSD recovery |
+
+IP addresses: use the ones labctl reports (`labctl status`).
 
 **Serial adapter requirement:** Must be CP2102 (Silicon Labs) for bidirectional
 serial. CH340 adapters only work in one direction (TX from board) on the debug
@@ -245,11 +277,14 @@ entry and the expected behavior.
 # 1. Build for Jetson
 make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
-# 2. Copy kernel to Jetson via SSH
-scp build/kernel/slmos.elf root@192.168.4.20:/root/
+# 2. Copy kernel to Jetson via SSH, then flush it to disk
+#    (without sync, the power cycle in step 5 can lose the write and
+#    the next boot silently runs the previous kernel)
+scp build/kernel/slmos.elf root@<JETSON_IP>:/root/
+ssh root@<JETSON_IP> sync
 
 # 3. Boot via kexec (GPU suspend + kexec in one step)
-ssh root@192.168.4.20 'slmos-kexec /root/slmos.elf'
+ssh root@<JETSON_IP> 'slmos-kexec /root/slmos.elf'
 
 # 4. Observe output via serial console
 labctl serial capture jetson-nano-1 --timeout 30
@@ -289,7 +324,12 @@ kills the CPU core. See GitHub issue #9 for root-cause analysis.
 After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
 
 1. `labctl power cycle jetson-nano-1` — power cycles back to Linux
-2. Wait ~40s for Linux to boot
+2. Wait for Linux to boot — about 40 s on a provisioned board. On
+   2026-10-29 both boards took several minutes after a cold power
+   cycle before the serial console showed a login prompt (cause not
+   yet established; UEFI network-boot fallback is one known source of
+   multi-minute delays, see `docs/jetson-boot.md` §Troubleshooting),
+   so serial captures after a power cycle should use a long timeout
 3. SSH is available again
 
 **Note:** Serial input (RX) works via TCU HSP mailbox on the USB-C debug port.
@@ -351,3 +391,4 @@ make kernel-clean && make kernel PLATFORM=RASPI5
 
 *Created: 25 December 2025*
 *Updated: 31 March 2026 — Replaced lab-tools with labctl, added SDWireC/Pi 5 workflow*
+*Updated: 29 October 2026 — Jetson board state refreshed (both need reprovisioning), dual-media provisioning cross-reference, `sync` step in the deploy workflow*
