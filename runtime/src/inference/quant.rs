@@ -872,6 +872,22 @@ fn dequant_q6k_half(ql: &[u8], qh: &[u8], sc: &[u8], d: f32, y: &mut [f32]) {
 // Generic dispatcher
 // ---------------------------------------------------------------------------
 
+/// Elements per quantization block for `ggml_type` (1 for the
+/// unblocked F32 / F16), `None` for unsupported types. A row of a
+/// block-quantized tensor must hold a whole number of blocks;
+/// [`quant_row_bytes`] alone doesn't enforce that (the `*_byte_size`
+/// helpers round a partial block up).
+pub fn quant_block_elements(ggml_type: GgmlType) -> Option<usize> {
+    match ggml_type {
+        GgmlType::F32 | GgmlType::F16 => Some(1),
+        GgmlType::Q4_K => Some(crate::slm::gguf::Q4_K_BLOCK_ELEMENTS),
+        GgmlType::Q6_K => Some(crate::slm::gguf::Q6_K_BLOCK_ELEMENTS),
+        GgmlType::Q5_0 => Some(crate::slm::gguf::Q5_0_BLOCK_ELEMENTS),
+        GgmlType::Q8_0 => Some(crate::slm::gguf::Q8_0_BLOCK_ELEMENTS),
+        _ => None,
+    }
+}
+
 /// Bytes-per-row for a tensor of `n_elements` quantized as `ggml_type`.
 ///
 /// Covers the types the M5 forward pass actually loads from real
@@ -953,6 +969,18 @@ mod tests {
     use alloc::vec::Vec;
 
     // -- Layout constants ---------------------------------------------
+
+    #[test]
+    fn quant_block_elements_per_type() {
+        // Pins the per-type block size `embedding_lookup_any` uses to
+        // reject partial-block rows (#1034).
+        assert_eq!(quant_block_elements(GgmlType::F32), Some(1));
+        assert_eq!(quant_block_elements(GgmlType::F16), Some(1));
+        assert_eq!(quant_block_elements(GgmlType::Q4_K), Some(256));
+        assert_eq!(quant_block_elements(GgmlType::Q6_K), Some(256));
+        assert_eq!(quant_block_elements(GgmlType::Q5_0), Some(32));
+        assert_eq!(quant_block_elements(GgmlType::Q8_0), Some(32));
+    }
 
     #[test]
     fn q4k_block_size_constants() {

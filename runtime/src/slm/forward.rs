@@ -841,6 +841,7 @@ pub fn forward_one(
 ///
 /// Returns `None` on:
 /// - unsupported `quant_type`,
+/// - `embedding_length` not a whole number of the type's blocks,
 /// - the row's byte range falling outside `table_bytes`,
 /// - `out.len() != embedding_length`.
 pub fn embedding_q4k_lookup(
@@ -874,6 +875,13 @@ pub fn embedding_lookup_any(
     scratch_f32: &mut Vec<f32>,
 ) -> Option<()> {
     if embedding_length == 0 || out.len() != embedding_length {
+        return None;
+    }
+    // Whole blocks only: a partial block isn't a valid row encoding,
+    // and quant_row_bytes would round it up (dropped with the Q4_K-only
+    // check in d5d5a812; pinned by `embedding_q4k_lookup_rejects_bad_dim`).
+    let block = crate::inference::quant::quant_block_elements(quant_type)?;
+    if embedding_length % block != 0 {
         return None;
     }
     let row_bytes = crate::inference::quant::quant_row_bytes(quant_type, embedding_length)?;
@@ -1099,7 +1107,7 @@ pub fn tensor_type(slm: &LoadedSlm, name: &str) -> Option<GgmlType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slm::gguf::{f16_to_f32, ArchKind, Q4_K_BLOCK_SIZE};
+    use crate::slm::gguf::{f16_to_f32, ArchKind, Q4_K_BLOCK_ELEMENTS, Q4_K_BLOCK_SIZE};
 
     fn test_arch() -> ArchInfo {
         ArchInfo {

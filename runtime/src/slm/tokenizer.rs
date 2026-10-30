@@ -389,12 +389,13 @@ impl Bbpe {
     fn decode_inner(&self, ids: &[u32], render_specials: bool) -> String {
         // Phase 1: build the encoded UTF-8 byte stream by concatenating
         // each token's byte representation:
-        //   * Qwen2-style BYTE tokens emit the raw byte they stand for.
-        //     When the encoder fell back to per-byte for the multi-byte
-        //     UTF-8 of an encoded char (e.g. `Ġ` = 0xC4 0xA0), the two
-        //     emitted raw bytes will reassemble into valid UTF-8 of the
-        //     encoded char downstream — phase 2's chars-then-reverse
-        //     loop will then recover the original byte.
+        //   * BYTE tokens stand for one raw input byte. They emit that
+        //     byte in its byte-to-unicode encoded form (e.g. `<0x0A>` →
+        //     `Ċ`), the same alphabet as normal vocab bodies, so phase
+        //     2's reverse mapping recovers the raw byte for every value
+        //     0x00..=0xFF. (Pushing the raw byte instead would leave a
+        //     lone 0x80..=0xFF byte in the stream, which phase 2 can't
+        //     parse as UTF-8.)
         //   * Normal tokens emit their vocab body verbatim. The body is
         //     already GPT-2 byte-to-unicode encoded UTF-8.
         //   * Specials emit their literal name (e.g. `<|im_start|>`)
@@ -420,7 +421,9 @@ impl Bbpe {
             // `from_gguf`; the bounds check above on `idx` against
             // `vocab.len()` therefore covers `byte_for_id` too.
             if let Some(b) = self.byte_for_id[idx] {
-                encoded.push(b);
+                let mut buf = [0u8; 4];
+                encoded.extend_from_slice(
+                    byte_to_unicode_char(b).encode_utf8(&mut buf).as_bytes());
             } else {
                 encoded.extend_from_slice(&self.vocab[idx]);
             }
@@ -577,21 +580,31 @@ impl Bbpe {
         for piece in &pieces {
             if let Some(&id) = self.bytes_to_id.get(piece) {
                 out.push(id);
-            } else {
-                // Byte fallback: encode each byte individually.
-                for &b in piece {
-                    if let Some(id) = self.byte_table[b as usize] {
-                        out.push(id);
-                    } else if let Some(&id) = self.bytes_to_id.get(&alloc::vec![b]) {
-                        // Not registered as a BYTE-type but a
-                        // single-byte normal token exists — accept it.
-                        out.push(id);
-                    }
-                    // Else: byte is unrepresentable in this vocab.
-                    // Drop silently — Qwen2 / Llama vocabs cover the
-                    // full 0x00..0xFF range, so this branch only fires
-                    // on synthetic malformed vocabs in tests.
+                continue;
+            }
+            // Byte fallback, one token per ORIGINAL input byte. Each
+            // char of the piece is the byte-to-unicode encoding of one
+            // input byte (`encode` built it that way), and a BYTE token
+            // stands for the raw byte, so `\n` falls back to `<0x0A>`,
+            // not to the BYTE tokens for `Ċ`'s UTF-8 (`<0xC4><0x8A>`),
+            // which the model would read as different bytes. Real
+            // GPT-2-style vocabs hold every encoded char as a normal
+            // token, so this mostly fires on small synthetic vocabs.
+            let piece_str = core::str::from_utf8(piece).unwrap_or("");
+            for ch in piece_str.chars() {
+                let mut buf = [0u8; 4];
+                let utf8 = ch.encode_utf8(&mut buf).as_bytes();
+                // A single-char normal token is the form the model was
+                // trained on, so it wins over the BYTE token.
+                if let Some(&id) = self.bytes_to_id.get(utf8) {
+                    out.push(id);
+                } else if let Some(id) = unicode_char_to_byte(ch)
+                    .and_then(|b| self.byte_table[b as usize])
+                {
+                    out.push(id);
                 }
+                // Else: unrepresentable in this vocab. Drop silently;
+                // Qwen2 / Llama vocabs cover all 256 bytes.
             }
         }
     }
@@ -1088,6 +1101,23 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(tok.byte_table[0xC2].unwrap(), ids[0]);
         assert_eq!(tok.byte_table[0xA9].unwrap(), ids[1]);
+    }
+
+    #[test]
+    fn byte_fallback_round_trips_low_and_high_bytes() {
+        // BYTE tokens stand for raw input bytes on both sides: encode
+        // falls back to the original byte's token, and decode turns it
+        // back into that byte. Covers a control byte (`\n`, encoded
+        // `Ċ`) and two-byte UTF-8 (`©`, bytes 0xC2 0xA9, encoded `Â©`),
+        // neither of which the synthetic vocab holds as a normal token.
+        let bytes = build_tiny_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse gguf");
+        let tok = Bbpe::from_gguf(&gguf).expect("build tokenizer");
+        for s in ["\n", "\u{a9}", "a\u{a9}\nb"] {
+            let ids = tok.encode(s);
+            assert_eq!(tok.decode(&ids), s, "round trip of {:?}", s);
+        }
+        assert_eq!(tok.encode("\n"), [tok.byte_table[0x0A].unwrap()]);
     }
 
     #[test]

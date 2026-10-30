@@ -237,6 +237,35 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn uart_puts(_s: *const u8) {}
 
+    /// Host stub for the kernel's 100 Hz tick counter, read by
+    /// `log::get_ticks` for the timestamp on every `log_*` line. Any
+    /// test reaching a `crate::log` call (the slm registry's load-error
+    /// paths since b7a4bfb5) needs the symbol to link (#1034). Never
+    /// written on the host, so log timestamps read 0.
+    #[no_mangle]
+    pub static mut pit_ticks: u64 = 0;
+
+    /// Host stubs for the GPU toggles and the eviction-MLP dispatch
+    /// (#1034). The host has no GPU: toggles read off and a dispatch
+    /// fails, the same as a non-Jetson kernel build, so policies take
+    /// their CPU paths.
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_inference_enabled() -> i32 { 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_consumer_eviction_enabled() -> i32 { 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_run_eviction_inference(
+        _features: *const f32,
+        _features_len: usize,
+        _score_out: *mut f32,
+    ) -> i32 {
+        -1
+    }
+
     // M5.3.1: registry tests want to allocate from the weight pool
     // (`mm::alloc_weights` → `kernel_ffi::alloc_pages`
     // → `slm_alloc_pages`). The host has no kernel PMM; route the
