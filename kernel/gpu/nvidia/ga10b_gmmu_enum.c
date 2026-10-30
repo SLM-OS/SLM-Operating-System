@@ -147,11 +147,11 @@ int ga10b_gmmu_enum_pages(uint64_t inst_block_phys,
     }
     /* PDB lo/hi are adjacent 32-bit words (512, 516): one 8-byte read.
      * Decoded exactly as ga10b_gmmu_walk does. */
-    uint64_t pdb = read64(inst_block_phys + INST_BLOCK_PDB_LO_BYTE_OFFSET);
-    uint32_t pdb_lo = (uint32_t)pdb;
-    uint32_t pdb_hi = (uint32_t)(pdb >> 32);
-    uint8_t target = (uint8_t)((pdb_lo >> 1) & 0x3);
-    uint64_t pdb_phys = ((uint64_t)pdb_hi << 32) | (pdb_lo & 0xfffff000u);
+    uint64_t pdb_phys;
+    uint8_t target;
+    decode_inst_block_pdb(read64(inst_block_phys +
+                                 INST_BLOCK_PDB_LO_BYTE_OFFSET),
+                          &pdb_phys, &target);
     if (pdb_phys == 0 || target == 0) {
         return -1;
     }

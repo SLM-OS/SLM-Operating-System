@@ -641,11 +641,11 @@ preserved across kexec (the default also starts the MNIST and
 sched-MLP helpers). **8/10 boots served a GPU score**. The two
 failures were one FECS_ERROR_PENDING (`mb6=0x5a`) and one "GP_GET did
 not advance" (`mb6=0x00`). The handoff was found on all 10 boots.
-1/10 versus 8/10 is significant (Fisher exact, two-sided p = 0.0055),
-so the low default-configuration rate comes from multiple preserved
-channels at kexec, not from the eviction pipeline itself.
-Making the helpers coexist is tracked in
+1/10 versus 8/10 is significant (Fisher exact, two-sided p = 0.0055).
+At the time this was read as multiple preserved channels at kexec
+breaking each other, and tracked in
 [#1029](https://github.com/SLM-OS/SLM-Operating-System/issues/1029).
+That reading was superseded the next day; see the root cause below.
 
 **Root cause (2026-10-30).** Neither the helper count nor the eviction
 pipeline was the real variable. The boot-time PMM reserve

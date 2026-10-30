@@ -871,8 +871,12 @@ static void reserve_channel_vm(uint64_t inst_phys,
     }
     /* Same PDB decode as ga10b_gmmu_enum_pages; used only as the
      * dedup key. */
-    uint64_t raw = reserve_read64(inst_phys + INST_BLOCK_PDB_LO_BYTE_OFFSET);
-    uint64_t pdb = (raw & 0xffffffff00000000ull) | (raw & 0xfffff000ull);
+    uint64_t pdb;
+    uint8_t target;
+    decode_inst_block_pdb(reserve_read64(inst_phys +
+                                         INST_BLOCK_PDB_LO_BYTE_OFFSET),
+                          &pdb, &target);
+    (void)target;
     for (uint32_t i = 0; i < seen->n; i++) {
         if (seen->pdb[i] == pdb) {
             uart_printf("[ga10b-reserve]   vm @inst 0x%lx: PDB 0x%lx "

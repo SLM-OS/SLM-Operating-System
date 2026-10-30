@@ -19,6 +19,19 @@
 #define INST_BLOCK_PDB_LO_BYTE_OFFSET   (128 * 4)
 #define INST_BLOCK_PDB_HI_BYTE_OFFSET   (129 * 4)
 
+/* Decode the inst block's PDB from its two adjacent 32-bit words, read
+ * as one 8-byte value at INST_BLOCK_PDB_LO_BYTE_OFFSET. `out_target`
+ * is the aperture (0 = invalid). */
+static inline void decode_inst_block_pdb(uint64_t pdb_words,
+                                         uint64_t *out_pdb_phys,
+                                         uint8_t *out_target)
+{
+    uint32_t pdb_lo = (uint32_t)pdb_words;
+    uint32_t pdb_hi = (uint32_t)(pdb_words >> 32);
+    *out_target   = (uint8_t)((pdb_lo >> 1) & 0x3);
+    *out_pdb_phys = ((uint64_t)pdb_hi << 32) | (pdb_lo & 0xfffff000u);
+}
+
 /* Decode a regular PDE entry (used for PDE3, PDE2, PDE1).
  *   - lower 32 bits: aperture(2:1) | volatile(3) | next_phys[31:12] (24 bits at [31:8] encoded as phys >> 12)
  *   - upper 32 bits: next_phys[55:32] (24 bits at [23:0])
@@ -46,8 +59,8 @@ static inline void decode_regular_pde(uint64_t entry,
     *out_next_phys = ((addr_hi << 24) | addr_lo) << 12;
 }
 
-/* Decode the small-page half of a dual PDE (PDE0). Big half is
- * ignored for Milestone A — see ga10b_gmmu.h. */
+/* Decode the small-page half of a dual PDE (PDE0) — bytes 8..15 of
+ * the 16-byte entry. */
 static inline void decode_dual_pde_small(uint64_t entry,
                                          uint64_t *out_next_phys,
                                          uint8_t *out_aperture,
@@ -70,10 +83,8 @@ static inline void decode_dual_pde_small(uint64_t entry,
  *
  * Phys reconstruction: phys = ((hi_byte << 28) | low_28_bits) << 8.
  *
- * This decoder is used when our walker reads the FIRST 8 bytes of a
- * 16-byte dual PDE entry (offset 0..7 in the entry) — that's the
- * big-page child. For 64-KB big-page mappings (the helper's default
- * for pushbuf/sem/qmd_pool/shaders), this is the correct half. */
+ * Takes the FIRST 8 bytes of the 16-byte dual PDE entry (offset 0..7),
+ * which point at the big-page (64 KB) PTE table. */
 static inline void decode_dual_pde_big(uint64_t entry,
                                        uint64_t *out_next_phys,
                                        uint8_t *out_aperture,
