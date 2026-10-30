@@ -92,9 +92,37 @@ pub trait EvictionPolicy {
     /// declares true, the toggle accepts with a "scaffold only"
     /// warning, recording operator intent without changing dispatch.
     /// Flipping a policy's return value to `true` requires the
-    /// matching `slm_gpu_run_eviction_inference()` plumbing on the
+    /// matching `slm_gpu_run_eviction_batch()` plumbing on the
     /// SLM-OS side — see `docs/design/gpu-policy-models.md` PR-6.
     fn has_gpu_backend(&self) -> bool { false }
+
+    /// Phase 1 of a registry decision that may use the GPU (#1020).
+    /// Called with `REGISTRY_LOCK` held. A policy that wants this
+    /// decision scored on the GPU returns its per-candidate feature
+    /// rows; the registry then drops the lock, runs one batched
+    /// dispatch, re-takes the lock and calls
+    /// [`Self::finish_gpu_select`] with the result. `None` (the
+    /// default) means "decide on the CPU" and the registry calls
+    /// `finish_gpu_select(candidates, None)` straight away, still under
+    /// the same lock acquisition.
+    fn gpu_batch_features(&mut self, _candidates: &[BlockMeta])
+        -> Option<Vec<BlockFeatures>>
+    {
+        None
+    }
+
+    /// Phase 3 of a registry decision (#1020), called with
+    /// `REGISTRY_LOCK` held. `gpu_scores` is `Some` with one score per
+    /// candidate when the batched dispatch succeeded, `None` when it
+    /// failed or was never attempted. Must not dispatch the GPU itself
+    /// — that is the point of the split. The default ignores the
+    /// scores and runs `select_victim`, which is correct for every
+    /// policy without a GPU path.
+    fn finish_gpu_select(&mut self, candidates: &[BlockMeta],
+                         _gpu_scores: Option<&[f32]>) -> usize
+    {
+        self.select_victim(candidates)
+    }
 
     /// Per-expert weights for ensemble policies (CACHEUS). Default
     /// impl returns `None` — atomic policies don't have experts.

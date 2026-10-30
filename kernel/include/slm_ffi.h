@@ -1181,7 +1181,7 @@ int slm_model_gpu_dispatch_enabled(uint32_t model_index);
  * The C-side `gpu_consumer_set` uses this to decide whether
  * `gpu use eviction on` accepts cleanly or with a "scaffold only"
  * warning. Today every shipped policy returns false; flipping
- * requires landing the matching `slm_gpu_run_eviction_inference`
+ * requires landing the matching `slm_gpu_run_eviction_batch`
  * dispatch — see `docs/design/gpu-policy-models.md` PR-6.
  */
 bool eviction_active_policy_has_gpu_backend(void);
@@ -1230,7 +1230,14 @@ int slm_gpu_run_mnist(void *logits_bytes_out);
  * Output / input caps are caller-supplied: callers know the model
  * shape, the kernel just bounds-checks against the handoff's
  * input_buf_size (set_input) or output_size (run). On non-Jetson
- * platforms all four return -1 unconditionally. */
+ * platforms all four return -1 unconditionally.
+ *
+ * slm_gpu_run_with_input returns SLM_GPU_ERR_INPUT_TOO_LARGE when
+ * `input_cap` exceeds the handoff's input_buf_size. That is a
+ * request-sizing mismatch with nothing sent to the GPU, so unlike
+ * the other failures it does not count toward the #552 circuit
+ * breaker. (slm_gpu_set_input keeps returning -2 for the same case.) */
+#define SLM_GPU_ERR_INPUT_TOO_LARGE  (-20)
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap);
 int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap);
 int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
@@ -1321,19 +1328,25 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * the 9-op pipeline staged by `scripts/gpu-kernel-eviction-qnet.c`
  * (handoff tagged `pipeline_kind == GA10B_PIPELINE_KIND_EVICTION_QNET`,
  * so it can coexist in DRAM with MNIST and sched-MLP handoffs from
- * the same kexec generation). One-shot semantic: caller passes the
- * 27-element fp32 feature vector in `features_bytes` (length
- * `features_bytes_len`, typically 108 = 27 × 4), the engine writes
- * the input into the v6 handoff's input buffer, fires the pipeline,
- * and fills `score_out` with 4 bytes (a single fp32 in [0, 1] — the
- * sigmoid output of the final layer). Caller ranks candidates by
- * this score.
+ * the same kexec generation). One call scores a whole `select_victim`
+ * candidate set (#1020): caller passes `n_rows` rows of
+ * SLM_EVICTION_FEATURE_DIM (27) fp32 features in `features`
+ * (row-major, `n_rows × 27` floats), the engine writes them into the
+ * v6 handoff's input buffer, fires the pipeline once, and fills
+ * `scores_out` with `n_rows` fp32 scores in [0, 1] (the sigmoid
+ * output of the final layer), in row order. Caller ranks candidates
+ * by these scores. The producer stages a fixed batch (`--batch`,
+ * default 64 rows) and the GPU always computes all of them; rows
+ * beyond `n_rows` are ignored.
  *
- * Returns 0 on success, negative rc on failure:
- *   -1  bad pointer, no v6 handoff present, rate-limited
- *       (`gpu use eviction on` accepted but no producer ran),
- *       or try-lock contended by another GPU dispatch
- *   -2  features_bytes_len exceeds the v6 handoff's input buffer cap
+ * Returns 0 on success (all `n_rows` scores written), negative rc on
+ * failure (`scores_out` contents unspecified):
+ *   -1  bad pointer, n_rows == 0 or > SLM_EVICTION_BATCH_MAX_ROWS,
+ *       no v6 handoff present (`gpu use eviction on` accepted but no
+ *       producer ran), rate-limited, or try-lock contended by another
+ *       GPU dispatch
+ *   SLM_GPU_ERR_INPUT_TOO_LARGE  n_rows exceeds the rows the producer
+ *       staged (e.g. a --batch 1 producer); no GPU work was done
  *   -3  internal set_input error (kind mismatch in handoff)
  * On non-Jetson platforms returns -1.
  *
@@ -1342,29 +1355,57 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * burst of `select_victim` calls from concurrent allocators on
  * different CPUs fan out cleanly into CPU fallbacks rather than
  * pile up IRQ-off behind the dispatch lock. Failures (including
- * rate-limit rejection) are silent for the caller — they fall back
- * to CPU `mlp_predict` in `runtime/src/mm/eviction/mlp.rs`, and are
- * counted by `slm_gpu_eviction_dispatch_stats` below. The first
- * successful dispatch after boot logs
+ * rate-limit rejection) are silent for the caller — it scores every
+ * candidate on the CPU (`mlp_predict` in
+ * `runtime/src/mm/eviction/mlp.rs`), never a GPU/CPU mix, and the
+ * outcome is counted by `slm_gpu_eviction_dispatch_stats` below.
+ * The first successful dispatch after boot logs
  * "[INFO] eviction GPU fastpath dispatching". */
-int slm_gpu_run_eviction_inference(const void *features_bytes,
-                                    size_t features_bytes_len,
-                                    void *score_out);
+#define SLM_EVICTION_FEATURE_DIM     27u
+/* Sanity cap on one request; the producer's staged batch (<= 256
+ * rows, see scripts/gpu-kernel-eviction-qnet.c) is the real limit. */
+#define SLM_EVICTION_BATCH_MAX_ROWS  4096u
+int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
+                               float *scores_out);
 
 /*
  * Eviction-MLP GPU dispatch counters (#965), surfaced by
- * `eviction stats`. `attempts` = calls into
- * `slm_gpu_run_eviction_inference`; `ok` = GPU-served scores;
- * `rate_limited` = fallbacks rejected by the 50 ms window. The
- * remaining `attempts - ok - rate_limited` fell back on a downstream
- * error. Attempts are counted on every platform (the non-Jetson stub
- * counts and fails), so routing is observable under QEMU. Any out
- * pointer may be NULL.
+ * `eviction stats`. One attempt per `select_victim` decision (#1020).
+ * `attempts` = calls into `slm_gpu_run_eviction_batch`; `ok` =
+ * decisions scored entirely on the GPU; `rate_limited` = fallbacks
+ * rejected by the 50 ms window; `oversize` = fallbacks whose
+ * candidate count exceeded the producer's staged batch. The
+ * remaining `attempts - ok - rate_limited - oversize` fell back on a
+ * downstream error. Attempts are counted on every platform (the
+ * non-Jetson stub counts and fails), so routing is observable under
+ * QEMU. Any out pointer may be NULL.
  */
 void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
                                      uint64_t *out_ok,
-                                     uint64_t *out_rate_limited);
+                                     uint64_t *out_rate_limited,
+                                     uint64_t *out_oversize);
 void slm_gpu_eviction_dispatch_stats_reset(void);
+
+/*
+ * Timing of GPU-served eviction dispatches (#965 latency, #1020 batch
+ * sizing). Each sample is the wall time of one successful
+ * `slm_gpu_run_eviction_batch` dispatch: try-lock, input copy,
+ * launch, completion poll and output read, which is also the span
+ * run with IRQs masked. The first success after boot also pays for
+ * channel bring-up, so it is reported alone in `first_ns` and left
+ * out of the rest. `rows_total / count` is the mean rows per timed
+ * dispatch. All zero on non-Jetson builds. The stats reset above
+ * clears everything except `first_ns`.
+ */
+struct slm_gpu_eviction_timing {
+    uint64_t first_ns;
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+    uint64_t rows_total;
+};
+void slm_gpu_eviction_dispatch_timing(struct slm_gpu_eviction_timing *out);
 
 /*
  * GPU dispatch circuit breaker (#552 mitigation).

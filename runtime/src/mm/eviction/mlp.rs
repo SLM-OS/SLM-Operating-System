@@ -13,75 +13,60 @@
 //! returns 0.5 for any input — the policy reduces to a constant
 //! "pick index 0" decision. See [`super::generated::MODELS_AVAILABLE`].
 //!
-//! ## GPU dispatch (PR-6 of docs/design/gpu-policy-models.md)
+//! ## GPU dispatch (PR-6 of docs/design/gpu-policy-models.md, #1020)
 //!
 //! When the operator flips both `gpu use inference on` (master) and
-//! `gpu use eviction on`, [`MlpPolicy`] tries
-//! [`slm_gpu_run_eviction_inference`] for each candidate before
-//! falling back to the CPU path. The dispatch consumes the v6 channel
-//! handoff staged by `scripts/gpu-kernel-eviction-qnet.c
-//! --preserve-for-kexec` and inherited across kexec. Dispatch failure
-//! (no producer ran, rate-limit window, try-lock contention, or any
-//! downstream GA10B error) silently falls back to CPU per-candidate;
-//! `eviction stats` reports attempts / ok / fallback (rate-limited)
-//! so the two cases can be told apart. GPU routing additionally
-//! requires the compiled-in models (`EVICTION_MODELS=ON`) with no
-//! runtime MLP blob active — see `MlpPolicy::gpu_route`.
+//! `gpu use eviction on`, [`MlpPolicy`] scores a decision's whole
+//! candidate set with one [`gpu_score_batch`] call: one dispatch of the
+//! batched pipeline staged by `scripts/gpu-kernel-eviction-qnet.c
+//! --preserve-for-kexec` (default 64 rows) and inherited across kexec.
+//! Either every candidate gets a GPU score or, on any failure (no
+//! producer ran, 50 ms rate-limit window, try-lock contention, more
+//! candidates than the producer's batch, a non-finite score, or any
+//! downstream GA10B error), every candidate is scored on the CPU. One
+//! argmax never mixes fp32 GPU and int8 CPU scores. `eviction stats`
+//! reports attempts / ok / fallback (rate-limited, oversize) per
+//! decision. GPU routing additionally requires the compiled-in models
+//! (`EVICTION_MODELS=ON`) with no runtime MLP blob active — see
+//! `MlpPolicy::gpu_route`.
 //!
-//! **v1 limitation: per-candidate dispatch.** This module dispatches
-//! the GPU once per candidate (8 dispatches per `select_victim` on
-//! the standard candidate set), not once for all candidates. Each
-//! dispatch is gated by the system-wide 50 ms rate limiter
-//! (`g_eviction_dispatch_last_ns` in `slm_ffi.c`), so the common
-//! pattern in practice is "at most 1 GPU dispatch per 50 ms, every
-//! other candidate on CPU" — i.e. 1 GPU + 7 CPU fallbacks for a
-//! `select_victim` that opens a fresh window, 0 + 8 for one inside
-//! it. The bench latency consequently reflects this mixed-mode cost
-//! rather than a pure all-GPU number, and the argmax compares an
-//! fp32 GPU score against int8 CPU scores. Batching
-//! 8 candidates × 27 features into a single dispatch is the proper
-//! shape and is tracked in #1020.
-//!
-//! **v1 limitation: dispatch runs under the allocator and registry
-//! locks.** `select_victim` is reached from
-//! `model_mem::evict_and_retry` with the pool allocator `SpinGuard`
-//! held, and through `registry::with_active_policy_for_pool` with
-//! `REGISTRY_LOCK` held. A GPU-routed candidate therefore takes
-//! `g_gpu_dispatch_lock` (try-lock, IRQs off) and busy-polls GA10B
-//! inside both spinlocks — up to the 2 s `ga10b_submit_and_poll`
-//! timeout when GR faults (the 2026-05-17 FECS_ERROR_PENDING case),
-//! during which every other CPU allocating model memory spins. The
-//! existing mitigations bound frequency, not duration: at most one
-//! dispatch per 50 ms window, try-lock instead of a blocking acquire
-//! (no deadlock), and the #552 circuit breaker after repeated
-//! failures. The path is reachable only with both opt-in toggles on,
-//! which requires a GPU. Moving the GPU scoring outside both locks
-//! (score a snapshot, then re-validate under the lock) is part of the
-//! #1020 restructure.
+//! **Locking.** A decision through the registry
+//! (`registry::select_victim`, the allocator's eviction path) runs the
+//! dispatch with no lock held: the policy hands its feature rows out
+//! under `REGISTRY_LOCK` ([`EvictionPolicy::gpu_batch_features`]), the
+//! registry drops the lock and dispatches, then re-takes it and lets
+//! the policy pick from the scores
+//! ([`EvictionPolicy::finish_gpu_select`]). `model_mem::evict_and_retry`
+//! already calls in without the allocator lock and re-validates the
+//! victim's generation before freeing. The dispatch itself still runs
+//! IRQs-off behind the GPU try-lock, bounded by the 2 s
+//! `ga10b_submit_and_poll` timeout. Direct callers of
+//! [`EvictionPolicy::select_victim`] (the bench harness) dispatch
+//! inline.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::features::extract_features;
 use super::generated;
 use super::{active_blob, blob_status, BlobKind, RuntimeMlpModel};
-use super::policy::{BlockMeta, EvictionPolicy};
+use super::policy::{BlockFeatures, BlockMeta, EvictionPolicy};
 
 extern "C" {
-    /// `int slm_gpu_run_eviction_inference(const void *features_bytes,
-    ///                                      size_t features_bytes_len,
-    ///                                      void *score_out);`
+    /// `int slm_gpu_run_eviction_batch(const float *features,
+    ///                                 size_t n_rows, float *scores_out);`
     ///
     /// SAFETY (FFI contract from kernel/include/slm_ffi.h):
-    /// - `features_bytes` must point to `features_bytes_len` valid bytes
-    ///   (typically 27 × 4 = 108).
-    /// - `score_out` must point to ≥ 4 writable bytes.
-    /// - Returns 0 on success (caller may read 4 fp32 bytes from
-    ///   `score_out`), negative rc on failure (output untouched).
-    /// - On non-Jetson platforms returns -1 unconditionally.
-    fn slm_gpu_run_eviction_inference(
-        features_bytes: *const f32,
-        features_bytes_len: usize,
-        score_out: *mut f32,
+    /// - `features` must point to `n_rows × 27` valid f32s (row-major).
+    /// - `scores_out` must point to `n_rows` writable f32s.
+    /// - Returns 0 on success (all `n_rows` scores written), negative
+    ///   rc on failure (`scores_out` contents unspecified).
+    /// - Never retains either pointer past the call.
+    /// - On non-Jetson platforms counts the attempt and returns -1.
+    fn slm_gpu_run_eviction_batch(
+        features: *const f32,
+        n_rows: usize,
+        scores_out: *mut f32,
     ) -> i32;
 
     /// `int gpu_consumer_enabled(GPU_CONSUMER_EVICTION)` wrapped as
@@ -111,19 +96,49 @@ fn eviction_gpu_eligible() -> bool {
     }
 }
 
-/// Try a GPU dispatch for one candidate's 27-element feature row.
-/// Returns `Some(score)` on success, `None` on any failure (caller
-/// falls back to CPU).
-fn try_gpu_score(row: &super::policy::BlockFeatures) -> Option<f32> {
-    let mut score = 0.0_f32;
+/// Score every row with one batched GPU dispatch. `Some` holds one
+/// finite score per row; `None` on any failure, including a
+/// non-finite score (a corrupted pipeline must not steer eviction),
+/// in which case the caller scores every row on the CPU.
+// The FFI reads each row as SLM_EVICTION_FEATURE_DIM (27) fp32s
+// (kernel/include/slm_ffi.h); a feature-count change on either side
+// alone would misalign every row after the first.
+const _: () = assert!(core::mem::size_of::<BlockFeatures>() == 27 * 4);
+
+pub(crate) fn gpu_score_batch(rows: &[BlockFeatures]) -> Option<Vec<f32>> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut scores = vec![0.0_f32; rows.len()];
+    // SAFETY: `[f32; 27]` rows are contiguous in the slice, so
+    // `rows.as_ptr()` addresses `rows.len() × 27` valid f32s; `scores`
+    // holds `rows.len()` writable f32s. Both outlive the call and C
+    // keeps neither pointer.
     let rc = unsafe {
-        slm_gpu_run_eviction_inference(
-            row.as_ptr(),
-            core::mem::size_of_val(row),
-            &mut score as *mut f32,
+        slm_gpu_run_eviction_batch(
+            rows.as_ptr() as *const f32,
+            rows.len(),
+            scores.as_mut_ptr(),
         )
     };
-    if rc == 0 { Some(score) } else { None }
+    if rc != 0 || !scores.iter().all(|s| s.is_finite()) {
+        return None;
+    }
+    Some(scores)
+}
+
+/// Index of the highest score; ties go to the lowest index, and a NaN
+/// never wins (matches the pre-#1020 per-candidate loop).
+fn argmax(scores: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut best_score = f32::MIN;
+    for (i, &s) in scores.iter().enumerate() {
+        if s > best_score {
+            best_score = s;
+            best = i;
+        }
+    }
+    best
 }
 
 #[derive(Clone)]
@@ -174,8 +189,8 @@ impl MlpPolicy {
 
     /// Whether this call may try the GPU. Beyond the operator toggles,
     /// the CPU fallback must be computing the *same model* the GPU
-    /// runs, because per-candidate dispatch mixes GPU and CPU scores
-    /// inside one argmax. The PR-5 producer bakes the compiled-in
+    /// runs, so that a decision's victim does not depend on which path
+    /// happened to serve it. The PR-5 producer bakes the compiled-in
     /// weights (`generated/mlp_policy_f32.rs`), so GPU routing is
     /// skipped when the CPU side would score with something else:
     /// the 0.5 stub (`EVICTION_MODELS=OFF`) or a runtime OTA blob
@@ -191,68 +206,83 @@ impl MlpPolicy {
     /// CPU-only scoring path. Routes through the runtime blob if
     /// loaded (`MLP1` payload from `eviction model load mlp ...`),
     /// otherwise the compiled-in int8 generator.
-    fn score_row_cpu(&self, row: &super::policy::BlockFeatures) -> f32 {
+    fn score_row_cpu(&self, row: &BlockFeatures) -> f32 {
         if let Some(cache) = self.runtime_cache.as_ref() {
             return cache.model.predict(row);
         }
         generated::mlp_predict(row)
     }
 
-    /// Score one row, trying GPU dispatch first when the toggle is
-    /// on. Per-candidate dispatch (see module docs for v1
-    /// limitations). On any GPU failure — including the common
-    /// "rate-limit window after a successful dispatch" case — the
-    /// caller silently falls back to CPU for THIS candidate, while
-    /// other candidates in the same `select_victim` invocation may
-    /// still succeed on the GPU path. The bench numbers reflect
-    /// this mixed-mode behavior.
-    fn score_row(&self, row: &super::policy::BlockFeatures, use_gpu: bool) -> f32 {
+    fn score_rows_cpu(&self, rows: &[BlockFeatures]) -> Vec<f32> {
+        rows.iter().map(|row| self.score_row_cpu(row)).collect()
+    }
+
+    /// Score every row: one batched GPU dispatch when `use_gpu`, all
+    /// rows on the CPU otherwise or if the dispatch fails. Never a
+    /// mix of the two.
+    fn score_rows(&self, rows: &[BlockFeatures], use_gpu: bool) -> Vec<f32> {
         if use_gpu {
-            if let Some(score) = try_gpu_score(row) {
-                return score;
+            if let Some(scores) = gpu_score_batch(rows) {
+                return scores;
             }
         }
-        self.score_row_cpu(row)
+        self.score_rows_cpu(rows)
     }
 }
 
 impl EvictionPolicy for MlpPolicy {
+    /// Direct (non-registry) entry point: dispatches inline. The
+    /// registry path goes through `gpu_batch_features` /
+    /// `finish_gpu_select` instead so the dispatch runs unlocked.
     fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
         debug_assert!(
             !candidates.is_empty(),
             "MlpPolicy select_victim on empty list"
         );
         self.refresh_runtime_cache();
-        let features = extract_features(candidates);
-
-        // Sample the toggle once at the top of the call so all
-        // candidates use a consistent eligibility decision. The
-        // per-candidate dispatch inside the loop still rate-limits
-        // independently — when the rate limit kicks in mid-loop,
-        // remaining candidates fall back to CPU per-candidate (the
-        // try_gpu_score path returns None silently).
         let use_gpu = self.gpu_route();
-
-        let mut best = 0usize;
-        let mut best_score = f32::MIN;
-        for (i, row) in features.iter().enumerate() {
-            let s = self.score_row(row, use_gpu);
-            if s > best_score {
-                best_score = s;
-                best = i;
-            }
-        }
-        best
+        let features = extract_features(candidates);
+        argmax(&self.score_rows(&features, use_gpu))
     }
 
     fn score(&mut self, candidates: &[BlockMeta]) -> Vec<f32> {
         self.refresh_runtime_cache();
         let use_gpu = self.gpu_route();
         let features = extract_features(candidates);
-        features
-            .iter()
-            .map(|row| self.score_row(row, use_gpu))
-            .collect()
+        self.score_rows(&features, use_gpu)
+    }
+
+    fn gpu_batch_features(&mut self, candidates: &[BlockMeta])
+        -> Option<Vec<BlockFeatures>>
+    {
+        self.refresh_runtime_cache();
+        if candidates.is_empty() || !self.gpu_route() {
+            return None;
+        }
+        Some(extract_features(candidates))
+    }
+
+    /// Never dispatches. GPU scores are used only when there is exactly
+    /// one per candidate and the CPU side still runs the model the GPU
+    /// ran: a runtime blob loaded while the dispatch was in flight
+    /// (`eviction model load mlp ...`) makes them stale, the same rule
+    /// `gpu_route` applies up front. Otherwise (dispatch failed, stale,
+    /// or a caller bug) the candidates are scored on the CPU.
+    fn finish_gpu_select(&mut self, candidates: &[BlockMeta],
+                         gpu_scores: Option<&[f32]>) -> usize
+    {
+        debug_assert!(
+            !candidates.is_empty(),
+            "MlpPolicy finish_gpu_select on empty list"
+        );
+        self.refresh_runtime_cache();
+        if let Some(scores) = gpu_scores {
+            if scores.len() == candidates.len() && self.runtime_cache.is_none() {
+                return argmax(scores);
+            }
+        }
+        let features = extract_features(candidates);
+        argmax(&self.score_rows_cpu(&features))
     }
 
     fn name(&self) -> &'static str { "MLP" }
@@ -264,7 +294,7 @@ impl EvictionPolicy for MlpPolicy {
     /// instead of the "scaffold only" warning. The dispatch itself
     /// still requires the producer (`scripts/gpu-kernel-eviction-qnet
     /// --preserve-for-kexec`) to have staged a v6 handoff before
-    /// kexec; if no handoff is present, `slm_gpu_run_eviction_inference`
-    /// silently returns -1 and `score_row` falls back to CPU.
+    /// kexec; if no handoff is present, `slm_gpu_run_eviction_batch`
+    /// silently returns -1 and every candidate is scored on the CPU.
     fn has_gpu_backend(&self) -> bool { self.gpu_capable }
 }
