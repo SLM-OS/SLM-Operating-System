@@ -560,7 +560,8 @@ amortizes and the MLP is marginal at small block sizes (see
 **GPU dispatch status (as of 2026-10-30) — Jetson plumbing landed;
 per-candidate GPU scores on 10 of 10 hardware boots both alone and
 alongside the MNIST and sched-MLP helpers after the #1029 whole-VM
-reserve; batched dispatch (#1020) passes QEMU, hardware ☐ pending;
+reserve; batched dispatch (#1020) GPU-served on hardware, through
+both the direct and the registry path;
 Pi 5 still CPU-only.** The numbers above are all host-CPU paths. PR-6 of
 [`docs/design/gpu-policy-models.md`](design/gpu-policy-models.md)
 ([#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965))
@@ -633,6 +634,35 @@ attempts and always falls back. The two-phase registry contract
 (scores used, dispatch unlocked, stale scores discarded on a policy
 swap) is pinned by the `two_phase_*` and `mlp_finish_*` checks in
 `rust_eviction_selftest`.
+
+**Batched dispatch on hardware (#1020, 2026-10-30).** One
+jetson-nano-2 boot of the #1020 kernel (`EVICTION_MODELS=ON`), with
+the batched producer (`--batch 64`, built on the board) plus the
+default MNIST and sched-MLP helpers preserved, `eviction policy mlp`
+and both GPU toggles on:
+
+- **Producer self-check (Linux).** All 64 rows matched the fp32 CPU
+  reference, worst |gpu − cpu| = 6.0e-8, and row 0 matched
+  `expected_score.bin`.
+- **`bench eviction`** (direct `select_victim` calls, 8 candidates).
+  It logged `eviction GPU fastpath dispatching (kind=EVICTION_QNET, 8
+  rows)`. The counters showed 156 attempts, ok 1 and 155 rate-limited,
+  with 0 errors and 0 oversize. That is one attempt per decision: the
+  same bench counted 1248 = 156 × 8 under per-candidate dispatch.
+  Fault rates were identical to the CPU path.
+- **`bench eviction-e2e --policy mlp`** (real pools, through
+  `registry::select_victim` and its unlocked dispatch phase, 64
+  candidates per decision). 12,404 decisions, all offered to the GPU.
+  187 were GPU-served and the rest rate-limited, with 0 errors and 0
+  oversize. Fault rates matched a CPU-only rerun
+  (`gpu use eviction off`) on 7 of 8 scenarios. The other,
+  `single_inference`, read 56% against 55%, consistent with 187
+  decisions scored in fp32 on the GPU instead of int8 on the CPU.
+  Average select latency was 759 µs against 738 µs CPU-only. Both
+  numbers are dominated by CPU feature extraction and scoring for 64
+  candidates, since only 1.5% of decisions reached the GPU under the
+  50 ms window. A per-dispatch GPU latency still needs a dedicated
+  measurement (#965).
 
 **Hardware status.** On 2026-10-29, jetson-nano-2 ran 10 power-cycled
 boots of the PR-6 kernel (`EVICTION_MODELS=ON`). Each boot staged the
