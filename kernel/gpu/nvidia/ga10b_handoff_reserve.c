@@ -1048,8 +1048,10 @@ void ga10b_kexec_handoff_register_reserves(void)
      * PMM to hand out. That alone did not fix #1029's dispatch
      * failures: the helper channels' page tables, shaders and QMD-
      * referenced buffers were still unreserved. The channel-VM pass
-     * inside `ga10b_reserve_handoffs_in_range` covers those (eviction-
-     * only on jetson-nano-2: 10/10 with it, 0/6 without, 2026-10-30). */
+     * inside `ga10b_reserve_handoffs_in_range` covers those. On
+     * jetson-nano-2 (2026-10-30), eviction dispatch with it: 10/10
+     * producer-alone (0/6 without) and 10/10 with the MNIST + sched
+     * helpers also preserved (1/10 before). */
     uart_puts("[ga10b-reserve] scanning DRAM for handoff magic "
               "(all pipeline kinds)...\n");
     /* g_boot_inst_block_phys is 0 when reserve_inst_block skipped, so

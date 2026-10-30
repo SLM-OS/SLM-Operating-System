@@ -644,9 +644,38 @@ not advance" (`mb6=0x00`). The handoff was found on all 10 boots.
 1/10 versus 8/10 is significant (Fisher exact, two-sided p = 0.0055),
 so the low default-configuration rate comes from multiple preserved
 channels at kexec, not from the eviction pipeline itself.
-GPU eviction testing should therefore stage the producer and run
-`slmos-kexec --no-helper`. Making the helpers coexist is tracked in
+Making the helpers coexist is tracked in
 [#1029](https://github.com/SLM-OS/SLM-Operating-System/issues/1029).
+
+**Root cause (2026-10-30).** Neither the helper count nor the eviction
+pipeline was the real variable. The boot-time PMM reserve
+(`ga10b_handoff_reserve.c`) pinned the buffers each handoff names, but
+not the inherited channel's GMMU page tables, nor the shaders, cbufs
+and buffers that its QMDs reference. A v6 dispatch relaunches the
+helper's own QMDs, so all of those pages must survive. `pmm_init`
+writes a `{next, prev}` free-list link into the first 16 bytes of
+every free block's head page. On jetson-nano-2 that link was read back
+from entry 0 of the eviction channel's PDE2 table, which unmapped the
+pushbuffer ("GP_GET did not advance"). It was also read back from
+op[0]'s first SASS instruction at VA `0x1ffc010000`, giving SM
+`illegal_instr_encoding` and "payload didn't land" with
+`gr_intr=0x00200000`. Whether a page is a block head depends on the
+rest of the reserve set. That is why changing what else was reserved
+(more helpers, #1030's per-kind reserves) moved the pass rate. On the
+#1030 kernel the eviction-only rate fell to 0/6, against 8/13 on the
+#1022 kernel. The v6 per-op shader reserve was also reading 24-byte
+v6 ops as 96-byte v7 ops.
+
+The fix enumerates each inherited channel's whole VM from its inst
+block (`ga10b_gmmu_enum_pages`) and reserves every page-table page
+and every mapped page. The boot log shows one line per channel, for
+example `vm @inst 0x...: 8 tables, 813 pages (3252 KB) in 63
+ranges`. With it, the eviction producer alone served a GPU score on
+**10/10** boots. The default multi-helper configuration (MNIST +
+sched-MLP + eviction channels preserved) served one on
+**10/10** boots, against 1/10 before (Fisher exact p = 0.0001).
+`slmos-kexec --no-helper` is no longer required for GPU eviction
+testing.
 On every failed boot the #552 circuit breaker tripped after three
 consecutive failures, and `bench eviction` completed on CPU scoring.
 One FECS_ERROR_PENDING boot spent more than 10 minutes in the bench
@@ -667,9 +696,10 @@ channel inherit itself succeeds on only about 65% of boots on either board
 (#844), so any future hardware claim needs a multi-boot `boot_test`
 ratio, not a single run. No Jetson GPU latency column exists yet. Of
 the #965 hardware criteria, the serial `fastpath dispatching` capture
-is met (2026-10-29, 9 boots across the two runs). The GPU bench delta, boot-test toggle
-gating, and re-evaluating the 1 µs target remain open; a meaningful
-bench delta needs both a reliable dispatch (#1029) and batched
+is met (2026-10-29, 9 boots across the two runs; 2026-10-30, 20 more
+with the whole-VM reserve). The GPU bench delta, boot-test toggle
+gating, and re-evaluating the 1 µs target remain open. With dispatch
+now reliable (#1029), a meaningful bench delta still needs batched
 scoring (#1020). On Pi 5 there is no GPU-side path in any
 form: VideoCore is intentionally stubbed and the AI HAT+ (Hailo-8L) is
 wedged at boundary IN ch=2 by
