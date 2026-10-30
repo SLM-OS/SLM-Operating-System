@@ -2336,6 +2336,8 @@ static void test_reserve_all_kinds_covers_eviction_and_sched(void)
     REQUIRE_EQ(reserves_at(0x160500000ULL), 1);
     free(ext);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 static void test_reserve_all_kinds_eviction_only(void)
@@ -2362,6 +2364,8 @@ static void test_reserve_all_kinds_eviction_only(void)
     REQUIRE_EQ(reserves_at(0x152000000ULL + 0x10000), 1); /* pushbuf */
     REQUIRE_EQ(reserves_at(evict_inst), 0);  /* resident, not doubled */
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* The single-pass scan must pick, per kind, the same handoff the
@@ -2400,6 +2404,8 @@ static void test_reserve_all_kinds_picks_first_valid_per_kind(void)
     REQUIRE_EQ(reserves_at(0x152000000ULL), 1);     /* first's userd */
     REQUIRE_EQ(reserves_at(0x170000000ULL), 0);     /* later's userd */
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* With no resident channel captured (FECS_CURRENT_CTX skipped, e.g.
@@ -2425,6 +2431,8 @@ static void test_reserve_all_kinds_no_resident_reserves_every_inst(void)
         REQUIRE_EQ(reserves_at(base + 0x30000), 1);
     }
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 static void test_reserve_all_kinds_none_found(void)
@@ -2441,6 +2449,83 @@ static void test_reserve_all_kinds_none_found(void)
     REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, start + 65536,
                                                4096, 0), 0);
     REQUIRE_EQ(g_n_reserves, 0);
+    free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
+}
+
+/* #1037: channel bring-up uses the boot scan's per-kind record instead
+ * of re-walking DRAM under the IRQs-masked dispatch lock, and falls
+ * back to the scan when the record no longer validates. */
+static void test_resolve_handoff_prefers_boot_record(void)
+{
+    printf("== test_resolve_handoff_prefers_boot_record ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    plant_reservable_handoff(buf, 8, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    plant_reservable_handoff(buf, 12, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end = start + 65536;
+    bool from_boot = true;
+
+    /* No boot scan yet: the resolver walks the given range. */
+    ga10b_boot_handoff_reset_for_test();
+    REQUIRE(!ga10b_boot_handoff_scan_ran());
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(
+                   GA10B_PIPELINE_KIND_EVICTION_QNET, start, end, 4096,
+                   &from_boot),
+               start + 8 * 4096);
+    REQUIRE(!from_boot);
+
+    g_n_reserves = 0;
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0x7u);
+    REQUIRE(ga10b_boot_handoff_scan_ran());
+
+    /* Boot scan keeps the first handoff of each kind. */
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_MNIST),
+               start + 1 * 4096);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_EVICTION_QNET),
+               start + 8 * 4096);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_COUNT), 0);
+
+    /* Record answers with an empty range, i.e. no walk. */
+    from_boot = false;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                             0, 0, 4096, &from_boot),
+               start + 4 * 4096);
+    REQUIRE(from_boot);
+
+    /* Record no longer valid (magic gone): reported missing, not
+     * replaced by the later, unreserved one at page 12. */
+    buf[8 * 1024] = 0;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(
+                   GA10B_PIPELINE_KIND_EVICTION_QNET, start, end, 4096,
+                   &from_boot),
+               0);
+    REQUIRE(from_boot);
+
+    /* Record re-tagged to another kind: not trusted either. */
+    struct ga10b_channel_handoff *mn =
+        (struct ga10b_channel_handoff *)((char *)buf + 1 * 4096);
+    mn->pipeline_kind = GA10B_PIPELINE_KIND_SCHED_MLP;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_MNIST,
+                                             start, end, 4096, NULL), 0);
+
+    /* A boot scan that found nothing is final too: no walk, even
+     * though a handoff of that kind is now in range. */
+    memset(buf, 0, 65536);
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0);
+    plant_reservable_handoff(buf, 2, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_SCHED_MLP), 0);
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                             start, end, 4096, NULL), 0);
+    ga10b_boot_handoff_reset_for_test();
     free(buf);
 }
 
@@ -2687,6 +2772,8 @@ static void test_reserve_channel_vm_pins_tables_and_leaves(void)
     REQUIRE_EQ(reserves_at(0x170010000ULL), 0);
     REQUIRE_EQ(reserves_at(0x171001000ULL), 0);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* The resident inst block is usually the helper's own channel: its VM
@@ -2711,6 +2798,8 @@ static void test_reserve_channel_vm_dedups_resident(void)
     REQUIRE_EQ(reserves_at(vm_fake_phys(1)), 1);
     REQUIRE_EQ(reserves_at(0x172000000ULL), 1);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* Index of the first recorded reserve based at `phys`, or -1. */
@@ -2749,6 +2838,8 @@ static void test_reserve_channel_vm_runs_after_named_buffers(void)
     REQUIRE(vm_tables >= 0);
     REQUIRE(sched_userd < vm_tables);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* ======================================================================
@@ -3903,6 +3994,7 @@ int main(void)
     test_reserve_all_kinds_picks_first_valid_per_kind();
     test_reserve_all_kinds_no_resident_reserves_every_inst();
     test_reserve_all_kinds_none_found();
+    test_resolve_handoff_prefers_boot_record();
     test_gmmu_enum_visits_every_table_and_leaf();
     test_gmmu_enum_rejects_invalid_pdb();
     test_gmmu_enum_table_budget_stops_fanout();

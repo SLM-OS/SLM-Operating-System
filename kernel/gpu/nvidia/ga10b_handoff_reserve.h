@@ -46,6 +46,7 @@
 #ifndef GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
 #define GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -118,5 +119,29 @@ uint64_t ga10b_kexec_inherited_inst_block_phys(void);
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
                                          uint64_t resident_inst_phys);
+
+/*
+ * Phys of the `kind` handoff that the boot scan in
+ * `ga10b_reserve_handoffs_in_range` picked, and whose pages it
+ * reserved; 0 if none was found, the scan hasn't run, `kind` is out
+ * of range, or on non-Jetson builds. `ga10b_resolve_handoff_of_kind`
+ * (ga10b_channel_handoff.h) uses it to avoid re-walking DRAM at
+ * dispatch time (#1037).
+ */
+uint64_t ga10b_boot_handoff_phys(uint32_t kind);
+
+/*
+ * Whether that boot scan has run. Once it has, its per-kind answer is
+ * final, including "none": handoffs are only created by Linux helpers
+ * before kexec, so a later scan could only find a page the boot pass
+ * did not reserve, and paid ~50 ms per miss with IRQs masked (#1037).
+ * Always false on non-Jetson builds.
+ */
+bool ga10b_boot_handoff_scan_ran(void);
+
+#ifdef SLM_HOST_HARNESS
+/* Forget the boot scan (records and the ran flag). Harness only. */
+void ga10b_boot_handoff_reset_for_test(void);
+#endif
 
 #endif /* GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H */

@@ -700,8 +700,15 @@ with IRQs masked. These are two jetson-nano-2 boots of kernel
   GPU dispatch to beat a CPU pass at these sizes. The batched GPU path
   stays an option for exploration, not a speed-up.
 - **First dispatch.** The first GPU-served dispatch after boot took
-  88.6 ms and 84.1 ms on the two boots. It includes channel bring-up,
-  which also runs with IRQs masked (#1037).
+  88.6 ms and 84.1 ms on the two boots, all with IRQs masked. A step
+  breakdown (#1037) showed inherit 39 ms and channel 42 ms, almost all
+  of it about 950 characters of bring-up progress lines written to the
+  115200-baud console under the dispatch lock. The DRAM handoff scan
+  was cheap when the handoff existed. With those lines suppressed on
+  the dispatch path, and the boot scan's handoff record reused instead
+  of a rescan, the first dispatch is 4.1 ms: inherit 2.1 ms, channel
+  1 µs, warmup 0.75 ms, then the throwaway and real dispatch. Steady
+  state is unchanged at 0.72 ms.
 - **Select-latency averages are dominated by CPU scoring.** The
   per-run average `select_victim` latency varied between 738 and
   1011 µs. GPU dispatches add only about 15–45 µs to a run's average,
