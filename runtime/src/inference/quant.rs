@@ -872,14 +872,6 @@ fn dequant_q6k_half(ql: &[u8], qh: &[u8], sc: &[u8], d: f32, y: &mut [f32]) {
 // Generic dispatcher
 // ---------------------------------------------------------------------------
 
-/// Bytes-per-row for a tensor of `n_elements` quantized as `ggml_type`.
-///
-/// Covers the types the M5 forward pass actually loads from real
-/// GGUFs: F32, F16, Q4_K (Qwen2 demo), Q6_K (LM-head in any K_M
-/// quant), Q5_0 / Q8_0 (SmolLM attention + embedding). Other types
-/// return `None` — caller falls back to whatever error path it has
-/// for "format not supported" (typically a diagnostic log + abort
-/// the forward pass cleanly).
 /// Elements per quantization block for `ggml_type` (1 for the
 /// unblocked F32 / F16), `None` for unsupported types. A row of a
 /// block-quantized tensor must hold a whole number of blocks;
@@ -896,6 +888,14 @@ pub fn quant_block_elements(ggml_type: GgmlType) -> Option<usize> {
     }
 }
 
+/// Bytes-per-row for a tensor of `n_elements` quantized as `ggml_type`.
+///
+/// Covers the types the M5 forward pass actually loads from real
+/// GGUFs: F32, F16, Q4_K (Qwen2 demo), Q6_K (LM-head in any K_M
+/// quant), Q5_0 / Q8_0 (SmolLM attention + embedding). Other types
+/// return `None` — caller falls back to whatever error path it has
+/// for "format not supported" (typically a diagnostic log + abort
+/// the forward pass cleanly).
 pub fn quant_row_bytes(ggml_type: GgmlType, n_elements: usize) -> Option<usize> {
     match ggml_type {
         GgmlType::F32 => n_elements.checked_mul(4),
@@ -969,6 +969,18 @@ mod tests {
     use alloc::vec::Vec;
 
     // -- Layout constants ---------------------------------------------
+
+    #[test]
+    fn quant_block_elements_per_type() {
+        // Pins the per-type block size `embedding_lookup_any` uses to
+        // reject partial-block rows (#1034).
+        assert_eq!(quant_block_elements(GgmlType::F32), Some(1));
+        assert_eq!(quant_block_elements(GgmlType::F16), Some(1));
+        assert_eq!(quant_block_elements(GgmlType::Q4_K), Some(256));
+        assert_eq!(quant_block_elements(GgmlType::Q6_K), Some(256));
+        assert_eq!(quant_block_elements(GgmlType::Q5_0), Some(32));
+        assert_eq!(quant_block_elements(GgmlType::Q8_0), Some(32));
+    }
 
     #[test]
     fn q4k_block_size_constants() {

@@ -594,12 +594,13 @@ impl Bbpe {
             for ch in piece_str.chars() {
                 let mut buf = [0u8; 4];
                 let utf8 = ch.encode_utf8(&mut buf).as_bytes();
-                if let Some(id) = unicode_char_to_byte(ch)
+                // A single-char normal token is the form the model was
+                // trained on, so it wins over the BYTE token.
+                if let Some(&id) = self.bytes_to_id.get(utf8) {
+                    out.push(id);
+                } else if let Some(id) = unicode_char_to_byte(ch)
                     .and_then(|b| self.byte_table[b as usize])
                 {
-                    out.push(id);
-                } else if let Some(&id) = self.bytes_to_id.get(utf8) {
-                    // Single-char normal token, not BYTE-typed.
                     out.push(id);
                 }
                 // Else: unrepresentable in this vocab. Drop silently;
