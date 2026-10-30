@@ -120,6 +120,7 @@ SHADERS=(
     "maxpool2d_fp32:maxpool2d_fp32_shader.sass"
     "gemm_fp32:gemm_fp32_shader.sass"
     "gemm_hmma_fp32a_fp16w:gemm_hmma_fp32a_fp16w_shader.sass"
+    "sigmoid_fp32:sigmoid_fp32_shader.sass"  # eviction-qnet producer only
 )
 
 for entry in "${SHADERS[@]}"; do
