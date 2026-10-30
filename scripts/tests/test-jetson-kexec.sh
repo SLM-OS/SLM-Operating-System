@@ -111,7 +111,49 @@ else
         "$SCRIPT" --no-gpu-suspend --no-usb-hold --no-smmu-fix --no-usb-root-cleanup "$tmpfile"
 fi
 
-# Test 6: Script does not call kexec if preconditions fail
+# Test 6: helper selection (#1029). --print-helpers resolves and exits 0
+# without root, so these run on any host.
+assert_prints() {
+    local desc="$1" expected="$2"
+    shift 2
+    local out rc=0
+    out="$("$@" 2>&1)" || rc=$?
+    if [[ $rc -eq 0 && "$out" == "$expected" ]]; then
+        pass "$desc"
+    else
+        fail "$desc: expected '$expected' (rc 0), got '$out' (rc $rc)"
+    fi
+}
+assert_prints "Default helper selection is mnist,sched" \
+    "mnist,sched" env -u SLMOS_HELPERS "$SCRIPT" --print-helpers
+assert_prints "--helpers=eviction selects only the eviction producer" \
+    "eviction" "$SCRIPT" --helpers=eviction --print-helpers
+assert_prints "--helpers keeps order and drops duplicates" \
+    "eviction,mnist" "$SCRIPT" --helpers=eviction,mnist,eviction --print-helpers
+assert_prints "SLMOS_HELPERS env selects helpers" \
+    "sched" env SLMOS_HELPERS=sched "$SCRIPT" --print-helpers
+assert_prints "--helpers overrides SLMOS_HELPERS" \
+    "mnist" env SLMOS_HELPERS=sched "$SCRIPT" --helpers=mnist --print-helpers
+assert_prints "--no-helper wins over --helpers" \
+    "none" "$SCRIPT" --helpers=eviction --no-helper --print-helpers
+assert_prints "--helpers=none selects nothing" \
+    "none" "$SCRIPT" --helpers=none --print-helpers
+assert_fails_with "Unknown helper name is rejected" \
+    2 "unknown helper 'mnsit'" \
+    "$SCRIPT" --helpers=mnist,mnsit --print-helpers
+assert_fails_with "Empty --helpers= is rejected" \
+    2 "empty helper list" \
+    "$SCRIPT" --helpers= --print-helpers
+assert_fails_with "Unknown helper in SLMOS_HELPERS is rejected" \
+    2 "unknown helper 'gpu'" \
+    env SLMOS_HELPERS=gpu "$SCRIPT" --print-helpers
+if [[ $EUID -ne 0 ]]; then
+    assert_fails_with "Valid --helpers still reaches the root check" \
+        1 "must run as root" \
+        "$SCRIPT" --helpers=eviction "$tmpfile"
+fi
+
+# Test 7: Script does not call kexec if preconditions fail
 # (implicit in tests 4 and 5 — if kexec were called, it would fail
 #  differently or actually attempt to run, which would error on a host
 #  without the kexec binary; our exit path is before kexec is invoked)

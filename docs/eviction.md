@@ -781,7 +781,8 @@ ranges`. With it, the eviction producer alone served a GPU score on
 sched-MLP + eviction channels preserved) served one on
 **10/10** boots, against 1/10 before (Fisher exact p = 0.0001).
 `slmos-kexec --no-helper` is no longer required for GPU eviction
-testing.
+testing; `slmos-kexec --helpers=mnist,sched,eviction` stages the
+producer alongside the default helpers (#1055).
 On every failed boot the #552 circuit breaker tripped after three
 consecutive failures, and `bench eviction` completed on CPU scoring.
 One FECS_ERROR_PENDING boot spent more than 10 minutes in the bench

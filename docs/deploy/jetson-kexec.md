@@ -377,6 +377,8 @@ The `slmos-kexec` helper's default behavior suits most cases. The common non-def
 | `--no-smmu-fix` | Skip loading `arm_smmu_noshutdown.ko`. Only useful if you are not exercising the USB-A/XHCI path or are deliberately reproducing the pre-fix failure. |
 | `--no-usb-root-cleanup` | Skip the Linux-side USB2 root-hub `authorized=0` cleanup before `kexec`. Useful only if you are intentionally reproducing the old stale-slot path; the default cleanup is what makes the retained slot-1 handoff reproducible on `jetson-nano-2`. |
 | `--no-cpufreq-pin` | Skip pinning each cpufreq policy's `scaling_min_freq` to `scaling_max_freq` before `kexec`. SLM-OS raises every core to CPU 0's frequency at boot (#1053), so with the pin all six cores run at the policy max (1344 MHz on `jetson-nano-2`); without it they run at whatever the governor last chose for CPU 0. |
+| `--helpers=LIST` | Choose which channel-inherit helpers to auto-start: a comma list of `mnist`, `sched`, `eviction`, or `none` (also settable as `SLMOS_HELPERS`, e.g. in `/etc/default/slmos-autokexec`). Default `mnist,sched`. Add `eviction` to stage the eviction producer (`gpu-kernel-eviction-qnet`) instead of starting it by hand. Several preserved channels coexist since #1032 (default helpers plus the eviction producer: 10/10 GPU-served boots). `--no-helper` is `--helpers=none`. |
+| `--print-helpers` | Print the resolved helper selection and exit without touching the system. |
 
 Full flag list in the script header.
 
