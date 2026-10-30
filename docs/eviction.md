@@ -623,7 +623,14 @@ harness) dispatch inline.
 `eviction` toggle state; `fallback − rate-limited − oversize` is the
 downstream-error count (no handoff, try-lock contention, circuit
 breaker, GA10B fault). Counts recorded before #1020 (including the
-hardware tables below) are per candidate, not per decision. The first
+hardware tables below) are per candidate, not per decision. A second
+line, `GPU dispatch time: avg … us, min … us, max … us over N (avg R
+rows); first … us incl. bring-up`, times each GPU-served dispatch
+(try-lock through output read, the IRQs-masked span), keeping the
+first dispatch after boot, which pays for channel bring-up, apart.
+`eviction stats gpu-reset` zeroes the counters and steady-state
+timing, but not the first-dispatch figure, so a single measurement
+window can be read on its own. The first
 GPU-served decision after boot logs
 `[INFO] eviction GPU fastpath dispatching (kind=EVICTION_QNET, N rows)`
 once. The QEMU suite pins the toggle matrix (`test_eviction_gpu_*` in
