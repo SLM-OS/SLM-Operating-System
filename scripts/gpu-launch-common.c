@@ -1062,6 +1062,26 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
         /* PR-3 extension: pipeline-kind discriminator (was _pad4). */
         .pipeline_kind      = pipeline_kind,
     };
+
+    /* #1029: publish GR ctx extents from v6 too (sched-MLP and
+     * eviction-QNet both publish v6). The fields sit at fixed
+     * offsets in the 256 B struct and SLM-OS's boot reserve pass
+     * consumes them for every pipeline kind regardless of version.
+     * Without this, a v6 helper started after the MNIST helper left
+     * its own channel's GR context buffers unreserved — the MNIST
+     * list only covers channels that existed when MNIST published —
+     * and FECS context restores read clobbered state post-kexec.
+     * Same non-fatal fallback as v7 on an unpatched nvgpu. */
+    {
+        uint64_t gr_ext_phys = 0;
+        uint32_t gr_ext_n    = 0;
+        if (gpu_collect_gr_ctx_extents((struct gpu_launch_ctx *)ctx,
+                                       &gr_ext_phys, &gr_ext_n) == 0) {
+            hoff.gr_ctx_extents_phys = gr_ext_phys;
+            hoff.gr_ctx_n_extents    = gr_ext_n;
+        }
+    }
+
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);
 

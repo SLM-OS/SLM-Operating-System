@@ -43,6 +43,8 @@
 #include "../../kernel/gpu/nvidia/falcon.h"
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include "../../kernel/gpu/nvidia/ga10b_gmmu.h"
+#include "../../kernel/gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../../kernel/gpu/nvidia/ga10b_qmd.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/include/ga10b_qmd_selftest_reference.h"
@@ -83,6 +85,56 @@ bool ga10b_phys_in_dram(uint64_t phys, size_t bytes)
 {
     (void)phys; (void)bytes;
     return true;
+}
+
+/* pmm_user_reserve_add / ga10b_gmmu_walk are called by
+ * ga10b_handoff_reserve.c (#1029 reserve-all-kinds tests). Record
+ * every reserve so tests can assert exactly which pages were pinned;
+ * the walk stub is only reached for per-op shaders without a
+ * published shader_phys, which the fixtures never plant. */
+#define TEST_MAX_RESERVES 256
+static struct { uint64_t phys, size; } g_reserves[TEST_MAX_RESERVES];
+static size_t g_n_reserves;
+
+int pmm_user_reserve_add(uint64_t phys, uint64_t size)
+{
+    if (size == 0 || g_n_reserves >= TEST_MAX_RESERVES) return -1;
+    g_reserves[g_n_reserves].phys = phys;
+    g_reserves[g_n_reserves].size = size;
+    g_n_reserves++;
+    return 0;
+}
+
+int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
+                    struct ga10b_gmmu_walk_result *result)
+{
+    (void)inst_block_phys; (void)gpu_va;
+    memset(result, 0, sizeof(*result));
+    result->status = GA10B_GMMU_WALK_BAD_INST;
+    return -1;
+}
+
+/* Symbols ga10b_bringup.c references that live in TUs outside this
+ * harness's link set (kernel timer driver, ga10b_gmmu.c). The timer
+ * pair is a real monotonic clock so timer_busy_wait_us-based polls
+ * terminate; the GMMU entry points are dump/recovery helpers the
+ * tests never drive, stubbed as no-op / failure. */
+#include <time.h>
+uint64_t timer_get_frequency(void) { return 1000000000ULL; }
+uint64_t timer_get_count(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h)
+{
+    (void)h;
+    return -1;
+}
+void ga10b_gmmu_dump_chram_runlist(const struct ga10b_channel_handoff *h)
+{
+    (void)h;
 }
 
 static int failures;
@@ -2175,6 +2227,139 @@ static void test_next_gp_put_wraps_at_ring_boundary(void)
 }
 
 /* ======================================================================
+ * #1029: boot-time PMM reservation covers every pipeline kind
+ * ====================================================================== */
+
+/* Number of recorded reserves whose base equals `phys`. */
+static unsigned reserves_at(uint64_t phys)
+{
+    unsigned n = 0;
+    for (size_t i = 0; i < g_n_reserves; i++) {
+        if (g_reserves[i].phys == phys) n++;
+    }
+    return n;
+}
+
+/* Plant a valid handoff of `kind` at page `page` whose channel buffers
+ * and inst block sit at a kind-specific fake phys (never dereferenced
+ * by the reserve path except the GR-ctx extents array). */
+static void plant_reservable_handoff(uint32_t *buf, size_t page,
+                                     uint32_t kind, uint64_t extents_phys,
+                                     uint32_t n_extents)
+{
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    uint64_t base = 0x150000000ULL + (uint64_t)kind * 0x1000000ULL;
+    h.version         = 6;
+    h.pipeline_kind   = kind;
+    h.userd_phys      = base + 0x0000;
+    h.gpfifo_phys     = base + 0x1000;
+    h.pushbuf_phys    = base + 0x10000;
+    h.semaphore_phys  = base + 0x20000;
+    h.inst_block_phys = base + 0x30000;
+    h.gr_ctx_extents_phys = extents_phys;
+    h.gr_ctx_n_extents    = n_extents;
+    memcpy((char *)buf + page * 4096, &h, sizeof(h));
+}
+
+static void test_reserve_all_kinds_covers_eviction_and_sched(void)
+{
+    printf("== test_reserve_all_kinds_covers_eviction_and_sched ==\n");
+    uint32_t *buf;
+    struct ga10b_phys_extent *ext;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0 ||
+        posix_memalign((void **)&ext, 4096, 4096) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    memset(ext, 0, 4096);
+    /* The eviction producer publishes two GR-ctx extents. */
+    ext[0].phys = 0x160400000ULL; ext[0].n_pages = 8;
+    ext[1].phys = 0x160500000ULL; ext[1].n_pages = 1;
+    uint64_t ext_phys = (uint64_t)(uintptr_t)ext;
+
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    plant_reservable_handoff(buf, 8, GA10B_PIPELINE_KIND_EVICTION_QNET,
+                             ext_phys, 2);
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t mnist_inst = 0x150000000ULL + 0x30000;
+    g_n_reserves = 0;
+    uint32_t mask = ga10b_reserve_handoffs_in_range(start, start + 65536,
+                                                    4096, mnist_inst);
+    REQUIRE_EQ(mask, 0x7u);
+
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        uint64_t base = 0x150000000ULL + (uint64_t)kind * 0x1000000ULL;
+        REQUIRE_EQ(reserves_at(base + 0x0000), 1);   /* userd */
+        REQUIRE_EQ(reserves_at(base + 0x1000), 1);   /* gpfifo */
+        REQUIRE_EQ(reserves_at(base + 0x10000), 1);  /* pushbuf */
+        REQUIRE_EQ(reserves_at(base + 0x20000), 1);  /* sem */
+    }
+    /* Each handoff page itself is pinned. */
+    REQUIRE_EQ(reserves_at(start + 1 * 4096), 1);
+    REQUIRE_EQ(reserves_at(start + 4 * 4096), 1);
+    REQUIRE_EQ(reserves_at(start + 8 * 4096), 1);
+    /* Non-resident channels get their own inst block reserved; the
+     * resident one (already covered by the FECS_CURRENT_CTX pass) is
+     * not reserved twice. */
+    REQUIRE_EQ(reserves_at(mnist_inst), 0);
+    REQUIRE_EQ(reserves_at(0x151000000ULL + 0x30000), 1);
+    REQUIRE_EQ(reserves_at(0x152000000ULL + 0x30000), 1);
+    /* The eviction handoff's GR-ctx extents and their array page. */
+    REQUIRE_EQ(reserves_at(ext_phys), 1);
+    REQUIRE_EQ(reserves_at(0x160400000ULL), 1);
+    REQUIRE_EQ(reserves_at(0x160500000ULL), 1);
+    free(ext);
+    free(buf);
+}
+
+static void test_reserve_all_kinds_eviction_only(void)
+{
+    printf("== test_reserve_all_kinds_eviction_only ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* `slmos-kexec --no-helper`: only the eviction producer staged.
+     * Before #1029 nothing beyond the resident inst block was
+     * reserved in this configuration. */
+    plant_reservable_handoff(buf, 2, GA10B_PIPELINE_KIND_EVICTION_QNET,
+                             0, 0);
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t evict_inst = 0x152000000ULL + 0x30000;
+    g_n_reserves = 0;
+    uint32_t mask = ga10b_reserve_handoffs_in_range(start, start + 65536,
+                                                    4096, evict_inst);
+    REQUIRE_EQ(mask, 1u << GA10B_PIPELINE_KIND_EVICTION_QNET);
+    REQUIRE_EQ(reserves_at(0x152000000ULL), 1);          /* userd */
+    REQUIRE_EQ(reserves_at(0x152000000ULL + 0x10000), 1); /* pushbuf */
+    REQUIRE_EQ(reserves_at(evict_inst), 0);  /* resident, not doubled */
+    free(buf);
+}
+
+static void test_reserve_all_kinds_none_found(void)
+{
+    printf("== test_reserve_all_kinds_none_found ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, start + 65536,
+                                               4096, 0), 0);
+    REQUIRE_EQ(g_n_reserves, 0);
+    free(buf);
+}
+
+/* ======================================================================
  * Test 9: handoff scanner (finds magic in a memory buffer)
  * ====================================================================== */
 
@@ -3321,6 +3506,9 @@ int main(void)
     test_scanner_kind_returns_zero_when_kind_absent();
     test_scanner_kind_skips_invalid_handoff();
     test_scanner_kind_legacy_zero_is_mnist();
+    test_reserve_all_kinds_covers_eviction_and_sched();
+    test_reserve_all_kinds_eviction_only();
+    test_reserve_all_kinds_none_found();
 
     test_poll_match_exact();
     test_poll_match_any_nonzero();

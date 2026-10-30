@@ -121,7 +121,10 @@ static inline void timer_busy_wait_us(uint64_t us)
     if (freq == 0) return;
     uint64_t target = timer_get_count() + (us * freq + 999999ULL) / 1000000ULL;
     while (timer_get_count() < target) {
-#if defined(PLATFORM_X86_64)
+        /* __x86_64__ covers host-harness builds (e.g. make
+         * test-ga10b-bringup), which include this header without a
+         * PLATFORM_* define. */
+#if defined(PLATFORM_X86_64) || defined(__x86_64__)
         __asm__ volatile("pause");
 #else
         __asm__ volatile("yield");
