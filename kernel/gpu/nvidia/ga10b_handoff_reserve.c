@@ -957,6 +957,17 @@ static void find_first_handoff_per_kind(uint64_t start, uint64_t end,
     }
 }
 
+/* Per-kind handoff phys found by the boot scan (0 = none). Recorded so
+ * the dispatch path can skip its own DRAM walk (#1037): that walk ran
+ * under the IRQs-masked GPU dispatch lock on every bring-up. Written
+ * once, single-threaded, before pmm_init; read-only afterwards. */
+static uint64_t g_boot_handoff_phys[GA10B_PIPELINE_KIND_COUNT];
+
+uint64_t ga10b_boot_handoff_phys(uint32_t kind)
+{
+    return kind < GA10B_PIPELINE_KIND_COUNT ? g_boot_handoff_phys[kind] : 0;
+}
+
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
                                          uint64_t resident_inst_phys)
@@ -964,6 +975,9 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
     uint64_t handoffs[GA10B_PIPELINE_KIND_COUNT];
     struct vm_reserve_seen seen = { .n = 0 };
     find_first_handoff_per_kind(start, end, stride, handoffs);
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        g_boot_handoff_phys[kind] = handoffs[kind];
+    }
 
     uint32_t found_mask = 0;
     for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
@@ -1099,6 +1113,13 @@ void ga10b_kexec_handoff_register_reserves(void)
  * FECS reads). */
 uint64_t ga10b_kexec_inherited_inst_block_phys(void)
 {
+    return 0;
+}
+
+/* Non-Jetson stub: no boot scan ran, so nothing is recorded. */
+uint64_t ga10b_boot_handoff_phys(uint32_t kind)
+{
+    (void)kind;
     return 0;
 }
 

@@ -2444,6 +2444,67 @@ static void test_reserve_all_kinds_none_found(void)
     free(buf);
 }
 
+/* #1037: channel bring-up uses the boot scan's per-kind record instead
+ * of re-walking DRAM under the IRQs-masked dispatch lock, and falls
+ * back to the scan when the record no longer validates. */
+static void test_resolve_handoff_prefers_boot_record(void)
+{
+    printf("== test_resolve_handoff_prefers_boot_record ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    plant_reservable_handoff(buf, 8, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    plant_reservable_handoff(buf, 12, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end = start + 65536;
+    g_n_reserves = 0;
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0x7u);
+
+    /* Boot scan keeps the first handoff of each kind. */
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_MNIST),
+               start + 1 * 4096);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_EVICTION_QNET),
+               start + 8 * 4096);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_COUNT), 0);
+
+    /* Record answers with an empty fallback range, i.e. no scan. */
+    bool from_boot = false;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                             0, 0, 4096, &from_boot),
+               start + 4 * 4096);
+    REQUIRE(from_boot);
+
+    /* Record no longer valid (magic gone): scan finds the next one. */
+    buf[8 * 1024] = 0;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(
+                   GA10B_PIPELINE_KIND_EVICTION_QNET, start, end, 4096,
+                   &from_boot),
+               start + 12 * 4096);
+    REQUIRE(!from_boot);
+
+    /* Record re-tagged to another kind: not trusted either. */
+    struct ga10b_channel_handoff *mn =
+        (struct ga10b_channel_handoff *)((char *)buf + 1 * 4096);
+    mn->pipeline_kind = GA10B_PIPELINE_KIND_SCHED_MLP;
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_MNIST,
+                                             start, end, 4096, &from_boot),
+               0);
+    REQUIRE(!from_boot);
+
+    /* A boot scan that finds nothing clears the records. */
+    memset(buf, 0, 65536);
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0);
+    REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_SCHED_MLP), 0);
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                             start, end, 4096, NULL), 0);
+    free(buf);
+}
+
 /* ======================================================================
  * #1029: whole-VM enumeration + channel-VM boot reserve
  * ====================================================================== */
@@ -3903,6 +3964,7 @@ int main(void)
     test_reserve_all_kinds_picks_first_valid_per_kind();
     test_reserve_all_kinds_no_resident_reserves_every_inst();
     test_reserve_all_kinds_none_found();
+    test_resolve_handoff_prefers_boot_record();
     test_gmmu_enum_visits_every_table_and_leaf();
     test_gmmu_enum_rejects_invalid_pdb();
     test_gmmu_enum_table_budget_stops_fanout();

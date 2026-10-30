@@ -657,6 +657,22 @@ uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
                                              uint32_t wanted_kind);
 
 /*
+ * Locate the `wanted_kind` handoff for channel bring-up (#1037).
+ * Returns the boot scan's pick (`ga10b_boot_handoff_phys`) when it
+ * still validates for that kind. That is the same handoff a fresh
+ * scan would find first: same range, stride and rule, and its pages
+ * are PMM-reserved. Otherwise falls back to
+ * `ga10b_find_handoff_of_kind_in_range(start, end, stride, ...)`.
+ * The fallback is a ~50 ms DRAM walk over the production range, which
+ * the dispatch path otherwise paid with IRQs masked on every bring-up.
+ * `*out_from_boot` (may be NULL) reports which path answered.
+ */
+uint64_t ga10b_resolve_handoff_of_kind(uint32_t wanted_kind,
+                                       uint64_t start, uint64_t end,
+                                       uint64_t stride,
+                                       bool *out_from_boot);
+
+/*
  * Pick the poll-target payload for `nvgpu launch-kernel`. v4 handoffs
  * carry a per-kernel `expected_payload`; v3 (and v4 handoffs where
  * the field is left zero) fall back to the caller-supplied default.

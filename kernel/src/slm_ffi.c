@@ -907,6 +907,13 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * 2 s per-op × 8-op MNIST pipeline × 3 dispatches ≈ 48 s of IRQ-
  * off in the worst case. A future async-warmup-from-kernel_main
  * move would relieve all three. */
+/* Per-kind wall time of the last ensure_bringup that actually ran
+ * the bring-up, split by step (#1037). Recorded under the dispatch
+ * lock; printed outside it (UART output inside the IRQs-masked span
+ * would itself lengthen that span). Index 0 inherit, 1 channel,
+ * 2 warmup dispatch. */
+static uint64_t g_bringup_step_ns[GA10B_PIPELINE_KIND_COUNT][3];
+
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -927,12 +934,18 @@ static int ensure_bringup(uint32_t kind)
     bool active_is_kind = (ga10b_bringup_active_pipeline_kind() == kind);
     if (channel_open && active_is_kind) return 0;
 
+    uint64_t t0 = slm_get_time_ns();
     int rc = ga10b_bringup_inherit(b);
+    uint64_t t1 = slm_get_time_ns();
+    g_bringup_step_ns[kind][0] = t1 - t0;
     if (rc < 0) return rc;
     rc = ga10b_bringup_channel_kind(b, kind);
+    uint64_t t2 = slm_get_time_ns();
+    g_bringup_step_ns[kind][1] = t2 - t1;
     if (rc < 0) return rc;
 
     int warmup_rc = ga10b_bringup_launch_kernel(b);
+    g_bringup_step_ns[kind][2] = slm_get_time_ns() - t2;
     if (warmup_rc < 0) {
         /* Non-fatal: the warmup failing doesn't itself prevent the
          * user's call. If a real dispatch problem persists, the
@@ -1272,11 +1285,17 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
                                       memory_order_relaxed)) {
             atomic_store_explicit(&g_eviction_gpu_time_first_ns, dt,
                                   memory_order_relaxed);
+            const uint64_t *st =
+                g_bringup_step_ns[GA10B_PIPELINE_KIND_EVICTION_QNET];
             uart_printf("[INFO] eviction GPU fastpath dispatching "
                         "(kind=EVICTION_QNET, %lu rows, first dispatch "
-                        "%lu us incl. bring-up)\n",
+                        "%lu us incl. bring-up: inherit %lu us, channel "
+                        "%lu us, warmup %lu us)\n",
                         (unsigned long)n_rows,
-                        (unsigned long)(dt / 1000u));
+                        (unsigned long)(dt / 1000u),
+                        (unsigned long)(st[0] / 1000u),
+                        (unsigned long)(st[1] / 1000u),
+                        (unsigned long)(st[2] / 1000u));
         } else {
             /* Runs after the dispatch lock is released, so two
              * back-to-back successes could overlap here; the 50 ms

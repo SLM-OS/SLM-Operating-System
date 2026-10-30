@@ -1264,6 +1264,7 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
  */
 
 #include "ga10b_channel_handoff.h"
+#include "ga10b_handoff_reserve.h"
 
 /* Cached handoff data for use by phase 7.
  *
@@ -1446,11 +1447,30 @@ uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
     return 0;
 }
 
-static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
+uint64_t ga10b_resolve_handoff_of_kind(uint32_t wanted_kind,
+                                       uint64_t start, uint64_t end,
+                                       uint64_t stride,
+                                       bool *out_from_boot)
 {
-    return ga10b_find_handoff_of_kind_in_range(0x100000000ULL,
-                                                0x200000000ULL,
-                                                4096, wanted_kind);
+    uint64_t cached = ga10b_boot_handoff_phys(wanted_kind);
+    if (cached != 0u) {
+        const struct ga10b_channel_handoff *h =
+            (const struct ga10b_channel_handoff *)(uintptr_t)cached;
+        if (ga10b_validate_handoff(h) == 0 &&
+            h->pipeline_kind == wanted_kind) {
+            if (out_from_boot) *out_from_boot = true;
+            return cached;
+        }
+    }
+    if (out_from_boot) *out_from_boot = false;
+    return ga10b_find_handoff_of_kind_in_range(start, end, stride,
+                                               wanted_kind);
+}
+
+static uint64_t find_handoff_scan_kind(uint32_t wanted_kind, bool *from_boot)
+{
+    return ga10b_resolve_handoff_of_kind(wanted_kind, 0x100000000ULL,
+                                         0x200000000ULL, 4096, from_boot);
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
@@ -1469,9 +1489,11 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
     if (b->state != GA10B_BRINGUP_ENGINES_READY &&
         b->state != GA10B_BRINGUP_PMU_UP) return -1;
 
-    uart_printf("[GA10B-P6] Scanning DRAM for handoff magic (kind=%u)...\n",
-                (unsigned)wanted_kind);
-    uint64_t handoff_phys = find_handoff_scan_kind(wanted_kind);
+    bool from_boot = false;
+    uint64_t handoff_phys = find_handoff_scan_kind(wanted_kind, &from_boot);
+    uart_printf("[GA10B-P6] Handoff lookup (kind=%u): %s\n",
+                (unsigned)wanted_kind,
+                from_boot ? "boot-scan record" : "DRAM scan");
     if (handoff_phys == 0) {
         uart_printf("[GA10B-P6] Handoff (kind=%u) not found. Was the Linux "
                     "helper run?\n", (unsigned)wanted_kind);

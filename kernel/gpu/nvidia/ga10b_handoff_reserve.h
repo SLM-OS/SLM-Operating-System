@@ -119,4 +119,14 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
                                          uint64_t resident_inst_phys);
 
+/*
+ * Phys of the `kind` handoff that the boot scan in
+ * `ga10b_reserve_handoffs_in_range` picked, and whose pages it
+ * reserved; 0 if none was found, the scan hasn't run, `kind` is out
+ * of range, or on non-Jetson builds. `ga10b_resolve_handoff_of_kind`
+ * (ga10b_channel_handoff.h) uses it to avoid re-walking DRAM at
+ * dispatch time (#1037).
+ */
+uint64_t ga10b_boot_handoff_phys(uint32_t kind);
+
 #endif /* GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H */
