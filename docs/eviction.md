@@ -692,13 +692,39 @@ class that blocks W-series oplib dispatch through the rebuilt PDB after
 #969 (post-kexec channel-inherit infrastructure) landed. A fix depends on
 the FECS context-switch work tracked under
 [#844](https://github.com/SLM-OS/SLM-Operating-System/issues/844). Post-kexec
-channel inherit itself succeeds on only about 65% of boots on either board
-(#844), so any future hardware claim needs a multi-boot `boot_test`
-ratio, not a single run. No Jetson GPU latency column exists yet. Of
-the #965 hardware criteria, the serial `fastpath dispatching` capture
-is met (2026-10-29, 9 boots across the two runs; 2026-10-30, 20 more
-with the whole-VM reserve). The GPU bench delta, boot-test toggle
-gating, and re-evaluating the 1 µs target remain open. With dispatch
+channel inherit succeeded on about 65% of boots on either board before
+the #1029 whole-VM reserve (#844, 101/156 `nvgpu run-mnist` boots in
+May 2026). On `main` b9de6824, which includes that reserve, it passed
+10/10 on jetson-nano-2 (2026-10-30), with bit-identical logits on every
+boot (Fisher p = 0.03 against the old rate). That is strong evidence
+that most of the residual failures were the same page clobber, but
+any hardware claim still needs a multi-boot ratio, not a single run.
+No Jetson GPU latency column exists yet. Of the #965 hardware
+criteria:
+
+- ✅ Serial `fastpath dispatching` capture. Met on 2026-10-29 (9 boots
+  across the two runs) and on 2026-10-30 (20 more with the whole-VM
+  reserve).
+- ✅ Toggle gating on hardware. Checked on 2026-10-30 on one
+  jetson-nano-2 boot of b9de6824, with the eviction producer plus the
+  default MNIST and sched-MLP helpers preserved and `eviction policy
+  mlp`. The `eviction stats` attempts counter was read after a
+  `bench eviction` in each state:
+
+  | `inference` | `eviction` | GPU attempts added | Path |
+  |---|---|---|---|
+  | off | off | 0 | CPU |
+  | off | on | 0 | CPU |
+  | on | off | 0 | CPU |
+  | on | on | 1248 (ok 1, 1247 rate-limited, 0 errors) | GPU, `fastpath dispatching` logged |
+  | on | off (after GPU use) | 0 | CPU |
+
+  Fault rates were identical in every state (`mlp` 164/368), as
+  expected with one GPU score per `select_victim` and the same model
+  on both paths.
+- ☐🎫 GPU bench delta, and re-evaluating the 1 µs target — #1020.
+
+With dispatch
 now reliable (#1029), a meaningful bench delta still needs batched
 scoring (#1020). On Pi 5 there is no GPU-side path in any
 form: VideoCore is intentionally stubbed and the AI HAT+ (Hailo-8L) is
