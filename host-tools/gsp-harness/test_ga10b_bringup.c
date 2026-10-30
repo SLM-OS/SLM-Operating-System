@@ -2336,6 +2336,8 @@ static void test_reserve_all_kinds_covers_eviction_and_sched(void)
     REQUIRE_EQ(reserves_at(0x160500000ULL), 1);
     free(ext);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 static void test_reserve_all_kinds_eviction_only(void)
@@ -2362,6 +2364,8 @@ static void test_reserve_all_kinds_eviction_only(void)
     REQUIRE_EQ(reserves_at(0x152000000ULL + 0x10000), 1); /* pushbuf */
     REQUIRE_EQ(reserves_at(evict_inst), 0);  /* resident, not doubled */
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* The single-pass scan must pick, per kind, the same handoff the
@@ -2400,6 +2404,8 @@ static void test_reserve_all_kinds_picks_first_valid_per_kind(void)
     REQUIRE_EQ(reserves_at(0x152000000ULL), 1);     /* first's userd */
     REQUIRE_EQ(reserves_at(0x170000000ULL), 0);     /* later's userd */
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* With no resident channel captured (FECS_CURRENT_CTX skipped, e.g.
@@ -2425,6 +2431,8 @@ static void test_reserve_all_kinds_no_resident_reserves_every_inst(void)
         REQUIRE_EQ(reserves_at(base + 0x30000), 1);
     }
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 static void test_reserve_all_kinds_none_found(void)
@@ -2442,6 +2450,8 @@ static void test_reserve_all_kinds_none_found(void)
                                                4096, 0), 0);
     REQUIRE_EQ(g_n_reserves, 0);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* #1037: channel bring-up uses the boot scan's per-kind record instead
@@ -2762,6 +2772,8 @@ static void test_reserve_channel_vm_pins_tables_and_leaves(void)
     REQUIRE_EQ(reserves_at(0x170010000ULL), 0);
     REQUIRE_EQ(reserves_at(0x171001000ULL), 0);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* The resident inst block is usually the helper's own channel: its VM
@@ -2786,6 +2798,8 @@ static void test_reserve_channel_vm_dedups_resident(void)
     REQUIRE_EQ(reserves_at(vm_fake_phys(1)), 1);
     REQUIRE_EQ(reserves_at(0x172000000ULL), 1);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* Index of the first recorded reserve based at `phys`, or -1. */
@@ -2824,6 +2838,8 @@ static void test_reserve_channel_vm_runs_after_named_buffers(void)
     REQUIRE(vm_tables >= 0);
     REQUIRE(sched_userd < vm_tables);
     free(buf);
+    /* Leave no boot-scan record behind for later tests (#1037). */
+    ga10b_boot_handoff_reset_for_test();
 }
 
 /* ======================================================================

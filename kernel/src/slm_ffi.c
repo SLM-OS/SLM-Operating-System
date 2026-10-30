@@ -914,16 +914,24 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * 2 warmup dispatch. */
 static uint64_t g_bringup_step_ns[GA10B_PIPELINE_KIND_COUNT][3];
 /* Set by ensure_bringup when it ran a (quiet) bring-up; the caller
- * prints a one-line summary after dropping the lock. */
-static bool g_bringup_ran[GA10B_PIPELINE_KIND_COUNT];
+ * prints a one-line summary after dropping the lock. Atomic because
+ * the reader runs outside the lock: the release store (under the
+ * lock, after the step times) pairs with the reader's acquire
+ * exchange, so exactly one caller prints each run and sees its
+ * times. A later bring-up can still overwrite the times while that
+ * caller prints, which only blurs a diagnostic line. */
+static _Atomic bool g_bringup_ran[GA10B_PIPELINE_KIND_COUNT];
 
 /* Print the summary of a bring-up the last locked dispatch ran, if
  * any. Call after releasing g_gpu_dispatch_lock and restoring IRQs;
  * `kind` must already have been range-checked by ensure_bringup. */
 static void report_quiet_bringup(uint32_t kind)
 {
-    if (kind >= GA10B_PIPELINE_KIND_COUNT || !g_bringup_ran[kind]) return;
-    g_bringup_ran[kind] = false;
+    if (kind >= GA10B_PIPELINE_KIND_COUNT) return;
+    if (!atomic_exchange_explicit(&g_bringup_ran[kind], false,
+                                  memory_order_acquire)) {
+        return;
+    }
     const uint64_t *st = g_bringup_step_ns[kind];
     uart_printf("[gpu-kind=%lu] channel bring-up: inherit %lu us, "
                 "channel %lu us, warmup %lu us (progress lines "
@@ -971,7 +979,7 @@ static int ensure_bringup(uint32_t kind)
 
     int warmup_rc = ga10b_bringup_launch_kernel(b);
     g_bringup_step_ns[kind][2] = slm_get_time_ns() - t2;
-    g_bringup_ran[kind] = true;
+    atomic_store_explicit(&g_bringup_ran[kind], true, memory_order_release);
     if (warmup_rc < 0) {
         /* Non-fatal: the warmup failing doesn't itself prevent the
          * user's call. If a real dispatch problem persists, the

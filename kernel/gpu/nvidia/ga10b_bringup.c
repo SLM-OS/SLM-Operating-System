@@ -59,7 +59,11 @@ bool ga10b_dispatch_verbose_get(void)
  * dispatch path (slm_ffi.c ensure_bringup) it runs with IRQs masked
  * under the GPU dispatch lock. ensure_bringup sets this flag around
  * the bring-up so only errors print there; the shell's `nvgpu
- * inherit` / `nvgpu channel` leave it clear and keep the full trail. */
+ * inherit` / `nvgpu channel` leave it clear and keep the full trail.
+ * The flag is process-wide, not per call: a shell `nvgpu inherit` on
+ * another CPU during the ~2 ms dispatch-path bring-up would lose its
+ * progress lines too. Accepted, since those shell commands don't take
+ * g_gpu_dispatch_lock and already race dispatch on g_handoff. */
 static atomic_bool g_ga10b_bringup_quiet = false;
 
 void ga10b_bringup_quiet_set(bool on)
