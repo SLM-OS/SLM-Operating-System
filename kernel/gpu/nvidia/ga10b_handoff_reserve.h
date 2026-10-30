@@ -44,8 +44,13 @@
 #include <stdint.h>
 
 /*
- * Discover the kexec'd channel's inst block via FECS_CURRENT_CTX and
- * register its physical page with the PMM as a user-supplied reserve.
+ * Register the kexec-inherited GPU state with the PMM as user-supplied
+ * reserves: the inst block of the channel resident at kexec (read from
+ * FECS_CURRENT_CTX), the GR runlist, and everything referenced by the
+ * published handoff of each pipeline kind via
+ * `ga10b_reserve_handoffs_in_range` (see the file-level "Scope"
+ * paragraph). The per-kind pass runs only when the FECS_CURRENT_CTX
+ * read yields a valid resident inst block.
  *
  * No return value: the function logs every decision (skipped because
  * no current ctx / outside DRAM / reserve table full / success) so

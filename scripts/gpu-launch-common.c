@@ -1070,7 +1070,8 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
      * Without this, a v6 helper started after the MNIST helper left
      * its own channel's GR context buffers unreserved — the MNIST
      * list only covers channels that existed when MNIST published —
-     * and FECS context restores read clobbered state post-kexec.
+     * so PMM could reuse those pages after kexec. (Coverage fix only:
+     * it did not resolve #1029's multi-helper dispatch failures.)
      * Same non-fatal fallback as v7 on an unpatched nvgpu. */
     {
         uint64_t gr_ext_phys = 0;

@@ -832,9 +832,11 @@ void ga10b_kexec_handoff_register_reserves(void)
      *
      * #1029: every pipeline kind, not just MNIST. With only the MNIST
      * handoff reserved, the sched-MLP and eviction channels' buffers
-     * (GR ctx save buffers included) were free for PMM to hand out,
-     * and their dispatches failed with ctxsw checksum / FECS errors
-     * on boots where more than one helper was staged. */
+     * (GR ctx save buffers included) were left unprotected, free for
+     * PMM to hand out. Closing that gap did NOT fix #1029's
+     * multi-helper eviction dispatch failures (ctxsw checksum / FECS
+     * errors persisted on jetson-nano-2 with every buffer reserved,
+     * 2026-10-29), so this is coverage, not that root cause. */
     uart_puts("[ga10b-reserve] scanning DRAM for handoff magic "
               "(all pipeline kinds)...\n");
     (void)ga10b_reserve_handoffs_in_range(0x100000000ull, 0x200000000ull,
