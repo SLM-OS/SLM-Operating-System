@@ -3,7 +3,7 @@
  * the Jetson GA10B GPU (PR-5 of docs/design/gpu-policy-models.md).
  *
  * Nine kernel dispatches chained through the v6 channel handoff, each
- * over a batch of B candidate rows (`--batch`, default 64; #1020):
+ * over a batch of B candidate rows (`--batch`, default 256; #1020):
  *
  *   Op 0  GEMM (L1)        x [B,27]   W [27,64]  → out [B,64]
  *   Op 1  Add+ReLU (L1)    + bias [64], apply_relu=1
@@ -82,7 +82,11 @@
 #define EVICT_OP_COUNT    9
 #define EVICT_INPUT_DIM   27   /* BlockFeatures = [f32; 27] (runtime_mlp.rs) */
 #define EVICT_OUTPUT_DIM   1   /* single fp32 eviction score in [0, 1] */
-#define EVICT_BATCH_DEFAULT 64  /* rows per dispatch (#1020) */
+/* Rows per dispatch (#1020). Defaults to the maximum: a decision with
+ * more candidates than this falls back to the CPU (`oversize`), and
+ * the weight pool alone has 512 blocks, while the extra GPU work for
+ * unused rows is negligible at these layer sizes. */
+#define EVICT_BATCH_DEFAULT 256
 /* Op 8 (sigmoid) runs as a single 256-thread CTA, and the Linux-side
  * completion check below waits on every score cell of it. */
 #define EVICT_BATCH_MAX   256

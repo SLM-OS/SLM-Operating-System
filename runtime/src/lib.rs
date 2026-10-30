@@ -3100,6 +3100,23 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             // GPU phase (decision happens under the lock, CPU only).
             check!(b"mlp_gpu_batch_features_none_when_toggles_off\0",
                    mlp.gpu_batch_features(&cands).is_none());
+
+            // A runtime blob activated while the dispatch was in flight
+            // makes the GPU scores (compiled-in model) stale: the
+            // decision must be the blob's own CPU pick. The stale scores
+            // peak at a different index, so using them would disagree.
+            use mm::eviction::{blob, runtime_mlp, store, BlobKind};
+            let payload = runtime_mlp::build_test_payload_first_feature_model(1.0);
+            let blob_bytes = blob::build_test_blob(BlobKind::Mlp, &payload);
+            let staged = store::stage_blob(&blob_bytes).is_ok()
+                && store::activate(BlobKind::Mlp).is_ok();
+            check!(b"mlp_finish_blob_staged\0", staged);
+            let blob_pick = mlp.finish_gpu_select(&cands, None);
+            let mut stale = [0.0f32; 3];
+            stale[(blob_pick + 1) % 3] = 1.0;
+            check!(b"mlp_finish_drops_gpu_scores_after_blob_load\0",
+                   mlp.finish_gpu_select(&cands, Some(&stale)) == blob_pick);
+            store::clear(BlobKind::Mlp);
         }
 
         // LRU default's score() override returns inverse-recency. With

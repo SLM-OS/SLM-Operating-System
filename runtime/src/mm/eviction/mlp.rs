@@ -19,7 +19,7 @@
 //! `gpu use eviction on`, [`MlpPolicy`] scores a decision's whole
 //! candidate set with one [`gpu_score_batch`] call: one dispatch of the
 //! batched pipeline staged by `scripts/gpu-kernel-eviction-qnet.c
-//! --preserve-for-kexec` (default 64 rows) and inherited across kexec.
+//! --preserve-for-kexec` (default 256 rows) and inherited across kexec.
 //! Either every candidate gets a GPU score or, on any failure (no
 //! producer ran, 50 ms rate-limit window, try-lock contention, more
 //! candidates than the producer's batch, a non-finite score, or any
@@ -100,6 +100,11 @@ fn eviction_gpu_eligible() -> bool {
 /// finite score per row; `None` on any failure, including a
 /// non-finite score (a corrupted pipeline must not steer eviction),
 /// in which case the caller scores every row on the CPU.
+// The FFI reads each row as SLM_EVICTION_FEATURE_DIM (27) fp32s
+// (kernel/include/slm_ffi.h); a feature-count change on either side
+// alone would misalign every row after the first.
+const _: () = assert!(core::mem::size_of::<BlockFeatures>() == 27 * 4);
+
 pub(crate) fn gpu_score_batch(rows: &[BlockFeatures]) -> Option<Vec<f32>> {
     if rows.is_empty() {
         return None;
@@ -258,8 +263,11 @@ impl EvictionPolicy for MlpPolicy {
     }
 
     /// Never dispatches. GPU scores are used only when there is exactly
-    /// one per candidate; anything else (dispatch failed, or a caller
-    /// bug) scores the candidates on the CPU.
+    /// one per candidate and the CPU side still runs the model the GPU
+    /// ran: a runtime blob loaded while the dispatch was in flight
+    /// (`eviction model load mlp ...`) makes them stale, the same rule
+    /// `gpu_route` applies up front. Otherwise (dispatch failed, stale,
+    /// or a caller bug) the candidates are scored on the CPU.
     fn finish_gpu_select(&mut self, candidates: &[BlockMeta],
                          gpu_scores: Option<&[f32]>) -> usize
     {
@@ -267,12 +275,12 @@ impl EvictionPolicy for MlpPolicy {
             !candidates.is_empty(),
             "MlpPolicy finish_gpu_select on empty list"
         );
+        self.refresh_runtime_cache();
         if let Some(scores) = gpu_scores {
-            if scores.len() == candidates.len() {
+            if scores.len() == candidates.len() && self.runtime_cache.is_none() {
                 return argmax(scores);
             }
         }
-        self.refresh_runtime_cache();
         let features = extract_features(candidates);
         argmax(&self.score_rows_cpu(&features))
     }

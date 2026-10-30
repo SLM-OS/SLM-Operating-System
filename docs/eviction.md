@@ -587,7 +587,7 @@ silently:
 
 **Batched dispatch (#1020).** One dispatch scores a decision's whole
 candidate set. The producer stages the pipeline for a fixed batch of
-rows (`--batch`, default 64, at most 256); SLM-OS writes one 27-feature
+rows (`--batch`, default and maximum 256); SLM-OS writes one 27-feature
 row per candidate and reads back one score per candidate, and the GPU
 computes the unused rows and ignores them. No new shaders were needed:
 GEMM takes M = batch, add-bias-ReLU takes the batch on `blockIdx.z`,
