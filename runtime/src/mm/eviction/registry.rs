@@ -24,13 +24,19 @@
 //!   compare-exchange's `Acquire` / `Release` semantics, which emit
 //!   `DMB ISH` on ARM64. That guarantees cross-CPU visibility of the
 //!   new `ACTIVE_POLICY` pointer after `set_eviction_policy` returns.
+//! - **No GPU dispatch under the lock (#1020).** `select_victim` asks
+//!   the policy for feature rows under the lock, releases it for the
+//!   batched GPU dispatch, then re-takes it to finish the decision
+//!   (see [`select_victim`]). `score` still calls `EvictionPolicy::
+//!   score` under the lock; it has no allocator caller (only the
+//!   selftest), so an MLP dispatch from there cannot stall allocation.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::policy::{BlockMeta, EvictionPolicy, PoolType};
+use super::policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
 
 // =============================================================================
 // Per-policy counters (#115)
@@ -164,6 +170,17 @@ static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
 const NUM_POOLS: usize = 2;
 static mut ACTIVE_POLICIES: [Option<Box<dyn EvictionPolicy + Send>>; NUM_POOLS] = [None, None];
 
+/// Bumped (under REGISTRY_LOCK) every time an installed policy is
+/// replaced. `select_victim` reads it before releasing the lock for a
+/// GPU dispatch and compares on re-acquire: a mismatch means the
+/// scores belong to a policy that is gone, so the new one decides on
+/// its own (CPU) path.
+static POLICY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn bump_generation() {
+    POLICY_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
 fn pool_index(pool: PoolType) -> usize {
     match pool {
         PoolType::Weight => 0,
@@ -208,6 +225,7 @@ pub fn init_default() {
             }
         }
     }
+    bump_generation();
 }
 
 /// Force-replace both pool policies with the default. Used by the
@@ -221,6 +239,7 @@ pub fn reset_to_default() {
             *slot = Some(default_policy());
         }
     }
+    bump_generation();
     counters_reset();
 }
 
@@ -247,6 +266,7 @@ pub fn set_eviction_policy(policy: Box<dyn EvictionPolicy + Send>) {
         (*p)[1] = Some(default_policy());
         (*p)[0] = Some(policy);
     }
+    bump_generation();
     counters_reset();
 }
 
@@ -260,6 +280,7 @@ pub fn set_eviction_policy_for_pool(
     unsafe {
         (*addr_of_mut!(ACTIVE_POLICIES))[pool_index(pool)] = Some(policy);
     }
+    bump_generation();
     counters_reset();
 }
 
@@ -310,7 +331,7 @@ pub fn with_active_policy_for_pool<R>(
 /// accepts the operator's intent but emits a "scaffold only" warning
 /// (mirroring the sched path). Today every shipped policy returns
 /// false from `has_gpu_backend`; flipping that requires landing the
-/// matching `slm_gpu_run_eviction_inference` dispatch
+/// matching `slm_gpu_run_eviction_batch` dispatch
 /// (`docs/design/gpu-policy-models.md` PR-6).
 pub fn any_active_policy_has_gpu_backend() -> bool {
     let _g = SpinGuard::new();
@@ -339,6 +360,7 @@ pub fn clear_for_test() {
             *slot = None;
         }
     }
+    bump_generation();
 }
 
 /// Select a victim using the active policy.
@@ -347,10 +369,40 @@ pub fn clear_for_test() {
 /// policy is installed or the candidate list is empty.
 ///
 /// Per-policy counters (#115): increments DECISIONS and accumulates
-/// the select_victim wall-clock latency regardless of which concrete
-/// policy is installed. Fallbacks are observed separately via
-/// `update_feedback(_, true)`.
+/// the select_victim wall-clock latency (GPU dispatch included)
+/// regardless of which concrete policy is installed. Fallbacks are
+/// observed separately via `update_feedback(_, true)`.
 pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
+    select_victim_with_scorer(candidates, super::mlp::gpu_score_batch)
+}
+
+/// Outcome of phase 1 of a decision, decided under REGISTRY_LOCK.
+enum Phase1 {
+    Done(usize),
+    Gpu(Vec<BlockFeatures>, u64),
+}
+
+/// `select_victim` with the GPU scorer injectable (the selftest drives
+/// it with a fake that inspects the lock and swaps policies).
+///
+/// Three phases (#1020) so the batched GPU dispatch, which polls with
+/// IRQs off for up to 2 s on a GR fault, never runs with
+/// REGISTRY_LOCK held:
+///
+/// 1. Under the lock: `gpu_batch_features`. `None` → the policy
+///    decides right there via `finish_gpu_select(_, None)`.
+/// 2. Unlocked: `scorer(rows)` → `Some(scores)` or `None`.
+/// 3. Under the lock again: `finish_gpu_select(_, scores)`, unless a
+///    policy swap happened in between (POLICY_GENERATION moved), in
+///    which case the new policy decides with `None`.
+///
+/// Candidate staleness across phase 2 needs no handling here: the
+/// candidates are already a snapshot, and `model_mem::evict_and_retry`
+/// re-validates the chosen block's generation before freeing it.
+pub(crate) fn select_victim_with_scorer(
+    candidates: &[BlockMeta],
+    scorer: impl FnOnce(&[BlockFeatures]) -> Option<Vec<f32>>,
+) -> Option<usize> {
     if candidates.is_empty() {
         return None;
     }
@@ -358,7 +410,24 @@ pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
     // pool, so all candidates share the same pool_type).
     let pool = candidates[0].pool_type;
     let t0 = unsafe { slm_get_time_ns() };
-    let out = with_active_policy_for_pool(pool, |p| p.select_victim(candidates));
+    let phase1 = with_active_policy_for_pool(pool, |p| {
+        match p.gpu_batch_features(candidates) {
+            Some(rows) => Phase1::Gpu(rows, POLICY_GENERATION.load(Ordering::Relaxed)),
+            None => Phase1::Done(p.finish_gpu_select(candidates, None)),
+        }
+    });
+    let out = match phase1 {
+        None => None,
+        Some(Phase1::Done(idx)) => Some(idx),
+        Some(Phase1::Gpu(rows, generation)) => {
+            let scores = scorer(&rows);
+            with_active_policy_for_pool(pool, |p| {
+                let same = POLICY_GENERATION.load(Ordering::Relaxed) == generation;
+                let scores = if same { scores.as_deref() } else { None };
+                p.finish_gpu_select(candidates, scores)
+            })
+        }
+    };
     let t1 = unsafe { slm_get_time_ns() };
     if out.is_some() {
         DECISIONS.fetch_add(1, Ordering::Relaxed);
@@ -372,6 +441,12 @@ pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
         unsafe { admin_telemetry_record_eviction_decision(dt); }
     }
     out
+}
+
+/// Whether REGISTRY_LOCK is currently held by anyone. Selftest-only
+/// observability for the "dispatch runs unlocked" contract.
+pub(crate) fn registry_lock_held_for_test() -> bool {
+    REGISTRY_LOCK.load(Ordering::Relaxed)
 }
 
 /// Forward feedback to the active policy. No-op if the registry is

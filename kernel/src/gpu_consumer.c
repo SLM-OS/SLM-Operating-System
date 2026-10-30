@@ -188,16 +188,18 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
              * even though dispatch is unaffected. */
         } else if (out_reason) {
             /* PR-6 of gpu-policy-models.md: when MlpPolicy is active,
-             * `select_victim` tries `slm_gpu_run_eviction_inference`
-             * per candidate (at most one success per 50 ms window)
-             * before falling back to CPU. No GPU dispatch latency has
+             * each `select_victim` tries one batched
+             * `slm_gpu_run_eviction_batch` dispatch for all candidates
+             * (#1020; at most one success per 50 ms window), else
+             * scores them all on CPU. No GPU dispatch latency has
              * been measured for eviction on hardware yet (#965), so
              * the note states routing, not a number. Routing also
              * needs the master `gpu use inference` toggle; say so,
              * since forgetting it silently keeps everything on CPU. */
-            *out_reason = "perf note — eviction mlp tries GPU per "
-                          "candidate (needs `gpu use inference on`; 50 ms "
-                          "rate limit; CPU fallback) — see `eviction stats`";
+            *out_reason = "perf note — eviction mlp tries one GPU batch "
+                          "per decision (needs `gpu use inference on`; "
+                          "50 ms rate limit; CPU fallback) — see "
+                          "`eviction stats`";
         }
         break;
 

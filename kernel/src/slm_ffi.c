@@ -500,13 +500,16 @@ bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last)
  *
  * Mirrors the per-op `g_op_dispatch_attempts` / `g_op_dispatch_ok`
  * pair that `slm gpu` reports, so `eviction stats` can tell GPU-served
- * scores apart from CPU fallbacks. `attempts` counts every entry into
- * `slm_gpu_run_eviction_inference` (one per candidate row while both
- * `gpu use inference` and `gpu use eviction` are on); `ok` counts
- * dispatches that returned a GPU score; `rate_limited` is the subset
- * of fallbacks rejected by the 50 ms window before touching the GPU.
- * `attempts - ok - rate_limited` is the downstream-error fallback
- * count (no handoff, try-lock contention, breaker, GA10B fault).
+ * decisions apart from CPU fallbacks. `attempts` counts every entry
+ * into `slm_gpu_run_eviction_batch` (one per `select_victim` decision
+ * while both `gpu use inference` and `gpu use eviction` are on, #1020);
+ * `ok` counts dispatches that returned GPU scores for the whole batch;
+ * `rate_limited` is the subset of fallbacks rejected by the 50 ms
+ * window before touching the GPU; `oversize` is the subset whose
+ * candidate count exceeded the producer's staged batch rows. The
+ * remaining `attempts - ok - rate_limited - oversize` is the
+ * downstream-error fallback count (no handoff, try-lock contention,
+ * breaker, GA10B fault).
  *
  * Platform-neutral so the non-Jetson stub records attempts too —
  * that is what lets the QEMU toggle-matrix tests in test_eviction.c
@@ -515,10 +518,12 @@ bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last)
 static _Atomic uint64_t g_eviction_gpu_attempts;
 static _Atomic uint64_t g_eviction_gpu_ok;
 static _Atomic uint64_t g_eviction_gpu_rate_limited;
+static _Atomic uint64_t g_eviction_gpu_oversize;
 
 void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
                                      uint64_t *out_ok,
-                                     uint64_t *out_rate_limited)
+                                     uint64_t *out_rate_limited,
+                                     uint64_t *out_oversize)
 {
     if (out_attempts) {
         *out_attempts = atomic_load_explicit(&g_eviction_gpu_attempts,
@@ -532,6 +537,10 @@ void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
         *out_rate_limited = atomic_load_explicit(&g_eviction_gpu_rate_limited,
                                                  memory_order_relaxed);
     }
+    if (out_oversize) {
+        *out_oversize = atomic_load_explicit(&g_eviction_gpu_oversize,
+                                             memory_order_relaxed);
+    }
 }
 
 void slm_gpu_eviction_dispatch_stats_reset(void)
@@ -540,6 +549,7 @@ void slm_gpu_eviction_dispatch_stats_reset(void)
     atomic_store_explicit(&g_eviction_gpu_ok, 0u, memory_order_relaxed);
     atomic_store_explicit(&g_eviction_gpu_rate_limited, 0u,
                           memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_oversize, 0u, memory_order_relaxed);
 }
 
 #ifdef PLATFORM_JETSON_ORIN_NANO
@@ -655,8 +665,8 @@ static _Atomic uint64_t g_sched_dispatch_last_ns = 0;
 /* Eviction-MLP dispatch rate limiter (PR-6 / #965).
  *
  * Symmetric to g_sched_dispatch_last_ns. `gpu use eviction on`
- * invokes `slm_gpu_run_eviction_inference` from `MlpPolicy::score_row`
- * during `select_victim`, which fires whenever the model-allocator
+ * invokes `slm_gpu_run_eviction_batch` once per `select_victim`
+ * decision (`MlpPolicy`, #1020), which fires whenever the model-allocator
  * runs out of pool space and triggers eviction. Eviction bursts
  * tend to be smaller than sched bursts (one per pool-exhaustion
  * event rather than one per task_create), so this is more
@@ -1003,6 +1013,12 @@ static int slm_gpu_dispatch_locked(uint32_t kind,
 
     struct ga10b_bringup *b = &g_bringups[kind];
     int n = ga10b_bringup_set_input(b, input, input_cap);
+    /* -2 = input larger than the handoff's input buffer: the caller
+     * sized the request for a bigger pipeline than the producer
+     * staged (e.g. a #1020 eviction batch against a --batch 1
+     * producer). Nothing touched the GPU, so it gets its own code,
+     * which the breaker ignores. */
+    if (n == -2) return SLM_GPU_ERR_INPUT_TOO_LARGE;
     if (n < 0) return n;
 
     /* Option A for #596. Throwaway dispatch is placed *after*
@@ -1035,7 +1051,7 @@ int slm_gpu_run_with_input(uint32_t kind,
     int rc = slm_gpu_dispatch_locked(kind, input, input_cap,
                                       output, output_cap);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_result(rc);
+    if (rc != SLM_GPU_ERR_INPUT_TOO_LARGE) gpu_dispatch_record_result(rc);
     return rc;
 }
 
@@ -1076,7 +1092,7 @@ static int slm_gpu_try_run_with_input(uint32_t kind,
                                       output, output_cap);
     spin_unlock(&g_gpu_dispatch_lock);
     irq_restore(irq);
-    gpu_dispatch_record_result(rc);
+    if (rc != SLM_GPU_ERR_INPUT_TOO_LARGE) gpu_dispatch_record_result(rc);
     return rc;
 }
 
@@ -1155,18 +1171,25 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
     return rc;
 }
 
-/* Output: single fp32 in [0, 1] = 4 bytes. */
-#define EVICTION_SCORE_BYTES  4u
-
-int slm_gpu_run_eviction_inference(const void *features_bytes,
-                                    size_t features_bytes_len,
-                                    void *score_out)
+int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
+                               float *scores_out)
 {
     /* Identical admission-control shape as the sched path
      * (rate limit → try-lock → dispatch → conditional timestamp
      * update on success), differing only in the per-policy atomic
      * timestamp and the rate-limit constant. See
-     * slm_gpu_run_sched_inference above for the full rationale. */
+     * slm_gpu_run_sched_inference above for the full rationale.
+     *
+     * One call scores a whole `select_victim` candidate set (#1020):
+     * `n_rows` rows of SLM_EVICTION_FEATURE_DIM fp32 features in,
+     * `n_rows` fp32 scores out. The producer's staged batch size is
+     * the handoff's input_buf_size; a larger request fails inside
+     * set_input with SLM_GPU_ERR_INPUT_TOO_LARGE before any GPU work,
+     * and is counted as `oversize`. */
+    if (!features || !scores_out || n_rows == 0u ||
+        n_rows > SLM_EVICTION_BATCH_MAX_ROWS) {
+        return -1;
+    }
     atomic_fetch_add_explicit(&g_eviction_gpu_attempts, 1u,
                               memory_order_relaxed);
     uint64_t now = slm_get_time_ns();
@@ -1178,14 +1201,23 @@ int slm_gpu_run_eviction_inference(const void *features_bytes,
         return -1;
     }
 
+    /* Bounded by SLM_EVICTION_BATCH_MAX_ROWS above: at most
+     * 4096 × 27 × 4 = 432 KB, no overflow. */
+    size_t in_bytes  = n_rows * SLM_EVICTION_FEATURE_DIM * sizeof(float);
+    size_t out_bytes = n_rows * sizeof(float);
     int rc = slm_gpu_try_run_with_input(GA10B_PIPELINE_KIND_EVICTION_QNET,
-                                         features_bytes, features_bytes_len,
-                                         score_out, EVICTION_SCORE_BYTES);
+                                         features, in_bytes,
+                                         scores_out, out_bytes);
+    if (rc == SLM_GPU_ERR_INPUT_TOO_LARGE) {
+        atomic_fetch_add_explicit(&g_eviction_gpu_oversize, 1u,
+                                  memory_order_relaxed);
+        return rc;
+    }
     if (rc == 0) {
         atomic_store_explicit(&g_eviction_dispatch_last_ns,
                               slm_get_time_ns(),
                               memory_order_relaxed);
-        /* One-shot log on the first GPU-served score so a serial
+        /* One-shot log on the first GPU-served decision so a serial
          * capture shows the fastpath actually engaged (otherwise a
          * silent CPU fallback is indistinguishable from success).
          * Printed after try_run returns, i.e. outside the dispatch
@@ -1197,7 +1229,8 @@ int slm_gpu_run_eviction_inference(const void *features_bytes,
         if (!atomic_exchange_explicit(&logged, true,
                                       memory_order_relaxed)) {
             uart_printf("[INFO] eviction GPU fastpath dispatching "
-                        "(kind=EVICTION_QNET)\n");
+                        "(kind=EVICTION_QNET, %lu rows)\n",
+                        (unsigned long)n_rows);
         }
     }
     return rc;
@@ -1249,11 +1282,13 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
     (void)state_bytes; (void)state_bytes_len; (void)logits_bytes_out;
     return -1;
 }
-int slm_gpu_run_eviction_inference(const void *features_bytes,
-                                    size_t features_bytes_len,
-                                    void *score_out)
+int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
+                               float *scores_out)
 {
-    (void)features_bytes; (void)features_bytes_len; (void)score_out;
+    if (!features || !scores_out || n_rows == 0u ||
+        n_rows > SLM_EVICTION_BATCH_MAX_ROWS) {
+        return -1;
+    }
     /* Count the attempt even with no GPU so the toggle-matrix tests
      * can observe routing on QEMU; every attempt is a fallback. */
     atomic_fetch_add_explicit(&g_eviction_gpu_attempts, 1u,

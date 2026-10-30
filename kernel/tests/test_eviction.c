@@ -1229,7 +1229,7 @@ static void test_bench_all_policies(void)
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* PR-6 of gpu-policy-models.md (#965): re-run with `gpu use
      * inference on` (master) + `gpu use eviction on` so `mlp` routes
-     * through slm_gpu_run_eviction_inference when a PR-5 v6 handoff
+     * through slm_gpu_run_eviction_batch when a PR-5 v6 handoff
      * has been inherited from Linux pre-kexec. Only `mlp` is affected
      * — CACHEUS's embedded MLP expert is CPU-only, and every other
      * policy has no GPU path — and only on EVICTION_MODELS=ON builds
@@ -1239,10 +1239,12 @@ static void test_bench_all_policies(void)
      * counter line printed after the mlp run tells the two apart.
      * Both toggles are restored before returning.
      *
-     * Expected shape under the per-candidate design (mlp.rs module
-     * docs): at most one GPU-served score per 50 ms window, every
-     * other candidate on CPU, so the mlp number is a mixed GPU + CPU
-     * cost, not an all-GPU latency. */
+     * Expected shape under the batched design (#1020, mlp.rs module
+     * docs): one dispatch scores all 8 candidates of a select_victim,
+     * and at most one decision per 50 ms window is GPU-served; the
+     * rest are scored entirely on CPU. The mlp number is therefore an
+     * average over a few all-GPU decisions and many all-CPU ones; the
+     * counter line below gives the split. */
     bool prev_inference_on = gpu_consumer_enabled(GPU_CONSUMER_INFERENCE);
     bool prev_eviction_on = gpu_consumer_enabled(GPU_CONSUMER_EVICTION);
     const char *reason = NULL;
@@ -1277,15 +1279,18 @@ static void test_bench_all_policies(void)
         run_one_bench("slm");
         run_one_bench("xgboost");
         run_one_bench("mlp");
-        uint64_t gpu_attempts = 0, gpu_ok = 0, gpu_rl = 0;
-        slm_gpu_eviction_dispatch_stats(&gpu_attempts, &gpu_ok, &gpu_rl);
+        uint64_t gpu_attempts = 0, gpu_ok = 0, gpu_rl = 0, gpu_big = 0;
+        slm_gpu_eviction_dispatch_stats(&gpu_attempts, &gpu_ok, &gpu_rl,
+                                        &gpu_big);
+        uint64_t gpu_known = gpu_ok + gpu_rl + gpu_big;
         uart_printf("  [BENCH] mlp GPU dispatch: attempts %lu, ok %lu, "
-                    "rate-limited %lu, error-fallback %lu\r\n",
+                    "rate-limited %lu, oversize %lu, error-fallback %lu\r\n",
                     (unsigned long)gpu_attempts,
                     (unsigned long)gpu_ok,
                     (unsigned long)gpu_rl,
-                    (unsigned long)(gpu_attempts > gpu_ok + gpu_rl
-                                    ? gpu_attempts - gpu_ok - gpu_rl
+                    (unsigned long)gpu_big,
+                    (unsigned long)(gpu_attempts > gpu_known
+                                    ? gpu_attempts - gpu_known
                                     : 0));
         run_one_bench("cacheus");
     } else {
@@ -1305,8 +1310,8 @@ static void test_bench_all_policies(void)
 /* ============================================================================
  * PR-6 (#965): eviction-MLP GPU routing toggle matrix
  *
- * `MlpPolicy` routes each candidate through
- * `slm_gpu_run_eviction_inference` only when the master `gpu use
+ * `MlpPolicy` routes each decision's candidates through one
+ * `slm_gpu_run_eviction_batch` call (#1020) only when the master `gpu use
  * inference` AND per-consumer `gpu use eviction` toggles are both on
  * (and the CPU fallback computes the same model — compiled-in
  * weights, no runtime blob). The dispatch counters
@@ -1321,7 +1326,6 @@ static void test_bench_all_policies(void)
 /* rust_eviction_bench_latency_ns: 32 warm-up + N timed select_victim
  * calls over the canonical 8-candidate set. */
 #define GPU_MATRIX_SELECTS     (32u + GPU_MATRIX_ITERS)
-#define GPU_MATRIX_CANDIDATES  8u
 
 static bool eviction_models_available(void)
 {
@@ -1346,7 +1350,7 @@ static void eviction_gpu_run(const char *policy, bool master, bool consumer,
         (const uint8_t *)policy, GPU_MATRIX_ITERS);
 
     uint64_t attempts = 0, ok = 0;
-    slm_gpu_eviction_dispatch_stats(&attempts, &ok, NULL);
+    slm_gpu_eviction_dispatch_stats(&attempts, &ok, NULL, NULL);
     slm_gpu_eviction_dispatch_stats_reset();
     gpu_consumer_test_force(GPU_CONSUMER_INFERENCE, prev_master);
     gpu_consumer_test_force(GPU_CONSUMER_EVICTION, prev_consumer);
@@ -1399,11 +1403,11 @@ static void test_eviction_gpu_both_on_attempts_gpu(void)
         TEST_ASSERT_EQUAL_UINT64(0, attempts);
         return;
     }
-    /* Every candidate of every select_victim is offered to the GPU
-     * (per-candidate dispatch; the 50 ms limiter rejects inside the
-     * C entry point, after the attempt is counted). */
-    TEST_ASSERT_EQUAL_UINT64(
-        (uint64_t)GPU_MATRIX_SELECTS * GPU_MATRIX_CANDIDATES, attempts);
+    /* One batched attempt per select_victim, covering all its
+     * candidates (#1020; the 50 ms limiter rejects inside the C entry
+     * point, after the attempt is counted). Pre-#1020 this was one
+     * attempt per candidate, GPU_MATRIX_SELECTS × 8. */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)GPU_MATRIX_SELECTS, attempts);
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
     /* No GPU: every attempt is a CPU fallback. */
     TEST_ASSERT_EQUAL_UINT64(0, ok);
@@ -1458,16 +1462,41 @@ static void test_eviction_gpu_backend_declared_by_mlp_only(void)
     TEST_ASSERT_FALSE(eviction_active_policy_has_gpu_backend());
 }
 
+static void test_eviction_gpu_batch_rejects_bad_args_uncounted(void)
+{
+    /* Malformed requests fail before the attempt counter, so they
+     * cannot inflate `eviction stats`; a well-formed one is counted
+     * (and, with no GPU or no producer, falls back). #1020. */
+    static float rows[2 * SLM_EVICTION_FEATURE_DIM];
+    float scores[2];
+    slm_gpu_eviction_dispatch_stats_reset();
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_eviction_batch(NULL, 1, scores));
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_eviction_batch(rows, 1, NULL));
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_eviction_batch(rows, 0, scores));
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_eviction_batch(
+        rows, SLM_EVICTION_BATCH_MAX_ROWS + 1u, scores));
+    uint64_t a = 1;
+    slm_gpu_eviction_dispatch_stats(&a, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT64(0, a);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_eviction_batch(rows, 2, scores));
+    slm_gpu_eviction_dispatch_stats(&a, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT64(1, a);
+#endif
+    slm_gpu_eviction_dispatch_stats_reset();
+}
+
 static void test_eviction_gpu_stats_reset_and_null_outs(void)
 {
     /* Counters exist on every build; NULL outs must be tolerated. */
-    slm_gpu_eviction_dispatch_stats(NULL, NULL, NULL);
+    slm_gpu_eviction_dispatch_stats(NULL, NULL, NULL, NULL);
     slm_gpu_eviction_dispatch_stats_reset();
-    uint64_t a = 1, ok = 1, rl = 1;
-    slm_gpu_eviction_dispatch_stats(&a, &ok, &rl);
+    uint64_t a = 1, ok = 1, rl = 1, big = 1;
+    slm_gpu_eviction_dispatch_stats(&a, &ok, &rl, &big);
     TEST_ASSERT_EQUAL_UINT64(0, a);
     TEST_ASSERT_EQUAL_UINT64(0, ok);
     TEST_ASSERT_EQUAL_UINT64(0, rl);
+    TEST_ASSERT_EQUAL_UINT64(0, big);
 }
 
 /* ============================================================================
@@ -1953,6 +1982,7 @@ int test_suite_eviction(void)
 
     /* PR-6 (#965): eviction-MLP GPU routing toggle matrix. */
     RUN_TEST(test_eviction_gpu_stats_reset_and_null_outs);
+    RUN_TEST(test_eviction_gpu_batch_rejects_bad_args_uncounted);
     RUN_TEST(test_eviction_gpu_backend_declared_by_mlp_only);
     RUN_TEST(test_eviction_gpu_master_off_consumer_on_stays_cpu);
     RUN_TEST(test_eviction_gpu_consumer_off_stays_cpu);

@@ -8379,18 +8379,21 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
     shell_printf("  Avg select latency:  %lu ns\r\n",
                 (unsigned long)s->policy_avg_latency_ns);
     /* #965: eviction-MLP GPU routing counters (same attempts/ok/
-     * fallback shape as `slm gpu`). Per-candidate, since boot — not
-     * reset on policy swap. Toggle state printed alongside so "0
-     * attempts" can be told apart from "toggles off". */
-    uint64_t gpu_attempts = 0, gpu_ok = 0, gpu_rl = 0;
-    slm_gpu_eviction_dispatch_stats(&gpu_attempts, &gpu_ok, &gpu_rl);
+     * fallback shape as `slm gpu`). One attempt per select_victim
+     * decision (#1020), since boot — not reset on policy swap. Toggle
+     * state printed alongside so "0 attempts" can be told apart from
+     * "toggles off". */
+    uint64_t gpu_attempts = 0, gpu_ok = 0, gpu_rl = 0, gpu_big = 0;
+    slm_gpu_eviction_dispatch_stats(&gpu_attempts, &gpu_ok, &gpu_rl,
+                                    &gpu_big);
     uint64_t gpu_fallback = gpu_attempts > gpu_ok ? gpu_attempts - gpu_ok : 0;
     shell_printf("  GPU dispatch:        attempts %llu, ok %llu, "
-                 "fallback %llu (rate-limited %llu)\r\n",
+                 "fallback %llu (rate-limited %llu, oversize %llu)\r\n",
                  (unsigned long long)gpu_attempts,
                  (unsigned long long)gpu_ok,
                  (unsigned long long)gpu_fallback,
-                 (unsigned long long)gpu_rl);
+                 (unsigned long long)gpu_rl,
+                 (unsigned long long)gpu_big);
     shell_printf("  GPU toggles:         inference=%s eviction=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_INFERENCE) ? "on" : "off",
                  gpu_consumer_enabled(GPU_CONSUMER_EVICTION) ? "on" : "off");

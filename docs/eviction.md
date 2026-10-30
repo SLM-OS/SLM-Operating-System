@@ -557,18 +557,20 @@ amortizes and the MLP is marginal at small block sizes (see
   #981 item is the on-card config-blob shadow above (cacheus tracking
   classical until `eviction model clear cacheus_config`), not instability.
 
-**GPU dispatch status (as of 2026-10-29) — Jetson plumbing landed;
-GPU-served eviction scores on 8 of 10 hardware boots when the eviction
-producer is the only preserved channel (1 of 10 alongside the MNIST
-and sched-MLP helpers); Pi 5 still CPU-only.** The numbers above are all host-CPU paths. PR-6 of
+**GPU dispatch status (as of 2026-10-30) — Jetson plumbing landed;
+per-candidate GPU scores on 10 of 10 hardware boots both alone and
+alongside the MNIST and sched-MLP helpers after the #1029 whole-VM
+reserve; batched dispatch (#1020) passes QEMU, hardware ☐ pending;
+Pi 5 still CPU-only.** The numbers above are all host-CPU paths. PR-6 of
 [`docs/design/gpu-policy-models.md`](design/gpu-policy-models.md)
 ([#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965))
 wires `MlpPolicy` to the 9-op pipeline staged by
 `scripts/gpu-kernel-eviction-qnet.c --preserve-for-kexec` (PR-5,
-#968) through the `slm_gpu_run_eviction_inference` FFI, and
-`MlpPolicy::has_gpu_backend()` now returns `true`. A candidate is
+#968) through the `slm_gpu_run_eviction_batch` FFI (#1020), and
+`MlpPolicy::has_gpu_backend()` now returns `true`. A decision is
 offered to the GPU only when **all** of the following hold; otherwise,
-and on any dispatch failure, it is scored on the CPU silently:
+and on any dispatch failure, every candidate is scored on the CPU
+silently:
 
 - `gpu use inference on` (master toggle) **and** `gpu use eviction on`.
 - The active policy is `mlp`. **CACHEUS has no GPU backend** — its
@@ -582,41 +584,55 @@ and on any dispatch failure, it is scored on the CPU silently:
   the CPU fallback would score with a different model (the 0.5 stub,
   or an `eviction model load mlp` blob).
 
-**Design divergence — per-candidate, not batched.** #965 specified one
-dispatch per pool snapshot. PR-6 dispatches once **per candidate row**,
-and every dispatch passes the 50 ms eviction rate limiter
-(`GPU_EVICTION_DISPATCH_RATE_LIMIT_NS`). A `select_victim` over the
-canonical 8 candidates is therefore at most **1 GPU dispatch + 7
-rate-limited CPU fallbacks** (0 + 8 when it starts inside an open
-window), and the argmax compares one fp32 GPU score against int8 CPU
-scores of the same model. Bench numbers taken with the toggle on are a
-mixed GPU + CPU cost, not a GPU latency. Batched `27 × N` dispatch is
-tracked in [#1020](https://github.com/SLM-OS/SLM-Operating-System/issues/1020).
+**Batched dispatch (#1020).** One dispatch scores a decision's whole
+candidate set. The producer stages the pipeline for a fixed batch of
+rows (`--batch`, default 64, at most 256); SLM-OS writes one 27-feature
+row per candidate and reads back one score per candidate, and the GPU
+computes the unused rows and ignores them. No new shaders were needed:
+GEMM takes M = batch, add-bias-ReLU takes the batch on `blockIdx.z`,
+and sigmoid is element-wise. Either every candidate is scored on the
+GPU or, on any failure, every candidate is scored on the CPU; one
+argmax never mixes fp32 GPU and int8 CPU scores, and a non-finite GPU
+score counts as a failure. A decision with more candidates than the
+producer's batch goes to the CPU and is counted as `oversize`; it does
+not count toward the #552 circuit breaker, since nothing reached the
+GPU. Every dispatch still passes the 50 ms rate limiter
+(`GPU_EVICTION_DISPATCH_RATE_LIMIT_NS`), so at most one decision per
+window is GPU-served.
 
-**Known limitation — GPU dispatch under spinlocks.** `select_victim`
-runs from `model_mem::evict_and_retry` with the pool allocator lock
-held, and inside `REGISTRY_LOCK`. A GPU-routed candidate then takes the
-GPU dispatch try-lock with IRQs masked and polls GA10B for completion,
-so a faulting dispatch can hold both locks for up to the 2 s poll
-timeout while other CPUs spin on model-memory allocation. The 50 ms
-rate limiter, the try-lock (no deadlock) and the #552 circuit breaker
-bound how often this happens, not how long one occurrence lasts. The
-path is reachable only with both opt-in toggles on, which requires a
-GPU, so no default build is affected. Scoring outside the locks is part
-of the #1020 restructure.
+**Locking (#1020).** `registry::select_victim` no longer dispatches
+under `REGISTRY_LOCK`. The decision runs in three phases: under the
+lock the policy hands out its feature rows
+(`EvictionPolicy::gpu_batch_features`); the lock is released for the
+dispatch; the lock is re-taken and the policy picks from the scores
+(`EvictionPolicy::finish_gpu_select`). If a policy swap happened
+during the dispatch, the stale scores are discarded and the new policy
+decides on its own path. The allocator lock was never held here:
+`model_mem::alloc_with_eviction` drops it before `evict_and_retry`,
+which snapshots the candidates and re-validates the victim's
+generation before freeing it. The dispatch itself still runs with IRQs
+masked behind the GPU try-lock and polls for up to 2 s on a GR fault;
+the rate limiter, the try-lock and the circuit breaker bound how often
+that happens. Direct callers of `MlpPolicy::select_victim` (the bench
+harness) dispatch inline.
 
 **Observability.** `eviction stats` prints
-`GPU dispatch: attempts N, ok N, fallback N (rate-limited N)` (per
-candidate, since boot) and the current `inference` / `eviction` toggle
-state; `fallback − rate-limited` is the downstream-error count (no
-handoff, try-lock contention, circuit breaker, GA10B fault). The first
-GPU-served score after boot logs
-`[INFO] eviction GPU fastpath dispatching (kind=EVICTION_QNET)` once.
-The QEMU suite pins the toggle matrix (`test_eviction_gpu_*` in
+`GPU dispatch: attempts N, ok N, fallback N (rate-limited N, oversize N)`
+(one attempt per decision, since boot) and the current `inference` /
+`eviction` toggle state; `fallback − rate-limited − oversize` is the
+downstream-error count (no handoff, try-lock contention, circuit
+breaker, GA10B fault). Counts recorded before #1020 (including the
+hardware tables below) are per candidate, not per decision. The first
+GPU-served decision after boot logs
+`[INFO] eviction GPU fastpath dispatching (kind=EVICTION_QNET, N rows)`
+once. The QEMU suite pins the toggle matrix (`test_eviction_gpu_*` in
 `kernel/tests/test_eviction.c`: master off + consumer on → CPU, both on
-→ GPU attempted, consumer off → CPU, plus the CACHEUS and runtime-blob
-guards) through the non-Jetson stub, which counts attempts and always
-falls back.
+→ one GPU attempt per decision, consumer off → CPU, plus the CACHEUS
+and runtime-blob guards) through the non-Jetson stub, which counts
+attempts and always falls back. The two-phase registry contract
+(scores used, dispatch unlocked, stale scores discarded on a policy
+swap) is pinned by the `two_phase_*` and `mlp_finish_*` checks in
+`rust_eviction_selftest`.
 
 **Hardware status.** On 2026-10-29, jetson-nano-2 ran 10 power-cycled
 boots of the PR-6 kernel (`EVICTION_MODELS=ON`). Each boot staged the

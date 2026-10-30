@@ -2998,6 +2998,110 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         check!(b"default_select_victim_after_reset\0",
                eviction::select_victim(&cands) == Some(0));
 
+        // ---- #1020: two-phase registry decision (GPU dispatch unlocked).
+        puts(b"\n-- eviction: registry GPU two-phase (#1020) --\n\0");
+        {
+            use core::sync::atomic::{AtomicUsize, Ordering as AO};
+            use mm::eviction::registry::{
+                registry_lock_held_for_test, select_victim_with_scorer,
+            };
+            // What GpuProbe::finish_gpu_select saw: 0 = not called,
+            // 1 = None, 2 + n = Some(n scores).
+            static FINISH_SAW: AtomicUsize = AtomicUsize::new(0);
+
+            /// Asks for the GPU when `want_gpu`; on `finish_gpu_select`
+            /// picks the max score, or the last candidate on `None`
+            /// (distinguishable from the scored picks below).
+            struct GpuProbe { want_gpu: bool }
+            impl EvictionPolicy for GpuProbe {
+                fn select_victim(&mut self, c: &[BlockMeta]) -> usize { c.len() - 1 }
+                fn gpu_batch_features(&mut self, c: &[BlockMeta])
+                    -> Option<alloc::vec::Vec<eviction::BlockFeatures>>
+                {
+                    if self.want_gpu { Some(alloc::vec![[0.0f32; 27]; c.len()]) } else { None }
+                }
+                fn finish_gpu_select(&mut self, c: &[BlockMeta], s: Option<&[f32]>) -> usize {
+                    match s {
+                        None => { FINISH_SAW.store(1, AO::Relaxed); c.len() - 1 }
+                        Some(s) => {
+                            FINISH_SAW.store(2 + s.len(), AO::Relaxed);
+                            let mut best = 0;
+                            for i in 1..s.len() { if s[i] > s[best] { best = i; } }
+                            best
+                        }
+                    }
+                }
+                fn name(&self) -> &'static str { "GpuProbe" }
+            }
+
+            // GPU scores reach finish_gpu_select, with the lock released
+            // while the scorer runs.
+            eviction::set_eviction_policy(Box::new(GpuProbe { want_gpu: true }));
+            FINISH_SAW.store(0, AO::Relaxed);
+            let mut scorer_rows = usize::MAX;
+            let mut lock_held_in_scorer = true;
+            let picked = select_victim_with_scorer(&cands, |rows| {
+                scorer_rows = rows.len();
+                lock_held_in_scorer = registry_lock_held_for_test();
+                Some(alloc::vec![0.1, 0.9, 0.2])
+            });
+            check!(b"two_phase_uses_gpu_scores\0", picked == Some(1));
+            check!(b"two_phase_scorer_gets_one_row_per_candidate\0",
+                   scorer_rows == cands.len());
+            check!(b"two_phase_scorer_runs_without_registry_lock\0",
+                   !lock_held_in_scorer);
+            check!(b"two_phase_finish_saw_all_scores\0",
+                   FINISH_SAW.load(AO::Relaxed) == 2 + cands.len());
+
+            // Failed dispatch → finish_gpu_select(None).
+            FINISH_SAW.store(0, AO::Relaxed);
+            let picked = select_victim_with_scorer(&cands, |_| None);
+            check!(b"two_phase_failed_dispatch_finishes_with_none\0",
+                   picked == Some(2) && FINISH_SAW.load(AO::Relaxed) == 1);
+
+            // Policy that declines the GPU: scorer never runs.
+            eviction::set_eviction_policy(Box::new(GpuProbe { want_gpu: false }));
+            FINISH_SAW.store(0, AO::Relaxed);
+            let mut scorer_ran = false;
+            let picked = select_victim_with_scorer(&cands, |_| {
+                scorer_ran = true;
+                None
+            });
+            check!(b"two_phase_cpu_policy_skips_scorer\0",
+                   !scorer_ran && picked == Some(2)
+                   && FINISH_SAW.load(AO::Relaxed) == 1);
+
+            // Policy swapped during the dispatch: the stale scores are
+            // dropped and the new policy decides itself. The swap takes
+            // REGISTRY_LOCK, so this would deadlock if phase 2 held it.
+            eviction::set_eviction_policy(Box::new(GpuProbe { want_gpu: true }));
+            let picked = select_victim_with_scorer(&cands, |_| {
+                eviction::set_eviction_policy(Box::new(eviction::FirstCandidatePolicy));
+                Some(alloc::vec![0.1, 0.9, 0.2])
+            });
+            check!(b"two_phase_policy_swap_discards_stale_scores\0",
+                   picked == Some(0));
+            eviction::reset_to_default();
+        }
+
+        // ---- #1020: MlpPolicy finish_gpu_select (no dispatch).
+        {
+            let mut mlp = eviction::MlpPolicy::new();
+            check!(b"mlp_finish_uses_gpu_scores\0",
+                   mlp.finish_gpu_select(&cands, Some(&[0.1, 0.3, 0.9])) == 2);
+            check!(b"mlp_finish_nan_never_wins\0",
+                   mlp.finish_gpu_select(&cands, Some(&[f32::NAN, 0.2, 0.1])) == 1);
+            // Wrong length (caller bug) → CPU scoring of every
+            // candidate, same answer as the plain CPU decision.
+            let cpu_pick = mlp.finish_gpu_select(&cands, None);
+            check!(b"mlp_finish_wrong_len_falls_back_to_cpu\0",
+                   mlp.finish_gpu_select(&cands, Some(&[0.9])) == cpu_pick);
+            // Toggles are off in the selftest, so the MLP declines the
+            // GPU phase (decision happens under the lock, CPU only).
+            check!(b"mlp_gpu_batch_features_none_when_toggles_off\0",
+                   mlp.gpu_batch_features(&cands).is_none());
+        }
+
         // LRU default's score() override returns inverse-recency. With
         // all candidates tied on last_access_time, scores collapse to 0.
         check!(b"lru_default_score_length_matches\0", {
