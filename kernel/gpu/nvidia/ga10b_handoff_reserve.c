@@ -39,8 +39,10 @@
  *   - Assumes the helper kept the channel loaded on the GR engine
  *     through kexec — i.e. FECS still has a meaningful current ctx
  *     to report. A `--gpu-suspend` kexec breaks this assumption;
- *     the function early-returns on `target == 0` (and on poisoned
- *     reads) so suspended-GPU boots cost only a single MMIO read.
+ *     the inst-block and runlist reserves are skipped on
+ *     `target == 0` (and on poisoned reads), but the per-kind
+ *     handoff scan still runs (~50 ms) since each handoff carries
+ *     its own inst_block_phys.
  *
  * **Patched-`nvgpu.ko` dependency** (#788 v10/v11 fix path).
  * `reserve_gr_ctx_extents` consumes `h->gr_ctx_extents_phys` /
@@ -55,13 +57,26 @@
 
 #include "ga10b_handoff_reserve.h"
 
-#if defined(PLATFORM_JETSON_ORIN_NANO)
+/* SLM_HOST_HARNESS: the host test harness (`make test-ga10b-bringup`)
+ * builds this TU too, so `ga10b_reserve_handoffs_in_range` can be
+ * exercised against in-memory handoffs. The harness supplies
+ * `pmm_user_reserve_add`, `ga10b_phys_in_dram`, `ga10b_gmmu_walk`
+ * and `uart_printf`; the MMIO-reading orchestrator is compiled but
+ * never called there. */
+#if defined(PLATFORM_JETSON_ORIN_NANO) || defined(SLM_HOST_HARNESS)
 
 #include "ga10b_channel_handoff.h"
 #include "ga10b_gmmu.h"
+#ifdef SLM_HOST_HARNESS
+#include <stddef.h>
+int pmm_user_reserve_add(uint64_t phys, uint64_t size);
+void uart_printf(const char *fmt, ...);
+void uart_puts(const char *s);
+#else
 #include "../../include/dtb.h"
 #include "../../include/pmm.h"
 #include "../../include/uart.h"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -694,22 +709,132 @@ static void reserve_weights_extents(const volatile struct ga10b_channel_handoff 
                 (unsigned long)handoff_phys_for_log);
 }
 
+/* Reserve the channel inst block the helper published in its own
+ * handoff (`inst_block_phys` = FECS_CURRENT_CTX at publish time,
+ * normally the helper's own channel). The boot FECS_CURRENT_CTX pass
+ * only covers whichever channel was resident at kexec; with several
+ * helpers staged, the other channels' inst blocks need this. A helper
+ * that caught a foreign channel at publish time costs one extra
+ * reserved page, which is harmless. */
+static void reserve_handoff_inst_block(const volatile struct ga10b_channel_handoff *h,
+                                       uint64_t resident_inst_phys)
+{
+    uint64_t inst_phys = h->inst_block_phys;
+    if (inst_phys == 0 || inst_phys == resident_inst_phys) {
+        return;
+    }
+    if (!ga10b_phys_in_dram(inst_phys, GA10B_INST_BLOCK_BYTES)) {
+        uart_printf("[ga10b-reserve]   handoff inst block 0x%lx outside "
+                    "DRAM — skipping\n", (unsigned long)inst_phys);
+        return;
+    }
+    if (pmm_user_reserve_add(inst_phys, GA10B_INST_BLOCK_BYTES) != 0) {
+        uart_printf("[ga10b-reserve]   pmm_user_reserve_add for handoff "
+                    "inst block @0x%lx failed (table full?)\n",
+                    (unsigned long)inst_phys);
+    } else {
+        uart_printf("[ga10b-reserve]   reserved handoff inst block "
+                    "@0x%lx\n", (unsigned long)inst_phys);
+    }
+}
+
+static const char *pipeline_kind_name(uint32_t kind)
+{
+    switch (kind) {
+    case GA10B_PIPELINE_KIND_MNIST:         return "mnist";
+    case GA10B_PIPELINE_KIND_SCHED_MLP:     return "sched_mlp";
+    case GA10B_PIPELINE_KIND_EVICTION_QNET: return "eviction_qnet";
+    default:                                return "?";
+    }
+}
+
+/* One magic scan over `[start, end)` that records, per pipeline kind,
+ * the first handoff passing `ga10b_validate_handoff` — the same choice
+ * `ga10b_find_handoff_of_kind_in_range` makes for each kind (so the
+ * reserved buffers are the ones the dispatch path will inherit; #834:
+ * stale handoffs with inst_block_phys=0 fail validation and are
+ * skipped). A single pass instead of one scan per kind keeps the boot
+ * cost at one ~50 ms walk of the 4 GB IOVMM range. Stops early once
+ * every kind is found. */
+static void find_first_handoff_per_kind(uint64_t start, uint64_t end,
+                                        uint64_t stride,
+                                        uint64_t out[GA10B_PIPELINE_KIND_COUNT])
+{
+    uint32_t remaining = GA10B_PIPELINE_KIND_COUNT;
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        out[kind] = 0;
+    }
+    uint64_t cursor = start;
+    while (cursor < end && remaining > 0) {
+        uint64_t found = ga10b_find_handoff_in_range(cursor, end, stride);
+        if (found == 0) {
+            break;
+        }
+        const struct ga10b_channel_handoff *h =
+            (const struct ga10b_channel_handoff *)(uintptr_t)found;
+        uint32_t kind = h->pipeline_kind;
+        if (ga10b_validate_handoff(h) == 0 &&
+            kind < GA10B_PIPELINE_KIND_COUNT && out[kind] == 0) {
+            out[kind] = found;
+            remaining--;
+        }
+        cursor = found + stride;
+    }
+}
+
+uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
+                                         uint64_t stride,
+                                         uint64_t resident_inst_phys)
+{
+    uint64_t handoffs[GA10B_PIPELINE_KIND_COUNT];
+    find_first_handoff_per_kind(start, end, stride, handoffs);
+
+    uint32_t found_mask = 0;
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        uint64_t handoff_phys = handoffs[kind];
+        if (handoff_phys == 0) {
+            uart_printf("[ga10b-reserve] kind=%u (%s): no handoff\n",
+                        (unsigned)kind, pipeline_kind_name(kind));
+            continue;
+        }
+        found_mask |= 1u << kind;
+        uart_printf("[ga10b-reserve] kind=%u (%s): handoff @0x%lx\n",
+                    (unsigned)kind, pipeline_kind_name(kind),
+                    (unsigned long)handoff_phys);
+
+        reserve_handoff_dmabuf(handoff_phys);
+
+        const volatile struct ga10b_channel_handoff *h =
+            (const volatile struct ga10b_channel_handoff *)
+            (uintptr_t)handoff_phys;
+
+        reserve_handoff_inst_block(h, resident_inst_phys);
+        reserve_helper_buffers(h);
+        reserve_per_op_shaders(h);
+        reserve_gr_ctx_extents(h);
+        reserve_weights_extents(h, handoff_phys);
+    }
+    return found_mask;
+}
+
 /* ---------------------------------------------------------------
  * Orchestrator.
  * --------------------------------------------------------------- */
 
 void ga10b_kexec_handoff_register_reserves(void)
 {
-    /* Always-on phase: read FECS_CURRENT_CTX and reserve the
-     * channel's inst block. If this skip-returns (poison MMIO,
-     * target=0 fresh boot, outside-DRAM, PMM table full), the rest
-     * of the handoff machinery is meaningless — no kexec'd channel
-     * to protect. */
-    if (!reserve_inst_block()) {
-        return;
+    /* Read FECS_CURRENT_CTX and reserve the resident channel's inst
+     * block. When this skips (poison MMIO, target=0, outside DRAM,
+     * PMM table full) there is no live GR context to anchor the
+     * runlist read on, so the runlist reserve is skipped too — but
+     * the per-kind handoff pass below still runs: each handoff
+     * carries its own inst_block_phys, so a `--gpu-suspend` kexec
+     * with helpers staged keeps its channels' pages protected. On a
+     * boot with no helper ever run, the pass finds nothing and costs
+     * one ~50 ms DRAM scan. */
+    if (reserve_inst_block()) {
+        reserve_runlist();
     }
-
-    reserve_runlist();
 
     /* Handoff-dependent phase: locate the helper-published handoff
      * dmabuf in DRAM by scanning for its magic. ~50 ms one-time-only
@@ -738,30 +863,21 @@ void ga10b_kexec_handoff_register_reserves(void)
      * All four buffers different — boot reserve pinned the wrong
      * set entirely. Switching to the kind-aware scanner cascades
      * the validate-handoff inst_block_phys=0 rejection (commit
-     * a099cd3b) into this code path too. */
-    uart_puts("[ga10b-reserve] scanning DRAM for handoff magic + "
-              "weights-pool extents...\n");
-    uint64_t handoff_phys =
-        ga10b_find_handoff_of_kind_in_range(0x100000000ull,
-                                             0x200000000ull,
-                                             4096ull,
-                                             GA10B_PIPELINE_KIND_MNIST);
-    if (handoff_phys == 0) {
-        uart_puts("[ga10b-reserve]   handoff not found — skipping "
-                  "weights-pool extent reservation\n");
-        return;
-    }
-
-    reserve_handoff_dmabuf(handoff_phys);
-
-    const volatile struct ga10b_channel_handoff *h =
-        (const volatile struct ga10b_channel_handoff *)
-        (uintptr_t)handoff_phys;
-
-    reserve_helper_buffers(h);
-    reserve_per_op_shaders(h);
-    reserve_gr_ctx_extents(h);
-    reserve_weights_extents(h, handoff_phys);
+     * a099cd3b) into this code path too.
+     *
+     * #1029: every pipeline kind, not just MNIST. With only the MNIST
+     * handoff reserved, the sched-MLP and eviction channels' buffers
+     * (GR ctx save buffers included) were left unprotected, free for
+     * PMM to hand out. Closing that gap did NOT fix #1029's
+     * multi-helper eviction dispatch failures (ctxsw checksum / FECS
+     * errors persisted on jetson-nano-2 with every buffer reserved,
+     * 2026-10-29), so this is coverage, not that root cause. */
+    uart_puts("[ga10b-reserve] scanning DRAM for handoff magic "
+              "(all pipeline kinds)...\n");
+    /* g_boot_inst_block_phys is 0 when reserve_inst_block skipped, so
+     * no handoff's inst block is treated as already reserved. */
+    (void)ga10b_reserve_handoffs_in_range(0x100000000ull, 0x200000000ull,
+                                          4096ull, g_boot_inst_block_phys);
 }
 
 uint64_t ga10b_kexec_inherited_inst_block_phys(void)
@@ -769,7 +885,7 @@ uint64_t ga10b_kexec_inherited_inst_block_phys(void)
     return g_boot_inst_block_phys;
 }
 
-#else  /* !PLATFORM_JETSON_ORIN_NANO */
+#else  /* !PLATFORM_JETSON_ORIN_NANO && !SLM_HOST_HARNESS */
 
 /* No-op stub for non-Jetson platforms. The header's documentation
  * notes the function is safe to call from a platform-guarded call
@@ -787,6 +903,15 @@ void ga10b_kexec_handoff_register_reserves(void)
  * FECS reads). */
 uint64_t ga10b_kexec_inherited_inst_block_phys(void)
 {
+    return 0;
+}
+
+/* Non-Jetson stub: there are no GA10B handoffs to reserve. */
+uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
+                                         uint64_t stride,
+                                         uint64_t resident_inst_phys)
+{
+    (void)start; (void)end; (void)stride; (void)resident_inst_phys;
     return 0;
 }
 

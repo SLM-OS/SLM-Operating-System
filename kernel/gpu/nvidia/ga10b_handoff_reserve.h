@@ -20,24 +20,22 @@
  * buddy allocator, so kernel allocations naturally steer around the
  * inherited channel's pages.
  *
- * **Scope of this MVP:** reserves the channel inst block only — one
- * 4 KB page identified via the FECS_CURRENT_CTX MMIO register. The
- * inst block carries the PDB pointer; without protecting it, any
- * GMMU walk reads garbage and faults at the first dispatch. Future
- * work will extend to walking the PDB tree and reserving every page
- * table page, plus the helper-allocated dmabufs (USERD / GPFIFO /
- * pushbuffer / semaphore / SASS pool) listed in the v9 handoff. The
- * MVP picks the highest-value single reservation first so the
- * hardware verification gives a clean before/after signal on whether
- * inst-block-only protection is enough to keep the wedge from firing.
+ * **Scope.** Reserves the inst block of the channel resident on GR at
+ * kexec (FECS_CURRENT_CTX), the GR runlist, and — for the published
+ * handoff of every pipeline kind (MNIST, SCHED_MLP, EVICTION_QNET;
+ * #1029, previously MNIST only) — the handoff page, that channel's
+ * own inst block, the helper dmabufs (USERD / GPFIFO / pushbuffer /
+ * semaphore / SASS / cbuf / QMD pool), per-op shaders, GR context
+ * extents and v9 weights extents. The GMMU page-table pages under
+ * each inst block's PDB are still not walked and reserved.
  *
  * Hooked from `kernel_main` between `vmm_init` (which sets up the
  * identity mappings the function needs to read GPU MMIO and DRAM)
  * and `pmm_init` (the consumer of `pmm_user_reserve_add`). Safe to
- * call from non-kexec boots — the function early-returns when
- * `FECS_CURRENT_CTX` reads zero / target=0 / a poisoned-MMIO
- * pattern, all of which characterise fresh boots where no channel
- * was ever live.
+ * call from non-kexec boots: when `FECS_CURRENT_CTX` reads zero /
+ * target=0 / a poisoned-MMIO pattern the inst-block and runlist
+ * reserves are skipped, and the per-kind handoff scan finds nothing
+ * (one ~50 ms DRAM walk) when no helper was ever run.
  */
 
 #ifndef GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
@@ -46,8 +44,13 @@
 #include <stdint.h>
 
 /*
- * Discover the kexec'd channel's inst block via FECS_CURRENT_CTX and
- * register its physical page with the PMM as a user-supplied reserve.
+ * Register the kexec-inherited GPU state with the PMM as user-supplied
+ * reserves: the inst block of the channel resident at kexec (read from
+ * FECS_CURRENT_CTX), the GR runlist, and everything referenced by the
+ * published handoff of each pipeline kind via
+ * `ga10b_reserve_handoffs_in_range` (see the file-level "Scope"
+ * paragraph). The runlist reserve needs a valid resident inst block
+ * from the FECS_CURRENT_CTX read; the per-kind pass always runs.
  *
  * No return value: the function logs every decision (skipped because
  * no current ctx / outside DRAM / reserve table full / success) so
@@ -82,5 +85,30 @@ void ga10b_kexec_handoff_register_reserves(void);
  * boot capture over live FECS reads for that workflow.
  */
 uint64_t ga10b_kexec_inherited_inst_block_phys(void);
+
+/*
+ * Reserve every page referenced by the published handoff of each
+ * pipeline kind (MNIST, SCHED_MLP, EVICTION_QNET) found in
+ * `[start, end)` at `stride`. One scan picks, per kind, the first
+ * handoff that passes `ga10b_validate_handoff` — the same choice as
+ * `ga10b_find_handoff_of_kind_in_range`. `resident_inst_phys` may be
+ * 0 (no resident channel captured). Per
+ * handoff: the handoff page, the channel's own inst block (skipped
+ * when it equals `resident_inst_phys`, which the FECS_CURRENT_CTX
+ * pass already reserved), the helper buffers, per-op shaders, GR
+ * ctx extents and weights extents.
+ *
+ * Returns a bitmask with bit `k` set for each kind whose handoff
+ * was found.
+ *
+ * #1029: before this, only the MNIST handoff was reserved, so the
+ * sched-MLP and eviction channels' buffers (including their GR
+ * context save buffers) were free for PMM to hand out. Called from
+ * `ga10b_kexec_handoff_register_reserves`; exposed so the host
+ * harness can exercise it against in-memory handoffs.
+ */
+uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
+                                         uint64_t stride,
+                                         uint64_t resident_inst_phys);
 
 #endif /* GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H */
