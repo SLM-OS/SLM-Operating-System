@@ -1497,6 +1497,21 @@ static void test_eviction_gpu_stats_reset_and_null_outs(void)
     TEST_ASSERT_EQUAL_UINT64(0, ok);
     TEST_ASSERT_EQUAL_UINT64(0, rl);
     TEST_ASSERT_EQUAL_UINT64(0, big);
+
+    /* Timing readout tolerates NULL, and the reset clears every
+     * steady-state field. On non-Jetson builds nothing is ever timed. */
+    slm_gpu_eviction_dispatch_timing(NULL);
+    struct slm_gpu_eviction_timing t;
+    __builtin_memset(&t, 0xA5, sizeof(t));
+    slm_gpu_eviction_dispatch_timing(&t);
+    TEST_ASSERT_EQUAL_UINT64(0, t.count);
+    TEST_ASSERT_EQUAL_UINT64(0, t.total_ns);
+    TEST_ASSERT_EQUAL_UINT64(0, t.min_ns);
+    TEST_ASSERT_EQUAL_UINT64(0, t.max_ns);
+    TEST_ASSERT_EQUAL_UINT64(0, t.rows_total);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_UINT64(0, t.first_ns);
+#endif
 }
 
 /* ============================================================================

@@ -520,6 +520,38 @@ static _Atomic uint64_t g_eviction_gpu_ok;
 static _Atomic uint64_t g_eviction_gpu_rate_limited;
 static _Atomic uint64_t g_eviction_gpu_oversize;
 
+/* GPU-served dispatch time (#965 latency column, #1020 batch sizing):
+ * wall time of slm_gpu_try_run_with_input for successful dispatches,
+ * i.e. try-lock + set_input + launch + poll + output read, which is
+ * also the span run with IRQs masked. The first success after boot
+ * includes ensure_bringup (inherit + channel + warmup dispatch), so it
+ * is kept apart in `first_ns` and excluded from count/total/min/max.
+ * Written only by the dispatch winner of the try-lock, read by
+ * `eviction stats`; relaxed is enough for an after-the-fact readout. */
+static _Atomic uint64_t g_eviction_gpu_time_first_ns;
+static _Atomic uint64_t g_eviction_gpu_time_count;
+static _Atomic uint64_t g_eviction_gpu_time_total_ns;
+static _Atomic uint64_t g_eviction_gpu_time_min_ns;
+static _Atomic uint64_t g_eviction_gpu_time_max_ns;
+static _Atomic uint64_t g_eviction_gpu_time_rows_total;
+
+void slm_gpu_eviction_dispatch_timing(struct slm_gpu_eviction_timing *out)
+{
+    if (!out) return;
+    out->first_ns   = atomic_load_explicit(&g_eviction_gpu_time_first_ns,
+                                           memory_order_relaxed);
+    out->count      = atomic_load_explicit(&g_eviction_gpu_time_count,
+                                           memory_order_relaxed);
+    out->total_ns   = atomic_load_explicit(&g_eviction_gpu_time_total_ns,
+                                           memory_order_relaxed);
+    out->min_ns     = atomic_load_explicit(&g_eviction_gpu_time_min_ns,
+                                           memory_order_relaxed);
+    out->max_ns     = atomic_load_explicit(&g_eviction_gpu_time_max_ns,
+                                           memory_order_relaxed);
+    out->rows_total = atomic_load_explicit(&g_eviction_gpu_time_rows_total,
+                                           memory_order_relaxed);
+}
+
 void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
                                      uint64_t *out_ok,
                                      uint64_t *out_rate_limited,
@@ -550,6 +582,14 @@ void slm_gpu_eviction_dispatch_stats_reset(void)
     atomic_store_explicit(&g_eviction_gpu_rate_limited, 0u,
                           memory_order_relaxed);
     atomic_store_explicit(&g_eviction_gpu_oversize, 0u, memory_order_relaxed);
+    /* first_ns is a once-per-boot bring-up figure; keep it. */
+    atomic_store_explicit(&g_eviction_gpu_time_count, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_time_total_ns, 0u,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_time_min_ns, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_time_max_ns, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_eviction_gpu_time_rows_total, 0u,
+                          memory_order_relaxed);
 }
 
 #ifdef PLATFORM_JETSON_ORIN_NANO
@@ -1205,9 +1245,11 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
      * 4096 × 27 × 4 = 432 KB, no overflow. */
     size_t in_bytes  = n_rows * SLM_EVICTION_FEATURE_DIM * sizeof(float);
     size_t out_bytes = n_rows * sizeof(float);
+    uint64_t t0 = slm_get_time_ns();
     int rc = slm_gpu_try_run_with_input(GA10B_PIPELINE_KIND_EVICTION_QNET,
                                          features, in_bytes,
                                          scores_out, out_bytes);
+    uint64_t dt = slm_get_time_ns() - t0;
     if (rc == SLM_GPU_ERR_INPUT_TOO_LARGE) {
         atomic_fetch_add_explicit(&g_eviction_gpu_oversize, 1u,
                                   memory_order_relaxed);
@@ -1228,9 +1270,35 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
                                   memory_order_relaxed);
         if (!atomic_exchange_explicit(&logged, true,
                                       memory_order_relaxed)) {
+            atomic_store_explicit(&g_eviction_gpu_time_first_ns, dt,
+                                  memory_order_relaxed);
             uart_printf("[INFO] eviction GPU fastpath dispatching "
-                        "(kind=EVICTION_QNET, %lu rows)\n",
-                        (unsigned long)n_rows);
+                        "(kind=EVICTION_QNET, %lu rows, first dispatch "
+                        "%lu us incl. bring-up)\n",
+                        (unsigned long)n_rows,
+                        (unsigned long)(dt / 1000u));
+        } else {
+            /* Runs after the dispatch lock is released, so two
+             * back-to-back successes could overlap here; the 50 ms
+             * window makes that rare. The sums are atomic adds; a
+             * lost min/max update only blurs that one extreme. */
+            uint64_t n = atomic_fetch_add_explicit(&g_eviction_gpu_time_count,
+                                                   1u, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_eviction_gpu_time_total_ns, dt,
+                                      memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_eviction_gpu_time_rows_total, n_rows,
+                                      memory_order_relaxed);
+            uint64_t lo = atomic_load_explicit(&g_eviction_gpu_time_min_ns,
+                                               memory_order_relaxed);
+            if (n == 0u || dt < lo) {
+                atomic_store_explicit(&g_eviction_gpu_time_min_ns, dt,
+                                      memory_order_relaxed);
+            }
+            if (dt > atomic_load_explicit(&g_eviction_gpu_time_max_ns,
+                                          memory_order_relaxed)) {
+                atomic_store_explicit(&g_eviction_gpu_time_max_ns, dt,
+                                      memory_order_relaxed);
+            }
         }
     }
     return rc;

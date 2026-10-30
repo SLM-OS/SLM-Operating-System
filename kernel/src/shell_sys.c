@@ -8347,6 +8347,7 @@ int cmd_sched(int argc, char *argv[])
  *   eviction stats          — detailed snapshot including CACHEUS expert
  *                             weights when the installed policy is an
  *                             ensemble selector
+ *   eviction stats gpu-reset — zero the GPU dispatch counters + timing
  */
 
 static void eviction_print_summary(const RustEvictionStats *s, const char *name)
@@ -8394,6 +8395,23 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
                  (unsigned long long)gpu_fallback,
                  (unsigned long long)gpu_rl,
                  (unsigned long long)gpu_big);
+    struct slm_gpu_eviction_timing t;
+    slm_gpu_eviction_dispatch_timing(&t);
+    if (t.count > 0u) {
+        shell_printf("  GPU dispatch time:   avg %llu us, min %llu us, "
+                     "max %llu us over %llu (avg %llu rows); "
+                     "first %llu us incl. bring-up\r\n",
+                     (unsigned long long)(t.total_ns / t.count / 1000u),
+                     (unsigned long long)(t.min_ns / 1000u),
+                     (unsigned long long)(t.max_ns / 1000u),
+                     (unsigned long long)t.count,
+                     (unsigned long long)(t.rows_total / t.count),
+                     (unsigned long long)(t.first_ns / 1000u));
+    } else if (t.first_ns > 0u) {
+        shell_printf("  GPU dispatch time:   first %llu us incl. bring-up "
+                     "(no steady-state samples)\r\n",
+                     (unsigned long long)(t.first_ns / 1000u));
+    }
     shell_printf("  GPU toggles:         inference=%s eviction=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_INFERENCE) ? "on" : "off",
                  gpu_consumer_enabled(GPU_CONSUMER_EVICTION) ? "on" : "off");
@@ -8732,6 +8750,13 @@ int cmd_eviction(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "stats") == 0) {
+        if (argc >= 3 && strcmp(argv[2], "gpu-reset") == 0) {
+            /* Zero the GPU dispatch counters and timing so one
+             * measurement window can be read on its own (#965). */
+            slm_gpu_eviction_dispatch_stats_reset();
+            shell_puts("eviction GPU dispatch counters reset\r\n");
+            return 0;
+        }
         eviction_print_stats(&stats, name_buf);
         return 0;
     }

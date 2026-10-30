@@ -1387,6 +1387,27 @@ void slm_gpu_eviction_dispatch_stats(uint64_t *out_attempts,
 void slm_gpu_eviction_dispatch_stats_reset(void);
 
 /*
+ * Timing of GPU-served eviction dispatches (#965 latency, #1020 batch
+ * sizing). Each sample is the wall time of one successful
+ * `slm_gpu_run_eviction_batch` dispatch: try-lock, input copy,
+ * launch, completion poll and output read, which is also the span
+ * run with IRQs masked. The first success after boot also pays for
+ * channel bring-up, so it is reported alone in `first_ns` and left
+ * out of the rest. `rows_total / count` is the mean rows per timed
+ * dispatch. All zero on non-Jetson builds. The stats reset above
+ * clears everything except `first_ns`.
+ */
+struct slm_gpu_eviction_timing {
+    uint64_t first_ns;
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+    uint64_t rows_total;
+};
+void slm_gpu_eviction_dispatch_timing(struct slm_gpu_eviction_timing *out);
+
+/*
  * GPU dispatch circuit breaker (#552 mitigation).
  *
  * `slm_gpu_run_mnist` and `slm_gpu_run_sched_inference` track
