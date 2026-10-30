@@ -193,6 +193,11 @@ int main(int argc, char **argv)
     const char *weights_dir = "./eviction-weights";
     const char *shader_dir  = ".";
     int batch = EVICT_BATCH_DEFAULT;
+    /* #1036 timing experiments (results deliberately wrong, so the
+     * self-check is skipped): 1 = GEMM 2 reads a CPU-filled buffer
+     * instead of op 1's output; 2 = GEMM 1 reads op 1's GPU-written
+     * output instead of the CPU-written input. */
+    int exp_mode = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
             preserve = true;
@@ -205,6 +210,16 @@ int main(int argc, char **argv)
             shader_dir = argv[++i];
         } else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc) {
             batch = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--exp") == 0 && i + 1 < argc) {
+            const char *e = argv[++i];
+            if (strcmp(e, "gemm2-cpu-input") == 0) {
+                exp_mode = 1;
+            } else if (strcmp(e, "gemm1-gpu-input") == 0) {
+                exp_mode = 2;
+            } else {
+                fprintf(stderr, "unknown --exp %s\n", e);
+                return 1;
+            }
         }
     }
     if (batch < 1 || batch > EVICT_BATCH_MAX) {
@@ -302,6 +317,15 @@ int main(int argc, char **argv)
     }
     printf("[evict] weights + %zu input rows loaded\n", B);
 
+    struct gpu_buffer exp_buf = {0};
+    if (exp_mode == 1) {
+        /* Same shape as op 1's output ([B][64] fp32), CPU-written. */
+        exp_buf = gpu_alloc_buffer(&ctx, round_up_page(B * 64u * 4u), 4096);
+        float *f = (float *)exp_buf.cpu_va;
+        for (size_t k = 0; k < B * 64u; k++) f[k] = 0.5f + 0.001f * (float)(k % 97u);
+        msync(exp_buf.cpu_va, exp_buf.size_bytes, MS_SYNC);
+    }
+
     /* --- Read per-op sentinel (cell_idx, bits) from disk. --- */
     uint32_t sentinel_idx[EVICT_OP_COUNT] = {0};
     uint32_t sentinel_bits[EVICT_OP_COUNT] = {0};
@@ -383,6 +407,8 @@ int main(int argc, char **argv)
              * for L2..L3, addrelu output of L3 for OUT. */
             uint64_t a_gva = (li == 0) ? input.gpu_va
                                        : ops[post_op - 2].output.gpu_va;
+            if (exp_mode == 1 && li == 1) a_gva = exp_buf.gpu_va;
+            if (exp_mode == 2 && li == 0) a_gva = ops[1].output.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x160) = a_gva;
             *(uint64_t *)((char *)cbuf + 0x168) = W[li].gpu_va;
             *(uint64_t *)((char *)cbuf + 0x170) = op->output.gpu_va;
@@ -478,6 +504,24 @@ int main(int argc, char **argv)
         memset(ops[i].output.cpu_va, 0, ops[i].output.size_bytes);
         msync(ops[i].output.cpu_va, ops[i].output.size_bytes, MS_SYNC);
     }
+    if (exp_mode == 2) {
+        /* GEMM 1 now reads op 1's output; seed it non-zero so the
+         * Linux-side sentinel poll still sees GEMM 1 write. */
+        float *f = (float *)ops[1].output.cpu_va;
+        for (size_t k = 0; k < ops[1].output.size_bytes / 4u; k++) f[k] = 0.25f;
+        msync(ops[1].output.cpu_va, ops[1].output.size_bytes, MS_SYNC);
+    }
+    if (exp_mode != 0) {
+        printf("[evict] EXPERIMENT %d buffers: input gva=0x%llx "
+               "W_L2 gva=0x%llx op0.out gva=0x%llx op1.out gva=0x%llx "
+               "op2.out gva=0x%llx exp gva=0x%llx\n", exp_mode,
+               (unsigned long long)input.gpu_va,
+               (unsigned long long)W[1].gpu_va,
+               (unsigned long long)ops[0].output.gpu_va,
+               (unsigned long long)ops[1].output.gpu_va,
+               (unsigned long long)ops[2].output.gpu_va,
+               (unsigned long long)exp_buf.gpu_va);
+    }
 
     printf("[evict] all 9 ops prepared. Linux-side dispatch:\n");
 
@@ -496,7 +540,8 @@ int main(int argc, char **argv)
             (volatile uint32_t *)((char *)op->output.cpu_va +
                                    op->sentinel_cell_idx * 4u);
         int ok = gpu_submit_and_poll(&ctx, pb_buf, pb_dwords, poll_va,
-                                      0u, /* any non-zero */ 5000);
+                                      0u, /* any non-zero */
+                                      exp_mode ? 200 : 5000);
         msync(op->output.cpu_va, op->output.size_bytes,
               MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
@@ -510,7 +555,12 @@ int main(int argc, char **argv)
                op->sentinel_bits,
                actual_sentinel_bits[i] == op->sentinel_bits
                    ? "exact" : "ULP-divergent");
-        if (!ok) {
+        if (!ok && exp_mode != 0) {
+            /* Experiment inputs can zero a post-ReLU sentinel cell; the
+             * op still ran, so keep going. */
+            printf("[evict]   op[%d] sentinel stayed 0 (experiment "
+                   "input) — continuing\n", i);
+        } else if (!ok) {
             fprintf(stderr,
                     "[evict] op[%d %s] sentinel timeout (no non-zero "
                     "write at cell %u)\n",
@@ -533,6 +583,12 @@ int main(int argc, char **argv)
         while (r < B && score_bits[r] != 0u) r++;
         if (r == B) break;
         usleep(100);
+    }
+
+    if (exp_mode != 0) {
+        printf("[evict] EXPERIMENT %d: results deliberately wrong, "
+               "self-check skipped\n", exp_mode);
+        goto handoff;
     }
 
     /* --- Validate every row against the fp32 CPU reference. --- */
@@ -594,6 +650,7 @@ int main(int argc, char **argv)
            "(score=%.6f, |err|=%.3e, %zu rows)\n",
            (double)score, (double)abs_err, B);
 
+handoff:
     if (!preserve) return 0;
 
     /* --- v6 handoff for SLM-OS post-kexec consumption. ---
