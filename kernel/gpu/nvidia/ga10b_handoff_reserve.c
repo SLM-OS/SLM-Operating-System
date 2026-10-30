@@ -39,8 +39,10 @@
  *   - Assumes the helper kept the channel loaded on the GR engine
  *     through kexec — i.e. FECS still has a meaningful current ctx
  *     to report. A `--gpu-suspend` kexec breaks this assumption;
- *     the function early-returns on `target == 0` (and on poisoned
- *     reads) so suspended-GPU boots cost only a single MMIO read.
+ *     the inst-block and runlist reserves are skipped on
+ *     `target == 0` (and on poisoned reads), but the per-kind
+ *     handoff scan still runs (~50 ms) since each handoff carries
+ *     its own inst_block_phys.
  *
  * **Patched-`nvgpu.ko` dependency** (#788 v10/v11 fix path).
  * `reserve_gr_ctx_extents` consumes `h->gr_ctx_extents_phys` /
@@ -746,19 +748,50 @@ static const char *pipeline_kind_name(uint32_t kind)
     }
 }
 
+/* One magic scan over `[start, end)` that records, per pipeline kind,
+ * the first handoff passing `ga10b_validate_handoff` — the same choice
+ * `ga10b_find_handoff_of_kind_in_range` makes for each kind (so the
+ * reserved buffers are the ones the dispatch path will inherit; #834:
+ * stale handoffs with inst_block_phys=0 fail validation and are
+ * skipped). A single pass instead of one scan per kind keeps the boot
+ * cost at one ~50 ms walk of the 4 GB IOVMM range. Stops early once
+ * every kind is found. */
+static void find_first_handoff_per_kind(uint64_t start, uint64_t end,
+                                        uint64_t stride,
+                                        uint64_t out[GA10B_PIPELINE_KIND_COUNT])
+{
+    uint32_t remaining = GA10B_PIPELINE_KIND_COUNT;
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        out[kind] = 0;
+    }
+    uint64_t cursor = start;
+    while (cursor < end && remaining > 0) {
+        uint64_t found = ga10b_find_handoff_in_range(cursor, end, stride);
+        if (found == 0) {
+            break;
+        }
+        const struct ga10b_channel_handoff *h =
+            (const struct ga10b_channel_handoff *)(uintptr_t)found;
+        uint32_t kind = h->pipeline_kind;
+        if (ga10b_validate_handoff(h) == 0 &&
+            kind < GA10B_PIPELINE_KIND_COUNT && out[kind] == 0) {
+            out[kind] = found;
+            remaining--;
+        }
+        cursor = found + stride;
+    }
+}
+
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
                                          uint64_t resident_inst_phys)
 {
-    /* One kind-aware scan per kind (~50 ms each on the 4 GB IOVMM
-     * range, so ~150 ms total at boot). Each kind uses the same
-     * validate-filtered scanner as the bringup path, so the reserved
-     * buffers are the ones the dispatch path will actually inherit
-     * (#834: stale handoffs with inst_block_phys=0 are skipped). */
+    uint64_t handoffs[GA10B_PIPELINE_KIND_COUNT];
+    find_first_handoff_per_kind(start, end, stride, handoffs);
+
     uint32_t found_mask = 0;
     for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
-        uint64_t handoff_phys =
-            ga10b_find_handoff_of_kind_in_range(start, end, stride, kind);
+        uint64_t handoff_phys = handoffs[kind];
         if (handoff_phys == 0) {
             uart_printf("[ga10b-reserve] kind=%u (%s): no handoff\n",
                         (unsigned)kind, pipeline_kind_name(kind));
@@ -790,16 +823,18 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
 
 void ga10b_kexec_handoff_register_reserves(void)
 {
-    /* Always-on phase: read FECS_CURRENT_CTX and reserve the
-     * channel's inst block. If this skip-returns (poison MMIO,
-     * target=0 fresh boot, outside-DRAM, PMM table full), the rest
-     * of the handoff machinery is meaningless — no kexec'd channel
-     * to protect. */
-    if (!reserve_inst_block()) {
-        return;
+    /* Read FECS_CURRENT_CTX and reserve the resident channel's inst
+     * block. When this skips (poison MMIO, target=0, outside DRAM,
+     * PMM table full) there is no live GR context to anchor the
+     * runlist read on, so the runlist reserve is skipped too — but
+     * the per-kind handoff pass below still runs: each handoff
+     * carries its own inst_block_phys, so a `--gpu-suspend` kexec
+     * with helpers staged keeps its channels' pages protected. On a
+     * boot with no helper ever run, the pass finds nothing and costs
+     * one ~50 ms DRAM scan. */
+    if (reserve_inst_block()) {
+        reserve_runlist();
     }
-
-    reserve_runlist();
 
     /* Handoff-dependent phase: locate the helper-published handoff
      * dmabuf in DRAM by scanning for its magic. ~50 ms one-time-only
@@ -839,6 +874,8 @@ void ga10b_kexec_handoff_register_reserves(void)
      * 2026-10-29), so this is coverage, not that root cause. */
     uart_puts("[ga10b-reserve] scanning DRAM for handoff magic "
               "(all pipeline kinds)...\n");
+    /* g_boot_inst_block_phys is 0 when reserve_inst_block skipped, so
+     * no handoff's inst block is treated as already reserved. */
     (void)ga10b_reserve_handoffs_in_range(0x100000000ull, 0x200000000ull,
                                           4096ull, g_boot_inst_block_phys);
 }

@@ -2342,6 +2342,69 @@ static void test_reserve_all_kinds_eviction_only(void)
     free(buf);
 }
 
+/* The single-pass scan must pick, per kind, the same handoff the
+ * bringup path's per-kind scanner inherits: the first one passing
+ * validation. Plants a magic-only (invalid) page and two valid
+ * eviction handoffs; only the first valid one may be reserved. */
+static void test_reserve_all_kinds_picks_first_valid_per_kind(void)
+{
+    printf("== test_reserve_all_kinds_picks_first_valid_per_kind ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    buf[1 * 1024] = GA10B_CHANNEL_HANDOFF_MAGIC;  /* page 1: magic, invalid */
+    plant_reservable_handoff(buf, 3, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    /* A second, later eviction handoff with different buffers. */
+    struct ga10b_channel_handoff later;
+    memcpy(&later, (char *)buf + 3 * 4096, sizeof(later));
+    later.userd_phys = 0x170000000ULL;
+    memcpy((char *)buf + 6 * 4096, &later, sizeof(later));
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_EVICTION_QNET),
+               start + 3 * 4096);
+
+    g_n_reserves = 0;
+    uint32_t mask = ga10b_reserve_handoffs_in_range(start, end, 4096, 0);
+    REQUIRE_EQ(mask, 1u << GA10B_PIPELINE_KIND_EVICTION_QNET);
+    REQUIRE_EQ(reserves_at(start + 3 * 4096), 1);   /* first valid */
+    REQUIRE_EQ(reserves_at(start + 6 * 4096), 0);   /* later duplicate */
+    REQUIRE_EQ(reserves_at(start + 1 * 4096), 0);   /* invalid magic page */
+    REQUIRE_EQ(reserves_at(0x152000000ULL), 1);     /* first's userd */
+    REQUIRE_EQ(reserves_at(0x170000000ULL), 0);     /* later's userd */
+    free(buf);
+}
+
+/* With no resident channel captured (FECS_CURRENT_CTX skipped, e.g.
+ * a --gpu-suspend kexec), every handoff's own inst block is reserved. */
+static void test_reserve_all_kinds_no_resident_reserves_every_inst(void)
+{
+    printf("== test_reserve_all_kinds_no_resident_reserves_every_inst ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 2, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    plant_reservable_handoff(buf, 5, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, start + 65536,
+                                               4096, 0), 0x7u);
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        uint64_t base = 0x150000000ULL + (uint64_t)kind * 0x1000000ULL;
+        REQUIRE_EQ(reserves_at(base + 0x30000), 1);
+    }
+    free(buf);
+}
+
 static void test_reserve_all_kinds_none_found(void)
 {
     printf("== test_reserve_all_kinds_none_found ==\n");
@@ -3508,6 +3571,8 @@ int main(void)
     test_scanner_kind_legacy_zero_is_mnist();
     test_reserve_all_kinds_covers_eviction_and_sched();
     test_reserve_all_kinds_eviction_only();
+    test_reserve_all_kinds_picks_first_valid_per_kind();
+    test_reserve_all_kinds_no_resident_reserves_every_inst();
     test_reserve_all_kinds_none_found();
 
     test_poll_match_exact();

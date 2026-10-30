@@ -32,10 +32,10 @@
  * Hooked from `kernel_main` between `vmm_init` (which sets up the
  * identity mappings the function needs to read GPU MMIO and DRAM)
  * and `pmm_init` (the consumer of `pmm_user_reserve_add`). Safe to
- * call from non-kexec boots — the function early-returns when
- * `FECS_CURRENT_CTX` reads zero / target=0 / a poisoned-MMIO
- * pattern, all of which characterise fresh boots where no channel
- * was ever live.
+ * call from non-kexec boots: when `FECS_CURRENT_CTX` reads zero /
+ * target=0 / a poisoned-MMIO pattern the inst-block and runlist
+ * reserves are skipped, and the per-kind handoff scan finds nothing
+ * (one ~50 ms DRAM walk) when no helper was ever run.
  */
 
 #ifndef GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
@@ -49,8 +49,8 @@
  * FECS_CURRENT_CTX), the GR runlist, and everything referenced by the
  * published handoff of each pipeline kind via
  * `ga10b_reserve_handoffs_in_range` (see the file-level "Scope"
- * paragraph). The per-kind pass runs only when the FECS_CURRENT_CTX
- * read yields a valid resident inst block.
+ * paragraph). The runlist reserve needs a valid resident inst block
+ * from the FECS_CURRENT_CTX read; the per-kind pass always runs.
  *
  * No return value: the function logs every decision (skipped because
  * no current ctx / outside DRAM / reserve table full / success) so
@@ -89,7 +89,10 @@ uint64_t ga10b_kexec_inherited_inst_block_phys(void);
 /*
  * Reserve every page referenced by the published handoff of each
  * pipeline kind (MNIST, SCHED_MLP, EVICTION_QNET) found in
- * `[start, end)` at `stride`, using the kind-aware scanner. Per
+ * `[start, end)` at `stride`. One scan picks, per kind, the first
+ * handoff that passes `ga10b_validate_handoff` — the same choice as
+ * `ga10b_find_handoff_of_kind_in_range`. `resident_inst_phys` may be
+ * 0 (no resident channel captured). Per
  * handoff: the handoff page, the channel's own inst block (skipped
  * when it equals `resident_inst_phys`, which the FECS_CURRENT_CTX
  * pass already reserved), the helper buffers, per-op shaders, GR
