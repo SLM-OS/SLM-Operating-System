@@ -637,7 +637,7 @@ swap) is pinned by the `two_phase_*` and `mlp_finish_*` checks in
 
 **Batched dispatch on hardware (#1020, 2026-10-30).** One
 jetson-nano-2 boot of the #1020 kernel (`EVICTION_MODELS=ON`), with
-the batched producer (`--batch 64`, built on the board) plus the
+the batched producer (then `--batch 64`, built on the board) plus the
 default MNIST and sched-MLP helpers preserved, `eviction policy mlp`
 and both GPU toggles on:
 
@@ -663,6 +663,17 @@ and both GPU toggles on:
   candidates, since only 1.5% of decisions reached the GPU under the
   50 ms window. A per-dispatch GPU latency still needs a dedicated
   measurement (#965).
+- **Default raised to `--batch 256` (same day, review fix).** The
+  producer self-check passed on all 256 rows (worst error 6.0e-8). The
+  e2e replay sent 64-candidate decisions into the 256-row pipeline. It
+  logged `fastpath dispatching (… 64 rows)`, with 12,413 attempts,
+  204 GPU-served, the rest rate-limited, 0 errors and 0 oversize.
+  Fault rates matched the 64-row run on every scenario. Average select
+  latency read 864 µs, against 759 µs at 64 rows and 738 µs CPU-only.
+  If that difference is real rather than run-to-run noise, it is a few
+  ms per GPU-served decision for the larger batch. That is dispatch
+  time with IRQs masked, so a per-dispatch measurement of both batch
+  sizes should settle the default (#965).
 
 **Hardware status.** On 2026-10-29, jetson-nano-2 ran 10 power-cycled
 boots of the PR-6 kernel (`EVICTION_MODELS=ON`). Each boot staged the
