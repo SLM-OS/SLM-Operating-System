@@ -258,10 +258,10 @@ mod test_ffi_stubs {
 
     #[cfg(feature = "ai_eviction")]
     #[no_mangle]
-    pub extern "C" fn slm_gpu_run_eviction_inference(
+    pub extern "C" fn slm_gpu_run_eviction_batch(
         _features: *const f32,
-        _features_len: usize,
-        _score_out: *mut f32,
+        _n_rows: usize,
+        _scores_out: *mut f32,
     ) -> i32 {
         -1
     }
