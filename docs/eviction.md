@@ -587,7 +587,7 @@ silently:
 
 **Batched dispatch (#1020).** One dispatch scores a decision's whole
 candidate set. The producer stages the pipeline for a fixed batch of
-rows (`--batch`, default and maximum 256); SLM-OS writes one 27-feature
+rows (`--batch`, default 64, at most 256); SLM-OS writes one 27-feature
 row per candidate and reads back one score per candidate, and the GPU
 computes the unused rows and ignores them. No new shaders were needed:
 GEMM takes M = batch, add-bias-ReLU takes the batch on `blockIdx.z`,
@@ -663,17 +663,42 @@ and both GPU toggles on:
   candidates, since only 1.5% of decisions reached the GPU under the
   50 ms window. A per-dispatch GPU latency still needs a dedicated
   measurement (#965).
-- **Default raised to `--batch 256` (same day, review fix).** The
-  producer self-check passed on all 256 rows (worst error 6.0e-8). The
-  e2e replay sent 64-candidate decisions into the 256-row pipeline. It
-  logged `fastpath dispatching (… 64 rows)`, with 12,413 attempts,
-  204 GPU-served, the rest rate-limited, 0 errors and 0 oversize.
-  Fault rates matched the 64-row run on every scenario. Average select
-  latency read 864 µs, against 759 µs at 64 rows and 738 µs CPU-only.
-  If that difference is real rather than run-to-run noise, it is a few
-  ms per GPU-served decision for the larger batch. That is dispatch
-  time with IRQs masked, so a per-dispatch measurement of both batch
-  sizes should settle the default (#965).
+- **`--batch 256` also works.** The producer self-check passed on all
+  256 rows (worst error 6.0e-8). In the e2e replay, 64-candidate
+  decisions went through the 256-row pipeline: 204 GPU-served, 0
+  errors, 0 oversize, and fault rates identical to the 64-row run.
+
+**GPU dispatch latency (#965, 2026-10-30).** `eviction stats` reports
+the wall time of each GPU-served dispatch (`GPU dispatch time`). That
+covers the try-lock through the output read, which is the span run
+with IRQs masked. These are two jetson-nano-2 boots of kernel
+46e8b425, with the default helpers preserved:
+
+| Producer `--batch` | Rows requested | Samples | Avg | Min | Max |
+|---|---|---|---|---|---|
+| 256 | 8 | 3 | 2.37 ms | 2.36 ms | 2.40 ms |
+| 256 | 64 | 217 | 2.38 ms | 2.33 ms | 2.41 ms |
+| 64 | 8 | 3 | 0.72 ms | 0.72 ms | 0.73 ms |
+| 64 | 64 | 249 | 0.71 ms | 0.65 ms | 0.74 ms |
+
+- **Batch size, not request size, sets the cost.** The GPU computes
+  every staged row on each dispatch. The likely culprit is
+  add-bias-ReLU's one-256-thread-CTA-per-element launch. That is why
+  the default stays at `--batch 64` (#1036).
+- **Against the CPU.** A GPU-served decision over 64 candidates costs
+  about what CPU-scoring them does: average `select_victim` latency
+  is about 0.74 ms CPU-only, including feature extraction. For small
+  candidate sets it is slower, and it is about 700× the 1 µs target
+  #965 asked to re-evaluate. The eviction MLP is too small for one
+  GPU dispatch to beat a CPU pass at these sizes. The batched GPU path
+  stays an option for exploration, not a speed-up.
+- **First dispatch.** The first GPU-served dispatch after boot took
+  88.6 ms and 84.1 ms on the two boots. It includes channel bring-up,
+  which also runs with IRQs masked (#1037).
+- **Select-latency averages are dominated by CPU scoring.** The
+  per-run average `select_victim` latency varied between 738 and
+  1011 µs. GPU dispatches add only about 15–45 µs to a run's average,
+  because the 50 ms window lets few through.
 
 **Hardware status.** On 2026-10-29, jetson-nano-2 ran 10 power-cycled
 boots of the PR-6 kernel (`EVICTION_MODELS=ON`). Each boot staged the
@@ -756,8 +781,7 @@ May 2026). On `main` b9de6824, which includes that reserve, it passed
 boot (Fisher p = 0.03 against the old rate). That is strong evidence
 that most of the residual failures were the same page clobber, but
 any hardware claim still needs a multi-boot ratio, not a single run.
-No Jetson GPU latency column exists yet. Of the #965 hardware
-criteria:
+Of the #965 hardware criteria:
 
 - ✅ Serial `fastpath dispatching` capture. Met on 2026-10-29 (9 boots
   across the two runs) and on 2026-10-30 (20 more with the whole-VM
@@ -779,11 +803,16 @@ criteria:
   Fault rates were identical in every state (`mlp` 164/368), as
   expected with one GPU score per `select_victim` and the same model
   on both paths.
-- ☐🎫 GPU bench delta, and re-evaluating the 1 µs target — #1020.
+- ✅ GPU latency and the 1 µs re-evaluation, measured on the batched
+  path (#1020): 0.71 ms per GPU-served decision at the default
+  `--batch 64`. The target is missed, and at these sizes the GPU path
+  is no faster than the CPU. See §"GPU dispatch latency" above. The
+  §"Latency Benchmarks (M9)" table stays CPU-only, because
+  `bench eviction` with the toggle on mixes a few GPU-served decisions
+  with many rate-limited CPU ones, so it has no clean "Jetson GPU"
+  column. The per-dispatch figure is that column's value.
 
-With dispatch
-now reliable (#1029), a meaningful bench delta still needs batched
-scoring (#1020). On Pi 5 there is no GPU-side path in any
+On Pi 5 there is no GPU-side path in any
 form: VideoCore is intentionally stubbed and the AI HAT+ (Hailo-8L) is
 wedged at boundary IN ch=2 by
 [#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682),

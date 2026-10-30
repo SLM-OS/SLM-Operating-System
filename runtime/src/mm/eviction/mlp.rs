@@ -19,7 +19,7 @@
 //! `gpu use eviction on`, [`MlpPolicy`] scores a decision's whole
 //! candidate set with one [`gpu_score_batch`] call: one dispatch of the
 //! batched pipeline staged by `scripts/gpu-kernel-eviction-qnet.c
-//! --preserve-for-kexec` (default 256 rows) and inherited across kexec.
+//! --preserve-for-kexec` (default 64 rows) and inherited across kexec.
 //! Either every candidate gets a GPU score or, on any failure (no
 //! producer ran, 50 ms rate-limit window, try-lock contention, more
 //! candidates than the producer's batch, a non-finite score, or any

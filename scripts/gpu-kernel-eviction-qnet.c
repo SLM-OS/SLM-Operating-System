@@ -3,7 +3,7 @@
  * the Jetson GA10B GPU (PR-5 of docs/design/gpu-policy-models.md).
  *
  * Nine kernel dispatches chained through the v6 channel handoff, each
- * over a batch of B candidate rows (`--batch`, default 256; #1020):
+ * over a batch of B candidate rows (`--batch`, default 64; #1020):
  *
  *   Op 0  GEMM (L1)        x [B,27]   W [27,64]  → out [B,64]
  *   Op 1  Add+ReLU (L1)    + bias [64], apply_relu=1
@@ -82,11 +82,13 @@
 #define EVICT_OP_COUNT    9
 #define EVICT_INPUT_DIM   27   /* BlockFeatures = [f32; 27] (runtime_mlp.rs) */
 #define EVICT_OUTPUT_DIM   1   /* single fp32 eviction score in [0, 1] */
-/* Rows per dispatch (#1020). Defaults to the maximum: a decision with
- * more candidates than this falls back to the CPU (`oversize`), and
- * the weight pool alone has 512 blocks, while the extra GPU work for
- * unused rows is negligible at these layer sizes. */
-#define EVICT_BATCH_DEFAULT 256
+/* Rows per dispatch (#1020). The GPU computes every staged row on
+ * every dispatch, so this sets the IRQs-masked dispatch time: 0.71 ms
+ * at 64 vs 2.38 ms at 256 on jetson-nano-2 (2026-10-30), dominated by
+ * add_bias_relu's one-CTA-per-element launch (#1036). Decisions with
+ * more candidates than this go to the CPU (`oversize`); pass a larger
+ * --batch for bigger pools once #1036 makes it cheap. */
+#define EVICT_BATCH_DEFAULT 64
 /* Op 8 (sigmoid) runs as a single 256-thread CTA, and the Linux-side
  * completion check below waits on every score cell of it. */
 #define EVICT_BATCH_MAX   256

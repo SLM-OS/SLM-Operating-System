@@ -1336,7 +1336,7 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * `scores_out` with `n_rows` fp32 scores in [0, 1] (the sigmoid
  * output of the final layer), in row order. Caller ranks candidates
  * by these scores. The producer stages a fixed batch (`--batch`,
- * default 256 rows) and the GPU always computes all of them; rows
+ * default 64 rows) and the GPU always computes all of them; rows
  * beyond `n_rows` are ignored.
  *
  * Returns 0 on success (all `n_rows` scores written), negative rc on
