@@ -689,9 +689,14 @@ with IRQs masked. These are two jetson-nano-2 boots of kernel
 | 64 | 64 | 249 | 0.71 ms | 0.65 ms | 0.74 ms |
 
 - **Batch size, not request size, sets the cost.** The GPU computes
-  every staged row on each dispatch. The likely culprit is
-  add-bias-ReLU's one-256-thread-CTA-per-element launch. That is why
-  the default stays at `--batch 64` (#1036).
+  every staged row on each dispatch. Per-op timing (`Last pipeline
+  ops:` in `eviction stats`) puts almost all of it in GEMMs 2–4: 313,
+  164 and 86 µs at batch 64, and 4× that at 256. They cost about
+  1.25 µs per inner-loop step per 16-row CTA band. GEMM 1 runs the
+  same shader at about 0.09 µs per step; it reads the CPU-written
+  input, whereas GEMMs 2–4 read GPU-written intermediates. The
+  add-bias-ReLU ops, first suspected, total about 77 µs at batch 256.
+  The default stays at `--batch 64` until #1036 explains the gap.
 - **Against the CPU.** A GPU-served decision over 64 candidates costs
   about what CPU-scoring them does: average `select_victim` latency
   is about 0.74 ms CPU-only, including feature extraction. For small

@@ -85,7 +85,8 @@
 /* Rows per dispatch (#1020). The GPU computes every staged row on
  * every dispatch, so this sets the IRQs-masked dispatch time: 0.71 ms
  * at 64 vs 2.38 ms at 256 on jetson-nano-2 (2026-10-30), dominated by
- * add_bias_relu's one-CTA-per-element launch (#1036). Decisions with
+ * GEMMs 2-4, which read the previous op's GPU-written output at ~14x
+ * GEMM 1's per-step cost (#1036; add_bias_relu is ~3% of it). Decisions with
  * more candidates than this go to the CPU (`oversize`); pass a larger
  * --batch for bigger pools once #1036 makes it cheap. */
 #define EVICT_BATCH_DEFAULT 64
