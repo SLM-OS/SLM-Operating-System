@@ -985,6 +985,18 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
         reserve_per_op_shaders(h);
         reserve_gr_ctx_extents(h);
         reserve_weights_extents(h, handoff_phys);
+    }
+    /* Channel VMs only after every kind's named buffers: a large VM
+     * (e.g. a v8 weights pool with no v9 extents to skip) can use
+     * hundreds of PMM user-reserve slots, and must not starve another
+     * handoff's USERD / GPFIFO / inst block of theirs. */
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        if (handoffs[kind] == 0) {
+            continue;
+        }
+        const volatile struct ga10b_channel_handoff *h =
+            (const volatile struct ga10b_channel_handoff *)
+            (uintptr_t)handoffs[kind];
         reserve_channel_vm(h->inst_block_phys, h, &seen);
     }
     /* The GR-resident channel last: usually a helper's (deduped by

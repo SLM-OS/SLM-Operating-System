@@ -2713,6 +2713,44 @@ static void test_reserve_channel_vm_dedups_resident(void)
     free(buf);
 }
 
+/* Index of the first recorded reserve based at `phys`, or -1. */
+static long reserve_index(uint64_t phys)
+{
+    for (size_t i = 0; i < g_n_reserves; i++) {
+        if (g_reserves[i].phys == phys) return (long)i;
+    }
+    return -1;
+}
+
+/* Channel-VM reserves can be large; they must come after every kind's
+ * named buffers so a full PMM table never costs another handoff its
+ * USERD / GPFIFO. MNIST (kind 0) owns the fake VM here; the sched
+ * handoff's userd must still be reserved before the VM's tables. */
+static void test_reserve_channel_vm_runs_after_named_buffers(void)
+{
+    printf("== test_reserve_channel_vm_runs_after_named_buffers ==\n");
+    uint64_t inst = vm_build_tree();
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    ((struct ga10b_channel_handoff *)(void *)((char *)buf + 4096))
+        ->inst_block_phys = inst;
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    ga10b_reserve_handoffs_in_range(start, start + 65536, 4096, 0);
+    long sched_userd = reserve_index(0x151000000ULL);
+    long vm_tables   = reserve_index(vm_fake_phys(1));
+    REQUIRE(sched_userd >= 0);
+    REQUIRE(vm_tables >= 0);
+    REQUIRE(sched_userd < vm_tables);
+    free(buf);
+}
+
 /* ======================================================================
  * Test 9: handoff scanner (finds magic in a memory buffer)
  * ====================================================================== */
@@ -3870,6 +3908,7 @@ int main(void)
     test_gmmu_enum_table_budget_stops_fanout();
     test_reserve_channel_vm_pins_tables_and_leaves();
     test_reserve_channel_vm_dedups_resident();
+    test_reserve_channel_vm_runs_after_named_buffers();
 
     test_poll_match_exact();
     test_poll_match_any_nonzero();
