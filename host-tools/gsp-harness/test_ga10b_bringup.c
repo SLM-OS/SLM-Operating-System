@@ -2462,8 +2462,20 @@ static void test_resolve_handoff_prefers_boot_record(void)
     plant_reservable_handoff(buf, 12, GA10B_PIPELINE_KIND_EVICTION_QNET, 0, 0);
     uint64_t start = (uint64_t)(uintptr_t)buf;
     uint64_t end = start + 65536;
+    bool from_boot = true;
+
+    /* No boot scan yet: the resolver walks the given range. */
+    ga10b_boot_handoff_reset_for_test();
+    REQUIRE(!ga10b_boot_handoff_scan_ran());
+    REQUIRE_EQ(ga10b_resolve_handoff_of_kind(
+                   GA10B_PIPELINE_KIND_EVICTION_QNET, start, end, 4096,
+                   &from_boot),
+               start + 8 * 4096);
+    REQUIRE(!from_boot);
+
     g_n_reserves = 0;
     REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0x7u);
+    REQUIRE(ga10b_boot_handoff_scan_ran());
 
     /* Boot scan keeps the first handoff of each kind. */
     REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_MNIST),
@@ -2472,36 +2484,38 @@ static void test_resolve_handoff_prefers_boot_record(void)
                start + 8 * 4096);
     REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_COUNT), 0);
 
-    /* Record answers with an empty fallback range, i.e. no scan. */
-    bool from_boot = false;
+    /* Record answers with an empty range, i.e. no walk. */
+    from_boot = false;
     REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
                                              0, 0, 4096, &from_boot),
                start + 4 * 4096);
     REQUIRE(from_boot);
 
-    /* Record no longer valid (magic gone): scan finds the next one. */
+    /* Record no longer valid (magic gone): reported missing, not
+     * replaced by the later, unreserved one at page 12. */
     buf[8 * 1024] = 0;
     REQUIRE_EQ(ga10b_resolve_handoff_of_kind(
                    GA10B_PIPELINE_KIND_EVICTION_QNET, start, end, 4096,
                    &from_boot),
-               start + 12 * 4096);
-    REQUIRE(!from_boot);
+               0);
+    REQUIRE(from_boot);
 
     /* Record re-tagged to another kind: not trusted either. */
     struct ga10b_channel_handoff *mn =
         (struct ga10b_channel_handoff *)((char *)buf + 1 * 4096);
     mn->pipeline_kind = GA10B_PIPELINE_KIND_SCHED_MLP;
     REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_MNIST,
-                                             start, end, 4096, &from_boot),
-               0);
-    REQUIRE(!from_boot);
+                                             start, end, 4096, NULL), 0);
 
-    /* A boot scan that finds nothing clears the records. */
+    /* A boot scan that found nothing is final too: no walk, even
+     * though a handoff of that kind is now in range. */
     memset(buf, 0, 65536);
     REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, end, 4096, 0), 0);
+    plant_reservable_handoff(buf, 2, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
     REQUIRE_EQ(ga10b_boot_handoff_phys(GA10B_PIPELINE_KIND_SCHED_MLP), 0);
     REQUIRE_EQ(ga10b_resolve_handoff_of_kind(GA10B_PIPELINE_KIND_SCHED_MLP,
                                              start, end, 4096, NULL), 0);
+    ga10b_boot_handoff_reset_for_test();
     free(buf);
 }
 

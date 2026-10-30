@@ -53,6 +53,27 @@ bool ga10b_dispatch_verbose_get(void)
             uart_printf(__VA_ARGS__);                               \
     } while (0)
 
+/* Quiet bring-up (#1037). The inherit and channel steps print ~17
+ * progress lines (~950 chars). On the 115200-baud console that is
+ * ~80 ms of blocking UART writes, and when the bring-up runs from the
+ * dispatch path (slm_ffi.c ensure_bringup) it runs with IRQs masked
+ * under the GPU dispatch lock. ensure_bringup sets this flag around
+ * the bring-up so only errors print there; the shell's `nvgpu
+ * inherit` / `nvgpu channel` leave it clear and keep the full trail. */
+static atomic_bool g_ga10b_bringup_quiet = false;
+
+void ga10b_bringup_quiet_set(bool on)
+{
+    atomic_store_explicit(&g_ga10b_bringup_quiet, on, memory_order_relaxed);
+}
+
+#define GA10B_PROGRESS(...)                                         \
+    do {                                                            \
+        if (!atomic_load_explicit(&g_ga10b_bringup_quiet,           \
+                                  memory_order_relaxed))            \
+            uart_printf(__VA_ARGS__);                               \
+    } while (0)
+
 /* Dispatch poll budget shared by ga10b_submit_and_poll (single-op
  * smoke-test path) and the v7 bulk dispatcher. Each iteration of
  * the outer poll loop pairs with one ga10b_dispatch_poll_delay_us
@@ -1017,8 +1038,8 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
     /* Check HWCFG2 bit 13 — the priv-lockdown gate. */
     uint32_t hwcfg2 = bar0_r32(NV_PGSP_BASE + FALCON_HWCFG2);
     uint32_t bit13 = (hwcfg2 >> 13) & 1u;
-    uart_printf("[GA10B-INHERIT] HWCFG2=0x%08lx bit13=%lu\n",
-                (unsigned long)hwcfg2, (unsigned long)bit13);
+    GA10B_PROGRESS("[GA10B-INHERIT] HWCFG2=0x%08lx bit13=%lu\n",
+                   (unsigned long)hwcfg2, (unsigned long)bit13);
 
     if (bit13 != 0) {
         uart_puts("[GA10B-INHERIT] FAIL — priv-lockdown is asserted. "
@@ -1095,10 +1116,10 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
             value = bar0_r32(GR_INTR_R);
             if (value != GA10B_PRI_POISON) break;
         }
-        uart_printf("[GA10B-INHERIT] GR PRI wake: iter=%d "
-                    "final=0x%08lx (poison=0x%08lx)\n",
-                    iter, (unsigned long)value,
-                    (unsigned long)GA10B_PRI_POISON);
+        GA10B_PROGRESS("[GA10B-INHERIT] GR PRI wake: iter=%d "
+                       "final=0x%08lx (poison=0x%08lx)\n",
+                       iter, (unsigned long)value,
+                       (unsigned long)GA10B_PRI_POISON);
         if (value == GA10B_PRI_POISON) {
             /* Diagnostics: is the GPU itself powered (NV_PMC_BOOT_0
              * returns chip id ~0x172...) or is the whole GPU gated? */
@@ -1119,12 +1140,12 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
     uint32_t gpccs_cpuctl = bar0_r32(GR_GPCCS_CPUCTL);
     uint32_t gsp_cpuctl   = bar0_r32(NV_PGSP_BASE + 0x100u);
 
-    uart_printf("[GA10B-INHERIT] GSP  CPUCTL=0x%08lx\n",
-                (unsigned long)gsp_cpuctl);
-    uart_printf("[GA10B-INHERIT] FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
-                (unsigned long)fecs_cpuctl, (unsigned long)fecs_mbox0);
-    uart_printf("[GA10B-INHERIT] GPCCS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
-                (unsigned long)gpccs_cpuctl, (unsigned long)gpccs_mbox0);
+    GA10B_PROGRESS("[GA10B-INHERIT] GSP  CPUCTL=0x%08lx\n",
+                   (unsigned long)gsp_cpuctl);
+    GA10B_PROGRESS("[GA10B-INHERIT] FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                   (unsigned long)fecs_cpuctl, (unsigned long)fecs_mbox0);
+    GA10B_PROGRESS("[GA10B-INHERIT] GPCCS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                   (unsigned long)gpccs_cpuctl, (unsigned long)gpccs_mbox0);
 
     if (fecs_mbox0 != GR_FECS_MAILBOX_PASS) {
         uart_printf("[GA10B-INHERIT] FECS not ready (expected 1, got 0x%lx)\n",
@@ -1137,8 +1158,8 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
         return -1;
     }
 
-    uart_puts("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
-              "skipping phases 1-4\n");
+    GA10B_PROGRESS("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
+                   "skipping phases 1-4\n");
 
     /* Evict L2 lines inherited from Linux's nvgpu before any SLM-OS
      * dispatch reads through them. See ga10b_l2_evict_sysmem header
@@ -1149,8 +1170,8 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
         uart_puts("[GA10B-INHERIT] L2 evict timed out — first dispatch may "
                   "still see stale nvgpu data\n");
     } else {
-        uart_puts("[GA10B-INHERIT] L2 evict done (FB_FLUSH + L2_FLUSH_DIRTY + "
-                  "L2_SYSMEM_INVALIDATE + FB_FLUSH)\n");
+        GA10B_PROGRESS("[GA10B-INHERIT] L2 evict done (FB_FLUSH + "
+                       "L2_FLUSH_DIRTY + L2_SYSMEM_INVALIDATE + FB_FLUSH)\n");
     }
 
     b->state = GA10B_BRINGUP_PMU_UP;
@@ -1452,15 +1473,21 @@ uint64_t ga10b_resolve_handoff_of_kind(uint32_t wanted_kind,
                                        uint64_t stride,
                                        bool *out_from_boot)
 {
-    uint64_t cached = ga10b_boot_handoff_phys(wanted_kind);
-    if (cached != 0u) {
+    if (ga10b_boot_handoff_scan_ran()) {
+        /* The boot answer is final (see ga10b_boot_handoff_scan_ran),
+         * so no fallback walk, even when it found nothing. A record
+         * that no longer validates is reported as missing rather than
+         * replaced by some other, unreserved, page. */
+        if (out_from_boot) *out_from_boot = true;
+        uint64_t cached = ga10b_boot_handoff_phys(wanted_kind);
+        if (cached == 0u) return 0;
         const struct ga10b_channel_handoff *h =
             (const struct ga10b_channel_handoff *)(uintptr_t)cached;
         if (ga10b_validate_handoff(h) == 0 &&
             h->pipeline_kind == wanted_kind) {
-            if (out_from_boot) *out_from_boot = true;
             return cached;
         }
+        return 0;
     }
     if (out_from_boot) *out_from_boot = false;
     return ga10b_find_handoff_of_kind_in_range(start, end, stride,
@@ -1491,17 +1518,17 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
 
     bool from_boot = false;
     uint64_t handoff_phys = find_handoff_scan_kind(wanted_kind, &from_boot);
-    uart_printf("[GA10B-P6] Handoff lookup (kind=%u): %s\n",
-                (unsigned)wanted_kind,
-                from_boot ? "boot-scan record" : "DRAM scan");
+    GA10B_PROGRESS("[GA10B-P6] Handoff lookup (kind=%u): %s\n",
+                   (unsigned)wanted_kind,
+                   from_boot ? "boot-scan record" : "DRAM scan");
     if (handoff_phys == 0) {
         uart_printf("[GA10B-P6] Handoff (kind=%u) not found. Was the Linux "
                     "helper run?\n", (unsigned)wanted_kind);
         b->last_error_phase = 6;
         return -1;
     }
-    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx (kind=%u)\n",
-                (unsigned long)handoff_phys, (unsigned)wanted_kind);
+    GA10B_PROGRESS("[GA10B-P6] Found handoff at phys 0x%lx (kind=%u)\n",
+                   (unsigned long)handoff_phys, (unsigned)wanted_kind);
 
     /* Read the handoff structure from the discovered location. */
     volatile struct ga10b_channel_handoff *hoff =
@@ -1617,29 +1644,29 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
         return -1;
     }
 
-    uart_printf("[GA10B-P6] channel=%lu tsg=%lu\n",
-                (unsigned long)g_handoff.channel_id,
-                (unsigned long)g_handoff.tsg_id);
-    uart_printf("[GA10B-P6] userd_phys=0x%lx gp_put_off=%lu gp_get_off=%lu\n",
-                (unsigned long)g_handoff.userd_phys,
-                (unsigned long)g_handoff.userd_gp_put_offset,
-                (unsigned long)g_handoff.userd_gp_get_offset);
-    uart_printf("[GA10B-P6] gpfifo_phys=0x%lx gpu_va=0x%lx entries=%lu\n",
-                (unsigned long)g_handoff.gpfifo_phys,
-                (unsigned long)g_handoff.gpfifo_gpu_va,
-                (unsigned long)g_handoff.gpfifo_entries);
-    uart_printf("[GA10B-P6] pushbuf_phys=0x%lx gpu_va=0x%lx size=%lu\n",
-                (unsigned long)g_handoff.pushbuf_phys,
-                (unsigned long)g_handoff.pushbuf_gpu_va,
-                (unsigned long)g_handoff.pushbuf_size);
-    uart_printf("[GA10B-P6] semaphore_phys=0x%lx gpu_va=0x%lx\n",
-                (unsigned long)g_handoff.semaphore_phys,
-                (unsigned long)g_handoff.semaphore_gpu_va);
-    uart_printf("[GA10B-P6] initial gp_put=%lu gp_get=%lu\n",
-                (unsigned long)g_handoff.initial_gp_put,
-                (unsigned long)g_handoff.initial_gp_get);
+    GA10B_PROGRESS("[GA10B-P6] channel=%lu tsg=%lu\n",
+                   (unsigned long)g_handoff.channel_id,
+                   (unsigned long)g_handoff.tsg_id);
+    GA10B_PROGRESS("[GA10B-P6] userd_phys=0x%lx gp_put_off=%lu gp_get_off=%lu\n",
+                   (unsigned long)g_handoff.userd_phys,
+                   (unsigned long)g_handoff.userd_gp_put_offset,
+                   (unsigned long)g_handoff.userd_gp_get_offset);
+    GA10B_PROGRESS("[GA10B-P6] gpfifo_phys=0x%lx gpu_va=0x%lx entries=%lu\n",
+                   (unsigned long)g_handoff.gpfifo_phys,
+                   (unsigned long)g_handoff.gpfifo_gpu_va,
+                   (unsigned long)g_handoff.gpfifo_entries);
+    GA10B_PROGRESS("[GA10B-P6] pushbuf_phys=0x%lx gpu_va=0x%lx size=%lu\n",
+                   (unsigned long)g_handoff.pushbuf_phys,
+                   (unsigned long)g_handoff.pushbuf_gpu_va,
+                   (unsigned long)g_handoff.pushbuf_size);
+    GA10B_PROGRESS("[GA10B-P6] semaphore_phys=0x%lx gpu_va=0x%lx\n",
+                   (unsigned long)g_handoff.semaphore_phys,
+                   (unsigned long)g_handoff.semaphore_gpu_va);
+    GA10B_PROGRESS("[GA10B-P6] initial gp_put=%lu gp_get=%lu\n",
+                   (unsigned long)g_handoff.initial_gp_put,
+                   (unsigned long)g_handoff.initial_gp_get);
 
-    uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
+    GA10B_PROGRESS("[GA10B-P6] channel handoff valid — inherited from Linux\n");
 
     /* #834: an earlier iteration of this code (reverted) invoked
      * `ga10b_fecs_method_push(STOP_CTXSW); _push(START_CTXSW);`

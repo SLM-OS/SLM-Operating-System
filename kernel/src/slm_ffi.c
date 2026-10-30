@@ -913,6 +913,26 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * would itself lengthen that span). Index 0 inherit, 1 channel,
  * 2 warmup dispatch. */
 static uint64_t g_bringup_step_ns[GA10B_PIPELINE_KIND_COUNT][3];
+/* Set by ensure_bringup when it ran a (quiet) bring-up; the caller
+ * prints a one-line summary after dropping the lock. */
+static bool g_bringup_ran[GA10B_PIPELINE_KIND_COUNT];
+
+/* Print the summary of a bring-up the last locked dispatch ran, if
+ * any. Call after releasing g_gpu_dispatch_lock and restoring IRQs;
+ * `kind` must already have been range-checked by ensure_bringup. */
+static void report_quiet_bringup(uint32_t kind)
+{
+    if (kind >= GA10B_PIPELINE_KIND_COUNT || !g_bringup_ran[kind]) return;
+    g_bringup_ran[kind] = false;
+    const uint64_t *st = g_bringup_step_ns[kind];
+    uart_printf("[gpu-kind=%lu] channel bring-up: inherit %lu us, "
+                "channel %lu us, warmup %lu us (progress lines "
+                "suppressed under the dispatch lock, #1037)\n",
+                (unsigned long)kind,
+                (unsigned long)(st[0] / 1000u),
+                (unsigned long)(st[1] / 1000u),
+                (unsigned long)(st[2] / 1000u));
+}
 
 static int ensure_bringup(uint32_t kind)
 {
@@ -934,18 +954,24 @@ static int ensure_bringup(uint32_t kind)
     bool active_is_kind = (ga10b_bringup_active_pipeline_kind() == kind);
     if (channel_open && active_is_kind) return 0;
 
+    /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
+     * the progress lines' blocking UART writes dominated (#1037). */
+    ga10b_bringup_quiet_set(true);
     uint64_t t0 = slm_get_time_ns();
     int rc = ga10b_bringup_inherit(b);
     uint64_t t1 = slm_get_time_ns();
     g_bringup_step_ns[kind][0] = t1 - t0;
-    if (rc < 0) return rc;
-    rc = ga10b_bringup_channel_kind(b, kind);
+    if (rc >= 0) {
+        rc = ga10b_bringup_channel_kind(b, kind);
+    }
     uint64_t t2 = slm_get_time_ns();
     g_bringup_step_ns[kind][1] = t2 - t1;
+    ga10b_bringup_quiet_set(false);
     if (rc < 0) return rc;
 
     int warmup_rc = ga10b_bringup_launch_kernel(b);
     g_bringup_step_ns[kind][2] = slm_get_time_ns() - t2;
+    g_bringup_ran[kind] = true;
     if (warmup_rc < 0) {
         /* Non-fatal: the warmup failing doesn't itself prevent the
          * user's call. If a real dispatch problem persists, the
@@ -1015,6 +1041,7 @@ int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
     rc = n < 0 ? -1 : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    report_quiet_bringup(kind);
     gpu_dispatch_record_result(rc);
     return rc;
 }
@@ -1032,6 +1059,7 @@ int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    report_quiet_bringup(kind);
     /* Filtered: only -1 / 0 reach the breaker counter. -2 (cap too
      * large) and -3 (bad arg) are caller-side validation errors. */
     gpu_dispatch_record_set_input_result(rc);
@@ -1050,6 +1078,7 @@ int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    report_quiet_bringup(kind);
     gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
@@ -1104,6 +1133,7 @@ int slm_gpu_run_with_input(uint32_t kind,
     int rc = slm_gpu_dispatch_locked(kind, input, input_cap,
                                       output, output_cap);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    report_quiet_bringup(kind);
     if (rc != SLM_GPU_ERR_INPUT_TOO_LARGE) gpu_dispatch_record_result(rc);
     return rc;
 }
@@ -1145,6 +1175,9 @@ static int slm_gpu_try_run_with_input(uint32_t kind,
                                       output, output_cap);
     spin_unlock(&g_gpu_dispatch_lock);
     irq_restore(irq);
+    /* No report_quiet_bringup here: the try-lock callers print it
+     * themselves, after their own timing, so a UART line isn't
+     * billed to the dispatch it describes. */
     if (rc != SLM_GPU_ERR_INPUT_TOO_LARGE) gpu_dispatch_record_result(rc);
     return rc;
 }
@@ -1204,6 +1237,7 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
     int rc = slm_gpu_try_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
                                          state_bytes, state_bytes_len,
                                          logits_bytes_out, 168u);
+    report_quiet_bringup(GA10B_PIPELINE_KIND_SCHED_MLP);
     if (rc == 0) {
         /* Update timestamp only on a successful dispatch. Failed
          * dispatches (-1 from try-lock contention or downstream rc)
@@ -1263,6 +1297,7 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
                                          features, in_bytes,
                                          scores_out, out_bytes);
     uint64_t dt = slm_get_time_ns() - t0;
+    report_quiet_bringup(GA10B_PIPELINE_KIND_EVICTION_QNET);
     if (rc == SLM_GPU_ERR_INPUT_TOO_LARGE) {
         atomic_fetch_add_explicit(&g_eviction_gpu_oversize, 1u,
                                   memory_order_relaxed);

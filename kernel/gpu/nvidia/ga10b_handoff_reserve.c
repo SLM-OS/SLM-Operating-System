@@ -962,11 +962,27 @@ static void find_first_handoff_per_kind(uint64_t start, uint64_t end,
  * under the IRQs-masked GPU dispatch lock on every bring-up. Written
  * once, single-threaded, before pmm_init; read-only afterwards. */
 static uint64_t g_boot_handoff_phys[GA10B_PIPELINE_KIND_COUNT];
+static bool g_boot_handoff_scan_ran;
 
 uint64_t ga10b_boot_handoff_phys(uint32_t kind)
 {
     return kind < GA10B_PIPELINE_KIND_COUNT ? g_boot_handoff_phys[kind] : 0;
 }
+
+bool ga10b_boot_handoff_scan_ran(void)
+{
+    return g_boot_handoff_scan_ran;
+}
+
+#ifdef SLM_HOST_HARNESS
+void ga10b_boot_handoff_reset_for_test(void)
+{
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        g_boot_handoff_phys[kind] = 0;
+    }
+    g_boot_handoff_scan_ran = false;
+}
+#endif
 
 uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t stride,
@@ -978,6 +994,7 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
     for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
         g_boot_handoff_phys[kind] = handoffs[kind];
     }
+    g_boot_handoff_scan_ran = true;
 
     uint32_t found_mask = 0;
     for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
@@ -1121,6 +1138,11 @@ uint64_t ga10b_boot_handoff_phys(uint32_t kind)
 {
     (void)kind;
     return 0;
+}
+
+bool ga10b_boot_handoff_scan_ran(void)
+{
+    return false;
 }
 
 /* Non-Jetson stub: there are no GA10B handoffs to reserve. */

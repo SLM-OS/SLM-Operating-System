@@ -658,13 +658,15 @@ uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
 
 /*
  * Locate the `wanted_kind` handoff for channel bring-up (#1037).
- * Returns the boot scan's pick (`ga10b_boot_handoff_phys`) when it
- * still validates for that kind. That is the same handoff a fresh
- * scan would find first: same range, stride and rule, and its pages
- * are PMM-reserved. Otherwise falls back to
- * `ga10b_find_handoff_of_kind_in_range(start, end, stride, ...)`.
- * The fallback is a ~50 ms DRAM walk over the production range, which
- * the dispatch path otherwise paid with IRQs masked on every bring-up.
+ * Once the boot scan has run (`ga10b_boot_handoff_scan_ran`), its
+ * answer is used as is: the recorded handoff if it still validates
+ * for that kind, else 0, and no DRAM walk either way. The record is
+ * the handoff a fresh scan would find first (same range, stride and
+ * rule), and its pages are PMM-reserved. Only when no boot scan ran
+ * does this fall back to
+ * `ga10b_find_handoff_of_kind_in_range(start, end, stride, ...)`, a
+ * ~50 ms walk over the production range that the dispatch path
+ * otherwise paid with IRQs masked on every bring-up attempt.
  * `*out_from_boot` (may be NULL) reports which path answered.
  */
 uint64_t ga10b_resolve_handoff_of_kind(uint32_t wanted_kind,

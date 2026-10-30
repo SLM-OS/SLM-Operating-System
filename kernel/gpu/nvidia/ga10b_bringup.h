@@ -223,6 +223,13 @@ uint64_t ga10b_weights_pool_size_bytes(void);
  * `gpu debug [on|off|status]` shell command. Errors and pipeline-
  * level summary lines bypass this gate and always print. */
 void ga10b_dispatch_verbose_set(bool on);
+
+/* Suppress the inherit / channel bring-up progress lines (errors
+ * still print). Set by the dispatch path's ensure_bringup, which runs
+ * them with IRQs masked, where ~950 chars of blocking UART output cost
+ * ~80 ms (#1037). The shell's `nvgpu inherit` / `nvgpu channel` leave
+ * it clear. */
+void ga10b_bringup_quiet_set(bool on);
 bool ga10b_dispatch_verbose_get(void);
 
 /* #788 diagnostic: latch FECS_CURRENT_CTX + fb_mmu_fault_inst +
