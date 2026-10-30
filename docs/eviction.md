@@ -558,8 +558,9 @@ amortizes and the MLP is marginal at small block sizes (see
   classical until `eviction model clear cacheus_config`), not instability.
 
 **GPU dispatch status (as of 2026-10-29) — Jetson plumbing landed;
-a GPU-served eviction score observed on 1 of 10 hardware boots; Pi 5
-still CPU-only.** The numbers above are all host-CPU paths. PR-6 of
+GPU-served eviction scores on 8 of 10 hardware boots when the eviction
+producer is the only preserved channel (1 of 10 alongside the MNIST
+and sched-MLP helpers); Pi 5 still CPU-only.** The numbers above are all host-CPU paths. PR-6 of
 [`docs/design/gpu-policy-models.md`](design/gpu-policy-models.md)
 ([#965](https://github.com/SLM-OS/SLM-Operating-System/issues/965))
 wires `MlpPolicy` to the 9-op pipeline staged by
@@ -633,7 +634,18 @@ every boot (|gpu − cpu| = 6e-8). After kexec:
 
 That is 1/10 end-to-end, and 1/9 given a successful inherit, well
 below the roughly 65% per-boot rate #844 records for channel inherit.
-The gap is under investigation in
+
+A second 10-boot run the same day changed one variable: `slmos-kexec
+--no-helper`, so the eviction producer was the only GPU channel
+preserved across kexec (the default also starts the MNIST and
+sched-MLP helpers). **8/10 boots served a GPU score**. The two
+failures were one FECS_ERROR_PENDING (`mb6=0x5a`) and one "GP_GET did
+not advance" (`mb6=0x00`). The handoff was found on all 10 boots.
+1/10 versus 8/10 is significant (Fisher exact, two-sided p = 0.0055),
+so the low default-configuration rate comes from multiple preserved
+channels at kexec, not from the eviction pipeline itself.
+GPU eviction testing should therefore stage the producer and run
+`slmos-kexec --no-helper`. Making the helpers coexist is tracked in
 [#1029](https://github.com/SLM-OS/SLM-Operating-System/issues/1029).
 On every failed boot the #552 circuit breaker tripped after three
 consecutive failures, and `bench eviction` completed on CPU scoring.
@@ -655,7 +667,7 @@ channel inherit itself succeeds on only about 65% of boots on either board
 (#844), so any future hardware claim needs a multi-boot `boot_test`
 ratio, not a single run. No Jetson GPU latency column exists yet. Of
 the #965 hardware criteria, the serial `fastpath dispatching` capture
-is met (2026-10-29, one boot). The GPU bench delta, boot-test toggle
+is met (2026-10-29, 9 boots across the two runs). The GPU bench delta, boot-test toggle
 gating, and re-evaluating the 1 µs target remain open; a meaningful
 bench delta needs both a reliable dispatch (#1029) and batched
 scoring (#1020). On Pi 5 there is no GPU-side path in any
