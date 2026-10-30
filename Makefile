@@ -1139,10 +1139,17 @@ runtime-rebuild: runtime-clean runtime
 # default parallel runner races on shared state. The kernel build
 # stays cfg(not(test)) so the panic_handler / no_main / global
 # allocator setup is unchanged.
+#
+# Runs twice: default features, then with the eviction policies and
+# models compiled in, whose #[cfg(test)] modules the default build
+# skips. Kernel C symbols the test binary reaches need a host stub in
+# `test_ffi_stubs` (runtime/src/lib.rs). Part of /ci since #1034.
 .PHONY: runtime-test
 runtime-test:
 	@echo "Running runtime cargo test (--features slm, --test-threads=1)..."
 	cd runtime && cargo test --target x86_64-unknown-linux-gnu --features slm -- --test-threads=1
+	@echo "Running runtime cargo test (--features slm,ai_eviction_models, --test-threads=1)..."
+	cd runtime && cargo test --target x86_64-unknown-linux-gnu --features slm,ai_eviction_models -- --test-threads=1
 
 .PHONY: rustdoc
 rustdoc:

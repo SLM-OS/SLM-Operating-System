@@ -26,7 +26,19 @@ lines are not printed to stdout. Treat "PASSED - All tests passed (exit code 0)"
 as success. On failure, also grep the build/run output for `PAGE FAULT` and
 `KERNEL PANIC` to characterize the crash.
 
-### 4. Diff check
+### 4. Runtime host unit tests
+```
+make runtime-test
+```
+Runs the Rust runtime's `#[cfg(test)]` modules on the host via
+`cargo test`, once with the default features and once with
+`slm,ai_eviction_models`. Treat two `test result: ok.` lines as success.
+This step catches compile or link rot in test-only code, which
+`make test` never builds: it went unnoticed for months before #1034.
+A link error naming a kernel symbol means `test_ffi_stubs` in
+`runtime/src/lib.rs` needs a stub for it.
+
+### 5. Diff check
 Run `git diff main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -39,6 +51,7 @@ Summarize results as a table:
 | ARM64 build | ✅/❌ | warnings if any |
 | x86-64 build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
+| Runtime host tests | ✅/❌ | N passed per feature set |
 | Artifact check | ✅/❌ | stray files if any |
 
 If everything passes, say "Ready for PR."
