@@ -230,6 +230,12 @@ void ga10b_dispatch_verbose_set(bool on);
  * ~80 ms (#1037). The shell's `nvgpu inherit` / `nvgpu channel` leave
  * it clear. */
 void ga10b_bringup_quiet_set(bool on);
+
+/* Per-op wall time (ns) of the last completed v5/v6 pipeline dispatch,
+ * submit through that op's drain-waiting semaphore release (#1036).
+ * Copies up to `max` entries into `out`; returns how many (0 if none
+ * yet, or the last dispatch failed). Diagnostic, unsynchronised. */
+uint32_t ga10b_bringup_last_pipeline_op_ns(uint64_t *out, uint32_t max);
 bool ga10b_dispatch_verbose_get(void);
 
 /* #788 diagnostic: latch FECS_CURRENT_CTX + fb_mmu_fault_inst +
