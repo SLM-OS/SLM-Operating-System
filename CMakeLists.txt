@@ -616,6 +616,9 @@ set(KERNEL_SOURCES
     # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
     # No-op until invoked via the `nvgpu gmmu walk` shell verb.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
+    # Jetson-only: whole-VM page enumerator — the boot reserve pins an
+    # inherited channel's page tables + mapped pages with it (#1029).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu_enum.c>
     # Jetson-only: GA10B Copy Engine memcpy primitive — the
     # GPU-resident weights pool staging backend (see
     # docs/design/gpu-weights-pool.md). Pushes

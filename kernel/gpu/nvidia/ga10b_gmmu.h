@@ -400,6 +400,43 @@ uint64_t ga10b_gmmu_discover_inst_block_phys(void);
  * and does not intersect the OP-TEE carveout. */
 bool ga10b_phys_in_dram(uint64_t phys, size_t bytes);
 
+/* ---------------------------------------------------------------------
+ * Whole-tree enumeration (#1029)
+ * ------------------------------------------------------------------- */
+
+enum ga10b_gmmu_page_kind {
+    GA10B_GMMU_PAGE_TABLE,  /* a PDE3/2/1/0 or PTE table */
+    GA10B_GMMU_PAGE_LEAF,   /* a page a valid PTE maps */
+};
+
+/* Reads one 8-byte entry at `phys`. Must return 0 for any address it
+ * cannot safely read — 0 decodes as invalid at every level, so the
+ * enumerator then skips that subtree instead of faulting. */
+typedef uint64_t (*ga10b_gmmu_read64_fn)(uint64_t phys);
+
+/* Called once per table and once per valid leaf PTE. `phys`/`bytes`
+ * describe the table itself (not page-rounded: a big-page PTE table
+ * is 256 B) or the mapped page (4 KB small / 64 KB big). `gpu_va` is
+ * the leaf's VA; 0 for tables. */
+typedef void (*ga10b_gmmu_page_fn)(void *ctx, enum ga10b_gmmu_page_kind kind,
+                                   uint64_t gpu_va, uint64_t phys,
+                                   uint64_t bytes);
+
+/* Enumerate every page-table page and every mapped page reachable from
+ * `inst_block_phys`'s PDB, in VA order. Both halves of each dual PDE0
+ * are followed. Read-only. Returns the number of `visit` calls, -1 if
+ * the inst block's PDB is zero/invalid, or -2 if the walk visited more
+ * than GA10B_GMMU_ENUM_MAX_TABLES tables (corrupt tree guard; the
+ * visits made before the cut-off still happened).
+ *
+ * Used by the boot reserve to pin an inherited channel's whole VM —
+ * its page tables plus every buffer its QMDs reference — before
+ * pmm_init writes free-list links into the head of each free block. */
+#define GA10B_GMMU_ENUM_MAX_TABLES 4096u
+int ga10b_gmmu_enum_pages(uint64_t inst_block_phys,
+                          ga10b_gmmu_read64_fn read64,
+                          ga10b_gmmu_page_fn visit, void *ctx);
+
 /* Forward decl — full struct is in `ga10b_channel_handoff.h`,
  * pulled in by the rebuild path's translation unit. Declaring here
  * lets callers of `ga10b_gmmu_rebuild_for_handoff` work with an

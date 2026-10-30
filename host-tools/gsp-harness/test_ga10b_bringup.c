@@ -44,6 +44,7 @@
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
 #include "../../kernel/gpu/nvidia/ga10b_gmmu.h"
+#include "../../kernel/gpu/nvidia/ga10b_gmmu_decode.h"
 #include "../../kernel/gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../../kernel/gpu/nvidia/ga10b_qmd.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
@@ -105,13 +106,34 @@ int pmm_user_reserve_add(uint64_t phys, uint64_t size)
     return 0;
 }
 
+static unsigned g_gmmu_walk_calls;
 int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
                     struct ga10b_gmmu_walk_result *result)
 {
     (void)inst_block_phys; (void)gpu_va;
+    g_gmmu_walk_calls++;
     memset(result, 0, sizeof(*result));
     result->status = GA10B_GMMU_WALK_BAD_INST;
     return -1;
+}
+
+/* Fake physical memory for the channel-VM reserve walk (#1029). A
+ * test maps [g_fake_phys_base, +g_fake_phys_size) onto a host buffer;
+ * every other phys reads 0, which decodes as invalid at every GMMU
+ * level — so fixtures that plant handoffs with made-up inst-block
+ * addresses simply get no VM reservation. */
+static uint8_t *g_fake_phys_mem;
+static uint64_t g_fake_phys_base, g_fake_phys_size;
+
+uint64_t ga10b_test_phys_read64(uint64_t phys)
+{
+    if (g_fake_phys_mem == NULL || phys < g_fake_phys_base ||
+        phys + 8 > g_fake_phys_base + g_fake_phys_size) {
+        return 0;
+    }
+    uint64_t v;
+    memcpy(&v, g_fake_phys_mem + (phys - g_fake_phys_base), sizeof(v));
+    return v;
 }
 
 /* Symbols ga10b_bringup.c references that live in TUs outside this
@@ -2423,6 +2445,313 @@ static void test_reserve_all_kinds_none_found(void)
 }
 
 /* ======================================================================
+ * #1029: whole-VM enumeration + channel-VM boot reserve
+ * ====================================================================== */
+
+/* Fake phys window the GMMU fixtures build page tables in. */
+#define VM_FAKE_BASE  0x1a0000000ULL
+#define VM_FAKE_PAGES 16u
+
+static uint64_t *vm_fake_table(unsigned page)
+{
+    return (uint64_t *)(void *)(g_fake_phys_mem + (size_t)page * 4096u);
+}
+
+static uint64_t vm_fake_phys(unsigned page)
+{
+    return VM_FAKE_BASE + (uint64_t)page * 4096u;
+}
+
+/* Entry encoders — inverses of ga10b_gmmu_decode.h (aperture 6 =
+ * sys_mem_ncoh, as nvgpu writes on Tegra). */
+static uint64_t enc_pde(uint64_t phys)
+{
+    return (((phys >> 12) & 0xffffffULL) << 8) |
+           (((phys >> 36) & 0xffffffULL) << 32) | (6ULL << 1);
+}
+static uint64_t enc_dual_big(uint64_t phys)
+{
+    return (((phys >> 8) & 0x0fffffffULL) << 4) |
+           (((phys >> 36) & 0xffULL) << 32) | 6ULL;
+}
+static uint64_t enc_dual_small(uint64_t phys)
+{
+    return (((phys >> 12) & 0xffffffULL) << 8) | (6ULL << 1);
+}
+static uint64_t enc_pte(uint64_t phys)
+{
+    return (((phys >> 12) & 0xffffffULL) << 8) |
+           (((phys >> 36) & 0xffffffULL) << 32) | (6ULL << 1) | 1ULL;
+}
+
+static void vm_fake_reset(void)
+{
+    if (g_fake_phys_mem == NULL) {
+        g_fake_phys_mem = calloc(VM_FAKE_PAGES, 4096u);
+    }
+    memset(g_fake_phys_mem, 0, (size_t)VM_FAKE_PAGES * 4096u);
+    g_fake_phys_base = VM_FAKE_BASE;
+    g_fake_phys_size = (uint64_t)VM_FAKE_PAGES * 4096u;
+}
+
+/* Page layout: 0 = inst block, 1 = PDB/PDE3, 2 = PDE2, 3 = PDE1,
+ * 4 = PDE0, 5 = big-page PTE table, 6 = small-page PTE table.
+ *
+ *   PDE3[0] → PDE2[0] → PDE1[1] (VA 512 MB) → PDE0[2] (+4 MB):
+ *     big half   → big PT:   PTE[3] → 0x170000000, PTE[4] → 0x170010000
+ *     small half → small PT: PTE[0] → 0x171000000, PTE[1] → 0x171001000,
+ *                            PTE[7] → 0x172000000
+ *
+ * Returns the inst block's fake phys. */
+#define VM_VA_BASE ((1ULL << GA10B_PDE1_VA_LO) + (2ULL << GA10B_PDE0_VA_LO))
+static uint64_t vm_build_tree(void)
+{
+    vm_fake_reset();
+    uint64_t pdb = vm_fake_phys(1);
+    uint32_t lo = (uint32_t)(pdb & 0xfffff000u) | (3u << 1); /* sys_ncoh */
+    uint32_t hi = (uint32_t)(pdb >> 32);
+    memcpy(g_fake_phys_mem + INST_BLOCK_PDB_LO_BYTE_OFFSET, &lo, 4);
+    memcpy(g_fake_phys_mem + INST_BLOCK_PDB_HI_BYTE_OFFSET, &hi, 4);
+
+    vm_fake_table(1)[0] = enc_pde(vm_fake_phys(2));
+    vm_fake_table(2)[0] = enc_pde(vm_fake_phys(3));
+    vm_fake_table(3)[1] = enc_pde(vm_fake_phys(4));
+    vm_fake_table(4)[2 * 2 + 0] = enc_dual_big(vm_fake_phys(5));
+    vm_fake_table(4)[2 * 2 + 1] = enc_dual_small(vm_fake_phys(6));
+    vm_fake_table(5)[3] = enc_pte(0x170000000ULL);
+    vm_fake_table(5)[4] = enc_pte(0x170010000ULL);
+    vm_fake_table(6)[0] = enc_pte(0x171000000ULL);
+    vm_fake_table(6)[1] = enc_pte(0x171001000ULL);
+    vm_fake_table(6)[7] = enc_pte(0x172000000ULL);
+    return vm_fake_phys(0);
+}
+
+#define VM_MAX_VISITS 32
+struct vm_visit_log {
+    unsigned n;
+    struct { int kind; uint64_t va, phys, bytes; } v[VM_MAX_VISITS];
+};
+
+static void vm_log_visit(void *ctx, enum ga10b_gmmu_page_kind kind,
+                         uint64_t gpu_va, uint64_t phys, uint64_t bytes)
+{
+    struct vm_visit_log *log = ctx;
+    if (log->n < VM_MAX_VISITS) {
+        log->v[log->n].kind  = (int)kind;
+        log->v[log->n].va    = gpu_va;
+        log->v[log->n].phys  = phys;
+        log->v[log->n].bytes = bytes;
+    }
+    log->n++;
+}
+
+static void test_gmmu_enum_visits_every_table_and_leaf(void)
+{
+    printf("== test_gmmu_enum_visits_every_table_and_leaf ==\n");
+    uint64_t inst = vm_build_tree();
+    struct vm_visit_log log = {0};
+    int rc = ga10b_gmmu_enum_pages(inst, ga10b_test_phys_read64,
+                                   vm_log_visit, &log);
+    REQUIRE_EQ(rc, 11);       /* 6 tables + 5 leaves */
+    REQUIRE_EQ(log.n, 11u);
+
+    /* VA order: PDB, PDE2, PDE1, PDE0, big PT + its leaves, then the
+     * small PT + its leaves. */
+    const struct { int kind; uint64_t va, phys, bytes; } want[11] = {
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(1), 4u * 8u },
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(2), 512u * 8u },
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(3), 512u * 8u },
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(4), 256u * 16u },
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(5), 32u * 8u },
+        { GA10B_GMMU_PAGE_LEAF, VM_VA_BASE + 3 * 0x10000ULL,
+          0x170000000ULL, 0x10000 },
+        { GA10B_GMMU_PAGE_LEAF, VM_VA_BASE + 4 * 0x10000ULL,
+          0x170010000ULL, 0x10000 },
+        { GA10B_GMMU_PAGE_TABLE, 0, vm_fake_phys(6), 512u * 8u },
+        { GA10B_GMMU_PAGE_LEAF, VM_VA_BASE, 0x171000000ULL, 0x1000 },
+        { GA10B_GMMU_PAGE_LEAF, VM_VA_BASE + 0x1000ULL,
+          0x171001000ULL, 0x1000 },
+        { GA10B_GMMU_PAGE_LEAF, VM_VA_BASE + 7 * 0x1000ULL,
+          0x172000000ULL, 0x1000 },
+    };
+    for (unsigned i = 0; i < 11u; i++) {
+        REQUIRE_EQ(log.v[i].kind, want[i].kind);
+        REQUIRE_EQ(log.v[i].va, want[i].va);
+        REQUIRE_EQ(log.v[i].phys, want[i].phys);
+        REQUIRE_EQ(log.v[i].bytes, want[i].bytes);
+    }
+}
+
+static void test_gmmu_enum_rejects_invalid_pdb(void)
+{
+    printf("== test_gmmu_enum_rejects_invalid_pdb ==\n");
+    vm_fake_reset();  /* inst block all zero: PDB target 0 */
+    struct vm_visit_log log = {0};
+    REQUIRE_EQ(ga10b_gmmu_enum_pages(vm_fake_phys(0), ga10b_test_phys_read64,
+                                     vm_log_visit, &log), -1);
+    REQUIRE_EQ(log.n, 0u);
+    REQUIRE_EQ(ga10b_gmmu_enum_pages(0, ga10b_test_phys_read64,
+                                     vm_log_visit, &log), -1);
+}
+
+static void vm_count_visit(void *ctx, enum ga10b_gmmu_page_kind kind,
+                           uint64_t gpu_va, uint64_t phys, uint64_t bytes)
+{
+    (void)kind; (void)gpu_va; (void)phys; (void)bytes;
+    (*(unsigned *)ctx)++;
+}
+
+/* A corrupt tree whose PDE1 entries all point at one PDE0 table (and
+ * its entries at one PT) would fan out to ~130k table visits; the
+ * budget must cut it off. */
+static void test_gmmu_enum_table_budget_stops_fanout(void)
+{
+    printf("== test_gmmu_enum_table_budget_stops_fanout ==\n");
+    vm_build_tree();
+    for (unsigned i = 0; i < 512u; i++) {
+        vm_fake_table(3)[i] = enc_pde(vm_fake_phys(4));
+    }
+    for (unsigned i = 0; i < 256u; i++) {
+        vm_fake_table(4)[2 * i + 1] = enc_dual_small(vm_fake_phys(6));
+    }
+    unsigned visits = 0;
+    REQUIRE_EQ(ga10b_gmmu_enum_pages(vm_fake_phys(0), ga10b_test_phys_read64,
+                                     vm_count_visit, &visits), -2);
+    REQUIRE(visits > 0u);
+}
+
+/* Total reserved bytes covering [phys, phys + bytes). */
+static int reserved_covers(uint64_t phys, uint64_t bytes)
+{
+    for (size_t i = 0; i < g_n_reserves; i++) {
+        if (g_reserves[i].phys <= phys &&
+            phys + bytes <= g_reserves[i].phys + g_reserves[i].size) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Plant a v6 eviction handoff (9 ops, no shader fields) whose channel
+ * VM is the fake tree, and check the boot reserve pins every table
+ * page and every mapped page — the pages pmm_init's free-list links
+ * clobbered on hardware. */
+static void test_reserve_channel_vm_pins_tables_and_leaves(void)
+{
+    printf("== test_reserve_channel_vm_pins_tables_and_leaves ==\n");
+    uint64_t inst = vm_build_tree();
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_EVICTION_QNET,
+                             0, 0);
+    /* Point the handoff at the fake VM and give it a v6 ops array in
+     * page 3 of the scan buffer. */
+    struct ga10b_channel_handoff *h =
+        (struct ga10b_channel_handoff *)(void *)((char *)buf + 4096);
+    h->inst_block_phys   = inst;
+    h->pipeline_n_ops    = 9;
+    h->pipeline_ops_phys = (uint64_t)(uintptr_t)buf + 3 * 4096;
+    struct ga10b_pipeline_op *ops =
+        (struct ga10b_pipeline_op *)(void *)((char *)buf + 3 * 4096);
+    for (unsigned i = 0; i < 9u; i++) {
+        ops[i].qmd_gpu_va  = 0x1ffc02d000ULL + i * 0x3000ULL;
+        ops[i].output_phys = 0x13d6a9000ULL + i * 0x2000ULL;
+    }
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    g_gmmu_walk_calls = 0;
+    REQUIRE_EQ(ga10b_reserve_handoffs_in_range(start, start + 65536,
+                                               4096, inst),
+               1u << GA10B_PIPELINE_KIND_EVICTION_QNET);
+
+    /* v6 ops must not be read as v7 (no shader walks). */
+    REQUIRE_EQ(g_gmmu_walk_calls, 0u);
+    /* Every table page (PDB..small PT = fake pages 1..6). */
+    for (unsigned pg = 1; pg <= 6u; pg++) {
+        REQUIRE(reserved_covers(vm_fake_phys(pg), 4096));
+    }
+    /* Every mapped page. */
+    REQUIRE(reserved_covers(0x170000000ULL, 0x10000));
+    REQUIRE(reserved_covers(0x170010000ULL, 0x10000));
+    REQUIRE(reserved_covers(0x171000000ULL, 0x2000));  /* coalesced */
+    REQUIRE(reserved_covers(0x172000000ULL, 0x1000));
+    /* Contiguous runs share one entry: tables 1..6 → 1 range, two big
+     * pages → 1, two small pages → 1, lone small page → 1. */
+    REQUIRE_EQ(reserves_at(vm_fake_phys(1)), 1);
+    REQUIRE_EQ(reserves_at(0x170000000ULL), 1);
+    REQUIRE_EQ(reserves_at(0x170010000ULL), 0);
+    REQUIRE_EQ(reserves_at(0x171001000ULL), 0);
+    free(buf);
+}
+
+/* The resident inst block is usually the helper's own channel: its VM
+ * must be enumerated once, not twice. */
+static void test_reserve_channel_vm_dedups_resident(void)
+{
+    printf("== test_reserve_channel_vm_dedups_resident ==\n");
+    uint64_t inst = vm_build_tree();
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_EVICTION_QNET,
+                             0, 0);
+    ((struct ga10b_channel_handoff *)(void *)((char *)buf + 4096))
+        ->inst_block_phys = inst;
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    ga10b_reserve_handoffs_in_range(start, start + 65536, 4096, inst);
+    REQUIRE_EQ(reserves_at(vm_fake_phys(1)), 1);
+    REQUIRE_EQ(reserves_at(0x172000000ULL), 1);
+    free(buf);
+}
+
+/* Index of the first recorded reserve based at `phys`, or -1. */
+static long reserve_index(uint64_t phys)
+{
+    for (size_t i = 0; i < g_n_reserves; i++) {
+        if (g_reserves[i].phys == phys) return (long)i;
+    }
+    return -1;
+}
+
+/* Channel-VM reserves can be large; they must come after every kind's
+ * named buffers so a full PMM table never costs another handoff its
+ * USERD / GPFIFO. MNIST (kind 0) owns the fake VM here; the sched
+ * handoff's userd must still be reserved before the VM's tables. */
+static void test_reserve_channel_vm_runs_after_named_buffers(void)
+{
+    printf("== test_reserve_channel_vm_runs_after_named_buffers ==\n");
+    uint64_t inst = vm_build_tree();
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    plant_reservable_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST, 0, 0);
+    plant_reservable_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP, 0, 0);
+    ((struct ga10b_channel_handoff *)(void *)((char *)buf + 4096))
+        ->inst_block_phys = inst;
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    g_n_reserves = 0;
+    ga10b_reserve_handoffs_in_range(start, start + 65536, 4096, 0);
+    long sched_userd = reserve_index(0x151000000ULL);
+    long vm_tables   = reserve_index(vm_fake_phys(1));
+    REQUIRE(sched_userd >= 0);
+    REQUIRE(vm_tables >= 0);
+    REQUIRE(sched_userd < vm_tables);
+    free(buf);
+}
+
+/* ======================================================================
  * Test 9: handoff scanner (finds magic in a memory buffer)
  * ====================================================================== */
 
@@ -3574,6 +3903,12 @@ int main(void)
     test_reserve_all_kinds_picks_first_valid_per_kind();
     test_reserve_all_kinds_no_resident_reserves_every_inst();
     test_reserve_all_kinds_none_found();
+    test_gmmu_enum_visits_every_table_and_leaf();
+    test_gmmu_enum_rejects_invalid_pdb();
+    test_gmmu_enum_table_budget_stops_fanout();
+    test_reserve_channel_vm_pins_tables_and_leaves();
+    test_reserve_channel_vm_dedups_resident();
+    test_reserve_channel_vm_runs_after_named_buffers();
 
     test_poll_match_exact();
     test_poll_match_any_nonzero();

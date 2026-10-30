@@ -23,12 +23,10 @@
  *
  * **Limitations of the MVP:**
  *
- *   - Reserves only the inst block. The PDB and page-table pages
- *     pointed to from the inst block also need protection but the
- *     walk requires reading those pages too — adding correctness
- *     gates that aren't worth shipping until the inst-block-only
- *     reservation is hardware-verified to fix the wedge or proves
- *     insufficient.
+ *   - The FECS_CURRENT_CTX pass reserves only the inst block; the
+ *     PDB, page-table pages and mapped pages under it are reserved
+ *     by the channel-VM pass (`reserve_channel_vm`, #1029), which
+ *     reads those tables through a bounds-checked accessor.
  *
  *   - Reads `FECS_CURRENT_CTX` from BAR0 directly. The Tegra GA10B
  *     GPU MMIO can return poisoned values (`0xbadfXXXX` family) when
@@ -60,13 +58,15 @@
 /* SLM_HOST_HARNESS: the host test harness (`make test-ga10b-bringup`)
  * builds this TU too, so `ga10b_reserve_handoffs_in_range` can be
  * exercised against in-memory handoffs. The harness supplies
- * `pmm_user_reserve_add`, `ga10b_phys_in_dram`, `ga10b_gmmu_walk`
- * and `uart_printf`; the MMIO-reading orchestrator is compiled but
- * never called there. */
+ * `pmm_user_reserve_add`, `ga10b_phys_in_dram`, `ga10b_gmmu_walk`,
+ * `ga10b_test_phys_read64` (backs the channel-VM walk with fake page
+ * tables) and `uart_printf`, and links the real ga10b_gmmu_enum.c;
+ * the MMIO-reading orchestrator is compiled but never called there. */
 #if defined(PLATFORM_JETSON_ORIN_NANO) || defined(SLM_HOST_HARNESS)
 
 #include "ga10b_channel_handoff.h"
 #include "ga10b_gmmu.h"
+#include "ga10b_gmmu_decode.h"
 #ifdef SLM_HOST_HARNESS
 #include <stddef.h>
 int pmm_user_reserve_add(uint64_t phys, uint64_t size);
@@ -443,12 +443,16 @@ static void reserve_per_op_shaders(const volatile struct ga10b_channel_handoff *
     }
 
     /* Reserve the ops array page itself (cheap + small — single
-     * 4 KB page for ≤GA10B_PIPELINE_V7_MAX_OPS v7 ops × 80 B).
+     * 4 KB page for ≤GA10B_PIPELINE_V7_MAX_OPS v7 ops × 96 B).
      * Without this, SLM-OS PMM could clobber the ops array between
-     * boot and the launch-kernel command reading it. */
+     * boot and the launch-kernel command reading it. The stride is
+     * version-dependent: v5/v6 ops are the 24-byte
+     * `struct ga10b_pipeline_op`. */
+    bool ops_are_v7 = h->version >= 7u;
     uint64_t ops_page_base = ops_phys & ~4095ull;
     uint64_t ops_bytes     = (uint64_t)n_ops *
-                             sizeof(struct ga10b_pipeline_op_v7);
+                             (ops_are_v7 ? sizeof(struct ga10b_pipeline_op_v7)
+                                         : sizeof(struct ga10b_pipeline_op));
     uint64_t ops_page_end  =
         (ops_phys + ops_bytes + 4095ull) & ~4095ull;
     if (pmm_user_reserve_add(ops_page_base,
@@ -457,6 +461,19 @@ static void reserve_per_op_shaders(const volatile struct ga10b_channel_handoff *
                     "@0x%lx (%llu B)\n",
                     (unsigned long)ops_page_base,
                     (unsigned long long)(ops_page_end - ops_page_base));
+    }
+
+    /* v5/v6 ops carry no shader fields — only qmd_gpu_va. Reading
+     * them as v7 (as this function did until #1029) "walked" other
+     * ops' QMD VAs and left the real shader pages unreserved. Their
+     * shaders are pinned by the channel-VM reserve instead
+     * (`reserve_channel_vm`), which covers every page the QMDs can
+     * reference. */
+    if (!ops_are_v7) {
+        uart_printf("[ga10b-reserve]   per-op shader: v%u ops carry no "
+                    "shader fields — covered by the channel-VM reserve\n",
+                    (unsigned)h->version);
+        return;
     }
 
     /* v7.1 path (commit b2b6c2dc+): the helper now publishes
@@ -738,6 +755,164 @@ static void reserve_handoff_inst_block(const volatile struct ga10b_channel_hando
     }
 }
 
+/* ---------------------------------------------------------------
+ * Channel-VM reserve (#1029).
+ *
+ * The per-buffer reserves above pin what the handoff names. A v6
+ * dispatch re-launches the helper's own QMDs, which reference pages
+ * no handoff field names: shader code, cbufs and the buffers their
+ * kernel params point at — plus the GMMU page tables that map all of
+ * it. Left unreserved, `pmm_init` writes a free-list link into the
+ * first 16 bytes of each free block's head page; jetson-nano-2
+ * (2026-10-30) showed that link on a PDE2 table entry (pushbuf VA
+ * unmapped → "GP_GET did not advance") and on op[0]'s first SASS
+ * instruction (SM `illegal_instr_encoding` → "payload didn't land").
+ * Whether a given page happens to be a block head depends on the
+ * rest of the reserve set, which is why #1030's extra reserves moved
+ * the failure rate without any of them being wrong.
+ *
+ * So: enumerate every table and every mapped page reachable from the
+ * channel's inst block and reserve them, coalescing physically
+ * contiguous pages into one table entry.
+ * --------------------------------------------------------------- */
+
+#ifdef SLM_HOST_HARNESS
+/* Harness-provided: resolves fake phys addresses to test memory. */
+uint64_t ga10b_test_phys_read64(uint64_t phys);
+static uint64_t reserve_read64(uint64_t phys)
+{
+    return ga10b_test_phys_read64(phys);
+}
+#else
+static uint64_t reserve_read64(uint64_t phys)
+{
+    if (!ga10b_phys_in_dram(phys, 8)) {
+        return 0;
+    }
+    return *(volatile uint64_t *)(uintptr_t)phys;
+}
+#endif
+
+struct vm_reserve_ctx {
+    /* Leaf VAs in [skip_va_lo, skip_va_hi) are already pinned by the
+     * v9 weights-pool extents; skipping them keeps a 1.5 GB pool from
+     * spending ~1000 more PMM user-reserve slots. */
+    uint64_t skip_va_lo, skip_va_hi;
+    uint64_t run_base, run_end;   /* pending coalesced range */
+    uint32_t n_tables, n_leaves, n_ranges;
+    uint64_t leaf_bytes;
+    bool     table_full;
+};
+
+static void vm_reserve_flush(struct vm_reserve_ctx *c)
+{
+    if (c->run_end == c->run_base) {
+        return;
+    }
+    if (pmm_user_reserve_add(c->run_base, c->run_end - c->run_base) != 0) {
+        c->table_full = true;
+    } else {
+        c->n_ranges++;
+    }
+    c->run_base = c->run_end = 0;
+}
+
+static void vm_reserve_add(struct vm_reserve_ctx *c, uint64_t phys,
+                           uint64_t bytes)
+{
+    uint64_t base = phys & ~4095ull;
+    uint64_t end  = (phys + bytes + 4095ull) & ~4095ull;
+    if (c->table_full || !ga10b_phys_in_dram(base, (size_t)(end - base))) {
+        return;
+    }
+    bool have_run = c->run_end != c->run_base;
+    if (have_run && base >= c->run_base && end <= c->run_end) {
+        return;  /* e.g. a 256 B big-page PTE table inside the run */
+    }
+    if (have_run && base == c->run_end) {
+        c->run_end = end;
+        return;
+    }
+    vm_reserve_flush(c);
+    c->run_base = base;
+    c->run_end  = end;
+}
+
+static void vm_reserve_visit(void *ctx, enum ga10b_gmmu_page_kind kind,
+                             uint64_t gpu_va, uint64_t phys, uint64_t bytes)
+{
+    struct vm_reserve_ctx *c = ctx;
+    if (kind == GA10B_GMMU_PAGE_LEAF) {
+        if (gpu_va >= c->skip_va_lo && gpu_va < c->skip_va_hi) {
+            return;
+        }
+        c->n_leaves++;
+        c->leaf_bytes += bytes;
+    } else {
+        c->n_tables++;
+    }
+    vm_reserve_add(c, phys, bytes);
+}
+
+/* PDBs already reserved by this pass; channels of one process share a
+ * VM, and the resident channel is usually one of the helpers'. */
+#define VM_RESERVE_MAX_PDBS 8u
+struct vm_reserve_seen {
+    uint64_t pdb[VM_RESERVE_MAX_PDBS];
+    uint32_t n;
+};
+
+static void reserve_channel_vm(uint64_t inst_phys,
+                               const volatile struct ga10b_channel_handoff *h,
+                               struct vm_reserve_seen *seen)
+{
+    if (inst_phys == 0) {
+        return;
+    }
+    /* Same PDB decode as ga10b_gmmu_enum_pages; used only as the
+     * dedup key. */
+    uint64_t pdb;
+    uint8_t target;
+    decode_inst_block_pdb(reserve_read64(inst_phys +
+                                         INST_BLOCK_PDB_LO_BYTE_OFFSET),
+                          &pdb, &target);
+    (void)target;
+    for (uint32_t i = 0; i < seen->n; i++) {
+        if (seen->pdb[i] == pdb) {
+            uart_printf("[ga10b-reserve]   vm @inst 0x%lx: PDB 0x%lx "
+                        "already reserved\n",
+                        (unsigned long)inst_phys, (unsigned long)pdb);
+            return;
+        }
+    }
+
+    struct vm_reserve_ctx c = {0};
+    if (h != NULL && h->version >= 9u && h->weights_n_extents > 0u &&
+        h->weights_pool_size_bytes > 0u) {
+        c.skip_va_lo = h->weights_pool_gpu_va;
+        c.skip_va_hi = h->weights_pool_gpu_va + h->weights_pool_size_bytes;
+    }
+    int rc = ga10b_gmmu_enum_pages(inst_phys, reserve_read64,
+                                   vm_reserve_visit, &c);
+    vm_reserve_flush(&c);
+    if (rc == -1) {
+        uart_printf("[ga10b-reserve]   vm @inst 0x%lx: PDB invalid — "
+                    "skipping\n", (unsigned long)inst_phys);
+        return;
+    }
+    if (seen->n < VM_RESERVE_MAX_PDBS) {
+        seen->pdb[seen->n++] = pdb;
+    }
+    uart_printf("[ga10b-reserve]   vm @inst 0x%lx: %u tables, %u pages "
+                "(%lu KB) in %u ranges%s%s\n",
+                (unsigned long)inst_phys, (unsigned)c.n_tables,
+                (unsigned)c.n_leaves, (unsigned long)(c.leaf_bytes >> 10),
+                (unsigned)c.n_ranges,
+                rc == -2 ? " — table budget exceeded, walk truncated" : "",
+                c.table_full ? " — PMM reserve table full, rest UNPROTECTED"
+                             : "");
+}
+
 static const char *pipeline_kind_name(uint32_t kind)
 {
     switch (kind) {
@@ -787,6 +962,7 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
                                          uint64_t resident_inst_phys)
 {
     uint64_t handoffs[GA10B_PIPELINE_KIND_COUNT];
+    struct vm_reserve_seen seen = { .n = 0 };
     find_first_handoff_per_kind(start, end, stride, handoffs);
 
     uint32_t found_mask = 0;
@@ -814,6 +990,23 @@ uint32_t ga10b_reserve_handoffs_in_range(uint64_t start, uint64_t end,
         reserve_gr_ctx_extents(h);
         reserve_weights_extents(h, handoff_phys);
     }
+    /* Channel VMs only after every kind's named buffers: a large VM
+     * (e.g. a v8 weights pool with no v9 extents to skip) can use
+     * hundreds of PMM user-reserve slots, and must not starve another
+     * handoff's USERD / GPFIFO / inst block of theirs. */
+    for (uint32_t kind = 0; kind < GA10B_PIPELINE_KIND_COUNT; kind++) {
+        if (handoffs[kind] == 0) {
+            continue;
+        }
+        const volatile struct ga10b_channel_handoff *h =
+            (const volatile struct ga10b_channel_handoff *)
+            (uintptr_t)handoffs[kind];
+        reserve_channel_vm(h->inst_block_phys, h, &seen);
+    }
+    /* The GR-resident channel last: usually a helper's (deduped by
+     * PDB above), otherwise e.g. Xorg's — whose pages are still live
+     * GPU state FECS may touch. */
+    reserve_channel_vm(resident_inst_phys, NULL, &seen);
     return found_mask;
 }
 
@@ -868,10 +1061,13 @@ void ga10b_kexec_handoff_register_reserves(void)
      * #1029: every pipeline kind, not just MNIST. With only the MNIST
      * handoff reserved, the sched-MLP and eviction channels' buffers
      * (GR ctx save buffers included) were left unprotected, free for
-     * PMM to hand out. Closing that gap did NOT fix #1029's
-     * multi-helper eviction dispatch failures (ctxsw checksum / FECS
-     * errors persisted on jetson-nano-2 with every buffer reserved,
-     * 2026-10-29), so this is coverage, not that root cause. */
+     * PMM to hand out. That alone did not fix #1029's dispatch
+     * failures: the helper channels' page tables, shaders and QMD-
+     * referenced buffers were still unreserved. The channel-VM pass
+     * inside `ga10b_reserve_handoffs_in_range` covers those. On
+     * jetson-nano-2 (2026-10-30), eviction dispatch with it: 10/10
+     * producer-alone (0/6 without) and 10/10 with the MNIST + sched
+     * helpers also preserved (1/10 before). */
     uart_puts("[ga10b-reserve] scanning DRAM for handoff magic "
               "(all pipeline kinds)...\n");
     /* g_boot_inst_block_phys is 0 when reserve_inst_block skipped, so

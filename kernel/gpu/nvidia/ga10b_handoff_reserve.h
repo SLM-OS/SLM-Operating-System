@@ -25,9 +25,14 @@
  * handoff of every pipeline kind (MNIST, SCHED_MLP, EVICTION_QNET;
  * #1029, previously MNIST only) — the handoff page, that channel's
  * own inst block, the helper dmabufs (USERD / GPFIFO / pushbuffer /
- * semaphore / SASS / cbuf / QMD pool), per-op shaders, GR context
- * extents and v9 weights extents. The GMMU page-table pages under
- * each inst block's PDB are still not walked and reserved.
+ * semaphore / SASS / cbuf / QMD pool), per-op shaders (v7+), GR
+ * context extents and v9 weights extents. Each of those channels'
+ * VMs — and the resident channel's — is then enumerated from its
+ * inst block's PDB (`ga10b_gmmu_enum_pages`) and every page-table
+ * page and every mapped page is reserved too (#1029): v6 dispatches
+ * relaunch the helper's own QMDs, whose shaders, cbufs and buffers no
+ * handoff field names, and `pmm_init`'s free-list links landing on an
+ * unreserved PDE table or SASS page wedged the dispatch.
  *
  * Hooked from `kernel_main` between `vmm_init` (which sets up the
  * identity mappings the function needs to read GPU MMIO and DRAM)
@@ -96,7 +101,10 @@ uint64_t ga10b_kexec_inherited_inst_block_phys(void);
  * handoff: the handoff page, the channel's own inst block (skipped
  * when it equals `resident_inst_phys`, which the FECS_CURRENT_CTX
  * pass already reserved), the helper buffers, per-op shaders, GR
- * ctx extents and weights extents.
+ * ctx extents, weights extents and the channel's whole VM (page
+ * tables + mapped pages; the v9 weights pool's VA range is skipped
+ * since its extents are already reserved). Finally the resident
+ * channel's VM, unless its PDB was already covered.
  *
  * Returns a bitmask with bit `k` set for each kind whose handoff
  * was found.

@@ -980,6 +980,7 @@ test-ga10b-bringup:
 	    host-tools/gsp-harness/test_ga10b_bringup.c \
 	    kernel/gpu/nvidia/ga10b_bringup.c \
 	    kernel/gpu/nvidia/ga10b_handoff_reserve.c \
+	    kernel/gpu/nvidia/ga10b_gmmu_enum.c \
 	    kernel/gpu/nvidia/ga10b_qmd.c \
 	    kernel/gpu/nvidia/falcon.c \
 	    kernel/gpu/nvidia/gsp.c

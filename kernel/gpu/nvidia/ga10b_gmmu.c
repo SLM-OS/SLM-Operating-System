@@ -21,6 +21,7 @@
  */
 
 #include "ga10b_gmmu.h"
+#include "ga10b_gmmu_decode.h"
 
 #include "../../include/cache.h"
 #include "../../include/pmm.h"
@@ -54,8 +55,8 @@
  *   phys_hi    = hi_word                   (bits [63:32] of phys)
  *   pdb_phys   = (uint64_t)phys_hi << 32 | phys_lo
  */
-#define INST_BLOCK_PDB_LO_BYTE_OFFSET   (128 * 4)
-#define INST_BLOCK_PDB_HI_BYTE_OFFSET   (129 * 4)
+/* INST_BLOCK_PDB_{LO,HI}_BYTE_OFFSET live in ga10b_gmmu_decode.h so
+ * the whole-tree enumerator (ga10b_gmmu_enum.c) shares them. */
 
 /* Jetson Orin Nano DRAM range, per platform.h / vmm_init dump:
  *   0x80000000 .. 0x280000000  (8 GB at 2 GB base)
@@ -143,91 +144,6 @@ static inline uint16_t va_index(uint64_t gpu_va, int hi, int lo)
 {
     uint64_t mask = (1ull << (hi - lo + 1)) - 1;
     return (uint16_t)((gpu_va >> lo) & mask);
-}
-
-/* Decode a regular PDE entry (used for PDE3, PDE2, PDE1).
- *   - lower 32 bits: aperture(2:1) | volatile(3) | next_phys[31:12] (24 bits at [31:8] encoded as phys >> 12)
- *   - upper 32 bits: next_phys[55:32] (24 bits at [23:0])
- *
- * Per nvgpu's `gmmu_new_pde_address_sys_f(v) = ((v & 0xffffff) << 8U)`,
- * the 24-bit lo half packs `phys[35:12]` shifted to bit position 8,
- * giving `(entry_lo & 0xffffff00) >> 8 << 12 = entry_lo & 0xfffff000`
- * — i.e. `phys[35:12]` lives at the same bit position in the entry
- * word as it does in the physical address (high 24 bits of low 32).
- */
-static void decode_regular_pde(uint64_t entry,
-                               uint64_t *out_next_phys,
-                               uint8_t *out_aperture,
-                               bool *out_valid)
-{
-    uint8_t aperture = (uint8_t)((entry >> GA10B_PDE_APERTURE_SHIFT) & 0x7);
-    *out_aperture = aperture;
-    /* Aperture 0 = invalid (matches gmmu_new_pde_aperture_invalid_f
-     * convention even though the explicit "_invalid_" macro isn't in
-     * the cached header). */
-    *out_valid = (aperture != 0);
-
-    uint64_t addr_lo = (entry & GA10B_PDE_ADDR_LO_MASK) >> 8;   /* phys[35:12] */
-    uint64_t addr_hi = (entry & GA10B_PDE_ADDR_HI_MASK) >> 32;  /* phys[59:36] */
-    *out_next_phys = ((addr_hi << 24) | addr_lo) << 12;
-}
-
-/* Decode the small-page half of a dual PDE (PDE0). Big half is
- * ignored for Milestone A — see ga10b_gmmu.h. */
-static void decode_dual_pde_small(uint64_t entry,
-                                  uint64_t *out_next_phys,
-                                  uint8_t *out_aperture,
-                                  bool *out_valid)
-{
-    uint8_t aperture = (uint8_t)((entry >> GA10B_DUAL_PDE_SMALL_APERTURE_SHIFT) & 0x7);
-    *out_aperture = aperture;
-    *out_valid = (aperture != 0);
-    /* Small PT phys >> 12 in low word [31:8]. */
-    uint64_t lo = (entry >> 8) & 0xffffff;
-    *out_next_phys = lo << 12;
-}
-
-/* Decode the big-page half of a dual PDE (PDE0). Layout per nvgpu's
- * `gmmu_new_dual_pde_*_big_*_f()` encoders:
- *   bits[2:0]   = aperture (0=invalid, 2=vid, 4=sys_coh, 6=sys_ncoh)
- *   bit 3       = volatile
- *   bits[31:4]  = big_addr = (phys_of_big_PT >> 8) — 28 bits
- *   pde_v[1][7:0] = high byte of big_addr (extends to ~36 bits of phys)
- *
- * Phys reconstruction: phys = ((hi_byte << 28) | low_28_bits) << 8.
- *
- * This decoder is used when our walker reads the FIRST 8 bytes of a
- * 16-byte dual PDE entry (offset 0..7 in the entry) — that's the
- * big-page child. For 64-KB big-page mappings (the helper's default
- * for pushbuf/sem/qmd_pool/shaders), this is the correct half. */
-static void decode_dual_pde_big(uint64_t entry,
-                                uint64_t *out_next_phys,
-                                uint8_t *out_aperture,
-                                bool *out_valid)
-{
-    uint8_t aperture = (uint8_t)(entry & 0x7u);
-    *out_aperture = aperture;
-    *out_valid = (aperture != 0);
-    uint64_t lo28 = (entry >> 4) & 0x0fffffffULL;   /* bits [31:4]   */
-    uint64_t hi8  = (entry >> 32) & 0xffULL;        /* pde_v[1][7:0] */
-    *out_next_phys = ((hi8 << 28) | lo28) << 8;
-}
-
-/* Decode a leaf PTE. */
-static void decode_pte(uint64_t entry,
-                       uint64_t *out_phys,
-                       uint8_t *out_aperture,
-                       bool *out_valid,
-                       bool *out_read_only,
-                       bool *out_privileged)
-{
-    *out_valid = (entry & GA10B_PTE_VALID_BIT) != 0;
-    *out_aperture = (uint8_t)((entry >> GA10B_PTE_APERTURE_SHIFT) & 0x7);
-    *out_read_only = (entry & GA10B_PTE_READ_ONLY_BIT) != 0;
-    *out_privileged = (entry & GA10B_PTE_PRIVILEGE_BIT) != 0;
-    uint64_t addr_lo = (entry & GA10B_PTE_ADDR_LO_MASK) >> 8;   /* phys[35:12] */
-    uint64_t addr_hi = (entry & GA10B_PTE_ADDR_HI_MASK) >> 32;  /* phys[59:36] */
-    *out_phys = ((addr_hi << 24) | addr_lo) << 12;
 }
 
 int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
