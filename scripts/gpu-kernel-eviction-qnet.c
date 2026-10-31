@@ -83,11 +83,11 @@
 #define EVICT_INPUT_DIM   27   /* BlockFeatures = [f32; 27] (runtime_mlp.rs) */
 #define EVICT_OUTPUT_DIM   1   /* single fp32 eviction score in [0, 1] */
 /* Rows per dispatch (#1020). The GPU computes every staged row on
- * every dispatch, so this sets the IRQs-masked dispatch time: 0.71 ms
- * at 64 vs 2.38 ms at 256 on jetson-nano-2 (2026-10-30), dominated by
- * add_bias_relu's one-CTA-per-element launch (#1036). Decisions with
+ * every dispatch, so this sets the IRQs-masked dispatch time. With
+ * one-warp add_bias_relu CTAs (#1036) that is 0.26 ms at 64 and
+ * 0.56 ms at 256 on jetson-nano-2 (was 0.72 / 2.38 ms). Decisions with
  * more candidates than this go to the CPU (`oversize`); pass a larger
- * --batch for bigger pools once #1036 makes it cheap. */
+ * --batch (up to 256) for bigger pools. */
 #define EVICT_BATCH_DEFAULT 64
 /* Op 8 (sigmoid) runs as a single 256-thread CTA, and the Linux-side
  * completion check below waits on every score cell of it. */
@@ -192,6 +192,16 @@ int main(int argc, char **argv)
     const char *weights_dir = "./eviction-weights";
     const char *shader_dir  = ".";
     int batch = EVICT_BATCH_DEFAULT;
+    /* #1036 timing experiments (results deliberately wrong, so the
+     * self-check is skipped): 1 = GEMM 2 reads a CPU-filled buffer
+     * instead of op 1's output; 2 = GEMM 1 reads op 1's GPU-written
+     * output instead of the CPU-written input; 3 = op 0 runs GEMM 2's
+     * exact shape (K = 64, N = 32) on a CPU-filled [B][64] buffer and
+     * W_L2, so op 0 and op 2 differ only in pipeline position; 4 =
+     * every add_bias_relu launches a single CTA; 5 / 6 = full grid
+     * with 1 / 256 threads per add_bias_relu CTA (256 = the pre-#1036
+     * launch, kept to reproduce the old timing). */
+    int exp_mode = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
             preserve = true;
@@ -204,6 +214,24 @@ int main(int argc, char **argv)
             shader_dir = argv[++i];
         } else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc) {
             batch = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--exp") == 0 && i + 1 < argc) {
+            const char *e = argv[++i];
+            if (strcmp(e, "gemm2-cpu-input") == 0) {
+                exp_mode = 1;
+            } else if (strcmp(e, "gemm1-gpu-input") == 0) {
+                exp_mode = 2;
+            } else if (strcmp(e, "gemm1-as-gemm2") == 0) {
+                exp_mode = 3;
+            } else if (strcmp(e, "relu-tiny") == 0) {
+                exp_mode = 4;
+            } else if (strcmp(e, "relu-threads-1") == 0) {
+                exp_mode = 5;
+            } else if (strcmp(e, "relu-threads-256") == 0) {
+                exp_mode = 6;
+            } else {
+                fprintf(stderr, "unknown --exp %s\n", e);
+                return 1;
+            }
         }
     }
     if (batch < 1 || batch > EVICT_BATCH_MAX) {
@@ -301,6 +329,17 @@ int main(int argc, char **argv)
     }
     printf("[evict] weights + %zu input rows loaded\n", B);
 
+    struct gpu_buffer exp_buf = {0};
+    if (exp_mode == 1 || exp_mode == 3) {
+        /* Same shape as op 1's output ([B][64] fp32), CPU-written. */
+        exp_buf = gpu_alloc_buffer(&ctx, round_up_page(B * 64u * 4u), 4096);
+        float *f = (float *)exp_buf.cpu_va;
+        for (size_t k = 0; k < B * 64u; k++) {
+            f[k] = 0.5f + 0.001f * (float)(k % 97u);
+        }
+        msync(exp_buf.cpu_va, exp_buf.size_bytes, MS_SYNC);
+    }
+
     /* --- Read per-op sentinel (cell_idx, bits) from disk. --- */
     uint32_t sentinel_idx[EVICT_OP_COUNT] = {0};
     uint32_t sentinel_bits[EVICT_OP_COUNT] = {0};
@@ -373,7 +412,16 @@ int main(int argc, char **argv)
             struct evict_op *op = &ops[gemm_op];
             uint32_t *cbuf = (uint32_t *)op->cbuf_page.cpu_va;
             memset(cbuf, 0, op->cbuf_page.size_bytes);
-            uint32_t grid_x = ((uint32_t)N + 15u) / 16u;
+            /* GEMM-only shape; the following add_bias_relu keeps the
+             * layer's real N. */
+            int gK = K, gN = N;
+            uint64_t w_gva = W[li].gpu_va;
+            if (exp_mode == 3 && li == 0) {
+                gK = LAYER_IN[1];
+                gN = LAYER_OUT[1];
+                w_gva = W[1].gpu_va;
+            }
+            uint32_t grid_x = ((uint32_t)gN + 15u) / 16u;
             uint32_t grid_y = ((uint32_t)M + 15u) / 16u;
             cbuf[0] = 16; cbuf[1] = 16; cbuf[2] = 1;
             cbuf[3] = grid_x; cbuf[4] = grid_y; cbuf[5] = 1;
@@ -382,12 +430,15 @@ int main(int argc, char **argv)
              * for L2..L3, addrelu output of L3 for OUT. */
             uint64_t a_gva = (li == 0) ? input.gpu_va
                                        : ops[post_op - 2].output.gpu_va;
+            if (exp_mode == 1 && li == 1) a_gva = exp_buf.gpu_va;
+            if (exp_mode == 2 && li == 0) a_gva = ops[1].output.gpu_va;
+            if (exp_mode == 3 && li == 0) a_gva = exp_buf.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x160) = a_gva;
-            *(uint64_t *)((char *)cbuf + 0x168) = W[li].gpu_va;
+            *(uint64_t *)((char *)cbuf + 0x168) = w_gva;
             *(uint64_t *)((char *)cbuf + 0x170) = op->output.gpu_va;
             *(int32_t  *)((char *)cbuf + 0x178) = M;
-            *(int32_t  *)((char *)cbuf + 0x17C) = K;
-            *(int32_t  *)((char *)cbuf + 0x180) = N;
+            *(int32_t  *)((char *)cbuf + 0x17C) = gK;
+            *(int32_t  *)((char *)cbuf + 0x180) = gN;
             msync(op->cbuf_page.cpu_va, op->cbuf_page.size_bytes, MS_SYNC);
 
             uint32_t *qmd = (uint32_t *)op->qmd_page.cpu_va;
@@ -413,9 +464,19 @@ int main(int argc, char **argv)
             struct evict_op *op = &ops[post_op];
             uint32_t *cbuf = (uint32_t *)op->cbuf_page.cpu_va;
             memset(cbuf, 0, op->cbuf_page.size_bytes);
-            cbuf[0] = 256; cbuf[1] = 1; cbuf[2] = 1;          /* blockDim */
-            cbuf[3] = 1;   cbuf[4] = (uint32_t)N;             /* grid */
-            cbuf[5] = (uint32_t)M;
+            /* One warp per CTA (#1036). With H = W = 1 only thread 0 of
+             * each CTA does work, so the result is identical, but a
+             * 256-thread CTA launched 8 warps apiece, and that grid
+             * (B x N CTAs) slowed the *next* op's GEMM ~6x: on
+             * jetson-nano-2 a dispatch dropped 722 -> 251 us at batch
+             * 64 and 2365 -> 561 us at batch 256. */
+            uint32_t r_threads = exp_mode == 5 ? 1u
+                               : exp_mode == 6 ? 256u : 32u;
+            uint32_t r_gy = exp_mode == 4 ? 1u : (uint32_t)N;
+            uint32_t r_gz = exp_mode == 4 ? 1u : (uint32_t)M;
+            cbuf[0] = r_threads; cbuf[1] = 1; cbuf[2] = 1;    /* blockDim */
+            cbuf[3] = 1;   cbuf[4] = r_gy;                    /* grid */
+            cbuf[5] = r_gz;
             *(uint64_t *)((char *)cbuf + 0x160) = ops[gemm_op].output.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x168) = b[li].gpu_va;
             *(uint64_t *)((char *)cbuf + 0x170) = op->output.gpu_va;
@@ -430,13 +491,13 @@ int main(int argc, char **argv)
             gpu_populate_qmd_at(qmd, addrelu_shader_gva, op->cbuf_page.gpu_va,
                                 GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
             gpu_qmd_set_bits(qmd, QMD_CTA_THREAD_DIM0_HI,
-                             QMD_CTA_THREAD_DIM0_LO, 256);
+                             QMD_CTA_THREAD_DIM0_LO, r_threads);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_WIDTH_HI,
                              QMD_CTA_RASTER_WIDTH_LO, 1);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
-                             QMD_CTA_RASTER_HEIGHT_LO, (uint32_t)N);
+                             QMD_CTA_RASTER_HEIGHT_LO, r_gy);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_DEPTH_HI,
-                             QMD_CTA_RASTER_DEPTH_LO, (uint32_t)M);
+                             QMD_CTA_RASTER_DEPTH_LO, r_gz);
             msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         }
     }
@@ -477,6 +538,26 @@ int main(int argc, char **argv)
         memset(ops[i].output.cpu_va, 0, ops[i].output.size_bytes);
         msync(ops[i].output.cpu_va, ops[i].output.size_bytes, MS_SYNC);
     }
+    if (exp_mode == 2) {
+        /* GEMM 1 now reads op 1's output; seed it non-zero so the
+         * Linux-side sentinel poll still sees GEMM 1 write. */
+        float *f = (float *)ops[1].output.cpu_va;
+        for (size_t k = 0; k < ops[1].output.size_bytes / 4u; k++) {
+            f[k] = 0.25f;
+        }
+        msync(ops[1].output.cpu_va, ops[1].output.size_bytes, MS_SYNC);
+    }
+    if (exp_mode != 0) {
+        printf("[evict] EXPERIMENT %d buffers: input gva=0x%llx "
+               "W_L2 gva=0x%llx op0.out gva=0x%llx op1.out gva=0x%llx "
+               "op2.out gva=0x%llx exp gva=0x%llx\n", exp_mode,
+               (unsigned long long)input.gpu_va,
+               (unsigned long long)W[1].gpu_va,
+               (unsigned long long)ops[0].output.gpu_va,
+               (unsigned long long)ops[1].output.gpu_va,
+               (unsigned long long)ops[2].output.gpu_va,
+               (unsigned long long)exp_buf.gpu_va);
+    }
 
     printf("[evict] all 9 ops prepared. Linux-side dispatch:\n");
 
@@ -495,7 +576,8 @@ int main(int argc, char **argv)
             (volatile uint32_t *)((char *)op->output.cpu_va +
                                    op->sentinel_cell_idx * 4u);
         int ok = gpu_submit_and_poll(&ctx, pb_buf, pb_dwords, poll_va,
-                                      0u, /* any non-zero */ 5000);
+                                      0u, /* any non-zero */
+                                      exp_mode ? 200 : 5000);
         msync(op->output.cpu_va, op->output.size_bytes,
               MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
@@ -509,7 +591,12 @@ int main(int argc, char **argv)
                op->sentinel_bits,
                actual_sentinel_bits[i] == op->sentinel_bits
                    ? "exact" : "ULP-divergent");
-        if (!ok) {
+        if (!ok && exp_mode != 0) {
+            /* Experiment inputs can zero a post-ReLU sentinel cell; the
+             * op still ran, so keep going. */
+            printf("[evict]   op[%d] sentinel stayed 0 (experiment "
+                   "input) — continuing\n", i);
+        } else if (!ok) {
             fprintf(stderr,
                     "[evict] op[%d %s] sentinel timeout (no non-zero "
                     "write at cell %u)\n",
@@ -532,6 +619,12 @@ int main(int argc, char **argv)
         while (r < B && score_bits[r] != 0u) r++;
         if (r == B) break;
         usleep(100);
+    }
+
+    if (exp_mode != 0) {
+        printf("[evict] EXPERIMENT %d: results deliberately wrong, "
+               "self-check skipped\n", exp_mode);
+        goto handoff;
     }
 
     /* --- Validate every row against the fp32 CPU reference. --- */
@@ -593,6 +686,7 @@ int main(int argc, char **argv)
            "(score=%.6f, |err|=%.3e, %zu rows)\n",
            (double)score, (double)abs_err, B);
 
+handoff:
     if (!preserve) return 0;
 
     /* --- v6 handoff for SLM-OS post-kexec consumption. ---

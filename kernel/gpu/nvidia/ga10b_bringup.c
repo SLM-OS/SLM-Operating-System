@@ -1291,6 +1291,30 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 #include "ga10b_channel_handoff.h"
 #include "ga10b_handoff_reserve.h"
 
+/* Per-op wall time of the last completed v5/v6 pipeline dispatch, in
+ * timer ticks (#1036). Each sample covers one op's submit through its
+ * trailing REPORT_SEMAPHORE release, which waits for that op's compute
+ * to drain, so it is the op's real cost. Written under the dispatch
+ * lock; read via ga10b_bringup_last_pipeline_op_ns for diagnostics. */
+static uint64_t g_last_pipeline_op_ticks[GA10B_PIPELINE_MAX_OPS];
+static uint32_t g_last_pipeline_n_ops;
+
+uint32_t ga10b_bringup_last_pipeline_op_ns(uint64_t *out, uint32_t max,
+                                           uint32_t *n_total)
+{
+    uint32_t n = g_last_pipeline_n_ops;
+    if (n_total) *n_total = 0;
+    if (!out || n > GA10B_PIPELINE_MAX_OPS) return 0;
+    if (n > max) n = max;
+    uint64_t freq = timer_get_frequency();
+    if (freq == 0u) return 0;
+    if (n_total) *n_total = g_last_pipeline_n_ops;
+    for (uint32_t i = 0; i < n; i++) {
+        out[i] = g_last_pipeline_op_ticks[i] * 1000000000ULL / freq;
+    }
+    return n;
+}
+
 /* Cached handoff data for use by phase 7.
  *
  * Single-channel only: each invocation of `nvgpu channel` overwrites
@@ -3637,17 +3661,21 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                     pb_buf, op->qmd_gpu_va,
                     sema_gpu_va,
                     GA10B_SEMA_RELEASE_PAYLOAD);
+            uint64_t op_t0 = timer_get_count();
             int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
                                            sema_phys,
                                            GA10B_SEMA_RELEASE_PAYLOAD,
                                            8, "GA10B-P8");
+            g_last_pipeline_op_ticks[i] = timer_get_count() - op_t0;
             if (rc < 0) {
+                g_last_pipeline_n_ops = 0;
                 uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "
                             "— aborting chain\n",
                             (unsigned long)(i + 1), rc);
                 return rc;
             }
         }
+        g_last_pipeline_n_ops = g_handoff.pipeline_n_ops;
         GA10B_DBG("[GA10B-P8] pipeline complete — %lu ops fired\n",
                   (unsigned long)g_handoff.pipeline_n_ops);
         return 0;
