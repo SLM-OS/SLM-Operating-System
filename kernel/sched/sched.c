@@ -437,6 +437,15 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
  * Caller is expected to have set cpu_data[cpu].online = false
  * before calling this so steal_deque-based thieves stop racing.
  */
+void sched_runqueue_clear(struct cpu_runqueue *rq)
+{
+    if (!rq) return;
+    volatile uint8_t *p = (volatile uint8_t *)rq;
+    for (size_t i = 0; i < sizeof(*rq); i++) {
+        p[i] = 0;
+    }
+}
+
 void sched_drain_cpu_runqueue(uint32_t cpu)
 {
     if (cpu >= MAX_CPUS) return;
@@ -829,11 +838,9 @@ void scheduler_init(void)
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         spin_init(&rq_lock[i]);
-        cpu_rq(i)->head = NULL;
-        cpu_rq(i)->tail = NULL;
-        cpu_rq(i)->idle_task = NULL;
-        cpu_rq(i)->zombie = NULL;
-        cpu_rq(i)->ready_count = 0;
+        /* Whole struct, not field by field: the AI tick counters were
+         * missed that way and started from leftover NC data (#1045). */
+        sched_runqueue_clear(cpu_rq(i));
 #if CONFIG_WORK_STEALING
         spin_init(&steal_deque_lock[i]);
         steal_deque_init(&cpu_steal_deques[i]);

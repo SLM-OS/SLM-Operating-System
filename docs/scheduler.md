@@ -838,7 +838,7 @@ Statistics are logged when the policy is deactivated via `shutdown()`.
 #### Scheduler Counters (CONFIG_AI_SCHEDULER)
 
 When `CONFIG_AI_SCHEDULER` is defined, the scheduler tracks additional metrics:
-- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`)
+- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`). `scheduler_init` zeroes each run queue whole with `sched_runqueue_clear()`. On Pi 5 and Jetson the queues live in NC memory from `ncmem_alloc`, which does not zero. Before #1045 the init cleared the queue fields one by one and missed these two counters, so after a Jetson kexec they started from leftover Linux data: `sched stats` showed utilization such as 337%, and `ai_mlp` / `ai_ppo` read the same garbage as their per-CPU utilization feature.
 - **Per-task**: `arrival_time_ns` (set in `scheduler_add_task()`), `completion_time_ns` (set in `task_exit()`)
 - **Global**: deadline miss rolling window (100 entries), cumulative latency, top-8 task cache (updated every 10 ticks)
 
