@@ -334,7 +334,9 @@ int main(int argc, char **argv)
         /* Same shape as op 1's output ([B][64] fp32), CPU-written. */
         exp_buf = gpu_alloc_buffer(&ctx, round_up_page(B * 64u * 4u), 4096);
         float *f = (float *)exp_buf.cpu_va;
-        for (size_t k = 0; k < B * 64u; k++) f[k] = 0.5f + 0.001f * (float)(k % 97u);
+        for (size_t k = 0; k < B * 64u; k++) {
+            f[k] = 0.5f + 0.001f * (float)(k % 97u);
+        }
         msync(exp_buf.cpu_va, exp_buf.size_bytes, MS_SYNC);
     }
 
@@ -466,7 +468,7 @@ int main(int argc, char **argv)
              * each CTA does work, so the result is identical, but a
              * 256-thread CTA launched 8 warps apiece, and that grid
              * (B x N CTAs) slowed the *next* op's GEMM ~6x: on
-             * jetson-nano-2 a dispatch dropped 722 -> 258 us at batch
+             * jetson-nano-2 a dispatch dropped 722 -> 251 us at batch
              * 64 and 2365 -> 561 us at batch 256. */
             uint32_t r_threads = exp_mode == 5 ? 1u
                                : exp_mode == 6 ? 256u : 32u;
@@ -540,7 +542,9 @@ int main(int argc, char **argv)
         /* GEMM 1 now reads op 1's output; seed it non-zero so the
          * Linux-side sentinel poll still sees GEMM 1 write. */
         float *f = (float *)ops[1].output.cpu_va;
-        for (size_t k = 0; k < ops[1].output.size_bytes / 4u; k++) f[k] = 0.25f;
+        for (size_t k = 0; k < ops[1].output.size_bytes / 4u; k++) {
+            f[k] = 0.25f;
+        }
         msync(ops[1].output.cpu_va, ops[1].output.size_bytes, MS_SYNC);
     }
     if (exp_mode != 0) {

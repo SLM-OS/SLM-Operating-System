@@ -1299,19 +1299,21 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 static uint64_t g_last_pipeline_op_ticks[GA10B_PIPELINE_MAX_OPS];
 static uint32_t g_last_pipeline_n_ops;
 
-uint32_t ga10b_bringup_last_pipeline_op_ns(uint64_t *out, uint32_t max)
+uint32_t ga10b_bringup_last_pipeline_op_ns(uint64_t *out, uint32_t max,
+                                           uint32_t *n_total)
 {
     uint32_t n = g_last_pipeline_n_ops;
+    if (n_total) *n_total = 0;
     if (!out || n > GA10B_PIPELINE_MAX_OPS) return 0;
     if (n > max) n = max;
     uint64_t freq = timer_get_frequency();
     if (freq == 0u) return 0;
+    if (n_total) *n_total = g_last_pipeline_n_ops;
     for (uint32_t i = 0; i < n; i++) {
         out[i] = g_last_pipeline_op_ticks[i] * 1000000000ULL / freq;
     }
     return n;
 }
-
 
 /* Cached handoff data for use by phase 7.
  *

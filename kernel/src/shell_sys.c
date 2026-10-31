@@ -8414,16 +8414,23 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* #1036: per-op split of the most recent v5/v6 pipeline dispatch
-     * of any kind (each op timed to its drain-waiting semaphore). */
+     * of any kind (each op timed to its drain-waiting semaphore). The
+     * eviction pipeline is 9 ops; a longer one that ran last (sched,
+     * inference) is truncated with a "+N more" note. */
     uint64_t op_ns[16];
-    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(op_ns, 16u);
+    uint32_t n_total = 0;
+    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(op_ns, 16u, &n_total);
     if (n_ops > 0u) {
         shell_puts("  Last pipeline ops:   ");
         for (uint32_t i = 0; i < n_ops; i++) {
             shell_printf("%s%llu", i ? " " : "",
                          (unsigned long long)(op_ns[i] / 1000u));
         }
-        shell_puts(" us\r\n");
+        shell_puts(" us");
+        if (n_total > n_ops) {
+            shell_printf(" (+%u more)", (unsigned)(n_total - n_ops));
+        }
+        shell_puts("\r\n");
     }
 #endif
     shell_printf("  GPU toggles:         inference=%s eviction=%s\r\n",
