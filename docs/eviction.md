@@ -676,34 +676,39 @@ and both GPU toggles on:
   errors, 0 oversize, and fault rates identical to the 64-row run.
 
 **GPU dispatch latency (#965, 2026-10-30).** `eviction stats` reports
-the wall time of each GPU-served dispatch (`GPU dispatch time`). That
-covers the try-lock through the output read, which is the span run
-with IRQs masked. These are two jetson-nano-2 boots of kernel
-46e8b425, with the default helpers preserved:
+the wall time of each GPU-served dispatch (`GPU dispatch time`), from
+the try-lock through the output read, which is the span run with IRQs
+masked. It also shows the per-op split of the last pipeline dispatch
+(`Last pipeline ops:`; each op is timed to its drain-waiting semaphore).
+The numbers are from jetson-nano-2 with the default helpers preserved
+and 64-candidate decisions (`bench eviction-e2e --policy mlp`):
 
-| Producer `--batch` | Rows requested | Samples | Avg | Min | Max |
-|---|---|---|---|---|---|
-| 256 | 8 | 3 | 2.37 ms | 2.36 ms | 2.40 ms |
-| 256 | 64 | 217 | 2.38 ms | 2.33 ms | 2.41 ms |
-| 64 | 8 | 3 | 0.72 ms | 0.72 ms | 0.73 ms |
-| 64 | 64 | 249 | 0.71 ms | 0.65 ms | 0.74 ms |
+| Producer | `--batch 64` | `--batch 256` |
+|---|---|---|
+| add-bias-ReLU 256 threads/CTA (before #1036) | 0.72 ms | 2.37 ms |
+| add-bias-ReLU 32 threads/CTA (#1036, current) | **0.25 ms** | **0.56 ms** |
 
-- **Batch size, not request size, sets the cost.** The GPU computes
-  every staged row on each dispatch. Per-op timing (`Last pipeline
-  ops:` in `eviction stats`) puts almost all of it in GEMMs 2–4: 313,
-  164 and 86 µs at batch 64, and 4× that at 256. They cost about
-  1.25 µs per inner-loop step per 16-row CTA band. GEMM 1 runs the
-  same shader at about 0.09 µs per step; it reads the CPU-written
-  input, whereas GEMMs 2–4 read GPU-written intermediates. The
-  add-bias-ReLU ops, first suspected, total about 77 µs at batch 256.
-  The default stays at `--batch 64` until #1036 explains the gap.
-- **Against the CPU.** A GPU-served decision over 64 candidates costs
-  about what CPU-scoring them does: average `select_victim` latency
-  is about 0.74 ms CPU-only, including feature extraction. For small
-  candidate sets it is slower, and it is about 700× the 1 µs target
-  #965 asked to re-evaluate. The eviction MLP is too small for one
-  GPU dispatch to beat a CPU pass at these sizes. The batched GPU path
-  stays an option for exploration, not a speed-up.
+- **Cause (#1036).** Each add-bias-ReLU op launched one 256-thread CTA
+  per output element, i.e. `B × N` CTAs of 8 warps, of which only
+  thread 0 does work (H = W = 1). The launch itself was cheap, about
+  77 µs total. But it slowed the next op's GEMM about 6× at batch 64:
+  GEMM 2 took 313 µs after it, and the same GEMM shape took 8 µs as
+  the pipeline's first op. Experiments ruled out data origin
+  (CPU- vs GPU-written), page attributes, weight values and GEMM shape.
+  - Shrinking those CTAs to one warp (32 or 1 threads; identical
+    results) cut GEMMs 2–4 from 313 / 164 / 86 µs to 57 / 33 / 21 µs.
+  - Shrinking the grid to one CTA (timing-only, wrong results) took
+    them to 9 µs. The remaining gap tracks the CTA count, so a
+    feature-major layout with `N` CTAs per layer would close most of
+    it.
+- **Against the CPU.** A CPU-only `select_victim` over 64 candidates
+  averages about 0.74 ms, and that includes the feature extraction
+  both paths pay. The GPU dispatch alone is now 0.25 ms, so for
+  64-candidate decisions the GPU path is likely the faster one. That
+  hasn't been measured end to end, because the 50 ms rate limit lets
+  too few decisions through for the run averages to show it. For small
+  candidate sets (8 rows) the CPU is still cheaper. Either way it is
+  about 250× the 1 µs target #965 asked to re-evaluate.
 - **First dispatch.** The first GPU-served dispatch after boot took
   88.6 ms and 84.1 ms on the two boots, all with IRQs masked. A step
   breakdown (#1037) showed inherit 39 ms and channel 42 ms, almost all
@@ -823,9 +828,9 @@ Of the #965 hardware criteria:
   expected with one GPU score per `select_victim` and the same model
   on both paths.
 - ✅ GPU latency and the 1 µs re-evaluation, measured on the batched
-  path (#1020): 0.71 ms per GPU-served decision at the default
-  `--batch 64`. The target is missed, and at these sizes the GPU path
-  is no faster than the CPU. See §"GPU dispatch latency" above. The
+  path (#1020): 0.25 ms per GPU-served decision at the default
+  `--batch 64` after #1036 (0.71 ms before). The target is missed.
+  See §"GPU dispatch latency" above. The
   §"Latency Benchmarks (M9)" table stays CPU-only, because
   `bench eviction` with the toggle on mixes a few GPU-served decisions
   with many rate-limited CPU ones, so it has no clean "Jetson GPU"

@@ -83,12 +83,11 @@
 #define EVICT_INPUT_DIM   27   /* BlockFeatures = [f32; 27] (runtime_mlp.rs) */
 #define EVICT_OUTPUT_DIM   1   /* single fp32 eviction score in [0, 1] */
 /* Rows per dispatch (#1020). The GPU computes every staged row on
- * every dispatch, so this sets the IRQs-masked dispatch time: 0.71 ms
- * at 64 vs 2.38 ms at 256 on jetson-nano-2 (2026-10-30), dominated by
- * GEMMs 2-4, which read the previous op's GPU-written output at ~14x
- * GEMM 1's per-step cost (#1036; add_bias_relu is ~3% of it). Decisions with
+ * every dispatch, so this sets the IRQs-masked dispatch time. With
+ * one-warp add_bias_relu CTAs (#1036) that is 0.26 ms at 64 and
+ * 0.56 ms at 256 on jetson-nano-2 (was 0.72 / 2.38 ms). Decisions with
  * more candidates than this go to the CPU (`oversize`); pass a larger
- * --batch for bigger pools once #1036 makes it cheap. */
+ * --batch (up to 256) for bigger pools. */
 #define EVICT_BATCH_DEFAULT 64
 /* Op 8 (sigmoid) runs as a single 256-thread CTA, and the Linux-side
  * completion check below waits on every score cell of it. */
@@ -198,7 +197,10 @@ int main(int argc, char **argv)
      * instead of op 1's output; 2 = GEMM 1 reads op 1's GPU-written
      * output instead of the CPU-written input; 3 = op 0 runs GEMM 2's
      * exact shape (K = 64, N = 32) on a CPU-filled [B][64] buffer and
-     * W_L2, so op 0 and op 2 differ only in pipeline position. */
+     * W_L2, so op 0 and op 2 differ only in pipeline position; 4 =
+     * every add_bias_relu launches a single CTA; 5 / 6 = full grid
+     * with 1 / 256 threads per add_bias_relu CTA (256 = the pre-#1036
+     * launch, kept to reproduce the old timing). */
     int exp_mode = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
@@ -220,6 +222,12 @@ int main(int argc, char **argv)
                 exp_mode = 2;
             } else if (strcmp(e, "gemm1-as-gemm2") == 0) {
                 exp_mode = 3;
+            } else if (strcmp(e, "relu-tiny") == 0) {
+                exp_mode = 4;
+            } else if (strcmp(e, "relu-threads-1") == 0) {
+                exp_mode = 5;
+            } else if (strcmp(e, "relu-threads-256") == 0) {
+                exp_mode = 6;
             } else {
                 fprintf(stderr, "unknown --exp %s\n", e);
                 return 1;
@@ -454,9 +462,19 @@ int main(int argc, char **argv)
             struct evict_op *op = &ops[post_op];
             uint32_t *cbuf = (uint32_t *)op->cbuf_page.cpu_va;
             memset(cbuf, 0, op->cbuf_page.size_bytes);
-            cbuf[0] = 256; cbuf[1] = 1; cbuf[2] = 1;          /* blockDim */
-            cbuf[3] = 1;   cbuf[4] = (uint32_t)N;             /* grid */
-            cbuf[5] = (uint32_t)M;
+            /* One warp per CTA (#1036). With H = W = 1 only thread 0 of
+             * each CTA does work, so the result is identical, but a
+             * 256-thread CTA launched 8 warps apiece, and that grid
+             * (B x N CTAs) slowed the *next* op's GEMM ~6x: on
+             * jetson-nano-2 a dispatch dropped 722 -> 258 us at batch
+             * 64 and 2365 -> 561 us at batch 256. */
+            uint32_t r_threads = exp_mode == 5 ? 1u
+                               : exp_mode == 6 ? 256u : 32u;
+            uint32_t r_gy = exp_mode == 4 ? 1u : (uint32_t)N;
+            uint32_t r_gz = exp_mode == 4 ? 1u : (uint32_t)M;
+            cbuf[0] = r_threads; cbuf[1] = 1; cbuf[2] = 1;    /* blockDim */
+            cbuf[3] = 1;   cbuf[4] = r_gy;                    /* grid */
+            cbuf[5] = r_gz;
             *(uint64_t *)((char *)cbuf + 0x160) = ops[gemm_op].output.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x168) = b[li].gpu_va;
             *(uint64_t *)((char *)cbuf + 0x170) = op->output.gpu_va;
@@ -471,13 +489,13 @@ int main(int argc, char **argv)
             gpu_populate_qmd_at(qmd, addrelu_shader_gva, op->cbuf_page.gpu_va,
                                 GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
             gpu_qmd_set_bits(qmd, QMD_CTA_THREAD_DIM0_HI,
-                             QMD_CTA_THREAD_DIM0_LO, 256);
+                             QMD_CTA_THREAD_DIM0_LO, r_threads);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_WIDTH_HI,
                              QMD_CTA_RASTER_WIDTH_LO, 1);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
-                             QMD_CTA_RASTER_HEIGHT_LO, (uint32_t)N);
+                             QMD_CTA_RASTER_HEIGHT_LO, r_gy);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_DEPTH_HI,
-                             QMD_CTA_RASTER_DEPTH_LO, (uint32_t)M);
+                             QMD_CTA_RASTER_DEPTH_LO, r_gz);
             msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         }
     }
