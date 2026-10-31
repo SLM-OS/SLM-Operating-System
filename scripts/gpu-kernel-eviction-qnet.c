@@ -196,7 +196,9 @@ int main(int argc, char **argv)
     /* #1036 timing experiments (results deliberately wrong, so the
      * self-check is skipped): 1 = GEMM 2 reads a CPU-filled buffer
      * instead of op 1's output; 2 = GEMM 1 reads op 1's GPU-written
-     * output instead of the CPU-written input. */
+     * output instead of the CPU-written input; 3 = op 0 runs GEMM 2's
+     * exact shape (K = 64, N = 32) on a CPU-filled [B][64] buffer and
+     * W_L2, so op 0 and op 2 differ only in pipeline position. */
     int exp_mode = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
@@ -216,6 +218,8 @@ int main(int argc, char **argv)
                 exp_mode = 1;
             } else if (strcmp(e, "gemm1-gpu-input") == 0) {
                 exp_mode = 2;
+            } else if (strcmp(e, "gemm1-as-gemm2") == 0) {
+                exp_mode = 3;
             } else {
                 fprintf(stderr, "unknown --exp %s\n", e);
                 return 1;
@@ -318,7 +322,7 @@ int main(int argc, char **argv)
     printf("[evict] weights + %zu input rows loaded\n", B);
 
     struct gpu_buffer exp_buf = {0};
-    if (exp_mode == 1) {
+    if (exp_mode == 1 || exp_mode == 3) {
         /* Same shape as op 1's output ([B][64] fp32), CPU-written. */
         exp_buf = gpu_alloc_buffer(&ctx, round_up_page(B * 64u * 4u), 4096);
         float *f = (float *)exp_buf.cpu_va;
@@ -398,7 +402,16 @@ int main(int argc, char **argv)
             struct evict_op *op = &ops[gemm_op];
             uint32_t *cbuf = (uint32_t *)op->cbuf_page.cpu_va;
             memset(cbuf, 0, op->cbuf_page.size_bytes);
-            uint32_t grid_x = ((uint32_t)N + 15u) / 16u;
+            /* GEMM-only shape; the following add_bias_relu keeps the
+             * layer's real N. */
+            int gK = K, gN = N;
+            uint64_t w_gva = W[li].gpu_va;
+            if (exp_mode == 3 && li == 0) {
+                gK = LAYER_IN[1];
+                gN = LAYER_OUT[1];
+                w_gva = W[1].gpu_va;
+            }
+            uint32_t grid_x = ((uint32_t)gN + 15u) / 16u;
             uint32_t grid_y = ((uint32_t)M + 15u) / 16u;
             cbuf[0] = 16; cbuf[1] = 16; cbuf[2] = 1;
             cbuf[3] = grid_x; cbuf[4] = grid_y; cbuf[5] = 1;
@@ -409,12 +422,13 @@ int main(int argc, char **argv)
                                        : ops[post_op - 2].output.gpu_va;
             if (exp_mode == 1 && li == 1) a_gva = exp_buf.gpu_va;
             if (exp_mode == 2 && li == 0) a_gva = ops[1].output.gpu_va;
+            if (exp_mode == 3 && li == 0) a_gva = exp_buf.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x160) = a_gva;
-            *(uint64_t *)((char *)cbuf + 0x168) = W[li].gpu_va;
+            *(uint64_t *)((char *)cbuf + 0x168) = w_gva;
             *(uint64_t *)((char *)cbuf + 0x170) = op->output.gpu_va;
             *(int32_t  *)((char *)cbuf + 0x178) = M;
-            *(int32_t  *)((char *)cbuf + 0x17C) = K;
-            *(int32_t  *)((char *)cbuf + 0x180) = N;
+            *(int32_t  *)((char *)cbuf + 0x17C) = gK;
+            *(int32_t  *)((char *)cbuf + 0x180) = gN;
             msync(op->cbuf_page.cpu_va, op->cbuf_page.size_bytes, MS_SYNC);
 
             uint32_t *qmd = (uint32_t *)op->qmd_page.cpu_va;
