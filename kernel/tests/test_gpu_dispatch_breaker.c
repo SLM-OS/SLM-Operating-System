@@ -356,6 +356,65 @@ static void test_rate_limit_sched_and_eviction_are_independent(void)
         slm_gpu_eviction_dispatch_test_within_window(now, last));
 }
 
+/* ---- Sched-MLP dispatch counters (`sched stats`) -------------------
+ *
+ * The counters exist on every build; NULL outs must be tolerated and
+ * the reset must clear every steady-state field. */
+static void test_sched_gpu_stats_reset_and_null_outs(void)
+{
+    slm_gpu_sched_dispatch_stats(NULL, NULL, NULL);
+    slm_gpu_sched_dispatch_stats_reset();
+    uint64_t a = 1, ok = 1, rl = 1;
+    slm_gpu_sched_dispatch_stats(&a, &ok, &rl);
+    TEST_ASSERT_EQUAL_UINT64(0, a);
+    TEST_ASSERT_EQUAL_UINT64(0, ok);
+    TEST_ASSERT_EQUAL_UINT64(0, rl);
+
+    slm_gpu_sched_dispatch_timing(NULL);
+    struct slm_gpu_sched_timing t;
+    __builtin_memset(&t, 0xA5, sizeof(t));
+    slm_gpu_sched_dispatch_timing(&t);
+    TEST_ASSERT_EQUAL_UINT64(0, t.count);
+    TEST_ASSERT_EQUAL_UINT64(0, t.total_ns);
+    TEST_ASSERT_EQUAL_UINT64(0, t.min_ns);
+    TEST_ASSERT_EQUAL_UINT64(0, t.max_ns);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_UINT64(0, t.first_ns);
+#endif
+}
+
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+/* With no GPU the stub still counts the attempt (so `sched stats`
+ * shows routing on QEMU), never reports ok or a timing sample, and
+ * leaves the eviction counters alone. */
+static void test_sched_gpu_stub_counts_attempt_only(void)
+{
+    float state[108] = { 0 };
+    float logits[42];
+    slm_gpu_sched_dispatch_stats_reset();
+    slm_gpu_eviction_dispatch_stats_reset();
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_sched_inference(
+        state, sizeof(state), logits));
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_run_sched_inference(
+        state, sizeof(state), logits));
+    uint64_t a = 0, ok = 1, rl = 1;
+    slm_gpu_sched_dispatch_stats(&a, &ok, &rl);
+    TEST_ASSERT_EQUAL_UINT64(2, a);
+    TEST_ASSERT_EQUAL_UINT64(0, ok);
+    TEST_ASSERT_EQUAL_UINT64(0, rl);
+    struct slm_gpu_sched_timing t;
+    slm_gpu_sched_dispatch_timing(&t);
+    TEST_ASSERT_EQUAL_UINT64(0, t.count);
+    TEST_ASSERT_EQUAL_UINT64(0, t.first_ns);
+    uint64_t ev = 1;
+    slm_gpu_eviction_dispatch_stats(&ev, NULL, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT64(0, ev);
+    slm_gpu_sched_dispatch_stats_reset();
+    slm_gpu_sched_dispatch_stats(&a, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT64(0, a);
+}
+#endif
+
 int test_suite_gpu_dispatch_breaker(void)
 {
     UNITY_BEGIN();
@@ -391,6 +450,12 @@ int test_suite_gpu_dispatch_breaker(void)
     RUN_TEST(test_eviction_rate_limit_far_outside_window);
     RUN_TEST(test_eviction_rate_limit_backward_time_safe);
     RUN_TEST(test_rate_limit_sched_and_eviction_are_independent);
+
+    /* Sched-MLP dispatch counters / timing (`sched stats`). */
+    RUN_TEST(test_sched_gpu_stats_reset_and_null_outs);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    RUN_TEST(test_sched_gpu_stub_counts_attempt_only);
+#endif
 
     return UNITY_END();
 }

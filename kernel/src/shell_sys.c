@@ -7918,6 +7918,71 @@ static int sched_model_autoload_cmd(int argc, char *argv[])
 }
 #endif
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/* #1036: per-op split of the most recent v5/v6 pipeline dispatch of
+ * any kind (each op timed to its drain-waiting semaphore), shown by
+ * `eviction stats` and `sched stats`. The eviction pipeline is 9 ops
+ * and sched / MNIST are 8; the "+N more" note covers any future
+ * pipeline over 16 (the handoff cap is GA10B_PIPELINE_MAX_OPS = 170).
+ * Prints nothing before the first dispatch. */
+static void print_last_pipeline_ops(const char *label)
+{
+    uint64_t op_ns[16];
+    uint32_t n_total = 0;
+    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(
+        op_ns, (uint32_t)(sizeof(op_ns) / sizeof(op_ns[0])), &n_total);
+    if (n_ops == 0u) return;
+    shell_puts(label);
+    for (uint32_t i = 0; i < n_ops; i++) {
+        shell_printf("%s%llu", i ? " " : "",
+                     (unsigned long long)(op_ns[i] / 1000u));
+    }
+    shell_puts(" us");
+    if (n_total > n_ops) {
+        shell_printf(" (+%u more)", (unsigned)(n_total - n_ops));
+    }
+    shell_puts("\r\n");
+}
+#endif
+
+#ifdef CONFIG_AI_SCHEDULER
+/* `sched stats` GPU section: routing counters and wall time of the
+ * `ai_mlp` GA10B dispatches (`gpu use sched on`). Counters are since
+ * boot or the last `sched stats gpu-reset`, not per policy. The toggle
+ * is printed so "0 attempts" can be told apart from "toggle off". */
+static void sched_print_gpu_stats(void)
+{
+    uint64_t attempts = 0, ok = 0, rl = 0;
+    slm_gpu_sched_dispatch_stats(&attempts, &ok, &rl);
+    uint64_t fallback = attempts > ok ? attempts - ok : 0;
+    shell_puts("\r\nGPU dispatch (ai_mlp):\r\n");
+    shell_printf("  Attempts:     %llu, ok %llu, fallback %llu "
+                 "(rate-limited %llu)\r\n",
+                 (unsigned long long)attempts, (unsigned long long)ok,
+                 (unsigned long long)fallback, (unsigned long long)rl);
+    struct slm_gpu_sched_timing t;
+    slm_gpu_sched_dispatch_timing(&t);
+    if (t.count > 0u) {
+        shell_printf("  Time:         avg %llu us, min %llu us, max %llu us "
+                     "over %llu; first %llu us incl. bring-up\r\n",
+                     (unsigned long long)(t.total_ns / t.count / 1000u),
+                     (unsigned long long)(t.min_ns / 1000u),
+                     (unsigned long long)(t.max_ns / 1000u),
+                     (unsigned long long)t.count,
+                     (unsigned long long)(t.first_ns / 1000u));
+    } else if (t.first_ns > 0u) {
+        shell_printf("  Time:         first %llu us incl. bring-up "
+                     "(no steady-state samples)\r\n",
+                     (unsigned long long)(t.first_ns / 1000u));
+    }
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    print_last_pipeline_ops("  Last ops:     ");
+#endif
+    shell_printf("  Toggle:       sched=%s\r\n",
+                 gpu_consumer_enabled(GPU_CONSUMER_SCHED) ? "on" : "off");
+}
+#endif
+
 int cmd_sched(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -8162,6 +8227,15 @@ int cmd_sched(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "stats") == 0) {
+#ifdef CONFIG_AI_SCHEDULER
+        if (argc >= 3 && strcmp(argv[2], "gpu-reset") == 0) {
+            /* Zero the GPU dispatch counters and timing so one
+             * measurement window can be read on its own. */
+            slm_gpu_sched_dispatch_stats_reset();
+            shell_puts("sched GPU dispatch counters reset\r\n");
+            return 0;
+        }
+#endif
         struct sched_stats stats;
         scheduler_get_stats(&stats);
 
@@ -8215,6 +8289,7 @@ int cmd_sched(int argc, char *argv[])
                 }
             }
         }
+        sched_print_gpu_stats();
 #endif
 
         return 0;
@@ -8413,27 +8488,7 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
                      (unsigned long long)(t.first_ns / 1000u));
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* #1036: per-op split of the most recent v5/v6 pipeline dispatch
-     * of any kind (each op timed to its drain-waiting semaphore). The
-     * eviction pipeline is 9 ops and sched / MNIST are 8; the "+N more"
-     * note covers any future pipeline over 16 (the handoff cap is
-     * GA10B_PIPELINE_MAX_OPS = 170). */
-    uint64_t op_ns[16];
-    uint32_t n_total = 0;
-    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(
-        op_ns, (uint32_t)(sizeof(op_ns) / sizeof(op_ns[0])), &n_total);
-    if (n_ops > 0u) {
-        shell_puts("  Last pipeline ops:   ");
-        for (uint32_t i = 0; i < n_ops; i++) {
-            shell_printf("%s%llu", i ? " " : "",
-                         (unsigned long long)(op_ns[i] / 1000u));
-        }
-        shell_puts(" us");
-        if (n_total > n_ops) {
-            shell_printf(" (+%u more)", (unsigned)(n_total - n_ops));
-        }
-        shell_puts("\r\n");
-    }
+    print_last_pipeline_ops("  Last pipeline ops:   ");
 #endif
     shell_printf("  GPU toggles:         inference=%s eviction=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_INFERENCE) ? "on" : "off",
