@@ -31,6 +31,7 @@
  *
  * Usage (Linux self-check, no kexec):
  *   sudo ./gpu-kernel-sched-mlp [--weights-dir PATH] [--shader-dir PATH]
+ *       [--relu-threads N]   (add_bias_relu CTA size, default 32; #1040)
  *
  * Usage (with v6 handoff for SLM-OS PR-3 to consume post-kexec):
  *   sudo ./gpu-kernel-sched-mlp --preserve-for-kexec [--timeout-secs N]
@@ -120,6 +121,9 @@ int main(int argc, char **argv)
     int timeout_secs = 900;
     const char *weights_dir = "./sched-weights";
     const char *shader_dir  = ".";
+    /* Threads per add_bias_relu CTA (#1040). One warp by default; 256
+     * reproduces the pre-#1040 launch for timing comparisons. */
+    uint32_t relu_threads = 32u;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
             preserve = true;
@@ -130,6 +134,13 @@ int main(int argc, char **argv)
             weights_dir = argv[++i];
         } else if (strcmp(argv[i], "--shader-dir") == 0 && i + 1 < argc) {
             shader_dir = argv[++i];
+        } else if (strcmp(argv[i], "--relu-threads") == 0 && i + 1 < argc) {
+            int t = atoi(argv[++i]);
+            if (t < 1 || t > 256) {
+                fprintf(stderr, "--relu-threads must be 1..256\n");
+                return 1;
+            }
+            relu_threads = (uint32_t)t;
         }
     }
 
@@ -151,7 +162,8 @@ int main(int argc, char **argv)
     make_path(path, sizeof(path), shader_dir, "add_bias_relu_fp32_shader.sass");
     struct gpu_buffer addrelu_shader =
         gpu_load_shader_buffer(&ctx, path, &addrelu_size);
-    printf("[sched] addrelu shader %zu bytes\n", addrelu_size);
+    printf("[sched] addrelu shader %zu bytes, %u threads per CTA\n",
+           addrelu_size, relu_threads);
 
     uint64_t gemm_shader_gva    = ctx.shader_gva;
     uint64_t addrelu_shader_gva = addrelu_shader.gpu_va;
@@ -300,7 +312,14 @@ int main(int argc, char **argv)
             struct sched_op *op = &ops[post_op];
             uint32_t *cbuf = (uint32_t *)op->cbuf_page.cpu_va;
             memset(cbuf, 0, op->cbuf_page.size_bytes);
-            cbuf[0] = 256; cbuf[1] = 1; cbuf[2] = 1;          /* blockDim */
+            /* One warp per CTA (#1040, same fix as #1036 in the
+             * eviction producer). With H = W = 1 only thread 0 of each
+             * CTA does work, so the result is identical; 256-thread
+             * CTAs launched 8 warps apiece and slowed the following
+             * GEMM. On jetson-nano-2 GEMMs 2-4 (L2, L3, OUT) dropped
+             * from 15-27 us to 9 us each and the 8-op total from
+             * ~187 to ~155 us. */
+            cbuf[0] = relu_threads; cbuf[1] = 1; cbuf[2] = 1; /* blockDim */
             cbuf[3] = 1;   cbuf[4] = (uint32_t)N; cbuf[5] = 1; /* grid */
             *(uint64_t *)((char *)cbuf + 0x160) = ops[gemm_op].output.gpu_va;
             *(uint64_t *)((char *)cbuf + 0x168) = b[li].gpu_va;
@@ -316,7 +335,7 @@ int main(int argc, char **argv)
             gpu_populate_qmd_at(qmd, addrelu_shader_gva, op->cbuf_page.gpu_va,
                                 GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
             gpu_qmd_set_bits(qmd, QMD_CTA_THREAD_DIM0_HI,
-                             QMD_CTA_THREAD_DIM0_LO, 256);
+                             QMD_CTA_THREAD_DIM0_LO, relu_threads);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_WIDTH_HI,
                              QMD_CTA_RASTER_WIDTH_LO, 1);
             gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
