@@ -315,9 +315,9 @@ int main(int argc, char **argv)
             /* One warp per CTA (#1040, same fix as #1036 in the
              * eviction producer). With H = W = 1 only thread 0 of each
              * CTA does work, so the result is identical; 256-thread
-             * CTAs launched 8 warps apiece, and on jetson-nano-2 that
-             * grid slowed the following GEMM ~6x in the eviction
-             * pipeline. */
+             * CTAs launched 8 warps apiece and slowed the following
+             * GEMM. On jetson-nano-2 GEMMs 1-3 dropped from 15-27 us
+             * to 9 us each and the 8-op total from ~187 to ~155 us. */
             cbuf[0] = relu_threads; cbuf[1] = 1; cbuf[2] = 1; /* blockDim */
             cbuf[3] = 1;   cbuf[4] = (uint32_t)N; cbuf[5] = 1; /* grid */
             *(uint64_t *)((char *)cbuf + 0x160) = ops[gemm_op].output.gpu_va;
