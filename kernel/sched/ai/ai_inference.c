@@ -263,19 +263,15 @@ void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
 #ifdef PLATFORM_JETSON_ORIN_NANO
     /* GPU fastpath. When `gpu use sched on` is set AND the GA10B
      * sched-MLP handoff is present in DRAM, dispatch the forward
-     * pass on the GPU. Sub-millisecond cost via QMD chain (~few
-     * hundred ms first run, includes channel inherit; subsequent
-     * runs amortize). On any error, fall through to CPU NEON.
+     * pass on the GPU. On any error, fall through to CPU NEON.
      *
-     * Caveat: GPU dispatch is ~6× slower than CPU NEON (post-handoff)
-     * because the v6 channel-inherit path serializes per QMD. The
-     * toggle is a deliberate operator-intent flag, not a perf default.
-     * See docs/design/gpu-policy-models.md §"Why this matters".
-     *
-     * Also note that the per-call `slm_gpu_run_sched_inference` does
-     * an inherit + channel scan on its first invocation (one-time
-     * ~300 ms cost), then reuses g_sched_bringup state for steady-
-     * state dispatch. */
+     * Cost on jetson-nano-2 (2026-10-31, `sched stats`): 0.23 ms per
+     * GPU-served pass with IRQs masked, of which ~0.15 ms is the 8 ops
+     * themselves. The first call also inherits the channel (~2.8 ms
+     * in all), then g_sched_bringup state is reused. At most one pass
+     * per 50 ms is GPU-served; the rest of a task-create burst gets
+     * -1 and runs on CPU NEON. The toggle is a deliberate
+     * operator-intent flag, not a perf default. */
     if (gpu_consumer_enabled(GPU_CONSUMER_SCHED)) {
         int rc = slm_gpu_run_sched_inference(state,
                                               AI_STATE_DIM * sizeof(float),
