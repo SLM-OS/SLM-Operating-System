@@ -1322,6 +1322,37 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
                                  void *logits_bytes_out);
 
 /*
+ * Sched-MLP GPU dispatch counters and timing, surfaced by
+ * `sched stats` and cleared by `sched stats gpu-reset`.
+ * `attempts` = calls into `slm_gpu_run_sched_inference` (one per
+ * `ai_mlp` forward pass while `gpu use sched` is on); `ok` = passes
+ * served by the GPU; `rate_limited` = fallbacks rejected by the
+ * 50 ms window. The remaining `attempts - ok - rate_limited` fell
+ * back on a downstream error. Attempts are counted on every platform
+ * (the non-Jetson stub counts and fails). Any out pointer may be
+ * NULL.
+ *
+ * Each timing sample is the wall time of one successful dispatch:
+ * try-lock, input copy, launch, completion poll and logits read,
+ * which is also the span run with IRQs masked. The first success
+ * after boot includes channel bring-up, so it is reported alone in
+ * `first_ns` and left out of the rest. All zero on non-Jetson
+ * builds. The reset clears everything except `first_ns`.
+ */
+void slm_gpu_sched_dispatch_stats(uint64_t *out_attempts, uint64_t *out_ok,
+                                  uint64_t *out_rate_limited);
+void slm_gpu_sched_dispatch_stats_reset(void);
+
+struct slm_gpu_sched_timing {
+    uint64_t first_ns;
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+};
+void slm_gpu_sched_dispatch_timing(struct slm_gpu_sched_timing *out);
+
+/*
  * Eviction-MLP dispatch — PR-6 of docs/design/gpu-policy-models.md.
  *
  * Runs the page-eviction MLP forward pass on GA10B by dispatching

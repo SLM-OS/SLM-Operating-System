@@ -216,6 +216,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
 | `sched stats` | Show scheduler statistics and per-CPU utilization |
+| `sched stats gpu-reset` | Zero the `ai_mlp` GPU dispatch counters and timing shown by `sched stats` (AI scheduler builds) |
 | `timdiag` | Timer/interrupt delivery diagnostic — ARM64 only. Dumps timer state, GIC group configuration, CPU interface registers, and SPI group bitmap. Helps investigate whether hardware timer preemption is available on the platform. See `docs/archive/investigations/jetson-preemption-investigation.md` for interpretation. |
 | `timdiag fiq` | Same diagnostic but also runs the FIQ delivery test (writes `ICC_IGRPEN0` and unmasks `DAIF.F`). **May crash on Jetson** if TF-A traps Group 0 register access. Use only for investigation. |
 | `timdiag sgi` | Pi 5 + `PI5_IRQ_DIAG` only. Self-SGI probe (Track B of #134) — fires SGI 0 to the calling CPU and polls `GICC_HPPIR` to verify the GIC distributor → CPU interface path works. DAIF stays masked the whole time so the IRQ vector never runs. Reports SGI propagation outcome (HPPIR=0 means propagated). See `docs/archive/investigations/pi5-armstub-track-c.md` for interpretation. |
@@ -519,6 +520,7 @@ sched                                       - Show current policy name
 sched policy                                - List all registered policies
 sched policy <name>                         - Switch to named policy
 sched stats                                 - Show scheduler statistics
+sched stats gpu-reset                       - Zero the ai_mlp GPU dispatch counters
 ```
 
 **Policy switching example:**
@@ -545,6 +547,15 @@ Per-CPU Utilization:
   CPU 2: 2% (161 / 8042 ticks)
   CPU 3: 1% (80 / 8042 ticks)
 ```
+
+On AI scheduler builds `sched stats` ends with a `GPU dispatch (ai_mlp)` section:
+
+- **Attempts:** calls into the GA10B path, with how many the GPU served (`ok`), how many fell back to the CPU, and how many of those fallbacks were rejected by the 50 ms rate limit.
+- **Time:** wall time of GPU-served dispatches (average, minimum and maximum). This is the span run with IRQs masked. The first dispatch after boot includes channel bring-up, so it is reported separately.
+- **Last ops:** per-op GPU time of the most recent pipeline dispatch of any kind, marked `(latest dispatch, any kind)` because after an eviction or MNIST dispatch it is not an `ai_mlp` pass (Jetson only).
+- **Toggle:** the `gpu use sched` state.
+
+The counters run from boot, or from the last `sched stats gpu-reset`. Off Jetson every attempt falls back, so only the attempt count moves.
 
 **Note:** `ai_mlp` and `ai_ppo` policies are only available when the kernel is built with `-DENABLE_AI_SCHEDULER=ON`. The `heuristic` policy is always available.
 

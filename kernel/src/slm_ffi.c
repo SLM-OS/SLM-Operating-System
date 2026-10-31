@@ -592,6 +592,75 @@ void slm_gpu_eviction_dispatch_stats_reset(void)
                           memory_order_relaxed);
 }
 
+/* Sched-MLP GPU dispatch counters and timing (`sched stats`).
+ *
+ * Same shape as the eviction set above, minus `oversize` and rows:
+ * the sched input is always one AI_STATE_DIM state vector.
+ * `attempts` counts every entry into `slm_gpu_run_sched_inference`
+ * (one per `ai_mlp` forward pass while `gpu use sched` is on); `ok`
+ * counts GPU-served passes; `rate_limited` is the subset of
+ * fallbacks rejected by the 50 ms window. The rest fell back on a
+ * downstream error (no handoff, try-lock contention, breaker, GA10B
+ * fault). Timing covers successful dispatches only, measured around
+ * slm_gpu_try_run_with_input as on the eviction path; the first
+ * success pays for bring-up and is kept apart in `first_ns`. The
+ * non-Jetson stub counts attempts too, so the counters are
+ * observable under QEMU. Relaxed ordering throughout: one writer per
+ * dispatch, read after the fact by the shell. */
+static _Atomic uint64_t g_sched_gpu_attempts;
+static _Atomic uint64_t g_sched_gpu_ok;
+static _Atomic uint64_t g_sched_gpu_rate_limited;
+static _Atomic uint64_t g_sched_gpu_time_first_ns;
+static _Atomic uint64_t g_sched_gpu_time_count;
+static _Atomic uint64_t g_sched_gpu_time_total_ns;
+static _Atomic uint64_t g_sched_gpu_time_min_ns;
+static _Atomic uint64_t g_sched_gpu_time_max_ns;
+
+void slm_gpu_sched_dispatch_stats(uint64_t *out_attempts, uint64_t *out_ok,
+                                  uint64_t *out_rate_limited)
+{
+    if (out_attempts) {
+        *out_attempts = atomic_load_explicit(&g_sched_gpu_attempts,
+                                             memory_order_relaxed);
+    }
+    if (out_ok) {
+        *out_ok = atomic_load_explicit(&g_sched_gpu_ok, memory_order_relaxed);
+    }
+    if (out_rate_limited) {
+        *out_rate_limited = atomic_load_explicit(&g_sched_gpu_rate_limited,
+                                                 memory_order_relaxed);
+    }
+}
+
+void slm_gpu_sched_dispatch_timing(struct slm_gpu_sched_timing *out)
+{
+    if (!out) return;
+    out->first_ns = atomic_load_explicit(&g_sched_gpu_time_first_ns,
+                                         memory_order_relaxed);
+    out->count    = atomic_load_explicit(&g_sched_gpu_time_count,
+                                         memory_order_relaxed);
+    out->total_ns = atomic_load_explicit(&g_sched_gpu_time_total_ns,
+                                         memory_order_relaxed);
+    out->min_ns   = atomic_load_explicit(&g_sched_gpu_time_min_ns,
+                                         memory_order_relaxed);
+    out->max_ns   = atomic_load_explicit(&g_sched_gpu_time_max_ns,
+                                         memory_order_relaxed);
+}
+
+void slm_gpu_sched_dispatch_stats_reset(void)
+{
+    atomic_store_explicit(&g_sched_gpu_attempts, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_sched_gpu_ok, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_sched_gpu_rate_limited, 0u,
+                          memory_order_relaxed);
+    /* first_ns is a once-per-boot bring-up figure; keep it. */
+    atomic_store_explicit(&g_sched_gpu_time_count, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_sched_gpu_time_total_ns, 0u,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_sched_gpu_time_min_ns, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_sched_gpu_time_max_ns, 0u, memory_order_relaxed);
+}
+
 #ifdef PLATFORM_JETSON_ORIN_NANO
 /* Per-kind dispatch lock — serialises every `slm_gpu_*` entry
  * point (run / set_input / set_input_fill / run_with_input and
@@ -1190,6 +1259,26 @@ static int slm_gpu_try_run_with_input(uint32_t kind,
     return rc;
 }
 
+/* Add one steady-state dispatch time to a count/total/min/max set
+ * (the eviction and sched timing above). Callers run after the
+ * dispatch lock is released, so two back-to-back successes could
+ * overlap here; the 50 ms windows make that rare. The sums are
+ * atomic adds; a lost min/max update only blurs that one extreme. */
+static void dispatch_time_sample(_Atomic uint64_t *count,
+                                 _Atomic uint64_t *total_ns,
+                                 _Atomic uint64_t *min_ns,
+                                 _Atomic uint64_t *max_ns, uint64_t dt)
+{
+    uint64_t n = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(total_ns, dt, memory_order_relaxed);
+    if (n == 0u || dt < atomic_load_explicit(min_ns, memory_order_relaxed)) {
+        atomic_store_explicit(min_ns, dt, memory_order_relaxed);
+    }
+    if (dt > atomic_load_explicit(max_ns, memory_order_relaxed)) {
+        atomic_store_explicit(max_ns, dt, memory_order_relaxed);
+    }
+}
+
 /* ---- Kind-named shims (backward compatibility) ----
  *
  * Existing Lua bindings (l_gpu_run_mnist, l_gpu_set_mnist_input)
@@ -1235,18 +1324,36 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
      *
      * Either rejection path returns -1; `forward_via_device` already
      * silently falls back to CPU NEON for negative rc. */
+    atomic_fetch_add_explicit(&g_sched_gpu_attempts, 1u,
+                              memory_order_relaxed);
     uint64_t now = slm_get_time_ns();
     uint64_t last = atomic_load_explicit(&g_sched_dispatch_last_ns,
                                           memory_order_relaxed);
     if (sched_dispatch_within_rate_limit(now, last)) {
+        atomic_fetch_add_explicit(&g_sched_gpu_rate_limited, 1u,
+                                  memory_order_relaxed);
         return -1;
     }
 
+    uint64_t t0 = slm_get_time_ns();
     int rc = slm_gpu_try_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
                                          state_bytes, state_bytes_len,
                                          logits_bytes_out, 168u);
+    uint64_t dt = slm_get_time_ns() - t0;
     report_quiet_bringup(GA10B_PIPELINE_KIND_SCHED_MLP);
     if (rc == 0) {
+        static atomic_bool first_timed;
+        atomic_fetch_add_explicit(&g_sched_gpu_ok, 1u, memory_order_relaxed);
+        if (!atomic_exchange_explicit(&first_timed, true,
+                                      memory_order_relaxed)) {
+            atomic_store_explicit(&g_sched_gpu_time_first_ns, dt,
+                                  memory_order_relaxed);
+        } else {
+            dispatch_time_sample(&g_sched_gpu_time_count,
+                                 &g_sched_gpu_time_total_ns,
+                                 &g_sched_gpu_time_min_ns,
+                                 &g_sched_gpu_time_max_ns, dt);
+        }
         /* Update timestamp only on a successful dispatch. Failed
          * dispatches (-1 from try-lock contention or downstream rc)
          * leave the window open so the next caller can attempt a
@@ -1340,27 +1447,12 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
                         (unsigned long)(st[1] / 1000u),
                         (unsigned long)(st[2] / 1000u));
         } else {
-            /* Runs after the dispatch lock is released, so two
-             * back-to-back successes could overlap here; the 50 ms
-             * window makes that rare. The sums are atomic adds; a
-             * lost min/max update only blurs that one extreme. */
-            uint64_t n = atomic_fetch_add_explicit(&g_eviction_gpu_time_count,
-                                                   1u, memory_order_relaxed);
-            atomic_fetch_add_explicit(&g_eviction_gpu_time_total_ns, dt,
-                                      memory_order_relaxed);
+            dispatch_time_sample(&g_eviction_gpu_time_count,
+                                 &g_eviction_gpu_time_total_ns,
+                                 &g_eviction_gpu_time_min_ns,
+                                 &g_eviction_gpu_time_max_ns, dt);
             atomic_fetch_add_explicit(&g_eviction_gpu_time_rows_total, n_rows,
                                       memory_order_relaxed);
-            uint64_t lo = atomic_load_explicit(&g_eviction_gpu_time_min_ns,
-                                               memory_order_relaxed);
-            if (n == 0u || dt < lo) {
-                atomic_store_explicit(&g_eviction_gpu_time_min_ns, dt,
-                                      memory_order_relaxed);
-            }
-            if (dt > atomic_load_explicit(&g_eviction_gpu_time_max_ns,
-                                          memory_order_relaxed)) {
-                atomic_store_explicit(&g_eviction_gpu_time_max_ns, dt,
-                                      memory_order_relaxed);
-            }
         }
     }
     return rc;
@@ -1410,6 +1502,10 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
                                  void *logits_bytes_out)
 {
     (void)state_bytes; (void)state_bytes_len; (void)logits_bytes_out;
+    /* Counted with no GPU, as on the eviction stub, so the counters
+     * are observable on QEMU; every attempt is a fallback. */
+    atomic_fetch_add_explicit(&g_sched_gpu_attempts, 1u,
+                              memory_order_relaxed);
     return -1;
 }
 int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
