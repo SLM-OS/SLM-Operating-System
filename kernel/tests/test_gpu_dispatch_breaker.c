@@ -389,6 +389,8 @@ static void test_sched_gpu_stats_reset_and_null_outs(void)
  * leaves the eviction counters alone. */
 static void test_sched_gpu_stub_counts_attempt_only(void)
 {
+    /* AI_STATE_DIM state, AI_SCHED_N_ACTIONS logits (ai_types.h is
+     * not reachable from here); the stub reads neither. */
     float state[108] = { 0 };
     float logits[42];
     slm_gpu_sched_dispatch_stats_reset();

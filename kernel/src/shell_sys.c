@@ -7924,8 +7924,9 @@ static int sched_model_autoload_cmd(int argc, char *argv[])
  * `eviction stats` and `sched stats`. The eviction pipeline is 9 ops
  * and sched / MNIST are 8; the "+N more" note covers any future
  * pipeline over 16 (the handoff cap is GA10B_PIPELINE_MAX_OPS = 170).
- * Prints nothing before the first dispatch. */
-static void print_last_pipeline_ops(const char *label)
+ * `note` is printed after the times (may be ""). Prints nothing
+ * before the first dispatch. */
+static void print_last_pipeline_ops(const char *label, const char *note)
 {
     uint64_t op_ns[16];
     uint32_t n_total = 0;
@@ -7941,6 +7942,7 @@ static void print_last_pipeline_ops(const char *label)
     if (n_total > n_ops) {
         shell_printf(" (+%u more)", (unsigned)(n_total - n_ops));
     }
+    shell_puts(note);
     shell_puts("\r\n");
 }
 #endif
@@ -7976,7 +7978,9 @@ static void sched_print_gpu_stats(void)
                      (unsigned long long)(t.first_ns / 1000u));
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    print_last_pipeline_ops("  Last ops:     ");
+    /* The split is of the latest dispatch of any kind, which after an
+     * eviction or MNIST run is not an ai_mlp pass; say so. */
+    print_last_pipeline_ops("  Last ops:     ", " (latest dispatch, any kind)");
 #endif
     shell_printf("  Toggle:       sched=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_SCHED) ? "on" : "off");
@@ -8235,6 +8239,11 @@ int cmd_sched(int argc, char *argv[])
             shell_puts("sched GPU dispatch counters reset\r\n");
             return 0;
         }
+#else
+        if (argc >= 3 && strcmp(argv[2], "gpu-reset") == 0) {
+            shell_puts("sched stats gpu-reset: requires AI_SCHED=ON\r\n");
+            return 1;
+        }
 #endif
         struct sched_stats stats;
         scheduler_get_stats(&stats);
@@ -8488,7 +8497,7 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
                      (unsigned long long)(t.first_ns / 1000u));
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    print_last_pipeline_ops("  Last pipeline ops:   ");
+    print_last_pipeline_ops("  Last pipeline ops:   ", "");
 #endif
     shell_printf("  GPU toggles:         inference=%s eviction=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_INFERENCE) ? "on" : "off",

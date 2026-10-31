@@ -552,7 +552,7 @@ On AI scheduler builds `sched stats` ends with a `GPU dispatch (ai_mlp)` section
 
 - **Attempts:** calls into the GA10B path, with how many the GPU served (`ok`), how many fell back to the CPU, and how many of those fallbacks were rejected by the 50 ms rate limit.
 - **Time:** wall time of GPU-served dispatches (average, minimum and maximum). This is the span run with IRQs masked. The first dispatch after boot includes channel bring-up, so it is reported separately.
-- **Last ops:** per-op GPU time of the most recent pipeline dispatch of any kind (Jetson only).
+- **Last ops:** per-op GPU time of the most recent pipeline dispatch of any kind, marked `(latest dispatch, any kind)` because after an eviction or MNIST dispatch it is not an `ai_mlp` pass (Jetson only).
 - **Toggle:** the `gpu use sched` state.
 
 The counters run from boot, or from the last `sched stats gpu-reset`. Off Jetson every attempt falls back, so only the attempt count moves.

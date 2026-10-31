@@ -1259,19 +1259,6 @@ static int slm_gpu_try_run_with_input(uint32_t kind,
     return rc;
 }
 
-/* ---- Kind-named shims (backward compatibility) ----
- *
- * Existing Lua bindings (l_gpu_run_mnist, l_gpu_set_mnist_input)
- * and Rust FFI callers (kernel_ffi::gpu_run_mnist) still call the
- * MNIST-named entry points. These thin wrappers preserve those
- * symbols. New model integrations should use the generic
- * slm_gpu_run / slm_gpu_set_input / slm_gpu_run_with_input
- * functions directly with the appropriate kind constant.
- *
- * Output-size constants below are derived from the model:
- *   MNIST:     10 fp32 logits = 40 bytes
- *   SCHED_MLP: 42 fp32 logits = 168 bytes (AI_SCHED_N_ACTIONS=42) */
-
 /* Add one steady-state dispatch time to a count/total/min/max set
  * (the eviction and sched timing above). Callers run after the
  * dispatch lock is released, so two back-to-back successes could
@@ -1291,6 +1278,19 @@ static void dispatch_time_sample(_Atomic uint64_t *count,
         atomic_store_explicit(max_ns, dt, memory_order_relaxed);
     }
 }
+
+/* ---- Kind-named shims (backward compatibility) ----
+ *
+ * Existing Lua bindings (l_gpu_run_mnist, l_gpu_set_mnist_input)
+ * and Rust FFI callers (kernel_ffi::gpu_run_mnist) still call the
+ * MNIST-named entry points. These thin wrappers preserve those
+ * symbols. New model integrations should use the generic
+ * slm_gpu_run / slm_gpu_set_input / slm_gpu_run_with_input
+ * functions directly with the appropriate kind constant.
+ *
+ * Output-size constants below are derived from the model:
+ *   MNIST:     10 fp32 logits = 40 bytes
+ *   SCHED_MLP: 42 fp32 logits = 168 bytes (AI_SCHED_N_ACTIONS=42) */
 
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
