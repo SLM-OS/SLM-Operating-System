@@ -8415,11 +8415,13 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* #1036: per-op split of the most recent v5/v6 pipeline dispatch
      * of any kind (each op timed to its drain-waiting semaphore). The
-     * eviction pipeline is 9 ops; a longer one that ran last (sched,
-     * inference) is truncated with a "+N more" note. */
+     * eviction pipeline is 9 ops and sched / MNIST are 8; the "+N more"
+     * note covers any future pipeline over 16 (the handoff cap is
+     * GA10B_PIPELINE_MAX_OPS = 170). */
     uint64_t op_ns[16];
     uint32_t n_total = 0;
-    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(op_ns, 16u, &n_total);
+    uint32_t n_ops = ga10b_bringup_last_pipeline_op_ns(
+        op_ns, (uint32_t)(sizeof(op_ns) / sizeof(op_ns[0])), &n_total);
     if (n_ops > 0u) {
         shell_puts("  Last pipeline ops:   ");
         for (uint32_t i = 0; i < n_ops; i++) {
