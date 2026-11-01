@@ -38,6 +38,7 @@
 #   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-helper     /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-cpufreq-pin /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -94,6 +95,12 @@
 #                       --no-helper if you've staged your own helper or
 #                       deliberately want CPU-only inference.
 #
+#   --no-cpufreq-pin    Skip pinning each cpufreq policy's
+#                       scaling_min_freq to scaling_max_freq before
+#                       kexec. SLM-OS copies CPU 0's frequency to every
+#                       core at boot (#1053), so without the pin SLM-OS
+#                       runs at whatever the governor last picked.
+#
 # Environment:
 #   SLMOS_HELPER_DIR    Directory containing gpu-kernel-mnist /
 #                       gpu-kernel-sched-mlp + their weights/shaders.
@@ -122,6 +129,7 @@ NO_USB_HOLD=0
 NO_SMMU_FIX=0
 NO_USB_ROOT_CLEANUP=0
 NO_HELPER=0
+NO_CPUFREQ_PIN=0
 KERNEL=""
 SKIP_XHCI_SLOT3_HANDOFF=0
 XHCI_SLOT1_HANDOFF_PAYLOAD=""
@@ -137,6 +145,7 @@ for arg in "$@"; do
         --no-smmu-fix)    NO_SMMU_FIX=1 ;;
         --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
         --no-helper)      NO_HELPER=1 ;;
+        --no-cpufreq-pin) NO_CPUFREQ_PIN=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
@@ -1176,6 +1185,37 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
         echo "Warning: GPU appears power-gated at kexec time (NV_PMC_BOOT_0=$pmc_boot0)" >&2
         echo "         SLM-OS GPU init will fail with PRI-bad poison reads" >&2
     fi
+fi
+
+# Pin CPU 0's frequency to its policy max before kexec (#1053).
+#
+# kexec offlines every CPU but CPU 0, and an offlined Tegra234 core's
+# NDIV drops to the 115.2 MHz floor. SLM-OS raises every core to CPU
+# 0's NDIV at boot (tegra234_cpufreq_sync_to_boot_cpu), so CPU 0's
+# frequency at the kexec moment sets the whole system's speed. Without
+# this pin that is whatever the governor last picked from load
+# (729/1036/1344 MHz seen on jetson-nano-2), so SLM-OS timings varied
+# boot to boot. Raising scaling_min_freq to scaling_max_freq holds the
+# policy at its ceiling. Only CPU 0's policy matters (the other cores
+# go offline and lose their request); every online policy is pinned
+# anyway because it costs nothing. Like the devfreq pin, this resets
+# on power-cycle.
+if [[ "$NO_CPUFREQ_PIN" != "1" ]]; then
+    echo "[8.6/9] Pinning CPU frequency to policy max..."
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        [[ -d "$policy" ]] || continue
+        cpu_max="$(cat "$policy/scaling_max_freq" 2>/dev/null || echo '')"
+        if [[ -z "$cpu_max" || "$cpu_max" == "0" ]]; then
+            echo "       $(basename "$policy"): scaling_max_freq unreadable — skipping"
+            continue
+        fi
+        echo "$cpu_max" > "$policy/scaling_min_freq" 2>/dev/null || \
+            echo "       $(basename "$policy"): scaling_min_freq write failed" >&2
+        cpu_cur="$(cat "$policy/scaling_cur_freq" 2>/dev/null || echo '?')"
+        echo "       $(basename "$policy"): cur=$cpu_cur min=max=$cpu_max kHz"
+    done
+else
+    echo "[8.6/9] SKIPPING CPU frequency pin (--no-cpufreq-pin)"
 fi
 
 echo "[9/9] Executing kexec (serial console will take over)"

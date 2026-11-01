@@ -375,6 +375,7 @@ The `slmos-kexec` helper's default behavior suits most cases. The common non-def
 | `--no-usb-hold` | SLM-OS builds that don't drive the XHCI controller. The held clocks are otherwise harmless. |
 | `--no-smmu-fix` | Skip loading `arm_smmu_noshutdown.ko`. Only useful if you are not exercising the USB-A/XHCI path or are deliberately reproducing the pre-fix failure. |
 | `--no-usb-root-cleanup` | Skip the Linux-side USB2 root-hub `authorized=0` cleanup before `kexec`. Useful only if you are intentionally reproducing the old stale-slot path; the default cleanup is what makes the retained slot-1 handoff reproducible on `jetson-nano-2`. |
+| `--no-cpufreq-pin` | Skip pinning each cpufreq policy's `scaling_min_freq` to `scaling_max_freq` before `kexec`. SLM-OS raises every core to CPU 0's frequency at boot (#1053), so with the pin all six cores run at the policy max (1344 MHz on `jetson-nano-2`); without it they run at whatever the governor last chose for CPU 0. |
 
 Full flag list in the script header.
 

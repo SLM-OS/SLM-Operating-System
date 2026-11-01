@@ -52,8 +52,9 @@ uint32_t tegra234_ndiv_to_khz(uint32_t ndiv);
 
 /*
  * NDIV to give every core, given the boot CPU's NDIV, or 0 to leave the
- * cores alone. The boot CPU's value is the frequency Linux's governor
- * had chosen at kexec time, so it is within Linux's limits; anything
+ * cores alone. The boot CPU's value is its frequency at kexec time
+ * (slmos-kexec pins it to the cpufreq policy max first), so it is
+ * within Linux's limits; anything
  * outside [TEGRA234_NDIV_MIN, TEGRA234_NDIV_MAX] is treated as an
  * unreadable/unexpected register and ignored.
  */
