@@ -218,6 +218,8 @@ make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 **UART LSR Read After Kexec (Solved):** After kexec, reading UARTC LSR (Line Status Register) without a DSB barrier returns stale data due to speculative MMIO access, causing TX FIFO overruns and garbled serial output. **Fix:** `uart_tegra.c` issues `dsb sy` before each LSR read.
 
+**CPU Cluster 1 Slow After Kexec (Solved, #1053):** Linux's kexec offlines every CPU but CPU 0, and an offlined core's NDIV (CPU PLL multiplier) drops to the 115.2 MHz floor. A Tegra234 cluster runs at its highest core's request, so cluster 0 keeps CPU 0's frequency while cluster 1 (CPUs 4-5) stayed at 115.2 MHz, ~12x slower. **Fix:** `tegra234_cpufreq_sync_to_boot_cpu()` (`kernel/drivers/tegra_cpufreq.c`, called from `smp_init`) raises every core to CPU 0's NDIV. The registers are at `0x0E002000 + 8 * (cluster * 4 + MPIDR.Aff1)`, 12.8 MHz per NDIV step. **Only touch those `id * 8` words: the `+4` words in between are unbacked, and reading one SErrors into EL3 ("Unhandled Exception in EL3"), which stops the board.** The target is whatever Linux's governor had CPU 0 at when kexec fired (seen: 57/81/105 = 729/1036/1344 MHz), so absolute CPU speed still varies boot to boot. The `cpu` shell command prints each core's NDIV/MHz.
+
 ### CBB Firewall — Partially Bypassed
 
 The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** enabled, SLM-OS can access UARTC, GICv3, and timer — enough to boot to the shell. UARTA (40-pin header) and GPU (0x17000000) remain blocked.
