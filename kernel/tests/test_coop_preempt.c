@@ -231,7 +231,8 @@ static void test_slm_preempt_point_drives_schedule(void)
 /*
  * The ARM timer ISR must refresh the shared tick timestamp (#1047).
  *
- * On the default Jetson build (hardware tick + COOP_PREEMPT), a timer
+ * On a Jetson build with both a hardware tick and COOP_PREEMPT
+ * (JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF, the default until #1050), a timer
  * ISR that doesn't call sched_note_hw_tick() lets schedule() add a
  * second, synthetic tick for every period, so CPU 0 counted ticks
  * twice. Two checks:

@@ -96,7 +96,8 @@ This drives the AI policy, deadline boosts, migration decisions, and
 the `pit_ticks` / `timer_handler_count` observability counters.
 
 The deadline is shared with the hardware tick: on builds that have
-both (the default Jetson build, #1050), the timer ISR resets it through
+both (Jetson with `JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF`, the default
+until #1050), the timer ISR resets it through
 `sched_note_hw_tick()`, so each 10 ms period produces one tick rather
 than two (#1047).
 

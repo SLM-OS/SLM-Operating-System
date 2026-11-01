@@ -57,19 +57,6 @@ HAILO_TRACE_MECH_DEFAULT ?= 0
 # anything else leaves the platform default in place.
 WORK_STEALING ?=
 
-# Secondary-CPU preemption via ELR trampoline. Default ON for Pi 5 +
-# Jetson (timer-driven quantum preemption on CPUs 1..N), OFF elsewhere
-# (cooperative-only). Override on the command line.
-ifeq ($(PLATFORM),RASPI5)
-    SECONDARY_PREEMPT ?= ON
-else
-    SECONDARY_PREEMPT ?= OFF
-endif
-# Legacy alias — still respected for back-compat.
-PI5_SECONDARY_PREEMPT ?= $(SECONDARY_PREEMPT)
-ifeq ($(PI5_SECONDARY_PREEMPT),ON)
-    SECONDARY_PREEMPT := ON
-endif
 
 # JETSON_HW_TICK=ON enables the per-CPU CNTHP / PPI 26 path on Jetson
 # Orin Nano. Requires the patched BL31 from
@@ -92,6 +79,33 @@ ifeq ($(PLATFORM),JETSON_ORIN_NANO)
 else
     JETSON_HW_TICK ?= OFF
 endif
+
+# Secondary-CPU preemption via ELR trampoline (timer-driven quantum
+# preemption on every CPU). Default ON for Pi 5 (#742/#777) and for
+# Jetson when JETSON_HW_TICK=ON (#1050, step 3.4 of
+# docs/plans/jetson-preemption-restoration-plan.md); OFF elsewhere.
+# Defined after JETSON_HW_TICK because the Jetson default depends on
+# it: JETSON_HW_TICK=OFF (stock BL31) keeps the cooperative path.
+# CMake then defaults COOP_PREEMPT to OFF when both are ON. Override
+# on the command line.
+ifeq ($(PLATFORM),RASPI5)
+    SECONDARY_PREEMPT ?= ON
+else ifeq ($(PLATFORM)-$(JETSON_HW_TICK),JETSON_ORIN_NANO-ON)
+    SECONDARY_PREEMPT ?= ON
+else
+    SECONDARY_PREEMPT ?= OFF
+endif
+# Legacy alias — still respected for back-compat.
+PI5_SECONDARY_PREEMPT ?= $(SECONDARY_PREEMPT)
+ifeq ($(PI5_SECONDARY_PREEMPT),ON)
+    SECONDARY_PREEMPT := ON
+endif
+
+# Print the resolved preemption flags (used by
+# scripts/check-preempt-config.sh, #1050).
+.PHONY: print-preempt-config
+print-preempt-config:
+	@echo "PLATFORM=$(PLATFORM) JETSON_HW_TICK=$(JETSON_HW_TICK) SECONDARY_PREEMPT=$(SECONDARY_PREEMPT)"
 
 # Eviction:
 #   DISABLE_EVICTION=ON    — compile out the pluggable eviction framework.
@@ -1454,7 +1468,12 @@ check-deploy-configs:
 	@./scripts/check-deploy-pi5-configs.sh
 
 .PHONY: test
-test: check-deploy-configs kernel-test $(SDHCI_TEST_IMG)
+# Resolved preemption flags per platform/override (#1050).
+.PHONY: check-preempt-config
+check-preempt-config:
+	@./scripts/check-preempt-config.sh
+
+test: check-deploy-configs check-preempt-config kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

@@ -19,7 +19,7 @@ Timer-driven scheduler ticks, context switches, per-platform mode.
 | Save: FPU / SIMD | v0-v31, FPCR, FPSR | Same | Same (q0-q31 + FPCR + FPSR saved across IRQ in `vectors.S`) | FXSAVE (512 B) |
 | `preempt_disabled` flag | Per-CPU | Per-CPU | Per-CPU | Per-CPU |
 | Reentrant-schedule gate | ✅ | ✅ | ✅ | ✅ |
-| First-timeslice preemption | ✅ `task_entry_trampoline` clears flag and unmasks IRQs (#1047) | ✅ since #1047 (every CPU; CPU 0 only in the cooperative build) | ✅ since #1047 on CPU 0 (the default build does not set `SECONDARY_PREEMPT`, see #1050); every CPU with `SECONDARY_PREEMPT=ON`; hardware check pending | ✅ |
+| First-timeslice preemption | ✅ `task_entry_trampoline` clears flag and unmasks IRQs (#1047) | ✅ since #1047 (every CPU; CPU 0 only in the cooperative build) | ✅ since #1047 on every CPU (default `SECONDARY_PREEMPT=ON` since #1050); CPU 0 only with `SECONDARY_PREEMPT=OFF` | ✅ |
 | Deadline boost | At tick | At tick (default) / at yield (cooperative build) | At tick (default) / at yield (`JETSON_HW_TICK=OFF`) | At tick |
 | Migration on tick | ✅ | ✅ HW (default) / ✅ cooperative (cooperative build) | ✅ HW (default) / ✅ cooperative (`JETSON_HW_TICK=OFF`) | ✅ |
 | Work stealing | ON | ON | ON | ON |
@@ -66,8 +66,6 @@ flashed via R36.4.4 BSP USB-recovery.
 
 ## Skipped / Blocked
 
-- **Jetson hardware check of the task-entry unmask** — QEMU and Pi 5
-  verified; Jetson pending (#1047).
 - **Utilization accounting while a task yield-polls** — the shell
   waits for input by calling `yield()` in a loop, so every tick sees
   it running and CPU 0 reads 100% busy on Pi 5 and Jetson (#1047).
