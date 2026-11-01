@@ -374,6 +374,12 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
 struct task *task_create(const char *name, task_entry_t entry, void *arg);
 
 /*
+ * True when a task starting on logical CPU `cpu` unmasks IRQs before
+ * its entry function runs (#1047). See task.c for the per-build rules.
+ */
+bool task_entry_unmasks_irq(uint32_t cpu);
+
+/*
  * Terminate the current task.
  *
  * Marks task as TERMINATED and yields to scheduler.

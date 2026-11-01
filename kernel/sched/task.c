@@ -127,6 +127,39 @@ static struct task *alloc_task_slot(void)
 extern void task_entry_wrapper(void);
 
 /*
+ * Whether a task starting on `cpu` unmasks IRQs before running its
+ * entry function (#1047). Tasks are created with DAIF.I=1 (see
+ * task_create) so a timer IRQ can't land mid-context-restore, and
+ * nothing else unmasks them: irq_restore / spin_unlock_irqrestore put
+ * the saved, still-masked flags back, and only the idle loop ran
+ * daifclr. Without this unmask a running task could never be
+ * timer-preempted on Pi 5 or Jetson, and ticks landed only in idle.
+ *
+ * Mirrors the unmask rules in scheduler_start: every CPU when the
+ * SECONDARY_PREEMPT trampoline is built (or off NC-memory platforms,
+ * e.g. QEMU); otherwise CPU 0 only, because without the trampoline a
+ * secondary's timer ISR would call schedule() directly, which corrupts
+ * the abandoned frame on real hardware. On those builds (including
+ * the default Jetson build, which sets JETSON_HW_TICK but not
+ * SECONDARY_PREEMPT, #1050) secondaries get their ticks from
+ * COOP_PREEMPT. x86-64 is unchanged: its tasks are set up by its own
+ * context code.
+ */
+bool task_entry_unmasks_irq(uint32_t cpu)
+{
+#if defined(PLATFORM_X86_64)
+    (void)cpu;
+    return false;
+#elif defined(PLATFORM_HAS_NC_MEMORY) && !defined(SECONDARY_PREEMPT) && \
+      !defined(PI5_FIQ_TIMER)
+    return cpu == 0;
+#else
+    (void)cpu;
+    return true;
+#endif
+}
+
+/*
  * C trampoline called from assembly task_entry_wrapper.
  * Callee-saved registers hold the entry point and argument.
  */
@@ -153,10 +186,9 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
      * scheduler_start() sets it to 1 before switch_to(NULL, first),
      * but switch_to never returns — it jumps here.
      *
-     * Note: On Pi 5, tasks run with IRQs masked (DAIF.I=1). Timer
-     * preemption is not enabled — scheduling is cooperative via yield().
-     * pit_ticks is advanced by the idle task which unmasks IRQs in its
-     * loop. On QEMU, timer IRQs fire regardless of DAIF. */
+     * Then unmask IRQs (#1047): the context is fully restored, so the
+     * mid-restore hazard that task_create's DAIF.I=1 guards against is
+     * over. See task_entry_unmasks_irq for which CPUs. */
 #if !defined(PLATFORM_X86_64)
     {
         extern volatile int preempt_disabled[];
@@ -168,6 +200,14 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
             preempt_disabled[hw_cpu] = 0;
         }
         __asm__ volatile("dsb sy" ::: "memory");
+        if (hw_cpu >= 0 && task_entry_unmasks_irq((uint32_t)hw_cpu)) {
+#if defined(PI5_FIQ_TIMER)
+            __asm__ volatile("msr daifclr, #3" ::: "memory");  /* I+F */
+#else
+            __asm__ volatile("msr daifclr, #2" ::: "memory");  /* I */
+#endif
+            __asm__ volatile("isb" ::: "memory");
+        }
     }
 #else
     {
@@ -377,9 +417,9 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
                                   * timer ISR fires mid-restore and corrupts the
                                   * partially restored context. Setting 0x080
                                   * keeps IRQs masked until the task is fully
-                                  * running; task code unmasks naturally via
-                                  * spin_unlock_irqrestore or explicit DAIF
-                                  * clear. */
+                                  * running; task_entry_trampoline then
+                                  * unmasks (#1047; irq_restore alone never
+                                  * would, it restores the masked flags). */
 
     /* Store entry point and arg in callee-saved registers for wrapper */
     task->context.x19 = (uint64_t)entry;

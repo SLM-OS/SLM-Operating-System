@@ -28,8 +28,10 @@
 #include <stddef.h>
 
 /* Hardware-counter timeout helper.
- * On Pi 5, pit_ticks doesn't advance while tasks run (IRQs masked).
- * Use timer_get_count() which reads the always-running hardware counter.
+ * pit_ticks is a global that every CPU's tick bumps, so on ARM it is not
+ * wall time (and before #1047 it didn't advance at all while Pi 5 tasks
+ * ran, since they were IRQ-masked). Use timer_get_count(), which reads
+ * the always-running hardware counter.
  *
  * Timeout values by component:
  *   echo_service:    60s — waits for user-initiated messages via shell

@@ -446,13 +446,23 @@ The `schedule()` function runs on each CPU independently:
 
 The idle task's IRQ unmask (`msr daifclr, #2`) must be inside the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry, and `context.S` saves this masked DAIF. On resume, the restored DAIF would keep IRQ masked, causing `wfi` to hang. Re-clearing DAIF each iteration prevents this.
 
-### Task Initial DAIF — Tasks Start With IRQ Masked (Pi 5 / Jetson)
+### Task Initial DAIF — Masked Through the Switch, Unmasked at Entry
 
 All tasks are created with `DAIF.I=1` (IRQ masked). `task_create()` in `kernel/sched/task.c` writes `task->context.daif = 0x080`, and `context.S:126-128` restores DAIF early in the switch sequence — before GP registers and SP are fully loaded.
 
-Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting tasks with IRQs masked closes this window. Task code unmasks naturally on the first `spin_unlock_irqrestore` or the idle task's explicit `daifclr`. On QEMU the same masking applies for uniformity — QEMU delivers IRQs regardless, but the invariant matches real hardware behavior.
+Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting the switch with IRQs masked closes this window.
 
-Platform-specific consequence: timer IRQ delivery on Pi 5 and Jetson depends on the BL31 in use. Stock TF-A on either platform leaves the GIC PPI Group register EL3-owned with `SCR_EL3.IRQ/FIQ` routed to EL3, so timer IRQs never reach NS-EL1/EL2 (see `docs/archive/investigations/pi5-preemption-resolution.md`, `docs/archive/investigations/jetson-preemption-investigation.md`); these builds rely on `COOP_PREEMPT` (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. With the patched BL31 (`tools/tfa-patches/0001-*` for Pi 5, `tools/tfa-patches/0004-*` for Jetson) and EL2/VHE, PPI 26 (CNTHP) delivers per-CPU at EL2 and `SECONDARY_PREEMPT=ON` enables true hardware preemption — default-on for Jetson under `JETSON_HW_TICK=ON`, opt-in on Pi 5. QEMU and x86-64 always have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
+Once the restore is complete, `task_entry_trampoline()` (also in `task.c`) unmasks IRQs before calling the task's entry function. `task_entry_unmasks_irq(cpu)` decides where, using the same rules `scheduler_start()` applies:
+
+| Build | Unmasked at task entry |
+|---|---|
+| `SECONDARY_PREEMPT=ON` (the Pi 5 default), `PI5_FIQ_TIMER`, QEMU | Every CPU (`PI5_FIQ_TIMER` clears I and F) |
+| NC-memory platform without `SECONDARY_PREEMPT` (the default Jetson build, which sets `JETSON_HW_TICK=ON` but not `SECONDARY_PREEMPT`; see #1050) | CPU 0 only. A secondary's timer ISR would call `schedule()` directly, which corrupts the abandoned frame on real hardware |
+| x86-64 | Not changed; its own context code sets up the flags |
+
+Before #1047 nothing on the task path unmasked IRQs. `irq_restore()` and `spin_unlock_irqrestore()` put back the saved flags, which were still masked, and only the idle loop ran `daifclr`. Running tasks therefore never took a timer IRQ. Ticks landed only while idle ran, so there was no real quantum preemption of a running task, and on Pi 5 CPU 0 (whose shell never idles) recorded no ticks at all. `irqtest noirq` on pi-5-2 showed the shell at `DAIF=0x80` with PPI 26 pending. With the fix, the same probe shows `DAIF=0x0`, and CPU 0's tick count matches the other CPUs. `test_task_entry_unmasks_irq` in `kernel/tests/test_scheduler.c` checks a fresh task's DAIF on CPU 0 and CPU 1 against the helper.
+
+Platform-specific consequence: timer IRQ delivery on Pi 5 and Jetson depends on the BL31 in use. Stock TF-A on either platform leaves the GIC PPI Group register EL3-owned with `SCR_EL3.IRQ/FIQ` routed to EL3, so timer IRQs never reach NS-EL1/EL2 (see `docs/archive/investigations/pi5-preemption-resolution.md`, `docs/archive/investigations/jetson-preemption-investigation.md`); these builds rely on `COOP_PREEMPT` (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. With the patched BL31 (`tools/tfa-patches/0001-*` for Pi 5, `tools/tfa-patches/0004-*` for Jetson) and EL2/VHE, PPI 26 (CNTHP) delivers per-CPU at EL2 and `SECONDARY_PREEMPT=ON` enables true hardware preemption. It is the default on Jetson (under `JETSON_HW_TICK=ON`) and, since #777, on Pi 5. QEMU and x86-64 always have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
 
 ### Secondary-CPU Preemption (`SECONDARY_PREEMPT`)
 
@@ -468,9 +478,10 @@ The feature is gated behind the `SECONDARY_PREEMPT` compile-time option:
 
 | Build invocation | Effect |
 |---|---|
-| *default* (Pi 5, QEMU, x86-64) | Trampoline not compiled. Secondary CPUs use cooperative `wfe`/SEV wake; preemption only on CPU 0 (if timer IRQs deliver there). |
+| *default* (QEMU, x86-64) | Trampoline not compiled. QEMU's emulated timer allows `schedule()` from the ISR; x86-64 has no ELR. |
+| *default* (Pi 5) | The Makefile sets `SECONDARY_PREEMPT ?= ON` for `PLATFORM=RASPI5`, and CMake defaults `COOP_PREEMPT` to OFF there (#777). Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched BL31. |
 | *default* (Jetson) | `JETSON_HW_TICK=ON` implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`. Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched tegra234 BL31. |
-| `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Live on Pi 5 (PR #742) and Jetson; QEMU works for trampoline-path CI but isn't strictly needed there. |
+| `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Live on Pi 5 (PR #742, default since #777) and Jetson; QEMU works for trampoline-path CI but isn't strictly needed there. |
 | `make kernel PI5_SECONDARY_PREEMPT=ON` | Deprecated alias. Sets `SECONDARY_PREEMPT=ON`. Kept so existing Pi 5 Makefile invocations continue working. |
 
 The option was renamed from the original `PI5_SECONDARY_PREEMPT` to a
@@ -641,7 +652,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 **Known Limitations:**
 - UART output is intentionally unsynchronized to avoid deadlock risks with panics
 - Blocked-task sleep queue attempted but wake mechanism failed on Pi 5 (deferred)
-- Pi 5 hardware timer IRQs deliver via PPI 26 (CNTHP, Hyp Physical Timer) at EL2/VHE under the patched BL31 (`tools/tfa-patches/0001-*`). Default Pi 5 build still ships `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF` pending a broader workload audit; opt-in with `make kernel PLATFORM=RASPI5 SECONDARY_PREEMPT=ON EXTRA_KERNEL_CMAKE_ARGS="-DCOOP_PREEMPT=OFF"`. Closed: #134, #672 (NS-EL1 GIC pin assertion, resolved by EL2/VHE pivot in #683), #742 (`SECONDARY_PREEMPT` viable at EL2/VHE).
+- Pi 5 hardware timer IRQs deliver via PPI 26 (CNTHP, Hyp Physical Timer) at EL2/VHE under the patched BL31 (`tools/tfa-patches/0001-*`). The default Pi 5 build has been `SECONDARY_PREEMPT=ON / COOP_PREEMPT=OFF` since #777. The cooperative build is still available with `make kernel PLATFORM=RASPI5 SECONDARY_PREEMPT=OFF EXTRA_KERNEL_CMAKE_ARGS="-DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON"` (both spellings are needed: the deprecated alias also defaults to OFF on Pi 5, and CMake forces `COOP_PREEMPT` OFF when the alias is OFF). Running tasks only became preemptible with #1047 (unmask at task entry; see §"Task Initial DAIF"). Closed: #134, #672 (NS-EL1 GIC pin assertion, resolved by EL2/VHE pivot in #683), #742 (`SECONDARY_PREEMPT` viable at EL2/VHE).
 
 ### Files Modified/Added
 

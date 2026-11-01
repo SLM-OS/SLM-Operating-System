@@ -5047,6 +5047,70 @@ static void test_uart_output_after_init(void)
     TEST_PASS();
 }
 
+#if !defined(PLATFORM_X86_64)
+/*
+ * #1047: tasks are created with DAIF.I=1 and used to run their whole
+ * life masked (irq_restore restores the masked flags), so the timer
+ * could only interrupt idle and never preempt a task. The entry
+ * trampoline now unmasks wherever task_entry_unmasks_irq says it is
+ * safe. Check a fresh task's DAIF on CPU 0 and, if present, CPU 1.
+ */
+static volatile uint64_t daif_probe_val;
+static volatile uint32_t daif_probe_cpu;
+static volatile int daif_probe_done;
+
+static void daif_probe_entry(void *arg)
+{
+    (void)arg;
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    daif_probe_val = daif;
+    daif_probe_cpu = cpu_id();
+    __asm__ volatile("dsb sy" ::: "memory");
+    daif_probe_done = 1;
+}
+
+static void daif_probe_on(uint32_t cpu)
+{
+    daif_probe_done = 0;
+    struct task *t = task_create("daif_probe", daif_probe_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    t->cpu_affinity = cpu;
+    scheduler_add_task_to_cpu(t, cpu);
+    int timeout = 200000;
+    while (!daif_probe_done && timeout-- > 0) {
+        yield();
+    }
+    if (!daif_probe_done) {
+        scheduler_terminate_task(t);
+        task_destroy(t);
+        TEST_FAIL_MESSAGE("daif_probe task never ran");
+        return;
+    }
+    while (t->state != TASK_TERMINATED && timeout-- > 0) {
+        yield();
+    }
+    if (t->state != TASK_TERMINATED) {
+        /* Still queued or running: take it off the run queue before
+         * freeing it, as the never-ran path does. */
+        scheduler_terminate_task(t);
+    }
+    task_destroy(t);
+    TEST_ASSERT_EQUAL_UINT32(cpu, daif_probe_cpu);
+    bool masked = (daif_probe_val & 0x80u) != 0;
+    TEST_ASSERT_EQUAL(task_entry_unmasks_irq(cpu) ? false : true, masked);
+}
+
+static void test_task_entry_unmasks_irq(void)
+{
+    TEST_ASSERT_TRUE(task_entry_unmasks_irq(0));
+    daif_probe_on(0);
+    if (cpu_count > 1) {
+        daif_probe_on(1);
+    }
+}
+#endif
+
 /*
  * Regression: tasks created with task_create use CPU 0 pinning for FFI tests.
  *
@@ -5487,6 +5551,9 @@ int test_suite_scheduler(void)
     RUN_TEST(test_hw_timer_counter_advances);
     RUN_TEST(test_uart_output_after_init);
     RUN_TEST(test_task_pinned_to_cpu0);
+#if !defined(PLATFORM_X86_64)
+    RUN_TEST(test_task_entry_unmasks_irq);   /* #1047 */
+#endif
 
     /* AI scheduler types (unconditional — header-only) */
     RUN_TEST(test_ai_decode_action_zero);
