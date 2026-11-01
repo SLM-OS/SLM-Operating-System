@@ -144,12 +144,12 @@ endif()
 # is passed on a non-applicable platform it is silently ignored, with
 # a status message for diagnosability.
 #
-# Default OFF because turning it on requires functional timer IRQ
-# delivery on all CPUs. On Pi 5 that is still blocked by #134
-# (the hardware timer-IRQ delivery regression); cooperative preemption
-# via PI5_COOP_PREEMPT is the current Pi 5 default. On Jetson this
-# option becomes relevant after the P1.0 GICR_IGROUPR0 fast-path plus
-# the MPIDR formula fix in vectors.S (Jetson plan P3 step 2).
+# Default OFF here because turning it on requires functional timer IRQ
+# delivery on all CPUs. The Makefile turns it on where that holds:
+# `SECONDARY_PREEMPT ?= ON` for PLATFORM=RASPI5 (#742/#777). It is not
+# set for Jetson, even under JETSON_HW_TICK=ON (see #1050). Tasks are
+# unmasked at entry on every CPU when it is ON (task_entry_unmasks_irq,
+# #1047); otherwise only CPU 0 unmasks.
 option(SECONDARY_PREEMPT "Enable deferred-scheduling preemption on secondary CPUs (ARM64, NC-memory platforms)" OFF)
 # Backward-compat alias: users can still pass -DPI5_SECONDARY_PREEMPT=ON.
 option(PI5_SECONDARY_PREEMPT "Deprecated alias for SECONDARY_PREEMPT" OFF)

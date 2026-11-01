@@ -139,9 +139,11 @@ extern void task_entry_wrapper(void);
  * SECONDARY_PREEMPT trampoline is built (or off NC-memory platforms,
  * e.g. QEMU); otherwise CPU 0 only, because without the trampoline a
  * secondary's timer ISR would call schedule() directly, which corrupts
- * the abandoned frame on real hardware. On those builds the timer
- * doesn't deliver at EL2/VHE anyway (COOP_PREEMPT). x86-64 is
- * unchanged: its tasks are set up by its own context code.
+ * the abandoned frame on real hardware. On those builds (including
+ * the default Jetson build, which sets JETSON_HW_TICK but not
+ * SECONDARY_PREEMPT, #1050) secondaries get their ticks from
+ * COOP_PREEMPT. x86-64 is unchanged: its tasks are set up by its own
+ * context code.
  */
 bool task_entry_unmasks_irq(uint32_t cpu)
 {

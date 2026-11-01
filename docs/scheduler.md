@@ -61,18 +61,28 @@ on QEMU, PPI 26 (CNTHP, the Hyp Physical Timer) at EL2/VHE on
 Pi 5 and Jetson — or the LAPIC timer vector on x86-64, every task
 is preempted asynchronously at the quantum boundary regardless of
 what it is doing. This is the model on **QEMU virt**, **x86-64**,
-and **Jetson Orin Nano** (default under `JETSON_HW_TICK=ON` with
+**Jetson Orin Nano** (default under `JETSON_HW_TICK=ON` with
 the patched tegra234 BL31 from
-`tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch`).
-It is also available on **Raspberry Pi 5** as an opt-in build
-(`SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` with the patched BCM2712
+`tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch`),
+and **Raspberry Pi 5** (default since #777:
+`SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` with the patched BCM2712
 BL31 from `tools/tfa-patches/0001-*`).
+
+On Pi 5 and Jetson this only holds since #1047. Tasks are switched in
+with IRQs masked (`DAIF.I=1`) so a tick can't land mid-restore, and
+before #1047 nothing on the task path unmasked them, so ticks landed
+only while idle ran. `task_entry_trampoline` now unmasks IRQs before
+the task's entry function runs (on every CPU under `SECONDARY_PREEMPT`,
+CPU 0 only otherwise); see `docs/smp.md` §"Task Initial DAIF".
 
 ### Cooperative preemption (`COOP_PREEMPT`) — fallback
 
-Default-on for **Raspberry Pi 5** and selectable on **Jetson**
-(via `JETSON_HW_TICK=OFF`) for boards that do not have the patched
-BL31. Stock TF-A on either platform leaves the GIC PPI Group
+Selectable on **Jetson** (via `JETSON_HW_TICK=OFF`) for boards that
+do not have the patched BL31, and on **Raspberry Pi 5** as a non-default
+build (`SECONDARY_PREEMPT=OFF` with
+`EXTRA_KERNEL_CMAKE_ARGS="-DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON"`;
+both spellings are needed because the deprecated alias also defaults
+to OFF on Pi 5). Stock TF-A on either platform leaves the GIC PPI Group
 register in EL3-only state with `SCR_EL3.IRQ/FIQ` routed to EL3,
 so hardware timer IRQs never reach NS-EL1/EL2 — see
 [`pi5-stage25-irqtest-findings.md`](pi5-stage25-irqtest-findings.md)
@@ -494,7 +504,7 @@ while (mutex->locked) {
 
 ### Known Limitation — Single-CPU Contended Priority Inheritance
 
-The boost path in `try_boost_owner` updates `effective_priority` but does not re-sort the run queue. A holder that was enqueued at `LOW` remains in its `LOW` slot in the per-CPU queue even after being boosted to `HIGH`. In a single-CPU scenario with one holder and one HIGH-priority waiter, the scheduler picks the waiter (rq head), which spins/yields and is itself re-queued at HIGH — starving the boosted holder. The livelock persists even under hardware preemption (Pi 5 opt-in via `SECONDARY_PREEMPT=ON`, Jetson default under `JETSON_HW_TICK=ON`) because the bug is the run-queue ordering, not the preemption mechanism: a timer IRQ would still pick the waiter on the next `schedule()` since it sits at the queue head.
+The boost path in `try_boost_owner` updates `effective_priority` but does not re-sort the run queue. A holder that was enqueued at `LOW` remains in its `LOW` slot in the per-CPU queue even after being boosted to `HIGH`. In a single-CPU scenario with one holder and one HIGH-priority waiter, the scheduler picks the waiter (rq head), which spins/yields and is itself re-queued at HIGH — starving the boosted holder. The livelock persists even under hardware preemption (Pi 5 default `SECONDARY_PREEMPT=ON`, Jetson default under `JETSON_HW_TICK=ON`) because the bug is the run-queue ordering, not the preemption mechanism: a timer IRQ would still pick the waiter on the next `schedule()` since it sits at the queue head.
 
 The capstone-ready conservative fix (SCHED-H1) handles the IRQ-safety issue but does not resolve the single-CPU livelock. The proper fix is a sleep-queue model — the waiter blocks on a wait condition and is woken by `pi_mutex_unlock` — and is tracked as a post-capstone enhancement.
 

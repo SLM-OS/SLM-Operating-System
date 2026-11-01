@@ -140,9 +140,9 @@ broader hardware/networking generalization remains follow-on work.
 ## 7. Scheduler Enhancements
 
 ### ✅ Secondary CPU Timer Preemption — Done
-- Deferred scheduling via ELR_EL1 trampoline shipped on Pi 5 (PR #742, opt-in via `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`) and Jetson (PRs #647 + #746 + #752 + #753 + #755, default-on under `JETSON_HW_TICK=ON`).
+- Deferred scheduling via ELR_EL1 trampoline shipped on Pi 5 (PR #742; `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`, default since #777) and Jetson (PRs #647 + #746 + #752 + #753 + #755, default-on under `JETSON_HW_TICK=ON`).
 - True preemptive multi-core scheduling on both ARM64 hardware platforms; `kernel/sched/preempt.c` + `resched_trampoline` in `vectors.S`.
-- Pi 5 default still ships cooperative pending a broader audit; Jetson default flipped 2026-05-09. See `docs/fact-sheets/preemption.md`.
+- Pi 5 default flipped to hardware preemption in #777; Jetson default flipped 2026-05-09. Running tasks only became timer-preemptible with #1047, which unmasks IRQs at task entry (before it, ticks landed only in idle). See `docs/fact-sheets/preemption.md`.
 
 ### Real AI Scheduler Weights — Wrapped up by #61 sub-tickets
 - ✅ Plan A exported MLP/PPO weights integrated (`kernel/sched/ai/ai_weights_{mlp,ppo}.c`)
@@ -176,7 +176,7 @@ broader hardware/networking generalization remains follow-on work.
 - Replace the spin-wait loop in `pi_mutex_lock` with a wait-queue model: waiter blocks (TASK_BLOCKED), owner's `pi_mutex_unlock` wakes one waiter
 - Removes the single-CPU contended livelock documented in `docs/scheduler.md` ("Known Limitation — Single-CPU Contended Priority Inheritance")
 - Also eliminates the need for `DAIF`-aware timer preemption to make progress on contended mutexes
-- Unblocked on Pi 5 (opt-in `SECONDARY_PREEMPT=ON`, PR #742) and Jetson (default `JETSON_HW_TICK=ON`, PR #746/#755). Sleep queue is now a straightforward addition.
+- Unblocked on Pi 5 (default `SECONDARY_PREEMPT=ON`, PR #742/#777) and Jetson (default `JETSON_HW_TICK=ON`, PR #746/#755). Sleep queue is now a straightforward addition.
 
 ### ✅ Timer-Driven Busy-Wait Helper (small) — Done (#94)
 - `timer_busy_wait_us(us)` added as inline in `kernel/include/timer.h` — uses CNTPCT_EL0 (ARM64) / TSC (x86-64)
