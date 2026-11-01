@@ -423,6 +423,16 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
     return cpu_rq(cpu);
 }
 
+/* Zero a whole run queue (#1045); see sched.h. */
+void sched_runqueue_clear(struct cpu_runqueue *rq)
+{
+    if (!rq) return;
+    volatile uint8_t *p = (volatile uint8_t *)rq;
+    for (size_t i = 0; i < sizeof(*rq); i++) {
+        p[i] = 0;
+    }
+}
+
 /*
  * Drain the per-CPU run queue under rq_lock. Used by the dormancy
  * recovery path (#216 Tier 2, kernel/sched/cpu_supervisor.c) when a
@@ -437,15 +447,6 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
  * Caller is expected to have set cpu_data[cpu].online = false
  * before calling this so steal_deque-based thieves stop racing.
  */
-void sched_runqueue_clear(struct cpu_runqueue *rq)
-{
-    if (!rq) return;
-    volatile uint8_t *p = (volatile uint8_t *)rq;
-    for (size_t i = 0; i < sizeof(*rq); i++) {
-        p[i] = 0;
-    }
-}
-
 void sched_drain_cpu_runqueue(uint32_t cpu)
 {
     if (cpu >= MAX_CPUS) return;

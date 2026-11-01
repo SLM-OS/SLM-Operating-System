@@ -4940,7 +4940,12 @@ static void test_ai_utilization_at_most_total_all_cpus(void)
 #ifdef CONFIG_AI_SCHEDULER
     for (uint32_t c = 0; c < cpu_count; c++) {
         struct cpu_runqueue *rq = sched_cpu_rq(c);
-        TEST_ASSERT_TRUE(rq->running_ticks <= rq->total_ticks);
+        /* Read running before total: scheduler_tick bumps total first,
+         * so this order cannot see running > total even if a tick
+         * lands between the two loads. */
+        uint64_t run = *(volatile uint64_t *)&rq->running_ticks;
+        uint64_t tot = *(volatile uint64_t *)&rq->total_ticks;
+        TEST_ASSERT_TRUE(run <= tot);
     }
 #else
     TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
