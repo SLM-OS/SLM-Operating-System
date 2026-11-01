@@ -695,6 +695,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
+    kernel/drivers/tegra_cpufreq.c
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
     # BPMP IPC stack — Jetson only.
@@ -1133,6 +1134,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coop_preempt.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_cpu_supervisor.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
+    kernel/tests/test_tegra_cpufreq.c
 )
 
 # lwIP library sources (QEMU networking only)

@@ -4,6 +4,7 @@
  * Commands: help, mem, tasks, cpu, uptime, clear, reboot, vmm, ipc, model, dtb
  */
 
+#include "tegra_cpufreq.h"
 #include "shell.h"
 #include "shell_internal.h"
 #include "uart.h"
@@ -404,6 +405,18 @@ int cmd_cpu(int argc, char *argv[])
         extern volatile uint32_t sched_diag_steal_stale[];
         extern volatile uint32_t sched_diag_steal_empty_victim[];
         extern volatile uint32_t sched_diag_steal_push_full[];
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        /* Per-core CPU clock (#1053): NDIV register * 12.8 MHz. A
+         * cluster runs at its highest core's request, so a core can
+         * read low here and still run fast if a sibling is raised. */
+        shell_printf("\r\n  CPU clock requests (NDIV, MHz):\r\n ");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uint32_t ndiv = tegra234_cpufreq_get_ndiv(c);
+            shell_printf("  cpu%u=%u/%u", c, ndiv,
+                         tegra234_ndiv_to_khz(ndiv) / 1000);
+        }
+        shell_printf("\r\n");
 #endif
         shell_printf("\r\n  Per-CPU work-stealing counters:\r\n");
         shell_printf("  CPU  Attempts  Success   Stale     EmptyVic  PushFull\r\n");

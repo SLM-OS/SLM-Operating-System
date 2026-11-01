@@ -1486,6 +1486,19 @@ static void vmm_setup_platform(void)
     }
 #endif
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* CCPLEX cluster control block (0x0E000000, one 2 MB block): the
+     * per-core CPU frequency (NDIV) registers. Linux's kexec offlines
+     * CPUs 4-5, which leaves the second cluster at its 115.2 MHz floor;
+     * SLM-OS reads and raises those registers (#1053). */
+    {
+        uint64_t blk = TEGRA234_CCPLEX_BASE & ~(BLOCK_SIZE - 1);
+        uint64_t idx = (blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[idx] = make_block_desc(blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+    }
+#endif
+
 #if defined(PLATFORM_QEMU_VIRT)
     /* VirtIO MMIO region for virtio-net at 0x0A000000 */
     uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;
