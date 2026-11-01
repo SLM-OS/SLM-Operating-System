@@ -36,7 +36,7 @@ Every helper is passed `--preserve-for-kexec`, which makes them publish a `struc
 
 ## Step 1: Build the SASS shader blobs
 
-The MNIST helper opens five `*_shader.sass` files at runtime — these are raw GA10B SASS `.text` segments extracted from cubins. They're produced by compiling the matching `.cu` sources in `scripts/cuda/` with `nvcc -arch=sm_87`, then carving the SASS bytes out via `cuobjdump --extract-elf` + `readelf -SW`.
+The MNIST helper opens five `*_shader.sass` files at runtime, and the eviction producer also needs `sigmoid_fp32_shader.sass` (`scripts/cuda/build-mnist-shaders.sh` builds all six) — these are raw GA10B SASS `.text` segments extracted from cubins. They're produced by compiling the matching `.cu` sources in `scripts/cuda/` with `nvcc -arch=sm_87`, then carving the SASS bytes out via `cuobjdump --extract-elf` + `readelf -SW`.
 
 These files are deliberately **not committed** to the repo (see `.gitignore`); regenerate them whenever a `.cu` source changes.
 

@@ -200,6 +200,9 @@ resolve_helpers() {
     else
         spec="${SLMOS_HELPERS:-mnist,sched}"
     fi
+    # Whitespace is ignored, so "mnist, sched" in
+    # /etc/default/slmos-autokexec works too.
+    spec="${spec//[[:space:]]/}"
     if [[ "$spec" == "none" ]]; then
         NO_HELPER=1
         return 0
@@ -235,12 +238,32 @@ if [[ "$PRINT_HELPERS" == "1" ]]; then
     exit 0
 fi
 
+# Binary name and weights directory for a --helpers token.
+helper_binary() {
+    case "$1" in
+        mnist)    echo gpu-kernel-mnist ;;
+        sched)    echo gpu-kernel-sched-mlp ;;
+        eviction) echo gpu-kernel-eviction-qnet ;;
+    esac
+}
+helper_weights_dir() {
+    case "$1" in
+        mnist)    echo mnist-weights ;;
+        sched)    echo sched-weights ;;
+        eviction) echo eviction-weights ;;
+    esac
+}
+
+# Selected helpers that maybe_start_gpu_helpers actually started (or
+# found already running); skipped ones are left out.
+STARTED_HELPERS=()
+
 # start_one_helper — stage one channel-inherit helper and block until
 # its handoff is published.
 #
-# Exit codes (callers can distinguish; today both invocations use
-# `|| true` because every non-zero outcome is non-fatal — kexec
-# proceeds with whatever channels are live):
+# Exit codes (non-fatal — kexec proceeds with whatever channels are
+# live; maybe_start_gpu_helpers uses rc 1 to leave a skipped helper
+# out of the pre-kexec liveness check):
 #   0 — newly started or already running (handoff is live in DRAM)
 #   1 — skipped: helper binary or weights directory missing
 #   2 — started but timed out before reaching "kexec now"
@@ -379,29 +402,21 @@ maybe_start_gpu_helpers() {
         mnist_extra+=("--gemm-tier" "hmma"
                       "--weights-fp16-dir" "mnist-weights-fp16")
     fi
-    local name
+    local name bin rc
+    local -a extra
     for name in "${SELECTED_HELPERS[@]}"; do
-        case "$name" in
-            mnist)
-                start_one_helper gpu-kernel-mnist mnist-weights \
-                    /tmp/gpu-kernel-mnist.log "${mnist_extra[@]}" || true ;;
-            sched)
-                start_one_helper gpu-kernel-sched-mlp sched-weights \
-                    /tmp/gpu-kernel-sched-mlp.log || true ;;
-            eviction)
-                start_one_helper gpu-kernel-eviction-qnet eviction-weights \
-                    /tmp/gpu-kernel-eviction-qnet.log || true ;;
-        esac
+        bin="$(helper_binary "$name")"
+        extra=()
+        [[ "$name" == "mnist" ]] && extra=("${mnist_extra[@]}")
+        rc=0
+        start_one_helper "$bin" "$(helper_weights_dir "$name")" \
+            "/tmp/$bin.log" "${extra[@]}" || rc=$?
+        # rc 1 = skipped (not staged on this board); the pre-kexec
+        # liveness check only looks at helpers that were started.
+        if [[ $rc -ne 1 ]]; then
+            STARTED_HELPERS+=("$name")
+        fi
     done
-}
-
-# Binary name for a --helpers token.
-helper_binary() {
-    case "$1" in
-        mnist)    echo gpu-kernel-mnist ;;
-        sched)    echo gpu-kernel-sched-mlp ;;
-        eviction) echo gpu-kernel-eviction-qnet ;;
-    esac
 }
 
 find_smmu_fix_module() {
@@ -1219,7 +1234,7 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
     # Helper liveness check (only relevant in --no-gpu-suspend mode).
     if [[ "$NO_GPU_SUSPEND" == "1" && "$NO_HELPER" != "1" ]]; then
         helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
-        for helper in "${SELECTED_HELPERS[@]}"; do
+        for helper in "${STARTED_HELPERS[@]}"; do
             bin="$(helper_binary "$helper")"
             # Same two argv forms start_one_helper accepts: absolute
             # path, or ./name (how start_one_helper launches it).

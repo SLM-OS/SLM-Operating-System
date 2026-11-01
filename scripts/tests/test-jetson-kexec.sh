@@ -136,6 +136,8 @@ assert_prints "--helpers overrides SLMOS_HELPERS" \
     "mnist" env SLMOS_HELPERS=sched "$SCRIPT" --helpers=mnist --print-helpers
 assert_prints "--no-helper wins over --helpers" \
     "none" "$SCRIPT" --helpers=eviction --no-helper --print-helpers
+assert_prints "Whitespace around helper names is ignored" \
+    "mnist,sched" env SLMOS_HELPERS=" mnist, sched " "$SCRIPT" --print-helpers
 assert_prints "--helpers=none selects nothing" \
     "none" "$SCRIPT" --helpers=none --print-helpers
 assert_fails_with "Unknown helper name is rejected" \
