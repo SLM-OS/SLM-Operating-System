@@ -64,10 +64,18 @@ Before trusting any docs (CLAUDE.md "Verify live board state first"):
 ### Pi 5 (SDWire)
 
 1. **Check the card:** run `sdwire_info(sbc_name)`. An SLM-OS card has a single FAT partition labelled `SLMOS`. Pi OS cards are multi-partition, and pi-5-1 has carried both. If the layout is not what the run expects, stop and ask.
-2. **Find the kernel name:** `sdwire_cat(sbc_name, 1, "config.txt")`.
+2. **Find the kernel name(s):** `sdwire_cat(sbc_name, 1, "config.txt")`.
    - If it sets `kernel=<name>`, deploy to that name only.
    - If there is no `kernel=` line, deploy to both `kernel_2712.img` and `kernel8.img`. The firmware loads `kernel_2712.img`, and a stale copy under either name can keep booting silently.
-3. **Deploy and back up in one call.** Copies run first, then renames:
+3. **Check for a leftover backup:** `sdwire_ls(sbc_name, 1)`.
+   - If any `<kernel>.prev` already exists, an earlier run never restored. That file may be the board's real original kernel, and this deploy would overwrite it.
+   - Stop and ask whether to restore it first (Step 5) or treat the current kernel as the one to keep.
+   - Note which of the kernel names from Step 2 exist on the card; Step 5 needs that list.
+4. **Deploy and back up in one call.** Copies run first, then renames. For each kernel name:
+   - **If it exists on the card:** copy `"<abs path>/build/kernel/slmos.bin:<kernel>.new"`, then rename `"<kernel>:<kernel>.prev"` and `"<kernel>.new:<kernel>"`.
+   - **If it doesn't exist:** copy straight to `"<abs path>/build/kernel/slmos.bin:<kernel>"`, with no renames. Step 5 deletes it.
+
+   For example, with a single existing name:
    ```
    sdwire_update(sbc_name, partition=1,
      copies=["<abs path>/build/kernel/slmos.bin:<kernel>.new"],
@@ -75,7 +83,7 @@ Before trusting any docs (CLAUDE.md "Verify live board state first"):
      reboot=true)
    ```
    `reboot=true` power-cycles the board when done, which also powers on a board that started off.
-4. **If the result says `Not power cycled: ...`,** the claim was lost: report it and stop.
+5. **If the result says `Not power cycled: ...`,** the claim was lost: report it and stop.
 
 ### Jetson (Linux, then kexec)
 
@@ -84,6 +92,7 @@ Before trusting any docs (CLAUDE.md "Verify live board state first"):
    - then `serial_capture(sbc_name, timeout=120, until_pattern="login:")`, about 60 s.
 2. **Copy, sync and kexec** with one Bash script. Keep it in the scratchpad, not the repo. It should:
    - wait for ssh;
+   - back up the board's current kernel: `ssh root@<ip> 'test ! -e /root/slmos.elf.prev && cp -p /root/slmos.elf /root/slmos.elf.prev && sync'`. `/root/slmos.elf` is the default kernel `slmos-kexec` boots, and other sessions rely on it. If `/root/slmos.elf.prev` already exists, an earlier run never restored: stop and ask, as for Pi 5;
    - `scp` the ELF to `root@<ip>:/root/slmos.elf`;
    - run `ssh root@<ip> 'sync; sha256sum /root/slmos.elf'`, and compare the hash with Step 1;
    - start `setsid nohup slmos-kexec /root/slmos.elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &` over ssh, with `-o ServerAliveInterval=2 -o ServerAliveCountMax=2`, and give up on the ssh session after about 60 s.
@@ -120,11 +129,16 @@ serial_send(sbc_name, data="<cmd>", capture_until="slmos>", capture_timeout=<s>)
 ## Step 5: Restore, release, report
 
 **Restore** unless `--keep` was given or the user asked to leave the new kernel installed:
-- **Pi 5:**
-  - Call `power_off` if the board started off.
-  - Then put the old kernel back with `sdwire_update(sbc_name, 1, renames=["<kernel>:<kernel>.test", "<kernel>.prev:<kernel>"], deletes=["<kernel>.test"], reboot=false)`. This leaves the card exactly as found.
-  - If the board started on, run that restore with `reboot=true` instead.
-- **Jetson:** SLM-OS doesn't survive a power cycle, so the board's Linux install is unchanged; nothing on disk needs restoring. If it should be back at Linux, call `power_cycle`. Otherwise leave it at the SLM-OS shell and say so.
+- **Pi 5:** one `sdwire_update(sbc_name, 1, ..., reboot=<started on>)` call. It powers the board off before switching the card, so no separate `power_off` is needed, and `reboot=false` leaves the board off.
+  - For each name that existed before the deploy: rename `"<kernel>:<kernel>.test"` and `"<kernel>.prev:<kernel>"`, then delete `"<kernel>.test"`.
+  - For each name the deploy created: delete `"<kernel>"`.
+
+  This leaves the card exactly as found. Example with one existing name: `renames=["<kernel>:<kernel>.test", "<kernel>.prev:<kernel>"], deletes=["<kernel>.test"]`.
+- **Jetson:** the deploy replaced `/root/slmos.elf` on the board's disk, so put it back:
+  1. Call `power_cycle` and wait for `login:` (Step 2).
+  2. Run `ssh root@<ip> 'mv /root/slmos.elf.prev /root/slmos.elf && sync; sha256sum /root/slmos.elf'`.
+
+  The board is then left at Linux on its original kernel. With `--keep`, run `ssh root@<ip> 'rm -f /root/slmos.elf.prev && sync'` instead, once Linux is up, or leave the board at the SLM-OS shell and say the backup is still there.
 
 **Release on every path,** including failures and early stops: `release_sbc(sbc_name)`.
 
@@ -138,7 +152,7 @@ Boot:    'slmos>' after <N> s ... PASS | FAIL (<last lines>)
 Command: <cmd>
          <relevant output lines>
 Errors:  <lines> | none
-Board:   <restored to previous kernel, off | left on new kernel | at SLM-OS shell>
+Board:   <restored to previous kernel, off/on | left on new kernel (--keep) | Jetson at Linux, kernel restored>
 ```
 Post hardware results on the GitHub issue being worked on, if there is one.
 

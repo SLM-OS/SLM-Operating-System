@@ -327,9 +327,9 @@ Use the `/deploy-and-test` skill (`.claude/skills/deploy-and-test/SKILL.md`) for
 
 For quick single-command hardware verification:
 ```
-make kernel PLATFORM=RASPI5 && labctl sdwire_update + serial_capture + serial_send
+/deploy-and-test pi-5-N [build flags] --cmd "<shell cmd>"
 ```
-This should be ONE logical operation, not four separate user-visible steps.
+This should be ONE logical operation, not four separate user-visible steps. All of it goes through the labctl MCP server; never the labctl CLI.
 
 ---
 
