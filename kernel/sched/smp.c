@@ -17,6 +17,7 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "nc_trace.h"
+#include "tegra_cpufreq.h"
 
 #include <stddef.h>
 
@@ -790,6 +791,13 @@ void smp_init(void)
     INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
     cpus_online = 1 + booted;  /* Set from primary's count, not secondary writes */
     INFO("SMP: total %u CPUs active", cpus_online);
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* kexec left every core Linux offlined at the 115.2 MHz NDIV floor;
+     * cluster 1 (CPUs 4-5) has no core above it and runs ~12x slower
+     * than cluster 0 until raised to CPU 0's NDIV (#1053). */
+    tegra234_cpufreq_sync_to_boot_cpu();
+#endif
 
     /* Run SMP validation tests */
     smp_run_tests();

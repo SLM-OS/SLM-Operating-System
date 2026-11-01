@@ -160,11 +160,12 @@ The recovery install gets none of these.
 
 ## One-time setup: install the `slmos-kexec` helper
 
-The `scripts/jetson-kexec-slmos.sh` helper does three things the raw `kexec` call cannot:
+The main things the `scripts/jetson-kexec-slmos.sh` helper does that the raw `kexec` call cannot:
 
-1. **GPU runtime-PM suspend + BPMP clock re-enable.** Prevents the TF-A RAS Uncorrectable Error that would otherwise kill the CPU core mid-kexec (issue #9). The suspend drains stale nvgpu DMA; the BPMP re-enable puts the GPU's clocks + powergate back on so SLM-OS sees `NV_PMC_BOOT_0` instead of `0xFFFFFFFF`.
+1. **GPU state across kexec.** By default (channel-preserving, since 2026-05-08) the helper starts the GPU channel-inherit helpers with `--preserve-for-kexec` (`--no-helper` to skip), forces the GPU powergate and clocks on through BPMP, and pins GPU devfreq at its max, so SLM-OS inherits a live GPU channel. `--gpu-suspend` selects the older mode: a runtime-PM suspend that drains stale nvgpu DMA (preventing the TF-A RAS Uncorrectable Error of issue #9), followed by a BPMP clock re-enable so SLM-OS sees `NV_PMC_BOOT_0` instead of `0xFFFFFFFF`, at the cost of falling back to CPU inference.
 2. **USB xHCI clock + powergate holds** (`--no-usb-hold` to skip). Keeps `xusba` / `xusbc` powergates and the `xusb_*` clock tree alive across the kexec so SLM-OS's XHCI driver finds the controller responsive (issue #266).
 3. **Optional xusb arm-smmu preservation.** If `arm_smmu_noshutdown.ko` is installed in `/usr/local/lib/slmos/arm_smmu_noshutdown.ko` (or one of the helper's fallback search paths), the helper loads it before `kexec -e`. This preserves the xusb stream's live SMMU context and adds an identity mapping for SLM-OS's NC memory region, which is required for the current XHCI RUN/NO_OP path.
+4. **CPU frequency pin** (`--no-cpufreq-pin` to skip). Raises every cpufreq policy's `scaling_min_freq` to `scaling_max_freq` just before `kexec -e`. SLM-OS copies CPU 0's frequency to all six cores at boot (#1053), so this makes that frequency the policy max on every boot.
 
 Install once:
 
@@ -375,6 +376,7 @@ The `slmos-kexec` helper's default behavior suits most cases. The common non-def
 | `--no-usb-hold` | SLM-OS builds that don't drive the XHCI controller. The held clocks are otherwise harmless. |
 | `--no-smmu-fix` | Skip loading `arm_smmu_noshutdown.ko`. Only useful if you are not exercising the USB-A/XHCI path or are deliberately reproducing the pre-fix failure. |
 | `--no-usb-root-cleanup` | Skip the Linux-side USB2 root-hub `authorized=0` cleanup before `kexec`. Useful only if you are intentionally reproducing the old stale-slot path; the default cleanup is what makes the retained slot-1 handoff reproducible on `jetson-nano-2`. |
+| `--no-cpufreq-pin` | Skip pinning each cpufreq policy's `scaling_min_freq` to `scaling_max_freq` before `kexec`. SLM-OS raises every core to CPU 0's frequency at boot (#1053), so with the pin all six cores run at the policy max (1344 MHz on `jetson-nano-2`); without it they run at whatever the governor last chose for CPU 0. |
 
 Full flag list in the script header.
 

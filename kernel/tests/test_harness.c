@@ -146,6 +146,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_mpidr_lookup();
     total_failures += test_suite_pmu();
 #endif
+    total_failures += test_suite_tegra_cpufreq();
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();

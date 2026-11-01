@@ -265,6 +265,9 @@ int test_suite_cpu_supervisor(void);
 /* MPIDR -> logical CPU id lookup tests (#647) */
 int test_suite_mpidr_lookup(void);
 
+/* Tegra234 CPU NDIV helpers (#1053) */
+int test_suite_tegra_cpufreq(void);
+
 /* ARM PMU primitive smoke tests (#874) */
 int test_suite_pmu(void);
 

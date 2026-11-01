@@ -173,6 +173,11 @@
 
 /* GPU (for reference, actual init in kernel/gpu/) */
 #define GPU_BASE            0x17000000UL
+/* CCPLEX cluster control (Linux: "nvidia,tegra234-ccplex-cluster", DT
+ * reg 0x0e000000 size 0x5ffff). The per-core NDIV (CPU PLL multiplier)
+ * registers live at +0x2000 + 8 * (cluster * 4 + MPIDR.Aff1); core
+ * frequency is 12.8 MHz * NDIV on this SoC (#1053). */
+#define TEGRA234_CCPLEX_BASE     0x0E000000UL
 
 /*
  * BPMP (Boot and Power Management Processor)
