@@ -348,8 +348,8 @@ When a hardware tick runs alongside the cooperative one (Jetson with
 CPU's cooperative deadline. The synthetic tick then fires only if the
 hardware tick has been missing for a full period. Without it, once
 #1047 unmasked IRQs at task entry, Jetson CPU 0 on that build counted
-every period twice (twice the ticks of CPUs 1-5, so half-length quanta). Regression
-test: `test_hw_tick_refreshes_last_tick` in
+every period twice (twice the ticks of CPUs 1-5, so half-length
+quanta). Regression test: `test_hw_tick_refreshes_last_tick` in
 `kernel/tests/test_coop_preempt.c`.
 
 **Diagnostics:** The `timdiag` shell command (`kernel/src/shell_sys.c`)

@@ -38,6 +38,18 @@ unset PLATFORM SECONDARY_PREEMPT PI5_SECONDARY_PREEMPT JETSON_HW_TICK \
 TOOLCHAIN="cmake/toolchain-aarch64-none-elf.cmake"
 FLAGS_REL="CMakeFiles/slmos.elf.dir/flags.make"
 
+# The CMake half configures with the aarch64 toolchain. On a host
+# without it (e.g. an x86-only setup running `make test
+# PLATFORM=X86_64`), check only the Makefile resolution and say so,
+# rather than failing the whole test run.
+have_cmake_toolchain=1
+if ! command -v aarch64-none-elf-gcc > /dev/null 2>&1 || \
+   ! command -v cmake > /dev/null 2>&1; then
+    have_cmake_toolchain=0
+    echo "SKIP CMake half: aarch64-none-elf-gcc or cmake not on PATH;" \
+         "checking Makefile resolution only"
+fi
+
 if [ -t 1 ]; then
     OK=$'\033[32mOK\033[0m'
     FAIL=$'\033[31mFAIL\033[0m'
@@ -58,6 +70,8 @@ check_case() {
     local make_args="$1" extra="$2" want_make="$3" want_on="$4" want_off="$5"
     case_no=$((case_no + 1))
 
+    # Plain `make`, not $(MAKE): this runs as its own top-level make
+    # (MAKEFLAGS is unset above), not as a jobserver child.
     # shellcheck disable=SC2086  # make_args is a word list on purpose
     local got_make
     got_make="$(make --no-print-directory print-preempt-config $make_args)"
@@ -74,6 +88,17 @@ check_case() {
     [ "$sp" = "ON" ] && args+=(-DSECONDARY_PREEMPT=ON)
     # shellcheck disable=SC2206  # extra is a word list on purpose
     [ -n "$extra" ] && args+=($extra)
+
+    local label="${make_args:-<default>}${extra:+ + $extra}"
+    if [ "$have_cmake_toolchain" -eq 0 ]; then
+        if [ "$got_make" = "$want_make" ]; then
+            echo "$OK   $label -> make: $got_make (CMake skipped)"
+        else
+            echo "$FAIL $label -> make: got '$got_make', want '$want_make'"
+            failures=$((failures + 1))
+        fi
+        return
+    fi
 
     local dir="$tmp_root/case$case_no"
     if ! cmake -G "Unix Makefiles" -S . -B "$dir" "${args[@]}" \
@@ -100,7 +125,6 @@ check_case() {
         fi
     done
 
-    local label="${make_args:-<default>}${extra:+ + $extra}"
     if [ -z "$bad" ]; then
         echo "$OK   $label -> ${defs:-<none>}"
     else

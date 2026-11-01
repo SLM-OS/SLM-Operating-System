@@ -5,6 +5,10 @@
 # Configuration
 # ============================================================================
 
+# Bare `make` builds the kernel. Pinned explicitly so a target defined
+# above `all` can never become the default goal by accident.
+.DEFAULT_GOAL := all
+
 # Build type: Debug or Release
 BUILD_TYPE ?= Release
 
@@ -100,12 +104,6 @@ PI5_SECONDARY_PREEMPT ?= $(SECONDARY_PREEMPT)
 ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
-
-# Print the resolved preemption flags (used by
-# scripts/check-preempt-config.sh, #1050).
-.PHONY: print-preempt-config
-print-preempt-config:
-	@echo "PLATFORM=$(PLATFORM) JETSON_HW_TICK=$(JETSON_HW_TICK) SECONDARY_PREEMPT=$(SECONDARY_PREEMPT)"
 
 # Eviction:
 #   DISABLE_EVICTION=ON    — compile out the pluggable eviction framework.
@@ -1467,12 +1465,19 @@ KERNEL_TEST_ISO := $(KERNEL_TEST_BUILD_DIR)/slmos-test.iso
 check-deploy-configs:
 	@./scripts/check-deploy-pi5-configs.sh
 
-.PHONY: test
 # Resolved preemption flags per platform/override (#1050).
+# print-preempt-config prints them; check-preempt-config checks every
+# case. Both live down here, below `all`, so neither becomes the
+# default goal.
+.PHONY: print-preempt-config
+print-preempt-config:
+	@echo "PLATFORM=$(PLATFORM) JETSON_HW_TICK=$(JETSON_HW_TICK) SECONDARY_PREEMPT=$(SECONDARY_PREEMPT)"
+
 .PHONY: check-preempt-config
 check-preempt-config:
 	@./scripts/check-preempt-config.sh
 
+.PHONY: test
 test: check-deploy-configs check-preempt-config kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
