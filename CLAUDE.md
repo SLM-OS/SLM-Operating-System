@@ -14,7 +14,7 @@ Ignore files under `docs/archive/` unless specifically told to look at them. Arc
 
 ## Build, Deploy, and Test
 
-Use the `/deploy-and-test` skill when building, deploying to Pi 5 hardware, and capturing boot/test output. This skill orchestrates the labctl MCP tools (sdwire_update, power_cycle, serial_capture, boot_test) for the full deploy cycle.
+Use the `/deploy-and-test` skill (`.claude/skills/deploy-and-test/SKILL.md`) when building, deploying to Pi 5 or Jetson hardware, and capturing boot/test output. This skill orchestrates the labctl MCP tools (sdwire_update, power_cycle, serial_capture, boot_test) for the full deploy cycle.
 
 For iterative hardware debugging, use the labctl MCP tools directly:
 - `sdwire_update` — flash kernel + rename/delete files on SD card
@@ -323,13 +323,13 @@ Do NOT wait for the user to ask for tests or documentation. Do NOT report a chan
 
 ## Build-Deploy-Test Workflow
 
-Use the build-and-run skill for Pi 5 hardware iterations. Do NOT manually sequence individual `make`, `sdwire_update`, `serial_capture` calls when the skill can orchestrate them. If the skill is not working or missing, inform the user immediately — do not fall back to manual steps silently.
+Use the `/deploy-and-test` skill (`.claude/skills/deploy-and-test/SKILL.md`) for Pi 5 and Jetson hardware iterations. Do NOT manually sequence individual `make`, `sdwire_update`, `serial_capture` calls when the skill can orchestrate them. If the skill is not working or missing, inform the user immediately — do not fall back to manual steps silently.
 
 For quick single-command hardware verification:
 ```
-make kernel PLATFORM=RASPI5 && labctl sdwire_update + serial_capture + serial_send
+/deploy-and-test pi-5-N [build flags] --cmd "<shell cmd>"
 ```
-This should be ONE logical operation, not four separate user-visible steps.
+This should be ONE logical operation, not four separate user-visible steps. All of it goes through the labctl MCP server; never the labctl CLI.
 
 ---
 
