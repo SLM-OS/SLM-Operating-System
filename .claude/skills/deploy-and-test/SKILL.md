@@ -92,7 +92,14 @@ Before trusting any docs (CLAUDE.md "Verify live board state first"):
    - then `serial_capture(sbc_name, timeout=120, until_pattern="login:")`, about 60 s.
 2. **Copy, sync and kexec** with one Bash script. Keep it in the scratchpad, not the repo. It should:
    - wait for ssh;
-   - back up the board's current kernel: `ssh root@<ip> 'test ! -e /root/slmos.elf.prev && cp -p /root/slmos.elf /root/slmos.elf.prev && sync'`. `/root/slmos.elf` is the default kernel `slmos-kexec` boots, and other sessions rely on it. If `/root/slmos.elf.prev` already exists, an earlier run never restored: stop and ask, as for Pi 5;
+   - back up the board's current kernel, and stop the script on any problem. `/root/slmos.elf` is the default kernel `slmos-kexec` boots, and other sessions rely on it:
+     ```
+     ssh root@<ip> 'if [ -e /root/slmos.elf.prev ]; then echo PREV_EXISTS; exit 3; fi
+                    if [ -e /root/slmos.elf ]; then cp -p /root/slmos.elf /root/slmos.elf.prev
+                    else echo NO_ORIGINAL; fi; sync' || exit 1
+     ```
+     - `PREV_EXISTS` (exit 3): an earlier run left a backup. Stop and ask, as for Pi 5; if the user says the earlier run was a deliberate `--keep`, the backup can be deleted.
+     - `NO_ORIGINAL`: the board had no kernel there. Note it for Step 5, which then deletes the new file instead of restoring;
    - `scp` the ELF to `root@<ip>:/root/slmos.elf`;
    - run `ssh root@<ip> 'sync; sha256sum /root/slmos.elf'`, and compare the hash with Step 1;
    - start `setsid nohup slmos-kexec /root/slmos.elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &` over ssh, with `-o ServerAliveInterval=2 -o ServerAliveCountMax=2`, and give up on the ssh session after about 60 s.
@@ -136,9 +143,13 @@ serial_send(sbc_name, data="<cmd>", capture_until="slmos>", capture_timeout=<s>)
   This leaves the card exactly as found. Example with one existing name: `renames=["<kernel>:<kernel>.test", "<kernel>.prev:<kernel>"], deletes=["<kernel>.test"]`.
 - **Jetson:** the deploy replaced `/root/slmos.elf` on the board's disk, so put it back:
   1. Call `power_cycle` and wait for `login:` (Step 2).
-  2. Run `ssh root@<ip> 'mv /root/slmos.elf.prev /root/slmos.elf && sync; sha256sum /root/slmos.elf'`.
+  2. Restore the file:
+     - **After a backup:** `ssh root@<ip> 'mv /root/slmos.elf.prev /root/slmos.elf && sync; sha256sum /root/slmos.elf'`.
+     - **After `NO_ORIGINAL`:** `ssh root@<ip> 'rm -f /root/slmos.elf && sync'`.
 
-  The board is then left at Linux on its original kernel. With `--keep`, run `ssh root@<ip> 'rm -f /root/slmos.elf.prev && sync'` instead, once Linux is up, or leave the board at the SLM-OS shell and say the backup is still there.
+  The board is then left at Linux with `/root/slmos.elf` as it was found. With `--keep`, there are two options:
+  - **Delete the backup:** once Linux is up, run `ssh root@<ip> 'rm -f /root/slmos.elf.prev && sync'`.
+  - **Leave the board at the SLM-OS shell:** the backup is still on disk, and the next run's backup check will stop on it. Say so in the report and tell the user that `/root/slmos.elf.prev` needs deleting or restoring.
 
 **Release on every path,** including failures and early stops: `release_sbc(sbc_name)`.
 
@@ -165,6 +176,9 @@ CLAUDE.md asks for at least 10 runs.
   boot_test(sbc_name, expect_pattern="slmos>", runs=N, timeout=90)
   ```
   Leave out `image` and `dest`: the kernel is already on the card, and passing them makes `boot_test` overwrite it with no backup. If the result starts with `Stopped:`, report the run as incomplete, not as a pass rate.
-- **Jetson:** `boot_test` can't kexec. Loop Steps 2–3 per run instead: power-cycle to Linux, sync, kexec, capture. The ELF only needs copying once.
+- **Jetson:** `boot_test` can't kexec, so loop by hand.
+  - **Once, before run 1:** do Step 2.2's backup, `scp` and `sync`.
+  - **Each run:** power-cycle to Linux (Step 2.1), start `slmos-kexec /root/slmos.elf` the same detached way, then capture (Step 3). Don't repeat the backup: from run 2 on, `/root/slmos.elf.prev` exists and the check would stop the run.
+  - **Once, after the last run:** Step 5.
 
 Either way, report pass/fail with the failure pattern, for example "3/10 failed, all stalled after `[GA10B-P6]`". Then do Step 5.
