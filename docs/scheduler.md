@@ -95,6 +95,11 @@ synthesizes a `scheduler_tick()` call when the quantum has expired.
 This drives the AI policy, deadline boosts, migration decisions, and
 the `pit_ticks` / `timer_handler_count` observability counters.
 
+The deadline is shared with the hardware tick: on builds that have
+both (the default Jetson build, #1050), the timer ISR resets it through
+`sched_note_hw_tick()`, so each 10 ms period produces one tick rather
+than two (#1047).
+
 **Consequence:** the scheduler intervenes **only when the running task
 calls `schedule()`** — voluntarily via `yield()` / `sleep()`, or
 implicitly via a blocking primitive (locks, message router,

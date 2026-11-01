@@ -180,6 +180,17 @@ void scheduler_dump(void);
 void scheduler_tick(void);
 
 /*
+ * Hardware-tick bookkeeping (#1047). The ARM timer ISR calls
+ * sched_note_hw_tick() so a COOP_PREEMPT build with a working
+ * hardware tick doesn't also synthesize a cooperative tick for the
+ * same period. sched_last_tick_cntpct() returns the CNTPCT value of
+ * the most recent tick on `cpu` from either source (0 before the
+ * first one); used by tests and diagnostics.
+ */
+void sched_note_hw_tick(uint32_t cpu);
+uint64_t sched_last_tick_cntpct(uint32_t cpu);
+
+/*
  * Context switch (implemented in assembly).
  *
  * Saves context of 'old' task, restores context of 'new' task.

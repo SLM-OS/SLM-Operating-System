@@ -1698,6 +1698,46 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 }
 #endif /* CONFIG_WORK_STEALING */
 
+/*
+ * Per-CPU CNTPCT value of the most recent scheduler tick, from either
+ * source: the hardware timer ISR (sched_note_hw_tick) or the
+ * cooperative tick synthesized in schedule() (coop_preempt_maybe_tick).
+ *
+ * 64-byte alignment keeps the array off cache lines shared with other
+ * data. Each CPU only reads/writes its own index. volatile prevents
+ * the compiler from holding stale values across the coop_preempt tick
+ * computation.
+ *
+ * Compiled on every platform so the hardware-tick bookkeeping can be
+ * tested on QEMU, where COOP_PREEMPT is never built.
+ */
+static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
+    __attribute__((aligned(64)));
+
+/*
+ * Record that the hardware timer just ticked on `cpu` (#1047).
+ *
+ * Builds with both a hardware tick and COOP_PREEMPT (the default
+ * Jetson build, JETSON_HW_TICK=ON + COOP_PREEMPT=ON, #1050) would
+ * otherwise count each 10 ms period twice: once in the timer ISR and
+ * again when schedule() finds the cooperative deadline expired. Once
+ * #1047 unmasked IRQs at task entry, Jetson CPU 0 showed exactly
+ * twice the ticks of CPUs 1-5. Resetting the cooperative deadline
+ * here means the synthetic tick only fires when the hardware tick
+ * has been missing for a full period.
+ */
+void sched_note_hw_tick(uint32_t cpu)
+{
+    if (cpu < MAX_CPUS) {
+        coop_last_tick_cntpct[cpu] = timer_get_count();
+    }
+}
+
+uint64_t sched_last_tick_cntpct(uint32_t cpu)
+{
+    return (cpu < MAX_CPUS) ? coop_last_tick_cntpct[cpu] : 0;
+}
+
 #if defined(COOP_PREEMPT)
 /*
  * Cooperative-preemption tick driver.
@@ -1715,18 +1755,6 @@ static struct task *sched_try_steal(uint32_t this_cpu)
  * Tasks that busy-wait without yielding won't preempt mid-execution;
  * that's a known limitation documented in the coop-preempt rationale.
  */
-/*
- * 64-byte alignment places each per-CPU entry on its own cache line
- * (no false sharing). Each CPU only reads/writes its own index, so
- * there's no true cross-CPU contention on this array; the alignment
- * is purely to stop other CPUs' dirty updates from ping-ponging a
- * neighboring entry's line. volatile on the declaration prevents
- * the compiler from holding stale values across the coop_preempt
- * tick computation.
- */
-static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
-    __attribute__((aligned(64)));
-
 /* timer_handler_count and pit_ticks are declared in timer.h. */
 
 void scheduler_tick(void);

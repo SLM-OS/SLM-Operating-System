@@ -341,6 +341,16 @@ preemptively. The `PI5_COOP_PREEMPT` spelling is retained as a
 deprecated Makefile/CMake alias for backward compatibility; source
 code uses `COOP_PREEMPT` everywhere.
 
+When a hardware tick runs alongside the cooperative one (the default
+Jetson build, `JETSON_HW_TICK=ON` + `COOP_PREEMPT=ON`, #1050),
+`timer_handler()` calls `sched_note_hw_tick(cpu)`, which resets that
+CPU's cooperative deadline. The synthetic tick then fires only if the
+hardware tick has been missing for a full period. Without it, once
+#1047 unmasked IRQs at task entry, Jetson CPU 0 counted every period
+twice (twice the ticks of CPUs 1-5, so half-length quanta). Regression
+test: `test_hw_tick_refreshes_last_tick` in
+`kernel/tests/test_coop_preempt.c`.
+
 **Diagnostics:** The `timdiag` shell command (`kernel/src/shell_sys.c`)
 dumps live GIC and timer state on any ARM64 platform. Run after boot
 to see the current group configuration. The command deliberately

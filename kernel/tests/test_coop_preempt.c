@@ -227,6 +227,57 @@ static void test_slm_preempt_point_drives_schedule(void)
 }
 #endif  /* COOP_PREEMPT */
 
+#if !defined(PLATFORM_X86_64)
+/*
+ * The ARM timer ISR must refresh the shared tick timestamp (#1047).
+ *
+ * On the default Jetson build (hardware tick + COOP_PREEMPT), a timer
+ * ISR that doesn't call sched_note_hw_tick() lets schedule() add a
+ * second, synthetic tick for every period, so CPU 0 counted ticks
+ * twice. Two checks:
+ *
+ *   1. sched_note_hw_tick() stores the current CNTPCT for this CPU,
+ *      and out-of-range CPUs read back as 0.
+ *   2. Wiring: after ~5 periods, CPU 1's timestamp is within two
+ *      periods of now. QEMU CPU 1 takes real timer IRQs (idle WFI), so
+ *      if timer_handler stops calling the hook the timestamp is stale
+ *      or 0. CPU 1 rather than the test's own CPU because QEMU CPU 0
+ *      takes no hardware timer ticks during the test run (#1051).
+ */
+static void test_hw_tick_refreshes_last_tick(void)
+{
+    uint64_t freq = timer_get_frequency();
+    TEST_ASSERT_MESSAGE(freq > 0, "timer_get_frequency returned 0");
+    uint64_t period = freq / TIMER_HZ;
+
+    uint32_t cpu = cpu_id();
+    sched_note_hw_tick(cpu);
+    uint64_t noted = sched_last_tick_cntpct(cpu);
+    uint64_t now = timer_get_count();
+    TEST_ASSERT_MESSAGE(noted != 0, "sched_note_hw_tick did not record a tick");
+    TEST_ASSERT_MESSAGE(now - noted < period,
+        "sched_note_hw_tick recorded a stale timestamp");
+    TEST_ASSERT_EQUAL_UINT64(0, sched_last_tick_cntpct(MAX_CPUS));
+
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("wiring check needs a second CPU");
+        return;
+    }
+
+    uint64_t start = timer_get_count();
+    while ((timer_get_count() - start) < 5 * period) {
+        yield();
+    }
+
+    uint64_t last = sched_last_tick_cntpct(1);
+    now = timer_get_count();
+    TEST_ASSERT_MESSAGE(last > start,
+        "CPU 1 timer ISR did not refresh the tick timestamp (sched_note_hw_tick)");
+    TEST_ASSERT_MESSAGE(now - last < 2 * period,
+        "CPU 1 tick timestamp is stale after 5 periods");
+}
+#endif  /* !PLATFORM_X86_64 */
+
 int test_suite_coop_preempt(void)
 {
     UNITY_BEGIN();
@@ -237,6 +288,9 @@ int test_suite_coop_preempt(void)
     RUN_TEST(test_slm_preempt_point_callable);
 #if defined(COOP_PREEMPT)
     RUN_TEST(test_slm_preempt_point_drives_schedule);
+#endif
+#if !defined(PLATFORM_X86_64)
+    RUN_TEST(test_hw_tick_refreshes_last_tick);
 #endif
     return UNITY_END();
 }

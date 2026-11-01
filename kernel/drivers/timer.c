@@ -183,6 +183,10 @@ void timer_handler(void)
      * causing an infinite IRQ storm (tval=0 → immediate re-fire). */
     write_timer_tval(read_cntfrq() / TIMER_HZ);
 
+    /* Reset the cooperative tick deadline so COOP_PREEMPT builds with
+     * a working hardware tick don't count this period twice (#1047). */
+    sched_note_hw_tick(cpu_id());
+
     /* Call scheduler tick handler */
     scheduler_tick();
 }
