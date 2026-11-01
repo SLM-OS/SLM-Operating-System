@@ -1234,6 +1234,10 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
     # Helper liveness check (only relevant in --no-gpu-suspend mode).
     if [[ "$NO_GPU_SUSPEND" == "1" && "$NO_HELPER" != "1" ]]; then
         helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
+        if [[ ${#STARTED_HELPERS[@]} -eq 0 ]]; then
+            echo "Warning: no channel-inherit helper started (see [4/9]) —" \
+                 "SLM-OS GPU inference will fall back to CPU" >&2
+        fi
         for helper in "${STARTED_HELPERS[@]}"; do
             bin="$(helper_binary "$helper")"
             # Same two argv forms start_one_helper accepts: absolute
