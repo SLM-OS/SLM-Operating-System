@@ -15,6 +15,7 @@ multitasking on Jetson Orin Nano. Tracks issue **#380**.
 | 3.5 | NULL-safe `maybe_arm_resched_trampoline` (#750 fix) | ✅ landed (PR #752) |
 | 3.5b | IRQ trap-frame FP/SIMD save (q0-q31 + FPCR/FPSR, 800-byte frame) | ✅ landed (PR #753) |
 | 3.6 | Default-flip `JETSON_HW_TICK=ON` for `PLATFORM=JETSON_ORIN_NANO` | ✅ landed (PR #755) |
+| 3.6b | `JETSON_HW_TICK=ON` also defaults `SECONDARY_PREEMPT=ON`, `COOP_PREEMPT=OFF` (step 3.4; #755 had left these out) | ✅ landed (#1050, 2026-10-31; 20/20 boots on jetson-nano-2) |
 | 3.7 | Update fact sheets / plan / `kernel/CLAUDE.md` | ✅ landed (this commit, 2026-05-09) |
 | 3.8 | Close #380 | ✅ closed 2026-05-09 (5-PR chain: #647 + #746 + #752 + #753 + #755; 10/10 boot_test on jetson-nano-2) |
 
@@ -218,18 +219,33 @@ Conditional on Phase 1 producing a working BL31.
   use"). The PR #742 helpers `write_timer_ctl` /
   `write_timer_tval` already encapsulate this — just widen the
   preprocessor gate.
-- ☐ **3.3** `kernel/sched/sched.c::idle_task_func` — restore
-  `daifclr; wfi` on CPU 0 for Jetson once HW ticks fire.
+- ✅ **3.3** `kernel/sched/sched.c::idle_task_func` — restore
+  `daifclr; wfi` on CPU 0 for Jetson once HW ticks fire. The
+  `SECONDARY_PREEMPT && JETSON_HW_TICK` branch does this on every CPU;
+  it only became the default build with 3.4 (#1050, 2026-10-31).
+  Secondary `Schedule` counts in `cpu` dropped from ~2M to ~1.6k per
+  boot (WFI instead of spin-yield).
   Currently (#739) the Jetson branch falls through to `yield()`
   to avoid CPU 0 deadlock-on-WFI. With HW ticks, WFI wakes on
   PPI 26. Gate the change on `JETSON_HW_TICK=ON` (new build flag)
   so the cooperative fallback stays intact for users on stock
   TF-A. Same change for secondary-CPU idle (was WFE-only).
-- ☐ **3.4** Flip CMake defaults for `JETSON_ORIN_NANO`:
+- ✅ **3.4** Flip CMake defaults for `JETSON_ORIN_NANO`:
   `COOP_PREEMPT=OFF`, `SECONDARY_PREEMPT=ON`, `JETSON_HW_TICK=ON`.
   Keep `COOP_PREEMPT=ON` build-flag-selectable for users on stock
-  BL31 or production-fused boards.
-- ☐ **3.5** Hardware verification on jetson-nano-2:
+  BL31 or production-fused boards. Done in #1050 (2026-10-31): #755
+  had flipped only `JETSON_HW_TICK`, so the build kept
+  `COOP_PREEMPT=ON` with no trampoline until then.
+  `make check-preempt-config` (a `make test` prerequisite) pins the
+  resolved flags for each platform/override.
+- ✅ **3.5** Hardware verification on jetson-nano-2 (2026-10-31, #1050):
+  20/20 kexec boots; `timer_handler_count` / per-CPU ticks even on all
+  6 CPUs (~800 each); two pinned non-yielding equal-priority Lua tasks
+  per CPU on CPUs 1-3 both finished in ~12 s (solo ~6 s), i.e. they
+  shared the CPU; `bench smp` 5/5, `bench stealing` 16/16,
+  `bench context` avg 4.7 µs; `bench infer-stress 4 50` with
+  `gpu use inference on` 200/200, same 31 s as main. CPUs 4-5 run
+  ~12× slower than 0-3 on both builds (#1053). Original checklist:
     - Boot to shell — clean, no exception storms.
     - `timdiag` shows `timer_handler_count` climbing.
     - `tasks` shows non-yielding tasks alternating at quantum rate

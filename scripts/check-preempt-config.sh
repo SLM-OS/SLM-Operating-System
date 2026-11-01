@@ -27,6 +27,14 @@
 
 set -euo pipefail
 
+# When run from `make test SECONDARY_PREEMPT=ON` (or any other
+# override), the outer make passes its command-line variables down
+# through MAKEFLAGS and the environment. Drop them so each case below
+# resolves from the Makefile defaults plus only that case's arguments.
+unset MAKEFLAGS MFLAGS MAKELEVEL MAKEOVERRIDES
+unset PLATFORM SECONDARY_PREEMPT PI5_SECONDARY_PREEMPT JETSON_HW_TICK \
+      EXTRA_KERNEL_CMAKE_ARGS
+
 TOOLCHAIN="cmake/toolchain-aarch64-none-elf.cmake"
 FLAGS_REL="CMakeFiles/slmos.elf.dir/flags.make"
 
