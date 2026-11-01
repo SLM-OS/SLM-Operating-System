@@ -1717,12 +1717,12 @@ static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
 /*
  * Record that the hardware timer just ticked on `cpu` (#1047).
  *
- * Builds with both a hardware tick and COOP_PREEMPT (the default
- * Jetson build, JETSON_HW_TICK=ON + COOP_PREEMPT=ON, #1050) would
+ * Builds with both a hardware tick and COOP_PREEMPT (Jetson with
+ * JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF, the default until #1050) would
  * otherwise count each 10 ms period twice: once in the timer ISR and
  * again when schedule() finds the cooperative deadline expired. Once
- * #1047 unmasked IRQs at task entry, Jetson CPU 0 showed exactly
- * twice the ticks of CPUs 1-5. Resetting the cooperative deadline
+ * #1047 unmasked IRQs at task entry, Jetson CPU 0 on that build showed
+ * exactly twice the ticks of CPUs 1-5. Resetting the cooperative deadline
  * here means the synthetic tick only fires when the hardware tick
  * has been missing for a full period.
  */

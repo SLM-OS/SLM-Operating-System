@@ -456,8 +456,8 @@ Once the restore is complete, `task_entry_trampoline()` (also in `task.c`) unmas
 
 | Build | Unmasked at task entry |
 |---|---|
-| `SECONDARY_PREEMPT=ON` (the Pi 5 default), `PI5_FIQ_TIMER`, QEMU | Every CPU (`PI5_FIQ_TIMER` clears I and F) |
-| NC-memory platform without `SECONDARY_PREEMPT` (the default Jetson build, which sets `JETSON_HW_TICK=ON` but not `SECONDARY_PREEMPT`; see #1050) | CPU 0 only. A secondary's timer ISR would call `schedule()` directly, which corrupts the abandoned frame on real hardware |
+| `SECONDARY_PREEMPT=ON` (the Pi 5 and Jetson defaults), `PI5_FIQ_TIMER`, QEMU | Every CPU (`PI5_FIQ_TIMER` clears I and F) |
+| NC-memory platform without `SECONDARY_PREEMPT` (Jetson `JETSON_HW_TICK=OFF`, or `JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF`) | CPU 0 only. A secondary's timer ISR would call `schedule()` directly, which corrupts the abandoned frame on real hardware |
 | x86-64 | Not changed; its own context code sets up the flags |
 
 Before #1047 nothing on the task path unmasked IRQs. `irq_restore()` and `spin_unlock_irqrestore()` put back the saved flags, which were still masked, and only the idle loop ran `daifclr`. Running tasks therefore never took a timer IRQ. Ticks landed only while idle ran, so there was no real quantum preemption of a running task, and on Pi 5 CPU 0 (whose shell never idles) recorded no ticks at all. `irqtest noirq` on pi-5-2 showed the shell at `DAIF=0x80` with PPI 26 pending. With the fix, the same probe shows `DAIF=0x0`, and CPU 0's tick count matches the other CPUs. `test_task_entry_unmasks_irq` in `kernel/tests/test_scheduler.c` checks a fresh task's DAIF on CPU 0 and CPU 1 against the helper.
@@ -480,7 +480,7 @@ The feature is gated behind the `SECONDARY_PREEMPT` compile-time option:
 |---|---|
 | *default* (QEMU, x86-64) | Trampoline not compiled. QEMU's emulated timer allows `schedule()` from the ISR; x86-64 has no ELR. |
 | *default* (Pi 5) | The Makefile sets `SECONDARY_PREEMPT ?= ON` for `PLATFORM=RASPI5`, and CMake defaults `COOP_PREEMPT` to OFF there (#777). Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched BL31. |
-| *default* (Jetson) | `JETSON_HW_TICK=ON` implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`. Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched tegra234 BL31. |
+| *default* (Jetson) | `JETSON_HW_TICK=ON` implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (Makefile and CMake since #1050; before that the build kept `COOP_PREEMPT=ON` with no trampoline). Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched tegra234 BL31. |
 | `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Live on Pi 5 (PR #742, default since #777) and Jetson; QEMU works for trampoline-path CI but isn't strictly needed there. |
 | `make kernel PI5_SECONDARY_PREEMPT=ON` | Deprecated alias. Sets `SECONDARY_PREEMPT=ON`. Kept so existing Pi 5 Makefile invocations continue working. |
 

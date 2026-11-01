@@ -146,8 +146,8 @@ endif()
 #
 # Default OFF here because turning it on requires functional timer IRQ
 # delivery on all CPUs. The Makefile turns it on where that holds:
-# `SECONDARY_PREEMPT ?= ON` for PLATFORM=RASPI5 (#742/#777). It is not
-# set for Jetson, even under JETSON_HW_TICK=ON (see #1050). Tasks are
+# `SECONDARY_PREEMPT ?= ON` for PLATFORM=RASPI5 (#742/#777) and for
+# Jetson when JETSON_HW_TICK=ON (#1050). Tasks are
 # unmasked at entry on every CPU when it is ON (task_entry_unmasks_irq,
 # #1047); otherwise only CPU 0 unmasks.
 option(SECONDARY_PREEMPT "Enable deferred-scheduling preemption on secondary CPUs (ARM64, NC-memory platforms)" OFF)
@@ -305,11 +305,15 @@ endif()
 # A pure CPU-bound loop with no yield still monopolizes its CPU.
 #
 # Default ON only where hardware timer-IRQ delivery is unavailable.
-# Pi 5 now ships SECONDARY_PREEMPT=ON by default (timer IRQs deliver
-# at EL2/VHE on PPI 26), so the cooperative path is no longer needed
-# on RASPI5 and is OFF by default. Jetson and other ARM64 NC-memory
-# platforms still default ON.
+# Pi 5 ships SECONDARY_PREEMPT=ON by default (timer IRQs deliver at
+# EL2/VHE on PPI 26), so the cooperative path is OFF there. Jetson is
+# OFF when the hardware tick and the trampoline are both on, which is
+# the Makefile default (JETSON_HW_TICK=ON implies SECONDARY_PREEMPT=ON,
+# #1050). JETSON_HW_TICK=OFF (stock BL31), or SECONDARY_PREEMPT=OFF,
+# keeps it ON so secondary CPUs still get cooperative ticks.
 if(PLATFORM STREQUAL "RASPI5")
+    set(_default_coop OFF)
+elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND JETSON_HW_TICK AND SECONDARY_PREEMPT)
     set(_default_coop OFF)
 else()
     set(_default_coop ON)
