@@ -1209,7 +1209,8 @@ if [[ "$NO_CPUFREQ_PIN" != "1" ]]; then
             echo "       $(basename "$policy"): scaling_max_freq unreadable — skipping"
             continue
         fi
-        echo "$cpu_max" > "$policy/scaling_min_freq" 2>/dev/null || \
+        # Braces so a failed redirect's own error message is silenced too.
+        { echo "$cpu_max" > "$policy/scaling_min_freq"; } 2>/dev/null || \
             echo "       $(basename "$policy"): scaling_min_freq write failed" >&2
         cpu_cur="$(cat "$policy/scaling_cur_freq" 2>/dev/null || echo '?')"
         echo "       $(basename "$policy"): cur=$cpu_cur min=max=$cpu_max kHz"

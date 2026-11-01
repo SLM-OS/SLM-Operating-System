@@ -27,7 +27,6 @@
 #define TEGRA_CPUFREQ_H
 
 #include <stdint.h>
-#include <stdbool.h>
 
 #define TEGRA234_CPUFREQ_REG_BASE       0x2000u
 #define TEGRA234_CPUFREQ_REG_STRIDE     8u
