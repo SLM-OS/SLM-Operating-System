@@ -10,12 +10,14 @@
 # and COOP_PREEMPT=OFF, but the build kept COOP_PREEMPT=ON with no
 # trampoline. For each case this script:
 #
-#   1. asks the Makefile for the resolved flags (make print-preempt-config);
-#   2. configures CMake into a temporary directory with the same -D
-#      arguments the Makefile would pass;
+#   1. asks the Makefile for the resolved flags and for the exact
+#      preemption CMake arguments its configure rules pass
+#      (make print-preempt-config, which prints KERNEL_PREEMPT_CMAKE_ARGS
+#      plus EXTRA_KERNEL_CMAKE_ARGS);
+#   2. configures CMake into a temporary directory with those arguments;
 #   3. checks the -D defines that reach the compiler.
 #
-# Run from repo root:
+# Run from anywhere (the script changes to the repo root):
 #
 #     ./scripts/check-preempt-config.sh
 #
@@ -26,6 +28,8 @@
 # Exits 0 when every case matches, 1 otherwise.
 
 set -euo pipefail
+
+cd "$(dirname "$0")/.."
 
 # When run from `make test SECONDARY_PREEMPT=ON` (or any other
 # override), the outer make passes its command-line variables down
@@ -69,41 +73,70 @@ case_no=0
 check_case() {
     local make_args="$1" extra="$2" want_make="$3" want_on="$4" want_off="$5"
     case_no=$((case_no + 1))
+    local label="${make_args:-<default>}${extra:+ + $extra}"
 
     # Plain `make`, not $(MAKE): this runs as its own top-level make
-    # (MAKEFLAGS is unset above), not as a jobserver child.
+    # (MAKEFLAGS is unset above), not as a jobserver child. The case's
+    # extra CMake arguments go in the way a user would pass them, via
+    # EXTRA_KERNEL_CMAKE_ARGS.
+    # stdout only: lines are picked by prefix below, so a make warning
+    # on stderr can't be mistaken for the PLATFORM=... line. stderr is
+    # kept for the failure message.
+    local out err="$tmp_root/make$case_no.err"
     # shellcheck disable=SC2086  # make_args is a word list on purpose
-    local got_make
-    got_make="$(make --no-print-directory print-preempt-config $make_args)"
+    if ! out="$(make --no-print-directory print-preempt-config $make_args \
+                ${extra:+"EXTRA_KERNEL_CMAKE_ARGS=$extra"} 2>"$err")"; then
+        echo "$FAIL $label -> make print-preempt-config failed:"
+        tail -5 "$err"
+        failures=$((failures + 1))
+        return
+    fi
+    local got_make cmake_args platform
+    got_make="$(grep -m1 '^PLATFORM=' <<<"$out" || true)"
+    cmake_args="$(sed -n 's/^CMAKE_ARGS=//p' <<<"$out")"
+    platform="$(sed -n 's/^PLATFORM=\([^ ]*\).*/\1/p' <<<"$got_make")"
 
-    local platform hw sp
-    platform="$(sed -n 's/.*PLATFORM=\([^ ]*\).*/\1/p' <<<"$got_make")"
-    hw="$(sed -n 's/.*JETSON_HW_TICK=\([^ ]*\).*/\1/p' <<<"$got_make")"
-    sp="$(sed -n 's/.*SECONDARY_PREEMPT=\([^ ]*\).*/\1/p' <<<"$got_make")"
+    # Check the printed preemption arguments directly, so the
+    # Makefile -> CMake plumbing is covered even when the CMake half
+    # below is skipped. Only SECONDARY_PREEMPT and JETSON_HW_TICK are
+    # Makefile-driven; COOP_PREEMPT is CMake's own default.
+    local bad=""
+    [ "$got_make" = "$want_make" ] || bad+=" make: got '${got_make:-<none>}', want '$want_make';"
+    local d
+    for d in $want_on; do
+        case "$d" in
+            SECONDARY_PREEMPT|JETSON_HW_TICK)
+                [[ " $cmake_args " == *" -D$d=ON "* ]] || bad+=" make args missing -D$d=ON;" ;;
+        esac
+    done
+    for d in $want_off; do
+        case "$d" in
+            SECONDARY_PREEMPT|JETSON_HW_TICK)
+                [[ " $cmake_args " != *" -D$d=ON "* ]] || bad+=" make args unexpectedly pass -D$d=ON;" ;;
+        esac
+    done
 
-    # Mirror the Makefile's cmake invocation for these options.
-    local args=(-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=Release
-                -DPLATFORM="$platform")
-    [ "$hw" = "ON" ] && args+=(-DJETSON_HW_TICK=ON)
-    [ "$sp" = "ON" ] && args+=(-DSECONDARY_PREEMPT=ON)
-    # shellcheck disable=SC2206  # extra is a word list on purpose
-    [ -n "$extra" ] && args+=($extra)
-
-    local label="${make_args:-<default>}${extra:+ + $extra}"
     if [ "$have_cmake_toolchain" -eq 0 ]; then
-        if [ "$got_make" = "$want_make" ]; then
-            echo "$OK   $label -> make: $got_make (CMake skipped)"
+        if [ -z "$bad" ]; then
+            echo "$OK   $label -> make args: ${cmake_args:-<none>} (CMake skipped)"
         else
-            echo "$FAIL $label -> make: got '$got_make', want '$want_make'"
+            echo "$FAIL $label ->$bad"
             failures=$((failures + 1))
         fi
         return
     fi
 
+    # The configure rules' fixed arguments, plus the preemption/extra
+    # arguments exactly as the Makefile printed them.
+    local args=(-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=Release
+                -DPLATFORM="$platform")
+    # shellcheck disable=SC2206  # cmake_args is a word list on purpose
+    [ -n "$cmake_args" ] && args+=($cmake_args)
+
     local dir="$tmp_root/case$case_no"
     if ! cmake -G "Unix Makefiles" -S . -B "$dir" "${args[@]}" \
             > "$dir.log" 2>&1; then
-        echo "$FAIL [$make_args $extra] cmake configure failed:"
+        echo "$FAIL $label -> cmake configure failed:"
         tail -5 "$dir.log"
         failures=$((failures + 1))
         return
@@ -113,9 +146,6 @@ check_case() {
     defs="$(grep -oE -- '-D(COOP_PREEMPT|SECONDARY_PREEMPT|JETSON_HW_TICK)=1' \
             "$dir/$FLAGS_REL" | sort -u | tr '\n' ' ' || true)"
 
-    local bad=""
-    [ "$got_make" = "$want_make" ] || bad+=" make: got '$got_make', want '$want_make';"
-    local d
     for d in $want_on; do
         grep -q -- "-D$d=1" <<<"$defs" || bad+=" missing -D$d;"
     done

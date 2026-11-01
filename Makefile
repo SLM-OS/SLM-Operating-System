@@ -61,7 +61,6 @@ HAILO_TRACE_MECH_DEFAULT ?= 0
 # anything else leaves the platform default in place.
 WORK_STEALING ?=
 
-
 # JETSON_HW_TICK=ON enables the per-CPU CNTHP / PPI 26 path on Jetson
 # Orin Nano. Requires the patched BL31 from
 # tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch
@@ -104,6 +103,13 @@ PI5_SECONDARY_PREEMPT ?= $(SECONDARY_PREEMPT)
 ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
+
+# CMake arguments for the preemption flags. Every kernel configure rule
+# (kernel, kexec, bzImage, test) passes this one variable, and
+# print-preempt-config prints it, so scripts/check-preempt-config.sh
+# checks the arguments the build really passes rather than a copy (#1050).
+KERNEL_PREEMPT_CMAKE_ARGS = $(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
+                            $(if $(filter ON,$(JETSON_HW_TICK)),-DJETSON_HW_TICK=ON)
 
 # Eviction:
 #   DISABLE_EVICTION=ON    — compile out the pluggable eviction framework.
@@ -546,8 +552,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(JETSON_HW_TICK)),-DJETSON_HW_TICK=ON) \
+		$(KERNEL_PREEMPT_CMAKE_ARGS) \
 		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
@@ -609,8 +614,7 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(JETSON_HW_TICK)),-DJETSON_HW_TICK=ON) \
+		$(KERNEL_PREEMPT_CMAKE_ARGS) \
 		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
@@ -731,8 +735,7 @@ $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(JETSON_HW_TICK)),-DJETSON_HW_TICK=ON) \
+		$(KERNEL_PREEMPT_CMAKE_ARGS) \
 		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
@@ -1435,8 +1438,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(JETSON_HW_TICK)),-DJETSON_HW_TICK=ON) \
+		$(KERNEL_PREEMPT_CMAKE_ARGS) \
 		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
@@ -1472,6 +1474,7 @@ check-deploy-configs:
 .PHONY: print-preempt-config
 print-preempt-config:
 	@echo "PLATFORM=$(PLATFORM) JETSON_HW_TICK=$(JETSON_HW_TICK) SECONDARY_PREEMPT=$(SECONDARY_PREEMPT)"
+	@echo "CMAKE_ARGS=$(strip $(KERNEL_PREEMPT_CMAKE_ARGS) $(EXTRA_KERNEL_CMAKE_ARGS))"
 
 .PHONY: check-preempt-config
 check-preempt-config:
