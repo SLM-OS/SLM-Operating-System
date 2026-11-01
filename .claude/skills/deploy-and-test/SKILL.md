@@ -101,7 +101,7 @@ Before trusting any docs (CLAUDE.md "Verify live board state first"):
      - `PREV_EXISTS` (exit 3): an earlier run left a backup. Stop and ask, as for Pi 5; if the user says the earlier run was a deliberate `--keep`, the backup can be deleted.
      - `NO_ORIGINAL`: the board had no kernel there. Note it for Step 5, which then deletes the new file instead of restoring;
    - `scp` the ELF to `root@<ip>:/root/slmos.elf`;
-   - run `ssh root@<ip> 'sync; sha256sum /root/slmos.elf'`, and compare the hash with Step 1;
+   - run `ssh root@<ip> 'sync; sha256sum /root/slmos.elf'`, and compare the hash with Step 1. On a mismatch, stop before the kexec;
    - start `setsid nohup slmos-kexec /root/slmos.elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &` over ssh, with `-o ServerAliveInterval=2 -o ServerAliveCountMax=2`, and give up on the ssh session after about 60 s.
 
    An ssh "server not responding" message at the end is expected: kexec has dropped Linux. Notes:
@@ -142,14 +142,16 @@ serial_send(sbc_name, data="<cmd>", capture_until="slmos>", capture_timeout=<s>)
 
   This leaves the card exactly as found. Example with one existing name: `renames=["<kernel>:<kernel>.test", "<kernel>.prev:<kernel>"], deletes=["<kernel>.test"]`.
 - **Jetson:** the deploy replaced `/root/slmos.elf` on the board's disk, so put it back:
-  1. Call `power_cycle` and wait for `login:` (Step 2).
+  1. Call `power_cycle` and wait for `login:` (Step 2.1).
   2. Restore the file:
      - **After a backup:** `ssh root@<ip> 'mv /root/slmos.elf.prev /root/slmos.elf && sync; sha256sum /root/slmos.elf'`.
      - **After `NO_ORIGINAL`:** `ssh root@<ip> 'rm -f /root/slmos.elf && sync'`.
 
-  The board is then left at Linux with `/root/slmos.elf` as it was found. With `--keep`, there are two options:
-  - **Delete the backup:** once Linux is up, run `ssh root@<ip> 'rm -f /root/slmos.elf.prev && sync'`.
-  - **Leave the board at the SLM-OS shell:** the backup is still on disk, and the next run's backup check will stop on it. Say so in the report and tell the user that `/root/slmos.elf.prev` needs deleting or restoring.
+  The board is then left at Linux with `/root/slmos.elf` as it was found. If it started off, call `power_off` after the restore.
+
+**With `--keep`:** the new kernel stays installed. Clear the backup, or the next run's leftover-backup check stops on it.
+- **Pi 5:** to clear it, run one `sdwire_update(sbc_name, 1, deletes=["<kernel>.prev", ...], reboot=<started on>)`, listing each `.prev` the deploy made. To keep the backups instead, list them in the report.
+- **Jetson:** to clear it, run `ssh root@<ip> 'rm -f /root/slmos.elf.prev && sync'` once Linux is up. Or leave the board at the SLM-OS shell; the report must then say that `/root/slmos.elf.prev` still needs deleting or restoring.
 
 **Release on every path,** including failures and early stops: `release_sbc(sbc_name)`.
 
