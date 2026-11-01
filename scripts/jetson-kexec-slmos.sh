@@ -1199,7 +1199,8 @@ fi
 # policy at its ceiling. Only CPU 0's policy matters (the other cores
 # go offline and lose their request); every online policy is pinned
 # anyway because it costs nothing. Like the devfreq pin, this resets
-# on power-cycle.
+# on power-cycle; if `kexec -e` fails, Linux keeps running pinned at
+# max until the next reboot.
 if [[ "$NO_CPUFREQ_PIN" != "1" ]]; then
     echo "[8.6/9] Pinning CPU frequency to policy max..."
     for policy in /sys/devices/system/cpu/cpufreq/policy*; do
@@ -1210,10 +1211,12 @@ if [[ "$NO_CPUFREQ_PIN" != "1" ]]; then
             continue
         fi
         # Braces so a failed redirect's own error message is silenced too.
-        { echo "$cpu_max" > "$policy/scaling_min_freq"; } 2>/dev/null || \
+        if { echo "$cpu_max" > "$policy/scaling_min_freq"; } 2>/dev/null; then
+            cpu_cur="$(cat "$policy/scaling_cur_freq" 2>/dev/null || echo '?')"
+            echo "       $(basename "$policy"): cur=$cpu_cur min=max=$cpu_max kHz"
+        else
             echo "       $(basename "$policy"): scaling_min_freq write failed" >&2
-        cpu_cur="$(cat "$policy/scaling_cur_freq" 2>/dev/null || echo '?')"
-        echo "       $(basename "$policy"): cur=$cpu_cur min=max=$cpu_max kHz"
+        fi
     done
 else
     echo "[8.6/9] SKIPPING CPU frequency pin (--no-cpufreq-pin)"
