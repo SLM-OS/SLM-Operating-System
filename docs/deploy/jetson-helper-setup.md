@@ -6,12 +6,15 @@ This document covers the per-Jetson helper-directory setup that `slmos-kexec` ex
 
 ## What lives in the helper directory
 
-`scripts/jetson-kexec-slmos.sh` starts up to two helpers immediately before `kexec -e`:
+`scripts/jetson-kexec-slmos.sh` starts the helpers selected with `--helpers=` / `SLMOS_HELPERS` (default `mnist,sched`) immediately before `kexec -e`:
 
-- `gpu-kernel-mnist` — owns the GPU channel that runs the MNIST conv pipeline post-kexec (the primary smoke test for `nvgpu launch-kernel`).
-- `gpu-kernel-sched-mlp` — owns a second channel for the AI-scheduler MLP policy (optional; absent on dev kits without sched weights).
+- `gpu-kernel-mnist` (`mnist`) — owns the GPU channel that runs the MNIST conv pipeline post-kexec (the primary smoke test for `nvgpu launch-kernel`).
+- `gpu-kernel-sched-mlp` (`sched`) — owns a channel for the AI-scheduler MLP policy (optional; absent on dev kits without sched weights).
+- `gpu-kernel-eviction-qnet` (`eviction`) — owns a channel for the eviction MLP (PR-6 of `docs/design/gpu-policy-models.md`).
 
-Both helpers are passed `--preserve-for-kexec`, which makes them publish a `struct ga10b_channel_handoff` to DRAM at a kind-tagged magic address that SLM-OS's DRAM scanner picks up after kexec.
+Select helpers with `slmos-kexec --helpers=LIST` or `SLMOS_HELPERS`; the default is `mnist,sched`. GPU eviction runs add the producer, for example `--helpers=mnist,sched,eviction`. Several preserved channels coexist: after the #1032 whole-VM PMM reserve (#1029 root cause), that configuration served the eviction score on 10/10 jetson-nano-2 boots. An earlier reading that multiple channels break each other (1/10 vs 8/10) was retracted.
+
+Every helper is passed `--preserve-for-kexec`, which makes them publish a `struct ga10b_channel_handoff` to DRAM at a kind-tagged magic address that SLM-OS's DRAM scanner picks up after kexec.
 
 `slmos-kexec` looks for them in `$SLMOS_HELPER_DIR`, defaulting to **`/root/gpu-mnist`** on the Jetson. The expected layout:
 
@@ -19,18 +22,21 @@ Both helpers are passed `--preserve-for-kexec`, which makes them publish a `stru
 /root/gpu-mnist/
 ├── gpu-kernel-mnist                          (compiled helper binary)
 ├── gpu-kernel-sched-mlp                      (optional)
+├── gpu-kernel-eviction-qnet                  (optional)
 ├── conv2d_fp32_direct_shader.sass            \
 ├── add_bias_relu_fp32_shader.sass            |  MNIST shaders, loaded
 ├── maxpool2d_fp32_shader.sass                |  at runtime by the helper
 ├── gemm_fp32_shader.sass                     |  via --shader-dir
 ├── gemm_hmma_fp32a_fp16w_shader.sass         /
+├── sigmoid_fp32_shader.sass                  (eviction producer only)
 ├── mnist-weights/                            (W_conv1.bin, etc.)
-└── sched-weights/                            (optional, MLP weights)
+├── sched-weights/                            (optional, MLP weights)
+└── eviction-weights/                         (optional, eviction MLP)
 ```
 
 ## Step 1: Build the SASS shader blobs
 
-The MNIST helper opens five `*_shader.sass` files at runtime — these are raw GA10B SASS `.text` segments extracted from cubins. They're produced by compiling the matching `.cu` sources in `scripts/cuda/` with `nvcc -arch=sm_87`, then carving the SASS bytes out via `cuobjdump --extract-elf` + `readelf -SW`.
+The MNIST helper opens five `*_shader.sass` files at runtime, and the eviction producer also needs `sigmoid_fp32_shader.sass` (`scripts/cuda/build-mnist-shaders.sh` builds all six) — these are raw GA10B SASS `.text` segments extracted from cubins. They're produced by compiling the matching `.cu` sources in `scripts/cuda/` with `nvcc -arch=sm_87`, then carving the SASS bytes out via `cuobjdump --extract-elf` + `readelf -SW`.
 
 These files are deliberately **not committed** to the repo (see `.gitignore`); regenerate them whenever a `.cu` source changes.
 
@@ -75,6 +81,8 @@ gcc -O2 -o /root/gpu-mnist/gpu-kernel-mnist \
     gpu-kernel-mnist.c gpu-launch-common.c
 gcc -O2 -o /root/gpu-mnist/gpu-kernel-sched-mlp \
     gpu-kernel-sched-mlp.c gpu-launch-common.c
+gcc -O2 -o /root/gpu-mnist/gpu-kernel-eviction-qnet \
+    gpu-kernel-eviction-qnet.c gpu-launch-common.c -lm
 ```
 
 `gpu-launch-common.c` ships the helper-side handoff publishing code (the v7 / v8 / v9 / v10 struct writers and the magic-tagged dmabuf scanner). Match the .c sources against `kernel/gpu/nvidia/ga10b_channel_handoff.h` in this repo — they share that header verbatim (the helper copies it into its build directory).
@@ -91,6 +99,11 @@ scp -r /tmp/mnist-weights root@<JETSON_IP>:/root/gpu-mnist/
 # Optional — sched MLP weights:
 python3 scripts/sched-extract-weights.py --out /tmp/sched-weights/
 scp -r /tmp/sched-weights root@<JETSON_IP>:/root/gpu-mnist/
+
+# Optional — eviction MLP weights (from the compiled-in fp32 tables):
+python3 scripts/eviction-extract-weights.py \
+    runtime/src/mm/eviction/generated/mlp_policy_f32.rs /tmp/eviction-weights/
+scp -r /tmp/eviction-weights root@<JETSON_IP>:/root/gpu-mnist/
 ```
 
 `gpu-kernel-mnist` falls back to an empty channel (no compute pre-staged) if `mnist-weights/` is missing — SLM-OS's `nvgpu launch-kernel` smoke test still works on the channel infrastructure alone. But running the full MNIST forward pass needs the weights present.

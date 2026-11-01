@@ -38,6 +38,7 @@
 #   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-helper     /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --helpers=mnist,sched,eviction /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-cpufreq-pin /path/to/slmos.elf
 #
 # Or install to Jetson and run:
@@ -94,6 +95,28 @@
 #                       check, and inference falls back to CPU. Use
 #                       --no-helper if you've staged your own helper or
 #                       deliberately want CPU-only inference.
+#                       Equivalent to --helpers=none.
+#
+#   --print-helpers     Print the resolved helper selection (after
+#                       --no-helper / --helpers= / $SLMOS_HELPERS) as a
+#                       comma list, or "none", and exit 0 without
+#                       touching the system. Handy for checking an
+#                       /etc/default/slmos-autokexec setting.
+#
+#   --helpers=LIST      Choose which channel-inherit helpers to auto-
+#                       start: a comma-separated subset of
+#                         mnist     gpu-kernel-mnist          (kind 0)
+#                         sched     gpu-kernel-sched-mlp      (kind 1)
+#                         eviction  gpu-kernel-eviction-qnet  (kind 2)
+#                       or "none". Default: mnist,sched (the historical
+#                       behavior). Overrides $SLMOS_HELPERS.
+#
+#                       Several preserved channels coexist: since the
+#                       #1032 whole-VM PMM reserve, the default helpers
+#                       plus the eviction producer served the eviction
+#                       score on 10/10 jetson-nano-2 boots (#1029).
+#                       Staging fewer helpers just saves the start-up
+#                       time and DRAM of the unused ones.
 #
 #   --no-cpufreq-pin    Skip pinning each cpufreq policy's
 #                       scaling_min_freq to scaling_max_freq before
@@ -103,8 +126,15 @@
 #
 # Environment:
 #   SLMOS_HELPER_DIR    Directory containing gpu-kernel-mnist /
-#                       gpu-kernel-sched-mlp + their weights/shaders.
+#                       gpu-kernel-sched-mlp / gpu-kernel-eviction-qnet
+#                       + their weights (mnist-weights/, sched-weights/,
+#                       eviction-weights/) and shaders (the eviction
+#                       producer also needs sigmoid_fp32_shader.sass).
 #                       Defaults to /root/gpu-mnist.
+#
+#   SLMOS_HELPERS       Same values as --helpers. Lets the
+#                       slmos-autokexec unit pick helpers via
+#                       /etc/default/slmos-autokexec.
 #
 #   SLMOS_GEMM_TIER     "hmma" (default) opts the FC layer (op 6) into
 #                       the FP32-activation × FP16-weight tensor-core
@@ -130,6 +160,9 @@ NO_SMMU_FIX=0
 NO_USB_ROOT_CLEANUP=0
 NO_HELPER=0
 NO_CPUFREQ_PIN=0
+HELPERS_ARG=""
+HELPERS_ARG_SET=0
+PRINT_HELPERS=0
 KERNEL=""
 SKIP_XHCI_SLOT3_HANDOFF=0
 XHCI_SLOT1_HANDOFF_PAYLOAD=""
@@ -146,23 +179,98 @@ for arg in "$@"; do
         --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
         --no-helper)      NO_HELPER=1 ;;
         --no-cpufreq-pin) NO_CPUFREQ_PIN=1 ;;
+        --helpers=*)      HELPERS_ARG="${arg#--helpers=}"; HELPERS_ARG_SET=1 ;;
+        --print-helpers)  PRINT_HELPERS=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
 KERNEL="${KERNEL:-/root/slmos.elf}"
 
+# Resolve the helper selection (#1029): --no-helper wins, then
+# --helpers=, then $SLMOS_HELPERS, then the historical default. Done
+# before any precondition check so a typo fails fast (exit 2), even
+# for a non-root dry run.
+SELECTED_HELPERS=()
+resolve_helpers() {
+    local spec
+    if [[ "$NO_HELPER" == "1" ]]; then
+        spec="none"
+    elif [[ "$HELPERS_ARG_SET" == "1" ]]; then
+        spec="$HELPERS_ARG"
+    else
+        spec="${SLMOS_HELPERS:-mnist,sched}"
+    fi
+    # Whitespace is ignored, so "mnist, sched" in
+    # /etc/default/slmos-autokexec works too.
+    spec="${spec//[[:space:]]/}"
+    if [[ "$spec" == "none" ]]; then
+        NO_HELPER=1
+        return 0
+    fi
+    local name seen=","
+    local -a names
+    IFS=',' read -r -a names <<<"$spec"
+    for name in "${names[@]}"; do
+        case "$name" in
+            mnist|sched|eviction) ;;
+            *)
+                echo "Error: unknown helper '$name' in '$spec'" \
+                     "(expected a comma list of mnist,sched,eviction or none)" >&2
+                exit 2 ;;
+        esac
+        if [[ "$seen" != *",$name,"* ]]; then
+            SELECTED_HELPERS+=("$name")
+            seen+="$name,"
+        fi
+    done
+    if [[ ${#SELECTED_HELPERS[@]} -eq 0 ]]; then
+        echo "Error: empty helper list '$spec'" >&2
+        exit 2
+    fi
+}
+resolve_helpers
+if [[ "$PRINT_HELPERS" == "1" ]]; then
+    if [[ "$NO_HELPER" == "1" ]]; then
+        echo "none"
+    else
+        (IFS=','; echo "${SELECTED_HELPERS[*]}")
+    fi
+    exit 0
+fi
+
+# Binary name and weights directory for a --helpers token.
+helper_binary() {
+    case "$1" in
+        mnist)    echo gpu-kernel-mnist ;;
+        sched)    echo gpu-kernel-sched-mlp ;;
+        eviction) echo gpu-kernel-eviction-qnet ;;
+    esac
+}
+helper_weights_dir() {
+    case "$1" in
+        mnist)    echo mnist-weights ;;
+        sched)    echo sched-weights ;;
+        eviction) echo eviction-weights ;;
+    esac
+}
+
+# Selected helpers that maybe_start_gpu_helpers actually started (or
+# found already running); skipped ones are left out.
+STARTED_HELPERS=()
+
 # start_one_helper — stage one channel-inherit helper and block until
 # its handoff is published.
 #
-# Exit codes (callers can distinguish; today both invocations use
-# `|| true` because every non-zero outcome is non-fatal — kexec
-# proceeds with whatever channels are live):
+# Exit codes (non-fatal — kexec proceeds with whatever channels are
+# live; maybe_start_gpu_helpers uses rc 1 to leave a skipped helper
+# out of the pre-kexec liveness check):
 #   0 — newly started or already running (handoff is live in DRAM)
 #   1 — skipped: helper binary or weights directory missing
 #   2 — started but timed out before reaching "kexec now"
 #
 # Args:
-#   $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
+#   $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp |
+#        gpu-kernel-eviction-qnet)
 #   $2 = weights directory under $helper_dir
 #   $3 = log file path
 #   $4..  = extra argv tokens passed verbatim to the helper (per-helper
@@ -199,7 +307,9 @@ start_one_helper() {
     # regex matches as a substring — `tail -f gpu-kernel-mnist
     # --preserve-for-kexec.log` would have triggered a false hit.
     local helper_path_re helper_name_re
+    # shellcheck disable=SC2016  # literal $ is part of the ERE class
     helper_path_re=$(printf '%s' "$helper_path" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
+    # shellcheck disable=SC2016
     helper_name_re=$(printf '%s' "$helper_name" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
     if pgrep -fx "$helper_path_re --preserve-for-kexec.*" >/dev/null 2>&1 ||
        pgrep -fx "\\./$helper_name_re --preserve-for-kexec.*" >/dev/null 2>&1; then
@@ -266,9 +376,10 @@ maybe_start_gpu_helpers() {
         return 0
     fi
 
-    # Start MNIST first (kind=0 handoff). Sched-MLP is best-effort —
-    # only stage it if the binary is on disk, since not every Jetson
-    # build has the sched-mlp pipeline compiled.
+    # Start the selected helpers in --helpers order (default mnist,
+    # then sched). Each is best-effort — start_one_helper skips a
+    # helper whose binary or weights directory is missing, since not
+    # every Jetson has every pipeline staged.
     #
     # `--qmd-pool` (MNIST only) produces a v7 handoff where each launch
     # authors fresh QMD bytes into a slot of a GMMU-mapped pool. This
@@ -291,8 +402,21 @@ maybe_start_gpu_helpers() {
         mnist_extra+=("--gemm-tier" "hmma"
                       "--weights-fp16-dir" "mnist-weights-fp16")
     fi
-    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log "${mnist_extra[@]}" || true
-    start_one_helper gpu-kernel-sched-mlp sched-weights /tmp/gpu-kernel-sched-mlp.log || true
+    local name bin rc
+    local -a extra
+    for name in "${SELECTED_HELPERS[@]}"; do
+        bin="$(helper_binary "$name")"
+        extra=()
+        [[ "$name" == "mnist" ]] && extra=("${mnist_extra[@]}")
+        rc=0
+        start_one_helper "$bin" "$(helper_weights_dir "$name")" \
+            "/tmp/$bin.log" "${extra[@]}" || rc=$?
+        # rc 1 = skipped (not staged on this board); the pre-kexec
+        # liveness check only looks at helpers that were started.
+        if [[ $rc -ne 1 ]]; then
+            STARTED_HELPERS+=("$name")
+        fi
+    done
 }
 
 find_smmu_fix_module() {
@@ -1110,15 +1234,28 @@ if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
     # Helper liveness check (only relevant in --no-gpu-suspend mode).
     if [[ "$NO_GPU_SUSPEND" == "1" && "$NO_HELPER" != "1" ]]; then
         helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
-        helper_path_re="$(printf '%s' "$helper_dir/gpu-kernel-mnist" | \
-                          sed 's/[][\\.*^$()+?{}|]/\\&/g')"
-        if pgrep -fx "$helper_path_re --preserve-for-kexec.*" >/dev/null 2>&1; then
-            echo "       gpu-kernel-mnist still alive ($(pgrep -fx \"$helper_path_re --preserve-for-kexec.*\" | head -1))"
-        else
-            echo "Warning: gpu-kernel-mnist NOT running at kexec time — channel inherit will fail" >&2
-            echo "         (tail of helper log:)" >&2
-            tail -10 /tmp/gpu-kernel-mnist.log 2>/dev/null >&2 || true
+        if [[ ${#STARTED_HELPERS[@]} -eq 0 ]]; then
+            echo "Warning: no channel-inherit helper started (see [4/9]) —" \
+                 "SLM-OS GPU inference will fall back to CPU" >&2
         fi
+        for helper in "${STARTED_HELPERS[@]}"; do
+            bin="$(helper_binary "$helper")"
+            # Same two argv forms start_one_helper accepts: absolute
+            # path, or ./name (how start_one_helper launches it).
+            # shellcheck disable=SC2016  # literal $ is part of the ERE class
+            path_re="$(printf '%s' "$helper_dir/$bin" | sed 's/[][\\.*^$()+?{}|]/\\&/g')"
+            # shellcheck disable=SC2016
+            name_re="$(printf '%s' "$bin" | sed 's/[][\\.*^$()+?{}|]/\\&/g')"
+            pid="$(pgrep -fx "$path_re --preserve-for-kexec.*" 2>/dev/null ||
+                   pgrep -fx "\\./$name_re --preserve-for-kexec.*" 2>/dev/null || true)"
+            if [[ -n "$pid" ]]; then
+                echo "       $bin still alive ($(head -1 <<<"$pid"))"
+            else
+                echo "Warning: $bin NOT running at kexec time — its channel inherit will fail" >&2
+                echo "         (tail of helper log:)" >&2
+                tail -10 "/tmp/$bin.log" 2>/dev/null >&2 || true
+            fi
+        done
     fi
 
     # Unconditional GPU force-on. Mirror step 3's suspend-mode
