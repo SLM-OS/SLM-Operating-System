@@ -75,13 +75,14 @@ check_case() {
     case_no=$((case_no + 1))
     local label="${make_args:-<default>}${extra:+ + $extra}"
 
-    # Plain `make`, not $(MAKE): this runs as its own top-level make
-    # (MAKEFLAGS is unset above), not as a jobserver child. The case's
-    # extra CMake arguments go in the way a user would pass them, via
-    # EXTRA_KERNEL_CMAKE_ARGS.
-    # stdout only: lines are picked by prefix below, so a make warning
-    # on stderr can't be mistaken for the PLATFORM=... line. stderr is
-    # kept for the failure message.
+    # Ask the Makefile for the resolved flags and CMake args:
+    # - plain `make`, not $(MAKE): this is its own top-level make
+    #   (MAKEFLAGS is unset above), not a jobserver child;
+    # - the case's extra CMake args go in as EXTRA_KERNEL_CMAKE_ARGS,
+    #   the way a user would pass them;
+    # - only stdout is parsed (lines picked by prefix below), so a make
+    #   warning can't be mistaken for the PLATFORM= line; stderr is kept
+    #   for the failure message.
     local out err="$tmp_root/make$case_no.err"
     # shellcheck disable=SC2086  # make_args is a word list on purpose
     if ! out="$(make --no-print-directory print-preempt-config $make_args \
