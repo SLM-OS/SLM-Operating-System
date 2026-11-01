@@ -5047,17 +5047,6 @@ static void test_uart_output_after_init(void)
     TEST_PASS();
 }
 
-/*
- * Regression: tasks created with task_create use CPU 0 pinning for FFI tests.
- *
- * On Pi 5, slm_task_create dispatches tasks via round-robin which can send
- * them to secondary CPUs. Without cache coherency, shared flags (like
- * ffi_task_proceed) are invisible cross-CPU. FFI tests must use
- * task_create + scheduler_add_task_to_cpu to pin to CPU 0.
- *
- * This test verifies that task_create followed by scheduler_add_task_to_cpu
- * correctly places the task on the specified CPU.
- */
 #if !defined(PLATFORM_X86_64)
 /*
  * #1047: tasks are created with DAIF.I=1 and used to run their whole
@@ -5101,6 +5090,11 @@ static void daif_probe_on(uint32_t cpu)
     while (t->state != TASK_TERMINATED && timeout-- > 0) {
         yield();
     }
+    if (t->state != TASK_TERMINATED) {
+        /* Still queued or running: take it off the run queue before
+         * freeing it, as the never-ran path does. */
+        scheduler_terminate_task(t);
+    }
     task_destroy(t);
     TEST_ASSERT_EQUAL_UINT32(cpu, daif_probe_cpu);
     bool masked = (daif_probe_val & 0x80u) != 0;
@@ -5117,6 +5111,17 @@ static void test_task_entry_unmasks_irq(void)
 }
 #endif
 
+/*
+ * Regression: tasks created with task_create use CPU 0 pinning for FFI tests.
+ *
+ * On Pi 5, slm_task_create dispatches tasks via round-robin which can send
+ * them to secondary CPUs. Without cache coherency, shared flags (like
+ * ffi_task_proceed) are invisible cross-CPU. FFI tests must use
+ * task_create + scheduler_add_task_to_cpu to pin to CPU 0.
+ *
+ * This test verifies that task_create followed by scheduler_add_task_to_cpu
+ * correctly places the task on the specified CPU.
+ */
 static void test_task_pinned_to_cpu0(void)
 {
     struct task *t = task_create("pin_test", nop_entry, NULL);

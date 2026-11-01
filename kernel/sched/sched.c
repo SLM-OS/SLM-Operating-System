@@ -2128,12 +2128,12 @@ void schedule(void)
         }
         rq_unlock_irqrestore(this_cpu, flags);
 
-        /* NOTE: On Pi 5, tasks run with DAIF.I=1 (IRQ masked) so pit_ticks
-         * does not advance during task execution. pit_ticks only advances
-         * when the idle task runs (it does daifclr+wfi). Components that
-         * poll pit_ticks must yield frequently enough for idle to run.
-         * Timer preemption on Pi 5 is not supported (causes hangs in IPC
-         * spinlock paths). See docs/pi5-cross-cpu-dispatch-investigation.md. */
+        /* NOTE: before #1047, tasks on Pi 5 and Jetson ran with DAIF.I=1
+         * for life, so pit_ticks only advanced while idle ran. Tasks are
+         * now unmasked at entry (task_entry_unmasks_irq), so hardware
+         * ticks also land while tasks run. Components should still time
+         * out against timer_get_count() rather than pit_ticks, which is a
+         * global bumped by every CPU's tick and is not wall time on ARM. */
         return;
     }
 
