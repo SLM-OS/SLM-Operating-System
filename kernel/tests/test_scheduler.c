@@ -4901,6 +4901,71 @@ static void test_fp_save_restore_callable(void)
 
 #endif /* CONFIG_AI_SCHEDULER */
 
+/* Run-queue init and `sched stats` tests that run on every build. */
+
+/*
+ * #1045: sched_runqueue_clear must zero the whole run queue, the AI
+ * tick counters included. On NC-memory platforms the queues come from
+ * ncmem_alloc, which does not zero, so a field-by-field init that
+ * missed the counters left them holding leftover data after kexec.
+ * QEMU uses a zeroed BSS fallback, so poison a local queue instead.
+ */
+static void test_sched_runqueue_clear_zeroes_all_fields(void)
+{
+    struct cpu_runqueue rq;
+    __builtin_memset(&rq, 0xA5, sizeof(rq));
+    sched_runqueue_clear(&rq);
+    const uint8_t *p = (const uint8_t *)&rq;
+    for (size_t i = 0; i < sizeof(rq); i++) {
+        TEST_ASSERT_EQUAL_HEX8(0, p[i]);
+    }
+    TEST_ASSERT_NULL(rq.head);
+    TEST_ASSERT_NULL(rq.tail);
+    TEST_ASSERT_NULL(rq.idle_task);
+    TEST_ASSERT_NULL(rq.zombie);
+    TEST_ASSERT_EQUAL_UINT32(0, rq.ready_count);
+#ifdef CONFIG_AI_SCHEDULER
+    TEST_ASSERT_EQUAL_UINT64(0, rq.running_ticks);
+    TEST_ASSERT_EQUAL_UINT64(0, rq.total_ticks);
+#endif
+    sched_runqueue_clear(NULL);   /* tolerated */
+}
+
+/*
+ * #1045: utilization must be a fraction on every online CPU. Garbage
+ * starting counters showed up as e.g. "CPU 2: 337%".
+ */
+static void test_ai_utilization_at_most_total_all_cpus(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct cpu_runqueue *rq = sched_cpu_rq(c);
+        /* Read running before total: scheduler_tick bumps total first,
+         * so this order cannot see running > total even if a tick
+         * lands between the two loads. */
+        uint64_t run = *(volatile uint64_t *)&rq->running_ticks;
+        uint64_t tot = *(volatile uint64_t *)&rq->total_ticks;
+        TEST_ASSERT_TRUE(run <= tot);
+    }
+#else
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#endif
+}
+
+extern int cmd_sched(int argc, char **argv);
+
+/* `sched stats gpu-reset` resets on AI scheduler builds and is
+ * refused (rc 1) elsewhere rather than silently printing stats. */
+static void test_sched_cmd_stats_gpu_reset(void)
+{
+    char *argv[] = {"sched", "stats", "gpu-reset"};
+#ifdef CONFIG_AI_SCHEDULER
+    TEST_ASSERT_EQUAL_INT(0, cmd_sched(3, argv));
+#else
+    TEST_ASSERT_EQUAL_INT(1, cmd_sched(3, argv));
+#endif
+}
+
 /* ============================================================================
  * Regression Tests: Pi 5 Fixes (April 2026)
  *
@@ -5430,6 +5495,11 @@ int test_suite_scheduler(void)
     RUN_TEST(test_ai_decode_action_all_valid);
     RUN_TEST(test_ai_state_dim_constants);
     RUN_TEST(test_ai_mlp_layer_dims);
+
+    /* Run-queue init (#1045) and `sched stats gpu-reset` (any build). */
+    RUN_TEST(test_sched_runqueue_clear_zeroes_all_fields);
+    RUN_TEST(test_ai_utilization_at_most_total_all_cpus);
+    RUN_TEST(test_sched_cmd_stats_gpu_reset);
 
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler library tests (only with -DENABLE_AI_SCHEDULER=ON) */

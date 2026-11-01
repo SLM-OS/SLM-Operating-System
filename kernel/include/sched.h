@@ -50,6 +50,17 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu);
 void sched_drain_cpu_runqueue(uint32_t cpu);
 
 /*
+ * Zero every field of a run queue, the AI tick counters included
+ * (#1045). Scheduler-internal: scheduler_init calls it for each CPU,
+ * because the NC-memory run queues come from ncmem_alloc, which does
+ * not zero, and after a Jetson kexec that memory holds Linux data.
+ * Exposed only so tests can run it on a poisoned queue. Byte-wise
+ * volatile stores, as in task_table_init, so no wide or DC ZVA store
+ * is emitted against NC memory.
+ */
+void sched_runqueue_clear(struct cpu_runqueue *rq);
+
+/*
  * Initialize the scheduler (boot CPU).
  *
  * Sets up the idle task and prepares the run queue.

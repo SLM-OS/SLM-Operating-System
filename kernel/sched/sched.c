@@ -423,6 +423,16 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
     return cpu_rq(cpu);
 }
 
+/* Zero a whole run queue (#1045); see sched.h. */
+void sched_runqueue_clear(struct cpu_runqueue *rq)
+{
+    if (!rq) return;
+    volatile uint8_t *p = (volatile uint8_t *)rq;
+    for (size_t i = 0; i < sizeof(*rq); i++) {
+        p[i] = 0;
+    }
+}
+
 /*
  * Drain the per-CPU run queue under rq_lock. Used by the dormancy
  * recovery path (#216 Tier 2, kernel/sched/cpu_supervisor.c) when a
@@ -829,11 +839,9 @@ void scheduler_init(void)
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         spin_init(&rq_lock[i]);
-        cpu_rq(i)->head = NULL;
-        cpu_rq(i)->tail = NULL;
-        cpu_rq(i)->idle_task = NULL;
-        cpu_rq(i)->zombie = NULL;
-        cpu_rq(i)->ready_count = 0;
+        /* Whole struct, not field by field: the AI tick counters were
+         * missed that way and started from leftover NC data (#1045). */
+        sched_runqueue_clear(cpu_rq(i));
 #if CONFIG_WORK_STEALING
         spin_init(&steal_deque_lock[i]);
         steal_deque_init(&cpu_steal_deques[i]);
