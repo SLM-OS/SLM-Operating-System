@@ -411,8 +411,11 @@ static inline uint8_t task_input_wait_begin(void)
     struct task *t = task_current();
     uint8_t prev = 0;
     if (t) {
-        prev = t->input_wait;
-        t->input_wait = 1;
+        /* volatile: scheduler_tick reads this from IRQ context on the
+         * same CPU, so the store must not be moved or elided. */
+        volatile uint8_t *iw = &t->input_wait;
+        prev = *iw;
+        *iw = 1;
     }
     return prev;
 }
@@ -421,7 +424,7 @@ static inline void task_input_wait_end(uint8_t prev)
 {
     struct task *t = task_current();
     if (t) {
-        t->input_wait = prev;
+        *(volatile uint8_t *)&t->input_wait = prev;
     }
 }
 
@@ -429,7 +432,8 @@ static inline void task_input_wait_end(uint8_t prev)
  * the idle task and not polling for console input. */
 static inline bool task_counts_as_running(const struct task *t)
 {
-    return t && !is_idle_task(t) && !t->input_wait;
+    return t && !is_idle_task(t) &&
+           !*(const volatile uint8_t *)&t->input_wait;
 }
 
 /*

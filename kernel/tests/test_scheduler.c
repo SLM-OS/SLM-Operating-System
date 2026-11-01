@@ -5132,6 +5132,7 @@ static void test_input_wait_not_counted_as_running(void)
     t->flags |= TASK_FLAG_IDLE;
     TEST_ASSERT_FALSE(task_counts_as_running(t));
     t->flags &= (uint8_t)~TASK_FLAG_IDLE;
+    t->state = TASK_TERMINATED;   /* never scheduled; task_destroy needs it */
     task_destroy(t);
 }
 
