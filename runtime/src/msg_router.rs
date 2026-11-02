@@ -120,11 +120,20 @@ impl Mailbox {
     /// mailbox over and logs once; a stale or torn message in a slot
     /// being reset anyway is the lesser failure.
     fn clear(&mut self) {
-        let start = unsafe { timer_get_count() };
-        let limit = unsafe { timer_get_frequency() } / 1000 * CLEAR_WAIT_MS;
+        // Timeout bookkeeping starts only once a claim is actually seen,
+        // so the common case (init / unsubscribe of an idle or full
+        // mailbox) never reads the timer. Multiply before dividing and
+        // keep at least one tick: x86-64 reports TIMER_HZ (100) until TSC
+        // calibration succeeds, and 100 / 1000 * 5 would round to 0 and
+        // force a takeover the moment a claim was seen.
+        let mut wait_start: Option<(u64, u64)> = None;
         loop {
             let cur = self.ready.load(Ordering::Acquire);
             if cur == READY_WRITING {
+                let (start, limit) = *wait_start.get_or_insert_with(|| unsafe {
+                    let freq = timer_get_frequency();
+                    (timer_get_count(), (freq.saturating_mul(CLEAR_WAIT_MS) / 1000).max(1))
+                });
                 if unsafe { timer_get_count() }.wrapping_sub(start) >= limit {
                     puts(b"[msg_router] WARN: mailbox reset forced past a stuck write claim\n\0");
                     self.ready.store(READY_WRITING, Ordering::Release);
