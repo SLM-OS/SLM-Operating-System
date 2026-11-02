@@ -1053,13 +1053,19 @@ static void test_ffi_set_priority(void)
     TEST_ASSERT_NOT_NULL(t);
     scheduler_add_task_to_cpu(t, 0);
 
+    /* Raise the spinner's priority and release it in one IRQ-masked
+     * step. Otherwise a CPU 0 timer tick between the two lets the HIGH
+     * spinner preempt this NORMAL test task, and strict priority never
+     * runs us again to set ffi_task_proceed: a livelock that appeared
+     * once QEMU CPU 0 took real timer IRQs (#1051). */
+    irq_flags_t flags = irq_save();
     int ret = slm_task_set_priority(t->id, TASK_PRIORITY_HIGH);
+    uint8_t prio = t->priority;
+    ffi_task_proceed = true;   /* signal task to exit */
+    irq_restore(flags);
+
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
-
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->priority);
-
-    /* Signal task to exit */
-    ffi_task_proceed = true;
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, prio);
 
     /* Wait for task to complete */
     int timeout = 500000;
@@ -1085,14 +1091,18 @@ static void test_ffi_set_deadline(void)
     TEST_ASSERT_NOT_NULL(t);
     scheduler_add_task_to_cpu(t, 0);
 
+    /* Same IRQ-masked set-and-release as test_ffi_set_priority: this
+     * deadline is already in the past, so the next tick boosts the
+     * spinner to critical priority and it would starve this task. */
     uint64_t deadline = 999999999ULL;
+    irq_flags_t flags = irq_save();
     int ret = slm_task_set_deadline(t->id, deadline);
+    uint64_t got = t->deadline_ns;
+    ffi_task_proceed = true;   /* signal task to exit */
+    irq_restore(flags);
+
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
-
-    TEST_ASSERT_EQUAL_UINT64(deadline, t->deadline_ns);
-
-    /* Signal task to exit */
-    ffi_task_proceed = true;
+    TEST_ASSERT_EQUAL_UINT64(deadline, got);
 
     /* Wait for task to complete */
     int timeout = 500000;
@@ -1192,11 +1202,14 @@ static void test_high_priority_runs_first(void)
     irq_flags_t flags = irq_save();
     scheduler_add_task_to_cpu(low, 0);
     scheduler_add_task_to_cpu(high, 0);
-    irq_restore(flags);
-
-    /* Memory barrier then release - tasks will start recording in priority order */
+    /* Release the barrier before re-enabling IRQs: the tasks are all
+     * queued, so recording order is still decided by priority. Releasing
+     * after irq_restore let a CPU 0 timer tick switch to a HIGH spinner
+     * that never yields to the scheduler while this task sits at IDLE
+     * priority, so the barrier was never released (#1051). */
     __asm__ volatile("dmb sy" ::: "memory");
     order_barrier_released = true;
+    irq_restore(flags);
 
     /* Wait for both tasks to complete, yielding to let them run */
     int timeout = 100;
@@ -1273,11 +1286,14 @@ static void test_priority_ordering_multiple_levels(void)
     scheduler_add_task_to_cpu(critical, 0);
     scheduler_add_task_to_cpu(low, 0);
     scheduler_add_task_to_cpu(high, 0);
-    irq_restore(flags);
-
-    /* Memory barrier then release - tasks will start recording in priority order */
+    /* Release the barrier before re-enabling IRQs: the tasks are all
+     * queued, so recording order is still decided by priority. Releasing
+     * after irq_restore let a CPU 0 timer tick switch to a HIGH spinner
+     * that never yields to the scheduler while this task sits at IDLE
+     * priority, so the barrier was never released (#1051). */
     __asm__ volatile("dmb sy" ::: "memory");
     order_barrier_released = true;
+    irq_restore(flags);
 
     /* Wait for all tasks to complete, yielding to let them run */
     int timeout = 200;
@@ -1353,11 +1369,14 @@ static void test_deadline_boost_affects_order(void)
     irq_flags_t flags = irq_save();
     scheduler_add_task_to_cpu(no_deadline, 0);
     scheduler_add_task_to_cpu(urgent, 0);
-    irq_restore(flags);
-
-    /* Memory barrier then release - tasks will start recording in priority order */
+    /* Release the barrier before re-enabling IRQs: the tasks are all
+     * queued, so recording order is still decided by priority. Releasing
+     * after irq_restore let a CPU 0 timer tick switch to a HIGH spinner
+     * that never yields to the scheduler while this task sits at IDLE
+     * priority, so the barrier was never released (#1051). */
     __asm__ volatile("dmb sy" ::: "memory");
     order_barrier_released = true;
+    irq_restore(flags);
 
     /* Wait for completion, yielding to let tasks run */
     int timeout = 100;

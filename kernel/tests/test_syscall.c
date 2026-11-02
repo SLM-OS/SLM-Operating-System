@@ -15,6 +15,7 @@
 #include "trap.h"
 #include "syscall.h"
 #include "task.h"
+#include "spinlock.h"
 #include "string.h"
 #include "pmm.h"
 #if !defined(PLATFORM_X86_64)
@@ -668,13 +669,39 @@ static void test_task_create_user_inits_mmap_cursor(void)
     task_destroy(t);
 }
 
+/*
+ * Run one syscall as if `t` were the current task.
+ *
+ * The mmap tests call syscall_dispatch directly (no EL0 round trip), so
+ * they temporarily make the user task "current" for the handler to see
+ * its user_l1_pa / cursor. That is only safe with IRQs masked: the test
+ * is still running on the harness task's stack, and a timer tick in the
+ * window would make schedule() save the harness context into `t`. The
+ * stack-overflow guard caught exactly that ("SP is outside current
+ * task's stack ... name='mmtask'") once QEMU CPU 0 started taking real
+ * timer IRQs (#1051). The fake current is also restored before any
+ * assertion, so a failing assert can't leave it behind.
+ */
+static int64_t dispatch_as(struct task *t, struct trap_frame *f)
+{
+    extern void task_set_current(struct task *task);
+    irq_flags_t flags = irq_save();
+    struct task *prev = task_current();
+    task_set_current(t);
+    syscall_dispatch(f);
+    task_set_current(prev);
+    irq_restore(flags);
+    return (int64_t)f->x0;
+}
+
 /* Test (mmap): a page mapped via sys_mmap shows up in the per-task
  * L1 with VMM_FLAG_PMM_OWNED set, advances the cursor, and is
  * reclaimed by task_destroy without leaking PMM pages.
  *
- * The handler is exercised directly via syscall_dispatch to avoid
- * needing scheduler-driven EL0 context — the EL0 round-trip is
- * separately verified by the `mmaptest` shell command on hardware. */
+ * The handler is exercised directly via syscall_dispatch (see
+ * dispatch_as) to avoid needing scheduler-driven EL0 context — the EL0
+ * round-trip is separately verified by the `mmaptest` shell command on
+ * hardware. */
 static void test_sys_mmap_allocates_advances_cursor(void)
 {
     extern void user_smoke_main(void *arg);
@@ -684,15 +711,6 @@ static void test_sys_mmap_allocates_advances_cursor(void)
     struct task *t = task_create_user("mmtask", (task_entry_t)user_smoke_main, NULL, 4);
     TEST_ASSERT_NOT_NULL(t);
 
-    /* Set this task as current so the syscall handler picks the right
-     * user_l1_pa / cursor. The original `current_task` is restored
-     * before destroying the task to keep the rest of the test suite
-     * stable. */
-    extern void task_set_current(struct task *task);
-    extern struct task *task_current(void);
-    struct task *prev = task_current();
-    task_set_current(t);
-
     struct trap_frame f;
     memset(&f, 0, sizeof(f));
     f.x8 = SYS_MMAP;
@@ -700,26 +718,23 @@ static void test_sys_mmap_allocates_advances_cursor(void)
     f.x1 = 4096;                             /* len */
     f.x2 = PROT_READ | PROT_WRITE;           /* prot */
     f.x3 = MAP_ANONYMOUS;                    /* flags */
-    syscall_dispatch(&f);
-
-    int64_t ret = (int64_t)f.x0;
-    TEST_ASSERT_EQUAL_INT64(USER_MMAP_VA_START, ret);
-    TEST_ASSERT_EQUAL_UINT64(USER_MMAP_VA_START + 4096, t->user_va_next);
+    int64_t ret = dispatch_as(t, &f);
+    uint64_t cursor = t->user_va_next;
 
     /* munmap the same range — leaf is freed back to PMM. */
     memset(&f, 0, sizeof(f));
     f.x8 = SYS_MUNMAP;
     f.x0 = (uint64_t)ret;
     f.x1 = 4096;
-    syscall_dispatch(&f);
-    TEST_ASSERT_EQUAL_INT64(0, (int64_t)f.x0);
+    int64_t unmap_ret = dispatch_as(t, &f);
 
-    /* Restore current and tear down. PMM should be net-neutral. */
-    task_set_current(prev);
     t->state = TASK_TERMINATED;
     task_destroy(t);
-
     pmm_get_stats(&after);
+
+    TEST_ASSERT_EQUAL_INT64(USER_MMAP_VA_START, ret);
+    TEST_ASSERT_EQUAL_UINT64(USER_MMAP_VA_START + 4096, cursor);
+    TEST_ASSERT_EQUAL_INT64(0, unmap_ret);
     TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
                         "mmap+munmap+destroy leaked pages");
 }
@@ -743,30 +758,26 @@ static void test_sys_mmap_validation(void)
     extern void user_smoke_main(void *arg);
     struct task *t = task_create_user("mmval", (task_entry_t)user_smoke_main, NULL, 4);
     TEST_ASSERT_NOT_NULL(t);
-    extern void task_set_current(struct task *task);
-    extern struct task *task_current(void);
-    struct task *prev = task_current();
-    task_set_current(t);
 
     /* len == 0 */
     memset(&f, 0, sizeof(f));
     f.x8 = SYS_MMAP;
     f.x1 = 0;
     f.x2 = PROT_READ;
-    syscall_dispatch(&f);
-    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+    int64_t zero_len = dispatch_as(t, &f);
 
     /* len > 64 MB */
     memset(&f, 0, sizeof(f));
     f.x8 = SYS_MMAP;
     f.x1 = 65UL * 1024 * 1024;
     f.x2 = PROT_READ;
-    syscall_dispatch(&f);
-    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+    int64_t huge_len = dispatch_as(t, &f);
 
-    task_set_current(prev);
     t->state = TASK_TERMINATED;
     task_destroy(t);
+
+    TEST_ASSERT_EQUAL_INT64(-1, zero_len);
+    TEST_ASSERT_EQUAL_INT64(-1, huge_len);
 }
 
 /* Test: sys_munmap rejects unaligned addr and addresses outside the
@@ -776,10 +787,6 @@ static void test_sys_munmap_validation(void)
     extern void user_smoke_main(void *arg);
     struct task *t = task_create_user("muval", (task_entry_t)user_smoke_main, NULL, 4);
     TEST_ASSERT_NOT_NULL(t);
-    extern void task_set_current(struct task *task);
-    extern struct task *task_current(void);
-    struct task *prev = task_current();
-    task_set_current(t);
 
     struct trap_frame f;
 
@@ -788,20 +795,20 @@ static void test_sys_munmap_validation(void)
     f.x8 = SYS_MUNMAP;
     f.x0 = USER_MMAP_VA_START + 0x1;
     f.x1 = 4096;
-    syscall_dispatch(&f);
-    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+    int64_t unaligned = dispatch_as(t, &f);
 
     /* Addr below mmap window — refuses to munmap .text.user / stack. */
     memset(&f, 0, sizeof(f));
     f.x8 = SYS_MUNMAP;
     f.x0 = USER_TEXT_VA;
     f.x1 = 4096;
-    syscall_dispatch(&f);
-    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+    int64_t below = dispatch_as(t, &f);
 
-    task_set_current(prev);
     t->state = TASK_TERMINATED;
     task_destroy(t);
+
+    TEST_ASSERT_EQUAL_INT64(-1, unaligned);
+    TEST_ASSERT_EQUAL_INT64(-1, below);
 }
 #endif
 
