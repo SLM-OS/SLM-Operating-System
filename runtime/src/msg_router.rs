@@ -57,21 +57,29 @@ fn puts(s: &[u8]) {
 
 /// `Mailbox::ready` state constants.
 ///
-/// Currently two-valued (`READY_IDLE` / `READY_FULL`). A future fix
-/// for the concurrent-publisher TOCTOU window noted in
-/// `Mailbox::try_deliver` would extend this to a three-valued protocol
-/// (idle → writing → full) with a CAS into the writing state. Named
-/// constants now so the future change is a constant-substitution, not
-/// a hunt-and-replace of magic 0/1 literals scattered across receive,
-/// ack, and unsubscribe paths.
+/// Three-valued (#1058): `READY_IDLE` → `READY_WRITING` → `READY_FULL`.
+/// A publisher claims an idle mailbox with a compare-and-swap into
+/// `READY_WRITING` before touching its data, so only one publisher can
+/// own it; receive and ack only ever act on `READY_FULL`, so a mailbox
+/// mid-write is invisible to the subscriber. With the earlier
+/// two-valued load-then-store, two publishers on different CPUs could
+/// both see `READY_IDLE`, both write, and the second overwrote the
+/// first while both counted the message as delivered.
 const READY_IDLE: u32 = 0;
 const READY_FULL: u32 = 1;
+const READY_WRITING: u32 = 2;
+
+/// How long `Mailbox::clear()` waits for an in-flight write claim to
+/// finish before taking the mailbox over (#1058). A healthy claim lasts
+/// two copies of at most `MAX_MSG_LEN` + `TOPIC_NAME_LEN` bytes.
+const CLEAR_WAIT_MS: u64 = 5;
 
 /// Per-subscriber mailbox for message delivery.
 struct Mailbox {
-    /// One of `READY_IDLE` / `READY_FULL`. Released by the producer
-    /// (`try_deliver`) once data + topic + priority + ack are written,
-    /// and reset to `READY_IDLE` by the consumer (`msg_router_ack`).
+    /// One of `READY_IDLE` / `READY_WRITING` / `READY_FULL`. Claimed
+    /// (`IDLE → WRITING`, CAS) and released (`→ FULL`) by the producer
+    /// (`try_deliver`) around writing data + topic + priority + ack, and
+    /// reset to `READY_IDLE` by the consumer (`msg_router_ack`).
     ready: AtomicU32,
     ack: AtomicU32,
     data: [u8; MAX_MSG_LEN],
@@ -92,26 +100,77 @@ impl Mailbox {
         }
     }
 
+    /// Reset the mailbox to empty.
+    ///
+    /// Claims it first, exactly like a publisher (#1058): waits out a
+    /// writer that is mid-`try_deliver` (`READY_WRITING`) and then CASes
+    /// whatever state is left (`IDLE` or `FULL`) into `READY_WRITING`
+    /// before zeroing. Without the claim, unsubscribe/init could reset a
+    /// mailbox while a publisher on another CPU was writing it; the
+    /// publisher would then store `READY_FULL` into the cleared slot and
+    /// a later subscriber reusing it would receive a stale message.
+    ///
+    /// The wait has a time limit (`CLEAR_WAIT_MS`). A healthy writer
+    /// holds `READY_WRITING` only across two short copies with IRQs
+    /// masked, far below the limit. But callers hold MSG_ROUTER_LOCK
+    /// with IRQs masked, so a claim that never completes — a writer
+    /// destroyed while running on another CPU, or a store another CPU
+    /// never observes (Pi 5 cross-CPU visibility, cf. #80) — would
+    /// otherwise hang the whole router. On timeout the reset takes the
+    /// mailbox over and logs once; a stale or torn message in a slot
+    /// being reset anyway is the lesser failure.
     fn clear(&mut self) {
-        self.ready.store(READY_IDLE, Ordering::Release);
+        // Timeout bookkeeping starts only once a claim is actually seen,
+        // so the common case (init / unsubscribe of an idle or full
+        // mailbox) never reads the timer. Multiply before dividing and
+        // keep at least one tick: x86-64 reports TIMER_HZ (100) until TSC
+        // calibration succeeds, and 100 / 1000 * 5 would round to 0 and
+        // force a takeover the moment a claim was seen.
+        let mut wait_start: Option<(u64, u64)> = None;
+        loop {
+            let cur = self.ready.load(Ordering::Acquire);
+            if cur == READY_WRITING {
+                let (start, limit) = *wait_start.get_or_insert_with(|| unsafe {
+                    let freq = timer_get_frequency();
+                    (timer_get_count(), (freq.saturating_mul(CLEAR_WAIT_MS) / 1000).max(1))
+                });
+                if unsafe { timer_get_count() }.wrapping_sub(start) >= limit {
+                    puts(b"[msg_router] WARN: mailbox reset forced past a stuck write claim\n\0");
+                    self.ready.store(READY_WRITING, Ordering::Release);
+                    break;
+                }
+                core::hint::spin_loop();
+                continue;
+            }
+            if self
+                .ready
+                .compare_exchange(cur, READY_WRITING, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
         self.ack.store(0, Ordering::Release);
         self.data = [0; MAX_MSG_LEN];
         self.topic = [0; TOPIC_NAME_LEN];
         self.priority.store(0, Ordering::Release);
+        self.ready.store(READY_IDLE, Ordering::Release);
     }
 
     /// Attempt to deliver a message to this mailbox.
     ///
-    /// Returns `true` on success, `false` if the mailbox already holds
-    /// an unacked message (`ready == READY_FULL`). The caller is
-    /// expected to retry after yielding so the subscriber has a chance
-    /// to ack. See #869 for the design rationale (option 2 —
-    /// reject-when-busy, publisher retries; preserves zero-loss
-    /// semantics).
+    /// Returns `true` on success, `false` if the mailbox is busy: it
+    /// holds an unacked message (`READY_FULL`) or another publisher is
+    /// writing it (`READY_WRITING`). The caller is expected to retry
+    /// after yielding so the subscriber has a chance to ack. See #869
+    /// for the design rationale (option 2 — reject-when-busy, publisher
+    /// retries; preserves zero-loss semantics).
     ///
-    /// Writes data and topic first, then priority (Release), then
-    /// `ready = READY_FULL` (Release) so the receiver sees consistent
-    /// data when it reads ready as `READY_FULL` (Acquire).
+    /// Claims the mailbox with a CAS `READY_IDLE → READY_WRITING`
+    /// (Acquire on success), writes data and topic, then priority
+    /// (Release), then `ready = READY_FULL` (Release) so the receiver
+    /// sees consistent data when it reads ready as `READY_FULL`
+    /// (Acquire).
     ///
     /// IMPORTANT (memory ordering invariant): the `data` and `topic`
     /// arrays are written with plain (non-atomic) stores, but they are
@@ -124,21 +183,19 @@ impl Mailbox {
     /// receiver will see torn / stale bytes. Keep ready, priority,
     /// and ack as Release stores.
     ///
-    /// CAVEAT (concurrent publishers): the `ready.load → write → store`
-    /// sequence is not a single atomic operation. Two publishers that
-    /// both observe `ready == READY_IDLE` between their Acquire load
-    /// and their later Release stores will both proceed to write, and
-    /// the second arrival's `ready.store(READY_FULL)` will overwrite
-    /// the first's data
-    /// in-place — the same single-slot-mailbox loss this method is
-    /// meant to prevent. In practice the in-tree caller
-    /// (`publish_internal`) holds MSG_ROUTER_LOCK only across the
-    /// gather phase, not the deliver phase, so two publishers CAN
-    /// arrive here concurrently for different topic→mailbox edges; for
-    /// the SAME mailbox edge they would have had to subscribe a single
-    /// component to a single topic — covered by this check but with
-    /// the residual TOCTOU window noted above. A full fix is the
-    /// queued-mailbox redesign (option 1 in #869), tracked separately.
+    /// Concurrent publishers (#1058): `publish_internal` holds
+    /// MSG_ROUTER_LOCK only across the gather phase, so two publishers
+    /// to the same topic CAN reach here at once for the same mailbox.
+    /// The CAS makes the claim atomic: exactly one wins and writes; the
+    /// other sees `READY_WRITING` (or `READY_FULL`), returns `false`,
+    /// and retries. The earlier `load → write → store` let both
+    /// proceed and lost the first message.
+    ///
+    /// IRQs are masked from the claim to the `READY_FULL` store so the
+    /// claimed window can't be preempted. Otherwise a publisher preempted
+    /// there and then destroyed (`slm.task_kill` removes any non-current
+    /// task) would leave the mailbox `READY_WRITING` forever, and every
+    /// later publish to it would time out as busy.
     ///
     /// # Safety
     /// Caller promises `topic_name` and `data` are NUL-terminated within
@@ -149,7 +206,13 @@ impl Mailbox {
         data: *const u8,
         prio: u8,
     ) -> bool {
-        if self.ready.load(Ordering::Acquire) != READY_IDLE {
+        let irq_flags = slm_irq_save();
+        if self
+            .ready
+            .compare_exchange(READY_IDLE, READY_WRITING, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            slm_irq_restore(irq_flags);
             return false;
         }
         str_copy(&mut self.data, data, MAX_MSG_LEN);
@@ -157,8 +220,58 @@ impl Mailbox {
         self.ack.store(0, Ordering::Release);
         self.priority.store(prio as u32, Ordering::Release);
         self.ready.store(READY_FULL, Ordering::Release);
+        slm_irq_restore(irq_flags);
         true
     }
+}
+
+/// Deterministic check of the `try_deliver` claim protocol (#1058),
+/// run from `rust_run_tests`. Uses a local `Mailbox`, not router state.
+///
+/// 1. A mailbox another publisher is mid-write on (`READY_WRITING`)
+///    must reject a second writer and leave the in-progress data alone
+///    — the pre-#1058 load-then-store accepted it and overwrote.
+/// 2. An idle mailbox is claimed and ends `READY_FULL` with the data.
+/// 3. A full (unacked) mailbox rejects a writer.
+/// 4. `clear()` resets a full mailbox to idle, and it accepts again.
+/// 5. `clear()` on a claim that never completes gives up after
+///    `CLEAR_WAIT_MS` and resets anyway instead of spinning forever.
+pub(crate) fn mailbox_claim_self_test() -> bool {
+    let mut mb = Mailbox::new();
+    mb.data[0] = b'A';
+    mb.ready.store(READY_WRITING, Ordering::Release);
+    // SAFETY: both strings are NUL-terminated and short.
+    let busy = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"B\0".as_ptr(), 0) };
+    let writing_rejected = !busy
+        && mb.data[0] == b'A'
+        && mb.ready.load(Ordering::Acquire) == READY_WRITING;
+
+    mb.ready.store(READY_IDLE, Ordering::Release);
+    // SAFETY: as above.
+    let ok = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"B\0".as_ptr(), 0) };
+    let idle_claimed = ok
+        && mb.data[0] == b'B'
+        && mb.ready.load(Ordering::Acquire) == READY_FULL;
+
+    // SAFETY: as above.
+    let again = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"C\0".as_ptr(), 0) };
+    let full_rejected = !again && mb.data[0] == b'B';
+
+    // clear() claims and resets a full mailbox, which then accepts again.
+    mb.clear();
+    let cleared = mb.ready.load(Ordering::Acquire) == READY_IDLE && mb.data[0] == 0;
+    // SAFETY: as above.
+    let after_clear = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"D\0".as_ptr(), 0) };
+    let redelivered = after_clear && mb.data[0] == b'D';
+
+    // A write claim that never completes must not hang clear(): after
+    // CLEAR_WAIT_MS it takes the mailbox over and resets it (logs one
+    // "reset forced past a stuck write claim" WARN line).
+    mb.ready.store(READY_WRITING, Ordering::Release);
+    mb.clear();
+    let stuck_reset = mb.ready.load(Ordering::Acquire) == READY_IDLE;
+
+    writing_rejected && idle_claimed && full_rejected && cleared && redelivered && stuck_reset
 }
 
 /// A subscription linking a component to its mailbox.

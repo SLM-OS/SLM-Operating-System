@@ -291,8 +291,9 @@ are the regression catch-points.
 
 `Mailbox` carries a single set of `ready`/`ack`/`data` atomics per
 subscription. `Mailbox::try_deliver` (formerly `deliver`) refuses to
-write when `ready == 1` — i.e. when a prior message is still
-unacked — and returns `false`. Two flavors of caller behavior follow:
+write when the mailbox is busy — a prior message is still unacked
+(`READY_FULL`) or another publisher is mid-write (`READY_WRITING`,
+#1058) — and returns `false`. Two flavors of caller behavior follow:
 
 - **`publish_internal` (ack-waiting):** if `try_deliver` returns
   `false`, the publisher bumps `FLOW_CONTROL_BUSY_RETRIES`, yields,
@@ -337,26 +338,56 @@ This is distinct from the LAST_RECEIVED ack-targeting case
 multiple mailboxes), which works correctly and is pinned by the
 67c tests.
 
-### Concurrent-publisher TOCTOU caveat (residual, not fixed by #869)
+### Concurrent-publisher claim (#1058)
 
-`try_deliver`'s ready-then-write sequence is not a single atomic
-operation. Two publishers that both observe `ready == 0` between their
-Acquire load and their later Release stores will both proceed to
-write, and the second arrival's `ready.store(1)` will overwrite the
-first's data in-place — the same loss this method is meant to prevent.
+`try_deliver` used to check `ready == 0` and then write, as two
+separate steps. `publish_internal` holds `MSG_ROUTER_LOCK` only across
+the gather phase, so two publishers to the SAME topic with one
+subscriber could both see the mailbox idle, both write, and the second
+overwrote the first while both publishers counted the message as
+delivered. This was documented here as a residual window that "the
+workloads in tree today don't sustain"; it surfaced as the intermittent
+`test_msg_router_same_mailbox_zero_loss` failure ("subscriber lost
+B-payloads") on QEMU `make test AI_SCHED=ON` (#1058).
 
-In practice the in-tree caller (`publish_internal`) holds
-`MSG_ROUTER_LOCK` only across the gather phase, not the deliver phase,
-so two publishers CAN arrive at `try_deliver` concurrently for the
-SAME mailbox edge if they both publish to the SAME topic with one
-subscriber. The check in `try_deliver` closes the larger
-"deliver-then-deliver-without-yield" window that single-publisher
-sequential code can hit; the smaller "both-CPUs-in-flight-at-the-same-
-nanosecond" window remains. A CAS-loop redesign (treat `ready` as
-0=idle, 2=writing, 1=ready) or the full queued-mailbox option from
-#869's scope would close this. Not done here because the workloads in
-tree today don't sustain enough simultaneity to surface it; if a
-telemetry fan-in or sensor producer trips it on hardware, escalate.
+`ready` is now three-valued: `READY_IDLE` (0) → `READY_WRITING` (2) →
+`READY_FULL` (1). A publisher claims the mailbox with a single
+`compare_exchange(IDLE, WRITING)` before writing; the loser sees
+`WRITING` or `FULL`, returns `false`, and retries like any busy
+mailbox. Receive and ack only act on `READY_FULL`, so a mailbox
+mid-write is invisible to the subscriber.
+
+Two rules keep the claimed state from getting stuck or racing a reset:
+
+- `try_deliver` masks IRQs (`slm_irq_save`) from the claim to the
+  `READY_FULL` store. A publisher preempted inside that window and then
+  destroyed (`slm.task_kill` removes any non-current task) would
+  otherwise leave the mailbox `READY_WRITING` forever, with every later
+  publish to it timing out as busy.
+- `Mailbox::clear()` (unsubscribe / init) claims the mailbox the same
+  way before zeroing it: it waits out an in-flight writer and CASes
+  `IDLE`/`FULL` into `WRITING`. Otherwise a writer could finish into a
+  just-cleared slot and a later subscriber reusing it would receive a
+  stale message. A healthy writer holds the claim only across two
+  short copies with IRQs masked. The wait is still capped at
+  `CLEAR_WAIT_MS` (5 ms, timed with `timer_get_count`), because callers
+  hold `MSG_ROUTER_LOCK` with IRQs masked: a claim that never completes
+  (a writer destroyed while running on another CPU, or a store another
+  CPU never observes, cf. #80 on Pi 5) would otherwise hang the whole
+  router. On timeout the reset takes the mailbox over and logs
+  `[msg_router] WARN: mailbox reset forced past a stuck write claim`.
+
+Pinned deterministically by `mailbox_claim_self_test()` (Rust boot test
+29, "mailbox claim rejects concurrent writer"), which also checks that
+`clear()` resets a full mailbox and gives up on a stuck claim; the
+cross-CPU integration test remains the end-to-end check.
+
+Not changed: the `ack` flag is a single bit, so when two publishers
+contend for one mailbox the ack one of them observes may belong to the
+other's message. That only shifts which publisher is credited first;
+every claimed message is still received and acked, so nothing is lost.
+Per-message ack identity would need a sequence counter (the
+queued-mailbox option in #869).
 
 ---
 

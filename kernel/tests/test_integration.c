@@ -2002,16 +2002,14 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
  * Requires cpu_count >= 4 (publisher A on CPU 1, publisher B on CPU 2,
  * subscriber on CPU 3, plus shell on CPU 0).
  *
- * IMPORTANT — QEMU vs hardware: this test passes on QEMU virt regardless
- * of whether the fix is present, because QEMU's serial TCG scheduler
- * interleaves the publishers and subscriber deterministically and never
- * opens the race window in the first place. The test's primary value is
- * on real Pi 5 / Jetson SMP hardware where publishers genuinely run
- * concurrently. A green QEMU run is structural only — do NOT conclude
- * from it that the underlying mailbox semantics are correct without a
- * hardware run. The matching same-CPU contract canary in
- * test_msg_router.c (`test_publish_nowait_basic_contract`) DOES fire on
- * QEMU and is the day-to-day regression guard.
+ * QEMU vs hardware: QEMU's TCG rarely interleaves the two publishers
+ * tightly enough to open the window, but it does happen. This test
+ * caught the residual concurrent-publisher overwrite ("subscriber lost
+ * B-payloads", #1058) intermittently on QEMU AI_SCHED=ON. The fix is a
+ * CAS claim in Mailbox::try_deliver, pinned deterministically by the
+ * Rust boot test "mailbox claim rejects concurrent writer"; this test
+ * stays as the end-to-end cross-CPU check, most useful on Pi 5 / Jetson
+ * where the publishers genuinely run concurrently.
  * ============================================================================ */
 
 #define SM_C_COMPONENT 24
