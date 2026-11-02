@@ -792,6 +792,15 @@ pub extern "C" fn rust_run_tests() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 29 (#1058): mailbox claim is atomic — a mailbox mid-write by
+    // another publisher rejects a second writer instead of being
+    // overwritten (the concurrent-publisher message loss).
+    {
+        let passed = msg_router::mailbox_claim_self_test();
+        print_test_result(b"msg_router: mailbox claim rejects concurrent writer\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // XGBoost cascade scheduler (#855): build a synthetic 3-classifier
     // cascade in memory, stage + activate via the FFI surface the C
     // policy uses, predict against a zero state, and assert the raw
