@@ -10,6 +10,7 @@
 #include "../include/uart.h"
 #include "../include/vfs.h"
 #include "../include/littlefs_slm.h"
+#include "../include/pmm.h"
 #include "../include/string.h"
 #include "test_blob_helpers.h"
 #include "../lib/fatfs/ff.h"
@@ -115,6 +116,19 @@ static size_t build_eviction_cacheus_config_payload(uint8_t *out, size_t out_cap
 }
 
 #ifdef CONFIG_AI_SCHEDULER
+/* Byte size of a sched MLP/PPO dense payload, from the live network
+ * dimensions (~528 KB today). The max-length-paths test used a fixed
+ * 4 KB buffer from when the network was tiny, so the builder returned 0
+ * and the test failed at "payload_len > 0" (#1044). Size buffers with
+ * this instead of a literal so they track the model; at this size they
+ * come from the PMM (see write_sched_dense_blob_files), since a static
+ * buffer would push the test kernel past the image-size limit. */
+#define SCHED_MLP_PAYLOAD_BYTES                                              \
+    (12u + 4u * (AI_MLP_LAYER0_OUT * AI_MLP_LAYER0_IN + AI_MLP_LAYER0_OUT +  \
+                 AI_MLP_LAYER1_OUT * AI_MLP_LAYER1_IN + AI_MLP_LAYER1_OUT +  \
+                 AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN + AI_MLP_LAYER2_OUT +  \
+                 AI_SCHED_N_ACTIONS * AI_MLP_LAYER3_IN + AI_SCHED_N_ACTIONS))
+
 static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
                                       uint8_t *out,
                                       size_t out_cap)
@@ -208,8 +222,10 @@ static size_t build_sched_thresholds_payload(uint64_t critical_ns,
     out[4] = 1; out[5] = 0;
     out[6] = 1; out[7] = 0;
     out[8] = 1; out[9] = 0;
-    out[10] = (uint8_t)(AI_SCHED_N_ACTIONS & 0xFF);
-    out[11] = (uint8_t)(AI_SCHED_N_ACTIONS >> 8);
+    /* action_count must be 0 for thresholds (parse_sched_thresholds_payload
+     * rejects anything else); this builder used AI_SCHED_N_ACTIONS, so
+     * every thresholds blob it made failed to stage (#1044). */
+    out[10] = 0; out[11] = 0;
     cursor = 12;
 #define WRITE_U64_LE(v) do {                               \
     uint64_t value_ = (v);                                 \
@@ -1540,6 +1556,40 @@ static void test_blob_autoload_rejects_malformed_metadata_suffix(void)
 }
 
 #ifdef CONFIG_AI_SCHEDULER
+/*
+ * Build one sched dense payload and write it as both an MLP and a PPO
+ * blob. The ~528 KB payload and blob come from the PMM and are freed
+ * before returning, so a failing assertion in the caller can't leak
+ * them. Returns 0 on success, -1 on any failure.
+ */
+static int write_sched_dense_blob_files(const char *path_mlp, const char *path_ppo)
+{
+    const size_t payload_pages = (SCHED_MLP_PAYLOAD_BYTES + 4095u) / 4096u;
+    const size_t blob_cap = SCHED_MLP_PAYLOAD_BYTES + BLOB_OUTER_HEADER_BYTES;
+    const size_t blob_pages = (blob_cap + 4095u) / 4096u;
+    uint8_t *payload = (uint8_t *)pmm_alloc_pages(payload_pages);
+    uint8_t *blob = (uint8_t *)pmm_alloc_pages(blob_pages);
+    int rc = -1;
+
+    if (payload && blob) {
+        size_t payload_len = build_sched_mlp_payload(0x3F800000u, payload,
+                                                     payload_pages * 4096u);
+        size_t mlp_len = payload_len
+            ? build_outer_blob(SCHED_MODEL_KIND_MLP, payload, payload_len, blob, blob_cap)
+            : 0;
+        if (mlp_len > 0 && write_binary_file(path_mlp, blob, mlp_len) == 0) {
+            size_t ppo_len = build_outer_blob(SCHED_MODEL_KIND_PPO, payload, payload_len,
+                                              blob, blob_cap);
+            if (ppo_len > 0 && write_binary_file(path_ppo, blob, ppo_len) == 0) {
+                rc = 0;
+            }
+        }
+    }
+    if (blob) pmm_free_pages(blob, blob_pages);
+    if (payload) pmm_free_pages(payload, payload_pages);
+    return rc;
+}
+
 static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
 {
     char path_xgb[VFS_MAX_PATH];
@@ -1556,7 +1606,6 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
      * 16 KB fixed and would not survive an automatic-storage version. */
     static uint8_t ev_mlp_payload[EVICTION_MLP_PAYLOAD_BYTES];
     uint8_t ev_cacheus_payload[24];
-    uint8_t sched_dense_payload[4096];
     uint8_t sched_cfg_payload[40];
     uint8_t sched_thresholds_payload[48];
     uint8_t sched_rebalance_payload[32];
@@ -1600,15 +1649,7 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
     TEST_ASSERT_TRUE(blob_len > 0);
     TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_cacheus, blob, blob_len));
 
-    payload_len = build_sched_mlp_payload(0x3F800000u, sched_dense_payload, sizeof(sched_dense_payload));
-    TEST_ASSERT_TRUE(payload_len > 0);
-    blob_len = build_outer_blob(SCHED_MODEL_KIND_MLP, sched_dense_payload, payload_len, blob, sizeof(blob));
-    TEST_ASSERT_TRUE(blob_len > 0);
-    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_mlp, blob, blob_len));
-
-    blob_len = build_outer_blob(SCHED_MODEL_KIND_PPO, sched_dense_payload, payload_len, blob, sizeof(blob));
-    TEST_ASSERT_TRUE(blob_len > 0);
-    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_ppo, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, write_sched_dense_blob_files(path_sched_mlp, path_sched_ppo));
 
     payload_len = build_sched_config_payload(sched_cfg_payload, sizeof(sched_cfg_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
@@ -1656,6 +1697,91 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
 }
 #endif
 
+/*
+ * Regression (#1044): every autoload entry keeps its size + checksum.
+ *
+ * The conf parser split "<path> <size> <checksum>" inside its loop over
+ * table entries, NUL-terminating the line in place on the first pass.
+ * Only table entry 0 (eviction xgboost) ever saw the metadata; every
+ * later entry was read back with size 0 / checksum 0, which also turned
+ * off blob_boot_autoload's tamper check for it. cacheus_config is a
+ * later entry and runs in every build.
+ */
+static void test_blob_autoload_metadata_persists_for_every_entry(void)
+{
+    struct blob_autoload_info info;
+    uint8_t xgb_payload[80];
+    uint8_t cacheus_payload[24];
+    uint8_t xgb_blob[128];
+    uint8_t cacheus_blob[128];
+    size_t xgb_payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
+    size_t xgb_len = build_outer_blob(1, xgb_payload, xgb_payload_len, xgb_blob, sizeof(xgb_blob));
+    size_t cacheus_len;
+
+    memset(cacheus_payload, 0, sizeof(cacheus_payload));
+    cacheus_payload[0] = 'C'; cacheus_payload[1] = 'C';
+    cacheus_payload[2] = 'F'; cacheus_payload[3] = 'G';
+    cacheus_payload[4] = 1; cacheus_payload[5] = 0;
+    cacheus_payload[8] = 1; /* all5 */
+    { uint32_t lr_bits = 0x3e4ccccdu; memcpy(cacheus_payload + 12, &lr_bits, 4); }
+    { uint32_t window = 200u; memcpy(cacheus_payload + 16, &window, 4); }
+    { uint32_t min_weight_bits = 0x3dcccccdu; memcpy(cacheus_payload + 20, &min_weight_bits, 4); }
+    cacheus_len = build_outer_blob(3, cacheus_payload, sizeof(cacheus_payload),
+                                   cacheus_blob, sizeof(cacheus_blob));
+
+    TEST_ASSERT_TRUE(xgb_len > 0);
+    TEST_ASSERT_TRUE(cacheus_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/meta_xgb.blob", xgb_blob, xgb_len));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/meta_cacheus.blob",
+                                               cacheus_blob, cacheus_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/meta_xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config",
+                                               "/mnt/files/meta_cacheus.blob"));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info));
+    TEST_ASSERT_EQUAL_UINT32(xgb_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(xgb_blob, xgb_len), info.checksum);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "cacheus_config", &info));
+    TEST_ASSERT_EQUAL_UINT32(cacheus_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(cacheus_blob, cacheus_len), info.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "cacheus_config"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/meta_xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/meta_cacheus.blob"));
+}
+
+/*
+ * Leave the scheduler's runtime models at their defaults (#1044).
+ *
+ * Several tests here stage and activate sched config / thresholds /
+ * rebalance / MLP / PPO blobs (directly or through blob_boot_autoload),
+ * and the config they activate has the S5 load-balance override
+ * disabled. Nothing reset that afterwards, so the scheduler suite that
+ * runs later inherited it: test_proactive_load_balance_redirect saw S5
+ * never fire, left its six tasks on CPU 0, and the next balance /
+ * rebalance tests failed on that backlog. Run once at the end of the
+ * suite so a test that aborts midway can't leak state either. Also
+ * drops the sched autoload entries so a later blob_boot_autoload()
+ * doesn't re-activate them.
+ */
+static void blob_autoload_suite_reset_runtime_state(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    static const uint16_t kinds[] = {
+        SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO, SCHED_MODEL_KIND_CONFIG,
+        SCHED_MODEL_KIND_THRESHOLDS, SCHED_MODEL_KIND_REBALANCE,
+    };
+    static const char *const kind_names[] = {
+        "mlp", "ppo", "config", "thresholds", "rebalance",
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        (void)blob_autoload_clear("sched", kind_names[i]);
+        (void)sched_model_clear(kinds[i]);
+    }
+#endif
+}
+
 int test_suite_blob_autoload(void)
 {
     UNITY_BEGIN();
@@ -1683,8 +1809,10 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_boot_autoload_skips_tampered_managed_blob);
     RUN_TEST(test_blob_autoload_accepts_legacy_entry_without_metadata);
     RUN_TEST(test_blob_autoload_rejects_malformed_metadata_suffix);
+    RUN_TEST(test_blob_autoload_metadata_persists_for_every_entry);
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
 #endif
+    blob_autoload_suite_reset_runtime_state();
     return UNITY_END();
 }

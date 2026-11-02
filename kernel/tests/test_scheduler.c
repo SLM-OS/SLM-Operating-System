@@ -3802,9 +3802,17 @@ static void test_proactive_load_balance_runtime_config_aggressive(void)
     }
     sched_set_policy(&stub_policy);
 
+    /* CPU 0 is rarely empty here: the shell task (started by kernel_main
+     * in test builds too, IDLE priority, pinned to CPU 0) sits READY in
+     * its queue while it polls for input. Set the trigger one above
+     * whatever backlog CPU 0 already has, so the first task stays on
+     * CPU 0 and only the second (which pushes CPU 0 past the threshold)
+     * is redirected. A fixed min_target_ready=1 assumed an empty CPU 0
+     * and redirected the first task too (#1044). */
+    uint32_t cpu0_backlog = sched_cpu_rq(0)->ready_count;
     uint8_t payload[64];
     uint8_t blob[128];
-    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+    size_t payload_len = build_sched_config_payload(1u, cpu0_backlog + 1u, 2u, 1u, 1u,
                                                     payload, sizeof(payload));
     size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
                                             payload_len, blob, sizeof(blob));
