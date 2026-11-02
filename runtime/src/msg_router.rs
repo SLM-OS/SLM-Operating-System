@@ -95,12 +95,38 @@ impl Mailbox {
         }
     }
 
+    /// Reset the mailbox to empty.
+    ///
+    /// Claims it first, exactly like a publisher (#1058): waits out a
+    /// writer that is mid-`try_deliver` (`READY_WRITING`) and then CASes
+    /// whatever state is left (`IDLE` or `FULL`) into `READY_WRITING`
+    /// before zeroing. Without the claim, unsubscribe/init could reset a
+    /// mailbox while a publisher on another CPU was writing it; the
+    /// publisher would then store `READY_FULL` into the cleared slot and
+    /// a later subscriber reusing it would receive a stale message. The
+    /// wait is bounded: `try_deliver` holds `READY_WRITING` only across
+    /// two short copies with IRQs masked, and never takes
+    /// MSG_ROUTER_LOCK, so callers holding that lock can't deadlock it.
     fn clear(&mut self) {
-        self.ready.store(READY_IDLE, Ordering::Release);
+        loop {
+            let cur = self.ready.load(Ordering::Acquire);
+            if cur == READY_WRITING {
+                core::hint::spin_loop();
+                continue;
+            }
+            if self
+                .ready
+                .compare_exchange(cur, READY_WRITING, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
         self.ack.store(0, Ordering::Release);
         self.data = [0; MAX_MSG_LEN];
         self.topic = [0; TOPIC_NAME_LEN];
         self.priority.store(0, Ordering::Release);
+        self.ready.store(READY_IDLE, Ordering::Release);
     }
 
     /// Attempt to deliver a message to this mailbox.
@@ -137,6 +163,12 @@ impl Mailbox {
     /// and retries. The earlier `load → write → store` let both
     /// proceed and lost the first message.
     ///
+    /// IRQs are masked from the claim to the `READY_FULL` store so the
+    /// claimed window can't be preempted. Otherwise a publisher preempted
+    /// there and then destroyed (`slm.task_kill` removes any non-current
+    /// task) would leave the mailbox `READY_WRITING` forever, and every
+    /// later publish to it would time out as busy.
+    ///
     /// # Safety
     /// Caller promises `topic_name` and `data` are NUL-terminated within
     /// `TOPIC_NAME_LEN` and `MAX_MSG_LEN` bytes respectively.
@@ -146,11 +178,13 @@ impl Mailbox {
         data: *const u8,
         prio: u8,
     ) -> bool {
+        let irq_flags = slm_irq_save();
         if self
             .ready
             .compare_exchange(READY_IDLE, READY_WRITING, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            slm_irq_restore(irq_flags);
             return false;
         }
         str_copy(&mut self.data, data, MAX_MSG_LEN);
@@ -158,6 +192,7 @@ impl Mailbox {
         self.ack.store(0, Ordering::Release);
         self.priority.store(prio as u32, Ordering::Release);
         self.ready.store(READY_FULL, Ordering::Release);
+        slm_irq_restore(irq_flags);
         true
     }
 }
@@ -170,6 +205,7 @@ impl Mailbox {
 ///    — the pre-#1058 load-then-store accepted it and overwrote.
 /// 2. An idle mailbox is claimed and ends `READY_FULL` with the data.
 /// 3. A full (unacked) mailbox rejects a writer.
+/// 4. `clear()` resets a full mailbox to idle, and it accepts again.
 pub(crate) fn mailbox_claim_self_test() -> bool {
     let mut mb = Mailbox::new();
     mb.data[0] = b'A';
@@ -191,7 +227,14 @@ pub(crate) fn mailbox_claim_self_test() -> bool {
     let again = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"C\0".as_ptr(), 0) };
     let full_rejected = !again && mb.data[0] == b'B';
 
-    writing_rejected && idle_claimed && full_rejected
+    // clear() claims and resets a full mailbox, which then accepts again.
+    mb.clear();
+    let cleared = mb.ready.load(Ordering::Acquire) == READY_IDLE && mb.data[0] == 0;
+    // SAFETY: as above.
+    let after_clear = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"D\0".as_ptr(), 0) };
+    let redelivered = after_clear && mb.data[0] == b'D';
+
+    writing_rejected && idle_claimed && full_rejected && cleared && redelivered
 }
 
 /// A subscription linking a component to its mailbox.

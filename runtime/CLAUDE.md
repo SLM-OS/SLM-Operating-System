@@ -355,10 +355,27 @@ B-payloads") on QEMU `make test AI_SCHED=ON` (#1058).
 `compare_exchange(IDLE, WRITING)` before writing; the loser sees
 `WRITING` or `FULL`, returns `false`, and retries like any busy
 mailbox. Receive and ack only act on `READY_FULL`, so a mailbox
-mid-write is invisible to the subscriber. Pinned deterministically by
-`mailbox_claim_self_test()` (Rust boot test 29, "mailbox claim rejects
-concurrent writer"); the cross-CPU integration test remains the
-end-to-end check.
+mid-write is invisible to the subscriber.
+
+Two rules keep the claimed state from getting stuck or racing a reset:
+
+- `try_deliver` masks IRQs (`slm_irq_save`) from the claim to the
+  `READY_FULL` store. A publisher preempted inside that window and then
+  destroyed (`slm.task_kill` removes any non-current task) would
+  otherwise leave the mailbox `READY_WRITING` forever, with every later
+  publish to it timing out as busy.
+- `Mailbox::clear()` (unsubscribe / init) claims the mailbox the same
+  way before zeroing it: it waits out an in-flight writer and CASes
+  `IDLE`/`FULL` into `WRITING`. Otherwise a writer could finish into a
+  just-cleared slot and a later subscriber reusing it would receive a
+  stale message. The wait is bounded because the writer holds the claim
+  only across two short copies with IRQs masked and never takes
+  `MSG_ROUTER_LOCK`.
+
+Pinned deterministically by `mailbox_claim_self_test()` (Rust boot test
+29, "mailbox claim rejects concurrent writer"), which also checks that
+`clear()` resets a full mailbox; the cross-CPU integration test remains
+the end-to-end check.
 
 Not changed: the `ack` flag is a single bit, so when two publishers
 contend for one mailbox the ack one of them observes may belong to the
