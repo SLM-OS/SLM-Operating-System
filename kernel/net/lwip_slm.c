@@ -1167,10 +1167,14 @@ void net_poll(void) {
      * tcp_close on live session pcbs. */
     admin_telemetry_periodic_pump(sys_now());
 
-    lwip_core_unlock(core);
-
-    /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
+    /* RX-stall watchdog. Cheap when not alarmed (a load + compare).
+     * Inside the core lock: it computes sys_now() - last_rx, and a
+     * caller preempted between those reads while net_pump records a
+     * newer last_rx would see the subtraction wrap and raise a false
+     * "RX stalled (0 ms idle)" alarm (seen on pi-5-1, #1065). */
     net_watchdog_check();
+
+    lwip_core_unlock(core);
 }
 
 /*
