@@ -276,6 +276,21 @@ releases the allocator lock before calling `eviction::select_victim`,
 then re-acquires it to free the victim and retry. Feedback callbacks
 follow the same pattern.
 
+**Stale victims (#1066).** Because the allocator lock is dropped for
+the consult, the chosen block can change before it is freed. Each
+candidate's slot generation is captured in the same locked pass as the
+snapshot, and the victim is freed with that generation, so a block
+freed and reallocated in the window fails with `StaleHandle`. A block
+`share`d in the window (a `WeightLease` on another CPU) keeps its
+generation, so `refcount <= 1` is re-checked as well; freeing it would
+consume the sharer's reference. A stale victim is dropped and the
+policy is consulted again over the rest, up to 4 times, after which
+the allocation is simply retried. Only a reclaim that actually freed a
+slot counts in `evictions_total` and reaches `notify_eviction`.
+Before #1066 the generation was re-read live, so neither check could
+fire. `update_feedback` routes by the pool encoded in `block_id` bits
+24+, so workspace feedback reaches the workspace policy.
+
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
 the real weights are not present.
@@ -630,8 +645,9 @@ dispatch; the lock is re-taken and the policy picks from the scores
 during the dispatch, the stale scores are discarded and the new policy
 decides on its own path. The allocator lock was never held here:
 `model_mem::alloc_with_eviction` drops it before `evict_and_retry`,
-which snapshots the candidates and re-validates the victim's
-generation before freeing it. The dispatch itself still runs with IRQs
+which snapshots the candidates with their generations and frees the
+victim only if its generation and refcount are unchanged (see "Stale
+victims" above). The dispatch itself still runs with IRQs
 masked behind the GPU try-lock and polls for up to 2 s on a GR fault;
 the rate limiter, the try-lock and the circuit breaker bound how often
 that happens. Direct callers of `MlpPolicy::select_victim` (the bench

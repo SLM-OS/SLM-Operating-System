@@ -320,6 +320,18 @@ mod test_ffi_stubs {
     pub extern "C" fn slm_task_current() -> u32 {
         0
     }
+
+    /// Host stubs for the eviction-telemetry hooks in
+    /// `kernel/src/admin_telemetry.c`, referenced by
+    /// `mm::eviction::registry`. Observational only — dropping the
+    /// samples on the host is harmless.
+    #[cfg(feature = "ai_eviction")]
+    #[no_mangle]
+    pub extern "C" fn admin_telemetry_record_eviction_decision(_dt_ns: u64) {}
+
+    #[cfg(feature = "ai_eviction")]
+    #[no_mangle]
+    pub extern "C" fn admin_telemetry_record_eviction_fallback() {}
 }
 
 // =============================================================================
