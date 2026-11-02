@@ -619,6 +619,12 @@ int net_init(void) {
      * that survived the prior teardown (DHCP-bound state, ARP
      * entries, etc.) and confuse pool accounting. The netif setup
      * below is re-runnable; the lwIP subsystem init is not. */
+    /* lwIP state from here to net_initialized is touched under the
+     * core lock (#1065): a re-init after net_shutdown runs from the
+     * shell while net_pump is alive. The driver init above stays
+     * outside — it can be slow and touches no lwIP state. */
+    sys_prot_t init_lev = lwip_core_lock();
+
     if (!lwip_subsystem_initialized) {
         lwip_init();
         lwip_subsystem_initialized = true;
@@ -639,6 +645,7 @@ int net_init(void) {
      * mismatch as the driver init above. */
     if (netif_add(&slm_netif, &ipaddr, &netmask, &gateway, NULL,
                   slm_netif_init, ethernet_input) == NULL) {
+        lwip_core_unlock(init_lev);
         ERROR("Failed to add network interface");
         return NET_E_GENERIC;
     }
@@ -660,6 +667,7 @@ int net_init(void) {
     static_gw_fallback = gateway.addr;
 
     net_initialized = true;
+    lwip_core_unlock(init_lev);
 
     /* Log initial configuration */
     char ip_str[16], gw_str[16], nm_str[16];
@@ -676,16 +684,23 @@ int net_init(void) {
      * server answers within NET_DHCP_TIMEOUT_MS, net_poll() falls back
      * to the static IP configured above. */
 #if defined(NET_DHCP_AT_BOOT)
-    dhcp_requested = true;
-    dhcp_timeout_armed = false;
-    dhcp_fallback_done = false;
-    if (net_link_is_up()) {
-        if (net_start_dhcp_client("at boot") == NET_OK) {
-            INFO("DHCP auto-start armed (timeout %u ms)", dhcp_timeout_ms);
+    /* net_initialized flipped true above, so net_pump may already be
+     * processing lwIP between our statements — dhcp_start needs the
+     * core lock from here on. */
+    {
+        sys_prot_t lev = lwip_core_lock();
+        dhcp_requested = true;
+        dhcp_timeout_armed = false;
+        dhcp_fallback_done = false;
+        if (net_link_is_up()) {
+            if (net_start_dhcp_client("at boot") == NET_OK) {
+                INFO("DHCP auto-start armed (timeout %u ms)", dhcp_timeout_ms);
+            }
+        } else {
+            INFO("DHCP auto-start deferred until link-ready (timeout %u ms)",
+                 dhcp_timeout_ms);
         }
-    } else {
-        INFO("DHCP auto-start deferred until link-ready (timeout %u ms)",
-             dhcp_timeout_ms);
+        lwip_core_unlock(lev);
     }
 #endif
 
@@ -769,6 +784,12 @@ int net_shutdown(void) {
 
     INFO("Shutting down network subsystem...");
 
+    /* Steps 1-4 all mutate lwIP core state from task context; hold
+     * the core lock so net_pump can't run tcp input/timers against
+     * pcbs mid-teardown. The nested stop calls in step 2a take the
+     * (nestable) lock again — harmless. */
+    sys_prot_t lev = lwip_core_lock();
+
     /* 1. DHCP release. dhcp_release_and_stop on a netif that never
      * ran DHCP is a no-op in lwIP, so this is safe even when the
      * link came up via the static fallback path. */
@@ -835,6 +856,8 @@ int net_shutdown(void) {
     netif_set_down(&slm_netif);
     netif_remove(&slm_netif);
 
+    lwip_core_unlock(lev);
+
     /* 5. Reset the RX-stall watchdog so `netstat` doesn't show
      * stale ALARMED state from before the shutdown. The counters
      * (stalls/recoveries) reset too — they're only meaningful
@@ -873,14 +896,21 @@ int net_shutdown(void) {
  */
 int net_input_frame_into_stack(const uint8_t *frame, size_t len)
 {
+    /* Core lock held across alloc + input: tcp callbacks fired from
+     * slm_netif.input (on_accept, on_tcp_recv) mutate pcb state that
+     * task-context tcp_write/tcp_output callers touch under the same
+     * lock — see kernel/net/sys_arch.c's locking-rule block. */
+    sys_prot_t lev = lwip_core_lock();
     struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
     if (!p) {
         net_statistics.rx_dropped++;
+        lwip_core_unlock(lev);
         return -1;
     }
     if (pbuf_take(p, frame, (u16_t)len) != ERR_OK) {
         pbuf_free(p);
         net_statistics.rx_dropped++;
+        lwip_core_unlock(lev);
         return -1;
     }
     net_statistics.rx_packets++;
@@ -901,8 +931,10 @@ int net_input_frame_into_stack(const uint8_t *frame, size_t len)
     if (slm_netif.input(p, &slm_netif) != ERR_OK) {
         pbuf_free(p);
         net_statistics.rx_dropped++;
+        lwip_core_unlock(lev);
         return -1;
     }
+    lwip_core_unlock(lev);
     return (int)len;
 }
 
@@ -1003,17 +1035,46 @@ void net_poll(void) {
      * platform gate in C and mirrors the "USB core compiles on every
      * platform" design in docs/networking.md.
      */
-    (void)usb_core_hotplug_poll();
-    (void)cdc_ecm_probe_and_register();
+    /* net_poll has more than one caller: net_pump, plus the shell's
+     * ping loop and net_http_get_file, which poll inline while
+     * net_pump is preempted mid-call (#1065). The USB hot-plug path
+     * below runs outside the lwIP core lock (enumeration is slow and
+     * must not run IRQs-off), so a reentrancy flag keeps a second
+     * caller from entering it while the first is mid-enumeration.
+     * Test-and-set under irq_save is atomic: every caller is pinned
+     * to CPU 0 (see kernel/net/sys_arch.c). */
+    {
+        static bool usb_poll_active;
+        sys_prot_t lev = lwip_core_lock();
+        bool enter = !usb_poll_active;
+        usb_poll_active = true;
+        lwip_core_unlock(lev);
+        if (enter) {
+            (void)usb_core_hotplug_poll();
+            (void)cdc_ecm_probe_and_register();
+            usb_poll_active = false;
+        }
+    }
 
     if (!net_initialized) {
         return;
     }
+
+    /* Everything from here to the watchdog runs under the lwIP core
+     * lock (#1065): the driver ops (recv fills the shared static
+     * rx_packet_buf; send runs inside lwIP's linkoutput under the
+     * same lock), lwIP input and timers, DHCP/ping state, and the
+     * per-session TX drains. Holding it for the whole body also makes
+     * two concurrent net_poll callers take turns instead of
+     * interleaving. Nothing in here sleeps or yields. */
+    sys_prot_t core = lwip_core_lock();
+
     /* Defensive: net_init guarantees active_driver was non-NULL at
      * the time it ran, but nothing prevents later code from clearing
      * the slot (tests, future hot-unplug paths). Bail rather than
      * NULL-deref the driver ops below. */
     if (active_driver == NULL) {
+        lwip_core_unlock(core);
         return;
     }
 
@@ -1049,11 +1110,9 @@ void net_poll(void) {
      *   - lwip's heap and pool budgets are unchanged; pbuf alloc
      *     can fail even mid-loop and we just bump rx_dropped and
      *     bail (next tick will retry).
-     *   - We do NOT pre-yield mid-loop. net_pump runs on a single
-     *     CPU 0 task at TASK_PRIORITY_IDLE; the shell task is also
-     *     IDLE. With cooperative scheduling, the shell already
-     *     can't preempt net_pump mid-call. Yielding inside the
-     *     loop would just re-introduce the per-frame tick overhead
+     *   - We do NOT yield mid-loop. The whole body runs under the
+     *     lwIP core lock, so nothing preempts net_pump here, and
+     *     yielding would re-introduce the per-frame tick overhead
      *     this fix removes.
      *
      * Allocation rationale (PBUF_POOL not PBUF_RAM) and the
@@ -1102,11 +1161,20 @@ void net_poll(void) {
     /* Drive the 1-Hz periodic publishers (tel.cpu / tel.stl / tel.mem).
      * Cheap when the publish window hasn't elapsed. Runs before the
      * server poll above on the next tick so a freshly-published sample
-     * gets fanned out without an extra pump round-trip. */
+     * gets fanned out without an extra pump round-trip. Must stay
+     * inside the core lock: its between-publish drains re-enter
+     * tcp_telemetry_server_poll(), which runs tcp_write/tcp_output/
+     * tcp_close on live session pcbs. */
     admin_telemetry_periodic_pump(sys_now());
 
-    /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
+    /* RX-stall watchdog. Cheap when not alarmed (a load + compare).
+     * Inside the core lock: it computes sys_now() - last_rx, and a
+     * caller preempted between those reads while net_pump records a
+     * newer last_rx would see the subtraction wrap and raise a false
+     * "RX stalled (0 ms idle)" alarm (seen on pi-5-1, #1065). */
     net_watchdog_check();
+
+    lwip_core_unlock(core);
 }
 
 /*
@@ -1142,6 +1210,10 @@ void net_pump_task_entry(void *arg)
 {
     (void)arg;
     uint64_t prev_rx = 0;
+    /* From here on a task can be preempted mid-lwIP-call by net_pump,
+     * so start checking that every raw-API call holds the core lock
+     * (#1065). */
+    lwip_core_check_arm(true);
     for (;;) {
         net_poll();
         /* Non-atomic 64-bit read: net_pump runs only on CPU 0 today
@@ -1197,6 +1269,9 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
         return NET_E_NOT_INIT;
     }
 
+    /* dhcp_stop + netif_set_addr from task context — core lock. */
+    sys_prot_t lev = lwip_core_lock();
+
     /* Stop DHCP if running */
     if (dhcp_started) {
         dhcp_stop(&slm_netif);
@@ -1214,6 +1289,8 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
 
     netif_set_addr(&slm_netif, &ip, &nm, &gw);
 
+    lwip_core_unlock(lev);
+
     char ip_str[16];
     net_ip_to_str(ip_addr, ip_str);
     INFO("Static IP set: %s", ip_str);
@@ -1226,18 +1303,26 @@ int net_enable_dhcp(void) {
         return NET_E_NOT_INIT;
     }
 
+    /* dhcp_* flags and dhcp_start race net_pump's link-state sync;
+     * hold the core lock across the whole decision. */
+    sys_prot_t lev = lwip_core_lock();
+
     dhcp_requested = true;
     dhcp_fallback_done = false;
 
     if (dhcp_started) {
+        lwip_core_unlock(lev);
         return NET_OK;
     }
 
     dhcp_timeout_armed = false;
     if (net_link_is_up()) {
-        return net_start_dhcp_client("manual request");
+        int rc = net_start_dhcp_client("manual request");
+        lwip_core_unlock(lev);
+        return rc;
     }
 
+    lwip_core_unlock(lev);
     INFO("DHCP request deferred until link-ready");
     return NET_OK;
 }
@@ -1247,13 +1332,20 @@ int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) 
         return NET_E_NOT_INIT;
     }
 
+    /* pbuf_alloc / raw_sendto and the ping_state handoff to the
+     * net_pump-side ping_recv callback — core lock. The pending check
+     * is inside it too, so the check and the set below are atomic. */
+    sys_prot_t lev = lwip_core_lock();
+
     if (ping_state.pending) {
+        lwip_core_unlock(lev);
         return NET_E_BUSY;  /* Previous ping still pending */
     }
 
     /* Create ICMP echo request */
     struct pbuf *p = pbuf_alloc(PBUF_IP, 8 + 32, PBUF_RAM);
     if (!p) {
+        lwip_core_unlock(lev);
         return NET_E_NO_MEM;
     }
 
@@ -1301,9 +1393,11 @@ int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) 
 
     if (err != ERR_OK) {
         ping_state.pending = false;
+        lwip_core_unlock(lev);
         return NET_E_GENERIC;
     }
 
+    lwip_core_unlock(lev);
     return 0;
 }
 

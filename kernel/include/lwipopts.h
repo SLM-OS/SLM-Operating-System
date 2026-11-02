@@ -293,6 +293,9 @@
 /* -------------------------------------------------------------------------- */
 
 /* Enable internal consistency checks */
-#define LWIP_ASSERT_CORE_LOCKED()   /* NO_SYS mode, nothing to check */
+/* Every raw-API entry point must run under lwip_core_lock() (#1065).
+ * Checked at runtime once net_pump has armed it; see sys_arch.h. */
+void lwip_core_assert_locked(void);
+#define LWIP_ASSERT_CORE_LOCKED()   lwip_core_assert_locked()
 
 #endif /* LWIPOPTS_H */

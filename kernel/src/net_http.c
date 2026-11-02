@@ -317,7 +317,11 @@ int net_http_get_file(const char *url, const char *dest_path,
     conn.headers_done_fn = http_headers_done_cb;
 
     {
+        /* httpc_get_file* enters tcp_new/tcp_connect (and DNS) from
+         * task context — hold the lwIP core lock across the call. The
+         * download itself proceeds via net_poll's guarded sections. */
         ip_addr_t server_addr;
+        sys_prot_t lev = lwip_core_lock();
         if (ipaddr_aton(parsed.host, &server_addr)) {
             err = httpc_get_file(&server_addr, parsed.port, parsed.uri,
                                  &conn, http_recv_to_file, &dl, &httpc_conn);
@@ -325,6 +329,7 @@ int net_http_get_file(const char *url, const char *dest_path,
             err = httpc_get_file_dns(parsed.host, parsed.port, parsed.uri,
                                      &conn, http_recv_to_file, &dl, &httpc_conn);
         }
+        lwip_core_unlock(lev);
     }
     (void)httpc_conn;
     if (err != ERR_OK) {
@@ -340,9 +345,19 @@ int net_http_get_file(const char *url, const char *dest_path,
     while (!dl.done) {
         net_poll();
         if ((sys_now() - start_ms) > NET_HTTP_OVERALL_TIMEOUT_MS) {
-            if (httpc_conn != NULL) {
+            /* Re-check dl.done under the lock: net_pump can finish
+             * the transfer between our loop test and here, and httpc
+             * frees its state in the result callback, so aborting
+             * then would touch freed memory (#1065). */
+            sys_prot_t lev = lwip_core_lock();
+            bool finished = dl.done;
+            if (httpc_conn != NULL && !finished) {
                 httpc_abort_connection(httpc_conn);
-                httpc_conn = NULL;
+            }
+            lwip_core_unlock(lev);
+            httpc_conn = NULL;
+            if (finished) {
+                break;   /* completed in the race window: normal exit */
             }
             dl.result.httpc_result = HTTPC_RESULT_ERR_TIMEOUT;
             dl.result.lwip_err = (int)ERR_TIMEOUT;

@@ -22,6 +22,7 @@
 #include "lwip/err.h"
 #include "lwip/ip_addr.h"
 #include "lwip/stats.h"
+#include "arch/sys_arch.h"   /* lwip_core_lock for task-context tcp_* calls */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -251,14 +252,11 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
 /*
  * NOTE: lwIP raw API calls here (tcp_new, tcp_bind, tcp_listen_with_backlog,
- * tcp_accept, tcp_close) run on the shell task, not on net_pump.
- * This follows the existing pattern used by net_init() from cmd_net:
- * the shell and net_pump are both pinned to CPU 0 and both priority
- * IDLE, so under SLM-OS's mostly-cooperative scheduling they do not
- * reach true concurrency on this CPU. A timer preemption mid-call is
- * theoretically possible (and is a known pre-existing risk with
- * net_init too) — Phase 3's `NET_TELNETD_AUTOSTART` path should
- * migrate this onto a net_pump-driven init hook.
+ * tcp_accept, tcp_close) run on the shell task, not on net_pump. A
+ * timer preemption mid-call would let net_pump run tcp input/timers
+ * against half-initialised pcb state, so the sequence holds the lwIP
+ * core lock (lwip_core_lock — see kernel/net/sys_arch.c's locking-rule
+ * block) for its duration.
  */
 int tcp_shell_server_start(uint16_t port)
 {
@@ -269,8 +267,10 @@ int tcp_shell_server_start(uint16_t port)
         port = 2323;
     }
 
+    sys_prot_t lev = lwip_core_lock();
     struct tcp_pcb *pcb = tcp_new();
     if (!pcb) {
+        lwip_core_unlock(lev);
         return -1;
     }
 
@@ -281,18 +281,21 @@ int tcp_shell_server_start(uint16_t port)
     err_t err = tcp_bind(pcb, &any, port);
     if (err != ERR_OK) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         return -2;
     }
 
     struct tcp_pcb *lpcb = tcp_listen_with_backlog(pcb, MAX_TCP_SHELL_SESSIONS);
     if (!lpcb) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         return -3;
     }
 
     tcp_accept(lpcb, on_accept);
     listen_pcb  = lpcb;
     listen_port = port;
+    lwip_core_unlock(lev);
 
     uart_printf("[TCPSH] Listening on 0.0.0.0:%u (unauthenticated — trusted networks only)\r\n",
                 (unsigned)port);
@@ -304,9 +307,11 @@ void tcp_shell_server_stop(void)
     if (!listen_pcb) {
         return;
     }
+    sys_prot_t lev = lwip_core_lock();
     tcp_close(listen_pcb);
     listen_pcb  = NULL;
     listen_port = 0;
+    lwip_core_unlock(lev);
 }
 
 bool     tcp_shell_server_running(void)  { return listen_pcb != NULL; }

@@ -2557,6 +2557,80 @@ static void test_net_shutdown_clears_in_tree_listeners(void)
     TEST_ASSERT_TRUE(net_is_up());
 }
 
+
+/*
+ * Test (#1065): every in-tree lwIP raw-API path holds the core lock.
+ *
+ * lwIP calls LWIP_ASSERT_CORE_LOCKED() at each raw-API entry; once
+ * armed, lwip_core_assert_locked() counts calls made with IRQs
+ * unmasked or off CPU 0. Production arms it when net_pump starts; the
+ * test kernel has no net_pump, so arm it here around the call sites
+ * that run from preemptible task context: net_poll (driver ops,
+ * input, timers, TX drains), the telnetd and telemetry listener
+ * start/stop paths, and net_ping. A site that drops the lock bumps
+ * the counter. The second half proves the hook is wired at all: a
+ * bare tcp_new() with IRQs unmasked must be counted.
+ */
+#include "lwip/tcp.h"
+
+static bool test_irqs_unmasked(void)
+{
+    uint64_t flags;
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("pushfq; pop %0" : "=r"(flags) :: "memory");
+    return (flags & (1u << 9)) != 0;
+#else
+    __asm__ volatile("mrs %0, daif" : "=r"(flags) :: "memory");
+    return (flags & (1u << 7)) == 0;
+#endif
+}
+
+static void test_lwip_core_lock_held_by_task_context_paths(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    lwip_core_check_arm(true);
+    uint32_t base = lwip_core_violation_count();
+
+    for (int i = 0; i < 8; i++) {
+        net_poll();
+    }
+    TEST_ASSERT_EQUAL_INT(0, tcp_shell_server_start(2325));
+    tcp_shell_server_stop();
+    TEST_ASSERT_EQUAL_INT(0, tcp_telemetry_server_start(0));
+    tcp_telemetry_server_stop();
+    (void)net_ping(net_ip4_addr(10, 0, 2, 2), 7, NULL, NULL);
+    for (int i = 0; i < 4; i++) {
+        net_poll();
+    }
+
+    uint32_t after_locked = lwip_core_violation_count();
+
+    /* Negative control: an unlocked raw-API call must be counted.
+     * Only meaningful when this task runs with IRQs unmasked, which
+     * is the case on every build since #1047. */
+    bool unmasked = test_irqs_unmasked();
+    struct tcp_pcb *pcb = tcp_new();
+    uint32_t after_unlocked = lwip_core_violation_count();
+    if (pcb) {
+        sys_prot_t lev = lwip_core_lock();
+        tcp_abort(pcb);
+        lwip_core_unlock(lev);
+    }
+
+    lwip_core_check_arm(false);
+
+    TEST_ASSERT_MESSAGE(after_locked == base,
+        "an lwIP raw-API call ran without lwip_core_lock (#1065)");
+    if (unmasked) {
+        TEST_ASSERT_MESSAGE(after_unlocked > after_locked,
+            "LWIP_ASSERT_CORE_LOCKED hook did not count an unlocked tcp_new()");
+    }
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -2674,6 +2748,7 @@ int test_suite_net(void)
      * `listen_pcb` pointers. Same destructive shape as the test
      * above — runs after it for the same reason. */
     RUN_TEST(test_net_shutdown_clears_in_tree_listeners);
+    RUN_TEST(test_lwip_core_lock_held_by_task_context_paths);
 
     return UNITY_END();
 #else

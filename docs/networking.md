@@ -699,6 +699,37 @@ The integration runs in `NO_SYS` mode (single-threaded):
 - **Critical Sections**: `sys_arch_protect()` uses spinlocks
 - **Memory**: Static pools, no dynamic allocation
 
+**Core lock.** `NO_SYS` protects only the lwIP heap
+(`SYS_ARCH_PROTECT` + CPU-0 pinning); pcb state has no guard of its
+own. Because tasks like sshd and the TCP shell sessions call
+`tcp_write`/`tcp_output` from preemptible task context while
+`net_pump` runs the lwIP core, every lwIP raw-API call from task
+context and `net_poll`'s core-processing sections must be bracketed
+with `lwip_core_lock()` / `lwip_core_unlock()`
+(`kernel/include/arch/sys_arch.h`). The lock is `irq_save`-based —
+nestable and callback-recursion-safe — and relies on the same
+"every lwIP caller is pinned to CPU 0" invariant documented in
+`kernel/net/sys_arch.c`; it serialises nothing across CPUs. Never
+hold it across crypto, `sleep_ms`, or `yield` — wrap only the lwIP
+calls themselves.
+
+`net_poll()` holds the lock for its whole post-init body (driver
+`recv`/`tx_reap`, lwIP input and timers, DHCP and ping state, the
+telnet and telemetry TX drains), so a second caller (the shell's
+`ping` loop, `net_http_get_file`) takes turns with `net_pump` instead
+of interleaving with it. The USB hot-plug poll at the top of
+`net_poll` runs outside the lock behind a reentrancy flag.
+
+**Checking.** `lwipopts.h` routes lwIP's `LWIP_ASSERT_CORE_LOCKED()`
+(called at every raw-API entry) to `lwip_core_assert_locked()`, which
+counts and WARNs on calls made with IRQs unmasked or off CPU 0
+(`lwIP raw API called without lwip_core_lock ...`). It is armed when
+`net_pump` starts; boot-time init and the test kernel (no `net_pump`)
+run unchecked. `test_lwip_core_lock_held_by_task_context_paths`
+(`kernel/tests/test_net.c`) arms it around the task-context paths and
+fails if any of them drops the lock. Background: #1065 — the race
+became live when #1047 made running tasks preemptible.
+
 ---
 
 ## QEMU Configuration

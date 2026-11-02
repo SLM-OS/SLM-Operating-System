@@ -55,6 +55,7 @@
 
 #include "lwip/tcp.h"
 #include "lwip/pbuf.h"
+#include "arch/sys_arch.h"  /* lwip_core_lock for task-context tcp_* calls */
 
 #include <wolfssh/ssh.h>
 #include <wolfssh/error.h>
@@ -290,15 +291,32 @@ static int wolf_io_send(WOLFSSH *ssh, void *buf, uint32_t sz, void *ctx)
     struct sshd_conn *c = (struct sshd_conn *)ctx;
     if (!c || !c->pcb) return WS_CBIO_ERR_CONN_RST;
 
+    /* Runs on the session task; a mid-tcp_write preemption would let
+     * net_pump mutate the same pcb's unsent/unacked queues. Hold the
+     * lwIP core lock across the tcp_* triplet only — wolfSSH's crypto
+     * runs before/after this callback, outside the lock. The tcp_err
+     * callback that NULLs c->pcb also runs under this lock (on
+     * net_pump), so the pcb re-check is race-free. */
+    sys_prot_t lev = lwip_core_lock();
+    if (!c->pcb) {
+        lwip_core_unlock(lev);
+        return WS_CBIO_ERR_CONN_RST;
+    }
+
     /* tcp_sndbuf reports the snd_buf headroom in the pcb. If it's
      * zero we ask wolfSSH to come back later. */
     uint16_t cap = tcp_sndbuf(c->pcb);
-    if (cap == 0u) return WS_CBIO_ERR_WANT_WRITE;
+    if (cap == 0u) {
+        lwip_core_unlock(lev);
+        return WS_CBIO_ERR_WANT_WRITE;
+    }
 
     uint16_t take = (sz < cap) ? (uint16_t)sz : cap;
     err_t e = tcp_write(c->pcb, buf, take, TCP_WRITE_FLAG_COPY);
-    if (e != ERR_OK) return WS_CBIO_ERR_GENERAL;
-    e = tcp_output(c->pcb);
+    if (e == ERR_OK) {
+        e = tcp_output(c->pcb);
+    }
+    lwip_core_unlock(lev);
     if (e != ERR_OK) return WS_CBIO_ERR_GENERAL;
     return (int)take;
 }
@@ -314,7 +332,12 @@ static void conn_close_locked(struct sshd_conn *c)
      * g_mod_lock — both end up calling this on the same slot. Without
      * the early-return, g_active would decrement twice for a single
      * connection (the > 0 guard keeps the counter from underflowing
-     * but the count still drifts low). */
+     * but the count still drifts low).
+     *
+     * lwIP core lock: every caller holds g_mod_lock via
+     * spin_lock_irqsave, which masks IRQs on this (CPU-0-pinned)
+     * task and therefore subsumes lwip_core_lock — the tcp_* calls
+     * below are already serialised against net_pump. */
     if (!c->in_use) return;
     if (c->ssh) {
         wolfSSH_free(c->ssh);
@@ -710,18 +733,27 @@ int sshd_start(uint16_t port)
         }
     }
 
+    /* Listener bring-up runs on the shell task — hold the lwIP core
+     * lock across the raw-API sequence (crypto/host-key work above
+     * stays outside it). */
+    sys_prot_t lev = lwip_core_lock();
     struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) return SSHD_E_LISTEN_FAIL;
+    if (!pcb) {
+        lwip_core_unlock(lev);
+        return SSHD_E_LISTEN_FAIL;
+    }
 
     ip_addr_t any = {0};
     IP4_ADDR(&any, 0, 0, 0, 0);
     if (tcp_bind(pcb, &any, port) != ERR_OK) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         return SSHD_E_LISTEN_FAIL;
     }
     struct tcp_pcb *lpcb = tcp_listen_with_backlog(pcb, SSHD_MAX_SESSIONS);
     if (!lpcb) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         return SSHD_E_LISTEN_FAIL;
     }
     tcp_arg(lpcb, NULL);
@@ -729,6 +761,7 @@ int sshd_start(uint16_t port)
 
     g_listen_pcb  = lpcb;
     g_listen_port = port;
+    lwip_core_unlock(lev);
     uart_printf("[SSHD] listening on port %u\r\n", (unsigned)port);
     return SSHD_OK;
 }
@@ -737,9 +770,13 @@ int sshd_stop(void)
 {
     if (!g_listen_pcb) return SSHD_OK;
 
-    tcp_close(g_listen_pcb);
-    g_listen_pcb  = NULL;
-    g_listen_port = 0;
+    {
+        sys_prot_t lev = lwip_core_lock();
+        tcp_close(g_listen_pcb);
+        g_listen_pcb  = NULL;
+        g_listen_port = 0;
+        lwip_core_unlock(lev);
+    }
 
     /* Tear down any open sessions (peer will see RST). */
     irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
