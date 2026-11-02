@@ -159,21 +159,12 @@ static void test_gic_set_affinity_rejects_invalid_cpu(void)
  *   2. Exclude CPU 1. SPI should now NOT target CPU 1.
  *   3. Include CPU 1. SPI should be back on CPU 1.
  *
- * Pi 5 and x86-64 are unaffected (different code paths); this test is
- * compile-gated to GICv3 platforms.
+ * Runs on both GIC versions. Since #1051 the GICv2 path (QEMU, Pi 5)
+ * keeps the same contract: an SPI whose only target was CPU 1 falls
+ * back to CPU 0 on exclude and goes back to CPU 1 on include.
  */
 static void test_gic_exclude_include_round_trip(void)
 {
-#if !defined(TEST_GIC_HAS_GICV3)
-    /* The GICv2 exclude/include path uses ITARGETSR bit masks with
-     * different semantics (exclude just clears the cpu bit; the SPI
-     * remains addressable by any other still-set CPU). The single-PE
-     * "re-route to CPU 0" contract this test asserts is GICv3-specific.
-     * Pi 5 (#909's regression-safe baseline) exercises the GICv2 path
-     * via test_isolate_core_marks_isolated in test_scheduler.c. */
-    TEST_IGNORE_MESSAGE("exclude/include re-route contract is GICv3-only");
-    return;
-#else
     if (cpu_count < 2) {
         TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
         return;
@@ -204,7 +195,36 @@ static void test_gic_exclude_include_round_trip(void)
             (void)gic_set_affinity(TEST_GIC_SPI, saved);
         }
     }
-#endif
+}
+
+/*
+ * Test: include only restores what exclude removed (#1051).
+ *
+ * The GICv2 include used to set `cpu`'s bit on every SPI, so one
+ * isolate/unisolate cycle of CPU 1 left every SPI targeting CPU 0 *and*
+ * CPU 1. On QEMU that showed up once SPIs were really delivered: the
+ * virtio-net handler ran on CPU 1 concurrently with the test on CPU 0.
+ * An SPI routed to CPU 0 alone must still be on CPU 0 alone after an
+ * exclude/include of CPU 1.
+ */
+static void test_gic_include_does_not_add_unrelated_spis(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    uint32_t saved = gic_get_affinity(TEST_GIC_SPI);
+    TEST_ASSERT_EQUAL_INT(0, gic_set_affinity(TEST_GIC_SPI, 1u << 0));
+
+    gic_exclude_cpu_from_spis(1);
+    TEST_ASSERT_EQUAL_UINT32(1u << 0, gic_get_affinity(TEST_GIC_SPI));
+    gic_include_cpu_in_spis(1);
+    TEST_ASSERT_EQUAL_UINT32(1u << 0, gic_get_affinity(TEST_GIC_SPI));
+
+    if (saved != 0) {
+        (void)gic_set_affinity(TEST_GIC_SPI, saved);
+    }
 }
 
 /*
@@ -279,6 +299,7 @@ int test_suite_gic(void)
     RUN_TEST(test_gic_set_affinity_rejects_non_spi);
     RUN_TEST(test_gic_set_affinity_rejects_invalid_cpu);
     RUN_TEST(test_gic_exclude_include_round_trip);
+    RUN_TEST(test_gic_include_does_not_add_unrelated_spis);
     RUN_TEST(test_gic_exclude_out_of_range_is_noop);
     RUN_TEST(test_gic_set_affinity_post_write_is_observed);
 #endif
