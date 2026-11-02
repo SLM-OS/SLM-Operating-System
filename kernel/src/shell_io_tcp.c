@@ -192,8 +192,9 @@ struct tcp_shell_ctx {
      *
      * Two writers reach this field via different locks: `mark_closed`
      * holds `rx_lock`, while `shell_io_tcp_kick` holds `pool_lock`.
-     * In practice they never race because every close path runs on
-     * CPU 0 under cooperative scheduling. The `volatile` qualifier +
+     * In practice they never race: every close path runs on CPU 0
+     * and both locks are irqsave, so even with preemptible tasks
+     * (#1047) the two writers can't interleave. The `volatile` qualifier +
      * first-NULL-wins check keeps a future multi-CPU regression to
      * "wrong reason logged for one line" rather than corruption. The
      * inconsistent lock holders mirror the pre-existing model for
@@ -540,17 +541,12 @@ static int tcp_read_char(struct shell_io *io)
             ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RX_RING_MASK;
             spin_unlock_irqrestore(&ctx->rx_lock, flags);
 
-            /* Acknowledge one byte so lwIP can slide its recv window.
-             * Deferring this to shell_io_tcp_poll would require a
-             * per-session "bytes-to-ack" counter; calling tcp_recved
-             * from shell-task context is safe per lwIP docs because
-             * the raw API permits it from any task as long as the
-             * call is not concurrent with net_poll — and we cooperate
-             * with net_pump via the ring locks. The shell task and
-             * net_pump both run on CPU 0, so no real concurrency. */
-            /* Intentionally acked in poll() instead to keep all lwIP
-             * calls on net_pump — simpler invariant, slightly higher
-             * latency. */
+            /* The recv window is acked in shell_io_tcp_poll (on
+             * net_pump, under the lwIP core lock), not here: this
+             * session task can be preempted at any point (#1047), so
+             * calling tcp_recved from it would race net_pump unless
+             * wrapped in lwip_core_lock (#1065). Keeping every lwIP
+             * call on net_pump is the simpler invariant. */
 
             return (int)c;
         }

@@ -611,14 +611,11 @@ void tcp_telemetry_server_poll(void)
  * NOTE: lwIP raw API calls here (tcp_new, tcp_bind, tcp_listen_with_backlog,
  * tcp_accept, tcp_close) run on the shell task when the operator types
  * `telemetry server start` or invokes `slm.telemetryd_start`, *not* on
- * net_pump. This mirrors the existing pattern in tcp_shell_server.c
- * (see its NOTE) and inherits the same pre-existing risk: under SLM-OS's
- * mostly-cooperative scheduling on CPU 0 + IDLE-priority pinning, the
- * shell task and net_pump don't reach true concurrency on this CPU. A
- * timer preemption mid-call is theoretically possible. The
- * NET_TELEMETRYD_AUTOSTART path runs from shell_init (also shell task)
- * and shares the same caveat. A future cleanup could migrate both
- * listener brings-up onto a net_pump-driven init hook.
+ * net_pump. Like tcp_shell_server.c (see its NOTE), the sequences hold
+ * the lwIP core lock so a timer preemption mid-call can't hand the
+ * half-initialised pcb to net_pump. The NET_TELEMETRYD_AUTOSTART path
+ * runs from shell_init (also shell task) and goes through the same
+ * locked functions.
  * ============================================================================ */
 
 int tcp_telemetry_server_start(uint16_t port)
@@ -633,8 +630,10 @@ int tcp_telemetry_server_start(uint16_t port)
         return -2;
     }
 
+    sys_prot_t lev = lwip_core_lock();
     struct tcp_pcb *pcb = tcp_new();
     if (!pcb) {
+        lwip_core_unlock(lev);
         msg_router_unsubscribe_all(TELEMETRY_COMPONENT_IDX);
         return -3;
     }
@@ -643,18 +642,21 @@ int tcp_telemetry_server_start(uint16_t port)
     err_t err = tcp_bind(pcb, &any, port);
     if (err != ERR_OK) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         msg_router_unsubscribe_all(TELEMETRY_COMPONENT_IDX);
         return -4;
     }
     struct tcp_pcb *lpcb = tcp_listen_with_backlog(pcb, MAX_TELEMETRY_SESSIONS);
     if (!lpcb) {
         tcp_close(pcb);
+        lwip_core_unlock(lev);
         msg_router_unsubscribe_all(TELEMETRY_COMPONENT_IDX);
         return -5;
     }
     tcp_accept(lpcb, on_accept);
     g_listen_pcb  = lpcb;
     g_listen_port = port;
+    lwip_core_unlock(lev);
     uart_printf("[TELD] Listening on 0.0.0.0:%u (telemetry feed)\r\n",
                 (unsigned)port);
     return 0;
@@ -663,9 +665,13 @@ int tcp_telemetry_server_start(uint16_t port)
 void tcp_telemetry_server_stop(void)
 {
     if (!g_listen_pcb) return;
-    tcp_close(g_listen_pcb);
-    g_listen_pcb  = NULL;
-    g_listen_port = 0;
+    {
+        sys_prot_t lev = lwip_core_lock();
+        tcp_close(g_listen_pcb);
+        g_listen_pcb  = NULL;
+        g_listen_port = 0;
+        lwip_core_unlock(lev);
+    }
 
     /* Mark every active session as closed; the next poll will tear
      * them down via lwIP. */

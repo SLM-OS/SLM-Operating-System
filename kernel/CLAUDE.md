@@ -194,6 +194,8 @@ WARN("retry budget exhausted");          /* should be unreachable */
 
 The 8-attempt bound is generous: each successful steal/migrate moves a task at most once per scheduling cycle, so retries succeed in 1-2 attempts in practice. `WARN` on exhaustion makes any pathological wedge visible. Regression coverage: `test_buffer_destroy_busy_keeps_slot` in `kernel/tests/test_ipc.c` exercises a related lock-ordering invariant.
 
+**lwIP core lock (kernel/net):** lwIP runs `NO_SYS` and its raw API is not reentrant. Every lwIP raw-API call from task context (`tcp_*`, `udp_*`, `raw_*`, `dns_*`, `netif_*`, `httpc_*` — sshd's `wolf_io_send`, the listener start/stop paths, `net_ping`, `net_http_get_file`) and `net_poll`'s core-processing sections must be bracketed with `lwip_core_lock()` / `lwip_core_unlock()` (declared in `kernel/include/arch/sys_arch.h`). The lock is `irq_save`-based: nestable, callback-recursion-safe, and correct only because every lwIP caller is pinned to CPU 0 (invariant documented in `kernel/net/sys_arch.c`) — it serialises nothing across CPUs. Code already inside `spin_lock_irqsave` holds it implicitly. Never hold it across wolfSSH/scrypt crypto, `sleep_ms`, or `yield` — wrap only the lwIP calls themselves. Once `net_pump` is running, `LWIP_ASSERT_CORE_LOCKED()` WARNs on any unlocked call (`lwIP raw API called without lwip_core_lock`), so a new call site that forgets the lock shows up on the console and in `test_lwip_core_lock_held_by_task_context_paths`. Became necessary in #1065 once #1047 made running tasks preemptible.
+
 ---
 
 ## Task Stack Sizing — `STACK_SIZE` (May 2026)
