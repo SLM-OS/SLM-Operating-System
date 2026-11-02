@@ -3486,37 +3486,46 @@ static void test_proactive_load_balance_redirect(void)
 
     /* Add 6 tasks in one irq-save region so no scheduler tick fires
      * mid-test. Stub policy returns CPU 0 for every call; we want to
-     * see at least one redirect to a non-zero CPU. */
+     * see at least one redirect to a non-zero CPU.
+     *
+     * Results are recorded, the tasks removed, IRQs and the policy
+     * restored, and only then asserted. Asserting inside the region
+     * left the six tasks queued on CPU 0 (and IRQs masked) when it
+     * failed, which then failed the next balance tests too (#1044). */
     irq_flags_t flags = irq_save();
     const int N = 6;
     struct task *tasks[6];
+    int created = 0;
     for (int i = 0; i < N; i++) {
         tasks[i] = task_create("s5_bal", nop_entry, NULL);
-        TEST_ASSERT_NOT_NULL(tasks[i]);
-        scheduler_add_task(tasks[i]);
+        if (tasks[i]) {
+            scheduler_add_task(tasks[i]);
+            created++;
+        }
     }
 
     int on_cpu0 = 0;
     int off_cpu0 = 0;
     for (int i = 0; i < N; i++) {
+        if (!tasks[i]) {
+            continue;
+        }
         if (tasks[i]->assigned_cpu == 0) {
             on_cpu0++;
         } else {
             off_cpu0++;
         }
-    }
-    TEST_ASSERT_MESSAGE(off_cpu0 >= 1,
-        "S5 override never redirected away from overloaded CPU 0");
-    TEST_ASSERT_MESSAGE(on_cpu0 < N,
-        "all tasks landed on CPU 0 — override is inert");
-
-    for (int i = 0; i < N; i++) {
         scheduler_remove_task(tasks[i]);
         tasks[i]->id = 0;
     }
     irq_restore(flags);
-
     sched_set_policy(sched_find_policy("heuristic"));
+
+    TEST_ASSERT_EQUAL_INT(N, created);
+    TEST_ASSERT_MESSAGE(off_cpu0 >= 1,
+        "S5 override never redirected away from overloaded CPU 0");
+    TEST_ASSERT_MESSAGE(on_cpu0 < N,
+        "all tasks landed on CPU 0 — override is inert");
 }
 
 /*
@@ -3802,35 +3811,67 @@ static void test_proactive_load_balance_runtime_config_aggressive(void)
     }
     sched_set_policy(&stub_policy);
 
+    /* CPU 0 is rarely empty here: the shell task (started by kernel_main
+     * in test builds too, IDLE priority, pinned to CPU 0) sits READY in
+     * its queue while it polls for input. Set the trigger one above
+     * whatever backlog CPU 0 already has, so the first task stays on
+     * CPU 0 and only the second (which pushes CPU 0 past the threshold)
+     * is redirected. A fixed min_target_ready=1 assumed an empty CPU 0
+     * and redirected the first task too (#1044).
+     *
+     * The backlog is read and the config staged inside the same
+     * IRQ-masked region as the placements, so CPU 0's queue can't change
+     * in between. Results are recorded and everything is cleaned up
+     * before any assertion, so a failure can't leave tasks queued, IRQs
+     * masked, or this config active for later tests. */
     uint8_t payload[64];
     uint8_t blob[128];
-    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
-                                                    payload, sizeof(payload));
-    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
-                                            payload_len, blob, sizeof(blob));
-    TEST_ASSERT_TRUE(payload_len > 0);
-    TEST_ASSERT_TRUE(blob_len > 0);
-    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
-    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
-    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+    size_t payload_len = 0;
+    size_t blob_len = 0;
+    int clear_rc = -1, stage_rc = -1, activate_rc = -1;
+    uint32_t a_cpu = UINT32_MAX, b_cpu = UINT32_MAX;
+    struct task *a = NULL;
+    struct task *b = NULL;
 
     irq_flags_t flags = irq_save();
-    struct task *a = task_create("s5_cfg_on_a", nop_entry, NULL);
-    struct task *b = task_create("s5_cfg_on_b", nop_entry, NULL);
+    uint32_t cpu0_backlog = sched_cpu_rq(0)->ready_count;
+    payload_len = build_sched_config_payload(1u, cpu0_backlog + 1u, 2u, 1u, 1u,
+                                             payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    if (payload_len > 0 && blob_len > 0) {
+        clear_rc = sched_model_clear(SCHED_MODEL_KIND_CONFIG);
+        stage_rc = sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len);
+        activate_rc = sched_model_activate(SCHED_MODEL_KIND_CONFIG);
+    }
+    if (activate_rc == 0) {
+        a = task_create("s5_cfg_on_a", nop_entry, NULL);
+        b = task_create("s5_cfg_on_b", nop_entry, NULL);
+        if (a && b) {
+            scheduler_add_task(a);
+            scheduler_add_task(b);
+            a_cpu = a->assigned_cpu;
+            b_cpu = b->assigned_cpu;
+            scheduler_remove_task(a);
+            scheduler_remove_task(b);
+        }
+        if (a) a->id = 0;
+        if (b) b->id = 0;
+    }
+    irq_restore(flags);
+    int final_clear_rc = sched_model_clear(SCHED_MODEL_KIND_CONFIG);
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, clear_rc);
+    TEST_ASSERT_EQUAL_INT(0, stage_rc);
+    TEST_ASSERT_EQUAL_INT(0, activate_rc);
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_NOT_NULL(b);
-    scheduler_add_task(a);
-    scheduler_add_task(b);
-    TEST_ASSERT_EQUAL_UINT32(0, a->assigned_cpu);
-    TEST_ASSERT_NOT_EQUAL(0u, b->assigned_cpu);
-    scheduler_remove_task(a);
-    scheduler_remove_task(b);
-    a->id = 0;
-    b->id = 0;
-    irq_restore(flags);
-
-    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
-    sched_set_policy(sched_find_policy("heuristic"));
+    TEST_ASSERT_EQUAL_UINT32(0, a_cpu);
+    TEST_ASSERT_NOT_EQUAL(0u, b_cpu);
+    TEST_ASSERT_EQUAL_INT(0, final_clear_rc);
 }
 
 static void test_sched_runtime_config_activation_sets_active_blob(void)

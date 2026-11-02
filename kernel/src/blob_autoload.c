@@ -880,41 +880,47 @@ static int blob_autoload_parse_entries(struct blob_autoload_entry *entries,
                     while (*path == ' ' || *path == '\t') path++;
                     path = trim_ascii(path);
                     if (*path != '\0') {
-                        for (size_t i = 0; i < count; i++) {
-                            uint32_t parsed_size = 0;
-                            uint32_t parsed_checksum = 0;
-                            int malformed_metadata = 0;
-                            char *path_end = path + strlen(path);
-                            char *size_text = NULL;
-                            char *checksum_text = NULL;
+                        /* Split "<path> <size> <checksum>" once per line
+                         * (#1044). This used to run inside the entry loop
+                         * below, and it NUL-terminates the line in place,
+                         * so only the first table entry saw the metadata:
+                         * every later entry (all the sched ones) found a
+                         * bare path and was recorded with size 0. */
+                        uint32_t parsed_size = 0;
+                        uint32_t parsed_checksum = 0;
+                        int malformed_metadata = 0;
+                        char *path_end = path + strlen(path);
+                        char *size_text = NULL;
+                        char *checksum_text = NULL;
 
-                            while (path_end > path &&
-                                   path_end[-1] != ' ' &&
-                                   path_end[-1] != '\t') {
-                                path_end--;
+                        while (path_end > path &&
+                               path_end[-1] != ' ' &&
+                               path_end[-1] != '\t') {
+                            path_end--;
+                        }
+                        if (path_end > path) {
+                            char *size_sep = path_end - 1;
+                            while (size_sep > path &&
+                                   size_sep[-1] != ' ' &&
+                                   size_sep[-1] != '\t') {
+                                size_sep--;
                             }
-                            if (path_end > path) {
-                                char *size_sep = path_end - 1;
-                                while (size_sep > path &&
-                                       size_sep[-1] != ' ' &&
-                                       size_sep[-1] != '\t') {
-                                    size_sep--;
-                                }
-                                if (size_sep <= path) {
+                            if (size_sep <= path) {
+                                malformed_metadata = 1;
+                            } else {
+                                checksum_text = path_end;
+                                size_text = size_sep;
+                                checksum_text[-1] = '\0';
+                                size_text[-1] = '\0';
+                                if (*size_text == '\0' ||
+                                    *checksum_text == '\0' ||
+                                    blob_autoload_parse_u32(size_text, 10, &parsed_size) != 0 ||
+                                    blob_autoload_parse_u32(checksum_text, 16, &parsed_checksum) != 0) {
                                     malformed_metadata = 1;
-                                } else {
-                                    checksum_text = path_end;
-                                    size_text = size_sep;
-                                    checksum_text[-1] = '\0';
-                                    size_text[-1] = '\0';
-                                    if (*size_text == '\0' ||
-                                        *checksum_text == '\0' ||
-                                        blob_autoload_parse_u32(size_text, 10, &parsed_size) != 0 ||
-                                        blob_autoload_parse_u32(checksum_text, 16, &parsed_checksum) != 0) {
-                                        malformed_metadata = 1;
-                                    }
                                 }
                             }
+                        }
+                        for (size_t i = 0; i < count; i++) {
                             if (strcmp(entries[i].domain, domain) == 0 &&
                                 strcmp(entries[i].kind, kind) == 0) {
                                 if (path_end == path) {
