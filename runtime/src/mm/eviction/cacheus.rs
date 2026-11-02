@@ -40,7 +40,7 @@ use super::lfu::LfuPolicy;
 use super::slm_heuristic::SlmHeuristicPolicy;
 use super::mlp::MlpPolicy;
 use super::store::active_blob;
-use super::policy::{BlockMeta, EvictionPolicy, TrajectoryEntry, MAX_EXPERTS};
+use super::policy::{BlockFeatures, BlockMeta, EvictionPolicy, TrajectoryEntry, MAX_EXPERTS};
 use super::runtime_cacheus::{ExpertPool, RuntimeCacheusConfig};
 use super::xgboost::XGBoostPolicy;
 
@@ -135,7 +135,7 @@ impl CacheusSelector {
     pub fn ml_only() -> Self {
         let experts: Vec<Box<dyn EvictionPolicy + Send>> = alloc::vec![
             Box::new(XGBoostPolicy::new()),
-            Box::new(MlpPolicy::cpu_only()),
+            Box::new(MlpPolicy::ensemble_expert()),
         ];
         Self::new_with_defaults(
             experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::MlOnly)
@@ -150,7 +150,7 @@ impl CacheusSelector {
             Box::new(LfuPolicy::new()),
             Box::new(SlmHeuristicPolicy::new()),
             Box::new(XGBoostPolicy::new()),
-            Box::new(MlpPolicy::cpu_only()),
+            Box::new(MlpPolicy::ensemble_expert()),
         ];
         Self::new_with_defaults(
             experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::All5)
@@ -221,14 +221,14 @@ impl CacheusSelector {
         let experts: Vec<Box<dyn EvictionPolicy + Send>> = match cfg.expert_pool {
             ExpertPool::MlOnly => alloc::vec![
                 Box::new(XGBoostPolicy::new()),
-                Box::new(MlpPolicy::cpu_only()),
+                Box::new(MlpPolicy::ensemble_expert()),
             ],
             ExpertPool::All5 => alloc::vec![
                 Box::new(LruPolicy::new()),
                 Box::new(LfuPolicy::new()),
                 Box::new(SlmHeuristicPolicy::new()),
                 Box::new(XGBoostPolicy::new()),
-                Box::new(MlpPolicy::cpu_only()),
+                Box::new(MlpPolicy::ensemble_expert()),
             ],
         };
         let n = experts.len();
@@ -264,8 +264,14 @@ impl CacheusSelector {
     }
 }
 
-impl EvictionPolicy for CacheusSelector {
-    fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+impl CacheusSelector {
+    /// One ensemble decision. `gpu_scores`, when `Some`, came from the
+    /// registry's batched dispatch of the features that the first
+    /// GPU-capable expert supplied in `gpu_batch_features` (#965); that
+    /// expert scores from them (falling back to its CPU path if they
+    /// don't fit), and every other expert scores on the CPU. With
+    /// `None` everything is CPU, exactly as before.
+    fn decide(&mut self, candidates: &[BlockMeta], gpu_scores: Option<&[f32]>) -> usize {
         self.ensure_runtime_config();
         debug_assert!(
             !candidates.is_empty(),
@@ -275,9 +281,14 @@ impl EvictionPolicy for CacheusSelector {
         let n = candidates.len();
         let mut combined = alloc::vec![0.0_f32; n];
         let mut expert_choices = Vec::with_capacity(self.experts.len());
+        let mut gpu_pending = gpu_scores;
 
         for (i, expert) in self.experts.iter_mut().enumerate() {
-            let scores = expert.score(candidates);
+            let scores = if gpu_pending.is_some() && expert.provides_gpu_expert_scores() {
+                expert.score_with_gpu(candidates, gpu_pending.take())
+            } else {
+                expert.score(candidates)
+            };
             let mut best_idx = 0;
             let mut best_score = f32::MIN;
             for (j, &s) in scores.iter().enumerate() {
@@ -290,9 +301,12 @@ impl EvictionPolicy for CacheusSelector {
             expert_choices.push(best_idx);
         }
 
+        // Seeded from f32::MIN over every index (as MlpPolicy's argmax),
+        // so a NaN can never win. Seeding from combined[0] let a NaN at
+        // index 0 beat everything, since no comparison with NaN is true.
         let mut victim = 0;
-        let mut max_combined = combined[0];
-        for (j, &s) in combined.iter().enumerate().skip(1) {
+        let mut max_combined = f32::MIN;
+        for (j, &s) in combined.iter().enumerate() {
             if s > max_combined {
                 max_combined = s;
                 victim = j;
@@ -310,6 +324,54 @@ impl EvictionPolicy for CacheusSelector {
         });
 
         victim
+    }
+}
+
+impl EvictionPolicy for CacheusSelector {
+    /// Direct (non-registry) entry point, like `MlpPolicy::select_victim`:
+    /// runs the three phases inline, dispatching the MLP expert's rows
+    /// once when eligible. The registry never calls this with its lock
+    /// held; it goes through `gpu_batch_features` / `finish_gpu_select`
+    /// so the dispatch runs unlocked.
+    fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+        let gpu_scores = self
+            .gpu_batch_features(candidates)
+            .and_then(|rows| super::mlp::gpu_score_batch(&rows));
+        self.decide(candidates, gpu_scores.as_deref())
+    }
+
+    /// Phase 1 of a registry decision (#965): if the pool has a
+    /// GPU-capable expert (the MLP) and it is eligible, its feature
+    /// rows go to the registry's batched dispatch, which runs with
+    /// REGISTRY_LOCK dropped. Only that one expert is offloaded; the
+    /// others (XGBoost, and the classical ones in `all_5`) stay CPU.
+    fn gpu_batch_features(&mut self, candidates: &[BlockMeta])
+        -> Option<Vec<BlockFeatures>>
+    {
+        self.ensure_runtime_config();
+        if candidates.is_empty() {
+            return None;
+        }
+        self.experts
+            .iter_mut()
+            .find(|e| e.provides_gpu_expert_scores())
+            .and_then(|e| e.gpu_expert_features(candidates))
+    }
+
+    /// Phase 3 (#965). Never dispatches. A config rebuild between the
+    /// phases is harmless: the MLP expert re-checks that the scores
+    /// fit before using them.
+    fn finish_gpu_select(&mut self, candidates: &[BlockMeta],
+                         gpu_scores: Option<&[f32]>) -> usize
+    {
+        self.decide(candidates, gpu_scores)
+    }
+
+    /// True when the expert pool contains the MLP, so `gpu use eviction
+    /// on` under CACHEUS reports a real GPU path rather than "scaffold
+    /// only" (#965). Both shipped pools (`ml_only`, `all_5`) do.
+    fn has_gpu_backend(&self) -> bool {
+        self.experts.iter().any(|e| e.provides_gpu_expert_scores())
     }
 
     /// Per-candidate score is the weighted sum of expert scores —

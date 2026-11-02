@@ -1414,15 +1414,38 @@ static void test_eviction_gpu_both_on_attempts_gpu(void)
 #endif
 }
 
-static void test_eviction_gpu_cacheus_expert_stays_cpu(void)
+static void test_eviction_gpu_cacheus_mlp_expert_uses_gpu(void)
 {
     if (!rust_eviction_enabled()) {
         TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
     }
-    /* CACHEUS reports has_gpu_backend()=false, so its embedded MLP
-     * expert must not dispatch even with both toggles on. */
-    TEST_ASSERT_EQUAL_UINT64(0,
-        eviction_gpu_attempts_for("cacheus", true, true));
+    /* #965: CACHEUS offloads its MLP expert through the registry's
+     * batched dispatch — one attempt per select_victim with both
+     * toggles on, like the standalone mlp policy. Its other experts
+     * (XGBoost) stay on the CPU. */
+    uint64_t attempts = 0, ok = 0;
+    eviction_gpu_run("cacheus", true, true, &attempts, &ok);
+    if (!eviction_models_available()) {
+        /* Stub build: same suppression as the mlp policy. */
+        TEST_ASSERT_EQUAL_UINT64(0, attempts);
+        return;
+    }
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)GPU_MATRIX_SELECTS, attempts);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_UINT64(0, ok);
+#endif
+}
+
+static void test_eviction_gpu_cacheus_toggles_off_stay_cpu(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    /* The ensemble path honours the same gating as mlp: master off,
+     * consumer off, or both off -> no dispatch. */
+    TEST_ASSERT_EQUAL_UINT64(0, eviction_gpu_attempts_for("cacheus", false, true));
+    TEST_ASSERT_EQUAL_UINT64(0, eviction_gpu_attempts_for("cacheus", true, false));
+    TEST_ASSERT_EQUAL_UINT64(0, eviction_gpu_attempts_for("cacheus", false, false));
 }
 
 static void test_eviction_gpu_runtime_blob_stays_cpu(void)
@@ -1448,16 +1471,18 @@ static void test_eviction_gpu_runtime_blob_stays_cpu(void)
     TEST_ASSERT_EQUAL_UINT64(0, attempts);
 }
 
-static void test_eviction_gpu_backend_declared_by_mlp_only(void)
+static void test_eviction_gpu_backend_declared_by_mlp_and_cacheus(void)
 {
     if (!rust_eviction_enabled()) {
         TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
     }
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_policy_set((const uint8_t *)"mlp"));
     TEST_ASSERT_TRUE(eviction_active_policy_has_gpu_backend());
+    /* #965: CACHEUS declares a GPU backend through its MLP expert, so
+     * `gpu use eviction on` no longer reports "scaffold only" for it. */
     TEST_ASSERT_EQUAL_INT(0,
         rust_eviction_policy_set((const uint8_t *)"cacheus"));
-    TEST_ASSERT_FALSE(eviction_active_policy_has_gpu_backend());
+    TEST_ASSERT_TRUE(eviction_active_policy_has_gpu_backend());
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_policy_set((const uint8_t *)"lru"));
     TEST_ASSERT_FALSE(eviction_active_policy_has_gpu_backend());
 }
@@ -1998,11 +2023,12 @@ int test_suite_eviction(void)
     /* PR-6 (#965): eviction-MLP GPU routing toggle matrix. */
     RUN_TEST(test_eviction_gpu_stats_reset_and_null_outs);
     RUN_TEST(test_eviction_gpu_batch_rejects_bad_args_uncounted);
-    RUN_TEST(test_eviction_gpu_backend_declared_by_mlp_only);
+    RUN_TEST(test_eviction_gpu_backend_declared_by_mlp_and_cacheus);
     RUN_TEST(test_eviction_gpu_master_off_consumer_on_stays_cpu);
     RUN_TEST(test_eviction_gpu_consumer_off_stays_cpu);
     RUN_TEST(test_eviction_gpu_both_on_attempts_gpu);
-    RUN_TEST(test_eviction_gpu_cacheus_expert_stays_cpu);
+    RUN_TEST(test_eviction_gpu_cacheus_mlp_expert_uses_gpu);
+    RUN_TEST(test_eviction_gpu_cacheus_toggles_off_stay_cpu);
     RUN_TEST(test_eviction_gpu_runtime_blob_stays_cpu);
 
     /* #979: end-to-end storage-backed eviction harness contract. */

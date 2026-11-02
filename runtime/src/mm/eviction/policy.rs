@@ -124,6 +124,33 @@ pub trait EvictionPolicy {
         self.select_victim(candidates)
     }
 
+    /// Ensemble support (#965, CACHEUS): whether this policy, used as an
+    /// expert inside an ensemble, can supply feature rows for the
+    /// registry's batched GPU dispatch and score from its result via
+    /// [`Self::gpu_expert_features`] / [`Self::score_with_gpu`]. Only
+    /// the MLP says yes. Independent of [`Self::has_gpu_backend`],
+    /// which describes the policy when it is the active one.
+    fn provides_gpu_expert_scores(&self) -> bool { false }
+
+    /// Ensemble phase 1 (#965): feature rows for the batched GPU
+    /// dispatch, or `None` to score this expert on the CPU. Called by
+    /// the ensemble's own `gpu_batch_features`, so with
+    /// `REGISTRY_LOCK` held; must not dispatch.
+    fn gpu_expert_features(&mut self, _candidates: &[BlockMeta])
+        -> Option<Vec<BlockFeatures>>
+    {
+        None
+    }
+
+    /// Ensemble phase 3 (#965): this expert's per-candidate scores,
+    /// using `gpu_scores` when they are valid for the current model,
+    /// otherwise the CPU. Must not dispatch. The default ignores them.
+    fn score_with_gpu(&mut self, candidates: &[BlockMeta],
+                      _gpu_scores: Option<&[f32]>) -> Vec<f32>
+    {
+        self.score(candidates)
+    }
+
     /// Per-expert weights for ensemble policies (CACHEUS). Default
     /// impl returns `None` — atomic policies don't have experts.
     /// The shell's `eviction stats` command uses this to surface

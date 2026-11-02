@@ -574,12 +574,32 @@ and on any dispatch failure, every candidate is scored on the CPU
 silently:
 
 - `gpu use inference on` (master toggle) **and** `gpu use eviction on`.
-- The active policy is `mlp`. **CACHEUS has no GPU backend** — its
-  embedded MLP expert is constructed CPU-only (`MlpPolicy::cpu_only`)
-  and `CacheusSelector::has_gpu_backend()` stays `false`, so
-  `gpu use eviction on` under CACHEUS prints the "scaffold only"
-  warning and means it. (#965 asked for CACHEUS's MLP expert on GPU;
-  PR-6 does not do that.)
+- The active policy is `mlp` or `cacheus`. **CACHEUS offloads only its
+  MLP expert** (#965): `CacheusSelector::gpu_batch_features` hands the
+  MLP expert's feature rows to the same batched dispatch, and
+  `finish_gpu_select` scores that expert from the result while every
+  other expert (XGBoost, plus LRU / LFU / SLM-Heuristic in `all_5`)
+  scores on the CPU and the weighted vote is unchanged.
+  `CacheusSelector::has_gpu_backend()` is `true` whenever the pool
+  contains the MLP (both shipped pools do), so `gpu use eviction on`
+  under CACHEUS no longer prints "scaffold only". The embedded expert
+  (`MlpPolicy::ensemble_expert`) never dispatches on its own, so an
+  ensemble decision never runs a dispatch with `REGISTRY_LOCK` held.
+  GPU scores are used only if every one is finite and in [0, 1] (the
+  producer's sigmoid range); a NaN or out-of-range batch from a bad
+  readback is discarded and the expert scores on the CPU, so it cannot
+  pin or swamp the weighted vote. Discarded batches (also wrong-length
+  or blob-stale ones, for `mlp` too) show as `scores rejected` next to
+  the `ok` count in `eviction stats`, since the dispatch itself
+  counted them as `ok`.
+  On jetson-nano-2 (2026-11-02, `EVICTION_MODELS=ON`, all three helpers
+  preserved, the batched eviction producer), `bench eviction-e2e
+  --policy cacheus` made one GPU attempt per decision (11 323 of 11 323)
+  and 267 were GPU-served at 250 µs on average (216–292 µs, 64 rows),
+  the same cost as `mlp`; the rest hit the 50 ms rate limit. With
+  `gpu use eviction off` the same replay made 0 attempts over 10 722
+  decisions. (That run needed a current producer build: the one in
+  `/root/gpu-mnist` predates batching, #1063.)
 - `EVICTION_MODELS=ON` with no runtime MLP blob active. The producer
   bakes the compiled-in fp32 weights, so GPU routing is skipped when
   the CPU fallback would score with a different model (the 0.5 stub,
@@ -635,8 +655,8 @@ GPU-served decision after boot logs
 `[INFO] eviction GPU fastpath dispatching (kind=EVICTION_QNET, N rows)`
 once. The QEMU suite pins the toggle matrix (`test_eviction_gpu_*` in
 `kernel/tests/test_eviction.c`: master off + consumer on → CPU, both on
-→ one GPU attempt per decision, consumer off → CPU, plus the CACHEUS
-and runtime-blob guards) through the non-Jetson stub, which counts
+→ one GPU attempt per decision, consumer off → CPU, the same matrix
+for CACHEUS, and the runtime-blob guard) through the non-Jetson stub, which counts
 attempts and always falls back. The two-phase registry contract
 (scores used, dispatch unlocked, stale scores discarded on a policy
 swap) is pinned by the `two_phase_*` and `mlp_finish_*` checks in

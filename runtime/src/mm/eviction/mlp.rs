@@ -51,6 +51,24 @@ use super::features::extract_features;
 use super::generated;
 use super::{active_blob, blob_status, BlobKind, RuntimeMlpModel};
 use super::policy::{BlockFeatures, BlockMeta, EvictionPolicy};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// GPU score batches that came back but were not used (#965): wrong
+/// length, a runtime blob loaded while the dispatch was in flight, or
+/// (ensemble path) a NaN / out-of-range value. The C-side dispatch
+/// counts those as `ok`, so without this `eviction stats` would show a
+/// decision as GPU-served when it was scored on the CPU.
+static GPU_SCORES_REJECTED: AtomicU64 = AtomicU64::new(0);
+
+fn note_gpu_scores_rejected() {
+    GPU_SCORES_REJECTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count of rejected GPU score batches since boot or the last reset.
+pub fn gpu_scores_rejected() -> u64 { GPU_SCORES_REJECTED.load(Ordering::Relaxed) }
+
+/// Zero the rejected-batch counter (`eviction stats gpu-reset`).
+pub fn reset_gpu_scores_rejected() { GPU_SCORES_REJECTED.store(0, Ordering::Relaxed); }
 
 extern "C" {
     /// `int slm_gpu_run_eviction_batch(const float *features,
@@ -149,10 +167,12 @@ struct RuntimeCache {
 
 pub struct MlpPolicy {
     runtime_cache: Option<RuntimeCache>,
-    /// Whether this instance may route scores to the GPU. `true` for
-    /// the standalone `mlp` policy; `false` for the expert embedded in
-    /// CACHEUS, which reports `has_gpu_backend() == false` and so must
-    /// not dispatch behind the operator's back (see [`Self::cpu_only`]).
+    /// Whether this instance dispatches the GPU itself (inline from
+    /// `select_victim` / `score`, or through the registry's two-phase
+    /// `gpu_batch_features` / `finish_gpu_select`). `true` for the
+    /// standalone `mlp` policy; `false` for the expert embedded in
+    /// CACHEUS (see [`Self::ensemble_expert`]), which never dispatches
+    /// on its own and is scored from the ensemble's batched dispatch.
     gpu_capable: bool,
 }
 
@@ -163,12 +183,22 @@ impl Default for MlpPolicy {
 impl MlpPolicy {
     pub fn new() -> Self { Self { runtime_cache: None, gpu_capable: true } }
 
-    /// CPU-only instance for composition inside CACHEUS. CACHEUS has
-    /// no GPU backend in PR-6 (#965 diverges from its spec here): its
-    /// `has_gpu_backend()` stays false, so `gpu use eviction on` warns
-    /// "scaffold only" under CACHEUS, and this constructor keeps that
-    /// warning truthful by never attempting a GPU dispatch.
-    pub fn cpu_only() -> Self { Self { runtime_cache: None, gpu_capable: false } }
+    /// Expert instance for composition inside CACHEUS. It never
+    /// dispatches the GPU itself: `score` / `select_victim` stay on the
+    /// CPU, so an ensemble decision never runs a dispatch while
+    /// REGISTRY_LOCK is held. CACHEUS gets GPU scores for it through
+    /// the registry's batched path instead, via
+    /// `gpu_expert_features` / `score_with_gpu` (#965).
+    pub fn ensemble_expert() -> Self { Self { runtime_cache: None, gpu_capable: false } }
+
+    /// GPU eligibility for the scores, independent of who dispatches:
+    /// the operator toggles, plus the CPU fallback computing the same
+    /// model the GPU runs (see [`Self::gpu_route`]).
+    fn gpu_model_eligible(&self) -> bool {
+        generated::MODELS_AVAILABLE
+            && self.runtime_cache.is_none()
+            && eviction_gpu_eligible()
+    }
 
     fn refresh_runtime_cache(&mut self) {
         let active_checksum = blob_status(BlobKind::Mlp)
@@ -197,10 +227,7 @@ impl MlpPolicy {
     /// (`eviction model load mlp ...`). What remains is fp32 (GPU)
     /// vs int8 (CPU) quantisation of one model.
     fn gpu_route(&self) -> bool {
-        self.gpu_capable
-            && generated::MODELS_AVAILABLE
-            && self.runtime_cache.is_none()
-            && eviction_gpu_eligible()
+        self.gpu_capable && self.gpu_model_eligible()
     }
 
     /// CPU-only scoring path. Routes through the runtime blob if
@@ -280,6 +307,7 @@ impl EvictionPolicy for MlpPolicy {
             if scores.len() == candidates.len() && self.runtime_cache.is_none() {
                 return argmax(scores);
             }
+            note_gpu_scores_rejected();
         }
         let features = extract_features(candidates);
         argmax(&self.score_rows_cpu(&features))
@@ -297,4 +325,43 @@ impl EvictionPolicy for MlpPolicy {
     /// kexec; if no handoff is present, `slm_gpu_run_eviction_batch`
     /// silently returns -1 and every candidate is scored on the CPU.
     fn has_gpu_backend(&self) -> bool { self.gpu_capable }
+
+    fn provides_gpu_expert_scores(&self) -> bool { true }
+
+    /// As an ensemble expert (#965): feature rows when the GPU would
+    /// score the same model the CPU fallback runs, else `None`.
+    fn gpu_expert_features(&mut self, candidates: &[BlockMeta])
+        -> Option<Vec<BlockFeatures>>
+    {
+        self.refresh_runtime_cache();
+        if candidates.is_empty() || !self.gpu_model_eligible() {
+            return None;
+        }
+        Some(extract_features(candidates))
+    }
+
+    /// As an ensemble expert (#965): the GPU scores when there is one
+    /// per candidate, every one is a finite value in [0, 1] (the
+    /// producer's sigmoid range), and no runtime blob was loaded
+    /// meanwhile (the same staleness rule as `finish_gpu_select`);
+    /// otherwise CPU scores. The range check matters here, unlike in
+    /// the standalone policy's `argmax`: these scores feed CACHEUS's
+    /// weighted vote, where a NaN or an out-of-range value from a bad
+    /// readback would pin or swamp the decision.
+    fn score_with_gpu(&mut self, candidates: &[BlockMeta],
+                      gpu_scores: Option<&[f32]>) -> Vec<f32>
+    {
+        self.refresh_runtime_cache();
+        if let Some(scores) = gpu_scores {
+            if scores.len() == candidates.len()
+                && self.runtime_cache.is_none()
+                && scores.iter().all(|s| s.is_finite() && (0.0..=1.0).contains(s))
+            {
+                return scores.to_vec();
+            }
+            note_gpu_scores_rejected();
+        }
+        let features = extract_features(candidates);
+        self.score_rows_cpu(&features)
+    }
 }

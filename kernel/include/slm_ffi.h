@@ -349,6 +349,12 @@ extern RustPoolStats rust_workspace_pool_stats(void);
  * Returns 1 when enabled, 0 when disabled. */
 extern int rust_eviction_enabled(void);
 
+/* GPU score batches that returned but were discarded (wrong length,
+ * runtime blob loaded meanwhile, NaN / out-of-range values) and scored
+ * on the CPU instead (#965); reset by `eviction stats gpu-reset`. */
+extern uint64_t rust_eviction_gpu_scores_rejected(void);
+extern void rust_eviction_gpu_scores_rejected_reset(void);
+
 /* True (1) if any active eviction policy declares
  * `EvictionPolicy::has_gpu_backend() == true` across either pool;
  * 0 otherwise. Wrapped by `eviction_active_policy_has_gpu_backend()`

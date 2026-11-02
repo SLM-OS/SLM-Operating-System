@@ -1353,6 +1353,24 @@ pub extern "C" fn rust_eviction_enabled() -> i32 {
     if cfg!(feature = "ai_eviction") { 1 } else { 0 }
 }
 
+/// GPU score batches that returned but were discarded and scored on
+/// the CPU instead (#965). Shown next to the dispatch `ok` count in
+/// `eviction stats`. Always 0 without `ai_eviction`.
+#[no_mangle]
+pub extern "C" fn rust_eviction_gpu_scores_rejected() -> u64 {
+    #[cfg(feature = "ai_eviction")]
+    { mm::eviction::mlp::gpu_scores_rejected() }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
+/// Zero the counter above (`eviction stats gpu-reset`).
+#[no_mangle]
+pub extern "C" fn rust_eviction_gpu_scores_rejected_reset() {
+    #[cfg(feature = "ai_eviction")]
+    mm::eviction::mlp::reset_gpu_scores_rejected();
+}
+
 /// Returns 1 if any active eviction policy declares
 /// `EvictionPolicy::has_gpu_backend() == true`, 0 otherwise.
 ///
@@ -3126,6 +3144,84 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             check!(b"mlp_finish_drops_gpu_scores_after_blob_load\0",
                    mlp.finish_gpu_select(&cands, Some(&stale)) == blob_pick);
             store::clear(BlobKind::Mlp);
+        }
+
+        // ---- #965: CACHEUS offloads its MLP expert (no dispatch here).
+        {
+            let ml = eviction::CacheusSelector::ml_only();
+            let all5 = eviction::CacheusSelector::all_5();
+            check!(b"cacheus_has_gpu_backend_ml_only\0", ml.has_gpu_backend());
+            check!(b"cacheus_has_gpu_backend_all_5\0", all5.has_gpu_backend());
+
+            let mut c = eviction::CacheusSelector::ml_only();
+            // Toggles are off in the selftest, so phase 1 declines.
+            check!(b"cacheus_gpu_batch_features_none_when_toggles_off\0",
+                   c.gpu_batch_features(&cands).is_none());
+
+            // finish(None) is the CPU decision (fresh, identical selectors).
+            let cpu_pick = eviction::CacheusSelector::ml_only().select_victim(&cands);
+            check!(b"cacheus_finish_none_matches_cpu\0",
+                   eviction::CacheusSelector::ml_only().finish_gpu_select(&cands, None)
+                       == cpu_pick);
+
+            // GPU scores reach the MLP expert: a one-hot score on a
+            // candidate other than the CPU pick moves the ensemble's
+            // choice there (weights are 0.5/0.5, expert scores in [0, 1]).
+            let target = (cpu_pick + 1) % cands.len();
+            let mut gpu = [0.0f32; 3];
+            gpu[target] = 1.0;
+            // Combined = 0.5 * xgb + 0.5 * mlp, so the one-hot MLP score
+            // wins unless XGBoost puts exactly 1 on the CPU pick and 0 on
+            // the target (then it is a tie and the test can't tell).
+            let xgb = eviction::XGBoostPolicy::new().score(&cands);
+            if xgb[cpu_pick] - xgb[target] < 1.0 {
+                check!(b"cacheus_finish_uses_gpu_scores_for_mlp_expert\0",
+                       eviction::CacheusSelector::ml_only()
+                           .finish_gpu_select(&cands, Some(&gpu)) == target);
+            } else {
+                // A tie the test can't break; not a CACHEUS failure.
+                puts(b"  [SKIP] cacheus_finish_uses_gpu_scores_for_mlp_expert (xgb 1 vs 0 tie)\n\0");
+            }
+
+            // Wrong length (caller bug) -> the MLP expert scores on the
+            // CPU, so the decision matches the plain CPU one.
+            check!(b"cacheus_finish_wrong_len_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&[0.9])) == cpu_pick);
+
+            // A bad readback (NaN, or outside the sigmoid range) must not
+            // reach the vote: the MLP expert falls back to the CPU, so the
+            // decision matches the plain CPU one. A NaN at index 0 used to
+            // pin the victim to 0.
+            // The batch would move the pick to `target` if it were used
+            // (one-hot 1.0 there), so landing on the CPU pick shows the
+            // whole batch was rejected because of the NaN elsewhere.
+            let mut nan_batch = [0.0f32; 3];
+            nan_batch[target] = 1.0;
+            nan_batch[(target + 1) % 3] = f32::NAN;
+            check!(b"cacheus_finish_nan_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&nan_batch)) == cpu_pick);
+            let mut huge = [0.0f32; 3];
+            huge[(cpu_pick + 1) % 3] = 1.0e6;
+            check!(b"cacheus_finish_out_of_range_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&huge)) == cpu_pick);
+
+            // Discarded batches are counted (shown in `eviction stats`);
+            // a used batch and a CPU-only decision are not.
+            {
+                use mm::eviction::mlp::{gpu_scores_rejected, reset_gpu_scores_rejected};
+                reset_gpu_scores_rejected();
+                let mut c = eviction::CacheusSelector::ml_only();
+                let _ = c.finish_gpu_select(&cands, Some(&nan_batch));
+                let after_bad = gpu_scores_rejected();
+                let _ = c.finish_gpu_select(&cands, None);
+                let _ = c.finish_gpu_select(&cands, Some(&gpu));
+                check!(b"cacheus_rejected_gpu_scores_are_counted\0",
+                       after_bad == 1 && gpu_scores_rejected() == 1);
+                reset_gpu_scores_rejected();
+            }
         }
 
         // LRU default's score() override returns inverse-recency. With
