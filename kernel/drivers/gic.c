@@ -788,19 +788,21 @@ void gic_percpu_init(void)
  * during the last gic_exclude_cpu_from_spis(cpu) call. The matching
  * gic_include_cpu_in_spis(cpu) restores exactly those SPIs back to
  * `cpu` and clears the bits. Static BSS storage; no allocator
- * required. ~744 bytes for MAX_CPUS=6.
+ * required. 124 bytes per CPU (~744 bytes for MAX_CPUS=6); GICv2
+ * builds also keep the same-sized spi_forced_cpu0_by table below.
  *
  * Each bit position B corresponds to SPI (GIC_SPI_START + B), i.e.
  * IRQ 32 is bit 0, IRQ 33 is bit 1, etc.
  *
  * Concurrency: caller-serialized. The only in-tree callers are
- * sched_isolate_core / sched_restore_core, which run from CPU 0 with
+ * sched_isolate_core / sched_unisolate_core, which run from CPU 0 with
  * their own contract that an exclude(cpu) is always paired with an
  * include(cpu) before the next exclude(cpu). Concurrent exclude/
  * include against the same `cpu` is undefined — the bitmap will tear
- * and the IROUTER MMIO sequence will race (the latter was also true
- * before this change). If a future caller needs cross-CPU exclude/
- * include, wrap the bitmap accesses under a dedicated lock here.
+ * and the routing MMIO will race (GICD_IROUTER writes on GICv3, the
+ * GICD_ITARGETSR read-modify-write on GICv2). If a future caller needs
+ * cross-CPU exclude/include, wrap the bitmap accesses under a
+ * dedicated lock here.
  */
 static uint8_t spi_excluded_by[MAX_CPUS][GIC_SPI_BITMAP_BYTES];
 
