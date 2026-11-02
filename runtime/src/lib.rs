@@ -3128,6 +3128,46 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             store::clear(BlobKind::Mlp);
         }
 
+        // ---- #965: CACHEUS offloads its MLP expert (no dispatch here).
+        {
+            let ml = eviction::CacheusSelector::ml_only();
+            let all5 = eviction::CacheusSelector::all_5();
+            check!(b"cacheus_has_gpu_backend_ml_only\0", ml.has_gpu_backend());
+            check!(b"cacheus_has_gpu_backend_all_5\0", all5.has_gpu_backend());
+
+            let mut c = eviction::CacheusSelector::ml_only();
+            // Toggles are off in the selftest, so phase 1 declines.
+            check!(b"cacheus_gpu_batch_features_none_when_toggles_off\0",
+                   c.gpu_batch_features(&cands).is_none());
+
+            // finish(None) is the CPU decision (fresh, identical selectors).
+            let cpu_pick = eviction::CacheusSelector::ml_only().select_victim(&cands);
+            check!(b"cacheus_finish_none_matches_cpu\0",
+                   eviction::CacheusSelector::ml_only().finish_gpu_select(&cands, None)
+                       == cpu_pick);
+
+            // GPU scores reach the MLP expert: a one-hot score on a
+            // candidate other than the CPU pick moves the ensemble's
+            // choice there (weights are 0.5/0.5, expert scores in [0, 1]).
+            let target = (cpu_pick + 1) % cands.len();
+            let mut gpu = [0.0f32; 3];
+            gpu[target] = 1.0;
+            // Combined = 0.5 * xgb + 0.5 * mlp, so the one-hot MLP score
+            // wins unless XGBoost puts exactly 1 on the CPU pick and 0 on
+            // the target (then it is a tie and the test can't tell).
+            let xgb = eviction::XGBoostPolicy::new().score(&cands);
+            let decisive = xgb[cpu_pick] - xgb[target] < 1.0;
+            check!(b"cacheus_finish_uses_gpu_scores_for_mlp_expert\0",
+                   decisive && eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&gpu)) == target);
+
+            // Wrong length (caller bug) -> the MLP expert scores on the
+            // CPU, so the decision matches the plain CPU one.
+            check!(b"cacheus_finish_wrong_len_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&[0.9])) == cpu_pick);
+        }
+
         // LRU default's score() override returns inverse-recency. With
         // all candidates tied on last_access_time, scores collapse to 0.
         check!(b"lru_default_score_length_matches\0", {

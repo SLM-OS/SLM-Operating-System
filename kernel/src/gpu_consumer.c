@@ -188,16 +188,19 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
         } else if (out_reason) {
-            /* PR-6 of gpu-policy-models.md: when MlpPolicy is active,
+            /* PR-6 of gpu-policy-models.md: when MlpPolicy (or CACHEUS,
+             * through its MLP expert, #965) is active,
              * each `select_victim` tries one batched
              * `slm_gpu_run_eviction_batch` dispatch for all candidates
              * (#1020; at most one success per 50 ms window), else
-             * scores them all on CPU. No GPU dispatch latency has
-             * been measured for eviction on hardware yet (#965), so
-             * the note states routing, not a number. Routing also
+             * scores them all on CPU. Covers both `mlp` and CACHEUS,
+             * which offloads its MLP expert the same way (#965). The
+             * note states routing, not a number (0.25 ms per GPU-served
+             * decision at 64 rows on jetson-nano-2; docs/eviction.md). Routing also
              * needs the master `gpu use inference` toggle; say so,
              * since forgetting it silently keeps everything on CPU. */
-            *out_reason = "perf note — eviction mlp tries one GPU batch "
+            *out_reason = "perf note — the eviction MLP (standalone or as "
+                          "CACHEUS's expert) tries one GPU batch "
                           "per decision (needs `gpu use inference on`; "
                           "50 ms rate limit; CPU fallback) — see "
                           "`eviction stats`";
