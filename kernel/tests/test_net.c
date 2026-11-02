@@ -952,6 +952,7 @@ extern void net_test_force_dhcp_start_fail(void);
 #include "../include/virtio_net.h"  /* virtio_net_get_irq_count (ARM64 MMIO) */
 #include "../include/virtio.h"      /* VIRTIO_DEVICE_IRQ */
 #include "../include/gic.h"         /* gic_lookup_handler */
+#include "../include/spinlock.h"    /* irq_save / irq_restore */
 #endif
 
 #if defined(PLATFORM_X86_64)
@@ -1778,9 +1779,12 @@ static void test_net_irq_handler_registered(void)
  * The handler reads the ISR, acks it, and drains the used ring on
  * USED_BUFFER. irq_count incrementing confirms the handler itself is
  * reachable from the dispatch path and does not early-exit on a freshly
- * initialized driver. With end-to-end GIC → CPU delivery blocked in
- * task context on QEMU (tasks run DAIF.I=1), this is the closest we get
- * to exercising the production path from userland tests.
+ * initialized driver.
+ *
+ * Since #1051 the virtio-net SPI is really delivered to CPU 0, so the
+ * device's own IRQs also run this handler (and bump irq_count) while
+ * the test sends. The direct call runs with IRQs masked so no real IRQ
+ * lands between the two reads, keeping the +1 check exact.
  */
 static void test_net_irq_handler_drains_tx(void)
 {
@@ -1793,21 +1797,22 @@ static void test_net_irq_handler_drains_tx(void)
     uint8_t frame[64];
     test_net_build_loopback_frame(frame);
 
-    uint32_t before = virtio_net_get_irq_count();
-
     /* Submit a few frames so the device has something to complete. */
     for (int i = 0; i < 4; i++) {
         (void)drv->send(frame, sizeof(frame));
     }
 
-    /* Invoke the handler directly. No GIC unmasking — this tests the
-     * handler body, not the dispatch/delivery plumbing. */
+    /* Invoke the handler directly, as the IRQ vector would (IRQs
+     * masked). This tests the handler body, not the dispatch path. */
+    irq_flags_t flags = irq_save();
+    uint32_t before = virtio_net_get_irq_count();
     virtio_net_irq_handler();
-
     uint32_t after = virtio_net_get_irq_count();
-    TEST_ASSERT_MESSAGE(after == before + 1,
-        "virtio_net_irq_handler did not increment irq_count — "
-        "handler early-exited or counter wiring broken");
+    irq_restore(flags);
+
+    /* Exactly one increment: the handler ran once and did not
+     * early-exit (prints the values on failure). */
+    TEST_ASSERT_EQUAL_UINT32(before + 1, after);
 }
 #endif /* PLATFORM_QEMU_VIRT */
 

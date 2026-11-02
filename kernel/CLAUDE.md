@@ -329,6 +329,22 @@ EL3, SCR_EL3.FIQ=1 routes FIQ to EL3).
   JETSON_HW_TICK=OFF` for stock-BL31 / production-fused boards.
   Hardware verification: `boot_test --count 10` 10/10 on
   jetson-nano-2 (2026-05-09).
+- **QEMU virt (GICv2 without Security Extensions, #1051):** there is
+  one CPU-interface view, and `gic_cpu_init` sets only `GICC_CTLR`
+  bit 0 (EnableGrp0), so interrupts must stay in **Group 0** (with
+  FIQEn=0 they signal as IRQ). `gic_dist_init` therefore writes
+  Group 1 to `GICD_IGROUPR` only when `GICD_TYPER.SecurityExtn` is
+  set. `GICD_IGROUPR0` (SGIs + PPIs) is banked per CPU and
+  `gic_dist_init` runs only on CPU 0, so the old unconditional
+  Group 1 write left CPU 0's timer PPI and every SPI undeliverable
+  while CPUs 1-3 kept the reset Group 0: CPU 0 never took a timer
+  IRQ under QEMU until this was fixed. `test_hw_tick_refreshes_last_tick`
+  checks the test's own CPU 0 as well as CPU 1. With SPIs now really
+  delivered on QEMU, the GICv2 `gic_include_cpu_in_spis()` (used by
+  `sched_unisolate_core`) was made a true save/restore pair like the
+  GICv3 one: it used to set the CPU's ITARGETSR bit on *every* SPI, so
+  an isolate/unisolate cycle spread all SPIs onto that CPU (also on
+  Pi 5). Pinned by `test_gic_include_does_not_add_unrelated_spis`.
 
 **Cooperative fallback (`COOP_PREEMPT=ON`; Jetson under
 `JETSON_HW_TICK=OFF`, opt-in on Pi 5).** `schedule()` checks

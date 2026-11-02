@@ -42,6 +42,10 @@
 #define GICD_IROUTER(n)     (*(volatile uint64_t *)(GICD_BASE + 0x6000 + 8 * (n)))
 #endif
 
+/* GICD_TYPER.SecurityExtn (GICv2): the GIC implements the Security
+ * Extensions (Group 0 = FIQ / Group 1 = IRQ for non-secure software). */
+#define GICD_TYPER_SECURITY_EXTN  (1u << 10)
+
 /* GICD_CTLR bits - differ between v2 and v3 */
 #if GIC_VERSION == 2
 #define GICD_CTLR_ENABLE    (1 << 0)
@@ -273,13 +277,26 @@ static void __attribute__((unused)) gic_dist_init(void)
     }
 
     /*
-     * Set all interrupts to Group 1 (non-secure).
-     * On Pi 5 (and other platforms with security extensions), Group 0
-     * interrupts signal as FIQ and Group 1 as IRQ. Since we only
-     * handle IRQ in our exception vectors, all interrupts must be Group 1.
+     * Interrupt groups.
+     *
+     * With the Security Extensions (GICD_TYPER.SecurityExtn), Group 0
+     * signals as FIQ and Group 1 as IRQ for a non-secure CPU interface.
+     * Since we only handle IRQ in our exception vectors, all interrupts
+     * must be Group 1.
+     *
+     * Without them (QEMU virt's default GICv2) there is one CPU-interface
+     * view: GICC_CTLR bit 0 enables Group 0 and gic_cpu_init sets only
+     * that bit, and with FIQEn=0 Group 0 signals as IRQ. Group 1 would
+     * need EnableGrp1 + AckCtl as well. GICD_IGROUPR0 (SGIs + PPIs) is
+     * banked per CPU and this init runs only on CPU 0, so writing Group 1
+     * here used to move CPU 0's timer PPI (and every SPI) into a group
+     * its CPU interface never forwards, while CPUs 1-3 kept the reset
+     * Group 0: CPU 0 never took a timer IRQ (#1051). Keep everything in
+     * Group 0 on such a GIC so every CPU matches.
      */
+    uint32_t group_val = (typer & GICD_TYPER_SECURITY_EXTN) ? 0xFFFFFFFFu : 0u;
     for (uint32_t i = 0; i < num_irqs / 32; i++) {
-        *(volatile uint32_t *)(GICD_BASE + 0x080 + 4 * i) = 0xFFFFFFFF;
+        *(volatile uint32_t *)(GICD_BASE + 0x080 + 4 * i) = group_val;
     }
 
     /* Clear any active interrupts */
@@ -759,6 +776,66 @@ void gic_percpu_init(void)
     gic_cpu_init();
 }
 
+/* Maximum SPI count the GIC architecture allows is IRQ 1019 (32..1019).
+ * GICv4-style ESPIs are not used; sticking to the classic range
+ * keeps the per-CPU save table small (124 bytes / CPU). Shared by the
+ * GICv2 and GICv3 exclude/include implementations below. */
+#define GIC_MAX_SPIS            988  /* IRQs 32..1019 inclusive */
+#define GIC_SPI_BITMAP_BYTES    ((GIC_MAX_SPIS + 7) / 8)
+
+/*
+ * Per-CPU bitmap recording which SPIs we re-routed AWAY from `cpu`
+ * during the last gic_exclude_cpu_from_spis(cpu) call. The matching
+ * gic_include_cpu_in_spis(cpu) restores exactly those SPIs back to
+ * `cpu` and clears the bits. Static BSS storage; no allocator
+ * required. ~744 bytes for MAX_CPUS=6.
+ *
+ * Each bit position B corresponds to SPI (GIC_SPI_START + B), i.e.
+ * IRQ 32 is bit 0, IRQ 33 is bit 1, etc.
+ *
+ * Concurrency: caller-serialized. The only in-tree callers are
+ * sched_isolate_core / sched_restore_core, which run from CPU 0 with
+ * their own contract that an exclude(cpu) is always paired with an
+ * include(cpu) before the next exclude(cpu). Concurrent exclude/
+ * include against the same `cpu` is undefined — the bitmap will tear
+ * and the IROUTER MMIO sequence will race (the latter was also true
+ * before this change). If a future caller needs cross-CPU exclude/
+ * include, wrap the bitmap accesses under a dedicated lock here.
+ */
+static uint8_t spi_excluded_by[MAX_CPUS][GIC_SPI_BITMAP_BYTES];
+
+#if GIC_VERSION == 2
+/* GICv2 only: SPIs whose ITARGETSR mask would have become empty when
+ * `cpu` was excluded, so exclude routed them to CPU 0 instead. The
+ * matching include removes CPU 0 again for exactly these SPIs. Same
+ * indexing and concurrency contract as spi_excluded_by. */
+static uint8_t spi_forced_cpu0_by[MAX_CPUS][GIC_SPI_BITMAP_BYTES];
+#endif
+
+static inline bool spi_excluded_test(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return false;
+    }
+    return (spi_excluded_by[cpu][spi_off / 8] >> (spi_off % 8)) & 1u;
+}
+
+static inline void spi_excluded_set(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return;
+    }
+    spi_excluded_by[cpu][spi_off / 8] |= (uint8_t)(1u << (spi_off % 8));
+}
+
+static inline void spi_excluded_clear(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return;
+    }
+    spi_excluded_by[cpu][spi_off / 8] &= (uint8_t)~(1u << (spi_off % 8));
+}
+
 #if GIC_VERSION == 2
 /*
  * Set interrupt target CPU(s) for an SPI (GICv2).
@@ -804,28 +881,46 @@ uint32_t gic_get_affinity(uint32_t irq)
 /*
  * Route all SPIs away from a CPU (GICv2).
  *
+ * Clears `cpu`'s bit in every SPI's GICD_ITARGETSR byte that has it and
+ * records the SPI in `spi_excluded_by[cpu]`. If clearing the bit would
+ * leave an SPI with no target CPU, it is routed to CPU 0 instead and
+ * also recorded in `spi_forced_cpu0_by[cpu]`. The paired
+ * `gic_include_cpu_in_spis(cpu)` undoes exactly those changes, so an
+ * isolate/unisolate cycle leaves the routing as it found it.
+ *
  * Timer IRQs are PPIs and are unaffected - each CPU still gets its own
- * timer interrupt for scheduler preemption.
+ * timer interrupt for scheduler preemption. Out-of-range `cpu` and
+ * CPU 0 are no-ops (CPU 0 is the fallback target).
  */
 void gic_exclude_cpu_from_spis(uint32_t cpu)
 {
-    if (cpu >= 8) {
-        return;  /* GICv2 supports max 8 CPUs */
+    if (cpu == 0 || cpu >= cpu_count || cpu >= MAX_CPUS || cpu >= 8) {
+        return;  /* GICv2 ITARGETSR has 8 CPU bits */
     }
 
-    uint8_t cpu_bit = (1 << cpu);
-
-    /* Get number of interrupt lines from TYPER */
+    uint32_t cpu_bit = 1u << cpu;
     uint32_t typer = GICD_TYPER;
     uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+    if (num_irqs > GIC_SPI_START + GIC_MAX_SPIS) {
+        num_irqs = GIC_SPI_START + GIC_MAX_SPIS;
+    }
 
-    /* Update all SPI target registers (starting at IRQ 32) */
     for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
         uint32_t reg = irq / 4;
         uint32_t offset = (irq % 4) * 8;
-
         uint32_t val = GICD_ITARGETSR(reg);
-        val &= ~(cpu_bit << offset);  /* Clear this CPU's bit */
+        uint32_t targets = (val >> offset) & 0xFFu;
+        if (!(targets & cpu_bit)) {
+            continue;
+        }
+        uint32_t spi_off = irq - GIC_SPI_START;
+        targets &= ~cpu_bit;
+        spi_excluded_set(cpu, spi_off);
+        if (targets == 0) {
+            targets = 1u;  /* CPU 0 */
+            spi_forced_cpu0_by[cpu][spi_off / 8] |= (uint8_t)(1u << (spi_off % 8));
+        }
+        val = (val & ~(0xFFu << offset)) | (targets << offset);
         GICD_ITARGETSR(reg) = val;
     }
 
@@ -833,28 +928,46 @@ void gic_exclude_cpu_from_spis(uint32_t cpu)
 }
 
 /*
- * Restore SPI routing to include a CPU (GICv2).
+ * Restore SPI routing for a CPU (GICv2).
+ *
+ * Re-adds `cpu` only to the SPIs the matching exclude removed it from,
+ * and drops the CPU 0 fallback it added. Before this, include set
+ * `cpu`'s bit on every SPI, so an isolate/unisolate cycle spread all
+ * SPIs (UART, PCIe, virtio-net, ...) onto that CPU; the QEMU virtio IRQ
+ * test saw its handler run on CPU 1 once SPIs were actually delivered
+ * (#1051). Bits are cleared as they're processed.
  */
 void gic_include_cpu_in_spis(uint32_t cpu)
 {
-    if (cpu >= 8) {
+    if (cpu == 0 || cpu >= cpu_count || cpu >= MAX_CPUS || cpu >= 8) {
         return;
     }
 
-    uint8_t cpu_bit = (1 << cpu);
-
-    /* Get number of interrupt lines from TYPER */
+    uint32_t cpu_bit = 1u << cpu;
     uint32_t typer = GICD_TYPER;
     uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+    if (num_irqs > GIC_SPI_START + GIC_MAX_SPIS) {
+        num_irqs = GIC_SPI_START + GIC_MAX_SPIS;
+    }
 
-    /* Update all SPI target registers (starting at IRQ 32) */
     for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
+        uint32_t spi_off = irq - GIC_SPI_START;
+        if (!spi_excluded_test(cpu, spi_off)) {
+            continue;
+        }
         uint32_t reg = irq / 4;
         uint32_t offset = (irq % 4) * 8;
-
         uint32_t val = GICD_ITARGETSR(reg);
-        val |= (cpu_bit << offset);  /* Set this CPU's bit */
+        uint32_t targets = ((val >> offset) & 0xFFu) | cpu_bit;
+        uint8_t *forced = &spi_forced_cpu0_by[cpu][spi_off / 8];
+        uint8_t fbit = (uint8_t)(1u << (spi_off % 8));
+        if (*forced & fbit) {
+            targets &= ~1u;  /* drop the CPU 0 fallback exclude added */
+            *forced &= (uint8_t)~fbit;
+        }
+        val = (val & ~(0xFFu << offset)) | (targets << offset);
         GICD_ITARGETSR(reg) = val;
+        spi_excluded_clear(cpu, spi_off);
     }
 
     DEBUG_PRINT("GIC: Included CPU %u in SPI routing", cpu);
@@ -897,56 +1010,6 @@ void gic_include_cpu_in_spis(uint32_t cpu)
  * MPIDR_AFFINITY_MASK for AArch64. */
 #define IROUTER_AFF_MASK        0xFF00FFFFFFULL
 
-/* Maximum SPI count the GICv3 spec allows is IRQ 1019 (32..1019).
- * GICv4-style ESPIs are not used; sticking to the classic range
- * keeps the per-CPU save table small (124 bytes / CPU). */
-#define GIC_MAX_SPIS            988  /* IRQs 32..1019 inclusive */
-#define GIC_SPI_BITMAP_BYTES    ((GIC_MAX_SPIS + 7) / 8)
-
-/*
- * Per-CPU bitmap recording which SPIs we re-routed AWAY from `cpu`
- * during the last gic_exclude_cpu_from_spis(cpu) call. The matching
- * gic_include_cpu_in_spis(cpu) restores exactly those SPIs back to
- * `cpu` and clears the bits. Static BSS storage; no allocator
- * required. ~744 bytes for MAX_CPUS=6.
- *
- * Each bit position B corresponds to SPI (GIC_SPI_START + B), i.e.
- * IRQ 32 is bit 0, IRQ 33 is bit 1, etc.
- *
- * Concurrency: caller-serialized. The only in-tree callers are
- * sched_isolate_core / sched_restore_core, which run from CPU 0 with
- * their own contract that an exclude(cpu) is always paired with an
- * include(cpu) before the next exclude(cpu). Concurrent exclude/
- * include against the same `cpu` is undefined — the bitmap will tear
- * and the IROUTER MMIO sequence will race (the latter was also true
- * before this change). If a future caller needs cross-CPU exclude/
- * include, wrap the bitmap accesses under a dedicated lock here.
- */
-static uint8_t spi_excluded_by[MAX_CPUS][GIC_SPI_BITMAP_BYTES];
-
-static inline bool spi_excluded_test(uint32_t cpu, uint32_t spi_off)
-{
-    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
-        return false;
-    }
-    return (spi_excluded_by[cpu][spi_off / 8] >> (spi_off % 8)) & 1u;
-}
-
-static inline void spi_excluded_set(uint32_t cpu, uint32_t spi_off)
-{
-    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
-        return;
-    }
-    spi_excluded_by[cpu][spi_off / 8] |= (uint8_t)(1u << (spi_off % 8));
-}
-
-static inline void spi_excluded_clear(uint32_t cpu, uint32_t spi_off)
-{
-    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
-        return;
-    }
-    spi_excluded_by[cpu][spi_off / 8] &= (uint8_t)~(1u << (spi_off % 8));
-}
 
 /*
  * Convert a logical CPU id into a GICD_IROUTER value targeting that CPU.

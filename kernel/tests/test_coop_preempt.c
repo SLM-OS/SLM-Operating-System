@@ -239,11 +239,13 @@ static void test_slm_preempt_point_drives_schedule(void)
  *
  *   1. sched_note_hw_tick() stores the current CNTPCT for this CPU,
  *      and out-of-range CPUs read back as 0.
- *   2. Wiring: after ~5 periods, CPU 1's timestamp is within two
- *      periods of now. QEMU CPU 1 takes real timer IRQs (idle WFI), so
- *      if timer_handler stops calling the hook the timestamp is stale
- *      or 0. CPU 1 rather than the test's own CPU because QEMU CPU 0
- *      takes no hardware timer ticks during the test run (#1051).
+ *   2. Wiring: after ~5 periods, both the test's own CPU (CPU 0, where
+ *      the harness is pinned) and CPU 1 have a timestamp within two
+ *      periods of now, so timer_handler is calling the hook on both.
+ *      The own-CPU check also pins #1051: on QEMU's GICv2 (no Security
+ *      Extensions) gic_dist_init used to put CPU 0's banked timer PPI
+ *      in Group 1, which its CPU interface never forwards, so CPU 0
+ *      took no hardware timer IRQs at all while CPUs 1-3 did.
  */
 static void test_hw_tick_refreshes_last_tick(void)
 {
@@ -270,8 +272,13 @@ static void test_hw_tick_refreshes_last_tick(void)
         yield();
     }
 
+    uint64_t own = sched_last_tick_cntpct(cpu);
     uint64_t last = sched_last_tick_cntpct(1);
     now = timer_get_count();
+    TEST_ASSERT_MESSAGE(own > start,
+        "this CPU took no hardware timer IRQ in 5 periods (#1051: GIC group)");
+    TEST_ASSERT_MESSAGE(now - own < 2 * period,
+        "this CPU's tick timestamp is stale after 5 periods");
     TEST_ASSERT_MESSAGE(last > start,
         "CPU 1 timer ISR did not refresh the tick timestamp (sched_note_hw_tick)");
     TEST_ASSERT_MESSAGE(now - last < 2 * period,
