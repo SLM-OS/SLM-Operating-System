@@ -345,11 +345,19 @@ int net_http_get_file(const char *url, const char *dest_path,
     while (!dl.done) {
         net_poll();
         if ((sys_now() - start_ms) > NET_HTTP_OVERALL_TIMEOUT_MS) {
-            if (httpc_conn != NULL) {
-                sys_prot_t lev = lwip_core_lock();
+            /* Re-check dl.done under the lock: net_pump can finish
+             * the transfer between our loop test and here, and httpc
+             * frees its state in the result callback, so aborting
+             * then would touch freed memory (#1065). */
+            sys_prot_t lev = lwip_core_lock();
+            bool finished = dl.done;
+            if (httpc_conn != NULL && !finished) {
                 httpc_abort_connection(httpc_conn);
-                lwip_core_unlock(lev);
-                httpc_conn = NULL;
+            }
+            lwip_core_unlock(lev);
+            httpc_conn = NULL;
+            if (finished) {
+                break;   /* completed in the race window: normal exit */
             }
             dl.result.httpc_result = HTTPC_RESULT_ERR_TIMEOUT;
             dl.result.lwip_err = (int)ERR_TIMEOUT;

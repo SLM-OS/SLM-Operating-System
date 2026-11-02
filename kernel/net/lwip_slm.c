@@ -1332,13 +1332,15 @@ int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) 
         return NET_E_NOT_INIT;
     }
 
+    /* pbuf_alloc / raw_sendto and the ping_state handoff to the
+     * net_pump-side ping_recv callback — core lock. The pending check
+     * is inside it too, so the check and the set below are atomic. */
+    sys_prot_t lev = lwip_core_lock();
+
     if (ping_state.pending) {
+        lwip_core_unlock(lev);
         return NET_E_BUSY;  /* Previous ping still pending */
     }
-
-    /* pbuf_alloc / raw_sendto and the ping_state handoff to the
-     * net_pump-side ping_recv callback — core lock. */
-    sys_prot_t lev = lwip_core_lock();
 
     /* Create ICMP echo request */
     struct pbuf *p = pbuf_alloc(PBUF_IP, 8 + 32, PBUF_RAM);
