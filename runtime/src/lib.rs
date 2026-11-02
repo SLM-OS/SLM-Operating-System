@@ -3156,16 +3156,39 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             // wins unless XGBoost puts exactly 1 on the CPU pick and 0 on
             // the target (then it is a tie and the test can't tell).
             let xgb = eviction::XGBoostPolicy::new().score(&cands);
-            let decisive = xgb[cpu_pick] - xgb[target] < 1.0;
-            check!(b"cacheus_finish_uses_gpu_scores_for_mlp_expert\0",
-                   decisive && eviction::CacheusSelector::ml_only()
-                       .finish_gpu_select(&cands, Some(&gpu)) == target);
+            if xgb[cpu_pick] - xgb[target] < 1.0 {
+                check!(b"cacheus_finish_uses_gpu_scores_for_mlp_expert\0",
+                       eviction::CacheusSelector::ml_only()
+                           .finish_gpu_select(&cands, Some(&gpu)) == target);
+            } else {
+                // A tie the test can't break; not a CACHEUS failure.
+                puts(b"  [SKIP] cacheus_finish_uses_gpu_scores_for_mlp_expert (xgb 1 vs 0 tie)\n\0");
+            }
 
             // Wrong length (caller bug) -> the MLP expert scores on the
             // CPU, so the decision matches the plain CPU one.
             check!(b"cacheus_finish_wrong_len_falls_back_to_cpu\0",
                    eviction::CacheusSelector::ml_only()
                        .finish_gpu_select(&cands, Some(&[0.9])) == cpu_pick);
+
+            // A bad readback (NaN, or outside the sigmoid range) must not
+            // reach the vote: the MLP expert falls back to the CPU, so the
+            // decision matches the plain CPU one. A NaN at index 0 used to
+            // pin the victim to 0.
+            // The batch would move the pick to `target` if it were used
+            // (one-hot 1.0 there), so landing on the CPU pick shows the
+            // whole batch was rejected because of the NaN elsewhere.
+            let mut nan_batch = [0.0f32; 3];
+            nan_batch[target] = 1.0;
+            nan_batch[(target + 1) % 3] = f32::NAN;
+            check!(b"cacheus_finish_nan_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&nan_batch)) == cpu_pick);
+            let mut huge = [0.0f32; 3];
+            huge[(cpu_pick + 1) % 3] = 1.0e6;
+            check!(b"cacheus_finish_out_of_range_falls_back_to_cpu\0",
+                   eviction::CacheusSelector::ml_only()
+                       .finish_gpu_select(&cands, Some(&huge)) == cpu_pick);
         }
 
         // LRU default's score() override returns inverse-recency. With

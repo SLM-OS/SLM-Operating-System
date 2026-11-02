@@ -301,9 +301,12 @@ impl CacheusSelector {
             expert_choices.push(best_idx);
         }
 
+        // Seeded from f32::MIN over every index (as MlpPolicy's argmax),
+        // so a NaN can never win. Seeding from combined[0] let a NaN at
+        // index 0 beat everything, since no comparison with NaN is true.
         let mut victim = 0;
-        let mut max_combined = combined[0];
-        for (j, &s) in combined.iter().enumerate().skip(1) {
+        let mut max_combined = f32::MIN;
+        for (j, &s) in combined.iter().enumerate() {
             if s > max_combined {
                 max_combined = s;
                 victim = j;

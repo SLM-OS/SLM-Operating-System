@@ -322,14 +322,22 @@ impl EvictionPolicy for MlpPolicy {
     }
 
     /// As an ensemble expert (#965): the GPU scores when there is one
-    /// per candidate and no runtime blob was loaded meanwhile (the same
-    /// staleness rule as `finish_gpu_select`), otherwise CPU scores.
+    /// per candidate, every one is a finite value in [0, 1] (the
+    /// producer's sigmoid range), and no runtime blob was loaded
+    /// meanwhile (the same staleness rule as `finish_gpu_select`);
+    /// otherwise CPU scores. The range check matters here, unlike in
+    /// the standalone policy's `argmax`: these scores feed CACHEUS's
+    /// weighted vote, where a NaN or an out-of-range value from a bad
+    /// readback would pin or swamp the decision.
     fn score_with_gpu(&mut self, candidates: &[BlockMeta],
                       gpu_scores: Option<&[f32]>) -> Vec<f32>
     {
         self.refresh_runtime_cache();
         if let Some(scores) = gpu_scores {
-            if scores.len() == candidates.len() && self.runtime_cache.is_none() {
+            if scores.len() == candidates.len()
+                && self.runtime_cache.is_none()
+                && scores.iter().all(|s| s.is_finite() && (0.0..=1.0).contains(s))
+            {
                 return scores.to_vec();
             }
         }
