@@ -1353,6 +1353,24 @@ pub extern "C" fn rust_eviction_enabled() -> i32 {
     if cfg!(feature = "ai_eviction") { 1 } else { 0 }
 }
 
+/// GPU score batches that returned but were discarded and scored on
+/// the CPU instead (#965). Shown next to the dispatch `ok` count in
+/// `eviction stats`. Always 0 without `ai_eviction`.
+#[no_mangle]
+pub extern "C" fn rust_eviction_gpu_scores_rejected() -> u64 {
+    #[cfg(feature = "ai_eviction")]
+    { mm::eviction::mlp::gpu_scores_rejected() }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
+/// Zero the counter above (`eviction stats gpu-reset`).
+#[no_mangle]
+pub extern "C" fn rust_eviction_gpu_scores_rejected_reset() {
+    #[cfg(feature = "ai_eviction")]
+    mm::eviction::mlp::reset_gpu_scores_rejected();
+}
+
 /// Returns 1 if any active eviction policy declares
 /// `EvictionPolicy::has_gpu_backend() == true`, 0 otherwise.
 ///
@@ -3189,6 +3207,21 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             check!(b"cacheus_finish_out_of_range_falls_back_to_cpu\0",
                    eviction::CacheusSelector::ml_only()
                        .finish_gpu_select(&cands, Some(&huge)) == cpu_pick);
+
+            // Discarded batches are counted (shown in `eviction stats`);
+            // a used batch and a CPU-only decision are not.
+            {
+                use mm::eviction::mlp::{gpu_scores_rejected, reset_gpu_scores_rejected};
+                reset_gpu_scores_rejected();
+                let mut c = eviction::CacheusSelector::ml_only();
+                let _ = c.finish_gpu_select(&cands, Some(&nan_batch));
+                let after_bad = gpu_scores_rejected();
+                let _ = c.finish_gpu_select(&cands, None);
+                let _ = c.finish_gpu_select(&cands, Some(&gpu));
+                check!(b"cacheus_rejected_gpu_scores_are_counted\0",
+                       after_bad == 1 && gpu_scores_rejected() == 1);
+                reset_gpu_scores_rejected();
+            }
         }
 
         // LRU default's score() override returns inverse-recency. With

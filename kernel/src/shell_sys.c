@@ -8486,10 +8486,11 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
     slm_gpu_eviction_dispatch_stats(&gpu_attempts, &gpu_ok, &gpu_rl,
                                     &gpu_big);
     uint64_t gpu_fallback = gpu_attempts > gpu_ok ? gpu_attempts - gpu_ok : 0;
-    shell_printf("  GPU dispatch:        attempts %llu, ok %llu, "
+    shell_printf("  GPU dispatch:        attempts %llu, ok %llu (scores rejected %llu), "
                  "fallback %llu (rate-limited %llu, oversize %llu)\r\n",
                  (unsigned long long)gpu_attempts,
                  (unsigned long long)gpu_ok,
+                 (unsigned long long)rust_eviction_gpu_scores_rejected(),
                  (unsigned long long)gpu_fallback,
                  (unsigned long long)gpu_rl,
                  (unsigned long long)gpu_big);
@@ -8855,6 +8856,7 @@ int cmd_eviction(int argc, char *argv[])
             /* Zero the GPU dispatch counters and timing so one
              * measurement window can be read on its own (#965). */
             slm_gpu_eviction_dispatch_stats_reset();
+            rust_eviction_gpu_scores_rejected_reset();
             shell_puts("eviction GPU dispatch counters reset\r\n");
             return 0;
         }

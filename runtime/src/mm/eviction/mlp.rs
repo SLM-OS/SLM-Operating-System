@@ -51,6 +51,24 @@ use super::features::extract_features;
 use super::generated;
 use super::{active_blob, blob_status, BlobKind, RuntimeMlpModel};
 use super::policy::{BlockFeatures, BlockMeta, EvictionPolicy};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// GPU score batches that came back but were not used (#965): wrong
+/// length, a runtime blob loaded while the dispatch was in flight, or
+/// (ensemble path) a NaN / out-of-range value. The C-side dispatch
+/// counts those as `ok`, so without this `eviction stats` would show a
+/// decision as GPU-served when it was scored on the CPU.
+static GPU_SCORES_REJECTED: AtomicU64 = AtomicU64::new(0);
+
+fn note_gpu_scores_rejected() {
+    GPU_SCORES_REJECTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count of rejected GPU score batches since boot or the last reset.
+pub fn gpu_scores_rejected() -> u64 { GPU_SCORES_REJECTED.load(Ordering::Relaxed) }
+
+/// Zero the rejected-batch counter (`eviction stats gpu-reset`).
+pub fn reset_gpu_scores_rejected() { GPU_SCORES_REJECTED.store(0, Ordering::Relaxed); }
 
 extern "C" {
     /// `int slm_gpu_run_eviction_batch(const float *features,
@@ -289,6 +307,7 @@ impl EvictionPolicy for MlpPolicy {
             if scores.len() == candidates.len() && self.runtime_cache.is_none() {
                 return argmax(scores);
             }
+            note_gpu_scores_rejected();
         }
         let features = extract_features(candidates);
         argmax(&self.score_rows_cpu(&features))
@@ -340,6 +359,7 @@ impl EvictionPolicy for MlpPolicy {
             {
                 return scores.to_vec();
             }
+            note_gpu_scores_rejected();
         }
         let features = extract_features(candidates);
         self.score_rows_cpu(&features)

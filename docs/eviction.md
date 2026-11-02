@@ -585,6 +585,13 @@ silently:
   under CACHEUS no longer prints "scaffold only". The embedded expert
   (`MlpPolicy::ensemble_expert`) never dispatches on its own, so an
   ensemble decision never runs a dispatch with `REGISTRY_LOCK` held.
+  GPU scores are used only if every one is finite and in [0, 1] (the
+  producer's sigmoid range); a NaN or out-of-range batch from a bad
+  readback is discarded and the expert scores on the CPU, so it cannot
+  pin or swamp the weighted vote. Discarded batches (also wrong-length
+  or blob-stale ones, for `mlp` too) show as `scores rejected` next to
+  the `ok` count in `eviction stats`, since the dispatch itself
+  counted them as `ok`.
   On jetson-nano-2 (2026-11-02, `EVICTION_MODELS=ON`, all three helpers
   preserved, the batched eviction producer), `bench eviction-e2e
   --policy cacheus` made one GPU attempt per decision (11 323 of 11 323)
