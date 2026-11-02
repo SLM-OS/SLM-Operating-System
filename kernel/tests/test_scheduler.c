@@ -5112,6 +5112,53 @@ static void test_task_entry_unmasks_irq(void)
 #endif
 
 /*
+ * Regression (#1047): the UART console waits for input by polling with
+ * yield(), and scheduler_tick counted every such tick as running time,
+ * so CPU 0's utilization (an AI-scheduler input) read 100% at an idle
+ * prompt. A task marked with task_input_wait_begin() must not count as
+ * running; the idle task never does; an ordinary task does.
+ */
+static void test_input_wait_not_counted_as_running(void)
+{
+    TEST_ASSERT_FALSE(task_counts_as_running(NULL));
+
+    struct task *t = task_create("iw_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0, t->input_wait);   /* reset by task_alloc */
+    TEST_ASSERT_TRUE(task_counts_as_running(t));
+    t->input_wait = 1;
+    TEST_ASSERT_FALSE(task_counts_as_running(t));
+    t->input_wait = 0;
+    t->flags |= TASK_FLAG_IDLE;
+    TEST_ASSERT_FALSE(task_counts_as_running(t));
+    t->flags &= (uint8_t)~TASK_FLAG_IDLE;
+    t->state = TASK_TERMINATED;   /* never scheduled; task_destroy needs it */
+    task_destroy(t);
+}
+
+/* begin/end mark the *current* task and nest (an inner wait does not
+ * clear an outer one). */
+static void test_input_wait_begin_end_nest(void)
+{
+    struct task *self = task_current();
+    TEST_ASSERT_NOT_NULL(self);
+    uint8_t saved = self->input_wait;
+    self->input_wait = 0;
+
+    uint8_t outer = task_input_wait_begin();
+    TEST_ASSERT_EQUAL_UINT8(0, outer);
+    TEST_ASSERT_FALSE(task_counts_as_running(self));
+    uint8_t inner = task_input_wait_begin();
+    TEST_ASSERT_EQUAL_UINT8(1, inner);
+    task_input_wait_end(inner);
+    TEST_ASSERT_FALSE(task_counts_as_running(self));   /* still waiting */
+    task_input_wait_end(outer);
+    TEST_ASSERT_EQUAL_UINT8(0, self->input_wait);
+
+    self->input_wait = saved;
+}
+
+/*
  * Regression: tasks created with task_create use CPU 0 pinning for FFI tests.
  *
  * On Pi 5, slm_task_create dispatches tasks via round-robin which can send
@@ -5554,6 +5601,8 @@ int test_suite_scheduler(void)
 #if !defined(PLATFORM_X86_64)
     RUN_TEST(test_task_entry_unmasks_irq);   /* #1047 */
 #endif
+    RUN_TEST(test_input_wait_not_counted_as_running);   /* #1047 */
+    RUN_TEST(test_input_wait_begin_end_nest);           /* #1047 */
 
     /* AI scheduler types (unconditional — header-only) */
     RUN_TEST(test_ai_decode_action_zero);

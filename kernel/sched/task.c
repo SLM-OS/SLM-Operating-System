@@ -281,6 +281,7 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->assigned_cpu = 0;
     task->priority = priority;
     task->effective_priority = priority;
+    task->input_wait = 0;   /* slot may be reused (#1047) */
     task->deadline_ns = 0;
     task->wake_time_ns = 0;
     task->sleep_next = NULL;

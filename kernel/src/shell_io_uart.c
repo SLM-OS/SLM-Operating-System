@@ -8,6 +8,7 @@
 
 #include "shell_io.h"
 #include "uart.h"
+#include "task.h"
 
 #include <stdarg.h>
 #include <stddef.h>
@@ -15,7 +16,11 @@
 static int uart_read_char(struct shell_io *io)
 {
     (void)io;
-    return (int)(unsigned char)uart_getc();
+    /* uart_getc polls with yield(); count that wait as idle (#1047). */
+    uint8_t prev = task_input_wait_begin();
+    int c = (int)(unsigned char)uart_getc();
+    task_input_wait_end(prev);
+    return c;
 }
 
 static int uart_try_read_char(struct shell_io *io)

@@ -805,7 +805,11 @@ int shell_getc(void)
     if (sess && sess->io) {
         return sess->io->read_char(sess->io);
     }
-    return (int)(unsigned char)uart_getc();
+    /* uart_getc polls with yield(); count that wait as idle (#1047). */
+    uint8_t prev = task_input_wait_begin();
+    int c = (int)(unsigned char)uart_getc();
+    task_input_wait_end(prev);
+    return c;
 }
 
 int shell_try_getc(void)

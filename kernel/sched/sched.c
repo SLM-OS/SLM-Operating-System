@@ -2473,7 +2473,7 @@ void scheduler_tick(void)
         struct cpu_runqueue *rq = cpu_rq(cpu);
         rq->total_ticks++;
         struct task *cur = task_current();
-        if (cur && cur != rq->idle_task) {
+        if (task_counts_as_running(cur)) {
             rq->running_ticks++;
         }
     }

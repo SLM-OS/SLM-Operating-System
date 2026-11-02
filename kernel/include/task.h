@@ -175,7 +175,14 @@ struct task {
     /* Priority scheduling */
     uint8_t priority;                   /* 0-7, higher = more important */
     uint8_t effective_priority;         /* Actual priority (may be boosted) */
-    uint8_t _priority_pad[2];           /* Padding for alignment */
+    /* Nonzero while the task busy-waits for console input (#1047).
+     * The UART console polls with yield(), so without this marker
+     * scheduler_tick counted the shell as running on every tick and
+     * CPU 0 read 100% busy. Written only by the task itself (via
+     * task_input_wait_begin/end) and read by scheduler_tick on the
+     * same CPU, so no lock is needed. Uses a former padding byte. */
+    uint8_t input_wait;
+    uint8_t _priority_pad[1];           /* Padding for alignment */
 
     /* Deadline scheduling */
     uint64_t deadline_ns;               /* Absolute deadline (0 = no deadline) */
@@ -391,6 +398,43 @@ void task_exit(void);
  * Get the currently running task.
  */
 struct task *task_current(void);
+
+/*
+ * Mark the current task as waiting for console input (#1047). Ticks
+ * that land while the marker is set are counted as idle by the
+ * per-CPU utilization accounting (running_ticks), since the task is
+ * only polling. Returns the previous value so calls nest; pass it to
+ * task_input_wait_end.
+ */
+static inline uint8_t task_input_wait_begin(void)
+{
+    struct task *t = task_current();
+    uint8_t prev = 0;
+    if (t) {
+        /* volatile: scheduler_tick reads this from IRQ context on the
+         * same CPU, so the store must not be moved or elided. */
+        volatile uint8_t *iw = &t->input_wait;
+        prev = *iw;
+        *iw = 1;
+    }
+    return prev;
+}
+
+static inline void task_input_wait_end(uint8_t prev)
+{
+    struct task *t = task_current();
+    if (t) {
+        *(volatile uint8_t *)&t->input_wait = prev;
+    }
+}
+
+/* True when a tick on `t` should count as running time (#1047): not
+ * the idle task and not polling for console input. */
+static inline bool task_counts_as_running(const struct task *t)
+{
+    return t && !is_idle_task(t) &&
+           !*(const volatile uint8_t *)&t->input_wait;
+}
 
 /*
  * Get the currently running task for a specific CPU.
