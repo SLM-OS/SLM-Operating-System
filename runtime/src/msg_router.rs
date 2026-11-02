@@ -69,6 +69,11 @@ const READY_IDLE: u32 = 0;
 const READY_FULL: u32 = 1;
 const READY_WRITING: u32 = 2;
 
+/// How long `Mailbox::clear()` waits for an in-flight write claim to
+/// finish before taking the mailbox over (#1058). A healthy claim lasts
+/// two copies of at most `MAX_MSG_LEN` + `TOPIC_NAME_LEN` bytes.
+const CLEAR_WAIT_MS: u64 = 5;
+
 /// Per-subscriber mailbox for message delivery.
 struct Mailbox {
     /// One of `READY_IDLE` / `READY_WRITING` / `READY_FULL`. Claimed
@@ -103,14 +108,28 @@ impl Mailbox {
     /// before zeroing. Without the claim, unsubscribe/init could reset a
     /// mailbox while a publisher on another CPU was writing it; the
     /// publisher would then store `READY_FULL` into the cleared slot and
-    /// a later subscriber reusing it would receive a stale message. The
-    /// wait is bounded: `try_deliver` holds `READY_WRITING` only across
-    /// two short copies with IRQs masked, and never takes
-    /// MSG_ROUTER_LOCK, so callers holding that lock can't deadlock it.
+    /// a later subscriber reusing it would receive a stale message.
+    ///
+    /// The wait has a time limit (`CLEAR_WAIT_MS`). A healthy writer
+    /// holds `READY_WRITING` only across two short copies with IRQs
+    /// masked, far below the limit. But callers hold MSG_ROUTER_LOCK
+    /// with IRQs masked, so a claim that never completes — a writer
+    /// destroyed while running on another CPU, or a store another CPU
+    /// never observes (Pi 5 cross-CPU visibility, cf. #80) — would
+    /// otherwise hang the whole router. On timeout the reset takes the
+    /// mailbox over and logs once; a stale or torn message in a slot
+    /// being reset anyway is the lesser failure.
     fn clear(&mut self) {
+        let start = unsafe { timer_get_count() };
+        let limit = unsafe { timer_get_frequency() } / 1000 * CLEAR_WAIT_MS;
         loop {
             let cur = self.ready.load(Ordering::Acquire);
             if cur == READY_WRITING {
+                if unsafe { timer_get_count() }.wrapping_sub(start) >= limit {
+                    puts(b"[msg_router] WARN: mailbox reset forced past a stuck write claim\n\0");
+                    self.ready.store(READY_WRITING, Ordering::Release);
+                    break;
+                }
                 core::hint::spin_loop();
                 continue;
             }
@@ -206,6 +225,8 @@ impl Mailbox {
 /// 2. An idle mailbox is claimed and ends `READY_FULL` with the data.
 /// 3. A full (unacked) mailbox rejects a writer.
 /// 4. `clear()` resets a full mailbox to idle, and it accepts again.
+/// 5. `clear()` on a claim that never completes gives up after
+///    `CLEAR_WAIT_MS` and resets anyway instead of spinning forever.
 pub(crate) fn mailbox_claim_self_test() -> bool {
     let mut mb = Mailbox::new();
     mb.data[0] = b'A';
@@ -234,7 +255,14 @@ pub(crate) fn mailbox_claim_self_test() -> bool {
     let after_clear = unsafe { mb.try_deliver(b"/t\0".as_ptr(), b"D\0".as_ptr(), 0) };
     let redelivered = after_clear && mb.data[0] == b'D';
 
-    writing_rejected && idle_claimed && full_rejected && cleared && redelivered
+    // A write claim that never completes must not hang clear(): after
+    // CLEAR_WAIT_MS it takes the mailbox over and resets it (logs one
+    // "reset forced past a stuck write claim" WARN line).
+    mb.ready.store(READY_WRITING, Ordering::Release);
+    mb.clear();
+    let stuck_reset = mb.ready.load(Ordering::Acquire) == READY_IDLE;
+
+    writing_rejected && idle_claimed && full_rejected && cleared && redelivered && stuck_reset
 }
 
 /// A subscription linking a component to its mailbox.

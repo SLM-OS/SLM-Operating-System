@@ -368,14 +368,19 @@ Two rules keep the claimed state from getting stuck or racing a reset:
   way before zeroing it: it waits out an in-flight writer and CASes
   `IDLE`/`FULL` into `WRITING`. Otherwise a writer could finish into a
   just-cleared slot and a later subscriber reusing it would receive a
-  stale message. The wait is bounded because the writer holds the claim
-  only across two short copies with IRQs masked and never takes
-  `MSG_ROUTER_LOCK`.
+  stale message. A healthy writer holds the claim only across two
+  short copies with IRQs masked. The wait is still capped at
+  `CLEAR_WAIT_MS` (5 ms, timed with `timer_get_count`), because callers
+  hold `MSG_ROUTER_LOCK` with IRQs masked: a claim that never completes
+  (a writer destroyed while running on another CPU, or a store another
+  CPU never observes, cf. #80 on Pi 5) would otherwise hang the whole
+  router. On timeout the reset takes the mailbox over and logs
+  `[msg_router] WARN: mailbox reset forced past a stuck write claim`.
 
 Pinned deterministically by `mailbox_claim_self_test()` (Rust boot test
 29, "mailbox claim rejects concurrent writer"), which also checks that
-`clear()` resets a full mailbox; the cross-CPU integration test remains
-the end-to-end check.
+`clear()` resets a full mailbox and gives up on a stuck claim; the
+cross-CPU integration test remains the end-to-end check.
 
 Not changed: the `ack` flag is a single bit, so when two publishers
 contend for one mailbox the ack one of them observes may belong to the
