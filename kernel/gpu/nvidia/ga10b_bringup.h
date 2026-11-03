@@ -204,6 +204,13 @@ struct ga10b_bringup *ga10b_bringup_state(void);
 int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
                                   const struct ga10b_channel_handoff *h);
 
+/* True when the active handoff came from ga10b_bringup_install_handoff
+ * (a channel SLM-OS built), false for none or a Linux helper's. Lets
+ * slm_ffi.c's ensure_bringup use the installed channel instead of
+ * re-running the kexec inherit + DRAM scan, which cannot succeed after
+ * a UEFI-direct boot. */
+bool ga10b_bringup_handoff_is_local(void);
+
 /* Weights-pool descriptor convenience accessors (#714 W1, see
  * docs/design/gpu-weights-pool.md). The handoff v8 extension exposes
  * three fields (phys / gpu_va / size_bytes) that SLM-OS's `slm load`

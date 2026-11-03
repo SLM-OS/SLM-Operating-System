@@ -617,10 +617,11 @@ set(KERNEL_SOURCES
     # without Linux (#1088). Driven by `nvgpu cold`.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_cold.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gr_init_table.c>
-    # Jetson-only: per-dispatch QMDV03_00 encoder (issue #558 fix).
-    # No-op when nothing calls ga10b_qmd_populate (Phase 1 — encoder
-    # ported but not yet wired into the dispatch path).
-    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_qmd.c>
+    # Per-dispatch QMDV03_00 encoder (issue #558 fix): built on every
+    # platform below (pure code; the cold MNIST pipeline and its unit
+    # tests use it).
+    # Jetson-only: cold-boot MNIST pipeline sources + install (#1088).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_mnist_embed.c>
     # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
     # No-op until invoked via the `nvgpu gmmu walk` shell verb.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
@@ -679,6 +680,10 @@ set(KERNEL_SOURCES
     # hardware reached only through struct ga10b_gpu_ops.
     kernel/gpu/nvidia/ga10b_chan.c
     kernel/gpu/nvidia/ga10b_grctx.c
+    # MNIST GPU pipeline on an SLM-OS-made channel (#1088) and the QMD
+    # encoder it uses: pure code, memory reached through ga10b_gpu_ops.
+    kernel/gpu/nvidia/ga10b_mnist_pipeline.c
+    kernel/gpu/nvidia/ga10b_qmd.c
     kernel/gpu/oplib_pool.c
     kernel/gpu/oplib_weights_pool.c
     kernel/gpu/operator_dispatch.c
@@ -1160,6 +1165,7 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_pmu.c
     kernel/tests/test_ga10b_chan.c
     kernel/tests/test_ga10b_grctx.c
+    kernel/tests/test_ga10b_mnist_pipeline.c
 )
 
 # lwIP library sources (QEMU networking only)
@@ -1540,6 +1546,23 @@ else()
     )
     message(STATUS "Embedding operator library: stub (no SASS files in scripts/cuda/operator_library/; set OPLIB_BLOB to override or extract SASS via the .cu source recipe)")
 endif()
+# ============================================================================
+# Cold-boot MNIST GPU pipeline inputs (.incbin, #1088)
+# ============================================================================
+#
+# models/test/mnist.onnx (weights, read from the protobuf at runtime by
+# kernel/gpu/nvidia/ga10b_mnist_pipeline.c) and the synthetic input
+# fixture. Both are tracked in git, so no generation step and no
+# optional path: every build embeds them (~29 KB). All platforms, so the
+# unit tests check the ONNX walk against the real model.
+target_sources(slmos.elf PRIVATE kernel/src/mnist_gpu_embed.S)
+set_source_files_properties(
+    kernel/src/mnist_gpu_embed.S
+    PROPERTIES
+    COMPILE_DEFINITIONS "MNIST_ONNX_PATH=${CMAKE_SOURCE_DIR}/models/test/mnist.onnx;MNIST_INPUT_SYNTH_PATH=${CMAKE_SOURCE_DIR}/scripts/fixtures/mnist_input_synth.bin"
+    OBJECT_DEPENDS      "${CMAKE_SOURCE_DIR}/models/test/mnist.onnx;${CMAKE_SOURCE_DIR}/scripts/fixtures/mnist_input_synth.bin"
+)
+
 target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
 set_source_files_properties(
     kernel/src/oplib_embed.S

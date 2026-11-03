@@ -32,6 +32,7 @@
 #include "ga10b_chan.h"
 #include "ga10b_grctx.h"
 #include "ga10b_channel_handoff.h"
+#include "ga10b_mnist_pipeline.h"
 #include "cache.h"
 #include "string.h"
 
@@ -179,6 +180,7 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GR_INIT] = "gr_init",
     [GA10B_COLD_GOLDEN]  = "golden",
     [GA10B_COLD_CHANNEL] = "channel",
+    [GA10B_COLD_MNIST]   = "mnist",
 };
 
 const char *ga10b_cold_step_name(enum ga10b_cold_step step)
@@ -1075,6 +1077,19 @@ static int step_channel(void)
     return 0;
 }
 
+/* ---- Step 12: MNIST pipeline ----
+ *
+ * What scripts/gpu-kernel-mnist.c --preserve-for-kexec --qmd-pool sets
+ * up on Linux: shaders from the embedded operator library, weights from
+ * the embedded mnist.onnx, cbufs, outputs, QMD pool and the v7 pipeline
+ * ops, installed as the active handoff so slm_gpu_run_mnist and the
+ * runtime's MNIST fastpath dispatch on this channel. On failure the
+ * channel handoff from step 11 stays installed. */
+static int step_mnist(void)
+{
+    return ga10b_mnist_cold_install(&cold_gpu_ops, &cold_chan) == 0 ? 0 : -1;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -1089,6 +1104,7 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GR_INIT] = step_gr_init,
     [GA10B_COLD_GOLDEN]  = step_golden,
     [GA10B_COLD_CHANNEL] = step_channel,
+    [GA10B_COLD_MNIST]   = step_mnist,
 };
 
 int ga10b_cold_run(enum ga10b_cold_step last)

@@ -165,6 +165,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_ga10b_pmu();
     total_failures += test_suite_ga10b_chan();
     total_failures += test_suite_ga10b_grctx();
+    total_failures += test_suite_ga10b_mnist_pipeline();
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();

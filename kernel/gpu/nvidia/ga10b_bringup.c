@@ -1349,6 +1349,11 @@ static struct ga10b_channel_handoff g_handoff;
  * not need extern visibility for tests. */
 static uint32_t g_qmd_pool_next_slot;
 
+/* True while g_handoff describes a channel SLM-OS built itself and
+ * installed with ga10b_bringup_install_handoff (cold bring-up, #1088);
+ * false once a Linux helper's handoff is copied in from DRAM. */
+static bool g_handoff_local;
+
 /* Scan a physical-memory range for the handoff magic, at the given
  * stride. Returns the address of the first match, or 0 if not found.
  * The stride and range are parameters so the host tests can drive this
@@ -1563,6 +1568,7 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
         (volatile struct ga10b_channel_handoff *)(uintptr_t)handoff_phys;
 
     /* Copy to a local (non-volatile) struct for easier access. */
+    g_handoff_local = false;
     g_handoff.magic              = hoff->magic;
     g_handoff.version            = hoff->version;
     g_handoff.channel_id         = hoff->channel_id;
@@ -1725,10 +1731,16 @@ int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
         return -1;
     }
     g_handoff = *h;
+    g_handoff_local = true;
     g_qmd_pool_next_slot = 0;
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
     b->last_error_phase = -1;
     return 0;
+}
+
+bool ga10b_bringup_handoff_is_local(void)
+{
+    return g_handoff_local && g_handoff.magic == GA10B_CHANNEL_HANDOFF_MAGIC;
 }
 
 uint32_t ga10b_bringup_active_pipeline_kind(void)

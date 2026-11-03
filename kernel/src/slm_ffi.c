@@ -1031,20 +1031,35 @@ static int ensure_bringup(uint32_t kind)
     bool active_is_kind = (ga10b_bringup_active_pipeline_kind() == kind);
     if (channel_open && active_is_kind) return 0;
 
-    /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
-     * the progress lines' blocking UART writes dominated (#1037). */
-    ga10b_bringup_quiet_set(true);
-    uint64_t t0 = slm_get_time_ns();
-    int rc = ga10b_bringup_inherit(b);
-    uint64_t t1 = slm_get_time_ns();
-    g_bringup_step_ns[kind][0] = t1 - t0;
-    if (rc >= 0) {
-        rc = ga10b_bringup_channel_kind(b, kind);
+    uint64_t t2;
+    const struct ga10b_channel_handoff *local = ga10b_bringup_handoff();
+    if (active_is_kind && local != NULL && local->pipeline_n_ops > 0u &&
+        ga10b_bringup_handoff_is_local()) {
+        /* A pipeline handoff for this kind on a channel SLM-OS built
+         * itself (`nvgpu cold`, #1088) is installed: use it. The kexec
+         * inherit + DRAM scan below have nothing to find after a
+         * UEFI-direct boot, and inherit would reset this slot. */
+        b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+        b->last_error_phase = -1;
+        g_bringup_step_ns[kind][0] = 0;
+        g_bringup_step_ns[kind][1] = 0;
+        t2 = slm_get_time_ns();
+    } else {
+        /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
+         * the progress lines' blocking UART writes dominated (#1037). */
+        ga10b_bringup_quiet_set(true);
+        uint64_t t0 = slm_get_time_ns();
+        int rc = ga10b_bringup_inherit(b);
+        uint64_t t1 = slm_get_time_ns();
+        g_bringup_step_ns[kind][0] = t1 - t0;
+        if (rc >= 0) {
+            rc = ga10b_bringup_channel_kind(b, kind);
+        }
+        t2 = slm_get_time_ns();
+        g_bringup_step_ns[kind][1] = t2 - t1;
+        ga10b_bringup_quiet_set(false);
+        if (rc < 0) return rc;
     }
-    uint64_t t2 = slm_get_time_ns();
-    g_bringup_step_ns[kind][1] = t2 - t1;
-    ga10b_bringup_quiet_set(false);
-    if (rc < 0) return rc;
 
     int warmup_rc = ga10b_bringup_launch_kernel(b);
     g_bringup_step_ns[kind][2] = slm_get_time_ns() - t2;
