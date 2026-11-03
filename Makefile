@@ -1067,6 +1067,14 @@ mnist-shaders: $(MNIST_SHADER_OUT)/.stamp
 mnist-shaders-clean:
 	rm -rf $(MNIST_SHADER_OUT)
 
+# test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
+# selection and section-table parsing, with nvcc/cuobjdump/readelf
+# stubbed (no CUDA toolkit needed). Covers both cuobjdump naming
+# schemes and single-digit section numbers (#1043).
+.PHONY: test-mnist-shaders
+test-mnist-shaders:
+	@bash scripts/tests/test-build-mnist-shaders.sh
+
 # CE pushbuffer encoding tests. Pure-logic, no MMIO, no kernel deps —
 # compiles ga10b_ce.c standalone (uart_puts / cache_clean_range
 # stubbed inline below). Runs on every host so a wrong class id /
@@ -1692,6 +1700,7 @@ help:
 	@echo "  mnist-shaders         Build MNIST SASS shaders for gpu-kernel-mnist"
 	@echo "                        (output: $(MNIST_SHADER_OUT)/*.sass; requires CUDA Toolkit)"
 	@echo "  mnist-shaders-clean   Remove $(MNIST_SHADER_OUT)/"
+	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

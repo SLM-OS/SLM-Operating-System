@@ -139,36 +139,51 @@ for entry in "${SHADERS[@]}"; do
     # 1. Compile to a fat-binary host stub (.1.cubin + .2.cubin).
     (cd "$WORK_DIR" && "$NVCC" -arch="$ARCH" -o "$src" "$src_cu")
 
-    # 2. Extract the device cubin. cuobjdump writes two cubins:
-    #    .1.<arch>.cubin = host stub, .2.<arch>.cubin = device code.
-    (cd "$WORK_DIR" && "$CUOBJDUMP" --extract-elf all "$src")
-
-    cubin="$WORK_DIR/$src.2.$ARCH.cubin"
-    if [ ! -f "$cubin" ]; then
-        # Some toolkit versions number the device cubin differently.
-        cubin=$(ls "$WORK_DIR/$src".*."$ARCH".cubin 2>/dev/null | tail -1)
-    fi
-    if [ -z "$cubin" ] || [ ! -f "$cubin" ]; then
-        echo "ERROR: no device cubin produced for $src" >&2
-        exit 2
-    fi
+    # 2. Extract the cubins into a directory of their own. cuobjdump
+    #    writes two per binary, and the names depend on the toolkit:
+    #    older ones write <src>.1.<arch>.cubin / <src>.2.<arch>.cubin,
+    #    CUDA 12.0 writes tmpxft_<id>-0.<arch>.cubin / -1.<arch>.cubin.
+    #    Only one of them holds the kernel, so pick the cubin that has
+    #    a .text.<kernel> section instead of relying on the name.
+    extract_dir="$WORK_DIR/$src.elf"
+    mkdir -p "$extract_dir"
+    (cd "$extract_dir" && "$CUOBJDUMP" --extract-elf all "$WORK_DIR/$src")
 
     # 3. readelf -SW dumps the section header table. We want the
     #    `.text.<kernel>` section — cuobjdump emits one per
     #    __global__. Match `.text.` (with trailing dot) to skip the
     #    cubin's combined `.text` slot.
-    text_line="$("$READELF" -SW "$cubin" | awk '/\.text\./ {print; exit}')"
-    if [ -z "$text_line" ]; then
-        echo "ERROR: no .text.<kernel> section in $cubin" >&2
+    cubin=""
+    text_line=""
+    for candidate in "$extract_dir"/*."$ARCH".cubin; do
+        [ -f "$candidate" ] || continue
+        line="$("$READELF" -SW "$candidate" | awk '/\.text\./ {print; exit}')"
+        if [ -n "$line" ]; then
+            cubin="$candidate"
+            text_line="$line"
+            break
+        fi
+    done
+    if [ -z "$cubin" ]; then
+        echo "ERROR: no $ARCH cubin with a .text.<kernel> section for $src" >&2
+        ls -la "$extract_dir" >&2
         exit 2
     fi
 
     # Section header columns: [Nr] Name Type Addr Off Size ...
-    off_hex="$(echo "$text_line" | awk '{print $5}')"
-    size_hex="$(echo "$text_line" | awk '{print $6}')"
+    # readelf pads single-digit numbers as "[ 9]", which awk splits
+    # into two fields, so drop the [Nr] column before counting.
+    fields="$(echo "$text_line" | sed 's/^[[:space:]]*\[[[:space:]]*[0-9]*\][[:space:]]*//')"
+    off_hex="$(echo "$fields" | awk '{print $4}')"
+    size_hex="$(echo "$fields" | awk '{print $5}')"
     off_dec=$((16#$off_hex))
     size_dec=$((16#$size_hex))
     echo "  .text section: offset=0x$off_hex size=0x$size_hex"
+    # Offset 0 is the ELF header, never a code section: a parse error.
+    if [ "$off_dec" -eq 0 ] || [ "$size_dec" -eq 0 ]; then
+        echo "ERROR: bad .text offset/size parsed from: $text_line" >&2
+        exit 2
+    fi
 
     # 4. Carve the SASS bytes out into the output file.
     dd if="$cubin" of="$out_file" bs=1 skip="$off_dec" count="$size_dec" status=none

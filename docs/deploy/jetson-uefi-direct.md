@@ -10,7 +10,7 @@ available. Both paths boot the same `slmos` build: kexec loads
 `slmos.elf`; UEFI loads `slmos.bin`.
 
 **Status (2026-11-03):** boots to the `slmos>` shell 10/10 on
-jetson-nano-2 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
+jetson-nano-2 and 10/10 on jetson-nano-1 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
 timer preemption on every CPU, serial console input and output, and
 USB networking (#1084): SLM-OS powers XUSB up itself, enumerates the
 onboard hub and the RTL8153 behind it, and gets a DHCP lease; 10/10
@@ -133,6 +133,73 @@ own NVMe entry (`0008`) is first in BootOrder and boots that removable-
 media path; with the file present every cold boot would start SLM-OS
 and the board would no longer fall back to Linux on a power cycle.
 Without it, `0008` fails and the firmware continues to the SD card.
+
+### Provisioning a board from scratch
+
+jetson-nano-1 was rebuilt into the same layout on 2026-11-03 (#1043),
+starting from a USB Force Recovery flash. The steps, in order:
+
+1. **Flash QSPI + microSD from the host.** Close the recovery strap
+   (labctl `enter_recovery`), check that exactly one `0955:7523 APX`
+   device is on the host's USB, then from an R36.4.4 BSP whose
+   `bootloader/tos-optee_t234.img` is the patched TOS
+   (`tools/tfa-patches/README.md`):
+   `sudo ./flash.sh jetson-orin-nano-devkit-super mmcblk0p1` (about
+   20 min). Root SSH keys can be baked in beforehand at
+   `rootfs/root/.ssh/authorized_keys`.
+2. **Upgrade to R36.4.7 with apt.** R36.4.7 is not on NVIDIA's download
+   archive (the BSP archive goes from 36.4.4 to 36.5.0); it ships only
+   as the JetPack 6.2 OTA in the `r36.4` apt channel.
+   `apt-get dist-upgrade` installs it and the
+   `nvidia-l4t-bootloader` postinst tries to stage the bootloader
+   capsule. On nano-1 that step reported "Trigger Capsule update is
+   done" but staged nothing (it runs `fwupdtool install-blob` with its
+   output discarded, while fwupd itself is being upgraded), so the
+   first reboot stayed on UEFI 36.4.4. Staging the capsule by hand
+   works:
+   ```bash
+   mkdir -p /boot/efi/EFI/UpdateCapsule
+   cp /opt/ota_package/t23x/TEGRA_BL_3767_super.Cap /boot/efi/EFI/UpdateCapsule/
+   printf '\x07\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00' > /tmp/osind.bin
+   dd if=/tmp/osind.bin of=/sys/firmware/efi/efivars/OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c bs=12
+   systemctl reboot
+   ```
+   A capsule updates the inactive bootloader slot and switches to it,
+   so do it twice to put 36.4.7 on both slots (`nvbootctrl
+   dump-slots-info`, `/sys/class/dmi/id/bios_version`).
+3. **Put the patched BL31 back.** The capsule installs NVIDIA's stock
+   TOS. Re-enter recovery and run
+   `sudo ./flash.sh -k A_secure-os jetson-orin-nano-devkit-super mmcblk0p1`,
+   then the same with `B_secure-os`. The RCM cold boot at the end of a
+   flash does not re-sample the strap, so power-cycle the board (with
+   the strap still closed) between the two. Verify with a
+   `COOP_PREEMPT=OFF` build (the default): `timdiag`'s
+   `timer_handler_count` must advance.
+4. **Install the SLM-OS extras** on the microSD install
+   ([`jetson-kexec.md`](jetson-kexec.md#slm-os-extras-on-the-development-install),
+   [`jetson-helper-setup.md`](jetson-helper-setup.md),
+   `tools/nvgpu-patches/README.md`) and check a kexec boot.
+5. **Make the NVMe.** Partition it as `APP` (ext4) plus a 512 MiB
+   `SLMOS-ESP` (`sgdisk -o -n 1:2048:-512M -c 1:APP -n 2:0:0 -t 2:EF00
+   -c 2:SLMOS-ESP`), copy the running rootfs
+   (`rsync -aAXH --one-file-system`), then in the copy change every
+   `root=/dev/mmcblk0p1` in `/boot/extlinux/extlinux.conf` to
+   `root=/dev/nvme0n1p1` and mark the `/boot/efi` line in `/etc/fstab`
+   `nofail`.
+6. **Prove the ESP and entry before staging SLM-OS.** Copy
+   `/boot/efi/EFI/BOOT/BOOTAA64.efi` (L4TLauncher) to
+   `\EFI\SLMOS\SLMOS.efi`, create the entry with `efibootmgr -C`, boot
+   it once with `efibootmgr -n`, and check that `findmnt -n -o SOURCE /`
+   says `/dev/nvme0n1p1`. If the copy still said `mmcblk0p1`, the
+   launcher would boot the microSD rootfs and the check would pass
+   without proving anything. A power cycle must then return to the
+   microSD.
+7. Deploy SLM-OS with `scripts/jetson-uefi-deploy.sh` as below.
+
+After a Linux `poweroff`, power-cycle the board with a delay of at
+least 15 s (`power_cycle delay=15`). With labctl's 5 s default the
+module doesn't see the power loss and stays off, which on the way into
+recovery looks like a missing APX device.
 
 ---
 
