@@ -183,6 +183,20 @@ static void test_reloc_honours_desc_size_stride(void)
                              LOAD, LINK, SIZE, FDT, FDTSZ));
 }
 
+/* A descriptor whose size or end wraps 64 bits is malformed; summing
+ * its coverage could hide a hole, so the whole map is refused. */
+static void test_reloc_rejects_overflowing_descriptor(void)
+{
+    efi_memory_desc_t map[] = {
+        desc(EFI_CONVENTIONAL_MEMORY, LINK, 0x4000000ULL),
+        desc(EFI_CONVENTIONAL_MEMORY, 0xFFFFFFFFFFFF0000ULL, 0x20000ULL),
+    };
+    TEST_ASSERT_EQUAL_INT(EFI_RELOC_BAD_MAP, check(map, 2, LOAD, LINK, FDT));
+    map[1].phys_start = 0x300000000ULL;
+    map[1].num_pages = UINT64_MAX / 2;
+    TEST_ASSERT_EQUAL_INT(EFI_RELOC_BAD_MAP, check(map, 2, LOAD, LINK, FDT));
+}
+
 static void test_mem_type_free_after_ebs(void)
 {
     TEST_ASSERT_TRUE(efi_mem_type_free_after_ebs(EFI_LOADER_CODE));
@@ -222,6 +236,7 @@ int test_suite_efi_reloc(void)
     RUN_TEST(test_reloc_rejects_overlap);
     RUN_TEST(test_reloc_rejects_fdt_in_dest);
     RUN_TEST(test_reloc_honours_desc_size_stride);
+    RUN_TEST(test_reloc_rejects_overflowing_descriptor);
     RUN_TEST(test_mem_type_free_after_ebs);
     RUN_TEST(test_boot_source_default_is_direct);
     return UnityEnd();

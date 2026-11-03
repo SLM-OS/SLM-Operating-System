@@ -130,8 +130,9 @@ static void efi_print_desc(efi_system_table_t *sys_table,
     static const efi_char16_t prefix[] = u"[slmos]  mm ";
     int n = 0;
 
-    for (int i = 0; prefix[i] != 0; i++)
+    for (int i = 0; prefix[i] != 0; i++) {
         buf[n++] = prefix[i];
+    }
     n += efi_fmt_hex(&buf[n], d->type, 2);
     buf[n++] = ' ';
     buf[n++] = '0';
@@ -143,8 +144,9 @@ static void efi_print_desc(efi_system_table_t *sys_table,
     buf[n++] = 'x';
     n += efi_fmt_hex(&buf[n], d->num_pages, 8);
     buf[n++] = ' ';
-    for (int i = 0; tag[i] != 0 && n < 92; i++)
+    for (int i = 0; tag[i] != 0 && n < 92; i++) {
         buf[n++] = tag[i];
+    }
     buf[n++] = '\r';
     buf[n++] = '\n';
     buf[n] = 0;
@@ -160,8 +162,9 @@ static inline bool efi_ranges_overlap(uint64_t a, uint64_t a_len,
 /*
  * Pure helper: decide whether the kernel can be relocated from where
  * UEFI loaded it (`src`) to its link address (`dst`) after
- * ExitBootServices. Shared with the host-side unit test, so it takes
- * the descriptor array explicitly and prints nothing.
+ * ExitBootServices. Pure (takes the descriptor array explicitly and
+ * prints nothing) so kernel/tests/test_efi_reloc.c can drive it with
+ * synthetic maps.
  *
  * Rules:
  *   - src == dst: nothing to copy, always OK.
@@ -181,32 +184,51 @@ efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
                                          uint64_t size,
                                          uint64_t fdt, uint64_t fdt_size)
 {
-    if (src == dst)
+    if (src == dst) {
         return EFI_RELOC_NOT_NEEDED;
-    if (efi_ranges_overlap(src, size, dst, size))
+    }
+    if (efi_ranges_overlap(src, size, dst, size)) {
         return EFI_RELOC_OVERLAP;
-    if (fdt != 0 && efi_ranges_overlap(fdt, fdt_size ? fdt_size : 1,
-                                       dst, size))
+    }
+    if (fdt != 0 &&
+        efi_ranges_overlap(fdt, fdt_size ? fdt_size : 1, dst, size)) {
         return EFI_RELOC_FDT_IN_DEST;
-    if (desc_size < sizeof(efi_memory_desc_t))
+    }
+    if (desc_size < sizeof(efi_memory_desc_t)) {
         return EFI_RELOC_BAD_MAP;
+    }
 
+    /*
+     * Coverage is summed per descriptor, which is only sound if the
+     * descriptors don't overlap (the spec guarantees it) and their
+     * ends don't wrap. Reject a descriptor whose size or end overflows
+     * rather than let a malformed map double-count and hide a hole.
+     */
     uint64_t covered = 0;
     for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
         const efi_memory_desc_t *d =
             (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        if (d->num_pages > UINT64_MAX / EFI_PAGE_SIZE) {
+            return EFI_RELOC_BAD_MAP;
+        }
         uint64_t len = d->num_pages * EFI_PAGE_SIZE;
-        if (!efi_ranges_overlap(d->phys_start, len, dst, size))
+        if (d->phys_start > UINT64_MAX - len) {
+            return EFI_RELOC_BAD_MAP;
+        }
+        if (!efi_ranges_overlap(d->phys_start, len, dst, size)) {
             continue;
-        if (!efi_mem_type_free_after_ebs(d->type))
+        }
+        if (!efi_mem_type_free_after_ebs(d->type)) {
             return EFI_RELOC_DEST_BUSY;
+        }
         uint64_t lo = d->phys_start > dst ? d->phys_start : dst;
         uint64_t hi_d = d->phys_start + len;
         uint64_t hi = hi_d < dst + size ? hi_d : dst + size;
         covered += hi - lo;
     }
-    if (covered < size)
+    if (covered < size) {
         return EFI_RELOC_DEST_NOT_RAM;
+    }
     return EFI_RELOC_OK;
 }
 
@@ -235,14 +257,16 @@ static efi_status_t efi_read_map(efi_boot_services_t *bs,
      * slack below is never zero. */
     (void)bs->get_memory_map(&map_size, NULL, &map_key,
                              &desc_size, &desc_version);
-    if (desc_size == 0)
+    if (desc_size == 0) {
         desc_size = sizeof(efi_memory_desc_t);
+    }
     /* Slack for the AllocatePool call itself and later map churn. */
     map_size += desc_size * 16;
 
     status = bs->allocate_pool(EFI_LOADER_DATA, map_size, (void **)&map);
-    if (status != EFI_SUCCESS)
+    if (status != EFI_SUCCESS) {
         return status;
+    }
 
     uint64_t buf_size = map_size;
     status = bs->get_memory_map(&map_size, map, &map_key,
@@ -286,11 +310,13 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
 
         status = bs->get_memory_map(&map_size, map, &map_key,
                                     &desc_size, &desc_version);
-        if (status != EFI_SUCCESS)
+        if (status != EFI_SUCCESS) {
             return status;
+        }
         status = bs->exit_boot_services(handle, map_key);
-        if (status == EFI_SUCCESS)
+        if (status == EFI_SUCCESS) {
             break;
+        }
     }
 
     /* After a successful ExitBootServices boot services are gone and
@@ -328,9 +354,37 @@ static void efi_dcache_clean_inval(uint64_t start, uint64_t len)
     uint64_t line = 4ULL << ((ctr >> 16) & 0xF);
     uint64_t end = start + len;
 
-    for (uint64_t a = start & ~(line - 1); a < end; a += line)
+    for (uint64_t a = start & ~(line - 1); a < end; a += line) {
         __asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+    }
     __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * Show the descriptors that matter for the relocation: everything
+ * overlapping the link range, plus whatever holds the loaded image and
+ * the DTB (fdt == 0: none).
+ */
+static void efi_print_relevant_descs(efi_system_table_t *sys_table,
+                                     const efi_memory_desc_t *map,
+                                     uint64_t map_size, uint64_t desc_size,
+                                     uint64_t load_base, uint64_t link_base,
+                                     uint64_t image_size, uint64_t fdt)
+{
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        const efi_memory_desc_t *d =
+            (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        uint64_t len = d->num_pages * EFI_PAGE_SIZE;
+        if (efi_ranges_overlap(d->phys_start, len, link_base, image_size)) {
+            efi_print_desc(sys_table, d, u"link");
+        }
+        if (efi_ranges_overlap(d->phys_start, len, load_base, image_size)) {
+            efi_print_desc(sys_table, d, u"load");
+        }
+        if (fdt != 0 && efi_ranges_overlap(d->phys_start, len, fdt, 1)) {
+            efi_print_desc(sys_table, d, u"fdt");
+        }
+    }
 }
 
 /*
@@ -369,12 +423,14 @@ static void efi_print_verdict(efi_system_table_t *sys_table,
 static uint64_t efi_fdt_size(const void *fdt)
 {
     const uint8_t *p = fdt;
-    if (fdt == NULL)
+    if (fdt == NULL) {
         return 0;
+    }
     uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
                      ((uint32_t)p[2] << 8) | p[3];
-    if (magic != 0xd00dfeedU)
+    if (magic != 0xd00dfeedU) {
         return 0;
+    }
     return ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
            ((uint32_t)p[6] << 8) | p[7];
 }
@@ -445,21 +501,9 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
         return EFI_STUB_ABORT;
     }
 
-    /* Show the descriptors that matter: everything overlapping the
-     * link range, plus whatever holds the loaded image and the DTB. */
-    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
-        const efi_memory_desc_t *d =
-            (const efi_memory_desc_t *)((const uint8_t *)map + off);
-        uint64_t len = d->num_pages * EFI_PAGE_SIZE;
-        if (efi_ranges_overlap(d->phys_start, len, link_base, image_size))
-            efi_print_desc(sys_table, d, u"link");
-        if (efi_ranges_overlap(d->phys_start, len, load_base, image_size))
-            efi_print_desc(sys_table, d, u"load");
-        if (fdt != NULL &&
-            efi_ranges_overlap(d->phys_start, len,
-                               (uint64_t)(uintptr_t)fdt, 1))
-            efi_print_desc(sys_table, d, u"fdt");
-    }
+    efi_print_relevant_descs(sys_table, map, map_size, desc_size,
+                             load_base, link_base, image_size,
+                             (uint64_t)(uintptr_t)fdt);
 
     efi_reloc_verdict_t verdict =
         efi_check_relocation(map, map_size, desc_size, load_base,
@@ -495,14 +539,12 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
     status = efi_exit_boot(handle, bs, map, buf_size);
 
     if (status != EFI_SUCCESS) {
-        /* Still safe to use ConOut here: per UEFI §7.4.1 Boot
-         * Services remain valid when ExitBootServices itself
-         * fails. The post-EBS ConOut restriction (and the
-         * removal of post-success markers above) applies only
-         * AFTER a successful EBS. Do NOT collapse this call
-         * into the post-EBS cleanup. */
-        efi_print(sys_table, u"[slmos] ! ExitBootServices failed\r\n");
-        bs->free_pool(map);
+        /* Neither attempt succeeded. UEFI §7.4.6: firmware may already
+         * have partly shut down Boot Services during the first call,
+         * and a loader must not call any boot service other than
+         * GetMemoryMap after it, so no ConOut message and no FreePool
+         * here. Hand EFI_LOAD_ERROR back to the firmware; the console
+         * shows "C calling ExitBootServices" with no "EL2" after it. */
         return EFI_STUB_ABORT;
     }
 
@@ -575,11 +617,13 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
     slmos_boot_source = BOOT_SOURCE_UEFI;
 
     efi_dcache_clean_inval(load_base, image_size);
-    if (link_base != load_base)
+    if (link_base != load_base) {
         efi_dcache_clean_inval(link_base, image_size);
-    if (fdt != NULL)
+    }
+    if (fdt != NULL) {
         efi_dcache_clean_inval((uint64_t)(uintptr_t)fdt,
                                fdt_size ? fdt_size : EFI_PAGE_SIZE);
+    }
 
     return fdt;
 }
