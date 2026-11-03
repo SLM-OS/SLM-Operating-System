@@ -1,6 +1,6 @@
 # Deploying SLM-OS to Jetson Orin Nano — kexec from Linux
 
-This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs for USB networking, GPU compute channels and the camera. The UEFI-direct cold-boot path ([`jetson-uefi-direct.md`](jetson-uefi-direct.md)) boots to the shell without Linux but without that inherited state.
+This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs for the GPU compute channels. The UEFI-direct cold-boot path ([`jetson-uefi-direct.md`](jetson-uefi-direct.md)) boots without Linux and brings USB networking and the camera RCE up itself, but has no GPU compute.
 
 The kexec-from-Linux flow is identical whether the Linux install lives on the microSD card or an NVMe SSD. [First-time provisioning](#first-time-provisioning-dual-media-layout) describes the recommended lab layout (NVMe development install plus microSD recovery install) and what each needs. SLM-OS itself never gets a partition: it is a file in the Linux root filesystem.
 

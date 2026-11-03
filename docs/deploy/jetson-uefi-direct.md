@@ -6,13 +6,16 @@ how the hand-off works, the one-time board setup, the build-deploy-test
 loop, and what does and does not work after a UEFI-direct boot.
 
 The kexec-from-Linux path ([`jetson-kexec.md`](jetson-kexec.md)) remains
-the primary path for work that needs state Linux leaves behind (USB
-networking, GPU compute channels, the camera RCE). Both paths boot the
-same `slmos` build: kexec loads `slmos.elf`; UEFI loads `slmos.bin`.
+the primary path for work that needs state Linux leaves behind (the
+GPU compute channels the helpers create). Both paths boot the same
+`slmos` build: kexec loads `slmos.elf`; UEFI loads `slmos.bin`.
 
 **Status (2026-11-03):** boots to the `slmos>` shell 10/10 on
 jetson-nano-2 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
-timer preemption on every CPU, serial console input and output.
+timer preemption on every CPU, serial console input and output, and
+USB networking (#1084): SLM-OS powers XUSB up itself, enumerates the
+onboard hub and the RTL8153 behind it, and gets a DHCP lease; 10/10
+boots answered ping and the telnet shell.
 
 ---
 
@@ -191,9 +194,41 @@ accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
 | Preemption | Hardware timer ticks on every CPU (patched BL31) |
 | Memory | Same PMM regions as kexec; UEFI's only firmware-owned RAM below `0x240000000` is 128 KB of RuntimeServicesData at `0xFFFE0000`, which the PMM range already stops at |
 | BPMP | IVC handshake and MRQ calls work |
-| GPU | GA10B probe works; no compute (no Linux-created channels to inherit) |
-| USB / network | **Not available.** `xhci_init` skips the controller: XUSB is unpowered and its falcon firmware is not loaded without Linux |
-| PCIe, camera | Not tested after a UEFI-direct boot; both drivers depend on state Linux sets up (PCIe already reports no backend on Jetson) |
+| USB / network | Works (#1084). `xhci_init` brings XUSB up from cold (see [XUSB cold bring-up](#xusb-cold-bring-up)); the hub on usb2-1 and the RTL8153 behind it enumerate, CDC-ECM binds; DHCP, ping and the telnet shell work. USB2 only: the SuperSpeed lanes are not used |
+| Camera RCE | Works: `rcediag` completes HELLO, PING and `CH_SETUP`. MB2 loads the RCE firmware before UEFI, and `camrtc_init` powers RCE through BPMP the same way it does after kexec |
+| GPU | GA10B probe works; no compute. Compute dispatch adopts channels the Linux helpers create before kexec (`slmos-kexec`), so it stays on the kexec path; GSP-RM bring-up fails cleanly ("firmware missing") |
+| PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
+
+### XUSB cold bring-up
+
+`kernel/drivers/usb/xhci/xusb_t234_cold.c` repeats what NVIDIA's own
+UEFI drivers do when they start the controller
+(`XhciControllerDxe`, `UsbPadCtlTegra234.c` in edk2-nvidia; cached at
+`~/slmos-ref/tegra-l4t/edk2-nvidia-usb/`). UEFI's ExitBootServices
+handler halts the controller, powers the pads down and power-gates
+XUSBA/XUSBC, so all of it has to be redone:
+
+1. BPMP: deassert `XUSB_PADCTL` reset; enable the fuse, `pll_e`,
+   `utmip_pll`, `usb2_trk` and XUSB core/falcon/fs/ss clocks.
+2. BPMP: power XUSBA (SuperSpeed partition) and XUSBC (host).
+3. Pads: read `FUSE_USB_CALIB_0` / `_EXT_0`, power the bias pad and run
+   tracking, program the USB2 pads of the host ports (usb2-1 hub,
+   usb2-2 M.2), override VBUS/ID to host. The USB-C port (usb2-0) is a
+   device-mode port and is left alone.
+4. FPCI: BAR0/BAR2 decode, `AXI_CFG = 5`, memory space + bus master.
+5. Wait for `USBSTS.CNR` to clear.
+
+No falcon firmware is loaded: Tegra234 boots the falcon from IFR
+firmware (MB2 logs `xusb: Authentication Finalize Done` / `Binary xusb
+loaded`), which is why Linux's `tegra234_soc` has no `.firmware`. The
+pad values the helpers produce match the registers Linux programs on
+jetson-nano-2 (pinned in `kernel/tests/test_xhci_tegra.c`).
+
+The driver then treats the bus as freshly reset: the first connected
+USB2 root port is enumerated without waiting for a re-plug, and devices
+are addressed with `ADDRESS_DEVICE` (BSR=0) so the controller assigns
+the USB address. The kexec-only paths (slot handoff, retained-address
+probes) are skipped.
 
 ## Findings
 
@@ -223,8 +258,10 @@ where the two disagree.
 3. **Unpowered peripherals stop the board instead of reading
    `0xFFFFFFFF`.** The first XUSB aperture read after a UEFI-direct boot
    produced an SError that BL31 escalated to "Unhandled Exception in
-   EL3". `xhci_init` now checks the boot source before touching the
-   hardware.
+   EL3". `xhci_init` now powers XUSB up (#1084) before the first
+   aperture access. Unbacked registers inside a powered block do the
+   same: `peek 0x03520000 256` stopped the board at padctl offset
+   `0x38`, so read padctl one known register at a time.
 4. **BPMP state queries do not show what Linux left on.** `MRQ_PG`
    `GET_STATE` for XUSBC and `MRQ_CLK` `IS_ENABLED` for `xusb_core_host`
    both read "off" from SLM-OS after kexec, while the controller was
@@ -237,6 +274,25 @@ where the two disagree.
    to CPU 0's NDIV in either direction.
 6. **UEFI 36.4.7 runs at EL2 with `HCR_EL2 = 0x88000000`** (TGE and RW,
    E2H clear), confirming the archived §5b correction.
+7. **UEFI leaves the DTB above the RAM identity map.** The blob sits in
+   BootServicesData at `0x2679DF000`, above the `0x240000000` limit of
+   the kernel's RAM mapping. `dtb_parse` runs before the MMU is on and
+   reads it fine; the first FDT walk afterwards (the xHCI handoff
+   loaders searching for `/slmos-handoff`) ended in a RAS
+   "Address Range Error" (`ADDR = 0x80000000401ffd40`) and a powered-off
+   core. `vmm_map_firmware_dtb()` now maps the blob read-only at 4 KB
+   granularity when no RAM mapping covers it (#1084).
+8. **The PORTSC reset ack disabled the port.** After `PRC`, the ack was
+   built as `(portsc & ~RW1CS) | PRC`, which still carries `PED`. PED is
+   write-1-to-disable, so the write disabled the port the reset had just
+   enabled: the hub went from `0x00200e03` (enabled, high speed) to
+   `0x000006e1` (PED=0, Polling) on every attempt. All PORTSC
+   read-modify-writes now start from a Linux-style neutral value
+   (`xhci_portsc_neutral`). The kexec path ran the same code, which is
+   the likely source of its "PED=0 / PLS=7 after reset" retries.
+9. **A cold port has no speed until it is reset.** A connected USB2
+   port reports CCS=1, PED=0, speed 0 and PLS=Polling, so the kexec
+   port scan, which keys on a decoded speed, found no device.
 
 ## Troubleshooting
 
@@ -245,5 +301,8 @@ where the two disagree.
 | L4TLauncher / Linux boots instead of SLM-OS | BootNext not set (deploy script failed), or the image on the ESP is not a PE file |
 | `reloc: ABORT ...` then Linux boots | The relocation check refused the move; the line names the reason |
 | Console stops after `C calling ExitBootServices` | Post-EBS fault before `primary_cpu`; the early VBAR_EL2 handler prints `!FAULT` with ESR/ELR/FAR over UARTC if it is a synchronous exception |
-| `Unhandled Exception in EL3` later in boot | A driver touched an unpowered block; gate it on `boot_source_is_uefi()` |
+| `Unhandled Exception in EL3` later in boot | A driver touched an unpowered block (or an unbacked register); power it first or gate it on `boot_source_is_uefi()` |
+| `xusb-cold: step N/5` is the last console line | The step stopped the board: 1-2 are BPMP calls, 3 pads/fuse MMIO, 4 FPCI, 5 the CNR wait |
+| `xusb-cold: controller not ready, USBSTS=...` | CNR never cleared: the falcon did not start from IFR firmware |
+| `cdc_ecm: no USB device` after a UEFI boot | No connected USB2 root port at enumeration; check the `xhci: cold boot — device on USB2 PORTSC[...]` line |
 | Board stuck in SLM-OS on every power cycle | A `BOOTAA64.efi` reached the NVMe ESP, or BootOrder was changed. Pick the SD entry from the UEFI boot manager (F11 at the prompt, via `serial_send keys=["F11"]`) and fix it from Linux |

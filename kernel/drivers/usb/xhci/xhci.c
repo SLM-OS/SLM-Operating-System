@@ -1170,7 +1170,8 @@ static int xhci_reset(void)
         return -1;
     }
     INFO("xhci: skipping HCRST on Tegra (Falcon-reset is BPMP-only); "
-         "using Linux's halted state as the init baseline");
+         "using the %s halted state as the init baseline",
+         boot_source_is_uefi() ? "freshly powered" : "Linux-left");
     return 0;
 }
 
