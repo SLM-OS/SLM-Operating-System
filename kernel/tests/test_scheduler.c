@@ -3186,6 +3186,126 @@ static void test_deadline_boost_raises_priority(void)
     t->id = 0;
 }
 
+#ifdef CONFIG_AI_SCHEDULER
+#include "../sched/ai/ai_types.h"   /* AI_PRIO_LOWER / KEEP / RAISE */
+
+extern uint32_t sched_ai_test_assign_with_action(struct task *task,
+                                                 uint8_t core,
+                                                 uint8_t priority_adj,
+                                                 uint8_t preempt);
+
+/*
+ * Test (#1069): priority_adj steps between the kernel's priority levels
+ * the way the training simulator does (0 lower, 1 keep, 2 raise).
+ */
+static void test_ai_priority_step_levels(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH,
+        sched_ai_step_priority(TASK_PRIORITY_NORMAL, AI_PRIO_RAISE));
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW,
+        sched_ai_step_priority(TASK_PRIORITY_NORMAL, AI_PRIO_LOWER));
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL,
+        sched_ai_step_priority(TASK_PRIORITY_NORMAL, AI_PRIO_KEEP));
+    /* Clamped at both ends. */
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL,
+        sched_ai_step_priority(TASK_PRIORITY_CRITICAL, AI_PRIO_RAISE));
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_IDLE,
+        sched_ai_step_priority(TASK_PRIORITY_IDLE, AI_PRIO_LOWER));
+    /* Off-level values snap to the level below first, as in the sim. */
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL,
+        sched_ai_step_priority(3, AI_PRIO_RAISE));
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_IDLE,
+        sched_ai_step_priority(1, AI_PRIO_LOWER));
+    /* Out-of-range adj is a keep. */
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL,
+        sched_ai_step_priority(TASK_PRIORITY_NORMAL, 7));
+}
+
+/*
+ * Test (#1069): an AI decision's priority survives enqueue. Before the
+ * fix, ai_assign_cpu_common wrote effective_priority and
+ * add_to_cpu_queue_locked's update_deadline_boost rewrote it to the
+ * base priority before it ordered anything. Goes through the real
+ * assign path with a forced action.
+ */
+static void test_ai_priority_action_survives_enqueue(void)
+{
+    struct task *t = task_create("ai_prio", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->priority);
+    task_set_affinity(t, 0);
+    TEST_ASSERT_TRUE(sched_ai_priority_actions_enabled());
+
+    static const struct { uint8_t adj; uint8_t want; } cases[] = {
+        { AI_PRIO_RAISE, TASK_PRIORITY_HIGH },
+        { AI_PRIO_KEEP,  TASK_PRIORITY_NORMAL },
+        { AI_PRIO_LOWER, TASK_PRIORITY_LOW },
+    };
+
+    irq_flags_t flags = irq_save();
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        t->ai_priority = TASK_AI_PRIORITY_NONE;
+        t->effective_priority = t->priority;
+        TEST_ASSERT_EQUAL_UINT32(0, sched_ai_test_assign_with_action(
+            t, 0, cases[i].adj, 0));
+        TEST_ASSERT_EQUAL_UINT8(cases[i].want, t->ai_priority);
+        scheduler_add_task_to_cpu(t, 0);
+        TEST_ASSERT_EQUAL_UINT8(cases[i].want, t->effective_priority);
+        scheduler_remove_task(t);
+    }
+
+    /* Preempt alone changes nothing (#1077). */
+    t->ai_priority = TASK_AI_PRIORITY_NONE;
+    t->effective_priority = t->priority;
+    (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_KEEP, 1);
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->effective_priority);
+    scheduler_remove_task(t);
+
+    /* Placement-only mode: the decision sets no level. */
+    sched_ai_set_priority_actions(false);
+    t->ai_priority = TASK_AI_PRIORITY_NONE;
+    (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_AI_PRIORITY_NONE, t->ai_priority);
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->effective_priority);
+    scheduler_remove_task(t);
+    sched_ai_set_priority_actions(true);
+
+    /* An explicit priority overrides the last AI decision. */
+    (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
+    task_set_priority(t, TASK_PRIORITY_LOW);
+    TEST_ASSERT_EQUAL_UINT8(TASK_AI_PRIORITY_NONE, t->ai_priority);
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, t->effective_priority);
+    scheduler_remove_task(t);
+    irq_restore(flags);
+
+    t->id = 0;
+}
+
+/*
+ * Test (#1069): a deadline boost never lowers an AI-raised priority.
+ */
+static void test_ai_priority_deadline_boost_never_lowers(void)
+{
+    struct task *t = task_create("ai_prio_dl", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+    /* 20 ms left: the HIGH band (between critical_ns and high_ns). */
+    task_set_deadline(t, slm_get_time_ns() + 20ULL * 1000000ULL);
+
+    irq_flags_t flags = irq_save();
+    t->ai_priority = TASK_PRIORITY_CRITICAL;
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
+    scheduler_remove_task(t);
+    irq_restore(flags);
+
+    t->id = 0;
+}
+#endif /* CONFIG_AI_SCHEDULER */
+
 /*
  * Test: Isolated cores excluded from round-robin dispatch.
  * Isolates a core, dispatches multiple tasks, verifies none land on it.
@@ -5680,6 +5800,9 @@ int test_suite_scheduler(void)
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler library tests (only with -DENABLE_AI_SCHEDULER=ON) */
     RUN_TEST(test_ai_extract_state_writes_all);
+    RUN_TEST(test_ai_priority_step_levels);
+    RUN_TEST(test_ai_priority_action_survives_enqueue);
+    RUN_TEST(test_ai_priority_deadline_boost_never_lowers);
     RUN_TEST(test_ai_policies_registered);
     RUN_TEST(test_ai_policy_switch_to_mlp_and_back);
     RUN_TEST(test_fp_save_restore_callable);

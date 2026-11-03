@@ -221,7 +221,7 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
  *
  *   p=<policy_id>           one char from ADMIN_TEL_AI_POLICY_*
  *   c=<core>                core_assignment (0..cpu_count-1) — success only
- *   pa=<priority_adj>       0=none, 1=boost, 2=reduce — success only
+ *   pa=<priority_adj>       0=lower, 1=keep, 2=raise (#1069) — success only
  *   pe=<preempt>            0=no, 1=yes — success only
  *   dt=<ns>                 wall-clock decision latency
  *   fb=<0|1>                fallback flag — 1 when AI inference failed

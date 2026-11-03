@@ -737,8 +737,8 @@ CPU-id clamping: the cascade was trained on a 6-core space; on Pi 5
 (`cpu_count == 4`) the core classifier can emit 4 or 5. The policy
 clamps via modulo and continues, with a one-shot WARN. Other than
 that, the assign_cpu path mirrors `ai_mlp` exactly — same isolation
-check, same priority-adjust + preempt encoding (1 = boost, 2 = reduce,
-preempt bit raises one priority level).
+check, same priority-adjust handling (see "AI priority actions" below);
+its labels use the same lower/keep/raise encoding.
 
 ##### Wire format: XGB1 vs XGBC
 
@@ -784,10 +784,35 @@ Output: logits[42] → argmax → decode(core, priority_adj, preempt)
 
 **Action decoding:** The argmax index encodes three decisions:
 - `preempt = idx % 2` (0=no, 1=yes)
-- `priority_adj = (idx / 2) % 3` (0=none, 1=boost, 2=reduce)
+- `priority_adj = (idx / 2) % 3` (0=lower, 1=keep, 2=raise)
 - `core_assignment = idx / 6` (0 to num_cores-1)
 
 Invalid actions (core out of range, isolated core) fall back to the heuristic policy.
+
+**AI priority actions (#1069).** The encoding is the training
+simulator's (`slm-os-scheduler-ai` `slm_sim/actions.py`). Lower and
+raise move the task one kernel priority level (0/2/4/6/7) from its
+current effective priority, clamped at IDLE and CRITICAL;
+`sched_ai_step_priority()` mirrors the simulator's `_adjust_priority`.
+The result is stored in `task->ai_priority` and replaces `priority` as
+the base of every effective-priority recompute until the task's next
+decision (`scheduler_add_task` clears it first, `task_set_priority`
+overrides it). Deadline boosts apply on top and never lower it. Before
+#1069 the policies wrote `effective_priority` directly, which
+`update_deadline_boost` overwrote on enqueue, and decoded 1 as boost
+and 2 as reduce. Priority actions never took effect.
+
+- `sched ai-prio off` switches to placement-only mode (the old
+  behaviour, for reproducing earlier comparisons); `sched ai-prio on`
+  is the default.
+- The `preempt` bit is decoded but not acted on. In the simulator it
+  displaces a lower-priority task already running on the target core;
+  the kernel has no safe hook for that from `assign_cpu` (#1077).
+- Tests: `test_ai_priority_step_levels`,
+  `test_ai_priority_action_survives_enqueue` (forces actions through
+  the real assign path via `sched_ai_test_assign_with_action`) and
+  `test_ai_priority_deadline_boost_never_lowers`, under `make test
+  AI_SCHED=ON`.
 
 #### State Vector (108 dimensions)
 

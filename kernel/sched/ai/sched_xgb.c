@@ -139,23 +139,11 @@ static uint32_t ai_xgb_assign_cpu(struct task *task)
         return sched_policy_heuristic.assign_cpu(task);
     }
 
-    /* Apply priority adjustment using the same encoding as sched_ai.c:
-     *   1 = boost, 2 = reduce. Other values are no-ops. */
-    if (prio_label == 1) {
-        if (task->effective_priority < TASK_PRIORITY_CRITICAL) {
-            task->effective_priority++;
-        }
-    } else if (prio_label == 2) {
-        if (task->effective_priority > TASK_PRIORITY_IDLE) {
-            task->effective_priority--;
-        }
-    }
-
-    /* Preempt: boost priority so pick_next_task prefers this task. */
-    if (preempt_label != 0
-     && task->effective_priority < TASK_PRIORITY_CRITICAL) {
-        task->effective_priority++;
-    }
+    /* Same handling as ai_assign_cpu_common (#1069): the labels use the
+     * simulator's encoding (0 lower, 1 keep, 2 raise), and preempt has
+     * no priority effect (#1077). */
+    (void)preempt_label;
+    sched_ai_apply_priority_action(task, (uint8_t)prio_label);
 
     FP_CONTEXT_RESTORE();
     return core;

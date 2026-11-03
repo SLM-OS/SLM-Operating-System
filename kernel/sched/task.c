@@ -281,6 +281,9 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->assigned_cpu = 0;
     task->priority = priority;
     task->effective_priority = priority;
+#ifdef CONFIG_AI_SCHEDULER
+    task->ai_priority = TASK_AI_PRIORITY_NONE;  /* slot may be reused */
+#endif
     task->input_wait = 0;   /* slot may be reused (#1047) */
     task->deadline_ns = 0;
     task->wake_time_ns = 0;
@@ -368,6 +371,9 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->assigned_cpu = 0;                  /* Default to CPU 0 */
     task->priority = priority;
     task->effective_priority = priority;
+#ifdef CONFIG_AI_SCHEDULER
+    task->ai_priority = TASK_AI_PRIORITY_NONE;  /* slot may be reused */
+#endif
     task->deadline_ns = 0;                   /* No deadline by default */
     task->wake_time_ns = 0;                  /* Not sleeping */
     task->sleep_next = NULL;
@@ -999,8 +1005,15 @@ void task_set_priority(struct task *task, uint8_t priority)
     }
 
     task->priority = priority;
+#ifdef CONFIG_AI_SCHEDULER
+    /* An explicit priority overrides the last AI decision (#1069). */
+    task->ai_priority = TASK_AI_PRIORITY_NONE;
+#endif
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->priority);
+#ifdef CONFIG_AI_SCHEDULER
+    cache_clean(&task->ai_priority);
+#endif
 #endif
 
     /* Update effective priority (may be boosted by deadline) */

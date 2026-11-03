@@ -2236,7 +2236,7 @@ static int l_task_migrate(lua_State *L) {
  *   - the task id is unknown or terminated
  *   - the AI policy has not run on this task yet (last_ai_action == -1)
  *
- * priority_adj is 0/1/2 (none/boost/reduce). preempt is 0/1. raw is the
+ * priority_adj is 0/1/2 (lower/keep/raise, #1069). preempt is 0/1. raw is the
  * packed action index used inside the AI scheduler for histogram keys.
  */
 static int l_ai_sched_decision(lua_State *L) {

@@ -129,21 +129,16 @@ static uint32_t ai_assign_cpu_common(
         return sched_policy_heuristic.assign_cpu(task);
     }
 
-    /* Apply priority adjustment */
-    if (action.priority_adj == 1) {
-        /* Boost */
-        if (task->effective_priority < TASK_PRIORITY_CRITICAL)
-            task->effective_priority++;
-    } else if (action.priority_adj == 2) {
-        /* Reduce */
-        if (task->effective_priority > TASK_PRIORITY_IDLE)
-            task->effective_priority--;
-    }
-
-    /* Preempt: boost priority so pick_next_task prefers this task */
-    if (action.preempt && task->effective_priority < TASK_PRIORITY_CRITICAL) {
-        task->effective_priority++;
-    }
+    /* Priority: record the model's lower/keep/raise as the task's level
+     * until its next decision (#1069). Writing effective_priority here,
+     * as this code used to, was overwritten by update_deadline_boost on
+     * enqueue before it ever ordered a run queue.
+     *
+     * Preempt has no priority effect. In the training simulator it only
+     * displaces a lower-priority task already running on the target
+     * core; the kernel has no safe hook for that from assign_cpu, so it
+     * is not acted on yet (tracked in #1077). */
+    sched_ai_apply_priority_action(task, action.priority_adj);
 
     /* Successful AI decision — emit tel.aix audit sample. */
     admin_telemetry_record_ai_decision(policy_id,
@@ -337,6 +332,31 @@ static void ai_ppo_shutdown(void)
              ai_ppo_stats.decisions, ai_ppo_stats.fallbacks,
              (unsigned long)avg_ns);
     }
+}
+
+/* Test hook (#1069): run the shared AI assign path with a fixed action,
+ * so tests cover decode, validation and the priority store end to end
+ * without depending on what a trained model happens to output. Always
+ * compiled (test_scheduler.c is linked into every kernel); production
+ * images drop it via --gc-sections. */
+static struct ai_sched_action test_forced_action;
+
+static int test_forced_infer(const float *state, struct ai_sched_action *out)
+{
+    (void)state;
+    *out = test_forced_action;
+    return 0;
+}
+
+uint32_t sched_ai_test_assign_with_action(struct task *task, uint8_t core,
+                                          uint8_t priority_adj, uint8_t preempt)
+{
+    static struct ai_policy_stats test_stats;
+    test_forced_action.core_assignment = core;
+    test_forced_action.priority_adj = priority_adj;
+    test_forced_action.preempt = preempt;
+    return ai_assign_cpu_common(task, test_forced_infer, &test_stats,
+                                ADMIN_TEL_AI_POLICY_MLP);
 }
 
 static uint32_t ai_ppo_assign_cpu(struct task *task)

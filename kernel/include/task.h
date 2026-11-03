@@ -286,8 +286,21 @@ struct task {
      * does not shift TASK_CONTEXT_OFFSET for non-AI builds. */
     int32_t last_ai_action;             /* -1 when unset */
     uint32_t _ai_pad;                   /* alignment */
+
+    /* Priority level the AI policy chose at this task's last decision
+     * (#1069), or TASK_AI_PRIORITY_NONE. While set, it replaces
+     * `priority` as the base of every effective-priority recompute
+     * (update_deadline_boost), so the decision holds until the task's
+     * next decision, as in the training simulator. Cleared at the start
+     * of each scheduler_add_task and by task_set_priority. */
+    uint8_t ai_priority;
+    uint8_t _ai_prio_pad[7];            /* alignment */
 #endif
 };
+
+#ifdef CONFIG_AI_SCHEDULER
+#define TASK_AI_PRIORITY_NONE  0xFFu
+#endif
 
 /* Task function prototype */
 typedef void (*task_entry_t)(void *arg);
