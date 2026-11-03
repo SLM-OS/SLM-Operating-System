@@ -12,6 +12,7 @@
 #ifndef SSHD_TEST_H
 #define SSHD_TEST_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -33,5 +34,10 @@ uint16_t sshd_test_ring_free(void *handle);
 /* Usable capacity (bytes). One less than the underlying buffer size
  * because the ring reserves a byte for full-vs-empty disambiguation. */
 size_t   sshd_test_ring_capacity(void);
+
+/* Pre-auth deadline predicate used by the session task (#1067). */
+bool     sshd_test_preauth_expired(uint64_t start, uint64_t now,
+                                   uint64_t freq, uint32_t limit_s);
+uint32_t sshd_test_preauth_timeout_s(void);
 
 #endif /* SSHD_TEST_H */

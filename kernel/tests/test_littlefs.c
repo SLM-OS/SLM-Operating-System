@@ -1114,6 +1114,48 @@ static void test_rename_through_mount(void)
 }
 
 /**
+ * Test rename over an existing destination replaces it (#1067).
+ *
+ * sshd's passwd and host-key saves write a temp file and rename it
+ * over the live one, with no remove first: removing first leaves a
+ * power-loss window with no copy on disk. That depends on lfs_rename
+ * replacing the destination in a single commit, pinned here.
+ */
+static void test_rename_replaces_existing_destination(void)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx("/mnt/files", &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd = littlefs_file_open(mnt, "/replace_dst.txt",
+                                LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    littlefs_file_write(mnt, fd, "old", 3);
+    littlefs_file_close(mnt, fd);
+
+    fd = littlefs_file_open(mnt, "/replace_src.txt",
+                            LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    littlefs_file_write(mnt, fd, "new-content", 11);
+    littlefs_file_close(mnt, fd);
+
+    TEST_ASSERT_EQUAL(0, littlefs_rename(mnt, "/replace_src.txt",
+                                         "/replace_dst.txt"));
+
+    struct lfs_entry_info info;
+    TEST_ASSERT_NOT_EQUAL(0, littlefs_stat_path(mnt, "/replace_src.txt", &info));
+
+    char buf[32] = {0};
+    fd = littlefs_file_open(mnt, "/replace_dst.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL(11, littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    littlefs_file_close(mnt, fd);
+    TEST_ASSERT_EQUAL_STRING("new-content", buf);
+
+    littlefs_remove(mnt, "/replace_dst.txt");
+}
+
+/**
  * Test truncate through mount context.
  */
 static void test_truncate_through_mount(void)
@@ -1309,6 +1351,7 @@ int test_suite_littlefs(void)
     RUN_TEST(test_write_through_mount);
     RUN_TEST(test_mkdir_through_mount);
     RUN_TEST(test_rename_through_mount);
+    RUN_TEST(test_rename_replaces_existing_destination);
     RUN_TEST(test_truncate_through_mount);
     RUN_TEST(test_append_through_mount);
     RUN_TEST(test_stale_handle_rejected);

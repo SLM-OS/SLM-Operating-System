@@ -67,6 +67,13 @@
 
 #define SSHD_RX_RING_BYTES   8192u
 
+/* Pre-auth deadline (#1067): a connection must finish KEX and user
+ * auth (both run inside wolfSSH_accept) within this many seconds or
+ * the session task drops it. Without it the accept loop waits on
+ * WS_WANT_READ forever, so SSHD_MAX_SESSIONS idle TCP connects hold
+ * every slot. OpenSSH's LoginGraceTime defaults to 120 s. */
+#define SSHD_PREAUTH_TIMEOUT_S   60u
+
 /* ---------------------------------------------------------------- */
 /* Per-connection state                                              */
 /* ---------------------------------------------------------------- */
@@ -98,7 +105,7 @@ static uint16_t            g_listen_port;
 static WOLFSSH_CTX        *g_ctx;
 static struct sshd_conn    g_conns[SSHD_MAX_SESSIONS];
 
-/* All four counters mutate under g_mod_lock. Reads (via
+/* The counters below mutate under g_mod_lock. Reads (via
  * sshd_get_stats) are best-effort snapshots that don't lock; the
  * documented contract is that the values are advisory diagnostics, not
  * fenced observations. `volatile` keeps the compiler from CSE-ing the
@@ -106,6 +113,7 @@ static struct sshd_conn    g_conns[SSHD_MAX_SESSIONS];
 static volatile uint32_t   g_accepted;
 static volatile uint32_t   g_kex_completed;
 static volatile uint32_t   g_kex_failed;
+static volatile uint32_t   g_kex_timeouts;
 static volatile uint32_t   g_active;
 static volatile int        g_last_kex_err;
 static volatile uint32_t   g_last_kex_cpu;
@@ -435,6 +443,19 @@ static void on_tcp_err(void *arg, err_t err)
 /* Session task — drives wolfSSH_accept                              */
 /* ---------------------------------------------------------------- */
 
+/* True once `limit_s` seconds of counter time have passed since
+ * `start`. A zero `freq` (counter frequency unknown) never expires, so
+ * a timer that isn't up can't drop every connection immediately.
+ * Unsigned subtraction handles counter wrap. */
+static bool sshd_preauth_expired(uint64_t start, uint64_t now,
+                                 uint64_t freq, uint32_t limit_s)
+{
+    if (freq == 0u) {
+        return false;
+    }
+    return (now - start) >= freq * (uint64_t)limit_s;
+}
+
 static void sshd_session_task(void *arg)
 {
     struct sshd_conn *c = (struct sshd_conn *)arg;
@@ -443,8 +464,12 @@ static void sshd_session_task(void *arg)
         return;
     }
 
-    /* Yield-loop on wolfSSH_accept until KEX completes or fatal error. */
+    /* Yield-loop on wolfSSH_accept until KEX + auth complete, a fatal
+     * error, or the pre-auth deadline. timer_get_count() reads
+     * CNTPCT/TSC, so the deadline holds even without timer IRQs. */
     bool kex_ok = false;
+    uint64_t preauth_start = timer_get_count();
+    uint64_t counter_freq  = timer_get_frequency();
     for (;;) {
         int ret = wolfSSH_accept(c->ssh);
         if (ret == WS_SUCCESS) {
@@ -469,6 +494,19 @@ static void sshd_session_task(void *arg)
                 spin_unlock_irqrestore(&g_mod_lock, mflags);
                 uart_printf("[SSHD] conn %u: peer disconnected during KEX\r\n",
                             (unsigned)c->session_id);
+                break;
+            }
+            if (sshd_preauth_expired(preauth_start, timer_get_count(),
+                                     counter_freq, SSHD_PREAUTH_TIMEOUT_S)) {
+                irq_flags_t mflags = spin_lock_irqsave(&g_mod_lock);
+                g_kex_failed++;
+                g_kex_timeouts++;
+                g_last_kex_err = err;
+                g_last_kex_cpu = cpu_id();
+                spin_unlock_irqrestore(&g_mod_lock, mflags);
+                uart_printf("[SSHD] conn %u: no KEX/auth within %u s, dropping\r\n",
+                            (unsigned)c->session_id,
+                            (unsigned)SSHD_PREAUTH_TIMEOUT_S);
                 break;
             }
             continue;
@@ -799,6 +837,7 @@ void sshd_get_stats(struct sshd_stats *out)
     out->connections_accepted = g_accepted;
     out->kex_completed        = g_kex_completed;
     out->kex_failed           = g_kex_failed;
+    out->kex_timeouts         = g_kex_timeouts;
     out->active               = g_active;
     out->last_kex_err         = g_last_kex_err;
     out->last_kex_cpu         = g_last_kex_cpu;
@@ -886,4 +925,15 @@ size_t sshd_test_ring_capacity(void)
 {
     /* One byte reserved to distinguish full from empty (see ring_free_locked). */
     return SSHD_RX_RING_BYTES - 1u;
+}
+
+bool sshd_test_preauth_expired(uint64_t start, uint64_t now,
+                               uint64_t freq, uint32_t limit_s)
+{
+    return sshd_preauth_expired(start, now, freq, limit_s);
+}
+
+uint32_t sshd_test_preauth_timeout_s(void)
+{
+    return SSHD_PREAUTH_TIMEOUT_S;
 }

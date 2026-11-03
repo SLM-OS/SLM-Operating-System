@@ -161,9 +161,11 @@ static int write_atomic(struct lfs_mount *mnt,
         (void)littlefs_remove(mnt, tmp_path);
         return -1;
     }
-    /* Remove the existing final (if any) before rename — littlefs
-     * doesn't atomic-replace on rename. */
-    (void)littlefs_remove(mnt, final_path);
+    /* No remove before the rename: lfs_rename replaces an existing
+     * destination in a single commit (pinned by
+     * test_rename_replaces_existing_destination), while removing
+     * first left a power-loss window with no host key on disk and a
+     * new key, i.e. a changed fingerprint, on next boot (#1067). */
     if (littlefs_rename(mnt, tmp_path, final_path) != 0) {
         (void)littlefs_remove(mnt, tmp_path);
         return -1;

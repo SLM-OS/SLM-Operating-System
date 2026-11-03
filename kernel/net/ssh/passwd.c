@@ -149,7 +149,11 @@ static int write_file_atomic(struct lfs_mount *mnt, const char *buf, size_t len)
         (void)littlefs_remove(mnt, PASSWD_TMP_LFS);
         return -1;
     }
-    (void)littlefs_remove(mnt, PASSWD_LFS);
+    /* No remove before the rename: lfs_rename replaces an existing
+     * destination atomically, and removing first left a power-loss
+     * window with no /etc/passwd at all, after which the bootstrap
+     * gate rejects every SSH login until users are re-added on the
+     * console (#1067). */
     if (littlefs_rename(mnt, PASSWD_TMP_LFS, PASSWD_LFS) != 0) {
         (void)littlefs_remove(mnt, PASSWD_TMP_LFS);
         return -1;
