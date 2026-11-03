@@ -25,7 +25,8 @@ enum ga10b_cold_step {
     GA10B_COLD_ENGINES,     /* engines out of reset, GR reset cycled */
     GA10B_COLD_FB,          /* FB/MMU: sysmem flush + MMU debug pages */
     GA10B_COLD_GR_HW,       /* GR non-ctx register loads from the netlist */
-    GA10B_COLD_ACR,         /* ACR on the GSP loads FECS/GPCCS into WPR */
+    GA10B_COLD_ACR,         /* ACR on the GSP loads PMU/FECS/GPCCS into WPR */
+    GA10B_COLD_PMU,         /* LS PMU RTOS booted, INIT message received */
     GA10B_COLD_FALCONS,     /* FECS/GPCCS started, ctxsw ucode ready */
     GA10B_COLD_GR_INIT,     /* GR/FB/LTC/CE setup nvgpu does after start */
     GA10B_COLD_STEP_COUNT,

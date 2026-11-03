@@ -28,6 +28,8 @@
 #include "ga10b_netlist.h"
 #include "ga10b_ctxsw_ucode.h"
 #include "ga10b_acr_blob.h"
+#include "ga10b_pmu.h"
+#include "ga10b_chan.h"
 #include "cache.h"
 #include "string.h"
 
@@ -170,6 +172,7 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_FB]      = "fb",
     [GA10B_COLD_GR_HW]   = "gr_hw",
     [GA10B_COLD_ACR]     = "acr",
+    [GA10B_COLD_PMU]     = "pmu",
     [GA10B_COLD_FALCONS] = "falcons",
     [GA10B_COLD_GR_INIT] = "gr_init",
 };
@@ -331,8 +334,16 @@ static int units_enable(uint32_t mask, bool enable)
  * (pulse GPCCS_ENGINE_RESET_CTL on the GPC broadcast, check GPC0 came
  * out of reset), device enable, then a PERFMON unit reset. After this
  * FECS registers answer instead of returning PRI poison. */
+/* Defined with the other GPU memory ops further down. */
+static const struct ga10b_gpu_ops cold_gpu_ops;
+
 static int step_engines(void)
 {
+    /* nvgpu programs FIFO/runlist/PBDMA state (doorbell enable,
+     * runlist interrupt vectors, ctxsw timeouts, PBDMA interrupt
+     * enables, USERD writeback timer) before the GR reset (trace
+     * lines 244-368). */
+    ga10b_chan_fifo_init(&cold_gpu_ops);
     uint32_t row1 = bar0_rd(NV_PTOP_DEVICE_INFO2(GA10B_GR_DEVINFO_ROW1));
     if ((row1 & 0xFFu) != GA10B_GR_RESET_ID) {
         WARN("ga10b-cold: device_info2[1]=0x%08x, GR reset_id %u expected",
@@ -607,7 +618,11 @@ static int step_gr_hw(void)
 static int step_acr(void)
 {
     struct ga10b_firmware_blob fecs, gpccs, fecs_sig, gpccs_sig, t, d, m;
+    struct ga10b_firmware_blob pmu_img, pmu_desc, pmu_sig;
     if (netlist_open() != 0 ||
+        ga10b_firmware_get(GA10B_FW_PMU_IMAGE, &pmu_img) < 0 ||
+        ga10b_firmware_get(GA10B_FW_PMU_DESC, &pmu_desc) < 0 ||
+        ga10b_firmware_get(GA10B_FW_PMU_SIG, &pmu_sig) < 0 ||
         ga10b_firmware_get(GA10B_FW_FECS, &fecs) < 0 ||
         ga10b_firmware_get(GA10B_FW_GPCCS, &gpccs) < 0 ||
         ga10b_firmware_get(GA10B_FW_FECS_SIG, &fecs_sig) < 0 ||
@@ -651,6 +666,14 @@ static int step_acr(void)
         .fecs_sig = fecs_sig.data, .fecs_sig_size = fecs_sig.size,
         .gpccs_sig = gpccs_sig.data, .gpccs_sig_size = gpccs_sig.size,
         .wpr_base = wpr.wpr_base,
+        /* L4T's configuration: the LS PMU is in the blob and bootstraps
+         * FECS/GPCCS lazily. ACR-only bootstrap is not usable with this
+         * firmware: the ctxsw ucode halts with mailbox6 = 0x98, and
+         * nvgpu with support_ls_pmu=false fails the same way. */
+        .include_pmu = true,
+        .pmu_image = pmu_img.data, .pmu_image_size = pmu_img.size,
+        .pmu_desc = pmu_desc.data, .pmu_desc_size = pmu_desc.size,
+        .pmu_sig = pmu_sig.data, .pmu_sig_size = pmu_sig.size,
     };
     static struct ga10b_acr_blob_layout lay;
     if (ga10b_acr_blob_layout(&bin, &lay) != GA10B_ACR_OK || lay.wpr_size > wpr.size) {
@@ -664,12 +687,18 @@ static int step_acr(void)
     size_t blob_pages = (lay.wpr_size + 4095u) / 4096u;
     void *blob = pmm_alloc_pages(blob_pages);
     struct ga10b_flcn2_acr_desc *desc = pmm_alloc_page();
+    void *ls_pmu_desc = pmm_alloc_page();
     int rc = -1;
-    if (blob && desc &&
-        ga10b_acr_blob_build(&bin, blob, blob_pages * 4096u, &lay) == GA10B_ACR_OK) {
+    if (blob && desc && ls_pmu_desc &&
+        ga10b_acr_blob_build(&bin, blob, blob_pages * 4096u, &lay) == GA10B_ACR_OK &&
+        ga10b_acr_copy_ls_pmu_desc(ls_pmu_desc, 4096, pmu_desc.data,
+                                   pmu_desc.size) == GA10B_ACR_OK) {
         cache_clean_range(blob, lay.wpr_size);
+        cache_clean_range(ls_pmu_desc, 4096);
         memset(desc, 0, 4096);
-        ga10b_acr_build_flcn2_desc(desc, (uint64_t)(uintptr_t)blob, lay.wpr_size);
+        ga10b_acr_build_flcn2_desc_ls_pmu(desc, (uint64_t)(uintptr_t)blob,
+                                          lay.wpr_size,
+                                          (uint64_t)(uintptr_t)ls_pmu_desc);
         cache_clean_range(desc, sizeof(*desc));
         INFO("ga10b-cold: LS blob 0x%lx (%u bytes), desc 0x%lx, WPR 0x%lx+0x%lx",
              (unsigned long)(uintptr_t)blob, (unsigned)lay.wpr_size,
@@ -704,7 +733,32 @@ static int fecs_method(uint32_t method, uint32_t data, uint32_t *ret)
     return -1;
 }
 
-/* ---- Step 7: start FECS/GPCCS ----
+/* LS PMU driver state (step_pmu boots it, step_falcons uses it). */
+static struct ga10b_pmu cold_pmu;
+
+/* Print what the driver parsed from the PMU INIT message and the raw
+ * first message-queue element in the super surface. */
+static void pmu_dump_init(void)
+{
+    const struct ga10b_pmu_init_msg *im = &cold_pmu.init;
+    INFO("ga10b-cold: PMU init: unit %u func %u status %u queues_start 0x%x "
+         "sw_area 0x%x+0x%x heap 0x%x/%u blks cmdq %u",
+         (unsigned)cold_pmu.init_unit_id, (unsigned)im->hdr.function,
+         (unsigned)im->status, (unsigned)im->queues_start,
+         (unsigned)im->sw_managed_area_offset, (unsigned)im->sw_managed_area_size,
+         (unsigned)cold_pmu.heap_base, (unsigned)cold_pmu.heap_blks,
+         (unsigned)cold_pmu.cmdq_index);
+    const uint8_t *ss = cold_pmu.cfg.super_surface.cpu;
+    if (!ss) return;
+    cache_invalidate_range(ss + GA10B_SS_FBQ_MSG_OFFSET, 64);
+    const uint32_t *w = (const uint32_t *)(ss + GA10B_SS_FBQ_MSG_OFFSET);
+    for (unsigned i = 0; i < 16u; i += 4u)
+        INFO("ga10b-cold: msgq[0]+%02x: %08x %08x %08x %08x", i * 4u,
+             (unsigned)w[i], (unsigned)w[i + 1], (unsigned)w[i + 2],
+             (unsigned)w[i + 3]);
+}
+
+/* ---- Step 8: start FECS/GPCCS ----
  *
  * nvgpu_gr_falcon_load_secure_ctxsw_ucode with ACR-loaded falcons:
  * start GPCCS, clear FECS mailbox 0, set mailbox 1, start FECS
@@ -734,6 +788,17 @@ static void gr_config_sm_ids(void)
 static int step_falcons(void)
 {
     gr_config_sm_ids();
+
+    /* gr_falcon_sec2_or_ls_pmu_coldboot_bootstrap: the PMU loads FECS
+     * and GPCCS from WPR (ACR INIT_WPR_REGION + BOOTSTRAP_GR_FALCONS). */
+    int prc = ga10b_pmu_bootstrap_ctxsw_falcons(&cold_pmu, 3000);
+    ga10b_pmu_dbg_drain(&cold_pmu);
+    if (prc != GA10B_PMU_OK) {
+        WARN("ga10b-cold: PMU did not bootstrap FECS/GPCCS rc=%d last_error=%d",
+             prc, cold_pmu.last_error);
+        pmu_dump_init();
+        return -1;
+    }
     bar0_wr(NV_PGRAPH_PRI_GPCS_GPCCS_CPUCTL_ALIAS, GR_CPUCTL_STARTCPU);
     bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
     bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(1), 1u);
@@ -771,11 +836,29 @@ static int step_falcons(void)
     return 0;
 }
 
-/* ---- Step 8: GR init support ----
+/* ga10b_ltc_lts_set_mgmt_setup (errata 200601972) and
+ * ga10b_fb_set_atomic_mode: RMW atomics, sys ncoh atomics in L2,
+ * mirrored into the HSHUB. nvgpu runs both right after ACR, before the
+ * PMU boots (trace 11220-11229). */
+static void ltc_fb_atomic_setup(void)
+{
+    uint32_t v = bar0_rd(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3);
+    bar0_wr(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3, v | LTC_SET_MGMT_3_DISALLOW_CLEAN_IMM);
+
+    v = bar0_rd(NV_PFB_PRI_MMU_CTRL);
+    v = (v & ~(FB_MMU_CTRL_ATOMIC_CAP_MODE_M | FB_MMU_CTRL_ATOMIC_SYS_NCOH_M)) |
+        FB_MMU_CTRL_ATOMIC_CAP_MODE_RMW;
+    bar0_wr(NV_PFB_PRI_MMU_CTRL, v);
+    v = bar0_rd(NV_PFB_FBHUB_NUM_ACTIVE_LTCS);
+    v = (v & ~FB_HUB_SYS_ATOMIC_MODE_M) | FB_HUB_SYS_ATOMIC_MODE_USE_RMW;
+    bar0_wr(NV_PFB_FBHUB_NUM_ACTIVE_LTCS, v);
+    bar0_wr(NV_PFB_HSHUB0_NUM_ACTIVE_LTCS, v);
+
+}
+
+/* ---- Step 9: GR init support ----
  *
  * What nvgpu does between FECS start and golden context creation:
- * ga10b_ltc_lts_set_mgmt_setup (errata 200601972), ga10b_fb_set_atomic_mode
- * (RMW atomics, sys ncoh atomics in L2, mirrored into the HSHUB),
  * ga10b_gr_init_gpc_mmu (GPC MMU copies of the FB MMU state), the
  * constant table (ga10b_gr_init_table.c) and the copy-engine device
  * enables. The table encodes this SKU's floorsweeping, so check it
@@ -791,18 +874,6 @@ static int step_gr_init(void)
              (unsigned)tpcs);
         return -1;
     }
-
-    uint32_t v = bar0_rd(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3);
-    bar0_wr(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3, v | LTC_SET_MGMT_3_DISALLOW_CLEAN_IMM);
-
-    v = bar0_rd(NV_PFB_PRI_MMU_CTRL);
-    v = (v & ~(FB_MMU_CTRL_ATOMIC_CAP_MODE_M | FB_MMU_CTRL_ATOMIC_SYS_NCOH_M)) |
-        FB_MMU_CTRL_ATOMIC_CAP_MODE_RMW;
-    bar0_wr(NV_PFB_PRI_MMU_CTRL, v);
-    v = bar0_rd(NV_PFB_FBHUB_NUM_ACTIVE_LTCS);
-    v = (v & ~FB_HUB_SYS_ATOMIC_MODE_M) | FB_HUB_SYS_ATOMIC_MODE_USE_RMW;
-    bar0_wr(NV_PFB_FBHUB_NUM_ACTIVE_LTCS, v);
-    bar0_wr(NV_PFB_HSHUB0_NUM_ACTIVE_LTCS, v);
 
     bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_CTRL,
             bar0_rd(NV_PFB_PRI_MMU_CTRL) & GPC_MMU_CTRL_COPY_MASK);
@@ -825,6 +896,119 @@ static int step_gr_init(void)
     return 0;
 }
 
+/* ---- GPU memory ops shared by the PMU VM and channel code ---- */
+static uint32_t ops_rd32(void *ctx, uint32_t off) { (void)ctx; return bar0_rd(off); }
+static void ops_wr32(void *ctx, uint32_t off, uint32_t v) { (void)ctx; bar0_wr(off, v); }
+static void ops_udelay(void *ctx, uint32_t us) { (void)ctx; udelay(us); }
+static void *ops_alloc_pages(void *ctx, uint32_t npages, uint64_t *phys)
+{
+    (void)ctx;
+    void *p = pmm_alloc_pages(npages);
+    if (!p) return NULL;
+    memset(p, 0, (size_t)npages * 4096u);
+    cache_clean_range(p, (size_t)npages * 4096u);
+    *phys = (uint64_t)(uintptr_t)p;   /* identity map, SMMU bypass */
+    return p;
+}
+static void ops_free_pages(void *ctx, void *cpu, uint32_t npages)
+{
+    (void)ctx;
+    pmm_free_pages(cpu, npages);
+}
+static void *ops_phys_to_cpu(void *ctx, uint64_t phys) { (void)ctx; return (void *)(uintptr_t)phys; }
+static void ops_clean(void *ctx, const void *p, size_t n) { (void)ctx; cache_clean_range(p, n); }
+static void ops_inval(void *ctx, const void *p, size_t n) { (void)ctx; cache_invalidate_range(p, n); }
+static void ops_log(void *ctx, const char *line) { (void)ctx; INFO("pmu-fw: %s", line); }
+
+static const struct ga10b_gpu_ops cold_gpu_ops = {
+    .rd32 = ops_rd32, .wr32 = ops_wr32, .udelay = ops_udelay,
+    .alloc_pages = ops_alloc_pages, .free_pages = ops_free_pages,
+    .phys_to_cpu = ops_phys_to_cpu,
+    .cache_clean = ops_clean, .cache_inval = ops_inval,
+};
+
+static const struct ga10b_pmu_ops cold_pmu_ops = {
+    .rd32 = ops_rd32, .wr32 = ops_wr32, .delay_us = ops_udelay,
+    .dma_clean = ops_clean, .dma_inval = ops_inval, .log_line = ops_log,
+};
+
+/* ---- Step 7: LS PMU (defined here, after the GPU memory ops) ----
+ *
+ * nvgpu_pmu_rtos_init on L4T: the PMU's own VM (nvgpu_init_system_vm)
+ * with the super surface and the RISC-V trace buffer mapped at fixed
+ * VAs below 512 MB, an instance block pointing at it, then the boot
+ * arguments through MAILBOX0/1 (EXTMEM2 offset), RISC-V start, BROM
+ * and priv-lockdown waits, and the RTOS INIT message (queue layout in
+ * the super surface). SLM-OS polls instead of taking the PMU IRQ, as
+ * nvgpu's own wait loop does. Perfmon and ELPG stay off (nvgpu's prod
+ * L4T build disables both). */
+#define PMU_VM_SUPER_SURFACE_VA  0x00100000ull
+#define PMU_VM_TRACE_BUF_VA      0x00210000ull
+
+static struct ga10b_vm cold_pmu_vm;
+
+static int pmu_buf(uint32_t bytes, struct ga10b_pmu_buf *b)
+{
+    struct ga10b_dma d;
+    if (ga10b_dma_alloc(&cold_gpu_ops, bytes, &d) != GA10B_CHAN_OK) return -1;
+    b->cpu = d.cpu;
+    b->addr = d.phys;
+    b->size = d.size;
+    return 0;
+}
+
+static int step_pmu(void)
+{
+    ltc_fb_atomic_setup();
+
+    struct ga10b_pmu_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (pmu_buf(GA10B_PMU_BOOT_ARGS_SIZE, &cfg.boot_args) ||
+        pmu_buf(GA10B_PMU_CORE_DUMP_SIZE, &cfg.core_dump) ||
+        pmu_buf(GA10B_PMU_SUPER_SURFACE_SIZE, &cfg.super_surface) ||
+        pmu_buf(GA10B_PMU_TRACE_BUF_SIZE, &cfg.trace_buf)) {
+        WARN("ga10b-cold: out of memory for PMU buffers");
+        return -1;
+    }
+    if (ga10b_vm_init(&cold_gpu_ops, &cold_pmu_vm) != GA10B_CHAN_OK ||
+        ga10b_vm_map(&cold_gpu_ops, &cold_pmu_vm, PMU_VM_SUPER_SURFACE_VA,
+                     cfg.super_surface.addr, cfg.super_surface.size, 0) != GA10B_CHAN_OK ||
+        ga10b_vm_map(&cold_gpu_ops, &cold_pmu_vm, PMU_VM_TRACE_BUF_VA,
+                     cfg.trace_buf.addr, cfg.trace_buf.size, 0) != GA10B_CHAN_OK) {
+        WARN("ga10b-cold: PMU VM setup failed");
+        return -1;
+    }
+    cfg.super_surface.gpu_va = PMU_VM_SUPER_SURFACE_VA;
+    cfg.trace_buf.gpu_va = PMU_VM_TRACE_BUF_VA;
+
+    struct ga10b_dma inst;
+    if (ga10b_dma_alloc(&cold_gpu_ops, GA10B_PMU_INST_BLOCK_SIZE, &inst) != GA10B_CHAN_OK) {
+        WARN("ga10b-cold: out of memory for the PMU instance block");
+        return -1;
+    }
+    ga10b_pmu_build_inst_block(inst.cpu, cold_pmu_vm.pdb.phys, false);
+    cache_clean_range(inst.cpu, GA10B_PMU_INST_BLOCK_SIZE);
+    ga10b_vm_tlb_invalidate(&cold_gpu_ops, &cold_pmu_vm);
+    cfg.inst_block_addr = inst.phys;
+    cfg.sysmem_coherent = false;
+
+    int rc = ga10b_pmu_init(&cold_pmu, &cold_pmu_ops, &cfg);
+    if (rc == GA10B_PMU_OK) rc = ga10b_pmu_boot(&cold_pmu);
+    if (rc == GA10B_PMU_OK) rc = ga10b_pmu_wait_init(&cold_pmu, 3000);
+    ga10b_pmu_dbg_drain(&cold_pmu);
+    if (rc != GA10B_PMU_OK) {
+        WARN("ga10b-cold: PMU boot failed rc=%d (last_error=%d BR_RETCODE=0x%x "
+             "IRQSTAT=0x%x halted=%d msgs=%u events=%u)", rc,
+             cold_pmu.last_error, (unsigned)cold_pmu.brom_retcode,
+             (unsigned)cold_pmu.last_irqstat, (int)cold_pmu.halted,
+             (unsigned)cold_pmu.msgs_seen, (unsigned)cold_pmu.events_seen);
+        return -1;
+    }
+    INFO("ga10b-cold: PMU RTOS up (cmd queue %u, %u msgs)",
+         (unsigned)cold_pmu.cmdq_index, (unsigned)cold_pmu.msgs_seen);
+    return 0;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -834,6 +1018,7 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_FB]      = step_fb,
     [GA10B_COLD_GR_HW]   = step_gr_hw,
     [GA10B_COLD_ACR]     = step_acr,
+    [GA10B_COLD_PMU]     = step_pmu,
     [GA10B_COLD_FALCONS] = step_falcons,
     [GA10B_COLD_GR_INIT] = step_gr_init,
 };

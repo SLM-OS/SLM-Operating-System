@@ -668,11 +668,17 @@ set(KERNEL_SOURCES
     kernel/src/gpu_consumer.c
     kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
-    # GA10B ACR/ctxsw blob builders (#1088): pure in-memory code, no MMIO,
+    # GA10B ACR/ctxsw blob builders and the LS PMU host driver (#1088):
+    # pure code (the PMU driver reaches MMIO only through an ops table),
     # built on every platform so the unit tests run under QEMU.
     kernel/gpu/nvidia/ga10b_netlist.c
     kernel/gpu/nvidia/ga10b_ctxsw_ucode.c
     kernel/gpu/nvidia/ga10b_acr_blob.c
+    kernel/gpu/nvidia/ga10b_pmu.c
+    # GA10B channel / GR context built without Linux (#1088): pure code,
+    # hardware reached only through struct ga10b_gpu_ops.
+    kernel/gpu/nvidia/ga10b_chan.c
+    kernel/gpu/nvidia/ga10b_grctx.c
     kernel/gpu/oplib_pool.c
     kernel/gpu/oplib_weights_pool.c
     kernel/gpu/operator_dispatch.c
@@ -1151,6 +1157,9 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_netlist.c
     kernel/tests/test_ga10b_ctxsw_ucode.c
     kernel/tests/test_ga10b_acr_blob.c
+    kernel/tests/test_ga10b_pmu.c
+    kernel/tests/test_ga10b_chan.c
+    kernel/tests/test_ga10b_grctx.c
 )
 
 # lwIP library sources (QEMU networking only)

@@ -3,13 +3,17 @@
  * surface / ACR LS blob builders against the real Jetson firmware
  * (#1088).
  *
- * Usage: test_ga10b_acr_blob [firmware_dir] [-o blob_out.bin]
+ * Usage: test_ga10b_acr_blob [firmware_dir] [-o blob_out.bin] [-p pmu_blob_out.bin]
  *   firmware_dir defaults to $HOME/jetson-ga10b-firmware.
  *
  * Parses NETA..NETD, builds the ctxsw ucode surface from the image
  * nvgpu uses on silicon (NETC prod), builds the non-WPR blob with the
  * jetson-nano-2 WPR1 registers, cross-checks the blob contents and
- * prints the layout. Exit status is non-zero on any failure.
+ * prints the layout. Then builds the blob L4T actually uses (with the
+ * LS PMU: PMU_NEXT_CORE + GPCCS + FECS, FECS/GPCCS lazy) and checks
+ * it against values worked out by hand from acr_blob_construct.c and
+ * gpmu_ucode_next_prod_desc.bin. `-o` writes the 2-falcon blob,
+ * `-p` the 3-falcon one. Exit status is non-zero on any failure.
  */
 
 #include <stdio.h>
@@ -131,7 +135,19 @@ static void print_falcon(const struct ga10b_acr_blob_falcon *f)
     const struct ga10b_lsf_lsb_fields *l = &f->lsb;
     const struct ga10b_flcn_bl_dmem_desc *b = &f->bl_desc;
     printf("  falcon %u (%s)\n", f->falcon_id,
-           f->falcon_id == GA10B_FALCON_ID_FECS ? "FECS" : "GPCCS");
+           f->falcon_id == GA10B_FALCON_ID_FECS ? "FECS" :
+           f->falcon_id == GA10B_FALCON_ID_GPCCS ? "GPCCS" : "PMU_NEXT_CORE");
+    if (f->is_next_core) {
+        const struct ga10b_falcon_next_core_ucode_desc *n = &f->ndesc;
+        printf("    ndesc: version=%u bl off=0x%x size=0x%x param off=0x%x size=0x%x elf off=0x%x "
+               "size=0x%x app_version=0x%08x\n           manifest off=0x%x size=0x%x "
+               "monitor data off=0x%x size=0x%x code off=0x%x size=0x%x monitor=%u\n",
+               n->version, n->bootloader_offset, n->bootloader_size,
+               n->bootloader_param_offset, n->bootloader_param_size, n->next_core_elf_offset,
+               n->next_core_elf_size, n->app_version, n->manifest_offset, n->manifest_size,
+               n->monitor_data_offset, n->monitor_data_size, n->monitor_code_offset,
+               n->monitor_code_size, n->is_monitor_enabled);
+    }
     printf("    wpr_header: lsb_offset=0x%x bootstrap_owner=%u lazy=%u bin_version=%u status=%u\n",
            f->wpr_header.lsb_offset, f->wpr_header.bootstrap_owner,
            f->wpr_header.lazy_bootstrap, f->wpr_header.bin_version, f->wpr_header.status);
@@ -161,9 +177,12 @@ int main(int argc, char **argv)
 {
     const char *dir = NULL;
     const char *out_path = NULL;
+    const char *pmu_out_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
             out_path = argv[++i];
+        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
+            pmu_out_path = argv[++i];
         else
             dir = argv[i];
     }
@@ -292,6 +311,124 @@ int main(int argc, char **argv)
            d.wpr_region_id, d.wpr_offset, d.regions.no_regions, d.nonwpr_ucode_blob_size,
            (unsigned long long)d.nonwpr_ucode_blob_start, (unsigned long long)d.ls_pmu_desc,
            d.gpu_mode, sizeof(d));
+
+    /* ---- With the LS PMU (what L4T builds: support_ls_pmu = true). ---- */
+    struct file_buf pmu_img, pmu_desc, pmu_sig;
+    if (load(dir, "gpmu_ucode_next_prod_image.bin", &pmu_img) ||
+        load(dir, "gpmu_ucode_next_prod_desc.bin", &pmu_desc) ||
+        load(dir, "pmu_pkc_prod_sig.bin", &pmu_sig))
+        return 2;
+    struct ga10b_acr_blob_inputs bp = bi;
+    bp.include_pmu = true;
+    bp.pmu_image = pmu_img.data;   bp.pmu_image_size = pmu_img.size;
+    bp.pmu_desc = pmu_desc.data;   bp.pmu_desc_size = pmu_desc.size;
+    bp.pmu_sig = pmu_sig.data;     bp.pmu_sig_size = pmu_sig.size;
+    static struct ga10b_acr_blob_layout lp;
+    CHECK(ga10b_acr_blob_layout(&bp, &lp) == 0, "pmu blob layout");
+    uint8_t *pblob = malloc(lp.wpr_size);
+    CHECK(pblob != NULL && ga10b_acr_blob_build(&bp, pblob, lp.wpr_size, &lp) == 0,
+          "pmu blob build");
+    printf("\n== ACR non-WPR blob with LS PMU (L4T configuration) ==\n"
+           "  managed falcons=%u wpr_size=0x%x (%u bytes) terminator at 0x%x\n",
+           lp.managed_flcn_cnt, lp.wpr_size, lp.wpr_size, lp.terminator_offset);
+    for (uint32_t i = 0; i < lp.managed_flcn_cnt; i++)
+        print_falcon(&lp.flcn[i]);
+    for (uint32_t i = 0; i <= lp.managed_flcn_cnt; i++) {
+        struct ga10b_lsf_wpr_header h;
+        memcpy(&h, pblob + i * sizeof(h), sizeof(h));
+        printf("  wpr_header[%u]: falcon_id=0x%x lsb_offset=0x%x owner=%u lazy=%u bin=%u status=%u\n",
+               i, h.falcon_id, h.lsb_offset, h.bootstrap_owner, h.lazy_bootstrap,
+               h.bin_version, h.status);
+    }
+    CHECK(lp.managed_flcn_cnt == 3 && lp.terminator_offset == 0x48, "3 falcons + terminator");
+    CHECK(lp.flcn[0].falcon_id == GA10B_FALCON_ID_PMU_NEXT_CORE &&
+          lp.flcn[1].falcon_id == GA10B_FALCON_ID_GPCCS &&
+          lp.flcn[2].falcon_id == GA10B_FALCON_ID_FECS, "order PMU_NEXT_CORE, GPCCS, FECS");
+    CHECK(lp.wpr_size <= wpr.size, "pmu blob fits WPR1");
+    memcpy(&term, pblob + lp.terminator_offset, sizeof(term));
+    CHECK(term.falcon_id == GA10B_FALCON_ID_INVALID, "pmu blob terminator");
+
+    /* Hand-derived from the 76-byte desc: bl 0x7000+0xff0, params
+     * 0x10 -> ucode_size 0x8000; elf 0x1d568 -> base 0x25568, padded
+     * to 0x26000 -> data_size 0x1e000. Image (0x26000 B) at 0x1000,
+     * BL slot 0x27000..0x27100, + 0x8000 reserved -> GPCCS LSB at
+     * 0x2f100 (already 256-aligned). */
+    const struct ga10b_acr_blob_falcon *pm = &lp.flcn[0];
+    CHECK(pm->is_next_core && pm->data_size == pmu_img.size, "pmu image = whole file");
+    CHECK(pm->wpr_header.lsb_offset == 0x100 && pm->lsb.ucode_off == 0x1000,
+          "pmu lsb/ucode offsets 0x%x 0x%x", pm->wpr_header.lsb_offset, pm->lsb.ucode_off);
+    CHECK(pm->lsb.ucode_size == 0x8000 && pm->lsb.data_size == 0x1e000,
+          "pmu ucode/data size 0x%x 0x%x", pm->lsb.ucode_size, pm->lsb.data_size);
+    CHECK(pm->lsb.bl_code_size == 0 && pm->lsb.bl_imem_off == 0 && pm->lsb.flags == 0 &&
+          pm->lsb.app_code_off == 0 && pm->lsb.app_code_size == 0 &&
+          pm->lsb.app_data_off == 0 && pm->lsb.app_data_size == 0, "pmu zero fields");
+    CHECK(pm->lsb.bl_data_off == 0x27000 && pm->lsb.bl_data_size == 0x100,
+          "pmu bl_data 0x%x/0x%x", pm->lsb.bl_data_off, pm->lsb.bl_data_size);
+    CHECK(pm->wpr_header.lazy_bootstrap == 0 && pm->wpr_header.bootstrap_owner == 1 &&
+          pm->wpr_header.status == 1, "pmu wpr header");
+    CHECK(lp.flcn[1].wpr_header.lsb_offset == 0x2f100, "gpccs lsb after pmu reserve 0x%x",
+          lp.flcn[1].wpr_header.lsb_offset);
+    CHECK(lp.flcn[1].wpr_header.lazy_bootstrap == 1 && lp.flcn[2].wpr_header.lazy_bootstrap == 1,
+          "fecs/gpccs lazy");
+    CHECK(memcmp(pblob + pm->lsb.ucode_off, pmu_img.data, pmu_img.size) == 0, "pmu image bytes");
+    {
+        static const uint8_t zero[256];
+        CHECK(memcmp(pblob + pm->lsb.bl_data_off, zero, 256) == 0, "pmu bl slot zero");
+        CHECK(memcmp(pblob + pm->lsb.bl_data_off + 256, zero, 256) == 0, "pmu reserve zero");
+    }
+    for (uint32_t i = 0; i < lp.managed_flcn_cnt; i++) {
+        const struct ga10b_acr_blob_falcon *f = &lp.flcn[i];
+        const struct file_buf *sig = f->falcon_id == GA10B_FALCON_ID_FECS ? &fecs_sig :
+                                     f->falcon_id == GA10B_FALCON_ID_GPCCS ? &gpccs_sig : &pmu_sig;
+        struct ga10b_lsf_lsb_header_v1 lsb;
+        memcpy(&lsb, pblob + f->wpr_header.lsb_offset, sizeof(lsb));
+        CHECK(lsb.signature.lsf_ucode_desc_v2.falcon_id == f->falcon_id, "pmu-blob lsb falcon_id");
+        CHECK(memcmp((uint8_t *)&lsb.signature + 12, sig->data + 12, sig->size - 12) == 0,
+              "pmu-blob signature body");
+        CHECK(memcmp(&lsb.ucode_off, &f->lsb, sizeof(f->lsb)) == 0, "pmu-blob lsb tail");
+        CHECK(f->wpr_header.bin_version ==
+              lsb.signature.lsf_ucode_desc_v2.ls_ucode_version, "bin_version");
+        if (!f->is_next_core) {
+            /* Same falcon in the 2-falcon blob: identical image and BL
+             * desc except the WPR addresses shift by the ucode_off delta. */
+            const struct ga10b_acr_blob_falcon *o =
+                &lay.flcn[f->falcon_id == GA10B_FALCON_ID_GPCCS ? 0 : 1];
+            CHECK(memcmp(pblob + f->lsb.ucode_off, blob + o->lsb.ucode_off, f->data_size) == 0,
+                  "ctxsw image bytes unchanged");
+            uint64_t d = (uint64_t)f->lsb.ucode_off - o->lsb.ucode_off;
+            uint64_t c0 = ((uint64_t)o->bl_desc.code_dma_base.hi << 32) | o->bl_desc.code_dma_base.lo;
+            uint64_t c1 = ((uint64_t)f->bl_desc.code_dma_base.hi << 32) | f->bl_desc.code_dma_base.lo;
+            CHECK(c1 == c0 + d, "bl code_dma_base shift");
+            struct ga10b_flcn_bl_dmem_desc onblob;
+            memcpy(&onblob, pblob + f->lsb.bl_data_off, sizeof(onblob));
+            CHECK(memcmp(&onblob, &f->bl_desc, sizeof(onblob)) == 0, "bl desc bytes");
+        }
+    }
+    uint8_t lsdesc[GA10B_NEXT_CORE_UCODE_DESC_SIZE];
+    CHECK(ga10b_acr_copy_ls_pmu_desc(lsdesc, sizeof(lsdesc), pmu_desc.data, pmu_desc.size) == 0,
+          "ls_pmu_desc copy");
+    CHECK(memcmp(lsdesc, pmu_desc.data, sizeof(lsdesc)) == 0, "ls_pmu_desc bytes");
+    ga10b_acr_build_flcn2_desc_ls_pmu(&d, 0x0000000100000000ull, lp.wpr_size,
+                                      0x0000000100200000ull);
+    printf("\n== flcn2_acr_desc with LS PMU (example addresses) ==\n"
+           "  blob_size=0x%x blob_start=0x%llx ls_pmu_desc=0x%llx no_regions=%u\n",
+           d.nonwpr_ucode_blob_size, (unsigned long long)d.nonwpr_ucode_blob_start,
+           (unsigned long long)d.ls_pmu_desc, d.regions.no_regions);
+    CHECK(d.ls_pmu_desc == 0x0000000100200000ull && d.nonwpr_ucode_blob_size == lp.wpr_size,
+          "flcn2 desc ls_pmu");
+
+    if (pmu_out_path != NULL && pblob != NULL) {
+        FILE *f = fopen(pmu_out_path, "wb");
+        if (f != NULL) {
+            fwrite(pblob, 1, lp.wpr_size, f);
+            fclose(f);
+            printf("wrote LS-PMU blob to %s\n", pmu_out_path);
+        }
+    }
+    free(pblob);
+    free(pmu_img.data);
+    free(pmu_desc.data);
+    free(pmu_sig.data);
 
     if (out_path != NULL) {
         FILE *f = fopen(out_path, "wb");

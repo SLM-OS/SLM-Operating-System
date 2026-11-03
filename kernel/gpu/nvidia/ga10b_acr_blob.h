@@ -20,10 +20,24 @@
  *  - GSP is a falcon2/RISC-V core, so NVGPU_ACR_NEXT_CORE_ENABLED and
  *    NVGPU_PKC_LS_SIG_ENABLED are set (acr_sw_ga10b.c:554-558): the
  *    PKC path (lsf_ucode_desc_wrapper, lsf_lsb_header_v1) is used.
- *  - g->support_ls_pmu == false (SLM-OS does not run the LS PMU):
- *    no PMU image in the blob and no ls_pmu_desc; FECS and GPCCS have
- *    is_lazy_bootstrap = false (acr_sw_ga10b.c:417, 443), so ACR
- *    bootstraps them itself.
+ *  - g->support_ls_pmu is an input (ga10b_acr_blob_inputs.include_pmu):
+ *      false: no PMU image in the blob and no ls_pmu_desc; FECS and
+ *        GPCCS have is_lazy_bootstrap = false (acr_sw_ga10b.c:417,
+ *        443), so ACR bootstraps them itself. On silicon the ctxsw
+ *        ucode then halts (nvgpu with support_ls_pmu forced false
+ *        fails the same way), so this mode is kept for tests only.
+ *      true (what L4T runs): NVGPU_PMU_NEXT_CORE_ENABLED (the PMU is
+ *        a falcon2/RISC-V core, pmu.c:262-265), so the PMU entry is
+ *        FALCON_ID_PMU_NEXT_CORE (ga10b_acr_lsf_pmu_next_core,
+ *        acr_sw_ga10b.c:379-398: dma idx UCODE, not lazy, not priv
+ *        load), its image is the whole gpmu_ucode_next_prod_image.bin
+ *        (nvgpu_acr_lsf_pmu_ncore_ucode_details,
+ *        acr_blob_construct.c:91-148) and FECS/GPCCS become
+ *        is_lazy_bootstrap = true: ACR leaves them for the LS PMU to
+ *        bootstrap (ga10b_pmu.h, lsfm BOOTSTRAP_GR_FALCONS RPC).
+ *        flcn2_acr_desc.ls_pmu_desc points at a sysmem copy of the
+ *        first sizeof(falcon_next_core_ucode_desc) = 60 bytes of
+ *        gpmu_ucode_next_prod_desc.bin (acr_sw_ga10b.c:283-301).
  *  - NVGPU_SUPPORT_MIG disabled (assumption; nvgpu enables MIG only on
  *    request): FECS is_priv_load = false (acr_sw_ga10b.c:418-422),
  *    GPCCS is_priv_load = true (acr_sw_ga10b.c:444), gpu_mode MIG bit
@@ -47,7 +61,7 @@
  *    GK20A_PMU_DMAIDX_UCODE = 0 (acr_sw_ga10b.c:407, pmu.h:193).
  *
  * Blob layout (offsets relative to the blob start == WPR start, since
- * wpr_offset = 0):
+ * wpr_offset = 0), no-PMU mode:
  *
  *   0x000  lsf_wpr_header[0]  = GPCCS
  *   0x018  lsf_wpr_header[1]  = FECS
@@ -57,10 +71,17 @@
  *     ALIGN(.., 4096)  ucode image (boot | code | data from the surface)
  *     ALIGN(.., 256)   flcn_bl_dmem_desc (84 B in a 256 B slot)
  *
+ * With the PMU the header array has four entries (PMU_NEXT_CORE,
+ * GPCCS, FECS, terminator) and the PMU's records come first: its LSB
+ * header, its whole image at a 4 KB boundary, an unwritten (zero)
+ * 256 B BL-data slot, then PMU_NVRISCV_WPR_RSVD_BYTES (0x8000) of
+ * reserved WPR space (acr_blob_construct.c:1014-1023, NON_FUSA).
+ *
  * Order: lsfm_discover_ucode_images walks falcon ids 0..FALCON_ID_END
- * (acr_blob_construct.c:780-809), finding FECS (2) then GPCCS (3), and
- * lsfm_add_ucode_img PREPENDS each node (acr_blob_construct.c:728-729),
- * so every later walk sees GPCCS first.
+ * (acr_blob_construct.c:780-809), finding FECS (2), GPCCS (3) and
+ * PMU_NEXT_CORE (13) in that order, and lsfm_add_ucode_img PREPENDS
+ * each node (acr_blob_construct.c:728-729), so every later walk sees
+ * PMU_NEXT_CORE (if present), then GPCCS, then FECS.
  *
  * bl_dmem_desc DMA addresses are WPR addresses (wpr_base + ucode_off +
  * ...; acr_blob_construct.c:1077-1089) because ACR moves the blob into
@@ -342,6 +363,38 @@ static_assert(sizeof(struct ga10b_flcn2_acr_desc) == 96, "flcn2_acr_desc");
 static_assert(offsetof(struct ga10b_ls_falcon_ucode_desc, bootloader_start_offset) == 80, "desc.bl_start");
 static_assert(sizeof(struct ga10b_ls_falcon_ucode_desc) == 80 + 15 * 4 + 64 * 8 + 4, "ls_falcon_ucode_desc");
 
+/* struct falcon_next_core_ucode_desc, include/nvgpu/pmu.h:381-400.
+ * The trailing `bool is_monitor_enabled` is a u8 plus 3 bytes of tail
+ * padding: sizeof == 60, which is the number of bytes nvgpu copies
+ * from gpmu_ucode_next_prod_desc.bin (76 B) into the ls_pmu_desc
+ * buffer (acr_sw_ga10b.c:286-298). */
+struct ga10b_falcon_next_core_ucode_desc {
+    uint32_t version;
+    uint32_t bootloader_offset;
+    uint32_t bootloader_size;
+    uint32_t bootloader_param_offset;
+    uint32_t bootloader_param_size;
+    uint32_t next_core_elf_offset;
+    uint32_t next_core_elf_size;
+    uint32_t app_version;
+    uint32_t manifest_offset;
+    uint32_t manifest_size;
+    uint32_t monitor_data_offset;
+    uint32_t monitor_data_size;
+    uint32_t monitor_code_offset;
+    uint32_t monitor_code_size;
+    uint8_t  is_monitor_enabled;
+    uint8_t  pad[3];
+};
+static_assert(offsetof(struct ga10b_falcon_next_core_ucode_desc, is_monitor_enabled) == 56,
+              "next_core_desc.is_monitor_enabled");
+static_assert(sizeof(struct ga10b_falcon_next_core_ucode_desc) == 60, "falcon_next_core_ucode_desc");
+#define GA10B_NEXT_CORE_UCODE_DESC_SIZE  60u
+
+/* acr_blob_construct.h:49 (reserved WPR bytes after the RISC-V PMU
+ * image, CONFIG_NVGPU_NON_FUSA) */
+#define GA10B_PMU_NVRISCV_WPR_RSVD_BYTES 0x8000u
+
 /* ---- WPR carveout info (nvgpu_acr_wpr_info_sys -> ga10b_fb_read_wpr_info) ---- */
 
 /* BAR0 registers nvgpu reads (hw_fb_ga10b.h:305-310). */
@@ -367,7 +420,7 @@ bool ga10b_acr_wpr_info_from_regs(uint32_t wpr1_addr_lo, uint32_t wpr1_addr_hi,
 
 /* ---- Blob builder ---- */
 
-#define GA10B_ACR_BLOB_MAX_FALCONS  2u
+#define GA10B_ACR_BLOB_MAX_FALCONS  3u
 
 struct ga10b_acr_blob_inputs {
     /* ctxsw surface + segment table from ga10b_ctxsw_ucode_build(). */
@@ -381,12 +434,26 @@ struct ga10b_acr_blob_inputs {
     const uint8_t *gpccs_sig; size_t gpccs_sig_size;
     /* WPR1 start (ga10b_acr_wpr_info_from_regs). */
     uint64_t wpr_base;
+    /* g->support_ls_pmu. When true the three PMU files are required:
+     * gpmu_ucode_next_prod_image.bin (copied whole), the 76-byte
+     * gpmu_ucode_next_prod_desc.bin (first 60 bytes used) and the
+     * 2248-byte pmu_pkc_prod_sig.bin. */
+    bool include_pmu;
+    const uint8_t *pmu_image; size_t pmu_image_size;
+    const uint8_t *pmu_desc;  size_t pmu_desc_size;
+    const uint8_t *pmu_sig;   size_t pmu_sig_size;
 };
 
-/* Per managed falcon, in nvgpu list order (GPCCS, then FECS). */
+/* Per managed falcon, in nvgpu list order ([PMU_NEXT_CORE,] GPCCS,
+ * FECS). For the PMU `desc` and `bl_desc` stay zero (nvgpu never
+ * builds them for a next-core image: p_img->desc is NULL and
+ * lsfm_init_wpr_contents skips the BL desc, acr_blob_construct.c:
+ * 1270-1290); `ndesc` carries the next-core descriptor instead. */
 struct ga10b_acr_blob_falcon {
     uint32_t falcon_id;
+    bool is_next_core;
     struct ga10b_ls_falcon_ucode_desc desc;
+    struct ga10b_falcon_next_core_ucode_desc ndesc;
     uint32_t src_offset;        /* p_img->data offset into the surface */
     uint32_t data_size;         /* p_img->data_size: bytes copied */
     struct ga10b_lsf_wpr_header wpr_header;
@@ -435,5 +502,22 @@ int ga10b_acr_blob_build(const struct ga10b_acr_blob_inputs *in,
  * the unrounded request size). */
 void ga10b_acr_build_flcn2_desc(struct ga10b_flcn2_acr_desc *d,
                                 uint64_t blob_addr, uint32_t blob_size);
+
+/* Same, with support_ls_pmu = true: additionally ls_pmu_desc =
+ * `ls_pmu_desc_addr`, the address (nvgpu_mem_get_addr of a
+ * PHYSICALLY_ADDRESSED sysmem buffer, i.e. the physical address) of
+ * the 60-byte descriptor copy made by ga10b_acr_copy_ls_pmu_desc
+ * (acr_sw_ga10b.c:283-301). */
+void ga10b_acr_build_flcn2_desc_ls_pmu(struct ga10b_flcn2_acr_desc *d,
+                                       uint64_t blob_addr, uint32_t blob_size,
+                                       uint64_t ls_pmu_desc_addr);
+
+/* Copy what nvgpu writes into the ls_pmu_desc buffer: the first
+ * GA10B_NEXT_CORE_UCODE_DESC_SIZE bytes of gpmu_ucode_next_prod_desc.bin
+ * (nvgpu_mem_wr_n(..., fw_desc->data, sizeof(struct
+ * falcon_next_core_ucode_desc))). Returns GA10B_ACR_ERR_ARG if the
+ * file is shorter than that or `dst_size` is too small. */
+int ga10b_acr_copy_ls_pmu_desc(void *dst, size_t dst_size,
+                               const uint8_t *desc_file, size_t desc_file_size);
 
 #endif /* GPU_NVIDIA_GA10B_ACR_BLOB_H */

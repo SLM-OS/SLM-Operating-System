@@ -275,6 +275,9 @@ int test_suite_tegra_cpufreq(void);
 int test_suite_ga10b_netlist(void);
 int test_suite_ga10b_ctxsw_ucode(void);
 int test_suite_ga10b_acr_blob(void);
+int test_suite_ga10b_pmu(void);   /* LS PMU RTOS host driver, fake BAR0 */
+int test_suite_ga10b_chan(void);  /* GA10B VM / inst block / RAMFC / runlist */
+int test_suite_ga10b_grctx(void); /* GA10B GR context encoders */
 
 /* ARM PMU primitive smoke tests (#874) */
 int test_suite_pmu(void);
