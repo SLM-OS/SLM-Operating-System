@@ -28,8 +28,9 @@ static uint32_t align32(uint32_t v, uint32_t a)
 bool ga10b_acr_wpr_info_from_regs(uint32_t wpr1_addr_lo, uint32_t wpr1_addr_hi,
                                   struct ga10b_wpr_info *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return false;
+    }
     out->wpr_base = 0;
     out->size = 0;
 
@@ -42,8 +43,9 @@ bool ga10b_acr_wpr_info_from_regs(uint32_t wpr1_addr_lo, uint32_t wpr1_addr_hi,
      * fb_ga10b.h:29). */
     uint64_t start = ((uint64_t)(lo_val >> 20) << 32) | (uint64_t)(uint32_t)(lo_val << 12);
     uint64_t end   = ((uint64_t)(hi_val >> 20) << 32) | (uint64_t)(uint32_t)(hi_val << 12);
-    if (end < start)
+    if (end < start) {
         return false;
+    }
     out->wpr_base = start;
     out->size = end - start;  /* fb_ga10b_fusa.c:203 */
     return true;
@@ -113,9 +115,11 @@ static uint32_t sig_ls_ucode_version(const uint8_t *sig, size_t sig_size)
     const size_t off = offsetof(struct ga10b_lsf_ucode_desc_wrapper, lsf_ucode_desc_v2) +
                        offsetof(struct ga10b_lsf_ucode_desc_v2, ls_ucode_version);
     uint8_t b[4] = {0, 0, 0, 0};
-    for (size_t i = 0; i < 4; i++)
-        if (off + i < sig_size)
+    for (size_t i = 0; i < 4; i++) {
+        if (off + i < sig_size) {
             b[i] = sig[off + i];
+        }
+        }
     return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
            ((uint32_t)b[3] << 24);
 }
@@ -161,8 +165,9 @@ static int fill_static_info(struct ga10b_acr_blob_falcon *f, uint32_t falcon_id,
         uint64_t base_size = ucode_size + n->next_core_elf_size;
         uint64_t pad = align_up(base_size, GA10B_LSF_UCODE_DATA_ALIGNMENT) - base_size;
         uint64_t data_size = (uint64_t)n->next_core_elf_size + pad;
-        if (ucode_size > 0xFFFFFFFFull || data_size > 0xFFFFFFFFull)
+        if (ucode_size > 0xFFFFFFFFull || data_size > 0xFFFFFFFFull) {
             return GA10B_ACR_ERR_OVERFLOW;  /* nvgpu_safe_add_u32 would BUG */
+        }
         lsb->ucode_size = (uint32_t)ucode_size;
         lsb->data_size = (uint32_t)data_size;
         lsb->bl_code_size = 0;
@@ -177,14 +182,16 @@ static int fill_static_info(struct ga10b_acr_blob_falcon *f, uint32_t falcon_id,
                              lsb->bl_code_size;
     uint64_t ucode_size = align_up(d->app_resident_data_offset,
                                    GA10B_LSF_BL_CODE_SIZE_ALIGNMENT) + lsb->bl_code_size;
-    if (full_app_size < ucode_size || full_app_size > 0xFFFFFFFFull)
+    if (full_app_size < ucode_size || full_app_size > 0xFFFFFFFFull) {
         return GA10B_ACR_ERR_OVERFLOW;  /* nvgpu_safe_sub_u32 would BUG */
+    }
     lsb->ucode_size = (uint32_t)ucode_size;
     lsb->data_size = (uint32_t)(full_app_size - ucode_size);
     lsb->bl_imem_off = d->bootloader_imem_offset;
     lsb->flags = GA10B_NV_FLCN_ACR_LSF_FLAG_FORCE_PRIV_LOAD_FALSE;
-    if (is_priv_load)
+    if (is_priv_load) {
         lsb->flags |= GA10B_NV_FLCN_ACR_LSF_FLAG_FORCE_PRIV_LOAD_TRUE;
+    }
     return GA10B_ACR_OK;
 }
 
@@ -252,19 +259,22 @@ static void populate_bl_dmem_desc(struct ga10b_acr_blob_falcon *f, uint64_t wpr_
 int ga10b_acr_blob_layout(const struct ga10b_acr_blob_inputs *in,
                           struct ga10b_acr_blob_layout *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_ACR_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
     if (in == nullptr || in->surface == nullptr || in->ucode == nullptr ||
         in->fecs_sig == nullptr || in->gpccs_sig == nullptr ||
-        in->fecs_sig_size == 0u || in->gpccs_sig_size == 0u)
+        in->fecs_sig_size == 0u || in->gpccs_sig_size == 0u) {
         return GA10B_ACR_ERR_ARG;
+    }
     if (in->include_pmu &&
         (in->pmu_image == nullptr || in->pmu_image_size == 0u ||
          in->pmu_image_size > 0xFFFFFFFFu ||
          in->pmu_desc == nullptr || in->pmu_desc_size < GA10B_NEXT_CORE_UCODE_DESC_SIZE ||
-         in->pmu_sig == nullptr || in->pmu_sig_size == 0u))
+         in->pmu_sig == nullptr || in->pmu_sig_size == 0u)) {
         return GA10B_ACR_ERR_ARG;
+    }
 
     /* Discovery walks falcon ids upward (FECS=2, GPCCS=3,
      * PMU_NEXT_CORE=13) and prepends, so the managed list is
@@ -289,9 +299,10 @@ int ga10b_acr_blob_layout(const struct ga10b_acr_blob_inputs *in,
 
     int rc = fill_static_info(fecs, GA10B_FALCON_ID_FECS, false /* MIG off */, lazy,
                               in->fecs_sig, in->fecs_sig_size);
-    if (rc == GA10B_ACR_OK)
+    if (rc == GA10B_ACR_OK) {
         rc = fill_static_info(gpccs, GA10B_FALCON_ID_GPCCS, true, lazy,
                               in->gpccs_sig, in->gpccs_sig_size);
+    }
     if (rc == GA10B_ACR_OK && pmu != nullptr) {
         pmu_ncore_ucode_details(in->pmu_desc, in->pmu_image_size, pmu);
         rc = fill_static_info(pmu, GA10B_FALCON_ID_PMU_NEXT_CORE, false, false,
@@ -307,8 +318,9 @@ int ga10b_acr_blob_layout(const struct ga10b_acr_blob_inputs *in,
      * header array of (cnt + 1) entries, the extra one the terminator. */
     uint64_t wpr_off = (uint64_t)sizeof(struct ga10b_lsf_wpr_header) *
                        (out->managed_flcn_cnt + 1u);
-    for (uint32_t i = 0; i < out->managed_flcn_cnt; i++)
+    for (uint32_t i = 0; i < out->managed_flcn_cnt; i++) {
         calc_wpr_size_pkc(&out->flcn[i], &wpr_off);
+    }
     if (wpr_off > 0xFFFFFFFFull) {
         memset(out, 0, sizeof(*out));
         return GA10B_ACR_ERR_OVERFLOW;
@@ -318,9 +330,11 @@ int ga10b_acr_blob_layout(const struct ga10b_acr_blob_inputs *in,
                              (uint32_t)sizeof(struct ga10b_lsf_wpr_header);
     out->wpr_base = in->wpr_base;
 
-    for (uint32_t i = 0; i < out->managed_flcn_cnt; i++)
-        if (!out->flcn[i].is_next_core)
+    for (uint32_t i = 0; i < out->managed_flcn_cnt; i++) {
+        if (!out->flcn[i].is_next_core) {
             populate_bl_dmem_desc(&out->flcn[i], in->wpr_base);
+        }
+        }
     return GA10B_ACR_OK;
 }
 
@@ -330,10 +344,12 @@ int ga10b_acr_blob_build(const struct ga10b_acr_blob_inputs *in,
                          struct ga10b_acr_blob_layout *out)
 {
     int rc = ga10b_acr_blob_layout(in, out);
-    if (rc != GA10B_ACR_OK)
+    if (rc != GA10B_ACR_OK) {
         return rc;
-    if (buf == nullptr || buf_size < out->wpr_size)
+    }
+    if (buf == nullptr || buf_size < out->wpr_size) {
         return GA10B_ACR_ERR_BUF_SMALL;
+    }
 
     uint8_t *b = buf;
     memset(b, 0, out->wpr_size);
@@ -373,8 +389,9 @@ int ga10b_acr_blob_build(const struct ga10b_acr_blob_inputs *in,
 
         /* BL gen desc: bl_gen_desc_size = sizeof(flcn_bl_dmem_desc).
          * Not written for a next-core image (acr_blob_construct.c:1270). */
-        if (!f->is_next_core)
+        if (!f->is_next_core) {
             memcpy(b + f->lsb.bl_data_off, &f->bl_desc, sizeof(f->bl_desc));
+        }
 
         /* Ucode image. */
         memcpy(b + f->lsb.ucode_off, image + f->src_offset, f->data_size);
@@ -391,8 +408,9 @@ int ga10b_acr_blob_build(const struct ga10b_acr_blob_inputs *in,
 void ga10b_acr_build_flcn2_desc(struct ga10b_flcn2_acr_desc *d,
                                 uint64_t blob_addr, uint32_t blob_size)
 {
-    if (d == nullptr)
+    if (d == nullptr) {
         return;
+    }
     memset(d, 0, sizeof(*d));
     d->nonwpr_ucode_blob_start = blob_addr;          /* acr_sw_ga10b.c:307-308 */
     d->nonwpr_ucode_blob_size = blob_size;           /* acr_sw_ga10b.c:312-313 */
@@ -408,8 +426,9 @@ void ga10b_acr_build_flcn2_desc_ls_pmu(struct ga10b_flcn2_acr_desc *d,
                                        uint64_t blob_addr, uint32_t blob_size,
                                        uint64_t ls_pmu_desc_addr)
 {
-    if (d == nullptr)
+    if (d == nullptr) {
         return;
+    }
     ga10b_acr_build_flcn2_desc(d, blob_addr, blob_size);
     d->ls_pmu_desc = ls_pmu_desc_addr;               /* acr_sw_ga10b.c:300-301 */
 }
@@ -419,8 +438,9 @@ int ga10b_acr_copy_ls_pmu_desc(void *dst, size_t dst_size,
 {
     if (dst == nullptr || desc_file == nullptr ||
         dst_size < GA10B_NEXT_CORE_UCODE_DESC_SIZE ||
-        desc_file_size < GA10B_NEXT_CORE_UCODE_DESC_SIZE)
+        desc_file_size < GA10B_NEXT_CORE_UCODE_DESC_SIZE) {
         return GA10B_ACR_ERR_ARG;
+    }
     memcpy(dst, desc_file, GA10B_NEXT_CORE_UCODE_DESC_SIZE);
     return GA10B_ACR_OK;
 }

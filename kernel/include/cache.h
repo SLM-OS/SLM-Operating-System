@@ -23,6 +23,7 @@
 #define CACHE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Cortex-A76 cacheline size */
 #define CACHE_LINE_SIZE 64
@@ -67,8 +68,10 @@ static inline void cache_invalidate(const volatile void *addr)
 /* Clean a range of memory (multiple cachelines) */
 static inline void cache_clean_range(const volatile void *addr, size_t size)
 {
-    const char *p = (const char *)addr;
-    const char *end = p + size;
+    /* Start at the line containing `addr`: stepping by line size from
+     * an unaligned start can stop one line short of the end. */
+    const char *end = (const char *)addr + size;
+    const char *p = (const char *)((uintptr_t)addr & ~(uintptr_t)(CACHE_LINE_SIZE - 1));
     for (; p < end; p += CACHE_LINE_SIZE) {
         __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
     }
@@ -78,8 +81,9 @@ static inline void cache_clean_range(const volatile void *addr, size_t size)
 /* Invalidate a range of memory (multiple cachelines) */
 static inline void cache_invalidate_range(const volatile void *addr, size_t size)
 {
-    const char *p = (const char *)addr;
-    const char *end = p + size;
+    /* Line-aligned start, as in cache_clean_range. */
+    const char *end = (const char *)addr + size;
+    const char *p = (const char *)((uintptr_t)addr & ~(uintptr_t)(CACHE_LINE_SIZE - 1));
     for (; p < end; p += CACHE_LINE_SIZE) {
         __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
     }

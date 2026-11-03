@@ -16,6 +16,7 @@
  */
 #include "unity.h"
 #include "../gpu/nvidia/ga10b_chan.h"
+#include "../gpu/nvidia/ga10b_grctx.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -290,6 +291,24 @@ static void test_fifo_init_table(void)
     TEST_ASSERT_EQUAL_HEX32(0x64u, ga10b_chan_fifo_init_writes[81].value);
 }
 
+/* ga10b_chan_create rejects a GPFIFO larger than
+ * GA10B_CHAN_MAX_GPFIFO_ENTRIES before touching any memory (the ring
+ * size is entries * 8 in 32 bits). */
+static void test_chan_create_bounds_gpfifo(void)
+{
+    static struct ga10b_grctx grctx;
+    static struct ga10b_gr_chan_ctx gr;
+    static struct ga10b_chan ch;
+    struct ga10b_chan_params p;
+    ga10b_chan_default_params(&p);
+    unsigned before = g_allocs;
+    p.gpfifo_entries = GA10B_CHAN_MAX_GPFIFO_ENTRIES << 1;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_ARG, ga10b_chan_create(&g_ops, &grctx, &p, &gr, &ch));
+    p.gpfifo_entries = 1u << 31;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_ARG, ga10b_chan_create(&g_ops, &grctx, &p, &gr, &ch));
+    TEST_ASSERT_EQUAL_UINT(before, g_allocs);
+}
+
 int test_suite_ga10b_chan(void)
 {
     UnityBegin("test_ga10b_chan.c");
@@ -299,6 +318,7 @@ int test_suite_ga10b_chan(void)
     RUN_TEST(test_inst_block_fields);
     RUN_TEST(test_ramfc_helper_channel);
     RUN_TEST(test_userd_and_gpfifo);
+    RUN_TEST(test_chan_create_bounds_gpfifo);
     RUN_TEST(test_runlist_entries);
     RUN_TEST(test_fifo_init_table);
     return UnityEnd();

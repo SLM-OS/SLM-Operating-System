@@ -393,6 +393,10 @@ enum ga10b_compute_preempt {
     GA10B_PREEMPT_CILP = 4,
 };
 
+/* Upper bound on GPFIFO entries (8 bytes each): keeps the ring size
+ * well inside 32 bits and the allocation sane. The helper uses 512. */
+#define GA10B_CHAN_MAX_GPFIFO_ENTRIES (1u << 20)
+
 struct ga10b_chan_params {
     uint32_t chid;              /* != 0: a zero doorbell token is rejected
                                    by ga10b_validate_handoff */

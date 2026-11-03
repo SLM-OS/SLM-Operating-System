@@ -92,11 +92,10 @@ int ga10b_mnist_cold_install(const struct ga10b_gpu_ops *ops, struct ga10b_chan 
     struct ga10b_channel_handoff h;
     ga10b_mnist_pipeline_fill_handoff(&cold_mnist, ch, &h);
     if (ga10b_handoff_is_v7(&h) == false || ga10b_v7_validate_handoff(&h) != GA10B_V7_OK ||
-        ga10b_bringup_install_handoff(ga10b_bringup_state(), &h) != 0) {
+        slm_gpu_install_handoff(ga10b_bringup_state(), &h) != 0) {
         WARN("mnist-gpu: v7 handoff rejected");
-        /* Mappings stay in the VM; the pages are freed only because no
-         * handoff points at them and nothing has been dispatched. */
-        ga10b_mnist_pipeline_free(ops, &cold_mnist);
+        /* The pipeline's pages stay mapped in the channel's VM, so they
+         * are leaked rather than freed (no stale PTEs to reused memory). */
         return -1;
     }
 
@@ -107,7 +106,8 @@ int ga10b_mnist_cold_install(const struct ga10b_gpu_ops *ops, struct ga10b_chan 
          (unsigned long)h.qmd_pool_phys, (unsigned)h.qmd_pool_n_slots,
          (unsigned)cold_mnist.sass_bytes[0], (unsigned)cold_mnist.sass_bytes[1],
          (unsigned)cold_mnist.sass_bytes[2], (unsigned)cold_mnist.sass_bytes[3]);
-    if (!src.input)
+    if (!src.input) {
         WARN("mnist-gpu: embedded synthetic input missing; input buffer starts zeroed");
+    }
     return 0;
 }

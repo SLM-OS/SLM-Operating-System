@@ -1113,6 +1113,15 @@ static void consume_post_inherit_double_dispatch(uint32_t kind,
  * existing Lua / Rust callers; new model integrations should
  * call the generic functions directly with the kind constant. */
 
+int slm_gpu_install_handoff(struct ga10b_bringup *b,
+                            const struct ga10b_channel_handoff *h)
+{
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    int rc = ga10b_bringup_install_handoff(b, h);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
+}
+
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
 {
     if (!output) return -1;

@@ -5653,7 +5653,7 @@ int cmd_nvgpu(int argc, char *argv[])
         /* `nvgpu cold [step]` — cold bring-up after UEFI-direct boot
          * (#1088). Runs every step up to `step` (default: all). */
         enum ga10b_cold_step last = (enum ga10b_cold_step)(GA10B_COLD_STEP_COUNT - 1);
-        if (argc >= 3 && strcmp(argv[2], "acrprobe") != 0) {
+        if (argc >= 3) {
             bool found = false;
             for (int s = 1; s < GA10B_COLD_STEP_COUNT; s++) {
                 if (strcmp(argv[2], ga10b_cold_step_name((enum ga10b_cold_step)s)) == 0) {
@@ -5663,31 +5663,13 @@ int cmd_nvgpu(int argc, char *argv[])
             }
             if (!found) {
                 shell_puts("usage: nvgpu cold [");
-                for (int s = 1; s < GA10B_COLD_STEP_COUNT; s++)
+                for (int s = 1; s < GA10B_COLD_STEP_COUNT; s++) {
                     shell_printf("%s%s", s > 1 ? "|" : "",
                                  ga10b_cold_step_name((enum ga10b_cold_step)s));
+                }
                 shell_puts("]\r\n");
                 return -1;
             }
-        }
-        if (argc >= 3 && strcmp(argv[2], "acrprobe") == 0) {
-            /* TEMP (#1088 bring-up): boot ACR with a zeroed descriptor
-             * to check the BROM accepts the image on a cold GPU. */
-            struct ga10b_firmware_blob t, d, m;
-            if (ga10b_firmware_get(GA10B_FW_ACR_TEXT, &t) < 0 ||
-                ga10b_firmware_get(GA10B_FW_ACR_DATA, &d) < 0 ||
-                ga10b_firmware_get(GA10B_FW_ACR_MANIFEST, &m) < 0) {
-                shell_puts("acr firmware not embedded\r\n");
-                return -1;
-            }
-            void *desc = pmm_alloc_page();
-            memset(desc, 0, 4096);
-            cache_clean_range(desc, 4096);
-            int prc = ga10b_cold_gsp_boot_acr_blobs(t.data, (uint32_t)t.size,
-                d.data, (uint32_t)d.size, m.data, (uint32_t)m.size,
-                (uint64_t)(uintptr_t)desc);
-            shell_printf("acrprobe: rc=%d\r\n", prc);
-            return prc;
         }
         int rc = ga10b_cold_run(last);
         shell_printf("cold: rc=%d done=%s\r\n", rc,

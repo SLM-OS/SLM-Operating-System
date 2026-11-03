@@ -81,11 +81,14 @@ static struct ga10b_pmu t_pmu;
 
 static uint32_t *reg_slot(uint32_t addr)
 {
-    for (int i = 0; i < F.nregs; i++)
-        if (F.regs[i].addr == addr)
+    for (int i = 0; i < F.nregs; i++) {
+        if (F.regs[i].addr == addr) {
             return &F.regs[i].val;
-    if (F.nregs >= NREGS)
+        }
+        }
+    if (F.nregs >= NREGS) {
         return nullptr;
+    }
     F.regs[F.nregs].addr = addr;
     F.regs[F.nregs].val = 0;
     return &F.regs[F.nregs++].val;
@@ -103,8 +106,9 @@ static void put_msg(uint8_t unit, uint8_t flags, uint8_t seq, const void *body, 
                                .ctrl_flags = flags, .seq_id = seq };
     memcpy(e, &mh, sizeof(mh));
     memcpy(e + 4, &h, sizeof(h));
-    if (body_len)
+    if (body_len) {
         memcpy(e + 8, body, body_len);
+    }
     F.pmu_msg_head = (F.pmu_msg_head + 1u) % GA10B_FBQ_MSG_NUM_ELEMENTS;
     set_reg(GA10B_PWR_FALCON_IRQSTAT, reg(GA10B_PWR_FALCON_IRQSTAT) | GA10B_FALCON_IRQ_SWGEN0);
 }
@@ -151,8 +155,9 @@ static void on_command(uint32_t new_head)
         set_reg(GA10B_PWR_FALCON_IRQSTAT, reg(GA10B_PWR_FALCON_IRQSTAT) | GA10B_FALCON_IRQ_HALT);
         return;
     }
-    if (F.no_reply)
+    if (F.no_reply) {
         return;
+    }
     /* The PMU writes the RPC back (status at hdr offset 3). */
     t_ss[GA10B_SS_CMD_QUEUE_OFFSET(GA10B_PMU_COMMAND_QUEUE_LPQ) +
          idx * GA10B_FBQ_CMD_ELEMENT_SIZE + 20 + 3] = F.rpc_status;
@@ -177,8 +182,9 @@ static uint32_t f_rd(void *ctx, uint32_t addr)
     (void)ctx;
     switch (addr) {
     case GA10B_PWR_RISCV_BR_RETCODE:
-        if (!F.started)
+        if (!F.started) {
             return 0;
+        }
         if (F.brom_running_reads > 0) {
             F.brom_running_reads--;
             return 1;
@@ -189,14 +195,16 @@ static uint32_t f_rd(void *ctx, uint32_t addr)
             F.lockdown_reads--;
             return 0x1a733u;            /* lockdown set (GSP value in trace) */
         }
-        if (F.started && !F.init_posted)
+        if (F.started && !F.init_posted) {
             post_init();
+        }
         return 0x18733u;                /* trace: PMU after release */
     case GA10B_PWR_FALCON_DMEMD0: {
         uint32_t a = F.dmemc & 0xfffcu, v;
         memcpy(&v, F.dmem + a, 4);
-        if (F.dmemc & GA10B_FALCON_DMEMC_AINCR)
+        if (F.dmemc & GA10B_FALCON_DMEMC_AINCR) {
             F.dmemc = (F.dmemc & ~0xfffcu) | ((a + 4u) & 0xfffcu);
+        }
         return v;
     }
     case GA10B_PWR_PMU_MSGQ_HEAD:
@@ -218,8 +226,9 @@ static void f_wr(void *ctx, uint32_t addr, uint32_t val)
     }
     switch (addr) {
     case GA10B_PWR_RISCV_CPUCTL:
-        if (val & GA10B_RISCV_CPUCTL_STARTCPU)
+        if (val & GA10B_RISCV_CPUCTL_STARTCPU) {
             F.started = true;
+        }
         break;
     case GA10B_PWR_FALCON_IRQSCLR:
         set_reg(GA10B_PWR_FALCON_IRQSTAT, reg(GA10B_PWR_FALCON_IRQSTAT) & ~val);
@@ -240,8 +249,9 @@ static void f_delay(void *ctx, uint32_t us)
 {
     (void)ctx;
     F.delay_total_us += us;
-    if (us >= 1000u && F.ndelays_ms < 8)
+    if (us >= 1000u && F.ndelays_ms < 8) {
         F.delays_ms_seen[F.ndelays_ms++] = us / 1000u;
+    }
 }
 
 static void f_line(void *ctx, const char *s)
@@ -249,8 +259,9 @@ static void f_line(void *ctx, const char *s)
     (void)ctx;
     if (F.nlines < 8) {
         size_t n = strlen(s);
-        if (n >= sizeof(F.lines[0]))
+        if (n >= sizeof(F.lines[0])) {
             n = sizeof(F.lines[0]) - 1u;
+        }
         memcpy(F.lines[F.nlines], s, n);
         F.lines[F.nlines][n] = '\0';
         F.nlines++;
@@ -294,11 +305,13 @@ static int boot_ready_with_sw_area(bool override, uint16_t off, uint16_t size)
     F.sw_size = size;
     struct ga10b_pmu_config c = make_cfg();
     int rc = ga10b_pmu_init(&t_pmu, &f_ops, &c);
-    if (rc != GA10B_PMU_OK)
+    if (rc != GA10B_PMU_OK) {
         return rc;
+    }
     rc = ga10b_pmu_boot(&t_pmu);
-    if (rc != GA10B_PMU_OK)
+    if (rc != GA10B_PMU_OK) {
         return rc;
+    }
     return ga10b_pmu_wait_init(&t_pmu, 100);
 }
 
@@ -316,9 +329,11 @@ static uint32_t get32(const uint8_t *p)
 
 static int find_write(uint32_t addr, int from)
 {
-    for (int i = from; i < F.nw; i++)
-        if (F.wlog[i].addr == addr)
+    for (int i = from; i < F.nw; i++) {
+        if (F.wlog[i].addr == addr) {
             return i;
+        }
+        }
     return -1;
 }
 

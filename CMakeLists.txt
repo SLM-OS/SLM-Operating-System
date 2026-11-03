@@ -1166,6 +1166,7 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_chan.c
     kernel/tests/test_ga10b_grctx.c
     kernel/tests/test_ga10b_mnist_pipeline.c
+    kernel/tests/test_ga10b_cold.c
 )
 
 # lwIP library sources (QEMU networking only)

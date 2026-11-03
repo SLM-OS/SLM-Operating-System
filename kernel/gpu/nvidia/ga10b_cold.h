@@ -35,9 +35,15 @@ enum ga10b_cold_step {
     GA10B_COLD_STEP_COUNT,
 };
 
+/* Returned by ga10b_cold_run when another caller (boot, or a second
+ * shell session) is already running the sequence. */
+#define GA10B_COLD_ERR_BUSY (-100)
+
 /* Run every step after the last completed one, up to and including
- * `last`. Returns 0 when `last` is reached, or the negative number of
- * the step that failed. */
+ * `last`. Returns 0 when `last` is reached, the negative number of
+ * the step that failed, or GA10B_COLD_ERR_BUSY. Not reentrant: a
+ * concurrent call returns GA10B_COLD_ERR_BUSY instead of driving the
+ * hardware sequence twice. */
 int ga10b_cold_run(enum ga10b_cold_step last);
 
 /* Highest step completed so far (GA10B_COLD_NONE before any). */
@@ -45,16 +51,6 @@ enum ga10b_cold_step ga10b_cold_progress(void);
 
 /* Short name for a step, for logs and the shell. */
 const char *ga10b_cold_step_name(enum ga10b_cold_step step);
-
-/* Boot the ACR HS ucode (acr-gsp text/data/manifest) on the GSP
- * RISC-V core (nvgpu nvgpu_acr_bootstrap_hs_ucode_riscv). `desc_phys`
- * is the physical address of the flcn2_acr_desc the ucode reads
- * through MAILBOX0/1. Returns 0 when the BROM accepted the image and
- * ACR halted with MAILBOX0 == 0. Lengths must be multiples of 4. */
-int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
-                                  const uint8_t *data, uint32_t data_len,
-                                  const uint8_t *manifest, uint32_t manifest_len,
-                                  uint64_t desc_phys);
 
 /* One BAR0 register write of a generated init table. */
 struct ga10b_reg_write {
@@ -67,6 +63,17 @@ extern const struct ga10b_reg_write ga10b_gr_init_support_writes[];
 extern const unsigned ga10b_gr_init_support_writes_count;
 
 /* ---- Pure helpers (host-testable) ---- */
+
+/* ACR image fits the GSP falcon: lengths are multiples of 4, the code
+ * fits IMEM, and data + manifest fit DMEM (summed in 64 bits). */
+static inline bool ga10b_cold_acr_image_fits(uint32_t code_len, uint32_t data_len,
+                                             uint32_t manifest_len,
+                                             uint32_t imem_size, uint32_t dmem_size)
+{
+    if ((code_len | data_len | manifest_len) & 3u) return false;
+    if (code_len > imem_size) return false;
+    return (uint64_t)data_len + manifest_len <= dmem_size;
+}
 
 /* NV_PFB_PRI_MMU_DEBUG_WR/RD value for a 4 KB-aligned sysmem page:
  * address >> 12 in bits 31:4, aperture SYS_MEM_NONCOHERENT (3), VOL=0

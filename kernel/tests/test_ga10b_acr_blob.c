@@ -65,8 +65,9 @@ static uint32_t get32(const uint8_t *p)
 
 static void make_sig(uint8_t *s, uint32_t file_falcon_id, uint32_t version, uint8_t fill)
 {
-    for (size_t i = 0; i < 2248; i++)
+    for (size_t i = 0; i < 2248; i++) {
         s[i] = (uint8_t)(fill + i);
+    }
     s[0] = 1; s[1] = 0; s[2] = 2; s[3] = 0;   /* identifier 1, version 2 */
     put32(s + 4, 2248);
     put32(s + 8, file_falcon_id);
@@ -83,10 +84,12 @@ static void make_inputs(struct ga10b_acr_blob_inputs *in)
         a_fw_fecs[16 + i] = (uint8_t)(0x10 + i);
         a_fw_gpccs[16 + i] = (uint8_t)(0x90 + i);
     }
-    for (size_t i = 0; i < sizeof(a_inst); i++)
+    for (size_t i = 0; i < sizeof(a_inst); i++) {
         a_inst[i] = (uint8_t)(0xC0 ^ i);
-    for (size_t i = 0; i < sizeof(a_data); i++)
+    }
+    for (size_t i = 0; i < sizeof(a_data); i++) {
         a_data[i] = (uint8_t)(0x30 + i);
+    }
     u.fecs_fw = a_fw_fecs;   u.fecs_fw_size = sizeof(a_fw_fecs);
     u.gpccs_fw = a_fw_gpccs; u.gpccs_fw_size = sizeof(a_fw_gpccs);
     u.fecs_inst = a_inst;  u.fecs_inst_size = sizeof(a_inst);
@@ -123,10 +126,12 @@ static void make_pmu_inputs(struct ga10b_acr_blob_inputs *in)
     put32(a_pmu_desc + 28, 0x01f774cc);/* app_version */
     put32(a_pmu_desc + 36, 0x80);      /* manifest_size */
     a_pmu_desc[56] = 1;                /* is_monitor_enabled */
-    for (size_t i = 60; i < sizeof(a_pmu_desc); i++)
+    for (size_t i = 60; i < sizeof(a_pmu_desc); i++) {
         a_pmu_desc[i] = 0xD5;          /* beyond the struct: never copied */
-    for (size_t i = 0; i < sizeof(a_pmu_img); i++)
+    }
+    for (size_t i = 0; i < sizeof(a_pmu_img); i++) {
         a_pmu_img[i] = (uint8_t)(0x5A ^ (i * 7));
+    }
     make_sig(a_sig_pmu, 0x0d, 1, 0x81);
     in->include_pmu = true;
     in->pmu_image = a_pmu_img;  in->pmu_image_size = sizeof(a_pmu_img);
@@ -264,8 +269,9 @@ static void test_build_blob_bytes(void)
     TEST_ASSERT_EQUAL_HEX32(GA10B_FALCON_ID_FECS, get32(a_blob + 24));
     TEST_ASSERT_EQUAL_HEX32(0x1500, get32(a_blob + 28));
     TEST_ASSERT_EQUAL_HEX32(GA10B_FALCON_ID_INVALID, get32(a_blob + 48));
-    for (uint32_t i = 52; i < 72; i += 4)
+    for (uint32_t i = 52; i < 72; i += 4) {
         TEST_ASSERT_EQUAL_HEX32(0, get32(a_blob + i));
+    }
     TEST_ASSERT_EQUAL_UINT8(0, a_blob[72]);            /* zero gap */
 
     /* FECS LSB: generic header copied, falcon_id overwritten, rest of
@@ -433,8 +439,9 @@ static void test_pmu_blob_bytes(void)
 
     TEST_ASSERT_EQUAL_MEMORY(a_pmu_img, a_pblob + 0x1000, sizeof(a_pmu_img));
     /* No BL desc for the PMU and the reserve stays zero. */
-    for (uint32_t i = 0x2000; i < 0xa100; i += 0x100)
+    for (uint32_t i = 0x2000; i < 0xa100; i += 0x100) {
         TEST_ASSERT_EQUAL_UINT8(0, a_pblob[i]);
+    }
     TEST_ASSERT_EQUAL_MEMORY(a_surface + 0x400, a_pblob + 0xb000, 0x400);
     TEST_ASSERT_EQUAL_MEMORY(a_surface + 0x000, a_pblob + 0xc000, 0x400);
     TEST_ASSERT_EQUAL_MEMORY(&a_lay.flcn[2].bl_desc, a_pblob + 0xc400, 84);

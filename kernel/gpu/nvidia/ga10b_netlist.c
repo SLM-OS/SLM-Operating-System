@@ -24,31 +24,36 @@ static uint32_t rd32(const uint8_t *p)
 
 int ga10b_netlist_open(struct ga10b_netlist *out, const void *blob, size_t size)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
-    if (blob == nullptr)
+    if (blob == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
 
     const uint8_t *b = blob;
-    if (size < sizeof(struct ga10b_netlist_image_header))
+    if (size < sizeof(struct ga10b_netlist_image_header)) {
         return GA10B_NETLIST_ERR_TRUNCATED;
+    }
 
     uint32_t version = rd32(b);
     uint32_t regions = rd32(b + 4);
 
     uint64_t table_end = (uint64_t)sizeof(struct ga10b_netlist_image_header) +
                          (uint64_t)regions * sizeof(struct ga10b_netlist_region);
-    if (table_end > (uint64_t)size)
+    if (table_end > (uint64_t)size) {
         return GA10B_NETLIST_ERR_TRUNCATED;
+    }
 
     for (uint32_t i = 0; i < regions; i++) {
         const uint8_t *r = b + sizeof(struct ga10b_netlist_image_header) +
                            (size_t)i * sizeof(struct ga10b_netlist_region);
         uint64_t dsize = rd32(r + 4);
         uint64_t doff = rd32(r + 8);
-        if (doff + dsize > (uint64_t)size)
+        if (doff + dsize > (uint64_t)size) {
             return GA10B_NETLIST_ERR_BOUNDS;
+        }
     }
 
     out->data = b;
@@ -62,8 +67,9 @@ int ga10b_netlist_region_at(const struct ga10b_netlist *nl, uint32_t idx,
                             struct ga10b_netlist_region *out)
 {
     if (nl == nullptr || out == nullptr || nl->data == nullptr ||
-        idx >= nl->region_count)
+        idx >= nl->region_count) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     const uint8_t *r = nl->data + sizeof(struct ga10b_netlist_image_header) +
                        (size_t)idx * sizeof(struct ga10b_netlist_region);
     out->region_id = rd32(r);
@@ -75,8 +81,9 @@ int ga10b_netlist_region_at(const struct ga10b_netlist *nl, uint32_t idx,
 int ga10b_netlist_find(const struct ga10b_netlist *nl, uint32_t region_id,
                        struct ga10b_netlist_blob_view *out)
 {
-    if (nl == nullptr || out == nullptr || nl->data == nullptr)
+    if (nl == nullptr || out == nullptr || nl->data == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     out->data = nullptr;
     out->size = 0;
 
@@ -99,23 +106,27 @@ static int find_aligned(const struct ga10b_netlist *nl, uint32_t region_id,
                         struct ga10b_netlist_blob_view *v)
 {
     int rc = ga10b_netlist_find(nl, region_id, v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
-    if (((uintptr_t)v->data & 3u) != 0u)
+    }
+    if (((uintptr_t)v->data & 3u) != 0u) {
         return GA10B_NETLIST_ERR_ALIGN;
+    }
     return GA10B_NETLIST_OK;
 }
 
 int ga10b_netlist_get_u32_list(const struct ga10b_netlist *nl, uint32_t region_id,
                                struct ga10b_netlist_u32_view *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
     struct ga10b_netlist_blob_view v;
     int rc = find_aligned(nl, region_id, &v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
+    }
     out->l = (const uint32_t *)(const void *)v.data;
     /* netlist.c:85-87: count = (len + sizeof(u32) - 1) / sizeof(u32). */
     out->count = (uint32_t)(((uint64_t)v.size + 3u) / 4u);
@@ -126,13 +137,15 @@ int ga10b_netlist_get_u32_list(const struct ga10b_netlist *nl, uint32_t region_i
 int ga10b_netlist_get_av_list(const struct ga10b_netlist *nl, uint32_t region_id,
                               struct ga10b_netlist_av_view *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
     struct ga10b_netlist_blob_view v;
     int rc = find_aligned(nl, region_id, &v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
+    }
     out->l = (const struct ga10b_netlist_av *)(const void *)v.data;
     out->count = v.size / (uint32_t)sizeof(struct ga10b_netlist_av); /* netlist.c:100 */
     return GA10B_NETLIST_OK;
@@ -141,13 +154,15 @@ int ga10b_netlist_get_av_list(const struct ga10b_netlist *nl, uint32_t region_id
 int ga10b_netlist_get_av64_list(const struct ga10b_netlist *nl, uint32_t region_id,
                                 struct ga10b_netlist_av64_view *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
     struct ga10b_netlist_blob_view v;
     int rc = find_aligned(nl, region_id, &v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
+    }
     out->l = (const struct ga10b_netlist_av64 *)(const void *)v.data;
     out->count = v.size / (uint32_t)sizeof(struct ga10b_netlist_av64); /* netlist.c:113 */
     return GA10B_NETLIST_OK;
@@ -156,13 +171,15 @@ int ga10b_netlist_get_av64_list(const struct ga10b_netlist *nl, uint32_t region_
 int ga10b_netlist_get_aiv_list(const struct ga10b_netlist *nl, uint32_t region_id,
                                struct ga10b_netlist_aiv_view *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
     struct ga10b_netlist_blob_view v;
     int rc = find_aligned(nl, region_id, &v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
+    }
     out->l = (const struct ga10b_netlist_aiv *)(const void *)v.data;
     out->count = v.size / (uint32_t)sizeof(struct ga10b_netlist_aiv); /* netlist.c:126 */
     return GA10B_NETLIST_OK;
@@ -171,14 +188,17 @@ int ga10b_netlist_get_aiv_list(const struct ga10b_netlist *nl, uint32_t region_i
 int ga10b_netlist_get_u32(const struct ga10b_netlist *nl, uint32_t region_id,
                           uint32_t *out)
 {
-    if (out == nullptr)
+    if (out == nullptr) {
         return GA10B_NETLIST_ERR_ARG;
+    }
     struct ga10b_netlist_blob_view v;
     int rc = ga10b_netlist_find(nl, region_id, &v);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return rc;
-    if (v.size < 4u)
+    }
+    if (v.size < 4u) {
         return GA10B_NETLIST_ERR_SIZE;
+    }
     *out = rd32(v.data);
     return GA10B_NETLIST_OK;
 }

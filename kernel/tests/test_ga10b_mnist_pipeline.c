@@ -148,8 +148,9 @@ static void test_op_table(void)
         TEST_ASSERT_TRUE(d->sentinel_cell * 4u < d->output_bytes);
     }
     /* Each op reads the previous op's output (the chain). */
-    for (unsigned i = 1; i < 8; i++)
+    for (unsigned i = 1; i < 8; i++) {
         TEST_ASSERT_EQUAL_UINT8(GA10B_MNIST_REF_OUTPUT(i - 1), ga10b_mnist_ops[i].ptr[0]);
+    }
     TEST_ASSERT_EQUAL_UINT8(GA10B_MNIST_REF_INPUT, ga10b_mnist_ops[0].ptr[0]);
     /* Op 7's output (logits) is read from cell 0 by
      * ga10b_bringup_read_pipeline_output via output_phys. */
@@ -186,8 +187,9 @@ static void check_dims(const uint8_t *c, uint32_t bx, uint32_t by, uint32_t gx,
 
 static void check_ints(const uint8_t *c, uint32_t off, const int32_t *v, unsigned n)
 {
-    for (unsigned i = 0; i < n; i++)
+    for (unsigned i = 0; i < n; i++) {
         TEST_ASSERT_EQUAL_INT32(v[i], (int32_t)rd32le(c + off + 4u * i));
+    }
     /* Nothing written past the last argument. */
     for (uint32_t o = off + 4u * n; o < 512u; o++) TEST_ASSERT_EQUAL_UINT8(0, c[o]);
 }
@@ -532,8 +534,9 @@ static void test_build_and_handoff(void)
 
     /* Sizes. */
     for (unsigned i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT32(65536, p->shader[i].size);
-    for (unsigned w = 0; w < 6; w++)
+    for (unsigned w = 0; w < 6; w++) {
         TEST_ASSERT_EQUAL_UINT32(ga10b_mnist_weights[w].buf_bytes, p->weight[w].size);
+    }
     static const uint32_t out_sz[8] = { 28672, 28672, 8192, 16384, 16384, 4096, 4096, 4096 };
     for (unsigned i = 0; i < 8; i++) {
         TEST_ASSERT_EQUAL_UINT32(out_sz[i], p->out[i].size);
@@ -558,12 +561,14 @@ static void test_build_and_handoff(void)
     for (unsigned m = 0; m < nm; m++) {
         TEST_ASSERT_TRUE(maps[m].va >= GA10B_VM_USER_BASE && maps[m].va < (1ull << 40));
         TEST_ASSERT_EQUAL_HEX64(0, maps[m].va & 0xfffu);
-        for (uint32_t off = 0; off < maps[m].d->size; off += 4096u)
+        for (uint32_t off = 0; off < maps[m].d->size; off += 4096u) {
             TEST_ASSERT_EQUAL_HEX64(maps[m].d->phys + off,
                                     ga10b_vm_lookup(&g_ops, &vm, maps[m].va + off));
-        for (unsigned k = 0; k < m; k++)        /* VA ranges disjoint */
+        }
+        for (unsigned k = 0; k < m; k++) {        /* VA ranges disjoint */
             TEST_ASSERT_TRUE(maps[m].va >= maps[k].va + maps[k].d->size ||
                              maps[k].va >= maps[m].va + maps[m].d->size);
+        }
     }
     /* The ops array is CPU-only. */
     TEST_ASSERT_NOT_NULL(p->ops.cpu);
@@ -574,10 +579,11 @@ static void test_build_and_handoff(void)
         TEST_ASSERT_EQUAL_MEMORY(g_sass[i], s, src.sass_bytes[i]);
         for (uint32_t o = src.sass_bytes[i]; o < 65536u; o++) TEST_ASSERT_EQUAL_UINT8(0, s[o]);
     }
-    for (unsigned w = 0; w < 6; w++)
+    for (unsigned w = 0; w < 6; w++) {
         TEST_ASSERT_EQUAL_HEX32(g_weight_ref[w].fnv,
             operator_library_checksum32((const uint8_t *)p->weight[w].cpu,
                                         ga10b_mnist_weights[w].bytes));
+    }
     TEST_ASSERT_EQUAL_MEMORY(mnist_input_synth_start, p->input.cpu, GA10B_MNIST_INPUT_BYTES);
     for (unsigned i = 0; i < 8; i++) {
         const uint8_t *o = (const uint8_t *)p->out[i].cpu;
@@ -702,17 +708,25 @@ static void test_build_errors(void)
     src.weight[GA10B_MNIST_B_FC] = NULL;
     TEST_ASSERT_EQUAL_INT(GA10B_MNIST_ERR_ARG, ga10b_mnist_pipeline_build(&g_ops, &vm, &src, p));
 
-    /* Out of memory part-way: everything allocated is released. */
+    /* Out of memory part-way: the pages allocated so far stay allocated
+     * (some are already mapped in the VM, so freeing them would leave
+     * PTEs to reused memory), and the pipeline is not marked built. */
     make_sources(&src);
-    unsigned tables = vm.table_pages;
     /* ~190 pages needed, ~150 left: fails in the middle. */
-    for (unsigned i = POOL_PAGES - 250u; i < POOL_PAGES; i++) g_used[i] = true;
+    for (unsigned i = POOL_PAGES - 250u; i < POOL_PAGES; i++) {
+        g_used[i] = true;
+    }
     int rc = ga10b_mnist_pipeline_build(&g_ops, &vm, &src, p);
     TEST_ASSERT_TRUE(rc == GA10B_MNIST_ERR_NOMEM || rc == GA10B_MNIST_ERR_MAP);
     TEST_ASSERT_FALSE(p->built);
-    for (unsigned i = POOL_PAGES - 250u; i < POOL_PAGES; i++) g_used[i] = false;
-    TEST_ASSERT_EQUAL_UINT32(vm.table_pages, pool_pages_used());
-    TEST_ASSERT_TRUE(vm.table_pages >= tables);
+    for (unsigned i = POOL_PAGES - 250u; i < POOL_PAGES; i++) {
+        g_used[i] = false;
+    }
+    TEST_ASSERT_TRUE(pool_pages_used() > vm.table_pages);
+
+    /* Fresh pool and VM for the remaining cases. */
+    pool_reset();
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_ops, &vm));
 
     /* Input NULL: buffer starts zeroed. */
     make_sources(&src);

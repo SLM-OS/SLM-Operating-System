@@ -87,8 +87,9 @@ uint64_t ga10b_mnist_ref_va(const struct ga10b_mnist_vas *va, uint8_t ref,
 {
     if (!va) return 0;
     if (ref == GA10B_MNIST_REF_INPUT) return va->input;
-    if (ref >= 0x10u && ref < 0x10u + GA10B_MNIST_N_WEIGHTS)
+    if (ref >= 0x10u && ref < 0x10u + GA10B_MNIST_N_WEIGHTS) {
         return va->weight[ref - 0x10u];
+    }
     if (ref >= 0x20u && ref < 0x20u + GA10B_MNIST_N_OPS) {
         uint32_t n = ref - 0x20u;
         /* An op may write its own output (n == op) but only read
@@ -232,14 +233,16 @@ static int parse_tensor(struct pb t, struct ga10b_onnx_tensor *out)
         if (f == 1u) {                          /* dims, int64 */
             if (wt == PB_VARINT) {
                 uint64_t v;
-                if (out->ndims >= GA10B_ONNX_MAX_DIMS || !pb_varint(&s, &v))
+                if (out->ndims >= GA10B_ONNX_MAX_DIMS || !pb_varint(&s, &v)) {
                     return GA10B_ONNX_ERR_FORMAT;
+                }
                 out->dims[out->ndims++] = (int64_t)v;
             } else if (wt == PB_LEN) {          /* packed */
                 while (s.p < s.end) {
                     uint64_t v;
-                    if (out->ndims >= GA10B_ONNX_MAX_DIMS || !pb_varint(&s, &v))
+                    if (out->ndims >= GA10B_ONNX_MAX_DIMS || !pb_varint(&s, &v)) {
                         return GA10B_ONNX_ERR_FORMAT;
+                    }
                     out->dims[out->ndims++] = (int64_t)v;
                 }
             } else {
@@ -279,8 +282,9 @@ static int parse_tensor(struct pb t, struct ga10b_onnx_tensor *out)
     }
     uint64_t n = 1;
     for (uint32_t i = 0; i < out->ndims; i++) {
-        if (out->dims[i] <= 0 || (uint64_t)out->dims[i] > (1ull << 32))
+        if (out->dims[i] <= 0 || (uint64_t)out->dims[i] > (1ull << 32)) {
             return GA10B_ONNX_ERR_FORMAT;
+        }
         n *= (uint64_t)out->dims[i];
         if (n > (1ull << 32)) return GA10B_ONNX_ERR_FORMAT;
     }
@@ -349,8 +353,9 @@ static int alloc_map(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
     if (!va) return GA10B_MNIST_OK;
     /* MAP_BUFFER_EX without the CACHEABLE flag (gpu-launch-common.c:513):
      * not GPU-L2 cacheable. */
-    if (ga10b_vm_map_dma(ops, vm, d, 0u, false, va) != GA10B_CHAN_OK)
+    if (ga10b_vm_map_dma(ops, vm, d, 0u, false, va) != GA10B_CHAN_OK) {
         return GA10B_MNIST_ERR_MAP;
+    }
     return GA10B_MNIST_OK;
 }
 
@@ -406,12 +411,15 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
                                struct ga10b_mnist_pipeline *p)
 {
     if (!ops || !vm || !src || !p) return GA10B_MNIST_ERR_ARG;
-    for (unsigned i = 0; i < GA10B_MNIST_N_SHADERS; i++)
+    for (unsigned i = 0; i < GA10B_MNIST_N_SHADERS; i++) {
         if (!src->sass[i] || src->sass_bytes[i] == 0u ||
-            src->sass_bytes[i] > GA10B_MNIST_SHADER_BUF_BYTES)
+            src->sass_bytes[i] > GA10B_MNIST_SHADER_BUF_BYTES) {
             return GA10B_MNIST_ERR_ARG;
-    for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++)
+        }
+        }
+    for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++) {
         if (!src->weight[i]) return GA10B_MNIST_ERR_ARG;
+    }
 
     memset(p, 0, sizeof(*p));
     int rc;
@@ -420,8 +428,9 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
      * the conv shader lives in ctx's 64 KB shader dmabuf, :397/:470). */
     for (unsigned i = 0; i < GA10B_MNIST_N_SHADERS; i++) {
         if ((rc = alloc_map(ops, vm, GA10B_MNIST_SHADER_BUF_BYTES, &p->shader[i],
-                            &p->shader_va[i])) != GA10B_MNIST_OK)
+                            &p->shader_va[i])) != GA10B_MNIST_OK) {
             goto fail;
+        }
         memcpy(p->shader[i].cpu, src->sass[i], src->sass_bytes[i]);
         p->sass_bytes[i] = src->sass_bytes[i];
         ga10b_dma_clean(ops, &p->shader[i]);
@@ -430,13 +439,15 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
     /* Weights + input (:298-329). */
     for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++) {
         if ((rc = alloc_map(ops, vm, ga10b_mnist_weights[i].buf_bytes, &p->weight[i],
-                            &p->va.weight[i])) != GA10B_MNIST_OK)
+                            &p->va.weight[i])) != GA10B_MNIST_OK) {
             goto fail;
+        }
         memcpy(p->weight[i].cpu, src->weight[i], ga10b_mnist_weights[i].bytes);
         ga10b_dma_clean(ops, &p->weight[i]);
     }
-    if ((rc = alloc_map(ops, vm, 4096u, &p->input, &p->va.input)) != GA10B_MNIST_OK)
+    if ((rc = alloc_map(ops, vm, 4096u, &p->input, &p->va.input)) != GA10B_MNIST_OK) {
         goto fail;
+    }
     if (src->input) memcpy(p->input.cpu, src->input, GA10B_MNIST_INPUT_BYTES);
     ga10b_dma_clean(ops, &p->input);
 
@@ -449,8 +460,9 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
             (rc = alloc_map(ops, vm, GA10B_MNIST_CBUF_PAGE_BYTES, &p->cbuf[i],
                             &p->cbuf_va[i])) != GA10B_MNIST_OK ||
             (rc = alloc_map(ops, vm, ga10b_mnist_round_page(ga10b_mnist_ops[i].output_bytes),
-                            &p->out[i], &p->va.output[i])) != GA10B_MNIST_OK)
+                            &p->out[i], &p->va.output[i])) != GA10B_MNIST_OK) {
             goto fail;
+        }
     }
 
     for (unsigned i = 0; i < GA10B_MNIST_N_OPS; i++) {
@@ -474,8 +486,9 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
 
     /* QMD pool (gpu_alloc_qmd_pool, gpu-launch-common.c:1092): zeroed. */
     if ((rc = alloc_map(ops, vm, GA10B_MNIST_QMD_POOL_SLOTS * GA10B_MNIST_QMD_SLOT_BYTES,
-                        &p->qmd_pool, &p->qmd_pool_va)) != GA10B_MNIST_OK)
+                        &p->qmd_pool, &p->qmd_pool_va)) != GA10B_MNIST_OK) {
         goto fail;
+    }
 
     /* v7 ops array (:890-922). Only the CPU reads it (by physical
      * address), so it is not mapped into the GPU VM. */
@@ -496,7 +509,10 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
     return GA10B_MNIST_OK;
 
 fail:
-    ga10b_mnist_pipeline_free(ops, p);
+    /* Pages already mapped into `vm` (the live channel's address space)
+     * are not returned to the PMM: freeing them would leave GPU PTEs
+     * pointing at reused memory. A failed build is rare (allocation or
+     * TLB-invalidate failure), so leaking it is the safe choice. */
     return rc;
 }
 

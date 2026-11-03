@@ -39,18 +39,21 @@ static void make_fw(uint8_t *fw, uint32_t boot_size, uint32_t imem, uint32_t ent
     put32(fw + 4, boot_size);
     put32(fw + 8, imem);
     put32(fw + 12, entry);
-    for (uint32_t i = 0; i < 0x40; i++)
+    for (uint32_t i = 0; i < 0x40; i++) {
         fw[16 + i] = (uint8_t)(fill + i);
+    }
 }
 
 static void make_inputs(struct ga10b_ctxsw_ucode_inputs *in)
 {
     make_fw(fw_fecs, 0x40, 0x9e00, 0x9e04, 0x10);
     make_fw(fw_gpccs, 0x40, 0x3800, 0x3804, 0x80);
-    for (uint32_t i = 0; i < sizeof(inst_buf); i++)
+    for (uint32_t i = 0; i < sizeof(inst_buf); i++) {
         inst_buf[i] = (uint8_t)(0xA0 ^ i);
-    for (uint32_t i = 0; i < sizeof(data_buf); i++)
+    }
+    for (uint32_t i = 0; i < sizeof(data_buf); i++) {
         data_buf[i] = (uint8_t)(0x50 + i);
+    }
     memset(in, 0, sizeof(*in));
     in->fecs_fw = fw_fecs;   in->fecs_fw_size = sizeof(fw_fecs);
     in->gpccs_fw = fw_gpccs; in->gpccs_fw_size = sizeof(fw_gpccs);
@@ -90,9 +93,10 @@ static void test_boot_signature_is_word_sum(void)
     struct ga10b_ctxsw_ucode_info info;
     ga10b_ctxsw_ucode_layout(&in, &info);
     uint32_t sum = 0;
-    for (uint32_t i = 0; i < 0x40; i += 4)
+    for (uint32_t i = 0; i < 0x40; i += 4) {
         sum += (uint32_t)fw_fecs[16 + i] | ((uint32_t)fw_fecs[17 + i] << 8) |
                ((uint32_t)fw_fecs[18 + i] << 16) | ((uint32_t)fw_fecs[19 + i] << 24);
+    }
     TEST_ASSERT_EQUAL_HEX32(sum, info.fecs.boot_signature);
 }
 

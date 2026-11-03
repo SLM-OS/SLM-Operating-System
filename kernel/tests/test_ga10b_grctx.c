@@ -140,8 +140,9 @@ static void test_priv_access_map(void)
     memset(map, 0xff, sizeof(map));
     ga10b_gr_build_priv_access_map(map, sizeof(map));
     unsigned bits = 0;
-    for (size_t i = 0; i < sizeof(map); i++)
+    for (size_t i = 0; i < sizeof(map); i++) {
         for (unsigned b = 0; b < 8; b++) bits += (map[i] >> b) & 1u;
+    }
     TEST_ASSERT_EQUAL_UINT32(35, ga10b_gr_priv_access_regs_count);
     TEST_ASSERT_EQUAL_UINT32(35, bits);
     /* 0x418380 >> 2 = 0x1060e0: byte 0x20c1c, bit 0. */
@@ -182,8 +183,9 @@ static void test_golden_load_fields(void)
     TEST_ASSERT_EQUAL_HEX32(0xfffffff7, ga10b_ctx_rd(img, 0x3c));   /* verif off */
     TEST_ASSERT_EQUAL_HEX32(0xfffffff8, ga10b_ctx_rd(img, 0x28));   /* pm no_ctxsw */
     TEST_ASSERT_EQUAL_HEX32(0, ga10b_ctx_rd(img, 0x2c));
-    for (uint32_t o = 0xd0; o <= 0xdc; o += 4)
+    for (uint32_t o = 0xd0; o <= 0xdc; o += 4) {
         TEST_ASSERT_EQUAL_HEX32(0, ga10b_ctx_rd(img, o));
+    }
     TEST_ASSERT_EQUAL_HEX32(0, ga10b_ctx_rd(img, 0xf4));
     TEST_ASSERT_EQUAL_HEX32(0, ga10b_ctx_rd(img, 0xf8));
     TEST_ASSERT_EQUAL_HEX32(0xffffffff, ga10b_ctx_rd(img, 0x84));

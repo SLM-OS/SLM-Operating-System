@@ -66,8 +66,9 @@ static int load(const char *dir, const char *name, struct file_buf *fb)
 static uint32_t fnv1a(const uint8_t *p, size_t n)
 {
     uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         h = (h ^ p[i]) * 16777619u;
+    }
     return h;
 }
 
@@ -77,8 +78,9 @@ static void dump_netlist(const char *name, const struct file_buf *fb)
     int rc = ga10b_netlist_open(&nl, fb->data, fb->size);
     printf("\n== %s (%zu bytes) ==\n", name, fb->size);
     CHECK(rc == GA10B_NETLIST_OK, "open %s rc=%d", name, rc);
-    if (rc != GA10B_NETLIST_OK)
+    if (rc != GA10B_NETLIST_OK) {
         return;
+    }
     printf("  version=%u regions=%u\n", nl.version, nl.region_count);
     printf("  %-4s %-32s %10s %10s %10s\n", "id", "name", "offset", "size", "fnv1a");
     for (uint32_t i = 0; i < nl.region_count; i++) {
@@ -89,34 +91,44 @@ static void dump_netlist(const char *name, const struct file_buf *fb)
                fnv1a(fb->data + r.data_offset, r.data_size));
     }
     uint32_t v;
-    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_MAJORV, &v) == 0)
+    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_MAJORV, &v) == 0) {
         printf("  MAJORV=0x%08x", v);
-    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_NETLIST_NUM, &v) == 0)
+    }
+    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_NETLIST_NUM, &v) == 0) {
         printf("  NETLIST_NUM=%u", v);
-    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_BUFFER_SIZE, &v) == 0)
+    }
+    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_BUFFER_SIZE, &v) == 0) {
         printf("  BUFFER_SIZE=0x%x", v);
-    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_CTXSW_REG_BASE_INDEX, &v) == 0)
+    }
+    if (ga10b_netlist_get_u32(&nl, GA10B_NETLIST_REGIONID_CTXSW_REG_BASE_INDEX, &v) == 0) {
         printf("  REG_BASE_INDEX=%u", v);
+    }
     printf("\n");
 
     struct ga10b_netlist_av_view av;
     struct ga10b_netlist_av64_view av64;
     struct ga10b_netlist_aiv_view aiv;
-    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_BUNDLE_INIT, &av) == 0)
+    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_BUNDLE_INIT, &av) == 0) {
         printf("  sw_bundle_init: %u av (first addr=0x%08x val=0x%08x)\n", av.count,
                av.count ? av.l[0].addr : 0u, av.count ? av.l[0].value : 0u);
-    if (ga10b_netlist_get_av64_list(&nl, GA10B_NETLIST_REGIONID_SW_BUNDLE64_INIT, &av64) == 0)
+    }
+    if (ga10b_netlist_get_av64_list(&nl, GA10B_NETLIST_REGIONID_SW_BUNDLE64_INIT, &av64) == 0) {
         printf("  sw_bundle64_init: %u av64\n", av64.count);
-    if (ga10b_netlist_get_aiv_list(&nl, GA10B_NETLIST_REGIONID_SW_CTX_LOAD, &aiv) == 0)
+    }
+    if (ga10b_netlist_get_aiv_list(&nl, GA10B_NETLIST_REGIONID_SW_CTX_LOAD, &aiv) == 0) {
         printf("  sw_ctx_load: %u aiv (first addr=0x%08x idx=%u val=0x%08x)\n", aiv.count,
                aiv.count ? aiv.l[0].addr : 0u, aiv.count ? aiv.l[0].index : 0u,
                aiv.count ? aiv.l[0].value : 0u);
-    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_NON_CTX_LOAD, &av) == 0)
+    }
+    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_NON_CTX_LOAD, &av) == 0) {
         printf("  sw_non_ctx_load: %u av\n", av.count);
-    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_METHOD_INIT, &av) == 0)
+    }
+    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SW_METHOD_INIT, &av) == 0) {
         printf("  sw_method_init: %u av\n", av.count);
-    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SWVEIDBUNDLEINIT, &av) == 0)
+    }
+    if (ga10b_netlist_get_av_list(&nl, GA10B_NETLIST_REGIONID_SWVEIDBUNDLEINIT, &av) == 0) {
         printf("  sw_veid_bundle_init: %u av\n", av.count);
+    }
 }
 
 static void print_segments(const char *name, const struct ga10b_ctxsw_ucode_segments *s)
@@ -179,12 +191,13 @@ int main(int argc, char **argv)
     const char *out_path = NULL;
     const char *pmu_out_path = NULL;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out_path = argv[++i];
-        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
+        } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             pmu_out_path = argv[++i];
-        else
+        } else {
             dir = argv[i];
+        }
     }
     char defdir[1024];
     if (dir == NULL) {
@@ -200,8 +213,9 @@ int main(int argc, char **argv)
     };
     struct file_buf net[4];
     for (int i = 0; i < 4; i++) {
-        if (load(dir, nets[i], &net[i]) != 0)
+        if (load(dir, nets[i], &net[i]) != 0) {
             return 2;
+        }
         dump_netlist(nets[i], &net[i]);
     }
 
@@ -213,12 +227,14 @@ int main(int argc, char **argv)
     struct file_buf fecs_fw, gpccs_fw, fecs_sig, gpccs_sig;
     if (load(dir, "fecs_encrypt_prod.bin", &fecs_fw) || load(dir, "gpccs_encrypt_prod.bin", &gpccs_fw) ||
         load(dir, "fecs_pkc_sig_encrypt.bin", &fecs_sig) ||
-        load(dir, "gpccs_pkc_sig_encrypt.bin", &gpccs_sig))
+        load(dir, "gpccs_pkc_sig_encrypt.bin", &gpccs_sig)) {
         return 2;
+    }
 
     struct ga10b_netlist nl;
-    if (ga10b_netlist_open(&nl, net[2].data, net[2].size) != 0)
+    if (ga10b_netlist_open(&nl, net[2].data, net[2].size) != 0) {
         return 2;
+    }
     struct ga10b_ctxsw_ucode_inputs ui = {0};
     ui.fecs_fw = fecs_fw.data;   ui.fecs_fw_size = fecs_fw.size;
     ui.gpccs_fw = gpccs_fw.data; ui.gpccs_fw_size = gpccs_fw.size;
@@ -262,8 +278,9 @@ int main(int argc, char **argv)
     printf("\n== ACR non-WPR blob ==\n  managed falcons=%u wpr_size=0x%x (%u bytes) "
            "terminator at 0x%x\n", lay.managed_flcn_cnt, lay.wpr_size, lay.wpr_size,
            lay.terminator_offset);
-    for (uint32_t i = 0; i < lay.managed_flcn_cnt; i++)
+    for (uint32_t i = 0; i < lay.managed_flcn_cnt; i++) {
         print_falcon(&lay.flcn[i]);
+    }
     CHECK(lay.wpr_size <= wpr.size, "blob fits WPR1");
 
     /* Cross-check the bytes actually written. */
@@ -316,8 +333,9 @@ int main(int argc, char **argv)
     struct file_buf pmu_img, pmu_desc, pmu_sig;
     if (load(dir, "gpmu_ucode_next_prod_image.bin", &pmu_img) ||
         load(dir, "gpmu_ucode_next_prod_desc.bin", &pmu_desc) ||
-        load(dir, "pmu_pkc_prod_sig.bin", &pmu_sig))
+        load(dir, "pmu_pkc_prod_sig.bin", &pmu_sig)) {
         return 2;
+    }
     struct ga10b_acr_blob_inputs bp = bi;
     bp.include_pmu = true;
     bp.pmu_image = pmu_img.data;   bp.pmu_image_size = pmu_img.size;
@@ -331,8 +349,9 @@ int main(int argc, char **argv)
     printf("\n== ACR non-WPR blob with LS PMU (L4T configuration) ==\n"
            "  managed falcons=%u wpr_size=0x%x (%u bytes) terminator at 0x%x\n",
            lp.managed_flcn_cnt, lp.wpr_size, lp.wpr_size, lp.terminator_offset);
-    for (uint32_t i = 0; i < lp.managed_flcn_cnt; i++)
+    for (uint32_t i = 0; i < lp.managed_flcn_cnt; i++) {
         print_falcon(&lp.flcn[i]);
+    }
     for (uint32_t i = 0; i <= lp.managed_flcn_cnt; i++) {
         struct ga10b_lsf_wpr_header h;
         memcpy(&h, pblob + i * sizeof(h), sizeof(h));
@@ -441,8 +460,9 @@ int main(int argc, char **argv)
 
     free(blob);
     free(surface);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         free(net[i].data);
+    }
     free(fecs_fw.data);
     free(gpccs_fw.data);
     free(fecs_sig.data);

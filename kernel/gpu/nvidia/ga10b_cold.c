@@ -38,6 +38,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 /* ---- BAR0 register offsets (GA10B, from nvgpu hw_*_ga10b.h) ---- */
 #define NV_PMC_BOOT_0                    0x000000u
@@ -165,6 +166,29 @@
  * | mpmu | access_timeout. The trace shows the same value. */
 #define PBUS_INTR_EN_0_MASK              0x9c0001fcu
 
+/* Poll budgets, microseconds. ACR's BROM check and run time follow
+ * nvgpu's silicon timeouts (NVRISCV_BR_COMPLETION / ACR_COMPLETION),
+ * rounded up; the GR/FECS ones are generous bounds for waits that
+ * finish in microseconds on hardware. */
+#define COLD_TIMEOUT_ACR_BROM_US        5000000u
+#define COLD_TIMEOUT_ACR_RUN_US        10000000u
+#define COLD_TIMEOUT_GR_IDLE_US         2000000u
+#define COLD_TIMEOUT_FECS_US            2000000u
+#define COLD_TIMEOUT_SCRUB_US           1000000u
+#define COLD_TIMEOUT_PRI_RING_US          10000u
+
+/* FECS watchdog timeout nvgpu sends with SET_WATCHDOG_TIMEOUT
+ * (nvgpu_gr_falcon_init_ctx_state, trace line 11550). */
+#define FECS_WATCHDOG_TIMEOUT           0x3fffffffu
+
+/* Floorsweeping the constant GR init table encodes: GPC1 swept
+ * (NV_FUSE_STATUS_OPT_GPC = 0x2), 4 TPCs in GPC0. */
+#define GA10B_COLD_OPT_GPC_EXPECTED     0x2u
+#define GA10B_COLD_MAX_GPCS             2u
+
+/* BAR0 aperture size; netlist addresses must fall inside it. */
+#define GA10B_BAR0_SIZE                 0x01000000u
+
 static enum ga10b_cold_step cold_done = GA10B_COLD_NONE;
 
 static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
@@ -214,6 +238,20 @@ static void udelay(uint32_t us)
     while (timer_get_count() < end) { }
 }
 
+/* Poll until (reg & mask) == 0 or `timeout_us` passes; re-checks once
+ * after the deadline so a value that settled during the last delay is
+ * not reported as a timeout. */
+static int wait_bits_clear(uint32_t reg, uint32_t mask, uint32_t timeout_us)
+{
+    for (uint32_t t = 0; t < timeout_us; t += 10) {
+        if ((bar0_rd(reg) & mask) == 0) {
+            return 0;
+        }
+        udelay(10);
+    }
+    return (bar0_rd(reg) & mask) == 0 ? 0 : -1;
+}
+
 /* ---- Step 1: power ----
  *
  * Linux: genpd powers TEGRA234_POWER_DOMAIN_GPU through BPMP MRQ_PG
@@ -227,8 +265,9 @@ static void udelay(uint32_t us)
 static int clk_on(uint32_t id, const char *name)
 {
     int rc = bpmp_clk_enable(id);
-    if (rc != 0)
+    if (rc != 0) {
         WARN("ga10b-cold: clk %s (%u) enable rc=%d", name, (unsigned)id, rc);
+    }
     return rc;
 }
 
@@ -253,7 +292,7 @@ static int step_power(void)
         { TEGRA234_CLK_GPC0CLK, "gpc0clk" },
         { TEGRA234_CLK_GPC1CLK, "gpc1clk" },
     };
-    for (unsigned g = 0; g < 2u; g++) {
+    for (unsigned g = 0; g < GA10B_COLD_MAX_GPCS; g++) {
         if (!ga10b_cold_gpc_present(gpc_fuse, g)) continue;
         if (clk_on(gpc_clk[g].id, gpc_clk[g].name) != 0) return -1;
     }
@@ -274,12 +313,7 @@ static int step_pri(void)
 {
     bar0_wr(NV_PPRIV_MASTER_RING_COMMAND, PRI_RING_CMD_ENUMERATE_AND_START);
 
-    unsigned retry = 0;
-    while (bar0_rd(NV_PPRIV_MASTER_RING_COMMAND) != 0u && retry < 1000u) {
-        udelay(10);
-        retry++;
-    }
-    if (retry == 1000u) {
+    if (wait_bits_clear(NV_PPRIV_MASTER_RING_COMMAND, 0xFFFFFFFFu, COLD_TIMEOUT_PRI_RING_US) != 0) {
         WARN("ga10b-cold: PRI ring enumeration timed out");
         return -1;
     }
@@ -356,8 +390,9 @@ static int step_engines(void)
              (unsigned)row1, (unsigned)GA10B_GR_RESET_ID);
         return -1;
     }
-    if (device_enable(ga10b_cold_reset_id_mask(GA10B_EARLY_RESET_ID), true) != 0)
+    if (device_enable(ga10b_cold_reset_id_mask(GA10B_EARLY_RESET_ID), true) != 0) {
         return -1;
+    }
 
     uint32_t gr_mask = ga10b_cold_reset_id_mask(GA10B_GR_RESET_ID);
     if (device_enable(gr_mask, false) != 0) return -1;
@@ -440,22 +475,19 @@ static void pio_write(uint32_t ctl_reg, uint32_t data_reg, uint32_t ctl,
     bar0_wr(ctl_reg, ctl);
     for (uint32_t i = 0; i < len; i += 4) {
         uint32_t w = 0;
-        for (uint32_t b = 0; b < 4 && i + b < len; b++)
+        for (uint32_t b = 0; b < 4 && i + b < len; b++) {
             w |= (uint32_t)src[i + b] << (8 * b);
+        }
         bar0_wr(data_reg, w);
     }
 }
 
-static int wait_bits_clear(uint32_t reg, uint32_t mask, uint32_t timeout_us)
-{
-    for (uint32_t t = 0; t < timeout_us; t += 10) {
-        if ((bar0_rd(reg) & mask) == 0) return 0;
-        udelay(10);
-    }
-    return -1;
-}
 
-int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
+/* Boot the ACR HS ucode (acr-gsp text/data/manifest) on the GSP RISC-V
+ * core. `desc_phys` is the physical address of the flcn2_acr_desc the
+ * ucode reads through MAILBOX0/1. Returns 0 when the BROM accepted the
+ * image and ACR halted with MAILBOX0 == 0. */
+static int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
                                   const uint8_t *data, uint32_t data_len,
                                   const uint8_t *manifest, uint32_t manifest_len,
                                   uint64_t desc_phys)
@@ -470,13 +502,16 @@ int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
         return -1;
     }
 
-    /* DMEM size: HWCFG bits 17:9 in 256-byte blocks (falcon_hwcfg_dmem_size). */
-    uint32_t dmem_size = ((bar0_rd(NV_PGSP_FALCON_HWCFG) >> 9) & 0x1FFu) * 256u;
-    if (code_len & 3u || data_len & 3u || manifest_len & 3u ||
-        data_len + manifest_len > dmem_size) {
-        WARN("ga10b-cold: ACR image does not fit (data %u + manifest %u > "
-             "DMEM %u)", (unsigned)data_len, (unsigned)manifest_len,
-             (unsigned)dmem_size);
+    /* IMEM/DMEM sizes: HWCFG bits 8:0 / 17:9 in 256-byte blocks
+     * (falcon_hwcfg_imem_size / _dmem_size). */
+    uint32_t hwcfg = bar0_rd(NV_PGSP_FALCON_HWCFG);
+    uint32_t imem_size = (hwcfg & 0x1FFu) * 256u;
+    uint32_t dmem_size = ((hwcfg >> 9) & 0x1FFu) * 256u;
+    if (!ga10b_cold_acr_image_fits(code_len, data_len, manifest_len,
+                                   imem_size, dmem_size)) {
+        WARN("ga10b-cold: ACR image does not fit (code %u / IMEM %u, data %u "
+             "+ manifest %u / DMEM %u)", (unsigned)code_len, (unsigned)imem_size,
+             (unsigned)data_len, (unsigned)manifest_len, (unsigned)dmem_size);
         return -1;
     }
 
@@ -495,11 +530,12 @@ int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
     bar0_wr(NV_PGSP_RISCV_CPUCTL, RISCV_CPUCTL_STARTCPU);
 
     uint32_t ret = 0;
-    for (uint32_t t = 0; t < 5000000u; t += 10) {     /* 5 s */
+    for (uint32_t t = 0; t < COLD_TIMEOUT_ACR_BROM_US; t += 10) {
         ret = bar0_rd(NV_PGSP_RISCV_BR_RETCODE);
         if (RISCV_BR_RETCODE_RESULT(ret) == RISCV_BR_RETCODE_PASS ||
-            RISCV_BR_RETCODE_RESULT(ret) == RISCV_BR_RETCODE_FAIL)
+            RISCV_BR_RETCODE_RESULT(ret) == RISCV_BR_RETCODE_FAIL) {
             break;
+        }
         udelay(10);
     }
     if (RISCV_BR_RETCODE_RESULT(ret) != RISCV_BR_RETCODE_PASS) {
@@ -509,7 +545,7 @@ int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
     }
 
     uint32_t ctl = 0;
-    for (uint32_t t = 0; t < 10000000u; t += 10) {    /* 10 s */
+    for (uint32_t t = 0; t < COLD_TIMEOUT_ACR_RUN_US; t += 10) {
         ctl = bar0_rd(NV_PGSP_RISCV_CPUCTL);
         if (ctl & RISCV_CPUCTL_HALTED) break;
         udelay(10);
@@ -562,15 +598,24 @@ static int load_av_region(uint32_t region_id)
              ga10b_netlist_region_name(region_id), rc);
         return -1;
     }
-    for (uint32_t i = 0; i < v.count; i++)
+    for (uint32_t i = 0; i < v.count; i++) {
+        if (v.l[i].addr >= GA10B_BAR0_SIZE || (v.l[i].addr & 3u)) {
+            WARN("ga10b-cold: netlist region %s entry %u: bad address 0x%x",
+                 ga10b_netlist_region_name(region_id), (unsigned)i,
+                 (unsigned)v.l[i].addr);
+            return -1;
+        }
+    }
+    for (uint32_t i = 0; i < v.count; i++) {
         bar0_wr(v.l[i].addr, v.l[i].value);
+    }
     return (int)v.count;
 }
 
 static int wait_gr_idle(void)
 {
     /* ga10b_gr_init_wait_idle: GR_STATUS.busy clear. */
-    if (wait_bits_clear(NV_PGRAPH_STATUS, 0x1u, 2000000u) != 0) {
+    if (wait_bits_clear(NV_PGRAPH_STATUS, 0x1u, COLD_TIMEOUT_GR_IDLE_US) != 0) {
         WARN("ga10b-cold: GR busy (STATUS=0x%08x)",
              (unsigned)bar0_rd(NV_PGRAPH_STATUS));
         return -1;
@@ -602,8 +647,8 @@ static int step_gr_hw(void)
         if (n < 0) return -1;
         total += n;
     }
-    if (wait_bits_clear(NV_PGRAPH_PRI_FECS_DMACTL, GR_DMACTL_SCRUBBING, 1000000u) ||
-        wait_bits_clear(NV_PGRAPH_PRI_GPCS_GPCCS_DMACTL, GR_DMACTL_SCRUBBING, 1000000u)) {
+    if (wait_bits_clear(NV_PGRAPH_PRI_FECS_DMACTL, GR_DMACTL_SCRUBBING, COLD_TIMEOUT_SCRUB_US) ||
+        wait_bits_clear(NV_PGRAPH_PRI_GPCS_GPCCS_DMACTL, GR_DMACTL_SCRUBBING, COLD_TIMEOUT_SCRUB_US)) {
         WARN("ga10b-cold: FECS/GPCCS memory scrub did not finish");
         return -1;
     }
@@ -688,8 +733,11 @@ static int step_acr(void)
         pmm_free_pages(surface, surf_pages);
         return -1;
     }
-    /* Blob and descriptor stay allocated: ACR may need them again for
-     * recovery, and nvgpu keeps them for the GPU's lifetime too. */
+    /* Blob, descriptor and ls_pmu_desc stay allocated on success and on
+     * failure alike: ACR and the PMU read them by physical address, and
+     * after a failed or timed-out boot SLM-OS cannot tell whether the
+     * GSP is still reading them. nvgpu keeps them for the GPU's
+     * lifetime too. A retried step allocates fresh copies. */
     size_t blob_pages = (lay.wpr_size + 4095u) / 4096u;
     void *blob = pmm_alloc_pages(blob_pages);
     struct ga10b_flcn2_acr_desc *desc = pmm_alloc_page();
@@ -728,7 +776,7 @@ static int fecs_method(uint32_t method, uint32_t data, uint32_t *ret)
     bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
     bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_DATA, data);
     bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_PUSH, method);
-    for (uint32_t t = 0; t < 2000000u; t += 10) {
+    for (uint32_t t = 0; t < COLD_TIMEOUT_FECS_US; t += 10) {
         uint32_t v = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
         if (v != 0u) {
             if (ret) *ret = v;
@@ -758,10 +806,11 @@ static void pmu_dump_init(void)
     if (!ss) return;
     cache_invalidate_range(ss + GA10B_SS_FBQ_MSG_OFFSET, 64);
     const uint32_t *w = (const uint32_t *)(ss + GA10B_SS_FBQ_MSG_OFFSET);
-    for (unsigned i = 0; i < 16u; i += 4u)
+    for (unsigned i = 0; i < 16u; i += 4u) {
         INFO("ga10b-cold: msgq[0]+%02x: %08x %08x %08x %08x", i * 4u,
              (unsigned)w[i], (unsigned)w[i + 1], (unsigned)w[i + 2],
              (unsigned)w[i + 3]);
+    }
 }
 
 /* ---- Step 8: start FECS/GPCCS ----
@@ -812,7 +861,7 @@ static int step_falcons(void)
     bar0_wr(NV_PGRAPH_PRI_FECS_CPUCTL_ALIAS, GR_CPUCTL_STARTCPU);
 
     uint32_t mb0 = 0;
-    for (uint32_t t = 0; t < 2000000u; t += 10) {
+    for (uint32_t t = 0; t < COLD_TIMEOUT_FECS_US; t += 10) {
         mb0 = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
         if (mb0 != 0u) break;
         udelay(10);
@@ -829,7 +878,7 @@ static int step_falcons(void)
     /* Watchdog: FECS acknowledges without a mailbox value, so only
      * the push matters (nvgpu does not wait for this one either). */
     bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
-    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_DATA, 0x3fffffffu);
+    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_DATA, FECS_WATCHDOG_TIMEOUT);
     bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_PUSH, FECS_METHOD_SET_WATCHDOG_TIMEOUT);
     udelay(100);
 
@@ -874,7 +923,7 @@ static int step_gr_init(void)
 {
     uint32_t gpc_fuse = bar0_rd(NV_FUSE_STATUS_OPT_GPC);
     uint32_t tpcs = bar0_rd(NV_PGRAPH_PRI_GPC0_GPCCS_FS_GPC) & 0x1Fu;
-    if (gpc_fuse != 0x2u || tpcs != GA10B_COLD_TPC_COUNT) {
+    if (gpc_fuse != GA10B_COLD_OPT_GPC_EXPECTED || tpcs != GA10B_COLD_TPC_COUNT) {
         WARN("ga10b-cold: unexpected floorsweeping (opt_gpc=0x%x, %u TPCs); "
              "the GR init table is for 1 GPC / 4 TPCs", (unsigned)gpc_fuse,
              (unsigned)tpcs);
@@ -891,9 +940,10 @@ static int step_gr_init(void)
     bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_NUM_ACTIVE_LTCS,
             bar0_rd(NV_PFB_FBHUB_NUM_ACTIVE_LTCS_MMU));
 
-    for (unsigned i = 0; i < ga10b_gr_init_support_writes_count; i++)
+    for (unsigned i = 0; i < ga10b_gr_init_support_writes_count; i++) {
         bar0_wr(ga10b_gr_init_support_writes[i].offset,
                 ga10b_gr_init_support_writes[i].value);
+    }
 
     if (device_enable(GA10B_LCE_DEVICE_ENABLE_MASK, true) != 0) return -1;
     if (wait_gr_idle() != 0) return -1;
@@ -963,6 +1013,9 @@ static int pmu_buf(uint32_t bytes, struct ga10b_pmu_buf *b)
     return 0;
 }
 
+/* PMU buffers, VM and instance block are never freed, also on failure:
+ * the RISC-V core may still be running and reading them by physical or
+ * VM address after a timeout. A retried step allocates new ones. */
 static int step_pmu(void)
 {
     ltc_fb_atomic_setup();
@@ -1066,7 +1119,7 @@ static int step_channel(void)
     struct ga10b_channel_handoff h;
     memset(&h, 0, sizeof(h));
     ga10b_chan_fill_handoff(&cold_chan, &h);
-    if (ga10b_bringup_install_handoff(ga10b_bringup_state(), &h) != 0) {
+    if (slm_gpu_install_handoff(ga10b_bringup_state(), &h) != 0) {
         WARN("ga10b-cold: channel handoff rejected");
         return -1;
     }
@@ -1107,18 +1160,28 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_MNIST]   = step_mnist,
 };
 
+/* Set while a ga10b_cold_run is driving the hardware. A flag rather
+ * than a spinlock: the steps spin for up to seconds. */
+static atomic_flag cold_running = ATOMIC_FLAG_INIT;
+
 int ga10b_cold_run(enum ga10b_cold_step last)
 {
     if ((unsigned)last >= GA10B_COLD_STEP_COUNT) return -1;
+    if (atomic_flag_test_and_set_explicit(&cold_running, memory_order_acquire)) {
+        return GA10B_COLD_ERR_BUSY;
+    }
+    int rc = 0;
     for (unsigned s = (unsigned)cold_done + 1u; s <= (unsigned)last; s++) {
         INFO("ga10b-cold: step %u (%s)", s, step_names[s]);
         if (step_fns[s]() != 0) {
             WARN("ga10b-cold: step %u (%s) failed", s, step_names[s]);
-            return -(int)s;
+            rc = -(int)s;
+            break;
         }
         cold_done = (enum ga10b_cold_step)s;
     }
-    return 0;
+    atomic_flag_clear_explicit(&cold_running, memory_order_release);
+    return rc;
 }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

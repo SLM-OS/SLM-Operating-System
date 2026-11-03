@@ -163,8 +163,9 @@ int ga10b_vm_map(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
 uint64_t ga10b_vm_reserve(struct ga10b_vm *vm, uint64_t size, uint64_t align,
                           bool kernel)
 {
-    if (!vm || size == 0u || align < GA10B_PAGE_SIZE || (align & (align - 1u)))
+    if (!vm || size == 0u || align < GA10B_PAGE_SIZE || (align & (align - 1u))) {
         return 0;
+    }
     uint64_t *next = kernel ? &vm->kernel_next : &vm->user_next;
     uint64_t limit = kernel ? GA10B_VM_KERNEL_LIMIT : GA10B_VM_USER_LIMIT;
     uint64_t va = (*next + align - 1u) & ~(align - 1u);
@@ -264,8 +265,9 @@ int ga10b_vm_tlb_invalidate(const struct ga10b_gpu_ops *ops, const struct ga10b_
               ga10b_tlb_invalidate_pdb_val(vm->pdb.phys));
     ops->wr32(ops->ctx, NV_PFB_PRI_MMU_INVALIDATE, MMU_INVALIDATE_ALL_VA_TRIGGER);
     for (i = 0; i < 1000u; i++) {
-        if (ops->rd32(ops->ctx, NV_PFB_PRI_MMU_CTRL) & MMU_CTRL_PRI_FIFO_EMPTY)
+        if (ops->rd32(ops->ctx, NV_PFB_PRI_MMU_CTRL) & MMU_CTRL_PRI_FIFO_EMPTY) {
             return GA10B_CHAN_OK;
+        }
         ops->udelay(ops->ctx, 2u);
     }
     return GA10B_CHAN_ERR_TIMEOUT;
@@ -363,8 +365,9 @@ int ga10b_ramfc_setup(uint32_t *w, const struct ga10b_ramfc_params *p)
 {
     if (!w || !p || p->gpfifo_entries < 2u ||
         (p->gpfifo_entries & (p->gpfifo_entries - 1u)) != 0u ||
-        p->chid > 0xfffu || p->veid >= GA10B_MAX_SUBCTX)
+        p->chid > 0xfffu || p->veid >= GA10B_MAX_SUBCTX) {
         return GA10B_CHAN_ERR_ARG;
+    }
 
     memset(w, 0, GA10B_RAMFC_BYTES);
     w[GA10B_RAMFC_W_GP_BASE] = (uint32_t)p->gpfifo_va & 0xfffffff8u;
@@ -535,9 +538,10 @@ const unsigned ga10b_chan_fifo_init_writes_count =
 
 void ga10b_chan_fifo_init(const struct ga10b_gpu_ops *ops)
 {
-    for (unsigned i = 0; i < ga10b_chan_fifo_init_writes_count; i++)
+    for (unsigned i = 0; i < ga10b_chan_fifo_init_writes_count; i++) {
         ops->wr32(ops->ctx, ga10b_chan_fifo_init_writes[i].offset,
                   ga10b_chan_fifo_init_writes[i].value);
+    }
 }
 
 /* ==================================================================
@@ -621,9 +625,11 @@ int ga10b_chan_create(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx
     if (!ops || !grctx || !p || !gr || !ch) return GA10B_CHAN_ERR_ARG;
     if (p->chid == 0u || p->chid > 0x7ffu || p->tsgid > 0xfffu ||
         p->veid >= GA10B_MAX_SUBCTX || p->gpfifo_entries < 2u ||
+        p->gpfifo_entries > GA10B_CHAN_MAX_GPFIFO_ENTRIES ||
         (p->gpfifo_entries & (p->gpfifo_entries - 1u)) != 0u ||
-        p->pushbuf_bytes == 0u || p->timeslice_us == 0u)
+        p->pushbuf_bytes == 0u || p->timeslice_us == 0u) {
         return GA10B_CHAN_ERR_ARG;
+    }
 
     memset(ch, 0, sizeof(*ch));
     ch->p = *p;
@@ -635,24 +641,27 @@ int ga10b_chan_create(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx
 
     /* OPEN_CHANNEL: nvgpu_channel_alloc_inst -> nvgpu_alloc_inst_block
      * (magic value). AS_BIND: gv11b_mm_init_inst_block -> init_pdb. */
-    if ((rc = ga10b_dma_alloc(ops, GA10B_INST_BLOCK_BYTES, &ch->inst)) != GA10B_CHAN_OK)
+    if ((rc = ga10b_dma_alloc(ops, GA10B_INST_BLOCK_BYTES, &ch->inst)) != GA10B_CHAN_OK) {
         goto fail;
+    }
     uint32_t *iw = (uint32_t *)ch->inst.cpu;
     ga10b_inst_set_magic(iw);
     ga10b_inst_init_pdb(iw, ch->vm.pdb.phys);
     /* BIND_CHANNEL_EX: gv11b_tsg_bind_channel_eng_method_buffers. The
      * buffer lives in the BAR2 VM in nvgpu; SLM-OS does not bind BAR2,
      * so it is set only when the caller provides one. */
-    if (p->eng_method_buffer_va)
+    if (p->eng_method_buffer_va) {
         ga10b_inst_set_eng_method_buffer(iw, p->eng_method_buffer_va);
+    }
 
     /* SETUP_BIND (usermode): USERD + GPFIFO from the caller's dmabufs. */
     if ((rc = ga10b_dma_alloc(ops, GA10B_PAGE_SIZE, &ch->userd)) != GA10B_CHAN_OK ||
         (rc = ga10b_dma_alloc(ops, p->gpfifo_entries * 8u, &ch->gpfifo)) != GA10B_CHAN_OK ||
         (rc = ga10b_dma_alloc(ops, p->pushbuf_bytes, &ch->pushbuf)) != GA10B_CHAN_OK ||
         (rc = ga10b_dma_alloc(ops, GA10B_PAGE_SIZE, &ch->sema)) != GA10B_CHAN_OK ||
-        (rc = ga10b_dma_alloc(ops, GA10B_PAGE_SIZE, &ch->runlist)) != GA10B_CHAN_OK)
+        (rc = ga10b_dma_alloc(ops, GA10B_PAGE_SIZE, &ch->runlist)) != GA10B_CHAN_OK) {
         goto fail;
+    }
     ga10b_userd_init((uint32_t *)ch->userd.cpu);
     ga10b_dma_clean(ops, &ch->userd);
     ga10b_dma_clean(ops, &ch->gpfifo);
@@ -663,8 +672,9 @@ int ga10b_chan_create(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx
      * flag (the helper passes flags 0): not GPU-L2 cacheable. */
     if ((rc = ga10b_vm_map_dma(ops, &ch->vm, &ch->gpfifo, 0u, false, &ch->gpfifo_va)) != GA10B_CHAN_OK ||
         (rc = ga10b_vm_map_dma(ops, &ch->vm, &ch->pushbuf, 0u, false, &ch->pushbuf_va)) != GA10B_CHAN_OK ||
-        (rc = ga10b_vm_map_dma(ops, &ch->vm, &ch->sema, 0u, false, &ch->sema_va)) != GA10B_CHAN_OK)
+        (rc = ga10b_vm_map_dma(ops, &ch->vm, &ch->sema, 0u, false, &ch->sema_va)) != GA10B_CHAN_OK) {
         goto fail;
+    }
 
     struct ga10b_ramfc_params rp = {
         .gpfifo_va = ch->gpfifo_va,

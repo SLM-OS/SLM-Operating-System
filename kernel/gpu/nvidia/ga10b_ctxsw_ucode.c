@@ -37,8 +37,9 @@ static int init_segments(struct ga10b_ctxsw_ucode_segments *s, uint64_t *offset,
                          const uint8_t *fw, size_t fw_size,
                          uint32_t inst_size, uint32_t data_size)
 {
-    if (fw_size < sizeof(struct ga10b_ctxsw_bootloader_desc))
+    if (fw_size < sizeof(struct ga10b_ctxsw_bootloader_desc)) {
         return GA10B_CTXSW_ERR_FW_SIZE;
+    }
 
     uint32_t desc_size = rd32(fw + 4);
     uint32_t imem_offset = rd32(fw + 8);
@@ -48,8 +49,9 @@ static int init_segments(struct ga10b_ctxsw_ucode_segments *s, uint64_t *offset,
      * copies that many bytes from fw + 16 without checking the file
      * length; reject a file that does not actually hold them. */
     uint64_t boot_size = align_up(desc_size, 4u);
-    if (sizeof(struct ga10b_ctxsw_bootloader_desc) + boot_size > (uint64_t)fw_size)
+    if (sizeof(struct ga10b_ctxsw_bootloader_desc) + boot_size > (uint64_t)fw_size) {
         return GA10B_CTXSW_ERR_FW_SIZE;
+    }
 
     /* Netlist u32 count rounds up (netlist.c:85-87); size = count * 4. */
     uint64_t code_size = align_up(inst_size, 4u);
@@ -60,13 +62,15 @@ static int init_segments(struct ga10b_ctxsw_ucode_segments *s, uint64_t *offset,
     init_segment(&s->boot, offset, (uint32_t)boot_size);
     init_segment(&s->code, offset, (uint32_t)code_size);
     init_segment(&s->data, offset, (uint32_t)dsize);
-    if (*offset > 0xFFFFFFFFull)
+    if (*offset > 0xFFFFFFFFull) {
         return GA10B_CTXSW_ERR_OVERFLOW;
+    }
 
     uint32_t sig = 0;
     const uint8_t *boot = fw + sizeof(struct ga10b_ctxsw_bootloader_desc);
-    for (uint32_t i = 0; i < s->boot.size / 4u; i++)
+    for (uint32_t i = 0; i < s->boot.size / 4u; i++) {
         sig += rd32(boot + (size_t)i * 4u);
+    }
     s->boot_signature = sig;
     return GA10B_CTXSW_OK;
 }
@@ -74,14 +78,16 @@ static int init_segments(struct ga10b_ctxsw_ucode_segments *s, uint64_t *offset,
 int ga10b_ctxsw_ucode_inputs_from_netlist(const struct ga10b_netlist *nl,
                                           struct ga10b_ctxsw_ucode_inputs *in)
 {
-    if (nl == nullptr || in == nullptr)
+    if (nl == nullptr || in == nullptr) {
         return GA10B_CTXSW_ERR_ARG;
+    }
     struct ga10b_netlist_blob_view fi, fd, gi, gd;
     if (ga10b_netlist_find(nl, GA10B_NETLIST_REGIONID_FECS_UCODE_INST, &fi) != 0 ||
         ga10b_netlist_find(nl, GA10B_NETLIST_REGIONID_FECS_UCODE_DATA, &fd) != 0 ||
         ga10b_netlist_find(nl, GA10B_NETLIST_REGIONID_GPCCS_UCODE_INST, &gi) != 0 ||
-        ga10b_netlist_find(nl, GA10B_NETLIST_REGIONID_GPCCS_UCODE_DATA, &gd) != 0)
+        ga10b_netlist_find(nl, GA10B_NETLIST_REGIONID_GPCCS_UCODE_DATA, &gd) != 0) {
         return GA10B_CTXSW_ERR_NETLIST;
+    }
     in->fecs_inst = fi.data;  in->fecs_inst_size = fi.size;
     in->fecs_data = fd.data;  in->fecs_data_size = fd.size;
     in->gpccs_inst = gi.data; in->gpccs_inst_size = gi.size;
@@ -92,25 +98,29 @@ int ga10b_ctxsw_ucode_inputs_from_netlist(const struct ga10b_netlist *nl,
 int ga10b_ctxsw_ucode_layout(const struct ga10b_ctxsw_ucode_inputs *in,
                              struct ga10b_ctxsw_ucode_info *out)
 {
-    if (in == nullptr || out == nullptr)
+    if (in == nullptr || out == nullptr) {
         return GA10B_CTXSW_ERR_ARG;
+    }
     memset(out, 0, sizeof(*out));
-    if (in->fecs_fw == nullptr || in->gpccs_fw == nullptr)
+    if (in->fecs_fw == nullptr || in->gpccs_fw == nullptr) {
         return GA10B_CTXSW_ERR_ARG;
+    }
     if ((in->fecs_inst == nullptr && in->fecs_inst_size != 0u) ||
         (in->fecs_data == nullptr && in->fecs_data_size != 0u) ||
         (in->gpccs_inst == nullptr && in->gpccs_inst_size != 0u) ||
-        (in->gpccs_data == nullptr && in->gpccs_data_size != 0u))
+        (in->gpccs_data == nullptr && in->gpccs_data_size != 0u)) {
         return GA10B_CTXSW_ERR_ARG;
+    }
 
     /* FECS first, then GPCCS, sharing one running offset
      * (gr_falcon.c:339-351). */
     uint64_t offset = 0;
     int rc = init_segments(&out->fecs, &offset, in->fecs_fw, in->fecs_fw_size,
                            in->fecs_inst_size, in->fecs_data_size);
-    if (rc == GA10B_CTXSW_OK)
+    if (rc == GA10B_CTXSW_OK) {
         rc = init_segments(&out->gpccs, &offset, in->gpccs_fw, in->gpccs_fw_size,
                            in->gpccs_inst_size, in->gpccs_data_size);
+    }
     if (rc != GA10B_CTXSW_OK) {
         memset(out, 0, sizeof(*out));
         return rc;
@@ -131,10 +141,12 @@ static void copy_segments(uint8_t *dst, const struct ga10b_ctxsw_ucode_segments 
 {
     memcpy(dst + s->boot.offset, fw + sizeof(struct ga10b_ctxsw_bootloader_desc),
            s->boot.size);
-    if (inst_size != 0u)
+    if (inst_size != 0u) {
         memcpy(dst + s->code.offset, inst, inst_size);
-    if (data_size != 0u)
+    }
+    if (data_size != 0u) {
         memcpy(dst + s->data.offset, data, data_size);
+    }
 }
 
 int ga10b_ctxsw_ucode_build(const struct ga10b_ctxsw_ucode_inputs *in,
@@ -142,10 +154,12 @@ int ga10b_ctxsw_ucode_build(const struct ga10b_ctxsw_ucode_inputs *in,
                             struct ga10b_ctxsw_ucode_info *out)
 {
     int rc = ga10b_ctxsw_ucode_layout(in, out);
-    if (rc != GA10B_CTXSW_OK)
+    if (rc != GA10B_CTXSW_OK) {
         return rc;
-    if (buf == nullptr || buf_size < out->surface_size)
+    }
+    if (buf == nullptr || buf_size < out->surface_size) {
         return GA10B_CTXSW_ERR_BUF_SMALL;
+    }
 
     uint8_t *dst = buf;
     memset(dst, 0, out->surface_size);

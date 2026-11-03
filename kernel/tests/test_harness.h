@@ -278,6 +278,7 @@ int test_suite_ga10b_acr_blob(void);
 int test_suite_ga10b_pmu(void);   /* LS PMU RTOS host driver, fake BAR0 */
 int test_suite_ga10b_chan(void);  /* GA10B VM / inst block / RAMFC / runlist */
 int test_suite_ga10b_grctx(void); /* GA10B GR context encoders */
+int test_suite_ga10b_cold(void);  /* GA10B cold bring-up pure helpers */
 int test_suite_ga10b_mnist_pipeline(void); /* cold-boot MNIST GPU pipeline */
 
 /* ARM PMU primitive smoke tests (#874) */

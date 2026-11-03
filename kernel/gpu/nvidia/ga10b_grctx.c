@@ -47,6 +47,11 @@
 #define GR_FECS_METHOD_PUSH             0x409504u
 #define GR_FECS_CTXSW_MAILBOX(i)        (0x409800u + (i) * 4u)
 #define GR_FECS_CURRENT_CTX             0x409b00u
+/* Context-image header words the CPU patches before golden save
+ * (zcull mode/pointers): clean the first 64 words. */
+#define GA10B_CTXSW_HDR_CLEAN_BYTES     (64u * 4u)
+static_assert(GA10B_CTXSW_ZCULL_PTR_HI < GA10B_CTXSW_HDR_CLEAN_BYTES,
+              "zcull header words must lie inside the cleaned range");
 #define GR_SM0_WARP_ESR_REPORT_MASK     0x504728u
 #define GR_SM0_GLOBAL_ESR_REPORT_MASK   0x50472cu
 #define GR_SMS_HWW_GLOBAL_ESR           0x419eb4u
@@ -271,6 +276,10 @@ void ga10b_gr_commit_global_ctx_buffers(struct ga10b_ctx_writer *w,
     uint32_t at = (uint32_t)(v->va[GA10B_GR_BUF_ATTRIB_CB] >> 12);
     ga10b_ctx_write(w, GR_GPCS_SETUP_ATTRIB_CB_BASE, (at & 0x0fffffffu) | GR_VALID_BIT31);
     ga10b_ctx_write(w, GR_GPCS_TPCS_PE_PIN_CB_BASE, (at & 0x0fffffffu) | GR_VALID_BIT28);
+    /* Written twice on purpose: gm20b_gr_init_commit_global_attrib_cb
+     * (gr_init_gm20b_fusa.c:436) and then gv11b's override
+     * (gr_init_gv11b_fusa.c:741) both patch it; the patch-buffer count
+     * the tests pin against the trace includes both entries. */
     ga10b_ctx_write(w, GR_GPCS_TPCS_MPC_VTG_CB_BASE, (at & 0x0fffffffu) | GR_VALID_BIT28);
     ga10b_ctx_write(w, GR_GPCS_TPCS_MPC_VTG_CB_BASE, (at & 0x0fffffffu) | GR_VALID_BIT28);
     ga10b_ctx_write(w, GR_GPCS_TPCS_TEX_RM_CB_0, at);
@@ -337,10 +346,11 @@ void ga10b_ctx_image_after_golden_load(void *img, uint64_t priv_map_va,
 
 void ga10b_ctx_image_set_compute_preempt(void *img, enum ga10b_compute_preempt m)
 {
-    if (m == GA10B_PREEMPT_CTA)
+    if (m == GA10B_PREEMPT_CTA) {
         ga10b_ctx_wr(img, GA10B_CTXSW_COMPUTE_PREEMPT_OPTIONS, 0x1u);
-    else if (m == GA10B_PREEMPT_CILP)
+    } else if (m == GA10B_PREEMPT_CILP) {
         ga10b_ctx_wr(img, GA10B_CTXSW_COMPUTE_PREEMPT_OPTIONS, 0x2u);
+    }
 }
 
 /* ==================================================================
@@ -427,8 +437,9 @@ int ga10b_gr_l2_flush(const struct ga10b_gpu_ops *ops, bool invalidate)
     unsigned n = invalidate ? 3u : 2u;
     for (unsigned i = 0; i < n; i++) {
         wr(ops, regs[i], 0x1u);
-        if (poll_mask_clear(ops, regs[i], FLUSH_PENDING_OUTSTANDING, 100000u) != 0)
+        if (poll_mask_clear(ops, regs[i], FLUSH_PENDING_OUTSTANDING, 100000u) != 0) {
             return GA10B_GRCTX_ERR_TIMEOUT;
+        }
     }
     return GA10B_GRCTX_OK;
 }
@@ -467,10 +478,12 @@ int ga10b_grctx_alloc_global(const struct ga10b_gpu_ops *ops, struct ga10b_grctx
     for (unsigned b = 0; b < GA10B_GR_BUF_COUNT; b++) {
         if (g->global[b].cpu) continue;
         uint32_t sz = ga10b_gr_global_buf_bytes(&g->cfg, (enum ga10b_gr_global_buf)b);
-        if (ga10b_dma_alloc(ops, sz, &g->global[b]) != GA10B_CHAN_OK)
+        if (ga10b_dma_alloc(ops, sz, &g->global[b]) != GA10B_CHAN_OK) {
             return GA10B_GRCTX_ERR_NOMEM;
-        if (b == GA10B_GR_BUF_PRIV_ACCESS_MAP)
+        }
+        if (b == GA10B_GR_BUF_PRIV_ACCESS_MAP) {
             ga10b_gr_build_priv_access_map((uint8_t *)g->global[b].cpu, g->global[b].size);
+        }
         ga10b_dma_clean(ops, &g->global[b]);
     }
     return GA10B_GRCTX_OK;
@@ -487,8 +500,9 @@ int ga10b_grctx_alloc_global(const struct ga10b_gpu_ops *ops, struct ga10b_grctx
 static uint32_t global_map_flags(unsigned b)
 {
     uint32_t f = GA10B_MAP_PRIV;
-    if (b != GA10B_GR_BUF_PRIV_ACCESS_MAP && b != GA10B_GR_BUF_RTV_CB)
+    if (b != GA10B_GR_BUF_PRIV_ACCESS_MAP && b != GA10B_GR_BUF_RTV_CB) {
         f |= GA10B_MAP_CACHEABLE;
+    }
     return f;
 }
 
@@ -501,17 +515,20 @@ static int ctx_prepare(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *g,
     memset(c, 0, sizeof(*c));
     if (ga10b_dma_alloc(ops, GA10B_GR_FECS_HEADER_BYTES, &c->header) != 0 ||
         ga10b_dma_alloc(ops, g->golden_size, &c->gr_ctx) != 0 ||
-        ga10b_dma_alloc(ops, ga10b_gr_patch_ctx_bytes(&g->cfg), &c->patch) != 0)
+        ga10b_dma_alloc(ops, ga10b_gr_patch_ctx_bytes(&g->cfg), &c->patch) != 0) {
         return GA10B_GRCTX_ERR_NOMEM;
+    }
     if (ga10b_vm_map_dma(ops, vm, &c->header, GA10B_MAP_PRIV, true, &c->header_va) != 0 ||
         ga10b_vm_map_dma(ops, vm, &c->gr_ctx, GA10B_MAP_PRIV, true, &c->gr_ctx_va) != 0 ||
-        ga10b_vm_map_dma(ops, vm, &c->patch, GA10B_MAP_PRIV, true, &c->patch_va) != 0)
+        ga10b_vm_map_dma(ops, vm, &c->patch, GA10B_MAP_PRIV, true, &c->patch_va) != 0) {
         return GA10B_GRCTX_ERR_VM;
+    }
     for (unsigned b = 0; b < GA10B_GR_BUF_COUNT; b++) {
         if (!g->global[b].cpu) return GA10B_GRCTX_ERR_STATE;
         if (ga10b_vm_map_dma(ops, vm, &g->global[b], global_map_flags(b), true,
-                             &c->global.va[b]) != 0)
+                             &c->global.va[b]) != 0) {
             return GA10B_GRCTX_ERR_VM;
+        }
     }
 
     /* commit_global_ctx_buffers(patch = true): patch_write_begin reads
@@ -671,8 +688,9 @@ static int load_bundles(const struct ga10b_gpu_ops *o, const struct ga10b_grctx 
             last = v->l[i].value;
         }
         wr(o, GR_PIPE_BUNDLE_ADDRESS, v->l[i].addr);
-        if ((v->l[i].addr & 0xffffu) == GR_GO_IDLE_BUNDLE && wait_idle(o, g) != 0)
+        if ((v->l[i].addr & 0xffffu) == GR_GO_IDLE_BUNDLE && wait_idle(o, g) != 0) {
             return GA10B_GRCTX_ERR_TIMEOUT;
+        }
         if (wait_fe_idle(o, g) != 0) return GA10B_GRCTX_ERR_TIMEOUT;
     }
     return GA10B_GRCTX_OK;
@@ -764,8 +782,9 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
     }
     if (get_av(g->netlist, GA10B_NETLIST_REGIONID_SW_BUNDLE_INIT, &bundle) ||
         get_av(g->netlist, GA10B_NETLIST_REGIONID_SWVEIDBUNDLEINIT, &veid_bundle) ||
-        get_av(g->netlist, GA10B_NETLIST_REGIONID_SW_METHOD_INIT, &method))
+        get_av(g->netlist, GA10B_NETLIST_REGIONID_SW_METHOD_INIT, &method)) {
         return GA10B_GRCTX_ERR_NETLIST;
+    }
     rc = ga10b_netlist_get_av64_list(g->netlist, GA10B_NETLIST_REGIONID_SW_BUNDLE64_INIT, &bundle64);
     if (rc == GA10B_NETLIST_ERR_NOT_FOUND) {
         bundle64.l = NULL;
@@ -786,8 +805,9 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
     if ((rc = fecs_submit(o, g, &bind, NULL)) != 0) return rc;
     if ((rc = wait_idle(o, g)) != 0) return rc;
 
-    for (uint32_t i = 0; i < ctx_load.count; i++)
+    for (uint32_t i = 0; i < ctx_load.count; i++) {
         wr(o, ctx_load.l[i].addr, ctx_load.l[i].value);
+    }
 
     /* ga10b_gr_intr_set_hww_esr_report_mask. */
     uint32_t warp = rd(o, GR_SM0_WARP_ESR_REPORT_MASK);
@@ -812,8 +832,9 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
     wr(o, GR_PES_VSC_VPC, vsc);
     rmw(o, GR_PD_AB_DIST_CFG0, 0u, GR_PD_AB_DIST_CFG0_TIMESLICE_EN);
     /* nvgpu_gr_fs_state_init. */
-    for (unsigned i = 0; i < ga10b_grctx_fs_state_writes_count; i++)
+    for (unsigned i = 0; i < ga10b_grctx_fs_state_writes_count; i++) {
         wr(o, ga10b_grctx_fs_state_writes[i].offset, ga10b_grctx_fs_state_writes[i].value);
+    }
     if ((rc = wait_idle(o, g)) != 0) goto restore;
     rmw(o, GR_DEBUG_2, GR_DEBUG_2_GFX_AUTO_GO_IDLE | GR_DEBUG_2_COMPUTE_AUTO_GO_IDLE, 0u);
 
@@ -849,6 +870,7 @@ int ga10b_grctx_golden_create(const struct ga10b_gpu_ops *ops, struct ga10b_grct
     struct ga10b_vm vm;
     struct ga10b_dma inst = { 0 };
     struct ga10b_gr_chan_ctx c;
+    bool fecs_bound = false;
     memset(&c, 0, sizeof(c));
     if (ga10b_vm_init(ops, &vm) != GA10B_CHAN_OK) return GA10B_GRCTX_ERR_NOMEM;
 
@@ -874,6 +896,9 @@ int ga10b_grctx_golden_create(const struct ga10b_gpu_ops *ops, struct ga10b_grct
         goto out;
     }
 
+    /* From here FECS may hold inst/gr_ctx as its current context
+     * (golden_hw issues BIND_POINTER early on). */
+    fecs_bound = true;
     rc = golden_hw(ops, g, &c, inst.phys);
     if (rc != 0) goto out;
 
@@ -883,7 +908,7 @@ int ga10b_grctx_golden_create(const struct ga10b_gpu_ops *ops, struct ga10b_grct
     ga10b_ctx_wr(c.gr_ctx.cpu, GA10B_CTXSW_ZCULL, GA10B_CTXSW_ZCULL_MODE_NO_CTXSW);
     ga10b_ctx_wr(c.gr_ctx.cpu, GA10B_CTXSW_ZCULL_PTR, 0u);
     ga10b_ctx_wr(c.gr_ctx.cpu, GA10B_CTXSW_ZCULL_PTR_HI, 0u);
-    ops->cache_clean(ops->ctx, c.gr_ctx.cpu, 64u * 4u);
+    ops->cache_clean(ops->ctx, c.gr_ctx.cpu, GA10B_CTXSW_HDR_CLEAN_BYTES);
 
     /* nvgpu_gr_obj_ctx_save_golden_ctx. */
     struct fecs_op save = { .clr = 0x3u, .addr = GA10B_FECS_METHOD_WFI_GOLDEN_SAVE,
@@ -908,6 +933,14 @@ int ga10b_grctx_golden_create(const struct ga10b_gpu_ops *ops, struct ga10b_grct
     wr(ops, GR_FECS_CURRENT_CTX, 0u);   /* gm20b_gr_falcon_set_current_ctx_invalid */
 
 out:
+    if (rc != 0 && fecs_bound) {
+        /* FECS may still reference these pages as its current context
+         * or be mid-save into them: invalidate its context pointer and
+         * leak the buffers rather than hand them back to the PMM, where
+         * a late GPU write would land in reused memory. */
+        wr(ops, GR_FECS_CURRENT_CTX, 0u);
+        return rc;
+    }
     ga10b_grctx_chan_free(ops, &c);
     ga10b_dma_free(ops, &inst);
     ga10b_vm_destroy(ops, &vm);
@@ -923,8 +956,9 @@ int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *
                            enum ga10b_compute_preempt preempt,
                            struct ga10b_gr_chan_ctx *c)
 {
-    if (!ops || !g || !vm || !inst_words || !c || veid >= GA10B_MAX_SUBCTX)
+    if (!ops || !g || !vm || !inst_words || !c || veid >= GA10B_MAX_SUBCTX) {
         return GA10B_GRCTX_ERR_ARG;
+    }
     if (!g->golden_ready) return GA10B_GRCTX_ERR_STATE;
 
     int rc = ctx_prepare(ops, g, vm, inst_words, c);

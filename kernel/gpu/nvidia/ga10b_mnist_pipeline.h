@@ -212,14 +212,16 @@ struct ga10b_mnist_pipeline {
  * GPU-uncached like the helper's MAP_BUFFER_EX with flags 0), then
  * write the baked QMD per op (ga10b_qmd_populate; kept for
  * byte-compare like the helper's qmd pages), the v7 ops array and a
- * zeroed QMD pool, and invalidate the VM's TLB. On failure everything
- * allocated is freed (VA stays reserved; the PTEs are never used). */
+ * zeroed QMD pool, and invalidate the VM's TLB. On failure the pages
+ * allocated so far are leaked, not freed: some may already be mapped in
+ * `vm`, and freeing them would leave PTEs to reused memory. */
 int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
                                struct ga10b_vm *vm,
                                const struct ga10b_mnist_sources *src,
                                struct ga10b_mnist_pipeline *p);
 
-/* Free a pipeline that was never installed (no PTE cleanup). */
+/* Free a successfully built pipeline whose VM is being torn down too
+ * (tests); it does not unmap, so never use it on a live VM. */
 void ga10b_mnist_pipeline_free(const struct ga10b_gpu_ops *ops,
                                struct ga10b_mnist_pipeline *p);
 

@@ -44,14 +44,16 @@ static void delay_us(struct ga10b_pmu *pmu, uint32_t us)
 
 static void dma_clean(struct ga10b_pmu *pmu, const void *p, size_t n)
 {
-    if (pmu->ops->dma_clean != nullptr)
+    if (pmu->ops->dma_clean != nullptr) {
         pmu->ops->dma_clean(pmu->ops->ctx, p, n);
+    }
 }
 
 static void dma_inval(struct ga10b_pmu *pmu, const void *p, size_t n)
 {
-    if (pmu->ops->dma_inval != nullptr)
+    if (pmu->ops->dma_inval != nullptr) {
         pmu->ops->dma_inval(pmu->ops->ctx, p, n);
+    }
 }
 
 static uint8_t *ss(struct ga10b_pmu *pmu)
@@ -97,8 +99,9 @@ uint32_t ga10b_pmu_inst_block_config(uint64_t inst_block_addr, bool coherent)
 void ga10b_pmu_build_inst_block(uint32_t inst[GA10B_PMU_INST_BLOCK_SIZE / 4u],
                                 uint64_t pdb_addr, bool coherent)
 {
-    if (inst == nullptr)
+    if (inst == nullptr) {
         return;
+    }
     memset(inst, 0, GA10B_PMU_INST_BLOCK_SIZE);
 
     uint32_t lo = (uint32_t)(pdb_addr >> 12);          /* u64_lo32(pdb >> base_shift) */
@@ -138,8 +141,9 @@ static void surface_describe(struct ga10b_pmu_flcn_mem_desc *d, uint64_t gpu_va,
 void ga10b_pmu_build_boot_params(struct ga10b_nv_pmu_boot_params *bp,
                                  const struct ga10b_pmu_config *cfg)
 {
-    if (bp == nullptr || cfg == nullptr)
+    if (bp == nullptr || cfg == nullptr) {
         return;
+    }
     memset(bp, 0, sizeof(*bp));
 
     /* nvgpu_pmu_rtos_cmdline_args_init: trace size/idx are no-ops in
@@ -173,12 +177,14 @@ void ga10b_pmu_build_boot_params(struct ga10b_nv_pmu_boot_params *bp,
 int ga10b_pmu_init(struct ga10b_pmu *pmu, const struct ga10b_pmu_ops *ops,
                    const struct ga10b_pmu_config *cfg)
 {
-    if (pmu == nullptr)
+    if (pmu == nullptr) {
         return GA10B_PMU_ERR_ARG;
+    }
     memset(pmu, 0, sizeof(*pmu));
     if (ops == nullptr || cfg == nullptr || ops->rd32 == nullptr || ops->wr32 == nullptr ||
-        ops->delay_us == nullptr)
+        ops->delay_us == nullptr) {
         return GA10B_PMU_ERR_ARG;
+    }
     if (cfg->boot_args.cpu == nullptr || cfg->boot_args.size < GA10B_PMU_BOOT_ARGS_SIZE ||
         cfg->boot_args.addr == 0u ||
         cfg->core_dump.addr == 0u || cfg->core_dump.size < GA10B_PMU_CORE_DUMP_SIZE ||
@@ -187,8 +193,9 @@ int ga10b_pmu_init(struct ga10b_pmu *pmu, const struct ga10b_pmu_ops *ops,
         cfg->super_surface.gpu_va == 0u ||
         cfg->trace_buf.gpu_va == 0u || cfg->trace_buf.size < GA10B_PMU_TRACE_BUF_SIZE ||
         cfg->inst_block_addr == 0u || (cfg->inst_block_addr & 0xfffu) != 0u ||
-        (cfg->inst_block_addr >> 12) > GA10B_PMU_INSTBLK_PTR_MASK)
+        (cfg->inst_block_addr >> 12) > GA10B_PMU_INSTBLK_PTR_MASK) {
         return GA10B_PMU_ERR_ARG;
+    }
     pmu->ops = ops;
     pmu->cfg = *cfg;
     return GA10B_PMU_OK;
@@ -203,8 +210,9 @@ static int wait_brom(struct ga10b_pmu *pmu)
     for (;;) {
         uint32_t r = rd(pmu, GA10B_PWR_RISCV_BR_RETCODE);
         pmu->brom_retcode = r;
-        if ((r & GA10B_RISCV_BR_RETCODE_MASK) == GA10B_RISCV_BR_RETCODE_PASS)
+        if ((r & GA10B_RISCV_BR_RETCODE_MASK) == GA10B_RISCV_BR_RETCODE_PASS) {
             break;
+        }
         if ((r & GA10B_RISCV_BR_RETCODE_MASK) == GA10B_RISCV_BR_RETCODE_FAIL) {
             err = GA10B_PMU_ERR_BROM;
             break;
@@ -219,8 +227,9 @@ static int wait_brom(struct ga10b_pmu *pmu)
     /* dump_brom_stats: HWCFG2, BCR_CTRL if not locked, RETCODE
      * (trace lines 11442-11444). */
     uint32_t hwcfg2 = rd(pmu, GA10B_PWR_FALCON_HWCFG2);
-    if ((hwcfg2 & GA10B_FALCON_HWCFG2_PRIV_LOCKDOWN) == 0u)
+    if ((hwcfg2 & GA10B_FALCON_HWCFG2_PRIV_LOCKDOWN) == 0u) {
         (void)rd(pmu, GA10B_PWR_RISCV_BCR_CTRL);
+    }
     pmu->brom_retcode = rd(pmu, GA10B_PWR_RISCV_BR_RETCODE);
     return err;
 }
@@ -230,10 +239,12 @@ static int wait_lockdown_release(struct ga10b_pmu *pmu)
 {
     uint64_t waited_us = 0;
     for (;;) {
-        if ((rd(pmu, GA10B_PWR_FALCON_HWCFG2) & GA10B_FALCON_HWCFG2_PRIV_LOCKDOWN) == 0u)
+        if ((rd(pmu, GA10B_PWR_FALCON_HWCFG2) & GA10B_FALCON_HWCFG2_PRIV_LOCKDOWN) == 0u) {
             return GA10B_PMU_OK;
-        if (waited_us >= (uint64_t)LOCKDOWN_TIMEOUT_MS * 1000u)
+        }
+        if (waited_us >= (uint64_t)LOCKDOWN_TIMEOUT_MS * 1000u) {
             return GA10B_PMU_ERR_TIMEOUT;
+        }
         delay_us(pmu, LOCKDOWN_POLL_US);
         waited_us += LOCKDOWN_POLL_US;
     }
@@ -241,10 +252,12 @@ static int wait_lockdown_release(struct ga10b_pmu *pmu)
 
 int ga10b_pmu_boot(struct ga10b_pmu *pmu)
 {
-    if (pmu == nullptr || pmu->ops == nullptr)
+    if (pmu == nullptr || pmu->ops == nullptr) {
         return GA10B_PMU_ERR_ARG;
-    if (pmu->booted)
+    }
+    if (pmu->booted) {
         return fail(pmu, GA10B_PMU_ERR_STATE);
+    }
 
     /* pmu_sw_setup -> nvgpu_pmu_super_surface_buf_alloc: zeroed DMA
      * buffer with its own GPU VA in hdr.data.address. */
@@ -280,11 +293,13 @@ int ga10b_pmu_boot(struct ga10b_pmu *pmu)
     pmu->booted = true;
 
     int err = wait_brom(pmu);
-    if (err != GA10B_PMU_OK)
+    if (err != GA10B_PMU_OK) {
         return fail(pmu, err);
+    }
     err = wait_lockdown_release(pmu);
-    if (err != GA10B_PMU_OK)
+    if (err != GA10B_PMU_OK) {
         return fail(pmu, err);
+    }
     return GA10B_PMU_OK;
 }
 
@@ -300,10 +315,11 @@ static bool heap_bit(const struct ga10b_pmu *pmu, uint32_t b)
 static void heap_set(struct ga10b_pmu *pmu, uint32_t b, uint32_t n, bool v)
 {
     for (uint32_t i = b; i < b + n; i++) {
-        if (v)
+        if (v) {
             pmu->heap_bitmap[i / 32u] |= 1u << (i % 32u);
-        else
+        } else {
             pmu->heap_bitmap[i / 32u] &= ~(1u << (i % 32u));
+        }
     }
 }
 
@@ -313,10 +329,12 @@ static uint32_t heap_find_zero_area(const struct ga10b_pmu *pmu, uint32_t limit,
 {
     for (uint32_t i = start; i + n <= limit; i++) {
         uint32_t j = 0;
-        while (j < n && !heap_bit(pmu, i + j))
+        while (j < n && !heap_bit(pmu, i + j)) {
             j++;
-        if (j == n)
+        }
+        if (j == n) {
             return i;
+        }
         i += j;  /* skip past the set bit */
     }
     return limit;  /* not found (callers test >= limit) */
@@ -325,14 +343,16 @@ static uint32_t heap_find_zero_area(const struct ga10b_pmu *pmu, uint32_t limit,
 /* nvgpu_bitmap_balloc: next-fit from next_blk, then the area before it. */
 static uint32_t heap_alloc(struct ga10b_pmu *pmu, uint32_t len)
 {
-    if (pmu->heap_blks == 0u || len == 0u)
+    if (pmu->heap_blks == 0u || len == 0u) {
         return 0;
+    }
     uint32_t blks = (len + GA10B_PMU_DMEM_ALLOC_ALIGNMENT - 1u) / GA10B_PMU_DMEM_ALLOC_ALIGNMENT;
     uint32_t offs = heap_find_zero_area(pmu, pmu->heap_blks, pmu->heap_next_blk, blks);
     if (offs >= pmu->heap_blks) {
         uint32_t limit = pmu->heap_next_blk;
-        while (limit < pmu->heap_blks && !heap_bit(pmu, limit))
+        while (limit < pmu->heap_blks && !heap_bit(pmu, limit)) {
             limit++;   /* find_next_bit(bitmap, num_bits, next_blk) */
+        }
         offs = heap_find_zero_area(pmu, limit, 0, blks);
         if (offs >= pmu->heap_next_blk) {
             pmu->heap_next_blk = 0;
@@ -346,12 +366,14 @@ static uint32_t heap_alloc(struct ga10b_pmu *pmu, uint32_t len)
 
 static void heap_free(struct ga10b_pmu *pmu, uint32_t addr, uint32_t len)
 {
-    if (pmu->heap_blks == 0u || addr < pmu->heap_base || len == 0u)
+    if (pmu->heap_blks == 0u || addr < pmu->heap_base || len == 0u) {
         return;
+    }
     uint32_t offs = (addr - pmu->heap_base) / GA10B_PMU_DMEM_ALLOC_ALIGNMENT;
     uint32_t blks = (len + GA10B_PMU_DMEM_ALLOC_ALIGNMENT - 1u) / GA10B_PMU_DMEM_ALLOC_ALIGNMENT;
-    if (offs + blks <= pmu->heap_blks)
+    if (offs + blks <= pmu->heap_blks) {
         heap_set(pmu, offs, blks, false);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -375,38 +397,44 @@ static void copy_from_dmem(struct ga10b_pmu *pmu, uint32_t src, uint8_t *dst, ui
 
 static void emit_line(struct ga10b_pmu *pmu, const char *s)
 {
-    if (pmu->ops->log_line != nullptr)
+    if (pmu->ops->log_line != nullptr) {
         pmu->ops->log_line(pmu->ops->ctx, s);
+    }
 }
 
 int ga10b_pmu_dbg_drain(struct ga10b_pmu *pmu)
 {
-    if (pmu == nullptr || pmu->ops == nullptr || !pmu->booted)
+    if (pmu == nullptr || pmu->ops == nullptr || !pmu->booted) {
         return GA10B_PMU_ERR_STATE;
+    }
     uint32_t write_offset = rd(pmu, GA10B_PWR_PMU_QUEUE_HEAD(GA10B_RISCV_DEBUG_BUFFER_QUEUE));
 
     if (!pmu->dbg_meta_ok) {
         /* nvgpu_falcon_dbg_buf_init + falcon_fetch_debug_buffer_metadata:
          * metadata sits in the last 16 bytes of DMEM. */
         uint32_t dmem_size = GA10B_FALCON_HWCFG_DMEM_SIZE(rd(pmu, GA10B_PWR_FALCON_HWCFG));
-        if (dmem_size < sizeof(struct ga10b_falcon_dbg_buf_metadata))
+        if (dmem_size < sizeof(struct ga10b_falcon_dbg_buf_metadata)) {
             return GA10B_PMU_ERR_PROTO;
+        }
         uint32_t meta_off = dmem_size - (uint32_t)sizeof(struct ga10b_falcon_dbg_buf_metadata);
         struct ga10b_falcon_dbg_buf_metadata m;
         copy_from_dmem(pmu, meta_off, (uint8_t *)&m, sizeof(m));
         if (m.magic != GA10B_NVRISCV_DEBUG_BUFFER_MAGIC ||
             m.buffer_size >= GA10B_RISCV_DMESG_BUFFER_SIZE || (m.buffer_size & 3u) != 0u ||
-            m.buffer_size == 0u || m.buffer_size > meta_off)
+            m.buffer_size == 0u || m.buffer_size > meta_off) {
             return GA10B_PMU_ERR_PROTO;
+        }
         pmu->dbg_buffer_size = m.buffer_size;
         pmu->dbg_dmem_offset = meta_off - m.buffer_size;
         pmu->dbg_read_offset = 0;
         pmu->dbg_meta_ok = true;
     }
-    if (write_offset >= pmu->dbg_buffer_size)
+    if (write_offset >= pmu->dbg_buffer_size) {
         return GA10B_PMU_ERR_PROTO;
-    if (write_offset == pmu->dbg_read_offset)
+    }
+    if (write_offset == pmu->dbg_read_offset) {
         return GA10B_PMU_OK;
+    }
 
     /* falcon_update_debug_buffer_from_dmem */
     uint32_t rd_al = pmu->dbg_read_offset & ~3u;
@@ -427,8 +455,9 @@ int ga10b_pmu_dbg_drain(struct ga10b_pmu *pmu)
         char c = (char)b[it];
         it = (it + 1u) % pmu->dbg_buffer_size;
         if (c != '\0') {
-            if (n + 1u < sizeof(line))
+            if (n + 1u < sizeof(line)) {
                 line[n++] = c;
+            }
             continue;
         }
         line[n] = '\0';
@@ -453,8 +482,9 @@ static uint32_t msgq_tail(struct ga10b_pmu *pmu) { return rd(pmu, GA10B_PWR_PMU_
 static int process_init_msg(struct ga10b_pmu *pmu)
 {
     uint32_t tail = msgq_tail(pmu);
-    if (tail >= GA10B_FBQ_MSG_NUM_ELEMENTS)
+    if (tail >= GA10B_FBQ_MSG_NUM_ELEMENTS) {
         return GA10B_PMU_ERR_PROTO;
+    }
     /* Read the element and the next one: the init message's declared
      * size can run past its 60-byte slot (nvgpu reads hdr.size bytes
      * from element + 4). */
@@ -463,22 +493,27 @@ static int process_init_msg(struct ga10b_pmu *pmu)
               GA10B_FBQ_MSG_NUM_ELEMENTS * GA10B_FBQ_MSG_ELEMENT_SIZE);
     struct ga10b_pmu_hdr h;
     memcpy(&h, ss(pmu) + off, sizeof(h));
-    if (h.unit_id != GA10B_PMU_UNIT_INIT_DGPU && h.unit_id != GA10B_PMU_UNIT_CMDMGMT)
+    if (h.unit_id != GA10B_PMU_UNIT_INIT_DGPU && h.unit_id != GA10B_PMU_UNIT_CMDMGMT) {
         return GA10B_PMU_ERR_PROTO;
+    }
     /* Need at least up to os_debug_entry_point. */
     const uint32_t need = (uint32_t)(sizeof(h) +
         offsetof(struct ga10b_pmu_init_msg, os_debug_entry_point) + 2u);
-    if (h.size < need)
+    if (h.size < need) {
         return GA10B_PMU_ERR_PROTO;
+    }
     uint32_t body = h.size - (uint32_t)sizeof(h);
-    if (body > sizeof(pmu->init))
+    if (body > sizeof(pmu->init)) {
         body = sizeof(pmu->init);
-    if (off + sizeof(h) + body > GA10B_PMU_SUPER_SURFACE_SIZE)
+    }
+    if (off + sizeof(h) + body > GA10B_PMU_SUPER_SURFACE_SIZE) {
         return GA10B_PMU_ERR_PROTO;
+    }
     memset(&pmu->init, 0, sizeof(pmu->init));
     memcpy(&pmu->init, ss(pmu) + off + sizeof(h), body);
-    if (pmu->init.hdr.function != GA10B_PMU_INIT_MSG_TYPE_PMU_INIT)
+    if (pmu->init.hdr.function != GA10B_PMU_INIT_MSG_TYPE_PMU_INIT) {
         return GA10B_PMU_ERR_PROTO;
+    }
     pmu->init_unit_id = h.unit_id;
 
     /* "Queue is not yet constructed, so inline next element code". */
@@ -487,8 +522,9 @@ static int process_init_msg(struct ga10b_pmu *pmu)
 
     /* pmu_fb_queue_init: LPQ index = queue_phy_id[LPQ_IDX_FOR_V3]. */
     pmu->cmdq_index = pmu->init.queue_phy_id[GA10B_PMU_QUEUE_LPQ_IDX_FOR_V3];
-    if (pmu->cmdq_index >= GA10B_PWR_PMU_QUEUE_COUNT)
+    if (pmu->cmdq_index >= GA10B_PWR_PMU_QUEUE_COUNT) {
         return GA10B_PMU_ERR_PROTO;
+    }
     pmu->cmdq_tail = 0;
     pmu->cmdq_in_use = 0;
 
@@ -505,8 +541,9 @@ static int process_init_msg(struct ga10b_pmu *pmu)
     if (start == 0u && end > a) start = a;
     pmu->heap_base = start;
     pmu->heap_blks = end > start ? (end - start) / a : 0u;
-    if (pmu->heap_blks > GA10B_PMU_HEAP_MAX_BLKS)
+    if (pmu->heap_blks > GA10B_PMU_HEAP_MAX_BLKS) {
         pmu->heap_blks = GA10B_PMU_HEAP_MAX_BLKS;
+    }
     pmu->heap_next_blk = 0;
     memset(pmu->heap_bitmap, 0, sizeof(pmu->heap_bitmap));
 
@@ -525,19 +562,26 @@ struct msg_reader {
 static int msg_pop(struct ga10b_pmu *pmu, struct msg_reader *r, void *data, uint32_t size)
 {
     r->position = msgq_tail(pmu);
-    if (r->position >= GA10B_FBQ_MSG_NUM_ELEMENTS)
+    if (r->position >= GA10B_FBQ_MSG_NUM_ELEMENTS) {
         return GA10B_PMU_ERR_PROTO;
-    if (size + r->read_position >= GA10B_FBQ_MSG_ELEMENT_SIZE)
-        return GA10B_PMU_ERR_PROTO;
+    }
     const uint32_t hoff = (uint32_t)sizeof(struct ga10b_falcon_fbq_msgq_hdr);
+    /* The message body starts `hoff` bytes into the element. nvgpu
+     * checks only size + read_position against the element size, which
+     * lets a firmware-declared size of 61-63 read past the element;
+     * bound the actual copy instead. */
+    if ((uint64_t)size + r->read_position + hoff > GA10B_FBQ_MSG_ELEMENT_SIZE) {
+        return GA10B_PMU_ERR_PROTO;
+    }
     struct ga10b_pmu_hdr h;
     if (r->read_position == 0u) {
         const uint8_t *src = ss(pmu) + GA10B_SS_MSG_ELEMENT_OFFSET(r->position);
         dma_inval(pmu, src, GA10B_FBQ_MSG_ELEMENT_SIZE);
         memcpy(r->elem, src, GA10B_FBQ_MSG_ELEMENT_SIZE);
         memcpy(&h, r->elem + hoff, sizeof(h));
-        if (h.size >= GA10B_FBQ_MSG_ELEMENT_SIZE)
+        if ((uint32_t)h.size > GA10B_FBQ_MSG_ELEMENT_SIZE - hoff) {
             return GA10B_PMU_ERR_PROTO;   /* "Super Surface read failed" */
+        }
     }
     memcpy(&h, r->elem + hoff, sizeof(h));
     memcpy(data, r->elem + r->read_position + hoff, size);
@@ -562,8 +606,9 @@ static void cmdq_free_element(struct ga10b_pmu *pmu, uint32_t idx)
     uint32_t head = rd(pmu, GA10B_PWR_PMU_QUEUE_HEAD(pmu->cmdq_index));
     uint32_t tail = pmu->cmdq_tail;
     while (tail != head && tail < GA10B_FBQ_CMD_NUM_ELEMENTS &&
-           (pmu->cmdq_in_use & (1u << tail)) == 0u)
+           (pmu->cmdq_in_use & (1u << tail)) == 0u) {
         tail = (tail + 1u) % GA10B_FBQ_CMD_NUM_ELEMENTS;
+    }
     pmu->cmdq_tail = tail;
 }
 
@@ -573,8 +618,9 @@ static int handle_response(struct ga10b_pmu *pmu, const struct ga10b_pmu_hdr *h,
                            const uint8_t *body)
 {
     uint32_t id = h->seq_id;
-    if (pmu->seq[id].state != SEQ_PENDING)
+    if (pmu->seq[id].state != SEQ_PENDING) {
         return GA10B_PMU_ERR_PROTO;   /* "msg for an unknown sequence" */
+    }
     int result = GA10B_PMU_OK;
     uint8_t status = 0;
     if (h->unit_id == GA10B_PMU_UNIT_RC && h->size > sizeof(*h) &&
@@ -591,14 +637,16 @@ static int handle_response(struct ga10b_pmu *pmu, const struct ga10b_pmu_hdr *h,
         struct ga10b_pmu_rpc_header rh;
         memcpy(&rh, ss(pmu) + off, sizeof(rh));
         status = rh.flcn_status;
-        if (rh.flcn_status != 0u)
+        if (rh.flcn_status != 0u) {
             result = GA10B_PMU_ERR_RPC;   /* "failed RPC response" */
+        }
         if (result == GA10B_PMU_OK && rh.unit_id == GA10B_PMU_UNIT_ACR) {
             /* nvgpu_pmu_lsfm_rpc_handler */
-            if (rh.function == GA10B_PMU_RPC_ID_ACR_INIT_WPR_REGION)
+            if (rh.function == GA10B_PMU_RPC_ID_ACR_INIT_WPR_REGION) {
                 pmu->wpr_init_done = true;
-            else if (rh.function == GA10B_PMU_RPC_ID_ACR_BOOTSTRAP_GR_FALCONS)
+            } else if (rh.function == GA10B_PMU_RPC_ID_ACR_BOOTSTRAP_GR_FALCONS) {
                 pmu->falcons_loaded = true;
+            }
         }
     }
     heap_free(pmu, pmu->seq[id].heap_offset, pmu->seq[id].heap_size);
@@ -617,29 +665,34 @@ static int process_messages(struct ga10b_pmu *pmu)
         /* nvgpu_engine_fb_queue_is_empty */
         uint32_t head = msgq_head(pmu);
         uint32_t tail = msgq_tail(pmu);
-        if (head == tail)
+        if (head == tail) {
             return GA10B_PMU_OK;
+        }
 
         struct msg_reader r;
         memset(&r, 0, sizeof(r));
         struct ga10b_pmu_hdr h;
         int err = msg_pop(pmu, &r, &h, sizeof(h));
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
+        }
         if (h.unit_id == GA10B_PMU_UNIT_REWIND) {
             /* FBQ: no rewind, read the header again. */
             err = msg_pop(pmu, &r, &h, sizeof(h));
-            if (err != GA10B_PMU_OK)
+            if (err != GA10B_PMU_OK) {
                 return err;
+            }
         }
-        if (!(h.unit_id < GA10B_PMU_UNIT_END || h.unit_id >= GA10B_PMU_UNIT_TEST_START))
+        if (!(h.unit_id < GA10B_PMU_UNIT_END || h.unit_id >= GA10B_PMU_UNIT_TEST_START)) {
             return GA10B_PMU_ERR_PROTO;
+        }
         uint8_t body[GA10B_FBQ_MSG_ELEMENT_SIZE];
         memset(body, 0, sizeof(body));
         if (h.size > sizeof(h)) {
             err = msg_pop(pmu, &r, body, (uint32_t)h.size - (uint32_t)sizeof(h));
-            if (err != GA10B_PMU_OK)
+            if (err != GA10B_PMU_OK) {
                 return err;
+            }
         }
         pmu->msgs_seen++;
 
@@ -652,17 +705,20 @@ static int process_messages(struct ga10b_pmu *pmu)
             continue;
         }
         err = handle_response(pmu, &h, body);
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
+        }
     }
 }
 
 int ga10b_pmu_poll(struct ga10b_pmu *pmu)
 {
-    if (pmu == nullptr || pmu->ops == nullptr)
+    if (pmu == nullptr || pmu->ops == nullptr) {
         return GA10B_PMU_ERR_ARG;
-    if (!pmu->booted)
+    }
+    if (!pmu->booted) {
         return GA10B_PMU_ERR_STATE;
+    }
 
     /* gk20a_pmu_isr: stat & (RISCV IRQMASK & IRQDEST), cleared before
      * handling (trace: W 10a004 then the debug-buffer / queue reads).
@@ -677,41 +733,51 @@ int ga10b_pmu_poll(struct ga10b_pmu *pmu)
         uint32_t mask = rd(pmu, GA10B_PWR_RISCV_IRQMASK) & rd(pmu, GA10B_PWR_RISCV_IRQDEST);
         pmu->last_irqstat = intr;
         intr &= mask;
-        if (intr != 0u)
+        if (intr != 0u) {
             wr(pmu, GA10B_PWR_FALCON_IRQSCLR, intr);
-        if ((intr & GA10B_FALCON_IRQ_HALT) != 0u)
+        }
+        if ((intr & GA10B_FALCON_IRQ_HALT) != 0u) {
             pmu->halted = true;
-        if ((intr & GA10B_FALCON_IRQ_SWGEN1) != 0u)
+        }
+        if ((intr & GA10B_FALCON_IRQ_SWGEN1) != 0u) {
             (void)ga10b_pmu_dbg_drain(pmu);   /* ga10b_pmu_handle_swgen1_irq */
+        }
     }
 
     /* Message queue: polled every time (no IRQ), INIT first. */
     if (!pmu->fw_ready) {
-        if (msgq_head(pmu) != msgq_tail(pmu))
+        if (msgq_head(pmu) != msgq_tail(pmu)) {
             err = process_init_msg(pmu);
+        }
     } else {
         err = process_messages(pmu);
     }
-    if (err != GA10B_PMU_OK)
+    if (err != GA10B_PMU_OK) {
         return fail(pmu, err);
-    if (pmu->halted)
+    }
+    if (pmu->halted) {
         return fail(pmu, GA10B_PMU_ERR_HALT);
+    }
     return GA10B_PMU_OK;
 }
 
 int ga10b_pmu_wait_init(struct ga10b_pmu *pmu, uint32_t timeout_ms)
 {
-    if (pmu == nullptr || pmu->ops == nullptr)
+    if (pmu == nullptr || pmu->ops == nullptr) {
         return GA10B_PMU_ERR_ARG;
+    }
     uint64_t waited = 0;
     for (;;) {
         int err = ga10b_pmu_poll(pmu);
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
-        if (pmu->fw_ready)
+        }
+        if (pmu->fw_ready) {
             return GA10B_PMU_OK;
-        if (waited >= (uint64_t)timeout_ms * 1000u)
+        }
+        if (waited >= (uint64_t)timeout_ms * 1000u) {
             return fail(pmu, GA10B_PMU_ERR_TIMEOUT);
+        }
         delay_us(pmu, WAIT_POLL_US);
         waited += WAIT_POLL_US;
     }
@@ -725,15 +791,18 @@ int ga10b_pmu_rpc_post(struct ga10b_pmu *pmu, const void *rpc, uint16_t size_rpc
                        uint16_t size_scratch)
 {
     if (pmu == nullptr || pmu->ops == nullptr || rpc == nullptr ||
-        size_rpc < sizeof(struct ga10b_pmu_rpc_header))
+        size_rpc < sizeof(struct ga10b_pmu_rpc_header)) {
         return GA10B_PMU_ERR_ARG;
-    if (!pmu->fw_ready)
+    }
+    if (!pmu->fw_ready) {
         return fail(pmu, GA10B_PMU_ERR_STATE);   /* "PMU is not ready to process RPC" */
+    }
 
     const uint32_t hdr_sz = (uint32_t)sizeof(struct ga10b_falcon_fbq_hdr);
     const uint32_t cmd_sz = (uint32_t)sizeof(struct ga10b_pmu_rpc_cmd_full);
-    if (hdr_sz + cmd_sz + (uint32_t)size_rpc + size_scratch > GA10B_FBQ_CMD_ELEMENT_SIZE)
+    if (hdr_sz + cmd_sz + (uint32_t)size_rpc + size_scratch > GA10B_FBQ_CMD_ELEMENT_SIZE) {
         return GA10B_PMU_ERR_ARG;
+    }
 
     /* nvgpu_pmu_rpc_execute: cmd header from the RPC header. */
     struct ga10b_pmu_rpc_header rh;
@@ -744,26 +813,30 @@ int ga10b_pmu_rpc_post(struct ga10b_pmu *pmu, const void *rpc, uint16_t size_rpc
     cmd.hdr.size = (uint8_t)cmd_sz;            /* PMU_CMD_HDR_SIZE + sizeof(nv_pmu_rpc_cmd) */
     cmd.rpc.cmd_type = GA10B_PMU_RPC_CMD_ID;
     cmd.rpc.flags = rh.flags;
-    if (!(cmd.hdr.unit_id < GA10B_PMU_UNIT_END || cmd.hdr.unit_id >= GA10B_PMU_UNIT_TEST_START))
+    if (!(cmd.hdr.unit_id < GA10B_PMU_UNIT_END || cmd.hdr.unit_id >= GA10B_PMU_UNIT_TEST_START)) {
         return GA10B_PMU_ERR_ARG;
+    }
 
     /* nvgpu_pmu_seq_acquire: first free id. */
     uint32_t id = GA10B_PMU_MAX_SEQ;
-    for (uint32_t i = 0; i < GA10B_PMU_MAX_SEQ; i++)
+    for (uint32_t i = 0; i < GA10B_PMU_MAX_SEQ; i++) {
         if ((pmu->seq_tbl[i / 32u] & (1u << (i % 32u))) == 0u) {
             id = i;
             break;
         }
-    if (id == GA10B_PMU_MAX_SEQ)
+        }
+    if (id == GA10B_PMU_MAX_SEQ) {
         return fail(pmu, GA10B_PMU_ERR_NOSPACE);
+    }
     cmd.hdr.seq_id = (uint8_t)id;
     cmd.hdr.ctrl_flags = GA10B_PMU_CMD_FLAGS_STATUS | GA10B_PMU_CMD_FLAGS_INTR;
 
     /* pmu_fbq_cmd_setup: heap space for fbq hdr + cmd + rpc + scratch. */
     uint32_t need = ((uint32_t)size_rpc + size_scratch + hdr_sz + cmd_sz + 3u) & ~3u;
     uint32_t heap_offset = heap_alloc(pmu, need);
-    if (heap_offset == 0u || heap_offset > 0xFFFFu)
+    if (heap_offset == 0u || heap_offset > 0xFFFFu) {
         return fail(pmu, GA10B_PMU_ERR_NOSPACE);
+    }
 
     /* engine_fb_queue_has_room + prepare_write (two head reads, as in
      * the trace: "R 10a804 ... x2"). */
@@ -819,20 +892,25 @@ int ga10b_pmu_rpc_post(struct ga10b_pmu *pmu, const void *rpc, uint16_t size_rpc
 
 int ga10b_pmu_rpc_wait(struct ga10b_pmu *pmu, int seq, void *out, uint32_t timeout_ms)
 {
-    if (pmu == nullptr || pmu->ops == nullptr || seq < 0 || seq >= (int)GA10B_PMU_MAX_SEQ)
+    if (pmu == nullptr || pmu->ops == nullptr || seq < 0 || seq >= (int)GA10B_PMU_MAX_SEQ) {
         return GA10B_PMU_ERR_ARG;
+    }
     uint32_t id = (uint32_t)seq;
-    if (pmu->seq[id].state == SEQ_FREE)
+    if (pmu->seq[id].state == SEQ_FREE) {
         return GA10B_PMU_ERR_STATE;
+    }
     uint64_t waited = 0;
     while (pmu->seq[id].state != SEQ_DONE) {
         int err = ga10b_pmu_poll(pmu);
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
-        if (pmu->seq[id].state == SEQ_DONE)
+        }
+        if (pmu->seq[id].state == SEQ_DONE) {
             break;
-        if (waited >= (uint64_t)timeout_ms * 1000u)
+        }
+        if (waited >= (uint64_t)timeout_ms * 1000u) {
             return fail(pmu, GA10B_PMU_ERR_TIMEOUT);
+        }
         delay_us(pmu, WAIT_POLL_US);
         waited += WAIT_POLL_US;
     }
@@ -845,15 +923,17 @@ int ga10b_pmu_rpc_wait(struct ga10b_pmu *pmu, int seq, void *out, uint32_t timeo
     }
     int result = pmu->seq[id].result;
     pmu->seq[id].state = SEQ_FREE;
-    if (result != GA10B_PMU_OK)
+    if (result != GA10B_PMU_OK) {
         return fail(pmu, result);
+    }
     return GA10B_PMU_OK;
 }
 
 int ga10b_pmu_lsfm_init_wpr_region(struct ga10b_pmu *pmu, uint32_t timeout_ms)
 {
-    if (pmu == nullptr)
+    if (pmu == nullptr) {
         return GA10B_PMU_ERR_ARG;
+    }
     struct ga10b_pmu_rpc_acr_init_wpr_region rpc;
     memset(&rpc, 0, sizeof(rpc));
     rpc.wpr_region_id = 0x1u;      /* lsfm_sw_gv100.c:47 */
@@ -863,12 +943,14 @@ int ga10b_pmu_lsfm_init_wpr_region(struct ga10b_pmu *pmu, uint32_t timeout_ms)
     rpc.hdr.flags = 0;
     int seq = ga10b_pmu_rpc_post(pmu, &rpc,
                                  (uint16_t)(sizeof(rpc) - sizeof(rpc.scratch)), 0);
-    if (seq < 0)
+    if (seq < 0) {
         return seq;
+    }
     delay_us(pmu, WPR_REGION_SETTLE_MS * 1000u);
     int err = ga10b_pmu_rpc_wait(pmu, seq, nullptr, timeout_ms);
-    if (err != GA10B_PMU_OK)
+    if (err != GA10B_PMU_OK) {
         return err;
+    }
     return pmu->wpr_init_done ? GA10B_PMU_OK : fail(pmu, GA10B_PMU_ERR_PROTO);
 }
 
@@ -876,8 +958,9 @@ int ga10b_pmu_lsfm_bootstrap_gr_falcons(struct ga10b_pmu *pmu, uint32_t falcon_i
                                         uint32_t timeout_ms)
 {
     const uint32_t ok = (1u << 2) | (1u << 3);   /* FALCON_ID_FECS, FALCON_ID_GPCCS */
-    if (pmu == nullptr || falcon_id_mask == 0u || (falcon_id_mask & ~ok) != 0u)
+    if (pmu == nullptr || falcon_id_mask == 0u || (falcon_id_mask & ~ok) != 0u) {
         return GA10B_PMU_ERR_ARG;
+    }
     pmu->falcons_loaded = false;                  /* lsfm->loaded_falcon_id = 0 */
     struct ga10b_pmu_rpc_acr_bootstrap_gr_falcons rpc;
     memset(&rpc, 0, sizeof(rpc));
@@ -887,27 +970,32 @@ int ga10b_pmu_lsfm_bootstrap_gr_falcons(struct ga10b_pmu *pmu, uint32_t falcon_i
     rpc.hdr.function = GA10B_PMU_RPC_ID_ACR_BOOTSTRAP_GR_FALCONS;
     int seq = ga10b_pmu_rpc_post(pmu, &rpc,
                                  (uint16_t)(sizeof(rpc) - sizeof(rpc.scratch)), 0);
-    if (seq < 0)
+    if (seq < 0) {
         return seq;
+    }
     delay_us(pmu, BOOTSTRAP_SETTLE_MS * 1000u);
     int err = ga10b_pmu_rpc_wait(pmu, seq, nullptr, timeout_ms);
-    if (err != GA10B_PMU_OK)
+    if (err != GA10B_PMU_OK) {
         return err;
+    }
     return pmu->falcons_loaded ? GA10B_PMU_OK : fail(pmu, GA10B_PMU_ERR_PROTO);
 }
 
 int ga10b_pmu_bootstrap_ctxsw_falcons(struct ga10b_pmu *pmu, uint32_t timeout_ms)
 {
-    if (pmu == nullptr)
+    if (pmu == nullptr) {
         return GA10B_PMU_ERR_ARG;
+    }
     int err;
     if (!pmu->wpr_init_done) {
         err = ga10b_pmu_wait_init(pmu, timeout_ms);   /* nvgpu_pmu_wait_fw_ready */
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
+        }
         err = ga10b_pmu_lsfm_init_wpr_region(pmu, timeout_ms);
-        if (err != GA10B_PMU_OK)
+        if (err != GA10B_PMU_OK) {
             return err;
+        }
     }
     return ga10b_pmu_lsfm_bootstrap_gr_falcons(pmu, (1u << 2) | (1u << 3), timeout_ms);
 }

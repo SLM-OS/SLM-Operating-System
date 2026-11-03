@@ -29,14 +29,14 @@
 
     .global mnist_onnx_start
     .global mnist_onnx_end
-    .align 4
+    .balign 16
 mnist_onnx_start:
     .incbin xstr(MNIST_ONNX_PATH)
 mnist_onnx_end:
 
     .global mnist_input_synth_start
     .global mnist_input_synth_end
-    .align 4
+    .balign 16
 mnist_input_synth_start:
     .incbin xstr(MNIST_INPUT_SYNTH_PATH)
 mnist_input_synth_end:

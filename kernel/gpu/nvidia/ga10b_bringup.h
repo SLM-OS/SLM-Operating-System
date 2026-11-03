@@ -204,6 +204,14 @@ struct ga10b_bringup *ga10b_bringup_state(void);
 int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
                                   const struct ga10b_channel_handoff *h);
 
+/* ga10b_bringup_install_handoff under the GPU dispatch lock, so a
+ * dispatch on another CPU never sees a half-copied handoff or a reset
+ * QMD-pool cursor. Use this from anything that can run after boot (the
+ * cold bring-up steps are re-runnable from the shell). Defined in
+ * kernel/src/slm_ffi.c, which owns the lock. */
+int slm_gpu_install_handoff(struct ga10b_bringup *b,
+                            const struct ga10b_channel_handoff *h);
+
 /* True when the active handoff came from ga10b_bringup_install_handoff
  * (a channel SLM-OS built), false for none or a Linux helper's. Lets
  * slm_ffi.c's ensure_bringup use the installed channel instead of
