@@ -21,16 +21,75 @@ typedef uint64_t efi_status_t;
 #define EFI_SUCCESS             0
 #define EFI_BUFFER_TOO_SMALL    5
 #define EFI_INVALID_PARAMETER   2
+#define EFI_ERROR_BIT           (1ULL << 63)
+#define EFI_LOAD_ERROR          (EFI_ERROR_BIT | 1)
 
 /* EFI handles and pointers */
 typedef void *efi_handle_t;
 typedef uint64_t efi_phys_addr_t;
 
-/* EFI memory types (for AllocatePool) */
-#define EFI_LOADER_DATA         2
+#define EFI_PAGE_SIZE           4096ULL
 
-/* EFI memory descriptor types (from GetMemoryMap) */
-#define EFI_CONVENTIONAL_MEMORY 7
+/*
+ * EFI_MEMORY_TYPE values (UEFI spec v2.10 §7.2, Table 7-5). Used both
+ * as the AllocatePool pool type and as the descriptor type returned by
+ * GetMemoryMap.
+ */
+#define EFI_RESERVED_MEMORY_TYPE    0
+#define EFI_LOADER_CODE             1
+#define EFI_LOADER_DATA             2
+#define EFI_BOOT_SERVICES_CODE      3
+#define EFI_BOOT_SERVICES_DATA      4
+#define EFI_RUNTIME_SERVICES_CODE   5
+#define EFI_RUNTIME_SERVICES_DATA   6
+#define EFI_CONVENTIONAL_MEMORY     7
+#define EFI_UNUSABLE_MEMORY         8
+#define EFI_ACPI_RECLAIM_MEMORY     9
+#define EFI_ACPI_MEMORY_NVS         10
+#define EFI_MEMORY_MAPPED_IO        11
+#define EFI_MEMORY_MAPPED_IO_PORT   12
+#define EFI_PAL_CODE                13
+#define EFI_PERSISTENT_MEMORY       14
+
+/*
+ * True for memory types that belong to the OS once ExitBootServices
+ * succeeds (UEFI spec v2.10 §7.4.6: "the OS loader owns all available
+ * memory in the system" — LoaderCode/Data, BootServicesCode/Data and
+ * ConventionalMemory). Everything else (runtime services, ACPI, MMIO,
+ * reserved) must survive the hand-off untouched.
+ */
+static inline bool efi_mem_type_free_after_ebs(uint32_t type)
+{
+    switch (type) {
+    case EFI_LOADER_CODE:
+    case EFI_LOADER_DATA:
+    case EFI_BOOT_SERVICES_CODE:
+    case EFI_BOOT_SERVICES_DATA:
+    case EFI_CONVENTIONAL_MEMORY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Return value efi_stub_entry() uses to tell boot.S "abort before
+ * ExitBootServices and return to the firmware". NULL is a legitimate
+ * "no DTB found" result, so the abort marker must be distinct from it
+ * and can never be a real (page-aligned, in-RAM) DTB address.
+ */
+#define EFI_STUB_ABORT          ((void *)~0UL)
+
+/* Outcome of efi_check_relocation(). */
+typedef enum {
+    EFI_RELOC_OK = 0,          /* dst is free after EBS — copy there */
+    EFI_RELOC_NOT_NEEDED,      /* already loaded at the link address */
+    EFI_RELOC_OVERLAP,         /* src and dst overlap (unsupported) */
+    EFI_RELOC_FDT_IN_DEST,     /* the DTB lives inside dst */
+    EFI_RELOC_DEST_BUSY,       /* dst holds firmware-owned memory */
+    EFI_RELOC_DEST_NOT_RAM,    /* part of dst is not in the map */
+    EFI_RELOC_BAD_MAP,         /* descriptor size smaller than spec */
+} efi_reloc_verdict_t;
 
 /* EFI_GUID — 16-byte globally unique identifier */
 typedef struct {
@@ -219,5 +278,16 @@ static inline bool efi_guid_eq(const efi_guid_t *a, const efi_guid_t *b)
     const uint64_t *pb = (const uint64_t *)b;
     return pa[0] == pb[0] && pa[1] == pb[1];
 }
+
+/*
+ * Forward declaration — the descriptor type is defined above. See
+ * efi_stub.c for the rules. Pure function; safe to call from tests.
+ */
+efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
+                                         uint64_t map_size,
+                                         uint64_t desc_size,
+                                         uint64_t src, uint64_t dst,
+                                         uint64_t size,
+                                         uint64_t fdt, uint64_t fdt_size);
 
 #endif /* EFI_H */

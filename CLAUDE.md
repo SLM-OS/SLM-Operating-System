@@ -218,7 +218,7 @@ make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 **UART LSR Read After Kexec (Solved):** After kexec, reading UARTC LSR (Line Status Register) without a DSB barrier returns stale data due to speculative MMIO access, causing TX FIFO overruns and garbled serial output. **Fix:** `uart_tegra.c` issues `dsb sy` before each LSR read.
 
-**CPU Cluster 1 Slow After Kexec (Solved, #1053):** Linux's kexec offlines every CPU but CPU 0, and an offlined core's NDIV (CPU PLL multiplier) drops to the 115.2 MHz floor. A Tegra234 cluster runs at its highest core's request, so cluster 0 keeps CPU 0's frequency while cluster 1 (CPUs 4-5) stayed at 115.2 MHz, ~12x slower. **Fix:** `tegra234_cpufreq_sync_to_boot_cpu()` (`kernel/drivers/tegra_cpufreq.c`, called from `smp_init`) raises every core to CPU 0's NDIV. The registers are at `0x0E002000 + 8 * (cluster * 4 + MPIDR.Aff1)`, 12.8 MHz per NDIV step. **Only touch those `id * 8` words: the `+4` words in between are unbacked, and reading one SErrors into EL3 ("Unhandled Exception in EL3"), which stops the board.** The target is CPU 0's frequency when kexec fires, so `slmos-kexec` pins every cpufreq policy's `scaling_min_freq` to `scaling_max_freq` first (step [8.6/9], skip with `--no-cpufreq-pin`); on jetson-nano-2 that is 1344 MHz (NDIV 105) on every boot. Without the pin it varied with the governor (seen: 729/1036/1344 MHz). The `cpu` shell command prints each core's NDIV/MHz.
+**CPU Cluster 1 Slow After Kexec (Solved, #1053; UEFI case #26):** Linux's kexec offlines every CPU but CPU 0, and an offlined core's NDIV (CPU PLL multiplier) drops to the 115.2 MHz floor. A Tegra234 cluster runs at its highest core's request, so cluster 0 keeps CPU 0's frequency while cluster 1 (CPUs 4-5) stayed at 115.2 MHz, ~12x slower. **Fix:** `tegra234_cpufreq_sync_to_boot_cpu()` (`kernel/drivers/tegra_cpufreq.c`, called from `smp_init`) moves every core to CPU 0's NDIV — up after kexec, and down after UEFI-direct boot, where PSCI-booted cores request NDIV 157 (2009 MHz, above the table). The registers are at `0x0E002000 + 8 * (cluster * 4 + MPIDR.Aff1)`, 12.8 MHz per NDIV step. **Only touch those `id * 8` words: the `+4` words in between are unbacked, and reading one SErrors into EL3 ("Unhandled Exception in EL3"), which stops the board.** The target is CPU 0's frequency when kexec fires, so `slmos-kexec` pins every cpufreq policy's `scaling_min_freq` to `scaling_max_freq` first (step [8.6/9], skip with `--no-cpufreq-pin`); on jetson-nano-2 that is 1344 MHz (NDIV 105) on every boot. Without the pin it varied with the governor (seen: 729/1036/1344 MHz). The `cpu` shell command prints each core's NDIV/MHz.
 
 ### CBB Firewall — Partially Bypassed
 
@@ -248,10 +248,11 @@ stock-BL31 / production-fused boards. Hardware verification:
 `boot_test --count 10` 10/10 on jetson-nano-2 (2026-05-09). See
 `docs/fact-sheets/preemption.md`.
 
-**UEFI direct boot (WIP, not required for SMP):**
-- EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`
-- PE/COFF loads when UEFI uses preferred address (ImageBase=0x80000000)
-- Blocked when UEFI can't use preferred address (no `.reloc` section for PE relocation)
+**UEFI direct boot (working, #26):** `make kernel PLATFORM=JETSON_ORIN_NANO` + `scripts/jetson-uefi-deploy.sh <ip>` boots `slmos.bin` from the NVMe ESP on jetson-nano-2 (one-shot BootNext; a power cycle returns to SD Linux). Full guide: `docs/deploy/jetson-uefi-direct.md`.
+- UEFI loads the PE image anywhere (never at `0x80000000`); `efi_stub_entry` checks the UEFI memory map, runs ExitBootServices, cleans by VA, and `boot.S` turns the MMU off and copies the image to the link address. An unsafe destination returns `EFI_LOAD_ERROR` to the firmware instead of hanging.
+- **Never use set/way cache maintenance or touch the stack after the MMU goes off on this path** — set/way does not reach the PoC; that was the old "RAS error in IOB" blocker. The RAS `ADDR` field shows PA bit 31 as bit 63.
+- Drivers that need Linux-initialised hardware must check `boot_source_is_uefi()` (`kernel/include/boot_source.h`) before touching MMIO: an unpowered block raises "Unhandled Exception in EL3". BPMP `MRQ_PG`/`MRQ_CLK` state queries can't replace it — they read "off" even for XUSB that Linux left running. USB/network and GPU compute are unavailable after a UEFI-direct boot.
+- Host checks: `make test-qemu-uefi` (QEMU AArch64 UEFI, in place + forced relocation), `make test-jetson-uefi-layout`.
 
 **Documentation:** `docs/archive/investigations/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
 
@@ -442,4 +443,4 @@ gh issue list --search "MPIDR"
 
 ---
 
-*Last updated: 9 May 2026*
+*Last updated: 3 November 2026*

@@ -38,6 +38,7 @@
 #include "littlefs_vfs.h"
 #include "blob_autoload.h"
 #include "boot_media.h"
+#include "boot_source.h"
 #include "help.h"
 #include "oplib_pool.h"
 #include "rng.h"
@@ -106,6 +107,11 @@ static void main_task_func(void *arg)
     /* Shell mode - shell task handles everything, just exit */
     task_exit();
 }
+
+/* See boot_source.h. The non-zero initialiser keeps it in .data, so
+ * the value efi_stub_entry() writes survives the relocation and the
+ * BSS clear in boot.S. */
+volatile uint32_t slmos_boot_source = BOOT_SOURCE_DIRECT;
 
 /*
  * kernel_main - Main kernel entry point
@@ -278,6 +284,8 @@ void kernel_main(void *dtb)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
+    INFO("Boot source: %s",
+         boot_source_is_uefi() ? "UEFI-direct (EFI stub)" : "direct load");
 #if defined(PLATFORM_X86_64)
     INFO("Running in Ring 0 on %s", PLATFORM_NAME);
 #else

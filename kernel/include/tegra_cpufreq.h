@@ -18,6 +18,13 @@
  * (CPUs 4-5, MPIDR 0x10200/0x10300) has no core left above the floor
  * and runs ~12x slower than CPUs 0-3 after kexec.
  *
+ * UEFI-direct boot (#26) shows the opposite skew: UEFI firmware 36.4.7
+ * leaves CPU 0 at NDIV 135 (1728 MHz, the top of the Orin Nano table)
+ * while cores brought up with PSCI CPU_ON request NDIV 157 (2009 MHz),
+ * above anything Linux's cpufreq table offers. Since a cluster runs at
+ * its highest core's request, the sync therefore moves every core to
+ * CPU 0's NDIV in either direction.
+ *
  * Only the 32-bit word at each id * 8 offset is a real register. The
  * words in between (e.g. +0x2004) are not backed: reading one raises an
  * SError that BL31 reports as "Unhandled Exception in EL3" and the
@@ -59,14 +66,23 @@ uint32_t tegra234_ndiv_to_khz(uint32_t ndiv);
  */
 uint32_t tegra234_cpufreq_sync_target(uint32_t boot_ndiv);
 
+/*
+ * NDIV to write to a core whose register currently reads `cur_ndiv`,
+ * given the sync target from tegra234_cpufreq_sync_target(), or 0 to
+ * leave the core alone (no target, or already there). Moves the core
+ * up (kexec: offlined core at the floor) or down (UEFI: PSCI-booted
+ * core above the table ceiling) to the target.
+ */
+uint32_t tegra234_cpufreq_sync_core(uint32_t cur_ndiv, uint32_t target);
+
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 /* Current NDIV of logical CPU `cpu`, or 0 if it has no valid register. */
 uint32_t tegra234_cpufreq_get_ndiv(uint32_t cpu);
 
 /*
- * Raise every present core whose NDIV is below the boot CPU's to the
- * boot CPU's NDIV (#1053). Call after the secondaries are online.
- * Returns the number of cores whose NDIV was raised.
+ * Move every present core's NDIV to the boot CPU's (#1053 raises it
+ * after kexec, #26 lowers it after UEFI-direct boot). Call after the
+ * secondaries are online. Returns the number of cores changed.
  */
 uint32_t tegra234_cpufreq_sync_to_boot_cpu(void);
 #endif

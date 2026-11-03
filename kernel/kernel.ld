@@ -79,13 +79,17 @@ SECTIONS
      * DATA SEGMENT (RW) - Initialized and uninitialized data
      * ================================================================ */
 
-    /* Page-align segment boundary for kexec compatibility */
-    . = ALIGN(4096);
-
-    /* Initialized data */
-    .data : {
+    /* Initialized data — aligned to the PE SectionAlignment (64 KB) so
+     * the PE .data section starts on a section boundary. UEFI firmware
+     * applies W^X per PE section (`make test-qemu-uefi` boots this image
+     * under QEMU's AArch64 UEFI): with .data at a 4 KB boundary its
+     * first page was still mapped read-only with .text and the first
+     * .data store faulted. Also satisfies kexec page alignment. */
+    .data ALIGN(0x10000) : {
         __data_start = .;
         *(.data .data.*)
+        /* Pad to PE FileAlignment (512 bytes) for SizeOfRawData */
+        . = ALIGN(0x200);
         __data_end = .;
     } > RAM :data
 
@@ -113,8 +117,8 @@ SECTIONS
         __stack_top = .;
     } > RAM :data
 
-    /* End of kernel image */
-    . = ALIGN(4096);            /* Page-align end for clean memory layout */
+    /* End of kernel image — aligned to SectionAlignment for PE SizeOfImage */
+    . = ALIGN(0x10000);
     __kernel_end = .;
 
     /* Kernel virtual size (includes BSS) for PE SizeOfImage */
@@ -135,11 +139,9 @@ SECTIONS
     /* PE .data section symbols (used by PE/COFF header in boot.S).
      * `_kernel_data_virtual_size` covers through __kernel_end so UEFI
      * zero-fills the BSS region when mapping .data, which in turn
-     * makes UEFI map that range RW-NX — boot.S's BSS clear then
-     * doesn't fault against UEFI's W^X policy. The PE header in
-     * boot.S is inert under QEMU (QEMU loads the raw ELF directly
-     * and doesn't parse the MZ/PE stub), but the symbol still has
-     * to resolve at link time. */
+     * makes UEFI map that range RW-NX. `make test` loads the raw ELF
+     * and ignores the PE header; `make test-qemu-uefi` boots
+     * slmos.bin through QEMU's UEFI firmware, which parses it. */
     _kernel_data_va = __data_start - _start;
     _kernel_data_size = __data_end - __data_start;
     _kernel_data_file = __data_start - _start;
@@ -153,19 +155,25 @@ SECTIONS
     }
 }
 
-/* PE/COFF section non-overlap invariant.
- *
- * The PE header boot.S emits is inert under QEMU (QEMU loads the raw
- * ELF and ignores the MZ/PE stub), so the PE alignment invariants
- * Jetson cares about (SectionAlignment, FileAlignment, SizeOfImage)
- * don't need to hold here — QEMU's linker aligns .data to 4KB, not
- * 64KB, and the PE header just absorbs that. But .text and .data
- * must not describe overlapping VA ranges regardless of whether the
- * header is consumed, otherwise `_kernel_code_size` is wrong in a
- * structural way. Would catch a regression of the `__data_end` vs.
- * `__data_start` bug that this file used to have. */
+/* PE/COFF invariants (SectionAlignment=0x10000, FileAlignment=0x200),
+ * same as kernel-jetson.ld. The PE header boot.S emits is consumed by
+ * real UEFI firmware in `make test-qemu-uefi`, so it must be valid PE,
+ * not just link. */
+ASSERT((__data_start - _start) % 0x10000 == 0,
+    "PE error: .data VA not aligned to SectionAlignment (64KB)")
+ASSERT((__data_end - __data_start) % 0x200 == 0,
+    "PE error: .data SizeOfRawData not aligned to FileAlignment (512)")
+ASSERT(_kernel_code_size % 0x200 == 0,
+    "PE error: .text SizeOfRawData not aligned to FileAlignment (512)")
+ASSERT(_kernel_size % 0x10000 == 0,
+    "PE error: SizeOfImage not aligned to SectionAlignment (64KB)")
+/* .text and .data must not describe overlapping VA ranges. Would catch
+ * a regression of the `__data_end` vs `__data_start` bug this file
+ * used to have in `_kernel_code_size`. */
 ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
     "PE error: .text and .data sections overlap")
+ASSERT(_kernel_data_va + _kernel_data_virtual_size == _kernel_size,
+    "PE error: .data end VA != SizeOfImage (layout inconsistency)")
 
 /* Sanity check: 32 MB ceiling. The original 16 MB ceiling
  * (0x41000000) was a defensive cap chosen long before the AI

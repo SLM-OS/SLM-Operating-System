@@ -1134,6 +1134,8 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coop_preempt.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_cpu_supervisor.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
+    # UEFI-direct relocation decision (#26) — same platforms as efi_stub.c
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_efi_reloc.c>
     kernel/tests/test_tegra_cpufreq.c
 )
 

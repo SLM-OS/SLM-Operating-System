@@ -53,6 +53,7 @@
 #include "timer.h"
 #include "spinlock.h"   /* dsb()/dmb() cross-platform barrier macros */
 #include "smp.h"
+#include "boot_source.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1929,6 +1930,21 @@ int xhci_init(void)
     xhci_cap_base  = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_HCD_BASE;
     xhci_fpci_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_FPCI_BASE;
     xhci_bar2_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_BAR2_BASE;
+
+    /*
+     * After UEFI-direct boot (#26) nothing has powered or clocked XUSB
+     * — the driver depends on Linux having brought the controller and
+     * its falcon firmware up before kexec. The first aperture read is
+     * then answered with an external abort that BL31 reports as
+     * "Unhandled Exception in EL3", stopping the board, so don't touch
+     * the hardware at all. See boot_source.h for why BPMP can't be
+     * asked instead.
+     */
+    if (boot_source_is_uefi()) {
+        WARN("xhci: UEFI-direct boot — XUSB not initialised by Linux, "
+             "skipping USB host");
+        return -1;
+    }
 
     /* Sanity check: if the clocks aren't held, CAPLENGTH reads as
      * 0xFF (low byte of 0xFFFFFFFF). Bail early with a clear

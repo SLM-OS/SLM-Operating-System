@@ -508,6 +508,11 @@ The `ccmp x18, #0, #0xd, pl` instruction encodes to bytes `4D 5A 40 FA`, providi
 - Valid ARM64 instruction (harmless conditional compare)
 - "MZ" signature at offset 0 for PE/COFF recognition
 
+The PE ImageBase is the link address of `_start`. Firmware that cannot
+load the image there (Jetson UEFI never can) loads it elsewhere; the EFI
+stub then copies it to the link address after ExitBootServices
+(`docs/deploy/jetson-uefi-direct.md`).
+
 ### Serial Console
 
 | Aspect | QEMU | Jetson Orin Nano |

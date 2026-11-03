@@ -1,6 +1,6 @@
 # Deploying SLM-OS to Jetson Orin Nano — kexec from Linux
 
-This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs — the UEFI-direct cold-boot path is still WIP (see `docs/archive/investigations/jetson-uefi-direct-result.md` for blockers).
+This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs for USB networking, GPU compute channels and the camera. The UEFI-direct cold-boot path ([`jetson-uefi-direct.md`](jetson-uefi-direct.md)) boots to the shell without Linux but without that inherited state.
 
 The kexec-from-Linux flow is identical whether the Linux install lives on the microSD card or an NVMe SSD. [First-time provisioning](#first-time-provisioning-dual-media-layout) describes the recommended lab layout (NVMe development install plus microSD recovery install) and what each needs. SLM-OS itself never gets a partition: it is a file in the Linux root filesystem.
 
@@ -12,7 +12,7 @@ The kexec-from-Linux flow is identical whether the Linux install lives on the mi
 |---|---|
 | Jetson with L4T already installed | This guide |
 | Fresh Jetson, or reinstalling a lab board | [First-time provisioning](#first-time-provisioning-dual-media-layout) below, then the rest of this guide |
-| Jetson cold-boot directly to SLM-OS (no Linux in the chain) | **Not yet working** — `docs/archive/investigations/jetson-uefi-direct-result.md` |
+| Jetson cold-boot directly to SLM-OS (no Linux in the chain) | [`jetson-uefi-direct.md`](jetson-uefi-direct.md) |
 
 ---
 
@@ -27,7 +27,9 @@ the boot media itself: it has no SD or NVMe driver on Jetson
 (`docs/fact-sheets/storage.md`), and its `/mnt/files` is a RAM-disk
 LittleFS (`docs/setup.md` §"Jetson SD-Card Layout"). Provisioning a
 Jetson for SLM-OS therefore means provisioning a Linux install with the
-SLM-OS extras listed below. No disk carries an "SLM-OS partition".
+SLM-OS extras listed below. No disk carries an "SLM-OS partition" for
+the kexec flow (the UEFI-direct flow adds one: see
+[`jetson-uefi-direct.md`](jetson-uefi-direct.md#one-time-board-setup)).
 
 This is also why the Jetson development loop needs neither an SDWire
 nor moving the SD card between the board and the host. Each new build

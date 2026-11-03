@@ -3,22 +3,23 @@
  *
  * Handles the EFI boot protocol when SLM-OS is launched directly by UEFI
  * as a PE/COFF EFI application. Extracts the DTB from the EFI configuration
- * table, calls ExitBootServices to take over the machine, then disables the
- * MMU and returns the DTB pointer to boot.S.
+ * table, checks that the kernel can be relocated to its link address,
+ * calls ExitBootServices to take over the machine, cleans the relevant
+ * ranges to the PoC and returns the DTB pointer to boot.S (which turns
+ * the MMU off, relocates and continues the normal boot).
  *
  * This code runs on UEFI's stack before ExitBootServices. After
  * ExitBootServices, the UEFI stack memory may be freed but remains
  * physically intact (no concurrent writers with interrupts masked).
  *
  * Entry: called from boot.S with x0=EFI_HANDLE, x1=EFI_SYSTEM_TABLE*
- * Exit:  returns DTB pointer (or NULL), MMU disabled, caches cleaned
+ * Exit:  returns DTB pointer (or NULL), MMU still on, ranges cleaned;
+ *        or EFI_STUB_ABORT before ExitBootServices.
  */
 
 #include "efi.h"
+#include "boot_source.h"
 #include <stddef.h>
-
-/* Forward declaration for MMU disable (assembly in boot.S or mmu.S) */
-static void efi_disable_mmu(void);
 
 /*
  * Trace helper — prints a UTF-16 literal via UEFI's ConOut protocol.
@@ -103,16 +104,123 @@ static void *efi_find_fdt(efi_system_table_t *sys_table)
 }
 
 /*
- * Call ExitBootServices with retry.
- *
- * ExitBootServices requires the map_key from the most recent GetMemoryMap.
- * If the memory map changes between the two calls (e.g., due to the
- * GetMemoryMap allocation itself), ExitBootServices returns
- * EFI_INVALID_PARAMETER. In that case, re-call GetMemoryMap into the
- * existing buffer (no new allocations!) and retry once.
+ * Format `value` as `digits` upper-case hex characters into `buf`.
+ * Returns the number of characters written (== digits).
  */
-static efi_status_t efi_exit_boot(efi_handle_t handle,
-                                   efi_boot_services_t *bs)
+static int efi_fmt_hex(efi_char16_t *buf, uint64_t value, int digits)
+{
+    static const efi_char16_t hex_digits[] = u"0123456789ABCDEF";
+    for (int i = 0; i < digits; i++) {
+        unsigned nibble = (value >> (4 * (digits - 1 - i))) & 0xF;
+        buf[i] = hex_digits[nibble];
+    }
+    return digits;
+}
+
+/*
+ * Print one memory descriptor as
+ *   "[slmos]  mm tt 0x<start 16> +0x<pages 8> <tag>\r\n"
+ * `tag` is a short UTF-16 note (may be empty).
+ */
+static void efi_print_desc(efi_system_table_t *sys_table,
+                           const efi_memory_desc_t *d,
+                           const efi_char16_t *tag)
+{
+    efi_char16_t buf[96];
+    static const efi_char16_t prefix[] = u"[slmos]  mm ";
+    int n = 0;
+
+    for (int i = 0; prefix[i] != 0; i++)
+        buf[n++] = prefix[i];
+    n += efi_fmt_hex(&buf[n], d->type, 2);
+    buf[n++] = ' ';
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    n += efi_fmt_hex(&buf[n], d->phys_start, 16);
+    buf[n++] = ' ';
+    buf[n++] = '+';
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    n += efi_fmt_hex(&buf[n], d->num_pages, 8);
+    buf[n++] = ' ';
+    for (int i = 0; tag[i] != 0 && n < 92; i++)
+        buf[n++] = tag[i];
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+    buf[n] = 0;
+    efi_print(sys_table, buf);
+}
+
+static inline bool efi_ranges_overlap(uint64_t a, uint64_t a_len,
+                                      uint64_t b, uint64_t b_len)
+{
+    return a < b + b_len && b < a + a_len;
+}
+
+/*
+ * Pure helper: decide whether the kernel can be relocated from where
+ * UEFI loaded it (`src`) to its link address (`dst`) after
+ * ExitBootServices. Shared with the host-side unit test, so it takes
+ * the descriptor array explicitly and prints nothing.
+ *
+ * Rules:
+ *   - src == dst: nothing to copy, always OK.
+ *   - src and dst ranges must not overlap. The copy loop runs from the
+ *     source image, so an overlapping forward copy could overwrite the
+ *     instructions doing the copy.
+ *   - every page of dst must be described by the map (no holes — a
+ *     hole is not RAM) and every descriptor touching dst must be a
+ *     type the OS owns after EBS (efi_mem_type_free_after_ebs).
+ *   - the DTB, when known, must not sit inside dst: the copy would
+ *     overwrite it before kernel_main parses it.
+ */
+efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
+                                         uint64_t map_size,
+                                         uint64_t desc_size,
+                                         uint64_t src, uint64_t dst,
+                                         uint64_t size,
+                                         uint64_t fdt, uint64_t fdt_size)
+{
+    if (src == dst)
+        return EFI_RELOC_NOT_NEEDED;
+    if (efi_ranges_overlap(src, size, dst, size))
+        return EFI_RELOC_OVERLAP;
+    if (fdt != 0 && efi_ranges_overlap(fdt, fdt_size ? fdt_size : 1,
+                                       dst, size))
+        return EFI_RELOC_FDT_IN_DEST;
+    if (desc_size < sizeof(efi_memory_desc_t))
+        return EFI_RELOC_BAD_MAP;
+
+    uint64_t covered = 0;
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        const efi_memory_desc_t *d =
+            (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        uint64_t len = d->num_pages * EFI_PAGE_SIZE;
+        if (!efi_ranges_overlap(d->phys_start, len, dst, size))
+            continue;
+        if (!efi_mem_type_free_after_ebs(d->type))
+            return EFI_RELOC_DEST_BUSY;
+        uint64_t lo = d->phys_start > dst ? d->phys_start : dst;
+        uint64_t hi_d = d->phys_start + len;
+        uint64_t hi = hi_d < dst + size ? hi_d : dst + size;
+        covered += hi - lo;
+    }
+    if (covered < size)
+        return EFI_RELOC_DEST_NOT_RAM;
+    return EFI_RELOC_OK;
+}
+
+/*
+ * Read the UEFI memory map into a freshly allocated pool buffer with
+ * slack for later re-reads (the allocation itself, and anything the
+ * firmware does while we print, can grow the map).
+ */
+static efi_status_t efi_read_map(efi_boot_services_t *bs,
+                                 efi_memory_desc_t **map_out,
+                                 uint64_t *buf_size_out,
+                                 uint64_t *map_size_out,
+                                 uint64_t *map_key_out,
+                                 uint64_t *desc_size_out)
 {
     efi_status_t status;
     uint64_t map_size = 0;
@@ -121,30 +229,22 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
     uint32_t desc_version = 0;
     efi_memory_desc_t *map = NULL;
 
-    /* First call: get required buffer size */
-    status = bs->get_memory_map(&map_size, NULL, &map_key,
-                                &desc_size, &desc_version);
-    /* Expected: EFI_BUFFER_TOO_SMALL, map_size now has required size.
-     * UEFI conformant firmware populates desc_size on the size-only
-     * call, but defend against a non-conformant implementation that
-     * leaves desc_size = 0 — `map_size += 0 * 8` would skip the
-     * slack and the second call could fail under map churn. Use a
-     * minimum descriptor stride large enough to match any plausible
-     * EFI memory descriptor (the spec-mandated minimum is 40 bytes
-     * for revision 1, but firmware may extend it). */
-    if (desc_size == 0) {
+    /* First call: get required buffer size. Expected result is
+     * EFI_BUFFER_TOO_SMALL with map_size filled in. Conformant firmware
+     * also fills desc_size; defend against one that leaves it 0 so the
+     * slack below is never zero. */
+    (void)bs->get_memory_map(&map_size, NULL, &map_key,
+                             &desc_size, &desc_version);
+    if (desc_size == 0)
         desc_size = sizeof(efi_memory_desc_t);
-    }
-    /* Add slack for the AllocatePool call itself changing the map */
-    map_size += desc_size * 8;
+    /* Slack for the AllocatePool call itself and later map churn. */
+    map_size += desc_size * 16;
 
-    /* Allocate buffer */
     status = bs->allocate_pool(EFI_LOADER_DATA, map_size, (void **)&map);
-    if (status != EFI_SUCCESS) {
+    if (status != EFI_SUCCESS)
         return status;
-    }
 
-    /* Second call: populate the buffer */
+    uint64_t buf_size = map_size;
     status = bs->get_memory_map(&map_size, map, &map_key,
                                 &desc_size, &desc_version);
     if (status != EFI_SUCCESS) {
@@ -152,223 +252,224 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
         return status;
     }
 
-    /* Exit boot services */
-    status = bs->exit_boot_services(handle, map_key);
+    *map_out = map;
+    *buf_size_out = buf_size;
+    *map_size_out = map_size;
+    *map_key_out = map_key;
+    *desc_size_out = desc_size;
+    return EFI_SUCCESS;
+}
 
-    if (status != EFI_SUCCESS) {
-        /*
-         * Map key was stale. Re-call GetMemoryMap into the SAME buffer
-         * (no new allocations allowed after failed ExitBootServices).
-         *
-         * NOTE: cannot TRACE() from here — `efi_exit_boot` doesn't have
-         * sys_table in scope; the caller will observe the retry branch
-         * through the status this function returns.
-         */
+/*
+ * Call ExitBootServices with retry.
+ *
+ * ExitBootServices requires the map_key from the most recent
+ * GetMemoryMap. The map is re-read into the existing buffer (no new
+ * allocations — the buffer was sized with slack by efi_read_map)
+ * immediately before each attempt, since anything done between the
+ * caller's own GetMemoryMap and here (ConOut prints included) may have
+ * changed it. Per UEFI §7.4.6, after a failed EBS only GetMemoryMap may
+ * be called before retrying.
+ */
+static efi_status_t efi_exit_boot(efi_handle_t handle,
+                                  efi_boot_services_t *bs,
+                                  efi_memory_desc_t *map,
+                                  uint64_t buf_size)
+{
+    efi_status_t status = EFI_INVALID_PARAMETER;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        uint64_t map_size = buf_size;
+        uint64_t map_key = 0;
+        uint64_t desc_size = 0;
+        uint32_t desc_version = 0;
+
         status = bs->get_memory_map(&map_size, map, &map_key,
                                     &desc_size, &desc_version);
-        if (status != EFI_SUCCESS) {
+        if (status != EFI_SUCCESS)
             return status;
-        }
-
         status = bs->exit_boot_services(handle, map_key);
+        if (status == EFI_SUCCESS)
+            break;
     }
 
-    /* After ExitBootServices: boot services are gone, we own the machine.
-     * Don't call free_pool or any other boot service from here. */
+    /* After a successful ExitBootServices boot services are gone and
+     * the OS owns the machine. Don't call free_pool or any other boot
+     * service from here. */
     return status;
 }
 
 /*
- * Disable MMU and clean caches.
+ * Clean and invalidate [start, start + len) to the Point of Coherency
+ * by virtual address (DC CIVAC), with UEFI's identity map still live.
  *
- * After ExitBootServices, UEFI's identity-mapped page tables are still
- * active. SLM-OS boot code expects MMU off. Disable it here so the
- * normal boot path works unchanged.
+ * Why by VA and not by set/way: boot.S turns the MMU and caches off
+ * right after efi_stub_entry returns, and everything it touches from
+ * then on (instruction fetch from the loaded image, the copy source
+ * and destination, the DTB) is read and written as Device memory that
+ * bypasses the caches. Those ranges must therefore be in DRAM, and no
+ * dirty line may be left that a later eviction could write back over
+ * the relocated kernel. DC CIVAC by VA is architecturally guaranteed
+ * to reach the PoC through every cache level, including system caches
+ * beyond the CPU cluster. Set/way maintenance is not: it only operates
+ * on the caches of the executing PE, and Arm's guidance (ARM ARM
+ * D7.5.9 "Performing cache maintenance instructions") is that it is
+ * not a means of pushing data to the PoC. The previous set/way-based
+ * efi_disable_mmu() then kept running C code (its own epilogue) with
+ * the MMU off, and the board faulted in exactly that window — TF-A
+ * reported "RAS Uncorrectable Error in IOB ... Error response from
+ * slave" (docs/deploy/jetson-uefi-direct.md, Findings 1-2).
  */
-static void efi_disable_mmu(void)
+static void efi_dcache_clean_inval(uint64_t start, uint64_t len)
 {
-    /* Clean and invalidate all data caches */
-    __asm__ volatile(
-        "dsb    sy\n"
-        "mrs    x0, clidr_el1\n"
-        "and    x3, x0, #0x7000000\n"   /* Get LoC (Level of Coherence) */
-        "lsr    x3, x3, #23\n"          /* Cache level value */
-        "cbz    x3, 5f\n"               /* If 0, no caches */
-        "mov    x10, #0\n"              /* Start with level 0 */
-    "1:\n"
-        "add    x2, x10, x10, lsr #1\n" /* x2 = 3*level */
-        "lsr    x1, x0, x2\n"
-        "and    x1, x1, #7\n"           /* Cache type for this level */
-        "cmp    x1, #2\n"
-        "b.lt   4f\n"                   /* Skip if no data cache */
-        "msr    csselr_el1, x10\n"      /* Select this cache level */
-        "isb\n"
-        "mrs    x1, ccsidr_el1\n"       /* Read cache size ID */
-        "and    x2, x1, #7\n"          /* Line size field */
-        "add    x2, x2, #4\n"          /* log2(line size in bytes) */
-        "ubfx   x4, x1, #3, #10\n"    /* Max way number */
-        "clz    w5, w4\n"              /* Bit position of way */
-        "ubfx   x7, x1, #13, #15\n"   /* Max set number */
-    "2:\n"
-        "mov    x9, x4\n"              /* Working copy of max way */
-    "3:\n"
-        "lsl    x6, x9, x5\n"
-        "orr    x11, x10, x6\n"        /* Combine set, way, level */
-        "lsl    x6, x7, x2\n"
-        "orr    x11, x11, x6\n"
-        "dc     cisw, x11\n"           /* Clean & invalidate by set/way */
-        "subs   x9, x9, #1\n"
-        "b.ge   3b\n"
-        "subs   x7, x7, #1\n"
-        "b.ge   2b\n"
-    "4:\n"
-        "add    x10, x10, #2\n"        /* Next cache level */
-        "cmp    x10, x3\n"
-        "b.lt   1b\n"
-    "5:\n"
-        "dsb    sy\n"
-        "isb\n"
-        ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6",
-            "x7", "x9", "x10", "x11", "memory"
-    );
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    /* CTR_EL0.DminLine [19:16] = log2(words) of the smallest D line. */
+    uint64_t line = 4ULL << ((ctr >> 16) & 0xF);
+    uint64_t end = start + len;
 
-    /* Invalidate instruction cache */
-    __asm__ volatile(
-        "ic     ialluis\n"
-        "dsb    ish\n"
-        "isb\n"
-        ::: "memory"
-    );
+    for (uint64_t a = start & ~(line - 1); a < end; a += line)
+        __asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+}
 
-    /* Disable MMU (read SCTLR, clear M/C/I bits, write back).
-     *
-     * SCTLR to write depends on the EL + VHE state we're running
-     * under. Three regimes matter:
-     *
-     *   (a) EL1 (no EL2 involvement):
-     *         active MMU control = SCTLR_EL1.
-     *         TLB  = tlbi vmalle1.
-     *   (b) EL2 with VHE on (HCR_EL2.E2H=1, e.g. kexec-from-Linux
-     *       where Linux already configured VHE):
-     *         SCTLR_EL1 is architecturally aliased to SCTLR_EL2.
-     *         tlbi vmalle1 invalidates EL2 TLB entries.
-     *   (c) EL2 with VHE off (HCR_EL2.E2H=0, e.g. UEFI-direct on
-     *       Jetson firmware v36.4.7 — see
-     *       docs/archive/investigations/jetson-uefi-direct-result.md §5c and P1 dump):
-     *         SCTLR_EL1 is a SEPARATE, dormant register. Writing
-     *         it here does NOT touch the active EL2 MMU — the
-     *         MMU stays ON. That is the latent bug that made the
-     *         subsequent `msr hcr_el2` in boot.S hang (flipping
-     *         E2H mid-flight with UEFI's translation active).
-     *         Correct target = SCTLR_EL2, TLB = tlbi alle2.
-     *
-     * Runtime branch on CurrentEL + HCR_EL2.E2H picks the right
-     * target. The inline asm uses a fall-through/branch idiom so
-     * each arm runs with its own SCTLR + TLBI sequence. */
-    {
-        uint64_t cur_el_raw;
-        uint64_t cur_el;
-        __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el_raw));
-        cur_el = (cur_el_raw >> 2) & 3;   /* 1=EL1, 2=EL2, 3=EL3 */
-
-        int use_el2 = 0;
-        if (cur_el == 2) {
-            uint64_t hcr;
-            __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr));
-            /* Treat E2H=0 as "EL2 non-VHE, must target SCTLR_EL2".
-             * E2H=1 means VHE is already on and SCTLR_EL1 aliases
-             * SCTLR_EL2, so the EL1-path sequence is correct. */
-            use_el2 = ((hcr >> 34) & 1) == 0;
-        }
-
-        if (use_el2) {
-            __asm__ volatile(
-                "mrs    x0, sctlr_el2\n"
-                "bic    x0, x0, #(1 << 0)\n"   /* M  */
-                "bic    x0, x0, #(1 << 2)\n"   /* C  */
-                "bic    x0, x0, #(1 << 12)\n"  /* I  */
-                "msr    sctlr_el2, x0\n"
-                "isb\n"
-                "tlbi   alle2\n"
-                "dsb    nsh\n"
-                "isb\n"
-                ::: "x0", "memory"
-            );
-        } else {
-            __asm__ volatile(
-                "mrs    x0, sctlr_el1\n"
-                "bic    x0, x0, #(1 << 0)\n"   /* M  */
-                "bic    x0, x0, #(1 << 2)\n"   /* C  */
-                "bic    x0, x0, #(1 << 12)\n"  /* I  */
-                "msr    sctlr_el1, x0\n"
-                "isb\n"
-                "tlbi   vmalle1\n"
-                "dsb    nsh\n"
-                "isb\n"
-                ::: "x0", "memory"
-            );
-        }
+/*
+ * Print the relocation verdict in words so a failed boot explains
+ * itself on the console before control returns to the firmware.
+ */
+static void efi_print_verdict(efi_system_table_t *sys_table,
+                              efi_reloc_verdict_t v)
+{
+    switch (v) {
+    case EFI_RELOC_OK:
+        efi_print(sys_table, u"[slmos] reloc: copy to link address after EBS\r\n");
+        break;
+    case EFI_RELOC_NOT_NEEDED:
+        efi_print(sys_table, u"[slmos] reloc: loaded at link address\r\n");
+        break;
+    case EFI_RELOC_OVERLAP:
+        efi_print(sys_table, u"[slmos] reloc: ABORT load and link ranges overlap\r\n");
+        break;
+    case EFI_RELOC_FDT_IN_DEST:
+        efi_print(sys_table, u"[slmos] reloc: ABORT DTB inside link range\r\n");
+        break;
+    case EFI_RELOC_DEST_BUSY:
+        efi_print(sys_table, u"[slmos] reloc: ABORT firmware memory in link range\r\n");
+        break;
+    case EFI_RELOC_DEST_NOT_RAM:
+        efi_print(sys_table, u"[slmos] reloc: ABORT link range not all RAM\r\n");
+        break;
+    case EFI_RELOC_BAD_MAP:
+        efi_print(sys_table, u"[slmos] reloc: ABORT bad memory map\r\n");
+        break;
     }
+}
+
+/* FDT header: magic and totalsize are big-endian u32 at offsets 0/4. */
+static uint64_t efi_fdt_size(const void *fdt)
+{
+    const uint8_t *p = fdt;
+    if (fdt == NULL)
+        return 0;
+    uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                     ((uint32_t)p[2] << 8) | p[3];
+    if (magic != 0xd00dfeedU)
+        return 0;
+    return ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+           ((uint32_t)p[6] << 8) | p[7];
 }
 
 /*
  * EFI stub entry point.
  *
- * Called from boot.S when EFI boot is detected.
- * Returns the DTB physical address (or NULL if not found).
- * On return, MMU is disabled and caches are cleaned.
+ * Called from boot.S when EFI boot is detected:
+ *   x0 = image handle, x1 = system table (from UEFI)
+ *   x2 = load_base  — runtime address of _start (where UEFI put us)
+ *   x3 = link_base  — link-time address of _start (where the rest of
+ *                     the kernel expects to run)
+ *   x4 = image_size — SizeOfImage (_kernel_size): text+data+bss+stack
+ *
+ * Returns the DTB pointer (or NULL) with ExitBootServices done and the
+ * image, destination and DTB cleaned to the PoC. boot.S then turns the
+ * MMU off, copies the image from load_base to link_base and jumps into
+ * the copy. Returns EFI_STUB_ABORT, WITHOUT calling
+ * ExitBootServices, when the relocation can't be done safely; boot.S
+ * then returns EFI_LOAD_ERROR to the firmware, which moves on to the
+ * next boot option instead of hanging the board.
+ *
+ * Why relocate instead of running in place: the PE image has no
+ * .reloc section and the kernel is not position-independent — linker
+ * symbols, function-pointer tables, smp_boot.S literals and the
+ * identity-mapped page tables all assume PA == link address, exactly
+ * as the kexec path provides. Copying the image to the link address
+ * restores that invariant for the whole kernel at once.
  */
-void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
+void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
+                     uint64_t load_base, uint64_t link_base,
+                     uint64_t image_size)
 {
     void *fdt = NULL;
     efi_status_t status;
+    efi_boot_services_t *bs = sys_table->boot_services;
 
-    /*
-     * Trace markers — visible on UEFI's console (and therefore on the
-     * Jetson USB-C serial via TCU) because UEFI's ConOut is still alive
-     * here. Each marker is a distinct letter so the last one observed
-     * on the wire localizes the failure without needing a debugger.
-     * See docs/archive/investigations/jetson-uefi-direct-result.md §"Key findings" for why
-     * direct UARTC MMIO isn't a viable tracing path from this context.
-     */
-    static const efi_char16_t m_entry[]     = u"[slmos] A efi_entry\r\n";
-    static const efi_char16_t m_find_done[] = u"[slmos] B find_fdt done\r\n";
-    static const efi_char16_t m_pre_ebs[]   = u"[slmos] C calling ExitBootServices\r\n";
-    static const efi_char16_t m_ebs_fail[]  = u"[slmos] ! ExitBootServices failed\r\n";
+    efi_print(sys_table, u"[slmos] A efi_entry\r\n");
 
-    efi_print(sys_table, m_entry);
-
-    /*
-     * DIAGNOSTIC: dump CurrentEL and HCR_EL2 so the next session
-     * knows exactly what UEFI has configured before deciding how to
-     * patch the EL2 block's HCR_EL2 write (skip/ORR/RMW).
-     *
-     * Reading hcr_el2 requires EL2. At EL1 the mrs traps; handle
-     * that by reading CurrentEL first and only mrs'ing hcr_el2 if
-     * we're at EL2. PR #226 thought we were at EL1 on Jetson; this
-     * session's probes (see docs/archive/investigations/jetson-uefi-direct-result.md §5b)
-     * showed EL2. The dump here prints both values so a reader can
-     * confirm without re-running brk probes.
-     */
     {
         uint64_t cur_el;
         __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el));
         efi_print_hex(sys_table, u"[slmos] CurrentEL=", cur_el);
-
-        /* CurrentEL[3:2] encodes EL: 0=EL0, 4=EL1, 8=EL2, 12=EL3. */
+        /* CurrentEL[3:2] encodes EL: 0=EL0, 4=EL1, 8=EL2, 12=EL3.
+         * hcr_el2 is only readable at EL2. */
         if (cur_el == 8) {
             uint64_t hcr_el2;
             __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr_el2));
-            efi_print_hex(sys_table, u"[slmos] HCR_EL2 =", hcr_el2);
-        } else {
-            efi_print(sys_table,
-                      u"[slmos] not at EL2, skipping hcr_el2 read\r\n");
+            efi_print_hex(sys_table, u"[slmos] HCR_EL2  =", hcr_el2);
         }
     }
 
     /* Find DTB in configuration table (must be done before ExitBootServices) */
     fdt = efi_find_fdt(sys_table);
-    efi_print(sys_table, m_find_done);
+    uint64_t fdt_size = efi_fdt_size(fdt);
+    efi_print_hex(sys_table, u"[slmos] load     =", load_base);
+    efi_print_hex(sys_table, u"[slmos] link     =", link_base);
+    efi_print_hex(sys_table, u"[slmos] size     =", image_size);
+    efi_print_hex(sys_table, u"[slmos] fdt      =", (uint64_t)(uintptr_t)fdt);
+    efi_print_hex(sys_table, u"[slmos] fdt_size =", fdt_size);
+
+    efi_memory_desc_t *map = NULL;
+    uint64_t buf_size = 0, map_size = 0, map_key = 0, desc_size = 0;
+    status = efi_read_map(bs, &map, &buf_size, &map_size, &map_key,
+                          &desc_size);
+    if (status != EFI_SUCCESS) {
+        efi_print(sys_table, u"[slmos] ! GetMemoryMap failed\r\n");
+        return EFI_STUB_ABORT;
+    }
+
+    /* Show the descriptors that matter: everything overlapping the
+     * link range, plus whatever holds the loaded image and the DTB. */
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        const efi_memory_desc_t *d =
+            (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        uint64_t len = d->num_pages * EFI_PAGE_SIZE;
+        if (efi_ranges_overlap(d->phys_start, len, link_base, image_size))
+            efi_print_desc(sys_table, d, u"link");
+        if (efi_ranges_overlap(d->phys_start, len, load_base, image_size))
+            efi_print_desc(sys_table, d, u"load");
+        if (fdt != NULL &&
+            efi_ranges_overlap(d->phys_start, len,
+                               (uint64_t)(uintptr_t)fdt, 1))
+            efi_print_desc(sys_table, d, u"fdt");
+    }
+
+    efi_reloc_verdict_t verdict =
+        efi_check_relocation(map, map_size, desc_size, load_base,
+                             link_base, image_size,
+                             (uint64_t)(uintptr_t)fdt, fdt_size);
+    efi_print_verdict(sys_table, verdict);
+    if (verdict != EFI_RELOC_OK && verdict != EFI_RELOC_NOT_NEEDED) {
+        bs->free_pool(map);
+        return EFI_STUB_ABORT;
+    }
 
     /* Exit boot services — takes over the machine.
      *
@@ -390,8 +491,8 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * further diagnostic output between here and `primary_cpu`
      * must go through UARTC directly — the Jetson EL2 block in
      * boot.S already has a working UARTC path for that. */
-    efi_print(sys_table, m_pre_ebs);
-    status = efi_exit_boot(handle, sys_table->boot_services);
+    efi_print(sys_table, u"[slmos] C calling ExitBootServices\r\n");
+    status = efi_exit_boot(handle, bs, map, buf_size);
 
     if (status != EFI_SUCCESS) {
         /* Still safe to use ConOut here: per UEFI §7.4.1 Boot
@@ -400,8 +501,9 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
          * removal of post-success markers above) applies only
          * AFTER a successful EBS. Do NOT collapse this call
          * into the post-EBS cleanup. */
-        efi_print(sys_table, m_ebs_fail);
-        return NULL;
+        efi_print(sys_table, u"[slmos] ! ExitBootServices failed\r\n");
+        bs->free_pool(map);
+        return EFI_STUB_ABORT;
     }
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
@@ -412,7 +514,7 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * Until this runs, VBAR_EL2 still points at ArmCpuDxe's vector
      * table, which depends on Boot Services state that the EBS just
      * tore down. Any synchronous fault in the code that follows
-     * (post-EBS efi_prints, efi_disable_mmu, the return to boot.S,
+     * (the cache maintenance below, the return to boot.S, the MMU-off,
      * the Jetson EL2 block's HCR_EL2 write, UARTC probe) would
      * bounce to that now-invalid handler and hang silently — the
      * historical failure mode tracked in
@@ -426,18 +528,15 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * out-of-range indexing in any future C caller.
      *
      * Only runs from EL2 — CurrentEL-gated because reading or
-     * writing VBAR_EL2 from EL1 would trap. If firmware drops us to
-     * EL1 (unexpected on Jetson but possible elsewhere), print a
-     * warning so the silent-skip doesn't look like a successful
-     * install.
+     * writing VBAR_EL2 from EL1 would trap. At EL1 there is nothing
+     * to install (and no way to report it: ConOut is gone after a
+     * successful ExitBootServices), so the EL1 case is a silent skip.
      *
      * Kexec path doesn't pass through here (it jumps straight to
      * real_start with x1 = 0), so this change is UEFI-direct only.
      */
     {
         extern uint8_t jetson_early_vbar_el2[2048];
-        static const efi_char16_t m_vbar_not_el2[] =
-            u"[slmos] W not at EL2, VBAR_EL2 not installed\r\n";
         uint64_t cur_el;
         __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el));
         if (cur_el == 8) {
@@ -447,23 +546,40 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
                 :
                 : "r"(jetson_early_vbar_el2)
                 : "memory");
-        } else {
-            /* ConOut may be torn down post-EBS (see comment block
-             * below), but if it still works on this firmware the
-             * warning reaches the serial console; if not, the
-             * absence of a subsequent `!FAULT` from the handler is
-             * itself a signal. */
-            efi_print(sys_table, m_vbar_not_el2);
         }
     }
 #endif
 
-    /* Disable MMU and clean caches for the normal boot path.
+    /*
+     * Push everything boot.S will touch with the MMU off out to DRAM
+     * (see efi_dcache_clean_inval for why this is by VA):
+     *   - the loaded image: instruction fetch and copy source;
+     *   - the copy destination: clean+invalidate so no stale dirty
+     *     line from UEFI's earlier use of that memory can be evicted
+     *     over the relocated kernel later;
+     *   - the DTB: kernel_main parses it before the MMU comes back.
+     * Nothing after this point may write memory that the MMU-off code
+     * reads: the C epilogue only loads from the stack, and boot.S
+     * abandons the UEFI stack after the return.
      *
-     * No ConOut calls past this point — see the comment block
-     * above efi_pre_ebs for why. Any post-EBS tracing needs to
-     * go through UARTC directly. */
-    efi_disable_mmu();
+     * The MMU itself is switched off in boot.S, not here, so no stack
+     * access happens with the MMU off.
+     *
+     * No ConOut calls past ExitBootServices — see the comment block
+     * above. Post-EBS tracing goes through UARTC directly.
+     *
+     * The boot source is recorded first: it lives in .data, so it must
+     * be written before the image is cleaned and copied for the
+     * relocated kernel to see it (boot_source.h).
+     */
+    slmos_boot_source = BOOT_SOURCE_UEFI;
+
+    efi_dcache_clean_inval(load_base, image_size);
+    if (link_base != load_base)
+        efi_dcache_clean_inval(link_base, image_size);
+    if (fdt != NULL)
+        efi_dcache_clean_inval((uint64_t)(uintptr_t)fdt,
+                               fdt_size ? fdt_size : EFI_PAGE_SIZE);
 
     return fdt;
 }
