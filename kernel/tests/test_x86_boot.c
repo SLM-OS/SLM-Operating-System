@@ -32,6 +32,8 @@
 #include "shell.h"              /* shell_cmd_t for shell-table tests */
 #include "string.h"             /* strcmp for shell-table scanners */
 #include "x86_lapic_consts.h"   /* LAPIC_TIMER_VECTOR */
+#include "ioapic.h"             /* ioapic_irq_is_masked */
+#include "x86_smp.h"            /* x86_ap_entry_misaligned */
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -759,8 +761,6 @@ static void test_spinlock_irqsave_roundtrip(void)
  */
 static void test_gic_enable_disable_timer(void)
 {
-    extern bool ioapic_irq_is_masked(uint32_t irq);
-
     irq_flags_t flags = irq_save();
     bool was_masked = ioapic_irq_is_masked(TIMER_IRQ);
 
@@ -770,8 +770,9 @@ static void test_gic_enable_disable_timer(void)
     gic_enable_irq(TIMER_IRQ);
     bool masked_after_enable = ioapic_irq_is_masked(TIMER_IRQ);
 
-    if (was_masked)
+    if (was_masked) {
         gic_disable_irq(TIMER_IRQ);
+    }
     irq_restore(flags);
 
     TEST_ASSERT_TRUE(masked_after_disable);
@@ -981,8 +982,9 @@ static void test_new_task_initial_rsp_sysv_aligned(void)
     TEST_ASSERT_EQUAL_UINT64(8, t->context.rsp & 15);
     scheduler_add_task(t);
 
-    for (int i = 0; i < 20 && !stack_align_done; i++)
+    for (int i = 0; i < 20 && !stack_align_done; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(stack_align_done);
     TEST_ASSERT_EQUAL_UINT64(0, stack_align_frame & 15);
@@ -995,7 +997,6 @@ static void test_new_task_initial_rsp_sysv_aligned(void)
  */
 static void test_ap_entry_stack_sysv_aligned(void)
 {
-    extern volatile uint32_t x86_ap_entry_misaligned;
     TEST_ASSERT_EQUAL_UINT32(0, x86_ap_entry_misaligned);
 }
 
@@ -1228,6 +1229,22 @@ static void test_idt_preempt_vectors_use_task_stack(void)
 }
 
 /*
+ * Test: IDT entry 8 (#DF) uses IST1 (#237).
+ *
+ * With the timer and reschedule IPI on the task stack, #DF is the only
+ * vector that still has a known-good stack after a task-stack overflow.
+ * On IST=0 such a double fault escalates to a silent triple fault.
+ */
+static void test_idt_double_fault_uses_ist1(void)
+{
+    struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr;
+    __asm__ volatile("sidt %0" : "=m"(idtr));
+    const struct a1_idt_entry *idt =
+        (const struct a1_idt_entry *)(uintptr_t)idtr.base;
+    TEST_ASSERT_EQUAL_UINT8(1, idt[8].ist & 0x07);
+}
+
+/*
  * Test: a CPU-bound task that never yields is preempted by the timer
  * ISR and resumes intact (#237).
  *
@@ -1252,8 +1269,9 @@ static void preempt_spin_worker(void *arg)
     /* 1 s escape hatch so a preemption regression fails the test
      * instead of wedging CPU 0. */
     uint64_t end = timer_get_count() + timer_get_frequency();
-    while (!preempt_spin_release && timer_get_count() < end)
-        ;
+    while (!preempt_spin_release && timer_get_count() < end) {
+        /* busy-wait without yielding */
+    }
     preempt_spin_released = preempt_spin_release;
     preempt_spin_done = 1;
 }
@@ -1278,11 +1296,13 @@ static void test_timer_preempts_cpu_bound_task(void)
     sleep_ms(20);               /* spinner runs; we return only via preemption */
     preempt_spin_release = 1;
 
-    for (int i = 0; i < 150 && !preempt_spin_done; i++)
+    for (int i = 0; i < 150 && !preempt_spin_done; i++) {
         sleep_ms(10);
+    }
 
-    if (!preempt_spin_done)
+    if (!preempt_spin_done) {
         scheduler_terminate_task(t);
+    }
     TEST_ASSERT_TRUE(preempt_spin_done);
     TEST_ASSERT_TRUE(preempt_spin_released);
 }
@@ -1303,6 +1323,7 @@ static void test_timer_preempts_cpu_bound_task(void)
  * test_idt_preempt_vectors_use_task_stack pins the IDT wiring and
  * test_timer_preempts_cpu_bound_task covers the behavior; the TSS
  * tests here still verify the per-CPU TSS + IST1 installation, which
+ * #DF uses (test_idt_double_fault_uses_ist1) and
  * stays in place for future non-switching vectors.
  */
 
@@ -3890,6 +3911,7 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_sleep_ms_on_ap);
     RUN_TEST(test_tss_loaded);
     RUN_TEST(test_idt_preempt_vectors_use_task_stack);
+    RUN_TEST(test_idt_double_fault_uses_ist1);
     RUN_TEST(test_timer_preempts_cpu_bound_task);
     RUN_TEST(test_tss_per_cpu_distinct);
     RUN_TEST(test_resched_ipi_delivers);

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "uart.h"
+#include "ioapic.h"
 
 /* IOAPIC uses indirect register access via REGSEL + DATAWIN */
 #define IOAPIC_REGSEL       0x00
@@ -146,7 +147,6 @@ void ioapic_disable_irq(uint32_t irq)
     ioapic_write(IOAPIC_REDTBL(pin), low);
 }
 
-/* True iff the IRQ's redirection entry is masked (or it has no pin). */
 bool ioapic_irq_is_masked(uint32_t irq)
 {
     uint32_t pin;

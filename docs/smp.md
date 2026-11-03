@@ -536,7 +536,9 @@ on IST1, but both handlers can call `schedule()` from the ISR: on IST1 the
 outgoing task's saved RSP pointed into the shared per-CPU IST stack, which
 the next timer IRQ overwrote. `schedule()`'s SP-range guard panicked on
 exactly this, so #237 moved them back to IST=0. The per-CPU TSS + IST1
-stack are still installed for future vectors that never context-switch.
+stack are still installed. #DF (vector 8) now uses IST1, so a double fault
+caused by a task-stack overflow still has a good stack for its register
+dump instead of escalating to a silent triple fault.
 
 Both backends short-circuit when `logical_cpu == cpu_id()` (self-IPI
 is redundant — the caller is already running) and when `logical_cpu >=

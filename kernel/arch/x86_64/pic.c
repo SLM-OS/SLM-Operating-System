@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include "gic.h"
+#include "ioapic.h"
 
 /* I/O port access */
 static inline void outb(uint16_t port, uint8_t val)
@@ -28,9 +29,6 @@ extern void lapic_init(void);
 extern void lapic_percpu_init(void);
 extern void lapic_eoi(void);
 extern void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags);
-extern void ioapic_init(void);
-extern void ioapic_enable_irq(uint32_t irq);
-extern void ioapic_disable_irq(uint32_t irq);
 
 /* IDT must be loaded before any interrupts */
 extern void idt_init(void);
@@ -68,11 +66,11 @@ void gic_init(void)
     /* Load IDT (x86-64 interrupt vector table) */
     idt_init();
 
-    /* Install per-CPU TSS + IST1 stack BEFORE enabling interrupts.
-     * idt_init() sets ist=1 on the LAPIC timer vector (48) so the
-     * timer ISR will stack-switch to TSS.ist1 on delivery — if TR
-     * is not loaded first, the CPU #TS-faults on the first tick.
-     * BSP is always logical CPU 0. A1 / P1-1. */
+    /* Install per-CPU TSS + IST1 stack immediately after idt_init().
+     * idt_init() puts #DF (vector 8) on IST1 (#237), and an IST
+     * vector delivered before TR is loaded faults again instead of
+     * reaching its handler. The timer and reschedule vectors run on
+     * the task stack (IST=0). BSP is always logical CPU 0. A1 / P1-1. */
     tss_install_current_cpu(0);
 
     /* Register the reschedule IPI handler (B1 / P2-1). */

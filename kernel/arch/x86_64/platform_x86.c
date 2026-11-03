@@ -16,6 +16,7 @@
 #include "smp.h"
 #include "dtb.h"
 #include "uart.h"
+#include "x86_smp.h"
 #include "spinlock.h"
 #include "pmm.h"
 #include "sched.h"
@@ -35,8 +36,9 @@
  * opportunity.
  *
  * Vector 49: the idt.S stub is already in place (originally reserved
- * for "future SMP IPI"). Runs on IST1 so it cannot corrupt the
- * interrupted task's stack (A1 / P1-1).
+ * for "future SMP IPI"). Runs on the interrupted task's stack
+ * (IST=0): the handler calls schedule(), which must never run on an
+ * IST stack (#237).
  */
 #define RESCHED_VECTOR  49
 
@@ -269,20 +271,19 @@ static void delay_ms(uint32_t ms)
  */
 extern void tss_install_current_cpu(uint32_t cpu_id);
 
-/* Count of APs that entered ap_entry_64 with a frame pointer that is not
- * 16-byte aligned, i.e. RSP % 16 != 8 at function entry (SysV ABI).
- * Read by test_x86_boot.c as a regression check for #237. */
+/* See x86_smp.h. The frame pointer is 16-byte aligned exactly when
+ * RSP % 16 == 8 at function entry. */
 volatile uint32_t x86_ap_entry_misaligned;
 
 static void ap_entry_64(uint32_t logical_cpu_id)
 {
-    if (((uintptr_t)__builtin_frame_address(0) & 15) != 0)
+    if (((uintptr_t)__builtin_frame_address(0) & 15) != 0) {
         __atomic_add_fetch(&x86_ap_entry_misaligned, 1, __ATOMIC_RELAXED);
+    }
 
     /* Install this AP's TSS + IST1 BEFORE any interrupt can fire, so
-     * any IDT vector flagged ist>0 has a loaded TR (a missing TR would
-     * #TS-fault). The timer/resched vectors are ist=0 since #237, but
-     * TR stays loaded for future IST vectors. A1 / P1-1. */
+     * #DF (vector 8, the only IST vector since #237) has a loaded TR.
+     * A1 / P1-1. */
     tss_install_current_cpu(logical_cpu_id);
 
     /* Initialize per-CPU LAPIC */

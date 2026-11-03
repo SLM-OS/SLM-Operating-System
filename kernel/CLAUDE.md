@@ -501,6 +501,7 @@ may have just gained work on its run queue. API in
   the LAPIC timer: a vector that can `schedule()` from the ISR must
   never use an IST stack, or the outgoing task's saved RSP points into
   the shared IST stack that the next interrupt overwrites (#237).
+  IST1 is used only by #DF (vector 8), which halts and never schedules.
 
 Both backends short-circuit self-notifications and out-of-range
 `cpu` ids. Replaces the previous
