@@ -456,10 +456,10 @@ static inline void irq_restore(irq_flags_t flags)
 /*
  * Acquire spinlock with IRQs disabled.
  *
- * NOTE: On Jetson after kexec, the ARM exclusive monitor state is corrupted
- * in a way that LDAXR/STXR operations hang. We skip actual locking since we're
- * running single-core after kexec anyway. IRQ disabling still provides
- * protection against interrupt handlers.
+ * SPINLOCK_SKIP_LOCKING (no platform defines it since #166) reduces this
+ * to IRQ masking only. Jetson used to set it unconditionally, which let
+ * CPUs race on PMM free lists once SMP was up; Jetson and Pi 5 now run
+ * real LDAXR/STXR once vmm_init sets spinlock_hw_enabled.
  */
 static inline irq_flags_t spin_lock_irqsave(spinlock_t *lock)
 {
