@@ -18,7 +18,10 @@ onboard hub and the RTL8153 behind it, and gets a DHCP lease; 10/10
 boots answered ping and the telnet shell. GPU compute works too
 (#1088): SLM-OS brings GA10B up from cold during boot and runs the MNIST
 pipeline on a channel it creates itself (see
-[GA10B cold bring-up](#ga10b-cold-bring-up)).
+[GA10B cold bring-up](#ga10b-cold-bring-up)); 10/10 consecutive
+UEFI-direct boots completed the bring-up and returned the expected
+MNIST result on the GPU, and `slm.model_infer_file` classifies the ten
+MNIST test digits correctly on the GPU.
 
 ---
 
@@ -243,7 +246,8 @@ state. The steps follow nvgpu's `nvgpu_finalize_poweron` (L4T R36.4.x)
 and were checked against an MMIO trace of nvgpu's own first power-on on
 jetson-nano-2 (instrumented `nvgpu_writel/readl`; trace and patch in
 `~/slmos-ref/derivatives/nvgpu-traces/`). `nvgpu cold [step]` runs or
-resumes them from the shell.
+resumes them from the shell; it is refused after kexec, where it would
+reset the GPU state inherited from Linux.
 
 | Step | What it does |
 |---|---|
