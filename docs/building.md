@@ -306,6 +306,11 @@ runtime/
 |-------|---------|
 | `linked_list_allocator` | Heap allocator for `no_std` |
 | `bitflags` | Type-safe flag enums |
+| `libm` | `no_std` float math |
+
+`runtime/Cargo.lock` is committed (#1072), so every checkout builds
+with the same dependency versions. Update it deliberately with
+`cargo update` in `runtime/` and commit the result.
 
 ### Troubleshooting Rust Builds
 
@@ -416,6 +421,20 @@ make kernel NET_SSHD=ON NET_SSHD_DEMO_ALLOW_ALL=ON # debugging: skip password au
 the scrypt-against-passwd check with a stub that accepts every
 login. `sshd_autostart` prints a loud WARNING on every boot when
 this is wired.
+
+### When a Build Directory Reconfigures
+
+Each kernel variant (`build/kernel`, `kernel-kexec`, `kernel-bzimage`,
+`kernel-test`) stores its configure options in `.build-config` and is
+wiped and reconfigured when they change. The options are the variant's
+full CMake argument list (`KERNEL_CMAKE_ARGS` and friends in the
+Makefile, built from one shared `KERNEL_COMMON_CMAKE_ARGS`), including
+`EXTRA_KERNEL_CMAKE_ARGS`. New configure options go into those
+variables, not into a single configure rule.
+`make check-build-signatures` (part of `make test`) toggles every
+option and fails if a variant would keep building with a stale
+configuration; `make print-build-signatures` shows the current
+values (#1072).
 
 ### Compiler Flags
 

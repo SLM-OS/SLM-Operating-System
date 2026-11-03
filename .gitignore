@@ -62,7 +62,10 @@ node_modules/
 
 # Rust
 **/*.rs.bk
+# runtime/Cargo.lock is committed so every build resolves the same
+# dependency versions (#1072); other crates' lockfiles stay local.
 Cargo.lock
+!runtime/Cargo.lock
 
 # Python (if any scripts)
 __pycache__/
