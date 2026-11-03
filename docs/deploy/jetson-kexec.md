@@ -327,7 +327,7 @@ Expected output on serial:
 
 1. Kernel messages from SLM-OS's `uart_tegra.c` driver — via UARTC at `0x0C280000`, routed through the TCU HSP mailbox to the USB-C debug port.
 2. SMP bring-up on 6 cores (Jetson is dual-cluster 2+4; MPIDRs `0x000`, `0x100`, `0x200`, `0x300`, `0x10200`, `0x10300`).
-3. `slm>` shell prompt. Input works bidirectionally via the TCU mailbox.
+3. `slmos>` shell prompt. Input works bidirectionally via the TCU mailbox.
 
 ### Step 4a — Run the networking smoke test
 
