@@ -383,7 +383,7 @@ change it without touching the repo. Before debugging any "board does
 not respond" symptom, and before any hardware verification run, check
 the live state through labctl rather than trusting the tables above:
 
-1. **Power, ping, serial:** `labctl status` / `labctl health` (MCP:
+1. **Power, ping, serial:** `labctl status` / `labctl health-check` (MCP:
    `run_health_check`).
 2. **Actuator bindings:** list them for the board (MCP:
    `bindings_list`) and read each one's `actuation_status`. A latched
