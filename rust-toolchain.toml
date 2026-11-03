@@ -3,9 +3,8 @@
 # Pinned rather than floating `stable` because the x86-64 runtime build
 # has hit a rustc ICE ("soften operand", #729, worked around by thin LTO
 # in #936) that is sensitive to both the compiler version and the libm
-# version (pinned exactly in runtime/Cargo.toml). Cargo.lock is
-# gitignored, so this file plus the libm pin are what keep builds
-# reproducible. Bump deliberately: build both `make test` and
+# version (pinned exactly in runtime/Cargo.toml, and recorded in the
+# committed runtime/Cargo.lock since #1072). Bump deliberately: build both `make test` and
 # `make test PLATFORM=X86_64` on the new version before changing it.
 [toolchain]
 channel = "1.94.1"

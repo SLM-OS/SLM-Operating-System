@@ -78,9 +78,9 @@ This is a freestanding Rust crate. Key constraints:
 
 The compiler itself is pinned by `rust-toolchain.toml` at the repo root
 (currently 1.94.1, with the `aarch64-unknown-none` and
-`x86_64-unknown-none` targets). `Cargo.lock` is gitignored, so the
-toolchain file plus the exact libm pin are what keep runtime builds
-reproducible.
+`x86_64-unknown-none` targets). `runtime/Cargo.lock` is committed
+(#1072), and the toolchain file plus the exact libm pin keep it from
+being re-resolved onto a version that re-triggers #729.
 
 ---
 
