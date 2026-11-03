@@ -102,10 +102,10 @@ labctl connect <sbc>
 or for an automated capture (e.g. scripting a test):
 
 ```
-labctl serial_capture <sbc> --timeout 30 --pattern "slm>"
+labctl serial capture <sbc> --timeout 30 --until "slmos>"
 ```
 
-The `--pattern "slm>"` argument returns control when the shell prompt appears. This is the hand-off point from boot to userland — if it appears within the timeout, the kernel is healthy.
+The `--until "slmos>"` argument returns control when the shell prompt appears. This is the hand-off point from boot to userland — if it appears within the timeout, the kernel is healthy.
 
 ---
 

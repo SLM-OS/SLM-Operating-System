@@ -340,7 +340,6 @@ dual-boot workflow in `docs/deploy/pi5-sdcard.md` and
 `docs/pi5-dual-boot-setup.md`.
 
 **Notes:**
-- The SDWireC requires the `sdwire` Python package (not `sd-mux-ctrl`, which uses FTDI)
 - A slower SD card (tested: 29 GB) is required — faster UHS-I cards negotiate SDR104 speeds that the SDWireC's analog MUX cannot handle
 - The Pi 5 EEPROM is at the original Sep 2024 firmware (no `SD_QUIRKS` needed with a slower card)
 - EEPROM firmware versions after Jan 2025 break bare-metal RP1 UART access (investigated but not resolved)

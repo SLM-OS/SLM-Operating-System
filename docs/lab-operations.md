@@ -15,7 +15,7 @@ This document describes how to interact with the embedded development lab hardwa
 | Power cycle | `labctl power cycle <sbc> --delay 2` |
 | Serial console | `labctl connect <sbc>` (the SBC name resolves to its console port) |
 | Lab status | `labctl status` |
-| Health check | `labctl health` |
+| Health check | `labctl health-check` |
 
 ---
 
@@ -43,8 +43,7 @@ hardware, firmware, installed software and deploy model.
 
 ## Lab Hardware
 
-The lab SBC names are `pi-5-1`, `pi-5-2`, `jetson-nano-1`,
-`jetson-nano-2` and `test-pc` (x86-64).
+The current SBC list is labctl's (`lab://sbcs`, `labctl status`).
 
 ### Raspberry Pi 5 boards
 
@@ -174,17 +173,18 @@ Never drive the raw `sdwire` tool or `/dev/sd*` devices while labctl
 is managing the lab: several SDWire devices exist and manual access
 risks switching or writing the wrong card (see CLAUDE.md §"labctl Is
 the Only Hardware Interface"). For recovery when labctl itself is
-down, the raw `sdwire` tool takes the device serial number recorded in
-labctl (`sdwire list` shows the serials of the attached devices):
+down, the raw `sdwire` tool (installed in labctl's venv, not on `PATH`)
+takes the device serial number recorded in labctl (`sdwire list` shows
+the serials of the attached devices):
 
 ```bash
-sudo sdwire switch -s "<serial>" host   # Switch SD to host (for flashing)
-sudo sdwire switch -s "<serial>" dut    # Switch SD to the board (for booting)
-sudo sdwire state -s "<serial>"         # Check current state
-sudo sdwire list                        # List all SDWire devices
+sudo /opt/labctl/venv/bin/sdwire switch -s "<serial>" host  # SD to host (flashing)
+sudo /opt/labctl/venv/bin/sdwire switch -s "<serial>" dut   # SD to the board (booting)
+sudo /opt/labctl/venv/bin/sdwire state -s "<serial>"        # current state
+sudo /opt/labctl/venv/bin/sdwire list                       # all SDWire devices
 ```
 
-**Note:** The SDWire block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check `sdwire list` for the current device.
+**Note:** The SDWire block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check labctl `sdwire_discover` (or `sdwire list`) for the current device.
 
 ### Full Deploy Workflow
 
@@ -329,8 +329,15 @@ For the current `jetson-nano-2` USB networking regression check, use:
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
-    --console-port <ser2net TCP port from labctl>
+    --console-port <ser2net TCP port from labctl> \
+    --expected-ip <JETSON_IP> \
+    --expected-gateway <GATEWAY>
 ```
+
+`<GATEWAY>` is the board's default gateway, as Linux on the board reports
+it (`ip route`). Pass both `--expected-*` flags: the script's built-in
+defaults are fixed addresses from an earlier lab setup, not values read
+from labctl.
 
 This drives the working lab path end-to-end from the host:
 
@@ -338,7 +345,7 @@ This drives the working lab path end-to-end from the host:
 - trigger Linux -> `kexec` -> SLM-OS
 - wait for `slmos>` over ser2net
 - run `net init`, send one `ifconfig dhcp`, poll `ifconfig` until `DHCP(bound)`, and then ping the gateway
-- verify that DHCP bound the board's reserved address (the one labctl lists) and the lab gateway
+- verify that DHCP bound the expected address and gateway
 
 It is not a generic Jetson automation harness; it is the repeatable
 smoke test for the validated `nano-2` USB hub + RTL8153 lab setup.
@@ -424,7 +431,7 @@ reaches the Linux login prompt about 65 s after power-on
 
 ### Smart plug authentication error
 
-A Kasa smart plug occasionally returns authentication errors (cloud token expired). Retry the command — it usually succeeds on the second attempt.
+A smart plug occasionally rejects labctl's authentication (seen with Kasa plugs when the cloud token expires). Retry the command; it usually succeeds on the second attempt. If it keeps failing, the plug's credentials in labctl need attention.
 
 ### SDWire not detected
 

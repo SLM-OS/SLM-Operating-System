@@ -195,7 +195,7 @@ no manual unplug/replug. Current validation on the lab path:
 
 - `net init` succeeds
 - a single `ifconfig dhcp` request binds the board's reserved address (the one labctl lists) with the lab gateway
-- `ping <gateway> 2` succeeds
+- a ping to the DHCP-assigned gateway (as `ifconfig` reports it) succeeds
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
 
@@ -337,8 +337,15 @@ automates the current regression check end-to-end:
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
-    --console-port <ser2net TCP port from labctl>
+    --console-port <ser2net TCP port from labctl> \
+    --expected-ip <JETSON_IP> \
+    --expected-gateway <GATEWAY>
 ```
+
+`<GATEWAY>` is the board's default gateway, as Linux on the board reports
+it (`ip route`). Pass both `--expected-*` flags: the script's built-in
+defaults are fixed addresses from an earlier lab setup, not values read
+from labctl.
 
 That script:
 
@@ -346,7 +353,7 @@ That script:
 - triggers `slmos-kexec`
 - waits for `slmos>` on serial
 - runs `net init`, sends one `ifconfig dhcp`, polls `ifconfig` until `DHCP(bound)`, and then pings the gateway
-- verifies that DHCP bound the board's reserved address (the one labctl lists) and the lab gateway
+- verifies that DHCP bound the expected address and gateway
 
 It is intentionally scoped to the current lab topology rather than a
 generic Jetson serial automation framework.
