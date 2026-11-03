@@ -464,7 +464,17 @@ pub fn update_feedback(block_id: u32, was_fault: bool) {
         // above — wait-free, scalar arg-less, BSS-resident.
         unsafe { admin_telemetry_record_eviction_fallback(); }
     }
-    with_active_policy(|p| p.update_feedback(block_id, was_fault));
+    // `block_id` packs `(pool_id << 24) | slot_idx` (see the
+    // `snapshot_at` encoding in `mm::model_mem`). Decode the pool so
+    // the feedback trains the policy that made the decision —
+    // routing everything to the weight-pool policy would train the
+    // wrong policy for workspace evictions.
+    let pool = if (block_id >> 24) as u8 == PoolType::Workspace as u8 {
+        PoolType::Workspace
+    } else {
+        PoolType::Weight
+    };
+    with_active_policy_for_pool(pool, |p| p.update_feedback(block_id, was_fault));
 }
 
 /// Notify the active policy that `block_id` has been evicted.
@@ -521,5 +531,38 @@ mod tests {
         clear_for_test();
         assert_eq!(get_eviction_policy_name().to_string(), "none");
         init_default();
+    }
+
+    #[test]
+    fn feedback_routes_to_pool_encoded_in_block_id() {
+        use core::sync::atomic::AtomicU32;
+        static WEIGHT_SEEN: AtomicU32 = AtomicU32::new(0);
+        static WORKSPACE_SEEN: AtomicU32 = AtomicU32::new(0);
+
+        struct Recorder(&'static AtomicU32);
+        impl EvictionPolicy for Recorder {
+            fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+            fn update_feedback(&mut self, block_id: u32, _was_fault: bool) {
+                self.0.store(block_id, Ordering::Relaxed);
+            }
+            fn name(&self) -> &'static str { "Recorder" }
+        }
+
+        set_eviction_policy_for_pool(
+            PoolType::Weight, Box::new(Recorder(&WEIGHT_SEEN)));
+        set_eviction_policy_for_pool(
+            PoolType::Workspace, Box::new(Recorder(&WORKSPACE_SEEN)));
+
+        // block_id bits 24+ carry the pool id (`snapshot_at` in
+        // `mm::model_mem`): 0 = weight, 1 = workspace.
+        let weight_id = 5;
+        let workspace_id = (1 << 24) | 7;
+        update_feedback(weight_id, false);
+        update_feedback(workspace_id, false);
+
+        assert_eq!(WEIGHT_SEEN.load(Ordering::Relaxed), weight_id);
+        assert_eq!(WORKSPACE_SEEN.load(Ordering::Relaxed), workspace_id);
+
+        reset_to_default();
     }
 }

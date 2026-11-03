@@ -187,6 +187,17 @@ impl BlockSlot {
         }
     }
 
+    /// True when the eviction path may reclaim this slot: allocated
+    /// and not pinned by extra references (`refcount <= 1`, the M6
+    /// policy filter). `gpu_mapped` is deliberately NOT a filter: it
+    /// is a soft cost feature the policies weigh (features.rs), and
+    /// the real GPU weight path pins through a `WeightLease` (refcount
+    /// 2) rather than the flag (#1066).
+    #[cfg(feature = "ai_eviction")]
+    fn is_evictable(&self) -> bool {
+        self.state != BlockState::Free && self.refcount <= 1
+    }
+
     /// Clear eviction-tracking fields when the slot goes back to the free list.
     fn clear_tracking(&mut self) {
         self.load_time = 0;
@@ -832,10 +843,21 @@ unsafe fn pool_alloc_raw(pool_id: u8) -> Result<ModelHandle, AllocError> {
     }
 }
 
+/// Re-consults `evict_and_retry` makes after victims that went stale
+/// while the pool lock was dropped, before it gives up on evicting and
+/// just retries the allocation. Each consult can be a batched GPU
+/// dispatch (#1038), so contention must not multiply them unboundedly.
+#[cfg(feature = "ai_eviction")]
+const MAX_STALE_VICTIMS: usize = 4;
+
 /// Eviction retry path — only compiled when the `ai_eviction`
-/// feature is on. Snapshots the requested pool's non-pinned
-/// candidates, consults the active policy, frees the victim, and
-/// retries the allocation.
+/// feature is on. Snapshots the requested pool's evictable
+/// candidates together with each slot's generation, consults the
+/// active policy, frees the victim, and retries the allocation. A
+/// victim whose slot changed while the pool lock was dropped (freed,
+/// reallocated, or pinned by a `share`) is skipped and the policy is
+/// re-consulted over the remaining candidates, at most
+/// `MAX_STALE_VICTIMS` times (#1066).
 #[cfg(feature = "ai_eviction")]
 fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
     use super::eviction;
@@ -860,101 +882,108 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
         eviction::update_feedback(id, false);
     }
 
-    // Build candidate set for this pool. `snapshot_evictable_blocks`
-    // returns both pools' candidates — we filter to the requested one.
-    let candidates: alloc::vec::Vec<eviction::BlockMeta> =
-        snapshot_evictable_blocks()
-            .into_iter()
-            .filter(|m| {
-                let want_pool = match pool_id {
-                    POOL_WEIGHT => eviction::PoolType::Weight,
-                    POOL_WORKSPACE => eviction::PoolType::Workspace,
-                    _ => return false,
-                };
-                m.pool_type == want_pool
-            })
-            .collect();
+    // Candidate set for this pool. The generation of each slot is
+    // captured in the same locked pass as the metadata so the free
+    // below can prove the slot is untouched since the snapshot.
+    let (mut candidates, mut generations): (
+        alloc::vec::Vec<eviction::BlockMeta>,
+        alloc::vec::Vec<u8>,
+    ) = snapshot_pool_candidates(pool_id).into_iter().unzip();
 
-    if candidates.is_empty() {
-        // Every block in the pool is free (shouldn't happen here —
-        // we're in the OOM branch) or pinned (ref_count > 1). Either
-        // way, OOM is the right answer.
-        return Err(AllocError::OutOfMemory);
-    }
-
-    // Ask the active policy to pick a victim.
-    let victim_idx = match eviction::select_victim(&candidates) {
-        Some(idx) => idx,
-        None => return Err(AllocError::OutOfMemory), // no policy installed
-    };
-    let victim = candidates[victim_idx];
-
-    // Decode block_id → ModelHandle. block_id encoding is
-    // `(pool_id << 24) | slot_idx`. Generation is fetched live so
-    // a concurrent free/realloc between snapshot and free is caught
-    // as `StaleHandle` — in which case we retry directly.
-    let slot_idx = (victim.block_id & 0x00FF_FFFF) as usize;
-
-    // Perform the free under the pool lock. Record the eviction's
-    // content key in the tracker so a subsequent alloc with the same
-    // (model_id, layer_idx, pool_type) can credit CACHEUS.
-    let content_key = eviction::ContentKey {
-        pool_type: victim.pool_type,
-        model_id: victim.model_id,
-        layer_idx: victim.layer_idx,
-    };
-    {
-        let _g = SpinGuard::new();
-        // SAFETY: _g held — exclusive access.
-        unsafe {
-            let pool_ptr = match pool_id {
-                POOL_WEIGHT => addr_of_mut!(WEIGHT_POOL),
-                POOL_WORKSPACE => addr_of_mut!(WORKSPACE_POOL),
-                _ => return Err(AllocError::InvalidHandle),
-            };
-            let pool = &mut *pool_ptr;
-            if slot_idx >= pool.block_count {
-                return Err(AllocError::InvalidHandle);
-            }
-            let generation = pool.blocks[slot_idx].generation;
-            let h = ModelHandle {
-                block_index: slot_idx as u16,
-                pool_id,
-                generation,
-                _reserved: 0,
-            };
-            // Free via the pool's free (handles refcount internally,
-            // wipes tracking). We accept StaleHandle as a benign race
-            // and fall through to the retry. Only count an eviction
-            // when the free actually reclaimed a slot — counting
-            // StaleHandle losses would skew the metric upward on
-            // every concurrent-touch race.
-            let freed = pool.free(h).is_ok();
-            if freed {
-                pool.evictions_total = pool.evictions_total.saturating_add(1);
-                if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
-                    t.record_eviction(content_key, victim.block_id, now);
-                }
-            }
+    let mut stale_victims = 0usize;
+    loop {
+        if candidates.is_empty() || stale_victims >= MAX_STALE_VICTIMS {
+            // Every candidate is pinned or went stale under us, or
+            // enough of them did that another consult (each can be a
+            // GPU dispatch since #1038) isn't worth it. A stale victim
+            // may have been FREED (not reallocated) by another CPU
+            // during the consult, so fall through to the retry — it
+            // reports the genuine OutOfMemory itself when the pool
+            // really is full.
+            break;
         }
-    }
 
-    // #114: inform the active policy that this block was evicted so
-    // ARC can populate its ghost lists proactively. Called outside the
-    // pool lock — the registry lock is independent. The pool type is
-    // known from pool_id; map it here so the registry dispatches to
-    // the correct per-pool policy.
-    {
-        let pool_type = match pool_id {
-            POOL_WEIGHT => eviction::PoolType::Weight,
-            POOL_WORKSPACE => eviction::PoolType::Workspace,
-            _ => eviction::PoolType::Weight,
+        // Ask the active policy to pick a victim. The pool lock is
+        // NOT held here — the registry lock must never nest inside it.
+        let victim_idx = match eviction::select_victim(&candidates) {
+            Some(idx) => idx,
+            None => return Err(AllocError::OutOfMemory), // no policy installed
         };
-        eviction::notify_eviction(victim.block_id, pool_type);
+        let victim = candidates[victim_idx];
+
+        // Decode block_id → slot. block_id encoding is
+        // `(pool_id << 24) | slot_idx`.
+        let slot_idx = (victim.block_id & 0x00FF_FFFF) as usize;
+
+        // Content key for the tracker so a subsequent alloc with the
+        // same (model_id, layer_idx, pool_type) can credit CACHEUS.
+        let content_key = eviction::ContentKey {
+            pool_type: victim.pool_type,
+            model_id: victim.model_id,
+            layer_idx: victim.layer_idx,
+        };
+
+        // Perform the free under the pool lock, using the generation
+        // captured at SNAPSHOT time. `MemoryPool::free`'s generation
+        // check then rejects (`StaleHandle`) a slot that was freed and
+        // reallocated while the lock was dropped for the policy call.
+        // A pin (`share`) in that window leaves the generation
+        // intact, so `is_evictable` is re-checked too —
+        // `free` on a re-pinned block would silently steal the
+        // sharer's reference. Only a free that actually reclaimed the
+        // slot counts as an eviction.
+        let freed = {
+            let _g = SpinGuard::new();
+            // SAFETY: _g held — exclusive access.
+            unsafe {
+                let pool_ptr = match pool_id {
+                    POOL_WEIGHT => addr_of_mut!(WEIGHT_POOL),
+                    POOL_WORKSPACE => addr_of_mut!(WORKSPACE_POOL),
+                    _ => return Err(AllocError::InvalidHandle),
+                };
+                let pool = &mut *pool_ptr;
+                if slot_idx >= pool.block_count {
+                    return Err(AllocError::InvalidHandle);
+                }
+                let h = ModelHandle {
+                    block_index: slot_idx as u16,
+                    pool_id,
+                    generation: generations[victim_idx],
+                    _reserved: 0,
+                };
+                let freed = pool.blocks[slot_idx].is_evictable()
+                    && pool.free(h).is_ok();
+                if freed {
+                    pool.evictions_total = pool.evictions_total.saturating_add(1);
+                    if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                        t.record_eviction(content_key, victim.block_id, now);
+                    }
+                }
+                freed
+            }
+        };
+
+        if freed {
+            // #114: inform the active policy that this block was
+            // evicted so ARC can populate its ghost lists proactively.
+            // Called outside the pool lock — the registry lock is
+            // independent. `victim.pool_type` was derived from
+            // pool_id at snapshot time, so the registry dispatches to
+            // the correct per-pool policy.
+            eviction::notify_eviction(victim.block_id, victim.pool_type);
+            break;
+        }
+
+        // The victim went hot while the pool lock was dropped — drop
+        // it from the candidate list and re-consult the policy.
+        stale_victims += 1;
+        candidates.remove(victim_idx);
+        generations.remove(victim_idx);
     }
 
-    // Retry allocation. If this still fails, the pool is genuinely
-    // broken — return whatever error the retry produces.
+    // Retry allocation. Reached after a reclaim, or with the
+    // candidate list exhausted — a concurrent free may still have
+    // opened a slot in the latter case, so the retry is unconditional.
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
     unsafe { pool_alloc_raw(pool_id) }
@@ -1318,8 +1347,9 @@ pub fn get_tracking(
 /// Build a snapshot of every allocated, non-pinned block across both
 /// pools for the active eviction policy.
 ///
-/// A block is "evictable" when it is allocated and `ref_count == 0` —
-/// shared blocks are considered pinned (matches the M6 policy filter).
+/// A block is "evictable" when it is allocated and not shared
+/// (`refcount <= 1` — shared blocks are considered pinned, matching
+/// the M6 policy filter). See `BlockSlot::is_evictable`.
 /// The resulting `Vec` is heap-allocated; callers on the hot path
 /// should pre-size / reuse if this becomes a bottleneck.
 #[cfg(feature = "ai_eviction")]
@@ -1337,13 +1367,49 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
         ] {
             let pool = &*pool_ptr;
             for i in 0..pool.block_count {
-                let slot = &pool.blocks[i];
-                if slot.state == BlockState::Free || slot.refcount > 1 {
+                if !pool.blocks[i].is_evictable() {
                     continue;
                 }
                 if let Some(meta) = pool.snapshot_at(i, pool_id) {
                     out.push(meta);
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Snapshot one pool's evictable blocks together with each slot's
+/// generation at snapshot time. Same candidacy filter as
+/// `snapshot_evictable_blocks`. `evict_and_retry` frees its victim
+/// with the snapshot generation so a slot recycled while the pool
+/// lock was dropped for the policy consult is rejected by
+/// `MemoryPool::free`'s generation check instead of being reclaimed
+/// out from under its new owner.
+#[cfg(feature = "ai_eviction")]
+fn snapshot_pool_candidates(
+    pool_id: u8,
+) -> alloc::vec::Vec<(super::eviction::BlockMeta, u8)> {
+    let mut out: alloc::vec::Vec<(super::eviction::BlockMeta, u8)> =
+        alloc::vec::Vec::new();
+    if !is_initialized() {
+        return out;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let pool_ptr = match pool_id {
+            POOL_WEIGHT => addr_of_mut!(WEIGHT_POOL),
+            POOL_WORKSPACE => addr_of_mut!(WORKSPACE_POOL),
+            _ => return out,
+        };
+        let pool = &*pool_ptr;
+        for i in 0..pool.block_count {
+            if !pool.blocks[i].is_evictable() {
+                continue;
+            }
+            if let Some(meta) = pool.snapshot_at(i, pool_id) {
+                out.push((meta, pool.blocks[i].generation));
             }
         }
     }
@@ -1464,5 +1530,259 @@ mod tests {
             model_mem_init(FIRST_OVERSIZED_MB + 1, 2),
             Err(AllocError::AlignmentError)
         );
+    }
+}
+
+#[cfg(all(test, feature = "ai_eviction"))]
+mod eviction_tests {
+    //! Host-side tests for the eviction retry path. Run with
+    //! `cargo test --features ai_eviction` (the default `slm` feature
+    //! must stay on — it supplies the host `slm_get_time_ns` stub in
+    //! `slm::decoder::tests`; `lib.rs::test_ffi_stubs` supplies the
+    //! PMM and telemetry stubs). `make runtime-test` runs it in its
+    //! second pass (`--features slm,ai_eviction_models`).
+    use super::*;
+    use crate::mm::eviction::{self, BlockMeta, EvictionPolicy, PoolType};
+    use alloc::boxed::Box;
+    use core::sync::atomic::AtomicU32;
+
+    /// Tests here mutate the global pools + policy registry, so they
+    /// must not interleave. Same TestSerialGuard pattern as
+    /// `slm::registry::tests`.
+    static TEST_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    struct TestSerialGuard;
+
+    impl TestSerialGuard {
+        fn new() -> Self {
+            while TEST_SERIAL
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            TestSerialGuard
+        }
+    }
+
+    impl Drop for TestSerialGuard {
+        fn drop(&mut self) {
+            TEST_SERIAL.store(false, Ordering::Release);
+        }
+    }
+
+    /// Reinits the pools to a small test size and, on drop, back to
+    /// whatever size they had before (when they were initialized), and
+    /// restores the default eviction policies, so these tests don't
+    /// leak state into later ones.
+    struct TestPools {
+        prior: Option<(usize, usize)>,
+    }
+
+    impl TestPools {
+        fn new(weight_mb: usize, workspace_mb: usize) -> Self {
+            let mb = |blocks: usize| blocks * (BLOCK_SIZE / (1024 * 1024));
+            let prior = if is_initialized() {
+                Some((mb(weight_pool_stats().total_blocks),
+                      mb(workspace_pool_stats().total_blocks)))
+            } else {
+                None
+            };
+            model_mem_reinit(weight_mb, workspace_mb).expect("reinit");
+            TestPools { prior }
+        }
+    }
+
+    impl Drop for TestPools {
+        fn drop(&mut self) {
+            eviction::reset_to_default();
+            if let Some((w, ws)) = self.prior {
+                let _ = model_mem_reinit(w, ws);
+            }
+        }
+    }
+
+    /// Policy that recreates the free→realloc race inside the window
+    /// where `evict_and_retry` has dropped the pool lock to consult
+    /// the policy: on the first call it frees the hot block behind
+    /// candidate slot 0 and immediately reallocates the slot (bumping
+    /// its generation), then nominates that same stale candidate.
+    struct EvictRacer {
+        hot: ModelHandle,
+        raced: bool,
+        realloced: &'static AtomicU32,
+    }
+
+    impl EvictionPolicy for EvictRacer {
+        fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+            if !self.raced {
+                self.raced = true;
+                free(self.hot).expect("race free");
+                let h = alloc_workspace(BLOCK_SIZE).expect("race realloc");
+                self.realloced.store(handle_bits(h), Ordering::Relaxed);
+                return candidates
+                    .iter()
+                    .position(|m| (m.block_id & 0x00FF_FFFF) == 0)
+                    .expect("slot 0 in candidates");
+            }
+            // Second consult after the stale candidate was pruned.
+            0
+        }
+
+        fn name(&self) -> &'static str {
+            "EvictRacer"
+        }
+    }
+
+    #[test]
+    fn stale_snapshot_victim_is_skipped_not_evicted() {
+        static REALLOCED: AtomicU32 = AtomicU32::new(0);
+        let _s = TestSerialGuard::new();
+        let _p = TestPools::new(4, 4);
+        let h0 = alloc_workspace(BLOCK_SIZE).expect("alloc h0");
+        let h1 = alloc_workspace(BLOCK_SIZE).expect("alloc h1");
+        let p1 = get_ptr(h1).expect("h1 ptr");
+
+        eviction::set_eviction_policy_for_pool(
+            PoolType::Workspace,
+            Box::new(EvictRacer { hot: h0, raced: false, realloced: &REALLOCED }),
+        );
+
+        // Pool is full → this alloc must evict. The racer recycles
+        // slot 0 mid-decision; the snapshot generation no longer
+        // matches, so the allocator must skip it and evict slot 1.
+        let h2 = alloc_workspace(BLOCK_SIZE).expect("alloc with eviction");
+        assert_eq!(
+            get_ptr(h2),
+            Some(p1),
+            "stale victim must be skipped; eviction falls back to slot 1"
+        );
+        assert!(get_ptr(h1).is_none(), "slot 1 must have been evicted");
+        // Only the successful reclaim counts — the stale skip doesn't.
+        assert_eq!(workspace_pool_stats().evictions_total, 1);
+
+        free(h2).expect("free h2");
+        free(handle_from_bits(REALLOCED.load(Ordering::Relaxed)))
+            .expect("free the racer's reallocated slot");
+    }
+
+    /// Policy that frees the sole candidate during the consult (the
+    /// pool lock is dropped there), then nominates it anyway.
+    struct FreeRacer {
+        hot: ModelHandle,
+    }
+
+    impl EvictionPolicy for FreeRacer {
+        fn select_victim(&mut self, _candidates: &[BlockMeta]) -> usize {
+            free(self.hot).expect("race free");
+            0
+        }
+
+        fn name(&self) -> &'static str {
+            "FreeRacer"
+        }
+    }
+
+    #[test]
+    fn exhausted_candidates_fall_through_to_retry_alloc() {
+        let _s = TestSerialGuard::new();
+        let _p = TestPools::new(4, 4);
+        let h0 = alloc_workspace(BLOCK_SIZE).expect("alloc h0");
+        let h1 = alloc_workspace(BLOCK_SIZE).expect("alloc h1");
+        // Pin h1 (refcount 2) so h0 is the sole candidate.
+        let h1b = share(h1).expect("share h1");
+
+        eviction::set_eviction_policy_for_pool(
+            PoolType::Workspace,
+            Box::new(FreeRacer { hot: h0 }),
+        );
+
+        // The sole candidate is freed mid-consult, so no eviction can
+        // land and the candidate list is exhausted — but the pool now
+        // has a free block, which the unconditional retry must pick
+        // up instead of reporting a spurious OutOfMemory.
+        let h2 = alloc_workspace(BLOCK_SIZE)
+            .expect("concurrent free during consult must not surface as OOM");
+        assert_eq!(
+            workspace_pool_stats().evictions_total, 0,
+            "no reclaim happened — nothing may count as an eviction"
+        );
+
+        free(h2).expect("free h2");
+        free(h1b).expect("free h1b (drop share)");
+        free(h1).expect("free h1");
+    }
+
+    /// Policy that takes a second reference (`share`) on the block
+    /// behind candidate slot 0 during the consult, the way a
+    /// `WeightLease::acquire` on another CPU would, then nominates it.
+    struct ShareRacer {
+        target: ModelHandle,
+        shared: &'static AtomicU32,
+    }
+
+    impl EvictionPolicy for ShareRacer {
+        fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+            if self.shared.load(Ordering::Relaxed) == 0 {
+                let h = share(self.target).expect("race share");
+                self.shared.store(handle_bits(h), Ordering::Relaxed);
+                return candidates
+                    .iter()
+                    .position(|m| (m.block_id & 0x00FF_FFFF) == 0)
+                    .expect("slot 0 in candidates");
+            }
+            0
+        }
+
+        fn name(&self) -> &'static str {
+            "ShareRacer"
+        }
+    }
+
+    /// The use-after-free #1066 is about: before the fix, a victim
+    /// shared during the consult kept its generation, so `free` just
+    /// dropped refcount 2->1 and returned Ok. The eviction was counted,
+    /// the sharer's reference was silently consumed, and the slot was
+    /// later freed under it. Now the shared victim must be skipped:
+    /// its refcount stays 2 and the eviction lands on slot 1.
+    #[test]
+    fn victim_shared_during_consult_is_not_evicted() {
+        static SHARED: AtomicU32 = AtomicU32::new(0);
+        let _s = TestSerialGuard::new();
+        let _p = TestPools::new(4, 4);
+        let h0 = alloc_workspace(BLOCK_SIZE).expect("alloc h0");
+        let h1 = alloc_workspace(BLOCK_SIZE).expect("alloc h1");
+        let p0 = get_ptr(h0).expect("h0 ptr");
+        let p1 = get_ptr(h1).expect("h1 ptr");
+
+        eviction::set_eviction_policy_for_pool(
+            PoolType::Workspace,
+            Box::new(ShareRacer { target: h0, shared: &SHARED }),
+        );
+
+        let h2 = alloc_workspace(BLOCK_SIZE).expect("alloc with eviction");
+        assert_eq!(get_ptr(h2), Some(p1), "eviction must land on slot 1");
+        assert_eq!(get_ptr(h0), Some(p0), "shared victim must survive");
+        assert_eq!(workspace_pool_stats().shared_blocks, 1,
+                   "the sharer's reference must still be held");
+        assert_eq!(workspace_pool_stats().evictions_total, 1);
+
+        let h0b = handle_from_bits(SHARED.load(Ordering::Relaxed));
+        free(h0b).expect("drop the share");
+        free(h0).expect("free h0");
+        free(h2).expect("free h2");
+    }
+
+    fn handle_bits(h: ModelHandle) -> u32 {
+        (h.block_index as u32) | ((h.pool_id as u32) << 16) | ((h.generation as u32) << 24)
+    }
+
+    fn handle_from_bits(b: u32) -> ModelHandle {
+        ModelHandle {
+            block_index: (b & 0xFFFF) as u16,
+            pool_id: ((b >> 16) & 0xFF) as u8,
+            generation: (b >> 24) as u8,
+            _reserved: 0,
+        }
     }
 }

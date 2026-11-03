@@ -393,3 +393,41 @@ pub fn run_scenario(idx: u32) -> Option<RunResult> {
         mean_ns: mean,
     })
 }
+
+#[cfg(all(test, feature = "ai_eviction"))]
+mod tests {
+    //! End-to-end replay of the embedded simulator traces through the
+    //! real pools and `evict_and_retry` (#1066). The classical policies
+    //! are deterministic, so their fault rates are pinned to the table
+    //! in docs/eviction.md ("Eviction E2E"). A change to the eviction
+    //! path that alters any victim choice shows up here. The ML
+    //! policies are left out: they take minutes on the host and their
+    //! compiled-in models change between releases.
+    use super::*;
+    use crate::mm::eviction::registry::make_policy_by_name;
+    extern crate std;
+
+    #[test]
+    fn classical_policy_fault_rates_match_reference_table() {
+        let table: [(&str, [u64; 8]); 5] = [
+            ("first_candidate", [55, 69, 69, 66, 56, 66, 4, 51]),
+            ("lru", [79, 82, 75, 54, 86, 72, 100, 75]),
+            ("lfu", [79, 82, 75, 54, 86, 72, 100, 50]),
+            ("arc", [79, 81, 75, 46, 76, 72, 5, 59]),
+            ("slm", [79, 82, 75, 54, 86, 72, 100, 75]),
+        ];
+        for (name, want) in table {
+            for pool in [eviction::PoolType::Weight, eviction::PoolType::Workspace] {
+                eviction::set_eviction_policy_for_pool(pool, make_policy_by_name(name).unwrap());
+            }
+            let mut got = [0u64; 8];
+            for i in 0..scenario_count() {
+                assert_eq!(reset(128, 64, b"x\0", 2048, false), 0);
+                let r = run_scenario(i).unwrap();
+                got[i as usize] = r.faults * 100 / r.accesses.max(1);
+            }
+            assert_eq!(got, want, "{} fault% row changed", name);
+        }
+        eviction::reset_to_default();
+    }
+}
