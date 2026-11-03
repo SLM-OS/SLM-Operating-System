@@ -511,14 +511,21 @@ int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags);
  * page-table pages) are NOT freed here even if they become empty;
  * vmm_destroy_user_l1 reclaims them at task tear-down.
  *
- * No TLB invalidation is emitted. Callers that may have a live TLB
- * entry for `va` (i.e. the L1 is in some CPU's TTBR0_EL1 right now)
- * must follow this with `tlbi vae1is, <va>>>12` + dsb ish + isb.
+ * The TLB entry for `va` is invalidated before the page is freed
+ * (#1070), so this is safe while the L1 is live in TTBR0_EL1.
  *
  * Returns 0 on success, -1 if `va` is out of the user window, not
  * page-aligned, or not currently mapped.
  */
 int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va);
+
+/*
+ * Unmap `pages` consecutive user pages from `va`: invalidate every
+ * leaf, issue one TLB range invalidate, then free the PMM-owned pages
+ * (#1070). Continues past unmapped pages and returns -1 if any page in
+ * the range wasn't mapped (or was out of the user window), else 0.
+ */
+int vmm_user_unmap_range(uint64_t l1_pa, uint64_t va, uint64_t pages);
 
 /*
  * PA of the boot (kernel) L1 table — the L1 that vmm_init populated

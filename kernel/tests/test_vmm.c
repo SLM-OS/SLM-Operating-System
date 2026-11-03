@@ -697,6 +697,64 @@ static void test_user_unmap_page_frees_pmm_owned(void)
                         "PMM leaked across map+unmap+destroy");
 }
 
+/* Raw L3 entry for `va` in a user L1, or ~0 when a level is missing. */
+static uint64_t test_user_l3_raw(uint64_t l1_pa, uint64_t va)
+{
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t e1 = l1[L1_INDEX(va)];
+    if ((e1 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return ~0UL;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(e1 & PTE_ADDR_MASK);
+    uint64_t e2 = l2[L2_INDEX(va)];
+    if ((e2 & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return ~0UL;
+    }
+    uint64_t *l3 = (uint64_t *)(uintptr_t)(e2 & PTE_ADDR_MASK);
+    return l3[L3_INDEX(va)];
+}
+
+/* Test (#1070): vmm_user_unmap_range invalidates every leaf, flushes
+ * the TLB once and then frees the PMM-owned pages. A hole in the range
+ * reports -1 without stopping the rest; afterwards every entry is zero
+ * (not just invalid) and exactly the owned pages came back to PMM. */
+static void test_user_unmap_range_frees_after_flush(void)
+{
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    uint64_t va = USER_VA_BASE + 0x40000;
+    /* Pages 0, 1 and 3 mapped and owned; page 2 left as a hole. */
+    for (uint64_t i = 0; i < 4; i++) {
+        if (i == 2) {
+            continue;
+        }
+        void *leaf = pmm_alloc_pages(1);
+        TEST_ASSERT_NOT_NULL(leaf);
+        TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(
+            l1_pa, va + i * PAGE_SIZE, (uint64_t)(uintptr_t)leaf,
+            VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+    }
+
+    struct pmm_stats mapped, unmapped;
+    pmm_get_stats(&mapped);
+
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_range(l1_pa, va, 4));
+    pmm_get_stats(&unmapped);
+    /* >= rather than ==: other tasks may allocate concurrently. */
+    TEST_ASSERT_MESSAGE(unmapped.free_pages >= mapped.free_pages + 3,
+                        "owned pages were not returned to PMM");
+    for (uint64_t i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT64(0, test_user_l3_raw(l1_pa, va + i * PAGE_SIZE));
+    }
+
+    /* Nothing left to unmap; zero pages is a no-op. */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_range(l1_pa, va, 4));
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_unmap_range(l1_pa, va, 0));
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
 /* Test: destroy walks L3 leaves and frees PMM_OWNED pages without
  * the caller having to unmap them first. */
 static void test_destroy_user_l1_frees_owned_leaves(void)
@@ -923,6 +981,7 @@ int test_suite_vmm(void)
     RUN_TEST(test_destroy_user_l1_zero_is_noop);
     RUN_TEST(test_create_destroy_user_l1_no_leak);
     RUN_TEST(test_user_unmap_page_frees_pmm_owned);
+    RUN_TEST(test_user_unmap_range_frees_after_flush);
     RUN_TEST(test_destroy_user_l1_frees_owned_leaves);
     RUN_TEST(test_user_unmap_page_validation);
 
