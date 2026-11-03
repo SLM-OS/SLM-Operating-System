@@ -24,6 +24,10 @@
 #include "debug.h"
 #include "timer.h"
 #include "pmm.h"
+#include "ga10b_bringup.h"
+#include "ga10b_netlist.h"
+#include "ga10b_ctxsw_ucode.h"
+#include "ga10b_acr_blob.h"
 #include "cache.h"
 #include "string.h"
 
@@ -79,6 +83,32 @@
 #define RISCV_BR_RETCODE_PASS            3u
 #define RISCV_BR_RETCODE_FAIL            2u
 
+/* GR (hw_gr_ga10b.h). */
+#define NV_PGRAPH_STATUS                 0x400700u
+#define NV_PGRAPH_PRI_FE_FIFO_ACCESS     0x400500u  /* gr_gpfifo_ctl */
+#define GR_GPFIFO_CTL_ACCESS_SEMAPHORE   0x00010001u /* access + semaphore_access enabled */
+#define NV_PGRAPH_PRI_FECS_DMACTL        0x40910cu
+#define NV_PGRAPH_PRI_GPCS_GPCCS_DMACTL  0x41a10cu
+#define GR_DMACTL_SCRUBBING              0x6u       /* imem (bit 2) | dmem (bit 1) */
+#define NV_PGRAPH_PRI_FECS_CPUCTL        0x409100u
+#define NV_PGRAPH_PRI_FECS_CPUCTL_ALIAS  0x409130u
+#define NV_PGRAPH_PRI_GPCS_GPCCS_CPUCTL_ALIAS 0x41a130u
+#define GR_CPUCTL_STARTCPU               0x2u
+#define NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(i) (0x409800u + (i) * 4u)
+#define NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX_CLEAR0 0x409840u
+#define NV_PGRAPH_PRI_FECS_CURRENT_CTX   0x409b00u
+#define NV_PGRAPH_PRI_FECS_METHOD_DATA   0x409500u
+#define NV_PGRAPH_PRI_FECS_METHOD_PUSH   0x409504u
+#define FECS_MAILBOX0_PASS               1u
+#define NV_PGRAPH_PRI_GPC0_GPM_PD_LIVE_PHYSICAL_PES 0x500c50u
+#define NV_PGRAPH_PRI_GPC0_SWDX_PES_MASK 0x5001d0u
+#define NV_PGRAPH_PRI_GPC0_GPM_PD_SM_ID(tpc) (0x500c10u + (tpc) * 4u)
+#define NV_PGRAPH_PRI_GPC0_TPC_SM_CFG(tpc)   (0x504608u + (tpc) * 0x800u)
+
+/* FECS methods (gr_fecs_method_push_adr_*). */
+#define FECS_METHOD_SET_WATCHDOG_TIMEOUT 0x21u
+#define FECS_METHOD_DISCOVER_IMAGE_SIZE  0x10u
+
 #define PMC_ENABLE_PERFMON               (1u << 28)
 
 /* Device-info layout on GA10B (read back at step 3 and checked):
@@ -105,6 +135,9 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_PRI]   = "pri",
     [GA10B_COLD_ENGINES] = "engines",
     [GA10B_COLD_FB]      = "fb",
+    [GA10B_COLD_GR_HW]   = "gr_hw",
+    [GA10B_COLD_ACR]     = "acr",
+    [GA10B_COLD_FALCONS] = "falcons",
 };
 
 const char *ga10b_cold_step_name(enum ga10b_cold_step step)
@@ -446,6 +479,264 @@ int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
     return 0;
 }
 
+/* ---- Netlist (NETC: the image nvgpu loads on silicon, see
+ * ga10b_netlist.h) ---- */
+static struct ga10b_netlist cold_netlist;
+
+static int netlist_open(void)
+{
+    if (cold_netlist.data) return 0;
+    struct ga10b_firmware_blob net;
+    if (ga10b_firmware_get(GA10B_FW_NET_C, &net) < 0) {
+        WARN("ga10b-cold: NETC netlist not embedded");
+        return -1;
+    }
+    int rc = ga10b_netlist_open(&cold_netlist, net.data, net.size);
+    if (rc != GA10B_NETLIST_OK) {
+        WARN("ga10b-cold: NETC netlist rejected rc=%d", rc);
+        return -1;
+    }
+    return 0;
+}
+
+static int load_av_region(uint32_t region_id)
+{
+    /* A region the netlist does not carry is an empty list, as in
+     * nvgpu (the list stays zero-length when netlist.c never sees it). */
+    struct ga10b_netlist_av_view v;
+    int rc = ga10b_netlist_get_av_list(&cold_netlist, region_id, &v);
+    if (rc == GA10B_NETLIST_ERR_NOT_FOUND) return 0;
+    if (rc != GA10B_NETLIST_OK) {
+        WARN("ga10b-cold: netlist region %s unreadable rc=%d",
+             ga10b_netlist_region_name(region_id), rc);
+        return -1;
+    }
+    for (uint32_t i = 0; i < v.count; i++)
+        bar0_wr(v.l[i].addr, v.l[i].value);
+    return (int)v.count;
+}
+
+static int wait_gr_idle(void)
+{
+    /* ga10b_gr_init_wait_idle: GR_STATUS.busy clear. */
+    if (wait_bits_clear(NV_PGRAPH_STATUS, 0x1u, 2000000u) != 0) {
+        WARN("ga10b-cold: GR busy (STATUS=0x%08x)",
+             (unsigned)bar0_rd(NV_PGRAPH_STATUS));
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- Step 5: GR hardware (gr_init_prepare_hw_impl) ----
+ *
+ * FIFO access on, the netlist's non-context register loads (sw_non_ctx
+ * plus the compute and graphics local/global lists, as the L4T build
+ * with CONFIG_NVGPU_GRAPHICS loads them), then wait for FECS/GPCCS
+ * memory scrubbing and GR idle. GR interrupt enables are skipped: SLM-OS
+ * polls. */
+static int step_gr_hw(void)
+{
+    if (netlist_open() != 0) return -1;
+    bar0_wr(NV_PGRAPH_PRI_FE_FIFO_ACCESS, GR_GPFIFO_CTL_ACCESS_SEMAPHORE);
+    static const uint32_t lists[] = {
+        GA10B_NETLIST_REGIONID_SW_NON_CTX_LOAD,
+        GA10B_NETLIST_REGIONID_SW_NON_CTX_LOCAL_COMPUTE_LOAD,
+        GA10B_NETLIST_REGIONID_SW_NON_CTX_LOCAL_GFX_LOAD,
+        GA10B_NETLIST_REGIONID_SW_NON_CTX_GLOBAL_COMPUTE_LOAD,
+        GA10B_NETLIST_REGIONID_SW_NON_CTX_GLOBAL_GFX_LOAD,
+    };
+    int total = 0;
+    for (unsigned i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        int n = load_av_region(lists[i]);
+        if (n < 0) return -1;
+        total += n;
+    }
+    if (wait_bits_clear(NV_PGRAPH_PRI_FECS_DMACTL, GR_DMACTL_SCRUBBING, 1000000u) ||
+        wait_bits_clear(NV_PGRAPH_PRI_GPCS_GPCCS_DMACTL, GR_DMACTL_SCRUBBING, 1000000u)) {
+        WARN("ga10b-cold: FECS/GPCCS memory scrub did not finish");
+        return -1;
+    }
+    if (wait_gr_idle() != 0) return -1;
+    INFO("ga10b-cold: GR non-ctx loads done (%d writes)", total);
+    return 0;
+}
+
+/* ---- Step 6: ACR ----
+ *
+ * Build the ctxsw ucode surface (FECS/GPCCS boot + netlist code/data),
+ * the non-WPR LS blob for FECS and GPCCS and the flcn2_acr_desc that
+ * points at it, then boot ACR on the GSP. ACR authenticates and
+ * decrypts both images into the WPR carveout (programmed by MB2 for
+ * every boot path) and loads them into the GR falcons. The surface is
+ * CPU-only scratch; the blob and descriptor are read by the GSP over a
+ * non-coherent path, so both are cleaned to DRAM. */
+static int step_acr(void)
+{
+    struct ga10b_firmware_blob fecs, gpccs, fecs_sig, gpccs_sig, t, d, m;
+    if (netlist_open() != 0 ||
+        ga10b_firmware_get(GA10B_FW_FECS, &fecs) < 0 ||
+        ga10b_firmware_get(GA10B_FW_GPCCS, &gpccs) < 0 ||
+        ga10b_firmware_get(GA10B_FW_FECS_SIG, &fecs_sig) < 0 ||
+        ga10b_firmware_get(GA10B_FW_GPCCS_SIG, &gpccs_sig) < 0 ||
+        ga10b_firmware_get(GA10B_FW_ACR_TEXT, &t) < 0 ||
+        ga10b_firmware_get(GA10B_FW_ACR_DATA, &d) < 0 ||
+        ga10b_firmware_get(GA10B_FW_ACR_MANIFEST, &m) < 0) {
+        WARN("ga10b-cold: GA10B firmware not embedded");
+        return -1;
+    }
+
+    struct ga10b_ctxsw_ucode_inputs uin = {
+        .fecs_fw = fecs.data, .fecs_fw_size = fecs.size,
+        .gpccs_fw = gpccs.data, .gpccs_fw_size = gpccs.size,
+    };
+    struct ga10b_ctxsw_ucode_info uinfo;
+    if (ga10b_ctxsw_ucode_inputs_from_netlist(&cold_netlist, &uin) != GA10B_CTXSW_OK ||
+        ga10b_ctxsw_ucode_layout(&uin, &uinfo) != GA10B_CTXSW_OK) {
+        WARN("ga10b-cold: ctxsw ucode layout failed");
+        return -1;
+    }
+    size_t surf_pages = (uinfo.surface_size + 4095u) / 4096u;
+    void *surface = pmm_alloc_pages(surf_pages);
+    if (!surface ||
+        ga10b_ctxsw_ucode_build(&uin, surface, surf_pages * 4096u, &uinfo) != GA10B_CTXSW_OK) {
+        WARN("ga10b-cold: ctxsw ucode surface build failed");
+        if (surface) pmm_free_pages(surface, surf_pages);
+        return -1;
+    }
+
+    struct ga10b_wpr_info wpr;
+    if (!ga10b_acr_wpr_info_from_regs(bar0_rd(GA10B_FB_MMU_WPR1_ADDR_LO),
+                                      bar0_rd(GA10B_FB_MMU_WPR1_ADDR_HI), &wpr)) {
+        WARN("ga10b-cold: WPR1 carveout not programmed");
+        pmm_free_pages(surface, surf_pages);
+        return -1;
+    }
+
+    struct ga10b_acr_blob_inputs bin = {
+        .surface = surface, .surface_size = uinfo.surface_size, .ucode = &uinfo,
+        .fecs_sig = fecs_sig.data, .fecs_sig_size = fecs_sig.size,
+        .gpccs_sig = gpccs_sig.data, .gpccs_sig_size = gpccs_sig.size,
+        .wpr_base = wpr.wpr_base,
+    };
+    static struct ga10b_acr_blob_layout lay;
+    if (ga10b_acr_blob_layout(&bin, &lay) != GA10B_ACR_OK || lay.wpr_size > wpr.size) {
+        WARN("ga10b-cold: LS blob layout failed (size 0x%x, WPR 0x%lx)",
+             (unsigned)lay.wpr_size, (unsigned long)wpr.size);
+        pmm_free_pages(surface, surf_pages);
+        return -1;
+    }
+    /* Blob and descriptor stay allocated: ACR may need them again for
+     * recovery, and nvgpu keeps them for the GPU's lifetime too. */
+    size_t blob_pages = (lay.wpr_size + 4095u) / 4096u;
+    void *blob = pmm_alloc_pages(blob_pages);
+    struct ga10b_flcn2_acr_desc *desc = pmm_alloc_page();
+    int rc = -1;
+    if (blob && desc &&
+        ga10b_acr_blob_build(&bin, blob, blob_pages * 4096u, &lay) == GA10B_ACR_OK) {
+        cache_clean_range(blob, lay.wpr_size);
+        memset(desc, 0, 4096);
+        ga10b_acr_build_flcn2_desc(desc, (uint64_t)(uintptr_t)blob, lay.wpr_size);
+        cache_clean_range(desc, sizeof(*desc));
+        INFO("ga10b-cold: LS blob 0x%lx (%u bytes), desc 0x%lx, WPR 0x%lx+0x%lx",
+             (unsigned long)(uintptr_t)blob, (unsigned)lay.wpr_size,
+             (unsigned long)(uintptr_t)desc, (unsigned long)wpr.wpr_base,
+             (unsigned long)wpr.size);
+        rc = ga10b_cold_gsp_boot_acr_blobs(t.data, (uint32_t)t.size,
+                                           d.data, (uint32_t)d.size,
+                                           m.data, (uint32_t)m.size,
+                                           (uint64_t)(uintptr_t)desc);
+    } else {
+        WARN("ga10b-cold: LS blob build failed");
+    }
+    pmm_free_pages(surface, surf_pages);
+    return rc;
+}
+
+/* FECS method interface (gm20b_gr_falcon_submit_fecs_method_op):
+ * clear mailbox 0, write data then method, poll mailbox 0. */
+static int fecs_method(uint32_t method, uint32_t data, uint32_t *ret)
+{
+    bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
+    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_DATA, data);
+    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_PUSH, method);
+    for (uint32_t t = 0; t < 2000000u; t += 10) {
+        uint32_t v = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
+        if (v != 0u) {
+            if (ret) *ret = v;
+            return 0;
+        }
+        udelay(10);
+    }
+    return -1;
+}
+
+/* ---- Step 7: start FECS/GPCCS ----
+ *
+ * nvgpu_gr_falcon_load_secure_ctxsw_ucode with ACR-loaded falcons:
+ * start GPCCS, clear FECS mailbox 0, set mailbox 1, start FECS
+ * (gm20b_gr_falcon_start_fecs), wait for the ctxsw ucode to post PASS
+ * in mailbox 0 (gm20b_gr_falcon_wait_ctxsw_ready), then the first
+ * methods nvgpu sends: watchdog timeout and the context image size. */
+static uint32_t gr_ctx_image_size;
+
+/* SM numbering nvgpu computes for this part (1 GPC, 4 TPCs on 2 PES,
+ * nvgpu_gr_config SM ordering), from the trace: SM n -> TPC
+ * ga10b_sm_to_tpc[n]. ga10b_gr_init_sm_id_numbering writes TPC.SM_CFG
+ * = smid and GPM_PD_SM_ID(tpc) = smid. */
+static const uint8_t ga10b_sm_to_tpc[4] = { 3, 1, 2, 0 };
+
+static void gr_config_sm_ids(void)
+{
+    /* gv11b_gr_config_set_live_pes_mask: SWDX PES mask = live PES. */
+    bar0_wr(NV_PGRAPH_PRI_GPC0_SWDX_PES_MASK,
+            bar0_rd(NV_PGRAPH_PRI_GPC0_GPM_PD_LIVE_PHYSICAL_PES));
+    for (uint32_t sm = 0; sm < 4u; sm++) {
+        uint32_t tpc = ga10b_sm_to_tpc[sm];
+        bar0_wr(NV_PGRAPH_PRI_GPC0_TPC_SM_CFG(tpc), sm);
+        bar0_wr(NV_PGRAPH_PRI_GPC0_GPM_PD_SM_ID(tpc), sm);
+    }
+}
+
+static int step_falcons(void)
+{
+    gr_config_sm_ids();
+    bar0_wr(NV_PGRAPH_PRI_GPCS_GPCCS_CPUCTL_ALIAS, GR_CPUCTL_STARTCPU);
+    bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
+    bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(1), 1u);
+    bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6), 0u);
+    bar0_wr(NV_PGRAPH_PRI_FECS_CPUCTL_ALIAS, GR_CPUCTL_STARTCPU);
+
+    uint32_t mb0 = 0;
+    for (uint32_t t = 0; t < 2000000u; t += 10) {
+        mb0 = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
+        if (mb0 != 0u) break;
+        udelay(10);
+    }
+    if (mb0 != FECS_MAILBOX0_PASS) {
+        WARN("ga10b-cold: FECS ctxsw ucode not ready (MAILBOX0=0x%08x "
+             "MAILBOX6=0x%08x CPUCTL=0x%08x)", (unsigned)mb0,
+             (unsigned)bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6)),
+             (unsigned)bar0_rd(NV_PGRAPH_PRI_FECS_CPUCTL));
+        return -1;
+    }
+    bar0_wr(NV_PGRAPH_PRI_FECS_CURRENT_CTX, 0u);
+
+    /* Watchdog: FECS acknowledges without a mailbox value, so only
+     * the push matters (nvgpu does not wait for this one either). */
+    bar0_wr(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0), 0u);
+    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_DATA, 0x3fffffffu);
+    bar0_wr(NV_PGRAPH_PRI_FECS_METHOD_PUSH, FECS_METHOD_SET_WATCHDOG_TIMEOUT);
+    udelay(100);
+
+    if (fecs_method(FECS_METHOD_DISCOVER_IMAGE_SIZE, 0u, &gr_ctx_image_size) != 0) {
+        WARN("ga10b-cold: FECS did not answer DISCOVER_IMAGE_SIZE");
+        return -1;
+    }
+    INFO("ga10b-cold: FECS/GPCCS running, GR context image 0x%x bytes",
+         (unsigned)gr_ctx_image_size);
+    return 0;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -453,6 +744,9 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_PRI]   = step_pri,
     [GA10B_COLD_ENGINES] = step_engines,
     [GA10B_COLD_FB]      = step_fb,
+    [GA10B_COLD_GR_HW]   = step_gr_hw,
+    [GA10B_COLD_ACR]     = step_acr,
+    [GA10B_COLD_FALCONS] = step_falcons,
 };
 
 int ga10b_cold_run(enum ga10b_cold_step last)

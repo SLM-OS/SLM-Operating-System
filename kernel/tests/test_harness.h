@@ -271,6 +271,11 @@ int test_suite_efi_reloc(void);
 /* Tegra234 CPU NDIV helpers (#1053) */
 int test_suite_tegra_cpufreq(void);
 
+/* GA10B netlist / ctxsw surface / ACR LS blob builders (#1088) */
+int test_suite_ga10b_netlist(void);
+int test_suite_ga10b_ctxsw_ucode(void);
+int test_suite_ga10b_acr_blob(void);
+
 /* ARM PMU primitive smoke tests (#874) */
 int test_suite_pmu(void);
 

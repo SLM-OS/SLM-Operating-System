@@ -667,6 +667,11 @@ set(KERNEL_SOURCES
     kernel/src/gpu_consumer.c
     kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
+    # GA10B ACR/ctxsw blob builders (#1088): pure in-memory code, no MMIO,
+    # built on every platform so the unit tests run under QEMU.
+    kernel/gpu/nvidia/ga10b_netlist.c
+    kernel/gpu/nvidia/ga10b_ctxsw_ucode.c
+    kernel/gpu/nvidia/ga10b_acr_blob.c
     kernel/gpu/oplib_pool.c
     kernel/gpu/oplib_weights_pool.c
     kernel/gpu/operator_dispatch.c
@@ -1142,6 +1147,9 @@ set(TEST_SOURCES
     # UEFI-direct relocation decision (#26) — same platforms as efi_stub.c
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_efi_reloc.c>
     kernel/tests/test_tegra_cpufreq.c
+    kernel/tests/test_ga10b_netlist.c
+    kernel/tests/test_ga10b_ctxsw_ucode.c
+    kernel/tests/test_ga10b_acr_blob.c
 )
 
 # lwIP library sources (QEMU networking only)
