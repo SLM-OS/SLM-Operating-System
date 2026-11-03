@@ -147,7 +147,7 @@ and 3.
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTUUID
 # Find the SLMOS card: a ~29 GB disk with a FAT32 partition labelled
 # SLMOS, on the host's reader (not an SDWire). Then:
-DEV=/dev/sdX    # the disk you identified; double-check before step 1
+DEV=/dev/sdX    # the disk identified above; double-check before step 1
 ```
 
 ### 1. Shrink the original SLMOS partition and create two new ones
