@@ -174,3 +174,14 @@
 
 #define TEGRA234_POWER_DOMAIN_XUSBA       10U
 #define TEGRA234_POWER_DOMAIN_XUSBC       12U
+
+/* ===================================================================== */
+/*  GA10B GPU (#1088)                                                    */
+/* ===================================================================== */
+/*
+ * Used by the UEFI-direct cold GPU bring-up in
+ * kernel/gpu/nvidia/ga10b_cold.c. The GPU clock and reset IDs
+ * (TEGRA234_CLK_GPUSYS / GPC0CLK / GPC1CLK, TEGRA234_RESET_GPU) live
+ * in platform.h next to the other BPMP IDs.
+ */
+#define TEGRA234_POWER_DOMAIN_GPU         35U
