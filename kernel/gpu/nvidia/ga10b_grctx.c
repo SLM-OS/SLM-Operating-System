@@ -793,6 +793,13 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
         return GA10B_GRCTX_ERR_NETLIST;
     }
 
+    /* Reject a bad SW_CTX_LOAD address before touching the hardware. */
+    for (uint32_t i = 0; i < ctx_load.count; i++) {
+        if (ctx_load.l[i].addr >= GA10B_BAR0_SIZE || (ctx_load.l[i].addr & 3u)) {
+            return GA10B_GRCTX_ERR_NETLIST;
+        }
+    }
+
     /* ---- init_hw_state (obj_ctx.c:610) ---- */
     if ((rc = fe_pwr_mode(o, true)) != 0) return rc;
     override_context_reset(o);
@@ -805,11 +812,6 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
     if ((rc = fecs_submit(o, g, &bind, NULL)) != 0) return rc;
     if ((rc = wait_idle(o, g)) != 0) return rc;
 
-    for (uint32_t i = 0; i < ctx_load.count; i++) {
-        if (ctx_load.l[i].addr >= GA10B_BAR0_SIZE || (ctx_load.l[i].addr & 3u)) {
-            return GA10B_GRCTX_ERR_NETLIST;
-        }
-    }
     for (uint32_t i = 0; i < ctx_load.count; i++) {
         wr(o, ctx_load.l[i].addr, ctx_load.l[i].value);
     }
