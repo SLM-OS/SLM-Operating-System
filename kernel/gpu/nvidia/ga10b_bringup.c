@@ -1717,6 +1717,20 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
     return 0;
 }
 
+int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
+                                  const struct ga10b_channel_handoff *h)
+{
+    if (!b || !h || ga10b_validate_handoff(h) < 0) {
+        uart_puts("[GA10B-P6] install_handoff: invalid handoff\n");
+        return -1;
+    }
+    g_handoff = *h;
+    g_qmd_pool_next_slot = 0;
+    b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+    b->last_error_phase = -1;
+    return 0;
+}
+
 uint32_t ga10b_bringup_active_pipeline_kind(void)
 {
     /* Reads the global g_handoff. Safe — single-threaded shell

@@ -30,6 +30,8 @@
 #include "ga10b_acr_blob.h"
 #include "ga10b_pmu.h"
 #include "ga10b_chan.h"
+#include "ga10b_grctx.h"
+#include "ga10b_channel_handoff.h"
 #include "cache.h"
 #include "string.h"
 
@@ -175,6 +177,8 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_PMU]     = "pmu",
     [GA10B_COLD_FALCONS] = "falcons",
     [GA10B_COLD_GR_INIT] = "gr_init",
+    [GA10B_COLD_GOLDEN]  = "golden",
+    [GA10B_COLD_CHANNEL] = "channel",
 };
 
 const char *ga10b_cold_step_name(enum ga10b_cold_step step)
@@ -1009,6 +1013,68 @@ static int step_pmu(void)
     return 0;
 }
 
+/* ---- Step 10: golden context ----
+ *
+ * The rest of nvgpu_gr_falcon_init_ctx_state (PM/zcull/preemption image
+ * sizes) and the SM L1 tag write, then nvgpu_gr_obj_ctx_init_golden_
+ * context_image: global context buffers, a temporary VM + instance
+ * block + gr_ctx, BIND_PTR, sw_ctx_load, bundle/method init, and FECS
+ * GOLDEN_IMAGE_SAVE. ga10b_grctx keeps a CPU copy for channels. */
+static struct ga10b_grctx cold_grctx;
+
+static int step_golden(void)
+{
+    int rc = ga10b_grctx_init(&cold_grctx, &cold_netlist, gr_ctx_image_size);
+    if (rc == GA10B_GRCTX_OK) rc = ga10b_grctx_init_support(&cold_gpu_ops, &cold_grctx);
+    if (rc == GA10B_GRCTX_OK) rc = ga10b_grctx_golden_create(&cold_gpu_ops, &cold_grctx);
+    if (rc != GA10B_GRCTX_OK) {
+        WARN("ga10b-cold: golden context failed rc=%d (FECS MAILBOX0=0x%08x "
+             "MAILBOX6=0x%08x GR_STATUS=0x%08x)", rc,
+             (unsigned)bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0)),
+             (unsigned)bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6)),
+             (unsigned)bar0_rd(NV_PGRAPH_STATUS));
+        return -1;
+    }
+    INFO("ga10b-cold: golden context image saved (0x%x bytes)",
+         (unsigned)cold_grctx.golden_size);
+    return 0;
+}
+
+/* ---- Step 11: channel ----
+ *
+ * What the Linux helper's ioctls do kernel-side (ALLOC_AS, OPEN_TSG,
+ * OPEN_CHANNEL, CREATE_SUBCONTEXT, SETUP_BIND, ALLOC_OBJ_CTX 0xC7C0,
+ * SET_PREEMPTION_MODE): address space, instance block, USERD, GPFIFO,
+ * pushbuffer, semaphore page and a GR context loaded from the golden
+ * image, then the runlist submit and CHRAM enable. The result is
+ * installed as the active handoff, so `nvgpu submit` /
+ * `submit-compute` and the dispatch paths run on it. */
+static struct ga10b_chan cold_chan;
+static struct ga10b_gr_chan_ctx cold_chan_gr;
+
+static int step_channel(void)
+{
+    struct ga10b_chan_params p;
+    ga10b_chan_default_params(&p);
+    int rc = ga10b_chan_create(&cold_gpu_ops, &cold_grctx, &p, &cold_chan_gr, &cold_chan);
+    if (rc != GA10B_CHAN_OK) {
+        WARN("ga10b-cold: channel create failed rc=%d", rc);
+        return -1;
+    }
+    struct ga10b_channel_handoff h;
+    memset(&h, 0, sizeof(h));
+    ga10b_chan_fill_handoff(&cold_chan, &h);
+    if (ga10b_bringup_install_handoff(ga10b_bringup_state(), &h) != 0) {
+        WARN("ga10b-cold: channel handoff rejected");
+        return -1;
+    }
+    INFO("ga10b-cold: channel %u (TSG %u) on the runlist, doorbell token 0x%x, "
+         "inst 0x%lx", (unsigned)p.chid, (unsigned)p.tsgid,
+         (unsigned)cold_chan.work_submit_token,
+         (unsigned long)cold_chan.inst.phys);
+    return 0;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -1021,6 +1087,8 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_PMU]     = step_pmu,
     [GA10B_COLD_FALCONS] = step_falcons,
     [GA10B_COLD_GR_INIT] = step_gr_init,
+    [GA10B_COLD_GOLDEN]  = step_golden,
+    [GA10B_COLD_CHANNEL] = step_channel,
 };
 
 int ga10b_cold_run(enum ga10b_cold_step last)

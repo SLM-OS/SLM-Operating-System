@@ -29,6 +29,8 @@ enum ga10b_cold_step {
     GA10B_COLD_PMU,         /* LS PMU RTOS booted, INIT message received */
     GA10B_COLD_FALCONS,     /* FECS/GPCCS started, ctxsw ucode ready */
     GA10B_COLD_GR_INIT,     /* GR/FB/LTC/CE setup nvgpu does after start */
+    GA10B_COLD_GOLDEN,      /* golden GR context image saved by FECS */
+    GA10B_COLD_CHANNEL,     /* TSG + channel on the runlist, handoff installed */
     GA10B_COLD_STEP_COUNT,
 };
 

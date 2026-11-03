@@ -197,6 +197,13 @@ const struct ga10b_channel_handoff *ga10b_bringup_handoff(void);
  * the channel handoff fields haven't been populated. */
 struct ga10b_bringup *ga10b_bringup_state(void);
 
+/* Use a channel SLM-OS created itself (UEFI-direct cold bring-up,
+ * #1088) instead of scanning DRAM for a Linux helper's handoff.
+ * Validates `h`, copies it as the active handoff and moves `b` to
+ * CHANNEL_OPEN so the submit/launch paths run on it. */
+int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
+                                  const struct ga10b_channel_handoff *h);
+
 /* Weights-pool descriptor convenience accessors (#714 W1, see
  * docs/design/gpu-weights-pool.md). The handoff v8 extension exposes
  * three fields (phys / gpu_va / size_bytes) that SLM-OS's `slm load`
