@@ -56,11 +56,12 @@ static inline void xusb_t234_decode_calib(uint32_t calib0, uint32_t calib_ext,
     for (uint32_t i = 0; i < T234_XUSB_NUM_USB2_PADS; i++) {
         uint32_t shift = (i == 0) ? 0 : 11 + (i - 1) * 6;
         out->hs_curr_level[i] = (uint8_t)((calib0 >> shift) & 0x3F);
-        if (i == 0)
+        if (i == 0) {
             out->hs_term_range_adj[i] = (uint8_t)((calib0 >> 7) & 0xF);
-        else
+        } else {
             out->hs_term_range_adj[i] =
                 (uint8_t)((calib_ext >> (5 + (i - 1) * 4)) & 0xF);
+        }
     }
     out->hs_squelch = (uint8_t)((calib0 >> 29) & 0x7);
     out->rpd_ctrl   = (uint8_t)(calib_ext & 0x1F);

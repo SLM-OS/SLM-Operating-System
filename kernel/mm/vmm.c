@@ -1444,8 +1444,9 @@ static uint64_t l3_fw_dtb[VMM_DTB_L3_TABLES][ENTRIES_PER_TABLE]
 static void vmm_map_firmware_dtb(void)
 {
     const uint8_t *blob = (const uint8_t *)dtb_get_blob();
-    if (blob == NULL)
+    if (blob == NULL) {
         return;
+    }
 
     uint64_t start = (uint64_t)(uintptr_t)blob;
     uint32_t total = ((uint32_t)blob[4] << 24) | ((uint32_t)blob[5] << 16) |
@@ -1454,8 +1455,9 @@ static void vmm_map_firmware_dtb(void)
     uint64_t last  = (start + total + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     uint64_t l1_idx = L1_INDEX(first);
 
-    if (total == 0 || l1_table[l1_idx] != 0)
+    if (total == 0 || l1_table[l1_idx] != 0) {
         return;     /* already covered by an identity mapping */
+    }
 
     uint64_t first_l2 = first >> BLOCK_SHIFT;
     uint64_t last_l2  = (last - 1) >> BLOCK_SHIFT;
@@ -1473,7 +1475,6 @@ static void vmm_map_firmware_dtb(void)
     for (uint64_t t = 0; t <= last_l2 - first_l2; t++) {
         uint64_t l2_idx = L2_INDEX((first_l2 + t) << BLOCK_SHIFT);
         l2_fw_dtb[l2_idx] = make_table_desc((uint64_t)(uintptr_t)l3_fw_dtb[t]);
-        vmm_state.l2_tables_used++;
     }
     l1_table[l1_idx] = make_table_desc((uint64_t)(uintptr_t)l2_fw_dtb);
     vmm_state.l2_tables_used++;

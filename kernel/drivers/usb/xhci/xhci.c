@@ -1355,8 +1355,9 @@ static void xhci_program_registers(uint8_t max_slots)
         xhci_load_slot1_handoff_from_fdt_node();
         xhci_load_slot3_handoff_from_fdt_node();
         xhci_load_slot3_handoff_from_bootargs();
-        if (!xhci_inherited_slot3_ctx_valid)
+        if (!xhci_inherited_slot3_ctx_valid) {
             xhci_load_slot3_handoff();
+        }
     }
 
     /*

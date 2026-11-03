@@ -16,18 +16,9 @@
 /*
  * Run the steps that have not completed yet. Returns 0 when the
  * controller reports ready (CNR clear, HCE clear), negative otherwise.
- * Safe to call again after a partial run (e.g. from the shell after
- * `xusb step N`): completed steps are not repeated.
+ * Safe to call again after a partial run: completed steps are not
+ * repeated.
  */
 int xusb_t234_cold_bringup(void);
-
-/* Run one step (1..XUSB_T234_COLD_STEPS). Returns 0 on success. */
-int xusb_t234_cold_step(int step);
-
-/* Highest step that has completed (0 = none). */
-int xusb_t234_cold_progress(void);
-
-/* USBSTS sampled by the last CNR wait (step 5). */
-uint32_t xusb_t234_cold_last_usbsts(void);
 
 #endif /* XUSB_T234_COLD_H */

@@ -26,6 +26,7 @@
 #define XHCI_ATTACH_H
 
 #include "usb.h"
+#include "xhci_regs.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -113,8 +114,9 @@ static inline uint8_t xhci_pick_cold_usb2_port(const uint32_t *portsc,
 {
     for (uint32_t p = usb2_first;
          p < (uint32_t)usb2_first + usb2_count && p < nports; p++) {
-        if (portsc[p] & 1u /* CCS */)
+        if (portsc[p] & XHCI_PORTSC_CCS) {
             return (uint8_t)p;
+        }
     }
     return 0xFF;
 }

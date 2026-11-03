@@ -69,8 +69,8 @@ static const struct {
     { TEGRA234_CLK_XUSB_SS,         "xusb_ss" },
 };
 
+/* Highest step completed, so a retry resumes after it. */
 static int cold_last_step;
-static uint32_t cold_last_usbsts;
 
 static inline uint32_t mmio_r32(uintptr_t addr)
 {
@@ -162,8 +162,9 @@ static void cold_pads_init(void)
 
     /* USB2 pads of the host ports (InitUsb2PadX). */
     for (uint32_t i = 0; i < T234_XUSB_NUM_USB2_PADS; i++) {
-        if ((XUSB_T234_COLD_USB2_PORT_MASK & (1u << i)) == 0)
+        if ((XUSB_T234_COLD_USB2_PORT_MASK & (1u << i)) == 0) {
             continue;
+        }
         pad_w(XP_USB2_PAD_MUX, xusb_t234_pad_mux(pad_r(XP_USB2_PAD_MUX), i));
         pad_w(XP_USB2_PORT_CAP,
               xusb_t234_port_cap_host(pad_r(XP_USB2_PORT_CAP), i));
@@ -194,7 +195,9 @@ static void cold_fpci_config(void)
 {
     uint32_t v = fpci_rd(XUSB_CFG_4);
     v &= ~(XUSB_BASE_ADDR_MASK << XUSB_BASE_ADDR_SHIFT);
-    v |= (uint32_t)TEGRA_XHCI_HCD_BASE & (XUSB_BASE_ADDR_MASK << XUSB_BASE_ADDR_SHIFT);
+    /* UEFI writes the hcd base (0x03610000); bit 16 does not latch, so
+     * use the FPCI base like tegra_xusb_config() in xhci.c does. */
+    v |= (uint32_t)TEGRA_XHCI_FPCI_BASE & (XUSB_BASE_ADDR_MASK << XUSB_BASE_ADDR_SHIFT);
     fpci_wr(XUSB_CFG_4, v);
     timer_busy_wait_us(200);
 
@@ -219,11 +222,11 @@ static int cold_wait_cnr(void)
     uint32_t sts = 0;
     for (int i = 0; i < 200; i++) {
         sts = mmio_r32(hcd + caplen + XHCI_OP_USBSTS);
-        if ((sts & XHCI_STS_CNR) == 0)
+        if ((sts & XHCI_STS_CNR) == 0) {
             break;
+        }
         timer_busy_wait_us(1000);
     }
-    cold_last_usbsts = sts;
     if (sts & (XHCI_STS_CNR | XHCI_STS_HCE)) {
         WARN("xusb-cold: controller not ready, USBSTS=0x%08x", (unsigned)sts);
         return -1;
@@ -233,7 +236,7 @@ static int cold_wait_cnr(void)
     return 0;
 }
 
-int xusb_t234_cold_step(int step)
+static int xusb_t234_cold_step(int step)
 {
     int rc = 0;
     switch (step) {
@@ -244,8 +247,9 @@ int xusb_t234_cold_step(int step)
     case 5: rc = cold_wait_cnr(); break;
     default: return -1;
     }
-    if (rc == 0)
+    if (rc == 0) {
         cold_last_step = step;
+    }
     return rc;
 }
 
@@ -266,16 +270,6 @@ int xusb_t234_cold_bringup(void)
         }
     }
     return 0;
-}
-
-int xusb_t234_cold_progress(void)
-{
-    return cold_last_step;
-}
-
-uint32_t xusb_t234_cold_last_usbsts(void)
-{
-    return cold_last_usbsts;
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */

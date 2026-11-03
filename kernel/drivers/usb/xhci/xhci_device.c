@@ -810,10 +810,12 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
          * its first reset — there is no stale Linux device to hide. */
         uint32_t sc[XHCI_MAX_SCAN_PORTS] = {0};
         uint8_t n = xhci_caps_cached.max_ports;
-        if (n > XHCI_MAX_SCAN_PORTS)
+        if (n > XHCI_MAX_SCAN_PORTS) {
             n = XHCI_MAX_SCAN_PORTS;
-        for (uint8_t p = 0; p < n; p++)
+        }
+        for (uint8_t p = 0; p < n; p++) {
             sc[p] = xhci_op_r32(XHCI_OP_PORTSC(p));
+        }
         uint8_t p = xhci_pick_cold_usb2_port(sc, n,
                                              TEGRA_XUSB_USB2_PORT_OFFSET,
                                              TEGRA_XUSB_USB2_PORT_COUNT);
