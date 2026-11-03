@@ -44,18 +44,25 @@ fast iteration path when the hardware supports it.
 The fastest path is the `/deploy-and-test` slash command. It runs the full build → flash → boot → serial-capture cycle as a single logical operation:
 
 ```
-/deploy-and-test pi-5-1
+/deploy-and-test <sbc>
 ```
 
-This:
+`<sbc>` is a Pi 5 with an SDWire assigned in labctl. The skill
+(`.claude/skills/deploy-and-test/SKILL.md` is the authoritative
+description):
 
 1. Builds the kernel for the Pi 5 (`make kernel PLATFORM=RASPI5`).
-2. Powers off the Pi 5 (required — labctl refuses to switch an SDWire to host mode while the SBC is powered on).
-3. Switches the SDWire to host mode.
-4. Mounts the FAT32 boot partition, copies `build/kernel/slmos.bin` to `kernel_2712.img`, syncs, unmounts.
-5. Switches the SDWire back to DUT mode.
-6. Powers on the Pi 5.
-7. Captures serial output until either a pattern match or a timeout.
+2. Checks the board's live state and claims it in labctl.
+3. Reads `config.txt` for the kernel file name, then deploys with one
+   `sdwire_update` call: the new kernel is copied in and the current
+   one is kept as `<kernel>.prev`. labctl powers the board off first,
+   switches the SDWire to the host and back, and does the mount and
+   copy itself.
+4. Boots the board and captures serial output until `slmos>` or a
+   timeout, then runs any requested shell commands.
+5. **Restores the previous kernel by default** and returns the board to
+   its starting power state. Pass `--keep` to leave the new kernel
+   installed.
 
 No manual mount/copy/unmount cycles and no chance of writing to the wrong block device — labctl tracks the SDWire-to-SBC mapping and exposes the correct block device to the mount step.
 
@@ -63,7 +70,7 @@ No manual mount/copy/unmount cycles and no chance of writing to the wrong block 
 
 ## Manual labctl MCP workflow
 
-When the slash command is not appropriate (e.g. running a one-off flash without capture, or capturing a longer boot), the MCP tools can be driven directly. This is also the canonical reference for what `/deploy-and-test` does under the hood.
+When the slash command is not appropriate (e.g. running a one-off flash without capture, or capturing a longer boot), the MCP tools can be driven directly. The deploy step below is the same `sdwire_update` call `/deploy-and-test` makes, minus its backup and restore.
 
 ### Step 1 — Build
 
@@ -123,7 +130,7 @@ A healthy boot produces, in order:
 
 1. Pi firmware banner (enabled by `uart_2ndstage=1` in `config.txt`) — a few lines about firmware version, DRAM size, and kernel load.
 2. SLM-OS boot messages — MMU setup, VMM init, PMM init, scheduler start, SMP bring-up (cores 1–3 come up via PSCI).
-3. `slm>` shell prompt.
+3. `slmos>` shell prompt.
 
 End-to-end the cycle takes ~30 seconds on the capstone lab hardware (Pi 5 boot is ~5 s; the rest is SDWire switch latency and serial settling).
 
@@ -166,8 +173,8 @@ When multiple USB devices are plugged in or the system reboots, Linux may reassi
 
 Most common causes, in order:
 
-1. **`--kernel-name` not set to `kernel_2712.img`.** Pi firmware ignores `slmos.bin` as a filename; only `kernel_2712.img` is recognized.
-2. **`config.txt` missing required bare-metal keys.** Diff the card's `config.txt` against [`deploy/pi5/config.txt`](../../deploy/pi5/config.txt) — that file is the source of truth. The required keys are `arm_64bit=1`, `kernel_address=0x80000`, `kernel=kernel_2712.img`, `pciex4_reset=0`, `uart_2ndstage=1`, `os_check=0` per [`docs/pi5-baremetal-status.md`](../pi5-baremetal-status.md) §Configuration; missing any of them produces total UART silence — no kernel output, no firmware banner.
+1. **Copy destination doesn't match `kernel=` in `config.txt`.** The firmware loads only the file `kernel=` names (`kernel_2712.img` by default); a `slmos.bin`, or a kernel copied under another name, is ignored and the old kernel keeps booting. Check the destination in the Step 2 `copies` / `--copy` argument.
+2. **`config.txt` missing required bare-metal keys.** Diff the card's `config.txt` against [`deploy/pi5/config.txt`](../../deploy/pi5/config.txt) — that file is the source of truth. Without `os_check=0`, `arm_64bit=1` and a `kernel=` line naming the deployed file, the firmware won't start SLM-OS. `uart_2ndstage=1` is what makes the firmware banner appear, so a card without it is silent until SLM-OS's own UART comes up. The reference file also sets `kernel_address=0x80000` and `pciex4_reset=0` (see [`docs/pi5-baremetal-status.md`](../pi5-baremetal-status.md) §Configuration), but the lab's pi-5-1 card boots without `kernel_address`, so a missing key is not by itself proof of the cause.
 3. **Pi firmware on the card is newer than what the kernel was tested against.** Pi 5 firmware updates in 2025 changed the RP1 init sequence. Bare-metal SLM-OS has been validated against **March 2025 firmware** (see [`pi5-sdcard.md`](pi5-sdcard.md) §Troubleshooting for how to verify / revert). Newer firmware may silently break UART bring-up.
 
 ---
