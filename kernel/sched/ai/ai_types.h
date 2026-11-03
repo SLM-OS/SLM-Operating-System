@@ -76,9 +76,21 @@ _Static_assert(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
  */
 struct ai_sched_action {
     uint8_t core_assignment;  /* 0 to num_cores-1 (or GPU slot) */
-    uint8_t priority_adj;     /* 0=none, 1=boost, 2=reduce */
+    uint8_t priority_adj;     /* AI_PRIO_LOWER / AI_PRIO_KEEP / AI_PRIO_RAISE */
     uint8_t preempt;          /* 0=no, 1=yes */
 };
+
+/*
+ * priority_adj values, as the training simulator defines them
+ * (slm-os-scheduler-ai slm_sim/actions.py; also ai_config.h, which
+ * export_models.py generates). Each step moves to the adjacent kernel
+ * priority level, see sched_ai_step_priority(). #1069: the kernel used
+ * to decode 1 as boost and 2 as reduce, i.e. "keep" boosted and
+ * "raise" lowered.
+ */
+#define AI_PRIO_LOWER  0u
+#define AI_PRIO_KEEP   1u
+#define AI_PRIO_RAISE  2u
 
 /*
  * Decode a raw action index into its components.

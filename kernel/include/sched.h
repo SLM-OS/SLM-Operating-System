@@ -252,4 +252,24 @@ uint32_t sched_get_isolated_cores(void);
  */
 int sched_set_task_affinity(struct task *task, uint32_t cpu);
 
+#ifdef CONFIG_AI_SCHEDULER
+/*
+ * AI priority actions (#1069). An AI policy's priority_adj (0 lower,
+ * 1 keep, 2 raise) moves the task one kernel priority level from its
+ * current effective priority. The result is stored in
+ * task->ai_priority and used as the base of later effective-priority
+ * recomputes until the task's next decision.
+ *
+ * sched_ai_step_priority: pure level step, exposed for tests.
+ * sched_ai_apply_priority_action: called by the AI policies' assign_cpu.
+ * sched_ai_set_priority_actions(false): placement-only mode, the
+ *   behaviour before #1069 (AI decisions pick a CPU only). Shell:
+ *   `sched ai-prio on|off`.
+ */
+uint8_t sched_ai_step_priority(uint8_t current, uint8_t priority_adj);
+void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj);
+void sched_ai_set_priority_actions(bool enabled);
+bool sched_ai_priority_actions_enabled(void);
+#endif
+
 #endif /* SCHED_H */

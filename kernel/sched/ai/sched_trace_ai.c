@@ -255,7 +255,12 @@ void sched_trace_ai_record_decision(struct task *task,
     copy_policy_name(r->u.decision.policy_name,
                      sizeof(r->u.decision.policy_name), policy_name);
     r->u.decision.action_core = (int32_t)action_core;
-    r->u.decision.action_priority = task ? (int32_t)task->effective_priority : -1;
+    /* The priority the decision asked for: the AI-chosen level (#1069),
+     * or the effective priority when the policy set none. */
+    r->u.decision.action_priority = !task ? -1
+        : (task->ai_priority != TASK_AI_PRIORITY_NONE)
+              ? (int32_t)task->ai_priority
+              : (int32_t)task->effective_priority;
     r->u.decision.action_preempt = 0;  /* reserved */
     r->u.decision._decision_pad = 0;
 

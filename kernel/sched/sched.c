@@ -676,11 +676,96 @@ static void idle_task_func(void *arg)
     }
 }
 
+#ifdef CONFIG_AI_SCHEDULER
+/* AI priority actions on (default) or placement-only (#1069). */
+static volatile bool ai_priority_actions = true;
+
+void sched_ai_set_priority_actions(bool enabled)
+{
+    ai_priority_actions = enabled;
+}
+
+bool sched_ai_priority_actions_enabled(void)
+{
+    return ai_priority_actions;
+}
+
+/*
+ * One priority_adj step between the kernel's priority levels, matching
+ * the training simulator's _adjust_priority (slm_sim/actions.py): find
+ * the highest level <= current, then move one level down (lower) or up
+ * (raise), clamped at IDLE and CRITICAL. Keep returns current as is.
+ */
+uint8_t sched_ai_step_priority(uint8_t current, uint8_t priority_adj)
+{
+    static const uint8_t levels[] = {
+        TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL,
+        TASK_PRIORITY_HIGH, TASK_PRIORITY_CRITICAL,
+    };
+    const int n = (int)(sizeof(levels) / sizeof(levels[0]));
+
+    if (priority_adj != AI_PRIO_LOWER && priority_adj != AI_PRIO_RAISE) {
+        return current;
+    }
+    int idx = 0;
+    for (int i = 0; i < n; i++) {
+        if (levels[i] <= current) {
+            idx = i;
+        }
+    }
+    if (priority_adj == AI_PRIO_LOWER) {
+        idx = (idx > 0) ? idx - 1 : 0;
+    } else {
+        idx = (idx < n - 1) ? idx + 1 : n - 1;
+    }
+    return levels[idx];
+}
+
+/*
+ * Record an AI decision's priority on the task. Steps from the current
+ * effective priority (which already carries any earlier AI level and
+ * deadline boost), as the simulator does. A single-byte store: readers
+ * recompute under rq_lock and see either the old or the new level.
+ */
+void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
+{
+    if (!task || !ai_priority_actions) {
+        return;
+    }
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_invalidate(&task->effective_priority);
+#endif
+    task->ai_priority = sched_ai_step_priority(task->effective_priority,
+                                               priority_adj);
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_clean(&task->ai_priority);
+#endif
+}
+
+/* Base priority for a recompute: the AI's level while one is set. */
+static uint8_t effective_base_priority(struct task *task)
+{
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_invalidate(&task->ai_priority);
+#endif
+    if (ai_priority_actions && task->ai_priority != TASK_AI_PRIORITY_NONE) {
+        return task->ai_priority;
+    }
+    return task->priority;
+}
+#else
+static uint8_t effective_base_priority(struct task *task)
+{
+    return task->priority;
+}
+#endif /* CONFIG_AI_SCHEDULER */
+
 /*
  * Update a task's effective priority based on deadline proximity.
  *
  * Called when adding a task to the run queue and during scheduler tick.
- * The effective_priority determines scheduling order.
+ * The effective_priority determines scheduling order. The base is the
+ * task's priority, or the AI policy's last chosen level (#1069).
  */
 static void update_deadline_boost(struct task *task)
 {
@@ -697,7 +782,7 @@ static void update_deadline_boost(struct task *task)
 
     if (task->deadline_ns == 0) {
         /* No deadline - effective priority equals base priority */
-        task->effective_priority = task->priority;
+        task->effective_priority = effective_base_priority(task);
 #if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->effective_priority);
 #endif
@@ -705,7 +790,7 @@ static void update_deadline_boost(struct task *task)
     }
 
     uint64_t now = slm_get_time_ns();
-    uint8_t base = task->priority;
+    uint8_t base = effective_base_priority(task);
     uint8_t boosted = base;
     sched_set_default_deadline_thresholds(&runtime_cfg);
 #ifdef CONFIG_AI_SCHEDULER
@@ -722,8 +807,9 @@ static void update_deadline_boost(struct task *task)
             /* < 10ms: boost to CRITICAL (7) */
             boosted = TASK_PRIORITY_CRITICAL;
         } else if (remaining < runtime_cfg.high_ns) {
-            /* < 50ms: boost to HIGH (6) */
-            boosted = TASK_PRIORITY_HIGH;
+            /* < 50ms: boost to HIGH (6). Never lowers: the base can
+             * already be CRITICAL (an AI raise, #1069). */
+            boosted = (base > TASK_PRIORITY_HIGH) ? base : TASK_PRIORITY_HIGH;
         } else if (remaining < runtime_cfg.boost_ns) {
             /* < 100ms: boost +1 (capped at max) */
             boosted = (base < TASK_PRIORITY_MAX) ? base + 1 : TASK_PRIORITY_MAX;
@@ -1229,6 +1315,9 @@ void scheduler_add_task(struct task *task)
     task->arrival_time_ns = slm_get_time_ns();
     /* -1 signals "no AI decision recorded yet" (#211). */
     task->last_ai_action = -1;
+    /* Each placement is a fresh decision: an AI policy sets a new level
+     * in assign_cpu below; any other policy leaves none (#1069). */
+    task->ai_priority = TASK_AI_PRIORITY_NONE;
 #endif
 
     uint32_t target_cpu;

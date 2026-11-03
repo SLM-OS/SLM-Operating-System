@@ -244,6 +244,16 @@ Real trained MLP and PPO weights from the Plan A export pipeline (108→256→25
 
 ### AI vs Heuristic Scheduler Comparison
 
+> **Note (#1069, 2026-11):** every AI-policy result in this section was
+> measured with the policies' priority actions having **no effect**:
+> `ai_assign_cpu_common` / `sched_xgb` wrote `effective_priority`, and
+> `update_deadline_boost` overwrote it on enqueue. The kernel also
+> decoded `priority_adj` as none/boost/reduce, while the models were
+> trained with lower/keep/raise. These numbers therefore compare **CPU
+> placement only**. Since #1069 the priority actions apply as trained;
+> `sched ai-prio off` restores placement-only mode so these results stay
+> reproducible. The `preempt` bit is still not acted on (#1077).
+
 | Metric | Heuristic | AI MLP | AI XGB | Ratio (XGB / heuristic) |
 |--------|-----------|--------|--------|------|
 | Decision latency (Pi 5) | ~2 us | 41.9 us | _captured by `bench sched-policy`_ | _t.b.d._ |
@@ -323,6 +333,9 @@ synthetic-trained baseline weights and the SLM-OS-fine-tuned weights
 a stable target shape.
 
 ### Scheduling-quality matrix (#61, capstone wrap-up)
+
+> The AI rows below are placement-only, like every pre-#1069 AI
+> result; see the note under "AI vs Heuristic Scheduler Comparison".
 
 **Status:** populated 2026-05-16 from real-hardware captures on
 pi-5-2 (Pi 5, 4× Cortex-A76) and jetson-nano-1 (Jetson Orin Nano,

@@ -8043,6 +8043,23 @@ int cmd_sched(int argc, char *argv[])
     }
 
 #ifdef CONFIG_AI_SCHEDULER
+    if (strcmp(argv[1], "ai-prio") == 0) {
+        if (argc >= 3) {
+            if (strcmp(argv[2], "on") == 0) {
+                sched_ai_set_priority_actions(true);
+            } else if (strcmp(argv[2], "off") == 0) {
+                sched_ai_set_priority_actions(false);
+            } else {
+                shell_puts("Usage: sched ai-prio [on|off]\r\n");
+                return 1;
+            }
+        }
+        shell_printf("AI priority actions: %s\r\n",
+                     sched_ai_priority_actions_enabled()
+                         ? "on" : "off (placement only)");
+        return 0;
+    }
+
     if (strcmp(argv[1], "model") == 0) {
         if (argc < 3 || strcmp(argv[2], "status") == 0) {
             shell_puts("Scheduler runtime blobs:\r\n");
