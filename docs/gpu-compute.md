@@ -29,10 +29,12 @@ and only falls back to CPU on dispatch failure.
 > `docs/archive/plans/jetson-gpu-mnist-plan.md` for the M0..M10 plan history
 > and `docs/gpu.md` for the broader GPU integration overview.
 >
-> The "deferred pending GSP firmware" framing below applies to **cold-boot
-> GPU bringup** (still tracked as #142 — bare-metal GSP loader). The
-> kexec-from-Linux path doesn't need a bare-metal GSP loader because Linux
-> bootstraps FECS/GPCCS/PMU before SLM-OS inherits the channel.
+> **Cold boot (November 2026, #1088):** after a UEFI-direct boot SLM-OS
+> brings GA10B up itself — ACR on the GSP, the LS PMU RTOS, FECS/GPCCS,
+> golden context and its own channel — and runs the MNIST pipeline on
+> it with no Linux in the boot chain. See
+> `docs/deploy/jetson-uefi-direct.md` §"GA10B cold bring-up". The
+> kexec path still inherits Linux's channels.
 
 ---
 
