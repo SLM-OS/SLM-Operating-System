@@ -290,6 +290,11 @@ slot counts in `evictions_total` and reaches `notify_eviction`.
 Before #1066 the generation was re-read live, so neither check could
 fire. `update_feedback` routes by the pool encoded in `block_id` bits
 24+, so workspace feedback reaches the workspace policy.
+Host tests: `mm::model_mem::eviction_tests` (stale, shared and
+exhausted victims) and
+`mm::weight_cache::tests::classical_policy_fault_rates_match_reference_table`,
+which replays the E2E traces and pins the classical rows of the table
+below.
 
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
@@ -472,6 +477,12 @@ gpu_contention, s6 adversarial, s7 multimodel_skew.
 | **xgboost** | **55** | **69** | **69** | **31** | **55** | **66** | **2** | 96 |
 | **mlp** | **55** | **69** | **69** | **32** | **56** | **66** | 4 | 98 |
 | cacheus | 55 | 69 | 69 | 31 | 55 | 66 | 2 | 98 |
+
+The ML rows above predate later compiled-in model changes; as of
+2026-11-02 the host replay and pi-5-1 both give xgboost
+`55 69 67 32 51 67 2 62`, mlp `55 69 69 32 56 66 4 98` and cacheus
+`55 69 67 32 50 67 2 59` (classical rows unchanged). `--all` currently
+hangs Pi 5 partway through (#1074); run one `--policy` at a time.
 
 With its experts un-shadowed (both runtime blobs cleared), `cacheus`
 tracks its XGBoost+MLP experts — verified on pi-5-2. On a card with the

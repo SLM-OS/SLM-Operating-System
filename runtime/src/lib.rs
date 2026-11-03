@@ -332,6 +332,17 @@ mod test_ffi_stubs {
     #[cfg(feature = "ai_eviction")]
     #[no_mangle]
     pub extern "C" fn admin_telemetry_record_eviction_fallback() {}
+
+    /// Host stub for `kernel_ffi::vfs_pread`, reached by the
+    /// weight-cache replay test (`--read` is off there, so nothing
+    /// needs real bytes).
+    #[cfg(feature = "ai_eviction")]
+    #[no_mangle]
+    pub extern "C" fn slm_vfs_pread(
+        _path: *const core::ffi::c_char, _offset: u64, _dst: *mut u8, _len: usize,
+    ) -> i32 {
+        0
+    }
 }
 
 // =============================================================================
