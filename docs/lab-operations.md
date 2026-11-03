@@ -60,8 +60,8 @@ The lab SBC names are `pi-5-1`, `pi-5-2`, `jetson-nano-1`,
 | Component | Details |
 |-----------|---------|
 | Board | Gigabyte H610M S2H V2, i7-6700, 16 GB DDR4, NVIDIA RTX 3050 (GA107) |
-| Linux | Ubuntu on the internal SSD (SSH as root, key auth) — the default boot entry |
-| SLM-OS | UEFI disk image on the SDWire-switched external SSD, booted one-shot with `efibootmgr --bootnext` |
+| Linux | Ubuntu on an external SSD (SSH as root, key auth); boots when no bootable SD card is switched to `test-pc` |
+| SLM-OS | UEFI disk image on the SDWire-switched SD card, first in the boot order |
 | Deploy guide | [`docs/deploy/x86-64-ssd.md`](deploy/x86-64-ssd.md) |
 
 ### Jetson Orin Nano boards
