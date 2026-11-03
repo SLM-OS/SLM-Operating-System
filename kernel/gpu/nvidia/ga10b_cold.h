@@ -27,6 +27,7 @@ enum ga10b_cold_step {
     GA10B_COLD_GR_HW,       /* GR non-ctx register loads from the netlist */
     GA10B_COLD_ACR,         /* ACR on the GSP loads FECS/GPCCS into WPR */
     GA10B_COLD_FALCONS,     /* FECS/GPCCS started, ctxsw ucode ready */
+    GA10B_COLD_GR_INIT,     /* GR/FB/LTC/CE setup nvgpu does after start */
     GA10B_COLD_STEP_COUNT,
 };
 
@@ -50,6 +51,16 @@ int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
                                   const uint8_t *data, uint32_t data_len,
                                   const uint8_t *manifest, uint32_t manifest_len,
                                   uint64_t desc_phys);
+
+/* One BAR0 register write of a generated init table. */
+struct ga10b_reg_write {
+    uint32_t offset;
+    uint32_t value;
+};
+
+/* Constant GR programming after FECS start (ga10b_gr_init_table.c). */
+extern const struct ga10b_reg_write ga10b_gr_init_support_writes[];
+extern const unsigned ga10b_gr_init_support_writes_count;
 
 /* ---- Pure helpers (host-testable) ---- */
 

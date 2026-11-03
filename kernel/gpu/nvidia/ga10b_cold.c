@@ -109,6 +109,39 @@
 #define FECS_METHOD_SET_WATCHDOG_TIMEOUT 0x21u
 #define FECS_METHOD_DISCOVER_IMAGE_SIZE  0x10u
 
+/* FB / LTC / GPC MMU (hw_fb_ga10b.h, hw_ltc_ga10b.h, hw_gr_ga10b.h). */
+#define NV_PFB_PRI_MMU_CTRL              0x100c80u
+#define NV_PFB_PRI_MMU_DEBUG_CTRL        0x100cc4u
+#define NV_PFB_FBHUB_NUM_ACTIVE_LTCS     0x100800u
+#define NV_PFB_HSHUB0_NUM_ACTIVE_LTCS    0x004c20u
+#define NV_PFB_FBHUB_NUM_ACTIVE_LTCS_MMU 0x100ec0u   /* fb_mmu_num_active_ltcs */
+#define FB_MMU_CTRL_ATOMIC_CAP_MODE_M    (0x3u << 24)
+#define FB_MMU_CTRL_ATOMIC_CAP_MODE_RMW  (0x2u << 24)
+#define FB_MMU_CTRL_ATOMIC_SYS_NCOH_M    (0x1u << 27)  /* 0 = L2 */
+#define FB_HUB_SYS_ATOMIC_MODE_M         (0x1u << 25)
+#define FB_HUB_SYS_ATOMIC_MODE_USE_RMW   (0x1u << 25)
+#define NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3 0x17e2b4u
+#define LTC_SET_MGMT_3_DISALLOW_CLEAN_IMM (0x5u << 21) /* ce_imm | fclr_imm */
+#define NV_PGRAPH_PRI_GPCS_MMU_CTRL      0x418880u
+#define NV_PGRAPH_PRI_GPCS_MMU_PM_UNIT_MASK 0x418890u
+#define NV_PGRAPH_PRI_GPCS_MMU_PM_REQ_MASK  0x418894u
+#define NV_PGRAPH_PRI_GPCS_MMU_DEBUG_CTRL 0x4188b0u
+#define NV_PGRAPH_PRI_GPCS_MMU_DEBUG_WR  0x4188b4u
+#define NV_PGRAPH_PRI_GPCS_MMU_DEBUG_RD  0x4188b8u
+#define NV_PGRAPH_PRI_GPCS_MMU_NUM_ACTIVE_LTCS 0x4188acu
+/* gr_gpcs_pri_mmu_ctrl fields ga10b_gr_init_gpc_mmu copies from FB:
+ * vm_pg_size, use_pdb_big_page_size, comp_fault, miss_gran,
+ * cache_mode, atomic_capability_mode, atomic_capability_sys_ncoh. */
+#define GPC_MMU_CTRL_COPY_MASK           (0x1u | (0x1u << 11) | (0x1u << 2) | \
+                                          (0x3u << 3) | (0x3u << 5) | \
+                                          (0x3u << 24) | (0x1u << 27))
+#define NV_PGRAPH_PRI_GPC0_GPCCS_FS_GPC  0x502608u   /* tpc count bits 4:0 */
+#define GA10B_COLD_TPC_COUNT             4u
+
+/* Copy engines: device enable for the LCE reset ids (2..5 per
+ * device info), as nvgpu's ce_init_support does. */
+#define GA10B_LCE_DEVICE_ENABLE_MASK     0x3cu
+
 #define PMC_ENABLE_PERFMON               (1u << 28)
 
 /* Device-info layout on GA10B (read back at step 3 and checked):
@@ -138,6 +171,7 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GR_HW]   = "gr_hw",
     [GA10B_COLD_ACR]     = "acr",
     [GA10B_COLD_FALCONS] = "falcons",
+    [GA10B_COLD_GR_INIT] = "gr_init",
 };
 
 const char *ga10b_cold_step_name(enum ga10b_cold_step step)
@@ -737,6 +771,60 @@ static int step_falcons(void)
     return 0;
 }
 
+/* ---- Step 8: GR init support ----
+ *
+ * What nvgpu does between FECS start and golden context creation:
+ * ga10b_ltc_lts_set_mgmt_setup (errata 200601972), ga10b_fb_set_atomic_mode
+ * (RMW atomics, sys ncoh atomics in L2, mirrored into the HSHUB),
+ * ga10b_gr_init_gpc_mmu (GPC MMU copies of the FB MMU state), the
+ * constant table (ga10b_gr_init_table.c) and the copy-engine device
+ * enables. The table encodes this SKU's floorsweeping, so check it
+ * first. The CBC (compression backing store) is not set up: SLM-OS maps
+ * GPU memory with uncompressed kinds only. */
+static int step_gr_init(void)
+{
+    uint32_t gpc_fuse = bar0_rd(NV_FUSE_STATUS_OPT_GPC);
+    uint32_t tpcs = bar0_rd(NV_PGRAPH_PRI_GPC0_GPCCS_FS_GPC) & 0x1Fu;
+    if (gpc_fuse != 0x2u || tpcs != GA10B_COLD_TPC_COUNT) {
+        WARN("ga10b-cold: unexpected floorsweeping (opt_gpc=0x%x, %u TPCs); "
+             "the GR init table is for 1 GPC / 4 TPCs", (unsigned)gpc_fuse,
+             (unsigned)tpcs);
+        return -1;
+    }
+
+    uint32_t v = bar0_rd(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3);
+    bar0_wr(NV_PLTCG_LTCS_LTSS_TSTG_SET_MGMT_3, v | LTC_SET_MGMT_3_DISALLOW_CLEAN_IMM);
+
+    v = bar0_rd(NV_PFB_PRI_MMU_CTRL);
+    v = (v & ~(FB_MMU_CTRL_ATOMIC_CAP_MODE_M | FB_MMU_CTRL_ATOMIC_SYS_NCOH_M)) |
+        FB_MMU_CTRL_ATOMIC_CAP_MODE_RMW;
+    bar0_wr(NV_PFB_PRI_MMU_CTRL, v);
+    v = bar0_rd(NV_PFB_FBHUB_NUM_ACTIVE_LTCS);
+    v = (v & ~FB_HUB_SYS_ATOMIC_MODE_M) | FB_HUB_SYS_ATOMIC_MODE_USE_RMW;
+    bar0_wr(NV_PFB_FBHUB_NUM_ACTIVE_LTCS, v);
+    bar0_wr(NV_PFB_HSHUB0_NUM_ACTIVE_LTCS, v);
+
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_CTRL,
+            bar0_rd(NV_PFB_PRI_MMU_CTRL) & GPC_MMU_CTRL_COPY_MASK);
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_PM_UNIT_MASK, 0u);
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_PM_REQ_MASK, 0u);
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_DEBUG_CTRL, bar0_rd(NV_PFB_PRI_MMU_DEBUG_CTRL));
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_DEBUG_WR, bar0_rd(NV_PFB_PRI_MMU_DEBUG_WR));
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_DEBUG_RD, bar0_rd(NV_PFB_PRI_MMU_DEBUG_RD));
+    bar0_wr(NV_PGRAPH_PRI_GPCS_MMU_NUM_ACTIVE_LTCS,
+            bar0_rd(NV_PFB_FBHUB_NUM_ACTIVE_LTCS_MMU));
+
+    for (unsigned i = 0; i < ga10b_gr_init_support_writes_count; i++)
+        bar0_wr(ga10b_gr_init_support_writes[i].offset,
+                ga10b_gr_init_support_writes[i].value);
+
+    if (device_enable(GA10B_LCE_DEVICE_ENABLE_MASK, true) != 0) return -1;
+    if (wait_gr_idle() != 0) return -1;
+    INFO("ga10b-cold: GR init support done (%u table writes)",
+         ga10b_gr_init_support_writes_count);
+    return 0;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -747,6 +835,7 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GR_HW]   = step_gr_hw,
     [GA10B_COLD_ACR]     = step_acr,
     [GA10B_COLD_FALCONS] = step_falcons,
+    [GA10B_COLD_GR_INIT] = step_gr_init,
 };
 
 int ga10b_cold_run(enum ga10b_cold_step last)

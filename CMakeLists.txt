@@ -616,6 +616,7 @@ set(KERNEL_SOURCES
     # Jetson-only: GA10B bring-up from cold after a UEFI-direct boot,
     # without Linux (#1088). Driven by `nvgpu cold`.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_cold.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gr_init_table.c>
     # Jetson-only: per-dispatch QMDV03_00 encoder (issue #558 fix).
     # No-op when nothing calls ga10b_qmd_populate (Phase 1 — encoder
     # ported but not yet wired into the dispatch path).
