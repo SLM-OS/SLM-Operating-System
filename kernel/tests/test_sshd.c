@@ -176,6 +176,28 @@ static void test_ring_wraps_around(void)
     sshd_test_release_slot(c);
 }
 
+/* #1067: the pre-auth deadline drops a connection that hasn't finished
+ * KEX + auth in SSHD_PREAUTH_TIMEOUT_S, survives counter wrap, and
+ * never fires when the counter frequency is unknown. */
+static void test_preauth_deadline(void)
+{
+    const uint64_t freq = 1000000u;   /* 1 MHz counter */
+    const uint32_t lim  = sshd_test_preauth_timeout_s();
+    TEST_ASSERT_TRUE(lim >= 30u && lim <= 300u);
+
+    TEST_ASSERT_FALSE(sshd_test_preauth_expired(0, 0, freq, lim));
+    TEST_ASSERT_FALSE(sshd_test_preauth_expired(0, freq * lim - 1u, freq, lim));
+    TEST_ASSERT_TRUE(sshd_test_preauth_expired(0, freq * lim, freq, lim));
+
+    /* Start just before the counter wraps; elapsed time is still small. */
+    uint64_t start = UINT64_MAX - 10u;
+    TEST_ASSERT_FALSE(sshd_test_preauth_expired(start, start + 100u, freq, lim));
+    TEST_ASSERT_TRUE(sshd_test_preauth_expired(start, start + freq * lim, freq, lim));
+
+    /* Unknown frequency: never expire rather than drop everything. */
+    TEST_ASSERT_FALSE(sshd_test_preauth_expired(0, UINT64_MAX, 0, lim));
+}
+
 static void test_slot_pool_respects_max_sessions(void)
 {
     sshd_test_release_all_slots();
@@ -210,6 +232,7 @@ int test_suite_sshd(void)
     RUN_TEST(test_ring_partial_push_returns_pushed_count);
     RUN_TEST(test_ring_wraps_around);
     RUN_TEST(test_slot_pool_respects_max_sessions);
+    RUN_TEST(test_preauth_deadline);
 
     return UnityEnd();
 }

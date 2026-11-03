@@ -140,6 +140,12 @@ void unity_fail_expected_actual_hex(const char *file, int line,
 #define TEST_ASSERT_MESSAGE(condition, msg) \
     do { if (!(condition)) { unity_fail(__FILE__, __LINE__, msg); return; } } while (0)
 
+#define TEST_ASSERT_TRUE_MESSAGE(condition, msg) \
+    TEST_ASSERT_MESSAGE(condition, msg)
+
+#define TEST_ASSERT_FALSE_MESSAGE(condition, msg) \
+    TEST_ASSERT_MESSAGE(!(condition), msg)
+
 /* ============================================================================
  * Pointer Assertions
  * ============================================================================ */

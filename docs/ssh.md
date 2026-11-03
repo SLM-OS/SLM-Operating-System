@@ -87,6 +87,13 @@ tcp_recv cb     |                   |  (single writer = net_pump)
                 +---------------------+
 ```
 
+A connection must finish KEX and password auth within 60 s
+(`SSHD_PREAUTH_TIMEOUT_S` in `sshd.c`; both run inside
+`wolfSSH_accept`) or the session task drops it and frees its
+`g_conns` slot. Without the deadline, `SSHD_MAX_SESSIONS` idle TCP
+connects held every slot indefinitely (#1067). `sshd status` reports
+these drops as `timeouts=` (they also count in `kex_fail`).
+
 Concurrency knobs:
 
 - `g_mod_lock` (module spinlock) — protects `g_conns[]` slot allocation, `g_active` / `g_kex_completed` / `g_kex_failed` / `g_last_kex_err` / `g_last_kex_cpu` counter mutates, and `conn_close_locked`. Idempotent on double-close.
@@ -132,13 +139,19 @@ between boot and the first `adduser` is safe.
 | Test | Suite size | Scope |
 |---|---|---|
 | `kernel/tests/test_rng.c` | 9 cases | RNG init / source dispatch / jitter pool / injection / chi-squared self-test |
-| `kernel/tests/test_sshd.c` | 7 cases | Listener + ring buffer round-trip via the test hooks in `sshd_test.h` |
+| `kernel/tests/test_sshd.c` | 8 cases | Listener + ring buffer round-trip + pre-auth deadline predicate via the test hooks in `sshd_test.h` |
 | `kernel/tests/test_host_key.c` | 6 cases | Generate / persist / load / fingerprint round-trip via the actual VFS mount |
 | `kernel/tests/test_passwd.c` | 10 cases | scrypt round-trip + length-bound regressions + bootstrap-gate behaviour |
 | `kernel/tests/test_wolf_heap.c` | 11 cases | wolfssl heap alloc / free / realloc paths + magic-stamp violation + double-free regression |
 | `kernel/tests/test_sshd_autostart.c` | 15 cases | `/etc/sshd.conf` parser internals (decimal / bool / line tokeniser) via `sshd_autostart_test.h` |
 
-Run via `make test NET_SSHD=ON`. All 58 SSH-related tests pass on QEMU.
+Run via `make test NET_SSHD=ON` (the Makefile forwards `NET_SSHD` to
+CMake and raises the QEMU timeout to 400 s for this suite, since real
+scrypt is slow under TCG; ~4 min). All 59 SSH-related tests pass on
+QEMU. The atomic-replace behaviour the passwd and host-key saves rely
+on (`littlefs_rename` over an existing file, no remove first) is
+pinned by `test_rename_replaces_existing_destination` in the default
+suite.
 
 ## Hardware validation
 

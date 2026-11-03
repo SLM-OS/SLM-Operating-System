@@ -222,19 +222,32 @@ matches what OpenSSH 6.8+ prompts for on first connection.
 
 ### Hardening
 
-DoS resistance is the current gap. Today every wrong-password
-attempt costs ~100 ms of scrypt CPU on Pi 5; there's no per-IP
-rate limit, no connection-rate cap, no pre-auth resource ceiling.
+DoS resistance is a partial gap. Every wrong-password attempt
+costs ~100 ms of scrypt CPU on Pi 5, and there's no per-IP rate
+limit or connection-rate cap. Slot occupancy is bounded: a
+connection that hasn't finished KEX and auth within 60 s
+(`SSHD_PREAUTH_TIMEOUT_S`) is dropped, so idle connects can no
+longer hold every slot (#1067).
+
+Unknown usernames are rejected without running scrypt, so they
+answer ~100 ms faster than a wrong password and are distinguishable
+by timing (the wire response is the same). Equalising that by
+running scrypt for unknown users was considered and rejected: each
+scrypt needs 32 MB of the 48 MB wolfssl heap, so it would let any
+username burn ~100 ms and 32 MB per attempt and block concurrent
+legitimate logins. It belongs with per-IP backoff, below.
+
 Follow-ups:
 
-- [ ] Per-source-IP failure backoff (1 s after 3 fails, 10 s
+- ☐ Per-source-IP failure backoff (1 s after 3 fails, 10 s
       after 10, 60 s after 30 — reset on success or 5 min idle).
-- [ ] Connection-rate cap per source IP.
-- [ ] Pre-auth memory + CPU limit; drop a connection after N
-      seconds of stalled auth.
-- [ ] Run hydra at 100 conn/s for 60 s; confirm a concurrent
+- ☐ Connection-rate cap per source IP.
+- ✅ Drop a connection after N seconds of stalled auth (60 s
+      pre-auth deadline, #1067).
+- ☐ Pre-auth memory + CPU ceiling.
+- ☐ Run hydra at 100 conn/s for 60 s; confirm a concurrent
       UART shell session stays responsive.
-- [ ] Wire a per-session authenticated-user field on
+- ☐ Wire a per-session authenticated-user field on
       `shell_session` so `whoami` from inside an SSH session
       returns the actual login name (currently reports "ssh").
 
@@ -242,12 +255,12 @@ Follow-ups:
 
 Run off-target with a multi-MB capture from `rng read`:
 
-- [ ] `ent` battery (Fourchette / Shannon / chi-squared / mean / pi
+- ☐ `ent` battery (Fourchette / Shannon / chi-squared / mean / pi
       Monte-Carlo / serial correlation). TRNG path expected to pass
       all five; jitter path expected to pass at acceptable margins.
-- [ ] NIST SP800-90B IID / non-IID conformance tests. Document
+- ☐ NIST SP800-90B IID / non-IID conformance tests. Document
       the chosen entropy estimator and the H_min the source proves.
-- [ ] Stuck-state behaviour: cap RDRAND with `cpufreq` lockstep
+- ☐ Stuck-state behaviour: cap RDRAND with `cpufreq` lockstep
       to provoke `hw_degrade_events` and confirm the fallback to
       jitter is taken cleanly.
 

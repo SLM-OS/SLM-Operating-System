@@ -38,6 +38,7 @@ struct sshd_stats {
     uint32_t connections_accepted;
     uint32_t kex_completed;          /* connections that reached WS_SUCCESS */
     uint32_t kex_failed;             /* connections that errored during accept */
+    uint32_t kex_timeouts;           /* of kex_failed: hit the pre-auth deadline */
     uint32_t active;                 /* currently open sessions */
     /* Diagnostics surfaced for `sshd status` so operators can debug
      * a KEX failure even when the session task's uart_printf is

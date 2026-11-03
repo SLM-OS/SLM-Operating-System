@@ -62,7 +62,8 @@ static void print_status(void)
                 (unsigned)st.active);
     if (st.kex_failed > 0u && n > 0 && (size_t)n < sizeof(buf)) {
         (void)uart_snprintf(buf + n, sizeof(buf) - (size_t)n,
-                            " last_err=%d last_cpu=%u",
+                            " timeouts=%u last_err=%d last_cpu=%u",
+                            (unsigned)st.kex_timeouts,
                             st.last_kex_err, (unsigned)st.last_kex_cpu);
     }
     uart_puts(buf);
