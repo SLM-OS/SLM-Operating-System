@@ -16,25 +16,17 @@ kernel/tests/
 ├── unity.c            # Unity implementation
 ├── test_harness.h     # Test suite declarations
 ├── test_harness.c     # UART output, suite runner, semihosting exit
-├── test_ipc.c         # IPC test suite
-├── test_scheduler.c   # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
-├── test_model_mem.c   # Model memory tests (Rust allocator via FFI)
-├── test_pi_mutex.c    # Priority inheritance mutex tests
-├── test_gpu.c         # GPU subsystem tests (22 tests)
-├── test_pmm.c         # PMM buddy allocator tests (24 tests)
-├── test_vmm.c         # VMM and TLB invalidation tests (10 tests)
-├── test_component.c   # Component system tests
-├── test_vfs.c         # Virtual filesystem tests
-├── test_shell.c       # Shell command and path resolution tests (106 tests)
-├── test_littlefs.c    # LittleFS and block device tests (26 tests)
-├── test_net.c         # Networking tests — IP utils + virtqueue ring
-│                      #   bookkeeping under cache maintenance (QEMU only)
-├── test_lua.c         # Lua scripting tests
-├── test_integration.c # Multi-core integration tests (5 tests)
-└── test_x86_boot.c    # x86-64 boot and platform tests (x86 only) —
-                       # includes LAPIC EOI fence stress + framebuffer
-                       # scroll regression coverage
+├── fixtures/          # Local HEF fixtures (*.hef, gitignored)
+└── test_*.c           # One file per suite
 ```
+
+The suite list has outgrown any hand-maintained listing here.
+`test_harness_run_all()` in `kernel/tests/test_harness.c` is the
+source of truth for which suites run. Some suites are gated on build
+flags (`ENABLE_NETWORKING`, `NET_SSHD`, `CONFIG_AI_SCHEDULER`), and
+x86-64 runs a reduced set: every suite inside an
+`#if !defined(PLATFORM_X86_64)` block there is skipped on x86-64. Check
+those blocks before relying on x86-64 results for a subsystem.
 
 ### Available Assertions
 
@@ -1039,7 +1031,7 @@ Use the `print_test_result()` helper to maintain consistent output format.
 - **Status**: Local CI via `/ci` Claude Code slash command
 - `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets
 - Uses ARM semihosting (ARM64) / `isa-debug-exit` (x86-64) for clean QEMU exit
-- The prior GitHub Actions workflow was retired; its config is archived at `docs/archive/ci-cd.md`. The workflow YAMLs under `.github/workflows/` remain in-tree but are not relied on.
+- The prior GitHub Actions workflow was retired; the workflow YAMLs were removed from the tree (there is no `.github/workflows/` directory) and the config is archived at `docs/archive/ci-cd.md`.
 
 ---
 

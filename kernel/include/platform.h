@@ -4,8 +4,13 @@
  * Platform-specific hardware addresses and configuration.
  * Select platform at build time via CMake or Makefile.
  *
- * NOTE: These are hardcoded values. Device Tree parsing will replace
- * these values in Phase 3 Milestone 4 (Required — Deferred).
+ * NOTE: DTB parsing (kernel/src/dtb.c) runs at boot, but the defines
+ * below remain authoritative for RAM/UART/GIC/timer addresses: no
+ * driver or MM code reads those from the DTB. What the DTB does supply:
+ * the CPU count (kernel/sched/smp.c), memory reservations
+ * (dtb_get_memreserves in pmm.c), /chosen entropy and bootargs (rng.c,
+ * main.c), and properties a few drivers read from the raw blob
+ * (macb.c MAC address, xhci.c).
  */
 
 #ifndef PLATFORM_H

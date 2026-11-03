@@ -540,20 +540,20 @@ void kernel_main(void *dtb)
                 int f = littlefs_file_open(lfs_mnt, "/hello.txt",
                                            LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
                 if (f >= 0) {
-                    const char *msg = "Hello from SLM-OS LittleFS!\n";
-                    littlefs_file_write(lfs_mnt, f, msg, 28);
+                    const char msg[] = "Hello from SLM-OS LittleFS!\n";
+                    littlefs_file_write(lfs_mnt, f, msg, sizeof(msg) - 1);
                     littlefs_file_close(lfs_mnt, f);
                 }
 
                 f = littlefs_file_open(lfs_mnt, "/readme.txt",
                                        LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
                 if (f >= 0) {
-                    const char *readme =
+                    const char readme[] =
                         "SLM-OS LittleFS File System\n"
                         "===========================\n"
                         "This filesystem is persisted in 0:/slmstore/files.lfs\n"
                         "on the boot FAT volume when that storage is available.\n";
-                    littlefs_file_write(lfs_mnt, f, readme, 158);
+                    littlefs_file_write(lfs_mnt, f, readme, sizeof(readme) - 1);
                     littlefs_file_close(lfs_mnt, f);
                 }
             }

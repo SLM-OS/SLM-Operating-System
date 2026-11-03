@@ -32,7 +32,7 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 
 | Component | Variation Level | Abstraction Strategy |
 |-----------|-----------------|----------------------|
-| Memory map | High | Platform descriptor |
+| Memory map | High | platform.h defines + DTB memreserves |
 | UART | Medium | Compile-time driver selection |
 | Interrupt controller | Low | Compile-time (GIC variants similar) |
 | Timer | Low | Compile-time (ARM generic timer) |
@@ -58,7 +58,7 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 | Type | PL011 | Tegra186 (NS16550) | RP1 PL011 |
 | Base address | 0x09000000 | 0x03100000 | 0x1F00030000 (via RP1) |
 | Register layout | ARM standard | 8250-compatible | ARM standard (no flag reads) |
-| Driver | uart_pl011.c | uart_tegra.c | uart_rp1_bitbang.c |
+| Driver | uart_pl011.c | uart_tegra.c | uart_rp1.c |
 | Notes | - | BPMP clock enable | Requires firmware PCIe init |
 
 #### Interrupt Controller
@@ -99,11 +99,24 @@ Best for: Components with few variants, hot code paths
 
 **Use for:** UART, timer, interrupt controller, boot code
 
-### Strategy 2: Platform Descriptor
+### Strategy 2: Platform Descriptor (future work — not implemented)
 
 Best for: Configuration data, memory maps
 
+**Status:** There is no `struct platform_info` in tree today. What
+the kernel actually does is Strategy 1: memory map and peripheral
+addresses are compile-time `#define`s in `kernel/include/platform.h`
+(one `#if defined(PLATFORM_*)` block per platform). The DTB parser
+fills an `fdt_info_t` (`kernel/include/dtb.h`) at boot, but its
+hardware-address fields are parsed and displayed (shell `dtb`
+command) rather than consumed by drivers. What the DTB does supply:
+the CPU count, memory reservations, `/chosen` entropy and bootargs,
+and a few per-device properties drivers read from the raw blob (the
+Pi 5 MAC address, xHCI). See [Device Tree Support](#device-tree-support). A dedicated descriptor
+struct remains a candidate future shape:
+
 ```c
+/* Future work — sketch only, not in tree */
 struct platform_info {
     const char *name;
 
@@ -134,7 +147,7 @@ extern const struct platform_info *platform;
 - Slight runtime overhead for lookups
 - Must be initialized early in boot
 
-**Use for:** Memory map, peripheral addresses, platform identification
+**Would be used for:** Memory map, peripheral addresses, platform identification
 
 ### Strategy 3: Hardware Abstraction Layer (HAL)
 
@@ -311,31 +324,32 @@ Once hardware testing confirms DTB parsing works on real hardware:
 
 ## Implementation Approach
 
-### Current (Month 1-2): Simple Compile-Time
+### Current: Compile-Time Selection (+ DTB for CPU count, memreserves, /chosen)
 
 ```
 kernel/
 ├── include/
-│   └── platform.h          # Platform detection and basic defines
-├── drivers/
-│   ├── uart_pl011.c        # PL011 driver
-│   └── uart_tegra.c        # Tegra driver (future)
-└── platform/
-    ├── qemu_virt.c         # QEMU platform descriptor
-    ├── jetson.c            # Jetson platform descriptor (future)
-    └── rpi5.c              # RPi5 platform descriptor (future)
+│   └── platform.h          # Platform detection + per-platform #define blocks
+├── drivers/                # UART/GIC/timer flat files — build selects per platform
+│   ├── uart_pl011.c        # PL011 (QEMU virt)
+│   ├── uart_rp1.c          # RP1 PL011 (Pi 5)
+│   ├── uart_tegra.c        # Tegra NS16550 (Jetson)
+│   └── uart_x86.c          # 16550 I/O-port (x86-64)
+└── src/
+    └── dtb.c               # DTB parser → fdt_info_t, memreserves, /chosen
 ```
 
-Build system selects platform:
+Build system selects platform (values match the `#ifdef` names):
 ```bash
-make PLATFORM=qemu_virt    # Default
-make PLATFORM=jetson       # Jetson build
-make PLATFORM=rpi5         # Raspberry Pi 5 build
+make PLATFORM=QEMU_VIRT         # Default
+make PLATFORM=JETSON_ORIN_NANO  # Jetson build
+make PLATFORM=RASPI5            # Raspberry Pi 5 build
+make PLATFORM=X86_64            # x86-64 build
 ```
 
-### Future (Month 3+): Hybrid Approach
+### Future: Hybrid Approach
 
-1. **Platform descriptor** for memory map and addresses
+1. **Platform descriptor** for memory map and addresses (not implemented — see Strategy 2)
 2. **Compile-time selection** for core drivers (UART, GIC, timer)
 3. **HAL with function pointers** for GPU subsystem
 
@@ -343,33 +357,34 @@ make PLATFORM=rpi5         # Raspberry Pi 5 build
 
 ## Directory Structure
 
+The platform-relevant parts of the tree as they exist today (there
+is no `kernel/platform/` directory; UART/GIC/timer drivers are flat
+files in `kernel/drivers/`, while subsystem drivers like `bpmp/`,
+`i2c/`, `camera/`, `usb/` have their own subdirs there):
+
 ```
 kernel/
 ├── include/
-│   ├── platform.h          # Platform detection, common defines
-│   ├── platform_types.h    # struct platform_info, etc.
+│   ├── platform.h          # Platform selection + per-platform hardware defines
+│   ├── dtb.h               # fdt_info_t + DTB parser API
 │   ├── uart.h              # UART interface
-│   ├── gic.h               # GIC interface
-│   └── gpu.h               # GPU HAL interface (future)
+│   └── gic.h               # GIC interface
 │
-├── platform/
-│   ├── platform.c          # Platform initialization
-│   ├── qemu_virt.c         # QEMU virt platform descriptor
-│   ├── jetson.c            # Jetson Orin Nano descriptor
-│   └── rpi5.c              # Raspberry Pi 5 descriptor
+├── src/
+│   └── dtb.c               # DTB parser (fills fdt_info_t at boot)
 │
-├── drivers/
-│   ├── uart/
-│   │   ├── uart_pl011.c    # PL011 (QEMU, RPi5)
-│   │   └── uart_tegra.c    # Tegra186 (Jetson)
-│   ├── gic/
-│   │   └── gic.c            # GIC driver (GICv2 + GICv3)
-│   └── timer/
-│       └── arm_timer.c     # ARM generic timer
+├── drivers/                # UART/GIC/timer flat files — build selects per platform
+│   ├── uart_pl011.c        # PL011 (QEMU virt)
+│   ├── uart_rp1.c          # RP1 PL011 (Pi 5)
+│   ├── uart_tegra.c        # Tegra NS16550 (Jetson)
+│   ├── uart_x86.c          # 16550 I/O-port (x86-64)
+│   ├── gic.c               # GIC driver (GICv2 + GICv3, ARM64 only)
+│   └── timer.c             # ARM generic timer (ARM64 only)
 │
-└── gpu/                    # Future: GPU HAL
-    ├── gpu_hal.c           # Common GPU interface
-    ├── gpu_jetson.c        # Jetson GPU driver
+└── gpu/                    # GPU HAL
+    ├── gpu.c               # Driver registration, dispatch
+    ├── cache.c             # ARM64 cache maintenance
+    ├── gpu_nvidia.c        # Jetson GPU driver
     └── gpu_stub.c          # No-op for QEMU
 ```
 
@@ -377,46 +392,46 @@ kernel/
 
 ## Adding a New Platform
 
-### Step 1: Create Platform Descriptor
+### Step 1: Add a Platform Block to platform.h
+
+Add a new `#if defined(PLATFORM_NEW)` block to
+`kernel/include/platform.h` defining at minimum the values the
+sanity checks at the bottom of that file require:
 
 ```c
-// kernel/platform/new_platform.c
-#include "platform_types.h"
-
-const struct platform_info new_platform = {
-    .name = "New Platform",
-    .dram_base = 0x80000000,
-    .dram_size = 4UL * 1024 * 1024 * 1024,  // 4 GB
-    .uart_base = 0x12340000,
-    // ... etc
-};
+#if defined(PLATFORM_NEW)
+#define PLATFORM_NAME       "New Platform"
+#define RAM_BASE            0x80000000UL
+#define RAM_SIZE            0x100000000UL   /* 4 GB */
+#define UART_TYPE_xxx
+#define UART_BASE           0x12340000UL
+#define GIC_DIST_BASE       /* ... */
+#define TIMER_IRQ           30
+#define CPU_MAX             4
+#endif
 ```
 
-### Step 2: Add Platform to platform.h
+Also extend the platform-selection default guard at the top of
+platform.h with the new `PLATFORM_NEW` macro.
 
-```c
-#elif defined(PLATFORM_NEW)
-    #define UART_TYPE_xxx
-    #define GIC_VERSION 2
-    // ...
-```
+### Step 2: Add Driver (if needed)
 
-### Step 3: Add Driver (if needed)
+If the platform uses a new UART type, implement it flat in the
+drivers directory:
+- `kernel/drivers/uart_new.c`
 
-If the platform uses a new UART type, implement:
-- `kernel/drivers/uart/uart_new.c`
+### Step 3: Update Build System
 
-### Step 4: Update Build System
+Add the platform to the Makefile `PLATFORM` handling and to the
+generator expressions in `CMakeLists.txt` that pick per-platform
+sources:
 
 ```cmake
-# CMakeLists.txt
-if(PLATFORM STREQUAL "NEW")
-    set(PLATFORM_SOURCES kernel/platform/new_platform.c)
-    set(UART_DRIVER kernel/drivers/uart/uart_new.c)
-endif()
+# CMakeLists.txt — UART driver selection
+$<$<STREQUAL:${PLATFORM},NEW>:kernel/drivers/uart_new.c>
 ```
 
-### Step 5: Update Documentation
+### Step 4: Update Documentation
 
 - Add to `docs/platform-abstraction.md` (this file)
 - Create `docs/platforms/new_platform.md` with specifics
@@ -455,7 +470,7 @@ These are called rarely and can use indirection:
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Primary abstraction | Compile-time | Zero overhead, platforms are fixed at flash time |
-| Memory map storage | Platform descriptor struct | Clean, extensible, DTB-ready |
+| Memory map storage | platform.h defines + DTB memreserves | Descriptor struct deferred (see Strategy 2) |
 | UART abstraction | Compile-time driver selection | Only 2-3 variants, hot path |
 | GPU abstraction | HAL with function pointers | Vastly different APIs, complex subsystem |
 | Build selection | CMake + Make variable | Standard tooling, easy CI integration |
