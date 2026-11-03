@@ -36,7 +36,9 @@ static void *f_alloc(void *ctx, uint32_t n, uint64_t *phys)
         uint32_t k;
         for (k = 0; k < n && !g_used[i + k]; k++) { }
         if (k == n) {
-            for (k = 0; k < n; k++) g_used[i + k] = true;
+            for (k = 0; k < n; k++) {
+                g_used[i + k] = true;
+            }
             memset(g_pool[i], 0, (size_t)n * 4096u);
             *phys = POOL_PHYS + (uint64_t)i * 4096u;
             g_allocs++;
@@ -50,7 +52,9 @@ static void f_free(void *ctx, void *cpu, uint32_t n)
 {
     (void)ctx;
     size_t i = (size_t)((uint8_t *)cpu - &g_pool[0][0]) / 4096u;
-    for (uint32_t k = 0; k < n; k++) g_used[i + k] = false;
+    for (uint32_t k = 0; k < n; k++) {
+        g_used[i + k] = false;
+    }
     g_frees++;
 }
 
@@ -154,7 +158,9 @@ static void test_vm_map_walk(void)
     unsigned frees_before = g_frees;
     ga10b_vm_destroy(&g_ops, &vm);
     TEST_ASSERT_EQUAL_UINT32(frees_before + 8u, g_frees);
-    for (unsigned i = 0; i < POOL_PAGES; i++) TEST_ASSERT_FALSE(g_used[i]);
+    for (unsigned i = 0; i < POOL_PAGES; i++) {
+        TEST_ASSERT_FALSE(g_used[i]);
+    }
 }
 
 static void test_vm_reserve(void)
@@ -207,7 +213,9 @@ static void test_inst_block_fields(void)
 static void test_ramfc_helper_channel(void)
 {
     static uint32_t w[1024];
-    for (unsigned i = 0; i < 1024; i++) w[i] = 0xdeadbeefu;
+    for (unsigned i = 0; i < 1024; i++) {
+        w[i] = 0xdeadbeefu;
+    }
     struct ga10b_ramfc_params p = {
         .gpfifo_va = 0x4001000ull, .gpfifo_entries = 512, .chid = 508, .veid = 1,
     };
@@ -243,7 +251,9 @@ static void test_ramfc_helper_channel(void)
 static void test_userd_and_gpfifo(void)
 {
     uint32_t u[128];
-    for (unsigned i = 0; i < 128; i++) u[i] = 0xffffffffu;
+    for (unsigned i = 0; i < 128; i++) {
+        u[i] = 0xffffffffu;
+    }
     ga10b_userd_init(u);
     TEST_ASSERT_EQUAL_HEX32(0, u[34]);
     TEST_ASSERT_EQUAL_HEX32(0, u[35]);

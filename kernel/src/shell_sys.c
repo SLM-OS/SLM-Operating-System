@@ -5145,6 +5145,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../gpu/nvidia/ga10b_ce.h"
 #include "../gpu/nvidia/ga10b_cold.h"
+#include "boot_source.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
 #include "oplib_probe.h"
@@ -5651,7 +5652,15 @@ int cmd_nvgpu(int argc, char *argv[])
 
     if (strcmp(argv[1], "cold") == 0) {
         /* `nvgpu cold [step]` — cold bring-up after UEFI-direct boot
-         * (#1088). Runs every step up to `step` (default: all). */
+         * (#1088). Runs every step up to `step` (default: all). Refused
+         * after kexec: it would re-power and reset the GPU state Linux
+         * left behind, killing the inherited channels. */
+        if (!boot_source_is_uefi()) {
+            shell_puts("nvgpu cold: only after a UEFI-direct boot (after "
+                       "kexec the GPU is inherited from Linux and this "
+                       "would reset it)\r\n");
+            return -1;
+        }
         enum ga10b_cold_step last = (enum ga10b_cold_step)(GA10B_COLD_STEP_COUNT - 1);
         if (argc >= 3) {
             bool found = false;

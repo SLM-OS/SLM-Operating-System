@@ -363,8 +363,12 @@ void ga10b_mnist_pipeline_free(const struct ga10b_gpu_ops *ops,
                                struct ga10b_mnist_pipeline *p)
 {
     if (!ops || !p) return;
-    for (unsigned i = 0; i < GA10B_MNIST_N_SHADERS; i++) ga10b_dma_free(ops, &p->shader[i]);
-    for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++) ga10b_dma_free(ops, &p->weight[i]);
+    for (unsigned i = 0; i < GA10B_MNIST_N_SHADERS; i++) {
+        ga10b_dma_free(ops, &p->shader[i]);
+    }
+    for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++) {
+        ga10b_dma_free(ops, &p->weight[i]);
+    }
     ga10b_dma_free(ops, &p->input);
     for (unsigned i = 0; i < GA10B_MNIST_N_OPS; i++) {
         ga10b_dma_free(ops, &p->qmd[i]);
@@ -416,7 +420,7 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
             src->sass_bytes[i] > GA10B_MNIST_SHADER_BUF_BYTES) {
             return GA10B_MNIST_ERR_ARG;
         }
-        }
+    }
     for (unsigned i = 0; i < GA10B_MNIST_N_WEIGHTS; i++) {
         if (!src->weight[i]) return GA10B_MNIST_ERR_ARG;
     }
@@ -496,7 +500,9 @@ int ga10b_mnist_pipeline_build(const struct ga10b_gpu_ops *ops,
     static_assert(GA10B_MNIST_N_OPS * sizeof(struct ga10b_pipeline_op_v7) <= 4096u,
                   "v7 ops array fits one page");
     struct ga10b_pipeline_op_v7 *arr = (struct ga10b_pipeline_op_v7 *)p->ops.cpu;
-    for (unsigned i = 0; i < GA10B_MNIST_N_OPS; i++) ga10b_mnist_fill_op_v7(p, i, &arr[i]);
+    for (unsigned i = 0; i < GA10B_MNIST_N_OPS; i++) {
+        ga10b_mnist_fill_op_v7(p, i, &arr[i]);
+    }
     ga10b_dma_clean(ops, &p->ops);
 
     /* The channel has already run (submit tests), so the GMMU may hold

@@ -141,7 +141,9 @@ static void test_priv_access_map(void)
     ga10b_gr_build_priv_access_map(map, sizeof(map));
     unsigned bits = 0;
     for (size_t i = 0; i < sizeof(map); i++) {
-        for (unsigned b = 0; b < 8; b++) bits += (map[i] >> b) & 1u;
+        for (unsigned b = 0; b < 8; b++) {
+            bits += (map[i] >> b) & 1u;
+        }
     }
     TEST_ASSERT_EQUAL_UINT32(35, ga10b_gr_priv_access_regs_count);
     TEST_ASSERT_EQUAL_UINT32(35, bits);

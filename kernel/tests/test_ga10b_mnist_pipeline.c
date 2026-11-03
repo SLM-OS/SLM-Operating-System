@@ -44,7 +44,9 @@ static void *f_alloc(void *ctx, uint32_t n, uint64_t *phys)
         uint32_t k;
         for (k = 0; k < n && !g_used[i + k]; k++) { }
         if (k == n) {
-            for (k = 0; k < n; k++) g_used[i + k] = true;
+            for (k = 0; k < n; k++) {
+                g_used[i + k] = true;
+            }
             memset(g_pool[i], 0, (size_t)n * 4096u);
             *phys = POOL_PHYS + (uint64_t)i * 4096u;
             g_allocs++;
@@ -59,7 +61,9 @@ static void f_free(void *ctx, void *cpu, uint32_t n)
 {
     (void)ctx;
     size_t i = (size_t)((uint8_t *)cpu - &g_pool[0][0]) / 4096u;
-    for (uint32_t k = 0; k < n; k++) g_used[i + k] = false;
+    for (uint32_t k = 0; k < n; k++) {
+        g_used[i + k] = false;
+    }
     g_frees++;
 }
 
@@ -92,7 +96,9 @@ static void pool_reset(void)
 static unsigned pool_pages_used(void)
 {
     unsigned n = 0;
-    for (unsigned i = 0; i < POOL_PAGES; i++) n += g_used[i] ? 1u : 0u;
+    for (unsigned i = 0; i < POOL_PAGES; i++) {
+        n += g_used[i] ? 1u : 0u;
+    }
     return n;
 }
 
@@ -170,8 +176,12 @@ static void test_op_table(void)
 static void fake_vas(struct ga10b_mnist_vas *va)
 {
     va->input = 0x4100000ull;
-    for (unsigned w = 0; w < 6; w++) va->weight[w] = 0x4200000ull + 0x10000ull * w;
-    for (unsigned o = 0; o < 8; o++) va->output[o] = 0x5000000ull + 0x100000ull * o;
+    for (unsigned w = 0; w < 6; w++) {
+        va->weight[w] = 0x4200000ull + 0x10000ull * w;
+    }
+    for (unsigned o = 0; o < 8; o++) {
+        va->output[o] = 0x5000000ull + 0x100000ull * o;
+    }
 }
 
 static void check_dims(const uint8_t *c, uint32_t bx, uint32_t by, uint32_t gx,
@@ -191,7 +201,9 @@ static void check_ints(const uint8_t *c, uint32_t off, const int32_t *v, unsigne
         TEST_ASSERT_EQUAL_INT32(v[i], (int32_t)rd32le(c + off + 4u * i));
     }
     /* Nothing written past the last argument. */
-    for (uint32_t o = off + 4u * n; o < 512u; o++) TEST_ASSERT_EQUAL_UINT8(0, c[o]);
+    for (uint32_t o = off + 4u * n; o < 512u; o++) {
+        TEST_ASSERT_EQUAL_UINT8(0, c[o]);
+    }
 }
 
 static uint8_t g_cbuf[4096];
@@ -211,7 +223,9 @@ static void test_cbuf_layouts(void)
     TEST_ASSERT_EQUAL_HEX64(va.output[0], rd64le(c + 0x170));
     static const int32_t conv1[] = { 1, 1, 28, 28, 8, 5, 5, 2, 2 };
     check_ints(c, 0x178, conv1, 9);
-    for (uint32_t o = 0x18; o < 0x160; o++) TEST_ASSERT_EQUAL_UINT8(0, c[o]);
+    for (uint32_t o = 0x18; o < 0x160; o++) {
+        TEST_ASSERT_EQUAL_UINT8(0, c[o]);
+    }
     TEST_ASSERT_EQUAL_UINT8(0, c[4095]);    /* whole page zeroed */
 
     /* Op 1 addrelu1 (:441-450) */
@@ -332,7 +346,9 @@ static size_t make_tensor(uint8_t *b, const char *name, const int64_t *dims,
     if (packed_dims) {
         uint8_t tmp[32];
         size_t t = 0;
-        for (unsigned i = 0; i < nd; i++) t += pb_vint(tmp + t, (uint64_t)dims[i]);
+        for (unsigned i = 0; i < nd; i++) {
+            t += pb_vint(tmp + t, (uint64_t)dims[i]);
+        }
         n += pb_bytes(b + n, 1, tmp, t);
     } else {
         for (unsigned i = 0; i < nd; i++) {
@@ -533,7 +549,9 @@ static void test_build_and_handoff(void)
     TEST_ASSERT_TRUE(g_wr32s >= wr_before + 2u);   /* TLB invalidate issued */
 
     /* Sizes. */
-    for (unsigned i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT32(65536, p->shader[i].size);
+    for (unsigned i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT32(65536, p->shader[i].size);
+    }
     for (unsigned w = 0; w < 6; w++) {
         TEST_ASSERT_EQUAL_UINT32(ga10b_mnist_weights[w].buf_bytes, p->weight[w].size);
     }
@@ -577,7 +595,9 @@ static void test_build_and_handoff(void)
     for (unsigned i = 0; i < 4; i++) {
         const uint8_t *s = (const uint8_t *)p->shader[i].cpu;
         TEST_ASSERT_EQUAL_MEMORY(g_sass[i], s, src.sass_bytes[i]);
-        for (uint32_t o = src.sass_bytes[i]; o < 65536u; o++) TEST_ASSERT_EQUAL_UINT8(0, s[o]);
+        for (uint32_t o = src.sass_bytes[i]; o < 65536u; o++) {
+            TEST_ASSERT_EQUAL_UINT8(0, s[o]);
+        }
     }
     for (unsigned w = 0; w < 6; w++) {
         TEST_ASSERT_EQUAL_HEX32(g_weight_ref[w].fnv,
@@ -587,7 +607,9 @@ static void test_build_and_handoff(void)
     TEST_ASSERT_EQUAL_MEMORY(mnist_input_synth_start, p->input.cpu, GA10B_MNIST_INPUT_BYTES);
     for (unsigned i = 0; i < 8; i++) {
         const uint8_t *o = (const uint8_t *)p->out[i].cpu;
-        for (uint32_t k = 0; k < p->out[i].size; k++) TEST_ASSERT_EQUAL_UINT8(0, o[k]);
+        for (uint32_t k = 0; k < p->out[i].size; k++) {
+            TEST_ASSERT_EQUAL_UINT8(0, o[k]);
+        }
     }
 
     /* cbuf pointers resolve to the buffers they name. */
@@ -733,7 +755,9 @@ static void test_build_errors(void)
     src.input = NULL;
     TEST_ASSERT_EQUAL_INT(GA10B_MNIST_OK, ga10b_mnist_pipeline_build(&g_ops, &vm, &src, p));
     const uint8_t *in = (const uint8_t *)p->input.cpu;
-    for (unsigned k = 0; k < 4096u; k++) TEST_ASSERT_EQUAL_UINT8(0, in[k]);
+    for (unsigned k = 0; k < 4096u; k++) {
+        TEST_ASSERT_EQUAL_UINT8(0, in[k]);
+    }
     ga10b_mnist_pipeline_free(&g_ops, p);
     ga10b_vm_destroy(&g_ops, &vm);
 

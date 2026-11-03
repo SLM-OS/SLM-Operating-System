@@ -176,6 +176,11 @@
 #define COLD_TIMEOUT_FECS_US            2000000u
 #define COLD_TIMEOUT_SCRUB_US           1000000u
 #define COLD_TIMEOUT_PRI_RING_US          10000u
+#define COLD_TIMEOUT_GSP_SCRUB_US        100000u
+#define COLD_DEVICE_ENABLE_POLLS           1000u   /* x 10 us */
+/* PMU INIT message and LSFM RPC replies, milliseconds (nvgpu waits up
+ * to its poll timeout; the RTOS answers within a few ms). */
+#define COLD_TIMEOUT_PMU_MS                3000u
 
 /* FECS watchdog timeout nvgpu sends with SET_WATCHDOG_TIMEOUT
  * (nvgpu_gr_falcon_init_ctx_state, trace line 11550). */
@@ -185,9 +190,6 @@
  * (NV_FUSE_STATUS_OPT_GPC = 0x2), 4 TPCs in GPC0. */
 #define GA10B_COLD_OPT_GPC_EXPECTED     0x2u
 #define GA10B_COLD_MAX_GPCS             2u
-
-/* BAR0 aperture size; netlist addresses must fall inside it. */
-#define GA10B_BAR0_SIZE                 0x01000000u
 
 static enum ga10b_cold_step cold_done = GA10B_COLD_NONE;
 
@@ -341,7 +343,7 @@ static int device_enable(uint32_t mask, bool enable)
     uint32_t v = bar0_rd(NV_PMC_DEVICE_ENABLE0);
     v = enable ? (v | mask) : (v & ~mask);
     bar0_wr(NV_PMC_DEVICE_ENABLE0, v);
-    for (unsigned i = 0; i < 1000u; i++) {
+    for (unsigned i = 0; i < COLD_DEVICE_ENABLE_POLLS; i++) {
         if (bar0_rd(NV_PMC_DEVICE_ENABLE0) == v) return 0;
         udelay(10);
     }
@@ -482,22 +484,21 @@ static void pio_write(uint32_t ctl_reg, uint32_t data_reg, uint32_t ctl,
     }
 }
 
-
 /* Boot the ACR HS ucode (acr-gsp text/data/manifest) on the GSP RISC-V
  * core. `desc_phys` is the physical address of the flcn2_acr_desc the
  * ucode reads through MAILBOX0/1. Returns 0 when the BROM accepted the
  * image and ACR halted with MAILBOX0 == 0. */
 static int ga10b_cold_gsp_boot_acr_blobs(const uint8_t *code, uint32_t code_len,
-                                  const uint8_t *data, uint32_t data_len,
-                                  const uint8_t *manifest, uint32_t manifest_len,
-                                  uint64_t desc_phys)
+                                         const uint8_t *data, uint32_t data_len,
+                                         const uint8_t *manifest, uint32_t manifest_len,
+                                         uint64_t desc_phys)
 {
     /* ga10b_gsp_engine_reset: assert, deassert, wait for scrubbing. */
     bar0_wr(NV_PGSP_FALCON_ENGINE, 1u);
     udelay(10);
     bar0_wr(NV_PGSP_FALCON_ENGINE, 0u);
     if (wait_bits_clear(NV_PGSP_FALCON_HWCFG2, FALCON_HWCFG2_MEM_SCRUBBING,
-                        100000u) != 0) {
+                        COLD_TIMEOUT_GSP_SCRUB_US) != 0) {
         WARN("ga10b-cold: GSP memory scrub did not finish");
         return -1;
     }
@@ -846,7 +847,7 @@ static int step_falcons(void)
 
     /* gr_falcon_sec2_or_ls_pmu_coldboot_bootstrap: the PMU loads FECS
      * and GPCCS from WPR (ACR INIT_WPR_REGION + BOOTSTRAP_GR_FALCONS). */
-    int prc = ga10b_pmu_bootstrap_ctxsw_falcons(&cold_pmu, 3000);
+    int prc = ga10b_pmu_bootstrap_ctxsw_falcons(&cold_pmu, COLD_TIMEOUT_PMU_MS);
     ga10b_pmu_dbg_drain(&cold_pmu);
     if (prc != GA10B_PMU_OK) {
         WARN("ga10b-cold: PMU did not bootstrap FECS/GPCCS rc=%d last_error=%d",
@@ -908,7 +909,6 @@ static void ltc_fb_atomic_setup(void)
     v = (v & ~FB_HUB_SYS_ATOMIC_MODE_M) | FB_HUB_SYS_ATOMIC_MODE_USE_RMW;
     bar0_wr(NV_PFB_FBHUB_NUM_ACTIVE_LTCS, v);
     bar0_wr(NV_PFB_HSHUB0_NUM_ACTIVE_LTCS, v);
-
 }
 
 /* ---- Step 9: GR init support ----
@@ -1053,7 +1053,7 @@ static int step_pmu(void)
 
     int rc = ga10b_pmu_init(&cold_pmu, &cold_pmu_ops, &cfg);
     if (rc == GA10B_PMU_OK) rc = ga10b_pmu_boot(&cold_pmu);
-    if (rc == GA10B_PMU_OK) rc = ga10b_pmu_wait_init(&cold_pmu, 3000);
+    if (rc == GA10B_PMU_OK) rc = ga10b_pmu_wait_init(&cold_pmu, COLD_TIMEOUT_PMU_MS);
     ga10b_pmu_dbg_drain(&cold_pmu);
     if (rc != GA10B_PMU_OK) {
         WARN("ga10b-cold: PMU boot failed rc=%d (last_error=%d BR_RETCODE=0x%x "

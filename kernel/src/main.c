@@ -724,7 +724,9 @@ void kernel_main(void *dtb)
          * leaves inference on the CPU. */
         if (boot_source_is_uefi()) {
             int cold_rc = ga10b_cold_run(GA10B_COLD_STEP_COUNT - 1);
-            if (cold_rc == -(int)GA10B_COLD_MNIST) {
+            if (cold_rc == GA10B_COLD_ERR_BUSY) {
+                WARN("GA10B cold bring-up already running elsewhere");
+            } else if (cold_rc == -(int)GA10B_COLD_MNIST) {
                 WARN("GA10B up from cold, but the MNIST GPU pipeline could "
                      "not be built (operator library / weights) — MNIST "
                      "inference stays on the CPU");

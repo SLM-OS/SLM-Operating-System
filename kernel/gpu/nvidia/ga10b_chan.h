@@ -68,6 +68,10 @@ struct ga10b_dma {
 
 #define GA10B_PAGE_SIZE 4096u
 
+/* GA10B BAR0 aperture size (0x17000000..0x18000000): netlist
+ * register addresses must fall inside it. */
+#define GA10B_BAR0_SIZE 0x01000000u
+
 int ga10b_dma_alloc(const struct ga10b_gpu_ops *ops, uint32_t bytes,
                     struct ga10b_dma *out);
 void ga10b_dma_free(const struct ga10b_gpu_ops *ops, struct ga10b_dma *d);

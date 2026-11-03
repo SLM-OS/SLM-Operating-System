@@ -806,6 +806,11 @@ static int golden_hw(const struct ga10b_gpu_ops *o, struct ga10b_grctx *g,
     if ((rc = wait_idle(o, g)) != 0) return rc;
 
     for (uint32_t i = 0; i < ctx_load.count; i++) {
+        if (ctx_load.l[i].addr >= GA10B_BAR0_SIZE || (ctx_load.l[i].addr & 3u)) {
+            return GA10B_GRCTX_ERR_NETLIST;
+        }
+    }
+    for (uint32_t i = 0; i < ctx_load.count; i++) {
         wr(o, ctx_load.l[i].addr, ctx_load.l[i].value);
     }
 

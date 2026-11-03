@@ -389,7 +389,9 @@ void ga10b_userd_init(uint32_t *u)
 {
     static const uint8_t words[] = { 16, 17, 18, 19, 22, 23, 24,
                                      GA10B_USERD_W_GP_GET, GA10B_USERD_W_GP_PUT };
-    for (unsigned i = 0; i < sizeof(words); i++) u[words[i]] = 0u;
+    for (unsigned i = 0; i < sizeof(words); i++) {
+        u[words[i]] = 0u;
+    }
 }
 
 /* ---- Runlist ---- */

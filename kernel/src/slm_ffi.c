@@ -28,6 +28,7 @@
 #include <stdint.h>
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "boot_source.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
@@ -1044,6 +1045,13 @@ static int ensure_bringup(uint32_t kind)
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
+    } else if (boot_source_is_uefi()) {
+        /* After a UEFI-direct boot there is no Linux state to inherit:
+         * the inherit path would touch GPU blocks the cold bring-up may
+         * not have powered (an EL3 SError on Tegra234) and could adopt a
+         * stale helper handoff a warm reboot left in DRAM. Without a
+         * locally built pipeline for this kind, stay on the CPU. */
+        return -1;
     } else {
         /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
          * the progress lines' blocking UART writes dominated (#1037). */
@@ -1116,6 +1124,12 @@ static void consume_post_inherit_double_dispatch(uint32_t kind,
 int slm_gpu_install_handoff(struct ga10b_bringup *b,
                             const struct ga10b_channel_handoff *h)
 {
+    /* Validate (and log a rejection) before taking the lock: UART
+     * output under the IRQs-off dispatch lock is what #1037 removed. */
+    if (!b || !h || ga10b_validate_handoff(h) < 0) {
+        uart_puts("[gpu] install_handoff: invalid handoff\n");
+        return -1;
+    }
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ga10b_bringup_install_handoff(b, h);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
