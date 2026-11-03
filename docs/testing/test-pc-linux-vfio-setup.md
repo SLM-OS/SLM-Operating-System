@@ -261,9 +261,11 @@ Falcon ucode hangs the device (recovery: `echo 1 > /sys/bus/pci/.../reset`).
 
 Three disks, one active at a time:
 
-- To run Linux: boot order prefers the external SSD (or press F12
-  at POST and pick it). Linux GRUB → Ubuntu.
-- To run bare-metal SLM-OS: `labctl sdwire_to_dut` + power-cycle.
+- To run Linux: the boot order puts the SD card first and the
+  external SSD second, so switch the card away from `test-pc`
+  (`labctl sdwire host test-pc`, with the machine off) and power-cycle,
+  or press F12 at POST and pick the SSD. Linux GRUB → Ubuntu.
+- To run bare-metal SLM-OS: `labctl sdwire dut test-pc` + power-cycle.
   BIOS/UEFI sees the SD-wire card; our UEFI disk image's GRUB →
   SLM-OS kernel.
 - The internal disk (old SLM-OS) is never touched. If BIOS prefers

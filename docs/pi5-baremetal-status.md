@@ -333,30 +333,13 @@ cp build/kernel/slmos.bin /path/to/sd/kernel_2712.img
 
 ### Automated Deploy via SDWireC
 
-On SDWire-equipped Pi 5 boards, the SLM-OS SD card can be updated through a
-Badgerd SDWireC (USB-C model), controlled by the `sdwire` Python CLI. The
-reference setup here is `pi-5-1`; no-SDWire boards such as `pi-5-2` should use
-the maintenance-OS / dual-boot workflow in `docs/deploy/pi5-sdcard.md` and
+On SDWire-equipped Pi 5 boards, the SLM-OS SD card is updated through labctl
+(`sdwire_update`; see `docs/deploy/pi5-sdwire.md`). Which boards have an
+SDWire is labctl configuration. Boards without one use the maintenance-OS /
+dual-boot workflow in `docs/deploy/pi5-sdcard.md` and
 `docs/pi5-dual-boot-setup.md`.
 
-```bash
-# Switch SD card to host for flashing
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" host
-sleep 2
-sudo mount /dev/sdc1 /mnt
-sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
-sudo umount /mnt
-
-# Switch back to the Pi 5 and boot
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
-labctl power cycle Pi-5-1
-
-# Monitor serial output
-labctl connect pi-5-1-console
-```
-
 **Notes:**
-- The SDWireC requires the `sdwire` Python package (not `sd-mux-ctrl`, which uses FTDI)
 - A slower SD card (tested: 29 GB) is required — faster UHS-I cards negotiate SDR104 speeds that the SDWireC's analog MUX cannot handle
 - The Pi 5 EEPROM is at the original Sep 2024 firmware (no `SD_QUIRKS` needed with a slower card)
 - EEPROM firmware versions after Jan 2025 break bare-metal RP1 UART access (investigated but not resolved)

@@ -194,8 +194,8 @@ fresh-enumerates the downstream RTL8153, and brings networking up with
 no manual unplug/replug. Current validation on the lab path:
 
 - `net init` succeeds
-- a single `ifconfig dhcp` request binds `192.168.4.5/24` with gateway `192.168.4.1`
-- `ping 192.168.4.1 2` succeeds
+- a single `ifconfig dhcp` request binds the board's reserved address (the one labctl lists) with the lab gateway
+- a ping to the DHCP-assigned gateway (as `ifconfig` reports it) succeeds
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
 
@@ -320,14 +320,14 @@ runs.
 From the host (before or after issuing `kexec`):
 
 ```bash
-labctl connect jetson-nano-1-console
+labctl connect <sbc>
 ```
 
 Expected output on serial:
 
 1. Kernel messages from SLM-OS's `uart_tegra.c` driver — via UARTC at `0x0C280000`, routed through the TCU HSP mailbox to the USB-C debug port.
 2. SMP bring-up on 6 cores (Jetson is dual-cluster 2+4; MPIDRs `0x000`, `0x100`, `0x200`, `0x300`, `0x10200`, `0x10300`).
-3. `slm>` shell prompt. Input works bidirectionally via the TCU mailbox.
+3. `slmos>` shell prompt. Input works bidirectionally via the TCU mailbox.
 
 ### Step 4a — Run the networking smoke test
 
@@ -337,16 +337,24 @@ automates the current regression check end-to-end:
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
-    --console-port 4004
+    --console-port <ser2net TCP port from labctl> \
+    --expected-ip <JETSON_IP> \
+    --expected-gateway <GATEWAY> \
+    --ping-target <GATEWAY>
 ```
+
+`<GATEWAY>` is the board's default gateway, as Linux on the board reports
+it (`ip route`). Pass all three address flags: the script's built-in
+defaults are fixed addresses from an earlier lab setup, not values read
+from labctl.
 
 That script:
 
 - copies `build/kernel/slmos.elf` and `scripts/jetson-kexec-slmos.sh`
 - triggers `slmos-kexec`
 - waits for `slmos>` on serial
-- runs `net init`, sends one `ifconfig dhcp`, polls `ifconfig` until `DHCP(bound)`, and then runs `ping 192.168.4.1 2`
-- verifies DHCP `192.168.4.5/24` with gateway `192.168.4.1`
+- runs `net init`, sends one `ifconfig dhcp`, polls `ifconfig` until `DHCP(bound)`, and then pings the gateway
+- verifies that DHCP bound the expected address and gateway
 
 It is intentionally scoped to the current lab topology rather than a
 generic Jetson serial automation framework.
@@ -356,7 +364,7 @@ generic Jetson serial automation framework.
 Once work in SLM-OS is finished:
 
 ```bash
-labctl power cycle jetson-nano-1
+labctl power cycle <sbc>
 ```
 
 Wait for Linux to boot, then SSH is available again. A provisioned

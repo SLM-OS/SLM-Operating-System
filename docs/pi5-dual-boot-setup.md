@@ -15,7 +15,7 @@ preserve both.
 
 ## TL;DR
 
-SSH into Pi OS (once set up): `ssh pi@192.168.4.25` password `slmos`.
+SSH into Pi OS (once set up): `ssh pi@<PI_IP>` password `slmos`, where `<PI_IP>` is the address labctl reports for the board.
 
 Switch from Pi OS to SLM-OS for one boot:
 ```bash
@@ -89,8 +89,9 @@ the `boot_partition` numbers in `autoboot.txt` on sdc1. Then
 `reboot 0 tryboot` from Pi OS becomes the path that gets you back
 to Pi OS for one boot, and plain power-on lands on SLM-OS. To edit
 the file, either SSH into Pi OS and mount sdc1 (FAT32 at
-`/dev/mmcblk0p1`), or `labctl sdwire_to_host pi-5-1` and edit from
-the dev host.
+`/dev/mmcblk0p1`), or, on a board with an SDWire, copy an edited
+`autoboot.txt` onto partition 1 with labctl `sdwire_update`
+(`copies=["<path>/autoboot.txt:autoboot.txt"]`).
 
 ---
 
@@ -123,23 +124,31 @@ release to release; check their site when needed).
 ## Creating a dual-boot card from scratch
 
 These steps assume you have a SLMOS-only card that you want to turn
-into a dual-boot card. If the board has SDWire, use that to expose the
-card to the host. If the board has no SDWire, do the same partitioning
-and copy steps through the host's SD-card reader or from the Linux
-maintenance OS already on the board.
+into a dual-boot card. Repartitioning needs raw block-device access, so
+do it with the card in the host's own SD-card reader (sneakernet, the
+one exception to labctl-only card access in `docs/deploy/README.md`),
+not through an SDWire: labctl owns the SDWire block devices, and their
+`/dev/sdX` names move between cards. They cannot be run from the Pi OS
+maintenance install on the same card: that OS runs from the card being
+repartitioned.
+
+In the steps below, `DEV` is the card's block device, and sdc1, sdc2
+and sdc3 (and the `/mnt/sdcN` mount points) name its partitions 1, 2
+and 3.
 
 ### 0. Get the card onto the host
 
-```bash
-labctl power_off pi-5-1
-labctl sdwire_to_host pi-5-1
-lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTUUID
-# Find the SLMOS card — it should show up as a ~29 GB disk with a
-# FAT32 partition labelled SLMOS. Note the /dev/sdX identifier.
-```
+1. Power the board off (`labctl power off <sbc>`).
+2. Remove the card from the board, or from its SDWire, and insert it in
+   the host's own SD-card reader.
+3. Identify it and set `DEV`:
 
-Verify the device identifier matches what labctl expects (multiple
-SDWires exist in the lab; the label is the safest confirmation).
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTUUID
+# Find the SLMOS card: a ~29 GB disk with a FAT32 partition labelled
+# SLMOS, on the host's reader (not an SDWire). Then:
+DEV=/dev/sdX    # the disk identified above; double-check before step 1
+```
 
 ### 1. Shrink the original SLMOS partition and create two new ones
 
@@ -149,16 +158,16 @@ it does on today's card), skip the shrink step.
 
 ```bash
 # Shrink sdc1 to ~512 MB (adjust if SLMOS files grow)
-sudo umount /dev/sdc1 2>/dev/null || true
-sudo fsck.vfat -f /dev/sdc1          # clean filesystem before resize
-sudo fatresize -s 512M /dev/sdc1     # or reformat fresh after backup
-sudo parted /dev/sdc resizepart 1 513MiB
+sudo umount ${DEV}1 2>/dev/null || true
+sudo fsck.vfat -f ${DEV}1          # clean filesystem before resize
+sudo fatresize -s 512M ${DEV}1     # or reformat fresh after backup
+sudo parted ${DEV} resizepart 1 513MiB
 
 # Create PIOS_BOOT (FAT32) and PIOS_ROOT (ext4) in the newly freed tail
-sudo parted -a optimal /dev/sdc mkpart primary fat32 513MiB  1025MiB
-sudo parted -a optimal /dev/sdc mkpart primary ext4  1025MiB 100%
-sudo mkfs.vfat -F 32 -n PIOS_BOOT /dev/sdc2
-sudo mkfs.ext4 -L PIOS_ROOT /dev/sdc3
+sudo parted -a optimal ${DEV} mkpart primary fat32 513MiB  1025MiB
+sudo parted -a optimal ${DEV} mkpart primary ext4  1025MiB 100%
+sudo mkfs.vfat -F 32 -n PIOS_BOOT ${DEV}2
+sudo mkfs.ext4 -L PIOS_ROOT ${DEV}3
 ```
 
 ### 2. Populate the Pi OS partitions from the official image
@@ -176,8 +185,8 @@ sudo mount ${LOOPDEV}p2 /mnt/piosimg_root
 
 # Mount our targets
 sudo mkdir -p /mnt/sdc2 /mnt/sdc3
-sudo mount /dev/sdc2 /mnt/sdc2
-sudo mount /dev/sdc3 /mnt/sdc3
+sudo mount ${DEV}2 /mnt/sdc2
+sudo mount ${DEV}3 /mnt/sdc3
 
 # Boot partition: plain cp is fine (FAT32, no special bits)
 sudo cp -av /mnt/piosimg_boot/. /mnt/sdc2/
@@ -208,10 +217,10 @@ releases). Our card has different ones. Patch them:
 
 ```bash
 # Grab the real PARTUUIDs from our card
-sudo blkid /dev/sdc2 /dev/sdc3
+sudo blkid ${DEV}2 ${DEV}3
 # Example output:
-#   /dev/sdc2: ... PARTUUID="1d0c498d-02"
-#   /dev/sdc3: ... PARTUUID="1d0c498d-03"
+#   ${DEV}2: ... PARTUUID="1d0c498d-02"
+#   ${DEV}3: ... PARTUUID="1d0c498d-03"
 
 # Update cmdline.txt (root=PARTUUID points at sdc3)
 sudo sed -i 's/7d23366b-02/1d0c498d-03/' /mnt/sdc2/cmdline.txt
@@ -271,7 +280,7 @@ image later, you have to recreate them.
 
 ```bash
 sudo mkdir -p /mnt/sdc1
-sudo mount /dev/sdc1 /mnt/sdc1
+sudo mount ${DEV}1 /mnt/sdc1
 sudo tee /mnt/sdc1/autoboot.txt > /dev/null <<'EOF'
 [all]
 boot_partition=2
@@ -291,9 +300,10 @@ sudo umount /mnt/sdc1 /mnt/sdc2 /mnt/sdc3 \
            /mnt/piosimg_boot /mnt/piosimg_root
 sudo losetup -d "$LOOPDEV"
 
-labctl sdwire_to_dut pi-5-1
-labctl power_on pi-5-1
-labctl serial_capture pi-5-1 --timeout 60 --until_pattern "raspberrypi login:"
+# Put the card back in the board (or its SDWire, switched to the DUT
+# with `labctl sdwire dut <sbc>`), then:
+labctl power on <sbc>
+labctl serial capture <sbc> --timeout 60 --until "raspberrypi login:"
 ```
 
 On first boot, Pi OS:
@@ -303,8 +313,8 @@ On first boot, Pi OS:
    cmdline flag is present (harmless even if the partition already fills).
 
 You should see `raspberrypi login:` on serial within ~30 s of power-on,
-and the system should announce an IP address from DHCP (typically
-`192.168.4.25` in our lab).
+and the system should announce an IP address from DHCP (it should
+match the address labctl lists for the board).
 
 ---
 
@@ -321,7 +331,7 @@ In order of how much time each one cost:
 2. **Stale PARTUUIDs from the image.** `cmdline.txt` and `/etc/fstab`
    reference the image's original PARTUUIDs. Symptom: kernel panic
    "VFS: Cannot open root device". Fix: `sed` the actual PARTUUIDs
-   from `blkid /dev/sdc2 /dev/sdc3`.
+   from `blkid ${DEV}2 ${DEV}3`.
 3. **`enable_uart=1` missing from Pi OS `config.txt`.** Pi OS Lite
    ships with UART disabled on the 40-pin GPIO header by default.
    Symptom: zero serial output from labctl even though the Pi is

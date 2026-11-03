@@ -19,16 +19,15 @@ the project should preserve both:
   - the card carries both SLM-OS and a Linux maintenance environment
   - Linux is used for recovery, local kernel replacement, and one-shot
     handoff into SLM-OS when no SDWire exists
-  - this is the supported workflow for boards such as `pi-5-2`
+  - this is the supported workflow for boards with no SDWire assigned
 
 These are complementary, not competing. SDWire is the fastest deploy
 path where available; dual boot is the resilient no-SDWire path.
 
-Current validation status:
-- `pi-5-2` has both paths working in practice:
-  - maintenance-OS dual boot for normal recovery / handoff
-  - SDWire-assisted host-driven `kernel_2712.img` replacement when the
-    shared `pc-sdwire` path is attached
+Both paths have been validated on the same dual-boot card: maintenance-OS
+dual boot for normal recovery / handoff, and SDWire-assisted host-driven
+`kernel_2712.img` replacement while an SDWire was attached. Which board
+has an SDWire at any time is labctl configuration.
 
 For file staging onto a running SLM-OS instance, see
 [`slm-put.md`](slm-put.md) for the first telnet-based host upload path.
@@ -53,7 +52,7 @@ flows, and now prefers a persistent LittleFS image at
 |---|---|---|---|---|
 | Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md), [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) | **Gap** (#TBD) | — | Preserve both Pi 5 models: SDWire-first deploy where hardware supports it, and maintenance-OS dual boot where it does not. |
 | Jetson Orin Nano | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SD rootfs) | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SSD rootfs) | — | No standalone bare-metal boot path yet — UEFI-direct is WIP (see `docs/archive/investigations/jetson-uefi-direct-result.md`). |
-| x86-64 (test-pc) | — | [`x86-64-ssd.md`](x86-64-ssd.md) | **Gap** (#TBD) | UEFI disk image written to SSD via SDWire; kexec-from-Linux is WIP (see `docs/x86-64-gpu-inference-status.md` §4.2.k). |
+| x86-64 (test-pc) | — | [`x86-64-ssd.md`](x86-64-ssd.md) | **Gap** (#TBD) | UEFI disk image written to an SD card via SDWire; kexec-from-Linux is WIP (see `docs/x86-64-gpu-inference-status.md` §4.2.k). |
 | QEMU (ARM64 / x86-64) | N/A | N/A | N/A | `make run` — no deploy step. See `docs/getting-started.md`. |
 
 Gaps marked above represent paths that are known to work in principle but have no written procedure. File a tracking issue before attempting to fill one in.
@@ -64,7 +63,7 @@ Gaps marked above represent paths that are known to work in principle but have n
 
 ### Hardware access
 
-All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board lacks an SDWire interface (for example `pi-5-2`), the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
+All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet**: the SD card is physically removed and written in the host machine's own card reader. It is used when a board has no SDWire assigned in labctl, and for first-time card provisioning that labctl cannot do, such as repartitioning (see [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md)), even on a board that normally uses an SDWire. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
 
 Never bypass labctl by running `mount`/`cp`/`picocom`/`nc` directly against lab-managed SD cards or serial ports — doing so risks device conflicts with other sessions and can corrupt the wrong card. Sneakernet is the one sanctioned exception.
 

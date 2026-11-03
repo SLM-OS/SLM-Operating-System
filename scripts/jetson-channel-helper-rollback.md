@@ -16,7 +16,7 @@ been removed. Keeping this document for future re-attempts.
 ## Files to remove if re-attempted and abandoned
 
 ```bash
-ssh root@192.168.4.93 'rm -f /root/gpu-channel-helper /root/gpu-channel-helper.c'
+ssh root@<JETSON_IP> 'rm -f /root/gpu-channel-helper /root/gpu-channel-helper.c'
 ```
 
 The Jetson-side `slmos-kexec` helper was never modified — the
@@ -28,13 +28,13 @@ is ready to test, but the current deployed version stays unchanged.
 ## How to verify clean state
 
 ```bash
-ssh root@192.168.4.93 'ls /root/gpu-channel-helper* 2>/dev/null && echo "NOT CLEAN" || echo "CLEAN"'
+ssh root@<JETSON_IP> 'ls /root/gpu-channel-helper* 2>/dev/null && echo "NOT CLEAN" || echo "CLEAN"'
 ```
 
 ## Packages installed for diagnostics (2026-04-17)
 
 - `strace` (v5.16-0ubuntu3) — installed to trace CUDA's ioctl calls.
-  Rollback: `ssh root@192.168.4.93 'apt-get remove -y strace'`
+  Rollback: `ssh root@<JETSON_IP> 'apt-get remove -y strace'`
 
 ## What we learned (blocker notes)
 

@@ -10,39 +10,58 @@ This document describes how to interact with the embedded development lab hardwa
 
 | Operation | Command |
 |-----------|---------|
-| Power on | `labctl power on pi-5-1` |
-| Power off | `labctl power off pi-5-1` |
-| Power cycle | `labctl power cycle pi-5-1 --delay 2` |
-| Serial console | `labctl connect pi-5-1-console` |
+| Power on | `labctl power on <sbc>` |
+| Power off | `labctl power off <sbc>` |
+| Power cycle | `labctl power cycle <sbc>` (waits the board's stored minimum cycle delay) |
+| Serial console | `labctl connect <sbc>` (the SBC name resolves to its console port) |
 | Lab status | `labctl status` |
-| Health check | `labctl health` |
+| Health check | `labctl health-check` |
+
+---
+
+## labctl Is the Source of Truth for Lab Configuration
+
+This document does **not** record lab wiring or configuration. For
+each SBC, labctl owns:
+
+- network addresses
+- serial ports, aliases and ser2net TCP ports
+- power plugs and outlets
+- SDWire devices and which board each one is assigned to
+- relay actuators and bindings
+
+Read them live (MCP: the `lab://sbcs` resource, `bindings_list`,
+`sdwire_discover`; CLI: `labctl status`). Placeholders such as
+`<JETSON_IP>`, `<PI_IP>` and `<TEST_PC_IP>` below stand for the address
+labctl reports for that board. If a document disagrees with labctl,
+labctl is right and the document should be fixed.
+
+What follows is per-board information that labctl does not hold:
+hardware, firmware, installed software and deploy model.
 
 ---
 
 ## Lab Hardware
 
-### Raspberry Pi 5 (`pi-5-1`)
+The current SBC list is labctl's (`lab://sbcs`, `labctl status`).
+
+### Raspberry Pi 5 boards
 
 | Component | Details |
 |-----------|---------|
 | Board | Raspberry Pi 5 (BCM2712), 4GB RAM |
-| Serial console | `/dev/lab/port-2-2` → TCP localhost:4005 (via ser2net) |
-| Power control | Kasa smart plug (via labctl) |
-| SD card deploy | SDWireC (Badgerd USB-C model) |
 | EEPROM | Sep 2024 firmware (do NOT update — see `docs/pi5-baremetal-status.md`) |
-| Deploy model | SDWire-first |
-| SD card | Dual-boot SLM-OS + Pi OS Lite — see `docs/pi5-dual-boot-setup.md` |
+| Deploy model | SDWire-first on a board with an SDWire assigned in labctl ([`docs/deploy/pi5-sdwire.md`](deploy/pi5-sdwire.md)); maintenance-OS dual boot otherwise ([`docs/deploy/pi5-sdcard.md`](deploy/pi5-sdcard.md), [`docs/pi5-dual-boot-setup.md`](pi5-dual-boot-setup.md)) |
+| SD card | Dual-boot SLM-OS + Pi OS Lite cards are supported on both models — see `docs/pi5-dual-boot-setup.md` |
 
-### Raspberry Pi 5 (`pi-5-2`)
+### x86-64 PC (`test-pc`)
 
 | Component | Details |
 |-----------|---------|
-| Board | Raspberry Pi 5 (BCM2712), 4GB RAM |
-| Serial console | labctl-managed serial console |
-| Power control | labctl-managed smart plug |
-| Deploy model | No SDWire / maintenance-OS dual boot |
-| SD card deploy | No SDWire — preserve the dual-boot maintenance workflow |
-| Notes | Use `docs/deploy/pi5-sdcard.md` and `docs/pi5-dual-boot-setup.md` as the authoritative workflows |
+| Board | Gigabyte H610M S2H V2, i7-6700, 16 GB DDR4, NVIDIA RTX 3050 (GA107) |
+| Linux | Ubuntu on an external SSD (SSH as root, key auth); boots when no bootable SD card is switched to `test-pc` |
+| SLM-OS | UEFI disk image on the SDWire-switched SD card, first in the boot order |
+| Deploy guide | [`docs/deploy/x86-64-ssd.md`](deploy/x86-64-ssd.md) |
 
 ### Jetson Orin Nano boards
 
@@ -51,9 +70,6 @@ State recorded 2026-10-29: `jetson-nano-2` is a working lab install;
 (re)provisioned board is an NVMe development install plus a microSD
 recovery install — see
 [`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
-Network addresses are deliberately not recorded here: labctl is the
-single source of truth (`labctl status`), and `<JETSON_IP>` below
-stands for the address it reports.
 
 #### `jetson-nano-1`
 
@@ -64,9 +80,7 @@ stands for the address it reports.
 | QSPI firmware | UEFI 36.4.4 |
 | microSD | JetPack, `root=/dev/mmcblk0p1` |
 | NVMe | Samsung MZVL4512HBLU with a single ext4 `APP` partition and no EFI system partition — its UEFI boot entry returns to the menu |
-| Serial console | `/dev/lab/port-2-3` → TCP localhost:4007 (via ser2net), labctl alias `jetson-nano-1-console` |
-| Power control | Kasa smart plug (via labctl) |
-| SD card deploy | No SDWire — SSH + kexec workflow (see below) |
+| Deploy | SSH + kexec workflow (see below) |
 
 #### `jetson-nano-2`
 
@@ -79,27 +93,28 @@ stands for the address it reports.
 | microSD | 238 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `SLM-OS`, `Linux -> auto-kexec SLM-OS` |
 | NVMe | 119 GB SPCC with a single ext4 `APP` partition and no EFI system partition — unused and not bootable |
 | SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` helpers, `arm_smmu_noshutdown.ko`, patched `nvgpu.ko`, `slmos-autokexec.service` (enabled) all present. Not yet staged: `gpu-kernel-eviction-qnet` (PR-6 producer) |
-| Recovery strap | labctl `recovery_mode` binding on `relay-a` channel 1 (latched, applied before power-on). Must read `released` for a normal boot |
-| Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net), labctl alias `jetson-console` |
-| Power control | Kasa smart plug (via labctl) |
+| Recovery strap | labctl `recovery_mode` latch binding (applied before power-on). Must read `released` for a normal boot |
 | Network | Linux and SLM-OS both use the USB RTL8153 dongle (on-board Ethernet and WiFi are down), so both get the same DHCP reservation — the address labctl lists |
 | SSH | `ssh root@<JETSON_IP>` (key or password `slmos`) |
-| SD card deploy | No SDWire — SSH + kexec workflow (see below) |
+| Deploy | SSH + kexec workflow (see below) |
 
 ---
 
 ## Power Control
 
-Power is managed via Kasa smart plugs controlled by labctl:
+Power is switched through the smart-plug outlet labctl has assigned to
+each board:
 
 ```bash
-labctl power on pi-5-1       # Turn on
-labctl power off pi-5-1      # Turn off
-labctl power cycle pi-5-1    # Off, wait 2s, on
-labctl power cycle pi-5-1 --delay 5  # Custom delay
+labctl power on <sbc>       # Turn on
+labctl power off <sbc>      # Turn off
+labctl power cycle <sbc>    # Off, wait the board's minimum delay, on
+labctl power cycle <sbc> --delay 5  # Longer delay (smaller values are raised to the board's minimum)
 ```
 
-**Important:** Devices are configured to auto-power-on when AC power is applied.
+**Important:** Boards must be configured to power on when AC power is
+applied (on `test-pc` this is a BIOS setting). Otherwise a plug cycle
+leaves them off.
 
 ---
 
@@ -108,7 +123,7 @@ labctl power cycle pi-5-1 --delay 5  # Custom delay
 ### Via labctl (recommended)
 
 ```bash
-labctl connect pi-5-1-console
+labctl connect <sbc>
 ```
 
 This connects to the ser2net TCP port using `nc`. Press `Ctrl+]` then `q` to disconnect.
@@ -122,23 +137,14 @@ causes device conflicts with other projects sharing the lab). Direct
 access is a last resort for when labctl/ser2net is itself broken:
 
 ```bash
-sudo systemctl stop ser2net           # release the port first
-sudo picocom -b 115200 /dev/ttyUSB1   # Pi 5 console
+sudo systemctl stop ser2net             # release the port first
+sudo picocom -b 115200 /dev/lab/<port>  # device path from labctl
 # when done:
-sudo systemctl start ser2net          # restore labctl access
+sudo systemctl start ser2net            # restore labctl access
 ```
 
 Restart ser2net immediately afterward, and report the missing labctl
 capability rather than adopting direct access as a workflow.
-
-### ser2net Configuration
-
-ser2net provides TCP access to serial ports. Configuration is in `/etc/ser2net.yaml`:
-
-| Port | TCP Port | Device | Baud |
-|------|----------|--------|------|
-| pi-5-1-console | 4005 | `/dev/lab/port-2-2` | 115200 |
-| jetson-console | 4004 | `/dev/lab/port-2-1` | 115200 |
 
 ---
 
@@ -146,43 +152,40 @@ ser2net provides TCP access to serial ports. Configuration is in `/etc/ser2net.y
 
 Pi 5 boards in the lab intentionally use **two** deploy models:
 
-- `pi-5-1`: SDWire-first deploy
-- `pi-5-2`: no-SDWire / maintenance-OS dual boot
+- SDWire-first deploy, on a board with an SDWire assigned in labctl
+- maintenance-OS dual boot, on a board without one
 
-Preserve both models. Do not assume every Pi 5 workflow should be
-rewritten to match the other.
+Which board uses which model follows the labctl SDWire assignments,
+which change as devices move between boards. Preserve both models. Do
+not assume every Pi 5 workflow should be rewritten to match the other.
 
-### `pi-5-1`: SDWire-first deploy
+### SDWire-first deploy
 
-The `pi-5-1` SD card is connected through a Badgerd SDWireC which
-allows the SD card to be switched between the host machine (for
-flashing) and the Pi 5 (for booting) without physical intervention.
+The SD card is connected through an SDWire which switches it between
+the host machine (for flashing) and the Pi 5 (for booting) without
+physical intervention.
 
-### SDWireC Commands (emergency only — labctl must be stopped)
+### SDWire Commands (emergency only — labctl must be stopped)
 
 Normal operation goes through labctl (`sdwire_to_host`,
 `sdwire_to_dut`, `sdwire_update` — MCP tools or CLI equivalents).
 Never drive the raw `sdwire` tool or `/dev/sd*` devices while labctl
-is managing the lab: two SDWire devices exist and manual access risks
-switching or writing the wrong card (see CLAUDE.md §"labctl Is the
-Only Hardware Interface"). The raw commands below are for recovery
-when labctl is itself down:
+is managing the lab: several SDWire devices exist and manual access
+risks switching or writing the wrong card (see CLAUDE.md §"labctl Is
+the Only Hardware Interface"). For recovery when labctl itself is
+down, the raw `sdwire` tool takes the device serial number recorded in
+labctl (`sdwire list` shows the serials of the attached devices). It is
+installed in labctl's virtualenv, not on `PATH`; `head -1 "$(command -v
+labctl)"` shows that venv's Python, and `sdwire` sits beside it.
 
 ```bash
-# Switch SD to host (for flashing)
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" host
-
-# Switch SD to Pi 5 (for booting)
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
-
-# Check current state
-sudo /tmp/sdwire-venv/bin/sdwire state -s "20120501030900000.10.3"
-
-# List all SDWire devices
-sudo /tmp/sdwire-venv/bin/sdwire list
+sudo <labctl venv>/bin/sdwire switch -s "<serial>" host  # SD to host (flashing)
+sudo <labctl venv>/bin/sdwire switch -s "<serial>" dut   # SD to the board (booting)
+sudo <labctl venv>/bin/sdwire state -s "<serial>"        # current state
+sudo <labctl venv>/bin/sdwire list                       # all SDWire devices
 ```
 
-**Note:** The SDWireC block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check `sdwire list` for the current device.
+**Note:** The SDWire block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check labctl `sdwire_discover` (or `sdwire list`) for the current device.
 
 ### Full Deploy Workflow
 
@@ -200,9 +203,9 @@ make kernel-clean && make kernel PLATFORM=RASPI5
 #    to kernel_2712.img (keep a .prev backup), and switches it back.
 
 # 3. Boot and monitor
-labctl power cycle pi-5-1 --delay 2
+labctl power cycle <sbc>
 sleep 15
-labctl connect pi-5-1-console
+labctl connect <sbc>
 ```
 
 Do NOT manually mount `/dev/sd*` or `cp` onto the card. If
@@ -219,10 +222,10 @@ The boot partition (FAT32, labeled SLMOS) contains:
 - `config.txt` — bare-metal boot config
 - Standard Pi firmware: `bootcode.bin`, `start*.elf`, `fixup*.dat`, DTBs, `overlays/`
 
-### `pi-5-2`: no-SDWire / maintenance-OS dual boot
+### Maintenance-OS dual boot (no SDWire)
 
-`pi-5-2` should be treated as the lab reference for the no-SDWire Pi 5
-model. That means:
+A Pi 5 without an SDWire uses the maintenance-OS dual-boot model. That
+means:
 
 - Linux maintenance access is a supported part of the workflow
 - dual-boot card layout is not an accident; it is a first-class deploy path
@@ -239,7 +242,7 @@ Use these guides instead of trying to force an SDWire workflow onto it:
 
 🟢 **Working** — boots to shell at EL2 via UARTC on both jetson-nano-1 and jetson-nano-2.
 
-The Jetson boards have no SDWire device. All deployment is via SSH + kexec, with serial
+Jetson deploys do not use an SDWire. All deployment is via SSH + kexec, with serial
 console and power control via labctl. No physical handling is required after initial setup.
 
 SLM-OS has no partition on either boot medium: the kernel is the file
@@ -248,14 +251,14 @@ launches it from Linux. Provisioning (NVMe development install, microSD
 recovery install, QSPI caveats) is covered in
 [`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
 
-### Lab Configuration
+### Board State
 
-| Board | Serial (labctl alias / TCP) | Current state (2026-10-29) | Target layout |
-|-------|-----------------------------|----------------------------|---------------|
-| jetson-nano-1 | `jetson-nano-1-console` / 4007 | 🔴 Needs reprovisioning — microSD JetPack boots, NVMe not bootable | NVMe development + microSD recovery |
-| jetson-nano-2 | `jetson-console` / 4004 | 🟢 Working — microSD JetPack with SLM-OS extras | NVMe development + microSD recovery (optional; current single-medium setup works) |
+| Board | Current state (2026-10-29) | Target layout |
+|-------|----------------------------|---------------|
+| jetson-nano-1 | 🔴 Needs reprovisioning — microSD JetPack boots, NVMe not bootable | NVMe development + microSD recovery |
+| jetson-nano-2 | 🟢 Working — microSD JetPack with SLM-OS extras | NVMe development + microSD recovery (optional; current single-medium setup works) |
 
-IP addresses: use the ones labctl reports (`labctl status`).
+Serial ports, IP addresses and power: use what labctl reports.
 
 **Serial adapter requirement:** Must be CP2102 (Silicon Labs) for bidirectional
 serial. CH340 adapters only work in one direction (TX from board) on the debug
@@ -314,10 +317,10 @@ ssh root@<JETSON_IP> sync
 ssh root@<JETSON_IP> 'slmos-kexec /root/slmos.elf'
 
 # 4. Observe output via serial console
-labctl serial capture jetson-nano-1 --timeout 30
+labctl serial capture <sbc> --timeout 30
 
 # 5. Recover back to Linux (power cycle)
-labctl power cycle jetson-nano-1
+labctl power cycle <sbc>
 ```
 
 ### End-to-End Smoke Validation
@@ -327,16 +330,24 @@ For the current `jetson-nano-2` USB networking regression check, use:
 ```bash
 scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
-    --console-port 4004
+    --console-port <ser2net TCP port from labctl> \
+    --expected-ip <JETSON_IP> \
+    --expected-gateway <GATEWAY> \
+    --ping-target <GATEWAY>
 ```
+
+`<GATEWAY>` is the board's default gateway, as Linux on the board reports
+it (`ip route`). Pass all three address flags: the script's built-in
+defaults are fixed addresses from an earlier lab setup, not values read
+from labctl.
 
 This drives the working lab path end-to-end from the host:
 
 - deploy the current `slmos.elf` + `slmos-kexec`
 - trigger Linux -> `kexec` -> SLM-OS
 - wait for `slmos>` over ser2net
-- run `net init`, send one `ifconfig dhcp`, poll `ifconfig` until `DHCP(bound)`, and then run `ping 192.168.4.1 2`
-- verify DHCP `192.168.4.5/24` and gateway `192.168.4.1`
+- run `net init`, send one `ifconfig dhcp`, poll `ifconfig` until `DHCP(bound)`, and then ping the gateway
+- verify that DHCP bound the expected address and gateway
 
 It is not a generic Jetson automation harness; it is the repeatable
 smoke test for the validated `nano-2` USB hub + RTL8153 lab setup.
@@ -350,7 +361,7 @@ kills the CPU core. See GitHub issue #9 for root-cause analysis.
 
 After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
 
-1. `labctl power cycle jetson-nano-1` — power cycles back to Linux
+1. `labctl power cycle <sbc>` — power cycles back to Linux
 2. Wait for Linux to boot — about 65 s from power-on to the login
    prompt on `jetson-nano-2`. A board still silent well past that is
    most likely held in USB Force Recovery; see
@@ -372,7 +383,7 @@ change it without touching the repo. Before debugging any "board does
 not respond" symptom, and before any hardware verification run, check
 the live state through labctl rather than trusting the tables above:
 
-1. **Power, ping, serial:** `labctl status` / `labctl health` (MCP:
+1. **Power, ping, serial:** `labctl status` / `labctl health-check` (MCP:
    `run_health_check`).
 2. **Actuator bindings:** list them for the board (MCP:
    `bindings_list`) and read each one's `actuation_status`. A latched
@@ -415,20 +426,20 @@ reaches the Linux login prompt about 65 s after power-on
 
 ### No serial output
 
-1. Check power: `labctl power cycle pi-5-1`
-2. Check serial connection: `labctl connect pi-5-1-console`
-3. Check SD card: `sudo /tmp/sdwire-venv/bin/sdwire state -s "20120501030900000.10.3"` (should be "Target" for booting)
+1. Check power: `labctl power cycle <sbc>`
+2. Check serial connection: `labctl connect <sbc>`
+3. On an SDWire board, check that the card is switched to the DUT (labctl `sdwire_to_dut`)
 4. Check USB: `lsusb | grep -i "CH340\|cp210"` for serial adapters
 
-### Kasa authentication error
+### Smart plug authentication error
 
-The Kasa smart plug occasionally returns authentication errors (cloud token expired). Retry the command — it usually succeeds on the second attempt.
+A smart plug occasionally rejects labctl's authentication (seen with Kasa plugs when the cloud token expires). Retry the command; it usually succeeds on the second attempt. If it keeps failing, the plug's credentials in labctl need attention.
 
-### SDWireC not detected
+### SDWire not detected
 
-1. Check USB: `sudo /tmp/sdwire-venv/bin/sdwire list`
+1. Check USB: labctl `sdwire_discover` lists every attached SDWire with its serial number
 2. Check cable connections
-3. The SDWireC uses `0bda:0316` (Realtek) — different from the old SDWire which used `04e8:6001` (Samsung)
+3. The SDWireC uses `0bda:0316` (Realtek); the original SDWire is an FTDI device
 
 ### Build fails for wrong platform
 
@@ -466,3 +477,4 @@ make kernel-clean && make kernel PLATFORM=RASPI5
 *Created: 25 December 2025*
 *Updated: 31 March 2026 — Replaced lab-tools with labctl, added SDWireC/Pi 5 workflow*
 *Updated: 29 October 2026 — Jetson board state refreshed, dual-media provisioning cross-reference, `sync` step in the deploy workflow; nano-2 corrected to working, live-state and recovery-strap troubleshooting added*
+*Updated: 2 November 2026 — Removed lab configuration owned by labctl (serial ports, ser2net ports, SDWire serials and assignments, relay channels, addresses); added `test-pc`*
