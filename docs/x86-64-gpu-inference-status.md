@@ -67,14 +67,14 @@ forward are realistic.
 | Host | Gigabyte H610M S2H V2, i7-6700, 16 GB DDR4 |
 | GPU | NVIDIA RTX 3050 6 GB — chip GA107, device id `0x2584` |
 | OS | Ubuntu 24.04 on external SSD, `vfio-pci` bound to the dGPU at boot |
-| Remote | `root@192.168.4.136`, passwordless SSH from dev box |
+| Remote | `root@<TEST_PC_IP>` (address from labctl), passwordless SSH from dev box |
 | IOMMU group | 10 |
 | Display | Monitor HDMI on dGPU output (so UEFI POST runs VBIOS DEVINIT on the dGPU) |
 
 ### 1.2 End-to-end state
 
 ```
-$ ssh root@192.168.4.136 './gsp-harness --fwsec-frts'
+$ ssh root@<TEST_PC_IP> './gsp-harness --fwsec-frts'
 [GSP-HARNESS] BAR0 mapped at 0x... size 16777216
 [GSP-HARNESS] BAR1 mapped at 0x... size 268435456
 [GSP-HARNESS] VFIO session open — DMA enabled
@@ -1118,23 +1118,23 @@ make test                                                     # ARM64 QEMU
 ### 6.2 Deploy to test-pc
 
 ```bash
-scp build/host-tools/gsp-harness root@192.168.4.136:/root/gsp-harness
-ssh root@192.168.4.136 'pkill -9 -f gsp-harness 2>/dev/null; sleep 1'
+scp build/host-tools/gsp-harness root@<TEST_PC_IP>:/root/gsp-harness
+ssh root@<TEST_PC_IP> 'pkill -9 -f gsp-harness 2>/dev/null; sleep 1'
 ```
 
 ### 6.3 Run
 
 ```bash
 # Preflight: DEVINIT done?
-ssh root@192.168.4.136 'timeout 10 /root/gsp-harness --check-devinit'
+ssh root@<TEST_PC_IP> 'timeout 10 /root/gsp-harness --check-devinit'
 # Falcon probe + SEC2 priv-lock detection
-ssh root@192.168.4.136 'timeout 10 /root/gsp-harness --falcons'
+ssh root@<TEST_PC_IP> 'timeout 10 /root/gsp-harness --falcons'
 # Main event: FWSEC-FRTS (should succeed, <1s post BSI)
-ssh root@192.168.4.136 'timeout 15 /root/gsp-harness --fwsec-frts'
+ssh root@<TEST_PC_IP> 'timeout 15 /root/gsp-harness --fwsec-frts'
 # Blocker surface: Booter Load (fails cleanly with GSP_ERR_TIMEOUT)
-ssh root@192.168.4.136 'timeout 15 /root/gsp-harness --booter-load'
+ssh root@<TEST_PC_IP> 'timeout 15 /root/gsp-harness --booter-load'
 # Evidence for #185: PLM scan
-ssh root@192.168.4.136 'timeout 15 /root/gsp-harness --sec2-plm-scan | head -40'
+ssh root@<TEST_PC_IP> 'timeout 15 /root/gsp-harness --sec2-plm-scan | head -40'
 ```
 
 ### 6.4 Gotchas

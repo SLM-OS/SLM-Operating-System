@@ -19,16 +19,15 @@ the project should preserve both:
   - the card carries both SLM-OS and a Linux maintenance environment
   - Linux is used for recovery, local kernel replacement, and one-shot
     handoff into SLM-OS when no SDWire exists
-  - this is the supported workflow for boards such as `pi-5-2`
+  - this is the supported workflow for boards with no SDWire assigned
 
 These are complementary, not competing. SDWire is the fastest deploy
 path where available; dual boot is the resilient no-SDWire path.
 
-Current validation status:
-- `pi-5-2` has both paths working in practice:
-  - maintenance-OS dual boot for normal recovery / handoff
-  - SDWire-assisted host-driven `kernel_2712.img` replacement when the
-    shared `pc-sdwire` path is attached
+Both paths have been validated on the same dual-boot card: maintenance-OS
+dual boot for normal recovery / handoff, and SDWire-assisted host-driven
+`kernel_2712.img` replacement while an SDWire was attached. Which board
+has an SDWire at any time is labctl configuration.
 
 For file staging onto a running SLM-OS instance, see
 [`slm-put.md`](slm-put.md) for the first telnet-based host upload path.
@@ -64,7 +63,7 @@ Gaps marked above represent paths that are known to work in principle but have n
 
 ### Hardware access
 
-All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board lacks an SDWire interface (for example `pi-5-2`), the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
+All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board has no SDWire assigned in labctl, the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
 
 Never bypass labctl by running `mount`/`cp`/`picocom`/`nc` directly against lab-managed SD cards or serial ports — doing so risks device conflicts with other sessions and can corrupt the wrong card. Sneakernet is the one sanctioned exception.
 

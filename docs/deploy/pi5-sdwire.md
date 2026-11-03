@@ -2,13 +2,11 @@
 
 This guide covers the **SDWire-first deploy model** for a Pi 5 equipped with an SDWire (or SDWireC) SD-card multiplexer. The SDWire switches the SD card between the development host (for flashing) and the Pi 5 (for booting) without physical intervention, so a full build → deploy → serial-capture cycle is scripted and hands-free.
 
-This workflow has been re-validated on `pi-5-2` using the shared
-`pc-sdwire` path: the host replaced partition-1 `kernel_2712.img`
-directly, switched the card back to DUT mode, and the refreshed SLM-OS
-image booted successfully afterward. `pi-5-2` still keeps its
-maintenance-OS dual-boot path as the normal day-to-day recovery model;
-the point here is that the SDWire-assisted host-driven update path also
-works and should stay supported.
+This workflow also works on a card that carries the maintenance-OS
+dual-boot layout: the host replaces partition-1 `kernel_2712.img`
+directly, switches the card back to DUT mode, and the refreshed SLM-OS
+image boots. Which boards currently have an SDWire is labctl
+configuration (`lab://sbcs`), not something this guide records.
 
 For first-time provisioning of a new SD card, see [`pi5-sdcard.md`](pi5-sdcard.md). That guide writes the initial FAT32 layout, Pi firmware, and bare-metal `config.txt`. This guide picks up from an already-provisioned card and only replaces `kernel_2712.img`.
 
@@ -25,7 +23,7 @@ fast iteration path when the hardware supports it.
 | New Pi 5, blank SD card | [`pi5-sdcard.md`](pi5-sdcard.md) first, then this |
 | Pi 5 with SDWire, iterative development | This guide |
 | Pi 5 without a dedicated SDWire path | [`pi5-sdcard.md`](pi5-sdcard.md) or [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) |
-| `pi-5-2` with shared `pc-sdwire` attached | This guide for host-driven kernel replacement, plus [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) for normal maintenance-OS boot control |
+| Pi 5 with SDWire and a dual-boot card | This guide for host-driven kernel replacement, plus [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) for normal maintenance-OS boot control |
 
 ---
 
@@ -34,7 +32,7 @@ fast iteration path when the hardware supports it.
 | Item | Source / Version |
 |---|---|
 | Pi 5 with SDWire installed | SDWire (FTDI, original) or SDWireC (Realtek, newer). Both are supported. |
-| SDWire registered in labctl | `labctl sdwire list` shows the device; `lab://sdwire-devices` has an `assigned_to` mapping |
+| SDWire registered in labctl and assigned to the board | `lab://sbcs` lists an `sdwire` entry for the board |
 | SD card provisioned for bare-metal SLM-OS | Per [`pi5-sdcard.md`](pi5-sdcard.md) |
 | labctl CLI or MCP access | See `docs/lab-operations.md` |
 | SLM-OS source checkout | `make kernel PLATFORM=RASPI5` succeeds |
@@ -90,7 +88,7 @@ The `--kernel-name` argument is required — the Pi 5 firmware looks for `kernel
 ### Step 3 — Power on
 
 ```
-labctl power cycle pi-5-1 --delay 2
+labctl power cycle <sbc> --delay 2
 ```
 
 The 2-second off-delay lets the Pi 5 PMIC fully discharge before reboot. Shorter delays have been observed to produce intermittent boot failures on the Pi 5.
@@ -98,13 +96,13 @@ The 2-second off-delay lets the Pi 5 PMIC fully discharge before reboot. Shorter
 ### Step 4 — Observe
 
 ```
-labctl connect pi-5-1-console
+labctl connect <sbc>
 ```
 
 or for an automated capture (e.g. scripting a test):
 
 ```
-labctl serial_capture pi-5-1 --timeout 30 --pattern "slm>"
+labctl serial_capture <sbc> --timeout 30 --pattern "slm>"
 ```
 
 The `--pattern "slm>"` argument returns control when the shell prompt appears. This is the hand-off point from boot to userland — if it appears within the timeout, the kernel is healthy.

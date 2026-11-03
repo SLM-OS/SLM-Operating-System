@@ -29,7 +29,7 @@ to file.
   path). The firmware is NVIDIA-proprietary and not in the repo.
   Equivalent QEMU build works for everything except the GPU consumer
   toggle's success path (no Jetson GA10B in QEMU).
-* Telnet reachable: `nc 192.168.4.5 2323`. The shell prompt appears
+* Telnet reachable: `nc <JETSON_IP> 2323` (address from labctl). The shell prompt appears
   immediately.
 * `/mnt/files` is mounted (LittleFS, preferably from the persistent
   boot-FAT-backed `0:/slmstore/files.lfs` image with RAM fallback).

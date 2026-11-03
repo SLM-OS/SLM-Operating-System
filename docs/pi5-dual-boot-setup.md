@@ -15,7 +15,7 @@ preserve both.
 
 ## TL;DR
 
-SSH into Pi OS (once set up): `ssh pi@192.168.4.25` password `slmos`.
+SSH into Pi OS (once set up): `ssh pi@<PI_IP>` password `slmos`, where `<PI_IP>` is the address labctl reports for the board.
 
 Switch from Pi OS to SLM-OS for one boot:
 ```bash
@@ -303,8 +303,8 @@ On first boot, Pi OS:
    cmdline flag is present (harmless even if the partition already fills).
 
 You should see `raspberrypi login:` on serial within ~30 s of power-on,
-and the system should announce an IP address from DHCP (typically
-`192.168.4.25` in our lab).
+and the system should announce an IP address from DHCP (it should
+match the address labctl lists for the board).
 
 ---
 
