@@ -128,8 +128,9 @@ into a dual-boot card. Repartitioning needs raw block-device access, so
 do it with the card in the host's own SD-card reader (sneakernet, the
 one exception to labctl-only card access in `docs/deploy/README.md`),
 not through an SDWire: labctl owns the SDWire block devices, and their
-`/dev/sdX` names move between cards. The same steps also work from the
-Linux maintenance OS already on the board.
+`/dev/sdX` names move between cards. They cannot be run from the Pi OS
+maintenance install on the same card: that OS runs from the card being
+repartitioned.
 
 In the steps below, `DEV` is the card's block device, and sdc1, sdc2
 and sdc3 (and the `/mnt/sdcN` mount points) name its partitions 1, 2

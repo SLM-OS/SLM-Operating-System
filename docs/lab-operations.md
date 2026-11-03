@@ -12,7 +12,7 @@ This document describes how to interact with the embedded development lab hardwa
 |-----------|---------|
 | Power on | `labctl power on <sbc>` |
 | Power off | `labctl power off <sbc>` |
-| Power cycle | `labctl power cycle <sbc> --delay 2` |
+| Power cycle | `labctl power cycle <sbc>` (waits the board's stored minimum cycle delay) |
 | Serial console | `labctl connect <sbc>` (the SBC name resolves to its console port) |
 | Lab status | `labctl status` |
 | Health check | `labctl health-check` |
@@ -108,8 +108,8 @@ each board:
 ```bash
 labctl power on <sbc>       # Turn on
 labctl power off <sbc>      # Turn off
-labctl power cycle <sbc>    # Off, wait, on
-labctl power cycle <sbc> --delay 5  # Custom delay
+labctl power cycle <sbc>    # Off, wait the board's minimum delay, on
+labctl power cycle <sbc> --delay 5  # Longer delay (smaller values are raised to the board's minimum)
 ```
 
 **Important:** Boards must be configured to power on when AC power is
@@ -203,7 +203,7 @@ make kernel-clean && make kernel PLATFORM=RASPI5
 #    to kernel_2712.img (keep a .prev backup), and switches it back.
 
 # 3. Boot and monitor
-labctl power cycle <sbc> --delay 2
+labctl power cycle <sbc>
 sleep 15
 labctl connect <sbc>
 ```

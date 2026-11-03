@@ -103,10 +103,10 @@ The destination name matters: the Pi 5 firmware loads the file named by `kernel=
 ### Step 3 — Power on
 
 ```
-labctl power cycle <sbc> --delay 2
+labctl power cycle <sbc>
 ```
 
-The 2-second off-delay lets the Pi 5 PMIC fully discharge before reboot. Shorter delays have been observed to produce intermittent boot failures on the Pi 5.
+labctl waits the board's stored minimum cycle delay between off and on (a smaller `--delay` is raised to it). The Pi 5 PMIC needs a few seconds to discharge fully; delays under about 2 s have been observed to produce intermittent boot failures, so the stored minimum for a Pi 5 should not go below that.
 
 ### Step 4 — Observe
 
