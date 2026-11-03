@@ -26,6 +26,7 @@
 #include "unity.h"
 #include "test_harness.h"
 #include "../drivers/usb/xhci/xhci_tegra.h"
+#include "../drivers/usb/xhci/xusb_t234_padctl.h"
 
 #include <stdint.h>
 
@@ -257,6 +258,81 @@ static void test_fw_ioctl_shift(void)
     TEST_ASSERT_EQUAL_UINT32(17, XUSB_FW_IOCTL_CFGTBL_READ);
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* UEFI-direct cold bring-up: pad calibration + register values (#1084)        */
+/* -------------------------------------------------------------------------- */
+/*
+ * Reference values read on jetson-nano-2 under L4T Linux 5.15
+ * (busybox devmem, 2026-11-03): FUSE_USB_CALIB_0 = 0x08a08890,
+ * FUSE_USB_CALIB_EXT_0 = 0x00002227, and the padctl registers Linux
+ * programs for the host ports. The helpers must reproduce Linux's
+ * values from the same fuses.
+ */
+
+#define NANO2_CALIB0     0x08A08890u
+#define NANO2_CALIB_EXT  0x00002227u
+
+static void test_xusb_calib_decode_matches_nano2(void)
+{
+    struct xusb_t234_calib c;
+    xusb_t234_decode_calib(NANO2_CALIB0, NANO2_CALIB_EXT, &c);
+    TEST_ASSERT_EQUAL_UINT8(0x10, c.hs_curr_level[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x11, c.hs_curr_level[1]);
+    TEST_ASSERT_EQUAL_UINT8(0x10, c.hs_curr_level[2]);
+    TEST_ASSERT_EQUAL_UINT8(1, c.hs_term_range_adj[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, c.hs_term_range_adj[1]);
+    TEST_ASSERT_EQUAL_UINT8(1, c.hs_term_range_adj[2]);
+    TEST_ASSERT_EQUAL_UINT8(0, c.hs_squelch);
+    TEST_ASSERT_EQUAL_UINT8(7, c.rpd_ctrl);
+}
+
+static void test_xusb_otg_pad_ctl_values_match_linux(void)
+{
+    struct xusb_t234_calib c;
+    xusb_t234_decode_calib(NANO2_CALIB0, NANO2_CALIB_EXT, &c);
+    /* Start from "powered down" bits set and stale fields, as UEFI's
+     * ExitBootServices handler leaves them; the helpers must reach
+     * Linux's USB2_OTG_PAD1_CTL_0 / CTL_1 for usb2-1 (the hub). */
+    uint32_t ctl0 = xusb_t234_otg_pad_ctl0(0x02CC88D1u | XP_OTG_PD | XP_OTG_PD_ZI,
+                                           c.hs_curr_level[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x02CC88D1u, ctl0);
+    uint32_t ctl1 = xusb_t234_otg_pad_ctl1(0x1E101008u | XP_OTG_PD_DR,
+                                           c.hs_term_range_adj[1], c.rpd_ctrl);
+    TEST_ASSERT_EQUAL_HEX32(0x1E101008u, ctl1);
+    TEST_ASSERT_EQUAL_HEX32(0x00001180u, xusb_t234_battery_chrg_ctl1(0x00001180u | XP_PD_VREG));
+}
+
+static void test_xusb_bias_and_mux_values_match_linux(void)
+{
+    TEST_ASSERT_EQUAL_HEX32(0x060E0338u,
+                            xusb_t234_bias_pad_ctl0(0x060E0338u | XP_BIAS_PAD_PD, 0));
+    /* Ports 1 and 2 to XUSB / host on top of a reset-default mux. */
+    uint32_t mux = xusb_t234_pad_mux(xusb_t234_pad_mux(0, 1), 2);
+    TEST_ASSERT_EQUAL_HEX32(0x14u, mux);
+    uint32_t cap = xusb_t234_port_cap_host(xusb_t234_port_cap_host(0x3u, 1), 2);
+    TEST_ASSERT_EQUAL_HEX32(0x113u, cap);   /* Linux: port 0 OTG, 1-2 host */
+    TEST_ASSERT_EQUAL_HEX32(0x00000FF0u,
+                            xusb_t234_oc_map_disabled(0, 1) | xusb_t234_oc_map_disabled(0, 2));
+}
+
+static void test_xusb_tracking_timers_and_vbus_id(void)
+{
+    uint32_t ctl1 = xusb_t234_bias_pad_ctl1_timers(0);
+    TEST_ASSERT_EQUAL_HEX32(XP_TRK_START_TIMER(0x1E) | XP_TRK_DONE_RESET_TIMER(0xA), ctl1);
+    uint32_t vid = xusb_t234_vbus_id_host(XP_ID_OVERRIDE(8));
+    TEST_ASSERT_EQUAL_HEX32(XP_ID_SOURCE_SELECT(1) | XP_VBUS_SOURCE_SELECT(1), vid);
+    TEST_ASSERT_EQUAL_HEX32(0xFC0u, xusb_t234_elpg1_release(0xFFFu, 0) &
+                                    xusb_t234_elpg1_release(0xFFFu, 1));
+}
+
+static void test_xusb_cold_port_mask_skips_otg_port(void)
+{
+    /* usb2-0 is the USB-C device-mode port: never switched to host. */
+    TEST_ASSERT_EQUAL_UINT32(0, XUSB_T234_COLD_USB2_PORT_MASK & 1u);
+    TEST_ASSERT_EQUAL_UINT32(0x6u, XUSB_T234_COLD_USB2_PORT_MASK);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -281,5 +357,10 @@ int test_suite_xhci_tegra(void)
     RUN_TEST(test_falcon_cpuctl_bits);
     RUN_TEST(test_fw_header_created_time_offset);
     RUN_TEST(test_fw_ioctl_shift);
+    RUN_TEST(test_xusb_calib_decode_matches_nano2);
+    RUN_TEST(test_xusb_otg_pad_ctl_values_match_linux);
+    RUN_TEST(test_xusb_bias_and_mux_values_match_linux);
+    RUN_TEST(test_xusb_tracking_timers_and_vbus_id);
+    RUN_TEST(test_xusb_cold_port_mask_skips_otg_port);
     return UnityEnd();
 }

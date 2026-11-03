@@ -954,6 +954,8 @@ set(KERNEL_SOURCES
     kernel/drivers/usb/xhci/xhci_device.c
     kernel/drivers/usb/xhci/xhci_ring.c
     kernel/drivers/usb/xhci/xhci_xfer.c
+    # UEFI-direct cold bring-up of XUSB (#1084); Jetson-only body.
+    kernel/drivers/usb/xhci/xusb_t234_cold.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack

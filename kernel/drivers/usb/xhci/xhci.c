@@ -54,6 +54,7 @@
 #include "spinlock.h"   /* dsb()/dmb() cross-platform barrier macros */
 #include "smp.h"
 #include "boot_source.h"
+#include "xusb_t234_cold.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1347,11 +1348,15 @@ static void xhci_program_registers(uint8_t max_slots)
          (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
     xhci_log_inherited_dcbaa(((uint64_t)orig_dcbaap_hi << 32) | orig_dcbaap_lo);
-    xhci_load_slot1_handoff_from_fdt_node();
-    xhci_load_slot3_handoff_from_fdt_node();
-    xhci_load_slot3_handoff_from_bootargs();
-    if (!xhci_inherited_slot3_ctx_valid)
-        xhci_load_slot3_handoff();
+    /* The slot-1/slot-3 handoff records are written by slmos-kexec's
+     * Linux side; a UEFI-direct boot has none to adopt. */
+    if (!boot_source_is_uefi()) {
+        xhci_load_slot1_handoff_from_fdt_node();
+        xhci_load_slot3_handoff_from_fdt_node();
+        xhci_load_slot3_handoff_from_bootargs();
+        if (!xhci_inherited_slot3_ctx_valid)
+            xhci_load_slot3_handoff();
+    }
 
     /*
      * ARM64 requires an explicit DSB between Normal-Non-Cacheable
@@ -1932,18 +1937,20 @@ int xhci_init(void)
     xhci_bar2_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_BAR2_BASE;
 
     /*
-     * After UEFI-direct boot (#26) nothing has powered or clocked XUSB
-     * — the driver depends on Linux having brought the controller and
-     * its falcon firmware up before kexec. The first aperture read is
-     * then answered with an external abort that BL31 reports as
-     * "Unhandled Exception in EL3", stopping the board, so don't touch
-     * the hardware at all. See boot_source.h for why BPMP can't be
-     * asked instead.
+     * After UEFI-direct boot (#26) the firmware has power-gated XUSB
+     * in ExitBootServices; an aperture read before it is powered again
+     * is answered with an external abort that BL31 reports as
+     * "Unhandled Exception in EL3", stopping the board. Bring the
+     * controller up from cold first (#1084, xusb_t234_cold.c) and only
+     * touch the apertures once that succeeded. See boot_source.h for
+     * why BPMP state queries can't tell us what is powered.
      */
     if (boot_source_is_uefi()) {
-        WARN("xhci: UEFI-direct boot — XUSB not initialised by Linux, "
-             "skipping USB host");
-        return -1;
+        INFO("xhci: UEFI-direct boot — bringing XUSB up from cold");
+        if (xusb_t234_cold_bringup() != 0) {
+            WARN("xhci: XUSB cold bring-up failed — skipping USB host");
+            return -1;
+        }
     }
 
     /* Sanity check: if the clocks aren't held, CAPLENGTH reads as

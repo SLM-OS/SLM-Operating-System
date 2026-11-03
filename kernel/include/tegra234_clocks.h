@@ -147,3 +147,30 @@
  */
 #define TEGRA234_POWER_DOMAIN_VI     28U
 #define TEGRA234_POWER_DOMAIN_ISPA   22U
+
+/* ===================================================================== */
+/*  XUSB host controller + pad controller (#1084)                        */
+/* ===================================================================== */
+/*
+ * Used by the UEFI-direct cold bring-up in
+ * kernel/drivers/usb/xhci/xusb_t234_cold.c. The clock list matches the
+ * `clocks` properties of the tegra234.dtsi usb@3610000 (xhci) and
+ * padctl@3520000 nodes; FUSE gates the FUSE MMIO block the USB pad
+ * calibration words are read from. XUSBA is the SuperSpeed partition,
+ * XUSBC the host partition (DT power-domain-names "xusb_ss",
+ * "xusb_host").
+ */
+#define TEGRA234_CLK_FUSE                 40U
+#define TEGRA234_CLK_PLLE                100U
+#define TEGRA234_CLK_UTMIP_PLL           103U
+#define TEGRA234_CLK_USB2_TRK            165U
+#define TEGRA234_CLK_XUSB_CORE_HOST      267U
+#define TEGRA234_CLK_XUSB_CORE_SS        268U
+#define TEGRA234_CLK_XUSB_FALCON         269U
+#define TEGRA234_CLK_XUSB_FS             272U
+#define TEGRA234_CLK_XUSB_SS             275U
+
+#define TEGRA234_RESET_XUSB_PADCTL       114U
+
+#define TEGRA234_POWER_DOMAIN_XUSBA       10U
+#define TEGRA234_POWER_DOMAIN_XUSBC       12U
