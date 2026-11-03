@@ -287,15 +287,19 @@ void idt_init(void)
     idt_set_gate(6,  isr_6,  IDT_TRAP_GATE);
     idt_set_gate(7,  isr_7,  IDT_TRAP_GATE);
     idt_set_gate(8,  isr_8,  IDT_TRAP_GATE);
-    /* #DF runs on the per-CPU IST1 stack (#237). Vectors 48/49 run on
-     * the interrupted task's stack, so after a task-stack overflow the
-     * next fault would push onto the same broken stack; a #DF on IST=0
-     * then escalates to a silent triple fault (reset, no diagnostic).
-     * IST1 gives exception_handler a good stack to print the register
-     * dump on. That is safe because exception_handler halts for every
+    /* #DF runs on the per-CPU IST1 stack (#237), now the only IST
+     * vector. If RSP is unusable (corrupted, non-canonical, or outside
+     * the mapped range), the CPU cannot push the first exception frame
+     * and raises #DF. On IST=0 that push fails too and the CPU
+     * triple-faults (silent reset, no diagnostic). IST1 gives
+     * exception_handler a good stack for the register dump. Ordinary
+     * task-stack overflow does not fault (task stacks have no guard
+     * page); the stack canary and schedule()'s SP check catch it.
+     * IST1 is safe here because exception_handler halts for every
      * vector < 32 and never calls schedule(). TR must be loaded before
      * a #DF can be delivered: gic_init() installs the BSP's TSS right
-     * after idt_init(), and ap_entry_64 does so first thing on each AP. */
+     * after idt_init(), and ap_entry_64 installs each AP's before
+     * enabling interrupts. */
     idt[8].ist = 1;
     idt_set_gate(9,  isr_9,  IDT_TRAP_GATE);
     idt_set_gate(10, isr_10, IDT_TRAP_GATE);

@@ -1231,9 +1231,10 @@ static void test_idt_preempt_vectors_use_task_stack(void)
 /*
  * Test: IDT entry 8 (#DF) uses IST1 (#237).
  *
- * With the timer and reschedule IPI on the task stack, #DF is the only
- * vector that still has a known-good stack after a task-stack overflow.
- * On IST=0 such a double fault escalates to a silent triple fault.
+ * #DF is now the only IST vector. A fault taken with an unusable RSP
+ * (corrupted, non-canonical, or outside the mapped range) escalates to
+ * #DF. On IST=0 that becomes a silent triple fault; on IST1 the
+ * register dump still prints.
  */
 static void test_idt_double_fault_uses_ist1(void)
 {

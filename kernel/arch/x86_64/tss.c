@@ -5,12 +5,17 @@
  * interrupt-stack-table (IST) slots. When an interrupt vector with
  * IST > 0 fires, the CPU switches to the TSS's istN field before
  * pushing the exception frame, regardless of the current privilege
- * level. This makes the ISR stack independent of whatever task was
- * running when the interrupt arrived — a task-stack overflow can no
- * longer corrupt the ISR's frame.
+ * level. The handler's stack is therefore independent of the RSP the
+ * interrupted code was using, even when that RSP is unusable.
  *
- * IST1 is used only by #DF (vector 8), so a double fault caused by a
- * task-stack overflow still has a good stack for its register dump.
+ * IST1 is used only by #DF (vector 8). If RSP is unusable (corrupted,
+ * non-canonical, or outside the mapped range), the CPU cannot push the
+ * first exception frame and escalates to #DF. On IST=0 the #DF push
+ * fails the same way and the CPU triple-faults (silent reset); on IST1
+ * the register dump still prints. Ordinary task-stack overflow does
+ * not fault: task stacks have no guard page, so it is caught by the
+ * stack canary and schedule()'s SP-range check instead.
+ *
  * The LAPIC timer (48) and reschedule IPI (49) originally used IST1
  * too, but they can schedule() from the ISR, which must never happen
  * on an IST stack, so #237 moved them to IST=0. All other vectors keep
