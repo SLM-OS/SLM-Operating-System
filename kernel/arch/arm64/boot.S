@@ -77,7 +77,11 @@ optional_header:
     .long   0x10000             /* AddressOfEntryPoint (64KB, where real_start will be) */
     .long   0x10000             /* BaseOfCode (64KB) */
 
-    .quad   0x80000000          /* ImageBase - preferred load address (Jetson RAM base) */
+    .quad   _start              /* ImageBase - preferred load address = link
+                                 * address (0x80000000 Jetson, 0x40000000
+                                 * QEMU virt). UEFI may load elsewhere; the
+                                 * EFI path in this file copies the image to
+                                 * the link address after ExitBootServices. */
     .long   0x10000             /* SectionAlignment (64KB, like Linux) */
     .long   0x200               /* FileAlignment (512 bytes) */
     .short  0                   /* MajorOperatingSystemVersion */
@@ -237,44 +241,144 @@ real_start:
     /*
      * EFI boot detected. x0=handle, x1=system_table.
      * UEFI provides a valid stack, so we can call C code directly.
-     * efi_stub_entry() will:
-     *   1. Find DTB in the EFI configuration table
-     *   2. Call ExitBootServices to take over the machine
-     *   3. Disable MMU and clean caches
-     *   4. Return the DTB pointer (or NULL) in x0
-     */
-    bl      efi_stub_entry
-    /* x0 = DTB pointer (or NULL). Continue with normal boot.
      *
-     * Mask ALL exceptions now. SLM-OS owns the machine after
-     * ExitBootServices, but UEFI's exception vectors are still
-     * installed (VBAR_EL2 still points at UEFI/ArmCpuDxe). If UEFI's
-     * DAIF state left interrupts unmasked and a stale timer IRQ
-     * fires during the Jetson post-EBS setup below, UEFI's handler
-     * runs into torn-down Boot Services and hangs silently. Masking
-     * here keeps the CPU quiet until `primary_cpu` installs the
-     * SLM-OS VBAR_EL1. The mask is done again at primary_cpu for
-     * the kexec path, which doesn't pass through this branch.
+     * Save the firmware's LR/FP: if efi_stub_entry() decides the
+     * relocation below is unsafe it returns EFI_STUB_ABORT without
+     * calling ExitBootServices, and we return EFI_LOAD_ERROR to the
+     * firmware so it moves on to the next boot option instead of
+     * hanging the board.
+     *
+     * Arguments (see efi_stub_entry):
+     *   x2 = load base (runtime address of _start, PC-relative)
+     *   x3 = link base (link-time address of _start, from the literal
+     *        pool — UEFI applies no relocations, so the literal keeps
+     *        its link-time value wherever the image was loaded)
+     *   x4 = SizeOfImage (_kernel_size)
      */
-    msr     daifset, #0xF
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+    adr     x2, _start
+    ldr     x3, =_start
+    ldr     x4, =_kernel_size
+    bl      efi_stub_entry
+    cmn     x0, #1                      /* x0 == EFI_STUB_ABORT (~0)? */
+    b.ne    .Lefi_continue
+    ldp     x29, x30, [sp], #16
+    mov     x0, #1                      /* EFI_LOAD_ERROR = */
+    orr     x0, x0, #(1 << 63)          /*   EFI_ERROR_BIT | 1 */
+    ret
+
+.Lefi_continue:
+    /* x0 = DTB pointer (or NULL). ExitBootServices is done, and the
+     * loaded image, the link-address destination and the DTB have
+     * been cleaned to the PoC by VA. The UEFI stack is abandoned from
+     * here (primary_cpu sets the SLM-OS stack): nothing below loads
+     * from or stores to it, because once the MMU is off those
+     * accesses would bypass the caches.
+     *
+     * Mask IRQ/FIQ/SError now. SLM-OS owns the machine after
+     * ExitBootServices, and the early VBAR_EL2 handler is installed
+     * but nothing below expects an interrupt. Debug (D) is left
+     * unmasked so planted `brk` probes still fire (DAIF.D masks BRK
+     * — see docs/archive/investigations/jetson-uefi-direct-result.md
+     * §5a). primary_cpu masks all four again for the kexec path.
+     */
+    msr     daifset, #0x7
+    mov     x19, x0                     /* DTB, callee-saved */
 
     /*
-     * No self-relocation. UEFI typically does NOT hand SLM-OS the
-     * preferred `0x80000000` ImageBase on Jetson (the address is
-     * occupied by UEFI's own code/data), so the earlier trampoline
-     * both overwrote UEFI memory and `br`'d into a page that wasn't
-     * executable from the EFI-application context. Without a real
-     * `.reloc` section UEFI doesn't patch absolute references
-     * either, so physically moving the image to the link address
-     * didn't restore correctness — it just added a corruption pass.
-     * Continue at whatever address UEFI picked. The code that
-     * follows is PC-relative (ADRP+ADD, literal pools, direct
-     * B/BL) and runs correctly at any load address. Absolute
-     * references inside the wider kernel (function-pointer tables,
-     * globals) are a separate fix — approach B of the UEFI-direct
-     * plan (real `.reloc` + PIC early boot). See
-     * docs/archive/investigations/jetson-uefi-direct-result.md.
+     * Turn the MMU and caches off (M, C, I) in the regime UEFI left
+     * active, then invalidate that regime's TLB:
+     *   EL1                  -> SCTLR_EL1, TLBI VMALLE1
+     *   EL2, HCR_EL2.E2H=1   -> SCTLR_EL1 (aliases SCTLR_EL2 under
+     *                           VHE), TLBI VMALLE1
+     *   EL2, HCR_EL2.E2H=0   -> SCTLR_EL2, TLBI ALLE2. Jetson UEFI
+     *                           v36.4.7 runs here (HCR_EL2=0x88000000);
+     *                           SCTLR_EL1 is a separate, dormant
+     *                           register in this regime, and writing it
+     *                           would leave the MMU on.
      */
+    mrs     x9, CurrentEL
+    cmp     x9, #8
+    b.ne    .Lefi_mmu_off_el1
+    mrs     x9, hcr_el2
+    tbnz    x9, #34, .Lefi_mmu_off_el1  /* E2H=1: EL1 names alias EL2 */
+    mrs     x9, sctlr_el2
+    bic     x9, x9, #(1 << 0)           /* M */
+    bic     x9, x9, #(1 << 2)           /* C */
+    bic     x9, x9, #(1 << 12)          /* I */
+    msr     sctlr_el2, x9
+    isb
+    tlbi    alle2
+    b       .Lefi_mmu_off_done
+.Lefi_mmu_off_el1:
+    mrs     x9, sctlr_el1
+    bic     x9, x9, #(1 << 0)           /* M */
+    bic     x9, x9, #(1 << 2)           /* C */
+    bic     x9, x9, #(1 << 12)          /* I */
+    msr     sctlr_el1, x9
+    isb
+    tlbi    vmalle1
+.Lefi_mmu_off_done:
+    dsb     nsh
+    ic      iallu
+    dsb     nsh
+    isb
+
+    /*
+     * Relocate to the link address.
+     *
+     * The kernel is linked to run with PA == link address (kexec
+     * loads it there). UEFI loads the PE image wherever it likes and,
+     * with no .reloc section, patches nothing. Copy the file-backed
+     * part of the image (code, rodata, initialized data — BSS is
+     * zeroed by primary_cpu) to the link address and jump into the
+     * copy. efi_stub_entry has already checked against the UEFI
+     * memory map that the destination is OS-owned RAM after EBS and
+     * does not overlap the source or the DTB.
+     *
+     * Runs with the MMU off, so every access is Device-nGnRnE and goes
+     * straight to DRAM (the C side cleaned both ranges): keep the copy
+     * 16-byte aligned (both bases are 64 KB aligned and
+     * _kernel_file_size ends on a 512-byte boundary). The I-cache is
+     * invalidated afterwards so no stale lines for the destination
+     * survive from UEFI's use of that memory.
+     */
+    adr     x1, _start                  /* src: where UEFI loaded us */
+    ldr     x2, =_start                 /* dst: link address */
+    cmp     x1, x2
+    b.eq    .Lefi_relocated             /* already at link address */
+    ldr     x3, =_kernel_file_size
+    add     x3, x1, x3                  /* src end */
+.Lefi_copy:
+    ldp     x4, x5, [x1], #16
+    stp     x4, x5, [x2], #16
+    cmp     x1, x3
+    b.lo    .Lefi_copy
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+    ldr     x9, =.Lefi_relocated        /* link address of the label */
+    br      x9                          /* continue in the copy */
+
+.Lefi_relocated:
+    /* Now executing at the link address. */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Re-point the early diagnostic vectors at the copy so a fault
+     * from here to primary_cpu is reported by the relocated handler
+     * (whose BSS fault slot is the one the kernel will see). EL2
+     * only — matches the gate in efi_stub_entry. */
+    mrs     x9, CurrentEL
+    cmp     x9, #8
+    b.ne    1f
+    adr     x9, jetson_early_vbar_el2
+    msr     vbar_el2, x9
+    isb
+1:
+#endif
+    mov     x0, x19
+    mov     x1, xzr
 
 .Lnot_efi:
 #endif /* !PLATFORM_RASPI5 */
@@ -694,11 +798,10 @@ real_start:
      *   what hung PR #219 / #226 / #239's UEFI-direct probes
      *   (docs/archive/investigations/jetson-uefi-direct-result.md §5c).
      *
-     *   Why this is safe here: efi_disable_mmu ran just before the
-     *   return to boot.S and now actually disables the active EL2
-     *   MMU (it's E2H-aware since P3; pre-P3 it wrote the dormant
-     *   SCTLR_EL1 when E2H=0 and left the real EL2 MMU running —
-     *   that was the silent latent bug). With MMU off, flipping
+     *   Why this is safe here: the EFI path above (.Lefi_continue)
+     *   has already turned the active EL2 MMU off, E2H-aware (with
+     *   E2H=0 it writes SCTLR_EL2; writing the dormant SCTLR_EL1
+     *   would leave the real EL2 MMU running). With MMU off, flipping
      *   HCR_EL2.E2H 0→1 no longer tears down an active translation
      *   regime.
      *
@@ -914,7 +1017,7 @@ secondary_spin:
  *
  * Installed by efi_stub_entry() immediately after a successful
  * ExitBootServices so any synchronous fault during the UEFI→SLM-OS
- * transition (post-EBS efi_prints, efi_disable_mmu, the return to
+ * transition (the post-EBS MMU-off and relocation, the return to
  * boot.S, the Jetson EL2 block's HCR_EL2 write, UARTC probe,
  * timer disables) lands in this handler instead of bouncing to
  * UEFI's VBAR_EL2 — which on post-EBS firmware points into

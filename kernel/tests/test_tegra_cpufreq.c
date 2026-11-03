@@ -75,6 +75,18 @@ static void test_sync_target_copies_in_range_only(void)
     TEST_ASSERT_EQUAL_UINT32(0, tegra234_cpufreq_sync_target(0x1FF));
 }
 
+/* kexec (#1053): offlined core at the floor is raised to CPU 0.
+ * UEFI-direct (#26): PSCI-booted core at NDIV 157 (2009 MHz, above
+ * the table) is lowered to CPU 0's 135. Equal or no target: untouched. */
+static void test_sync_core_moves_both_directions(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(105, tegra234_cpufreq_sync_core(9, 105));
+    TEST_ASSERT_EQUAL_UINT32(135, tegra234_cpufreq_sync_core(157, 135));
+    TEST_ASSERT_EQUAL_UINT32(0, tegra234_cpufreq_sync_core(105, 105));
+    TEST_ASSERT_EQUAL_UINT32(0, tegra234_cpufreq_sync_core(0x1000 | 105, 105));
+    TEST_ASSERT_EQUAL_UINT32(0, tegra234_cpufreq_sync_core(157, 0));
+}
+
 int test_suite_tegra_cpufreq(void)
 {
     UNITY_BEGIN();
@@ -84,5 +96,6 @@ int test_suite_tegra_cpufreq(void)
     RUN_TEST(test_reg_offset_stride_8);
     RUN_TEST(test_ndiv_to_khz_matches_linux);
     RUN_TEST(test_sync_target_copies_in_range_only);
+    RUN_TEST(test_sync_core_moves_both_directions);
     return UNITY_END();
 }

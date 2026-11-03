@@ -152,6 +152,11 @@ int test_harness_run_all(void)
     total_failures += test_suite_mpidr_lookup();
     total_failures += test_suite_pmu();
 #endif
+#if !defined(PLATFORM_X86_64) && !defined(PLATFORM_RASPI5)
+    /* UEFI-direct relocation decision (#26); efi_stub.c is built on
+     * every ARM64 platform with a PE header (not Pi 5). */
+    total_failures += test_suite_efi_reloc();
+#endif
     total_failures += test_suite_tegra_cpufreq();
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();

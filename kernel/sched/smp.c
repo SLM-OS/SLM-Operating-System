@@ -795,7 +795,9 @@ void smp_init(void)
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* kexec left every core Linux offlined at the 115.2 MHz NDIV floor;
      * cluster 1 (CPUs 4-5) has no core above it and runs ~12x slower
-     * than cluster 0 until raised to CPU 0's NDIV (#1053). */
+     * than cluster 0 until raised to CPU 0's NDIV (#1053). After
+     * UEFI-direct boot the PSCI-booted cores instead request NDIV 157,
+     * above the table, and are lowered to CPU 0's (#26). */
     tegra234_cpufreq_sync_to_boot_cpu();
 #endif
 

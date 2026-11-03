@@ -265,6 +265,9 @@ int test_suite_cpu_supervisor(void);
 /* MPIDR -> logical CPU id lookup tests (#647) */
 int test_suite_mpidr_lookup(void);
 
+/* UEFI-direct boot: efi_check_relocation() decision tests (#26) */
+int test_suite_efi_reloc(void);
+
 /* Tegra234 CPU NDIV helpers (#1053) */
 int test_suite_tegra_cpufreq(void);
 

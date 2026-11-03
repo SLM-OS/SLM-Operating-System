@@ -908,6 +908,25 @@ hailo-clean:
 test-jetson-uefi-layout:
 	@bash scripts/test-jetson-uefi-layout.sh
 
+# UEFI-direct boot under QEMU's AArch64 UEFI firmware (#26). Boots the
+# QEMU_VIRT PE image (build/kernel/slmos.bin) from a FAT ESP twice:
+#   1. as built — firmware honours ImageBase (= link address);
+#   2. with ImageBase rewritten to a non-RAM address, so the firmware
+#      loads it elsewhere and the EFI stub must relocate it — the
+#      situation on Jetson, whose firmware never grants 0x80000000.
+# Both must reach the shell prompt. Needs the qemu-efi-aarch64 package
+# (AAVMF firmware) and mtools. Build the kernel first (`make kernel`).
+.PHONY: test-qemu-uefi
+test-qemu-uefi:
+	@test -f $(KERNEL_BIN) || { echo "build the QEMU_VIRT kernel first: make kernel"; exit 2; }
+	@bash scripts/qemu-uefi-boot.sh $(KERNEL_BIN) $(TEST_TIMEOUT)
+	@FORCE_IMAGE_BASE=0x1000 bash scripts/qemu-uefi-boot.sh $(KERNEL_BIN) $(TEST_TIMEOUT)
+	@grep -a -q "reloc: copy to link address" build/qemu-uefi/console.log \
+		|| { echo "test-qemu-uefi: relocation path was not taken"; exit 1; }
+	@grep -a -q "Boot source: UEFI-direct" build/qemu-uefi/console.log \
+		|| { echo "test-qemu-uefi: boot source not recorded across the relocation"; exit 1; }
+	@echo "test-qemu-uefi: PASS (in-place and relocated UEFI boots)"
+
 # VBIOS parser unit tests — runs on the host, no GPU required.
 # Synthetic VBIOS image built in the test, no proprietary binaries.
 .PHONY: test-vbios

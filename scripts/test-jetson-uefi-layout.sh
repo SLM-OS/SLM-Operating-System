@@ -21,6 +21,17 @@
 #   6. Verifies the primary_cpu SLM-OS VBAR_EL1 install site still
 #      exists (regressions here would mean a fault post-primary_cpu
 #      misses the SLM-OS handler).
+#   7. Verifies the EFI entry in boot.S turns the MMU off with both
+#      the E2H=0 and EL1/VHE arms, invalidates the I-cache and jumps
+#      into the relocated copy (#26).
+#   8. Verifies the EFI stub cleans by VA (dc civac) and never by
+#      set/way (dc cisw).
+#   9. Verifies the PE ImageBase equals the link address of _start.
+#  10. Verifies the HCR_EL2 write is read-modify-write.
+#
+# The runtime behaviour of the same path (firmware load at a
+# non-preferred address, relocation, boot to the shell) is exercised
+# under QEMU's AArch64 UEFI by `make test-qemu-uefi`.
 #
 # Exit 0 on pass, 1 on fail. Expected to run as part of pre-merge
 # validation for any change touching boot.S / efi_stub.c / the
@@ -201,41 +212,81 @@ else
     err "exception_vectors symbol missing"
 fi
 
-printf '\n== P3: E2H-aware efi_disable_mmu ==\n'
+printf '\n== UEFI hand-off: cache clean, MMU off, relocation (#26) ==\n'
 
-# 6. efi_disable_mmu must contain BOTH the EL2-path TLBI (`tlbi
-#    alle2`) and the EL1-path TLBI (`tlbi vmalle1`). If either is
-#    missing, the runtime branch is only half-implemented and one
-#    of the two entry modes (UEFI-direct with E2H=0 vs
-#    kexec/EL1/VHE-on) will silently leave the MMU running or hit
-#    the wrong register. The tlbi instruction is a unique marker
-#    for each branch since the mrs/bic/msr surrounding sequences
-#    are identical.
+# 6. The EFI entry window in boot.S (real_start .. primary_cpu) turns
+#    the MMU off itself, E2H-aware, and must carry BOTH arms: `tlbi
+#    alle2` (EL2 with E2H=0 — Jetson UEFI v36.4.7) and `tlbi vmalle1`
+#    (EL1, or EL2 with VHE on). If either is missing, one entry mode
+#    silently leaves the MMU running or hits the dormant register.
+#    The window must also invalidate the I-cache and branch into the
+#    relocated copy (`br`).
 #
 # NOTE: uses `grep -c` + count-check rather than `grep -q` because
 # with `set -o pipefail` a SIGPIPE-driven early-exit from `grep -q`
 # makes `echo "$huge_string" | grep -q ...` spuriously fail when
 # echo can't complete writing before grep closes its stdin.
-alle2_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \
-    | grep -cE 'tlbi[[:space:]]+alle2' || true)
-if [ "$alle2_count" -ge 1 ]; then
-    pass "image contains 'tlbi alle2' (EL2-path MMU disable)"
+rs_addr=$("$NM" "$ELF" | awk '$3 == "real_start" {print $1}')
+pc_addr=$("$NM" "$ELF" | awk '$3 == "primary_cpu" {print $1}')
+if [ -z "$rs_addr" ] || [ -z "$pc_addr" ]; then
+    err "real_start / primary_cpu symbol missing"
 else
-    err "no 'tlbi alle2' — E2H=0 branch of efi_disable_mmu missing?"
+    win=$("$OBJDUMP" -d "$ELF" --start-address="0x$rs_addr" \
+        --stop-address="0x$pc_addr" 2>/dev/null)
+    n=$(echo "$win" | grep -cE 'tlbi[[:space:]]+alle2' || true)
+    [ "$n" -ge 1 ] && pass "EFI entry has 'tlbi alle2' (EL2, E2H=0 MMU-off)" \
+                   || err "no 'tlbi alle2' in EFI entry — E2H=0 MMU-off arm missing"
+    # vmalle1 (not vmalle1is): the IS variant is used elsewhere.
+    n=$(echo "$win" | grep -cE 'tlbi[[:space:]]+vmalle1($|[^i])' || true)
+    [ "$n" -ge 1 ] && pass "EFI entry has 'tlbi vmalle1' (EL1 / VHE MMU-off)" \
+                   || err "no 'tlbi vmalle1' in EFI entry — EL1/VHE MMU-off arm missing"
+    n=$(echo "$win" | grep -cE 'ic[[:space:]]+iallu' || true)
+    [ "$n" -ge 1 ] && pass "EFI entry invalidates the I-cache after the copy" \
+                   || err "no 'ic iallu' in EFI entry"
+    n=$(echo "$win" | grep -cE '[[:space:]]br[[:space:]]+x[0-9]+' || true)
+    [ "$n" -ge 1 ] && pass "EFI entry branches into the relocated copy" \
+                   || err "no 'br xN' in EFI entry — relocation jump missing"
 fi
 
-# tlbi vmalle1 (not vmalle1is) specifically — the `is` variant is
-# used elsewhere in the kernel for IS-scoped shootdown and would
-# match a too-broad regex.
-vmalle1_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \
-    | grep -cE 'tlbi[[:space:]]+vmalle1($|[^i])' || true)
-if [ "$vmalle1_count" -ge 1 ]; then
-    pass "image contains 'tlbi vmalle1' (EL1/VHE-path MMU disable)"
-else
-    err "no 'tlbi vmalle1' — E2H=1 / EL1 branch of efi_disable_mmu missing?"
+# 7. efi_stub_entry must clean by VA (`dc civac`) and must NOT use
+#    set/way maintenance (`dc cisw`). Set/way does not reach the PoC
+#    through system caches; on Jetson the stale stack it left behind
+#    took the board down with an EL3 RAS error after ExitBootServices.
+if [ -n "$efi_entry_addr" ]; then
+    stop=$(printf '%x' $((0x$efi_entry_addr + 0x1000)))
+    edis=$("$OBJDUMP" -d "$ELF" --start-address="0x$efi_entry_addr" \
+        --stop-address="0x$stop" 2>/dev/null)
+    n=$(echo "$edis" | grep -cE 'dc[[:space:]]+civac' || true)
+    [ "$n" -ge 1 ] && pass "efi_stub_entry cleans by VA (dc civac)" \
+                   || err "no 'dc civac' in efi_stub_entry — VA clean missing"
+    n=$("$OBJDUMP" -d "$ELF" 2>/dev/null | awk '/<efi_/,/^$/' \
+        | grep -cE 'dc[[:space:]]+cisw' || true)
+    [ "$n" -eq 0 ] && pass "no set/way 'dc cisw' in EFI stub code" \
+                   || err "EFI stub uses set/way 'dc cisw' ($n sites)"
 fi
 
-# 7. boot.S's Jetson HCR_EL2 write must be RMW: a `mrs XN, hcr_el2`
+# 8. PE ImageBase must equal the link address of _start, so firmware
+#    that honours it loads the image where it is linked.
+BIN="$ROOT/build/kernel/slmos.bin"
+start_addr=$("$NM" "$ELF" | awk '$3 == "_start" {print $1}')
+if [ -f "$BIN" ] && [ -n "$start_addr" ]; then
+    ib=$(python3 -I - "$BIN" <<'PY'
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    f.seek(0x3C); pe = struct.unpack("<I", f.read(4))[0]
+    f.seek(pe + 4 + 20 + 24); print("%x" % struct.unpack("<Q", f.read(8))[0])
+PY
+)
+    if (( 0x$ib == 0x$start_addr )); then
+        pass "PE ImageBase 0x$ib == link address of _start"
+    else
+        err "PE ImageBase 0x$ib != _start 0x$start_addr"
+    fi
+else
+    warn "slmos.bin or _start missing — ImageBase check skipped"
+fi
+
+# 9. boot.S's Jetson HCR_EL2 write must be RMW: a `mrs XN, hcr_el2`
 #    before the `msr hcr_el2, ...`. Pre-P3 the write was an
 #    unconditional move with no preceding mrs.
 mrs_hcr_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \

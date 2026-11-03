@@ -94,15 +94,20 @@ aarch64-none-elf-objcopy -O binary slmos.elf slmos.bin
 # Then add ARM64 Image header (64 bytes)
 ```
 
-### Option 2: EFI Stub (Future)
+### Option 2: EFI Stub (working, #26)
 
-Build SLM-OS as an EFI application that UEFI can load directly. This is more complex but cleaner.
+SLM-OS is built as an EFI application (`slmos.bin` carries a PE/COFF
+header) that UEFI launches directly; the EFI stub relocates it to its
+link address after ExitBootServices. See
+`docs/deploy/jetson-uefi-direct.md`.
 
 ### Option 3: Chainload from Linux (Fallback)
 
 Boot Linux normally, then use kexec to jump to SLM-OS. This is useful for early development.
 
-**Current approach:** Start with Option 3 for debugging, then implement Option 1.
+**Current approach:** Option 3 (kexec) is the primary path because USB
+networking, GPU compute and the camera depend on state Linux sets up;
+Option 2 boots to the shell without Linux.
 
 ---
 
@@ -186,7 +191,7 @@ QEMU uses GICv2 at 0x08000000/0x08010000. The platform.h `#ifdef` handles the di
 | RAM Size | 128 MB (configurable) | ~6.7 GB (8 GB minus OP-TEE carveout) |
 | CPU Count | 4 (configurable) | 6 (Cortex-A78AE), 1 online (SMP blocked) |
 | Exception Level | EL1 (drops from EL3) | EL2 with VHE (stays at EL2) |
-| Bootloader | Direct load | UEFI → kexec from Linux |
+| Bootloader | Direct load | UEFI → kexec from Linux, or UEFI-direct (EFI stub) |
 | Timer | Virtual | Physical (system register) |
 
 ---

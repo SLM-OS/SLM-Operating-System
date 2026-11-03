@@ -6,7 +6,7 @@ How SLM-OS enters execution on each platform and reaches a running shell.
 
 | Sub-capability | QEMU (ARM64) | Pi 5 | Jetson | x86-64 |
 |---|---|---|---|---|
-| Boot chain | QEMU `-kernel` direct load | Raspberry Pi firmware (`start4.elf`) → custom TF-A `bl31.bin` → `kernel_2712.img` | Linux + kexec `HVC_SOFT_RESTART` (UEFI-direct WIP) | GRUB multiboot2 (ISO or UEFI disk image) |
+| Boot chain | QEMU `-kernel` direct load | Raspberry Pi firmware (`start4.elf`) → custom TF-A `bl31.bin` → `kernel_2712.img` | Linux + kexec `HVC_SOFT_RESTART`, or UEFI-direct (EFI stub relocates to the link address) | GRUB multiboot2 (ISO or UEFI disk image) |
 | Custom firmware (built in-tree) | — | `make tfa-pi5` builds patched `bl31.bin` (clears `SCR_EL3.IRQ/FIQ`, writes `GICD_IGROUPR[0]=0xFFFFFFFF`); deployed manually | — | — |
 | Entry exception level | EL1 | **NS EL2 + VHE** (`HCR_EL2.{E2H,TGE}=1`) | NS EL2 + VHE (inherits from Linux) | CPL=0 long mode |
 | Entry address | `0x40000000` | `0x80000` | `0x80000000` (kexec load addr) | multiboot2 header |
@@ -49,7 +49,7 @@ mailbox tags are not portable.
 
 ## Skipped / Blocked
 
-- **Jetson direct UEFI boot** — WIP. UEFI enters at NS EL2; two blockers remain: (a) `boot.S`'s unconditional `msr hcr_el2` clobbers UEFI-set bits, (b) UARTC MMIO faults from EFI-app context even at EL2 (CBB permission profile differs from kexec-from-Linux).
+- **Jetson direct UEFI boot** — boots to the shell (10/10 on jetson-nano-2, #26); see `docs/deploy/jetson-uefi-direct.md`. No USB networking or GPU compute on that path: those drivers depend on state Linux leaves behind, so kexec remains the path for them.
 - **Pi 5 vendor `armstub8-2712.bin`** — replaced by custom in-tree TF-A `bl31` (`make tfa-pi5`), required for hardware timer IRQ delivery. Vendor armstub remains the fallback if TF-A is not flashed; cooperative preemption is required in that case.
 - **Jetson OP-TEE carveout (0xBE000000–0xC2000000)** — cannot touch. PMM allocator uses three non-contiguous regions around it.
 - **Jetson BPMP IVC** — unreachable post-kexec, so SLM-OS inherits whatever clock/power state Linux left. No dynamic re-configuration possible.

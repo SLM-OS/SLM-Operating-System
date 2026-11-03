@@ -40,6 +40,14 @@ uint32_t tegra234_cpufreq_sync_target(uint32_t boot_ndiv)
     return ndiv;
 }
 
+uint32_t tegra234_cpufreq_sync_core(uint32_t cur_ndiv, uint32_t target)
+{
+    if (target == 0) {
+        return 0;
+    }
+    return (cur_ndiv & TEGRA234_NDIV_MASK) == target ? 0 : target;
+}
+
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "smp.h"
 #include "debug.h"
@@ -70,7 +78,7 @@ uint32_t tegra234_cpufreq_get_ndiv(uint32_t cpu)
 uint32_t tegra234_cpufreq_sync_to_boot_cpu(void)
 {
     uint32_t target = tegra234_cpufreq_sync_target(tegra234_cpufreq_get_ndiv(0));
-    uint32_t raised = 0;
+    uint32_t changed = 0;
 
     if (target == 0) {
         WARN("cpufreq: CPU 0 NDIV unreadable or out of range; leaving CPU clocks alone");
@@ -83,16 +91,17 @@ uint32_t tegra234_cpufreq_sync_to_boot_cpu(void)
             continue;
         }
         uint32_t cur = *reg & TEGRA234_NDIV_MASK;
-        if (cur >= target) {
+        uint32_t next = tegra234_cpufreq_sync_core(cur, target);
+        if (next == 0) {
             continue;
         }
-        *reg = target;
+        *reg = next;
         __asm__ volatile("dsb sy" ::: "memory");
         INFO("cpufreq: CPU %u NDIV %u (%u MHz) -> %u (%u MHz), matching CPU 0",
              cpu, cur, tegra234_ndiv_to_khz(cur) / 1000,
-             target, tegra234_ndiv_to_khz(target) / 1000);
-        raised++;
+             next, tegra234_ndiv_to_khz(next) / 1000);
+        changed++;
     }
-    return raised;
+    return changed;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
