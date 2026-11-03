@@ -63,7 +63,7 @@ Gaps marked above represent paths that are known to work in principle but have n
 
 ### Hardware access
 
-All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board has no SDWire assigned in labctl, the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
+All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet**: the SD card is physically removed and written in the host machine's own card reader. It is used when a board has no SDWire assigned in labctl, and for first-time card provisioning that labctl cannot do, such as repartitioning (see [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md)), even on a board that normally uses an SDWire. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
 
 Never bypass labctl by running `mount`/`cp`/`picocom`/`nc` directly against lab-managed SD cards or serial ports — doing so risks device conflicts with other sessions and can corrupt the wrong card. Sneakernet is the one sanctioned exception.
 
