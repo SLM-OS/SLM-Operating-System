@@ -113,13 +113,23 @@ labctl connect pi-5-1-console
 
 This connects to the ser2net TCP port using `nc`. Press `Ctrl+]` then `q` to disconnect.
 
-### Direct access
+### Direct access (emergency only — labctl must be stopped)
+
+labctl is the only supported hardware interface: never run `picocom`
+or `nc` against the serial ports directly while ser2net is up (see
+CLAUDE.md §"labctl Is the Only Hardware Interface" — bypassing it
+causes device conflicts with other projects sharing the lab). Direct
+access is a last resort for when labctl/ser2net is itself broken:
 
 ```bash
+sudo systemctl stop ser2net           # release the port first
 sudo picocom -b 115200 /dev/ttyUSB1   # Pi 5 console
+# when done:
+sudo systemctl start ser2net          # restore labctl access
 ```
 
-**Note:** ser2net must be stopped first for direct access (`sudo systemctl stop ser2net`).
+Restart ser2net immediately afterward, and report the missing labctl
+capability rather than adopting direct access as a workflow.
 
 ### ser2net Configuration
 
@@ -148,7 +158,15 @@ The `pi-5-1` SD card is connected through a Badgerd SDWireC which
 allows the SD card to be switched between the host machine (for
 flashing) and the Pi 5 (for booting) without physical intervention.
 
-### SDWireC Commands
+### SDWireC Commands (emergency only — labctl must be stopped)
+
+Normal operation goes through labctl (`sdwire_to_host`,
+`sdwire_to_dut`, `sdwire_update` — MCP tools or CLI equivalents).
+Never drive the raw `sdwire` tool or `/dev/sd*` devices while labctl
+is managing the lab: two SDWire devices exist and manual access risks
+switching or writing the wrong card (see CLAUDE.md §"labctl Is the
+Only Hardware Interface"). The raw commands below are for recovery
+when labctl is itself down:
 
 ```bash
 # Switch SD to host (for flashing)
@@ -168,24 +186,30 @@ sudo /tmp/sdwire-venv/bin/sdwire list
 
 ### Full Deploy Workflow
 
+All steps route through labctl — `sdwire_update` handles the SDWire
+switch to host, the mount, the kernel copy, the unmount, and the
+switch back to the Pi. Prefer the `/deploy-and-test` skill, which
+orchestrates this whole cycle.
+
 ```bash
 # 1. Build for Pi 5
 make kernel-clean && make kernel PLATFORM=RASPI5
 
-# 2. Flash SD card
-labctl power off pi-5-1
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" host
-sleep 2
-sudo mount /dev/sddN /mnt           # Check sdwire list for correct device!
-sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
-sudo umount /mnt
-sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
+# 2. Flash SD card: labctl's sdwire_update tool (MCP) powers the board
+#    off, switches the card to the host, copies build/kernel/slmos.bin
+#    to kernel_2712.img (keep a .prev backup), and switches it back.
 
 # 3. Boot and monitor
 labctl power cycle pi-5-1 --delay 2
 sleep 15
 labctl connect pi-5-1-console
 ```
+
+Do NOT manually mount `/dev/sd*` or `cp` onto the card. If
+`sdwire_update` lacks a needed capability, request the labctl feature
+instead of working around it (CLAUDE.md §"labctl Is the Only
+Hardware Interface"). Manual recovery with labctl stopped is covered
+under "SDWireC Commands" above.
 
 ### SD Card Contents
 

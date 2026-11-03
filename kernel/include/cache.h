@@ -11,8 +11,12 @@
  *   cache_clean_range(addr, size) — clean multiple cachelines
  *
  * On QEMU and platforms with working coherency, these are no-ops.
- * Spinlock-protected accesses (ldaxr/stxr) don't need these — the
- * exclusive monitor has its own coherency mechanism.
+ * Spinlocks are NOT exempt: the exclusive monitor does not provide
+ * coherency on Pi 5 — without SMPEN, a waiter's ldaxr can spin
+ * forever on a stale "locked" cacheline. spinlock.h's
+ * PLATFORM_RASPI5 path does its own DC CIVAC + DSB SY around
+ * ldaxr/stlr, so lock users still never call these helpers for the
+ * lock word itself (see kernel/CLAUDE.md §"Pi 5 spinlock DRAM flush").
  */
 
 #ifndef CACHE_H

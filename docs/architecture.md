@@ -216,7 +216,7 @@ Pub/Sub" for the full reference):
 |-----------|---------|---------|
 | SMP Boot | `kernel/sched/smp.c`, `smp_boot.S` | Secondary CPU initialization |
 | Spinlocks | `kernel/include/spinlock.h` | Multi-core synchronization |
-| IPI | `kernel/src/gic.c` | Inter-processor interrupts |
+| IPI | `kernel/drivers/gic.c` | Inter-processor interrupts |
 
 **Phase 3 Learnings:**
 - PSCI is the standard way to boot secondary cores
@@ -721,10 +721,11 @@ Power On / Bootloader
     │ (x0 = DTB address)
     ▼
 ┌─────────────────┐
-│   _start        │  kernel/src/boot.S
-│   (EL2 → EL1)   │  Saves x0→x19, passes to kernel_main
+│   _start        │  kernel/arch/arm64/boot.S
+│   (EL1 / EL2)   │  Saves x0→x19, passes to kernel_main
 └────────┬────────┘
-         │
+         │  (No EL2→EL1 drop: QEMU virt enters and runs at EL1;
+         │   Pi 5 and Jetson stay at EL2 with VHE — see boot.S)
          ▼
 ┌─────────────────┐
 │   kernel_main   │  kernel/src/main.c
@@ -969,7 +970,6 @@ See `docs/ffi.md` for complete FFI documentation.
 - GPU compute kernels (requires GSP firmware loading)
 - INT8 quantization (FP16 loading implemented; INT8 deferred)
 - Per-component address spaces (TTBR0_EL1)
-- Dynamic batching
 - Pi 5 secondary CPU timer preemption (see `docs/archive/investigations/pi5-secondary-cpu-preemption.md`)
 - Jetson kexec RAS error (nvgpu GPU fabric reset needed)
 

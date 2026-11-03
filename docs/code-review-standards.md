@@ -25,7 +25,7 @@ or security holes here.
 ## Critical Review Checks (always flag these)
 
 ### Memory Safety
-- Stack buffer overflows (kernel stacks are 16KB, fixed)
+- Stack buffer overflows (kernel stacks are fixed at 256KB — `STACK_SIZE` in `kernel/include/config.h` is authoritative)
 - Missing bounds checks on array/buffer access
 - Use-after-free in task cleanup or IPC teardown paths
 - Integer overflow in size calculations (especially `size_t` arithmetic)

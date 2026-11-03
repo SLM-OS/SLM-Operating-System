@@ -88,8 +88,11 @@ static struct {
 } buddy_state;
 
 /* PMM lock - protects all buddy state
- * NOTE: On Jetson after kexec, spinlock operations are no-ops (defined in
- * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
+ * NOTE: Pre-MMU (spinlock_hw_enabled == 0) spin_lock falls through to a
+ * barrier-only path on Pi 5/Jetson; once vmm_init enables the MMU, real
+ * LDAXR/STXR runs and provides cross-CPU exclusion. Jetson's former
+ * SPINLOCK_SKIP_LOCKING no-op let concurrent CPUs corrupt this free
+ * list (issue #166).
  */
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 

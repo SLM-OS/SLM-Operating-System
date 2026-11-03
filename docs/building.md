@@ -361,8 +361,8 @@ Displays help text with all available targets.
 ### Build Types
 
 ```bash
-make BUILD_TYPE=Debug    # Default: debug symbols, no optimization
-make BUILD_TYPE=Release  # Optimized, no debug symbols
+make BUILD_TYPE=Debug    # Debug symbols, no optimization
+make BUILD_TYPE=Release  # Default: optimized, no debug symbols
 ```
 
 **Debug build flags:**

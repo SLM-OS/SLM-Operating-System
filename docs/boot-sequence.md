@@ -78,7 +78,7 @@ The Jetson Orin Nano uses NVIDIA's boot architecture with UEFI as the CPU bootlo
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Operating System (SLM-OS)                                          │
 │  - Kernel entry point                                               │
-│  - Running at EL1                                                   │
+│  - Running at EL2 with VHE (no drop to EL1)                         │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,12 +129,12 @@ ARMv8-A defines four Exception Levels (EL0-EL3) with increasing privilege. Excep
 │  - Typically ARM Trusted Firmware (ATF)                             │
 │  - Optional                                                         │
 ├─────────────────────────────────────────────────────────────────────┤
-│  EL2 - Hypervisor                                                   │
+│  EL2 - Hypervisor                    ◄── SLM-OS HERE (Pi 5/Jetson)  │
 │  - Virtualization support                                           │
 │  - KVM, VMware, VirtualBox                                          │
-│  - Optional                                                         │
+│  - SLM-OS runs here with VHE on Pi 5 and Jetson                     │
 ├─────────────────────────────────────────────────────────────────────┤
-│  EL1 - Operating System Kernel                     ◄── SLM-OS HERE  │
+│  EL1 - Operating System Kernel      ◄── SLM-OS HERE (QEMU virt)     │
 │  - Privileged OS code                                               │
 │  - Full hardware access                                             │
 │  - Mandatory                                                        │
@@ -151,8 +151,8 @@ ARMv8-A defines four Exception Levels (EL0-EL3) with increasing privilege. Excep
 | Level | Name | Privilege | Typical Use | Required |
 |-------|------|-----------|-------------|----------|
 | EL0 | User | Lowest | Applications, userspace | Mandatory |
-| EL1 | Kernel | Privileged | **OS kernel (SLM-OS)** | Mandatory |
-| EL2 | Hypervisor | Higher | Virtualization | Optional |
+| EL1 | Kernel | Privileged | **OS kernel (SLM-OS on QEMU virt)** | Mandatory |
+| EL2 | Hypervisor | Higher | Virtualization (**SLM-OS on Pi 5/Jetson, with VHE**) | Optional |
 | EL3 | Secure Monitor | Highest | TrustZone, security | Optional |
 
 ### Transitioning Between Levels
@@ -285,7 +285,7 @@ Based on TODO.md recommendations:
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Initial Target | QEMU first | Faster iteration, defer Jetson to Month 2-3 |
-| Exception Level | EL1 | Standard for OS kernels, simpler than EL2 |
+| Exception Level | Entry EL (no drop) | EL1 on QEMU virt; EL2+VHE on Pi 5/Jetson (hardware IRQ routing — see kernel/arch/arm64/boot.S) |
 | Boot Method | QEMU direct load | No bootloader needed initially |
 
 ### Boot Requirements
@@ -387,7 +387,7 @@ Secondary CPU cores are brought online via PSCI (Power State Coordination Interf
 Each secondary core:
 1. Receives entry point address via PSCI `CPU_ON` call
 2. Starts executing `secondary_entry` in `smp_boot.S`
-3. Sets up its own 16KB stack from `cpu_stacks[]` array
+3. Sets up its own stack from the `cpu_stacks[]` array (`STACK_SIZE`, 256 KB per CPU)
 4. Initializes its GIC CPU interface and timer
 5. Enters the per-core scheduler, initially running its idle task
 

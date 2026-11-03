@@ -14,7 +14,7 @@ no POSIX. All code runs in kernel space (EL1/EL2 on ARM64, Ring 0 on x86-64).
 ### Critical (must fix before merge)
 
 **Memory Safety:**
-- Buffer overflows (kernel stacks are 16KB fixed)
+- Buffer overflows (kernel stacks are 256KB fixed — see `STACK_SIZE` in `kernel/include/config.h`)
 - Use-after-free in task cleanup or IPC teardown
 - Integer overflow in size calculations (`size_t` arithmetic)
 - Missing bounds checks on array/buffer access

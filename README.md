@@ -94,7 +94,8 @@ ARM64 and x86-64 targets. Use before every merge to `main`.
 ### Code Review
 
 Branch review is also a slash command, tailored for embedded / bare-metal
-code quality criteria (no libc, no POSIX, kernel stacks fixed at 16 KB,
+code quality criteria (no libc, no POSIX, kernel stacks fixed at 256 KB
+(`STACK_SIZE` in `kernel/include/config.h`),
 memory-safety review for use-after-free in task/IPC teardown, etc.):
 
 ```
