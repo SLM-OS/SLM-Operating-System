@@ -39,6 +39,9 @@
 #include "blob_autoload.h"
 #include "boot_media.h"
 #include "boot_source.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../gpu/nvidia/ga10b_cold.h"
+#endif
 #include "help.h"
 #include "oplib_pool.h"
 #include "rng.h"
@@ -62,7 +65,6 @@ extern const struct gpu_driver gpu_stub_driver;
 extern const struct gpu_driver gpu_nvidia_driver;
 extern void nvidia_gpu_set_mmio_base(uintptr_t base);
 extern void jetson_gsp_platform_install(void);
-extern int  gsp_init(void);
 #endif
 
 /* External symbols from linker script */
@@ -713,9 +715,28 @@ void kernel_main(void *dtb)
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     if (gpu_ret == GPU_OK) {
         jetson_gsp_platform_install();
-        int gsp_ret = gsp_init();
-        if (gsp_ret < 0) {
-            WARN("GSP init incomplete (rc=%d) — GPU compute unavailable", gsp_ret);
+        /* GA10B does not use the discrete-Ampere GSP-RM stack that
+         * gsp_init() drives (#579). After kexec, compute inherits
+         * Linux's GPU state lazily (slm_ffi.c ensure_bringup). After a
+         * UEFI-direct boot nothing has initialised the GPU, so bring
+         * it up from cold here (#1088): power, ACR, LS PMU, FECS/GPCCS,
+         * golden context and an SLM-OS-created channel. A failure
+         * leaves inference on the CPU. */
+        if (boot_source_is_uefi()) {
+            int cold_rc = ga10b_cold_run(GA10B_COLD_STEP_COUNT - 1);
+            if (cold_rc == GA10B_COLD_ERR_BUSY) {
+                WARN("GA10B cold bring-up already running elsewhere");
+            } else if (cold_rc == -(int)GA10B_COLD_MNIST) {
+                WARN("GA10B up from cold, but the MNIST GPU pipeline could "
+                     "not be built (operator library / weights) — MNIST "
+                     "inference stays on the CPU");
+            } else if (cold_rc != 0) {
+                WARN("GA10B cold bring-up stopped at step %d (%s) — "
+                     "GPU compute unavailable", -cold_rc,
+                     ga10b_cold_step_name((enum ga10b_cold_step)-cold_rc));
+            } else {
+                INFO("GA10B cold bring-up complete — GPU compute available");
+            }
         }
     }
 #endif

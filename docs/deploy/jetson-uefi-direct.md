@@ -6,8 +6,8 @@ how the hand-off works, the one-time board setup, the build-deploy-test
 loop, and what does and does not work after a UEFI-direct boot.
 
 The kexec-from-Linux path ([`jetson-kexec.md`](jetson-kexec.md)) remains
-the primary path for work that needs state Linux leaves behind (the
-GPU compute channels the helpers create). Both paths boot the same
+available for work that needs state Linux leaves behind (the sched and
+eviction GPU channels the helpers create). Both paths boot the same
 `slmos` build: kexec loads `slmos.elf`; UEFI loads `slmos.bin`.
 
 **Status (2026-11-03):** boots to the `slmos>` shell 10/10 on
@@ -15,7 +15,13 @@ jetson-nano-2 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
 timer preemption on every CPU, serial console input and output, and
 USB networking (#1084): SLM-OS powers XUSB up itself, enumerates the
 onboard hub and the RTL8153 behind it, and gets a DHCP lease; 10/10
-boots answered ping and the telnet shell.
+boots answered ping and the telnet shell. GPU compute works too
+(#1088): SLM-OS brings GA10B up from cold during boot and runs the MNIST
+pipeline on a channel it creates itself (see
+[GA10B cold bring-up](#ga10b-cold-bring-up)); 10/10 consecutive
+UEFI-direct boots completed the bring-up and returned the expected
+MNIST result on the GPU, and `slm.model_infer_file` classifies the ten
+MNIST test digits correctly on the GPU.
 
 ---
 
@@ -196,7 +202,7 @@ accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
 | BPMP | IVC handshake and MRQ calls work |
 | USB / network | Works (#1084). `xhci_init` brings XUSB up from cold (see [XUSB cold bring-up](#xusb-cold-bring-up)); the hub on usb2-1 and the RTL8153 behind it enumerate, CDC-ECM binds; DHCP, ping and the telnet shell work. USB2 only: the SuperSpeed lanes are not used |
 | Camera RCE | Works: `rcediag` completes HELLO, PING and `CH_SETUP`. MB2 loads the RCE firmware before UEFI, and `camrtc_init` powers RCE through BPMP the same way it does after kexec |
-| GPU | GA10B probe works; no compute. Compute dispatch adopts channels the Linux helpers create before kexec (`slmos-kexec`), so it stays on the kexec path; GSP-RM bring-up fails cleanly ("firmware missing") |
+| GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
 
 ### XUSB cold bring-up
@@ -229,6 +235,42 @@ USB2 root port is enumerated without waiting for a re-plug, and devices
 are addressed with `ADDRESS_DEVICE` (BSR=0) so the controller assigns
 the USB address. The kexec-only paths (slot handoff, retained-address
 probes) are skipped.
+
+### GA10B cold bring-up
+
+After a UEFI-direct boot nothing has touched the GPU: no PRI ring, no
+ACR, no ctxsw firmware, no channels. `main.c` therefore runs
+`ga10b_cold_run()` (`kernel/gpu/nvidia/ga10b_cold.c`) when
+`boot_source_is_uefi()`; the kexec path keeps inheriting Linux's GPU
+state. The steps follow nvgpu's `nvgpu_finalize_poweron` (L4T R36.4.x)
+and were checked against an MMIO trace of nvgpu's own first power-on on
+jetson-nano-2 (instrumented `nvgpu_writel/readl`; trace and patch in
+`~/slmos-ref/derivatives/nvgpu-traces/`). `nvgpu cold [step]` runs or
+resumes them from the shell; it is refused after kexec, where it would
+reset the GPU state inherited from Linux.
+
+| Step | What it does |
+|---|---|
+| power | BPMP: GPU partition on, gpusysclk, gpcclk of each non-floorswept GPC (GPC1 is swept on Orin Nano) |
+| pri | PRI ring enumerate/start, PBUS error enables |
+| engines | FIFO/runlist/PBDMA setup, GR reset cycle (`reset_gpcs`), PERFMON reset |
+| fb | NISO sysmem flush page, MMU debug pages |
+| gr_hw | Netlist (NETC) non-context register loads |
+| acr | ctxsw ucode surface + non-WPR LS blob (PMU, GPCCS, FECS) + `flcn2_acr_desc`; ACR-GSP on the GSP RISC-V copies them into the WPR carveout (MB2 programs it on every boot path) |
+| pmu | LS PMU RTOS in its own VM: boot args via MAILBOX0/1, RISC-V start, INIT message (FBQ queues in the super surface) |
+| falcons | PMU RPCs ACR `INIT_WPR_REGION` + `BOOTSTRAP_GR_FALCONS`, SM ids, FECS/GPCCS start, context image size |
+| gr_init | Atomics, GPC MMU copies, constant GR programming (table generated from the trace by `scripts/tools/gen-ga10b-reg-table.py`), copy-engine enables |
+| golden | Global context buffers, golden context image (FECS `GOLDEN_IMAGE_SAVE`) |
+| channel | VM, TSG, subcontext, instance block/RAMFC, USERD, GPFIFO, runlist, CHRAM; installed as the active handoff |
+| mnist | MNIST v7 pipeline: shaders from the embedded operator library, weights from the embedded `mnist.onnx`, cbufs, outputs, QMD pool |
+
+The firmware is the L4T set embedded at build time
+(`GA10B_FIRMWARE_DIR`, auto-detected at `~/jetson-ga10b-firmware`); the
+MNIST shaders are the `scripts/cuda/operator_library/*_shader.sass`
+build artifacts. Without them the bring-up stops at the step that needs
+them and MNIST stays on the CPU. Smoke checks after boot:
+`nvgpu submit` (host semaphore through PBDMA) and `nvgpu submit-compute`
+(AMPERE_COMPUTE_B semaphore through GR).
 
 ## Findings
 
@@ -294,6 +336,20 @@ where the two disagree.
    port reports CCS=1, PED=0, speed 0 and PLS=Polling, so the kexec
    port scan, which keys on a decoded speed, found no device.
 
+10. **FECS/GPCCS need the LS PMU.** Bootstrapped by ACR alone (nvgpu's
+    `support_ls_pmu = false` mode) the L4T ctxsw ucode runs and then
+    halts with ctxsw mailbox 6 = `0x98`. Linux nvgpu with
+    `support_ls_pmu` forced off fails the same way ("falcon ucode init
+    timeout"), so this is the firmware's requirement, not a porting
+    error: the LS PMU RTOS must load them.
+11. **The PMU reports its sw-managed DMEM area at offset 0.** nvgpu's
+    bitmap allocator moves a zero base up one block; without that the
+    first command buffer lands at offset 0, which the allocator reports
+    as failure, and every PMU command fails.
+12. **The GSP-RM path was wrong for GA10B** (#579). `gsp_init()` drives
+    the discrete-Ampere GSP-RM stack and only printed "firmware missing"
+    on Jetson; it is no longer called there.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -306,3 +362,5 @@ where the two disagree.
 | `xusb-cold: controller not ready, USBSTS=...` | CNR never cleared: the falcon did not start from IFR firmware |
 | `cdc_ecm: no USB device` after a UEFI boot | No connected USB2 root port at enumeration; check the `xhci: cold boot — device on USB2 PORTSC[...]` line |
 | Board stuck in SLM-OS on every power cycle | A `BOOTAA64.efi` reached the NVMe ESP, or BootOrder was changed. Pick the SD entry from the UEFI boot manager (F11 at the prompt, via `serial_send keys=["F11"]`) and fix it from Linux |
+| `GA10B cold bring-up stopped at step N` at boot | The log names the step; `nvgpu cold` resumes from it. `acr`/`pmu`/`falcons` failures print the falcon mailboxes and the PMU's RISC-V debug-buffer lines (`pmu-fw:`) |
+| SD Linux does not come up (no SSH, silent console) | Recover without a re-flash: F11 at the firmware prompt (`serial_send keys=["F11"]`), choose UEFI Shell, run `FS3:\EFI\L4T\l4t.efi` (an L4TLauncher copy on the NVMe ESP, so it boots the NVMe rootfs), then mount `mmcblk0p1` from there and fix it. The UEFI Shell sees the SD ext4 rootfs read-only. Type one short command per line; long lines get mangled on this console |

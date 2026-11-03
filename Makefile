@@ -1085,6 +1085,27 @@ test-ga10b-ce:
 	    kernel/gpu/nvidia/ga10b_ce.c
 	@./build/host-tools/test_ga10b_ce
 
+# GA10B ACR LS blob builders (#1088) against the real Jetson firmware:
+# parses NETA..NETD, builds the FECS/GPCCS ctxsw ucode surface from
+# NETC (the image nvgpu uses on silicon) and the non-WPR ucode blob
+# for the jetson-nano-2 WPR1 carveout, cross-checks the bytes and
+# prints the layout. GA10B_FW_DIR defaults to ~/jetson-ga10b-firmware.
+# The kernel modules include "string.h"; without -Ikernel/include that
+# resolves to the host libc header, which is what a host build wants.
+GA10B_FW_DIR ?= $(HOME)/jetson-ga10b-firmware
+.PHONY: test-ga10b-acr
+test-ga10b-acr:
+	@mkdir -p build/host-tools
+	@echo "Building + running GA10B ACR blob host test..."
+	$(CC) -std=c2x -Wall -Wextra -Wpedantic -Werror -O2 -g \
+	    -Ikernel/gpu/nvidia \
+	    -o build/host-tools/test_ga10b_acr_blob \
+	    host-tools/ga10b-acr/test_ga10b_acr_blob.c \
+	    kernel/gpu/nvidia/ga10b_netlist.c \
+	    kernel/gpu/nvidia/ga10b_ctxsw_ucode.c \
+	    kernel/gpu/nvidia/ga10b_acr_blob.c
+	@./build/host-tools/test_ga10b_acr_blob $(GA10B_FW_DIR)
+
 # Jetson GA10B platform shim (nvidia_gsp_platform.c) — portable surfaces.
 #
 # The shim is under kernel/arch/arm64/ and normally compiled for Jetson

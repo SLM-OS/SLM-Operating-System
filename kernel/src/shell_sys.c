@@ -5144,6 +5144,8 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_gmmu.h"
 #include "../gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../gpu/nvidia/ga10b_ce.h"
+#include "../gpu/nvidia/ga10b_cold.h"
+#include "boot_source.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
 #include "oplib_probe.h"
@@ -5646,6 +5648,42 @@ int cmd_nvgpu(int argc, char *argv[])
                         (int)b_p->state, b_p->last_error_phase);
         }
         return 0;
+    }
+
+    if (strcmp(argv[1], "cold") == 0) {
+        /* `nvgpu cold [step]` — cold bring-up after UEFI-direct boot
+         * (#1088). Runs every step up to `step` (default: all). Refused
+         * after kexec: it would re-power and reset the GPU state Linux
+         * left behind, killing the inherited channels. */
+        if (!boot_source_is_uefi()) {
+            shell_puts("nvgpu cold: only after a UEFI-direct boot (after "
+                       "kexec the GPU is inherited from Linux and this "
+                       "would reset it)\r\n");
+            return -1;
+        }
+        enum ga10b_cold_step last = (enum ga10b_cold_step)(GA10B_COLD_STEP_COUNT - 1);
+        if (argc >= 3) {
+            bool found = false;
+            for (int s = 1; s < GA10B_COLD_STEP_COUNT; s++) {
+                if (strcmp(argv[2], ga10b_cold_step_name((enum ga10b_cold_step)s)) == 0) {
+                    last = (enum ga10b_cold_step)s;
+                    found = true;
+                }
+            }
+            if (!found) {
+                shell_puts("usage: nvgpu cold [");
+                for (int s = 1; s < GA10B_COLD_STEP_COUNT; s++) {
+                    shell_printf("%s%s", s > 1 ? "|" : "",
+                                 ga10b_cold_step_name((enum ga10b_cold_step)s));
+                }
+                shell_puts("]\r\n");
+                return -1;
+            }
+        }
+        int rc = ga10b_cold_run(last);
+        shell_printf("cold: rc=%d done=%s\r\n", rc,
+                     ga10b_cold_step_name(ga10b_cold_progress()));
+        return rc;
     }
 
     if (strcmp(argv[1], "prepare") == 0) {

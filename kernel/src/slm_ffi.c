@@ -28,6 +28,7 @@
 #include <stdint.h>
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "boot_source.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
@@ -1031,20 +1032,42 @@ static int ensure_bringup(uint32_t kind)
     bool active_is_kind = (ga10b_bringup_active_pipeline_kind() == kind);
     if (channel_open && active_is_kind) return 0;
 
-    /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
-     * the progress lines' blocking UART writes dominated (#1037). */
-    ga10b_bringup_quiet_set(true);
-    uint64_t t0 = slm_get_time_ns();
-    int rc = ga10b_bringup_inherit(b);
-    uint64_t t1 = slm_get_time_ns();
-    g_bringup_step_ns[kind][0] = t1 - t0;
-    if (rc >= 0) {
-        rc = ga10b_bringup_channel_kind(b, kind);
+    uint64_t t2;
+    const struct ga10b_channel_handoff *local = ga10b_bringup_handoff();
+    if (active_is_kind && local != NULL && local->pipeline_n_ops > 0u &&
+        ga10b_bringup_handoff_is_local()) {
+        /* A pipeline handoff for this kind on a channel SLM-OS built
+         * itself (`nvgpu cold`, #1088) is installed: use it. The kexec
+         * inherit + DRAM scan below have nothing to find after a
+         * UEFI-direct boot, and inherit would reset this slot. */
+        b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+        b->last_error_phase = -1;
+        g_bringup_step_ns[kind][0] = 0;
+        g_bringup_step_ns[kind][1] = 0;
+        t2 = slm_get_time_ns();
+    } else if (boot_source_is_uefi()) {
+        /* After a UEFI-direct boot there is no Linux state to inherit:
+         * the inherit path would touch GPU blocks the cold bring-up may
+         * not have powered (an EL3 SError on Tegra234) and could adopt a
+         * stale helper handoff a warm reboot left in DRAM. Without a
+         * locally built pipeline for this kind, stay on the CPU. */
+        return -1;
+    } else {
+        /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
+         * the progress lines' blocking UART writes dominated (#1037). */
+        ga10b_bringup_quiet_set(true);
+        uint64_t t0 = slm_get_time_ns();
+        int rc = ga10b_bringup_inherit(b);
+        uint64_t t1 = slm_get_time_ns();
+        g_bringup_step_ns[kind][0] = t1 - t0;
+        if (rc >= 0) {
+            rc = ga10b_bringup_channel_kind(b, kind);
+        }
+        t2 = slm_get_time_ns();
+        g_bringup_step_ns[kind][1] = t2 - t1;
+        ga10b_bringup_quiet_set(false);
+        if (rc < 0) return rc;
     }
-    uint64_t t2 = slm_get_time_ns();
-    g_bringup_step_ns[kind][1] = t2 - t1;
-    ga10b_bringup_quiet_set(false);
-    if (rc < 0) return rc;
 
     int warmup_rc = ga10b_bringup_launch_kernel(b);
     g_bringup_step_ns[kind][2] = slm_get_time_ns() - t2;
@@ -1097,6 +1120,21 @@ static void consume_post_inherit_double_dispatch(uint32_t kind,
  * stay below as 1-line wrappers for backward compatibility with
  * existing Lua / Rust callers; new model integrations should
  * call the generic functions directly with the kind constant. */
+
+int slm_gpu_install_handoff(struct ga10b_bringup *b,
+                            const struct ga10b_channel_handoff *h)
+{
+    /* Validate (and log a rejection) before taking the lock: UART
+     * output under the IRQs-off dispatch lock is what #1037 removed. */
+    if (!b || !h || ga10b_validate_handoff(h) < 0) {
+        uart_puts("[gpu] install_handoff: invalid handoff\n");
+        return -1;
+    }
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    int rc = ga10b_bringup_install_handoff(b, h);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
+}
 
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
 {
