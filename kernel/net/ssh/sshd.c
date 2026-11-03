@@ -105,7 +105,7 @@ static uint16_t            g_listen_port;
 static WOLFSSH_CTX        *g_ctx;
 static struct sshd_conn    g_conns[SSHD_MAX_SESSIONS];
 
-/* All four counters mutate under g_mod_lock. Reads (via
+/* The counters below mutate under g_mod_lock. Reads (via
  * sshd_get_stats) are best-effort snapshots that don't lock; the
  * documented contract is that the values are advisory diagnostics, not
  * fenced observations. `volatile` keeps the compiler from CSE-ing the
