@@ -11,10 +11,12 @@
 
 /*
  * x86-64: Use QEMU isa-debug-exit device for test exit.
- * Port 0x501, writing (code << 1) | 1. QEMU exits with that value.
- * QEMU sees exit_code=0 → writes 0x01 → QEMU exits with code 1.
- * QEMU sees exit_code=1 → writes 0x03 → QEMU exits with code 3.
- * The test harness accounts for this mapping.
+ * Writing value V to port 0x501 makes QEMU exit with status (V << 1) | 1,
+ * so the kernel writes exit_code as-is:
+ *   exit_code=0 → writes 0x00 → QEMU exits with code 1 (Makefile: PASS).
+ *   exit_code=1 → writes 0x01 → QEMU exits with code 3 (Makefile: FAIL).
+ * Pre-encoding (code << 1) | 1 here doubled the shift, so an all-pass
+ * run exited 3 and `make test` reported failure (#237).
  */
 static inline void outb_x86(uint16_t port, uint8_t val)
 {
@@ -23,8 +25,7 @@ static inline void outb_x86(uint16_t port, uint8_t val)
 
 void semihosting_exit(int exit_code)
 {
-    /* isa-debug-exit at port 0x501: value = (exit_code << 1) | 1 */
-    outb_x86(0x501, (uint8_t)((exit_code << 1) | 1));
+    outb_x86(0x501, (uint8_t)exit_code);
     /* Fallback: halt if isa-debug-exit not present */
     for (;;)
         __asm__ volatile("hlt");

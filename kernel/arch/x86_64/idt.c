@@ -287,6 +287,20 @@ void idt_init(void)
     idt_set_gate(6,  isr_6,  IDT_TRAP_GATE);
     idt_set_gate(7,  isr_7,  IDT_TRAP_GATE);
     idt_set_gate(8,  isr_8,  IDT_TRAP_GATE);
+    /* #DF runs on the per-CPU IST1 stack (#237), now the only IST
+     * vector. If RSP is unusable (corrupted, non-canonical, or outside
+     * the mapped range), the CPU cannot push the first exception frame
+     * and raises #DF. On IST=0 that push fails too and the CPU
+     * triple-faults (silent reset, no diagnostic). IST1 gives
+     * exception_handler a good stack for the register dump. Ordinary
+     * task-stack overflow does not fault (task stacks have no guard
+     * page); the stack canary and schedule()'s SP check catch it.
+     * IST1 is safe here because exception_handler halts for every
+     * vector < 32 and never calls schedule(). TR must be loaded before
+     * a #DF can be delivered: gic_init() installs the BSP's TSS right
+     * after idt_init(), and ap_entry_64 installs each AP's before
+     * enabling interrupts. */
+    idt[8].ist = 1;
     idt_set_gate(9,  isr_9,  IDT_TRAP_GATE);
     idt_set_gate(10, isr_10, IDT_TRAP_GATE);
     idt_set_gate(11, isr_11, IDT_TRAP_GATE);
@@ -330,14 +344,16 @@ void idt_init(void)
     idt_set_gate(47, isr_47, IDT_INTERRUPT_GATE);
 
     /* Extended vectors (48-63) for LAPIC timer, IPIs, etc. */
+    /* LAPIC timer (48) and reschedule IPI (49) deliberately run on the
+     * interrupted task's stack (IST=0), NOT on IST1. Both handlers can
+     * call schedule() from the ISR, and switch_to saves the live RSP
+     * as the outgoing task's context. On IST1 that RSP points into the
+     * per-CPU IST stack, and the next timer IRQ on that CPU resets RSP
+     * to the IST1 top and overwrites the preempted task's frames. The
+     * schedule() SP-range guard panics on exactly this ("SP is outside
+     * current task's stack", #237). The per-CPU TSS + IST1 stack from
+     * A1 / P1-1 stay installed for future non-switching vectors. */
     idt_set_gate(48, isr_48, IDT_INTERRUPT_GATE);
-    /* LAPIC timer runs on IST1 so a stack-overflowing task cannot
-     * corrupt the timer ISR's frame. Requires tss_install_current_cpu()
-     * to have run on this CPU before interrupts are enabled. A1 / P1-1. */
-    idt[48].ist = 1;
-    /* Reschedule IPI (vector 49) shares IST1 with the timer — both
-     * are "preemption trigger" ISRs. B1 / P2-1. */
-    idt[49].ist = 1;
     idt_set_gate(49, isr_49, IDT_INTERRUPT_GATE);
     idt_set_gate(50, isr_50, IDT_INTERRUPT_GATE);
     idt_set_gate(51, isr_51, IDT_INTERRUPT_GATE);

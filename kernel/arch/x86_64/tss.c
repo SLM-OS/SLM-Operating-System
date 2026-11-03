@@ -5,14 +5,22 @@
  * interrupt-stack-table (IST) slots. When an interrupt vector with
  * IST > 0 fires, the CPU switches to the TSS's istN field before
  * pushing the exception frame, regardless of the current privilege
- * level. This makes the ISR stack independent of whatever task was
- * running when the interrupt arrived — a task-stack overflow can no
- * longer corrupt the ISR's frame.
+ * level. The handler's stack is therefore independent of the RSP the
+ * interrupted code was using, even when that RSP is unusable.
  *
- * We use IST1 for the LAPIC timer vector (48) and for the reschedule
- * IPI vector (0xF1 — installed in B1). All other vectors keep IST=0
- * so that synchronous exceptions (#PF, #GP, …) run on the current
- * task's kernel stack where callers expect them.
+ * IST1 is used only by #DF (vector 8). If RSP is unusable (corrupted,
+ * non-canonical, or outside the mapped range), the CPU cannot push the
+ * first exception frame and escalates to #DF. On IST=0 the #DF push
+ * fails the same way and the CPU triple-faults (silent reset); on IST1
+ * the register dump still prints. Ordinary task-stack overflow does
+ * not fault: task stacks have no guard page, so it is caught by the
+ * stack canary and schedule()'s SP-range check instead.
+ *
+ * The LAPIC timer (48) and reschedule IPI (49) originally used IST1
+ * too, but they can schedule() from the ISR, which must never happen
+ * on an IST stack, so #237 moved them to IST=0. All other vectors keep
+ * IST=0, so synchronous exceptions (#PF, #GP, ...) run on the current
+ * task's kernel stack.
  *
  * Design:
  *   - Each CPU has its own GDT (copied from the boot GDT at
@@ -40,7 +48,7 @@ struct tss64 {
     uint64_t rsp1;
     uint64_t rsp2;
     uint64_t reserved1;
-    uint64_t ist1;          /* IST1: timer + reschedule IPI */
+    uint64_t ist1;          /* IST1: #DF only (#237) */
     uint64_t ist2;
     uint64_t ist3;
     uint64_t ist4;

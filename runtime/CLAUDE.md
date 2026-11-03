@@ -74,6 +74,13 @@ This is a freestanding Rust crate. Key constraints:
 |-------|---------|-------|
 | `linked_list_allocator` | Global heap allocator | Requires `rust_heap_init()` call from C |
 | `bitflags` | Type-safe flag enums | For `MemFlags`, `ShmFlags` |
+| `libm` | `roundf` / `expf` etc. for `no_std` | Pinned exactly (`=0.2.16`): libm drift can re-trigger the x86-64 rustc "soften operand" ICE (#729). Bump together with `rust-toolchain.toml`. |
+
+The compiler itself is pinned by `rust-toolchain.toml` at the repo root
+(currently 1.94.1, with the `aarch64-unknown-none` and
+`x86_64-unknown-none` targets). `runtime/Cargo.lock` is committed
+(#1072), and the toolchain file plus the exact libm pin keep it from
+being re-resolved onto a version that re-triggers #729.
 
 ---
 

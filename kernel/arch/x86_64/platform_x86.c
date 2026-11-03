@@ -16,6 +16,7 @@
 #include "smp.h"
 #include "dtb.h"
 #include "uart.h"
+#include "x86_smp.h"
 #include "spinlock.h"
 #include "pmm.h"
 #include "sched.h"
@@ -35,8 +36,9 @@
  * opportunity.
  *
  * Vector 49: the idt.S stub is already in place (originally reserved
- * for "future SMP IPI"). Runs on IST1 so it cannot corrupt the
- * interrupted task's stack (A1 / P1-1).
+ * for "future SMP IPI"). Runs on the interrupted task's stack
+ * (IST=0): the handler calls schedule(), which must never run on an
+ * IST stack (#237).
  */
 #define RESCHED_VECTOR  49
 
@@ -269,12 +271,19 @@ static void delay_ms(uint32_t ms)
  */
 extern void tss_install_current_cpu(uint32_t cpu_id);
 
+/* See x86_smp.h. The frame pointer is 16-byte aligned exactly when
+ * RSP % 16 == 8 at function entry. */
+volatile uint32_t x86_ap_entry_misaligned;
+
 static void ap_entry_64(uint32_t logical_cpu_id)
 {
-    /* Install this AP's TSS + IST1 BEFORE any interrupt can fire.
-     * The shared IDT has LAPIC timer vector 48 flagged ist=1; without
-     * a loaded TR the first tick #TS-faults. Must run before
-     * timer_percpu_init() enables the local LAPIC timer. A1 / P1-1. */
+    if (((uintptr_t)__builtin_frame_address(0) & 15) != 0) {
+        __atomic_add_fetch(&x86_ap_entry_misaligned, 1, __ATOMIC_RELAXED);
+    }
+
+    /* Install this AP's TSS + IST1 BEFORE any interrupt can fire, so
+     * #DF (vector 8, the only IST vector since #237) has a loaded TR.
+     * A1 / P1-1. */
     tss_install_current_cpu(logical_cpu_id);
 
     /* Initialize per-CPU LAPIC */
@@ -728,11 +737,6 @@ void cache_flush_range(void *addr, size_t size)
 {
     (void)addr; (void)size;
 }
-
-/* ---- Lua shell stub (for Makefile.test builds without Lua library) ---- */
-#if !defined(SLM_INTEGRATED_BUILD) || !defined(__LUA_LINKED__)
-void __attribute__((weak)) lua_shell_init(void) {}
-#endif
 
 /* ---- VMM stats stub ---- */
 
