@@ -339,11 +339,12 @@ scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
     --console-port <ser2net TCP port from labctl> \
     --expected-ip <JETSON_IP> \
-    --expected-gateway <GATEWAY>
+    --expected-gateway <GATEWAY> \
+    --ping-target <GATEWAY>
 ```
 
 `<GATEWAY>` is the board's default gateway, as Linux on the board reports
-it (`ip route`). Pass both `--expected-*` flags: the script's built-in
+it (`ip route`). Pass all three address flags: the script's built-in
 defaults are fixed addresses from an earlier lab setup, not values read
 from labctl.
 
@@ -363,7 +364,7 @@ generic Jetson serial automation framework.
 Once work in SLM-OS is finished:
 
 ```bash
-labctl power cycle jetson-nano-1
+labctl power cycle <sbc>
 ```
 
 Wait for Linux to boot, then SSH is available again. A provisioned

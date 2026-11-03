@@ -89,7 +89,7 @@ the `boot_partition` numbers in `autoboot.txt` on sdc1. Then
 `reboot 0 tryboot` from Pi OS becomes the path that gets you back
 to Pi OS for one boot, and plain power-on lands on SLM-OS. To edit
 the file, either SSH into Pi OS and mount sdc1 (FAT32 at
-`/dev/mmcblk0p1`), or `labctl sdwire_to_host pi-5-1` and edit from
+`/dev/mmcblk0p1`), or `labctl sdwire host <sbc>` and edit from
 the dev host.
 
 ---
@@ -131,8 +131,8 @@ maintenance OS already on the board.
 ### 0. Get the card onto the host
 
 ```bash
-labctl power_off pi-5-1
-labctl sdwire_to_host pi-5-1
+labctl power off <sbc>
+labctl sdwire host <sbc>
 lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTUUID
 # Find the SLMOS card — it should show up as a ~29 GB disk with a
 # FAT32 partition labelled SLMOS. Note the /dev/sdX identifier.
@@ -291,9 +291,9 @@ sudo umount /mnt/sdc1 /mnt/sdc2 /mnt/sdc3 \
            /mnt/piosimg_boot /mnt/piosimg_root
 sudo losetup -d "$LOOPDEV"
 
-labctl sdwire_to_dut pi-5-1
-labctl power_on pi-5-1
-labctl serial_capture pi-5-1 --timeout 60 --until_pattern "raspberrypi login:"
+labctl sdwire dut <sbc>
+labctl power on <sbc>
+labctl serial capture <sbc> --timeout 60 --until "raspberrypi login:"
 ```
 
 On first boot, Pi OS:

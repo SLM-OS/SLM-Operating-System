@@ -73,17 +73,25 @@ make kernel PLATFORM=RASPI5
 
 Output: `build/kernel/slmos.bin`.
 
-### Step 2 — Flash (via `labctl sdwire_update`)
+### Step 2 — Flash (via `sdwire_update`)
 
-`sdwire_update` is the single tool that handles the power-off / switch-to-host / mount / copy / sync / unmount / switch-to-DUT sequence:
+`sdwire_update` is the single tool that handles the power-off / switch-to-host / mount / copy / sync / unmount / switch-to-DUT sequence. As an MCP call:
 
 ```
-labctl sdwire_update pi-5-1 \
-    --kernel build/kernel/slmos.bin \
-    --kernel-name kernel_2712.img
+sdwire_update(sbc_name="<sbc>", partition=1,
+              copies=["<abs path>/build/kernel/slmos.bin:kernel_2712.img"])
 ```
 
-The `--kernel-name` argument is required — the Pi 5 firmware looks for `kernel_2712.img` specifically, not `slmos.bin`. See `docs/archive/investigations/pi5-cross-cpu-dispatch-investigation.md:193` for the incident where a missing `--kernel-name` caused weeks of stale-binary boots that looked like real regressions.
+CLI equivalent:
+
+```
+labctl sdwire update <sbc> --partition 1 \
+    --copy build/kernel/slmos.bin:kernel_2712.img
+```
+
+The source path must be one labctl can read (its allowed read paths, or an uploaded image; `list_images` lists the options).
+
+The destination name matters: the Pi 5 firmware loads the file named by `kernel=` in `config.txt` (`kernel_2712.img` by default), not `slmos.bin`. Check `config.txt` first (`sdwire_cat`). See `docs/archive/investigations/pi5-cross-cpu-dispatch-investigation.md:193` for the incident where a wrong kernel file name caused weeks of stale-binary boots that looked like real regressions.
 
 ### Step 3 — Power on
 
@@ -142,14 +150,13 @@ image.
 
 ### `sdwire_update` fails with "SBC is powered on"
 
-labctl refuses to switch an SDWire to host mode while the SBC is drawing power, because SD-bus contention between the host and the SBC can corrupt the card. `sdwire_update` is supposed to power-off first, but in some edge cases (e.g. Kasa smart plug auth failure) the power-off silently fails. Manual fix:
+labctl refuses to switch an SDWire to host mode while the SBC is drawing power, because SD-bus contention between the host and the SBC can corrupt the card. `sdwire_update` powers the board off first; if that power-off fails (for example, the smart plug rejects labctl's authentication), it refuses before touching the card. Fix the power path, then retry:
 
-```
-labctl power off pi-5-1
-labctl sdwire_update pi-5-1 --kernel build/kernel/slmos.bin --kernel-name kernel_2712.img
-```
+1. Check the plug and board state: `labctl health-check --sbc <sbc>`, or MCP `run_health_check`.
+2. Power the board off: `labctl power off <sbc>`.
+3. Rerun the `sdwire_update` call from Step 2.
 
-If that still fails, `force=true` overrides the safety check — but verify the SBC is actually powered off first.
+Do not override the power check (`force`) unless the board is confirmed off by other means; that check is what protects the card from bus contention.
 
 ### SDWire block device changes (`/dev/sdc` → `/dev/sdd`)
 

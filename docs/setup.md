@@ -322,7 +322,7 @@ scripts/fetch-slm.sh
 # `slm-xload.py` reference client (drives the kernel-side
 # `slm xload` verb over the same telnet binary protocol that
 # `xput-bin` uses).
-labctl power_cycle jetson-nano-1
+labctl power cycle <sbc>    # <sbc>: the working Jetson (see docs/lab-operations.md)
 
 # <JETSON_IP> is the address labctl reports for the target Jetson.
 python3 scripts/tools/slm-xload.py <JETSON_IP> qwen \

@@ -173,15 +173,16 @@ Never drive the raw `sdwire` tool or `/dev/sd*` devices while labctl
 is managing the lab: several SDWire devices exist and manual access
 risks switching or writing the wrong card (see CLAUDE.md §"labctl Is
 the Only Hardware Interface"). For recovery when labctl itself is
-down, the raw `sdwire` tool (installed in labctl's venv, not on `PATH`)
-takes the device serial number recorded in labctl (`sdwire list` shows
-the serials of the attached devices):
+down, the raw `sdwire` tool takes the device serial number recorded in
+labctl (`sdwire list` shows the serials of the attached devices). It is
+installed in labctl's virtualenv, not on `PATH`; `head -1 "$(command -v
+labctl)"` shows that venv's Python, and `sdwire` sits beside it.
 
 ```bash
-sudo /opt/labctl/venv/bin/sdwire switch -s "<serial>" host  # SD to host (flashing)
-sudo /opt/labctl/venv/bin/sdwire switch -s "<serial>" dut   # SD to the board (booting)
-sudo /opt/labctl/venv/bin/sdwire state -s "<serial>"        # current state
-sudo /opt/labctl/venv/bin/sdwire list                       # all SDWire devices
+sudo <labctl venv>/bin/sdwire switch -s "<serial>" host  # SD to host (flashing)
+sudo <labctl venv>/bin/sdwire switch -s "<serial>" dut   # SD to the board (booting)
+sudo <labctl venv>/bin/sdwire state -s "<serial>"        # current state
+sudo <labctl venv>/bin/sdwire list                       # all SDWire devices
 ```
 
 **Note:** The SDWire block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check labctl `sdwire_discover` (or `sdwire list`) for the current device.
@@ -316,10 +317,10 @@ ssh root@<JETSON_IP> sync
 ssh root@<JETSON_IP> 'slmos-kexec /root/slmos.elf'
 
 # 4. Observe output via serial console
-labctl serial capture jetson-nano-1 --timeout 30
+labctl serial capture <sbc> --timeout 30
 
 # 5. Recover back to Linux (power cycle)
-labctl power cycle jetson-nano-1
+labctl power cycle <sbc>
 ```
 
 ### End-to-End Smoke Validation
@@ -331,11 +332,12 @@ scripts/tests/test-jetson-kexec-networking-smoke.sh \
     --ssh-target root@<JETSON_IP> \
     --console-port <ser2net TCP port from labctl> \
     --expected-ip <JETSON_IP> \
-    --expected-gateway <GATEWAY>
+    --expected-gateway <GATEWAY> \
+    --ping-target <GATEWAY>
 ```
 
 `<GATEWAY>` is the board's default gateway, as Linux on the board reports
-it (`ip route`). Pass both `--expected-*` flags: the script's built-in
+it (`ip route`). Pass all three address flags: the script's built-in
 defaults are fixed addresses from an earlier lab setup, not values read
 from labctl.
 
@@ -359,7 +361,7 @@ kills the CPU core. See GitHub issue #9 for root-cause analysis.
 
 After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
 
-1. `labctl power cycle jetson-nano-1` — power cycles back to Linux
+1. `labctl power cycle <sbc>` — power cycles back to Linux
 2. Wait for Linux to boot — about 65 s from power-on to the login
    prompt on `jetson-nano-2`. A board still silent well past that is
    most likely held in USB Force Recovery; see
