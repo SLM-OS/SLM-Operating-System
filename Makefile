@@ -149,12 +149,11 @@ EMBED_DEMO_SCRIPTS ?= ON
 # `make test`, its suites (test_sshd, test_passwd, test_host_key,
 # test_wolf_heap, test_sshd_autostart). NET_SSHD_AUTOSTART and
 # NET_SSHD_DEMO_ALLOW_ALL (docs/building.md) refine it. Unset leaves
-# CMake's defaults. All three are part of every build signature, so
-# toggling one reconfigures (#1068; EXTRA_KERNEL_CMAKE_ARGS does not).
+# CMake's defaults. Like every configure option they are part of the
+# build signatures, so toggling one reconfigures (#1068, #1072).
 NET_SSHD ?=
 NET_SSHD_AUTOSTART ?=
 NET_SSHD_DEMO_ALLOW_ALL ?=
-NET_SSHD_SIG := NET_SSHD=$(NET_SSHD);NET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART);NET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL)
 ifeq ($(EVICTION_MODELS),ON)
     # Model weights require the base eviction framework.
     DISABLE_EVICTION := OFF
@@ -261,10 +260,66 @@ all: kernel
 # AI_WEIGHTS only affects the build when AI_SCHED=ON, so omit it from the
 # signature otherwise — keeps signature-driven rebuild detection from
 # tripping on a no-op variable change in non-AI builds.
-AI_WEIGHTS_SIG := $(if $(filter ON,$(AI_SCHED)),AI_WEIGHTS=$(AI_WEIGHTS);,)
-KERNEL_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);$(AI_WEIGHTS_SIG)HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);HAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT);HAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);JETSON_HW_TICK=$(JETSON_HW_TICK);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS);JETSON_EL1_SMOKE=$(JETSON_EL1_SMOKE);HAILO_FW_BLOB=$(HAILO_FW_BLOB);SCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB);USER_HEF_BLOB=$(USER_HEF_BLOB);OPLIB_BLOB=$(OPLIB_BLOB);MNIST_DIGITS_DIR=$(MNIST_DIGITS_DIR);$(NET_SSHD_SIG)
-KERNEL_KEXEC_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);$(AI_WEIGHTS_SIG)HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);JETSON_HW_TICK=$(JETSON_HW_TICK);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS);$(NET_SSHD_SIG)
-KERNEL_TEST_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);$(AI_WEIGHTS_SIG)HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);HAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT);HAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);JETSON_HW_TICK=$(JETSON_HW_TICK);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS);$(NET_SSHD_SIG)
+# CMake configure arguments, defined once (#1072). Every kernel build
+# variant shares KERNEL_COMMON_CMAKE_ARGS; each adds its own flag. The
+# build signatures that decide when a build directory is reconfigured
+# are the full argument lists, so an option added here can't be left
+# out of one variant's signature (STAGE25_TRACE_PI5 and the blob paths
+# had drifted out of some). Recursive (=) so definition order below
+# doesn't matter.
+KERNEL_COMMON_CMAKE_ARGS = \
+	-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+	-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	-DPLATFORM=$(PLATFORM) \
+	$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON -DAI_WEIGHTS=$(AI_WEIGHTS)) \
+	$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
+	-DHAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT) \
+	-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
+	$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+	$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
+	$(KERNEL_PREEMPT_CMAKE_ARGS) \
+	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
+	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+	-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
+	$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+	$(if $(NET_SSHD),-DNET_SSHD=$(NET_SSHD)) \
+	$(if $(NET_SSHD_AUTOSTART),-DNET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART)) \
+	$(if $(NET_SSHD_DEMO_ALLOW_ALL),-DNET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL))
+
+# Firmware / model blobs and the EL1 smoke switch: main kernel only.
+KERNEL_BLOB_CMAKE_ARGS = \
+	$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
+	$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
+	$(if $(SCHEDULER_HEF_BLOB),-DSCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB)) \
+	$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
+	$(if $(OPLIB_BLOB),-DOPLIB_BLOB=$(OPLIB_BLOB)) \
+	$(if $(MNIST_DIGITS_DIR),-DMNIST_DIGITS_DIR=$(MNIST_DIGITS_DIR))
+
+KERNEL_CMAKE_ARGS         = $(KERNEL_COMMON_CMAKE_ARGS) $(KERNEL_BLOB_CMAKE_ARGS) $(EXTRA_KERNEL_CMAKE_ARGS)
+KERNEL_KEXEC_CMAKE_ARGS   = $(KERNEL_COMMON_CMAKE_ARGS) -DKEXEC_BUILD=1 $(EXTRA_KERNEL_CMAKE_ARGS)
+KERNEL_BZIMAGE_CMAKE_ARGS = $(KERNEL_COMMON_CMAKE_ARGS) -DBZIMAGE_BUILD=1 $(EXTRA_KERNEL_CMAKE_ARGS)
+KERNEL_TEST_CMAKE_ARGS    = $(KERNEL_COMMON_CMAKE_ARGS) -DENABLE_BOOT_TESTS=ON $(EXTRA_KERNEL_CMAKE_ARGS)
+
+KERNEL_BUILD_SIGNATURE         = $(strip $(KERNEL_CMAKE_ARGS))
+KERNEL_KEXEC_BUILD_SIGNATURE   = $(strip $(KERNEL_KEXEC_CMAKE_ARGS))
+KERNEL_BZIMAGE_BUILD_SIGNATURE = $(strip $(KERNEL_BZIMAGE_CMAKE_ARGS))
+KERNEL_TEST_BUILD_SIGNATURE    = $(strip $(KERNEL_TEST_CMAKE_ARGS))
+
+# Wipe and reconfigure a build directory when its signature changed.
+# $(call kernel_config_check,<label>,<build dir>,<signature>)
+define kernel_config_check
+	@sig='$(3)'; \
+	stamp="$(2)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "$(1) build options changed; reconfiguring $(2)"; \
+		rm -rf "$(2)"; \
+		mkdir -p "$(2)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
+endef
 
 # Check for stale file locks in build directories (Windows issue with
 # ungraceful QEMU/GDB termination). If we can't create slmos.elf, nuke the
@@ -298,16 +353,7 @@ check-kernel-test-build-dir:
 
 .PHONY: kernel-config-check
 kernel-config-check:
-	@sig='$(KERNEL_BUILD_SIGNATURE)'; \
-	stamp="$(KERNEL_BUILD_DIR)/.build-config"; \
-	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
-		:; \
-	else \
-		echo "Kernel build options changed; reconfiguring $(KERNEL_BUILD_DIR)"; \
-		rm -rf "$(KERNEL_BUILD_DIR)"; \
-		mkdir -p "$(KERNEL_BUILD_DIR)"; \
-		printf '%s\n' "$$sig" > "$$stamp"; \
-	fi
+	$(call kernel_config_check,Kernel,$(KERNEL_BUILD_DIR),$(KERNEL_BUILD_SIGNATURE))
 
 .PHONY: kernel
 kernel:
@@ -554,31 +600,7 @@ tfa-jetson-clean:
 $(KERNEL_BUILD_DIR)/Makefile:
 	@echo "Configuring kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \
-		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DPLATFORM=$(PLATFORM) \
-		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON -DAI_WEIGHTS=$(AI_WEIGHTS)) \
-		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
-		-DHAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT) \
-		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
-		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
-		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(KERNEL_PREEMPT_CMAKE_ARGS) \
-		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
-		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
-		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
-		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
-		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
-		$(if $(NET_SSHD),-DNET_SSHD=$(NET_SSHD)) \
-		$(if $(NET_SSHD_AUTOSTART),-DNET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART)) \
-		$(if $(NET_SSHD_DEMO_ALLOW_ALL),-DNET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL)) \
-		$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
-		$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
-		$(if $(SCHEDULER_HEF_BLOB),-DSCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB)) \
-		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
-		$(if $(OPLIB_BLOB),-DOPLIB_BLOB=$(OPLIB_BLOB)) \
-		$(if $(MNIST_DIGITS_DIR),-DMNIST_DIGITS_DIR=$(MNIST_DIGITS_DIR)) \
-		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 # kernel-kexec: X86_64-only parallel build of slmos.elf linked at
@@ -604,40 +626,12 @@ _kernel-kexec-build: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)
 
 .PHONY: kernel-kexec-config-check
 kernel-kexec-config-check:
-	@sig='$(KERNEL_KEXEC_BUILD_SIGNATURE)'; \
-	stamp="$(KERNEL_KEXEC_BUILD_DIR)/.build-config"; \
-	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
-		:; \
-	else \
-		echo "Kernel kexec build options changed; reconfiguring $(KERNEL_KEXEC_BUILD_DIR)"; \
-		rm -rf "$(KERNEL_KEXEC_BUILD_DIR)"; \
-		mkdir -p "$(KERNEL_KEXEC_BUILD_DIR)"; \
-		printf '%s\n' "$$sig" > "$$stamp"; \
-	fi
+	$(call kernel_config_check,Kernel kexec,$(KERNEL_KEXEC_BUILD_DIR),$(KERNEL_KEXEC_BUILD_SIGNATURE))
 
 $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 	@echo "Configuring kexec kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_KEXEC_BUILD_DIR) \
-		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DPLATFORM=$(PLATFORM) \
-		-DKEXEC_BUILD=1 \
-		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON -DAI_WEIGHTS=$(AI_WEIGHTS)) \
-		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
-		-DHAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT) \
-		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
-		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
-		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(KERNEL_PREEMPT_CMAKE_ARGS) \
-		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
-		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
-		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
-		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
-		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
-		$(if $(NET_SSHD),-DNET_SSHD=$(NET_SSHD)) \
-		$(if $(NET_SSHD_AUTOSTART),-DNET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART)) \
-		$(if $(NET_SSHD_DEMO_ALLOW_ALL),-DNET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL)) \
-		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(KERNEL_KEXEC_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-kexec-clean
@@ -730,8 +724,12 @@ endif
 	@flock --verbose $(KERNEL_BZIMAGE_BUILD_LOCK) \
 	    $(MAKE) --no-print-directory _kernel-bzimage-build
 
+.PHONY: kernel-bzimage-config-check
+kernel-bzimage-config-check:
+	$(call kernel_config_check,Kernel bzImage,$(KERNEL_BZIMAGE_BUILD_DIR),$(KERNEL_BZIMAGE_BUILD_SIGNATURE))
+
 .PHONY: _kernel-bzimage-build
-_kernel-bzimage-build: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+_kernel-bzimage-build: runtime kernel-bzimage-config-check $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 	@echo "Building kernel (bzImage variant)..."
 	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
 	@echo "Wrapping ELF as Linux bzImage..."
@@ -742,26 +740,7 @@ _kernel-bzimage-build: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 	@echo "Configuring bzImage kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BZIMAGE_BUILD_DIR) \
-		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DPLATFORM=$(PLATFORM) \
-		-DBZIMAGE_BUILD=1 \
-		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON -DAI_WEIGHTS=$(AI_WEIGHTS)) \
-		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
-		-DHAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT) \
-		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
-		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
-		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(KERNEL_PREEMPT_CMAKE_ARGS) \
-		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
-		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
-		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
-		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
-		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
-		$(if $(NET_SSHD),-DNET_SSHD=$(NET_SSHD)) \
-		$(if $(NET_SSHD_AUTOSTART),-DNET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART)) \
-		$(if $(NET_SSHD_DEMO_ALLOW_ALL),-DNET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL)) \
-		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(KERNEL_BZIMAGE_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-bzimage-clean
@@ -1436,40 +1415,12 @@ _kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check
 
 .PHONY: kernel-test-config-check
 kernel-test-config-check:
-	@sig='$(KERNEL_TEST_BUILD_SIGNATURE)'; \
-	stamp="$(KERNEL_TEST_BUILD_DIR)/.build-config"; \
-	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
-		:; \
-	else \
-		echo "Kernel test build options changed; reconfiguring $(KERNEL_TEST_BUILD_DIR)"; \
-		rm -rf "$(KERNEL_TEST_BUILD_DIR)"; \
-		mkdir -p "$(KERNEL_TEST_BUILD_DIR)"; \
-		printf '%s\n' "$$sig" > "$$stamp"; \
-	fi
+	$(call kernel_config_check,Kernel test,$(KERNEL_TEST_BUILD_DIR),$(KERNEL_TEST_BUILD_SIGNATURE))
 
 $(KERNEL_TEST_BUILD_DIR)/Makefile:
 	@echo "Configuring test kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_TEST_BUILD_DIR) \
-		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DPLATFORM=$(PLATFORM) \
-		-DENABLE_BOOT_TESTS=ON \
-		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON -DAI_WEIGHTS=$(AI_WEIGHTS)) \
-		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
-		-DHAILO_TRACE_PHASE_DEFAULT=$(HAILO_TRACE_PHASE_DEFAULT) \
-		-DHAILO_TRACE_MECH_DEFAULT=$(HAILO_TRACE_MECH_DEFAULT) \
-		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
-		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
-		$(KERNEL_PREEMPT_CMAKE_ARGS) \
-		$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
-		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
-		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
-		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
-		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
-		$(if $(NET_SSHD),-DNET_SSHD=$(NET_SSHD)) \
-		$(if $(NET_SSHD_AUTOSTART),-DNET_SSHD_AUTOSTART=$(NET_SSHD_AUTOSTART)) \
-		$(if $(NET_SSHD_DEMO_ALLOW_ALL),-DNET_SSHD_DEMO_ALLOW_ALL=$(NET_SSHD_DEMO_ALLOW_ALL)) \
-		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(KERNEL_TEST_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean
@@ -1505,8 +1456,22 @@ print-preempt-config:
 check-preempt-config:
 	@./scripts/check-preempt-config.sh
 
+# One line per kernel build variant: its build signature (#1072).
+# scripts/check-build-signatures.sh checks that toggling any configure
+# option changes every variant's signature, i.e. forces a reconfigure.
+.PHONY: print-build-signatures
+print-build-signatures:
+	@printf 'kernel=%s\n'         '$(KERNEL_BUILD_SIGNATURE)'
+	@printf 'kernel-kexec=%s\n'   '$(KERNEL_KEXEC_BUILD_SIGNATURE)'
+	@printf 'kernel-bzimage=%s\n' '$(KERNEL_BZIMAGE_BUILD_SIGNATURE)'
+	@printf 'kernel-test=%s\n'    '$(KERNEL_TEST_BUILD_SIGNATURE)'
+
+.PHONY: check-build-signatures
+check-build-signatures:
+	@./scripts/check-build-signatures.sh
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)
