@@ -581,6 +581,23 @@ __asm__ volatile("dsb ishst" ::: "memory");
 vmm_invalidate_tlb(virt_addr);
 ```
 
+**Unmapping a page that will be freed (#1070).** The order is unmap,
+invalidate, *then* free. Freeing first lets a stale TLB entry (or a
+speculative walk that cached the old leaf) reach a page the allocator
+has already given to someone else. `vmm_user_unmap_range()` does this
+for user pages with one TLB invalidate for the whole range. Its first
+pass clears only each leaf's valid bit, so the address and
+`PTE_SW_PMM_OWNED` stay in the ignored descriptor for the second pass,
+which frees the owned pages and zeroes the entries. `sys_munmap` and
+`sys_mmap`'s failure rollback use it, and `vmm_user_unmap_page()` is the
+one-page case. Before #1070 the rollback freed pages with no TLB
+invalidate at all, while the next `mmap` reused the same VAs.
+
+Page-table writes are also cleaned to PoC (`cache_clean_range`) before
+the invalidate, including the kernel 2 MB block map/unmap path. That
+matches the rest of `vmm.c`, because per-core caches on Pi 5 and
+Jetson aren't coherent.
+
 ### Test Coverage
 
 The VMM tests in `kernel/tests/test_vmm.c` include functional TLB tests that verify invalidation correctness:
@@ -590,9 +607,10 @@ The VMM tests in `kernel/tests/test_vmm.c` include functional TLB tests that ver
 3. **test_remap_with_range_invalidation** — Same test using `vmm_invalidate_tlb_range()`
 4. **test_sequential_remaps** — Remaps VA through PA1→PA2→PA3→PA1
 5. **test_rapid_remap_stress** — 50 rapid remap cycles with verification
-6. **test_public_remap_invalidates_tlb** — Exercises `vmm_unmap_block`/`vmm_map_block` through the public API without any caller-side TLB invalidation; confirms the public map API performs the TLB invalidation itself.
+6. **test_user_unmap_range_frees_after_flush** (#1070) — unmaps a user range with a hole; checks the -1 return, that every entry ends up zero and that the owned pages return to PMM
+7. **test_public_remap_invalidates_tlb** — Exercises `vmm_unmap_block`/`vmm_map_block` through the public API without any caller-side TLB invalidation; confirms the public map API performs the TLB invalidation itself.
 
-Tests 1-5 use helper functions to manipulate page tables without automatic TLB invalidation, proving that explicit invalidation is necessary and working. Test 6 validates that the public mapping API preserves this invariant internally.
+Tests 1-5 use helper functions to manipulate page tables without automatic TLB invalidation, proving that explicit invalidation is necessary and working. Test 7 validates that the public mapping API preserves this invariant internally.
 
 ---
 

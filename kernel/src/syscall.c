@@ -256,14 +256,14 @@ static int64_t sys_mmap_handler(struct trap_frame *frame)
     if (prot & PROT_EXEC)  vmm_flags |= VMM_FLAG_EXEC;
 
     /* Allocate + map each page. On any failure mid-loop, roll back
-     * by unmapping the partial range — vmm_user_unmap_page sees the
-     * PMM_OWNED bit and frees the leaf back to PMM. */
+     * by unmapping the partial range. vmm_user_unmap_range flushes the
+     * TLB before freeing the PMM_OWNED leaves: TTBR0 is live here and
+     * the next mmap reuses these VAs, so a stale entry would otherwise
+     * reach a freed page (#1070). */
     for (uint64_t i = 0; i < pages; i++) {
         void *page = pmm_alloc_pages(1);
         if (!page) {
-            for (uint64_t j = 0; j < i; j++) {
-                vmm_user_unmap_page(t->user_l1_pa, base_va + j * PAGE_SIZE);
-            }
+            (void)vmm_user_unmap_range(t->user_l1_pa, base_va, i);
             return -1;
         }
         memset(page, 0, PAGE_SIZE);
@@ -271,9 +271,7 @@ static int64_t sys_mmap_handler(struct trap_frame *frame)
         if (vmm_user_map_page(t->user_l1_pa, base_va + i * PAGE_SIZE,
                               (uint64_t)(uintptr_t)page, vmm_flags) != 0) {
             pmm_free_pages(page, 1);
-            for (uint64_t j = 0; j < i; j++) {
-                vmm_user_unmap_page(t->user_l1_pa, base_va + j * PAGE_SIZE);
-            }
+            (void)vmm_user_unmap_range(t->user_l1_pa, base_va, i);
             return -1;
         }
     }
@@ -287,10 +285,9 @@ static int64_t sys_mmap_handler(struct trap_frame *frame)
  *   x0 = addr (must be page-aligned, in the mmap window)
  *   x1 = len in bytes (rounded up to PAGE_SIZE)
  *
- * Returns 0 on success, -1 on validation failure. Each page is
- * unmapped and its PMM-owned leaf freed via vmm_user_unmap_page,
- * then the TLB is invalidated for the range so a subsequent EL0
- * access faults instead of hitting a stale entry.
+ * Returns 0 on success, -1 on validation failure. The range is
+ * unmapped with vmm_user_unmap_range: leaves invalidated, one TLB
+ * range invalidate, then the PMM-owned pages freed (#1070).
  */
 static int64_t sys_munmap_handler(struct trap_frame *frame)
 {
@@ -323,18 +320,10 @@ static int64_t sys_munmap_handler(struct trap_frame *frame)
      * partially-mapped range still has its installed pages freed,
      * and report a single -1 on any failure. The caller cannot
      * recover per-page rc anyway. */
-    int rc = 0;
-    for (uint64_t i = 0; i < pages; i++) {
-        if (vmm_user_unmap_page(t->user_l1_pa, addr + i * PAGE_SIZE) != 0) {
-            rc = -1;
-        }
-    }
-
-    /* The task's L1 is the active TTBR0_EL1 right now (we got here
-     * via SVC from EL0), so stale entries would shadow the unmap.
-     * Flush the range. */
-    vmm_invalidate_tlb_range(addr, addr + pages * PAGE_SIZE);
-    return rc;
+    /* The task's L1 is the active TTBR0_EL1 (we got here via SVC from
+     * EL0). vmm_user_unmap_range invalidates the leaves, flushes the
+     * range's TLB entries once, and only then frees the pages (#1070). */
+    return vmm_user_unmap_range(t->user_l1_pa, addr, pages);
 }
 
 /* SYS_TOUCH_BLOCK: Touch a model memory block (update LRU timestamp).

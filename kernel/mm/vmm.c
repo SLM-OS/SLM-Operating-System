@@ -383,6 +383,9 @@ static int vmm_map_block_locked(uint64_t virt, uint64_t phys, uint32_t flags)
     }
 
     l2[l2_idx] = make_block_desc(phys, flags);
+    /* Clean to PoC like every other page-table write in this file: on
+     * Pi 5 / Jetson the per-core caches aren't coherent (#1070). */
+    cache_clean_range(&l2[l2_idx], sizeof(uint64_t));
     vmm_state.blocks_mapped++;
 
     /* Ensure write is visible, then drop any stale TLB entry for this VA so
@@ -408,6 +411,7 @@ static int vmm_unmap_block_locked(uint64_t virt)
     }
 
     l2[l2_idx] = PTE_TYPE_INVALID;
+    cache_clean_range(&l2[l2_idx], sizeof(uint64_t));   /* see map (#1070) */
     vmm_state.blocks_mapped--;
 
     vmm_invalidate_tlb(virt);
@@ -982,53 +986,90 @@ void vmm_destroy_user_l1(uint64_t l1_pa)
     pmm_free_pages((void *)(uintptr_t)l1_pa, 1);
 }
 
-int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va)
+/*
+ * Walk a user L1 to the L3 entry for `va`. Returns NULL when `va` is
+ * outside the user window, not page-aligned, or an L1/L2 level is
+ * missing. The entry itself may be valid, zero, or invalidated by
+ * vmm_user_unmap_range's first pass.
+ */
+static uint64_t *user_l3_entry(uint64_t l1_pa, uint64_t va)
 {
     if (l1_pa == 0) {
-        return -1;
+        return NULL;
     }
     if (va < USER_VA_BASE || va >= USER_VA_LIMIT) {
-        return -1;
+        return NULL;
     }
     if ((va & (PAGE_SIZE - 1)) != 0) {
-        return -1;
+        return NULL;
     }
 
     uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
-    uint64_t l1_idx = L1_INDEX(va);
-    uint64_t l2_idx = L2_INDEX(va);
-    uint64_t l3_idx = L3_INDEX(va);
-
-    /* Walk L1 → L2 → L3. Any missing level means the VA isn't mapped. */
-    uint64_t l1_entry = user_l1[l1_idx];
+    uint64_t l1_entry = user_l1[L1_INDEX(va)];
     if ((l1_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
-        return -1;
+        return NULL;
     }
     uint64_t *l2 = (uint64_t *)(uintptr_t)(l1_entry & PTE_ADDR_MASK);
 
-    uint64_t l2_entry = l2[l2_idx];
+    uint64_t l2_entry = l2[L2_INDEX(va)];
     if ((l2_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
-        return -1;
+        return NULL;
     }
     uint64_t *l3 = (uint64_t *)(uintptr_t)(l2_entry & PTE_ADDR_MASK);
+    return &l3[L3_INDEX(va)];
+}
 
-    uint64_t l3_entry = l3[l3_idx];
-    if ((l3_entry & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
-        return -1;
+/*
+ * Unmap `pages` user pages from `va` with the break-before-free order
+ * the architecture needs (#1070): every leaf is made invalid first, one
+ * TLB invalidate covers the whole range, and only then are PMM-owned
+ * pages freed. Freeing before the invalidate let a stale TLB entry
+ * reach a page the allocator had already handed to someone else.
+ *
+ * The first pass clears only the descriptor's valid bit, so the
+ * address and PTE_SW_PMM_OWNED survive in the (now ignored) entry for
+ * the second pass. That keeps munmap of a large range at one TLB
+ * invalidate without storing the freed addresses anywhere.
+ */
+int vmm_user_unmap_range(uint64_t l1_pa, uint64_t va, uint64_t pages)
+{
+    int rc = 0;
+
+    if (pages == 0) {
+        return 0;
     }
 
-    /* Capture the leaf PA + ownership before clearing. */
-    uint64_t leaf_pa = l3_entry & PTE_ADDR_MASK;
-    bool pmm_owned = (l3_entry & PTE_SW_PMM_OWNED) != 0;
-
-    l3[l3_idx] = 0;
-    cache_clean_range(&l3[l3_idx], sizeof(uint64_t));
-
-    if (pmm_owned) {
-        pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t *e = user_l3_entry(l1_pa, va + i * PAGE_SIZE);
+        if (!e || (*e & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
+            rc = -1;
+            continue;
+        }
+        *e &= ~(uint64_t)PTE_TYPE_MASK;
+        cache_clean_range(e, sizeof(uint64_t));
     }
 
-    return 0;
+    vmm_invalidate_tlb_range(va, va + pages * PAGE_SIZE);
+
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t *e = user_l3_entry(l1_pa, va + i * PAGE_SIZE);
+        if (!e || *e == 0 || (*e & PTE_TYPE_MASK) != PTE_TYPE_INVALID) {
+            continue;
+        }
+        uint64_t leaf_pa = *e & PTE_ADDR_MASK;
+        bool pmm_owned = (*e & PTE_SW_PMM_OWNED) != 0;
+        *e = 0;
+        cache_clean_range(e, sizeof(uint64_t));
+        if (pmm_owned) {
+            pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+        }
+    }
+    return rc;
+}
+
+int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va)
+{
+    return vmm_user_unmap_range(l1_pa, va, 1);
 }
 
 /*
