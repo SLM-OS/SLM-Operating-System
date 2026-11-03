@@ -895,10 +895,11 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
         if candidates.is_empty() || stale_victims >= MAX_STALE_VICTIMS {
             // Every candidate is pinned or went stale under us, or
             // enough of them did that another consult (each can be a
-            // GPU dispatch since #1038) isn't worth it. A stale victim may have been FREED (not
-            // reallocated) by another CPU during the policy consult,
-            // so fall through to the retry — it reports the genuine
-            // OutOfMemory itself when the pool really is full.
+            // GPU dispatch since #1038) isn't worth it. A stale victim
+            // may have been FREED (not reallocated) by another CPU
+            // during the consult, so fall through to the retry — it
+            // reports the genuine OutOfMemory itself when the pool
+            // really is full.
             break;
         }
 
@@ -926,8 +927,8 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
         // captured at SNAPSHOT time. `MemoryPool::free`'s generation
         // check then rejects (`StaleHandle`) a slot that was freed and
         // reallocated while the lock was dropped for the policy call.
-        // A pin (`share`) or GPU map in that window leaves the
-        // generation intact, so `is_evictable` is re-checked too —
+        // A pin (`share`) in that window leaves the generation
+        // intact, so `is_evictable` is re-checked too —
         // `free` on a re-pinned block would silently steal the
         // sharer's reference. Only a free that actually reclaimed the
         // slot counts as an eviction.
