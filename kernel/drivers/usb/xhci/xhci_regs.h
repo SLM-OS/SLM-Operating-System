@@ -102,13 +102,24 @@
 #define XHCI_PORTSC_RW1CS_MASK      (XHCI_PORTSC_CSC | XHCI_PORTSC_PEC | \
                                      XHCI_PORTSC_PRC | XHCI_PORTSC_PLC)
 /*
- * Minimal "neutral write-back" subset for the PORTSC fields this driver
- * actually models. This intentionally excludes PED: on xHCI, carrying
- * bit 1 through a link-state write is not neutral.
+ * PORTSC "neutral" write-back (Linux xhci_port_state_to_neutral):
+ * keep the read-only and read/write-sticky fields (CCS, OCA, speed,
+ * DR; PLS, PP, PIC, WCE/WDE/WOE) and drop everything whose write has
+ * a side effect — PED (write 1 = disable the port), PR, LWS, and the
+ * RW1CS change bits. Every PORTSC read-modify-write starts from this
+ * value and ORs in only the bits it means to act on. Carrying PED
+ * through a reset-completion ack disabled the port the reset had just
+ * enabled (#1084).
  */
-#define XHCI_PORTSC_NEUTRAL_MASK    (XHCI_PORTSC_CCS | XHCI_PORTSC_PP | \
-                                     XHCI_PORTSC_PLS_MASK | \
-                                     XHCI_PORTSC_SPEED_MASK)
+#define XHCI_PORTSC_NEUTRAL_MASK    ((1u << 0) | (1u << 3) | (0xFu << 10) | \
+                                     (1u << 30) |                          \
+                                     (0xFu << 5) | (1u << 9) |             \
+                                     (0x3u << 14) | (0x7u << 25))
+
+static inline uint32_t xhci_portsc_neutral(uint32_t portsc)
+{
+    return portsc & XHCI_PORTSC_NEUTRAL_MASK;
+}
 
 /* PORTSC speed values (tegra-xusb reports 1 = full, 2 = low, 3 = high on USB 2). */
 #define XHCI_PORTSC_SPEED_FULL      1

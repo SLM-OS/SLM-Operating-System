@@ -320,6 +320,9 @@
 #define TEGRA_XUSB_PADCTL_BASE   0x03520000UL    /* UPHY/XUSB pad controller */
 #define TEGRA_XUDC_BASE          0x03550000UL    /* XUDC device controller */
 
+/* Tegra234 FUSE block (USB pad calibration words; #1084). */
+#define T234_FUSE_MMIO_BASE      0x03810000UL
+
 /*
  * Tegra234 camera subsystem MMIO bases. Verified at NS EL2 from the
  * #396 Phase 0 recon session on jetson-nano-1 (2026-04-25): all three

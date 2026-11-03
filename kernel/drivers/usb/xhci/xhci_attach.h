@@ -26,8 +26,10 @@
 #define XHCI_ATTACH_H
 
 #include "usb.h"
+#include "xhci_regs.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 enum xhci_attach_phase {
     XHCI_ATTACH_STALE = 0,
@@ -91,6 +93,32 @@ xhci_attach_step(enum xhci_attach_phase state,
 
     /* Unreachable — enum exhausted. Defensive: report disconnected. */
     return r;
+}
+
+/*
+ * Cold-boot root-port pick (#1084). After a UEFI-direct boot SLM-OS
+ * powers the controller up itself, so nothing on the bus has been
+ * enumerated by anyone this power cycle and there is no stale device to
+ * hide. A USB2 port that sees a device reports CCS=1 with PED=0 and no
+ * speed until software resets it (xHCI 1.2 §4.19.1.1), so the kexec
+ * scan, which keys on a decoded speed, finds nothing.
+ *
+ * Returns the lowest xHCI port index in [usb2_first, usb2_first +
+ * usb2_count) whose PORTSC has CCS set, or 0xFF if none does. On the
+ * Orin Nano developer kit that is the onboard hub on usb2-1.
+ */
+static inline uint8_t xhci_pick_cold_usb2_port(const uint32_t *portsc,
+                                               uint8_t nports,
+                                               uint8_t usb2_first,
+                                               uint8_t usb2_count)
+{
+    for (uint32_t p = usb2_first;
+         p < (uint32_t)usb2_first + usb2_count && p < nports; p++) {
+        if (portsc[p] & XHCI_PORTSC_CCS) {
+            return (uint8_t)p;
+        }
+    }
+    return 0xFF;
 }
 
 #endif /* XHCI_ATTACH_H */

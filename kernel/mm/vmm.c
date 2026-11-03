@@ -12,6 +12,7 @@
 #include "debug.h"
 #include "spinlock.h"
 #include "cache.h"
+#include "dtb.h"
 #include <stddef.h>
 
 /*
@@ -1415,6 +1416,77 @@ void vmm_dump(void)
  * RAM gets an L2 table for 2MB block mappings.
  * MMIO gets an L2 table with sparse device mappings.
  */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/* Tables for the firmware DTB outside the identity-mapped RAM. */
+#define VMM_DTB_L3_TABLES 2
+static uint64_t l2_fw_dtb[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t l3_fw_dtb[VMM_DTB_L3_TABLES][ENTRIES_PER_TABLE]
+    __attribute__((aligned(PAGE_SIZE)));
+
+/*
+ * Map the firmware-supplied DTB read-only when it lies outside the RAM
+ * the tables above identity-map (#1084).
+ *
+ * dtb_parse() runs before the MMU is enabled, so the boot-time parse
+ * reads the blob wherever it is. Later FDT lookups (dtb_get_blob()
+ * users: the xHCI handoff loaders, `dtb-dump`) run with the MMU on.
+ * After kexec Linux puts the DTB in low RAM, which is mapped; UEFI
+ * leaves it in BootServicesData near the top of DRAM (0x2679DF000 on
+ * jetson-nano-2), above the 0x240000000 limit of the RAM mapping, and
+ * a full tree walk there stopped the board with a RAS error instead of
+ * a clean fault.
+ *
+ * Pages are mapped at 4 KB granularity so no neighbouring firmware
+ * carveout is reachable through the new mapping. Up to two L3 tables
+ * cover a blob of up to 2 MB that straddles one 2 MB boundary; a blob
+ * that does not fit is left unmapped with a warning.
+ */
+static void vmm_map_firmware_dtb(void)
+{
+    const uint8_t *blob = (const uint8_t *)dtb_get_blob();
+    if (blob == NULL) {
+        return;
+    }
+
+    uint64_t start = (uint64_t)(uintptr_t)blob;
+    uint32_t total = ((uint32_t)blob[4] << 24) | ((uint32_t)blob[5] << 16) |
+                     ((uint32_t)blob[6] << 8)  |  (uint32_t)blob[7];
+    uint64_t first = start & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t last  = (start + total + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t l1_idx = L1_INDEX(first);
+
+    if (total == 0 || l1_table[l1_idx] != 0) {
+        return;     /* already covered by an identity mapping */
+    }
+
+    uint64_t first_l2 = first >> BLOCK_SHIFT;
+    uint64_t last_l2  = (last - 1) >> BLOCK_SHIFT;
+    if (L1_INDEX(last - 1) != l1_idx ||
+        last_l2 - first_l2 + 1 > VMM_DTB_L3_TABLES) {
+        WARN("vmm: firmware DTB at 0x%lx (+0x%x) too large to map",
+             (unsigned long)start, (unsigned)total);
+        return;
+    }
+
+    for (uint64_t pa = first; pa < last; pa += PAGE_SIZE) {
+        uint64_t t = (pa >> BLOCK_SHIFT) - first_l2;
+        l3_fw_dtb[t][L3_INDEX(pa)] = make_page_desc(pa, VMM_FLAG_READ);
+    }
+    for (uint64_t t = 0; t <= last_l2 - first_l2; t++) {
+        uint64_t l2_idx = L2_INDEX((first_l2 + t) << BLOCK_SHIFT);
+        l2_fw_dtb[l2_idx] = make_table_desc((uint64_t)(uintptr_t)l3_fw_dtb[t]);
+    }
+    l1_table[l1_idx] = make_table_desc((uint64_t)(uintptr_t)l2_fw_dtb);
+    vmm_state.l2_tables_used++;
+
+    /* Page tables are read by the walker from DRAM on secondary CPUs. */
+    cache_clean_range(l2_fw_dtb, sizeof(l2_fw_dtb));
+    cache_clean_range(l3_fw_dtb, sizeof(l3_fw_dtb));
+    DEBUG_PRINT("  firmware DTB 0x%lx..0x%lx mapped read-only (4 KB pages)",
+                (unsigned long)first, (unsigned long)last);
+}
+#endif
+
 static void vmm_setup_platform(void)
 {
     /* Note: VMM_FLAG_USER (AP[1]=1) causes QEMU MMU hang on virt platform
@@ -1625,6 +1697,18 @@ static void vmm_setup_platform(void)
         DEBUG_PRINT("  XUDC + padctl L2[%lu] mapped", (unsigned long)xudc_l2);
     }
 
+    /* FUSE block (0x03810000) in the 2 MB block at 0x03800000 (L2 idx
+     * 28). The UEFI-direct XUSB bring-up (#1084) reads the USB pad
+     * calibration words from it; on the kexec path Linux has already
+     * programmed the pads and nothing reads it. */
+    {
+        uint64_t fuse_blk = T234_FUSE_MMIO_BASE & ~(BLOCK_SIZE - 1);
+        uint64_t fuse_l2 = (fuse_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[fuse_l2] = make_block_desc(fuse_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  FUSE L2[%lu] mapped", (unsigned long)fuse_l2);
+    }
+
     /* Camera-subsystem MMIO blocks for the #396 Phase 0 reachability
      * probe: NVCSI receiver, RCE HSP (camera-rtcpu IPC mailbox + SS),
      * RCE PM (R5_CTRL + PWR_STATUS state probes), and the HSI2C
@@ -1710,6 +1794,8 @@ static void vmm_setup_platform(void)
                     (unsigned)(SYSRAM_BASE >> 30),
                     (unsigned long)(SYSRAM_BASE & ~(BLOCK_SIZE - 1)));
     }
+
+    vmm_map_firmware_dtb();
 #endif
 }
 #endif /* QEMU || JETSON */

@@ -11,7 +11,8 @@
  *     ExitBootServices.
  *
  * Drivers that depend on Linux-inherited state must not touch their
- * hardware after a UEFI-direct boot: on Tegra234 an access to an
+ * hardware after a UEFI-direct boot unless they first bring it up
+ * themselves (xhci_init does, via xusb_t234_cold.c, #1084): on Tegra234 an access to an
  * unpowered block is answered with an external abort that BL31 turns
  * into "Unhandled Exception in EL3", stopping the board. The power and
  * clock state can't be asked of BPMP instead — its MRQ_PG / MRQ_CLK

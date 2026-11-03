@@ -373,6 +373,71 @@ static void test_attach_is_idempotent(void)
     TEST_ASSERT_FALSE(c.transitioned);
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* PORTSC neutral write-back (#1084)                                           */
+/* -------------------------------------------------------------------------- */
+
+static void test_portsc_neutral_drops_ped(void)
+{
+    /*
+     * 0x00200e03 is PORTSC[5] on jetson-nano-2 at reset completion
+     * (CCS, PED, high speed, PRC). The ack built from it must not
+     * carry PED: writing 1 to PED disables the port, which left the
+     * hub at PED=0 / PLS=Polling right after every reset.
+     */
+    uint32_t sc = 0x00200e03u;
+    uint32_t ack = xhci_portsc_neutral(sc) | XHCI_PORTSC_PRC;
+    TEST_ASSERT_EQUAL_UINT32(0, ack & XHCI_PORTSC_PED);
+    TEST_ASSERT_EQUAL_UINT32(XHCI_PORTSC_PRC, ack & XHCI_PORTSC_RW1CS_MASK);
+    TEST_ASSERT_EQUAL_UINT32(0, ack & (XHCI_PORTSC_PR | XHCI_PORTSC_LWS));
+}
+
+static void test_portsc_neutral_keeps_power_and_sticky_bits(void)
+{
+    /* PP, PLS, PIC and the wake-enable bits are read/write-sticky:
+     * dropping them from a read-modify-write would power the port off
+     * or clear wake configuration. */
+    uint32_t sc = XHCI_PORTSC_PP | (7u << XHCI_PORTSC_PLS_SHIFT) |
+                  (0x3u << 14) | (0x7u << 25) | XHCI_PORTSC_CCS;
+    TEST_ASSERT_EQUAL_UINT32(sc, xhci_portsc_neutral(sc));
+}
+
+static void test_portsc_neutral_drops_every_change_bit(void)
+{
+    uint32_t sc = XHCI_PORTSC_RW1CS_MASK | XHCI_PORTSC_PP;
+    TEST_ASSERT_EQUAL_UINT32(XHCI_PORTSC_PP, xhci_portsc_neutral(sc));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Cold-boot root-port pick (#1084)                                            */
+/* -------------------------------------------------------------------------- */
+
+static void test_cold_pick_selects_connected_usb2_port_without_speed(void)
+{
+    /* PORTSC values seen after the UEFI-direct cold bring-up: SS port
+     * 0 linked (hub SuperSpeed half), USB2 port 5 (hub) and 6 (M.2 BT)
+     * connected but not yet reset (speed field 0). */
+    const uint32_t sc[8] = {
+        0x00021603u, 0x000002a0u, 0x000000a0u, 0x000000a0u,
+        0x000002a0u, 0x000202e1u, 0x000202e1u, 0x000002a0u,
+    };
+    TEST_ASSERT_EQUAL_UINT8(5, xhci_pick_cold_usb2_port(sc, 8, 4, 4));
+}
+
+static void test_cold_pick_ignores_superspeed_ports(void)
+{
+    const uint32_t sc[8] = { 0x00021603u, 0, 0, 0, 0x2a0u, 0x2a0u, 0x2a0u, 0x2a0u };
+    TEST_ASSERT_EQUAL_UINT8(0xFF, xhci_pick_cold_usb2_port(sc, 8, 4, 4));
+}
+
+static void test_cold_pick_bounded_by_port_count(void)
+{
+    const uint32_t sc[6] = { 0, 0, 0, 0, 0, 0 };
+    /* Range runs past nports: must not read beyond the array. */
+    TEST_ASSERT_EQUAL_UINT8(0xFF, xhci_pick_cold_usb2_port(sc, 6, 4, 4));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -390,6 +455,12 @@ int test_suite_xhci_device(void)
     RUN_TEST(test_portsc_unknown_speed_id);
     RUN_TEST(test_portsc_ignores_change_bits);
     RUN_TEST(test_portsc_null_output_safe);
+    RUN_TEST(test_portsc_neutral_drops_ped);
+    RUN_TEST(test_portsc_neutral_keeps_power_and_sticky_bits);
+    RUN_TEST(test_portsc_neutral_drops_every_change_bit);
+    RUN_TEST(test_cold_pick_selects_connected_usb2_port_without_speed);
+    RUN_TEST(test_cold_pick_ignores_superspeed_ports);
+    RUN_TEST(test_cold_pick_bounded_by_port_count);
     RUN_TEST(test_ctx_stride_matches_csz);
     RUN_TEST(test_ctx_dev_bytes);
     RUN_TEST(test_ctx_in_bytes);

@@ -6,7 +6,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 
 | Sub-capability | QEMU (ARM64) | QEMU (x86-64) | Pi 5 | Jetson | x86-64 HW |
 |---|---|---|---|---|---|
-| Wire interface | virtio-mmio | virtio-pci | Cadence MACB/GEM via RP1 | USB CDC-ECM over retained Tegra XHCI root-hub handoff | virtio-pci (QEMU); Realtek RTL8168 (#243) planned for HW |
+| Wire interface | virtio-mmio | virtio-pci | Cadence MACB/GEM via RP1 | USB CDC-ECM over Tegra XHCI (retained root-hub handoff after kexec; cold bring-up after UEFI-direct) | virtio-pci (QEMU); Realtek RTL8168 (#243) planned for HW |
 | Driver file | `kernel/drivers/virtio_net.c` | `kernel/drivers/virtio_net_pci.c` | `kernel/drivers/macb.c` | `kernel/usb/class/cdc_ecm.c` + `kernel/drivers/usb/xhci/*` | same as QEMU x86-64 for now |
 | Driver abstraction | `struct net_driver` | `struct net_driver` | `struct net_driver` | `struct net_driver` | `struct net_driver` |
 | IP stack | lwIP | lwIP | lwIP | lwIP | lwIP |
@@ -32,7 +32,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 ## Skipped / Blocked
 
 - **#25 — Jetson internal Ethernet path.** On the Super Developer Kit in the lab, the onboard RJ45 routes through a PCIe RTL8168 behind Tegra PCIe root complex C8, not an active EQOS path. No SLM-OS driver landed yet; see `docs/jetson-pcie-investigation.md` and `docs/archive/plans/networking-expansion-plan.md`.
-- **#266 — Jetson USB networking** is the shipped Jetson NIC path. Current path is USB CDC-ECM on the validated `jetson-nano-2` lab topology: retained root hub plus downstream RTL8153 after `kexec`. Generic multi-device USB-host work tracked in #384.
+- **#266 — Jetson USB networking** is the shipped Jetson NIC path. Current path is USB CDC-ECM on the validated `jetson-nano-2` lab topology: retained root hub plus downstream RTL8153 after `kexec`, or the same hub and RTL8153 freshly enumerated after a UEFI-direct boot, where SLM-OS powers XUSB up itself (#1084, `docs/deploy/jetson-uefi-direct.md`). Generic multi-device USB-host work tracked in #384.
 - **#384 — General USB host support beyond the current Jetson NIC path.** Follow-on to the landed Jetson CDC-ECM path: generic multi-device topology, hub traversal, hotplug, alternate settings, and class binding. Plan written at `docs/archive/plans/usb-host-generalization-plan.md`.
 - **#243 — x86-64 Realtek RTL8168/8111 driver for bare-metal.** Works under QEMU x86-64 (virtio-pci); the test-pc dev board has a Realtek NIC that would need a native driver. Not blocking the capstone narrative because QEMU x86-64 demonstrates the full stack.
 - **#247 — Pi 5 RP1 MSIX_CFG engine doesn't fire TLPs.** MACB IRQ handler is registered but never runs. MACB falls back to polling (same pattern as UART RX). Functional at 2-4 ms RTT; not a correctness issue. Affects every RP1 peripheral.

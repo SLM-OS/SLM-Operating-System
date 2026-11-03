@@ -33,6 +33,7 @@
 #include "debug.h"
 #include "timer.h"
 #include "spinlock.h"   /* dsb() */
+#include "boot_source.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -54,6 +55,7 @@
  */
 #define TEGRA_XUSB_USB2_PORT_OFFSET         4u
 #define TEGRA_XUSB_USB2_PORT_COUNT          4u
+#define XHCI_MAX_SCAN_PORTS                 16u
 #define XUSB_PADCTL_USB2_PAD_MUX           0x004u
 #define XUSB_PADCTL_USB2_PORT_CAP          0x008u
 #define XUSB_PADCTL_USB2_OTG_PADX_CTL0(x)  (0x088u + ((x) * 0x40u))
@@ -217,7 +219,7 @@ static bool xhci_inherited_slot1_matches_active_port(enum usb_speed speed)
 
 static uint32_t xhci_port_state_to_neutral(uint32_t portsc)
 {
-    return portsc & XHCI_PORTSC_NEUTRAL_MASK;
+    return xhci_portsc_neutral(portsc);
 }
 
 static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
@@ -802,6 +804,32 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (!xhci_live) return false;
     if (port != 0) return false;   /* Phase 3A: one logical port only. */
 
+    if (xhci_active_port == 0xFF && boot_source_is_uefi()) {
+        /* UEFI-direct (#1084): SLM-OS powered the controller up from
+         * cold, so a connected port is a fresh attach that still needs
+         * its first reset — there is no stale Linux device to hide. */
+        uint32_t sc[XHCI_MAX_SCAN_PORTS] = {0};
+        uint8_t n = xhci_caps_cached.max_ports;
+        if (n > XHCI_MAX_SCAN_PORTS) {
+            n = XHCI_MAX_SCAN_PORTS;
+        }
+        for (uint8_t p = 0; p < n; p++) {
+            sc[p] = xhci_op_r32(XHCI_OP_PORTSC(p));
+        }
+        uint8_t p = xhci_pick_cold_usb2_port(sc, n,
+                                             TEGRA_XUSB_USB2_PORT_OFFSET,
+                                             TEGRA_XUSB_USB2_PORT_COUNT);
+        if (p != 0xFF) {
+            xhci_active_port = p;
+            xhci_active_portsc = sc[p];
+            xhci_stale_portsc_initial = sc[p];
+            xhci_prereset_speed = USB_SPEED_UNKNOWN;
+            xhci_attach_state = XHCI_ATTACH_FRESH;
+            INFO("xhci: cold boot — device on USB2 PORTSC[%u]=0x%08x, "
+                 "enumerating", (unsigned)p, (unsigned)sc[p]);
+        }
+    }
+
     if (xhci_active_port == 0xFF) {
         xhci_active_port = xhci_locate_usb2_port();
         if (xhci_active_port == 0xFF) {
@@ -1235,20 +1263,19 @@ int xhci_hcd_port_reset(uint8_t port)
         portsc = xhci_ack_port_changes(pidx, portsc, "pre-reset cleanup");
 
         /*
-         * PORTSC write discipline per §5.4.8: read-modify-write, clear the
-         * RW1CS change bits we don't intend to touch (writing 1 would
-         * clear them), then set PR. The controller starts the reset and
-         * signals completion by setting PRC.
+         * PORTSC write discipline per §5.4.8: start from the neutral
+         * value (no RW1CS change bits, and no PED — writing 1 there
+         * disables the port), then set PR. The controller starts the
+         * reset and signals completion by setting PRC.
          */
-        uint32_t write = portsc & ~XHCI_PORTSC_RW1CS_MASK;
-        write |= XHCI_PORTSC_PR;
+        uint32_t write = xhci_port_state_to_neutral(portsc) | XHCI_PORTSC_PR;
         xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
 
         uint64_t start = timer_get_count();
         while (1) {
             uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
             if ((sc & XHCI_PORTSC_PRC) && !(sc & XHCI_PORTSC_PR)) {
-                uint32_t ack = (sc & ~XHCI_PORTSC_RW1CS_MASK) |
+                uint32_t ack = xhci_port_state_to_neutral(sc) |
                                XHCI_PORTSC_PRC |
                                ((sc & XHCI_PORTSC_PEC) ? XHCI_PORTSC_PEC : 0U) |
                                ((sc & XHCI_PORTSC_CSC) ? XHCI_PORTSC_CSC : 0U);
@@ -1791,14 +1818,14 @@ static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
         return;
     }
 
-    uint32_t off = portsc & ~(XHCI_PORTSC_PP | XHCI_PORTSC_RW1CS_MASK);
+    uint32_t off = xhci_port_state_to_neutral(portsc) & ~XHCI_PORTSC_PP;
     xhci_op_w32(XHCI_OP_PORTSC(pidx), off);
     uint64_t start = timer_get_count();
     uint64_t ticks = timer_get_frequency() / 20; /* 50 ms */
     while (timer_get_count() - start < ticks) { }
     uint32_t after_off = xhci_op_r32(XHCI_OP_PORTSC(pidx));
 
-    uint32_t on = (after_off & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PP;
+    uint32_t on = xhci_port_state_to_neutral(after_off) | XHCI_PORTSC_PP;
     xhci_op_w32(XHCI_OP_PORTSC(pidx), on);
     start = timer_get_count();
     while (timer_get_count() - start < ticks) { }
@@ -2165,13 +2192,34 @@ int xhci_hcd_device_open(struct usb_device *dev)
              (unsigned)dev->speed,
              (unsigned)dev->route_string);
     }
+    /*
+     * UEFI-direct (#1084): SLM-OS powered the controller up itself, so
+     * every device on the bus is freshly reset and in the Default
+     * state. Use the standard xHCI flow (§4.3.4): ADDRESS_DEVICE with
+     * BSR=0 lets the controller send SET_ADDRESS, and usb_core is told
+     * the assigned address so it does not send its own SET_ADDRESS
+     * control transfer (which an xHC must never see). The BSR=1 path
+     * and its retained-address probes below exist for devices Linux
+     * enumerated before kexec.
+     */
+    bool cold_address = boot_source_is_uefi();
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
-                   (1u << 9) |
+                   (cold_address ? 0u : (1u << 9)) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: ADDRESS_DEVICE(BSR=1) cc=%u", cc);
+        WARN("xhci: ADDRESS_DEVICE(BSR=%u) cc=%u", cold_address ? 0u : 1u, cc);
         goto err_slot;
+    }
+    if (cold_address) {
+        uint32_t dw3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+        dev->address = (uint8_t)(dw3 & XHCI_SLOT_DW3_ADDR_MASK);
+        dev->state = USB_STATE_ADDRESS;
+        INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=0, address %u)",
+             slot, (unsigned)dev->speed, d->root_port, (unsigned)dev->address);
+        xhci_log_devctx_snapshot(d, "post-address");
+        dev->hcd_private = d;
+        return 0;
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
          slot, (unsigned)dev->speed, d->root_port);
