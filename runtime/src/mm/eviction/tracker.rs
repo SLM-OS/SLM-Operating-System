@@ -88,6 +88,10 @@ impl EvictedContentTracker {
     pub fn window_ns(&self) -> u64 { self.window_ns }
 
     /// Record an eviction. Evicts the oldest entry if the FIFO is full.
+    ///
+    /// Called under mm::model_mem's IRQ-masking lock (#1093), so it must
+    /// never allocate: the deque is created at full capacity and pops
+    /// before it pushes once full. Keep it that way.
     pub fn record_eviction(
         &mut self,
         key: ContentKey,

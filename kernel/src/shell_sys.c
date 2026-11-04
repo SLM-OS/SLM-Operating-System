@@ -11635,10 +11635,10 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
             break;
         }
         if (rc == 0) {
-            int32_t mag = mc < 0 ? -mc : mc;
-            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=%s%d.%d",
+            uint32_t mag = mc < 0 ? 0u - (uint32_t)mc : (uint32_t)mc;
+            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=%s%u.%u",
                                thermal_zones[i].name, mc < 0 ? "-" : "",
-                               (int)(mag / 1000), (int)(mag % 1000 / 100));
+                               (unsigned)(mag / 1000u), (unsigned)(mag % 1000u / 100u));
         } else {
             n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=err%d",
                                thermal_zones[i].name, rc);
