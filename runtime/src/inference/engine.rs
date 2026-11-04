@@ -866,8 +866,10 @@ impl InferenceEngine {
     fn exec_add(&mut self, node: &GraphNode) -> Result<(), EngineError> {
         let a = self.resolve(&node.inputs[0])?;
         let b = self.resolve(&node.inputs[1])?;
-        // ONNX Add broadcasts both ways; ops::add broadcasts its second
-        // operand into the first, so put the larger tensor first.
+        // ops::add broadcasts its second operand into the first, so put
+        // the larger tensor first: a one-way broadcast in either
+        // direction works. A two-way broadcast ([3,1] + [1,4]) is
+        // rejected, and the output keeps the larger tensor's rank.
         let (a, b) = if b.num_elements() > a.num_elements() { (b, a) } else { (a, b) };
 
         // Output shape matches the larger input
@@ -1045,9 +1047,9 @@ impl InferenceEngine {
         let channels = input.dim(1) as usize;
 
         let a = &node.attrs;
-        // ops::maxpool2d has no padding or dilation.
-        if a.unsupported || a.dilations != [1, 1] || a.pads != [0; 4] ||
-           matches!(a.auto_pad, AutoPad::SameUpper | AutoPad::SameLower) {
+        // ops::maxpool2d has no padding or dilation. ONNX requires
+        // kernel_shape; strides without it is a malformed node.
+        if a.unsupported || a.dilations != [1, 1] || (a.has_strides && !a.has_kernel_shape) {
             return Err(EngineError::UnsupportedOp);
         }
         let (kh, kw, sh, sw) = if a.has_kernel_shape {
@@ -1063,6 +1065,17 @@ impl InferenceEngine {
         };
         if kh == 0 || kw == 0 || sh == 0 || sw == 0 {
             return Err(EngineError::ShapeMismatch);
+        }
+        // Padding (explicit, or SAME_*) is fine only when it resolves to
+        // zero, e.g. SAME_UPPER on 28 with a 2x2 / stride 2 window.
+        let ph = resolve_pads(a.auto_pad, (a.pads[0] as u32, a.pads[2] as u32),
+                              input.dim(2), kh, sh, 1)
+            .ok_or(EngineError::ShapeMismatch)?;
+        let pw = resolve_pads(a.auto_pad, (a.pads[1] as u32, a.pads[3] as u32),
+                              input.dim(3), kw, sw, 1)
+            .ok_or(EngineError::ShapeMismatch)?;
+        if ph != (0, 0) || pw != (0, 0) {
+            return Err(EngineError::UnsupportedOp);
         }
 
         // Same checked-subtraction pattern as exec_conv: a kh > input.dim(2)

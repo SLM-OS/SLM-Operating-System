@@ -928,6 +928,10 @@ mod tests {
         assert_eq!(resolve_pads(AutoPad::SameLower, (0, 0), 28, 4, 1, 1), Some((2, 1)));
         // Stride 2: out = ceil(7/2) = 4, need (4-1)*2 + 3 = 9, total 2.
         assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 7, 3, 2, 1), Some((1, 1)));
+        // A 2x2 / stride-2 pool on an even size needs none: MaxPool
+        // accepts SAME_* exactly when this is (0, 0).
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 2, 2, 1), Some((0, 0)));
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 27, 2, 2, 1), Some((0, 1)));
         // Explicit and VALID.
         assert_eq!(resolve_pads(AutoPad::NotSet, (1, 3), 28, 5, 1, 1), Some((1, 3)));
         assert_eq!(resolve_pads(AutoPad::Valid, (1, 3), 28, 5, 1, 1), Some((0, 0)));

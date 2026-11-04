@@ -640,7 +640,7 @@ extern "C" {
 /// Add: out = a + b, with broadcasting.
 ///
 /// Supports:
-/// - Same element count: element-wise (SIMD)
+/// - Same shape (ranks aligned, e.g. \[1, N\] + \[N\]): element-wise (SIMD)
 /// - Scalar broadcast: b is \[1\] → add b\[0\] to all elements (SIMD)
 /// - Row broadcast: b's only non-1 dimension is a's last one → add b to
 ///   each row of a (SIMD)
@@ -665,7 +665,10 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
         let outp = out.data_mut();
 
         if a_n == b_n {
-            // Same shape: element-wise SIMD
+            // Same shape (after aligning ranks): element-wise SIMD. An
+            // equal element count with another shape ([2,3] + [3,2]) is
+            // not a broadcast and is rejected.
+            broadcast_shape(a, b)?;
             add_elementwise_simd(ap, bp, outp, a_n);
         } else if b_n == 1 {
             // Scalar broadcast: SIMD
@@ -1643,5 +1646,11 @@ mod tests {
         assert!(add_shapes(&a, &[3, 4], &[1.0, 2.0], &[2]).is_err());
         assert!(add_shapes(&a, &[3, 4], &[1.0; 6], &[2, 3]).is_err());
         assert!(add_shapes(&a, &[3, 4], &[1.0; 4], &[2, 1, 2]).is_err());
+        // Equal element count is not enough.
+        let a6 = [0.0f32; 6];
+        assert!(add_shapes(&a6, &[2, 3], &a6, &[3, 2]).is_err());
+        assert!(add_shapes(&a6[..3], &[1, 3], &a6[..3], &[3, 1]).is_err());
+        // ... but a rank difference of leading 1s is.
+        assert!(add_shapes(&a6, &[2, 3], &a6, &[1, 2, 3]).is_ok());
     }
 }

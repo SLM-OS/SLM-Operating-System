@@ -48,7 +48,8 @@ The parser reads `kernel_shape`, `strides`, `pads`, `auto_pad`,
   `SAME_UPPER` or `SAME_LOWER`. SAME padding is resolved per the ONNX
   rule (`resolve_pads`).
 - MaxPool: `kernel_shape` and `strides`. `strides` defaults to 1 when it
-  is absent, as in the ONNX spec.
+  is absent, as in the ONNX spec. Padding (explicit or `SAME_*`) is
+  accepted only when it resolves to zero.
 
 The CPU kernels cannot do asymmetric padding, dilation, grouped
 convolution, pooling pads or `ceil_mode`. A node that needs one of those
@@ -65,7 +66,10 @@ wrong.
 `Add` broadcasts like NumPy / ONNX: same shape, a scalar, a trailing-axis
 bias, or any shape whose dimensions each equal the other tensor's or are
 1 (a Conv bias `[C, 1, 1]` on `[N, C, H, W]` is added per channel).
-Shapes that do not broadcast are rejected. The earlier fallback repeated
+Shapes that do not broadcast are rejected, including an equal element
+count in another shape (`[2, 3] + [3, 2]`). The broadcast is one-way in
+either direction (the smaller operand into the larger); a two-way
+broadcast such as `[3, 1] + [1, 4]` is rejected. The earlier fallback repeated
 the smaller tensor by flat index, which added a `[C, 1, 1]` bias by
 element position (#1086).
 
