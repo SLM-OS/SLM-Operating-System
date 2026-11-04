@@ -867,10 +867,13 @@ impl InferenceEngine {
         let a = self.resolve(&node.inputs[0])?;
         let b = self.resolve(&node.inputs[1])?;
         // ops::add broadcasts its second operand into the first, so put
-        // the larger tensor first: a one-way broadcast in either
-        // direction works. A two-way broadcast ([3,1] + [1,4]) is
-        // rejected, and the output keeps the larger tensor's rank.
-        let (a, b) = if b.num_elements() > a.num_elements() { (b, a) } else { (a, b) };
+        // the larger tensor first (on a tie, the higher rank: [N] +
+        // [1, N] gives [1, N], as in ONNX). A one-way broadcast in either
+        // direction works; a two-way broadcast ([3,1] + [1,4]) is
+        // rejected.
+        let swap = b.num_elements() > a.num_elements()
+            || (b.num_elements() == a.num_elements() && b.ndim > a.ndim);
+        let (a, b) = if swap { (b, a) } else { (a, b) };
 
         // Output shape matches the larger input
         let mut out_shape = [0u32; 8];
@@ -1387,9 +1390,7 @@ mod tests {
              [-6.5396, -6.3542, 8.3823, 0.5812, 9.9540,
               5.6430, -3.8846, 8.3275, 1.7407, -7.7055]),
         ];
-        if !crate::mm::model_mem::is_pool_initialized() {
-            crate::mm::model_mem::model_mem_init(16, 8).expect("model memory pools");
-        }
+        crate::mm::model_mem::ensure_pools_for_tests();
         registry::init();
         let idx = registry::load_model(b"mnist_ref_host", MNIST).expect("load mnist");
         for (rows, cols, want_argmax, want) in cases.iter() {

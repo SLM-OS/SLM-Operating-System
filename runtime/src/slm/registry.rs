@@ -746,15 +746,9 @@ pub(crate) fn reset_for_tests() {
 /// services the underlying page request via `std::alloc`.
 #[cfg(test)]
 pub(crate) fn ensure_mm_initialized_for_tests() {
-    use core::sync::atomic::AtomicBool;
-    static MM_INITED: AtomicBool = AtomicBool::new(false);
-    if !MM_INITED.load(Ordering::Acquire) {
-        // Idempotent on success; if a different test thread has
-        // already raced ahead the second call sees an already-
-        // initialized state and returns OK.
-        let _ = crate::mm::model_mem_init(64, 8);
-        MM_INITED.store(true, Ordering::Release);
-    }
+    // One shared once-guard for every host test that loads a model
+    // (the ONNX engine tests use it too).
+    crate::mm::model_mem::ensure_pools_for_tests();
 }
 
 // ---------------------------------------------------------------------------
