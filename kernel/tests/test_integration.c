@@ -1609,12 +1609,12 @@ static void test_msg_router_multi_subscriber(void)
  *
  * Caveat: mailboxes are single-slot. Because each publish_internal call
  * blocks on ack before returning, this test never has two unacked messages
- * in the SAME mailbox at once, so the single-slot overwrite issue isn't
- * exercised here. That case (back-to-back delivery to one mailbox with no
- * intervening ack) is a real limitation of the current design and is filed
- * as #869 for follow-up — explicitly NOT in scope for this
- * test. The assertion is about CROSS-MAILBOX priority comparison at receive
- * time, not within-mailbox queueing.
+ * in the SAME mailbox at once, so same-mailbox contention isn't exercised
+ * here. That case is covered by test_msg_router_same_mailbox_zero_loss:
+ * since #948 (fix for #869) a delivery to an unacked mailbox is refused and
+ * retried rather than overwriting the first message. The assertion here is
+ * about CROSS-MAILBOX priority comparison at receive time, not
+ * within-mailbox queueing.
  *
  * Acceptance: both publishers complete all N publishes with every message
  * acked (no starvation deadlock), subscriber receives exactly N hi + N lo,

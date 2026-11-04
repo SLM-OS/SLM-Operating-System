@@ -448,4 +448,4 @@ gh issue list --search "MPIDR"
 
 ---
 
-*Last updated: 3 November 2026*
+*Last updated: 4 November 2026*

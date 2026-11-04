@@ -200,7 +200,15 @@ broader hardware/networking generalization remains follow-on work.
 
 ---
 
-## Priority Recommendations
+## Priority Recommendations (end-of-capstone snapshot)
+
+This list records the priorities as set when the capstone ended (2026)
+and is kept as history; it is not maintained. Current priorities are the
+P-labels on GitHub issues in the `Backlog` milestone. Since the snapshot:
+item 1 shipped (synthetic and SLM-OS-fine-tuned scheduler weights,
+`AI_WEIGHTS=synthetic|real`, #61), item 3 shipped (#93), and item 7 is
+done on Jetson: GA10B compute works on both the kexec and the UEFI-direct
+path, without NVIDIA's runtime.
 
 **High priority:**
 1. Real AI scheduler weights — validates the AI-first thesis

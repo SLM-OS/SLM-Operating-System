@@ -196,17 +196,16 @@ static void test_priority_inheritance_basic(void)
 }
 
 /* ----------------------------------------------------------------------------
- * Regression test: pi_mutex wait loop does not deadlock (SCHED-H1)
+ * Regression test: repeated pi_mutex cycles do not deadlock (SCHED-H1)
  *
- * Exercises the IRQ-mask probe path in pi_mutex_lock's inner wait loop.
- * A realistic contended-waiter scenario (two runnable tasks, one holder
- * one waiter) depends on the scheduler handling priority inheritance
- * correctly under re-queue — which is a known limitation
- * (sleep queue rework is filed separately). Here we validate the
- * narrower SCHED-H1 claim: repeated trylock / unlock cycles run without
- * deadlocking on the mutex's guard or looping forever in the spin path.
- * Each iteration also calls yield() to let the scheduler interleave
- * other tasks, ensuring IRQ re-enable during the spin path is safe.
+ * Written for SCHED-H1's spin-and-yield wait loop, which #93 replaced
+ * with a sleep queue (contended waiters now block and are handed the
+ * mutex on unlock). The test still guards the uncontended paths:
+ * repeated trylock / unlock cycles, with a yield() between iterations so
+ * the scheduler interleaves other tasks, must not deadlock on the
+ * mutex's guard spinlock. It does not cover a contended waiter, nor
+ * whether the holder keeps its inherited priority across a re-queue
+ * (it does not today: #1103).
  * ---------------------------------------------------------------------------- */
 static void test_pi_mutex_wait_loop_stress(void)
 {

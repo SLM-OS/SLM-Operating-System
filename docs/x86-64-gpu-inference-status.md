@@ -466,8 +466,8 @@ the EL2+VHE workaround we already use for the rest of Jetson bringup
 is at a higher priv level than vfio-pci, so the range of potentially-
 accessible PLMs is broader.
 
-**Recommendation:** pursue this as the pragmatic
-way to actually reach GPU inference.
+**Recommendation:** pursue this as the pragmatic way to actually reach
+GPU inference.
 
 ### 4.2 Option B — **Bare-metal SLM-OS on x86-64**
 
