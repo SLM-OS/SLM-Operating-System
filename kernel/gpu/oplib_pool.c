@@ -302,6 +302,23 @@ int oplib_pool_stage_with_as(const struct oplib_gpu_as *as)
     return stage_common(as);
 }
 
+void oplib_pool_unstage(void)
+{
+    g_staged = false;
+    g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+    g_sass_pool_gpu_va = 0;
+    g_sass_pool_n_pages = 0;
+    g_sass_pool_base_phys = 0;
+    g_scratch_off = 0;
+    g_cbuf_phys = 0;
+    g_cbuf_gpu_va = 0;
+}
+
+size_t oplib_pool_sass_region_len(void)
+{
+    return (g_initialized && g_init_rc == 0) ? g_handle.sass_region_len : 0;
+}
+
 int oplib_pool_scratch_base(uint64_t *out_phys, uint64_t *out_gpu_va)
 {
     if (out_phys == NULL || out_gpu_va == NULL) {

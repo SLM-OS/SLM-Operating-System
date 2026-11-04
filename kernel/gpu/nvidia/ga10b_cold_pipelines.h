@@ -266,7 +266,9 @@ struct ga10b_cp_pipeline {
 /* Allocate, fill, clean and map every buffer of `spec` into `vm` (user
  * range, not GPU-L2 cacheable like the helpers' MAP_BUFFER_EX with flags
  * 0), write the baked QMD page per op, the v7 ops array and a zeroed QMD
- * pool, and invalidate the VM's TLB. Same failure policy as
+ * pool. The caller invalidates the VM's TLB (the channel has run, so the
+ * GPU may hold stale walks), under the dispatch lock when a dispatch can
+ * be in flight. Same failure policy as
  * ga10b_mnist_pipeline_build: pages allocated before a failure are
  * leaked, since some may already be mapped in the live VM. */
 int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,

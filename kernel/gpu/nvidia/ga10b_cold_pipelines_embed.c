@@ -15,11 +15,12 @@
 #include <stdint.h>
 
 #if defined(CONFIG_AI_SCHEDULER)
-/* kernel/sched/ai/ai_weights_mlp.c (or _real.c under AI_WEIGHTS=real),
- * declared in kernel/sched/ai/ai_weights.h, which is not on the kernel
- * include path. Read as bytes only. */
-extern const float ai_mlp_w0[], ai_mlp_b0[], ai_mlp_w1[], ai_mlp_b1[];
-extern const float ai_mlp_w2[], ai_mlp_b2[], ai_mlp_w3[], ai_mlp_b3[];
+/* kernel/sched/ai/ai_weights_mlp.c (or _real.c under AI_WEIGHTS=real).
+ * The sized declarations let ga10b_cold_pipeline_sources check them
+ * against the pipeline's layer shapes, so a change to the scheduler
+ * model's shape skips the GPU path instead of reading past an array.
+ * Read as bytes only. */
+#include "../../sched/ai/ai_weights.h"
 #endif
 
 static int shaders_from_oplib(const struct ga10b_cp_spec *s, struct ga10b_cp_sources *src)
@@ -57,6 +58,18 @@ int ga10b_cold_pipeline_sources(uint32_t kind, struct ga10b_cp_sources *src)
 #if defined(CONFIG_AI_SCHEDULER)
         const float *const w[8] = { ai_mlp_w0, ai_mlp_b0, ai_mlp_w1, ai_mlp_b1,
                                     ai_mlp_w2, ai_mlp_b2, ai_mlp_w3, ai_mlp_b3 };
+        const size_t have[8] = { sizeof(ai_mlp_w0), sizeof(ai_mlp_b0),
+                                 sizeof(ai_mlp_w1), sizeof(ai_mlp_b1),
+                                 sizeof(ai_mlp_w2), sizeof(ai_mlp_b2),
+                                 sizeof(ai_mlp_w3), sizeof(ai_mlp_b3) };
+        for (unsigned i = 0; i < 8u && i < s->n_weights; i++) {
+            if (have[i] != s->weights[i].bytes) {
+                WARN("sched-mlp-gpu: ai_mlp weight %u is %lu B, the pipeline "
+                     "expects %u B (model shape changed?)", i,
+                     (unsigned long)have[i], (unsigned)s->weights[i].bytes);
+                return -1;
+            }
+        }
         for (unsigned i = 0; i < 8u; i++) {
             src->weight[i] = (const uint8_t *)w[i];
         }
@@ -82,6 +95,26 @@ int ga10b_cold_pipeline_sources(uint32_t kind, struct ga10b_cp_sources *src)
 }
 
 static struct ga10b_cp_pipeline cold_pipes[GA10B_PIPELINE_KIND_COUNT];
+
+/* Make a built pipeline usable: drop stale GPU translations for its
+ * new mappings and store its handoff, together under the dispatch lock.
+ * `nvgpu cold` can re-run the step after boot while MNIST dispatches on
+ * the channel; an all-VA invalidate mid-dispatch can disturb PBDMA
+ * (#844), and ensure_bringup reads the store under the same lock. */
+struct publish_args {
+    const struct ga10b_gpu_ops *ops;
+    struct ga10b_vm *vm;
+    const struct ga10b_channel_handoff *h;
+    int inval_rc;
+};
+
+static int publish_locked(void *arg)
+{
+    struct publish_args *a = arg;
+    a->inval_rc = ga10b_vm_tlb_invalidate(a->ops, a->vm);
+    if (a->inval_rc != GA10B_CHAN_OK) return GA10B_CP_STORE_ERR_ARG;
+    return ga10b_cp_store_put(ga10b_cp_store_global(), a->h);
+}
 
 int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
                               uint32_t kind)
@@ -109,9 +142,11 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
 
     struct ga10b_channel_handoff h;
     ga10b_cp_fill_handoff(p, ch, &h);
-    rc = ga10b_cp_store_put(ga10b_cp_store_global(), &h);
+    struct publish_args pa = { .ops = ops, .vm = &ch->vm, .h = &h };
+    rc = slm_gpu_call_locked(publish_locked, &pa);
     if (rc != GA10B_CP_STORE_OK) {
-        WARN("%s-gpu: v7 handoff rejected (rc=%d)", s->name, rc);
+        WARN("%s-gpu: v7 handoff not published (rc=%d, invalidate rc=%d)",
+             s->name, rc, pa.inval_rc);
         return GA10B_CP_ERR_ARG;
     }
     INFO("%s-gpu: %u-op pipeline built (v7, kind %u, stored): ops 0x%lx, input 0x%lx "

@@ -180,6 +180,15 @@ int oplib_pool_stage_with_as(const struct oplib_gpu_as *as);
  * exists (not staged). */
 int oplib_pool_scratch_base(uint64_t *out_phys, uint64_t *out_gpu_va);
 
+/* Forget the staged pool so the next stage call starts over (the pages
+ * stay mapped and are not freed). For tests that stage into a fake
+ * address space; the kernel never unstages. */
+void oplib_pool_unstage(void);
+
+/* Bytes of SASS in the embedded library (0 before oplib_pool_init or
+ * for the stub library). */
+size_t oplib_pool_sass_region_len(void);
+
 /* Look up a SASS kernel's GPU VA by (op_kind, tier, dtype).
  *
  * On success returns 0 and *out_gpu_va / *out_size give the GPU virtual

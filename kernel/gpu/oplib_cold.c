@@ -29,6 +29,7 @@ static struct {
     struct oplib_cold_as_ctx as_ctx;
     struct oplib_gpu_as as;
     bool qmd_pool_added;        /* attach supplied the handoff's QMD pool */
+    bool staged;                /* SASS pool staged into the cold VM */
     bool wpool_built;           /* chunks allocated and mapped */
     bool wpool_valid;           /* ... and the TLB invalidated: usable */
     struct oplib_wpool wpool;
@@ -125,14 +126,26 @@ static int tlb_invalidate(void)
 }
 
 /* The built pool becomes usable once the GPU's TLB has dropped any
- * stale walk of its VA range. */
+ * stale walk of its VA range. Invalidate, publish and reset the bump
+ * allocator in one locked step, so slm_runtime_stage_weight (which runs
+ * under the dispatch lock) never sees the pool half-published. */
+static int wpool_publish_cb(void *ctx)
+{
+    int rc = g_cold.raw_tlb_invalidate(ctx);
+    if (rc == OPLIB_AS_OK) {
+        g_cold.wpool_valid = true;
+        oplib_weights_pool_reset();
+    }
+    return rc;
+}
+
 static int wpool_publish(void)
 {
-    if (tlb_invalidate() != OPLIB_AS_OK) {
+    if (slm_gpu_call_locked(wpool_publish_cb, g_cold.as.ctx) != OPLIB_AS_OK) {
+        uart_puts("[oplib-cold] TLB invalidate timed out — weights pool not "
+                  "published (retry `nvgpu oplib wpool`)\n");
         return -1;
     }
-    g_cold.wpool_valid = true;
-    oplib_weights_pool_reset();
     return 0;
 }
 
@@ -155,32 +168,11 @@ int oplib_cold_weights_pool_init(uint64_t bytes)
     return wpool_publish();
 }
 
-int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
-                      uint64_t weights_pool_bytes)
+/* Step 1 of attach: give the active handoff a QMD pool for
+ * slm_oplib_dispatch (the MNIST v7 handoff has one; a channel-only
+ * handoff does not) and re-install it under the dispatch lock. */
+static int attach_qmd_pool(const struct ga10b_channel_handoff *h)
 {
-    if (ops == NULL || ch == NULL || !ch->enabled) {
-        uart_puts("[oplib-cold] attach: channel not created/enabled\n");
-        return -1;
-    }
-    if (g_cold.attached) {
-        return g_cold.ch == ch ? 0 : -1;
-    }
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || !ga10b_bringup_handoff_is_local() ||
-        h->inst_block_phys != ch->inst.phys) {
-        uart_puts("[oplib-cold] attach: the channel's handoff is not the "
-                  "active one (install it first)\n");
-        return -1;
-    }
-
-    g_cold.ops = ops;
-    g_cold.ch = ch;
-    oplib_gpu_as_init_cold(&g_cold.as, &g_cold.as_ctx, ops, &ch->vm);
-    cold_lock_ops();
-
-    /* 1. QMD pool for slm_oplib_dispatch (the MNIST v7 handoff has
-     *    one; a channel-only handoff does not). The copy is
-     *    re-installed under the dispatch lock. */
     struct ga10b_channel_handoff copy = *h;
     int q = oplib_gpu_as_ensure_qmd_pool(&g_cold.as, &copy);
     if (q < 0) {
@@ -195,12 +187,14 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
         }
         g_cold.qmd_pool_added = true;
     }
+    return 0;
+}
 
-    /* From here on oplib_cold_active() is true, so every consumer
-     * routes to the cold VM and the ga10b_gmmu.c mapper is refused. */
-    g_cold.attached = true;
-
-    /* 2. SASS pool + scratch slots + cbuf. */
+/* Steps 2-5: SASS pool + scratch slots + cbuf (staging invalidates the
+ * TLB itself), optional weights pool, probe. Re-run by a later attach
+ * when staging failed. */
+static int attach_stage(uint64_t weights_pool_bytes)
+{
     int rc = oplib_pool_stage_with_as(&g_cold.as);
     if (rc < 0) {
         uart_printf("[oplib-cold] attach: SASS pool staging failed rc=%d\n", rc);
@@ -209,36 +203,64 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
         }
         return rc;
     }
+    g_cold.staged = true;
 
-    /* 3. Weights pool (optional; a failure leaves the CPU path for
-     *    weight-bearing ops, it does not fail the attach). */
-    if (weights_pool_bytes != 0) {
-        (void)wpool_build(weights_pool_bytes);
-    }
-
-    /* 4. One invalidate for everything mapped above: the channel (and
-     *    the MNIST pipeline) already ran, so the GPU has walked this
-     *    VM. Nothing dispatches before the probe below flips tiers. */
-    if (g_cold.wpool_built) {
-        if (wpool_publish() != 0) {
-            return -1;
-        }
-    } else if (tlb_invalidate() != OPLIB_AS_OK) {
+    /* Weights pool (optional; a failure leaves the CPU path for
+     * weight-bearing ops, it does not fail the attach). */
+    if (weights_pool_bytes != 0 && wpool_build(weights_pool_bytes) == 0) {
+        (void)wpool_publish();
+    } else if (g_cold.qmd_pool_added && tlb_invalidate() != OPLIB_AS_OK) {
         return -1;
     }
 
-    /* 5. Same static probe `nvgpu oplib stage` runs on the kexec path. */
+    /* Same static probe `nvgpu oplib stage` runs on the kexec path. */
     int simt = oplib_probe_run();
     uart_printf("[oplib-cold] attached to channel %u (inst 0x%llx): pool "
                 "gpu_va=0x%llx, cbuf 0x%llx, QMD pool %s, weights pool "
                 "%llu MB, %d ops at Simt\n",
-                (unsigned)ch->p.chid, (unsigned long long)ch->inst.phys,
+                (unsigned)g_cold.ch->p.chid, (unsigned long long)g_cold.ch->inst.phys,
                 (unsigned long long)oplib_pool_gpu_va_base(),
                 (unsigned long long)oplib_pool_cbuf_gpu_va(),
                 g_cold.qmd_pool_added ? "added" : "from handoff",
                 (unsigned long long)(g_cold.wpool_valid ? g_cold.wpool.size >> 20 : 0),
                 simt);
     return 0;
+}
+
+int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
+                      uint64_t weights_pool_bytes)
+{
+    if (ops == NULL || ch == NULL || !ch->enabled) {
+        uart_puts("[oplib-cold] attach: channel not created/enabled\n");
+        return -1;
+    }
+    if (g_cold.attached) {
+        if (g_cold.ch != ch) {
+            return -1;
+        }
+        /* A `nvgpu cold` retry after a failed staging stages again. */
+        return g_cold.staged ? 0 : attach_stage(weights_pool_bytes);
+    }
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || !ga10b_bringup_handoff_is_local() ||
+        h->inst_block_phys != ch->inst.phys) {
+        uart_puts("[oplib-cold] attach: the channel's handoff is not the "
+                  "active one (install it first)\n");
+        return -1;
+    }
+
+    g_cold.ops = ops;
+    g_cold.ch = ch;
+    oplib_gpu_as_init_cold(&g_cold.as, &g_cold.as_ctx, ops, &ch->vm);
+    cold_lock_ops();
+    if (attach_qmd_pool(h) != 0) {
+        return -1;
+    }
+
+    /* From here on oplib_cold_active() is true, so every consumer
+     * routes to the cold VM and the ga10b_gmmu.c mapper is refused. */
+    g_cold.attached = true;
+    return attach_stage(weights_pool_bytes);
 }
 
 void oplib_cold_status_print(void)

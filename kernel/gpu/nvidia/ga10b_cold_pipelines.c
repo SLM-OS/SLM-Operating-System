@@ -547,9 +547,6 @@ int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
     if ((rc = cp_stage_sources(ops, vm, spec, src, p)) != GA10B_CP_OK) return rc;
     if ((rc = cp_stage_ops(ops, vm, spec, p)) != GA10B_CP_OK) return rc;
     if ((rc = cp_stage_v7(ops, vm, spec, p)) != GA10B_CP_OK) return rc;
-
-    /* The channel has run already: drop stale GMMU translations. */
-    if (ga10b_vm_tlb_invalidate(ops, vm) != GA10B_CHAN_OK) return GA10B_CP_ERR_MAP;
     p->built = true;
     return GA10B_CP_OK;
 }

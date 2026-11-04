@@ -1178,7 +1178,6 @@ static int step_mnist(void)
  * failure fails the step. */
 static int step_policies(void)
 {
-    (void)ga10b_cold_pipeline_store_active();   /* MNIST's handoff, kind 0 */
     int rc_s = ga10b_cold_pipeline_build(&cold_gpu_ops, &cold_chan,
                                          GA10B_PIPELINE_KIND_SCHED_MLP);
     int rc_e = ga10b_cold_pipeline_build(&cold_gpu_ops, &cold_chan,
@@ -1188,6 +1187,9 @@ static int step_policies(void)
         WARN("ga10b-cold: operator library attach failed rc=%d - SLM ops stay on the CPU",
              rc_o);
     }
+    /* Store MNIST's handoff (kind 0) last: attach may re-install it with
+     * a QMD pool, and switching back to MNIST must restore that one. */
+    (void)ga10b_cold_pipeline_store_active();
     bool ok_s = rc_s == GA10B_CP_OK || rc_s == GA10B_CP_SKIP;
     bool ok_e = rc_e == GA10B_CP_OK || rc_e == GA10B_CP_SKIP;
     return (ok_s && ok_e) ? 0 : -1;

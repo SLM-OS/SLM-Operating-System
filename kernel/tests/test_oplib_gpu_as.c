@@ -231,6 +231,45 @@ static void test_stage_pool_multi_slot_sass(void)
     TEST_ASSERT_TRUE(maps_linear(sp.pool_gpu_va, sp.pool_phys, sp.pool_bytes));
 }
 
+/* oplib_pool_stage_with_as + oplib_pool_scratch_base with the embedded
+ * library in this address space: the scratch base it reports is the
+ * pool plus oplib_pool_scratch_off(SASS length), so scratch never
+ * overlaps SASS, and a failed staging is retried from scratch. With the
+ * stub library (no SASS extracted) there is nothing to stage. */
+static void test_pool_stage_with_as_scratch_base(void)
+{
+    reset();
+    TEST_ASSERT_EQUAL_INT(0, oplib_pool_init());
+    size_t len = oplib_pool_sass_region_len();
+    oplib_pool_unstage();
+    uint64_t phys = 0, va = 0;
+
+    if (len == 0) {
+        TEST_ASSERT_EQUAL_INT(0, oplib_pool_stage_with_as(&g_as));
+        TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, &va));
+        oplib_pool_unstage();
+        return;
+    }
+
+    /* First attempt: the pool allocation fails. */
+    g_fail_after = 0;
+    TEST_ASSERT_TRUE(oplib_pool_stage_with_as(&g_as) < 0);
+    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, &va));
+    /* Retry succeeds. */
+    g_fail_after = -1;
+    unsigned wr_before = g_wr32s;
+    TEST_ASSERT_EQUAL_INT(0, oplib_pool_stage_with_as(&g_as));
+    TEST_ASSERT_TRUE(g_wr32s > wr_before);            /* TLB invalidated */
+    TEST_ASSERT_EQUAL_INT(0, oplib_pool_scratch_base(&phys, &va));
+    uint64_t off = oplib_pool_scratch_off(len);
+    TEST_ASSERT_EQUAL_HEX64(oplib_pool_base_phys() + off, phys);
+    TEST_ASSERT_EQUAL_HEX64(oplib_pool_gpu_va_base() + off, va);
+    TEST_ASSERT_TRUE(va + OPLIB_POOL_OFF_SCRATCH0 >= oplib_pool_gpu_va_base() + len);
+    TEST_ASSERT_TRUE(maps_linear(va + OPLIB_POOL_OFF_SCRATCH0, phys + OPLIB_POOL_OFF_SCRATCH0,
+                                 3u * OPLIB_POOL_SLOT_BYTES));
+    oplib_pool_unstage();
+}
+
 /* ---- Scripted backend: map always fails ---- */
 
 static void *s_alloc(void *ctx, uint32_t n, uint64_t *phys) { return f_alloc(ctx, n, phys); }
@@ -396,6 +435,7 @@ int test_suite_oplib_gpu_as(void)
     RUN_TEST(test_stage_pool_layout);
     RUN_TEST(test_stage_pool_limits);
     RUN_TEST(test_stage_pool_multi_slot_sass);
+    RUN_TEST(test_pool_stage_with_as_scratch_base);
     RUN_TEST(test_failed_map_frees_only_when_safe);
     RUN_TEST(test_qmd_pool_for_channel_only_handoff);
     RUN_TEST(test_wpool_chunks_and_write);

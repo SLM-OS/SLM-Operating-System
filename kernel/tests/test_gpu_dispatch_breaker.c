@@ -175,6 +175,29 @@ static void test_breaker_resets_on_intermittent_success(void)
     TEST_ASSERT_FALSE(slm_gpu_dispatch_breaker_is_tripped());
 }
 
+/* slm_gpu_call_locked (#1092): runs the callback under the dispatch
+ * lock and returns its value; NULL is rejected. Re-entering the lock
+ * from the callback would deadlock, so the callback only records. */
+int slm_gpu_call_locked(int (*fn)(void *), void *arg);   /* ga10b_bringup.h */
+static int g_call_locked_hits;
+static int call_locked_cb(void *arg)
+{
+    g_call_locked_hits++;
+    return *(const int *)arg;
+}
+
+static void test_call_locked_runs_callback(void)
+{
+    int v = 42;
+    g_call_locked_hits = 0;
+    TEST_ASSERT_EQUAL_INT(42, slm_gpu_call_locked(call_locked_cb, &v));
+    v = -7;
+    TEST_ASSERT_EQUAL_INT(-7, slm_gpu_call_locked(call_locked_cb, &v));
+    TEST_ASSERT_EQUAL_INT(2, g_call_locked_hits);
+    TEST_ASSERT_EQUAL_INT(-1, slm_gpu_call_locked(NULL, &v));
+    TEST_ASSERT_EQUAL_INT(2, g_call_locked_hits);
+}
+
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 
 /*
@@ -429,6 +452,7 @@ int test_suite_gpu_dispatch_breaker(void)
     RUN_TEST(test_breaker_manual_reset_clears_tripped_state);
     RUN_TEST(test_breaker_continues_counting_past_threshold);
     RUN_TEST(test_breaker_resets_on_intermittent_success);
+    RUN_TEST(test_call_locked_runs_callback);
 #else
     RUN_TEST(test_breaker_stubs_on_non_jetson);
 #endif

@@ -1013,6 +1013,11 @@ static void report_quiet_bringup(uint32_t kind)
                 (unsigned long)(st[2] / 1000u));
 }
 
+/* Kinds that have had their warmup on the cold channel (UEFI-direct
+ * boot, #1092): later switches back to them skip it. Written and read
+ * under g_gpu_dispatch_lock. */
+static bool g_cold_warmed[GA10B_PIPELINE_KIND_COUNT];
+
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -1043,6 +1048,7 @@ static int ensure_bringup(uint32_t kind)
          * UEFI-direct boot, and inherit would reset this slot. */
         b->state = GA10B_BRINGUP_CHANNEL_OPEN;
         b->last_error_phase = -1;
+        g_cold_warmed[kind] = true;   /* warmed below */
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
@@ -1063,10 +1069,9 @@ static int ensure_bringup(uint32_t kind)
          * channel is already running, so a kind gets them on its first
          * install only: alternating sched / eviction / MNIST would
          * otherwise run three pipelines per user call with IRQs masked
-         * (#1092 review). Written under g_gpu_dispatch_lock. */
-        static bool cold_warmed[GA10B_PIPELINE_KIND_COUNT];
-        if (cold_warmed[kind]) return 0;
-        cold_warmed[kind] = true;
+         * (#1092 review). */
+        if (g_cold_warmed[kind]) return 0;
+        g_cold_warmed[kind] = true;
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
