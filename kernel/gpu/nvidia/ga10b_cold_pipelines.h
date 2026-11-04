@@ -184,7 +184,7 @@ extern const float ga10b_evict_mlp_b_out[1];
 
 /* Outputs (fp32 bit patterns) that differ from the reference by more
  * than `tol_ppm` parts per million of max(1, |want|), or are NaN/Inf
- * (or |x| >= 2^20). Integer-only. Used by `nvgpu cold check` to compare
+ * (or |x| >= 2^20). `tol_ppm` is capped at 1000000. Integer-only. Used by `nvgpu cold check` to compare
  * a GPU run on the synthetic input with the helpers' CPU reference. */
 uint32_t ga10b_cp_count_mismatch(const uint32_t *got, const uint32_t *want,
                                  uint32_t n, uint32_t tol_ppm);
@@ -259,6 +259,9 @@ struct ga10b_cp_pipeline {
 #define GA10B_CP_ERR_ARG      (-1)
 #define GA10B_CP_ERR_NOMEM    (-2)
 #define GA10B_CP_ERR_MAP      (-3)
+/* ga10b_cold_pipeline_build: the kind's shaders or weights are not in
+ * this build (logged); the kind stays on the CPU. Not an error. */
+#define GA10B_CP_SKIP         (-10)
 
 /* Allocate, fill, clean and map every buffer of `spec` into `vm` (user
  * range, not GPU-L2 cacheable like the helpers' MAP_BUFFER_EX with flags
@@ -294,6 +297,8 @@ void ga10b_cp_fill_handoff(const struct ga10b_cp_pipeline *p, const struct ga10b
 struct ga10b_cp_store {
     struct ga10b_channel_handoff h[GA10B_PIPELINE_KIND_COUNT];
     bool have[GA10B_PIPELINE_KIND_COUNT];
+    /* QMD-pool cursor each kind had when it was switched away from. */
+    uint32_t qmd_cursor[GA10B_PIPELINE_KIND_COUNT];
 };
 
 #define GA10B_CP_STORE_OK          0
@@ -324,6 +329,14 @@ int ga10b_cp_switch_handoff(const struct ga10b_cp_store *st, uint32_t kind,
                             const struct ga10b_channel_handoff *active,
                             struct ga10b_channel_handoff *out);
 
+/* Record `from_kind`'s QMD-pool cursor (it is being switched away from;
+ * ignored when out of range) and return the cursor `to_kind` left off
+ * at (0 the first time). Each kind has its own QMD pool, so restoring
+ * its cursor keeps the #558 rotation going instead of re-authoring
+ * slot 0 on every switch. */
+uint32_t ga10b_cp_store_swap_cursor(struct ga10b_cp_store *st, uint32_t from_kind,
+                                    uint32_t from_cursor, uint32_t to_kind);
+
 /* The kernel's store (the cold bring-up fills it). */
 struct ga10b_cp_store *ga10b_cp_store_global(void);
 
@@ -339,9 +352,10 @@ struct ga10b_bringup;
 int ga10b_cold_pipeline_sources(uint32_t kind, struct ga10b_cp_sources *src);
 
 /* Build `kind`'s pipeline on the cold channel and store its handoff
- * (not installed). Returns 0, -1 when its sources are unavailable, or a
- * negative GA10B_CP_ERR_* from the build. Each kind is built at most
- * once per boot. */
+ * (not installed). Returns 0 (also when it is already built: a
+ * `nvgpu cold` retry), GA10B_CP_SKIP when its sources are not in this
+ * build, or a negative GA10B_CP_ERR_* (build failure, or the store
+ * rejected the handoff). */
 int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
                               uint32_t kind);
 

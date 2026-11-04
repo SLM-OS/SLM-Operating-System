@@ -225,6 +225,8 @@ uint32_t ga10b_cp_count_mismatch(const uint32_t *got, const uint32_t *want,
                                  uint32_t n, uint32_t tol_ppm)
 {
     if (got == NULL || want == NULL) return n;
+    /* 100% at most: keeps tol_ppm * scale (scale < 2^40) below 2^60. */
+    if (tol_ppm > 1000000u) tol_ppm = 1000000u;
     uint32_t bad = 0;
     for (uint32_t i = 0; i < n; i++) {
         int64_t g, w;
@@ -240,7 +242,8 @@ uint32_t ga10b_cp_count_mismatch(const uint32_t *got, const uint32_t *want,
     return bad;
 }
 
-/* Monotonic unsigned key for fp32 ordering (NaN sorts past +Inf). */
+/* Monotonic unsigned key for fp32 ordering (a positive NaN sorts past
+ * +Inf, a negative one below -Inf). */
 static uint32_t cp_f32_key(uint32_t bits)
 {
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
@@ -352,8 +355,12 @@ static int alloc_map(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
 void ga10b_cp_free(const struct ga10b_gpu_ops *ops, struct ga10b_cp_pipeline *p)
 {
     if (!ops || !p) return;
-    for (unsigned i = 0; i < GA10B_CP_MAX_SHADERS; i++) ga10b_dma_free(ops, &p->shader[i]);
-    for (unsigned i = 0; i < GA10B_CP_MAX_WEIGHTS; i++) ga10b_dma_free(ops, &p->weight[i]);
+    for (unsigned i = 0; i < GA10B_CP_MAX_SHADERS; i++) {
+        ga10b_dma_free(ops, &p->shader[i]);
+    }
+    for (unsigned i = 0; i < GA10B_CP_MAX_WEIGHTS; i++) {
+        ga10b_dma_free(ops, &p->weight[i]);
+    }
     ga10b_dma_free(ops, &p->input);
     for (unsigned i = 0; i < GA10B_CP_MAX_OPS; i++) {
         ga10b_dma_free(ops, &p->qmd[i]);
@@ -399,38 +406,41 @@ void ga10b_cp_fill_op_v7(const struct ga10b_cp_pipeline *p, uint32_t op,
     o->shader_size_bytes = ga10b_mnist_round_page(p->sass_bytes[sh]);
 }
 
-int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
-                   const struct ga10b_cp_spec *spec,
-                   const struct ga10b_cp_sources *src, struct ga10b_cp_pipeline *p)
+/* Sizes and pointers in `spec` / `src` that ga10b_cp_build relies on. */
+static bool cp_inputs_valid(const struct ga10b_cp_spec *spec,
+                            const struct ga10b_cp_sources *src)
 {
-    if (!ops || !vm || !spec || !src || !p) return GA10B_CP_ERR_ARG;
     if (spec->n_shaders == 0u || spec->n_shaders > GA10B_CP_MAX_SHADERS ||
         spec->n_weights > GA10B_CP_MAX_WEIGHTS || spec->n_ops == 0u ||
         spec->n_ops > GA10B_CP_MAX_OPS || spec->input_bytes == 0u) {
-        return GA10B_CP_ERR_ARG;
+        return false;
     }
     for (unsigned i = 0; i < spec->n_shaders; i++) {
         if (!src->sass[i] || src->sass_bytes[i] == 0u ||
             src->sass_bytes[i] > GA10B_CP_SHADER_BUF_BYTES) {
-            return GA10B_CP_ERR_ARG;
+            return false;
         }
     }
     for (unsigned i = 0; i < spec->n_weights; i++) {
         const struct ga10b_cp_weight_desc *w = &spec->weights[i];
         if (!src->weight[i] || w->bytes == 0u ||
             (w->rows != 0u && (uint64_t)w->rows * w->cols * 4u != w->bytes)) {
-            return GA10B_CP_ERR_ARG;
+            return false;
         }
     }
     for (unsigned i = 0; i < spec->n_ops; i++) {
-        if (spec->ops[i].shader >= spec->n_shaders) return GA10B_CP_ERR_ARG;
+        if (spec->ops[i].shader >= spec->n_shaders) return false;
     }
-    if (src->input && src->input_bytes > spec->input_bytes) return GA10B_CP_ERR_ARG;
+    return !(src->input && src->input_bytes > spec->input_bytes);
+}
 
-    memset(p, 0, sizeof(*p));
-    p->spec = spec;
+/* Shaders, weights and the input buffer. */
+static int cp_stage_sources(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                            const struct ga10b_cp_spec *spec,
+                            const struct ga10b_cp_sources *src,
+                            struct ga10b_cp_pipeline *p)
+{
     int rc;
-
     /* Shaders: 64 KB, zero tail (common.c:542-568). */
     for (unsigned i = 0; i < spec->n_shaders; i++) {
         if ((rc = alloc_map(ops, vm, GA10B_CP_SHADER_BUF_BYTES, &p->shader[i],
@@ -461,10 +471,17 @@ int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
     }
     if (src->input) memcpy(p->input.cpu, src->input, src->input_bytes);
     ga10b_dma_clean(ops, &p->input);
+    return GA10B_CP_OK;
+}
 
-    /* Per op: QMD page, cbuf page, output buffer (sched.c:244-248,
-     * evict.c:385-389). alloc_pages hands out zeroed pages, which is
-     * the helpers' pre-zeroing (sched.c:351-356). */
+/* Per op: QMD page, cbuf page, output buffer (sched.c:244-248,
+ * evict.c:385-389), then the cbufs and the helper-baked QMDs.
+ * alloc_pages hands out zeroed pages, which is the helpers'
+ * pre-zeroing (sched.c:351-356). */
+static int cp_stage_ops(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                        const struct ga10b_cp_spec *spec, struct ga10b_cp_pipeline *p)
+{
+    int rc;
     for (unsigned i = 0; i < spec->n_ops; i++) {
         if ((rc = alloc_map(ops, vm, GA10B_CP_PAGE_BYTES, &p->qmd[i],
                             &p->qmd_va[i])) != GA10B_CP_OK ||
@@ -491,8 +508,15 @@ int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
                            d->block[0], d->block[1], d->block[2]);
         ga10b_dma_clean(ops, &p->qmd[i]);
     }
+    return GA10B_CP_OK;
+}
 
-    /* QMD pool (v7 addition; gpu_alloc_qmd_pool common.c:1092). */
+/* The v7 additions: QMD pool and the op array. */
+static int cp_stage_v7(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                       const struct ga10b_cp_spec *spec, struct ga10b_cp_pipeline *p)
+{
+    int rc;
+    /* QMD pool (gpu_alloc_qmd_pool common.c:1092). */
     if ((rc = alloc_map(ops, vm, GA10B_CP_QMD_POOL_SLOTS * GA10B_CP_QMD_SLOT_BYTES,
                         &p->qmd_pool, &p->qmd_pool_va)) != GA10B_CP_OK) {
         return rc;
@@ -507,6 +531,22 @@ int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
         ga10b_cp_fill_op_v7(p, i, &arr[i]);
     }
     ga10b_dma_clean(ops, &p->ops);
+    return GA10B_CP_OK;
+}
+
+int ga10b_cp_build(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                   const struct ga10b_cp_spec *spec,
+                   const struct ga10b_cp_sources *src, struct ga10b_cp_pipeline *p)
+{
+    if (!ops || !vm || !spec || !src || !p) return GA10B_CP_ERR_ARG;
+    if (!cp_inputs_valid(spec, src)) return GA10B_CP_ERR_ARG;
+
+    memset(p, 0, sizeof(*p));
+    p->spec = spec;
+    int rc;
+    if ((rc = cp_stage_sources(ops, vm, spec, src, p)) != GA10B_CP_OK) return rc;
+    if ((rc = cp_stage_ops(ops, vm, spec, p)) != GA10B_CP_OK) return rc;
+    if ((rc = cp_stage_v7(ops, vm, spec, p)) != GA10B_CP_OK) return rc;
 
     /* The channel has run already: drop stale GMMU translations. */
     if (ga10b_vm_tlb_invalidate(ops, vm) != GA10B_CHAN_OK) return GA10B_CP_ERR_MAP;
@@ -585,6 +625,14 @@ int ga10b_cp_switch_handoff(const struct ga10b_cp_store *st, uint32_t kind,
     }
     *out = *s;
     return GA10B_CP_STORE_OK;
+}
+
+uint32_t ga10b_cp_store_swap_cursor(struct ga10b_cp_store *st, uint32_t from_kind,
+                                    uint32_t from_cursor, uint32_t to_kind)
+{
+    if (!st) return 0;
+    if (from_kind < GA10B_PIPELINE_KIND_COUNT) st->qmd_cursor[from_kind] = from_cursor;
+    return to_kind < GA10B_PIPELINE_KIND_COUNT ? st->qmd_cursor[to_kind] : 0;
 }
 
 static struct ga10b_cp_store g_cp_store;

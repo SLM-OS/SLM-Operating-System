@@ -190,7 +190,9 @@ int oplib_wpool_build(const struct oplib_gpu_as *as, uint64_t request,
      * mapped chunks). Chunk-aligned so a chunk never straddles a PDE0
      * boundary more than it must. */
     uint64_t align = PAGE_BYTES;
-    while (align < chunk_bytes && align < (2ull << 20)) align <<= 1;
+    while (align < chunk_bytes && align < (2ull << 20)) {
+        align <<= 1;
+    }
     uint64_t base = as->reserve(as->ctx, want * chunk_bytes, align);
     if (base == 0) return OPLIB_AS_ERR_MAP;
 

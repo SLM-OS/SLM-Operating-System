@@ -211,8 +211,12 @@ static void fake_vas(struct ga10b_cp_vas *va)
 {
     memset(va, 0, sizeof(*va));
     va->input = 0x4100000ull;
-    for (unsigned i = 0; i < GA10B_CP_MAX_WEIGHTS; i++) va->weight[i] = 0x4200000ull + i * 0x10000ull;
-    for (unsigned i = 0; i < GA10B_CP_MAX_OPS; i++) va->output[i] = 0x4800000ull + i * 0x10000ull;
+    for (unsigned i = 0; i < GA10B_CP_MAX_WEIGHTS; i++) {
+        va->weight[i] = 0x4200000ull + i * 0x10000ull;
+    }
+    for (unsigned i = 0; i < GA10B_CP_MAX_OPS; i++) {
+        va->output[i] = 0x4800000ull + i * 0x10000ull;
+    }
 }
 
 static void test_cbuf_layouts(void)
@@ -438,7 +442,9 @@ static void make_sources(const struct ga10b_cp_spec *s, struct ga10b_cp_sources 
 {
     memset(src, 0, sizeof(*src));
     for (unsigned i = 0; i < 3; i++) {
-        for (unsigned k = 0; k < sizeof(g_sass[i]); k++) g_sass[i][k] = (uint8_t)(0x40u * i + k);
+        for (unsigned k = 0; k < sizeof(g_sass[i]); k++) {
+            g_sass[i][k] = (uint8_t)(0x40u * i + k);
+        }
     }
     static const uint32_t sizes[3] = { 2048, 2560, 2048 };
     for (unsigned i = 0; i < s->n_shaders; i++) {
@@ -811,6 +817,28 @@ static void test_store_real_handoffs(void)
     ga10b_vm_destroy(&g_cp_ops, &vm);
 }
 
+/* Each kind resumes its own QMD-pool cursor after a switch (#558). */
+static void test_store_swap_cursor(void)
+{
+    static struct ga10b_cp_store st;
+    memset(&st, 0, sizeof(st));
+    const uint32_t M = GA10B_PIPELINE_KIND_MNIST;
+    const uint32_t S = GA10B_PIPELINE_KIND_SCHED_MLP;
+    const uint32_t E = GA10B_PIPELINE_KIND_EVICTION_QNET;
+    /* First visit of a kind starts at slot 0. */
+    TEST_ASSERT_EQUAL_UINT32(0, ga10b_cp_store_swap_cursor(&st, M, 40, S));
+    TEST_ASSERT_EQUAL_UINT32(0, ga10b_cp_store_swap_cursor(&st, S, 9, E));
+    /* Back to MNIST: where it left off, not 0. */
+    TEST_ASSERT_EQUAL_UINT32(40, ga10b_cp_store_swap_cursor(&st, E, 18, M));
+    TEST_ASSERT_EQUAL_UINT32(9, ga10b_cp_store_swap_cursor(&st, M, 48, S));
+    TEST_ASSERT_EQUAL_UINT32(18, ga10b_cp_store_swap_cursor(&st, S, 17, E));
+    TEST_ASSERT_EQUAL_UINT32(48, ga10b_cp_store_swap_cursor(&st, E, 27, M));
+    /* Unknown outgoing kind (nothing local was active) records nothing. */
+    TEST_ASSERT_EQUAL_UINT32(17, ga10b_cp_store_swap_cursor(&st, GA10B_PIPELINE_KIND_COUNT, 999, S));
+    TEST_ASSERT_EQUAL_UINT32(0, ga10b_cp_store_swap_cursor(&st, S, 1, GA10B_PIPELINE_KIND_COUNT));
+    TEST_ASSERT_EQUAL_UINT32(0, ga10b_cp_store_swap_cursor(NULL, S, 1, M));
+}
+
 /* `nvgpu cold check` compares a GPU run with the CPU reference. fp32
  * values are written as bit patterns: kernel tests build with
  * -mgeneral-regs-only. */
@@ -841,6 +869,9 @@ static void test_check_helpers(void)
     got[3] = 0x7F800000u;  /* +Inf */
     TEST_ASSERT_EQUAL_UINT32(2, ga10b_cp_count_mismatch(got, want, 4, 1000u));
     TEST_ASSERT_EQUAL_UINT32(4, ga10b_cp_count_mismatch(NULL, want, 4, 1000u));
+    /* A huge tolerance is capped at 100%, not wrapped: -200.3 vs -200
+     * still passes, and an Inf still fails. */
+    TEST_ASSERT_EQUAL_UINT32(1, ga10b_cp_count_mismatch(got, want, 4, 0xFFFFFFFFu));
     /* The eviction reference against itself and a neighbour 1 ULP off. */
     const uint32_t ev = GA10B_CP_EVICT_EXPECTED_SCORE;
     const uint32_t ev1 = GA10B_CP_EVICT_EXPECTED_SCORE + 1u;
@@ -868,5 +899,6 @@ int test_suite_ga10b_cold_pipelines(void)
     RUN_TEST(test_store_and_switch);
     RUN_TEST(test_store_real_handoffs);
     RUN_TEST(test_check_helpers);
+    RUN_TEST(test_store_swap_cursor);
     return UnityEnd();
 }

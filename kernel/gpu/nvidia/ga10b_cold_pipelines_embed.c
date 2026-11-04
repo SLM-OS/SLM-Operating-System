@@ -57,7 +57,9 @@ int ga10b_cold_pipeline_sources(uint32_t kind, struct ga10b_cp_sources *src)
 #if defined(CONFIG_AI_SCHEDULER)
         const float *const w[8] = { ai_mlp_w0, ai_mlp_b0, ai_mlp_w1, ai_mlp_b1,
                                     ai_mlp_w2, ai_mlp_b2, ai_mlp_w3, ai_mlp_b3 };
-        for (unsigned i = 0; i < 8u; i++) src->weight[i] = (const uint8_t *)w[i];
+        for (unsigned i = 0; i < 8u; i++) {
+            src->weight[i] = (const uint8_t *)w[i];
+        }
         src->input = (const uint8_t *)ga10b_cp_sched_input_synth;
         src->input_bytes = (uint32_t)sizeof(ga10b_cp_sched_input_synth);
 #else
@@ -69,7 +71,9 @@ int ga10b_cold_pipeline_sources(uint32_t kind, struct ga10b_cp_sources *src)
                                     ga10b_evict_mlp_w_l2, ga10b_evict_mlp_b_l2,
                                     ga10b_evict_mlp_w_l3, ga10b_evict_mlp_b_l3,
                                     ga10b_evict_mlp_w_out, ga10b_evict_mlp_b_out };
-        for (unsigned i = 0; i < 8u; i++) src->weight[i] = (const uint8_t *)w[i];
+        for (unsigned i = 0; i < 8u; i++) {
+            src->weight[i] = (const uint8_t *)w[i];
+        }
         /* Row 0 = the synthetic vector (evict.c:316-318). */
         src->input = (const uint8_t *)ga10b_cp_evict_input_synth;
         src->input_bytes = (uint32_t)sizeof(ga10b_cp_evict_input_synth);
@@ -85,13 +89,16 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
     const struct ga10b_cp_spec *s = ga10b_cp_spec_for_kind(kind);
     if (!ops || !ch || !ch->enabled || !s) return GA10B_CP_ERR_ARG;
     struct ga10b_cp_pipeline *p = &cold_pipes[kind];
+    if (p->built && ga10b_cp_store_get(ga10b_cp_store_global(), kind) != NULL) {
+        return GA10B_CP_OK;   /* `nvgpu cold` re-running the step */
+    }
     if (p->built) {
-        WARN("%s-gpu: pipeline already built", s->name);
+        WARN("%s-gpu: built but not stored (earlier store failure)", s->name);
         return GA10B_CP_ERR_ARG;
     }
 
     struct ga10b_cp_sources src;
-    if (ga10b_cold_pipeline_sources(kind, &src) != 0) return -1;
+    if (ga10b_cold_pipeline_sources(kind, &src) != 0) return GA10B_CP_SKIP;
 
     int rc = ga10b_cp_build(ops, &ch->vm, s, &src, p);
     if (rc != GA10B_CP_OK) {
@@ -105,7 +112,7 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
     rc = ga10b_cp_store_put(ga10b_cp_store_global(), &h);
     if (rc != GA10B_CP_STORE_OK) {
         WARN("%s-gpu: v7 handoff rejected (rc=%d)", s->name, rc);
-        return -1;
+        return GA10B_CP_ERR_ARG;
     }
     INFO("%s-gpu: %u-op pipeline built (v7, kind %u, stored): ops 0x%lx, input 0x%lx "
          "(%u B), result 0x%lx (%u B), QMD pool 0x%lx (%u slots)",
@@ -133,5 +140,11 @@ int ga10b_cold_pipeline_install(struct ga10b_bringup *b, uint32_t kind)
         ga10b_bringup_handoff_is_local() ? ga10b_bringup_handoff() : NULL;
     int rc = ga10b_cp_switch_handoff(ga10b_cp_store_global(), kind, active, &h);
     if (rc != GA10B_CP_STORE_OK) return rc;
-    return ga10b_bringup_install_handoff(b, &h) == 0 ? 0 : -1;
+    uint32_t from_kind = active ? active->pipeline_kind : GA10B_PIPELINE_KIND_COUNT;
+    uint32_t from_cursor = ga10b_bringup_qmd_pool_cursor();
+    if (ga10b_bringup_install_handoff(b, &h) != 0) return -1;
+    /* install resets the cursor; give the kind back its own. */
+    ga10b_bringup_qmd_pool_cursor_set(ga10b_cp_store_swap_cursor(
+        ga10b_cp_store_global(), from_kind, from_cursor, kind));
+    return 0;
 }

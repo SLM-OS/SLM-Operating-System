@@ -29,9 +29,41 @@ static struct {
     struct oplib_cold_as_ctx as_ctx;
     struct oplib_gpu_as as;
     bool qmd_pool_added;        /* attach supplied the handoff's QMD pool */
-    bool wpool_valid;
+    bool wpool_built;           /* chunks allocated and mapped */
+    bool wpool_valid;           /* ... and the TLB invalidated: usable */
     struct oplib_wpool wpool;
+    /* The cold backend's own tlb_invalidate; g_cold.as runs it under
+     * the dispatch lock (see cold_lock_ops). */
+    int (*raw_tlb_invalidate)(void *ctx);
 } g_cold;
+
+/* ---- TLB invalidate under the dispatch lock ----
+ *
+ * After boot, `nvgpu oplib wpool` and `nvgpu oplib stage` add mappings
+ * to the cold channel's VM while the sched / eviction / MNIST consumers
+ * may be dispatching on it from another CPU. The new PTEs cover VA no
+ * dispatch uses, and dispatches never modify the VM, so writing them
+ * needs no lock (and the page-table pages they may allocate must not
+ * be allocated under it). The all-VA TLB invalidate that publishes them
+ * is different: in the middle of a dispatch it can disturb PBDMA's
+ * fetch (#844), so it runs under the dispatch lock. */
+static int cold_tlb_locked_cb(void *ctx)
+{
+    return g_cold.raw_tlb_invalidate(ctx);
+}
+
+static int cold_tlb_l(void *ctx)
+{
+    return slm_gpu_call_locked(cold_tlb_locked_cb, ctx);
+}
+
+static void cold_lock_ops(void)
+{
+    g_cold.raw_tlb_invalidate = g_cold.as.tlb_invalidate;
+    if (g_cold.raw_tlb_invalidate != NULL) {
+        g_cold.as.tlb_invalidate = cold_tlb_l;
+    }
+}
 
 bool oplib_cold_active(void)
 {
@@ -72,8 +104,7 @@ static int wpool_build(uint64_t bytes)
         return rc;
     }
     g_cold.wpool = w;
-    g_cold.wpool_valid = true;
-    oplib_weights_pool_reset();
+    g_cold.wpool_built = true;
     uart_printf("[oplib-cold] weights pool: gpu_va=0x%llx size=%llu MB "
                 "(%u x %llu MB chunks%s)\n",
                 (unsigned long long)w.gpu_va,
@@ -93,6 +124,18 @@ static int tlb_invalidate(void)
     return rc;
 }
 
+/* The built pool becomes usable once the GPU's TLB has dropped any
+ * stale walk of its VA range. */
+static int wpool_publish(void)
+{
+    if (tlb_invalidate() != OPLIB_AS_OK) {
+        return -1;
+    }
+    g_cold.wpool_valid = true;
+    oplib_weights_pool_reset();
+    return 0;
+}
+
 int oplib_cold_weights_pool_init(uint64_t bytes)
 {
     if (!oplib_cold_active() || bytes == 0) {
@@ -101,11 +144,15 @@ int oplib_cold_weights_pool_init(uint64_t bytes)
     if (g_cold.wpool_valid) {
         return 1;
     }
-    int rc = wpool_build(bytes);
-    if (rc != 0) {
-        return rc;
+    /* A pool built by an earlier call whose invalidate timed out is
+     * reused: only the invalidate is retried (no second allocation). */
+    if (!g_cold.wpool_built) {
+        int rc = wpool_build(bytes);
+        if (rc != 0) {
+            return rc;
+        }
     }
-    return tlb_invalidate() == OPLIB_AS_OK ? 0 : -1;
+    return wpool_publish();
 }
 
 int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
@@ -129,6 +176,7 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
     g_cold.ops = ops;
     g_cold.ch = ch;
     oplib_gpu_as_init_cold(&g_cold.as, &g_cold.as_ctx, ops, &ch->vm);
+    cold_lock_ops();
 
     /* 1. QMD pool for slm_oplib_dispatch (the MNIST v7 handoff has
      *    one; a channel-only handoff does not). The copy is
@@ -156,6 +204,9 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
     int rc = oplib_pool_stage_with_as(&g_cold.as);
     if (rc < 0) {
         uart_printf("[oplib-cold] attach: SASS pool staging failed rc=%d\n", rc);
+        if (g_cold.qmd_pool_added) {
+            (void)tlb_invalidate();   /* the QMD pool mapped in step 1 */
+        }
         return rc;
     }
 
@@ -168,7 +219,11 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
     /* 4. One invalidate for everything mapped above: the channel (and
      *    the MNIST pipeline) already ran, so the GPU has walked this
      *    VM. Nothing dispatches before the probe below flips tiers. */
-    if (tlb_invalidate() != OPLIB_AS_OK) {
+    if (g_cold.wpool_built) {
+        if (wpool_publish() != 0) {
+            return -1;
+        }
+    } else if (tlb_invalidate() != OPLIB_AS_OK) {
         return -1;
     }
 

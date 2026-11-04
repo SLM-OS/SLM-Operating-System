@@ -212,12 +212,27 @@ int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
 int slm_gpu_install_handoff(struct ga10b_bringup *b,
                             const struct ga10b_channel_handoff *h);
 
+/* Run `fn(arg)` under the GPU dispatch lock (IRQs masked) and return
+ * its result. For short GPU address-space updates that must not
+ * interleave with a dispatch on another CPU (page-table writes, TLB
+ * invalidates). `fn` must not print, allocate or take the lock.
+ * Defined in kernel/src/slm_ffi.c. */
+int slm_gpu_call_locked(int (*fn)(void *), void *arg);
+
 /* True when the active handoff came from ga10b_bringup_install_handoff
  * (a channel SLM-OS built), false for none or a Linux helper's. Lets
  * slm_ffi.c's ensure_bringup use the installed channel instead of
  * re-running the kexec inherit + DRAM scan, which cannot succeed after
  * a UEFI-direct boot. */
 bool ga10b_bringup_handoff_is_local(void);
+
+/* The active handoff's QMD-pool cursor (next slot to author). Install
+ * resets it to 0; the cold channel's per-kind switch saves it for the
+ * outgoing kind and restores the incoming kind's, so a kind keeps
+ * rotating through its own pool across switches (#558, #1092). Call
+ * with the GPU dispatch lock held. */
+uint32_t ga10b_bringup_qmd_pool_cursor(void);
+void ga10b_bringup_qmd_pool_cursor_set(uint32_t next_slot);
 
 /* Weights-pool descriptor convenience accessors (#714 W1, see
  * docs/design/gpu-weights-pool.md). The handoff v8 extension exposes

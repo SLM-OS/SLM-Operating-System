@@ -264,6 +264,15 @@ static int stage_common(const struct oplib_gpu_as *as)
     g_stage_rc = 0;
     g_staged   = true;
 
+    /* An address space the GPU may already have walked (the cold
+     * channel's, on a `nvgpu oplib stage` retry after boot) must drop
+     * stale translations before the new pool is used. The kexec mapper
+     * has no invalidate (NULL). */
+    if (as->tlb_invalidate != NULL && as->tlb_invalidate(as->ctx) != OPLIB_AS_OK) {
+        uart_printf("[oplib] stage_to_gpu: %s: TLB invalidate timed out — "
+                    "the pool may not be visible to the GPU yet\n", as->name);
+    }
+
     uart_printf("[oplib] stage_to_gpu: %zu B SASS staged at gpu_va=0x%llx "
                 "(%s, self-allocated %llu KB pool, base phys=0x%llx, "
                 "cbuf gpu_va=0x%llx)\n",

@@ -1188,7 +1188,9 @@ static int step_policies(void)
         WARN("ga10b-cold: operator library attach failed rc=%d - SLM ops stay on the CPU",
              rc_o);
     }
-    return (rc_s < -1 || rc_e < -1) ? -1 : 0;
+    bool ok_s = rc_s == GA10B_CP_OK || rc_s == GA10B_CP_SKIP;
+    bool ok_e = rc_e == GA10B_CP_OK || rc_e == GA10B_CP_SKIP;
+    return (ok_s && ok_e) ? 0 : -1;
 }
 
 typedef int (*cold_step_fn)(void);

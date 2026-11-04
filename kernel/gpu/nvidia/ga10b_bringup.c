@@ -1738,6 +1738,16 @@ int ga10b_bringup_install_handoff(struct ga10b_bringup *b,
     return 0;
 }
 
+uint32_t ga10b_bringup_qmd_pool_cursor(void)
+{
+    return g_qmd_pool_next_slot;
+}
+
+void ga10b_bringup_qmd_pool_cursor_set(uint32_t next_slot)
+{
+    g_qmd_pool_next_slot = next_slot;
+}
+
 bool ga10b_bringup_handoff_is_local(void)
 {
     return g_handoff_local && g_handoff.magic == GA10B_CHANNEL_HANDOFF_MAGIC;

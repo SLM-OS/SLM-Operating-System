@@ -1058,6 +1058,15 @@ static int ensure_bringup(uint32_t kind)
         if (ga10b_cold_pipeline_install(b, kind) != 0) return -1;
         b->state = GA10B_BRINGUP_CHANNEL_OPEN;
         b->last_error_phase = -1;
+        /* The warmup and the throwaway dispatch below are the Bug A
+         * safety nets for a channel inherited from Linux. The cold
+         * channel is already running, so a kind gets them on its first
+         * install only: alternating sched / eviction / MNIST would
+         * otherwise run three pipelines per user call with IRQs masked
+         * (#1092 review). Written under g_gpu_dispatch_lock. */
+        static bool cold_warmed[GA10B_PIPELINE_KIND_COUNT];
+        if (cold_warmed[kind]) return 0;
+        cold_warmed[kind] = true;
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
@@ -1141,6 +1150,15 @@ int slm_gpu_install_handoff(struct ga10b_bringup *b,
     }
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ga10b_bringup_install_handoff(b, h);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
+}
+
+int slm_gpu_call_locked(int (*fn)(void *), void *arg)
+{
+    if (!fn) return -1;
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    int rc = fn(arg);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
 }
