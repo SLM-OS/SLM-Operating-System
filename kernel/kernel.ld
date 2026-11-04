@@ -175,12 +175,15 @@ ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
 ASSERT(_kernel_data_va + _kernel_data_virtual_size == _kernel_size,
     "PE error: .data end VA != SizeOfImage (layout inconsistency)")
 
-/* Sanity check: 32 MB ceiling. The original 16 MB ceiling
+/* Sanity check: 64 MB ceiling. The original 16 MB ceiling
  * (0x41000000) was a defensive cap chosen long before the AI
  * scheduler weight blobs (~6 MB across MLP + PPO) and the
  * accumulated platform driver code pushed the bare-metal image
  * past 13 MB; with AI_SCHED=ON the link now needs ~14-18 MB.
- * 32 MB matches the headroom Pi 5 already has (its cap is at
- * 64 MB) and stays well below the QEMU virt RAM start
- * + 1 GB allocation. */
-ASSERT(__kernel_end < 0x42000000, "Kernel image too large!")
+ * It was raised to 32 MB, and then to 64 MB, the cap Pi 5 and Jetson
+ * use, once the GA10B host-tested modules' fake-GPU page pools
+ * (#1088/#1092; test sources link into every image) took the
+ * AI_SCHED=ON test kernel to ~39 MB, almost all BSS. Nothing on QEMU
+ * virt is placed below 0x44000000 (PMM starts at __kernel_end), and
+ * the 1 GB of guest RAM leaves ample room. */
+ASSERT(__kernel_end < 0x44000000, "Kernel image too large!")
