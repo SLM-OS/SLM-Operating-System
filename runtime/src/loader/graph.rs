@@ -240,7 +240,7 @@ pub enum AutoPad {
 /// what the CPU ops can honour is kept; anything else is recorded in
 /// `unsupported` so the engine refuses the node instead of silently
 /// computing with defaults. `pads` is ONNX order: [top, left, bottom,
-/// right]. 28 bytes per node: ParsedOnnx (16 nodes) grows by under
+/// right]. 26 bytes per node: ParsedOnnx (16 nodes) grows by under
 /// 0.5 KB, well inside the 256 KB task stack it is parsed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeAttrs {

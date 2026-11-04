@@ -51,6 +51,10 @@ The parser reads `kernel_shape`, `strides`, `pads`, `auto_pad`,
   is absent, as in the ONNX spec. Padding (explicit or `SAME_*`) is
   accepted only when it resolves to zero.
 
+A malformed `AttributeProto` on any node fails the model load
+(`CorruptedData`); attributes the engine does not use are otherwise
+ignored.
+
 The CPU kernels cannot do asymmetric padding, dilation, grouped
 convolution, pooling pads or `ceil_mode`. A node that needs one of those
 fails with `UnsupportedOp` instead of running with default geometry.
