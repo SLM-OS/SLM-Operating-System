@@ -44,6 +44,7 @@
 #include <stdint.h>
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../gpu/nvidia/ga10b_bringup.h"   /* slm_gpu_call_locked */
 
 /*
  * Reset the breaker to a known-clean state at the start of each
@@ -178,7 +179,6 @@ static void test_breaker_resets_on_intermittent_success(void)
 /* slm_gpu_call_locked (#1092): runs the callback under the dispatch
  * lock and returns its value; NULL is rejected. Re-entering the lock
  * from the callback would deadlock, so the callback only records. */
-int slm_gpu_call_locked(int (*fn)(void *), void *arg);   /* ga10b_bringup.h */
 static int g_call_locked_hits;
 static int call_locked_cb(void *arg)
 {

@@ -125,19 +125,20 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
     if (p->built && ga10b_cp_store_get(ga10b_cp_store_global(), kind) != NULL) {
         return GA10B_CP_OK;   /* `nvgpu cold` re-running the step */
     }
-    if (p->built) {
-        WARN("%s-gpu: built but not stored (earlier store failure)", s->name);
-        return GA10B_CP_ERR_ARG;
-    }
 
-    struct ga10b_cp_sources src;
-    if (ga10b_cold_pipeline_sources(kind, &src) != 0) return GA10B_CP_SKIP;
+    int rc;
+    /* Built by an earlier attempt whose publish failed (TLB invalidate
+     * timeout): publish again instead of rebuilding. */
+    if (!p->built) {
+        struct ga10b_cp_sources src;
+        if (ga10b_cold_pipeline_sources(kind, &src) != 0) return GA10B_CP_SKIP;
 
-    int rc = ga10b_cp_build(ops, &ch->vm, s, &src, p);
-    if (rc != GA10B_CP_OK) {
-        /* Pages already mapped in the channel's VM are leaked, not freed. */
-        WARN("%s-gpu: pipeline build failed rc=%d", s->name, rc);
-        return rc;
+        rc = ga10b_cp_build(ops, &ch->vm, s, &src, p);
+        if (rc != GA10B_CP_OK) {
+            /* Pages already mapped in the channel's VM are leaked, not freed. */
+            WARN("%s-gpu: pipeline build failed rc=%d", s->name, rc);
+            return rc;
+        }
     }
 
     struct ga10b_channel_handoff h;
