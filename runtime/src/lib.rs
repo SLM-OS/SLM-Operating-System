@@ -252,6 +252,64 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn slm_gpu_inference_enabled() -> i32 { 0 }
 
+    /// Host stubs for the rest of the inference engine's kernel calls,
+    /// so a host test can run a model end to end (the #1086 MNIST
+    /// reference test): no GPU (the engine takes its CPU path), no PMU,
+    /// and scalar versions of the x86-64 SSE kernels
+    /// (kernel/arch/x86_64/sse_kernels.c) the CPU ops call on x86.
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_available() -> i32 { 0 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_get_info(_info: *mut crate::kernel_ffi::GpuInfoFfi) -> i32 { -1 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_run_mnist(_logits_bytes_out: *mut u8) -> i32 { -1 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_set_mnist_input(_bytes: *const u8, _cap: usize) -> i32 { -1 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_pmu_read_cycles() -> u64 { 0 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_pmu_read_event(_idx: u32) -> u32 { 0 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_pmu_reset() {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn slm_sse_relu_f32(inp: *const f32, outp: *mut f32, n: usize) {
+        for i in 0..n {
+            let v = *inp.add(i);
+            *outp.add(i) = if v > 0.0 { v } else { 0.0 };
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn slm_sse_zero_f32(ptr: *mut f32, n: usize) {
+        for i in 0..n {
+            *ptr.add(i) = 0.0;
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn slm_sse_add_scalar_f32(ptr: *mut f32, scalar_bits: u32, n: usize) {
+        let s = f32::from_bits(scalar_bits);
+        for i in 0..n {
+            *ptr.add(i) += s;
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn slm_sse_fma_row_f32(cp: *mut f32, bp: *const f32,
+                                                 scalar_bits: u32, n: usize) {
+        let s = f32::from_bits(scalar_bits);
+        for i in 0..n {
+            *cp.add(i) += s * *bp.add(i);
+        }
+    }
+
     #[cfg(feature = "ai_eviction")]
     #[no_mangle]
     pub extern "C" fn slm_gpu_consumer_eviction_enabled() -> i32 { 0 }
@@ -8736,6 +8794,72 @@ pub extern "C" fn rust_inference_test() -> i32 {
         } else {
             print_test_result(b"profile: model load for profile test\0", false);
             failures += 1;
+        }
+    }
+
+    // Test (#1086): the CPU MNIST path computes the right logits. The
+    // ONNX-zoo model uses auto_pad=SAME_UPPER on both 5x5 Convs and a
+    // 3x3/stride-3 second MaxPool; the engine used to hard-code pad 0
+    // and a 2x2 pool, which still produced a 16x4x4 tensor for the
+    // MatMul, so the logits were silently wrong (7/10 on the MNIST test
+    // digits). References: onnxruntime 1.24 on models/test/mnist.onnx,
+    // which the GA10B GPU pipeline matches to ~1e-3. The inputs are
+    // asymmetric, so a transposed layout would fail too.
+    {
+        static MNIST_REF_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+        // (row range, col range) of 1.0 pixels, expected argmax, logits.
+        const CASES: [((usize, usize), (usize, usize), usize, [f32; 10]); 2] = [
+            ((4, 24), (13, 15), 1,
+             [-4.2782, 14.5679, -7.1510, -7.3986, 2.8744,
+              -2.9450, -0.3030, -0.2807, -1.6662, -6.6280]),
+            ((13, 15), (4, 24), 4,
+             [-6.5396, -6.3542, 8.3823, 0.5812, 9.9540,
+              5.6430, -3.8846, 8.3275, 1.7407, -7.7055]),
+        ];
+        static mut MNIST_REF_INPUT: [f32; 784] = [0.0; 784];
+        static mut MNIST_REF_OUTPUT: [f32; 10] = [0.0; 10];
+
+        loader::registry::init();
+        match loader::registry::load_model(b"mnist_ref", MNIST_REF_ONNX) {
+            Ok(idx) => {
+                let mut all_ok = true;
+                for (rows, cols, want_argmax, want) in CASES.iter() {
+                    let (run, out) = unsafe {
+                        let inp = &mut *core::ptr::addr_of_mut!(MNIST_REF_INPUT);
+                        for (i, px) in inp.iter_mut().enumerate() {
+                            let (r, c) = (i / 28, i % 28);
+                            *px = if r >= rows.0 && r < rows.1 && c >= cols.0 && c < cols.1 {
+                                1.0
+                            } else {
+                                0.0
+                            };
+                        }
+                        let out_ptr = core::ptr::addr_of_mut!(MNIST_REF_OUTPUT) as *mut f32;
+                        core::ptr::write_bytes(out_ptr, 0, 10);
+                        let run = inference::run_inference(idx, inp.as_ptr(), inp.len(),
+                                                           out_ptr, 10);
+                        (run, *core::ptr::addr_of!(MNIST_REF_OUTPUT))
+                    };
+                    let mut argmax = 0usize;
+                    let mut max_err = 0.0f32;
+                    for k in 0..10 {
+                        if out[k] > out[argmax] { argmax = k; }
+                        let d = out[k] - want[k];
+                        let d = if d < 0.0 { -d } else { d };
+                        if !(d <= max_err) { max_err = d; }   // NaN sticks
+                    }
+                    if run.is_err() || argmax != *want_argmax || !(max_err <= 5e-3) {
+                        all_ok = false;
+                    }
+                }
+                print_test_result(b"mnist: CPU logits match onnxruntime (#1086)\0", all_ok);
+                if !all_ok { failures += 1; }
+                let _ = loader::registry::unload_model(idx);
+            }
+            Err(_) => {
+                print_test_result(b"mnist: model load for reference test\0", false);
+                failures += 1;
+            }
         }
     }
 

@@ -866,6 +866,9 @@ impl InferenceEngine {
     fn exec_add(&mut self, node: &GraphNode) -> Result<(), EngineError> {
         let a = self.resolve(&node.inputs[0])?;
         let b = self.resolve(&node.inputs[1])?;
+        // ONNX Add broadcasts both ways; ops::add broadcasts its second
+        // operand into the first, so put the larger tensor first.
+        let (a, b) = if b.num_elements() > a.num_elements() { (b, a) } else { (a, b) };
 
         // Output shape matches the larger input
         let mut out_shape = [0u32; 8];
@@ -950,8 +953,8 @@ impl InferenceEngine {
 
     /// Conv2D: out = conv(input, weight) + bias
     ///
-    /// Infers kernel size from the weight tensor shape.
-    /// Default: stride=1, pad=0 (MNIST uses these defaults for first conv).
+    /// Kernel size from the weight tensor; stride / padding / auto_pad
+    /// from the node's attributes (ONNX defaults: stride 1, pad 0).
     fn exec_conv(&mut self, node: &GraphNode) -> Result<(), EngineError> {
         let input = self.resolve(&node.inputs[0])?;
         let weight = self.resolve(&node.inputs[1])?;
@@ -970,11 +973,30 @@ impl InferenceEngine {
         let kh = weight.dim(2);
         let kw = weight.dim(3);
 
-        // Default stride=1, pad=0 (MNIST-12 uses kernel_shape=[5,5] stride=1 pad=0)
-        let sh: u32 = 1;
-        let sw: u32 = 1;
-        let ph: u32 = 0;
-        let pw: u32 = 0;
+        // Stride, padding and auto_pad come from the node's attributes
+        // (#1086). They used to be hard-coded to stride 1 / pad 0, which
+        // ran the ONNX-zoo MNIST model (auto_pad=SAME_UPPER, i.e. pad 2
+        // for its 5x5 kernels) with the wrong geometry: shapes still
+        // lined up at the MatMul, so the logits were silently wrong.
+        let a = &node.attrs;
+        if a.unsupported || a.group != 1 || a.dilations != [1, 1] {
+            return Err(EngineError::UnsupportedOp);
+        }
+        if a.has_kernel_shape && (a.kernel_shape[0] as u32 != kh || a.kernel_shape[1] as u32 != kw) {
+            return Err(EngineError::ShapeMismatch);
+        }
+        let (sh, sw) = (a.strides[0] as u32, a.strides[1] as u32);
+        let (ph0, ph1) = resolve_pads(a.auto_pad, (a.pads[0] as u32, a.pads[2] as u32),
+                                      input.dim(2), kh, sh, 1)
+            .ok_or(EngineError::ShapeMismatch)?;
+        let (pw0, pw1) = resolve_pads(a.auto_pad, (a.pads[1] as u32, a.pads[3] as u32),
+                                      input.dim(3), kw, sw, 1)
+            .ok_or(EngineError::ShapeMismatch)?;
+        // ops::conv2d pads both sides by the same amount.
+        if ph0 != ph1 || pw0 != pw1 {
+            return Err(EngineError::UnsupportedOp);
+        }
+        let (ph, pw) = (ph0, pw0);
 
         // Use checked arithmetic throughout so a kernel larger than
         // the padded input doesn't underflow u32 to a giant h_out/
@@ -1009,7 +1031,9 @@ impl InferenceEngine {
 
     /// MaxPool2D: out = maxpool(input)
     ///
-    /// Default: kernel=2×2, stride=2 (MNIST-12 uses these).
+    /// Kernel and strides from the node's attributes (#1086; the ONNX
+    /// MNIST model's second pool is 3x3 / stride 3). A node without a
+    /// kernel_shape (graphs built in code) keeps the old 2x2 / stride 2.
     fn exec_maxpool(&mut self, node: &GraphNode) -> Result<(), EngineError> {
         let input = self.resolve(&node.inputs[0])?;
 
@@ -1020,11 +1044,26 @@ impl InferenceEngine {
         let batch = input.dim(0) as usize;
         let channels = input.dim(1) as usize;
 
-        // Default kernel=2, stride=2 (MNIST-12 uses kernel_shape=[2,2] strides=[2,2])
-        let kh: u32 = 2;
-        let kw: u32 = 2;
-        let sh: u32 = 2;
-        let sw: u32 = 2;
+        let a = &node.attrs;
+        // ops::maxpool2d has no padding or dilation.
+        if a.unsupported || a.dilations != [1, 1] || a.pads != [0; 4] ||
+           matches!(a.auto_pad, AutoPad::SameUpper | AutoPad::SameLower) {
+            return Err(EngineError::UnsupportedOp);
+        }
+        let (kh, kw, sh, sw) = if a.has_kernel_shape {
+            // ONNX: strides default to 1 when absent.
+            let (sh, sw) = if a.has_strides {
+                (a.strides[0] as u32, a.strides[1] as u32)
+            } else {
+                (1, 1)
+            };
+            (a.kernel_shape[0] as u32, a.kernel_shape[1] as u32, sh, sw)
+        } else {
+            (2, 2, 2, 2)
+        };
+        if kh == 0 || kw == 0 || sh == 0 || sw == 0 {
+            return Err(EngineError::ShapeMismatch);
+        }
 
         // Same checked-subtraction pattern as exec_conv: a kh > input.dim(2)
         // input would otherwise underflow u32 and produce a giant h_out.
@@ -1314,4 +1353,49 @@ unsafe fn run_inference_inner(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static MNIST: &[u8] = include_bytes!("../../../models/test/mnist.onnx");
+
+    /// #1086: the CPU path computes the same logits as onnxruntime 1.24
+    /// on models/test/mnist.onnx (which the GA10B GPU pipeline matches
+    /// to ~1e-3). Asymmetric inputs, so a transposed layout fails too.
+    #[test]
+    fn mnist_cpu_logits_match_onnxruntime() {
+        let cases: [((usize, usize), (usize, usize), usize, [f32; 10]); 2] = [
+            ((4, 24), (13, 15), 1,
+             [-4.2782, 14.5679, -7.1510, -7.3986, 2.8744,
+              -2.9450, -0.3030, -0.2807, -1.6662, -6.6280]),
+            ((13, 15), (4, 24), 4,
+             [-6.5396, -6.3542, 8.3823, 0.5812, 9.9540,
+              5.6430, -3.8846, 8.3275, 1.7407, -7.7055]),
+        ];
+        if !crate::mm::model_mem::is_pool_initialized() {
+            crate::mm::model_mem::model_mem_init(16, 8).expect("model memory pools");
+        }
+        registry::init();
+        let idx = registry::load_model(b"mnist_ref_host", MNIST).expect("load mnist");
+        for (rows, cols, want_argmax, want) in cases.iter() {
+            let mut input = [0.0f32; 784];
+            for (i, px) in input.iter_mut().enumerate() {
+                let (r, c) = (i / 28, i % 28);
+                if r >= rows.0 && r < rows.1 && c >= cols.0 && c < cols.1 {
+                    *px = 1.0;
+                }
+            }
+            let mut out = [0.0f32; 10];
+            unsafe {
+                run_inference(idx, input.as_ptr(), 784, out.as_mut_ptr(), 10).expect("run");
+            }
+            let argmax = (0..10).fold(0, |b, k| if out[k] > out[b] { k } else { b });
+            let max_err = (0..10).map(|k| (out[k] - want[k]).abs()).fold(0.0f32, f32::max);
+            assert_eq!(argmax, *want_argmax, "logits {:?}", out);
+            assert!(max_err <= 5e-3, "max |err| {} logits {:?} want {:?}", max_err, out, want);
+        }
+        let _ = registry::unload_model(idx);
+    }
 }

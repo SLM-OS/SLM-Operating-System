@@ -223,11 +223,85 @@ impl TensorShape {
     }
 }
 
+/// ONNX `auto_pad` (Conv / pooling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPad {
+    /// Explicit `pads` (the ONNX default).
+    NotSet,
+    /// Pad so out = ceil(in / stride); an odd total puts the extra
+    /// element at the end (UPPER) or the beginning (LOWER).
+    SameUpper,
+    SameLower,
+    /// No padding.
+    Valid,
+}
+
+/// The spatial attributes of a 2-D Conv / MaxPool node (#1086). Only
+/// what the CPU ops can honour is kept; anything else is recorded in
+/// `unsupported` so the engine refuses the node instead of silently
+/// computing with defaults. `pads` is ONNX order: [top, left, bottom,
+/// right].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeAttrs {
+    pub has_kernel_shape: bool,
+    pub kernel_shape: [u16; 2],
+    pub has_strides: bool,
+    pub strides: [u16; 2],
+    pub pads: [u16; 4],
+    pub dilations: [u16; 2],
+    pub group: u16,
+    pub auto_pad: AutoPad,
+    /// An attribute value the CPU ops cannot represent (a 3-D kernel,
+    /// a negative or oversized value, an unknown auto_pad, ceil_mode).
+    pub unsupported: bool,
+}
+
+impl NodeAttrs {
+    pub const EMPTY: Self = Self {
+        has_kernel_shape: false,
+        kernel_shape: [0; 2],
+        has_strides: false,
+        strides: [1; 2],
+        pads: [0; 4],
+        dilations: [1; 2],
+        group: 1,
+        auto_pad: AutoPad::NotSet,
+        unsupported: false,
+    };
+}
+
+/// Padding along one spatial axis for `in_len` input elements:
+/// (begin, end). For SAME_*, total = max((ceil(in/stride) - 1) * stride
+/// + (k - 1) * dilation + 1 - in, 0), as in the ONNX spec. None when
+/// `stride` or `k` is 0.
+pub fn resolve_pads(auto_pad: AutoPad, explicit: (u32, u32), in_len: u32, k: u32,
+                    stride: u32, dilation: u32) -> Option<(u32, u32)> {
+    if stride == 0 || k == 0 || dilation == 0 {
+        return None;
+    }
+    match auto_pad {
+        AutoPad::NotSet => Some(explicit),
+        AutoPad::Valid => Some((0, 0)),
+        AutoPad::SameUpper | AutoPad::SameLower => {
+            let out = (in_len as u64 + stride as u64 - 1) / stride as u64;
+            let eff_k = (k as u64 - 1) * dilation as u64 + 1;
+            let need = (out.saturating_sub(1)) * stride as u64 + eff_k;
+            let total = need.saturating_sub(in_len as u64);
+            let total = u32::try_from(total).ok()?;
+            let small = total / 2;
+            let big = total - small;
+            Some(if auto_pad == AutoPad::SameUpper { (small, big) } else { (big, small) })
+        }
+    }
+}
+
 /// A node in the runtime operator graph.
 #[derive(Clone, Copy)]
 pub struct GraphNode {
     pub op_type: OpType,
     pub name: TensorName,
+    /// Conv / MaxPool spatial attributes (EMPTY for other ops).
+    pub attrs: NodeAttrs,
     pub inputs: [TensorName; MAX_NODE_INPUTS],
     pub input_count: u8,
     pub outputs: [TensorName; MAX_NODE_OUTPUTS],
@@ -238,6 +312,7 @@ impl GraphNode {
     pub const EMPTY: Self = Self {
         op_type: OpType::Unknown,
         name: TensorName::EMPTY,
+        attrs: NodeAttrs::EMPTY,
         inputs: [TensorName::EMPTY; MAX_NODE_INPUTS],
         input_count: 0,
         outputs: [TensorName::EMPTY; MAX_NODE_OUTPUTS],
