@@ -115,7 +115,7 @@ cat /sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys
 | Host | Status | Verified |
 |------|--------|----------|
 | `jetson-nano-2` | Patched | yes (used by every PR #823 hardware run) |
-| `jetson-nano-1` | Unknown | check before relying on the 60% PASS baseline |
+| `jetson-nano-1` | Patched (built on the board from `kernel_oot_modules_src.tbz2`, 2026-11-03, #1043) | yes — `slmos_*` debugfs files present; stock kept as `nvgpu.ko.stock` |
 
 Without the patched module, SLM-OS still boots and reaches its
 shell, but `nvgpu launch-kernel` per-attempt PASS regresses to the

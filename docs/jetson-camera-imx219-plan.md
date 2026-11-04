@@ -536,8 +536,9 @@ Items that can land before Phase 0 hardware probing.
   `/opt/nvidia/jetson-io/config-by-hardware.py -n 2='Camera IMX219-A'`
   instead — it writes a separate `LABEL JetsonIO` block with the
   supported `OVERLAYS` directive and bumps the `DEFAULT` to it.
-  Reboot to apply. (The lab nano-1 is now configured this way, so the
-  overlay loads automatically every boot until reverted.)
+  Reboot to apply. (The lab nano-1 was configured this way until it was
+  reflashed on 2026-11-03 (#1043); the overlay has not been reapplied
+  since, so run the command again before camera work on that board.)
 - ✅ Code-read camera-rtcpu IVC bring-up — see
   `docs/jetson-camera-rtcpu-ivc-driver-notes.md`. Headlines:
   - HSP wire format is shared-mailbox + shared-semaphore (not the

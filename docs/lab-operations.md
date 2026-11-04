@@ -65,22 +65,33 @@ The current SBC list is labctl's (`lab://sbcs`, `labctl status`).
 
 ### Jetson Orin Nano boards
 
-State recorded 2026-10-29: `jetson-nano-2` is a working lab install;
-`jetson-nano-1` needs reprovisioning. The target layout for a
-(re)provisioned board is an NVMe development install plus a microSD
-recovery install — see
-[`docs/deploy/jetson-kexec.md` §First-time provisioning](deploy/jetson-kexec.md#first-time-provisioning-dual-media-layout).
+Both boards use the same layout (`jetson-nano-1` was reprovisioned to
+match `jetson-nano-2` on 2026-11-03, #1043): JetPack on the microSD
+card is the default cold boot and the deploy host, the NVMe holds a
+copy of that rootfs plus a small `SLMOS-ESP` partition for the
+UEFI-direct image. Both the kexec path
+([`docs/deploy/jetson-kexec.md`](deploy/jetson-kexec.md)) and the
+UEFI-direct path ([`docs/deploy/jetson-uefi-direct.md`](deploy/jetson-uefi-direct.md))
+work on either board. How `jetson-nano-1` was provisioned from scratch
+is recorded in
+[`docs/deploy/jetson-uefi-direct.md` §Provisioning a board from scratch](deploy/jetson-uefi-direct.md#provisioning-a-board-from-scratch).
 
 #### `jetson-nano-1`
 
 | Component | Details |
 |-----------|---------|
-| Board | Jetson Orin Nano Developer Kit (UEFI banner now reports "Super"; #844 recorded it as a non-Super flash, so it has likely been reflashed since) |
-| Status | 🔴 Needs reprovisioning — boots JetPack from microSD; root password and SSH host key no longer match lab records |
-| QSPI firmware | UEFI 36.4.4 |
-| microSD | JetPack, `root=/dev/mmcblk0p1` |
-| NVMe | Samsung MZVL4512HBLU with a single ext4 `APP` partition and no EFI system partition — its UEFI boot entry returns to the menu |
-| Deploy | SSH + kexec workflow (see below) |
+| Board | Jetson Orin Nano Super Developer Kit (flashed with `jetson-orin-nano-devkit-super`; DT `p3768-0000+p3767-0005-super`) |
+| Status | 🟢 Working lab install (hostname `slmos-1`), reprovisioned 2026-11-03 (#1043). kexec 10/10 and UEFI-direct 10/10 to `slmos>`; UEFI-direct cold GPU bring-up and `nvgpu cold check` pass |
+| QSPI firmware | UEFI 36.4.7 on both bootloader slots; patched BL31 (`tools/tfa-patches/0004-*`) in `A_secure-os` and `B_secure-os` |
+| Linux | JetPack R36.4.7 (R36.4.4 flash + apt OTA), kernel 5.15.148-tegra, 25 W power mode |
+| microSD | 64 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `Linux -> auto-kexec SLM-OS` |
+| NVMe | 512 GB Samsung MZVL4512HBLU: `p1` ext4 `APP` (476.4 GiB, copy of the microSD rootfs with `root=/dev/nvme0n1p1`) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding `\EFI\SLMOS\SLMOS.efi` and an L4TLauncher copy at `\EFI\L4T\l4t.efi` (UEFI Shell recovery). UEFI entry `SLM-OS NVMe` points at the SLM-OS image, outside BootOrder. No `BOOTAA64.efi` there, so cold boots fall through to the microSD |
+| SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` (MNIST, sched-MLP and eviction producers, shaders, weights), `arm_smmu_noshutdown.ko`, patched `nvgpu.ko` (stock kept as `nvgpu.ko.stock`), `slmos-autokexec.service` (enabled) — on both media |
+| Recovery strap | labctl `recovery_mode` latch binding wired to J14 pins 9-10. Must read `released` for a normal boot. Power-cycle delay is 15 s (stored in labctl, `labctl edit --cycle-delay`): after a Linux shutdown the board stayed off for every off time up to 13 s and first came back at 14 s (measured 2026-11-03, 1 s steps; disconnecting the USB-C cable made no difference) |
+| Network | USB RTL8153 dongle for Linux and SLM-OS; the DHCP reservation is the address labctl lists |
+| SSH | `ssh root@<JETSON_IP>` (key or password `slmos`). User `slmos-1` / `slmos-1` with sudo |
+| Camera | The IMX219 `JetsonIO` overlay used by the camera work was not reapplied after the reflash; see `docs/jetson-camera-imx219-plan.md` |
+| Deploy | SSH + kexec workflow (see below), or UEFI-direct (`scripts/jetson-uefi-deploy.sh`) |
 
 #### `jetson-nano-2`
 
@@ -93,7 +104,7 @@ recovery install — see
 | microSD | 238 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `SLM-OS`, `Linux -> auto-kexec SLM-OS` |
 | NVMe | 119 GB SPCC: `p1` ext4 `APP` (118.7 GiB, spare L4T rootfs) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding the UEFI-direct image `\EFI\SLMOS\SLMOS.efi`. UEFI entry `SLM-OS NVMe` points at it, outside BootOrder; boot it one-shot with `scripts/jetson-uefi-deploy.sh` (#26, `docs/deploy/jetson-uefi-direct.md`). No `BOOTAA64.efi` there, so cold boots still fall through to the microSD |
 | SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` helpers, `arm_smmu_noshutdown.ko`, patched `nvgpu.ko`, `slmos-autokexec.service` (enabled) all present. Not yet staged: `gpu-kernel-eviction-qnet` (PR-6 producer) |
-| Recovery strap | labctl `recovery_mode` latch binding (applied before power-on). Must read `released` for a normal boot |
+| Recovery strap | labctl `recovery_mode` latch binding (applied before power-on). Must read `released` for a normal boot. Power-cycle delay 15 s in labctl, the same as `jetson-nano-1` (its threshold has not been measured separately) |
 | Network | Linux and SLM-OS both use the USB RTL8153 dongle (on-board Ethernet and WiFi are down), so both get the same DHCP reservation — the address labctl lists |
 | SSH | `ssh root@<JETSON_IP>` (key or password `slmos`) |
 | Deploy | SSH + kexec workflow (see below), or UEFI-direct (`scripts/jetson-uefi-deploy.sh`) |
@@ -253,10 +264,10 @@ recovery install, QSPI caveats) is covered in
 
 ### Board State
 
-| Board | Current state (2026-10-29) | Target layout |
-|-------|----------------------------|---------------|
-| jetson-nano-1 | 🔴 Needs reprovisioning — microSD JetPack boots, NVMe not bootable | NVMe development + microSD recovery |
-| jetson-nano-2 | 🟢 Working — microSD JetPack with SLM-OS extras | NVMe development + microSD recovery (optional; current single-medium setup works) |
+| Board | Current state (2026-11-03) | Layout |
+|-------|----------------------------|--------|
+| jetson-nano-1 | 🟢 Working — reprovisioned 2026-11-03 (#1043) | microSD JetPack with SLM-OS extras (default boot) + NVMe rootfs copy + NVMe `SLMOS-ESP` |
+| jetson-nano-2 | 🟢 Working — microSD JetPack with SLM-OS extras | microSD JetPack with SLM-OS extras (default boot) + NVMe spare rootfs + NVMe `SLMOS-ESP` |
 
 Serial ports, IP addresses and power: use what labctl reports.
 

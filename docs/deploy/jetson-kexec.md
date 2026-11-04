@@ -59,6 +59,15 @@ The `kexec` flow is identical on either medium, so the roles can be
 swapped. A board without an NVMe drive runs the development install
 from microSD and has no recovery install.
 
+**The two lab boards currently use the swapped arrangement:** the
+microSD install is the default boot and carries the SLM-OS extras, and
+the NVMe holds a copy of that rootfs plus the `SLMOS-ESP` partition for
+UEFI-direct boot (state in `docs/lab-operations.md`; how jetson-nano-1
+was built in
+[`jetson-uefi-direct.md` §Provisioning a board from scratch](jetson-uefi-direct.md#provisioning-a-board-from-scratch)).
+That keeps a power cycle returning to microSD Linux, which the one-shot
+UEFI-direct loop relies on.
+
 ### Boot firmware is shared — QSPI caveats
 
 Every boot stage up to and including UEFI lives in the module's QSPI
@@ -88,7 +97,11 @@ creates the full GPT partition set on the NVMe, including the EFI
 system partition that holds L4TLauncher. A rootfs copied onto a single
 ext4 partition is not bootable: the UEFI boot-manager entry for the
 drive silently returns to the menu (observed on `jetson-nano-1`,
-2026-10-29).
+2026-10-29). A copied rootfs does boot once the NVMe also has an ESP
+holding L4TLauncher and a boot entry pointing at it, and its
+`extlinux.conf` says `root=/dev/nvme0n1p1`. That is how both lab boards'
+NVMe rootfs copies are booted (step 6 of
+[`jetson-uefi-direct.md` §Provisioning a board from scratch](jetson-uefi-direct.md#provisioning-a-board-from-scratch)).
 
 Use either SDK Manager (target storage: NVMe) or the BSP's initrd flash
 from `Linux_for_Tegra/` on the host, with the board in USB Force
