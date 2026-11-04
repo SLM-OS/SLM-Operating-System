@@ -136,7 +136,7 @@ for entry in "${SHADERS[@]}"; do
 
     echo "=== $src ==="
 
-    # 1. Compile to a fat-binary host stub (.1.cubin + .2.cubin).
+    # 1. Compile to a fat binary (host stub + embedded device cubin).
     (cd "$WORK_DIR" && "$NVCC" -arch="$ARCH" -o "$src" "$src_cu")
 
     # 2. Extract the cubins into a directory of their own. cuobjdump
@@ -157,7 +157,10 @@ for entry in "${SHADERS[@]}"; do
     text_line=""
     for candidate in "$extract_dir"/*."$ARCH".cubin; do
         [ -f "$candidate" ] || continue
-        line="$("$READELF" -SW "$candidate" | awk '/\.text\./ {print; exit}')"
+        # A candidate readelf can't parse (e.g. a non-ELF host stub) is
+        # skipped rather than allowed to abort the build under pipefail:
+        # the kernel cubin may still come later in the glob.
+        line="$("$READELF" -SW "$candidate" 2>/dev/null | awk '/\.text\./ {print; exit}')" || line=""
         if [ -n "$line" ]; then
             cubin="$candidate"
             text_line="$line"
@@ -176,6 +179,12 @@ for entry in "${SHADERS[@]}"; do
     fields="$(echo "$text_line" | sed 's/^[[:space:]]*\[[[:space:]]*[0-9]*\][[:space:]]*//')"
     off_hex="$(echo "$fields" | awk '{print $4}')"
     size_hex="$(echo "$fields" | awk '{print $5}')"
+    # Validate before converting: $((16#...)) on an empty or non-hex
+    # field would die with a bash arithmetic error instead of this one.
+    if ! [[ $off_hex =~ ^[0-9a-fA-F]+$ && $size_hex =~ ^[0-9a-fA-F]+$ ]]; then
+        echo "ERROR: bad .text offset/size parsed from: $text_line" >&2
+        exit 2
+    fi
     off_dec=$((16#$off_hex))
     size_dec=$((16#$size_hex))
     echo "  .text section: offset=0x$off_hex size=0x$size_hex"

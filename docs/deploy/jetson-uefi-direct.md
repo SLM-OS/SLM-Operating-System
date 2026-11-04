@@ -152,7 +152,7 @@ starting from a USB Force Recovery flash. The steps, in order:
    `rootfs/root/.ssh/authorized_keys`.
 2. **Upgrade to R36.4.7 with apt.** R36.4.7 is not on NVIDIA's download
    archive (the BSP archive goes from 36.4.4 to 36.5.0); it ships only
-   as the JetPack 6.2 OTA in the `r36.4` apt channel.
+   as the JetPack 6.2.x OTA in the `r36.4` apt channel.
    `apt-get dist-upgrade` installs it and the
    `nvidia-l4t-bootloader` postinst tries to stage the bootloader
    capsule. On nano-1 that step reported "Trigger Capsule update is

@@ -50,10 +50,18 @@ EOF
 
 # readelf stub: prints a section table. The kernel cubin (the one
 # whose content starts with H) gets a .text.<kernel> row at offset 0x40,
-# size 0x20, numbered per $STUB_SECNUM ("[ 9]" or "[10]").
+# size 0x20, numbered per $STUB_SECNUM ("[ 9]" or "[10]"). The host-stub
+# cubin is not an ELF, so the stub fails on it the way real readelf does
+# ("Failed to read file header", exit 1). It sorts first in both naming
+# schemes, so every case checks that the build script skips a candidate
+# readelf rejects instead of aborting under pipefail.
 cat > "$STUBS/readelf" <<'EOF'
 #!/bin/bash
 f="$2"
+if [ "$(head -c9 "$f")" = "STUBCUBIN" ]; then
+    echo "readelf: Error: $f: Failed to read file header" >&2
+    exit 1
+fi
 echo "  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al"
 echo "  [ 1] .shstrtab         STRTAB          0000000000000000 000040 000100 00      0   0  1"
 if [ "$(head -c1 "$f")" = "H" ]; then
@@ -61,6 +69,13 @@ if [ "$(head -c1 "$f")" = "H" ]; then
 fi
 EOF
 chmod +x "$STUBS/nvcc" "$STUBS/cuobjdump" "$STUBS/readelf"
+
+# Number of entries in the build script's SHADERS table ("src:out.sass").
+EXPECTED_SHADERS=$(grep -cE '^[[:space:]]+"[a-z0-9_]+:[a-z0-9_]+_shader\.sass"' "$BUILD_SCRIPT")
+if [ "$EXPECTED_SHADERS" -lt 1 ]; then
+    echo "FAIL: could not count the SHADERS table in $BUILD_SCRIPT"
+    exit 2
+fi
 
 fails=0
 run_case() {
@@ -74,7 +89,15 @@ run_case() {
         fails=$((fails + 1))
         return
     fi
-    local f got want
+    local f got want n
+    # Every shader in the build script's SHADERS table must be written;
+    # a run that exits 0 with nothing produced is a failure, not a pass.
+    n=$(find "$out" -maxdepth 1 -name '*_shader.sass' | wc -l)
+    if [ "$n" -ne "$EXPECTED_SHADERS" ]; then
+        echo "FAIL: naming=$naming secnum='[$secnum]': $n shader(s) written, want $EXPECTED_SHADERS"
+        fails=$((fails + 1))
+        return
+    fi
     for f in "$out"/*_shader.sass; do
         # e.g. conv2d_fp32_direct_shader.sass came from conv2d_fp32_direct.
         local src
@@ -108,6 +131,24 @@ elif grep -q 'bad .text offset/size' "$TMP/zero.log"; then
     echo "PASS: offset 0 rejected"
 else
     echo "FAIL: offset 0 rejected for the wrong reason:"; tail -3 "$TMP/zero.log"
+    fails=$((fails + 1))
+fi
+
+# A section row whose Off/Size columns aren't hex (a parse that went
+# wrong) must be rejected with the script's own error, not a bash
+# arithmetic failure.
+cat > "$STUBS/readelf" <<'EOF'
+#!/bin/bash
+echo "  [ 9] .text._Z6kernelv  PROGBITS        0000000000000000 PROGBITS AX"
+EOF
+if STUB_NAMING=cuda12 NVCC="$STUBS/nvcc" CUOBJDUMP="$STUBS/cuobjdump" READELF="$STUBS/readelf" \
+   bash "$BUILD_SCRIPT" "$TMP/out-nonhex" > "$TMP/nonhex.log" 2>&1; then
+    echo "FAIL: non-hex offset was accepted"
+    fails=$((fails + 1))
+elif grep -q 'bad .text offset/size' "$TMP/nonhex.log"; then
+    echo "PASS: non-hex offset rejected"
+else
+    echo "FAIL: non-hex offset rejected for the wrong reason:"; tail -3 "$TMP/nonhex.log"
     fails=$((fails + 1))
 fi
 
