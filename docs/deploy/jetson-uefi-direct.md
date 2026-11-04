@@ -558,9 +558,11 @@ where the two disagree.
     while held, and the stats read try-locks the eviction registry
     (see runtime/CLAUDE.md §"Locks reached from IRQs-off context").
     The same code ran after kexec; nothing about it was UEFI-specific.
-    After a UEFI-direct boot the fan PWM's clock is off and nothing
-    drives the fan, but load testing stayed far from any trip point
-    (70 °C hot-surface, 99 °C slowdown).
+    SLM-OS does not drive the fan on either boot path: after a
+    UEFI-direct boot the fan PWM's clock is off, and after kexec Linux
+    has disabled the PWM (CSR 0) on its way out (`thermal fan`; fan
+    control is #1105). Load testing still stayed far from
+    any trip point (70 °C hot-surface, 99 °C slowdown).
 
 ## Troubleshooting
 

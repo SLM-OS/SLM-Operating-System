@@ -11635,10 +11635,10 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
             break;
         }
         if (rc == 0) {
-            int32_t whole = mc / 1000;
-            int32_t tenth = (mc < 0 ? -mc : mc) % 1000 / 100;
-            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=%d.%d",
-                               thermal_zones[i].name, (int)whole, (int)tenth);
+            int32_t mag = mc < 0 ? -mc : mc;
+            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=%s%d.%d",
+                               thermal_zones[i].name, mc < 0 ? "-" : "",
+                               (int)(mag / 1000), (int)(mag % 1000 / 100));
         } else {
             n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=err%d",
                                thermal_zones[i].name, rc);
@@ -11653,8 +11653,7 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
  * unclocked block traps into EL3 on Tegra234. (A clocked block held in
  * reset could fault too; BPMP has no reset-state query, and Linux
  * deasserts this reset together with enabling the clock.) */
-#define THERMAL_FAN_PWM_CSR  0x032a0000UL
-#define TEGRA234_CLK_PWM3    107u
+#define THERMAL_FAN_PWM_CSR  TEGRA234_PWM3_BASE   /* mapped in vmm.c */
 
 static void thermal_print_fan(void)
 {

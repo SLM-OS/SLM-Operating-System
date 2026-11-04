@@ -1709,6 +1709,18 @@ static void vmm_setup_platform(void)
         DEBUG_PRINT("  FUSE L2[%lu] mapped", (unsigned long)fuse_l2);
     }
 
+    /* PWM controller 3 (0x032a0000, the carrier's fan PWM) in the 2 MB
+     * block at 0x03200000 (L2 idx 25). Read by `thermal fan` (#1093)
+     * only after BPMP reports its clock on, which after kexec it is
+     * (Linux's pwm-fan) and after a UEFI-direct boot it is not. */
+    {
+        uint64_t pwm_blk = TEGRA234_PWM3_BASE & ~(BLOCK_SIZE - 1);
+        uint64_t pwm_l2 = (pwm_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[pwm_l2] = make_block_desc(pwm_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  PWM3 L2[%lu] mapped", (unsigned long)pwm_l2);
+    }
+
     /* Camera-subsystem MMIO blocks for the #396 Phase 0 reachability
      * probe: NVCSI receiver, RCE HSP (camera-rtcpu IPC mailbox + SS),
      * RCE PM (R5_CTRL + PWR_STATUS state probes), and the HSI2C

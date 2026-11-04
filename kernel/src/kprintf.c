@@ -34,8 +34,12 @@
  *     This is safe because secondary CPUs only print during early boot
  *     (before scheduler start). After scheduler start, all UART output
  *     comes from CPU 0 (shell, tests, INFO logs). See smp.c:secondary_init.
- *     If secondary CPU printing is needed later, an NC-memory-based lock
- *     must be added.
+ *     One deliberate exception: the Jetson `thermal log` diagnostic
+ *     (#1093) prints from a task pinned to the last CPU, so it keeps
+ *     reporting when CPU 0 is wedged. Its lines can interleave with,
+ *     or garble, concurrent CPU 0 output; it is an opt-in debug aid.
+ *     If secondary CPU printing is needed beyond that, an NC-memory-
+ *     based lock must be added.
  *
  *   Default (QEMU, x86-64): standard spinlock with IRQ save/restore. */
 #if defined(PLATFORM_HAS_NC_MEMORY)

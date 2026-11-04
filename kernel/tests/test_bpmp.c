@@ -136,6 +136,17 @@ static void test_bpmp_clock_and_reset_ids_match_tegra234_bindings(void)
 }
 #endif
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/* #1093: `thermal fan` reads PWM3's CSR, mapped by vmm.c from this
+ * base; the clock id is the one BPMP is asked about first (L4T DT:
+ * pwm@32a0000, clocks = <&bpmp 107>). */
+static void test_thermal_fan_pwm_constants(void)
+{
+    TEST_ASSERT_EQUAL_HEX64(0x032a0000UL, TEGRA234_PWM3_BASE);
+    TEST_ASSERT_EQUAL_UINT(107, TEGRA234_CLK_PWM3);
+}
+#endif
+
 /* #1093: MRQ_THERMAL request is Linux's 20-byte struct (type + the
  * 16-byte union) and the zone ids match the L4T device tree. */
 static void test_bpmp_thermal_abi_layout(void)
@@ -169,6 +180,7 @@ int test_suite_bpmp(void)
      * is that the TEGRA234_* id constants haven't drifted.
      */
     RUN_TEST(test_bpmp_clock_and_reset_ids_match_tegra234_bindings);
+    RUN_TEST(test_thermal_fan_pwm_constants);
 #else
     RUN_TEST(test_bpmp_init_returns_zero_on_stub_platform);
     RUN_TEST(test_bpmp_is_available_returns_false_on_stub);

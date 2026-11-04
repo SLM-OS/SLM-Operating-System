@@ -1509,12 +1509,14 @@ static const struct help_entry help_entries[] = {
         "  thermal            Read the BPMP thermal zones (cpu, gpu, soc0-2, tj) in C\n"
         "  thermal fan        Fan PWM (pwm3) clock state, enable and duty\n"
         "  thermal log <ms>   Print zones plus per-CPU ticks/schedules/current task\n"
-        "                     on the console every <ms> (min 100), from a task that\n"
-        "                     can run on any CPU\n"
+        "                     on the console every <ms> (min 100), from a task\n"
+        "                     pinned to the last CPU (off CPU 0)\n"
         "  thermal log 0      Stop the log\n"
         "\n"
         "A CPU whose tick count stops advancing in the log is spinning with\n"
         "IRQs masked; the task shown is the one it is stuck in (#1093).\n"
+        "The log prints from a secondary CPU, so its lines can interleave\n"
+        "with shell output on CPU 0.\n"
     ),
 
     HELP_TEXT("timdiag",
