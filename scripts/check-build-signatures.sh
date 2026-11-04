@@ -75,8 +75,9 @@ done
 # for QEMU and x86-64; AI_SCHED=OFF still drops it.
 ai_default() {  # ai_default <want ON|OFF> <make args...>
     local want="$1"; shift
-    local got=OFF
-    if sigs "$@" | grep "^kernel=" | grep -q -- "-DENABLE_AI_SCHEDULER=ON"; then
+    local out got=OFF
+    out="$(sigs "$@")"   # a failing make aborts here (set -e), not as "OFF"
+    if grep "^kernel=" <<<"$out" | grep -q -- "-DENABLE_AI_SCHEDULER=ON"; then
         got=ON
     fi
     if [ "$got" != "$want" ]; then
