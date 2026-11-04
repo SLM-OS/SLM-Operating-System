@@ -81,11 +81,11 @@ is recorded in
 | Component | Details |
 |-----------|---------|
 | Board | Jetson Orin Nano Super Developer Kit (flashed with `jetson-orin-nano-devkit-super`; DT `p3768-0000+p3767-0005-super`) |
-| Status | 🟢 Working lab install (hostname `slmos-1`), reprovisioned 2026-11-03 (#1043). kexec 10/10 and UEFI-direct 10/10 to `slmos>` |
+| Status | 🟢 Working lab install (hostname `slmos-1`), reprovisioned 2026-11-03 (#1043). kexec 10/10 and UEFI-direct 10/10 to `slmos>`; UEFI-direct cold GPU bring-up and `nvgpu cold check` pass |
 | QSPI firmware | UEFI 36.4.7 on both bootloader slots; patched BL31 (`tools/tfa-patches/0004-*`) in `A_secure-os` and `B_secure-os` |
 | Linux | JetPack R36.4.7 (R36.4.4 flash + apt OTA), kernel 5.15.148-tegra, 25 W power mode |
 | microSD | 64 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `Linux -> auto-kexec SLM-OS` |
-| NVMe | 512 GB Samsung MZVL4512HBLU: `p1` ext4 `APP` (476.4 GiB, copy of the microSD rootfs with `root=/dev/nvme0n1p1`) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding `\EFI\SLMOS\SLMOS.efi`. UEFI entry `SLM-OS NVMe` points at it, outside BootOrder. No `BOOTAA64.efi` there, so cold boots fall through to the microSD |
+| NVMe | 512 GB Samsung MZVL4512HBLU: `p1` ext4 `APP` (476.4 GiB, copy of the microSD rootfs with `root=/dev/nvme0n1p1`) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding `\EFI\SLMOS\SLMOS.efi` and an L4TLauncher copy at `\EFI\L4T\l4t.efi` (UEFI Shell recovery). UEFI entry `SLM-OS NVMe` points at the SLM-OS image, outside BootOrder. No `BOOTAA64.efi` there, so cold boots fall through to the microSD |
 | SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` (MNIST, sched-MLP and eviction producers, shaders, weights), `arm_smmu_noshutdown.ko`, patched `nvgpu.ko` (stock kept as `nvgpu.ko.stock`), `slmos-autokexec.service` (enabled) — on both media |
 | Recovery strap | labctl `recovery_mode` latch binding wired to J14 pins 9-10. Must read `released` for a normal boot. Power-cycle delay is 15 s (stored in labctl, `labctl edit --cycle-delay`): after a Linux shutdown the board stayed off for every off time up to 13 s and first came back at 14 s (measured 2026-11-03, 1 s steps; disconnecting the USB-C cable made no difference) |
 | Network | USB RTL8153 dongle for Linux and SLM-OS; the DHCP reservation is the address labctl lists |

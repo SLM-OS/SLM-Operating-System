@@ -10,7 +10,10 @@ available. Both paths boot the same `slmos` build: kexec loads
 `slmos.elf`; UEFI loads `slmos.bin`.
 
 **Status (2026-11-03):** boots to the `slmos>` shell 10/10 on
-jetson-nano-2 and 10/10 on jetson-nano-1 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
+jetson-nano-2 (UEFI 36.4.7), and 10/10 on jetson-nano-1 with the
+pre-#1088 build. On jetson-nano-1 the cold GPU bring-up and
+`nvgpu cold check` also pass (scheduler and eviction, single boot, AI_SCHED=ON
+build). Both boards: EL2 with VHE, 6 CPUs via PSCI, hardware
 timer preemption on every CPU, serial console input and output, and
 USB networking (#1084): SLM-OS powers XUSB up itself, enumerates the
 onboard hub and the RTL8153 behind it, and gets a DHCP lease; 10/10
@@ -193,7 +196,9 @@ starting from a USB Force Recovery flash. The steps, in order:
    says `/dev/nvme0n1p1`. If the copy still said `mmcblk0p1`, the
    launcher would boot the microSD rootfs and the check would pass
    without proving anything. A power cycle must then return to the
-   microSD.
+   microSD. Also leave a copy at `\EFI\L4T\l4t.efi` on the same ESP:
+   it is what the UEFI Shell recovery path in
+   [Troubleshooting](#troubleshooting) runs.
 7. Deploy SLM-OS with `scripts/jetson-uefi-deploy.sh` as below.
 
 After a Linux shutdown, jetson-nano-1 needs its outlet off for at least
