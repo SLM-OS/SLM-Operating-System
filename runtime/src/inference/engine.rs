@@ -990,6 +990,9 @@ impl InferenceEngine {
             return Err(EngineError::ShapeMismatch);
         }
         let (sh, sw) = (a.strides[0] as u32, a.strides[1] as u32);
+        if sh == 0 || sw == 0 {
+            return Err(EngineError::UnsupportedOp);   // malformed node
+        }
         let (ph0, ph1) = resolve_pads(a.auto_pad, (a.pads[0] as u32, a.pads[2] as u32),
                                       input.dim(2), kh, sh, 1)
             .ok_or(EngineError::ShapeMismatch)?;
@@ -1424,9 +1427,10 @@ mod tests {
                 run_inference(idx, input.as_ptr(), 784, out.as_mut_ptr(), 10).expect("run");
             }
             let argmax = (0..10).fold(0, |b, k| if out[k] > out[b] { k } else { b });
-            let max_err = (0..10).map(|k| (out[k] - want[k]).abs()).fold(0.0f32, f32::max);
             assert_eq!(argmax, *want_argmax, "logits {:?}", out);
-            assert!(max_err <= 5e-3, "max |err| {} logits {:?} want {:?}", max_err, out, want);
+            // Per element, so a NaN logit fails (f32::max would drop it).
+            assert!(out.iter().zip(want.iter()).all(|(o, w)| (o - w).abs() <= 5e-3),
+                    "logits {:?} want {:?}", out, want);
         }
         let _ = registry::unload_model(idx);
     }

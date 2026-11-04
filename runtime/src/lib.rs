@@ -8841,14 +8841,15 @@ pub extern "C" fn rust_inference_test() -> i32 {
                         (run, *core::ptr::addr_of!(MNIST_REF_OUTPUT))
                     };
                     let mut argmax = 0usize;
-                    let mut max_err = 0.0f32;
+                    let mut close = true;
                     for k in 0..10 {
                         if out[k] > out[argmax] { argmax = k; }
                         let d = out[k] - want[k];
                         let d = if d < 0.0 { -d } else { d };
-                        if !(d <= max_err) { max_err = d; }   // NaN sticks
+                        // Written so a NaN logit fails the comparison.
+                        if !(d <= 5e-3) { close = false; }
                     }
-                    if run.is_err() || argmax != *want_argmax || !(max_err <= 5e-3) {
+                    if run.is_err() || argmax != *want_argmax || !close {
                         all_ok = false;
                     }
                 }
