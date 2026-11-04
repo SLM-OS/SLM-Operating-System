@@ -196,11 +196,14 @@ starting from a USB Force Recovery flash. The steps, in order:
    microSD.
 7. Deploy SLM-OS with `scripts/jetson-uefi-deploy.sh` as below.
 
-One power-timing observation, not yet characterised: on 2026-11-03 a
-Linux `poweroff` followed about 10 s later by `enter_recovery` (labctl's
-5 s off time) left jetson-nano-1 off. There was no APX device and the
-serial console stayed silent. A `power_cycle delay=15` then brought it
-up in recovery. Until this is tested, use a 15 s delay after a shutdown.
+After a Linux shutdown, jetson-nano-1 needs its outlet off for at least
+14 s before it powers back on. With anything shorter it stays off: no
+APX device and a silent console, which on the way into recovery looks
+like a strap problem. This was measured on 2026-11-03 in 1 s steps from
+5 s. Disconnecting the USB-C cable made no difference, so the port is
+not back-feeding the board. The board's labctl cycle delay is set to
+15 s, so `power_cycle`, `enter_recovery` and `exit_recovery` wait that
+long by default.
 
 ---
 
