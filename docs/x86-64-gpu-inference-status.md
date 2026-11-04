@@ -466,7 +466,7 @@ the EL2+VHE workaround we already use for the rest of Jetson bringup
 is at a higher priv level than vfio-pci, so the range of potentially-
 accessible PLMs is broader.
 
-**Recommendation:** pursue this, even post-capstone, as the pragmatic
+**Recommendation:** pursue this as the pragmatic
 way to actually reach GPU inference.
 
 ### 4.2 Option B — **Bare-metal SLM-OS on x86-64**
@@ -1061,8 +1061,7 @@ lock. Empirical test required to know.
 **Costs:** Linux kernel engineering, out-of-tree maintenance, PR
 upstream if we want long-term support.
 
-**Estimated effort:** unknown. Not recommended for capstone or
-immediate post-capstone work.
+**Estimated effort:** unknown. Not recommended as near-term work.
 
 ### 4.4 Options descoped
 

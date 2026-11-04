@@ -201,7 +201,7 @@ static void test_priority_inheritance_basic(void)
  * Exercises the IRQ-mask probe path in pi_mutex_lock's inner wait loop.
  * A realistic contended-waiter scenario (two runnable tasks, one holder
  * one waiter) depends on the scheduler handling priority inheritance
- * correctly under re-queue — which is a known post-capstone limitation
+ * correctly under re-queue — which is a known limitation
  * (sleep queue rework is filed separately). Here we validate the
  * narrower SCHED-H1 claim: repeated trylock / unlock cycles run without
  * deadlocking on the mutex's guard or looping forever in the spin path.

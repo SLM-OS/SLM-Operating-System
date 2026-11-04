@@ -512,7 +512,7 @@ while (mutex->locked) {
 
 The boost path in `try_boost_owner` updates `effective_priority` but does not re-sort the run queue. A holder that was enqueued at `LOW` remains in its `LOW` slot in the per-CPU queue even after being boosted to `HIGH`. In a single-CPU scenario with one holder and one HIGH-priority waiter, the scheduler picks the waiter (rq head), which spins/yields and is itself re-queued at HIGH — starving the boosted holder. The livelock persists even under hardware preemption (Pi 5 default `SECONDARY_PREEMPT=ON`, Jetson default under `JETSON_HW_TICK=ON`) because the bug is the run-queue ordering, not the preemption mechanism: a timer IRQ would still pick the waiter on the next `schedule()` since it sits at the queue head.
 
-The capstone-ready conservative fix (SCHED-H1) handles the IRQ-safety issue but does not resolve the single-CPU livelock. The proper fix is a sleep-queue model — the waiter blocks on a wait condition and is woken by `pi_mutex_unlock` — and is tracked as a post-capstone enhancement.
+The capstone-ready conservative fix (SCHED-H1) handles the IRQ-safety issue but does not resolve the single-CPU livelock. The proper fix is a sleep-queue model — the waiter blocks on a wait condition and is woken by `pi_mutex_unlock` — and is tracked as a future enhancement.
 
 ## FFI Task API
 

@@ -427,7 +427,7 @@ ack between iterations, so a single publisher cannot back-to-back deliver
 to one mailbox.
 
 The single-mailbox overwrite drop is a real limitation of the current
-single-slot design and is tracked for post-capstone follow-up as #869.
+single-slot design and is tracked as #869.
 The concurrency-stress tests in `test_integration.c` document the
 boundary explicitly so future maintainers don't mistake a deliberate
 limitation for a regression.

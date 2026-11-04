@@ -1612,7 +1612,7 @@ static void test_msg_router_multi_subscriber(void)
  * in the SAME mailbox at once, so the single-slot overwrite issue isn't
  * exercised here. That case (back-to-back delivery to one mailbox with no
  * intervening ack) is a real limitation of the current design and is filed
- * as #869 for post-capstone follow-up — explicitly NOT in scope for this
+ * as #869 for follow-up — explicitly NOT in scope for this
  * test. The assertion is about CROSS-MAILBOX priority comparison at receive
  * time, not within-mailbox queueing.
  *

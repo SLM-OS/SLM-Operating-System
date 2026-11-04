@@ -1,6 +1,6 @@
 # SLM-OS Future Work
 
-Post-capstone development roadmap. These items were identified during Phases 1-6 and explicitly deferred to maintain focus on the core capstone deliverables.
+Development roadmap. Most of these items were first identified during the original capstone (Phases 1-6) and deferred then to keep its scope focused; open work is tracked in the GitHub `Backlog` and `Icebox` milestones.
 
 ---
 
@@ -20,7 +20,7 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - **E3.4.e / E4 / E5 / E6** — RISC-V startup, RPC ring completion, compute engine, full pipeline: transitively blocked by E3.4.d on this platform.
 - **Jetson GA10B / bare-metal paths:** the portable bringup code (VBIOS parse, Falcon driver, DMEMMAPPER patcher, sig-index, RPC skeleton) transfers directly and does not suffer the priv-lock. See `docs/x86-64-gpu-inference-status.md` §4.
 
-### TensorRT Integration (still post-capstone)
+### TensorRT Integration
 - Requires working GSP + CUDA runtime
 - Pre-compiled TensorRT engines for supported models
 - Fallback to CPU inference when GPU unavailable
@@ -202,7 +202,7 @@ broader hardware/networking generalization remains follow-on work.
 
 ## Priority Recommendations
 
-**High priority (immediate post-capstone):**
+**High priority:**
 1. Real AI scheduler weights — validates the AI-first thesis
 2. FP16 quantization — practical inference speedup
 3. pi_mutex sleep queue — replaces single-CPU contended livelock on the priority-inheritance path
