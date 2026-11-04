@@ -288,7 +288,9 @@ instead:
   library) and the same op shapes;
 - eviction batch 64; add-bias-ReLU with 32-thread CTAs (#1036/#1040);
 - the scheduler's own `ai_mlp_*` weights, transposed at build time; the
-  scheduler pipeline needs AI_SCHED=ON, the Jetson default;
+  scheduler pipeline needs AI_SCHED=ON, the Jetson default (the
+  Makefile sets it for `PLATFORM=JETSON_ORIN_NANO`; an `AI_SCHED=OFF`
+  build skips the sched pipeline and `nvgpu cold check` reports it);
 - the eviction weights from `runtime/src/mm/eviction/generated/mlp_policy_f32.rs`,
   extracted by `cmake/gen_eviction_mlp_weights.cmake`.
 

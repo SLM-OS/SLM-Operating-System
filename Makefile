@@ -16,9 +16,11 @@ BUILD_TYPE ?= Release
 PLATFORM ?= QEMU_VIRT
 
 # AI Scheduler: ON for Pi 5 (trained MLP/PPO weights + the
-# `hailo load ... sched` path that the inference workflow needs);
-# OFF elsewhere. Override on the command line if needed.
-ifeq ($(PLATFORM),RASPI5)
+# `hailo load ... sched` path that the inference workflow needs) and
+# for Jetson (the ai_mlp weights the GA10B sched-MLP GPU pipeline runs,
+# incl. the one the UEFI-direct cold bring-up builds, #1092); OFF
+# elsewhere. Override on the command line (AI_SCHED=OFF) if needed.
+ifneq ($(filter $(PLATFORM),RASPI5 JETSON_ORIN_NANO),)
     AI_SCHED ?= ON
 else
     AI_SCHED ?= OFF

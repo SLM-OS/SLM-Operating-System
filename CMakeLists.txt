@@ -2513,7 +2513,7 @@ if(ENABLE_AI_SCHEDULER)
     )
 
     target_link_libraries(slmos.elf PRIVATE ai_sched)
-    message(STATUS "  AI Scheduler: ENABLED (stub weights)")
+    message(STATUS "  AI Scheduler: ENABLED (AI_WEIGHTS=${AI_WEIGHTS})")
 else()
     message(STATUS "  AI Scheduler: disabled")
 endif()
