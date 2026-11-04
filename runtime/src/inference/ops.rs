@@ -640,9 +640,17 @@ extern "C" {
 /// Add: out = a + b, with broadcasting.
 ///
 /// Supports:
-/// - Same shape: element-wise (SIMD)
-/// - Bias broadcast: a is \[M, N\], b is \[N\] → add b to each row of a
+/// - Same shape (ranks aligned, e.g. \[1, N\] + \[N\]): element-wise (SIMD)
 /// - Scalar broadcast: b is \[1\] → add b\[0\] to all elements (SIMD)
+/// - Row broadcast: b's only non-1 dimension is a's last one → add b to
+///   each row of a (SIMD)
+/// - Any other NumPy / ONNX unidirectional broadcast of b into a's shape,
+///   e.g. a Conv bias \[C, 1, 1\] onto \[N, C, H, W\] (per channel)
+///
+/// `out` has a's shape. A b that does not broadcast to a is an error:
+/// the old fallback repeated b by flat index (`b[i % len(b)]`), which
+/// added a \[C, 1, 1\] bias by element position instead of by channel
+/// and made the CPU MNIST path wrong (#1086).
 pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
     let a_n = a.num_elements();
     let b_n = b.num_elements();
@@ -657,7 +665,10 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
         let outp = out.data_mut();
 
         if a_n == b_n {
-            // Same shape: element-wise SIMD
+            // Same shape (after aligning ranks): element-wise SIMD. An
+            // equal element count with another shape ([2,3] + [3,2]) is
+            // not a broadcast and is rejected.
+            broadcast_shape(a, b)?;
             add_elementwise_simd(ap, bp, outp, a_n);
         } else if b_n == 1 {
             // Scalar broadcast: SIMD
@@ -667,25 +678,108 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
                 core::ptr::copy_nonoverlapping(ap, outp, a_n);
             }
             add_scalar_simd(outp, scalar, a_n);
-        } else if a.ndim >= 2 && b_n == a.cols() as usize {
-            // Bias broadcast: b[N] added to each row of a[M, N]
-            let cols = a.cols() as usize;
-            let rows = a_n / cols;
-            for r in 0..rows {
-                let row_offset = r * cols;
-                add_elementwise_simd(ap.add(row_offset), bp, outp.add(row_offset), cols);
-            }
-        } else if b_n > 0 && a_n % b_n == 0 {
-            // General broadcast: repeat b across a
-            for i in 0..a_n {
-                *outp.add(i) = *ap.add(i) + *bp.add(i % b_n);
-            }
         } else {
-            return Err(EngineError::ShapeMismatch);
+            let bshape = broadcast_shape(a, b)?;
+            let nd = a.ndim as usize;
+            let row_bcast = nd >= 2 && bshape[nd - 1] == a.shape[nd - 1]
+                && bshape[..nd - 1].iter().all(|&d| d == 1);
+            if row_bcast {
+                // b[N] added to each row of a[.., N]
+                let cols = a.shape[nd - 1] as usize;
+                let rows = a_n / cols;
+                for r in 0..rows {
+                    let row_offset = r * cols;
+                    add_elementwise_simd(ap.add(row_offset), bp, outp.add(row_offset), cols);
+                }
+            } else {
+                add_broadcast_general(ap, bp, outp, &a.shape[..nd], &bshape[..nd]);
+            }
         }
     }
 
     Ok(())
+}
+
+/// b's shape aligned to a's `ndim` (leading 1s added; extra leading 1s
+/// of b dropped), checked to broadcast into a: every dimension equals
+/// a's or is 1.
+fn broadcast_shape(a: &Tensor, b: &Tensor) -> Result<[u32; super::tensor::MAX_DIMS], EngineError> {
+    let nd = a.ndim as usize;
+    let bnd = b.ndim as usize;
+    let mut out = [1u32; super::tensor::MAX_DIMS];
+    if nd == 0 || bnd == 0 {
+        return Err(EngineError::ShapeMismatch);
+    }
+    for i in 0..bnd {
+        let d = b.shape[i];
+        // Position of b's dim i once right-aligned with a.
+        match (nd + i).checked_sub(bnd) {
+            Some(j) => {
+                if d != 1 && d != a.shape[j] {
+                    return Err(EngineError::ShapeMismatch);
+                }
+                out[j] = d;
+            }
+            None => {
+                if d != 1 {
+                    return Err(EngineError::ShapeMismatch);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// out = a + b where b (shape `bshape`, already aligned and checked by
+/// broadcast_shape) broadcasts into a (shape `ashape`). The innermost
+/// axes over which b is constant are added as one scalar per run.
+///
+/// # Safety
+/// `ap`/`outp` cover prod(ashape) f32s, `bp` covers prod(bshape).
+unsafe fn add_broadcast_general(ap: *const f32, bp: *const f32, outp: *mut f32,
+                                ashape: &[u32], bshape: &[u32]) {
+    let nd = ashape.len();
+    let mut bstride = [0usize; super::tensor::MAX_DIMS];
+    let mut s = 1usize;
+    for i in (0..nd).rev() {
+        if bshape[i] != 1 {
+            bstride[i] = s;
+        }
+        s *= bshape[i] as usize;
+    }
+    // Innermost run of axes where b is constant.
+    let mut k = nd;
+    let mut inner = 1usize;
+    while k > 0 && bshape[k - 1] == 1 {
+        k -= 1;
+        inner *= ashape[k] as usize;
+    }
+    let total: usize = ashape.iter().map(|&d| d as usize).product();
+    if inner == 0 || total == 0 {
+        return;
+    }
+    let outer = total / inner;
+    let mut idx = [0u32; super::tensor::MAX_DIMS];
+    for o in 0..outer {
+        let mut boff = 0usize;
+        for i in 0..k {
+            boff += idx[i] as usize * bstride[i];
+        }
+        let bv = *bp.add(boff);
+        let base = o * inner;
+        for j in 0..inner {
+            *outp.add(base + j) = *ap.add(base + j) + bv;
+        }
+        let mut i = k;
+        while i > 0 {
+            i -= 1;
+            idx[i] += 1;
+            if idx[i] < ashape[i] {
+                break;
+            }
+            idx[i] = 0;
+        }
+    }
 }
 
 /// Element-wise add using SIMD.
@@ -1495,5 +1589,68 @@ mod tests {
         let qp = quantize_fp32_to_int8(core::ptr::null(), 16, core::ptr::null_mut());
         assert_eq!(qp.scale, 1.0);
         assert_eq!(qp.zero_point, 0);
+    }
+
+    /// Run ops::add on owned buffers; Err when it rejects the shapes.
+    fn add_shapes(a: &[f32], ashape: &[u32], b: &[f32], bshape: &[u32])
+                  -> Result<std::vec::Vec<f32>, EngineError> {
+        let mut out = std::vec![0.0f32; a.len()];
+        let at = Tensor::new(a.as_ptr(), ashape);
+        let bt = Tensor::new(b.as_ptr(), bshape);
+        let mut ot = Tensor::new(out.as_mut_ptr() as *const f32, ashape);
+        add(&at, &bt, &mut ot)?;
+        Ok(out)
+    }
+
+    /// #1086: a Conv bias [C, 1, 1] is added per channel. Here C == W
+    /// (2), the case the old flat-index fallback (`b[i % C]`) also got
+    /// wrong without changing any shape.
+    #[test]
+    fn add_broadcasts_channel_bias() {
+        let a: std::vec::Vec<f32> = (0..8).map(|v| v as f32).collect();   // [1, 2, 2, 2]
+        let out = add_shapes(&a, &[1, 2, 2, 2], &[100.0, 200.0], &[2, 1, 1]).unwrap();
+        assert_eq!(out, [100.0, 101.0, 102.0, 103.0, 204.0, 205.0, 206.0, 207.0]);
+        // Same through a rank-matched [1, 2, 1, 1].
+        let out = add_shapes(&a, &[1, 2, 2, 2], &[100.0, 200.0], &[1, 2, 1, 1]).unwrap();
+        assert_eq!(out, [100.0, 101.0, 102.0, 103.0, 204.0, 205.0, 206.0, 207.0]);
+    }
+
+    #[test]
+    fn add_broadcasts_rows_middle_axes_and_scalars() {
+        // Row broadcast [2, 3] + [3] and + [1, 3].
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let want = [11.0, 22.0, 33.0, 14.0, 25.0, 36.0];
+        assert_eq!(add_shapes(&a, &[2, 3], &[10.0, 20.0, 30.0], &[3]).unwrap(), want);
+        assert_eq!(add_shapes(&a, &[2, 3], &[10.0, 20.0, 30.0], &[1, 3]).unwrap(), want);
+        // Column broadcast [2, 3] + [2, 1].
+        assert_eq!(add_shapes(&a, &[2, 3], &[10.0, 20.0], &[2, 1]).unwrap(),
+                   [11.0, 12.0, 13.0, 24.0, 25.0, 26.0]);
+        // Middle axis [2, 2, 2] + [2, 1] (aligned to [1, 2, 1]).
+        let a8: std::vec::Vec<f32> = (0..8).map(|v| v as f32).collect();
+        assert_eq!(add_shapes(&a8, &[2, 2, 2], &[10.0, 20.0], &[2, 1]).unwrap(),
+                   [10.0, 11.0, 22.0, 23.0, 14.0, 15.0, 26.0, 27.0]);
+        // Scalar and same-shape.
+        assert_eq!(add_shapes(&a, &[2, 3], &[1.0], &[1]).unwrap(),
+                   [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(add_shapes(&a, &[2, 3], &a, &[2, 3]).unwrap(),
+                   [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+        // A leading 1 beyond a's rank is fine.
+        assert_eq!(add_shapes(&a, &[2, 3], &[10.0, 20.0, 30.0], &[1, 1, 3]).unwrap(), want);
+    }
+
+    /// Shapes that do not broadcast are rejected instead of being
+    /// repeated by flat index.
+    #[test]
+    fn add_rejects_non_broadcastable_shapes() {
+        let a = [0.0f32; 12];   // [3, 4]
+        assert!(add_shapes(&a, &[3, 4], &[1.0, 2.0], &[2]).is_err());
+        assert!(add_shapes(&a, &[3, 4], &[1.0; 6], &[2, 3]).is_err());
+        assert!(add_shapes(&a, &[3, 4], &[1.0; 4], &[2, 1, 2]).is_err());
+        // Equal element count is not enough.
+        let a6 = [0.0f32; 6];
+        assert!(add_shapes(&a6, &[2, 3], &a6, &[3, 2]).is_err());
+        assert!(add_shapes(&a6[..3], &[1, 3], &a6[..3], &[3, 1]).is_err());
+        // ... but a rank difference of leading 1s is.
+        assert!(add_shapes(&a6, &[2, 3], &a6, &[1, 2, 3]).is_ok());
     }
 }

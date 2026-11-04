@@ -641,6 +641,19 @@ pub fn is_pool_initialized() -> bool {
 // Public API
 // =============================================================================
 
+/// Host tests: initialise the model memory pools exactly once per test
+/// process (64 MB weights, 8 MB workspace), however many tests and
+/// threads ask. model_mem_init itself re-creates the pools on every
+/// call, which would pull memory out from under a model another test
+/// has loaded.
+#[cfg(test)]
+pub(crate) fn ensure_pools_for_tests() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = model_mem_init(64, 8);
+    });
+}
+
 /// Initialize model memory pools.
 ///
 /// Allocates memory from C PMM and sets up weight and workspace pools.

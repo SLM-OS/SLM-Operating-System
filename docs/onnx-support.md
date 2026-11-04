@@ -21,7 +21,7 @@ The following ONNX operators are recognized during graph construction:
 | Operator | OpType Enum | Description |
 |----------|-------------|-------------|
 | MatMul | `MatMul` | Matrix multiplication |
-| Add | `Add` | Element-wise addition |
+| Add | `Add` | Element-wise addition with NumPy / ONNX broadcasting (see [Add broadcasting](#add-broadcasting)) |
 | Relu | `Relu` | Rectified linear unit activation |
 | Softmax | `Softmax` | Softmax normalization |
 | LayerNorm | `LayerNorm` | Layer normalization |
@@ -32,11 +32,50 @@ The following ONNX operators are recognized during graph construction:
 | Unsqueeze | `Unsqueeze` | Insert dimensions |
 | Gemm | `Gemm` | General matrix multiplication |
 | Flatten | `Flatten` | Flatten tensor to 2D |
-| Conv | `Conv` | 2D convolution (NCHW layout, default stride=1, pad=0) |
-| MaxPool | `MaxPool` | 2D max pooling (default kernel=2x2, stride=2) |
+| Conv | `Conv` | 2D convolution (NCHW layout); `strides`, `pads`, `auto_pad` honoured (see [Conv / MaxPool attributes](#conv--maxpool-attributes)) |
+| MaxPool | `MaxPool` | 2D max pooling; `kernel_shape` and `strides` honoured (2x2 / stride 2 when the node has no `kernel_shape`) |
 | Shape | `Shape` | Return tensor shape |
 | Constant | `Constant` | Constant tensor value |
 | Cast | `Cast` | Data type conversion |
+
+### Conv / MaxPool attributes
+
+The parser reads `kernel_shape`, `strides`, `pads`, `auto_pad`,
+`dilations`, `group` and `ceil_mode` from each node (`NodeAttrs` in
+`runtime/src/loader/graph.rs`), and the engine applies them:
+
+- Conv: `strides`, explicit `pads`, and `auto_pad` = `NOTSET`, `VALID`,
+  `SAME_UPPER` or `SAME_LOWER`. SAME padding is resolved per the ONNX
+  rule (`resolve_pads`).
+- MaxPool: `kernel_shape` and `strides`. `strides` defaults to 1 when it
+  is absent, as in the ONNX spec. Padding (explicit or `SAME_*`) is
+  accepted only when it resolves to zero.
+
+A malformed `AttributeProto` on any node fails the model load
+(`CorruptedData`); attributes the engine does not use are otherwise
+ignored.
+
+The CPU kernels cannot do asymmetric padding, dilation, grouped
+convolution, pooling pads or `ceil_mode`. A node that needs one of those
+fails with `UnsupportedOp` instead of running with default geometry.
+
+Until #1086 these attributes were ignored: Conv ran with stride 1 and
+pad 0, and every MaxPool ran with 2x2 / stride 2. The ONNX-zoo MNIST
+model (`SAME_UPPER` 5x5 Convs, a 3x3 / stride 3 second pool) still
+produced a 16x4x4 tensor for its MatMul, so its logits were silently
+wrong.
+
+### Add broadcasting
+
+`Add` broadcasts like NumPy / ONNX: same shape, a scalar, a trailing-axis
+bias, or any shape whose dimensions each equal the other tensor's or are
+1 (a Conv bias `[C, 1, 1]` on `[N, C, H, W]` is added per channel).
+Shapes that do not broadcast are rejected, including an equal element
+count in another shape (`[2, 3] + [3, 2]`). The broadcast is one-way in
+either direction (the smaller operand into the larger); a two-way
+broadcast such as `[3, 1] + [1, 4]` is rejected. The earlier fallback repeated
+the smaller tensor by flat index, which added a `[C, 1, 1]` bias by
+element position (#1086).
 
 Operators not in this set are parsed as `Unknown`. An `Unknown` operator does not prevent loading but would block inference once the execution engine is implemented.
 
@@ -146,6 +185,8 @@ SLM-OS> model load /mnt/files/mnist.onnx
 SLM-OS can now execute ONNX models end-to-end on the CPU. The inference engine walks the operator graph in topological order, dispatching each node to the corresponding operator implementation. Intermediate tensors are allocated from a static workspace buffer that resets between inference calls.
 
 The **MNIST-12** model from the ONNX Model Zoo serves as the verified test case. This model uses Conv, MaxPool, Reshape, MatMul, Add, Relu, and Softmax operators to classify 28x28 grayscale digit images into 10 classes. Running `model infer` on a loaded MNIST model executes the full forward pass and prints output probabilities with the predicted class.
+
+The CPU path is checked against onnxruntime: `mnist_cpu_logits_match_onnxruntime` (host, `make runtime-test`) and the in-kernel `mnist: CPU logits match onnxruntime (#1086)` test (`make test`) run two asymmetric inputs and require every logit within 5e-3 of onnxruntime 1.24's output. The GA10B GPU pipeline matches the same reference to about 1e-3.
 
 See `docs/ffi.md` for the inference FFI functions (`rust_infer`, `rust_infer_and_print`, `rust_inference_test`).
 

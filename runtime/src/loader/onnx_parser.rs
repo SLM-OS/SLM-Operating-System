@@ -36,6 +36,13 @@ const NODE_INPUT: u32 = 1;
 const NODE_OUTPUT: u32 = 2;
 const NODE_NAME: u32 = 3;
 const NODE_OP_TYPE: u32 = 4;
+const NODE_ATTRIBUTE: u32 = 5;
+
+// AttributeProto field numbers
+const ATTR_NAME: u32 = 1;
+const ATTR_I: u32 = 3;
+const ATTR_S: u32 = 4;
+const ATTR_INTS: u32 = 8;
 
 // TensorProto
 const TENSOR_DIMS: u32 = 1;
@@ -257,6 +264,8 @@ pub struct ParsedNode {
     pub input_count: u8,
     pub outputs: [Name; MAX_NODE_OUTPUTS_PARSE],
     pub output_count: u8,
+    /// Conv / pooling attributes (#1086); EMPTY when the node has none.
+    pub attrs: NodeAttrs,
 }
 
 impl ParsedNode {
@@ -267,6 +276,7 @@ impl ParsedNode {
         input_count: 0,
         outputs: [Name::EMPTY; MAX_NODE_OUTPUTS_PARSE],
         output_count: 0,
+        attrs: NodeAttrs::EMPTY,
     };
 }
 
@@ -474,11 +484,116 @@ fn parse_node(data: &[u8]) -> Result<ParsedNode, ParseError> {
                     node.op_type = Name::from_bytes(name);
                 }
             }
-            _ => {} // Skip attributes, domain, etc.
+            NODE_ATTRIBUTE => {
+                if let FieldData::Bytes(attr) = field.data {
+                    parse_attribute(attr, &mut node.attrs)?;
+                }
+            }
+            _ => {} // Skip domain, doc_string, etc.
         }
     }
 
     Ok(node)
+}
+
+/// Collect INTS values from an AttributeProto `ints` field (packed, or
+/// one varint per field) into `out`, counting every value in `n` (so
+/// `n > out.len()` means there were too many). Values outside
+/// 0..=u16::MAX mark the attribute unsupported.
+fn collect_ints(field: &protobuf::ProtoField, out: &mut [u16], n: &mut usize,
+                unsupported: &mut bool) -> Result<(), ParseError> {
+    let mut push = |v: i64, n: &mut usize| {
+        if *n < out.len() {
+            if (0..=u16::MAX as i64).contains(&v) {
+                out[*n] = v as u16;
+            } else {
+                *unsupported = true;
+            }
+        }
+        *n += 1;
+    };
+    match field.data {
+        FieldData::Varint(v) => push(v as i64, n),
+        FieldData::Bytes(b) => {
+            for v in protobuf::packed_varint_i64(b) {
+                push(v?, n);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Parse one AttributeProto into the 2-D Conv / pooling attributes the
+/// CPU ops use (kernel_shape, strides, pads, dilations, group, auto_pad,
+/// ceil_mode). Other attributes are ignored. A value the ops cannot
+/// represent sets `attrs.unsupported`, so the engine refuses the node
+/// rather than silently running it with defaults (#1086: Conv padding
+/// and the MaxPool kernel used to be hard-coded).
+fn parse_attribute(data: &[u8], attrs: &mut NodeAttrs) -> Result<(), ParseError> {
+    let mut name: &[u8] = &[];
+    // First pass: the name (field order is not guaranteed).
+    for field in ProtoIter::new(data) {
+        let field = field?;
+        if field.field_number == ATTR_NAME {
+            if let Some(n) = protobuf::field_as_str(&field) {
+                name = n;
+            }
+        }
+    }
+
+    let mut ints = [0u16; 4];
+    let mut n_ints = 0usize;
+    let mut int_val: Option<i64> = None;
+    let mut str_val: &[u8] = &[];
+    let mut unsupported = false;
+    for field in ProtoIter::new(data) {
+        let field = field?;
+        match field.field_number {
+            ATTR_INTS => collect_ints(&field, &mut ints, &mut n_ints, &mut unsupported)?,
+            ATTR_I => int_val = Some(protobuf::field_as_i64(&field)),
+            ATTR_S => str_val = protobuf::field_as_str(&field).unwrap_or(&[]),
+            _ => {}
+        }
+    }
+
+    match name {
+        b"kernel_shape" => {
+            attrs.has_kernel_shape = true;
+            if n_ints == 2 { attrs.kernel_shape = [ints[0], ints[1]]; } else { unsupported = true; }
+        }
+        b"strides" => {
+            attrs.has_strides = true;
+            if n_ints == 2 { attrs.strides = [ints[0], ints[1]]; } else { unsupported = true; }
+        }
+        b"dilations" => {
+            if n_ints == 2 { attrs.dilations = [ints[0], ints[1]]; } else { unsupported = true; }
+        }
+        b"pads" => {
+            if n_ints == 4 { attrs.pads = ints; } else { unsupported = true; }
+        }
+        b"group" => match int_val {
+            Some(g) if (1..=u16::MAX as i64).contains(&g) => attrs.group = g as u16,
+            _ => unsupported = true,
+        },
+        b"auto_pad" => {
+            attrs.auto_pad = match str_val {
+                b"NOTSET" | b"" => AutoPad::NotSet,
+                b"SAME_UPPER" => AutoPad::SameUpper,
+                b"SAME_LOWER" => AutoPad::SameLower,
+                b"VALID" => AutoPad::Valid,
+                _ => { unsupported = true; AutoPad::NotSet }
+            };
+        }
+        b"ceil_mode" => {
+            if int_val.unwrap_or(0) != 0 { unsupported = true; }
+        }
+        _ => {}
+    }
+    if unsupported {
+        attrs.unsupported = true;
+    }
+    Ok(())
 }
 
 /// Parse a TensorProto message (initializer / weight tensor).
@@ -647,6 +762,7 @@ pub fn build_graph(parsed: &ParsedOnnx) -> Result<OperatorGraph, LoadError> {
         let mut gnode = GraphNode::EMPTY;
         gnode.op_type = op_type;
         gnode.name = TensorName::from_bytes(pnode.name.as_bytes());
+        gnode.attrs = pnode.attrs;
 
         let in_count = core::cmp::min(
             core::cmp::min(pnode.input_count as usize, MAX_NODE_INPUTS_PARSE),
@@ -711,4 +827,116 @@ fn parsed_shape_to_tensor_shape(ps: &ParsedShape, dt: OnnxDataType) -> TensorSha
     }
     ts.ndim = ndim as u8;
     ts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static MNIST: &[u8] = include_bytes!("../../../models/test/mnist.onnx");
+
+    /// #1086: Conv / MaxPool attributes reach the graph. The ONNX-zoo
+    /// MNIST model has auto_pad=SAME_UPPER 5x5 Convs, a 2x2/2 pool and a
+    /// 3x3/3 pool; the engine used to run them with pad 0 and 2x2 pools.
+    #[test]
+    fn mnist_conv_and_pool_attributes_are_parsed() {
+        let parsed = parse_onnx(MNIST).expect("parse mnist.onnx");
+        let graph = build_graph(&parsed).expect("build graph");
+        let mut convs = 0;
+        let mut pools = [[0u16; 4]; 2];
+        let mut n_pools = 0;
+        for node in graph.nodes.iter().take(graph.node_count) {
+            match node.op_type {
+                OpType::Conv => {
+                    convs += 1;
+                    assert_eq!(node.attrs.auto_pad, AutoPad::SameUpper);
+                    assert_eq!(node.attrs.kernel_shape, [5, 5]);
+                    assert_eq!(node.attrs.strides, [1, 1]);
+                    assert_eq!(node.attrs.dilations, [1, 1]);
+                    assert_eq!(node.attrs.group, 1);
+                    assert!(!node.attrs.unsupported);
+                }
+                OpType::MaxPool => {
+                    let a = &node.attrs;
+                    assert!(a.has_kernel_shape && a.has_strides && !a.unsupported);
+                    assert_eq!(a.auto_pad, AutoPad::NotSet);
+                    assert_eq!(a.pads, [0; 4]);
+                    pools[n_pools] = [a.kernel_shape[0], a.kernel_shape[1],
+                                      a.strides[0], a.strides[1]];
+                    n_pools += 1;
+                }
+                _ => assert_eq!(node.attrs, NodeAttrs::EMPTY),
+            }
+        }
+        assert_eq!(convs, 2);
+        assert_eq!(n_pools, 2);
+        assert_eq!(pools, [[2, 2, 2, 2], [3, 3, 3, 3]]);
+    }
+
+    /// AttributeProto encoding, one varint per `ints` entry (unpacked)
+    /// and packed, plus values the CPU ops cannot represent.
+    #[test]
+    fn attribute_parsing_edge_cases() {
+        // name="strides" (field 1), ints 2 and 3 unpacked (field 8, varint).
+        let unpacked = [0x0A, 7, b's', b't', b'r', b'i', b'd', b'e', b's', 0x40, 2, 0x40, 3];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&unpacked, &mut a).unwrap();
+        assert!(a.has_strides && !a.unsupported);
+        assert_eq!(a.strides, [2, 3]);
+
+        // name="pads", packed ints [1,2,1,2] (field 8, length-delimited).
+        let packed = [0x0A, 4, b'p', b'a', b'd', b's', 0x42, 4, 1, 2, 1, 2];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&packed, &mut a).unwrap();
+        assert_eq!(a.pads, [1, 2, 1, 2]);
+        assert!(!a.unsupported);
+
+        // A 3-D kernel_shape is not representable.
+        let k3 = [0x0A, 12, b'k', b'e', b'r', b'n', b'e', b'l', b'_', b's', b'h', b'a', b'p', b'e',
+                  0x42, 3, 3, 3, 3];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&k3, &mut a).unwrap();
+        assert!(a.unsupported);
+
+        // auto_pad="SAME_LOWER" (field 4, string); ceil_mode=1 (field 3).
+        let lower = [0x0A, 8, b'a', b'u', b't', b'o', b'_', b'p', b'a', b'd',
+                     0x22, 10, b'S', b'A', b'M', b'E', b'_', b'L', b'O', b'W', b'E', b'R'];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&lower, &mut a).unwrap();
+        assert_eq!(a.auto_pad, AutoPad::SameLower);
+        let ceil = [0x0A, 9, b'c', b'e', b'i', b'l', b'_', b'm', b'o', b'd', b'e', 0x18, 1];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&ceil, &mut a).unwrap();
+        assert!(a.unsupported);
+
+        // A negative pad (int64 varint of -1) is not representable.
+        let neg = [0x0A, 4, b'p', b'a', b'd', b's',
+                   0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+                   0x40, 0, 0x40, 0, 0x40, 0];
+        let mut a = NodeAttrs::EMPTY;
+        parse_attribute(&neg, &mut a).unwrap();
+        assert!(a.unsupported);
+    }
+
+    #[test]
+    fn resolve_pads_matches_onnx_same_rules() {
+        // MNIST: 28 / 14 input, 5x5 kernel, stride 1 -> 2 on each side.
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 5, 1, 1), Some((2, 2)));
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 14, 5, 1, 1), Some((2, 2)));
+        // Odd total: UPPER puts the extra element at the end, LOWER at the start.
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 4, 1, 1), Some((1, 2)));
+        assert_eq!(resolve_pads(AutoPad::SameLower, (0, 0), 28, 4, 1, 1), Some((2, 1)));
+        // Stride 2: out = ceil(7/2) = 4, need (4-1)*2 + 3 = 9, total 2.
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 7, 3, 2, 1), Some((1, 1)));
+        // A 2x2 / stride-2 pool on an even size needs none: MaxPool
+        // accepts SAME_* exactly when this is (0, 0).
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 2, 2, 1), Some((0, 0)));
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 27, 2, 2, 1), Some((0, 1)));
+        // Explicit and VALID.
+        assert_eq!(resolve_pads(AutoPad::NotSet, (1, 3), 28, 5, 1, 1), Some((1, 3)));
+        assert_eq!(resolve_pads(AutoPad::Valid, (1, 3), 28, 5, 1, 1), Some((0, 0)));
+        // Degenerate.
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 5, 0, 1), None);
+        assert_eq!(resolve_pads(AutoPad::SameUpper, (0, 0), 28, 0, 1, 1), None);
+    }
 }
