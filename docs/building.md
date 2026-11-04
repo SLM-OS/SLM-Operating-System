@@ -383,7 +383,9 @@ make BUILD_TYPE=Release  # Default: optimized, no debug symbols
 ### Optional Features
 
 ```bash
-make kernel AI_SCHED=ON               # AI scheduler (MLP/PPO, kernel-side, C)
+make kernel AI_SCHED=ON               # AI scheduler (MLP/PPO, kernel-side, C);
+                                      #   default ON for RASPI5 and JETSON_ORIN_NANO,
+                                      #   AI_SCHED=OFF to drop it there
 make kernel                          # eviction enabled by default (LRU)
 make kernel EVICTION_DEFAULT_POLICY=lfu
 make kernel EVICTION_MODELS=ON        # trained XGBoost + int8 MLP policies

@@ -688,7 +688,7 @@ PMM budget; see `kernel/CLAUDE.md` §"Task Stack Sizing".
 
 ### AI Scheduler (Optional)
 
-The AI scheduler is an optional feature that adds MLP/PPO model-based CPU assignment policies. It is disabled by default and has no effect on the standard build.
+The AI scheduler is an optional feature that adds MLP/PPO model-based CPU assignment policies. The Makefile builds it by default for Pi 5 and Jetson (`AI_SCHED ?= ON`; the Jetson sched-MLP GPU pipeline runs its weights) and leaves it out for QEMU and x86-64; `AI_SCHED=OFF` / `AI_SCHED=ON` override either way.
 
 ```bash
 # Build with AI scheduler (adds ai_mlp and ai_ppo policies)

@@ -26,7 +26,7 @@ runtime-selectable via `sched_set_policy(name)` — see #848 for the
 | Forward-pass file | `kernel/sched/ai/ai_inference.c` | Same | Same | Same |
 | Decision trigger | Every `scheduler_tick()` | Hardware tick (opt-in `SECONDARY_PREEMPT=ON`) / synthesized at yield (default) | Same (synthesized at yield) | Every tick |
 | Inference latency target | <50 μs on Cortex-A76 | Same | Same (A78AE) | <50 μs on Skylake |
-| Build gate | `AI_SCHED=ON` → `ENABLE_AI_SCHEDULER=ON` | Same | Same | Same |
+| Build gate | `AI_SCHED=ON` → `ENABLE_AI_SCHEDULER=ON` (default OFF) | Same (default ON) | Same (default ON) | Same (default OFF) |
 | Observability | `sched stats`, AI-policy counter | Same | Same | Same |
 
 ## State-vector `cache_pressure` (#872)

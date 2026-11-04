@@ -23,8 +23,9 @@ cd "$(dirname "$0")/.."
 # make exports its command-line variables (and MAKEFLAGS) to this
 # script, so the "default" baseline already had AI_SCHED=ON and every
 # toggle of it looked like a no-op. PLATFORM is dropped too, so the
-# check always runs against the default platform's variants; that is
-# enough, since it only asks whether toggling an option changes them.
+# toggle checks run against the default platform's variants; that is
+# enough, since they only ask whether toggling an option changes them.
+# (The AI-default checks below pass PLATFORM explicitly.)
 sigs() {
     env -i PATH="$PATH" HOME="$HOME" \
         make --no-print-directory -s print-build-signatures "$@"
@@ -70,7 +71,28 @@ for o in "${main_only[@]}"; do
     check "$o" kernel
 done
 
+# Per-platform AI scheduler default: ON for Pi 5 and Jetson (the
+# Jetson sched-MLP GPU pipeline runs the ai_mlp weights, #1092), OFF
+# for QEMU and x86-64; AI_SCHED=OFF still drops it.
+ai_default() {  # ai_default <want ON|OFF> <make args...>
+    local want="$1"; shift
+    local out got=OFF
+    out="$(sigs "$@")"   # a failing make aborts here (set -e), not as "OFF"
+    if grep -q -- '^kernel=.*-DENABLE_AI_SCHEDULER=ON' <<<"$out"; then
+        got=ON
+    fi
+    if [ "$got" != "$want" ]; then
+        echo "FAIL AI scheduler for '$*' is $got, expected $want"
+        fail=1
+    fi
+}
+ai_default ON  PLATFORM=RASPI5
+ai_default ON  PLATFORM=JETSON_ORIN_NANO
+ai_default OFF PLATFORM=JETSON_ORIN_NANO AI_SCHED=OFF
+ai_default OFF PLATFORM=QEMU_VIRT
+ai_default OFF PLATFORM=X86_64
+
 if [ "$fail" -eq 0 ]; then
-    echo "All $(( ${#common[@]} + ${#main_only[@]} )) build-signature options change their variants' signatures"
+    echo "All $(( ${#common[@]} + ${#main_only[@]} )) build-signature options change their variants' signatures; AI scheduler defaults match"
 fi
 exit "$fail"

@@ -5633,7 +5633,13 @@ static int nvgpu_cold_check(void)
                                     sizeof(ga10b_cp_sched_input_synth),
                                     sched_out, sizeof(sched_out));
     if (rc != 0) {
+#if defined(CONFIG_AI_SCHEDULER)
         shell_printf("check sched: dispatch rc=%d (pipeline not built?)\r\n", rc);
+#else
+        /* No ai_mlp weights in this build, so the cold bring-up skipped
+         * the sched pipeline (Jetson defaults to AI_SCHED=ON). */
+        shell_printf("check sched: not built - AI_SCHED=OFF build (rc=%d)\r\n", rc);
+#endif
         fails++;
     } else {
         uint32_t bad = ga10b_cp_count_mismatch(sched_out,

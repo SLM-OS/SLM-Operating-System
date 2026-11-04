@@ -136,14 +136,15 @@ make kexec-deploy PLATFORM=X86_64     # scp ELF to test-pc + fire kexec (mb2 mod
 # See docs/x86-64-gpu-inference-status.md §4.2.k for kexec investigation trail.
 
 # Other platforms:
-make kernel PLATFORM=RASPI5            # Raspberry Pi 5
+make kernel PLATFORM=RASPI5            # Raspberry Pi 5 (AI_SCHED ON by default)
 make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano (HW timer preempt
                                        #   ON by default; pass JETSON_HW_TICK=OFF
-                                       #   on stock-BL31 dev kits — see #755)
+                                       #   on stock-BL31 dev kits — see #755;
+                                       #   AI_SCHED ON by default)
 
-# AI scheduler (optional, adds MLP/PPO policies with real trained weights):
+# AI scheduler (adds MLP/PPO policies; default ON for Pi 5 and Jetson,
+# OFF for QEMU and x86-64; AI_SCHED=OFF turns it off):
 make kernel AI_SCHED=ON                        # QEMU ARM64 with AI scheduler
-make kernel PLATFORM=RASPI5 AI_SCHED=ON        # Pi 5 with AI scheduler
 make test AI_SCHED=ON                          # Run tests with AI scheduler
 make kernel PLATFORM=X86_64 AI_SCHED=ON        # x86-64 with AI scheduler (SSE)
 ```
