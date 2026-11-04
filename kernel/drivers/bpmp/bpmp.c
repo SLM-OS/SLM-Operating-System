@@ -309,6 +309,33 @@ int bpmp_pg_set_state(uint32_t domain_id, bool on)
     return (int)err;
 }
 
+_Static_assert(sizeof(struct bpmp_thermal_request) == 20,
+               "MRQ_THERMAL request is the 20-byte Linux ABI struct");
+
+int bpmp_thermal_get_temp(uint32_t zone, int32_t *temp_mc)
+{
+    if (!g_bpmp_initialised || temp_mc == NULL) {
+        return -1;
+    }
+
+    struct bpmp_thermal_request req = {
+        .type = CMD_THERMAL_GET_TEMP,
+        .zone = zone,
+    };
+    /* Response: struct cmd_thermal_get_temp_response { int32_t temp; } */
+    int32_t temp = 0;
+    int32_t err = 0;
+    int rc = mrq_send(MRQ_THERMAL, &req, sizeof(req), &temp, sizeof(temp), &err);
+    if (rc != 0) {
+        return rc;
+    }
+    if (err != 0) {
+        return (int)err;
+    }
+    *temp_mc = temp;
+    return 0;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO */
 
 /* Stubs for QEMU / Pi 5 / x86-64. */
@@ -323,5 +350,7 @@ int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
 int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en; return 0; }
 int  bpmp_pg_set_state(uint32_t id, bool on) { (void)id; (void)on; return 0; }
+/* No BPMP: there is no temperature to report. */
+int  bpmp_thermal_get_temp(uint32_t zone, int32_t *t) { (void)zone; (void)t; return -1; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

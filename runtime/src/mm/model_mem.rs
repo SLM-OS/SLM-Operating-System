@@ -598,29 +598,59 @@ unsafe impl Sync for MemoryPool {}
 #[cfg(feature = "ai_eviction")]
 static mut EVICTED_CONTENT_TRACKER: Option<super::eviction::EvictedContentTracker> = None;
 
+extern "C" {
+    fn slm_irq_save() -> u64;
+    fn slm_irq_restore(flags: u64);
+}
+
 /// RAII guard for the allocator spinlock.
 ///
 /// Replaces manual `lock_acquire`/`lock_release` pairs: the lock is
 /// released on drop, so panics or early returns can't leak the lock.
 /// (We compile with `panic = "abort"`, but RAII still protects against
 /// accidental `?` / early-return leaks.)
-struct SpinGuard;
+///
+/// IRQs stay masked while it is held, like `spin_lock_irqsave` and the
+/// msg_router guard (#1093). The pool stats are also read from
+/// IRQs-off context: net_pump's 1 Hz telemetry publish runs inside the
+/// lwIP core lock. With IRQs left on, a task preempted while holding
+/// LOCK on CPU 0 (the telnet shell running `bench eviction-e2e`) could
+/// never run again once net_pump, pinned to the same CPU, spun on LOCK
+/// with IRQs masked: CPU 0 hung, taking the network and the serial
+/// shell with it.
+///
+/// Nothing may allocate, free, or take another plain spinlock while
+/// LOCK is held: the heap (`linked_list_allocator::LockedHeap`) and the
+/// eviction registry lock leave IRQs on, so the same deadlock would
+/// come back through them. Callers size their Vecs before taking LOCK
+/// (snapshot helpers, `drain_expired_into`), build or drop the tracker
+/// outside it, and call into the eviction registry after releasing it.
+/// The only nested lock is the kernel PMM's (`spin_lock_irqsave`),
+/// when a reinit frees the pool backing.
+struct SpinGuard {
+    irq_flags: u64,
+}
 
 impl SpinGuard {
     fn new() -> Self {
+        // SAFETY: slm_irq_save reads DAIF (ARM64) / EFLAGS (x86_64) and
+        // masks IRQs; always safe to call.
+        let irq_flags = unsafe { slm_irq_save() };
         while LOCK
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             core::hint::spin_loop();
         }
-        SpinGuard
+        SpinGuard { irq_flags }
     }
 }
 
 impl Drop for SpinGuard {
     fn drop(&mut self) {
         LOCK.store(false, Ordering::Release);
+        // SAFETY: restores the IRQ state saved by the paired new().
+        unsafe { slm_irq_restore(self.irq_flags) };
     }
 }
 
@@ -705,6 +735,12 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
         })?;
     let workspace_base = workspace_base_ptr.as_ptr() as usize;
 
+    // Built before taking LOCK, which masks IRQs: the tracker's
+    // VecDeque comes from the heap, whose lock does not (#1093).
+    #[cfg(feature = "ai_eviction")]
+    let tracker = super::eviction::EvictedContentTracker::new();
+    #[cfg(feature = "ai_eviction")]
+    let old_tracker: Option<super::eviction::EvictedContentTracker>;
     {
         let _g = SpinGuard::new();
         // SAFETY: SpinGuard held — exclusive access to the pool statics.
@@ -716,12 +752,18 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
             // Install the eviction-feedback tracker once the heap is up.
             #[cfg(feature = "ai_eviction")]
             {
-                *addr_of_mut!(EVICTED_CONTENT_TRACKER) =
-                    Some(super::eviction::EvictedContentTracker::new());
-                super::eviction::init();
+                old_tracker = (*addr_of_mut!(EVICTED_CONTENT_TRACKER)).replace(tracker);
             }
         }
         INITIALIZED.store(1, Ordering::Release);
+    }
+    // After LOCK: freeing a previous tracker takes the heap lock, and
+    // eviction::init() takes the registry lock (held across policy
+    // consults) and boxes the default policies. Idempotent.
+    #[cfg(feature = "ai_eviction")]
+    {
+        drop(old_tracker);
+        super::eviction::init();
     }
 
     Ok(())
@@ -761,12 +803,16 @@ unsafe fn free_pool_backing(pool: *mut MemoryPool) {
 /// yet, this is just `model_mem_init`.
 pub fn model_mem_reinit(weight_mb: usize, workspace_mb: usize) -> Result<(), AllocError> {
     if is_initialized() {
+        #[cfg(feature = "ai_eviction")]
+        let stale_tracker: Option<super::eviction::EvictedContentTracker>;
         {
             let _g = SpinGuard::new();
             // SAFETY: SpinGuard held — exclusive access to the pool
             // statics. We free each pool's backing pages, then reset the
             // pool structs and the eviction tracker so a fresh
-            // model_mem_init starts from a clean slate.
+            // model_mem_init starts from a clean slate. The tracker is
+            // taken out here and dropped after LOCK is released: freeing
+            // its VecDeque takes the heap lock (#1093).
             unsafe {
                 free_pool_backing(addr_of_mut!(WEIGHT_POOL));
                 free_pool_backing(addr_of_mut!(WORKSPACE_POOL));
@@ -774,11 +820,13 @@ pub fn model_mem_reinit(weight_mb: usize, workspace_mb: usize) -> Result<(), All
                 *addr_of_mut!(WORKSPACE_POOL) = MemoryPool::new();
                 #[cfg(feature = "ai_eviction")]
                 {
-                    *addr_of_mut!(EVICTED_CONTENT_TRACKER) = None;
+                    stale_tracker = (*addr_of_mut!(EVICTED_CONTENT_TRACKER)).take();
                 }
             }
             INITIALIZED.store(0, Ordering::Release);
         }
+        #[cfg(feature = "ai_eviction")]
+        drop(stale_tracker);
     }
     model_mem_init(weight_mb, workspace_mb)
 }
@@ -881,16 +929,18 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
     // collect IDs under the allocator lock and drive feedback after
     // releasing it so the registry lock is never nested inside ours.
     let now = kernel_ffi::get_time_ns();
-    let expired_ids: alloc::vec::Vec<u32> = {
+    // Reserved before LOCK (it masks IRQs); the drain never grows it.
+    let mut expired_ids: alloc::vec::Vec<u32> =
+        alloc::vec::Vec::with_capacity(eviction::EVICTION_TRACKER_CAPACITY);
+    {
         let _g = SpinGuard::new();
         // SAFETY: _g held — exclusive access.
         unsafe {
-            match &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
-                Some(t) => t.drain_expired(now),
-                None => alloc::vec::Vec::new(),
+            if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                t.drain_expired_into(now, &mut expired_ids);
             }
         }
-    };
+    }
     for id in expired_ids {
         eviction::update_feedback(id, false);
     }
@@ -1367,10 +1417,12 @@ pub fn get_tracking(
 /// should pre-size / reuse if this becomes a bottleneck.
 #[cfg(feature = "ai_eviction")]
 pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta> {
-    let mut out: alloc::vec::Vec<super::eviction::BlockMeta> = alloc::vec::Vec::new();
     if !is_initialized() {
-        return out;
+        return alloc::vec::Vec::new();
     }
+    // Allocate before taking LOCK (it masks IRQs); push never grows it.
+    let mut out: alloc::vec::Vec<super::eviction::BlockMeta> =
+        alloc::vec::Vec::with_capacity(pool_block_capacity(None));
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to pool statics.
     unsafe {
@@ -1383,6 +1435,9 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
                 if !pool.blocks[i].is_evictable() {
                     continue;
                 }
+                if out.len() == out.capacity() {
+                    break;
+                }
                 if let Some(meta) = pool.snapshot_at(i, pool_id) {
                     out.push(meta);
                 }
@@ -1390,6 +1445,49 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
         }
     }
     out
+}
+
+/// Number of evictable blocks across both pools, without allocating
+/// (the telemetry publish calls this from IRQs-off context).
+#[cfg(feature = "ai_eviction")]
+pub fn count_evictable_blocks() -> usize {
+    if !is_initialized() {
+        return 0;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let mut n = 0usize;
+        for pool_ptr in [addr_of_mut!(WEIGHT_POOL), addr_of_mut!(WORKSPACE_POOL)] {
+            let pool = &*pool_ptr;
+            for i in 0..pool.block_count {
+                if pool.blocks[i].is_evictable() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+}
+
+/// Block slots in one pool (`Some(id)`) or both (`None`): the Vec
+/// capacity the snapshot helpers reserve before taking LOCK. Reads
+/// `block_count` under the lock; a concurrent reinit between this and
+/// the fill only truncates the snapshot.
+#[cfg(feature = "ai_eviction")]
+fn pool_block_capacity(pool_id: Option<u8>) -> usize {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let w = (*addr_of_mut!(WEIGHT_POOL)).block_count;
+        let ws = (*addr_of_mut!(WORKSPACE_POOL)).block_count;
+        match pool_id {
+            Some(POOL_WEIGHT) => w,
+            Some(POOL_WORKSPACE) => ws,
+            Some(_) => 0,
+            None => w + ws,
+        }
+    }
 }
 
 /// Snapshot one pool's evictable blocks together with each slot's
@@ -1403,11 +1501,12 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
 fn snapshot_pool_candidates(
     pool_id: u8,
 ) -> alloc::vec::Vec<(super::eviction::BlockMeta, u8)> {
-    let mut out: alloc::vec::Vec<(super::eviction::BlockMeta, u8)> =
-        alloc::vec::Vec::new();
     if !is_initialized() {
-        return out;
+        return alloc::vec::Vec::new();
     }
+    // Allocate before taking LOCK (it masks IRQs); push never grows it.
+    let mut out: alloc::vec::Vec<(super::eviction::BlockMeta, u8)> =
+        alloc::vec::Vec::with_capacity(pool_block_capacity(Some(pool_id)));
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to pool statics.
     unsafe {
@@ -1420,6 +1519,9 @@ fn snapshot_pool_candidates(
         for i in 0..pool.block_count {
             if !pool.blocks[i].is_evictable() {
                 continue;
+            }
+            if out.len() == out.capacity() {
+                break;
             }
             if let Some(meta) = pool.snapshot_at(i, pool_id) {
                 out.push((meta, pool.blocks[i].generation));
@@ -1677,6 +1779,37 @@ mod eviction_tests {
         free(h2).expect("free h2");
         free(handle_from_bits(REALLOCED.load(Ordering::Relaxed)))
             .expect("free the racer's reallocated slot");
+    }
+
+    /// #1093: the count-only path the IRQs-off telemetry publish uses
+    /// agrees with the snapshot, and the snapshot reserves its Vec
+    /// before taking the (IRQ-masking) pool lock: capacity is fixed at
+    /// the slot count, so a push under the lock never reallocates.
+    #[test]
+    fn evictable_count_matches_snapshot_without_growing_under_lock() {
+        let _s = TestSerialGuard::new();
+        let _p = TestPools::new(4, 4);
+        assert_eq!(count_evictable_blocks(), 0);
+        let w0 = alloc_weights(BLOCK_SIZE).expect("alloc w0");
+        let k0 = alloc_workspace(BLOCK_SIZE).expect("alloc k0");
+        let k1 = alloc_workspace(BLOCK_SIZE).expect("alloc k1");
+        let pinned = share(k1).expect("pin k1");   // refcount 2: not evictable
+
+        let snap = snapshot_evictable_blocks();
+        assert_eq!(snap.len(), 2, "w0 and k0; k1 is pinned");
+        assert_eq!(count_evictable_blocks(), snap.len());
+        // Reserved up front (with_capacity may round up, never down).
+        assert!(snap.capacity() >= pool_block_capacity(None));
+        assert_eq!(pool_block_capacity(None), 4);   // 4 MB + 4 MB of 2 MB blocks
+        assert!(snapshot_pool_candidates(POOL_WORKSPACE).capacity()
+                >= pool_block_capacity(Some(POOL_WORKSPACE)));
+
+        unshare(pinned).expect("unpin k1");
+        assert_eq!(count_evictable_blocks(), 3);
+        free(w0).expect("free w0");
+        free(k0).expect("free k0");
+        free(k1).expect("free k1");
+        assert_eq!(count_evictable_blocks(), 0);
     }
 
     /// Policy that frees the sole candidate during the consult (the

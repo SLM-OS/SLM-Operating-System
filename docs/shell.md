@@ -119,6 +119,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
   peek         Read physical memory
   poke         Write 32-bit word
   rtldiag      RTL8168 PCIe probe (Jetson + networking)
+  thermal      BPMP temperatures, fan PWM, per-CPU liveness log (Jetson only)
   timdiag      Timer/interrupt delivery diagnostic (non-x86; subcommands on Pi 5)
   xhci         Tegra XHCI controller info (Jetson only)
   xhcidiag     Tegra XHCI CBB-at-EL2 probe (Jetson + networking)

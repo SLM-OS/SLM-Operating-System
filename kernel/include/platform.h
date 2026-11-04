@@ -203,6 +203,7 @@
 #define TEGRA234_CLK_GPU_PWR         42    /* GPU power clock */
 #define TEGRA234_CLK_GPC0CLK         41    /* GPU GPC0 engine clock */
 #define TEGRA234_CLK_GPC1CLK         236   /* GPU GPC1 engine clock */
+#define TEGRA234_CLK_PWM3            107   /* PWM controller 3: carrier fan */
 
 /* BPMP reset IDs (from tegra234-reset.h) */
 #define TEGRA234_RESET_UARTA         100
@@ -319,6 +320,7 @@
  */
 #define TEGRA_XUSB_PADCTL_BASE   0x03520000UL    /* UPHY/XUSB pad controller */
 #define TEGRA_XUDC_BASE          0x03550000UL    /* XUDC device controller */
+#define TEGRA234_PWM3_BASE       0x032a0000UL    /* PWM 3: fan header (L4T pwm-fan) */
 
 /* Tegra234 FUSE block (USB pad calibration words; #1084). */
 #define T234_FUSE_MMIO_BASE      0x03810000UL

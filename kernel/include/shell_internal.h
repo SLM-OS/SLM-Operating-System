@@ -115,6 +115,7 @@ int cmd_cdcdiag(int argc, char **argv);
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 int cmd_hspdiag(int argc, char **argv);
 int cmd_bpmp(int argc, char **argv);
+int cmd_thermal(int argc, char **argv);
 int cmd_pcietrain(int argc, char **argv);
 int cmd_imx219(int argc, char **argv);
 int cmd_nvcsi(int argc, char **argv);

@@ -272,6 +272,13 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn slm_pmu_read_cycles() -> u64 { 0 }
 
+    /// The host has no interrupts to mask (model_mem's guard, #1093).
+    #[no_mangle]
+    pub extern "C" fn slm_irq_save() -> u64 { 0 }
+
+    #[no_mangle]
+    pub extern "C" fn slm_irq_restore(_flags: u64) {}
+
     #[no_mangle]
     pub extern "C" fn slm_pmu_read_event(_idx: u32) -> u32 { 0 }
 
@@ -1582,9 +1589,10 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
 
 /// Count of currently-evictable blocks visible to the active policy.
 ///
-/// Wraps `mm::snapshot_evictable_blocks().len()` for C callers that
-/// want to verify the snapshot filter without needing to marshal a
-/// `Vec<BlockMeta>` across FFI. A block is "evictable" when it is
+/// Same filter as `mm::snapshot_evictable_blocks()`, counted without
+/// building the snapshot (`mm::model_mem::count_evictable_blocks`), so
+/// it allocates nothing: the telemetry publish calls it with IRQs
+/// masked (#1093). A block is "evictable" when it is
 /// allocated and `ref_count <= 1` (shared blocks with additional refs
 /// are pinned).
 ///
@@ -1599,7 +1607,9 @@ pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
 
     #[cfg(feature = "ai_eviction")]
     {
-        let n = mm::snapshot_evictable_blocks().len();
+        // Count only: this runs from net_pump's telemetry publish with
+        // IRQs masked, where allocating a snapshot Vec is not allowed.
+        let n = mm::model_mem::count_evictable_blocks();
         if n > i32::MAX as usize { i32::MAX } else { n as i32 }
     }
 }
@@ -2354,10 +2364,13 @@ pub unsafe extern "C" fn rust_eviction_get_stats(
     // CACHEUS weights are surfaced through the EvictionPolicy trait's
     // `ensemble_weights` method — default `None` for atomic policies,
     // overridden by CacheusSelector. This reads the live installed
-    // instance (no probe or duplicate state).
+    // instance (no probe or duplicate state). Try-lock: the kernel's
+    // telemetry publish calls this with IRQs masked (#1093), and a
+    // preempted task can hold the registry lock while its policy runs;
+    // the weights are then left out of this sample.
     #[cfg(feature = "ai_eviction")]
     {
-        mm::eviction::with_active_policy(|p| {
+        mm::eviction::try_with_active_policy(|p| {
             if let Some(w) = p.ensemble_weights() {
                 stats.cacheus_expert_count = w.len().min(5) as u32;
                 for (i, v) in w.iter().take(5).enumerate() {

@@ -10971,6 +10971,8 @@ int cmd_cdcdiag(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "bpmp.h"
+#include <stdarg.h>
+#include <stdatomic.h>
 #include "hsp.h"
 
 /*
@@ -11601,6 +11603,199 @@ int cmd_csidiag(int argc, char *argv[])
     }
 
     uart_puts("=== End ===\r\n");
+    return 0;
+}
+
+/* ---- thermal (#1093) ----
+ *
+ * Temperatures through BPMP (MRQ_THERMAL) and the fan PWM state, to
+ * tell a thermal shutdown apart from a hang on a board with no Linux
+ * thermal / pwm-fan driver behind it (UEFI-direct boot). */
+static const struct {
+    const char *name;
+    uint32_t zone;
+} thermal_zones[] = {
+    { "cpu",  TEGRA234_BPMP_THERMAL_ZONE_CPU  },
+    { "gpu",  TEGRA234_BPMP_THERMAL_ZONE_GPU  },
+    { "soc0", TEGRA234_BPMP_THERMAL_ZONE_SOC0 },
+    { "soc1", TEGRA234_BPMP_THERMAL_ZONE_SOC1 },
+    { "soc2", TEGRA234_BPMP_THERMAL_ZONE_SOC2 },
+    { "tj",   TEGRA234_BPMP_THERMAL_ZONE_TJ   },
+};
+
+/* One line, every zone: "cpu=45.1 gpu=46.5 ... tj=46.4" (°C). */
+static void thermal_print_line(int (*out)(const char *fmt, ...), const char *prefix)
+{
+    char line[160];
+    int n = uart_snprintf(line, sizeof(line), "%s", prefix);
+    for (unsigned i = 0; i < sizeof(thermal_zones) / sizeof(thermal_zones[0]); i++) {
+        int32_t mc = 0;
+        int rc = bpmp_thermal_get_temp(thermal_zones[i].zone, &mc);
+        if (n < 0 || (size_t)n >= sizeof(line)) {
+            break;
+        }
+        if (rc == 0) {
+            uint32_t mag = mc < 0 ? 0u - (uint32_t)mc : (uint32_t)mc;
+            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=%s%u.%u",
+                               thermal_zones[i].name, mc < 0 ? "-" : "",
+                               (unsigned)(mag / 1000u), (unsigned)(mag % 1000u / 100u));
+        } else {
+            n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %s=err%d",
+                               thermal_zones[i].name, rc);
+        }
+    }
+    out("%s\r\n", line);
+}
+
+/* Fan: PWM controller 3 at 0x032a0000 drives the carrier's fan header
+ * (L4T DT pwm-fan: pwms = <&pwm3 0 45334>). CSR bit 31 = enable, bits
+ * 23:16 = duty (0-255). Only read when BPMP says its clock is on: an
+ * unclocked block traps into EL3 on Tegra234. (A clocked block held in
+ * reset could fault too; BPMP has no reset-state query, and Linux
+ * deasserts this reset together with enabling the clock.) */
+#define THERMAL_FAN_PWM_CSR  TEGRA234_PWM3_BASE   /* mapped in vmm.c */
+
+static void thermal_print_fan(void)
+{
+    int on = 0;
+    int rc = bpmp_clk_is_enabled(TEGRA234_CLK_PWM3, &on);
+    if (rc != 0) {
+        shell_printf("fan: pwm3 clock query rc=%d\r\n", rc);
+        return;
+    }
+    if (!on) {
+        shell_puts("fan: pwm3 clock OFF - nothing drives the fan PWM\r\n");
+        return;
+    }
+    uint32_t csr = *(volatile uint32_t *)(uintptr_t)THERMAL_FAN_PWM_CSR;
+    shell_printf("fan: pwm3 CSR=0x%08x enable=%u duty=%u/255\r\n",
+                 (unsigned)csr, (unsigned)(csr >> 31), (unsigned)((csr >> 16) & 0xFFu));
+}
+
+/* Background logger: one line per period on the UART, so a serial
+ * capture keeps the last reading before a stop. 0 = stopped. */
+static _Atomic uint32_t g_thermal_log_ms;
+static _Atomic bool g_thermal_log_running;
+
+static int thermal_uart_out(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[192];
+    int n = uart_vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    uart_puts(buf);
+    return n;
+}
+
+/* Per-CPU liveness for the log line: timer ticks taken, schedule()
+ * calls and the running task. A CPU whose ticks stop advancing is
+ * spinning with IRQs masked; one whose ticks advance while the same
+ * task stays current is stuck at task level. NC-backed counters
+ * (sched.c) so another CPU reads them coherently. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+extern volatile uint32_t *sched_diag_tick;
+extern volatile uint32_t *sched_diag_schedule;
+#else
+extern volatile uint32_t sched_diag_tick[];
+extern volatile uint32_t sched_diag_schedule[];
+#endif
+
+static void thermal_print_cpus(void)
+{
+    char line[256];
+    int n = uart_snprintf(line, sizeof(line), "[cpus]");
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        if (n < 0 || (size_t)n >= sizeof(line)) {
+            break;
+        }
+        struct task *t = task_current_on_cpu(c);
+        n += uart_snprintf(line + n, sizeof(line) - (size_t)n, " %u:%u/%u:%s",
+                           (unsigned)c, (unsigned)sched_diag_tick[c],
+                           (unsigned)sched_diag_schedule[c],
+                           t != NULL ? t->name : "-");
+    }
+    /* Directly: thermal_uart_out's buffer is smaller than this line. */
+    uart_puts(line);
+    uart_puts("\r\n");
+}
+
+static void thermal_log_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t ms;
+        while ((ms = atomic_load(&g_thermal_log_ms)) != 0) {
+            char prefix[40];
+            uart_snprintf(prefix, sizeof(prefix), "[thermal t=%llus]",
+                          (unsigned long long)(timer_get_count() / timer_get_frequency()));
+            thermal_print_line(thermal_uart_out, prefix);
+            thermal_print_cpus();
+            task_sleep_ms(ms);
+        }
+        atomic_store(&g_thermal_log_running, false);
+        /* A `thermal log <ms>` that ran after the period went to 0 but
+         * before the store above saw running=true and started nothing:
+         * pick its period up instead of exiting. */
+        bool expected = false;
+        if (atomic_load(&g_thermal_log_ms) == 0 ||
+            !atomic_compare_exchange_strong(&g_thermal_log_running, &expected, true)) {
+            return;
+        }
+    }
+}
+
+int cmd_thermal(int argc, char *argv[])
+{
+    if (argc >= 2 && strcmp(argv[1], "fan") == 0) {
+        thermal_print_fan();
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "log") == 0) {
+        uint32_t ms = 0;
+        if (argc >= 3) {
+            for (const char *p = argv[2]; *p != '\0'; p++) {
+                if (*p < '0' || *p > '9' || ms > 3600000u) {
+                    shell_puts("thermal log: period is 0 (stop) or 100..3600000 ms\r\n");
+                    return -1;
+                }
+                ms = ms * 10u + (uint32_t)(*p - '0');
+            }
+        }
+        if (ms > 3600000u) {
+            shell_puts("thermal log: period is 0 (stop) or 100..3600000 ms\r\n");
+            return -1;
+        }
+        if (ms != 0 && ms < 100) {
+            ms = 100;
+        }
+        atomic_store(&g_thermal_log_ms, ms);
+        if (ms == 0) {
+            shell_puts("thermal log: stopping\r\n");
+            return 0;
+        }
+        if (!atomic_exchange(&g_thermal_log_running, true)) {
+            struct task *t = task_create("thermal_log", thermal_log_task, NULL);
+            if (t == NULL) {
+                atomic_store(&g_thermal_log_running, false);
+                shell_puts("thermal log: task create failed\r\n");
+                return -1;
+            }
+            /* Off CPU 0, where net_pump and the shells run: the log is
+             * how a wedged CPU 0 shows up (#1093). */
+            if (cpu_count > 1) {
+                t->cpu_affinity = cpu_count - 1;
+            }
+            scheduler_add_task(t);
+        }
+        shell_printf("thermal log: every %u ms on the console\r\n", (unsigned)ms);
+        return 0;
+    }
+    if (argc >= 2) {
+        shell_puts("usage: thermal [fan | log <ms> | log 0]\r\n");
+        return -1;
+    }
+    thermal_print_line(shell_printf, "thermal (C):");
     return 0;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

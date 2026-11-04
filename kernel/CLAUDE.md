@@ -782,7 +782,7 @@ existing fixtures keep working.
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).
 
-This is safe because secondary CPUs do not print after boot (the `secondary_init` comment at smp.c:328 documents this). All UART output during normal operation comes from CPU 0 (shell, tests, INFO logs). If secondary CPU printing is needed in the future, an NC-memory-based lock must be implemented.
+This is safe because secondary CPUs do not print after boot (the `secondary_init` comment at smp.c:328 documents this). All UART output during normal operation comes from CPU 0 (shell, tests, INFO logs). One deliberate exception: the Jetson `thermal log <ms>` diagnostic (#1093) prints from a task pinned to the last CPU, so it keeps reporting while CPU 0 is wedged. Its lines can interleave with, or garble, concurrent CPU 0 output, which is acceptable for an opt-in debug aid. If secondary CPU printing is needed beyond that, an NC-memory-based lock must be implemented.
 
 ---
 
