@@ -104,7 +104,7 @@ is recorded in
 | microSD | 238 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `SLM-OS`, `Linux -> auto-kexec SLM-OS` |
 | NVMe | 119 GB SPCC: `p1` ext4 `APP` (118.7 GiB, spare L4T rootfs) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding the UEFI-direct image `\EFI\SLMOS\SLMOS.efi`. UEFI entry `SLM-OS NVMe` points at it, outside BootOrder; boot it one-shot with `scripts/jetson-uefi-deploy.sh` (#26, `docs/deploy/jetson-uefi-direct.md`). No `BOOTAA64.efi` there, so cold boots still fall through to the microSD |
 | SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` helpers, `arm_smmu_noshutdown.ko`, patched `nvgpu.ko`, `slmos-autokexec.service` (enabled) all present. Not yet staged: `gpu-kernel-eviction-qnet` (PR-6 producer) |
-| Recovery strap | labctl `recovery_mode` latch binding (applied before power-on). Must read `released` for a normal boot |
+| Recovery strap | labctl `recovery_mode` latch binding (applied before power-on). Must read `released` for a normal boot. Power-cycle delay 15 s in labctl, the same as `jetson-nano-1` (its threshold has not been measured separately) |
 | Network | Linux and SLM-OS both use the USB RTL8153 dongle (on-board Ethernet and WiFi are down), so both get the same DHCP reservation — the address labctl lists |
 | SSH | `ssh root@<JETSON_IP>` (key or password `slmos`) |
 | Deploy | SSH + kexec workflow (see below), or UEFI-direct (`scripts/jetson-uefi-deploy.sh`) |
