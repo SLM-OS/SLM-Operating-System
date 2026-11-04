@@ -484,7 +484,8 @@ With PI:
   Schedule order: A (boosted), C  ← A runs to release the lock; B gets it next
 ```
 
-The boost currently lasts only until the holder is next re-queued; see
+Per #1103 (code reading, not yet reproduced), the boost may last only
+until the holder is next re-queued; see
 [Known Limitation](#known-limitation--pi-boost-lost-when-the-holder-is-re-queued-1103).
 
 ### When to Use PI Mutex

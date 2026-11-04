@@ -422,9 +422,13 @@ mailbox whose first message had not been acked overwrote it in place, and
 both publishers reported success. Since #948, `try_deliver` refuses to
 write into an unacked mailbox:
 
-- **Blocking publish** (`publish_internal`) yields and retries within the
-  same ack-timeout budget, counting `FLOW_CONTROL_BUSY_RETRIES`. A
-  subscriber that never acks shows up as `delivered=0`.
+- **Blocking publish** (`publish_internal`) yields and retries for up to
+  `ACK_TIMEOUT_SECS` (5 s), counting `FLOW_CONTROL_BUSY_RETRIES`, then
+  waits up to another 5 s for the ack. The two budgets are independent,
+  so a slow prior subscriber can't make a message that did land report
+  `delivered=0`; the worst case is about 10 s per target. A target whose
+  mailbox stays busy, or whose subscriber never acks, is not counted in
+  `delivered`.
 - **Non-blocking publish** (`publish_internal_nowait`) drops the message
   for that target, counts `FLOW_CONTROL_NOWAIT_DROPS`, and leaves it out
   of `delivered`, so the caller sees the drop.

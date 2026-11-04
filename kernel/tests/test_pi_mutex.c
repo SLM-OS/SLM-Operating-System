@@ -205,7 +205,7 @@ static void test_priority_inheritance_basic(void)
  * the scheduler interleaves other tasks, must not deadlock on the
  * mutex's guard spinlock. It does not cover a contended waiter, nor
  * whether the holder keeps its inherited priority across a re-queue
- * (it does not today: #1103).
+ * (see #1103, which suggests it does not).
  * ---------------------------------------------------------------------------- */
 static void test_pi_mutex_wait_loop_stress(void)
 {

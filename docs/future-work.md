@@ -207,8 +207,9 @@ and is kept as history; it is not maintained. Current priorities are the
 P-labels on GitHub issues in the `Backlog` milestone. Since the snapshot:
 item 1 shipped (synthetic and SLM-OS-fine-tuned scheduler weights,
 `AI_WEIGHTS=synthetic|real`, #61), item 3 shipped (#93), and item 7 is
-done on Jetson: GA10B compute works on both the kexec and the UEFI-direct
-path, without NVIDIA's runtime.
+done on Jetson: GA10B compute works after kexec on channels that Linux's
+nvgpu driver creates, and on the UEFI-direct path with SLM-OS bringing
+the GPU up itself (#1088).
 
 **High priority:**
 1. Real AI scheduler weights — validates the AI-first thesis
