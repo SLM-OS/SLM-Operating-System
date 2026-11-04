@@ -3843,25 +3843,19 @@ static void test_qmd_set_bits_rejects_inverted_range(void)
  *
  * The test runs from the project root via `make test-ga10b-bringup`
  * (Makefile:775), so the source path is relative to cwd. */
-static void test_l2_evict_call_sites_pinned_to_minimal(void)
+/* Call sites of ga10b_l2_evict_sysmem( in `path`, or -1 if the file
+ * can't be opened. The cheap heuristic: ignore lines whose first
+ * non-whitespace is `*` (block-comment body) or `//` (line comment),
+ * and ignore the line that starts the function definition
+ * (`int ga10b_l2_evict_sysmem(void)`). */
+static int count_l2_evict_call_sites(const char *path)
 {
-    printf("== test_l2_evict_call_sites_pinned_to_minimal ==\n");
-
-    const char *path = "kernel/gpu/nvidia/ga10b_bringup.c";
     FILE *f = fopen(path, "r");
     if (!f) {
         fprintf(stderr, "  could not open %s (cwd must be project root)\n",
                 path);
-        REQUIRE(f != NULL);
-        return;
+        return -1;
     }
-
-    /* Count `ga10b_l2_evict_sysmem(` occurrences that look like
-     * function-call sites — i.e. not inside a comment line and not
-     * the function's own definition. The cheap heuristic: ignore
-     * lines whose first non-whitespace is `*` (block-comment body)
-     * or `//` (line comment), and ignore the line that starts the
-     * function definition (`int ga10b_l2_evict_sysmem(void)`). */
     char line[512];
     int call_sites = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -3877,12 +3871,71 @@ static void test_l2_evict_call_sites_pinned_to_minimal(void)
         }
     }
     fclose(f);
+    return call_sites;
+}
 
-    /* Expected sites:
+static void test_l2_evict_call_sites_pinned_to_minimal(void)
+{
+    printf("== test_l2_evict_call_sites_pinned_to_minimal ==\n");
+
+    /* Expected sites in ga10b_bringup.c:
      *   1. `ga10b_bringup_inherit` — post-kexec L2 evict (#596 race)
      *   2. `ga10b_bringup_read_pipeline_output` — per-dispatch
      *      post-launch coherency (#715 / #722, narrowed by #723) */
-    REQUIRE_EQ(call_sites, 2);
+    REQUIRE_EQ(count_l2_evict_call_sites("kernel/gpu/nvidia/ga10b_bringup.c"), 2);
+
+    /* And one in slm_oplib_dispatch: the operator library reads its
+     * output from the scratch slots without going through
+     * read_pipeline_output, so it needs its own post-launch evict.
+     * Without it every `nvgpu oplib smoke` on the SLM-OS-built
+     * channel read back its sentinel (#1092). */
+    REQUIRE_EQ(count_l2_evict_call_sites("kernel/gpu/oplib_dispatch.c"), 1);
+}
+
+/* #1092: the v7 dispatch path runs with IRQs masked under the dispatch
+ * lock, and every v7 dispatch (MNIST, and every kind on the cold
+ * channel) goes through the #844 FECS recovery and the op dump. Their
+ * unconditional UART lines cost ~146 ms per dispatch at 115200 baud
+ * (MNIST went 146 ms -> 0.41 ms once gated). Pin each line to the
+ * `gpu debug on` switch: in ga10b_bringup.c it must be a GA10B_DBG,
+ * in ga10b_gmmu.c the uart_printf must sit inside an
+ * `if (ga10b_dispatch_verbose_get())` opened on the line before. */
+static int file_line_matches(const char *path, const char *needle,
+                             const char *prev_needle)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "  could not open %s (cwd must be project root)\n", path);
+        return -1;
+    }
+    char line[512], prev[512] = "";
+    int hits = 0, gated = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, needle)) {
+            hits++;
+            if (prev_needle == NULL || strstr(prev, prev_needle)) gated++;
+        }
+        if (strspn(line, " \t\r\n") != strlen(line)) {
+            memcpy(prev, line, sizeof(prev));
+        }
+    }
+    fclose(f);
+    return hits == 1 && gated == 1 ? 1 : 0;
+}
+
+static void test_v7_dispatch_trace_lines_are_gated(void)
+{
+    printf("== test_v7_dispatch_trace_lines_are_gated ==\n");
+    const char *br = "kernel/gpu/nvidia/ga10b_bringup.c";
+    const char *mm = "kernel/gpu/nvidia/ga10b_gmmu.c";
+    REQUIRE_EQ(file_line_matches(br, "GA10B_DBG(\"[GA10B-P8-v7] FECS current_ctx invalidated", NULL), 1);
+    REQUIRE_EQ(file_line_matches(br, "GA10B_DBG(\"[GA10B-P8-v7-DBG] ops_v7 array", NULL), 1);
+    REQUIRE_EQ(file_line_matches(br, "uart_printf(\"[GA10B-P8-v7] FECS current_ctx", NULL), 0);
+    REQUIRE_EQ(file_line_matches(br, "uart_printf(\"[GA10B-P8-v7-DBG] ops_v7 array", NULL), 0);
+    REQUIRE_EQ(file_line_matches(mm, "uart_printf(\"[rebuild-gmmu] topology",
+                                 "if (ga10b_dispatch_verbose_get())"), 1);
+    REQUIRE_EQ(file_line_matches(mm, "uart_printf(\"[fecs-reload] CHRAM",
+                                 "if (ga10b_dispatch_verbose_get())"), 1);
 }
 
 /* ======================================================================
@@ -4042,6 +4095,7 @@ int main(void)
     test_qmd_set_bits_rejects_inverted_range();
 
     test_l2_evict_call_sites_pinned_to_minimal();
+    test_v7_dispatch_trace_lines_are_gated();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

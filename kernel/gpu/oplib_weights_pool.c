@@ -10,6 +10,12 @@
  * inherited GMMU mapping. This sidesteps the post-kexec GMMU-walk-
  * discovery failure described in PR #769: SLM-OS never needs the
  * channel's inst-block phys.
+ *
+ * Cold channel (#1092): after a UEFI-direct boot there is no helper
+ * pool. oplib_cold.c allocates one from SLM-OS memory (physically
+ * contiguous chunks behind one GPU VA range in the channel's own VM),
+ * so the descriptor comes from oplib_cold_wpool() and staging is a
+ * CPU memcpy + clean into the chunks — no bounce slot, no copy engine.
  */
 
 #include "oplib_weights_pool.h"
@@ -21,6 +27,8 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
+#include "oplib_cold.h"
+#include "oplib_gpu_as.h"
 #include "nvidia/ga10b_bringup.h"
 #include "nvidia/ga10b_ce.h"
 #include "nvidia/ga10b_channel_handoff.h"
@@ -37,6 +45,31 @@
 
 static uint64_t g_pool_bytes_used = 0;
 
+/* Active pool descriptor: the cold channel's SLM-OS pool while
+ * oplib_cold_active(), else the helper's v8 handoff fields. */
+static const struct oplib_wpool *cold_pool(void)
+{
+    return oplib_cold_active() ? oplib_cold_wpool() : NULL;
+}
+
+uint64_t oplib_weights_pool_gpu_va(void)
+{
+    if (oplib_cold_active()) {
+        const struct oplib_wpool *w = oplib_cold_wpool();
+        return w != NULL ? w->gpu_va : 0;
+    }
+    return ga10b_weights_pool_gpu_va();
+}
+
+static uint64_t pool_size_bytes(void)
+{
+    if (oplib_cold_active()) {
+        const struct oplib_wpool *w = oplib_cold_wpool();
+        return w != NULL ? w->size : 0;
+    }
+    return ga10b_weights_pool_size_bytes();
+}
+
 uint64_t oplib_weights_pool_alloc(size_t size, size_t align)
 {
     if (size == 0) {
@@ -49,8 +82,8 @@ uint64_t oplib_weights_pool_alloc(size_t size, size_t align)
         return 0;
     }
 
-    uint64_t pool_base = ga10b_weights_pool_gpu_va();
-    uint64_t pool_size = ga10b_weights_pool_size_bytes();
+    uint64_t pool_base = oplib_weights_pool_gpu_va();
+    uint64_t pool_size = pool_size_bytes();
     if (pool_base == 0 || pool_size == 0) {
         return 0;
     }
@@ -79,8 +112,8 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
         return -1;
     }
 
-    uint64_t pool_base = ga10b_weights_pool_gpu_va();
-    uint64_t pool_size = ga10b_weights_pool_size_bytes();
+    uint64_t pool_base = oplib_weights_pool_gpu_va();
+    uint64_t pool_size = pool_size_bytes();
     if (pool_base == 0 || pool_size == 0) {
         return -1;
     }
@@ -92,6 +125,13 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
     }
     if (gpu_va - pool_base > pool_size - (uint64_t)len) {
         return -1;
+    }
+
+    /* Cold channel: the chunks are CPU-reachable, copy directly. */
+    const struct oplib_wpool *cw = cold_pool();
+    if (cw != NULL) {
+        return oplib_wpool_write(cw, oplib_cold_as(), gpu_va, src, len) ==
+                       OPLIB_AS_OK ? 0 : -1;
     }
 
     struct ga10b_bringup *b = ga10b_bringup_state();
@@ -188,7 +228,7 @@ size_t oplib_weights_pool_bytes_used(void)
 
 size_t oplib_weights_pool_total_size(void)
 {
-    return (size_t)ga10b_weights_pool_size_bytes();
+    return (size_t)pool_size_bytes();
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
@@ -221,5 +261,6 @@ void oplib_weights_pool_reset(void) { }
 
 size_t oplib_weights_pool_bytes_used(void) { return 0; }
 size_t oplib_weights_pool_total_size(void) { return 0; }
+uint64_t oplib_weights_pool_gpu_va(void) { return 0; }
 
 #endif

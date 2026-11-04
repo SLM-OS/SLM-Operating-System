@@ -33,6 +33,8 @@
 #include "ga10b_grctx.h"
 #include "ga10b_channel_handoff.h"
 #include "ga10b_mnist_pipeline.h"
+#include "ga10b_cold_pipelines.h"
+#include "oplib_cold.h"
 #include "cache.h"
 #include "string.h"
 
@@ -207,6 +209,7 @@ static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GOLDEN]  = "golden",
     [GA10B_COLD_CHANNEL] = "channel",
     [GA10B_COLD_MNIST]   = "mnist",
+    [GA10B_COLD_POLICIES] = "policies",
 };
 
 const char *ga10b_cold_step_name(enum ga10b_cold_step step)
@@ -263,14 +266,33 @@ static int wait_bits_clear(uint32_t reg, uint32_t mask, uint32_t timeout_us)
  * of a floorswept GPC (ga10b_tegra_is_clock_available; the Orin Nano
  * ships with GPC1 swept and BPMP rejects gpc1clk with -EINVAL). BPMP
  * sequences the partition reset with the power-up. MRQ_STRAP
- * floorsweeping masks are left at their fused defaults. */
+ * floorsweeping masks are left at their fused defaults.
+ *
+ * Rates: ga10b_tegra_acquire_platform_clocks sets every clock in
+ * tegra_ga10b_clocks[] to its default_rate, UINT_MAX, which BPMP
+ * rounds to the clock's maximum. Mirror it so the GPU's speed does not
+ * depend on the rate BPMP (or UEFI) left the clocks at; on
+ * jetson-nano-2 both clocks read back 1020 MHz (#1092). */
+#define GA10B_COLD_CLK_RATE_MAX_HZ 0xFFFFFFFFull   /* nvgpu: UINT_MAX */
+
 static int clk_on(uint32_t id, const char *name)
 {
     int rc = bpmp_clk_enable(id);
     if (rc != 0) {
         WARN("ga10b-cold: clk %s (%u) enable rc=%d", name, (unsigned)id, rc);
+        return rc;
     }
-    return rc;
+    /* A rate failure only costs speed, so it does not fail the step. */
+    uint64_t actual = 0;
+    int rrc = bpmp_clk_set_rate(id, GA10B_COLD_CLK_RATE_MAX_HZ, &actual);
+    if (rrc != 0) {
+        WARN("ga10b-cold: clk %s (%u) set_rate(max) rc=%d - left at boot rate",
+             name, (unsigned)id, rrc);
+    } else {
+        INFO("ga10b-cold: clk %s at %llu MHz", name,
+             (unsigned long long)(actual / 1000000u));
+    }
+    return 0;
 }
 
 static int step_power(void)
@@ -1143,6 +1165,39 @@ static int step_mnist(void)
     return ga10b_mnist_cold_install(&cold_gpu_ops, &cold_chan) == 0 ? 0 : -1;
 }
 
+/* Step 13: the other GPU consumers on the same channel (#1092). The
+ * scheduler MLP and eviction Q-net pipelines are built and stored
+ * per kind next to MNIST's, which stays the installed handoff;
+ * ensure_bringup switches to a kind's handoff on its first dispatch.
+ * The operator library (SLM ops) is attached to the channel's VM last,
+ * without a weights pool: like slmos-kexec, which runs the helper
+ * without --weights-pool-size, nothing reserves 1.5 GB at boot, and
+ * `nvgpu oplib wpool <MB>` sizes it before `slm load`. A consumer
+ * whose shaders or weights are missing from this build is skipped with
+ * a warning and stays on the CPU; only a sched / eviction pipeline
+ * allocation, mapping or publication failure fails the step. An
+ * operator-library attach failure is logged and does not: the policy
+ * consumers work without it, and `nvgpu oplib stage` retries a failed
+ * staging (`nvgpu oplib cold` shows the state). */
+static int step_policies(void)
+{
+    int rc_s = ga10b_cold_pipeline_build(&cold_gpu_ops, &cold_chan,
+                                         GA10B_PIPELINE_KIND_SCHED_MLP);
+    int rc_e = ga10b_cold_pipeline_build(&cold_gpu_ops, &cold_chan,
+                                         GA10B_PIPELINE_KIND_EVICTION_QNET);
+    int rc_o = oplib_cold_attach(&cold_gpu_ops, &cold_chan, 0);
+    if (rc_o != 0) {
+        WARN("ga10b-cold: operator library attach failed rc=%d - SLM ops stay on the CPU",
+             rc_o);
+    }
+    /* Store MNIST's handoff (kind 0) last: attach may re-install it with
+     * a QMD pool, and switching back to MNIST must restore that one. */
+    (void)ga10b_cold_pipeline_store_active();
+    bool ok_s = rc_s == GA10B_CP_OK || rc_s == GA10B_CP_SKIP;
+    bool ok_e = rc_e == GA10B_CP_OK || rc_e == GA10B_CP_SKIP;
+    return (ok_s && ok_e) ? 0 : -1;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -1158,6 +1213,7 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_GOLDEN]  = step_golden,
     [GA10B_COLD_CHANNEL] = step_channel,
     [GA10B_COLD_MNIST]   = step_mnist,
+    [GA10B_COLD_POLICIES] = step_policies,
 };
 
 /* Set while a ga10b_cold_run is driving the hardware. A flag rather

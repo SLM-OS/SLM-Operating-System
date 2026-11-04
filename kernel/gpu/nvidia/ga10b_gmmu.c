@@ -22,6 +22,8 @@
 
 #include "ga10b_gmmu.h"
 #include "ga10b_gmmu_decode.h"
+#include "ga10b_bringup.h"          /* ga10b_bringup_handoff_is_local */
+#include "ga10b_channel_handoff.h"
 
 #include "../../include/cache.h"
 #include "../../include/pmm.h"
@@ -598,6 +600,23 @@ static uint64_t read_pdb_phys(uint64_t inst_block_phys)
     return pdb_phys;
 }
 
+/* #1092: this mapper writes Linux-layout page tables with 8-byte-stride
+ * dual PDE0 entries (#1090). A channel SLM-OS built itself (UEFI-direct
+ * cold bring-up) has ga10b_vm page tables with 16-byte PDE0 entries;
+ * writing them from here would corrupt live translations. The operator
+ * library maps into that VM through oplib_gpu_as / ga10b_vm_map
+ * instead; refuse every PTE-writing entry point for its inst block. */
+static bool refuse_local_vm(uint64_t inst_block_phys, const char *who)
+{
+    if (!ga10b_bringup_handoff_is_local()) return false;
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->inst_block_phys != inst_block_phys) return false;
+    uart_printf("[GMMU] %s: inst 0x%lx belongs to the SLM-OS-built channel "
+                "(ga10b_vm page tables) — refusing the Linux-layout mapper\n",
+                who, (unsigned long)inst_block_phys);
+    return true;
+}
+
 /* Map one page at `gpu_va` to `data_phys`. Walks PDE3 → PDE0,
  * allocating intermediate tables on demand; writes the leaf PTE.
  * Does NOT issue dsb sy — caller is expected to issue one after
@@ -653,6 +672,7 @@ int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
     if (out_gpu_va == NULL || out_cpu_va == NULL || out_phys == NULL) {
         return -1;
     }
+    if (refuse_local_vm(inst_block_phys, "alloc_page")) return -1;
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
 
@@ -903,6 +923,7 @@ int ga10b_gmmu_alloc(uint64_t inst_block_phys,
     if (n_pages == 0 || n_pages > GA10B_GMMU_MAX_ALLOC_PAGES) {
         return -1;
     }
+    if (refuse_local_vm(inst_block_phys, "alloc")) return -1;
 
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
@@ -975,6 +996,7 @@ int ga10b_gmmu_map(uint64_t inst_block_phys,
      * GPU would happily fetch from before silently producing
      * garbage. */
     if ((target_phys & 4095ull) != 0u) return -1;
+    if (refuse_local_vm(inst_block_phys, "map")) return -1;
 
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
@@ -1026,6 +1048,7 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
         gpu_va + (uint64_t)n_pages * 4096ull > GA10B_GMMU_VA_LIMIT) {
         return -1;
     }
+    if (refuse_local_vm(inst_block_phys, "free")) return -1;
 
     /* Per page: walk to find the leaf PTE, clear it. */
     for (uint32_t i = 0; i < n_pages; i++) {
@@ -1376,12 +1399,16 @@ static uint64_t discover_gr_runlist_pri_base(void)
         uint32_t row2 = bar0_read32(TOP_DEV_INFO2_OFF + (i + 2u) * 4u);
         uint64_t gr_rl_pri_base =
             (uint64_t)(((row2 >> 10) & 0xffffu)) << 10;
-        uart_printf("[rebuild-gmmu] topology: GR at row %u "
-                    "row0=0x%08x row2=0x%08x "
-                    "runlist_pri_base=0x%lx\n",
-                    (unsigned)i, (unsigned)row0,
-                    (unsigned)row2,
-                    (unsigned long)gr_rl_pri_base);
+        /* Reached from ga10b_gmmu_force_ctx_reload on every v7
+         * dispatch (IRQs masked): trace only, #1092. */
+        if (ga10b_dispatch_verbose_get()) {
+            uart_printf("[rebuild-gmmu] topology: GR at row %u "
+                        "row0=0x%08x row2=0x%08x "
+                        "runlist_pri_base=0x%lx\n",
+                        (unsigned)i, (unsigned)row0,
+                        (unsigned)row2,
+                        (unsigned long)gr_rl_pri_base);
+        }
         return gr_rl_pri_base;
     }
     return 0u;
@@ -1716,10 +1743,12 @@ int ga10b_gmmu_force_ctx_reload(const struct ga10b_channel_handoff *h)
     __asm__ volatile("dsb sy" ::: "memory");
     *chram = 0x00000200u;   /* force_ctx_reload */
     __asm__ volatile("dsb sy" ::: "memory");
-    uart_printf("[fecs-reload] CHRAM[hw_chid=%u]@0x%lx "
-                "enable+force_ctx_reload (chram_bar0=0x%x)\n",
-                (unsigned)hw_chid, (unsigned long)chram_chan_addr,
-                (unsigned)chram_bar0_offset);
+    if (ga10b_dispatch_verbose_get()) {   /* per dispatch: trace only (#1092) */
+        uart_printf("[fecs-reload] CHRAM[hw_chid=%u]@0x%lx "
+                    "enable+force_ctx_reload (chram_bar0=0x%x)\n",
+                    (unsigned)hw_chid, (unsigned long)chram_chan_addr,
+                    (unsigned)chram_bar0_offset);
+    }
     return 0;
 }
 
@@ -1894,6 +1923,9 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
         return -1;
     }
     if (!phys_in_dram(inst_block_phys, 4096)) {
+        return -1;
+    }
+    if (refuse_local_vm(inst_block_phys, "rebuild_for_handoff")) {
         return -1;
     }
 

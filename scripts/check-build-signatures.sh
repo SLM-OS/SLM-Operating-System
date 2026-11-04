@@ -19,7 +19,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-sigs() { make --no-print-directory -s print-build-signatures "$@"; }
+# Run in a minimal environment: under `make test AI_SCHED=ON` the parent
+# make exports its command-line variables (and MAKEFLAGS) to this
+# script, so the "default" baseline already had AI_SCHED=ON and every
+# toggle of it looked like a no-op. PLATFORM is dropped too, so the
+# check always runs against the default platform's variants; that is
+# enough, since it only asks whether toggling an option changes them.
+sigs() {
+    env -i PATH="$PATH" HOME="$HOME" \
+        make --no-print-directory -s print-build-signatures "$@"
+}
 
 base="$(sigs)"
 fail=0

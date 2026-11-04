@@ -95,6 +95,20 @@ void test_oplib_pool_gpu_va_base_zero_when_unstaged(void)
     TEST_ASSERT_EQUAL_UINT64((uint64_t)0, oplib_pool_gpu_va_base());
 }
 
+/* oplib_pool_scratch_base (#1092): no scratch before staging, and NULL
+ * out-params are rejected. The self-allocated layout it reports
+ * (scratch base = pool + oplib_pool_scratch_off) is pinned with a real
+ * page-table walk in test_oplib_gpu_as.c. */
+void test_oplib_pool_scratch_base_unstaged(void)
+{
+    uint64_t phys = 0x1234u, va = 0x5678u;
+    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(NULL, &va));
+    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, NULL));
+    TEST_ASSERT_EQUAL_INT(-1, oplib_pool_scratch_base(&phys, &va));
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)0, oplib_pool_scratch_off(0));
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)OPLIB_POOL_MIN_BYTES, oplib_pool_self_bytes(1));
+}
+
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
 void test_oplib_pool_stage_to_gpu_non_jetson_returns_minus_one(void)
 {
@@ -116,6 +130,7 @@ int test_suite_oplib_pool(void)
     RUN_TEST(test_oplib_pool_get_sass_gpu_va_unstaged_returns_null);
     RUN_TEST(test_oplib_pool_get_sass_gpu_va_rejects_null_out_params);
     RUN_TEST(test_oplib_pool_gpu_va_base_zero_when_unstaged);
+    RUN_TEST(test_oplib_pool_scratch_base_unstaged);
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
     RUN_TEST(test_oplib_pool_stage_to_gpu_non_jetson_returns_minus_one);
 #endif

@@ -6,9 +6,8 @@ how the hand-off works, the one-time board setup, the build-deploy-test
 loop, and what does and does not work after a UEFI-direct boot.
 
 The kexec-from-Linux path ([`jetson-kexec.md`](jetson-kexec.md)) remains
-available for work that needs state Linux leaves behind (the sched and
-eviction GPU channels the helpers create). Both paths boot the same
-`slmos` build: kexec loads `slmos.elf`; UEFI loads `slmos.bin`.
+available. Both paths boot the same `slmos` build: kexec loads
+`slmos.elf`; UEFI loads `slmos.bin`.
 
 **Status (2026-11-03):** boots to the `slmos>` shell 10/10 on
 jetson-nano-2 (UEFI 36.4.7): EL2 with VHE, 6 CPUs via PSCI, hardware
@@ -21,7 +20,13 @@ pipeline on a channel it creates itself (see
 [GA10B cold bring-up](#ga10b-cold-bring-up)); 10/10 consecutive
 UEFI-direct boots completed the bring-up and returned the expected
 MNIST result on the GPU, and `slm.model_infer_file` classifies the ten
-MNIST test digits correctly on the GPU.
+MNIST test digits correctly on the GPU. The scheduler MLP, the eviction
+Q-net and the operator library (SLM per-op kernels) run on the same
+channel (#1092); none of the Linux GPU helpers is needed.
+
+**Known issue:** sustained all-core CPU load (for example
+`bench eviction-e2e`) silently stops the board after a UEFI-direct
+boot, also on builds without #1092; see #1093.
 
 ---
 
@@ -263,6 +268,7 @@ reset the GPU state inherited from Linux.
 | golden | Global context buffers, golden context image (FECS `GOLDEN_IMAGE_SAVE`) |
 | channel | VM, TSG, subcontext, instance block/RAMFC, USERD, GPFIFO, runlist, CHRAM; installed as the active handoff |
 | mnist | MNIST v7 pipeline: shaders from the embedded operator library, weights from the embedded `mnist.onnx`, cbufs, outputs, QMD pool |
+| policies | Scheduler MLP (kind 1) and eviction Q-net (kind 2) v7 pipelines built and stored next to MNIST's; operator library attached to the channel's VM (#1092) |
 
 The firmware is the L4T set embedded at build time
 (`GA10B_FIRMWARE_DIR`, auto-detected at `~/jetson-ga10b-firmware`); the
@@ -271,6 +277,98 @@ build artifacts. Without them the bring-up stops at the step that needs
 them and MNIST stays on the CPU. Smoke checks after boot:
 `nvgpu submit` (host semaphore through PBDMA) and `nvgpu submit-compute`
 (AMPERE_COMPUTE_B semaphore through GR).
+
+### Scheduler and eviction GPU consumers (#1092)
+
+On the kexec path, `gpu-kernel-sched-mlp` and `gpu-kernel-eviction-qnet`
+build these pipelines on Linux and leave v6 handoffs in DRAM.
+`ga10b_cold_pipelines.c` builds the same pipelines on the cold channel
+instead:
+- the same shaders (GEMM, add-bias-ReLU, sigmoid from the operator
+  library) and the same op shapes;
+- eviction batch 64; add-bias-ReLU with 32-thread CTAs (#1036/#1040);
+- the scheduler's own `ai_mlp_*` weights, transposed at build time; the
+  scheduler pipeline needs AI_SCHED=ON, the Jetson default;
+- the eviction weights from `runtime/src/mm/eviction/generated/mlp_policy_f32.rs`,
+  extracted by `cmake/gen_eviction_mlp_weights.cmake`.
+
+Each kind gets a v7 handoff (fresh QMD per launch, own QMD pool), and
+`step_policies` stores them per kind next to MNIST's. The first dispatch
+of a kind, from `ensure_bringup` in `slm_ffi.c`, installs that kind's
+handoff and carries the channel's live GPFIFO cursor over
+(`ga10b_cp_switch_handoff`). So MNIST, `gpu use sched` and
+`gpu use eviction` share the one channel and switch freely; each switch
+costs one warmup dispatch. A kind whose shaders or weights are missing
+from the build is skipped with a warning and stays on the CPU.
+
+`nvgpu cold check` runs both pipelines on the helpers' synthetic inputs
+and compares them with the helpers' CPU reference: argmax 8 and every
+logit within 1e-3 for the scheduler, row-0 score 0.673633 within 1e-4
+for eviction. The scheduler reference assumes the default
+`AI_WEIGHTS=synthetic`.
+
+| Command | Expected |
+|---|---|
+| `nvgpu cold` | `cold: rc=0 done=policies` |
+| `nvgpu cold check` | `check sched: PASS - argmax 8 ...`, `check eviction: PASS - row 0 score bits 0x3f2c733x ...` |
+| `gpu use inference on`, `gpu use sched on`, `sched policy ai_mlp`, `bench sched-policy`, `sched stats` | `ok` > 0 under `GPU dispatch (ai_mlp)` |
+| `gpu use eviction on`, `eviction policy mlp`, `eviction stats` after eviction traffic | `ok` > 0, `scores rejected 0` |
+
+### Operator library on the cold channel (#1092)
+
+On the kexec path the operator library (SLM per-op kernels:
+`slm_runtime_dispatch_*_simt`, `slm_runtime_stage_weight`, the
+`nvgpu oplib ...` verbs) depends on state Linux's helper created: it
+maps its SASS pool, cbuf and scratch slots into the helper's channel
+through `ga10b_gmmu.c` (keyed off the inherited instance block, found by
+handoff / FECS / DRAM walk), stages weights into the helper's 1.5 GB
+IOVMM pool (handoff v8/v9) with the copy engine, and fires through the
+handoff's QMD pool. None of that exists after a UEFI-direct boot, and
+`ga10b_gmmu.c` must not write the cold channel's page tables: it writes
+dual PDE0 entries with an 8-byte stride (#1090), while the cold
+channel's `struct ga10b_vm` uses nvgpu's 16-byte entries.
+
+`oplib_cold_attach()` (`kernel/gpu/oplib_cold.c`) moves the operator
+library onto the cold channel. It is called by the cold bring-up once
+the channel's handoff is installed, and it:
+
+1. selects the channel's `ga10b_vm` as the operator library's address
+   space (`struct oplib_gpu_as`, `kernel/include/oplib_gpu_as.h`; the
+   kexec path keeps a `ga10b_gmmu.c` backend behind the same interface);
+2. adds a QMD pool (1024 x 256 B) to the active handoff if it has none
+   (channel-only handoff, MNIST step failed) and re-installs it;
+3. stages the SASS/scratch pool and the cbuf page into the VM. SASS
+   fills as many 64 KB slots as it needs from offset 0, and the three
+   scratch slots follow it (`oplib_pool_self_bytes`). With every SLM op
+   packed the SASS is ~88 KB, so the pool is 320 KB;
+4. can add a weights pool from SLM-OS memory, in 64 MB physically
+   contiguous chunks behind one GPU VA range. The boot passes no size,
+   like `slmos-kexec`'s helper without `--weights-pool-size`; run
+   `nvgpu oplib wpool <MB>` (1536 for Qwen2.5-1.5B Q4_K_M) before
+   `slm load`. Every chunk is CPU-reachable, so
+   `slm_runtime_stage_weight` copies with memcpy + cache clean: no
+   bounce slot, no copy engine;
+5. invalidates the VM's TLB once, then runs `oplib_probe_run()` (the
+   tier flip `nvgpu oplib stage` does on the kexec path).
+
+While the attached channel's handoff is the active one
+(`oplib_cold_active()`), `oplib_pool_stage_to_gpu`,
+`oplib_weights_pool_*` and `slm_oplib_prepare_dispatch` use the cold
+address space, and the PTE-writing `ga10b_gmmu.c` entry points refuse
+that channel's instance block. Checks after boot:
+
+| Command | Expected |
+|---|---|
+| `nvgpu oplib cold` | `attached: channel 1 ... active=yes`, pool and cbuf GPU VAs whose `GPU walk ->` equals their phys, QMD pool, `weights pool: none` until `nvgpu oplib wpool` |
+| `nvgpu oplib status` | `GPU staging: pool gpu_va=0x...` |
+| `nvgpu oplib probe 0 2 2` | RMSNORM SIMT FP16 kernel VA (needs `rmsnorm_f16_shader.sass` in the build) |
+| `nvgpu oplib smoke 0` (also 2, 3, 5, 6, 12) | `PASS (N output bytes verified zero)` |
+| `nvgpu oplib dispatch-rmsnorm 4 16` | output matches the CPU reference |
+| `nvgpu oplib wpool 64`, then `nvgpu weights-pool smoke 0x1000` | `smoke PASS ... via GPU page-table walk ... (cold channel)` |
+
+Without the SLM-op SASS (`rmsnorm_f16_shader.sass` etc., extracted on a
+Jetson, gitignored) the library only holds the MNIST kernels: lookups
+for the SLM ops miss and every op stays on the CPU.
 
 ## Findings
 
@@ -349,6 +447,29 @@ where the two disagree.
 12. **The GSP-RM path was wrong for GA10B** (#579). `gsp_init()` drives
     the discrete-Ampere GSP-RM stack and only printed "firmware missing"
     on Jetson; it is no longer called there.
+13. **Every v7 dispatch spent ~146 ms writing to the UART** (#1092). The
+    #844 FECS recovery and an op-by-op dump printed about 1.6 KB per
+    dispatch, at 115200 baud, with IRQs masked under the dispatch lock.
+    Timed with the CPU counter, MNIST spent 146 ms before the doorbell
+    and 0.36 ms waiting for the GPU. The lines now print only under
+    `gpu debug on`. MNIST went from 146 ms to 0.41 ms per run; on the
+    kexec path the same change took it from 154 ms to 0.30 ms. The kexec
+    sched and eviction helpers publish v6 handoffs, which take another
+    path, so their 0.23–0.25 ms numbers never included this cost.
+14. **oplib dispatches read their own sentinel.** `slm_oplib_dispatch`
+    waited for the trailing semaphore and then read the output from
+    the scratch slots, without the post-launch L2 evict that
+    `ga10b_bringup_read_pipeline_output` does for the pipelines (#715).
+    On the cold channel, every `nvgpu oplib smoke` read back its 0xCAFE
+    sentinel. It passed on kexec only because those slots sat in the
+    helper's own buffer. The evict now runs after every oplib dispatch.
+15. **The full operator library does not fit one 64 KB slot.** The
+    pool layout put SASS in slot 0 and scratch in slots 1-3. With all 14
+    kernels packed (88 KB), staging failed, and every SLM op silently
+    stayed on the CPU. Self-allocated pools now size the SASS area to
+    the library and move the scratch slots behind it. The helper-staged
+    kexec pool is used only when the SASS fits slot 0, because a larger
+    copy would overwrite the helper's scratch slots.
 
 ## Troubleshooting
 
@@ -363,4 +484,6 @@ where the two disagree.
 | `cdc_ecm: no USB device` after a UEFI boot | No connected USB2 root port at enumeration; check the `xhci: cold boot — device on USB2 PORTSC[...]` line |
 | Board stuck in SLM-OS on every power cycle | A `BOOTAA64.efi` reached the NVMe ESP, or BootOrder was changed. Pick the SD entry from the UEFI boot manager (F11 at the prompt, via `serial_send keys=["F11"]`) and fix it from Linux |
 | `GA10B cold bring-up stopped at step N` at boot | The log names the step; `nvgpu cold` resumes from it. `acr`/`pmu`/`falcons` failures print the falcon mailboxes and the PMU's RISC-V debug-buffer lines (`pmu-fw:`) |
+| `nvgpu cold check` FAIL, or `sched stats` / `eviction stats` show only fallbacks | `nvgpu cold` must reach `done=policies`; the boot log names a skipped kind (`sched-mlp-gpu:` / `eviction-qnet-gpu:` warnings: shader missing from the operator library, or AI_SCHED=OFF). `gpu debug on` traces each dispatch (slow: it prints under the dispatch lock) |
+| Board goes silent during a long CPU-heavy bench | #1093 (UEFI-direct only, cause under investigation) |
 | SD Linux does not come up (no SSH, silent console) | Recover without a re-flash: F11 at the firmware prompt (`serial_send keys=["F11"]`), choose UEFI Shell, run `FS3:\EFI\L4T\l4t.efi` (an L4TLauncher copy on the NVMe ESP, so it boots the NVMe rootfs), then mount `mmcblk0p1` from there and fix it. The UEFI Shell sees the SD ext4 rootfs read-only. Type one short command per line; long lines get mangled on this console |

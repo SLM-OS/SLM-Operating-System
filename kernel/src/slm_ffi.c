@@ -29,6 +29,7 @@
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "boot_source.h"
+#include "../gpu/nvidia/ga10b_cold_pipelines.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
@@ -1012,6 +1013,35 @@ static void report_quiet_bringup(uint32_t kind)
                 (unsigned long)(st[2] / 1000u));
 }
 
+/* Kinds that have had their warmup on the cold channel (UEFI-direct
+ * boot, #1092): later switches back to them skip it. Written and read
+ * under g_gpu_dispatch_lock. */
+static bool g_cold_warmed[GA10B_PIPELINE_KIND_COUNT];
+
+/* ensure_bringup after a UEFI-direct boot, for a kind whose pipeline
+ * is not the installed one. There is no Linux state to inherit: the
+ * inherit path would touch GPU blocks the cold bring-up may not have
+ * powered (an EL3 SError on Tegra234) and could adopt a stale helper
+ * handoff a warm reboot left in DRAM. Switch to the pipeline the cold
+ * bring-up stored for this kind (#1092); the caller holds
+ * g_gpu_dispatch_lock, so this installs directly rather than through
+ * slm_gpu_install_handoff. Returns -1 (none stored: stay on the CPU),
+ * 1 (installed, already warmed: done) or 0 (installed for the first
+ * time: run the warmup). The warmup and the throwaway dispatch the
+ * caller arms are the Bug A safety nets for a channel inherited from
+ * Linux; the cold channel is already running, so a kind gets them on
+ * its first install only, or alternating sched / eviction / MNIST
+ * would run three pipelines per user call with IRQs masked. */
+static int ensure_bringup_cold(struct ga10b_bringup *b, uint32_t kind)
+{
+    if (ga10b_cold_pipeline_install(b, kind) != 0) return -1;
+    b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+    b->last_error_phase = -1;
+    if (g_cold_warmed[kind]) return 1;
+    g_cold_warmed[kind] = true;
+    return 0;
+}
+
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -1042,16 +1072,16 @@ static int ensure_bringup(uint32_t kind)
          * UEFI-direct boot, and inherit would reset this slot. */
         b->state = GA10B_BRINGUP_CHANNEL_OPEN;
         b->last_error_phase = -1;
+        g_cold_warmed[kind] = true;   /* warmed below */
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
     } else if (boot_source_is_uefi()) {
-        /* After a UEFI-direct boot there is no Linux state to inherit:
-         * the inherit path would touch GPU blocks the cold bring-up may
-         * not have powered (an EL3 SError on Tegra234) and could adopt a
-         * stale helper handoff a warm reboot left in DRAM. Without a
-         * locally built pipeline for this kind, stay on the CPU. */
-        return -1;
+        int crc = ensure_bringup_cold(b, kind);
+        if (crc != 0) return crc < 0 ? -1 : 0;
+        g_bringup_step_ns[kind][0] = 0;
+        g_bringup_step_ns[kind][1] = 0;
+        t2 = slm_get_time_ns();
     } else {
         /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
          * the progress lines' blocking UART writes dominated (#1037). */
@@ -1132,6 +1162,15 @@ int slm_gpu_install_handoff(struct ga10b_bringup *b,
     }
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ga10b_bringup_install_handoff(b, h);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
+}
+
+int slm_gpu_call_locked(int (*fn)(void *), void *arg)
+{
+    if (!fn) return -1;
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    int rc = fn(arg);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
 }
@@ -1773,9 +1812,9 @@ void slm_runtime_dispatch_stats_reset(void)
  *
  *   2. **oplib_pool self-allocated scratch** — `oplib_pool_stage_to_gpu`'s
  *      slow path (also added in this PR) allocates a 256 KB
- *      contiguous PMM buffer, maps it into the inherited channel's
- *      GMMU via `ga10b_gmmu_map`, and exposes the base addresses
- *      via `oplib_pool_base_phys` / `oplib_pool_gpu_va_base`.
+ *      contiguous PMM buffer (larger when the SASS spans more than
+ *      one slot), maps it into the channel's GMMU, and exposes the
+ *      scratch base via `oplib_pool_scratch_base`.
  *
  * Returns 0 on success or -1 if neither source has scratch (no
  * helper handoff + `nvgpu oplib stage` was never called or
@@ -1784,21 +1823,10 @@ void slm_runtime_dispatch_stats_reset(void)
 static int slm_ffi_resolve_scratch_base(uint64_t *out_phys,
                                          uint64_t *out_gva)
 {
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h != NULL && h->shader_phys != 0 && h->shader_gpu_va != 0 &&
-        h->shader_size >= OPLIB_POOL_MIN_BYTES) {
-        *out_phys = h->shader_phys;
-        *out_gva  = h->shader_gpu_va;
-        return 0;
-    }
-    uint64_t pool_phys = oplib_pool_base_phys();
-    uint64_t pool_gva  = oplib_pool_gpu_va_base();
-    if (pool_phys != 0 && pool_gva != 0) {
-        *out_phys = pool_phys;
-        *out_gva  = pool_gva;
-        return 0;
-    }
-    return -1;
+    /* oplib_pool_scratch_base resolves both sources, including the
+     * scratch offset of a self-allocated pool whose SASS spans more
+     * than one slot (#1092). */
+    return oplib_pool_scratch_base(out_phys, out_gva);
 }
 
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,

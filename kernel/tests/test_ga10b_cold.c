@@ -70,6 +70,7 @@ static void test_step_names(void)
 {
     TEST_ASSERT_EQUAL_STRING("power", ga10b_cold_step_name(GA10B_COLD_POWER));
     TEST_ASSERT_EQUAL_STRING("mnist", ga10b_cold_step_name(GA10B_COLD_MNIST));
+    TEST_ASSERT_EQUAL_STRING("policies", ga10b_cold_step_name(GA10B_COLD_POLICIES));
     TEST_ASSERT_EQUAL_STRING("?", ga10b_cold_step_name(GA10B_COLD_STEP_COUNT));
 }
 #endif

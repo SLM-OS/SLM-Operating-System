@@ -21,6 +21,7 @@
 #include "../include/cache.h"
 #include "nvidia/ga10b_gmmu.h"
 #include "nvidia/ga10b_bringup.h"
+#include "oplib_cold.h"
 #include "nvidia/ga10b_channel_handoff.h"
 #endif
 
@@ -133,6 +134,22 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
                 cbuf_va   = pool_cbuf_va;
                 cbuf_phys = pool_cbuf_phys;
                 cbuf_cpu  = (void *)(uintptr_t)pool_cbuf_phys;
+            } else if (ga10b_bringup_handoff_is_local()) {
+                /* SLM-OS-built channel (#1092): its page tables are a
+                 * ga10b_vm, which the ga10b_gmmu.c mapper must not
+                 * write (#1090). The cbuf comes only from the pool
+                 * oplib_cold_attach staged. Logged once: W-series
+                 * callers run this under the IRQs-off dispatch lock
+                 * (#1037), and fall back to the CPU on every call. */
+                static bool warned;
+                if (!warned) {
+                    warned = true;
+                    uart_printf("[oplib-dispatch] no staged cbuf on the "
+                                "SLM-OS channel (oplib_cold_attach %s)\n",
+                                oplib_cold_active() ? "staging failed"
+                                                    : "not run");
+                }
+                return -1;
             } else {
                 /* Last-resort slow path: ga10b_gmmu_alloc. Requires a
                  * valid inst_block_phys, which the W-series FFI
@@ -298,6 +315,23 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
     if (rc < 0) {
         uart_printf("[oplib-dispatch] inline dispatch failed: rc=%d\n", rc);
         return rc;
+    }
+    /* The trailing semaphore says the kernel finished, not that its
+     * output left the GPU L2: GA10B's LTC can keep sysmem lines the
+     * CPU then reads stale (#715). ga10b_bringup_read_pipeline_output
+     * evicts for MNIST/sched/eviction; the oplib path reads its output
+     * straight from the scratch slots, so evict here. Without it every
+     * `nvgpu oplib smoke` on the SLM-OS-built channel read back its
+     * own sentinel (#1092). */
+    if (ga10b_l2_evict_sysmem() < 0) {
+        /* Once only: this runs under the IRQs-off dispatch lock. */
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            uart_printf("[oplib-dispatch] post-dispatch L2 evict timed out "
+                        "(op_kind=%u) — output may be stale\n", (unsigned)op_kind);
+        }
+        return -1;
     }
     /* Success print is gated — see the matching comment on the
      * prepared-op gate above. */

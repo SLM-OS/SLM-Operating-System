@@ -6,18 +6,22 @@
  * (op_kind, tier, dtype) without re-validating headers on every
  * call.
  *
- * GPU-VA staging is intentionally out of scope here — that's the
- * dispatcher's job and lands once #666 GMMU work merges to main.
- * This file is just the parser-handle owner.
+ * It also owns the GPU-VA staging of the SASS pool + cbuf (#718,
+ * #832). Staging goes through a struct oplib_gpu_as (#1092): the
+ * kexec backend below (Linux's page tables via ga10b_gmmu.c) or the
+ * cold-channel backend from oplib_cold.c (SLM-OS's ga10b_vm).
  */
 
 #include "oplib_pool.h"
 
 #include "operator_library.h"
+#include "oplib_gpu_as.h"
+#include "string.h"
 #include "uart.h"
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
+#include "oplib_cold.h"
 #include "../include/pmm.h"  /* pmm_alloc_pages / pmm_free_pages */
 #include "nvidia/ga10b_gmmu.h"
 #include "nvidia/ga10b_bringup.h"          /* ga10b_bringup_handoff */
@@ -40,9 +44,17 @@ static bool g_initialized;
  * calls are idempotent and return `g_stage_rc`. The stub blob
  * (sass_region_len == 0) staging path is also recorded as "staged"
  * with `g_sass_pool_gpu_va == 0` so callers see a stable,
- * NOT_AVAILABLE-returning lookup contract. */
-static bool g_staged;
-static int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+ * NOT_AVAILABLE-returning lookup contract.
+ *
+ * Atomic (sequentially consistent) because a post-boot re-stage
+ * (`nvgpu oplib stage` after a failed boot-time staging) publishes the
+ * pool from the shell while the W-series FFIs read it under the GPU
+ * dispatch lock on other CPUs: every stage path writes the pool fields
+ * first and sets g_stage_rc / g_staged last, and every reader tests
+ * g_staged first, so a reader never pairs them with half-written
+ * fields. A retry clears g_staged before touching them. */
+static _Atomic bool g_staged;
+static _Atomic int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
 static uint64_t g_sass_pool_gpu_va;
 static size_t g_sass_pool_n_pages;
 
@@ -54,6 +66,11 @@ static size_t g_sass_pool_n_pages;
  * path (from `pmm_alloc_pages` return). Stays 0 if neither path
  * yields a contiguous-phys-mappable buffer. */
 static uint64_t g_sass_pool_base_phys;
+
+/* Offset of the scratch base (see oplib_pool_scratch_off) from the
+ * pool base: 0 in the helper layout, more when a self-allocated pool
+ * holds SASS larger than one slot (#1092). */
+static uint64_t g_scratch_off;
 
 /* #832: cbuf is a separate 4 KB page in the channel's GMMU,
  * populated per-dispatch by `slm_oplib_prepare_dispatch` with the
@@ -188,78 +205,44 @@ uint64_t oplib_pool_cbuf_gpu_va(void)
     return g_cbuf_gpu_va;
 }
 
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-
-/* #832: ensure a cbuf page is mapped into the channel's GMMU and
- * recorded in g_cbuf_phys / g_cbuf_gpu_va. Called by both fast and
- * slow paths of `oplib_pool_stage_to_gpu` after SASS staging — the
- * helper may have published cbuf_* (h->cbuf_*) but the current
- * MNIST helper's v6/v7 paths zero those fields, so we fall back to
- * a SLM-OS-allocated 4 KB page.
+/* ---- Backend-independent staging (#1092) ----
  *
- * Idempotent: if g_cbuf_phys is already non-zero (set earlier by
- * the fast path's helper-cbuf check), returns 0 without allocating.
- *
- * Returns 0 on success or a negative error. On error, the caller
- * still treats SASS staging as successful — cbuf failure makes the
- * W-series dispatch FFI return -1 (CPU fallback) but doesn't
- * invalidate the SASS pool itself. */
-static int stage_cbuf(uint64_t inst_block_phys)
+ * Stage the SASS pool + cbuf through `as` and publish the result in
+ * the g_* accessors. Caller has checked/reset g_staged. Records the
+ * outcome in g_staged / g_stage_rc. */
+/* Make a successfully staged pool visible to dispatchers. Order
+ * matters on a post-boot retry, when W-series FFIs on other CPUs read
+ * the pool under the dispatch lock:
+ *   1. drop stale GPU translations (an address space the GPU may
+ *      already have walked: the cold channel's; the kexec mapper has
+ *      no invalidate) before anything can dispatch into the new VAs;
+ *   2. write the pool fields;
+ *   3. publish with g_stage_rc = 0, then g_staged (both atomic): a
+ *      reader that sees rc 0 also sees the fields written before it.
+ * A retry clears g_staged and leaves g_stage_rc nonzero until step 3,
+ * so readers reject the pool in between. */
+static void stage_publish(const struct oplib_gpu_as *as,
+                          const struct oplib_staged_pool *sp, size_t sass_len)
 {
-    if (g_cbuf_phys != 0 && g_cbuf_gpu_va != 0) {
-        return 0;  /* helper-published path; nothing to do */
+    if (as->tlb_invalidate != NULL && as->tlb_invalidate(as->ctx) != OPLIB_AS_OK) {
+        uart_printf("[oplib] stage_to_gpu: %s: TLB invalidate timed out — "
+                    "the pool may not be visible to the GPU yet\n", as->name);
     }
-
-    void *cbuf_cpu = pmm_alloc_pages(1u);
-    if (cbuf_cpu == NULL) {
-        uart_puts("[oplib] stage_cbuf: pmm_alloc_pages(1) failed — "
-                  "W-series dispatches will fall back to CPU\n");
-        return -1;
-    }
-    uint64_t cbuf_phys = (uint64_t)(uintptr_t)cbuf_cpu;
-
-    uint64_t cbuf_gva = 0;
-    int rc = ga10b_gmmu_map(inst_block_phys, cbuf_phys, 1u, 0u, &cbuf_gva);
-    if (rc < 0) {
-        pmm_free_pages(cbuf_cpu, 1u);
-        uart_printf("[oplib] stage_cbuf: ga10b_gmmu_map(phys=0x%llx) "
-                    "failed rc=%d\n",
-                    (unsigned long long)cbuf_phys, rc);
-        return rc;
-    }
-
-    /* Zero the cbuf — each dispatch writes a fresh layout, but
-     * keeping uninitialized bytes deterministic helps diagnostic
-     * dumps. */
-    {
-        volatile uint8_t *p = (volatile uint8_t *)cbuf_cpu;
-        for (size_t i = 0; i < 4096; i++) {
-            p[i] = 0;
-        }
-        cache_clean_range(cbuf_cpu, 4096);
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
-
-    g_cbuf_phys   = cbuf_phys;
-    g_cbuf_gpu_va = cbuf_gva;
-    uart_printf("[oplib] stage_cbuf: allocated 4 KB cbuf at "
-                "gpu_va=0x%llx (phys=0x%llx)\n",
-                (unsigned long long)cbuf_gva,
-                (unsigned long long)cbuf_phys);
-    return 0;
+    g_sass_pool_gpu_va    = sp->pool_gpu_va + OPLIB_POOL_OFF_SASS;
+    g_sass_pool_n_pages   = (sass_len + 4095) / 4096;
+    g_sass_pool_base_phys = sp->pool_phys;
+    g_scratch_off         = sp->scratch_off;
+    g_stage_rc = 0;
+    g_staged   = true;
 }
 
-int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
+static int stage_common(const struct oplib_gpu_as *as)
 {
-    if (g_staged) {
-        return g_stage_rc;
-    }
     if (!g_initialized || g_init_rc != 0) {
         g_staged = true;
         g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
         return g_stage_rc;
     }
-
     /* Stub blob (op_count=0, sass_region_len=0): nothing to map. Mark
      * staged so subsequent lookups return NOT_AVAILABLE cleanly via
      * g_sass_pool_gpu_va == 0. */
@@ -271,178 +254,284 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
         return 0;
     }
 
+    /* The W-series dispatch FFIs compute their per-call scratch slots
+     * as `pool_base + OPLIB_POOL_OFF_SCRATCH<N>`, so the pool is one
+     * contiguous physical buffer (SASS in slot 0, 64 KB). */
     size_t sass_len = g_handle.sass_region_len;
+    struct oplib_staged_pool sp;
+    memset(&sp, 0, sizeof(sp));
+    int rc = oplib_gpu_as_stage_pool(as, g_handle.sass_region, sass_len, &sp);
+    if (rc != OPLIB_AS_OK) {
+        g_staged = true;
+        g_stage_rc = -1;
+        if (rc == OPLIB_AS_ERR_TOO_BIG) {
+            uart_printf("[oplib] stage_to_gpu: SASS region %zu B exceeds "
+                        "the %u B self-allocated pool limit "
+                        "(OPLIB_POOL_SASS_MAX_BYTES)\n",
+                        sass_len, (unsigned)OPLIB_POOL_SASS_MAX_BYTES);
+        } else {
+            uart_printf("[oplib] stage_to_gpu: %s: %llu KB pool alloc/map "
+                        "failed rc=%d\n", as->name,
+                        (unsigned long long)(oplib_pool_self_bytes(sass_len) >> 10), rc);
+        }
+        return -1;
+    }
 
-    /* Fast path: if the inherited channel handoff exposes a pre-
-     * staged SASS region (helper allocated `shader_*` fields in
-     * the channel's GMMU pre-kexec), copy the embedded SASS bytes
-     * into it and use the helper's GPU VA directly. Skips the
-     * post-kexec ga10b_gmmu_alloc path entirely — that path
-     * requires discovering the channel's inst_block_phys, which
-     * is unreliable on a kexec'd Linux box (FECS_CURRENT_CTX
-     * stale, walk-discovery blocked on big-page support). */
-    {
-        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-        /* Capacity check uses the page-rounded length (matches
-         * what the slow path's ga10b_gmmu_alloc(n_pages) would
-         * map). A handoff with shader_size between sass_len and
-         * round_up(sass_len, 4 KB) would otherwise pass the raw
-         * sass_len check but leave the last 4 KB page partially
-         * outside the helper's mapping, which the
-         * `g_sass_pool_n_pages` claim below would lie about. The
-         * helper today always allocates a multiple of 4 KB so the
-         * extra strictness is a no-op in practice; this guards
-         * against any future producer that hands SLM-OS an
-         * unaligned shader_size. */
-        size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
-        if (h != NULL && h->shader_gpu_va != 0 &&
-            h->shader_phys != 0 && h->shader_size >= sass_pages_bytes) {
-            /* The SASS bytes occupy slot 0 of the helper-staged
-             * pool (see `OPLIB_POOL_OFF_SASS` in oplib_pool.h). The
-             * `+ OPLIB_POOL_OFF_SASS` is a no-op today because the
-             * offset is 0, but adding it explicitly keeps the slot
-             * mapping symmetric with the SCRATCH slots that the
-             * dispatch verbs in shell_sys.c carve out. */
-            uint64_t sass_phys = h->shader_phys + OPLIB_POOL_OFF_SASS;
-            uint64_t sass_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SASS;
-            volatile uint8_t *dst =
-                (volatile uint8_t *)(uintptr_t)sass_phys;
-            const uint8_t *src = g_handle.sass_region;
-            for (size_t i = 0; i < sass_len; i++) {
-                dst[i] = src[i];
-            }
-            cache_clean_range((void *)(uintptr_t)sass_phys, sass_len);
-            __asm__ volatile("dsb sy" ::: "memory");
-            g_sass_pool_gpu_va = sass_gva;
-            g_sass_pool_n_pages = (sass_len + 4095) / 4096;
-            /* #832: record pool base so W-series dispatch FFIs can
-             * compute scratch slot phys without re-reading
-             * `h->shader_phys`. SASS is slot 0 (OPLIB_POOL_OFF_SASS == 0),
-             * so the pool base IS the SASS base. */
-            g_sass_pool_base_phys = h->shader_phys;
-            /* If the helper also published cbuf_*, record it.
-             * Otherwise fall through to the cbuf-allocation step
-             * below — the v6/v7 publish paths zero cbuf_* the same
-             * way they zero shader_*. */
-            if (h->cbuf_phys != 0 && h->cbuf_gpu_va != 0) {
-                g_cbuf_phys   = h->cbuf_phys;
-                g_cbuf_gpu_va = h->cbuf_gpu_va;
-            }
-            /* Ensure cbuf is mapped. Returns 0 if helper published
-             * h->cbuf_*, otherwise allocates a fresh 4 KB page. */
-            (void)stage_cbuf(inst_block_phys);
-            g_stage_rc = 0;
-            g_staged = true;
-            uart_printf("[oplib] stage_to_gpu: %zu B copied into helper-"
-                        "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
-                        "capacity %u B)\n",
-                        sass_len,
-                        (unsigned long long)sass_gva,
-                        (unsigned long long)sass_phys,
-                        (unsigned)h->shader_size);
-            return 0;
+    /* Cbuf gets its own 4 KB page (helper-published h->cbuf_* are used
+     * instead when present; kexec fast path only). A cbuf failure makes
+     * the W-series FFIs fall back to CPU but leaves the pool usable. */
+    if (g_cbuf_phys == 0 || g_cbuf_gpu_va == 0) {
+        if (oplib_gpu_as_stage_cbuf(as, &sp) == OPLIB_AS_OK) {
+            g_cbuf_phys   = sp.cbuf_phys;
+            g_cbuf_gpu_va = sp.cbuf_gpu_va;
+        } else {
+            uart_printf("[oplib] stage_cbuf: %s: cbuf alloc/map failed — "
+                        "W-series dispatches will fall back to CPU\n",
+                        as->name);
         }
     }
 
-    /* Slow path (#832): the helper's v6/v7 publish path zeros
-     * `h->shader_*`, so there's no pre-staged scratch region for
-     * the W-series dispatch FFI to use. Allocate the FULL pool
-     * (SASS + 3 scratch slots = OPLIB_POOL_MIN_BYTES) as one
-     * contiguous physical buffer via PMM and map it into the
-     * inherited channel's GMMU via the new `ga10b_gmmu_map`.
-     *
-     * Contiguous-phys is load-bearing: each dispatch FFI does
-     * `pool_base_phys + OPLIB_POOL_OFF_SCRATCH<N>` to find its
-     * per-call CPU↔GPU staging slot. The prior slow path that used
-     * `ga10b_gmmu_alloc` got per-page-discontig PMM and couldn't
-     * satisfy that math.
-     *
-     * SASS must fit in slot 0 (64 KB). All seven W-series shipped
-     * kernels combine to ~40 KB today — fits comfortably. If a
-     * future operator library exceeds this, the assertion below
-     * fires before any GMMU mapping is attempted. */
-    if (sass_len > OPLIB_POOL_SLOT_BYTES) {
-        g_staged = true;
-        g_stage_rc = -1;
-        uart_printf("[oplib] stage_to_gpu: SASS region %zu B exceeds "
-                    "slot 0 capacity %u B — pool layout assumes "
-                    "SASS fits in slot 0. Rework slot sizing or "
-                    "split the library.\n",
-                    sass_len, (unsigned)OPLIB_POOL_SLOT_BYTES);
+    stage_publish(as, &sp, sass_len);
+
+    uart_printf("[oplib] stage_to_gpu: %zu B SASS staged at gpu_va=0x%llx "
+                "(%s, self-allocated %llu KB pool, base phys=0x%llx, "
+                "cbuf gpu_va=0x%llx)\n",
+                sass_len, (unsigned long long)g_sass_pool_gpu_va, as->name,
+                (unsigned long long)(sp.pool_bytes >> 10),
+                (unsigned long long)sp.pool_phys,
+                (unsigned long long)g_cbuf_gpu_va);
+    return 0;
+}
+
+int oplib_pool_stage_with_as(const struct oplib_gpu_as *as)
+{
+    if (as == NULL) {
+        return OPERATOR_LIBRARY_ERR_NULL;
+    }
+    if (g_staged && g_stage_rc == 0) {
+        return 0;
+    }
+    /* A previous attempt failed (e.g. `nvgpu oplib stage` run before
+     * the cold channel existed): retry from scratch. */
+    g_staged = false;
+    g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+    g_sass_pool_gpu_va = 0;
+    g_sass_pool_n_pages = 0;
+    g_sass_pool_base_phys = 0;
+    g_scratch_off = 0;
+    return stage_common(as);
+}
+
+void oplib_pool_unstage(void)
+{
+    g_staged = false;
+    g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+    g_sass_pool_gpu_va = 0;
+    g_sass_pool_n_pages = 0;
+    g_sass_pool_base_phys = 0;
+    g_scratch_off = 0;
+    g_cbuf_phys = 0;
+    g_cbuf_gpu_va = 0;
+}
+
+size_t oplib_pool_sass_region_len(void)
+{
+    return (g_initialized && g_init_rc == 0) ? g_handle.sass_region_len : 0;
+}
+
+int oplib_pool_scratch_base(uint64_t *out_phys, uint64_t *out_gpu_va)
+{
+    if (out_phys == NULL || out_gpu_va == NULL) {
         return -1;
     }
-
-    /* OPLIB_POOL_MIN_BYTES = 256 KB rounds to 64 pages → order 6
-     * in the buddy allocator. Plenty of headroom on Jetson's
-     * ~6.7 GB usable. */
-    const size_t pool_pages = OPLIB_POOL_MIN_BYTES / 4096u;
-    void *pool_cpu = pmm_alloc_pages(pool_pages);
-    if (pool_cpu == NULL) {
-        g_staged = true;
-        g_stage_rc = -1;
-        uart_printf("[oplib] stage_to_gpu: pmm_alloc_pages(%zu) for "
-                    "256 KB scratch pool failed\n", pool_pages);
-        return -1;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Helper-published v4 shader region (kexec, old helpers). Never
+     * present on a locally built handoff. */
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h != NULL && h->shader_phys != 0 && h->shader_gpu_va != 0 &&
+        h->shader_size >= OPLIB_POOL_MIN_BYTES) {
+        *out_phys   = h->shader_phys;
+        *out_gpu_va = h->shader_gpu_va;
+        return 0;
     }
-    uint64_t pool_phys = (uint64_t)(uintptr_t)pool_cpu;
+#endif
+    if (g_staged && g_stage_rc == 0 && g_sass_pool_base_phys != 0 &&
+        g_sass_pool_gpu_va != 0) {
+        *out_phys   = g_sass_pool_base_phys + g_scratch_off;
+        *out_gpu_va = g_sass_pool_gpu_va - OPLIB_POOL_OFF_SASS + g_scratch_off;
+        return 0;
+    }
+    return -1;
+}
 
-    /* Map the whole pool into the channel's GMMU at a fresh GPU VA.
-     * Read-write because per-call staging writes activations into
-     * SCRATCH0/1/2; the SASS slot is also writable today (no
-     * separate RO flag per slot — fix once we add slot-granular
-     * mapping). */
-    uint64_t gpu_va = 0;
-    int rc = ga10b_gmmu_map(inst_block_phys, pool_phys,
-                             (uint32_t)pool_pages,
-                             /* flags */ 0,
-                             &gpu_va);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+
+/* ---- kexec backend: Linux's page tables through ga10b_gmmu.c ----
+ *
+ * Only for a channel Linux's helper created. ga10b_gmmu_map writes
+ * 8-byte-stride dual PDE0 entries (#1090), so it must never touch a
+ * VM laid out by ga10b_vm_* (the cold channel; see oplib_cold.c). */
+static void *kexec_as_alloc(void *ctx, uint32_t npages, uint64_t *phys)
+{
+    (void)ctx;
+    void *p = pmm_alloc_pages(npages);
+    if (p != NULL) {
+        *phys = (uint64_t)(uintptr_t)p;   /* identity map */
+    }
+    return p;
+}
+
+static void kexec_as_free(void *ctx, void *cpu, uint32_t npages)
+{
+    (void)ctx;
+    pmm_free_pages(cpu, npages);
+}
+
+static int kexec_as_map(void *ctx, uint64_t phys, uint64_t bytes,
+                        uint64_t *gpu_va)
+{
+    uint64_t inst = *(const uint64_t *)ctx;
+    int rc = ga10b_gmmu_map(inst, phys, (uint32_t)(bytes / 4096u), 0u, gpu_va);
     if (rc < 0) {
-        /* Free the PMM pages — they'd otherwise leak until reboot. */
-        pmm_free_pages(pool_cpu, pool_pages);
-        g_staged = true;
-        g_stage_rc = rc;
-        uart_printf("[oplib] stage_to_gpu: ga10b_gmmu_map(phys=0x%llx, "
-                    "n_pages=%zu) failed: rc=%d\n",
-                    (unsigned long long)pool_phys, pool_pages, rc);
-        return rc;
+        uart_printf("[oplib] ga10b_gmmu_map(inst=0x%llx, phys=0x%llx, "
+                    "%llu B) failed rc=%d\n", (unsigned long long)inst,
+                    (unsigned long long)phys, (unsigned long long)bytes, rc);
+        return OPLIB_AS_ERR_MAP;
     }
+    return OPLIB_AS_OK;
+}
 
-    /* Copy SASS into slot 0. The pool is physically contiguous so
-     * we can write through the kernel-VA alias (`pool_cpu`) in one
-     * pass, and a single cache_clean_range covers slot 0. */
-    {
-        const uint8_t *src = g_handle.sass_region;
+static void kexec_as_clean(void *ctx, const void *p, size_t len)
+{
+    (void)ctx;
+    cache_clean_range(p, len);
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* ga10b_gmmu_map orders its own PTE writes (dsb sy) and the inherited
+ * channel must not see a dispatch-time all-VA invalidate (#844), so
+ * no tlb_invalidate / reserve / map_at. The pages are freed after a
+ * failed map, as the pre-#1092 slow path did. */
+static void kexec_as_init(struct oplib_gpu_as *as, uint64_t *inst)
+{
+    *as = (struct oplib_gpu_as){
+        .name = "kexec-gmmu",
+        .ctx = inst,
+        .alloc = kexec_as_alloc,
+        .free = kexec_as_free,
+        .map = kexec_as_map,
+        .clean = kexec_as_clean,
+    };
+}
+
+/* kexec fast path: if the inherited channel handoff exposes a pre-
+ * staged SASS region (helper allocated `shader_*` fields in the
+ * channel's GMMU pre-kexec), copy the embedded SASS bytes into it and
+ * use the helper's GPU VA directly. Skips the post-kexec
+ * ga10b_gmmu_alloc path entirely — that path requires discovering the
+ * channel's inst_block_phys, which is unreliable on a kexec'd Linux box
+ * (FECS_CURRENT_CTX stale, walk-discovery blocked on big-page support).
+ * Returns 1 when staged here, 0 when the helper region is unusable. */
+static int stage_into_helper_region(const struct oplib_gpu_as *kx, size_t sass_len)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    /* Capacity check uses the page-rounded length so the last
+     * 4 KB page is fully inside the helper's mapping. */
+    size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
+    /* Only when the SASS fits slot 0: the helper's slots 1-3 are
+     * the scratch buffers, and a larger library would overwrite
+     * them. Larger libraries take the self-allocated pool (stage_common). */
+    if (h != NULL && h->shader_gpu_va != 0 &&
+        h->shader_phys != 0 && h->shader_size >= sass_pages_bytes &&
+        sass_len <= OPLIB_POOL_SLOT_BYTES) {
+        /* SASS occupies slot 0 of the helper-staged pool. */
+        uint64_t sass_phys = h->shader_phys + OPLIB_POOL_OFF_SASS;
+        uint64_t sass_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SASS;
         volatile uint8_t *dst =
-            (volatile uint8_t *)pool_cpu + OPLIB_POOL_OFF_SASS;
+            (volatile uint8_t *)(uintptr_t)sass_phys;
+        const uint8_t *src = g_handle.sass_region;
         for (size_t i = 0; i < sass_len; i++) {
             dst[i] = src[i];
         }
-        cache_clean_range((void *)((uintptr_t)pool_cpu + OPLIB_POOL_OFF_SASS),
-                          sass_len);
+        cache_clean_range((void *)(uintptr_t)sass_phys, sass_len);
+        __asm__ volatile("dsb sy" ::: "memory");
+        g_sass_pool_gpu_va = sass_gva;
+        g_sass_pool_n_pages = (sass_len + 4095) / 4096;
+        /* #832: pool base for the W-series scratch-slot math. */
+        g_sass_pool_base_phys = h->shader_phys;
+        g_scratch_off = 0;
+        if (h->cbuf_phys != 0 && h->cbuf_gpu_va != 0) {
+            g_cbuf_phys   = h->cbuf_phys;
+            g_cbuf_gpu_va = h->cbuf_gpu_va;
+        } else {
+            /* v6/v7 publish paths zero cbuf_*: own 4 KB page. */
+            struct oplib_staged_pool sp;
+            memset(&sp, 0, sizeof(sp));
+            if (oplib_gpu_as_stage_cbuf(kx, &sp) == OPLIB_AS_OK) {
+                g_cbuf_phys   = sp.cbuf_phys;
+                g_cbuf_gpu_va = sp.cbuf_gpu_va;
+                uart_printf("[oplib] stage_cbuf: allocated 4 KB cbuf at "
+                            "gpu_va=0x%llx (phys=0x%llx)\n",
+                            (unsigned long long)sp.cbuf_gpu_va,
+                            (unsigned long long)sp.cbuf_phys);
+            } else {
+                uart_puts("[oplib] stage_cbuf: cbuf alloc/map failed — "
+                          "W-series dispatches will fall back to CPU\n");
+            }
+        }
+        g_stage_rc = 0;
+        g_staged = true;
+        uart_printf("[oplib] stage_to_gpu: %zu B copied into helper-"
+                    "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
+                    "capacity %u B)\n",
+                    sass_len,
+                    (unsigned long long)sass_gva,
+                    (unsigned long long)sass_phys,
+                    (unsigned)h->shader_size);
+        return 1;
+    }
+    return 0;
+}
+
+int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
+{
+    /* UEFI-direct boot: the channel is SLM-OS's own; stage into its VM
+     * (inst_block_phys is ignored — the cold channel is not reachable
+     * through ga10b_gmmu.c). */
+    if (oplib_cold_active()) {
+        return oplib_pool_stage_with_as(oplib_cold_as());
+    }
+    if (g_staged) {
+        return g_stage_rc;
+    }
+    if (ga10b_bringup_handoff_is_local()) {
+        /* A local handoff without oplib_cold_attach: refusing beats
+         * writing Linux-format PDEs into SLM-OS's page tables. */
+        g_staged = true;
+        g_stage_rc = -1;
+        uart_puts("[oplib] stage_to_gpu: active channel was built by "
+                  "SLM-OS but the operator library is not attached to "
+                  "it (oplib_cold_attach) — not staging\n");
+        return -1;
+    }
+    if (!g_initialized || g_init_rc != 0 || g_handle.sass_region_len == 0) {
+        return stage_common(NULL);   /* records the init/stub outcome */
     }
 
-    /* DSB SY so the GPU sees the populated SASS pages from PoC on
-     * its first dispatch. ga10b_gmmu_map already issued one for the
-     * page-table publication; this one orders the SASS data writes. */
-    __asm__ volatile("dsb sy" ::: "memory");
+    uint64_t inst = inst_block_phys;
+    struct oplib_gpu_as kx;
+    kexec_as_init(&kx, &inst);
+    size_t sass_len = g_handle.sass_region_len;
 
-    g_sass_pool_gpu_va    = gpu_va + OPLIB_POOL_OFF_SASS;
-    g_sass_pool_n_pages   = (sass_len + 4095) / 4096;
-    g_sass_pool_base_phys = pool_phys;
+    if (stage_into_helper_region(&kx, sass_len) == 1) {
+        return 0;
+    }
 
-    /* Cbuf gets its own 4 KB page, separately allocated and mapped.
-     * Same v6/v7-publish-zeros story as shader_*. */
-    (void)stage_cbuf(inst_block_phys);
-
-    g_stage_rc = 0;
-    g_staged   = true;
-
-    uart_printf("[oplib] stage_to_gpu: %zu B SASS staged at gpu_va=0x%llx "
-                "(self-allocated 256 KB pool, base phys=0x%llx, "
-                "scratch slots mapped)\n",
-                sass_len, (unsigned long long)g_sass_pool_gpu_va,
-                (unsigned long long)pool_phys);
-    return 0;
+    /* Slow path (#832): the helper's v6/v7 publish path zeros
+     * `h->shader_*`. Allocate the full pool (SASS + 3 scratch slots)
+     * as one contiguous PMM buffer and map it into the inherited
+     * channel's GMMU through the kexec address space. */
+    return stage_common(&kx);
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
