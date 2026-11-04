@@ -159,8 +159,11 @@ for entry in "${SHADERS[@]}"; do
         [ -f "$candidate" ] || continue
         # A candidate readelf can't parse (e.g. a non-ELF host stub) is
         # skipped rather than allowed to abort the build under pipefail:
-        # the kernel cubin may still come later in the glob.
-        line="$("$READELF" -SW "$candidate" 2>/dev/null | awk '/\.text\./ {print; exit}')" || line=""
+        # the kernel cubin may still come later in the glob. awk reads to
+        # the end instead of exiting on the first match: an early exit can
+        # SIGPIPE readelf, and pipefail plus the fallback would then drop
+        # the match.
+        line="$("$READELF" -SW "$candidate" 2>/dev/null | awk '/\.text\./ && !found {print; found=1}')" || line=""
         if [ -n "$line" ]; then
             cubin="$candidate"
             text_line="$line"

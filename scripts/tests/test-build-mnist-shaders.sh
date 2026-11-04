@@ -35,8 +35,10 @@ EOF
 
 # cuobjdump stub: `cuobjdump --extract-elf all <binary>` writes two
 # cubins into the cwd, named per $STUB_NAMING. The kernel cubin holds
-# 0x40 filler bytes, then the 16-byte "SASS-<kernel>" marker at the
-# .text offset (0x40), padded to 0x20 bytes.
+# 0x40 filler bytes, then the marker "SASS-<src>" padded with dots to
+# 32 bytes (the stub readelf's .text size, 0x20) at offset 0x40. A
+# shader name longer than 27 characters would overflow that field and
+# fail every case; widen both if one is ever added.
 cat > "$STUBS/cuobjdump" <<'EOF'
 #!/bin/bash
 src=$(basename "$3")
@@ -71,7 +73,8 @@ EOF
 chmod +x "$STUBS/nvcc" "$STUBS/cuobjdump" "$STUBS/readelf"
 
 # Number of entries in the build script's SHADERS table ("src:out.sass").
-EXPECTED_SHADERS=$(grep -cE '^[[:space:]]+"[a-z0-9_]+:[a-z0-9_]+_shader\.sass"' "$BUILD_SCRIPT")
+# (grep -c exits 1 on zero matches; `|| true` lets the check below report it.)
+EXPECTED_SHADERS=$(grep -cE '^[[:space:]]+"[a-z0-9_]+:[a-z0-9_]+_shader\.sass"' "$BUILD_SCRIPT" || true)
 if [ "$EXPECTED_SHADERS" -lt 1 ]; then
     echo "FAIL: could not count the SHADERS table in $BUILD_SCRIPT"
     exit 2
