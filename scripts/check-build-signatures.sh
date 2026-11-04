@@ -23,8 +23,9 @@ cd "$(dirname "$0")/.."
 # make exports its command-line variables (and MAKEFLAGS) to this
 # script, so the "default" baseline already had AI_SCHED=ON and every
 # toggle of it looked like a no-op. PLATFORM is dropped too, so the
-# check always runs against the default platform's variants; that is
-# enough, since it only asks whether toggling an option changes them.
+# toggle checks run against the default platform's variants; that is
+# enough, since they only ask whether toggling an option changes them.
+# (The AI-default checks below pass PLATFORM explicitly.)
 sigs() {
     env -i PATH="$PATH" HOME="$HOME" \
         make --no-print-directory -s print-build-signatures "$@"
@@ -77,7 +78,7 @@ ai_default() {  # ai_default <want ON|OFF> <make args...>
     local want="$1"; shift
     local out got=OFF
     out="$(sigs "$@")"   # a failing make aborts here (set -e), not as "OFF"
-    if grep "^kernel=" <<<"$out" | grep -q -- "-DENABLE_AI_SCHEDULER=ON"; then
+    if grep -q -- '^kernel=.*-DENABLE_AI_SCHEDULER=ON' <<<"$out"; then
         got=ON
     fi
     if [ "$got" != "$want" ]; then

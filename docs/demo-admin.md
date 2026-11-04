@@ -16,10 +16,10 @@ to file.
 
 ## Prerequisites
 
-* SLM-OS built with `make kernel PLATFORM=JETSON_ORIN_NANO AI_SCHED=ON`
+* SLM-OS built with `make kernel PLATFORM=JETSON_ORIN_NANO`
   and deployed via `sudo slmos-kexec /root/slmos.elf` to `jetson-nano-2`.
-  Networking, DHCP-at-boot, telnetd autostart, and GA10B firmware
-  embedding are all default-ON for `JETSON_ORIN_NANO`. The only
+  The AI scheduler, networking, DHCP-at-boot, telnetd autostart, and
+  GA10B firmware embedding are all default-ON for `JETSON_ORIN_NANO`. The only
   prerequisite outside the build itself is having the firmware blobs
   staged at `$HOME/jetson-ga10b-firmware/`. Run
   `scripts/tools/fetch-ga10b-firmware.sh` once after a fresh clone —
