@@ -5738,7 +5738,7 @@ int cmd_nvgpu(int argc, char *argv[])
                     shell_printf("%s%s", s > 1 ? "|" : "",
                                  ga10b_cold_step_name((enum ga10b_cold_step)s));
                 }
-                shell_puts("]\r\n");
+                shell_puts("|check]\r\n");
                 return -1;
             }
         }
