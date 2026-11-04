@@ -87,9 +87,9 @@ is recorded in
 | microSD | 64 GB, 15-partition JetPack layout, `root=/dev/mmcblk0p1`. extlinux menu: `primary kernel` (default), `Linux -> auto-kexec SLM-OS` |
 | NVMe | 512 GB Samsung MZVL4512HBLU: `p1` ext4 `APP` (476.4 GiB, copy of the microSD rootfs with `root=/dev/nvme0n1p1`) and `p2` FAT32 `SLMOS-ESP` (512 MiB) holding `\EFI\SLMOS\SLMOS.efi`. UEFI entry `SLM-OS NVMe` points at it, outside BootOrder. No `BOOTAA64.efi` there, so cold boots fall through to the microSD |
 | SLM-OS extras | `slmos-kexec`, `/root/gpu-mnist` (MNIST, sched-MLP and eviction producers, shaders, weights), `arm_smmu_noshutdown.ko`, patched `nvgpu.ko` (stock kept as `nvgpu.ko.stock`), `slmos-autokexec.service` (enabled) — on both media |
-| Recovery strap | labctl `recovery_mode` latch binding wired to J14 pins 9-10. Must read `released` for a normal boot. After a Linux `poweroff`, power-cycle with a delay of at least 15 s: with the 5 s default the module doesn't see the power loss and stays off |
+| Recovery strap | labctl `recovery_mode` latch binding wired to J14 pins 9-10. Must read `released` for a normal boot. Seen once (2026-11-03): `poweroff` from Linux, then `enter_recovery` with the 5 s default about 10 s later, and the board stayed off; a 15 s `power_cycle` brought it up. Not yet characterised — use 15 s after a shutdown until it is |
 | Network | USB RTL8153 dongle for Linux and SLM-OS; the DHCP reservation is the address labctl lists |
-| SSH | `ssh root@<JETSON_IP>` (key only; no root password set). User `slmos-1` / `slmos-1` with sudo |
+| SSH | `ssh root@<JETSON_IP>` (key or password `slmos`). User `slmos-1` / `slmos-1` with sudo |
 | Camera | The IMX219 `JetsonIO` overlay used by the camera work was not reapplied after the reflash; see `docs/jetson-camera-imx219-plan.md` |
 | Deploy | SSH + kexec workflow (see below), or UEFI-direct (`scripts/jetson-uefi-deploy.sh`) |
 

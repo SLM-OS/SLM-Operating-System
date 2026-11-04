@@ -196,10 +196,11 @@ starting from a USB Force Recovery flash. The steps, in order:
    microSD.
 7. Deploy SLM-OS with `scripts/jetson-uefi-deploy.sh` as below.
 
-After a Linux `poweroff`, power-cycle the board with a delay of at
-least 15 s (`power_cycle delay=15`). With labctl's 5 s default the
-module doesn't see the power loss and stays off, which on the way into
-recovery looks like a missing APX device.
+One power-timing observation, not yet characterised: on 2026-11-03 a
+Linux `poweroff` followed about 10 s later by `enter_recovery` (labctl's
+5 s off time) left jetson-nano-1 off. There was no APX device and the
+serial console stayed silent. A `power_cycle delay=15` then brought it
+up in recovery. Until this is tested, use a 15 s delay after a shutdown.
 
 ---
 
