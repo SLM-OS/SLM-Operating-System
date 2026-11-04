@@ -138,11 +138,17 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
                 /* SLM-OS-built channel (#1092): its page tables are a
                  * ga10b_vm, which the ga10b_gmmu.c mapper must not
                  * write (#1090). The cbuf comes only from the pool
-                 * oplib_cold_attach staged. */
-                uart_printf("[oplib-dispatch] no staged cbuf on the "
-                            "SLM-OS channel (oplib_cold_attach %s)\n",
-                            oplib_cold_active() ? "staging failed"
-                                                : "not run");
+                 * oplib_cold_attach staged. Logged once: W-series
+                 * callers run this under the IRQs-off dispatch lock
+                 * (#1037), and fall back to the CPU on every call. */
+                static bool warned;
+                if (!warned) {
+                    warned = true;
+                    uart_printf("[oplib-dispatch] no staged cbuf on the "
+                                "SLM-OS channel (oplib_cold_attach %s)\n",
+                                oplib_cold_active() ? "staging failed"
+                                                    : "not run");
+                }
                 return -1;
             } else {
                 /* Last-resort slow path: ga10b_gmmu_alloc. Requires a
@@ -318,8 +324,13 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
      * `nvgpu oplib smoke` on the SLM-OS-built channel read back its
      * own sentinel (#1092). */
     if (ga10b_l2_evict_sysmem() < 0) {
-        uart_printf("[oplib-dispatch] post-dispatch L2 evict timed out "
-                    "(op_kind=%u) — output may be stale\n", (unsigned)op_kind);
+        /* Once only: this runs under the IRQs-off dispatch lock. */
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            uart_printf("[oplib-dispatch] post-dispatch L2 evict timed out "
+                        "(op_kind=%u) — output may be stale\n", (unsigned)op_kind);
+        }
         return -1;
     }
     /* Success print is gated — see the matching comment on the

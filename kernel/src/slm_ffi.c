@@ -1018,6 +1018,30 @@ static void report_quiet_bringup(uint32_t kind)
  * under g_gpu_dispatch_lock. */
 static bool g_cold_warmed[GA10B_PIPELINE_KIND_COUNT];
 
+/* ensure_bringup after a UEFI-direct boot, for a kind whose pipeline
+ * is not the installed one. There is no Linux state to inherit: the
+ * inherit path would touch GPU blocks the cold bring-up may not have
+ * powered (an EL3 SError on Tegra234) and could adopt a stale helper
+ * handoff a warm reboot left in DRAM. Switch to the pipeline the cold
+ * bring-up stored for this kind (#1092); the caller holds
+ * g_gpu_dispatch_lock, so this installs directly rather than through
+ * slm_gpu_install_handoff. Returns -1 (none stored: stay on the CPU),
+ * 1 (installed, already warmed: done) or 0 (installed for the first
+ * time: run the warmup). The warmup and the throwaway dispatch the
+ * caller arms are the Bug A safety nets for a channel inherited from
+ * Linux; the cold channel is already running, so a kind gets them on
+ * its first install only, or alternating sched / eviction / MNIST
+ * would run three pipelines per user call with IRQs masked. */
+static int ensure_bringup_cold(struct ga10b_bringup *b, uint32_t kind)
+{
+    if (ga10b_cold_pipeline_install(b, kind) != 0) return -1;
+    b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+    b->last_error_phase = -1;
+    if (g_cold_warmed[kind]) return 1;
+    g_cold_warmed[kind] = true;
+    return 0;
+}
+
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -1053,25 +1077,8 @@ static int ensure_bringup(uint32_t kind)
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();
     } else if (boot_source_is_uefi()) {
-        /* After a UEFI-direct boot there is no Linux state to inherit:
-         * the inherit path would touch GPU blocks the cold bring-up may
-         * not have powered (an EL3 SError on Tegra234) and could adopt a
-         * stale helper handoff a warm reboot left in DRAM. Switch to the
-         * pipeline the cold bring-up stored for this kind (#1092); we
-         * already hold g_gpu_dispatch_lock, so this installs directly
-         * rather than through slm_gpu_install_handoff. Without one, stay
-         * on the CPU. */
-        if (ga10b_cold_pipeline_install(b, kind) != 0) return -1;
-        b->state = GA10B_BRINGUP_CHANNEL_OPEN;
-        b->last_error_phase = -1;
-        /* The warmup and the throwaway dispatch below are the Bug A
-         * safety nets for a channel inherited from Linux. The cold
-         * channel is already running, so a kind gets them on its first
-         * install only: alternating sched / eviction / MNIST would
-         * otherwise run three pipelines per user call with IRQs masked
-         * (#1092 review). */
-        if (g_cold_warmed[kind]) return 0;
-        g_cold_warmed[kind] = true;
+        int crc = ensure_bringup_cold(b, kind);
+        if (crc != 0) return crc < 0 ? -1 : 0;
         g_bringup_step_ns[kind][0] = 0;
         g_bringup_step_ns[kind][1] = 0;
         t2 = slm_get_time_ns();

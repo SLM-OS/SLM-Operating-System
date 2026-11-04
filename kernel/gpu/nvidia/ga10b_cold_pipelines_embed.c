@@ -159,10 +159,19 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
     return 0;
 }
 
-int ga10b_cold_pipeline_store_active(void)
+/* Copy the installed handoff into the store under the dispatch lock:
+ * after boot (a `nvgpu cold` retry) ensure_bringup may be rewriting the
+ * installed handoff or reading the store on another CPU. */
+static int store_active_locked(void *arg)
 {
+    (void)arg;
     if (!ga10b_bringup_handoff_is_local()) return GA10B_CP_STORE_ERR_ARG;
     return ga10b_cp_store_put(ga10b_cp_store_global(), ga10b_bringup_handoff());
+}
+
+int ga10b_cold_pipeline_store_active(void)
+{
+    return slm_gpu_call_locked(store_active_locked, NULL);
 }
 
 int ga10b_cold_pipeline_install(struct ga10b_bringup *b, uint32_t kind)

@@ -44,8 +44,16 @@ static bool g_initialized;
  * calls are idempotent and return `g_stage_rc`. The stub blob
  * (sass_region_len == 0) staging path is also recorded as "staged"
  * with `g_sass_pool_gpu_va == 0` so callers see a stable,
- * NOT_AVAILABLE-returning lookup contract. */
-static bool g_staged;
+ * NOT_AVAILABLE-returning lookup contract.
+ *
+ * Atomic (sequentially consistent) because a post-boot re-stage
+ * (`nvgpu oplib stage`, `nvgpu cold` retry) publishes the pool from the
+ * shell while the W-series FFIs read it under the GPU dispatch lock on
+ * other CPUs: every stage path writes the pool fields first and sets
+ * g_staged last, and every reader tests g_staged first, so a reader
+ * never pairs g_staged with half-written fields. A retry clears it
+ * before touching them. */
+static _Atomic bool g_staged;
 static int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
 static uint64_t g_sass_pool_gpu_va;
 static size_t g_sass_pool_n_pages;
