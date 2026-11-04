@@ -32,6 +32,7 @@ enum ga10b_cold_step {
     GA10B_COLD_GOLDEN,      /* golden GR context image saved by FECS */
     GA10B_COLD_CHANNEL,     /* TSG + channel on the runlist, handoff installed */
     GA10B_COLD_MNIST,       /* MNIST v7 pipeline built on the channel */
+    GA10B_COLD_POLICIES,    /* sched/eviction pipelines + operator library (#1092) */
     GA10B_COLD_STEP_COUNT,
 };
 

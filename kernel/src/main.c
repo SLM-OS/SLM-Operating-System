@@ -730,6 +730,10 @@ void kernel_main(void *dtb)
                 WARN("GA10B up from cold, but the MNIST GPU pipeline could "
                      "not be built (operator library / weights) — MNIST "
                      "inference stays on the CPU");
+            } else if (cold_rc == -(int)GA10B_COLD_POLICIES) {
+                WARN("GA10B up from cold with GPU MNIST, but the scheduler/"
+                     "eviction GPU pipelines could not be built — those "
+                     "consumers stay on the CPU");
             } else if (cold_rc != 0) {
                 WARN("GA10B cold bring-up stopped at step %d (%s) — "
                      "GPU compute unavailable", -cold_rc,

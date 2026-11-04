@@ -29,6 +29,7 @@
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "boot_source.h"
+#include "../gpu/nvidia/ga10b_cold_pipelines.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
@@ -1049,9 +1050,17 @@ static int ensure_bringup(uint32_t kind)
         /* After a UEFI-direct boot there is no Linux state to inherit:
          * the inherit path would touch GPU blocks the cold bring-up may
          * not have powered (an EL3 SError on Tegra234) and could adopt a
-         * stale helper handoff a warm reboot left in DRAM. Without a
-         * locally built pipeline for this kind, stay on the CPU. */
-        return -1;
+         * stale helper handoff a warm reboot left in DRAM. Switch to the
+         * pipeline the cold bring-up stored for this kind (#1092); we
+         * already hold g_gpu_dispatch_lock, so this installs directly
+         * rather than through slm_gpu_install_handoff. Without one, stay
+         * on the CPU. */
+        if (ga10b_cold_pipeline_install(b, kind) != 0) return -1;
+        b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+        b->last_error_phase = -1;
+        g_bringup_step_ns[kind][0] = 0;
+        g_bringup_step_ns[kind][1] = 0;
+        t2 = slm_get_time_ns();
     } else {
         /* Quiet: this runs IRQs-masked under g_gpu_dispatch_lock, where
          * the progress lines' blocking UART writes dominated (#1037). */
@@ -1773,9 +1782,9 @@ void slm_runtime_dispatch_stats_reset(void)
  *
  *   2. **oplib_pool self-allocated scratch** — `oplib_pool_stage_to_gpu`'s
  *      slow path (also added in this PR) allocates a 256 KB
- *      contiguous PMM buffer, maps it into the inherited channel's
- *      GMMU via `ga10b_gmmu_map`, and exposes the base addresses
- *      via `oplib_pool_base_phys` / `oplib_pool_gpu_va_base`.
+ *      contiguous PMM buffer (larger when the SASS spans more than
+ *      one slot), maps it into the channel's GMMU, and exposes the
+ *      scratch base via `oplib_pool_scratch_base`.
  *
  * Returns 0 on success or -1 if neither source has scratch (no
  * helper handoff + `nvgpu oplib stage` was never called or
@@ -1784,21 +1793,10 @@ void slm_runtime_dispatch_stats_reset(void)
 static int slm_ffi_resolve_scratch_base(uint64_t *out_phys,
                                          uint64_t *out_gva)
 {
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h != NULL && h->shader_phys != 0 && h->shader_gpu_va != 0 &&
-        h->shader_size >= OPLIB_POOL_MIN_BYTES) {
-        *out_phys = h->shader_phys;
-        *out_gva  = h->shader_gpu_va;
-        return 0;
-    }
-    uint64_t pool_phys = oplib_pool_base_phys();
-    uint64_t pool_gva  = oplib_pool_gpu_va_base();
-    if (pool_phys != 0 && pool_gva != 0) {
-        *out_phys = pool_phys;
-        *out_gva  = pool_gva;
-        return 0;
-    }
-    return -1;
+    /* oplib_pool_scratch_base resolves both sources, including the
+     * scratch offset of a self-allocated pool whose SASS spans more
+     * than one slot (#1092). */
+    return oplib_pool_scratch_base(out_phys, out_gva);
 }
 
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,

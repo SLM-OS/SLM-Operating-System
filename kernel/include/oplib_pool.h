@@ -47,6 +47,35 @@
 #define OPLIB_POOL_OFF_SCRATCH1 0x20000ull          /* slot 2 */
 #define OPLIB_POOL_OFF_SCRATCH2 0x30000ull          /* slot 3 */
 
+/* Self-allocated pools (`oplib_pool_stage_with_as`, the cold channel
+ * and the kexec fallback) are sized to the library instead: SASS takes
+ * as many 64 KB slots as it needs from offset 0 and the three scratch
+ * slots follow it. The scratch base is defined so that
+ * `scratch_base + OPLIB_POOL_OFF_SCRATCH<N>` keeps working, i.e. it
+ * sits one slot below the first scratch slot. A library that fits one
+ * slot gets exactly the helper layout above. With every SLM op packed
+ * the SASS is ~88 KB (#1092), past the old one-slot limit. */
+#define OPLIB_POOL_SASS_MAX_BYTES (16u * OPLIB_POOL_SLOT_BYTES)   /* 1 MB */
+
+/* Slots the SASS occupies in a self-allocated pool (at least one). */
+static inline uint32_t oplib_pool_sass_slots(size_t sass_len)
+{
+    size_t n = (sass_len + OPLIB_POOL_SLOT_BYTES - 1u) / OPLIB_POOL_SLOT_BYTES;
+    return n == 0 ? 1u : (uint32_t)n;
+}
+
+/* Offset of the scratch base inside a self-allocated pool. */
+static inline uint64_t oplib_pool_scratch_off(size_t sass_len)
+{
+    return (uint64_t)(oplib_pool_sass_slots(sass_len) - 1u) * OPLIB_POOL_SLOT_BYTES;
+}
+
+/* Total size of a self-allocated pool: SASS slots + three scratch. */
+static inline uint64_t oplib_pool_self_bytes(size_t sass_len)
+{
+    return (uint64_t)(oplib_pool_sass_slots(sass_len) + 3u) * OPLIB_POOL_SLOT_BYTES;
+}
+
 /* Initialize the operator-library handle from the embedded blob.
  *
  * Called once during kernel boot, after early UART is up. If the
@@ -126,6 +155,30 @@ size_t oplib_pool_blob_size(void);
  *   -1 on Jetson-only-platform stub fallback.
  */
 int oplib_pool_stage_to_gpu(uint64_t inst_block_phys);
+
+/* #1092: on Jetson, `oplib_pool_stage_to_gpu` routes to the cold
+ * channel's address space (and ignores `inst_block_phys`) while
+ * `oplib_cold_active()`; it refuses (-1) when the active handoff is a
+ * locally built one that the operator library was never attached to,
+ * so the Linux-format ga10b_gmmu.c mapper never touches SLM-OS's page
+ * tables. */
+
+struct oplib_gpu_as;
+
+/* Stage the SASS pool + cbuf through an explicit address space
+ * (oplib_gpu_as.h). Same layout, accessors and idempotency as
+ * `oplib_pool_stage_to_gpu`, except that a previous FAILED attempt is
+ * retried instead of returning the cached error. Built on every
+ * platform (the backend supplies all memory access). Returns 0 on
+ * success or stub blob, negative on failure. */
+int oplib_pool_stage_with_as(const struct oplib_gpu_as *as);
+
+/* Base (CPU phys, GPU VA) of the 256 KB scratch-slot pool the per-call
+ * dispatchers carve OPLIB_POOL_OFF_SCRATCH0..2 from: the helper-
+ * published v4 shader region if the handoff has one (kexec), else the
+ * pool `oplib_pool_stage_*` allocated. Returns 0, or -1 when neither
+ * exists (not staged). */
+int oplib_pool_scratch_base(uint64_t *out_phys, uint64_t *out_gpu_va);
 
 /* Look up a SASS kernel's GPU VA by (op_kind, tier, dtype).
  *

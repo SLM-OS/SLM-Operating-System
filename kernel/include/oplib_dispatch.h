@@ -7,8 +7,9 @@
  * (kernel/gpu/nvidia/ga10b_bringup.c). The pieces:
  *
  *   1. Look up the SASS GPU VA for the op via oplib_pool.
- *   2. Allocate a cbuf page from the inherited channel's GMMU via
- *      ga10b_gmmu_alloc.
+ *   2. Take the cbuf page oplib_pool staged (helper-published cbuf
+ *      first; ga10b_gmmu_alloc on the inherited channel only as a
+ *      last resort, never on an SLM-OS-built channel — #1092).
  *   3. Populate the cbuf via the registered cbuf-args builder.
  *   4. Compute the launch shape via the registered launch-shape fn.
  *   5. Construct a v7 op struct ready to feed into the existing

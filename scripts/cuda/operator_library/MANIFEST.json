@@ -93,6 +93,13 @@
       "dtype":   "Q4K",
       "sass":    "embedding_q4k_f16_shader.sass",
       "comment": "Token-ID → embedding-row gather over a Q4_K-packed embedding table. The first op of every SLM forward pass; produces the FP16 input vector for the first attention block. One block per super-block in the row, 256 threads per block — same Q4_K decoding path as q4k_dequant_f16 (#699) plus a token_id-keyed row offset and an embedding_length bounds check that handles padded rows (e.g., SmolLM2-135M's 576-element rows stored across 3 256-element super-blocks = 768 dequantized; only 576 written). Mirrors runtime/src/slm/forward.rs::embedding_lookup_any. Validated bit-exactly across Qwen2.5 (1536), Llama-2 (4096), Phi-2 (2560), and the SmolLM2 padded-row boundary. Source: scripts/cuda/embedding_q4k_f16.cu (#540)."
+    },
+    {
+      "op_kind": "SIGMOID",
+      "tier":    "SIMT",
+      "dtype":   "FP32",
+      "sass":    "sigmoid_fp32_shader.sass",
+      "comment": "Element-wise FP32 sigmoid, out[i] = 1 / (1 + expf(-x[i])) with libdevice expf. cbuf: x at 0x160, out at 0x168, N (int32) at 0x170; one thread per element, 256-thread blocks. Final op of the eviction MLP pipeline (scripts/gpu-kernel-eviction-qnet.c op 8); the cold-boot eviction pipeline (kernel/gpu/nvidia/ga10b_cold_pipelines.c, #1092) takes it from the operator library. Source: scripts/cuda/sigmoid_fp32.cu."
     }
   ],
 

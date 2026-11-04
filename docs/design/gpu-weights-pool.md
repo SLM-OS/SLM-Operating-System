@@ -98,6 +98,19 @@ Lookup is O(log n) on tensor count (~250 tensors for Qwen 30 layers)
 For the simplest first cut: no free list, the pool resets when SLM-OS
 loses the channel (kexec or shutdown). One model per channel.
 
+**UEFI-direct boot (#1092).** There is no Linux helper, so there is no
+handoff pool. `oplib_cold_attach()` allocates the pool from SLM-OS's
+PMM instead: 64 MB physically contiguous chunks (sized by
+`nvgpu oplib wpool <MB>`; nothing is reserved at boot, matching the
+kexec helper's default of no pool; fewer chunks if memory runs out)
+mapped back to back into one GPU VA range of
+the cold channel's own `ga10b_vm`. `oplib_weights_pool_alloc` hands out
+the same bump-allocated VAs, and `oplib_weights_pool_stage` writes the
+tensor straight into the chunks (memcpy + cache clean, split at chunk
+boundaries). The copy-engine path and the v8/v9 handoff fields are not
+used there. See `docs/deploy/jetson-uefi-direct.md` §"Operator library
+on the cold channel".
+
 ### Wire-format extension: handoff `weights_pool_*` fields
 
 ```c

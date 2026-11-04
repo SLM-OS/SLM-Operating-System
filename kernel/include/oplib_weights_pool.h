@@ -25,6 +25,11 @@
  *     stitches scattered phys pages via SMMU; helper publishes
  *     phys=0 sentinel) and isn't consulted by the CE path.
  *
+ * Cold channel (#1092): after a UEFI-direct boot oplib_cold.c owns the
+ * pool instead (SLM-OS memory mapped into the cold channel's VM, see
+ * oplib_cold.h); alloc/stage/total_size switch to it while
+ * oplib_cold_active(), and staging becomes a CPU memcpy + cache clean.
+ *
  * Allocator is a bump pointer with no free list — designed for
  * single-model "load once at boot, run inference until kexec" usage.
  * `slm unload` would reset the pointer; in practice today nothing
@@ -93,5 +98,10 @@ size_t oplib_weights_pool_bytes_used(void);
  * handoff's `weights_pool_size_bytes` field). 0 when no v8 handoff
  * is staged. */
 size_t oplib_weights_pool_total_size(void);
+
+/* Inspector: GPU VA base of the active pool — the cold channel's
+ * SLM-OS-allocated pool while oplib_cold_active() (#1092), else the
+ * helper's v8 `weights_pool_gpu_va`. 0 when there is none. */
+uint64_t oplib_weights_pool_gpu_va(void);
 
 #endif /* OPLIB_WEIGHTS_POOL_H */

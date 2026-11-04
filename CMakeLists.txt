@@ -622,6 +622,9 @@ set(KERNEL_SOURCES
     # tests use it).
     # Jetson-only: cold-boot MNIST pipeline sources + install (#1088).
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_mnist_embed.c>
+    # Jetson-only: cold-boot sched-MLP / eviction-MLP pipeline sources,
+    # build and per-kind install (#1092).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_cold_pipelines_embed.c>
     # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
     # No-op until invoked via the `nvgpu gmmu walk` shell verb.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
@@ -684,11 +687,20 @@ set(KERNEL_SOURCES
     # encoder it uses: pure code, memory reached through ga10b_gpu_ops.
     kernel/gpu/nvidia/ga10b_mnist_pipeline.c
     kernel/gpu/nvidia/ga10b_qmd.c
+    # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
+    # per-kind handoff store (#1092): pure code. The eviction weights
+    # are generated from the Rust model (see the generator block below).
+    kernel/gpu/nvidia/ga10b_cold_pipelines.c
+    kernel/gpu/nvidia/ga10b_eviction_weights.c
     kernel/gpu/oplib_pool.c
     kernel/gpu/oplib_weights_pool.c
     kernel/gpu/operator_dispatch.c
     kernel/gpu/oplib_dispatch.c
     kernel/gpu/oplib_probe.c
+    # Operator library on the SLM-OS-built (UEFI-direct) channel (#1092):
+    # address-space interface + cold-VM backend (pure) and the attach glue.
+    kernel/gpu/oplib_gpu_as.c
+    kernel/gpu/oplib_cold.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
@@ -1167,6 +1179,8 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_grctx.c
     kernel/tests/test_ga10b_mnist_pipeline.c
     kernel/tests/test_ga10b_cold.c
+    kernel/tests/test_ga10b_cold_pipelines.c
+    kernel/tests/test_oplib_gpu_as.c
 )
 
 # lwIP library sources (QEMU networking only)
@@ -1562,6 +1576,36 @@ set_source_files_properties(
     PROPERTIES
     COMPILE_DEFINITIONS "MNIST_ONNX_PATH=${CMAKE_SOURCE_DIR}/models/test/mnist.onnx;MNIST_INPUT_SYNTH_PATH=${CMAKE_SOURCE_DIR}/scripts/fixtures/mnist_input_synth.bin"
     OBJECT_DEPENDS      "${CMAKE_SOURCE_DIR}/models/test/mnist.onnx;${CMAKE_SOURCE_DIR}/scripts/fixtures/mnist_input_synth.bin"
+)
+
+# ============================================================================
+# Cold-boot eviction GPU pipeline weights (#1092)
+# ============================================================================
+#
+# runtime/src/mm/eviction/generated/mlp_policy_f32.rs (the model the Rust
+# eviction policy runs) -> a C header of float literals, consumed by
+# kernel/gpu/nvidia/ga10b_eviction_weights.c. Plain CMake script, no
+# Python; regenerated when the .rs changes. Every platform, so the unit
+# tests pin the bytes against the helper's eviction-weights/ files.
+set(EVICT_MLP_RS      "${CMAKE_SOURCE_DIR}/runtime/src/mm/eviction/generated/mlp_policy_f32.rs")
+set(EVICT_MLP_GEN_DIR "${CMAKE_BINARY_DIR}/generated")
+set(EVICT_MLP_GEN_H   "${EVICT_MLP_GEN_DIR}/ga10b_eviction_mlp_weights_gen.h")
+file(MAKE_DIRECTORY "${EVICT_MLP_GEN_DIR}")
+add_custom_command(
+    OUTPUT  "${EVICT_MLP_GEN_H}"
+    COMMAND ${CMAKE_COMMAND}
+            -DRS_FILE=${EVICT_MLP_RS}
+            -DOUT_FILE=${EVICT_MLP_GEN_H}
+            -P ${CMAKE_SOURCE_DIR}/cmake/gen_eviction_mlp_weights.cmake
+    DEPENDS "${EVICT_MLP_RS}" "${CMAKE_SOURCE_DIR}/cmake/gen_eviction_mlp_weights.cmake"
+    COMMENT "Generating ga10b_eviction_mlp_weights_gen.h"
+    VERBATIM
+)
+target_sources(slmos.elf PRIVATE "${EVICT_MLP_GEN_H}")
+target_include_directories(slmos.elf PRIVATE "${EVICT_MLP_GEN_DIR}")
+set_source_files_properties(
+    kernel/gpu/nvidia/ga10b_eviction_weights.c
+    PROPERTIES OBJECT_DEPENDS "${EVICT_MLP_GEN_H}"
 )
 
 target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
@@ -2401,6 +2445,9 @@ if(ENABLE_AI_SCHEDULER)
                 "_real export). See docs/fact-sheets/ai-scheduler.md.")
         endif()
         set(_ai_mlp_src kernel/sched/ai/ai_weights_mlp_real.c)
+        # Lets test_ga10b_cold_pipelines skip its synthetic-weight
+        # checksums (#1092).
+        add_compile_definitions(SLMOS_AI_WEIGHTS_REAL=1)
         if(EXISTS
            "${CMAKE_CURRENT_SOURCE_DIR}/kernel/sched/ai/ai_weights_ppo_real.c")
             set(_ai_ppo_src kernel/sched/ai/ai_weights_ppo_real.c)

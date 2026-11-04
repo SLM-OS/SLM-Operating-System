@@ -2977,9 +2977,12 @@ static void ga10b_fecs_set_current_ctx_invalid(void)
     uint32_t before = bar0_r32(GR_FECS_CURRENT_CTX);
     bar0_w32(GR_FECS_CURRENT_CTX, 0u);
     gsp_platform->mb();
-    uart_printf("[GA10B-P8-v7] FECS current_ctx invalidated: "
-                "0x%08lx -> 0x00000000 (#844 skip stale-ctx save)\n",
-                (unsigned long)before);
+    /* Runs on every v7 dispatch with IRQs masked under the dispatch
+     * lock: an unconditional UART line here (and the op dump below)
+     * cost ~146 ms per dispatch at 115200 baud (#1092). Tracing only. */
+    GA10B_DBG("[GA10B-P8-v7] FECS current_ctx invalidated: "
+              "0x%08lx -> 0x00000000 (#844 skip stale-ctx save)\n",
+              (unsigned long)before);
 }
 
 /* Internal worker — fires N v7 ops + 1 trailing semaphore release
@@ -3156,11 +3159,12 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      * GPU VAs to confirm whether the v7 ops the helper published
      * point at the right SASS pool. The bisect-E SM fault at PC =
      * pushbuf_gpu_va + 0x10000 suggests op[i].shader_gpu_va is
-     * being mis-set. */
-    uart_printf("[GA10B-P8-v7-DBG] ops_v7 array @0x%lx, n=%lu\n",
-                (unsigned long)g_handoff.pipeline_ops_phys,
-                (unsigned long)n);
-    for (uint32_t i = 0; i < n; i++) {
+     * being mis-set. Tracing only (`gpu debug on`): it ran on every
+     * dispatch under the IRQs-off lock (#1092). */
+    GA10B_DBG("[GA10B-P8-v7-DBG] ops_v7 array @0x%lx, n=%lu\n",
+              (unsigned long)g_handoff.pipeline_ops_phys,
+              (unsigned long)n);
+    for (uint32_t i = 0; i < n && ga10b_dispatch_verbose_get(); i++) {
         const struct ga10b_pipeline_op_v7 *opdbg = &ops_v7[i];
         uart_printf("[GA10B-P8-v7-DBG]   op[%lu] shader_gpu_va=0x%lx "
                     "cbuf_gpu_va=0x%lx qmd_gpu_va=0x%lx output_phys=0x%lx "

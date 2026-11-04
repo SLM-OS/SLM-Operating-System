@@ -64,6 +64,7 @@ _OP_KINDS = {
     "ADD_BIAS":    10,
     "MAXPOOL":     11,
     "Q4K_DEQUANT": 12,
+    "SIGMOID":     13,
 }
 
 # Mirror of SLM_GPU_TIER_* in kernel/include/gpu_handoff.h.

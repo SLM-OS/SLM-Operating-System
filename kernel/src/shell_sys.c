@@ -5145,11 +5145,13 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../gpu/nvidia/ga10b_ce.h"
 #include "../gpu/nvidia/ga10b_cold.h"
+#include "../gpu/nvidia/ga10b_cold_pipelines.h"
 #include "boot_source.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
 #include "oplib_probe.h"
 #include "oplib_dispatch.h"
+#include "oplib_cold.h"
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
  * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
  * `cache.h` here — gpu.h declares cache_clean_range as
@@ -5612,6 +5614,63 @@ struct ga10b_bringup *ga10b_bringup_state(void)
     return &g_nvgpu_b;
 }
 
+/* `nvgpu cold check` (#1092): run the scheduler MLP and eviction Q-net
+ * pipelines the cold bring-up stored on the helpers' synthetic inputs
+ * and compare with their CPU reference (scripts/sched-extract-weights.py
+ * / eviction-extract-weights.py expected outputs). Goes through the
+ * same per-kind handoff switch the consumers use, without their rate
+ * limits. The sched reference holds for the default synthetic weights
+ * only (AI_WEIGHTS=synthetic). */
+static int nvgpu_cold_check(void)
+{
+    static uint32_t sched_out[GA10B_CP_SCHED_ACTIONS];
+    static uint32_t ev_in[GA10B_CP_EVICT_BATCH * GA10B_CP_EVICT_FEATURES];
+    static uint32_t ev_out[GA10B_CP_EVICT_BATCH];
+    int fails = 0;
+
+    int rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                    ga10b_cp_sched_input_synth,
+                                    sizeof(ga10b_cp_sched_input_synth),
+                                    sched_out, sizeof(sched_out));
+    if (rc != 0) {
+        shell_printf("check sched: dispatch rc=%d (pipeline not built?)\r\n", rc);
+        fails++;
+    } else {
+        uint32_t bad = ga10b_cp_count_mismatch(sched_out,
+                                               ga10b_cp_sched_expected_logits,
+                                               GA10B_CP_SCHED_ACTIONS, 1000u);
+        uint32_t am = ga10b_cp_argmax(sched_out, GA10B_CP_SCHED_ACTIONS);
+#if defined(SLMOS_AI_WEIGHTS_REAL)
+        shell_printf("check sched: argmax=%u (AI_WEIGHTS=real: no reference)\r\n",
+                     (unsigned)am);
+#else
+        bool ok = bad == 0u && am == GA10B_CP_SCHED_EXPECTED_ARGMAX;
+        shell_printf("check sched: %s - argmax %u (want %u), %u/%u logits "
+                     "outside 1e-3\r\n", ok ? "PASS" : "FAIL", (unsigned)am,
+                     (unsigned)GA10B_CP_SCHED_EXPECTED_ARGMAX, (unsigned)bad,
+                     (unsigned)GA10B_CP_SCHED_ACTIONS);
+        fails += ok ? 0 : 1;
+#endif
+    }
+
+    memset(ev_in, 0, sizeof(ev_in));
+    memcpy(ev_in, ga10b_cp_evict_input_synth, sizeof(ga10b_cp_evict_input_synth));
+    rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_EVICTION_QNET, ev_in,
+                                sizeof(ev_in), ev_out, sizeof(ev_out));
+    if (rc != 0) {
+        shell_printf("check eviction: dispatch rc=%d (pipeline not built?)\r\n", rc);
+        fails++;
+    } else {
+        const uint32_t want = GA10B_CP_EVICT_EXPECTED_SCORE;
+        bool ok = ga10b_cp_count_mismatch(ev_out, &want, 1, 100u) == 0u;
+        shell_printf("check eviction: %s - row 0 score bits 0x%08x (want "
+                     "0x%08x, 1e-4)\r\n", ok ? "PASS" : "FAIL",
+                     (unsigned)ev_out[0], (unsigned)want);
+        fails += ok ? 0 : 1;
+    }
+    return fails == 0 ? 0 : -1;
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     /* `b_p` aliases the file-scope `g_nvgpu_b` so the rest of this
@@ -5660,6 +5719,9 @@ int cmd_nvgpu(int argc, char *argv[])
                        "kexec the GPU is inherited from Linux and this "
                        "would reset it)\r\n");
             return -1;
+        }
+        if (argc >= 3 && strcmp(argv[2], "check") == 0) {
+            return nvgpu_cold_check();
         }
         enum ga10b_cold_step last = (enum ga10b_cold_step)(GA10B_COLD_STEP_COUNT - 1);
         if (argc >= 3) {
@@ -5925,8 +5987,26 @@ int cmd_nvgpu(int argc, char *argv[])
              *
              *   nvgpu oplib stage              — auto-discover inst block
              *   nvgpu oplib stage <inst_hex>   — explicit inst block
+             *
+             * #1092: on a channel SLM-OS built (UEFI-direct boot) the
+             * discovery/rebuild below would point the Linux-layout
+             * ga10b_gmmu.c mapper at SLM-OS's page tables. Staging
+             * there belongs to oplib_cold_attach (run by the cold
+             * bring-up); this verb only re-runs it on the cold VM.
              */
             uint64_t inst_phys = 0;
+            if (oplib_cold_active()) {
+                shell_puts("oplib stage: SLM-OS-built channel — staging "
+                           "into its own VM (inst arg ignored)\r\n");
+                goto oplib_stage_call;
+            }
+            if (ga10b_bringup_handoff_is_local()) {
+                shell_puts("oplib stage: the active channel was built by "
+                           "SLM-OS but the operator library is not "
+                           "attached to it (`nvgpu cold` runs "
+                           "oplib_cold_attach)\r\n");
+                return -1;
+            }
             if (argc >= 4) {
                 const char *s = argv[3];
                 if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
@@ -6182,17 +6262,21 @@ oplib_stage_call:
              * docs/design/gpu-weights-pool.md). Prints when the
              * helper was run with --weights-pool-size N; otherwise
              * size is 0 and the line shows "(none)" for clarity. */
-            uint64_t wp_size = ga10b_weights_pool_size_bytes();
+            uint64_t wp_size = (uint64_t)oplib_weights_pool_total_size();
             if (wp_size != 0) {
                 shell_printf("[oplib-pool] weights region: phys=0x%lx "
                              "gpu_va=0x%lx size=%lu B (%lu MB)\r\n",
-                             (unsigned long)ga10b_weights_pool_phys(),
-                             (unsigned long)ga10b_weights_pool_gpu_va(),
+                             (unsigned long)(oplib_cold_active()
+                                 ? 0ul : ga10b_weights_pool_phys()),
+                             (unsigned long)oplib_weights_pool_gpu_va(),
                              (unsigned long)wp_size,
                              (unsigned long)(wp_size / (1024u * 1024u)));
             } else {
-                shell_puts("[oplib-pool] weights region: (none — "
-                           "helper run without --weights-pool-size)\r\n");
+                shell_puts(oplib_cold_active()
+                           ? "[oplib-pool] weights region: (none — "
+                             "`nvgpu oplib wpool <MB>`)\r\n"
+                           : "[oplib-pool] weights region: (none — "
+                             "helper run without --weights-pool-size)\r\n");
             }
             /* #714 §B.2: walk every registered op_kind, validate the
              * dispatcher metadata accepts a representative fixture,
@@ -6203,6 +6287,42 @@ oplib_stage_call:
              * locating the call here keeps the static + future-
              * hardware probe paths in the same place. */
             (void)oplib_probe_run();
+            return 0;
+        }
+        if (strcmp(argv[2], "cold") == 0) {
+            /* #1092: operator library on the SLM-OS-built channel —
+             * attach state, VM, pool/cbuf mappings (with a software
+             * walk of the GPU page tables), QMD pool, weights pool. */
+            oplib_cold_status_print();
+            return 0;
+        }
+        if (strcmp(argv[2], "wpool") == 0) {
+            /* #1092: size the cold channel's weights pool once,
+             *   nvgpu oplib wpool <MB>
+             * when oplib_cold_attach ran without one. Run before
+             * inference starts (it invalidates the GPU TLB). */
+            if (argc < 4 || atoi(argv[3]) <= 0) {
+                shell_puts("usage: nvgpu oplib wpool <MB>\r\n");
+                return -1;
+            }
+            if (!oplib_cold_active()) {
+                shell_puts("oplib wpool: only for the SLM-OS-built channel "
+                           "(UEFI-direct boot, after `nvgpu cold`)\r\n");
+                return -1;
+            }
+            int rc = oplib_cold_weights_pool_init(
+                (uint64_t)atoi(argv[3]) << 20);
+            if (rc == 1) {
+                shell_puts("oplib wpool: a weights pool already exists\r\n");
+                return 0;
+            }
+            if (rc != 0) {
+                shell_printf("oplib wpool: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib wpool: gpu_va=0x%lx size=%lu MB\r\n",
+                         (unsigned long)oplib_weights_pool_gpu_va(),
+                         (unsigned long)(oplib_weights_pool_total_size() >> 20));
             return 0;
         }
         if (strcmp(argv[2], "probe") == 0) {
@@ -6281,6 +6401,13 @@ oplib_stage_call:
                 return -1;
             }
 
+            /* #1092: this verb maps through ga10b_gmmu.c, which must
+             * not touch an SLM-OS-built channel's page tables. */
+            if (ga10b_bringup_handoff_is_local()) {
+                shell_puts("oplib prep-rmsnorm: not on the SLM-OS-built "
+                           "channel — use dispatch-rmsnorm\r\n");
+                return -1;
+            }
             /* Resolve inst_block_phys: handoff first, FECS fallback. */
             uint64_t inst_phys = 0;
             const struct ga10b_channel_handoff *h =
@@ -6432,11 +6559,21 @@ oplib_stage_call:
              * we don't need a discovered inst_block_phys — the
              * helper already mapped the pool in the channel's
              * address space. */
+            uint64_t base_phys = 0, base_gva = 0;
+            bool have_scratch = false;
             if (h != NULL && h->shader_gpu_va != 0 &&
                 h->shader_phys != 0 &&
                 h->shader_size >= OPLIB_POOL_MIN_BYTES) {
-                uint64_t base_phys = h->shader_phys;
-                uint64_t base_gva  = h->shader_gpu_va;
+                base_phys = h->shader_phys;
+                base_gva  = h->shader_gpu_va;
+                have_scratch = true;
+            } else if (ga10b_bringup_handoff_is_local()) {
+                /* #1092: SLM-OS-built channel — the pool
+                 * oplib_cold_attach staged into its VM. */
+                have_scratch =
+                    oplib_pool_scratch_base(&base_phys, &base_gva) == 0;
+            }
+            if (have_scratch) {
                 /* SASS occupies slot 0; carve scratch from slots 1-3. */
                 in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
                 in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
@@ -6460,6 +6597,10 @@ oplib_stage_call:
                 out_cpu = (void *)(uintptr_t)out_phys;
                 shell_puts("dispatch-rmsnorm: scratch buffers carved from "
                            "pre-staged SASS pool\r\n");
+            } else if (ga10b_bringup_handoff_is_local()) {
+                shell_puts("dispatch-rmsnorm: SASS pool not staged on the "
+                           "SLM-OS-built channel (`nvgpu oplib cold`)\r\n");
+                return -1;
             } else {
                 if (h != NULL && h->inst_block_phys != 0) {
                     inst_phys = h->inst_block_phys;
@@ -6651,17 +6792,13 @@ oplib_stage_call:
             /* Carve scratch from the pre-staged SASS pool. Same
              * slot layout as dispatch-rmsnorm: SASS in slot 0,
              * vec/positions/cos_sin in slots 1-3. */
-            const struct ga10b_channel_handoff *h =
-                ga10b_bringup_handoff();
-            if (h == NULL || h->shader_gpu_va == 0 ||
-                h->shader_phys == 0 ||
-                h->shader_size < OPLIB_POOL_MIN_BYTES) {
-                shell_puts("dispatch-rope: pre-staged SASS pool "
-                           "missing — run helper with --qmd-pool\r\n");
+            uint64_t base_phys = 0, base_gva = 0;
+            if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+                shell_puts("dispatch-rope: SASS/scratch pool missing — "
+                           "run `nvgpu oplib stage` (kexec) or "
+                           "`nvgpu cold` (UEFI-direct)\r\n");
                 return -1;
             }
-            uint64_t base_phys = h->shader_phys;
-            uint64_t base_gva  = h->shader_gpu_va;
             uint64_t vec_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
             uint64_t vec_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
             uint64_t pos_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH1;
@@ -6810,17 +6947,13 @@ oplib_stage_call:
             }
             uint32_t op_kind = (uint32_t)atoi(argv[3]);
 
-            const struct ga10b_channel_handoff *h =
-                ga10b_bringup_handoff();
-            if (h == NULL || h->shader_gpu_va == 0 ||
-                h->shader_phys == 0 ||
-                h->shader_size < OPLIB_POOL_MIN_BYTES) {
-                shell_puts("smoke: pre-staged SASS pool missing — "
-                           "run helper with --qmd-pool\r\n");
+            uint64_t base_phys = 0, base_gva = 0;
+            if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+                shell_puts("smoke: SASS/scratch pool missing — run "
+                           "`nvgpu oplib stage` (kexec) or `nvgpu cold` "
+                           "(UEFI-direct)\r\n");
                 return -1;
             }
-            uint64_t base_phys = h->shader_phys;
-            uint64_t base_gva  = h->shader_gpu_va;
 
             /* Per-op scratch sizes — kept small so every op fits in
              * a single 64 KB slot per buffer. The fixtures are
@@ -6929,6 +7062,7 @@ oplib_stage_call:
             return 0;
         }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
+                   "cold | wpool <MB> | "
                    "probe <op_kind> <tier> <dtype> | "
                    "prep-rmsnorm <n_rows> <n> | "
                    "dispatch-rmsnorm <n_rows> <n> | "
@@ -7530,7 +7664,7 @@ oplib_stage_call:
             uint64_t total = (uint64_t)oplib_weights_pool_total_size();
             uint64_t used  = (uint64_t)oplib_weights_pool_bytes_used();
             shell_printf("[weights-pool] gpu_va=0x%lx size=%lu B used=%lu B\r\n",
-                         (unsigned long)ga10b_weights_pool_gpu_va(),
+                         (unsigned long)oplib_weights_pool_gpu_va(),
                          (unsigned long)total,
                          (unsigned long)used);
             return 0;
@@ -7609,6 +7743,44 @@ oplib_stage_call:
              * post-readback compare can't accidentally observe
              * residual bounce contents). Both endpoints have known
              * helper-published phys — no GMMU walk needed. */
+            if (oplib_cold_active()) {
+                /* #1092: SLM-OS-owned pool on the cold channel. Walk
+                 * the channel's GPU page tables for every staged byte
+                 * and read it back through the physical address the
+                 * GPU would use (identity-mapped), so a wrong PTE or
+                 * a missed copy both show up. No copy engine. */
+                int bad = 0;
+                for (uint64_t i = 0; i < want_bytes; i++) {
+                    uint64_t pa = oplib_cold_lookup(gpu_va + i);
+                    uint8_t got = 0;
+                    if (pa != 0) {
+                        cache_invalidate_range((void *)(uintptr_t)pa, 1);
+                        got = *(volatile uint8_t *)(uintptr_t)pa;
+                    }
+                    if (pa == 0 || got != pattern[i]) {
+                        if (bad < 4) {
+                            shell_printf("  byte %lu: pa=0x%lx got 0x%02x "
+                                         "want 0x%02x\r\n",
+                                         (unsigned long)i,
+                                         (unsigned long)pa, (unsigned)got,
+                                         (unsigned)pattern[i]);
+                        }
+                        bad++;
+                    }
+                }
+                if (bad != 0) {
+                    shell_printf("weights-pool smoke: FAIL, %d byte(s) "
+                                 "differ in %lu B span\r\n",
+                                 bad, (unsigned long)want_bytes);
+                    return -1;
+                }
+                shell_printf("[weights-pool] smoke PASS — %lu B byte-exact "
+                             "via GPU page-table walk of gpu_va=0x%lx "
+                             "(cold channel)\r\n",
+                             (unsigned long)want_bytes,
+                             (unsigned long)gpu_va);
+                return 0;
+            }
             const struct ga10b_channel_handoff *h_dbg =
                 ga10b_bringup_handoff();
             struct ga10b_bringup *b_dbg = ga10b_bringup_state();
@@ -7675,7 +7847,7 @@ oplib_stage_call:
               "gmmu <pushbuf | walk | walk-raw | "
               "alloc-page | alloc-page-synth | "
               "alloc-multi-synth | reuse-synth> | "
-              "oplib | "
+              "oplib [cold | wpool <MB> | ...] | "
               "ce smoke | "
               "weights-pool <status | smoke>]\r\n");
     return -1;

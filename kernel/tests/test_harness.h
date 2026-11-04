@@ -280,6 +280,8 @@ int test_suite_ga10b_chan(void);  /* GA10B VM / inst block / RAMFC / runlist */
 int test_suite_ga10b_grctx(void); /* GA10B GR context encoders */
 int test_suite_ga10b_cold(void);  /* GA10B cold bring-up pure helpers */
 int test_suite_ga10b_mnist_pipeline(void); /* cold-boot MNIST GPU pipeline */
+int test_suite_ga10b_cold_pipelines(void); /* cold-boot sched/eviction pipelines (#1092) */
+int test_suite_oplib_gpu_as(void); /* oplib address space on the cold channel (#1092) */
 
 /* ARM PMU primitive smoke tests (#874) */
 int test_suite_pmu(void);

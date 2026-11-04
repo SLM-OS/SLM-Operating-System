@@ -128,6 +128,9 @@ enum slm_gpu_op_kind {
      * for prefill-once-then-decode patterns and as a stepping-stone
      * before the fused Q4K_DOT / Q4K_GEMM kernels land. */
     SLM_GPU_OP_Q4K_DEQUANT   = 12, /* Q4_K → FP16 dequantize            */
+    /* Element-wise FP32 sigmoid: the eviction MLP's output activation
+     * (cold-boot eviction pipeline, #1092). */
+    SLM_GPU_OP_SIGMOID       = 13,
 };
 
 /* Number of SLM transformer ops (discriminants 0..7) — sizes the

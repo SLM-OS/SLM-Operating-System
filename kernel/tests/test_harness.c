@@ -167,6 +167,8 @@ int test_harness_run_all(void)
     total_failures += test_suite_ga10b_grctx();
     total_failures += test_suite_ga10b_cold();
     total_failures += test_suite_ga10b_mnist_pipeline();
+    total_failures += test_suite_ga10b_cold_pipelines(); /* #1092 sched/eviction */
+    total_failures += test_suite_oplib_gpu_as();   /* #1092 cold-channel oplib */
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
