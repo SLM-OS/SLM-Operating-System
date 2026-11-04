@@ -54,7 +54,7 @@ static bool g_initialized;
  * never pairs g_staged with half-written fields. A retry clears it
  * before touching them. */
 static _Atomic bool g_staged;
-static int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+static _Atomic int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
 static uint64_t g_sass_pool_gpu_va;
 static size_t g_sass_pool_n_pages;
 
@@ -210,6 +210,32 @@ uint64_t oplib_pool_cbuf_gpu_va(void)
  * Stage the SASS pool + cbuf through `as` and publish the result in
  * the g_* accessors. Caller has checked/reset g_staged. Records the
  * outcome in g_staged / g_stage_rc. */
+/* Make a successfully staged pool visible to dispatchers. Order
+ * matters on a post-boot retry, when W-series FFIs on other CPUs read
+ * the pool under the dispatch lock:
+ *   1. drop stale GPU translations (an address space the GPU may
+ *      already have walked: the cold channel's; the kexec mapper has
+ *      no invalidate) before anything can dispatch into the new VAs;
+ *   2. write the pool fields;
+ *   3. publish with g_stage_rc = 0, then g_staged (both atomic): a
+ *      reader that sees rc 0 also sees the fields written before it.
+ * A retry clears g_staged and leaves g_stage_rc nonzero until step 3,
+ * so readers reject the pool in between. */
+static void stage_publish(const struct oplib_gpu_as *as,
+                          const struct oplib_staged_pool *sp, size_t sass_len)
+{
+    if (as->tlb_invalidate != NULL && as->tlb_invalidate(as->ctx) != OPLIB_AS_OK) {
+        uart_printf("[oplib] stage_to_gpu: %s: TLB invalidate timed out — "
+                    "the pool may not be visible to the GPU yet\n", as->name);
+    }
+    g_sass_pool_gpu_va    = sp->pool_gpu_va + OPLIB_POOL_OFF_SASS;
+    g_sass_pool_n_pages   = (sass_len + 4095) / 4096;
+    g_sass_pool_base_phys = sp->pool_phys;
+    g_scratch_off         = sp->scratch_off;
+    g_stage_rc = 0;
+    g_staged   = true;
+}
+
 static int stage_common(const struct oplib_gpu_as *as)
 {
     if (!g_initialized || g_init_rc != 0) {
@@ -265,21 +291,7 @@ static int stage_common(const struct oplib_gpu_as *as)
         }
     }
 
-    g_sass_pool_gpu_va    = sp.pool_gpu_va + OPLIB_POOL_OFF_SASS;
-    g_sass_pool_n_pages   = (sass_len + 4095) / 4096;
-    g_sass_pool_base_phys = sp.pool_phys;
-    g_scratch_off         = sp.scratch_off;
-    g_stage_rc = 0;
-    g_staged   = true;
-
-    /* An address space the GPU may already have walked (the cold
-     * channel's, on a `nvgpu oplib stage` retry after boot) must drop
-     * stale translations before the new pool is used. The kexec mapper
-     * has no invalidate (NULL). */
-    if (as->tlb_invalidate != NULL && as->tlb_invalidate(as->ctx) != OPLIB_AS_OK) {
-        uart_printf("[oplib] stage_to_gpu: %s: TLB invalidate timed out — "
-                    "the pool may not be visible to the GPU yet\n", as->name);
-    }
+    stage_publish(as, &sp, sass_len);
 
     uart_printf("[oplib] stage_to_gpu: %zu B SASS staged at gpu_va=0x%llx "
                 "(%s, self-allocated %llu KB pool, base phys=0x%llx, "
