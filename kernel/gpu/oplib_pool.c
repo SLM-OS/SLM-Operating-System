@@ -47,12 +47,12 @@ static bool g_initialized;
  * NOT_AVAILABLE-returning lookup contract.
  *
  * Atomic (sequentially consistent) because a post-boot re-stage
- * (`nvgpu oplib stage`, `nvgpu cold` retry) publishes the pool from the
- * shell while the W-series FFIs read it under the GPU dispatch lock on
- * other CPUs: every stage path writes the pool fields first and sets
- * g_staged last, and every reader tests g_staged first, so a reader
- * never pairs g_staged with half-written fields. A retry clears it
- * before touching them. */
+ * (`nvgpu oplib stage` after a failed boot-time staging) publishes the
+ * pool from the shell while the W-series FFIs read it under the GPU
+ * dispatch lock on other CPUs: every stage path writes the pool fields
+ * first and sets g_stage_rc / g_staged last, and every reader tests
+ * g_staged first, so a reader never pairs them with half-written
+ * fields. A retry clears g_staged before touching them. */
 static _Atomic bool g_staged;
 static _Atomic int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
 static uint64_t g_sass_pool_gpu_va;
@@ -424,6 +424,75 @@ static void kexec_as_init(struct oplib_gpu_as *as, uint64_t *inst)
     };
 }
 
+/* kexec fast path: if the inherited channel handoff exposes a pre-
+ * staged SASS region (helper allocated `shader_*` fields in the
+ * channel's GMMU pre-kexec), copy the embedded SASS bytes into it and
+ * use the helper's GPU VA directly. Skips the post-kexec
+ * ga10b_gmmu_alloc path entirely — that path requires discovering the
+ * channel's inst_block_phys, which is unreliable on a kexec'd Linux box
+ * (FECS_CURRENT_CTX stale, walk-discovery blocked on big-page support).
+ * Returns 1 when staged here, 0 when the helper region is unusable. */
+static int stage_into_helper_region(const struct oplib_gpu_as *kx, size_t sass_len)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    /* Capacity check uses the page-rounded length so the last
+     * 4 KB page is fully inside the helper's mapping. */
+    size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
+    /* Only when the SASS fits slot 0: the helper's slots 1-3 are
+     * the scratch buffers, and a larger library would overwrite
+     * them. Larger libraries take the self-allocated pool (stage_common). */
+    if (h != NULL && h->shader_gpu_va != 0 &&
+        h->shader_phys != 0 && h->shader_size >= sass_pages_bytes &&
+        sass_len <= OPLIB_POOL_SLOT_BYTES) {
+        /* SASS occupies slot 0 of the helper-staged pool. */
+        uint64_t sass_phys = h->shader_phys + OPLIB_POOL_OFF_SASS;
+        uint64_t sass_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SASS;
+        volatile uint8_t *dst =
+            (volatile uint8_t *)(uintptr_t)sass_phys;
+        const uint8_t *src = g_handle.sass_region;
+        for (size_t i = 0; i < sass_len; i++) {
+            dst[i] = src[i];
+        }
+        cache_clean_range((void *)(uintptr_t)sass_phys, sass_len);
+        __asm__ volatile("dsb sy" ::: "memory");
+        g_sass_pool_gpu_va = sass_gva;
+        g_sass_pool_n_pages = (sass_len + 4095) / 4096;
+        /* #832: pool base for the W-series scratch-slot math. */
+        g_sass_pool_base_phys = h->shader_phys;
+        g_scratch_off = 0;
+        if (h->cbuf_phys != 0 && h->cbuf_gpu_va != 0) {
+            g_cbuf_phys   = h->cbuf_phys;
+            g_cbuf_gpu_va = h->cbuf_gpu_va;
+        } else {
+            /* v6/v7 publish paths zero cbuf_*: own 4 KB page. */
+            struct oplib_staged_pool sp;
+            memset(&sp, 0, sizeof(sp));
+            if (oplib_gpu_as_stage_cbuf(kx, &sp) == OPLIB_AS_OK) {
+                g_cbuf_phys   = sp.cbuf_phys;
+                g_cbuf_gpu_va = sp.cbuf_gpu_va;
+                uart_printf("[oplib] stage_cbuf: allocated 4 KB cbuf at "
+                            "gpu_va=0x%llx (phys=0x%llx)\n",
+                            (unsigned long long)sp.cbuf_gpu_va,
+                            (unsigned long long)sp.cbuf_phys);
+            } else {
+                uart_puts("[oplib] stage_cbuf: cbuf alloc/map failed — "
+                          "W-series dispatches will fall back to CPU\n");
+            }
+        }
+        g_stage_rc = 0;
+        g_staged = true;
+        uart_printf("[oplib] stage_to_gpu: %zu B copied into helper-"
+                    "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
+                    "capacity %u B)\n",
+                    sass_len,
+                    (unsigned long long)sass_gva,
+                    (unsigned long long)sass_phys,
+                    (unsigned)h->shader_size);
+        return 1;
+    }
+    return 0;
+}
+
 int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
 {
     /* UEFI-direct boot: the channel is SLM-OS's own; stage into its VM
@@ -454,71 +523,8 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
     kexec_as_init(&kx, &inst);
     size_t sass_len = g_handle.sass_region_len;
 
-    /* Fast path: if the inherited channel handoff exposes a pre-
-     * staged SASS region (helper allocated `shader_*` fields in
-     * the channel's GMMU pre-kexec), copy the embedded SASS bytes
-     * into it and use the helper's GPU VA directly. Skips the
-     * post-kexec ga10b_gmmu_alloc path entirely — that path
-     * requires discovering the channel's inst_block_phys, which
-     * is unreliable on a kexec'd Linux box (FECS_CURRENT_CTX
-     * stale, walk-discovery blocked on big-page support). */
-    {
-        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-        /* Capacity check uses the page-rounded length so the last
-         * 4 KB page is fully inside the helper's mapping. */
-        size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
-        /* Only when the SASS fits slot 0: the helper's slots 1-3 are
-         * the scratch buffers, and a larger library would overwrite
-         * them. Larger libraries take the self-allocated pool below. */
-        if (h != NULL && h->shader_gpu_va != 0 &&
-            h->shader_phys != 0 && h->shader_size >= sass_pages_bytes &&
-            sass_len <= OPLIB_POOL_SLOT_BYTES) {
-            /* SASS occupies slot 0 of the helper-staged pool. */
-            uint64_t sass_phys = h->shader_phys + OPLIB_POOL_OFF_SASS;
-            uint64_t sass_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SASS;
-            volatile uint8_t *dst =
-                (volatile uint8_t *)(uintptr_t)sass_phys;
-            const uint8_t *src = g_handle.sass_region;
-            for (size_t i = 0; i < sass_len; i++) {
-                dst[i] = src[i];
-            }
-            cache_clean_range((void *)(uintptr_t)sass_phys, sass_len);
-            __asm__ volatile("dsb sy" ::: "memory");
-            g_sass_pool_gpu_va = sass_gva;
-            g_sass_pool_n_pages = (sass_len + 4095) / 4096;
-            /* #832: pool base for the W-series scratch-slot math. */
-            g_sass_pool_base_phys = h->shader_phys;
-            g_scratch_off = 0;
-            if (h->cbuf_phys != 0 && h->cbuf_gpu_va != 0) {
-                g_cbuf_phys   = h->cbuf_phys;
-                g_cbuf_gpu_va = h->cbuf_gpu_va;
-            } else {
-                /* v6/v7 publish paths zero cbuf_*: own 4 KB page. */
-                struct oplib_staged_pool sp;
-                memset(&sp, 0, sizeof(sp));
-                if (oplib_gpu_as_stage_cbuf(&kx, &sp) == OPLIB_AS_OK) {
-                    g_cbuf_phys   = sp.cbuf_phys;
-                    g_cbuf_gpu_va = sp.cbuf_gpu_va;
-                    uart_printf("[oplib] stage_cbuf: allocated 4 KB cbuf at "
-                                "gpu_va=0x%llx (phys=0x%llx)\n",
-                                (unsigned long long)sp.cbuf_gpu_va,
-                                (unsigned long long)sp.cbuf_phys);
-                } else {
-                    uart_puts("[oplib] stage_cbuf: cbuf alloc/map failed — "
-                              "W-series dispatches will fall back to CPU\n");
-                }
-            }
-            g_stage_rc = 0;
-            g_staged = true;
-            uart_printf("[oplib] stage_to_gpu: %zu B copied into helper-"
-                        "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
-                        "capacity %u B)\n",
-                        sass_len,
-                        (unsigned long long)sass_gva,
-                        (unsigned long long)sass_phys,
-                        (unsigned)h->shader_size);
-            return 0;
-        }
+    if (stage_into_helper_region(&kx, sass_len) == 1) {
+        return 0;
     }
 
     /* Slow path (#832): the helper's v6/v7 publish path zeros

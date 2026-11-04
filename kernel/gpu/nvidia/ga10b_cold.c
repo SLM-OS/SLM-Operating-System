@@ -1174,8 +1174,11 @@ static int step_mnist(void)
  * without --weights-pool-size, nothing reserves 1.5 GB at boot, and
  * `nvgpu oplib wpool <MB>` sizes it before `slm load`. A consumer
  * whose shaders or weights are missing from this build is skipped with
- * a warning and stays on the CPU; only an allocation or mapping
- * failure fails the step. */
+ * a warning and stays on the CPU; only a sched / eviction pipeline
+ * allocation, mapping or publication failure fails the step. An
+ * operator-library attach failure is logged and does not: the policy
+ * consumers work without it, and `nvgpu oplib stage` retries a failed
+ * staging (`nvgpu oplib cold` shows the state). */
 static int step_policies(void)
 {
     int rc_s = ga10b_cold_pipeline_build(&cold_gpu_ops, &cold_chan,

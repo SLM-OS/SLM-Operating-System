@@ -238,7 +238,9 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
         if (g_cold.ch != ch) {
             return -1;
         }
-        /* A `nvgpu cold` retry after a failed staging stages again. */
+        /* A repeat attach after a failed staging stages again (reached
+         * when `nvgpu cold` re-runs the policies step;
+         * `nvgpu oplib stage` retries the staging on its own). */
         return g_cold.staged ? 0 : attach_stage(weights_pool_bytes);
     }
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
