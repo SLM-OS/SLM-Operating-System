@@ -1589,9 +1589,10 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
 
 /// Count of currently-evictable blocks visible to the active policy.
 ///
-/// Wraps `mm::snapshot_evictable_blocks().len()` for C callers that
-/// want to verify the snapshot filter without needing to marshal a
-/// `Vec<BlockMeta>` across FFI. A block is "evictable" when it is
+/// Same filter as `mm::snapshot_evictable_blocks()`, counted without
+/// building the snapshot (`mm::model_mem::count_evictable_blocks`), so
+/// it allocates nothing: the telemetry publish calls it with IRQs
+/// masked (#1093). A block is "evictable" when it is
 /// allocated and `ref_count <= 1` (shared blocks with additional refs
 /// are pinned).
 ///

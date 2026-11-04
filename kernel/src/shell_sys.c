@@ -11650,7 +11650,9 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
 /* Fan: PWM controller 3 at 0x032a0000 drives the carrier's fan header
  * (L4T DT pwm-fan: pwms = <&pwm3 0 45334>). CSR bit 31 = enable, bits
  * 23:16 = duty (0-255). Only read when BPMP says its clock is on: an
- * unclocked block traps into EL3 on Tegra234. */
+ * unclocked block traps into EL3 on Tegra234. (A clocked block held in
+ * reset could fault too; BPMP has no reset-state query, and Linux
+ * deasserts this reset together with enabling the clock.) */
 #define THERMAL_FAN_PWM_CSR  0x032a0000UL
 #define TEGRA234_CLK_PWM3    107u
 
@@ -11714,22 +11716,34 @@ static void thermal_print_cpus(void)
                            (unsigned)sched_diag_schedule[c],
                            t != NULL ? t->name : "-");
     }
-    thermal_uart_out("%s\r\n", line);
+    /* Directly: thermal_uart_out's buffer is smaller than this line. */
+    uart_puts(line);
+    uart_puts("\r\n");
 }
 
 static void thermal_log_task(void *arg)
 {
     (void)arg;
-    uint32_t ms;
-    while ((ms = atomic_load(&g_thermal_log_ms)) != 0) {
-        char prefix[40];
-        uart_snprintf(prefix, sizeof(prefix), "[thermal t=%llus]",
-                      (unsigned long long)(timer_get_count() / timer_get_frequency()));
-        thermal_print_line(thermal_uart_out, prefix);
-        thermal_print_cpus();
-        task_sleep_ms(ms);
+    for (;;) {
+        uint32_t ms;
+        while ((ms = atomic_load(&g_thermal_log_ms)) != 0) {
+            char prefix[40];
+            uart_snprintf(prefix, sizeof(prefix), "[thermal t=%llus]",
+                          (unsigned long long)(timer_get_count() / timer_get_frequency()));
+            thermal_print_line(thermal_uart_out, prefix);
+            thermal_print_cpus();
+            task_sleep_ms(ms);
+        }
+        atomic_store(&g_thermal_log_running, false);
+        /* A `thermal log <ms>` that ran after the period went to 0 but
+         * before the store above saw running=true and started nothing:
+         * pick its period up instead of exiting. */
+        bool expected = false;
+        if (atomic_load(&g_thermal_log_ms) == 0 ||
+            !atomic_compare_exchange_strong(&g_thermal_log_running, &expected, true)) {
+            return;
+        }
     }
-    atomic_store(&g_thermal_log_running, false);
 }
 
 int cmd_thermal(int argc, char *argv[])
@@ -11739,7 +11753,20 @@ int cmd_thermal(int argc, char *argv[])
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "log") == 0) {
-        uint32_t ms = argc >= 3 ? (uint32_t)atoi(argv[2]) : 0;
+        uint32_t ms = 0;
+        if (argc >= 3) {
+            for (const char *p = argv[2]; *p != '\0'; p++) {
+                if (*p < '0' || *p > '9' || ms > 3600000u) {
+                    shell_puts("thermal log: period is 0 (stop) or 100..3600000 ms\r\n");
+                    return -1;
+                }
+                ms = ms * 10u + (uint32_t)(*p - '0');
+            }
+        }
+        if (ms > 3600000u) {
+            shell_puts("thermal log: period is 0 (stop) or 100..3600000 ms\r\n");
+            return -1;
+        }
         if (ms != 0 && ms < 100) {
             ms = 100;
         }
@@ -11754,6 +11781,11 @@ int cmd_thermal(int argc, char *argv[])
                 atomic_store(&g_thermal_log_running, false);
                 shell_puts("thermal log: task create failed\r\n");
                 return -1;
+            }
+            /* Off CPU 0, where net_pump and the shells run: the log is
+             * how a wedged CPU 0 shows up (#1093). */
+            if (cpu_count > 1) {
+                t->cpu_affinity = cpu_count - 1;
             }
             scheduler_add_task(t);
         }

@@ -154,6 +154,25 @@ impl EvictedContentTracker {
         out
     }
 
+    /// Like [`drain_expired`], but appends to `out` and stops at its
+    /// capacity instead of growing it, so it can run under a lock that
+    /// masks IRQs (mm::model_mem's, #1093). Entries left behind stay
+    /// queued for the next call. Returns how many were drained.
+    pub fn drain_expired_into(&mut self, now_ns: u64, out: &mut alloc::vec::Vec<u32>) -> usize {
+        let mut n = 0;
+        while out.len() < out.capacity() {
+            match self.entries.front() {
+                Some(front) if now_ns.saturating_sub(front.evicted_at_ns) > self.window_ns => {}
+                _ => break,
+            }
+            if let Some(entry) = self.entries.pop_front() {
+                out.push(entry.evicted_block_id);
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -186,4 +205,40 @@ pub fn drain_and_report_good(
         registry::update_feedback(id, false);
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mm::eviction::PoolType;
+
+    fn key(layer: i16) -> ContentKey {
+        ContentKey { pool_type: PoolType::Weight, model_id: 1, layer_idx: layer }
+    }
+
+    /// #1093: drain_expired_into fills the caller's pre-sized Vec and
+    /// never grows it (it runs under the IRQ-masking model_mem lock);
+    /// what does not fit stays queued for the next call.
+    #[test]
+    fn drain_expired_into_stops_at_capacity() {
+        let mut t = EvictedContentTracker::with_params(8, 100);
+        for i in 0..5i16 {
+            t.record_eviction(key(i), 10 + i as u32, 0);
+        }
+        let mut out = alloc::vec::Vec::with_capacity(2);
+        let cap = out.capacity();
+        // Not yet expired: nothing drained.
+        assert_eq!(t.drain_expired_into(50, &mut out), 0);
+        assert!(out.is_empty());
+        // All expired, but only `cap` fit.
+        assert_eq!(t.drain_expired_into(1_000, &mut out), cap);
+        assert_eq!(out.capacity(), cap, "must not reallocate");
+        assert_eq!(&out[..2], &[10, 11]);
+        assert_eq!(t.len(), 5 - cap);
+        // The rest comes out on the next call, oldest first.
+        let mut rest = alloc::vec::Vec::with_capacity(8);
+        assert_eq!(t.drain_expired_into(1_000, &mut rest), 5 - cap);
+        assert!(t.is_empty());
+        assert_eq!(rest.first().copied(), Some(10 + cap as u32));
+    }
 }
