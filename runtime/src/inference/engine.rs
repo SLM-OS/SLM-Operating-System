@@ -871,8 +871,7 @@ impl InferenceEngine {
         // [1, N] gives [1, N], as in ONNX). A one-way broadcast in either
         // direction works; a two-way broadcast ([3,1] + [1,4]) is
         // rejected.
-        let swap = b.num_elements() > a.num_elements()
-            || (b.num_elements() == a.num_elements() && b.ndim > a.ndim);
+        let swap = add_swap_operands(a.num_elements(), a.ndim, b.num_elements(), b.ndim);
         let (a, b) = if swap { (b, a) } else { (a, b) };
 
         // Output shape matches the larger input
@@ -1371,11 +1370,30 @@ unsafe fn run_inference_inner(
     result
 }
 
+/// exec_add operand order: true when b should become the first operand
+/// (ops::add broadcasts its second operand into the first) — b has more
+/// elements, or as many with a higher rank.
+fn add_swap_operands(a_n: usize, a_ndim: u8, b_n: usize, b_ndim: u8) -> bool {
+    b_n > a_n || (b_n == a_n && b_ndim > a_ndim)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     static MNIST: &[u8] = include_bytes!("../../../models/test/mnist.onnx");
+
+    #[test]
+    fn add_operand_order() {
+        // [C,1,1] + [1,C,H,W]: the activation goes first.
+        assert!(add_swap_operands(8, 3, 8 * 28 * 28, 4));
+        assert!(!add_swap_operands(8 * 28 * 28, 4, 8, 3));
+        // [N] + [1,N] -> [1,N] (ONNX: max rank), in either order.
+        assert!(add_swap_operands(10, 1, 10, 2));
+        assert!(!add_swap_operands(10, 2, 10, 1));
+        // Identical shapes keep their order.
+        assert!(!add_swap_operands(10, 2, 10, 2));
+    }
 
     /// #1086: the CPU path computes the same logits as onnxruntime 1.24
     /// on models/test/mnist.onnx (which the GA10B GPU pipeline matches
