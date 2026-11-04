@@ -1502,6 +1502,21 @@ static const struct help_entry help_entries[] = {
         "patch in tools/tfa-patches/0004-*) is needed.\n"
     ),
 
+    HELP_TEXT("thermal",
+        "thermal - Temperatures, fan PWM and CPU liveness (Jetson Orin Nano only)\n"
+        "\n"
+        "Usage:\n"
+        "  thermal            Read the BPMP thermal zones (cpu, gpu, soc0-2, tj) in C\n"
+        "  thermal fan        Fan PWM (pwm3) clock state, enable and duty\n"
+        "  thermal log <ms>   Print zones plus per-CPU ticks/schedules/current task\n"
+        "                     on the console every <ms> (min 100), from a task that\n"
+        "                     can run on any CPU\n"
+        "  thermal log 0      Stop the log\n"
+        "\n"
+        "A CPU whose tick count stops advancing in the log is spinning with\n"
+        "IRQs masked; the task shown is the one it is stuck in (#1093).\n"
+    ),
+
     HELP_TEXT("timdiag",
         "timdiag - Timer / interrupt-delivery diagnostic (non-x86)\n"
         "\n"

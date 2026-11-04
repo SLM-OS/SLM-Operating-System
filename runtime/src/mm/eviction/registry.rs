@@ -201,6 +201,14 @@ impl SpinGuard {
         }
         SpinGuard
     }
+
+    /// One attempt; `None` if the lock is held.
+    fn try_new() -> Option<Self> {
+        REGISTRY_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| SpinGuard)
+    }
 }
 
 impl Drop for SpinGuard {
@@ -306,6 +314,24 @@ pub fn get_eviction_policy_name_for_pool(pool: PoolType) -> &'static str {
 /// compat wrapper — callers that don't specify a pool get weight.
 pub fn with_active_policy<R>(f: impl FnOnce(&mut dyn EvictionPolicy) -> R) -> Option<R> {
     with_active_policy_for_pool(PoolType::Weight, f)
+}
+
+/// Like [`with_active_policy`], but gives up instead of spinning when
+/// the registry lock is held: returns `None` then. For callers in
+/// IRQs-off context, such as the 1 Hz telemetry stats read inside the
+/// lwIP core lock (#1093). REGISTRY_LOCK is held while a policy runs
+/// (MLP inference, even a GPU dispatch), by tasks that can be
+/// preempted; spinning on it with IRQs masked on the holder's CPU
+/// would never end.
+pub fn try_with_active_policy<R>(f: impl FnOnce(&mut dyn EvictionPolicy) -> R) -> Option<R> {
+    let _g = SpinGuard::try_new()?;
+    // SAFETY: _g held — exclusive access.
+    unsafe {
+        match &mut (*addr_of_mut!(ACTIVE_POLICIES))[pool_index(PoolType::Weight)] {
+            Some(p) => Some(f(p.as_mut())),
+            None => None,
+        }
+    }
 }
 
 /// Invoke a specific pool's policy under the registry lock. #120.
@@ -500,6 +526,18 @@ mod tests {
     impl EvictionPolicy for NamedPolicy {
         fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
         fn name(&self) -> &'static str { self.0 }
+    }
+
+    /// #1093: with the registry lock held (here by an outer
+    /// with_active_policy, as a policy consult holds it), the try
+    /// variant the IRQs-off telemetry read uses returns None at once
+    /// instead of spinning; once the lock is free it runs the closure.
+    #[test]
+    fn try_with_active_policy_gives_up_while_locked() {
+        init_default();
+        let inner = with_active_policy(|_p| try_with_active_policy(|p| p.name()));
+        assert_eq!(inner, Some(None), "lock held: try must not run the closure");
+        assert!(try_with_active_policy(|p| p.name()).is_some());
     }
 
     #[test]

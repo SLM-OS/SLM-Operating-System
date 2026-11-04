@@ -138,4 +138,38 @@ int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id,
  */
 int bpmp_pg_set_state(uint32_t domain_id, bool on);
 
+/*
+ * BPMP thermal zones on Tegra234 (the `thermal-sensors` cells of the
+ * L4T device tree's thermal-zones, dt-bindings/thermal/tegra234-bpmp-
+ * thermal.h). cv0-cv2 (2-4) read "unavailable" on Orin Nano.
+ */
+#define TEGRA234_BPMP_THERMAL_ZONE_CPU   0u
+#define TEGRA234_BPMP_THERMAL_ZONE_GPU   1u
+#define TEGRA234_BPMP_THERMAL_ZONE_SOC0  5u
+#define TEGRA234_BPMP_THERMAL_ZONE_SOC1  6u
+#define TEGRA234_BPMP_THERMAL_ZONE_SOC2  7u
+#define TEGRA234_BPMP_THERMAL_ZONE_TJ    8u   /* hottest junction */
+
+/*
+ * MRQ_THERMAL / CMD_THERMAL_GET_TEMP request (linux-bpmp-abi.h
+ * struct mrq_thermal_host_to_bpmp_request): the sub-command word and a
+ * union whose largest member (set_trip: zone, low, high, enabled) is
+ * 16 bytes. Linux sends the whole 20-byte struct; so does SLM-OS.
+ */
+struct bpmp_thermal_request {
+    uint32_t type;
+    uint32_t zone;
+    uint32_t pad[3];
+};
+
+/*
+ * MRQ_THERMAL / CMD_THERMAL_GET_TEMP — read a thermal zone (#1093).
+ *   zone      TEGRA234_BPMP_THERMAL_ZONE_*.
+ *   temp_mc   filled with the temperature in millidegrees Celsius.
+ * Returns 0 on success, negative on transport failure (or no BPMP:
+ * non-Jetson stub), positive on a BPMP err code (e.g. a zone with no
+ * sensor driver).
+ */
+int bpmp_thermal_get_temp(uint32_t zone, int32_t *temp_mc);
+
 #endif /* BPMP_H */

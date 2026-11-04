@@ -23,6 +23,11 @@
 #define MRQ_RESET       20
 #define MRQ_UPHY        69
 #define MRQ_PG          66
+#define MRQ_THERMAL     27
+
+/* MRQ_THERMAL host->BPMP sub-commands (linux-bpmp-abi.h
+ * enum mrq_thermal_host_to_bpmp_cmd). */
+#define CMD_THERMAL_GET_TEMP    1
 
 /*
  * MRQ_UPHY sub-commands (linux-bpmp-abi.h enum mrq_uphy_cmd).

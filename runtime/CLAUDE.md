@@ -233,6 +233,31 @@ Every place that touches `static mut` must take the corresponding lock.
 Mutable statics without a held lock are UB under the Rust memory model;
 the compiler warns `static_mut_refs` on any unguarded reference.
 
+### Locks reached from IRQs-off context (#1093)
+
+A plain spin guard leaves IRQs enabled, so the task holding it can be
+preempted. If kernel code with IRQs masked then spins on the same lock
+on that CPU, the holder never runs again and the CPU hangs. On Jetson
+this took down CPU 0, so the network and the serial shell died with it:
+`net_pump` (pinned to CPU 0, inside the IRQ-masking lwIP core lock)
+read model-memory and eviction stats for the 1 Hz telemetry publish,
+while the telnet shell (also pinned to CPU 0) was preempted holding
+those locks during `bench eviction-e2e`.
+
+Before calling a Rust function from an IRQs-off path (the lwIP core
+lock, `spin_lock_irqsave` sections, the GPU dispatch lock, ISRs), check
+every lock it takes:
+
+- **Short critical sections with no allocation:** make the guard
+  IRQ-saving (`slm_irq_save` / `slm_irq_restore`, as `msg_router` and
+  `mm::model_mem` do). Size any `Vec` before taking the lock.
+- **Locks held across long work** (an eviction policy consult, model
+  inference, GPU dispatch): don't spin from IRQs-off context; use a
+  one-shot try-lock and skip the data when it's busy
+  (`mm::eviction::try_with_active_policy`).
+- Never allocate from IRQs-off context. The telemetry path uses
+  `count_evictable_blocks`, not `snapshot_evictable_blocks().len()`.
+
 ### Module-level RAII guards (`EngineGuard`, `OpsGuard`)
 
 `runtime/src/inference/engine.rs` and `runtime/src/inference/ops.rs`

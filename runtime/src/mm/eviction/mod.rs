@@ -56,7 +56,7 @@ pub use registry::{
     policy_counters, reset_to_default, score,
     notify_eviction, select_victim, set_eviction_policy,
     set_eviction_policy_for_pool,
-    update_feedback, with_active_policy, with_active_policy_for_pool,
+    update_feedback, with_active_policy, with_active_policy_for_pool, try_with_active_policy,
     FirstCandidatePolicy, PolicyCounters,
 };
 pub use lru::LruPolicy;

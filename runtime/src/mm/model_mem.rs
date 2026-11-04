@@ -598,29 +598,52 @@ unsafe impl Sync for MemoryPool {}
 #[cfg(feature = "ai_eviction")]
 static mut EVICTED_CONTENT_TRACKER: Option<super::eviction::EvictedContentTracker> = None;
 
+extern "C" {
+    fn slm_irq_save() -> u64;
+    fn slm_irq_restore(flags: u64);
+}
+
 /// RAII guard for the allocator spinlock.
 ///
 /// Replaces manual `lock_acquire`/`lock_release` pairs: the lock is
 /// released on drop, so panics or early returns can't leak the lock.
 /// (We compile with `panic = "abort"`, but RAII still protects against
 /// accidental `?` / early-return leaks.)
-struct SpinGuard;
+///
+/// IRQs stay masked while it is held, like `spin_lock_irqsave` and the
+/// msg_router guard (#1093). The pool stats are also read from
+/// IRQs-off context: net_pump's 1 Hz telemetry publish runs inside the
+/// lwIP core lock. With IRQs left on, a task preempted while holding
+/// LOCK on CPU 0 (the telnet shell running `bench eviction-e2e`) could
+/// never run again once net_pump, pinned to the same CPU, spun on LOCK
+/// with IRQs masked: CPU 0 hung, taking the network and the serial
+/// shell with it. Nothing under LOCK allocates or waits (the snapshot
+/// helpers size their Vec before taking it), so the IRQs-off window is
+/// a few loads and stores per call.
+struct SpinGuard {
+    irq_flags: u64,
+}
 
 impl SpinGuard {
     fn new() -> Self {
+        // SAFETY: slm_irq_save reads DAIF (ARM64) / EFLAGS (x86_64) and
+        // masks IRQs; always safe to call.
+        let irq_flags = unsafe { slm_irq_save() };
         while LOCK
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             core::hint::spin_loop();
         }
-        SpinGuard
+        SpinGuard { irq_flags }
     }
 }
 
 impl Drop for SpinGuard {
     fn drop(&mut self) {
         LOCK.store(false, Ordering::Release);
+        // SAFETY: restores the IRQ state saved by the paired new().
+        unsafe { slm_irq_restore(self.irq_flags) };
     }
 }
 
@@ -1367,10 +1390,12 @@ pub fn get_tracking(
 /// should pre-size / reuse if this becomes a bottleneck.
 #[cfg(feature = "ai_eviction")]
 pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta> {
-    let mut out: alloc::vec::Vec<super::eviction::BlockMeta> = alloc::vec::Vec::new();
     if !is_initialized() {
-        return out;
+        return alloc::vec::Vec::new();
     }
+    // Allocate before taking LOCK (it masks IRQs); push never grows it.
+    let mut out: alloc::vec::Vec<super::eviction::BlockMeta> =
+        alloc::vec::Vec::with_capacity(pool_block_capacity(None));
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to pool statics.
     unsafe {
@@ -1383,6 +1408,9 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
                 if !pool.blocks[i].is_evictable() {
                     continue;
                 }
+                if out.len() == out.capacity() {
+                    break;
+                }
                 if let Some(meta) = pool.snapshot_at(i, pool_id) {
                     out.push(meta);
                 }
@@ -1390,6 +1418,49 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
         }
     }
     out
+}
+
+/// Number of evictable blocks across both pools, without allocating
+/// (the telemetry publish calls this from IRQs-off context).
+#[cfg(feature = "ai_eviction")]
+pub fn count_evictable_blocks() -> usize {
+    if !is_initialized() {
+        return 0;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let mut n = 0usize;
+        for pool_ptr in [addr_of_mut!(WEIGHT_POOL), addr_of_mut!(WORKSPACE_POOL)] {
+            let pool = &*pool_ptr;
+            for i in 0..pool.block_count {
+                if pool.blocks[i].is_evictable() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+}
+
+/// Block slots in one pool (`Some(id)`) or both (`None`): the Vec
+/// capacity the snapshot helpers reserve before taking LOCK. Reads
+/// `block_count` under the lock; a concurrent reinit between this and
+/// the fill only truncates the snapshot.
+#[cfg(feature = "ai_eviction")]
+fn pool_block_capacity(pool_id: Option<u8>) -> usize {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let w = (*addr_of_mut!(WEIGHT_POOL)).block_count;
+        let ws = (*addr_of_mut!(WORKSPACE_POOL)).block_count;
+        match pool_id {
+            Some(POOL_WEIGHT) => w,
+            Some(POOL_WORKSPACE) => ws,
+            Some(_) => 0,
+            None => w + ws,
+        }
+    }
 }
 
 /// Snapshot one pool's evictable blocks together with each slot's
@@ -1403,11 +1474,12 @@ pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta
 fn snapshot_pool_candidates(
     pool_id: u8,
 ) -> alloc::vec::Vec<(super::eviction::BlockMeta, u8)> {
-    let mut out: alloc::vec::Vec<(super::eviction::BlockMeta, u8)> =
-        alloc::vec::Vec::new();
     if !is_initialized() {
-        return out;
+        return alloc::vec::Vec::new();
     }
+    // Allocate before taking LOCK (it masks IRQs); push never grows it.
+    let mut out: alloc::vec::Vec<(super::eviction::BlockMeta, u8)> =
+        alloc::vec::Vec::with_capacity(pool_block_capacity(Some(pool_id)));
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to pool statics.
     unsafe {
@@ -1420,6 +1492,9 @@ fn snapshot_pool_candidates(
         for i in 0..pool.block_count {
             if !pool.blocks[i].is_evictable() {
                 continue;
+            }
+            if out.len() == out.capacity() {
+                break;
             }
             if let Some(meta) = pool.snapshot_at(i, pool_id) {
                 out.push((meta, pool.blocks[i].generation));
@@ -1677,6 +1752,36 @@ mod eviction_tests {
         free(h2).expect("free h2");
         free(handle_from_bits(REALLOCED.load(Ordering::Relaxed)))
             .expect("free the racer's reallocated slot");
+    }
+
+    /// #1093: the count-only path the IRQs-off telemetry publish uses
+    /// agrees with the snapshot, and the snapshot reserves its Vec
+    /// before taking the (IRQ-masking) pool lock: capacity is fixed at
+    /// the slot count, so a push under the lock never reallocates.
+    #[test]
+    fn evictable_count_matches_snapshot_without_growing_under_lock() {
+        let _s = TestSerialGuard::new();
+        let _p = TestPools::new(4, 4);
+        assert_eq!(count_evictable_blocks(), 0);
+        let w0 = alloc_weights(BLOCK_SIZE).expect("alloc w0");
+        let k0 = alloc_workspace(BLOCK_SIZE).expect("alloc k0");
+        let k1 = alloc_workspace(BLOCK_SIZE).expect("alloc k1");
+        let pinned = share(k1).expect("pin k1");   // refcount 2: not evictable
+
+        let snap = snapshot_evictable_blocks();
+        assert_eq!(snap.len(), 2, "w0 and k0; k1 is pinned");
+        assert_eq!(count_evictable_blocks(), snap.len());
+        assert_eq!(snap.capacity(), pool_block_capacity(None));
+        assert_eq!(pool_block_capacity(None), 4);   // 4 MB + 4 MB of 2 MB blocks
+        assert_eq!(snapshot_pool_candidates(POOL_WORKSPACE).capacity(),
+                   pool_block_capacity(Some(POOL_WORKSPACE)));
+
+        unshare(pinned).expect("unpin k1");
+        assert_eq!(count_evictable_blocks(), 3);
+        free(w0).expect("free w0");
+        free(k0).expect("free k0");
+        free(k1).expect("free k1");
+        assert_eq!(count_evictable_blocks(), 0);
     }
 
     /// Policy that frees the sole candidate during the consult (the

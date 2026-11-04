@@ -203,6 +203,9 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
     {"rtldiag",   cmd_rtldiag,   "RTL8168 PCIe probe diagnostic",                             false, SHELL_CAT_HARDWARE},
 #endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"thermal",   cmd_thermal,   "BPMP temperatures and fan PWM (thermal [fan | log <ms>])",  false, SHELL_CAT_HARDWARE},
+#endif
 #if !defined(PLATFORM_X86_64)
     {"timdiag",   cmd_timdiag,   "Timer/interrupt delivery diagnostic",                       false, SHELL_CAT_HARDWARE},
 #if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)

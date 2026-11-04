@@ -27,10 +27,6 @@ MNIST test digits correctly on the GPU. The scheduler MLP, the eviction
 Q-net and the operator library (SLM per-op kernels) run on the same
 channel (#1092); none of the Linux GPU helpers is needed.
 
-**Known issue:** sustained all-core CPU load (for example
-`bench eviction-e2e`) silently stops the board after a UEFI-direct
-boot, also on builds without #1092; see #1093.
-
 ---
 
 ## How the hand-off works
@@ -548,6 +544,23 @@ where the two disagree.
     the library and move the scratch slots behind it. The helper-staged
     kexec pool is used only when the SASS fits slot 0, because a larger
     copy would overwrite the helper's scratch slots.
+16. **"The board goes silent under load" was a CPU 0 deadlock, not
+    heat** (#1093). During `bench eviction-e2e`, ping, telnet and the
+    serial shell all stopped together. `thermal log` (BPMP
+    temperatures plus per-CPU tick counters) showed temperatures under
+    72 °C and CPUs 1-5 still running. CPU 0's tick count was frozen
+    with `net_pump` current, i.e. it was spinning with IRQs masked.
+    Breadcrumbs placed it in the 1 Hz telemetry publish, which reads
+    model-memory and eviction-policy stats inside the lwIP core lock.
+    The telnet shell running the bench (pinned to CPU 0 like
+    `net_pump`) had been preempted holding those Rust spinlocks, so
+    neither could ever run again. The model-memory lock now masks IRQs
+    while held, and the stats read try-locks the eviction registry
+    (see runtime/CLAUDE.md §"Locks reached from IRQs-off context").
+    The same code ran after kexec; nothing about it was UEFI-specific.
+    After a UEFI-direct boot the fan PWM's clock is off and nothing
+    drives the fan, but load testing stayed far from any trip point
+    (70 °C hot-surface, 99 °C slowdown).
 
 ## Troubleshooting
 
@@ -563,5 +576,5 @@ where the two disagree.
 | Board stuck in SLM-OS on every power cycle | A `BOOTAA64.efi` reached the NVMe ESP, or BootOrder was changed. Pick the SD entry from the UEFI boot manager (F11 at the prompt, via `serial_send keys=["F11"]`) and fix it from Linux |
 | `GA10B cold bring-up stopped at step N` at boot | The log names the step; `nvgpu cold` resumes from it. `acr`/`pmu`/`falcons` failures print the falcon mailboxes and the PMU's RISC-V debug-buffer lines (`pmu-fw:`) |
 | `nvgpu cold check` FAIL, or `sched stats` / `eviction stats` show only fallbacks | `nvgpu cold` must reach `done=policies`; the boot log names a skipped kind (`sched-mlp-gpu:` / `eviction-qnet-gpu:` warnings: shader missing from the operator library, or AI_SCHED=OFF). `gpu debug on` traces each dispatch (slow: it prints under the dispatch lock) |
-| Board goes silent during a long CPU-heavy bench | #1093 (UEFI-direct only, cause under investigation) |
+| Network, telnet and the serial shell all stop, but the board is powered | CPU 0 is wedged with IRQs masked. `thermal log 2000` (start it first) keeps printing from another CPU: a frozen CPU 0 tick count names the stuck task. Look for a lock taken from an IRQs-off path while a preemptible task holds it (#1093) |
 | SD Linux does not come up (no SSH, silent console) | Recover without a re-flash: F11 at the firmware prompt (`serial_send keys=["F11"]`), choose UEFI Shell, run `FS3:\EFI\L4T\l4t.efi` (an L4TLauncher copy on the NVMe ESP, so it boots the NVMe rootfs), then mount `mmcblk0p1` from there and fix it. The UEFI Shell sees the SD ext4 rootfs read-only. Type one short command per line; long lines get mangled on this console |

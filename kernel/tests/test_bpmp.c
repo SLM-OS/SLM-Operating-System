@@ -22,6 +22,7 @@
 #include "bpmp.h"
 #include "test_harness.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
 
@@ -135,6 +136,26 @@ static void test_bpmp_clock_and_reset_ids_match_tegra234_bindings(void)
 }
 #endif
 
+/* #1093: MRQ_THERMAL request is Linux's 20-byte struct (type + the
+ * 16-byte union) and the zone ids match the L4T device tree. */
+static void test_bpmp_thermal_abi_layout(void)
+{
+    TEST_ASSERT_EQUAL_UINT(20, sizeof(struct bpmp_thermal_request));
+    TEST_ASSERT_EQUAL_UINT(4, offsetof(struct bpmp_thermal_request, zone));
+    TEST_ASSERT_EQUAL_UINT(0, TEGRA234_BPMP_THERMAL_ZONE_CPU);
+    TEST_ASSERT_EQUAL_UINT(1, TEGRA234_BPMP_THERMAL_ZONE_GPU);
+    TEST_ASSERT_EQUAL_UINT(8, TEGRA234_BPMP_THERMAL_ZONE_TJ);
+}
+
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+static void test_bpmp_thermal_stub_reports_unavailable(void)
+{
+    int32_t t = 12345;
+    TEST_ASSERT_TRUE(bpmp_thermal_get_temp(TEGRA234_BPMP_THERMAL_ZONE_TJ, &t) < 0);
+    TEST_ASSERT_EQUAL_INT32(12345, t);   /* untouched */
+}
+#endif
+
 int test_suite_bpmp(void)
 {
     UNITY_BEGIN();
@@ -159,6 +180,8 @@ int test_suite_bpmp(void)
     RUN_TEST(test_bpmp_uphy_pcie_controller_state_returns_zero_on_stub);
     RUN_TEST(test_bpmp_pg_set_state_returns_zero_on_stub);
     RUN_TEST(test_bpmp_public_opcodes_are_stable);
+    RUN_TEST(test_bpmp_thermal_stub_reports_unavailable);
 #endif
+    RUN_TEST(test_bpmp_thermal_abi_layout);
     return UNITY_END();
 }
