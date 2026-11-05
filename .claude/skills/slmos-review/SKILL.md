@@ -6,7 +6,7 @@ context: fork
 agent: general-purpose
 background: false
 effort: high
-allowed-tools: Bash(git fetch *) Bash(git branch --show-current) Bash(git log *) Bash(git status *) Bash(git diff *) Bash(git show *) Bash(echo *) Bash(gh pr diff *) Bash(gh pr view *) Bash(gh issue list *)
+allowed-tools: Bash(git fetch *) Bash(git branch --show-current) Bash(git log *) Bash(git status *) Bash(git diff *) Bash(git show *) Bash(echo *) Bash(gh pr diff *) Bash(gh pr view *) Bash(gh issue list *) Bash(make check-braces*)
 ---
 
 # SLM-OS review
@@ -21,7 +21,7 @@ Snapshot taken when this review started:
 - Uncommitted: !`git status --short || true`
 - Size: !`git diff origin/main...HEAD --shortstat || true`
 
-Review only. Don't edit files, commit, build, run tests or touch hardware; `/ci` and `/deploy-and-test` do that.
+Review only. Don't edit files, commit, build, run tests or touch hardware; `/ci` and `/deploy-and-test` do that. The one exception is `make check-braces`, which configures but doesn't compile.
 
 ## 1. Set the scope
 
@@ -108,7 +108,9 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 - A closing keyword ("fix", "close", "resolve" + `#N`) in a commit message or PR body closes that issue on merge, even in a negated sentence. Flag any that shouldn't, and check `closingIssuesReferences` on a PR.
 
 **C style: braces**
-- Every `if`/`else`/`while`/`for`/`do` body is braced. The only exception is a stand-alone single-line guard with no `else`, like `if (err) return rc;`. A chained `if`/`else` is fully braced even with one-line bodies (the `readability-braces-around-statements` convention with `ShortStatementLines: 1`).
+- When reviewing the checked-out branch, run `make check-braces` and report each violation as a Warning. Don't look for these by hand. It checks changed lines as the main and test kernel of all four platforms, and its result is authoritative for code those configurations compile.
+- If it can't run (no `clang-tidy` or cross compiler on PATH), or for a PR on another branch, say so in the report and read changed lines for the rule: every `if`/`else`/`while`/`for`/`do` body is braced, except a stand-alone single-line statement like `if (err) return rc;`. An `if`/`else` across several lines is fully braced even with one-line bodies.
+- Also read by hand any file it lists as not checked, macro bodies (the rule skips macro expansions), and changes inside `#if` blocks that are off in the default builds (`COOP_PREEMPT`, `HAILO_WIRE_DEBUG`, `NET_SSHD`, for example).
 
 **Suggestions only**
 - Functions over 80 lines worth splitting, magic numbers, missing `static`, comments that say what instead of why.

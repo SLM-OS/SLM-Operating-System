@@ -1229,7 +1229,7 @@ rustdoc:
 # ============================================================================
 
 .PHONY: clean
-clean: kernel-clean kernel-test-clean runtime-clean
+clean: kernel-clean kernel-test-clean runtime-clean tidy-clean
 	@echo "Clean complete."
 
 .PHONY: rebuild
@@ -1523,6 +1523,43 @@ print-build-signatures:
 check-build-signatures:
 	@./scripts/check-build-signatures.sh
 
+# Brace check on changed C lines (scripts/check-c-braces.py, .clang-tidy).
+# Configures each platform as both the main and the test kernel, so code under
+# platform and ENABLE_BOOT_TESTS #ifdefs is parsed; nothing is compiled. Each
+# database is configured from scratch, so no option stays cached from an
+# earlier run.
+# BRACES_BASE sets the diff base; BRACES_ARGS=--all reports the whole tree.
+# The ARM toolchain's usual location is a fallback for shells without it on PATH.
+BRACES_BASE ?= origin/main
+BRACES_ARGS ?=
+TIDY_DB_DIR := $(BUILD_DIR)/tidy
+TIDY_PLATFORMS := QEMU_VIRT RASPI5 JETSON_ORIN_NANO X86_64
+TIDY_VARIANT ?= kernel
+TIDY_DB_NAME = $(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
+
+.PHONY: tidy-db
+tidy-db:
+	@rm -rf $(TIDY_DB_DIR)/$(TIDY_DB_NAME)
+	@$(CMAKE) -G "Unix Makefiles" -B $(TIDY_DB_DIR)/$(TIDY_DB_NAME) \
+		$(if $(filter test,$(TIDY_VARIANT)),$(KERNEL_TEST_CMAKE_ARGS),$(KERNEL_CMAKE_ARGS)) \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+		$(MAKE_PROGRAM_ARG) > /dev/null
+
+.PHONY: tidy-clean
+tidy-clean:
+	@rm -rf $(TIDY_DB_DIR)
+
+.PHONY: check-braces
+check-braces:
+	@PATH="$$PATH:$(TFA_TOOLCHAIN)" python3 scripts/check-c-braces.py --make-db \
+		--base $(BRACES_BASE) \
+		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p) --db $(TIDY_DB_DIR)/$(p)-test) \
+		$(BRACES_ARGS)
+
+.PHONY: test-check-braces
+test-check-braces:
+	@bash scripts/tests/test-check-c-braces.sh
+
 .PHONY: test
 test: check-deploy-configs check-preempt-config check-build-signatures kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
@@ -1663,6 +1700,7 @@ check-tools:
 	@which cmake > /dev/null && echo "  [OK] cmake" || echo "  [MISSING] cmake"
 	@which cargo > /dev/null && echo "  [OK] cargo" || echo "  [MISSING] cargo"
 	@which $(QEMU) > /dev/null && echo "  [OK] $(QEMU)" || echo "  [MISSING] $(QEMU)"
+	@which clang-tidy > /dev/null && echo "  [OK] clang-tidy" || echo "  [MISSING] clang-tidy (make check-braces)"
 	@which aarch64-none-elf-gdb > /dev/null && echo "  [OK] aarch64-none-elf-gdb" || echo "  [MISSING] aarch64-none-elf-gdb"
 
 .PHONY: help
@@ -1706,6 +1744,8 @@ help:
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
+	@echo "  check-braces   Check braces on changed C lines with clang-tidy"
+	@echo "  test-check-braces  Test the brace check itself (host only)"
 	@echo "  check-tools    Verify required tools are installed"
 	@echo "  help           Show this help message"
 	@echo ""
