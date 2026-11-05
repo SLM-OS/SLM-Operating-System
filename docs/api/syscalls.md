@@ -282,17 +282,17 @@ user-provided pointers before the kernel dereferences them.
 static int validate_user_ptr(const void *ptr, size_t len);
 ```
 
-**Current behavior (Phase 5 -- shared address space):**
+**Current behavior:**
 
-1. `NULL` pointer with `len == 0` passes (treated as "no access needed")
-2. Overflow check: rejects if `ptr + len` wraps around
-3. All kernel-mapped addresses are accepted (shared address space)
+1. Rejects a `NULL` pointer or `len == 0`
+2. Rejects a range where `ptr + len` wraps around
+3. Rejects the call if the current task is missing or has no stack
+4. Accepts any other address, including kernel and unmapped addresses
 
-**Returns:** `1` if the pointer is valid, `0` if invalid.
+**Returns:** `1` if the pointer passes, `0` if not.
 
-In the current shared-address-space design, all tasks share the kernel's page tables,
-so any mapped address is technically reachable. Future phases with per-component page
-tables will restrict validation to each component's own memory region.
+EL0 tasks have per-task page tables, but this function doesn't consult them, so passing
+doesn't mean the range is mapped or belongs to the task. #29 tracks real validation.
 
 ---
 

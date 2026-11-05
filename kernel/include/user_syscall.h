@@ -28,7 +28,7 @@
 #define SLMOS_USER_SYSCALL_INLINE \
     static inline __attribute__((always_inline))
 
-/* Exit the current component */
+/* Exit the current task */
 SLMOS_USER_SYSCALL_INLINE void sys_exit(int code)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)(uint32_t)code;

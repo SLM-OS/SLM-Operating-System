@@ -1,7 +1,7 @@
 /*
  * syscall.h - System Call Interface for SLM-OS
  *
- * Defines the syscall ABI for user-mode (EL0) components.
+ * Defines the syscall ABI for user-mode (EL0) tasks.
  *
  * Calling convention (AArch64):
  *   x8  = syscall number
