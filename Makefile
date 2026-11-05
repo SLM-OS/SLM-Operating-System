@@ -1595,8 +1595,12 @@ check-braces:
 test-check-braces:
 	@bash scripts/tests/test-check-c-braces.sh
 
+.PHONY: check-oplib-shell-lock
+check-oplib-shell-lock:
+	@./scripts/check-oplib-shell-lock.sh
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-oplib-shell-lock kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

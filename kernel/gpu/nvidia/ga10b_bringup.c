@@ -3139,13 +3139,9 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      *
      * Single-threaded contract: this static counter assumes only
      * one caller of `ga10b_dispatch_v7_pipeline_inline` is in
-     * flight at a time. The shell verb is the only caller today,
-     * and `slm_oplib_dispatch` polls the trailing semaphore before
-     * returning, so a second invocation can't race the first.
-     * Same assumption applies to `g_qmd_pool_next_slot` above. If
-     * a future caller fires this from a Lua-thread or scheduler
-     * task, both counters need `_Atomic uint32_t` + a CAS update,
-     * or a spinlock around the entire dispatch. */
+     * flight at a time. Every caller holds `g_gpu_dispatch_lock`
+     * across the whole dispatch, including the shell verbs (#1111).
+     * Same assumption applies to `g_qmd_pool_next_slot` above. */
     static uint32_t g_pushbuf_ring_offset = 0u;
     if ((uint64_t)g_pushbuf_ring_offset + total_pb_bytes >
             g_handoff.pushbuf_size) {

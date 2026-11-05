@@ -701,12 +701,13 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * doesn't take the lock.
  *
  * Note: the `nvgpu` shell command (kernel/src/shell_sys.c) keeps
- * its own function-local `struct ga10b_bringup b` that's separate
- * from these globals. Both ultimately mutate `g_handoff`, so a
- * `nvgpu channel` from the shell raced against an `slm_gpu_*`
- * call would still race. The shell command is operator-driven
- * single-shot diagnostic and not meant to interleave with FFI
- * dispatch; documenting rather than locking that path. */
+ * its own `struct ga10b_bringup` that's separate from these globals.
+ * Its operator dispatches take this lock (#1111). Its other bring-up
+ * steps, such as `nvgpu channel`, don't: they're operator-driven
+ * single-shot diagnostics, not meant to interleave with FFI dispatch.
+ * The `nvgpu oplib` verbs stage and read back their scratch outside
+ * the lock, so a W-series FFI running at the same time can change a
+ * verb's reported result, though not the channel state. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 
 /* Per-kind bringup state. One slot per `enum ga10b_pipeline_kind`

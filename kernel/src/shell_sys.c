@@ -5607,6 +5607,43 @@ static uint32_t smoke_dtype_for(uint32_t op_kind)
     }
 }
 
+/* Dispatch an operator from the shell under the GPU dispatch lock. The W-series
+ * FFIs and the sched and eviction consumers mutate the same channel state
+ * (GPFIFO, pushbuffer, QMD pool, semaphore) and can swap g_handoff under this
+ * lock, and they run on other CPUs while a shell verb is running (#1111). IRQs stay
+ * masked for the whole dispatch, as they do for those callers, so the verbs print
+ * and read back outside it. scripts/check-oplib-shell-lock.sh keeps this the only
+ * dispatch in this file. */
+struct oplib_shell_dispatch {
+    struct ga10b_bringup *b;
+    uint64_t inst_block_phys;
+    uint32_t op_kind;
+    uint32_t dtype;
+    const struct operator_dispatch_args *args;
+};
+
+static int oplib_shell_dispatch_cb(void *arg)
+{
+    const struct oplib_shell_dispatch *d = arg;
+    return slm_oplib_dispatch(d->b, d->inst_block_phys, d->op_kind,
+                              SLM_GPU_TIER_SIMT, d->dtype, d->args);
+}
+
+static int oplib_shell_dispatch_locked(struct ga10b_bringup *b,
+                                       uint64_t inst_block_phys,
+                                       uint32_t op_kind, uint32_t dtype,
+                                       const struct operator_dispatch_args *args)
+{
+    struct oplib_shell_dispatch d = {
+        .b = b,
+        .inst_block_phys = inst_block_phys,
+        .op_kind = op_kind,
+        .dtype = dtype,
+        .args = args,
+    };
+    return slm_gpu_call_locked(oplib_shell_dispatch_cb, &d);
+}
+
 /* `cmd_nvgpu`'s long-lived bringup state. Hoisted from a function-
  * local static to file scope (#714 §B.3) so the SLM-runtime FFI
  * (`slm_runtime_dispatch_rmsnorm_simt` in `slm_ffi.c`, called from
@@ -6690,11 +6727,9 @@ oplib_stage_call:
                 },
             };
 
-            rc = slm_oplib_dispatch(b_p, inst_phys,
-                                     SLM_GPU_OP_RMSNORM,
-                                     SLM_GPU_TIER_SIMT,
-                                     SLM_GPU_DTYPE_FP16,
-                                     &args);
+            rc = oplib_shell_dispatch_locked(b_p, inst_phys,
+                                             SLM_GPU_OP_RMSNORM,
+                                             SLM_GPU_DTYPE_FP16, &args);
             if (rc < 0) {
                 shell_printf("dispatch-rmsnorm: slm_oplib_dispatch rc=%d\r\n", rc);
                 return rc;
@@ -6882,11 +6917,8 @@ oplib_stage_call:
                 },
             };
 
-            int rc = slm_oplib_dispatch(b_p, 0,
-                                         SLM_GPU_OP_ROPE,
-                                         SLM_GPU_TIER_SIMT,
-                                         SLM_GPU_DTYPE_FP16,
-                                         &args);
+            int rc = oplib_shell_dispatch_locked(b_p, 0, SLM_GPU_OP_ROPE,
+                                                 SLM_GPU_DTYPE_FP16, &args);
             if (rc < 0) {
                 shell_printf("dispatch-rope: slm_oplib_dispatch rc=%d\r\n",
                              rc);
@@ -7035,10 +7067,9 @@ oplib_stage_call:
             shell_printf("smoke: op_kind=%u dispatching... ",
                          (unsigned)op_kind);
 
-            int rc = slm_oplib_dispatch(b_p, 0, op_kind,
-                                         SLM_GPU_TIER_SIMT,
-                                         smoke_dtype_for(op_kind),
-                                         &args);
+            int rc = oplib_shell_dispatch_locked(b_p, 0, op_kind,
+                                                 smoke_dtype_for(op_kind),
+                                                 &args);
             if (rc < 0) {
                 shell_printf("FAIL: rc=%d\r\n", rc);
                 return rc;
