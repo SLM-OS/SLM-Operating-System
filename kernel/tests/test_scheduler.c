@@ -7,6 +7,7 @@
 #include "unity.h"
 #include "task.h"
 #include "sched.h"
+#include "ncmem.h"
 #include "sched_policy.h"
 #include "slm_ffi.h"
 #include "spinlock.h"
@@ -3469,6 +3470,94 @@ static void test_reposition_only_moves_queued_task(void)
 }
 
 /*
+ * Test (#1103): a reposition from CPU 0 moves a holder queued on CPU 1. A
+ * CRITICAL task keeps CPU 1 busy so the queue stays put while it's inspected.
+ * The flags are in NC memory where the platform has it, because they cross CPUs.
+ */
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+static volatile uint32_t repos_flags_storage[2];
+#endif
+
+static void repos_spinner_entry(void *arg)
+{
+    volatile uint32_t *flags = arg;
+
+    flags[0] = 1;
+    while (!flags[1]) {
+    }
+}
+
+static void repos_reap(struct task *t)
+{
+    int timeout = 200000;
+
+    while (t->state != TASK_TERMINATED && timeout-- > 0) {
+        yield();
+    }
+    if (t->state != TASK_TERMINATED) {
+        scheduler_terminate_task(t);
+    }
+    task_destroy(t);
+}
+
+static void test_reposition_moves_task_queued_on_other_cpu(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Need 2+ CPUs");
+    }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    volatile uint32_t *f = ncmem_alloc(2 * sizeof(uint32_t), sizeof(uint32_t));
+    TEST_ASSERT_NOT_NULL(f);
+#else
+    volatile uint32_t *f = repos_flags_storage;
+#endif
+    f[0] = 0;
+    f[1] = 0;
+
+    struct task *spin = task_create_with_priority("pi_spin", repos_spinner_entry, (void *)f,
+                                                  TASK_PRIORITY_CRITICAL);
+    TEST_ASSERT_NOT_NULL(spin);
+    task_set_affinity(spin, 1);
+    scheduler_add_task_to_cpu(spin, 1);
+    int timeout = 200000;
+    while (!f[0] && timeout-- > 0) {
+        yield();
+    }
+    bool spinning = f[0] != 0;
+
+    struct task *peer = task_create_with_priority("pi_peer", nop_entry, NULL, TASK_PRIORITY_NORMAL);
+    struct task *holder = task_create_with_priority("pi_hold", nop_entry, NULL, TASK_PRIORITY_LOW);
+    TEST_ASSERT_NOT_NULL(peer);
+    TEST_ASSERT_NOT_NULL(holder);
+    task_set_affinity(peer, 1);
+    task_set_affinity(holder, 1);
+    scheduler_add_task_to_cpu(peer, 1);
+    scheduler_add_task_to_cpu(holder, 1);
+
+    struct task *head_before = sched_cpu_rq(1)->head;
+    uint32_t ready_before = sched_cpu_rq(1)->ready_count;
+
+    holder->pi_priority = TASK_PRIORITY_HIGH;
+    sched_reposition_task(holder);
+
+    struct task *head_after = sched_cpu_rq(1)->head;
+    uint32_t ready_after = sched_cpu_rq(1)->ready_count;
+    uint8_t priority_after = holder->effective_priority;
+
+    /* Let CPU 1 go before any assert can leave this function. */
+    f[1] = 1;
+    repos_reap(spin);
+    repos_reap(peer);
+    repos_reap(holder);
+
+    TEST_ASSERT_TRUE(spinning);
+    TEST_ASSERT_EQUAL_PTR(peer, head_before);
+    TEST_ASSERT_EQUAL_PTR(holder, head_after);
+    TEST_ASSERT_EQUAL_UINT32(ready_before, ready_after);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, priority_after);
+}
+
+/*
  * Test: Isolated cores excluded from round-robin dispatch.
  * Isolates a core, dispatches multiple tasks, verifies none land on it.
  */
@@ -5904,6 +5993,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_inherited_priority_is_floor_on_recompute);
     RUN_TEST(test_reposition_only_moves_queued_task);
     RUN_TEST(test_reposition_keeps_place_when_order_holds);
+    RUN_TEST(test_reposition_moves_task_queued_on_other_cpu);
     RUN_TEST(test_isolation_excludes_from_dispatch);
 
     /* Pluggable scheduler policy interface */

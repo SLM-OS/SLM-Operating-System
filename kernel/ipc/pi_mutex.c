@@ -210,7 +210,8 @@ bool pi_mutex_held_by_self(pi_mutex_t *mutex)
 }
 
 /*
- * Release the mutex and restore priority.
+ * Release the mutex. The inherited priority is dropped only when this was
+ * the last PI mutex the task held.
  *
  * If there are blocked waiters, the highest-priority one is woken
  * and directly given ownership of the mutex (hand-off) so it doesn't

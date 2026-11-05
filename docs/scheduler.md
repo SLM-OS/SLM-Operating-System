@@ -507,8 +507,8 @@ Continue using spinlocks for:
 A contended `pi_mutex_lock` boosts the owner, appends the caller to the
 mutex's FIFO wait queue, marks it `TASK_BLOCKED` and calls `schedule()`,
 which takes it off the run queue. `pi_mutex_unlock` drops the owner's
-inherited priority, picks the highest-priority waiter, hands it ownership directly
-and wakes it, so a woken waiter never has to re-acquire.
+inherited priority if this was the last PI mutex it held, picks the
+highest-priority waiter, hands it ownership directly and wakes it, so a woken waiter never has to re-acquire.
 
 **Lock order:** `mutex->guard`, then `rq_lock`, because a boost repositions a
 queued holder under the guard. Nothing may take a `pi_mutex` while holding an
