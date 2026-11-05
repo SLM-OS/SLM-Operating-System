@@ -280,8 +280,9 @@ void el1_sync_handler(struct trap_frame *tf)
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
         int _cpu = cpu_logical_id(_mpidr);
-        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS) {
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xE0 + _cpu;
+        }
     }
 #endif
 
@@ -330,8 +331,9 @@ void el1_irq_handler(void)
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
         int _cpu = cpu_logical_id(_mpidr);
-        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS) {
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xF0 + _cpu;
+        }
     }
 #endif
 

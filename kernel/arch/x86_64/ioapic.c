@@ -87,12 +87,14 @@ void ioapic_init(void)
                 uint32_t low = REDIR_MASKED | (IOAPIC_VECTOR_BASE + source_irq);
 
                 /* Apply polarity from ISO flags (bits 0-1) */
-                if ((flags & 0x03) == 0x03)  /* Active low */
+                if ((flags & 0x03) == 0x03) {  /* Active low */
                     low |= REDIR_LOW_ACTIVE;
+                }
 
                 /* Apply trigger mode from ISO flags (bits 2-3) */
-                if ((flags & 0x0C) == 0x0C)  /* Level triggered */
+                if ((flags & 0x0C) == 0x0C) {  /* Level triggered */
                     low |= REDIR_LEVEL;
+                }
 
                 ioapic_write(IOAPIC_REDTBL(global_irq), low);
                 ioapic_write(IOAPIC_REDTBL_HI(global_irq), 0);

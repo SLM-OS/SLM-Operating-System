@@ -105,8 +105,9 @@ static void jetson_gsp_bar1_read(uint32_t offset, void *dst, size_t n)
     volatile uint8_t *src = (volatile uint8_t *)(g_bar1_base + offset);
     cache_invalidate_range((void *)src, n);
     uint8_t *d = (uint8_t *)dst;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         d[i] = src[i];
+    }
 }
 
 static void jetson_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
@@ -117,8 +118,9 @@ static void jetson_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
     }
     volatile uint8_t *d = (volatile uint8_t *)(g_bar1_base + offset);
     const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         d[i] = s[i];
+    }
     cache_clean_range((void *)(g_bar1_base + offset), n);
 }
 
@@ -146,8 +148,9 @@ static void *jetson_gsp_dma_alloc(size_t size, size_t align,
      * alignments, over-allocate to guarantee we can find an aligned
      * block within the allocation. */
     size_t page_size = 4096;
-    if (align < page_size)
+    if (align < page_size) {
         align = page_size;
+    }
 
     size_t alloc_size = size;
     if (align > page_size) {
@@ -170,8 +173,9 @@ static void *jetson_gsp_dma_alloc(size_t size, size_t align,
     uintptr_t aligned = (addr + align - 1) & ~(align - 1);
 
     /* Identity mapping: DMA address == physical address. */
-    if (out_dma_addr)
+    if (out_dma_addr) {
         *out_dma_addr = (uint64_t)aligned;
+    }
 
     return (void *)aligned;
 }

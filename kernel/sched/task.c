@@ -75,8 +75,9 @@ void task_table_init(void)
         task_table = task_table_fallback;
     } else {
         volatile uint8_t *p = (volatile uint8_t *)task_table;
-        for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++)
+        for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++) {
             p[i] = 0;
+        }
     }
 
     current_task = ncmem_alloc(MAX_CPUS * sizeof(struct task *),
@@ -91,8 +92,9 @@ void task_table_init(void)
          * needs to be raised in the platform header. */
         panic("current_task: NC arena exhausted — bump NC_MEM_SIZE in kernel/include/ncmem.h");
     }
-    for (uint32_t i = 0; i < MAX_CPUS; i++)
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
         current_task[i] = NULL;
+    }
 #else
     task_table = task_table_fallback;
 #endif
@@ -177,8 +179,9 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
         /* cpu_logical_map[] lookup — correct on every platform incl.
          * Jetson dual-cluster (#647). */
         int _cpu = cpu_logical_id(_mpidr);
-        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS) {
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
+        }
     }
 #endif
 
@@ -413,8 +416,9 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
      * precision/underflow/overflow/zero-divide/invalid, 53-bit
      * precision. Per Intel SDM Vol. 1 §8.1.5, this matches the
      * hardware-init state after a hard reset. */
-    for (size_t i = 0; i < sizeof(task->context.fxsave); i++)
+    for (size_t i = 0; i < sizeof(task->context.fxsave); i++) {
         task->context.fxsave[i] = 0;
+    }
     task->context.fxsave[0] = 0x7F;                     /* FCW low  */
     task->context.fxsave[1] = 0x03;                     /* FCW high */
     task->context.fxsave[24] = 0x80;                    /* MXCSR = 0x1F80 */

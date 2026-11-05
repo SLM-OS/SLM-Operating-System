@@ -2216,8 +2216,9 @@ int cmd_bench(int argc, char *argv[])
          * Uses NC memory for done flags — instantly visible cross-CPU. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
         /* Zero done flags in NC memory — one slot per CPU (skip slot 0, unused). */
-        for (uint32_t i = 0; i < cpu_count; i++)
+        for (uint32_t i = 0; i < cpu_count; i++) {
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + i * 4) = 0;
+        }
 #endif
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
             extern void smp_test_task(void *arg);
@@ -3612,8 +3613,9 @@ static int model_swap(int argc, char *argv[])
     /* Derive the new model's name from the file (matches `model load`). */
     const char *base = resolved;
     for (const char *p = resolved; *p; p++) {
-        if (*p == '/')
+        if (*p == '/') {
             base = p + 1;
+        }
     }
     char model_name[32];
     size_t name_len = 0;
@@ -4680,8 +4682,9 @@ int cmd_xhci(int argc, char *argv[])
         return -1;
     }
 
-    if (!xhci_dump_info())
+    if (!xhci_dump_info()) {
         shell_puts("xhci: not live (clocks gated? check slmos-kexec)\r\n");
+    }
     return 0;
 }
 #endif
@@ -4934,10 +4937,16 @@ int cmd_gpu(int argc, char *argv[])
         uint32_t off = 0;
         while (*s) {
             uint32_t d;
-            if (*s >= '0' && *s <= '9') d = *s - '0';
-            else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
-            else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-            else { shell_puts("bad hex offset\r\n"); return -1; }
+            if (*s >= '0' && *s <= '9') {
+                d = *s - '0';
+            } else if (*s >= 'a' && *s <= 'f') {
+                d = 10 + (*s - 'a');
+            } else if (*s >= 'A' && *s <= 'F') {
+                d = 10 + (*s - 'A');
+            } else {
+                shell_puts("bad hex offset\r\n");
+                return -1;
+            }
             off = (off << 4) | d;
             s++;
         }
@@ -9498,19 +9507,21 @@ static void timdiag_dump_gicv3(void)
     shell_printf("    GICR_WAKER:     0x%x (Sleep=%u ChildrenAsleep=%u)\r\n",
                 waker, (waker >> 1) & 1, (waker >> 2) & 1);
     shell_printf("    GICR_IGROUPR0:  0x%08x", igroupr0);
-    if (igroupr0 == 0)
+    if (igroupr0 == 0) {
         shell_puts(" (ALL Group 0 — NS writes blocked by EL3)\r\n");
-    else if (igroupr0 == 0xFFFFFFFF)
+    } else if (igroupr0 == 0xFFFFFFFF) {
         shell_puts(" (ALL Group 1 NS)\r\n");
-    else
+    } else {
         shell_printf(" (mixed: PPI30=%u PPI26=%u PPI27=%u)\r\n",
                     (igroupr0 >> 30) & 1, (igroupr0 >> 26) & 1,
                     (igroupr0 >> 27) & 1);
+    }
     shell_printf("    GICR_IGRPMODR0: 0x%08x", igrpmodr0);
-    if (igrpmodr0 == 0)
+    if (igrpmodr0 == 0) {
         shell_puts(" (RAZ from NS — expected)\r\n");
-    else
+    } else {
         shell_printf(" (unexpected non-zero!)\r\n");
+    }
     shell_printf("    GICR_ISENABLER0: 0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
                 isenabler0,
                 (isenabler0 >> 30) & 1, (isenabler0 >> 26) & 1,
@@ -9624,11 +9635,12 @@ static void timdiag_test_fiq(void)
     } else {
         shell_printf("  RESULT: No FIQ after %u us. ISTATUS=%lu\r\n",
                     elapsed_us, (cntp_ctl >> 2) & 1);
-        if ((cntp_ctl >> 2) & 1)
+        if ((cntp_ctl >> 2) & 1) {
             shell_puts("  Timer condition IS asserted but FIQ not delivered.\r\n"
                       "  >>> SCR_EL3.FIQ=1 — FIQ trapped to EL3.\r\n");
-        else
+        } else {
             shell_puts("  Timer did not fire (unexpected).\r\n");
+        }
     }
 }
 

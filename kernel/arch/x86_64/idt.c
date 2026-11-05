@@ -167,8 +167,9 @@ static irq_handler_t irq_handlers[32];
 
 void irq_register(uint8_t irq, irq_handler_t handler)
 {
-    if (irq < 32)
+    if (irq < 32) {
         irq_handlers[irq] = handler;
+    }
 }
 
 /* gic_end_interrupt for LAPIC EOI — provided by pic.c in integrated build.
@@ -199,10 +200,11 @@ void exception_handler(struct interrupt_frame *frame)
         __asm__ volatile("cli");
 
         serial_puts("\n*** EXCEPTION: ");
-        if (vec < sizeof(exception_names) / sizeof(exception_names[0]))
+        if (vec < sizeof(exception_names) / sizeof(exception_names[0])) {
             serial_puts(exception_names[vec]);
-        else
+        } else {
             serial_puts("Unknown");
+        }
         serial_puts(" (vector ");
         serial_print_hex(vec);
         serial_puts(")\n");
@@ -259,16 +261,18 @@ void exception_handler(struct interrupt_frame *frame)
         }
 
         serial_puts("*** HALT ***\n");
-        while (1)
+        while (1) {
             __asm__ volatile("hlt");
+        }
     } else if (vec >= 32 && vec < 64) {
         /* Hardware IRQ (IOAPIC vectors 32-47, LAPIC vectors 48-63).
          * Send EOI before handler — timer_handler may context switch
          * via schedule() and never return here. */
         uint8_t irq = vec - 32;
         gic_end_interrupt(vec);  /* LAPIC EOI for all APIC-delivered interrupts */
-        if (irq < 32 && irq_handlers[irq])
+        if (irq < 32 && irq_handlers[irq]) {
             irq_handlers[irq](irq);
+        }
     }
 }
 

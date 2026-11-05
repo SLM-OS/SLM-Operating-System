@@ -301,8 +301,9 @@ static void control_msi_handler(void *ctx)
      * emit blocks for the duration of the serial drain (~hundreds
      * of bytes at 115200 baud = several ms) and lengthens the ISR
      * accordingly — acceptable for diagnostics, not for production. */
-    if (hailo_trace_active(HAILO_TRACE_MECH_IRQ))
+    if (hailo_trace_active(HAILO_TRACE_MECH_IRQ)) {
         hailo_trace_emit_irq(0u, istatus, src_bits, dst_bits);
+    }
 }
 
 /*

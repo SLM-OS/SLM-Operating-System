@@ -86,8 +86,9 @@ static void extract_per_core(float *out)
 
         if ((uint32_t)c >= cpu_count) {
             /* Zero-fill unused core slots */
-            for (int j = 0; j < AI_FEATURES_PER_CORE; j++)
+            for (int j = 0; j < AI_FEATURES_PER_CORE; j++) {
                 f[j] = 0.0f;
+            }
             continue;
         }
 
@@ -155,8 +156,9 @@ static void extract_per_task(float *out, uint64_t now)
 
         if ((uint32_t)t >= n || !tasks[t]) {
             /* Zero-fill unused task slots */
-            for (int j = 0; j < AI_FEATURES_PER_TASK; j++)
+            for (int j = 0; j < AI_FEATURES_PER_TASK; j++) {
                 f[j] = 0.0f;
+            }
             continue;
         }
 

@@ -2682,12 +2682,15 @@ static void test_cpu_logical_map_encoding(void)
 
 #if defined(PLATFORM_RASPI5)
     /* Pi 5: Aff1 encoding — each CPU ID shifted left by 8 */
-    if (cpu_count >= 2)
+    if (cpu_count >= 2) {
         TEST_ASSERT_EQUAL_HEX64(0x100, cpu_logical_map[1]);
-    if (cpu_count >= 3)
+    }
+    if (cpu_count >= 3) {
         TEST_ASSERT_EQUAL_HEX64(0x200, cpu_logical_map[2]);
-    if (cpu_count >= 4)
+    }
+    if (cpu_count >= 4) {
         TEST_ASSERT_EQUAL_HEX64(0x300, cpu_logical_map[3]);
+    }
 #elif defined(PLATFORM_QEMU_VIRT)
     /* QEMU: Aff0 encoding — sequential */
     if (cpu_count >= 2) {
@@ -5068,8 +5071,9 @@ static void test_fp_save_restore_callable(void)
     alignas(16) uint8_t fp_state[528];
 
     /* Zero the state buffer */
-    for (int i = 0; i < 528; i++)
+    for (int i = 0; i < 528; i++) {
         fp_state[i] = 0;
+    }
 
     /* These should not crash */
     fp_save(fp_state);

@@ -119,8 +119,9 @@ extern volatile enum hailo_trace_phase  hailo_trace_current_phase;
  * disarmed case. */
 static inline bool hailo_trace_active(uint32_t mech_bit)
 {
-    if (hailo_trace_mech_mask == 0u || hailo_trace_phase_mask == 0u)
+    if (hailo_trace_mech_mask == 0u || hailo_trace_phase_mask == 0u) {
         return false;
+    }
     if ((hailo_trace_mech_mask & mech_bit) == 0u) return false;
     const uint32_t phase_bit = hailo_trace_phase_bit(hailo_trace_current_phase);
     return (hailo_trace_phase_mask & phase_bit) != 0u;

@@ -207,21 +207,26 @@ static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
 
     volatile uint64_t *old_dcbaa = (volatile uint64_t *)dcbaa_ptr;
     uint32_t max_slots = xhci_caps_cached.max_slots;
-    if (max_slots > 8)
+    if (max_slots > 8) {
         max_slots = 8;
+    }
 
     for (uint32_t slot = 1; slot <= max_slots; slot++) {
         uint64_t devctx = old_dcbaa[slot];
         uintptr_t devctx_ptr = (uintptr_t)(devctx & ~0x3FULL);
-        if (slot == 1)
+        if (slot == 1) {
             xhci_inherited_slot1_devctx_raw_phys = devctx_ptr;
-        if (slot == 3)
+        }
+        if (slot == 3) {
             xhci_inherited_slot3_devctx_raw_phys = devctx_ptr;
-        if (devctx_ptr == 0 || !xhci_ram_ptr_valid(devctx_ptr))
+        }
+        if (devctx_ptr == 0 || !xhci_ram_ptr_valid(devctx_ptr)) {
             continue;
+        }
 
-        if (slot == 3)
+        if (slot == 3) {
             xhci_inherited_slot3_devctx_phys = devctx_ptr;
+        }
 
         volatile uint32_t *slot_ctx = (volatile uint32_t *)devctx_ptr;
         uint32_t dw0 = slot_ctx[0];
@@ -249,10 +254,12 @@ static void xhci_set_inherited_slot1_context(const uint32_t slot_ctx_dw[4],
     memset(xhci_inherited_slot1_slot_ctx_dw, 0, sizeof(xhci_inherited_slot1_slot_ctx_dw));
     memset(xhci_inherited_slot1_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot1_ep0_ctx_dw));
 
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         xhci_inherited_slot1_slot_ctx_dw[i] = slot_ctx_dw[i];
-    for (unsigned i = 0; i < 8; i++)
+    }
+    for (unsigned i = 0; i < 8; i++) {
         xhci_inherited_slot1_ep0_ctx_dw[i] = ep0_ctx_dw[i];
+    }
     xhci_inherited_slot1_ctx_valid = true;
 }
 
@@ -263,14 +270,17 @@ static void xhci_set_inherited_slot3_contexts(const uint32_t slot_ctx_dw[4],
     memset(xhci_inherited_slot3_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep0_ctx_dw));
     memset(xhci_inherited_slot3_ep_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep_ctx_dw));
 
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         xhci_inherited_slot3_slot_ctx_dw[i] = slot_ctx_dw[i];
-    for (unsigned dci = 1; dci <= 7; dci++) {
-        for (unsigned i = 0; i < 8; i++)
-            xhci_inherited_slot3_ep_ctx_dw[dci][i] = ep_ctx_dw[dci - 1][i];
     }
-    for (unsigned i = 0; i < 8; i++)
+    for (unsigned dci = 1; dci <= 7; dci++) {
+        for (unsigned i = 0; i < 8; i++) {
+            xhci_inherited_slot3_ep_ctx_dw[dci][i] = ep_ctx_dw[dci - 1][i];
+        }
+    }
+    for (unsigned i = 0; i < 8; i++) {
         xhci_inherited_slot3_ep0_ctx_dw[i] = xhci_inherited_slot3_ep_ctx_dw[1][i];
+    }
     xhci_inherited_slot3_ctx_valid = true;
 }
 
@@ -296,12 +306,14 @@ static void xhci_load_slot3_handoff(void)
         return;
     }
 
-    if (xhci_inherited_slot3_devctx_raw_phys == 0)
+    if (xhci_inherited_slot3_devctx_raw_phys == 0) {
         xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)h->devctx_phys;
+    }
     xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)h->ep0_deq_phys;
 
-    for (unsigned i = 0; i < 8; i++)
+    for (unsigned i = 0; i < 8; i++) {
         ep_ctx_dw[0][i] = h->ep0_ctx_dw[i];
+    }
     xhci_set_inherited_slot3_contexts((const uint32_t *)h->slot_ctx_dw, ep_ctx_dw);
 
     INFO("xhci: slot3 handoff recovered raw devctx=0x%08x%08x dcbaap=0x%08x%08x ep0_deq=0x%08x%08x root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
@@ -336,15 +348,18 @@ static const char *xhci_find_bootarg_value(const char *bootargs, uint32_t len,
     while (p < end && *p != '\0') {
         const char *arg = p;
 
-        while (p < end && *p != ' ' && *p != '\0')
+        while (p < end && *p != ' ' && *p != '\0') {
             p++;
+        }
 
         if ((size_t)(p - arg) > prefix_len &&
-            memcmp(arg, prefix, prefix_len) == 0)
+            memcmp(arg, prefix, prefix_len) == 0) {
             return arg + prefix_len;
+        }
 
-        while (p < end && (*p == ' ' || *p == '\0'))
+        while (p < end && (*p == ' ' || *p == '\0')) {
             p++;
+        }
     }
 
     return NULL;
@@ -369,8 +384,9 @@ static int xhci_bounded_strlen(const char *s, const char *end)
     int n = 0;
 
     while (s + n < end) {
-        if (s[n] == '\0')
+        if (s[n] == '\0') {
             return n;
+        }
         n++;
     }
 
@@ -449,8 +465,9 @@ static void xhci_debug_dump_root_nodes(const void *dtb)
                     line[used++] = (char)('0' + dumped);
                     line[used++] = ']';
                 }
-                for (int i = 0; i < nlen && used + 1 < sizeof(line); i++)
+                for (int i = 0; i < nlen && used + 1 < sizeof(line); i++) {
                     line[used++] = name[i];
+                }
                 line[used] = '\0';
                 dumped++;
             }
@@ -459,8 +476,9 @@ static void xhci_debug_dump_root_nodes(const void *dtb)
         }
 
         case FDT_END_NODE:
-            if (depth == 0)
+            if (depth == 0) {
                 return;
+            }
             depth--;
             break;
 
@@ -506,8 +524,9 @@ static bool xhci_parse_u64_token(const char **cursor, const char *end,
     unsigned base = 10;
     bool any = false;
 
-    if (p >= end)
+    if (p >= end) {
         return false;
+    }
 
     if ((end - p) >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
         base = 16;
@@ -528,16 +547,18 @@ static bool xhci_parse_u64_token(const char **cursor, const char *end,
             break;
         }
 
-        if (digit >= base)
+        if (digit >= base) {
             return false;
+        }
 
         value = value * base + digit;
         any = true;
         p++;
     }
 
-    if (!any)
+    if (!any) {
         return false;
+    }
 
     *cursor = p;
     *out = value;
@@ -598,15 +619,18 @@ static void xhci_load_slot3_handoff_from_bootargs(void)
 
     p = value;
     end = value;
-    while (end < ((const char *)prop + len) && *end != ' ' && *end != '\0')
+    while (end < ((const char *)prop + len) && *end != ' ' && *end != '\0') {
         end++;
+    }
 
     while (count < XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
-        if (!xhci_parse_u64_token(&p, end, &vals[count]))
+        if (!xhci_parse_u64_token(&p, end, &vals[count])) {
             break;
+        }
         count++;
-        if (p >= end || *p != ',')
+        if (p >= end || *p != ',') {
             break;
+        }
         p++;
     }
 
@@ -620,20 +644,24 @@ static void xhci_load_slot3_handoff_from_bootargs(void)
         return;
     }
 
-    if (xhci_inherited_slot3_devctx_raw_phys == 0)
+    if (xhci_inherited_slot3_devctx_raw_phys == 0) {
         xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)vals[1];
+    }
     xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)vals[2];
 
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         slot_ctx_dw[i] = (uint32_t)vals[4 + i];
+    }
     if (count == 16) {
-        for (unsigned i = 0; i < 8; i++)
+        for (unsigned i = 0; i < 8; i++) {
             ep_ctx_dw[0][i] = (uint32_t)vals[8 + i];
+        }
     } else {
         unsigned idx = 8;
         for (unsigned dci = 0; dci < 7; dci++) {
-            for (unsigned i = 0; i < 8; i++, idx++)
+            for (unsigned i = 0; i < 8; i++, idx++) {
                 ep_ctx_dw[dci][i] = (uint32_t)vals[idx];
+            }
         }
     }
     xhci_set_inherited_slot3_contexts(slot_ctx_dw, ep_ctx_dw);
@@ -662,16 +690,20 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
     uint32_t node_off;
     unsigned count = 0;
 
-    if (!dtb)
+    if (!dtb) {
         return;
-    if (fdt_init(&fdt, dtb) != FDT_LIB_OK)
+    }
+    if (fdt_init(&fdt, dtb) != FDT_LIB_OK) {
         return;
+    }
     if (fdt_find_node_by_path(&fdt, XHCI_SLOT3_HANDOFF_FDT_NODE,
-                              &node_off) != FDT_LIB_OK)
+                              &node_off) != FDT_LIB_OK) {
         return;
+    }
     if (fdt_get_property(&fdt, node_off, XHCI_SLOT3_HANDOFF_FDT_PROP,
-                         &prop, &len) != FDT_LIB_OK)
+                         &prop, &len) != FDT_LIB_OK) {
         return;
+    }
 
     p = (const char *)prop;
     end = p + len;
@@ -681,8 +713,9 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
             return;
         }
         count++;
-        if (p >= end || *p != ',')
+        if (p >= end || *p != ',') {
             break;
+        }
         p++;
     }
     if (count != 16 && count != XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
@@ -692,16 +725,19 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
 
     xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)vals[1];
     xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)vals[2];
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         slot_ctx_dw[i] = (uint32_t)vals[4 + i];
+    }
     if (count == 16) {
-        for (unsigned i = 0; i < 8; i++)
+        for (unsigned i = 0; i < 8; i++) {
             ep_ctx_dw[0][i] = (uint32_t)vals[8 + i];
+        }
     } else {
         unsigned idx = 8;
         for (unsigned dci = 0; dci < 7; dci++) {
-            for (unsigned i = 0; i < 8; i++, idx++)
+            for (unsigned i = 0; i < 8; i++, idx++) {
                 ep_ctx_dw[dci][i] = (uint32_t)vals[idx];
+            }
         }
     }
     xhci_set_inherited_slot3_contexts(slot_ctx_dw, ep_ctx_dw);
@@ -729,16 +765,20 @@ static void xhci_load_slot1_handoff_from_fdt_node(void)
     unsigned count = 0;
     const unsigned expected = (unsigned)(sizeof(vals) / sizeof(vals[0]));
 
-    if (!dtb)
+    if (!dtb) {
         return;
-    if (fdt_init(&fdt, dtb) != FDT_LIB_OK)
+    }
+    if (fdt_init(&fdt, dtb) != FDT_LIB_OK) {
         return;
+    }
     if (fdt_find_node_by_path(&fdt, XHCI_SLOT3_HANDOFF_FDT_NODE,
-                              &node_off) != FDT_LIB_OK)
+                              &node_off) != FDT_LIB_OK) {
         return;
+    }
     if (fdt_get_property(&fdt, node_off, XHCI_SLOT1_HANDOFF_FDT_PROP,
-                         &prop, &len) != FDT_LIB_OK)
+                         &prop, &len) != FDT_LIB_OK) {
         return;
+    }
 
     p = (const char *)prop;
     end = p + len;
@@ -748,8 +788,9 @@ static void xhci_load_slot1_handoff_from_fdt_node(void)
             return;
         }
         count++;
-        if (p >= end || *p != ',')
+        if (p >= end || *p != ',') {
             break;
+        }
         p++;
     }
     if (count != expected) {
@@ -759,10 +800,12 @@ static void xhci_load_slot1_handoff_from_fdt_node(void)
 
     xhci_inherited_slot1_devctx_raw_phys = (uintptr_t)vals[1];
     xhci_inherited_slot1_ep0_deq_phys = (uintptr_t)vals[2];
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         slot_ctx_dw[i] = (uint32_t)vals[4 + i];
-    for (unsigned i = 0; i < 8; i++)
+    }
+    for (unsigned i = 0; i < 8; i++) {
         ep0_ctx_dw[i] = (uint32_t)vals[8 + i];
+    }
     xhci_set_inherited_slot1_context(slot_ctx_dw, ep0_ctx_dw);
 
     INFO("xhci: slot1 fdt-node handoff devctx=0x%lx root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
@@ -831,8 +874,9 @@ static void tegra_xusb_cache_context(void)
 
 void xhci_tegra_restore_context(const char *why)
 {
-    if (!xhci_tegra_context_cached)
+    if (!xhci_tegra_context_cached) {
         return;
+    }
 
     for (unsigned i = 0;
          i < sizeof(tegra_xusb_context_fpci_offsets) /
@@ -865,10 +909,12 @@ static int poll_reg32(volatile uint8_t *base, uint32_t off,
     uint64_t ticks = (freq * timeout_ms) / 1000;
 
     for (;;) {
-        if ((r32(base, off) & mask) == expected)
+        if ((r32(base, off) & mask) == expected) {
             return 0;
-        if (timer_get_count() - start > ticks)
+        }
+        if (timer_get_count() - start > ticks) {
             return -1;
+        }
     }
 }
 
@@ -1092,8 +1138,9 @@ static uint32_t tegra_xusb_read_firmware_header(uint32_t byte_offset)
      * doesn't silently turn into an unbounded-offset hazard when
      * someone re-enables this path for Path 1 / Path 3 of §10.
      */
-    if (byte_offset >= XUSB_FW_HDR_SIZE)
+    if (byte_offset >= XUSB_FW_HDR_SIZE) {
         return 0;
+    }
 
     uint32_t cmd = (uint32_t)XUSB_FW_IOCTL_CFGTBL_READ
                    << XUSB_FW_IOCTL_TYPE_SHIFT;
@@ -1227,12 +1274,14 @@ static uint32_t xhci_page_size_bytes(void)
      * supported. Controller picks one and reports it; we honour it
      * for scratchpad allocation. */
     uint32_t ps = r32(xhci_op_base, XHCI_OP_PAGESIZE);
-    if (ps == 0)
+    if (ps == 0) {
         return XHCI_PAGESIZE_DEFAULT;
+    }
     /* Find the first set bit (lowest supported). */
     for (unsigned i = 0; i < 16; i++) {
-        if (ps & (1u << i))
+        if (ps & (1u << i)) {
             return 1u << (i + 12);
+        }
     }
     return XHCI_PAGESIZE_DEFAULT;
 }
@@ -1257,8 +1306,9 @@ static uint32_t xhci_max_scratchpads(uint32_t hcs_params2)
 static int xhci_alloc_scratchpads(uint32_t count)
 {
     xhci_num_scratchpads = count;
-    if (count == 0)
+    if (count == 0) {
         return 0;
+    }
 
     size_t ptr_bytes = (size_t)count * sizeof(uint64_t);
     xhci_scratchpad_ptrs = ncmem_alloc(ptr_bytes, 64);
@@ -1278,8 +1328,9 @@ static int xhci_alloc_scratchpads(uint32_t count)
     memset(xhci_scratchpad_bufs, 0, buf_bytes);
 
     uintptr_t base = (uintptr_t)xhci_scratchpad_bufs;
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < count; i++) {
         xhci_scratchpad_ptrs[i] = base + (uint64_t)i * page_size;
+    }
 
     INFO("xhci: allocated %u scratchpad%s (%u bytes each)",
          count, count == 1 ? "" : "s", (unsigned)page_size);
@@ -1321,8 +1372,9 @@ static int xhci_alloc_dcbaa(uint8_t max_slots)
     }
     memset(xhci_dcbaa, 0, bytes);
 
-    if (xhci_num_scratchpads > 0 && xhci_scratchpad_ptrs != NULL)
+    if (xhci_num_scratchpads > 0 && xhci_scratchpad_ptrs != NULL) {
         xhci_dcbaa[0] = (uint64_t)(uintptr_t)xhci_scratchpad_ptrs;
+    }
 
     return 0;
 }
@@ -1526,8 +1578,9 @@ void xhci_dump_runtime_state(const char *tag)
 void xhci_dump_runtime_state_slot(const char *tag, uint8_t slot_id)
 {
     xhci_dump_runtime_state(tag);
-    if (slot_id == 0)
+    if (slot_id == 0) {
         return;
+    }
 
     uint32_t slot_db = r32(xhci_db_base, 4u * (uint32_t)slot_id);
     INFO("xhci: %s slot%u-doorbell=0x%08x",
@@ -1567,8 +1620,9 @@ static void xhci_dump_event_ring_window(const char *tag)
          (unsigned)xhci_evt_ring.cycle_state,
          (unsigned long)xhci_event_ring_dequeue_phys(&xhci_evt_ring));
 
-    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0)
+    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0) {
         return;
+    }
 
     for (unsigned i = 0; i < 4 && i < xhci_evt_ring.num_trbs; i++) {
         uint32_t idx = (xhci_evt_ring.dequeue + i) % xhci_evt_ring.num_trbs;
@@ -1585,8 +1639,9 @@ static void xhci_dump_event_ring_window(const char *tag)
 
 static void xhci_scan_event_ring_for_cmd(const char *tag, uintptr_t pending_phys)
 {
-    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0)
+    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0) {
         return;
+    }
 
     unsigned matches = 0;
     for (uint32_t i = 0; i < xhci_evt_ring.num_trbs; i++) {
@@ -1594,8 +1649,9 @@ static void xhci_scan_event_ring_for_cmd(const char *tag, uintptr_t pending_phys
         uintptr_t evt_phys = (uintptr_t)trb->param_lo |
                              ((uintptr_t)trb->param_hi << 32);
         uint32_t type = XHCI_TRB_TYPE_GET(trb->control);
-        if (type != XHCI_TRB_EVT_CMD_COMPLETION && evt_phys != pending_phys)
+        if (type != XHCI_TRB_EVT_CMD_COMPLETION && evt_phys != pending_phys) {
             continue;
+        }
 
         INFO("xhci: %s evt[%u] match param=0x%08x:%08x status=0x%08x control=0x%08x cycle=%u type=%u",
              tag ? tag : "evt-scan",
@@ -1655,16 +1711,18 @@ static void xhci_dump_cmd_ring_state(const char *tag, const struct xhci_trb *cmd
 
 void xhci_defer_post_short_noop(uint8_t slot_id)
 {
-    if (slot_id == 0)
+    if (slot_id == 0) {
         return;
+    }
     xhci_post_short_noop_pending = true;
     xhci_post_short_noop_slot = slot_id;
 }
 
 void xhci_run_deferred_probes(void)
 {
-    if (!xhci_post_short_noop_pending)
+    if (!xhci_post_short_noop_pending) {
         return;
+    }
 
     uint8_t slot_id = xhci_post_short_noop_slot;
     xhci_post_short_noop_pending = false;
@@ -1737,10 +1795,12 @@ int xhci_event_ring_drain(void)
         uint32_t iman_ack = (iman_before & 0x2u) | 0x1u; /* keep IE, clear IP */
         w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
         w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
-        if (usbsts_ack != 0)
+        if (usbsts_ack != 0) {
             w32(xhci_op_base, XHCI_OP_USBSTS, usbsts_ack);
-        if ((iman_before & 0x1u) != 0)
+        }
+        if ((iman_before & 0x1u) != 0) {
             w32(ir0, XHCI_IR_IMAN, iman_ack);
+        }
         if (xhci_verbose_cmd_logs &&
             (usbsts_ack != 0 || (iman_before & 0x1u) != 0)) {
             uint32_t usbsts_after = r32(xhci_op_base, XHCI_OP_USBSTS);
@@ -1763,8 +1823,9 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
                              uint8_t *slot_out,
                              uint32_t timeout_ms)
 {
-    if (cmd == NULL)
+    if (cmd == NULL) {
         return -1;
+    }
 
     struct xhci_trb *slot = xhci_ring_enqueue(&xhci_cmd_ring, cmd);
     if (slot == NULL) {
@@ -1782,11 +1843,13 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
     xhci_last_cmd_diag.trb_phys = (uintptr_t)slot;
     xhci_last_cmd_diag.usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
 
-    if (xhci_verbose_cmd_logs)
+    if (xhci_verbose_cmd_logs) {
         xhci_dump_cmd_ring_state("pre-cmd-doorbell", cmd, slot);
+    }
     xhci_ring_doorbell(XHCI_DB_COMMAND, 0);
-    if (xhci_verbose_cmd_logs)
+    if (xhci_verbose_cmd_logs) {
         xhci_dump_cmd_ring_state("post-cmd-doorbell", cmd, slot);
+    }
 
     uint64_t freq  = timer_get_frequency();
     uint64_t start = timer_get_count();
@@ -1794,8 +1857,9 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
 
     while (!xhci_cmd_completed) {
         (void)xhci_event_ring_drain();
-        if (xhci_cmd_completed)
+        if (xhci_cmd_completed) {
             break;
+        }
         if (timer_get_count() - start >= ticks) {
             WARN("xhci: command timeout (type=%u, USBSTS=0x%08x)",
                  (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
@@ -1811,8 +1875,9 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
         }
     }
 
-    if (xhci_verbose_cmd_logs)
+    if (xhci_verbose_cmd_logs) {
         xhci_dump_cmd_ring_state("cmd-complete", cmd, slot);
+    }
     xhci_last_cmd_diag.completed = true;
     xhci_last_cmd_diag.timed_out = false;
     xhci_last_cmd_diag.cc = xhci_cmd_completion_cc;
@@ -1838,8 +1903,9 @@ static int xhci_send_noop(void)
 
     uint8_t cc = 0;
     int rc = xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 500);
-    if (rc != 0)
+    if (rc != 0) {
         return rc;
+    }
     if (cc == XHCI_CC_SUCCESS) {
         INFO("xhci: NO_OP round-trip OK (cc=SUCCESS)");
 #if defined(JETSON_XHCI_REBOOT_ON_NOOP)
@@ -1857,8 +1923,9 @@ static int xhci_send_noop(void)
 
 int xhci_cmd_noop_probe(void)
 {
-    if (!xhci_live)
+    if (!xhci_live) {
         return -1;
+    }
     return xhci_send_noop();
 }
 
@@ -2105,31 +2172,39 @@ int xhci_init(void)
          xhci_caps_cached.ac64 ? "64-bit" : "32-bit",
          xhci_caps_cached.ctx_64 ? 64 : 32);
 
-    if (xhci_halt() != 0)
+    if (xhci_halt() != 0) {
         return -1;
-    if (xhci_reset() != 0)
+    }
+    if (xhci_reset() != 0) {
         return -1;
+    }
 
     /* -----------------------------------------------------------------
      * Step 4: scratchpads + DCBAA + rings + NO_OP round-trip
      * -----------------------------------------------------------------
      */
     xhci_num_scratchpads = xhci_max_scratchpads(xhci_caps_cached.hcs_params2);
-    if (xhci_alloc_scratchpads(xhci_num_scratchpads) != 0)
+    if (xhci_alloc_scratchpads(xhci_num_scratchpads) != 0) {
         return -1;
-    if (xhci_alloc_dcbaa(xhci_caps_cached.max_slots) != 0)
+    }
+    if (xhci_alloc_dcbaa(xhci_caps_cached.max_slots) != 0) {
         return -1;
-    if (xhci_alloc_erst() != 0)
+    }
+    if (xhci_alloc_erst() != 0) {
         return -1;
-    if (xhci_ring_alloc(&xhci_cmd_ring, XHCI_CMD_RING_TRBS) != 0)
+    }
+    if (xhci_ring_alloc(&xhci_cmd_ring, XHCI_CMD_RING_TRBS) != 0) {
         return -1;
-    if (xhci_event_ring_alloc(&xhci_evt_ring, XHCI_EVT_RING_TRBS) != 0)
+    }
+    if (xhci_event_ring_alloc(&xhci_evt_ring, XHCI_EVT_RING_TRBS) != 0) {
         return -1;
+    }
 
     xhci_program_registers(xhci_caps_cached.max_slots);
 
-    if (xhci_start_controller() != 0)
+    if (xhci_start_controller() != 0) {
         return -1;
+    }
     INFO("xhci: controller running (USBSTS=0x%08x)",
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
 
@@ -2172,8 +2247,9 @@ int xhci_init(void)
      * that eliminates the re-plug.
      */
     int rc = usb_core_start();
-    if (rc != 0)
+    if (rc != 0) {
         WARN("xhci: usb_core_start returned %d", rc);
+    }
     /* The state machine in xhci_hcd_port_status defers enumeration
      * until a fresh CCS rising edge. In the pre-existing-device case
      * (kexec with a Linux-enumerated dongle, or future direct boot
@@ -2188,8 +2264,9 @@ int xhci_init(void)
 
 bool xhci_dump_info(void)
 {
-    if (!xhci_live)
+    if (!xhci_live) {
         return false;
+    }
 
     const struct xhci_caps *c = &xhci_caps_cached;
     uart_printf("xhci @ %p (op @ +0x%02x, rt @ +0x%x, db @ +0x%x)\r\n",
@@ -2233,12 +2310,14 @@ bool xhci_dump_info(void)
 
 void xhci_get_caps(struct xhci_caps *out)
 {
-    if (out == NULL)
+    if (out == NULL) {
         return;
-    if (xhci_live)
+    }
+    if (xhci_live) {
         memcpy(out, &xhci_caps_cached, sizeof(*out));
-    else
+    } else {
         memset(out, 0, sizeof(*out));
+    }
 }
 
 /* -------------------------------------------------------------------------- */

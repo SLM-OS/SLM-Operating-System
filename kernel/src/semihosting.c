@@ -27,8 +27,9 @@ void semihosting_exit(int exit_code)
 {
     outb_x86(0x501, (uint8_t)exit_code);
     /* Fallback: halt if isa-debug-exit not present */
-    for (;;)
+    for (;;) {
         __asm__ volatile("hlt");
+    }
 }
 
 int semihosting_available(void)

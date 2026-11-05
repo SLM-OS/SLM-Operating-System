@@ -59,8 +59,9 @@ static void lapic_timer_irq(uint8_t irq)
 {
     (void)irq;
     /* Only BSP increments the global tick counter (avoid 8× rate with SMP) */
-    if (cpu_id() == 0)
+    if (cpu_id() == 0) {
         pit_ticks++;
+    }
     scheduler_tick();
 }
 
@@ -93,8 +94,9 @@ static uint64_t tsc_freq_from_cpuid(void)
     if (max_leaf >= 0x16) {
         x86_cpuid(0x16, &eax, &ebx, &ecx, &edx);
         /* EAX = processor base frequency in MHz */
-        if (eax != 0)
+        if (eax != 0) {
             return (uint64_t)eax * 1000000ULL;
+        }
     }
 
     return 0;
@@ -184,15 +186,17 @@ void timer_handler(void)
 
 uint64_t timer_get_count(void)
 {
-    if (tsc_freq > 0)
+    if (tsc_freq > 0) {
         return rdtsc();
+    }
     return pit_ticks;
 }
 
 uint64_t timer_get_frequency(void)
 {
-    if (tsc_freq > 0)
+    if (tsc_freq > 0) {
         return tsc_freq;
+    }
     return TIMER_HZ;
 }
 
@@ -218,8 +222,9 @@ void sleep_ms(uint32_t ms)
      * works on BSP. */
     uint64_t freq = timer_get_frequency();
     uint64_t target = timer_get_count() + ((uint64_t)ms * freq + 999) / 1000;
-    while (timer_get_count() < target)
+    while (timer_get_count() < target) {
         yield();
+    }
 }
 
 void sleep_us(uint64_t us)
@@ -228,8 +233,9 @@ void sleep_us(uint64_t us)
 
     uint64_t freq = timer_get_frequency();
     uint64_t target = timer_get_count() + (us * freq + 999999) / 1000000;
-    while (timer_get_count() < target)
+    while (timer_get_count() < target) {
         yield();
+    }
 }
 
 void timer_wake_sleepers(void)

@@ -262,8 +262,9 @@ char uart_getc(void)
 
     for (;;) {
         val = *mbox;
-        if (val & TCU_MBOX_TAG_BIT)
+        if (val & TCU_MBOX_TAG_BIT) {
             break;
+        }
         /* Let equal-priority tasks such as net_pump run while the
          * console blocks for input. */
         yield();

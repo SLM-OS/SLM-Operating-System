@@ -654,8 +654,9 @@ void pmm_init(void)
      * Use the detected RAM end from vmm_init() (Multiboot2 memory map). */
     {
         extern uintptr_t x86_detected_ram_end;
-        if (x86_detected_ram_end > 0)
+        if (x86_detected_ram_end > 0) {
             buddy_state.heap_end = x86_detected_ram_end;
+        }
     }
 #endif
 
@@ -736,26 +737,28 @@ void pmm_init(void)
         struct free_block *head = buddy_state.free_lists[o];
         if (!head) continue;
         uintptr_t haddr = (uintptr_t)head;
-        if (haddr < buddy_state.heap_start || haddr >= buddy_state.heap_end)
+        if (haddr < buddy_state.heap_start || haddr >= buddy_state.heap_end) {
             panic("pmm_init: free list head order=%u outside heap "
                   "(head=0x%lx, heap=0x%lx-0x%lx) — likely stale cache "
                   "from kexec; ensure vmm_init runs before pmm_init",
                   o, (unsigned long)haddr,
                   (unsigned long)buddy_state.heap_start,
                   (unsigned long)buddy_state.heap_end);
+        }
         if (head->next != NULL || head->prev != NULL) {
             uintptr_t naddr = (uintptr_t)head->next;
             uintptr_t paddr = (uintptr_t)head->prev;
             bool n_ok = (naddr == 0) ||
                         (naddr >= buddy_state.heap_start &&
                          naddr < buddy_state.heap_end);
-            if (head->prev != NULL || !n_ok)
+            if (head->prev != NULL || !n_ok) {
                 panic("pmm_init: free list head order=%u corrupt "
                       "(head=0x%lx next=0x%lx prev=0x%lx) — likely "
                       "stale cache from kexec; ensure vmm_init runs "
                       "before pmm_init",
                       o, (unsigned long)haddr,
                       (unsigned long)naddr, (unsigned long)paddr);
+            }
         }
     }
 

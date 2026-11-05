@@ -218,8 +218,9 @@ static uint32_t pi5_read32(uint8_t bar, uint32_t offset)
 {
     if (bar >= HAILO_PI5_NUM_BARS || !bar_map[bar]) return 0xFFFFFFFFu;
     uint32_t v = *bar_u32(bar, offset);
-    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO))
+    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO)) {
         hailo_trace_emit_mmio_r((int)bar, offset, v);
+    }
     return v;
 }
 
@@ -227,8 +228,9 @@ static void pi5_write32(uint8_t bar, uint32_t offset, uint32_t value)
 {
     if (bar >= HAILO_PI5_NUM_BARS || !bar_map[bar]) return;
     *bar_u32(bar, offset) = value;
-    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO))
+    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO)) {
         hailo_trace_emit_mmio_w((int)bar, offset, value);
+    }
 }
 
 /*
