@@ -1912,8 +1912,9 @@ static int xhci_send_noop(void)
         INFO("xhci: JETSON_XHCI_REBOOT_ON_NOOP set — rebooting to Linux");
         timer_busy_wait_us(500000);
         psci_system_reset();
-        for (;;)
+        for (;;) {
             __asm__ volatile("wfi");
+        }
 #endif
         return 0;
     }

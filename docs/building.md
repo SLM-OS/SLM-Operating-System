@@ -356,7 +356,7 @@ QEMU cores:     4
 ```
 
 #### `make check-braces`
-Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main and test kernel of all four platforms. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
+Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main, test and check-only wide kernel of all four platforms; the wide kernel turns on default-off features such as `NET_SSHD`. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
 
 #### `make check-tools`
 Verifies all required tools are installed and in PATH.
@@ -412,9 +412,9 @@ make kernel NET_SSHD=ON               # vendored wolfSSH 1.4.18 + wolfCrypt — 
 
 `NET_SSHD=ON` pulls in the vendored wolfSSH / wolfCrypt sources
 (~205K LOC) and the SLM-OS-side glue (`kernel/net/ssh/`). It is
-default ON on `RASPI5` + `JETSON_ORIN_NANO` lab images and OFF
-elsewhere. `NET_SSHD_AUTOSTART` (default ON for those two platforms,
-OFF elsewhere) brings the daemon up at boot; the bootstrap gate
+default OFF on every platform. With `NET_SSHD=ON`, `NET_SSHD_AUTOSTART`
+(default ON for `RASPI5` and `JETSON_ORIN_NANO`, OFF elsewhere) brings
+the daemon up at boot; the bootstrap gate
 makes that safe — the daemon refuses every login until at least one
 user has been provisioned via the console-side `adduser` shell
 verb. Full design + threat model: `docs/ssh.md` + `docs/security.md`.
