@@ -448,7 +448,13 @@ write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=COMMENT_OPTION)
 expect "required define only in a comment fails" 2 "no C file tests COMMENT_OPTION"
 EXTRA_ARGS=(--require-define other=WANTED_OPTION)
-expect "required define for an unknown database fails" 2 "unknown databases: other"
+expect "required define for an unknown database fails" 2 "databases: other"
+EXTRA_ARGS=(--forbid-define other=WANTED_OPTION)
+expect "forbidden define for an unknown database fails" 2 "databases: other"
+EXTRA_ARGS=(--forbid-define db=COMMENT_OPTION)
+expect "forbidden define that is set fails" 2 "db defines COMMENT_OPTION"
+EXTRA_ARGS=(--forbid-define db=NOT_SET_OPTION)
+expect "forbidden define that isn't set passes" 0 "0 violation"
 FLAGS="-DWANTED_OPTION=1"
 write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
@@ -474,6 +480,19 @@ git add kernel/src/uses_option.h
 git commit -qm kept-option
 expect "build change with defines intact passes" 0 "no changed C lines"
 git checkout -q Makefile
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+printf '# build\n' > CMakeLists.txt
+mkdir -p cmake
+printf '# build\n' > cmake/gen.cmake
+git add CMakeLists.txt cmake/gen.cmake
+git commit -qm build-files
+expect "committed build files don't count" 0 "no changed C lines"
+echo '# changed' >> CMakeLists.txt
+expect "CMakeLists.txt change checks required defines" 2 "db doesn't define DROPPED_OPTION"
+git checkout -q CMakeLists.txt
+echo '# changed' >> cmake/gen.cmake
+expect "cmake/ change checks required defines" 2 "db doesn't define DROPPED_OPTION"
+git checkout -q cmake/gen.cmake
 EXTRA_ARGS=()
 FLAGS=""
 write_db kernel/src/a.c

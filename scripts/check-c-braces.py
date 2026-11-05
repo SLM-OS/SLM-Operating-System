@@ -187,13 +187,13 @@ def unused_defines(required):
                 capture_output=True).returncode != 0]
 
 
-def missing_defines(db_dir, required):
-    """Return the macros in required that no compile command in db_dir defines."""
+def defined_in(db_dir, macros):
+    """Return the macros that some compile command in db_dir defines."""
     commands = " ".join(
         entry.get("command") or " ".join(entry.get("arguments", []))
         for entry in json.loads((db_dir / "compile_commands.json").read_text()))
-    return [macro for macro in required
-            if not re.search(rf"-D{re.escape(macro)}(=|\s|$)", commands)]
+    return {macro for macro in macros
+            if re.search(rf"-D{re.escape(macro)}(=|\s|$)", commands)}
 
 
 def run_tidy(db_dir, args, config, path):
@@ -266,6 +266,10 @@ def main():
                         metavar="DB=MACRO",
                         help="fail unless database DB (its directory name) "
                              "defines MACRO; repeatable")
+    parser.add_argument("--forbid-define", action="append", default=[],
+                        metavar="DB=MACRO",
+                        help="fail if database DB defines MACRO, because it "
+                             "would hide a branch nothing else parses; repeatable")
     parser.add_argument("--make-db", action="store_true",
                         help="generate databases with `make tidy-db` first; "
                              "each directory is named PLATFORM, "
@@ -298,7 +302,7 @@ def main():
             return 2
         # A build change can drop an option even with no C change, so the required
         # defines still get checked below. Otherwise skip the configure step.
-        if not changed and not (options.require_define
+        if not changed and not ((options.require_define or options.forbid_define)
                                 and build_files_changed(options.base)):
             print("check-braces: no changed C lines")
             return 0
@@ -323,13 +327,24 @@ def main():
     for item in options.require_define:
         name, _, macro = item.partition("=")
         required[name].append(macro)
-    unknown = set(required) - {db_dir.name for db_dir in options.db}
+    forbidden = collections.defaultdict(list)
+    for item in options.forbid_define:
+        name, _, macro = item.partition("=")
+        forbidden[name].append(macro)
+    unknown = (set(required) | set(forbidden)) - {db_dir.name
+                                                  for db_dir in options.db}
     if unknown:
-        print("check-braces: --require-define names unknown databases: "
+        print("check-braces: --require-define or --forbid-define names unknown "
+              "databases: "
               + ", ".join(sorted(unknown)), file=sys.stderr)
         return 2
     for db_dir in options.db:
-        for macro in missing_defines(db_dir, required[db_dir.name]):
+        for macro in sorted(defined_in(db_dir, forbidden[db_dir.name])):
+            print(f"check-braces: {db_dir.name} defines {macro}, which hides a "
+                  "branch no other configuration parses", file=sys.stderr)
+            return 2
+        wanted = required[db_dir.name]
+        for macro in sorted(set(wanted) - defined_in(db_dir, wanted)):
             print(f"check-braces: {db_dir.name} doesn't define {macro}, so code "
                   "under it wouldn't be checked", file=sys.stderr)
             return 2
