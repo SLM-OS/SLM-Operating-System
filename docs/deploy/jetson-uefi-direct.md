@@ -261,7 +261,7 @@ to the next boot option.
 |---|---|
 | `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default |
 | `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Needs `qemu-efi-aarch64` and `mtools` |
-| `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address |
+| `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address, HCR_EL2 read-modify-write, inherited PAN cleared after the E2H flip (#1079) |
 
 `scripts/qemu-uefi-boot.sh` is the script behind `test-qemu-uefi`; it
 accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.

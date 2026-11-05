@@ -437,8 +437,9 @@ service, reachable via the message router.
   `/slm/token` → publish final stats to `/slm/done`.
 - ☐ Hot-swap-safe: model handle and KV cache live across replacements
   (similar to how `sensor_monitor` preserves subscriptions).
-- ☐ EL0 isolation: works on QEMU (Phase-5 M4 path); falls back to
-  in-kernel on Jetson (matches Phase-5 status).
+- ☐ EL0 isolation: the EL0 task path works on QEMU, Pi 5 and Jetson, but
+  `slm-runner` runs in-kernel until the component runtime creates EL0
+  components.
 - ☐ Lua demo (`scripts/slm-chat-demo.lua`): publishes a few prompts,
   prints streamed responses, exits.
 

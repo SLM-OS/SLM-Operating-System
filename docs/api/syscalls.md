@@ -1,7 +1,7 @@
 # System Call API Reference
 
 API reference for the SLM-OS system call interface. System calls provide the mechanism
-for user-mode (EL0) components to request kernel services. The current implementation
+for user-mode (EL0) tasks to request kernel services. The current implementation
 defines 7 syscalls covering process lifecycle, scheduling, IPC, inference, and I/O.
 
 **Source files:**
@@ -37,7 +37,7 @@ When the Exception Class (EC) field of ESR_EL1 equals `0x15` (SVC from AArch64),
 
 | Number | Name | Signature | Description |
 |--------|------|-----------|-------------|
-| 0 | `SYS_EXIT` | `sys_exit(code)` | Terminate the calling component |
+| 0 | `SYS_EXIT` | `sys_exit(code)` | Terminate the calling task |
 | 1 | `SYS_YIELD` | `sys_yield()` | Voluntarily yield the CPU |
 | 2 | `SYS_SEND` | `sys_send(topic, data, len)` | Publish a message to a topic |
 | 3 | `SYS_RECV` | `sys_recv(topic_out, buf, len, timeout_ms)` | Receive a message |
@@ -54,7 +54,7 @@ rejected with a return value of `-1`.
 
 ### SYS_EXIT (0)
 
-Terminate the calling component.
+Terminate the calling task.
 
 ```c
 void sys_exit(int code);
@@ -201,7 +201,7 @@ via `uart_putc()`. Output is capped at 256 characters regardless of `len`.
 ## User-Mode Stubs
 
 The header `kernel/include/user_syscall.h` provides inline assembly wrappers for each
-syscall. User-mode components include this header to invoke syscalls without writing
+syscall. EL0 code includes this header to invoke syscalls without writing
 assembly directly. The stubs are only available when compiling for AArch64
 (`__aarch64__` defined).
 
@@ -282,17 +282,17 @@ user-provided pointers before the kernel dereferences them.
 static int validate_user_ptr(const void *ptr, size_t len);
 ```
 
-**Current behavior (Phase 5 -- shared address space):**
+**Current behavior:**
 
-1. `NULL` pointer with `len == 0` passes (treated as "no access needed")
-2. Overflow check: rejects if `ptr + len` wraps around
-3. All kernel-mapped addresses are accepted (shared address space)
+1. Rejects a `NULL` pointer or `len == 0`
+2. Rejects a range where `ptr + len` wraps around
+3. Rejects the call if the current task is missing or has no stack
+4. Accepts any other address, including kernel and unmapped addresses
 
-**Returns:** `1` if the pointer is valid, `0` if invalid.
+**Returns:** `1` if the pointer passes, `0` if not.
 
-In the current shared-address-space design, all tasks share the kernel's page tables,
-so any mapped address is technically reachable. Future phases with per-component page
-tables will restrict validation to each component's own memory region.
+EL0 tasks have per-task page tables, but this function doesn't consult them, so passing
+doesn't mean the range is mapped or belongs to the task. #29 tracks real validation.
 
 ---
 
@@ -344,7 +344,7 @@ with a diagnostic message printed to UART.
 
 ## SPSR for EL0
 
-When launching a user-mode component, the kernel sets `SPSR_EL1` to `SPSR_EL0T` (`0x0`),
+When launching an EL0 task, the kernel sets `SPSR_EL1` to `SPSR_EL0T` (`0x0`),
 which configures:
 
 - Exception level: EL0 (unprivileged)

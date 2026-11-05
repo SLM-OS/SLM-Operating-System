@@ -462,7 +462,7 @@ el0_serror:
     DIAG_BUMP_VEC 0x18
     save_regs
     mov     x0, sp
-    bl      el0_serror_handler  /* C handler: terminate component */
+    bl      el0_serror_handler  /* C handler: terminate the task */
     restore_regs
     eret
 

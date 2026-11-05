@@ -30,6 +30,8 @@
 #      set/way (dc cisw).
 #   9. Verifies the PE ImageBase equals the link address of _start.
 #  10. Verifies the HCR_EL2 write is read-modify-write.
+#  11. Verifies boot.S sets SCTLR.SPAN and clears PSTATE.PAN after the
+#      E2H flip (#1079). QEMU can't produce the kexec state this guards.
 #
 # The runtime behaviour of the same path (firmware load at a
 # non-preferred address, relocation, boot to the shell) is exercised
@@ -299,6 +301,40 @@ if [ "$mrs_hcr_count" -ge 1 ]; then
     pass "kernel reads HCR_EL2 before writing it ($mrs_hcr_count sites — RMW pattern)"
 else
     err "no 'mrs XN, hcr_el2' found — P3 RMW pattern missing?"
+fi
+
+# 10. boot.S must set SCTLR.SPAN and clear PSTATE.PAN (#1079). A kexec
+#     from Linux leaves SPAN=0 and PAN=1 on CPU 0, so without this every
+#     EL0 syscall reading a user pointer faults. The SPAN write must come
+#     after the E2H flip: before it, SCTLR_EL1 is the dormant register.
+printf '\n== Inherited PAN cleared at boot (#1079) ==\n'
+if [ -n "${win:-}" ]; then
+    span_ln=$(echo "$win" | awk '/orr[[:space:]]+x[0-9]+,[[:space:]]*x[0-9]+,[[:space:]]*#0x800000([[:space:]]|$)/ {n=NR} END {print n+0}')
+    hcr_ln=$(echo "$win" | awk '/msr[[:space:]]+hcr_el2,/ {n=NR} END {print n+0}')
+    if [ "$span_ln" -eq 0 ]; then
+        err "no SPAN 'orr' (bit 23) in EFI/kexec entry window"
+    else
+        n=$(echo "$win" | sed -n "$((span_ln + 1))p" | grep -cE 'msr[[:space:]]+sctlr_el1,' || true)
+        [ "$n" -ge 1 ] && pass "SPAN is written to SCTLR_EL1" \
+                       || err "SPAN 'orr' is not followed by 'msr sctlr_el1'"
+        if [ "$hcr_ln" -eq 0 ]; then
+            err "no 'msr hcr_el2' in EFI/kexec entry window — can't confirm the E2H flip"
+        elif [ "$span_ln" -gt "$hcr_ln" ]; then
+            pass "SPAN write comes after the E2H flip"
+        else
+            err "SPAN write precedes 'msr hcr_el2' — it would hit the dormant SCTLR_EL1"
+        fi
+    fi
+    pan_ln=$(echo "$win" | awk '/msr[[:space:]]+pan,[[:space:]]*xzr/ {n=NR} END {print n+0}')
+    if [ "$pan_ln" -eq 0 ]; then
+        err "no 'msr pan, xzr' in EFI/kexec entry window"
+    elif [ "$hcr_ln" -gt 0 ] && [ "$pan_ln" -gt "$hcr_ln" ]; then
+        pass "PSTATE.PAN is cleared after the E2H flip"
+    else
+        err "PAN clear isn't after 'msr hcr_el2' — it could sit on a branch kexec skips"
+    fi
+else
+    err "entry window unavailable — PAN checks not run"
 fi
 
 printf '\n== Summary ==\n'

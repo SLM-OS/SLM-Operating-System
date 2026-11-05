@@ -75,7 +75,7 @@ Development roadmap. Most of these items were first identified during the origin
 - Resource limits (memory, CPU time) per component
 - Automatic component restart on fault
 
-**Note:** EL0/Ring3 transition is partially implemented (syscall dispatch works, EL0 execution deferred due to QEMU MMU issue with AP[1]=1). See `docs/component-isolation.md`.
+**Note:** EL0 tasks work on ARM64 (`task_create_user`, verified with `usertest`, `mmaptest` and `userelf`), but components still run in-kernel and x86-64 Ring 3 is not wired up. See `docs/component-isolation.md`.
 
 ---
 
