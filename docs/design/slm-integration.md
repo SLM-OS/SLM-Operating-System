@@ -428,9 +428,9 @@ that op.
 
 A new component type, `slm-runner`, registered via the Phase-4 component
 system. Subscribes to a prompt topic, publishes a token stream topic. Runs
-in EL0 on QEMU (proven Phase-5 M4 path); on real hardware it falls back to
-in-kernel execution while the EL0 hardware path is being stabilized
-(matches Phase-5 component status).
+in EL0 on QEMU (proven Phase-5 M4 path); on real hardware it runs in-kernel
+because the component runtime does not yet create components at EL0. The EL0
+task path itself is verified on Pi 5 and Jetson (#697, #1079).
 
 ```yaml
 # components/slm-runner/manifest.yaml

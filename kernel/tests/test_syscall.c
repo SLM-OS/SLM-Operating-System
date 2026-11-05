@@ -5,9 +5,9 @@
  * functions by constructing mock trap frames and calling dispatch
  * directly from EL1.
  *
- * Note: Full EL0 execution tests are deferred pending VMM_FLAG_USER
- * investigation on QEMU. These tests validate the kernel-side syscall
- * infrastructure independently.
+ * Note: Full EL0 round trips are covered on hardware by the `usertest`,
+ * `mmaptest` and `userelf` shell commands. These tests validate the
+ * kernel-side syscall infrastructure independently.
  */
 
 #include "test_harness.h"
