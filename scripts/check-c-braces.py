@@ -8,9 +8,11 @@ including uncommitted and untracked files; the tree has older violations that
 aren't reported unless --all is given. Vendored kernel/lib/ and nanopb output
 are exempt.
 
-A file with no database entry (host tools, for example) is listed as not
-covered. A file clang can't parse on any platform can't be checked, so it
-fails the run rather than passing silently.
+Only code the databases compile is seen, so feature-gated blocks that are off
+in every configuration aren't checked. A changed file that no parse reached
+(host tools, for example) is listed as not checked. A failed parse in any
+database fails the run rather than passing silently, because that database's
+#ifdef blocks would otherwise go unchecked.
 
 Exit status: 0 clean, 1 violations, 2 could not check.
 
@@ -33,6 +35,8 @@ C_SUFFIXES = (".c", ".h")
 # clang parsing; a real generated header takes precedence if one exists.
 GENERATED_HEADERS = ("build_info.h", "ga10b_eviction_mlp_weights_gen.h")
 DIAGNOSTIC = re.compile(r"^(.+?):(\d+):(\d+): (warning|error): (.*)$")
+# With -H, clang prints each opened header as dots, a space and the path.
+INCLUDED = re.compile(r"^\.+ (.+)$")
 
 
 def git(*args):
@@ -49,7 +53,8 @@ def changed_lines(base):
     merge_base = git("merge-base", base, "HEAD").strip()
     changed = collections.defaultdict(set)
     path = None
-    for line in git("diff", "-U0", "--no-color", merge_base).splitlines():
+    for line in git("diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/",
+                    "--dst-prefix=b/", merge_base).splitlines():
         if line.startswith("+++ "):
             path = line[6:] if line.startswith("+++ b/") else None
         elif line.startswith("@@") and path:
@@ -66,12 +71,13 @@ def changed_lines(base):
 
 def compiler_args(compiler):
     """Clang needs the cross compiler's target and system include paths."""
-    args = []
-    name = os.path.basename(compiler)
-    if name.startswith("aarch64-"):
-        args.append("--extra-arg-before=--target=aarch64-none-elf")
-    elif name.startswith("x86_64-"):
-        args.append("--extra-arg-before=--target=x86_64-none-elf")
+    machine = subprocess.run([compiler, "-dumpmachine"], capture_output=True,
+                             text=True).stdout.strip()
+    args = ["--extra-arg-before=--target=" + machine]
+    if machine.startswith("aarch64"):
+        # Clang may not know the -mcpu GCC was given (cortex-a78ae on Jetson),
+        # and the CPU has no bearing on brace analysis.
+        args.append("--extra-arg=-mcpu=generic")
     result = subprocess.run([compiler, "-E", "-Wp,-v", "-xc", os.devnull],
                             capture_output=True, text=True)
     in_list = False
@@ -92,7 +98,7 @@ def load_database(db_dir, root):
     stubs.mkdir(exist_ok=True)
     for header in GENERATED_HEADERS:
         (stubs / header).touch()
-    args = ["--extra-arg=-w", "--extra-arg=-ferror-limit=0",
+    args = ["--extra-arg=-w", "--extra-arg=-ferror-limit=0", "--extra-arg=-H",
             "--extra-arg=-I" + str(stubs)]
     files = []
     compiler = None
@@ -125,7 +131,8 @@ def main():
                         help="report every violation, not just changed lines")
     parser.add_argument("--make-db", action="store_true",
                         help="generate databases with `make tidy-db` first; "
-                             "each directory's name is its PLATFORM")
+                             "each directory is named PLATFORM or "
+                             "PLATFORM-test")
     options = parser.parse_args()
 
     if not shutil.which("clang-tidy"):
@@ -149,9 +156,11 @@ def main():
 
     if options.make_db:
         for db_dir in options.db:
+            platform, _, variant = db_dir.name.partition("-")
             result = subprocess.run(
                 ["make", "--no-print-directory", "tidy-db",
-                 "PLATFORM=" + db_dir.name], capture_output=True, text=True)
+                 "PLATFORM=" + platform, "TIDY_VARIANT=" + (variant or "kernel")],
+                capture_output=True, text=True)
             if result.returncode:
                 print(f"check-braces: configuring {db_dir.name} failed "
                       f"(is its cross compiler on PATH?)\n{result.stdout}"
@@ -163,22 +172,33 @@ def main():
     headers_changed = options.all or any(p.endswith(".h") for p in changed)
     config = str(root / ".clang-tidy")
     jobs = []
-    in_database = set()
     for db_dir in options.db:
         args, files = load_database(db_dir.resolve(), root)
-        in_database.update(files)
         for path in sorted(set(files)):
             if headers_changed or path in changed:
                 jobs.append((db_dir.resolve(), args, config, path))
 
     findings = {}
-    parsed = set()
+    reached = set()
+    parses = collections.Counter()
     failed = collections.defaultdict(set)
     workers = min(8, os.cpu_count() or 1)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
         for db_dir, path, output in pool.map(lambda j: run_tidy(*j), jobs):
             fatal = None
+            reached.add(path)
+            parses[db_dir.name] += 1
             for line in output.splitlines():
+                match = INCLUDED.match(line)
+                if match:
+                    header = Path(match[1]).resolve()
+                    if header.is_relative_to(root):
+                        reached.add(str(header.relative_to(root)))
+                    continue
+                if line.startswith("error: "):
+                    # No location: clang-tidy gave up on the whole file.
+                    fatal = line
+                    continue
                 match = DIAGNOSTIC.match(line)
                 if not match:
                     continue
@@ -191,34 +211,39 @@ def main():
                         continue
                     relative = str(location.relative_to(root))
                     number = int(match[2])
+                    # The finding sits on the line before the unbraced body,
+                    # so an edit to that body counts too.
+                    lines = changed.get(relative, ())
                     if not exempt(relative) and (
-                            options.all or number in changed.get(relative, ())):
+                            options.all or number in lines
+                            or number + 1 in lines):
                         findings[(relative, number)] = match[5]
             if fatal:
                 failed[path].add(f"{db_dir.name}: {fatal}")
-            else:
-                parsed.add(path)
 
     for (path, number), message in sorted(findings.items()):
         print(f"{path}:{number}: {message}")
 
-    not_covered = sorted(p for p in changed if p.endswith(".c")
-                         and p not in in_database)
+    not_covered = sorted(set(changed) - reached)
     if not_covered:
-        print("check-braces: not in any compile database, not checked: "
+        print("check-braces: no parse reached these, not checked: "
               + ", ".join(not_covered))
-    unchecked = sorted(set(failed) - parsed)
-    for path in unchecked:
+    for path in sorted(failed):
         for reason in sorted(failed[path]):
             print(f"check-braces: could not parse {path} ({reason})",
                   file=sys.stderr)
 
-    print(f"check-braces: {len(findings)} violation(s), {len(jobs)} parses, "
-          f"{len(unchecked)} file(s) unparsed")
-    if findings:
-        return 1
-    return 2 if unchecked else 0
+    counts = ", ".join(f"{name} {count}" for name, count in sorted(parses.items()))
+    print(f"check-braces: {len(findings)} violation(s), {len(failed)} file(s) "
+          f"unparsed; parses: {counts or 'none'}")
+    if failed:
+        return 2
+    return 1 if findings else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:  # Status 1 would read as "violations found".
+        print(f"check-braces: {error!r}", file=sys.stderr)
+        sys.exit(2)

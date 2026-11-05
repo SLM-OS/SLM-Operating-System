@@ -42,10 +42,12 @@ A link error naming a kernel symbol means `test_ffi_stubs` in
 ```
 make test-check-braces && make check-braces
 ```
-Runs `clang-tidy` on C lines changed since `origin/main` for all four
-platforms (`scripts/check-c-braces.py`). Older violations aren't reported.
-Fix any it reports. Exit status 2 from the script means a file could not be
-checked: read the message rather than treating it as a pass.
+Runs `clang-tidy` on C lines changed since `origin/main`, as the main and test
+kernel of all four platforms (`scripts/check-c-braces.py`). Older violations
+aren't reported. Fix any it reports. A `could not parse` line means a file was
+not checked, so don't treat that as a pass. `make` reports `Error 2` for any
+failure, so read the script's output. Its last line gives parses per
+configuration, and all eight should appear when headers or shared files change.
 
 ### 6. Diff check
 Run `git diff main...HEAD --stat` and confirm no untracked build artifacts

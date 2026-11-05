@@ -44,11 +44,12 @@ expect() {  # expect <name> <exit status> <grep pattern or "-"> [absent pattern]
     fi
 }
 
+FLAGS=""
 write_db() {
-    python3 - "$WORK" "$@" <<'PY'
+    python3 - "$WORK" "$FLAGS" "$@" <<'PY'
 import json, sys
-root, files = sys.argv[1], sys.argv[2:]
-json.dump([{"directory": root, "file": f, "command": f"gcc -c {f}"}
+root, flags, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+json.dump([{"directory": root, "file": f, "command": f"gcc {flags} -c {f}"}
            for f in files], open("db/compile_commands.json", "w"))
 PY
 }
@@ -134,6 +135,19 @@ expect "multi-line loop body is flagged" 1 "kernel/src/b.c:3:.*readability-brace
 rm kernel/src/b.c
 write_db kernel/src/a.c kernel/lib/vendored.c kernel/src/gen.pb.c
 
+# Editing the body of an older unbraced statement counts as a change to it.
+sed -i 's/return 1;/return 2;/' kernel/src/a.c
+expect "edit to an older unbraced body is flagged" 1 "kernel/src/a.c:3:.*readability-braces"
+
+# Git settings that change the diff prefixes must not hide changes.
+git config diff.noprefix true
+expect "diff.noprefix does not hide changes" 1 "kernel/src/a.c:3:"
+git config --unset diff.noprefix
+git config diff.mnemonicPrefix true
+expect "diff.mnemonicPrefix does not hide changes" 1 "kernel/src/a.c:3:"
+git config --unset diff.mnemonicPrefix
+git checkout -q kernel/src/a.c
+
 # Exempt paths, even with a violation on a changed line.
 cat > kernel/lib/vendored.c <<'C'
 int v(int x)
@@ -162,7 +176,10 @@ int c(int x) { return h(x); }
 C
 write_db kernel/src/a.c kernel/src/c.c
 expect "violation in a changed header is flagged" 1 "kernel/src/h.h:3:.*readability-braces"
-rm kernel/src/h.h kernel/src/c.c
+rm kernel/src/c.c
+write_db kernel/src/a.c
+expect "changed header no parse reaches is reported" 0 "not checked: kernel/src/h.h"
+rm kernel/src/h.h
 
 # A file clang can't parse must not pass silently.
 cat > kernel/src/d.c <<'C'
@@ -172,6 +189,16 @@ C
 write_db kernel/src/a.c kernel/src/d.c
 expect "unparsable file fails the check" 2 "could not parse kernel/src/d.c"
 rm kernel/src/d.c
+
+# A compile flag clang rejects stops it analyzing the file, with an error that
+# has no file:line prefix. This is how Jetson's -mcpu=cortex-a78ae first failed.
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+FLAGS="-march=not-a-cpu"
+write_db kernel/src/a.c
+expect "flag clang rejects fails the check" 2 "could not parse kernel/src/a.c"
+FLAGS=""
+write_db kernel/src/a.c
+git checkout -q kernel/src/a.c
 
 # A changed C file outside the database is reported, not failed.
 mkdir -p tools

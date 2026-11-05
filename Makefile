@@ -1524,24 +1524,31 @@ check-build-signatures:
 	@./scripts/check-build-signatures.sh
 
 # Brace check on changed C lines (scripts/check-c-braces.py, .clang-tidy).
-# Configures each platform with the test-kernel arguments, so code under
-# ENABLE_BOOT_TESTS and platform #ifdefs is parsed; nothing is compiled.
+# Configures each platform as both the main and the test kernel, so code under
+# platform and ENABLE_BOOT_TESTS #ifdefs is parsed; nothing is compiled. Each
+# database is configured from scratch, so no option stays cached from an
+# earlier run.
 # BRACES_BASE sets the diff base; BRACES_ARGS=--all reports the whole tree.
 BRACES_BASE ?= origin/main
 BRACES_ARGS ?=
 TIDY_DB_DIR := $(BUILD_DIR)/tidy
 TIDY_PLATFORMS := QEMU_VIRT RASPI5 JETSON_ORIN_NANO X86_64
+TIDY_VARIANT ?= kernel
+TIDY_DB_NAME = $(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
 
 .PHONY: tidy-db
 tidy-db:
-	@$(CMAKE) -G "Unix Makefiles" -B $(TIDY_DB_DIR)/$(PLATFORM) \
-		$(KERNEL_TEST_CMAKE_ARGS) -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+	@rm -rf $(TIDY_DB_DIR)/$(TIDY_DB_NAME)
+	@$(CMAKE) -G "Unix Makefiles" -B $(TIDY_DB_DIR)/$(TIDY_DB_NAME) \
+		$(if $(filter test,$(TIDY_VARIANT)),$(KERNEL_TEST_CMAKE_ARGS),$(KERNEL_CMAKE_ARGS)) \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 		$(MAKE_PROGRAM_ARG) > /dev/null
 
 .PHONY: check-braces
 check-braces:
 	@python3 scripts/check-c-braces.py --make-db --base $(BRACES_BASE) \
-		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p)) $(BRACES_ARGS)
+		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p) --db $(TIDY_DB_DIR)/$(p)-test) \
+		$(BRACES_ARGS)
 
 .PHONY: test-check-braces
 test-check-braces:
