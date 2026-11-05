@@ -15,8 +15,16 @@
 #include "task.h"
 #include "uart.h"
 
-/* Serialises the PWM register and the state below between the control
- * task and the shell. BPMP calls are made outside it. */
+/* The tachometer has no 2 MB block of its own in vmm.c: it is reached
+ * through the FUSE block's mapping. Moving either breaks the other. */
+_Static_assert((TEGRA234_TACH0_BASE & ~0x1FFFFFUL) == (T234_FUSE_MMIO_BASE & ~0x1FFFFFUL),
+               "TACH0 must share the FUSE 2 MB block mapped in vmm.c");
+
+/* Serialises the PWM and tachometer registers and the state below
+ * between the control task and the shells. BPMP calls are made outside
+ * it. `ready`, `tach_ok` and `pfm` are written once by tegra_fan_init,
+ * before the task or any shell exists, so reading them unlocked is
+ * safe. */
 static spinlock_t g_fan_lock = SPINLOCK_INIT;
 
 static struct {
@@ -28,8 +36,13 @@ static struct {
     uint32_t target;
     int32_t temp_mc;
     int temp_rc;
+    uint32_t temp_fails;   /* consecutive polls with no zone readable */
     uint64_t pwm_clk_hz;
 } g_fan;
+
+/* One unreadable poll holds the level (a BPMP timeout is not a reason
+ * for 40 s of full speed); this many in a row go to 255. */
+#define FAN_TEMP_FAILS_TO_MAX  2u
 
 static volatile uint32_t *pwm_csr(void)
 {
@@ -81,31 +94,44 @@ static int fan_read_hottest(int32_t *mc)
     return 0;
 }
 
+/* Returns 0, or -1..-4 for the step that failed. A failure after the
+ * clock is on turns it back off: `thermal fan`'s raw view reads the CSR
+ * whenever BPMP reports the clock on, and a clocked block still held in
+ * reset may fault. */
 static int fan_clock_pwm(void)
 {
     if (bpmp_clk_enable(TEGRA234_CLK_PWM3) != 0) {
         return -1;
     }
+    int rc = 0;
     /* pwm-tegra: ask for 256 ticks per period; if BPMP rounds below
      * that, ask for twice as much and divide it down. */
     uint64_t want = tegra_pwm_required_rate(TEGRA_FAN_PERIOD_NS);
     uint64_t got = 0;
+    uint32_t pfm = 0;
     if (bpmp_clk_set_rate(TEGRA234_CLK_PWM3, want, &got) != 0) {
-        return -2;
+        rc = -2;
+        goto fail;
     }
     if (got < want && bpmp_clk_set_rate(TEGRA234_CLK_PWM3, want * 2u, &got) != 0) {
-        return -2;
+        rc = -2;
+        goto fail;
     }
-    uint32_t pfm = 0;
     if (tegra_pwm_pfm(got, TEGRA_FAN_PERIOD_NS, &pfm) != 0) {
-        return -3;
+        rc = -3;
+        goto fail;
     }
     if (bpmp_reset_deassert(TEGRA234_RESET_PWM3) != 0) {
-        return -4;
+        rc = -4;
+        goto fail;
     }
     g_fan.pfm = pfm;
     g_fan.pwm_clk_hz = got;
     return 0;
+
+fail:
+    (void)bpmp_clk_disable(TEGRA234_CLK_PWM3);
+    return rc;
 }
 
 /* Tachometer, as pwm-tegra-tachometer.c probes it: clock at the
@@ -139,13 +165,11 @@ int tegra_fan_init(void)
     }
     bool tach_ok = fan_clock_tach();
 
-#if defined(ENABLE_BOOT_TESTS)
-    uint32_t start = TEGRA_FAN_FIXED_PWM;
-    int32_t mc = 0;
-    int trc = 0;
-#else
     int32_t mc = 0;
     int trc = fan_read_hottest(&mc);
+#if defined(ENABLE_BOOT_TESTS)
+    uint32_t start = TEGRA_FAN_FIXED_PWM;
+#else
     /* Unknown temperature: run flat out until the task reads one. */
     uint32_t start = trc == 0 ? tegra_fan_curve_pwm(mc) : TEGRA_FAN_MAX_PWM;
     if (start > 0u && start < TEGRA_FAN_KICKSTART_PWM) {
@@ -175,12 +199,19 @@ void tegra_fan_poll(void)
     }
     int32_t mc = 0;
     int rc = fan_read_hottest(&mc);
-    uint32_t target = rc == 0 ? tegra_fan_curve_pwm(mc) : TEGRA_FAN_MAX_PWM;
 
     irq_flags_t f = spin_lock_irqsave(&g_fan_lock);
     g_fan.temp_rc = rc;
+    uint32_t target;
     if (rc == 0) {
         g_fan.temp_mc = mc;
+        g_fan.temp_fails = 0;
+        target = tegra_fan_curve_pwm(mc);
+    } else {
+        if (g_fan.temp_fails < FAN_TEMP_FAILS_TO_MAX) {
+            g_fan.temp_fails++;
+        }
+        target = g_fan.temp_fails >= FAN_TEMP_FAILS_TO_MAX ? TEGRA_FAN_MAX_PWM : g_fan.target;
     }
     if (!g_fan.manual) {
         g_fan.target = target;
@@ -236,6 +267,10 @@ void tegra_fan_set_auto(void)
 {
     irq_flags_t f = spin_lock_irqsave(&g_fan_lock);
     g_fan.manual = false;
+    /* Show the curve's target at once; the next poll ramps toward it. */
+    if (g_fan.temp_rc == 0) {
+        g_fan.target = tegra_fan_curve_pwm(g_fan.temp_mc);
+    }
     spin_unlock_irqrestore(&g_fan_lock, f);
 }
 
@@ -254,11 +289,13 @@ void tegra_fan_get_status(struct tegra_fan_status *out)
     out->temp_rc = g_fan.temp_rc;
     out->pwm_clk_hz = g_fan.pwm_clk_hz;
     out->csr = g_fan.ready ? *pwm_csr() : 0u;
-    spin_unlock_irqrestore(&g_fan_lock, f);
     uint32_t tach = g_fan.tach_ok ? *tach0_reg() : 0u;
     if (tach & TEGRA_TACH_OVERFLOW) {
-        *tach0_reg() = tach;   /* write 1 to clear the stall flag */
+        /* Write 1 to clear the stall flag, keeping the window field
+         * (pwm-tegra-tachometer.c writes the value back the same way). */
+        *tach0_reg() = tach;
     }
+    spin_unlock_irqrestore(&g_fan_lock, f);
     out->rpm = tegra_tach_rpm(tach);
 }
 
@@ -271,7 +308,7 @@ int  tegra_fan_set_manual(uint32_t p)  { (void)p; return -1; }
 void tegra_fan_set_auto(void)          { }
 void tegra_fan_get_status(struct tegra_fan_status *out)
 {
-    if (out != 0) {
+    if (out != NULL) {
         *out = (struct tegra_fan_status){ 0 };
     }
 }

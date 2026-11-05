@@ -1699,8 +1699,9 @@ static void vmm_setup_platform(void)
 
     /* FUSE block (0x03810000) in the 2 MB block at 0x03800000 (L2 idx
      * 28). The UEFI-direct XUSB bring-up (#1084) reads the USB pad
-     * calibration words from it; on the kexec path Linux has already
-     * programmed the pads and nothing reads it. */
+     * calibration words from it. The fan tachometer (0x039c0000,
+     * #1105) shares this block and is read on both boot paths;
+     * tegra_fan.c asserts the two stay in one block. */
     {
         uint64_t fuse_blk = T234_FUSE_MMIO_BASE & ~(BLOCK_SIZE - 1);
         uint64_t fuse_l2 = (fuse_blk >> BLOCK_SHIFT) & 0x1FF;
@@ -1710,9 +1711,9 @@ static void vmm_setup_platform(void)
     }
 
     /* PWM controller 3 (0x032a0000, the carrier's fan PWM) in the 2 MB
-     * block at 0x03200000 (L2 idx 25). Read by `thermal fan` (#1093)
-     * only after BPMP reports its clock on, which after kexec it is
-     * (Linux's pwm-fan) and after a UEFI-direct boot it is not. */
+     * block at 0x03200000 (L2 idx 25). Programmed by the fan driver
+     * (#1105) once it has clocked the block through BPMP; `thermal fan`
+     * reads it raw only when BPMP reports the clock on. */
     {
         uint64_t pwm_blk = TEGRA234_PWM3_BASE & ~(BLOCK_SIZE - 1);
         uint64_t pwm_l2 = (pwm_blk >> BLOCK_SHIFT) & 0x1FF;

@@ -73,6 +73,15 @@ static void test_pwm_register_matches_linux(void)
      * overflows the 13-bit field. */
     TEST_ASSERT_EQUAL_INT(-1, tegra_pwm_pfm(1000000u, TEGRA_FAN_PERIOD_NS, &pfm));
     TEST_ASSERT_EQUAL_INT(-1, tegra_pwm_pfm(1000000000000ull, TEGRA_FAN_PERIOD_NS, &pfm));
+    TEST_ASSERT_EQUAL_INT(-1, tegra_pwm_pfm(UINT64_MAX, TEGRA_FAN_PERIOD_NS, &pfm));
+    TEST_ASSERT_EQUAL_INT(-1, tegra_pwm_pfm(11027028u, 0u, &pfm));
+    /* The two rates fan_clock_pwm can land on: exactly the requested
+     * one (pfm 0) and the doubled fallback (pfm 1). */
+    uint64_t want = tegra_pwm_required_rate(TEGRA_FAN_PERIOD_NS);
+    TEST_ASSERT_EQUAL_INT(0, tegra_pwm_pfm(want, TEGRA_FAN_PERIOD_NS, &pfm));
+    TEST_ASSERT_EQUAL_UINT32(0, pfm);
+    TEST_ASSERT_EQUAL_INT(0, tegra_pwm_pfm(want * 2u, TEGRA_FAN_PERIOD_NS, &pfm));
+    TEST_ASSERT_EQUAL_UINT32(1, pfm);
     TEST_ASSERT_EQUAL_INT(0, tegra_pwm_pfm(22588000u, TEGRA_FAN_PERIOD_NS, &pfm));
     TEST_ASSERT_EQUAL_UINT32(3, pfm);
 }

@@ -16,9 +16,14 @@
 #define TEGRA_FAN_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-/* L4T device tree: pwm-fan { pwms = <&pwm3 0 45334>; } */
+/* L4T device tree: pwm-fan { pwms = <&pwm3 0 45334>; }. The PWM runs
+ * faster than this: BPMP rounds the clock up (11.03 MHz after Linux,
+ * 9.6 MHz after UEFI) and the 13-bit divider bottoms out at 0, so the
+ * real period is 256 / clock (23 or 27 us). Linux runs it the same way
+ * (CSR 0x803c0000 at level 60); the fan follows duty, not frequency. */
 #define TEGRA_FAN_PERIOD_NS      45334u
 /* nvfancontrol.conf: POLLING_INTERVAL 2, STEP_SIZE 10, KICKSTART_PWM 64 */
 #define TEGRA_FAN_POLL_MS        2000u
@@ -95,6 +100,7 @@ static inline uint64_t tegra_pwm_required_rate(uint32_t period_ns)
 /* Divider for the clock BPMP actually set; -1 if it doesn't fit. */
 static inline int tegra_pwm_pfm(uint64_t rate_hz, uint32_t period_ns, uint32_t *pfm)
 {
+    if (period_ns == 0u || rate_hz > UINT64_MAX / period_ns) return -1;
     uint64_t r = rate_hz * period_ns / (1000000000ull << 8);
     if (r == 0u || ((r - 1u) >> 13) != 0u) return -1;
     *pfm = (uint32_t)(r - 1u);

@@ -916,7 +916,13 @@ void kernel_main(void *dtb)
     /* Fan control loop (#1105). Same gate as the supervisor: test
      * kernels keep tegra_fan_init's fixed duty and no extra task. */
     if (tegra_fan_start() != 0) {
-        WARN("fan: control task not started - fan stays at its boot level");
+        struct tegra_fan_status fan_st;
+        tegra_fan_get_status(&fan_st);
+        if (fan_st.ready) {
+            WARN("fan: control task not started - fan stays at its boot level");
+        } else {
+            WARN("fan: driver not initialised - SLM-OS is not driving the fan");
+        }
     }
 #endif
 #endif
