@@ -6,8 +6,8 @@
 # The UEFI-direct path depends on several non-obvious layout and
 # alignment invariants that the QEMU test suite doesn't cover. Some of
 # the code is gated on PLATFORM_JETSON_ORIN_NANO (the early vector
-# table); the EFI entry and stub are shared with QEMU_VIRT and checked
-# here as built for Jetson. A structural check on the build catches
+# table, the HCR_EL2 write); the EFI entry and stub are shared with
+# QEMU_VIRT and checked here as built for Jetson. A structural check on the build catches
 # regressions that would otherwise only show up on live hardware as a
 # silent hang.
 #
@@ -35,9 +35,9 @@
 # non-preferred address, relocation, boot to the shell) is exercised
 # under QEMU's AArch64 UEFI by `make test-qemu-uefi`.
 #
-# Exit 0 on pass, 1 on fail. Expected to run as part of pre-merge
-# validation for any change touching boot.S / efi_stub.c / the
-# Jetson linker script.
+# Exit 0 on pass, 1 on fail. Runs as a step of /ci, so it covers every
+# change validated that way, not only those touching boot.S, efi_stub.c
+# or the Jetson linker script.
 
 set -euo pipefail
 

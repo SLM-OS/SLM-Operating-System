@@ -59,9 +59,13 @@ make test-jetson-uefi-layout
 ```
 Does its own clean Jetson build, then checks it for invariants the QEMU test
 suite doesn't cover: the Jetson-only early vector table, the UEFI hand-off as
-built for Jetson, and the boot-time register setup. `make test-qemu-uefi`
-covers the hand-off at runtime, but `/ci` doesn't run it, so run it separately
-when changing the EFI entry or stub.
+built for Jetson, and the boot-time register setup. `/ci` doesn't cover the
+hand-off at runtime, so when changing the EFI entry or stub, also run the
+command below. `test-qemu-uefi` boots whatever image is in `build/kernel`, and
+this step leaves a Jetson one there, so rebuild first:
+```
+make kernel-clean && make kernel PLATFORM=QEMU_VIRT && make test-qemu-uefi
+```
 
 Treat "All checks passed." as success; failures are the lines marked `✗`. A `!`
 line means a check was skipped and the script still says "All checks passed.",
