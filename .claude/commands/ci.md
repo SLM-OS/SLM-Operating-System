@@ -19,9 +19,11 @@ Report: pass/fail, any warnings.
 ### 3. Build — Jetson with real AI weights
 ```
 make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real
+make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real
 ```
-Code under `SLMOS_AI_WEIGHTS_REAL` isn't compiled by any other step, and an unused
-variable there broke this build unnoticed (#1110). Report: pass/fail, any warnings.
+Code under `SLMOS_AI_WEIGHTS_REAL`, in both the main and test kernels, isn't compiled
+by any other step, and an unused variable there broke this build unnoticed (#1110).
+Report: pass/fail, any warnings.
 
 ### 4. Run test suite (ARM64 QEMU)
 ```
