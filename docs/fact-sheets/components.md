@@ -38,7 +38,7 @@ is now the integration glue, not the EL0 bring-up.
 
 ## Skipped / Blocked
 
-- **`slm-runner` and other components running in EL0 on real hardware** — the EL0 *task* path works (#697/#731/#734), but the component runtime still creates components in EL1. Wiring the `component run` path to use `task_create_user_elf` is the remaining gap.
+- **`slm-runner` and other components running in EL0** — the EL0 *task* path works (#697/#731/#734), but the component runtime still creates components in EL1. Wiring the `component run` path to use `task_create_user_elf` is the remaining gap.
 - **x86-64 CPL=3 user mode** — syscall path present in tree but never wired into task or component execution. ARM64 has the full per-task TTBR0 + ASID + EL0 path; x86-64 lags.
 - **Component marketplace / registry / signing** — tracked as #41 ("Component Marketplace — signing, distribution"). Not started.
 - **Persistence across reboot** — no component state survives reboot. Each boot re-registers components from in-kernel tables.

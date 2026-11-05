@@ -1489,9 +1489,9 @@ static void vmm_map_firmware_dtb(void)
 
 static void vmm_setup_platform(void)
 {
-    /* Note: VMM_FLAG_USER (AP[1]=1) causes QEMU MMU hang on virt platform
-     * with cortex-a53, cortex-a76, and -cpu max. Root cause: unknown
-     * (PTE format is valid per ARM ARM, PAN/SPAN investigated and ruled out).
+    /* Note: don't set VMM_FLAG_USER here. A region writable at EL0 is PXN at
+     * EL1, so the kernel couldn't fetch its own code after MMU enable: it
+     * loops on Prefetch Aborts with no output (see docs/troubleshooting.md).
      * EL0 uses AP[1]=1 only in per-task TTBR0 tables, so kernel pages avoid it. */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
 

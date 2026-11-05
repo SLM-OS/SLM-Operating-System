@@ -696,7 +696,7 @@ static int64_t dispatch_as(struct task *t, struct trap_frame *f)
 
 /* #1079: syscall handlers read user memory directly, so the kernel must
  * run with PSTATE.PAN=0 and SCTLR.SPAN=1 (SPAN=0 sets PAN on every
- * exception from EL0). This checks the invariant on the running CPU.
+ * exception taken to the kernel's EL). Checks the invariant on this CPU.
  * The #1079 failure came from state a kexec from Linux leaves on Jetson,
  * which QEMU can't produce, so `mmaptest` after slmos-kexec on hardware
  * remains the end-to-end check. */

@@ -854,8 +854,8 @@ real_start:
      * PSTATE.PAN=1 on the boot CPU (measured: SCTLR 0x30401805 at the
      * shell). cpu_soft_restart writes INIT_SCTLR_EL1_MMU_OFF, which has
      * no SPAN, to the live register; PAN=1 is carried over from Linux.
-     * SPAN=0 re-arms PAN on every exception from EL0, so each syscall
-     * that dereferences a user pointer takes a level-3 permission
+     * SPAN=0 re-arms PAN on every exception taken to this EL, so each
+     * syscall that dereferences a user pointer takes a level-3 permission
      * fault. Secondaries (TF-A reset value) and UEFI-direct already
      * have SPAN=1, PAN=0; Pi 5 gets SPAN=1 from its baseline.
      *

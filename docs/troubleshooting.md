@@ -413,11 +413,11 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 
 **Fix:** This was fixed by replacing the `?` early return with an explicit `match` that ensures `engine_unlock()` is always called. If the issue recurs, check that all paths through `run_inference()` in `runtime/src/inference/engine.rs` release the `ENGINE_LOCK`.
 
-### QEMU MMU Hang with User-Accessible Pages
+### MMU Hang with User-Accessible Kernel Pages
 
 **Symptom:** System hangs at "Enabling MMU..." when `VMM_FLAG_USER` is set on RAM page table entries.
 
-**Cause:** Setting `PTE_AP_RW_ALL` (AP[1]=1) in L2 block descriptors causes QEMU to hang during MMU enable. Tested with `-cpu cortex-a53`, `-cpu cortex-a76`, and `-cpu max` — all hang. PAN (Privileged Access Never) and SPAN were investigated and ruled out. The PTE format is valid per the ARM Architecture Reference Manual. Root cause is believed to be a QEMU-specific emulation limitation.
+**Cause:** Arm treats any region writable at EL0 as PXN at EL1. With `PTE_AP_RW_ALL` (AP=01) on the kernel's RAM mapping, the kernel can't fetch its own code, so the first fetch after MMU enable takes a permission fault. The vectors are on those pages too, so it faults repeatedly with no output. QEMU `-d int` shows repeated Prefetch Aborts with ESR `0x8600000e`. With `PTE_AP_RO_ALL` (AP=11), which isn't writable at EL0, fetches work and the first fault is a Data Abort on a kernel write (ESR `0x9600004e`). This was measured on QEMU; it is architectural behaviour, not specific to QEMU.
 
 **Status:** Avoided by design: kernel pages keep AP=00 and user pages live in per-task `TTBR0_EL1` tables, so this only reproduces if `VMM_FLAG_USER` is set on kernel pages. EL0 is verified on Pi 5 (#697) and Jetson (#1079). See `docs/component-isolation.md` for details.
 

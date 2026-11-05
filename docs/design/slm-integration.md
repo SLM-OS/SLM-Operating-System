@@ -428,9 +428,8 @@ that op.
 
 A new component type, `slm-runner`, registered via the Phase-4 component
 system. Subscribes to a prompt topic, publishes a token stream topic. Runs
-in EL0 on QEMU (proven Phase-5 M4 path); on real hardware it runs in-kernel
-because the component runtime does not yet create components at EL0. The EL0
-task path itself is verified on Pi 5 and Jetson (#697, #1079).
+in-kernel on all platforms until the component runtime creates components at
+EL0. The EL0 task path itself is verified on QEMU, Pi 5 and Jetson (#697, #1079).
 
 ```yaml
 # components/slm-runner/manifest.yaml
@@ -547,10 +546,10 @@ callback pattern already used for inference probability output.
   the Jetson Orin Nano has its DLA fused off (DLA exists only on Orin NX
   and AGX Orin). The Nano's only AI silicon is the GA10B GPU's CUDA cores
   and tensor cores.
-- **EL0 isolation of `slm-runner` on Jetson hardware.** The hardware EL0
-  path is verified on Jetson with the `usertest`, `mmaptest` and `userelf`
-  smoke tasks (#1079), but `slm-runner` itself has not run at EL0 there. The
-  component stays in-kernel on Jetson until it does.
+- **EL0 isolation of `slm-runner`.** The EL0 task path is verified on Jetson
+  with the `usertest`, `mmaptest` and `userelf` smoke tasks (#1079), but
+  `slm-runner` has not run at EL0 on any platform. It stays in-kernel until
+  the component runtime creates components at EL0.
 - **GGUF v1/v2 / non-Q4_K quants.** Out of scope. Ship only Q4_K_M; add
   Q4_0 support only if needed as an initial bring-up rung. Other quants
   trivial to add later (the parser handles GGUF v3 generically).
