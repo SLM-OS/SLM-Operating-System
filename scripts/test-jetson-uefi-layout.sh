@@ -309,7 +309,7 @@ fi
 #     after the E2H flip: before it, SCTLR_EL1 is the dormant register.
 printf '\n== Inherited PAN cleared at boot (#1079) ==\n'
 if [ -n "${win:-}" ]; then
-    span_ln=$(echo "$win" | awk '/orr[[:space:]]+x[0-9]+,[[:space:]]*x[0-9]+,[[:space:]]*#0x800000/ {n=NR} END {print n+0}')
+    span_ln=$(echo "$win" | awk '/orr[[:space:]]+x[0-9]+,[[:space:]]*x[0-9]+,[[:space:]]*#0x800000([[:space:]]|$)/ {n=NR} END {print n+0}')
     hcr_ln=$(echo "$win" | awk '/msr[[:space:]]+hcr_el2,/ {n=NR} END {print n+0}')
     if [ "$span_ln" -eq 0 ]; then
         err "no SPAN 'orr' (bit 23) in EFI/kexec entry window"
@@ -317,8 +317,13 @@ if [ -n "${win:-}" ]; then
         n=$(echo "$win" | sed -n "$((span_ln + 1))p" | grep -cE 'msr[[:space:]]+sctlr_el1,' || true)
         [ "$n" -ge 1 ] && pass "SPAN is written to SCTLR_EL1" \
                        || err "SPAN 'orr' is not followed by 'msr sctlr_el1'"
-        [ "$span_ln" -gt "$hcr_ln" ] && pass "SPAN write comes after the E2H flip" \
-                                     || err "SPAN write precedes 'msr hcr_el2' — it would hit the dormant SCTLR_EL1"
+        if [ "$hcr_ln" -eq 0 ]; then
+            err "no 'msr hcr_el2' in EFI/kexec entry window — can't confirm the E2H flip"
+        elif [ "$span_ln" -gt "$hcr_ln" ]; then
+            pass "SPAN write comes after the E2H flip"
+        else
+            err "SPAN write precedes 'msr hcr_el2' — it would hit the dormant SCTLR_EL1"
+        fi
     fi
     n=$(echo "$win" | grep -cE 'msr[[:space:]]+pan,[[:space:]]*xzr' || true)
     [ "$n" -ge 1 ] && pass "PSTATE.PAN is cleared" \

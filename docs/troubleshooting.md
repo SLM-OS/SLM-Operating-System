@@ -419,7 +419,7 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 
 **Cause:** Setting `PTE_AP_RW_ALL` (AP[1]=1) in L2 block descriptors causes QEMU to hang during MMU enable. Tested with `-cpu cortex-a53`, `-cpu cortex-a76`, and `-cpu max` — all hang. PAN (Privileged Access Never) and SPAN were investigated and ruled out. The PTE format is valid per the ARM Architecture Reference Manual. Root cause is believed to be a QEMU-specific emulation limitation.
 
-**Status:** EL0 data access is deferred to hardware testing (Pi 5, Jetson). The syscall infrastructure works at EL1. See `docs/component-isolation.md` for details.
+**Status:** Avoided by design: kernel pages keep AP=00 and user pages live in per-task `TTBR0_EL1` tables, so this only reproduces if `VMM_FLAG_USER` is set on kernel pages. EL0 is verified on Pi 5 (#697) and Jetson (#1079). See `docs/component-isolation.md` for details.
 
 ### ONNX Model Name Truncation
 
