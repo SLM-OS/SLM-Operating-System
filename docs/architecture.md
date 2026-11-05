@@ -17,7 +17,7 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 │                                                                              │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                    Application Layer (Phase 5)                       │   │
-│   │     Components, ONNX Inference, Message Routing, EL0 Isolation      │   │
+│   │     Components, ONNX Inference, Message Routing, EL0 Tasks          │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
 │                                    ▼                                         │
@@ -426,7 +426,7 @@ Phase 5 delivers the AI inference capabilities that justify the "SLM" in SLM-OS.
 │   Syscall Interface (EL0/EL1)                                           │
 │   ├── SVC dispatch (7 syscalls)                                         │
 │   ├── Fault isolation (handle_user_fault)                               │
-│   └── User pointer validation                                           │
+│   └── User pointer checks                                               │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
