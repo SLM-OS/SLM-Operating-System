@@ -93,7 +93,7 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 **Builds and configuration**
 - Platform code is guarded by `#ifdef PLATFORM_*`, and values live in `kernel/include/platform.h` instead of hardcoded addresses.
 - Check optional features too, not just the four platforms: `AI_SCHED`, `WORK_STEALING`, `EVICTION_MODELS`, `JETSON_HW_TICK`, `SECONDARY_PREEMPT`, `NET_SSHD`. Look for code nested inside an unrelated `#if`, and for code that breaks when a feature is off.
-- A new build option joins the shared per-variant CMake argument lists in the `Makefile`, so toggling it forces a reconfigure (`make check-build-signatures`).
+- A new build option joins the shared per-variant CMake argument lists in the `Makefile`, so toggling it forces a reconfigure (`make check-build-signatures`). A new default-off option that gates C code also joins the wide lists for `make check-braces`, unless it would hide a branch no other configuration parses.
 - Kernel C follows the C23 rules in `kernel/CLAUDE.md`. No circular dependencies between subsystems.
 - NIC driver changes (`kernel/drivers/*net*.c`, `kernel/net/lwip_slm.c`, a new `struct net_driver`) follow `docs/net-driver-checklist.md`.
 
@@ -108,9 +108,9 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 - A closing keyword ("fix", "close", "resolve" + `#N`) in a commit message or PR body closes that issue on merge, even in a negated sentence. Flag any that shouldn't, and check `closingIssuesReferences` on a PR.
 
 **C style: braces**
-- When reviewing the checked-out branch, run `make check-braces` and report each violation as a Warning. Don't look for these by hand. It checks changed lines as the main and test kernel of all four platforms, and its result is authoritative for code those configurations compile.
+- When reviewing the checked-out branch, run `make check-braces` and report each violation as a Warning. Don't look for these by hand. It checks changed lines as the main, test and check-only wide kernel of all four platforms, and its result is authoritative for code those configurations compile.
 - If it can't run (no `clang-tidy` or cross compiler on PATH), or for a PR on another branch, say so in the report and read changed lines for the rule: every `if`/`else`/`while`/`for`/`do` body is braced, except a stand-alone single-line statement like `if (err) return rc;`. An `if`/`else` across several lines is fully braced even with one-line bodies.
-- Also read by hand any file it lists as not checked, macro bodies (the rule skips macro expansions), and changes inside `#if` blocks that are off in the default builds (`COOP_PREEMPT`, `HAILO_WIRE_DEBUG`, `NET_SSHD`, for example).
+- Also read by hand any file it lists as not checked, macro bodies (the rule skips macro expansions), changes inside `#if` blocks that are off even in the wide configuration (`NET_SSHD_DEMO_ALLOW_ALL`, `PI5_FIQ_TIMER`, `SLM_HOST_HARNESS` or the `ENABLE_*_EMBED` blocks, for example), and code that needs both a wide-only option and `ENABLE_BOOT_TESTS`.
 
 **Suggestions only**
 - Functions over 80 lines worth splitting, magic numbers, missing `static`, comments that say what instead of why.

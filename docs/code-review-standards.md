@@ -26,11 +26,13 @@ configures each platform without compiling. Builds and QEMU tests belong to
 `/ci`, and hardware runs belong to `/deploy-and-test`.
 
 The brace rule is checked mechanically by `clang-tidy` (`.clang-tidy`,
-`scripts/check-c-braces.py`) on changed lines, for code that the main and test
-kernel of each platform compile. `make check-braces BRACES_ARGS=--all` checks
-the whole tree and reports 0, so a non-zero count is a new regression. Code it
-cannot see may still have unbraced bodies: `#if` blocks off in every
-configuration, files outside the builds, and macro bodies.
+`scripts/check-c-braces.py`) on changed lines, for code that the main, test and
+check-only wide kernel of each platform compile. `make check-braces BRACES_ARGS=--all` checks
+the whole tree and reports 0, so a non-zero count is a new regression. The wide kernel
+turns on default-off features such as `NET_SSHD`, `COOP_PREEMPT` and
+`HAILO_WIRE_DEBUG`; it is never built or booted. Code the check cannot see needs
+reading by hand: `#if` blocks off even there, code needing both a wide-only
+option and `ENABLE_BOOT_TESTS`, files outside every build, and macro bodies.
 
 ## Severity and completion
 

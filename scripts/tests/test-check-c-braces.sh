@@ -405,19 +405,97 @@ sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
 cat > Makefile <<'MK'
 tidy-db:
 	@test "$(PLATFORM)" != BROKEN
-	@mkdir -p db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
-	@cp db/compile_commands.json db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)/
+	@mkdir -p db/$(PLATFORM)$(if $(filter-out kernel,$(TIDY_VARIANT)),-$(TIDY_VARIANT))
+	@cp db/compile_commands.json db/$(PLATFORM)$(if $(filter-out kernel,$(TIDY_VARIANT)),-$(TIDY_VARIANT))/
 MK
 git add Makefile
 git commit -qm makefile
-DB_ARGS=(--db db/PLAT --db db/PLAT-test)
+DB_ARGS=(--db db/PLAT --db db/PLAT-test --db db/PLAT-wide)
 EXTRA_ARGS=(--make-db)
-expect "--make-db builds main and test databases" 0 "parses: PLAT 1, PLAT-test 1"
+expect "--make-db builds main, test and wide databases" 0 "parses: PLAT 1, PLAT-test 1, PLAT-wide 1"
 DB_ARGS=(--db db/BROKEN)
 expect "--make-db failure fails the check" 2 "configuring BROKEN failed"
 DB_ARGS=(--db db)
 EXTRA_ARGS=()
 git checkout -q kernel/src/a.c
+
+# A wide option that CMake silently drops must fail the check.
+cat > kernel/src/uses_option.h <<'C'
+#ifdef WANTED_OPTION
+#endif
+#ifdef DROPPED_OPTION
+#endif
+#ifdef WANTED
+#endif
+C
+git add kernel/src/uses_option.h
+git commit -qm uses-option
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+FLAGS="-DWANTED_OPTION=1"
+write_db kernel/src/a.c
+EXTRA_ARGS=(--require-define db=WANTED_OPTION)
+expect "required define that is present passes" 0 "0 violation"
+EXTRA_ARGS=(--require-define db=RENAMED_OPTION)
+FLAGS="-DRENAMED_OPTION=1"
+write_db kernel/src/a.c
+expect "required define no C file tests fails" 2 "no C file tests RENAMED_OPTION"
+# A comment doesn't count: a rename can leave the old name behind in one.
+printf '/* COMMENT_OPTION used to gate this. */\n' > kernel/src/comment.h
+git add kernel/src/comment.h
+git commit -qm comment
+FLAGS="-DCOMMENT_OPTION=1"
+write_db kernel/src/a.c
+EXTRA_ARGS=(--require-define db=COMMENT_OPTION)
+expect "required define only in a comment fails" 2 "no C file tests COMMENT_OPTION"
+EXTRA_ARGS=(--require-define other=WANTED_OPTION)
+expect "required define for an unknown database fails" 2 "databases: other"
+EXTRA_ARGS=(--forbid-define other=WANTED_OPTION)
+expect "forbidden define for an unknown database fails" 2 "databases: other"
+EXTRA_ARGS=(--forbid-define db=COMMENT_OPTION)
+expect "forbidden define that is set fails" 2 "db defines COMMENT_OPTION"
+EXTRA_ARGS=(--forbid-define db=NOT_SET_OPTION)
+expect "forbidden define that isn't set passes" 0 "0 violation"
+FLAGS="-DWANTED_OPTION=1"
+write_db kernel/src/a.c
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+expect "required define that is missing fails" 2 "db doesn't define DROPPED_OPTION"
+EXTRA_ARGS=(--require-define db=WANTED)
+expect "required define must match the whole name" 2 "db doesn't define WANTED"
+EXTRA_ARGS=()
+FLAGS=""
+write_db kernel/src/a.c
+git checkout -q kernel/src/a.c
+
+# A build change with no C change still checks the required defines. Without a
+# build change the run stops early and doesn't configure anything.
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+expect "no build change skips the define check" 0 "no changed C lines"
+echo '# changed' >> Makefile
+expect "build change alone checks required defines" 2 "db doesn't define DROPPED_OPTION"
+EXTRA_ARGS=(--require-define db=KEPT_OPTION)
+FLAGS="-DKEPT_OPTION=1"
+write_db kernel/src/a.c
+printf '#ifdef KEPT_OPTION\n#endif\n' >> kernel/src/uses_option.h
+git add kernel/src/uses_option.h
+git commit -qm kept-option
+expect "build change with defines intact passes" 0 "no changed C lines"
+git checkout -q Makefile
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+printf '# build\n' > CMakeLists.txt
+mkdir -p cmake
+printf '# build\n' > cmake/gen.cmake
+git add CMakeLists.txt cmake/gen.cmake
+git commit -qm build-files
+expect "committed build files don't count" 0 "no changed C lines"
+echo '# changed' >> CMakeLists.txt
+expect "CMakeLists.txt change checks required defines" 2 "db doesn't define DROPPED_OPTION"
+git checkout -q CMakeLists.txt
+echo '# changed' >> cmake/gen.cmake
+expect "cmake/ change checks required defines" 2 "db doesn't define DROPPED_OPTION"
+git checkout -q cmake/gen.cmake
+EXTRA_ARGS=()
+FLAGS=""
+write_db kernel/src/a.c
 
 # A changed C file outside the database is reported, not failed.
 mkdir -p tools

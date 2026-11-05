@@ -592,8 +592,9 @@ static void idle_task_func(void *arg)
             uint64_t mpidr;
             __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
             int hw_cpu = cpu_logical_id(mpidr);
-            if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS)
+            if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
                 (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
+            }
         }
 #endif
 
@@ -1860,8 +1861,9 @@ void scheduler_tick(void);
 static inline void coop_preempt_maybe_tick(uint32_t cpu)
 {
     uint64_t freq = timer_get_frequency();
-    if (freq == 0)
+    if (freq == 0) {
         return;
+    }
     uint64_t period = freq / TIMER_HZ;       /* cycles per tick */
     uint64_t now = timer_get_count();
     uint64_t last = coop_last_tick_cntpct[cpu];
@@ -1872,8 +1874,9 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
         __asm__ volatile("dmb ish" ::: "memory");
         return;
     }
-    if (now - last < period)
+    if (now - last < period) {
         return;
+    }
 
     /* Catch up — if we haven't scheduled in a long time (idle wfi or
      * long busy-wait), replay one tick and advance our marker by one
@@ -1935,8 +1938,9 @@ volatile uint64_t slm_preempt_point_schedule_calls;
 void slm_preempt_check_and_yield(void)
 {
     uint32_t cpu = cpu_id();
-    if (cpu >= MAX_CPUS)
+    if (cpu >= MAX_CPUS) {
         return;
+    }
 
     slm_preempt_point_calls++;
 
@@ -1944,12 +1948,14 @@ void slm_preempt_check_and_yield(void)
      * CPU — recursing into schedule() through the preempt-point would
      * just re-enter the same code path. NOTE: this does NOT cover
      * spinlock-held callers; see the function header comment. */
-    if (preempt_disabled[cpu])
+    if (preempt_disabled[cpu]) {
         return;
+    }
 
     uint64_t freq = timer_get_frequency();
-    if (freq == 0)
+    if (freq == 0) {
         return;
+    }
     uint64_t period = freq / TIMER_HZ;
     uint64_t now = timer_get_count();
     uint64_t last = coop_last_tick_cntpct[cpu];
@@ -1958,8 +1964,9 @@ void slm_preempt_check_and_yield(void)
      * the bootstrap case before the first real tick — we want to
      * fall through into schedule() once on first call so the
      * deadline gets seeded by coop_preempt_maybe_tick. */
-    if (last != 0 && (now - last) < period)
+    if (last != 0 && (now - last) < period) {
         return;
+    }
 
     slm_preempt_point_schedule_calls++;
     schedule();
