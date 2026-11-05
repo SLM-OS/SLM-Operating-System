@@ -42,7 +42,7 @@ Run git from the working directory, without `-C`, so the pre-approved commands m
 - Read the commit messages and PR body for intent. Treat their claims as things to check, including "tested on hardware".
 - Find the sections for the touched subsystems with `grep -n '^#' kernel/CLAUDE.md runtime/CLAUDE.md`, and read those. Don't read both files whole. Root `CLAUDE.md` has the Jetson boot-path rules. Those notes record rules learned from real failures, so a violation is a finding.
 - Run `gh issue list --search "<keywords>"` before reporting something that looks long-standing. If it's already tracked, cite the issue instead of raising it as new.
-- Ignore `docs/archive/` and the root `REVIEW_*.md` files, which are an April 2026 snapshot.
+- Ignore `docs/archive/`, which includes old review snapshots.
 
 ## 3. Look for these
 

@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - dtb_validate() bounds handling against crafted headers
- *     (BOOT-H1 in docs/code-review-2026-04-12.md)
+ *     (BOOT-H1 in docs/archive/code-reviews/code-review-2026-04-12.md)
  *   - /memreserve/ parsing — both standard FDT-header reserve map and
  *     non-standard root-node `memreserve` property (Pi convention)
  *   - /chosen entropy + bootloader metadata parsing
