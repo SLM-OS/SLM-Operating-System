@@ -45,8 +45,8 @@ make test-check-braces && make check-braces
 Runs `clang-tidy` on C lines changed since `origin/main`, as the main and test
 kernel of all four platforms (`scripts/check-c-braces.py`). Older violations
 aren't reported. Fix any it reports. A `could not parse` line means a file was
-not checked, so don't treat that as a pass. `make` reports `Error 2` for any
-failure, so read the script's output. Its last line gives parses per
+not checked, so don't treat that as a pass. `make` exits 2 for any failure, so
+read the script's output. Its last line gives parses per
 configuration, and all eight should appear when headers or shared files change.
 
 ### 6. Diff check

@@ -200,6 +200,41 @@ FLAGS=""
 write_db kernel/src/a.c
 git checkout -q kernel/src/a.c
 
+# A clang-tidy crash must not pass as clean. The stand-in only passes through
+# the config check.
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+mkdir -p fake
+REAL_TIDY="$(command -v clang-tidy)"
+cat > fake/clang-tidy <<SH
+#!/bin/bash
+case "\$*" in *--list-checks*) exec "$REAL_TIDY" "\$@";; esac
+kill -SEGV \$\$
+SH
+chmod +x fake/clang-tidy
+echo fake/ >> .gitignore
+git add .gitignore
+git commit -qm ignore-fake
+SAVED_PATH="$PATH"
+PATH="$WORK/fake:$PATH"
+expect "clang-tidy crash fails the check" 2 "could not parse kernel/src/a.c"
+PATH="$SAVED_PATH"
+git checkout -q kernel/src/a.c
+
+# A bad config would otherwise switch the rule off.
+cp .clang-tidy config.saved
+sed -i 's/readability-braces-around-statements/readability-braces-typo/' .clang-tidy
+expect "misspelled check in the config fails" 2 "isn't enabled"
+echo 'Checks: [unterminated' > .clang-tidy
+expect "malformed config fails" 2 "isn't enabled"
+mv config.saved .clang-tidy
+
+# An unexpected exception must not read as "violations" (status 1).
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+mv db/compile_commands.json db/saved.json
+expect "unexpected exception exits 2" 2 "check-braces:"
+mv db/saved.json db/compile_commands.json
+git checkout -q kernel/src/a.c
+
 # A changed C file outside the database is reported, not failed.
 mkdir -p tools
 cat > tools/host.c <<'C'

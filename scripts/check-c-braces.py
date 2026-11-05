@@ -10,9 +10,12 @@ are exempt.
 
 Only code the databases compile is seen, so feature-gated blocks that are off
 in every configuration aren't checked. A changed file that no parse reached
-(host tools, for example) is listed as not checked. A failed parse in any
-database fails the run rather than passing silently, because that database's
-#ifdef blocks would otherwise go unchecked.
+(host tools, for example) is listed as not checked. A file that clang-tidy
+gives up on in any database fails the run rather than passing silently, because
+that database's #ifdef blocks would otherwise go unchecked: a missing header, a
+rejected flag or a crash. Other compile errors are tolerated (empty generated
+headers cause some, and GCC's system headers others), since clang still analyzes
+the rest of the file.
 
 Exit status: 0 clean, 1 violations, 2 could not check.
 
@@ -34,6 +37,7 @@ C_SUFFIXES = (".c", ".h")
 # Generated during a build. The check only configures, so empty stand-ins keep
 # clang parsing; a real generated header takes precedence if one exists.
 GENERATED_HEADERS = ("build_info.h", "ga10b_eviction_mlp_weights_gen.h")
+RULE = "readability-braces-around-statements"
 DIAGNOSTIC = re.compile(r"^(.+?):(\d+):(\d+): (warning|error): (.*)$")
 # With -H, clang prints each opened header as dots, a space and the path.
 INCLUDED = re.compile(r"^\.+ (.+)$")
@@ -118,7 +122,7 @@ def run_tidy(db_dir, args, config, path):
         ["clang-tidy", "-p", str(db_dir), "--quiet", "--config-file=" + config,
          "--header-filter=.*", *args, path],
         capture_output=True, text=True)
-    return db_dir, path, result.stdout + result.stderr
+    return db_dir, path, result.returncode, result.stdout + result.stderr
 
 
 def main():
@@ -141,6 +145,15 @@ def main():
         return 2
     root = Path(git("rev-parse", "--show-toplevel").strip()).resolve()
     os.chdir(root)
+    config = str(root / ".clang-tidy")
+    # A typo or bad YAML in the config otherwise disables the rule silently.
+    listed = subprocess.run(["clang-tidy", "--list-checks",
+                             "--config-file=" + config],
+                            capture_output=True, text=True)
+    if RULE not in listed.stdout:
+        print(f"check-braces: {RULE} isn't enabled by .clang-tidy\n"
+              f"{listed.stderr}", file=sys.stderr)
+        return 2
 
     changed = {}
     if not options.all:
@@ -170,7 +183,6 @@ def main():
     # A changed header can affect any file, so only a pure .c change narrows
     # the list of files to run.
     headers_changed = options.all or any(p.endswith(".h") for p in changed)
-    config = str(root / ".clang-tidy")
     jobs = []
     for db_dir in options.db:
         args, files = load_database(db_dir.resolve(), root)
@@ -184,8 +196,10 @@ def main():
     failed = collections.defaultdict(set)
     workers = min(8, os.cpu_count() or 1)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        for db_dir, path, output in pool.map(lambda j: run_tidy(*j), jobs):
+        for db_dir, path, status, output in pool.map(lambda j: run_tidy(*j),
+                                                     jobs):
             fatal = None
+            located_error = False
             reached.add(path)
             parses[db_dir.name] += 1
             for line in output.splitlines():
@@ -202,10 +216,12 @@ def main():
                 match = DIAGNOSTIC.match(line)
                 if not match:
                     continue
+                if match[4] == "error":
+                    located_error = True
                 if match[4] == "error" and "file not found" in match[5]:
                     fatal = f"{match[1]}:{match[2]}: {match[5]}"
                 elif (match[4] == "warning" and
-                      "readability-braces-around-statements" in match[5]):
+                      RULE in match[5]):
                     location = Path(match[1]).resolve()
                     if not location.is_relative_to(root):
                         continue
@@ -218,6 +234,9 @@ def main():
                             options.all or number in lines
                             or number + 1 in lines):
                         findings[(relative, number)] = match[5]
+            # Status 1 with a compile error is a tolerated error, not a failure.
+            if status < 0 or status >= 128 or (status and not located_error):
+                fatal = fatal or f"clang-tidy exit status {status}"
             if fatal:
                 failed[path].add(f"{db_dir.name}: {fatal}")
 
