@@ -16,7 +16,14 @@ make kernel-clean && make kernel PLATFORM=X86_64
 ```
 Report: pass/fail, any warnings.
 
-### 3. Run test suite (ARM64 QEMU)
+### 3. Build — Jetson with real AI weights
+```
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real
+```
+Code under `SLMOS_AI_WEIGHTS_REAL` isn't compiled by any other step, and an unused
+variable there broke this build unnoticed (#1110). Report: pass/fail, any warnings.
+
+### 4. Run test suite (ARM64 QEMU)
 ```
 make test
 ```
@@ -26,7 +33,7 @@ lines are not printed to stdout. Treat "PASSED - All tests passed (exit code 0)"
 as success. On failure, also grep the build/run output for `PAGE FAULT` and
 `KERNEL PANIC` to characterize the crash.
 
-### 4. Runtime host unit tests
+### 5. Runtime host unit tests
 ```
 make runtime-test
 ```
@@ -38,7 +45,7 @@ This step catches compile or link rot in test-only code, which
 A link error naming a kernel symbol means `test_ffi_stubs` in
 `runtime/src/lib.rs` needs a stub for it.
 
-### 5. Brace check
+### 6. Brace check
 ```
 make test-check-braces && make check-braces
 ```
@@ -53,7 +60,7 @@ A `not checked` line exits 0, because those files are outside the configured
 builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone
 reads them for braces by hand.
 
-### 6. Jetson boot layout check
+### 7. Jetson boot layout check
 ```
 make test-jetson-uefi-layout
 ```
@@ -74,7 +81,7 @@ so name it in the Notes column and don't treat that check as a pass.
 The build log is at `build/jetson-layout-build.log`. The step leaves a Jetson
 build in `build/kernel`.
 
-### 7. Diff check
+### 8. Diff check
 Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -86,6 +93,7 @@ Summarize results as a table:
 |------|--------|-------|
 | ARM64 build | ✅/❌ | warnings if any |
 | x86-64 build | ✅/❌ | warnings if any |
+| Jetson real-weights build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |

@@ -5651,14 +5651,14 @@ static int nvgpu_cold_check(void)
 #endif
         fails++;
     } else {
-        uint32_t bad = ga10b_cp_count_mismatch(sched_out,
-                                               ga10b_cp_sched_expected_logits,
-                                               GA10B_CP_SCHED_ACTIONS, 1000u);
         uint32_t am = ga10b_cp_argmax(sched_out, GA10B_CP_SCHED_ACTIONS);
 #if defined(SLMOS_AI_WEIGHTS_REAL)
         shell_printf("check sched: argmax=%u (AI_WEIGHTS=real: no reference)\r\n",
                      (unsigned)am);
 #else
+        uint32_t bad = ga10b_cp_count_mismatch(sched_out,
+                                               ga10b_cp_sched_expected_logits,
+                                               GA10B_CP_SCHED_ACTIONS, 1000u);
         bool ok = bad == 0u && am == GA10B_CP_SCHED_EXPECTED_ARGMAX;
         shell_printf("check sched: %s - argmax %u (want %u), %u/%u logits "
                      "outside 1e-3\r\n", ok ? "PASS" : "FAIL", (unsigned)am,
