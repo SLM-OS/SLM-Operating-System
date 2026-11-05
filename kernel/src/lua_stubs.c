@@ -531,8 +531,12 @@ long strtol(const char *nptr, char **endptr, int base) {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
 
     /* Handle sign */
-    if (*s == '-') { negative = 1; s++; }
-    else if (*s == '+') s++;
+    if (*s == '-') {
+        negative = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Handle base prefix */
     if (base == 0 || base == 16) {
@@ -597,8 +601,12 @@ double strtod(const char *nptr, char **endptr) {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
 
     /* Handle sign */
-    if (*s == '-') { negative = 1; s++; }
-    else if (*s == '+') s++;
+    if (*s == '-') {
+        negative = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Parse integer and fraction parts */
     while (*s) {
@@ -613,8 +621,12 @@ double strtod(const char *nptr, char **endptr) {
             in_fraction = 1;
         } else if (*s == 'e' || *s == 'E') {
             s++;
-            if (*s == '-') { exp_negative = 1; s++; }
-            else if (*s == '+') s++;
+            if (*s == '-') {
+                exp_negative = 1;
+                s++;
+            } else if (*s == '+') {
+                s++;
+            }
             while (*s >= '0' && *s <= '9') {
                 exponent = exponent * 10 + (*s - '0');
                 s++;
