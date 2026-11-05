@@ -112,6 +112,22 @@ static void test_ctl_init_start_level(void)
     TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_init(&c, 0, 30000));
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_init(&c, -4, 0));
     TEST_ASSERT_FALSE(c.temp_ok);
+    /* ... and that counts as lost: a manual 0 is refused, auto keeps
+     * 255, and BPMP waits for the back-off retry. */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_manual(&c, 0));
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_auto(&c, false));
+    TEST_ASSERT_FALSE(tegra_fan_ctl_should_read(&c));
+}
+
+/* Skip the back-off window the way the driver does. */
+static void drain_backoff(struct tegra_fan_ctl *c)
+{
+    for (uint32_t i = 0; i < TEGRA_FAN_RETRY_POLLS; i++) {
+        if (tegra_fan_ctl_should_read(c)) {
+            return;
+        }
+    }
+    TEST_FAIL_MESSAGE("back-off never ended");
 }
 
 static void test_ctl_auto_ramps_to_curve(void)
@@ -150,8 +166,8 @@ static void test_ctl_read_failures_hold_then_max_then_backoff(void)
     TEST_ASSERT_TRUE(tegra_fan_ctl_should_read(&c));
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, -4, 0));
     TEST_ASSERT_FALSE(tegra_fan_ctl_should_read(&c));
-    /* BPMP back: no more backoff once polled, ramp down to the curve. */
-    c.backoff = 0;
+    /* BPMP back at the next retry: ramp down to the curve. */
+    drain_backoff(&c);
     TEST_ASSERT_EQUAL_UINT32(245, tegra_fan_ctl_step(&c, 0, 49500));
     TEST_ASSERT_TRUE(tegra_fan_ctl_should_read(&c));
     TEST_ASSERT_EQUAL_UINT32(70, c.target);
@@ -171,9 +187,12 @@ static void test_ctl_manual_and_safety_override(void)
     TEST_ASSERT_TRUE(c.manual);
     /* nor a new manual level while it is lost (backoff window). */
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_manual(&c, 20));
-    /* Latched: recovery keeps manual 255 until `auto`. */
-    c.backoff = 0;
+    /* Latched: recovery keeps manual 255 ... */
+    drain_backoff(&c);
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, 0, 49500));
+    TEST_ASSERT_TRUE(c.manual);
+    /* ... until a new manual level, now that the temperature is back. */
+    TEST_ASSERT_EQUAL_UINT32(40, tegra_fan_ctl_manual(&c, 40));
     /* >= 95 C overrides a manual level too. */
     tegra_fan_ctl_init(&c, 0, 49500);
     tegra_fan_ctl_manual(&c, 30);

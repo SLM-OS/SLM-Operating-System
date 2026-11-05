@@ -205,14 +205,14 @@
 #define TEGRA234_CLK_GPC1CLK         236   /* GPU GPC1 engine clock */
 #define TEGRA234_CLK_PWM3            107   /* PWM controller 3: carrier fan */
 #define TEGRA234_CLK_TACH0           152   /* fan tachometer counter */
-#define TEGRA234_RESET_PWM3          70
-#define TEGRA234_RESET_TACH0         95
 
 /* BPMP reset IDs (from tegra234-reset.h) */
 #define TEGRA234_RESET_UARTA         100
 #define TEGRA234_RESET_PEX2_CORE_8   25    /* PCIe C8 controller reset */
 #define TEGRA234_RESET_PEX2_CORE_8_APB  26 /* PCIe C8 APB reset */
 #define TEGRA234_RESET_GPU           19
+#define TEGRA234_RESET_PWM3          70
+#define TEGRA234_RESET_TACH0         95
 
 /* BPMP power-domain IDs (from tegra234-powergate.h) */
 #define TEGRA234_POWER_DOMAIN_PCIEX4CA  13  /* PCIe C8 domain */

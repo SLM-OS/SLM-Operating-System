@@ -53,7 +53,7 @@
  * hottest of CPU / GPU / SOC0-2:
  *   margin <= 10 (>= 95 C)    -> 255
  *   margin 11-31 (74-94 C)    -> 187
- *   margin 32-70 (73 to 35 C) -> linear, 186 down to 0
+ *   35-74 C                   -> linear, 0 up to 187 (reached ~73.9 C)
  *   margin >= 70 (<= 35 C)    -> 0 */
 static inline uint32_t tegra_fan_curve_pwm(int32_t temp_mc)
 {
@@ -131,7 +131,8 @@ static inline uint32_t tegra_tach_rpm(uint32_t tach0)
  *    TEGRA_FAN_RETRY_POLLS-th poll (each failed MRQ spins up to 100 ms
  *    with IRQs masked).
  *  - >= 95 C or a lost temperature forces 255 over a manual level. The
- *    level stays manual at 255 until `auto`.
+ *    level stays manual at 255 until `auto` or a new manual level
+ *    once the temperature is back.
  *  - Auto ramps toward the curve with tegra_fan_next_pwm(). */
 #define TEGRA_FAN_TEMP_FAILS_TO_MAX  2u
 #define TEGRA_FAN_RETRY_POLLS        8u
@@ -165,6 +166,12 @@ static inline uint32_t tegra_fan_ctl_forced(const struct tegra_fan_ctl *c)
 static inline uint32_t tegra_fan_ctl_init(struct tegra_fan_ctl *c, int rc, int32_t mc)
 {
     *c = (struct tegra_fan_ctl){ 0 };
+    if (rc != 0) {
+        /* No reading at boot counts as lost: 255 that a manual level
+         * can't lower, and BPMP retried on the back-off schedule. */
+        c->temp_fails = TEGRA_FAN_TEMP_FAILS_TO_MAX;
+        c->backoff = TEGRA_FAN_RETRY_POLLS - 1u;
+    }
     c->temp_ok = rc == 0;
     c->temp_mc = rc == 0 ? mc : 0;
     uint32_t start = rc == 0 ? tegra_fan_curve_pwm(mc) : TEGRA_FAN_MAX_PWM;

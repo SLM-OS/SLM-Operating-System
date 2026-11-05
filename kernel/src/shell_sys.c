@@ -11652,8 +11652,9 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
  * (L4T DT pwm-fan: pwms = <&pwm3 0 45334>). CSR bit 31 = enable, bits
  * 24:16 = duty (0-256 ticks). The raw view is only read when BPMP
  * says its clock is on: an unclocked block traps into EL3 on Tegra234.
- * (A clocked block held in reset could fault too; BPMP has no reset-state query, and Linux
- * deasserts this reset together with enabling the clock.) */
+ * (A clocked block held in reset could fault too; BPMP has no
+ * reset-state query, and Linux deasserts this reset together with
+ * enabling the clock.) */
 #define THERMAL_FAN_PWM_CSR  TEGRA234_PWM3_BASE   /* mapped in vmm.c */
 
 static void thermal_print_fan_raw(void)

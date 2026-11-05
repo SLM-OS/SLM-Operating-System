@@ -573,7 +573,8 @@ where the two disagree.
     level moves 10 per step and is kicked to 64 from a stop. Two failed
     temperature reads in a row (or none at boot) drive the fan at 255,
     with BPMP then retried every 16 s. 95 °C or a lost temperature
-    also overrides a manual level, which stays at 255 until `auto`. BPMP gives PWM3 9.6 MHz
+    also overrides a manual level, which stays at 255 until `auto` (or
+    a new level once the temperature is back). BPMP gives PWM3 9.6 MHz
     after UEFI and Linux's 11.03 MHz after kexec; both need PFM 0.
     `thermal fan` shows the mode, level, rpm and CSR. `thermal fan <n>`
     holds a level and `thermal fan auto` returns to the curve. On

@@ -1526,7 +1526,8 @@ static const struct help_entry help_entries[] = {
         "10 levels per step, kicked at 64 from a stop. Two failed temperature\n"
         "reads in a row (or none at boot) drive the fan at 255, with BPMP\n"
         "then retried every 16 s. That and >= 95 C both override a manual\n"
-        "level, which then stays at 255 until `thermal fan auto`.\n"
+        "level, which then stays at 255 until `thermal fan auto` (or a new\n"
+        "level once the temperature is back).\n"
     ),
 
     HELP_TEXT("timdiag",

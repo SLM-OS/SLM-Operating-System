@@ -182,8 +182,9 @@ int tegra_fan_init(void)
     g_fan.temp_rc = trc;
     uint32_t start = tegra_fan_ctl_init(&g_fan.ctl, trc, mc);
 #if defined(ENABLE_BOOT_TESTS)
-    /* No control task in test kernels: a fixed, safe level. */
-    start = TEGRA_FAN_FIXED_PWM;
+    /* No control task in test kernels: a fixed level, unless the
+     * safety rules force 255. */
+    start = tegra_fan_ctl_forced(&g_fan.ctl) != 0u ? TEGRA_FAN_MAX_PWM : TEGRA_FAN_FIXED_PWM;
     g_fan.ctl.pwm = start;
     g_fan.ctl.target = start;
 #endif
