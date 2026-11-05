@@ -420,11 +420,27 @@ EXTRA_ARGS=()
 git checkout -q kernel/src/a.c
 
 # A wide option that CMake silently drops must fail the check.
+cat > kernel/src/uses_option.h <<'C'
+#ifdef WANTED_OPTION
+#endif
+#ifdef DROPPED_OPTION
+#endif
+#ifdef WANTED
+#endif
+C
+git add kernel/src/uses_option.h
+git commit -qm uses-option
 sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
 FLAGS="-DWANTED_OPTION=1"
 write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=WANTED_OPTION)
 expect "required define that is present passes" 0 "0 violation"
+EXTRA_ARGS=(--require-define db=RENAMED_OPTION)
+FLAGS="-DRENAMED_OPTION=1"
+write_db kernel/src/a.c
+expect "required define no source mentions fails" 2 "no source file mentions RENAMED_OPTION"
+FLAGS="-DWANTED_OPTION=1"
+write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
 expect "required define that is missing fails" 2 "db doesn't define DROPPED_OPTION"
 EXTRA_ARGS=(--require-define db=WANTED)
@@ -433,6 +449,24 @@ EXTRA_ARGS=()
 FLAGS=""
 write_db kernel/src/a.c
 git checkout -q kernel/src/a.c
+
+# A build change with no C change still checks the required defines. Without a
+# build change the run stops early and doesn't configure anything.
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+expect "no build change skips the define check" 0 "no changed C lines"
+echo '# changed' >> Makefile
+expect "build change alone checks required defines" 2 "db doesn't define DROPPED_OPTION"
+EXTRA_ARGS=(--require-define db=KEPT_OPTION)
+FLAGS="-DKEPT_OPTION=1"
+write_db kernel/src/a.c
+printf '#ifdef KEPT_OPTION\n#endif\n' >> kernel/src/uses_option.h
+git add kernel/src/uses_option.h
+git commit -qm kept-option
+expect "build change with defines intact passes" 0 "no changed C lines"
+git checkout -q Makefile
+EXTRA_ARGS=()
+FLAGS=""
+write_db kernel/src/a.c
 
 # A changed C file outside the database is reported, not failed.
 mkdir -p tools

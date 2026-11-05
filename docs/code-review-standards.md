@@ -31,8 +31,8 @@ check-only wide kernel of each platform compile. `make check-braces BRACES_ARGS=
 the whole tree and reports 0, so a non-zero count is a new regression. The wide kernel
 turns on default-off features such as `NET_SSHD`, `COOP_PREEMPT` and
 `HAILO_WIRE_DEBUG`; it is never built or booted. Code the check cannot see needs
-reading by hand: `#if` blocks off even there, files outside every build, and
-macro bodies.
+reading by hand: `#if` blocks off even there, code needing both a wide-only
+option and `ENABLE_BOOT_TESTS`, files outside every build, and macro bodies.
 
 ## Severity and completion
 

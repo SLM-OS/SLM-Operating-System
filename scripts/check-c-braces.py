@@ -10,7 +10,8 @@ nanopb output are exempt.
 
 Only code the databases compile is seen, so `make check-braces` adds a wide
 configuration per platform with default-off features on. Blocks that are off even
-there aren't checked. The rule also skips statements that come from a macro
+there aren't checked, and neither is code needing both a wide-only option and
+ENABLE_BOOT_TESTS, since the wide configuration builds the main kernel. The rule also skips statements that come from a macro
 expansion, so macro bodies aren't checked. A changed file that no
 parse reached (host tools, for example) is listed as not checked. A file that
 clang-tidy gives up on in any database fails the run rather than passing
@@ -124,6 +125,14 @@ def changed_lines(base):
             if path.endswith(C_SUFFIXES) and not exempt(path)}
 
 
+def build_files_changed(base):
+    """True if the diff touches what decides which options reach the compiler."""
+    merge_base = git("merge-base", base, "HEAD").strip()
+    names = git("diff", "--name-only", "--no-renames", merge_base).splitlines()
+    return any(name in ("Makefile", "CMakeLists.txt") or name.startswith("cmake/")
+               for name in names)
+
+
 def compiler_args(compiler):
     """Clang needs the cross compiler's target and system include paths."""
     machine = subprocess.run([compiler, "-dumpmachine"], capture_output=True,
@@ -166,6 +175,13 @@ def load_database(db_dir, root):
             if not exempt(relative):
                 files.append(relative)
     return args + compiler_args(compiler), files
+
+
+def unused_defines(required):
+    """Return the macros no tracked source file mentions, such as after a rename."""
+    return [macro for macro in sorted(set(required))
+            if subprocess.run(["git", "grep", "-qw", macro, "--", "*.c", "*.h"],
+                              capture_output=True).returncode != 0]
 
 
 def missing_defines(db_dir, required):
@@ -277,7 +293,10 @@ def main():
             print(f"check-braces: can't diff against {options.base}: "
                   f"{error.stderr.strip()}", file=sys.stderr)
             return 2
-        if not changed:
+        # A build change can drop an option even with no C change, so the required
+        # defines still get checked below. Otherwise skip the configure step.
+        if not changed and not (options.require_define
+                                and build_files_changed(options.base)):
             print("check-braces: no changed C lines")
             return 0
 
@@ -306,6 +325,13 @@ def main():
             print(f"check-braces: {db_dir.name} doesn't define {macro}, so code "
                   "under it wouldn't be checked", file=sys.stderr)
             return 2
+    for macro in unused_defines(m for ms in required.values() for m in ms):
+        print(f"check-braces: no source file mentions {macro}; update the required "
+              "defines in the Makefile", file=sys.stderr)
+        return 2
+    if not options.all and not changed:
+        print("check-braces: no changed C lines")
+        return 0
 
     jobs = []
     for db_dir in options.db:
