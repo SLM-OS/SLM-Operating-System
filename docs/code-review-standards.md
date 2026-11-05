@@ -33,7 +33,7 @@ findings remain; Suggestions alone do not call for another review round.
 ## Related checklists
 
 - [`docs/net-driver-checklist.md`](net-driver-checklist.md): NIC drivers
-- [`docs/security.md`](security.md): handling of secrets, including `secure_zero`
+- [`kernel/include/string.h`](../kernel/include/string.h): `secure_zero`, for wiping secrets from the stack
 - [`CLAUDE.md`](../CLAUDE.md) "Post-Change Checklist": tests, documentation and
   verification required after every code change
 - [`kernel/CLAUDE.md`](../kernel/CLAUDE.md) and

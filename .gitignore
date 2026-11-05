@@ -12,7 +12,7 @@ cmake-build-*/
 .claude/worktrees
 # Runtime artifacts (e.g. .claude/scheduled_tasks.lock) — never
 # checked-in; the only tracked content under .claude/ is settings,
-# commands, and notes, none of which use .lock.
+# commands, skills, and notes, none of which use .lock.
 .claude/*.lock
 .codex
 
