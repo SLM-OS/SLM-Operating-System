@@ -173,6 +173,17 @@ static void test_ctl_read_failures_hold_then_max_then_backoff(void)
     TEST_ASSERT_EQUAL_UINT32(70, c.target);
 }
 
+static void test_ctl_failed_poll_mid_ramp(void)
+{
+    struct tegra_fan_ctl c;
+    tegra_fan_ctl_init(&c, 0, 30000);                    /* off */
+    TEST_ASSERT_EQUAL_UINT32(64, tegra_fan_ctl_step(&c, 0, 60000)); /* -> 120 */
+    /* One failed poll: the target holds and the ramp keeps going. */
+    TEST_ASSERT_EQUAL_UINT32(74, tegra_fan_ctl_step(&c, -4, 0));
+    TEST_ASSERT_EQUAL_UINT32(120, c.target);
+    TEST_ASSERT_EQUAL_UINT32(84, tegra_fan_ctl_step(&c, 0, 60000));
+}
+
 static void test_ctl_manual_and_safety_override(void)
 {
     struct tegra_fan_ctl c;
@@ -219,6 +230,9 @@ static void test_ctl_auto(void)
     tegra_fan_ctl_step(&c, -4, 0);
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_auto(&c, false));
     TEST_ASSERT_EQUAL_UINT32(255, c.target);
+    /* ... and without the task: 255, not the fixed level. */
+    tegra_fan_ctl_manual(&c, 0);
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_auto(&c, true));
 }
 
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
@@ -249,6 +263,7 @@ int test_suite_tegra_fan(void)
     RUN_TEST(test_ctl_init_start_level);
     RUN_TEST(test_ctl_auto_ramps_to_curve);
     RUN_TEST(test_ctl_read_failures_hold_then_max_then_backoff);
+    RUN_TEST(test_ctl_failed_poll_mid_ramp);
     RUN_TEST(test_ctl_manual_and_safety_override);
     RUN_TEST(test_ctl_auto);
 #if !defined(PLATFORM_JETSON_ORIN_NANO)

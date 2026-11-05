@@ -4,9 +4,12 @@
  */
 #include "tegra_fan.h"
 
+#include <stddef.h>
+
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
 #include "bpmp.h"
+#include "cache.h"
 #include "debug.h"
 #include "platform.h"
 #include "sched.h"
@@ -64,10 +67,11 @@ static void fan_apply_locked(uint32_t pwm_now, uint32_t pwm)
 }
 
 /* Hottest of the zones nvfancontrol's thermal group uses (CPU, GPU,
- * SOC0-2). Returns 0 with *mc set, or the BPMP error when no zone
- * could be read. Stops at the first error: each failed MRQ can spin
- * for its 100 ms timeout with IRQs masked, and if one zone fails the
- * next is unlikely to answer. */
+ * SOC0-2). Returns 0 with *mc set only when every zone was read;
+ * otherwise the BPMP error, so a zone that keeps failing counts as a
+ * failed poll (two in a row: temperature lost, 255) instead of quietly
+ * dropping out of the max. Stops at the first error: each failed MRQ
+ * can spin for its 100 ms timeout with IRQs masked. */
 static int fan_read_hottest(int32_t *mc)
 {
     static const uint32_t zones[] = {
@@ -75,23 +79,16 @@ static int fan_read_hottest(int32_t *mc)
         TEGRA234_BPMP_THERMAL_ZONE_SOC0, TEGRA234_BPMP_THERMAL_ZONE_SOC1,
         TEGRA234_BPMP_THERMAL_ZONE_SOC2,
     };
-    int rc = -1;
-    bool any = false;
-    int32_t hottest = 0;
+    int32_t hottest = INT32_MIN;
     for (unsigned i = 0; i < sizeof(zones) / sizeof(zones[0]); i++) {
         int32_t t = 0;
         int r = bpmp_thermal_get_temp(zones[i], &t);
         if (r != 0) {
-            rc = r;
-            break;
+            return r;
         }
-        if (!any || t > hottest) {
+        if (t > hottest) {
             hottest = t;
         }
-        any = true;
-    }
-    if (!any) {
-        return rc;
     }
     *mc = hottest;
     return 0;
@@ -214,9 +211,34 @@ void tegra_fan_poll(void)
 
     f = spin_lock_irqsave(&g_fan_lock);
     g_fan.temp_rc = rc;
+    bool was_lost = tegra_fan_ctl_temp_lost(&g_fan.ctl);
     uint32_t before = g_fan.ctl.pwm;
     fan_apply_locked(before, tegra_fan_ctl_step(&g_fan.ctl, rc, mc));
+    bool lost = tegra_fan_ctl_temp_lost(&g_fan.ctl);
     spin_unlock_irqrestore(&g_fan_lock, f);
+
+    /* Only on the transitions, so a dead BPMP prints once. */
+    if (lost && !was_lost) {
+        WARN("fan: temperature unreadable (BPMP rc=%d) - fan at full speed", rc);
+    } else if (was_lost && !lost) {
+        INFO("fan: temperature readable again - back on the curve");
+    }
+}
+
+/* The CPU for the control task: the highest one that came online, off
+ * CPU 0 (net_pump and the shells run there, and a wedged CPU 0 must not
+ * stop the fan, #1093). cpu_count is the configured count, so a core
+ * that failed to boot would hold the task on a run queue nobody
+ * serves. CPU_AFFINITY_ANY if no secondary is up. */
+static uint32_t fan_task_cpu(void)
+{
+    for (uint32_t c = cpu_count; c > 1u; c--) {
+        cache_invalidate(&cpu_data[c - 1u].online);
+        if (cpu_data[c - 1u].online) {
+            return c - 1u;
+        }
+    }
+    return CPU_AFFINITY_ANY;
 }
 
 static void fan_task(void *arg)
@@ -237,11 +259,7 @@ int tegra_fan_start(void)
     if (t == NULL) {
         return -1;
     }
-    /* Off CPU 0: net_pump and the shells run there, and a wedged CPU 0
-     * must not stop the fan (#1093). */
-    if (cpu_count > 1) {
-        t->cpu_affinity = cpu_count - 1;
-    }
+    t->cpu_affinity = fan_task_cpu();
     irq_flags_t f = spin_lock_irqsave(&g_fan_lock);
     g_fan.task_started = true;
     spin_unlock_irqrestore(&g_fan_lock, f);

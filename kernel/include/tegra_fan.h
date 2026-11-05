@@ -16,7 +16,6 @@
 #define TEGRA_FAN_H
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 /* L4T device tree: pwm-fan { pwms = <&pwm3 0 45334>; }. The PWM runs
@@ -125,7 +124,7 @@ static inline uint32_t tegra_tach_rpm(uint32_t tach0)
  *
  * Each poll: tegra_fan_ctl_should_read() says whether to ask BPMP at
  * all; tegra_fan_ctl_step() takes the result and moves the level.
- *  - One unreadable poll holds the level (a BPMP timeout is not worth
+ *  - One unreadable poll holds the target (a BPMP timeout is not worth
  *    40 s of full speed); TEGRA_FAN_TEMP_FAILS_TO_MAX in a row mean the
  *    temperature is lost: 255, and BPMP is then retried only every
  *    TEGRA_FAN_RETRY_POLLS-th poll (each failed MRQ spins up to 100 ms
@@ -219,10 +218,12 @@ static inline uint32_t tegra_fan_ctl_step(struct tegra_fan_ctl *c, int rc, int32
     }
     if (forced != 0u) {
         c->target = forced;
-    } else if (c->temp_ok) {
+    } else {
+        /* temp_ok here: forced covers a lost temperature. After one
+         * failed poll temp_mc is the last reading, so the target holds
+         * while the level keeps ramping toward it. */
         c->target = tegra_fan_curve_pwm(c->temp_mc);
     }
-    /* else: one unreadable poll, hold the target. */
     c->pwm = tegra_fan_next_pwm(c->pwm, c->target);
     return c->pwm;
 }
@@ -281,10 +282,11 @@ struct tegra_fan_status {
  * unclocked and the fan undriven. */
 int tegra_fan_init(void);
 
-/* Start the 2 s control task, pinned off CPU 0 so the fan keeps being
- * driven if CPU 0 wedges (#1093). The task itself never prints; a
- * failing BPMP shows up as the MRQ layer's timeout WARNs, one per
- * retry (every 16 s once the temperature is lost). */
+/* Start the 2 s control task, pinned to the highest online CPU other
+ * than CPU 0 so the fan keeps being driven if CPU 0 wedges (#1093). It
+ * prints only when the temperature is lost or comes back; BPMP
+ * timeouts also show as the MRQ layer's WARNs, one per retry (every
+ * 16 s once the temperature is lost). */
 int tegra_fan_start(void);
 
 /* One control step (see the state machine above). */
