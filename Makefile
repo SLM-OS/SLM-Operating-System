@@ -1529,6 +1529,7 @@ check-build-signatures:
 # database is configured from scratch, so no option stays cached from an
 # earlier run.
 # BRACES_BASE sets the diff base; BRACES_ARGS=--all reports the whole tree.
+# The ARM toolchain's usual location is a fallback for shells without it on PATH.
 BRACES_BASE ?= origin/main
 BRACES_ARGS ?=
 TIDY_DB_DIR := $(BUILD_DIR)/tidy
@@ -1546,7 +1547,8 @@ tidy-db:
 
 .PHONY: check-braces
 check-braces:
-	@python3 scripts/check-c-braces.py --make-db --base $(BRACES_BASE) \
+	@PATH="$$PATH:$(TFA_TOOLCHAIN)" python3 scripts/check-c-braces.py --make-db \
+		--base $(BRACES_BASE) \
 		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p) --db $(TIDY_DB_DIR)/$(p)-test) \
 		$(BRACES_ARGS)
 
@@ -1739,6 +1741,7 @@ help:
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
 	@echo "  check-braces   Check braces on changed C lines with clang-tidy"
+	@echo "  test-check-braces  Test the brace check itself (host only)"
 	@echo "  check-tools    Verify required tools are installed"
 	@echo "  help           Show this help message"
 	@echo ""

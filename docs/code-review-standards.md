@@ -27,8 +27,8 @@ configures each platform without compiling. Builds and QEMU tests belong to
 
 The brace rule is checked mechanically by `clang-tidy` (`.clang-tidy`,
 `scripts/check-c-braces.py`) on changed lines, for code that the main and test
-kernel of each platform compile. Older violations remain in the tree and are
-listed by `make check-braces BRACES_ARGS=--all`.
+kernel of each platform compile. Macro bodies are not checked. Older violations
+remain in the tree and are listed by `make check-braces BRACES_ARGS=--all`.
 
 ## Severity and completion
 

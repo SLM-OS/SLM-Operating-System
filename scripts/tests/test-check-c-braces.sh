@@ -27,9 +27,13 @@ echo db/ > .gitignore
 mkdir -p kernel/lib kernel/src db
 
 fails=0
+DB_ARGS=(--db db)
+BASE_ARGS=(--base main)
+EXTRA_ARGS=()
 expect() {  # expect <name> <exit status> <grep pattern or "-"> [absent pattern]
     local name="$1" want="$2" pattern="$3" absent="${4:-}" got=0 output
-    output="$(python3 "$CHECK" --db db --base main 2>&1)" || got=$?
+    output="$(python3 "$CHECK" "${DB_ARGS[@]}" "${BASE_ARGS[@]}" \
+              ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1)" || got=$?
     if [[ "$got" != "$want" ]]; then
         echo "FAIL: $name: exit $got, wanted $want"; echo "$output"
         fails=$((fails + 1))
@@ -233,6 +237,92 @@ sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
 mv db/compile_commands.json db/saved.json
 expect "unexpected exception exits 2" 2 "check-braces:"
 mv db/saved.json db/compile_commands.json
+git checkout -q kernel/src/a.c
+
+# --all reports the older violation with nothing changed.
+EXTRA_ARGS=(--all)
+expect "--all reports older violations" 1 "kernel/src/a.c:3:.*readability-braces"
+EXTRA_ARGS=()
+
+# A base that doesn't exist can't be diffed.
+BASE_ARGS=(--base no-such-ref)
+expect "unknown base fails the check" 2 "can't diff against no-such-ref"
+BASE_ARGS=(--base main)
+
+# A statement using a generated macro must not be discarded. The stand-in
+# header defines them, so this unbraced body is flagged.
+cat > kernel/src/e.c <<'C'
+#include "build_info.h"
+void f(const char *s);
+void e(int x)
+{
+    if (x)
+        f("v " SLMOS_VERSION SLMOS_BUILD_STAMP SLMOS_BUILD_SHA);
+}
+C
+write_db kernel/src/a.c kernel/src/e.c
+expect "body using a generated macro is flagged" 1 "kernel/src/e.c:5:.*readability-braces"
+rm kernel/src/e.c
+
+# Any other undeclared name on a changed line discards the statement, so the
+# line can't be checked.
+cat > kernel/src/e.c <<'C'
+void e(int x)
+{
+    if (x)
+        x = NOT_DECLARED_ANYWHERE;
+}
+C
+write_db kernel/src/a.c kernel/src/e.c
+expect "undeclared name on a changed line fails" 2 "could not parse kernel/src/e.c.*undeclared"
+rm kernel/src/e.c
+
+cat > kernel/src/e.c <<'C'
+void f(const char *s);
+void e(int x)
+{
+    if (x)
+        f("v " NOT_A_MACRO "\n");
+}
+C
+write_db kernel/src/a.c kernel/src/e.c
+expect "syntax error on a changed line fails" 2 "could not parse kernel/src/e.c.*expected"
+rm kernel/src/e.c
+
+# WarningsAsErrors turns findings into errors, which must still count.
+cat >> .clang-tidy <<'YAML'
+WarningsAsErrors: '*'
+YAML
+sed -i '/^\.\.\.$/d' .clang-tidy
+sed -i 's/return 1;/return 2;/' kernel/src/a.c
+write_db kernel/src/a.c
+expect "WarningsAsErrors does not hide violations" 1 "kernel/src/a.c:3:.*readability-braces"
+git checkout -q kernel/src/a.c .clang-tidy
+
+# Non-UTF-8 text, as in some vendored lwIP files, must not abort the run.
+printf '/* caf\xe9 */\n' >> kernel/lib/vendored.c
+printf '/* caf\xe9 */\n' >> kernel/src/a.c
+expect "non-UTF-8 text is tolerated" 0 "0 violation"
+git checkout -q kernel/lib/vendored.c kernel/src/a.c
+
+# --make-db generates each database through `make tidy-db`, naming the variant.
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+cat > Makefile <<'MK'
+tidy-db:
+	@test "$(PLATFORM)" != BROKEN
+	@mkdir -p db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
+	@cp db/compile_commands.json db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)/
+MK
+git add Makefile
+git commit -qm makefile
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+DB_ARGS=(--db db/PLAT --db db/PLAT-test)
+EXTRA_ARGS=(--make-db)
+expect "--make-db builds main and test databases" 0 "parses: PLAT 1, PLAT-test 1"
+DB_ARGS=(--db db/BROKEN)
+expect "--make-db failure fails the check" 2 "configuring BROKEN failed"
+DB_ARGS=(--db db)
+EXTRA_ARGS=()
 git checkout -q kernel/src/a.c
 
 # A changed C file outside the database is reported, not failed.

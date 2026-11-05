@@ -9,13 +9,14 @@ aren't reported unless --all is given. Vendored kernel/lib/ and nanopb output
 are exempt.
 
 Only code the databases compile is seen, so feature-gated blocks that are off
-in every configuration aren't checked. A changed file that no parse reached
+in every configuration aren't checked. The rule also skips statements that come
+from a macro expansion, so macro bodies aren't checked. A changed file that no parse reached
 (host tools, for example) is listed as not checked. A file that clang-tidy
 gives up on in any database fails the run rather than passing silently, because
 that database's #ifdef blocks would otherwise go unchecked: a missing header, a
-rejected flag or a crash. Other compile errors are tolerated (empty generated
-headers cause some, and GCC's system headers others), since clang still analyzes
-the rest of the file.
+rejected flag or a crash. An undeclared name or syntax error on a changed line
+fails it too, since clang discards that statement. Other compile errors are tolerated (GCC's
+system headers cause most), since clang still analyzes the code around them.
 
 Exit status: 0 clean, 1 violations, 2 could not check.
 
@@ -34,9 +35,17 @@ import sys
 from pathlib import Path
 
 C_SUFFIXES = (".c", ".h")
-# Generated during a build. The check only configures, so empty stand-ins keep
-# clang parsing; a real generated header takes precedence if one exists.
-GENERATED_HEADERS = ("build_info.h", "ga10b_eviction_mlp_weights_gen.h")
+# Generated during a build. The check only configures, so stand-ins keep clang
+# parsing; a real generated header takes precedence if one exists. build_info.h
+# needs its macros, because clang discards a statement that uses an undeclared
+# name, and a discarded unbraced body can't be flagged. The weight macros only
+# appear in initializers, so their header can stay empty.
+GENERATED_HEADERS = {
+    "build_info.h": ('#define SLMOS_VERSION ""\n'
+                     '#define SLMOS_BUILD_STAMP ""\n'
+                     '#define SLMOS_BUILD_SHA ""\n'),
+    "ga10b_eviction_mlp_weights_gen.h": "",
+}
 RULE = "readability-braces-around-statements"
 DIAGNOSTIC = re.compile(r"^(.+?):(\d+):(\d+): (warning|error): (.*)$")
 # With -H, clang prints each opened header as dots, a space and the path.
@@ -45,7 +54,8 @@ INCLUDED = re.compile(r"^\.+ (.+)$")
 
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True,
-                          text=True).stdout
+                          text=True, encoding="utf-8",
+                          errors="replace").stdout
 
 
 def exempt(path):
@@ -100,8 +110,8 @@ def load_database(db_dir, root):
     entries = json.loads((db_dir / "compile_commands.json").read_text())
     stubs = db_dir / "tidy-stubs"
     stubs.mkdir(exist_ok=True)
-    for header in GENERATED_HEADERS:
-        (stubs / header).touch()
+    for header, content in GENERATED_HEADERS.items():
+        (stubs / header).write_text(content)
     args = ["--extra-arg=-w", "--extra-arg=-ferror-limit=0", "--extra-arg=-H",
             "--extra-arg=-I" + str(stubs)]
     files = []
@@ -121,7 +131,7 @@ def run_tidy(db_dir, args, config, path):
     result = subprocess.run(
         ["clang-tidy", "-p", str(db_dir), "--quiet", "--config-file=" + config,
          "--header-filter=.*", *args, path],
-        capture_output=True, text=True)
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
     return db_dir, path, result.returncode, result.stdout + result.stderr
 
 
@@ -220,13 +230,20 @@ def main():
                     located_error = True
                 if match[4] == "error" and "file not found" in match[5]:
                     fatal = f"{match[1]}:{match[2]}: {match[5]}"
-                elif (match[4] == "warning" and
-                      RULE in match[5]):
-                    location = Path(match[1]).resolve()
-                    if not location.is_relative_to(root):
-                        continue
-                    relative = str(location.relative_to(root))
-                    number = int(match[2])
+                    continue
+                location = Path(match[1]).resolve()
+                if not location.is_relative_to(root):
+                    continue
+                relative = str(location.relative_to(root))
+                number = int(match[2])
+                # An unknown macro beside a string literal reads as a syntax
+                # error ("expected ')'"), not as an undeclared name.
+                if match[4] == "error" and ("undeclared" in match[5]
+                                            or match[5].startswith("expected")):
+                    if number in changed.get(relative, ()):
+                        fatal = f"{relative}:{number}: {match[5]}"
+                # Either severity: WarningsAsErrors turns findings into errors.
+                elif RULE in match[5]:
                     # The finding sits on the line before the unbraced body,
                     # so an edit to that body counts too.
                     lines = changed.get(relative, ())

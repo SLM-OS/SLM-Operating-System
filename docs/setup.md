@@ -28,6 +28,7 @@ by every SLM-OS target:
 sudo apt update
 sudo apt install -y \
     build-essential \
+    clang-tidy \
     cmake \
     ninja-build \
     git \
@@ -143,6 +144,7 @@ aarch64-none-elf-gcc --version   # ARM cross-compiler
 gcc --version                    # host / x86-64 cross-compiler
 rustc --version                  # Rust ≥ 1.80 recommended
 cmake --version                  # must be ≥ 3.20
+clang-tidy --version             # for make check-braces
 qemu-system-aarch64 --version    # ≥ 7.0 recommended
 qemu-system-x86_64 --version
 grub-mkrescue --version
