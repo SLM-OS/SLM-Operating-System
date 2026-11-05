@@ -1029,7 +1029,7 @@ Use the `print_test_result()` helper to maintain consistent output format.
 ### Phase 4: CI/CD Integration
 
 - **Status**: Local CI via `/ci` Claude Code slash command
-- `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets, plus runtime host tests, the C brace check and `make test-jetson-uefi-layout` for boot invariants in the Jetson build that the QEMU test suite doesn't cover
+- `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets, plus a Jetson build with real AI weights, runtime host tests, the C brace check and `make test-jetson-uefi-layout` for boot invariants in the Jetson build that the QEMU test suite doesn't cover
 - Uses ARM semihosting (ARM64) / `isa-debug-exit` (x86-64) for clean QEMU exit
 - The prior GitHub Actions workflow was retired; the workflow YAMLs were removed from the tree (there is no `.github/workflows/` directory) and the config is archived at `docs/archive/ci-cd.md`.
 
