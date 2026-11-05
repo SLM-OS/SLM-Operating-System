@@ -848,6 +848,25 @@ real_start:
     str     w12, [x11]
 
 .Ljetson_post_setup:
+    /*
+     * Don't inherit PAN from the previous owner of this CPU (#1079).
+     * A kexec from VHE Linux reaches here with SCTLR.SPAN=0 and
+     * PSTATE.PAN=1 on the boot CPU (measured: SCTLR 0x30401805 at the
+     * shell). cpu_soft_restart writes INIT_SCTLR_EL1_MMU_OFF, which has
+     * no SPAN, to the live register; PAN=1 is carried over from Linux.
+     * SPAN=0 re-arms PAN on every exception taken to this EL, so each
+     * syscall that dereferences a user pointer takes a level-3 permission
+     * fault. Secondaries (TF-A reset value) and UEFI-direct already
+     * have SPAN=1, PAN=0; Pi 5 gets SPAN=1 from its baseline.
+     *
+     * Both are needed: setting SPAN leaves the current PSTATE.PAN
+     * alone. SCTLR_EL1 is SCTLR_EL2 here on the E2H=1 path.
+     */
+    mrs     x10, sctlr_el1
+    orr     x10, x10, #(1 << 23)           /* SPAN: leave PAN alone on entry */
+    msr     sctlr_el1, x10
+    msr     pan, xzr                       /* PSTATE.PAN = 0 */
+    isb
 #endif
 
     /*

@@ -745,7 +745,7 @@ Used by the Rust model memory allocator (`gpu_map`/`gpu_unmap`) to ensure cache 
 
 ## Syscall Interface (Phase 5 M4)
 
-Milestone 4 adds a kernel-internal syscall dispatch mechanism for user-mode (EL0) components. This is **not** an FFI boundary — syscalls use the ARM64 `SVC #0` instruction rather than C function calls. The syscall dispatch table (`kernel/src/syscall.c`) routes requests from EL0 to kernel handlers that call existing FFI functions (e.g., `rust_infer`, `msg_router_publish`).
+Milestone 4 adds a kernel-internal syscall dispatch mechanism for user-mode (EL0) tasks. This is **not** an FFI boundary — syscalls use the ARM64 `SVC #0` instruction rather than C function calls. The syscall dispatch table (`kernel/src/syscall.c`) routes requests from EL0 to kernel handlers that call existing FFI functions (e.g., `rust_infer`, `msg_router_publish`).
 
 The syscall ABI is documented in `docs/component-isolation.md`. Seven syscalls are defined (SYS_EXIT through SYS_LOG), with user-side stubs in `kernel/include/user_syscall.h`.
 

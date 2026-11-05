@@ -517,10 +517,10 @@ void el1_serror_handler(struct trap_frame *tf)
 }
 
 /* ============================================================================
- * EL0 Exception Handlers (Phase 5 M4 - Component Isolation)
+ * EL0 Exception Handlers (Phase 5 M4)
  *
- * These handle exceptions from user-mode (EL0) components.
- * Key difference from EL1 handlers: faults terminate the component
+ * These handle exceptions from user-mode (EL0) tasks.
+ * Key difference from EL1 handlers: faults terminate the task
  * instead of panicking the kernel.
  * ============================================================================ */
 
@@ -528,7 +528,7 @@ void el1_serror_handler(struct trap_frame *tf)
  * Handle a user-mode fault.
  *
  * Logs diagnostic info and terminates the faulting task.
- * The kernel continues running — only the faulting component is affected.
+ * The kernel continues running — only the faulting task is affected.
  */
 static void handle_user_fault(struct trap_frame *tf, uint64_t esr,
                               uint64_t far, uint32_t ec)
@@ -555,7 +555,7 @@ static void handle_user_fault(struct trap_frame *tf, uint64_t esr,
  *
  * Dispatches SVC (syscalls) to the syscall table.
  * All other synchronous exceptions (data abort, instruction abort,
- * illegal instruction, etc.) terminate the component.
+ * illegal instruction, etc.) terminate the task.
  *
  * #683 PR-5 (EL2/VHE): with the kernel at EL2h+TGE on Pi 5, EL0 sync
  * exceptions take the lower-EL AArch64 sync vector at VBAR_EL2 + 0x400
@@ -585,7 +585,7 @@ void el0_sync_handler(struct trap_frame *tf)
 /*
  * EL0 SError handler.
  *
- * Asynchronous external abort from EL0 — terminate component.
+ * Asynchronous external abort from EL0 — terminate the task.
  */
 void el0_serror_handler(struct trap_frame *tf)
 {
