@@ -381,7 +381,6 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 | test_pi_mutex_trylock_success | trylock succeeds when mutex is unlocked |
 | test_pi_mutex_trylock_fail | trylock returns 0 when mutex is already locked (simulates held lock) |
 | test_pi_mutex_priority_preserved | An uncontended lock and unlock leaves the owner's priority unchanged |
-| test_priority_inheritance_basic | LOW owner boosted to HIGH when HIGH-pri task waits |
 | test_pi_boost_survives_requeue | Real tasks: a holder boosted by a blocked waiter keeps the priority across `yield()` re-queues, and loses it on unlock (#1103) |
 | test_pi_boosted_holder_runs_before_medium | Real tasks: with a HIGH task blocked on the mutex, the holder unlocks before a NORMAL task runs (#1103) |
 | test_pi_boost_kept_until_last_mutex_released | A holder of two mutexes keeps the boost through the inner release and loses it with the last (#1103) |
@@ -391,7 +390,7 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 | test_inversion_count | Verify lock/unlock cycle without waiters doesn't increment inversion count |
 
 **Test Notes:**
-- `test_priority_inheritance_basic` manually simulates PI scenario by creating owner/waiter tasks; the #1103 tests run the real `pi_mutex_lock` path
+- The #1103 tests run the real `pi_mutex_lock` path with real tasks
 - Verifies priority boost occurs (`effective_priority` changes from LOW to HIGH)
 - Verifies priority restoration on unlock
 - Logs PI events: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`

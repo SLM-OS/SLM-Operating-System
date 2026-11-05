@@ -17,6 +17,13 @@
 static volatile uint32_t total_inversions = 0;
 static volatile int last_inversion_flag = 0;
 
+/* Serializes raises of task->pi_priority. A per-mutex guard isn't enough: two
+ * waiters on two mutexes held by one task hold different guards, and a plain
+ * check-then-set could lose the higher value. Not an atomic max, because
+ * struct task is in NC memory on Pi 5 / Jetson, where exclusive operations
+ * aren't safe; this lock lives in cacheable memory. */
+static spinlock_t pi_floor_lock = SPINLOCK_INIT;
+
 /*
  * Initialize a priority-inheriting mutex.
  */
@@ -40,6 +47,7 @@ static void note_mutex_acquired(struct task *task)
 
 /*
  * Raise `task`'s inherited priority to at least `priority`. Guard held.
+ * Returns true if it changed.
  *
  * Stored apart from effective_priority, which every run-queue insertion
  * recomputes (#1103). It is set even when the task is currently at or above
@@ -47,31 +55,43 @@ static void note_mutex_acquired(struct task *task)
  * a priority someone lowers later), and the task must not fall below a waiter
  * when it ends.
  */
-static void raise_inherited_priority(struct task *task, uint8_t priority)
+static bool raise_inherited_priority(struct task *task, uint8_t priority)
 {
+    bool raised = false;
+    irq_flags_t flags = spin_lock_irqsave(&pi_floor_lock);
+
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_invalidate(&task->pi_priority);
+#endif
     if (priority > task->pi_priority) {
         task->pi_priority = priority;
 #if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->pi_priority);
 #endif
+        raised = true;
     }
+
+    spin_unlock_irqrestore(&pi_floor_lock, flags);
+    return raised;
 }
 
 /*
  * Make `caller`'s priority a floor for the owner, and boost the owner now if
  * caller outranks it. Must be called with guard held.
  *
- * Returns: 1 if priority was boosted (inversion detected), 0 otherwise.
+ * Returns: true if the owner's floor or effective priority changed, so its
+ * run-queue position needs refreshing. Also true when only the floor rose: a
+ * re-queue in flight on another CPU may have read the old floor.
  */
-static int try_boost_owner(pi_mutex_t *mutex, struct task *caller)
+static bool try_boost_owner(pi_mutex_t *mutex, struct task *caller)
 {
     struct task *owner = mutex->owner;
 
     if (!owner || !caller) {
-        return 0;
+        return false;
     }
 
-    raise_inherited_priority(owner, caller->effective_priority);
+    bool changed = raise_inherited_priority(owner, caller->effective_priority);
 
     /* Check if caller has higher priority than owner's effective priority */
     if (caller->effective_priority > owner->effective_priority) {
@@ -86,10 +106,10 @@ static int try_boost_owner(pi_mutex_t *mutex, struct task *caller)
 #endif
         total_inversions++;
         last_inversion_flag = 1;
-        return 1;
+        changed = true;
     }
 
-    return 0;
+    return changed;
 }
 
 /*
@@ -121,9 +141,9 @@ void pi_mutex_lock(pi_mutex_t *mutex)
      * is still at its old position, so move it, or everything queued ahead of
      * that position runs first. This is the one place the guard nests around
      * an rq_lock (never the reverse: nothing under rq_lock takes a pi_mutex).
-     * Holding the guard keeps the owner from releasing the mutex meanwhile;
-     * doing it before this task joins the wait queue means no hand-off can
-     * mark this task READY while it spends longer here. */
+     * Holding the guard keeps the owner from releasing the mutex meanwhile, and
+     * no hand-off can see this task until the guard is dropped below, so this
+     * adds nothing to the time between it becoming visible and switching away. */
     if (try_boost_owner(mutex, self)) {
         sched_reposition_task(mutex->owner);
     }

@@ -721,6 +721,8 @@ uint8_t sched_ai_step_priority(uint8_t current, uint8_t priority_adj)
     return levels[idx];
 }
 
+static uint8_t effective_base_priority(struct task *task);
+
 /*
  * Record an AI decision's priority on the task. Steps from the current
  * effective priority (which already carries any earlier AI level and
@@ -735,13 +737,14 @@ void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->pi_priority);
 #endif
-    /* While a task inherits a priority (#1103) its effective priority says
-     * nothing about the task itself: stepping from it would leave the
+    /* While a task runs on a borrowed priority (#1103) its effective priority
+     * says nothing about the task itself: stepping from it would leave the
      * borrowed level behind as the AI's choice after the mutex is released.
      * Record no new level. On the usual path scheduler_add_task has already
      * cleared the old one, so the task has no AI level until its next
-     * placement after the inheritance ends. */
-    if (task->pi_priority != 0) {
+     * placement after the inheritance ends. A floor at or below the task's
+     * own base priority borrows nothing, so the decision goes ahead. */
+    if (task->pi_priority > effective_base_priority(task)) {
         return;
     }
 #if !defined(PLATFORM_HAS_NC_MEMORY)
@@ -809,7 +812,7 @@ static void update_deadline_boost(struct task *task)
 #endif
 
     if (task->deadline_ns == 0) {
-        /* No deadline - effective priority equals base priority */
+        /* No deadline: the base priority, or the inherited floor if higher */
         set_effective_priority(task, effective_base_priority(task));
         return;
     }

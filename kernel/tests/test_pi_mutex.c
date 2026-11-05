@@ -13,16 +13,6 @@
 #include "smp.h"
 #include "debug.h"
 
-/* Shared state for tests */
-static pi_mutex_t test_mutex;
-
-/* Simple task entry that immediately exits */
-static void nop_entry(void *arg)
-{
-    (void)arg;
-    task_exit();
-}
-
 /* ============================================================================
  * Unit Tests: Basic PI Mutex Operations
  * ============================================================================ */
@@ -122,85 +112,13 @@ static void test_pi_mutex_priority_preserved(void)
  * Integration Tests: Priority Inheritance
  * ============================================================================ */
 
-/*
- * Test: Priority inheritance occurs when high-pri waits on low-pri
- *
- * This is a simplified test that directly exercises the priority
- * inheritance logic without needing multi-task coordination.
- * We simulate the scenario by:
- * 1. Creating a low-priority task and having it acquire the mutex
- * 2. Calling try_boost from a high-priority context
- */
-static void test_priority_inheritance_basic(void)
-{
-    pi_mutex_init(&test_mutex);
-
-    /* Create a low priority "owner" task */
-    struct task *low_task = task_create_with_priority(
-        "pi_owner", nop_entry, NULL, TASK_PRIORITY_LOW);
-    TEST_ASSERT_NOT_NULL(low_task);
-
-    /* Manually set up the mutex as if low_task owns it */
-    irq_flags_t flags = irq_save();
-
-    test_mutex.locked = 1;
-    test_mutex.owner = low_task;
-    uint8_t low_original_pri = low_task->effective_priority;
-
-    /* Now simulate a high-priority task trying to acquire */
-    /* We'll create a high-priority task to represent the waiter */
-    struct task *high_task = task_create_with_priority(
-        "pi_waiter", nop_entry, NULL, TASK_PRIORITY_HIGH);
-    TEST_ASSERT_NOT_NULL(high_task);
-
-    /* Verify initial state */
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, low_task->effective_priority);
-
-    /*
-     * The priority inheritance happens when high_task tries to lock.
-     * Since we can't easily run the task, we'll manually invoke the
-     * boost logic by checking the condition and boosting.
-     */
-    if (high_task->effective_priority > test_mutex.owner->effective_priority) {
-        /* This is what pi_mutex_lock does internally */
-        INFO("PI: Boosting task '%s' (pri %u->%u) for waiter '%s' (pri %u)",
-             test_mutex.owner->name,
-             test_mutex.owner->effective_priority,
-             high_task->effective_priority,
-             high_task->name,
-             high_task->effective_priority);
-        test_mutex.owner->effective_priority = high_task->effective_priority;
-    }
-
-    /* Verify priority was boosted */
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, low_task->effective_priority);
-
-    /* Simulate unlock - restore priority */
-    low_task->effective_priority = low_original_pri;
-    test_mutex.locked = 0;
-    test_mutex.owner = NULL;
-
-    /* Verify priority was restored */
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, low_task->effective_priority);
-
-    irq_restore(flags);
-
-    /* Cleanup */
-    low_task->state = TASK_TERMINATED;
-    high_task->state = TASK_TERMINATED;
-    task_destroy(low_task);
-    task_destroy(high_task);
-
-    INFO("Priority inheritance test passed");
-}
-
 /* ----------------------------------------------------------------------------
  * Regression test: repeated pi_mutex cycles do not deadlock (SCHED-H1)
  *
  * Written for SCHED-H1's spin-and-yield wait loop, which #93 replaced
  * with a sleep queue (contended waiters now block and are handed the
  * mutex on unlock). The test still guards the uncontended paths:
- * repeated trylock / unlock cycles, with a yield() between iterations so
+ * repeated lock / unlock cycles, with a yield() between iterations so
  * the scheduler interleaves other tasks, must not deadlock on the
  * mutex's guard spinlock. Contended waiters and the inherited priority
  * are covered by the #1103 tests below.
@@ -356,6 +274,7 @@ static void rq_cleanup(struct task *holder, struct task *waiter, struct task *me
 static void test_pi_boost_survives_requeue(void)
 {
     rq_reset();
+    uint32_t inversions_before = pi_mutex_inversion_count();
 
     struct task *holder = rq_create("pi_rq_hold", rq_holder_entry, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(holder);
@@ -363,6 +282,9 @@ static void test_pi_boost_survives_requeue(void)
     bool locked = rq_wait(&rq_holder_locked);
 
     struct task *waiter = rq_create("pi_rq_wait", rq_waiter_entry, TASK_PRIORITY_HIGH);
+    if (!waiter) {
+        rq_cleanup(holder, NULL, NULL);
+    }
     TEST_ASSERT_NOT_NULL(waiter);
     scheduler_add_task_to_cpu(waiter, 0);
     bool done = locked && rq_wait(&rq_holder_done) && rq_wait(&rq_waiter_done);
@@ -372,6 +294,7 @@ static void test_pi_boost_survives_requeue(void)
     TEST_ASSERT_TRUE_MESSAGE(locked, "holder never acquired the mutex");
     TEST_ASSERT_TRUE_MESSAGE(done, "holder/waiter did not complete");
     TEST_ASSERT_MESSAGE(rq_pri_boosted == TASK_PRIORITY_HIGH, "holder was not boosted");
+    TEST_ASSERT_EQUAL_UINT32(inversions_before + 1, pi_mutex_inversion_count());
     TEST_ASSERT_MESSAGE(rq_pri_after_yield == TASK_PRIORITY_HIGH,
                         "boost lost when the holder was re-queued");
     TEST_ASSERT_MESSAGE(rq_pri_after_unlock == TASK_PRIORITY_LOW,
@@ -394,6 +317,9 @@ static void test_pi_boosted_holder_runs_before_medium(void)
 
     struct task *waiter = rq_create("pi_rq_wait", rq_waiter_entry, TASK_PRIORITY_HIGH);
     struct task *medium = rq_create("pi_rq_med", rq_medium_entry, TASK_PRIORITY_NORMAL);
+    if (!waiter || !medium) {
+        rq_cleanup(holder, waiter, medium);
+    }
     TEST_ASSERT_NOT_NULL(waiter);
     TEST_ASSERT_NOT_NULL(medium);
 
@@ -457,6 +383,9 @@ static void test_pi_boost_kept_until_last_mutex_released(void)
     bool locked = rq_wait(&rq_holder_locked);
 
     struct task *waiter = rq_create("pi_rq_wait", rq_waiter_entry, TASK_PRIORITY_HIGH);
+    if (!waiter) {
+        rq_cleanup(holder, NULL, NULL);
+    }
     TEST_ASSERT_NOT_NULL(waiter);
     scheduler_add_task_to_cpu(waiter, 0);
     bool done = locked && rq_wait(&rq_holder_done) && rq_wait(&rq_waiter_done);
@@ -518,6 +447,9 @@ static void test_pi_floor_recorded_when_holder_not_below_waiter(void)
 
     struct task *holder = rq_create("pi_rq_hold", rq_equal_holder_entry, TASK_PRIORITY_HIGH);
     struct task *waiter = rq_create("pi_rq_wait", rq_late_waiter_entry, TASK_PRIORITY_HIGH);
+    if (!holder || !waiter) {
+        rq_cleanup(holder, waiter, NULL);
+    }
     TEST_ASSERT_NOT_NULL(holder);
     TEST_ASSERT_NOT_NULL(waiter);
 
@@ -589,6 +521,9 @@ static void test_pi_floor_set_on_handoff_for_remaining_waiters(void)
     /* The first to block is first in the FIFO, so it wins the HIGH tie. */
     struct task *next_owner = rq_create("pi_rq_next", rq_handoff_owner_entry, TASK_PRIORITY_HIGH);
     struct task *waiter = rq_create("pi_rq_wait", rq_waiter_entry, TASK_PRIORITY_HIGH);
+    if (!next_owner || !waiter) {
+        rq_cleanup(holder, waiter, next_owner);
+    }
     TEST_ASSERT_NOT_NULL(next_owner);
     TEST_ASSERT_NOT_NULL(waiter);
 
@@ -643,8 +578,7 @@ static void test_pi_mutexes_held_count(void)
  * 1. Returns a valid (non-negative) value
  * 2. Doesn't increment spuriously between calls
  *
- * Note: Full inversion counting verification requires multi-task
- * coordination which is tested in test_priority_inheritance_basic.
+ * test_pi_boost_survives_requeue checks that a real inversion counts.
  */
 static void test_inversion_count(void)
 {
@@ -708,7 +642,6 @@ int test_suite_pi_mutex(void)
     RUN_TEST(test_pi_mutex_held_by_self_states);
 
     /* Integration tests */
-    RUN_TEST(test_priority_inheritance_basic);
     RUN_TEST(test_pi_mutex_wait_loop_stress);
     RUN_TEST(test_pi_boost_survives_requeue);
     RUN_TEST(test_pi_boosted_holder_runs_before_medium);

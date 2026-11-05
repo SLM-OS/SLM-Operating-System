@@ -3315,6 +3315,7 @@ static void test_ai_priority_action_skipped_while_inheriting(void)
     struct task *t = task_create("ai_prio_pi", nop_entry, NULL);
     TEST_ASSERT_NOT_NULL(t);
     task_set_affinity(t, 0);
+    TEST_ASSERT_TRUE(sched_ai_priority_actions_enabled());
 
     irq_flags_t flags = irq_save();
     t->pi_priority = TASK_PRIORITY_HIGH;
@@ -3325,6 +3326,13 @@ static void test_ai_priority_action_skipped_while_inheriting(void)
     t->pi_priority = 0;
     sched_refresh_effective_priority(t);
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->effective_priority);
+
+    /* A floor below the task's own priority borrows nothing. */
+    t->pi_priority = TASK_PRIORITY_LOW;
+    (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->ai_priority);
+    t->pi_priority = 0;
+    t->ai_priority = TASK_AI_PRIORITY_NONE;
     irq_restore(flags);
 
     t->id = 0;

@@ -510,6 +510,10 @@ which takes it off the run queue. `pi_mutex_unlock` drops the owner's
 inherited priority, picks the highest-priority waiter, hands it ownership directly
 and wakes it, so a woken waiter never has to re-acquire.
 
+**Lock order:** `mutex->guard`, then `rq_lock`, because a boost repositions a
+queued holder under the guard. Nothing may take a `pi_mutex` while holding an
+`rq_lock`. `pi_floor_lock` is a leaf taken under a guard.
+
 This replaced a spin-and-yield wait loop (SCHED-H1, 2026-04-12) four days
 after it landed (#93, 2026-04-16). The spin loop could livelock on a single
 CPU: the HIGH waiter kept being picked ahead of the boosted holder. A
@@ -522,8 +526,8 @@ blocked waiter is off the run queue, so that livelock is gone.
   longer than strictly needed, but never less (the same rule FreeRTOS uses).
 - **One level of inheritance:** a boosted holder that blocks on a second
   mutex does not pass the boost on to that mutex's owner (#1121).
-- **AI scheduler:** a decision taken while a task inherits a priority sets no
-  level (`sched_ai_apply_priority_action`), because stepping from the borrowed
+- **AI scheduler:** a decision taken while a task runs on a borrowed priority
+  (a floor above its own base) sets no level (`sched_ai_apply_priority_action`), because stepping from the borrowed
   priority would leave it behind after the release. `scheduler_add_task` has
   usually cleared the previous level already, so the task has no AI level until
   its next placement after the release.
