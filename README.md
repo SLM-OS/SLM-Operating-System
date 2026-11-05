@@ -93,19 +93,20 @@ ARM64 and x86-64 targets. Use before every merge to `main`.
 
 ### Code Review
 
-Branch review is also a slash command, tailored for embedded / bare-metal
-code quality criteria (no libc, no POSIX, kernel stacks fixed at 256 KB
-(`STACK_SIZE` in `kernel/include/config.h`),
-memory-safety review for use-after-free in task/IPC teardown, etc.):
+Branch review is also a slash command, tailored for bare-metal code: memory
+safety, concurrency and IRQ safety, hardware access, boot paths and test
+evidence.
 
 ```
-/slmos-review
+/slmos-review                  # current branch against origin/main
+/slmos-review <PR-number>      # a pull request
+/slmos-review --since <sha>    # re-review after fixes
 ```
 
-Runs `.claude/commands/slmos-review.md` against the current branch's diff
-to `main`. Named `slmos-review` rather than the shorter `review` so it
-doesn't mask Claude Code's built-in `/review` command. See the command
-file for the full critical / high / medium / low review taxonomy.
+Defined in `.claude/skills/slmos-review/SKILL.md`, which holds the Critical /
+Warning / Suggestion criteria. Named `slmos-review` rather than `review` to
+stay distinct from Claude Code's built-in review commands. See
+[`docs/code-review-standards.md`](docs/code-review-standards.md).
 
 ### Issue Tracking
 

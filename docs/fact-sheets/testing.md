@@ -54,9 +54,10 @@ End-to-end hardware validation (full KEX + scrypt auth + REPL over the SSH chann
 
 - `docs/testing.md` (narrative)
 - `.claude/commands/ci.md` — `/ci` slash command (local CI pipeline)
-- `docs/code-review-standards.md` (post-change checklist)
+- `CLAUDE.md` "Post-Change Checklist"
+- `docs/code-review-standards.md` (`/slmos-review` overview)
 - `kernel/tests/` (test source)
 - `docs/testing/` (HW validation logs, live)
 - `docs/ssh.md` (SSH design + test surface)
 
-*Last updated: 25 April 2026*
+*Last updated: 4 November 2026*
