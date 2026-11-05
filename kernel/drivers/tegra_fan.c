@@ -186,6 +186,9 @@ int tegra_fan_init(void)
     g_fan.ready = true;
     spin_unlock_irqrestore(&g_fan_lock, f);
 
+    if (trc != 0) {
+        WARN("fan: temperature unreadable at boot (BPMP rc=%d) - fan at full speed", trc);
+    }
     INFO("fan: PWM3 at %llu Hz (pfm %u), level %u/255, tachometer %s",
          (unsigned long long)g_fan.pwm_clk_hz, (unsigned)g_fan.pfm, (unsigned)start,
          tach_ok ? "on" : "unavailable");
