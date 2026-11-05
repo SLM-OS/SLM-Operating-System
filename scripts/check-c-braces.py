@@ -9,17 +9,17 @@ is clean, so any finding there is a new regression. Vendored kernel/lib/ and
 nanopb output are exempt.
 
 Only code the databases compile is seen, so `make check-braces` adds a wide
-configuration per platform with default-off features on. Blocks that are off even
-there aren't checked, and neither is code needing both a wide-only option and
-ENABLE_BOOT_TESTS, since the wide configuration builds the main kernel. The rule also skips statements that come from a macro
-expansion, so macro bodies aren't checked. A changed file that no
-parse reached (host tools, for example) is listed as not checked. A file that
-clang-tidy gives up on in any database fails the run rather than passing
-silently, because that database's #ifdef blocks would otherwise go unchecked: a
-missing header, a rejected flag or a crash. An undeclared name or syntax error
-on a changed line fails it too, since clang discards that statement. Other
-compile errors are tolerated (GCC's system headers cause most), since clang
-still analyzes the code around them.
+configuration per platform with default-off features on. Blocks that are off
+even there aren't checked, and neither is code needing both a wide-only option
+and ENABLE_BOOT_TESTS, since the wide configuration builds the main kernel. The
+rule also skips statements that come from a macro expansion, so macro bodies
+aren't checked. A changed file that no parse reached (host tools, for example)
+is listed as not checked. A file that clang-tidy gives up on in any database
+fails the run rather than passing silently, because that database's #ifdef
+blocks would otherwise go unchecked: a missing header, a rejected flag or a
+crash. An undeclared name or syntax error on a changed line fails it too, since
+clang discards that statement. Other compile errors are tolerated (GCC's system
+headers cause most), since clang still analyzes the code around them.
 
 Exit status: 0 clean, 1 violations, 2 could not check.
 
@@ -178,10 +178,13 @@ def load_database(db_dir, root):
 
 
 def unused_defines(required):
-    """Return the macros no tracked C file mentions, such as after a rename."""
+    """Return the macros no C preprocessor line tests, such as after a rename."""
     return [macro for macro in sorted(set(required))
-            if subprocess.run(["git", "grep", "-qw", macro, "--", "*.c", "*.h"],
-                              capture_output=True).returncode != 0]
+            if subprocess.run(
+                ["git", "grep", "-qE",
+                 rf"^\s*#\s*(if|ifdef|ifndef|elif)\b.*\b{re.escape(macro)}\b",
+                 "--", "*.c", "*.h"],
+                capture_output=True).returncode != 0]
 
 
 def missing_defines(db_dir, required):
@@ -320,13 +323,18 @@ def main():
     for item in options.require_define:
         name, _, macro = item.partition("=")
         required[name].append(macro)
+    unknown = set(required) - {db_dir.name for db_dir in options.db}
+    if unknown:
+        print("check-braces: --require-define names unknown databases: "
+              + ", ".join(sorted(unknown)), file=sys.stderr)
+        return 2
     for db_dir in options.db:
         for macro in missing_defines(db_dir, required[db_dir.name]):
             print(f"check-braces: {db_dir.name} doesn't define {macro}, so code "
                   "under it wouldn't be checked", file=sys.stderr)
             return 2
     for macro in unused_defines(m for ms in required.values() for m in ms):
-        print(f"check-braces: no C file mentions {macro}; update the required "
+        print(f"check-braces: no C file tests {macro}; update the required "
               "defines in the Makefile", file=sys.stderr)
         return 2
     if not options.all and not changed:

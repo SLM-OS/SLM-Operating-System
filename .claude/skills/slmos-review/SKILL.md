@@ -110,7 +110,7 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 **C style: braces**
 - When reviewing the checked-out branch, run `make check-braces` and report each violation as a Warning. Don't look for these by hand. It checks changed lines as the main, test and check-only wide kernel of all four platforms, and its result is authoritative for code those configurations compile.
 - If it can't run (no `clang-tidy` or cross compiler on PATH), or for a PR on another branch, say so in the report and read changed lines for the rule: every `if`/`else`/`while`/`for`/`do` body is braced, except a stand-alone single-line statement like `if (err) return rc;`. An `if`/`else` across several lines is fully braced even with one-line bodies.
-- Also read by hand any file it lists as not checked, macro bodies (the rule skips macro expansions), and changes inside `#if` blocks that are off even in the wide configuration (`SLM_HOST_HARNESS` or the `ENABLE_*_EMBED` blocks, for example).
+- Also read by hand any file it lists as not checked, macro bodies (the rule skips macro expansions), changes inside `#if` blocks that are off even in the wide configuration (`NET_SSHD_DEMO_ALLOW_ALL`, `SLM_HOST_HARNESS` or the `ENABLE_*_EMBED` blocks, for example), and code that needs both a wide-only option and `ENABLE_BOOT_TESTS`.
 
 **Suggestions only**
 - Functions over 80 lines worth splitting, magic numbers, missing `static`, comments that say what instead of why.

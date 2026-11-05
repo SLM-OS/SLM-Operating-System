@@ -438,7 +438,17 @@ expect "required define that is present passes" 0 "0 violation"
 EXTRA_ARGS=(--require-define db=RENAMED_OPTION)
 FLAGS="-DRENAMED_OPTION=1"
 write_db kernel/src/a.c
-expect "required define no source mentions fails" 2 "no C file mentions RENAMED_OPTION"
+expect "required define no C file tests fails" 2 "no C file tests RENAMED_OPTION"
+# A comment doesn't count: a rename can leave the old name behind in one.
+printf '/* COMMENT_OPTION used to gate this. */\n' > kernel/src/comment.h
+git add kernel/src/comment.h
+git commit -qm comment
+FLAGS="-DCOMMENT_OPTION=1"
+write_db kernel/src/a.c
+EXTRA_ARGS=(--require-define db=COMMENT_OPTION)
+expect "required define only in a comment fails" 2 "no C file tests COMMENT_OPTION"
+EXTRA_ARGS=(--require-define other=WANTED_OPTION)
+expect "required define for an unknown database fails" 2 "unknown databases: other"
 FLAGS="-DWANTED_OPTION=1"
 write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
