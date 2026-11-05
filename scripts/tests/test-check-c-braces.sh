@@ -367,8 +367,9 @@ git commit -qm remove-later-hunk
 write_db kernel/src/a.c
 
 # Git decorates some paths in a diff: a tab after one with a space, and quotes
-# around one with a backslash. None of them may drop out of the check.
-for name in 'sp ace' 'caf\xc3\xa9' 'back\\slash'; do
+# around one with a backslash or control character. None may drop out of the
+# check.
+for name in 'sp ace' 'caf\xc3\xa9' 'back\\slash' 'ct\001l'; do
     file="kernel/src/$(printf "$name").c"
     pattern="$(printf "$name" | sed 's/[^a-z]/./g')\.c:3:.*readability-braces"
     printf 'int n(int x)\n{\n    if (x)\n        return 1;\n    return 0;\n}\n' > "$file"

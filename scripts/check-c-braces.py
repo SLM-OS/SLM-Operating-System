@@ -69,6 +69,15 @@ def exempt(path):
     return path.startswith("kernel/lib/") or path.endswith((".pb.c", ".pb.h"))
 
 
+def unescape(match):
+    """Decode one C-style escape from a path git quoted."""
+    if len(match[1]) == 3:
+        return chr(int(match[1], 8))
+    names = {"a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f",
+             "r": "\r"}
+    return names.get(match[1], match[1])
+
+
 def diff_path(header):
     """Return the path from a "+++ b/path" line, or None for /dev/null.
 
@@ -77,8 +86,7 @@ def diff_path(header):
     """
     text = header[4:]
     if text.startswith('"') and text.endswith('"'):
-        text = re.sub(r"\\(.)", lambda m: {"t": "\t", "n": "\n"}.get(m[1], m[1]),
-                      text[1:-1])
+        text = re.sub(r"\\([0-7]{3}|.)", unescape, text[1:-1])
     else:
         text = text.rstrip("\t")
     return text[2:] if text.startswith("b/") else None
@@ -167,6 +175,56 @@ def run_tidy(db_dir, args, config, path):
     return db_dir, path, result.returncode, result.stdout + result.stderr
 
 
+def parse_output(output, status, root, changed, report_all):
+    """Read one clang-tidy run: (failure reason or None, findings, headers)."""
+    fatal = None
+    located_error = False
+    findings = {}
+    headers = set()
+    for line in output.splitlines():
+        match = INCLUDED.match(line)
+        if match:
+            header = Path(match[1]).resolve()
+            if header.is_relative_to(root):
+                headers.add(str(header.relative_to(root)))
+            continue
+        if line.startswith("error: "):
+            # No location: clang-tidy gave up on the whole file.
+            fatal = line
+            continue
+        match = DIAGNOSTIC.match(line)
+        if not match:
+            continue
+        if match[4] == "error":
+            located_error = True
+        if match[4] == "error" and "file not found" in match[5]:
+            fatal = f"{match[1]}:{match[2]}: {match[5]}"
+            continue
+        location = Path(match[1]).resolve()
+        if not location.is_relative_to(root):
+            continue
+        relative = str(location.relative_to(root))
+        number = int(match[2])
+        lines = changed.get(relative, ())
+        # An unknown macro beside a string literal reads as a syntax error
+        # ("expected ')'"), not as an undeclared name.
+        if match[4] == "error" and ("undeclared" in match[5]
+                                    or match[5].startswith("expected")):
+            if number in lines:
+                fatal = f"{relative}:{number}: {match[5]}"
+        # Either severity: WarningsAsErrors turns findings into errors.
+        elif RULE in match[5]:
+            # The finding sits on the line before the unbraced body, so an edit
+            # to that body counts too.
+            if not exempt(relative) and (report_all or number in lines
+                                         or number + 1 in lines):
+                findings[(relative, number)] = match[5]
+    # Status 1 with a compile error is a tolerated error, not a failure.
+    if status < 0 or status >= 128 or (status and not located_error):
+        fatal = fatal or f"clang-tidy exit status {status}"
+    return fatal, findings, headers
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--db", action="append", required=True, type=Path,
@@ -240,52 +298,12 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
         for db_dir, path, status, output in pool.map(lambda j: run_tidy(*j),
                                                      jobs):
-            fatal = None
-            located_error = False
             reached.add(path)
             parses[db_dir.name] += 1
-            for line in output.splitlines():
-                match = INCLUDED.match(line)
-                if match:
-                    header = Path(match[1]).resolve()
-                    if header.is_relative_to(root):
-                        reached.add(str(header.relative_to(root)))
-                    continue
-                if line.startswith("error: "):
-                    # No location: clang-tidy gave up on the whole file.
-                    fatal = line
-                    continue
-                match = DIAGNOSTIC.match(line)
-                if not match:
-                    continue
-                if match[4] == "error":
-                    located_error = True
-                if match[4] == "error" and "file not found" in match[5]:
-                    fatal = f"{match[1]}:{match[2]}: {match[5]}"
-                    continue
-                location = Path(match[1]).resolve()
-                if not location.is_relative_to(root):
-                    continue
-                relative = str(location.relative_to(root))
-                number = int(match[2])
-                # An unknown macro beside a string literal reads as a syntax
-                # error ("expected ')'"), not as an undeclared name.
-                if match[4] == "error" and ("undeclared" in match[5]
-                                            or match[5].startswith("expected")):
-                    if number in changed.get(relative, ()):
-                        fatal = f"{relative}:{number}: {match[5]}"
-                # Either severity: WarningsAsErrors turns findings into errors.
-                elif RULE in match[5]:
-                    # The finding sits on the line before the unbraced body,
-                    # so an edit to that body counts too.
-                    lines = changed.get(relative, ())
-                    if not exempt(relative) and (
-                            options.all or number in lines
-                            or number + 1 in lines):
-                        findings[(relative, number)] = match[5]
-            # Status 1 with a compile error is a tolerated error, not a failure.
-            if status < 0 or status >= 128 or (status and not located_error):
-                fatal = fatal or f"clang-tidy exit status {status}"
+            fatal, found, headers = parse_output(output, status, root, changed,
+                                                 options.all)
+            findings.update(found)
+            reached.update(headers)
             if fatal:
                 failed[path].add(f"{db_dir.name}: {fatal}")
 
