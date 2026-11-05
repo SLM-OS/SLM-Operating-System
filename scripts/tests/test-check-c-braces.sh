@@ -419,6 +419,21 @@ DB_ARGS=(--db db)
 EXTRA_ARGS=()
 git checkout -q kernel/src/a.c
 
+# A wide option that CMake silently drops must fail the check.
+sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
+FLAGS="-DWANTED_OPTION=1"
+write_db kernel/src/a.c
+EXTRA_ARGS=(--require-define db=WANTED_OPTION)
+expect "required define that is present passes" 0 "0 violation"
+EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
+expect "required define that is missing fails" 2 "db doesn't define DROPPED_OPTION"
+EXTRA_ARGS=(--require-define db=WANTED)
+expect "required define must match the whole name" 2 "db doesn't define WANTED"
+EXTRA_ARGS=()
+FLAGS=""
+write_db kernel/src/a.c
+git checkout -q kernel/src/a.c
+
 # A changed C file outside the database is reported, not failed.
 mkdir -p tools
 cat > tools/host.c <<'C'

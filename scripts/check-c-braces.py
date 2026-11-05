@@ -168,6 +168,15 @@ def load_database(db_dir, root):
     return args + compiler_args(compiler), files
 
 
+def missing_defines(db_dir, required):
+    """Return the macros in required that no compile command in db_dir defines."""
+    commands = " ".join(
+        entry.get("command") or " ".join(entry.get("arguments", []))
+        for entry in json.loads((db_dir / "compile_commands.json").read_text()))
+    return [macro for macro in required
+            if not re.search(rf"-D{re.escape(macro)}(=|\s|$)", commands)]
+
+
 def run_tidy(db_dir, args, config, path):
     result = subprocess.run(
         ["clang-tidy", "-p", str(db_dir), "--quiet", "--config-file=" + config,
@@ -234,6 +243,10 @@ def main():
                         help="ref to diff against (default: origin/main)")
     parser.add_argument("--all", action="store_true",
                         help="report every violation, not just changed lines")
+    parser.add_argument("--require-define", action="append", default=[],
+                        metavar="DB=MACRO",
+                        help="fail unless database DB (its directory name) "
+                             "defines MACRO; repeatable")
     parser.add_argument("--make-db", action="store_true",
                         help="generate databases with `make tidy-db` first; "
                              "each directory is named PLATFORM, "
@@ -284,6 +297,16 @@ def main():
     # A changed header can affect any file, so only a pure .c change narrows
     # the list of files to run.
     headers_changed = options.all or any(p.endswith(".h") for p in changed)
+    required = collections.defaultdict(list)
+    for item in options.require_define:
+        name, _, macro = item.partition("=")
+        required[name].append(macro)
+    for db_dir in options.db:
+        for macro in missing_defines(db_dir, required[db_dir.name]):
+            print(f"check-braces: {db_dir.name} doesn't define {macro}, so code "
+                  "under it wouldn't be checked", file=sys.stderr)
+            return 2
+
     jobs = []
     for db_dir in options.db:
         args, files = load_database(db_dir.resolve(), root)
