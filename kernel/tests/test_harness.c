@@ -158,6 +158,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_efi_reloc();
 #endif
     total_failures += test_suite_tegra_cpufreq();
+    total_failures += test_suite_tegra_fan();
     /* GA10B ACR LS blob builders (#1088): pure, every platform. */
     total_failures += test_suite_ga10b_netlist();
     total_failures += test_suite_ga10b_ctxsw_ucode();

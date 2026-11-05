@@ -728,6 +728,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
     kernel/drivers/tegra_cpufreq.c
+    kernel/drivers/tegra_fan.c
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
     # BPMP IPC stack — Jetson only.
@@ -1171,6 +1172,7 @@ set(TEST_SOURCES
     # UEFI-direct relocation decision (#26) — same platforms as efi_stub.c
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_efi_reloc.c>
     kernel/tests/test_tegra_cpufreq.c
+    kernel/tests/test_tegra_fan.c
     kernel/tests/test_ga10b_netlist.c
     kernel/tests/test_ga10b_ctxsw_ucode.c
     kernel/tests/test_ga10b_acr_blob.c

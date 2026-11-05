@@ -29,6 +29,7 @@
 #include "hailo_trace.h"
 #endif
 #include "bpmp.h"
+#include "tegra_fan.h"
 #include "vfs.h"
 #include "component.h"
 #include "blkdev.h"
@@ -696,6 +697,10 @@ void kernel_main(void *dtb)
             bool responding = bpmp_is_available();
             INFO("BPMP: %s", responding ? "MRQ_PING round-trip OK"
                                          : "no PING response (firmware busy?)");
+            /* Nothing else drives the fan on either boot path (#1105):
+             * UEFI leaves PWM3 unclocked, Linux disables it on the way
+             * out of kexec. The control task starts with the others. */
+            (void)tegra_fan_init();
         }
     }
     {
@@ -907,6 +912,19 @@ void kernel_main(void *dtb)
      * command instead — driven from integration tests when explicit
      * recovery is needed. */
     cpu_supervisor_start();
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Fan control loop (#1105). Same gate as the supervisor: test
+     * kernels keep tegra_fan_init's fixed duty and no extra task. */
+    if (tegra_fan_start() != 0) {
+        struct tegra_fan_status fan_st;
+        tegra_fan_get_status(&fan_st);
+        if (fan_st.ready) {
+            WARN("fan: control task not started - fan stays at its boot level");
+        } else {
+            WARN("fan: driver not initialised - SLM-OS is not driving the fan");
+        }
+    }
+#endif
 #endif
 
 #if defined(ENABLE_NETWORKING) && !defined(ENABLE_BOOT_TESTS)

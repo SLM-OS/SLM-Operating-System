@@ -144,6 +144,12 @@ static void test_thermal_fan_pwm_constants(void)
 {
     TEST_ASSERT_EQUAL_HEX64(0x032a0000UL, TEGRA234_PWM3_BASE);
     TEST_ASSERT_EQUAL_UINT(107, TEGRA234_CLK_PWM3);
+    /* #1105 fan driver: tegra234-clock.h / tegra234-reset.h ids and the
+     * tachometer block (L4T DT: tachometer@39c0000). */
+    TEST_ASSERT_EQUAL_UINT(152, TEGRA234_CLK_TACH0);
+    TEST_ASSERT_EQUAL_UINT(70, TEGRA234_RESET_PWM3);
+    TEST_ASSERT_EQUAL_UINT(95, TEGRA234_RESET_TACH0);
+    TEST_ASSERT_EQUAL_HEX64(0x039c0000UL, TEGRA234_TACH0_BASE);
 }
 #endif
 

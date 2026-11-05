@@ -1507,7 +1507,9 @@ static const struct help_entry help_entries[] = {
         "\n"
         "Usage:\n"
         "  thermal            Read the BPMP thermal zones (cpu, gpu, soc0-2, tj) in C\n"
-        "  thermal fan        Fan PWM (pwm3) clock state, enable and duty\n"
+        "  thermal fan        Fan mode, level, hottest zone, rpm and PWM3 CSR\n"
+        "  thermal fan auto   Return the fan to the temperature curve\n"
+        "  thermal fan <n>    Hold the fan at level n (0-255) until `auto`\n"
         "  thermal log <ms>   Print zones plus per-CPU ticks/schedules/current task\n"
         "                     on the console every <ms> (min 100), from a task\n"
         "                     pinned to the last CPU (off CPU 0)\n"
@@ -1517,6 +1519,16 @@ static const struct help_entry help_entries[] = {
         "IRQs masked; the task shown is the one it is stuck in (#1093).\n"
         "The log prints from a secondary CPU, so its lines can interleave\n"
         "with shell output on CPU 0.\n"
+        "\n"
+        "Fan control (#1105): a task on the highest online CPU (test\n"
+        "kernels: none, a fixed level) polls every 2 s and\n"
+        "follows nvfancontrol's quiet profile on the hottest of cpu/gpu/\n"
+        "soc0-2: off at <= 35 C, linear to 187 at 74 C, 255 from 95 C,\n"
+        "10 levels per step, kicked at 64 from a stop. Two failed temperature\n"
+        "reads in a row (or none at boot) drive the fan at 255, with BPMP\n"
+        "then retried every 16 s. That and >= 95 C both override a manual\n"
+        "level, which then stays at 255 until `thermal fan auto` (or a new\n"
+        "level once the temperature is back).\n"
     ),
 
     HELP_TEXT("timdiag",

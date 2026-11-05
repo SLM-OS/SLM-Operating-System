@@ -10971,6 +10971,7 @@ int cmd_cdcdiag(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "bpmp.h"
+#include "tegra_fan.h"
 #include <stdarg.h>
 #include <stdatomic.h>
 #include "hsp.h"
@@ -11610,7 +11611,8 @@ int cmd_csidiag(int argc, char *argv[])
  *
  * Temperatures through BPMP (MRQ_THERMAL) and the fan PWM state, to
  * tell a thermal shutdown apart from a hang on a board with no Linux
- * thermal / pwm-fan driver behind it (UEFI-direct boot). */
+ * thermal driver behind it (UEFI-direct boot). Fan control itself is
+ * kernel/drivers/tegra_fan.c (#1105). */
 static const struct {
     const char *name;
     uint32_t zone;
@@ -11649,13 +11651,14 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
 
 /* Fan: PWM controller 3 at 0x032a0000 drives the carrier's fan header
  * (L4T DT pwm-fan: pwms = <&pwm3 0 45334>). CSR bit 31 = enable, bits
- * 23:16 = duty (0-255). Only read when BPMP says its clock is on: an
- * unclocked block traps into EL3 on Tegra234. (A clocked block held in
- * reset could fault too; BPMP has no reset-state query, and Linux
- * deasserts this reset together with enabling the clock.) */
+ * 24:16 = duty (0-256 ticks). The raw view is only read when BPMP
+ * says its clock is on: an unclocked block traps into EL3 on Tegra234.
+ * (A clocked block held in reset could fault too; BPMP has no
+ * reset-state query, and Linux deasserts this reset together with
+ * enabling the clock.) */
 #define THERMAL_FAN_PWM_CSR  TEGRA234_PWM3_BASE   /* mapped in vmm.c */
 
-static void thermal_print_fan(void)
+static void thermal_print_fan_raw(void)
 {
     int on = 0;
     int rc = bpmp_clk_is_enabled(TEGRA234_CLK_PWM3, &on);
@@ -11668,8 +11671,90 @@ static void thermal_print_fan(void)
         return;
     }
     uint32_t csr = *(volatile uint32_t *)(uintptr_t)THERMAL_FAN_PWM_CSR;
-    shell_printf("fan: pwm3 CSR=0x%08x enable=%u duty=%u/255\r\n",
-                 (unsigned)csr, (unsigned)(csr >> 31), (unsigned)((csr >> 16) & 0xFFu));
+    shell_printf("fan: pwm3 CSR=0x%08x enable=%u duty=%u/256\r\n",
+                 (unsigned)csr, (unsigned)(csr >> 31),
+                 (unsigned)((csr >> TEGRA_PWM_DUTY_SHIFT) & TEGRA_PWM_DUTY_MASK));
+}
+
+/* Status from the fan driver (#1105); the raw register view when the
+ * driver did not come up (BPMP down, or clocking failed). */
+static void thermal_print_fan(void)
+{
+    struct tegra_fan_status st;
+    tegra_fan_get_status(&st);
+    if (!st.ready) {
+        shell_puts("fan: driver not running\r\n");
+        thermal_print_fan_raw();
+        return;
+    }
+    char temp[24];
+    if (st.temp_rc == 0) {
+        int32_t mc = st.temp_mc;
+        uint32_t mag = mc < 0 ? 0u - (uint32_t)mc : (uint32_t)mc;
+        uart_snprintf(temp, sizeof(temp), "%s%u.%u C", mc < 0 ? "-" : "",
+                      (unsigned)(mag / 1000u), (unsigned)(mag % 1000u / 100u));
+    } else {
+        uart_snprintf(temp, sizeof(temp), "err%d", st.temp_rc);
+    }
+    shell_printf("fan: %s pwm=%u/255 target=%u hottest=%s\r\n",
+                 st.manual ? "manual" : "auto", (unsigned)st.pwm,
+                 (unsigned)st.target, temp);
+    if (st.tach_ok && st.pwm == 0) {
+        /* A stopped fan sends no pulses and the tachometer keeps its last
+         * period without flagging overflow (seen on nano-2 after 255 -> 0:
+         * 5240 rpm for 24 s), so the reading is not the speed. */
+        shell_printf("fan: off (tach holds its last reading, %u rpm)  CSR=0x%08x  pwm3 clk=%llu Hz\r\n",
+                     (unsigned)st.rpm, (unsigned)st.csr,
+                     (unsigned long long)st.pwm_clk_hz);
+    } else if (st.tach_ok) {
+        shell_printf("fan: %u rpm  CSR=0x%08x  pwm3 clk=%llu Hz\r\n",
+                     (unsigned)st.rpm, (unsigned)st.csr,
+                     (unsigned long long)st.pwm_clk_hz);
+    } else {
+        shell_printf("fan: rpm n/a (tach not clocked)  CSR=0x%08x  pwm3 clk=%llu Hz\r\n",
+                     (unsigned)st.csr, (unsigned long long)st.pwm_clk_hz);
+    }
+}
+
+/* thermal fan [auto | <0-255>] */
+static int thermal_fan_cmd(int argc, char *argv[])
+{
+    if (argc < 3) {
+        thermal_print_fan();
+        return 0;
+    }
+    if (argc > 3) {
+        shell_puts("usage: thermal fan [auto | <0-255>]\r\n");
+        return -1;
+    }
+    if (strcmp(argv[2], "auto") == 0) {
+        int rc = tegra_fan_set_auto();
+        thermal_print_fan();
+        return rc;
+    }
+    uint32_t level = 0;
+    const char *p = argv[2];
+    if (*p == '\0') {
+        shell_puts("usage: thermal fan [auto | <0-255>]\r\n");
+        return -1;
+    }
+    for (; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9' || level > TEGRA_FAN_MAX_PWM) {
+            shell_puts("thermal fan: level is 0..255, or auto\r\n");
+            return -1;
+        }
+        level = level * 10u + (uint32_t)(*p - '0');
+    }
+    if (level > TEGRA_FAN_MAX_PWM) {
+        shell_puts("thermal fan: level is 0..255, or auto\r\n");
+        return -1;
+    }
+    if (tegra_fan_set_manual(level) != 0) {
+        shell_puts("thermal fan: driver not running\r\n");
+        return -1;
+    }
+    thermal_print_fan();
+    return 0;
 }
 
 /* Background logger: one line per period on the UART, so a serial
@@ -11748,8 +11833,7 @@ static void thermal_log_task(void *arg)
 int cmd_thermal(int argc, char *argv[])
 {
     if (argc >= 2 && strcmp(argv[1], "fan") == 0) {
-        thermal_print_fan();
-        return 0;
+        return thermal_fan_cmd(argc, argv);
     }
     if (argc >= 2 && strcmp(argv[1], "log") == 0) {
         uint32_t ms = 0;
@@ -11792,7 +11876,7 @@ int cmd_thermal(int argc, char *argv[])
         return 0;
     }
     if (argc >= 2) {
-        shell_puts("usage: thermal [fan | log <ms> | log 0]\r\n");
+        shell_puts("usage: thermal [fan [auto | <0-255>] | log <ms> | log 0]\r\n");
         return -1;
     }
     thermal_print_line(shell_printf, "thermal (C):");

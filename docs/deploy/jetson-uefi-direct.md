@@ -558,11 +558,32 @@ where the two disagree.
     while held, and the stats read try-locks the eviction registry
     (see runtime/CLAUDE.md §"Locks reached from IRQs-off context").
     The same code ran after kexec; nothing about it was UEFI-specific.
-    SLM-OS does not drive the fan on either boot path: after a
-    UEFI-direct boot the fan PWM's clock is off, and after kexec Linux
-    has disabled the PWM (CSR 0) on its way out (`thermal fan`; fan
-    control is #1105). Load testing still stayed far from
-    any trip point (70 °C hot-surface, 99 °C slowdown).
+    At the time SLM-OS did not drive the fan on either boot path (fixed
+    by #1105, item 17). Load testing still stayed far from any trip
+    point (70 °C hot-surface, 99 °C slowdown).
+17. **SLM-OS drives the fan itself** (#1105). After a UEFI-direct boot
+    the fan PWM (PWM3, `0x032a0000`) has no clock; after kexec Linux
+    has disabled it (CSR 0) on its way out. Either way nothing cooled
+    the board. `tegra_fan_init()` (`kernel/drivers/tegra_fan.c`, right
+    after BPMP comes up) clocks PWM3 and the tachometer (`0x039c0000`)
+    through BPMP, deasserts their resets and sets a level. A task pinned
+    to the last CPU then follows nvfancontrol's default "quiet" curve
+    every 2 s on the hottest of cpu/gpu/soc0-2. The curve is off at or
+    below 35 °C, linear up to 187 at 74 °C, and 255 from 95 °C. The
+    level moves 10 per step and is kicked to 64 from a stop. Two failed
+    temperature reads in a row (or none at boot) drive the fan at 255,
+    with BPMP then retried every 16 s. 95 °C or a lost temperature
+    also overrides a manual level, which stays at 255 until `auto` (or
+    a new level once the temperature is back). BPMP gives PWM3 9.6 MHz
+    after UEFI and Linux's 11.03 MHz after kexec; both need PFM 0.
+    `thermal fan` shows the mode, level, rpm and CSR. `thermal fan <n>`
+    holds a level and `thermal fan auto` returns to the curve. On
+    nano-2, level 70 gives about 1400 rpm and 255 gives 5500 rpm. With
+    the fan held off, an idle board rose from 53.4 to 56.3 °C in
+    2.5 min; on auto it fell to 48.3 °C. A stopped fan sends no tach
+    pulses, and the tachometer keeps its last period without setting
+    its overflow bit, so the shell labels the reading at level 0 as
+    stale.
 
 ## Troubleshooting
 
