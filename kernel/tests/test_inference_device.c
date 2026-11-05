@@ -151,7 +151,8 @@ static void test_find_nonexistent_returns_null(void)
 /* `inference_device_find` must compare the FULL strings; a prefix
  * lookup must not false-match a longer registered name. Pins the
  * strcmp-replacement of the previous hand-rolled char-by-char
- * compare (PR #598 / docs/archive/code-reviews/code-review-2026-04-26-suggestions.md). */
+ * compare (PR #598 /
+ * docs/archive/code-reviews/code-review-2026-04-26-suggestions.md). */
 static void test_find_prefix_does_not_match(void)
 {
     /* `fake-test` is registered above. Querying just `fake` (a

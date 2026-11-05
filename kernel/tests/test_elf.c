@@ -2,7 +2,7 @@
  * test_elf.c - ELF loader regression tests
  *
  * Covers elf_validate() bounds handling against truncated/crafted headers
- * (BOOT-H2 in docs/code-review-2026-04-12.md).
+ * (BOOT-H2 in docs/archive/code-reviews/code-review-2026-04-12.md).
  */
 
 #include "unity.h"
