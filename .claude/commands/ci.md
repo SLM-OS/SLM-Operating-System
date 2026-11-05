@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets and run the QEMU test suite.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, and check C braces on changed lines.
 
 ## Instructions
 
@@ -38,8 +38,23 @@ This step catches compile or link rot in test-only code, which
 A link error naming a kernel symbol means `test_ffi_stubs` in
 `runtime/src/lib.rs` needs a stub for it.
 
-### 5. Diff check
-Run `git diff main...HEAD --stat` and confirm no untracked build artifacts
+### 5. Brace check
+```
+make test-check-braces && make check-braces
+```
+Runs `clang-tidy` on C lines changed since `origin/main`, as the main and test
+kernel of all four platforms (`scripts/check-c-braces.py`). Older violations
+aren't reported. Fix any it reports. A `could not parse` line means a file was
+not checked, so don't treat that as a pass. `make` exits 2 for any failure, so
+read the script's output. Its last line gives parses per configuration, and all
+eight should appear when headers or shared files change.
+
+A `not checked` line exits 0, because those files are outside the configured
+builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone
+reads them for braces by hand.
+
+### 6. Diff check
+Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
 ## Output
@@ -52,6 +67,7 @@ Summarize results as a table:
 | x86-64 build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
+| Brace check | ✅/❌ | violations if any |
 | Artifact check | ✅/❌ | stray files if any |
 
 If everything passes, say "Ready for PR."

@@ -89,7 +89,8 @@ locally via a Claude Code slash command:
 ```
 
 This runs `.claude/commands/ci.md` — a clean-build + QEMU test sweep across
-ARM64 and x86-64 targets. Use before every merge to `main`.
+ARM64 and x86-64 targets, runtime host tests and the C brace check. Use before
+every merge to `main`.
 
 ### Code Review
 

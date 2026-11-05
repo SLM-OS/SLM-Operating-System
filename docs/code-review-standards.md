@@ -21,8 +21,14 @@ failures seen on Pi 5 and Jetson hardware that QEMU does not reproduce.
 | Specific paths | `/slmos-review <path> ...` |
 | Changes since an earlier review | `/slmos-review --since <sha>` |
 
-The review reads code only. Builds and QEMU tests belong to `/ci`, and
-hardware runs belong to `/deploy-and-test`.
+The review reads code only, apart from running `make check-braces`, which
+configures each platform without compiling. Builds and QEMU tests belong to
+`/ci`, and hardware runs belong to `/deploy-and-test`.
+
+The brace rule is checked mechanically by `clang-tidy` (`.clang-tidy`,
+`scripts/check-c-braces.py`) on changed lines, for code that the main and test
+kernel of each platform compile. Macro bodies are not checked. Older violations
+remain in the tree and are listed by `make check-braces BRACES_ARGS=--all`.
 
 ## Severity and completion
 

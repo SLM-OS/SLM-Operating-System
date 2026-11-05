@@ -12,6 +12,7 @@ This document describes how to build, run, and debug SLM-OS.
 |------|---------|--------------|
 | `aarch64-none-elf-gcc` | ARM64 cross-compiler | [ARM GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads) |
 | `cmake` | Build system generator | [CMake Downloads](https://cmake.org/download/) |
+| `clang-tidy` | C brace check (`make check-braces`) | `apt install clang-tidy`, or [LLVM Releases](https://releases.llvm.org/download.html) |
 | `make` | Build automation | Included with Cygwin or MinGW |
 | `qemu-system-aarch64` | ARM64 emulator | [QEMU Downloads](https://www.qemu.org/download/) |
 | `aarch64-none-elf-gdb` | Debugger | Included with ARM GNU Toolchain |
@@ -51,6 +52,7 @@ Checking required tools...
   [OK] cmake
   [OK] cargo
   [OK] qemu-system-aarch64
+  [OK] clang-tidy
   [OK] aarch64-none-elf-gdb
 ```
 
@@ -352,6 +354,9 @@ QEMU CPU:       cortex-a76
 QEMU memory:    512M
 QEMU cores:     4
 ```
+
+#### `make check-braces`
+Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main and test kernel of all four platforms. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
 
 #### `make check-tools`
 Verifies all required tools are installed and in PATH.
