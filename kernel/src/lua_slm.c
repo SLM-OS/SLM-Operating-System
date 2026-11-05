@@ -3178,8 +3178,9 @@ static int l_model_load(lua_State *L) {
     if (!name) {
         const char *base = resolved;
         for (const char *p = resolved; *p; p++) {
-            if (*p == '/')
+            if (*p == '/') {
                 base = p + 1;
+            }
         }
         size_t n = 0;
         for (const char *p = base; *p && *p != '.' && n < 31; p++) {
@@ -3257,8 +3258,9 @@ static int l_model_swap(lua_State *L) {
     if (!name) {
         const char *base = resolved;
         for (const char *p = resolved; *p; p++) {
-            if (*p == '/')
+            if (*p == '/') {
                 base = p + 1;
+            }
         }
         size_t n = 0;
         for (const char *p = base; *p && *p != '.' && n < 31; p++) {

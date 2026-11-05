@@ -196,8 +196,9 @@ static int walk_subimages(const uint8_t *image, size_t image_size,
          * arbitrary byte (e.g. the "VN" block seen on GA107). So we
          * require 0x55AA only for image 0. */
         if (i == 0 && (image[off] != PCI_ROM_SIG_0 ||
-                       image[off+1] != PCI_ROM_SIG_1))
+                       image[off+1] != PCI_ROM_SIG_1)) {
             return -1;
+        }
 
         uint16_t pcir_ptr = rd16(&image[off + PCI_SUBIMG_PCIR_PTR]);
         size_t pcir = (size_t)off + pcir_ptr;
@@ -255,13 +256,14 @@ static int walk_subimages(const uint8_t *image, size_t image_size,
         out->subimages[i].code_type = code_type;
         out->num_subimages = (uint8_t)(i + 1);
 
-        if (code_type == VBIOS_CODE_TYPE_X86 && out->pciat_idx < 0)
+        if (code_type == VBIOS_CODE_TYPE_X86 && out->pciat_idx < 0) {
             out->pciat_idx = (int8_t)i;
-        else if (code_type == VBIOS_CODE_TYPE_VBIOS_EXT) {
-            if (out->first_fwsec_idx < 0)
+        } else if (code_type == VBIOS_CODE_TYPE_VBIOS_EXT) {
+            if (out->first_fwsec_idx < 0) {
                 out->first_fwsec_idx = (int8_t)i;
-            else if (out->second_fwsec_idx < 0)
+            } else if (out->second_fwsec_idx < 0) {
                 out->second_fwsec_idx = (int8_t)i;
+            }
         }
 
         if (last || sub_len == 0) break;
@@ -283,8 +285,9 @@ static int walk_subimages(const uint8_t *image, size_t image_size,
 static int find_bit_signature(const uint8_t *image, size_t image_size,
                               uint32_t *out_off)
 {
-    if (image_size < 64)
+    if (image_size < 64) {
         return -1;
+    }
     /* Cap the search at VBIOS_BIT_SCAN_MAX_OFFSET — BIT has never
      * been observed past 64 KB and scanning the whole ROM wastes
      * cycles on large dumps. (#148) */
@@ -311,17 +314,20 @@ int nvidia_vbios_parse(const uint8_t *image, size_t image_size,
     if (!image || !out) return -1;
     out->parsed_ok = false;
 
-    if (image_size < 64 || image_size > NVIDIA_VBIOS_MAX_SIZE)
+    if (image_size < 64 || image_size > NVIDIA_VBIOS_MAX_SIZE) {
         return -1;
+    }
 
     /* PCI expansion ROM signature. Required before we trust any
      * downstream offsets. */
-    if (image[0] != PCI_ROM_SIG_0 || image[1] != PCI_ROM_SIG_1)
+    if (image[0] != PCI_ROM_SIG_0 || image[1] != PCI_ROM_SIG_1) {
         return -1;
+    }
 
     uint32_t bit_off = 0;
-    if (find_bit_signature(image, image_size, &bit_off) < 0)
+    if (find_bit_signature(image, image_size, &bit_off) < 0) {
         return -1;
+    }
 
     /* Defensive arithmetic — find_bit_signature caps at 64 KB and
      * image_size at NVIDIA_VBIOS_MAX_SIZE (1 MB), so with
@@ -330,8 +336,9 @@ int nvidia_vbios_parse(const uint8_t *image, size_t image_size,
      * addend in `size_t` space anyway so future tightening
      * (raising the 1 MB cap, etc.) can't regress this check. */
     if (bit_off > image_size ||
-        (size_t)bit_off + BIT_HDR_SIZE_MIN > image_size)
+        (size_t)bit_off + BIT_HDR_SIZE_MIN > image_size) {
         return -1;
+    }
 
     uint8_t hdr_size    = image[bit_off + 8];
     uint8_t entry_size  = image[bit_off + 9];
@@ -513,8 +520,9 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
     /* Modern path — BIT 'p' → FalconUcodeTablePtr. */
     uint32_t ftp_entry_off = 0, ftp_entry_len = 0;
     if (nvidia_vbios_find_entry(vb, VBIOS_BIT_ID_FALCON_DATA, -1,
-                                &ftp_entry_off, &ftp_entry_len) < 0)
+                                &ftp_entry_off, &ftp_entry_len) < 0) {
         return -1;
+    }
     if (ftp_entry_len < 4) return -1;
     if ((size_t)ftp_entry_off + 4 > vb->image_size) return -1;
 
@@ -523,8 +531,9 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
     /* Resolve through the PciAt|FwSec1|FwSec2 concatenation. */
     uint32_t tbl_abs = 0;
     int tbl_fwsec_idx = -1;
-    if (falcon_ptr_resolve(vb, falcon_ucode_table_ptr, &tbl_abs, &tbl_fwsec_idx) < 0)
+    if (falcon_ptr_resolve(vb, falcon_ucode_table_ptr, &tbl_abs, &tbl_fwsec_idx) < 0) {
         return -1;
+    }
     if ((size_t)tbl_abs + FALCON_TABLE_HDR_SIZE > vb->image_size) return -1;
 
     const uint8_t *tbl = &vb->image[tbl_abs];
@@ -571,8 +580,9 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
      * two-subtraction resolution. */
     uint32_t desc_abs = 0;
     int desc_fwsec_idx = -1;
-    if (falcon_ptr_resolve(vb, fwsec_desc_ptr, &desc_abs, &desc_fwsec_idx) < 0)
+    if (falcon_ptr_resolve(vb, fwsec_desc_ptr, &desc_abs, &desc_fwsec_idx) < 0) {
         return -1;
+    }
     if ((size_t)desc_abs + 4 > vb->image_size) return -1;
 
     /* Descriptor header tells us which version + size we're reading.

@@ -61,7 +61,7 @@ static inline void assert_double_close(double expected, double actual,
 }
 
 /* ============================================================================
- * strtol — exercises the three-way digit chain at lua_stubs.c:548-562
+ * strtol — exercises the three-way digit chain in lua_stubs.c's strtol()
  * ============================================================================ */
 
 /* '0'-'9' branch — base-10 happy path. */
@@ -130,8 +130,8 @@ static void test_strtol_skips_whitespace(void)
 }
 
 /* ============================================================================
- * strtod — exercises the integer/fraction/exponent chain at
- * lua_stubs.c:600-621 and the exponent-apply if/else at 626-632.
+ * strtod — exercises the integer/fraction/exponent chain and the
+ * exponent-apply if/else in lua_stubs.c's strtod().
  * ============================================================================ */
 
 /* Integer-only path: '0'-'9' branch in the parse chain. */

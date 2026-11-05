@@ -41,19 +41,22 @@ void ncmem_init(void)
 
 void *ncmem_alloc(size_t size, size_t align)
 {
-    if (size == 0 || align == 0)
+    if (size == 0 || align == 0) {
         return NULL;
+    }
 
     /* Round up to alignment */
     uintptr_t aligned = (nc_next_free + align - 1) & ~(align - 1);
 
     /* Rounding wrapped — treat as out of memory */
-    if (aligned < nc_next_free)
+    if (aligned < nc_next_free) {
         return NULL;
+    }
 
     /* size addition wrapped — treat as out of memory */
-    if (aligned + size < aligned)
+    if (aligned + size < aligned) {
         return NULL;
+    }
 
     if (aligned + size > NC_MEM_BASE + NC_MEM_SIZE) {
         WARN("ncmem_alloc: out of NC memory (requested %zu, used %zu/%lu)",

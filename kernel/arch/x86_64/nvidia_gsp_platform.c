@@ -90,8 +90,9 @@ static uint32_t x86_gsp_bar0_read32(uint32_t offset)
 {
     volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
     uint32_t size = nvidia_gpu_get_bar0_size();
-    if (!bar0 || offset + 4 > size)
+    if (!bar0 || offset + 4 > size) {
         return 0xBADF5040u;
+    }
     return bar0[offset / 4];
 }
 
@@ -99,8 +100,9 @@ static void x86_gsp_bar0_write32(uint32_t offset, uint32_t value)
 {
     volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
     uint32_t size = nvidia_gpu_get_bar0_size();
-    if (!bar0 || offset + 4 > size)
+    if (!bar0 || offset + 4 > size) {
         return;
+    }
     bar0[offset / 4] = value;
 }
 
@@ -113,24 +115,28 @@ static void x86_gsp_bar1_read(uint32_t offset, void *dst, size_t n)
 {
     volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
     uint64_t size = nvidia_gpu_get_bar1_size();
-    if (!bar1 || (uint64_t)offset + n > size)
+    if (!bar1 || (uint64_t)offset + n > size) {
         return;
+    }
     /* Byte-by-byte from volatile MMIO — memcpy is not safe on
      * volatile pointers (compiler may optimize to non-volatile). */
     uint8_t *d = (uint8_t *)dst;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         d[i] = bar1[offset + i];
+    }
 }
 
 static void x86_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
 {
     volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
     uint64_t size = nvidia_gpu_get_bar1_size();
-    if (!bar1 || (uint64_t)offset + n > size)
+    if (!bar1 || (uint64_t)offset + n > size) {
         return;
+    }
     const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++) {
         bar1[offset + i] = s[i];
+    }
 }
 
 /* ---- DMA allocation via PMM ----
@@ -266,8 +272,9 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
      * would otherwise have us reading RAM as if it were VBIOS. */
     if (rom_phys == 0 || rom_phys == 0xFFFFF800u ||
         rom_phys < PCI_ROM_PHYS_MIN ||
-        rom_phys >= PCI_ROM_PHYS_MAX)
+        rom_phys >= PCI_ROM_PHYS_MAX) {
         return -1;
+    }
 
     /* Ensure memory-space decoding is enabled. */
     pci_config_write32(bus, dev, func, PCI_CFG_COMMAND,
@@ -310,8 +317,9 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
         return -1;
     }
 
-    for (size_t i = 0; i < copy_len; i++)
+    for (size_t i = 0; i < copy_len; i++) {
         dst[i] = rom[i];
+    }
 
     /* Restore PCI config — leave the GPU the way we found it. */
     pci_config_write32(bus, dev, func, PCI_CFG_ROM_BAR, saved_rom);
@@ -348,8 +356,9 @@ static int x86_read_vbios_prom_window(uint8_t *dst, size_t max)
 
     /* Read up to max bytes (capped by buffer and PROM window size) */
     size_t copy_len = max;
-    if (copy_len > NV_PROM_DATA_SIZE)
+    if (copy_len > NV_PROM_DATA_SIZE) {
         copy_len = NV_PROM_DATA_SIZE;
+    }
 
     const volatile uint32_t *prom = &bar0[NV_PROM_DATA_OFFSET / 4];
 
@@ -364,16 +373,18 @@ static int x86_read_vbios_prom_window(uint8_t *dst, size_t max)
     /* 32-bit reads into the buffer */
     uint32_t *d = (uint32_t *)dst;
     size_t words = copy_len / 4;
-    for (size_t i = 0; i < words; i++)
+    for (size_t i = 0; i < words; i++) {
         d[i] = prom[i];
+    }
 
     /* Handle trailing bytes if copy_len is not 4-aligned */
     size_t tail = copy_len & 3;
     if (tail) {
         uint32_t last = prom[words];
         uint8_t *bp = dst + words * 4;
-        for (size_t i = 0; i < tail; i++)
+        for (size_t i = 0; i < tail; i++) {
             bp[i] = (uint8_t)(last >> (i * 8));
+        }
     }
 
     uart_printf("[VBIOS] read %u bytes via BAR0 PROM window\n",
@@ -402,8 +413,9 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
     /* Path 2: PCI Expansion ROM BAR (fallback) */
     if (copied <= 0) {
         uint8_t bus, dev, func;
-        if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0)
+        if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0) {
             return -1;
+        }
         copied = x86_read_expansion_rom(bus, dev, func,
                                         x86_vbios_buf, sizeof(x86_vbios_buf));
     }

@@ -53,8 +53,9 @@ static void resched_ipi_handler(uint8_t irq)
 {
     (void)irq;
     uint32_t cpu = cpu_id();
-    if (cpu < MAX_CPUS)
+    if (cpu < MAX_CPUS) {
         smp_resched_ipi_count[cpu]++;
+    }
     /* schedule() internally guards with preempt_disabled[cpu], so a
      * nested call while schedule() is already in flight no-ops
      * safely. */
@@ -80,10 +81,12 @@ void smp_resched_ipi_init(void)
  */
 void smp_notify_cpu(uint32_t logical_cpu)
 {
-    if (logical_cpu == cpu_id())
+    if (logical_cpu == cpu_id()) {
         return;
-    if (logical_cpu >= cpu_count)
+    }
+    if (logical_cpu >= cpu_count) {
         return;
+    }
     uint32_t apic_id = (uint32_t)cpu_data[logical_cpu].mpidr;
     lapic_send_ipi(apic_id, RESCHED_VECTOR, 0);
 }
@@ -131,10 +134,12 @@ void kernel_main_x86(uint32_t mb_addr)
          * Then clamp to the snapshot buffer and memcpy in. */
         const uint8_t *src = (const uint8_t *)(uintptr_t)mb_addr;
         uint32_t total_size = *(const uint32_t *)src;
-        if (total_size > MB2_SNAPSHOT_MAX)
+        if (total_size > MB2_SNAPSHOT_MAX) {
             total_size = MB2_SNAPSHOT_MAX;
-        for (uint32_t i = 0; i < total_size; i++)
+        }
+        for (uint32_t i = 0; i < total_size; i++) {
             mb2_snapshot[i] = src[i];
+        }
     }
 
     /* Point the rest of the kernel at the snapshot (zero-filled if
@@ -260,8 +265,9 @@ static inline void io_outb(uint16_t port, uint8_t val)
 static void delay_ms(uint32_t ms)
 {
     /* Simple busy-loop; not precise but sufficient for SIPI timing */
-    for (volatile uint32_t i = 0; i < ms * 100000; i++)
+    for (volatile uint32_t i = 0; i < ms * 100000; i++) {
         __asm__ volatile("pause");
+    }
 }
 
 /*
@@ -300,8 +306,9 @@ static void ap_entry_64(uint32_t logical_cpu_id)
                 logical_cpu_id, (uint32_t)cpu_data[logical_cpu_id].mpidr);
 
     /* Wait for BSP to finish scheduler initialization */
-    while (!scheduler_is_initialized())
+    while (!scheduler_is_initialized()) {
         __asm__ volatile("pause" ::: "memory");
+    }
 
     /* Initialize scheduler for this CPU */
     scheduler_init_secondary(logical_cpu_id);
@@ -388,8 +395,9 @@ static int boot_ap(uint32_t logical_cpu_id, uint8_t apic_id)
 
     /* Wait for AP to signal it's running */
     for (int i = 0; i < 1000; i++) {
-        if (*(volatile uint32_t *)(params_base + 0x30) != 0)
+        if (*(volatile uint32_t *)(params_base + 0x30) != 0) {
             return 0;  /* AP is up */
+        }
         delay_ms(1);
     }
 
@@ -397,8 +405,9 @@ static int boot_ap(uint32_t logical_cpu_id, uint8_t apic_id)
     lapic_send_ipi(apic_id, sipi_vector, ICR_SIPI);
 
     for (int i = 0; i < 1000; i++) {
-        if (*(volatile uint32_t *)(params_base + 0x30) != 0)
+        if (*(volatile uint32_t *)(params_base + 0x30) != 0) {
             return 0;
+        }
         delay_ms(1);
     }
 
@@ -437,8 +446,9 @@ void smp_init(void)
     uart_printf("[SMP] %u CPUs detected (BSP APIC ID %u)\n",
                 cpu_count, acpi_get_cpu_apic_id(0));
 
-    if (cpu_count <= 1)
+    if (cpu_count <= 1) {
         return;
+    }
 
     /* Copy AP trampoline to low memory (below 1MB, at 0x8000) */
     uintptr_t tramp_size = (uintptr_t)ap_trampoline_end - (uintptr_t)ap_trampoline_start;
@@ -446,12 +456,14 @@ void smp_init(void)
     const uint8_t *tramp_src = (const uint8_t *)ap_trampoline_start;
 
     /* Zero the entire trampoline page (including params area) */
-    for (uintptr_t i = 0; i < 0x1000; i++)
+    for (uintptr_t i = 0; i < 0x1000; i++) {
         tramp_dest[i] = 0;
+    }
 
     /* Copy trampoline code */
-    for (uintptr_t i = 0; i < tramp_size; i++)
+    for (uintptr_t i = 0; i < tramp_size; i++) {
         tramp_dest[i] = tramp_src[i];
+    }
 
     uart_printf("[SMP] Trampoline copied to 0x%x (%lu bytes)\n",
                 AP_TRAMPOLINE_BASE, (unsigned long)tramp_size);
@@ -473,8 +485,9 @@ void smp_init(void)
 int cpu_logical_id(uint64_t mpidr)
 {
     for (uint32_t i = 0; i < cpu_count; i++) {
-        if (cpu_logical_map[i] == mpidr)
+        if (cpu_logical_map[i] == mpidr) {
             return (int)i;
+        }
     }
     return 0;
 }
@@ -532,8 +545,9 @@ void psci_system_off(void)
 {
     uart_puts("System halted.\n");
     __asm__ volatile("cli");
-    while (1)
+    while (1) {
         __asm__ volatile("hlt");
+    }
 }
 
 /* ---- VMM: extend page tables to map all RAM ---- */
@@ -554,8 +568,9 @@ uintptr_t x86_detected_ram_end = 0;
  */
 static uintptr_t detect_ram_end(void)
 {
-    if (multiboot_info_addr == 0)
+    if (multiboot_info_addr == 0) {
         return RAM_BASE + 0x3DE00000UL;  /* Fallback: ~1GB */
+    }
 
     uint8_t *ptr = (uint8_t *)(uintptr_t)multiboot_info_addr;
     uint32_t total_size = *(uint32_t *)ptr;
@@ -577,8 +592,9 @@ static uintptr_t detect_ram_end(void)
                 uint32_t type = *(uint32_t *)(entry + 16);
                 if (type == 1) {  /* Available */
                     uint64_t region_end = base + len;
-                    if (region_end > highest)
+                    if (region_end > highest) {
                         highest = region_end;
+                    }
                 }
                 entry += entry_size;
             }
@@ -602,8 +618,9 @@ void vmm_init(void)
      * touch unmapped memory. */
     uint64_t gb_for_ram = (ram_end + 0x3FFFFFFFUL) >> 30;  /* Round up */
     uint64_t gb_needed = gb_for_ram + 2;  /* Extra margin for buddy allocator */
-    if (gb_needed > 20)
+    if (gb_needed > 20) {
         gb_needed = 20;  /* Limited by reserved PD pages */
+    }
 
     uart_printf("[VMM] Detected RAM end: 0x%lx (%lu GB)\n", ram_end, gb_needed);
 
@@ -651,8 +668,9 @@ void vmm_init(void)
      * Subtract one page to ensure the last free block's header
      * doesn't land on the first unmapped byte. */
     uintptr_t mapped_end = gb_needed << 30;  /* gb_needed * 1GB */
-    if (x86_detected_ram_end > mapped_end)
+    if (x86_detected_ram_end > mapped_end) {
         x86_detected_ram_end = mapped_end;
+    }
     /* Align down to page boundary */
     x86_detected_ram_end &= ~(uintptr_t)0xFFF;
 }
@@ -668,8 +686,9 @@ int dtb_parse(const void *dtb, fdt_info_t *info)
         /* Zero out — main.c checks fields. The hardcoded [0] index was a
          * typo: only byte 0 was being cleared on every iteration, leaving
          * the rest of *info as uninitialized stack memory for callers. */
-        for (unsigned i = 0; i < sizeof(*info); i++)
+        for (unsigned i = 0; i < sizeof(*info); i++) {
             ((uint8_t *)info)[i] = 0;
+        }
     }
     return FDT_ERR_BADPTR;  /* No DTB on x86-64 */
 }

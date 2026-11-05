@@ -221,8 +221,9 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     for (int ai = 3; ai < argc; ai++) {
         if (strncmp(argv[ai], "hwc", 3) == 0) {
             int n = 0;
-            for (const char *p = argv[ai] + 3; *p >= '0' && *p <= '9'; p++)
+            for (const char *p = argv[ai] + 3; *p >= '0' && *p <= '9'; p++) {
                 n = n * 10 + (*p - '0');
+            }
             if (n >= 1 && n <= 16) hwc_repeat = (uint32_t)n;
         } else if (strcmp(argv[ai], "pings") == 0) {
             inject_pings = true;

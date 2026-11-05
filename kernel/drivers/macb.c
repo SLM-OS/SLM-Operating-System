@@ -315,8 +315,9 @@ static int macb_mdio_wait_idle(void)
  * registers, so the caller can still distinguish via context). */
 static uint16_t macb_mdio_read(uint8_t phy, uint8_t reg)
 {
-    if (macb_mdio_wait_idle() < 0)
+    if (macb_mdio_wait_idle() < 0) {
         return 0xFFFF;
+    }
 
     macb_writel(MACB_MAN,
                 MACB_MAN_SOF_C22 |
@@ -325,16 +326,18 @@ static uint16_t macb_mdio_read(uint8_t phy, uint8_t reg)
                 ((uint32_t)reg << MACB_MAN_REGA_SHIFT) |
                 MACB_MAN_CODE);
 
-    if (macb_mdio_wait_idle() < 0)
+    if (macb_mdio_wait_idle() < 0) {
         return 0xFFFF;
+    }
 
     return (uint16_t)(macb_readl(MACB_MAN) & MACB_MAN_DATA_MASK);
 }
 
 static int macb_mdio_write(uint8_t phy, uint8_t reg, uint16_t val)
 {
-    if (macb_mdio_wait_idle() < 0)
+    if (macb_mdio_wait_idle() < 0) {
         return -1;
+    }
 
     macb_writel(MACB_MAN,
                 MACB_MAN_SOF_C22 |
@@ -344,8 +347,9 @@ static int macb_mdio_write(uint8_t phy, uint8_t reg, uint16_t val)
                 MACB_MAN_CODE |
                 ((uint32_t)val & MACB_MAN_DATA_MASK));
 
-    if (macb_mdio_wait_idle() < 0)
+    if (macb_mdio_wait_idle() < 0) {
         return -1;
+    }
 
     return 0;
 }

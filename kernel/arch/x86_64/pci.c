@@ -263,10 +263,12 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func)
     /* Read BARs (only for Type 0 headers — endpoints, not bridges) */
     uint8_t hdr_type = d->header_type & 0x7F;
     int bar_count = (hdr_type == 0x00) ? 6 : (hdr_type == 0x01) ? 2 : 0;
-    for (int i = 0; i < bar_count; i++)
+    for (int i = 0; i < bar_count; i++) {
         d->bar[i] = pci_config_read32(bus, dev, func, PCI_BAR0 + i * 4);
-    for (int i = bar_count; i < 6; i++)
+    }
+    for (int i = bar_count; i < 6; i++) {
         d->bar[i] = 0;
+    }
 
     pci_device_count++;
 }
@@ -284,8 +286,9 @@ static void pci_scan_device(uint8_t bus, uint8_t dev)
     /* Check if multi-function device (bit 7 of header type) */
     uint8_t hdr = pci_config_read8(bus, dev, 0, PCI_HEADER_TYPE);
     if (hdr & 0x80) {
-        for (uint8_t func = 1; func < 8; func++)
+        for (uint8_t func = 1; func < 8; func++) {
             pci_scan_function(bus, dev, func);
+        }
     }
 }
 
@@ -294,8 +297,9 @@ static void pci_scan_device(uint8_t bus, uint8_t dev)
  */
 static void pci_scan_bus(uint8_t bus)
 {
-    for (uint8_t dev = 0; dev < 32; dev++)
+    for (uint8_t dev = 0; dev < 32; dev++) {
         pci_scan_device(bus, dev);
+    }
 }
 
 /* ---- Public Interface ---- */
@@ -323,8 +327,9 @@ void pci_init(void)
         /* Multi-root: scan buses starting from each function */
         for (uint8_t func = 0; func < 8; func++) {
             vendor = pci_config_read16(0, 0, func, PCI_VENDOR_ID);
-            if (vendor != 0xFFFF)
+            if (vendor != 0xFFFF) {
                 pci_scan_bus(func);
+            }
         }
     } else {
         /* Single root: scan bus 0, then follow bridges */
@@ -337,8 +342,9 @@ void pci_init(void)
         if (d->class_code == 0x06 && d->subclass == 0x04) {
             /* PCI-PCI bridge — read secondary bus number */
             uint8_t secondary = pci_config_read8(d->bus, d->dev, d->func, 0x19);
-            if (secondary > 0 && secondary < 255)
+            if (secondary > 0 && secondary < 255) {
                 pci_scan_bus(secondary);
+            }
         }
     }
 
@@ -386,8 +392,9 @@ const struct pci_device *pci_find_device(uint16_t vendor_id, uint16_t device_id)
 {
     for (uint32_t i = 0; i < pci_device_count; i++) {
         if (pci_devices[i].vendor_id == vendor_id &&
-            pci_devices[i].device_id == device_id)
+            pci_devices[i].device_id == device_id) {
             return &pci_devices[i];
+        }
     }
     return NULL;
 }
@@ -400,8 +407,9 @@ const struct pci_device *pci_find_class(uint8_t class_code, uint8_t subclass)
 {
     for (uint32_t i = 0; i < pci_device_count; i++) {
         if (pci_devices[i].class_code == class_code &&
-            pci_devices[i].subclass == subclass)
+            pci_devices[i].subclass == subclass) {
             return &pci_devices[i];
+        }
     }
     return NULL;
 }
@@ -441,8 +449,9 @@ static int cmd_pci(int argc, char *argv[])
                     name);
 
         /* Highlight NVIDIA */
-        if (d->vendor_id == 0x10DE)
+        if (d->vendor_id == 0x10DE) {
             uart_printf(" [NVIDIA]");
+        }
 
         uart_printf("\n");
     }

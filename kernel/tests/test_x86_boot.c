@@ -384,8 +384,9 @@ static void test_multiboot2_memory_above_1mb(void)
                 uint64_t base = *(uint64_t *)entry;
                 uint64_t len  = *(uint64_t *)(entry + 8);
                 uint32_t type = *(uint32_t *)(entry + 16);
-                if (type == 1)  /* Available */
+                if (type == 1) {  /* Available */
                     total_usable += len;
+                }
                 (void)base;
                 entry += entry_size;
             }
@@ -621,8 +622,9 @@ static void test_pit_ticks_incrementing(void)
 {
     uint64_t start = pit_ticks;
     /* Busy-wait with HLT for ~50ms (5 ticks at 100 Hz) */
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 10; i++) {
         __asm__ volatile("hlt");
+    }
     uint64_t elapsed = pit_ticks - start;
     /* Should have gotten at least 1 tick */
     TEST_ASSERT_TRUE(elapsed >= 1);
@@ -640,8 +642,9 @@ static void test_pit_rate_approximately_100hz(void)
 {
     uint64_t start = pit_ticks;
     /* HLT 100 times — each should wake on the next interrupt (~10ms each) */
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < 100; i++) {
         __asm__ volatile("hlt");
+    }
     uint64_t elapsed = pit_ticks - start;
     /* Should be roughly 100 ticks. Allow wide tolerance (50-200). */
     TEST_ASSERT_TRUE(elapsed >= 50);
@@ -799,8 +802,9 @@ static void test_timer_get_count_advances(void)
 {
     uint64_t t1 = timer_get_count();
     /* Wait a few ticks */
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 5; i++) {
         __asm__ volatile("hlt");
+    }
     uint64_t t2 = timer_get_count();
     TEST_ASSERT_TRUE(t2 > t1);
 }
@@ -931,8 +935,9 @@ static void test_new_task_runs_and_yields(void)
     scheduler_add_task(t);
 
     /* Give the worker enough scheduler visits to complete four yields. */
-    for (int i = 0; i < 20 && sched_regression_worker_ticks < 4; i++)
+    for (int i = 0; i < 20 && sched_regression_worker_ticks < 4; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_EQUAL_UINT32(4, sched_regression_worker_ticks);
 }
@@ -1041,8 +1046,9 @@ static void test_two_tasks_yield_both_advance(void)
     /* Give both workers enough scheduler visits to finish 8 yields each. */
     for (int i = 0; i < 40
          && (sched_multi_yield_counts[0] < 8 || sched_multi_yield_counts[1] < 8);
-         i++)
+         i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_EQUAL_UINT32(8, sched_multi_yield_counts[0]);
     TEST_ASSERT_EQUAL_UINT32(8, sched_multi_yield_counts[1]);
@@ -1085,8 +1091,9 @@ static void test_new_task_preemptible_on_first_timeslice(void)
     TEST_ASSERT_NOT_NULL(t);
     scheduler_add_task(t);
 
-    for (int i = 0; i < 20 && !sched_new_task_ran; i++)
+    for (int i = 0; i < 20 && !sched_new_task_ran; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(sched_new_task_ran);
     TEST_ASSERT_EQUAL_INT(0, sched_new_task_observed_preempt);
@@ -1172,8 +1179,9 @@ static void test_sleep_ms_on_ap(void)
     scheduler_add_task(t);
 
     /* Give the worker up to 400 ms to run and finish its 100 ms sleep. */
-    for (int i = 0; i < 40 && !sched_ap_sleep_done; i++)
+    for (int i = 0; i < 40 && !sched_ap_sleep_done; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(sched_ap_sleep_done);
     TEST_ASSERT_EQUAL_UINT32(1, sched_ap_sleep_cpu);
@@ -1370,8 +1378,9 @@ static void test_resched_ipi_delivers(void)
 
     /* Give the IPI up to 50 ms to propagate and the target's handler to
      * run. In practice this takes microseconds even in QEMU. */
-    for (int i = 0; i < 5 && smp_resched_ipi_count[1] == before; i++)
+    for (int i = 0; i < 5 && smp_resched_ipi_count[1] == before; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(smp_resched_ipi_count[1] > before);
 }
@@ -1442,8 +1451,9 @@ static void test_cross_cpu_dispatch_latency(void)
 
     scheduler_add_task(t);
 
-    for (int i = 0; i < 50 && !b1_target_ran; i++)
+    for (int i = 0; i < 50 && !b1_target_ran; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(b1_target_ran);
     uint64_t freq = timer_get_frequency();
@@ -1501,8 +1511,9 @@ static void test_all_cpus_timer_preempt_under_load(void)
     }
 
     /* Zero counters + stop flag. */
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++) {
         b2_worker_counters[i] = 0;
+    }
     b2_worker_stop = 0;
 
     /* Snapshot sched_diag_tick[] before, then after the busy window. */
@@ -1645,8 +1656,9 @@ static void test_sse_relu_matches_scalar(void)
         -1e10f, 0.125f, 42.0f, -0.5f, 3.14f, -2.718f,
     };
     for (int i = 0; i < 13; i++) c1_inp[i] = pattern[i];
-    for (int i = 0; i < 13; i++)
+    for (int i = 0; i < 13; i++) {
         c1_ref[i] = pattern[i] > 0.0f ? pattern[i] : 0.0f;
+    }
 
     slm_sse_relu_f32(c1_inp, c1_outp, 13);
 
@@ -1714,8 +1726,9 @@ static void test_rebalance_respects_affinity(void)
 
     /* Wait long enough for at least 2 rebalance intervals (200 ms at
      * 100 Hz) so if a bug caused migration we'd see it. */
-    for (int i = 0; i < 50 && !d1_pinned_task_ran; i++)
+    for (int i = 0; i < 50 && !d1_pinned_task_ran; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(d1_pinned_task_ran);
     TEST_ASSERT_EQUAL_UINT32(0, d1_pinned_task_affinity_seen);
@@ -1773,8 +1786,9 @@ static void test_rebalance_after_burst(void)
     }
 
     const uint32_t N = 16;
-    for (uint32_t i = 0; i < N; i++)
+    for (uint32_t i = 0; i < N; i++) {
         d1_burst_cpu_seen[i] = 0xFFFFFFFFu;
+    }
     d1_burst_count = 0;
 
     /* Create N tasks with CPU_AFFINITY_ANY (default) — the policy
@@ -1789,8 +1803,9 @@ static void test_rebalance_after_burst(void)
 
     /* Wait for all to finish. At least 2 rebalance intervals
      * (200 ms) so rebalance has a chance to run. */
-    for (int i = 0; i < 50 && d1_burst_count < N; i++)
+    for (int i = 0; i < 50 && d1_burst_count < N; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_EQUAL_UINT32(N, d1_burst_count);
 
@@ -1899,8 +1914,9 @@ static void test_fxsave_new_task_fresh_fcw(void)
     TEST_ASSERT_NOT_NULL(t);
     scheduler_add_task(t);
 
-    for (int i = 0; i < 20 && !d2_fcw_ran; i++)
+    for (int i = 0; i < 20 && !d2_fcw_ran; i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(d2_fcw_ran);
     TEST_ASSERT_EQUAL_UINT16(0x037F, d2_fcw_seen);
@@ -1928,8 +1944,9 @@ static void test_fxsave_preserves_xmm_across_preemption(void)
     scheduler_add_task(a);
     scheduler_add_task(b);
 
-    for (int i = 0; i < 40 && (!d2_xmm_done[0] || !d2_xmm_done[1]); i++)
+    for (int i = 0; i < 40 && (!d2_xmm_done[0] || !d2_xmm_done[1]); i++) {
         sleep_ms(10);
+    }
 
     TEST_ASSERT_TRUE(d2_xmm_done[0]);
     TEST_ASSERT_TRUE(d2_xmm_done[1]);
@@ -2051,8 +2068,9 @@ static void test_lapic_timer_running(void)
 {
     extern volatile uint64_t pit_ticks;
     uint64_t start = pit_ticks;
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 10; i++) {
         __asm__ volatile("hlt");
+    }
     TEST_ASSERT_TRUE(pit_ticks > start);
 }
 
@@ -2213,8 +2231,9 @@ static void test_cpuid_leaf_15_accessible(void)
     /* If EBX (numerator) is non-zero, EAX (denominator) must also
      * be non-zero — otherwise the TSC/crystal ratio computation
      * crashes. */
-    if (ebx != 0)
+    if (ebx != 0) {
         TEST_ASSERT_TRUE(eax != 0);
+    }
     /* If ECX (crystal Hz) is reported, it must be in a sane MHz
      * range. Common values are 24/25/38.4 MHz. The upper bound is
      * 1 GHz — Intel core crystals have always been low-MHz parts
@@ -2597,8 +2616,9 @@ static void test_nvidia_gpu_no_crash_without_gpu(void)
  */
 static void test_nvidia_gpu_vram_test_without_gpu(void)
 {
-    if (nvidia_gpu_is_found())
+    if (nvidia_gpu_is_found()) {
         return;  /* Skip on real hardware — VRAM test would pass there */
+    }
     int result = nvidia_gpu_vram_test();
     TEST_ASSERT_EQUAL_INT(-1, result);
 }

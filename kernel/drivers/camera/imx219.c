@@ -144,9 +144,10 @@ int imx219_power_on(void)
         struct tegra_i2c_regdump_entry regs[10] = {0};
         tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 10);
         for (uint32_t i = 0; i < 10; i++) {
-            if (regs[i].name)
+            if (regs[i].name) {
                 INFO("imx219: i2c %s = 0x%08x",
                      regs[i].name, (unsigned)regs[i].value);
+            }
         }
         return -2;
     }

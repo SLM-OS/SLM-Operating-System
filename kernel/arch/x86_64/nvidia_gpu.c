@@ -122,8 +122,9 @@ static uint64_t probe_bar_size(uint8_t bus, uint8_t dev, uint8_t func,
     /* Save original */
     uint32_t orig_lo = pci_config_read32(bus, dev, func, bar_reg);
     uint32_t orig_hi = 0;
-    if (is_64bit)
+    if (is_64bit) {
         orig_hi = pci_config_read32(bus, dev, func, bar_reg + 4);
+    }
 
     /* Write all-ones */
     pci_config_write32(bus, dev, func, bar_reg, 0xFFFFFFFF);
@@ -138,15 +139,17 @@ static uint64_t probe_bar_size(uint8_t bus, uint8_t dev, uint8_t func,
 
     /* Restore original */
     pci_config_write32(bus, dev, func, bar_reg, orig_lo);
-    if (is_64bit)
+    if (is_64bit) {
         pci_config_write32(bus, dev, func, bar_reg + 4, orig_hi);
+    }
 
     /* MMIO BAR: clear type bits (low 4 bits) */
     bool is_mmio = !(orig_lo & 1);
-    if (is_mmio)
+    if (is_mmio) {
         mask &= ~0xFULL;
-    else
+    } else {
         mask &= ~0x3ULL;
+    }
 
     if (mask == 0) return 0;
 
@@ -219,8 +222,9 @@ void nvidia_gpu_init(void)
     bool bar1_is_64bit = (bar1_lo & 1) == 0 && ((bar1_lo >> 1) & 3) == 2;
 
     nvidia_gpu.bar1_addr = bar1_lo & ~0xFUL;
-    if (bar1_is_64bit)
+    if (bar1_is_64bit) {
         nvidia_gpu.bar1_addr |= (uint64_t)bar1_hi << 32;
+    }
 
     nvidia_gpu.bar1_size = probe_bar_size(
         pci_dev->bus, pci_dev->dev, pci_dev->func, 0x14, bar1_is_64bit);
@@ -312,9 +316,10 @@ int nvidia_gpu_vram_test(void)
         uint32_t expected = pattern ^ (uint32_t)i;
         uint32_t actual = vram[i];
         if (actual != expected) {
-            if (errors < 5)
+            if (errors < 5) {
                 uart_printf("[GPU]   VRAM[%d]: expected 0x%08x, got 0x%08x\n",
                             i, expected, actual);
+            }
             errors++;
         }
     }
@@ -361,8 +366,9 @@ int nvidia_gpu_vram_test_extended(void)
         int errors = 0;
 
         /* Write pattern */
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 64; i++) {
             vram[word_offset + i] = pattern ^ (uint32_t)i;
+        }
 
         __asm__ volatile("mfence" ::: "memory");
 
@@ -371,9 +377,10 @@ int nvidia_gpu_vram_test_extended(void)
             uint32_t expected = pattern ^ (uint32_t)i;
             uint32_t actual = vram[word_offset + i];
             if (actual != expected) {
-                if (errors == 0)
+                if (errors == 0) {
                     uart_printf("[GPU]   Offset 0x%lx+%d: expected 0x%08x, got 0x%08x\n",
                                 word_offset * 4, i * 4, expected, actual);
+                }
                 errors++;
             }
         }

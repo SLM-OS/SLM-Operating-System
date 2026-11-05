@@ -295,8 +295,9 @@ static uint32_t xhci_nudge_disabled_port_to_u0(uint8_t pidx, uint32_t portsc,
     enum usb_speed speed = USB_SPEED_UNKNOWN;
     (void)xhci_decode_portsc(portsc, &connected, &speed);
 
-    if (!connected || (portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH)
+    if (!connected || (portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH) {
         return portsc;
+    }
 
     uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
     uint32_t write = (xhci_port_state_to_neutral(portsc) &
@@ -351,23 +352,27 @@ static void xhci_padctl_w32(uint32_t off, uint32_t v)
 
 static bool xhci_active_usb2_lane(unsigned *lane_out)
 {
-    if (xhci_active_port < TEGRA_XUSB_USB2_PORT_OFFSET)
+    if (xhci_active_port < TEGRA_XUSB_USB2_PORT_OFFSET) {
         return false;
+    }
 
     unsigned lane = (unsigned)xhci_active_port - TEGRA_XUSB_USB2_PORT_OFFSET;
-    if (lane >= TEGRA_XUSB_USB2_PORT_COUNT)
+    if (lane >= TEGRA_XUSB_USB2_PORT_COUNT) {
         return false;
+    }
 
-    if (lane_out)
+    if (lane_out) {
         *lane_out = lane;
+    }
     return true;
 }
 
 static void tegra_xusb_utmi_pad_power_on_active_lane(const char *why)
 {
     unsigned lane = 0;
-    if (!xhci_active_usb2_lane(&lane))
+    if (!xhci_active_usb2_lane(&lane)) {
         return;
+    }
 
     uint32_t mux_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PAD_MUX);
     uint32_t cap_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PORT_CAP);
@@ -414,8 +419,9 @@ static void tegra_xusb_utmi_pad_power_on_active_lane(const char *why)
 static void tegra_xusb_utmi_pad_power_cycle_active_lane(const char *why)
 {
     unsigned lane = 0;
-    if (!xhci_active_usb2_lane(&lane))
+    if (!xhci_active_usb2_lane(&lane)) {
         return;
+    }
 
     uint32_t ctl0_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane));
     uint32_t ctl1_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane));
@@ -504,8 +510,9 @@ static const char *xhci_ctrl_stage_str(uint8_t stage)
 static void xhci_log_one_devctx_snapshot(const char *tag, const char *which,
                                          void *devctx)
 {
-    if (devctx == NULL)
+    if (devctx == NULL) {
         return;
+    }
 
     bool cz = xhci_caps_cached.ctx_64;
     uint32_t slot0 = *xhci_dev_slot_dw(devctx, 0);
@@ -551,8 +558,9 @@ static void xhci_log_one_devctx_snapshot(const char *tag, const char *which,
 static void xhci_log_inherited_slot3_handoff_snapshot(const char *tag,
                                                       uintptr_t phys)
 {
-    if (!xhci_inherited_slot3_ctx_valid)
+    if (!xhci_inherited_slot3_ctx_valid) {
         return;
+    }
 
     uint32_t slot0 = xhci_inherited_slot3_slot_ctx_dw[0];
     uint32_t slot1 = xhci_inherited_slot3_slot_ctx_dw[1];
@@ -597,8 +605,9 @@ static void xhci_log_inherited_slot3_handoff_snapshot(const char *tag,
 static void xhci_log_inherited_slot1_handoff_snapshot(const char *tag,
                                                       uintptr_t phys)
 {
-    if (!xhci_inherited_slot1_ctx_valid)
+    if (!xhci_inherited_slot1_ctx_valid) {
         return;
+    }
 
     uint32_t slot0 = xhci_inherited_slot1_slot_ctx_dw[0];
     uint32_t slot1 = xhci_inherited_slot1_slot_ctx_dw[1];
@@ -642,14 +651,17 @@ static void xhci_log_inherited_slot1_handoff_snapshot(const char *tag,
 
 static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
 {
-    if (d == NULL)
+    if (d == NULL) {
         return;
+    }
 
     xhci_log_one_devctx_snapshot(tag, "local", d->dev_ctx);
-    if (d->adopted_inherited && d->slot_id == 1 && d->controller_devctx_phys != 0)
+    if (d->adopted_inherited && d->slot_id == 1 && d->controller_devctx_phys != 0) {
         xhci_log_inherited_slot1_handoff_snapshot(tag, d->controller_devctx_phys);
-    if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0)
+    }
+    if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0) {
         xhci_log_inherited_slot3_handoff_snapshot(tag, d->controller_devctx_phys);
+    }
 }
 
 static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
@@ -680,8 +692,9 @@ static bool xhci_stale_port_already_recovered(uint32_t portsc, bool connected)
      * Keep this narrow: the original stale inherited device path keeps
      * PED set, so it still stays hidden until a real re-plug.
      */
-    if (!connected)
+    if (!connected) {
         return false;
+    }
 
     return !(portsc & XHCI_PORTSC_PED) &&
            !!(portsc & (XHCI_PORTSC_PEC | XHCI_PORTSC_PRC));
@@ -700,8 +713,9 @@ static bool xhci_stale_port_detached_in_linux(uint32_t portsc, bool connected,
      * unplug/replug.
      */
     if (!connected || (portsc & XHCI_PORTSC_PED) ||
-        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        (portsc & XHCI_PORTSC_RW1CS_MASK)) {
         return false;
+    }
 
     return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
            speed == USB_SPEED_HIGH;
@@ -721,8 +735,9 @@ static bool xhci_stale_port_enabled_inherited(uint32_t portsc, bool connected,
      * forcing the old unplug/replug path up front.
      */
     if (!connected || !(portsc & XHCI_PORTSC_PED) ||
-        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        (portsc & XHCI_PORTSC_RW1CS_MASK)) {
         return false;
+    }
 
     return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
            speed == USB_SPEED_HIGH;
@@ -734,8 +749,9 @@ static bool xhci_connected_disabled_port(uint32_t portsc)
     enum usb_speed speed = USB_SPEED_UNKNOWN;
     bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
 
-    if (!connected || (portsc & XHCI_PORTSC_PED) || !decoded)
+    if (!connected || (portsc & XHCI_PORTSC_PED) || !decoded) {
         return false;
+    }
 
     return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
            speed == USB_SPEED_HIGH;
@@ -748,11 +764,13 @@ static bool xhci_connected_enabled_u0_port(uint32_t portsc)
     bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
     uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
 
-    if (!connected || !(portsc & XHCI_PORTSC_PED) || !decoded)
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || !decoded) {
         return false;
+    }
 
-    if (pls != XHCI_PLS_U0)
+    if (pls != XHCI_PLS_U0) {
         return false;
+    }
 
     return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
            speed == USB_SPEED_HIGH;
@@ -762,8 +780,9 @@ static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
                                       const char *why)
 {
     uint32_t change = portsc & XHCI_PORTSC_RW1CS_MASK;
-    if (!change)
+    if (!change) {
         return portsc;
+    }
 
     uint32_t ack = xhci_port_state_to_neutral(portsc) | change;
     xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
@@ -978,8 +997,9 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
 
 void xhci_dump_port_state(void)
 {
-    if (!xhci_live)
+    if (!xhci_live) {
         return;
+    }
 
     uart_printf("  attach_state=%s active_port=%s",
                 xhci_attach_phase_str(xhci_attach_state),
@@ -1071,8 +1091,9 @@ void xhci_dump_device_state(void)
 
     for (unsigned i = 0; i < sizeof(xhci_dev_pool) / sizeof(xhci_dev_pool[0]); i++) {
         struct xhci_device *d = &xhci_dev_pool[i];
-        if (!d->valid)
+        if (!d->valid) {
             continue;
+        }
 
         uart_printf("  dev[%u]: slot=%u root_port=%u dev_ctx=%p controller_devctx_phys=0x%08x%08x input_ctx=%p\r\n",
                     i, (unsigned)d->slot_id, (unsigned)d->root_port,
@@ -1177,8 +1198,9 @@ int xhci_hcd_port_reset(uint8_t port)
 {
     if (!xhci_live) return -1;
     if (port != 0) return -1;
-    if (xhci_active_port == 0xFF)
+    if (xhci_active_port == 0xFF) {
         return -1;
+    }
 
     tegra_xusb_utmi_pad_power_on_active_lane("pre-reset");
 
@@ -1389,8 +1411,9 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
 
 static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
 {
-    if (d == NULL || d->dev_ctx == NULL)
+    if (d == NULL || d->dev_ctx == NULL) {
         return;
+    }
 
     uint32_t *slot3 = xhci_dev_slot_dw(d->dev_ctx, 3);
     uint32_t old = *slot3;
@@ -1408,8 +1431,9 @@ static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
 static void xhci_probe_eval_slot_address(struct xhci_device *d, uint8_t addr)
 {
     if (d == NULL || d->input_ctx == NULL || d->dev_ctx == NULL ||
-        d->slot_id == 0)
+        d->slot_id == 0) {
         return;
+    }
 
     bool cz = xhci_caps_cached.ctx_64;
     memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
@@ -1424,8 +1448,9 @@ static void xhci_probe_eval_slot_address(struct xhci_device *d, uint8_t addr)
      * written Device Context, then patch only addr/state for this
      * one-shot experiment.
      */
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         *xhci_in_slot_dw(d->input_ctx, i, cz) = *xhci_dev_slot_dw(d->dev_ctx, i);
+    }
 
     uint32_t *slot3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
     uint32_t old = *slot3;
@@ -1474,8 +1499,9 @@ static int xhci_prepare_slot3_fixed_mirror(struct xhci_device *d,
     uintptr_t ep0_controller_phys = ep0_cpu_phys;
     uintptr_t devctx_controller_phys = (uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
 
-    if (d == NULL || ep0 == NULL)
+    if (d == NULL || ep0 == NULL) {
         return -1;
+    }
 
     d->dev_ctx = (void *)(uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
     d->dev_ctx_phys = devctx_controller_phys;
@@ -1507,12 +1533,14 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
                                          struct xhci_ring *ep0)
 {
     if (!xhci_adopt_inherited_slot3_once || d == NULL || dev == NULL ||
-        ep0 == NULL)
+        ep0 == NULL) {
         return -1;
+    }
 
     if (dev->route_string != 0 || dev->speed != USB_SPEED_FULL ||
-        d->root_port != 7)
+        d->root_port != 7) {
         return -1;
+    }
 
     /*
      * On nano-2's inherited full-speed Bluetooth path, Linux leaves a live
@@ -1526,8 +1554,9 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
 
-    if (xhci_prepare_slot3_fixed_mirror(d, ep0) != 0)
+    if (xhci_prepare_slot3_fixed_mirror(d, ep0) != 0) {
         return -1;
+    }
 
     cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
                   ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
@@ -1595,10 +1624,12 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
                 (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] &
                             XHCI_SLOT_DW0_CTXENT_MASK) >>
                            XHCI_SLOT_DW0_CTXENT_SHIFT);
-            if (ctx_entries > 7)
+            if (ctx_entries > 7) {
                 ctx_entries = 7;
-            for (unsigned i = 0; i < 4; i++)
+            }
+            for (unsigned i = 0; i < 4; i++) {
                 *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot3_slot_ctx_dw[i];
+            }
             for (unsigned dci = 1; dci <= ctx_entries; dci++) {
                 for (unsigned i = 0; i < ep_dw_count; i++) {
                     *xhci_dev_ep_dw(d->dev_ctx, dci, i, cz) =
@@ -1673,12 +1704,14 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
                                           struct xhci_ring *ep0)
 {
     if (!xhci_adopt_inherited_slot1_once || d == NULL || dev == NULL ||
-        ep0 == NULL)
+        ep0 == NULL) {
         return -1;
+    }
 
     if (dev->route_string != 0 || dev->speed != USB_SPEED_HIGH ||
-        d->root_port != 6)
+        d->root_port != 6) {
         return -1;
+    }
 
     if (!xhci_inherited_slot1_ctx_valid ||
         xhci_inherited_slot1_devctx_raw_phys == 0) {
@@ -1693,11 +1726,13 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
     uint32_t inherited_ep0_state =
         xhci_inherited_slot1_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK;
 
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 4; i++) {
         *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot1_slot_ctx_dw[i];
-    for (unsigned i = 0; i < 8; i++)
+    }
+    for (unsigned i = 0; i < 8; i++) {
         *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz) =
             xhci_inherited_slot1_ep0_ctx_dw[i];
+    }
     *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
         (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
     *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
@@ -1755,16 +1790,19 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
 
 int xhci_debug_reprime_adopted_ep0(struct usb_device *dev)
 {
-    if (dev == NULL || dev->hcd_private == NULL)
+    if (dev == NULL || dev->hcd_private == NULL) {
         return -1;
+    }
 
     struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
-    if (!d->valid || !d->adopted_inherited || d->slot_id == 0)
+    if (!d->valid || !d->adopted_inherited || d->slot_id == 0) {
         return -1;
+    }
 
     struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
-    if (ep0 == NULL || ep0->trbs == NULL || ep0->num_trbs == 0)
+    if (ep0 == NULL || ep0->trbs == NULL || ep0->num_trbs == 0) {
         return -1;
+    }
 
     uintptr_t next_tr_phys = ep0->phys +
                              (uintptr_t)ep0->enqueue * sizeof(struct xhci_trb);
@@ -1808,8 +1846,9 @@ int xhci_debug_reprime_adopted_ep0(struct usb_device *dev)
 
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
 {
-    if (!XHCI_HCC1_PPC(xhci_caps_cached.hcc_params1))
+    if (!XHCI_HCC1_PPC(xhci_caps_cached.hcc_params1)) {
         return;
+    }
 
     uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
     if ((portsc & XHCI_PORTSC_PP) == 0) {
@@ -1917,16 +1956,19 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
 
 int xhci_sync_child_address_bsr0(struct usb_device *dev)
 {
-    if (!xhci_live || dev == NULL)
+    if (!xhci_live || dev == NULL) {
         return -1;
+    }
 
     struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
-    if (d == NULL || d->slot_id == 0 || d->adopted_inherited)
+    if (d == NULL || d->slot_id == 0 || d->adopted_inherited) {
         return -1;
+    }
 
     struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
-    if (ep0 == NULL)
+    if (ep0 == NULL) {
         return -1;
+    }
 
     xhci_build_input_ctx_for_address(d, dev, ep0->phys);
 
@@ -2223,8 +2265,9 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
          slot, (unsigned)dev->speed, d->root_port);
-    if (inherited_addr != 0)
+    if (inherited_addr != 0) {
         xhci_patch_inherited_address(d, inherited_addr);
+    }
     if (xhci_probe_highspeed_eval_addr1 &&
         dev->route_string == 0 &&
         dev->speed == USB_SPEED_HIGH &&
@@ -2261,11 +2304,13 @@ err:
 
 void xhci_hcd_device_close(struct usb_device *dev)
 {
-    if (!xhci_live || dev == NULL)
+    if (!xhci_live || dev == NULL) {
         return;
+    }
     struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
-    if (d == NULL)
+    if (d == NULL) {
         return;
+    }
 
     if (d->slot_id != 0) {
         if (d->adopted_inherited) {
@@ -2323,11 +2368,13 @@ static uint32_t xhci_ep_interval_from_usb(const struct usb_device *dev,
     uint8_t xfer = ep->attributes & USB_XFER_TYPE_MASK;
     uint32_t interval = ep->interval;
 
-    if (interval == 0)
+    if (interval == 0) {
         return 0;
+    }
 
-    if (xfer == USB_XFER_CONTROL || xfer == USB_XFER_BULK)
+    if (xfer == USB_XFER_CONTROL || xfer == USB_XFER_BULK) {
         return 0;
+    }
 
     /*
      * xHCI stores the endpoint interval in 125 us quanta. For FS/LS
@@ -2336,8 +2383,9 @@ static uint32_t xhci_ep_interval_from_usb(const struct usb_device *dev,
      * power of two the same way Linux does.
      */
     if ((dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW) &&
-        xfer == USB_XFER_INTERRUPT)
+        xfer == USB_XFER_INTERRUPT) {
         return xhci_interval_ceil_log2(interval * 8U);
+    }
 
     /*
      * HS interrupt and HS/FS isochronous descriptors already encode
@@ -2376,16 +2424,19 @@ static uint32_t xhci_ep_dw4_from_usb(const struct usb_endpoint *ep)
 int xhci_hcd_endpoint_configure(struct usb_device *dev,
                                 const struct usb_endpoint *ep)
 {
-    if (!xhci_live || dev == NULL || ep == NULL || !ep->valid)
+    if (!xhci_live || dev == NULL || ep == NULL || !ep->valid) {
         return -1;
+    }
     struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
-    if (d == NULL)
+    if (d == NULL) {
         return -1;
+    }
 
     bool cz = xhci_caps_cached.ctx_64;
     unsigned dci = xhci_dci_ep(ep->address);
-    if (dci < 2 || dci > 31)
+    if (dci < 2 || dci > 31) {
         return -1;
+    }
     if (d->ep_rings[dci] != NULL) {
         INFO("xhci: ep 0x%02x already configured (dci=%u)",
              ep->address, dci);
@@ -2403,14 +2454,17 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
         bool any_non_ep0_configured = false;
         unsigned valid_non_ep0 = 0;
         for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
-            if (!dev->endpoints[i].valid)
+            if (!dev->endpoints[i].valid) {
                 continue;
+            }
             unsigned ep_dci = xhci_dci_ep(dev->endpoints[i].address);
-            if (ep_dci < 2 || ep_dci > 31)
+            if (ep_dci < 2 || ep_dci > 31) {
                 continue;
+            }
             valid_non_ep0++;
-            if (d->ep_rings[ep_dci] != NULL)
+            if (d->ep_rings[ep_dci] != NULL) {
                 any_non_ep0_configured = true;
+            }
         }
         batch_all = !any_non_ep0_configured && valid_non_ep0 > 1;
     }
@@ -2418,12 +2472,14 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     if (batch_all) {
         for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
             const struct usb_endpoint *cfg_ep = &dev->endpoints[i];
-            if (!cfg_ep->valid)
+            if (!cfg_ep->valid) {
                 continue;
+            }
 
             unsigned cfg_dci_i = xhci_dci_ep(cfg_ep->address);
-            if (cfg_dci_i < 2 || cfg_dci_i > 31)
+            if (cfg_dci_i < 2 || cfg_dci_i > 31) {
                 continue;
+            }
 
             struct xhci_ring *cfg_ring = xhci_ring_pool_alloc();
             if (cfg_ring == NULL) {
@@ -2439,8 +2495,9 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
             cfg_eps[cfg_count] = cfg_ep;
             cfg_rings[cfg_count] = cfg_ring;
             cfg_dcis[cfg_count] = cfg_dci_i;
-            if (cfg_dci_i > max_dci)
+            if (cfg_dci_i > max_dci) {
                 max_dci = cfg_dci_i;
+            }
             cfg_count++;
         }
 
@@ -2470,8 +2527,9 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
     uint32_t *in_add  = xhci_in_control_dw(d->input_ctx, 1);
     *in_add = XHCI_INPUT_ADD_SLOT;
-    for (unsigned i = 0; i < cfg_count; i++)
+    for (unsigned i = 0; i < cfg_count; i++) {
         *in_add |= XHCI_INPUT_ADD_EP(cfg_dcis[i]);
+    }
 
     /* Update Slot Context: start from the live slot image so retained
      * addr/state survive, then bump Context Entries to cover the new EP. */
@@ -2584,8 +2642,9 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
 
 err_free_cfg_rings:
     for (unsigned i = 0; i < cfg_count; i++) {
-        if (cfg_rings[i] != NULL)
+        if (cfg_rings[i] != NULL) {
             xhci_ring_pool_free(cfg_rings[i]);
+        }
     }
     return -1;
 }

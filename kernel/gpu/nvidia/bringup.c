@@ -135,8 +135,9 @@ int gsp_bringup_select_sig_index(uint32_t fuse_reg, uint16_t sig_versions,
      * last available signature. Nouveau errors here; we accept it
      * because retail cards always have non-zero fuse_reg and a
      * dev-kit failing on signature picks the most recent sig. */
-    if (fuse_reg == 0)
+    if (fuse_reg == 0) {
         return (int)sig_count - 1;
+    }
 
     /* Nouveau ga102 algorithm:
      *   reg_bit = 1 << fls(fuse_reg)
@@ -297,8 +298,9 @@ static inline size_t round_up(size_t n, size_t align)
 int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
 {
     if (!b) return -1;
-    if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free)
+    if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free) {
         return -1;
+    }
 
     b->last_error_phase = 1;
 
@@ -676,8 +678,9 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
 {
     if (!b) return GSP_ERR_INVAL;
     if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
-        || !gsp_platform->firmware_get)
+        || !gsp_platform->firmware_get) {
         return GSP_ERR_INVAL;
+    }
     if (b->state != GSP_BRINGUP_FWSEC_FRTS_DONE) {
         /* Allow re-entry on a partially-failed bringup, but the WPR2
          * registers must be set — booter dereferences WprMeta to find

@@ -71,8 +71,9 @@ void uart_putc(char c)
 {
     uint16_t base = (uint16_t)UART_BASE;
 
-    while ((inb(base + UART_LSR) & LSR_THRE) == 0)
+    while ((inb(base + UART_LSR) & LSR_THRE) == 0) {
         ;
+    }
     outb(base + UART_THR, c);
 }
 
@@ -81,8 +82,9 @@ char uart_getc(void)
     uint16_t base = (uint16_t)UART_BASE;
     extern void yield(void);
 
-    while ((inb(base + UART_LSR) & LSR_DR) == 0)
+    while ((inb(base + UART_LSR) & LSR_DR) == 0) {
         yield();  /* Let other tasks run while waiting for input */
+    }
     return (char)inb(base + UART_RBR);
 }
 

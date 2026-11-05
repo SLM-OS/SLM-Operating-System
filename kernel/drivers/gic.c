@@ -95,8 +95,9 @@ static uintptr_t gicr_cpu_base[MAX_CPUS];
 /* Calculate redistributor base for a CPU (must be initialized first) */
 static inline uintptr_t gicr_rd_base(uint32_t cpu)
 {
-    if (gicr_cpu_base[cpu])
+    if (gicr_cpu_base[cpu]) {
         return gicr_cpu_base[cpu];
+    }
     /* Fallback to stride calculation (for boot CPU before discovery) */
     return GICR_BASE + (cpu * GICR_STRIDE);
 }

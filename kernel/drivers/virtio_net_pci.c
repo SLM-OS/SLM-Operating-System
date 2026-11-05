@@ -325,8 +325,9 @@ static bool find_virtio_cap(uint8_t bus, uint8_t dev, uint8_t func,
 {
     /* Read PCI status register to check capabilities list */
     uint16_t status = pci_config_read16(bus, dev, func, 0x06);
-    if (!(status & (1 << 4)))  /* Capabilities List bit */
+    if (!(status & (1 << 4))) {  /* Capabilities List bit */
         return false;
+    }
 
     /* Read capabilities pointer */
     uint8_t cap_ptr = pci_config_read8(bus, dev, func, 0x34) & 0xFC;
@@ -368,8 +369,9 @@ static bool find_virtio_cap(uint8_t bus, uint8_t dev, uint8_t func,
 static bool find_msix_cap(const struct pci_device *pdev)
 {
     uint16_t status = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x06);
-    if (!(status & PCI_STATUS_CAP_LIST))
+    if (!(status & PCI_STATUS_CAP_LIST)) {
         return false;
+    }
 
     uint8_t cap_ptr = pci_config_read8(pdev->bus, pdev->dev, pdev->func, 0x34) & 0xFC;
 
@@ -393,13 +395,15 @@ static bool find_msix_cap(const struct pci_device *pdev)
              * PCI spec). A corrupt / non-compliant device reporting
              * BAR 6 or 7 would read out-of-bounds below; refuse the
              * capability rather than walk off the array. */
-            if (table_bar >= 6)
+            if (table_bar >= 6) {
                 return false;
+            }
 
             uint64_t bar_addr = pdev->bar[table_bar] & ~0xFUL;
             /* 64-bit BAR: high half in bar[n+1]. 0x6 mask = type bits. */
-            if ((pdev->bar[table_bar] & 0x6) == 0x4 && table_bar < 5)
+            if ((pdev->bar[table_bar] & 0x6) == 0x4 && table_bar < 5) {
                 bar_addr |= (uint64_t)pdev->bar[table_bar + 1] << 32;
+            }
 
             pci_msix.cap_ptr    = cap_ptr;
             pci_msix.table_size = (uint16_t)((msg_ctrl & MSIX_MSG_CTRL_TABLE_SIZE) + 1);
@@ -505,8 +509,9 @@ static int vq_init(struct pci_virtqueue *vq, uint16_t index) {
     vq->free_head = 0;
     vq->num_free = qsize;
     vq->last_used_idx = 0;
-    for (uint16_t i = 0; i < qsize - 1; i++)
+    for (uint16_t i = 0; i < qsize - 1; i++) {
         vq->desc[i].next = i + 1;
+    }
 
     /* Tell device about queue addresses */
     common->queue_desc  = (uint64_t)(uintptr_t)vq->desc;
@@ -541,8 +546,9 @@ static int vq_init(struct pci_virtqueue *vq, uint16_t index) {
 }
 
 static int vq_alloc_desc(struct pci_virtqueue *vq) {
-    if (vq->num_free == 0)
+    if (vq->num_free == 0) {
         return -1;
+    }
     int idx = vq->free_head;
     vq->free_head = vq->desc[idx].next;
     vq->num_free--;
@@ -558,8 +564,9 @@ static void vq_free_desc(struct pci_virtqueue *vq, int idx) {
 static int vq_add_buf(struct pci_virtqueue *vq, void *addr, uint32_t len,
                       bool write) {
     int idx = vq_alloc_desc(vq);
-    if (idx < 0)
+    if (idx < 0) {
         return -1;
+    }
 
     vq->desc[idx].addr = (uint64_t)(uintptr_t)addr;
     vq->desc[idx].len = len;
@@ -577,13 +584,15 @@ static int vq_add_buf(struct pci_virtqueue *vq, void *addr, uint32_t len,
 
 static int vq_get_buf(struct pci_virtqueue *vq, uint32_t *len) {
     vio_mb();
-    if (vq->last_used_idx == vq->used->idx)
+    if (vq->last_used_idx == vq->used->idx) {
         return -1;
+    }
 
     uint16_t used_idx = vq->last_used_idx % vq->size;
     uint32_t desc_idx = vq->used->ring[used_idx].id;
-    if (len)
+    if (len) {
         *len = vq->used->ring[used_idx].len;
+    }
 
     vq_free_desc(vq, desc_idx);
     vq->last_used_idx++;
@@ -626,16 +635,18 @@ static void post_rx_buffers(void) {
 /* -------------------------------------------------------------------------- */
 
 static int virtio_net_pci_init(void) {
-    if (pci_net.initialized)
+    if (pci_net.initialized) {
         return 0;
+    }
 
     INFO("Initializing VirtIO-Net PCI driver...");
 
     /* Find VirtIO network device */
     const struct pci_device *pdev = pci_find_device(VIRTIO_PCI_VENDOR,
                                                      VIRTIO_PCI_NET_MODERN);
-    if (!pdev)
+    if (!pdev) {
         pdev = pci_find_device(VIRTIO_PCI_VENDOR, VIRTIO_PCI_NET_LEGACY);
+    }
     if (!pdev) {
         /* Also try class-based search: Ethernet controller (02:00) with VirtIO vendor */
         for (uint32_t i = 0; i < pci_get_device_count(); i++) {
@@ -688,29 +699,33 @@ static int virtio_net_pci_init(void) {
 
     /* Map BAR regions — on x86-64 with identity mapping, BAR addr = virtual addr */
     uint64_t bar_addr = pdev->bar[cap_common.bar] & ~0xFUL;
-    if ((pdev->bar[cap_common.bar] & 0x6) == 0x4 && cap_common.bar < 5)
+    if ((pdev->bar[cap_common.bar] & 0x6) == 0x4 && cap_common.bar < 5) {
         bar_addr |= (uint64_t)pdev->bar[cap_common.bar + 1] << 32;
+    }
 
     pci_net.common = (volatile struct virtio_pci_common_cfg *)
         (uintptr_t)(bar_addr + cap_common.offset);
 
     uint64_t notify_bar = pdev->bar[cap_notify.bar] & ~0xFUL;
-    if ((pdev->bar[cap_notify.bar] & 0x6) == 0x4 && cap_notify.bar < 5)
+    if ((pdev->bar[cap_notify.bar] & 0x6) == 0x4 && cap_notify.bar < 5) {
         notify_bar |= (uint64_t)pdev->bar[cap_notify.bar + 1] << 32;
+    }
     pci_net.notify_base = (volatile uint16_t *)
         (uintptr_t)(notify_bar + cap_notify.offset);
     pci_net.notify_off_multiplier = cap_notify.notify_off_multiplier;
 
     uint64_t isr_bar = pdev->bar[cap_isr.bar] & ~0xFUL;
-    if ((pdev->bar[cap_isr.bar] & 0x6) == 0x4 && cap_isr.bar < 5)
+    if ((pdev->bar[cap_isr.bar] & 0x6) == 0x4 && cap_isr.bar < 5) {
         isr_bar |= (uint64_t)pdev->bar[cap_isr.bar + 1] << 32;
+    }
     pci_net.isr = (volatile uint32_t *)
         (uintptr_t)(isr_bar + cap_isr.offset);
 
     if (has_dev_cfg) {
         uint64_t dev_bar = pdev->bar[cap_device.bar] & ~0xFUL;
-        if ((pdev->bar[cap_device.bar] & 0x6) == 0x4 && cap_device.bar < 5)
+        if ((pdev->bar[cap_device.bar] & 0x6) == 0x4 && cap_device.bar < 5) {
             dev_bar |= (uint64_t)pdev->bar[cap_device.bar + 1] << 32;
+        }
         pci_net.dev_cfg = (volatile struct virtio_net_config_pci *)
             (uintptr_t)(dev_bar + cap_device.offset);
     }
@@ -813,8 +828,9 @@ static int virtio_net_pci_init(void) {
 
     /* Read MAC address */
     if ((pci_net.features & VIRTIO_NET_F_MAC) && pci_net.dev_cfg) {
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 6; i++) {
             pci_net.mac[i] = pci_net.dev_cfg->mac[i];
+        }
     } else {
         pci_net.mac[0] = 0x52; pci_net.mac[1] = 0x54;
         pci_net.mac[2] = 0x00; pci_net.mac[3] = 0x12;
@@ -861,8 +877,9 @@ static bool tx_has_inflight(void) {
 /* Watchdog check extracted so tests can drive it with synthetic
  * inputs. Caller holds pci_net.tx_lock. */
 static void tx_watchdog_warn_if_stuck(bool any_inflight) {
-    if (tx_stall_warned || !any_inflight)
+    if (tx_stall_warned || !any_inflight) {
         return;
+    }
     uint32_t elapsed = sys_now() - tx_last_progress_ms;
     if (elapsed >= VIRTIO_NET_TX_STALL_THRESHOLD_MS) {
         WARN("TX descriptors stuck: no completion for %u ms (virtio-pci)",
@@ -883,8 +900,9 @@ static void virtio_net_pci_tx_reap_locked(void) {
     while (true) {
         uint32_t used_len;
         int desc_idx = vq_get_buf(&pci_net.tx_vq, &used_len);
-        if (desc_idx < 0)
+        if (desc_idx < 0) {
             break;
+        }
 
         uintptr_t addr = (uintptr_t)pci_net.tx_vq.desc[desc_idx].addr;
         uintptr_t pool_base = (uintptr_t)&tx_buffers[0][0];
@@ -911,18 +929,21 @@ static void virtio_net_pci_tx_reap_locked(void) {
 /* Entry point called from net_poll() via the net_driver op — wraps
  * the locked helper with tx_lock acquisition. */
 static void virtio_net_pci_tx_reap(void) {
-    if (!pci_net.initialized)
+    if (!pci_net.initialized) {
         return;
+    }
     irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
     virtio_net_pci_tx_reap_locked();
     spin_unlock_irqrestore(&pci_net.tx_lock, flags);
 }
 
 static int virtio_net_pci_send(const void *data, size_t len) {
-    if (!pci_net.initialized)
+    if (!pci_net.initialized) {
         return -1;
-    if (len > 1514)
+    }
+    if (len > 1514) {
         return NET_E_TOO_LARGE;
+    }
 
     irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
 
@@ -969,8 +990,9 @@ static int virtio_net_pci_send(const void *data, size_t len) {
 }
 
 static int virtio_net_pci_recv(void *buffer, size_t max_len) {
-    if (!pci_net.initialized)
+    if (!pci_net.initialized) {
         return -1;
+    }
 
     irq_flags_t flags = spin_lock_irqsave(&pci_net.rx_lock);
 
@@ -1002,10 +1024,11 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
 }
 
 static void virtio_net_pci_get_mac(uint8_t mac[6]) {
-    if (pci_net.initialized)
+    if (pci_net.initialized) {
         memcpy(mac, pci_net.mac, 6);
-    else
+    } else {
         memset(mac, 0, 6);
+    }
 }
 
 static bool virtio_net_pci_link_status(void) {
@@ -1033,8 +1056,9 @@ static bool virtio_net_pci_link_status(void) {
 void virtio_net_pci_irq_handler(uint8_t irq)
 {
     (void)irq;  /* single-vector handler; irq index unused */
-    if (!pci_net.initialized)
+    if (!pci_net.initialized) {
         return;
+    }
 
     pci_msix.irq_count++;
 

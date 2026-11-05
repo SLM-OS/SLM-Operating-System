@@ -2815,8 +2815,9 @@ uint32_t hailo_backend_in_use_slots(void)
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     uint32_t n = 0;
     for (int i = 0; i < HAILO_MAX_MODELS; i++) {
-        if (slots[i].in_use)
+        if (slots[i].in_use) {
             n++;
+        }
     }
     spin_unlock_irqrestore(&slots_lock, flags);
     return n;

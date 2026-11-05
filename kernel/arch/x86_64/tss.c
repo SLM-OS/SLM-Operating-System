@@ -117,8 +117,9 @@ static void tss_descriptor_write(uint64_t *slot, uint64_t base,
  */
 void tss_install_current_cpu(uint32_t cpu_id)
 {
-    if (cpu_id >= MAX_CPUS)
+    if (cpu_id >= MAX_CPUS) {
         return;
+    }
 
     struct tss64 *tss = &cpu_tsses[cpu_id];
     struct cpu_gdt *gdt = &cpu_gdts[cpu_id];
@@ -126,8 +127,9 @@ void tss_install_current_cpu(uint32_t cpu_id)
     /* Populate TSS: point IST1 at the top of this CPU's 4 KiB IST
      * stack (x86-64 stack grows down). All other IST slots and the
      * legacy ring-0 rsp0/1/2 fields are zero — unused today. */
-    for (size_t i = 0; i < sizeof(*tss); i++)
+    for (size_t i = 0; i < sizeof(*tss); i++) {
         ((uint8_t *)tss)[i] = 0;
+    }
     tss->ist1 = (uint64_t)&cpu_ist1_stacks[cpu_id][sizeof(cpu_ist1_stacks[cpu_id])];
     tss->io_map_base = sizeof(*tss);    /* no I/O bitmap */
 
@@ -159,22 +161,25 @@ void tss_install_current_cpu(uint32_t cpu_id)
  */
 uintptr_t tss_get_ist1_for_cpu(uint32_t cpu_id)
 {
-    if (cpu_id >= MAX_CPUS)
+    if (cpu_id >= MAX_CPUS) {
         return 0;
+    }
     return (uintptr_t)&cpu_ist1_stacks[cpu_id][sizeof(cpu_ist1_stacks[cpu_id])];
 }
 
 uintptr_t tss_get_ist1_stack_base_for_cpu(uint32_t cpu_id)
 {
-    if (cpu_id >= MAX_CPUS)
+    if (cpu_id >= MAX_CPUS) {
         return 0;
+    }
     return (uintptr_t)&cpu_ist1_stacks[cpu_id][0];
 }
 
 uintptr_t tss_get_tss_base_for_cpu(uint32_t cpu_id)
 {
-    if (cpu_id >= MAX_CPUS)
+    if (cpu_id >= MAX_CPUS) {
         return 0;
+    }
     return (uintptr_t)&cpu_tsses[cpu_id];
 }
 

@@ -191,15 +191,18 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
 
     uint32_t cpu = cpu_id();
 
-    if (!reschedule_pending[cpu])
+    if (!reschedule_pending[cpu]) {
         return;
-    if (preempt_disabled[cpu])
+    }
+    if (preempt_disabled[cpu]) {
         return;
+    }
     /* Accept either EL1h or EL2h — kernel-mode source. EL0t and
      * other unexpected modes fall through and are not preempted. */
     uint64_t mode = tf->spsr & PSR_MODE_MASK;
-    if (mode != PSR_MODE_EL1H && mode != PSR_MODE_EL2H)
+    if (mode != PSR_MODE_EL1H && mode != PSR_MODE_EL2H) {
         return;
+    }
 
     /* Consume the flag and stash the original exception return state
      * for resched_trampoline to replay. orig_spsr is the interrupted

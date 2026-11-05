@@ -135,8 +135,9 @@ static inline void spin_lock(spinlock_t *lock)
     uint32_t val = 1;
     while (__atomic_exchange_n(&lock->lock, val, __ATOMIC_ACQUIRE) != 0) {
         /* Spin on read (avoids bus lock contention) until lock looks free */
-        while (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED) != 0)
+        while (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED) != 0) {
             __asm__ volatile("pause" ::: "memory");
+        }
     }
 #elif defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: skip locking, just barrier for memory ordering */
@@ -377,8 +378,9 @@ static inline void ticket_lock(ticket_lock_t *lock)
                 : "=r"(seen)
                 : "r"(&lock->owner)
                 : "memory");
-            if (seen == ticket)
+            if (seen == ticket) {
                 break;
+            }
             __asm__ volatile("wfe" ::: "memory");
         }
     }

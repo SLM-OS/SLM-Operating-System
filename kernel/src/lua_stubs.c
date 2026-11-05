@@ -152,24 +152,28 @@ static void __ctype_to_init(void) {
         __ctype_toupper_table[i] = c;
         __ctype_tolower_table[i] = c;
     }
-    for (int c = 'a'; c <= 'z'; c++)
+    for (int c = 'a'; c <= 'z'; c++) {
         __ctype_toupper_table[CTYPE_NEG_OFFSET + c] = c - 32;
-    for (int c = 'A'; c <= 'Z'; c++)
+    }
+    for (int c = 'A'; c <= 'Z'; c++) {
         __ctype_tolower_table[CTYPE_NEG_OFFSET + c] = c + 32;
+    }
     __ctype_toupper_ptr = &__ctype_toupper_table[CTYPE_NEG_OFFSET];
     __ctype_tolower_ptr = &__ctype_tolower_table[CTYPE_NEG_OFFSET];
     __atomic_store_n(&__ctype_to_inited, true, __ATOMIC_RELEASE);
 }
 
 const int **__ctype_toupper_loc(void) {
-    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE)) {
         __ctype_to_init();
+    }
     return &__ctype_toupper_ptr;
 }
 
 const int **__ctype_tolower_loc(void) {
-    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE)) {
         __ctype_to_init();
+    }
     return &__ctype_tolower_ptr;
 }
 #endif
@@ -527,8 +531,12 @@ long strtol(const char *nptr, char **endptr, int base) {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
 
     /* Handle sign */
-    if (*s == '-') { negative = 1; s++; }
-    else if (*s == '+') s++;
+    if (*s == '-') {
+        negative = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Handle base prefix */
     if (base == 0 || base == 16) {
@@ -593,8 +601,12 @@ double strtod(const char *nptr, char **endptr) {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
 
     /* Handle sign */
-    if (*s == '-') { negative = 1; s++; }
-    else if (*s == '+') s++;
+    if (*s == '-') {
+        negative = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
 
     /* Parse integer and fraction parts */
     while (*s) {
@@ -609,8 +621,12 @@ double strtod(const char *nptr, char **endptr) {
             in_fraction = 1;
         } else if (*s == 'e' || *s == 'E') {
             s++;
-            if (*s == '-') { exp_negative = 1; s++; }
-            else if (*s == '+') s++;
+            if (*s == '-') {
+                exp_negative = 1;
+                s++;
+            } else if (*s == '+') {
+                s++;
+            }
             while (*s >= '0' && *s <= '9') {
                 exponent = exponent * 10 + (*s - '0');
                 s++;

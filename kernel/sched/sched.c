@@ -577,9 +577,12 @@ static void idle_task_func(void *arg)
          * -Werror=address would flag an unconditional `if (arr)`
          * there, so the check is gated. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
-        if (sched_diag_idle_loops)
-#endif
+        if (sched_diag_idle_loops) {
             sched_diag_idle_loops[cpu_id()]++;
+        }
+#else
+        sched_diag_idle_loops[cpu_id()]++;
+#endif
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
@@ -888,8 +891,9 @@ void scheduler_init(void)
                                CACHE_LINE_SIZE);
     if (!nc_runqueues) {
         INFO("SMP: NC run queue allocation failed");
-        for (;;)
+        for (;;) {
             ;
+        }
     }
     INFO("SMP: run queues in NC memory at 0x%lx",
          (unsigned long)nc_runqueues);
@@ -913,8 +917,9 @@ void scheduler_init(void)
         sched_diag_picked[i] = 0;
     }
     sched_diag_idle_loops = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    for (uint32_t i = 0; i < MAX_CPUS; i++)
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
         sched_diag_idle_loops[i] = 0;
+    }
 
     /* Work-stealing observability counters (#105, #175). */
     sched_diag_steal_attempts     = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
@@ -1249,8 +1254,9 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
         irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
         int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
         spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
-        if (rc < 0)
+        if (rc < 0) {
             sched_diag_steal_push_full[cpu]++;
+        }
     }
 #endif
 
@@ -1828,8 +1834,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 
     for (uint32_t i = 1; i < cpu_count; i++) {
         uint32_t victim = (this_cpu + i) % cpu_count;
-        if (victim == this_cpu)
+        if (victim == this_cpu) {
             continue;
+        }
 
         /* Cheap early-out: if the victim is currently inside its own
          * schedule() critical section (between rq_unlock_irqrestore
@@ -1839,8 +1846,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * is still the primary mutual-exclusion mechanism that keeps
          * the steal race-free; this is belt-and-suspenders per the
          * cross-plan review (B3 / P2-3). */
-        if (preempt_disabled[victim])
+        if (preempt_disabled[victim]) {
             continue;
+        }
 
         /* Drain any stale pointers along with finding a live one. Bounded
          * by deque capacity so this loop cannot spin forever. */
@@ -1858,8 +1866,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
             struct task *candidate =
                 steal_deque_steal(&cpu_steal_deques[victim], &captured_gen);
             spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
-            if (!candidate)
+            if (!candidate) {
                 break;  /* Empty — try next victim */
+            }
             victim_had_entry = 1;
 
             irq_flags_t flags = rq_lock_irqsave(victim);
@@ -2661,8 +2670,9 @@ void scheduler_tick(void)
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* sched_diag_tick pointer is in cacheable BSS — secondary CPUs
      * may have stale L2 data for it. Use direct NC address if available. */
-    if (sched_diag_tick)
+    if (sched_diag_tick) {
         sched_diag_tick[cpu]++;
+    }
 #else
     sched_diag_tick[cpu]++;
 #endif

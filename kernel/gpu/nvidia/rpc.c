@@ -45,10 +45,12 @@ void gsp_rpc_publish_word(volatile uint32_t *cell, uint32_t value)
      * matters: cache_clean(cell) BEFORE the barrier, otherwise the
      * GSP can observe the value via the coherent path while the
      * barrier-protected dirty cache line still hasn't drained. */
-    if (gsp_platform->cache_clean)
+    if (gsp_platform->cache_clean) {
         gsp_platform->cache_clean((const void *)cell, sizeof(*cell));
-    if (gsp_platform->mb)
+    }
+    if (gsp_platform->mb) {
         gsp_platform->mb();
+    }
 }
 
 uint32_t gsp_rpc_snapshot_word(volatile uint32_t *cell)
@@ -57,10 +59,12 @@ uint32_t gsp_rpc_snapshot_word(volatile uint32_t *cell)
     /* Mirror image of publish: invalidate the cache line so any
      * stale CPU-side copy is dropped, barrier so the read below
      * doesn't speculate ahead of the invalidate. */
-    if (gsp_platform->cache_invalidate)
+    if (gsp_platform->cache_invalidate) {
         gsp_platform->cache_invalidate((void *)cell, sizeof(*cell));
-    if (gsp_platform->mb)
+    }
+    if (gsp_platform->mb) {
         gsp_platform->mb();
+    }
     return *cell;
 }
 
@@ -79,8 +83,9 @@ uint32_t gsp_rpc_pages_for_payload(uint32_t rpc_payload_len)
      * send path already caps at 16 pages via a separate guard; this
      * is belt-and-suspenders at the arithmetic boundary. */
     const uint32_t hdr = (uint32_t)sizeof(struct gsp_msg_hdr);
-    if (rpc_payload_len > UINT32_MAX - hdr - (GSP_PAGE_SIZE - 1))
+    if (rpc_payload_len > UINT32_MAX - hdr - (GSP_PAGE_SIZE - 1)) {
         return UINT32_MAX;
+    }
     uint32_t total = hdr + rpc_payload_len;
     return (total + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
 }
@@ -126,8 +131,9 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
 {
     if (!ch) return GSP_ERR_INVAL;
     if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
-        || !gsp_platform->cache_clean)
+        || !gsp_platform->cache_clean) {
         return GSP_ERR_INVAL;
+    }
 
     memset(ch, 0, sizeof(*ch));
 
@@ -208,8 +214,9 @@ int gsp_rpc_send(struct gsp_rpc_channel *ch, uint32_t function,
     /* Free-space check. */
     uint32_t wptr = *ch->cmdq.wptr;
     uint32_t rptr = *ch->cmdq.rptr;
-    if (gsp_rpc_free_pages(wptr, rptr, ch->cmdq.page_count) < pages)
+    if (gsp_rpc_free_pages(wptr, rptr, ch->cmdq.page_count) < pages) {
         return GSP_ERR_NOSPC;
+    }
 
     /* Until GSP-RM is alive on the RISC-V core, the consumer never
      * advances rptr — sending here would silently fill the ring.
