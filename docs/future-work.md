@@ -1,6 +1,6 @@
 # SLM-OS Future Work
 
-Post-capstone development roadmap. These items were identified during Phases 1-6 and explicitly deferred to maintain focus on the core capstone deliverables.
+Development roadmap. Most of these items were first identified during the original capstone (Phases 1-6) and deferred then to keep its scope focused; open work is tracked in the GitHub `Backlog` and `Icebox` milestones.
 
 ---
 
@@ -20,7 +20,7 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - **E3.4.e / E4 / E5 / E6** — RISC-V startup, RPC ring completion, compute engine, full pipeline: transitively blocked by E3.4.d on this platform.
 - **Jetson GA10B / bare-metal paths:** the portable bringup code (VBIOS parse, Falcon driver, DMEMMAPPER patcher, sig-index, RPC skeleton) transfers directly and does not suffer the priv-lock. See `docs/x86-64-gpu-inference-status.md` §4.
 
-### TensorRT Integration (still post-capstone)
+### TensorRT Integration
 - Requires working GSP + CUDA runtime
 - Pre-compiled TensorRT engines for supported models
 - Fallback to CPU inference when GPU unavailable
@@ -200,9 +200,18 @@ broader hardware/networking generalization remains follow-on work.
 
 ---
 
-## Priority Recommendations
+## Priority Recommendations (end-of-capstone snapshot)
 
-**High priority (immediate post-capstone):**
+This list records the priorities as set when the capstone ended (2026)
+and is kept as history; it is not maintained. Current priorities are the
+P-labels on GitHub issues in the `Backlog` milestone. Since the snapshot:
+item 1 shipped (synthetic and SLM-OS-fine-tuned scheduler weights,
+`AI_WEIGHTS=synthetic|real`, #61), item 3 shipped (#93), and item 7 is
+done on Jetson: GA10B compute works after kexec on channels that Linux's
+nvgpu driver creates, and on the UEFI-direct path with SLM-OS bringing
+the GPU up itself (#1088).
+
+**High priority:**
 1. Real AI scheduler weights — validates the AI-first thesis
 2. FP16 quantization — practical inference speedup
 3. pi_mutex sleep queue — replaces single-CPU contended livelock on the priority-inheritance path

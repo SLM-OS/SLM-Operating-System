@@ -480,8 +480,13 @@ Before PI:
 
 With PI:
   Task A boosted to pri=6 while holding mutex
-  Schedule order: A (boosted), B, C  ← A runs to release lock quickly
+  B is blocked on the mutex (off the run queue)
+  Schedule order: A (boosted), C  ← A runs to release the lock; B gets it next
 ```
+
+Per #1103 (code reading, not yet reproduced), the boost may last only
+until the holder is next re-queued; see
+[Known Limitation](#known-limitation--pi-boost-lost-when-the-holder-is-re-queued-1103).
 
 ### When to Use PI Mutex
 
@@ -495,24 +500,30 @@ Continue using spinlocks for:
 - Interrupt handlers (IRQ context)
 - Single-CPU scenarios
 
-### Wait-Loop Implementation (SCHED-H1, April 2026)
+### Wait Queue (#93)
 
-`pi_mutex_lock`'s inner spin loop now guards each probe of `mutex->locked` with a local `irq_save` / `irq_restore` pair and calls `yield()` between probes. This closes a narrow window where a timer ISR could re-enter `pi_mutex` paths with interrupts already enabled and deadlock against another waiter's `guard` acquire. The pseudocode:
+A contended `pi_mutex_lock` boosts the owner, appends the caller to the
+mutex's FIFO wait queue, marks it `TASK_BLOCKED` and calls `schedule()`,
+which takes it off the run queue. `pi_mutex_unlock` restores the owner's
+priority, picks the highest-priority waiter, hands it ownership directly
+and wakes it, so a woken waiter never has to re-acquire.
 
-```c
-while (mutex->locked) {
-    irq_flags_t f = irq_save();
-    if (!mutex->locked) { irq_restore(f); break; }
-    irq_restore(f);
-    yield();
-}
-```
+This replaced a spin-and-yield wait loop (SCHED-H1, 2026-04-12) four days
+after it landed (#93, 2026-04-16). The spin loop could livelock on a single
+CPU: the HIGH waiter kept being picked ahead of the boosted holder. A
+blocked waiter is off the run queue, so that livelock is gone.
 
-### Known Limitation — Single-CPU Contended Priority Inheritance
+### Known Limitation — PI Boost Lost When the Holder Is Re-queued (#1103)
 
-The boost path in `try_boost_owner` updates `effective_priority` but does not re-sort the run queue. A holder that was enqueued at `LOW` remains in its `LOW` slot in the per-CPU queue even after being boosted to `HIGH`. In a single-CPU scenario with one holder and one HIGH-priority waiter, the scheduler picks the waiter (rq head), which spins/yields and is itself re-queued at HIGH — starving the boosted holder. The livelock persists even under hardware preemption (Pi 5 default `SECONDARY_PREEMPT=ON`, Jetson default under `JETSON_HW_TICK=ON`) because the bug is the run-queue ordering, not the preemption mechanism: a timer IRQ would still pick the waiter on the next `schedule()` since it sits at the queue head.
-
-The capstone-ready conservative fix (SCHED-H1) handles the IRQ-safety issue but does not resolve the single-CPU livelock. The proper fix is a sleep-queue model — the waiter blocks on a wait condition and is woken by `pi_mutex_unlock` — and is tracked as a post-capstone enhancement.
+`try_boost_owner` implements inheritance by writing the holder's
+`effective_priority`, but every run-queue insertion recomputes that field
+from the base priority (or the AI scheduler's level) in
+`update_deadline_boost`, which knows nothing about the boost. A boosted
+holder that is preempted or yields therefore goes back to its base
+priority on re-queue, and a medium-priority task can run ahead of it.
+The boost also does not re-position a holder that is already queued,
+because the queue is ordered at insertion. Tracked in #1103 (found by code
+reading; not yet reproduced on hardware).
 
 ## FFI Task API
 

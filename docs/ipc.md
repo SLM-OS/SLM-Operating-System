@@ -414,23 +414,32 @@ and `test_wildcard_only_delivers_once` pin the contract on every
   (`test_integration.c::test_msg_router_ack_targets_last_received_cross_cpu`,
   cpu_count ≥ 2). Regression for #867 / #67c.
 
-### Single-slot mailbox limitation
+### Single-slot mailboxes and flow control
 
-The current `Mailbox` struct is a single-slot structure (one set of
-`ready`/`ack`/`data` atomics per subscription). If two `publish_internal`
-calls target the *same* mailbox before the subscriber has acked the first
-message, the second `deliver()` overwrites the first message in place;
-the subscriber then sees only the second message. This case requires
-multiple publishers running concurrently against the same mailbox, which
-the standard ack-wait publish path does not produce — its loop blocks on
-ack between iterations, so a single publisher cannot back-to-back deliver
-to one mailbox.
+The `Mailbox` struct is single-slot (one set of `ready`/`ack`/`data`
+atomics per subscription). Until #869 was fixed, a second delivery to a
+mailbox whose first message had not been acked overwrote it in place, and
+both publishers reported success. Since #948, `try_deliver` refuses to
+write into an unacked mailbox:
 
-The single-mailbox overwrite drop is a real limitation of the current
-single-slot design and is tracked for post-capstone follow-up as #869.
-The concurrency-stress tests in `test_integration.c` document the
-boundary explicitly so future maintainers don't mistake a deliberate
-limitation for a regression.
+- **Blocking publish** (`publish_internal`) yields and retries for up to
+  `ACK_TIMEOUT_SECS` (5 s), counting `FLOW_CONTROL_BUSY_RETRIES`, then
+  waits up to another 5 s for the ack. The two budgets are independent,
+  so a slow prior subscriber can't make a message that did land report
+  `delivered=0`; the worst case is about 10 s per target. A target whose
+  mailbox stays busy, or whose subscriber never acks, is not counted in
+  `delivered`.
+- **Non-blocking publish** (`publish_internal_nowait`) drops the message
+  for that target, counts `FLOW_CONTROL_NOWAIT_DROPS`, and leaves it out
+  of `delivered`, so the caller sees the drop.
+
+Read the counters with `msg_router_flow_control_stats` (reset with
+`msg_router_flow_control_reset`). The contract is pinned by
+`test_msg_router.c::test_publish_nowait_basic_contract` (nowait drop) and
+`test_integration.c::test_msg_router_same_mailbox_zero_loss` (concurrent
+blocking publishers to one mailbox lose nothing). A mailbox still holds
+one message at a time, so a slow subscriber throttles its publishers
+rather than queueing.
 
 ---
 

@@ -395,7 +395,7 @@ All issues are tracked in GitHub Issues via `gh` CLI. This is the single source 
 - Use `gh issue create` with the appropriate template (`--template bug_report.md`, `--template investigation.md`, or `--template enhancement.md`)
 - Always set platform and subsystem labels on creation: `--label "platform:jetson" --label "sub:smp"`
 - Always set a priority label: `--label "P1-high"`
-- Assign a milestone when the target phase is clear: `--milestone "Capstone"`
+- Assign a milestone: `--milestone "Backlog"` for committed work, `--milestone "Icebox"` for ideas with no timeline. (The `Capstone` milestone is closed and kept only as the record of the original capstone; don't assign new work to it.)
 - For quick filing without the template form: `gh issue create --title "..." --body "..." --label "..." --label "..."`
 
 ### Before Starting Work
@@ -440,7 +440,7 @@ gh issue list --label "platform:jetson"
 gh issue list --label "blocker" --state open
 
 # Everything in a milestone
-gh issue list --milestone "Capstone"
+gh issue list --milestone "Backlog"
 
 # Search by keyword
 gh issue list --search "MPIDR"
@@ -448,4 +448,4 @@ gh issue list --search "MPIDR"
 
 ---
 
-*Last updated: 3 November 2026*
+*Last updated: 4 November 2026*
