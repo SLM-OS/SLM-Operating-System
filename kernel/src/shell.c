@@ -718,7 +718,13 @@ int shell_session_read_raw(char *dst, int max_len)
         return n;
     }
 
-    return shell_io_read_buf(s->io, dst, max_len);
+    /* xput-bin isn't a mutating command, but a lua-admin script can run it
+     * with the shell mutation lock held. On TCP this wait yields to net_pump
+     * at IDLE, which a holder boosted by a waiter would never let run (#1103). */
+    bool paused = shell_mutation_pause();
+    int got = shell_io_read_buf(s->io, dst, max_len);
+    shell_mutation_resume(paused);
+    return got;
 }
 
 /*

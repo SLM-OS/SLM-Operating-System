@@ -526,6 +526,11 @@ blocked waiter is off the run queue, so that livelock is gone.
   longer than strictly needed, but never less (the same rule FreeRTOS uses).
 - **One level of inheritance:** a boosted holder that blocks on a second
   mutex does not pass the boost on to that mutex's owner (#1121).
+- **Polling with `yield()`:** a boosted holder that polls with `yield()` goes
+  straight back ahead of lower-priority tasks on its CPU, so it must not wait
+  that way for work one of them does. Shell sessions and `net_pump` run at
+  IDLE and `uart_getc` polls this way, so shell code releases `shell_mutex`
+  with `shell_mutation_pause()` while it waits for input.
 - **AI scheduler:** a decision taken while a task runs on a borrowed priority
   (a floor above its own base) sets no level (`sched_ai_apply_priority_action`), because stepping from the borrowed
   priority would leave it behind after the release. `scheduler_add_task` has

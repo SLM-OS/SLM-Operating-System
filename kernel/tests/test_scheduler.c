@@ -3342,6 +3342,8 @@ static void test_ai_priority_action_skipped_while_inheriting(void)
     t->pi_priority = TASK_PRIORITY_HIGH;
     t->effective_priority = TASK_PRIORITY_HIGH;
     TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));
+    t->effective_priority = TASK_PRIORITY_CRITICAL; /* deadline boost above it */
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, sched_trace_ai_action_priority(t));
     t->pi_priority = TASK_PRIORITY_LOW;
     t->effective_priority = TASK_PRIORITY_NORMAL;
     TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));

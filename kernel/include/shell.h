@@ -116,7 +116,9 @@ int shell_execute(const char *cmdline);
 /* Temporarily release the shell mutation lock if the current task holds it.
  * Intended for long-running mutating handlers that need to block on input,
  * then reacquire before touching unlocked global state again. Returns true
- * when the lock was released and must later be resumed. */
+ * when the lock was released and must later be resumed. Waiting for input
+ * with the lock held would block other sessions, and a holder boosted by a
+ * waiter that polls with yield() starves IDLE tasks on its CPU (#1103). */
 bool shell_mutation_pause(void);
 
 /* Reacquire the shell mutation lock after shell_mutation_pause() returned

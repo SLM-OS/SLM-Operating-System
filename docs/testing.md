@@ -281,7 +281,8 @@ Validates the deadline-aware scheduler with priority ordering, deadline boost, c
 | test_inherited_priority_is_floor_on_recompute | `pi_priority` is a floor on every recompute; a deadline boost above it still wins |
 | test_reposition_only_moves_queued_task | `sched_reposition_task` leaves an unqueued task out of the run queue and moves a queued one |
 | test_reposition_keeps_place_when_order_holds | A change that doesn't affect the queue order keeps the task's place; a real one still moves it |
-| test_ai_priority_action_skipped_while_inheriting | An AI decision on a borrowed priority sets no level and traces log the task's own priority; a floor below its base borrows nothing (AI_SCHED=ON only) |
+| test_ai_priority_action_skipped_while_inheriting | An AI decision on a borrowed priority sets no level and traces log the task's own priority, or a deadline boost above it; a floor below its base borrows nothing (AI_SCHED=ON only) |
+| test_blocking_input_releases_shell_mutex | `getchar`, `shell_session_read_raw`, `slm.read_line` and `slm stream` wait for input without `shell_mutex`, and take it back afterwards (`test_shell_session.c`) |
 
 #### Unit Tests: Core Isolation
 

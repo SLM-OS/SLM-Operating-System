@@ -1095,7 +1095,11 @@ int puts(const char *s) {
 }
 
 int getchar(void) {
-    return shell_getc();
+    /* Don't wait for input holding the shell mutation lock (#1103). */
+    bool paused = shell_mutation_pause();
+    int c = shell_getc();
+    shell_mutation_resume(paused);
+    return c;
 }
 
 int putchar(int c) {
