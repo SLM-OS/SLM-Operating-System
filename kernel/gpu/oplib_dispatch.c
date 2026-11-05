@@ -206,11 +206,9 @@ int slm_oplib_prepare_dispatch(uint32_t op_kind,
     }
     cache_clean_range(cbuf_cpu, 4096);
 
-    /* DSB SY so the cbuf bytes + page-table publication that
-     * ga10b_gmmu_alloc already issued are both visible to the GPU
-     * before any submit consumes the cbuf. The submit-side helper
-     * (next PR) issues its own dsb sy too — this one orders the
-     * data writes relative to the page-table writes. */
+    /* DSB SY so the cbuf bytes are visible to the GPU before any submit
+     * consumes the cbuf. The submit-side helper issues its own dsb sy
+     * too. */
     __asm__ volatile("dsb sy" ::: "memory");
 
     out->shader_gpu_va    = sass_va;

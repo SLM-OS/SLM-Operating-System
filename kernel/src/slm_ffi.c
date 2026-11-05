@@ -704,11 +704,13 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * its own `struct ga10b_bringup` that's separate from these globals.
  * Its verbs that submit work or use the shared cbuf and scratch slots
  * take this lock, staging and reading back inside it (#1111). Bring-up
- * and diagnostic verbs that replace or inspect channel state don't:
- * `inherit`, `channel`, `run`, `oplib stage`, the FECS verbs and
- * `nvgpu cold`. `run` includes a smoke-test submit.
- * They're not meant to run alongside FFI dispatch, and #1143 tracks
- * them. */
+ * and diagnostic verbs that change channel, page-table or engine state
+ * don't: `inherit`, `channel`, `run` (includes a smoke-test submit),
+ * `oplib stage`, `rebuild-gmmu`, `gmmu alloc-page`, `engine-clear`, the
+ * FECS verbs and `nvgpu cold`, plus the GMMU allocations in `oplib
+ * prep-rmsnorm` before its locked prepare. They print, poll or allocate,
+ * so they can't simply run under it. They're not meant to run alongside
+ * FFI dispatch, and #1143 tracks them. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 
 /* Per-kind bringup state. One slot per `enum ga10b_pipeline_kind`

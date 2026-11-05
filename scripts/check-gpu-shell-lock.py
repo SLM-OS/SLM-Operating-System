@@ -30,7 +30,9 @@ CHANNEL_FUNCTIONS = (
     "ga10b_bringup_set_input_fill",
 )
 CALL = re.compile(r"\b(" + "|".join(CHANNEL_FUNCTIONS) + r")\s*\(")
-DEFINITION = re.compile(r"^[A-Za-z_][\w\s\*]*?\b(\w+)\s*\(")
+# A column-0 line up to its first "(": a function's return type and name, or
+# just its name when the type is on the line above.
+DEFINITION = re.compile(r"^(?:[A-Za-z_][\w\s\*]*[\s\*])?([A-Za-z_]\w*)\s*\(")
 
 
 def strip_noise(text):
@@ -48,7 +50,7 @@ def check(path):
     callbacks = set()
     for number, line in enumerate(source.splitlines(), 1):
         definition = DEFINITION.match(line)
-        if definition and not line.startswith(("#", "typedef", "struct")):
+        if definition and not line.startswith("typedef"):
             current = definition[1]
             if current.endswith("_locked_cb") and not line.rstrip().endswith(";"):
                 callbacks.add(current)

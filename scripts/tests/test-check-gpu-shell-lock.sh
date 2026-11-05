@@ -72,6 +72,44 @@ static int run_locked(void *arg)
 }
 C
 
+expect "function returning a struct pointer ends the callback" 1 "called from verb" <<'C'
+static int run_locked_cb(void *arg)
+{
+    return slm_gpu_call_locked(run_locked_cb, arg);
+}
+struct foo *verb(void)
+{
+    ga10b_ce_memcpy(0, 0, 0, 0);
+    return 0;
+}
+C
+
+expect "function with its name alone at column 0 ends the callback" 1 "called from verb" <<'C'
+static int run_locked_cb(void *arg)
+{
+    return slm_gpu_call_locked(run_locked_cb, arg);
+}
+int
+verb(void)
+{
+    return ga10b_ce_memcpy(0, 0, 0, 0);
+}
+C
+
+expect "struct definition after a callback isn't a function" 0 - <<'C'
+static int run_locked_cb(void *arg)
+{
+    return slm_oplib_dispatch(arg, 0, 0, 0);
+}
+struct run {
+    int x;
+};
+int verb(void)
+{
+    return slm_gpu_call_locked(run_locked_cb, 0);
+}
+C
+
 expect "comments and strings don't count" 0 - <<'C'
 /* slm_oplib_dispatch(b) used to be called here */
 int verb(void)
