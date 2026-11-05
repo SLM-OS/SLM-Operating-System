@@ -2,7 +2,7 @@
  * user_syscall.h - User-Mode Syscall Stubs for SLM-OS
  *
  * Inline assembly wrappers for making system calls from EL0.
- * User-mode components include this header instead of calling
+ * EL0 code includes this header instead of calling
  * kernel functions directly.
  *
  * These functions use SVC #0 with the syscall number in x8.

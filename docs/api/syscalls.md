@@ -1,7 +1,7 @@
 # System Call API Reference
 
 API reference for the SLM-OS system call interface. System calls provide the mechanism
-for user-mode (EL0) components to request kernel services. The current implementation
+for user-mode (EL0) tasks to request kernel services. The current implementation
 defines 7 syscalls covering process lifecycle, scheduling, IPC, inference, and I/O.
 
 **Source files:**
@@ -37,7 +37,7 @@ When the Exception Class (EC) field of ESR_EL1 equals `0x15` (SVC from AArch64),
 
 | Number | Name | Signature | Description |
 |--------|------|-----------|-------------|
-| 0 | `SYS_EXIT` | `sys_exit(code)` | Terminate the calling component |
+| 0 | `SYS_EXIT` | `sys_exit(code)` | Terminate the calling task |
 | 1 | `SYS_YIELD` | `sys_yield()` | Voluntarily yield the CPU |
 | 2 | `SYS_SEND` | `sys_send(topic, data, len)` | Publish a message to a topic |
 | 3 | `SYS_RECV` | `sys_recv(topic_out, buf, len, timeout_ms)` | Receive a message |
@@ -54,7 +54,7 @@ rejected with a return value of `-1`.
 
 ### SYS_EXIT (0)
 
-Terminate the calling component.
+Terminate the calling task.
 
 ```c
 void sys_exit(int code);
@@ -201,7 +201,7 @@ via `uart_putc()`. Output is capped at 256 characters regardless of `len`.
 ## User-Mode Stubs
 
 The header `kernel/include/user_syscall.h` provides inline assembly wrappers for each
-syscall. User-mode components include this header to invoke syscalls without writing
+syscall. EL0 code includes this header to invoke syscalls without writing
 assembly directly. The stubs are only available when compiling for AArch64
 (`__aarch64__` defined).
 
@@ -344,7 +344,7 @@ with a diagnostic message printed to UART.
 
 ## SPSR for EL0
 
-When launching a user-mode component, the kernel sets `SPSR_EL1` to `SPSR_EL0T` (`0x0`),
+When launching an EL0 task, the kernel sets `SPSR_EL1` to `SPSR_EL0T` (`0x0`),
 which configures:
 
 - Exception level: EL0 (unprivileged)

@@ -40,13 +40,13 @@ static int user_str_has_nul(const char *p, size_t max_len)
 /*
  * Basic user pointer validation.
  *
- * Only rejects NULL, empty ranges and address overflow, so any other
- * address passes, including kernel addresses.
+ * Only rejects NULL, empty ranges, overflow and a task with no stack, so
+ * any other address passes, including kernel addresses.
  * Future: validate against the task's own page tables (#29).
  */
 static int validate_user_ptr(const void *ptr, size_t len)
 {
-    if (!ptr || len == 0) return 0;  /* NULL or empty is "valid" (no access) */
+    if (!ptr || len == 0) return 0;  /* NULL or empty: rejected */
 
     struct task *t = task_current();
     if (!t || !t->stack_base) return 0;
@@ -57,8 +57,8 @@ static int validate_user_ptr(const void *ptr, size_t len)
     /* Overflow check */
     if (end < start) return 0;
 
-    /* For now, allow any kernel-mapped address (shared address space) */
-    /* Future: restrict to component's own memory region */
+    /* No range check: any other address passes, including kernel */
+    /* addresses. #29 tracks restricting this to the task's mappings. */
     (void)t;
     return 1;
 }
@@ -67,7 +67,7 @@ static int validate_user_ptr(const void *ptr, size_t len)
  * Syscall Handlers
  * ============================================================================ */
 
-/* SYS_EXIT: Terminate the calling component */
+/* SYS_EXIT: Terminate the calling task */
 static int64_t sys_exit_handler(struct trap_frame *frame)
 {
     int code = (int)frame->x0;

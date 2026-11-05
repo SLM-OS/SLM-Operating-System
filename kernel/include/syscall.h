@@ -19,7 +19,7 @@
  * Syscall Numbers
  * ============================================================================ */
 
-#define SYS_EXIT        0       /* Terminate component: sys_exit(code) */
+#define SYS_EXIT        0       /* Terminate task: sys_exit(code) */
 #define SYS_YIELD       1       /* Yield CPU: sys_yield() */
 #define SYS_SEND        2       /* Send message: sys_send(topic, data, len) */
 #define SYS_RECV        3       /* Receive message: sys_recv(topic_out, buf, len, timeout) */

@@ -30,7 +30,7 @@ Invocation is via `SVC #0`. Negative return values indicate errors.
 
 | Number | Name         | Signature                                          | Description                        |
 |--------|--------------|----------------------------------------------------|------------------------------------|
-| 0      | `SYS_EXIT`   | `sys_exit(code)`                                   | Terminate the calling component    |
+| 0      | `SYS_EXIT`   | `sys_exit(code)`                                   | Terminate the calling task         |
 | 1      | `SYS_YIELD`  | `sys_yield()`                                      | Voluntarily yield the CPU          |
 | 2      | `SYS_SEND`   | `sys_send(topic, data, len) -> int`                | Publish a message to a topic       |
 | 3      | `SYS_RECV`   | `sys_recv(topic_out, buf, len, timeout) -> int`    | Receive a message from a topic     |
@@ -51,7 +51,7 @@ Three EL0 exception vectors are installed in `vectors.S`:
 The `el0_sync_handler()` reads the Exception Class (EC) field from `ESR_EL1`:
 
 - **EC 0x15 (SVC from AArch64):** Dispatched to `syscall_dispatch()`, which reads the syscall number from `frame->x8`, calls the corresponding handler, and writes the result to `frame->x0`. Execution returns to EL0 via `restore_regs` + `ERET`.
-- **All other EC values** (data abort, instruction abort, illegal instruction, PC/SP alignment fault, etc.): Routed to `handle_user_fault()`, which logs diagnostics and terminates the component via `task_exit()`.
+- **All other EC values** (data abort, instruction abort, illegal instruction, PC/SP alignment fault, etc.): Routed to `handle_user_fault()`, which logs diagnostics and terminates the task via `task_exit()`.
 
 ### EL0 IRQ (`el0_irq`)
 
@@ -70,7 +70,7 @@ When a user-mode fault occurs, `handle_user_fault()`:
 3. Calls `task_exit()` to terminate the task
 4. The scheduler picks the next runnable task; the kernel continues
 
-This is the key isolation property: a component crash does not crash the kernel.
+This is the key isolation property: an EL0 task crash does not crash the kernel. It doesn't protect against component crashes yet, because components run in-kernel.
 
 ---
 
@@ -130,10 +130,10 @@ Before accessing user-provided pointers, each syscall handler calls `validate_us
 
 ## Known Limitations
 
-- **Kernel RAM must not be writable at EL0.** Arm treats any region writable at EL0 as PXN at EL1, so with AP=01 on the kernel's RAM mapping the kernel can't fetch its own code. This was measured on QEMU by forcing the AP bits with a temporary patch: `-d int` shows repeated Prefetch Aborts (ESR `0x8600000e`, permission fault) right after MMU enable, with no output because the vectors are on those pages too. With AP=11, which has the same AP[1]=1 but isn't writable at EL0, fetches work and the first fault is a Data Abort on a kernel write (ESR `0x9600004e`). `make_block_desc` rejects `VMM_FLAG_USER`, so setting that flag on the mapping panics before MMU enable. **The production design avoids this by construction**: per-task `TTBR0_EL1` (user pages live in a separate L1 table), kernel keeps `TTBR1_EL1` with AP=00, and user mappings are never applied to kernel pages.
+- **Kernel RAM must not be writable at EL0.** Arm treats any region writable at EL0 as PXN at EL1, so with AP=01 on the kernel's RAM mapping the kernel can't fetch its own code. This was measured on QEMU by forcing the AP bits with a temporary patch: `-d int` shows repeated Prefetch Aborts (ESR `0x8600000e`, permission fault) right after MMU enable, with no output because the vectors are on those pages too. With AP=11, which has the same AP[1]=1 but isn't writable at EL0, fetches work and the first fault is a Data Abort on a kernel write (ESR `0x9600004e`). `make_block_desc` rejects `VMM_FLAG_USER`, so setting that flag on the mapping panics before MMU enable. **The production design avoids this by construction**: kernel mappings stay AP=00, and user mappings go only in the user region of each per-task L1 table, which copies the kernel's entries unchanged.
 - **Per-component page tables:** EL0 tasks have per-task `TTBR0_EL1` address spaces and ASIDs (#697, #728, #738), but the component runtime still creates components in-kernel, so components don't use them yet.
 - **x86-64 Ring 3:** Not yet implemented. `task_create_user()` is ARM64-only.
-- **Restart policy:** Faulting components are terminated but not automatically restarted. Configurable restart is planned for a future milestone.
+- **Restart policy:** Faulting EL0 tasks are terminated but not automatically restarted. Configurable restart is planned for a future milestone.
 
 ---
 
