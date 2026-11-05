@@ -1,7 +1,7 @@
 /*
  * syscall.c - System Call Dispatch for SLM-OS
  *
- * Handles system calls from EL0 (user-mode) components.
+ * Handles system calls from EL0 (user-mode) tasks.
  * Each syscall handler receives the trap frame and can read arguments
  * from x0-x5 and write the return value to x0.
  */
@@ -20,10 +20,10 @@
 #include <stddef.h>
 
 /*
- * Scan a validated user buffer for a NUL byte within [0, max_len).
- * The caller must have already validated the pointer is readable for
- * max_len bytes via validate_user_ptr(). Returns 1 if a NUL was found,
- * 0 otherwise.
+ * Scan a user buffer for a NUL byte within [0, max_len). The pointer
+ * has passed validate_user_ptr(), which doesn't check it is mapped, so
+ * this can still fault on a bad pointer (#29). Returns 1 if a NUL was
+ * found, 0 otherwise.
  */
 static int user_str_has_nul(const char *p, size_t max_len)
 {
@@ -40,13 +40,13 @@ static int user_str_has_nul(const char *p, size_t max_len)
 /*
  * Basic user pointer validation.
  *
- * For Phase 5 (shared address space, no per-component page tables),
- * this checks that the pointer is within the task's stack region.
- * Future: validate against per-component page table mappings.
+ * Only rejects NULL, empty ranges, overflow and a task with no stack, so
+ * any other address passes, including kernel addresses.
+ * Future: validate against the task's own page tables (#29).
  */
 static int validate_user_ptr(const void *ptr, size_t len)
 {
-    if (!ptr || len == 0) return 0;  /* NULL or empty is "valid" (no access) */
+    if (!ptr || len == 0) return 0;  /* NULL or empty: rejected */
 
     struct task *t = task_current();
     if (!t || !t->stack_base) return 0;
@@ -57,8 +57,8 @@ static int validate_user_ptr(const void *ptr, size_t len)
     /* Overflow check */
     if (end < start) return 0;
 
-    /* For now, allow any kernel-mapped address (shared address space) */
-    /* Future: restrict to component's own memory region */
+    /* No range check: any other address passes, including kernel */
+    /* addresses. #29 tracks restricting this to the task's mappings. */
     (void)t;
     return 1;
 }
@@ -67,7 +67,7 @@ static int validate_user_ptr(const void *ptr, size_t len)
  * Syscall Handlers
  * ============================================================================ */
 
-/* SYS_EXIT: Terminate the calling component */
+/* SYS_EXIT: Terminate the calling task */
 static int64_t sys_exit_handler(struct trap_frame *frame)
 {
     int code = (int)frame->x0;
@@ -101,8 +101,8 @@ static int64_t sys_send_handler(struct trap_frame *frame)
     uint32_t len = (uint32_t)frame->x2;
 
     /* Topic: must be a NUL-terminated C string within the router's
-     * topic-name window. Validate the whole window is readable before
-     * scanning, then require a terminator within it. */
+     * topic-name window. Sanity-check the window (not whether it's mapped,
+     * see #29) before scanning, then require a terminator within it. */
     if (!validate_user_ptr(topic, MSG_ROUTER_TOPIC_LEN)) {
         return -1;
     }

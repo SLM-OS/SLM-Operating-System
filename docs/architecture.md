@@ -17,7 +17,7 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 │                                                                              │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                    Application Layer (Phase 5)                       │   │
-│   │     Components, ONNX Inference, Message Routing, EL0 Isolation      │   │
+│   │     Components, ONNX Inference, Message Routing, EL0 Tasks          │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
 │                                    ▼                                         │
@@ -426,7 +426,7 @@ Phase 5 delivers the AI inference capabilities that justify the "SLM" in SLM-OS.
 │   Syscall Interface (EL0/EL1)                                           │
 │   ├── SVC dispatch (7 syscalls)                                         │
 │   ├── Fault isolation (handle_user_fault)                               │
-│   └── User pointer validation                                           │
+│   └── User pointer checks                                               │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -505,11 +505,11 @@ Current status: GPU compute dispatch returns `NotReady` on all platforms (GSP fi
 
 ### Component Isolation
 
-Phase 5 implements EL0/EL1 privilege separation for component isolation on ARM64:
+Phase 5 implements EL0/EL1 privilege separation on ARM64. EL0 tasks use it today; components still run in-kernel, so they aren't isolated yet:
 
 - **Syscall interface:** 7 custom syscalls (exit, yield, send, recv, infer, sleep, log) via `SVC #0` with arguments in x0-x5 and syscall number in x8.
-- **Exception handling:** EL0 synchronous exceptions dispatch to `syscall_dispatch()` for SVC or `handle_user_fault()` for faults. A faulting component is terminated without affecting the kernel.
-- **User pointer validation:** `validate_user_ptr()` checks pointers before kernel access.
+- **Exception handling:** EL0 synchronous exceptions dispatch to `syscall_dispatch()` for SVC or `handle_user_fault()` for faults. A faulting EL0 task is terminated without affecting the kernel.
+- **User pointer validation:** `validate_user_ptr()` only rejects NULL, empty ranges and overflow, so kernel addresses pass. #29 tracks real validation.
 - **EL0 IRQ:** Timer preemption works transparently for user-mode tasks via the existing EL0 IRQ vector.
 
 See `docs/component-isolation.md` for the full design.
@@ -613,12 +613,12 @@ Shell                 C FFI              Rust Runtime           Model Memory
 
 The load path parses the ONNX protobuf on the stack (~6 KB for `ParsedOnnx`), builds an operator graph, and allocates weight storage from the 2 MB-aligned weight pool. The inference path creates a static `InferenceEngine`, binds weight pointers into the tensor binding table, and executes operators in topological order using workspace memory from the bump allocator.
 
-**Syscall Flow (EL0 Component)**
+**Syscall Flow (EL0 Task)**
 
-This diagram shows how an EL0 component issues a syscall, how the ARM64 hardware transitions to EL1, and how the kernel dispatches and returns the result.
+This diagram shows how an EL0 task issues a syscall, how the ARM64 hardware transitions to EL1, and how the kernel dispatches and returns the result.
 
 ```
-EL0 Component         ARM64 Hardware        EL1 Kernel
+EL0 Task              ARM64 Hardware        EL1 Kernel
   |                     |                     |
   | sys_log(msg, len)   |                     |
   | x8=SYS_LOG, x0=msg |                     |
@@ -901,10 +901,10 @@ See `docs/ffi.md` for complete FFI documentation.
   - Operator placement heuristic (large ops to GPU, small to CPU)
   - CPU fallback when GPU compute unavailable
   - Cache coherency for shared weight memory
-- **Component Isolation**:
+- **EL0 Task Isolation**:
   - EL0/EL1 syscall interface (7 syscalls via SVC #0)
-  - Fault handling (component crash does not crash kernel)
-  - User pointer validation
+  - Fault handling (EL0 task crash does not crash kernel)
+  - Basic user pointer checks
 - **Example Components**:
   - sensor_monitor: rule-based threshold monitoring with message routing
   - digit_classifier: MNIST inference with publish/subscribe pipeline

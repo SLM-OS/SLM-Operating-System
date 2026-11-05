@@ -413,13 +413,13 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 
 **Fix:** This was fixed by replacing the `?` early return with an explicit `match` that ensures `engine_unlock()` is always called. If the issue recurs, check that all paths through `run_inference()` in `runtime/src/inference/engine.rs` release the `ENGINE_LOCK`.
 
-### QEMU MMU Hang with User-Accessible Pages
+### MMU Hang with EL0-Writable Kernel RAM
 
-**Symptom:** System hangs at "Enabling MMU..." when `VMM_FLAG_USER` is set on RAM page table entries.
+**Symptom:** System hangs at "Enabling MMU..." with no further output when the kernel's RAM mapping has AP=01. Setting `VMM_FLAG_USER` on that mapping doesn't get this far: `make_block_desc` panics with `VMM_FLAG_USER on block descriptor`.
 
-**Cause:** Setting `PTE_AP_RW_ALL` (AP[1]=1) in L2 block descriptors causes QEMU to hang during MMU enable. Tested with `-cpu cortex-a53`, `-cpu cortex-a76`, and `-cpu max` — all hang. PAN (Privileged Access Never) and SPAN were investigated and ruled out. The PTE format is valid per the ARM Architecture Reference Manual. Root cause is believed to be a QEMU-specific emulation limitation.
+**Cause:** Arm treats any region writable at EL0 as PXN at EL1. With AP=01 on the kernel's RAM mapping, the kernel can't fetch its own code, so the first fetch after MMU enable takes a permission fault. The vectors are on those pages too, so it faults repeatedly with no output. Forcing the AP bits on QEMU with a temporary patch, `-d int` shows repeated Prefetch Aborts with ESR `0x8600000e`. With AP=11, which isn't writable at EL0, fetches work and the first fault is a Data Abort on a kernel write (ESR `0x9600004e`). This was measured on QEMU; the rule is architectural, not specific to QEMU.
 
-**Status:** EL0 data access is deferred to hardware testing (Pi 5, Jetson). The syscall infrastructure works at EL1. See `docs/component-isolation.md` for details.
+**Status:** Avoided by design: kernel pages keep AP=00, user pages live in per-task `TTBR0_EL1` tables, and `make_block_desc` rejects `VMM_FLAG_USER`. EL0 tasks are verified on Pi 5 (#697) and Jetson (#1079). See `docs/component-isolation.md` for details.
 
 ### ONNX Model Name Truncation
 

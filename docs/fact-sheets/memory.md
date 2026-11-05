@@ -14,7 +14,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Per-page PMM ownership tracking | `PMM_OWNED` bit | Same | Same | Same |
 | VMM granule | 4 KB | 4 KB | 4 KB | 4 KB |
 | Page table levels | 3 (L1/L2/L3) | 3 | 3 + 1GB blocks for high RAM | 4 (PML4/PDP/PD/PT) |
-| TTBR model (kernel) | `TTBR1_EL1` (high half) | `TTBR1_EL1` (aliased to EL2 via VHE) | `TTBR1_EL1` (aliased to EL2 via VHE) | CR3 |
+| TTBR model (kernel) | `TTBR0_EL1`, low identity-mapped VAs, mirrored into each per-task L1 | Same (aliased to EL2 via VHE) | Same (aliased to EL2 via VHE) | CR3 |
 | TTBR model (per-task user) | `TTBR0_EL1` per task (#728) | Same | Same | Per-task CR3 (planned) |
 | Per-task ASID tagging | ✅ TLBI on recycle, no flush on swap (#738) | Same | Same | PCID (planned) |
 | User memory mapping (EL0) | ✅ `SYS_MMAP` / `SYS_MUNMAP` (#731) | ✅ | ✅ | ❌ EL0 unwired |

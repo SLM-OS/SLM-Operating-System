@@ -5,9 +5,9 @@
  * functions by constructing mock trap frames and calling dispatch
  * directly from EL1.
  *
- * Note: Full EL0 execution tests are deferred pending VMM_FLAG_USER
- * investigation on QEMU. These tests validate the kernel-side syscall
- * infrastructure independently.
+ * Note: Full EL0 round trips are covered on hardware by the `usertest`,
+ * `mmaptest` and `userelf` shell commands. These tests validate the
+ * kernel-side syscall infrastructure independently.
  */
 
 #include "test_harness.h"
@@ -20,6 +20,8 @@
 #include "pmm.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
+#include "sched.h"
+#include "smp.h"
 #endif
 #include <stdint.h>
 #include <stddef.h>
@@ -694,6 +696,64 @@ static int64_t dispatch_as(struct task *t, struct trap_frame *f)
     return (int64_t)f->x0;
 }
 
+/* #1079: syscall handlers read user memory directly, so the kernel must
+ * run with PSTATE.PAN=0 and SCTLR.SPAN=1 (SPAN=0 sets PAN on every
+ * exception taken to the kernel's EL). Checks the invariant on every CPU,
+ * since Jetson secondaries get SPAN=1 from firmware rather than boot.S.
+ * The #1079 failure came from state a kexec from Linux leaves on Jetson,
+ * which QEMU can't produce, so `mmaptest` after slmos-kexec on hardware
+ * remains the end-to-end check. */
+#define PAN_CHECK_RAN_ON_PINNED_CPU  (1U << 0)
+#define PAN_CHECK_SPAN_SET           (1U << 1)
+#define PAN_CHECK_PAN_CLEAR          (1U << 2)
+#define PAN_CHECK_ALL                (PAN_CHECK_RAN_ON_PINNED_CPU | \
+                                      PAN_CHECK_SPAN_SET | PAN_CHECK_PAN_CLEAR)
+
+static volatile uint32_t pan_check_result[MAX_CPUS];
+static volatile uint32_t pan_check_done[MAX_CPUS];
+
+static void pan_check_task(void *arg)
+{
+    uint32_t pinned = (uint32_t)(uintptr_t)arg;
+    uint32_t result = 0;
+    uint64_t sctlr, pan;
+
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    __asm__ volatile("mrs %0, pan" : "=r"(pan));
+    if (cpu_id() == pinned) {
+        result |= PAN_CHECK_RAN_ON_PINNED_CPU;
+    }
+    if (sctlr & SCTLR_SPAN) {
+        result |= PAN_CHECK_SPAN_SET;
+    }
+    if ((pan & PSTATE_PAN) == 0) {
+        result |= PAN_CHECK_PAN_CLEAR;
+    }
+    pan_check_result[pinned] = result;
+    pan_check_done[pinned] = 1;
+}
+
+static void test_kernel_pan_not_armed(void)
+{
+    for (uint32_t cpu = 0; cpu < cpu_count; cpu++) {
+        pan_check_result[cpu] = 0;
+        pan_check_done[cpu] = 0;
+        struct task *t = task_create("pan_check", pan_check_task,
+                                     (void *)(uintptr_t)cpu);
+        TEST_ASSERT_NOT_NULL(t);
+        task_set_affinity(t, cpu);
+        scheduler_add_task_to_cpu(t, cpu);
+    }
+
+    for (uint32_t cpu = 0; cpu < cpu_count; cpu++) {
+        for (int i = 0; i < 100000 && !pan_check_done[cpu]; i++) {
+            yield();
+        }
+        TEST_ASSERT_TRUE_MESSAGE(pan_check_done[cpu], "PAN check task never ran");
+        TEST_ASSERT_EQUAL_UINT32(PAN_CHECK_ALL, pan_check_result[cpu]);
+    }
+}
+
 /* Test (mmap): a page mapped via sys_mmap shows up in the per-task
  * L1 with VMM_FLAG_PMM_OWNED set, advances the cursor, and is
  * reclaimed by task_destroy without leaking PMM pages.
@@ -897,6 +957,7 @@ int test_suite_syscall(void)
 
 #if !defined(PLATFORM_X86_64)
     /* User task creation */
+    RUN_TEST(test_kernel_pan_not_armed);
     RUN_TEST(test_task_create_user_sets_flag);
     RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
     RUN_TEST(test_task_destroy_frees_user_l1);

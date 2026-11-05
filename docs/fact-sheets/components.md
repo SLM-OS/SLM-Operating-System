@@ -15,7 +15,7 @@ Component system: lifecycle, hot-swap, isolation.
 | EL0 syscalls | `SYS_EXIT`, `SYS_WRITE`, `SYS_MMAP` / `SYS_MUNMAP` (#731), `SYS_LOG` | Same | Same | ❌ |
 | Per-task user address space | ✅ `TTBR0_EL1` switched per-task (#728) | ✅ | ✅ | ❌ shared CR3 today |
 | Per-task ASID | ✅ TLBI on recycle, no flush on swap (#738) | ✅ | ✅ | ❌ |
-| EL0 hardware verification | ✅ `usertest`, `mmaptest`, `userelf` shell verbs | ✅ verified on pi-5-2 (under both coop and HW preempt) | ✅ | ❌ |
+| EL0 hardware verification | ✅ `usertest`, `mmaptest`, `userelf` shell verbs | ✅ verified on pi-5-2 (under both coop and HW preempt) | ✅ verified on jetson-nano-2: all three after kexec, `mmaptest` + `userelf` after UEFI-direct (#1079) | ❌ |
 | EL0 dynamic memory (mmap from EL0) | ✅ `SYS_MMAP` returns user VA, page-faults service via PMM_OWNED | ✅ | ✅ | ❌ |
 | Shell surface | `component list/run/swap/register/status` + `usertest/mmaptest/userelf` | Same | Same | Same (run/swap work; no EL0 components) |
 | Lua bindings | `slm.component_run`, `component_swap`, `component_list` | Same | Same | Same |
@@ -38,7 +38,7 @@ is now the integration glue, not the EL0 bring-up.
 
 ## Skipped / Blocked
 
-- **`slm-runner` and other components running in EL0 on real hardware** — the EL0 *task* path works (#697/#731/#734), but the component runtime still creates components in EL1. Wiring the `component run` path to use `task_create_user_elf` is the remaining gap.
+- **`slm-runner` and other components running in EL0** — the EL0 *task* path works (#697/#731/#734), but the component runtime still creates components in EL1. Wiring the `component run` path to use `task_create_user_elf` is the remaining gap.
 - **x86-64 CPL=3 user mode** — syscall path present in tree but never wired into task or component execution. ARM64 has the full per-task TTBR0 + ASID + EL0 path; x86-64 lags.
 - **Component marketplace / registry / signing** — tracked as #41 ("Component Marketplace — signing, distribution"). Not started.
 - **Persistence across reboot** — no component state survives reboot. Each boot re-registers components from in-kernel tables.

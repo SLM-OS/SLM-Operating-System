@@ -1,16 +1,16 @@
 # Component Isolation (Phase 5 M4)
 
-EL0/EL1 privilege separation for isolating user-mode components from the kernel.
+EL0/EL1 privilege separation for isolating user-mode tasks from the kernel. Components still run in-kernel; see Known Limitations.
 
-**Status:** Live. Syscall dispatch, fault handling, and EL0 execution are all shipped on ARM64. The VMM_FLAG_USER work that originally blocked EL0 execution closed via the per-task L1 + TTBR0 swap ladder tracked in `docs/archive/plans/pi5-el0-execution-plan.md`. Built-in EL0 component example: `kernel/src/user_hello.c` linked into the kernel via `kernel/src/user_hello_embed.S` and launched through `task_create_user_elf`.
+**Status:** Live for EL0 tasks. Syscall dispatch, fault handling, and EL0 execution are all shipped on ARM64. The VMM_FLAG_USER work that originally blocked EL0 execution closed via the per-task L1 + TTBR0 swap ladder tracked in `docs/archive/plans/pi5-el0-execution-plan.md`. Built-in EL0 example: `kernel/src/user_hello.c` linked into the kernel via `kernel/src/user_hello_embed.S` and launched through `task_create_user_elf`.
 
 ---
 
 ## Overview
 
-SLM-OS components can run at EL0 (user mode) on ARM64, where hardware enforces privilege restrictions. A component running at EL0 cannot execute privileged instructions, write to kernel memory, or access hardware directly. All interaction with the kernel occurs through the syscall interface (SVC #0).
+SLM-OS tasks can run at EL0 (user mode) on ARM64, where hardware enforces privilege restrictions. A task running at EL0 cannot execute privileged instructions, write to kernel memory, or access hardware directly. All interaction with the kernel occurs through the syscall interface (SVC #0).
 
-If a component at EL0 triggers a fault (page fault, illegal instruction, alignment error), the kernel catches the exception and terminates only the faulting component. The kernel itself continues running. This is a fundamental improvement over running everything at EL1, where any component crash would bring down the entire system.
+If a task at EL0 triggers a fault (page fault, illegal instruction, alignment error), the kernel catches the exception and terminates only the faulting task. The kernel itself continues running. Today only the `usertest`, `mmaptest` and `userelf` shell commands create EL0 tasks. Components run in-kernel, so a crashing component can still bring down the system.
 
 ---
 
@@ -30,7 +30,7 @@ Invocation is via `SVC #0`. Negative return values indicate errors.
 
 | Number | Name         | Signature                                          | Description                        |
 |--------|--------------|----------------------------------------------------|------------------------------------|
-| 0      | `SYS_EXIT`   | `sys_exit(code)`                                   | Terminate the calling component    |
+| 0      | `SYS_EXIT`   | `sys_exit(code)`                                   | Terminate the calling task         |
 | 1      | `SYS_YIELD`  | `sys_yield()`                                      | Voluntarily yield the CPU          |
 | 2      | `SYS_SEND`   | `sys_send(topic, data, len) -> int`                | Publish a message to a topic       |
 | 3      | `SYS_RECV`   | `sys_recv(topic_out, buf, len, timeout) -> int`    | Receive a message from a topic     |
@@ -51,15 +51,15 @@ Three EL0 exception vectors are installed in `vectors.S`:
 The `el0_sync_handler()` reads the Exception Class (EC) field from `ESR_EL1`:
 
 - **EC 0x15 (SVC from AArch64):** Dispatched to `syscall_dispatch()`, which reads the syscall number from `frame->x8`, calls the corresponding handler, and writes the result to `frame->x0`. Execution returns to EL0 via `restore_regs` + `ERET`.
-- **All other EC values** (data abort, instruction abort, illegal instruction, PC/SP alignment fault, etc.): Routed to `handle_user_fault()`, which logs diagnostics and terminates the component via `task_exit()`.
+- **All other EC values** (data abort, instruction abort, illegal instruction, PC/SP alignment fault, etc.): Routed to `handle_user_fault()`, which logs diagnostics and terminates the task via `task_exit()`.
 
 ### EL0 IRQ (`el0_irq`)
 
-Reuses the EL1 IRQ handler (`el1_irq_handler`). This enables timer preemption of user-mode components. When a timer interrupt fires during EL0 execution, the scheduler runs and may context-switch to another task. The `ERET` from the IRQ vector returns to EL0 with the saved `ELR_EL1` and `SPSR_EL1`.
+Reuses the EL1 IRQ handler (`el1_irq_handler`). This enables timer preemption of EL0 tasks. When a timer interrupt fires during EL0 execution, the scheduler runs and may context-switch to another task. The `ERET` from the IRQ vector returns to EL0 with the saved `ELR_EL1` and `SPSR_EL1`.
 
 ### EL0 SError (`el0_serror`)
 
-Asynchronous external abort from EL0. Handled by `el0_serror_handler()`, which calls `handle_user_fault()` to terminate the component.
+Asynchronous external abort from EL0. Handled by `el0_serror_handler()`, which calls `handle_user_fault()` to terminate the task.
 
 ### Fault Handling (`handle_user_fault`)
 
@@ -70,7 +70,7 @@ When a user-mode fault occurs, `handle_user_fault()`:
 3. Calls `task_exit()` to terminate the task
 4. The scheduler picks the next runnable task; the kernel continues
 
-This is the key isolation property: a component crash does not crash the kernel.
+This is the key isolation property: an EL0 task crash does not crash the kernel. It doesn't protect against component crashes yet, because components run in-kernel.
 
 ---
 
@@ -104,7 +104,7 @@ When the EL0 function completes, it issues `SVC #0` with `x8 = SYS_EXIT` to term
 
 ## User Syscall Stubs
 
-The header `kernel/include/user_syscall.h` provides inline assembly wrappers for all seven syscalls. User-mode components include this header instead of calling kernel functions directly.
+The header `kernel/include/user_syscall.h` provides inline assembly wrappers for all seven syscalls. EL0 code includes this header instead of calling kernel functions directly.
 
 Each stub places arguments in the correct registers, loads the syscall number into `x8`, and executes `SVC #0`. For syscalls that return a value, the result is read from `x0`.
 
@@ -124,16 +124,16 @@ static inline void sys_log(const char *str, uint32_t len)
 
 ## Pointer Validation
 
-Before accessing user-provided pointers, each syscall handler calls `validate_user_ptr(ptr, len)`. Currently this performs basic sanity checks (non-NULL, no overflow). With a shared address space (no per-component page tables yet), the validation is permissive. Future work will restrict pointers to the component's own memory region once per-component page tables are implemented.
+Before accessing user-provided pointers, each syscall handler calls `validate_user_ptr(ptr, len)`. Currently this performs basic sanity checks (non-NULL, no overflow). Any other address passes, including kernel addresses. Restricting pointers to the calling task's own mappings is tracked in #29.
 
 ---
 
 ## Known Limitations
 
-- **VMM_FLAG_USER on kernel pages causes a QEMU hang.** Setting `VMM_FLAG_USER` on the QEMU virt kernel RAM mapping (so AP[1]=1, UXN=0 on kernel pages that are already W and X) wedges the CPU exactly at the `msr sctlr_el1` instruction that enables the MMU. Re-confirmed on QEMU 8.2.2 + cortex-a76 (May 2026, see #697 step 1). PAN/EPAN/PAN3 are ruled out (cortex-a76 is ARMv8.2-A, no FEAT_PAN3; explicit `msr pan, #0` had no effect). `SCTLR_EL1.WXN` is 0 in baseline. Most likely a QEMU TCG quirk specific to user-flagged executable kernel pages. **The production design avoids this by construction**: per-task `TTBR0_EL1` (user pages live in a separate L1 table), kernel keeps `TTBR1_EL1` with AP=00, and user mappings are never applied to kernel pages.
-- **Per-component page tables:** All tasks currently share the kernel's page table (`TTBR1_EL1`). Per-component address spaces via `TTBR0_EL1` are tracked in [#697](https://github.com/SLM-OS/SLM-Operating-System/issues/697) and are the path that unblocks real EL0 execution.
+- **Kernel RAM must not be writable at EL0.** Arm treats any region writable at EL0 as PXN at EL1, so with AP=01 on the kernel's RAM mapping the kernel can't fetch its own code. This was measured on QEMU by forcing the AP bits with a temporary patch: `-d int` shows repeated Prefetch Aborts (ESR `0x8600000e`, permission fault) right after MMU enable, with no output because the vectors are on those pages too. With AP=11, which has the same AP[1]=1 but isn't writable at EL0, fetches work and the first fault is a Data Abort on a kernel write (ESR `0x9600004e`). `make_block_desc` rejects `VMM_FLAG_USER`, so setting that flag on the mapping panics before MMU enable. **The production design avoids this by construction**: kernel mappings stay AP=00, and user mappings go only in the user region of each per-task L1 table, which copies the kernel's entries unchanged.
+- **Per-component page tables:** EL0 tasks have per-task `TTBR0_EL1` address spaces and ASIDs (#697, #728, #738), but the component runtime still creates components in-kernel, so components don't use them yet.
 - **x86-64 Ring 3:** Not yet implemented. `task_create_user()` is ARM64-only.
-- **Restart policy:** Faulting components are terminated but not automatically restarted. Configurable restart is planned for a future milestone.
+- **Restart policy:** Faulting EL0 tasks are terminated but not automatically restarted. Configurable restart is planned for a future milestone.
 
 ---
 
@@ -143,7 +143,7 @@ Before accessing user-provided pointers, each syscall handler calls `validate_us
 |-----------------------------------|------------------------------------------------------|
 | `kernel/include/syscall.h`        | Syscall numbers, dispatch prototype, SPSR_EL0T       |
 | `kernel/include/trap.h`           | Trap frame struct (matches vectors.S register layout) |
-| `kernel/include/user_syscall.h`   | Inline assembly syscall stubs for EL0 components     |
+| `kernel/include/user_syscall.h`   | Inline assembly syscall stubs for EL0 tasks          |
 | `kernel/src/syscall.c`            | Syscall dispatch table and handler implementations   |
 | `kernel/arch/arm64/user_entry.S`  | EL1-to-EL0 transition via ERET                       |
 | `kernel/arch/arm64/vectors.S`     | EL0 exception vectors (sync, IRQ, SError)            |
