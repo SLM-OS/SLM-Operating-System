@@ -1524,10 +1524,11 @@ check-build-signatures:
 	@./scripts/check-build-signatures.sh
 
 # Brace check on changed C lines (scripts/check-c-braces.py, .clang-tidy).
-# Configures each platform as both the main and the test kernel, so code under
-# platform and ENABLE_BOOT_TESTS #ifdefs is parsed; nothing is compiled. Each
-# database is configured from scratch, so no option stays cached from an
-# earlier run.
+# Configures each platform as the main kernel, the test kernel and a check-only
+# "wide" kernel with default-off features on, so code under platform, test and
+# feature #ifdefs is parsed; nothing is compiled. A wide kernel need not build
+# or boot. Each database is configured from scratch, so no option stays cached
+# from an earlier run.
 # BRACES_BASE sets the diff base; BRACES_ARGS=--all reports the whole tree.
 # The ARM toolchain's usual location is a fallback for shells without it on PATH.
 BRACES_BASE ?= origin/main
@@ -1535,13 +1536,27 @@ BRACES_ARGS ?=
 TIDY_DB_DIR := $(BUILD_DIR)/tidy
 TIDY_PLATFORMS := QEMU_VIRT RASPI5 JETSON_ORIN_NANO X86_64
 TIDY_VARIANT ?= kernel
-TIDY_DB_NAME = $(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
+TIDY_DB_NAME = $(PLATFORM)$(if $(filter-out kernel,$(TIDY_VARIANT)),-$(TIDY_VARIANT))
+# x86-64 doesn't build the SSH daemon.
+TIDY_WIDE_MAKE_ARGS = $(if $(filter X86_64,$(PLATFORM)),,NET_SSHD=ON NET_SSHD_AUTOSTART=ON NET_SSHD_DEMO_ALLOW_ALL=ON) \
+	HAILO_WIRE_DEBUG=ON EVICTION_MODELS=ON AI_SCHED=ON AI_WEIGHTS=real \
+	STAGE25_TRACE_PI5=ON
+TIDY_WIDE_CMAKE_ARGS = -DCOOP_PREEMPT=ON -DSECONDARY_PREEMPT=OFF -DJETSON_HW_TICK=OFF \
+	-DPI5_FIQ_TIMER=ON -DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON
+TIDY_WIDE_CFLAGS = -DSCHED_DEBUG_NC_TRACE -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
 
 .PHONY: tidy-db
 tidy-db:
 	@rm -rf $(TIDY_DB_DIR)/$(TIDY_DB_NAME)
-	@$(CMAKE) -G "Unix Makefiles" -B $(TIDY_DB_DIR)/$(TIDY_DB_NAME) \
+	@$(MAKE) --no-print-directory tidy-db-configure \
+		$(if $(filter wide,$(TIDY_VARIANT)),$(TIDY_WIDE_MAKE_ARGS))
+
+.PHONY: tidy-db-configure
+tidy-db-configure:
+	@CFLAGS="$(if $(filter wide,$(TIDY_VARIANT)),$(TIDY_WIDE_CFLAGS))" \
+	$(CMAKE) -G "Unix Makefiles" -B $(TIDY_DB_DIR)/$(TIDY_DB_NAME) \
 		$(if $(filter test,$(TIDY_VARIANT)),$(KERNEL_TEST_CMAKE_ARGS),$(KERNEL_CMAKE_ARGS)) \
+		$(if $(filter wide,$(TIDY_VARIANT)),$(TIDY_WIDE_CMAKE_ARGS)) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 		$(MAKE_PROGRAM_ARG) > /dev/null
 
@@ -1553,7 +1568,7 @@ tidy-clean:
 check-braces:
 	@PATH="$$PATH:$(TFA_TOOLCHAIN)" python3 scripts/check-c-braces.py --make-db \
 		--base $(BRACES_BASE) \
-		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p) --db $(TIDY_DB_DIR)/$(p)-test) \
+		$(foreach p,$(TIDY_PLATFORMS),--db $(TIDY_DB_DIR)/$(p) --db $(TIDY_DB_DIR)/$(p)-test --db $(TIDY_DB_DIR)/$(p)-wide) \
 		$(BRACES_ARGS)
 
 .PHONY: test-check-braces

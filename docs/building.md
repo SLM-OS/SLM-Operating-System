@@ -356,7 +356,7 @@ QEMU cores:     4
 ```
 
 #### `make check-braces`
-Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main and test kernel of all four platforms. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
+Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main, test and check-only wide kernel of all four platforms; the wide kernel turns on default-off features such as `NET_SSHD`. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
 
 #### `make check-tools`
 Verifies all required tools are installed and in PATH.

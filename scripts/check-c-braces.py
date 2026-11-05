@@ -8,9 +8,10 @@ including uncommitted and untracked files; --all reports the whole tree, which
 is clean, so any finding there is a new regression. Vendored kernel/lib/ and
 nanopb output are exempt.
 
-Only code the databases compile is seen, so feature-gated blocks that are off
-in every configuration aren't checked. The rule also skips statements that come
-from a macro expansion, so macro bodies aren't checked. A changed file that no
+Only code the databases compile is seen, so `make check-braces` adds a wide
+configuration per platform with default-off features on. Blocks that are off even
+there aren't checked. The rule also skips statements that come from a macro
+expansion, so macro bodies aren't checked. A changed file that no
 parse reached (host tools, for example) is listed as not checked. A file that
 clang-tidy gives up on in any database fails the run rather than passing
 silently, because that database's #ifdef blocks would otherwise go unchecked: a
@@ -235,8 +236,8 @@ def main():
                         help="report every violation, not just changed lines")
     parser.add_argument("--make-db", action="store_true",
                         help="generate databases with `make tidy-db` first; "
-                             "each directory is named PLATFORM or "
-                             "PLATFORM-test")
+                             "each directory is named PLATFORM, "
+                             "PLATFORM-test or PLATFORM-wide")
     options = parser.parse_args()
 
     if not shutil.which("clang-tidy"):

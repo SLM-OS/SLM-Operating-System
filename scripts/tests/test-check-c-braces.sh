@@ -405,14 +405,14 @@ sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
 cat > Makefile <<'MK'
 tidy-db:
 	@test "$(PLATFORM)" != BROKEN
-	@mkdir -p db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)
-	@cp db/compile_commands.json db/$(PLATFORM)$(if $(filter test,$(TIDY_VARIANT)),-test)/
+	@mkdir -p db/$(PLATFORM)$(if $(filter-out kernel,$(TIDY_VARIANT)),-$(TIDY_VARIANT))
+	@cp db/compile_commands.json db/$(PLATFORM)$(if $(filter-out kernel,$(TIDY_VARIANT)),-$(TIDY_VARIANT))/
 MK
 git add Makefile
 git commit -qm makefile
-DB_ARGS=(--db db/PLAT --db db/PLAT-test)
+DB_ARGS=(--db db/PLAT --db db/PLAT-test --db db/PLAT-wide)
 EXTRA_ARGS=(--make-db)
-expect "--make-db builds main and test databases" 0 "parses: PLAT 1, PLAT-test 1"
+expect "--make-db builds main, test and wide databases" 0 "parses: PLAT 1, PLAT-test 1, PLAT-wide 1"
 DB_ARGS=(--db db/BROKEN)
 expect "--make-db failure fails the check" 2 "configuring BROKEN failed"
 DB_ARGS=(--db db)
