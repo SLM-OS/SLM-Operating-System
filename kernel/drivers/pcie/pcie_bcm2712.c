@@ -1155,8 +1155,9 @@ static struct mip1_slot mip1_slots[MIP1_NUM_VECTORS];
         /* ACK the MIP1 latch before invoking the driver handler — \
          * otherwise a second edge during handler run is lost. */ \
         mip1_w32(MIP_INT_CLEARED, 1u << (n)); \
-        if (mip1_slots[n].handler) \
+        if (mip1_slots[n].handler) { \
             mip1_slots[n].handler(mip1_slots[n].ctx); \
+        } \
     }
 DEFINE_MIP1_TRAMPOLINE(0)
 DEFINE_MIP1_TRAMPOLINE(1)

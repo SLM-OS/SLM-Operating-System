@@ -160,8 +160,9 @@ static int ai_mlp_init(void)
     ai_mlp_stats.decisions = 0;
     ai_mlp_stats.fallbacks = 0;
     ai_mlp_stats.total_latency_ns = 0;
-    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++) {
         ai_mlp_stats.action_hist[i] = 0;
+    }
     latency_hist_reset(&ai_mlp_stats.latency_hist);
     rate_ewma_init(&ai_mlp_stats.decision_rate, 0);
     rate_ewma_init(&ai_mlp_stats.fallback_rate, 0);
@@ -299,8 +300,9 @@ static int ai_ppo_init(void)
     ai_ppo_stats.decisions = 0;
     ai_ppo_stats.fallbacks = 0;
     ai_ppo_stats.total_latency_ns = 0;
-    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++) {
         ai_ppo_stats.action_hist[i] = 0;
+    }
     latency_hist_reset(&ai_ppo_stats.latency_hist);
     rate_ewma_init(&ai_ppo_stats.decision_rate, 0);
     rate_ewma_init(&ai_ppo_stats.fallback_rate, 0);
@@ -454,8 +456,9 @@ inference_model_handle_t ai_policy_hailo_get_model_handle(void)
 {
     /* Acquire matches the release in ai_policy_hailo_set_model so if
      * we see loaded==true, we observe the paired handle write. */
-    if (!__atomic_load_n(&ai_hailo_model.loaded, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&ai_hailo_model.loaded, __ATOMIC_ACQUIRE)) {
         return INF_INVALID_HANDLE;
+    }
     return ai_hailo_model.handle;
 }
 
@@ -511,8 +514,9 @@ static int ai_hailo_init(void)
     ai_hailo_stats.decisions = 0;
     ai_hailo_stats.fallbacks = 0;
     ai_hailo_stats.total_latency_ns = 0;
-    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++) {
         ai_hailo_stats.action_hist[i] = 0;
+    }
     latency_hist_reset(&ai_hailo_stats.latency_hist);
     rate_ewma_init(&ai_hailo_stats.decision_rate, 0);
     rate_ewma_init(&ai_hailo_stats.fallback_rate, 0);
@@ -699,12 +703,13 @@ void sched_ai_get_stats(const char *policy_name,
         policy_name[1] != '\0' && policy_name[2] != '\0' &&
         policy_name[3] != '\0' &&
         policy_name[0] == 'a') {
-        if (policy_name[3] == 'm')
+        if (policy_name[3] == 'm') {
             stats = &ai_mlp_stats;
-        else if (policy_name[3] == 'p')
+        } else if (policy_name[3] == 'p') {
             stats = &ai_ppo_stats;
-        else if (policy_name[3] == 'h')
+        } else if (policy_name[3] == 'h') {
             stats = &ai_hailo_stats;
+        }
     }
 
     if (!stats) {
@@ -743,26 +748,30 @@ int sched_ai_get_rate_stats(const char *policy_name,
      * sched_ai_get_stats above. A caller passing "ai\0" must not read
      * past the NUL. */
     if (policy_name[0] == '\0' || policy_name[1] == '\0' ||
-        policy_name[2] == '\0' || policy_name[3] == '\0')
+        policy_name[2] == '\0' || policy_name[3] == '\0') {
         return -1;
+    }
 
     struct ai_policy_stats *stats = NULL;
-    if (policy_name[0] == 'a' && policy_name[3] == 'm')
+    if (policy_name[0] == 'a' && policy_name[3] == 'm') {
         stats = &ai_mlp_stats;
-    else if (policy_name[0] == 'a' && policy_name[3] == 'p')
+    } else if (policy_name[0] == 'a' && policy_name[3] == 'p') {
         stats = &ai_ppo_stats;
-    else if (policy_name[0] == 'a' && policy_name[3] == 'h')
+    } else if (policy_name[0] == 'a' && policy_name[3] == 'h') {
         stats = &ai_hailo_stats;
+    }
 
     if (!stats) return -1;
 
     uint64_t now_ns = slm_get_time_ns();
 
     if (out_hist) latency_hist_snapshot(&stats->latency_hist, out_hist);
-    if (out_decision_rate_q16)
+    if (out_decision_rate_q16) {
         *out_decision_rate_q16 = rate_ewma_get_q16(&stats->decision_rate, now_ns);
-    if (out_fallback_rate_q16)
+    }
+    if (out_fallback_rate_q16) {
         *out_fallback_rate_q16 = rate_ewma_get_q16(&stats->fallback_rate, now_ns);
+    }
     if (out_total_decisions) *out_total_decisions = stats->decisions;
     if (out_total_fallbacks) *out_total_fallbacks = stats->fallbacks;
     if (out_total_ns) *out_total_ns = stats->total_latency_ns;

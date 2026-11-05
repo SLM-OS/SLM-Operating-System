@@ -151,10 +151,11 @@ void falcon_start(struct falcon *f, uint32_t boot_pc)
      * 0x100 because BROM-gated cases happen to clear quickly on the
      * cards it tests, but the contract is "honour ALIAS_EN". */
     uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
-    if (cpuctl & FALCON_CPUCTL_ALIAS_EN)
+    if (cpuctl & FALCON_CPUCTL_ALIAS_EN) {
         flcn_w32(f, FALCON_CPUCTL_ALIAS, FALCON_CPUCTL_STARTCPU);
-    else
+    } else {
         flcn_w32(f, FALCON_CPUCTL, FALCON_CPUCTL_STARTCPU);
+    }
     gsp_platform->mb();
 }
 
@@ -233,8 +234,9 @@ bool falcon_is_idle(const struct falcon *f)
     if ((cpuctl & FALCON_CPUCTL_HALTED) == 0) return false;
     if ((trfcmd & FALCON_DMATRFCMD_IDLE) == 0) return false;
     if (hwcfg2 & FALCON_HWCFG2_MEM_SCRUBBING) return false;
-    if (dmactl & (FALCON_DMACTL_IMEM_SCRUBBING | FALCON_DMACTL_DMEM_SCRUBBING))
+    if (dmactl & (FALCON_DMACTL_IMEM_SCRUBBING | FALCON_DMACTL_DMEM_SCRUBBING)) {
         return false;
+    }
     return true;
 }
 

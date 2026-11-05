@@ -641,13 +641,18 @@ static int slm_launch(int argc, char *argv[])
             }
             i++;
         } else if (strcmp(a, "--sampler") == 0 && v) {
-            if (strcmp(v, "greedy") == 0)        sampler_kind = SLM_SAMPLER_GREEDY;
-            else if (strcmp(v, "temp") == 0)     sampler_kind = SLM_SAMPLER_TEMPERATURE;
-            else if (strcmp(v, "topk") == 0)     sampler_kind = SLM_SAMPLER_TOP_K;
-            else if (strcmp(v, "topp") == 0)     sampler_kind = SLM_SAMPLER_TOP_P;
-            else if (strcmp(v, "topkp") == 0 ||
-                     strcmp(v, "topktopp") == 0) sampler_kind = SLM_SAMPLER_TOP_K_TOP_P;
-            else {
+            if (strcmp(v, "greedy") == 0) {
+                sampler_kind = SLM_SAMPLER_GREEDY;
+            } else if (strcmp(v, "temp") == 0) {
+                sampler_kind = SLM_SAMPLER_TEMPERATURE;
+            } else if (strcmp(v, "topk") == 0) {
+                sampler_kind = SLM_SAMPLER_TOP_K;
+            } else if (strcmp(v, "topp") == 0) {
+                sampler_kind = SLM_SAMPLER_TOP_P;
+            } else if (strcmp(v, "topkp") == 0 ||
+                       strcmp(v, "topktopp") == 0) {
+                sampler_kind = SLM_SAMPLER_TOP_K_TOP_P;
+            } else {
                 shell_printf("slm launch: unknown sampler '%s' "
                              "(want greedy|temp|topk|topp|topkp)\r\n", v);
                 return -1;

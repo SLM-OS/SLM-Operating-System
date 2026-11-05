@@ -4,9 +4,9 @@
 Runs the .clang-tidy brace rule over every compile database, because code
 under #ifdef PLATFORM_* is only visible to the platform that enables it.
 Findings are limited to lines changed since the merge base with --base,
-including uncommitted and untracked files; the tree has older violations that
-aren't reported unless --all is given. Vendored kernel/lib/ and nanopb output
-are exempt.
+including uncommitted and untracked files; --all reports the whole tree, which
+is clean, so any finding there is a new regression. Vendored kernel/lib/ and
+nanopb output are exempt.
 
 Only code the databases compile is seen, so feature-gated blocks that are off
 in every configuration aren't checked. The rule also skips statements that come

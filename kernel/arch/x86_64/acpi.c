@@ -124,8 +124,9 @@ static bool acpi_checksum_valid(const void *data, size_t len)
 {
     const uint8_t *bytes = data;
     uint8_t sum = 0;
-    for (size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++) {
         sum += bytes[i];
+    }
     return sum == 0;
 }
 
@@ -163,8 +164,9 @@ static const struct acpi_rsdp *find_rsdp_by_scan(void)
         const char *p = (const char *)addr;
         if (p[0] == 'R' && p[1] == 'S' && p[2] == 'D' && p[3] == ' ' &&
             p[4] == 'P' && p[5] == 'T' && p[6] == 'R' && p[7] == ' ') {
-            if (acpi_checksum_valid(p, 20))
+            if (acpi_checksum_valid(p, 20)) {
                 return (const struct acpi_rsdp *)p;
+            }
         }
     }
     return NULL;
@@ -174,8 +176,9 @@ static const struct acpi_rsdp *find_rsdp_by_scan(void)
 
 static bool sig_match(const char *a, const char *b, int len)
 {
-    for (int i = 0; i < len; i++)
+    for (int i = 0; i < len; i++) {
         if (a[i] != b[i]) return false;
+    }
     return true;
 }
 
@@ -299,8 +302,9 @@ int acpi_init(void)
 
     /* Count enabled CPUs */
     uint32_t enabled = 0;
-    for (uint32_t i = 0; i < acpi_info.cpu_count; i++)
+    for (uint32_t i = 0; i < acpi_info.cpu_count; i++) {
         if (acpi_info.cpus[i].enabled) enabled++;
+    }
 
     uart_printf("[ACPI] MADT: %u CPUs (%u enabled), LAPIC=0x%x, IOAPIC=0x%x\n",
                 acpi_info.cpu_count, enabled,
@@ -332,21 +336,24 @@ uint32_t acpi_get_enabled_cpu_count(void)
 {
     if (!acpi_info.valid) return 1;
     uint32_t count = 0;
-    for (uint32_t i = 0; i < acpi_info.cpu_count; i++)
+    for (uint32_t i = 0; i < acpi_info.cpu_count; i++) {
         if (acpi_info.cpus[i].enabled) count++;
+    }
     return count > 0 ? count : 1;
 }
 
 uint8_t acpi_get_cpu_apic_id(uint32_t logical_id)
 {
-    if (!acpi_info.valid || logical_id >= acpi_info.cpu_count)
+    if (!acpi_info.valid || logical_id >= acpi_info.cpu_count) {
         return 0;
+    }
     /* Return the nth enabled CPU's APIC ID */
     uint32_t n = 0;
     for (uint32_t i = 0; i < acpi_info.cpu_count; i++) {
         if (acpi_info.cpus[i].enabled) {
-            if (n == logical_id)
+            if (n == logical_id) {
                 return acpi_info.cpus[i].apic_id;
+            }
             n++;
         }
     }
@@ -390,8 +397,9 @@ const void *acpi_find_table(const char *sig)
             if (ptrs[i] == 0 || ptrs[i] >= ACPI_MAX_ADDR) continue;
             const struct acpi_sdt_header *hdr =
                 (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
-            if (sig_match(hdr->signature, sig, 4))
+            if (sig_match(hdr->signature, sig, 4)) {
                 return hdr;
+            }
         }
     } else {
         uintptr_t rsdt_addr = (uintptr_t)saved_rsdp->rsdt_address;
@@ -404,8 +412,9 @@ const void *acpi_find_table(const char *sig)
             if (ptrs[i] == 0) continue;
             const struct acpi_sdt_header *hdr =
                 (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
-            if (sig_match(hdr->signature, sig, 4))
+            if (sig_match(hdr->signature, sig, 4)) {
                 return hdr;
+            }
         }
     }
 

@@ -43,11 +43,11 @@ A link error naming a kernel symbol means `test_ffi_stubs` in
 make test-check-braces && make check-braces
 ```
 Runs `clang-tidy` on C lines changed since `origin/main`, as the main and test
-kernel of all four platforms (`scripts/check-c-braces.py`). Older violations
-aren't reported. Fix any it reports. A `could not parse` line means a file was
-not checked, so don't treat that as a pass. `make` exits 2 for any failure, so
-read the script's output. Its last line gives parses per configuration, and all
-eight should appear when headers or shared files change.
+kernel of all four platforms (`scripts/check-c-braces.py`). Fix any it reports.
+A `could not parse` line means a file was not checked, so don't treat that as a
+pass. `make` exits 2 for any failure, so read the script's output. Its last line
+gives parses per configuration, and all eight should appear when headers or
+shared files change.
 
 A `not checked` line exits 0, because those files are outside the configured
 builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone

@@ -1212,8 +1212,9 @@ static void test_camrtc_vi_channel_config_bitfield_positions(void)
      * that the adjacent `match.datatype` byte at offset 4 stays
      * zero (no write-bleed past the container). */
     #define CHECK_BIT(field, bit) do {                              \
-        for (size_t _i = 0; _i < sizeof(cfg); _i++)                 \
+        for (size_t _i = 0; _i < sizeof(cfg); _i++) {               \
             ((volatile uint8_t *)&cfg)[_i] = 0u;                    \
+        }                                                           \
         cfg.field = 1u;                                             \
         uint32_t _word = *(volatile uint32_t *)&cfg;                \
         TEST_ASSERT_EQUAL_HEX32(((uint32_t)1u) << (bit), _word);    \

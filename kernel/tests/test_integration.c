@@ -131,8 +131,9 @@ static struct {
 
 static void nc_sync_clear(uint32_t start, uint32_t count)
 {
-    for (uint32_t i = start; i < start + count; i++)
+    for (uint32_t i = start; i < start + count; i++) {
         NC_SYNC(i) = 0;
+    }
 }
 #endif
 
@@ -813,11 +814,13 @@ static void test_nc_memory_accessible(void)
     /* Allocate a larger block and verify stride access */
     volatile uint32_t *nc_arr = (volatile uint32_t *)ncmem_alloc(256, 64);
     TEST_ASSERT_NOT_NULL(nc_arr);
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < 64; i++) {
         nc_arr[i] = (uint32_t)((uint32_t)i * 0x11111111U);
+    }
     __asm__ volatile("dmb sy" ::: "memory");
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < 64; i++) {
         TEST_ASSERT_EQUAL_HEX32((uint32_t)((uint32_t)i * 0x11111111U), nc_arr[i]);
+    }
 }
 
 /*
@@ -1068,16 +1071,18 @@ static void test_work_stealing_distributes_load(void)
     extern volatile uint32_t *sched_diag_idle_loops;
 #endif
     uint32_t pre_push_full[MAX_CPUS] = {0};
-    for (uint32_t c = 0; c < cpu_count; c++)
+    for (uint32_t c = 0; c < cpu_count; c++) {
         pre_push_full[c] = sched_diag_steal_push_full[c];
+    }
 
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
         for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
         steal_done_count = 0;
 #if defined(PLATFORM_HAS_NC_MEMORY)
         NC_SYNC(NC_STEAL_DONE) = 0;
-        for (int i = 0; i < STEAL_TASK_COUNT; i++)
+        for (int i = 0; i < STEAL_TASK_COUNT; i++) {
             NC_SYNC(NC_STEAL_CPU_BASE + i) = 0;
+        }
 #else
         cache_clean((void *)&steal_done_count);
 #endif

@@ -112,8 +112,9 @@ extern const struct gsp_platform_ops *gsp_platform;
 static inline void *gsp_dma_alloc_checked(size_t size, size_t align,
                                           uint64_t *out_iova)
 {
-    if (!gsp_platform || !gsp_platform->dma_alloc)
+    if (!gsp_platform || !gsp_platform->dma_alloc) {
         return (void *)0;
+    }
     void *va = gsp_platform->dma_alloc(size, align, out_iova);
     if (!va) return (void *)0;
     if (out_iova && (*out_iova & (align - 1u))) {

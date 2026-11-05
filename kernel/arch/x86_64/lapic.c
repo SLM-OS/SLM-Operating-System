@@ -371,11 +371,13 @@ static uint32_t lapic_timer_freq_cpuid(void)
     uint32_t eax, ebx, ecx, edx;
     /* Max leaf check first. */
     x86_cpuid(0, &eax, &ebx, &ecx, &edx);
-    if (eax < 0x15)
+    if (eax < 0x15) {
         return 0;
+    }
     x86_cpuid(0x15, &eax, &ebx, &ecx, &edx);
-    if (ebx == 0 || ecx == 0)
+    if (ebx == 0 || ecx == 0) {
         return 0;
+    }
     return ecx;   /* Hz */
 }
 

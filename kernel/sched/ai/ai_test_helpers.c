@@ -95,8 +95,9 @@ int ai_test_matvec_zero_weights(void)
     float out[AI_MLP_LAYER0_OUT];
 
     /* Input = all ones */
-    for (int i = 0; i < AI_MLP_LAYER0_IN; i++)
+    for (int i = 0; i < AI_MLP_LAYER0_IN; i++) {
         in[i] = 1.0f;
+    }
 
     /* Test matvec at model dimensions. With real weights, output is non-zero.
      * With stub weights (all zeros), output = bias (also zero). Either way,
@@ -221,8 +222,9 @@ int ai_test_argmax_negative(void)
 int ai_test_mlp_stub_inference(void)
 {
     float state[AI_STATE_DIM];
-    for (int i = 0; i < AI_STATE_DIM; i++)
+    for (int i = 0; i < AI_STATE_DIM; i++) {
         state[i] = 1.0f;
+    }
 
     struct ai_sched_action action;
     int ret = ai_schedule_mlp(state, &action);
@@ -243,8 +245,9 @@ int ai_test_mlp_stub_inference(void)
 int ai_test_ppo_stub_inference(void)
 {
     float state[AI_STATE_DIM];
-    for (int i = 0; i < AI_STATE_DIM; i++)
+    for (int i = 0; i < AI_STATE_DIM; i++) {
         state[i] = 0.5f;
+    }
 
     struct ai_sched_action action;
     int ret = ai_schedule_ppo(state, &action);
@@ -405,8 +408,9 @@ int ai_test_ppo_null_state(void)
 int ai_test_mlp_action_bounds(void)
 {
     float state[AI_STATE_DIM];
-    for (int i = 0; i < AI_STATE_DIM; i++)
+    for (int i = 0; i < AI_STATE_DIM; i++) {
         state[i] = 0.0f;
+    }
 
     struct ai_sched_action action;
     int ret = ai_schedule_mlp(state, &action);
@@ -530,8 +534,9 @@ int ai_test_extract_state_core_zero_fill(void)
     for (uint32_t c = cpu_count; c < AI_STATE_NUM_CORES; c++) {
         for (int j = 0; j < AI_FEATURES_PER_CORE; j++) {
             float val = state[c * AI_FEATURES_PER_CORE + j];
-            if (!approx_eq(val, 0.0f, 0.001f))
+            if (!approx_eq(val, 0.0f, 0.001f)) {
                 return -(int)(c * 10 + j);
+            }
         }
     }
     return 0;
@@ -672,8 +677,9 @@ int ai_test_fp_repeated_save_restore(void)
         /* Run inference which uses FP registers internally */
         float state[AI_STATE_DIM];
         struct ai_sched_action action;
-        for (int j = 0; j < AI_STATE_DIM; j++)
+        for (int j = 0; j < AI_STATE_DIM; j++) {
             state[j] = (float)i * 0.1f;
+        }
 
         ai_schedule_mlp(state, &action);
 
@@ -758,8 +764,9 @@ int ai_test_inference_latency(void)
     struct ai_sched_action action;
     uint64_t min_ns = UINT64_MAX, max_ns = 0, total_ns = 0;
 
-    for (int i = 0; i < AI_STATE_DIM; i++)
+    for (int i = 0; i < AI_STATE_DIM; i++) {
         state[i] = 0.0f;
+    }
 
     for (int i = 0; i < 100; i++) {
         uint64_t t0 = slm_get_time_ns();

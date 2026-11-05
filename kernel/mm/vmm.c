@@ -1853,8 +1853,9 @@ static void vmm_setup_platform(void)
         uint64_t gb3_base = (uint64_t)(ram_gb - 1) * L1_BLOCK_SIZE;
         uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
 
-        for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+        for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
             l2_ram_gb3[i] = 0;
+        }
 
         /* L2[0-510]: WB cacheable 2MB blocks (same as original L1 block) */
         for (int i = 0; i < ENTRIES_PER_TABLE - 1; i++) {
@@ -1880,8 +1881,9 @@ static void vmm_setup_platform(void)
      * PCIe RC (pcie2): 0x1000120000  → L2 index = (0x1000120000 >> 21) & 0x1FF
      * MIP0:            0x1000130000  → same 2MB block as PCIe RC
      */
-    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
         l2_mmio_pcie[i] = 0;
+    }
 
     uint64_t pcie_l1_idx = PCIE_RC_BASE >> 30;
     l1_table[pcie_l1_idx] = make_table_desc((uint64_t)l2_mmio_pcie);
@@ -1921,8 +1923,9 @@ static void vmm_setup_platform(void)
      * 14 GB) which isn't populated until a device actually needs
      * prefetchable space.
      */
-    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
         l2_pcie_bar_win[i] = 0;
+    }
     l1_table[0x1b80000000UL >> 30] = make_table_desc((uint64_t)l2_pcie_bar_win);
     vmm_state.l2_tables_used++;
 
@@ -1933,8 +1936,9 @@ static void vmm_setup_platform(void)
      * GIC CPU iface:   0x107FFFA000  → same 2MB block as distributor
      * GPIO2 (ACT LED): 0x107D517C04  → L2 index = (0x107D517C04 >> 21) & 0x1FF
      */
-    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
         l2_mmio_gic[i] = 0;
+    }
 
     uint64_t gic_l1_idx = GIC_DIST_BASE >> 30;
     l1_table[gic_l1_idx] = make_table_desc((uint64_t)l2_mmio_gic);
@@ -1973,8 +1977,9 @@ static void vmm_setup_platform(void)
      * RIO:    0x1F000E0000  → same 2MB block
      * PADS:   0x1F000F0000  → same 2MB block
      */
-    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
         l2_mmio_rp1[i] = 0;
+    }
 
     uint64_t rp1_l1_idx = UART_BASE >> 30;
     l1_table[rp1_l1_idx] = make_table_desc((uint64_t)l2_mmio_rp1);
@@ -2037,14 +2042,16 @@ void vmm_init(void)
     {
         const char *p = (const char *)l2_kernel;
         const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
-        for (; p < end; p += 64)
+        for (; p < end; p += 64) {
             __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+        }
     }
     {
         const char *p = (const char *)l2_ram_c0;
         const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
-        for (; p < end; p += 64)
+        for (; p < end; p += 64) {
             __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+        }
     }
 #endif
     __asm__ volatile("dsb sy" ::: "memory");
