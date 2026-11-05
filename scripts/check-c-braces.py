@@ -10,13 +10,14 @@ are exempt.
 
 Only code the databases compile is seen, so feature-gated blocks that are off
 in every configuration aren't checked. The rule also skips statements that come
-from a macro expansion, so macro bodies aren't checked. A changed file that no parse reached
-(host tools, for example) is listed as not checked. A file that clang-tidy
-gives up on in any database fails the run rather than passing silently, because
-that database's #ifdef blocks would otherwise go unchecked: a missing header, a
-rejected flag or a crash. An undeclared name or syntax error on a changed line
-fails it too, since clang discards that statement. Other compile errors are tolerated (GCC's
-system headers cause most), since clang still analyzes the code around them.
+from a macro expansion, so macro bodies aren't checked. A changed file that no
+parse reached (host tools, for example) is listed as not checked. A file that
+clang-tidy gives up on in any database fails the run rather than passing
+silently, because that database's #ifdef blocks would otherwise go unchecked: a
+missing header, a rejected flag or a crash. An undeclared name or syntax error
+on a changed line fails it too, since clang discards that statement. Other
+compile errors are tolerated (GCC's system headers cause most), since clang
+still analyzes the code around them.
 
 Exit status: 0 clean, 1 violations, 2 could not check.
 
@@ -58,13 +59,29 @@ INCLUDED = re.compile(r"^\.+ (.+)$")
 
 
 def git(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True,
+    return subprocess.run(["git", "-c", "core.quotePath=false", *args],
+                          check=True, capture_output=True,
                           text=True, encoding="utf-8",
                           errors="replace").stdout
 
 
 def exempt(path):
     return path.startswith("kernel/lib/") or path.endswith((".pb.c", ".pb.h"))
+
+
+def diff_path(header):
+    """Return the path from a "+++ b/path" line, or None for /dev/null.
+
+    Git appends a tab to a path containing whitespace, and quotes one containing
+    a backslash, a double quote or a control character.
+    """
+    text = header[4:]
+    if text.startswith('"') and text.endswith('"'):
+        text = re.sub(r"\\(.)", lambda m: {"t": "\t", "n": "\n"}.get(m[1], m[1]),
+                      text[1:-1])
+    else:
+        text = text.rstrip("\t")
+    return text[2:] if text.startswith("b/") else None
 
 
 def changed_lines(base):
@@ -81,7 +98,7 @@ def changed_lines(base):
             in_header = True
             path = None
         elif in_header and line.startswith("+++ "):
-            path = line[6:] if line.startswith("+++ b/") else None
+            path = diff_path(line)
         elif line.startswith("@@"):
             in_header = False
             if not path:
@@ -89,7 +106,8 @@ def changed_lines(base):
             match = re.search(r"\+(\d+)(?:,(\d+))? @@", line)
             start, count = int(match[1]), int(match[2] or 1)
             changed[path].update(range(start, start + count))
-    for path in git("ls-files", "--others", "--exclude-standard").splitlines():
+    for path in git("ls-files", "-z", "--others",
+                    "--exclude-standard").split("\0"):
         if path.endswith(C_SUFFIXES):
             count = len(Path(path).read_text(errors="replace").splitlines())
             changed[path].update(range(1, count + 1))

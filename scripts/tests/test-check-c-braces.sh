@@ -51,9 +51,10 @@ expect() {  # expect <name> <exit status> <grep pattern or "-"> [absent pattern]
 FLAGS=""
 write_db() {
     python3 - "$WORK" "$FLAGS" "$@" <<'PY'
-import json, sys
+import json, shlex, sys
 root, flags, files = sys.argv[1], sys.argv[2], sys.argv[3:]
-json.dump([{"directory": root, "file": f, "command": f"gcc {flags} -c {f}"}
+json.dump([{"directory": root, "file": f,
+            "command": f"gcc {flags} -c {shlex.quote(f)}"}
            for f in files], open("db/compile_commands.json", "w"))
 PY
 }
@@ -363,6 +364,23 @@ sed -i 's/return y;/return y + 1;/' kernel/src/g.c
 expect "added line starting with ++ keeps later hunks" 1 "kernel/src/g.c:9:.*readability-braces"
 git rm -qf kernel/src/g.c
 git commit -qm remove-later-hunk
+write_db kernel/src/a.c
+
+# Git decorates some paths in a diff: a tab after one with a space, and quotes
+# around one with a backslash. None of them may drop out of the check.
+for name in 'sp ace' 'caf\xc3\xa9' 'back\\slash'; do
+    file="kernel/src/$(printf "$name").c"
+    pattern="$(printf "$name" | sed 's/[^a-z]/./g')\.c:3:.*readability-braces"
+    printf 'int n(int x)\n{\n    if (x)\n        return 1;\n    return 0;\n}\n' > "$file"
+    write_db kernel/src/a.c "$file"
+    expect "untracked unusual path is checked: $file" 1 "$pattern"
+    git add "$file"
+    git commit -qm unusual-path
+    sed -i 's/return 1;/return 2;/' "$file"
+    expect "changed unusual path is checked: $file" 1 "$pattern"
+    git rm -qf "$file"
+    git commit -qm remove-unusual-path
+done
 write_db kernel/src/a.c
 
 # WarningsAsErrors turns findings into errors, which must still count.

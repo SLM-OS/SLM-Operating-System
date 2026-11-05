@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets and run the QEMU test suite.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, and check C braces on changed lines.
 
 ## Instructions
 
