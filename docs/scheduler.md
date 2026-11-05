@@ -512,7 +512,7 @@ and wakes it, so a woken waiter never has to re-acquire.
 
 **Lock order:** `mutex->guard`, then `rq_lock`, because a boost repositions a
 queued holder under the guard. Nothing may take a `pi_mutex` while holding an
-`rq_lock`. `pi_floor_lock` is a leaf taken under a guard.
+`rq_lock`. `pi_floor.lock` is a leaf taken under a guard.
 
 This replaced a spin-and-yield wait loop (SCHED-H1, 2026-04-12) four days
 after it landed (#93, 2026-04-16). The spin loop could livelock on a single

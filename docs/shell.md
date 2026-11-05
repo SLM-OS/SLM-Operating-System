@@ -785,7 +785,9 @@ submit once; bare LF (raw nc) still works.
   `model load`, etc.) serialize on a priority-inheriting mutex so two
   concurrent sessions can't race each other. Read-only commands
   (`ls`, `mem`, `tasks`) skip the lock. See `.mutates` in each
-  command-table entry.
+  command-table entry. The mutex is released while a command waits for
+  input (`slm stream`, `slm xload`, `slm.read_line()` under `lua-admin`),
+  so another session's command can run during that wait.
 
 ### Daemon control (§3)
 

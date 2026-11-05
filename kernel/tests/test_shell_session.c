@@ -544,7 +544,6 @@ static int mutex_probe_read_char(struct shell_io *io)
     return '\n';
 }
 
-extern int getchar(void);
 /* Through a pointer: x86-64 GCC otherwise rewrites getchar() as getc(stdin). */
 static int (*volatile input_getchar)(void) = getchar;
 

@@ -21,8 +21,12 @@ static volatile int last_inversion_flag = 0;
  * waiters on two mutexes held by one task hold different guards, and a plain
  * check-then-set could lose the higher value. Not an atomic max, because
  * struct task is in NC memory on Pi 5 / Jetson, where exclusive operations
- * aren't safe; this lock lives in cacheable memory. */
-static spinlock_t pi_floor_lock = SPINLOCK_INIT;
+ * aren't safe; this lock lives in cacheable memory. The struct gives the lock a
+ * whole cache line: the Pi 5 lock path cleans the line, and aligning the lock
+ * alone would leave other variables in the rest of it. */
+static struct {
+    spinlock_t lock;
+} __attribute__((aligned(64))) pi_floor = { SPINLOCK_INIT };
 
 /*
  * Initialize a priority-inheriting mutex.
@@ -58,7 +62,7 @@ static void note_mutex_acquired(struct task *task)
 static bool raise_inherited_priority(struct task *task, uint8_t priority)
 {
     bool raised = false;
-    irq_flags_t flags = spin_lock_irqsave(&pi_floor_lock);
+    irq_flags_t flags = spin_lock_irqsave(&pi_floor.lock);
 
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->pi_priority);
@@ -71,7 +75,7 @@ static bool raise_inherited_priority(struct task *task, uint8_t priority)
         raised = true;
     }
 
-    spin_unlock_irqrestore(&pi_floor_lock, flags);
+    spin_unlock_irqrestore(&pi_floor.lock, flags);
     return raised;
 }
 

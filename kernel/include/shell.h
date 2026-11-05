@@ -53,7 +53,9 @@ typedef enum {
  * shell sessions cannot race each other's mutations. Read-only
  * commands and commands that mutate through an already-locked
  * subsystem (VFS, PMM, etc.) are `mutates = false` and bypass the
- * lock.
+ * lock. A handler that waits for input gives the lock up during the
+ * wait (shell_mutation_pause), so global state it read before the
+ * wait must be checked again afterwards.
  *
  * `category` controls grouping in `help`. See shell_cmd_category_t
  * above. cmd_help groups by category and alphabetizes within each

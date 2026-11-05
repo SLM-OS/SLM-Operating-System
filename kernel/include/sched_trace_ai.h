@@ -136,6 +136,11 @@ uint64_t sched_trace_ai_dropped(void);         /* records that wrapped before du
 
 /* ---- Hot path (called from scheduler_add_task / task_exit) ---- */
 
+struct task;
+
+/* The priority recorded for a decision on `task`; -1 if task is NULL. */
+int32_t sched_trace_ai_action_priority(const struct task *task);
+
 /* Record a DECISION event. Called from `scheduler_add_task` right
  * after `active_policy->assign_cpu(task)` returns. The state vector
  * is extracted internally via `ai_extract_state(task, state)` so
@@ -150,10 +155,6 @@ uint64_t sched_trace_ai_dropped(void);         /* records that wrapped before du
  * IRQ handler (the state extraction touches per-CPU data which the
  * handler may have partially updated).
  */
-struct task;
-/* The priority recorded for a decision on `task`; -1 if task is NULL. */
-int32_t sched_trace_ai_action_priority(const struct task *task);
-
 void sched_trace_ai_record_decision(struct task *task,
                                     const char *policy_name,
                                     uint32_t action_core);
