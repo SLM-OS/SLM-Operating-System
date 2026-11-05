@@ -40,9 +40,9 @@ static int user_str_has_nul(const char *p, size_t max_len)
 /*
  * Basic user pointer validation.
  *
- * For Phase 5 (shared address space, no per-component page tables),
- * this checks that the pointer is within the task's stack region.
- * Future: validate against per-component page table mappings.
+ * Only rejects NULL, empty ranges and address overflow, so any other
+ * address passes, including kernel addresses.
+ * Future: validate against the task's own page tables (#29).
  */
 static int validate_user_ptr(const void *ptr, size_t len)
 {

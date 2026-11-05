@@ -325,9 +325,14 @@ if [ -n "${win:-}" ]; then
             err "SPAN write precedes 'msr hcr_el2' — it would hit the dormant SCTLR_EL1"
         fi
     fi
-    n=$(echo "$win" | grep -cE 'msr[[:space:]]+pan,[[:space:]]*xzr' || true)
-    [ "$n" -ge 1 ] && pass "PSTATE.PAN is cleared" \
-                   || err "no 'msr pan, xzr' in EFI/kexec entry window"
+    pan_ln=$(echo "$win" | awk '/msr[[:space:]]+pan,[[:space:]]*xzr/ {n=NR} END {print n+0}')
+    if [ "$pan_ln" -eq 0 ]; then
+        err "no 'msr pan, xzr' in EFI/kexec entry window"
+    elif [ "$hcr_ln" -gt 0 ] && [ "$pan_ln" -gt "$hcr_ln" ]; then
+        pass "PSTATE.PAN is cleared after the E2H flip"
+    else
+        err "PAN clear isn't after 'msr hcr_el2' — it could sit on a branch kexec skips"
+    fi
 else
     err "entry window unavailable — PAN checks not run"
 fi

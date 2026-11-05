@@ -28,7 +28,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not applicable on this platform
 ## Skipped / Blocked
 
 - **Big.LITTLE-aware decode-thread placement** (Jetson 6× A78AE dual-cluster) — uniform placement today.
-- **`slm-runner` EL0-isolated decode component** — EL0 task primitives shipped on Pi 5 (#697/#731/#734); component-runtime EL0 wiring is the missing piece.
+- **`slm-runner` EL0-isolated decode component** — EL0 task primitives verified on Pi 5 and Jetson (#697/#731/#734/#1079); component-runtime EL0 wiring is the missing piece.
 - **GPU IMMA INT8 path** — deferred follow-up; needs INT8 activations.
 - **x86-64** — most SLM features are NEON-tuned; the SSE port works but is not the primary target.
 

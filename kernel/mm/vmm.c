@@ -1489,10 +1489,10 @@ static void vmm_map_firmware_dtb(void)
 
 static void vmm_setup_platform(void)
 {
-    /* Note: don't set VMM_FLAG_USER here. A region writable at EL0 is PXN at
-     * EL1, so the kernel couldn't fetch its own code after MMU enable: it
-     * loops on Prefetch Aborts with no output (see docs/troubleshooting.md).
-     * EL0 uses AP[1]=1 only in per-task TTBR0 tables, so kernel pages avoid it. */
+    /* Note: kernel RAM must not be EL0-writable (AP=01). Such a region is PXN
+     * at EL1, so the kernel couldn't fetch its own code after MMU enable and
+     * would loop on Prefetch Aborts. make_block_desc rejects VMM_FLAG_USER, and
+     * EL0 uses AP[1]=1 only in per-task TTBR0 tables (docs/troubleshooting.md). */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
 
     /* L1 entry for MMIO region (GIC, UART, etc. all below 0x40000000) */
