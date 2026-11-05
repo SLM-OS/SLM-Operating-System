@@ -183,7 +183,16 @@ expect "violation in a changed header is flagged" 1 "kernel/src/h.h:3:.*readabil
 rm kernel/src/c.c
 write_db kernel/src/a.c
 expect "changed header no parse reaches is reported" 0 "not checked: kernel/src/h.h"
-rm kernel/src/h.h
+cat > kernel/src/h.h <<'C'
+static inline int h(int x) { return x; }
+C
+cat > kernel/src/c.c <<'C'
+#include "h.h"
+int c(int x) { return h(x); }
+C
+write_db kernel/src/a.c kernel/src/c.c
+expect "clean header a parse reaches isn't listed" 0 "0 violation" "not checked"
+rm kernel/src/h.h kernel/src/c.c
 
 # A file clang can't parse must not pass silently.
 cat > kernel/src/d.c <<'C'
@@ -289,6 +298,73 @@ write_db kernel/src/a.c kernel/src/e.c
 expect "syntax error on a changed line fails" 2 "could not parse kernel/src/e.c.*expected"
 rm kernel/src/e.c
 
+# Every macro in the weights stand-in is defined, or edits to that file could
+# never pass.
+cat > kernel/src/e.c <<'C'
+#include "ga10b_eviction_mlp_weights_gen.h"
+const float w[1] = { GA10B_EVICT_MLP_W_L1 };
+const float b[1] = { GA10B_EVICT_MLP_B_OUT };
+_Static_assert(GA10B_EVICT_MLP_W_OUT_COUNT == 16, "W_OUT size");
+C
+write_db kernel/src/a.c kernel/src/e.c
+expect "generated weight macros on changed lines pass" 0 "0 violation"
+rm kernel/src/e.c
+
+# Other compile errors are tolerated: the finding beside one is still reported.
+cat > kernel/src/e.c <<'C'
+struct s { int a; };
+void e(struct s *p, int x)
+{
+    if (x)
+        p->bogus = 1;
+}
+C
+write_db kernel/src/a.c kernel/src/e.c
+expect "body beside a tolerated error is flagged" 1 "kernel/src/e.c:4:.*readability-braces"
+rm kernel/src/e.c
+
+# An undeclared name only matters on a changed line.
+cat > kernel/src/e.c <<'C'
+int e(void)
+{
+    int y = 1;
+    return NOT_DECLARED_ANYWHERE + y;
+}
+C
+write_db kernel/src/a.c kernel/src/e.c
+git add kernel/src/e.c
+git commit -qm undeclared
+sed -i 's/int y = 1;/int y = 2;/' kernel/src/e.c
+expect "undeclared name on an unchanged line is tolerated" 0 "0 violation"
+git rm -qf kernel/src/e.c
+git commit -qm remove-undeclared
+write_db kernel/src/a.c
+
+# An added line starting "++ " appears as "+++ " in the diff, and must not read
+# as a file header that hides the file's later hunks.
+cat > kernel/src/g.c <<'C'
+int g(int x, int y)
+{
+    x = 1;
+    x = 2;
+    x = 3;
+    x = 4;
+    x = 5;
+    if (x)
+        return y;
+    return x;
+}
+C
+write_db kernel/src/a.c kernel/src/g.c
+git add kernel/src/g.c
+git commit -qm later-hunk
+sed -i '3a ++ x;' kernel/src/g.c
+sed -i 's/return y;/return y + 1;/' kernel/src/g.c
+expect "added line starting with ++ keeps later hunks" 1 "kernel/src/g.c:9:.*readability-braces"
+git rm -qf kernel/src/g.c
+git commit -qm remove-later-hunk
+write_db kernel/src/a.c
+
 # WarningsAsErrors turns findings into errors, which must still count.
 cat >> .clang-tidy <<'YAML'
 WarningsAsErrors: '*'
@@ -315,7 +391,6 @@ tidy-db:
 MK
 git add Makefile
 git commit -qm makefile
-sed -i 's/return 0;/int y = x + 1; return y;/' kernel/src/a.c
 DB_ARGS=(--db db/PLAT --db db/PLAT-test)
 EXTRA_ARGS=(--make-db)
 expect "--make-db builds main and test databases" 0 "parses: PLAT 1, PLAT-test 1"

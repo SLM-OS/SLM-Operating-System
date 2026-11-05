@@ -1229,7 +1229,7 @@ rustdoc:
 # ============================================================================
 
 .PHONY: clean
-clean: kernel-clean kernel-test-clean runtime-clean
+clean: kernel-clean kernel-test-clean runtime-clean tidy-clean
 	@echo "Clean complete."
 
 .PHONY: rebuild
@@ -1544,6 +1544,10 @@ tidy-db:
 		$(if $(filter test,$(TIDY_VARIANT)),$(KERNEL_TEST_CMAKE_ARGS),$(KERNEL_CMAKE_ARGS)) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 		$(MAKE_PROGRAM_ARG) > /dev/null
+
+.PHONY: tidy-clean
+tidy-clean:
+	@rm -rf $(TIDY_DB_DIR)
 
 .PHONY: check-braces
 check-braces:

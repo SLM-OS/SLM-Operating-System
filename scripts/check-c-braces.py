@@ -36,15 +36,20 @@ from pathlib import Path
 
 C_SUFFIXES = (".c", ".h")
 # Generated during a build. The check only configures, so stand-ins keep clang
-# parsing; a real generated header takes precedence if one exists. build_info.h
-# needs its macros, because clang discards a statement that uses an undeclared
-# name, and a discarded unbraced body can't be flagged. The weight macros only
-# appear in initializers, so their header can stay empty.
+# parsing. They define every macro the real headers do, because an undeclared
+# name on a changed line fails the run and nothing in the changed file could fix
+# that. The values don't matter for brace analysis: a static_assert that fails
+# on a weight count is a tolerated error.
+WEIGHT_MACROS = [f"GA10B_EVICT_MLP_{kind}_{layer}{suffix}"
+                 for layer in ("L1", "L2", "L3", "OUT")
+                 for kind in ("W", "B")
+                 for suffix in ("", "_COUNT")]
 GENERATED_HEADERS = {
     "build_info.h": ('#define SLMOS_VERSION ""\n'
                      '#define SLMOS_BUILD_STAMP ""\n'
                      '#define SLMOS_BUILD_SHA ""\n'),
-    "ga10b_eviction_mlp_weights_gen.h": "",
+    "ga10b_eviction_mlp_weights_gen.h": "".join(
+        f"#define {name} 0\n" for name in WEIGHT_MACROS),
 }
 RULE = "readability-braces-around-statements"
 DIAGNOSTIC = re.compile(r"^(.+?):(\d+):(\d+): (warning|error): (.*)$")
@@ -67,11 +72,20 @@ def changed_lines(base):
     merge_base = git("merge-base", base, "HEAD").strip()
     changed = collections.defaultdict(set)
     path = None
+    in_header = False
     for line in git("diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/",
                     "--dst-prefix=b/", merge_base).splitlines():
-        if line.startswith("+++ "):
+        # Only a file header counts: an added line of C starting with "++ " also
+        # appears as "+++ ".
+        if line.startswith("diff --git "):
+            in_header = True
+            path = None
+        elif in_header and line.startswith("+++ "):
             path = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("@@") and path:
+        elif line.startswith("@@"):
+            in_header = False
+            if not path:
+                continue
             match = re.search(r"\+(\d+)(?:,(\d+))? @@", line)
             start, count = int(match[1]), int(match[2] or 1)
             changed[path].update(range(start, start + count))
