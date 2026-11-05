@@ -578,9 +578,11 @@ static void idle_task_func(void *arg)
          * there, so the check is gated. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
         if (sched_diag_idle_loops) {
-#endif
             sched_diag_idle_loops[cpu_id()]++;
         }
+#else
+        sched_diag_idle_loops[cpu_id()]++;
+#endif
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
