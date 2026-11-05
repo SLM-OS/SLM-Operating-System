@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, and check C braces on changed lines.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, and check the Jetson boot layout.
 
 ## Instructions
 
@@ -53,7 +53,18 @@ A `not checked` line exits 0, because those files are outside the configured
 builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone
 reads them for braces by hand.
 
-### 6. Diff check
+### 6. Jetson boot layout check
+```
+make test-jetson-uefi-layout
+```
+Does its own clean Jetson build, then checks the ELF for invariants QEMU
+can't exercise because the code is gated on `PLATFORM_JETSON_ORIN_NANO`: the
+early vector table, the UEFI hand-off, and the boot-time register setup.
+Treat "All checks passed." as success; failures are the lines marked `✗`.
+The build log is at `/tmp/jetson-build.log`. It leaves a Jetson build in
+`build/kernel`.
+
+### 7. Diff check
 Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -68,6 +79,7 @@ Summarize results as a table:
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |
+| Jetson layout check | ✅/❌ | failed checks if any |
 | Artifact check | ✅/❌ | stray files if any |
 
 If everything passes, say "Ready for PR."
