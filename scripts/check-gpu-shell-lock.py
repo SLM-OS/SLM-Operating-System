@@ -25,11 +25,12 @@ CHANNEL_FUNCTIONS = (
     "ga10b_bringup_smoke_test_compute",
     "ga10b_ce_memcpy",
     "ga10b_submit_and_poll",
-    "ga10b_dispatch_v7_pipeline",
+    "ga10b_dispatch_v7_pipeline_inline",
+    "ga10b_bringup_set_input",
+    "ga10b_bringup_set_input_fill",
 )
 CALL = re.compile(r"\b(" + "|".join(CHANNEL_FUNCTIONS) + r")\s*\(")
 DEFINITION = re.compile(r"^[A-Za-z_][\w\s\*]*?\b(\w+)\s*\(")
-CALLBACK = re.compile(r"^static\s+int\s+(\w+_locked_cb)\s*\(")
 
 
 def strip_noise(text):
@@ -49,9 +50,8 @@ def check(path):
         definition = DEFINITION.match(line)
         if definition and not line.startswith(("#", "typedef", "struct")):
             current = definition[1]
-        callback = CALLBACK.match(line)
-        if callback:
-            callbacks.add(callback[1])
+            if current.endswith("_locked_cb") and not line.rstrip().endswith(";"):
+                callbacks.add(current)
         for call in CALL.finditer(line):
             if current is None or not current.endswith("_locked_cb"):
                 problems.append(f"{path}:{number}: {call[1]} called from "

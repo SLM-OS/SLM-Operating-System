@@ -5614,9 +5614,10 @@ static uint32_t smoke_dtype_for(uint32_t op_kind)
  * GPFIFO, pushbuffer, QMD pool, semaphore, cbuf and pool scratch slots
  * under g_gpu_dispatch_lock, on other CPUs, while a shell verb runs. So
  * each verb below stages its buffers, submits and reads back inside one
- * *_locked_cb run by slm_gpu_call_locked, and prints only after it
- * returns: IRQs stay masked for the whole callback. Scratch fills are
- * capped at one 64 KB pool slot, which bounds them.
+ * *_locked_cb run by slm_gpu_call_locked, and prints its results only
+ * after it returns: IRQs stay masked for the whole callback. Scratch fills
+ * are capped at one 64 KB pool slot, which bounds them. Callees below may
+ * still print: submit progress lines, and failures (#1140).
  *
  * scripts/check-gpu-shell-lock.py enforces this for shell_sys.c.
  * ------------------------------------------------------------------- */
@@ -5672,15 +5673,16 @@ static int oplib_prepare_rmsnorm_locked_cb(void *arg)
 
 struct oplib_rmsnorm_run {
     struct ga10b_bringup *b;
-    const struct operator_dispatch_args *args;
-    volatile uint16_t *in;
-    volatile uint16_t *gamma;
-    volatile uint16_t *out;
+    uint32_t n_rows;
+    uint32_t n;
     uint32_t in_pages;
     uint32_t gamma_pages;
     uint32_t out_pages;
-    uint32_t n;
     uint64_t count;
+    uint64_t in_va;
+    uint64_t gamma_va;
+    uint64_t out_va;
+    bool no_pool;
     uint16_t head[OPLIB_HEAD_WORDS];
     uint16_t tail;
 };
@@ -5688,35 +5690,61 @@ struct oplib_rmsnorm_run {
 static int oplib_rmsnorm_locked_cb(void *arg)
 {
     struct oplib_rmsnorm_run *r = arg;
+    uint64_t base_phys = 0, base_gva = 0;
+
+    if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+        r->no_pool = true;
+        return -1;
+    }
+    volatile uint16_t *in =
+        (volatile uint16_t *)(uintptr_t)(base_phys + OPLIB_POOL_OFF_SCRATCH0);
+    volatile uint16_t *gamma =
+        (volatile uint16_t *)(uintptr_t)(base_phys + OPLIB_POOL_OFF_SCRATCH1);
+    volatile uint16_t *out =
+        (volatile uint16_t *)(uintptr_t)(base_phys + OPLIB_POOL_OFF_SCRATCH2);
+    r->in_va    = base_gva + OPLIB_POOL_OFF_SCRATCH0;
+    r->gamma_va = base_gva + OPLIB_POOL_OFF_SCRATCH1;
+    r->out_va   = base_gva + OPLIB_POOL_OFF_SCRATCH2;
 
     /* Alternating +1.0/-1.0 FP16. After RMSNorm with gamma=1.0 the
      * output is also +-1.0, since sqrt(mean(1^2)) == 1.0. */
     for (uint64_t i = 0; i < r->count; i++) {
-        r->in[i] = (i & 1) ? 0xBC00u : 0x3C00u;
+        in[i] = (i & 1) ? 0xBC00u : 0x3C00u;
     }
-    cache_clean_range((void *)r->in, r->in_pages * 4096u);
+    cache_clean_range((void *)in, r->in_pages * 4096u);
     for (uint32_t i = 0; i < r->n; i++) {
-        r->gamma[i] = 0x3C00u;     /* FP16 +1.0 */
+        gamma[i] = 0x3C00u;     /* FP16 +1.0 */
     }
-    cache_clean_range((void *)r->gamma, r->gamma_pages * 4096u);
+    cache_clean_range((void *)gamma, r->gamma_pages * 4096u);
     /* Sentinel: shows whether the GPU wrote anything at all. */
     for (uint64_t i = 0; i < r->count; i++) {
-        r->out[i] = 0xCAFEu;
+        out[i] = 0xCAFEu;
     }
-    cache_clean_range((void *)r->out, r->out_pages * 4096u);
+    cache_clean_range((void *)out, r->out_pages * 4096u);
 
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_RMSNORM,
+        .u.rmsnorm = {
+            .x_gpu_va     = r->in_va,
+            .gamma_gpu_va = r->gamma_va,
+            .out_gpu_va   = r->out_va,
+            .n_rows       = r->n_rows,
+            .n            = r->n,
+            .eps_bits     = 0x358637BDu,    /* 1e-6f */
+        },
+    };
     int rc = slm_oplib_dispatch(r->b, SLM_GPU_OP_RMSNORM, SLM_GPU_TIER_SIMT,
-                                SLM_GPU_DTYPE_FP16, r->args);
+                                SLM_GPU_DTYPE_FP16, &args);
     if (rc < 0) {
         return rc;
     }
 
     /* Invalidate first so the CPU sees what the GPU wrote. */
-    cache_invalidate_range((void *)r->out, r->out_pages * 4096u);
+    cache_invalidate_range((void *)out, r->out_pages * 4096u);
     for (uint32_t i = 0; i < OPLIB_HEAD_WORDS && i < r->count; i++) {
-        r->head[i] = r->out[i];
+        r->head[i] = out[i];
     }
-    r->tail = r->out[r->count - 1u];
+    r->tail = out[r->count - 1u];
     return 0;
 }
 
@@ -5947,18 +5975,25 @@ static uint8_t g_ce_shell_readback[4096];
 
 struct ce_smoke_run {
     struct ga10b_bringup *b;
-    uint64_t src_phys;
-    uint64_t dst_phys;
+    uint32_t bytes;
+    bool not_ready;
     uint64_t src_gva;
     uint64_t dst_gva;
-    uint32_t bytes;
 };
 
 static int ce_smoke_locked_cb(void *arg)
 {
     struct ce_smoke_run *r = arg;
-    uint8_t *src = (uint8_t *)(uintptr_t)r->src_phys;
-    uint8_t *dst = (uint8_t *)(uintptr_t)r->dst_phys;
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+
+    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0) {
+        r->not_ready = true;
+        return -1;
+    }
+    uint8_t *src = (uint8_t *)(uintptr_t)(h->shader_phys + OPLIB_POOL_OFF_SCRATCH0);
+    uint8_t *dst = (uint8_t *)(uintptr_t)(h->shader_phys + OPLIB_POOL_OFF_SCRATCH1);
+    r->src_gva = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    r->dst_gva = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
     size_t flush_bytes = (size_t)((r->bytes + 4095u) & ~4095u);
 
     /* Distinguishable pattern + zero destination so a stale read can't
@@ -5981,28 +6016,37 @@ static int ce_smoke_locked_cb(void *arg)
 
 struct weights_readback_run {
     struct ga10b_bringup *b;
-    uint64_t rb_phys;
-    uint64_t rb_gva;
     uint64_t gpu_va;
     uint32_t bytes;
+    bool not_ready;
 };
 
 static int weights_readback_locked_cb(void *arg)
 {
     struct weights_readback_run *r = arg;
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+
+    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0) {
+        r->not_ready = true;
+        return -1;
+    }
+    /* SCRATCH1: a different slot than the staging bounce, so the compare
+     * can't accidentally observe residual bounce contents. */
+    void *rb = (void *)(uintptr_t)(h->shader_phys + OPLIB_POOL_OFF_SCRATCH1);
     size_t flush_bytes = (size_t)((r->bytes + 4095u) & ~4095ull);
 
     /* Zero the destination before the CE so a stale read doesn't
      * masquerade as success. */
-    memset((void *)(uintptr_t)r->rb_phys, 0, (size_t)r->bytes);
-    cache_clean_range((void *)(uintptr_t)r->rb_phys, flush_bytes);
-    int rc = ga10b_ce_memcpy(r->b, r->gpu_va, r->rb_gva, r->bytes);
+    memset(rb, 0, (size_t)r->bytes);
+    cache_clean_range(rb, flush_bytes);
+    int rc = ga10b_ce_memcpy(r->b, r->gpu_va,
+                             h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1,
+                             r->bytes);
     if (rc != 0) {
         return rc;
     }
-    cache_invalidate_range((void *)(uintptr_t)r->rb_phys, flush_bytes);
-    memcpy(g_ce_shell_readback, (void *)(uintptr_t)r->rb_phys,
-           (size_t)r->bytes);
+    cache_invalidate_range(rb, flush_bytes);
+    memcpy(g_ce_shell_readback, rb, (size_t)r->bytes);
     return 0;
 }
 
@@ -6904,8 +6948,8 @@ oplib_stage_call:
             return 0;
         }
         if (strcmp(argv[2], "dispatch-rmsnorm") == 0) {
-            /* #732: end-to-end RMSNORM-on-GPU smoke test. Allocates
-             * input/gamma/output buffers via GMMU, fills input with
+            /* #732: end-to-end RMSNORM-on-GPU smoke test. Uses the
+             * pool's scratch slots, fills input with
              * a known FP16 pattern (sentinel: alternating 0x3C00
              * and 0xBC00 = +1.0 / -1.0 so RMSNorm has work to do
              * but a deterministic answer), fills gamma with all
@@ -6935,14 +6979,11 @@ oplib_stage_call:
                 return -1;
             }
 
-            uint64_t inst_phys = 0;
-            const struct ga10b_channel_handoff *h =
-                ga10b_bringup_handoff();
             uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
             uint64_t gam_bytes = (uint64_t)n * 2u;
             uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
-            /* The fills run with IRQs masked, so cap them at one slot on
-             * every path. */
+            /* The buffers are the pool's scratch slots, and the fills run
+             * with IRQs masked. */
             if (in_bytes  > OPLIB_POOL_SLOT_BYTES ||
                 gam_bytes > OPLIB_POOL_SLOT_BYTES ||
                 out_bytes > OPLIB_POOL_SLOT_BYTES) {
@@ -6954,129 +6995,28 @@ oplib_stage_call:
                              (unsigned)OPLIB_POOL_SLOT_BYTES);
                 return -1;
             }
-            uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
-            uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
-            uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
-            if (in_pages == 0)  in_pages = 1;
-            if (gam_pages == 0) gam_pages = 1;
-            if (out_pages == 0) out_pages = 1;
-
-            uint64_t in_va = 0, gam_va = 0, out_va = 0;
-            uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
-            void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
-            int rc;
-
-            /* Fast path: when the helper pre-staged the SASS pool
-             * (1 MB), carve scratch input/gamma/output out of the
-             * tail. The SASS region itself sits at offset 0 with
-             * length 7680 B for the rmsnorm-only blob; we leave a
-             * safety margin and start the scratch carve-outs at
-             * 64 KB so any future SASS region growth doesn't
-             * collide. Each region is sized to in_bytes/gam_bytes/
-             * out_bytes — the cap upstream limits each to
-             * 65536² × 2 B but the smoke test uses tiny shapes
-             * (4×16 → 128 B). The 1 MB pool is plenty for any
-             * shape this verb is realistically invoked with.
-             *
-             * Avoiding the post-kexec ga10b_gmmu_alloc path means
-             * we don't need a discovered inst_block_phys — the
-             * helper already mapped the pool in the channel's
-             * address space. */
-            uint64_t base_phys = 0, base_gva = 0;
-            bool have_scratch = false;
-            if (h != NULL && h->shader_gpu_va != 0 &&
-                h->shader_phys != 0 &&
-                h->shader_size >= OPLIB_POOL_MIN_BYTES) {
-                base_phys = h->shader_phys;
-                base_gva  = h->shader_gpu_va;
-                have_scratch = true;
-            } else if (ga10b_bringup_handoff_is_local()) {
-                /* #1092: SLM-OS-built channel — the pool
-                 * oplib_cold_attach staged into its VM. */
-                have_scratch =
-                    oplib_pool_scratch_base(&base_phys, &base_gva) == 0;
-            }
-            if (have_scratch) {
-                /* SASS occupies slot 0; carve scratch from slots 1-3. */
-                in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                in_cpu  = (void *)(uintptr_t)in_phys;
-                gam_cpu = (void *)(uintptr_t)gam_phys;
-                out_cpu = (void *)(uintptr_t)out_phys;
-                shell_puts("dispatch-rmsnorm: scratch buffers carved from "
-                           "pre-staged SASS pool\r\n");
-            } else if (ga10b_bringup_handoff_is_local()) {
-                shell_puts("dispatch-rmsnorm: SASS pool not staged on the "
-                           "SLM-OS-built channel (`nvgpu oplib cold`)\r\n");
-                return -1;
-            } else {
-                if (h != NULL && h->inst_block_phys != 0) {
-                    inst_phys = h->inst_block_phys;
-                } else {
-                    inst_phys = ga10b_gmmu_discover_inst_block_phys();
-                    if (inst_phys == 0) {
-                        shell_puts("dispatch-rmsnorm: no handoff and "
-                                   "FECS_CURRENT_CTX read failed\r\n");
-                        return -1;
-                    }
-                }
-                rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
-                                       &in_va, &in_cpu, &in_phys);
-                if (rc < 0) {
-                    shell_printf("dispatch-rmsnorm: input alloc rc=%d\r\n", rc);
-                    return rc;
-                }
-                rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
-                                       &gam_va, &gam_cpu, &gam_phys);
-                if (rc < 0) {
-                    shell_printf("dispatch-rmsnorm: gamma alloc rc=%d\r\n", rc);
-                    return rc;
-                }
-                rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
-                                       &out_va, &out_cpu, &out_phys);
-                if (rc < 0) {
-                    shell_printf("dispatch-rmsnorm: output alloc rc=%d\r\n", rc);
-                    return rc;
-                }
-            }
-
             uint64_t in_count = (uint64_t)n_rows * n;
-
-            shell_printf("dispatch-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx "
-                         "(n_rows=%u, n=%u)\r\n",
-                         (unsigned long)in_va, (unsigned long)gam_va,
-                         (unsigned long)out_va,
-                         (unsigned)n_rows, (unsigned)n);
-
-            struct operator_dispatch_args args = {
-                .op_kind = SLM_GPU_OP_RMSNORM,
-                .u.rmsnorm = {
-                    .x_gpu_va     = in_va,
-                    .gamma_gpu_va = gam_va,
-                    .out_gpu_va   = out_va,
-                    .n_rows       = n_rows,
-                    .n            = n,
-                    .eps_bits     = 0x358637BDu,    /* 1e-6f */
-                },
-            };
-
             struct oplib_rmsnorm_run run = {
                 .b = b_p,
-                .args = &args,
-                .in = (volatile uint16_t *)in_cpu,
-                .gamma = (volatile uint16_t *)gam_cpu,
-                .out = (volatile uint16_t *)out_cpu,
-                .in_pages = in_pages,
-                .gamma_pages = gam_pages,
-                .out_pages = out_pages,
+                .n_rows = n_rows,
                 .n = n,
+                .in_pages = (uint32_t)((in_bytes + 4095u) / 4096u),
+                .gamma_pages = (uint32_t)((gam_bytes + 4095u) / 4096u),
+                .out_pages = (uint32_t)((out_bytes + 4095u) / 4096u),
                 .count = in_count,
             };
-            rc = slm_gpu_call_locked(oplib_rmsnorm_locked_cb, &run);
+            int rc = slm_gpu_call_locked(oplib_rmsnorm_locked_cb, &run);
+            if (run.no_pool) {
+                shell_puts("dispatch-rmsnorm: SASS/scratch pool missing — "
+                           "run `nvgpu oplib stage` (kexec) or `nvgpu cold` "
+                           "(UEFI-direct)\r\n");
+                return -1;
+            }
+            shell_printf("dispatch-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx "
+                         "(n_rows=%u, n=%u)\r\n",
+                         (unsigned long)run.in_va, (unsigned long)run.gamma_va,
+                         (unsigned long)run.out_va,
+                         (unsigned)n_rows, (unsigned)n);
             if (rc < 0) {
                 shell_printf("dispatch-rmsnorm: slm_oplib_dispatch rc=%d\r\n", rc);
                 return rc;
@@ -7840,29 +7780,14 @@ oplib_stage_call:
             want_bytes = v;
         }
 
-        const struct ga10b_channel_handoff *h_ce = ga10b_bringup_handoff();
         struct ga10b_bringup *b_ce = ga10b_bringup_state();
-        if (h_ce == NULL || b_ce == NULL ||
-            h_ce->shader_phys == 0 || h_ce->shader_gpu_va == 0) {
+        struct ce_smoke_run run = { .b = b_ce, .bytes = want_bytes };
+        int rc = b_ce == NULL ? -1 : slm_gpu_call_locked(ce_smoke_locked_cb, &run);
+        if (b_ce == NULL || run.not_ready) {
             shell_puts("ce smoke: channel state not ready — run "
                        "`nvgpu inherit / channel / oplib stage` first\r\n");
             return -1;
         }
-
-        uint64_t src_phys = h_ce->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-        uint64_t src_gva  = h_ce->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
-        uint64_t dst_phys = h_ce->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-        uint64_t dst_gva  = h_ce->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
-
-        struct ce_smoke_run run = {
-            .b = b_ce,
-            .src_phys = src_phys,
-            .dst_phys = dst_phys,
-            .src_gva = src_gva,
-            .dst_gva = dst_gva,
-            .bytes = want_bytes,
-        };
-        int rc = slm_gpu_call_locked(ce_smoke_locked_cb, &run);
         if (rc != 0) {
             shell_printf("ce smoke: ga10b_ce_memcpy rc=%d "
                          "(class/runlist binding issue?)\r\n", rc);
@@ -7891,7 +7816,7 @@ oplib_stage_call:
         shell_printf("[ce] smoke PASS — %u B CE memcpy "
                      "SCRATCH0(0x%lx)→SCRATCH1(0x%lx) byte-exact\r\n",
                      (unsigned)want_bytes,
-                     (unsigned long)src_gva, (unsigned long)dst_gva);
+                     (unsigned long)run.src_gva, (unsigned long)run.dst_gva);
         return 0;
     }
 
@@ -8020,26 +7945,19 @@ oplib_stage_call:
                              (unsigned long)gpu_va);
                 return 0;
             }
-            const struct ga10b_channel_handoff *h_dbg =
-                ga10b_bringup_handoff();
             struct ga10b_bringup *b_dbg = ga10b_bringup_state();
-            if (h_dbg == NULL || b_dbg == NULL ||
-                h_dbg->shader_phys == 0 || h_dbg->shader_gpu_va == 0) {
+            struct weights_readback_run rb = {
+                .b = b_dbg,
+                .gpu_va = gpu_va,
+                .bytes = (uint32_t)want_bytes,
+            };
+            int rb_rc = b_dbg == NULL ? -1 :
+                slm_gpu_call_locked(weights_readback_locked_cb, &rb);
+            if (b_dbg == NULL || rb.not_ready) {
                 shell_puts("weights-pool smoke: stage succeeded but "
                            "readback channel state unavailable\r\n");
                 return -1;
             }
-            uint64_t rb_phys = h_dbg->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-            uint64_t rb_gva  = h_dbg->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
-
-            struct weights_readback_run rb = {
-                .b = b_dbg,
-                .rb_phys = rb_phys,
-                .rb_gva = rb_gva,
-                .gpu_va = gpu_va,
-                .bytes = (uint32_t)want_bytes,
-            };
-            int rb_rc = slm_gpu_call_locked(weights_readback_locked_cb, &rb);
             if (rb_rc != 0) {
                 shell_printf("weights-pool smoke: readback CE memcpy "
                              "rc=%d\r\n", rb_rc);

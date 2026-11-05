@@ -7,9 +7,9 @@
  * (kernel/gpu/nvidia/ga10b_bringup.c). The pieces:
  *
  *   1. Look up the SASS GPU VA for the op via oplib_pool.
- *   2. Take the cbuf page oplib_pool staged (helper-published cbuf
- *      first; ga10b_gmmu_alloc on the inherited channel only as a
- *      last resort, never on an SLM-OS-built channel — #1092).
+ *   2. Take the cbuf page: helper-published first, otherwise the one
+ *      oplib_pool staged. This never allocates, because callers hold
+ *      the IRQs-off dispatch lock.
  *   3. Populate the cbuf via the registered cbuf-args builder.
  *   4. Compute the launch shape via the registered launch-shape fn.
  *   5. Construct a v7 op struct ready to feed into the existing
@@ -84,8 +84,8 @@ struct ga10b_bringup;
 /* Fire a single SASS kernel from the operator library through the
  * inherited GPU channel.
  *
- * Composes `slm_oplib_prepare_dispatch` (lookup SASS, allocate cbuf,
- * populate, compute launch shape) with
+ * Composes `slm_oplib_prepare_dispatch` (lookup SASS, take the shared
+ * cbuf, populate, compute launch shape) with
  * `ga10b_dispatch_v7_pipeline_inline` (build a 1-element v7 op,
  * submit through QMD pool + pushbuffer + semaphore, poll
  * completion). The dispatcher reuses the inherited handoff's
@@ -93,11 +93,10 @@ struct ga10b_bringup;
  * channel-open and the operator library is staged via
  * `oplib_pool_stage_to_gpu`.
  *
- * Returns 0 on dispatch + completion, -1 on any failure
- * (lookup miss, GMMU alloc failure, GPU dispatch timeout). The
- * cbuf allocated by `prepare_dispatch` stays mapped after return —
- * caller can free via the GMMU's free path or leave it for the
- * next dispatch's cbuf if reuse semantics are wanted.
+ * Returns 0 on dispatch + completion, -1 on any failure (lookup miss,
+ * no staged cbuf, GPU dispatch timeout). The cbuf is shared by every
+ * dispatch, so callers must not free it. Call this under
+ * g_gpu_dispatch_lock.
  *
  * Jetson-only. On non-Jetson platforms returns -1 without side
  * effects.

@@ -1598,7 +1598,7 @@ test-check-braces:
 .PHONY: check-gpu-shell-lock
 check-gpu-shell-lock:
 	@python3 scripts/check-gpu-shell-lock.py
-	@bash scripts/tests/test-check-gpu-shell-lock.sh > /dev/null
+	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
 
 .PHONY: test
 test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock kernel-test $(SDHCI_TEST_IMG)

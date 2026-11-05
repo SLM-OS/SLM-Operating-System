@@ -36,7 +36,9 @@ C
 
 for fn in slm_oplib_dispatch slm_oplib_prepare_dispatch ga10b_bringup_launch_kernel \
           ga10b_bringup_read_pipeline_output ga10b_bringup_smoke_test \
-          ga10b_bringup_smoke_test_compute ga10b_ce_memcpy ga10b_submit_and_poll; do
+          ga10b_bringup_smoke_test_compute ga10b_ce_memcpy ga10b_submit_and_poll \
+          ga10b_dispatch_v7_pipeline_inline ga10b_bringup_set_input \
+          ga10b_bringup_set_input_fill; do
     expect "direct call to $fn fails" 1 "$fn called from verb" <<C
 int verb(void)
 {
@@ -53,6 +55,13 @@ static int run_locked_cb(void *arg)
 int verb(void)
 {
     return run_locked_cb(0);
+}
+C
+
+expect "callback that isn't static int is still checked" 1 "run_locked_cb isn't run" <<'C'
+int run_locked_cb(void *arg)
+{
+    return slm_oplib_dispatch(arg, 0, 0, 0);
 }
 C
 

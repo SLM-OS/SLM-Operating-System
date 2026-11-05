@@ -88,10 +88,16 @@ int slm_oplib_prepare_dispatch(uint32_t op_kind,
     int rc = oplib_pool_get_sass_gpu_va(op_kind, tier, dtype,
                                          &sass_va, &sass_size);
     if (rc != 0) {
-        uart_printf("[oplib-dispatch] SASS lookup miss: op_kind=%u "
-                    "tier=%u dtype=%u rc=%d\n",
-                    (unsigned)op_kind, (unsigned)tier,
-                    (unsigned)dtype, rc);
+        /* Once only: callers hold the IRQs-off dispatch lock (#1037), and
+         * W-series callers fall back to the CPU on every call. */
+        static bool warned_lookup;
+        if (!warned_lookup) {
+            warned_lookup = true;
+            uart_printf("[oplib-dispatch] SASS lookup miss: op_kind=%u "
+                        "tier=%u dtype=%u rc=%d\n",
+                        (unsigned)op_kind, (unsigned)tier,
+                        (unsigned)dtype, rc);
+        }
         return -1;
     }
 
@@ -145,11 +151,18 @@ int slm_oplib_prepare_dispatch(uint32_t op_kind,
                 }
                 return -1;
             } else {
-                /* Callers hold the IRQs-off dispatch lock, so this
-                 * can't allocate a page instead. */
-                uart_printf("[oplib-dispatch] no cbuf: no helper cbuf "
-                            "and no oplib_pool cbuf (run `nvgpu oplib "
-                            "stage`)\n");
+                /* The pool is staged, or the SASS lookup above would have
+                 * missed, so its cbuf failed at staging, and re-staging
+                 * returns early without retrying it. Callers hold the
+                 * IRQs-off dispatch lock, so don't allocate here, and log
+                 * once. */
+                static bool warned_cbuf;
+                if (!warned_cbuf) {
+                    warned_cbuf = true;
+                    uart_printf("[oplib-dispatch] no cbuf: staging didn't "
+                                "get one, so ops stay on the CPU until "
+                                "reboot\n");
+                }
                 return -1;
             }
         }

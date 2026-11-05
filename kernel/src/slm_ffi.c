@@ -705,7 +705,8 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * Its verbs that submit work or use the shared cbuf and scratch slots
  * take this lock, staging and reading back inside it (#1111). Bring-up
  * and diagnostic verbs that replace or inspect channel state don't:
- * `inherit`, `channel`, `oplib stage`, the FECS verbs and `nvgpu cold`.
+ * `inherit`, `channel`, `run`, `oplib stage`, the FECS verbs and
+ * `nvgpu cold`. `run` includes a smoke-test submit.
  * They're not meant to run alongside FFI dispatch, and #1143 tracks
  * them. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
