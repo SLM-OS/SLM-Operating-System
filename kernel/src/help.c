@@ -1523,8 +1523,9 @@ static const struct help_entry help_entries[] = {
         "Fan control (#1105): a task on the last CPU polls every 2 s and\n"
         "follows nvfancontrol's quiet profile on the hottest of cpu/gpu/\n"
         "soc0-2: off at <= 35 C, linear to 187 at 74 C, 255 from 95 C,\n"
-        "10 levels per step, kicked at 64 from a stop. A failed temperature\n"
-        "read drives the fan at 255.\n"
+        "10 levels per step, kicked at 64 from a stop. Two failed temperature\n"
+        "reads in a row (or none at boot) drive the fan at 255, and so does\n"
+        ">= 95 C even over a manual level.\n"
     ),
 
     HELP_TEXT("timdiag",

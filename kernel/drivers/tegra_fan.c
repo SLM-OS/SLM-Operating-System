@@ -37,12 +37,16 @@ static struct {
     int32_t temp_mc;
     int temp_rc;
     uint32_t temp_fails;   /* consecutive polls with no zone readable */
+    uint32_t backoff;      /* polls left before BPMP is retried */
+    bool task_started;
     uint64_t pwm_clk_hz;
 } g_fan;
 
 /* One unreadable poll holds the level (a BPMP timeout is not a reason
  * for 40 s of full speed); this many in a row go to 255. */
 #define FAN_TEMP_FAILS_TO_MAX  2u
+/* Once at 255 for a dead BPMP, retry it every this many polls. */
+#define FAN_BPMP_RETRY_POLLS   8u
 
 static volatile uint32_t *pwm_csr(void)
 {
@@ -63,8 +67,10 @@ static void fan_apply_locked(uint32_t pwm)
 }
 
 /* Hottest of the zones nvfancontrol's thermal group uses (CPU, GPU,
- * SOC0-2). Returns 0 with *mc set, or the last BPMP error when no zone
- * could be read. */
+ * SOC0-2). Returns 0 with *mc set, or the BPMP error when no zone
+ * could be read. Stops at the first error: each failed MRQ can spin
+ * for its 100 ms timeout with IRQs masked, and if one zone fails the
+ * next is unlikely to answer. */
 static int fan_read_hottest(int32_t *mc)
 {
     static const uint32_t zones[] = {
@@ -80,7 +86,7 @@ static int fan_read_hottest(int32_t *mc)
         int r = bpmp_thermal_get_temp(zones[i], &t);
         if (r != 0) {
             rc = r;
-            continue;
+            break;
         }
         if (!any || t > hottest) {
             hottest = t;
@@ -140,10 +146,14 @@ fail:
 static bool fan_clock_tach(void)
 {
     uint64_t got = 0;
-    if (bpmp_clk_enable(TEGRA234_CLK_TACH0) != 0 ||
-        bpmp_clk_set_rate(TEGRA234_CLK_TACH0, TEGRA_TACH_COUNTER_HZ, &got) != 0 ||
+    if (bpmp_clk_enable(TEGRA234_CLK_TACH0) != 0) {
+        return false;
+    }
+    if (bpmp_clk_set_rate(TEGRA234_CLK_TACH0, TEGRA_TACH_COUNTER_HZ, &got) != 0 ||
         bpmp_reset_assert(TEGRA234_RESET_TACH0) != 0 ||
         bpmp_reset_deassert(TEGRA234_RESET_TACH0) != 0) {
+        /* As for PWM3: no clocked block left behind in reset. */
+        (void)bpmp_clk_disable(TEGRA234_CLK_TACH0);
         return false;
     }
     uint32_t v = *tach0_reg();
@@ -197,6 +207,11 @@ void tegra_fan_poll(void)
     if (!g_fan.ready) {
         return;
     }
+    /* Only this task touches backoff: no lock needed to skip BPMP. */
+    if (g_fan.backoff > 0u) {
+        g_fan.backoff--;
+        return;
+    }
     int32_t mc = 0;
     int rc = fan_read_hottest(&mc);
 
@@ -211,7 +226,18 @@ void tegra_fan_poll(void)
         if (g_fan.temp_fails < FAN_TEMP_FAILS_TO_MAX) {
             g_fan.temp_fails++;
         }
-        target = g_fan.temp_fails >= FAN_TEMP_FAILS_TO_MAX ? TEGRA_FAN_MAX_PWM : g_fan.target;
+        if (g_fan.temp_fails >= FAN_TEMP_FAILS_TO_MAX) {
+            target = TEGRA_FAN_MAX_PWM;
+            g_fan.backoff = FAN_BPMP_RETRY_POLLS - 1u;
+        } else {
+            target = g_fan.target;
+        }
+    }
+    if (g_fan.manual && target == TEGRA_FAN_MAX_PWM && g_fan.pwm != TEGRA_FAN_MAX_PWM) {
+        /* >= 95 C or no temperature: a manual level does not hold the
+         * fan below full speed. It stays manual at 255 until `auto`. */
+        g_fan.target = TEGRA_FAN_MAX_PWM;
+        fan_apply_locked(TEGRA_FAN_MAX_PWM);
     }
     if (!g_fan.manual) {
         g_fan.target = target;
@@ -246,6 +272,9 @@ int tegra_fan_start(void)
     if (cpu_count > 1) {
         t->cpu_affinity = cpu_count - 1;
     }
+    irq_flags_t f = spin_lock_irqsave(&g_fan_lock);
+    g_fan.task_started = true;
+    spin_unlock_irqrestore(&g_fan_lock, f);
     scheduler_add_task(t);
     return 0;
 }
@@ -270,6 +299,9 @@ void tegra_fan_set_auto(void)
     /* Show the curve's target at once; the next poll ramps toward it. */
     if (g_fan.temp_rc == 0) {
         g_fan.target = tegra_fan_curve_pwm(g_fan.temp_mc);
+    }
+    if (g_fan.ready && !g_fan.task_started) {
+        fan_apply_locked(g_fan.target);
     }
     spin_unlock_irqrestore(&g_fan_lock, f);
 }

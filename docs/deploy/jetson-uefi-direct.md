@@ -570,8 +570,10 @@ where the two disagree.
     to the last CPU then follows nvfancontrol's default "quiet" curve
     every 2 s on the hottest of cpu/gpu/soc0-2. The curve is off at or
     below 35 °C, linear up to 187 at 74 °C, and 255 from 95 °C. The
-    level moves 10 per step and is kicked to 64 from a stop. A failed
-    temperature read drives the fan at 255. BPMP gives PWM3 9.6 MHz
+    level moves 10 per step and is kicked to 64 from a stop. Two failed
+    temperature reads in a row (or none at boot) drive the fan at 255,
+    with BPMP then retried every 16 s; 95 °C or a lost temperature
+    also overrides a manual level. BPMP gives PWM3 9.6 MHz
     after UEFI and Linux's 11.03 MHz after kexec; both need PFM 0.
     `thermal fan` shows the mode, level, rpm and CSR. `thermal fan <n>`
     holds a level and `thermal fan auto` returns to the curve. On

@@ -50,10 +50,10 @@
 
 /* nvfancontrol "quiet" profile with TMARGIN, margin = 105 C - the
  * hottest of CPU / GPU / SOC0-2:
- *   margin 0-10 (>= 95 C)  -> 255
- *   margin 11-31 (74-94 C) -> 187
- *   margin 31-70 (74-35 C) -> 187 down to 0, linearly
- *   margin >= 70 (<= 35 C) -> 0 */
+ *   margin <= 10 (>= 95 C)    -> 255
+ *   margin 11-31 (74-94 C)    -> 187
+ *   margin 31-70 (74 to 35 C) -> 187 down to 0, linearly (74 C is 187)
+ *   margin >= 70 (<= 35 C)    -> 0 */
 static inline uint32_t tegra_fan_curve_pwm(int32_t temp_mc)
 {
     if (temp_mc >= 95000) return 255u;
@@ -142,16 +142,26 @@ struct tegra_fan_status {
 int tegra_fan_init(void);
 
 /* Start the 2 s control task, pinned off CPU 0 so the fan keeps being
- * driven if CPU 0 wedges (#1093). Silent: it never prints. */
+ * driven if CPU 0 wedges (#1093). The task itself never prints; a
+ * failing BPMP shows up as the MRQ layer's timeout WARNs, which back
+ * off with the task's temperature polls (see tegra_fan_poll). */
 int tegra_fan_start(void);
 
-/* One control step: read the zones, move the PWM toward the curve. */
+/* One control step: read the zones, move the PWM toward the curve.
+ * One unreadable poll holds the level; two in a row drive 255, and
+ * after that BPMP is only retried every 8th poll (16 s) so a dead
+ * BPMP costs one 100 ms MRQ timeout (IRQs masked) per retry, not five
+ * every 2 s. >= 95 C or no temperature overrides a manual level. */
 void tegra_fan_poll(void);
 
-/* Shell: fix the level (0-255), or return to the curve. */
+/* Shell: fix the level (0-255), or return to the curve. Without the
+ * control task (test kernels) set_auto applies the curve target at
+ * once instead of leaving it to a poll that never comes. */
 int tegra_fan_set_manual(uint32_t pwm);
 void tegra_fan_set_auto(void);
 
+/* Snapshot for the shell. Also clears a set tachometer overflow (stall)
+ * flag, write-1-to-clear, as Linux's capture path does. */
 void tegra_fan_get_status(struct tegra_fan_status *out);
 
 #endif /* TEGRA_FAN_H */
