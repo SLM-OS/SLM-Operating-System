@@ -4,10 +4,12 @@
 # Jetson UEFI-direct boot path.
 #
 # The UEFI-direct path depends on several non-obvious layout and
-# alignment invariants that aren't exercised by the QEMU test suite
-# (the code is all gated on PLATFORM_JETSON_ORIN_NANO). A structural
-# check on the ELF catches regressions that would otherwise only show
-# up on live hardware as a silent hang.
+# alignment invariants that the QEMU test suite doesn't cover. Some of
+# the code is gated on PLATFORM_JETSON_ORIN_NANO (the early vector
+# table); the EFI entry and stub are shared with QEMU_VIRT and checked
+# here as built for Jetson. A structural check on the build catches
+# regressions that would otherwise only show up on live hardware as a
+# silent hang.
 #
 # This script:
 #   1. Builds the Jetson kernel.
@@ -41,6 +43,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ELF="$ROOT/build/kernel/slmos.elf"
+BUILD_LOG="$ROOT/build/jetson-layout-build.log"
 NM="${NM:-aarch64-none-elf-nm}"
 OBJDUMP="${OBJDUMP:-aarch64-none-elf-objdump}"
 
@@ -51,11 +54,12 @@ err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 
 printf '\n== Build Jetson kernel ==\n'
 make -C "$ROOT" kernel-clean >/dev/null 2>&1 || true
-if make -C "$ROOT" kernel PLATFORM=JETSON_ORIN_NANO >/tmp/jetson-build.log 2>&1; then
+mkdir -p "$ROOT/build"
+if make -C "$ROOT" kernel PLATFORM=JETSON_ORIN_NANO >"$BUILD_LOG" 2>&1; then
     pass "build succeeded"
 else
-    err "build failed — see /tmp/jetson-build.log"
-    tail -40 /tmp/jetson-build.log
+    err "build failed — see $BUILD_LOG"
+    tail -40 "$BUILD_LOG"
     exit 1
 fi
 

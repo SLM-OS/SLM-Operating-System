@@ -57,12 +57,18 @@ reads them for braces by hand.
 ```
 make test-jetson-uefi-layout
 ```
-Does its own clean Jetson build, then checks the ELF for invariants QEMU
-can't exercise because the code is gated on `PLATFORM_JETSON_ORIN_NANO`: the
-early vector table, the UEFI hand-off, and the boot-time register setup.
-Treat "All checks passed." as success; failures are the lines marked `✗`.
-The build log is at `/tmp/jetson-build.log`. It leaves a Jetson build in
-`build/kernel`.
+Does its own clean Jetson build, then checks it for invariants the QEMU test
+suite doesn't cover: the Jetson-only early vector table, the UEFI hand-off as
+built for Jetson, and the boot-time register setup. `make test-qemu-uefi`
+covers the hand-off at runtime, but `/ci` doesn't run it, so run it separately
+when changing the EFI entry or stub.
+
+Treat "All checks passed." as success; failures are the lines marked `✗`. A `!`
+line means a check was skipped and the script still says "All checks passed.",
+so name it in the Notes column and don't treat that check as a pass.
+
+The build log is at `build/jetson-layout-build.log`. The step leaves a Jetson
+build in `build/kernel`.
 
 ### 7. Diff check
 Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
@@ -79,7 +85,7 @@ Summarize results as a table:
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |
-| Jetson layout check | ✅/❌ | failed checks if any |
+| Jetson layout check | ✅/❌ | failed or skipped checks if any |
 | Artifact check | ✅/❌ | stray files if any |
 
 If everything passes, say "Ready for PR."
