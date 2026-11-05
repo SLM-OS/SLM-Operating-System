@@ -1524,8 +1524,9 @@ static const struct help_entry help_entries[] = {
         "follows nvfancontrol's quiet profile on the hottest of cpu/gpu/\n"
         "soc0-2: off at <= 35 C, linear to 187 at 74 C, 255 from 95 C,\n"
         "10 levels per step, kicked at 64 from a stop. Two failed temperature\n"
-        "reads in a row (or none at boot) drive the fan at 255, and so does\n"
-        ">= 95 C even over a manual level.\n"
+        "reads in a row (or none at boot) drive the fan at 255, with BPMP\n"
+        "then retried every 16 s. That and >= 95 C both override a manual\n"
+        "level, which then stays at 255 until `thermal fan auto`.\n"
     ),
 
     HELP_TEXT("timdiag",

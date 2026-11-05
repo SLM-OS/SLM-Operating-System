@@ -97,6 +97,111 @@ static void test_tach_rpm_matches_linux(void)
     TEST_ASSERT_TRUE(tegra_tach_rpm(0x02006000u) > 2000u);
 }
 
+/* ---- control state machine ---- */
+
+static void test_ctl_init_start_level(void)
+{
+    struct tegra_fan_ctl c;
+    TEST_ASSERT_EQUAL_UINT32(70, tegra_fan_ctl_init(&c, 0, 49500));
+    TEST_ASSERT_EQUAL_UINT32(70, c.target);
+    TEST_ASSERT_FALSE(c.manual);
+    /* Curve level below the kickstart: start at 64, target stays. */
+    TEST_ASSERT_EQUAL_UINT32(64, tegra_fan_ctl_init(&c, 0, 40000));
+    TEST_ASSERT_EQUAL_UINT32(24, c.target);
+    /* Cool board: off. Unknown temperature: full speed. */
+    TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_init(&c, 0, 30000));
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_init(&c, -4, 0));
+    TEST_ASSERT_FALSE(c.temp_ok);
+}
+
+static void test_ctl_auto_ramps_to_curve(void)
+{
+    struct tegra_fan_ctl c;
+    tegra_fan_ctl_init(&c, 0, 49500);                    /* 70 */
+    TEST_ASSERT_EQUAL_UINT32(80, tegra_fan_ctl_step(&c, 0, 60000)); /* -> 120 */
+    TEST_ASSERT_EQUAL_UINT32(120, c.target);
+    TEST_ASSERT_EQUAL_UINT32(90, tegra_fan_ctl_step(&c, 0, 60000));
+    /* >= 95 C: straight to 255. */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, 0, 96000));
+    /* Cooling: back down 10 per poll. */
+    TEST_ASSERT_EQUAL_UINT32(245, tegra_fan_ctl_step(&c, 0, 49500));
+    TEST_ASSERT_EQUAL_UINT32(70, c.target);
+}
+
+static void test_ctl_read_failures_hold_then_max_then_backoff(void)
+{
+    struct tegra_fan_ctl c;
+    tegra_fan_ctl_init(&c, 0, 49500);                    /* 70 */
+    /* One failure: hold the level and target. */
+    TEST_ASSERT_TRUE(tegra_fan_ctl_should_read(&c));
+    TEST_ASSERT_EQUAL_UINT32(70, tegra_fan_ctl_step(&c, -4, 0));
+    TEST_ASSERT_EQUAL_UINT32(70, c.target);
+    TEST_ASSERT_TRUE(c.temp_ok);
+    /* A success in between resets the count. */
+    TEST_ASSERT_EQUAL_UINT32(70, tegra_fan_ctl_step(&c, 0, 49500));
+    TEST_ASSERT_EQUAL_UINT32(70, tegra_fan_ctl_step(&c, -4, 0));
+    /* Second in a row: temperature lost, 255, back off. */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, -4, 0));
+    TEST_ASSERT_FALSE(c.temp_ok);
+    for (uint32_t i = 0; i < TEGRA_FAN_RETRY_POLLS - 1u; i++) {
+        TEST_ASSERT_FALSE(tegra_fan_ctl_should_read(&c));
+    }
+    /* The 8th poll retries; still dead: 255 and back off again. */
+    TEST_ASSERT_TRUE(tegra_fan_ctl_should_read(&c));
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, -4, 0));
+    TEST_ASSERT_FALSE(tegra_fan_ctl_should_read(&c));
+    /* BPMP back: no more backoff once polled, ramp down to the curve. */
+    c.backoff = 0;
+    TEST_ASSERT_EQUAL_UINT32(245, tegra_fan_ctl_step(&c, 0, 49500));
+    TEST_ASSERT_TRUE(tegra_fan_ctl_should_read(&c));
+    TEST_ASSERT_EQUAL_UINT32(70, c.target);
+}
+
+static void test_ctl_manual_and_safety_override(void)
+{
+    struct tegra_fan_ctl c;
+    tegra_fan_ctl_init(&c, 0, 49500);
+    TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_manual(&c, 0));
+    TEST_ASSERT_TRUE(c.manual);
+    /* Manual holds against the curve and a single read failure. */
+    TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_step(&c, 0, 80000));
+    TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_step(&c, -4, 0));
+    /* ... but not against a lost temperature, */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, -4, 0));
+    TEST_ASSERT_TRUE(c.manual);
+    /* nor a new manual level while it is lost (backoff window). */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_manual(&c, 20));
+    /* Latched: recovery keeps manual 255 until `auto`. */
+    c.backoff = 0;
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, 0, 49500));
+    /* >= 95 C overrides a manual level too. */
+    tegra_fan_ctl_init(&c, 0, 49500);
+    tegra_fan_ctl_manual(&c, 30);
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_step(&c, 0, 95000));
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_manual(&c, 30));
+}
+
+static void test_ctl_auto(void)
+{
+    struct tegra_fan_ctl c;
+    tegra_fan_ctl_init(&c, 0, 49500);
+    tegra_fan_ctl_manual(&c, 200);
+    /* With the task: target at once, level ramps on the next poll. */
+    TEST_ASSERT_EQUAL_UINT32(200, tegra_fan_ctl_auto(&c, false));
+    TEST_ASSERT_FALSE(c.manual);
+    TEST_ASSERT_EQUAL_UINT32(70, c.target);
+    TEST_ASSERT_EQUAL_UINT32(190, tegra_fan_ctl_step(&c, 0, 49500));
+    /* Without it (test kernels): the fixed level, not a stale curve. */
+    tegra_fan_ctl_manual(&c, 0);
+    TEST_ASSERT_EQUAL_UINT32(TEGRA_FAN_FIXED_PWM, tegra_fan_ctl_auto(&c, true));
+    /* Temperature lost: auto goes to 255 at once, either way. */
+    tegra_fan_ctl_manual(&c, 0);
+    tegra_fan_ctl_step(&c, -4, 0);
+    tegra_fan_ctl_step(&c, -4, 0);
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_auto(&c, false));
+    TEST_ASSERT_EQUAL_UINT32(255, c.target);
+}
+
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
 /* Other platforms get inert stubs: nothing to clock, nothing ready. */
 static void test_stubs_off_jetson(void)
@@ -107,7 +212,7 @@ static void test_stubs_off_jetson(void)
     TEST_ASSERT_EQUAL_INT(-1, tegra_fan_init());
     TEST_ASSERT_EQUAL_INT(-1, tegra_fan_start());
     TEST_ASSERT_EQUAL_INT(-1, tegra_fan_set_manual(100));
-    tegra_fan_set_auto();
+    TEST_ASSERT_EQUAL_INT(-1, tegra_fan_set_auto());
     tegra_fan_poll();
     tegra_fan_get_status(&st);
     TEST_ASSERT_FALSE(st.ready);
@@ -122,6 +227,11 @@ int test_suite_tegra_fan(void)
     RUN_TEST(test_ramp_kickstart_and_full_speed);
     RUN_TEST(test_pwm_register_matches_linux);
     RUN_TEST(test_tach_rpm_matches_linux);
+    RUN_TEST(test_ctl_init_start_level);
+    RUN_TEST(test_ctl_auto_ramps_to_curve);
+    RUN_TEST(test_ctl_read_failures_hold_then_max_then_backoff);
+    RUN_TEST(test_ctl_manual_and_safety_override);
+    RUN_TEST(test_ctl_auto);
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
     RUN_TEST(test_stubs_off_jetson);
 #endif

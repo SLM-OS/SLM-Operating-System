@@ -38,6 +38,7 @@
 #define TEGRA_PWM_ENABLE         0x80000000u
 #define TEGRA_PWM_DUTY_SHIFT     16
 #define TEGRA_PWM_SCALE_MASK     0x1FFFu
+#define TEGRA_PWM_DUTY_MASK      0x1FFu     /* bits 24:16, 0-256 ticks */
 
 /* Tachometer (nvidia-oot pwm-tegra-tachometer.c, L4T DT). */
 #define TEGRA_TACH_COUNTER_HZ    1010526u
@@ -52,7 +53,7 @@
  * hottest of CPU / GPU / SOC0-2:
  *   margin <= 10 (>= 95 C)    -> 255
  *   margin 11-31 (74-94 C)    -> 187
- *   margin 31-70 (74 to 35 C) -> 187 down to 0, linearly (74 C is 187)
+ *   margin 32-70 (73 to 35 C) -> linear, 186 down to 0
  *   margin >= 70 (<= 35 C)    -> 0 */
 static inline uint32_t tegra_fan_curve_pwm(int32_t temp_mc)
 {
@@ -120,6 +121,137 @@ static inline uint32_t tegra_tach_rpm(uint32_t tach0)
     return (uint32_t)((60000000ull + us / 2u) / us);
 }
 
+/* ---- Control state machine (pure; the driver holds its lock) ----
+ *
+ * Each poll: tegra_fan_ctl_should_read() says whether to ask BPMP at
+ * all; tegra_fan_ctl_step() takes the result and moves the level.
+ *  - One unreadable poll holds the level (a BPMP timeout is not worth
+ *    40 s of full speed); TEGRA_FAN_TEMP_FAILS_TO_MAX in a row mean the
+ *    temperature is lost: 255, and BPMP is then retried only every
+ *    TEGRA_FAN_RETRY_POLLS-th poll (each failed MRQ spins up to 100 ms
+ *    with IRQs masked).
+ *  - >= 95 C or a lost temperature forces 255 over a manual level. The
+ *    level stays manual at 255 until `auto`.
+ *  - Auto ramps toward the curve with tegra_fan_next_pwm(). */
+#define TEGRA_FAN_TEMP_FAILS_TO_MAX  2u
+#define TEGRA_FAN_RETRY_POLLS        8u
+
+struct tegra_fan_ctl {
+    bool manual;
+    bool temp_ok;          /* temp_mc holds a reading */
+    int32_t temp_mc;
+    uint32_t pwm;          /* level applied */
+    uint32_t target;
+    uint32_t temp_fails;   /* consecutive unreadable polls (saturates) */
+    uint32_t backoff;      /* polls to skip before retrying BPMP */
+};
+
+static inline bool tegra_fan_ctl_temp_lost(const struct tegra_fan_ctl *c)
+{
+    return c->temp_fails >= TEGRA_FAN_TEMP_FAILS_TO_MAX;
+}
+
+/* Level the safety rules force regardless of mode, or 0 for none. */
+static inline uint32_t tegra_fan_ctl_forced(const struct tegra_fan_ctl *c)
+{
+    if (tegra_fan_ctl_temp_lost(c)) return TEGRA_FAN_MAX_PWM;
+    if (c->temp_ok && tegra_fan_curve_pwm(c->temp_mc) == TEGRA_FAN_MAX_PWM) return TEGRA_FAN_MAX_PWM;
+    return 0u;
+}
+
+/* Boot: the start level for a first reading (rc 0 = mc valid). An
+ * unknown temperature starts at 255; a low curve level is raised to
+ * the kickstart so a stopped fan actually spins up. */
+static inline uint32_t tegra_fan_ctl_init(struct tegra_fan_ctl *c, int rc, int32_t mc)
+{
+    *c = (struct tegra_fan_ctl){ 0 };
+    c->temp_ok = rc == 0;
+    c->temp_mc = rc == 0 ? mc : 0;
+    uint32_t start = rc == 0 ? tegra_fan_curve_pwm(mc) : TEGRA_FAN_MAX_PWM;
+    if (start > 0u && start < TEGRA_FAN_KICKSTART_PWM) {
+        start = TEGRA_FAN_KICKSTART_PWM;
+    }
+    c->pwm = start;
+    c->target = rc == 0 ? tegra_fan_curve_pwm(mc) : TEGRA_FAN_MAX_PWM;
+    return start;
+}
+
+/* False while backing off from a dead BPMP (and counts the skip). */
+static inline bool tegra_fan_ctl_should_read(struct tegra_fan_ctl *c)
+{
+    if (c->backoff > 0u) {
+        c->backoff--;
+        return false;
+    }
+    return true;
+}
+
+/* One poll's result (rc 0 = mc valid). Returns the level to apply. */
+static inline uint32_t tegra_fan_ctl_step(struct tegra_fan_ctl *c, int rc, int32_t mc)
+{
+    if (rc == 0) {
+        c->temp_ok = true;
+        c->temp_mc = mc;
+        c->temp_fails = 0;
+    } else {
+        if (c->temp_fails < TEGRA_FAN_TEMP_FAILS_TO_MAX) {
+            c->temp_fails++;
+        }
+        if (tegra_fan_ctl_temp_lost(c)) {
+            c->temp_ok = false;
+            c->backoff = TEGRA_FAN_RETRY_POLLS - 1u;
+        }
+    }
+    uint32_t forced = tegra_fan_ctl_forced(c);
+    if (c->manual) {
+        if (forced != 0u) {
+            c->target = forced;
+            c->pwm = forced;
+        }
+        return c->pwm;
+    }
+    if (forced != 0u) {
+        c->target = forced;
+    } else if (c->temp_ok) {
+        c->target = tegra_fan_curve_pwm(c->temp_mc);
+    }
+    /* else: one unreadable poll, hold the target. */
+    c->pwm = tegra_fan_next_pwm(c->pwm, c->target);
+    return c->pwm;
+}
+
+/* Shell: hold `level` (0-255). Returns the level applied, which is 255
+ * instead when the safety rules force it. */
+static inline uint32_t tegra_fan_ctl_manual(struct tegra_fan_ctl *c, uint32_t level)
+{
+    uint32_t forced = tegra_fan_ctl_forced(c);
+    c->manual = true;
+    c->target = forced != 0u ? forced : level;
+    c->pwm = c->target;
+    return c->pwm;
+}
+
+/* Shell: back to the curve. The target is set at once and the next
+ * poll ramps toward it; with no control task to do that (`no_task`,
+ * test kernels) the level is set directly: the forced level, or
+ * TEGRA_FAN_FIXED_PWM, since nothing refreshes the temperature there.
+ * Returns the level to apply. */
+static inline uint32_t tegra_fan_ctl_auto(struct tegra_fan_ctl *c, bool no_task)
+{
+    uint32_t forced = tegra_fan_ctl_forced(c);
+    c->manual = false;
+    if (forced != 0u) {
+        c->target = forced;
+        c->pwm = forced;
+    } else if (no_task) {
+        c->target = TEGRA_FAN_FIXED_PWM;
+        c->pwm = TEGRA_FAN_FIXED_PWM;
+    } else if (c->temp_ok) {
+        c->target = tegra_fan_curve_pwm(c->temp_mc);
+    }
+    return c->pwm;
+}
+
 /* ---- Jetson driver (kernel/drivers/tegra_fan.c) ---- */
 
 struct tegra_fan_status {
@@ -137,28 +269,25 @@ struct tegra_fan_status {
 
 /* Clock and program PWM3 and the tachometer through BPMP and apply the
  * curve for the current temperature (TEGRA_FAN_FIXED_PWM in test
- * kernels). Returns 0, or a negative step number on failure (the fan
- * is then left as it was). */
+ * kernels). Returns 0; -1 if BPMP is unavailable or the clock enable
+ * failed; -2..-4 for a later PWM3 step, after which PWM3 is left
+ * unclocked and the fan undriven. */
 int tegra_fan_init(void);
 
 /* Start the 2 s control task, pinned off CPU 0 so the fan keeps being
  * driven if CPU 0 wedges (#1093). The task itself never prints; a
- * failing BPMP shows up as the MRQ layer's timeout WARNs, which back
- * off with the task's temperature polls (see tegra_fan_poll). */
+ * failing BPMP shows up as the MRQ layer's timeout WARNs, one per
+ * retry (every 16 s once the temperature is lost). */
 int tegra_fan_start(void);
 
-/* One control step: read the zones, move the PWM toward the curve.
- * One unreadable poll holds the level; two in a row drive 255, and
- * after that BPMP is only retried every 8th poll (16 s) so a dead
- * BPMP costs one 100 ms MRQ timeout (IRQs masked) per retry, not five
- * every 2 s. >= 95 C or no temperature overrides a manual level. */
+/* One control step (see the state machine above). */
 void tegra_fan_poll(void);
 
-/* Shell: fix the level (0-255), or return to the curve. Without the
- * control task (test kernels) set_auto applies the curve target at
- * once instead of leaving it to a poll that never comes. */
+/* Shell: hold a level (0-255), or return to the curve
+ * (tegra_fan_ctl_manual / tegra_fan_ctl_auto). Both return -1 when the
+ * driver is not running. */
 int tegra_fan_set_manual(uint32_t pwm);
-void tegra_fan_set_auto(void);
+int tegra_fan_set_auto(void);
 
 /* Snapshot for the shell. Also clears a set tachometer overflow (stall)
  * flag, write-1-to-clear, as Linux's capture path does. */

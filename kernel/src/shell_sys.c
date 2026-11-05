@@ -11651,8 +11651,8 @@ static void thermal_print_line(int (*out)(const char *fmt, ...), const char *pre
 /* Fan: PWM controller 3 at 0x032a0000 drives the carrier's fan header
  * (L4T DT pwm-fan: pwms = <&pwm3 0 45334>). CSR bit 31 = enable, bits
  * 24:16 = duty (0-256 ticks). The raw view is only read when BPMP
- * says its clock is on: an unclocked block traps into EL3 on Tegra234. (A clocked block held in
- * reset could fault too; BPMP has no reset-state query, and Linux
+ * says its clock is on: an unclocked block traps into EL3 on Tegra234.
+ * (A clocked block held in reset could fault too; BPMP has no reset-state query, and Linux
  * deasserts this reset together with enabling the clock.) */
 #define THERMAL_FAN_PWM_CSR  TEGRA234_PWM3_BASE   /* mapped in vmm.c */
 
@@ -11671,7 +11671,7 @@ static void thermal_print_fan_raw(void)
     uint32_t csr = *(volatile uint32_t *)(uintptr_t)THERMAL_FAN_PWM_CSR;
     shell_printf("fan: pwm3 CSR=0x%08x enable=%u duty=%u/256\r\n",
                  (unsigned)csr, (unsigned)(csr >> 31),
-                 (unsigned)((csr >> TEGRA_PWM_DUTY_SHIFT) & 0x1FFu));
+                 (unsigned)((csr >> TEGRA_PWM_DUTY_SHIFT) & TEGRA_PWM_DUTY_MASK));
 }
 
 /* Status from the fan driver (#1105); the raw register view when the
@@ -11726,9 +11726,9 @@ static int thermal_fan_cmd(int argc, char *argv[])
         return -1;
     }
     if (strcmp(argv[2], "auto") == 0) {
-        tegra_fan_set_auto();
+        int rc = tegra_fan_set_auto();
         thermal_print_fan();
-        return 0;
+        return rc;
     }
     uint32_t level = 0;
     const char *p = argv[2];
