@@ -1,0 +1,10 @@
+---
+# Only the brace rule is enforced; see scripts/check-c-braces.py and
+# `make check-braces`. ShortStatementLines: 1 leaves a stand-alone single-line
+# guard (`if (err) return rc;`) alone. A chained if/else spans several lines,
+# so it must be braced even when each body is one line.
+Checks: '-*,readability-braces-around-statements'
+CheckOptions:
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '1'
+...

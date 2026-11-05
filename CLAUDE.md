@@ -111,6 +111,7 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 - CMake 3.20+
 - QEMU (qemu-system-aarch64 for ARM, qemu-system-x86_64 for x86)
 - grub-mkrescue — for x86-64 ISO creation (test and boot)
+- clang-tidy — for `make check-braces`
 - Rust toolchain with `aarch64-unknown-none` and `x86_64-unknown-none` targets — pinned by `rust-toolchain.toml` (rustup installs it automatically on first build)
 
 ### Build Commands
@@ -122,6 +123,8 @@ make kernel-clean    # Clean kernel build
 make run             # Build and run in QEMU
 make debug           # Build and run with GDB server
 make test            # Build test kernel and run in QEMU
+make check-braces    # clang-tidy brace rule on changed C lines, all platforms
+                     #   (BRACES_BASE=<ref>; BRACES_ARGS=--all for the whole tree)
 
 # x86-64 platform:
 make kernel PLATFORM=X86_64    # Build for x86-64 (bare-metal, linked at 0x100000)

@@ -38,7 +38,16 @@ This step catches compile or link rot in test-only code, which
 A link error naming a kernel symbol means `test_ffi_stubs` in
 `runtime/src/lib.rs` needs a stub for it.
 
-### 5. Diff check
+### 5. Brace check
+```
+make test-check-braces && make check-braces
+```
+Runs `clang-tidy` on C lines changed since `origin/main` for all four
+platforms (`scripts/check-c-braces.py`). Older violations aren't reported.
+Fix any it reports. Exit status 2 from the script means a file could not be
+checked: read the message rather than treating it as a pass.
+
+### 6. Diff check
 Run `git diff main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -52,6 +61,7 @@ Summarize results as a table:
 | x86-64 build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
+| Brace check | ✅/❌ | violations if any |
 | Artifact check | ✅/❌ | stray files if any |
 
 If everything passes, say "Ready for PR."
