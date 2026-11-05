@@ -3491,13 +3491,33 @@ static void repos_reap(struct task *t)
 {
     int timeout = 200000;
 
+    if (!t) {
+        return;
+    }
     while (t->state != TASK_TERMINATED && timeout-- > 0) {
         yield();
     }
     if (t->state != TASK_TERMINATED) {
         scheduler_terminate_task(t);
     }
+    /* CPU 1 can still be on this stack in schedule() just after the state flips. */
+    task_sleep_ms(5);
     task_destroy(t);
+}
+
+/* A tick on CPU 1 can briefly put the spinner at the head of its queue. */
+static void repos_read_queue(uint32_t cpu, const struct task *spin,
+                             struct task **head, uint32_t *ready)
+{
+    struct cpu_runqueue *rq = sched_cpu_rq(cpu);
+
+    for (int i = 0; i < 100000; i++) {
+        *head = rq->head;
+        *ready = rq->ready_count;
+        if (*head != spin && *head == rq->head) {
+            return;
+        }
+    }
 }
 
 static void test_reposition_moves_task_queued_on_other_cpu(void)
@@ -3527,29 +3547,35 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
 
     struct task *peer = task_create_with_priority("pi_peer", nop_entry, NULL, TASK_PRIORITY_NORMAL);
     struct task *holder = task_create_with_priority("pi_hold", nop_entry, NULL, TASK_PRIORITY_LOW);
-    TEST_ASSERT_NOT_NULL(peer);
-    TEST_ASSERT_NOT_NULL(holder);
-    task_set_affinity(peer, 1);
-    task_set_affinity(holder, 1);
-    scheduler_add_task_to_cpu(peer, 1);
-    scheduler_add_task_to_cpu(holder, 1);
+    bool created = peer && holder;
+    struct task *head_before = NULL;
+    struct task *head_after = NULL;
+    uint32_t ready_before = 0;
+    uint32_t ready_after = 0;
+    uint8_t priority_after = 0;
 
-    struct task *head_before = sched_cpu_rq(1)->head;
-    uint32_t ready_before = sched_cpu_rq(1)->ready_count;
+    if (created) {
+        task_set_affinity(peer, 1);
+        task_set_affinity(holder, 1);
+        scheduler_add_task_to_cpu(peer, 1);
+        scheduler_add_task_to_cpu(holder, 1);
+        repos_read_queue(1, spin, &head_before, &ready_before);
 
-    holder->pi_priority = TASK_PRIORITY_HIGH;
-    sched_reposition_task(holder);
+        holder->pi_priority = TASK_PRIORITY_HIGH;
+        sched_reposition_task(holder);
 
-    struct task *head_after = sched_cpu_rq(1)->head;
-    uint32_t ready_after = sched_cpu_rq(1)->ready_count;
-    uint8_t priority_after = holder->effective_priority;
+        repos_read_queue(1, spin, &head_after, &ready_after);
+        priority_after = holder->effective_priority;
+    }
 
-    /* Let CPU 1 go before any assert can leave this function. */
+    /* Let CPU 1 go before any assert can leave this function. An unstarted
+     * peer or holder is reaped through its never-ran path. */
     f[1] = 1;
     repos_reap(spin);
     repos_reap(peer);
     repos_reap(holder);
 
+    TEST_ASSERT_TRUE(created);
     TEST_ASSERT_TRUE(spinning);
     TEST_ASSERT_EQUAL_PTR(peer, head_before);
     TEST_ASSERT_EQUAL_PTR(holder, head_after);

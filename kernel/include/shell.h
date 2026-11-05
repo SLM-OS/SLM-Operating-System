@@ -140,6 +140,9 @@ void shell_mutation_resume(bool paused);
  * This is the line reader that the shell REPL uses internally; exposed
  * so Lua scripting (slm.read_line) and other callers can prompt the
  * user without duplicating the implementation.
+ *
+ * Waits with the shell mutation lock held if the caller holds it. A mutating
+ * handler must wrap the call in shell_mutation_pause/resume (#1103).
  */
 int shell_read_line(char *buf, int max_len);
 
@@ -163,7 +166,9 @@ void shell_putc(char c);
 int  shell_printf(const char *fmt, ...);
 
 /* Blocking read of one byte (0..255) from the current session's I/O.
- * Returns -1 if the session has closed. */
+ * Returns -1 if the session has closed. Waits with the shell mutation lock
+ * held if the caller holds it: a mutating handler must wrap the call in
+ * shell_mutation_pause/resume (#1103). */
 int  shell_getc(void);
 
 /* Non-blocking read. Returns a byte (0..255) or -1 if no data is
@@ -256,7 +261,8 @@ int shell_read_command(const char *prompt, char *buf, int max_len);
  * ring or the upload would skip them.
  *
  * Returns the number of bytes read (1..max_len) on success, or
- * a negative value on closed/error backend.
+ * a negative value on closed/error backend. Releases the shell mutation
+ * lock while it waits on the backend, if the caller holds it (#1103).
  */
 int shell_session_read_raw(char *dst, int max_len);
 

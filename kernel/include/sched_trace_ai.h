@@ -68,7 +68,7 @@ struct __attribute__((packed)) sched_trace_ai_record {
         struct __attribute__((packed)) {
             char     policy_name[16];   /* offset 16, null-padded */
             int32_t  action_core;       /* offset 32, CPU chosen by assign_cpu */
-            int32_t  action_priority;   /* offset 36, effective_priority at decision time */
+            int32_t  action_priority;   /* offset 36, see docs/sched-trace-format.md */
             int32_t  action_preempt;    /* offset 40, reserved for future preempt-action field */
             uint32_t _decision_pad;     /* offset 44 */
             float    state[SCHED_TRACE_AI_STATE_DIM]; /* offset 48..480 — 432 B */
