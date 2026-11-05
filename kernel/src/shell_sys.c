@@ -11611,7 +11611,8 @@ int cmd_csidiag(int argc, char *argv[])
  *
  * Temperatures through BPMP (MRQ_THERMAL) and the fan PWM state, to
  * tell a thermal shutdown apart from a hang on a board with no Linux
- * thermal / pwm-fan driver behind it (UEFI-direct boot). */
+ * thermal driver behind it (UEFI-direct boot). Fan control itself is
+ * kernel/drivers/tegra_fan.c (#1105). */
 static const struct {
     const char *name;
     uint32_t zone;

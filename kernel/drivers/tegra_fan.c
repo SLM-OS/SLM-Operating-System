@@ -16,7 +16,6 @@
 #include "smp.h"
 #include "spinlock.h"
 #include "task.h"
-#include "uart.h"
 
 /* The tachometer has no 2 MB block of its own in vmm.c: it is reached
  * through the FUSE block's mapping. Moving either breaks the other. */
@@ -181,9 +180,7 @@ int tegra_fan_init(void)
 #if defined(ENABLE_BOOT_TESTS)
     /* No control task in test kernels: a fixed level, unless the
      * safety rules force 255. */
-    start = tegra_fan_ctl_forced(&g_fan.ctl) != 0u ? TEGRA_FAN_MAX_PWM : TEGRA_FAN_FIXED_PWM;
-    g_fan.ctl.pwm = start;
-    g_fan.ctl.target = start;
+    start = tegra_fan_ctl_auto(&g_fan.ctl, true);
 #endif
     fan_program_locked(start);
     g_fan.ready = true;

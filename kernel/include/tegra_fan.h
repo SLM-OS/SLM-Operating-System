@@ -240,10 +240,11 @@ static inline uint32_t tegra_fan_ctl_manual(struct tegra_fan_ctl *c, uint32_t le
 }
 
 /* Shell: back to the curve. The target is set at once and the next
- * poll ramps toward it; with no control task to do that (`no_task`,
- * test kernels) the level is set directly: the forced level, or
- * TEGRA_FAN_FIXED_PWM, since nothing refreshes the temperature there.
- * Returns the level to apply. */
+ * poll ramps toward it; with no control task to do that (`no_task`:
+ * test kernels, or task creation failed) the level is set directly:
+ * the forced level, else TEGRA_FAN_FIXED_PWM or the last reading's
+ * curve level if higher (nothing refreshes the temperature there, so
+ * never go below what it last asked for). Returns the level to apply. */
 static inline uint32_t tegra_fan_ctl_auto(struct tegra_fan_ctl *c, bool no_task)
 {
     uint32_t forced = tegra_fan_ctl_forced(c);
@@ -252,9 +253,15 @@ static inline uint32_t tegra_fan_ctl_auto(struct tegra_fan_ctl *c, bool no_task)
         c->target = forced;
         c->pwm = forced;
     } else if (no_task) {
-        c->target = TEGRA_FAN_FIXED_PWM;
-        c->pwm = TEGRA_FAN_FIXED_PWM;
+        uint32_t level = TEGRA_FAN_FIXED_PWM;
+        if (c->temp_ok && tegra_fan_curve_pwm(c->temp_mc) > level) {
+            level = tegra_fan_curve_pwm(c->temp_mc);
+        }
+        c->target = level;
+        c->pwm = level;
     } else if (c->temp_ok) {
+        /* Always true here: temp_ok is only false with the temperature
+         * lost, which `forced` covers. Kept as a guard. */
         c->target = tegra_fan_curve_pwm(c->temp_mc);
     }
     return c->pwm;
@@ -283,7 +290,10 @@ struct tegra_fan_status {
 int tegra_fan_init(void);
 
 /* Start the 2 s control task, pinned to the highest online CPU other
- * than CPU 0 so the fan keeps being driven if CPU 0 wedges (#1093). It
+ * than CPU 0 so the fan keeps being driven if CPU 0 wedges (#1093).
+ * That holds with per-CPU timer ticks (JETSON_HW_TICK=ON, the default);
+ * in the cooperative fallback the task's 2 s wake-ups come from CPU 0's
+ * ticks, so a wedged CPU 0 leaves the fan at its last level. It
  * prints only when the temperature is lost or comes back; BPMP
  * timeouts also show as the MRQ layer's WARNs, one per retry (every
  * 16 s once the temperature is lost). */

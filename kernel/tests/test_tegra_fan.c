@@ -108,6 +108,9 @@ static void test_ctl_init_start_level(void)
     /* Curve level below the kickstart: start at 64, target stays. */
     TEST_ASSERT_EQUAL_UINT32(64, tegra_fan_ctl_init(&c, 0, 40000));
     TEST_ASSERT_EQUAL_UINT32(24, c.target);
+    /* >= 95 C at boot: full speed, curve target 255. */
+    TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_init(&c, 0, 96000));
+    TEST_ASSERT_EQUAL_UINT32(255, c.target);
     /* Cool board: off. Unknown temperature: full speed. */
     TEST_ASSERT_EQUAL_UINT32(0, tegra_fan_ctl_init(&c, 0, 30000));
     TEST_ASSERT_EQUAL_UINT32(255, tegra_fan_ctl_init(&c, -4, 0));
@@ -221,9 +224,14 @@ static void test_ctl_auto(void)
     TEST_ASSERT_FALSE(c.manual);
     TEST_ASSERT_EQUAL_UINT32(70, c.target);
     TEST_ASSERT_EQUAL_UINT32(190, tegra_fan_ctl_step(&c, 0, 49500));
-    /* Without it (test kernels): the fixed level, not a stale curve. */
+    /* Without it (test kernels): the fixed level, not a stale curve, */
     tegra_fan_ctl_manual(&c, 0);
     TEST_ASSERT_EQUAL_UINT32(TEGRA_FAN_FIXED_PWM, tegra_fan_ctl_auto(&c, true));
+    /* unless the last reading asked for more. */
+    tegra_fan_ctl_init(&c, 0, 80000);                    /* curve 187 */
+    tegra_fan_ctl_manual(&c, 0);
+    TEST_ASSERT_EQUAL_UINT32(187, tegra_fan_ctl_auto(&c, true));
+    tegra_fan_ctl_init(&c, 0, 49500);
     /* Temperature lost: auto goes to 255 at once, either way. */
     tegra_fan_ctl_manual(&c, 0);
     tegra_fan_ctl_step(&c, -4, 0);
