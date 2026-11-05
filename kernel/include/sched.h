@@ -271,7 +271,9 @@ int sched_set_task_affinity(struct task *task, uint32_t cpu);
  * 1 keep, 2 raise) moves the task one kernel priority level from its
  * current effective priority. The result is stored in
  * task->ai_priority and used as the base of later effective-priority
- * recomputes until the task's next decision.
+ * recomputes until the task's next decision. A decision taken while the
+ * task runs on a priority borrowed through a pi_mutex (#1103) sets no
+ * level.
  *
  * sched_ai_step_priority: pure level step, exposed for tests.
  * sched_ai_apply_priority_action: called by the AI policies' assign_cpu.
