@@ -225,6 +225,7 @@
 #define SCTLR_I             (1UL << 12)     /* Instruction cache enable */
 #define SCTLR_WXN           (1UL << 19)     /* Write implies XN */
 #define SCTLR_SPAN          (1UL << 23)     /* 1 = leave PSTATE.PAN alone on exception; 0 = set PAN on entry */
+#define PSTATE_PAN          (1UL << 22)     /* PAN bit, as read through the PAN register */
 
 /*
  * ==========================================================================

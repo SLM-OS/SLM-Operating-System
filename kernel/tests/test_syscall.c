@@ -706,7 +706,7 @@ static void test_kernel_pan_not_armed(void)
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
     __asm__ volatile("mrs %0, pan" : "=r"(pan));
     TEST_ASSERT_TRUE_MESSAGE((sctlr & SCTLR_SPAN) != 0, "SCTLR.SPAN must be 1");
-    TEST_ASSERT_TRUE_MESSAGE((pan & (1UL << 22)) == 0, "PSTATE.PAN must be 0");
+    TEST_ASSERT_TRUE_MESSAGE((pan & PSTATE_PAN) == 0, "PSTATE.PAN must be 0");
 }
 
 /* Test (mmap): a page mapped via sys_mmap shows up in the per-task
