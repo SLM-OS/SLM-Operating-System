@@ -178,7 +178,7 @@ def load_database(db_dir, root):
 
 
 def unused_defines(required):
-    """Return the macros no tracked source file mentions, such as after a rename."""
+    """Return the macros no tracked C file mentions, such as after a rename."""
     return [macro for macro in sorted(set(required))
             if subprocess.run(["git", "grep", "-qw", macro, "--", "*.c", "*.h"],
                               capture_output=True).returncode != 0]
@@ -326,7 +326,7 @@ def main():
                   "under it wouldn't be checked", file=sys.stderr)
             return 2
     for macro in unused_defines(m for ms in required.values() for m in ms):
-        print(f"check-braces: no source file mentions {macro}; update the required "
+        print(f"check-braces: no C file mentions {macro}; update the required "
               "defines in the Makefile", file=sys.stderr)
         return 2
     if not options.all and not changed:

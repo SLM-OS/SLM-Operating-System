@@ -438,7 +438,7 @@ expect "required define that is present passes" 0 "0 violation"
 EXTRA_ARGS=(--require-define db=RENAMED_OPTION)
 FLAGS="-DRENAMED_OPTION=1"
 write_db kernel/src/a.c
-expect "required define no source mentions fails" 2 "no source file mentions RENAMED_OPTION"
+expect "required define no source mentions fails" 2 "no C file mentions RENAMED_OPTION"
 FLAGS="-DWANTED_OPTION=1"
 write_db kernel/src/a.c
 EXTRA_ARGS=(--require-define db=DROPPED_OPTION)
