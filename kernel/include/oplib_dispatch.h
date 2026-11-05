@@ -64,22 +64,14 @@ struct slm_oplib_dispatch_prep {
  * kernel/include/gpu_handoff.h::SLM_GPU_TIER_* and
  * enum slm_gpu_dtype). For RMSNORM today, pass tier=SIMT, dtype=FP16.
  *
- * `inst_block_phys` is the GPU channel whose page tables receive
- * the cbuf mapping. Caller obtains it from
- * `ga10b_bringup_handoff()->inst_block_phys` (real handoff) or
- * `ga10b_gmmu_discover_inst_block_phys()` (FECS fallback).
- *
  * Returns:
  *   0 on success.
- *   -1 on lookup miss, GMMU alloc failure, builder mismatch, or
+ *   -1 on lookup miss, no staged cbuf, builder mismatch, or
  *      Jetson-only-platform stub fallback.
  *
- * The cbuf allocated here is owned by the caller after success —
- * it is not auto-freed when the dispatch completes. Future
- * pooled-cbuf reuse will land alongside the submit-side wiring.
+ * Writes the shared cbuf page, so call it under g_gpu_dispatch_lock.
  */
-int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
-                                uint32_t op_kind,
+int slm_oplib_prepare_dispatch(uint32_t op_kind,
                                 uint32_t tier,
                                 uint32_t dtype,
                                 const struct operator_dispatch_args *args,
@@ -111,7 +103,6 @@ struct ga10b_bringup;
  * effects.
  */
 int slm_oplib_dispatch(struct ga10b_bringup *b,
-                       uint64_t inst_block_phys,
                        uint32_t op_kind,
                        uint32_t tier,
                        uint32_t dtype,

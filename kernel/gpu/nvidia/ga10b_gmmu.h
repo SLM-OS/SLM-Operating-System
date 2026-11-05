@@ -569,9 +569,9 @@ uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
  *
  * Returns 0 on success, -1 on FIFO timeout.
  *
- * Single-threaded today — the shell task is the only caller path.
- * Add a spinlock when the GMMU writer becomes accessible to
- * concurrent contexts (e.g. the runtime model loader if it lands a
+ * Not safe to run concurrently with itself. Callers are shell verbs and
+ * staging, not the dispatch paths. Add a spinlock when the GMMU writer
+ * becomes accessible to concurrent contexts (e.g. the runtime model loader if it lands a
  * worker thread).
  */
 int ga10b_gmmu_tlb_invalidate(uint64_t pdb_phys);

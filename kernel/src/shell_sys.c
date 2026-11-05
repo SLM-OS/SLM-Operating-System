@@ -5607,41 +5607,403 @@ static uint32_t smoke_dtype_for(uint32_t op_kind)
     }
 }
 
-/* Dispatch an operator from the shell under the GPU dispatch lock. The W-series
- * FFIs and the sched and eviction consumers mutate the same channel state
- * (GPFIFO, pushbuffer, QMD pool, semaphore) and can swap g_handoff under this
- * lock, and they run on other CPUs while a shell verb is running (#1111). IRQs stay
- * masked for the whole dispatch, as they do for those callers, so the verbs print
- * and read back outside it. scripts/check-oplib-shell-lock.sh keeps this the only
- * dispatch in this file. */
-struct oplib_shell_dispatch {
-    struct ga10b_bringup *b;
-    uint64_t inst_block_phys;
-    uint32_t op_kind;
-    uint32_t dtype;
-    const struct operator_dispatch_args *args;
-};
-
-static int oplib_shell_dispatch_cb(void *arg)
+/* ---------------------------------------------------------------------
+ * Shell verbs that use the GPU channel (#1111)
+ *
+ * The W-series FFIs and the sched and eviction consumers use the same
+ * GPFIFO, pushbuffer, QMD pool, semaphore, cbuf and pool scratch slots
+ * under g_gpu_dispatch_lock, on other CPUs, while a shell verb runs. So
+ * each verb below stages its buffers, submits and reads back inside one
+ * *_locked_cb run by slm_gpu_call_locked, and prints only after it
+ * returns: IRQs stay masked for the whole callback. Scratch fills are
+ * capped at one 64 KB pool slot, which bounds them.
+ *
+ * scripts/check-gpu-shell-lock.py enforces this for shell_sys.c.
+ * ------------------------------------------------------------------- */
+static int gpu_submit_locked_cb(void *arg)
 {
-    const struct oplib_shell_dispatch *d = arg;
-    return slm_oplib_dispatch(d->b, d->inst_block_phys, d->op_kind,
-                              SLM_GPU_TIER_SIMT, d->dtype, d->args);
+    return ga10b_bringup_smoke_test(arg);
 }
 
-static int oplib_shell_dispatch_locked(struct ga10b_bringup *b,
-                                       uint64_t inst_block_phys,
-                                       uint32_t op_kind, uint32_t dtype,
-                                       const struct operator_dispatch_args *args)
+static int gpu_submit_compute_locked_cb(void *arg)
 {
-    struct oplib_shell_dispatch d = {
-        .b = b,
-        .inst_block_phys = inst_block_phys,
-        .op_kind = op_kind,
-        .dtype = dtype,
-        .args = args,
+    return ga10b_bringup_smoke_test_compute(arg);
+}
+
+static int gpu_launch_kernel_locked_cb(void *arg)
+{
+    return ga10b_bringup_launch_kernel(arg);
+}
+
+struct gpu_run_mnist {
+    struct ga10b_bringup *b;
+    uint8_t logits[40];
+    int launch_rc;
+    int read_n;
+};
+
+static int gpu_run_mnist_locked_cb(void *arg)
+{
+    struct gpu_run_mnist *r = arg;
+    r->read_n = -1;
+    r->launch_rc = ga10b_bringup_launch_kernel(r->b);
+    if (r->launch_rc < 0) {
+        return r->launch_rc;
+    }
+    r->read_n = ga10b_bringup_read_pipeline_output(r->b, r->logits,
+                                                   sizeof(r->logits));
+    return r->read_n < 0 ? -1 : 0;
+}
+
+struct oplib_prepare_run {
+    const struct operator_dispatch_args *args;
+    struct slm_oplib_dispatch_prep prep;
+};
+
+static int oplib_prepare_rmsnorm_locked_cb(void *arg)
+{
+    struct oplib_prepare_run *r = arg;
+    return slm_oplib_prepare_dispatch(SLM_GPU_OP_RMSNORM, SLM_GPU_TIER_SIMT,
+                                      SLM_GPU_DTYPE_FP16, r->args, &r->prep);
+}
+
+/* Samples of a dispatched FP16 buffer, for printing after the lock. */
+#define OPLIB_HEAD_WORDS 8u
+
+struct oplib_rmsnorm_run {
+    struct ga10b_bringup *b;
+    const struct operator_dispatch_args *args;
+    volatile uint16_t *in;
+    volatile uint16_t *gamma;
+    volatile uint16_t *out;
+    uint32_t in_pages;
+    uint32_t gamma_pages;
+    uint32_t out_pages;
+    uint32_t n;
+    uint64_t count;
+    uint16_t head[OPLIB_HEAD_WORDS];
+    uint16_t tail;
+};
+
+static int oplib_rmsnorm_locked_cb(void *arg)
+{
+    struct oplib_rmsnorm_run *r = arg;
+
+    /* Alternating +1.0/-1.0 FP16. After RMSNorm with gamma=1.0 the
+     * output is also +-1.0, since sqrt(mean(1^2)) == 1.0. */
+    for (uint64_t i = 0; i < r->count; i++) {
+        r->in[i] = (i & 1) ? 0xBC00u : 0x3C00u;
+    }
+    cache_clean_range((void *)r->in, r->in_pages * 4096u);
+    for (uint32_t i = 0; i < r->n; i++) {
+        r->gamma[i] = 0x3C00u;     /* FP16 +1.0 */
+    }
+    cache_clean_range((void *)r->gamma, r->gamma_pages * 4096u);
+    /* Sentinel: shows whether the GPU wrote anything at all. */
+    for (uint64_t i = 0; i < r->count; i++) {
+        r->out[i] = 0xCAFEu;
+    }
+    cache_clean_range((void *)r->out, r->out_pages * 4096u);
+
+    int rc = slm_oplib_dispatch(r->b, SLM_GPU_OP_RMSNORM, SLM_GPU_TIER_SIMT,
+                                SLM_GPU_DTYPE_FP16, r->args);
+    if (rc < 0) {
+        return rc;
+    }
+
+    /* Invalidate first so the CPU sees what the GPU wrote. */
+    cache_invalidate_range((void *)r->out, r->out_pages * 4096u);
+    for (uint32_t i = 0; i < OPLIB_HEAD_WORDS && i < r->count; i++) {
+        r->head[i] = r->out[i];
+    }
+    r->tail = r->out[r->count - 1u];
+    return 0;
+}
+
+struct oplib_rope_run {
+    struct ga10b_bringup *b;
+    uint32_t batch;
+    uint32_t num_heads;
+    uint32_t head_dim;
+    uint64_t vec_count;
+    uint64_t vec_bytes;
+    uint64_t pos_bytes;
+    uint64_t cs_bytes;
+    uint64_t vec_va;
+    uint64_t pos_va;
+    uint64_t cs_va;
+    bool no_pool;
+    uint16_t head[OPLIB_HEAD_WORDS];
+    uint16_t tail;
+    bool mismatch;
+    uint64_t bad_index;
+    uint16_t bad_value;
+    uint16_t bad_expect;
+};
+
+static int oplib_rope_locked_cb(void *arg)
+{
+    struct oplib_rope_run *r = arg;
+    uint64_t base_phys = 0, base_gva = 0;
+
+    if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+        r->no_pool = true;
+        return -1;
+    }
+    /* Same slot layout as dispatch-rmsnorm. */
+    uint64_t vec_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t pos_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t cs_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    r->vec_va = base_gva + OPLIB_POOL_OFF_SCRATCH0;
+    r->pos_va = base_gva + OPLIB_POOL_OFF_SCRATCH1;
+    r->cs_va  = base_gva + OPLIB_POOL_OFF_SCRATCH2;
+
+    /* Sentinel first, then the real input, so any byte the GPU doesn't
+     * touch is still distinguishable from a stale read. Identity
+     * rotation should leave the input pattern intact. */
+    volatile uint16_t *vec_p = (volatile uint16_t *)(uintptr_t)vec_phys;
+    for (uint64_t i = 0; i < r->vec_count; i++) {
+        vec_p[i] = 0xCAFEu;
+    }
+    cache_clean_range((void *)(uintptr_t)vec_phys,
+                      (size_t)((r->vec_bytes + 4095u) & ~4095ull));
+    for (uint64_t i = 0; i < r->vec_count; i++) {
+        vec_p[i] = (i & 1u) ? 0xBC00u : 0x3C00u;
+    }
+    cache_clean_range((void *)(uintptr_t)vec_phys,
+                      (size_t)((r->vec_bytes + 4095u) & ~4095ull));
+
+    /* positions[i] = 0 for every token. */
+    volatile uint32_t *pos_p = (volatile uint32_t *)(uintptr_t)pos_phys;
+    for (uint32_t i = 0; i < r->batch; i++) {
+        pos_p[i] = 0u;
+    }
+    cache_clean_range((void *)(uintptr_t)pos_phys,
+                      (size_t)((r->pos_bytes + 4095u) & ~4095ull));
+
+    /* cos_sin[2i]   = 1.0f (cos 0)  -> IEEE 0x3F800000
+     * cos_sin[2i+1] = 0.0f (sin 0)  -> IEEE 0x00000000 */
+    volatile uint32_t *cs_p = (volatile uint32_t *)(uintptr_t)cs_phys;
+    for (uint32_t i = 0; i < r->head_dim; i++) {
+        cs_p[i * 2u]      = 0x3F800000u;
+        cs_p[i * 2u + 1u] = 0x00000000u;
+    }
+    cache_clean_range((void *)(uintptr_t)cs_phys,
+                      (size_t)((r->cs_bytes + 4095u) & ~4095ull));
+
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_ROPE,
+        .u.rope = {
+            .vec_gpu_va       = r->vec_va,
+            .positions_gpu_va = r->pos_va,
+            .cos_sin_gpu_va   = r->cs_va,
+            .batch            = r->batch,
+            .num_heads        = r->num_heads,
+            .head_dim         = r->head_dim,
+        },
     };
-    return slm_gpu_call_locked(oplib_shell_dispatch_cb, &d);
+    int rc = slm_oplib_dispatch(r->b, SLM_GPU_OP_ROPE, SLM_GPU_TIER_SIMT,
+                                SLM_GPU_DTYPE_FP16, &args);
+    if (rc < 0) {
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)vec_phys,
+                           (size_t)((r->vec_bytes + 4095u) & ~4095ull));
+    for (uint32_t i = 0; i < OPLIB_HEAD_WORDS && i < r->vec_count; i++) {
+        r->head[i] = vec_p[i];
+    }
+    r->tail = vec_p[r->vec_count - 1u];
+    /* Identity-rotation check: every element should still be the
+     * original alternating +-1.0 FP16 pattern. */
+    for (uint64_t i = 0; i < r->vec_count; i++) {
+        uint16_t expect = (i & 1u) ? 0xBC00u : 0x3C00u;
+        if (vec_p[i] != expect) {
+            r->mismatch = true;
+            r->bad_index = i;
+            r->bad_value = vec_p[i];
+            r->bad_expect = expect;
+            break;
+        }
+    }
+    return 0;
+}
+
+#define OPLIB_SMOKE_DUMP_WORDS 16u
+
+struct oplib_smoke_run {
+    struct ga10b_bringup *b;
+    uint32_t op_kind;
+    bool no_pool;
+    bool unsupported;
+    uint64_t out_bytes;
+    bool mismatch;
+    uint64_t bad_index;
+    uint8_t bad_byte;
+    uint16_t dump[OPLIB_SMOKE_DUMP_WORDS];
+    uint32_t dump_words;
+};
+
+static int oplib_smoke_locked_cb(void *arg)
+{
+    struct oplib_smoke_run *r = arg;
+    uint32_t op_kind = r->op_kind;
+
+    uint64_t base_phys = 0, base_gva = 0;
+    if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+        r->no_pool = true;
+        return -1;
+    }
+
+    /* Per-op scratch sizes are kept small so every op fits in a single
+     * 64 KB slot per buffer: enough work to exercise dispatch, not
+     * enough to need real-shape allocations. */
+    uint64_t out_bytes = 0;
+    uint64_t out_phys  = 0;
+    uint64_t out_va    = 0;
+    struct operator_dispatch_args args;
+    memset(&args, 0, sizeof(args));
+    args.op_kind = op_kind;
+
+    switch (op_kind) {
+    case SLM_GPU_OP_RMSNORM:
+        smoke_fixture_rmsnorm(base_phys, base_gva, &args,
+                              &out_phys, &out_va, &out_bytes);
+        break;
+    case SLM_GPU_OP_EMBEDDING:
+        smoke_fixture_embedding(base_phys, base_gva, &args,
+                                &out_phys, &out_va, &out_bytes);
+        break;
+    case SLM_GPU_OP_Q4K_DEQUANT:
+        smoke_fixture_q4k_dequant(base_phys, base_gva, &args,
+                                  &out_phys, &out_va, &out_bytes);
+        break;
+    case SLM_GPU_OP_SWIGLU:
+        smoke_fixture_swiglu(base_phys, base_gva, &args,
+                             &out_phys, &out_va, &out_bytes);
+        break;
+    case SLM_GPU_OP_Q4K_DOT:
+        smoke_fixture_q4k_dot(base_phys, base_gva, &args,
+                              &out_phys, &out_va, &out_bytes);
+        break;
+    case SLM_GPU_OP_GQA_ATTN:
+        smoke_fixture_gqa_attn(base_phys, base_gva, &args,
+                               &out_phys, &out_va, &out_bytes);
+        break;
+    default:
+        r->unsupported = true;
+        return -1;
+    }
+    (void)out_va;     /* set by helper for completeness; the dispatch
+                       * path reads it from args.u.<op>.out_gpu_va. */
+    r->out_bytes = out_bytes;
+
+    /* Pre-fill the output with the 0xCAFE sentinel. out_bytes is the
+     * kernel's actual write size; round up to a 4 KB clean unit. */
+    volatile uint16_t *out_p = (volatile uint16_t *)(uintptr_t)out_phys;
+    uint64_t out_words = (out_bytes + 1u) / 2u;
+    for (uint64_t i = 0; i < out_words; i++) {
+        out_p[i] = 0xCAFEu;
+    }
+    cache_clean_range((void *)(uintptr_t)out_phys,
+                      (size_t)((out_bytes + 4095u) & ~4095ull));
+
+    int rc = slm_oplib_dispatch(r->b, op_kind, SLM_GPU_TIER_SIMT,
+                                smoke_dtype_for(op_kind), &args);
+    if (rc < 0) {
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)out_phys,
+                           (size_t)((out_bytes + 4095u) & ~4095ull));
+
+    /* Every output byte must be zero, treating output as uint8_t to
+     * cover Q4K_DOT's FP32 case alongside the FP16 ops. On a mismatch,
+     * keep the first output words so the failure mode is visible:
+     * sentinel intact, partial write or unexpected non-zero output. */
+    volatile uint8_t *out_b = (volatile uint8_t *)(uintptr_t)out_phys;
+    for (uint64_t i = 0; i < out_bytes; i++) {
+        if (out_b[i] != 0u) {
+            r->mismatch = true;
+            r->bad_index = i;
+            r->bad_byte = out_b[i];
+            r->dump_words = (uint32_t)(out_bytes / 2u);
+            if (r->dump_words > OPLIB_SMOKE_DUMP_WORDS) {
+                r->dump_words = OPLIB_SMOKE_DUMP_WORDS;
+            }
+            for (uint32_t w = 0; w < r->dump_words; w++) {
+                r->dump[w] = out_p[w];
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+/* Up to 4 KB, the verbs' own limit. Static because the shell stack
+ * needn't hold it and only the serial or one telnet shell runs it at a
+ * time; a racing shell would only garble its own readout. */
+static uint8_t g_ce_shell_readback[4096];
+
+struct ce_smoke_run {
+    struct ga10b_bringup *b;
+    uint64_t src_phys;
+    uint64_t dst_phys;
+    uint64_t src_gva;
+    uint64_t dst_gva;
+    uint32_t bytes;
+};
+
+static int ce_smoke_locked_cb(void *arg)
+{
+    struct ce_smoke_run *r = arg;
+    uint8_t *src = (uint8_t *)(uintptr_t)r->src_phys;
+    uint8_t *dst = (uint8_t *)(uintptr_t)r->dst_phys;
+    size_t flush_bytes = (size_t)((r->bytes + 4095u) & ~4095u);
+
+    /* Distinguishable pattern + zero destination so a stale read can't
+     * pose as success. */
+    for (uint32_t i = 0; i < r->bytes; i++) {
+        src[i] = (uint8_t)(0xA5u ^ (i & 0xFFu));
+    }
+    memset(dst, 0, (size_t)r->bytes);
+    cache_clean_range(src, flush_bytes);
+    cache_clean_range(dst, flush_bytes);
+
+    int rc = ga10b_ce_memcpy(r->b, r->src_gva, r->dst_gva, r->bytes);
+    if (rc != 0) {
+        return rc;
+    }
+    cache_invalidate_range(dst, flush_bytes);
+    memcpy(g_ce_shell_readback, dst, (size_t)r->bytes);
+    return 0;
+}
+
+struct weights_readback_run {
+    struct ga10b_bringup *b;
+    uint64_t rb_phys;
+    uint64_t rb_gva;
+    uint64_t gpu_va;
+    uint32_t bytes;
+};
+
+static int weights_readback_locked_cb(void *arg)
+{
+    struct weights_readback_run *r = arg;
+    size_t flush_bytes = (size_t)((r->bytes + 4095u) & ~4095ull);
+
+    /* Zero the destination before the CE so a stale read doesn't
+     * masquerade as success. */
+    memset((void *)(uintptr_t)r->rb_phys, 0, (size_t)r->bytes);
+    cache_clean_range((void *)(uintptr_t)r->rb_phys, flush_bytes);
+    int rc = ga10b_ce_memcpy(r->b, r->gpu_va, r->rb_gva, r->bytes);
+    if (rc != 0) {
+        return rc;
+    }
+    cache_invalidate_range((void *)(uintptr_t)r->rb_phys, flush_bytes);
+    memcpy(g_ce_shell_readback, (void *)(uintptr_t)r->rb_phys,
+           (size_t)r->bytes);
+    return 0;
 }
 
 /* `cmd_nvgpu`'s long-lived bringup state. Hoisted from a function-
@@ -5903,7 +6265,7 @@ int cmd_nvgpu(int argc, char *argv[])
     }
     if (strcmp(argv[1], "submit") == 0) {
         /* Phase 7: pushbuffer smoke test. */
-        int rc = ga10b_bringup_smoke_test(b_p);
+        int rc = slm_gpu_call_locked(gpu_submit_locked_cb, b_p);
         shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
@@ -5976,7 +6338,7 @@ int cmd_nvgpu(int argc, char *argv[])
         /* Phase 7 (compute): COMPUTE_B SEMAPHORE_RELEASE smoke test.
          * Requires `nvgpu inherit` + `nvgpu channel` first (same as
          * the host-family `submit`). Unblocked by PR #295. */
-        int rc = ga10b_bringup_smoke_test_compute(b_p);
+        int rc = slm_gpu_call_locked(gpu_submit_compute_locked_cb, b_p);
         shell_printf("submit-compute: rc=%d, state=%d\r\n",
                      rc, (int)b_p->state);
         return rc;
@@ -5985,7 +6347,7 @@ int cmd_nvgpu(int argc, char *argv[])
         /* Phase 8: launch a pre-uploaded compute kernel from a v3
          * handoff (shader + QMD + cbuf + output pre-populated by
          * scripts/gpu-kernel-launch.c --preserve-for-kexec). */
-        int rc = ga10b_bringup_launch_kernel(b_p);
+        int rc = slm_gpu_call_locked(gpu_launch_kernel_locked_cb, b_p);
         shell_printf("launch-kernel: rc=%d, state=%d\r\n",
                      rc, (int)b_p->state);
         return rc;
@@ -6001,19 +6363,18 @@ int cmd_nvgpu(int argc, char *argv[])
          * patterns — the kernel target compiles with
          * -mgeneral-regs-only and can't format fp32 as decimal.
          * Use `slm.gpu_run_mnist()` from Lua for decimal output. */
-        int rc = ga10b_bringup_launch_kernel(b_p);
-        if (rc < 0) {
-            shell_printf("run-mnist: launch failed rc=%d\r\n", rc);
-            return rc;
+        struct gpu_run_mnist run = { .b = b_p };
+        (void)slm_gpu_call_locked(gpu_run_mnist_locked_cb, &run);
+        if (run.launch_rc < 0) {
+            shell_printf("run-mnist: launch failed rc=%d\r\n", run.launch_rc);
+            return run.launch_rc;
         }
-        uint8_t logits_bytes[40];
-        int n = ga10b_bringup_read_pipeline_output(b_p, logits_bytes,
-                                                    sizeof(logits_bytes));
-        if (n < 0) {
+        if (run.read_n < 0) {
             shell_printf("run-mnist: failed to read logits "
                          "(no v5 handoff?)\r\n");
             return -1;
         }
+        const uint8_t *logits_bytes = run.logits;
         int argmax = slm_fp32_argmax(logits_bytes, 10u);
         shell_puts("run-mnist: logits (fp32 bit patterns):\r\n");
         for (int i = 0; i < 10; i++) {
@@ -6530,12 +6891,9 @@ oplib_stage_call:
                 },
             };
 
-            struct slm_oplib_dispatch_prep prep;
-            rc = slm_oplib_prepare_dispatch(inst_phys,
-                                             SLM_GPU_OP_RMSNORM,
-                                             SLM_GPU_TIER_SIMT,
-                                             SLM_GPU_DTYPE_FP16,
-                                             &args, &prep);
+            /* Writes the shared cbuf page. */
+            struct oplib_prepare_run prepare = { .args = &args };
+            rc = slm_gpu_call_locked(oplib_prepare_rmsnorm_locked_cb, &prepare);
             if (rc < 0) {
                 shell_printf("oplib prep-rmsnorm: prepare rc=%d "
                              "(did you `nvgpu oplib stage` first?)\r\n", rc);
@@ -6583,6 +6941,19 @@ oplib_stage_call:
             uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
             uint64_t gam_bytes = (uint64_t)n * 2u;
             uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
+            /* The fills run with IRQs masked, so cap them at one slot on
+             * every path. */
+            if (in_bytes  > OPLIB_POOL_SLOT_BYTES ||
+                gam_bytes > OPLIB_POOL_SLOT_BYTES ||
+                out_bytes > OPLIB_POOL_SLOT_BYTES) {
+                shell_printf("dispatch-rmsnorm: scratch slot too small "
+                             "(in=%llu gam=%llu out=%llu vs %u B)\r\n",
+                             (unsigned long long)in_bytes,
+                             (unsigned long long)gam_bytes,
+                             (unsigned long long)out_bytes,
+                             (unsigned)OPLIB_POOL_SLOT_BYTES);
+                return -1;
+            }
             uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
             uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
             uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
@@ -6633,17 +7004,6 @@ oplib_stage_call:
                 gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
                 out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
                 out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                if (in_bytes  > OPLIB_POOL_SLOT_BYTES ||
-                    gam_bytes > OPLIB_POOL_SLOT_BYTES ||
-                    out_bytes > OPLIB_POOL_SLOT_BYTES) {
-                    shell_printf("dispatch-rmsnorm: scratch slot too small "
-                                 "(in=%llu gam=%llu out=%llu vs %u B)\r\n",
-                                 (unsigned long long)in_bytes,
-                                 (unsigned long long)gam_bytes,
-                                 (unsigned long long)out_bytes,
-                                 (unsigned)OPLIB_POOL_SLOT_BYTES);
-                    return -1;
-                }
                 in_cpu  = (void *)(uintptr_t)in_phys;
                 gam_cpu = (void *)(uintptr_t)gam_phys;
                 out_cpu = (void *)(uintptr_t)out_phys;
@@ -6684,30 +7044,7 @@ oplib_stage_call:
                 }
             }
 
-            /* Fill input with alternating +1.0/-1.0 FP16 (0x3C00 /
-             * 0xBC00). After RMSNorm with gamma=1.0, the output
-             * should also be ±1.0 for each element since
-             * sqrt(mean(1^2)) == 1.0 and rms_inv = 1.0. */
-            volatile uint16_t *in_p = (volatile uint16_t *)in_cpu;
             uint64_t in_count = (uint64_t)n_rows * n;
-            for (uint64_t i = 0; i < in_count; i++) {
-                in_p[i] = (i & 1) ? 0xBC00u : 0x3C00u;
-            }
-            cache_clean_range(in_cpu, in_pages * 4096u);
-
-            volatile uint16_t *gam_p = (volatile uint16_t *)gam_cpu;
-            for (uint32_t i = 0; i < n; i++) {
-                gam_p[i] = 0x3C00u;     /* FP16 +1.0 */
-            }
-            cache_clean_range(gam_cpu, gam_pages * 4096u);
-
-            /* Pre-fill output with a sentinel so we can tell if
-             * the GPU wrote anything at all. */
-            volatile uint16_t *out_p = (volatile uint16_t *)out_cpu;
-            for (uint64_t i = 0; i < in_count; i++) {
-                out_p[i] = 0xCAFEu;
-            }
-            cache_clean_range(out_cpu, out_pages * 4096u);
 
             shell_printf("dispatch-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx "
                          "(n_rows=%u, n=%u)\r\n",
@@ -6727,35 +7064,40 @@ oplib_stage_call:
                 },
             };
 
-            rc = oplib_shell_dispatch_locked(b_p, inst_phys,
-                                             SLM_GPU_OP_RMSNORM,
-                                             SLM_GPU_DTYPE_FP16, &args);
+            struct oplib_rmsnorm_run run = {
+                .b = b_p,
+                .args = &args,
+                .in = (volatile uint16_t *)in_cpu,
+                .gamma = (volatile uint16_t *)gam_cpu,
+                .out = (volatile uint16_t *)out_cpu,
+                .in_pages = in_pages,
+                .gamma_pages = gam_pages,
+                .out_pages = out_pages,
+                .n = n,
+                .count = in_count,
+            };
+            rc = slm_gpu_call_locked(oplib_rmsnorm_locked_cb, &run);
             if (rc < 0) {
                 shell_printf("dispatch-rmsnorm: slm_oplib_dispatch rc=%d\r\n", rc);
                 return rc;
             }
 
-            /* Read back output. Cache-invalidate first so the CPU
-             * sees what the GPU wrote (not stale L1). */
-            cache_invalidate_range(out_cpu, out_pages * 4096u);
-
-            /* Print the first 8 output halves + a sample from the
-             * tail. With sentinel-fill above, any 0xCAFE means the
-             * GPU didn't write that slot. */
+            /* The first 8 output halves + a sample from the tail. With
+             * the sentinel fill, any 0xCAFE means the GPU didn't write
+             * that slot. */
             shell_puts("dispatch-rmsnorm: output[0..7] = ");
-            for (int i = 0; i < 8 && (uint64_t)i < in_count; i++) {
-                shell_printf("0x%04x ", (unsigned)out_p[i]);
+            for (uint32_t i = 0; i < OPLIB_HEAD_WORDS && i < in_count; i++) {
+                shell_printf("0x%04x ", (unsigned)run.head[i]);
             }
             shell_puts("\r\n");
-            if (in_count > 8) {
-                uint64_t tail = in_count - 1;
+            if (in_count > OPLIB_HEAD_WORDS) {
                 shell_printf("dispatch-rmsnorm: output[%llu] = 0x%04x\r\n",
-                             (unsigned long long)tail,
-                             (unsigned)out_p[tail]);
+                             (unsigned long long)(in_count - 1u),
+                             (unsigned)run.tail);
             }
 
             /* Sentinel check: at least output[0] must not be 0xCAFE. */
-            if (out_p[0] == 0xCAFEu) {
+            if (run.head[0] == 0xCAFEu) {
                 shell_puts("dispatch-rmsnorm: FAIL — output[0] is "
                            "still 0xCAFE sentinel (GPU didn't write)\r\n");
                 return -1;
@@ -6839,119 +7181,53 @@ oplib_stage_call:
                 return -1;
             }
 
-            /* Carve scratch from the pre-staged SASS pool. Same
-             * slot layout as dispatch-rmsnorm: SASS in slot 0,
-             * vec/positions/cos_sin in slots 1-3. */
-            uint64_t base_phys = 0, base_gva = 0;
-            if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+            struct oplib_rope_run run = {
+                .b = b_p,
+                .batch = batch,
+                .num_heads = num_heads,
+                .head_dim = head_dim,
+                .vec_count = (uint64_t)batch * num_heads * head_dim,
+                .vec_bytes = vec_bytes,
+                .pos_bytes = pos_bytes,
+                .cs_bytes = cs_bytes,
+            };
+            int rc = slm_gpu_call_locked(oplib_rope_locked_cb, &run);
+            if (run.no_pool) {
                 shell_puts("dispatch-rope: SASS/scratch pool missing — "
                            "run `nvgpu oplib stage` (kexec) or "
                            "`nvgpu cold` (UEFI-direct)\r\n");
                 return -1;
             }
-            uint64_t vec_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-            uint64_t vec_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-            uint64_t pos_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-            uint64_t pos_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-            uint64_t cs_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-            uint64_t cs_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-            shell_puts("dispatch-rope: scratch buffers carved from "
-                       "pre-staged SASS pool\r\n");
-
-            /* Pre-fill vec with sentinel, then overwrite with real
-             * input. This way any byte the GPU doesn't touch keeps
-             * the sentinel. Identity rotation should leave the
-             * input pattern intact. */
-            volatile uint16_t *vec_p =
-                (volatile uint16_t *)(uintptr_t)vec_phys;
-            uint64_t vec_count =
-                (uint64_t)batch * num_heads * head_dim;
-            for (uint64_t i = 0; i < vec_count; i++) {
-                vec_p[i] = 0xCAFEu;
-            }
-            cache_clean_range((void *)(uintptr_t)vec_phys,
-                              (size_t)((vec_bytes + 4095u) & ~4095ull));
-            for (uint64_t i = 0; i < vec_count; i++) {
-                vec_p[i] = (i & 1u) ? 0xBC00u : 0x3C00u;
-            }
-            cache_clean_range((void *)(uintptr_t)vec_phys,
-                              (size_t)((vec_bytes + 4095u) & ~4095ull));
-
-            /* positions[i] = 0 for every token. */
-            volatile uint32_t *pos_p =
-                (volatile uint32_t *)(uintptr_t)pos_phys;
-            for (uint32_t i = 0; i < batch; i++) {
-                pos_p[i] = 0u;
-            }
-            cache_clean_range((void *)(uintptr_t)pos_phys,
-                              (size_t)((pos_bytes + 4095u) & ~4095ull));
-
-            /* cos_sin[2i]   = 1.0f (cos 0)  → IEEE 0x3F800000
-             * cos_sin[2i+1] = 0.0f (sin 0)  → IEEE 0x00000000 */
-            volatile uint32_t *cs_p =
-                (volatile uint32_t *)(uintptr_t)cs_phys;
-            for (uint32_t i = 0; i < head_dim; i++) {
-                cs_p[i * 2u]      = 0x3F800000u;
-                cs_p[i * 2u + 1u] = 0x00000000u;
-            }
-            cache_clean_range((void *)(uintptr_t)cs_phys,
-                              (size_t)((cs_bytes + 4095u) & ~4095ull));
-
             shell_printf("dispatch-rope: vec=0x%lx pos=0x%lx "
                          "cos_sin=0x%lx (batch=%u heads=%u head_dim=%u)\r\n",
-                         (unsigned long)vec_va,
-                         (unsigned long)pos_va,
-                         (unsigned long)cs_va,
+                         (unsigned long)run.vec_va,
+                         (unsigned long)run.pos_va,
+                         (unsigned long)run.cs_va,
                          (unsigned)batch, (unsigned)num_heads,
                          (unsigned)head_dim);
-
-            struct operator_dispatch_args args = {
-                .op_kind = SLM_GPU_OP_ROPE,
-                .u.rope = {
-                    .vec_gpu_va       = vec_va,
-                    .positions_gpu_va = pos_va,
-                    .cos_sin_gpu_va   = cs_va,
-                    .batch            = batch,
-                    .num_heads        = num_heads,
-                    .head_dim         = head_dim,
-                },
-            };
-
-            int rc = oplib_shell_dispatch_locked(b_p, 0, SLM_GPU_OP_ROPE,
-                                                 SLM_GPU_DTYPE_FP16, &args);
             if (rc < 0) {
                 shell_printf("dispatch-rope: slm_oplib_dispatch rc=%d\r\n",
                              rc);
                 return rc;
             }
 
-            cache_invalidate_range((void *)(uintptr_t)vec_phys,
-                                   (size_t)((vec_bytes + 4095u) & ~4095ull));
-
             shell_puts("dispatch-rope: vec[0..7] = ");
-            for (int i = 0; i < 8 && (uint64_t)i < vec_count; i++) {
-                shell_printf("0x%04x ", (unsigned)vec_p[i]);
+            for (uint32_t i = 0; i < OPLIB_HEAD_WORDS && i < run.vec_count; i++) {
+                shell_printf("0x%04x ", (unsigned)run.head[i]);
             }
             shell_puts("\r\n");
-            if (vec_count > 8) {
-                uint64_t tail = vec_count - 1;
+            if (run.vec_count > OPLIB_HEAD_WORDS) {
                 shell_printf("dispatch-rope: vec[%llu] = 0x%04x\r\n",
-                             (unsigned long long)tail,
-                             (unsigned)vec_p[tail]);
+                             (unsigned long long)(run.vec_count - 1u),
+                             (unsigned)run.tail);
             }
-
-            /* Identity-rotation check: every element should be the
-             * original alternating ±1.0 FP16 pattern. */
-            for (uint64_t i = 0; i < vec_count; i++) {
-                uint16_t expect = (i & 1u) ? 0xBC00u : 0x3C00u;
-                if (vec_p[i] != expect) {
-                    shell_printf("dispatch-rope: FAIL — vec[%llu] = "
-                                 "0x%04x (expected 0x%04x)\r\n",
-                                 (unsigned long long)i,
-                                 (unsigned)vec_p[i],
-                                 (unsigned)expect);
-                    return -1;
-                }
+            if (run.mismatch) {
+                shell_printf("dispatch-rope: FAIL — vec[%llu] = "
+                             "0x%04x (expected 0x%04x)\r\n",
+                             (unsigned long long)run.bad_index,
+                             (unsigned)run.bad_value,
+                             (unsigned)run.bad_expect);
+                return -1;
             }
             shell_puts("dispatch-rope: PASS — identity rotation "
                        "preserved input bit-exact\r\n");
@@ -6994,117 +7270,39 @@ oplib_stage_call:
             }
             uint32_t op_kind = (uint32_t)atoi(argv[3]);
 
-            uint64_t base_phys = 0, base_gva = 0;
-            if (oplib_pool_scratch_base(&base_phys, &base_gva) != 0) {
+            struct oplib_smoke_run run = { .b = b_p, .op_kind = op_kind };
+            int rc = slm_gpu_call_locked(oplib_smoke_locked_cb, &run);
+            if (run.no_pool) {
                 shell_puts("smoke: SASS/scratch pool missing — run "
                            "`nvgpu oplib stage` (kexec) or `nvgpu cold` "
                            "(UEFI-direct)\r\n");
                 return -1;
             }
-
-            /* Per-op scratch sizes — kept small so every op fits in
-             * a single 64 KB slot per buffer. The fixtures are
-             * deliberately tiny: enough work to exercise dispatch,
-             * not enough to need real-shape allocations. Each
-             * smoke_fixture_* helper above memsets its inputs and
-             * issues cache_clean_range; the smoke verb here only
-             * dispatches per op_kind and pre-fills the output
-             * sentinel afterwards. */
-            uint64_t out_bytes = 0;
-            uint64_t out_phys  = 0;
-            uint64_t out_va    = 0;
-            struct operator_dispatch_args args;
-            memset(&args, 0, sizeof(args));
-            args.op_kind = op_kind;
-
-            switch (op_kind) {
-            case SLM_GPU_OP_RMSNORM:
-                smoke_fixture_rmsnorm(base_phys, base_gva, &args,
-                                      &out_phys, &out_va, &out_bytes);
-                break;
-            case SLM_GPU_OP_EMBEDDING:
-                smoke_fixture_embedding(base_phys, base_gva, &args,
-                                        &out_phys, &out_va, &out_bytes);
-                break;
-            case SLM_GPU_OP_Q4K_DEQUANT:
-                smoke_fixture_q4k_dequant(base_phys, base_gva, &args,
-                                          &out_phys, &out_va, &out_bytes);
-                break;
-            case SLM_GPU_OP_SWIGLU:
-                smoke_fixture_swiglu(base_phys, base_gva, &args,
-                                     &out_phys, &out_va, &out_bytes);
-                break;
-            case SLM_GPU_OP_Q4K_DOT:
-                smoke_fixture_q4k_dot(base_phys, base_gva, &args,
-                                      &out_phys, &out_va, &out_bytes);
-                break;
-            case SLM_GPU_OP_GQA_ATTN:
-                smoke_fixture_gqa_attn(base_phys, base_gva, &args,
-                                       &out_phys, &out_va, &out_bytes);
-                break;
-            default:
+            if (run.unsupported) {
                 shell_printf("smoke: op_kind=%u not supported by this "
                              "verb (try 0/1/2/3/5/6/12)\r\n",
                              (unsigned)op_kind);
                 return -1;
             }
-            (void)out_va;     /* set by helper for completeness; the
-                               * dispatch path reads it from
-                               * args.u.<op>.out_gpu_va already. */
-
-            /* Pre-fill the output region with the 0xCAFE sentinel.
-             * out_bytes is the kernel's actual write size; round up
-             * to a 4 KB cache-clean unit. */
-            volatile uint16_t *out_p =
-                (volatile uint16_t *)(uintptr_t)out_phys;
-            uint64_t out_words = (out_bytes + 1u) / 2u;
-            for (uint64_t i = 0; i < out_words; i++) {
-                out_p[i] = 0xCAFEu;
-            }
-            cache_clean_range((void *)(uintptr_t)out_phys,
-                              (size_t)((out_bytes + 4095u) & ~4095ull));
-
             shell_printf("smoke: op_kind=%u dispatching... ",
                          (unsigned)op_kind);
-
-            int rc = oplib_shell_dispatch_locked(b_p, 0, op_kind,
-                                                 smoke_dtype_for(op_kind),
-                                                 &args);
             if (rc < 0) {
                 shell_printf("FAIL: rc=%d\r\n", rc);
                 return rc;
             }
-
-            cache_invalidate_range(
-                (void *)(uintptr_t)out_phys,
-                (size_t)((out_bytes + 4095u) & ~4095ull));
-
-            /* Verify the GPU wrote zeros over the sentinel. Check
-             * every output byte (treat output as uint8_t to handle
-             * Q4K_DOT's FP32 case alongside the FP16 ops). On
-             * mismatch, dump the first 16 output FP16 words so the
-             * failure mode is visible (sentinel-intact vs partial
-             * write vs unexpected non-zero output). */
-            volatile uint8_t *out_b =
-                (volatile uint8_t *)(uintptr_t)out_phys;
-            for (uint64_t i = 0; i < out_bytes; i++) {
-                if (out_b[i] != 0u) {
-                    shell_printf("FAIL: first non-zero at out[%llu]=0x%02x "
-                                 "(expected 0x00).\r\nout[0..15] = ",
-                                 (unsigned long long)i, (unsigned)out_b[i]);
-                    uint64_t dump_words = (out_bytes / 2u);
-                    if (dump_words > 16u) {
-                        dump_words = 16u;
-                    }
-                    for (uint64_t w = 0; w < dump_words; w++) {
-                        shell_printf("0x%04x ", (unsigned)out_p[w]);
-                    }
-                    shell_puts("\r\n");
-                    return -1;
+            if (run.mismatch) {
+                shell_printf("FAIL: first non-zero at out[%llu]=0x%02x "
+                             "(expected 0x00).\r\nout[0..15] = ",
+                             (unsigned long long)run.bad_index,
+                             (unsigned)run.bad_byte);
+                for (uint32_t w = 0; w < run.dump_words; w++) {
+                    shell_printf("0x%04x ", (unsigned)run.dump[w]);
                 }
+                shell_puts("\r\n");
+                return -1;
             }
             shell_printf("PASS (%llu output bytes verified zero)\r\n",
-                         (unsigned long long)out_bytes);
+                         (unsigned long long)run.out_bytes);
             return 0;
         }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
@@ -7656,27 +7854,22 @@ oplib_stage_call:
         uint64_t dst_phys = h_ce->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
         uint64_t dst_gva  = h_ce->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
 
-        /* Distinguishable pattern + zero destination so a stale
-         * read can't pose as success. */
-        uint8_t *src = (uint8_t *)(uintptr_t)src_phys;
-        uint8_t *dst = (uint8_t *)(uintptr_t)dst_phys;
-        for (uint32_t i = 0; i < want_bytes; i++) {
-            src[i] = (uint8_t)(0xA5u ^ (i & 0xFFu));
-        }
-        memset(dst, 0, (size_t)want_bytes);
-        size_t flush_bytes =
-            (size_t)((want_bytes + 4095u) & ~4095u);
-        cache_clean_range(src, flush_bytes);
-        cache_clean_range(dst, flush_bytes);
-
-        int rc = ga10b_ce_memcpy(b_ce, src_gva, dst_gva, want_bytes);
+        struct ce_smoke_run run = {
+            .b = b_ce,
+            .src_phys = src_phys,
+            .dst_phys = dst_phys,
+            .src_gva = src_gva,
+            .dst_gva = dst_gva,
+            .bytes = want_bytes,
+        };
+        int rc = slm_gpu_call_locked(ce_smoke_locked_cb, &run);
         if (rc != 0) {
             shell_printf("ce smoke: ga10b_ce_memcpy rc=%d "
                          "(class/runlist binding issue?)\r\n", rc);
             return rc;
         }
 
-        cache_invalidate_range(dst, flush_bytes);
+        const uint8_t *dst = g_ce_shell_readback;
         int mismatches = 0;
         for (uint32_t i = 0; i < want_bytes; i++) {
             uint8_t want = (uint8_t)(0xA5u ^ (i & 0xFFu));
@@ -7839,23 +8032,20 @@ oplib_stage_call:
             uint64_t rb_phys = h_dbg->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
             uint64_t rb_gva  = h_dbg->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
 
-            /* Zero the destination before the CE so a stale read
-             * doesn't masquerade as success. */
-            memset((void *)(uintptr_t)rb_phys, 0, (size_t)want_bytes);
-            cache_clean_range((void *)(uintptr_t)rb_phys,
-                              (size_t)((want_bytes + 4095u) & ~4095ull));
-
-            int rb_rc = ga10b_ce_memcpy(b_dbg, gpu_va, rb_gva,
-                                         (uint32_t)want_bytes);
+            struct weights_readback_run rb = {
+                .b = b_dbg,
+                .rb_phys = rb_phys,
+                .rb_gva = rb_gva,
+                .gpu_va = gpu_va,
+                .bytes = (uint32_t)want_bytes,
+            };
+            int rb_rc = slm_gpu_call_locked(weights_readback_locked_cb, &rb);
             if (rb_rc != 0) {
                 shell_printf("weights-pool smoke: readback CE memcpy "
                              "rc=%d\r\n", rb_rc);
                 return -1;
             }
-
-            uint8_t *readback = (uint8_t *)(uintptr_t)rb_phys;
-            cache_invalidate_range(readback,
-                                   (size_t)((want_bytes + 4095u) & ~4095ull));
+            const uint8_t *readback = g_ce_shell_readback;
 
             int mismatches = 0;
             for (uint64_t i = 0; i < want_bytes; i++) {

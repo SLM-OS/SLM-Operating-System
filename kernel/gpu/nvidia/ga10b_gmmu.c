@@ -406,10 +406,10 @@ void ga10b_gmmu_walk_print(const struct ga10b_gmmu_walk_result *r)
  * Milestone B — single-page allocator + writer
  * --------------------------------------------------------------------- */
 
-/* Bump cursor for SLM-OS GMMU allocations. Single-threaded shell
- * task is the only caller path today (matches `g_handoff` access
- * pattern); no spinlock yet. Add one when a second writer (e.g.
- * the runtime model loader's worker task) lands. */
+/* Bump cursor for SLM-OS GMMU allocations. Only shell verbs and staging
+ * allocate, and not under g_gpu_dispatch_lock; no spinlock yet. Add one
+ * when a second concurrent writer (e.g. the runtime model loader's
+ * worker task) lands. */
 static uint64_t g_va_cursor = GA10B_GMMU_VA_BASE;
 
 uint64_t ga10b_gmmu_va_cursor(void)

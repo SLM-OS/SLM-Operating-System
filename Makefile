@@ -1595,12 +1595,13 @@ check-braces:
 test-check-braces:
 	@bash scripts/tests/test-check-c-braces.sh
 
-.PHONY: check-oplib-shell-lock
-check-oplib-shell-lock:
-	@./scripts/check-oplib-shell-lock.sh
+.PHONY: check-gpu-shell-lock
+check-gpu-shell-lock:
+	@python3 scripts/check-gpu-shell-lock.py
+	@bash scripts/tests/test-check-gpu-shell-lock.sh > /dev/null
 
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-oplib-shell-lock kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

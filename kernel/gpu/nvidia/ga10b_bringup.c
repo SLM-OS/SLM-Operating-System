@@ -1755,9 +1755,8 @@ bool ga10b_bringup_handoff_is_local(void)
 
 uint32_t ga10b_bringup_active_pipeline_kind(void)
 {
-    /* Reads the global g_handoff. Safe — single-threaded shell
-     * task is the only caller path today (slm_ffi.c's
-     * ensure_*_bringup helpers). */
+    /* Reads the global g_handoff. Callers hold g_gpu_dispatch_lock
+     * (slm_ffi.c's ensure_*_bringup helpers). */
     return g_handoff.pipeline_kind;
 }
 
@@ -3140,7 +3139,8 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      * Single-threaded contract: this static counter assumes only
      * one caller of `ga10b_dispatch_v7_pipeline_inline` is in
      * flight at a time. Every caller holds `g_gpu_dispatch_lock`
-     * across the whole dispatch, including the shell verbs (#1111).
+     * across the whole dispatch: the FFIs and consumers in slm_ffi.c
+     * and the shell's *_locked_cb verbs (#1111).
      * Same assumption applies to `g_qmd_pool_next_slot` above. */
     static uint32_t g_pushbuf_ring_offset = 0u;
     if ((uint64_t)g_pushbuf_ring_offset + total_pb_bytes >
