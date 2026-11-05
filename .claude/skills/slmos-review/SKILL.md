@@ -6,7 +6,7 @@ context: fork
 agent: general-purpose
 background: false
 effort: high
-allowed-tools: Bash(git fetch *) Bash(git branch *) Bash(git log *) Bash(git status *) Bash(git diff *) Bash(git show *) Bash(echo *) Bash(gh pr diff *) Bash(gh pr view *) Bash(gh issue list *)
+allowed-tools: Bash(git fetch *) Bash(git branch --show-current) Bash(git log *) Bash(git status *) Bash(git diff *) Bash(git show *) Bash(echo *) Bash(gh pr diff *) Bash(gh pr view *) Bash(gh issue list *)
 ---
 
 # SLM-OS review
@@ -32,9 +32,9 @@ Always diff against `origin/main`, never local `main`, which is stale in most wo
 | none | `git diff origin/main...HEAD`, plus uncommitted work (`git diff HEAD`, untracked files) |
 | PR number | `gh pr diff N` and `gh pr view N --json title,body,closingIssuesReferences`; read code from `git fetch origin pull/N/head` with `git show FETCH_HEAD:<path>`, since this checkout may be on another branch |
 | paths | the same as none, limited to those paths |
-| `--since <sha>` | a re-review: `git diff <sha> HEAD`, see step 5. If a rebase made `<sha>` unreachable, say so and review the full diff |
+| `--since <sha>` | a re-review, see step 5: `git diff <sha>` plus untracked files, or `git diff <sha> FETCH_HEAD` with a PR number. If `git log --oneline HEAD..<sha>` (or `FETCH_HEAD..<sha>`) prints anything, a rebase has moved the branch, so say so and review the full diff |
 
-If the diff is empty, say so and stop. For a large diff, go file by file, riskiest first (assembly, locking, DMA, parsers, then the rest), and list anything left unread in the report.
+Run git from the working directory, without `-C`, so the pre-approved commands match. If the diff is empty, say so and stop. For a large diff, go file by file, riskiest first (assembly, locking, DMA, parsers, then the rest), and list anything left unread in the report.
 
 ## 2. Read for context
 
@@ -64,10 +64,11 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 - Cross-CPU data on Pi 5 and Jetson: see "Cache Maintenance" and "Non-Cacheable Shared Memory" in `kernel/CLAUDE.md`. QEMU won't show these bugs.
 
 **IRQ safety**
-- ISRs and IRQs-off paths (`spin_lock_irqsave` sections, the GPU dispatch lock, the lwIP core lock) must not allocate, sleep, `yield()`, `schedule()` or loop without a bound. No spinlock of any kind is held across allocation or I/O.
+- ISRs and IRQs-off paths (`spin_lock_irqsave` sections, the GPU dispatch lock, the lwIP core lock) must not allocate, sleep, `yield()`, `schedule()` or loop without a bound.
+- Flag a spinlock newly held across allocation or slow device I/O, unless that is its documented design (the UART lock, `g_gpu_dispatch_lock`, the runtime's long-work locks).
 - **No unconditional UART output on these paths.** UART writes are slow and IRQs stay masked throughout, so per-dispatch prints cost milliseconds. Log before taking the lock, print once, or put it behind a debug switch.
 - **Rust reached from IRQs-off paths:** check every lock taken below the call. Short sections use IRQ-saving guards; long-held locks use a one-shot try-lock and skip on busy; nothing allocates. Also check nothing allocates or takes a plain lock under an IRQ-saving guard. See "Locks reached from IRQs-off context" in `runtime/CLAUDE.md`.
-- Secondary CPUs don't print after boot on platforms with `PLATFORM_HAS_NC_MEMORY`: the UART lock there has no cross-CPU exclusion. The Jetson `thermal log` task is the one documented exception.
+- Secondary CPUs don't print after boot on platforms with `PLATFORM_HAS_NC_MEMORY`: the UART lock there has no cross-CPU exclusion. The Jetson `thermal log` and fan tasks are the known exceptions.
 
 **Hardware access**
 - MMIO goes through `volatile` access at the width the spec gives. Read-modify-write on a shared register is synchronized and leaves write-1-to-clear or write-1-to-disable bits alone.
