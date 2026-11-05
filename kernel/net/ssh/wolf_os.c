@@ -194,7 +194,7 @@ int wc_KeyPemToDer(const unsigned char *pem, int pemSz,
 /* ---------------------------------------------------------------- */
 /*
  * wolfSSL's USER_TIME mode calls a `time(time_t *)` function. The
- * kernel already exposes `time()` from `kernel/src/lua_stubs.c:703`
+ * kernel already exposes `time()` from `kernel/src/lua_stubs.c`
  * for Lua's `os.time()` — both consumers want monotonic seconds and
  * the lua_stubs implementation does exactly that. We deliberately do
  * NOT redefine `time()` here to avoid a multiple-definition link
