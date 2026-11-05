@@ -3188,6 +3188,7 @@ static void test_deadline_boost_raises_priority(void)
 
 #ifdef CONFIG_AI_SCHEDULER
 #include "../sched/ai/ai_types.h"   /* AI_PRIO_LOWER / KEEP / RAISE */
+#include "sched_trace_ai.h"
 
 extern uint32_t sched_ai_test_assign_with_action(struct task *task,
                                                  uint8_t core,
@@ -3333,6 +3334,18 @@ static void test_ai_priority_action_skipped_while_inheriting(void)
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->ai_priority);
     t->pi_priority = 0;
     t->ai_priority = TASK_AI_PRIORITY_NONE;
+
+    /* Traces log the task's own priority for a decision on a borrowed one. */
+    t->pi_priority = TASK_PRIORITY_HIGH;
+    t->effective_priority = TASK_PRIORITY_HIGH;
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));
+    t->pi_priority = TASK_PRIORITY_LOW;
+    t->effective_priority = TASK_PRIORITY_NORMAL;
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));
+    t->pi_priority = 0;
+    t->ai_priority = TASK_PRIORITY_CRITICAL;
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, sched_trace_ai_action_priority(t));
+    t->ai_priority = TASK_AI_PRIORITY_NONE;
     irq_restore(flags);
 
     t->id = 0;
@@ -3377,6 +3390,45 @@ static void test_inherited_priority_is_floor_on_recompute(void)
 
     irq_restore(flags);
     t->id = 0;
+}
+
+/*
+ * Test (#1103): a change that doesn't affect the queue order keeps the task's
+ * place: a floor at or below its priority must not send it behind its peers.
+ */
+static void test_reposition_keeps_place_when_order_holds(void)
+{
+    struct task *a = task_create_with_priority("pi_keep_a", nop_entry, NULL, TASK_PRIORITY_HIGH);
+    struct task *b = task_create_with_priority("pi_keep_b", nop_entry, NULL, TASK_PRIORITY_HIGH);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+    task_set_affinity(a, 0);
+    task_set_affinity(b, 0);
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(a, 0);
+    scheduler_add_task_to_cpu(b, 0);
+
+    a->pi_priority = TASK_PRIORITY_LOW;
+    sched_reposition_task(a);
+    TEST_ASSERT_EQUAL_PTR(b, a->next);
+
+    a->pi_priority = TASK_PRIORITY_HIGH;
+    sched_reposition_task(a);
+    TEST_ASSERT_EQUAL_PTR(b, a->next);
+
+    /* A real change still moves it: b now outranks a. */
+    a->pi_priority = 0;
+    b->pi_priority = TASK_PRIORITY_CRITICAL;
+    sched_reposition_task(b);
+    TEST_ASSERT_EQUAL_PTR(a, b->next);
+
+    scheduler_remove_task(a);
+    scheduler_remove_task(b);
+    b->pi_priority = 0;
+    irq_restore(flags);
+    a->id = 0;
+    b->id = 0;
 }
 
 /*
@@ -5845,6 +5897,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_deadline_boost_raises_priority);
     RUN_TEST(test_inherited_priority_is_floor_on_recompute);
     RUN_TEST(test_reposition_only_moves_queued_task);
+    RUN_TEST(test_reposition_keeps_place_when_order_holds);
     RUN_TEST(test_isolation_excludes_from_dispatch);
 
     /* Pluggable scheduler policy interface */

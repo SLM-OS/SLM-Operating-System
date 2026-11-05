@@ -466,7 +466,7 @@ uint32_t pi_mutex_inversion_count(void);    /* Total inversions detected */
 When a high-priority task attempts to lock a mutex held by a lower-priority task:
 
 1. The waiter's priority is stored in the holder's `task->pi_priority`, even if the holder is already at or above it (that level may only be temporary), and the holder's `effective_priority` is raised if it is below
-2. If the holder is waiting in a run queue, it is moved to the position its new priority calls for (`sched_reposition_task`); the queue is ordered at insertion, so it would otherwise stay behind everything queued ahead of its old position
+2. If the holder is waiting in a run queue and the queue order no longer holds, it is moved to the position its new priority calls for (`sched_reposition_task`); the queue is ordered at insertion, so it would otherwise stay behind everything queued ahead of its old position
 3. `pi_priority` is a floor on every recompute of `effective_priority` (`update_deadline_boost`), so the boost survives the holder being preempted, yielding or being re-queued. A deadline boost above it still wins
 4. When the holder releases the last PI mutex it holds (`task->pi_mutexes_held`), `pi_priority` is cleared and `effective_priority` recomputed. A new owner by hand-off takes its `pi_priority` from the waiters still queued
 5. Each boost is logged: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`

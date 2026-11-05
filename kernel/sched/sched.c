@@ -1472,6 +1472,36 @@ void scheduler_remove_task(struct task *task)
 }
 
 /*
+ * Recompute a queued task's priority and move it if the queue order no longer
+ * holds. Keeps its place otherwise, so a change that doesn't affect the order
+ * (say a floor below its priority) can't send it behind its peers. Returns
+ * true if it moved; false also if the task isn't in this queue.
+ */
+static bool reposition_locked(struct task *task, uint32_t cpu)
+{
+    struct task *prev = NULL;
+    struct task *curr = cpu_rq(cpu)->head;
+
+    while (curr && curr != task) {
+        prev = curr;
+        curr = curr->next;
+    }
+    if (!curr) {
+        return false;
+    }
+
+    update_deadline_boost(task);
+    if ((!prev || prev->effective_priority >= task->effective_priority) &&
+        (!task->next || task->next->effective_priority <= task->effective_priority)) {
+        return false;
+    }
+
+    (void)remove_from_cpu_queue_locked(task, cpu);
+    add_to_cpu_queue_locked(task, cpu);
+    return true;
+}
+
+/*
  * Move a queued task to the position its current priority calls for. The
  * run queue is ordered at insertion, so raising the priority of a task that
  * is already queued does not by itself let it run any sooner. A task that
@@ -1500,10 +1530,8 @@ void sched_reposition_task(struct task *task)
             continue;
         }
 
-        bool moved = false;
-        if (remove_from_cpu_queue_locked(task, cpu)) {
-            add_to_cpu_queue_locked(task, cpu);
-            moved = true;
+        bool moved = reposition_locked(task, cpu);
+        if (moved) {
 #if !defined(PLATFORM_HAS_NC_MEMORY)
             struct cpu_runqueue *rq = cpu_rq(cpu);
             cache_clean(&rq->head);

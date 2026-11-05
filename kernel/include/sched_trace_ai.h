@@ -151,6 +151,9 @@ uint64_t sched_trace_ai_dropped(void);         /* records that wrapped before du
  * handler may have partially updated).
  */
 struct task;
+/* The priority recorded for a decision on `task`; -1 if task is NULL. */
+int32_t sched_trace_ai_action_priority(const struct task *task);
+
 void sched_trace_ai_record_decision(struct task *task,
                                     const char *policy_name,
                                     uint32_t action_core);

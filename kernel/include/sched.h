@@ -109,9 +109,9 @@ void scheduler_remove_task(struct task *task);
 void sched_refresh_effective_priority(struct task *task);
 
 /*
- * Re-insert a queued task at the position its current priority calls for.
- * No-op for a task that is not in its CPU's run queue. Takes rq_lock, so it
- * must not be called with one held.
+ * Move a queued task to the position its current priority calls for, keeping
+ * its place if the queue order already holds. No-op for a task that is not in
+ * its CPU's run queue. Takes rq_lock, so it must not be called with one held.
  */
 void sched_reposition_task(struct task *task);
 
