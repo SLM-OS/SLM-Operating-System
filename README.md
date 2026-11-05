@@ -89,8 +89,8 @@ locally via a Claude Code slash command:
 ```
 
 This runs `.claude/commands/ci.md` — a clean-build + QEMU test sweep across
-ARM64 and x86-64 targets, runtime host tests, the C brace check and a structural
-check of the Jetson boot code. Use before every merge to `main`.
+ARM64 and x86-64 targets, a Jetson build with real AI weights, runtime host tests,
+the C brace check and a structural check of the Jetson boot code. Use before every merge to `main`.
 
 ### Code Review
 
