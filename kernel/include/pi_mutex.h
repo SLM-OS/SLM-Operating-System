@@ -22,16 +22,18 @@ struct task;
 /*
  * Priority-inheriting mutex.
  *
- * Uses a spinlock internally to protect the mutex state,
- * but the actual wait is done with a spin loop that allows
- * the scheduler to preempt (IRQs enabled).
+ * Uses a spinlock internally to protect the mutex state. A contended
+ * locker blocks on the mutex's wait queue (#93). The inherited priority
+ * lives in task->pi_priority (#1103) and is dropped when the holder releases
+ * the last PI mutex it holds, so a task holding several can stay boosted a
+ * little longer than strictly needed, but never less. Inheritance is one
+ * level: a boosted holder blocked on another mutex does not pass it on.
  */
 typedef struct {
     spinlock_t guard;           /* Protects mutex state */
     struct task *owner;         /* Current owner (NULL if unlocked) */
     struct task *wait_head;     /* Head of blocked-waiter FIFO (#93) */
     struct task *wait_tail;     /* Tail of blocked-waiter FIFO */
-    uint8_t owner_original_pri; /* Owner's priority before inheritance */
     volatile uint8_t locked;    /* 1 if locked, 0 if unlocked */
 } pi_mutex_t;
 
@@ -40,7 +42,6 @@ typedef struct {
     .owner = NULL, \
     .wait_head = NULL, \
     .wait_tail = NULL, \
-    .owner_original_pri = 0, \
     .locked = 0 \
 }
 
@@ -69,9 +70,10 @@ int pi_mutex_trylock(pi_mutex_t *mutex);
 /*
  * Release a priority-inheriting mutex.
  *
- * Restores the owner's priority to its original value
- * (or the highest of any remaining waiters if we implement
- * a proper wait queue in the future).
+ * If this was the last PI mutex the owner holds, drops its inherited priority
+ * and recomputes its effective priority. If tasks are waiting, hands the mutex
+ * to the highest-priority one and wakes it; the waiters left behind set its
+ * inherited priority.
  */
 void pi_mutex_unlock(pi_mutex_t *mutex);
 

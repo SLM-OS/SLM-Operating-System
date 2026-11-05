@@ -3304,7 +3304,104 @@ static void test_ai_priority_deadline_boost_never_lowers(void)
 
     t->id = 0;
 }
+
+/*
+ * Test (#1103): an AI decision taken while a task inherits a priority sets no
+ * level. Stepping from the borrowed effective priority would leave it behind
+ * as the AI's choice after the mutex is released.
+ */
+static void test_ai_priority_action_skipped_while_inheriting(void)
+{
+    struct task *t = task_create("ai_prio_pi", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+
+    irq_flags_t flags = irq_save();
+    t->pi_priority = TASK_PRIORITY_HIGH;
+    t->effective_priority = TASK_PRIORITY_HIGH;
+    (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_AI_PRIORITY_NONE, t->ai_priority);
+
+    t->pi_priority = 0;
+    sched_refresh_effective_priority(t);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->effective_priority);
+    irq_restore(flags);
+
+    t->id = 0;
+}
 #endif /* CONFIG_AI_SCHEDULER */
+
+/*
+ * Test (#1103): an inherited priority is a floor on every recompute, and only
+ * a floor: a deadline boost above it still wins.
+ */
+static void test_inherited_priority_is_floor_on_recompute(void)
+{
+    struct task *t = task_create_with_priority("pi_floor", nop_entry, NULL, TASK_PRIORITY_LOW);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+
+    irq_flags_t flags = irq_save();
+
+    /* No deadline: the base would be LOW. */
+    t->pi_priority = TASK_PRIORITY_HIGH;
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->effective_priority);
+    scheduler_remove_task(t);
+
+    /* Far deadline, no boost: same floor through the deadline path. */
+    task_set_deadline(t, slm_get_time_ns() + 10ULL * 1000000000ULL);
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->effective_priority);
+    scheduler_remove_task(t);
+
+    /* Missed deadline: CRITICAL beats the inherited HIGH. */
+    task_set_deadline(t, 1);
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
+    scheduler_remove_task(t);
+
+    /* Inheritance over: back to the base. */
+    task_set_deadline(t, 0);
+    t->pi_priority = 0;
+    sched_refresh_effective_priority(t);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, t->effective_priority);
+
+    irq_restore(flags);
+    t->id = 0;
+}
+
+/*
+ * Test (#1103): sched_reposition_task leaves a task that isn't queued out of
+ * the run queue, and moves one that is.
+ */
+static void test_reposition_only_moves_queued_task(void)
+{
+    struct task *t = task_create_with_priority("pi_repos", nop_entry, NULL, TASK_PRIORITY_LOW);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+
+    irq_flags_t flags = irq_save();
+    t->assigned_cpu = 0;
+    uint32_t ready_before = sched_cpu_rq(0)->ready_count;
+
+    sched_reposition_task(t);
+    TEST_ASSERT_EQUAL_UINT32(ready_before, sched_cpu_rq(0)->ready_count);
+
+    scheduler_add_task_to_cpu(t, 0);
+    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, sched_cpu_rq(0)->ready_count);
+
+    t->pi_priority = TASK_PRIORITY_CRITICAL;
+    sched_reposition_task(t);
+    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, sched_cpu_rq(0)->ready_count);
+    TEST_ASSERT_EQUAL_PTR(t, sched_cpu_rq(0)->head);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
+
+    scheduler_remove_task(t);
+    t->pi_priority = 0;
+    irq_restore(flags);
+    t->id = 0;
+}
 
 /*
  * Test: Isolated cores excluded from round-robin dispatch.
@@ -5738,6 +5835,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_round_robin_distributes_tasks);
     RUN_TEST(test_scheduler_start_accepts_cpu_param);
     RUN_TEST(test_deadline_boost_raises_priority);
+    RUN_TEST(test_inherited_priority_is_floor_on_recompute);
+    RUN_TEST(test_reposition_only_moves_queued_task);
     RUN_TEST(test_isolation_excludes_from_dispatch);
 
     /* Pluggable scheduler policy interface */
@@ -5803,6 +5902,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_ai_priority_step_levels);
     RUN_TEST(test_ai_priority_action_survives_enqueue);
     RUN_TEST(test_ai_priority_deadline_boost_never_lowers);
+    RUN_TEST(test_ai_priority_action_skipped_while_inheriting);
     RUN_TEST(test_ai_policies_registered);
     RUN_TEST(test_ai_policy_switch_to_mlp_and_back);
     RUN_TEST(test_fp_save_restore_callable);

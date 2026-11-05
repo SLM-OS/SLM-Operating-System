@@ -103,6 +103,19 @@ void scheduler_add_task(struct task *task);
 void scheduler_remove_task(struct task *task);
 
 /*
+ * Recompute task->effective_priority from its base, deadline and inherited
+ * priority. Does not move the task; see sched_reposition_task.
+ */
+void sched_refresh_effective_priority(struct task *task);
+
+/*
+ * Re-insert a queued task at the position its current priority calls for.
+ * No-op for a task that is not in its CPU's run queue. Takes rq_lock, so it
+ * must not be called with one held.
+ */
+void sched_reposition_task(struct task *task);
+
+/*
  * Mark a task TERMINATED and dequeue it atomically under rq_lock.
  * Used by task_exit to close the pick-a-terminated-task race:
  * without a single locked region around state=TERMINATED + dequeue,

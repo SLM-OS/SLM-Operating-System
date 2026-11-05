@@ -10,6 +10,8 @@
 #include "spinlock.h"
 #include "debug.h"
 #include "smp.h"
+#include "cache.h"
+#include "ncmem.h"              /* PLATFORM_HAS_NC_MEMORY */
 
 /* Statistics */
 static volatile uint32_t total_inversions = 0;
@@ -24,13 +26,40 @@ void pi_mutex_init(pi_mutex_t *mutex)
     mutex->owner = NULL;
     mutex->wait_head = NULL;
     mutex->wait_tail = NULL;
-    mutex->owner_original_pri = 0;
     mutex->locked = 0;
 }
 
+/* Record that `task` now holds one more PI mutex. Guard held. */
+static void note_mutex_acquired(struct task *task)
+{
+    task->pi_mutexes_held++;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_clean(&task->pi_mutexes_held);
+#endif
+}
+
 /*
- * Boost owner's priority if caller has higher priority.
- * Must be called with guard held.
+ * Raise `task`'s inherited priority to at least `priority`. Guard held.
+ *
+ * Stored apart from effective_priority, which every run-queue insertion
+ * recomputes (#1103). It is set even when the task is currently at or above
+ * `priority`: that level may only be temporary (an AI level, a deadline boost,
+ * a priority someone lowers later), and the task must not fall below a waiter
+ * when it ends.
+ */
+static void raise_inherited_priority(struct task *task, uint8_t priority)
+{
+    if (priority > task->pi_priority) {
+        task->pi_priority = priority;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+        cache_clean(&task->pi_priority);
+#endif
+    }
+}
+
+/*
+ * Make `caller`'s priority a floor for the owner, and boost the owner now if
+ * caller outranks it. Must be called with guard held.
  *
  * Returns: 1 if priority was boosted (inversion detected), 0 otherwise.
  */
@@ -42,6 +71,8 @@ static int try_boost_owner(pi_mutex_t *mutex, struct task *caller)
         return 0;
     }
 
+    raise_inherited_priority(owner, caller->effective_priority);
+
     /* Check if caller has higher priority than owner's effective priority */
     if (caller->effective_priority > owner->effective_priority) {
         /* Priority inversion detected! Boost owner. */
@@ -50,6 +81,9 @@ static int try_boost_owner(pi_mutex_t *mutex, struct task *caller)
              caller->name, caller->effective_priority);
 
         owner->effective_priority = caller->effective_priority;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+        cache_clean(&owner->effective_priority);
+#endif
         total_inversions++;
         last_inversion_flag = 1;
         return 1;
@@ -78,13 +112,21 @@ void pi_mutex_lock(pi_mutex_t *mutex)
         /* Fast path: mutex is free. */
         mutex->locked = 1;
         mutex->owner = self;
-        mutex->owner_original_pri = self->effective_priority;
+        note_mutex_acquired(self);
         spin_unlock_irqrestore(&mutex->guard, flags);
         return;
     }
 
-    /* Mutex is held — boost owner and block. */
-    try_boost_owner(mutex, self);
+    /* Mutex is held — boost owner and block. A holder waiting in a run queue
+     * is still at its old position, so move it, or everything queued ahead of
+     * that position runs first. This is the one place the guard nests around
+     * an rq_lock (never the reverse: nothing under rq_lock takes a pi_mutex).
+     * Holding the guard keeps the owner from releasing the mutex meanwhile;
+     * doing it before this task joins the wait queue means no hand-off can
+     * mark this task READY while it spends longer here. */
+    if (try_boost_owner(mutex, self)) {
+        sched_reposition_task(mutex->owner);
+    }
 
     /* Append to wait queue (FIFO). task->next is free because the
      * task is about to leave the run queue (TASK_BLOCKED removes it
@@ -105,11 +147,10 @@ void pi_mutex_lock(pi_mutex_t *mutex)
      * We resume here after pi_mutex_unlock wakes us and the scheduler
      * re-dispatches us. At that point the mutex is ours.
      *
-     * Between the state flip above and schedule() below, a timer tick
-     * could fire (IRQs re-enabled by spin_unlock_irqrestore). This is
-     * safe: on Pi 5 / Jetson tasks run with DAIF.I=1 so the tick
-     * cannot deliver. On QEMU the tick fires but schedule() simply
-     * skips the BLOCKED task — a harmless no-op. */
+     * A timer tick can fire between the state flip above and this call (IRQs
+     * are enabled again). That is safe: schedule() re-queues only a
+     * TASK_RUNNING task, so it just switches away from us without queueing
+     * us, and we continue from here once woken. */
     schedule();
 }
 
@@ -125,7 +166,7 @@ int pi_mutex_trylock(pi_mutex_t *mutex)
     if (!mutex->locked) {
         mutex->locked = 1;
         mutex->owner = self;
-        mutex->owner_original_pri = self->effective_priority;
+        note_mutex_acquired(self);
 
         spin_unlock_irqrestore(&mutex->guard, flags);
         return 1;
@@ -158,11 +199,25 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
     struct task *owner = mutex->owner;
 
     if (owner) {
-        if (owner->effective_priority != mutex->owner_original_pri) {
-            INFO("PI: Restoring task '%s' priority %u->%u",
-                 owner->name, owner->effective_priority, mutex->owner_original_pri);
+        if (owner->pi_mutexes_held > 0) {
+            owner->pi_mutexes_held--;
         }
-        owner->effective_priority = mutex->owner_original_pri;
+        /* Drop the inherited priority with the last mutex held: what an
+         * earlier-released mutex contributed can't be told apart from what
+         * one still held does, and over-boosting is the safe side. */
+        if (owner->pi_mutexes_held == 0 && owner->pi_priority != 0) {
+            uint8_t boosted = owner->effective_priority;
+            owner->pi_priority = 0;
+            sched_refresh_effective_priority(owner);
+            if (owner->effective_priority != boosted) {
+                INFO("PI: Restoring task '%s' priority %u->%u",
+                     owner->name, boosted, owner->effective_priority);
+            }
+        }
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+        cache_clean(&owner->pi_mutexes_held);
+        cache_clean(&owner->pi_priority);
+#endif
     }
 
     /* Pick the highest-priority waiter from the wait queue. Walk the
@@ -202,8 +257,12 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
          * pi_mutex_lock after its schedule() call and finds the mutex
          * already acquired on its behalf. */
         mutex->owner = best;
-        mutex->owner_original_pri = best->effective_priority;
-        /* mutex->locked stays 1. */
+        note_mutex_acquired(best);
+        /* mutex->locked stays 1. `best` outranks or matches the waiters left
+         * in the queue, but only for now: they set its floor. */
+        for (struct task *t = mutex->wait_head; t; t = t->next) {
+            raise_inherited_priority(best, t->effective_priority);
+        }
 
         best->state = TASK_READY;
 
@@ -216,7 +275,6 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
     } else {
         /* No waiters — just release. */
         mutex->owner = NULL;
-        mutex->owner_original_pri = 0;
         mutex->locked = 0;
 
         spin_unlock_irqrestore(&mutex->guard, flags);

@@ -223,30 +223,29 @@ Time remaining        Boost applied
 
 ### Implementation (C Kernel)
 
-The deadline boost is calculated in `update_deadline_boost()` (sched.c:245):
+The deadline boost is calculated in `update_deadline_boost()` in `kernel/sched/sched.c`, at every run-queue insertion. In outline:
 
 ```c
 static void update_deadline_boost(struct task *task)
 {
-    if (!task || task->deadline_ns == 0) {
-        task->effective_priority = task->priority;
-        return;
+    uint8_t base = effective_base_priority(task); /* priority, or the AI's level */
+    uint8_t boosted = base;
+
+    if (task->deadline_ns != 0) {
+        uint64_t now = slm_get_time_ns();
+        uint64_t remaining = task->deadline_ns - now;
+
+        if (now >= task->deadline_ns || remaining < critical_ns) {  /* 10ms */
+            boosted = TASK_PRIORITY_CRITICAL;
+        } else if (remaining < high_ns) {                           /* 50ms */
+            boosted = max(base, TASK_PRIORITY_HIGH);
+        } else if (remaining < boost_ns) {                          /* 100ms */
+            boosted = min(base + 1, TASK_PRIORITY_MAX);
+        }
     }
 
-    uint64_t now = slm_get_time_ns();
-    uint64_t remaining = task->deadline_ns - now;
-
-    if (now >= task->deadline_ns) {
-        task->effective_priority = TASK_PRIORITY_CRITICAL;
-    } else if (remaining < DEADLINE_CRITICAL_NS) {   /* 10ms */
-        task->effective_priority = TASK_PRIORITY_CRITICAL;
-    } else if (remaining < DEADLINE_HIGH_NS) {       /* 50ms */
-        task->effective_priority = TASK_PRIORITY_HIGH;
-    } else if (remaining < DEADLINE_BOOST_NS) {      /* 100ms */
-        task->effective_priority = task->priority + 1;
-    } else {
-        task->effective_priority = task->priority;
-    }
+    /* Never below a priority inherited through a pi_mutex (#1103). */
+    task->effective_priority = max(boosted, task->pi_priority);
 }
 ```
 
@@ -448,7 +447,8 @@ Priority inversion occurs when a high-priority task waits on a lock held by a lo
 typedef struct {
     spinlock_t guard;           /* Protects mutex state */
     struct task *owner;         /* Current owner (NULL if unlocked) */
-    uint8_t owner_original_pri; /* Owner's priority before inheritance */
+    struct task *wait_head;     /* Head of blocked-waiter FIFO (#93) */
+    struct task *wait_tail;     /* Tail of blocked-waiter FIFO */
     volatile uint8_t locked;    /* 1 if locked, 0 if unlocked */
 } pi_mutex_t;
 
@@ -465,10 +465,11 @@ uint32_t pi_mutex_inversion_count(void);    /* Total inversions detected */
 
 When a high-priority task attempts to lock a mutex held by a lower-priority task:
 
-1. The lock holder's `effective_priority` is boosted to match the waiter
-2. The original priority is saved in `owner_original_pri`
-3. When the lock is released, the owner's priority is restored
-4. Each boost is logged: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`
+1. The waiter's priority is stored in the holder's `task->pi_priority`, even if the holder is already at or above it (that level may only be temporary), and the holder's `effective_priority` is raised if it is below
+2. If the holder is waiting in a run queue, it is moved to the position its new priority calls for (`sched_reposition_task`); the queue is ordered at insertion, so it would otherwise stay behind everything queued ahead of its old position
+3. `pi_priority` is a floor on every recompute of `effective_priority` (`update_deadline_boost`), so the boost survives the holder being preempted, yielding or being re-queued. A deadline boost above it still wins
+4. When the holder releases the last PI mutex it holds (`task->pi_mutexes_held`), `pi_priority` is cleared and `effective_priority` recomputed. A new owner by hand-off takes its `pi_priority` from the waiters still queued
+5. Each boost is logged: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`
 
 ```
 Before PI:
@@ -484,9 +485,10 @@ With PI:
   Schedule order: A (boosted), C  ← A runs to release the lock; B gets it next
 ```
 
-Per #1103 (code reading, not yet reproduced), the boost may last only
-until the holder is next re-queued; see
-[Known Limitation](#known-limitation--pi-boost-lost-when-the-holder-is-re-queued-1103).
+Before #1103 the boost was stored only in `effective_priority`, which every
+run-queue insertion recomputes, so it was lost the first time the holder was
+re-queued and a medium-priority task could run ahead of it. Pinned by
+`test_pi_boost_survives_requeue` and `test_pi_boosted_holder_runs_before_medium`.
 
 ### When to Use PI Mutex
 
@@ -504,8 +506,8 @@ Continue using spinlocks for:
 
 A contended `pi_mutex_lock` boosts the owner, appends the caller to the
 mutex's FIFO wait queue, marks it `TASK_BLOCKED` and calls `schedule()`,
-which takes it off the run queue. `pi_mutex_unlock` restores the owner's
-priority, picks the highest-priority waiter, hands it ownership directly
+which takes it off the run queue. `pi_mutex_unlock` drops the owner's
+inherited priority, picks the highest-priority waiter, hands it ownership directly
 and wakes it, so a woken waiter never has to re-acquire.
 
 This replaced a spin-and-yield wait loop (SCHED-H1, 2026-04-12) four days
@@ -513,17 +515,18 @@ after it landed (#93, 2026-04-16). The spin loop could livelock on a single
 CPU: the HIGH waiter kept being picked ahead of the boosted holder. A
 blocked waiter is off the run queue, so that livelock is gone.
 
-### Known Limitation — PI Boost Lost When the Holder Is Re-queued (#1103)
+### Known Limitations
 
-`try_boost_owner` implements inheritance by writing the holder's
-`effective_priority`, but every run-queue insertion recomputes that field
-from the base priority (or the AI scheduler's level) in
-`update_deadline_boost`, which knows nothing about the boost. A boosted
-holder that is preempted or yields therefore goes back to its base
-priority on re-queue, and a medium-priority task can run ahead of it.
-The boost also does not re-position a holder that is already queued,
-because the queue is ordered at insertion. Tracked in #1103 (found by code
-reading; not yet reproduced on hardware).
+- **Multiple mutexes:** a task holding several PI mutexes keeps the highest
+  priority it inherited until it releases the last one. It can stay boosted
+  longer than strictly needed, but never less (the same rule FreeRTOS uses).
+- **One level of inheritance:** a boosted holder that blocks on a second
+  mutex does not pass the boost on to that mutex's owner (#1121).
+- **AI scheduler:** a decision taken while a task inherits a priority sets no
+  level (`sched_ai_apply_priority_action`), because stepping from the borrowed
+  priority would leave it behind after the release. `scheduler_add_task` has
+  usually cleared the previous level already, so the task has no AI level until
+  its next placement after the release.
 
 ## FFI Task API
 

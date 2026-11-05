@@ -281,6 +281,8 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->assigned_cpu = 0;
     task->priority = priority;
     task->effective_priority = priority;
+    task->pi_priority = 0;              /* slot may be reused */
+    task->pi_mutexes_held = 0;
 #ifdef CONFIG_AI_SCHEDULER
     task->ai_priority = TASK_AI_PRIORITY_NONE;  /* slot may be reused */
 #endif
@@ -371,6 +373,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->assigned_cpu = 0;                  /* Default to CPU 0 */
     task->priority = priority;
     task->effective_priority = priority;
+    task->pi_priority = 0;              /* slot may be reused */
+    task->pi_mutexes_held = 0;
 #ifdef CONFIG_AI_SCHEDULER
     task->ai_priority = TASK_AI_PRIORITY_NONE;  /* slot may be reused */
 #endif
