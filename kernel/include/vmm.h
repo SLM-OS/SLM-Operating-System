@@ -224,7 +224,7 @@
 #define SCTLR_SA            (1UL << 3)      /* SP alignment check */
 #define SCTLR_I             (1UL << 12)     /* Instruction cache enable */
 #define SCTLR_WXN           (1UL << 19)     /* Write implies XN */
-#define SCTLR_SPAN          (1UL << 23)     /* Set PAN on exception (clear = don't auto-set PAN) */
+#define SCTLR_SPAN          (1UL << 23)     /* 1 = leave PSTATE.PAN alone on exception; 0 = set PAN on entry */
 
 /*
  * ==========================================================================

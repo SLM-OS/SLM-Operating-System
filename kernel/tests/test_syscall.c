@@ -694,6 +694,21 @@ static int64_t dispatch_as(struct task *t, struct trap_frame *f)
     return (int64_t)f->x0;
 }
 
+/* #1079: syscall handlers read user memory directly, so the kernel must
+ * run with PSTATE.PAN=0 and SCTLR.SPAN=1 (SPAN=0 sets PAN on every
+ * exception from EL0). This checks the invariant on the running CPU.
+ * The #1079 failure came from state a kexec from Linux leaves on Jetson,
+ * which QEMU can't produce, so `mmaptest` after slmos-kexec on hardware
+ * remains the end-to-end check. */
+static void test_kernel_pan_not_armed(void)
+{
+    uint64_t sctlr, pan;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    __asm__ volatile("mrs %0, pan" : "=r"(pan));
+    TEST_ASSERT_TRUE_MESSAGE((sctlr & SCTLR_SPAN) != 0, "SCTLR.SPAN must be 1");
+    TEST_ASSERT_TRUE_MESSAGE((pan & (1UL << 22)) == 0, "PSTATE.PAN must be 0");
+}
+
 /* Test (mmap): a page mapped via sys_mmap shows up in the per-task
  * L1 with VMM_FLAG_PMM_OWNED set, advances the cursor, and is
  * reclaimed by task_destroy without leaking PMM pages.
@@ -897,6 +912,7 @@ int test_suite_syscall(void)
 
 #if !defined(PLATFORM_X86_64)
     /* User task creation */
+    RUN_TEST(test_kernel_pan_not_armed);
     RUN_TEST(test_task_create_user_sets_flag);
     RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
     RUN_TEST(test_task_destroy_frees_user_l1);

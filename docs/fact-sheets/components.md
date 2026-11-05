@@ -15,7 +15,7 @@ Component system: lifecycle, hot-swap, isolation.
 | EL0 syscalls | `SYS_EXIT`, `SYS_WRITE`, `SYS_MMAP` / `SYS_MUNMAP` (#731), `SYS_LOG` | Same | Same | ❌ |
 | Per-task user address space | ✅ `TTBR0_EL1` switched per-task (#728) | ✅ | ✅ | ❌ shared CR3 today |
 | Per-task ASID | ✅ TLBI on recycle, no flush on swap (#738) | ✅ | ✅ | ❌ |
-| EL0 hardware verification | ✅ `usertest`, `mmaptest`, `userelf` shell verbs | ✅ verified on pi-5-2 (under both coop and HW preempt) | ✅ | ❌ |
+| EL0 hardware verification | ✅ `usertest`, `mmaptest`, `userelf` shell verbs | ✅ verified on pi-5-2 (under both coop and HW preempt) | ✅ verified on jetson-nano-2: all three after kexec, `mmaptest` + `userelf` after UEFI-direct (#1079) | ❌ |
 | EL0 dynamic memory (mmap from EL0) | ✅ `SYS_MMAP` returns user VA, page-faults service via PMM_OWNED | ✅ | ✅ | ❌ |
 | Shell surface | `component list/run/swap/register/status` + `usertest/mmaptest/userelf` | Same | Same | Same (run/swap work; no EL0 components) |
 | Lua bindings | `slm.component_run`, `component_swap`, `component_list` | Same | Same | Same |
