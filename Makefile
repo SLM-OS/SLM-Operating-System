@@ -311,6 +311,16 @@ KERNEL_KEXEC_BUILD_SIGNATURE   = $(strip $(KERNEL_KEXEC_CMAKE_ARGS))
 KERNEL_BZIMAGE_BUILD_SIGNATURE = $(strip $(KERNEL_BZIMAGE_CMAKE_ARGS))
 KERNEL_TEST_BUILD_SIGNATURE    = $(strip $(KERNEL_TEST_CMAKE_ARGS))
 
+# Each _kernel*-build rule configures from its recipe, in a sub-make, so that it
+# happens after `runtime` and the config check have finished. Under `make -j`, a
+# configure prerequisite would run beside them: CMake decides at configure time whether
+# to link the Rust library, so it would link the C stubs on a tree without one (#1144).
+# Make also records whether the build's Makefile exists when it first considers that
+# file, so it would not reconfigure after the check had wiped the directory.
+#
+# Each config check also waits for its stale-lock check where the kernel has one: both
+# write to the build directory, and either can delete it.
+#
 # Wipe and reconfigure a build directory when its signature changed.
 # $(call kernel_config_check,<label>,<build dir>,<signature>)
 define kernel_config_check
@@ -357,7 +367,7 @@ check-kernel-test-build-dir:
 	fi
 
 .PHONY: kernel-config-check
-kernel-config-check:
+kernel-config-check: check-build-dir
 	$(call kernel_config_check,Kernel,$(KERNEL_BUILD_DIR),$(KERNEL_BUILD_SIGNATURE))
 
 .PHONY: kernel
@@ -367,7 +377,8 @@ kernel:
 	    $(MAKE) --no-print-directory _kernel-build
 
 .PHONY: _kernel-build
-_kernel-build: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
+_kernel-build: runtime kernel-config-check
+	@test -f $(KERNEL_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -624,7 +635,8 @@ endif
 	    $(MAKE) --no-print-directory _kernel-kexec-build
 
 .PHONY: _kernel-kexec-build
-_kernel-kexec-build: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+_kernel-kexec-build: runtime kernel-kexec-config-check
+	@test -f $(KERNEL_KEXEC_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
@@ -734,7 +746,8 @@ kernel-bzimage-config-check:
 	$(call kernel_config_check,Kernel bzImage,$(KERNEL_BZIMAGE_BUILD_DIR),$(KERNEL_BZIMAGE_BUILD_SIGNATURE))
 
 .PHONY: _kernel-bzimage-build
-_kernel-bzimage-build: runtime kernel-bzimage-config-check $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+_kernel-bzimage-build: runtime kernel-bzimage-config-check
+	@test -f $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 	@echo "Building kernel (bzImage variant)..."
 	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
 	@echo "Wrapping ELF as Linux bzImage..."
@@ -1069,6 +1082,11 @@ mnist-shaders: $(MNIST_SHADER_OUT)/.stamp
 mnist-shaders-clean:
 	rm -rf $(MNIST_SHADER_OUT)
 
+# Each kernel's configure rule must wait for the Rust build (#1144).
+.PHONY: test-build-order
+test-build-order:
+	@bash scripts/tests/test-build-order.sh
+
 # test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
 # selection and section-table parsing, with nvcc/cuobjdump/readelf
 # stubbed (no CUDA toolkit needed). Covers both cuobjdump naming
@@ -1342,7 +1360,10 @@ endif
 .PHONY: sdhci-test-img-force
 sdhci-test-img-force:
 
-$(SDHCI_TEST_IMG): sdhci-test-img-force | $(KERNEL_TEST_BUILD_DIR)
+# Order-only on kernel-test: under `make -j` its config check can wipe the directory
+# holding this image. sdhci-test-img-force makes this rule run anyway, so it sees the
+# file as make finds it after the wipe (#1144).
+$(SDHCI_TEST_IMG): sdhci-test-img-force | $(KERNEL_TEST_BUILD_DIR) kernel-test
 	@rm -f $@ $@.tmp
 	@if truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
 		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
@@ -1389,9 +1410,10 @@ else
     QEMU_BOOT_ARG = -kernel $(KERNEL_ELF)
 endif
 
-# Build GRUB ISO for x86-64 (no-op for ARM64)
+# Build GRUB ISO for x86-64 (ARM64 builds only the kernel). It waits for the kernel it
+# packages: under `make -j` it would otherwise copy the previous ELF, or find none (#1144).
 .PHONY: grub-iso
-grub-iso:
+grub-iso: kernel
 ifeq ($(PLATFORM),X86_64)
 	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
 	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
@@ -1462,12 +1484,13 @@ kernel-test:
 	    $(MAKE) --no-print-directory _kernel-test-build
 
 .PHONY: _kernel-test-build
-_kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
+_kernel-test-build: runtime kernel-test-config-check
+	@test -f $(KERNEL_TEST_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
 
 .PHONY: kernel-test-config-check
-kernel-test-config-check:
+kernel-test-config-check: check-kernel-test-build-dir
 	$(call kernel_config_check,Kernel test,$(KERNEL_TEST_BUILD_DIR),$(KERNEL_TEST_BUILD_SIGNATURE))
 
 $(KERNEL_TEST_BUILD_DIR)/Makefile:
@@ -1784,6 +1807,7 @@ help:
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
+	@echo "  test-build-order  Check each kernel configures after the Rust build under -j"
 	@echo "  check-braces   Check braces on changed C lines with clang-tidy"
 	@echo "  test-check-braces  Test the brace check itself (host only)"
 	@echo "  check-tools    Verify required tools are installed"

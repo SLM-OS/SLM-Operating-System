@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, and check the Jetson boot layout.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, check the configure order under `make -j`, and check the Jetson boot layout.
 
 ## Instructions
 
@@ -62,7 +62,19 @@ A `not checked` line exits 0, because those files are outside the configured
 builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone
 reads them for braces by hand.
 
-### 7. Jetson boot layout check
+### 7. Build order check
+```
+make test-build-order
+```
+Checks that each kernel configures after the Rust build under `make -j`, again after
+a flag change wipes its build directory, and that the SD test image and GRUB ISO wait
+for the kernel (#1144). The steps above build serially,
+so they don't cover this. It compiles no kernel code. It deletes each platform's
+`libslm_runtime.a`, and the next build recreates it, so don't run it beside another
+build in the same checkout.
+Treat "All build-order tests passed" as success.
+
+### 8. Jetson boot layout check
 ```
 make test-jetson-uefi-layout
 ```
@@ -83,7 +95,7 @@ so name it in the Notes column and don't treat that check as a pass.
 The build log is at `build/jetson-layout-build.log`. The step leaves a Jetson
 build in `build/kernel`.
 
-### 8. Diff check
+### 9. Diff check
 Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -99,6 +111,7 @@ Summarize results as a table:
 | Test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |
+| Build order check | ✅/❌ | failed checks if any |
 | Jetson layout check | ✅/❌ | failed or skipped checks if any |
 | Artifact check | ✅/❌ | stray files if any |
 
