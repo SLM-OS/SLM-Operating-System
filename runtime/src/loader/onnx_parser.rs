@@ -14,7 +14,7 @@
 
 use super::protobuf::{self, ProtoIter, ParseError, FieldData};
 use super::graph::*;
-use crate::mm::model_loader::LoadError;
+use crate::loader::error::LoadError;
 
 // =============================================================================
 // ONNX protobuf field numbers (from onnx.proto3)

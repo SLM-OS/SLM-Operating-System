@@ -551,6 +551,7 @@ Statistics accumulate across all callers (shell, components) and are accessible 
 | `runtime/src/loader/onnx_parser.rs` | ONNX schema parser |
 | `runtime/src/loader/graph.rs` | Operator graph types |
 | `runtime/src/loader/registry.rs` | Model registry |
+| `runtime/src/loader/error.rs` | `LoadError`, shared with the GGUF loader |
 | `runtime/src/inference/engine.rs` | Inference engine |
 | `runtime/src/inference/ops.rs` | Operator implementations |
 | `runtime/src/inference/gpu.rs` | GPU backend framework |

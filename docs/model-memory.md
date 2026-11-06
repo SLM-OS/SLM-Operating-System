@@ -254,7 +254,7 @@ The allocator uses a spinlock for thread safety:
 
 **Status:** Implemented (April 2026)
 
-The model loader parses ONNX model files, builds an operator graph, allocates weight and workspace memory from the model memory pools, and stores entries in a fixed-size registry. The implementation is split across four Rust modules under `runtime/src/loader/`:
+The model loader parses ONNX model files, builds an operator graph, allocates weight and workspace memory from the model memory pools, and stores entries in a fixed-size registry. The implementation is split across five Rust modules under `runtime/src/loader/`:
 
 | Module | File | Purpose |
 |--------|------|---------|
@@ -262,6 +262,7 @@ The model loader parses ONNX model files, builds an operator graph, allocates we
 | `onnx_parser` | `runtime/src/loader/onnx_parser.rs` | ONNX schema interpreter with hardcoded field numbers from `onnx.proto3` |
 | `graph` | `runtime/src/loader/graph.rs` | Owned operator graph representation (lifetime-free, stored in registry) |
 | `registry` | `runtime/src/loader/registry.rs` | Fixed-size model registry (max 8 models), spinlock-protected |
+| `error` | `runtime/src/loader/error.rs` | `LoadError`, shared with the GGUF loader in `runtime/src/slm/` |
 
 ### Parse Pipeline
 

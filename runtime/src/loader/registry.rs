@@ -7,7 +7,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mm::{self, ModelHandle};
-use crate::mm::model_loader::LoadError;
+use crate::loader::error::LoadError;
 use super::onnx_parser;
 use super::graph::{OperatorGraph, WeightTable, WeightEntry, TensorName, TensorShape, ElemType};
 
