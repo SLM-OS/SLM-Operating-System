@@ -162,7 +162,8 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
              * where the cost and the counters are. The flag itself
              * still flips cleanly — this is informational, not a
              * refusal. */
-            *out_reason = "perf note — ai_mlp tries the GPU per "
+            *out_reason = "perf note — ai_mlp's built-in model (not a "
+                          "runtime one) tries the GPU per "
                           "assign_cpu (~0.23 ms, IRQs masked; 50 ms rate "
                           "limit; CPU fallback) — see `sched stats`";
         }

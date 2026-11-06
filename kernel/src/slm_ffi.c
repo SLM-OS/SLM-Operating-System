@@ -768,9 +768,8 @@ static bool g_post_inherit_double_dispatch_pending
  * dispatch (see comment near the store), so the next allowed dispatch
  * starts at least RATE_LIMIT_NS after the previous one finishes —
  * about 55 ms start-to-start for a 5 ms dispatch with a 50 ms window.
- * Rejected dispatches return -1, and `forward_via_device` already has
- * a silent CPU NEON fallback for that case
- * (kernel/sched/ai/ai_inference.c:280-289).
+ * Rejected dispatches return -1, and `ai_mlp_forward_logits` already
+ * has a silent CPU NEON fallback for that case.
  *
  * Effective worst-case IRQ-off load on the system: in steady state
  * only one CPU at a time wins the try-lock, so the dispatch path

@@ -23,6 +23,8 @@
 #include "fp_context.h"
 #include "gpu_consumer.h"
 #include "runtime_model.h"
+#include "../include/shell_io.h"
+#include "../include/slm_ffi_test.h"
 #endif
 
 /* snprintf is part of the test kernel's runtime (kernel/lib) but isn't
@@ -735,6 +737,58 @@ static uint64_t forward_counting_gpu_attempts(const float *state, float *logits)
     slm_gpu_sched_dispatch_stats(&after, NULL, NULL);
     return after - before;
 }
+
+/* Session output sink: `sched stats` ends with the line the test looks for, after a
+ * long report, so the buffer has to hold all of it. */
+static char sched_stats_buf[8192];
+static size_t sched_stats_len;
+
+static void sched_stats_write(struct shell_io *io, const char *buf, size_t len)
+{
+    (void)io;
+    for (size_t i = 0; i < len && sched_stats_len + 1 < sizeof(sched_stats_buf); i++) {
+        sched_stats_buf[sched_stats_len++] = buf[i];
+    }
+    sched_stats_buf[sched_stats_len] = '\0';
+}
+
+static void sched_stats_flush(struct shell_io *io)
+{
+    (void)io;
+}
+
+static bool sched_stats_is_open(struct shell_io *io)
+{
+    (void)io;
+    return true;
+}
+
+/* Runs `sched stats` in a bound session; returns its result. */
+static int capture_sched_stats(void)
+{
+    struct task *t = task_current();
+    struct shell_session *s = shell_session_alloc();
+    struct shell_io io;
+    int rc;
+
+    if (!s) {
+        return -1;
+    }
+    memset(&io, 0, sizeof(io));
+    io.write = sched_stats_write;
+    io.flush = sched_stats_flush;
+    io.is_open = sched_stats_is_open;
+    s->io = &io;
+    sched_stats_len = 0;
+    sched_stats_buf[0] = '\0';
+
+    shell_session_bind(t, s);
+    rc = shell_execute("sched stats");
+    shell_session_unbind(t);
+    s->io = NULL;
+    shell_session_free(s);
+    return rc;
+}
 #endif
 
 /*
@@ -755,40 +809,48 @@ static void test_sched_gpu_path_skipped_with_runtime_model(void)
     static float logits[AI_SCHED_N_ACTIONS];
     const uint32_t one_bits = 0x3F800000u;
     const uint32_t two_bits = 0x40000000u;
-    const char *reason = NULL;
     uint32_t logit_bits = 0;
-    int rc;
 
     size_t payload_len = build_sched_mlp_payload(two_bits, payload, sizeof(payload));
     TEST_ASSERT_TRUE(payload_len > 0);
     size_t blob_len = build_shell_test_blob(SCHED_MODEL_KIND_MLP, payload, payload_len,
                                             blob, sizeof(blob));
     TEST_ASSERT_TRUE(blob_len > 0);
-
-    rc = gpu_consumer_set(GPU_CONSUMER_SCHED, true, &reason);
-    if (rc != 0) {
-        TEST_IGNORE_MESSAGE("sched GPU toggle not available");
-    }
     memcpy(&state[0], &one_bits, sizeof(one_bits));
 
-    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_MLP, blob, blob_len));
-    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_MLP));
+    bool prev_toggle = gpu_consumer_enabled(GPU_CONSUMER_SCHED);
+    gpu_consumer_test_force(GPU_CONSUMER_SCHED, true);
 
+    int stage_rc = sched_model_stage_blob(SCHED_MODEL_KIND_MLP, blob, blob_len);
+    int activate_rc = sched_model_activate(SCHED_MODEL_KIND_MLP);
     uint64_t with_model = forward_counting_gpu_attempts(state, logits);
     memcpy(&logit_bits, &logits[0], sizeof(logit_bits));
-    int stats_rc = shell_execute("sched stats");
+    int stats_rc = capture_sched_stats();
+    bool line_with_model = strstr(sched_stats_buf, "Runtime MLP:") != NULL;
+    bool section_with_model = strstr(sched_stats_buf, "GPU dispatch (ai_mlp):") != NULL;
 
     int clear_rc = sched_model_clear(SCHED_MODEL_KIND_MLP);
     uint64_t without_model = forward_counting_gpu_attempts(state, logits);
+    int stats_rc_clear = capture_sched_stats();
+    bool line_without_model = strstr(sched_stats_buf, "Runtime MLP:") != NULL;
+    bool section_without_model = strstr(sched_stats_buf, "GPU dispatch (ai_mlp):") != NULL;
 
     /* Assert after cleanup, so a failure can't leak the model or the toggle. */
-    (void)gpu_consumer_set(GPU_CONSUMER_SCHED, false, &reason);
+    gpu_consumer_test_force(GPU_CONSUMER_SCHED, prev_toggle);
 
-    TEST_ASSERT_EQUAL_INT(0, stats_rc);
+    TEST_ASSERT_EQUAL_INT(0, stage_rc);
+    TEST_ASSERT_EQUAL_INT(0, activate_rc);
     TEST_ASSERT_EQUAL_INT(0, clear_rc);
     TEST_ASSERT_EQUAL_UINT64(0, with_model);
     TEST_ASSERT_EQUAL_HEX32(two_bits, logit_bits);
     TEST_ASSERT_EQUAL_UINT64(1, without_model);
+    TEST_ASSERT_EQUAL_INT(0, stats_rc);
+    TEST_ASSERT_EQUAL_INT(0, stats_rc_clear);
+    /* The sections show the capture worked, so a missing line means something. */
+    TEST_ASSERT_TRUE(section_with_model);
+    TEST_ASSERT_TRUE(section_without_model);
+    TEST_ASSERT_TRUE(line_with_model);
+    TEST_ASSERT_FALSE(line_without_model);
 #endif
 }
 

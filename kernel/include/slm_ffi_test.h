@@ -64,8 +64,8 @@ bool slm_gpu_eviction_dispatch_test_within_window(uint64_t now, uint64_t last);
  * `gpu_consumer_set`'s validation (#965 toggle-matrix tests).
  *
  * `gpu_consumer_set(c, true)` returns NODEV when `slm_gpu_available()`
- * is 0, so on QEMU no toggle can be switched on through the public
- * API. This seam stores the flag directly so tests can exercise the
+ * is 0, so on a build with no GPU driver no toggle can be switched on
+ * through the public API. This seam stores the flag directly so tests can exercise the
  * eviction-MLP routing gate on every platform. Defined in
  * `kernel/src/gpu_consumer.c`. Out-of-range `consumer` is ignored.
  * Tests must restore the prior state before returning. */
