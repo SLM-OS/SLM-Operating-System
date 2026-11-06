@@ -355,6 +355,9 @@ QEMU memory:    512M
 QEMU cores:     4
 ```
 
+#### `make test-build-order`
+Checks the configure order under `make -j` for all four kernel variants, using a delayed `cargo` and a stand-in `cmake`, so it compiles no kernel code. See [When a Build Directory Reconfigures](#when-a-build-directory-reconfigures). It uses the real `runtime/target`, so it must not run beside another build in the same checkout.
+
 #### `make check-braces`
 Runs `clang-tidy`'s brace rule on C lines changed since `origin/main`, as the main, test and check-only wide kernel of all four platforms; the wide kernel turns on default-off features such as `NET_SSHD`. It configures each one but compiles nothing. `BRACES_BASE=<ref>` changes the diff base, and `BRACES_ARGS=--all` reports the whole tree. `make test-check-braces` tests the check itself.
 
@@ -442,6 +445,13 @@ variables, not into a single configure rule.
 option and fails if a variant would keep building with a stale
 configuration; `make print-build-signatures` shows the current
 values (#1072).
+
+The configure runs after both the Rust build and the config check have
+finished, because CMake decides at configure time whether to link the
+library. Under
+`make -j`, anything else that uses the build directory must also wait
+for the kernel, as the SD test image and the x86-64 GRUB ISO do.
+`make test-build-order` checks this order for all four variants (#1144).
 
 ### Compiler Flags
 
