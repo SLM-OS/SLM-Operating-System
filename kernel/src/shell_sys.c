@@ -6945,8 +6945,8 @@ oplib_stage_call:
                              "(did you `nvgpu oplib stage` first?)\r\n", rc);
                 return rc;
             }
-            shell_printf("oplib prep-rmsnorm: PREPARED — submit not yet "
-                         "wired (#714 follow-on)\r\n");
+            shell_printf("oplib prep-rmsnorm: PREPARED — not submitted; "
+                         "`dispatch-rmsnorm` also submits\r\n");
             return 0;
         }
         if (strcmp(argv[2], "dispatch-rmsnorm") == 0) {
@@ -7226,7 +7226,7 @@ oplib_stage_call:
                              (unsigned)op_kind);
                 return -1;
             }
-            shell_printf("smoke: op_kind=%u dispatching... ",
+            shell_printf("smoke: op_kind=%u dispatched: ",
                          (unsigned)op_kind);
             if (rc < 0) {
                 shell_printf("FAIL: rc=%d\r\n", rc);
