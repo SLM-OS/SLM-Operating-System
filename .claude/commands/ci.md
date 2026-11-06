@@ -66,10 +66,12 @@ reads them for braces by hand.
 ```
 make test-build-order
 ```
-Checks that each kernel configures after the Rust build under `make -j`, and again
-after a flag change wipes its build directory (#1144). The steps above build serially,
+Checks that each kernel configures after the Rust build under `make -j`, again after
+a flag change wipes its build directory, and that the SD test image and GRUB ISO wait
+for the kernel (#1144). The steps above build serially,
 so they don't cover this. It compiles no kernel code. It deletes each platform's
-`libslm_runtime.a`, and the next build recreates it.
+`libslm_runtime.a`, and the next build recreates it, so don't run it beside another
+build in the same checkout.
 Treat "All build-order tests passed" as success.
 
 ### 8. Jetson boot layout check

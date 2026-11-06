@@ -1360,7 +1360,10 @@ endif
 .PHONY: sdhci-test-img-force
 sdhci-test-img-force:
 
-$(SDHCI_TEST_IMG): sdhci-test-img-force | $(KERNEL_TEST_BUILD_DIR)
+# Order-only on kernel-test: under `make -j` its config check can wipe the directory
+# holding this image. sdhci-test-img-force makes this rule run anyway, so it sees the
+# file as make finds it after the wipe (#1144).
+$(SDHCI_TEST_IMG): sdhci-test-img-force | $(KERNEL_TEST_BUILD_DIR) kernel-test
 	@rm -f $@ $@.tmp
 	@if truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
 		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
@@ -1407,9 +1410,10 @@ else
     QEMU_BOOT_ARG = -kernel $(KERNEL_ELF)
 endif
 
-# Build GRUB ISO for x86-64 (no-op for ARM64)
+# Build GRUB ISO for x86-64 (no-op for ARM64). It waits for the kernel it packages:
+# under `make -j` it would otherwise copy the previous ELF, or find none (#1144).
 .PHONY: grub-iso
-grub-iso:
+grub-iso: kernel
 ifeq ($(PLATFORM),X86_64)
 	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
 	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
