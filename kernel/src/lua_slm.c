@@ -3544,6 +3544,10 @@ static int l_gpu_status(lua_State *L) {
  *
  * Used by interactive Lua scripts (menus, prompts) so they can read user
  * input without each script reimplementing line editing.
+ *
+ * Under `lua-admin` the wait releases the shell mutation lock, like the REPL:
+ * a prompt must not hold it against other sessions, and a holder boosted by
+ * a waiter must not poll ahead of the IDLE tasks on its CPU (#1103).
  */
 static int l_read_line(lua_State *L) {
     if (!L) return 0;
@@ -3551,7 +3555,9 @@ static int l_read_line(lua_State *L) {
      * so scripts that wait at a menu prompt still see their subscribers. */
     lua_msg_drain(L);
     char buf[SHELL_MAX_LINE];
+    bool paused = shell_mutation_pause();
     int n = shell_read_line(buf, (int)sizeof(buf));
+    shell_mutation_resume(paused);
     if (n < 0) {
         lua_pushnil(L);
     } else {

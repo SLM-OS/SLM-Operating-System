@@ -644,7 +644,11 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
          * stays pinned, this loop could starve when net_pump
          * doesn't get scheduled. Today the shell task runs on
          * CPU 0 with net_pump alongside it (TASK_PRIORITY_IDLE),
-         * so a yield reliably hands control back. */
+         * so a yield hands control back as long as this task isn't
+         * above IDLE. A task boosted through a pi_mutex would go
+         * straight back ahead of net_pump (#1103), so callers release
+         * the shell mutation lock before reading
+         * (shell_session_read_raw). */
         yield();
     }
 }

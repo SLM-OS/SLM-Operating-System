@@ -919,7 +919,12 @@ static int slm_stream(int argc, char *argv[])
      * runaway paste can't overrun. */
     for (int line = 0; line < 16; line++) {
         char buf[SHELL_MAX_LINE];
+        /* `slm` is a mutating command: don't wait for input holding the
+         * shell mutation lock (#1103). run_prompt checks the session id
+         * after the lock is back. */
+        bool paused = shell_mutation_pause();
         int n = shell_read_line(buf, sizeof(buf));
+        shell_mutation_resume(paused);
         if (n < 0) {
             shell_puts("[slm] stream: session closed\r\n");
             return -1;
