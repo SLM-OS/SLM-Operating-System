@@ -2,12 +2,11 @@
  * oplib_dispatch.c - Prepare a v7 op for SASS dispatch via the
  * operator library (#714, A.2 follow-on).
  *
- * Composes oplib_pool's GPU-VA lookup, ga10b_gmmu's cbuf
- * allocator, and operator_dispatch's per-op metadata into a single
- * "everything needed to fire this kernel" preparation step. The
- * actual pushbuffer-firing submit lives in the next PR — that one
- * refactors `ga10b_dispatch_v7_pipeline` to accept an explicit
- * ops_v7 array, then calls it with the v7 op this file constructs.
+ * Composes oplib_pool's GPU-VA lookup and staged cbuf with
+ * operator_dispatch's per-op metadata into a single "everything needed
+ * to fire this kernel" preparation step. slm_oplib_dispatch then fires
+ * the resulting v7 op through ga10b_dispatch_v7_pipeline_inline. Nothing
+ * here allocates, because callers hold the IRQs-off dispatch lock.
  */
 
 #include "oplib_dispatch.h"
@@ -19,7 +18,6 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
-#include "nvidia/ga10b_gmmu.h"
 #include "nvidia/ga10b_bringup.h"
 #include "oplib_cold.h"
 #include "nvidia/ga10b_channel_handoff.h"
@@ -60,8 +58,7 @@ static void write_builtin_dims(void *cbuf_cpu,
     bdim[5] = shape->grid_z;    /* 0x14 gridDim.z  */
 }
 
-int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
-                                uint32_t op_kind,
+int slm_oplib_prepare_dispatch(uint32_t op_kind,
                                 uint32_t tier,
                                 uint32_t dtype,
                                 const struct operator_dispatch_args *args,
@@ -89,10 +86,17 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
     int rc = oplib_pool_get_sass_gpu_va(op_kind, tier, dtype,
                                          &sass_va, &sass_size);
     if (rc != 0) {
-        uart_printf("[oplib-dispatch] SASS lookup miss: op_kind=%u "
-                    "tier=%u dtype=%u rc=%d\n",
-                    (unsigned)op_kind, (unsigned)tier,
-                    (unsigned)dtype, rc);
+        /* Once per op: callers hold the IRQs-off dispatch lock (#1037), and
+         * W-series callers fall back to the CPU on every call. */
+        static uint32_t warned_lookup;
+        uint32_t op_bit = 1u << (op_kind & 31u);
+        if ((warned_lookup & op_bit) == 0u) {
+            warned_lookup |= op_bit;
+            uart_printf("[oplib-dispatch] SASS lookup miss: op_kind=%u "
+                        "tier=%u dtype=%u rc=%d\n",
+                        (unsigned)op_kind, (unsigned)tier,
+                        (unsigned)dtype, rc);
+        }
         return -1;
     }
 
@@ -100,17 +104,14 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
      *    the SASS via cbuf[0] reads at offsets 0x160 onward — see
      *    operator_dispatch.h::OPERATOR_CBUF0_BASE.
      *
-     *    Fast path: if the inherited handoff has a pre-staged cbuf
+     *    If the inherited handoff has a pre-staged cbuf
      *    (helper allocated `cbuf_*` fields in the channel's GMMU
      *    pre-kexec), use it directly. The cbuf is reused serially
      *    across dispatches — slm_oplib_dispatch polls the trailing
      *    semaphore before returning, so two dispatches can't race
      *    on the cbuf bytes.
      *
-     *    Slow path: post-kexec ga10b_gmmu_alloc, which requires a
-     *    correct inst_block_phys (currently unreliable on Jetson —
-     *    see oplib_pool.c::oplib_pool_stage_to_gpu for the same
-     *    architectural concern). */
+     *    Otherwise: the cbuf `oplib_pool` allocated at staging time. */
     uint64_t cbuf_va = 0;
     uint64_t cbuf_phys = 0;
     void    *cbuf_cpu = NULL;
@@ -124,10 +125,8 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
             /* #832 path: fall back to `oplib_pool`'s pre-allocated
              * cbuf — populated during `oplib_pool_stage_to_gpu` (so
              * `nvgpu oplib stage` must have run first). Avoids the
-             * old per-dispatch `ga10b_gmmu_alloc` slow path which
-             * (a) leaks a page per dispatch and (b) is unreliable
-             * post-kexec because the W-series FFI passes
-             * inst_block_phys=0 anyway. */
+             * old per-dispatch `ga10b_gmmu_alloc`, which leaked a page
+             * per dispatch and allocated under the dispatch lock. */
             uint64_t pool_cbuf_va  = oplib_pool_cbuf_gpu_va();
             uint64_t pool_cbuf_phys = oplib_pool_cbuf_phys();
             if (pool_cbuf_va != 0 && pool_cbuf_phys != 0) {
@@ -151,19 +150,19 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
                 }
                 return -1;
             } else {
-                /* Last-resort slow path: ga10b_gmmu_alloc. Requires a
-                 * valid inst_block_phys, which the W-series FFI
-                 * doesn't pass today — kept for diag verbs that
-                 * supply one. */
-                rc = ga10b_gmmu_alloc(inst_block_phys, 1u, 0u,
-                                      &cbuf_va, &cbuf_cpu, &cbuf_phys);
-                if (rc < 0) {
-                    uart_printf("[oplib-dispatch] cbuf alloc failed: "
-                                "rc=%d (no helper cbuf, no oplib_pool "
-                                "cbuf, inst_block_phys=0x%lx)\n",
-                                rc, (unsigned long)inst_block_phys);
-                    return -1;
+                /* The pool is staged, or the SASS lookup above would have
+                 * missed, so its cbuf failed at staging, and re-staging
+                 * returns early without retrying it. Callers hold the
+                 * IRQs-off dispatch lock, so don't allocate here, and log
+                 * once. */
+                static bool warned_cbuf;
+                if (!warned_cbuf) {
+                    warned_cbuf = true;
+                    uart_printf("[oplib-dispatch] no cbuf: staging didn't "
+                                "get one, so ops stay on the CPU until "
+                                "reboot\n");
                 }
+                return -1;
             }
         }
     }
@@ -206,11 +205,9 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
     }
     cache_clean_range(cbuf_cpu, 4096);
 
-    /* DSB SY so the cbuf bytes + page-table publication that
-     * ga10b_gmmu_alloc already issued are both visible to the GPU
-     * before any submit consumes the cbuf. The submit-side helper
-     * (next PR) issues its own dsb sy too — this one orders the
-     * data writes relative to the page-table writes. */
+    /* DSB SY so the cbuf bytes are visible to the GPU before any submit
+     * consumes the cbuf. The submit-side helper issues its own dsb sy
+     * too. */
     __asm__ volatile("dsb sy" ::: "memory");
 
     out->shader_gpu_va    = sass_va;
@@ -254,7 +251,6 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
 }
 
 int slm_oplib_dispatch(struct ga10b_bringup *b,
-                       uint64_t inst_block_phys,
                        uint32_t op_kind,
                        uint32_t tier,
                        uint32_t dtype,
@@ -265,7 +261,7 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
     }
 
     struct slm_oplib_dispatch_prep prep;
-    int rc = slm_oplib_prepare_dispatch(inst_block_phys, op_kind,
+    int rc = slm_oplib_prepare_dispatch(op_kind,
                                          tier, dtype, args, &prep);
     if (rc < 0) {
         return rc;
@@ -286,8 +282,12 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
     if (h == NULL || h->qmd_pool_gpu_va == 0) {
         /* Defensive: the inline dispatcher would still fail later
          * on a zero pool VA. Surface here for a clearer error. */
-        uart_puts("[oplib-dispatch] qmd_pool_gpu_va == 0 — "
-                  "channel handoff missing v7 pool resources\n");
+        static bool warned_qmd_pool;
+        if (!warned_qmd_pool) {
+            warned_qmd_pool = true;
+            uart_puts("[oplib-dispatch] qmd_pool_gpu_va == 0 — "
+                      "channel handoff missing v7 pool resources\n");
+        }
         return -1;
     }
     uint64_t placeholder = h->qmd_pool_gpu_va;
@@ -344,14 +344,12 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 
-int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
-                                uint32_t op_kind,
+int slm_oplib_prepare_dispatch(uint32_t op_kind,
                                 uint32_t tier,
                                 uint32_t dtype,
                                 const struct operator_dispatch_args *args,
                                 struct slm_oplib_dispatch_prep *out)
 {
-    (void)inst_block_phys;
     (void)op_kind;
     (void)tier;
     (void)dtype;
@@ -363,14 +361,12 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
 }
 
 int slm_oplib_dispatch(struct ga10b_bringup *b,
-                       uint64_t inst_block_phys,
                        uint32_t op_kind,
                        uint32_t tier,
                        uint32_t dtype,
                        const struct operator_dispatch_args *args)
 {
     (void)b;
-    (void)inst_block_phys;
     (void)op_kind;
     (void)tier;
     (void)dtype;

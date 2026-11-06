@@ -213,9 +213,10 @@ int slm_gpu_install_handoff(struct ga10b_bringup *b,
                             const struct ga10b_channel_handoff *h);
 
 /* Run `fn(arg)` under the GPU dispatch lock (IRQs masked) and return
- * its result. For short GPU address-space updates that must not
- * interleave with a dispatch on another CPU (page-table writes, TLB
- * invalidates). `fn` must not print, allocate or take the lock.
+ * its result. For work that must not interleave with a dispatch on another
+ * CPU: GPU address-space updates (page-table writes, TLB invalidates) and the
+ * shell verbs that use the channel. IRQs stay masked throughout, so `fn` must not
+ * allocate or take the lock, and shouldn't print on any repeated path.
  * Defined in kernel/src/slm_ffi.c. */
 int slm_gpu_call_locked(int (*fn)(void *), void *arg);
 

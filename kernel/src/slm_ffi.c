@@ -701,12 +701,17 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * doesn't take the lock.
  *
  * Note: the `nvgpu` shell command (kernel/src/shell_sys.c) keeps
- * its own function-local `struct ga10b_bringup b` that's separate
- * from these globals. Both ultimately mutate `g_handoff`, so a
- * `nvgpu channel` from the shell raced against an `slm_gpu_*`
- * call would still race. The shell command is operator-driven
- * single-shot diagnostic and not meant to interleave with FFI
- * dispatch; documenting rather than locking that path. */
+ * its own `struct ga10b_bringup` that's separate from these globals.
+ * Its verbs that submit work or use the shared cbuf and scratch slots
+ * take this lock, staging and reading back inside it (#1111). Bring-up
+ * and diagnostic verbs that change channel, page-table or engine state
+ * don't: `inherit`, `channel`, `test`, `run` (includes a smoke-test
+ * submit), `oplib stage`, `rebuild-gmmu`, the `gmmu` allocation verbs
+ * (`alloc-page`, `alloc-page-synth`, `alloc-multi-synth`, `reuse-synth`),
+ * `engine-clear`, the FECS verbs and `nvgpu cold`, plus the GMMU allocations in `oplib
+ * prep-rmsnorm` before its locked prepare. They print, poll or allocate,
+ * so they can't simply run under it. They're not meant to run alongside
+ * FFI dispatch, and #1143 tracks them. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 
 /* Per-kind bringup state. One slot per `enum ga10b_pipeline_kind`
@@ -1919,8 +1924,7 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
             .eps_bits     = eps_bits,
         },
     };
-    int rc = slm_oplib_dispatch(b, 0,
-                                 SLM_GPU_OP_RMSNORM,
+    int rc = slm_oplib_dispatch(b, SLM_GPU_OP_RMSNORM,
                                  SLM_GPU_TIER_SIMT,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);
@@ -1994,8 +1998,7 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
             .n           = n,
         },
     };
-    int rc = slm_oplib_dispatch(b, 0,
-                                 SLM_GPU_OP_SWIGLU,
+    int rc = slm_oplib_dispatch(b, SLM_GPU_OP_SWIGLU,
                                  SLM_GPU_TIER_SIMT,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);
@@ -2095,8 +2098,7 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
             .seq_len    = seq_len,
         },
     };
-    int rc = slm_oplib_dispatch(b, 0,
-                                 SLM_GPU_OP_GQA_ATTN,
+    int rc = slm_oplib_dispatch(b, SLM_GPU_OP_GQA_ATTN,
                                  SLM_GPU_TIER_SIMT,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);
@@ -2173,8 +2175,7 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
             .n              = n,
         },
     };
-    int rc = slm_oplib_dispatch(b, 0,
-                                 SLM_GPU_OP_Q4K_DOT,
+    int rc = slm_oplib_dispatch(b, SLM_GPU_OP_Q4K_DOT,
                                  SLM_GPU_TIER_SIMT,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);
@@ -2246,8 +2247,7 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
             .table_row_bytes  = table_row_bytes,
         },
     };
-    int rc = slm_oplib_dispatch(b, 0,
-                                 SLM_GPU_OP_EMBEDDING,
+    int rc = slm_oplib_dispatch(b, SLM_GPU_OP_EMBEDDING,
                                  SLM_GPU_TIER_SIMT,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);

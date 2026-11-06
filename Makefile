@@ -1595,8 +1595,13 @@ check-braces:
 test-check-braces:
 	@bash scripts/tests/test-check-c-braces.sh
 
+.PHONY: check-gpu-shell-lock
+check-gpu-shell-lock:
+	@python3 scripts/check-gpu-shell-lock.py
+	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)
