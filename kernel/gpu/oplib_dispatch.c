@@ -88,11 +88,12 @@ int slm_oplib_prepare_dispatch(uint32_t op_kind,
     int rc = oplib_pool_get_sass_gpu_va(op_kind, tier, dtype,
                                          &sass_va, &sass_size);
     if (rc != 0) {
-        /* Once only: callers hold the IRQs-off dispatch lock (#1037), and
+        /* Once per op: callers hold the IRQs-off dispatch lock (#1037), and
          * W-series callers fall back to the CPU on every call. */
-        static bool warned_lookup;
-        if (!warned_lookup) {
-            warned_lookup = true;
+        static uint32_t warned_lookup;
+        uint32_t op_bit = 1u << (op_kind & 31u);
+        if ((warned_lookup & op_bit) == 0u) {
+            warned_lookup |= op_bit;
             uart_printf("[oplib-dispatch] SASS lookup miss: op_kind=%u "
                         "tier=%u dtype=%u rc=%d\n",
                         (unsigned)op_kind, (unsigned)tier,
@@ -283,8 +284,12 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
     if (h == NULL || h->qmd_pool_gpu_va == 0) {
         /* Defensive: the inline dispatcher would still fail later
          * on a zero pool VA. Surface here for a clearer error. */
-        uart_puts("[oplib-dispatch] qmd_pool_gpu_va == 0 — "
-                  "channel handoff missing v7 pool resources\n");
+        static bool warned_qmd_pool;
+        if (!warned_qmd_pool) {
+            warned_qmd_pool = true;
+            uart_puts("[oplib-dispatch] qmd_pool_gpu_va == 0 — "
+                      "channel handoff missing v7 pool resources\n");
+        }
         return -1;
     }
     uint64_t placeholder = h->qmd_pool_gpu_va;

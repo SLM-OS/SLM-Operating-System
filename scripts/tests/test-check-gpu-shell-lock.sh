@@ -110,6 +110,45 @@ int verb(void)
 }
 C
 
+expect "direct call to a callback also run by the lock fails" 1 "run_locked_cb called directly" <<'C'
+static int run_locked_cb(void *arg)
+{
+    return slm_oplib_dispatch(arg, 0, 0, 0);
+}
+int verb(void)
+{
+    (void)slm_gpu_call_locked(run_locked_cb, 0);
+    return run_locked_cb(0);
+}
+C
+
+for fn in shell_printf shell_puts uart_printf uart_puts; do
+    expect "$fn inside a callback fails" 1 "run_locked_cb calls $fn" <<C
+static int run_locked_cb(void *arg)
+{
+    $fn("x");
+    return 0;
+}
+int verb(void)
+{
+    return slm_gpu_call_locked(run_locked_cb, 0);
+}
+C
+done
+
+expect "printing after the lock passes" 0 - <<'C'
+static int run_locked_cb(void *arg)
+{
+    return slm_oplib_dispatch(arg, 0, 0, 0);
+}
+int verb(void)
+{
+    int rc = slm_gpu_call_locked(run_locked_cb, 0);
+    shell_printf("rc=%d", rc);
+    return rc;
+}
+C
+
 expect "comments and strings don't count" 0 - <<'C'
 /* slm_oplib_dispatch(b) used to be called here */
 int verb(void)

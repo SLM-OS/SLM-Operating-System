@@ -705,9 +705,10 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * Its verbs that submit work or use the shared cbuf and scratch slots
  * take this lock, staging and reading back inside it (#1111). Bring-up
  * and diagnostic verbs that change channel, page-table or engine state
- * don't: `inherit`, `channel`, `run` (includes a smoke-test submit),
- * `oplib stage`, `rebuild-gmmu`, `gmmu alloc-page`, `engine-clear`, the
- * FECS verbs and `nvgpu cold`, plus the GMMU allocations in `oplib
+ * don't: `inherit`, `channel`, `test`, `run` (includes a smoke-test
+ * submit), `oplib stage`, `rebuild-gmmu`, the `gmmu` allocation verbs
+ * (`alloc-page`, `alloc-page-synth`, `alloc-multi-synth`, `reuse-synth`),
+ * `engine-clear`, the FECS verbs and `nvgpu cold`, plus the GMMU allocations in `oplib
  * prep-rmsnorm` before its locked prepare. They print, poll or allocate,
  * so they can't simply run under it. They're not meant to run alongside
  * FFI dispatch, and #1143 tracks them. */

@@ -7,7 +7,8 @@ time shows it: the race needs real hardware with a consumer running.
 
 In kernel/src/shell_sys.c, each function in CHANNEL_FUNCTIONS may only be called
 from a function named *_locked_cb, and each of those must be passed to
-slm_gpu_call_locked.
+slm_gpu_call_locked and never called directly. A callback must not print itself:
+IRQs are masked, so verbs print after it returns.
 
 Exit status: 0 clean, 1 violations, 2 usage. Tested by
 scripts/tests/test-check-gpu-shell-lock.sh.
@@ -30,6 +31,8 @@ CHANNEL_FUNCTIONS = (
     "ga10b_bringup_set_input_fill",
 )
 CALL = re.compile(r"\b(" + "|".join(CHANNEL_FUNCTIONS) + r")\s*\(")
+PRINT = re.compile(r"\b(shell_printf|shell_puts|uart_printf|uart_puts)\s*\(")
+DIRECT = re.compile(r"\b(\w+_locked_cb)\s*\(")
 # A column-0 line up to its first "(": a function's return type and name, or
 # just its name when the type is on the line above.
 DEFINITION = re.compile(r"^(?:[A-Za-z_][\w\s\*]*[\s\*])?([A-Za-z_]\w*)\s*\(")
@@ -58,6 +61,14 @@ def check(path):
             if current is None or not current.endswith("_locked_cb"):
                 problems.append(f"{path}:{number}: {call[1]} called from "
                                 f"{current}, not a *_locked_cb")
+        if current is not None and current.endswith("_locked_cb"):
+            for call in PRINT.finditer(line):
+                problems.append(f"{path}:{number}: {current} calls {call[1]} "
+                                "with IRQs masked")
+        if not definition:
+            for call in DIRECT.finditer(line):
+                problems.append(f"{path}:{number}: {call[1]} called directly, "
+                                "not through slm_gpu_call_locked")
     for name in sorted(callbacks):
         if not re.search(r"\bslm_gpu_call_locked\s*\(\s*" + name + r"\s*,", source):
             problems.append(f"{path}: {name} isn't run by slm_gpu_call_locked")

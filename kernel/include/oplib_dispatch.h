@@ -55,10 +55,10 @@ struct slm_oplib_dispatch_prep {
     uint32_t barrier_count;
 };
 
-/* Prepare a v7 op for SASS dispatch. Allocates a cbuf page via
- * `ga10b_gmmu_alloc` (Jetson-only), populates it from `args` via
- * the registered cbuf-args builder, looks up the SASS GPU VA, and
- * computes the launch shape. Returns 0 on success and fills `out`.
+/* Prepare a v7 op for SASS dispatch. Takes the cbuf page
+ * (helper-published, else the one `oplib_pool` staged; Jetson-only),
+ * populates it from `args` via the registered cbuf-args builder, looks
+ * up the SASS GPU VA, and computes the launch shape. Returns 0 on success and fills `out`.
  *
  * `tier` and `dtype` follow the operator-library schema (see
  * kernel/include/gpu_handoff.h::SLM_GPU_TIER_* and

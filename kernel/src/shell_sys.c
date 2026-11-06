@@ -5986,7 +5986,8 @@ static int ce_smoke_locked_cb(void *arg)
     struct ce_smoke_run *r = arg;
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
 
-    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0) {
+    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
         r->not_ready = true;
         return -1;
     }
@@ -6026,7 +6027,8 @@ static int weights_readback_locked_cb(void *arg)
     struct weights_readback_run *r = arg;
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
 
-    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0) {
+    if (h == NULL || h->shader_phys == 0 || h->shader_gpu_va == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
         r->not_ready = true;
         return -1;
     }
@@ -7099,7 +7101,7 @@ oplib_stage_call:
              * (2 B); positions is batch int32 (4 B). cos_sin is the
              * precomputed (cos, sin) lookup table for one position:
              * head_dim/2 pairs × 2 floats per pair × 4 B = head_dim
-             * × 4 B. The fill loop below over-writes 2× this for
+             * × 4 B. The fill loop in oplib_rope_locked_cb over-writes 2× this for
              * convenience (head_dim * 8 B with both cos and sin set
              * to identity at every index); the kernel only reads
              * the first head_dim/2 pairs, so the extra writes are
