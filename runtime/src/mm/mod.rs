@@ -3,7 +3,6 @@
 //! This module provides:
 //! - Model memory allocator for AI weights and inference workspace
 //! - GPU memory mapping support
-//! - Model loader skeleton (full implementation in Phase 5)
 //!
 //! See `docs/model-memory.md` for design documentation.
 

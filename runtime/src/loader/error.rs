@@ -19,8 +19,6 @@ pub enum LoadError {
     ModelTooLarge,
     /// Model data is corrupted
     CorruptedData,
-    /// Feature not implemented
-    NotImplemented,
     /// Registry index does not point at an active slot. Distinct from
     /// `InvalidFormat` so swap_model can report "no model in this slot"
     /// without conflating it with a malformed payload.
@@ -53,8 +51,8 @@ impl From<AllocError> for LoadError {
 mod tests {
     use super::*;
 
-    /// Callers tell a real out-of-memory from a stale handle or an allocator bug by
-    /// this mapping, so each `AllocError` has to stay in its own group.
+    /// Today's callers only act on some of these, but the mapping keeps a real
+    /// out-of-memory, a stale handle and an allocator bug apart for any that need to.
     #[test]
     fn alloc_errors_keep_their_meaning() {
         let cases = [
