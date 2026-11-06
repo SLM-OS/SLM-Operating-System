@@ -2,12 +2,11 @@
  * oplib_dispatch.c - Prepare a v7 op for SASS dispatch via the
  * operator library (#714, A.2 follow-on).
  *
- * Composes oplib_pool's GPU-VA lookup, ga10b_gmmu's cbuf
- * allocator, and operator_dispatch's per-op metadata into a single
- * "everything needed to fire this kernel" preparation step. The
- * actual pushbuffer-firing submit lives in the next PR — that one
- * refactors `ga10b_dispatch_v7_pipeline` to accept an explicit
- * ops_v7 array, then calls it with the v7 op this file constructs.
+ * Composes oplib_pool's GPU-VA lookup and staged cbuf with
+ * operator_dispatch's per-op metadata into a single "everything needed
+ * to fire this kernel" preparation step. slm_oplib_dispatch then fires
+ * the resulting v7 op through ga10b_dispatch_v7_pipeline_inline. Nothing
+ * here allocates, because callers hold the IRQs-off dispatch lock.
  */
 
 #include "oplib_dispatch.h"
@@ -19,7 +18,6 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
-#include "nvidia/ga10b_gmmu.h"
 #include "nvidia/ga10b_bringup.h"
 #include "oplib_cold.h"
 #include "nvidia/ga10b_channel_handoff.h"

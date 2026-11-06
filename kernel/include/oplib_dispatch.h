@@ -15,13 +15,8 @@
  *   5. Construct a v7 op struct ready to feed into the existing
  *      v7-pipeline dispatch loop.
  *
- * Step 6 (actually submitting the pushbuffer + polling the
- * semaphore) requires the v7 dispatch loop to accept an explicit
- * ops_v7 array parameter (currently it reads from
- * g_handoff.pipeline_ops_phys, which the Linux pre-kexec helper
- * stages). That refactor is the next-PR follow-on; until then,
- * `slm_oplib_prepare_dispatch` is the integration test surface
- * for everything up to "ready to fire".
+ * Step 6 (submitting the pushbuffer and polling the semaphore) is
+ * `slm_oplib_dispatch`, through `ga10b_dispatch_v7_pipeline_inline`.
  *
  * Jetson-only. On other platforms the function compiles to a stub
  * that returns -1 (no GA10B GMMU, no operator library staging).
