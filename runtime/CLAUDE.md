@@ -16,6 +16,13 @@ runtime/
     ├── kernel_ffi.rs    # FFI declarations and safe wrappers
     ├── log.rs           # Logging infrastructure (via UART FFI)
     ├── msg_router.rs    # Topic-based pub/sub message router (FFI)
+    ├── loader/
+    │   ├── mod.rs       # Model loader module
+    │   ├── protobuf.rs  # Protobuf wire format parser
+    │   ├── onnx_parser.rs # ONNX schema parser
+    │   ├── graph.rs     # Operator graph types
+    │   ├── registry.rs  # Model registry
+    │   └── error.rs     # LoadError
     ├── mm/
     │   ├── mod.rs       # Memory management module
     │   └── model_mem.rs # Model memory allocator (weight/workspace pools)

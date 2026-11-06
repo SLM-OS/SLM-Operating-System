@@ -51,8 +51,8 @@ impl From<AllocError> for LoadError {
 mod tests {
     use super::*;
 
-    /// Today's callers only act on some of these, but the mapping keeps a real
-    /// out-of-memory, a stale handle and an allocator bug apart for any that need to.
+    /// No caller acts on these yet, but the mapping keeps a real out-of-memory, a
+    /// stale handle and an allocator bug apart for any that need to.
     #[test]
     fn alloc_errors_keep_their_meaning() {
         let cases = [
