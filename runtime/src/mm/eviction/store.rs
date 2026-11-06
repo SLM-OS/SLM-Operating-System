@@ -236,3 +236,126 @@ pub fn active_blob(kind: BlobKind) -> Option<ParsedBlob> {
     let _g = SpinGuard::new();
     unsafe { (*store_ref(kind)).active.clone() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::blob::build_test_blob;
+    use super::*;
+
+    const KIND: BlobKind = BlobKind::Mlp;
+
+    fn stage(payload: &[u8]) {
+        assert_eq!(stage_blob(&build_test_blob(KIND, payload)), Ok(KIND));
+    }
+
+    fn active_payload() -> alloc::vec::Vec<u8> {
+        active_blob(KIND).expect("no active blob").payload
+    }
+
+    fn rollback_checksum() -> Option<u32> {
+        status(KIND).rollback.map(|meta| meta.checksum)
+    }
+
+    #[test]
+    fn stage_rejects_a_corrupt_blob() {
+        reset();
+        let mut bytes = build_test_blob(KIND, b"payload");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        assert_eq!(
+            stage_blob(&bytes),
+            Err(StoreError::Parse(BlobError::ChecksumMismatch))
+        );
+        assert!(staged_blob(KIND).is_none());
+        assert_eq!(status(KIND).state, SlotState::Empty);
+        reset();
+    }
+
+    /// Two activations leave the older blob in the rollback slot. Rollback swaps the
+    /// two slots rather than emptying one, so a second rollback undoes the first and
+    /// never returns `NoRollbackBlob`. The kernel's `sched model` store does the same.
+    #[test]
+    fn rollback_swaps_active_and_prior_blob() {
+        reset();
+        stage(b"first");
+        activate(KIND).unwrap();
+        assert_eq!(rollback_checksum(), None);
+
+        stage(b"second");
+        activate(KIND).unwrap();
+        assert_eq!(active_payload(), b"second");
+        let first = rollback_checksum().expect("first blob should be kept for rollback");
+
+        rollback(KIND).unwrap();
+        assert_eq!(active_payload(), b"first");
+        assert_eq!(status(KIND).state, SlotState::RolledBack);
+        let second = rollback_checksum().expect("second blob should be kept for undo");
+        assert_ne!(first, second);
+
+        rollback(KIND).unwrap();
+        assert_eq!(active_payload(), b"second");
+        assert_eq!(rollback_checksum(), Some(first));
+        reset();
+    }
+
+    #[test]
+    fn rollback_needs_a_prior_blob() {
+        reset();
+        assert_eq!(rollback(KIND), Err(StoreError::NoRollbackBlob));
+
+        stage(b"only");
+        assert_eq!(rollback(KIND), Err(StoreError::NoRollbackBlob));
+        activate(KIND).unwrap();
+        assert_eq!(rollback(KIND), Err(StoreError::NoRollbackBlob));
+        assert_eq!(active_payload(), b"only");
+        reset();
+    }
+
+    #[test]
+    fn activate_needs_a_staged_blob() {
+        reset();
+        assert_eq!(activate(KIND), Err(StoreError::NoStagedBlob));
+
+        stage(b"first");
+        activate(KIND).unwrap();
+        // Activating consumes the staged blob, so repeating it changes nothing.
+        assert_eq!(activate(KIND), Err(StoreError::NoStagedBlob));
+        assert_eq!(active_payload(), b"first");
+        assert_eq!(rollback_checksum(), None);
+        reset();
+    }
+
+    #[test]
+    fn rollback_discards_a_staged_blob() {
+        reset();
+        for payload in [&b"first"[..], &b"second"[..]] {
+            stage(payload);
+            activate(KIND).unwrap();
+        }
+        stage(b"third");
+
+        rollback(KIND).unwrap();
+        assert!(staged_blob(KIND).is_none());
+        assert_eq!(activate(KIND), Err(StoreError::NoStagedBlob));
+        reset();
+    }
+
+    #[test]
+    fn clear_empties_only_its_own_kind() {
+        reset();
+        for payload in [&b"first"[..], &b"second"[..]] {
+            stage(payload);
+            activate(KIND).unwrap();
+        }
+        stage(b"third");
+        let other = BlobKind::CacheusConfig;
+        stage_blob(&build_test_blob(other, b"other")).unwrap();
+
+        clear(KIND);
+        let cleared = status(KIND);
+        assert_eq!(cleared.state, SlotState::Empty);
+        assert!(cleared.staged.is_none() && cleared.active.is_none() && cleared.rollback.is_none());
+        assert!(staged_blob(other).is_some());
+        reset();
+    }
+}
