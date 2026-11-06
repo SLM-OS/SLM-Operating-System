@@ -1333,8 +1333,8 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * `attempts` = calls into `slm_gpu_run_sched_inference` (one per
  * `ai_mlp` forward pass while `gpu use sched` is on and no runtime
  * model is active); `ok` = passes served by the GPU; `rate_limited` =
- * fallbacks rejected by the 50 ms window. The remaining `attempts - ok - rate_limited` fell
- * back on a downstream error. Attempts are counted on every platform
+ * fallbacks rejected by the 50 ms window. The remaining
+ * `attempts - ok - rate_limited` fell back on a downstream error. Attempts are counted on every platform
  * (the non-Jetson stub counts and fails). Any out pointer may be
  * NULL.
  *

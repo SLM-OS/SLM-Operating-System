@@ -701,7 +701,7 @@ Validates the filesystem stack including block device abstraction, RAM disk driv
 
 ### Shell Tests (`kernel/tests/test_shell.c`)
 
-Validates shell command dispatch, argument parsing, working directory management, path resolution, file utility commands, and the file-driven help system. Tests run via Unity framework (106 tests total).
+Validates shell command dispatch, argument parsing, working directory management, path resolution, file utility commands, and the file-driven help system. Tests run via Unity framework (238 tests total).
 
 #### Scheduler Runtime Model Tests
 

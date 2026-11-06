@@ -756,8 +756,8 @@ static bool g_post_inherit_double_dispatch_pending
  *
  * `gpu use sched on` with `ai_mlp` and no runtime model active invokes
  * `slm_gpu_run_sched_inference` from every `ai_mlp_assign_cpu` call —
- * i.e. every task_create / steal across all six CPUs. Each dispatch holds `g_gpu_dispatch_lock` IRQ-
- * off for ~5 ms; a task burst piles up dozens of waiters and starves
+ * i.e. every task_create / steal across all six CPUs. Each dispatch
+ * holds `g_gpu_dispatch_lock` IRQ-off for ~5 ms; a task burst piles up dozens of waiters and starves
  * timer ticks / RX-stall watchdogs / shell scheduling enough to wedge
  * the box (telnet stops, serial stops, hard power-cycle required —
  * 2026-04-27 jetson-nano-2 reproducer).
