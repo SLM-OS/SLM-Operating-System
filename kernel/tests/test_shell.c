@@ -18,6 +18,12 @@
 #include "../include/slm_ffi.h"
 #include "../include/help.h"
 #include "ai_types.h"
+#ifdef CONFIG_AI_SCHEDULER
+#include "ai_inference.h"
+#include "fp_context.h"
+#include "gpu_consumer.h"
+#include "runtime_model.h"
+#endif
 
 /* snprintf is part of the test kernel's runtime (kernel/lib) but isn't
  * pulled in by the headers above. Declare it once for all tests that
@@ -712,6 +718,77 @@ static void test_shell_cmd_sched_model_lifecycle(void)
     shell_execute("rm /mnt/files/test-sched-ppo-b.blob");
     shell_execute("rm /mnt/files/test-sched-config-a.blob");
     shell_execute("rm /mnt/files/test-sched-config-b.blob");
+#endif
+}
+
+#ifdef CONFIG_AI_SCHEDULER
+/* One forward pass; returns how many GPU attempts it made. */
+static uint64_t forward_counting_gpu_attempts(const float *state, float *logits)
+{
+    uint64_t before = 0;
+    uint64_t after = 0;
+
+    slm_gpu_sched_dispatch_stats(&before, NULL, NULL);
+    FP_CONTEXT_SAVE();
+    ai_mlp_forward_logits(state, logits);
+    FP_CONTEXT_RESTORE();
+    slm_gpu_sched_dispatch_stats(&after, NULL, NULL);
+    return after - before;
+}
+#endif
+
+/*
+ * Test (#1113): an active runtime MLP keeps every pass off the GPU, whose
+ * pipeline holds the built-in weights. Off Jetson the stub still counts
+ * attempts, so the order can be checked with no GPU. The floats move as bit
+ * patterns: the runtime model's weights are all zero except a path from
+ * state[0] to logits[0] that multiplies by 2.0.
+ */
+static void test_sched_gpu_path_skipped_with_runtime_model(void)
+{
+#ifndef CONFIG_AI_SCHEDULER
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#else
+    static uint8_t payload[530000];
+    static uint8_t blob[530100];
+    static float state[AI_STATE_DIM];
+    static float logits[AI_SCHED_N_ACTIONS];
+    const uint32_t one_bits = 0x3F800000u;
+    const uint32_t two_bits = 0x40000000u;
+    const char *reason = NULL;
+    uint32_t logit_bits = 0;
+    int rc;
+
+    size_t payload_len = build_sched_mlp_payload(two_bits, payload, sizeof(payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    size_t blob_len = build_shell_test_blob(SCHED_MODEL_KIND_MLP, payload, payload_len,
+                                            blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+
+    rc = gpu_consumer_set(GPU_CONSUMER_SCHED, true, &reason);
+    if (rc != 0) {
+        TEST_IGNORE_MESSAGE("sched GPU toggle not available");
+    }
+    memcpy(&state[0], &one_bits, sizeof(one_bits));
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_MLP, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_MLP));
+
+    uint64_t with_model = forward_counting_gpu_attempts(state, logits);
+    memcpy(&logit_bits, &logits[0], sizeof(logit_bits));
+    int stats_rc = shell_execute("sched stats");
+
+    int clear_rc = sched_model_clear(SCHED_MODEL_KIND_MLP);
+    uint64_t without_model = forward_counting_gpu_attempts(state, logits);
+
+    /* Assert after cleanup, so a failure can't leak the model or the toggle. */
+    (void)gpu_consumer_set(GPU_CONSUMER_SCHED, false, &reason);
+
+    TEST_ASSERT_EQUAL_INT(0, stats_rc);
+    TEST_ASSERT_EQUAL_INT(0, clear_rc);
+    TEST_ASSERT_EQUAL_UINT64(0, with_model);
+    TEST_ASSERT_EQUAL_HEX32(two_bits, logit_bits);
+    TEST_ASSERT_EQUAL_UINT64(1, without_model);
 #endif
 }
 
@@ -4108,6 +4185,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_eviction_model_status);
     RUN_TEST(test_shell_cmd_eviction_model_lifecycle);
     RUN_TEST(test_shell_cmd_sched_model_lifecycle);
+    RUN_TEST(test_sched_gpu_path_skipped_with_runtime_model);
     RUN_TEST(test_shell_cmd_sched_thresholds_lifecycle);
     RUN_TEST(test_shell_cmd_sched_rebalance_lifecycle);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);

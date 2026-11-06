@@ -8364,6 +8364,13 @@ static void sched_print_gpu_stats(void)
 #endif
     shell_printf("  Toggle:       sched=%s\r\n",
                  gpu_consumer_enabled(GPU_CONSUMER_SCHED) ? "on" : "off");
+    /* The GPU pipeline holds the built-in weights, so an active runtime
+     * model keeps every pass on the CPU (#1113). */
+    struct sched_model_status model;
+    if (sched_model_status(SCHED_MODEL_KIND_MLP, &model) == 0 &&
+        model.has_active) {
+        shell_puts("  Runtime MLP:  active, all passes on the CPU\r\n");
+    }
 }
 #endif
 

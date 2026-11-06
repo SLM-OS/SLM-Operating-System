@@ -599,7 +599,8 @@ void slm_gpu_eviction_dispatch_stats_reset(void)
  * Same shape as the eviction set above, minus `oversize` and rows:
  * the sched input is always one AI_STATE_DIM state vector.
  * `attempts` counts every entry into `slm_gpu_run_sched_inference`
- * (one per `ai_mlp` forward pass while `gpu use sched` is on); `ok`
+ * (one per `ai_mlp` forward pass while `gpu use sched` is on and no
+ * runtime model is active); `ok`
  * counts GPU-served passes; `rate_limited` is the subset of
  * fallbacks rejected by the 50 ms window. The rest fell back on a
  * downstream error (no handoff, try-lock contention, breaker, GA10B

@@ -45,7 +45,8 @@
  * write for the helpers:
  *   - sched: ai_mlp_w* / ai_mlp_b* from kernel/sched/ai/ai_weights_mlp.c
  *     (linked when AI_SCHED=ON; AI_WEIGHTS=real swaps in the real set,
- *     matching what the CPU scheduler then runs);
+ *     matching the CPU scheduler's built-in model. ai_mlp_forward_logits
+ *     skips this pipeline while a runtime model is active, #1113);
  *   - eviction: runtime/src/mm/eviction/generated/mlp_policy_f32.rs,
  *     converted to C at build time by cmake/gen_eviction_mlp_weights.cmake
  *     (ga10b_eviction_weights.c, every platform).
