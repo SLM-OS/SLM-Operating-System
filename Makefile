@@ -311,6 +311,13 @@ KERNEL_KEXEC_BUILD_SIGNATURE   = $(strip $(KERNEL_KEXEC_CMAKE_ARGS))
 KERNEL_BZIMAGE_BUILD_SIGNATURE = $(strip $(KERNEL_BZIMAGE_CMAKE_ARGS))
 KERNEL_TEST_BUILD_SIGNATURE    = $(strip $(KERNEL_TEST_CMAKE_ARGS))
 
+# Each _kernel*-build rule configures from its recipe, in a sub-make, so that it
+# happens after `runtime` and the config check have finished. Under `make -j`, a
+# configure prerequisite would run beside them: CMake decides at configure time whether
+# to link the Rust library, so it would link the C stubs on a tree without one (#1144).
+# Make also records whether the build's Makefile exists when it first considers that
+# file, so it would not reconfigure after the check had wiped the directory.
+#
 # Wipe and reconfigure a build directory when its signature changed.
 # $(call kernel_config_check,<label>,<build dir>,<signature>)
 define kernel_config_check
@@ -367,7 +374,8 @@ kernel:
 	    $(MAKE) --no-print-directory _kernel-build
 
 .PHONY: _kernel-build
-_kernel-build: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
+_kernel-build: check-build-dir runtime kernel-config-check
+	$(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -624,7 +632,8 @@ endif
 	    $(MAKE) --no-print-directory _kernel-kexec-build
 
 .PHONY: _kernel-kexec-build
-_kernel-kexec-build: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+_kernel-kexec-build: runtime kernel-kexec-config-check
+	$(MAKE) --no-print-directory $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
@@ -734,7 +743,8 @@ kernel-bzimage-config-check:
 	$(call kernel_config_check,Kernel bzImage,$(KERNEL_BZIMAGE_BUILD_DIR),$(KERNEL_BZIMAGE_BUILD_SIGNATURE))
 
 .PHONY: _kernel-bzimage-build
-_kernel-bzimage-build: runtime kernel-bzimage-config-check $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+_kernel-bzimage-build: runtime kernel-bzimage-config-check
+	$(MAKE) --no-print-directory $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 	@echo "Building kernel (bzImage variant)..."
 	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
 	@echo "Wrapping ELF as Linux bzImage..."
@@ -1068,6 +1078,11 @@ mnist-shaders: $(MNIST_SHADER_OUT)/.stamp
 .PHONY: mnist-shaders-clean
 mnist-shaders-clean:
 	rm -rf $(MNIST_SHADER_OUT)
+
+# Each kernel's configure rule must wait for the Rust build (#1144).
+.PHONY: test-build-order
+test-build-order:
+	@bash scripts/tests/test-build-order.sh
 
 # test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
 # selection and section-table parsing, with nvcc/cuobjdump/readelf
@@ -1462,7 +1477,8 @@ kernel-test:
 	    $(MAKE) --no-print-directory _kernel-test-build
 
 .PHONY: _kernel-test-build
-_kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
+_kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check
+	$(MAKE) --no-print-directory $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
 
