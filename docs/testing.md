@@ -703,6 +703,12 @@ Validates the filesystem stack including block device abstraction, RAM disk driv
 
 Validates shell command dispatch, argument parsing, working directory management, path resolution, file utility commands, and the file-driven help system. Tests run via Unity framework (106 tests total).
 
+#### Scheduler Runtime Model Tests
+
+| Test | Description |
+|------|-------------|
+| test_sched_gpu_path_skipped_with_runtime_model | With `gpu use sched` on, an active runtime MLP serves the pass with no GPU attempt and `sched stats` says so; after clearing, the pass tries the GPU (`AI_SCHED=ON`, #1113) |
+
 #### Command Dispatch Tests
 
 | Test | Description |
@@ -1045,7 +1051,7 @@ Use the `print_test_result()` helper to maintain consistent output format.
 ### Phase 4: CI/CD Integration
 
 - **Status**: Local CI via `/ci` Claude Code slash command
-- `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets, plus a Jetson build with real AI weights, runtime host tests, the C brace check, `make test-build-order` for the configure order under `make -j`, and `make test-jetson-uefi-layout` for boot invariants in the Jetson build that the QEMU test suite doesn't cover
+- `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets, plus a Jetson build with real AI weights, the test suite again with `AI_SCHED=ON`, runtime host tests, the C brace check, `make test-build-order` for the configure order under `make -j`, and `make test-jetson-uefi-layout` for boot invariants in the Jetson build that the QEMU test suite doesn't cover
 - Uses ARM semihosting (ARM64) / `isa-debug-exit` (x86-64) for clean QEMU exit
 - The prior GitHub Actions workflow was retired; the workflow YAMLs were removed from the tree (there is no `.github/workflows/` directory) and the config is archived at `docs/archive/ci-cd.md`.
 

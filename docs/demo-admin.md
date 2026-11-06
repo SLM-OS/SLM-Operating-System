@@ -299,8 +299,9 @@ the GPU. **sched** is wired through `slm_gpu_run_sched_inference`
 (PR-3 of `docs/design/gpu-policy-models.md`): when ON, the active
 `ai_mlp` policy's `ai_mlp_forward_logits` runs on GA10B for every
 `assign_cpu` decision instead of CPU NEON, falling back to CPU
-on dispatch error. The GPU pipeline holds the built-in weights, so
-an activated runtime model keeps every decision on the CPU. Requires the sched-MLP v6 handoff staged via
+on the 50 ms rate limit or a dispatch error. The GPU pipeline holds
+the built-in weights, so an activated runtime model keeps every
+decision on the CPU. Requires the sched-MLP v6 handoff staged via
 `scripts/gpu-kernel-sched-mlp.c --preserve-for-kexec` pre-kexec.
 **eviction** still accepts on/off as operator intent and emits a
 `note: scaffold only …` warning — no eviction policy declares a
