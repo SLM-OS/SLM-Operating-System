@@ -3326,35 +3326,43 @@ static void test_ai_priority_action_skipped_while_inheriting(void)
     t->pi_priority = TASK_PRIORITY_HIGH;
     t->effective_priority = TASK_PRIORITY_HIGH;
     (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
-    TEST_ASSERT_EQUAL_UINT8(TASK_AI_PRIORITY_NONE, t->ai_priority);
+    uint8_t ai_borrowed = t->ai_priority;
 
     t->pi_priority = 0;
     sched_refresh_effective_priority(t);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, t->effective_priority);
+    uint8_t refreshed = t->effective_priority;
 
     /* A floor below the task's own priority borrows nothing. */
     t->pi_priority = TASK_PRIORITY_LOW;
     (void)sched_ai_test_assign_with_action(t, 0, AI_PRIO_RAISE, 0);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->ai_priority);
+    uint8_t ai_low_floor = t->ai_priority;
     t->pi_priority = 0;
     t->ai_priority = TASK_AI_PRIORITY_NONE;
 
     /* Traces log the task's own priority for a decision on a borrowed one. */
     t->pi_priority = TASK_PRIORITY_HIGH;
     t->effective_priority = TASK_PRIORITY_HIGH;
-    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));
+    int32_t trace_borrowed = sched_trace_ai_action_priority(t);
     t->effective_priority = TASK_PRIORITY_CRITICAL; /* deadline boost above it */
-    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, sched_trace_ai_action_priority(t));
+    int32_t trace_boosted = sched_trace_ai_action_priority(t);
     t->pi_priority = TASK_PRIORITY_LOW;
     t->effective_priority = TASK_PRIORITY_NORMAL;
-    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, sched_trace_ai_action_priority(t));
+    int32_t trace_low_floor = sched_trace_ai_action_priority(t);
     t->pi_priority = 0;
     t->ai_priority = TASK_PRIORITY_CRITICAL;
-    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, sched_trace_ai_action_priority(t));
+    int32_t trace_ai_level = sched_trace_ai_action_priority(t);
     t->ai_priority = TASK_AI_PRIORITY_NONE;
     irq_restore(flags);
 
     t->id = 0;
+
+    TEST_ASSERT_EQUAL_UINT8(TASK_AI_PRIORITY_NONE, ai_borrowed);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_NORMAL, refreshed);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, ai_low_floor);
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, trace_borrowed);
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, trace_boosted);
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_NORMAL, trace_low_floor);
+    TEST_ASSERT_EQUAL_INT(TASK_PRIORITY_CRITICAL, trace_ai_level);
 }
 #endif /* CONFIG_AI_SCHEDULER */
 
@@ -3373,29 +3381,34 @@ static void test_inherited_priority_is_floor_on_recompute(void)
     /* No deadline: the base would be LOW. */
     t->pi_priority = TASK_PRIORITY_HIGH;
     scheduler_add_task_to_cpu(t, 0);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->effective_priority);
+    uint8_t no_deadline = t->effective_priority;
     scheduler_remove_task(t);
 
     /* Far deadline, no boost: same floor through the deadline path. */
     task_set_deadline(t, slm_get_time_ns() + 10ULL * 1000000000ULL);
     scheduler_add_task_to_cpu(t, 0);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->effective_priority);
+    uint8_t far_deadline = t->effective_priority;
     scheduler_remove_task(t);
 
     /* Missed deadline: CRITICAL beats the inherited HIGH. */
     task_set_deadline(t, 1);
     scheduler_add_task_to_cpu(t, 0);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
+    uint8_t missed_deadline = t->effective_priority;
     scheduler_remove_task(t);
 
     /* Inheritance over: back to the base. */
     task_set_deadline(t, 0);
     t->pi_priority = 0;
     sched_refresh_effective_priority(t);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, t->effective_priority);
+    uint8_t after_inheritance = t->effective_priority;
 
     irq_restore(flags);
     t->id = 0;
+
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, no_deadline);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, far_deadline);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, missed_deadline);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, after_inheritance);
 }
 
 /*
@@ -3417,17 +3430,17 @@ static void test_reposition_keeps_place_when_order_holds(void)
 
     a->pi_priority = TASK_PRIORITY_LOW;
     sched_reposition_task(a);
-    TEST_ASSERT_EQUAL_PTR(b, a->next);
+    struct task *after_low_floor = a->next;
 
     a->pi_priority = TASK_PRIORITY_HIGH;
     sched_reposition_task(a);
-    TEST_ASSERT_EQUAL_PTR(b, a->next);
+    struct task *after_equal_floor = a->next;
 
     /* A real change still moves it: b now outranks a. */
     a->pi_priority = 0;
     b->pi_priority = TASK_PRIORITY_CRITICAL;
     sched_reposition_task(b);
-    TEST_ASSERT_EQUAL_PTR(a, b->next);
+    struct task *after_real_change = b->next;
 
     scheduler_remove_task(a);
     scheduler_remove_task(b);
@@ -3435,6 +3448,10 @@ static void test_reposition_keeps_place_when_order_holds(void)
     irq_restore(flags);
     a->id = 0;
     b->id = 0;
+
+    TEST_ASSERT_EQUAL_PTR(b, after_low_floor);
+    TEST_ASSERT_EQUAL_PTR(b, after_equal_floor);
+    TEST_ASSERT_EQUAL_PTR(a, after_real_change);
 }
 
 /*
@@ -3452,21 +3469,27 @@ static void test_reposition_only_moves_queued_task(void)
     uint32_t ready_before = sched_cpu_rq(0)->ready_count;
 
     sched_reposition_task(t);
-    TEST_ASSERT_EQUAL_UINT32(ready_before, sched_cpu_rq(0)->ready_count);
+    uint32_t ready_unqueued = sched_cpu_rq(0)->ready_count;
 
     scheduler_add_task_to_cpu(t, 0);
-    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, sched_cpu_rq(0)->ready_count);
+    uint32_t ready_queued = sched_cpu_rq(0)->ready_count;
 
     t->pi_priority = TASK_PRIORITY_CRITICAL;
     sched_reposition_task(t);
-    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, sched_cpu_rq(0)->ready_count);
-    TEST_ASSERT_EQUAL_PTR(t, sched_cpu_rq(0)->head);
-    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
+    uint32_t ready_moved = sched_cpu_rq(0)->ready_count;
+    struct task *head_moved = sched_cpu_rq(0)->head;
+    uint8_t priority_moved = t->effective_priority;
 
     scheduler_remove_task(t);
     t->pi_priority = 0;
     irq_restore(flags);
     t->id = 0;
+
+    TEST_ASSERT_EQUAL_UINT32(ready_before, ready_unqueued);
+    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, ready_queued);
+    TEST_ASSERT_EQUAL_UINT32(ready_before + 1, ready_moved);
+    TEST_ASSERT_EQUAL_PTR(t, head_moved);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, priority_moved);
 }
 
 /*
@@ -3475,7 +3498,7 @@ static void test_reposition_only_moves_queued_task(void)
  * The flags are in NC memory where the platform has it, because they cross CPUs.
  */
 #if !defined(PLATFORM_HAS_NC_MEMORY)
-static volatile uint32_t repos_flags_storage[2];
+static volatile uint32_t repos_flags_storage[5];
 #endif
 
 static void repos_spinner_entry(void *arg)
@@ -3485,24 +3508,28 @@ static void repos_spinner_entry(void *arg)
     flags[0] = 1;
     while (!flags[1]) {
     }
+    flags[2] = 1;
 }
 
-static void repos_reap(struct task *t)
+static void repos_done_entry(void *arg)
 {
-    int timeout = 200000;
+    *(volatile uint32_t *)arg = 1;
+}
 
+/* A task that finished is reaped by the scheduler, so only one whose done flag
+ * is still clear is torn down here, as rq_cleanup does. */
+static void repos_reap(struct task *t, volatile uint32_t *done, bool queued)
+{
     if (!t) {
         return;
     }
-    while (t->state != TASK_TERMINATED && timeout-- > 0) {
-        yield();
+    for (uint32_t ms = 0; queued && !*done && ms < 1000; ms++) {
+        task_sleep_ms(1);
     }
-    if (t->state != TASK_TERMINATED) {
+    if (!*done) {
         scheduler_terminate_task(t);
+        task_destroy(t);
     }
-    /* CPU 1 can still be on this stack in schedule() just after the state flips. */
-    task_sleep_ms(5);
-    task_destroy(t);
 }
 
 /* A tick on CPU 1 can briefly put the spinner at the head of its queue. */
@@ -3526,13 +3553,15 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
         TEST_IGNORE_MESSAGE("Need 2+ CPUs");
     }
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    volatile uint32_t *f = ncmem_alloc(2 * sizeof(uint32_t), sizeof(uint32_t));
+    volatile uint32_t *f = ncmem_alloc(5 * sizeof(uint32_t), sizeof(uint32_t));
     TEST_ASSERT_NOT_NULL(f);
 #else
     volatile uint32_t *f = repos_flags_storage;
 #endif
-    f[0] = 0;
-    f[1] = 0;
+    /* 0: spinner running, 1: release it, 2-4: spinner, peer, holder done. */
+    for (int i = 0; i < 5; i++) {
+        f[i] = 0;
+    }
 
     struct task *spin = task_create_with_priority("pi_spin", repos_spinner_entry, (void *)f,
                                                   TASK_PRIORITY_CRITICAL);
@@ -3545,8 +3574,10 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
     }
     bool spinning = f[0] != 0;
 
-    struct task *peer = task_create_with_priority("pi_peer", nop_entry, NULL, TASK_PRIORITY_NORMAL);
-    struct task *holder = task_create_with_priority("pi_hold", nop_entry, NULL, TASK_PRIORITY_LOW);
+    struct task *peer = task_create_with_priority("pi_peer", repos_done_entry, (void *)&f[3],
+                                                  TASK_PRIORITY_NORMAL);
+    struct task *holder = task_create_with_priority("pi_hold", repos_done_entry, (void *)&f[4],
+                                                    TASK_PRIORITY_LOW);
     bool created = peer && holder;
     struct task *head_before = NULL;
     struct task *head_after = NULL;
@@ -3568,12 +3599,11 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
         priority_after = holder->effective_priority;
     }
 
-    /* Let CPU 1 go before any assert can leave this function. An unstarted
-     * peer or holder is reaped through its never-ran path. */
+    /* Let CPU 1 go before any assert can leave this function. */
     f[1] = 1;
-    repos_reap(spin);
-    repos_reap(peer);
-    repos_reap(holder);
+    repos_reap(spin, &f[2], true);
+    repos_reap(peer, &f[3], created);
+    repos_reap(holder, &f[4], created);
 
     TEST_ASSERT_TRUE(created);
     TEST_ASSERT_TRUE(spinning);
