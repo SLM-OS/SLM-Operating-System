@@ -237,7 +237,7 @@ pub fn active_blob(kind: BlobKind) -> Option<ParsedBlob> {
     unsafe { (*store_ref(kind)).active.clone() }
 }
 
-#[cfg(all(test, feature = "ai_eviction"))]
+#[cfg(test)]
 mod tests {
     use super::super::blob::build_test_blob;
     use super::*;
@@ -254,6 +254,21 @@ mod tests {
 
     fn rollback_checksum() -> Option<u32> {
         status(KIND).rollback.map(|meta| meta.checksum)
+    }
+
+    #[test]
+    fn stage_rejects_a_corrupt_blob() {
+        reset();
+        let mut bytes = build_test_blob(KIND, b"payload");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        assert_eq!(
+            stage_blob(&bytes),
+            Err(StoreError::Parse(BlobError::ChecksumMismatch))
+        );
+        assert!(staged_blob(KIND).is_none());
+        assert_eq!(status(KIND).state, SlotState::Empty);
+        reset();
     }
 
     /// Two activations leave the older blob in the rollback slot. Rollback swaps the
