@@ -377,7 +377,7 @@ kernel:
 	    $(MAKE) --no-print-directory _kernel-build
 
 .PHONY: _kernel-build
-_kernel-build: check-build-dir runtime kernel-config-check
+_kernel-build: runtime kernel-config-check
 	@test -f $(KERNEL_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
@@ -1410,8 +1410,8 @@ else
     QEMU_BOOT_ARG = -kernel $(KERNEL_ELF)
 endif
 
-# Build GRUB ISO for x86-64 (no-op for ARM64). It waits for the kernel it packages:
-# under `make -j` it would otherwise copy the previous ELF, or find none (#1144).
+# Build GRUB ISO for x86-64 (ARM64 builds only the kernel). It waits for the kernel it
+# packages: under `make -j` it would otherwise copy the previous ELF, or find none (#1144).
 .PHONY: grub-iso
 grub-iso: kernel
 ifeq ($(PLATFORM),X86_64)
@@ -1484,7 +1484,7 @@ kernel-test:
 	    $(MAKE) --no-print-directory _kernel-test-build
 
 .PHONY: _kernel-test-build
-_kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check
+_kernel-test-build: runtime kernel-test-config-check
 	@test -f $(KERNEL_TEST_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)

@@ -446,8 +446,9 @@ option and fails if a variant would keep building with a stale
 configuration; `make print-build-signatures` shows the current
 values (#1072).
 
-The wipe and the configure both happen after the Rust library is built,
-because CMake decides at configure time whether to link it. Under
+The configure runs after both the Rust build and the config check have
+finished, because CMake decides at configure time whether to link the
+library. Under
 `make -j`, anything else that uses the build directory must also wait
 for the kernel, as the SD test image and the x86-64 GRUB ISO do.
 `make test-build-order` checks this order for all four variants (#1144).

@@ -14,8 +14,8 @@
 #
 # A stand-in for cmake stops each run at the compile step. It needs the cross compilers
 # and cargo, and it compiles no kernel code. It uses the real runtime/target: it deletes
-# each platform's libslm_runtime.a and leaves one built with AI_SCHED=ON, so it must
-# not overlap another build in the same checkout.
+# each platform's libslm_runtime.a, so it must not overlap another build in the same
+# checkout.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
