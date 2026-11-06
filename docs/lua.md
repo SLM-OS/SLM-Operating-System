@@ -23,7 +23,10 @@ lua-admin        # Full admin/global-control Lua REPL
 session-local / read-mostly bindings intended for multiple interactive
 sessions. `lua-admin` is the serialized surface for global mutators
 such as task control, shell escape, component hot-swap, and telnetd
-control.
+control. The lock is released while a script waits in `slm.read_line()`
+or at the REPL prompt, so another session can change global state during
+the wait. A script must look up models, tasks and other global state
+again after a prompt rather than reuse what it read before.
 
 ### Interactive REPL
 

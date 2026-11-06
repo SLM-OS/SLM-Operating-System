@@ -274,6 +274,17 @@ Validates the deadline-aware scheduler with priority ordering, deadline boost, c
 | test_ffi_set_deadline | slm_task_set_deadline() works via FFI |
 | test_ffi_invalid_task_id | FFI functions return -1 for invalid task IDs |
 
+#### Unit Tests: Inherited Priority (#1103)
+
+| Test | Description |
+|------|-------------|
+| test_inherited_priority_is_floor_on_recompute | `pi_priority` is a floor on every recompute; a deadline boost above it still wins |
+| test_reposition_only_moves_queued_task | `sched_reposition_task` leaves an unqueued task out of the run queue and moves a queued one |
+| test_reposition_keeps_place_when_order_holds | A change that doesn't affect the queue order keeps the task's place; a real one still moves it |
+| test_reposition_moves_task_queued_on_other_cpu | With the holder queued on CPU 1 behind a higher-priority task, a raised floor moves it to the head of CPU 1's queue. Skipped on one CPU |
+| test_ai_priority_action_skipped_while_inheriting | An AI decision on a borrowed priority sets no level and traces log the task's own priority, or a deadline boost above it; a floor below its base borrows nothing (AI_SCHED=ON only) |
+| test_blocking_input_releases_shell_mutex | `getchar`, `shell_session_read_raw`, `slm.read_line` and `slm stream` wait for input without `shell_mutex`, and take it back afterwards (`test_shell_session.c`) |
+
 #### Unit Tests: Core Isolation
 
 | Test | Description |
@@ -380,12 +391,17 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 | test_pi_mutex_lock_unlock | Basic lock/unlock cycle updates locked flag and owner |
 | test_pi_mutex_trylock_success | trylock succeeds when mutex is unlocked |
 | test_pi_mutex_trylock_fail | trylock returns 0 when mutex is already locked (simulates held lock) |
-| test_pi_mutex_priority_preserved | Owner's original priority saved and restored on unlock |
-| test_priority_inheritance_basic | LOW owner boosted to HIGH when HIGH-pri task waits |
+| test_pi_mutex_priority_preserved | An uncontended lock and unlock leaves the owner's priority unchanged |
+| test_pi_boost_survives_requeue | Real tasks: a holder boosted by a blocked waiter keeps the priority across `yield()` re-queues, and loses it on unlock (#1103) |
+| test_pi_boosted_holder_runs_before_medium | Real tasks: with a HIGH task blocked on the mutex, the holder unlocks before a NORMAL task runs (#1103) |
+| test_pi_boost_kept_until_last_mutex_released | A holder of two mutexes keeps the boost through the inner release and loses it with the last (#1103) |
+| test_pi_floor_recorded_when_holder_not_below_waiter | A holder already at the waiter's level, then lowered, stays at the waiter's level after a re-queue (#1103) |
+| test_pi_floor_set_on_handoff_for_remaining_waiters | A new owner by hand-off, then lowered, stays at the level of the waiters still queued (#1103) |
+| test_pi_mutexes_held_count | lock, trylock and unlock keep `task->pi_mutexes_held` in step |
 | test_inversion_count | Verify lock/unlock cycle without waiters doesn't increment inversion count |
 
 **Test Notes:**
-- `test_priority_inheritance_basic` manually simulates PI scenario by creating owner/waiter tasks
+- The #1103 tests run the real `pi_mutex_lock` path with real tasks
 - Verifies priority boost occurs (`effective_priority` changes from LOW to HIGH)
 - Verifies priority restoration on unlock
 - Logs PI events: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`

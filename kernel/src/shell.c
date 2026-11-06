@@ -395,8 +395,9 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
  * happens when a mutating handler like `lua` dispatches another
  * command via shell_execute — e.g. slm.exec / slm.model_preload),
  * skip the acquire. Serialization is still preserved because the
- * outer lock is held for the whole duration; a recursive lock would
- * deadlock since pi_mutex_lock is not re-entrant.
+ * outer lock stays held, except while a handler waits for input
+ * (shell_mutation_pause); a recursive lock would deadlock since
+ * pi_mutex_lock is not re-entrant.
  */
 static int dispatch_cmd(const shell_cmd_t *cmd, int argc, char *argv[])
 {
@@ -718,7 +719,14 @@ int shell_session_read_raw(char *dst, int max_len)
         return n;
     }
 
-    return shell_io_read_buf(s->io, dst, max_len);
+    /* `slm xload` holds the shell mutation lock here, for every chunk that
+     * reaches the backend, and a lua-admin script can run xput-bin with it held.
+     * On TCP this wait yields to net_pump at IDLE, which a holder boosted by a
+     * waiter would never let run (#1103). */
+    bool paused = shell_mutation_pause();
+    int got = shell_io_read_buf(s->io, dst, max_len);
+    shell_mutation_resume(paused);
+    return got;
 }
 
 /*

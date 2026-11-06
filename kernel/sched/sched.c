@@ -725,6 +725,8 @@ uint8_t sched_ai_step_priority(uint8_t current, uint8_t priority_adj)
     return levels[idx];
 }
 
+static uint8_t effective_base_priority(struct task *task);
+
 /*
  * Record an AI decision's priority on the task. Steps from the current
  * effective priority (which already carries any earlier AI level and
@@ -734,6 +736,19 @@ uint8_t sched_ai_step_priority(uint8_t current, uint8_t priority_adj)
 void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
 {
     if (!task || !ai_priority_actions) {
+        return;
+    }
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_invalidate(&task->pi_priority);
+#endif
+    /* While a task runs on a borrowed priority (#1103) its effective priority
+     * says nothing about the task itself: stepping from it would leave the
+     * borrowed level behind as the AI's choice after the mutex is released.
+     * Record no new level. On the usual path scheduler_add_task has already
+     * cleared the old one, so the task has no AI level until its next
+     * placement after the inheritance ends. A floor at or below the task's
+     * own base priority borrows nothing, so the decision goes ahead. */
+    if (task->pi_priority > effective_base_priority(task)) {
         return;
     }
 #if !defined(PLATFORM_HAS_NC_MEMORY)
@@ -765,11 +780,27 @@ static uint8_t effective_base_priority(struct task *task)
 #endif /* CONFIG_AI_SCHEDULER */
 
 /*
+ * Store a recomputed effective priority, never below what the task has
+ * inherited through a pi_mutex (#1103).
+ */
+static void set_effective_priority(struct task *task, uint8_t priority)
+{
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_invalidate(&task->pi_priority);
+#endif
+    task->effective_priority = (task->pi_priority > priority) ? task->pi_priority : priority;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_clean(&task->effective_priority);
+#endif
+}
+
+/*
  * Update a task's effective priority based on deadline proximity.
  *
  * Called when adding a task to the run queue and during scheduler tick.
  * The effective_priority determines scheduling order. The base is the
- * task's priority, or the AI policy's last chosen level (#1069).
+ * task's priority, or the AI policy's last chosen level (#1069). A priority
+ * inherited through a pi_mutex is a floor on the result (#1103).
  */
 static void update_deadline_boost(struct task *task)
 {
@@ -785,11 +816,8 @@ static void update_deadline_boost(struct task *task)
 #endif
 
     if (task->deadline_ns == 0) {
-        /* No deadline - effective priority equals base priority */
-        task->effective_priority = effective_base_priority(task);
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-        cache_clean(&task->effective_priority);
-#endif
+        /* No deadline: the base priority, or the inherited floor if higher */
+        set_effective_priority(task, effective_base_priority(task));
         return;
     }
 
@@ -821,10 +849,12 @@ static void update_deadline_boost(struct task *task)
         /* else: > 100ms remaining, no boost */
     }
 
-    task->effective_priority = boosted;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-    cache_clean(&task->effective_priority);
-#endif
+    set_effective_priority(task, boosted);
+}
+
+void sched_refresh_effective_priority(struct task *task)
+{
+    update_deadline_boost(task);
 }
 
 /*
@@ -1445,6 +1475,87 @@ void scheduler_remove_task(struct task *task)
      * which should be effectively impossible. Log loudly so the dequeue
      * miss is visible if it ever happens. */
     WARN("scheduler_remove_task: gave up after 8 retries on task '%s'",
+         task->name);
+}
+
+/*
+ * Recompute a queued task's priority and move it if the queue order no longer
+ * holds. Keeps its place otherwise, so a change that doesn't affect the order
+ * (say a floor below its priority) can't send it behind its peers. Returns
+ * true if it moved; false also if the task isn't in this queue.
+ */
+static bool reposition_locked(struct task *task, uint32_t cpu)
+{
+    struct task *prev = NULL;
+    struct task *curr = cpu_rq(cpu)->head;
+
+    while (curr && curr != task) {
+        prev = curr;
+        curr = curr->next;
+    }
+    if (!curr) {
+        return false;
+    }
+
+    update_deadline_boost(task);
+    if ((!prev || prev->effective_priority >= task->effective_priority) &&
+        (!task->next || task->next->effective_priority <= task->effective_priority)) {
+        return false;
+    }
+
+    (void)remove_from_cpu_queue_locked(task, cpu);
+    add_to_cpu_queue_locked(task, cpu);
+    return true;
+}
+
+/*
+ * Move a queued task to the position its current priority calls for. The
+ * run queue is ordered at insertion, so raising the priority of a task that
+ * is already queued does not by itself let it run any sooner. A task that
+ * is running, blocked or in another CPU's hands is left alone: it picks the
+ * priority up at its next insertion.
+ */
+void sched_reposition_task(struct task *task)
+{
+    if (!task) {
+        return;
+    }
+
+    for (int attempts = 0; attempts < 8; attempts++) {
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+        cache_invalidate(&task->assigned_cpu);
+#endif
+        uint32_t cpu = task->assigned_cpu;
+        if (cpu >= cpu_count) {
+            return;  /* Defensive: corrupt assigned_cpu — bail. */
+        }
+        irq_flags_t flags = rq_lock_irqsave(cpu);
+
+        if (task->assigned_cpu != cpu) {
+            /* Moved between read and lock; release and try again. */
+            rq_unlock_irqrestore(cpu, flags);
+            continue;
+        }
+
+        bool moved = reposition_locked(task, cpu);
+        if (moved) {
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+            struct cpu_runqueue *rq = cpu_rq(cpu);
+            cache_clean(&rq->head);
+            cache_clean(&rq->tail);
+            cache_clean(&rq->ready_count);
+            cache_clean(&task->next);
+#endif
+        }
+
+        rq_unlock_irqrestore(cpu, flags);
+        if (moved) {
+            smp_notify_cpu(cpu);
+        }
+        return;
+    }
+
+    WARN("sched_reposition_task: gave up after 8 retries on task '%s'",
          task->name);
 }
 

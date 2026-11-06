@@ -172,11 +172,8 @@ broader hardware/networking generalization remains follow-on work.
 - Priority ceiling protocol for mutex
 - Worst-case execution time (WCET) analysis tooling
 
-### pi_mutex Sleep Queue (1-2 weeks)
-- Replace the spin-wait loop in `pi_mutex_lock` with a wait-queue model: waiter blocks (TASK_BLOCKED), owner's `pi_mutex_unlock` wakes one waiter
-- Removes the single-CPU contended livelock documented in `docs/scheduler.md` ("Known Limitation — Single-CPU Contended Priority Inheritance")
-- Also eliminates the need for `DAIF`-aware timer preemption to make progress on contended mutexes
-- Unblocked on Pi 5 (default `SECONDARY_PREEMPT=ON`, PR #742/#777) and Jetson (default `JETSON_HW_TICK=ON`, PR #746/#755). Sleep queue is now a straightforward addition.
+### ✅ pi_mutex Sleep Queue — Done (#93)
+- `pi_mutex_lock` blocks contended waiters (TASK_BLOCKED) on a wait queue, and `pi_mutex_unlock` hands the mutex to the highest-priority one. See `docs/scheduler.md` §"Wait Queue".
 
 ### ✅ Timer-Driven Busy-Wait Helper (small) — Done (#94)
 - `timer_busy_wait_us(us)` added as inline in `kernel/include/timer.h` — uses CNTPCT_EL0 (ARM64) / TSC (x86-64)

@@ -220,6 +220,26 @@ static void copy_policy_name(char *dst, size_t max, const char *src)
     /* Last byte already zero from memset — guarantees null term. */
 }
 
+/*
+ * The priority a decision asked for: the AI-chosen level (#1069), else the
+ * effective priority. A decision taken on a borrowed priority sets no level
+ * (#1103), and logging the borrowed value would look like a policy choice in
+ * training traces, so that case records the task's own priority.
+ */
+int32_t sched_trace_ai_action_priority(const struct task *task)
+{
+    if (!task) {
+        return -1;
+    }
+    if (task->ai_priority != TASK_AI_PRIORITY_NONE) {
+        return (int32_t)task->ai_priority;
+    }
+    if (task->pi_priority != 0 && task->pi_priority >= task->effective_priority) {
+        return (int32_t)task->priority;
+    }
+    return (int32_t)task->effective_priority;
+}
+
 void sched_trace_ai_record_decision(struct task *task,
                                     const char *policy_name,
                                     uint32_t action_core)
@@ -255,12 +275,7 @@ void sched_trace_ai_record_decision(struct task *task,
     copy_policy_name(r->u.decision.policy_name,
                      sizeof(r->u.decision.policy_name), policy_name);
     r->u.decision.action_core = (int32_t)action_core;
-    /* The priority the decision asked for: the AI-chosen level (#1069),
-     * or the effective priority when the policy set none. */
-    r->u.decision.action_priority = !task ? -1
-        : (task->ai_priority != TASK_AI_PRIORITY_NONE)
-              ? (int32_t)task->ai_priority
-              : (int32_t)task->effective_priority;
+    r->u.decision.action_priority = sched_trace_ai_action_priority(task);
     r->u.decision.action_preempt = 0;  /* reserved */
     r->u.decision._decision_pad = 0;
 

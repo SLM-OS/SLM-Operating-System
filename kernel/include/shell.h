@@ -53,7 +53,9 @@ typedef enum {
  * shell sessions cannot race each other's mutations. Read-only
  * commands and commands that mutate through an already-locked
  * subsystem (VFS, PMM, etc.) are `mutates = false` and bypass the
- * lock.
+ * lock. A handler that waits for input gives the lock up during the
+ * wait (shell_mutation_pause), so global state it read before the
+ * wait must be checked again afterwards.
  *
  * `category` controls grouping in `help`. See shell_cmd_category_t
  * above. cmd_help groups by category and alphabetizes within each
@@ -116,7 +118,9 @@ int shell_execute(const char *cmdline);
 /* Temporarily release the shell mutation lock if the current task holds it.
  * Intended for long-running mutating handlers that need to block on input,
  * then reacquire before touching unlocked global state again. Returns true
- * when the lock was released and must later be resumed. */
+ * when the lock was released and must later be resumed. Waiting for input
+ * with the lock held would block other sessions, and a holder boosted by a
+ * waiter that polls with yield() starves IDLE tasks on its CPU (#1103). */
 bool shell_mutation_pause(void);
 
 /* Reacquire the shell mutation lock after shell_mutation_pause() returned
@@ -136,6 +140,9 @@ void shell_mutation_resume(bool paused);
  * This is the line reader that the shell REPL uses internally; exposed
  * so Lua scripting (slm.read_line) and other callers can prompt the
  * user without duplicating the implementation.
+ *
+ * Waits with the shell mutation lock held if the caller holds it. A mutating
+ * handler must wrap the call in shell_mutation_pause/resume (#1103).
  */
 int shell_read_line(char *buf, int max_len);
 
@@ -159,7 +166,9 @@ void shell_putc(char c);
 int  shell_printf(const char *fmt, ...);
 
 /* Blocking read of one byte (0..255) from the current session's I/O.
- * Returns -1 if the session has closed. */
+ * Returns -1 if the session has closed. Waits with the shell mutation lock
+ * held if the caller holds it: a mutating handler must wrap the call in
+ * shell_mutation_pause/resume (#1103). */
 int  shell_getc(void);
 
 /* Non-blocking read. Returns a byte (0..255) or -1 if no data is
@@ -252,7 +261,8 @@ int shell_read_command(const char *prompt, char *buf, int max_len);
  * ring or the upload would skip them.
  *
  * Returns the number of bytes read (1..max_len) on success, or
- * a negative value on closed/error backend.
+ * a negative value on closed/error backend. Releases the shell mutation
+ * lock while it waits on the backend, if the caller holds it (#1103).
  */
 int shell_session_read_raw(char *dst, int max_len);
 

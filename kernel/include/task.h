@@ -182,7 +182,13 @@ struct task {
      * task_input_wait_begin/end) and read by scheduler_tick on the
      * same CPU, so no lock is needed. Uses a former padding byte. */
     uint8_t input_wait;
-    uint8_t _priority_pad[1];           /* Padding for alignment */
+    /* Priority inherited through a pi_mutex (#1103), 0 when none. Kept
+     * apart from effective_priority, which update_deadline_boost recomputes
+     * at every run-queue insertion and folds this value into. */
+    uint8_t pi_priority;
+    /* PI mutexes this task holds. The inherited priority is dropped only
+     * when the last one is released. */
+    uint8_t pi_mutexes_held;
 
     /* Deadline scheduling */
     uint64_t deadline_ns;               /* Absolute deadline (0 = no deadline) */

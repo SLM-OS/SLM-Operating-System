@@ -68,7 +68,7 @@ struct __attribute__((packed)) sched_trace_ai_record {
         struct __attribute__((packed)) {
             char     policy_name[16];   /* offset 16, null-padded */
             int32_t  action_core;       /* offset 32, CPU chosen by assign_cpu */
-            int32_t  action_priority;   /* offset 36, effective_priority at decision time */
+            int32_t  action_priority;   /* offset 36, see docs/sched-trace-format.md */
             int32_t  action_preempt;    /* offset 40, reserved for future preempt-action field */
             uint32_t _decision_pad;     /* offset 44 */
             float    state[SCHED_TRACE_AI_STATE_DIM]; /* offset 48..480 — 432 B */
@@ -136,6 +136,11 @@ uint64_t sched_trace_ai_dropped(void);         /* records that wrapped before du
 
 /* ---- Hot path (called from scheduler_add_task / task_exit) ---- */
 
+struct task;
+
+/* The priority recorded for a decision on `task`; -1 if task is NULL. */
+int32_t sched_trace_ai_action_priority(const struct task *task);
+
 /* Record a DECISION event. Called from `scheduler_add_task` right
  * after `active_policy->assign_cpu(task)` returns. The state vector
  * is extracted internally via `ai_extract_state(task, state)` so
@@ -150,7 +155,6 @@ uint64_t sched_trace_ai_dropped(void);         /* records that wrapped before du
  * IRQ handler (the state extraction touches per-CPU data which the
  * handler may have partially updated).
  */
-struct task;
 void sched_trace_ai_record_decision(struct task *task,
                                     const char *policy_name,
                                     uint32_t action_core);

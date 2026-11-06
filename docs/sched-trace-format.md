@@ -60,7 +60,7 @@ function operates on (extracted via `ai_extract_state`).
 |-------:|-----:|---------|-------------------|------------------------------------------------------|
 | 16     | 16   | char[16]| `policy_name`     | Null-padded ASCII; policy that made the decision.    |
 | 32     | 4    | i32     | `action_core`     | CPU id `assign_cpu` returned. Pre-S5-override.       |
-| 36     | 4    | i32     | `action_priority` | Priority the decision set: `task->ai_priority` (#1069), or `task->effective_priority` when the policy set none. |
+| 36     | 4    | i32     | `action_priority` | Priority the decision set: `task->ai_priority` (#1069), or `task->effective_priority` when the policy set none. A decision on a priority borrowed through a `pi_mutex` sets no level and records `task->priority` (#1103); if a deadline boost has lifted the task above the borrowed priority, it records `task->effective_priority`, since that level isn't borrowed. |
 | 40     | 4    | i32     | `action_preempt`  | Reserved (currently always `0`).                     |
 | 44     | 4    | u32     | `_decision_pad`   | Zero.                                                |
 | 48     | 432  | f32[108]| `state`           | 108-dim FP32 state vector (`ai_extract_state` output)|

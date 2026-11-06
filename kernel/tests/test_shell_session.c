@@ -518,6 +518,126 @@ static void test_nested_mutating_dispatch_no_deadlock(void)
     TEST_ASSERT_EQUAL_INT(1, nested_depth_on_inner);
 }
 
+
+/* ============================================================================
+ * Blocking input releases shell_mutex (#1103)
+ *
+ * A boosted holder polling for input with yield() would stay ahead of the
+ * IDLE tasks on its CPU, so input waits run without the lock.
+ * ========================================================================== */
+
+static bool mutex_held_at_read;
+static uint32_t mutex_probe_reads;
+
+static bool shell_mutex_held(void)
+{
+    bool held = shell_mutation_pause();
+    shell_mutation_resume(held);
+    return held;
+}
+
+static int mutex_probe_read_char(struct shell_io *io)
+{
+    (void)io;
+    mutex_held_at_read = shell_mutex_held();
+    mutex_probe_reads++;
+    return '\n';
+}
+
+/* Through a pointer: x86-64 GCC otherwise rewrites getchar() as getc(stdin). */
+static int (*volatile input_getchar)(void) = getchar;
+
+static bool held_before_input;
+static bool held_at_getchar;
+static bool held_after_getchar;
+static bool held_at_read_raw;
+static bool held_after_read_raw;
+
+static int input_probe_cmd(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    char c;
+
+    held_before_input = shell_mutex_held();
+    (void)input_getchar();
+    held_at_getchar = mutex_held_at_read;
+    held_after_getchar = shell_mutex_held();
+    (void)shell_session_read_raw(&c, 1);
+    held_at_read_raw = mutex_held_at_read;
+    held_after_read_raw = shell_mutex_held();
+    return 0;
+}
+
+static void test_blocking_input_releases_shell_mutex(void)
+{
+    shell_cmd_t probe = {
+        .name = "t_input_probe",
+        .handler = input_probe_cmd,
+        .help = "regression: input wait under the shell mutex",
+        .mutates = true,
+        .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
+    };
+    TEST_ASSERT_EQUAL_INT(0, shell_register_command(&probe));
+
+    struct task *t = task_current();
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+    struct shell_io io;
+    struct capture_ctx cap;
+    capture_init(&io, &cap);
+    io.read_char = mutex_probe_read_char;
+    io.try_read_char = mutex_probe_read_char;
+    s->io = &io;
+    shell_session_bind(t, s);
+
+    mutex_held_at_read = true;
+    int rc_cmd = shell_execute("t_input_probe");
+
+    /* Control: a non-blocking read keeps the lock, so the probe can see it. */
+    mutex_held_at_read = false;
+    mutex_probe_reads = 0;
+    int rc_try = shell_execute("lua-admin -e slm.try_getc()");
+    bool try_reads = mutex_probe_reads == 1;
+    bool held_at_try = mutex_held_at_read;
+
+    mutex_held_at_read = true;
+    mutex_probe_reads = 0;
+    int rc_line = shell_execute("lua-admin -e slm.read_line()");
+    bool line_reads = mutex_probe_reads == 1;
+    bool held_at_line = mutex_held_at_read;
+
+    /* A blank line ends the prompt before any session is looked up. */
+    mutex_held_at_read = true;
+    mutex_probe_reads = 0;
+    int rc_stream = shell_execute("slm stream 0");
+    bool stream_reads = mutex_probe_reads == 1;
+    bool held_at_stream = mutex_held_at_read;
+
+    shell_session_unbind(t);
+    s->io = NULL;
+    shell_session_free(s);
+
+    TEST_ASSERT_EQUAL_INT(0, rc_cmd);
+    TEST_ASSERT_TRUE(held_before_input);
+    TEST_ASSERT_FALSE(held_at_getchar);
+    TEST_ASSERT_TRUE(held_after_getchar);
+    TEST_ASSERT_FALSE(held_at_read_raw);
+    TEST_ASSERT_TRUE(held_after_read_raw);
+
+    TEST_ASSERT_EQUAL_INT(0, rc_try);
+    TEST_ASSERT_TRUE(try_reads);
+    TEST_ASSERT_TRUE(held_at_try);
+
+    TEST_ASSERT_EQUAL_INT(0, rc_line);
+    TEST_ASSERT_TRUE(line_reads);
+    TEST_ASSERT_FALSE(held_at_line);
+
+    TEST_ASSERT_EQUAL_INT(0, rc_stream);
+    TEST_ASSERT_TRUE(stream_reads);
+    TEST_ASSERT_FALSE(held_at_stream);
+}
+
 /* ============================================================================
  * Lua shell command regressions
  * ============================================================================ */
@@ -723,6 +843,7 @@ int test_suite_shell_session(void)
     RUN_TEST(test_help_show_unknown_command_routes_to_bound_session);
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
+    RUN_TEST(test_blocking_input_releases_shell_mutex);
     RUN_TEST(test_lua_command_non_repl_state_does_not_persist_per_session);
     RUN_TEST(test_lua_command_state_does_not_persist_on_console);
     RUN_TEST(test_lua_command_arg_table_rebuilt_per_invocation);
