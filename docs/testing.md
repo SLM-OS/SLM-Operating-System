@@ -707,6 +707,9 @@ Validates shell command dispatch, argument parsing, working directory management
 
 | Test | Description |
 |------|-------------|
+| test_shell_cmd_sched_model_lifecycle | `sched model` load, activate, rollback and clear for the `mlp`, `ppo` and `config` kinds (`AI_SCHED=ON`) |
+| test_shell_cmd_sched_thresholds_lifecycle | The same commands for the `thresholds` kind (`AI_SCHED=ON`) |
+| test_shell_cmd_sched_rebalance_lifecycle | The same commands for the `rebalance` kind (`AI_SCHED=ON`) |
 | test_sched_gpu_path_skipped_with_runtime_model | With `gpu use sched` on, an active runtime MLP serves the pass with no GPU attempt and `sched stats` says so; after clearing, the pass tries the GPU (`AI_SCHED=ON`, #1113) |
 
 #### Command Dispatch Tests
