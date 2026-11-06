@@ -5008,7 +5008,7 @@ pub unsafe extern "C" fn rust_model_swap(
     let name_slice = core::slice::from_raw_parts(name, name_len);
     let data_slice = core::slice::from_raw_parts(data, data_len);
 
-    use mm::model_loader::LoadError;
+    use loader::LoadError;
     match loader::registry::swap_model(index as usize, name_slice, data_slice) {
         Ok(()) => 0,
         Err(LoadError::InvalidIndex) => -2,

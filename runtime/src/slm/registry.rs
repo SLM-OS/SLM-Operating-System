@@ -24,7 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::kernel_ffi;
-use crate::mm::model_loader::LoadError;
+use crate::loader::error::LoadError;
 use crate::slm::gguf::{
     ArchInfo, ArchKind, GgmlType, Gguf, GgufError, MetaValue,
 };

@@ -15,11 +15,13 @@
 //!                                                    registry entry
 //! ```
 
+pub mod error;
 pub mod protobuf;
 pub mod onnx_parser;
 pub mod graph;
 pub mod registry;
 
+pub use error::LoadError;
 pub use graph::{AutoPad, NodeAttrs, resolve_pads};
 pub use graph::{OpType, OperatorGraph, GraphNode, TensorName, TensorShape, ElemType,
                 WeightTable, WeightEntry, MAX_WEIGHT_ENTRIES};

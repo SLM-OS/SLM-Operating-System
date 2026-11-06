@@ -18,8 +18,7 @@ runtime/
     ├── msg_router.rs    # Topic-based pub/sub message router (FFI)
     ├── mm/
     │   ├── mod.rs       # Memory management module
-    │   ├── model_mem.rs # Model memory allocator (weight/workspace pools)
-    │   └── model_loader.rs  # Model loader skeleton (Phase 5)
+    │   └── model_mem.rs # Model memory allocator (weight/workspace pools)
     ├── sched/
     │   ├── mod.rs       # Scheduler policy module
     │   ├── deadline.rs  # Deadline-aware scheduling
@@ -43,7 +42,7 @@ runtime/
 | `log` | Logging via UART (log_info, log_error, etc.) | Complete |
 | `msg_router` | Topic-based pub/sub message router | Complete |
 | `mm::model_mem` | 2MB-aligned model memory allocator | Complete |
-| `mm::model_loader` | GGUF/ONNX model loading | Skeleton (Phase 5) |
+| `loader` | ONNX parser, operator graph, model registry, `LoadError` | Complete |
 | `sched::deadline` | Deadline-aware task scheduling hints | Complete |
 | `sched::inference` | Inference request queue management | Skeleton (Phase 5) |
 | `sched::heterogeneous` | CPU topology and core selection | Complete |

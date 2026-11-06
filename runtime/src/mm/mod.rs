@@ -8,7 +8,6 @@
 //! See `docs/model-memory.md` for design documentation.
 
 pub mod model_mem;
-pub mod model_loader;
 
 #[cfg(feature = "ai_eviction")]
 pub mod eviction;
@@ -27,8 +26,3 @@ pub use model_mem::{
 
 #[cfg(feature = "ai_eviction")]
 pub use model_mem::snapshot_evictable_blocks;
-
-pub use model_loader::{
-    ModelLoader, LoadedModel, ModelMetadata,
-    ModelFormat, LoadError,
-};
