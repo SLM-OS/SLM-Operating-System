@@ -318,6 +318,9 @@ KERNEL_TEST_BUILD_SIGNATURE    = $(strip $(KERNEL_TEST_CMAKE_ARGS))
 # Make also records whether the build's Makefile exists when it first considers that
 # file, so it would not reconfigure after the check had wiped the directory.
 #
+# Each config check also waits for its stale-lock check where the kernel has one: both
+# write to the build directory, and either can delete it.
+#
 # Wipe and reconfigure a build directory when its signature changed.
 # $(call kernel_config_check,<label>,<build dir>,<signature>)
 define kernel_config_check
@@ -364,7 +367,7 @@ check-kernel-test-build-dir:
 	fi
 
 .PHONY: kernel-config-check
-kernel-config-check:
+kernel-config-check: check-build-dir
 	$(call kernel_config_check,Kernel,$(KERNEL_BUILD_DIR),$(KERNEL_BUILD_SIGNATURE))
 
 .PHONY: kernel
@@ -375,7 +378,7 @@ kernel:
 
 .PHONY: _kernel-build
 _kernel-build: check-build-dir runtime kernel-config-check
-	$(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
+	@test -f $(KERNEL_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -633,7 +636,7 @@ endif
 
 .PHONY: _kernel-kexec-build
 _kernel-kexec-build: runtime kernel-kexec-config-check
-	$(MAKE) --no-print-directory $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+	@test -f $(KERNEL_KEXEC_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
@@ -744,7 +747,7 @@ kernel-bzimage-config-check:
 
 .PHONY: _kernel-bzimage-build
 _kernel-bzimage-build: runtime kernel-bzimage-config-check
-	$(MAKE) --no-print-directory $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+	@test -f $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 	@echo "Building kernel (bzImage variant)..."
 	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
 	@echo "Wrapping ELF as Linux bzImage..."
@@ -1478,12 +1481,12 @@ kernel-test:
 
 .PHONY: _kernel-test-build
 _kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check
-	$(MAKE) --no-print-directory $(KERNEL_TEST_BUILD_DIR)/Makefile
+	@test -f $(KERNEL_TEST_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
 
 .PHONY: kernel-test-config-check
-kernel-test-config-check:
+kernel-test-config-check: check-kernel-test-build-dir
 	$(call kernel_config_check,Kernel test,$(KERNEL_TEST_BUILD_DIR),$(KERNEL_TEST_BUILD_SIGNATURE))
 
 $(KERNEL_TEST_BUILD_DIR)/Makefile:
@@ -1800,6 +1803,7 @@ help:
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
+	@echo "  test-build-order  Check each kernel configures after the Rust build under -j"
 	@echo "  check-braces   Check braces on changed C lines with clang-tidy"
 	@echo "  test-check-braces  Test the brace check itself (host only)"
 	@echo "  check-tools    Verify required tools are installed"

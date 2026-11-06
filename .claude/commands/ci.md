@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, and check the Jetson boot layout.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, check the configure order under `make -j`, and check the Jetson boot layout.
 
 ## Instructions
 

@@ -41,11 +41,16 @@ fail() {
     fails=$((fails + 1))
 }
 
+# Run in a minimal environment. Under `make test-build-order AI_SCHED=ON`, the parent make
+# exports its command-line variables and MAKEFLAGS to this script, so the first run
+# would already have the flag and the flag change below would do nothing. Under
+# BUILD_TYPE=Debug it would build a library other than the one this script deletes.
 # The run stops at the compile step, so make's own exit status is always a failure.
 run() {  # run <log> <make arguments...>
     local log="$1"; shift
-    PATH="$WORK/bin:$PATH" make -j8 "BUILD_DIR=$WORK/b" "CMAKE=$WORK/bin/cmake" "$@" \
-        > "$log" 2>&1 || true
+    env -i PATH="$WORK/bin:$PATH" HOME="$HOME" \
+        ${RUSTUP_HOME:+RUSTUP_HOME="$RUSTUP_HOME"} ${CARGO_HOME:+CARGO_HOME="$CARGO_HOME"} \
+        make -j8 "BUILD_DIR=$WORK/b" "CMAKE=$WORK/bin/cmake" "$@" > "$log" 2>&1 || true
 }
 
 check() {  # check <platform> <rust target> <make target>
@@ -60,6 +65,17 @@ check() {  # check <platform> <rust target> <make target>
         fail "$name: configured without the Rust library"; grep "Rust lib" "$log" || true
     else
         echo "PASS: $name: configures after the Rust build"
+    fi
+
+    run "$log" "PLATFORM=$platform" "$goal"
+    if grep -q "reconfiguring" "$log"; then
+        fail "$name: reconfigured with unchanged flags"
+    elif ! grep -q "BUILD_STEP_CONFIGURED" "$log"; then
+        fail "$name: an unchanged rebuild didn't reach the compile step"; tail -5 "$log"
+    elif grep -q "is up to date" "$log"; then
+        fail "$name: an unchanged rebuild printed make's up-to-date message"
+    else
+        echo "PASS: $name: an unchanged rebuild stays configured and quiet"
     fi
 
     run "$log" "PLATFORM=$platform" "AI_SCHED=ON" "$goal"
