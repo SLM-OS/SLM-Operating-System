@@ -21,7 +21,7 @@ runtime-selectable via `sched_set_policy(name)` — see #848 for the
 | Weight format | float32, auto-generated C arrays. XGBoost: SEMB+XGBC binary blob (~9 MB on trained model). | Same | Same | Same |
 | Binary size impact | +1-3 MB with `AI_SCHED=ON` (XGBoost cascade adds 0 — runtime-loaded) | Same | Same | Same |
 | SIMD backend (CPU) | NEON (AArch64) | NEON | NEON | SSE (`kernel/arch/x86_64/sse_kernels.c`, `-msse -msse2`) |
-| GPU backend (`ai_mlp` on Ampere) | — | — | ✅ shipped — `slm_gpu_run_sched_inference` runs the MLP on GA10B; toggled via `gpu use sched on/off`; rate-limited under bursts (#651/#653) | — |
+| GPU backend (`ai_mlp` on Ampere) | — | — | ✅ shipped — `slm_gpu_run_sched_inference` runs the MLP on GA10B; toggled via `gpu use sched on/off`; rate-limited under bursts (#651/#653); built-in weights only, so an active runtime model stays on the CPU (#1113) | — |
 | FFI path to runtime | extern-C from `ops.rs` | Same | Same | Same |
 | Forward-pass file | `kernel/sched/ai/ai_inference.c` | Same | Same | Same |
 | Decision trigger | Every `scheduler_tick()` | Hardware tick (opt-in `SECONDARY_PREEMPT=ON`) / synthesized at yield (default) | Same (synthesized at yield) | Every tick |

@@ -1159,7 +1159,7 @@ int slm_gpu_inference_enabled(void);
  * whether to attempt GPU dispatch in the `select_victim` hot path.
  *
  * The sched-MLP side checks the analogous `gpu_consumer_enabled
- * (GPU_CONSUMER_SCHED)` inline in C (`ai_inference.c::forward_logits`);
+ * (GPU_CONSUMER_SCHED)` inline in C (`ai_inference.c::ai_mlp_forward_logits`);
  * eviction needs this Rust-callable wrapper because the eviction
  * MLP's hot path lives entirely in Rust.
  */
@@ -1331,10 +1331,10 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
  * Sched-MLP GPU dispatch counters and timing, surfaced by
  * `sched stats` and cleared by `sched stats gpu-reset`.
  * `attempts` = calls into `slm_gpu_run_sched_inference` (one per
- * `ai_mlp` forward pass while `gpu use sched` is on); `ok` = passes
- * served by the GPU; `rate_limited` = fallbacks rejected by the
- * 50 ms window. The remaining `attempts - ok - rate_limited` fell
- * back on a downstream error. Attempts are counted on every platform
+ * `ai_mlp` forward pass while `gpu use sched` is on and no runtime
+ * model is active); `ok` = passes served by the GPU; `rate_limited` =
+ * fallbacks rejected by the 50 ms window. The remaining
+ * `attempts - ok - rate_limited` fell back on a downstream error. Attempts are counted on every platform
  * (the non-Jetson stub counts and fails). Any out pointer may be
  * NULL.
  *

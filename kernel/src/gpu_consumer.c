@@ -152,9 +152,9 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
              * even though dispatch is unaffected. */
         } else if (out_reason) {
             /* PR-3 of gpu-policy-models.md: when a GPU-backed sched
-             * policy is active (today: ai_mlp on Jetson), the next
-             * `assign_cpu` will route through GA10B and pay the
-             * dispatch cost: 0.23 ms per GPU-served pass with IRQs
+             * policy is active (today: ai_mlp on Jetson) and no runtime
+             * model is, the next `assign_cpu` will route through GA10B
+             * and pay the dispatch cost: 0.23 ms per GPU-served pass with IRQs
              * masked on jetson-nano-2 (2026-10-31, `sched stats`),
              * after a one-time ~2.8 ms bring-up. The 50 ms rate limit
              * sends the rest of a burst to CPU NEON. Surface that as
@@ -162,7 +162,8 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
              * where the cost and the counters are. The flag itself
              * still flips cleanly — this is informational, not a
              * refusal. */
-            *out_reason = "perf note — ai_mlp tries the GPU per "
+            *out_reason = "perf note — ai_mlp's built-in model (not a "
+                          "runtime one) tries the GPU per "
                           "assign_cpu (~0.23 ms, IRQs masked; 50 ms rate "
                           "limit; CPU fallback) — see `sched stats`";
         }

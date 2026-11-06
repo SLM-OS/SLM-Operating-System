@@ -19,12 +19,13 @@
 #include "runtime_model.h"
 
 /* PR-3 of gpu-policy-models.md: GPU dispatch path. The MLP forward
- * pass routes through `slm_gpu_run_sched_inference` when the
- * `gpu use sched on` toggle is set AND a v6 handoff with
- * `pipeline_kind == GA10B_PIPELINE_KIND_SCHED_MLP` is present in
- * DRAM (typically published by `scripts/gpu-kernel-sched-mlp.c`
- * pre-kexec). On any error the path falls back to the CPU NEON
- * forward below — the scheduler always gets a valid logits vector. */
+ * pass routes through `slm_gpu_run_sched_inference` when no runtime
+ * model is active, the `gpu use sched on` toggle is set, AND a v6
+ * handoff with `pipeline_kind == GA10B_PIPELINE_KIND_SCHED_MLP` is
+ * present in DRAM (typically published by
+ * `scripts/gpu-kernel-sched-mlp.c` pre-kexec). On any error the path
+ * falls back to the CPU NEON forward below — the scheduler always gets
+ * a valid logits vector. */
 #include "gpu_consumer.h"
 #include "slm_ffi.h"
 
@@ -260,10 +261,24 @@ void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
 
     if (!state || !out) return;
 
-#ifdef PLATFORM_JETSON_ORIN_NANO
+    /* An activated runtime model always wins. The GPU pipeline holds the
+     * built-in weights, so serving any pass there would mix two models in
+     * one burst (#1113). */
+    if (sched_runtime_mlp_acquire(&runtime, &runtime_token)) {
+        forward_logits(state,
+                       runtime->w0, runtime->b0,
+                       runtime->w1, runtime->b1,
+                       runtime->w2, runtime->b2,
+                       runtime->w3, runtime->b3,
+                       out);
+        sched_runtime_mlp_release(runtime_token);
+        return;
+    }
+
     /* GPU fastpath. When `gpu use sched on` is set AND the GA10B
      * sched-MLP handoff is present in DRAM, dispatch the forward
-     * pass on the GPU. On any error, fall through to CPU NEON.
+     * pass on the GPU. On any error, fall through to CPU NEON. Off
+     * Jetson the call is a stub that counts the attempt and returns -1.
      *
      * Cost on jetson-nano-2 (2026-10-31, `sched stats`): 0.23 ms per
      * GPU-served pass with IRQs masked, of which ~0.15 ms is the 8 ops
@@ -282,18 +297,6 @@ void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
          * valid logits vector — silent fallback is the right call
          * here because the alternative is "scheduler stops working
          * if you fat-finger the toggle". */
-    }
-#endif
-
-    if (sched_runtime_mlp_acquire(&runtime, &runtime_token)) {
-        forward_logits(state,
-                       runtime->w0, runtime->b0,
-                       runtime->w1, runtime->b1,
-                       runtime->w2, runtime->b2,
-                       runtime->w3, runtime->b3,
-                       out);
-        sched_runtime_mlp_release(runtime_token);
-        return;
     }
 
     forward_logits(state,

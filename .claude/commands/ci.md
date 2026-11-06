@@ -35,7 +35,14 @@ lines are not printed to stdout. Treat "PASSED - All tests passed (exit code 0)"
 as success. On failure, also grep the build/run output for `PAGE FAULT` and
 `KERNEL PANIC` to characterize the crash.
 
-### 5. Runtime host unit tests
+### 5. Run test suite with the AI scheduler (ARM64 QEMU)
+```
+make test AI_SCHED=ON
+```
+`kernel/sched/ai/` and its tests build only with this flag, and it's off by default on
+QEMU, so step 4 doesn't compile them (#1113). Treat the same "PASSED" line as success.
+
+### 6. Runtime host unit tests
 ```
 make runtime-test
 ```
@@ -47,7 +54,7 @@ This step catches compile or link rot in test-only code, which
 A link error naming a kernel symbol means `test_ffi_stubs` in
 `runtime/src/lib.rs` needs a stub for it.
 
-### 6. Brace check
+### 7. Brace check
 ```
 make test-check-braces && make check-braces
 ```
@@ -62,7 +69,7 @@ A `not checked` line exits 0, because those files are outside the configured
 builds (`kernel/net/ssh/`, host tools). Name them in the Notes column so someone
 reads them for braces by hand.
 
-### 7. Build order check
+### 8. Build order check
 ```
 make test-build-order
 ```
@@ -74,7 +81,7 @@ so they don't cover this. It compiles no kernel code. It deletes each platform's
 build in the same checkout.
 Treat "All build-order tests passed" as success.
 
-### 8. Jetson boot layout check
+### 9. Jetson boot layout check
 ```
 make test-jetson-uefi-layout
 ```
@@ -95,7 +102,7 @@ so name it in the Notes column and don't treat that check as a pass.
 The build log is at `build/jetson-layout-build.log`. The step leaves a Jetson
 build in `build/kernel`.
 
-### 9. Diff check
+### 10. Diff check
 Run `git diff origin/main...HEAD --stat` and confirm no untracked build artifacts
 are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
@@ -109,6 +116,7 @@ Summarize results as a table:
 | x86-64 build | ✅/❌ | warnings if any |
 | Jetson real-weights build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
+| AI scheduler test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |
 | Build order check | ✅/❌ | failed checks if any |

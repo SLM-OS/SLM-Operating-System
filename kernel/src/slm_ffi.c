@@ -599,7 +599,8 @@ void slm_gpu_eviction_dispatch_stats_reset(void)
  * Same shape as the eviction set above, minus `oversize` and rows:
  * the sched input is always one AI_STATE_DIM state vector.
  * `attempts` counts every entry into `slm_gpu_run_sched_inference`
- * (one per `ai_mlp` forward pass while `gpu use sched` is on); `ok`
+ * (one per `ai_mlp` forward pass while `gpu use sched` is on and no
+ * runtime model is active); `ok`
  * counts GPU-served passes; `rate_limited` is the subset of
  * fallbacks rejected by the 50 ms window. The rest fell back on a
  * downstream error (no handoff, try-lock contention, breaker, GA10B
@@ -753,10 +754,10 @@ static bool g_post_inherit_double_dispatch_pending
 
 /* Sched-MLP dispatch rate limiter (#651).
  *
- * `gpu use sched on` with `ai_mlp` invokes `slm_gpu_run_sched_inference`
- * from every `ai_mlp_assign_cpu` call — i.e. every task_create / steal
- * across all six CPUs. Each dispatch holds `g_gpu_dispatch_lock` IRQ-
- * off for ~5 ms; a task burst piles up dozens of waiters and starves
+ * `gpu use sched on` with `ai_mlp` and no runtime model active invokes
+ * `slm_gpu_run_sched_inference` from every `ai_mlp_assign_cpu` call —
+ * i.e. every task_create / steal across all six CPUs. Each dispatch
+ * holds `g_gpu_dispatch_lock` IRQ-off for ~5 ms; a task burst piles up dozens of waiters and starves
  * timer ticks / RX-stall watchdogs / shell scheduling enough to wedge
  * the box (telnet stops, serial stops, hard power-cycle required —
  * 2026-04-27 jetson-nano-2 reproducer).
@@ -767,9 +768,8 @@ static bool g_post_inherit_double_dispatch_pending
  * dispatch (see comment near the store), so the next allowed dispatch
  * starts at least RATE_LIMIT_NS after the previous one finishes —
  * about 55 ms start-to-start for a 5 ms dispatch with a 50 ms window.
- * Rejected dispatches return -1, and `forward_via_device` already has
- * a silent CPU NEON fallback for that case
- * (kernel/sched/ai/ai_inference.c:280-289).
+ * Rejected dispatches return -1, and `ai_mlp_forward_logits` already
+ * has a silent CPU NEON fallback for that case.
  *
  * Effective worst-case IRQ-off load on the system: in steady state
  * only one CPU at a time wins the try-lock, so the dispatch path
@@ -1404,7 +1404,7 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
      *      currently dispatching, return immediately rather than
      *      spin IRQ-off behind it.
      *
-     * Either rejection path returns -1; `forward_via_device` already
+     * Either rejection path returns -1; `ai_mlp_forward_logits` already
      * silently falls back to CPU NEON for negative rc. */
     atomic_fetch_add_explicit(&g_sched_gpu_attempts, 1u,
                               memory_order_relaxed);
