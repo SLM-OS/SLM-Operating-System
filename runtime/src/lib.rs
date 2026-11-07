@@ -272,6 +272,9 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn slm_pmu_read_cycles() -> u64 { 0 }
 
+    #[no_mangle]
+    pub extern "C" fn task_sleep_ms(_ms: u32) {}
+
     /// The host has no interrupts to mask (model_mem's guard, #1093).
     #[no_mangle]
     pub extern "C" fn slm_irq_save() -> u64 { 0 }
@@ -6274,6 +6277,38 @@ pub unsafe extern "C" fn rust_slm_get_info(
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_count() -> u32 {
     slm::registry::count() as u32
+}
+
+/// The most recently loaded SLM still in the registry: its slot in `*handle`
+/// and its load sequence number in `*seq`. Returns 0, or -1 if none is loaded.
+/// Takes the registry lock, which a running prompt holds for each forward
+/// step, so don't call this from an IRQs-off path (#1093).
+///
+/// # Safety
+/// `handle` and `seq` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_latest_loaded(handle: *mut u32, seq: *mut u64) -> i32 {
+    if handle.is_null() || seq.is_null() {
+        return -1;
+    }
+    match slm::registry::latest_loaded() {
+        Some((slot, s)) => {
+            *handle = slot as u32;
+            *seq = s;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Load sequence number of the model in `index`, or 0 if that slot is empty.
+/// A slot that was reloaded gets a new number. Same lock rule as
+/// [`rust_slm_latest_loaded`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_load_seq(index: u32) -> u64 {
+    slm::registry::load_seq(index as usize).unwrap_or(0)
 }
 
 /// Maximum GGUF buffer size accepted by `rust_slm_load`, in bytes.

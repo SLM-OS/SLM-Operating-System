@@ -23,6 +23,10 @@
  *   slm status               — model count + session count summary
  *   slm stats <s>            — rust_slm_stats pretty-print
  *   slm gpu                  — per-op tier + dispatch counters
+ *   slm runner start|stop|status — the slm-runner component (slm_runner.c)
+ *   slm ask [--timeout S] "<text>"
+ *                            — publish on /slm/prompt, print the reply from
+ *                              /slm/token and /slm/done
  *
  * NOTE on -mgeneral-regs-only: rust_slm_session_open and
  * rust_slm_prompt take f32 by value. AAPCS64 puts those in V0/V1 —
@@ -42,6 +46,7 @@
 #include "kbuf.h"
 #endif
 #include "slm_ffi.h"
+#include "slm_runner.h"
 #include "boot_models.h"
 #include "string.h"
 #include "timer.h"
@@ -650,6 +655,114 @@ static void slm_print_backend(uint32_t sid, uint32_t gpu_mode)
     }
 }
 
+/*
+ * The session options `slm launch` and `slm runner start` share, parsed from
+ * argv[first] on into `o` over the caller's defaults. `runner` also accepts
+ * --handle, --max and --raw. Returns 0, or -1 after printing what's wrong.
+ */
+static int slm_parse_session_opts(const char *who, int argc, char *argv[],
+                                  int first, slm_runner_config_t *o, bool runner)
+{
+    for (int i = first; i < argc; i++) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--ctx") == 0 && v) {
+            if (shell_parse_uint(v, &o->max_ctx) != 0) {
+                shell_printf("%s: bad --ctx '%s'\r\n", who, v); return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--sampler") == 0 && v) {
+            if (strcmp(v, "greedy") == 0) {
+                o->sampler_kind = SLM_SAMPLER_GREEDY;
+            } else if (strcmp(v, "temp") == 0) {
+                o->sampler_kind = SLM_SAMPLER_TEMPERATURE;
+            } else if (strcmp(v, "topk") == 0) {
+                o->sampler_kind = SLM_SAMPLER_TOP_K;
+            } else if (strcmp(v, "topp") == 0) {
+                o->sampler_kind = SLM_SAMPLER_TOP_P;
+            } else if (strcmp(v, "topkp") == 0 ||
+                       strcmp(v, "topktopp") == 0) {
+                o->sampler_kind = SLM_SAMPLER_TOP_K_TOP_P;
+            } else {
+                shell_printf("%s: unknown sampler '%s' "
+                             "(want greedy|temp|topk|topp|topkp)\r\n", who, v);
+                return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--temp") == 0 && v) {
+            if (parse_f32(v, &o->temperature) != 0) {
+                shell_printf("%s: bad --temp '%s'\r\n", who, v); return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--topk") == 0 && v) {
+            if (shell_parse_uint(v, &o->top_k) != 0) {
+                shell_printf("%s: bad --topk '%s'\r\n", who, v); return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--topp") == 0 && v) {
+            if (parse_f32(v, &o->top_p) != 0) {
+                shell_printf("%s: bad --topp '%s'\r\n", who, v); return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--seed") == 0 && v) {
+            uint32_t s32;
+            if (shell_parse_uint(v, &s32) != 0) {
+                shell_printf("%s: bad --seed '%s'\r\n", who, v); return -1;
+            }
+            o->seed = (uint64_t)s32;
+            i++;
+        } else if (strcmp(a, "--gpu") == 0 && v) {
+            if (strcmp(v, "auto") == 0) {
+                o->gpu_mode = SLM_GPU_AUTO;
+            } else if (strcmp(v, "cpu") == 0) {
+                o->gpu_mode = SLM_GPU_CPU;
+            } else if (strcmp(v, "on") == 0) {
+                o->gpu_mode = SLM_GPU_ON;
+            } else {
+                shell_printf("%s: bad --gpu '%s' "
+                             "(want auto|cpu|on)\r\n", who, v);
+                return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--threads") == 0 && v) {
+            if (shell_parse_uint(v, &o->threads) != 0 ||
+                o->threads == 0 || o->threads > 64u) {
+                shell_printf("%s: bad --threads '%s' "
+                             "(want 1..64)\r\n", who, v);
+                return -1;
+            }
+            i++;
+        } else if (runner && strcmp(a, "--raw") == 0) {
+            o->prompt_flags = SLM_PROMPT_RAW;
+        } else if (runner && strcmp(a, "--handle") == 0 && v) {
+            uint32_t h;
+            if (shell_parse_uint(v, &h) != 0 || h > 0x7FFFFFFFu) {
+                shell_printf("%s: bad --handle '%s'\r\n", who, v);
+                return -1;
+            }
+            o->model_handle = (int32_t)h;
+            i++;
+        } else if (runner && strcmp(a, "--max") == 0 && v) {
+            if (shell_parse_uint(v, &o->max_new_tokens) != 0) {
+                shell_printf("%s: bad --max '%s'\r\n", who, v);
+                return -1;
+            }
+            i++;
+        } else {
+            shell_printf("%s: unknown option '%s'\r\n", who, a);
+            return -1;
+        }
+    }
+
+
+    if (o->gpu_mode == SLM_GPU_ON && rust_slm_gpu_tier_ops() == 0) {
+        shell_printf("%s: --gpu on, but no op has a GPU tier "
+                     "(see `slm gpu`); use --gpu auto or cpu\r\n", who);
+        return -1;
+    }
+    return 0;
+}
+
 static int slm_launch(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -666,95 +779,21 @@ static int slm_launch(int argc, char *argv[])
     }
 
     /* Defaults — match the demo line in docs/design/slm-integration.md. */
-    uint32_t max_ctx       = 2048u;
-    uint32_t sampler_kind  = SLM_SAMPLER_TOP_K_TOP_P;
-    float    temperature   = 0.7f;
-    uint32_t top_k         = 40u;
-    float    top_p         = 0.9f;
-    uint64_t seed          = 1u;
-    uint32_t gpu_mode      = SLM_GPU_AUTO;
-    uint32_t threads       = 4u;
-
-    for (int i = 3; i < argc; i++) {
-        const char *a = argv[i];
-        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
-        if (strcmp(a, "--ctx") == 0 && v) {
-            if (shell_parse_uint(v, &max_ctx) != 0) {
-                shell_printf("slm launch: bad --ctx '%s'\r\n", v); return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--sampler") == 0 && v) {
-            if (strcmp(v, "greedy") == 0) {
-                sampler_kind = SLM_SAMPLER_GREEDY;
-            } else if (strcmp(v, "temp") == 0) {
-                sampler_kind = SLM_SAMPLER_TEMPERATURE;
-            } else if (strcmp(v, "topk") == 0) {
-                sampler_kind = SLM_SAMPLER_TOP_K;
-            } else if (strcmp(v, "topp") == 0) {
-                sampler_kind = SLM_SAMPLER_TOP_P;
-            } else if (strcmp(v, "topkp") == 0 ||
-                       strcmp(v, "topktopp") == 0) {
-                sampler_kind = SLM_SAMPLER_TOP_K_TOP_P;
-            } else {
-                shell_printf("slm launch: unknown sampler '%s' "
-                             "(want greedy|temp|topk|topp|topkp)\r\n", v);
-                return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--temp") == 0 && v) {
-            if (parse_f32(v, &temperature) != 0) {
-                shell_printf("slm launch: bad --temp '%s'\r\n", v); return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--topk") == 0 && v) {
-            if (shell_parse_uint(v, &top_k) != 0) {
-                shell_printf("slm launch: bad --topk '%s'\r\n", v); return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--topp") == 0 && v) {
-            if (parse_f32(v, &top_p) != 0) {
-                shell_printf("slm launch: bad --topp '%s'\r\n", v); return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--seed") == 0 && v) {
-            uint32_t s32;
-            if (shell_parse_uint(v, &s32) != 0) {
-                shell_printf("slm launch: bad --seed '%s'\r\n", v); return -1;
-            }
-            seed = (uint64_t)s32;
-            i++;
-        } else if (strcmp(a, "--gpu") == 0 && v) {
-            if (strcmp(v, "auto") == 0) {
-                gpu_mode = SLM_GPU_AUTO;
-            } else if (strcmp(v, "cpu") == 0) {
-                gpu_mode = SLM_GPU_CPU;
-            } else if (strcmp(v, "on") == 0) {
-                gpu_mode = SLM_GPU_ON;
-            } else {
-                shell_printf("slm launch: bad --gpu '%s' "
-                             "(want auto|cpu|on)\r\n", v);
-                return -1;
-            }
-            i++;
-        } else if (strcmp(a, "--threads") == 0 && v) {
-            if (shell_parse_uint(v, &threads) != 0 ||
-                threads == 0 || threads > 64u) {
-                shell_printf("slm launch: bad --threads '%s' "
-                             "(want 1..64)\r\n", v);
-                return -1;
-            }
-            i++;
-        } else {
-            shell_printf("slm launch: unknown option '%s'\r\n", a);
-            return -1;
-        }
-    }
-
-    if (gpu_mode == SLM_GPU_ON && rust_slm_gpu_tier_ops() == 0) {
-        shell_puts("slm launch: --gpu on, but no op has a GPU tier "
-                   "(see `slm gpu`); use --gpu auto or cpu\r\n");
+    slm_runner_config_t o;
+    slm_runner_default_config(&o);
+    o.max_ctx = 2048u;
+    if (slm_parse_session_opts("slm launch", argc, argv, 3, &o, false) != 0) {
         return -1;
     }
+    uint32_t max_ctx       = o.max_ctx;
+    uint32_t sampler_kind  = o.sampler_kind;
+    float    temperature   = o.temperature;
+    uint32_t top_k         = o.top_k;
+    float    top_p         = o.top_p;
+    uint64_t seed          = o.seed;
+    uint32_t gpu_mode      = o.gpu_mode;
+    uint32_t threads       = o.threads;
+
 
     int32_t sid = rust_slm_session_open(handle, max_ctx, sampler_kind,
                                         temperature, top_k, top_p, seed);
@@ -877,21 +916,6 @@ static int slm_stop(int argc, char *argv[])
     }
     shell_printf("Stop signaled for session %lu\r\n", (unsigned long)sid);
     return 0;
-}
-
-/* Words for SlmStatsC.last_stop_reason. */
-static const char *slm_stop_reason_name(uint32_t reason)
-{
-    switch (reason) {
-    case SLM_STOP_EOS:          return "eos";
-    case SLM_STOP_MAX_TOKENS:   return "max";
-    case SLM_STOP_USER:         return "stopped";
-    case SLM_STOP_CALLBACK:     return "callback";
-    case SLM_STOP_CONTEXT_FULL: return "ctx-full";
-    case SLM_STOP_NO_LOGITS:    return "no-logits";
-    case SLM_STOP_EMPTY_PROMPT: return "empty";
-    default:                    return "none";
-    }
 }
 
 /*
@@ -1053,6 +1077,25 @@ static int slm_parse_prompt_opts(const char *verb, int first, int *last,
  * joined with single spaces, so an unquoted prompt still works. Empty
  * text is valid and generates nothing.
  */
+static char *slm_join_words(char *argv[], int first, int last)
+{
+    /* Join the words in place, which also keeps a second line-sized buffer
+     * off the shell task's stack. The words sit in ascending order in the
+     * parser's buffer with a gap between each, so `out` never overtakes the
+     * word being moved. */
+    char *text = argv[first];
+    char *out = text + strlen(text);
+    for (int i = first + 1; i <= last; i++) {
+        size_t wl = strlen(argv[i]);
+        *out++ = ' ';
+        memmove(out, argv[i], wl);
+        out += wl;
+    }
+    *out = '\0';
+    slm_unescape_inplace(text);
+    return text;
+}
+
 static int slm_prompt(int argc, char *argv[])
 {
     if (argc < 4) {
@@ -1078,22 +1121,7 @@ static int slm_prompt(int argc, char *argv[])
         return -1;
     }
 
-    /* Join the words in place, which also keeps a second line-sized buffer
-     * off the shell task's stack. The words sit in ascending order in the
-     * parser's buffer with a gap between each, so `out` never overtakes the
-     * word being moved. */
-    char *text = argv[first];
-    char *out = text + strlen(text);
-    for (int i = first + 1; i <= last; i++) {
-        size_t wl = strlen(argv[i]);
-        *out++ = ' ';
-        memmove(out, argv[i], wl);
-        out += wl;
-    }
-    *out = '\0';
-    slm_unescape_inplace(text);
-
-    return run_prompt(sid, text, flags, max_new);
+    return run_prompt(sid, slm_join_words(argv, first, last), flags, max_new);
 }
 
 /*
@@ -1272,6 +1300,95 @@ static int slm_gpu(void)
  * Top-level dispatch
  * ========================================================================= */
 
+/*
+ * slm runner start [slm launch's options] [--handle H] [--max N] [--raw]
+ * slm runner stop
+ * slm runner status
+ *
+ * No --handle: each prompt uses the most recently loaded model.
+ */
+static int slm_runner_verb(int argc, char *argv[])
+{
+    static const char *const gpu_names[] = { "auto", "cpu", "on" };
+    const char *sub = argc >= 3 ? argv[2] : "";
+
+    if (strcmp(sub, "start") == 0) {
+        slm_runner_config_t cfg;
+        slm_runner_default_config(&cfg);
+        if (slm_parse_session_opts("slm runner start", argc, argv, 3, &cfg,
+                                   true) != 0) {
+            return -1;
+        }
+        if (slm_runner_configure(&cfg) != 0) {
+            shell_puts("slm runner start: already running "
+                       "(`slm runner stop` first)\r\n");
+            return -1;
+        }
+        if (slm_runner_start() != 0) {
+            shell_puts("slm runner start: failed\r\n");
+            return -1;
+        }
+    } else if (strcmp(sub, "stop") == 0) {
+        int rc = slm_runner_stop();
+        if (rc == -1) {
+            shell_puts("slm runner stop: not running\r\n");
+            return -1;
+        }
+        if (rc != 0) {
+            shell_puts("slm runner stop: still running after 60 s\r\n");
+            return -1;
+        }
+    } else if (strcmp(sub, "status") != 0) {
+        shell_puts("Usage: slm runner start [--handle H] [--max N] [--raw] "
+                   "[slm launch options]\r\n"
+                   "       slm runner stop\r\n"
+                   "       slm runner status\r\n");
+        return -1;
+    }
+
+    slm_runner_status_t st;
+    slm_runner_get_status(&st);
+    if (!st.running) {
+        shell_printf("slm-runner: stopped prompts=%lu dropped=%lu\r\n",
+                     (unsigned long)st.prompts, (unsigned long)st.dropped);
+        return 0;
+    }
+    shell_printf("slm-runner: running component=%ld session=%ld model=%ld "
+                 "gpu=%s busy=%lu prompts=%lu dropped=%lu\r\n",
+                 (long)st.component_idx, (long)st.session, (long)st.model,
+                 st.gpu_mode < 3u ? gpu_names[st.gpu_mode] : "?",
+                 (unsigned long)st.busy, (unsigned long)st.prompts,
+                 (unsigned long)st.dropped);
+    return 0;
+}
+
+/*
+ * slm ask [--timeout S] "<text>"
+ *
+ * Long enough by default to outlast a CPU prefill of a long prompt on the
+ * real model: at 0.4 tok/s a 64-token prompt takes about four minutes before
+ * its first token.
+ */
+#define SLM_ASK_DEFAULT_TIMEOUT_S 600u
+
+static int slm_ask(int argc, char *argv[])
+{
+    int first = 2;
+    uint32_t timeout_s = SLM_ASK_DEFAULT_TIMEOUT_S;
+    if (argc >= 4 && strcmp(argv[2], "--timeout") == 0) {
+        if (shell_parse_uint(argv[3], &timeout_s) != 0 || timeout_s == 0) {
+            shell_printf("slm ask: bad --timeout '%s'\r\n", argv[3]);
+            return -1;
+        }
+        first = 4;
+    }
+    if (first >= argc) {
+        shell_puts("Usage: slm ask [--timeout S] \"<text>\"\r\n");
+        return -1;
+    }
+    return slm_runner_ask(slm_join_words(argv, first, argc - 1), timeout_s);
+}
+
 static void slm_print_usage(void)
 {
     shell_puts("Usage: slm <verb> [args]\r\n");
@@ -1293,6 +1410,9 @@ static void slm_print_usage(void)
     shell_puts("  status                         One-line summary\r\n");
     shell_puts("  stats  <session>               Per-session telemetry\r\n");
     shell_puts("  gpu                            GPU dispatch state\r\n");
+    shell_puts("  runner start|stop|status       The slm-runner bus service\r\n");
+    shell_puts("  ask    [--timeout S] \"<text>\"  Ask slm-runner over the "
+               "message bus\r\n");
 }
 
 /* Verbs that change global state: the registry, the session table, memory
@@ -1330,6 +1450,9 @@ int cmd_slm(int argc, char *argv[])
     if (strcmp(verb, "status") == 0) return slm_status();
     if (strcmp(verb, "stats")  == 0) return slm_stats(argc, argv);
     if (strcmp(verb, "gpu")    == 0) return slm_gpu();
+    /* Same: they wait on a task, and the task can need the shell to run. */
+    if (strcmp(verb, "runner") == 0) return slm_runner_verb(argc, argv);
+    if (strcmp(verb, "ask")    == 0) return slm_ask(argc, argv);
     if (strcmp(verb, "help")   == 0) { slm_print_usage(); return 0; }
 
     bool locked = shell_mutation_lock();

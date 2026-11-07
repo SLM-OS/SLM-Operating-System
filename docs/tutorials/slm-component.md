@@ -1,16 +1,37 @@
 # Tutorial: Using the `slm-runner` Component
 
 The `slm-runner` is a built-in SLM-OS component that turns a loaded GGUF
-language model into a long-lived chat service. It subscribes to
-`/slm/prompt`, drives each prompt through the M5.2 session FFI, streams
-generated tokens back on `/slm/token`, and announces per-prompt
-completion on `/slm/done`.
+language model into a service on the message bus. It subscribes to
+`/slm/prompt` and `/slm/stop`, answers each prompt through the session FFI,
+streams generated tokens on `/slm/token`, and ends every prompt with one
+`/slm/done`.
 
-This tutorial walks through running the component, publishing a prompt
-to it, and consuming the streamed response from a Lua script. Reading
-[`docs/tutorials/component.md`](component.md) first is recommended —
-the component lifecycle and message-router primitives below are the
-same ones the `digit_classifier` walkthrough introduces.
+This tutorial covers starting the runner, asking it something from the
+shell and from Lua, and what it guarantees. Reading
+[`docs/tutorials/component.md`](component.md) first is recommended: the
+component lifecycle and message-router primitives are the same ones the
+`digit_classifier` walkthrough introduces.
+
+---
+
+## What Works
+
+| Item | State |
+|------|-------|
+| Client publishes `/slm/prompt`, receives every token in order, then `/slm/done` with stats | ✅ `make test`: scripted logits and the real forward path on `scripts/fixtures/slm/tiny_qwen2.gguf` |
+| Prompts up to 511 bytes (a 64-token prompt is about 370) | ✅ `make test` |
+| Stop by `/slm/stop`, `slm stop <session>`, or Ctrl-C in `slm ask` | ✅ `make test` |
+| Runner restart, model choice, `--gpu`, bad handle | ✅ `make test` |
+| Real Qwen on Jetson after a cold UEFI-direct boot | ☐ integration stage of #475 |
+| Tests on x86-64 | ⏸️ `kernel/tests/test_slm_runner.c` stays ARM64-only, as `test_slm_shell.c` does; x86-64 builds and links the runner but doesn't run it |
+
+The runner runs **in-kernel only**. The EL0 task path works, but the component
+runtime still creates components at EL1, and the runner has not run at EL0 on
+any platform. A fault in the decoder is a kernel fault.
+
+Hot-swap of the runner is not tested. The model stays in the registry across a
+swap, but the new instance opens its own session, so a running conversation
+and its KV cache don't carry over.
 
 ---
 
@@ -18,163 +39,201 @@ same ones the `digit_classifier` walkthrough introduces.
 
 ```
 +-----------+   /slm/prompt    +-------------+   /slm/token   +-----------+
-|  Producer | ---------------> |  slm-runner | -------------> | Consumer  |
-| (Lua/API) |                  |  component  | -------------> |  (Lua/UI) |
-+-----------+                  +-------------+   /slm/done    +-----------+
+|  Client   | ---------------> |  slm-runner | -------------> |  Client   |
+| (shell or |   /slm/stop      |  component  |   /slm/done    | (shell or |
+|    Lua)   | ---------------> |  in-kernel  | -------------> |    Lua)   |
++-----------+                  +-------------+                +-----------+
 ```
-
-The runner opens a single SLM session over slot 0 (the most recently
-loaded model) and keeps it alive for the lifetime of the component.
-Every `/slm/prompt` message triggers one prefill+decode pass; the token
-callback publishes each generated UTF-8 token as its own message on
-`/slm/token`, then a final `/slm/done` summary carries the per-prompt
-counters.
 
 ### Topic Surface
 
 | Topic | Direction | Payload | Notes |
 |-------|-----------|---------|-------|
-| `/slm/prompt` | runner subscribes | UTF-8 prompt string | One message per prompt; payload size capped at 60 bytes by the message router |
-| `/slm/token` | runner publishes | UTF-8 token bytes | One message per generated token that has printable bytes (a character split across tokens arrives whole, with its last token); consumer must ack quickly under the router's latest-wins semantics |
-| `/slm/done` | runner publishes | `rc=<n> tokens_out=<n> prompts=<n>` | Always published once per prompt, even when the decoder rejects the request |
+| `/slm/prompt` | runner subscribes | UTF-8 prompt, up to 511 bytes | One message per prompt. A longer publish is refused, never cut |
+| `/slm/stop` | runner subscribes | ignored | Ends the running prompt before its next forward step. Does nothing when idle |
+| `/slm/token` | runner publishes | UTF-8 text | One message per generated token that has printable bytes |
+| `/slm/done` | runner publishes | see below | Exactly one per prompt, on every path |
+
+A token whose bytes end inside a character carries what's complete, and the
+next one brings the rest, so a message never holds half a character. A token
+longer than a message is split on a character boundary. NUL bytes can't travel
+on the bus and are left out.
+
+### `/slm/done`
+
+A prompt that ran:
+
+```
+rc=0 stop=eos tokens_in=98 tokens_out=8 msgs=8 dropped=0 ttft_ms=42 decode_ms=180 session=0 prompts=1
+```
+
+A prompt that couldn't start:
+
+```
+rc=-1 err=no-model stop=none tokens_in=0 tokens_out=0 msgs=0 dropped=0 prompts=1
+```
+
+| Field | Meaning |
+|-------|---------|
+| `rc` | 0 if the prompt ran, even if stopped early. -1 on a decoder error such as invalid UTF-8. -3 (`SLM_ERR_BUSY`) if a `slm prompt` was running |
+| `err` | Only when it couldn't start: `no-model`, `bad-handle`, `open-failed` |
+| `stop` | `eos`, `max`, `stopped`, `callback`, `ctx-full`, `no-logits`, `empty`, `none` |
+| `tokens_in` | Tokens fed to the model, chat template included |
+| `tokens_out` | Tokens generated |
+| `msgs` | `/slm/token` messages published. A client that counted fewer lost some |
+| `dropped` | Times a subscriber's mailbox stayed full for the whole wait, over all subscribers |
+| `ttft_ms`, `decode_ms` | Time to first token; time in the decode loop after it |
+| `prompts` | Prompts handled since this runner started |
+
+---
+
+## Delivery
+
+Tokens are published with `msg_router_publish_reliable`. The mailbox holds one
+message per subscriber and a publish waits for it to be read, so a slow reader
+slows the decoder and loses nothing. Order on `/slm/token` is publication
+order, and `/slm/done` comes last because each token was acked first.
+
+The wait has a limit. A reader that takes more than 30 s over one token loses
+the next one, which shows in `dropped=`, and for the rest of that prompt the
+runner waits 1 s per token. That keeps a subscriber that died without
+unsubscribing from wedging the service. Other subscribers still get everything.
+
+A client on a higher priority than the runner must sleep while it waits, not
+yield: the runner runs at the shell's priority, and a yield doesn't let a
+lower-priority task run. `msg_router_publish_reliable` already does this when
+the runner is the one waiting.
+
+There are no request ids. One prompt runs at a time, and a client that wants a
+clean reply waits for `/slm/done` before publishing again. `slm ask` refuses
+while the runner is busy. A prompt published anyway waits in the mailbox until
+the current one ends; a stop leaves it there.
 
 ---
 
 ## Step 1: Load a Model
 
-The runner requires an SLM in slot 0 of the registry. On Jetson the
-recommended path is `slm xload`, which streams the GGUF straight
-into a single PMM buffer (see `docs/setup.md` §"Jetson SD-Card
-Layout" for why the LittleFS-staged path doesn't fit a Qwen-class
-model on 8 GB). On platforms with enough contiguous PMM the
-file-path `slm load` form still works.
+On Jetson after a cold UEFI-direct boot the model comes from the boot-time
+delivery in `docs/deploy/jetson-uefi-direct.md`. Otherwise:
 
 ```
-# Jetson (streamed):
-SLM-OS> slm xload qwen <total_bytes>
-[INFO] SLM 'qwen' loaded at slot 0 (28 layers, vocab 152064)
-
-# Or, on a platform with the alloc+copy headroom:
-SLM-OS> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
-[INFO] SLM 'qwen2.5-1.5b' loaded at slot 0 (28 layers, vocab 152064)
-
-SLM-OS> slm list
-[0] qwen  arch=qwen2  ctx=32768  vocab=152064
+slmos> slm xload qwen <total_bytes>
+slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ```
 
-If the runner is started before any model is loaded, the component
-exits cleanly after logging:
-
-```
-[slm-runner] ERROR: no SLM loaded
-[slm-runner] Load one with: slm xload <name> <bytes>
-```
+The runner doesn't need a model to start. Without one, a prompt gets
+`rc=-1 err=no-model`, and a model loaded later is picked up by the next prompt
+with no restart.
 
 ---
 
-## Step 2: Start the Component
+## Step 2: Start the Runner
 
 ```
-SLM-OS> component run slm-runner
+slmos> slm runner start --gpu auto
 Component 'slm-runner' v1.0.0 started (idx=5, task=12)
-[slm-runner] Started (component 5, session 0), subscribed to /slm/prompt
+[slm-runner] Started (component 5, session 0, model 0), subscribed to /slm/prompt
+slm-runner: running component=5 session=0 model=0 gpu=auto busy=0 prompts=0 dropped=0
 ```
 
-The runner opens a session with the spec's demo defaults: `max_ctx=4096`,
-sampler `top_k=40, top_p=0.9, temperature=0.7`, seed `0`. The session
-stays open until the component task exits (60 seconds idle timeout, or
-explicit termination).
+`slm runner start` takes every session option of `slm launch` (`--ctx
+--sampler --temp --topk --topp --seed --gpu --threads`), applied through the
+same `rust_slm_session_configure` call, plus:
+
+| Option | Meaning | Default |
+|--------|---------|---------|
+| `--handle H` | Always use slot H | The most recently loaded model |
+| `--max N` | Tokens per prompt, 0 for no limit | 256 |
+| `--raw` | Tokenize prompts as given instead of rendering the chat template | Chat template |
+
+Other defaults: `--ctx 4096`, sampler `topkp` with temperature 0.7, top-k 40,
+top-p 0.9, seed 1, `--gpu auto`.
+
+`component run slm-runner` also starts it, with the options of the last `slm
+runner start`, or the defaults if there hasn't been one.
+
+**Which model.** Without `--handle`, each prompt uses the model loaded most
+recently that's still loaded: not slot 0, and not the highest slot. If that
+isn't the model the open session is on, or its slot was reloaded, the runner
+closes the session and opens a new one. With `--handle H` an empty slot H gets
+`rc=-1 err=bad-handle`.
+
+**What keeps it running, and what restarts it.** The runner has no idle
+timeout. It runs until `slm runner stop`, or until its task is killed from
+outside. Nothing starts or restarts it on its own: not boot, not a crash. `slm
+runner start` or `component run slm-runner` does.
+
+**One conversation per prompt.** The runner resets the session before each
+prompt, so one client's text can't reach another's reply and the context can't
+fill up over time. A client that wants a conversation uses `slm launch` and
+`slm prompt`.
 
 ---
 
-## Step 3: Publish a Prompt
+## Step 3: Ask It
 
-Any task on the system can drive the runner by publishing on
-`/slm/prompt`. From the shell, the simplest path is the `msg send`
-verb:
-
-```
-SLM-OS> msg send /slm/prompt "Say hello"
-[slm-runner] prompt #1 rc=0 tokens=12
-```
-
-Each generated token shows up as a `/slm/token` publish; subscribe a
-listener component to see the stream:
+`slm ask` is a client that only uses the bus. It subscribes to `/slm/token` and
+`/slm/done`, publishes the prompt, prints what arrives, and compares what it
+counted with `msgs=`:
 
 ```
-SLM-OS> component run listener           # toy listener; subscribes to "events"
-SLM-OS> msg subscribe /slm/token listener  # bind it to /slm/token instead
+slmos> slm ask "Explain RAII in one sentence."
+RAII ties a resource's lifetime to an object's scope...
+[slm done] rc=0 stop=eos tokens_in=38 tokens_out=21 msgs=21 dropped=0 ttft_ms=3100 decode_ms=52000 session=0 prompts=1
+[slm ask] received 21 of 21 token messages
 ```
+
+Ctrl-C publishes `/slm/stop` and keeps reading to `/slm/done`. `--timeout S`
+sets how long to go without a message before giving up (default 600 s, enough
+for a CPU prefill of a long prompt). It returns an error if the runner refused
+the prompt, if tokens went missing, or on a timeout.
+
+Without a client, `msg send /slm/prompt "Say hello"` starts a prompt too, and
+`[slm-runner] prompt #1 rc=0 tokens=12` shows up on the UART when it ends.
 
 ---
 
-## Step 4: Lua Demo
-
-A more interesting consumer is a Lua script that subscribes to both
-`/slm/token` and `/slm/done`, prints tokens as they arrive, and exits
-on the done message:
+## Step 4: A Lua Client
 
 ```lua
--- slm-chat-demo.lua: publish a prompt and stream the response.
+-- Publish a prompt and stream the response.
+local done = nil
 
-local function on_token(topic, payload)
-    io.write(payload)
-    io.flush()
+slm.msg_subscribe("/slm/token", function(_, text) io.write(text) end)
+slm.msg_subscribe("/slm/done",  function(_, stats) done = stats end)
+
+slm.msg_publish("/slm/prompt", "Explain RAII in one sentence.")
+while not done do
+    slm.yield()
 end
-
-local function on_done(topic, payload)
-    print()
-    print("[done] " .. payload)
-    msg.unsubscribe("/slm/token")
-    msg.unsubscribe("/slm/done")
-end
-
-msg.subscribe("/slm/token", on_token)
-msg.subscribe("/slm/done",  on_done)
-
-msg.publish("/slm/prompt", "Explain RAII in one sentence.")
+print()
+print("[done] " .. done)
 ```
 
-Run with `lua /mnt/files/slm-chat-demo.lua` after `component run
-slm-runner` is active. The expected output is the model's response
-streaming token-by-token, followed by a `[done] rc=0 tokens_out=N
-prompts=1` summary line.
+Subscriptions are delivered on the script's own task at `slm.yield()`,
+`slm.sleep()` and `slm.msg_drain()`, so a script holding back from those holds
+back the decoder.
 
 ---
 
-## Step 5: Inspect the Session
-
-The shell's `slm` family exposes the same session the runner is
-driving:
+## Step 5: Stop
 
 ```
-SLM-OS> slm status
-models=1 sessions=1
-SLM-OS> slm stats 0
-session 0: prompts=1 tokens_in=4 tokens_out=12 ttft=42ms decode=180ms
+slmos> msg send /slm/stop now      # the running prompt
+slmos> slm stop 0                  # the same, by session id
+slmos> slm runner status
+slmos> slm runner stop             # the runner: ends any prompt, closes the session
 ```
-
-`slm stats <session_id>` prints the same `SlmStatsC` snapshot the
-runner publishes on `/slm/done`.
 
 ---
 
-## Limitations (M8.1)
+## Limitations
 
-- **M5.2 placeholder weights.** The decoder runs on zero-initialised
-  weights, so non-empty prompts currently return `rc=-1` and emit no
-  tokens. Real generation lands with M5.3 once the GGUF weights are
-  mapped into the model-memory pool. The runner still publishes
-  `/slm/done` on the rejected path so subscribers always observe
-  completion.
-- **Hot-swap caveat.** Replacing the runner via `component_hot_swap`
-  rebuilds the session over slot 0. If the underlying SLM has been
-  unregistered between the two runs, the new instance logs the
-  `no SLM loaded` hint and exits. Spec target: full session/KV
-  carryover across hot-swap (tracked as a follow-up).
-- **Topic payload cap.** The message router caps payloads at 60 bytes.
-  Tokens longer than 60 bytes (rare for BBPE outputs) are truncated
-  before publish.
+- **In-kernel only**, as above.
+- **No request ids.** Two clients at once see each other's tokens.
+- **511-byte prompts.** The bus carries C strings up to that size.
+- **Pinned to CPU 0** with the shell, like every component. The decode shares
+  that CPU with the shell at the same priority.
 
 ---
 
@@ -182,11 +241,13 @@ runner publishes on `/slm/done`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/src/slm_runner.c` | Component entry point, token callback, prompt dispatch |
+| `kernel/src/slm_runner.c` | Component entry point, token stream, `slm ask` client |
+| `kernel/include/slm_runner.h` | Topics, configuration, status, router additions |
+| `kernel/src/slm_shell.c` | `slm runner` and `slm ask` verbs |
 | `kernel/src/component_runtime.c` | Built-in registration in `builtin_components[]` |
-| `kernel/include/slm_ffi.h` | `rust_slm_session_open` / `rust_slm_prompt` / `rust_slm_stats` declarations |
-| `runtime/src/slm/decoder.rs` | Rust-side prefill + decode loop |
-| `runtime/src/msg_router.rs` | Topic router driving `/slm/prompt` -> `/slm/token` -> `/slm/done` |
+| `runtime/src/msg_router.rs` | Topics, mailboxes, `msg_router_publish_reliable` |
+| `runtime/src/slm/decoder.rs` | Rust-side prefill and decode loop |
+| `kernel/tests/test_slm_runner.c` | Tests: bus path end to end |
 
 See [`docs/design/slm-integration.md`](../design/slm-integration.md)
 "Component Integration" for the design rationale and
@@ -195,4 +256,4 @@ M8 for the delivery context.
 
 ---
 
-*Last updated: April 2026*
+*Last updated: November 2026*

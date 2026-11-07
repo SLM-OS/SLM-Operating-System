@@ -18,7 +18,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const MAX_TOPICS: usize = 16;
 const MAX_SUBSCRIBERS: usize = 4;
-const MAX_MSG_LEN: usize = 60;
+/// Mailbox payload size, terminating NUL included. Large enough for a
+/// 64-token prompt (about 370 bytes) to travel on `/slm/prompt`. A publish
+/// that doesn't fit is rejected rather than truncated.
+const MAX_MSG_LEN: usize = 512;
 const TOPIC_NAME_LEN: usize = 16;
 const MAX_WILDCARD_SUBS: usize = 8;
 const MSG_PRIORITY_NORMAL: u8 = 0;
@@ -27,6 +30,12 @@ const MSG_PRIORITY_NORMAL: u8 = 0;
 /// call site via `timer_get_frequency()` so the timeout is correct
 /// regardless of TIMER_HZ or whether timer IRQs are masked.
 const ACK_TIMEOUT_SECS: u64 = 5;
+
+/// `msg_router_publish_reliable` sleeps instead of yielding every this many
+/// polls. A yield only runs tasks of equal or higher priority, so a publisher
+/// waiting on a lower-priority subscriber would otherwise spin out its
+/// timeout while the subscriber never runs.
+const RELIABLE_YIELDS_PER_SLEEP: u32 = 64;
 
 // =============================================================================
 // External C functions
@@ -37,6 +46,7 @@ extern "C" {
     fn uart_printf(fmt: *const u8, ...);
     #[link_name = "yield"]
     fn sched_yield();
+    fn task_sleep_ms(ms: u32);
     /// ARM generic timer counter (CNTPCT_EL0). Always advances regardless
     /// of DAIF.I state — safe to poll from tasks on Pi 5 where timer IRQs
     /// don't fire while a task runs.
@@ -788,8 +798,62 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
     }
 }
 
-/// Internal publish with priority. Delivers to exact topic subscribers
-/// and wildcard subscribers, then waits for acknowledgment.
+/// What happened to one `msg_router_publish_reliable` call, per subscriber.
+/// Mirrors `msg_publish_stats_t` in `kernel/include/slm_runner.h`.
+#[repr(C)]
+#[derive(Default)]
+pub struct MsgPublishStats {
+    /// Subscribers (exact and wildcard) the message was addressed to.
+    pub targets: i32,
+    /// Took the message and acked it, or unsubscribed with it read or unread.
+    pub acked: i32,
+    /// The mailbox stayed full for the whole timeout: this subscriber lost
+    /// the message.
+    pub dropped: i32,
+    /// The message landed but wasn't acked in time. It isn't lost, and blocks
+    /// the next publish to that mailbox until it's consumed.
+    pub unacked: i32,
+}
+
+/// How long a publish waits per subscriber, and how it passes the time.
+#[derive(Clone, Copy)]
+struct PublishWait {
+    timeout_cycles: u64,
+    /// Sleep now and then so a lower-priority subscriber gets to run.
+    may_sleep: bool,
+}
+
+/// Give the CPU away for one poll of a publish wait.
+///
+/// # Safety
+/// Must run in task context with IRQs enabled, without any lock held.
+unsafe fn publish_wait_step(wait: PublishWait, polls: &mut u32) {
+    *polls = polls.wrapping_add(1);
+    if wait.may_sleep && *polls % RELIABLE_YIELDS_PER_SLEEP == 0 {
+        task_sleep_ms(1);
+    } else {
+        sched_yield();
+    }
+}
+
+/// Internal publish with priority and the standard ack timeout. Delivers to
+/// exact topic subscribers and wildcard subscribers, then waits for
+/// acknowledgment.
+///
+/// # Safety
+/// As [`publish_wait`].
+unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8) -> i32 {
+    let wait = PublishWait {
+        timeout_cycles: timer_get_frequency().saturating_mul(ACK_TIMEOUT_SECS),
+        may_sleep: false,
+    };
+    let mut stats = MsgPublishStats::default();
+    publish_wait(topic_name, data, priority, wait, &mut stats);
+    stats.acked
+}
+
+/// Deliver to every subscriber, waiting per subscriber for room and for the
+/// ack, and record the outcome in `stats`.
 ///
 /// # Concurrency
 /// Holds `MSG_ROUTER_LOCK` only while scanning the topic/wildcard arrays
@@ -800,7 +864,13 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
 /// # Safety
 /// Caller promises `topic_name` (≤ TOPIC_NAME_LEN + NUL) and `data`
 /// (≤ MAX_MSG_LEN + NUL) are readable NUL-terminated C strings.
-unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8) -> i32 {
+unsafe fn publish_wait(
+    topic_name: *const u8,
+    data: *const u8,
+    priority: u8,
+    wait: PublishWait,
+    stats: &mut MsgPublishStats,
+) {
     const MAX_TARGETS: usize = MAX_SUBSCRIBERS + MAX_WILDCARD_SUBS;
     let mut targets: [*mut Mailbox; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
     let mut target_count = 0usize;
@@ -861,8 +931,9 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
     // `pit_ticks` never advances and the loop would hang forever. The
     // hardware counter increments continuously regardless of IRQ mask
     // state.
-    let mut delivered = 0i32;
-    let timeout_cycles = timer_get_frequency().saturating_mul(ACK_TIMEOUT_SECS);
+    let timeout_cycles = wait.timeout_cycles;
+    let mut polls = 0u32;
+    stats.targets = target_count as i32;
     for t in 0..target_count {
         // SAFETY: pointer points at a Mailbox inside the TOPICS /
         // WILDCARD_SUBS static arrays (stable storage).
@@ -895,9 +966,10 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
                  * delivered=0, knows the send didn't land). */
                 break;
             }
-            sched_yield();
+            publish_wait_step(wait, &mut polls);
         }
         if !delivered_this_target {
+            stats.dropped += 1;
             continue;
         }
 
@@ -910,18 +982,39 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
          * to the same mailbox on the next round). */
         let ack_start = timer_get_count();
         loop {
-            if mb.ack.load(Ordering::Acquire) != 0 {
-                delivered += 1;
+            // Back to idle counts too: a reader that acks and unsubscribes at
+            // once resets the mailbox, ack flag included, possibly before
+            // this task gets to look. Sitting out the timeout would stall the
+            // publisher for a message that was consumed.
+            if mb.ack.load(Ordering::Acquire) != 0
+                || mb.ready.load(Ordering::Acquire) == READY_IDLE
+            {
+                stats.acked += 1;
                 break;
             }
             if timer_get_count().wrapping_sub(ack_start) >= timeout_cycles {
+                stats.unacked += 1;
                 break;
             }
-            sched_yield();
+            publish_wait_step(wait, &mut polls);
         }
     }
+}
 
-    delivered
+/// True if `data` fits a mailbox. Otherwise logs and returns false: a
+/// truncated prompt would get a confident answer to the wrong question.
+///
+/// # Safety
+/// `data` must be a readable NUL-terminated C string.
+unsafe fn payload_fits(data: *const u8) -> bool {
+    if cstr_len_bounded(data, MAX_MSG_LEN).is_some() {
+        return true;
+    }
+    uart_printf(
+        b"[msg] publish: payload too long (max %d bytes)\n\0".as_ptr(),
+        (MAX_MSG_LEN - 1) as i32,
+    );
+    false
 }
 
 /// Fire-and-forget delivery — same gather-then-deliver shape as
@@ -1004,7 +1097,60 @@ pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> 
         }
         return 0;
     }
+    if unsafe { !payload_fits(data) } {
+        return 0;
+    }
     unsafe { publish_internal(topic_name, data, MSG_PRIORITY_NORMAL) }
+}
+
+/// Largest payload a publish accepts, in bytes, excluding the NUL.
+#[no_mangle]
+pub extern "C" fn msg_router_max_payload() -> u32 {
+    (MAX_MSG_LEN - 1) as u32
+}
+
+/// Publish with back-pressure, for streams that can't lose messages.
+///
+/// Waits up to `timeout_ms` per subscriber for room in its mailbox, and again
+/// for the ack. Unlike `msg_router_publish`, the caller can tell a lost
+/// message (`stats.dropped`) from one still waiting to be read
+/// (`stats.unacked`), and a subscriber of lower priority gets to run because
+/// the wait sleeps now and then.
+///
+/// Returns the number of subscribers that acked, or -1 for a bad argument or
+/// a payload over `msg_router_max_payload()`. A single publisher's messages
+/// arrive in order on one topic, and across topics as long as each was acked
+/// before the next was published.
+///
+/// # Safety
+/// `topic_name` and `data` must be NUL-terminated C strings. `stats` must be
+/// null or writable. Must run in task context with IRQs enabled and no lock
+/// held: this blocks.
+#[no_mangle]
+pub unsafe extern "C" fn msg_router_publish_reliable(
+    topic_name: *const u8,
+    data: *const u8,
+    timeout_ms: u32,
+    stats: *mut MsgPublishStats,
+) -> i32 {
+    if topic_name.is_null()
+        || data.is_null()
+        || cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none()
+        || !payload_fits(data)
+    {
+        return -1;
+    }
+    let wait = PublishWait {
+        timeout_cycles: (timer_get_frequency().saturating_mul(timeout_ms as u64) / 1000).max(1),
+        may_sleep: true,
+    };
+    let mut local = MsgPublishStats::default();
+    publish_wait(topic_name, data, MSG_PRIORITY_NORMAL, wait, &mut local);
+    let acked = local.acked;
+    if !stats.is_null() {
+        *stats = local;
+    }
+    acked
 }
 
 /// Publish a message with explicit priority (0 = normal, higher = more urgent).
@@ -1028,6 +1174,9 @@ pub extern "C" fn msg_router_publish_priority(
         }
         return 0;
     }
+    if unsafe { !payload_fits(data) } {
+        return 0;
+    }
     unsafe { publish_internal(topic_name, data, priority) }
 }
 
@@ -1046,11 +1195,11 @@ pub extern "C" fn msg_router_publish_priority(
 /// telemetry-feed TCP server has the matching wildcard subscription
 /// active.
 ///
-/// `Mailbox::deliver` already overwrites unconditionally (no flow-
-/// control check on the previous ack), so skipping the wait is safe:
-/// a fast publisher can overwrite an unread message, but the pumps
-/// that need this variant are 1 Hz while the server drain runs at
-/// 100 Hz from net_pump — the server picks up every sample.
+/// A message that finds the mailbox still full is dropped and counted
+/// (#869), so skipping the wait is safe for sampled data: the pumps that
+/// need this variant are 1 Hz while the server drain runs at 100 Hz from
+/// net_pump, so the server picks up every sample. A stream that can't lose
+/// messages uses `msg_router_publish_reliable`.
 #[no_mangle]
 pub extern "C" fn msg_router_publish_nowait(
     topic_name: *const u8,
@@ -1066,6 +1215,9 @@ pub extern "C" fn msg_router_publish_nowait(
                 (TOPIC_NAME_LEN - 1) as i32,
             );
         }
+        return 0;
+    }
+    if unsafe { !payload_fits(data) } {
         return 0;
     }
     unsafe { publish_internal_nowait(topic_name, data, MSG_PRIORITY_NORMAL) }
@@ -1154,6 +1306,50 @@ pub extern "C" fn msg_router_receive(
 
         best_data
     }
+}
+
+/// `msg_router_receive`, for one exact topic only. Lets a task that's busy
+/// check for a control message without taking the work queued on its other
+/// topics. Ack with `msg_router_ack` as usual. Returns NULL if nothing is
+/// pending on that topic.
+///
+/// # Safety
+/// `topic_name` must be a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn msg_router_receive_topic(
+    component_idx: i32,
+    topic_name: *const u8,
+) -> *const u8 {
+    if topic_name.is_null()
+        || component_idx < 0
+        || component_idx as usize >= MAX_COMPONENTS
+        || cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none()
+    {
+        return core::ptr::null();
+    }
+    let _g = SpinGuard::new();
+    // MSG_ROUTER_LOCK held — exclusive access to TOPICS / LAST_RECEIVED.
+    for i in 0..MAX_TOPICS {
+        if !TOPICS[i].is_active() || !str_eq_cstr(&TOPICS[i].name, topic_name) {
+            continue;
+        }
+        for j in 0..MAX_SUBSCRIBERS {
+            if TOPICS[i].subs[j].component_idx != component_idx {
+                continue;
+            }
+            let mb = &TOPICS[i].subs[j].mailbox;
+            if mb.ready.load(Ordering::Acquire) == READY_FULL {
+                LAST_RECEIVED[component_idx as usize] = LastReceived {
+                    topic_idx: i as i32,
+                    sub_idx: j as i32,
+                    wildcard_idx: -1,
+                };
+                return mb.data.as_ptr();
+            }
+        }
+        break;
+    }
+    core::ptr::null()
 }
 
 /// Acknowledge receipt of a message. Targets the exact mailbox that

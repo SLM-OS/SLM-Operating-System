@@ -473,7 +473,9 @@ static const struct builtin_component builtin_components[] = {
         .version = "1.0.0",
         .description = "SLM prompt streaming via /slm/prompt → /slm/token",
         .type = COMPONENT_TYPE_APPLICATION,
-        .priority = COMPONENT_PRIORITY_NORMAL,
+        /* Same as the shell: a decode is minutes of CPU on CPU 0, and at any
+         * higher priority the shell, and every client on it, never runs. */
+        .priority = COMPONENT_PRIORITY_IDLE,
         .entry = slm_runner_entry,
     },
 };

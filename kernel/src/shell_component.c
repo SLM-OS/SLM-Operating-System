@@ -11,6 +11,7 @@
 #include "component.h"
 #include "string.h"
 #include "slm_ffi.h"
+#include "slm_runner.h"
 #include <stdint.h>
 
 /* Component runtime (component_runtime.c) */
@@ -293,12 +294,14 @@ int cmd_msg(int argc, char *argv[])
         }
         const char *topic = argv[2];
 
-        /* Join remaining args into message */
-        char msg[64];
+        /* Join remaining args into message. Larger than the router takes, so
+         * an oversized message is refused by the router, not cut here. */
+        char msg[MSG_ROUTER_MAX_PAYLOAD + 2];
         int pos = 0;
-        for (int i = 3; i < argc && pos < 62; i++) {
-            if (i > 3 && pos < 62) msg[pos++] = ' ';
-            for (int j = 0; argv[i][j] && pos < 62; j++) {
+        const int msg_cap = (int)sizeof(msg) - 1;
+        for (int i = 3; i < argc && pos < msg_cap; i++) {
+            if (i > 3 && pos < msg_cap) msg[pos++] = ' ';
+            for (int j = 0; argv[i][j] && pos < msg_cap; j++) {
                 msg[pos++] = argv[i][j];
             }
         }

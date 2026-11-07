@@ -46,7 +46,9 @@ extern void msg_router_ack(int component_idx);
 /* Component slot. The msg_router's MAX_COMPONENTS=64 is split today as:
  *   0..15:  COMPONENT_MAX_COUNT — native components (component.c)
  *   16..48: LUA_MSG_COMPONENT_BASE..MAX (16 + 1 + 16 = 33 slots; lua_slm.c)
- *   49..63: free
+ *   49:     telemetryd (this file)
+ *   50:     `slm ask` (SLM_ASK_COMPONENT_IDX, slm_runner.h)
+ *   51..63: free
  * We park telemetryd at 49. If the Lua range grows past 48 the
  * compile-time guard in lua_slm.c (LUA_MSG_COMPONENT_MAX <= 64) fires
  * and forces a coordinated bump of MAX_COMPONENTS in msg_router.rs;
@@ -57,9 +59,10 @@ extern void msg_router_ack(int component_idx);
 #define TELEMETRY_TOPIC_LEN     16
 
 /* Scratch buffer used to format one sample line before fanout. Sized to
- * comfortably hold "<topic> seq=<20> ts=<10> <60-byte payload>\n\0".
- * msg_router caps payload at MAX_MSG_LEN=60 incl. nul, so 16 + 6 + 20 +
- * 4 + 10 + 1 + 60 + 2 ≈ 119 bytes; round up. */
+ * comfortably hold "<topic> seq=<20> ts=<10> <60-byte payload>\n\0":
+ * 16 + 6 + 20 + 4 + 10 + 1 + 60 + 2 ≈ 119 bytes; round up. Telemetry payloads
+ * fit in 60. The router takes up to 511, and a sample too long for this line
+ * is skipped (format_sample returns 0). */
 #define TELEMETRY_LINE_MAX      192
 
 /* Per-client TX ring. 4 KB matches shell_io_tcp's TCP_SHELL_RING_SIZE

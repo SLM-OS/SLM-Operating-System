@@ -338,6 +338,11 @@ const _: () = assert!(core::mem::size_of::<SlmModelInfoC>() == 92);
 
 static SLM_LOCK: AtomicBool = AtomicBool::new(false);
 static mut SLOTS: [Option<LoadedSlm>; SLM_MAX_SLOTS] = [EMPTY_SLOT; SLM_MAX_SLOTS];
+/// When each occupied slot was filled, counting loads since boot from 1.
+/// Tells "most recently loaded" apart from "highest slot", and a reloaded
+/// slot from the model that used to be there. Guarded by the slot lock.
+static mut SLOT_LOAD_SEQ: [u64; SLM_MAX_SLOTS] = [0; SLM_MAX_SLOTS];
+static mut NEXT_LOAD_SEQ: u64 = 1;
 
 struct SpinGuard;
 
@@ -743,6 +748,36 @@ where
 }
 
 /// Number of currently-occupied slots.
+pub fn load_seq(index: usize) -> Option<u64> {
+    if index >= SLM_MAX_SLOTS {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slot = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    slot[index].as_ref()?;
+    // SAFETY: SpinGuard held.
+    Some(unsafe { SLOT_LOAD_SEQ[index] })
+}
+
+/// The occupied slot loaded last, with its load sequence number.
+pub fn latest_loaded() -> Option<(usize, u64)> {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slot = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    let mut best = None;
+    for (i, s) in slot.iter().enumerate() {
+        if s.is_some() {
+            // SAFETY: SpinGuard held.
+            let seq = unsafe { SLOT_LOAD_SEQ[i] };
+            if best.map_or(true, |(_, b)| seq > b) {
+                best = Some((i, seq));
+            }
+        }
+    }
+    best
+}
+
 pub fn count() -> usize {
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
@@ -802,6 +837,11 @@ fn insert_entry(entry: LoadedSlm) -> Result<usize, LoadError> {
     for (i, s) in slot.iter_mut().enumerate() {
         if s.is_none() {
             *s = Some(entry);
+            // SAFETY: SpinGuard held.
+            unsafe {
+                SLOT_LOAD_SEQ[i] = NEXT_LOAD_SEQ;
+                NEXT_LOAD_SEQ += 1;
+            }
             return Ok(i);
         }
     }
