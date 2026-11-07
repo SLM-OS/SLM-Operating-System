@@ -131,6 +131,8 @@ enum slm_gpu_op_kind {
     /* Element-wise FP32 sigmoid: the eviction MLP's output activation
      * (cold-boot eviction pipeline, #1092). */
     SLM_GPU_OP_SIGMOID       = 13,
+    /* 32+: the #475 GPU program kernels, SLM_SASS_* in order
+     * (scripts/cuda/gen-slm-kernel-table.py). */
 };
 
 /* Number of SLM transformer ops (discriminants 0..7) — sizes the

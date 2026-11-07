@@ -28,7 +28,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use crate::inference::gpu_slm::{select_tier, set_tier, OpKind, Tier};
+use crate::inference::gpu_slm::{select_tier, OpKind, Tier};
 use crate::slm::{
     chat_template::{
         encode_chat, encode_chat_continuation, ChatTurn, Role, GENERIC_SYSTEM_PROMPT,
@@ -37,7 +37,7 @@ use crate::slm::{
     forward::{forward_one, ForwardScratch},
     gguf::ArchKind,
     registry,
-    session::{GpuMode, Session, SessionState, StopReason},
+    session::{ForwardPath, Session, SessionState, StopReason},
     tokenizer::Bbpe,
 };
 
@@ -239,11 +239,6 @@ pub fn run_prompt(
     // given, so it drops it.
     session.pending_token = None;
 
-    // `--gpu cpu`: hold every op on the CPU tier for this prompt. Only
-    // one prompt runs at a time (see `ffi_cb` in lib.rs), so nothing
-    // else reads the table's normal values until the guard restores them.
-    let _cpu_only = (session.gpu_mode == GpuMode::Cpu).then(CpuOnlyGuard::engage);
-
     // Allocate the forward-pass scratch once per prompt. It's sized from
     // the session's cached arch + max_ctx and reused for every token.
     let mut scratch = ForwardScratch::new(
@@ -256,12 +251,27 @@ pub fn run_prompt(
     //    refilling it is a memcpy, and the sampler mutates it in place.
     let chunk = if cfg.prefill_chunk == 0 { 1 } else { cfg.prefill_chunk } as usize;
     let mut last_logits: Vec<f32> = Vec::with_capacity(session.vocab_size as usize);
-    for (i, &tok) in prompt_ids.iter().enumerate() {
+    let mut i = 0usize;
+    while i < prompt_ids.len() {
         if stop_wanted(session, cfg) {
             return Some(finish(session, i as u32, 0, 0, 0, StopReason::Stopped));
         }
-        step(session, tok, true, &mut scratch, &mut last_logits);
-        if (i + 1) % chunk == 0 {
+        // A GPU program takes the prompt in batches. Anything else, or a
+        // program that just failed, goes one token at a time.
+        let batch = session
+            .gpu
+            .as_ref()
+            .filter(|_| !script::armed())
+            .map_or(1, |p| p.max_batch as usize)
+            .min(prompt_ids.len() - i);
+        let tokens = &prompt_ids[i..i + batch];
+        if batch > 1 {
+            step_many(session, tokens, &mut scratch, &mut last_logits);
+        } else {
+            step(session, tokens[0], true, &mut scratch, &mut last_logits);
+        }
+        i += batch;
+        if i % chunk == 0 || batch > 1 {
             unsafe { sched_yield(); }
         }
     }
@@ -393,11 +403,6 @@ fn build_prompt_ids(session: &Session, text: &str, mode: PromptMode, tk: &Bbpe) 
     }
 }
 
-/// Holds every op on [`Tier::Cpu`] and puts the table back on drop.
-struct CpuOnlyGuard {
-    saved: [Tier; OpKind::COUNT],
-}
-
 const ALL_OPS: [OpKind; OpKind::COUNT] = [
     OpKind::RmsNorm,
     OpKind::Rope,
@@ -408,25 +413,6 @@ const ALL_OPS: [OpKind; OpKind::COUNT] = [
     OpKind::SwiGlu,
     OpKind::LmHead,
 ];
-
-impl CpuOnlyGuard {
-    fn engage() -> Self {
-        let mut saved = [Tier::Cpu; OpKind::COUNT];
-        for (slot, op) in saved.iter_mut().zip(ALL_OPS) {
-            *slot = select_tier(op);
-            set_tier(op, Tier::Cpu);
-        }
-        Self { saved }
-    }
-}
-
-impl Drop for CpuOnlyGuard {
-    fn drop(&mut self) {
-        for (tier, op) in self.saved.iter().zip(ALL_OPS) {
-            set_tier(op, *tier);
-        }
-    }
-}
 
 /// How many ops the tier table currently sends to the GPU.
 pub fn gpu_tier_ops() -> u32 {
@@ -527,9 +513,75 @@ fn step(
 ) {
     if script::armed() {
         script::step(session, prefill, out);
+    } else if session.gpu.is_some() {
+        step_many(session, core::slice::from_ref(&token_id), scratch, out);
     } else {
+        session.cpu_tokens = session.cpu_tokens.saturating_add(1);
         forward_step_via_registry(session, token_id, scratch, out);
     }
+}
+
+/// Feed `tokens` through the session's GPU program. If that fails, the
+/// session moves to the CPU for good and these tokens run there, so the
+/// caller gets the same logits either way.
+fn step_many(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch, out: &mut Vec<f32>) {
+    let mut prog = match session.gpu.take() {
+        Some(p) => p,
+        None => {
+            run_on_cpu(session, tokens, scratch, out);
+            return;
+        }
+    };
+    let pos = session.kv.len;
+    // No lock held here: the wait needs IRQs on (runtime/CLAUDE.md, #1093).
+    match prog.run(tokens, pos, out) {
+        Ok(()) => {
+            session.kv.len = pos + tokens.len();
+            session.gpu_tokens = session.gpu_tokens.saturating_add(tokens.len() as u64);
+            session.gpu_us_per_token = prog.gpu_us_per_token();
+            session.gpu = Some(prog);
+        }
+        Err(why) => {
+            let history = core::mem::take(&mut prog.history);
+            // Drop closes the program: unmaps the arena, frees it.
+            drop(prog);
+            fall_back_to_cpu(session, why, &history, scratch, out);
+            run_on_cpu(session, tokens, scratch, out);
+        }
+    }
+}
+
+fn run_on_cpu(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch, out: &mut Vec<f32>) {
+    for &t in tokens {
+        session.cpu_tokens = session.cpu_tokens.saturating_add(1);
+        forward_step_via_registry(session, t, scratch, out);
+    }
+}
+
+/// The program's KV cache died with it, so the CPU rebuilds its own from
+/// the tokens fed so far. Slow for a long history but always correct, and
+/// it doesn't depend on reading anything back from a wedged GPU.
+fn fall_back_to_cpu(
+    session: &mut Session,
+    why: &'static str,
+    history: &[u32],
+    scratch: &mut ForwardScratch,
+    out: &mut Vec<f32>,
+) {
+    let mut line = alloc::string::String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut line,
+        format_args!(
+            "[slm] GPU program failed ({why}); session continues on the CPU, replaying {} tokens\n\0",
+            history.len()
+        ),
+    );
+    crate::kernel_ffi::print(line.as_bytes());
+    session.gpu_note = Some(why);
+    session.path = ForwardPath::Cpu;
+    session.kv.ensure_storage();
+    session.kv.clear();
+    run_on_cpu(session, history, scratch, out);
 }
 
 /// Look up the loaded model's `LoadedSlm` under the registry lock and
@@ -595,7 +647,8 @@ mod script {
     /// on. A one-shot script running out looks like a forward failure.
     /// Non-looping scripts advance the KV length as a real forward does.
     pub(super) fn step(session: &mut Session, prefill: bool, out: &mut alloc::vec::Vec<f32>) {
-        GPU_OPS_SEEN.store(super::gpu_tier_ops(), Ordering::Relaxed);
+        let per_op = session.path == super::ForwardPath::PerOp;
+        GPU_OPS_SEEN.store(if per_op { super::gpu_tier_ops() } else { 0 }, Ordering::Relaxed);
         let len = LEN.load(Ordering::Relaxed);
         let looping = LOOPING.load(Ordering::Relaxed);
         let mut pos = POS.load(Ordering::Relaxed);
@@ -652,6 +705,7 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::inference::gpu_slm::set_tier;
     use crate::slm::registry::{
         build_cli_test_fixture, build_qwen_test_fixture, ensure_mm_initialized_for_tests,
         load_slm, reset_for_tests as reset_registry, CLI_FIXTURE_ENDOFTEXT, CLI_FIXTURE_EOS,
@@ -1148,7 +1202,8 @@ mod tests {
         run_prompt(&mut s, "hi", &cfg, record).expect("run");
         assert_eq!(test_script_gpu_ops_seen(), 2, "auto keeps the table");
 
-        s.gpu_mode = GpuMode::Cpu;
+        s.gpu_mode = crate::slm::session::GpuMode::Cpu;
+        s.path = ForwardPath::Cpu;
         test_script_set(&[97, CLI_FIXTURE_IM_END], false);
         run_prompt(&mut s, "hi", &cfg, record).expect("run");
         assert_eq!(test_script_gpu_ops_seen(), 0, "cpu holds every op on the CPU");

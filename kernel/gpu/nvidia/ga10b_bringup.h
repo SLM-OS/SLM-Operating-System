@@ -512,6 +512,12 @@ int ga10b_submit_and_poll(struct ga10b_bringup *b,
 uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
                                               uint64_t qmd_gpu_va);
 
+/* Queue one prebuilt GPFIFO entry and ring the doorbell, without waiting.
+ * Caller holds g_gpu_dispatch_lock. 0, or -1 without a usable handoff. */
+int ga10b_bringup_submit_gp_entry(uint64_t entry);
+/* GR, FECS, MMU fault and PBDMA state to the console. */
+void ga10b_bringup_dump_fault_state(const char *tag);
+
 /* Size of the launch-kernel-with-semaphore pushbuffer in dwords.
  *
  * Extends GA10B_LAUNCH_KERNEL_PB_DWORDS (14) with a REPORT_SEMAPHORE
