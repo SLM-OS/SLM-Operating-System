@@ -5,14 +5,266 @@
  "arch": "sm_87",
  "entries": [
   {
+   "name": "slm_mm_q4k_hmma_b1",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q4_K",
+   "sass": "slm_mm_q4k_hmma_b1_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_b1.cu",
+   "code_bytes": 11904,
+   "sha256": "430757fe7a5b3e3d433a7b9d7ce793de87703512434f6e5df576dbe09e4dff42",
+   "grid": "ceil(N/15),1,1",
+   "block": [
+    32,
+    "nw",
+    1
+   ],
+   "smem_bytes": 512,
+   "regs": 60,
+   "hmma_instructions": 16,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B must be 1; flags bits 8..15 = nw, block (32,nw,1). Prefer this one for B=1."
+  },
+  {
+   "name": "slm_mm_q6k_hmma_b1",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q6_K",
+   "sass": "slm_mm_q6k_hmma_b1_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_b1.cu",
+   "code_bytes": 15232,
+   "sha256": "72d884f2b503de447a1fd4b96ae04e25f9add0328eac6177e1c69eba30b14e6b",
+   "grid": "ceil(N/15),1,1",
+   "block": [
+    32,
+    "nw",
+    1
+   ],
+   "smem_bytes": 512,
+   "regs": 54,
+   "hmma_instructions": 16,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B must be 1; flags bits 8..15 = nw, block (32,nw,1). Prefer this one for B=1."
+  },
+  {
+   "name": "slm_mm_q4k_hmma_bs",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q4_K",
+   "sass": "slm_mm_q4k_hmma_bs_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_bs.cu",
+   "code_bytes": 15872,
+   "sha256": "ac029e6f6cd613ec8eb8fe6a6571413fa8e0fe3b9e3b95d20fb28bb6d2c58329",
+   "grid": "ceil(N/120),1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 8192,
+   "regs": 136,
+   "hmma_instructions": 32,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 9..64, x in shared memory; prefer for N > 256."
+  },
+  {
+   "name": "slm_mm_q6k_hmma_bs",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q6_K",
+   "sass": "slm_mm_q6k_hmma_bs_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_bs.cu",
+   "code_bytes": 19840,
+   "sha256": "b699660a3985f6e4f9e2dbe98fe241dda906ae713345310ee508003ad2c4bffe",
+   "grid": "ceil(N/120),1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 8192,
+   "regs": 100,
+   "hmma_instructions": 32,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 9..64, x in shared memory; prefer for N > 256."
+  },
+  {
    "name": "slm_mm_q4k_hmma_b64",
    "op": "matmul",
    "tier": "HMMA",
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_b64_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
-   "code_bytes": 21376,
-   "sha256": "87ae28083e5c5342658188276f7b0271e1329b12b4d5e26e8dd20b04d40477ab",
+   "code_bytes": 23040,
+   "sha256": "575854a0960125f574d206ffcea6cb848d23a9a955a902f4e075f1f5479c3969",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -20,7 +272,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 126,
+   "regs": 119,
    "hmma_instructions": 32,
    "cbuf0_size": 400,
    "abi": [
@@ -200,8 +452,8 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b64_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q6k.cu",
-   "code_bytes": 19200,
-   "sha256": "b6c68ec75d25826ed909e259a6906a059a95d197e0b0e97df2d34d59cc6e342a",
+   "code_bytes": 22144,
+   "sha256": "59d50678b1d8da4c0d12891a9d7c209899a782ce0df50bea8673a7dc935b13d2",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -209,7 +461,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 97,
+   "regs": 80,
    "hmma_instructions": 8,
    "cbuf0_size": 400,
    "abi": [

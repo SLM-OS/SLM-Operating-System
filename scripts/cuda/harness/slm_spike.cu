@@ -130,6 +130,33 @@ static int test_probe()
     return bad;
 }
 
+/* Does the tensor core honour FP16 subnormals in A? If so, a nibble can be fed as
+ * a raw integer times 2^-24, with no exponent to OR in. */
+__global__ void probe_subnormal(float *C)
+{
+    float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
+    const uint32_t a = 0x00030003u; /* 3 * 2^-24 in every element */
+    const uint32_t b = 0x3C003C00u; /* 1.0 */
+    __syncwarp();
+    slm_mma(c0, c1, c2, c3, a, a, a, a, b, b);
+    C[threadIdx.x] = c0;
+}
+
+static void test_subnormal()
+{
+    float *d;
+    float got[32];
+    CK(cudaMalloc(&d, sizeof got));
+    probe_subnormal<<<1, 32>>>(d);
+    CK(cudaGetLastError());
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(got, d, sizeof got, cudaMemcpyDeviceToHost));
+    const float want = 16.0f * 3.0f * ldexpf(1.0f, -24);
+    printf("mma FP16 subnormal A: got %g, honoured would be %g, flushed would be 0: %s\n",
+           (double)got[0], (double)want, got[0] == want ? "HONOURED" : "NOT HONOURED");
+    CK(cudaFree(d));
+}
+
 enum Kern { K_SIMT, K_B8, K_B64 };
 static const char *kname[] = {"simt", "hmma_b8", "hmma_b64"};
 
@@ -167,6 +194,7 @@ int main(int argc, char **argv)
            prop.multiProcessorCount, prop.clockRate, prop.totalGlobalMem / 1e9);
 
     int fails = test_probe();
+    test_subnormal();
 
     Gguf g;
     double t0 = now_ms();
@@ -272,6 +300,35 @@ int main(int argc, char **argv)
                 printf("  ** above tolerance 1e-3 of rms\n");
                 fails++;
             }
+        }
+        CK(cudaFree(dx));
+        CK(cudaFree(dout));
+    }
+
+    /* ---- does prefill's b64 kernel suffer from x missing the L1? ----
+     * ffn_gate's bytes reinterpreted with a smaller K: the same weight bytes and
+     * the same MACs, but the x each tile walks shrinks. Results are meaningless;
+     * only the time counts. Default x at B=64, K=1536 is 196 KB. */
+    {
+        const GgufTensor &t = g.tensors.at("blk.0.ffn_gate.weight");
+        const size_t bytes = gg_row_bytes(t) * t.dim1;
+        half *dx;
+        float *dout;
+        CK(cudaMalloc(&dx, (size_t)64 * 8960 * 2));
+        CK(cudaMalloc(&dout, (size_t)64 * 54000 * 4));
+        CK(cudaMemset(dx, 0, (size_t)64 * 8960 * 2));
+        printf("\nb64 working-set test: same W bytes (%.1f MB), same MACs\n", bytes / 1e6);
+        for (const int K : {1536, 768, 512, 256}) {
+            const int N = (int)(bytes / ((size_t)(K / 256) * 144));
+            std::vector<double> times;
+            for (int i = 0; i < 7; i++) {
+                const double s = now_ms();
+                launch(K_B64, dx, dW + t.offset, dout, K, N, 64);
+                CK(cudaGetLastError());
+                CK(cudaDeviceSynchronize());
+                times.push_back(now_ms() - s);
+            }
+            printf("  K=%-5d N=%-6d x %6.1f KB: %8.3f ms\n", K, N, K * 64 * 2 / 1024.0, median(times));
         }
         CK(cudaFree(dx));
         CK(cudaFree(dout));

@@ -23,6 +23,8 @@
  * 2-byte aligned, so q6k_load32 reads the aligned 8 bytes around the value and
  * shifts; only a lane whose value crosses an 8-byte boundary loads again.
  */
+#include <cmath>
+
 #include "slm_common.cuh"
 
 #define Q6K_BLOCK_BYTES 210
@@ -243,6 +245,10 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
     const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
     const int off4 = 4 * c;
     const int xtiles = (B + 7) >> 3;
+    const bool running = flags & SLM_MM_BIAS_RUNNING;
+    const int only = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y : -1;
+    const int bstart = SLM_MM_BSTART(flags);
+    const int bend = SLM_MM_BCOUNT(flags) ? bstart + SLM_MM_BCOUNT(flags) : nb;
 
     float acc[Q6K_XTILES][4];
 #pragma unroll
@@ -254,7 +260,7 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
     }
     __syncwarp();
 
-    for (int b = 0; b < nb; b++) {
+    for (int b = bstart; b < bend; b++) {
         const uint8_t *blk0 = w0 + b * Q6K_BLOCK_BYTES;
         const uint8_t *blk1 = w1 + b * Q6K_BLOCK_BYTES;
         const float d0 = has0 ? slm_h2f(q6k_u16(blk0 + 208)) : 0.0f;
@@ -265,6 +271,7 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
             const uint32_t s0b = q6k_load32(blk0 + 196 + h * 8);
             const uint32_t s1a = q6k_load32(blk1 + 192 + h * 8);
             const uint32_t s1b = q6k_load32(blk1 + 196 + h * 8);
+            __syncwarp();
 
             for (int t = 0; t < 2; t++) {
                 const int l = t * 16 + off4;
@@ -274,6 +281,7 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
                 const uint32_t la1 = q6k_load32(blk1 + h * 64 + l) & keep1;
                 const uint32_t lb1 = q6k_load32(blk1 + h * 64 + 32 + l) & keep1;
                 const uint32_t qh1 = q6k_load32(blk1 + 128 + h * 32 + l) & keep1;
+                __syncwarp();
 
                 for (int g = 0; g < 4; g++) {
                     const int nib_hi = g >> 1;
@@ -296,7 +304,7 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
 
 #pragma unroll
                     for (int xt = 0; xt < Q6K_XTILES; xt++) {
-                        if (xt >= xtiles) {
+                        if (xt >= xtiles || (only >= 0 && xt != only)) {
                             continue;
                         }
                         const int bat = xt * 8 + gr;
@@ -312,25 +320,39 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
                         slm_mma(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
                         const float s_0 = __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
                         const float s_1 = __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
-                        acc[xt][0] += k0 * c0 - off0 * s_0;
-                        acc[xt][1] += k0 * c1 - off0 * s_1;
-                        acc[xt][2] += k1 * c2 - off1 * s_0;
-                        acc[xt][3] += k1 * c3 - off1 * s_1;
+                        acc[xt][0] = fmaf(-off0, s_0, fmaf(k0, c0, acc[xt][0]));
+                        acc[xt][1] = fmaf(-off0, s_1, fmaf(k0, c1, acc[xt][1]));
+                        acc[xt][2] = fmaf(-off1, s_0, fmaf(k1, c2, acc[xt][2]));
+                        acc[xt][3] = fmaf(-off1, s_1, fmaf(k1, c3, acc[xt][3]));
                     }
                 }
             }
         }
     }
 
-    const float bias0 = (bias && has0) ? bias[r0] : 0.0f;
-    const float bias1 = (bias && has1) ? bias[r1] : 0.0f;
+    const float bias0 = (!running && bias && has0) ? bias[r0] : 0.0f;
+    const float bias1 = (!running && bias && has1) ? bias[r1] : 0.0f;
 #pragma unroll
     for (int xt = 0; xt < Q6K_XTILES; xt++) {
-        if (xt >= xtiles) {
+        if (xt >= xtiles || (only >= 0 && xt != only)) {
             continue;
         }
         const int n0 = xt * 8 + 2 * c;
         const int n1 = n0 + 1;
+        if (running) {
+            if (has0 && n0 < B) {
+                acc[xt][0] += bias[(long)n0 * N + r0];
+            }
+            if (has0 && n1 < B) {
+                acc[xt][1] += bias[(long)n1 * N + r0];
+            }
+            if (has1 && n0 < B) {
+                acc[xt][2] += bias[(long)n0 * N + r1];
+            }
+            if (has1 && n1 < B) {
+                acc[xt][3] += bias[(long)n1 * N + r1];
+            }
+        }
         if (has0 && n0 < B) {
             slm_store_out(out, (long)n0 * N + r0, acc[xt][0] + bias0, flags);
         }

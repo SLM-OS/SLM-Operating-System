@@ -27,6 +27,7 @@
 #include "../slm/slm_mm_q4k.cu"
 #include "../slm/slm_mm_q6k.cu"
 #include "../slm/slm_mm_b1.cu"
+#include "../slm/slm_mm_bs.cu"
 #include "../slm/slm_ops.cu"
 #include "gguf_lite.h"
 #include "slm_cpu_ref.h"
@@ -139,6 +140,7 @@ struct Program {
 
 struct Arena {
     uint8_t *w;
+    float *run; /* running FP32 sum across the K ranges of a b64 matmul */
     half *x, *xn, *q, *k, *v, *a, *p, *g, *u, *s, *d;
     std::vector<half *> K, V;
     float *table, *logits;
@@ -154,6 +156,7 @@ struct Model {
 };
 
 static bool g_simt = false;
+static bool g_b64 = false;
 
 static int mm_grid(int N) { return (N + Q4K_TILE_ROWS - 1) / Q4K_TILE_ROWS; }
 
@@ -178,6 +181,7 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
     void *f;
     dim3 grid(mm_grid(N));
     int nw = 1;
+    bool ranged = false;
     if (g_simt) {
         f = q6 ? (void *)slm_mm_q6k_simt : (void *)slm_mm_q4k_simt;
         grid = dim3(N, B, 1);
@@ -188,6 +192,58 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
         f = q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8;
     } else {
         f = q6 ? (void *)slm_mm_q6k_hmma_b64 : (void *)slm_mm_q4k_hmma_b64;
+        ranged = true;
+    }
+    /* Prefill path. Big matmuls share x through shared memory; small ones have too
+     * few CTAs to fill the SMs that way and split per x tile instead. */
+    if (ranged && N > 256 && !g_b64) {
+        const dim3 g2((N + 119) / 120);
+        P.add_op(name, cls, q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs, g2);
+        Op &o = P.ops.back();
+        o.block = dim3(32, 8, 1);
+        o.mma = (double)mm_grid(N) * (K / 256) * 16.0 * 8;
+        o.macs = (double)N * K * B;
+        o.bytes = (double)gg_row_bytes(t) * N;
+        o.tc = true;
+        P.arg(x);
+        P.arg((const uint8_t *)(A.w + t.offset));
+        P.arg(out);
+        P.arg(bias);
+        P.arg(K);
+        P.arg(N);
+        P.arg(B);
+        P.arg(flags);
+        return;
+    }
+    if (ranged) {
+        const int xtiles = (B + 7) >> 3;
+        const int nb = K / 256;
+        /* Whole K: ranges fit x in the L1 but measured slower overall (running-sum
+         * reloads, cold starts). The kernel keeps them; see ADR 0003. */
+        const int per = nb;
+        const int split = N <= 256 ? SLM_MM_SPLIT_XT : 0;
+        const dim3 g2(mm_grid(N), split ? xtiles : 1, 1);
+        const int ranges = (nb + per - 1) / per;
+        for (int r = 0; r < ranges; r++) {
+            const int start = r * per, count = std::min(per, nb - start);
+            const bool last = r == ranges - 1;
+            P.add_op(name, cls, f, g2);
+            Op &o = P.ops.back();
+            o.mma = (double)mm_grid(N) * count * 16.0 * xtiles;
+            o.macs = (double)N * count * 256 * B;
+            o.bytes = (double)gg_row_bytes(t) * N * count / nb;
+            o.tc = true;
+            P.arg(x);
+            P.arg((const uint8_t *)(A.w + t.offset));
+            P.arg(last ? out : (void *)A.run);
+            P.arg(r == 0 ? bias : (const float *)A.run);
+            P.arg(K);
+            P.arg(N);
+            P.arg(B);
+            P.arg((last ? flags : 0) | (r ? SLM_MM_BIAS_RUNNING : 0) | split | (start << 8) |
+                  (count << 16));
+        }
+        return;
     }
     P.add_op(name, cls, f, grid);
     Op &o = P.ops.back();
@@ -531,6 +587,54 @@ static void check_kernels(const Model &M, Arena &A)
                     g_fails++;
                 }
             }
+            /* Shared-memory x kernel. */
+            if (B > 8 && !is_head) {
+                int flags = 0;
+                const uint8_t *wp = A.w + t.offset;
+                void *f = q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs;
+                void *params[] = {&dx, &wp, &dout, &bias_none, (void *)&K, (void *)&N, &B, &flags};
+                CK(cudaLaunchKernel(f, dim3((N + 119) / 120), dim3(32, 8, 1), params, 0, nullptr));
+                const std::vector<float> got = down(dout, ref.size());
+                double worst = 0;
+                for (size_t i = 0; i < ref.size(); i++) {
+                    worst = std::max(worst, fabs((double)got[i] - ref[i]));
+                }
+                const bool ok = worst <= 1e-3 * rms;
+                printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
+                       m.tensor.c_str(), "hmma_bs", B, worst, worst / rms, ok ? "PASS" : "FAIL");
+                if (!ok) {
+                    g_fails++;
+                }
+            }
+            /* b64 in K ranges through a running sum, and split per x tile. */
+            if (!is_head && B > 8) {
+                const int nb = K / 256;
+                const int per = std::max(1, nb / 3);
+                const uint8_t *wp = A.w + t.offset;
+                void *f = q6 ? (void *)slm_mm_q6k_hmma_b64 : (void *)slm_mm_q4k_hmma_b64;
+                for (int split = 0; split <= SLM_MM_SPLIT_XT; split += SLM_MM_SPLIT_XT) {
+                    const dim3 grid(mm_grid(N), split ? (B + 7) >> 3 : 1, 1);
+                    for (int st = 0; st < nb; st += per) {
+                        const int count = std::min(per, nb - st);
+                        int flags = (st ? SLM_MM_BIAS_RUNNING : 0) | split | (st << 8) | (count << 16);
+                        const float *bp = st ? dout : nullptr;
+                        void *params[] = {&dx, &wp, &dout, &bp, (void *)&K, (void *)&N, &B, &flags};
+                        CK(cudaLaunchKernel(f, grid, dim3(32), params, 0, nullptr));
+                    }
+                    const std::vector<float> got = down(dout, ref.size());
+                    double worst = 0;
+                    for (size_t i = 0; i < ref.size(); i++) {
+                        worst = std::max(worst, fabs((double)got[i] - ref[i]));
+                    }
+                    const bool ok = worst <= 1e-3 * rms;
+                    printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
+                           m.tensor.c_str(), split ? "b64 xt" : "b64 rng", B, worst, worst / rms,
+                           ok ? "PASS" : "FAIL");
+                    if (!ok) {
+                        g_fails++;
+                    }
+                }
+            }
             CK(cudaFree(dx));
             CK(cudaFree(dout));
         }
@@ -760,6 +864,8 @@ int main(int argc, char **argv)
         const std::string a = argv[i];
         if (a == "--simt") {
             g_simt = true;
+        } else if (a == "--b64") {
+            g_b64 = true;
         } else if (a == "--no-check") {
             do_check = false;
         } else if (a == "--golden") {
@@ -823,6 +929,7 @@ int main(int argc, char **argv)
         CK(cudaMalloc(&A.K[l], kvb));
         CK(cudaMalloc(&A.V[l], kvb));
     }
+    CK(cudaMalloc(&A.run, (size_t)Bmax * std::max(M.ff, M.hidden) * 4));
     CK(cudaMalloc(&A.table, M.rope.size() * 4));
     up(A.table, M.rope);
     CK(cudaMalloc(&A.logits, (size_t)M.vocab * 4));
@@ -972,10 +1079,33 @@ int main(int argc, char **argv)
                100.0 * macs_tc / (macs + gqa_macs), macs_tc / 1e6, (macs + gqa_macs) / 1e6, T);
     }
 
+    /* Same breakdown for prefill. */
+    if (prefill > 0) {
+        std::map<std::string, std::pair<int, double>> by;
+        set_step(A, prompt, 0);
+        double all = 0;
+        for (size_t i = 0; i < pre.ops.size(); i++) {
+            const double s = now_ms();
+            pre.run_op(i);
+            CK(cudaDeviceSynchronize());
+            const double t = now_ms() - s;
+            auto &e = by[pre.ops[i].cls];
+            e.first++;
+            e.second += t;
+            all += t;
+        }
+        printf("\nper-op prefill breakdown B=%d (op by op with sync):\n", prefill);
+        for (auto &kv : by) {
+            printf("  %-18s %4d ops  total %8.3f ms  %8.1f us/op\n", kv.first.c_str(), kv.second.first,
+                   kv.second.second, kv.second.second * 1e3 / kv.second.first);
+        }
+        printf("  %-18s %4zu ops  total %8.3f ms\n", "ALL", pre.ops.size(), all);
+    }
+
     /* ---- whole-forward comparison with the CPU reference ---- */
     if (do_check) {
         printf("\nwhole-forward comparison with the CPU reference:\n");
-        const int nprompt = std::min(prefill, 8);
+        const int nprompt = std::min(prefill, 12);
         std::vector<uint32_t> ids(prompt.begin(), prompt.begin() + nprompt);
         const double c0 = now_ms();
         std::vector<float> rl;
@@ -993,7 +1123,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < p8.ops.size(); i++) {
             p8.run_op(i);
         }
-        report_logits("prefill B=8", down(A.logits, M.vocab), rl, 2.0);
+        report_logits("prefill B=12", down(A.logits, M.vocab), rl, 0.1);
         /* Two decode steps from there. */
         uint32_t nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         for (int i = 0; i < 2; i++) {
@@ -1002,7 +1132,7 @@ int main(int argc, char **argv)
             set_step(A, {nx}, p);
             CK(cudaGraphLaunch(dec.exec, 0));
             CK(cudaStreamSynchronize(0));
-            report_logits("decode", down(A.logits, M.vocab), rl, 2.0);
+            report_logits("decode", down(A.logits, M.vocab), rl, 0.1);
             nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         }
     }

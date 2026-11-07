@@ -19,11 +19,17 @@
  *     Columns 1..7 repeat it and their results are ignored, so c1 and c3 are
  *     never reset and only c0 and c2 are read: half the zeroing and half the
  *     FMAs of the b8 kernel.
- *   - A 32-bit register of FP16 takes bytes 0 and 2 of the weight word, which
- *     needs one shift and one mask rather than two of each. So the x register
- *     holds elements 0 and 2, and the next holds 1 and 3.
+ *   - Weights go in as raw FP16 subnormals, n * 2^-24 instead of the 1 + n/16 of
+ *     the other kernels, so packing is one shift and one mask. Over a sub-block,
+ *     with H = sum(n * 2^-24 * x) and S = sum(x): Q4_K gives
+ *     d*sc*2^24*H - dmin*mn*S, Q6_K gives d*sc*(2^24*H - 32*S). Row 15 stays 1.0
+ *     to produce S.
+ *   - A 32-bit register of FP16 takes bytes 0 and 2 of the weight word, so the x
+ *     register holds elements 0 and 2, and the next holds 1 and 3.
  *   - The loops over j are unrolled, which folds the scale field selection.
  */
+#include <cmath>
+
 #include "slm_common.cuh"
 
 #ifndef Q4K_BLOCK_BYTES
@@ -35,10 +41,12 @@
 #define B1_TILE_ROWS 15
 #define B1_MAX_WARPS 8
 
-/* FP16 mantissa bits of a Q4_K nibble in bits 6..9, for each half. */
-#define B1_Q4_MASK 0x03C003C0u
-/* The same for a 6-bit Q6_K value, in bits 4..9. */
-#define B1_Q6_MASK 0x03F003F0u
+/* A value in the low bits of an FP16 is a subnormal, n * 2^-24, exactly. The tensor
+ * core honours these (slm_spike's probe_subnormal pins it), so no exponent needs
+ * to be merged in. The two 16-bit halves of a register come from bytes 0 and 2. */
+#define B1_N4 0x000F000Fu
+#define B1_N6 0x003F003Fu
+#define B1_2P24 16777216.0f
 
 /* Elements (0,2) and (1,3) of two consecutive x words. */
 SLM_INL uint32_t b1_x02(uint32_t w0, uint32_t w1)
@@ -98,7 +106,7 @@ SLM_INL void b1_q4k_scales(uint32_t w1, uint32_t w2, uint32_t w3, int is, float 
         mn = ((w3 >> (s + 4)) & 0x0Fu) | (((w2 >> s) >> 2) & 0x30u);
     }
     k = d16 * (float)sc;
-    off = k + dmin * (float)mn;
+    off = dmin * (float)mn;
 }
 
 __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, const float *bias,
@@ -119,6 +127,7 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
     const uint8_t *w0 = W + (has0 ? r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? r1 : 0) * row_bytes;
     const uint32_t keep1 = g == 7 ? 0u : 0xFFFFFFFFu;
+    const uint32_t one1 = g == 7 ? SLM_H_ONE2 : 0u;
     const int off8 = 8 * c;
 
     float acc0 = 0.0f, acc2 = 0.0f;
@@ -130,9 +139,9 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
         const uint8_t *blk1 = w1 + b * Q4K_BLOCK_BYTES;
         const slm_x16 h0 = *reinterpret_cast<const slm_x16 *>(blk0);
         const slm_x16 h1 = *reinterpret_cast<const slm_x16 *>(blk1);
-        const float d0 = has0 ? 16.0f * slm_h2f(h0.w0 & 0xFFFFu) : 0.0f;
+        const float d0 = has0 ? B1_2P24 * slm_h2f(h0.w0 & 0xFFFFu) : 0.0f;
         const float m0 = has0 ? slm_h2f(h0.w0 >> 16) : 0.0f;
-        const float d1 = has1 ? 16.0f * slm_h2f(h1.w0 & 0xFFFFu) : 0.0f;
+        const float d1 = has1 ? B1_2P24 * slm_h2f(h1.w0 & 0xFFFFu) : 0.0f;
         const float m1 = has1 ? slm_h2f(h1.w0 >> 16) : 0.0f;
         const half *xb = x + (b << 8) + off8;
 
@@ -147,23 +156,22 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
 
             float cl0 = 0.f, cl2 = 0.f, ch0 = 0.f, ch2 = 0.f;
             /* A registers: (byte0,byte2) with x(0,2), (byte1,byte3) with x(1,3).
-             * Nibble n of byte0 goes to bit 6: low nibble <<6, high nibble <<2,
-             * and for byte1 the same with 8 fewer. */
+             * Low nibble of byte0 is already in place, the others shift down. */
             slm_mma(cl0, cl1, cl2, cl3,
-                    SLM_H_ONE2 | ((u0a << 6) & B1_Q4_MASK), SLM_H_ONE2 | ((u1a << 6) & B1_Q4_MASK),
-                    SLM_H_ONE2 | ((u0a >> 2) & B1_Q4_MASK), SLM_H_ONE2 | ((u1a >> 2) & B1_Q4_MASK),
+                    u0a & B1_N4, one1 | (u1a & B1_N4),
+                    (u0a >> 8) & B1_N4, one1 | ((u1a >> 8) & B1_N4),
                     b1_x02(xl.w0, xl.w1), b1_x13(xl.w0, xl.w1));
             slm_mma(cl0, cl1, cl2, cl3,
-                    SLM_H_ONE2 | ((u0b << 6) & B1_Q4_MASK), SLM_H_ONE2 | ((u1b << 6) & B1_Q4_MASK),
-                    SLM_H_ONE2 | ((u0b >> 2) & B1_Q4_MASK), SLM_H_ONE2 | ((u1b >> 2) & B1_Q4_MASK),
+                    u0b & B1_N4, one1 | (u1b & B1_N4),
+                    (u0b >> 8) & B1_N4, one1 | ((u1b >> 8) & B1_N4),
                     b1_x02(xl.w2, xl.w3), b1_x13(xl.w2, xl.w3));
             slm_mma(ch0, ch1, ch2, ch3,
-                    SLM_H_ONE2 | ((u0a << 2) & B1_Q4_MASK), SLM_H_ONE2 | ((u1a << 2) & B1_Q4_MASK),
-                    SLM_H_ONE2 | ((u0a >> 6) & B1_Q4_MASK), SLM_H_ONE2 | ((u1a >> 6) & B1_Q4_MASK),
+                    (u0a >> 4) & B1_N4, one1 | ((u1a >> 4) & B1_N4),
+                    (u0a >> 12) & B1_N4, one1 | ((u1a >> 12) & B1_N4),
                     b1_x02(xh.w0, xh.w1), b1_x13(xh.w0, xh.w1));
             slm_mma(ch0, ch1, ch2, ch3,
-                    SLM_H_ONE2 | ((u0b << 2) & B1_Q4_MASK), SLM_H_ONE2 | ((u1b << 2) & B1_Q4_MASK),
-                    SLM_H_ONE2 | ((u0b >> 6) & B1_Q4_MASK), SLM_H_ONE2 | ((u1b >> 6) & B1_Q4_MASK),
+                    (u0b >> 4) & B1_N4, one1 | ((u1b >> 4) & B1_N4),
+                    (u0b >> 12) & B1_N4, one1 | ((u1b >> 12) & B1_N4),
                     b1_x02(xh.w2, xh.w3), b1_x13(xh.w2, xh.w3));
 
             /* Every column repeats x, so S is row 15 column 0, held by lane 28. */
@@ -172,13 +180,13 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
 
             float k, off;
             b1_q4k_scales(h0.w1, h0.w2, h0.w3, 2 * j, d0, m0, k, off);
-            acc0 += k * cl0 - off * sl;
+            acc0 = fmaf(-off, sl, fmaf(k, cl0, acc0));
             b1_q4k_scales(h1.w1, h1.w2, h1.w3, 2 * j, d1, m1, k, off);
-            acc2 += k * cl2 - off * sl;
+            acc2 = fmaf(-off, sl, fmaf(k, cl2, acc2));
             b1_q4k_scales(h0.w1, h0.w2, h0.w3, 2 * j + 1, d0, m0, k, off);
-            acc0 += k * ch0 - off * sh;
+            acc0 = fmaf(-off, sh, fmaf(k, ch0, acc0));
             b1_q4k_scales(h1.w1, h1.w2, h1.w3, 2 * j + 1, d1, m1, k, off);
-            acc2 += k * ch2 - off * sh;
+            acc2 = fmaf(-off, sh, fmaf(k, ch2, acc2));
         }
     }
 
@@ -188,17 +196,12 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
 
 /* ---- Q6_K ---- */
 
-/* 32 bits at a 2-byte-aligned address. */
+/* 32 bits at a 2-byte-aligned address. Two 16-bit loads cost fewer instructions
+ * than an aligned load, a shift and a branch, and instructions are the limit. */
 SLM_INL uint32_t b1_load32(const uint8_t *p)
 {
-    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
-    const int sh = (int)(a & 6u);
-    const uint8_t *base = p - sh;
-    uint32_t v = (uint32_t)(*reinterpret_cast<const uint64_t *>(base) >> (sh * 8));
-    if (sh == 6) {
-        v |= (uint32_t)*reinterpret_cast<const uint16_t *>(base + 8) << 16;
-    }
-    return v;
+    return (uint32_t)*reinterpret_cast<const uint16_t *>(p) |
+           ((uint32_t)*reinterpret_cast<const uint16_t *>(p + 2) << 16);
 }
 
 __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, const float *bias,
@@ -219,6 +222,7 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
     const uint8_t *w0 = W + (has0 ? r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? r1 : 0) * row_bytes;
     const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
+    const uint32_t one1 = gr == 7 ? SLM_H_ONE2 : 0u;
     const int off4 = 4 * c;
 
     float acc0 = 0.0f, acc2 = 0.0f;
@@ -237,7 +241,6 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
             const uint32_t s0b = b1_load32(blk0 + 196 + h * 8);
             const uint32_t s1a = b1_load32(blk1 + 192 + h * 8);
             const uint32_t s1b = b1_load32(blk1 + 196 + h * 8);
-            __syncwarp();
 
 #pragma unroll
             for (int t = 0; t < 2; t++) {
@@ -249,7 +252,6 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
                 const uint32_t lb1 = b1_load32(blk1 + h * 64 + 32 + l) & keep1;
                 const uint32_t qh1 = b1_load32(blk1 + 128 + h * 32 + l) & keep1;
                 const half *xk = x + (b << 8) + h * 128 + l;
-                __syncwarp();
 
 #pragma unroll
                 for (int g = 0; g < 4; g++) {
@@ -268,10 +270,11 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
 
                     float c0 = 0.f, c2 = 0.f;
                     slm_mma(c0, c1, c2, c3,
-                            SLM_H_ONE2 | ((v0 << 4) & B1_Q6_MASK), SLM_H_ONE2 | ((v1 << 4) & B1_Q6_MASK),
-                            SLM_H_ONE2 | ((v0 >> 4) & B1_Q6_MASK), SLM_H_ONE2 | ((v1 >> 4) & B1_Q6_MASK),
+                            v0 & B1_N6, one1 | (v1 & B1_N6),
+                            (v0 >> 8) & B1_N6, one1 | ((v1 >> 8) & B1_N6),
                             b1_x02(xw0, xw1), b1_x13(xw0, xw1));
                     const float s = __shfl_sync(0xFFFFFFFFu, c2, 28);
+                    const float s32 = -32.0f * s;
 
                     const int idx = 2 * g + t;
                     const uint32_t sw0 = idx < 4 ? s0a : s0b;
@@ -279,9 +282,9 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
                     const int sh = (idx & 3) * 8;
                     const float f0 = d0 * (float)(int8_t)(sw0 >> sh);
                     const float f1 = d1 * (float)(int8_t)(sw1 >> sh);
-                    /* f * (64*H - 96*S) */
-                    acc0 += f0 * (64.0f * c0 - 96.0f * s);
-                    acc2 += f1 * (64.0f * c2 - 96.0f * s);
+                    /* f * (2^24*H - 32*S) */
+                    acc0 = fmaf(f0, fmaf(B1_2P24, c0, s32), acc0);
+                    acc2 = fmaf(f1, fmaf(B1_2P24, c2, s32), acc2);
                 }
             }
         }
