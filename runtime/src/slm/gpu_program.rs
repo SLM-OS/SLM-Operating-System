@@ -866,8 +866,10 @@ impl GpuProgram {
         })
     }
 
-    /// [`Self::prepare`] then [`Self::build_prepared`], for callers that hold
-    /// no spinlock (tests). Under `with_loaded_slm` use the two halves.
+    /// [`Self::prepare`] then [`Self::build_prepared`] in one call. `slm`
+    /// borrows the registry, so the caller holds the registry lock for the
+    /// whole build; only tests do that. Production callers run `prepare`
+    /// under `with_loaded_slm` and `build_prepared` after releasing it.
     pub fn build(slm: &LoadedSlm, max_ctx: usize, vocab: u32, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
         Self::build_prepared(Self::prepare(slm, vocab)?, max_ctx, rope_table)
     }

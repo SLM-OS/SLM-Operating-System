@@ -162,8 +162,9 @@ int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pr
 void slm_prog_clean(int32_t h, const void *p, size_t len);
 void slm_prog_invalidate(int32_t h, const void *p, size_t len);
 
-/* Run a finished shape: submit, wait with IRQs on and no lock held,
- * evict L2. On a timeout the session is dead: the GR and MMU fault state
+/* Run a finished shape: submit, wait with IRQs on, evict L2. The
+ * slm_prog program lock (not a spinlock; holders and waiters yield) is held
+ * from submit to the end of the wait; no spinlock is held while waiting. On a timeout the session is dead: the GR and MMU fault state
  * has been dumped and every later call returns SLM_PROG_ERR_DEAD. */
 int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats);
 

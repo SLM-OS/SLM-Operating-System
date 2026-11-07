@@ -857,6 +857,11 @@ mod tests {
         t.prompt_begin(2, 0, 0);
         for i in 1..=200_000u64 {
             t.decode_step(1, i, 1);
+            // Give the reader a chance on a loaded host; the coherence
+            // assertion above is what this test is about.
+            if i % 1024 == 0 {
+                std::thread::yield_now();
+            }
         }
         stop.store(true, Relaxed);
         assert!(reader.join().unwrap() > 0, "no consistent read at all");
