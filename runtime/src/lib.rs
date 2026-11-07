@@ -6487,6 +6487,17 @@ pub extern "C" fn rust_slm_session_configure(session_id: u32, gpu_mode: u32, thr
     }
 }
 
+/// 1 if a prompt is running on this session, 0 if not, -1 on a bad id.
+/// Takes only the session table lock, which a prompt doesn't hold.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_busy(session_id: u32) -> i32 {
+    match slm::session::snapshot(session_id as usize) {
+        Some(snap) => snap.busy as i32,
+        None => -1,
+    }
+}
+
 /// Number of ops the tier table currently routes to the GPU.
 #[no_mangle]
 #[cfg(feature = "slm")]

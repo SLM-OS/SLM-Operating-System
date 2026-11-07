@@ -235,7 +235,8 @@ pub fn run_prompt(
     if session.kv.len.saturating_add(prompt_ids.len()) > session.max_ctx {
         return Some(finish(session, 0, 0, 0, 0, StopReason::ContextFull));
     }
-    // The prompt is going in, which includes any held-back reply token.
+    // A chat prompt just fed any held-back reply token; a raw one is as
+    // given, so it drops it.
     session.pending_token = None;
 
     // `--gpu cpu`: hold every op on the CPU tier for this prompt. Only

@@ -2045,6 +2045,10 @@ extern int32_t rust_slm_session_configure(uint32_t session_id,
  * prompt runs. Returns 0 on success, -1 on NULL pointer / bad session id. */
 extern int32_t rust_slm_session_info(uint32_t session_id, SlmSessionInfoC *out);
 
+/* 1 if a prompt is running on this session, 0 if not, -1 on bad session id.
+ * Takes no lock that a running prompt holds for long. */
+extern int32_t rust_slm_session_busy(uint32_t session_id);
+
 /* Number of ops the tier table currently routes to the GPU (out of 8). */
 extern uint32_t rust_slm_gpu_tier_ops(void);
 

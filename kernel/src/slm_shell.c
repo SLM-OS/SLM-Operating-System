@@ -861,8 +861,9 @@ static int slm_stop(int argc, char *argv[])
                      (unsigned long)sid);
         return -1;
     }
-    SlmSessionInfoC info;
-    if (rust_slm_session_info(sid, &info) == 0 && !info.busy) {
+    /* Not rust_slm_session_info: that takes the registry lock, which a
+     * running prompt holds for each forward step. */
+    if (rust_slm_session_busy(sid) == 0) {
         shell_printf("Session %lu has no prompt running\r\n",
                      (unsigned long)sid);
         return 0;
