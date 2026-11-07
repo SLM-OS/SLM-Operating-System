@@ -43,3 +43,18 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+---
+
+## Qwen2.5-1.5B-Instruct tokenizer — Apache-2.0
+
+`scripts/fixtures/slm/qwen_vocab.gguf` holds the tokenizer metadata (tokens,
+token types, merges) of Qwen2.5-1.5B-Instruct and no model weights. The golden
+tokenizer test reads it, and it is not linked into any kernel. See
+`scripts/fixtures/slm/PROVENANCE.md`.
+
+- Original source: <https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct>
+- License: Apache License 2.0, <https://www.apache.org/licenses/LICENSE-2.0>
+
+The other fixtures in that directory are outputs of llama.cpp / ggml (MIT, see
+above) on inputs SLM-OS generated.

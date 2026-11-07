@@ -10,6 +10,7 @@ pub mod chat_template;
 pub mod decoder;
 pub mod forward;
 pub mod gguf;
+pub mod golden;
 pub mod kv_cache;
 pub mod registry;
 pub mod sampler;
