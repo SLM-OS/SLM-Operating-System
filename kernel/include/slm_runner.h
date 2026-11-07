@@ -58,6 +58,11 @@ extern int rust_slm_latest_loaded(uint32_t *handle, uint64_t *seq);
 /* Load sequence number of a slot, 0 if empty. A reload gets a new number. */
 extern uint64_t rust_slm_load_seq(uint32_t index);
 
+/* Session additions (runtime/src/slm/session.rs). Open sequence of the
+ * session in a slot, running or not: unique per open, 0 if the slot is
+ * empty. Takes only the session table lock. */
+extern uint64_t rust_slm_session_open_seq(uint32_t session_id);
+
 /* ============================================================================
  * Runner
  * ============================================================================ */
@@ -104,11 +109,18 @@ typedef struct {
 /* The configuration `component run slm-runner` uses when nothing set one. */
 void slm_runner_default_config(slm_runner_config_t *cfg);
 
+/* Returned by configure, start and stop while another of them runs. */
+#define SLM_RUNNER_ERR_BUSY (-3)
+
 /* Store the configuration the next start uses. -1 while the runner runs. */
 int slm_runner_configure(const slm_runner_config_t *cfg);
 
 /* Start the component and wait until it serves the bus. 0, or -1. */
 int slm_runner_start(void);
+
+/* Configure and start in one step, so no other start or configure can come
+ * between them. 0, -1 if it runs already or didn't start. */
+int slm_runner_start_with(const slm_runner_config_t *cfg);
 
 /* Stop the prompt it's running, if any, end the task and wait for that.
  * 0, -1 if it wasn't running, -2 if it hasn't exited after 60 s. */

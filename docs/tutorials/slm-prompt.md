@@ -123,9 +123,9 @@ section says what each one is.
 
 | Mode | Behavior |
 |------|----------|
-| `auto` (default) | Follow the tier table, falling back to the CPU per op. |
+| `auto` (default) | Run on the GPU program when one can be built (a cold UEFI-direct boot on Jetson), otherwise follow the tier table, falling back to the CPU per op. |
 | `cpu` | Hold every op on the CPU for the duration of each prompt. |
-| `on` | As `auto`, but `slm launch` fails if no op has a GPU tier. |
+| `on` | Run on the GPU program; `slm launch` fails, saying why, when none can be built (after kexec, or off Jetson). |
 
 `--threads K` (1 to 64, default 4) is stored on the session, and has no effect
 yet: the forward path is single-threaded until the worker pool lands. The banner

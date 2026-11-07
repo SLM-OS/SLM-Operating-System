@@ -473,6 +473,42 @@ static void test_slm_prompt_max_option_both_positions(void)
     slm_prompt_teardown();
 }
 
+/* ---- summary line ---- */
+
+/* total is ttft plus decode. It printed decode alone, so a CPU prompt, whose
+ * prefill is most of the time, showed ttft=73100 ms total=7331 ms. */
+static void test_slm_prompt_summary_total_includes_ttft(void)
+{
+    SLM_PROMPT_SETUP();
+    SlmStatsC st;
+    memset(&st, 0, sizeof(st));
+    st.last_ttft_ns = 73100ull * 1000000ull;
+    st.last_decode_ns = 7331ull * 1000000ull;
+    st.last_stop_reason = SLM_STOP_MAX_TOKENS;
+    slm_prompt_print_summary(&st, 4, 12);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "[slm] ttft=73100 ms  decode="));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, " total=80431 ms tokens=4 bytes=12 stop=max"));
+
+    /* And end to end: never below ttft. */
+    cap_clear();
+    LAUNCH_GREEDY();
+    SCRIPT(0, 'a', 'b', CLI_EOS);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm prompt 0 --raw hi"));
+    const char *t = strstr(cap.buf, "ttft=");
+    const char *tot = strstr(cap.buf, "total=");
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_NOT_NULL(tot);
+    unsigned long ttft = 0, total = 0;
+    for (t += 5; *t >= '0' && *t <= '9'; t++) {
+        ttft = ttft * 10u + (unsigned long)(*t - '0');
+    }
+    for (tot += 6; *tot >= '0' && *tot <= '9'; tot++) {
+        total = total * 10u + (unsigned long)(*tot - '0');
+    }
+    TEST_ASSERT_TRUE(total >= ttft);
+    slm_prompt_teardown();
+}
+
 /* ---- EOS ---- */
 
 /* Id 2 was the hard-coded EOS: it must generate on here, and the id the GGUF
@@ -915,6 +951,7 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_prompt_raw_parses_specials);
     RUN_TEST(test_slm_prompt_unescapes_newlines);
     RUN_TEST(test_slm_prompt_max_option_both_positions);
+    RUN_TEST(test_slm_prompt_summary_total_includes_ttft);
     RUN_TEST(test_slm_prompt_stops_on_gguf_eos_not_two);
     RUN_TEST(test_slm_prompt_stops_on_named_end_tokens);
     RUN_TEST(test_slm_prompt_flushes_per_token_and_keeps_utf8_whole);

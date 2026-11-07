@@ -91,6 +91,7 @@ static struct {
     volatile uint32_t prompts;
     volatile uint32_t dropped;
     uint64_t model_seq;
+    uint64_t session_seq;      /* open sequence of `session`, 0 without one */
     uint32_t publish_timeout_ms;
 } g_runner = {
     .comp_idx = -1,
@@ -323,13 +324,29 @@ int slm_runner_setup_session(void)
     return slm_runner_setup_session_with_ctx(g_cfg.max_ctx);
 }
 
+/* Whether the session id the runner holds is still the session it opened.
+ * `slm close` from a shell can close it, and the next `slm launch` then gets
+ * the same id: the runner must not use or close that one (#475 W8). */
+static bool slm_runner_owns_session(void)
+{
+    return g_runner.session >= 0 && g_runner.session_seq != 0 &&
+           rust_slm_session_open_seq((uint32_t)g_runner.session) ==
+               g_runner.session_seq;
+}
+
+static void slm_runner_forget_session(void)
+{
+    g_runner.session = -1;
+    g_runner.session_seq = 0;
+    g_runner.model = -1;
+}
+
 static void slm_runner_close_session(void)
 {
-    if (g_runner.session >= 0) {
+    if (slm_runner_owns_session()) {
         rust_slm_session_close((uint32_t)g_runner.session);
     }
-    g_runner.session = -1;
-    g_runner.model = -1;
+    slm_runner_forget_session();
 }
 
 /* Make sure the open session is on the model the configuration names now.
@@ -343,6 +360,11 @@ static int slm_runner_ensure_session(const char **err)
         slm_runner_close_session();
         return -1;
     }
+    if (g_runner.session >= 0 && !slm_runner_owns_session()) {
+        uart_printf("[slm-runner] session %d was closed from outside; "
+                    "opening a new one\r\n", (int)g_runner.session);
+        slm_runner_forget_session();
+    }
     if (g_runner.session >= 0 && g_runner.model == (int32_t)handle &&
         g_runner.model_seq == seq) {
         return 0;
@@ -354,6 +376,7 @@ static int slm_runner_ensure_session(const char **err)
         return -1;
     }
     g_runner.session = session;
+    g_runner.session_seq = rust_slm_session_open_seq((uint32_t)session);
     g_runner.model = (int32_t)handle;
     g_runner.model_seq = seq;
     return 0;
@@ -432,33 +455,93 @@ int slm_runner_handle_prompt(uint32_t session_id,
  * whole reply. */
 static uint32_t g_ask_claimed;
 
-/* How long the runner's log line waits for an `slm ask` to finish printing. */
+/*
+ * Hand-off of the runner's per-prompt line to `slm ask`. Printed by the
+ * runner after /slm/done, the line landed after the shell's next prompt,
+ * cut by it (`slmos> [slm-runne...`). Printed before /slm/done, it lands in
+ * the middle of the reply. `slm ask` prints it instead, last, before it
+ * returns to the prompt.
+ *
+ *   IDLE    no `slm ask` waiting: the runner prints its own line.
+ *   WAITING `slm ask` is in an exchange and takes the line.
+ *   WRITING the runner is copying the line.
+ *   POSTED  the line is in g_log_line for `slm ask` to print.
+ */
+enum {
+    SLM_LOG_IDLE = 0,
+    SLM_LOG_WAITING,
+    SLM_LOG_WRITING,
+    SLM_LOG_POSTED,
+};
+static uint32_t g_log_state;
+static char g_log_line[96];
+
+/* How long `slm ask` waits after /slm/done for the runner's line. */
 #define SLM_RUNNER_LOG_WAIT_MS 2000u
 
-/* Test hook: sees each runner log line and whether `slm ask` was still
- * printing when it went out. */
-void (*slm_runner_test_log_hook)(const char *line, bool ask_printing);
+/* Test hook: sees each runner log line and whether it went to `slm ask`. */
+void (*slm_runner_test_log_hook)(const char *line, bool handed_to_ask);
 
-/*
- * The runner's per-prompt UART line. It goes out after /slm/done, and only
- * once a `slm ask` has printed that reply: printed any earlier, it lands in
- * the middle of the client's output on a shared console and garbles the
- * /slm/done fields there. The wait is bounded, so a client that hangs can't
- * hold the runner.
- */
+/* The runner's per-prompt line: to the waiting `slm ask`, or to the UART in
+ * one locked write, never a piece at a time. */
 static void slm_runner_log(const char *line)
+{
+    uint32_t expect = SLM_LOG_WAITING;
+    bool handed = __atomic_compare_exchange_n(&g_log_state, &expect,
+                                              SLM_LOG_WRITING, false,
+                                              __ATOMIC_ACQUIRE,
+                                              __ATOMIC_RELAXED);
+    if (handed) {
+        strncpy(g_log_line, line, sizeof(g_log_line) - 1u);
+        g_log_line[sizeof(g_log_line) - 1u] = '\0';
+        __atomic_store_n(&g_log_state, SLM_LOG_POSTED, __ATOMIC_RELEASE);
+    }
+    if (slm_runner_test_log_hook) {
+        slm_runner_test_log_hook(line, handed);
+    }
+    if (!handed) {
+        uart_puts(line);
+    }
+}
+
+/* `slm ask`, after /slm/done: print the runner's line for this prompt if it
+ * comes within the wait. Leaves the state for slm_runner_ask to reset. */
+static void slm_ask_print_runner_line(void)
 {
     uint64_t start = timer_get_count();
     uint64_t limit = (timer_get_frequency() * SLM_RUNNER_LOG_WAIT_MS) / 1000u;
-    while (__atomic_load_n(&g_ask_claimed, __ATOMIC_ACQUIRE) &&
-           timer_get_count() - start < limit) {
+    for (;;) {
+        uint32_t st = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
+        if (st == SLM_LOG_POSTED) {
+            shell_puts(g_log_line);
+            shell_flush();
+            return;
+        }
+        if (st == SLM_LOG_WAITING && timer_get_count() - start >= limit) {
+            return;
+        }
         task_sleep_ms(1);
     }
-    bool printing = __atomic_load_n(&g_ask_claimed, __ATOMIC_ACQUIRE) != 0;
-    if (slm_runner_test_log_hook) {
-        slm_runner_test_log_hook(line, printing);
+}
+
+/* End the hand-off: no more lines to `slm ask`. A line being copied right
+ * now is let through first. */
+static void slm_ask_end_log_handoff(void)
+{
+    for (;;) {
+        uint32_t expect = SLM_LOG_WAITING;
+        if (__atomic_compare_exchange_n(&g_log_state, &expect, SLM_LOG_IDLE,
+                                        false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED)) {
+            return;
+        }
+        if (expect != SLM_LOG_WRITING) {
+            /* POSTED: printed, or the exchange failed first. */
+            __atomic_store_n(&g_log_state, SLM_LOG_IDLE, __ATOMIC_RELEASE);
+            return;
+        }
+        task_sleep_ms(1);
     }
-    uart_puts(line);
 }
 
 /* A prompt off the bus: pick the model, start a fresh conversation, run it. */
@@ -518,8 +601,7 @@ void slm_runner_entry(void *arg)
 
     /* A task killed from outside left its fields behind. Its session is still
      * leased to the prompt it died in, and can't be closed. */
-    g_runner.session = -1;
-    g_runner.model = -1;
+    slm_runner_forget_session();
     g_runner.prompts = 0;
     g_runner.dropped = 0;
     g_runner.comp_idx = comp_idx;
@@ -534,10 +616,12 @@ void slm_runner_entry(void *arg)
     if (slm_runner_ensure_session(&err) != 0) {
         uart_printf("[slm-runner] no session yet: %s\r\n", err);
     }
-    __atomic_store_n(&g_runner.running, 1u, __ATOMIC_RELEASE);
+    /* The line before the flag: `slm runner start` returns to the prompt on
+     * the flag, and a line after it lands behind that prompt. */
     uart_printf("[slm-runner] Started (component %d, session %d, model %d), "
                 "subscribed to " SLM_TOPIC_PROMPT "\r\n",
                 comp_idx, (int)g_runner.session, (int)g_runner.model);
+    __atomic_store_n(&g_runner.running, 1u, __ATOMIC_RELEASE);
 
     while (!__atomic_load_n(&g_runner.exit_requested, __ATOMIC_ACQUIRE)) {
         char topic[MSG_ROUTER_TOPIC_LEN];
@@ -576,13 +660,41 @@ void slm_runner_default_config(slm_runner_config_t *cfg)
     *cfg = SLM_RUNNER_DEFAULT_CONFIG;
 }
 
+/*
+ * Held by one start, stop or configure at a time (#475 W9). Two shells
+ * starting at once both saw no runner; the second component_run then
+ * unregistered the first one's component while it was still starting, and
+ * its configure could change the options under it. A flag, not a lock: the
+ * caller that doesn't get it returns SLM_RUNNER_ERR_BUSY at once.
+ */
+static uint32_t g_control;
+
+static bool slm_runner_control_claim(void)
+{
+    return __atomic_exchange_n(&g_control, 1u, __ATOMIC_ACQUIRE) == 0u;
+}
+
+static void slm_runner_control_release(void)
+{
+    __atomic_store_n(&g_control, 0u, __ATOMIC_RELEASE);
+}
+
+/* Test hook: runs inside a start once the component is asked for, before
+ * the wait, where a second shell's start would land. */
+void (*slm_runner_test_start_hook)(void);
+
 int slm_runner_configure(const slm_runner_config_t *cfg)
 {
-    if (slm_runner_alive()) {
-        return -1;
+    if (!slm_runner_control_claim()) {
+        return SLM_RUNNER_ERR_BUSY;
     }
-    g_cfg = *cfg;
-    return 0;
+    int rc = -1;
+    if (!slm_runner_alive()) {
+        g_cfg = *cfg;
+        rc = 0;
+    }
+    slm_runner_control_release();
+    return rc;
 }
 
 static uint64_t ms_to_counts(uint32_t ms)
@@ -590,7 +702,33 @@ static uint64_t ms_to_counts(uint32_t ms)
     return (timer_get_frequency() * ms) / 1000u;
 }
 
+static int slm_runner_start_locked(void);
+
 int slm_runner_start(void)
+{
+    if (!slm_runner_control_claim()) {
+        return SLM_RUNNER_ERR_BUSY;
+    }
+    int rc = slm_runner_start_locked();
+    slm_runner_control_release();
+    return rc;
+}
+
+int slm_runner_start_with(const slm_runner_config_t *cfg)
+{
+    if (!slm_runner_control_claim()) {
+        return SLM_RUNNER_ERR_BUSY;
+    }
+    int rc = -1;
+    if (!slm_runner_alive()) {
+        g_cfg = *cfg;
+        rc = slm_runner_start_locked();
+    }
+    slm_runner_control_release();
+    return rc;
+}
+
+static int slm_runner_start_locked(void)
 {
     if (slm_runner_alive()) {
         return -1;
@@ -599,6 +737,9 @@ int slm_runner_start(void)
     __atomic_store_n(&g_runner.running, 0u, __ATOMIC_RELEASE);
     if (component_run("slm-runner") < 0) {
         return -1;
+    }
+    if (slm_runner_test_start_hook) {
+        slm_runner_test_start_hook();
     }
     /* A sleep gets the new task on the CPU whatever the caller's priority. */
     uint64_t start = timer_get_count();
@@ -611,7 +752,19 @@ int slm_runner_start(void)
     return 0;
 }
 
+static int slm_runner_stop_locked(void);
+
 int slm_runner_stop(void)
+{
+    if (!slm_runner_control_claim()) {
+        return SLM_RUNNER_ERR_BUSY;
+    }
+    int rc = slm_runner_stop_locked();
+    slm_runner_control_release();
+    return rc;
+}
+
+static int slm_runner_stop_locked(void)
 {
     if (!slm_runner_alive()) {
         return -1;
@@ -619,7 +772,7 @@ int slm_runner_stop(void)
     int32_t idx = g_runner.comp_idx;
     __atomic_store_n(&g_runner.exit_requested, 1u, __ATOMIC_RELEASE);
     int32_t session = g_runner.session;
-    if (session >= 0) {
+    if (session >= 0 && slm_runner_owns_session()) {
         rust_slm_stop((uint32_t)session);
     }
 
@@ -766,6 +919,7 @@ static int slm_ask_exchange(const char *text, uint32_t timeout_s)
     }
     shell_printf("[slm ask] received %lu of %ld token messages\r\n",
                  (unsigned long)received, msgs);
+    slm_ask_print_runner_line();
     return rc == 0 ? 0 : -1;
 }
 
@@ -790,7 +944,9 @@ int slm_runner_ask(const char *text, uint32_t timeout_s)
         shell_puts("slm ask: another `slm ask` is running\r\n");
         return -1;
     }
+    __atomic_store_n(&g_log_state, SLM_LOG_WAITING, __ATOMIC_RELEASE);
     int rc = slm_ask_exchange(text, timeout_s);
+    slm_ask_end_log_handoff();
     msg_router_unsubscribe_all(SLM_ASK_COMPONENT_IDX);
     __atomic_store_n(&g_ask_claimed, 0u, __ATOMIC_RELEASE);
     return rc;
