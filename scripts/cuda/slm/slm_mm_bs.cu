@@ -13,7 +13,13 @@
  * eight x tiles from there, so a warp reads x once for eight warps' use and
  * nothing it needs for the multiply can miss.
  *
- * Encoding as in slm_mm_q4k.cu: A holds FP16 1 + n/16 and row 15 is 1.0.
+ * x is buffered per pass in two sets, so one barrier per pass is enough: a warp
+ * writes the set the others are not reading, and the barrier both publishes it
+ * and proves everyone finished the previous pass.
+ *
+ * Encoding as in slm_mm_b1.cu: A holds raw FP16 subnormals n * 2^-24 and row 15
+ * is 1.0. Each register pairs bytes 0 and 2, or 1 and 3, so x is stored paired
+ * the same way when it is loaded, once, instead of being swizzled per x tile.
  */
 #include <cmath>
 
@@ -28,15 +34,9 @@
 #define BS_TILE_ROWS 15
 #define BS_WARPS 8
 
-SLM_INL uint32_t bs_pack_lo(uint32_t u)
-{
-    return SLM_H_ONE2 | ((u & 0x000Fu) << 6) | ((u & 0x0F00u) << 14);
-}
-
-SLM_INL uint32_t bs_pack_hi(uint32_t u)
-{
-    return SLM_H_ONE2 | ((u & 0x00F0u) << 2) | ((u & 0xF000u) << 10);
-}
+#define BS_N4 0x000F000Fu
+#define BS_N6 0x003F003Fu
+#define BS_2P24 16777216.0f
 
 SLM_INL void bs_q4k_factors(uint32_t w1, uint32_t w2, uint32_t w3, int is, float d, float dmin,
                             float &k, float &off)
@@ -51,8 +51,8 @@ SLM_INL void bs_q4k_factors(uint32_t w1, uint32_t w2, uint32_t w3, int is, float
         sc = ((w3 >> s) & 0x0Fu) | (((w1 >> s) >> 2) & 0x30u);
         mn = ((w3 >> (s + 4)) & 0x0Fu) | (((w2 >> s) >> 2) & 0x30u);
     }
-    k = 16.0f * d * (float)sc;
-    off = k + dmin * (float)mn;
+    k = BS_2P24 * d * (float)sc;
+    off = dmin * (float)mn;
 }
 
 /* Store this warp's accumulators for every x tile. */
@@ -97,13 +97,15 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
     const uint8_t *w0 = W + (has0 ? (size_t)r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? (size_t)r1 : 0) * row_bytes;
     const uint32_t keep1 = g == 7 ? 0u : 0xFFFFFFFFu;
+    const uint32_t one1 = g == 7 ? SLM_H_ONE2 : 0u;
     const int off8 = 8 * c;
     const int bat = w * 8 + g;
     const half *xrow = x + (size_t)bat * K;
     const bool xact = bat < B;
 
-    /* [x tile][group][column c][nibble] of one 16-byte x value. */
-    __shared__ __align__(16) slm_x16 bsq4_x[8][8][4][2];
+    /* [set][x tile][group][column c][nibble] of one 16-byte x value, paired. */
+    __shared__ __align__(16) slm_x16 bsq4_x[2][8][8][4][2];
+    int set = 0;
 
     float acc[8][4];
 #pragma unroll
@@ -131,8 +133,13 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                 xl = *reinterpret_cast<const slm_x16 *>(xe);
                 xh = *reinterpret_cast<const slm_x16 *>(xe + 32);
             }
-            bsq4_x[w][g][c][0] = xl;
-            bsq4_x[w][g][c][1] = xh;
+            /* Elements (0,2) (1,3) (4,6) (5,7). */
+            const slm_x16 pl = {(xl.w0 & 0xFFFFu) | (xl.w1 << 16), (xl.w0 >> 16) | (xl.w1 & 0xFFFF0000u),
+                                (xl.w2 & 0xFFFFu) | (xl.w3 << 16), (xl.w2 >> 16) | (xl.w3 & 0xFFFF0000u)};
+            const slm_x16 ph = {(xh.w0 & 0xFFFFu) | (xh.w1 << 16), (xh.w0 >> 16) | (xh.w1 & 0xFFFF0000u),
+                                (xh.w2 & 0xFFFFu) | (xh.w3 << 16), (xh.w2 >> 16) | (xh.w3 & 0xFFFF0000u)};
+            bsq4_x[set][w][g][c][0] = pl;
+            bsq4_x[set][w][g][c][1] = ph;
             const uint64_t q0 = *reinterpret_cast<const uint64_t *>(blk0 + 16 + (j << 5) + off8);
             const uint64_t q1 = *reinterpret_cast<const uint64_t *>(blk1 + 16 + (j << 5) + off8);
             __syncthreads();
@@ -147,14 +154,15 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
 
 #pragma unroll
             for (int hi = 0; hi < 2; hi++) {
-                const uint32_t a0a = hi ? bs_pack_hi(u0a) : bs_pack_lo(u0a);
-                const uint32_t a1a = hi ? bs_pack_hi(u1a) : bs_pack_lo(u1a);
-                const uint32_t a2a = hi ? bs_pack_hi(u0a >> 16) : bs_pack_lo(u0a >> 16);
-                const uint32_t a3a = hi ? bs_pack_hi(u1a >> 16) : bs_pack_lo(u1a >> 16);
-                const uint32_t a0b = hi ? bs_pack_hi(u0b) : bs_pack_lo(u0b);
-                const uint32_t a1b = hi ? bs_pack_hi(u1b) : bs_pack_lo(u1b);
-                const uint32_t a2b = hi ? bs_pack_hi(u0b >> 16) : bs_pack_lo(u0b >> 16);
-                const uint32_t a3b = hi ? bs_pack_hi(u1b >> 16) : bs_pack_lo(u1b >> 16);
+                const int ns = hi * 4;
+                const uint32_t a0a = (u0a >> ns) & BS_N4;
+                const uint32_t a1a = one1 | ((u1a >> ns) & BS_N4);
+                const uint32_t a2a = (u0a >> (ns + 8)) & BS_N4;
+                const uint32_t a3a = one1 | ((u1a >> (ns + 8)) & BS_N4);
+                const uint32_t a0b = (u0b >> ns) & BS_N4;
+                const uint32_t a1b = one1 | ((u1b >> ns) & BS_N4);
+                const uint32_t a2b = (u0b >> (ns + 8)) & BS_N4;
+                const uint32_t a3b = one1 | ((u1b >> (ns + 8)) & BS_N4);
                 const float k0 = hi ? kh0 : kl0;
                 const float off0 = hi ? offh0 : offl0;
                 const float k1 = hi ? kh1 : kl1;
@@ -162,7 +170,7 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
 
 #pragma unroll
                 for (int xt = 0; xt < 8; xt++) {
-                    const slm_x16 xv = bsq4_x[xt][g][c][hi];
+                    const slm_x16 xv = bsq4_x[set][xt][g][c][hi];
                     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f;
                     slm_mma(c0, c1, c2, c3, a0a, a1a, a2a, a3a, xv.w0, xv.w1);
                     slm_mma(c0, c1, c2, c3, a0b, a1b, a2b, a3b, xv.w2, xv.w3);
@@ -174,7 +182,7 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                     acc[xt][3] = fmaf(-off1, s1, fmaf(k1, c3, acc[xt][3]));
                 }
             }
-            __syncthreads();
+            set ^= 1;
         }
     }
     bs_finish(acc, bias, out, N, B, r0, r1, has0, has1, c, flags);
@@ -203,13 +211,15 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
     const uint8_t *w0 = W + (has0 ? (size_t)r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? (size_t)r1 : 0) * row_bytes;
     const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
+    const uint32_t one1 = gr == 7 ? SLM_H_ONE2 : 0u;
     const int off4 = 4 * c;
     const int bat = w * 8 + gr;
     const half *xrow = x + (size_t)bat * K;
     const bool xact = bat < B;
 
-    /* [x tile][group][column c][sub-group g] of one 8-byte x value. */
-    __shared__ __align__(8) uint64_t bsq6_x[8][8][4][4];
+    /* [set][x tile][group][column c][sub-group g] of one 8-byte x value, paired. */
+    __shared__ __align__(8) uint64_t bsq6_x[2][8][8][4][4];
+    int set = 0;
 
     float acc[8][4];
 #pragma unroll
@@ -239,7 +249,11 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                     if (xact) {
                         xv = *reinterpret_cast<const uint64_t *>(xrow + ek + g * 32);
                     }
-                    bsq6_x[w][gr][c][g] = xv;
+                    /* Elements (0,2) in the low word, (1,3) in the high word. */
+                    const uint32_t x0 = (uint32_t)xv, x1 = (uint32_t)(xv >> 32);
+                    bsq6_x[set][w][gr][c][g] =
+                        (uint64_t)((x0 & 0xFFFFu) | (x1 << 16)) |
+                        ((uint64_t)((x0 >> 16) | (x1 & 0xFFFF0000u)) << 32);
                 }
                 const uint32_t la0 = bs_u32(blk0 + h * 64 + l);
                 const uint32_t lb0 = bs_u32(blk0 + h * 64 + 32 + l);
@@ -258,11 +272,10 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                                         (((qh0 >> (2 * g)) & 0x03030303u) << 4);
                     const uint32_t v1 = ((q1 >> ns) & 0x0F0F0F0Fu) |
                                         (((qh1 >> (2 * g)) & 0x03030303u) << 4);
-                    /* FP16 1 + q/64 in adjacent bytes' pairs, as q6k_pack. */
-                    const uint32_t a0 = SLM_H_ONE2 | ((v0 & 0x003Fu) << 4) | ((v0 & 0x3F00u) << 12);
-                    const uint32_t a1 = SLM_H_ONE2 | ((v1 & 0x003Fu) << 4) | ((v1 & 0x3F00u) << 12);
-                    const uint32_t a2 = SLM_H_ONE2 | ((v0 & 0x003F0000u) >> 12) | ((v0 & 0x3F000000u) >> 4);
-                    const uint32_t a3 = SLM_H_ONE2 | ((v1 & 0x003F0000u) >> 12) | ((v1 & 0x3F000000u) >> 4);
+                    const uint32_t a0 = v0 & BS_N6;
+                    const uint32_t a1 = one1 | (v1 & BS_N6);
+                    const uint32_t a2 = (v0 >> 8) & BS_N6;
+                    const uint32_t a3 = one1 | ((v1 >> 8) & BS_N6);
 
                     const int idx = 2 * g + t;
                     const uint32_t sw0 = idx < 4 ? s0a : s0b;
@@ -273,19 +286,19 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
 
 #pragma unroll
                     for (int xt = 0; xt < 8; xt++) {
-                        const uint64_t xv = bsq6_x[xt][gr][c][g];
+                        const uint64_t xv = bsq6_x[set][xt][gr][c][g];
                         float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
                         slm_mma(c0, c1, c2, c3, a0, a1, a2, a3, (uint32_t)xv,
                                 (uint32_t)(xv >> 32));
-                        const float s_0 = -96.0f * __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
-                        const float s_1 = -96.0f * __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
-                        acc[xt][0] = fmaf(f0, fmaf(64.0f, c0, s_0), acc[xt][0]);
-                        acc[xt][1] = fmaf(f0, fmaf(64.0f, c1, s_1), acc[xt][1]);
-                        acc[xt][2] = fmaf(f1, fmaf(64.0f, c2, s_0), acc[xt][2]);
-                        acc[xt][3] = fmaf(f1, fmaf(64.0f, c3, s_1), acc[xt][3]);
+                        const float s_0 = -32.0f * __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
+                        const float s_1 = -32.0f * __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
+                        acc[xt][0] = fmaf(f0, fmaf(BS_2P24, c0, s_0), acc[xt][0]);
+                        acc[xt][1] = fmaf(f0, fmaf(BS_2P24, c1, s_1), acc[xt][1]);
+                        acc[xt][2] = fmaf(f1, fmaf(BS_2P24, c2, s_0), acc[xt][2]);
+                        acc[xt][3] = fmaf(f1, fmaf(BS_2P24, c3, s_1), acc[xt][3]);
                     }
                 }
-                __syncthreads();
+                set ^= 1;
             }
         }
     }

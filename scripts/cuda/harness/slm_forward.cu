@@ -288,7 +288,8 @@ static void add_rmsnorm(Program &P, const Model &M, const Arena &A, const std::s
 static void add_add(Program &P, const std::string &name, const half *a, const half *b, half *out,
                     int total)
 {
-    P.add_op(name, "add", (void *)slm_add, dim3((total + 31) / 32));
+    P.add_op(name, "add", (void *)slm_add_w8, dim3((total + 255) / 256));
+    P.ops.back().block = dim3(256);
     P.arg(a);
     P.arg(b);
     P.arg(out);
@@ -362,7 +363,8 @@ static void build_program(Program &P, const Model &M, const Arena &A, int B)
                A.xn, A.g, B, SLM_MM_OUT_F16);
         add_mm(P, M, A, b + "ffn_up", "matmul 1536x8960", M.t(b + "ffn_up.weight"), nullptr, A.xn,
                A.u, B, SLM_MM_OUT_F16);
-        P.add_op(b + "swiglu", "swiglu", (void *)slm_swiglu, dim3((B * M.ff + 31) / 32));
+        P.add_op(b + "swiglu", "swiglu", (void *)slm_swiglu_w8, dim3((B * M.ff + 255) / 256));
+        P.ops.back().block = dim3(256);
         P.arg((const half *)A.g);
         P.arg((const half *)A.u);
         P.arg(A.s);
@@ -715,6 +717,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *params[] = {&pa, &pb, &o, &tt};
         CK(cudaLaunchKernel((void *)slm_add, dim3((total + 31) / 32), dim3(32), params, 0, nullptr));
         report_h16("add", h_from(A.q, ref.size()), ref.data(), 1.0);
+        CK(cudaLaunchKernel((void *)slm_add_w8, dim3((total + 255) / 256), dim3(256), params, 0, nullptr));
+        report_h16("add_w8", h_from(A.q, ref.size()), ref.data(), 1.0);
     }
 
     /* Standalone bias add. */
@@ -754,6 +758,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *params[] = {&pg, &pu, &o, &tt};
         CK(cudaLaunchKernel((void *)slm_swiglu, dim3((total + 31) / 32), dim3(32), params, 0, nullptr));
         report_h16("swiglu", h_from(A.s, ref.size()), ref.data(), 2.0);
+        CK(cudaLaunchKernel((void *)slm_swiglu_w8, dim3((total + 255) / 256), dim3(256), params, 0, nullptr));
+        report_h16("swiglu_w8 fast math", h_from(A.s, ref.size()), ref.data(), 2.0);
     }
 
     /* RoPE with per-row positions, then KV append, then GQA over a causal mask
@@ -1105,7 +1111,7 @@ int main(int argc, char **argv)
     /* ---- whole-forward comparison with the CPU reference ---- */
     if (do_check) {
         printf("\nwhole-forward comparison with the CPU reference:\n");
-        const int nprompt = std::min(prefill, 12);
+        const int nprompt = prefill;
         std::vector<uint32_t> ids(prompt.begin(), prompt.begin() + nprompt);
         const double c0 = now_ms();
         std::vector<float> rl;
@@ -1123,7 +1129,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < p8.ops.size(); i++) {
             p8.run_op(i);
         }
-        report_logits("prefill B=12", down(A.logits, M.vocab), rl, 0.1);
+        report_logits("prefill", down(A.logits, M.vocab), rl, 0.1);
         /* Two decode steps from there. */
         uint32_t nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         for (int i = 0; i < 2; i++) {

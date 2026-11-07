@@ -61,6 +61,9 @@ OPS = {
     "slm_gqa": ("gqa", "SIMT", "FP16", "nhq,B,1",
                 "Online softmax; query row b sees 0..=pos[b]. q,out [B][nhq][hd]; "
                 "k,v [T][nhkv][hd]; hd % 32 == 0, hd <= 256."),
+    "slm_add_w8": ("add", "SIMT", "FP16", "ceil(total/256),1,1", "As slm_add, 8 warps per CTA."),
+    "slm_swiglu_w8": ("swiglu", "SIMT", "FP16", "ceil(total/256),1,1",
+                      "As slm_swiglu, 8 warps per CTA, fast exponent and divide."),
     "slm_gqa_w8": ("gqa", "SIMT", "FP16", "nhq,B,1",
                    "As slm_gqa, positions split across 8 warps. Prefer this one."),
     "slm_rmsnorm_w8": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
@@ -71,6 +74,8 @@ OPS = {
 BLOCKS = {
     "slm_gqa_w8": [32, 8, 1],
     "slm_rmsnorm_w8": [32, 8, 1],
+    "slm_add_w8": [256, 1, 1],
+    "slm_swiglu_w8": [256, 1, 1],
     # nw is chosen per shape at launch, 1 is the minimum.
     "slm_mm_q4k_hmma_b1": [32, "nw", 1],
     "slm_mm_q6k_hmma_b1": [32, "nw", 1],
@@ -91,6 +96,8 @@ ARGS = {
     "slm_gqa": "q, k, v, pos, out, nhq, nhkv, hd, B",
     "slm_gqa_w8": "q, k, v, pos, out, nhq, nhkv, hd, B",
     "slm_rmsnorm_w8": "x, gamma, out, n, B, eps",
+    "slm_add_w8": "a, b, out, total",
+    "slm_swiglu_w8": "gate, up, out, total",
 }
 
 
