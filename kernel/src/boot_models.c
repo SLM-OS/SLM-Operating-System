@@ -74,6 +74,10 @@ int boot_model_verify(const struct boot_model *m)
         !boot_models_name_ok(m->name)) {
         return -1;
     }
+#if defined(PLATFORM_X86_64)
+    /* No EFI stub and no vmm_is_mapped here: nothing can fill the table. */
+    return -2;
+#else
     /* The identity map uses 2 MiB blocks: check each one the file spans. */
     for (uint64_t pa = m->phys; pa < m->phys + m->size; pa += BOOT_MODEL_ALIGN) {
         if (!vmm_is_mapped(pa)) {
@@ -89,6 +93,7 @@ int boot_model_verify(const struct boot_model *m)
         return -4;
     }
     return 0;
+#endif
 }
 
 void boot_models_reserve_table(struct boot_model_table *t)

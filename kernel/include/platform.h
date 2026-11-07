@@ -199,6 +199,8 @@
 /* BPMP clock IDs (from tegra234-clock.h) */
 #define TEGRA234_CLK_UARTA           155
 #define TEGRA234_CLK_PEX2_C8_CORE    172   /* PCIe C8 controller core clock */
+#define TEGRA234_CLK_EMC             31    /* External memory controller */
+#define TEGRA234_EMC_MAX_HZ          3199000000ULL  /* top rate under JetPack */
 #define TEGRA234_CLK_GPUSYS          304   /* GPU system clock */
 #define TEGRA234_CLK_GPU_PWR         42    /* GPU power clock */
 #define TEGRA234_CLK_GPC0CLK         41    /* GPU GPC0 engine clock */
