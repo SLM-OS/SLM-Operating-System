@@ -271,6 +271,7 @@ int test_suite_mpidr_lookup(void);
 
 /* UEFI-direct boot: efi_check_relocation() decision tests (#26) */
 int test_suite_efi_reloc(void);
+int test_suite_boot_models(void);
 
 /* Tegra234 CPU NDIV helpers (#1053) */
 int test_suite_tegra_cpufreq(void);
