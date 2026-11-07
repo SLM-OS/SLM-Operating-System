@@ -2117,8 +2117,10 @@ typedef struct {
     uint64_t itl_rolling_ns; /* mean of the last 32 */
     uint64_t peak_resident_bytes; /* weights + KV + GPU arena */
     /* GPU, this prompt, from the semaphore timestamps. */
-    uint64_t gpu_steps;
-    uint64_t gpu_busy_ns;
+    uint64_t gpu_prefill_steps; /* before the first token; inside ttft_ns */
+    uint64_t gpu_prefill_ns;
+    uint64_t gpu_decode_steps;  /* after it; inside decode_ns */
+    uint64_t gpu_decode_ns;
     uint64_t gpu_last_ns;
     uint64_t gpu_wait_us;
     uint64_t gpu_evict_us;
@@ -2140,7 +2142,7 @@ typedef struct {
     SlmOpClassC classes[SLM_OPCLASS_COUNT];
 } SlmTelemetryC;
 
-_Static_assert(sizeof(SlmTelemetryC) == 488,
+_Static_assert(sizeof(SlmTelemetryC) == 504,
                "SlmTelemetryC has a Rust mirror with a paired const-assert");
 
 extern int32_t rust_slm_telemetry(uint32_t session_id, uint64_t gpc_hz, SlmTelemetryC *out);

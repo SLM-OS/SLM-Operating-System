@@ -133,8 +133,12 @@ pub struct SlmTelemetryC {
     pub peak_resident_bytes: u64,
 
     // GPU, this prompt.
-    pub gpu_steps: u64,
-    pub gpu_busy_ns: u64,
+    /// Steps and GPU time before the first token (prefill), then after it.
+    /// Decode GPU time fits inside `decode_ns`; prefill time is in `ttft_ns`.
+    pub gpu_prefill_steps: u64,
+    pub gpu_prefill_ns: u64,
+    pub gpu_decode_steps: u64,
+    pub gpu_decode_ns: u64,
     pub gpu_last_ns: u64,
     pub gpu_wait_us: u64,
     pub gpu_evict_us: u64,
@@ -164,13 +168,15 @@ pub struct SlmTelemetryC {
     pub classes: [SlmOpClassC; OP_CLASSES],
 }
 
-const _: () = assert!(core::mem::size_of::<SlmTelemetryC>() == 488);
+const _: () = assert!(core::mem::size_of::<SlmTelemetryC>() == 504);
 
 /// One session's live figures.
 pub struct Telemetry {
     seq: AtomicU32,
     profile: AtomicBool,
     running: AtomicBool,
+    /// Past the first token: GPU steps count as decode.
+    decoding: AtomicBool,
     path: AtomicU32,
     stop_reason: AtomicU32,
     kv_used: AtomicU32,
@@ -190,8 +196,10 @@ pub struct Telemetry {
     itl_sum_ns: AtomicU64,
     itl_ring: [AtomicU64; ITL_RING],
     peak_resident_bytes: AtomicU64,
-    gpu_steps: AtomicU64,
-    gpu_busy_ns: AtomicU64,
+    gpu_prefill_steps: AtomicU64,
+    gpu_prefill_ns: AtomicU64,
+    gpu_decode_steps: AtomicU64,
+    gpu_decode_ns: AtomicU64,
     gpu_last_ns: AtomicU64,
     gpu_wait_us: AtomicU64,
     gpu_evict_us: AtomicU64,
@@ -249,6 +257,7 @@ impl Telemetry {
             seq: AtomicU32::new(0),
             profile: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            decoding: AtomicBool::new(false),
             path: AtomicU32::new(0),
             stop_reason: AtomicU32::new(0),
             kv_used: AtomicU32::new(0),
@@ -268,8 +277,10 @@ impl Telemetry {
             itl_sum_ns: AtomicU64::new(0),
             itl_ring: [const { AtomicU64::new(0) }; ITL_RING],
             peak_resident_bytes: AtomicU64::new(0),
-            gpu_steps: AtomicU64::new(0),
-            gpu_busy_ns: AtomicU64::new(0),
+            gpu_prefill_steps: AtomicU64::new(0),
+            gpu_prefill_ns: AtomicU64::new(0),
+            gpu_decode_steps: AtomicU64::new(0),
+            gpu_decode_ns: AtomicU64::new(0),
             gpu_last_ns: AtomicU64::new(0),
             gpu_wait_us: AtomicU64::new(0),
             gpu_evict_us: AtomicU64::new(0),
@@ -368,8 +379,10 @@ impl Telemetry {
             &self.itl_min_ns,
             &self.itl_max_ns,
             &self.itl_sum_ns,
-            &self.gpu_steps,
-            &self.gpu_busy_ns,
+            &self.gpu_prefill_steps,
+            &self.gpu_prefill_ns,
+            &self.gpu_decode_steps,
+            &self.gpu_decode_ns,
             &self.gpu_last_ns,
             &self.gpu_wait_us,
             &self.gpu_evict_us,
@@ -381,6 +394,7 @@ impl Telemetry {
             self.class_last_ns[i].store(0, Relaxed);
             self.class_total_ns[i].store(0, Relaxed);
         }
+        self.decoding.store(false, Relaxed);
     }
 
     #[inline]
@@ -429,7 +443,10 @@ impl Telemetry {
     }
 
     pub fn first_token(&self, ttft_ns: u64) {
-        self.write(|| self.ttft_ns.store(ttft_ns, Relaxed));
+        self.write(|| {
+            self.ttft_ns.store(ttft_ns, Relaxed);
+            self.decoding.store(true, Relaxed);
+        });
     }
 
     /// One decode step is done: `gap_ns` since the token before it, `decode_ns`
@@ -464,8 +481,13 @@ impl Telemetry {
     #[inline]
     pub fn gpu_step(&self, gpu_ns: u64, wait_us: u64, evict_us: u64) {
         self.write(|| {
-            Self::add(&self.gpu_steps, 1);
-            Self::add(&self.gpu_busy_ns, gpu_ns);
+            let (steps, ns) = if self.decoding.load(Relaxed) {
+                (&self.gpu_decode_steps, &self.gpu_decode_ns)
+            } else {
+                (&self.gpu_prefill_steps, &self.gpu_prefill_ns)
+            };
+            Self::add(steps, 1);
+            Self::add(ns, gpu_ns);
             self.gpu_last_ns.store(gpu_ns, Relaxed);
             Self::add(&self.gpu_wait_us, wait_us);
             Self::add(&self.gpu_evict_us, evict_us);
@@ -550,8 +572,10 @@ impl Telemetry {
         }
 
         o.peak_resident_bytes = self.peak_resident_bytes.load(Relaxed);
-        o.gpu_steps = self.gpu_steps.load(Relaxed);
-        o.gpu_busy_ns = self.gpu_busy_ns.load(Relaxed);
+        o.gpu_prefill_steps = self.gpu_prefill_steps.load(Relaxed);
+        o.gpu_prefill_ns = self.gpu_prefill_ns.load(Relaxed);
+        o.gpu_decode_steps = self.gpu_decode_steps.load(Relaxed);
+        o.gpu_decode_ns = self.gpu_decode_ns.load(Relaxed);
         o.gpu_last_ns = self.gpu_last_ns.load(Relaxed);
         o.gpu_wait_us = self.gpu_wait_us.load(Relaxed);
         o.gpu_evict_us = self.gpu_evict_us.load(Relaxed);
@@ -716,6 +740,31 @@ mod tests {
         assert_eq!(mma_issue_bp(0, 40_500_000, MMA_RATE_GPC_HZ), NA, "no mma: below tier 1");
         assert_eq!(mma_issue_bp(1, 0, MMA_RATE_GPC_HZ), NA, "not profiled yet");
         assert_eq!(mma_issue_bp(1, 1, 0), NA, "clock unknown");
+    }
+
+    /// The critic's case: a 72 ms prefill step counted with 62 decode steps
+    /// made "GPU busy" exceed the decode wall time.
+    #[test]
+    fn gpu_time_before_the_first_token_is_prefill() {
+        let t = Telemetry::new(1, 512);
+        t.prompt_begin(0, 0, 0);
+        t.gpu_step(28_680_000, 0, 52);
+        t.first_token(75_000_000);
+        for i in 1..=62u64 {
+            t.gpu_step(19_355_000, 0, 52);
+            t.decode_step(19_500_000, i * 19_500_000, 1);
+        }
+        let s = t.snapshot(0);
+        assert_eq!((s.gpu_prefill_steps, s.gpu_prefill_ns), (1, 28_680_000));
+        assert_eq!((s.gpu_decode_steps, s.gpu_decode_ns), (62, 62 * 19_355_000));
+        assert!(s.gpu_decode_ns <= s.decode_ns, "decode GPU time is inside the decode wall");
+        assert_eq!(s.gpu_evict_us, 63 * 52);
+        // The next prompt starts in prefill again.
+        t.prompt_end(2, 1);
+        t.prompt_begin(0, 1, 0);
+        t.gpu_step(5, 0, 0);
+        let s = t.snapshot(0);
+        assert_eq!((s.gpu_prefill_steps, s.gpu_decode_steps), (1, 0));
     }
 
     #[test]

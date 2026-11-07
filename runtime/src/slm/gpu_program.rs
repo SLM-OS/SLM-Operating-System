@@ -2730,7 +2730,7 @@ mod tests {
         assert_eq!(soft::MARKED_RUNS.load(Relaxed), 0, "stats disabled must not touch the marks");
         let s = tel.snapshot(0);
         assert_eq!(s.profiled_tokens, 0);
-        assert!(s.gpu_steps > 0, "GPU busy has a source without --profile");
+        assert!(s.gpu_prefill_steps > 0 && s.gpu_decode_steps > 0, "GPU busy has a source without --profile");
         assert_eq!(s.tc_issue_bp, crate::slm::telemetry::NA, "no matmul time measured");
         assert_ne!(s.tc_mac_share_bp, crate::slm::telemetry::NA);
         assert_eq!(s.path, session::PATH_PROGRAM);
