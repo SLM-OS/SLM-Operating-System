@@ -730,7 +730,9 @@ static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
  * Any CPU can retire the program by reading its end semaphore, so a
  * waiter that masked IRQs on the program owner's CPU cannot deadlock:
  * it doesn't need the owner to run (#1093 class). Written under the
- * lock. */
+ * lock. There is no owner field: slm_prog.c's run_step holds its own lock
+ * from slm_gpu_prog_submit to slm_gpu_prog_finished, so at most one
+ * program is in flight and finished always clears its own. */
 static struct {
     bool active;
     const volatile uint32_t *end_slot;

@@ -367,9 +367,12 @@ impl Session {
             self.arch.rope_freq_base,
             RopePairing::for_arch(self.arch.architecture),
         );
+        // Read and pin the model under the registry lock, build without it:
+        // the build may wait for another session's GPU step (#475 W-B).
         let built = registry::with_loaded_slm(self.model_handle as usize, |slm| {
-            GpuProgram::build(slm, ctx, vocab, &rope.cos_sin)
-        });
+            GpuProgram::prepare(slm, vocab)
+        })
+        .map(|prep| prep.and_then(|i| GpuProgram::build_prepared(i, ctx, &rope.cos_sin)));
         match built {
             Some(Ok(p)) => {
                 self.kv.release_storage();

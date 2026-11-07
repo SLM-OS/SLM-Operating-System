@@ -167,7 +167,7 @@ Every disagreement is a near tie. The FP16 divergences are the ones seen on SLM-
 ## Concurrency and failure handling
 
 - One lock in `slm_prog.c` covers the global program tables, writes to the shared GPU VM made by `slm_prog`, and each step from submit to the end of its wait. A waiter yields instead of spinning with IRQs masked, and gets `SLM_PROG_ERR_BUSY` after 6 s. A close that cannot take the lock is finished by the holder on release. GPU VM writes outside `slm_prog` (cold bring-up, oplib) are not covered by this lock.
-- The in-flight flag records its owning session, so one session cannot clear another's.
+- The in-flight flag (`g_prog_flight` in `slm_ffi.c`) has no owner field. One session cannot clear another's because `run_step` holds the `slm_prog` lock from submit to `slm_gpu_prog_finished`, so only one program is ever in flight. Cache clean and invalidate take no lock, so they never skip. `slm launch` reads and pins the model under the registry lock and opens the program after releasing it.
 - After a step timeout or a failed L2 evict, closing the session removes the PTEs but deliberately leaks the arena, control pages and VA (one log line), because dirty GPU lines could otherwise land on reused pages.
 - A GPU program pins its model: `slm unload` returns BUSY while one is mapped.
 - At build, each tensor's dims, type and byte length are checked against the plan; a mismatch keeps the session on the CPU and says why.

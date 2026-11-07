@@ -919,30 +919,29 @@ int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pr
     return rc;
 }
 
-static void slm_prog_clean_locked(int32_t h, const void *p, size_t len)
+/* Cache maintenance takes no lock. It touches only the caller's own session
+ * memory (its arena or step page), which nothing else frees while that
+ * session is open: the caller owns the session, and a close from elsewhere
+ * waits for the holder. Taking the lock here would let a busy lock skip
+ * the clean or invalidate silently and compute on stale data (#475 W-A). */
+static const struct ga10b_gpu_ops *session_ops(int32_t h)
 {
-    struct prog_session *s = session(h);
-    if (s) s->be->ops->cache_clean(s->be->ops->ctx, p, len);
+    if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return NULL;
+    const struct prog_session *s = &g_sessions[h];
+    if (!__atomic_load_n(&s->open, __ATOMIC_ACQUIRE) || !s->be) return NULL;
+    return s->be->ops;
 }
 
 void slm_prog_clean(int32_t h, const void *p, size_t len)
 {
-    if (prog_lock(backend()) != 0) return;
-    slm_prog_clean_locked(h, p, len);
-    prog_unlock();
-}
-
-static void slm_prog_invalidate_locked(int32_t h, const void *p, size_t len)
-{
-    struct prog_session *s = session(h);
-    if (s) s->be->ops->cache_inval(s->be->ops->ctx, p, len);
+    const struct ga10b_gpu_ops *ops = session_ops(h);
+    if (ops) ops->cache_clean(ops->ctx, p, len);
 }
 
 void slm_prog_invalidate(int32_t h, const void *p, size_t len)
 {
-    if (prog_lock(backend()) != 0) return;
-    slm_prog_invalidate_locked(h, p, len);
-    prog_unlock();
+    const struct ga10b_gpu_ops *ops = session_ops(h);
+    if (ops) ops->cache_inval(ops->ctx, p, len);
 }
 
 /* Print once per session: a dead program means every later step of the

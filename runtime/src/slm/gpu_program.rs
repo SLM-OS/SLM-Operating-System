@@ -838,15 +838,46 @@ pub fn backend_available() -> bool {
     unsafe { slm_prog_available() != 0 }
 }
 
+/// What [`GpuProgram::build_prepared`] needs from the registry, read under its
+/// lock by [`GpuProgram::prepare`]. The pin keeps the weights alive once that
+/// lock is dropped.
+pub struct BuildInput {
+    desc: ModelDesc,
+    weights: *const u8,
+    weights_len: usize,
+    pin: Option<crate::slm::registry::GpuPin>,
+}
+
 impl GpuProgram {
-    /// Allocate the arena, map the weights, build every launch. On `Err`
-    /// nothing is left behind.
-    pub fn build(slm: &LoadedSlm, max_ctx: usize, vocab: u32, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
+    /// Read and pin the model: the part of a build that needs the registry
+    /// lock (`with_loaded_slm`). Fast, and never waits for the GPU.
+    pub fn prepare(slm: &LoadedSlm, vocab: u32) -> Result<BuildInput, BuildError> {
         // SAFETY: plain FFI query with no arguments.
         if unsafe { slm_prog_available() } == 0 {
             return Err(BuildError::NoBackend);
         }
         let desc = ModelDesc::from_slm(slm, vocab).map_err(BuildError::Failed)?;
+        let weights = slm.weight_bytes().ok_or(BuildError::Failed("model has no weight bytes"))?;
+        Ok(BuildInput {
+            desc,
+            weights: weights.as_ptr(),
+            weights_len: weights.len(),
+            pin: crate::slm::registry::pin_for_gpu(slm),
+        })
+    }
+
+    /// [`Self::prepare`] then [`Self::build_prepared`], for callers that hold
+    /// no spinlock (tests). Under `with_loaded_slm` use the two halves.
+    pub fn build(slm: &LoadedSlm, max_ctx: usize, vocab: u32, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
+        Self::build_prepared(Self::prepare(slm, vocab)?, max_ctx, rope_table)
+    }
+
+    /// Allocate the arena, map the weights, build every launch. On `Err`
+    /// nothing is left behind. Call with no spinlock held: slm_prog_open may
+    /// wait (yielding) for another session's step, and a wait under the
+    /// registry lock could hang CPU 0 (#475 W-B).
+    pub fn build_prepared(input: BuildInput, max_ctx: usize, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
+        let BuildInput { desc, weights, weights_len, pin } = input;
         let mut flags = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
         let simt = flags & FLAG_SIMT != 0;
         let inject_fault = flags & FLAG_INJECT_FAULT != 0;
@@ -861,10 +892,9 @@ impl GpuProgram {
         let decode = build_plan(&desc, &arena, false, simt);
         let prefill = (max_batch > 1).then(|| build_plan(&desc, &arena, true, simt));
 
-        let weights = slm.weight_bytes().ok_or(BuildError::Failed("model has no weight bytes"))?;
         let args = OpenArgs {
-            weights: weights.as_ptr(),
-            weights_bytes: weights.len() as u64,
+            weights,
+            weights_bytes: weights_len as u64,
             data_bytes: arena.data_bytes,
             step_bytes: arena.step_bytes,
             max_launches: [
@@ -941,10 +971,7 @@ impl GpuProgram {
                 return Err(BuildError::Failed(err_message(rc)));
             }
         }
-        // Last, so no early return drops a pinned program inside the
-        // caller's with_loaded_slm (GpuPin's drop doesn't need the lock, but
-        // nothing else here should run pinned and half-built either).
-        p.pin = crate::slm::registry::pin_for_gpu(slm);
+        p.pin = pin;
         Ok(p)
     }
 
@@ -1508,11 +1535,13 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         a.1,
         crate::inference::ops_transformer::RopePairing::for_arch(a.2),
     );
-    let mut prog = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
-        GpuProgram::build(slm, ctx, info.vocab_size, &rope.cos_sin)
+    let prep = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+        GpuProgram::prepare(slm, info.vocab_size)
     })
-    .ok_or("model not loaded")?
-    .map_err(|e| match e {
+    .ok_or("model not loaded")?;
+    let mut prog = prep
+        .and_then(|i| GpuProgram::build_prepared(i, ctx, &rope.cos_sin))
+        .map_err(|e| match e {
         BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
         BuildError::Failed(w) => w,
     })?;
@@ -2293,6 +2322,8 @@ pub mod soft {
         /// Fail run number N (0-based) with this rc.
         pub fail_run: Option<(u32, i32)>,
         pub closes: u32,
+        /// An open ran while the registry spinlock was held (#475 W-B).
+        pub opened_under_registry_lock: bool,
     }
 
     pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
@@ -2302,11 +2333,12 @@ pub mod soft {
         max_batch: 64,
         fail_run: None,
         closes: 0,
+        opened_under_registry_lock: false,
     });
 
     pub fn reset_knobs() {
         let mut k = KNOBS.lock().unwrap();
-        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0 };
+        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0, opened_under_registry_lock: false };
     }
 
     fn mem_of(s: &mut Soft) -> reference::Mem {
@@ -2335,6 +2367,9 @@ pub mod soft {
     }
     #[no_mangle]
     extern "C" fn slm_prog_open(a: *const OpenArgs, out: *mut OpenOut) -> i32 {
+        if crate::slm::registry::lock_held_for_tests() {
+            KNOBS.lock().unwrap().opened_under_registry_lock = true;
+        }
         let k = KNOBS.lock().unwrap();
         let _ = &k;
         let a = unsafe { &*a };
@@ -3239,5 +3274,25 @@ mod tests {
             let got = code_bytes(name);
             assert!(got <= budget, "{name}: {got} bytes of SASS, budget {budget}");
         }
+    }
+
+    /// #475 W-B: `slm launch` built the program inside `with_loaded_slm`, so
+    /// slm_prog_open's wait for another session's step ran under the registry
+    /// spinlock, which every other task spins on. The build now reads and pins
+    /// the model under the lock and opens the program after dropping it.
+    #[test]
+    fn program_open_never_runs_under_the_registry_lock() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        assert_eq!(snapshot(sid).path, ForwardPath::Program);
+        assert!(!soft::KNOBS.lock().unwrap().opened_under_registry_lock);
+        assert!(registry::gpu_pinned(model as usize), "pinned before the lock was dropped");
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        let mut rep = GoldenReport::default();
+        let _ = golden_run(model, GREEDY, false, &mut rep);
+        assert!(!soft::KNOBS.lock().unwrap().opened_under_registry_lock);
+        reset_for_tests();
     }
 }

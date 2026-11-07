@@ -614,8 +614,12 @@ static int slm_unload(int argc, char *argv[])
     }
     int rc = rust_slm_unload(idx);
     if (rc == SLM_ERR_BUSY) {
-        shell_printf("slm unload: a prompt is running on handle %lu "
-                     "(slm stop it first)\r\n", (unsigned long)idx);
+        /* BUSY is a running prompt, or a session's GPU program (even an
+         * idle one) mapping the weights (#475 W5). */
+        shell_printf("slm unload: handle %lu is in use: a prompt is running, "
+                     "or a session's GPU program maps it (slm stop the prompt, "
+                     "or close that session or relaunch it with --gpu cpu)\r\n",
+                     (unsigned long)idx);
         return -1;
     }
     if (rc != 0) {
