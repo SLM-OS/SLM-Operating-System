@@ -170,7 +170,7 @@ Publishing sends a message to all subscribers of a given topic:
 msg_router_publish("/output/result", "class=7");
 ```
 
-Published messages are delivered asynchronously. Each subscriber receives a copy in its per-component mailbox slot. If a subscriber has not acknowledged its previous message, `msg_router_publish` waits for it, for up to 5 s, and `msg_router_publish_nowait` drops the new message and counts it. Messages are up to 511 bytes; a longer publish is refused. A stream that can't lose messages uses `msg_router_publish_reliable`, which reports what happened per subscriber.
+Published messages are delivered asynchronously. Each subscriber receives a copy in its per-component mailbox slot. If a subscriber has not acknowledged its previous message, `msg_router_publish` waits for it, for up to 5 s, and `msg_router_publish_nowait` drops the new message and counts it. Messages are up to 511 bytes; a longer publish is refused. A stream that can't lose messages uses `msg_router_publish_reliable`, which reports what happened per subscriber. A publisher that subscribes to its own topic, as a Lua state can, is not waited on for its own copy: `slm.msg_publish` uses `msg_router_publish_from`.
 
 ### Message Router API Summary
 

@@ -611,6 +611,32 @@ static void test_receive_topic_leaves_other_topics_alone(void)
     msg_router_init();
 }
 
+/* A publisher subscribed to its own topic (a Lua state) can't ack until the
+ * publish returns. It isn't waited on: the message lands, or is dropped if
+ * its mailbox is still full, at once instead of after the 5 s timeout. */
+extern int msg_router_publish_from(int publisher_idx, const uint8_t *topic_name,
+                                   const uint8_t *data, uint8_t priority);
+
+static void test_publish_from_does_not_wait_on_itself(void)
+{
+    msg_router_init();
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/self", 9));
+    uint64_t freq = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_from(9, (const uint8_t *)"/t/self",
+                                                     (const uint8_t *)"one", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_from(9, (const uint8_t *)"/t/self",
+                                                     (const uint8_t *)"two", 0));
+    TEST_ASSERT_LESS_THAN(freq, timer_get_count() - t0);
+
+    uint8_t topic[16];
+    const uint8_t *got = msg_router_receive(9, topic);
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_STRING("one", (const char *)got);
+    msg_router_ack(9);
+    msg_router_init();
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -629,6 +655,7 @@ int test_suite_msg_router(void)
     RUN_TEST(test_publish_reliable_reports_what_happened);
     RUN_TEST(test_publish_reliable_lets_a_lower_priority_reader_run);
     RUN_TEST(test_receive_topic_leaves_other_topics_alone);
+    RUN_TEST(test_publish_from_does_not_wait_on_itself);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }

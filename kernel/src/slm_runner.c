@@ -59,7 +59,8 @@ extern int  msg_router_publish_nowait(const uint8_t *topic_name, const uint8_t *
 #define SLM_RUNNER_IDLE_POLL_MS 10u
 /* How long `slm ask` waits for the runner to take the prompt. */
 #define SLM_ASK_PUBLISH_TIMEOUT_MS 5000u
-#define SLM_RUNNER_START_TIMEOUT_MS 2000u
+/* Covers the session open: a KV cache, and under --gpu on a GPU program. */
+#define SLM_RUNNER_START_TIMEOUT_MS 60000u
 /* Past a publish stalled on a dead subscriber, a slow forward step and more. */
 #define SLM_RUNNER_STOP_TIMEOUT_MS 60000u
 
@@ -487,15 +488,16 @@ void slm_runner_entry(void *arg)
     g_runner.comp_idx = comp_idx;
     __atomic_store_n(&g_runner.busy, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_runner.exit_requested, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_runner.running, 1u, __ATOMIC_RELEASE);
 
     /* Open a session now if there's a model, so a bad configuration or an
      * out-of-memory KV cache shows at start. Without one, keep going: the
-     * model can come later and each prompt picks its own. */
+     * model can come later and each prompt picks its own. Running is set
+     * after, so `slm runner start` reports the session it got. */
     const char *err = NULL;
     if (slm_runner_ensure_session(&err) != 0) {
         uart_printf("[slm-runner] no session yet: %s\r\n", err);
     }
+    __atomic_store_n(&g_runner.running, 1u, __ATOMIC_RELEASE);
     uart_printf("[slm-runner] Started (component %d, session %d, model %d), "
                 "subscribed to " SLM_TOPIC_PROMPT "\r\n",
                 comp_idx, (int)g_runner.session, (int)g_runner.model);

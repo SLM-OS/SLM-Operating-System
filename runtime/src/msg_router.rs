@@ -821,6 +821,10 @@ struct PublishWait {
     timeout_cycles: u64,
     /// Sleep now and then so a lower-priority subscriber gets to run.
     may_sleep: bool,
+    /// The publisher's own component index, or -1. Its own mailbox can only
+    /// be drained after the publish returns, so waiting on it is a wait for
+    /// the timeout: land the message or drop it, and move on.
+    publisher_idx: i32,
 }
 
 /// Give the CPU away for one poll of a publish wait.
@@ -846,6 +850,7 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
     let wait = PublishWait {
         timeout_cycles: timer_get_frequency().saturating_mul(ACK_TIMEOUT_SECS),
         may_sleep: false,
+        publisher_idx: -1,
     };
     let mut stats = MsgPublishStats::default();
     publish_wait(topic_name, data, priority, wait, &mut stats);
@@ -873,6 +878,7 @@ unsafe fn publish_wait(
 ) {
     const MAX_TARGETS: usize = MAX_SUBSCRIBERS + MAX_WILDCARD_SUBS;
     let mut targets: [*mut Mailbox; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
+    let mut owners: [i32; MAX_TARGETS] = [-1; MAX_TARGETS];
     let mut target_count = 0usize;
 
     // Gather target mailbox pointers under the lock, then release it
@@ -892,6 +898,7 @@ unsafe fn publish_wait(
                         continue;
                     }
                     targets[target_count] = &mut TOPICS[i].subs[j].mailbox;
+                    owners[target_count] = TOPICS[i].subs[j].component_idx;
                     target_count += 1;
                 }
                 break;
@@ -906,6 +913,7 @@ unsafe fn publish_wait(
             }
             if target_count < MAX_TARGETS {
                 targets[target_count] = &mut WILDCARD_SUBS[i].mailbox;
+                owners[target_count] = WILDCARD_SUBS[i].component_idx;
                 target_count += 1;
             }
         }
@@ -938,6 +946,15 @@ unsafe fn publish_wait(
         // SAFETY: pointer points at a Mailbox inside the TOPICS /
         // WILDCARD_SUBS static arrays (stable storage).
         let mb = &mut *targets[t];
+
+        if wait.publisher_idx >= 0 && owners[t] == wait.publisher_idx {
+            if mb.try_deliver(topic_name, data, priority) {
+                stats.acked += 1;
+            } else {
+                stats.dropped += 1;
+            }
+            continue;
+        }
 
         // Try to deliver, retrying with yield while the mailbox is
         // busy (a prior message is still unacked). The busy-wait and
@@ -1103,6 +1120,38 @@ pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> 
     unsafe { publish_internal(topic_name, data, MSG_PRIORITY_NORMAL) }
 }
 
+/// `msg_router_publish_priority` for a publisher that is itself a subscriber,
+/// such as a Lua state: its own mailbox gets the message without the wait,
+/// which could only end in the timeout because nothing reads that mailbox
+/// until this returns. Other subscribers are waited for as usual. Counts its
+/// own mailbox as delivered when the message landed there.
+///
+/// # Safety
+/// As `msg_router_publish`.
+#[no_mangle]
+pub unsafe extern "C" fn msg_router_publish_from(
+    publisher_idx: i32,
+    topic_name: *const u8,
+    data: *const u8,
+    priority: u8,
+) -> i32 {
+    if topic_name.is_null()
+        || data.is_null()
+        || cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none()
+        || !payload_fits(data)
+    {
+        return 0;
+    }
+    let wait = PublishWait {
+        timeout_cycles: timer_get_frequency().saturating_mul(ACK_TIMEOUT_SECS),
+        may_sleep: false,
+        publisher_idx,
+    };
+    let mut stats = MsgPublishStats::default();
+    publish_wait(topic_name, data, priority, wait, &mut stats);
+    stats.acked
+}
+
 /// Largest payload a publish accepts, in bytes, excluding the NUL.
 #[no_mangle]
 pub extern "C" fn msg_router_max_payload() -> u32 {
@@ -1143,6 +1192,7 @@ pub unsafe extern "C" fn msg_router_publish_reliable(
     let wait = PublishWait {
         timeout_cycles: (timer_get_frequency().saturating_mul(timeout_ms as u64) / 1000).max(1),
         may_sleep: true,
+        publisher_idx: -1,
     };
     let mut local = MsgPublishStats::default();
     publish_wait(topic_name, data, MSG_PRIORITY_NORMAL, wait, &mut local);
