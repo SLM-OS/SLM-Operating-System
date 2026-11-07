@@ -91,12 +91,6 @@ int bpmp_clk_disable(uint32_t clock_id);
 int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 
 /*
- * Read a clock's current rate in Hz (CMD_CLK_GET_RATE). Same return
- * convention as bpmp_clk_enable.
- */
-int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out);
-
-/*
  * Ask the bandwidth manager for a memory clock floor on behalf of a
  * client (TEGRA_ICC_BPMP_*), MRQ_BWMGR_INT. *rate_hz_out gets the memory
  * clock BPMP set. Same return convention as bpmp_clk_enable.
@@ -120,6 +114,9 @@ int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz
  */
 int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
                       uint64_t *actual_hz_out);
+
+/* The clock's current rate in Hz. 0 on success. */
+int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *rate_hz_out);
 
 /*
  * Reset control wrappers. Same error convention as bpmp_clk_*.

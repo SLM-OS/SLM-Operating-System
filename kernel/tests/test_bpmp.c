@@ -115,6 +115,13 @@ static void test_bpmp_public_opcodes_are_stable(void)
     TEST_ASSERT_EQUAL_INT(2, CMD_RESET_DEASSERT);
 }
 
+/* `clocks` relies on this to say there's no rate rather than print 0. */
+static void test_bpmp_clk_get_rate_stub_reports_unavailable(void)
+{
+    uint64_t hz = 123;
+    TEST_ASSERT_TRUE(bpmp_clk_get_rate(31, &hz) != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, hz);
+}
 #endif /* !PLATFORM_JETSON_ORIN_NANO */
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
@@ -199,6 +206,7 @@ int test_suite_bpmp(void)
     RUN_TEST(test_bpmp_pg_set_state_returns_zero_on_stub);
     RUN_TEST(test_bpmp_public_opcodes_are_stable);
     RUN_TEST(test_bpmp_thermal_stub_reports_unavailable);
+    RUN_TEST(test_bpmp_clk_get_rate_stub_reports_unavailable);
 #endif
     RUN_TEST(test_bpmp_thermal_abi_layout);
     return UNITY_END();

@@ -36,8 +36,8 @@ leaves them reserved. Every failure in the stub is non-fatal.
 
 ## Consequences
 
-- Every boot with a model on disk spends the read and hash time before the
-  kernel starts. The stub stops reading after 180 s, and the firmware's
+- Every boot with a model on disk spends about 1.7 s on reading, hashing and
+  verifying. The stub stops reading after 180 s, and the firmware's
   5-minute watchdog remains the backstop for a Read that never returns.
 - Reserved pages leave the PMM for the whole boot, even after `slm unload`.
 - Models change only by writing the disk from SD Linux and rebooting.
@@ -51,5 +51,9 @@ Host: `make test` (`test_boot_models.c`, fake firmware), `make
 test-qemu-uefi` (real AAVMF firmware; read error by blkdebug), `make
 runtime-test`.
 
-Hardware, jetson-nano-2: pending. Volume visibility, SD and NVMe read speed,
-and the choice of NVMe first are not yet measured.
+Hardware, jetson-nano-2, UEFI 36.4.7, 1.04 GiB file. NVIDIA's firmware exposes
+both ext4 partitions. NVMe APP read 780 ms (about 1400 MiB/s); SD rootfs read
+67977 ms (15.7 MiB/s), which is why NVMe goes first, and hiding the NVMe copy
+proved the SD fallback. Stub hash 610 ms, clean 38 ms, kernel verify 270 ms.
+20 of 20 cold boots reached `slmos>` with the file verified, in 55.6 s from
+power-on. `slm load` takes 346 ms.

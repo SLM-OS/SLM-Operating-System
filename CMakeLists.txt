@@ -835,6 +835,7 @@ set(KERNEL_SOURCES
     kernel/src/timdiag_pi5_probes.c
     kernel/src/shell_fs.c
     kernel/src/boot_models.c
+    kernel/src/shell_clocks.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/shell_top.c

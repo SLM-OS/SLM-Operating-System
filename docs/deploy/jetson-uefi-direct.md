@@ -249,6 +249,19 @@ file was dropped.
 `slm load` on these paths is zero-copy, and `slm unload` leaves the pages
 reserved, so the same file can be loaded again without a reboot.
 
+CPU inference on this model is the first number on this boot path, measured
+after a cold boot with EMC at 3199 MHz: the 64-token prompt
+`bench/475/prompts/p1.txt`, greedy, `--gpu cpu`, 256 tokens gives TTFT 155.8 s
+and 0.400 tok/s. The forward path is single-threaded, so `--threads 4` has no
+effect yet. EMC at 204 MHz gives 165.6 s and 0.384 tok/s, so memory clock is
+not what limits the CPU path. `slm load` does feel it: 590 ms at 204 MHz.
+
+To test cold boots with `boot_test`, copy the image to `\EFI\BOOT\BOOTAA64.efi`
+on the NVMe ESP so entry `0008` boots it on every power cycle. Return to Linux
+with `serial_send keys=["F11"]` at the firmware prompt, then `["Down", "Enter"]`
+for "UEFI SD Device", delete the file, and check that a power cycle reaches SD
+Linux.
+
 ---
 
 ## Build, deploy, test
@@ -325,7 +338,8 @@ variables its header lists for models and shell input.
 | Camera RCE | Works: `rcediag` completes HELLO, PING and `CH_SETUP`. MB2 loads the RCE firmware before UEFI, and `camrtc_init` powers RCE through BPMP the same way it does after kexec |
 | GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
-| Models from disk | Host-tested only; hardware verification pending (ADR 0002). See [Models on disk](#models-on-disk) |
+| Models from disk | Works ([ADR 0002](../adr/0002-uefi-model-delivery.md), [Models on disk](#models-on-disk)): a 1.04 GiB GGUF reads in 780 ms from NVMe, 68 s from SD; 20/20 cold boots verified it, 55.6 s from power-on to `slmos>`; `slm load` takes 346 ms |
+| Memory clock | UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU and XUSB bring-up; `clocks` shows the rates, `clocks emc <MHz>` requests one |
 
 ### XUSB cold bring-up
 

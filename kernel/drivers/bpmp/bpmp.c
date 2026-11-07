@@ -162,31 +162,6 @@ struct mrq_clk_set_rate_response {
     int64_t rate;
 } __attribute__((packed));
 
-int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out)
-{
-    if (!g_bpmp_initialised) {
-        return -1;
-    }
-    struct mrq_clk_set_rate_request req = {
-        .cmd_and_id = MRQ_CLK_CMD_AND_ID(CMD_CLK_GET_RATE, clock_id),
-    };
-    struct mrq_clk_set_rate_response resp = { .rate = 0 };
-    int32_t err = 0;
-    /* CMD_CLK_GET_RATE takes no payload beyond cmd_and_id. */
-    int rc = mrq_send(MRQ_CLK, &req, sizeof(req.cmd_and_id),
-                      &resp, sizeof(resp), &err);
-    if (rc != 0) {
-        return rc;
-    }
-    if (err != 0) {
-        return (int)err;
-    }
-    if (hz_out) {
-        *hz_out = (uint64_t)resp.rate;
-    }
-    return 0;
-}
-
 int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz_out)
 {
     if (!g_bpmp_initialised) {
@@ -249,6 +224,30 @@ int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
     if (actual_hz_out) {
         *actual_hz_out = (uint64_t)resp.rate;
     }
+    return 0;
+}
+
+/* CMD_CLK_GET_RATE: empty request body, response int64_t rate. */
+int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *rate_hz_out)
+{
+    if (!g_bpmp_initialised || rate_hz_out == NULL) {
+        return -1;
+    }
+
+    struct mrq_clk_payload_v1 req = {
+        .cmd_and_id = MRQ_CLK_CMD_AND_ID(CMD_CLK_GET_RATE, clock_id),
+    };
+    struct mrq_clk_set_rate_response resp = { .rate = 0 };
+    int32_t err = 0;
+    int rc = mrq_send(MRQ_CLK, &req, sizeof(req),
+                      &resp, sizeof(resp), &err);
+    if (rc != 0) {
+        return rc;
+    }
+    if (err != 0) {
+        return (int)err;
+    }
+    *rate_hz_out = (uint64_t)resp.rate;
     return 0;
 }
 
