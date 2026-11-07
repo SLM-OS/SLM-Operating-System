@@ -518,7 +518,9 @@ place.
 | `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
 | `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
 | `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
-| `slm gpu golden [batch]` | `PASS`: every step's logits within tolerance of llama.cpp on the tiny model. Needs a `SLM_GPU_GOLDEN=ON` build (about 790 KB of fixtures) |
+| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
+| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt |
+| `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a `SLM_GPU_GOLDEN=ON` build (about 790 KB of fixtures) |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
 

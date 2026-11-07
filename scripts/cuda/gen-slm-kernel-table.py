@@ -21,21 +21,25 @@ SLM_OP_KIND_BASE = 32
 MM = [("x", 0x160), ("W", 0x168), ("out", 0x170), ("bias", 0x178),
       ("K", 0x180), ("N", 0x184), ("B", 0x188), ("flags", 0x18C)]
 SLM_SASS = {
+    "slm_mm_q4k_hmma_b1": MM,
     "slm_mm_q4k_hmma_b8": MM,
+    "slm_mm_q4k_hmma_bs": MM,
     "slm_mm_q4k_hmma_b64": MM,
     "slm_mm_q4k_simt": MM,
+    "slm_mm_q6k_hmma_b1": MM,
     "slm_mm_q6k_hmma_b8": MM,
+    "slm_mm_q6k_hmma_bs": MM,
     "slm_mm_q6k_hmma_b64": MM,
     "slm_mm_q6k_simt": MM,
     "slm_embed_q4k": [("ids", 0x160), ("table", 0x168), ("out", 0x170), ("K", 0x178), ("B", 0x17C)],
     "slm_embed_q6k": [("ids", 0x160), ("table", 0x168), ("out", 0x170), ("K", 0x178), ("B", 0x17C)],
-    "slm_rmsnorm": [("x", 0x160), ("gamma", 0x168), ("out", 0x170), ("n", 0x178), ("B", 0x17C),
+    "slm_rmsnorm_w8": [("x", 0x160), ("gamma", 0x168), ("out", 0x170), ("n", 0x178), ("B", 0x17C),
                     ("eps", 0x180)],
     "slm_add": [("a", 0x160), ("b", 0x168), ("out", 0x170), ("total", 0x178)],
     "slm_swiglu": [("gate", 0x160), ("up", 0x168), ("out", 0x170), ("total", 0x178)],
     "slm_rope": [("x", 0x160), ("out", 0x168), ("table", 0x170), ("pos", 0x178), ("nh", 0x180),
                  ("hd", 0x184), ("B", 0x188)],
-    "slm_gqa": [("q", 0x160), ("k", 0x168), ("v", 0x170), ("pos", 0x178), ("out", 0x180),
+    "slm_gqa_w8": [("q", 0x160), ("k", 0x168), ("v", 0x170), ("pos", 0x178), ("out", 0x180),
                 ("nhq", 0x188), ("nhkv", 0x18C), ("hd", 0x190), ("B", 0x194)],
 }
 
@@ -52,8 +56,8 @@ def load(path):
         got = [(a["name"], a["offset"]) for a in e["abi"]]
         if got != want:
             raise SystemExit(f"{path}: {name}: cbuf ABI {got}, slm_prog.c assumes {want}")
-        if list(e["block"]) != [32, 1, 1]:
-            raise SystemExit(f"{path}: {name}: block {e['block']}, slm_prog.c assumes 32,1,1")
+        if e["block"][0] != 32:
+            raise SystemExit(f"{path}: {name}: block {e['block']}, slm_prog.c assumes 32 lanes")
         if e["cbuf0_size"] > 512:
             raise SystemExit(f"{path}: {name}: cbuf0 {e['cbuf0_size']} over the 512 B stride")
         out.append(e)
@@ -74,12 +78,13 @@ def main():
     for i, e in enumerate(entries):
         lines.append(f"#define SLM_SASS_{e['name'][4:].upper()} {i}u")
     lines.append("/* name, tier (SLM_GPU_TIER_*), registers, shared memory rounded to the")
-    lines.append(" * QMD's 256 B granule. */")
+    lines.append(" * QMD's 256 B granule, control barriers (multi-warp CTAs use __syncthreads). */")
     lines.append("#define SLM_SASS_TABLE \\")
     for e in entries:
         tier = 1 if e["tier"] == "HMMA" else 2
         smem = (e["smem_bytes"] + 255) // 256 * 256
-        lines.append(f"    {{ \"{e['name']}\", {tier}u, {e['regs']}u, {smem}u }}, \\")
+        barriers = 1 if e["block"][1] != 1 else 0
+        lines.append(f"    {{ \"{e['name']}\", {tier}u, {e['regs']}u, {smem}u, {barriers}u }}, \\")
     lines.append("")
     lines.append("#endif")
     with open(sys.argv[2], "w", encoding="utf-8") as f:
