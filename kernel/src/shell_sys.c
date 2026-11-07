@@ -6230,7 +6230,10 @@ int cmd_nvgpu(int argc, char *argv[])
             if (shell_parse_uint(argv[3], &g_race_n) != 0 || g_race_n == 0u) return -1;
             struct task *t = task_create("gpu_race", (task_entry_t)nvgpu_cold_race_task, NULL);
             if (!t) return -1;
-            scheduler_add_task(t);
+            /* On CPU 0: it ends with a UART line, and on Jetson only CPU 0
+             * prints (kernel/CLAUDE.md, "UART Lock on Pi 5 / Jetson"). */
+            t->cpu_affinity = 0;
+            scheduler_add_task_to_cpu(t, 0);
             return 0;
         }
         if (argc >= 3 && strcmp(argv[2], "check") == 0) {

@@ -1663,6 +1663,26 @@ static volatile bool migrate_spin_release;
 static volatile bool migrate_spin_started;
 
 /* Holds its CPU without yielding until released. */
+static void migrate_spin_entry(void *arg);
+
+/*
+ * Runs after the test whether it passed or not. A failed assert returns from
+ * the test before its own release, which left the spinner holding CPU 1 at
+ * high priority: every later test that needs CPU 1 then hung, and one
+ * failure became a suite timeout (#475 W10). Then waits for the spinner to
+ * leave, so the next test starts with CPU 1 free.
+ */
+static volatile bool migrate_spin_done;
+
+static void migrate_spin_cleanup(void)
+{
+    migrate_spin_release = true;
+    for (uint32_t i = 0; i < 1000u && migrate_spin_started &&
+                         !migrate_spin_done; i++) {
+        task_sleep_ms(1);
+    }
+}
+
 static void migrate_spin_entry(void *arg)
 {
     (void)arg;
@@ -1670,6 +1690,7 @@ static void migrate_spin_entry(void *arg)
     while (!migrate_spin_release) {
         __asm__ volatile("" ::: "memory");
     }
+    migrate_spin_done = true;
     task_exit();
 }
 
@@ -1684,6 +1705,7 @@ static void test_migrate_ready_task_updates_assigned_cpu(void)
      * Keep it busy with a higher-priority spinner until the migrate is done. */
     migrate_spin_release = false;
     migrate_spin_started = false;
+    migrate_spin_done = false;
     struct task *spin = task_create_with_priority("mig_spin", migrate_spin_entry,
                                                   NULL, TASK_PRIORITY_HIGH);
     TEST_ASSERT_NOT_NULL(spin);
@@ -6003,6 +6025,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
+    migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
     /* Integration tests: Priority ordering */
