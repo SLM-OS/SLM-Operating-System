@@ -379,6 +379,13 @@ pub fn pin_for_gpu(slm: &LoadedSlm) -> Option<GpuPin> {
     Some(GpuPin(index))
 }
 
+/// Whether some task holds the slot lock, for tests that check nothing
+/// waits under it.
+#[cfg(test)]
+pub fn lock_held_for_tests() -> bool {
+    SLM_LOCK.load(Ordering::Acquire)
+}
+
 /// Whether a GPU program still maps slot `index`'s weights.
 pub fn gpu_pinned(index: usize) -> bool {
     index < SLM_MAX_SLOTS && GPU_PINS[index].load(Ordering::Acquire) != 0

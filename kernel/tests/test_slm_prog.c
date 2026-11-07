@@ -580,11 +580,15 @@ static void *pm_p2c(void *ctx, uint64_t phys)
     return (void *)(uintptr_t)phys;
 }
 
+/* Cache operations on this address are counted. */
+static const void *g_cache_watch;
+static unsigned g_cache_watch_hits;
+
 static void pm_cache(void *ctx, const void *p, size_t n)
 {
     (void)ctx;
-    (void)p;
     (void)n;
+    if (g_cache_watch && p == g_cache_watch) g_cache_watch_hits++;
 }
 
 static uint32_t pm_rd32(void *ctx, uint32_t off)
@@ -630,6 +634,7 @@ static struct {
     int32_t nested_run;     /* run this handle from inside the first wait turn */
     int nested_rc;
     int32_t nested_close;   /* close this handle from inside the first wait turn */
+    int32_t nested_clean;   /* clean + invalidate g_cache_watch of this handle there */
     bool in_relax;
     uint64_t now;
     unsigned submits, finishes, evicts, tlbs, dumps;
@@ -719,6 +724,10 @@ static void fk_relax(void)
         g_fk.nested_rc = slm_prog_run(g_fk.nested_run, 0, &st);
     }
     if (g_fk.turns == 1u && g_fk.nested_close >= 0) slm_prog_close(g_fk.nested_close);
+    if (g_fk.turns == 1u && g_fk.nested_clean >= 0) {
+        slm_prog_clean(g_fk.nested_clean, g_cache_watch, 64u);
+        slm_prog_invalidate(g_fk.nested_clean, g_cache_watch, 64u);
+    }
     if (g_fk.late_slot && g_fk.turns >= g_fk.late_turn) {
         *g_fk.late_slot = g_fk.late_payload;
         g_fk.late_slot = NULL;
@@ -750,6 +759,9 @@ static void fake_up(void)
     memset(&g_fk, 0, sizeof(g_fk));
     g_fk.nested_run = -1;
     g_fk.nested_close = -1;
+    g_fk.nested_clean = -1;
+    g_cache_watch = NULL;
+    g_cache_watch_hits = 0;
     TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_pm_ops, &g_vm));
     slm_prog_backend_set(&g_fake);
 }
@@ -1181,6 +1193,40 @@ static void test_two_sessions_never_overlap(void)
     pmm_free_pages(w, wp);
 }
 
+/* #475 W-A: clean and invalidate took the program lock and silently did
+ * nothing when it stayed busy (another session's step, a fault dump), so a
+ * step could run on a stale step page or the CPU read stale logits. They now
+ * take no lock and always reach the cache. */
+static void test_cache_ops_never_skipped_while_another_step_runs(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out a, b;
+    open_built(w, &a);
+    open_built(w, &b);
+    g_cache_watch = b.data_cpu;
+    g_fk.mode = FAKE_LATE;
+    g_fk.late_turn = 1u;
+    g_fk.nested_clean = b.handle;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(a.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(2, g_cache_watch_hits);
+    /* With IRQs masked too: no lock to fail on. */
+    g_fk.irqs_off = true;
+    slm_prog_clean(b.handle, g_cache_watch, 64u);
+    g_fk.irqs_off = false;
+    TEST_ASSERT_EQUAL_UINT32(3, g_cache_watch_hits);
+    /* A closed handle does nothing. */
+    slm_prog_close(b.handle);
+    slm_prog_clean(b.handle, g_cache_watch, 64u);
+    TEST_ASSERT_EQUAL_UINT32(3, g_cache_watch_hits);
+    slm_prog_close(a.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* Review suggestion: the step deadline counted the time submit spent waiting
  * for the dispatch lock, so a step queued behind another GPU consumer could
  * time out (and kill its session) with the GPU never late. */
@@ -1408,6 +1454,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_run_other_failures);
     RUN_TEST(test_dead_session_leaks_arena);
     RUN_TEST(test_two_sessions_never_overlap);
+    RUN_TEST(test_cache_ops_never_skipped_while_another_step_runs);
     RUN_TEST(test_deadline_starts_at_the_doorbell);
     RUN_TEST(test_prog_barrier_cap);
     RUN_TEST(test_kernel_lookup_and_batch);
