@@ -118,6 +118,7 @@ const MM_TILE_ROWS: u64 = 15;
 
 extern "C" {
     fn slm_prog_available() -> i32;
+    fn slm_prog_unavailable_reason() -> *const core::ffi::c_char;
     fn slm_prog_open(a: *const OpenArgs, out: *mut OpenOut) -> i32;
     fn slm_prog_close(h: i32);
     fn slm_prog_add(h: i32, shape: u32, op: *const ProgOp) -> i32;
@@ -712,6 +713,17 @@ pub fn set_options(barrier: u32, flags: u32) {
 // ---------------------------------------------------------------------------
 // The program
 // ---------------------------------------------------------------------------
+
+/// Why this boot has no channel for programs, from the C side's checks.
+pub fn unavailable_reason() -> &'static str {
+    // SAFETY: plain FFI query; a non-null result is a static C string.
+    let p = unsafe { slm_prog_unavailable_reason() };
+    if p.is_null() {
+        return err_message(ERR_NO_BACKEND);
+    }
+    // SAFETY: as above, NUL-terminated and never freed.
+    unsafe { core::ffi::CStr::from_ptr(p) }.to_str().unwrap_or("no GPU channel")
+}
 
 /// Why no program exists for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2318,6 +2330,10 @@ pub mod soft {
     #[no_mangle]
     extern "C" fn slm_prog_profile_ns(_h: i32, _shape: u32, _idx: u32) -> u64 {
         0
+    }
+    #[no_mangle]
+    extern "C" fn slm_prog_unavailable_reason() -> *const core::ffi::c_char {
+        core::ptr::null()
     }
     #[no_mangle]
     extern "C" fn slm_prog_max_batch(_simt: bool) -> u32 {

@@ -377,7 +377,7 @@ impl Session {
             Some(Err(e)) => {
                 let (why, path) = match e {
                     BuildError::NoBackend => {
-                        ("no SLM-OS-built GPU channel (needs a UEFI-direct boot)", ForwardPath::PerOp)
+                        (crate::slm::gpu_program::unavailable_reason(), ForwardPath::PerOp)
                     }
                     BuildError::Failed(w) => (w, ForwardPath::Cpu),
                 };

@@ -75,6 +75,11 @@ bool oplib_cold_active(void)
     return h != NULL && h->inst_block_phys == g_cold.ch->inst.phys;
 }
 
+bool oplib_cold_library_empty(void)
+{
+    return oplib_pool_init() != 0 || oplib_pool_sass_region_len() == 0u;
+}
+
 int oplib_cold_vm(const struct ga10b_gpu_ops **ops, struct ga10b_vm **vm)
 {
     if (!oplib_cold_active()) return -1;

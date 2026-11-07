@@ -1162,6 +1162,12 @@ static int step_channel(void)
  * channel handoff from step 11 stays installed. */
 static int step_mnist(void)
 {
+    if (oplib_cold_library_empty()) {
+        uart_puts("[ga10b-cold] the operator library has no SASS: this kernel was built "
+                  "without nvcc (make oplib-shaders). MNIST, sched, eviction and the SLM "
+                  "GPU program stay on the CPU.\n");
+        return -1;
+    }
     return ga10b_mnist_cold_install(&cold_gpu_ops, &cold_chan) == 0 ? 0 : -1;
 }
 

@@ -309,6 +309,7 @@ static struct prog_va_range g_va_free[VA_FREE_MAX];
 static const struct slm_prog_backend *g_backend_override;
 
 static const struct slm_prog_backend *jetson_backend(void);
+static const char *platform_reason(void);
 
 static const struct slm_prog_backend *backend(void)
 {
@@ -525,6 +526,23 @@ static void session_free(struct prog_session *s)
 int slm_prog_available(void)
 {
     return backend() != NULL;
+}
+
+const char *slm_prog_reason_for(bool uefi, bool library_empty, bool channel_up, bool attached)
+{
+    if (!uefi) return SLM_PROG_WHY_KEXEC;
+    /* First: with no SASS nothing later can succeed, and the cold bring-up
+     * stops at MNIST, which would otherwise read as a GPU fault. */
+    if (library_empty) return SLM_PROG_WHY_NO_SASS;
+    if (!channel_up) return SLM_PROG_WHY_NO_CHANNEL;
+    if (!attached) return SLM_PROG_WHY_NOT_ATTACHED;
+    return NULL;
+}
+
+const char *slm_prog_unavailable_reason(void)
+{
+    if (backend() != NULL) return NULL;
+    return platform_reason();
 }
 
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out)
@@ -912,8 +930,10 @@ const char *slm_prog_strerror(int err)
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+#include "boot_source.h"
 #include "bpmp.h"
 #include "kbuf.h"
+#include "nvidia/ga10b_cold.h"
 #include "oplib_cold.h"
 #include "oplib_gpu_as.h"
 #include "oplib_pool.h"
@@ -1021,6 +1041,12 @@ static const struct slm_prog_backend *jetson_backend(void)
     return &g_jb;
 }
 
+static const char *platform_reason(void)
+{
+    return slm_prog_reason_for(boot_source_is_uefi(), oplib_cold_library_empty(),
+                               ga10b_cold_progress() >= GA10B_COLD_CHANNEL, oplib_cold_active());
+}
+
 void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz)
 {
     uint64_t e = 0, g = 0;
@@ -1035,6 +1061,11 @@ void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz)
 static const struct slm_prog_backend *jetson_backend(void)
 {
     return NULL;
+}
+
+static const char *platform_reason(void)
+{
+    return SLM_PROG_WHY_KEXEC;
 }
 
 void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz)
