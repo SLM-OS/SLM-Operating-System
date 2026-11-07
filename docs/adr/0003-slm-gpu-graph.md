@@ -66,6 +66,15 @@ Tensor-core utilization, both measures:
 - Mma issue cycles over matmul wall time, from known mma counts and the measured 3.44 G mma/s: 7.7 percent.
 - MAC share on tensor cores: 99.47 percent. GQA is the only SIMT matmul-class op.
 
+Greedy text against llama.cpp CUDA (`run-teacher.sh`, p1 to p3, 256 tokens, llama.cpp's tokens fed back):
+
+| Matmul input | Top-1 agreement | Largest llama.cpp gap where we differ | First free-run divergence |
+|---|---|---|---|
+| FP16 (as shipped) | 98.8, 98.8, 99.6 percent | 0.091 logits | 50, 83, 154 |
+| q8_1, as llama.cpp CUDA | 99.6, 98.4, 98.4 percent | 0.126 logits | 50, 83, 20 |
+
+Every disagreement is a near tie. The FP16 divergences are the ones seen on SLM-OS: "page tables. The" hardware/page, "She had" always/never, "repeatedly" attempt/try. Emulating q8_1 does not track llama.cpp longer, so it is not adopted. On p2, the FP16 harness output does not loop (no sentence more than twice). The q8_1 run loops on "It was a creature that was unlike any she had ever seen before." (8 times), the sentence SLM-OS repeats. So the loop follows from which near-tie branch is taken; it is not a systematic error.
+
 Bare metal: these counters are programmed through `tegra-soc-hwpm`, not nvgpu. Its `hwpm_dbg_regops` log lists 323 register addresses for one `ncu` read but no values.
 
 ## Implementation notes
