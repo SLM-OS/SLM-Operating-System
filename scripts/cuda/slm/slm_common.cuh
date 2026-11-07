@@ -20,6 +20,11 @@
 #define SLM_H_ONE 0x3C00u
 #define SLM_H_ONE2 0x3C003C00u
 
+/* One 16-byte load. The address must be 16-byte aligned. */
+struct __align__(16) slm_x16 {
+    uint32_t w0, w1, w2, w3;
+};
+
 SLM_INL float slm_h2f(uint32_t bits)
 {
     return __half2float(__ushort_as_half((unsigned short)bits));

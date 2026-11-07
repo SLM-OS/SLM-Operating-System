@@ -72,6 +72,7 @@ struct Op {
     std::string cls; /* class for the per-op table */
     void *func;
     dim3 grid;
+    dim3 block = dim3(32);
     std::vector<void *> params;
     double mma = 0;    /* mma instructions */
     double macs = 0;   /* matmul MACs (tensor-core or SIMT) */
@@ -106,7 +107,7 @@ struct Program {
     void run_op(size_t i)
     {
         Op &o = ops[i];
-        CK(cudaLaunchKernel(o.func, o.grid, dim3(32), o.params.data(), 0, nullptr));
+        CK(cudaLaunchKernel(o.func, o.grid, o.block, o.params.data(), 0, nullptr));
     }
 
     void build_graph(double *inst_ms)
@@ -118,7 +119,7 @@ struct Program {
             cudaKernelNodeParams p = {};
             p.func = o.func;
             p.gridDim = o.grid;
-            p.blockDim = dim3(32);
+            p.blockDim = o.block;
             p.sharedMemBytes = 0;
             p.kernelParams = o.params.data();
             p.extra = nullptr;
@@ -203,7 +204,8 @@ static const float *wf(const Arena &A, const GgufTensor &t)
 static void add_rmsnorm(Program &P, const Model &M, const Arena &A, const std::string &name,
                         const GgufTensor &gt, const half *x, half *out, int B)
 {
-    P.add_op(name, "rmsnorm", (void *)slm_rmsnorm, dim3(B));
+    P.add_op(name, "rmsnorm", (void *)slm_rmsnorm_w8, dim3(B));
+    P.ops.back().block = dim3(32, 8, 1);
     P.arg(x);
     P.arg(wf(A, gt));
     P.arg(out);
@@ -270,7 +272,8 @@ static void build_program(Program &P, const Model &M, const Arena &A, int B)
         add_rope(P, M, A, b + "rope_k", A.k, M.nhkv, B);
         add_kv(P, b + "kv_k", A.k, A.K[l], A.pos, HV, B);
         add_kv(P, b + "kv_v", A.v, A.V[l], A.pos, HV, B);
-        P.add_op(b + "gqa", "gqa", (void *)slm_gqa, dim3(M.nhq, B, 1));
+        P.add_op(b + "gqa", "gqa", (void *)slm_gqa_w8, dim3(M.nhq, B, 1));
+        P.ops.back().block = dim3(32, 8, 1);
         P.arg((const half *)A.q);
         P.arg((const half *)A.K[l]);
         P.arg((const half *)A.V[l]);
@@ -566,6 +569,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *params[] = {&in, &gp, &o, (void *)&H, (void *)&B, &eps};
         CK(cudaLaunchKernel((void *)slm_rmsnorm, dim3(B), dim3(32), params, 0, nullptr));
         report_h16("rmsnorm B=5", h_from(A.xn, ref.size()), ref.data(), 2.0);
+        CK(cudaLaunchKernel((void *)slm_rmsnorm_w8, dim3(B), dim3(32, 8, 1), params, 0, nullptr));
+        report_h16("rmsnorm_w8 B=5", h_from(A.xn, ref.size()), ref.data(), 2.0);
     }
 
     /* Residual add. */
@@ -680,6 +685,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *pg[] = {&pq, &pk, &pv, &pp, &pa, &vnh, &vk, &vhd, &vb};
         CK(cudaLaunchKernel((void *)slm_gqa, dim3(nhq, B, 1), dim3(32), pg, 0, nullptr));
         report_h16("gqa B=4 T=14..17 causal", h_from(A.a, ref_a.size()), ref_a.data(), 4.0);
+        CK(cudaLaunchKernel((void *)slm_gqa_w8, dim3(nhq, B, 1), dim3(32, 8, 1), pg, 0, nullptr));
+        report_h16("gqa_w8 B=4 T=14..17", h_from(A.a, ref_a.size()), ref_a.data(), 4.0);
     }
     CK(cudaDeviceSynchronize());
 }

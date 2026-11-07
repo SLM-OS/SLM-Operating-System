@@ -104,6 +104,85 @@ static void cmp_h16(const char *name, const h16 &got, const std::vector<float> &
     fails += !ok;
 }
 
+/*
+ * The HMMA kernels pair each weight byte with an x element by address, in a
+ * permuted column order. Replay that map on real blocks: every element of a
+ * block must be reached once, and the value read at that byte must decode to
+ * the weight of the element it is paired with.
+ */
+static void check_q4k_map(const uint8_t *blk)
+{
+    float y[256];
+    gg_q4k_block(blk, y);
+    uint16_t dh, mh;
+    memcpy(&dh, blk, 2);
+    memcpy(&mh, blk + 2, 2);
+    const float d = gg_f16_to_f32(dh), dmin = gg_f16_to_f32(mh);
+    int seen[256] = {0};
+    bool ok = true;
+    for (int j = 0; j < 4; j++) {
+        for (int c = 0; c < 4; c++) {
+            for (int i = 0; i < 8; i++) {
+                const uint8_t q = blk[16 + j * 32 + 8 * c + i];
+                for (int hi = 0; hi < 2; hi++) {
+                    const int e = j * 64 + hi * 32 + 8 * c + i;
+                    uint32_t sc, mn;
+                    gg_q4k_scale_min(blk + 4, 2 * j + hi, sc, mn);
+                    const uint32_t n = hi ? (q >> 4) : (q & 15);
+                    /* Offset encoding: h = 1 + n/16. */
+                    const float h = 1.0f + (float)n / 16.0f;
+                    const float w = 16.0f * d * (float)sc * (h - 1.0f) - dmin * (float)mn;
+                    ok = ok && fabsf(w - y[e]) <= 1e-5f * (fabsf(y[e]) + 1e-3f);
+                    seen[e]++;
+                }
+            }
+        }
+    }
+    for (int v : seen) {
+        ok = ok && v == 1;
+    }
+    printf("q4k byte map   every element reached once, right value: %s\n", ok ? "PASS" : "FAIL");
+    fails += !ok;
+}
+
+static void check_q6k_map(const uint8_t *blk)
+{
+    float y[256];
+    gg_q6k_block(blk, y);
+    uint16_t dh;
+    memcpy(&dh, blk + 208, 2);
+    const float d = gg_f16_to_f32(dh);
+    int seen[256] = {0};
+    bool ok = true;
+    for (int h = 0; h < 2; h++) {
+        for (int t = 0; t < 2; t++) {
+            for (int c = 0; c < 4; c++) {
+                const int l = t * 16 + 4 * c;
+                for (int g = 0; g < 4; g++) {
+                    for (int i = 0; i < 4; i++) {
+                        const uint8_t ql = blk[h * 64 + (g & 1) * 32 + l + i];
+                        const uint8_t qh = blk[128 + h * 32 + l + i];
+                        const int q = (((g >> 1) ? (ql >> 4) : (ql & 15))) |
+                                      (((qh >> (2 * g)) & 3) << 4);
+                        const int8_t sc = (int8_t)blk[192 + h * 8 + 2 * g + t];
+                        const int e = h * 128 + g * 32 + l + i;
+                        /* Offset encoding: hv = 1 + q/64, w = f * (64*hv - 96). */
+                        const float hv = 1.0f + (float)q / 64.0f;
+                        const float w = d * (float)sc * (64.0f * hv - 96.0f);
+                        ok = ok && fabsf(w - y[e]) <= 1e-5f * (fabsf(y[e]) + 1e-3f);
+                        seen[e]++;
+                    }
+                }
+            }
+        }
+    }
+    for (int v : seen) {
+        ok = ok && v == 1;
+    }
+    printf("q6k byte map   every element reached once, right value: %s\n", ok ? "PASS" : "FAIL");
+    fails += !ok;
+}
+
 int main(int argc, char **argv)
 {
     R = read_rec(argc > 1 ? argv[1] : "scripts/fixtures/slm/golden_ops.rec");
@@ -171,6 +250,8 @@ int main(int argc, char **argv)
     for (int hd : {32, 64, 128, 256}) {
         check_rope_coverage(hd);
     }
+    check_q4k_map(R.at("q4k.bytes").data());
+    check_q6k_map(R.at("q6k.bytes").data());
     printf("%s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

@@ -11,17 +11,17 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_b64_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
-   "code_bytes": 12928,
-   "sha256": "2b5f16d36cf837e954271afc54870e545f5d2c8886288ade810fe7bd2b3bf1b5",
+   "code_bytes": 21376,
+   "sha256": "87ae28083e5c5342658188276f7b0271e1329b12b4d5e26e8dd20b04d40477ab",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
     1,
     1
    ],
-   "smem_bytes": 4096,
-   "regs": 72,
-   "hmma_instructions": 6,
+   "smem_bytes": 0,
+   "regs": 126,
+   "hmma_instructions": 32,
    "cbuf0_size": 400,
    "abi": [
     {
@@ -65,7 +65,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. B 1..64."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 1..64."
   },
   {
    "name": "slm_mm_q4k_hmma_b8",
@@ -74,8 +74,8 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
-   "code_bytes": 7040,
-   "sha256": "d680266a1312a10e35774a86491f3991e50a223c2d560b23a863e4f4843420da",
+   "code_bytes": 6912,
+   "sha256": "7cfa41974fe95792083f3284650aa6da62c69ca2f9a90edfa46c86eaa3dcbaf9",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -83,7 +83,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 53,
+   "regs": 58,
    "hmma_instructions": 4,
    "cbuf0_size": 400,
    "abi": [
@@ -128,7 +128,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. B 1..8."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 1..8."
   },
   {
    "name": "slm_mm_q4k_simt",
@@ -138,7 +138,7 @@
    "sass": "slm_mm_q4k_simt_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
    "code_bytes": 3968,
-   "sha256": "033b99c82eee90cff5552a0025befe1f3a440abcf0cb5247ce28a8e8c331a14e",
+   "sha256": "aa11c390f0c043c3ea2b0ce2eed3dcf76ca9010f2264b3859dcf222ba10e55da",
    "grid": "N,B,1",
    "block": [
     32,
@@ -191,7 +191,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. Any B."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. Any B."
   },
   {
    "name": "slm_mm_q6k_hmma_b64",
@@ -200,17 +200,17 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b64_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q6k.cu",
-   "code_bytes": 11520,
-   "sha256": "b2939be78a31c4ecc3a9cf9a60e52a40221724639db4a081fcf1a7053be092e7",
+   "code_bytes": 19200,
+   "sha256": "b6c68ec75d25826ed909e259a6906a059a95d197e0b0e97df2d34d59cc6e342a",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
     1,
     1
    ],
-   "smem_bytes": 4096,
-   "regs": 56,
-   "hmma_instructions": 3,
+   "smem_bytes": 0,
+   "regs": 97,
+   "hmma_instructions": 8,
    "cbuf0_size": 400,
    "abi": [
     {
@@ -254,7 +254,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. B 1..64."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 1..64."
   },
   {
    "name": "slm_mm_q6k_hmma_b8",
@@ -263,8 +263,8 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q6k.cu",
-   "code_bytes": 7808,
-   "sha256": "79324caf18c9bc741c9d2eaca9c5a3101a66d4ded9d15e433e4e2061ff37b494",
+   "code_bytes": 9984,
+   "sha256": "5878ce0edede7e75a49be98e076ef6901ac0ea3df5c55c1455a627321d73385c",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -272,7 +272,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 50,
+   "regs": 62,
    "hmma_instructions": 4,
    "cbuf0_size": 400,
    "abi": [
@@ -317,7 +317,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. B 1..8."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 1..8."
   },
   {
    "name": "slm_mm_q6k_simt",
@@ -380,7 +380,7 @@
      "size": 4
     }
    ],
-   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out. Any B."
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. Any B."
   },
   {
    "name": "slm_add",
@@ -638,6 +638,74 @@
    "doc": "Online softmax; query row b sees 0..=pos[b]. q,out [B][nhq][hd]; k,v [T][nhkv][hd]; hd % 32 == 0, hd <= 256."
   },
   {
+   "name": "slm_gqa_w8",
+   "op": "gqa",
+   "tier": "SIMT",
+   "dtype": "FP16",
+   "sass": "slm_gqa_w8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 20864,
+   "sha256": "d0052a6c60c71fe05e5a10d04643c47e0eaf5203eb02313ea41e14c3ca64b0b3",
+   "grid": "nhq,B,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 8256,
+   "regs": 40,
+   "hmma_instructions": 0,
+   "cbuf0_size": 408,
+   "abi": [
+    {
+     "name": "q",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "k",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "v",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "pos",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 384,
+     "size": 8
+    },
+    {
+     "name": "nhq",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "nhkv",
+     "offset": 396,
+     "size": 4
+    },
+    {
+     "name": "hd",
+     "offset": 400,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 404,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_gqa, positions split across 8 warps. Prefer this one."
+  },
+  {
    "name": "slm_kv_append",
    "op": "kv_append",
    "tier": "SIMT",
@@ -737,6 +805,59 @@
     }
    ],
    "doc": "x and out FP16 [B,n], n % 32 == 0."
+  },
+  {
+   "name": "slm_rmsnorm_w8",
+   "op": "rmsnorm",
+   "tier": "SIMT",
+   "dtype": "F32 gamma",
+   "sass": "slm_rmsnorm_w8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 6912,
+   "sha256": "9517334dc2faacbe689e7eb46cf686aae38e604e193a73d312f3e5cc636a448d",
+   "grid": "B,1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 32,
+   "regs": 21,
+   "hmma_instructions": 0,
+   "cbuf0_size": 388,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "gamma",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "n",
+     "offset": 376,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 380,
+     "size": 4
+    },
+    {
+     "name": "eps",
+     "offset": 384,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_rmsnorm, across 8 warps. Prefer this one."
   },
   {
    "name": "slm_rope",

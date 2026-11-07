@@ -25,7 +25,8 @@ EIATTR_KPARAM_INFO = 0x17
 EIATTR_PARAM_CBANK = 0x0A
 
 MM_ARGS = "x, W, out, bias, K, N, B, flags"
-MM_DOC = "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out"
+MM_DOC = ("out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; "
+          "x must be 16-byte aligned")
 
 # Launch shapes and contracts that the ELF cannot tell. Every entry has block
 # (32,1,1). The grid is a formula over the named parameters.
@@ -50,7 +51,14 @@ OPS = {
     "slm_gqa": ("gqa", "SIMT", "FP16", "nhq,B,1",
                 "Online softmax; query row b sees 0..=pos[b]. q,out [B][nhq][hd]; "
                 "k,v [T][nhkv][hd]; hd % 32 == 0, hd <= 256."),
+    "slm_gqa_w8": ("gqa", "SIMT", "FP16", "nhq,B,1",
+                   "As slm_gqa, positions split across 8 warps. Prefer this one."),
+    "slm_rmsnorm_w8": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
+                       "As slm_rmsnorm, across 8 warps. Prefer this one."),
 }
+
+# Kernels whose block is not (32,1,1).
+BLOCKS = {"slm_gqa_w8": [32, 8, 1], "slm_rmsnorm_w8": [32, 8, 1]}
 
 # Parameter names per kernel, checked against the count in the ELF.
 ARGS = {
@@ -63,6 +71,8 @@ ARGS = {
     "slm_rope": "x, out, table, pos, nh, hd, B",
     "slm_kv_append": "src, kv, pos, width, B",
     "slm_gqa": "q, k, v, pos, out, nhq, nhkv, hd, B",
+    "slm_gqa_w8": "q, k, v, pos, out, nhq, nhkv, hd, B",
+    "slm_rmsnorm_w8": "x, gamma, out, n, B, eps",
 }
 
 
@@ -220,7 +230,7 @@ def cmd_manifest(args):
                 "code_bytes": len(k["code"]),
                 "sha256": hashlib.sha256(k["code"]).hexdigest(),
                 "grid": grid,
-                "block": [32, 1, 1],
+                "block": BLOCKS.get(name, [32, 1, 1]),
                 "smem_bytes": k["smem"],
                 "regs": k["regs"],
                 "hmma_instructions": hmma,
