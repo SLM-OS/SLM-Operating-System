@@ -21,7 +21,7 @@ hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
 | `qwen_vocab.gguf` | 5928416 |
 | `tiny_qwen2.gguf` | 773280 |
 | `tiny_qwen2_greedy.rec` | 12018 |
-| `tokenizer_goldens.tsv` | 6410 |
+| `tokenizer_goldens.tsv` | 7364 |
 
 `*.rec` layout (little endian), read by `runtime/src/slm/golden.rs`: `SGR1`,
 u32 record count, then per record u32 name length, name, u32 data length,

@@ -934,6 +934,38 @@ static int slm_stop(int argc, char *argv[])
 }
 
 /*
+ * The line after a prompt. ttft runs from the prompt's start to its first
+ * token, so it covers tokenizing and prefill; decode runs from that token to
+ * the end. total is the two together: it printed decode alone, so on the CPU
+ * path, where prefill is most of the time, total came out below ttft
+ * (ttft=73100 ms, total=7331 ms on hardware).
+ */
+void slm_prompt_print_summary(const SlmStatsC *st, uint64_t tokens, uint64_t bytes)
+{
+    unsigned long ttft_ms  = (unsigned long)(st->last_ttft_ns / 1000000ull);
+    unsigned long total_ms =
+        (unsigned long)((st->last_ttft_ns + st->last_decode_ns) / 1000000ull);
+    /* last_decode_ns starts after the first token, so it covers one
+     * forward step per later token, plus the one that sampled EOS. */
+    uint64_t steps = tokens > 0 ? tokens - 1u : 0;
+    if (st->last_stop_reason == SLM_STOP_EOS && tokens > 0) {
+        steps += 1u;
+    }
+    float tok_per_s = 0.0f;
+    if (st->last_decode_ns > 0 && steps > 0) {
+        double sec = (double)st->last_decode_ns / 1.0e9;
+        tok_per_s = (float)((double)steps / sec);
+    }
+    shell_printf("[slm] ttft=%lu ms  decode=", ttft_ms);
+    print_f32_3(tok_per_s);
+    shell_printf(" tok/s  total=%lu ms tokens=%lu bytes=%lu stop=%s\r\n",
+                 total_ms,
+                 (unsigned long)tokens,
+                 (unsigned long)bytes,
+                 slm_stop_reason_name(st->last_stop_reason));
+}
+
+/*
  * Run a prompt against an open session. `flags` is 0 or SLM_PROMPT_RAW.
  * `max_new_tokens` of 0 means "unlimited" per the FFI contract.
  */
@@ -981,26 +1013,7 @@ static int run_prompt(uint32_t sid, const char *text, uint32_t flags,
     /* Telemetry summary (decode rate intentionally rounded to 1 dec). */
     SlmStatsC st;
     if (rust_slm_stats(sid, &st) == 0) {
-        unsigned long ttft_ms   = (unsigned long)(st.last_ttft_ns / 1000000ull);
-        unsigned long decode_ms = (unsigned long)(st.last_decode_ns / 1000000ull);
-        /* last_decode_ns starts after the first token, so it covers one
-         * forward step per later token, plus the one that sampled EOS. */
-        uint64_t steps = ctx.total_tokens > 0 ? ctx.total_tokens - 1u : 0;
-        if (st.last_stop_reason == SLM_STOP_EOS && ctx.total_tokens > 0) {
-            steps += 1u;
-        }
-        float tok_per_s = 0.0f;
-        if (st.last_decode_ns > 0 && steps > 0) {
-            double sec = (double)st.last_decode_ns / 1.0e9;
-            tok_per_s = (float)((double)steps / sec);
-        }
-        shell_printf("[slm] ttft=%lu ms  decode=", ttft_ms);
-        print_f32_3(tok_per_s);
-        shell_printf(" tok/s  total=%lu ms tokens=%lu bytes=%lu stop=%s\r\n",
-                     decode_ms,
-                     (unsigned long)ctx.total_tokens,
-                     (unsigned long)ctx.total_bytes,
-                     slm_stop_reason_name(st.last_stop_reason));
+        slm_prompt_print_summary(&st, ctx.total_tokens, ctx.total_bytes);
         if (st.last_stop_reason == SLM_STOP_CONTEXT_FULL) {
             shell_puts("[slm] context full: `slm reset` for a fresh "
                        "conversation, or `slm launch --ctx` larger\r\n");
@@ -1785,17 +1798,32 @@ static int slm_runner_verb(int argc, char *argv[])
                                    true) != 0) {
             return -1;
         }
-        if (slm_runner_configure(&cfg) != 0) {
+        slm_runner_status_t now;
+        slm_runner_get_status(&now);
+        if (now.running) {
             shell_puts("slm runner start: already running "
                        "(`slm runner stop` first)\r\n");
             return -1;
         }
-        if (slm_runner_start() != 0) {
+        /* One call, so a second shell's start can't come between the
+         * configure and the start (#475 W9). */
+        int rc = slm_runner_start_with(&cfg);
+        if (rc == SLM_RUNNER_ERR_BUSY) {
+            shell_puts("slm runner start: another start or stop is in "
+                       "progress\r\n");
+            return -1;
+        }
+        if (rc != 0) {
             shell_puts("slm runner start: failed\r\n");
             return -1;
         }
     } else if (strcmp(sub, "stop") == 0) {
         int rc = slm_runner_stop();
+        if (rc == SLM_RUNNER_ERR_BUSY) {
+            shell_puts("slm runner stop: another start or stop is in "
+                       "progress\r\n");
+            return -1;
+        }
         if (rc == -1) {
             shell_puts("slm runner stop: not running\r\n");
             return -1;
@@ -1908,9 +1936,12 @@ int cmd_slm(int argc, char *argv[])
     }
     const char *verb = argv[1];
 
-    /* These only read, under the runtime's own short locks, and must answer
-     * while another session's command holds the mutation lock. `stop` above
-     * all: the one thing it must never do is wait for what it's stopping. */
+    /* These skip the mutation lock and must answer while another session's
+     * command holds it. `stop` above all: the one thing it must never do is
+     * wait for what it's stopping. Most only read, under the runtime's own
+     * short locks. Some `gpu` verbs change state (profile turns a session's
+     * profiling on, inject arms a fault, golden loads a model, smoke runs a
+     * GPU program), relying on the runtime's own locks, not this one. */
     if (strcmp(verb, "stop")   == 0) return slm_stop(argc, argv);
     if (strcmp(verb, "list")   == 0) return slm_list();
     if (strcmp(verb, "info")   == 0) return slm_info(argc, argv);

@@ -230,16 +230,23 @@ static bool efi_model_has_gguf_suffix(const uint16_t *name)
            (s[3] | 0x20) == 'u' && (s[4] | 0x20) == 'f';
 }
 
+static char efi_model_ascii_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+/* Case-insensitive, as FAT is: `M.GGUF` on one volume and `m.gguf` on
+ * another are the same model, and only the first volume's copy loads. */
 static bool efi_model_table_has(const struct boot_model_table *t, const char *name)
 {
     for (uint32_t i = 0; i < t->count; i++) {
         const char *a = t->models[i].name;
         const char *b = name;
-        while (*a != 0 && *a == *b) {
+        while (*a != 0 && efi_model_ascii_lower(*a) == efi_model_ascii_lower(*b)) {
             a++;
             b++;
         }
-        if (*a == *b) {
+        if (efi_model_ascii_lower(*a) == efi_model_ascii_lower(*b)) {
             return true;
         }
     }

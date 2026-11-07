@@ -24,7 +24,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::inference::ops_transformer::{RopePairing, RopeTable};
 use crate::slm::{
@@ -210,6 +210,10 @@ pub struct Session {
     pub last_ttft_ns: u64,
     /// Last prompt's total decode duration in nanoseconds.
     pub last_decode_ns: u64,
+    /// Set by [`insert`], unique across every session ever opened, so a
+    /// holder of a session id can tell its session from a later one that
+    /// got the same slot. 0 until inserted.
+    pub open_seq: u64,
 }
 
 impl Session {
@@ -288,6 +292,7 @@ impl Session {
             tokens_out: 0,
             last_ttft_ns: 0,
             last_decode_ns: 0,
+            open_seq: 0,
         })
     }
 
@@ -431,6 +436,7 @@ impl Session {
             last_ttft_ns: self.last_ttft_ns,
             last_decode_ns: self.last_decode_ns,
             last_stop_reason: self.last_stop_reason,
+            open_seq: self.open_seq,
         }
     }
 
@@ -494,6 +500,7 @@ pub struct SessionSnapshot {
     pub last_ttft_ns: u64,
     pub last_decode_ns: u64,
     pub last_stop_reason: StopReason,
+    pub open_seq: u64,
 }
 
 /// Why a slot operation couldn't run.
@@ -521,6 +528,8 @@ enum Slot {
 const EMPTY_SLOT: Slot = Slot::Empty;
 
 static SESSION_LOCK: AtomicBool = AtomicBool::new(false);
+/// Next [`Session::open_seq`]. Starts at 1: 0 means "no session".
+static NEXT_OPEN_SEQ: AtomicU64 = AtomicU64::new(1);
 static mut SESSIONS: [Slot; SLM_MAX_SESSIONS] = [EMPTY_SLOT; SLM_MAX_SESSIONS];
 
 struct SpinGuard;
@@ -548,12 +557,13 @@ impl Drop for SpinGuard {
 /// Returns the slot index or `None` if every slot is occupied. The
 /// caller usually calls [`Session::open`] first and hands the result
 /// here.
-pub fn insert(session: Session) -> Option<usize> {
+pub fn insert(mut session: Session) -> Option<usize> {
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to SESSIONS.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
     for (i, slot) in slots.iter_mut().enumerate() {
         if matches!(slot, Slot::Empty) {
+            session.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::Relaxed);
             *slot = Slot::Ready(session);
             return Some(i);
         }
@@ -723,6 +733,20 @@ pub fn telemetry(index: usize) -> Option<Arc<Telemetry>> {
         Slot::Leased(leased) => Some(leased.telemetry.clone()),
         Slot::Empty => None,
     }
+}
+
+/// The [`Session::open_seq`] of the session at `index`, running or not,
+/// or 0 if nothing is open there.
+pub fn open_seq(index: usize) -> u64 {
+    snapshot(index).map_or(0, |s| s.open_seq)
+}
+
+/// `open_seq` for C: the slm-runner checks the session it opened is still
+/// the one in its slot before using it or closing it (#475 W8). Takes only
+/// the session table lock, never the registry lock.
+#[no_mangle]
+pub extern "C" fn rust_slm_session_open_seq(session_id: u32) -> u64 {
+    open_seq(session_id as usize)
 }
 
 /// Whether a running prompt is using `model_handle`.
@@ -897,6 +921,28 @@ mod tests {
         assert!(!s.stop_requested());
         s.request_stop();
         assert!(s.stop_requested());
+    }
+
+    /// #475 W8: a session that reuses a closed one's slot is told apart by
+    /// its open sequence, leased or not.
+    #[test]
+    fn open_seq_tells_a_reused_slot_apart() {
+        let _serial = TestSerialGuard::new();
+        reset_registry();
+        reset_for_tests();
+        let idx = insert(make_session()).expect("insert");
+        let first = rust_slm_session_open_seq(idx as u32);
+        assert_ne!(first, 0);
+        {
+            let _lease = checkout(idx).expect("checkout");
+            assert_eq!(open_seq(idx), first, "a running prompt keeps its number");
+        }
+        remove(idx).expect("remove");
+        assert_eq!(open_seq(idx), 0, "an empty slot has none");
+        let again = insert(make_session()).expect("insert again");
+        assert_eq!(again, idx, "same slot");
+        assert_ne!(open_seq(idx), first, "a different session");
+        assert_eq!(rust_slm_session_open_seq(99), 0);
     }
 
     /// The lock must be free while a prompt holds the session, or `slm

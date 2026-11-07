@@ -552,6 +552,26 @@ static void test_stub_prefers_nvme_and_dedupes_by_name(void)
     TEST_ASSERT_EQUAL_UINT32(1, outstanding_allocs());
 }
 
+/* FAT names are case-insensitive: the SD's M.GGUF is the NVMe's m.gguf, and
+ * loading both put the model in the table twice. */
+static void test_stub_dedupes_names_that_differ_only_in_case(void)
+{
+    fw_reset();
+    static uint8_t other[4096];
+    memset(other, 0xCD, sizeof(other));
+    memcpy(other, "GGUF", 4);
+    add_file(add_volume(false, true), "M.GGUF", other, sizeof(other));
+    add_file(add_volume(true, true), "m.gguf", src_pages, 4096);
+    run_loader();
+    assert_tidy();
+
+    TEST_ASSERT_EQUAL_UINT32(1, table.count);
+    TEST_ASSERT_EQUAL_STRING("m.gguf", table.models[0].name);
+    TEST_ASSERT_EQUAL_INT(0, memcmp((void *)(uintptr_t)table.models[0].phys,
+                                    src_pages, 4096));
+    TEST_ASSERT_EQUAL_UINT32(1, outstanding_allocs());
+}
+
 static void test_stub_falls_back_to_the_next_volume(void)
 {
     fw_reset();
@@ -1229,6 +1249,7 @@ int test_suite_boot_models(void)
 
     RUN_TEST(test_stub_loads_a_file_intact);
     RUN_TEST(test_stub_prefers_nvme_and_dedupes_by_name);
+    RUN_TEST(test_stub_dedupes_names_that_differ_only_in_case);
     RUN_TEST(test_stub_falls_back_to_the_next_volume);
     RUN_TEST(test_stub_ignores_what_is_not_a_model);
     RUN_TEST(test_stub_bounds_the_file_count);

@@ -107,6 +107,17 @@ CHAT_CASES = [
     ("chat_multi", [("system", "Be brief."), ("user", "Name a color."),
                     ("assistant", "Blue."), ("user", "Another one, please.")]),
     ("chat_unicode", [("user", "翻译成中文: good morning\n\nThanks 😀")]),
+    # Content that starts with whitespace merges with the role's newline when
+    # llama.cpp tokenizes the rendered template as one text (#475 W7).
+    ("chat_lead_newline", [("user", "\nHello")]),
+    ("chat_lead_newlines", [("user", "\n\n\nHello there")]),
+    ("chat_lead_space", [("user", " Hi")]),
+    ("chat_lead_spaces", [("user", "    indented code")]),
+    ("chat_lead_tab", [("user", "\tTabbed")]),
+    ("chat_lead_crlf", [("user", "\r\nWindows line")]),
+    ("chat_only_space", [("user", "   ")]),
+    ("chat_system_lead_newline", [("system", "\nBe brief."), ("user", " \nHi")]),
+    ("chat_trailing_space", [("user", "Hi  \n")]),
 ]
 
 

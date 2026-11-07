@@ -181,7 +181,11 @@ slmos> slm ask "Explain RAII in one sentence."
 RAII ties a resource's lifetime to an object's scope...
 [slm done] rc=0 stop=eos tokens_in=38 tokens_out=21 msgs=21 dropped=0 ttft_ms=3100 decode_ms=52000 session=0 prompts=1
 [slm ask] received 21 of 21 token messages
+[slm-runner] prompt #1 rc=0 tokens=21
 ```
+
+The last line is the runner's own: for a prompt from `slm ask`, the client
+prints it before returning to the prompt, so it never lands after `slmos>`.
 
 Ctrl-C publishes `/slm/stop` and keeps reading to `/slm/done`. `--timeout S`
 sets how long to go without a message before giving up (default 600 s, enough
@@ -189,7 +193,17 @@ for a CPU prefill of a long prompt). It returns an error if the runner refused
 the prompt, if tokens went missing, or on a timeout.
 
 Without a client, `msg send /slm/prompt "Say hello"` starts a prompt too, and
-`[slm-runner] prompt #1 rc=0 tokens=12` shows up on the UART when it ends.
+`[slm-runner] prompt #1 rc=0 tokens=12` shows up on the UART when it ends, as
+one whole line.
+
+**One start or stop at a time.** `slm runner start` and `slm runner stop` from
+two shells at once don't overlap: the second says `another start or stop is in
+progress` and changes nothing.
+
+**Its own session.** The runner checks before each prompt that its session is
+still the one it opened. If a shell closed it (`slm close`) and a later `slm
+launch` got the same id, the runner leaves that session alone and opens its
+own.
 
 ---
 

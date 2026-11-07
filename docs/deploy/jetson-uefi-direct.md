@@ -528,12 +528,14 @@ gives the same reason.
 | `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
 | `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
 | `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt |
-| `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a `SLM_GPU_GOLDEN=ON` build (about 790 KB of fixtures) |
+| `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
 
-Nothing raises the memory clock after a cold boot: EMC reads 204 MHz until the
-first program opens and asks BPMP for a 3199 MHz floor (`[slm-prog] EMC was ...`).
+UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU
+and XUSB bring-up, so `slm gpu` reads 3199 MHz before any prompt; the first
+program to open asks for the same floor again (`[slm-prog] EMC was ...`), which
+covers a request that failed at boot.
 
 A step that times out (5 s) prints the GR and MMU fault state once, then
 the session continues on the CPU, replaying its tokens: `[slm] GPU program

@@ -94,18 +94,28 @@ pub fn render_chatml(turns: &[ChatTurn<'_>]) -> String {
 /// doesn't carry the special, the renderer falls back to byte-level
 /// BPE on the literal `<|...|>` form (which produces a longer but
 /// still correct token stream).
+///
+/// llama.cpp tokenizes the rendered template as one text, split only
+/// at special tokens, so `{role}\n{content}` is one piece of text:
+/// content that starts with whitespace merges with the role's newline
+/// (`"user\n\nHi"` gives `user`, `\n\n`, `Hi`). Encoding the role and
+/// the content apart gave `\n`, `\n` instead. The one deliberate
+/// difference: a special token's text inside the content stays text
+/// here, where llama.cpp would parse it, so a user can't close a turn.
 pub fn encode_chat(tokenizer: &Bbpe, turns: &[ChatTurn<'_>]) -> Vec<u32> {
     let mut ids: Vec<u32> = Vec::with_capacity(turns.len() * 16);
 
     for turn in turns {
         push_special_or_bytes(tokenizer, &mut ids, "<|im_start|>");
-        // Role text (e.g. "system") + newline.
-        let mut role_with_nl = String::with_capacity(turn.role.as_str().len() + 1);
-        role_with_nl.push_str(turn.role.as_str());
-        role_with_nl.push('\n');
-        ids.extend(tokenizer.encode(&role_with_nl));
-        // Content body.
-        ids.extend(tokenizer.encode(turn.content));
+        // Role text (e.g. "system"), newline and content, as one text.
+        let role = turn.role.as_str();
+        let mut body = String::with_capacity(
+            role.len().saturating_add(1).saturating_add(turn.content.len()),
+        );
+        body.push_str(role);
+        body.push('\n');
+        body.push_str(turn.content);
+        ids.extend(tokenizer.encode(&body));
         push_special_or_bytes(tokenizer, &mut ids, "<|im_end|>");
         ids.extend(tokenizer.encode("\n"));
     }

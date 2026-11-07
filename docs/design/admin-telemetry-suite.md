@@ -206,7 +206,7 @@ The idealized long-form schema (slash-paths, structured payloads):
 #### Compact (`tel.*`) implementation
 
 The actual on-the-wire topics are squeezed into the existing 16-byte
-`TOPIC_NAME_LEN` and 60-byte `MAX_MSG_LEN` (see §14.6 for the deferral
+`TOPIC_NAME_LEN` and what was then a 60-byte `MAX_MSG_LEN` (512 bytes since #475) (see §14.6 for the deferral
 rationale). Wildcard `tel.*` matches everything in this table.
 
 | Topic | When | Payload format |
@@ -471,7 +471,7 @@ loose end.
 5. **Model engine for `ggml`.** Stubbed. Real implementation is its own spec; this one just promises the launch surface and a meaningful ENOSYS until then.
    * **Deferred:** M5 lands the engine registry with `ggml` returning ENOSYS until a separate ggml-engine spec is written.
 6. **Topic naming length (M4 deviation).** Spec §7.1 uses `/telemetry/<consumer>/<metric>` paths (25+ chars). The underlying `msg_router` caps `TOPIC_NAME_LEN` at 16 bytes. Bumping that buffer is a cross-cutting change — every existing topic and every wildcard subscriber would need a re-test.
-   * **Decided 2026-04-26 (M4):** ship a compact `tel.<consumer>` schema that fits the existing buffer (`tel.evi`, `tel.inf`). Wildcard `tel.*` matches all telemetry topics. Sample payload format is short ASCII key=value (`dt=12345 ok=1`) capped at the 60-byte `MAX_MSG_LEN`. Long-form topic names + structured (JSON) sample payloads are a follow-up that bumps `TOPIC_NAME_LEN` and `MAX_MSG_LEN` together.
+   * **Decided 2026-04-26 (M4):** ship a compact `tel.<consumer>` schema that fits the existing buffer (`tel.evi`, `tel.inf`). Wildcard `tel.*` matches all telemetry topics. Sample payload format is short ASCII key=value (`dt=12345 ok=1`) capped at what was then a 60-byte `MAX_MSG_LEN`. #475 raised `MAX_MSG_LEN` to 512 bytes for the slm-runner's prompts; long-form topic names + structured (JSON) sample payloads remain a follow-up that bumps `TOPIC_NAME_LEN`.
 7. **Per-shell `telemetry subscribe <pattern>` (M4 deferral).** Spec §5 promises a blocking shell command that streams matching events. Each shell session would need its own msg_router mailbox slot allocator — a small but separate piece of work.
    * **Decided 2026-04-26 (M4):** for now operators subscribe via `lua -e 'slm.telemetry_subscribe("tel.*", function(t,d) print(t,d) end)'`, which uses the existing per-`lua_State` mailbox. Shell-side blocking subscribe lands when the per-shell mailbox slot allocator does.
 8. **1Hz aggregate topics + heartbeat (M4 deferral, partially shipped).** Spec §7.1 lists `/telemetry/<consumer>/aggregate/1s` topics plus `/telemetry/system/heartbeat`. Both need a kernel-task scheduler.

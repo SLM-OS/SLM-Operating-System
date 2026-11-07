@@ -59,7 +59,8 @@ extern void msg_router_unsubscribe_all(int component_idx);
 extern int msg_router_publish_nowait(const uint8_t *topic_name, const uint8_t *data);
 
 extern void slm_runner_test_set_publish_timeout(uint32_t ms);
-extern void (*slm_runner_test_log_hook)(const char *line, bool ask_printing);
+extern void (*slm_runner_test_log_hook)(const char *line, bool handed_to_ask);
+extern void (*slm_runner_test_start_hook)(void);
 extern uint32_t slm_runner_test_publish_bytes(const uint8_t *bytes, size_t len);
 
 /* ============================================================================
@@ -516,6 +517,7 @@ static void bus_end(void)
     rust_slm_test_script(NULL, 0, 0);
     slm_runner_test_set_publish_timeout(0);
     slm_runner_test_log_hook = NULL;
+    slm_runner_test_start_hook = NULL;
     task_set_priority(task_current(), bus_saved_priority);
     shell_session_unbind(task_current());
     bus_sess->io = NULL;
@@ -628,54 +630,151 @@ static void test_runner_runs_at_the_shells_priority(void)
     bus_end();
 }
 
-/* The runner's own UART line waits for `slm ask` to finish printing the
- * reply: on hardware it landed inside the /slm/done line and changed the
- * field values on screen. Here the client is slowed down so the runner's
- * line would go out first without the wait. */
+/* The runner's own line for a prompt from `slm ask` comes out through the
+ * client, after the reply and before `slm ask` returns to the prompt. Printed
+ * by the runner after /slm/done, it landed behind the next `slmos>` prompt
+ * and was cut there on hardware (`slmos> [slm-runne`). The console is slow
+ * here, as a UART is, so the runner gets the CPU while the client prints. */
 static volatile uint32_t log_lines;
-static volatile uint32_t log_lines_during_ask;
-static char log_last[80];
+static volatile uint32_t log_lines_handed;
+static char log_last[96];
 
-static void record_log(const char *line, bool ask_printing)
+static void record_log(const char *line, bool handed_to_ask)
 {
     log_lines = log_lines + 1u;
-    if (ask_printing) {
-        log_lines_during_ask = log_lines_during_ask + 1u;
+    if (handed_to_ask) {
+        log_lines_handed = log_lines_handed + 1u;
     }
     strncpy(log_last, line, sizeof(log_last) - 1u);
 }
 
-/* A slow console, as a UART is: the runner gets the CPU while the client
- * prints. */
 static void slow_write(struct shell_io *io, const char *buf, size_t len)
 {
     bcap_write(io, buf, len);
     task_sleep_ms(2);
 }
 
-static void test_runner_log_waits_for_ask_output(void)
+static void test_runner_line_prints_before_the_prompt(void)
 {
     bus_begin();
     SCRIPT(0, 'a', 'b', 'c', 'd', CLI_IM_END);
     TEST_ASSERT_EQUAL_INT(0, shell_execute(
         "slm runner start --sampler greedy --ctx 256"));
     log_lines = 0;
-    log_lines_during_ask = 0;
-    log_last[0] = '\0';
+    log_lines_handed = 0;
+    log_last[0] = 0;
     slm_runner_test_log_hook = record_log;
     bus_io.write = slow_write;
 
     TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
+    /* Read at once: by the time `slm ask` returns, the line is out. */
+    uint32_t lines = log_lines;
+    uint32_t handed = log_lines_handed;
+    slm_runner_test_log_hook = NULL;
+    bus_io.write = bcap_write;
+
+    TEST_ASSERT_EQUAL_UINT32(1u, lines);
+    TEST_ASSERT_EQUAL_UINT32(1u, handed);
+    TEST_ASSERT_NOT_NULL(strstr(log_last, "[slm-runner] prompt #1 rc=0 tokens=4"));
+    /* Whole, after the reply and the client's summary, and last. */
+    static const char tail[] = "[slm ask] received 4 of 4 token messages\r\n"
+                               "[slm-runner] prompt #1 rc=0 tokens=4\r\n";
+    size_t tl = sizeof(tail) - 1u;
+    TEST_ASSERT_TRUE(bcap.len >= tl);
+    TEST_ASSERT_EQUAL_STRING(tail, bcap.buf + bcap.len - tl);
+    ASSERT_OUTPUT("msgs=4 dropped=0");
+
+    /* A client that isn't `slm ask` leaves the line to the runner. */
+    SCRIPT(0, 'a', CLI_IM_END);
+    log_lines = 0;
+    log_lines_handed = 0;
+    slm_runner_test_log_hook = record_log;
+    client_subscribe();
+    TEST_ASSERT_EQUAL_INT(1, client_publish_prompt("hi"));
+    char done[MSG_ROUTER_MAX_PAYLOAD + 1];
+    client_drain_to_done(done, sizeof(done));
     for (uint32_t i = 0; i < 2000u && log_lines == 0; i++) {
         task_sleep_ms(1);
     }
     slm_runner_test_log_hook = NULL;
-    bus_io.write = bcap_write;
-
+    msg_router_unsubscribe_all(CLIENT_IDX);
     TEST_ASSERT_EQUAL_UINT32(1u, log_lines);
-    TEST_ASSERT_EQUAL_UINT32(0u, log_lines_during_ask);
-    TEST_ASSERT_NOT_NULL(strstr(log_last, "[slm-runner] prompt #1 rc=0 tokens=4"));
-    ASSERT_OUTPUT("msgs=4 dropped=0");
+    TEST_ASSERT_EQUAL_UINT32(0u, log_lines_handed);
+    bus_end();
+}
+
+/* #475 W8: closed from a shell, the runner's session id goes to the next
+ * `slm launch`. The runner must open its own, not adopt that one. */
+static void test_runner_does_not_adopt_a_reused_session_id(void)
+{
+    bus_begin();
+    SCRIPT(1, 'k');
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256 --max 2"));
+    slm_runner_status_t st;
+    slm_runner_get_status(&st);
+    TEST_ASSERT_GREATER_OR_EQUAL(0, st.session);
+    uint32_t sid = (uint32_t)st.session;
+
+    char cmd[48];
+    uart_snprintf(cmd, sizeof(cmd), "slm close %u", (unsigned)sid);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(cmd));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm launch 0 --sampler greedy --ctx 256"));
+    uint64_t theirs = rust_slm_session_open_seq(sid);
+    TEST_ASSERT_TRUE(theirs != 0);
+
+    bcap_clear();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
+    ASSERT_OUTPUT("tokens_out=2 msgs=2");
+
+    SlmStatsC stats;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_stats(sid, &stats));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.prompts_completed);
+    TEST_ASSERT_TRUE(rust_slm_session_open_seq(sid) == theirs);
+    slm_runner_get_status(&st);
+    TEST_ASSERT_TRUE(st.session != (int32_t)sid);
+
+    /* Stopping the runner leaves the other user's session open. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm runner stop"));
+    TEST_ASSERT_TRUE(rust_slm_session_open_seq(sid) == theirs);
+    bus_end();
+}
+
+/* #475 W9: a second start while the first is still bringing the runner up
+ * is refused, instead of re-running the component under it. */
+static volatile int nested_start_rc;
+static volatile int nested_stop_rc;
+static volatile int nested_configure_rc;
+
+static void nested_start(void)
+{
+    slm_runner_config_t cfg;
+    slm_runner_default_config(&cfg);
+    nested_start_rc = slm_runner_start();
+    nested_stop_rc = slm_runner_stop();
+    nested_configure_rc = slm_runner_configure(&cfg);
+}
+
+static void test_runner_start_is_serialized(void)
+{
+    bus_begin();
+    SCRIPT(1, 'k');
+    uint32_t components_before = component_count();
+    nested_start_rc = 99;
+    nested_stop_rc = 99;
+    nested_configure_rc = 99;
+    slm_runner_test_start_hook = nested_start;
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256 --max 2"));
+    slm_runner_test_start_hook = NULL;
+    TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_start_rc);
+    TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_stop_rc);
+    TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_configure_rc);
+    TEST_ASSERT_EQUAL_UINT32(components_before + 1u, component_count());
+
+    /* The first start's runner is the one serving, with its options. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
+    ASSERT_OUTPUT("tokens_out=2 msgs=2");
     bus_end();
 }
 
@@ -1321,7 +1420,9 @@ int test_suite_slm_runner(void)
     /* The bus path, with a real runner task. */
     RUN_BUS_TEST(test_ask_prints_every_token_then_stats);
     RUN_BUS_TEST(test_runner_runs_at_the_shells_priority);
-    RUN_BUS_TEST(test_runner_log_waits_for_ask_output);
+    RUN_BUS_TEST(test_runner_line_prints_before_the_prompt);
+    RUN_BUS_TEST(test_runner_does_not_adopt_a_reused_session_id);
+    RUN_BUS_TEST(test_runner_start_is_serialized);
     RUN_BUS_TEST(test_slow_reader_gets_every_token_in_order);
     RUN_BUS_TEST(test_dead_subscriber_doesnt_wedge_a_live_client);
     RUN_BUS_TEST(test_long_prompt_arrives_whole);
