@@ -352,19 +352,26 @@ static void test_encode_kernels(void)
     TEST_ASSERT_EQUAL_UINT32(75, l.grid_x);     /* ceil(8960 / 120) */
     TEST_ASSERT_EQUAL_UINT32(8, l.block_y);
     TEST_ASSERT_TRUE(l.register_count_v <= 256u);
-    TEST_ASSERT_TRUE(l.smem_size_bytes >= 8192u);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 16384u);
     TEST_ASSERT_EQUAL_UINT32(1, arg32(a, 0x2C));
 
-    /* Prefill, small N: one CTA per (tile, x tile). */
+    /* Prefill, small N: b8, one CTA per (tile, x tile of 8 rows). */
     op.dim[1] = 256;
     op.rows = 9;
-    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B64, (uint32_t)slm_prog_op_sass(&op));
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B8, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
     TEST_ASSERT_EQUAL_UINT32(18, l.grid_x);
     TEST_ASSERT_EQUAL_UINT32(2, l.grid_y);
-    TEST_ASSERT_EQUAL_UINT32(1u | SLM_PROG_MM_SPLIT_XT | (6u << 16), arg32(a, 0x2C));
+    TEST_ASSERT_EQUAL_UINT32(1u | SLM_PROG_MM_SPLIT_XT, arg32(a, 0x2C));
+    op.rows = 63;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(8, l.grid_y);
+    op.rows = 8;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_y);
+    TEST_ASSERT_EQUAL_UINT32(1u, arg32(a, 0x2C));
     op.rows = 65;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
     op.dim[1] = 8960;
     op.rows = 8;
     /* The kernels load 16 bytes of x at a time. */

@@ -1915,7 +1915,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
     let l0 = d.layers[0];
     let fill_a = |n: usize| move |c: &OpCheck| c.write_u16s(a_off, n, 0x1234);
 
-    for rows in [1usize, 2, 9, ROWS] {
+    for rows in [1usize, 2, 9, 63, ROWS] {
         // Matmuls: both quant types, biased and not, FP16 and FP32 out.
         let mm = |c: &mut OpCheck, name: &str, m: &Matmul, k: usize, n: usize, f16: bool, r: usize| {
             let op = ProgOp {

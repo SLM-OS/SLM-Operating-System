@@ -63,7 +63,7 @@ static enum mm_variant mm_variant_of(uint32_t sass)
 }
 
 /* Decode: B = 1 kernels. Prefill: b8 to 8 rows; past that x in shared memory
- * (bs) when N is big enough to fill the SMs, otherwise b64 split per x tile.
+ * (bs) when N is big enough to fill the SMs, otherwise b8 split per x tile.
  * The same choice as scripts/cuda/harness/slm_forward.cu add_mm. */
 int slm_prog_op_sass(const struct slm_prog_op *op)
 {
@@ -82,11 +82,11 @@ int slm_prog_op_sass(const struct slm_prog_op *op)
     case SLM_PROG_K_MM_Q4K:
         return simt ? SLM_SASS_MM_Q4K_SIMT : rows == 1u ? SLM_SASS_MM_Q4K_HMMA_B1
              : rows <= 8u ? SLM_SASS_MM_Q4K_HMMA_B8
-             : big ? SLM_SASS_MM_Q4K_HMMA_BS : SLM_SASS_MM_Q4K_HMMA_B64;
+             : big ? SLM_SASS_MM_Q4K_HMMA_BS : SLM_SASS_MM_Q4K_HMMA_B8;
     case SLM_PROG_K_MM_Q6K:
         return simt ? SLM_SASS_MM_Q6K_SIMT : rows == 1u ? SLM_SASS_MM_Q6K_HMMA_B1
              : rows <= 8u ? SLM_SASS_MM_Q6K_HMMA_B8
-             : big ? SLM_SASS_MM_Q6K_HMMA_BS : SLM_SASS_MM_Q6K_HMMA_B64;
+             : big ? SLM_SASS_MM_Q6K_HMMA_BS : SLM_SASS_MM_Q6K_HMMA_B8;
     default:
         return -1;
     }
@@ -140,7 +140,7 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         enum mm_variant v = mm_variant_of(sass);
         if (k == 0u || n == 0u || !op->ptr[0] || !op->ptr[1] || !op->ptr[2] ||
             (op->ptr[0] & 15u) || (v == MM_B1 && rows != 1u) ||
-            (v == MM_B8 && rows > 8u) || ((v == MM_BS || v == MM_B64) && rows > 64u)) {
+            (rows > 64u && v != MM_SIMT)) {
             return -1;
         }
         l->grid_x = (n + 14u) / 15u;    /* a tile holds 15 weight rows */
@@ -165,6 +165,11 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
             flags |= SLM_PROG_MM_SPLIT_XT | ((k / 256u) << 16);
             break;
         case MM_B8:
+            /* Past 8 rows: one CTA per (tile, x tile of 8 rows). */
+            if (rows > 8u) {
+                l->grid_y = (rows + 7u) >> 3;
+                flags |= SLM_PROG_MM_SPLIT_XT;
+            }
             break;
         }
         put64(args, 0x160, op->ptr[0]);
