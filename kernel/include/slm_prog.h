@@ -1,0 +1,244 @@
+/*
+ * slm_prog.h - Per-session GPU program for an SLM forward pass (#475,
+ * docs/adr/0003-slm-gpu-graph.md).
+ *
+ * The Rust runtime (runtime/src/slm/gpu_program.rs) decides what runs:
+ * ops, buffers, barriers, what a step patches. This layer owns the GPU
+ * side of a session:
+ *
+ *   weights   the GGUF mapped in place, read-only and L2-cacheable, with
+ *             64 KB pages when the memory allows it
+ *   data      activations, KV cache, gammas, RoPE LUT, logits: PMM pages,
+ *             L2-cacheable, CPU-visible after one L2 evict
+ *   control   pushbuffers, QMDs, cbufs, semaphores, the step page:
+ *             PMM pages, GPU-uncached (CPU writes are cleaned)
+ *
+ * and turns struct slm_prog_op descriptors into launches
+ * (kernel/gpu/nvidia/ga10b_prog.c).
+ *
+ * Hardware access goes through struct slm_prog_backend. The Jetson
+ * backend reaches the cold channel (UEFI-direct boot only; after kexec
+ * none is registered and slm_prog_open reports SLM_PROG_ERR_NO_BACKEND).
+ * make test registers a fake one.
+ */
+#ifndef SLM_PROG_H
+#define SLM_PROG_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* Keep in step with runtime/src/slm/gpu_program.rs::Kernel. The ABI is
+ * scripts/cuda/slm/: every array is row-major, batch first. */
+enum slm_prog_kernel {
+    SLM_PROG_K_RMSNORM = 0,  /* ptr x, gamma (F32), out; dim n; scal[0] eps bits */
+    SLM_PROG_K_ROPE,         /* ptr x, out, table, pos; dim heads, head_dim */
+    SLM_PROG_K_SWIGLU,       /* ptr gate, up, out; dim n per row */
+    SLM_PROG_K_GQA,          /* ptr q, k, v, pos, out; dim nq, nkv, hd */
+    SLM_PROG_K_MM_Q4K,       /* ptr x (16 B aligned), W, out, bias; dim K, N; scal[0] flags */
+    SLM_PROG_K_MM_Q6K,       /* same, Q6_K weights */
+    SLM_PROG_K_ADD,          /* ptr a, b, out; dim n per row */
+    SLM_PROG_K_EMBED_Q4K,    /* ptr ids, table, out; dim K */
+    SLM_PROG_K_EMBED_Q6K,    /* same, Q6_K table */
+    SLM_PROG_K_COUNT,
+};
+
+/* scal[0] of the matmul kernels (scripts/cuda/slm/slm_common.cuh). */
+#define SLM_PROG_MM_OUT_F16 1u
+/* scal[1] of the matmul kernels: use the SIMT kernel, not the tensor core one. */
+#define SLM_PROG_MM_SIMT 1u
+/* Added to scal[0] for the split b64 launch (slm_common.cuh SLM_MM_SPLIT_XT). */
+#define SLM_PROG_MM_SPLIT_XT 4u
+
+/* One operation, as Rust sends it. Keep in step with gpu_program.rs::ProgOp. */
+struct slm_prog_op {
+    uint32_t kernel;        /* enum slm_prog_kernel */
+    uint32_t rows;          /* batch rows */
+    uint32_t dim[4];
+    uint64_t ptr[5];        /* GPU VAs */
+    uint32_t scal[2];
+};
+_Static_assert(sizeof(struct slm_prog_op) == 72, "slm_prog_op is shared with Rust");
+
+#define SLM_PROG_SHAPES 2u  /* 0 = decode (one row), 1 = prefill (batch) */
+#define SLM_PROG_MAX_SESSIONS 4
+
+#define SLM_PROG_FLAG_LEAN_QMD 1u
+#define SLM_PROG_FLAG_PROFILE  2u
+#define SLM_PROG_FLAG_SIMT     4u   /* Rust: SIMT matmuls, the bring-up reference */
+#define SLM_PROG_FLAG_INJECT_HANG 8u /* `slm gpu inject`: decode never completes */
+
+struct slm_prog_open_args {
+    const void *weights;        /* CPU pointer to the file bytes */
+    uint64_t weights_bytes;
+    uint64_t data_bytes;
+    uint32_t step_bytes;
+    uint32_t max_launches[SLM_PROG_SHAPES];  /* 0: shape not used */
+    uint32_t flags;
+    uint32_t barrier;           /* enum ga10b_prog_barrier */
+};
+
+struct slm_prog_open_out {
+    int32_t handle;
+    uint32_t weights_big;       /* 1 when weights use 64 KB PTEs */
+    uint64_t weights_gpu_va;
+    uint64_t data_gpu_va;
+    uint64_t step_gpu_va;
+    uint8_t *data_cpu;
+    uint8_t *step_cpu;
+    uint64_t weights_map_us;    /* mapping + cleaning its page tables */
+    uint32_t table_pages_added;
+    uint32_t pad;
+};
+
+struct slm_prog_run_stats {
+    uint64_t gpu_ns;            /* end - start semaphore timestamps */
+    uint64_t wait_us;           /* CPU: doorbell to completion */
+    uint64_t evict_us;          /* the one L2 evict */
+};
+
+/* Errors. Keep in step with gpu_program.rs. */
+#define SLM_PROG_ERR_NO_BACKEND  (-1)  /* no cold channel: kexec, QEMU, Pi 5 */
+#define SLM_PROG_ERR_ARG         (-2)
+#define SLM_PROG_ERR_NOMEM       (-3)
+#define SLM_PROG_ERR_MAP         (-4)
+#define SLM_PROG_ERR_NO_KERNEL   (-5)  /* kernel missing from the operator library */
+#define SLM_PROG_ERR_TIMEOUT     (-6)
+#define SLM_PROG_ERR_SUBMIT      (-7)
+#define SLM_PROG_ERR_DEAD        (-8)  /* an earlier step on this session failed */
+#define SLM_PROG_ERR_EVICT       (-9)
+#define SLM_PROG_ERR_IRQS_OFF    (-10)
+#define SLM_PROG_ERR_BUSY        (-11) /* slm_prog lock not free within a step timeout */
+
+/* Bounds a wait no step on this hardware should come near: the ADR 0001
+ * bar is 23 ms per token and 74 ms for a 64-token prefill. */
+#define SLM_PROG_STEP_TIMEOUT_MS 5000u
+
+/* ---- API (called from Rust; all sleepable, IRQs on) ----
+ *
+ * Every call takes one lock, so two sessions (the shell and slm-runner)
+ * can use the program, and its shared tables and VM, at the same time.
+ * A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s, or at
+ * all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
+
+/* 1 if this boot has a channel programs can run on. */
+int slm_prog_available(void);
+
+/* Why slm_prog_available() is 0, as a sentence; NULL when it is 1. */
+const char *slm_prog_unavailable_reason(void);
+
+/* The same from its inputs, for tests: a UEFI-direct boot, an operator library
+ * with no SASS, the cold bring-up's channel up, and the library attached to it. */
+const char *slm_prog_reason_for(bool uefi, bool library_empty, bool channel_up, bool attached);
+
+#define SLM_PROG_WHY_KEXEC  "no SLM-OS-built GPU channel (needs a UEFI-direct boot)"
+#define SLM_PROG_WHY_NO_SASS \
+    "the operator library has no SASS: this kernel was built without nvcc " \
+    "(run make oplib-shaders, then rebuild)"
+#define SLM_PROG_WHY_NO_CHANNEL "GPU cold bring-up stopped before its channel (see the boot log)"
+#define SLM_PROG_WHY_NOT_ATTACHED \
+    "GPU cold bring-up stopped before the operator library was attached (see the boot log)"
+int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
+void slm_prog_close(int32_t h);
+
+/* Sessions whose pages were left allocated on close because the GPU could
+ * still write them (a timed-out step, a failed evict or TLB invalidate). */
+uint32_t slm_prog_leaked_sessions(void);
+
+/* Build: append a launch (returns its index), a barrier, a timestamp for the
+ * marked copy of the decode shape (right after a barrier; returns its index),
+ * or finish. */
+int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op);
+int slm_prog_barrier(int32_t h, uint32_t shape);
+int slm_prog_mark(int32_t h, uint32_t shape);
+int slm_prog_finish(int32_t h, uint32_t shape);
+
+/* Step: rewrite a launch's cbuf args (patch) or also its QMD, for a
+ * changed grid (update). Both clean what they wrote. */
+int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op);
+int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op);
+
+/* Clean / invalidate part of the data or step regions. */
+void slm_prog_clean(int32_t h, const void *p, size_t len);
+void slm_prog_invalidate(int32_t h, const void *p, size_t len);
+
+/* Run a finished shape: submit, wait with IRQs on, evict L2. The
+ * slm_prog program lock (not a spinlock; holders and waiters yield) is held
+ * from submit to the end of the wait; no spinlock is held while waiting. On a timeout the session is dead: the GR and MMU fault state
+ * has been dumped and every later call returns SLM_PROG_ERR_DEAD. */
+int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats);
+
+/* slm_prog_run on the marked copy, then `ns[]` receives the GPU time up to each
+ * mark and from the last mark to the end: marks + 1 values (0 values if `cap`
+ * is short). Same commands as a plain run plus one FLUSH_DISABLE release per
+ * mark. Allocates nothing. */
+int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
+                        uint64_t *ns, uint32_t cap);
+
+/* Largest batch the library's matmuls support (0: they are missing, 8 or 64).
+ * With `simt`, the SIMT matmuls, which take any batch: 64. */
+uint32_t slm_prog_max_batch(bool simt);
+
+/* Per-launch GPU time when opened with SLM_PROG_FLAG_PROFILE. Returns
+ * nanoseconds between launch idx - 1 and idx ending, 0 otherwise. */
+uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx);
+
+/* EMC and GPU clocks, in Hz (0 when unknown). */
+void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz);
+
+const char *slm_prog_strerror(int err);
+
+/* ---- Pure: encode one op ---- */
+
+struct ga10b_prog_launch;
+
+/* The kernel (SLM_SASS_*) an op runs: for a matmul that depends on its rows
+ * and scal[1]. Negative for an unknown kernel. */
+int slm_prog_op_sass(const struct slm_prog_op *op);
+
+/* Fill `l` and `args` (at least GA10B_PROG_CBUF_ARGS_MAX bytes; l->args
+ * points at it) for `op`, run by kernel `sass` at shader_va. Negative if the
+ * shape is invalid. */
+int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader_va,
+                    struct ga10b_prog_launch *l, uint8_t *args);
+
+/* ---- Backend ---- */
+
+struct ga10b_gpu_ops;
+struct ga10b_vm;
+
+struct slm_prog_backend {
+    const struct ga10b_gpu_ops *ops;
+    struct ga10b_vm *vm;
+    /* TLB invalidate for vm, serialised against dispatches. */
+    int (*tlb_invalidate)(void);
+    /* VA of kernel SLM_SASS_*. 0, or negative when the library lacks it. */
+    int (*kernel_va)(uint32_t sass, uint64_t *va);
+    /* Physical address of a CPU address in the weights, 0 if unmapped. */
+    uint64_t (*virt_to_phys)(const void *p);
+    /* True when a CPU range is physically contiguous (identity-mapped RAM). */
+    bool (*is_contiguous)(const void *p, uint64_t len);
+    /* Write one GPFIFO entry and ring the doorbell, marking a program in
+     * flight until slm_gpu_prog_done. The dispatch lock is held only
+     * inside. `end_slot`: where other CPUs can see completion. */
+    int (*submit)(uint64_t gp_entry, const volatile void *end_slot, uint32_t end_payload,
+                  uint32_t timeout_ms);
+    /* The wait is over (done or timed out). */
+    void (*finished)(void);
+    /* One L2 evict, under the dispatch lock. 0 on success. */
+    int (*l2_evict)(void);
+    uint64_t (*now_us)(void);
+    /* Give the CPU to other tasks; returns quickly if none is ready. */
+    void (*relax)(void);
+    /* Timeout: GR + MMU fault state to the console. */
+    void (*dump_fault)(const char *why);
+    bool (*irqs_enabled)(void);
+    /* Optional: raise memory clocks for compute, once per boot. */
+    void (*prepare_clocks)(void);
+};
+
+/* Test hook; the Jetson backend is picked automatically on a cold boot.
+ * NULL restores that. */
+void slm_prog_backend_set(const struct slm_prog_backend *b);
+
+#endif /* SLM_PROG_H */

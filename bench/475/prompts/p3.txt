@@ -1,0 +1,5 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+List five practical differences between a mutex and a spinlock on a multicore machine, and for each one give a concrete situation inside an operating system kernel where choosing the wrong primitive would cause a bug or a loss of performance.<|im_end|>
+<|im_start|>assistant

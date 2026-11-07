@@ -42,8 +42,9 @@ efi_stub_entry()                                  (MMU on, ConOut alive)
   1. find the DTB in the EFI configuration table
   2. GetMemoryMap; check the link-address range   ── unsafe ──► return
      with efi_check_relocation()                     EFI_LOAD_ERROR to
-  3. ExitBootServices                                 UEFI (next boot
-  4. install the early VBAR_EL2 fault handler         option runs)
+     read \slmos\models\*.gguf (non-fatal), re-check  UEFI (next boot
+  3. ExitBootServices                                 option runs)
+  4. install the early VBAR_EL2 fault handler
   5. record slmos_boot_source = UEFI (.data)
   6. DC CIVAC the loaded image, the destination
      and the DTB to the PoC
@@ -208,6 +209,61 @@ long by default.
 
 ---
 
+## Models on disk
+
+The stub reads `\slmos\models\*.gguf` through the firmware's file
+protocols, so a model is available after a cold boot with no host
+(decision and alternatives:
+[ADR 0002](../adr/0002-uefi-model-delivery.md)). The ESP is too small for
+a model, so it goes on an ext4 partition. From SD Linux:
+
+```bash
+mount /dev/nvme0n1p1 /mnt
+mkdir -p /mnt/slmos/models
+cp /root/qwen2.5-1.5b-instruct-q4_k_m.gguf /mnt/slmos/models/
+sync
+sha256sum /mnt/slmos/models/*.gguf
+umount /mnt
+
+# Fallback copy on the SD rootfs; a hard link costs no space.
+mkdir -p /slmos/models
+ln /root/qwen2.5-1.5b-instruct-q4_k_m.gguf /slmos/models/
+sync
+```
+
+Then, after `scripts/jetson-uefi-deploy.sh`:
+
+```
+slmos> ls /boot/models
+slmos> slm load /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+```
+
+Limits: 4 files, 2 GiB per file, and half of the `0x100000000..0x240000000`
+window in total. A file name is ASCII and at most 63 bytes. NVMe volumes are
+read first; the first copy of a file name wins, and a failed read falls back
+to the next volume. Any failure prints a `[slmos] model` line and the boot
+continues without that file. The kernel checks the magic and hash again
+before reserving the pages; `Boot model ...: failed its check` means the
+file was dropped.
+
+`slm load` on these paths is zero-copy, and `slm unload` leaves the pages
+reserved, so the same file can be loaded again without a reboot.
+
+CPU inference on this model is the first number on this boot path, measured
+after a cold boot with EMC at 3199 MHz: the 64-token prompt
+`bench/475/prompts/p1.txt`, greedy, `--gpu cpu`, 256 tokens gives TTFT 155.8 s
+and 0.400 tok/s. The forward path is single-threaded, so `--threads 4` has no
+effect yet. EMC at 204 MHz gives 165.6 s and 0.384 tok/s, so memory clock is
+not what limits the CPU path. `slm load` does feel it: 590 ms at 204 MHz.
+
+To test cold boots with `boot_test`, copy the image to `\EFI\BOOT\BOOTAA64.efi`
+on the NVMe ESP so entry `0008` boots it on every power cycle. Return to Linux
+with `serial_send keys=["F11"]` at the firmware prompt, then `["Down", "Enter"]`
+for "UEFI SD Device", delete the file, and check that a power cycle reaches SD
+Linux.
+
+---
+
 ## Build, deploy, test
 
 ```bash
@@ -259,12 +315,13 @@ to the next boot option.
 
 | Check | What it covers |
 |---|---|
-| `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default |
-| `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Needs `qemu-efi-aarch64` and `mtools` |
+| `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default. `kernel/tests/test_boot_models.c`: the model loader against a fake firmware (every failure path), range picking, kernel checks, reservation, `/boot/models`, zero-copy load |
+| `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Then `scripts/test-qemu-uefi-models.sh` boots with a small GGUF on the virtual disk and with no file, a read error (QEMU blkdebug), a file too big and no memory. Needs `qemu-efi-aarch64` and `mtools` |
 | `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address, HCR_EL2 read-modify-write, inherited PAN cleared after the E2H flip (#1079) |
 
 `scripts/qemu-uefi-boot.sh` is the script behind `test-qemu-uefi`; it
-accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
+accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs, and the
+variables its header lists for models and shell input.
 
 ---
 
@@ -281,6 +338,8 @@ accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
 | Camera RCE | Works: `rcediag` completes HELLO, PING and `CH_SETUP`. MB2 loads the RCE firmware before UEFI, and `camrtc_init` powers RCE through BPMP the same way it does after kexec |
 | GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
+| Models from disk | Works ([ADR 0002](../adr/0002-uefi-model-delivery.md), [Models on disk](#models-on-disk)): a 1.04 GiB GGUF reads in 780 ms from NVMe, 68 s from SD; 20/20 cold boots verified it, 55.6 s from power-on to `slmos>`; `slm load` takes 346 ms |
+| Memory clock | UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU and XUSB bring-up; `clocks` shows the rates, `clocks emc <MHz>` requests one |
 
 ### XUSB cold bring-up
 
@@ -443,6 +502,45 @@ that channel's instance block. Checks after boot:
 Without the SLM-op SASS (`rmsnorm_f16_shader.sass` etc., extracted on a
 Jetson, gitignored) the library only holds the MNIST kernels: lookups
 for the SLM ops miss and every op stays on the CPU.
+
+### SLM GPU program (#475)
+
+`slm launch --gpu auto|on` builds one GPU command stream for a session's
+whole forward step instead of dispatching ops one at a time
+([ADR 0003](../adr/0003-slm-gpu-graph.md)). It needs the cold channel:
+after kexec `--gpu on` is refused and `--gpu auto` keeps the per-op path.
+The weights pool (`nvgpu oplib wpool`) is not used: the GGUF is mapped in
+place.
+
+The kernels come from `scripts/cuda/` and are not checked in. `make kernel
+PLATFORM=JETSON_ORIN_NANO` builds them first when they are missing or older
+than their sources and nvcc is installed (`scripts/cuda/ensure-oplib-shaders.sh`).
+Without nvcc the kernel still builds, after a warning that every GPU consumer
+will run on the CPU. Such a kernel boots normally: the cold bring-up stops at
+its MNIST step and says the library has no SASS, and `slm launch --gpu on`
+gives the same reason.
+
+| Command | Expected |
+|---|---|
+| `slm gpu smoke [n]` | `PASS`, n launches, ns per launch. Needs only `rmsnorm_f16_shader.sass`; no model |
+| `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
+| `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
+| `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
+| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
+| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt |
+| `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
+| `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
+| `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
+
+UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU
+and XUSB bring-up, so `slm gpu` reads 3199 MHz before any prompt; the first
+program to open asks for the same floor again (`[slm-prog] EMC was ...`), which
+covers a request that failed at boot.
+
+A step that times out (5 s) prints the GR and MMU fault state once, then
+the session continues on the CPU, replaying its tokens: `[slm] GPU program
+failed (...)`. `slm gpu` keeps saying why. Other GPU consumers on the
+channel then time out and trip their breaker to the CPU; a reboot clears it.
 
 ## Findings
 

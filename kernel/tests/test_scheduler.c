@@ -1659,6 +1659,41 @@ static void test_migrate_stolen_task_no_double_queue(void)
  * covers the queue-state invariant for its specific scenario. This
  * test's name is deliberately scoped to the assigned_cpu semantic.
  */
+static volatile bool migrate_spin_release;
+static volatile bool migrate_spin_started;
+
+/* Holds its CPU without yielding until released. */
+static void migrate_spin_entry(void *arg);
+
+/*
+ * Runs after the test whether it passed or not. A failed assert returns from
+ * the test before its own release, which left the spinner holding CPU 1 at
+ * high priority: every later test that needs CPU 1 then hung, and one
+ * failure became a suite timeout (#475 W10). Then waits for the spinner to
+ * leave, so the next test starts with CPU 1 free.
+ */
+static volatile bool migrate_spin_done;
+
+static void migrate_spin_cleanup(void)
+{
+    migrate_spin_release = true;
+    for (uint32_t i = 0; i < 1000u && migrate_spin_started &&
+                         !migrate_spin_done; i++) {
+        task_sleep_ms(1);
+    }
+}
+
+static void migrate_spin_entry(void *arg)
+{
+    (void)arg;
+    migrate_spin_started = true;
+    while (!migrate_spin_release) {
+        __asm__ volatile("" ::: "memory");
+    }
+    migrate_spin_done = true;
+    task_exit();
+}
+
 static void test_migrate_ready_task_updates_assigned_cpu(void)
 {
     if (cpu_count < 4) {
@@ -1666,7 +1701,23 @@ static void test_migrate_ready_task_updates_assigned_cpu(void)
         return;
     }
 
-    struct task *t = task_create("mig_ok", nop_entry, NULL);
+    /* CPU 1 is idle and would run the task before the migrate (#1162).
+     * Keep it busy with a higher-priority spinner until the migrate is done. */
+    migrate_spin_release = false;
+    migrate_spin_started = false;
+    migrate_spin_done = false;
+    struct task *spin = task_create_with_priority("mig_spin", migrate_spin_entry,
+                                                  NULL, TASK_PRIORITY_HIGH);
+    TEST_ASSERT_NOT_NULL(spin);
+    spin->cpu_affinity = 1;
+    scheduler_add_task_to_cpu(spin, 1);
+    for (uint32_t i = 0; i < 1000u && !migrate_spin_started; i++) {
+        task_sleep_ms(1);
+    }
+    TEST_ASSERT_TRUE(migrate_spin_started);
+
+    struct task *t = task_create_with_priority("mig_ok", nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
     TEST_ASSERT_NOT_NULL(t);
 
     /* Pin to CPU 1 so work-stealing thieves on CPU 2 / CPU 3
@@ -1692,6 +1743,7 @@ static void test_migrate_ready_task_updates_assigned_cpu(void)
     /* Relax affinity so the migrate call passes the target check. */
     t->cpu_affinity = 3;
     int ret = sched_migrate_task(t, 3);
+    migrate_spin_release = true;
     TEST_ASSERT_EQUAL_INT(0, ret);
     TEST_ASSERT_EQUAL_UINT32(3, t->assigned_cpu);
 
@@ -4687,8 +4739,10 @@ static void test_sched_runtime_rebalance_controls_tick_migration(void)
         return;
     }
 
-    a = task_create("rebalance_a", nop_entry, NULL);
-    b = task_create("rebalance_b", nop_entry, NULL);
+    /* Below this task, so a tick on CPU 0 can't run them before the
+     * rebalance does (#1162). Rebalancing looks at queue lengths only. */
+    a = task_create_with_priority("rebalance_a", nop_entry, NULL, TASK_PRIORITY_LOW);
+    b = task_create_with_priority("rebalance_b", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(a);
     TEST_ASSERT_NOT_NULL(b);
 
@@ -5971,6 +6025,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
+    migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
     /* Integration tests: Priority ordering */

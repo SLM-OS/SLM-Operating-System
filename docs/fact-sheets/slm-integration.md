@@ -24,6 +24,7 @@ Legend: ✅ shipped · 🟡 partial · ❌ not applicable on this platform
 | Sampler (greedy, temperature, top-k, top-p) | ✅ | ✅ | ✅ | 🟡 |
 | Chat template renderer (Qwen ChatML) | ✅ | ✅ | ✅ | 🟡 |
 | LRU model eviction (reuses Phase-5 registry) | ✅ | ✅ | ✅ | ✅ |
+| `slm-runner` bus service, in-kernel (`slm runner`, `slm ask`; tests in `make test`, ARM64 only) | ✅ | ☐ | ☐ | ⏸️ |
 
 ## Skipped / Blocked
 
@@ -37,4 +38,5 @@ Legend: ✅ shipped · 🟡 partial · ❌ not applicable on this platform
 - [`../design/slm-integration.md`](../design/slm-integration.md) — full design spec (target SLM rationale, runtime stack, memory plan, GPU integration paths).
 - [`memory.md`](memory.md) — pool layout, OP-TEE carveout, Jetson 1 GB weight pool.
 - [`gpu-inference.md`](gpu-inference.md) — GA10B compute path the GPU-resident ops dispatch through.
-- [`components.md`](components.md) — component lifecycle the `slm-runner` will inherit.
+- [`components.md`](components.md) — component lifecycle the `slm-runner` uses.
+- [`../tutorials/slm-component.md`](../tutorials/slm-component.md) — the `slm-runner` topics, delivery guarantees and lifecycle.

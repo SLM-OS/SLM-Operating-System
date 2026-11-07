@@ -66,12 +66,13 @@ use core::fmt::Write as _;
 use crate::inference::gpu_slm::{select_tier, OpKind, OperatorLibraryBackend, Tier};
 use crate::inference::ops_transformer::{
     gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_elementwise,
-    swiglu_mlp_q, RopeTable,
+    swiglu_mlp_q, RopePairing, RopeTable,
 };
 use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
 use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
 use crate::slm::registry::LoadedSlm;
 use crate::slm::session::Session;
+use crate::slm::telemetry::{LapTimer, OpClass};
 
 /// Hybrid RMSNorm: try the GPU operator library if the boot probe
 /// (#714 §B.2) flipped this op's tier to `Tier::Simt`, fall through
@@ -91,6 +92,7 @@ use crate::slm::session::Session;
 /// shaped ops (Q4K_DOT, GQA_ATTN) are wired in follow-on PRs.
 #[inline]
 fn rmsnorm_hybrid(
+    gpu: bool,
     x: &[u16],
     gamma: &[u16],
     eps: f32,
@@ -103,10 +105,12 @@ fn rmsnorm_hybrid(
     if n == 0 || gamma.len() != n || out.len() != n {
         return None;
     }
-    if let Ok(()) = OperatorLibraryBackend::dispatch_rmsnorm(
-        x, gamma, out, 1u32, n as u32, eps,
-    ) {
-        return Some(());
+    if gpu {
+        if let Ok(()) = OperatorLibraryBackend::dispatch_rmsnorm(
+            x, gamma, out, 1u32, n as u32, eps,
+        ) {
+            return Some(());
+        }
     }
     rmsnorm(x, gamma, eps, out)
 }
@@ -125,6 +129,7 @@ fn rmsnorm_hybrid(
 /// the same as `embedding_lookup_any` for the call sites.
 #[inline]
 fn embedding_lookup_hybrid(
+    gpu: bool,
     slm: &LoadedSlm,
     token_id: u32,
     out: &mut [u16],
@@ -136,7 +141,7 @@ fn embedding_lookup_hybrid(
     }
     /* GPU path. The `if let` chain bails to CPU on any miss without
      * rebinding ergonomics. */
-    if let Some(table) = slm.gpu_tensor_map().get("token_embd.weight") {
+    if let Some(table) = slm.gpu_tensor_map().get("token_embd.weight").filter(|_| gpu) {
         if select_tier(OpKind::Embedding) == Tier::Simt {
             /* Need table_row_bytes for the kernel's Q4_K block math
              * — derive from the on-disk tensor descriptor (the
@@ -225,6 +230,7 @@ fn swiglu_elementwise_hybrid(gate: &mut [u16], up: &[u16], n: usize) {
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn gqa_decode_hybrid(
+    gpu: bool,
     q: &[u16],
     k: &[u16],
     v: &[u16],
@@ -237,7 +243,7 @@ fn gqa_decode_hybrid(
 ) -> Option<()> {
     /* GPU path — pre-flight shape checks BEFORE we touch the FFI
      * (avoids the IRQ-off lock cost on the obvious miss cases). */
-    if select_tier(OpKind::GqaAttn) == Tier::Simt {
+    if gpu && select_tier(OpKind::GqaAttn) == Tier::Simt {
         let kv_bytes = seq_len.checked_mul(n_head_kv)?
             .checked_mul(head_dim)?
             .checked_mul(2)?;
@@ -288,6 +294,7 @@ fn gqa_decode_hybrid(
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn matmul_q4k_rows_hybrid(
+    gpu: bool,
     slm: &LoadedSlm,
     weight_name: &str,
     quant_type: GgmlType,
@@ -304,6 +311,7 @@ fn matmul_q4k_rows_hybrid(
         && cols % 256 == 0
         && cols < (1u32 << 31) as usize
         && rows < (1u32 << 31) as usize
+        && gpu
         && select_tier(OpKind::Q4kDot) == Tier::Simt
     {
         if let Some(gref) = slm.gpu_tensor_map().get(weight_name) {
@@ -501,7 +509,12 @@ impl ForwardScratch {
             embed_f32: vec![0.0f32; padded_hidden],
             dequant_f32: vec![0.0f32; padded_max_row],
             acts_f32: vec![0.0f32; max_row],
-            rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
+            rope: RopeTable::new(
+                head_dim,
+                max_ctx,
+                arch.rope_freq_base,
+                RopePairing::for_arch(arch.architecture),
+            ),
             name_buf: String::with_capacity(32),
         }
     }
@@ -548,6 +561,9 @@ pub fn forward_one(
     let n_head_kv = arch.head_count_kv as usize;
     let block_count = arch.block_count as usize;
     let vocab_size = session.vocab_size as usize;
+    // `--gpu cpu` and a session the GPU program gave up on keep every op
+    // on this CPU, whatever the shared tier table says.
+    let gpu = session.path == crate::slm::session::ForwardPath::PerOp;
 
     // Sanity: scratch was sized for this arch.
     if scratch.x_fp16.len() != hidden
@@ -590,6 +606,9 @@ pub fn forward_one(
         return None;
     }
 
+    // `slm stats --profile`. Off: one branch per class, no clock read.
+    let mut lap = LapTimer::new(session.telemetry.profile_on());
+
     // ---------------------------------------------------------------
     // Token embedding lookup. The table's quant type varies by build:
     // Qwen2.5 Q4_K_M ships token_embd as Q6_K, SmolLM2 as Q8_0, the
@@ -597,11 +616,13 @@ pub fn forward_one(
     // GGUF descriptor says.
     // ---------------------------------------------------------------
     embedding_lookup_hybrid(
+        gpu,
         slm,
         token_id,
         &mut scratch.x_fp16,
         &mut scratch.embed_f32,
     )?;
+    lap.lap(OpClass::Embed);
 
     // ---------------------------------------------------------------
     // Per-layer transformer block.
@@ -613,7 +634,8 @@ pub fn forward_one(
         // -- attention RMSNorm ---------------------------------------
         let attn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_norm.weight")?;
         f32_bytes_into_fp16_slice(attn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        lap.lap(OpClass::RmsNorm);
 
         // -- Q / K / V projections (matmul + optional F32 bias add) --
         //
@@ -670,6 +692,8 @@ pub fn forward_one(
             &mut scratch.v_fp16,
         )?;
 
+        lap.lap(OpClass::MatmulAttn);
+
         // -- RoPE (per-head) -----------------------------------------
         for h in 0..n_head_q {
             let off = h.checked_mul(head_dim)?;
@@ -679,6 +703,8 @@ pub fn forward_one(
             let off = h.checked_mul(head_dim)?;
             scratch.rope.apply(pos, &mut scratch.k_fp16[off..off + head_dim]);
         }
+
+        lap.lap(OpClass::Rope);
 
         // -- KV-cache append -----------------------------------------
         session.kv.append(layer, &scratch.k_fp16, &scratch.v_fp16)?;
@@ -697,6 +723,7 @@ pub fn forward_one(
         let k_view = session.kv.k_view_with_pending(layer)?;
         let v_view = session.kv.v_view_with_pending(layer)?;
         gqa_decode_hybrid(
+            gpu,
             &scratch.q_fp16,
             k_view,
             v_view,
@@ -707,6 +734,7 @@ pub fn forward_one(
             &mut scratch.attn_logits[..seq_len],
             &mut scratch.attn_out,
         )?;
+        lap.lap(OpClass::Gqa);
 
         // -- Output projection ---------------------------------------
         let (o_w, o_quant) =
@@ -729,6 +757,7 @@ pub fn forward_one(
         let attn_output_name = layer_tensor_name(
             &mut scratch.name_buf, layer, "attn_output.weight")?;
         matmul_q4k_rows_hybrid(
+            gpu,
             slm,
             attn_output_name,
             o_quant,
@@ -741,6 +770,7 @@ pub fn forward_one(
             &mut scratch.acts_f32,
             &mut scratch.matmul_f32[..proj_out_len],
         )?;
+        lap.lap(OpClass::MatmulAttn);
 
         // -- Attention residual --------------------------------------
         for i in 0..hidden {
@@ -748,12 +778,15 @@ pub fn forward_one(
             scratch.x_fp16[i] = f32_to_f16(r + scratch.matmul_f32[i]);
         }
 
+        lap.lap(OpClass::Add);
+
         // -- MLP block: residual + RMSNorm + SwiGLU + residual -------
         scratch.residual.copy_from_slice(&scratch.x_fp16);
 
         let ffn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_norm.weight")?;
         f32_bytes_into_fp16_slice(ffn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        lap.lap(OpClass::RmsNorm);
 
         // FFN weights mix quant types in K_M tiers — Qwen2.5-1.5B has
         // ffn_gate/ffn_up = Q4_K but ffn_down = Q6_K; SmolLM mixes
@@ -778,12 +811,15 @@ pub fn forward_one(
             &mut scratch.acts_f32,
             &mut scratch.mlp_out,
         )?;
+        // SwiGLU runs inside that call, so it counts as MLP matmul time here.
+        lap.lap(OpClass::MatmulMlp);
 
         for i in 0..hidden {
             let r = crate::slm::gguf::f16_to_f32(scratch.residual[i]);
             let m = crate::slm::gguf::f16_to_f32(scratch.mlp_out[i]);
             scratch.x_fp16[i] = f32_to_f16(r + m);
         }
+        lap.lap(OpClass::Add);
     }
 
     // ---------------------------------------------------------------
@@ -793,7 +829,8 @@ pub fn forward_one(
 
     let out_norm_bytes = slm.tensor_bytes("output_norm.weight")?;
     f32_bytes_into_fp16_slice(out_norm_bytes, &mut scratch.norm_fp16)?;
-    rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+    rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+    lap.lap(OpClass::RmsNorm);
 
     // Some Qwen2 builds tie `output.weight` to `token_embd.weight`. If
     // a dedicated LM-head tensor is present, use it; otherwise fall
@@ -818,6 +855,10 @@ pub fn forward_one(
         &mut scratch.acts_f32,
         &mut scratch.logits[..vocab_size],
     )?;
+    lap.lap(OpClass::LmHead);
+    if let Some(ns) = lap.finish() {
+        session.telemetry.classes(ns);
+    }
     Some(())
 }
 

@@ -169,6 +169,10 @@ endif
 #   make kernel-clean
 #   make kernel PLATFORM=JETSON_ORIN_NANO \
 #       EXTRA_KERNEL_CMAKE_ARGS=-DJETSON_XHCI_REBOOT_ON_NOOP=ON
+#
+# `slm gpu golden` (#475) is built the same way, with
+# EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON (embeds about 790 KB of
+# fixtures; see docs/deploy/jetson-uefi-direct.md).
 EXTRA_KERNEL_CMAKE_ARGS ?=
 
 # Cargo feature list built from the flags above.
@@ -378,6 +382,9 @@ kernel:
 
 .PHONY: _kernel-build
 _kernel-build: runtime kernel-config-check
+	@# Jetson: build missing or stale SASS before CMake globs it, or warn that
+	@# the GPU paths will be CPU-only (scripts/cuda/ensure-oplib-shaders.sh).
+	$(if $(filter JETSON_ORIN_NANO,$(PLATFORM)),@bash scripts/cuda/ensure-oplib-shaders.sh)
 	@test -f $(KERNEL_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
@@ -929,8 +936,11 @@ test-jetson-uefi-layout:
 #   2. with ImageBase rewritten to a non-RAM address, so the firmware
 #      loads it elsewhere and the EFI stub must relocate it — the
 #      situation on Jetson, whose firmware never grants 0x80000000.
-# Both must reach the shell prompt. Needs the qemu-efi-aarch64 package
-# (AAVMF firmware) and mtools. Build the kernel first (`make kernel`).
+# Both must reach the shell prompt. Then model delivery (ADR 0002):
+# scripts/test-qemu-uefi-models.sh boots with a small GGUF on the virtual
+# disk, and with each failure the real firmware can be made to produce.
+# Needs the qemu-efi-aarch64 package (AAVMF firmware) and mtools. Build
+# the kernel first (`make kernel`).
 .PHONY: test-qemu-uefi
 test-qemu-uefi:
 	@test -f $(KERNEL_BIN) || { echo "build the QEMU_VIRT kernel first: make kernel"; exit 2; }
@@ -940,7 +950,8 @@ test-qemu-uefi:
 		|| { echo "test-qemu-uefi: relocation path was not taken"; exit 1; }
 	@grep -a -q "Boot source: UEFI-direct" build/qemu-uefi/console.log \
 		|| { echo "test-qemu-uefi: boot source not recorded across the relocation"; exit 1; }
-	@echo "test-qemu-uefi: PASS (in-place and relocated UEFI boots)"
+	@bash scripts/test-qemu-uefi-models.sh $(KERNEL_BIN) $(TEST_TIMEOUT)
+	@echo "test-qemu-uefi: PASS (in-place and relocated UEFI boots, model delivery)"
 
 # VBIOS parser unit tests — runs on the host, no GPU required.
 # Synthetic VBIOS image built in the test, no proprietary binaries.
@@ -1086,6 +1097,23 @@ mnist-shaders-clean:
 .PHONY: test-build-order
 test-build-order:
 	@bash scripts/tests/test-build-order.sh
+
+# oplib-shaders: every *_shader.sass the kernel can embed, built with nvcc
+# (host cross-build or on a Jetson) into scripts/cuda/operator_library/, which
+# is gitignored. Also regenerates scripts/cuda/slm/MANIFEST.json, the SLM op
+# table. A Jetson GPU build needs these; without a toolkit the target stops
+# with instructions. test-oplib-shaders needs no toolkit (#475).
+.PHONY: oplib-shaders
+oplib-shaders:
+	@scripts/cuda/build-oplib-shaders.sh
+
+.PHONY: test-oplib-shaders
+test-oplib-shaders:
+	@bash scripts/tests/test-oplib-shaders.sh
+
+.PHONY: test-ensure-oplib-shaders
+test-ensure-oplib-shaders:
+	@out="$$(bash scripts/tests/test-ensure-oplib-shaders.sh 2>&1)" || { echo "$$out"; exit 1; }
 
 # test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
 # selection and section-table parsing, with nvcc/cuobjdump/readelf
@@ -1569,13 +1597,13 @@ TIDY_WIDE_MAKE_ARGS = $(if $(filter X86_64,$(PLATFORM)),,NET_SSHD=ON NET_SSHD_AU
 	HAILO_WIRE_DEBUG=ON AI_SCHED=ON AI_WEIGHTS=real
 TIDY_WIDE_CMAKE_ARGS = -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -DSECONDARY_PREEMPT=OFF \
 	-DJETSON_HW_TICK=OFF \
-	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON
+	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON -DSLM_GPU_GOLDEN=ON
 TIDY_WIDE_CFLAGS = -DSCHED_DEBUG_NC_TRACE -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
 # Defines each wide database must contain, because CMake can silently drop an
 # option: on Pi 5, COOP_PREEMPT also needs PI5_COOP_PREEMPT. The check fails if
 # one is missing.
 TIDY_WIDE_DEFINES = HAILO_WIRE_DEBUG SLMOS_AI_WEIGHTS_REAL CONFIG_AI_SCHEDULER \
-	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART \
+	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART SLM_GPU_GOLDEN \
 	SCHED_DEBUG_NC_TRACE JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
 TIDY_WIDE_SSH_DEFINES = NET_SSHD NET_SSHD_AUTOSTART
 TIDY_WIDE_DEFINES_QEMU_VIRT = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES)
@@ -1600,6 +1628,7 @@ tidy-db-configure:
 		$(if $(filter wide,$(TIDY_VARIANT)),$(TIDY_WIDE_CMAKE_ARGS)) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 		$(MAKE_PROGRAM_ARG) > /dev/null
+	@$(CMAKE) --build $(TIDY_DB_DIR)/$(TIDY_DB_NAME) --target slm_kernels_header > /dev/null
 
 .PHONY: tidy-clean
 tidy-clean:
@@ -1624,7 +1653,7 @@ check-gpu-shell-lock:
 	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
 
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)
@@ -1804,6 +1833,8 @@ help:
 	@echo "                        (output: $(MNIST_SHADER_OUT)/*.sass; requires CUDA Toolkit)"
 	@echo "  mnist-shaders-clean   Remove $(MNIST_SHADER_OUT)/"
 	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
+	@echo "  oplib-shaders         Build every *_shader.sass and the SLM op table (requires CUDA Toolkit)"
+	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

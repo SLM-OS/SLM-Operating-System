@@ -7,6 +7,9 @@
 //! activation footprint to fit Qwen2.5-1.5B's ~230 MB KV cache; FP32
 //! accumulators preserve numerical fidelity through long reduction chains
 //! (RMS, attention softmax, etc.).
+//! FP32 activations were measured against llama.cpp and do not bring greedy
+//! output closer: see "Numeric fidelity against llama.cpp" in
+//! `docs/design/slm-integration.md`.
 //!
 //! Includes the simpler ops (RMSNorm, RoPE, FP16 embedding lookup, SiLU)
 //! from M4.1 plus the matmul-heavy `gqa_decode_step`, `swiglu_mlp`,
@@ -85,24 +88,45 @@ pub fn rmsnorm(x: &[u16], gamma: &[u16], eps: f32, out: &mut [u16]) -> Option<()
 // RoPE
 // ---------------------------------------------------------------------------
 
+/// Which elements of a head vector RoPE rotates together. The two conventions
+/// are not interchangeable: they go with how the Q and K weights were laid out
+/// at conversion, so the choice follows the model's architecture.
+///
+/// Mirrors ggml's rope modes, which llama.cpp selects in
+/// `llama_model_rope_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RopePairing {
+    /// Pair `i` is `(vec[i], vec[i + head_dim/2])`: `GGML_ROPE_TYPE_NEOX`,
+    /// HF `rotate_half`. Qwen2.
+    HalfSplit,
+    /// Pair `i` is `(vec[2i], vec[2i+1])`: `GGML_ROPE_TYPE_NORMAL`. The `llama`
+    /// architecture (SmolLM2 here), whose Q and K weights are permuted at
+    /// conversion to suit it.
+    Interleaved,
+}
+
+impl RopePairing {
+    /// The pairing an architecture's weights were converted for.
+    pub fn for_arch(arch: crate::slm::gguf::ArchKind) -> Self {
+        match arch {
+            crate::slm::gguf::ArchKind::Qwen2 => RopePairing::HalfSplit,
+            crate::slm::gguf::ArchKind::Llama => RopePairing::Interleaved,
+        }
+    }
+}
+
 /// Precomputed RoPE cos/sin table for a given `head_dim` and `theta_base`.
 ///
 /// Built once per session (head_dim is per-arch, theta_base comes from the
 /// GGUF metadata `*.rope.freq_base`). The table stores cos/sin pairs as
 /// `f32` since head_dim is small (~128) and the LUT footprint is tiny
-/// even at long context: 128 dims × 4096 positions × 4 B ≈ 2 MB.
-///
-/// # Convention
-///
-/// This implementation uses the GPT-NeoX / Llama / Qwen2 pair-interleave
-/// convention: pair `i` is `(vec[2i], vec[2i+1])`, **not** the alternate
-/// `(vec[i], vec[i + head_dim/2])` half-split convention some reference
-/// implementations use.
+/// even at long context: 128 dims x 4096 positions x 4 B = 2 MB.
 ///
 /// # Layout
 ///
-/// `cos_sin` is a flat `f32` vector of length `max_pos * head_dim`.
-/// For position `pos` and pair index `i` (i in `0..head_dim/2`):
+/// `cos_sin` is a flat `f32` vector of length `max_pos * head_dim`, the same
+/// for either [`RopePairing`]. For position `pos` and pair index `i` (i in
+/// `0..head_dim/2`):
 ///
 /// ```text
 /// cos_sin[pos * head_dim + 2*i]     = cos(pos * theta_i)
@@ -116,6 +140,7 @@ pub struct RopeTable {
     pub cos_sin: Vec<f32>,
     pub head_dim: usize,
     pub max_pos: usize,
+    pub pairing: RopePairing,
 }
 
 impl RopeTable {
@@ -126,7 +151,7 @@ impl RopeTable {
     ///
     /// `head_dim * max_pos` is checked for `usize` overflow before
     /// allocation.
-    pub fn new(head_dim: usize, max_pos: usize, theta_base: f32) -> Self {
+    pub fn new(head_dim: usize, max_pos: usize, theta_base: f32, pairing: RopePairing) -> Self {
         // Reject odd head_dim or zero dims by returning an empty table
         // — `apply` will then fall through with no-op behaviour.
         if head_dim == 0 || max_pos == 0 || head_dim % 2 != 0 {
@@ -134,6 +159,7 @@ impl RopeTable {
                 cos_sin: Vec::new(),
                 head_dim,
                 max_pos,
+                pairing,
             };
         }
 
@@ -144,26 +170,25 @@ impl RopeTable {
                     cos_sin: Vec::new(),
                     head_dim,
                     max_pos,
+                    pairing,
                 };
             }
         };
 
         let mut cos_sin = vec![0.0f32; total];
         let half = head_dim / 2;
+        // Each pair's angle is the previous one times a fixed scale, the same
+        // float sequence as ggml_rope_cache_init. libm::powf is allowed (mathf
+        // only replaces sqrtf/tanhf), as are libm::cosf and sinf.
+        let theta_scale = libm::powf(theta_base, -2.0 / (head_dim as f32));
 
         for pos in 0..max_pos {
+            let mut angle = pos as f32;
             for i in 0..half {
-                // theta_i = theta_base ^ (-2*i / head_dim).
-                let exponent = -2.0 * (i as f32) / (head_dim as f32);
-                // libm::powf is allowed (mathf only replaces sqrtf/tanhf).
-                let theta_i = libm::powf(theta_base, exponent);
-                let angle = (pos as f32) * theta_i;
-                // libm::cosf / sinf are allowed for the same reason.
-                let c = libm::cosf(angle);
-                let s = libm::sinf(angle);
                 let base = pos * head_dim + 2 * i;
-                cos_sin[base] = c;
-                cos_sin[base + 1] = s;
+                cos_sin[base] = libm::cosf(angle);
+                cos_sin[base + 1] = libm::sinf(angle);
+                angle *= theta_scale;
             }
         }
 
@@ -171,14 +196,15 @@ impl RopeTable {
             cos_sin,
             head_dim,
             max_pos,
+            pairing,
         }
     }
 
     /// Apply rotary embedding to `vec` in-place.
     ///
-    /// `vec` is a single query or key vector of length `head_dim`; pairs
-    /// `(vec[2i], vec[2i+1])` get rotated by the position's angle. FP16
-    /// storage, FP32 trig already baked into the LUT.
+    /// `vec` is a single query or key vector of length `head_dim`, rotated pair
+    /// by pair per [`RopePairing`] by the position's angle. FP16 storage, FP32
+    /// trig already baked into the LUT.
     ///
     /// No-op when `pos >= max_pos`, `vec.len() != head_dim`, or the LUT
     /// is empty (degenerate `head_dim` / overflow).
@@ -193,12 +219,16 @@ impl RopeTable {
         let half = self.head_dim / 2;
         let base = pos * self.head_dim;
         for i in 0..half {
+            let (a, b) = match self.pairing {
+                RopePairing::HalfSplit => (i, i + half),
+                RopePairing::Interleaved => (2 * i, 2 * i + 1),
+            };
             let c = self.cos_sin[base + 2 * i];
             let s = self.cos_sin[base + 2 * i + 1];
-            let v0 = f16_to_f32(vec[2 * i]);
-            let v1 = f16_to_f32(vec[2 * i + 1]);
-            vec[2 * i] = f32_to_f16(v0 * c - v1 * s);
-            vec[2 * i + 1] = f32_to_f16(v0 * s + v1 * c);
+            let v0 = f16_to_f32(vec[a]);
+            let v1 = f16_to_f32(vec[b]);
+            vec[a] = f32_to_f16(v0 * c - v1 * s);
+            vec[b] = f32_to_f16(v0 * s + v1 * c);
         }
     }
 }
@@ -983,7 +1013,7 @@ mod tests {
         // At pos=0, every angle is 0, so every cos=1 and sin=0.
         // Applying RoPE leaves the vector unchanged.
         let head_dim = 8usize;
-        let table = RopeTable::new(head_dim, 16, 10000.0);
+        let table = RopeTable::new(head_dim, 16, 10000.0, RopePairing::HalfSplit);
         let original = from_f32(&[0.5, -1.5, 2.0, -0.25, 0.75, 1.0, -0.5, 0.125]);
         let mut vec_buf = original.clone();
         table.apply(0, &mut vec_buf);
@@ -1006,7 +1036,7 @@ mod tests {
     fn rope_norm_preserved() {
         // RoPE is a rotation: ||apply(pos, v)|| == ||v||.
         let head_dim = 8usize;
-        let table = RopeTable::new(head_dim, 32, 10000.0);
+        let table = RopeTable::new(head_dim, 32, 10000.0, RopePairing::HalfSplit);
         let original = from_f32(&[0.5, -1.5, 2.0, -0.25, 0.75, 1.0, -0.5, 0.125]);
         let norm_before: f32 = to_f32(&original).iter().map(|x| x * x).sum::<f32>();
 
@@ -1021,9 +1051,39 @@ mod tests {
         }
     }
 
+    /// Which elements move together is the whole difference between the two
+    /// pairings (#1156): position 1, pair 0 rotates by exactly 1 radian.
+    #[test]
+    fn rope_pairing_decides_which_elements_rotate_together() {
+        let input = [1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let (c, s) = (libm::cosf(1.0), libm::sinf(1.0));
+
+        let table = RopeTable::new(8, 2, 10000.0, RopePairing::HalfSplit);
+        let mut v = from_f32(&input);
+        table.apply(1, &mut v);
+        let got = to_f32(&v);
+        assert!(approx_eq(got[0], c, 1e-3) && approx_eq(got[4], s, 1e-3), "{got:?}");
+        assert!(approx_eq(got[1], 0.0, 1e-6), "{got:?}");
+
+        let table = RopeTable::new(8, 2, 10000.0, RopePairing::Interleaved);
+        let mut v = from_f32(&input);
+        table.apply(1, &mut v);
+        let got = to_f32(&v);
+        assert!(approx_eq(got[0], c, 1e-3) && approx_eq(got[1], s, 1e-3), "{got:?}");
+        assert!(approx_eq(got[4], 0.0, 1e-6), "{got:?}");
+    }
+
+    /// Qwen2's Q and K are not permuted at conversion; the `llama` arch's are.
+    #[test]
+    fn rope_pairing_follows_the_architecture() {
+        use crate::slm::gguf::ArchKind;
+        assert_eq!(RopePairing::for_arch(ArchKind::Qwen2), RopePairing::HalfSplit);
+        assert_eq!(RopePairing::for_arch(ArchKind::Llama), RopePairing::Interleaved);
+    }
+
     #[test]
     fn rope_table_rejects_odd_head_dim() {
-        let table = RopeTable::new(7, 16, 10000.0);
+        let table = RopeTable::new(7, 16, 10000.0, RopePairing::HalfSplit);
         assert!(table.cos_sin.is_empty(), "odd head_dim should yield empty LUT");
         // apply() with mismatched head_dim is a no-op.
         let mut v = from_f32(&[1.0; 7]);

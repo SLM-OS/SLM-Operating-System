@@ -75,6 +75,19 @@ bool oplib_cold_active(void)
     return h != NULL && h->inst_block_phys == g_cold.ch->inst.phys;
 }
 
+bool oplib_cold_library_empty(void)
+{
+    return oplib_pool_init() != 0 || oplib_pool_sass_region_len() == 0u;
+}
+
+int oplib_cold_vm(const struct ga10b_gpu_ops **ops, struct ga10b_vm **vm)
+{
+    if (!oplib_cold_active()) return -1;
+    *ops = g_cold.ops;
+    *vm = &g_cold.ch->vm;
+    return 0;
+}
+
 const struct oplib_gpu_as *oplib_cold_as(void)
 {
     return oplib_cold_active() ? &g_cold.as : NULL;
@@ -328,6 +341,12 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
 
 bool oplib_cold_active(void) { return false; }
 const struct oplib_gpu_as *oplib_cold_as(void) { return NULL; }
+int oplib_cold_vm(const struct ga10b_gpu_ops **ops, struct ga10b_vm **vm)
+{
+    (void)ops;
+    (void)vm;
+    return -1;
+}
 const struct oplib_wpool *oplib_cold_wpool(void) { return NULL; }
 
 int oplib_cold_weights_pool_init(uint64_t bytes)

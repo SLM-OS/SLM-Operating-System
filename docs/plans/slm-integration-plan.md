@@ -405,11 +405,9 @@ token-by-token UART streaming.
   helper. Honors UART back-pressure.
 - ☐ `slm stream` reads from UART line-buffered until blank input; useful
   for interactive testing without copy-paste.
-- ☐ `slm stop` from a separate UART input session signals the stop flag —
-  requires a small change to `shell.c` to allow command interleaving from
-  the same UART (or document that `stop` works via a second session).
-  **Decision needed (M7-D1):** interleaved input vs. require second UART
-  session.
+- ✅ `slm stop` from a second shell session signals an atomic per-session
+  stop flag without taking any lock, and Ctrl-C on the session running the
+  prompt does the same. (M7-D1: both.)
 - ☐ Lua bindings: `slm.load`, `slm.launch`, `slm.prompt`, `slm.stats` —
   matches the existing `slm.component_*` pattern.
 - ☐ Help text + categorization in `builtin_commands[]`.
@@ -432,9 +430,10 @@ slmos> slm prompt 0 "What is virtual memory?"
 service, reachable via the message router.
 
 - ☐ `components/slm-runner/` with manifest from the spec.
-- ☐ Component subscribes `/slm/prompt`; for each message:
+- ✅ Component subscribes `/slm/prompt`; for each message:
   tokenize → render ChatML → run prompt → publish each token to
-  `/slm/token` → publish final stats to `/slm/done`.
+  `/slm/token` → publish final stats to `/slm/done`. See
+  `docs/tutorials/slm-component.md`.
 - ☐ Hot-swap-safe: model handle and KV cache live across replacements
   (similar to how `sensor_monitor` preserves subscriptions).
 - ☐ EL0 isolation: the EL0 task path works on QEMU, Pi 5 and Jetson, but
@@ -455,12 +454,12 @@ stats on `/slm/done`. Hot-swap of `slm-runner` preserves the loaded model
 **Goal:** All telemetry the spec promises, plus per-platform benchmark
 reports.
 
-- ☐ Per-op profiling under `slm stats --profile`: rmsnorm, rope, gqa
-  (broken into qkv-proj, attn, oproj), mlp (gate, up, silu*mul, down),
-  lm_head. Implementation: `Timer::elapsed()` ring buffer per op,
-  reported as ms/token average.
-- ☐ GPU PTIMER integration for `slm stats --gpu` (Jetson only).
-- ☐ Best-effort power proxy via BPMP MRQ for `slm stats --power`.
+- ✅ Per-op profiling under `slm stats --profile`, by op class: semaphore
+  timestamps on the GPU path, timers on the CPU path (#475).
+- ✅ GPU busy time for `slm stats --gpu`, from semaphore timestamps, not
+  PTIMER MMIO (#475).
+- ✅ Best-effort `slm stats --power`: BPMP temperatures; power prints `n/a`,
+  since no rail sensor is read (#475).
 - ☐ `slm bench` runs the spec's standard battery: 64/256-token prompt
   prefill + 256-token decode, three runs, reports min/avg/max.
 - ☐ Benchmark report committed to `docs/benchmarks.md` covering CPU and
@@ -494,7 +493,7 @@ reports.
 | M6-D3 | Tensor-core API to target | `nvcuda::wmma` C++ vs inline `mma.sync.aligned…` PTX | **Start with `wmma`** for readability; drop to inline PTX only on the 1–2 hottest kernels (`q4K_dot`, `gqa_attn`) if profiling shows a meaningful gap |
 | M6-D4 | Tier-1 / Tier-2 authoring order per M6.B kernel | Tier-1 first vs Tier-2 first | **Tier-2 first** per kernel — gives a working golden reference before HMMA tile work begins, so any Tier-1 slip leaves the GPU path intact |
 | M6-D5 | HMMA accumulator precision | FP16 vs FP32 | **FP32 accumulator** for attention (`Q·Kᵀ`, `P·V`) and `lm_head`; FP16 acceptable elsewhere. Matches llama.cpp's choices and stays inside the 1e-2 max-abs tolerance |
-| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | **Interleaved** if shell.c supports it cleanly; otherwise document the second-UART workaround for the demo |
+| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | Both: Ctrl-C polled during the decode, and `slm stop` from a second session |
 | M8-D1 | KV cache lifetime across hot-swap | preserve vs reset | **Preserve** — chat continuity matters; component generation counter handles correctness |
 
 ---

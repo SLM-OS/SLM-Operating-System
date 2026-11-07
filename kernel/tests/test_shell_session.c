@@ -642,6 +642,20 @@ static void test_blocking_input_releases_shell_mutex(void)
  * Lua shell command regressions
  * ============================================================================ */
 
+/* The rest of this file's `lua -e` assertions only mean something if a Lua
+ * error comes back as a failure and quoted code really runs (#1136). */
+static void test_lua_command_reports_errors_and_runs_quoted_code(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(1 + 1 == 2)\""));
+    TEST_ASSERT_NOT_EQUAL(0, shell_execute("lua -e \"assert(1 + 1 == 3)\""));
+    TEST_ASSERT_NOT_EQUAL(0, shell_execute("lua -e \"error('boom')\""));
+    TEST_ASSERT_NOT_EQUAL(0, shell_execute("lua -e \"this is not lua\""));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e 'assert(\"a b\" == \"a b\")'"));
+    /* A script that fails. */
+    write_lfs_file("/mnt/files/lua_fails.lua", "error('boom')");
+    TEST_ASSERT_NOT_EQUAL(0, shell_execute("lua /mnt/files/lua_fails.lua"));
+}
+
 static void test_lua_command_non_repl_state_does_not_persist_per_session(void)
 {
     struct task *cur = task_current();
@@ -844,6 +858,7 @@ int test_suite_shell_session(void)
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
     RUN_TEST(test_blocking_input_releases_shell_mutex);
+    RUN_TEST(test_lua_command_reports_errors_and_runs_quoted_code);
     RUN_TEST(test_lua_command_non_repl_state_does_not_persist_per_session);
     RUN_TEST(test_lua_command_state_does_not_persist_on_console);
     RUN_TEST(test_lua_command_arg_table_rebuilt_per_invocation);

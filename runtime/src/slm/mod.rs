@@ -9,9 +9,15 @@
 pub mod chat_template;
 pub mod decoder;
 pub mod forward;
+pub mod gpu_program;
 pub mod gguf;
+pub mod golden;
 pub mod kv_cache;
+#[cfg(test)]
+pub mod numerics_probe;
 pub mod registry;
 pub mod sampler;
 pub mod session;
+pub mod telemetry;
 pub mod tokenizer;
+mod unicode_tables;

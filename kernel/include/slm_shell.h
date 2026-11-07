@@ -23,4 +23,12 @@
  */
 int cmd_slm(int argc, char **argv);
 
+/* `slm stats --gpu`'s GPU-time lines, for tests. */
+#include "slm_ffi.h"
+void slm_stats_print_gpu_busy(const SlmTelemetryC *t);
+
+/* The `[slm] ttft=... total=...` line after a prompt: total is ttft plus
+ * decode. `tokens` and `bytes` are what the prompt printed. */
+void slm_prompt_print_summary(const SlmStatsC *st, uint64_t tokens, uint64_t bytes);
+
 #endif /* SLM_SHELL_H */

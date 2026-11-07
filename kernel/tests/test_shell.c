@@ -1640,6 +1640,122 @@ static void test_shell_register_external_command(void)
 }
 
 /* ============================================================================
+ * Argument parser tests (#1136)
+ * ============================================================================ */
+
+#define T_ARGS_MAX_WORD 64
+
+static int  t_args_argc;
+static char t_args_argv[SHELL_MAX_ARGS][T_ARGS_MAX_WORD];
+
+static int t_args_handler(int argc, char *argv[])
+{
+    t_args_argc = argc;
+    for (int i = 0; i < argc && i < SHELL_MAX_ARGS; i++) {
+        strncpy(t_args_argv[i], argv[i], T_ARGS_MAX_WORD - 1);
+        t_args_argv[i][T_ARGS_MAX_WORD - 1] = '\0';
+    }
+    return 0;
+}
+
+static void t_args_register(void)
+{
+    static bool registered;
+    if (registered) {
+        return;
+    }
+    shell_cmd_t cmd = {
+        .name = "t_args",
+        .handler = t_args_handler,
+        .help = "Parser test probe",
+        .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
+    };
+    TEST_ASSERT_EQUAL_INT(0, shell_register_command(&cmd));
+    registered = true;
+}
+
+static void test_shell_parse_double_quotes_group_words(void)
+{
+    t_args_register();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("t_args \"one two  three\" four"));
+    TEST_ASSERT_EQUAL_INT(3, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("one two  three", t_args_argv[1]);
+    TEST_ASSERT_EQUAL_STRING("four", t_args_argv[2]);
+}
+
+static void test_shell_parse_single_quotes_are_literal(void)
+{
+    t_args_register();
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("t_args 'print(\"a b\")' 'x\\y'"));
+    TEST_ASSERT_EQUAL_INT(3, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("print(\"a b\")", t_args_argv[1]);
+    TEST_ASSERT_EQUAL_STRING("x\\y", t_args_argv[2]);
+}
+
+static void test_shell_parse_escapes_inside_double_quotes(void)
+{
+    t_args_register();
+    /* \" and \\ are escapes; \n is left for the command to interpret. */
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("t_args \"say \\\"hi\\\" \\\\ \\n\""));
+    TEST_ASSERT_EQUAL_INT(2, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("say \"hi\" \\ \\n", t_args_argv[1]);
+}
+
+static void test_shell_parse_empty_quotes_are_an_argument(void)
+{
+    t_args_register();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("t_args \"\" x ''"));
+    TEST_ASSERT_EQUAL_INT(4, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("", t_args_argv[1]);
+    TEST_ASSERT_EQUAL_STRING("x", t_args_argv[2]);
+    TEST_ASSERT_EQUAL_STRING("", t_args_argv[3]);
+}
+
+static void test_shell_parse_midword_quote_is_ordinary(void)
+{
+    t_args_register();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("t_args What's a=\"b up"));
+    TEST_ASSERT_EQUAL_INT(4, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("What's", t_args_argv[1]);
+    TEST_ASSERT_EQUAL_STRING("a=\"b", t_args_argv[2]);
+    TEST_ASSERT_EQUAL_STRING("up", t_args_argv[3]);
+}
+
+static void test_shell_parse_text_after_closing_quote_joins(void)
+{
+    t_args_register();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("t_args \"a b\"c d"));
+    TEST_ASSERT_EQUAL_INT(3, t_args_argc);
+    TEST_ASSERT_EQUAL_STRING("a bc", t_args_argv[1]);
+    TEST_ASSERT_EQUAL_STRING("d", t_args_argv[2]);
+}
+
+static void test_shell_parse_unterminated_quote_runs_nothing(void)
+{
+    t_args_register();
+    t_args_argc = -1;
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("t_args \"never closed"));
+    TEST_ASSERT_EQUAL_INT(-1, t_args_argc);
+}
+
+static void test_shell_parse_too_many_args_runs_nothing(void)
+{
+    t_args_register();
+    t_args_argc = -1;
+    /* Exactly SHELL_MAX_ARGS words is fine. */
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("t_args 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"));
+    TEST_ASSERT_EQUAL_INT(SHELL_MAX_ARGS, t_args_argc);
+    /* One more used to drop the tail silently. */
+    t_args_argc = -1;
+    TEST_ASSERT_EQUAL_INT(-1,
+        shell_execute("t_args 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"));
+    TEST_ASSERT_EQUAL_INT(-1, t_args_argc);
+}
+
+/* ============================================================================
  * Working Directory and Path Resolution Tests
  * ============================================================================ */
 
@@ -4216,6 +4332,14 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_jetson_bpmp_pcie_cmds_correct_platform);
 
     /* Command dispatch tests - essential */
+    RUN_TEST(test_shell_parse_double_quotes_group_words);
+    RUN_TEST(test_shell_parse_single_quotes_are_literal);
+    RUN_TEST(test_shell_parse_escapes_inside_double_quotes);
+    RUN_TEST(test_shell_parse_empty_quotes_are_an_argument);
+    RUN_TEST(test_shell_parse_midword_quote_is_ordinary);
+    RUN_TEST(test_shell_parse_text_after_closing_quote_joins);
+    RUN_TEST(test_shell_parse_unterminated_quote_runs_nothing);
+    RUN_TEST(test_shell_parse_too_many_args_runs_nothing);
     RUN_TEST(test_shell_empty_command);
     RUN_TEST(test_shell_whitespace_only);
     RUN_TEST(test_shell_unknown_command);
