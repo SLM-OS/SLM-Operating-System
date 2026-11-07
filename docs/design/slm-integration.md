@@ -149,6 +149,52 @@ like a `model_idx` today.
 **Total new Rust:** ~4 200 LOC, all `#![no_std]`, all using existing kernel
 FFI for memory and time.
 
+### Numeric fidelity against llama.cpp
+
+**Decision: the forward path keeps FP16 activations.** FP32 activations do not
+bring greedy output closer to llama.cpp, so they would add memory and code for
+no gain. Token-exact output against llama.cpp is not a usable requirement,
+because llama.cpp does not meet it against itself.
+
+Measured on `qwen2.5-1.5b-instruct-q4_k_m.gguf` on x86-64 host, using the
+`bench/475/prompts` (68, 68 and 66 tokens), up to 256 greedy tokens, against
+llama.cpp `ca89968a` at one thread. The table gives the generated token where
+each run first differs from the reference:
+
+| Run | Reference | p1 | p2 | p3 | Wrong tokens, teacher-forced | Median RMS logit error |
+|---|---|---|---|---|---|---|
+| Interleaved RoPE (before #1156), first 64 tokens | AVX2 | 0 | 0 | 1 | 137 of 197 | 4.33 |
+| FP16 activations (shipped) | AVX2 | 90 | 25 | 6 | 24 of 768 | 0.175 |
+| FP32 activations, Q6_K through Q8_K, double RMS sum | AVX2 | 15 | 80 | 19 | 23 of 768 | 0.184 |
+| FP16 activations, first 64 tokens | scalar | 15 | 25 | 20 | 5 of 197 | 0.179 |
+| FP32 as above, first 64 tokens | scalar | none | 45 | 6 | 6 of 197 | 0.185 |
+| llama.cpp scalar build, free run | AVX2 | 15 | 45 | 6 | not comparable | per-step max median 0.85 to 0.93 |
+
+The scalar build is the same llama.cpp commit with SIMD, repack and sgemm off.
+Its logit error against the AVX2 build is the same size as SLM-OS's error.
+
+Every token that differs from the AVX2 reference is a near tie: the reference's
+top-1 lead there is at most 0.38 logits.
+
+**Cause.** Up to `ffn_out-0` the FP32 path agrees with llama.cpp to 1 or 2 F32
+ULP. Hidden values then reach about 2500, where F32 itself is coarse, and each
+matmul quantizes its activation to Q8_K with a step of `max / 127` per
+256-element block, so a rounding difference that crosses a bin boundary becomes
+a whole step. Injecting +/-1 F32 ULP of noise into the hidden state after each
+residual sum, with nothing else changed, gives RMS logit error of 0.12 to 0.32
+and maxima up to 1.48 against the same pass without noise, and flipped the
+argmax by step 10 of the 12 run (`golden_real_model_one_ulp_sensitivity`). A
+single element moved by 1 ULP does nothing at all on those 12 steps: Q8_K
+absorbs it unless a bin flips. So this is summation-order and rounding noise,
+not a modelling difference, and an exact match would need every ggml operation
+order reproduced bit for bit, per ggml SIMD path.
+
+**What this means for tests.** The golden suites compare logits within
+`LOGIT_TOLERANCE`, on a model whose greedy margins clear that noise. Bench runs
+against llama.cpp should compare quality and speed, not token identity past the
+first near tie. `runtime/src/slm/numerics_probe.rs` holds the switchable-rounding
+forward pass for repeating this; a test pins it to the production path bit for bit.
+
 ### Why not pull in llama.cpp wholesale
 
 Direct reasons:

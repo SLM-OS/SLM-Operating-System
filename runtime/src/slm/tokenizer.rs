@@ -5,8 +5,8 @@
 //! §M2 and `docs/design/slm-integration.md`). Vocab + merges + special-token
 //! tables are loaded from the GGUF metadata produced by the M1.x parser
 //! ([`crate::slm::gguf`]). No external regex / tokenizer crate is pulled
-//! in: the GPT-2 pre-tokenization split is implemented as a hand-rolled
-//! DFA.
+//! in: the pre-tokenization splits ([`PreTokenizer`], chosen by the GGUF's
+//! `tokenizer.ggml.pre`) are implemented by hand.
 //!
 //! The tokenizer is `no_std` + `alloc`, the same constraint envelope as
 //! the rest of the SLM runtime stack.
@@ -18,6 +18,7 @@
 //! | `tokenizer.ggml.tokens`      | `Array<String>`  | One entry per id, indexed by token id.   |
 //! | `tokenizer.ggml.merges`      | `Array<String>`  | `"left right"` per entry; first-space.   |
 //! | `tokenizer.ggml.token_type`  | `Array<I32>`     | Optional. 1 = NORMAL, 2 = BYTE, 3 = CTRL.|
+//! | `tokenizer.ggml.pre`         | `String`         | Optional. Selects the [`PreTokenizer`].  |
 //!
 //! For absent `token_type` metadata the loader falls back to detecting
 //! special tokens by the `<|...|>` pattern and assumes any single-byte
@@ -43,6 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::slm::gguf::{Gguf, MetaType, MetaValue};
+use crate::slm::unicode_tables::{LETTER_RANGES, NUMBER_RANGES};
 
 // ---------------------------------------------------------------------------
 // Plausibility gates
@@ -104,8 +106,36 @@ pub enum TokenizerError {
 // Tokenizer state
 // ---------------------------------------------------------------------------
 
+/// The regex that cuts text into chunks before BPE merging. Different splits
+/// give different token ids for the same text, and a model only ever saw the
+/// one it was trained with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreTokenizer {
+    /// `'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`.
+    /// Any GGUF that does not name a pre-tokenizer below.
+    Gpt2,
+    /// Qwen2's split, see [`next_chunk_qwen2`]. `tokenizer.ggml.pre` of `qwen2`
+    /// and the other names llama.cpp maps to `LLAMA_VOCAB_PRE_TYPE_QWEN2`.
+    Qwen2,
+}
+
+impl PreTokenizer {
+    fn from_gguf(gguf: &Gguf<'_>) -> Self {
+        match gguf.metadata("tokenizer.ggml.pre") {
+            Some(MetaValue::String(s))
+                if matches!(s.as_str(), "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2") =>
+            {
+                PreTokenizer::Qwen2
+            }
+            _ => PreTokenizer::Gpt2,
+        }
+    }
+}
+
 /// Byte-level BPE tokenizer.
 pub struct Bbpe {
+    /// The pre-tokenizer the GGUF names.
+    pre: PreTokenizer,
     /// Token-id → token-bytes.
     vocab: Vec<Vec<u8>>,
     /// Reverse lookup: token-bytes → token-id. Built from [`Self::vocab`]
@@ -335,6 +365,7 @@ impl Bbpe {
 
 
         Ok(Self {
+            pre: PreTokenizer::from_gguf(gguf),
             vocab,
             bytes_to_id,
             merges,
@@ -344,6 +375,11 @@ impl Bbpe {
             byte_table,
             byte_for_id,
         })
+    }
+
+    /// The pre-tokenizer this vocabulary uses.
+    pub fn pre_tokenizer(&self) -> PreTokenizer {
+        self.pre
     }
 
     /// Number of tokens in the vocabulary. Always fits in `u32` because
@@ -427,8 +463,8 @@ impl Bbpe {
         out
     }
 
-    /// Encode a UTF-8 string into a Vec of token ids. The pre-tokenizer
-    /// splits on the GPT-2 regex; BPE merges run within each chunk.
+    /// Encode a UTF-8 string into a Vec of token ids. The GGUF's
+    /// [`PreTokenizer`] splits the text; BPE merges run within each chunk.
     /// Special-token strings are tokenized as bytes — pass ChatML
     /// inputs through [`crate::slm::chat_template::encode_chat`] or
     /// [`Self::encode_with_specials`] to have specials looked up by name.
@@ -443,7 +479,7 @@ impl Bbpe {
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out: Vec<u32> = Vec::with_capacity(text.len() / 3);
         let mut encoded: String = String::new();
-        for chunk in pre_tokenize(text) {
+        for chunk in pre_tokenize(text, self.pre) {
             encoded.clear();
             encoded.reserve(chunk.len() * 2);
             for &b in chunk.as_bytes() {
@@ -830,25 +866,20 @@ fn hex_digit(c: u8) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// GPT-2 pre-tokenization split
+// Pre-tokenization splits
 // ---------------------------------------------------------------------------
 
-/// Pre-tokenize `text` into chunks per the GPT-2 split regex used by
-/// Qwen2 and Llama:
-///
-/// ```text
-/// '(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-/// ```
-///
-/// Implemented as a hand-rolled DFA — no regex crate.
-pub(crate) fn pre_tokenize(text: &str) -> PreTokens<'_> {
-    PreTokens { text, pos: 0 }
+/// Pre-tokenize `text` into chunks per `kind`'s split. Implemented by hand: no
+/// regex crate.
+pub(crate) fn pre_tokenize(text: &str, kind: PreTokenizer) -> PreTokens<'_> {
+    PreTokens { text, pos: 0, kind }
 }
 
 /// Iterator returned by [`pre_tokenize`].
 pub(crate) struct PreTokens<'a> {
     text: &'a str,
     pos: usize,
+    kind: PreTokenizer,
 }
 
 impl<'a> Iterator for PreTokens<'a> {
@@ -859,12 +890,136 @@ impl<'a> Iterator for PreTokens<'a> {
             return None;
         }
         let rest = &self.text[self.pos..];
-        let (start, end) = next_chunk(rest)?;
+        let (start, end) = match self.kind {
+            PreTokenizer::Gpt2 => next_chunk(rest)?,
+            PreTokenizer::Qwen2 => (0, next_chunk_qwen2(rest)?),
+        };
         let abs_start = self.pos + start;
         let abs_end = self.pos + end;
         self.pos = abs_end;
         Some(&self.text[abs_start..abs_end])
     }
+}
+
+/// Membership in a sorted table of inclusive ranges.
+fn in_ranges(c: char, table: &[(u32, u32)]) -> bool {
+    let c = c as u32;
+    table
+        .binary_search_by(|&(lo, hi)| {
+            if c < lo {
+                core::cmp::Ordering::Greater
+            } else if c > hi {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// `\p{L}`. Not `char::is_alphabetic`, which also accepts marks and so would
+/// keep a Devanagari virama inside a letter run.
+fn is_letter(c: char) -> bool {
+    in_ranges(c, LETTER_RANGES)
+}
+
+/// `\p{N}`, from the same data as [`is_letter`].
+fn is_number(c: char) -> bool {
+    in_ranges(c, NUMBER_RANGES)
+}
+
+/// `[^\s\p{L}\p{N}]`.
+fn is_other(c: char) -> bool {
+    !c.is_whitespace() && !is_letter(c) && !is_number(c)
+}
+
+/// Byte length of the next Qwen2 chunk of `rest`, `None` when it is empty:
+///
+/// ```text
+/// (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+/// ```
+///
+/// Port of llama.cpp's `unicode_regex_split_custom_qwen2`, which the tokenizer
+/// goldens in `scripts/fixtures/slm/` come from. The alternatives run in order,
+/// and each `at` below is a char boundary because it only moves by whole chars.
+fn next_chunk_qwen2(rest: &str) -> Option<usize> {
+    let at = |pos: usize| rest[pos..].chars().next();
+    let c0 = at(0)?;
+    let p1 = c0.len_utf8();
+    let c1 = at(p1);
+
+    // (?i:'s|'t|'re|'ve|'m|'ll|'d). ASCII lowercasing is enough:
+    // slm-gen-unicode-tables.py checks no other char lowercases to these.
+    if c0 == '\'' {
+        if let Some(next) = c1 {
+            let n1 = next.to_ascii_lowercase();
+            if matches!(n1, 's' | 't' | 'm' | 'd') {
+                return Some(p1 + 1);
+            }
+            if let Some(n2) = at(p1 + next.len_utf8()) {
+                let n2 = n2.to_ascii_lowercase();
+                if matches!((n1, n2), ('r', 'e') | ('v', 'e') | ('l', 'l')) {
+                    return Some(p1 + 2);
+                }
+            }
+        }
+    }
+
+    // [^\r\n\p{L}\p{N}]?\p{L}+. Taken as "any char, then letters" when either
+    // of the first two chars is a letter, so one leading space or symbol joins.
+    if c0 != '\r' && c0 != '\n' && !is_number(c0) && (is_letter(c0) || c1.is_some_and(is_letter)) {
+        let mut pos = p1;
+        while let Some(c) = at(pos).filter(|&c| is_letter(c)) {
+            pos += c.len_utf8();
+        }
+        return Some(pos);
+    }
+
+    // \p{N}: one digit per chunk.
+    if is_number(c0) {
+        return Some(p1);
+    }
+
+    // <space>?[^\s\p{L}\p{N}]+[\r\n]*. A lone final space comes through here
+    // too, as itself.
+    let body = if c0 == ' ' { p1 } else { 0 };
+    if at(body).map_or(true, is_other) {
+        let mut pos = body;
+        while let Some(c) = at(pos).filter(|&c| is_other(c)) {
+            pos += c.len_utf8();
+        }
+        while let Some(c) = at(pos).filter(|&c| c == '\r' || c == '\n') {
+            pos += c.len_utf8();
+        }
+        return Some(pos);
+    }
+
+    // What is left starts with whitespace, so measure the run.
+    let mut count = 0usize;
+    let mut run_end = 0usize;
+    let mut before_last = 0usize;
+    let mut after_newline = 0usize;
+    for (i, c) in rest.char_indices() {
+        if !c.is_whitespace() {
+            break;
+        }
+        count += 1;
+        before_last = i;
+        run_end = i + c.len_utf8();
+        if c == '\r' || c == '\n' {
+            after_newline = run_end;
+        }
+    }
+    // \s*[\r\n]+
+    if after_newline > 0 {
+        return Some(after_newline);
+    }
+    // \s+(?!\S): the last space stays for the chunk after it.
+    if count > 1 && run_end < rest.len() {
+        return Some(before_last);
+    }
+    // \s+
+    Some(run_end.max(p1))
 }
 
 /// Find the next chunk in `rest` and return its `(start, end)` byte
@@ -999,6 +1154,76 @@ mod tests {
     use super::*;
     use crate::slm::gguf::Gguf;
     use alloc::vec;
+
+    /// One expected split per alternative of the Qwen2 regex, in order.
+    #[test]
+    fn qwen2_split_follows_each_regex_alternative() {
+        let cases: &[(&str, &[&str])] = &[
+            // Contractions, case-insensitive.
+            ("IT'S don't WE'LL", &["IT", "'S", " don", "'t", " WE", "'LL"]),
+            // Bare apostrophe: nothing to contract with.
+            ("a'", &["a", "'"]),
+            // One leading non-space char joins the letters behind it.
+            ("a+b=c", &["a", "+b", "=c"]),
+            ("?q=1&r=2", &["?q", "=", "1", "&r", "=", "2"]),
+            // Digits go one at a time, without the leading space.
+            ("in 42", &["in", " ", "4", "2"]),
+            // Punctuation takes the newlines right behind it, and a leading space.
+            ("End.\nNext !!\n\nx", &["End", ".\n", "Next", " !!\n\n", "x"]),
+            // Whitespace run ending in a newline stays together.
+            ("a \n\n  b", &["a", " \n\n", " ", " b"]),
+            ("x\r\ny", &["x", "\r\n", "y"]),
+            // Whitespace before a word leaves its last space to that word.
+            ("a   b", &["a", "  ", " b"]),
+            // Trailing whitespace stays together, a lone final space too.
+            ("a   ", &["a", "   "]),
+            ("a ", &["a", " "]),
+            (" ", &[" "]),
+            ("\t", &["\t"]),
+            // Marks are not letters: the virama and vowel sign end the run.
+            ("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}",
+             &["\u{0928}\u{092E}\u{0938}", "\u{094D}\u{0924}", "\u{0947}"]),
+        ];
+        for (text, want) in cases {
+            let got: Vec<&str> = pre_tokenize(text, PreTokenizer::Qwen2).collect();
+            assert_eq!(&got, want, "{text:?}");
+        }
+    }
+
+    /// No input may lose bytes or stall the split, whatever it holds.
+    #[test]
+    fn qwen2_split_covers_every_byte() {
+        let text = "a\u{0301} \u{00A0}\u{3000}x'\r\n\t\u{FFFD}\u{1F600}9 \u{0660}' ";
+        for start in text.char_indices().map(|(i, _)| i) {
+            let tail = &text[start..];
+            let joined: String = pre_tokenize(tail, PreTokenizer::Qwen2).collect();
+            assert_eq!(joined, tail);
+        }
+    }
+
+    #[test]
+    fn letter_and_number_tables_are_sorted_and_classify() {
+        for t in [LETTER_RANGES, NUMBER_RANGES] {
+            assert!(t.windows(2).all(|w| w[0].1 < w[1].0));
+        }
+        assert!(is_letter('a') && is_letter('\u{4E2D}') && is_letter('\u{0928}'));
+        assert!(!is_letter('\u{094D}'), "virama is a mark");
+        assert!(!is_letter('1') && !is_letter(' '));
+        assert!(is_number('7') && is_number('\u{0660}') && !is_number('a'));
+    }
+
+    /// `tokenizer.ggml.pre` picks the split: SmolLM2 and fixtures that name
+    /// nothing else keep GPT-2's.
+    #[test]
+    fn pre_tokenizer_comes_from_gguf_metadata() {
+        let tiny = build_tiny_gguf();
+        let gguf = Gguf::parse(&tiny).expect("fixture parses");
+        assert_eq!(Bbpe::from_gguf(&gguf).unwrap().pre_tokenizer(), PreTokenizer::Gpt2);
+
+        let vocab = include_bytes!("../../../scripts/fixtures/slm/qwen_vocab.gguf");
+        let gguf = Gguf::parse(vocab).expect("vocab fixture parses");
+        assert_eq!(Bbpe::from_gguf(&gguf).unwrap().pre_tokenizer(), PreTokenizer::Qwen2);
+    }
 
     /// Build a tiny synthetic GGUF whose tokenizer metadata covers the
     /// pieces a tokenizer test needs: ASCII byte tokens, a few merges,
@@ -1235,13 +1460,13 @@ mod tests {
 
     #[test]
     fn pre_tokenize_splits_letters_digits_punct() {
-        let chunks: Vec<&str> = pre_tokenize("Hi 42!").collect();
+        let chunks: Vec<&str> = pre_tokenize("Hi 42!", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["Hi", " 42", "!"]);
     }
 
     #[test]
     fn pre_tokenize_handles_apostrophe_contractions() {
-        let chunks: Vec<&str> = pre_tokenize("don't").collect();
+        let chunks: Vec<&str> = pre_tokenize("don't", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["don", "'t"]);
     }
 
@@ -1251,7 +1476,7 @@ mod tests {
         // alternation should keep two spaces with the whitespace run
         // and hand the last one off to the next chunk's optional
         // leading-space rule.
-        let chunks: Vec<&str> = pre_tokenize("Hi   x").collect();
+        let chunks: Vec<&str> = pre_tokenize("Hi   x", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["Hi", "  ", " x"]);
     }
 

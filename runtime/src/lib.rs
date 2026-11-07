@@ -6356,7 +6356,7 @@ const SLM_SAMPLER_TOP_K_TOP_P: u32 = 4;
 const SLM_ERR_BUSY: i32 = -3;
 /// `rust_slm_prompt_ex` flag: tokenize the text as given.
 #[cfg(feature = "slm")]
-const SLM_PROMPT_RAW: u32 = 1;
+pub(crate) const SLM_PROMPT_RAW: u32 = 1;
 
 /// C-layout snapshot of session telemetry. Mirrors `SlmStatsC` in
 /// the kernel header.
