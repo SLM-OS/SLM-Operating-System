@@ -34,6 +34,7 @@ struct slm_sass_info {
     uint32_t tier;
     uint32_t regs;
     uint32_t smem;
+    uint32_t barriers;
 };
 
 static const struct slm_sass_info g_sass[SLM_SASS_COUNT] = { SLM_SASS_TABLE };
@@ -48,31 +49,58 @@ static inline void put32(uint8_t *a, uint32_t cbuf_off, uint32_t v)
     memcpy(a + (cbuf_off - GA10B_PROG_CBUF_ARGS_BASE), &v, 4);
 }
 
-static bool sass_is_simt_mm(uint32_t sass)
+enum mm_variant { MM_SIMT, MM_B1, MM_B8, MM_BS, MM_B64 };
+
+static enum mm_variant mm_variant_of(uint32_t sass)
 {
-    return sass == SLM_SASS_MM_Q4K_SIMT || sass == SLM_SASS_MM_Q6K_SIMT;
+    switch (sass) {
+    case SLM_SASS_MM_Q4K_SIMT: case SLM_SASS_MM_Q6K_SIMT: return MM_SIMT;
+    case SLM_SASS_MM_Q4K_HMMA_B1: case SLM_SASS_MM_Q6K_HMMA_B1: return MM_B1;
+    case SLM_SASS_MM_Q4K_HMMA_BS: case SLM_SASS_MM_Q6K_HMMA_BS: return MM_BS;
+    case SLM_SASS_MM_Q4K_HMMA_B64: case SLM_SASS_MM_Q6K_HMMA_B64: return MM_B64;
+    default: return MM_B8;
+    }
 }
 
+/* Decode: B = 1 kernels. Prefill: b8 to 8 rows; past that x in shared memory
+ * (bs) when N is big enough to fill the SMs, otherwise b8 split per x tile.
+ * The same choice as scripts/cuda/harness/slm_forward.cu add_mm. */
 int slm_prog_op_sass(const struct slm_prog_op *op)
 {
     if (!op) return -1;
     bool simt = (op->scal[1] & SLM_PROG_MM_SIMT) != 0u;
-    bool b8 = op->rows <= 8u;
+    uint32_t rows = op->rows;
+    bool big = op->dim[1] > 256u;
     switch (op->kernel) {
-    case SLM_PROG_K_RMSNORM: return SLM_SASS_RMSNORM;
+    case SLM_PROG_K_RMSNORM: return SLM_SASS_RMSNORM_W8;
     case SLM_PROG_K_ROPE: return SLM_SASS_ROPE;
     case SLM_PROG_K_SWIGLU: return SLM_SASS_SWIGLU;
-    case SLM_PROG_K_GQA: return SLM_SASS_GQA;
+    case SLM_PROG_K_GQA: return SLM_SASS_GQA_W8;
     case SLM_PROG_K_ADD: return SLM_SASS_ADD;
     case SLM_PROG_K_EMBED_Q4K: return SLM_SASS_EMBED_Q4K;
     case SLM_PROG_K_EMBED_Q6K: return SLM_SASS_EMBED_Q6K;
     case SLM_PROG_K_MM_Q4K:
-        return simt ? SLM_SASS_MM_Q4K_SIMT : b8 ? SLM_SASS_MM_Q4K_HMMA_B8 : SLM_SASS_MM_Q4K_HMMA_B64;
+        return simt ? SLM_SASS_MM_Q4K_SIMT : rows == 1u ? SLM_SASS_MM_Q4K_HMMA_B1
+             : rows <= 8u ? SLM_SASS_MM_Q4K_HMMA_B8
+             : big ? SLM_SASS_MM_Q4K_HMMA_BS : SLM_SASS_MM_Q4K_HMMA_B8;
     case SLM_PROG_K_MM_Q6K:
-        return simt ? SLM_SASS_MM_Q6K_SIMT : b8 ? SLM_SASS_MM_Q6K_HMMA_B8 : SLM_SASS_MM_Q6K_HMMA_B64;
+        return simt ? SLM_SASS_MM_Q6K_SIMT : rows == 1u ? SLM_SASS_MM_Q6K_HMMA_B1
+             : rows <= 8u ? SLM_SASS_MM_Q6K_HMMA_B8
+             : big ? SLM_SASS_MM_Q6K_HMMA_BS : SLM_SASS_MM_Q6K_HMMA_B8;
     default:
         return -1;
     }
+}
+
+/* Warps per CTA of a B = 1 matmul: enough tiles to fill the SMs, never more
+ * warps than weight blocks. As mm_nw in the harness. */
+static uint32_t mm_nw(uint32_t k, uint32_t n)
+{
+    uint32_t grid = (n + 14u) / 15u;
+    uint32_t want = (200u + grid - 1u) / grid;
+    uint32_t nw = k / 256u < 8u ? k / 256u : 8u;
+    if (want < nw) nw = want;
+    return nw ? nw : 1u;
 }
 
 /* Largest element count a launch can cover: grid fields are 32-bit. */
@@ -96,6 +124,7 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
     l->args = args;
     l->register_count_v = g_sass[sass].regs;
     l->smem_size_bytes = g_sass[sass].smem;
+    l->barrier_count = g_sass[sass].barriers;
     l->block_x = 32;
     l->block_y = 1;
     l->block_z = 1;
@@ -107,10 +136,41 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
     switch (op->kernel) {
     case SLM_PROG_K_MM_Q4K:
     case SLM_PROG_K_MM_Q6K: {
-        uint32_t k = op->dim[0], n = op->dim[1];
-        bool simt = sass_is_simt_mm(sass);
-        if (k == 0u || n == 0u || (!simt && rows > 64u) || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) {
+        uint32_t k = op->dim[0], n = op->dim[1], flags = op->scal[0];
+        enum mm_variant v = mm_variant_of(sass);
+        if (k == 0u || n == 0u || !op->ptr[0] || !op->ptr[1] || !op->ptr[2] ||
+            (op->ptr[0] & 15u) || (v == MM_B1 && rows != 1u) ||
+            (rows > 64u && v != MM_SIMT)) {
             return -1;
+        }
+        l->grid_x = (n + 14u) / 15u;    /* a tile holds 15 weight rows */
+        switch (v) {
+        case MM_SIMT:
+            l->grid_x = n;
+            l->grid_y = rows;
+            break;
+        case MM_B1: {
+            uint32_t nw = mm_nw(k, n);
+            l->block_y = nw;
+            flags |= nw << 8;
+            break;
+        }
+        case MM_BS:
+            l->grid_x = (n + 119u) / 120u;
+            l->block_y = 8;
+            break;
+        case MM_B64:
+            /* One CTA per (tile, x tile): flags SPLIT_XT, the whole K as the range. */
+            l->grid_y = (rows + 7u) >> 3;
+            flags |= SLM_PROG_MM_SPLIT_XT | ((k / 256u) << 16);
+            break;
+        case MM_B8:
+            /* Past 8 rows: one CTA per (tile, x tile of 8 rows). */
+            if (rows > 8u) {
+                l->grid_y = (rows + 7u) >> 3;
+                flags |= SLM_PROG_MM_SPLIT_XT;
+            }
+            break;
         }
         put64(args, 0x160, op->ptr[0]);
         put64(args, 0x168, op->ptr[1]);
@@ -119,14 +179,8 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         put32(args, 0x180, k);
         put32(args, 0x184, n);
         put32(args, 0x188, rows);
-        put32(args, 0x18C, op->scal[0]);
+        put32(args, 0x18C, flags);
         l->args_len = 0x30;
-        if (simt) {
-            l->grid_x = n;
-            l->grid_y = rows;
-        } else {
-            l->grid_x = (n + 14u) / 15u;    /* a tile holds 15 weight rows */
-        }
         return 0;
     }
     case SLM_PROG_K_EMBED_Q4K:
@@ -152,6 +206,7 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         put32(args, 0x180, op->scal[0]);
         l->args_len = 0x24;
         l->grid_x = rows;
+        l->block_y = 8;
         return 0;
     case SLM_PROG_K_ADD:
     case SLM_PROG_K_SWIGLU:
@@ -197,6 +252,7 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         l->args_len = 0x38;
         l->grid_x = op->dim[0];
         l->grid_y = rows;
+        l->block_y = 8;
         return 0;
     default:
         return -1;
@@ -430,6 +486,8 @@ static uint64_t control_bytes(const struct slm_prog_open_args *a)
 {
     uint64_t total = align256(a->step_bytes);
     uint32_t f = (a->flags & SLM_PROG_FLAG_PROFILE) ? GA10B_PROG_F_PROFILE : 0u;
+    /* Room for the injected acquire in the sizes below as well. */
+    f |= (a->flags & SLM_PROG_FLAG_INJECT_HANG) ? GA10B_PROG_F_INJECT_HANG : 0u;
     for (unsigned s = 0; s < SLM_PROG_SHAPES; s++) {
         if (a->max_launches[s] == 0u) continue;
         uint32_t pb, q, c, se;
@@ -553,10 +611,11 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
     uint32_t pf = 0;
     if (a->flags & SLM_PROG_FLAG_LEAN_QMD) pf |= GA10B_PROG_F_LEAN_QMD;
     if (a->flags & SLM_PROG_FLAG_PROFILE) pf |= GA10B_PROG_F_PROFILE;
+    uint32_t sized = pf | ((a->flags & SLM_PROG_FLAG_INJECT_HANG) ? GA10B_PROG_F_INJECT_HANG : 0u);
     for (unsigned i = 0; i < SLM_PROG_SHAPES; i++) {
         if (a->max_launches[i] == 0u) continue;
         uint32_t pb, q, c, se;
-        uint32_t fi = pf | shape_marks(i);
+        uint32_t fi = sized | shape_marks(i);
         ga10b_prog_sizes(a->max_launches[i], fi, &pb, &q, &c, &se);
         struct ga10b_prog_mem m_pb = { (uint8_t *)s->control.cpu + off, s->control_va + off, pb };
         off += align256(pb);
@@ -566,7 +625,9 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         off += align256(c);
         struct ga10b_prog_mem m_s = { (uint8_t *)s->control.cpu + off, s->control_va + off, se };
         off += align256(se);
-        if (ga10b_prog_init(&s->shapes[i].p, &m_pb, &m_q, &m_c, &m_s, a->max_launches[i], fi,
+        uint32_t spf = pf | shape_marks(i);
+        if (i == 0u && (a->flags & SLM_PROG_FLAG_INJECT_HANG)) spf |= GA10B_PROG_F_INJECT_HANG;
+        if (ga10b_prog_init(&s->shapes[i].p, &m_pb, &m_q, &m_c, &m_s, a->max_launches[i], spf,
                             (enum ga10b_prog_barrier)a->barrier) != GA10B_PROG_OK) {
             rc = SLM_PROG_ERR_ARG;
             goto fail;
@@ -817,10 +878,15 @@ uint32_t slm_prog_max_batch(bool simt)
         return sass_present(be, SLM_SASS_MM_Q4K_SIMT) && sass_present(be, SLM_SASS_MM_Q6K_SIMT)
                    ? 64u : 0u;
     }
-    if (!sass_present(be, SLM_SASS_MM_Q4K_HMMA_B8) || !sass_present(be, SLM_SASS_MM_Q6K_HMMA_B8)) {
+    if (!sass_present(be, SLM_SASS_MM_Q4K_HMMA_B1) || !sass_present(be, SLM_SASS_MM_Q6K_HMMA_B1)) {
         return 0u;
     }
-    return sass_present(be, SLM_SASS_MM_Q4K_HMMA_B64) && sass_present(be, SLM_SASS_MM_Q6K_HMMA_B64)
+    if (!sass_present(be, SLM_SASS_MM_Q4K_HMMA_B8) || !sass_present(be, SLM_SASS_MM_Q6K_HMMA_B8)) {
+        return 1u;
+    }
+    return sass_present(be, SLM_SASS_MM_Q4K_HMMA_BS) && sass_present(be, SLM_SASS_MM_Q6K_HMMA_BS) &&
+                   sass_present(be, SLM_SASS_MM_Q4K_HMMA_B64) &&
+                   sass_present(be, SLM_SASS_MM_Q6K_HMMA_B64)
                ? 64u : 8u;
 }
 

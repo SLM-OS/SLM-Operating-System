@@ -6672,6 +6672,14 @@ pub extern "C" fn rust_slm_session_gpu_profile(session_id: u32) -> i32 {
     r.unwrap_or(-1)
 }
 
+/// `slm gpu inject`: failure for the next launch's decode program. 0 none,
+/// 1 a hang, 2 an MMU fault.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_set_inject(kind: u32) {
+    slm::gpu_program::set_inject(kind);
+}
+
 /// `slm gpu opcheck`: every kernel against its CPU reference. Returns the
 /// number of failed checks, or -1 with the reason on the console.
 #[no_mangle]

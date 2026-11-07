@@ -1604,20 +1604,14 @@ static int slm_gpu_golden(int argc, char *argv[])
         shell_puts("slm gpu golden: FAIL, the program did not run\r\n");
         return -1;
     }
-    if (r.first_bad_step < 0) {
-        shell_printf("slm gpu golden: PASS, %lu steps, %lu same top token, max error %d.%03d, "
-                     "%llu us/token\r\n",
-                     (unsigned long)r.steps, (unsigned long)r.argmax_matches,
-                     (int)(r.max_err_milli / 1000), (int)(r.max_err_milli % 1000),
-                     (unsigned long long)r.gpu_us_per_token);
-        return 0;
-    }
-    shell_printf("slm gpu golden: FAIL at step %d logit %d: got %d milli, want %d milli "
-                 "(%lu steps, %lu same top token, max error %d milli)\r\n",
-                 (int)r.first_bad_step, (int)r.first_bad_index,
-                 (int)r.first_bad_got_milli, (int)r.first_bad_want_milli,
-                 (unsigned long)r.steps, (unsigned long)r.argmax_matches, (int)r.max_err_milli);
-    return -1;
+    bool ok = r.first_bad_step < 0 && r.exact_first_bad_step < 0 && r.argmax_matches == r.steps;
+    shell_printf("slm gpu golden: %s, %lu steps, %lu same top token, vs llama.cpp max %d milli "
+                 "(first over 1500 at step %d), vs exact max %d milli (first over 100 at step %d), "
+                 "%llu us/token\r\n",
+                 ok ? "PASS" : "FAIL", (unsigned long)r.steps, (unsigned long)r.argmax_matches,
+                 (int)r.max_err_milli, (int)r.first_bad_step, (int)r.exact_max_err_milli,
+                 (int)r.exact_first_bad_step, (unsigned long long)r.gpu_us_per_token);
+    return ok ? 0 : -1;
 }
 #endif
 
@@ -1673,6 +1667,13 @@ static int slm_gpu(int argc, char *argv[])
         return 0;
     }
     if (argc >= 3 && strcmp(argv[2], "smoke") == 0) return slm_gpu_smoke(argc, argv);
+    if (argc >= 4 && strcmp(argv[2], "inject") == 0) {
+        uint32_t kind = strcmp(argv[3], "hang") == 0 ? 1u : strcmp(argv[3], "fault") == 0 ? 2u : 0u;
+        rust_slm_gpu_set_inject(kind);
+        shell_printf("next `slm launch`: decode %s\r\n",
+                     kind == 1u ? "hangs" : kind == 2u ? "faults" : "runs normally");
+        return 0;
+    }
 #ifdef SLM_GPU_GOLDEN
     if (argc >= 3 && strcmp(argv[2], "golden") == 0) return slm_gpu_golden(argc, argv);
 #endif

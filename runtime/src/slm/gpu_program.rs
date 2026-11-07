@@ -99,9 +99,19 @@ pub const FLAG_LEAN_QMD: u32 = 1;
 pub const FLAG_PROFILE: u32 = 2;
 /// Run matmuls on the SIMT kernels (plan decision M6-D4's reference).
 pub const FLAG_SIMT: u32 = 4;
+/// The decode program waits on a semaphore nobody releases.
+pub const FLAG_INJECT_HANG: u32 = 8;
+/// The first decode op writes to an unmapped GPU address: an MMU fault.
+pub const FLAG_INJECT_FAULT: u32 = 16;
+const UNMAPPED_VA: u64 = 0x1F_0000_0000;
 
 const MM_OUT_F16: u32 = 1;
 const MM_SIMT: u32 = 1;
+/// Agreement with llama.cpp on `tiny_qwen2`: llama.cpp quantizes activations
+/// to Q8_K, which the kernels don't, and that accounts for up to about 1.43.
+pub const GOLDEN_LLAMA_TOLERANCE: f32 = 1.5;
+/// Agreement with the CPU reference using exact dot products.
+pub const GOLDEN_EXACT_TOLERANCE: f32 = 0.1;
 const RMS_EPS: f32 = 1e-6;
 /// Keep in step with `slm_prog_encode` and `Q4K_TILE_ROWS` in the kernels.
 const MM_TILE_ROWS: u64 = 15;
@@ -680,6 +690,19 @@ const BARRIER_WFI: u32 = 2;
 static OPT_BARRIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(BARRIER_WFI);
 static OPT_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(FLAG_LEAN_QMD);
 
+/// `slm gpu inject`: the next launch's decode program fails on purpose.
+/// 0 none, 1 a hang on a semaphore, 2 an MMU fault.
+pub fn set_inject(kind: u32) {
+    let mut f = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
+    f &= !(FLAG_INJECT_HANG | FLAG_INJECT_FAULT);
+    f |= match kind {
+        1 => FLAG_INJECT_HANG,
+        2 => FLAG_INJECT_FAULT,
+        _ => 0,
+    };
+    OPT_FLAGS.store(f, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Used by the next `slm launch`. `barrier` is an `enum ga10b_prog_barrier`.
 pub fn set_options(barrier: u32, flags: u32) {
     OPT_BARRIER.store(barrier, core::sync::atomic::Ordering::Relaxed);
@@ -778,7 +801,8 @@ impl GpuProgram {
         let desc = ModelDesc::from_slm(slm, vocab).map_err(BuildError::Failed)?;
         let mut flags = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
         let simt = flags & FLAG_SIMT != 0;
-        flags &= FLAG_LEAN_QMD | FLAG_PROFILE;
+        let inject_fault = flags & FLAG_INJECT_FAULT != 0;
+        flags &= FLAG_LEAN_QMD | FLAG_PROFILE | FLAG_INJECT_HANG;
         // SAFETY: plain FFI query.
         let max_batch = unsafe { slm_prog_max_batch(simt) };
         if max_batch == 0 {
@@ -856,6 +880,16 @@ impl GpuProgram {
         p.emit(SHAPE_DECODE).map_err(|rc| BuildError::Failed(err_message(rc)))?;
         if p.prefill.is_some() {
             p.emit(SHAPE_PREFILL).map_err(|rc| BuildError::Failed(err_message(rc)))?;
+        }
+        if inject_fault {
+            let s = StepArgs { pos: 0, rows: 1 };
+            let mut op = p.decode.ops[1].materialize(&p.bases, &s);
+            op.ptr[2] = UNMAPPED_VA;
+            // SAFETY: the handle is open and `op` outlives the call.
+            let rc = unsafe { slm_prog_patch(p.h, SHAPE_DECODE, 1, &op) };
+            if rc < 0 {
+                return Err(BuildError::Failed(err_message(rc)));
+            }
         }
         Ok(p)
     }
@@ -1075,6 +1109,30 @@ impl GpuProgram {
     #[cfg(test)]
     pub fn data_ptr(&self) -> usize {
         self.data_cpu
+    }
+
+    /// The same step on the CPU over `mem`, with this program's VAs: what the
+    /// GPU should have produced.
+    fn reference_step(&self, mem: &reference::Mem, tokens: &[u32], pos: usize, out: &mut Vec<f32>) {
+        let rows = tokens.len() as u32;
+        let shape = if rows > 1 { SHAPE_PREFILL } else { SHAPE_DECODE };
+        let s = StepArgs { pos: pos as u32, rows };
+        for (r, &t) in tokens.iter().enumerate() {
+            // SAFETY: the step buffer has the arena's layout.
+            unsafe {
+                ((mem.step + self.arena.step_ids as usize) as *mut u32).add(r).write(t);
+                ((mem.step + self.arena.step_positions as usize) as *mut u32).add(r).write((pos + r) as u32);
+            }
+        }
+        for op in &self.plan(shape).ops {
+            reference::exec(mem, &op.materialize(&self.bases, &s));
+        }
+        let n = self.dims.vocab as usize;
+        out.clear();
+        // SAFETY: the data buffer has the arena's layout.
+        out.extend_from_slice(unsafe {
+            core::slice::from_raw_parts((mem.data + self.arena.logits as usize) as *const f32, n)
+        });
     }
 
     /// Time per decode step, and with `slm gpu opts ... profile` what each
@@ -1329,7 +1387,7 @@ pub fn smoke(n: u32, width: u32, rep: &mut SmokeReport) -> Result<(), &'static s
 pub struct GoldenReport {
     /// Steps compared.
     pub steps: u32,
-    /// First step with a logit off by more than `LOGIT_TOLERANCE`, or -1.
+    /// First step with a logit off by more than [`GOLDEN_LLAMA_TOLERANCE`], or -1.
     pub first_bad_step: i32,
     pub first_bad_index: i32,
     /// Thousandths, since kernel C has no floating point.
@@ -1339,6 +1397,10 @@ pub struct GoldenReport {
     pub max_err_milli: i32,
     /// Steps where the top logit is the token llama.cpp's top logit is.
     pub argmax_matches: u32,
+    /// First step over [`GOLDEN_EXACT_TOLERANCE`] from the exact reference, or -1.
+    pub exact_first_bad_step: i32,
+    /// Largest error against the exact reference, in thousandths.
+    pub exact_max_err_milli: i32,
     pub gpu_us_per_token: u64,
 }
 
@@ -1346,7 +1408,7 @@ pub struct GoldenReport {
 /// every step's logits with llama.cpp's. With `batched`, the prompt goes in
 /// as one prefill step, so only its last row has a reference.
 pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport) -> Result<(), &'static str> {
-    use crate::slm::golden::{Records, LOGIT_TOLERANCE};
+    use crate::slm::golden::Records;
     let r = Records::new(rec).ok_or("bad record file")?;
     let (ids, tokens, logits, n_vocab) = match (
         r.u32s("prompt.ids"),
@@ -1383,16 +1445,48 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         BuildError::Failed(w) => w,
     })?;
 
+    // The exact CPU reference, in memory of its own with the arena's layout.
+    let weights = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+        slm.weight_bytes().map(|b| (b.as_ptr() as usize, b.len()))
+    })
+    .flatten()
+    .ok_or("model has no weight bytes")?;
+    let mut ref_data = alloc::vec![0u64; prog.arena.data_bytes as usize / 8 + 1];
+    let mut ref_step = alloc::vec![0u64; prog.arena.step_bytes as usize / 8 + 1];
+    let mem = reference::Mem {
+        weights_va: prog.bases.weights,
+        weights: weights.0,
+        weights_len: weights.1,
+        data_va: prog.bases.data,
+        data: ref_data.as_mut_ptr() as usize,
+        data_len: prog.arena.data_bytes as usize,
+        step_va: prog.bases.step,
+        step: ref_step.as_mut_ptr() as usize,
+        step_len: prog.arena.step_bytes as usize,
+        exact: true,
+    };
+    // SAFETY: the arena reserves room for the table at `rope`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            rope.cos_sin.as_ptr() as *const u8,
+            (mem.data + prog.arena.rope as usize) as *mut u8,
+            rope.cos_sin.len() * 4,
+        );
+    }
+
     let steps = logits.len() / n_vocab;
     let mut out = Vec::new();
+    let mut exact = Vec::new();
     rep.first_bad_step = -1;
     rep.first_bad_index = -1;
+    rep.exact_first_bad_step = -1;
     rep.max_err_milli = 0;
+    rep.exact_max_err_milli = 0;
     rep.argmax_matches = 0;
     rep.steps = 0;
-    let mut max_err = 0.0f32;
+    let (mut max_err, mut exact_max) = (0.0f32, 0.0f32);
     let mut step = 0usize;
-    let mut compare = |step: usize, out: &[f32], rep: &mut GoldenReport| {
+    let mut compare = |step: usize, out: &[f32], exact: &[f32], rep: &mut GoldenReport| {
         let want = &logits[step * n_vocab..(step + 1) * n_vocab];
         let top = |v: &[f32]| {
             let mut b = 0usize;
@@ -1406,37 +1500,47 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         if top(out) == top(want) {
             rep.argmax_matches += 1;
         }
-        let (mut step_max, mut step_sq) = (0.0f32, 0.0f32);
-        for (i, (g, w)) in out.iter().zip(want.iter()).enumerate() {
-            let e = (g - w).abs();
-            step_sq += e * e;
+        let (mut step_max, mut step_exact) = (0.0f32, 0.0f32);
+        for i in 0..n_vocab {
+            let e = (out[i] - want[i]).abs();
             if !(e <= step_max) {
                 step_max = e;
             }
-            if !(e <= max_err) {
-                max_err = e;
-            }
-            if !(e <= LOGIT_TOLERANCE) && rep.first_bad_step < 0 {
+            if !(e <= GOLDEN_LLAMA_TOLERANCE) && rep.first_bad_step < 0 {
                 rep.first_bad_step = step as i32;
                 rep.first_bad_index = i as i32;
-                rep.first_bad_got_milli = (*g * 1000.0) as i32;
-                rep.first_bad_want_milli = (*w * 1000.0) as i32;
+                rep.first_bad_got_milli = (out[i] * 1000.0) as i32;
+                rep.first_bad_want_milli = (want[i] * 1000.0) as i32;
+            }
+            let x = (out[i] - exact[i]).abs();
+            if !(x <= step_exact) {
+                step_exact = x;
+            }
+            if !(x <= GOLDEN_EXACT_TOLERANCE) && rep.exact_first_bad_step < 0 {
+                rep.exact_first_bad_step = step as i32;
             }
         }
+        max_err = max_err.max(step_max);
+        exact_max = exact_max.max(step_exact);
         rep.max_err_milli = (max_err * 1000.0) as i32;
+        rep.exact_max_err_milli = (exact_max * 1000.0) as i32;
         rep.steps += 1;
         let mut line = String::new();
-        let _ = write!(line, "[slm] golden step {step}: max error {} milli, rms {} milli\n\0",
-                       (step_max * 1000.0) as i32,
-                       (crate::inference::mathf::sqrtf(step_sq / n_vocab as f32) * 1000.0) as i32);
+        let _ = write!(
+            line,
+            "[slm] golden step {step}: vs llama.cpp {} milli, vs exact {} milli\n\0",
+            (step_max * 1000.0) as i32,
+            (step_exact * 1000.0) as i32
+        );
         crate::kernel_ffi::print(line.as_bytes());
     };
     let mut pos = 0usize;
     if batched && ids.len() >= 2 && (prog.max_batch as usize) >= ids.len() {
         prog.run(&ids, 0, &mut out)?;
+        prog.reference_step(&mem, &ids, 0, &mut exact);
         pos = ids.len();
         step = ids.len() - 1;
-        compare(step, &out, rep);
+        compare(step, &out, &exact, rep);
         step += 1;
     }
     while step < steps {
@@ -1447,7 +1551,8 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         };
         let toks = [t];
         prog.run(&toks, pos, &mut out)?;
-        compare(step, &out, rep);
+        prog.reference_step(&mem, &toks, pos, &mut exact);
+        compare(step, &out, &exact, rep);
         pos += 1;
         step += 1;
     }
@@ -1478,6 +1583,9 @@ pub mod reference {
         pub step_va: u64,
         pub step: usize,
         pub step_len: usize,
+        /// Matmuls as exact dot products over dequantized weights, instead of
+        /// the CPU path's Q8_K rounding of activations for Q4_K.
+        pub exact: bool,
     }
 
     fn at(s: &Mem, va: u64) -> *mut u8 {
@@ -1597,8 +1705,23 @@ pub mod reference {
                 let mut res = alloc::vec![0.0f32; n];
                 for r in 0..rows {
                     let acts = u16s(unsafe { xp.add(r * kk * 2) }, kk);
-                    matmul_quant_rows(quant, w, n, kk, acts, &mut q8, &mut dq, &mut af, &mut res)
-                        .expect("matmul");
+                    if s.exact {
+                        for (a, &h) in af.iter_mut().zip(acts.iter()) {
+                            *a = f16_to_f32(h);
+                        }
+                        for j in 0..n {
+                            dequantize_row_any(quant, &w[j * row_bytes..(j + 1) * row_bytes], &mut dq[..kk])
+                                .expect("dequant");
+                            let mut acc = 0.0f64;
+                            for t in 0..kk {
+                                acc += dq[t] as f64 * af[t] as f64;
+                            }
+                            res[j] = acc as f32;
+                        }
+                    } else {
+                        matmul_quant_rows(quant, w, n, kk, acts, &mut q8, &mut dq, &mut af, &mut res)
+                            .expect("matmul");
+                    }
                     for j in 0..n {
                         let mut v = res[j];
                         if let Some(bp) = bias {
@@ -1670,6 +1793,34 @@ impl OpCheck {
 
     /// GPU, then reference, on identical inputs. `fill` writes the inputs.
     fn one(&mut self, name: &str, op: &ProgOp, out_off: usize, out_n: usize, f32_out: bool, fill: &dyn Fn(&Self)) {
+        self.mem.exact = true;
+        self.run_one(name, op, out_off, out_n, f32_out, fill, true);
+    }
+
+    /// A matmul, against both references. The exact dot product decides; the
+    /// CPU path's Q8_K one is printed for information.
+    fn matmul(&mut self, name: &str, op: &ProgOp, out_off: usize, out_n: usize, f32_out: bool, fill: &dyn Fn(&Self)) {
+        self.mem.exact = true;
+        self.run_one(name, op, out_off, out_n, f32_out, fill, true);
+        if op.kernel == Kernel::MmQ4k as u32 && op.rows == 1 {
+            self.mem.exact = false;
+            let mut label = String::from(name);
+            label.push_str(" vs q8k");
+            self.run_one(&label, op, out_off, out_n, f32_out, fill, false);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_one(
+        &mut self,
+        name: &str,
+        op: &ProgOp,
+        out_off: usize,
+        out_n: usize,
+        f32_out: bool,
+        fill: &dyn Fn(&Self),
+        count: bool,
+    ) {
         let esz = if f32_out { 4 } else { 2 };
         // SAFETY: both regions are ours and the GPU is idle between checks.
         unsafe {
@@ -1729,13 +1880,13 @@ impl OpCheck {
             }
             sq += e * e;
             max_val = max_val.max(c.abs());
-            if !(e <= 0.01 * c.abs() + 0.01) {
+            if !(e <= 0.002 * c.abs() + 0.03) {
                 over += 1;
             }
         }
         let rms = crate::inference::mathf::sqrtf(sq / out_n as f32);
         let verdict = if over == 0 { "ok" } else { "BAD" };
-        if over != 0 {
+        if over != 0 && count {
             self.bad += 1;
         }
         self.report(name, op, (max_err * 1000.0) as i32, (rms * 1000.0) as i32, over, st.gpu_ns, verdict);
@@ -1775,7 +1926,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
         dims.head_dim as usize,
     );
     const POSITIONS: usize = 16;
-    const ROWS: usize = 9;
+    const ROWS: usize = 64;
     let rope = crate::inference::ops_transformer::RopeTable::new(
         hd,
         POSITIONS + ROWS,
@@ -1784,11 +1935,11 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
     );
     // Two activation buffers, one output, all big enough for ROWS rows of the
     // widest vector, the RoPE table and the logits.
-    let row_max = hidden.max(inter).max(nq * hd).max(dims.vocab as usize * 2);
+    let row_max = hidden.max(inter).max(nq * hd);
     let a_off = 0usize;
     let b_off = align256((ROWS * row_max * 2) as u64) as usize;
     let o_off = 2 * b_off;
-    let k_off = 3 * b_off;
+    let k_off = o_off + b_off.max(dims.vocab as usize * 4);
     let kv_bytes = align256(((POSITIONS + ROWS) * nkv * hd * 2) as u64) as usize;
     let v_off = k_off + kv_bytes;
     let rope_off = v_off + kv_bytes;
@@ -1829,6 +1980,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
             step_va: sa,
             step: out.step_cpu,
             step_len: 4096,
+            exact: true,
         },
         data_cpu: out.data_cpu,
         data_bytes,
@@ -1874,7 +2026,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
     let l0 = d.layers[0];
     let fill_a = |n: usize| move |c: &OpCheck| c.write_u16s(a_off, n, 0x1234);
 
-    for rows in [1usize, 2, ROWS] {
+    for rows in [1usize, 2, 9, 63, ROWS] {
         // Matmuls: both quant types, biased and not, FP16 and FP32 out.
         let mm = |c: &mut OpCheck, name: &str, m: &Matmul, k: usize, n: usize, f16: bool, r: usize| {
             let op = ProgOp {
@@ -1884,7 +2036,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
                 ptr: [da_a, wa + m.w_off, da_o, m.bias_off.map_or(0, |b| wa + b), 0],
                 scal: [if f16 { MM_OUT_F16 } else { 0 }, simt_flag],
             };
-            c.one(name, &op, o_off, r * n, !f16, &fill_a(r * k));
+            c.matmul(name, &op, o_off, r * n, !f16, &fill_a(r * k));
         };
         mm(&mut c, "mm_q", &l0.q, hidden, nq * hd, true, rows);
         mm(&mut c, "mm_k", &l0.k, hidden, nkv * hd, true, rows);
@@ -1977,7 +2129,7 @@ pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
         ptr: [da_a, wa + lm.w_off, da_o, 0, 0],
         scal: [0, simt_flag],
     };
-    c.one("lm_head", &op, o_off, dims.vocab as usize, true, &fill_a(hidden));
+    c.matmul("lm_head", &op, o_off, dims.vocab as usize, true, &fill_a(hidden));
     Ok(c.bad)
 }
 
@@ -2043,6 +2195,8 @@ pub mod soft {
             step_va: S_BASE,
             step: s.step.as_mut_ptr() as usize,
             step_len: s.step.len(),
+            // What the kernels compute: no Q8_K in them.
+            exact: true,
         }
     }
 
@@ -2178,7 +2332,7 @@ pub mod soft {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slm::golden::{Records, LOGIT_TOLERANCE};
+    use crate::slm::golden::Records;
     use crate::slm::registry::{self, load_slm, reset_for_tests, with_loaded_slm};
     use crate::slm::session::{self, GpuMode, ForwardPath};
 
@@ -2346,7 +2500,7 @@ mod tests {
         assert_eq!(got.len(), want.len());
         for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
             assert!(
-                (g - w).abs() <= LOGIT_TOLERANCE,
+                (g - w).abs() <= GOLDEN_LLAMA_TOLERANCE,
                 "step {step} logit {i}: got {g} want {w}"
             );
         }
@@ -2706,7 +2860,9 @@ mod tests {
         assert!(rep.steps > 4);
         assert_eq!(rep.argmax_matches, rep.steps);
         // A plan that's wrong misses by far more than the tolerance.
-        assert!(rep.max_err_milli > 0 && rep.max_err_milli < 1000, "max_err {}", rep.max_err_milli);
+        assert!(rep.max_err_milli > 0 && rep.max_err_milli < 1500, "max_err {}", rep.max_err_milli);
+        assert_eq!(rep.exact_first_bad_step, -1, "{rep:?}");
+        assert!(rep.exact_max_err_milli < 100, "{rep:?}");
         let mut rep = GoldenReport::default();
         golden_run(model, GREEDY, true, &mut rep).unwrap();
         assert_eq!(rep.first_bad_step, -1, "{rep:?}");
@@ -2718,6 +2874,8 @@ mod tests {
         soft::reset_knobs();
         reset_for_tests();
     }
+
+    const LOGIT_CPU: f32 = crate::slm::golden::LOGIT_TOLERANCE;
 
     /// The program rounds the attention output to FP16 before the residual
     /// and uses FP32 gammas, where `forward_one` has them the other way
@@ -2755,8 +2913,10 @@ mod tests {
             }
         }
         std::eprintln!("max |cpu-llama|={d_cpu} |prog-llama|={d_prog} |prog-cpu|={d_both}");
-        assert!(d_prog <= d_cpu * 1.5 + 0.1, "program {d_prog}, forward_one {d_cpu}");
-        assert!(d_both < 1.0, "program and forward_one differ by {d_both}");
+        std::eprintln!("(forward_one rounds through Q8_K, the kernels don't)");
+        assert!(d_cpu <= LOGIT_CPU, "forward_one {d_cpu}");
+        assert!(d_prog < GOLDEN_LLAMA_TOLERANCE, "program {d_prog}");
+        assert!(d_both < 2.0, "program and forward_one differ by {d_both}");
         drop(p);
         reset_for_tests();
     }

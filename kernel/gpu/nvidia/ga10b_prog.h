@@ -77,7 +77,8 @@ enum ga10b_prog_barrier {
 #define GA10B_PROG_F_LEAN_QMD  (1u << 0)  /* no per-launch icache/texture/const
                                              invalidate, no CWD SYSMEMBAR */
 #define GA10B_PROG_F_PROFILE   (1u << 1)  /* drained timestamp after each launch */
-#define GA10B_PROG_F_MARKS     (1u << 2)  /* second pushbuffer with marks */
+#define GA10B_PROG_F_INJECT_HANG (1u << 2) /* wait on a semaphore nobody releases */
+#define GA10B_PROG_F_MARKS     (1u << 3)  /* second pushbuffer with marks */
 
 /* One region of GPU-visible memory. */
 struct ga10b_prog_mem {

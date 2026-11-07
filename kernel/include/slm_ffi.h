@@ -2156,6 +2156,8 @@ typedef struct {
     int32_t first_bad_want_milli;
     int32_t max_err_milli;
     uint32_t argmax_matches;    /* steps whose top token is llama.cpp's */
+    int32_t exact_first_bad_step;  /* first over 0.1 from the exact CPU reference, or -1 */
+    int32_t exact_max_err_milli;
     uint64_t gpu_us_per_token;
 } SlmGpuGoldenReport;
 
@@ -2166,6 +2168,9 @@ typedef struct {
     uint64_t wait_us;
     uint64_t evict_us;
 } SlmGpuSmokeReport;
+
+/* Make the next launch's decode program fail: 0 none, 1 hang, 2 MMU fault. */
+extern void rust_slm_gpu_set_inject(uint32_t kind);
 
 /* Per-step times and per-kernel GPU time to the console. 0, or -1. */
 extern int32_t rust_slm_session_gpu_profile(uint32_t session_id);

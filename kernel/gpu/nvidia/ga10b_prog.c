@@ -67,7 +67,9 @@ void ga10b_prog_sizes(uint32_t max_launches, uint32_t flags, uint32_t *pb_bytes,
         per += PB_DRAIN_DWORDS + PB_SEMA_DWORDS;
         slots += max_launches;
     }
-    uint32_t plain = PB_PROLOGUE_DWORDS + PB_DRAIN_DWORDS + PB_SEMA_DWORDS + per * max_launches;
+    /* Two semaphores at the end: the end release, and room for the injected
+     * acquire. */
+    uint32_t plain = PB_PROLOGUE_DWORDS + PB_DRAIN_DWORDS + 2u * PB_SEMA_DWORDS + per * max_launches;
     uint32_t total = plain;
     if (flags & GA10B_PROG_F_MARKS) {
         total += plain + PB_MARK_DWORDS * max_launches;
@@ -293,6 +295,11 @@ int ga10b_prog_finish(struct ga10b_prog *p)
      * about 1 us after a launch whose kernel was still running, so logits read
      * back half-computed. Idle first, then write everything to memory. */
     emit_drain(p);
+    if (p->flags & GA10B_PROG_F_INJECT_HANG) {
+        /* ACQUIRE of a value the start slot never holds: the channel stops
+         * here for good. For testing the timeout path on real hardware. */
+        emit_sema(p, GA10B_PROG_SEMA_START, GA10B_PROG_PAYLOAD_START + 0x100u, 1u);
+    }
     emit_sema(p, GA10B_PROG_SEMA_END, GA10B_PROG_PAYLOAD_END, 0u);
     p->finished = true;
     return GA10B_PROG_OK;

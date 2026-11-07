@@ -35,7 +35,7 @@ enum slm_prog_kernel {
     SLM_PROG_K_ROPE,         /* ptr x, out, table, pos; dim heads, head_dim */
     SLM_PROG_K_SWIGLU,       /* ptr gate, up, out; dim n per row */
     SLM_PROG_K_GQA,          /* ptr q, k, v, pos, out; dim nq, nkv, hd */
-    SLM_PROG_K_MM_Q4K,       /* ptr x, W, out, bias; dim K, N; scal[0] flags */
+    SLM_PROG_K_MM_Q4K,       /* ptr x (16 B aligned), W, out, bias; dim K, N; scal[0] flags */
     SLM_PROG_K_MM_Q6K,       /* same, Q6_K weights */
     SLM_PROG_K_ADD,          /* ptr a, b, out; dim n per row */
     SLM_PROG_K_EMBED_Q4K,    /* ptr ids, table, out; dim K */
@@ -47,6 +47,8 @@ enum slm_prog_kernel {
 #define SLM_PROG_MM_OUT_F16 1u
 /* scal[1] of the matmul kernels: use the SIMT kernel, not the tensor core one. */
 #define SLM_PROG_MM_SIMT 1u
+/* Added to scal[0] for the split b64 launch (slm_common.cuh SLM_MM_SPLIT_XT). */
+#define SLM_PROG_MM_SPLIT_XT 4u
 
 /* One operation, as Rust sends it. Keep in step with gpu_program.rs::ProgOp. */
 struct slm_prog_op {
@@ -64,6 +66,7 @@ _Static_assert(sizeof(struct slm_prog_op) == 72, "slm_prog_op is shared with Rus
 #define SLM_PROG_FLAG_LEAN_QMD 1u
 #define SLM_PROG_FLAG_PROFILE  2u
 #define SLM_PROG_FLAG_SIMT     4u   /* Rust: SIMT matmuls, the bring-up reference */
+#define SLM_PROG_FLAG_INJECT_HANG 8u /* `slm gpu inject`: decode never completes */
 
 struct slm_prog_open_args {
     const void *weights;        /* CPU pointer to the file bytes */
