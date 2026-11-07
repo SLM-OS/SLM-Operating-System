@@ -6610,6 +6610,37 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
     0
 }
 
+/// Compare a program with llama.cpp on a fixture (see `slm gpu golden`).
+/// Returns 0 with `*out` filled, or -1 if the program couldn't run: nothing to
+/// report beyond the console line.
+///
+/// # Safety
+/// `rec` must point to `rec_len` readable bytes; `out` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_gpu_golden(
+    model: u32,
+    rec: *const u8,
+    rec_len: usize,
+    batched: u32,
+    out: *mut slm::gpu_program::GoldenReport,
+) -> i32 {
+    if rec.is_null() || out.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract.
+    let (rec, out) = unsafe { (core::slice::from_raw_parts(rec, rec_len), &mut *out) };
+    match slm::gpu_program::golden_run(model, rec, batched != 0, out) {
+        Ok(()) => 0,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] golden: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
 /// Barrier kind and QMD flags for the next `slm launch`, for measuring them
 /// on hardware. See `enum ga10b_prog_barrier` and `SLM_PROG_FLAG_*`.
 #[no_mangle]

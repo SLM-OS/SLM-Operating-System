@@ -354,16 +354,16 @@ static void test_slm_launch_rejects_bad_gpu_and_threads(void)
     slm_prompt_teardown();
 }
 
-static void test_slm_launch_gpu_on_requires_a_gpu_tier(void)
+/* QEMU has no channel, so --gpu on has nothing to run on and says so, and
+ * no session is left behind. */
+static void test_slm_launch_gpu_on_requires_a_program(void)
 {
     SLM_PROMPT_SETUP();
-    int rc = shell_execute("slm launch 0 --ctx 8 --gpu on");
-    if (rust_slm_gpu_tier_ops() == 0) {
-        TEST_ASSERT_EQUAL_INT(-1, rc);
-        TEST_ASSERT_NOT_NULL(strstr(cap.buf, "no GPU program"));
-    } else {
-        TEST_ASSERT_EQUAL_INT(0, rc);
-    }
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm launch 0 --ctx 8 --gpu on"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "no GPU program"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "UEFI-direct"));
+    SlmSessionInfoC info;
+    TEST_ASSERT_EQUAL_INT(-1, rust_slm_session_info(0, &info));
     slm_prompt_teardown();
 }
 
@@ -722,7 +722,7 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_launch_gpu_cpu_is_stored_and_reported);
     RUN_TEST(test_slm_launch_defaults_to_gpu_auto);
     RUN_TEST(test_slm_launch_rejects_bad_gpu_and_threads);
-    RUN_TEST(test_slm_launch_gpu_on_requires_a_gpu_tier);
+    RUN_TEST(test_slm_launch_gpu_on_requires_a_program);
     RUN_TEST(test_slm_prompt_long_quoted_text_arrives_whole);
     RUN_TEST(test_slm_prompt_too_many_unquoted_words_is_an_error);
     RUN_TEST(test_slm_prompt_renders_chatml_by_default);

@@ -1387,6 +1387,21 @@ if(ENABLE_BOOT_TESTS)
     )
 endif()
 
+# `slm gpu golden`: the tiny model and llama.cpp's logits in a production
+# image, to compare the GPU program on hardware (#475). About 790 KB.
+option(SLM_GPU_GOLDEN "Embed the SLM golden fixture for `slm gpu golden`" OFF)
+if(SLM_GPU_GOLDEN)
+    target_sources(slmos PRIVATE kernel/src/slm_gpu_golden_embed.S)
+    target_compile_definitions(slmos PRIVATE SLM_GPU_GOLDEN)
+    set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
+    set_source_files_properties(
+        kernel/src/slm_gpu_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
 # Feed absolute paths of the demo Lua scripts to demo_scripts.S so GAS's
 # .incbin can resolve them regardless of the assembler's working directory.
 # OBJECT_DEPENDS makes the .S file rebuild when the scripts change so the

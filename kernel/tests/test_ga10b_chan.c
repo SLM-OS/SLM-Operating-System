@@ -175,8 +175,8 @@ static void test_vm_map_big(void)
     TEST_ASSERT_EQUAL_HEX32(0, w[2]);
     TEST_ASSERT_EQUAL_HEX32(0, w[3]);
     ga10b_pde0_big_encode(0x1234500000100ull, w);       /* above bit 36 */
-    TEST_ASSERT_EQUAL_HEX32(0x0000001eu, w[0]);
-    TEST_ASSERT_EQUAL_HEX32(0x123u, w[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x5000001eu, w[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x1234u, w[1]);
 
     pool_reset();
     struct ga10b_vm vm;

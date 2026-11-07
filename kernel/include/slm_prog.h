@@ -52,7 +52,7 @@ struct slm_prog_op {
     uint64_t ptr[4];        /* GPU VAs */
     uint32_t scal[2];
 };
-_Static_assert(sizeof(struct slm_prog_op) == 72, "slm_prog_op is shared with Rust");
+_Static_assert(sizeof(struct slm_prog_op) == 64, "slm_prog_op is shared with Rust");
 
 #define SLM_PROG_SHAPES 2u  /* 0 = decode (one row), 1 = prefill (batch) */
 #define SLM_PROG_MAX_SESSIONS 4
@@ -107,6 +107,8 @@ struct slm_prog_run_stats {
 
 /* ---- API (called from Rust; all sleepable, IRQs on) ---- */
 
+/* 1 if this boot has a channel programs can run on. */
+int slm_prog_available(void);
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
 void slm_prog_close(int32_t h);
 

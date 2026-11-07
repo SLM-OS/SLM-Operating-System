@@ -28,7 +28,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use crate::inference::gpu_slm::{select_tier, set_tier, OpKind, Tier};
+use crate::inference::gpu_slm::{select_tier, OpKind, Tier};
 use crate::slm::{
     chat_template::{
         encode_chat, encode_chat_continuation, ChatTurn, Role, GENERIC_SYSTEM_PROMPT,
@@ -714,6 +714,7 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::inference::gpu_slm::set_tier;
     use crate::slm::registry::{
         build_cli_test_fixture, build_qwen_test_fixture, ensure_mm_initialized_for_tests,
         load_slm, reset_for_tests as reset_registry, CLI_FIXTURE_ENDOFTEXT, CLI_FIXTURE_EOS,

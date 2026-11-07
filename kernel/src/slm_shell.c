@@ -1299,9 +1299,52 @@ static int slm_gpu_opts(int argc, char *argv[])
     return 0;
 }
 
+#ifdef SLM_GPU_GOLDEN
+extern const uint8_t slm_gpu_golden_tiny_start[], slm_gpu_golden_tiny_end[];
+extern const uint8_t slm_gpu_golden_rec_start[], slm_gpu_golden_rec_end[];
+
+/* slm gpu golden [batch]: the tiny Qwen2 model on the GPU program, every
+ * step's logits against llama.cpp. Needs a build with SLM_GPU_GOLDEN=ON. */
+static int slm_gpu_golden(int argc, char *argv[])
+{
+    bool batched = argc >= 4 && strcmp(argv[3], "batch") == 0;
+    int idx = rust_slm_load((const uint8_t *)"tiny-qwen2", slm_gpu_golden_tiny_start,
+                            (size_t)(slm_gpu_golden_tiny_end - slm_gpu_golden_tiny_start));
+    if (idx < 0) {
+        shell_puts("slm gpu golden: could not load the fixture\r\n");
+        return -1;
+    }
+    SlmGpuGoldenReport r;
+    int32_t rc = rust_slm_gpu_golden((uint32_t)idx, slm_gpu_golden_rec_start,
+                                     (size_t)(slm_gpu_golden_rec_end - slm_gpu_golden_rec_start),
+                                     batched ? 1u : 0u, &r);
+    (void)rust_slm_unload((uint32_t)idx);
+    if (rc != 0) {
+        shell_puts("slm gpu golden: FAIL, the program did not run\r\n");
+        return -1;
+    }
+    if (r.first_bad_step < 0) {
+        shell_printf("slm gpu golden: PASS, %lu steps, max error %d.%03d, %llu us/token\r\n",
+                     (unsigned long)r.steps, (int)(r.max_err_milli / 1000),
+                     (int)(r.max_err_milli % 1000),
+                     (unsigned long long)r.gpu_us_per_token);
+        return 0;
+    }
+    shell_printf("slm gpu golden: FAIL at step %d logit %d: got %d milli, want %d milli "
+                 "(%lu steps compared)\r\n",
+                 (int)r.first_bad_step, (int)r.first_bad_index,
+                 (int)r.first_bad_got_milli, (int)r.first_bad_want_milli,
+                 (unsigned long)r.steps);
+    return -1;
+}
+#endif
+
 static int slm_gpu(int argc, char *argv[])
 {
     if (argc >= 3 && strcmp(argv[2], "opts") == 0) return slm_gpu_opts(argc, argv);
+#ifdef SLM_GPU_GOLDEN
+    if (argc >= 3 && strcmp(argv[2], "golden") == 0) return slm_gpu_golden(argc, argv);
+#endif
     slm_gpu_sessions();
     /* Walk the 8 first-class SLM op kinds and report which tier the
      * forward path will route each one through. The tier table is

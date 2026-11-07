@@ -19,6 +19,7 @@
 #include "operator_dispatch.h"
 #include "nvidia/ga10b_chan.h"
 #include "nvidia/ga10b_prog.h"
+#include "nvidia/ga10b_qmd.h"
 #include "string.h"
 #include "uart.h"
 
@@ -157,6 +158,35 @@ int slm_prog_encode(const struct slm_prog_op *op, uint64_t shader_va,
         a.u.gqa_attn.head_dim = op->dim[2];
         a.u.gqa_attn.seq_len = op->scal[0];
         return encode_registry(&a, l, args, 0x30);
+    case SLM_PROG_K_GQA_BATCH: {
+        /* One block per (row, query head); the kernel takes the row from
+         * blockIdx. Same layout as GQA_ATTN with seq_len as the base
+         * position, plus the row count. Not final until scripts/cuda/slm/
+         * has this kernel. */
+        uint32_t rows = op->rows;
+        uint64_t grid = (uint64_t)rows * op->dim[0];
+        if (rows == 0u || rows > 64u || grid == 0u || grid > 0xFFFFFFFFu ||
+            op->scal[0] + rows > GQA_ATTN_MAX_SEQ_LEN) {
+            return -1;
+        }
+        memcpy(args + 0x00, &op->ptr[0], 8);
+        memcpy(args + 0x08, &op->ptr[1], 8);
+        memcpy(args + 0x10, &op->ptr[2], 8);
+        memcpy(args + 0x18, &op->ptr[3], 8);
+        memcpy(args + 0x20, &op->dim[0], 12);
+        memcpy(args + 0x2C, &op->scal[0], 4);
+        memcpy(args + 0x30, &rows, 4);
+        l->args_len = 0x34;
+        l->grid_x = (uint32_t)grid;
+        l->grid_y = 1;
+        l->grid_z = 1;
+        l->block_x = GQA_ATTN_BLOCK_DIM;
+        l->block_y = 1;
+        l->block_z = 1;
+        l->smem_size_bytes = GQA_ATTN_SMEM_BYTES;
+        l->barrier_count = 1;
+        return 0;
+    }
     case SLM_PROG_K_MM_Q4K:
     case SLM_PROG_K_MM_Q6K:
         return encode_mm(op, l, args);
@@ -420,6 +450,11 @@ static void session_free(struct prog_session *s)
         if (s->control_va) va_put(s->control_va, s->control_va_size);
     }
     memset(s, 0, sizeof(*s));
+}
+
+int slm_prog_available(void)
+{
+    return backend() != NULL;
 }
 
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out)

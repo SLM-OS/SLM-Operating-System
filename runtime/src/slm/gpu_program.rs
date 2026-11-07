@@ -54,6 +54,8 @@ pub struct ProgOp {
     pub scal: [u32; 2],
 }
 
+const _: () = assert!(core::mem::size_of::<ProgOp>() == 64);
+
 #[repr(C)]
 pub struct OpenArgs {
     pub weights: *const u8,
@@ -100,6 +102,7 @@ const RMS_EPS: f32 = 1e-6;
 const GQA_MAX_SEQ: usize = 4096;
 
 extern "C" {
+    fn slm_prog_available() -> i32;
     fn slm_prog_open(a: *const OpenArgs, out: *mut OpenOut) -> i32;
     fn slm_prog_close(h: i32);
     fn slm_prog_add(h: i32, shape: u32, op: *const ProgOp) -> i32;
@@ -695,6 +698,10 @@ impl GpuProgram {
     /// Allocate the arena, map the weights, build every launch. On `Err`
     /// nothing is left behind.
     pub fn build(slm: &LoadedSlm, max_ctx: usize, vocab: u32, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
+        // SAFETY: plain FFI query with no arguments.
+        if unsafe { slm_prog_available() } == 0 {
+            return Err(BuildError::NoBackend);
+        }
         if max_ctx > GQA_MAX_SEQ {
             return Err(BuildError::Failed("--ctx above the attention kernel's 4096 positions"));
         }
@@ -993,6 +1000,127 @@ pub fn add_f16(a: u16, b: u16) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// Golden comparison (`slm gpu golden`)
+// ---------------------------------------------------------------------------
+
+/// Keep in step with `SlmGpuGoldenReport` in slm_ffi.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GoldenReport {
+    /// Steps compared.
+    pub steps: u32,
+    /// First step with a logit off by more than `LOGIT_TOLERANCE`, or -1.
+    pub first_bad_step: i32,
+    pub first_bad_index: i32,
+    /// Thousandths, since kernel C has no floating point.
+    pub first_bad_got_milli: i32,
+    pub first_bad_want_milli: i32,
+    /// Largest error over all steps, in thousandths.
+    pub max_err_milli: i32,
+    pub gpu_us_per_token: u64,
+}
+
+/// Run the fixture's prompt and greedy continuation on a program and compare
+/// every step's logits with llama.cpp's. With `batched`, the prompt goes in
+/// as one prefill step, so only its last row has a reference.
+pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport) -> Result<(), &'static str> {
+    use crate::slm::golden::{Records, LOGIT_TOLERANCE};
+    let r = Records::new(rec).ok_or("bad record file")?;
+    let (ids, tokens, logits, n_vocab) = match (
+        r.u32s("prompt.ids"),
+        r.u32s("greedy.tokens"),
+        r.f32s("greedy.logits"),
+        r.u32s("greedy.n_vocab"),
+    ) {
+        (Ok(a), Ok(b), Ok(c), Ok(d)) if !d.is_empty() && d[0] != 0 && !a.is_empty() => {
+            (a, b, c, d[0] as usize)
+        }
+        _ => return Err("record file is missing fields"),
+    };
+    let info = crate::slm::registry::get_info(model as usize).ok_or("model not loaded")?;
+    if info.vocab_size as usize != n_vocab {
+        return Err("record file is for another model");
+    }
+    let a = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+        (slm.arch().head_dim, slm.arch().rope_freq_base, slm.arch().architecture)
+    })
+    .ok_or("model not loaded")?;
+    let ctx = 64usize;
+    let rope = crate::inference::ops_transformer::RopeTable::new(
+        a.0 as usize,
+        ctx,
+        a.1,
+        crate::inference::ops_transformer::RopePairing::for_arch(a.2),
+    );
+    let mut prog = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+        GpuProgram::build(slm, ctx, info.vocab_size, &rope.cos_sin)
+    })
+    .ok_or("model not loaded")?
+    .map_err(|e| match e {
+        BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
+        BuildError::Failed(w) => w,
+    })?;
+
+    let steps = logits.len() / n_vocab;
+    let mut out = Vec::new();
+    rep.first_bad_step = -1;
+    rep.first_bad_index = -1;
+    rep.max_err_milli = 0;
+    rep.steps = 0;
+    let mut max_err = 0.0f32;
+    let mut step = 0usize;
+    let mut compare = |step: usize, out: &[f32], rep: &mut GoldenReport| {
+        let want = &logits[step * n_vocab..(step + 1) * n_vocab];
+        for (i, (g, w)) in out.iter().zip(want.iter()).enumerate() {
+            let e = (g - w).abs();
+            if !(e <= max_err) {
+                max_err = e;
+            }
+            if !(e <= LOGIT_TOLERANCE) && rep.first_bad_step < 0 {
+                rep.first_bad_step = step as i32;
+                rep.first_bad_index = i as i32;
+                rep.first_bad_got_milli = (*g * 1000.0) as i32;
+                rep.first_bad_want_milli = (*w * 1000.0) as i32;
+            }
+        }
+        rep.max_err_milli = (max_err * 1000.0) as i32;
+        rep.steps += 1;
+    };
+    let mut pos = 0usize;
+    if batched && ids.len() >= 2 && (prog.max_batch as usize) >= ids.len() {
+        crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+            prog.stage_tokens(slm, &ids, 0)
+        })
+        .flatten()
+        .ok_or("could not stage the prompt")?;
+        prog.run(&ids, 0, &mut out)?;
+        pos = ids.len();
+        step = ids.len() - 1;
+        compare(step, &out, rep);
+        step += 1;
+    }
+    while step < steps {
+        let t = if step < ids.len() {
+            ids[step]
+        } else {
+            *tokens.get(step - ids.len()).ok_or("record file is short")?
+        };
+        let toks = [t];
+        crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+            prog.stage_tokens(slm, &toks, pos)
+        })
+        .flatten()
+        .ok_or("could not stage a token")?;
+        prog.run(&toks, pos, &mut out)?;
+        compare(step, &out, rep);
+        pos += 1;
+        step += 1;
+    }
+    rep.gpu_us_per_token = prog.gpu_us_per_token();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Software GPU for host tests
 // ---------------------------------------------------------------------------
 
@@ -1170,11 +1298,12 @@ pub mod soft {
     }
 
     #[no_mangle]
+    extern "C" fn slm_prog_available() -> i32 {
+        !KNOBS.lock().unwrap().no_backend as i32
+    }
+    #[no_mangle]
     extern "C" fn slm_prog_open(a: *const OpenArgs, out: *mut OpenOut) -> i32 {
         let k = KNOBS.lock().unwrap();
-        if k.no_backend {
-            return ERR_NO_BACKEND;
-        }
         if k.missing_kernel {
             return ERR_NO_KERNEL;
         }
@@ -1648,6 +1777,59 @@ mod tests {
         assert_eq!(snapshot(c).path, ForwardPath::Cpu);
         assert_eq!(soft::KNOBS.lock().unwrap().closes, 1);
         assert_eq!(crate::rust_slm_session_close(c), 0);
+        reset_for_tests();
+    }
+
+    /// The harness the board runs agrees that a correct program is correct,
+    /// batched or not, and points at the first wrong logit when it isn't.
+    #[test]
+    fn golden_harness_passes_and_catches_a_wrong_program() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let mut rep = GoldenReport::default();
+        golden_run(model, GREEDY, false, &mut rep).unwrap();
+        assert_eq!(rep.first_bad_step, -1, "{rep:?}");
+        assert!(rep.steps > 4);
+        // Soft GPU and forward_one share the kernels; only llama.cpp's float
+        // order differs, so this is far tighter than the tolerance.
+        assert!(rep.max_err_milli < 500, "max_err {}", rep.max_err_milli);
+        let mut rep = GoldenReport::default();
+        golden_run(model, GREEDY, true, &mut rep).unwrap();
+        assert_eq!(rep.first_bad_step, -1, "{rep:?}");
+
+        // Failing the first step is reported as an error, not a pass.
+        soft::KNOBS.lock().unwrap().fail_run = Some((0, -6));
+        let mut rep = GoldenReport::default();
+        assert_eq!(golden_run(model, GREEDY, false, &mut rep), Err("GPU step timed out"));
+        soft::reset_knobs();
+        reset_for_tests();
+    }
+
+    /// The soft GPU runs the same CPU kernels `forward_one` uses, so the two
+    /// paths must agree closely. A wrong plan can't hide inside the 1.0
+    /// tolerance used against llama.cpp.
+    #[test]
+    fn soft_gpu_tracks_forward_one_tightly() {
+        use crate::slm::forward::{forward_one, ForwardScratch};
+        use crate::slm::session::Session;
+        use crate::slm::sampler::Sampler;
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let ids = r.u32s("prompt.ids").unwrap();
+        let mut cpu = Session::open(model, 64, Sampler::Greedy, 0).unwrap();
+        cpu.path = ForwardPath::Cpu;
+        let mut sc = ForwardScratch::new(&cpu.arch, cpu.max_ctx, cpu.vocab_size as usize);
+        let mut p = build_tiny(model, 64);
+        let mut out = Vec::new();
+        for (step, &t) in ids.iter().enumerate() {
+            with_loaded_slm(model as usize, |slm| forward_one(&mut cpu, slm, t, &mut sc)).unwrap().unwrap();
+            step_prog(&mut p, model, &[t], step, &mut out);
+            for (i, (g, w)) in out.iter().zip(sc.logits.iter()).enumerate() {
+                assert!((g - w).abs() < 1e-2, "step {step} logit {i}: {g} vs {w}");
+            }
+        }
+        drop(p);
         reset_for_tests();
     }
 

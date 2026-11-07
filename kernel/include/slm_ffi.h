@@ -2061,6 +2061,22 @@ typedef struct {
 
 extern int32_t rust_slm_session_gpu_info(uint32_t session_id, SlmSessionGpuC *out);
 
+typedef struct {
+    uint32_t steps;
+    int32_t first_bad_step;     /* first logit over tolerance, -1 if none */
+    int32_t first_bad_index;
+    /* Thousandths: kernel C has no floating point. */
+    int32_t first_bad_got_milli;
+    int32_t first_bad_want_milli;
+    int32_t max_err_milli;
+    uint64_t gpu_us_per_token;
+} SlmGpuGoldenReport;
+
+/* Compare a program on `model` with a *_greedy.rec fixture. 0, or -1 when
+ * the program couldn't run (the console says why). */
+extern int32_t rust_slm_gpu_golden(uint32_t model, const uint8_t *rec, size_t rec_len,
+                                   uint32_t batched, SlmGpuGoldenReport *out);
+
 /* Barrier kind and flags for the next launch (see kernel/include/slm_prog.h). */
 extern void rust_slm_gpu_set_options(uint32_t barrier, uint32_t flags);
 
