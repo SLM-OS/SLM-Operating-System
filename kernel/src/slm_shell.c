@@ -1394,24 +1394,28 @@ void slm_stats_print_gpu_busy(const SlmTelemetryC *t)
                  (unsigned long long)(steps ? t->gpu_evict_us / steps : 0u));
 }
 
-/* Decode DRAM bandwidth (ADR 0005): the plan's bytes per decode step (weights
- * plus KV at the current position, before any L2 hit) times decode tokens over
- * the decode wall, against the LPDDR5 peak of a 128-bit bus at two transfers
- * per EMC clock (3199 MHz -> 102.4 GB/s). Derived, not a counter; the KV term
- * uses the final position, so it slightly overstates early tokens. */
+/* Jetson Orin Nano LPDDR5: 128-bit bus, two transfers per EMC clock. */
+#define SLM_DRAM_BYTES_PER_EMC_CLOCK 32u
+
+/* Decode DRAM bandwidth (ADR 0005): the plan's bytes per decode forward pass
+ * (weights plus KV at the current position, before any L2 hit) times the
+ * number of decode forward passes (itl_count; the first token comes from the
+ * prefill logits) over the decode wall, against the LPDDR5 peak (3199 MHz EMC
+ * is 102.37 GB/s, printed truncated as 102.3). Derived, not a counter; the KV
+ * term uses the final position, so it slightly overstates early tokens. */
 void slm_stats_print_dram_bw(const SlmTelemetryC *t, uint64_t emc_hz)
 {
     shell_puts("  dram bw  : decode ");
-    if (t->decode_tokens == 0u || t->decode_ns == 0u || emc_hz == 0u) {
-        shell_puts("n/a (no decode tokens or EMC clock unknown)\r\n");
+    if (t->itl_count == 0u || t->decode_ns == 0u || emc_hz == 0u) {
+        shell_puts("n/a (no decode steps or EMC clock unknown)\r\n");
         return;
     }
     uint64_t per_tok = t->weight_bytes + t->kv_read_bytes;
     /* Bytes per microsecond is MB/s (decimal). per_tok (about 1e9) times
-     * decode tokens (at most max_ctx, 32768) stays far inside 64 bits. */
+     * decode steps (at most max_ctx, 32768) stays far inside 64 bits. */
     uint64_t us = t->decode_ns / 1000u;
-    uint64_t mb_s = us ? per_tok * t->decode_tokens / us : 0u;
-    uint64_t peak_mb_s = emc_hz / 1000000u * 32u;           /* 16 B x 2 per clock */
+    uint64_t mb_s = us ? per_tok * t->itl_count / us : 0u;
+    uint64_t peak_mb_s = emc_hz / 1000000u * SLM_DRAM_BYTES_PER_EMC_CLOCK;
     uint64_t bp = peak_mb_s ? mb_s * 10000u / peak_mb_s : 0u;
     shell_printf("%llu.%01llu GB/s = ", (unsigned long long)(mb_s / 1000u),
                  (unsigned long long)((mb_s % 1000u) / 100u));

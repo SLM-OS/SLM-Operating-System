@@ -797,9 +797,10 @@ static void test_slm_stats_gpu_busy_splits_prefill(void)
     slm_prompt_teardown();
 }
 
-/* Decode DRAM bandwidth (ADR 0005): plan bytes per token times decode rate,
- * against 32 bytes per EMC clock. 982 MB x 256 tokens in 5.16 s at 3199 MHz is
- * 48.7 GB/s, 47.59 % of 102.3 GB/s. */
+/* Decode DRAM bandwidth (ADR 0005): plan bytes per forward pass times decode
+ * forward passes (itl_count, not emitted tokens), against 32 bytes per EMC
+ * clock. 982 MB x 256 passes in 5.16 s at 3199 MHz is 48.7 GB/s, 47.59 % of
+ * 102.3 GB/s; with 257 emitted tokens the figure must not change. */
 static void test_slm_stats_dram_bw_against_peak(void)
 {
     SLM_PROMPT_SETUP();
@@ -807,7 +808,8 @@ static void test_slm_stats_dram_bw_against_peak(void)
     memset(&t, 0, sizeof(t));
     t.weight_bytes = 979000000ull;
     t.kv_read_bytes = 3000000ull;
-    t.decode_tokens = 256u;
+    t.decode_tokens = 257u;
+    t.itl_count = 256u;
     t.decode_ns = 5160000000ull;
     cap_clear();
     slm_stats_print_dram_bw(&t, 3199000000ull);

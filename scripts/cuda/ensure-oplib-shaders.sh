@@ -39,7 +39,7 @@ warn() {
         echo "##########################################################################"
         echo "# WARNING: $1"
         echo "# The SLM GPU path will be CPU-only, as will MNIST, sched and eviction."
-        echo "# Install the CUDA Toolkit and rerun, or run \`make oplib-shaders\`."
+        echo "# Install CUDA 12.0 (the pinned toolkit) and rerun, or run \`make oplib-shaders\`."
         echo "##########################################################################"
     } >&2
 }
@@ -65,7 +65,8 @@ if NVCC="$(nvcc_path)"; then
     export NVCC
     echo "oplib-shaders: SASS $( [ "$have_sass" = 1 ] && echo stale || echo missing ), building with $NVCC"
     if ! bash "$BUILD"; then
-        echo "oplib-shaders: shader build failed; not building a kernel without GPU kernels" >&2
+        echo "oplib-shaders: shader build failed; not building a kernel without GPU kernels." >&2
+        echo "oplib-shaders: if nvcc is not CUDA 12.0, install 12.0 or set ALLOW_CUDA_MISMATCH=1 (see above)." >&2
         exit 2
     fi
     touch "$STAMP"

@@ -37,10 +37,11 @@ if [ -z "$NVCC" ] || [ ! -x "$NVCC" ]; then
 oplib-shaders: nvcc not found (looked in PATH and /usr/local/cuda/bin).
 
 The GPU kernels are compiled from scripts/cuda/ with the NVIDIA CUDA Toolkit
-and are not checked in. Install it and rerun \`make oplib-shaders\`:
-  Ubuntu/Debian: sudo apt install nvidia-cuda-toolkit
-  Official:      https://developer.nvidia.com/cuda-downloads
-  Jetson:        provided by L4T at /usr/local/cuda/
+and are not checked in. They are pinned to CUDA 12.0 (CUDA_PIN). Install it and
+rerun \`make oplib-shaders\`:
+  Ubuntu 24.04:  sudo apt install nvidia-cuda-toolkit   (packages CUDA 12.0)
+  Official:      https://developer.nvidia.com/cuda-12-0-0-download-archive
+  Other version: set ALLOW_CUDA_MISMATCH=1 and record the toolkit with results
 
 A kernel built without these shaders has no GPU path: every op stays on the CPU.
 EOF

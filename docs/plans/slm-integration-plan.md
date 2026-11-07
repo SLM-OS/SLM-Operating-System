@@ -272,6 +272,9 @@ output token-for-token.
 the Qwen2.5-1.5B forward pass on the GA10B GPU, **driving the Ampere
 tensor cores via HMMA as the main-line implementation**. Sustained
 decode ≥ 25 tok/s with ≥ 60 % tensor-core utilization on matmul ops.
+*Superseded by [ADR 0005](../adr/0005-dod6-decode-bandwidth.md): single-stream
+decode is memory-bound, so the target is parity speed plus decode DRAM
+bandwidth, with tensor-core figures for information only.*
 
 The Orin Nano has no NVDLA / no separate TPU — the GA10B's 32 third-gen
 tensor cores are the only AI silicon on the board, and the 67-TOPS
@@ -362,8 +365,10 @@ one variant.
   - ☐ With Tier-2 CUDA-core fallback on all matmul kernels: **≥ 10 tok/s**
     sustained (degraded-mode floor).
 - ☐ TTFT for a 64-token prompt ≤ 400 ms (Tier-1).
-- ☐ `slm stats --gpu` reports tensor-core utilization ≥ 60 % during
-  matmul ops in Tier-1 mode.
+- ⏸️ `slm stats --gpu` reports tensor-core utilization ≥ 60 % during
+  matmul ops in Tier-1 mode. *Superseded by ADR 0005: `slm stats --gpu`
+  reports decode DRAM bandwidth against the LPDDR5 peak (target ≥ 50 %;
+  measured 48.3 %) and tensor-core use for information only.*
 - ☐ Per-op tier selection visible via `slm gpu` (e.g. one op stuck on
   Tier 2 while others run Tier 1 is a supported, non-failure state).
 

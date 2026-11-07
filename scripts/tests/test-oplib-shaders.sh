@@ -128,6 +128,12 @@ if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ]; then
     echo "SKIP: real build, no nvcc"
     exit 0
 fi
+REAL_NVCC="$(command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)"
+REAL_VER="$("$REAL_NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)"
+if [ "$REAL_VER" != "12.0" ]; then
+    echo "NOTE: real build with CUDA $REAL_VER, not the pinned 12.0 (ALLOW_CUDA_MISMATCH=1)"
+    export ALLOW_CUDA_MISMATCH=1
+fi
 MANIFEST_OUT="$TMP/MANIFEST.json" bash "$ROOT/scripts/cuda/build-oplib-shaders.sh" "$TMP/out" \
     > "$TMP/build.log" 2>&1 || { cat "$TMP/build.log"; fail "real build"; }
 python3 - "$TMP/MANIFEST.json" "$TMP/out" "$ROOT/scripts/cuda/slm/MANIFEST.json" <<'EOF'
