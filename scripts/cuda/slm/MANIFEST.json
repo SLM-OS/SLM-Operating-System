@@ -11,8 +11,8 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_b1_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_b1.cu",
-   "code_bytes": 11904,
-   "sha256": "430757fe7a5b3e3d433a7b9d7ce793de87703512434f6e5df576dbe09e4dff42",
+   "code_bytes": 12416,
+   "sha256": "24c26d34deaf1a048d0b6a4fdba47a36124e3e2559756087ae34a9f4acd029a4",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -20,7 +20,7 @@
     1
    ],
    "smem_bytes": 512,
-   "regs": 60,
+   "regs": 66,
    "hmma_instructions": 16,
    "cbuf0_size": 400,
    "abi": [
@@ -74,8 +74,8 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b1_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_b1.cu",
-   "code_bytes": 15232,
-   "sha256": "72d884f2b503de447a1fd4b96ae04e25f9add0328eac6177e1c69eba30b14e6b",
+   "code_bytes": 16768,
+   "sha256": "20011748b96c1845e0b85f6da4e19ed1ba25f899f4f729a1d2b5ae4a492611a3",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -83,7 +83,7 @@
     1
    ],
    "smem_bytes": 512,
-   "regs": 54,
+   "regs": 62,
    "hmma_instructions": 16,
    "cbuf0_size": 400,
    "abi": [
@@ -137,8 +137,8 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_bs_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_bs.cu",
-   "code_bytes": 16000,
-   "sha256": "2db0c9bd67232f8fac8f86d68efca0bce625f4d7f7b61215b450daa81b3dde1f",
+   "code_bytes": 16896,
+   "sha256": "41ddf877edfc6a2d52cc4b32ae861e67fa296830c9759fcac7199d1b436c3550",
    "grid": "ceil(N/120),1,1",
    "block": [
     32,
@@ -192,6 +192,69 @@
     }
    ],
    "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 9..64, x in shared memory; prefer for N > 256."
+  },
+  {
+   "name": "slm_mm_q4k_hmma_bsq",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q4_K",
+   "sass": "slm_mm_q4k_hmma_bsq_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_bs.cu",
+   "code_bytes": 17280,
+   "sha256": "c0f9d7f7cba9d93d224dada06c51aa74e9bbb378f41d395e5d411affedd88b95",
+   "grid": "ceil(N/120),1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 17408,
+   "regs": 146,
+   "hmma_instructions": 32,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. As slm_mm_q4k_hmma_bs with x in q8_1 rows (SLM_MM_XQ)."
   },
   {
    "name": "slm_mm_q6k_hmma_bs",
@@ -255,6 +318,69 @@
     }
    ],
    "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. B 9..64, x in shared memory; prefer for N > 256."
+  },
+  {
+   "name": "slm_mm_q6k_hmma_bsq",
+   "op": "matmul",
+   "tier": "HMMA",
+   "dtype": "Q6_K",
+   "sass": "slm_mm_q6k_hmma_bsq_shader.sass",
+   "source": "scripts/cuda/slm/slm_mm_bs.cu",
+   "code_bytes": 21632,
+   "sha256": "b629bd928a3d568d56995901368505d0f44a193622a87e2ff8acff573d055d6d",
+   "grid": "ceil(N/120),1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 18432,
+   "regs": 166,
+   "hmma_instructions": 32,
+   "cbuf0_size": 400,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "W",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "bias",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "K",
+     "offset": 384,
+     "size": 4
+    },
+    {
+     "name": "N",
+     "offset": 388,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "flags",
+     "offset": 396,
+     "size": 4
+    }
+   ],
+   "doc": "out[B,N] = x[B,K] @ W[N,K]^T + bias[N]; flags bit 0 means FP16 out; x must be 16-byte aligned. As slm_mm_q6k_hmma_bs with x in q8_1 rows (SLM_MM_XQ)."
   },
   {
    "name": "slm_mm_q4k_hmma_b64",
@@ -326,8 +452,8 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
-   "code_bytes": 6912,
-   "sha256": "bf96b35c875c6001c40d53f6a3c93c2defa2fd6aa5b5d3cfdbeeb1cfafd7fba9",
+   "code_bytes": 7680,
+   "sha256": "b5e5fb13456bf4c55370e3915d57d43e642bed11e8bc69dea8f63b7df566dacf",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -335,7 +461,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 58,
+   "regs": 64,
    "hmma_instructions": 4,
    "cbuf0_size": 400,
    "abi": [
@@ -515,8 +641,8 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q6k.cu",
-   "code_bytes": 10112,
-   "sha256": "4b8c30a5e677b8841230bf0ace114813bb79a87f2956ffd75cf82dd658fd24cc",
+   "code_bytes": 11520,
+   "sha256": "876afa2fc942ff2b85cde3071aafc40c0c70b57a11a10d966a28d719f7ea69c2",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -524,7 +650,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 62,
+   "regs": 72,
    "hmma_instructions": 4,
    "cbuf0_size": 400,
    "abi": [
@@ -933,6 +1059,74 @@
    "doc": "Online softmax; query row b sees 0..=pos[b]. q,out [B][nhq][hd]; k,v [T][nhkv][hd]; hd % 32 == 0, hd <= 256."
   },
   {
+   "name": "slm_gqa_q8",
+   "op": "gqa",
+   "tier": "SIMT",
+   "dtype": "FP16",
+   "sass": "slm_gqa_q8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 22016,
+   "sha256": "c66f537cc62f56b691345b1adc296c1187af0ab1124d7c638c0ae4bab3f9594b",
+   "grid": "nhq,B,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 8256,
+   "regs": 40,
+   "hmma_instructions": 0,
+   "cbuf0_size": 408,
+   "abi": [
+    {
+     "name": "q",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "k",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "v",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "pos",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 384,
+     "size": 8
+    },
+    {
+     "name": "nhq",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "nhkv",
+     "offset": 396,
+     "size": 4
+    },
+    {
+     "name": "hd",
+     "offset": 400,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 404,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_gqa_w8, out in q8_1 rows of nhq*hd for SLM_MM_XQ."
+  },
+  {
    "name": "slm_gqa_w8",
    "op": "gqa",
    "tier": "SIMT",
@@ -1102,6 +1296,59 @@
    "doc": "x and out FP16 [B,n], n % 32 == 0."
   },
   {
+   "name": "slm_rmsnorm_q8",
+   "op": "rmsnorm",
+   "tier": "SIMT",
+   "dtype": "F32 gamma",
+   "sass": "slm_rmsnorm_q8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 10880,
+   "sha256": "224a5cefcee0afe7403d2649c26da0ca215b2eeec8ab3dc048d3e4ecfb2fff23",
+   "grid": "B,1,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 32,
+   "regs": 38,
+   "hmma_instructions": 0,
+   "cbuf0_size": 388,
+   "abi": [
+    {
+     "name": "x",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "gamma",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "n",
+     "offset": 376,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 380,
+     "size": 4
+    },
+    {
+     "name": "eps",
+     "offset": 384,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_rmsnorm_w8, out in q8_1 rows for SLM_MM_XQ (stride n + n/16 halves)."
+  },
+  {
    "name": "slm_rmsnorm_w8",
    "op": "rmsnorm",
    "tier": "SIMT",
@@ -1254,6 +1501,54 @@
     }
    ],
    "doc": "out[i] = silu(gate[i]) * up[i]."
+  },
+  {
+   "name": "slm_swiglu_q8",
+   "op": "swiglu",
+   "tier": "SIMT",
+   "dtype": "FP16",
+   "sass": "slm_swiglu_q8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 4096,
+   "sha256": "d6ad0c9b8038fed848a437f93078e11ab15e408239887da0bd1ed55937b4d5b1",
+   "grid": "ceil(total/256),1,1",
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "regs": 21,
+   "hmma_instructions": 0,
+   "cbuf0_size": 384,
+   "abi": [
+    {
+     "name": "gate",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "up",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "total",
+     "offset": 376,
+     "size": 4
+    },
+    {
+     "name": "n",
+     "offset": 380,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_swiglu_w8 plus row width n, out in q8_1 rows for SLM_MM_XQ."
   },
   {
    "name": "slm_swiglu_w8",

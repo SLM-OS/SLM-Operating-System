@@ -175,7 +175,11 @@ __global__ void slm_mm_q4k_hmma_b8(const half *x, const uint8_t *W, void *out,
     /* First batch of this CTA's x tile. */
     const int base = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y * 8 : 0;
     const bool xact = base + g < B;
-    const half *xrow = x + (size_t)(base + g) * K;
+    const size_t xs = slm_xstride(K, flags);
+    const half *xrow = x + (size_t)(base + g) * xs;
+    /* q8_1 scale rows of this lane's two output batches. */
+    const half *xr0 = x + (size_t)min(base + 2 * c, B - 1) * xs;
+    const half *xr1 = x + (size_t)min(base + 2 * c + 1, B - 1) * xs;
     /* Row 15's nibbles read as zero, which encodes exactly 1.0. */
     const uint32_t keep1 = g == 7 ? 0u : 0xFFFFFFFFu;
     const int off8 = 8 * c;
@@ -223,19 +227,22 @@ __global__ void slm_mm_q4k_hmma_b8(const half *x, const uint8_t *W, void *out,
             const float sh0 = __shfl_sync(0xFFFFFFFFu, ch2, 28 + c);
             const float sh1 = __shfl_sync(0xFFFFFFFFu, ch3, 28 + c);
 
+            const int bl = (b << 3) + 2 * j;
+            const float dl0 = slm_xq_d(xr0, K, flags, bl), dl1 = slm_xq_d(xr1, K, flags, bl);
+            const float dh0 = slm_xq_d(xr0, K, flags, bl + 1), dh1 = slm_xq_d(xr1, K, flags, bl + 1);
             float k, off;
             q4k_factors(h0, 2 * j, k, off);
-            acc0 += k * cl0 - off * sl0;
-            acc1 += k * cl1 - off * sl1;
+            acc0 += dl0 * (k * cl0 - off * sl0);
+            acc1 += dl1 * (k * cl1 - off * sl1);
             q4k_factors(h1, 2 * j, k, off);
-            acc2 += k * cl2 - off * sl0;
-            acc3 += k * cl3 - off * sl1;
+            acc2 += dl0 * (k * cl2 - off * sl0);
+            acc3 += dl1 * (k * cl3 - off * sl1);
             q4k_factors(h0, 2 * j + 1, k, off);
-            acc0 += k * ch0 - off * sh0;
-            acc1 += k * ch1 - off * sh1;
+            acc0 += dh0 * (k * ch0 - off * sh0);
+            acc1 += dh1 * (k * ch1 - off * sh1);
             q4k_factors(h1, 2 * j + 1, k, off);
-            acc2 += k * ch2 - off * sh0;
-            acc3 += k * ch3 - off * sh1;
+            acc2 += dh0 * (k * ch2 - off * sh0);
+            acc3 += dh1 * (k * ch3 - off * sh1);
         }
     }
 

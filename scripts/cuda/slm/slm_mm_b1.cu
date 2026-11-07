@@ -178,15 +178,18 @@ __global__ void slm_mm_q4k_hmma_b1(const half *x, const uint8_t *W, void *out, c
             const float sl = __shfl_sync(0xFFFFFFFFu, cl2, 28);
             const float sh = __shfl_sync(0xFFFFFFFFu, ch2, 28);
 
+            /* q8_1 scales of the two 32-element blocks (1 for plain x). */
+            const float dl = slm_xq_d(x, K, flags, (b << 3) + 2 * j);
+            const float dh = slm_xq_d(x, K, flags, (b << 3) + 2 * j + 1);
             float k, off;
             b1_q4k_scales(h0.w1, h0.w2, h0.w3, 2 * j, d0, m0, k, off);
-            acc0 = fmaf(-off, sl, fmaf(k, cl0, acc0));
+            acc0 = fmaf(dl, fmaf(-off, sl, k * cl0), acc0);
             b1_q4k_scales(h1.w1, h1.w2, h1.w3, 2 * j, d1, m1, k, off);
-            acc2 = fmaf(-off, sl, fmaf(k, cl2, acc2));
+            acc2 = fmaf(dl, fmaf(-off, sl, k * cl2), acc2);
             b1_q4k_scales(h0.w1, h0.w2, h0.w3, 2 * j + 1, d0, m0, k, off);
-            acc0 = fmaf(-off, sh, fmaf(k, ch0, acc0));
+            acc0 = fmaf(dh, fmaf(-off, sh, k * ch0), acc0);
             b1_q4k_scales(h1.w1, h1.w2, h1.w3, 2 * j + 1, d1, m1, k, off);
-            acc2 = fmaf(-off, sh, fmaf(k, ch2, acc2));
+            acc2 = fmaf(dh, fmaf(-off, sh, k * ch2), acc2);
         }
     }
 
@@ -280,8 +283,9 @@ __global__ void slm_mm_q6k_hmma_b1(const half *x, const uint8_t *W, void *out, c
                     const uint32_t sw0 = idx < 4 ? s0a : s0b;
                     const uint32_t sw1 = idx < 4 ? s1a : s1b;
                     const int sh = (idx & 3) * 8;
-                    const float f0 = d0 * (float)(int8_t)(sw0 >> sh);
-                    const float f1 = d1 * (float)(int8_t)(sw1 >> sh);
+                    const float dx = slm_xq_d(x, K, flags, (b << 3) + h * 4 + g);
+                    const float f0 = dx * d0 * (float)(int8_t)(sw0 >> sh);
+                    const float f1 = dx * d1 * (float)(int8_t)(sw1 >> sh);
                     /* f * (2^24*H - 32*S) */
                     acc0 = fmaf(f0, fmaf(B1_2P24, c0, s32), acc0);
                     acc2 = fmaf(f1, fmaf(B1_2P24, c2, s32), acc2);

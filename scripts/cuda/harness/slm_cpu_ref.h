@@ -47,6 +47,45 @@ static inline void ref_matmul(const Gguf &g, const GgufTensor &t, const uint16_t
     }
 }
 
+/* ggml quantize_q8_1 round trip in place: per 32 values d = amax/127,
+ * q = roundf(v/d), value = FP16(d) * q, as llama.cpp's CUDA dot products use it. */
+static inline void ref_q8_1(float *v, int n)
+{
+    for (int b = 0; b < n; b += 32) {
+        float amax = 0;
+        for (int i = 0; i < 32; i++) {
+            amax = fmaxf(amax, fabsf(v[b + i]));
+        }
+        const float d = amax / 127.0f;
+        const float d16 = gg_f16_to_f32(gg_f32_to_f16(d));
+        for (int i = 0; i < 32; i++) {
+            v[b + i] = amax == 0.0f ? 0.0f : d16 * roundf(v[b + i] / d);
+        }
+    }
+}
+
+/* ref_matmul with FP32 inputs. */
+static inline void ref_matmul_f(const Gguf &g, const GgufTensor &t, const float *fx, int B,
+                                float *out)
+{
+    const int K = (int)t.dim0, N = (int)t.dim1;
+#pragma omp parallel
+    {
+        std::vector<float> row(K);
+#pragma omp for schedule(static)
+        for (int r = 0; r < N; r++) {
+            gg_decode_row(g.data.data(), t, r, row.data());
+            for (int b = 0; b < B; b++) {
+                double s = 0;
+                for (int k = 0; k < K; k++) {
+                    s += (double)row[k] * (double)fx[(size_t)b * K + k];
+                }
+                out[(size_t)b * N + r] = (float)s;
+            }
+        }
+    }
+}
+
 /* Matmul plus optional F32 bias, rounded to FP16 per row. */
 static inline void ref_project(const Gguf &g, const GgufTensor &t, const float *bias,
                                const uint16_t *x, int B, uint16_t *out)

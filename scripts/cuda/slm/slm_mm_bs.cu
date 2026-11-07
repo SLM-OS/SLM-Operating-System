@@ -80,9 +80,13 @@ SLM_INL void bs_finish(float (&acc)[8][4], const float *bias, void *out, int N, 
     }
 }
 
-__global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, const float *bias,
-                                   int K, int N, int B, int flags)
+/* XQ is a template parameter: as a runtime flag it costs 40 registers, which
+ * halves the warps that fit. slm_mm_*_hmma_bsq are the q8_1 entry points. */
+template <bool XQ>
+SLM_INL void bs_q4k(const half *x, const uint8_t *W, void *out, const float *bias, int K, int N,
+                    int B, int flags)
 {
+    flags = XQ ? (flags | SLM_MM_XQ) : (flags & ~SLM_MM_XQ);
     const int lane = threadIdx.x;
     const int w = threadIdx.y;
     const int g = lane >> 2;
@@ -100,11 +104,13 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
     const uint32_t one1 = g == 7 ? SLM_H_ONE2 : 0u;
     const int off8 = 8 * c;
     const int bat = w * 8 + g;
-    const half *xrow = x + (size_t)bat * K;
+    const half *xrow = x + (size_t)bat * slm_xstride(K, flags);
     const bool xact = bat < B;
 
     /* [set][x tile][group][column c][nibble] of one 16-byte x value, paired. */
     __shared__ __align__(16) slm_x16 bsq4_x[2][8][8][4][2];
+    /* [set][x tile][batch in tile][nibble]: q8_1 scale of the 32-element block. */
+    __shared__ float bsq4_d[2][8][8][2];
     int set = 0;
 
     float acc[8][4];
@@ -140,6 +146,9 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                                 (xh.w2 & 0xFFFFu) | (xh.w3 << 16), (xh.w2 >> 16) | (xh.w3 & 0xFFFF0000u)};
             bsq4_x[set][w][g][c][0] = pl;
             bsq4_x[set][w][g][c][1] = ph;
+            if (XQ && c < 2) {
+                bsq4_d[set][w][g][c] = xact ? slm_xq_d(xrow, K, flags, (b << 3) + 2 * j + c) : 0.0f;
+            }
             const uint64_t q0 = *reinterpret_cast<const uint64_t *>(blk0 + 16 + (j << 5) + off8);
             const uint64_t q1 = *reinterpret_cast<const uint64_t *>(blk1 + 16 + (j << 5) + off8);
             __syncthreads();
@@ -169,10 +178,12 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                     slm_mma(c0, c1, c2, c3, a0b, a1b, a2b, a3b, xv.w2, xv.w3);
                     const float s0 = __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
                     const float s1 = __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
-                    acc[xt][0] = fmaf(-off0, s0, fmaf(k0, c0, acc[xt][0]));
-                    acc[xt][1] = fmaf(-off0, s1, fmaf(k0, c1, acc[xt][1]));
-                    acc[xt][2] = fmaf(-off1, s0, fmaf(k1, c2, acc[xt][2]));
-                    acc[xt][3] = fmaf(-off1, s1, fmaf(k1, c3, acc[xt][3]));
+                    const float e0 = XQ ? bsq4_d[set][xt][2 * c][hi] : 1.0f;
+                    const float e1 = XQ ? bsq4_d[set][xt][2 * c + 1][hi] : 1.0f;
+                    acc[xt][0] = fmaf(e0, fmaf(-off0, s0, k0 * c0), acc[xt][0]);
+                    acc[xt][1] = fmaf(e1, fmaf(-off0, s1, k0 * c1), acc[xt][1]);
+                    acc[xt][2] = fmaf(e0, fmaf(-off1, s0, k1 * c2), acc[xt][2]);
+                    acc[xt][3] = fmaf(e1, fmaf(-off1, s1, k1 * c3), acc[xt][3]);
                 }
             }
             set ^= 1;
@@ -187,9 +198,11 @@ SLM_INL uint32_t bs_u32(const uint8_t *p)
            ((uint32_t)*reinterpret_cast<const uint16_t *>(p + 2) << 16);
 }
 
-__global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, const float *bias,
-                                   int K, int N, int B, int flags)
+template <bool XQ>
+SLM_INL void bs_q6k(const half *x, const uint8_t *W, void *out, const float *bias, int K, int N,
+                    int B, int flags)
 {
+    flags = XQ ? (flags | SLM_MM_XQ) : (flags & ~SLM_MM_XQ);
     const int lane = threadIdx.x;
     const int w = threadIdx.y;
     const int gr = lane >> 2;
@@ -207,11 +220,13 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
     const uint32_t one1 = gr == 7 ? SLM_H_ONE2 : 0u;
     const int off4 = 4 * c;
     const int bat = w * 8 + gr;
-    const half *xrow = x + (size_t)bat * K;
+    const half *xrow = x + (size_t)bat * slm_xstride(K, flags);
     const bool xact = bat < B;
 
     /* [set][x tile][group][column c][sub-group g] of one 8-byte x value, paired. */
     __shared__ __align__(8) uint64_t bsq6_x[2][8][8][4][4];
+    /* [set][x tile][batch in tile][sub-group g]: q8_1 scale of the 32-element block. */
+    __shared__ float bsq6_d[2][8][8][4];
     int set = 0;
 
     float acc[8][4];
@@ -247,6 +262,10 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                     bsq6_x[set][w][gr][c][g] =
                         (uint64_t)((x0 & 0xFFFFu) | (x1 << 16)) |
                         ((uint64_t)((x0 >> 16) | (x1 & 0xFFFF0000u)) << 32);
+                }
+                if (XQ) {
+                    bsq6_d[set][w][gr][c] =
+                        xact ? slm_xq_d(xrow, K, flags, (b << 3) + h * 4 + c) : 0.0f;
                 }
                 const uint32_t la0 = bs_u32(blk0 + h * 64 + l);
                 const uint32_t lb0 = bs_u32(blk0 + h * 64 + 32 + l);
@@ -285,10 +304,12 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                                 (uint32_t)(xv >> 32));
                         const float s_0 = -32.0f * __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
                         const float s_1 = -32.0f * __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
-                        acc[xt][0] = fmaf(f0, fmaf(BS_2P24, c0, s_0), acc[xt][0]);
-                        acc[xt][1] = fmaf(f0, fmaf(BS_2P24, c1, s_1), acc[xt][1]);
-                        acc[xt][2] = fmaf(f1, fmaf(BS_2P24, c2, s_0), acc[xt][2]);
-                        acc[xt][3] = fmaf(f1, fmaf(BS_2P24, c3, s_1), acc[xt][3]);
+                        const float e0 = XQ ? bsq6_d[set][xt][2 * c][g] : 1.0f;
+                        const float e1 = XQ ? bsq6_d[set][xt][2 * c + 1][g] : 1.0f;
+                        acc[xt][0] = fmaf(e0 * f0, fmaf(BS_2P24, c0, s_0), acc[xt][0]);
+                        acc[xt][1] = fmaf(e1 * f0, fmaf(BS_2P24, c1, s_1), acc[xt][1]);
+                        acc[xt][2] = fmaf(e0 * f1, fmaf(BS_2P24, c2, s_0), acc[xt][2]);
+                        acc[xt][3] = fmaf(e1 * f1, fmaf(BS_2P24, c3, s_1), acc[xt][3]);
                     }
                 }
                 set ^= 1;
@@ -296,4 +317,28 @@ __global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, c
         }
     }
     bs_finish(acc, bias, out, N, B, r0, r1, has0, has1, c, flags);
+}
+
+__global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, const float *bias,
+                                   int K, int N, int B, int flags)
+{
+    bs_q4k<false>(x, W, out, bias, K, N, B, flags);
+}
+
+__global__ void slm_mm_q4k_hmma_bsq(const half *x, const uint8_t *W, void *out, const float *bias,
+                                    int K, int N, int B, int flags)
+{
+    bs_q4k<true>(x, W, out, bias, K, N, B, flags);
+}
+
+__global__ void slm_mm_q6k_hmma_bs(const half *x, const uint8_t *W, void *out, const float *bias,
+                                   int K, int N, int B, int flags)
+{
+    bs_q6k<false>(x, W, out, bias, K, N, B, flags);
+}
+
+__global__ void slm_mm_q6k_hmma_bsq(const half *x, const uint8_t *W, void *out, const float *bias,
+                                    int K, int N, int B, int flags)
+{
+    bs_q6k<true>(x, W, out, bias, K, N, B, flags);
 }
