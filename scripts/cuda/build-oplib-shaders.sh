@@ -11,8 +11,15 @@
 #
 # Usage: scripts/cuda/build-oplib-shaders.sh [output-dir]
 # Environment: NVCC, ARCH (default sm_87), PYTHON (default python3),
-#              MANIFEST_OUT (default scripts/cuda/slm/MANIFEST.json).
-# Exit codes: 0 built; 1 toolkit missing; 2 compile or extraction failure.
+#              MANIFEST_OUT (default scripts/cuda/slm/MANIFEST.json),
+#              CUDA_PIN (default 12.0: the toolkit every #475 benchmark used),
+#              ALLOW_CUDA_MISMATCH=1 to build with another toolkit anyway.
+# Exit codes: 0 built; 1 toolkit missing; 2 compile or extraction failure;
+#             3 toolkit is not the pinned release.
+#
+# Why the pin: kernels built by a different nvcc round differently, which can
+# flip a near tie in greedy decoding (12.0 and 12.6 builds gave different p2
+# text, ADR 0004). Results are only comparable on the pinned toolkit.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +48,16 @@ EOF
 fi
 
 TOOLKIT="$("$NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)"
+CUDA_PIN="${CUDA_PIN:-12.0}"
+if [ "${TOOLKIT:-}" != "$CUDA_PIN" ] && [ "${ALLOW_CUDA_MISMATCH:-0}" != 1 ]; then
+    cat >&2 <<MSG
+oplib-shaders: nvcc is CUDA ${TOOLKIT:-unknown}, but the shaders are pinned to
+CUDA $CUDA_PIN. A different toolkit can change greedy output (ADR 0004).
+Install CUDA $CUDA_PIN, or set ALLOW_CUDA_MISMATCH=1 and record the toolkit
+with any result.
+MSG
+    exit 3
+fi
 echo "oplib-shaders: nvcc $NVCC (CUDA ${TOOLKIT:-unknown}), arch $ARCH, output $OUT_DIR"
 
 mkdir -p "$OUT_DIR"

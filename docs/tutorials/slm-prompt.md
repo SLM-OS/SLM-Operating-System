@@ -193,6 +193,8 @@ Prompts on one session continue one conversation until `slm reset`.
 | Sampler | Flags | When to pick |
 |---------|-------|--------------|
 | `greedy` | (none) | Deterministic. Good for testing, regression checks, or when you need bit-stable output. |
+
+For demos, use the default `topkp` sampler. Greedy decoding of a 1.5B model can fall into a repeated sentence on some prompts (bench prompt p2 does so on SLM-OS), because a near tie between two tokens sends it down a different branch than llama.cpp takes; see ADR 0004.
 | `temp`   | `--temp F` | Softmax with `logit / T`. T → 0 acts like greedy; T → ∞ approaches uniform. Demo default is `0.7`. |
 | `topk`   | `--temp F --topk N` | Mask all but the top-N highest-logit tokens before softmax. Useful when the long tail produces incoherent words. |
 | `topp`   | `--temp F --topp F` | Nucleus sampling: keep the smallest prefix whose softmax sum reaches `p`. Demo default is `0.9`. |

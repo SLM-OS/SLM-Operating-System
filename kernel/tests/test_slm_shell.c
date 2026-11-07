@@ -797,6 +797,29 @@ static void test_slm_stats_gpu_busy_splits_prefill(void)
     slm_prompt_teardown();
 }
 
+/* Decode DRAM bandwidth (ADR 0005): plan bytes per token times decode rate,
+ * against 32 bytes per EMC clock. 982 MB x 256 tokens in 5.16 s at 3199 MHz is
+ * 48.7 GB/s, 47.59 % of 102.3 GB/s. */
+static void test_slm_stats_dram_bw_against_peak(void)
+{
+    SLM_PROMPT_SETUP();
+    SlmTelemetryC t;
+    memset(&t, 0, sizeof(t));
+    t.weight_bytes = 979000000ull;
+    t.kv_read_bytes = 3000000ull;
+    t.decode_tokens = 256u;
+    t.decode_ns = 5160000000ull;
+    cap_clear();
+    slm_stats_print_dram_bw(&t, 3199000000ull);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf,
+        "dram bw  : decode 48.7 GB/s = 47.59 % of 102.3 GB/s LPDDR5 peak"));
+    memset(&t, 0, sizeof(t));
+    cap_clear();
+    slm_stats_print_dram_bw(&t, 3199000000ull);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "dram bw  : decode n/a"));
+    slm_prompt_teardown();
+}
+
 /* A figure read in a second session during a prompt is live: it advances
  * between two reads, and neither a plain read nor --follow stops the prompt. */
 static volatile uint64_t live_first;
@@ -964,6 +987,7 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_stats_before_any_prompt);
     RUN_TEST(test_slm_stats_formats_every_section);
     RUN_TEST(test_slm_stats_gpu_busy_splits_prefill);
+    RUN_TEST(test_slm_stats_dram_bw_against_peak);
     RUN_TEST(test_slm_stats_live_from_second_session);
     RUN_TEST(test_slm_stats_disabled_cost_is_not_measurable);
     RUN_TEST(test_slm_stop_idle_session_says_so);

@@ -1349,7 +1349,7 @@ static void slm_stats_profile(const SlmTelemetryC *t)
  * "Tensor-core utilization"). */
 static void slm_stats_tensor_core(const SlmTelemetryC *t)
 {
-    shell_puts("  tensor core utilization:\r\n");
+    shell_puts("  tensor core utilization (information only, ADR 0005; prefill is where it is meaningful):\r\n");
     shell_puts("    mma issue time / matmul wall (derived): ");
     if (t->tc_issue_bp != SLM_TELEMETRY_NA) {
         slm_print_bp(t->tc_issue_bp);
@@ -1394,6 +1394,33 @@ void slm_stats_print_gpu_busy(const SlmTelemetryC *t)
                  (unsigned long long)(steps ? t->gpu_evict_us / steps : 0u));
 }
 
+/* Decode DRAM bandwidth (ADR 0005): the plan's bytes per decode step (weights
+ * plus KV at the current position, before any L2 hit) times decode tokens over
+ * the decode wall, against the LPDDR5 peak of a 128-bit bus at two transfers
+ * per EMC clock (3199 MHz -> 102.4 GB/s). Derived, not a counter; the KV term
+ * uses the final position, so it slightly overstates early tokens. */
+void slm_stats_print_dram_bw(const SlmTelemetryC *t, uint64_t emc_hz)
+{
+    shell_puts("  dram bw  : decode ");
+    if (t->decode_tokens == 0u || t->decode_ns == 0u || emc_hz == 0u) {
+        shell_puts("n/a (no decode tokens or EMC clock unknown)\r\n");
+        return;
+    }
+    uint64_t per_tok = t->weight_bytes + t->kv_read_bytes;
+    /* Bytes per microsecond is MB/s (decimal). per_tok (about 1e9) times
+     * decode tokens (at most max_ctx, 32768) stays far inside 64 bits. */
+    uint64_t us = t->decode_ns / 1000u;
+    uint64_t mb_s = us ? per_tok * t->decode_tokens / us : 0u;
+    uint64_t peak_mb_s = emc_hz / 1000000u * 32u;           /* 16 B x 2 per clock */
+    uint64_t bp = peak_mb_s ? mb_s * 10000u / peak_mb_s : 0u;
+    shell_printf("%llu.%01llu GB/s = ", (unsigned long long)(mb_s / 1000u),
+                 (unsigned long long)((mb_s % 1000u) / 100u));
+    slm_print_bp((uint32_t)bp);
+    shell_printf(" of %llu.%01llu GB/s LPDDR5 peak (derived from plan bytes per token; target 50 %%)\r\n",
+                 (unsigned long long)(peak_mb_s / 1000u),
+                 (unsigned long long)((peak_mb_s % 1000u) / 100u));
+}
+
 static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_hz)
 {
     shell_printf("  clocks   : EMC %llu MHz, GPC %llu MHz\r\n",
@@ -1411,6 +1438,7 @@ static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_
         shell_printf("  dram est : %llu MB weights + %llu MB KV per token (plan, before L2)\r\n",
                      (unsigned long long)(t->weight_bytes >> 20),
                      (unsigned long long)(t->kv_read_bytes >> 20));
+        slm_stats_print_dram_bw(t, emc_hz);
         slm_stats_print_gpu_busy(t);
     } else {
         shell_puts("  gpu busy : n/a (not on a GPU program)\r\n");

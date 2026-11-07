@@ -29,6 +29,21 @@ else
     echo "PASS: missing toolkit stops with instructions"
 fi
 
+# 1b. A toolkit other than the pinned one stops with exit 3 unless allowed.
+mkdir -p "$TMP/fakecuda"
+cat > "$TMP/fakecuda/nvcc" <<'EOF'
+#!/bin/sh
+echo "Cuda compilation tools, release 12.6, V12.6.68"
+EOF
+chmod +x "$TMP/fakecuda/nvcc"
+rc=0
+NVCC="$TMP/fakecuda/nvcc" bash "$ROOT/scripts/cuda/build-oplib-shaders.sh" "$TMP/pin-out" \
+    > "$TMP/pin.log" 2>&1 || rc=$?
+[ "$rc" = 3 ] || fail "toolkit pin: exit $rc, expected 3"
+grep -q "pinned to" "$TMP/pin.log" || fail "toolkit pin: no message"
+[ ! -e "$TMP/pin-out" ] || fail "toolkit pin: created output"
+echo "PASS: unpinned toolkit stops with exit 3"
+
 # 2. Extractor on a synthetic cubin.
 python3 - "$ROOT/scripts/cuda/oplib-extract.py" "$TMP" <<'EOF'
 import importlib.util, struct, sys

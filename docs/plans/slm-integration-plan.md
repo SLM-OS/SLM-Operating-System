@@ -555,10 +555,15 @@ boot can:
 4. Show real-time per-token telemetry on `slm stats --profile`.
 5. Demonstrate `slm-runner` answering prompts published to `/slm/prompt`
    on the message bus.
-6. Hold ≥ 25 tok/s decode and < 400 ms TTFT on a 64-token prompt with
-   Tier-1 HMMA tensor-core kernels engaged on all matmul ops, and report
-   ≥ 60 % tensor-core utilization during decode via `slm stats --gpu`.
+6. Hold ≥ 25 tok/s decode, at least parity with llama.cpp CUDA at the same
+   GPU clock (ADR 0001), and < 400 ms TTFT on a 64-token prompt, with Tier-1
+   HMMA tensor-core kernels on all weight matmuls. `slm stats --gpu` reports
+   decode DRAM bandwidth as a fraction of the LPDDR5 peak (target ≥ 50 %) and
+   tensor-core use, the latter for information only (meaningful for prefill).
    Degraded-mode (Tier-2 fallback only) acceptance floor is ≥ 10 tok/s.
+   *Amended 2026-11-07 by [ADR 0005](../adr/0005-dod6-decode-bandwidth.md);
+   the original wording required ≥ 60 % tensor-core utilization during
+   decode and HMMA on all matmul ops, including attention.*
 7. Pass the full `/ci` sweep (QEMU ARM64 + x86-64) with the new test
    suites, including golden-vector tokenizer, golden-vector ops, and an
    end-to-end deterministic-greedy completion test.

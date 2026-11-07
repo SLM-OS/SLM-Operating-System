@@ -16,8 +16,8 @@ Keep FP16 activations and exact dot products (no activation quantization) on bot
 
 ## Consequences
 
-Greedy text will keep departing from llama.cpp at near ties. This is expected and is not a defect. The CUDA toolkit that builds the shaders can flip a near tie (p2 differed between a 12.0 and a 12.6 build), so benchmark runs record the toolkit.
+Greedy text will keep departing from llama.cpp at near ties. This is expected and is not a defect. The CUDA toolkit that builds the shaders can flip a near tie (p2 differed between a 12.0 and a 12.6 build), so `scripts/cuda/build-oplib-shaders.sh` pins CUDA 12.0 (the toolkit every benchmark here used) and refuses another unless `ALLOW_CUDA_MISMATCH=1`.
 
 ## Evidence
 
-Teacher forcing on jetson-nano-2 (MAXN, llama.cpp CUDA tokens fed to the SLM-OS kernels): every disagreement sits where llama.cpp's own top-1 to top-2 gap is at most 0.13 logits; mean RMS logit difference 0.07 to 0.09. llama.cpp's own scalar and SIMD CPU builds diverge from each other at steps 15, 45 and 6. Q8_K differs from an exact dot product by up to 3.4 percent of output RMS on real weights; the GPU kernels differ by under 3e-5. Details: `docs/design/slm-gpu-program.md`, `.gauntlet/475.md`.
+Teacher forcing on jetson-nano-2 (MAXN, llama.cpp CUDA tokens fed to the SLM-OS kernels): every disagreement sits where llama.cpp's own top-1 to top-2 gap is at most 0.13 logits; mean RMS logit difference 0.07 to 0.09. llama.cpp's own scalar and SIMD CPU builds diverge from each other at steps 15, 45 and 6. Q8_K differs from an exact dot product by up to 3.4 percent of output RMS on real weights; the GPU kernels differ by under 3e-5. Details: `docs/design/slm-gpu-program.md`, `docs/archive/475-gauntlet/475.md`.

@@ -26,6 +26,8 @@ int cmd_slm(int argc, char **argv);
 /* `slm stats --gpu`'s GPU-time lines, for tests. */
 #include "slm_ffi.h"
 void slm_stats_print_gpu_busy(const SlmTelemetryC *t);
+/* `slm stats --gpu`'s decode DRAM bandwidth line (ADR 0005), for tests. */
+void slm_stats_print_dram_bw(const SlmTelemetryC *t, uint64_t emc_hz);
 
 /* The `[slm] ttft=... total=...` line after a prompt: total is ttft plus
  * decode. `tokens` and `bytes` are what the prompt printed. */
