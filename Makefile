@@ -1087,6 +1087,19 @@ mnist-shaders-clean:
 test-build-order:
 	@bash scripts/tests/test-build-order.sh
 
+# oplib-shaders: every *_shader.sass the kernel can embed, built with nvcc
+# (host cross-build or on a Jetson) into scripts/cuda/operator_library/, which
+# is gitignored. Also regenerates scripts/cuda/slm/MANIFEST.json, the SLM op
+# table. A Jetson GPU build needs these; without a toolkit the target stops
+# with instructions. test-oplib-shaders needs no toolkit (#475).
+.PHONY: oplib-shaders
+oplib-shaders:
+	@scripts/cuda/build-oplib-shaders.sh
+
+.PHONY: test-oplib-shaders
+test-oplib-shaders:
+	@bash scripts/tests/test-oplib-shaders.sh
+
 # test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
 # selection and section-table parsing, with nvcc/cuobjdump/readelf
 # stubbed (no CUDA toolkit needed). Covers both cuobjdump naming
@@ -1804,6 +1817,8 @@ help:
 	@echo "                        (output: $(MNIST_SHADER_OUT)/*.sass; requires CUDA Toolkit)"
 	@echo "  mnist-shaders-clean   Remove $(MNIST_SHADER_OUT)/"
 	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
+	@echo "  oplib-shaders         Build every *_shader.sass and the SLM op table (requires CUDA Toolkit)"
+	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

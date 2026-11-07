@@ -35,7 +35,9 @@
 #include "slm_common.cuh"
 
 #define Q4K_BLOCK_BYTES 144
+#ifndef Q4K_TILE_ROWS
 #define Q4K_TILE_ROWS 15
+#endif
 
 /* Pack the two selected nibbles of a 16-bit load as FP16 1 + n/16.
  * hi selects the high nibble of each byte. */
@@ -296,9 +298,6 @@ __global__ void slm_mm_q4k_hmma_b64(const half *x, const uint8_t *W, void *out,
      * compiler spilled them, and SLM-OS launches these without a stack. */
     __shared__ __align__(16) float smem_acc[Q4K_XTILES * 16 * 8];
     /* Row r, batch-in-tile n of tile xt: smem_acc[xt*128 + r*8 + n]. */
-    if (lane == 0) {
-        /* Cleared by group-0 lanes below; nothing to do here. */
-    }
     for (int xt = 0; xt < xtiles; xt++) {
         smem_acc[xt * 128 + g * 8 + 2 * c] = 0.0f;
         smem_acc[xt * 128 + g * 8 + 2 * c + 1] = 0.0f;

@@ -29,6 +29,8 @@ struct GgufTensor {
 
 struct Gguf {
     std::vector<uint8_t> data; /* tensor data region */
+    uint32_t block_count = 0, hidden = 0, ff = 0, nhq = 0, nhkv = 0;
+    float rope_base = 10000.0f, rms_eps = 1e-6f;
     std::map<std::string, GgufTensor> tensors;
     uint64_t data_size = 0;
 };
@@ -222,8 +224,24 @@ static inline bool gguf_read(const char *path, Gguf &g)
     for (uint64_t i = 0; i < nk; i++) {
         const std::string k = rstr();
         const uint32_t t = r32();
+        const size_t dot = k.rfind('.');
+        const std::string leaf = dot == std::string::npos ? k : k.substr(dot + 1);
         if (k == "general.alignment") {
             align = r32();
+        } else if (t == 4 && leaf == "block_count") {
+            g.block_count = r32();
+        } else if (t == 4 && leaf == "embedding_length") {
+            g.hidden = r32();
+        } else if (t == 4 && leaf == "feed_forward_length") {
+            g.ff = r32();
+        } else if (t == 4 && leaf == "head_count") {
+            g.nhq = r32();
+        } else if (t == 4 && leaf == "head_count_kv") {
+            g.nhkv = r32();
+        } else if (t == 6 && leaf == "freq_base") {
+            rd(&g.rope_base, 4);
+        } else if (t == 6 && leaf == "layer_norm_rms_epsilon") {
+            rd(&g.rms_eps, 4);
         } else {
             skip_val(t, skip_val);
         }
