@@ -275,4 +275,40 @@ static inline bool gguf_read(const char *path, Gguf &g)
     return true;
 }
 
+/* Golden .rec reader: "SGR1", count, then name, data, padded by data length. */
+static std::map<std::string, std::vector<uint8_t>> read_rec(const char *path)
+{
+    std::map<std::string, std::vector<uint8_t>> out;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        exit(2);
+    }
+    fseek(f, 0, SEEK_END);
+    const long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> d(sz);
+    if (fread(d.data(), 1, sz, f) != (size_t)sz || memcmp(d.data(), "SGR1", 4)) {
+        fprintf(stderr, "%s: bad rec\n", path);
+        exit(2);
+    }
+    fclose(f);
+    uint32_t count;
+    memcpy(&count, &d[4], 4);
+    size_t o = 8;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t n;
+        memcpy(&n, &d[o], 4);
+        o += 4;
+        const std::string name((const char *)&d[o], n);
+        o += n;
+        uint32_t dl;
+        memcpy(&dl, &d[o], 4);
+        o += 4;
+        out[name].assign(d.begin() + o, d.begin() + o + dl);
+        o += (dl + 3) & ~(size_t)3;
+    }
+    return out;
+}
+
 #endif /* GGUF_LITE_H */

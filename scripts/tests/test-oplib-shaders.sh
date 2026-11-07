@@ -97,7 +97,18 @@ assert set(x.ARGS) <= set(x.OPS)
 print("PASS: names and op table")
 EOF
 
-# 3. Real build when a toolkit is there.
+# 3. The harness's CPU reference judges every GPU kernel on the board, so it is
+#    checked against the ggml goldens here.
+if command -v g++ >/dev/null 2>&1; then
+    g++ -O2 -std=c++17 "$ROOT/scripts/cuda/harness/test_ref.cpp" -o "$TMP/test_ref" -lm
+    "$TMP/test_ref" "$ROOT/scripts/fixtures/slm/golden_ops.rec" > "$TMP/ref.log" \
+        || { cat "$TMP/ref.log"; fail "CPU reference vs goldens"; }
+    echo "PASS: harness CPU reference matches the ggml goldens"
+else
+    echo "SKIP: CPU reference check, no g++"
+fi
+
+# 4. Real build when a toolkit is there.
 if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ]; then
     echo "SKIP: real build, no nvcc"
     exit 0

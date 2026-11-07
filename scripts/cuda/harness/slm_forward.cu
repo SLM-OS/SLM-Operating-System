@@ -710,43 +710,6 @@ static void report_logits(const char *label, const std::vector<float> &got,
     }
 }
 
-/* Golden .rec reader: "SGR1", count, then name, data, padded to 4 bytes. */
-static std::map<std::string, std::vector<uint8_t>> read_rec(const char *path)
-{
-    std::map<std::string, std::vector<uint8_t>> out;
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        perror(path);
-        exit(2);
-    }
-    fseek(f, 0, SEEK_END);
-    const long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    std::vector<uint8_t> d(sz);
-    if (fread(d.data(), 1, sz, f) != (size_t)sz || memcmp(d.data(), "SGR1", 4)) {
-        fprintf(stderr, "%s: bad rec\n", path);
-        exit(2);
-    }
-    fclose(f);
-    uint32_t count;
-    memcpy(&count, &d[4], 4);
-    size_t o = 8;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t n;
-        memcpy(&n, &d[o], 4);
-        o += 4;
-        const std::string name((const char *)&d[o], n);
-        o += n;
-        uint32_t dl;
-        memcpy(&dl, &d[o], 4);
-        o += 4;
-        out[name].assign(d.begin() + o, d.begin() + o + dl);
-        o += dl;
-        o = (o + 3) & ~(size_t)3;
-    }
-    return out;
-}
-
 static void set_step(Arena &A, const std::vector<uint32_t> &ids, uint32_t pos0)
 {
     std::vector<uint32_t> pos(ids.size());
@@ -840,7 +803,7 @@ int main(int argc, char **argv)
     }
 
     /* ---- mma issue rate ---- */
-    double cpi = 0;
+    double mma_rate = 0;
     {
         float *d;
         const int warps = prop.multiProcessorCount * 32;
@@ -854,10 +817,8 @@ int main(int argc, char **argv)
             ts.push_back(now_ms() - s);
         }
         const double ms = median(ts);
-        const double per_s = (double)warps * reps / (ms * 1e-3);
-        cpi = 0; /* set from rate below */
-        printf("\nmma issue: %.2f G mma/s across all SMs\n", per_s / 1e9);
-        cpi = per_s; /* carried as a rate */
+        mma_rate = (double)warps * reps / (ms * 1e-3);
+        printf("\nmma issue: %.2f G mma/s across all SMs\n", mma_rate / 1e9);
         CK(cudaFree(d));
     }
 
@@ -975,7 +936,7 @@ int main(int argc, char **argv)
         const double gqa_macs = 2.0 * M.layers * M.nhq * T * M.hd;
         printf("tensor-core utilization, labelled:\n");
         printf("  mma issue cycles over matmul wall time: %.1f%% (%.2fM mma at %.2f G mma/s max, matmul time %.2f ms op-by-op)\n",
-               100.0 * (mma / cpi) / (mm_ms * 1e-3), mma / 1e6, cpi / 1e9, mm_ms);
+               100.0 * (mma / mma_rate) / (mm_ms * 1e-3), mma / 1e6, mma_rate / 1e9, mm_ms);
         printf("  MAC share on tensor cores: %.2f%% (%.0fM of %.0fM, GQA at T=%.0f counted as SIMT)\n",
                100.0 * macs_tc / (macs + gqa_macs), macs_tc / 1e6, (macs + gqa_macs) / 1e6, T);
     }
