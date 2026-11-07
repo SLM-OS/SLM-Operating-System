@@ -344,6 +344,15 @@ mod test_ffi_stubs {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static TEST_ALLOC_BUMP: AtomicUsize = AtomicUsize::new(0);
 
+    /// How many times the host `slm_free_pages` stub has run, so tests
+    /// can tell whether an owner released its pages.
+    static FREE_PAGE_CALLS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    pub fn free_page_calls() -> usize {
+        FREE_PAGE_CALLS.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
     #[no_mangle]
     pub extern "C" fn slm_alloc_pages(count: usize) -> *mut u8 {
         // 4 KB pages → bytes.
@@ -370,6 +379,7 @@ mod test_ffi_stubs {
 
     #[no_mangle]
     pub extern "C" fn slm_free_pages(_addr: *mut u8, _count: usize) {
+        FREE_PAGE_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         // Host stub: leak the allocation. The host process exits
         // shortly after each test invocation; tests that loop alloc/
         // free pairs are bounded and the OS reclaims everything on
@@ -6171,6 +6181,47 @@ pub unsafe extern "C" fn rust_slm_load_take_pages(
         None => return -1,
     };
     match slm::registry::load_slm_take_pages(name_slice, weight_ptr, pages, data_len) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Load a SLM from memory the registry only borrows: boot-delivered
+/// models in reserved pages (`kernel/src/boot_models.c`). Neither a
+/// failure here nor a later unload frees the pages, and there is no
+/// copy. See `slm::registry::load_slm_borrow_pages`.
+///
+/// Returns the slot index (>= 0), or -1.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer.
+/// - `data` must point to `data_len` initialized bytes that stay valid
+///   and unmodified for the life of the boot.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load_borrow_pages(
+    name: *const u8,
+    data: *const u8,
+    pages: usize,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 || pages == 0 {
+        return -1;
+    }
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let weight_ptr = match core::ptr::NonNull::new(data as *mut u8) {
+        Some(p) => p,
+        None => return -1,
+    };
+    match slm::registry::load_slm_borrow_pages(name_slice, weight_ptr, pages, data_len) {
         Ok(idx) => idx as i32,
         Err(_) => -1,
     }

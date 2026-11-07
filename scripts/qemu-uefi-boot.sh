@@ -25,6 +25,13 @@
 #   QEMU_ACPI=on|off        firmware hardware description (default off:
 #                           the firmware then publishes the DTB in the
 #                           EFI configuration table, as Jetson's does).
+#   QEMU_MEM=512M           guest RAM (default 1G).
+#   MODEL_FILES="a b"       files to put in \\slmos\\models on the ESP.
+#   ESP_HOOK=path           run with the ESP image as $1 once it's built.
+#   BLKDEBUG_CONF=path      blkdebug rules for the disk, for injected I/O
+#                           errors. The hook can write this file.
+#   SHELL_CMDS="a|b"        shell commands, |-separated, typed one by one
+#                           after the first prompt.
 #
 # Exit status: 0 if the pattern appeared, 1 otherwise. The console log
 # is left in $OUT_DIR (default: build/qemu-uefi) for inspection.
@@ -85,18 +92,70 @@ with open(path, "r+b") as f:
 PY
 fi
 mcopy -i "$ESP" "$BOOT_IMG" ::/EFI/BOOT/BOOTAA64.EFI
+if [ -n "${MODEL_FILES:-}" ]; then
+    mmd -i "$ESP" ::/slmos ::/slmos/models
+    for f in $MODEL_FILES; do
+        mcopy -i "$ESP" "$f" "::/slmos/models/$(basename "$f")"
+    done
+fi
+if [ -n "${ESP_HOOK:-}" ]; then
+    "$ESP_HOOK" "$ESP"
+fi
 cp "$FW_VARS_TEMPLATE" "$VARS"
+
+if [ -n "${BLKDEBUG_CONF:-}" ]; then
+    DISK=(-drive "if=virtio,format=raw,file.driver=blkdebug,file.config=$BLKDEBUG_CONF,file.image.driver=file,file.image.filename=$ESP")
+else
+    DISK=(-drive "if=virtio,format=raw,file=$ESP")
+fi
+
+# With shell commands, QEMU's stdin stays open on a FIFO. The writer runs
+# here so the console can be watched for the prompt first.
+: >"$LOG"
+FIFO="$OUT_DIR/stdin.fifo"
+rm -f "$FIFO"
+mkfifo "$FIFO"
+exec 9<>"$FIFO"
 
 set +e
 systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% \
     timeout "$TIMEOUT" \
-    qemu-system-aarch64 -machine "virt,acpi=${QEMU_ACPI:-off}" -cpu cortex-a76 -smp cores=4 -m 1G \
+    qemu-system-aarch64 -machine "virt,acpi=${QEMU_ACPI:-off}" -cpu cortex-a76 -smp cores=4 -m "${QEMU_MEM:-1G}" \
         -nographic -accel tcg,tb-size=128 -no-reboot \
         -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
         -drive if=pflash,format=raw,file="$VARS" \
-        -drive if=virtio,format=raw,file="$ESP" \
-    >"$LOG" 2>&1 </dev/null
+        "${DISK[@]}" \
+    >"$LOG" 2>&1 <&9 &
+QEMU_PID=$!
 set -e
+
+prompts_seen() { grep -a -c "slmos>" "$LOG" || true; }
+
+# Wait up to `timeout` for at least $1 prompts, or for QEMU to exit.
+wait_prompts() {
+    local want="$1"
+    while kill -0 "$QEMU_PID" 2>/dev/null; do
+        if [ "$(prompts_seen)" -ge "$want" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+if wait_prompts 1 && [ -n "${SHELL_CMDS:-}" ]; then
+    IFS='|' read -r -a CMDS <<<"$SHELL_CMDS"
+    for cmd in "${CMDS[@]}"; do
+        before=$(prompts_seen)
+        printf '%s\r' "$cmd" >&9
+        wait_prompts $((before + 1)) || break
+    done
+fi
+sleep 0.2
+kill "$QEMU_PID" 2>/dev/null || true
+wait "$QEMU_PID" 2>/dev/null || true
+exec 9>&-
+rm -f "$FIFO"
 
 if grep -a -q -E "$EXPECT" "$LOG"; then
     echo "qemu-uefi-boot: PASS ('$EXPECT' seen) — log: $LOG"

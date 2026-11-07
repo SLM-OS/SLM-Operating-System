@@ -156,6 +156,7 @@ int test_harness_run_all(void)
     /* UEFI-direct relocation decision (#26); efi_stub.c is built on
      * every ARM64 platform with a PE header (not Pi 5). */
     total_failures += test_suite_efi_reloc();
+    total_failures += test_suite_boot_models();
 #endif
     total_failures += test_suite_tegra_cpufreq();
     total_failures += test_suite_tegra_fan();

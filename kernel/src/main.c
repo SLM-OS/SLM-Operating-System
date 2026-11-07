@@ -40,6 +40,7 @@
 #include "blob_autoload.h"
 #include "boot_media.h"
 #include "boot_source.h"
+#include "boot_models.h"
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../gpu/nvidia/ga10b_cold.h"
 #endif
@@ -397,6 +398,10 @@ void kernel_main(void *dtb)
     ga10b_kexec_handoff_register_reserves();
 #endif
 
+    /* Check the model files the EFI stub read and keep their pages out
+     * of the buddy allocator (ADR 0002). Empty on every other boot path. */
+    boot_models_reserve();
+
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();
@@ -485,6 +490,7 @@ void kernel_main(void *dtb)
      * allocations first to avoid concurrent PMM access. */
     INFO("Initializing VFS...");
     vfs_init();
+    boot_models_mount();
 
     /* Initialize Block Device Subsystem and LittleFS */
     INFO("Initializing filesystem subsystems...");

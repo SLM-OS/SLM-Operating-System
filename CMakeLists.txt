@@ -572,6 +572,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/pmu.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_model.c>
     # Per-arch RNG TRNG probes (FEAT_RNG / RDRAND). Compiled unconditionally —
     # rng_init's jitter path is useful even without SSH and is what the
     # boot banner reports. See `kernel/include/rng.h`. #199a / #893.
@@ -831,6 +832,7 @@ set(KERNEL_SOURCES
     kernel/src/shell_sys.c
     kernel/src/timdiag_pi5_probes.c
     kernel/src/shell_fs.c
+    kernel/src/boot_models.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/shell_top.c
@@ -1171,6 +1173,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
     # UEFI-direct relocation decision (#26) — same platforms as efi_stub.c
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_efi_reloc.c>
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_boot_models.c>
     kernel/tests/test_tegra_cpufreq.c
     kernel/tests/test_tegra_fan.c
     kernel/tests/test_ga10b_netlist.c

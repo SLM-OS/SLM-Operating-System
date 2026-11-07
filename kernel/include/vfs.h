@@ -14,8 +14,10 @@
 /* Maximum path length */
 #define VFS_MAX_PATH        128
 
-/* Maximum name length for a node */
-#define VFS_MAX_NAME        32
+/* Maximum name length for a node, NUL included. Model files in
+ * /boot/models keep their full names, and those run past 32 bytes
+ * ("qwen2.5-1.5b-instruct-q4_k_m.gguf" is 33). */
+#define VFS_MAX_NAME        64
 
 /* Maximum children per directory */
 #define VFS_MAX_CHILDREN    16

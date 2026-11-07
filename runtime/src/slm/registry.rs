@@ -124,6 +124,10 @@ pub struct LoadedSlm {
     weight_pages_count: u32,
     /// Number of valid bytes inside [`Self::weight_pages`].
     weight_data_len: usize,
+    /// True when [`Self::weight_pages`] belongs to someone else (the
+    /// boot-delivered models, which stay reserved for the life of the
+    /// boot): unloading drops the slot and leaves the pages alone.
+    weight_borrowed: bool,
 
     /// Pre-built tokenizer for this model. Sessions reuse this via
     /// [`with_loaded_slm`] / [`LoadedSlm::tokenizer`] rather than
@@ -530,6 +534,7 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data.len(),
+        weight_borrowed: false,
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
@@ -592,6 +597,34 @@ pub fn load_slm_take_pages(
     pages: usize,
     data_len: usize,
 ) -> Result<usize, LoadError> {
+    adopt_pages(name, weight_ptr, pages, data_len, false)
+}
+
+/// Like [`load_slm_take_pages`], but the registry only borrows the
+/// pages: neither an error here nor [`unload_slm`] frees them. Used for
+/// models the EFI stub read into reserved boot memory (`slm load
+/// /boot/models/...`, docs/adr/0002-uefi-model-delivery.md); there is no
+/// copy, so peak memory is the file size, and the same pages can be
+/// loaded again after an unload.
+///
+/// The caller must guarantee that the `data_len` initialized bytes at
+/// `weight_ptr` stay valid and unmodified for as long as the slot lives.
+pub fn load_slm_borrow_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+) -> Result<usize, LoadError> {
+    adopt_pages(name, weight_ptr, pages, data_len, true)
+}
+
+fn adopt_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+    borrowed: bool,
+) -> Result<usize, LoadError> {
     let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
 
     // SAFETY: The caller's contract requires `weight_ptr` to point to
@@ -611,6 +644,7 @@ pub fn load_slm_take_pages(
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data_len,
+        weight_borrowed: borrowed,
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
@@ -639,6 +673,9 @@ pub fn unload_slm(index: usize) -> Result<(), LoadError> {
         Some(e) => e,
         None => return Err(LoadError::InvalidFormat),
     };
+    if entry.weight_borrowed {
+        return Ok(());
+    }
     if let Some(ptr) = entry.weight_pages {
         // SAFETY: `ptr` was returned by `alloc_pages(weight_pages_count)`
         // in `load_slm` and has not been freed since. The slot was
@@ -723,6 +760,9 @@ pub(crate) fn reset_for_tests() {
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
         for s in slot.iter_mut() {
             if let Some(entry) = s.take() {
+                if entry.weight_borrowed {
+                    continue;
+                }
                 if let Some(ptr) = entry.weight_pages {
                     // SAFETY: ptr came from `alloc_pages(count)` in
                     // `load_slm`. The slot was just taken out of the
@@ -1283,6 +1323,50 @@ mod tests {
         // M5.3.1: fixture now ships output_norm.weight + token_embd.weight.
         assert_eq!(info.tensor_count, 2);
         assert_eq!(info.source_bytes, bytes.len() as u32);
+    }
+
+    #[test]
+    fn borrowed_pages_are_not_freed_and_can_be_reloaded() {
+        let _serial = TestSerialGuard::new();
+        ensure_mm_initialized();
+        reset_for_tests();
+        let mut bytes = build_qwen_gguf_with_vocab(64);
+        let snapshot = bytes.clone();
+        let len = bytes.len();
+        let pages = len.div_ceil(4096);
+        let ptr = core::ptr::NonNull::new(bytes.as_mut_ptr()).unwrap();
+        let frees = crate::test_ffi_stubs::free_page_calls();
+
+        let idx = load_slm_borrow_pages(b"boot", ptr, pages, len).expect("borrow");
+        // Zero-copy: the slot's weights are the caller's bytes.
+        let base = with_loaded_slm(idx, |m| m.weight_bytes().unwrap().as_ptr()).unwrap();
+        assert_eq!(base, ptr.as_ptr() as *const u8);
+        unload_slm(idx).expect("unload");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees);
+        assert_eq!(bytes, snapshot);
+
+        // Unloading left the pages usable, and a load that fails to
+        // parse doesn't take them either.
+        let idx = load_slm_borrow_pages(b"boot", ptr, pages, len).expect("reload");
+        unload_slm(idx).expect("unload again");
+        let mut junk = vec![0u8; 64];
+        let junk_ptr = core::ptr::NonNull::new(junk.as_mut_ptr()).unwrap();
+        assert!(load_slm_borrow_pages(b"junk", junk_ptr, 1, 64).is_err());
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees);
+    }
+
+    #[test]
+    fn take_pages_are_freed_on_unload() {
+        let _serial = TestSerialGuard::new();
+        ensure_mm_initialized();
+        reset_for_tests();
+        let mut bytes = build_qwen_gguf_with_vocab(64);
+        let len = bytes.len();
+        let ptr = core::ptr::NonNull::new(bytes.as_mut_ptr()).unwrap();
+        let frees = crate::test_ffi_stubs::free_page_calls();
+        let idx = load_slm_take_pages(b"owned", ptr, len.div_ceil(4096), len).expect("take");
+        unload_slm(idx).expect("unload");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees + 1);
     }
 
     #[test]

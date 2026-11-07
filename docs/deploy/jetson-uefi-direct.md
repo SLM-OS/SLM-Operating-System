@@ -42,8 +42,9 @@ efi_stub_entry()                                  (MMU on, ConOut alive)
   1. find the DTB in the EFI configuration table
   2. GetMemoryMap; check the link-address range   ── unsafe ──► return
      with efi_check_relocation()                     EFI_LOAD_ERROR to
-  3. ExitBootServices                                 UEFI (next boot
-  4. install the early VBAR_EL2 fault handler         option runs)
+     read \slmos\models\*.gguf (non-fatal), re-check  UEFI (next boot
+  3. ExitBootServices                                 option runs)
+  4. install the early VBAR_EL2 fault handler
   5. record slmos_boot_source = UEFI (.data)
   6. DC CIVAC the loaded image, the destination
      and the DTB to the PoC
@@ -208,6 +209,48 @@ long by default.
 
 ---
 
+## Models on disk
+
+The stub reads `\slmos\models\*.gguf` through the firmware's file
+protocols, so a model is available after a cold boot with no host
+(decision and alternatives:
+[ADR 0002](../adr/0002-uefi-model-delivery.md)). The ESP is too small for
+a model, so it goes on an ext4 partition. From SD Linux:
+
+```bash
+mount /dev/nvme0n1p1 /mnt
+mkdir -p /mnt/slmos/models
+cp /root/qwen2.5-1.5b-instruct-q4_k_m.gguf /mnt/slmos/models/
+sync
+sha256sum /mnt/slmos/models/*.gguf
+umount /mnt
+
+# Fallback copy on the SD rootfs; a hard link costs no space.
+mkdir -p /slmos/models
+ln /root/qwen2.5-1.5b-instruct-q4_k_m.gguf /slmos/models/
+sync
+```
+
+Then, after `scripts/jetson-uefi-deploy.sh`:
+
+```
+slmos> ls /boot/models
+slmos> slm load /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+```
+
+Limits: 4 files, 2 GiB per file, and half of the `0x100000000..0x240000000`
+window in total. A file name is ASCII and at most 63 bytes. NVMe volumes are
+read first; the first copy of a file name wins, and a failed read falls back
+to the next volume. Any failure prints a `[slmos] model` line and the boot
+continues without that file. The kernel checks the magic and hash again
+before reserving the pages; `Boot model ...: failed its check` means the
+file was dropped.
+
+`slm load` on these paths is zero-copy, and `slm unload` leaves the pages
+reserved, so the same file can be loaded again without a reboot.
+
+---
+
 ## Build, deploy, test
 
 ```bash
@@ -259,12 +302,13 @@ to the next boot option.
 
 | Check | What it covers |
 |---|---|
-| `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default |
-| `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Needs `qemu-efi-aarch64` and `mtools` |
+| `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default. `kernel/tests/test_boot_models.c`: the model loader against a fake firmware (every failure path), range picking, kernel checks, reservation, `/boot/models`, zero-copy load |
+| `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Then `scripts/test-qemu-uefi-models.sh` boots with a small GGUF on the virtual disk and with no file, a read error (QEMU blkdebug), a file too big and no memory. Needs `qemu-efi-aarch64` and `mtools` |
 | `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address, HCR_EL2 read-modify-write, inherited PAN cleared after the E2H flip (#1079) |
 
 `scripts/qemu-uefi-boot.sh` is the script behind `test-qemu-uefi`; it
-accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
+accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs, and the
+variables its header lists for models and shell input.
 
 ---
 
@@ -281,6 +325,7 @@ accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs.
 | Camera RCE | Works: `rcediag` completes HELLO, PING and `CH_SETUP`. MB2 loads the RCE firmware before UEFI, and `camrtc_init` powers RCE through BPMP the same way it does after kexec |
 | GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
+| Models from disk | Host-tested only; hardware verification pending (ADR 0002). See [Models on disk](#models-on-disk) |
 
 ### XUSB cold bring-up
 

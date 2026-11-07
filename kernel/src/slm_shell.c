@@ -39,6 +39,7 @@
 #include "kbuf.h"
 #endif
 #include "slm_ffi.h"
+#include "boot_models.h"
 #include "string.h"
 #include "timer.h"
 
@@ -202,6 +203,12 @@ static int slm_load(int argc, char *argv[])
     if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
         shell_puts("slm load: path too long\r\n");
         return -1;
+    }
+
+    /* Models the EFI stub delivered load without a read or a copy. */
+    int boot_rc = boot_models_slm_load(resolved);
+    if (boot_rc != BOOT_MODEL_NOT_HANDLED) {
+        return boot_rc;
     }
 
     struct vfs_entry_info info;
