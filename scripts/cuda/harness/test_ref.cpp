@@ -6,6 +6,7 @@
  */
 #include <cassert>
 
+#include "../slm/slm_chunks.h"
 #include "gguf_lite.h"
 #include "slm_cpu_ref.h"
 
@@ -30,6 +31,50 @@ static h16 fp16s(const std::string &n)
 }
 
 static int fails = 0;
+
+/*
+ * slm_rope's control flow, one warp of 32 lanes per head, against the CPU
+ * reference. A truncating chunk count skipped every pair at head_dim 32, which
+ * is what tiny_qwen2.gguf uses: the kernel returned its input untouched.
+ */
+static void check_rope_coverage(int hd)
+{
+    const int half_hd = hd >> 1, nh = 2;
+    std::vector<float> table;
+    ref_rope_table(hd, 8, 1000000.0f, table);
+    h16 in((size_t)nh * hd);
+    for (size_t i = 0; i < in.size(); i++) {
+        in[i] = gg_f32_to_f16(1.0f + 0.03125f * (float)i);
+    }
+    const uint32_t pos = 5;
+    h16 want = in, got = in;
+    ref_rope(table, &pos, nh, hd, 1, want.data());
+    std::vector<int> visits(in.size(), 0);
+    const float *t = &table[(size_t)pos * hd];
+    for (int head = 0; head < nh; head++) {
+        const size_t base = (size_t)head * hd;
+        for (int c = 0; c < SLM_ROPE_CHUNKS(half_hd); c++) {
+            for (int l = 0; l < 32; l++) {
+                const int i = (c << 5) + l;
+                if (i >= half_hd) {
+                    continue;
+                }
+                const float v0 = gg_f16_to_f32(in[base + i]);
+                const float v1 = gg_f16_to_f32(in[base + i + half_hd]);
+                got[base + i] = gg_f32_to_f16(v0 * t[2 * i] - v1 * t[2 * i + 1]);
+                got[base + i + half_hd] = gg_f32_to_f16(v0 * t[2 * i + 1] + v1 * t[2 * i]);
+                visits[base + i]++;
+                visits[base + i + half_hd]++;
+            }
+        }
+    }
+    bool ok = got == want && got != in;
+    for (int v : visits) {
+        ok = ok && v == 1;
+    }
+    printf("rope coverage hd=%-3d every element rotated once: %s\n", hd, ok ? "PASS" : "FAIL");
+    fails += !ok;
+}
 
 static void cmp_f32(const char *name, const float *got, const std::vector<float> &want, float tol)
 {
@@ -122,6 +167,9 @@ int main(int argc, char **argv)
         ref_swiglu(g.data(), u.data(), g.size(), out.data());
         /* Two rounding points, see check_swiglu in runtime/src/slm/golden.rs. */
         cmp_h16("swiglu", out, f32s("swiglu.out"), 4.0f);
+    }
+    for (int hd : {32, 64, 128, 256}) {
+        check_rope_coverage(hd);
     }
     printf("%s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

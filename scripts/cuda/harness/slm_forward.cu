@@ -511,17 +511,17 @@ static void check_kernels(const Model &M, Arena &A)
 
     /* Bias and FP16 output path of the matmul. */
     {
-        const GgufTensor &t = M.t("blk.3.attn_k.weight");
+        const GgufTensor &t = M.t("blk.0.attn_k.weight");
         const int B = 3;
         const h16 x = rand_h((size_t)B * t.dim0, 1.0f);
         h16 ref((size_t)B * t.dim1);
         const float *bias = reinterpret_cast<const float *>(M.g.data.data() +
-                                                            M.t("blk.3.attn_k.bias").offset);
+                                                            M.t("blk.0.attn_k.bias").offset);
         ref_project(M.g, t, bias, x.data(), B, ref.data());
         h_up(A.xn, x);
         const int K = (int)t.dim0, N = (int)t.dim1, fl = SLM_MM_OUT_F16;
         const uint8_t *wp = A.w + t.offset;
-        const float *db = wf(A, M.t("blk.3.attn_k.bias"));
+        const float *db = wf(A, M.t("blk.0.attn_k.bias"));
         const half *in = A.xn;
         void *out = A.k;
         void *params[] = {&in, &wp, &out, &db, (void *)&K, (void *)&N, (void *)&B, (void *)&fl};

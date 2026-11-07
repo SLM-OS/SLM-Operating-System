@@ -3,7 +3,8 @@
  *
  * All activations are FP16, row-major with the batch first. Every kernel takes
  * block (32,1,1). Row widths and head_dim must be multiples of 32 so that a
- * warp always covers whole chunks and no lane diverges. The cbuf[0] ABI is
+ * warp always covers whole chunks; RoPE works on half of head_dim, so it alone
+ * guards a partial chunk. The cbuf[0] ABI is
  * flat arguments from 0x160; scripts/cuda/slm/MANIFEST.json holds the exact
  * table generated from the cubin.
  *
@@ -12,6 +13,7 @@
  */
 #include <cmath>
 
+#include "slm_chunks.h"
 #include "slm_common.cuh"
 
 #define Q4K_BLOCK 144
@@ -164,11 +166,16 @@ __global__ void slm_rope(const half *x, half *out, const float *table,
     const int bat = blockIdx.y;
     const int l = threadIdx.x;
     const int half_hd = hd >> 1;
-    const int chunks = half_hd >> 5;
+    /* Rounded up: half_hd is below 32 for head_dim 32, as in tiny_qwen2.gguf,
+     * and a truncating shift would make this a silent no-op. */
+    const int chunks = SLM_ROPE_CHUNKS(half_hd);
     const size_t base = ((size_t)bat * nh + head) * hd;
     const float *t = table + (size_t)pos[bat] * hd;
     for (int c = 0; c < chunks; c++) {
         const int i = (c << 5) + l;
+        if (i >= half_hd) {
+            continue;
+        }
         const float cs = t[2 * i];
         const float sn = t[2 * i + 1];
         const float v0 = __half2float(x[base + i]);

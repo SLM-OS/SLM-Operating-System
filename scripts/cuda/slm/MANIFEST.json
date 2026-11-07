@@ -745,8 +745,8 @@
    "dtype": "FP16",
    "sass": "slm_rope_shader.sass",
    "source": "scripts/cuda/slm/slm_ops.cu",
-   "code_bytes": 3072,
-   "sha256": "d858269f725acd956ccf5e22030cbf7fc616cb53f730fb9f7aa94886c36b6143",
+   "code_bytes": 4224,
+   "sha256": "debddc2ab8f45b288c74b9176b734a83519d51f291f254f937ef92395856213b",
    "grid": "nh,B,1",
    "block": [
     32,
@@ -754,7 +754,7 @@
     1
    ],
    "smem_bytes": 0,
-   "regs": 37,
+   "regs": 38,
    "hmma_instructions": 0,
    "cbuf0_size": 396,
    "abi": [
