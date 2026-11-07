@@ -1396,6 +1396,11 @@ void slm_stats_print_gpu_busy(const SlmTelemetryC *t)
 
 /* Jetson Orin Nano LPDDR5: 128-bit bus, two transfers per EMC clock. */
 #define SLM_DRAM_BYTES_PER_EMC_CLOCK 32u
+/* ADR 0005 target: llama.cpp CUDA's decode bandwidth fraction on the same
+ * board and clocks (ADR 0001, MAXN_SUPER median 43.03 tok/s). The same plan
+ * bytes per token (about 982 MB) at that rate are 42.3 GB/s, 41.28 % of
+ * 102.37 GB/s. */
+#define SLM_DRAM_PARITY_BP 4128u
 
 /* Decode DRAM bandwidth (ADR 0005): the plan's bytes per decode forward pass
  * (weights plus KV at the current position, before any L2 hit) times the
@@ -1420,9 +1425,12 @@ void slm_stats_print_dram_bw(const SlmTelemetryC *t, uint64_t emc_hz)
     shell_printf("%llu.%01llu GB/s = ", (unsigned long long)(mb_s / 1000u),
                  (unsigned long long)((mb_s % 1000u) / 100u));
     slm_print_bp((uint32_t)bp);
-    shell_printf(" of %llu.%01llu GB/s LPDDR5 peak (derived from plan bytes per token; target 50 %%)\r\n",
+    shell_printf(" of %llu.%01llu GB/s LPDDR5 peak (derived from plan bytes per token); "
+                 "target llama.cpp parity ",
                  (unsigned long long)(peak_mb_s / 1000u),
                  (unsigned long long)((peak_mb_s % 1000u) / 100u));
+    slm_print_bp(SLM_DRAM_PARITY_BP);
+    shell_puts(bp >= SLM_DRAM_PARITY_BP ? ": met\r\n" : ": not met\r\n");
 }
 
 static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_hz)

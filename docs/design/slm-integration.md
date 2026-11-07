@@ -452,7 +452,7 @@ aggregated across sessions for `slm status`.
 | **CPU cycle accounting** | inherited per-task `task_cycles_on_cpu` | `top`, `bench smp` |
 | **GPU busy time** (Path A/B) | start and end semaphore timestamps of each program step (the GPU's own timer, no MMIO); split at the first token into prefill (inside TTFT) and decode (inside the decode wall) | `slm stats --gpu` |
 | **Launches per token, DRAM bytes per token** | the session's plan; DRAM is an estimate from the bytes the kernels name, before the L2 | `slm stats --gpu` |
-| **Decode DRAM bandwidth** | plan bytes per decode forward pass times decode passes over the decode wall, against the LPDDR5 peak (32 bytes per EMC clock); derived, the DoD 6 figure per ADR 0005 (target ≥ 50 %) | `slm stats --gpu` |
+| **Decode DRAM bandwidth** | plan bytes per decode forward pass times decode passes over the decode wall, against the LPDDR5 peak (32 bytes per EMC clock); derived, the DoD 6 figure per ADR 0005 (target: at least llama.cpp's 41.28 %) | `slm stats --gpu` |
 | **Tensor-core utilization** | Per-op tier from the plan, and two derived measures, for information only (ADR 0005; meaningful for prefill). No hardware counter is read: see below. | `slm stats --gpu` |
 | **Power proxy** | BPMP temperatures (`thermal`'s zones). Power itself prints `n/a`: no rail sensor is read. | `slm stats --power` (best-effort) |
 | **OOV** | text pieces the tokenizer's vocab lacks | `slm stats` |

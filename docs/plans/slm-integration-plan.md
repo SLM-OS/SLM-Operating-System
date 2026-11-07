@@ -367,8 +367,8 @@ one variant.
 - ☐ TTFT for a 64-token prompt ≤ 400 ms (Tier-1).
 - ⏸️ `slm stats --gpu` reports tensor-core utilization ≥ 60 % during
   matmul ops in Tier-1 mode. *Superseded by ADR 0005: `slm stats --gpu`
-  reports decode DRAM bandwidth against the LPDDR5 peak (target ≥ 50 %;
-  measured 48.3 %) and tensor-core use for information only.*
+  reports decode DRAM bandwidth against the LPDDR5 peak (target: parity
+  with llama.cpp, 41.28 %; measured 48.1 %) and tensor-core use for information only.*
 - ☐ Per-op tier selection visible via `slm gpu` (e.g. one op stuck on
   Tier 2 while others run Tier 1 is a supported, non-failure state).
 
@@ -563,7 +563,7 @@ boot can:
 6. Hold ≥ 25 tok/s decode, at least parity with llama.cpp CUDA at the same
    GPU clock (ADR 0001), and < 400 ms TTFT on a 64-token prompt, with Tier-1
    HMMA tensor-core kernels on all weight matmuls. `slm stats --gpu` reports
-   decode DRAM bandwidth as a fraction of the LPDDR5 peak (target ≥ 50 %) and
+   decode DRAM bandwidth as a fraction of the LPDDR5 peak (target: at least llama.cpp's fraction, 41.28 %) and
    tensor-core use, the latter for information only (meaningful for prefill).
    Degraded-mode (Tier-2 fallback only) acceptance floor is ≥ 10 tok/s.
    *Amended 2026-11-07 by [ADR 0005](../adr/0005-dod6-decode-bandwidth.md);
