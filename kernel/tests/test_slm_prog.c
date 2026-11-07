@@ -949,6 +949,25 @@ static void test_run_ok_and_patch(void)
 
 /* A hang is bounded, dumps the fault state once, doesn't evict, and kills
  * the session so nothing else is queued behind it. */
+/* A UEFI-direct kernel built without SASS booted to the shell with every GPU
+ * consumer on the CPU, but `slm launch --gpu on` blamed the boot path. Each
+ * cause now names itself, the missing SASS first: with none, the cold
+ * bring-up stops at MNIST and the rest can't be reached. */
+static void test_unavailable_reason_names_the_cause(void)
+{
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_KEXEC, slm_prog_reason_for(false, true, false, false));
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_NO_SASS, slm_prog_reason_for(true, true, true, false));
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_NO_SASS, slm_prog_reason_for(true, true, false, false));
+    TEST_ASSERT_NOT_NULL(strstr(SLM_PROG_WHY_NO_SASS, "make oplib-shaders"));
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_NO_CHANNEL, slm_prog_reason_for(true, false, false, false));
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_NOT_ATTACHED, slm_prog_reason_for(true, false, true, false));
+    TEST_ASSERT_NULL(slm_prog_reason_for(true, false, true, true));
+    /* This boot (QEMU, x86) has no cold channel at all. */
+    slm_prog_backend_set(NULL);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_available());
+    TEST_ASSERT_EQUAL_STRING(SLM_PROG_WHY_KEXEC, slm_prog_unavailable_reason());
+}
+
 /* A session's two runs differ in the GPFIFO entry alone. */
 static void test_run_marked_uses_the_marked_entry(void)
 {
@@ -1228,6 +1247,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_session_without_weights);
     RUN_TEST(test_run_ok_and_patch);
     RUN_TEST(test_prog_marks);
+    RUN_TEST(test_unavailable_reason_names_the_cause);
     RUN_TEST(test_run_marked_uses_the_marked_entry);
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);

@@ -117,6 +117,21 @@ struct slm_prog_run_stats {
 
 /* 1 if this boot has a channel programs can run on. */
 int slm_prog_available(void);
+
+/* Why slm_prog_available() is 0, as a sentence; NULL when it is 1. */
+const char *slm_prog_unavailable_reason(void);
+
+/* The same from its inputs, for tests: a UEFI-direct boot, an operator library
+ * with no SASS, the cold bring-up's channel up, and the library attached to it. */
+const char *slm_prog_reason_for(bool uefi, bool library_empty, bool channel_up, bool attached);
+
+#define SLM_PROG_WHY_KEXEC  "no SLM-OS-built GPU channel (needs a UEFI-direct boot)"
+#define SLM_PROG_WHY_NO_SASS \
+    "the operator library has no SASS: this kernel was built without nvcc " \
+    "(run make oplib-shaders, then rebuild)"
+#define SLM_PROG_WHY_NO_CHANNEL "GPU cold bring-up stopped before its channel (see the boot log)"
+#define SLM_PROG_WHY_NOT_ATTACHED \
+    "GPU cold bring-up stopped before the operator library was attached (see the boot log)"
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
 void slm_prog_close(int32_t h);
 

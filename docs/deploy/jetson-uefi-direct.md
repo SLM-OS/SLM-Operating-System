@@ -512,6 +512,14 @@ after kexec `--gpu on` is refused and `--gpu auto` keeps the per-op path.
 The weights pool (`nvgpu oplib wpool`) is not used: the GGUF is mapped in
 place.
 
+The kernels come from `scripts/cuda/` and are not checked in. `make kernel
+PLATFORM=JETSON_ORIN_NANO` builds them first when they are missing or older
+than their sources and nvcc is installed (`scripts/cuda/ensure-oplib-shaders.sh`).
+Without nvcc the kernel still builds, after a warning that every GPU consumer
+will run on the CPU. Such a kernel boots normally: the cold bring-up stops at
+its MNIST step and says the library has no SASS, and `slm launch --gpu on`
+gives the same reason.
+
 | Command | Expected |
 |---|---|
 | `slm gpu smoke [n]` | `PASS`, n launches, ns per launch. Needs only `rmsnorm_f16_shader.sass`; no model |

@@ -378,6 +378,9 @@ kernel:
 
 .PHONY: _kernel-build
 _kernel-build: runtime kernel-config-check
+	@# Jetson: build missing or stale SASS before CMake globs it, or warn that
+	@# the GPU paths will be CPU-only (scripts/cuda/ensure-oplib-shaders.sh).
+	$(if $(filter JETSON_ORIN_NANO,$(PLATFORM)),@bash scripts/cuda/ensure-oplib-shaders.sh)
 	@test -f $(KERNEL_BUILD_DIR)/Makefile || $(MAKE) --no-print-directory $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
@@ -1104,6 +1107,10 @@ oplib-shaders:
 test-oplib-shaders:
 	@bash scripts/tests/test-oplib-shaders.sh
 
+.PHONY: test-ensure-oplib-shaders
+test-ensure-oplib-shaders:
+	@out="$$(bash scripts/tests/test-ensure-oplib-shaders.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 # test-mnist-shaders: host-only test of build-mnist-shaders.sh's cubin
 # selection and section-table parsing, with nvcc/cuobjdump/readelf
 # stubbed (no CUDA toolkit needed). Covers both cuobjdump naming
@@ -1642,7 +1649,7 @@ check-gpu-shell-lock:
 	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
 
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

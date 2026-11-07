@@ -96,3 +96,5 @@ scripts/arm-smmu-noshutdown/modules.order
 # scoped (not a global *.sass) because NVIDIA SASS shares the
 # extension with CSS Sass.
 scripts/cuda/operator_library/*.sass
+# Written by scripts/cuda/ensure-oplib-shaders.sh after a successful build.
+scripts/cuda/operator_library/.built
