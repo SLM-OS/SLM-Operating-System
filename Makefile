@@ -1617,6 +1617,7 @@ tidy-db-configure:
 		$(if $(filter wide,$(TIDY_VARIANT)),$(TIDY_WIDE_CMAKE_ARGS)) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 		$(MAKE_PROGRAM_ARG) > /dev/null
+	@$(CMAKE) --build $(TIDY_DB_DIR)/$(TIDY_DB_NAME) --target slm_kernels_header > /dev/null
 
 .PHONY: tidy-clean
 tidy-clean:
