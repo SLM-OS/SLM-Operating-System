@@ -44,6 +44,30 @@ Per decode step at 64 tokens: GPU 40.9 ms of a 41.4 ms step, evict 52 us; matmul
 
 `nvgpu cold check` passes between prompts on the same channel. Not tested on hardware: a real GPU hang, and a consumer racing a step in flight.
 
+### Kernels under JetPack (C3K)
+
+Native CUDA 12.6 harness (`scripts/cuda/harness/`), MAXN_SUPER, 1020 MHz, 479 ops in one CUDA graph, real weights, random 63-token prompt. Measured at the commit that adds this section.
+
+| | Native harness | Bar |
+|---|---|---|
+| Decode at position 63 | 22.47 ms, 44.5 tok/s (44.2 with logit readback) | 43.0 tok/s |
+| Prefill, 63 tokens | 71.4 ms | 74 ms |
+
+Checks: 147 pass on the real model. Logits stay within 0.018 of an exact CPU reference at B=63, the top token matches, and the tolerance is 0.1. Every kernel is within 1e-3 of output RMS or 2 FP16 ULP. Against llama.cpp on the tiny model, the max logit error is 1.42, with the top token the same at 10 of 10 steps. CPU variants put this down to llama.cpp's Q8_K activations: F32 plus Q8_K gives 0.54, F32 plus an exact dot gives 1.41. The remaining 0.5 of the F32 plus Q8_K gap is not explained. Q8_K differs from an exact dot by up to 3.4 percent of RMS on real weights; the GPU kernels differ by under 3e-5.
+
+How each step was found:
+- Decode matmuls are issue-bound. The stall counters show about one instruction per active scheduler cycle, while reads stay under the 72 GB/s that the tile shape sustains. Weights go into HMMA as FP16 subnormals, which the tensor core honours, at 30 instructions per mma (52 at first).
+- Prefill was limited by x missing the L1 and by registers. x sits in shared memory across 8 warps, and register use dropped from 132 to 104 so that more warps fit.
+- Splitting K into ranges kept x in the L1 but was slower overall.
+- llama.cpp's mmq uses 26 to 28 instructions per mma with int8 activations. Our kernels stayed FP16; no IMMA is used.
+
+Tensor-core utilization, both measures:
+- `ncu` counter `sm__pipe_tensor_cycles_active`, percent of peak elapsed: decode matmuls 2 to 10 percent, prefill 13 to 23 percent. llama.cpp under the same tool: decode 0.2 to 0.9 percent, prefill 1.1 to 14.6 percent. The 60 percent in the DoD is not reached by either.
+- Mma issue cycles over matmul wall time, from known mma counts and the measured 3.44 G mma/s: 7.7 percent.
+- MAC share on tensor cores: 99.47 percent. GQA is the only SIMT matmul-class op.
+
+Bare metal: these counters are programmed through `tegra-soc-hwpm`, not nvgpu. Its `hwpm_dbg_regops` log lists 323 register addresses for one `ncu` read but no values.
+
 ## Implementation notes
 
 - `slm launch` builds the plan in Rust (`gpu_program.rs`); `slm_prog.c` encodes it; `ga10b_prog.c` writes the pushbuffer, QMDs and cbufs.

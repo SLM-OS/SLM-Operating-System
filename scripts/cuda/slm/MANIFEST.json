@@ -137,16 +137,16 @@
    "dtype": "Q4_K",
    "sass": "slm_mm_q4k_hmma_bs_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_bs.cu",
-   "code_bytes": 15872,
-   "sha256": "ac029e6f6cd613ec8eb8fe6a6571413fa8e0fe3b9e3b95d20fb28bb6d2c58329",
+   "code_bytes": 16000,
+   "sha256": "2db0c9bd67232f8fac8f86d68efca0bce625f4d7f7b61215b450daa81b3dde1f",
    "grid": "ceil(N/120),1,1",
    "block": [
     32,
     8,
     1
    ],
-   "smem_bytes": 8192,
-   "regs": 136,
+   "smem_bytes": 16384,
+   "regs": 104,
    "hmma_instructions": 32,
    "cbuf0_size": 400,
    "abi": [
@@ -200,16 +200,16 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_bs_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_bs.cu",
-   "code_bytes": 19840,
-   "sha256": "b699660a3985f6e4f9e2dbe98fe241dda906ae713345310ee508003ad2c4bffe",
+   "code_bytes": 19456,
+   "sha256": "cf6d7839aa911c122ff5b073c18fe1c3305ba7318d4cd0cf7174dabee970f479",
    "grid": "ceil(N/120),1,1",
    "block": [
     32,
     8,
     1
    ],
-   "smem_bytes": 8192,
-   "regs": 100,
+   "smem_bytes": 16384,
+   "regs": 118,
    "hmma_instructions": 32,
    "cbuf0_size": 400,
    "abi": [
@@ -327,7 +327,7 @@
    "sass": "slm_mm_q4k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q4k.cu",
    "code_bytes": 6912,
-   "sha256": "7cfa41974fe95792083f3284650aa6da62c69ca2f9a90edfa46c86eaa3dcbaf9",
+   "sha256": "bf96b35c875c6001c40d53f6a3c93c2defa2fd6aa5b5d3cfdbeeb1cfafd7fba9",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -515,8 +515,8 @@
    "dtype": "Q6_K",
    "sass": "slm_mm_q6k_hmma_b8_shader.sass",
    "source": "scripts/cuda/slm/slm_mm_q6k.cu",
-   "code_bytes": 9984,
-   "sha256": "5878ce0edede7e75a49be98e076ef6901ac0ea3df5c55c1455a627321d73385c",
+   "code_bytes": 10112,
+   "sha256": "4b8c30a5e677b8841230bf0ace114813bb79a87f2956ffd75cf82dd658fd24cc",
    "grid": "ceil(N/15),1,1",
    "block": [
     32,
@@ -726,6 +726,49 @@
    "doc": "out[B,n] = x[B,n] + bias[n]."
   },
   {
+   "name": "slm_add_w8",
+   "op": "add",
+   "tier": "SIMT",
+   "dtype": "FP16",
+   "sass": "slm_add_w8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 768,
+   "sha256": "b8be78a43315e428b8317c292e3036ddffa3d1d31e695c06c6055aad4aeab291",
+   "grid": "ceil(total/256),1,1",
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "regs": 12,
+   "hmma_instructions": 0,
+   "cbuf0_size": 380,
+   "abi": [
+    {
+     "name": "a",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "b",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "total",
+     "offset": 376,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_add, 8 warps per CTA."
+  },
+  {
    "name": "slm_embed_q4k",
    "op": "embed",
    "tier": "SIMT",
@@ -896,8 +939,8 @@
    "dtype": "FP16",
    "sass": "slm_gqa_w8_shader.sass",
    "source": "scripts/cuda/slm/slm_ops.cu",
-   "code_bytes": 20864,
-   "sha256": "d0052a6c60c71fe05e5a10d04643c47e0eaf5203eb02313ea41e14c3ca64b0b3",
+   "code_bytes": 20608,
+   "sha256": "93a4574d4089ab1f6417ea65f55ea16bba4d195cd999de3a1528c0e9d6fa11e1",
    "grid": "nhq,B,1",
    "block": [
     32,
@@ -1211,6 +1254,49 @@
     }
    ],
    "doc": "out[i] = silu(gate[i]) * up[i]."
+  },
+  {
+   "name": "slm_swiglu_w8",
+   "op": "swiglu",
+   "tier": "SIMT",
+   "dtype": "FP16",
+   "sass": "slm_swiglu_w8_shader.sass",
+   "source": "scripts/cuda/slm/slm_ops.cu",
+   "code_bytes": 1024,
+   "sha256": "9824299eb3fc36893c33818389d8cf4ec4696e6b0d59dfb4835a37307a844279",
+   "grid": "ceil(total/256),1,1",
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "regs": 14,
+   "hmma_instructions": 0,
+   "cbuf0_size": 380,
+   "abi": [
+    {
+     "name": "gate",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "up",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "total",
+     "offset": 376,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_swiglu, 8 warps per CTA, fast exponent and divide."
   }
  ]
 }

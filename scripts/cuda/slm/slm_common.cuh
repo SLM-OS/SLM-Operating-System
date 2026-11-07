@@ -18,8 +18,9 @@
 /* b64 only. Each launch covers weight blocks [start, start + count) and bias is
  * then a running FP32 sum shaped [B][N], which may alias out. */
 #define SLM_MM_BIAS_RUNNING 2
-/* b64 only: one x tile per CTA, grid (ceil(N/15), xtiles, 1). More warps, repeats
- * the weight decode per tile; for small N, limited by serial warp latency. */
+/* b8 and b64: one x tile per CTA, grid (ceil(N/15), xtiles, 1), B up to 64. More
+ * warps, repeats the weight decode per tile; for small N, limited by serial warp
+ * latency. */
 #define SLM_MM_SPLIT_XT 4
 #define SLM_MM_BSTART(flags) (((flags) >> 8) & 0xFF)
 #define SLM_MM_BCOUNT(flags) (((flags) >> 16) & 0xFF)

@@ -215,6 +215,26 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
         P.arg(flags);
         return;
     }
+    /* Small N: low-register per-tile warps. */
+    if (ranged && N <= 256 && !g_b64) {
+        const int xtiles = (B + 7) >> 3;
+        P.add_op(name, cls, q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8,
+                 dim3(mm_grid(N), xtiles, 1));
+        Op &o = P.ops.back();
+        o.mma = (double)mm_grid(N) * (K / 256) * 16.0 * xtiles;
+        o.macs = (double)N * K * B;
+        o.bytes = (double)gg_row_bytes(t) * N;
+        o.tc = true;
+        P.arg(x);
+        P.arg((const uint8_t *)(A.w + t.offset));
+        P.arg(out);
+        P.arg(bias);
+        P.arg(K);
+        P.arg(N);
+        P.arg(B);
+        P.arg(flags | SLM_MM_SPLIT_XT);
+        return;
+    }
     if (ranged) {
         const int xtiles = (B + 7) >> 3;
         const int nb = K / 256;
@@ -585,6 +605,25 @@ static void check_kernels(const Model &M, Arena &A)
                 const bool ok = worst <= 1e-3 * rms;
                 printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
                        m.tensor.c_str(), var.first, B, worst, worst / rms, ok ? "PASS" : "FAIL");
+                if (!ok) {
+                    g_fails++;
+                }
+            }
+            /* b8 per x tile, for small N in prefill. */
+            if (B > 8 && !is_head) {
+                int flags = SLM_MM_SPLIT_XT;
+                const uint8_t *wp = A.w + t.offset;
+                void *f = q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8;
+                void *params[] = {&dx, &wp, &dout, &bias_none, (void *)&K, (void *)&N, &B, &flags};
+                CK(cudaLaunchKernel(f, dim3(mm_grid(N), (B + 7) >> 3, 1), dim3(32), params, 0, nullptr));
+                const std::vector<float> got = down(dout, ref.size());
+                double worst = 0;
+                for (size_t i = 0; i < ref.size(); i++) {
+                    worst = std::max(worst, fabs((double)got[i] - ref[i]));
+                }
+                const bool ok = worst <= 1e-3 * rms;
+                printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
+                       m.tensor.c_str(), "b8 xt", B, worst, worst / rms, ok ? "PASS" : "FAIL");
                 if (!ok) {
                     g_fails++;
                 }

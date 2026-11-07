@@ -146,12 +146,6 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
 
             const uint32_t u0a = (uint32_t)q0, u0b = (uint32_t)(q0 >> 32);
             const uint32_t u1a = (uint32_t)q1 & keep1, u1b = (uint32_t)(q1 >> 32) & keep1;
-            float kl0, offl0, kl1, offl1, kh0, offh0, kh1, offh1;
-            bs_q4k_factors(h0.w1, h0.w2, h0.w3, 2 * j, d0, m0, kl0, offl0);
-            bs_q4k_factors(h1.w1, h1.w2, h1.w3, 2 * j, d1, m1, kl1, offl1);
-            bs_q4k_factors(h0.w1, h0.w2, h0.w3, 2 * j + 1, d0, m0, kh0, offh0);
-            bs_q4k_factors(h1.w1, h1.w2, h1.w3, 2 * j + 1, d1, m1, kh1, offh1);
-
 #pragma unroll
             for (int hi = 0; hi < 2; hi++) {
                 const int ns = hi * 4;
@@ -163,10 +157,9 @@ __global__ void slm_mm_q4k_hmma_bs(const half *x, const uint8_t *W, void *out, c
                 const uint32_t a1b = one1 | ((u1b >> ns) & BS_N4);
                 const uint32_t a2b = (u0b >> (ns + 8)) & BS_N4;
                 const uint32_t a3b = one1 | ((u1b >> (ns + 8)) & BS_N4);
-                const float k0 = hi ? kh0 : kl0;
-                const float off0 = hi ? offh0 : offl0;
-                const float k1 = hi ? kh1 : kl1;
-                const float off1 = hi ? offh1 : offl1;
+                float k0, off0, k1, off1;
+                bs_q4k_factors(h0.w1, h0.w2, h0.w3, 2 * j + hi, d0, m0, k0, off0);
+                bs_q4k_factors(h1.w1, h1.w2, h1.w3, 2 * j + hi, d1, m1, k1, off1);
 
 #pragma unroll
                 for (int xt = 0; xt < 8; xt++) {
