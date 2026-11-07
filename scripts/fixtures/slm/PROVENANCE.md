@@ -11,8 +11,9 @@ reference is upstream llama.cpp and ggml, CPU build, never SLM-OS code.
   at least 5 distinct greedy tokens, no token 2 and a top-1 margin of at least
   1.5 at every step (1.807 here). Greedy tokens: `[206, 174, 87, 178, 134, 164, 123, 206]`.
 
-Token 2 is excluded because `rust_slm_prompt` hardcodes it as EOS (#1158), so
-these goldens neither trigger nor catch that bug.
+Token 2 is excluded from the greedy run, a leftover from when `rust_slm_prompt`
+hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
+`golden_ffi_runs_past_token_2_and_stops_at_gguf_eos` cover that bug (#1158).
 
 | File | Bytes |
 |---|---|

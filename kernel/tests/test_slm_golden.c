@@ -17,12 +17,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* RoPE pairs (i, i+1), ggml's NEOX mode for Qwen2 pairs (i, i+head_dim/2), so
- * anything past position 0 differs from llama.cpp (#1156). Set to 1 with the
- * fix. */
-#define SLM_GOLDEN_ROPE_FIXED 0
-#define ROPE_IGNORE_MESSAGE "#1156: Qwen2 RoPE pairing differs from llama.cpp"
-
 extern const uint8_t slm_golden_ops_start[], slm_golden_ops_end[];
 extern const uint8_t slm_golden_tiny_start[], slm_golden_tiny_end[];
 extern const uint8_t slm_golden_greedy_start[], slm_golden_greedy_end[];
@@ -110,8 +104,10 @@ static void check_prompt(const char *text_rec, const char *tokens_rec)
     TEST_ASSERT_GREATER_OR_EQUAL(0, session);
 
     collected_t got = {.count = 0};
-    int32_t rc = rust_slm_prompt((uint32_t)session, text, (size_t)text_len,
-                                 want_count, collect_cb, &got);
+    /* Raw: the record holds llama.cpp's tokens for this text, no template. */
+    int32_t rc = rust_slm_prompt_ex((uint32_t)session, text, (size_t)text_len,
+                                    SLM_PROMPT_RAW, want_count, collect_cb,
+                                    NULL, &got);
     TEST_ASSERT_EQUAL_INT(0, rc);
     TEST_ASSERT_EQUAL_UINT32(want_count, got.count);
     for (uint32_t i = 0; i < want_count; i++) {
@@ -130,12 +126,8 @@ static void test_golden_ops(void)
 
 static void test_golden_rope(void)
 {
-#if SLM_GOLDEN_ROPE_FIXED
     TEST_ASSERT_EQUAL_INT(0, rust_slm_golden_check(GOLDEN_ROPE, 0u,
                                                    slm_golden_ops_start, ops_len()));
-#else
-    TEST_IGNORE_MESSAGE(ROPE_IGNORE_MESSAGE);
-#endif
 }
 
 /* Position 0: RoPE is the identity and attention has one entry, so everything
@@ -156,24 +148,16 @@ static void test_golden_ffi_first_token(void)
 
 static void test_golden_greedy_logits(void)
 {
-#if SLM_GOLDEN_ROPE_FIXED
     int idx = -1;
     load_tiny(&idx);
     TEST_ASSERT_EQUAL_INT(0, rust_slm_golden_check(GOLDEN_GREEDY, (uint32_t)idx,
                                                    slm_golden_greedy_start, greedy_len()));
     unload_tiny(idx);
-#else
-    TEST_IGNORE_MESSAGE(ROPE_IGNORE_MESSAGE);
-#endif
 }
 
 static void test_golden_ffi_greedy(void)
 {
-#if SLM_GOLDEN_ROPE_FIXED
     check_prompt("prompt.text", "greedy.tokens");
-#else
-    TEST_IGNORE_MESSAGE(ROPE_IGNORE_MESSAGE);
-#endif
 }
 
 int test_suite_slm_golden(void)

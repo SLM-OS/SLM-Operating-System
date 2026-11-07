@@ -386,8 +386,8 @@ def gen_tiny(gguf, llama, driver, tmp):
         rec = read_records(out_path)
         toks = np.frombuffer(rec["greedy.tokens"], dtype="<i4")
         margins = np.frombuffer(rec["greedy.margins"], dtype="<f4")
-        # Token 2 is excluded because rust_slm_prompt stops on it (see
-        # PROVENANCE.md), and a run stuck on one token would prove little.
+        # Token 2 is excluded as a leftover from rust_slm_prompt stopping on it
+        # (see PROVENANCE.md), and a run stuck on one token would prove little.
         if 2 in toks or len(set(toks.tolist())) < 5 or margins.min() < TINY_MIN_MARGIN:
             continue
         first_path = Path(tmp) / "first.rec"
@@ -461,8 +461,9 @@ reference is upstream llama.cpp and ggml, CPU build, never SLM-OS code.
   at least 5 distinct greedy tokens, no token 2 and a top-1 margin of at least
   {TINY_MIN_MARGIN} at every step ({margin:.3f} here). Greedy tokens: `{toks}`.
 
-Token 2 is excluded because `rust_slm_prompt` hardcodes it as EOS (#1158), so
-these goldens neither trigger nor catch that bug.
+Token 2 is excluded from the greedy run, a leftover from when `rust_slm_prompt`
+hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
+`golden_ffi_runs_past_token_2_and_stops_at_gguf_eos` cover that bug (#1158).
 
 | File | Bytes |
 |---|---|

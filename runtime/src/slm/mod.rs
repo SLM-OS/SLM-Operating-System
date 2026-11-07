@@ -12,7 +12,10 @@ pub mod forward;
 pub mod gguf;
 pub mod golden;
 pub mod kv_cache;
+#[cfg(test)]
+pub mod numerics_probe;
 pub mod registry;
 pub mod sampler;
 pub mod session;
 pub mod tokenizer;
+mod unicode_tables;
