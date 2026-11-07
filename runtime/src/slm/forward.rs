@@ -66,7 +66,7 @@ use core::fmt::Write as _;
 use crate::inference::gpu_slm::{select_tier, OpKind, OperatorLibraryBackend, Tier};
 use crate::inference::ops_transformer::{
     gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_elementwise,
-    swiglu_mlp_q, RopeTable,
+    swiglu_mlp_q, RopePairing, RopeTable,
 };
 use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
 use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
@@ -501,7 +501,12 @@ impl ForwardScratch {
             embed_f32: vec![0.0f32; padded_hidden],
             dequant_f32: vec![0.0f32; padded_max_row],
             acts_f32: vec![0.0f32; max_row],
-            rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
+            rope: RopeTable::new(
+                head_dim,
+                max_ctx,
+                arch.rope_freq_base,
+                RopePairing::for_arch(arch.architecture),
+            ),
             name_buf: String::with_capacity(32),
         }
     }

@@ -291,10 +291,9 @@ static void test_rust_slm_prompt_null_with_length_fails(void)
 }
 
 /*
- * rust_slm_stop on a fresh session returns 0 (sets the cooperative
- * stop flag idempotently). On a bad session id it returns -1. Pins
- * the FFI signature so a future change to the stop-flag mechanism
- * surfaces here.
+ * rust_slm_stop on a fresh session returns 0 and does nothing, since
+ * no prompt is running. On a bad session id it returns -1. Pins the FFI
+ * signature so a future change to the stop-flag mechanism surfaces here.
  */
 static void test_rust_slm_stop_signatures(void)
 {

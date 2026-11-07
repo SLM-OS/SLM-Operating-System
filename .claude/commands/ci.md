@@ -1,4 +1,4 @@
-Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suite and runtime host tests, check C braces on changed lines, check the configure order under `make -j`, and check the Jetson boot layout.
+Run the SLM-OS CI pipeline locally: build all targets, run the QEMU test suites (ARM64 and x86-64) and runtime host tests, check C braces on changed lines, check the configure order under `make -j`, and check the Jetson boot layout.
 
 ## Instructions
 
@@ -35,6 +35,13 @@ lines are not printed to stdout. Treat "PASSED - All tests passed (exit code 0)"
 as success. On failure, also grep the build/run output for `PAGE FAULT` and
 `KERNEL PANIC` to characterize the crash.
 
+### 4b. Run test suite (x86-64 QEMU)
+```
+make test PLATFORM=X86_64
+```
+Same pass line as step 4. Runs on its own because the x86-64 kernel takes the
+scalar paths where ARM64 takes NEON, and the SLM golden suite below checks both.
+
 ### 5. Run test suite with the AI scheduler (ARM64 QEMU)
 ```
 make test AI_SCHED=ON
@@ -53,6 +60,16 @@ This step catches compile or link rot in test-only code, which
 `make test` never builds: it went unnoticed for months before #1034.
 A link error naming a kernel symbol means `test_ffi_stubs` in
 `runtime/src/lib.rs` needs a stub for it.
+
+**SLM goldens (DoD item 7).** Steps 4, 4b and 6 include the suites that compare
+the SLM stack with upstream llama.cpp (`runtime/src/slm/golden.rs`,
+`kernel/tests/test_slm_golden.c`, fixtures and reference commit in
+`scripts/fixtures/slm/`): tokenizer against the real Qwen vocabulary (host),
+single ops against ggml (host and both QEMU kernels), and greedy tokens plus
+logits on a small Qwen2 GGUF through the production registry, forward path and
+FFI (host and both QEMU kernels). A mismatch means the model computes something
+other than llama.cpp does: report it, and never widen a tolerance or regenerate
+a golden to make it pass. The parts blocked by #1156 and #1157 show as ignored.
 
 ### 7. Brace check
 ```
@@ -116,6 +133,7 @@ Summarize results as a table:
 | x86-64 build | ✅/❌ | warnings if any |
 | Jetson real-weights build | ✅/❌ | warnings if any |
 | Test suite | ✅/❌ | N/M passed |
+| x86-64 test suite | ✅/❌ | N/M passed |
 | AI scheduler test suite | ✅/❌ | N/M passed |
 | Runtime host tests | ✅/❌ | N passed per feature set |
 | Brace check | ✅/❌ | violations if any |

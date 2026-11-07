@@ -12,12 +12,17 @@
 //!
 //! A 4-slot fixed table mirrors the registry's pattern from M1.4: bounded
 //! to keep the `no_std` runtime predictable, and protected by a
-//! SpinGuard for cross-FFI access from the M7 shell.
+//! SpinGuard for cross-FFI access from the M7 shell. The guard is only
+//! ever held for table bookkeeping: a prompt takes the session out of
+//! its slot with [`checkout`], so a decode that runs for minutes doesn't
+//! keep `slm stop` or `slm stats` spinning on the lock.
 //!
 //! `no_std` + `alloc` only.
 
 #![allow(clippy::module_name_repetitions)]
 
+use alloc::sync::Arc;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::slm::{
@@ -45,11 +50,68 @@ pub enum SessionState {
     /// Inside a `prompt()` call. The decoder loop polls
     /// [`Session::stop_flag`] at every yield boundary.
     Decoding,
-    /// `stop_flag` was honoured mid-decode. Next prompt requires
-    /// [`Session::reset`] first.
+    /// The stop flag was honoured mid-decode. The stop lands between
+    /// forward steps, so every committed KV position is complete and the
+    /// next prompt continues the conversation; [`Session::reset`] is
+    /// only needed to start a fresh one.
     Stopped,
     /// Slot released; subsequent operations return errors.
     Closed,
+}
+
+/// What `slm launch --gpu` asked for. [`crate::slm::decoder`] applies
+/// [`GpuMode::Cpu`] for the duration of each prompt; the forward path
+/// can read [`Session::gpu_mode`] directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum GpuMode {
+    /// Use whatever the tier table says, falling back per op to the CPU.
+    Auto = 0,
+    /// Never dispatch to the GPU for this session.
+    Cpu = 1,
+    /// Like `Auto`, but `slm launch` refuses when no op has a GPU tier.
+    On = 2,
+}
+
+impl GpuMode {
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(GpuMode::Auto),
+            1 => Some(GpuMode::Cpu),
+            2 => Some(GpuMode::On),
+            _ => None,
+        }
+    }
+}
+
+/// `--threads` when the operator didn't give one (spec default).
+pub const DEFAULT_THREADS: u32 = 4;
+/// Upper bound on `--threads`. Jetson Orin Nano has six cores.
+pub const MAX_THREADS: u32 = 64;
+
+/// Why the last prompt stopped generating. Values are FFI: they mirror
+/// `SLM_STOP_*` in `kernel/include/slm_ffi.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum StopReason {
+    /// No prompt has run yet.
+    None = 0,
+    /// The model sampled an end-of-generation token.
+    Eos = 1,
+    /// Hit the per-prompt `--max` cap.
+    MaxTokens = 2,
+    /// `slm stop` or Ctrl-C.
+    Stopped = 3,
+    /// The token callback asked to stop.
+    Callback = 4,
+    /// The KV cache has no room left: either the prompt didn't fit
+    /// (nothing ran) or generation filled it.
+    ContextFull = 5,
+    /// The forward pass produced no logits (e.g. a model without the
+    /// per-layer weights, or a shape error).
+    NoLogits = 6,
+    /// Nothing to do: the prompt text was empty.
+    EmptyPrompt = 7,
 }
 
 /// Per-session decoder state.
@@ -78,9 +140,21 @@ pub struct Session {
     pub sampler_state: SamplerState,
     /// Lifecycle state — see [`SessionState`].
     pub state: SessionState,
-    /// Cooperative-cancel flag. The decoder loop checks this at each
-    /// `yield` boundary; M7's shell flips it via `rust_slm_stop`.
-    pub stop_flag: bool,
+    /// Cooperative-cancel flag. The decoder loop checks it between
+    /// forward steps. It's shared with the slot table so `rust_slm_stop`
+    /// can set it while this session is checked out for a prompt.
+    pub stop_flag: Arc<AtomicBool>,
+    /// What `--gpu` asked for. See [`GpuMode`].
+    pub gpu_mode: GpuMode,
+    /// What `--threads` asked for. Stored only: the forward path is
+    /// single-threaded until the worker pool lands.
+    pub threads: u32,
+    /// Why the last prompt stopped.
+    pub last_stop_reason: StopReason,
+    /// The last sampled token when a prompt ended without feeding it to
+    /// the model and it wasn't an end-of-generation token. The next chat
+    /// turn feeds it so the KV cache holds the reply as displayed.
+    pub pending_token: Option<u32>,
     /// Number of prompts processed since the last [`Session::reset`]
     /// or open.
     pub prompts_completed: u32,
@@ -149,7 +223,11 @@ impl Session {
             sampler_cfg,
             sampler_state: SamplerState::new(seed),
             state: SessionState::Open,
-            stop_flag: false,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            gpu_mode: GpuMode::Auto,
+            threads: DEFAULT_THREADS,
+            last_stop_reason: StopReason::None,
+            pending_token: None,
             prompts_completed: 0,
             tokens_in: 0,
             tokens_out: 0,
@@ -163,7 +241,9 @@ impl Session {
     /// other than [`SessionState::Closed`] back to [`SessionState::Open`].
     pub fn reset(&mut self) {
         self.kv.clear();
-        self.stop_flag = false;
+        self.stop_flag.store(false, Ordering::Release);
+        self.pending_token = None;
+        self.last_stop_reason = StopReason::None;
         self.prompts_completed = 0;
         self.tokens_in = 0;
         self.tokens_out = 0;
@@ -174,11 +254,34 @@ impl Session {
         }
     }
 
-    /// Request cooperative cancellation. The decoder loop notices at
-    /// the next yield boundary and transitions to
+    /// Request cooperative cancellation. The decoder loop notices before
+    /// its next forward step and transitions to
     /// [`SessionState::Stopped`].
-    pub fn request_stop(&mut self) {
-        self.stop_flag = true;
+    pub fn request_stop(&self) {
+        self.stop_flag.store(true, Ordering::Release);
+    }
+
+    /// Whether [`Self::request_stop`] has fired and not been honoured.
+    pub fn stop_requested(&self) -> bool {
+        self.stop_flag.load(Ordering::Acquire)
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            model_handle: self.model_handle,
+            gpu_mode: self.gpu_mode,
+            threads: self.threads,
+            max_ctx: self.max_ctx,
+            kv_len: self.kv.len,
+            state: self.state,
+            busy: false,
+            prompts_completed: self.prompts_completed,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            last_ttft_ns: self.last_ttft_ns,
+            last_decode_ns: self.last_decode_ns,
+            last_stop_reason: self.last_stop_reason,
+        }
     }
 
     /// Mark the session closed. The slot table will free the slot
@@ -207,18 +310,57 @@ fn arch_kind_from_bytes(bytes: &[u8]) -> crate::slm::gguf::ArchKind {
 // ---------------------------------------------------------------------------
 // Session table — 4-slot fixed array protected by a spinlock.
 //
-// The decoder operates on `&mut Session`, and the FFI layer takes a
-// `session_id` (= slot index). To avoid juggling raw pointers from C,
-// the FFI shim acquires the spin lock, resolves the slot, and calls
-// the helper functions in this module. The table is private; only
-// the public functions below cross the module boundary.
+// The FFI layer takes a `session_id` (= slot index). The lock covers
+// table bookkeeping only and is never held across a decode: `checkout`
+// moves the session out of its slot and leaves a `Leased` record behind
+// so the other verbs can still answer while a prompt runs. The table is
+// private; only the public functions below cross the module boundary.
 // ---------------------------------------------------------------------------
 
-const EMPTY_SESSION: Option<Session> = None;
+/// Copy of a session's externally visible state.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionSnapshot {
+    pub model_handle: u32,
+    pub gpu_mode: GpuMode,
+    pub threads: u32,
+    pub max_ctx: usize,
+    pub kv_len: usize,
+    pub state: SessionState,
+    /// A prompt is in flight. The counters are then as of its start.
+    pub busy: bool,
+    pub prompts_completed: u32,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub last_ttft_ns: u64,
+    pub last_decode_ns: u64,
+    pub last_stop_reason: StopReason,
+}
+
+/// Why a slot operation couldn't run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotError {
+    /// Out of range, or nothing is open there.
+    Empty,
+    /// A prompt holds the session.
+    Busy,
+}
+
+/// Slot record for a session that's out on a [`SessionLease`].
+struct Leased {
+    stop: Arc<AtomicBool>,
+    snapshot: SessionSnapshot,
+}
+
+enum Slot {
+    Empty,
+    Ready(Session),
+    Leased(Leased),
+}
+
+const EMPTY_SLOT: Slot = Slot::Empty;
 
 static SESSION_LOCK: AtomicBool = AtomicBool::new(false);
-static mut SESSIONS: [Option<Session>; SLM_MAX_SESSIONS] =
-    [EMPTY_SESSION; SLM_MAX_SESSIONS];
+static mut SESSIONS: [Slot; SLM_MAX_SESSIONS] = [EMPTY_SLOT; SLM_MAX_SESSIONS];
 
 struct SpinGuard;
 
@@ -250,58 +392,176 @@ pub fn insert(session: Session) -> Option<usize> {
     // SAFETY: SpinGuard held — exclusive access to SESSIONS.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
     for (i, slot) in slots.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(session);
+        if matches!(slot, Slot::Empty) {
+            *slot = Slot::Ready(session);
             return Some(i);
         }
     }
     None
 }
 
-/// Free the slot at `index`. Returns `None` if the slot was already
-/// empty or `index` is out of range; otherwise returns the freed
-/// session (so the caller can run any extra teardown).
-pub fn remove(index: usize) -> Option<Session> {
+/// Free the slot at `index` and return the session, so the caller can
+/// run any extra teardown.
+pub fn remove(index: usize) -> Result<Session, SlotError> {
     if index >= SLM_MAX_SESSIONS {
-        return None;
+        return Err(SlotError::Empty);
     }
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
-    slots[index].take()
+    match core::mem::replace(&mut slots[index], Slot::Empty) {
+        Slot::Ready(session) => Ok(session),
+        Slot::Empty => Err(SlotError::Empty),
+        leased @ Slot::Leased(_) => {
+            slots[index] = leased;
+            Err(SlotError::Busy)
+        }
+    }
 }
 
 /// Run a closure against the session at `index` while the table lock
-/// is held.
-///
-/// The callback gets `&mut Session`; returning a value out of the
-/// closure is the canonical way to copy state out without leaking
-/// references past the lock release.
-///
-/// Returns `None` if the slot is empty or out of range.
-pub fn with_session<R, F>(index: usize, f: F) -> Option<R>
+/// is held. The closure must be short and must not re-enter the table.
+/// Fails with [`SlotError::Busy`] while a prompt holds the session.
+pub fn try_with_session<R, F>(index: usize, f: F) -> Result<R, SlotError>
 where
     F: FnOnce(&mut Session) -> R,
 {
     if index >= SLM_MAX_SESSIONS {
-        return None;
+        return Err(SlotError::Empty);
     }
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held — exclusive access to SESSIONS for the
-    // duration of `f`. The closure must not re-enter the session
-    // table (would deadlock); callers are decoder.rs / lib.rs FFI
-    // shims and stay self-contained.
+    // duration of `f`.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
-    let slot = slots[index].as_mut()?;
-    Some(f(slot))
+    match &mut slots[index] {
+        Slot::Ready(session) => Ok(f(session)),
+        Slot::Empty => Err(SlotError::Empty),
+        Slot::Leased(_) => Err(SlotError::Busy),
+    }
 }
 
-/// Number of currently-open sessions.
+/// [`try_with_session`] for callers that don't care why it failed.
+pub fn with_session<R, F>(index: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut Session) -> R,
+{
+    try_with_session(index, f).ok()
+}
+
+/// Exclusive hold on a session for the length of one prompt. Dropping
+/// the lease puts the session back in its slot and clears the stop flag.
+pub struct SessionLease {
+    index: usize,
+    session: Option<Session>,
+}
+
+impl Deref for SessionLease {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        // `session` is only None inside `drop`.
+        self.session.as_ref().unwrap_or_else(|| unreachable!())
+    }
+}
+
+impl DerefMut for SessionLease {
+    fn deref_mut(&mut self) -> &mut Session {
+        self.session.as_mut().unwrap_or_else(|| unreachable!())
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.stop_flag.store(false, Ordering::Release);
+            let _g = SpinGuard::new();
+            // SAFETY: SpinGuard held.
+            let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
+            slots[self.index] = Slot::Ready(session);
+        }
+    }
+}
+
+/// Take the session at `index` out of the table for a prompt.
+pub fn checkout(index: usize) -> Result<SessionLease, SlotError> {
+    if index >= SLM_MAX_SESSIONS {
+        return Err(SlotError::Empty);
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
+    match core::mem::replace(&mut slots[index], Slot::Empty) {
+        Slot::Ready(session) => {
+            let mut snapshot = session.snapshot();
+            snapshot.busy = true;
+            snapshot.state = SessionState::Decoding;
+            slots[index] = Slot::Leased(Leased {
+                stop: session.stop_flag.clone(),
+                snapshot,
+            });
+            Ok(SessionLease { index, session: Some(session) })
+        }
+        Slot::Empty => Err(SlotError::Empty),
+        leased @ Slot::Leased(_) => {
+            slots[index] = leased;
+            Err(SlotError::Busy)
+        }
+    }
+}
+
+/// Ask the prompt running on `index` to stop. Returns whether one was
+/// running; stopping an idle session changes nothing, so a stale stop
+/// can't cancel the next prompt.
+pub fn request_stop(index: usize) -> Result<bool, SlotError> {
+    if index >= SLM_MAX_SESSIONS {
+        return Err(SlotError::Empty);
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held; the flag itself is atomic and the decoder
+    // reads it without this lock.
+    let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
+    match &slots[index] {
+        Slot::Leased(leased) => {
+            leased.stop.store(true, Ordering::Release);
+            Ok(true)
+        }
+        Slot::Ready(_) => Ok(false),
+        Slot::Empty => Err(SlotError::Empty),
+    }
+}
+
+/// Copy out a session's state. Works while a prompt runs: the counters
+/// are then the ones from the prompt's start and `busy` is set.
+pub fn snapshot(index: usize) -> Option<SessionSnapshot> {
+    if index >= SLM_MAX_SESSIONS {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
+    match &slots[index] {
+        Slot::Ready(session) => Some(session.snapshot()),
+        Slot::Leased(leased) => Some(leased.snapshot),
+        Slot::Empty => None,
+    }
+}
+
+/// Whether a running prompt is using `model_handle`.
+pub fn model_busy(model_handle: u32) -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
+    slots.iter().any(|slot| {
+        matches!(slot, Slot::Leased(leased) if leased.snapshot.model_handle == model_handle)
+    })
+}
+
+/// Number of currently-open sessions, including any running a prompt.
 pub fn count() -> usize {
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
     let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
-    slots.iter().filter(|s| s.is_some()).count()
+    slots.iter().filter(|s| !matches!(s, Slot::Empty)).count()
 }
 
 #[cfg(test)]
@@ -310,7 +570,7 @@ pub(crate) fn reset_for_tests() {
     // SAFETY: SpinGuard held; cfg(test) only.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
     for s in slots.iter_mut() {
-        *s = None;
+        *s = Slot::Empty;
     }
 }
 
@@ -418,6 +678,8 @@ mod tests {
         s.tokens_out = 42;
         s.last_ttft_ns = 1_000_000;
         s.state = SessionState::Stopped;
+        s.pending_token = Some(7);
+        s.request_stop();
         let zero_kv = vec![0u16; (s.arch.head_count_kv * s.arch.head_dim) as usize];
         s.kv.append(0, &zero_kv, &zero_kv).expect("append");
         s.kv.commit_position().expect("commit");
@@ -430,6 +692,8 @@ mod tests {
         assert_eq!(s.tokens_out, 0);
         assert_eq!(s.last_ttft_ns, 0);
         assert_eq!(s.state, SessionState::Open);
+        assert_eq!(s.pending_token, None);
+        assert!(!s.stop_requested());
     }
 
     #[test]
@@ -450,10 +714,72 @@ mod tests {
         let _serial = TestSerialGuard::new();
         reset_registry();
         reset_for_tests();
-        let mut s = make_session();
-        assert!(!s.stop_flag);
+        let s = make_session();
+        assert!(!s.stop_requested());
         s.request_stop();
-        assert!(s.stop_flag);
+        assert!(s.stop_requested());
+    }
+
+    /// The lock must be free while a prompt holds the session, or `slm
+    /// stop` spins for the whole decode (the bug this table layout
+    /// fixes). A second thread stands in for a second shell session.
+    #[test]
+    fn stop_reaches_a_checked_out_session_from_another_thread() {
+        extern crate std;
+        let _serial = TestSerialGuard::new();
+        reset_registry();
+        reset_for_tests();
+        let idx = insert(make_session()).expect("insert");
+
+        let lease = checkout(idx).expect("checkout");
+        assert!(!lease.stop_requested());
+
+        let other = std::thread::spawn(move || {
+            let was_running = request_stop(idx).expect("stop");
+            let snap = snapshot(idx).expect("snapshot");
+            (was_running, snap.busy, snap.state)
+        });
+        // Join with the lease still out: this deadlocks if anything in
+        // the stop path needs the session back.
+        let (was_running, busy, state) = other.join().expect("join");
+        assert!(was_running);
+        assert!(busy);
+        assert_eq!(state, SessionState::Decoding);
+        assert!(lease.stop_requested(), "decoder sees the flag without the lock");
+
+        drop(lease);
+        let snap = snapshot(idx).expect("snapshot");
+        assert!(!snap.busy);
+        assert_eq!(request_stop(idx), Ok(false), "nothing is running now");
+        assert!(
+            !with_session(idx, |s| s.stop_requested()).expect("slot"),
+            "a stale stop must not cancel the next prompt",
+        );
+    }
+
+    #[test]
+    fn busy_session_refuses_structural_verbs() {
+        let _serial = TestSerialGuard::new();
+        reset_registry();
+        reset_for_tests();
+        let idx = insert(make_session()).expect("insert");
+        let model = snapshot(idx).expect("snapshot").model_handle;
+
+        assert!(!model_busy(model));
+        let lease = checkout(idx).expect("checkout");
+        assert!(model_busy(model));
+        assert_eq!(count(), 1, "a running session still counts");
+        assert!(matches!(remove(idx), Err(SlotError::Busy)));
+        assert!(matches!(checkout(idx), Err(SlotError::Busy)));
+        assert_eq!(try_with_session(idx, |s| s.reset()), Err(SlotError::Busy));
+        drop(lease);
+        assert!(!model_busy(model));
+        assert_eq!(try_with_session(idx, |s| s.reset()), Ok(()));
+        assert!(remove(idx).is_ok());
+        assert!(matches!(remove(idx), Err(SlotError::Empty)));
+        assert!(matches!(checkout(idx), Err(SlotError::Empty)));
+        assert_eq!(request_stop(idx), Err(SlotError::Empty));
+        assert_eq!(request_stop(SLM_MAX_SESSIONS), Err(SlotError::Empty));
     }
 
     #[test]
@@ -497,7 +823,7 @@ mod tests {
         let s = make_session();
         let idx = insert(s).expect("insert");
         let taken = remove(idx);
-        assert!(taken.is_some());
-        assert!(remove(idx).is_none(), "slot already empty");
+        assert!(taken.is_ok());
+        assert!(remove(idx).is_err(), "slot already empty");
     }
 }

@@ -2,7 +2,7 @@
  * rope_f16.cu — Rotary Position Embedding in FP16 on Jetson GA10B
  * (fourth SLM-on-GPU operator from the #540 menu).
  *
- * RoPE rotates pairs `(vec[2i], vec[2i+1])` of every Q/K vector by an
+ * RoPE rotates pairs `(vec[i], vec[i + head_dim/2])` of every Q/K vector by an
  * angle that depends on (token position, pair index). The cos/sin
  * factors are precomputed once into a flat FP32 lookup table; the
  * kernel just gathers from it and applies a 2×2 rotation:
@@ -10,11 +10,12 @@
  *     v0' = v0 * cos − v1 * sin
  *     v1' = v0 * sin + v1 * cos
  *
- * Convention is GPT-NeoX / Llama / Qwen2 pair-interleave: pair `i` is
- * `(vec[2i], vec[2i+1])`. Mirrors
- * `runtime/src/inference/ops_transformer.rs::RopeTable::apply` and is
- * called once per attention block on Q (n_heads heads) and once on K
- * (n_kv_heads heads).
+ * Convention is Qwen2's half split (ggml GGML_ROPE_TYPE_NEOX, #1156): pair
+ * `i` is `(vec[i], vec[i + head_dim/2])`. Mirrors
+ * `runtime/src/inference/ops_transformer.rs::RopeTable::apply` with
+ * `RopePairing::HalfSplit` and is called once per attention block on Q
+ * (n_heads heads) and once on K (n_kv_heads heads). The `llama` architecture's
+ * interleaved pairing is CPU-only.
  *
  * Mapping (one block per (token, head), one thread per pair):
  *   blockIdx.x  = token_idx * num_heads + head_idx
@@ -62,11 +63,11 @@ __global__ void rope_f16(half *vec, const int *positions,
     float c = cos_sin[cos_base];
     float s = cos_sin[cos_base + 1];
 
-    int vec_base = vec_idx * head_dim + (pair_idx << 1);
+    int vec_base = vec_idx * head_dim + pair_idx;
     float v0 = __half2float(vec[vec_base]);
-    float v1 = __half2float(vec[vec_base + 1]);
-    vec[vec_base    ] = __float2half(v0 * c - v1 * s);
-    vec[vec_base + 1] = __float2half(v0 * s + v1 * c);
+    float v1 = __half2float(vec[vec_base + half_dim]);
+    vec[vec_base           ] = __float2half(v0 * c - v1 * s);
+    vec[vec_base + half_dim] = __float2half(v0 * s + v1 * c);
 }
 
 /* ---- CPU reference (mirrors runtime/src/inference/ops_transformer.rs::RopeTable::apply) ---- */
@@ -84,10 +85,10 @@ static void cpu_reference(half *vec, const int *positions,
             for (int i = 0; i < half_dim; i++) {
                 float c = cos_sin[cos_off + 2 * i];
                 float s = cos_sin[cos_off + 2 * i + 1];
-                float v0 = __half2float(vec[vec_off + 2 * i]);
-                float v1 = __half2float(vec[vec_off + 2 * i + 1]);
-                vec[vec_off + 2 * i]     = __float2half(v0 * c - v1 * s);
-                vec[vec_off + 2 * i + 1] = __float2half(v0 * s + v1 * c);
+                float v0 = __half2float(vec[vec_off + i]);
+                float v1 = __half2float(vec[vec_off + i + half_dim]);
+                vec[vec_off + i]            = __float2half(v0 * c - v1 * s);
+                vec[vec_off + i + half_dim] = __float2half(v0 * s + v1 * c);
             }
         }
     }

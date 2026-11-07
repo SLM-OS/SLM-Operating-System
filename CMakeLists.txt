@@ -1368,6 +1368,22 @@ else()
     target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fno-pie)
 endif()
 
+# SLM golden tests against llama.cpp (#475). On every platform, since the
+# runtime takes different code paths per architecture, but only in boot-test
+# kernels: TEST_SOURCES go into every image, and these fixtures are about 860 KB.
+if(ENABLE_BOOT_TESTS)
+    target_sources(slmos.elf PRIVATE
+        kernel/tests/test_slm_golden.c
+        kernel/tests/slm_golden_embed.S)
+    set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
+    set_source_files_properties(
+        kernel/tests/slm_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_GOLDEN_OPS_PATH=${SLM_GOLDEN_DIR}/golden_ops.rec;SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/golden_ops.rec;${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
 # Feed absolute paths of the demo Lua scripts to demo_scripts.S so GAS's
 # .incbin can resolve them regardless of the assembler's working directory.
 # OBJECT_DEPENDS makes the .S file rebuild when the scripts change so the

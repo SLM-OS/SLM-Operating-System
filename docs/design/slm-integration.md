@@ -149,6 +149,52 @@ like a `model_idx` today.
 **Total new Rust:** ~4 200 LOC, all `#![no_std]`, all using existing kernel
 FFI for memory and time.
 
+### Numeric fidelity against llama.cpp
+
+**Decision: the forward path keeps FP16 activations.** FP32 activations do not
+bring greedy output closer to llama.cpp, so they would add memory and code for
+no gain. Token-exact output against llama.cpp is not a usable requirement,
+because llama.cpp does not meet it against itself.
+
+Measured on `qwen2.5-1.5b-instruct-q4_k_m.gguf` on x86-64 host, using the
+`bench/475/prompts` (68, 68 and 66 tokens), up to 256 greedy tokens, against
+llama.cpp `ca89968a` at one thread. The table gives the generated token where
+each run first differs from the reference:
+
+| Run | Reference | p1 | p2 | p3 | Wrong tokens, teacher-forced | Median RMS logit error |
+|---|---|---|---|---|---|---|
+| Interleaved RoPE (before #1156), first 64 tokens | AVX2 | 0 | 0 | 1 | 137 of 197 | 4.33 |
+| FP16 activations (shipped) | AVX2 | 90 | 25 | 6 | 24 of 768 | 0.175 |
+| FP32 activations, Q6_K through Q8_K, double RMS sum | AVX2 | 15 | 80 | 19 | 23 of 768 | 0.184 |
+| FP16 activations, first 64 tokens | scalar | 15 | 25 | 20 | 5 of 197 | 0.179 |
+| FP32 as above, first 64 tokens | scalar | none | 45 | 6 | 6 of 197 | 0.185 |
+| llama.cpp scalar build, free run | AVX2 | 15 | 45 | 6 | not comparable | per-step max median 0.85 to 0.93 |
+
+The scalar build is the same llama.cpp commit with SIMD, repack and sgemm off.
+Its logit error against the AVX2 build is the same size as SLM-OS's error.
+
+Every token that differs from the AVX2 reference is a near tie: the reference's
+top-1 lead there is at most 0.38 logits.
+
+**Cause.** Up to `ffn_out-0` the FP32 path agrees with llama.cpp to 1 or 2 F32
+ULP. Hidden values then reach about 2500, where F32 itself is coarse, and each
+matmul quantizes its activation to Q8_K with a step of `max / 127` per
+256-element block, so a rounding difference that crosses a bin boundary becomes
+a whole step. Injecting +/-1 F32 ULP of noise into the hidden state after each
+residual sum, with nothing else changed, gives RMS logit error of 0.12 to 0.32
+and maxima up to 1.48 against the same pass without noise, and flipped the
+argmax by step 10 of the 12 run (`golden_real_model_one_ulp_sensitivity`). A
+single element moved by 1 ULP does nothing at all on those 12 steps: Q8_K
+absorbs it unless a bin flips. So this is summation-order and rounding noise,
+not a modelling difference, and an exact match would need every ggml operation
+order reproduced bit for bit, per ggml SIMD path.
+
+**What this means for tests.** The golden suites compare logits within
+`LOGIT_TOLERANCE`, on a model whose greedy margins clear that noise. Bench runs
+against llama.cpp should compare quality and speed, not token identity past the
+first near tie. `runtime/src/slm/numerics_probe.rs` holds the switchable-rounding
+forward pass for repeating this; a test pins it to the production path bit for bit.
+
 ### Why not pull in llama.cpp wholesale
 
 Direct reasons:
@@ -216,16 +262,20 @@ session-oriented and prompt-aware.
 | `slm load <vfs-path>` | Parse GGUF, allocate weight blocks in weight pool, register model. Prints model handle, parameter count, file format, quant scheme, vocab size. Wraps `rust_slm_load(name, data, len)`. |
 | `slm list` | Lists all loaded SLMs (handle, name, params, quant, weight bytes resident). |
 | `slm info <handle>` | Detailed metadata: arch (`qwen2`), n_layer, n_head, n_kv_head, head_dim, hidden, vocab, RoPE theta, max ctx. |
-| `slm launch <handle> [--ctx N] [--threads K] [--gpu auto\|cpu\|on]` | Creates a **session**: allocates KV-cache slot, pins the model in registry, returns a `session_id`. Default `--ctx 2048`, `--threads 4` (4 of 6 A78AE cores), `--gpu auto`. |
-| `slm prompt <session_id> "<text>"` | Renders the chat template, tokenizes, runs prefill, runs decode to EOS or `--max 256`. Prints generated text **streaming** to UART, one token at a time. |
-| `slm stream <session_id>` | Reads from stdin (UART line) until blank line, then runs prompt. Convenience for interactive use over serial console. |
-| `slm stop <session_id>` | Cancels an in-flight decode (sets cooperative cancel flag; decoder checks at each `yield()` boundary). |
-| `slm reset <session_id>` | Clears KV cache for a fresh conversation; keeps model loaded. |
-| `slm unload <session_id\|--model <handle>>` | Releases session (frees KV slot) or model (unpins, allows LRU eviction). |
+| `slm launch <handle> [--ctx N] [--threads K] [--gpu auto\|cpu\|on]` | Creates a **session**: allocates KV-cache slot, returns a `session_id`. Default `--ctx 2048`, `--gpu auto`. `--gpu cpu` holds every op on the CPU for each prompt; `--gpu on` fails if no op has a GPU tier. `--threads K` (default 4) is stored but has no effect until the worker pool lands. The banner states the real backend. |
+| `slm prompt <session_id> [--raw] [--max N] "<text>"` | Renders the chat template, tokenizes, runs prefill, runs decode to EOS or `--max` (default 256). Prints generated text **streaming** to UART, one token at a time. `--raw` feeds the text without the template, parsing special-token names. `\n`, `\t`, `\\` in the text are unescaped. Ctrl-C stops it. |
+| `slm stream <session_id> [--raw] [--max N]` | Reads from stdin (UART line) until blank line, then runs prompt. Convenience for interactive use over serial console. |
+| `slm stop <session_id>` | Stops a running decode from another shell session: sets an atomic per-session flag without taking any lock. The decoder checks it before each forward step. A stopped session takes new prompts; the conversation continues. |
+| `slm reset <session_id>` | Clears KV cache for a fresh conversation; keeps model loaded. Refused while a prompt runs on the session. |
+| `slm close <session_id>` | Releases a session (frees KV slot). Refused while a prompt runs on it. |
+| `slm unload <handle>` | Releases a model. Refused while a prompt runs on it. |
 | `slm status` | One-line summary: loaded models, active sessions, pool utilization. |
 | `slm stats [<session_id>]` | Last-prompt and cumulative stats (see "Telemetry" below). |
 | `slm bench <handle> [--prompt-len N] [--gen-len M] [--runs R]` | Synthetic throughput benchmark: warm-up, R runs, reports prefill tok/s, decode tok/s, TTFT, peak-resident MB. |
 | `slm gpu` | Inherits Phase-5 `model gpu` semantics; reports backend chosen for the active session and any kexec-handoff state. |
+
+The shell parser handles quotes for every command (#1136). The figures in the
+example below are illustrative.
 
 ### Example session
 
@@ -245,22 +295,23 @@ slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [slm] loaded handle=0  qwen2  1.54 B params  weights=1014 MB  load=412 ms
 
 slmos> slm launch 0 --ctx 4096 --gpu auto
-[slm] session=0 backend=GPU(kexec-handoff) kv_cache=234 MB ctx=4096 threads=4
+[slm] session=0 backend=GPU+CPU(gpu_ops=5/8 staged_tensors=339) threads=4(stored; forward is single-threaded) sampler=topkp ctx=4096 temp=0.700 top_k=40 top_p=0.900 seed=1
 
 slmos> slm prompt 0 "Explain virtual memory in two sentences."
 Virtual memory is an abstraction the OS provides so each process sees a
 private, contiguous address space, while the actual physical pages may live
 anywhere in RAM (or on disk). The MMU translates virtual to physical
 addresses on every memory access using per-process page tables.
-[slm] ttft=312 ms  decode=27.4 tok/s  prefill=146 tok/s  peak=1.34 GB
+[slm] ttft=312 ms  decode=27.400 tok/s  total=2117 ms tokens=58 bytes=291 stop=eos
 
 slmos> slm stats 0
-session 0  prompts=1  tokens_in=11  tokens_out=58
-  prefill  : 146 tok/s   75 ms total
-  decode   :  27.4 tok/s  2117 ms total  (avg 36.5 ms / token)
+session 0  prompts=1  tokens_in=41  tokens_out=58
   ttft     : 312 ms
-  kv_used  : 69 / 4096 (1.7%)
-  oov      : 0
+  decode   : 2117 ms total
+  stop     : eos
+  kv_used  : 98 / 4096
+  backend=GPU+CPU(gpu_ops=5/8 staged_tensors=339)
+  threads  : 4 (stored; forward is single-threaded)
 ```
 
 ---

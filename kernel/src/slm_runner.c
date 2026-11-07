@@ -86,8 +86,17 @@ static int32_t slm_runner_token_cb(
     const uint8_t *bytes,
     size_t bytes_len)
 {
-    (void)token_id;
     slm_runner_token_ctx_t *ctx = (slm_runner_token_ctx_t *)user;
+
+    /* Nothing printable yet: the token ended inside a UTF-8 sequence or
+     * was a special. Subscribers get no empty message; it still counts
+     * as a model token. */
+    if (bytes_len == 0) {
+        if (ctx) {
+            ctx->tokens_emitted++;
+        }
+        return 1;
+    }
 
     /* Stage the token bytes into a NUL-terminated buffer.
      *
@@ -135,7 +144,7 @@ static int32_t slm_runner_token_cb(
     buf[n] = '\0';
 
     msg_router_publish((const uint8_t *)"/slm/token", buf);
-    if (ctx) {
+    if (ctx && token_id != SLM_TOKEN_ID_FLUSH) {
         ctx->tokens_emitted++;
     }
 

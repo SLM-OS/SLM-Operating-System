@@ -71,7 +71,7 @@
       "tier":    "SIMT",
       "dtype":   "FP16",
       "sass":    "rope_f16_shader.sass",
-      "comment": "Rotary Position Embedding for Q/K vectors. Rotates pairs (vec[2i], vec[2i+1]) by precomputed (cos, sin) factors from a flat FP32 LUT keyed on (token position, pair index). One block per (token, head); one thread per pair; no shared memory, no reductions. GPT-NeoX / Llama / Qwen2 pair-interleave convention. Mirrors runtime/src/inference/ops_transformer.rs::RopeTable::apply. Validated within 2 ULPs across Qwen2.5-1.5B Q (1×12×128), K (1×2×128), prefill (16×12×128), Llama-2 Q (1×32×128), and a 64-dim head (1×8×64); position-0 boundary case is bit-exact. Source: scripts/cuda/rope_f16.cu (#540)."
+      "comment": "Rotary Position Embedding for Q/K vectors. Rotates pairs (vec[i], vec[i+head_dim/2]) by precomputed (cos, sin) factors from a flat FP32 LUT keyed on (token position, pair index). One block per (token, head); one thread per pair; no shared memory, no reductions. Qwen2's half-split convention (ggml GGML_ROPE_TYPE_NEOX, #1156), which the source moved to after the validation below; the SASS needs a rebuild on a CUDA host before this op is enabled. Mirrors runtime/src/inference/ops_transformer.rs::RopeTable::apply with RopePairing::HalfSplit. Validated within 2 ULPs across Qwen2.5-1.5B Q (1×12×128), K (1×2×128), prefill (16×12×128), Llama-2 Q (1×32×128), and a 64-dim head (1×8×64); position-0 boundary case is bit-exact. Source: scripts/cuda/rope_f16.cu (#540)."
     },
     {
       "op_kind": "Q4K_DOT",

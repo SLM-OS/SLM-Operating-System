@@ -1,0 +1,5 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Write a short story about a lighthouse keeper who discovers that the light she has tended for forty years has been guiding something other than ships, and tell how she decides what to do on the last night of the winter storms.<|im_end|>
+<|im_start|>assistant
