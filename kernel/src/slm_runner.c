@@ -504,8 +504,16 @@ static void slm_runner_log(const char *line)
     }
 }
 
+/* Print the posted line and stop taking lines. */
+static void slm_ask_print_posted_line(void)
+{
+    shell_puts(g_log_line);
+    shell_flush();
+    __atomic_store_n(&g_log_state, SLM_LOG_IDLE, __ATOMIC_RELEASE);
+}
+
 /* `slm ask`, after /slm/done: print the runner's line for this prompt if it
- * comes within the wait. Leaves the state for slm_runner_ask to reset. */
+ * comes within the wait. */
 static void slm_ask_print_runner_line(void)
 {
     uint64_t start = timer_get_count();
@@ -513,8 +521,7 @@ static void slm_ask_print_runner_line(void)
     for (;;) {
         uint32_t st = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
         if (st == SLM_LOG_POSTED) {
-            shell_puts(g_log_line);
-            shell_flush();
+            slm_ask_print_posted_line();
             return;
         }
         if (st == SLM_LOG_WAITING && timer_get_count() - start >= limit) {
@@ -525,7 +532,8 @@ static void slm_ask_print_runner_line(void)
 }
 
 /* End the hand-off: no more lines to `slm ask`. A line being copied right
- * now is let through first. */
+ * now is waited for, and a line posted but not printed yet (the exchange
+ * failed after /slm/done) is printed, so none is lost. */
 static void slm_ask_end_log_handoff(void)
 {
     for (;;) {
@@ -535,12 +543,14 @@ static void slm_ask_end_log_handoff(void)
                                         __ATOMIC_RELAXED)) {
             return;
         }
-        if (expect != SLM_LOG_WRITING) {
-            /* POSTED: printed, or the exchange failed first. */
-            __atomic_store_n(&g_log_state, SLM_LOG_IDLE, __ATOMIC_RELEASE);
+        if (expect == SLM_LOG_POSTED) {
+            slm_ask_print_posted_line();
             return;
         }
-        task_sleep_ms(1);
+        if (expect == SLM_LOG_IDLE) {
+            return;
+        }
+        task_sleep_ms(1);  /* WRITING */
     }
 }
 
