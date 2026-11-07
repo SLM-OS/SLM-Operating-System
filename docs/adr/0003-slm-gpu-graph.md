@@ -38,7 +38,7 @@ Pending: `slm gpu smoke` and `slm gpu golden` on jetson-nano-2, then decode tok/
 - Layout: `slm launch` builds a plan in Rust; `kernel/gpu/slm_prog.c` encodes it; `kernel/gpu/nvidia/ga10b_prog.c` holds the pure pushbuffer, QMD and cbuf writers.
 - Barriers: WAIT_FOR_IDLE plus INVALIDATE_SHADER_CACHES (DATA, FLUSH_DATA), as NVK does for compute. `slm gpu opts` selects cheaper forms for measurement.
 - Page tables: weights and data use 64 KB PTEs, about 140 KB of tables for 1.1 GB; `slm xload` memory is scattered and maps at 4 KB, which works at about 2.2 MB of tables.
-- KV append needs no op: K and V projections write into the position's cache slot. Embeddings are decoded on the CPU into the step page.
+- KV append needs no op: K and V projections write into the position's cache slot, so `slm_kv_append` isn't launched. Kernels read positions and token ids from the step page, so a decode step patches only K and V output pointers and RoPE on K (84 cbufs for 28 layers).
 - Other consumers: a dispatcher that finds a program in flight releases the dispatch lock until it ends; sched-MLP's try-lock takes its CPU fallback. Any CPU can retire the program from its end semaphore, so a waiter with IRQs masked cannot deadlock on the owner (#1093 class).
 - Failure: a timeout (5 s) dumps GR and MMU fault state once and kills the program. The session rebuilds its KV cache on the CPU by replaying its tokens, since a wedged GPU cannot be read back.
 - Kexec: there is no cold channel, so `--gpu on` is refused and `--gpu auto` keeps the per-op tier path. The per-op path is otherwise unchanged.

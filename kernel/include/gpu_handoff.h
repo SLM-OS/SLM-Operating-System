@@ -131,10 +131,8 @@ enum slm_gpu_op_kind {
     /* Element-wise FP32 sigmoid: the eviction MLP's output activation
      * (cold-boot eviction pipeline, #1092). */
     SLM_GPU_OP_SIGMOID       = 13,
-    /* #475 GPU program kernels (scripts/cuda/slm/). */
-    SLM_GPU_OP_MM_Q4K        = 14, /* out[B,N] = x[B,K] @ Q4_K W[N,K]^T */
-    SLM_GPU_OP_MM_Q6K        = 15, /* same, Q6_K weights                */
-    SLM_GPU_OP_ADD_F16       = 16, /* element-wise FP16 add             */
+    /* 32+: the #475 GPU program kernels, SLM_SASS_* in order
+     * (scripts/cuda/gen-slm-kernel-table.py). */
 };
 
 /* Number of SLM transformer ops (discriminants 0..7) — sizes the
@@ -165,9 +163,6 @@ enum slm_gpu_dtype {
     SLM_GPU_DTYPE_TF32  = 4,
     SLM_GPU_DTYPE_INT8  = 5,
     SLM_GPU_DTYPE_Q4K   = 6,
-    /* Batch variants of the #475 matmuls (slm_mm_*_hmma_b8 / _b64). */
-    SLM_GPU_DTYPE_MM_B8  = 7,
-    SLM_GPU_DTYPE_MM_B64 = 8,
 };
 
 /*

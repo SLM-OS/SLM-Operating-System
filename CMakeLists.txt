@@ -1387,6 +1387,20 @@ if(ENABLE_BOOT_TESTS)
     )
 endif()
 
+# SLM kernels' registers and shared memory, from the manifest of their cubins.
+# Every platform: the table is pure data and the tests read it.
+set(SLM_KERNELS_GEN "${CMAKE_BINARY_DIR}/generated/slm_kernels_gen.h")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+add_custom_command(
+    OUTPUT  "${SLM_KERNELS_GEN}"
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json" "${SLM_KERNELS_GEN}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
+    VERBATIM)
+target_sources(slmos.elf PRIVATE "${SLM_KERNELS_GEN}")
+target_include_directories(slmos.elf PRIVATE "${CMAKE_BINARY_DIR}/generated")
+
 # `slm gpu golden`: the tiny model and llama.cpp's logits in a production
 # image, to compare the GPU program on hardware (#475). About 790 KB.
 option(SLM_GPU_GOLDEN "Embed the SLM golden fixture for `slm gpu golden`" OFF)
@@ -1578,9 +1592,12 @@ elseif(OPLIB_SASS_FILES)
         COMMAND python3
                 "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
                 --skip-missing
+                --slm-manifest "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 "${OPLIB_BLOB_FINAL}"
         DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 ${OPLIB_SASS_FILES}
         VERBATIM

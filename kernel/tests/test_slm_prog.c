@@ -20,10 +20,10 @@
 #include "../gpu/nvidia/ga10b_chan.h"
 #include "../gpu/nvidia/ga10b_prog.h"
 #include "../gpu/nvidia/ga10b_qmd.h"
-#include "../include/operator_dispatch.h"
 #include "../include/slm_ffi.h"
 #include "../include/slm_prog.h"
 #include "pmm.h"
+#include "slm_kernels_gen.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -286,14 +286,13 @@ static void test_encode_kernels(void)
     struct ga10b_prog_launch l;
     uint8_t a[GA10B_PROG_CBUF_ARGS_MAX];
 
-    /* slm_mm_* (scripts/cuda/slm/slm_mm_q4k.cu): 0x160 x, 0x168 W,
-     * 0x170 out, 0x178 bias, 0x180 K, 0x184 N, 0x188 B, 0x18C flags;
-     * block 32, grid ceil(N / 15). */
+    /* slm_mm_*: offsets checked against the manifest at build time, too. */
     struct slm_prog_op op = {
         .kernel = SLM_PROG_K_MM_Q4K, .rows = 8, .dim = { 1536, 8960 },
         .ptr = { 0x1000, 0x2000, 0x3000, 0x4000 }, .scal = { SLM_PROG_MM_OUT_F16 },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B8, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
     TEST_ASSERT_EQUAL_HEX64(0xA000, l.shader_gpu_va);
     TEST_ASSERT_EQUAL_HEX64(0x1000, arg64(a, 0x00));
     TEST_ASSERT_EQUAL_HEX64(0x2000, arg64(a, 0x08));
@@ -304,83 +303,109 @@ static void test_encode_kernels(void)
     TEST_ASSERT_EQUAL_UINT32(8, arg32(a, 0x28));
     TEST_ASSERT_EQUAL_UINT32(1, arg32(a, 0x2C));
     TEST_ASSERT_EQUAL_UINT32(598, l.grid_x);    /* ceil(8960 / 15) */
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_y);
     TEST_ASSERT_EQUAL_UINT32(32, l.block_x);
-    /* No bias is a null pointer, which the kernel checks. */
-    op.ptr[3] = 0;
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_HEX64(0, arg64(a, 0x18));
-    op.dim[1] = 151936;
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_UINT32(10130, l.grid_x);  /* ceil(151936 / 15) */
-    op.rows = 65;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, 0xA000, &l, a));
-    op.rows = 1;
-    op.ptr[1] = 0;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, 0xA000, &l, a));
+    /* Registers and shared memory come from the manifest. */
+    TEST_ASSERT_TRUE(l.register_count_v > 0u);
+    TEST_ASSERT_EQUAL_UINT32(0, l.smem_size_bytes % 256u);
 
-    /* Registry kernels land at the offsets operator_dispatch.h pins. */
+    /* Past 8 rows the b64 kernel, which needs its shared memory. */
+    op.rows = 9;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B64, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 4096u);
+    op.rows = 65;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+
+    /* SIMT: one block per (row, batch). Any batch. */
+    op.rows = 65;
+    op.scal[1] = SLM_PROG_MM_SIMT;
+    op.kernel = SLM_PROG_K_MM_Q6K;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q6K_SIMT, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(8960, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(65, l.grid_y);
+    /* A null weight pointer never launches; a null bias is how none is said. */
+    op.ptr[3] = 0;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+    op.ptr[1] = 0;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+
+    struct slm_prog_op e = {
+        .kernel = SLM_PROG_K_EMBED_Q6K, .rows = 4, .dim = { 1536 }, .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&e, SLM_SASS_EMBED_Q6K, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x30, arg64(a, 0x10));
+    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(4, arg32(a, 0x1C));
+    TEST_ASSERT_EQUAL_UINT32(4, l.grid_x);
+
     struct slm_prog_op n = {
         .kernel = SLM_PROG_K_RMSNORM, .rows = 4, .dim = { 1536 },
         .ptr = { 0x10, 0x20, 0x30 }, .scal = { 0x358637BDu },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&n, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_HEX64(0x10, arg64(a, RMSNORM_CBUF_OFFSET_X));
-    TEST_ASSERT_EQUAL_HEX64(0x30, arg64(a, RMSNORM_CBUF_OFFSET_OUT));
-    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, RMSNORM_CBUF_OFFSET_N));
-    TEST_ASSERT_EQUAL_HEX32(0x358637BDu, arg32(a, RMSNORM_CBUF_OFFSET_EPS));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&n, SLM_SASS_RMSNORM, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x10, arg64(a, 0x00));
+    TEST_ASSERT_EQUAL_HEX64(0x20, arg64(a, 0x08));
+    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(4, arg32(a, 0x1C));
+    TEST_ASSERT_EQUAL_HEX32(0x358637BDu, arg32(a, 0x20));
     TEST_ASSERT_EQUAL_UINT32(4, l.grid_x);
-    TEST_ASSERT_EQUAL_UINT32(RMSNORM_BLOCK_DIM, l.block_x);
-    TEST_ASSERT_TRUE(l.smem_size_bytes != 0u);
+    /* The kernel covers whole warps only. */
+    n.dim[0] = 1537;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&n, SLM_SASS_RMSNORM, 0xA000, &l, a));
 
     struct slm_prog_op r = {
-        .kernel = SLM_PROG_K_ROPE, .rows = 2, .dim = { 12, 128 }, .ptr = { 0x10, 0x20, 0x30 },
+        .kernel = SLM_PROG_K_ROPE, .rows = 2, .dim = { 12, 128 },
+        .ptr = { 0x10, 0x10, 0x30, 0x40 },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&r, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_HEX64(0x20, arg64(a, ROPE_CBUF_OFFSET_POSITIONS));
-    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, ROPE_CBUF_OFFSET_BATCH));
-    TEST_ASSERT_EQUAL_UINT32(24, l.grid_x);
-    TEST_ASSERT_EQUAL_UINT32(64, l.block_x);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&r, SLM_SASS_ROPE, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x40, arg64(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(12, arg32(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(128, arg32(a, 0x24));
+    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(12, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(2, l.grid_y);
+    r.dim[1] = 100;  /* heads must be whole warps */
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&r, SLM_SASS_ROPE, 0xA000, &l, a));
 
     struct slm_prog_op g = {
-        .kernel = SLM_PROG_K_GQA, .rows = 1, .dim = { 12, 2, 128 },
-        .ptr = { 0x10, 0x20, 0x30, 0x40 }, .scal = { 17 },
+        .kernel = SLM_PROG_K_GQA, .rows = 5, .dim = { 12, 2, 128 },
+        .ptr = { 0x10, 0x20, 0x30, 0x40, 0x50 },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_UINT32(17, arg32(a, GQA_ATTN_CBUF_OFFSET_SEQ_LEN));
-    TEST_ASSERT_EQUAL_UINT32(GQA_ATTN_SMEM_BYTES, l.smem_size_bytes);
-    g.scal[0] = GQA_ATTN_MAX_SEQ_LEN + 1u;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&g, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, SLM_SASS_GQA, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x40, arg64(a, 0x18));
+    TEST_ASSERT_EQUAL_HEX64(0x50, arg64(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(12, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, 0x2C));
+    TEST_ASSERT_EQUAL_UINT32(128, arg32(a, 0x30));
+    TEST_ASSERT_EQUAL_UINT32(5, arg32(a, 0x34));
+    TEST_ASSERT_EQUAL_UINT32(12, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(5, l.grid_y);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 1024u);
+    g.dim[2] = 512;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&g, SLM_SASS_GQA, 0xA000, &l, a));
 
-    /* Batched: base position and rows; blocks per (row, head). */
-    struct slm_prog_op gb = {
-        .kernel = SLM_PROG_K_GQA_BATCH, .rows = 5, .dim = { 12, 2, 128 },
-        .ptr = { 0x10, 0x20, 0x30, 0x40 }, .scal = { 100 },
-    };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&gb, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_UINT32(100, arg32(a, 0x2C));
-    TEST_ASSERT_EQUAL_UINT32(5, arg32(a, 0x30));
-    TEST_ASSERT_EQUAL_UINT32(60, l.grid_x);
-    gb.scal[0] = GQA_ATTN_MAX_SEQ_LEN - 4u;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&gb, 0xA000, &l, a));
-
+    /* Total elements: rows * width, rounded up to whole warps. */
     struct slm_prog_op s = {
         .kernel = SLM_PROG_K_SWIGLU, .rows = 2, .dim = { 8960 }, .ptr = { 0x10, 0x20, 0x30 },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&s, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_UINT32(17920, arg32(a, SWIGLU_CBUF_OFFSET_N));
-    TEST_ASSERT_EQUAL_UINT32(70, l.grid_x);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&s, SLM_SASS_SWIGLU, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(17920, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(560, l.grid_x);
 
     struct slm_prog_op sum = {
-        .kernel = SLM_PROG_K_ADD, .rows = 2, .dim = { 1536 }, .ptr = { 0x10, 0x20, 0x30 },
+        .kernel = SLM_PROG_K_ADD, .rows = 1, .dim = { 1537 }, .ptr = { 0x10, 0x20, 0x30 },
     };
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&sum, 0xA000, &l, a));
-    TEST_ASSERT_EQUAL_UINT32(3072, arg32(a, 0x18));
-    TEST_ASSERT_EQUAL_UINT32(12, l.grid_x);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&sum, SLM_SASS_ADD, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1537, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(49, l.grid_x);
 
     /* A kernel VA of 0 means the lookup failed, and unknown kinds fail. */
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, 0, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, SLM_SASS_ADD, 0, &l, a));
     sum.kernel = SLM_PROG_K_COUNT;
-    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, SLM_SASS_ADD, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_op_sass(&sum));
 }
 
 /* ---- Sessions on a fake channel ---- */
@@ -453,8 +478,8 @@ static struct {
     int evict_rc;
     bool irqs_off;
     bool scattered;
-    bool missing_kernel;
-    uint32_t max_batch_kernels;
+    bool no_q6k;
+    bool no_b64;
 } g_fk;
 
 static int fk_tlb(void)
@@ -463,11 +488,11 @@ static int fk_tlb(void)
     return 0;
 }
 
-static int fk_kernel_va(uint32_t k, uint32_t rows, uint64_t *va)
+static int fk_kernel_va(uint32_t sass, uint64_t *va)
 {
-    if (g_fk.missing_kernel && k == SLM_PROG_K_MM_Q6K) return -1;
-    if (rows > g_fk.max_batch_kernels) return -1;
-    *va = 0x7000000ull + 0x1000u * k;
+    if (g_fk.no_q6k && sass == SLM_SASS_MM_Q6K_HMMA_B8) return -1;
+    if (g_fk.no_b64 && (sass == SLM_SASS_MM_Q4K_HMMA_B64 || sass == SLM_SASS_MM_Q6K_HMMA_B64)) return -1;
+    *va = 0x7000000ull + 0x1000u * sass;
     return 0;
 }
 
@@ -543,7 +568,6 @@ static const struct slm_prog_backend g_fake = {
 static void fake_up(void)
 {
     memset(&g_fk, 0, sizeof(g_fk));
-    g_fk.max_batch_kernels = 64u;
     TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_pm_ops, &g_vm));
     slm_prog_backend_set(&g_fake);
 }
@@ -692,7 +716,7 @@ static void test_session_open_failures(void)
     slm_prog_backend_set(NULL);
     a = open_args(w);
     TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NO_BACKEND, slm_prog_open(&a, &o));
-    TEST_ASSERT_EQUAL_INT(0, slm_prog_kernel_available(SLM_PROG_K_RMSNORM, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_max_batch(false));
     ga10b_vm_destroy(&g_pm_ops, &g_vm);
     pmm_free_pages(w, wp);
 }
@@ -829,20 +853,18 @@ static void test_session_without_weights(void)
 static void test_kernel_lookup_and_batch(void)
 {
     fake_up();
-    TEST_ASSERT_EQUAL_UINT32(64u, slm_prog_max_batch());
-    g_fk.max_batch_kernels = 8u;
-    TEST_ASSERT_EQUAL_UINT32(8u, slm_prog_max_batch());
-    g_fk.max_batch_kernels = 1u;
-    TEST_ASSERT_EQUAL_UINT32(1u, slm_prog_max_batch());
-    g_fk.max_batch_kernels = 64u;
-    g_fk.missing_kernel = true;
-    TEST_ASSERT_EQUAL_UINT32(1u, slm_prog_max_batch());
+    TEST_ASSERT_EQUAL_UINT32(64u, slm_prog_max_batch(false));
+    g_fk.no_b64 = true;
+    TEST_ASSERT_EQUAL_UINT32(8u, slm_prog_max_batch(false));
+    TEST_ASSERT_EQUAL_UINT32(64u, slm_prog_max_batch(true));
+    g_fk.no_b64 = false;
+    g_fk.no_q6k = true;
+    TEST_ASSERT_EQUAL_UINT32(0u, slm_prog_max_batch(false));
 
     /* A missing kernel fails the add with the code Rust reports. */
     uint32_t wp;
     void *w = alloc_weights(&wp);
     TEST_ASSERT_NOT_NULL(w);
-    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
     struct slm_prog_open_args a = open_args(w);
     struct slm_prog_open_out o;
     TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
@@ -906,8 +928,8 @@ static void test_e2e_build(void)
     SlmSessionGpuC g;
     TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
     TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
-    /* Two layers of 15, the final norm, the LM head. */
-    TEST_ASSERT_EQUAL_UINT32(2u * 15u + 2u, g.launches);
+    /* The embedding, two layers of 15, the final norm, the LM head. */
+    TEST_ASSERT_EQUAL_UINT32(1u + 2u * 15u + 2u, g.launches);
     TEST_ASSERT_EQUAL_UINT32(64u, g.max_batch);
     /* Layer: 9 barriers inside, 1 before the next one; final norm and head. */
     TEST_ASSERT_TRUE(g.barriers > 15u);

@@ -114,17 +114,6 @@ fn rmsnorm_hybrid(
     rmsnorm(x, gamma, eps, out)
 }
 
-/// One row of the embedding table as FP16, on the CPU, for the GPU program's
-/// step page. `scratch` must hold the row's decode (hidden, padded to a block).
-pub(crate) fn embedding_lookup_cpu(
-    slm: &LoadedSlm,
-    token_id: u32,
-    out: &mut [u16],
-    scratch: &mut Vec<f32>,
-) -> Option<()> {
-    embedding_lookup_hybrid(false, slm, token_id, out, scratch)
-}
-
 /// W4: EMBEDDING hybrid wrapper. Looks up the token embedding table
 /// in `gpu_tensor_map`; if present and the tier table allows GPU
 /// dispatch, calls `OperatorLibraryBackend::dispatch_embedding`. On

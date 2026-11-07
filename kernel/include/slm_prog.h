@@ -28,37 +28,42 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Keep in step with runtime/src/slm/gpu_program.rs::Kernel. */
+/* Keep in step with runtime/src/slm/gpu_program.rs::Kernel. The ABI is
+ * scripts/cuda/slm/: every array is row-major, batch first. */
 enum slm_prog_kernel {
-    SLM_PROG_K_RMSNORM = 0,  /* ptr x, gamma, out; dim n; scal eps bits */
-    SLM_PROG_K_ROPE,         /* ptr vec, positions, cos_sin; dim heads, head_dim */
+    SLM_PROG_K_RMSNORM = 0,  /* ptr x, gamma (F32), out; dim n; scal[0] eps bits */
+    SLM_PROG_K_ROPE,         /* ptr x, out, table, pos; dim heads, head_dim */
     SLM_PROG_K_SWIGLU,       /* ptr gate, up, out; dim n per row */
-    SLM_PROG_K_GQA,          /* ptr q, k, v, out; dim nq, nkv, hd; scal seq_len. rows=1 */
-    SLM_PROG_K_GQA_BATCH,    /* same, rows>1: row r attends to seq_len + r + 1 positions */
-    SLM_PROG_K_MM_Q4K,       /* ptr x, W, out, bias; dim K, N; scal flags */
+    SLM_PROG_K_GQA,          /* ptr q, k, v, pos, out; dim nq, nkv, hd */
+    SLM_PROG_K_MM_Q4K,       /* ptr x, W, out, bias; dim K, N; scal[0] flags */
     SLM_PROG_K_MM_Q6K,       /* same, Q6_K weights */
     SLM_PROG_K_ADD,          /* ptr a, b, out; dim n per row */
+    SLM_PROG_K_EMBED_Q4K,    /* ptr ids, table, out; dim K */
+    SLM_PROG_K_EMBED_Q6K,    /* same, Q6_K table */
     SLM_PROG_K_COUNT,
 };
 
 /* scal[0] of the matmul kernels (scripts/cuda/slm/slm_common.cuh). */
 #define SLM_PROG_MM_OUT_F16 1u
+/* scal[1] of the matmul kernels: use the SIMT kernel, not the tensor core one. */
+#define SLM_PROG_MM_SIMT 1u
 
 /* One operation, as Rust sends it. Keep in step with gpu_program.rs::ProgOp. */
 struct slm_prog_op {
     uint32_t kernel;        /* enum slm_prog_kernel */
     uint32_t rows;          /* batch rows */
     uint32_t dim[4];
-    uint64_t ptr[4];        /* GPU VAs */
+    uint64_t ptr[5];        /* GPU VAs */
     uint32_t scal[2];
 };
-_Static_assert(sizeof(struct slm_prog_op) == 64, "slm_prog_op is shared with Rust");
+_Static_assert(sizeof(struct slm_prog_op) == 72, "slm_prog_op is shared with Rust");
 
 #define SLM_PROG_SHAPES 2u  /* 0 = decode (one row), 1 = prefill (batch) */
 #define SLM_PROG_MAX_SESSIONS 4
 
 #define SLM_PROG_FLAG_LEAN_QMD 1u
 #define SLM_PROG_FLAG_PROFILE  2u
+#define SLM_PROG_FLAG_SIMT     4u   /* Rust: SIMT matmuls, the bring-up reference */
 
 struct slm_prog_open_args {
     const void *weights;        /* CPU pointer to the file bytes */
@@ -131,11 +136,9 @@ void slm_prog_invalidate(int32_t h, const void *p, size_t len);
  * has been dumped and every later call returns SLM_PROG_ERR_DEAD. */
 int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats);
 
-/* 1 if kernel `k` has SASS in the operator library for `rows` rows. */
-int slm_prog_kernel_available(uint32_t kernel, uint32_t rows);
-
-/* Largest batch the library's kernels support (1, 8 or 64). */
-uint32_t slm_prog_max_batch(void);
+/* Largest batch the library's matmuls support (0: they are missing, 8 or 64).
+ * With `simt`, the SIMT matmuls, which take any batch: 64. */
+uint32_t slm_prog_max_batch(bool simt);
 
 /* Per-launch GPU time when opened with SLM_PROG_FLAG_PROFILE. Returns
  * nanoseconds between launch idx - 1 and idx ending, 0 otherwise. */
@@ -149,10 +152,15 @@ const char *slm_prog_strerror(int err);
 /* ---- Pure: encode one op ---- */
 
 struct ga10b_prog_launch;
+
+/* The kernel (SLM_SASS_*) an op runs: for a matmul that depends on its rows
+ * and scal[1]. Negative for an unknown kernel. */
+int slm_prog_op_sass(const struct slm_prog_op *op);
+
 /* Fill `l` and `args` (at least GA10B_PROG_CBUF_ARGS_MAX bytes; l->args
- * points at it) for `op`, with the kernel at shader_va. Negative if the
+ * points at it) for `op`, run by kernel `sass` at shader_va. Negative if the
  * shape is invalid. */
-int slm_prog_encode(const struct slm_prog_op *op, uint64_t shader_va,
+int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader_va,
                     struct ga10b_prog_launch *l, uint8_t *args);
 
 /* ---- Backend ---- */
@@ -165,8 +173,8 @@ struct slm_prog_backend {
     struct ga10b_vm *vm;
     /* TLB invalidate for vm, serialised against dispatches. */
     int (*tlb_invalidate)(void);
-    /* Kernel VA. Returns 0, or negative when the library has no such kernel. */
-    int (*kernel_va)(uint32_t kernel, uint32_t rows, uint64_t *va);
+    /* VA of kernel SLM_SASS_*. 0, or negative when the library lacks it. */
+    int (*kernel_va)(uint32_t sass, uint64_t *va);
     /* Physical address of a CPU address in the weights, 0 if unmapped. */
     uint64_t (*virt_to_phys)(const void *p);
     /* True when a CPU range is physically contiguous (identity-mapped RAM). */

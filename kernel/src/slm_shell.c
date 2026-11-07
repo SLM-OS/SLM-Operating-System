@@ -1269,12 +1269,12 @@ static void slm_gpu_sessions(void)
     }
 }
 
-/* slm gpu opts <wfi-flush|flush|wfi> [lean] [profile]: applies to the next
+/* slm gpu opts <wfi-flush|flush|wfi> [lean] [profile] [simt]: applies to the next
  * launch. Exists to measure barriers on hardware, not to be tuned by hand. */
 static int slm_gpu_opts(int argc, char *argv[])
 {
     if (argc < 4) {
-        shell_puts("Usage: slm gpu opts <wfi-flush|flush|wfi> [lean] [profile]\r\n");
+        shell_puts("Usage: slm gpu opts <wfi-flush|flush|wfi> [lean] [profile] [simt]\r\n");
         return -1;
     }
     uint32_t barrier;
@@ -1289,6 +1289,7 @@ static int slm_gpu_opts(int argc, char *argv[])
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "lean") == 0) flags |= SLM_PROG_FLAG_LEAN_QMD;
         else if (strcmp(argv[i], "profile") == 0) flags |= SLM_PROG_FLAG_PROFILE;
+        else if (strcmp(argv[i], "simt") == 0) flags |= SLM_PROG_FLAG_SIMT;
         else {
             shell_printf("slm gpu opts: unknown option '%s'\r\n", argv[i]);
             return -1;

@@ -6,10 +6,10 @@
 //! barrier is needed. `kernel/gpu/slm_prog.c` encodes the plan into QMDs,
 //! cbufs and one pushbuffer. A step then only:
 //!
-//! 1. writes the token embeddings and positions into the step page (the
-//!    embedding is one row of `token_embd.weight`, decoded on the CPU);
+//! 1. writes the token ids and positions into the step page, which the
+//!    embedding, RoPE and attention kernels read;
 //! 2. patches the cbufs that depend on the position: K and V output
-//!    pointers, RoPE on K, the attention's sequence length;
+//!    pointers, RoPE on K;
 //! 3. submits one GPFIFO entry and waits without holding a lock;
 //! 4. reads the last position's logits after one L2 evict.
 //!
@@ -25,7 +25,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::slm::forward::embedding_lookup_cpu;
 use crate::slm::gguf::{f16_to_f32, f32_to_f16, GgmlType};
 use crate::slm::registry::LoadedSlm;
 
@@ -37,10 +36,11 @@ pub enum Kernel {
     Rope = 1,
     SwiGlu = 2,
     Gqa = 3,
-    GqaBatch = 4,
-    MmQ4k = 5,
-    MmQ6k = 6,
-    Add = 7,
+    MmQ4k = 4,
+    MmQ6k = 5,
+    Add = 6,
+    EmbedQ4k = 7,
+    EmbedQ6k = 8,
 }
 
 /// Keep in step with `struct slm_prog_op`.
@@ -50,11 +50,11 @@ pub struct ProgOp {
     pub kernel: u32,
     pub rows: u32,
     pub dim: [u32; 4],
-    pub ptr: [u64; 4],
+    pub ptr: [u64; 5],
     pub scal: [u32; 2],
 }
 
-const _: () = assert!(core::mem::size_of::<ProgOp>() == 64);
+const _: () = assert!(core::mem::size_of::<ProgOp>() == 72);
 
 #[repr(C)]
 pub struct OpenArgs {
@@ -95,11 +95,12 @@ pub const ERR_NO_KERNEL: i32 = -5;
 
 pub const FLAG_LEAN_QMD: u32 = 1;
 pub const FLAG_PROFILE: u32 = 2;
+/// Run matmuls on the SIMT kernels (plan decision M6-D4's reference).
+pub const FLAG_SIMT: u32 = 4;
 
 const MM_OUT_F16: u32 = 1;
+const MM_SIMT: u32 = 1;
 const RMS_EPS: f32 = 1e-6;
-/// `GQA_ATTN_MAX_SEQ_LEN`: the kernel's shared-memory logits array.
-const GQA_MAX_SEQ: usize = 4096;
 
 extern "C" {
     fn slm_prog_available() -> i32;
@@ -113,7 +114,7 @@ extern "C" {
     fn slm_prog_clean(h: i32, p: *const u8, len: usize);
     fn slm_prog_invalidate(h: i32, p: *const u8, len: usize);
     fn slm_prog_run(h: i32, shape: u32, stats: *mut RunStats) -> i32;
-    fn slm_prog_max_batch() -> u32;
+    fn slm_prog_max_batch(simt: bool) -> u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,10 @@ pub struct ModelDesc {
     pub dims: Dims,
     pub layers: Vec<LayerDesc>,
     pub lm_head: Matmul,
+    pub embed: Matmul,
+    /// File offsets of the FP32 gammas: per layer attention, feed-forward.
+    pub norms: Vec<(u64, u64)>,
+    pub out_norm: u64,
 }
 
 fn mm_kernel(t: GgmlType) -> Option<Kernel> {
@@ -196,6 +201,10 @@ impl ModelDesc {
         {
             return Err("activation sizes are not multiples of 256");
         }
+        // The other kernels take whole warps of 32.
+        if dims.head_dim > 256 || dims.head_dim % 32 != 0 {
+            return Err("head_dim is not a multiple of 32 up to 256");
+        }
         let base = slm.weight_bytes().ok_or("model has no weight bytes")?.as_ptr() as usize;
         let offset = |bytes: &[u8]| (bytes.as_ptr() as usize - base) as u64;
         let mm = |w: &str, b: Option<&str>| -> Result<Matmul, &'static str> {
@@ -205,7 +214,15 @@ impl ModelDesc {
             let bias_off = b.and_then(|n| slm.tensor_bytes(n)).map(&offset);
             Ok(Matmul { kernel, w_off: offset(bytes), bias_off })
         };
+        let norm = |n: &str| -> Result<u64, &'static str> {
+            let b = slm.tensor_bytes(n).ok_or("a norm weight is missing")?;
+            if b.len() != dims.hidden as usize * 4 {
+                return Err("a norm weight has the wrong size");
+            }
+            Ok(offset(b))
+        };
         let mut layers = Vec::with_capacity(dims.layers as usize);
+        let mut norms = Vec::with_capacity(dims.layers as usize);
         let mut nb = String::new();
         let mut nb2 = String::new();
         for l in 0..dims.layers {
@@ -221,6 +238,13 @@ impl ModelDesc {
                     None => mm(&nb, None),
                 }
             };
+            let mut name = String::new();
+            let _ = write!(name, "blk.{}.attn_norm.weight", l);
+            let attn_norm = norm(&name)?;
+            name.clear();
+            let _ = write!(name, "blk.{}.ffn_norm.weight", l);
+            let ffn_norm = norm(&name)?;
+            norms.push((attn_norm, ffn_norm));
             layers.push(LayerDesc {
                 q: with("attn_q.weight", Some("attn_q.bias"))?,
                 k: with("attn_k.weight", Some("attn_k.bias"))?,
@@ -236,7 +260,19 @@ impl ModelDesc {
         } else {
             "token_embd.weight"
         };
-        Ok(Self { dims, layers, lm_head: mm(lm_name, None)? })
+        let e = mm("token_embd.weight", None)?;
+        let embed = Matmul {
+            kernel: if e.kernel == Kernel::MmQ4k { Kernel::EmbedQ4k } else { Kernel::EmbedQ6k },
+            ..e
+        };
+        Ok(Self {
+            dims,
+            layers,
+            lm_head: mm(lm_name, None)?,
+            embed,
+            norms,
+            out_norm: norm("output_norm.weight")?,
+        })
     }
 }
 
@@ -263,13 +299,12 @@ pub struct Arena {
     pub up: u64,
     pub silu: u64,
     pub m: u64,
-    pub gamma: u64,
     pub rope: u64,
     pub kv_k: u64,
     pub kv_v: u64,
     pub logits: u64,
     pub data_bytes: u64,
-    pub step_embed: u64,
+    pub step_ids: u64,
     pub step_positions: u64,
     pub step_bytes: u32,
     /// Bytes of K (or V) per position per layer.
@@ -308,16 +343,14 @@ impl Arena {
         let up = take(row_inter)?;
         let silu = take(row_inter)?;
         let m = take(row_hidden)?;
-        // Two norms per layer, plus the final one.
-        let gamma = take(layers.checked_mul(2)?.checked_add(1)?.checked_mul(hidden)?.checked_mul(FP16)?)?;
         let rope = take(max_ctx.checked_mul(d.head_dim as u64)?.checked_mul(FP32)?)?;
         let kv_k = take(per_layer.checked_mul(layers)?)?;
         let kv_v = take(per_layer.checked_mul(layers)?)?;
         let logits = take((d.vocab as u64).checked_mul(FP32)?)?;
         let data_bytes = at;
 
-        let step_embed = 0u64;
-        let step_positions = align256(row_hidden);
+        let step_ids = 0u64;
+        let step_positions = align256(batch.checked_mul(4)?);
         let step_bytes = u32::try_from(step_positions.checked_add(align256(batch.checked_mul(4)?))?).ok()?;
         Some(Self {
             x,
@@ -329,13 +362,12 @@ impl Arena {
             up,
             silu,
             m,
-            gamma,
             rope,
             kv_k,
             kv_v,
             logits,
             data_bytes,
-            step_embed,
+            step_ids,
             step_positions,
             step_bytes,
             kv_per_pos: per_pos,
@@ -359,23 +391,11 @@ pub enum Ref {
     DataAtPos { off: u64, stride: u64 },
     /// `base + (rows - 1) * stride`: the last row of a batch.
     DataLastRow { off: u64, stride: u64 },
-    StepLastRow { off: u64, stride: u64 },
-}
-
-/// A cbuf scalar, resolved per step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Scal {
-    Const(u32),
-    /// `pos + rows`: positions the single row attends to.
-    SeqLen,
-    /// `pos`: positions before the batch's first row.
-    SeqBase,
 }
 
 /// Logical buffer ids for dependency tracking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Buf {
-    Embed,
     X,
     Xn,
     Q,
@@ -409,8 +429,8 @@ pub struct PlanOp {
     /// True when the op has one row per batch row; else one row always.
     pub batched: bool,
     pub dim: [u32; 4],
-    pub ptr: [Ref; 4],
-    pub scal: [Scal; 2],
+    pub ptr: [Ref; 5],
+    pub scal: [u32; 2],
     pub reads: Vec<Buf>,
     pub writes: Vec<Buf>,
 }
@@ -424,16 +444,10 @@ impl PlanOp {
             Ref::Step(o) => b.step + o,
             Ref::DataAtPos { off, stride } => b.data + off + (s.pos as u64) * stride,
             Ref::DataLastRow { off, stride } => b.data + off + (s.rows as u64 - 1) * stride,
-            Ref::StepLastRow { off, stride } => b.step + off + (s.rows as u64 - 1) * stride,
         }
     }
 
     pub fn materialize(&self, b: &Bases, s: &StepArgs) -> ProgOp {
-        let scal = |v: Scal| match v {
-            Scal::Const(c) => c,
-            Scal::SeqLen => s.pos + s.rows,
-            Scal::SeqBase => s.pos,
-        };
         ProgOp {
             kernel: self.kernel as u32,
             rows: if self.batched { s.rows } else { 1 },
@@ -443,15 +457,15 @@ impl PlanOp {
                 Self::resolve(self.ptr[1], b, s),
                 Self::resolve(self.ptr[2], b, s),
                 Self::resolve(self.ptr[3], b, s),
+                Self::resolve(self.ptr[4], b, s),
             ],
-            scal: [scal(self.scal[0]), scal(self.scal[1])],
+            scal: self.scal,
         }
     }
 
     /// Does a step have to rewrite this op's cbuf at a fixed batch size?
     pub fn depends_on_pos(&self) -> bool {
         self.ptr.iter().any(|r| matches!(r, Ref::DataAtPos { .. }))
-            || self.scal.iter().any(|v| matches!(v, Scal::SeqLen | Scal::SeqBase))
     }
 }
 
@@ -501,7 +515,11 @@ impl PlanBuilder {
     }
 }
 
-fn mm_op(m: &Matmul, x: Ref, out: Ref, k: u32, n: u32, reads: Buf, writes: Buf, f16: bool, batched: bool) -> PlanOp {
+struct PlanCtx {
+    simt: u32,
+}
+
+fn mm_op(c: &PlanCtx, m: &Matmul, x: Ref, out: Ref, k: u32, n: u32, reads: Buf, writes: Buf, f16: bool, batched: bool) -> PlanOp {
     PlanOp {
         kernel: m.kernel,
         batched,
@@ -511,108 +529,116 @@ fn mm_op(m: &Matmul, x: Ref, out: Ref, k: u32, n: u32, reads: Buf, writes: Buf, 
             Ref::Weights(m.w_off),
             out,
             m.bias_off.map(Ref::Weights).unwrap_or(Ref::Null),
+            Ref::Null,
         ],
-        scal: [Scal::Const(if f16 { MM_OUT_F16 } else { 0 }), Scal::Const(0)],
+        scal: [if f16 { MM_OUT_F16 } else { 0 }, c.simt],
         reads: alloc::vec![reads],
         writes: alloc::vec![writes],
     }
 }
 
-/// Build the launches for one program shape: `batched` covers prefill
-/// (one row per token, causal attention), otherwise a single row.
-pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool) -> Plan {
+/// Build the launches for one program shape: `batched` covers prefill (one
+/// row per token, causal through the kernels' per-row positions), otherwise
+/// a single row. The ops are the same; only the rows differ.
+pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool, simt: bool) -> Plan {
     let dims = &d.dims;
     let hidden = dims.hidden;
     let inter = dims.intermediate;
     let nqhd = dims.n_head * dims.head_dim;
     let nkvhd = dims.n_head_kv * dims.head_dim;
     let eps = RMS_EPS.to_bits();
-    let gamma_row = hidden as u64 * FP16;
+    let hidden_row = hidden as u64 * FP16;
+    let c = PlanCtx { simt: if simt { MM_SIMT } else { 0 } };
     let mut pb = PlanBuilder::new(batched);
 
     let norm = |x: Ref, gamma: u64, out: Ref, reads: Buf, writes: Buf, batched: bool| PlanOp {
         kernel: Kernel::RmsNorm,
         batched,
         dim: [hidden, 0, 0, 0],
-        ptr: [x, Ref::Data(gamma), out, Ref::Null],
-        scal: [Scal::Const(eps), Scal::Const(0)],
+        ptr: [x, Ref::Weights(gamma), out, Ref::Null, Ref::Null],
+        scal: [eps, 0],
         reads: alloc::vec![reads],
         writes: alloc::vec![writes],
     };
-    let add = |x: Ref, y: u64, reads: [Buf; 2]| PlanOp {
+    let add = |y: u64, other: Buf| PlanOp {
         kernel: Kernel::Add,
         batched: true,
         dim: [hidden, 0, 0, 0],
-        ptr: [x, Ref::Data(y), Ref::Data(a.x), Ref::Null],
-        scal: [Scal::Const(0), Scal::Const(0)],
-        reads: reads.to_vec(),
+        ptr: [Ref::Data(a.x), Ref::Data(y), Ref::Data(a.x), Ref::Null, Ref::Null],
+        scal: [0, 0],
+        reads: alloc::vec![Buf::X, other],
         writes: alloc::vec![Buf::X],
     };
+    let pos = Ref::Step(a.step_positions);
     let rope = |vec: Ref, heads: u32, buf: Buf| PlanOp {
         kernel: Kernel::Rope,
         batched: true,
         dim: [heads, dims.head_dim, 0, 0],
-        ptr: [vec, Ref::Step(a.step_positions), Ref::Data(a.rope), Ref::Null],
-        scal: [Scal::Const(0), Scal::Const(0)],
+        ptr: [vec, vec, Ref::Data(a.rope), pos, Ref::Null],
+        scal: [0, 0],
         reads: alloc::vec![buf],
         writes: alloc::vec![buf],
     };
 
+    pb.push(PlanOp {
+        kernel: d.embed.kernel,
+        batched: true,
+        dim: [hidden, 0, 0, 0],
+        ptr: [Ref::Step(a.step_ids), Ref::Weights(d.embed.w_off), Ref::Data(a.x), Ref::Null, Ref::Null],
+        scal: [0, 0],
+        reads: Vec::new(),
+        writes: alloc::vec![Buf::X],
+    });
     for (i, l) in d.layers.iter().enumerate() {
         let li = i as u32;
         let kv_k = a.kv_k + i as u64 * a.kv_per_layer;
         let kv_v = a.kv_v + i as u64 * a.kv_per_layer;
         let k_at = Ref::DataAtPos { off: kv_k, stride: a.kv_per_pos };
         let v_at = Ref::DataAtPos { off: kv_v, stride: a.kv_per_pos };
-        // The first layer reads the embeddings the CPU wrote to the step page.
-        let (x_ref, x_buf) = if i == 0 {
-            (Ref::Step(a.step_embed), Buf::Embed)
-        } else {
-            (Ref::Data(a.x), Buf::X)
-        };
+        let (attn_norm, ffn_norm) = d.norms[i];
 
-        pb.push(norm(x_ref, a.gamma + (2 * i as u64) * gamma_row, Ref::Data(a.xn), x_buf, Buf::Xn, true));
-        pb.push(mm_op(&l.q, Ref::Data(a.xn), Ref::Data(a.q), hidden, nqhd, Buf::Xn, Buf::Q, true, true));
-        pb.push(mm_op(&l.k, Ref::Data(a.xn), k_at, hidden, nkvhd, Buf::Xn, Buf::KvK(li), true, true));
-        pb.push(mm_op(&l.v, Ref::Data(a.xn), v_at, hidden, nkvhd, Buf::Xn, Buf::KvV(li), true, true));
+        pb.push(norm(Ref::Data(a.x), attn_norm, Ref::Data(a.xn), Buf::X, Buf::Xn, true));
+        pb.push(mm_op(&c, &l.q, Ref::Data(a.xn), Ref::Data(a.q), hidden, nqhd, Buf::Xn, Buf::Q, true, true));
+        pb.push(mm_op(&c, &l.k, Ref::Data(a.xn), k_at, hidden, nkvhd, Buf::Xn, Buf::KvK(li), true, true));
+        pb.push(mm_op(&c, &l.v, Ref::Data(a.xn), v_at, hidden, nkvhd, Buf::Xn, Buf::KvV(li), true, true));
         pb.push(rope(Ref::Data(a.q), dims.n_head, Buf::Q));
         pb.push(rope(k_at, dims.n_head_kv, Buf::KvK(li)));
         pb.push(PlanOp {
-            kernel: if batched { Kernel::GqaBatch } else { Kernel::Gqa },
-            batched,
+            kernel: Kernel::Gqa,
+            batched: true,
             dim: [dims.n_head, dims.n_head_kv, dims.head_dim, 0],
-            ptr: [Ref::Data(a.q), Ref::Data(kv_k), Ref::Data(kv_v), Ref::Data(a.attn)],
-            scal: [if batched { Scal::SeqBase } else { Scal::SeqLen }, Scal::Const(0)],
+            ptr: [Ref::Data(a.q), Ref::Data(kv_k), Ref::Data(kv_v), pos, Ref::Data(a.attn)],
+            scal: [0, 0],
             reads: alloc::vec![Buf::Q, Buf::KvK(li), Buf::KvV(li)],
             writes: alloc::vec![Buf::Attn],
         });
-        pb.push(mm_op(&l.o, Ref::Data(a.attn), Ref::Data(a.o), nqhd, hidden, Buf::Attn, Buf::O, true, true));
-        pb.push(add(x_ref, a.o, [x_buf, Buf::O]));
-        pb.push(norm(Ref::Data(a.x), a.gamma + (2 * i as u64 + 1) * gamma_row, Ref::Data(a.xn), Buf::X, Buf::Xn, true));
-        pb.push(mm_op(&l.gate, Ref::Data(a.xn), Ref::Data(a.gate), hidden, inter, Buf::Xn, Buf::Gate, true, true));
-        pb.push(mm_op(&l.up, Ref::Data(a.xn), Ref::Data(a.up), hidden, inter, Buf::Xn, Buf::Up, true, true));
+        pb.push(mm_op(&c, &l.o, Ref::Data(a.attn), Ref::Data(a.o), nqhd, hidden, Buf::Attn, Buf::O, true, true));
+        pb.push(add(a.o, Buf::O));
+        pb.push(norm(Ref::Data(a.x), ffn_norm, Ref::Data(a.xn), Buf::X, Buf::Xn, true));
+        pb.push(mm_op(&c, &l.gate, Ref::Data(a.xn), Ref::Data(a.gate), hidden, inter, Buf::Xn, Buf::Gate, true, true));
+        pb.push(mm_op(&c, &l.up, Ref::Data(a.xn), Ref::Data(a.up), hidden, inter, Buf::Xn, Buf::Up, true, true));
         pb.push(PlanOp {
             kernel: Kernel::SwiGlu,
             batched: true,
             dim: [inter, 0, 0, 0],
-            ptr: [Ref::Data(a.gate), Ref::Data(a.up), Ref::Data(a.silu), Ref::Null],
-            scal: [Scal::Const(0), Scal::Const(0)],
+            ptr: [Ref::Data(a.gate), Ref::Data(a.up), Ref::Data(a.silu), Ref::Null, Ref::Null],
+            scal: [0, 0],
             reads: alloc::vec![Buf::Gate, Buf::Up],
             writes: alloc::vec![Buf::Silu],
         });
-        pb.push(mm_op(&l.down, Ref::Data(a.silu), Ref::Data(a.m), inter, hidden, Buf::Silu, Buf::M, true, true));
-        pb.push(add(Ref::Data(a.x), a.m, [Buf::X, Buf::M]));
+        pb.push(mm_op(&c, &l.down, Ref::Data(a.silu), Ref::Data(a.m), inter, hidden, Buf::Silu, Buf::M, true, true));
+        pb.push(add(a.m, Buf::M));
     }
     // Only the last position produces logits.
     pb.push(norm(
-        Ref::DataLastRow { off: a.x, stride: gamma_row },
-        a.gamma + 2 * dims.layers as u64 * gamma_row,
+        Ref::DataLastRow { off: a.x, stride: hidden_row },
+        d.out_norm,
         Ref::Data(a.xn),
         Buf::X,
         Buf::Xn,
         false,
     ));
-    pb.push(mm_op(&d.lm_head, Ref::Data(a.xn), Ref::Data(a.logits), hidden, dims.vocab, Buf::Xn, Buf::Logits, false, false));
+    pb.push(mm_op(&c, &d.lm_head, Ref::Data(a.xn), Ref::Data(a.logits), hidden, dims.vocab, Buf::Xn, Buf::Logits, false, false));
     pb.plan
 }
 
@@ -659,7 +685,6 @@ pub struct GpuProgram {
     prefill_rows: u32,
     /// Tokens the GPU KV cache holds, for the replay if the GPU fails.
     pub history: Vec<u32>,
-    embed_scratch: Vec<f32>,
     pub steps: u64,
     pub tokens: u64,
     pub gpu_ns_total: u64,
@@ -702,20 +727,21 @@ impl GpuProgram {
         if unsafe { slm_prog_available() } == 0 {
             return Err(BuildError::NoBackend);
         }
-        if max_ctx > GQA_MAX_SEQ {
-            return Err(BuildError::Failed("--ctx above the attention kernel's 4096 positions"));
-        }
         let desc = ModelDesc::from_slm(slm, vocab).map_err(BuildError::Failed)?;
-        // SAFETY: plain FFI query with no arguments.
-        let max_batch = unsafe { slm_prog_max_batch() }.max(1);
+        let mut flags = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
+        let simt = flags & FLAG_SIMT != 0;
+        flags &= FLAG_LEAN_QMD | FLAG_PROFILE;
+        // SAFETY: plain FFI query.
+        let max_batch = unsafe { slm_prog_max_batch(simt) };
+        if max_batch == 0 {
+            return Err(BuildError::Failed(err_message(ERR_NO_KERNEL)));
+        }
         let arena = Arena::compute(&desc.dims, max_ctx as u64, max_batch as u64)
             .ok_or(BuildError::Failed("session arena does not fit"))?;
-        let decode = build_plan(&desc, &arena, false);
-        let prefill = (max_batch > 1).then(|| build_plan(&desc, &arena, true));
+        let decode = build_plan(&desc, &arena, false, simt);
+        let prefill = (max_batch > 1).then(|| build_plan(&desc, &arena, true, simt));
 
         let weights = slm.weight_bytes().ok_or(BuildError::Failed("model has no weight bytes"))?;
-        let mut flags = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
-        flags &= FLAG_LEAN_QMD | FLAG_PROFILE;
         let args = OpenArgs {
             weights: weights.as_ptr(),
             weights_bytes: weights.len() as u64,
@@ -751,7 +777,6 @@ impl GpuProgram {
             max_batch,
             prefill_rows: 0,
             history: Vec::new(),
-            embed_scratch: alloc::vec![0.0f32; desc.dims.hidden as usize + 256],
             steps: 0,
             tokens: 0,
             gpu_ns_total: 0,
@@ -765,7 +790,7 @@ impl GpuProgram {
             data_bytes: arena.data_bytes,
         });
         // From here on, Drop closes the session.
-        p.fill_constants(slm, rope_table).map_err(BuildError::Failed)?;
+        p.fill_constants(rope_table).map_err(BuildError::Failed)?;
         p.emit(SHAPE_DECODE).map_err(|rc| BuildError::Failed(err_message(rc)))?;
         if p.prefill.is_some() {
             p.emit(SHAPE_PREFILL).map_err(|rc| BuildError::Failed(err_message(rc)))?;
@@ -777,38 +802,8 @@ impl GpuProgram {
         self.dims
     }
 
-    /// Gammas as FP16 and the RoPE table, then clean. The layout comes
-    /// from [`Arena`].
-    fn fill_constants(&mut self, slm: &LoadedSlm, rope_table: &[f32]) -> Result<(), &'static str> {
-        let d = self.dims;
-        let hidden = d.hidden as usize;
-        let mut name = String::new();
-        for g in 0..(2 * d.layers as usize + 1) {
-            name.clear();
-            if g == 2 * d.layers as usize {
-                name.push_str("output_norm.weight");
-            } else if g % 2 == 0 {
-                let _ = write!(name, "blk.{}.attn_norm.weight", g / 2);
-            } else {
-                let _ = write!(name, "blk.{}.ffn_norm.weight", g / 2);
-            }
-            let bytes = slm.tensor_bytes(&name).ok_or("a norm weight is missing")?;
-            if bytes.len() != hidden * 4 {
-                return Err("a norm weight has the wrong size");
-            }
-            let off = self.arena.gamma as usize + g * hidden * 2;
-            for (j, c) in bytes.chunks_exact(4).enumerate() {
-                let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                // SAFETY: off..off + hidden * 2 is inside the data region
-                // (Arena::compute sized gamma for 2 * layers + 1 rows).
-                unsafe {
-                    core::ptr::write_unaligned(
-                        (self.data_cpu + off + j * 2) as *mut u16,
-                        f32_to_f16(f),
-                    );
-                }
-            }
-        }
+    /// The RoPE table, then clean. The layout comes from [`Arena`].
+    fn fill_constants(&mut self, rope_table: &[f32]) -> Result<(), &'static str> {
         let rope_bytes = rope_table.len() * 4;
         if (self.arena.kv_k - self.arena.rope) < rope_bytes as u64 {
             return Err("RoPE table does not fit");
@@ -820,11 +815,7 @@ impl GpuProgram {
                 (self.data_cpu + self.arena.rope as usize) as *mut u8,
                 rope_bytes,
             );
-            slm_prog_clean(
-                self.h,
-                (self.data_cpu + self.arena.gamma as usize) as *const u8,
-                (self.arena.kv_k - self.arena.gamma) as usize,
-            );
+            slm_prog_clean(self.h, (self.data_cpu + self.arena.rope as usize) as *const u8, rope_bytes);
         }
         Ok(())
     }
@@ -876,34 +867,36 @@ impl GpuProgram {
         Ok(())
     }
 
-    /// Write `tokens`' embeddings and positions into the step page. Takes
-    /// the model (the caller holds the registry) and touches no GPU state.
-    pub fn stage_tokens(&mut self, slm: &LoadedSlm, tokens: &[u32], pos: usize) -> Option<()> {
-        let hidden = self.dims.hidden as usize;
+    /// Write `tokens` and their positions into the step page.
+    fn stage_tokens(&mut self, tokens: &[u32], pos: usize) -> Result<(), &'static str> {
         if tokens.is_empty() || tokens.len() > self.max_batch as usize {
-            return None;
+            return Err("batch larger than the program");
         }
+        if tokens.iter().any(|&t| t >= self.dims.vocab) {
+            return Err("token id out of range");
+        }
+        let ids = (self.step_cpu + self.arena.step_ids as usize) as *mut u32;
+        let poss = (self.step_cpu + self.arena.step_positions as usize) as *mut u32;
         for (r, &t) in tokens.iter().enumerate() {
-            let dst = self.step_cpu + self.arena.step_embed as usize + r * hidden * 2;
-            // SAFETY: the step page holds max_batch rows of `hidden` FP16s,
-            // aligned to 2, and only this task writes it between steps.
-            let row = unsafe { core::slice::from_raw_parts_mut(dst as *mut u16, hidden) };
-            embedding_lookup_cpu(slm, t, row, &mut self.embed_scratch)?;
-            let pdst = self.step_cpu + self.arena.step_positions as usize + r * 4;
-            // SAFETY: as above, the positions array holds max_batch i32s.
-            unsafe { core::ptr::write_unaligned(pdst as *mut u32, (pos + r) as u32) };
+            // SAFETY: both arrays hold max_batch u32s, aligned to 256, and only
+            // this task writes them between steps.
+            unsafe {
+                ids.add(r).write(t);
+                poss.add(r).write((pos + r) as u32);
+            }
         }
         // SAFETY: the range is the step page.
         unsafe {
             slm_prog_clean(self.h, self.step_cpu as *const u8, self.arena.step_bytes as usize);
         }
-        Some(())
+        Ok(())
     }
 
-    /// One step over the rows [`Self::stage_tokens`] wrote. `out` receives
-    /// the last row's logits. Waits with IRQs on, so no spinlock may be
-    /// held across this call.
+    /// One step: `tokens` at positions `pos..`. `out` receives the last row's
+    /// logits. Waits with IRQs on, so no spinlock may be held across this
+    /// call.
     pub fn run(&mut self, tokens: &[u32], pos: usize, out: &mut Vec<f32>) -> Result<(), &'static str> {
+        self.stage_tokens(tokens, pos)?;
         let rows = tokens.len() as u32;
         let shape = if rows > 1 { SHAPE_PREFILL } else { SHAPE_DECODE };
         if rows > 1 && self.prefill.is_none() {
@@ -1024,7 +1017,7 @@ pub fn smoke(n: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
     if n == 0 {
         return Err("no launches");
     }
-    let data_bytes = (2 * N * 2 + N * 2 + 4096) as u64;
+    let data_bytes = (2 * N * 2 + N * 4 + 4096) as u64;
     let args = OpenArgs {
         weights: core::ptr::null(),
         weights_bytes: 0,
@@ -1052,15 +1045,18 @@ pub fn smoke(n: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
 
     let mut x = alloc::vec![0u16; N];
     let mut gamma = alloc::vec![0u16; N];
+    let mut gamma32 = alloc::vec![0f32; N];
     for i in 0..N {
         x[i] = f32_to_f16(((i % 97) as f32 - 48.0) / 16.0);
-        gamma[i] = f32_to_f16(1.0 + (i % 5) as f32 / 8.0);
+        // Exact in FP16, so the kernel's F32 gamma and the reference agree.
+        gamma32[i] = 1.0 + (i % 5) as f32 / 8.0;
+        gamma[i] = f32_to_f16(gamma32[i]);
     }
     let (a_off, b_off, g_off) = (0usize, N * 2, 2 * N * 2);
     // SAFETY: the data region holds data_bytes, more than these three rows.
     unsafe {
         core::ptr::copy_nonoverlapping(x.as_ptr() as *const u8, (out.data_cpu + a_off) as *mut u8, N * 2);
-        core::ptr::copy_nonoverlapping(gamma.as_ptr() as *const u8, (out.data_cpu + g_off) as *mut u8, N * 2);
+        core::ptr::copy_nonoverlapping(gamma32.as_ptr() as *const u8, (out.data_cpu + g_off) as *mut u8, N * 4);
         slm_prog_clean(h, out.data_cpu as *const u8, data_bytes as usize);
     }
     for i in 0..n {
@@ -1073,6 +1069,7 @@ pub fn smoke(n: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
                 out.data_gpu_va + from as u64,
                 out.data_gpu_va + g_off as u64,
                 out.data_gpu_va + to as u64,
+                0,
                 0,
             ],
             scal: [RMS_EPS.to_bits(), 0],
@@ -1222,11 +1219,6 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
     };
     let mut pos = 0usize;
     if batched && ids.len() >= 2 && (prog.max_batch as usize) >= ids.len() {
-        crate::slm::registry::with_loaded_slm(model as usize, |slm| {
-            prog.stage_tokens(slm, &ids, 0)
-        })
-        .flatten()
-        .ok_or("could not stage the prompt")?;
         prog.run(&ids, 0, &mut out)?;
         pos = ids.len();
         step = ids.len() - 1;
@@ -1240,11 +1232,6 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
             *tokens.get(step - ids.len()).ok_or("record file is short")?
         };
         let toks = [t];
-        crate::slm::registry::with_loaded_slm(model as usize, |slm| {
-            prog.stage_tokens(slm, &toks, pos)
-        })
-        .flatten()
-        .ok_or("could not stage a token")?;
         prog.run(&toks, pos, &mut out)?;
         compare(step, &out, rep);
         pos += 1;
@@ -1265,7 +1252,8 @@ pub mod soft {
     //! pointer, stride, position or barrier-free dependency shows up as a
     //! wrong logit against llama.cpp.
     use super::*;
-    use crate::inference::ops_transformer::{gqa_decode_step, matmul_quant_rows, rmsnorm, swiglu_elementwise};
+    use crate::inference::ops_transformer::{gqa_decode_step, matmul_quant_rows, swiglu_elementwise};
+    use crate::inference::quant::dequantize_row_any;
     use std::sync::Mutex;
 
     pub const W_BASE: u64 = 0x10_0000_0000;
@@ -1286,7 +1274,6 @@ pub mod soft {
     /// Failure injection and backend selection.
     pub struct Knobs {
         pub no_backend: bool,
-        pub missing_kernel: bool,
         pub max_batch: u32,
         /// Fail run number N (0-based) with this rc.
         pub fail_run: Option<(u32, i32)>,
@@ -1296,7 +1283,6 @@ pub mod soft {
     pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
     pub static KNOBS: Mutex<Knobs> = Mutex::new(Knobs {
         no_backend: false,
-        missing_kernel: false,
         max_batch: 64,
         fail_run: None,
         closes: 0,
@@ -1304,7 +1290,7 @@ pub mod soft {
 
     pub fn reset_knobs() {
         let mut k = KNOBS.lock().unwrap();
-        *k = Knobs { no_backend: false, missing_kernel: false, max_batch: 64, fail_run: None, closes: 0 };
+        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0 };
     }
 
     fn at<'a>(s: &'a mut Soft, va: u64) -> *mut u8 {
@@ -1329,24 +1315,51 @@ pub mod soft {
 
     fn exec(s: &mut Soft, op: &ProgOp) {
         let rows = op.rows as usize;
-        let [a, b, c, d] = op.ptr;
+        let [a, b, c, d, e] = op.ptr;
         match op.kernel {
+            x if x == Kernel::EmbedQ4k as u32 || x == Kernel::EmbedQ6k as u32 => {
+                let quant = if x == Kernel::EmbedQ4k as u32 { GgmlType::Q4_K } else { GgmlType::Q6_K };
+                let n = op.dim[0] as usize;
+                let row_bytes = crate::inference::quant::quant_row_bytes(quant, n).expect("row bytes");
+                let (ip, tp, op_) = (at(s, a), at(s, b), at(s, c));
+                let mut f = alloc::vec![0.0f32; n + 256];
+                for r in 0..rows {
+                    let id = unsafe { *(ip as *const u32).add(r) } as usize;
+                    let w = unsafe { core::slice::from_raw_parts(tp.add(id * row_bytes), row_bytes) };
+                    dequantize_row_any(quant, w, &mut f[..n]).expect("dequant");
+                    let o = u16s_mut(unsafe { op_.add(r * n * 2) }, n);
+                    for j in 0..n {
+                        o[j] = f32_to_f16(f[j]);
+                    }
+                }
+            }
             x if x == Kernel::RmsNorm as u32 => {
+                // As slm_rmsnorm: F32 gamma, F32 accumulator.
                 let n = op.dim[0] as usize;
                 let eps = f32::from_bits(op.scal[0]);
                 let (xp, gp, op_) = (at(s, a), at(s, b), at(s, c));
                 for r in 0..rows {
-                    let x = u16s(unsafe { xp.add(r * n * 2) }, n);
-                    let g = u16s(gp, n);
+                    let x = u16s(unsafe { xp.add(r * n * 2) }, n).to_vec();
                     let o = u16s_mut(unsafe { op_.add(r * n * 2) }, n);
-                    rmsnorm(x, g, eps, o).expect("rmsnorm");
+                    let mut acc = 0.0f32;
+                    for &v in &x {
+                        let f = f16_to_f32(v);
+                        acc += f * f;
+                    }
+                    let inv = 1.0 / crate::inference::mathf::sqrtf(acc / n as f32 + eps);
+                    for j in 0..n {
+                        let g = unsafe { core::ptr::read_unaligned((gp as *const f32).add(j)) };
+                        o[j] = f32_to_f16(f16_to_f32(x[j]) * inv * g);
+                    }
                 }
             }
             x if x == Kernel::Rope as u32 => {
+                // ptr: x, out, table, pos (in place in this plan).
                 let heads = op.dim[0] as usize;
                 let hd = op.dim[1] as usize;
                 let half = hd / 2;
-                let (vp, pp, lp) = (at(s, a), at(s, b), at(s, c));
+                assert_eq!(a, b, "the plan runs RoPE in place");
+                let (vp, lp, pp) = (at(s, a), at(s, c), at(s, d));
                 for r in 0..rows {
                     let pos = unsafe { *(pp as *const u32).add(r) } as usize;
                     let lut = unsafe { (lp as *const f32).add(pos * hd) };
@@ -1369,15 +1382,12 @@ pub mod soft {
                 swiglu_elementwise(&mut g, u16s(up, n), n);
                 u16s_mut(op_, n).copy_from_slice(&g);
             }
-            x if x == Kernel::Gqa as u32 || x == Kernel::GqaBatch as u32 => {
+            x if x == Kernel::Gqa as u32 => {
+                // Query row r sees positions 0..=pos[r].
                 let (nq, nkv, hd) = (op.dim[0] as usize, op.dim[1] as usize, op.dim[2] as usize);
-                let (qp, kp, vp, op_) = (at(s, a), at(s, b), at(s, c), at(s, d));
+                let (qp, kp, vp, pp, op_) = (at(s, a), at(s, b), at(s, c), at(s, d), at(s, e));
                 for r in 0..rows {
-                    let seq = if x == Kernel::Gqa as u32 {
-                        op.scal[0] as usize
-                    } else {
-                        op.scal[0] as usize + r + 1
-                    };
+                    let seq = unsafe { *(pp as *const u32).add(r) } as usize + 1;
                     let q = u16s(unsafe { qp.add(r * nq * hd * 2) }, nq * hd);
                     let k = u16s(kp, seq * nkv * hd);
                     let v = u16s(vp, seq * nkv * hd);
@@ -1438,9 +1448,7 @@ pub mod soft {
     #[no_mangle]
     extern "C" fn slm_prog_open(a: *const OpenArgs, out: *mut OpenOut) -> i32 {
         let k = KNOBS.lock().unwrap();
-        if k.missing_kernel {
-            return ERR_NO_KERNEL;
-        }
+        let _ = &k;
         let a = unsafe { &*a };
         let mut st = STATE.lock().unwrap();
         // 8-aligned host memory stands in for PMM pages.
@@ -1530,7 +1538,7 @@ pub mod soft {
         0
     }
     #[no_mangle]
-    extern "C" fn slm_prog_max_batch() -> u32 {
+    extern "C" fn slm_prog_max_batch(_simt: bool) -> u32 {
         KNOBS.lock().unwrap().max_batch
     }
 }
@@ -1562,7 +1570,15 @@ mod tests {
     fn fake_desc(d: Dims) -> ModelDesc {
         let m = Matmul { kernel: Kernel::MmQ4k, w_off: 0x1000, bias_off: None };
         let l = LayerDesc { q: m, k: m, v: m, o: m, gate: m, up: m, down: m };
-        ModelDesc { dims: d, layers: alloc::vec![l; d.layers as usize], lm_head: m }
+        let embed = Matmul { kernel: Kernel::EmbedQ6k, ..m };
+        ModelDesc {
+            dims: d,
+            layers: alloc::vec![l; d.layers as usize],
+            lm_head: m,
+            embed,
+            norms: alloc::vec![(0x2000, 0x3000); d.layers as usize],
+            out_norm: 0x4000,
+        }
     }
 
     #[test]
@@ -1582,7 +1598,7 @@ mod tests {
 
         // A batch only grows activations and the step page.
         let b = Arena::compute(&QWEN_1_5B, 4096, 64).unwrap();
-        assert_eq!(b.step_positions, align256(64 * 1536 * 2));
+        assert_eq!(b.step_positions, align256(64 * 4));
         assert_eq!(b.step_bytes as u64, b.step_positions + align256(64 * 4));
         assert_eq!(b.xn - b.x, 64 * 1536 * 2);
         assert_eq!(b.logits - b.kv_k, a.logits - a.kv_k);
@@ -1597,33 +1613,37 @@ mod tests {
     fn plan_has_expected_shape_and_barriers() {
         let d = fake_desc(QWEN_1_5B);
         let a = Arena::compute(&d.dims, 4096, 1).unwrap();
-        let p = build_plan(&d, &a, false);
-        // 15 launches a layer, then the final norm and the LM head.
-        assert_eq!(p.ops.len(), 28 * 15 + 2);
+        let p = build_plan(&d, &a, false, false);
+        // The embedding, 15 launches a layer, the final norm, the LM head.
+        assert_eq!(p.ops.len(), 1 + 28 * 15 + 2);
         assert!(p.ops.len() <= 1000);
+        assert_eq!(p.ops[0].kernel, Kernel::EmbedQ6k);
         let n_rope = p.ops.iter().filter(|o| o.kernel == Kernel::Rope).count();
         assert_eq!(n_rope, 2 * 28);
-        // Every per-position op, and nothing else, is on the patch list:
-        // K out, V out, RoPE K, attention.
-        assert_eq!(p.patch.len(), 4 * 28);
+        // Exactly the ops that write the KV slot of this position.
+        assert_eq!(p.patch.len(), 3 * 28);
 
-        // Layer 0: norm | Q K V | RoPE RoPE | GQA | O | add | norm |
-        // gate up | swiglu | down | add.
+        // Layer 0, after the embedding: norm | Q K V | RoPE RoPE | GQA | O |
+        // add | norm | gate up | swiglu | down | add.
         let want = [
-            false, true, false, false, true, false, true, true, true, true, true, false, true,
+            true, true, false, false, true, false, true, true, true, true, true, false, true,
             true, true,
         ];
-        assert_eq!(&p.barrier_before[..15], &want);
+        assert_eq!(&p.barrier_before[1..16], &want);
         // The next layer's norm reads x, written by the last add.
-        assert!(p.barrier_before[15]);
-        assert!(!p.barrier_before[16 + 1], "K shares only its input with Q");
-        // The first op of the last two (LM head reads the norm's output).
+        assert!(p.barrier_before[16]);
+        // The LM head reads the final norm's output.
         assert!(p.barrier_before[p.ops.len() - 1]);
         // Only the final norm and LM head are single-row regardless of batch.
         let last = &p.ops[p.ops.len() - 1];
         assert!(!last.batched);
         assert_eq!(last.dim[1], 151936);
-        assert_eq!(last.scal[0], Scal::Const(0), "logits stay FP32");
+        assert_eq!(last.scal[0], 0, "logits stay FP32");
+        // The SIMT reference only changes the matmuls' flag.
+        let s = build_plan(&d, &a, false, true);
+        assert_eq!(s.ops.len(), p.ops.len());
+        assert_eq!(s.ops[2].scal[1], MM_SIMT);
+        assert_eq!(p.ops[2].scal[1], 0);
     }
 
     #[test]
@@ -1632,7 +1652,7 @@ mod tests {
         let d = fake_desc(QWEN_1_5B);
         let a = Arena::compute(&d.dims, 4096, 64).unwrap();
         for batched in [false, true] {
-            let p = build_plan(&d, &a, batched);
+            let p = build_plan(&d, &a, batched, false);
             let mut w: Vec<Buf> = Vec::new();
             let mut r: Vec<Buf> = Vec::new();
             for (op, &bar) in p.ops.iter().zip(p.barrier_before.iter()) {
@@ -1657,28 +1677,37 @@ mod tests {
         let d = fake_desc(QWEN_1_5B);
         let a = Arena::compute(&d.dims, 4096, 64).unwrap();
         let bases = Bases { weights: 0x1000_0000, data: 0x2000_0000, step: 0x3000_0000 };
-        let p = build_plan(&d, &a, false);
+        let p = build_plan(&d, &a, false, false);
         let s = StepArgs { pos: 7, rows: 1 };
+        // ops[0] is the embedding, each layer is 15 after that.
+        let l1 = 1 + 15;
         // Layer 1's K projection writes position 7 of layer 1.
-        let k1 = p.ops[15 + 2].materialize(&bases, &s);
+        let k1 = p.ops[l1 + 2].materialize(&bases, &s);
         assert_eq!(k1.ptr[2], bases.data + a.kv_k + a.kv_per_layer + 7 * a.kv_per_pos);
         assert_eq!(k1.rows, 1);
-        // Layer 1's attention sees all 8 positions from the cache's base.
-        let g1 = p.ops[15 + 6].materialize(&bases, &s);
+        // RoPE on K rotates that slot in place.
+        let r1 = p.ops[l1 + 5].materialize(&bases, &s);
+        assert_eq!(r1.ptr[0], k1.ptr[2]);
+        assert_eq!(r1.ptr[1], k1.ptr[2]);
+        assert_eq!(r1.ptr[3], bases.step + a.step_positions);
+        // Layer 1's attention reads the cache from its base and the positions.
+        let g1 = p.ops[l1 + 6].materialize(&bases, &s);
         assert_eq!(g1.kernel, Kernel::Gqa as u32);
-        assert_eq!(g1.scal[0], 8);
         assert_eq!(g1.ptr[1], bases.data + a.kv_k + a.kv_per_layer);
-        // Layer 0 reads the step page; layer 1 reads x.
-        assert_eq!(p.ops[0].materialize(&bases, &s).ptr[0], bases.step + a.step_embed);
-        assert_eq!(p.ops[15].materialize(&bases, &s).ptr[0], bases.data + a.x);
+        assert_eq!(g1.ptr[3], bases.step + a.step_positions);
+        // Everything reads x; only the embedding reads the ids.
+        assert_eq!(p.ops[0].materialize(&bases, &s).ptr[0], bases.step + a.step_ids);
+        assert_eq!(p.ops[0].materialize(&bases, &s).ptr[2], bases.data + a.x);
+        assert_eq!(p.ops[1].materialize(&bases, &s).ptr[0], bases.data + a.x);
+        // Gammas come straight from the file.
+        assert_eq!(p.ops[1].materialize(&bases, &s).ptr[1], bases.weights + 0x2000);
 
-        // Prefill: the attention takes base position; the final norm takes
-        // the last row of x.
-        let pb = build_plan(&d, &a, true);
+        // Prefill: rows come from the step, and the final norm takes the last
+        // row of x.
+        let pb = build_plan(&d, &a, true, false);
         let s = StepArgs { pos: 3, rows: 5 };
-        let gb = pb.ops[6].materialize(&bases, &s);
-        assert_eq!(gb.kernel, Kernel::GqaBatch as u32);
-        assert_eq!(gb.scal[0], 3);
+        let gb = pb.ops[7].materialize(&bases, &s);
+        assert_eq!(gb.kernel, Kernel::Gqa as u32);
         assert_eq!(gb.rows, 5);
         let fin = pb.ops[pb.ops.len() - 2].materialize(&bases, &s);
         assert_eq!(fin.rows, 1);
@@ -1752,8 +1781,7 @@ mod tests {
         .expect("build")
     }
 
-    fn step_prog(p: &mut GpuProgram, model: u32, toks: &[u32], pos: usize, out: &mut Vec<f32>) {
-        with_loaded_slm(model as usize, |slm| p.stage_tokens(slm, toks, pos)).unwrap().unwrap();
+    fn step_prog(p: &mut GpuProgram, _model: u32, toks: &[u32], pos: usize, out: &mut Vec<f32>) {
         p.run(toks, pos, out).unwrap();
     }
 
@@ -1881,7 +1909,7 @@ mod tests {
         soft::reset_knobs();
         let model = load_tiny();
         // Missing kernel: auto stays on the CPU and says so; on fails.
-        soft::KNOBS.lock().unwrap().missing_kernel = true;
+        soft::KNOBS.lock().unwrap().max_batch = 0;
         let a = open_session(model);
         assert_eq!(crate::rust_slm_session_configure(a, 0, 4), 0);
         assert_eq!(snapshot(a).path, ForwardPath::Cpu);
@@ -1952,8 +1980,9 @@ mod tests {
         reset_for_tests();
     }
 
-    /// The program rounds the attention output to FP16 before the residual,
-    /// where `forward_one` adds it as FP32, so the two aren't bit-identical.
+    /// The program rounds the attention output to FP16 before the residual
+    /// and uses FP32 gammas, where `forward_one` has them the other way
+    /// round, so the two aren't bit-identical.
     /// A wrong plan still can't hide inside the 1.0 tolerance against
     /// llama.cpp: the program must be about as close to llama.cpp as
     /// `forward_one` is, and close to `forward_one` in absolute terms.
@@ -1988,7 +2017,7 @@ mod tests {
         }
         std::eprintln!("max |cpu-llama|={d_cpu} |prog-llama|={d_prog} |prog-cpu|={d_both}");
         assert!(d_prog <= d_cpu * 1.5 + 0.1, "program {d_prog}, forward_one {d_cpu}");
-        assert!(d_both < 0.5, "program and forward_one differ by {d_both}");
+        assert!(d_both < 1.0, "program and forward_one differ by {d_both}");
         drop(p);
         reset_for_tests();
     }

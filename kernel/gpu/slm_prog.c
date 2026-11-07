@@ -16,182 +16,188 @@
 #include "slm_prog.h"
 
 #include "gpu_handoff.h"
-#include "operator_dispatch.h"
+#include "slm_kernels_gen.h"
 #include "nvidia/ga10b_chan.h"
 #include "nvidia/ga10b_prog.h"
 #include "nvidia/ga10b_qmd.h"
 #include "string.h"
 #include "uart.h"
 
-/* ---- Kernel table ----
+/* ---- Kernels ----
  *
- * Existing kernels reuse operator_dispatch.c's cbuf and launch-shape
- * code, so their ABI stays in one place. The #475 kernels come from
- * scripts/cuda/slm/ (C3K); the ABI comments there are the source. */
+ * scripts/cuda/slm/ is the source of the ABI. gen-slm-kernel-table.py checks
+ * its manifest's offsets against the writes below when the kernel is built,
+ * and supplies registers and shared memory. All kernels take block (32,1,1). */
 
-#define MM_BLOCK_X 32u
-#define MM_TILE_ROWS 15u
+struct slm_sass_info {
+    const char *name;
+    uint32_t tier;
+    uint32_t regs;
+    uint32_t smem;
+};
 
-/* slm_mm_*: 0x160 x, 0x168 W, 0x170 out, 0x178 bias, 0x180 K, 0x184 N,
- * 0x188 B, 0x18C flags. */
-static int encode_mm(const struct slm_prog_op *op, struct ga10b_prog_launch *l, uint8_t *args)
+static const struct slm_sass_info g_sass[SLM_SASS_COUNT] = { SLM_SASS_TABLE };
+
+static inline void put64(uint8_t *a, uint32_t cbuf_off, uint64_t v)
 {
-    uint32_t k = op->dim[0], n = op->dim[1], b = op->rows;
-    if (k == 0u || n == 0u || b == 0u || b > 64u || op->ptr[0] == 0u || op->ptr[1] == 0u ||
-        op->ptr[2] == 0u) {
+    memcpy(a + (cbuf_off - GA10B_PROG_CBUF_ARGS_BASE), &v, 8);
+}
+
+static inline void put32(uint8_t *a, uint32_t cbuf_off, uint32_t v)
+{
+    memcpy(a + (cbuf_off - GA10B_PROG_CBUF_ARGS_BASE), &v, 4);
+}
+
+static bool sass_is_simt_mm(uint32_t sass)
+{
+    return sass == SLM_SASS_MM_Q4K_SIMT || sass == SLM_SASS_MM_Q6K_SIMT;
+}
+
+int slm_prog_op_sass(const struct slm_prog_op *op)
+{
+    if (!op) return -1;
+    bool simt = (op->scal[1] & SLM_PROG_MM_SIMT) != 0u;
+    bool b8 = op->rows <= 8u;
+    switch (op->kernel) {
+    case SLM_PROG_K_RMSNORM: return SLM_SASS_RMSNORM;
+    case SLM_PROG_K_ROPE: return SLM_SASS_ROPE;
+    case SLM_PROG_K_SWIGLU: return SLM_SASS_SWIGLU;
+    case SLM_PROG_K_GQA: return SLM_SASS_GQA;
+    case SLM_PROG_K_ADD: return SLM_SASS_ADD;
+    case SLM_PROG_K_EMBED_Q4K: return SLM_SASS_EMBED_Q4K;
+    case SLM_PROG_K_EMBED_Q6K: return SLM_SASS_EMBED_Q6K;
+    case SLM_PROG_K_MM_Q4K:
+        return simt ? SLM_SASS_MM_Q4K_SIMT : b8 ? SLM_SASS_MM_Q4K_HMMA_B8 : SLM_SASS_MM_Q4K_HMMA_B64;
+    case SLM_PROG_K_MM_Q6K:
+        return simt ? SLM_SASS_MM_Q6K_SIMT : b8 ? SLM_SASS_MM_Q6K_HMMA_B8 : SLM_SASS_MM_Q6K_HMMA_B64;
+    default:
         return -1;
     }
-    memcpy(args + 0x00, &op->ptr[0], 8);
-    memcpy(args + 0x08, &op->ptr[1], 8);
-    memcpy(args + 0x10, &op->ptr[2], 8);
-    memcpy(args + 0x18, &op->ptr[3], 8);
-    memcpy(args + 0x20, &k, 4);
-    memcpy(args + 0x24, &n, 4);
-    memcpy(args + 0x28, &b, 4);
-    memcpy(args + 0x2C, &op->scal[0], 4);
-    l->args_len = 0x30;
-    l->grid_x = (n + MM_TILE_ROWS - 1u) / MM_TILE_ROWS;
-    l->grid_y = 1;
-    l->grid_z = 1;
-    l->block_x = MM_BLOCK_X;
-    l->block_y = 1;
-    l->block_z = 1;
-    return 0;
 }
 
-/* slm_add: 0x160 a, 0x168 b, 0x170 out, 0x178 n (total elements). */
-static int encode_add(const struct slm_prog_op *op, struct ga10b_prog_launch *l, uint8_t *args)
+/* Largest element count a launch can cover: grid fields are 32-bit. */
+static bool total_of(const struct slm_prog_op *op, uint32_t *total)
 {
-    uint64_t total = (uint64_t)op->rows * op->dim[0];
-    if (total == 0u || total > 0xFFFFFFFFu || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) return -1;
-    uint32_t n = (uint32_t)total;
-    memcpy(args + 0x00, &op->ptr[0], 8);
-    memcpy(args + 0x08, &op->ptr[1], 8);
-    memcpy(args + 0x10, &op->ptr[2], 8);
-    memcpy(args + 0x18, &n, 4);
-    l->args_len = 0x1C;
-    l->grid_x = (n + 255u) / 256u;
-    l->grid_y = 1;
-    l->grid_z = 1;
-    l->block_x = 256;
-    l->block_y = 1;
-    l->block_z = 1;
-    return 0;
+    uint64_t t = (uint64_t)op->rows * op->dim[0];
+    if (t == 0u || t > 0x7FFFFFFFu) return false;
+    *total = (uint32_t)t;
+    return true;
 }
 
-/* Legacy kernels: build through the registry into a scratch cbuf. */
-static int encode_registry(const struct operator_dispatch_args *a, struct ga10b_prog_launch *l,
-                           uint8_t *args, uint32_t args_len)
-{
-    static_assert(OPERATOR_CBUF0_BASE == GA10B_PROG_CBUF_ARGS_BASE, "same cbuf layout");
-    uint8_t cbuf[OPERATOR_CBUF0_BASE + GA10B_PROG_CBUF_ARGS_MAX];
-    struct operator_launch_shape s;
-    if (operator_dispatch_build_cbuf(cbuf, a) != 0 || operator_dispatch_launch_shape(a, &s) != 0) {
-        return -1;
-    }
-    memcpy(args, cbuf + OPERATOR_CBUF0_BASE, args_len);
-    l->args_len = args_len;
-    l->grid_x = s.grid_x;
-    l->grid_y = s.grid_y;
-    l->grid_z = s.grid_z;
-    l->block_x = s.block_x;
-    l->block_y = s.block_y;
-    l->block_z = s.block_z;
-    l->register_count_v = s.register_count_v;
-    l->smem_size_bytes = s.smem_size_bytes;
-    l->slm_size_bytes = s.slm_size_bytes;
-    l->barrier_count = s.barrier_count;
-    return 0;
-}
-
-int slm_prog_encode(const struct slm_prog_op *op, uint64_t shader_va,
+int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader_va,
                     struct ga10b_prog_launch *l, uint8_t *args)
 {
-    if (!op || !l || !args || shader_va == 0u) return -1;
+    if (!op || !l || !args || shader_va == 0u || sass >= SLM_SASS_COUNT || op->rows == 0u) {
+        return -1;
+    }
     memset(l, 0, sizeof(*l));
     memset(args, 0, GA10B_PROG_CBUF_ARGS_MAX);
     l->shader_gpu_va = shader_va;
     l->args = args;
-    /* Default until the kernel's resource usage says otherwise. */
-    l->register_count_v = 64;
+    l->register_count_v = g_sass[sass].regs;
+    l->smem_size_bytes = g_sass[sass].smem;
+    l->block_x = 32;
+    l->block_y = 1;
+    l->block_z = 1;
+    l->grid_y = 1;
+    l->grid_z = 1;
 
-    struct operator_dispatch_args a;
-    memset(&a, 0, sizeof(a));
+    uint32_t rows = op->rows;
+    uint32_t total = 0;
     switch (op->kernel) {
-    case SLM_PROG_K_RMSNORM:
-        a.op_kind = SLM_GPU_OP_RMSNORM;
-        a.u.rmsnorm.x_gpu_va = op->ptr[0];
-        a.u.rmsnorm.gamma_gpu_va = op->ptr[1];
-        a.u.rmsnorm.out_gpu_va = op->ptr[2];
-        a.u.rmsnorm.n_rows = op->rows;
-        a.u.rmsnorm.n = op->dim[0];
-        a.u.rmsnorm.eps_bits = op->scal[0];
-        return encode_registry(&a, l, args, 0x20);
-    case SLM_PROG_K_ROPE:
-        a.op_kind = SLM_GPU_OP_ROPE;
-        a.u.rope.vec_gpu_va = op->ptr[0];
-        a.u.rope.positions_gpu_va = op->ptr[1];
-        a.u.rope.cos_sin_gpu_va = op->ptr[2];
-        a.u.rope.batch = op->rows;
-        a.u.rope.num_heads = op->dim[0];
-        a.u.rope.head_dim = op->dim[1];
-        return encode_registry(&a, l, args, 0x24);
-    case SLM_PROG_K_SWIGLU: {
-        uint64_t n = (uint64_t)op->rows * op->dim[0];
-        if (n > 0xFFFFFFFFu) return -1;
-        a.op_kind = SLM_GPU_OP_SWIGLU;
-        a.u.swiglu.gate_gpu_va = op->ptr[0];
-        a.u.swiglu.up_gpu_va = op->ptr[1];
-        a.u.swiglu.out_gpu_va = op->ptr[2];
-        a.u.swiglu.n = (uint32_t)n;
-        return encode_registry(&a, l, args, 0x1C);
-    }
-    case SLM_PROG_K_GQA:
-        if (op->rows != 1u || op->scal[0] > GQA_ATTN_MAX_SEQ_LEN) return -1;
-        a.op_kind = SLM_GPU_OP_GQA_ATTN;
-        a.u.gqa_attn.q_gpu_va = op->ptr[0];
-        a.u.gqa_attn.k_gpu_va = op->ptr[1];
-        a.u.gqa_attn.v_gpu_va = op->ptr[2];
-        a.u.gqa_attn.out_gpu_va = op->ptr[3];
-        a.u.gqa_attn.n_head_q = op->dim[0];
-        a.u.gqa_attn.n_head_kv = op->dim[1];
-        a.u.gqa_attn.head_dim = op->dim[2];
-        a.u.gqa_attn.seq_len = op->scal[0];
-        return encode_registry(&a, l, args, 0x30);
-    case SLM_PROG_K_GQA_BATCH: {
-        /* One block per (row, query head); the kernel takes the row from
-         * blockIdx. Same layout as GQA_ATTN with seq_len as the base
-         * position, plus the row count. Not final until scripts/cuda/slm/
-         * has this kernel. */
-        uint32_t rows = op->rows;
-        uint64_t grid = (uint64_t)rows * op->dim[0];
-        if (rows == 0u || rows > 64u || grid == 0u || grid > 0xFFFFFFFFu ||
-            op->scal[0] + rows > GQA_ATTN_MAX_SEQ_LEN) {
+    case SLM_PROG_K_MM_Q4K:
+    case SLM_PROG_K_MM_Q6K: {
+        uint32_t k = op->dim[0], n = op->dim[1];
+        bool simt = sass_is_simt_mm(sass);
+        if (k == 0u || n == 0u || (!simt && rows > 64u) || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) {
             return -1;
         }
-        memcpy(args + 0x00, &op->ptr[0], 8);
-        memcpy(args + 0x08, &op->ptr[1], 8);
-        memcpy(args + 0x10, &op->ptr[2], 8);
-        memcpy(args + 0x18, &op->ptr[3], 8);
-        memcpy(args + 0x20, &op->dim[0], 12);
-        memcpy(args + 0x2C, &op->scal[0], 4);
-        memcpy(args + 0x30, &rows, 4);
-        l->args_len = 0x34;
-        l->grid_x = (uint32_t)grid;
-        l->grid_y = 1;
-        l->grid_z = 1;
-        l->block_x = GQA_ATTN_BLOCK_DIM;
-        l->block_y = 1;
-        l->block_z = 1;
-        l->smem_size_bytes = GQA_ATTN_SMEM_BYTES;
-        l->barrier_count = 1;
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put64(args, 0x178, op->ptr[3]);     /* bias: null when absent */
+        put32(args, 0x180, k);
+        put32(args, 0x184, n);
+        put32(args, 0x188, rows);
+        put32(args, 0x18C, op->scal[0]);
+        l->args_len = 0x30;
+        if (simt) {
+            l->grid_x = n;
+            l->grid_y = rows;
+        } else {
+            l->grid_x = (n + 14u) / 15u;    /* a tile holds 15 weight rows */
+        }
         return 0;
     }
-    case SLM_PROG_K_MM_Q4K:
-    case SLM_PROG_K_MM_Q6K:
-        return encode_mm(op, l, args);
+    case SLM_PROG_K_EMBED_Q4K:
+    case SLM_PROG_K_EMBED_Q6K:
+        if (op->dim[0] == 0u || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) return -1;
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put32(args, 0x178, op->dim[0]);
+        put32(args, 0x17C, rows);
+        l->args_len = 0x20;
+        l->grid_x = rows;
+        return 0;
+    case SLM_PROG_K_RMSNORM:
+        if (op->dim[0] == 0u || (op->dim[0] & 31u) || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) {
+            return -1;
+        }
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put32(args, 0x178, op->dim[0]);
+        put32(args, 0x17C, rows);
+        put32(args, 0x180, op->scal[0]);
+        l->args_len = 0x24;
+        l->grid_x = rows;
+        return 0;
     case SLM_PROG_K_ADD:
-        return encode_add(op, l, args);
+    case SLM_PROG_K_SWIGLU:
+        if (!total_of(op, &total) || !op->ptr[0] || !op->ptr[1] || !op->ptr[2]) return -1;
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put32(args, 0x178, total);
+        l->args_len = 0x1C;
+        l->grid_x = (total + 31u) / 32u;
+        return 0;
+    case SLM_PROG_K_ROPE:
+        if (op->dim[0] == 0u || op->dim[1] == 0u || (op->dim[1] & 31u) ||
+            !op->ptr[0] || !op->ptr[1] || !op->ptr[2] || !op->ptr[3]) {
+            return -1;
+        }
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put64(args, 0x178, op->ptr[3]);
+        put32(args, 0x180, op->dim[0]);
+        put32(args, 0x184, op->dim[1]);
+        put32(args, 0x188, rows);
+        l->args_len = 0x2C;
+        l->grid_x = op->dim[0];
+        l->grid_y = rows;
+        return 0;
+    case SLM_PROG_K_GQA:
+        if (op->dim[0] == 0u || op->dim[1] == 0u || op->dim[2] == 0u || (op->dim[2] & 31u) ||
+            op->dim[2] > 256u || !op->ptr[0] || !op->ptr[1] || !op->ptr[2] || !op->ptr[3] ||
+            !op->ptr[4]) {
+            return -1;
+        }
+        put64(args, 0x160, op->ptr[0]);
+        put64(args, 0x168, op->ptr[1]);
+        put64(args, 0x170, op->ptr[2]);
+        put64(args, 0x178, op->ptr[3]);
+        put64(args, 0x180, op->ptr[4]);
+        put32(args, 0x188, op->dim[0]);
+        put32(args, 0x18C, op->dim[1]);
+        put32(args, 0x190, op->dim[2]);
+        put32(args, 0x194, rows);
+        l->args_len = 0x38;
+        l->grid_x = op->dim[0];
+        l->grid_y = rows;
+        return 0;
     default:
         return -1;
     }
@@ -598,9 +604,11 @@ static struct prog_shape *shape_of(struct prog_session *s, uint32_t shape)
 static int encode_for(const struct prog_session *s, const struct slm_prog_op *op,
                       struct ga10b_prog_launch *l, uint8_t *args)
 {
+    int sass = slm_prog_op_sass(op);
+    if (sass < 0) return SLM_PROG_ERR_ARG;
     uint64_t va = 0;
-    if (s->be->kernel_va(op->kernel, op->rows, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
-    return slm_prog_encode(op, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
+    if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+    return slm_prog_encode(op, (uint32_t)sass, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
 }
 
 int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
@@ -760,25 +768,25 @@ uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)
     return t - prev;
 }
 
-int slm_prog_kernel_available(uint32_t kernel, uint32_t rows)
+static bool sass_present(const struct slm_prog_backend *be, uint32_t sass)
 {
-    const struct slm_prog_backend *be = backend();
     uint64_t va = 0;
-    return be && be->kernel_va(kernel, rows, &va) == 0 && va != 0u;
+    return be->kernel_va(sass, &va) == 0 && va != 0u;
 }
 
-uint32_t slm_prog_max_batch(void)
+uint32_t slm_prog_max_batch(bool simt)
 {
-    if (!slm_prog_kernel_available(SLM_PROG_K_GQA_BATCH, 8u) ||
-        !slm_prog_kernel_available(SLM_PROG_K_MM_Q4K, 8u) ||
-        !slm_prog_kernel_available(SLM_PROG_K_MM_Q6K, 8u)) {
-        return 1u;
+    const struct slm_prog_backend *be = backend();
+    if (!be) return 0u;
+    if (simt) {
+        return sass_present(be, SLM_SASS_MM_Q4K_SIMT) && sass_present(be, SLM_SASS_MM_Q6K_SIMT)
+                   ? 64u : 0u;
     }
-    if (slm_prog_kernel_available(SLM_PROG_K_MM_Q4K, 64u) &&
-        slm_prog_kernel_available(SLM_PROG_K_MM_Q6K, 64u)) {
-        return 64u;
+    if (!sass_present(be, SLM_SASS_MM_Q4K_HMMA_B8) || !sass_present(be, SLM_SASS_MM_Q6K_HMMA_B8)) {
+        return 0u;
     }
-    return 8u;
+    return sass_present(be, SLM_SASS_MM_Q4K_HMMA_B64) && sass_present(be, SLM_SASS_MM_Q6K_HMMA_B64)
+               ? 64u : 8u;
 }
 
 const char *slm_prog_strerror(int err)
@@ -818,30 +826,12 @@ const char *slm_prog_strerror(int err)
 /* TEGRA234_CLK_EMC (dt-bindings/clock/tegra234-clock.h). */
 #define T234_CLK_EMC 31u
 
-/* (op_kind, tier, dtype) in the operator library, from MANIFEST.json. */
-static int jb_kernel_va(uint32_t kernel, uint32_t rows, uint64_t *va)
+/* SLM_OP_KIND_BASE + index, FP16: how build-operator-library.py files them. */
+static int jb_kernel_va(uint32_t sass, uint64_t *va)
 {
-    uint32_t kind = 0, tier = SLM_GPU_TIER_SIMT, dtype = SLM_GPU_DTYPE_FP16;
-    switch (kernel) {
-    case SLM_PROG_K_RMSNORM: kind = SLM_GPU_OP_RMSNORM; break;
-    case SLM_PROG_K_ROPE:    kind = SLM_GPU_OP_ROPE; break;
-    case SLM_PROG_K_SWIGLU:  kind = SLM_GPU_OP_SWIGLU; break;
-    case SLM_PROG_K_GQA:     kind = SLM_GPU_OP_GQA_ATTN; break;
-    case SLM_PROG_K_GQA_BATCH:
-        kind = SLM_GPU_OP_GQA_ATTN;
-        tier = SLM_GPU_TIER_HMMA;
-        break;
-    case SLM_PROG_K_MM_Q4K:
-    case SLM_PROG_K_MM_Q6K:
-        kind = kernel == SLM_PROG_K_MM_Q4K ? SLM_GPU_OP_MM_Q4K : SLM_GPU_OP_MM_Q6K;
-        tier = SLM_GPU_TIER_HMMA;
-        dtype = rows <= 8u ? SLM_GPU_DTYPE_MM_B8 : SLM_GPU_DTYPE_MM_B64;
-        break;
-    case SLM_PROG_K_ADD:     kind = SLM_GPU_OP_ADD_F16; break;
-    default: return -1;
-    }
     size_t size = 0;
-    return oplib_pool_get_sass_gpu_va(kind, tier, dtype, va, &size);
+    return oplib_pool_get_sass_gpu_va(SLM_OP_KIND_BASE + sass, g_sass[sass].tier,
+                                      SLM_GPU_DTYPE_FP16, va, &size);
 }
 
 static int jb_tlb(void)

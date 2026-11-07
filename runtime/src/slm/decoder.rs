@@ -533,17 +533,8 @@ fn step_many(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch
         }
     };
     let pos = session.kv.len;
-    // Embeddings under the registry lock; the wait must be outside it,
-    // since the GPU wait needs IRQs on (runtime/CLAUDE.md, #1093).
-    let staged = registry::with_loaded_slm(session.model_handle as usize, |slm| {
-        prog.stage_tokens(slm, tokens, pos)
-    })
-    .flatten();
-    let result = match staged {
-        Some(()) => prog.run(tokens, pos, out),
-        None => Err("could not stage the token embeddings"),
-    };
-    match result {
+    // No lock held here: the wait needs IRQs on (runtime/CLAUDE.md, #1093).
+    match prog.run(tokens, pos, out) {
         Ok(()) => {
             session.kv.len = pos + tokens.len();
             session.gpu_tokens = session.gpu_tokens.saturating_add(tokens.len() as u64);
