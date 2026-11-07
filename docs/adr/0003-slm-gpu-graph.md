@@ -29,16 +29,26 @@ Execution moves out of `forward_one` for GPU sessions, so two forward paths exis
 
 ## Evidence
 
-Host only so far. `runtime/src/slm/gpu_program.rs` runs the plan on a software GPU built from the CPU kernels: decode and batched prefill match llama.cpp's logits on `tiny_qwen2.gguf` and stay within 1e-2 of `forward_one`, a hung step falls back with the same greedy tokens. `kernel/tests/test_slm_prog.c` covers pushbuffer, QMD, cbuf and arena contents. Decode for Qwen2.5-1.5B is 422 launches with 308 barriers.
+jetson-nano-2, cold UEFI-direct boot, model from `/boot/models`, GPC 1020 MHz. EMC reads 204 MHz after boot; a BPMP floor request at launch raises it to 3199 MHz. Program: 423 launches, 310 barriers, 19 MB arena at `--ctx 512`, weights on 64 KB PTEs.
 
-Pending: `slm gpu smoke` and `slm gpu golden` on jetson-nano-2, then decode tok/s and prefill ms against ADR 0001. This ADR is updated with them.
+| p1, `--gpu on`, 256 tokens | SLM-OS | Bar (ADR 0001, 1020 MHz) |
+|---|---|---|
+| Decode | 21.9 tok/s | 43.0 tok/s |
+| First token, 64-row prefill included | 218 ms | 74 ms prefill |
+
+Output is coherent. It departs from llama.cpp after "...called page tables. The". SLM-OS's CPU path (0.41 tok/s) printed the same 64 tokens as the program, so that departure is not caused by the GPU path.
+
+Per decode step at 64 tokens: GPU 40.9 ms of a 41.4 ms step, evict 52 us; matmuls 31.9 ms, attention 7.7 ms. The gap to the bar is in the kernels. A chain of 32-element RMSNorm launches costs 4.1 us per launch and barrier, against CUDA's 1-3 us: about 1.7 ms per token.
+
+`slm gpu opcheck`: embed, RMSNorm, add, SwiGLU, RoPE, GQA and Q6_K matmuls agree with the CPU reference at 1, 2 and 9 rows. Q4_K matmuls differ by up to 0.25 absolute (rms under 0.02), not yet explained; the CPU reference rounds through Q8_K and the kernel does not. `slm gpu golden` on the tiny model picks the same top token as llama.cpp on 10 of 10 steps (8 of 8 batched), but exceeds the 1.0 logit tolerance (max 1.43), so it reports FAIL.
+
+`nvgpu cold check` passes between prompts on the same channel. Not tested on hardware: a real GPU hang, and a consumer racing a step in flight.
 
 ## Implementation notes
 
-- Layout: `slm launch` builds a plan in Rust; `kernel/gpu/slm_prog.c` encodes it; `kernel/gpu/nvidia/ga10b_prog.c` holds the pure pushbuffer, QMD and cbuf writers.
-- Barriers: WAIT_FOR_IDLE plus INVALIDATE_SHADER_CACHES (DATA, FLUSH_DATA), as NVK does for compute. `slm gpu opts` selects cheaper forms for measurement.
-- Page tables: weights and data use 64 KB PTEs, about 140 KB of tables for 1.1 GB; `slm xload` memory is scattered and maps at 4 KB, which works at about 2.2 MB of tables.
-- KV append needs no op: K and V projections write into the position's cache slot, so `slm_kv_append` isn't launched. Kernels read positions and token ids from the step page, so a decode step patches only K and V output pointers and RoPE on K (84 cbufs for 28 layers).
-- Other consumers: a dispatcher that finds a program in flight releases the dispatch lock until it ends; sched-MLP's try-lock takes its CPU fallback. Any CPU can retire the program from its end semaphore, so a waiter with IRQs masked cannot deadlock on the owner (#1093 class).
-- Failure: a timeout (5 s) dumps GR and MMU fault state once and kills the program. The session rebuilds its KV cache on the CPU by replaying its tokens, since a wedged GPU cannot be read back.
-- Kexec: there is no cold channel, so `--gpu on` is refused and `--gpu auto` keeps the per-op tier path. The per-op path is otherwise unchanged.
+- `slm launch` builds the plan in Rust (`gpu_program.rs`); `slm_prog.c` encodes it; `ga10b_prog.c` writes the pushbuffer, QMDs and cbufs.
+- Barriers are WAIT_FOR_IDLE, with the QMD invalidating shader data. A program ends with WAIT_FOR_IDLE and a flush before its semaphore: the release alone fired about 1 us after launching a kernel still running, which returned half-computed logits.
+- KV append needs no op: K and V projections write the position's cache slot. Kernels read positions and token ids from the step page, so a decode step patches 84 cbufs.
+- A dispatcher that finds a program in flight releases the dispatch lock until it ends; sched-MLP's try-lock takes its CPU fallback. Any CPU can retire the program from its end semaphore, so a waiter with IRQs masked cannot deadlock (#1093 class).
+- A timeout (5 s) dumps GR and MMU fault state once. The session rebuilds its KV cache on the CPU by replaying its tokens.
+- After kexec there is no cold channel: `--gpu on` is refused and `--gpu auto` keeps the per-op path.

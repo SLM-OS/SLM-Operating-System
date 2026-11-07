@@ -115,6 +115,7 @@ extern "C" {
     fn slm_prog_invalidate(h: i32, p: *const u8, len: usize);
     fn slm_prog_run(h: i32, shape: u32, stats: *mut RunStats) -> i32;
     fn slm_prog_max_batch(simt: bool) -> u32;
+    fn slm_prog_profile_ns(h: i32, shape: u32, idx: u32) -> u64;
 }
 
 // ---------------------------------------------------------------------------
@@ -646,9 +647,15 @@ pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool, simt: bool) -> Plan {
 // Options
 // ---------------------------------------------------------------------------
 
-/// Barrier kinds and QMD options under measurement (`slm gpu opts`).
-static OPT_BARRIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static OPT_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// `GA10B_PROG_BARRIER_WFI`.
+const BARRIER_WFI: u32 = 2;
+
+/// Barrier kinds and QMD options (`slm gpu opts` changes them to measure).
+/// WAIT_FOR_IDLE with lean QMDs: the QMD already invalidates shader data, the
+/// extra flush in the barrier added nothing on jetson-nano-2, and lean QMDs
+/// save about 2 us per launch with identical p1 output.
+static OPT_BARRIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(BARRIER_WFI);
+static OPT_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(FLAG_LEAN_QMD);
 
 /// Used by the next `slm launch`. `barrier` is an `enum ga10b_prog_barrier`.
 pub fn set_options(barrier: u32, flags: u32) {
@@ -687,6 +694,13 @@ pub struct GpuProgram {
     pub history: Vec<u32>,
     pub steps: u64,
     pub tokens: u64,
+    decode_steps: u64,
+    decode_gpu_ns: u64,
+    decode_wait_us: u64,
+    decode_evict_us: u64,
+    decode_wall_ns: u64,
+    prefill_last_gpu_ns: u64,
+    prefill_last_rows: u32,
     pub gpu_ns_total: u64,
     pub wait_us_total: u64,
     pub evict_us_total: u64,
@@ -779,6 +793,13 @@ impl GpuProgram {
             history: Vec::new(),
             steps: 0,
             tokens: 0,
+            decode_steps: 0,
+            decode_gpu_ns: 0,
+            decode_wait_us: 0,
+            decode_evict_us: 0,
+            decode_wall_ns: 0,
+            prefill_last_gpu_ns: 0,
+            prefill_last_rows: 0,
             gpu_ns_total: 0,
             wait_us_total: 0,
             evict_us_total: 0,
@@ -896,6 +917,7 @@ impl GpuProgram {
     /// logits. Waits with IRQs on, so no spinlock may be held across this
     /// call.
     pub fn run(&mut self, tokens: &[u32], pos: usize, out: &mut Vec<f32>) -> Result<(), &'static str> {
+        let t0 = crate::kernel_ffi::get_time_ns();
         self.stage_tokens(tokens, pos)?;
         let rows = tokens.len() as u32;
         let shape = if rows > 1 { SHAPE_PREFILL } else { SHAPE_DECODE };
@@ -912,6 +934,17 @@ impl GpuProgram {
             return Err(err_message(rc));
         }
         self.read_logits(out);
+        if shape == SHAPE_DECODE {
+            self.decode_steps += 1;
+            self.decode_gpu_ns = self.decode_gpu_ns.wrapping_add(stats.gpu_ns);
+            self.decode_wait_us = self.decode_wait_us.wrapping_add(stats.wait_us);
+            self.decode_evict_us = self.decode_evict_us.wrapping_add(stats.evict_us);
+            let t = crate::kernel_ffi::get_time_ns().wrapping_sub(t0);
+            self.decode_wall_ns = self.decode_wall_ns.wrapping_add(t);
+        } else {
+            self.prefill_last_gpu_ns = stats.gpu_ns;
+            self.prefill_last_rows = rows;
+        }
         self.steps += 1;
         self.tokens += rows as u64;
         self.gpu_ns_total = self.gpu_ns_total.wrapping_add(stats.gpu_ns);
@@ -968,6 +1001,44 @@ impl GpuProgram {
     #[cfg(test)]
     pub fn data_ptr(&self) -> usize {
         self.data_cpu
+    }
+
+    /// Time per decode step, and with `slm gpu opts ... profile` what each
+    /// kernel took in the last one, to the console.
+    pub fn print_profile(&self) {
+        let n = self.decode_steps.max(1);
+        let mut line = String::new();
+        let _ = write!(
+            line,
+            "[slm] decode {} steps: gpu {} us, wait {} us, evict {} us, whole step {} us; last prefill {} rows gpu {} us\n\0",
+            self.decode_steps,
+            self.decode_gpu_ns / 1000 / n,
+            self.decode_wait_us / n,
+            self.decode_evict_us / n,
+            self.decode_wall_ns / 1000 / n,
+            self.prefill_last_rows,
+            self.prefill_last_gpu_ns / 1000
+        );
+        crate::kernel_ffi::print(line.as_bytes());
+        // One line per (kernel, output width), summed over the layers.
+        let mut rows: Vec<(Kernel, u32, u32, u64)> = Vec::new();
+        for (i, op) in self.decode.ops.iter().enumerate() {
+            // SAFETY: the handle is open; returns 0 unless opened with profile.
+            let ns = unsafe { slm_prog_profile_ns(self.h, SHAPE_DECODE, i as u32) };
+            let w = if matches!(op.kernel, Kernel::MmQ4k | Kernel::MmQ6k) { op.dim[1] } else { 0 };
+            match rows.iter_mut().find(|r| r.0 == op.kernel && r.1 == w) {
+                Some(r) => {
+                    r.2 += 1;
+                    r.3 += ns;
+                }
+                None => rows.push((op.kernel, w, 1, ns)),
+            }
+        }
+        for (k, w, count, ns) in rows {
+            let mut l = String::new();
+            let _ = write!(l, "[slm]   {k:?} N={w}: {count} launches, {} us\n\0", ns / 1000);
+            crate::kernel_ffi::print(l.as_bytes());
+        }
     }
 
     /// Mean GPU time per step, in microseconds.
@@ -1155,6 +1226,8 @@ pub struct GoldenReport {
     pub first_bad_want_milli: i32,
     /// Largest error over all steps, in thousandths.
     pub max_err_milli: i32,
+    /// Steps where the top logit is the token llama.cpp's top logit is.
+    pub argmax_matches: u32,
     pub gpu_us_per_token: u64,
 }
 
@@ -1204,11 +1277,24 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
     rep.first_bad_step = -1;
     rep.first_bad_index = -1;
     rep.max_err_milli = 0;
+    rep.argmax_matches = 0;
     rep.steps = 0;
     let mut max_err = 0.0f32;
     let mut step = 0usize;
     let mut compare = |step: usize, out: &[f32], rep: &mut GoldenReport| {
         let want = &logits[step * n_vocab..(step + 1) * n_vocab];
+        let top = |v: &[f32]| {
+            let mut b = 0usize;
+            for i in 0..v.len() {
+                if v[i] > v[b] {
+                    b = i;
+                }
+            }
+            b
+        };
+        if top(out) == top(want) {
+            rep.argmax_matches += 1;
+        }
         let (mut step_max, mut step_sq) = (0.0f32, 0.0f32);
         for (i, (g, w)) in out.iter().zip(want.iter()).enumerate() {
             let e = (g - w).abs();
@@ -1949,6 +2035,10 @@ pub mod soft {
         0
     }
     #[no_mangle]
+    extern "C" fn slm_prog_profile_ns(_h: i32, _shape: u32, _idx: u32) -> u64 {
+        0
+    }
+    #[no_mangle]
     extern "C" fn slm_prog_max_batch(_simt: bool) -> u32 {
         KNOBS.lock().unwrap().max_batch
     }
@@ -2391,6 +2481,7 @@ mod tests {
         golden_run(model, GREEDY, false, &mut rep).unwrap();
         assert_eq!(rep.first_bad_step, -1, "{rep:?}");
         assert!(rep.steps > 4);
+        assert_eq!(rep.argmax_matches, rep.steps);
         // A plan that's wrong misses by far more than the tolerance.
         assert!(rep.max_err_milli > 0 && rep.max_err_milli < 1000, "max_err {}", rep.max_err_milli);
         let mut rep = GoldenReport::default();

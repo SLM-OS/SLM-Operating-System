@@ -2069,6 +2069,7 @@ typedef struct {
     int32_t first_bad_got_milli;
     int32_t first_bad_want_milli;
     int32_t max_err_milli;
+    uint32_t argmax_matches;    /* steps whose top token is llama.cpp's */
     uint64_t gpu_us_per_token;
 } SlmGpuGoldenReport;
 
@@ -2079,6 +2080,9 @@ typedef struct {
     uint64_t wait_us;
     uint64_t evict_us;
 } SlmGpuSmokeReport;
+
+/* Per-step times and per-kernel GPU time to the console. 0, or -1. */
+extern int32_t rust_slm_session_gpu_profile(uint32_t session_id);
 
 /* Every kernel on `model`'s shapes against its CPU reference. Failed checks, or -1. */
 extern int32_t rust_slm_gpu_opcheck(uint32_t model, uint32_t simt);

@@ -6610,6 +6610,21 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
     0
 }
 
+/// `slm gpu profile <session>`: per-step times and per-kernel GPU time.
+/// Returns 0, or -1 if the session isn't on a program or a prompt holds it.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_gpu_profile(session_id: u32) -> i32 {
+    let r = slm::session::try_with_session(session_id as usize, |s| match s.gpu.as_ref() {
+        Some(p) => {
+            p.print_profile();
+            0
+        }
+        None => -1,
+    });
+    r.unwrap_or(-1)
+}
+
 /// `slm gpu opcheck`: every kernel against its CPU reference. Returns the
 /// number of failed checks, or -1 with the reason on the console.
 #[no_mangle]

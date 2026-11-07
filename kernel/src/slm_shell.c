@@ -1325,17 +1325,18 @@ static int slm_gpu_golden(int argc, char *argv[])
         return -1;
     }
     if (r.first_bad_step < 0) {
-        shell_printf("slm gpu golden: PASS, %lu steps, max error %d.%03d, %llu us/token\r\n",
-                     (unsigned long)r.steps, (int)(r.max_err_milli / 1000),
-                     (int)(r.max_err_milli % 1000),
+        shell_printf("slm gpu golden: PASS, %lu steps, %lu same top token, max error %d.%03d, "
+                     "%llu us/token\r\n",
+                     (unsigned long)r.steps, (unsigned long)r.argmax_matches,
+                     (int)(r.max_err_milli / 1000), (int)(r.max_err_milli % 1000),
                      (unsigned long long)r.gpu_us_per_token);
         return 0;
     }
     shell_printf("slm gpu golden: FAIL at step %d logit %d: got %d milli, want %d milli "
-                 "(%lu steps compared)\r\n",
+                 "(%lu steps, %lu same top token, max error %d milli)\r\n",
                  (int)r.first_bad_step, (int)r.first_bad_index,
                  (int)r.first_bad_got_milli, (int)r.first_bad_want_milli,
-                 (unsigned long)r.steps);
+                 (unsigned long)r.steps, (unsigned long)r.argmax_matches, (int)r.max_err_milli);
     return -1;
 }
 #endif
@@ -1383,6 +1384,14 @@ static int slm_gpu(int argc, char *argv[])
 {
     if (argc >= 3 && strcmp(argv[2], "opts") == 0) return slm_gpu_opts(argc, argv);
     if (argc >= 3 && strcmp(argv[2], "opcheck") == 0) return slm_gpu_opcheck(argc, argv);
+    if (argc >= 4 && strcmp(argv[2], "profile") == 0) {
+        uint32_t sid = 0;
+        if (shell_parse_uint(argv[3], &sid) != 0 || rust_slm_session_gpu_profile(sid) != 0) {
+            shell_puts("slm gpu profile: no session on a GPU program there\r\n");
+            return -1;
+        }
+        return 0;
+    }
     if (argc >= 3 && strcmp(argv[2], "smoke") == 0) return slm_gpu_smoke(argc, argv);
 #ifdef SLM_GPU_GOLDEN
     if (argc >= 3 && strcmp(argv[2], "golden") == 0) return slm_gpu_golden(argc, argv);

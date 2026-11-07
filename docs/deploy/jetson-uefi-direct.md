@@ -501,10 +501,15 @@ place.
 | Command | Expected |
 |---|---|
 | `slm gpu smoke [n]` | `PASS`, n launches, ns per launch. Needs only `rmsnorm_f16_shader.sass`; no model |
-| `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile]` | Barrier and QMD options for the next launch, to measure them |
+| `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
+| `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
+| `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
 | `slm gpu golden [batch]` | `PASS`: every step's logits within tolerance of llama.cpp on the tiny model. Needs a `SLM_GPU_GOLDEN=ON` build (about 790 KB of fixtures) |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
+
+Nothing raises the memory clock after a cold boot: EMC reads 204 MHz until the
+first program opens and asks BPMP for a 3199 MHz floor (`[slm-prog] EMC was ...`).
 
 A step that times out (5 s) prints the GR and MMU fault state once, then
 the session continues on the CPU, replaying its tokens: `[slm] GPU program
