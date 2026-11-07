@@ -688,6 +688,8 @@ set(KERNEL_SOURCES
     # encoder it uses: pure code, memory reached through ga10b_gpu_ops.
     kernel/gpu/nvidia/ga10b_mnist_pipeline.c
     kernel/gpu/nvidia/ga10b_qmd.c
+    kernel/gpu/nvidia/ga10b_prog.c
+    kernel/gpu/slm_prog.c
     # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
     # per-kind handoff store (#1092): pure code. The eviction weights
     # are generated from the Rust model (see the generator block below).
@@ -1181,6 +1183,7 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_acr_blob.c
     kernel/tests/test_ga10b_pmu.c
     kernel/tests/test_ga10b_chan.c
+    kernel/tests/test_slm_prog.c
     kernel/tests/test_ga10b_grctx.c
     kernel/tests/test_ga10b_mnist_pipeline.c
     kernel/tests/test_ga10b_cold.c

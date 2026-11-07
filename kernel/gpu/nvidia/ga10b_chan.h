@@ -105,6 +105,16 @@ static inline uint32_t ga10b_vm_idx_pde1(uint64_t va) { return (uint32_t)((va >>
 static inline uint32_t ga10b_vm_idx_pde0(uint64_t va) { return (uint32_t)((va >> 21) & 0xffu); }
 static inline uint32_t ga10b_vm_idx_pte(uint64_t va)  { return (uint32_t)((va >> 12) & 0x1ffu); }
 
+/* 64 KB big pages: PTE index VA[20:16], a 32-entry 256 B table
+ * (gmmu_ga10b_fusa.c: lo_bit {12, 16}). One 2 MB PDE0 span is either
+ * all small or all big. */
+#define GA10B_BIG_PAGE_SIZE           0x10000u
+#define GA10B_VM_PDE0_SPAN            0x200000u
+#define GA10B_VM_BIG_PTES             32u
+#define GA10B_VM_BIG_TABLE_BYTES      256u
+#define GA10B_VM_BIG_TABLES_PER_PAGE  16u
+static inline uint32_t ga10b_vm_idx_pte_big(uint64_t va) { return (uint32_t)((va >> 16) & 0x1fu); }
+
 /* gmmu_new_* field values (hw_gmmu_ga10b.h). */
 #define GA10B_GMMU_APERTURE_SYS_NCOH  0x6u   /* *_aperture_sys_mem_ncoh_f() */
 #define GA10B_GMMU_VOL                0x8u   /* *_vol_true_f() */
@@ -132,6 +142,19 @@ static inline void ga10b_pde0_small_encode(uint64_t pt_phys, uint32_t w[4])
     w[2] = GA10B_GMMU_APERTURE_SYS_NCOH | GA10B_GMMU_VOL |
            (uint32_t)((a & 0xffffffu) << 8);
     w[3] = (uint32_t)(a >> 24);
+}
+
+/* Dual PDE0, big half only (ga10b_update_gmmu_pde0_locked): the big
+ * address is in 256 B units, w0 = aperture | vol | addr[27:0] << 4,
+ * w1 = addr >> 28, w[2..3] = small half = 0. */
+static inline void ga10b_pde0_big_encode(uint64_t pt_phys, uint32_t w[4])
+{
+    uint64_t a = pt_phys >> 8;
+    w[0] = GA10B_GMMU_APERTURE_SYS_NCOH | GA10B_GMMU_VOL |
+           (uint32_t)((a & 0xfffffffu) << 4);
+    w[1] = (uint32_t)(a >> 28);
+    w[2] = 0;
+    w[3] = 0;
 }
 
 /* Mapping flags. */
@@ -167,6 +190,9 @@ struct ga10b_vm {
     uint64_t user_next;
     uint64_t kernel_next;
     uint32_t table_pages;       /* page-table pages allocated (incl. PDB) */
+    void *big_slab_cpu;         /* page the next big-page tables come from */
+    uint64_t big_slab_phys;
+    uint32_t big_slab_used;     /* tables handed out from that page */
 };
 
 int ga10b_vm_init(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm);
@@ -182,6 +208,15 @@ uint64_t ga10b_vm_reserve(struct ga10b_vm *vm, uint64_t size, uint64_t align,
  * if the GPU may already have walked this VM. */
 int ga10b_vm_map(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
                  uint64_t gpu_va, uint64_t phys, uint64_t size, uint32_t flags);
+/* Map with 64 KB PTEs; gpu_va, phys and size must be 64 KB aligned. No
+ * 2 MB span may mix page sizes: GA10B_CHAN_ERR_VA if a span already has
+ * small PTEs (and ga10b_vm_map refuses a span that has big ones). */
+int ga10b_vm_map_big(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                     uint64_t gpu_va, uint64_t phys, uint64_t size, uint32_t flags);
+/* Clear the PTEs of [gpu_va, gpu_va + size). Tables stay allocated and
+ * the VA stays reserved. Invalidate the TLB before freeing the pages. */
+void ga10b_vm_unmap(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                    uint64_t gpu_va, uint64_t size);
 /* Reserve VA and map a dma buffer in one step. */
 int ga10b_vm_map_dma(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
                      const struct ga10b_dma *d, uint32_t flags, bool kernel,

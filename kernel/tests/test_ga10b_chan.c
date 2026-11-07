@@ -163,6 +163,79 @@ static void test_vm_map_walk(void)
     }
 }
 
+/* 64 KB mappings: encoding from nvgpu's ga10b_update_gmmu_pde0_locked,
+ * walk, exclusivity of a 2 MB span, unmap, and teardown of slab pages. */
+static void test_vm_map_big(void)
+{
+    uint32_t w[4];
+    ga10b_pde0_big_encode(0x1080ad100ull, w);
+    /* aperture ncoh 0x6 | vol 0x8 | (phys >> 8) << 4 */
+    TEST_ASSERT_EQUAL_HEX32((0x1080ad1u << 4) | 0xeu, w[0]);
+    TEST_ASSERT_EQUAL_HEX32(0, w[1]);
+    TEST_ASSERT_EQUAL_HEX32(0, w[2]);
+    TEST_ASSERT_EQUAL_HEX32(0, w[3]);
+    ga10b_pde0_big_encode(0x1234500000100ull, w);       /* above bit 36 */
+    TEST_ASSERT_EQUAL_HEX32(0x0000001eu, w[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x123u, w[1]);
+
+    pool_reset();
+    struct ga10b_vm vm;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_ops, &vm));
+    uint64_t va = 0x40000000ull;      /* 2 MB aligned */
+    uint64_t pa = 0x200000000ull;     /* mapped memory need not be in the pool */
+
+    /* Misalignment is refused for all three values. */
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_VA,
+        ga10b_vm_map_big(&g_ops, &vm, va + 0x1000u, pa, 0x10000u, 0));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_VA,
+        ga10b_vm_map_big(&g_ops, &vm, va, pa + 0x1000u, 0x10000u, 0));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_VA,
+        ga10b_vm_map_big(&g_ops, &vm, va, pa, 0x11000u, 0));
+
+    /* 5 MB across three PDE0 spans: 3 tables from one slab page. */
+    uint32_t before = vm.table_pages;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK,
+        ga10b_vm_map_big(&g_ops, &vm, va, pa, 0x500000u, GA10B_MAP_CACHEABLE | GA10B_MAP_RO));
+    /* PDE2 + PDE1 + PDE0 + one slab page. */
+    TEST_ASSERT_EQUAL_UINT32(before + 4u, vm.table_pages);
+    TEST_ASSERT_EQUAL_UINT32(3u, vm.big_slab_used);
+    TEST_ASSERT_EQUAL_HEX64(pa, ga10b_vm_lookup(&g_ops, &vm, va));
+    TEST_ASSERT_EQUAL_HEX64(pa + 0x1234u, ga10b_vm_lookup(&g_ops, &vm, va + 0x1234u));
+    TEST_ASSERT_EQUAL_HEX64(pa + 0x4fffffu, ga10b_vm_lookup(&g_ops, &vm, va + 0x4fffffu));
+    /* Past the last big PTE, inside the mapped span's table. */
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_ops, &vm, va + 0x500000u));
+
+    /* No 2 MB span holds both page sizes, either way round. */
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_VA,
+        ga10b_vm_map(&g_ops, &vm, va + 0x400000u, POOL_PHYS, 4096u, 0));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK,
+        ga10b_vm_map(&g_ops, &vm, va + 0x600000u, POOL_PHYS, 4096u, 0));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_VA,
+        ga10b_vm_map_big(&g_ops, &vm, va + 0x600000u + 0x10000u, pa, 0x10000u, 0));
+
+    /* Unmap drops only the range; small and big both. */
+    ga10b_vm_unmap(&g_ops, &vm, va + 0x10000u, 0x200000u);
+    TEST_ASSERT_EQUAL_HEX64(pa, ga10b_vm_lookup(&g_ops, &vm, va));
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_ops, &vm, va + 0x10000u));
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_ops, &vm, va + 0x200000u));
+    TEST_ASSERT_EQUAL_HEX64(pa + 0x210000u, ga10b_vm_lookup(&g_ops, &vm, va + 0x210000u));
+    ga10b_vm_unmap(&g_ops, &vm, va + 0x600000u, 4096u);
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_ops, &vm, va + 0x600000u));
+    /* Re-mapping the same VA works. */
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK,
+        ga10b_vm_map_big(&g_ops, &vm, va + 0x10000u, pa, 0x10000u, 0));
+    TEST_ASSERT_EQUAL_HEX64(pa, ga10b_vm_lookup(&g_ops, &vm, va + 0x10000u));
+
+    /* A 17th table starts a second slab page; destroy frees every page once. */
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK,
+        ga10b_vm_map_big(&g_ops, &vm, va + 0x800000u, pa, 16u * 0x200000u, 0));
+    ga10b_vm_destroy(&g_ops, &vm);
+    for (unsigned i = 0; i < POOL_PAGES; i++) {
+        TEST_ASSERT_FALSE(g_used[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT32(g_allocs, g_frees);
+}
+
 static void test_vm_reserve(void)
 {
     struct ga10b_vm vm;
@@ -324,6 +397,7 @@ int test_suite_ga10b_chan(void)
     UnityBegin("test_ga10b_chan.c");
     RUN_TEST(test_gmmu_encoders);
     RUN_TEST(test_vm_map_walk);
+    RUN_TEST(test_vm_map_big);
     RUN_TEST(test_vm_reserve);
     RUN_TEST(test_inst_block_fields);
     RUN_TEST(test_ramfc_helper_channel);

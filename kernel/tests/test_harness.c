@@ -166,6 +166,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_ga10b_acr_blob();
     total_failures += test_suite_ga10b_pmu();
     total_failures += test_suite_ga10b_chan();
+    total_failures += test_suite_slm_prog();
     total_failures += test_suite_ga10b_grctx();
     total_failures += test_suite_ga10b_cold();
     total_failures += test_suite_ga10b_mnist_pipeline();

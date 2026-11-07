@@ -360,7 +360,7 @@ static void test_slm_launch_gpu_on_requires_a_gpu_tier(void)
     int rc = shell_execute("slm launch 0 --ctx 8 --gpu on");
     if (rust_slm_gpu_tier_ops() == 0) {
         TEST_ASSERT_EQUAL_INT(-1, rc);
-        TEST_ASSERT_NOT_NULL(strstr(cap.buf, "no op has a GPU tier"));
+        TEST_ASSERT_NOT_NULL(strstr(cap.buf, "no GPU program"));
     } else {
         TEST_ASSERT_EQUAL_INT(0, rc);
     }

@@ -91,6 +91,12 @@ int bpmp_clk_disable(uint32_t clock_id);
 int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 
 /*
+ * Read a clock's current rate in Hz (CMD_CLK_GET_RATE). Same return
+ * convention as bpmp_clk_enable.
+ */
+int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out);
+
+/*
  * Set a clock's rate in Hz (CMD_CLK_SET_RATE). BPMP rounds to the
  * closest hardware-supported rate; the actual rate it programmed is
  * returned via *actual_hz_out (may be NULL if caller doesn't care).

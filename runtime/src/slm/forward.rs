@@ -91,6 +91,7 @@ use crate::slm::session::Session;
 /// shaped ops (Q4K_DOT, GQA_ATTN) are wired in follow-on PRs.
 #[inline]
 fn rmsnorm_hybrid(
+    gpu: bool,
     x: &[u16],
     gamma: &[u16],
     eps: f32,
@@ -103,12 +104,25 @@ fn rmsnorm_hybrid(
     if n == 0 || gamma.len() != n || out.len() != n {
         return None;
     }
-    if let Ok(()) = OperatorLibraryBackend::dispatch_rmsnorm(
-        x, gamma, out, 1u32, n as u32, eps,
-    ) {
-        return Some(());
+    if gpu {
+        if let Ok(()) = OperatorLibraryBackend::dispatch_rmsnorm(
+            x, gamma, out, 1u32, n as u32, eps,
+        ) {
+            return Some(());
+        }
     }
     rmsnorm(x, gamma, eps, out)
+}
+
+/// One row of the embedding table as FP16, on the CPU, for the GPU program's
+/// step page. `scratch` must hold the row's decode (hidden, padded to a block).
+pub(crate) fn embedding_lookup_cpu(
+    slm: &LoadedSlm,
+    token_id: u32,
+    out: &mut [u16],
+    scratch: &mut Vec<f32>,
+) -> Option<()> {
+    embedding_lookup_hybrid(false, slm, token_id, out, scratch)
 }
 
 /// W4: EMBEDDING hybrid wrapper. Looks up the token embedding table
@@ -125,6 +139,7 @@ fn rmsnorm_hybrid(
 /// the same as `embedding_lookup_any` for the call sites.
 #[inline]
 fn embedding_lookup_hybrid(
+    gpu: bool,
     slm: &LoadedSlm,
     token_id: u32,
     out: &mut [u16],
@@ -136,7 +151,7 @@ fn embedding_lookup_hybrid(
     }
     /* GPU path. The `if let` chain bails to CPU on any miss without
      * rebinding ergonomics. */
-    if let Some(table) = slm.gpu_tensor_map().get("token_embd.weight") {
+    if let Some(table) = slm.gpu_tensor_map().get("token_embd.weight").filter(|_| gpu) {
         if select_tier(OpKind::Embedding) == Tier::Simt {
             /* Need table_row_bytes for the kernel's Q4_K block math
              * — derive from the on-disk tensor descriptor (the
@@ -225,6 +240,7 @@ fn swiglu_elementwise_hybrid(gate: &mut [u16], up: &[u16], n: usize) {
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn gqa_decode_hybrid(
+    gpu: bool,
     q: &[u16],
     k: &[u16],
     v: &[u16],
@@ -237,7 +253,7 @@ fn gqa_decode_hybrid(
 ) -> Option<()> {
     /* GPU path — pre-flight shape checks BEFORE we touch the FFI
      * (avoids the IRQ-off lock cost on the obvious miss cases). */
-    if select_tier(OpKind::GqaAttn) == Tier::Simt {
+    if gpu && select_tier(OpKind::GqaAttn) == Tier::Simt {
         let kv_bytes = seq_len.checked_mul(n_head_kv)?
             .checked_mul(head_dim)?
             .checked_mul(2)?;
@@ -288,6 +304,7 @@ fn gqa_decode_hybrid(
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn matmul_q4k_rows_hybrid(
+    gpu: bool,
     slm: &LoadedSlm,
     weight_name: &str,
     quant_type: GgmlType,
@@ -304,6 +321,7 @@ fn matmul_q4k_rows_hybrid(
         && cols % 256 == 0
         && cols < (1u32 << 31) as usize
         && rows < (1u32 << 31) as usize
+        && gpu
         && select_tier(OpKind::Q4kDot) == Tier::Simt
     {
         if let Some(gref) = slm.gpu_tensor_map().get(weight_name) {
@@ -553,6 +571,9 @@ pub fn forward_one(
     let n_head_kv = arch.head_count_kv as usize;
     let block_count = arch.block_count as usize;
     let vocab_size = session.vocab_size as usize;
+    // `--gpu cpu` and a session the GPU program gave up on keep every op
+    // on this CPU, whatever the shared tier table says.
+    let gpu = session.path == crate::slm::session::ForwardPath::PerOp;
 
     // Sanity: scratch was sized for this arch.
     if scratch.x_fp16.len() != hidden
@@ -602,6 +623,7 @@ pub fn forward_one(
     // GGUF descriptor says.
     // ---------------------------------------------------------------
     embedding_lookup_hybrid(
+        gpu,
         slm,
         token_id,
         &mut scratch.x_fp16,
@@ -618,7 +640,7 @@ pub fn forward_one(
         // -- attention RMSNorm ---------------------------------------
         let attn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_norm.weight")?;
         f32_bytes_into_fp16_slice(attn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
         // -- Q / K / V projections (matmul + optional F32 bias add) --
         //
@@ -702,6 +724,7 @@ pub fn forward_one(
         let k_view = session.kv.k_view_with_pending(layer)?;
         let v_view = session.kv.v_view_with_pending(layer)?;
         gqa_decode_hybrid(
+            gpu,
             &scratch.q_fp16,
             k_view,
             v_view,
@@ -734,6 +757,7 @@ pub fn forward_one(
         let attn_output_name = layer_tensor_name(
             &mut scratch.name_buf, layer, "attn_output.weight")?;
         matmul_q4k_rows_hybrid(
+            gpu,
             slm,
             attn_output_name,
             o_quant,
@@ -758,7 +782,7 @@ pub fn forward_one(
 
         let ffn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_norm.weight")?;
         f32_bytes_into_fp16_slice(ffn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
         // FFN weights mix quant types in K_M tiers — Qwen2.5-1.5B has
         // ffn_gate/ffn_up = Q4_K but ffn_down = Q6_K; SmolLM mixes
@@ -798,7 +822,7 @@ pub fn forward_one(
 
     let out_norm_bytes = slm.tensor_bytes("output_norm.weight")?;
     f32_bytes_into_fp16_slice(out_norm_bytes, &mut scratch.norm_fp16)?;
-    rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+    rmsnorm_hybrid(gpu, &scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
     // Some Qwen2 builds tie `output.weight` to `token_embd.weight`. If
     // a dedicated LM-head tensor is present, use it; otherwise fall

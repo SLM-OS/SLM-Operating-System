@@ -2037,6 +2037,33 @@ extern int32_t rust_slm_session_reset(uint32_t session_id);
  * Returns 0 on success, -1 on a bad argument or session id,
  * SLM_ERR_BUSY while a prompt runs on it.
  */
+/* Returned by rust_slm_session_configure for --gpu on without a program. */
+#define SLM_ERR_GPU_PROGRAM  (-16)
+
+/* Where a session's forward steps run. */
+#define SLM_PATH_PROGRAM 0u
+#define SLM_PATH_PER_OP  1u
+#define SLM_PATH_CPU     2u
+
+typedef struct {
+    uint32_t path;          /* SLM_PATH_* */
+    uint32_t launches;      /* per decode step */
+    uint32_t barriers;
+    uint32_t max_batch;     /* prefill rows per step, 0 off the program */
+    uint32_t weights_big;   /* weights mapped with 64 KB PTEs */
+    uint32_t pad;
+    uint64_t arena_bytes;
+    uint64_t gpu_tokens;    /* tokens run on the program, kept after a fallback */
+    uint64_t cpu_tokens;    /* tokens run by forward_one */
+    uint64_t gpu_us_per_token;
+    char note[96];          /* why the session isn't on the program; may be "" */
+} SlmSessionGpuC;
+
+extern int32_t rust_slm_session_gpu_info(uint32_t session_id, SlmSessionGpuC *out);
+
+/* Barrier kind and flags for the next launch (see kernel/include/slm_prog.h). */
+extern void rust_slm_gpu_set_options(uint32_t barrier, uint32_t flags);
+
 extern int32_t rust_slm_session_configure(uint32_t session_id,
                                           uint32_t gpu_mode,
                                           uint32_t threads);
@@ -2115,5 +2142,15 @@ extern int32_t rust_slm_stop(uint32_t session_id);
  * Returns 0 on success, -1 on NULL pointer / bad session id.
  */
 extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);
+
+/* ---- GPU program submission (#475, Jetson; slm_ffi.c) ----
+ *
+ * The backend half of kernel/gpu/slm_prog.c: everything that touches
+ * the dispatch lock. See g_prog_flight in slm_ffi.c. */
+int slm_gpu_prog_submit(uint64_t gp_entry, const volatile void *end_slot, uint32_t end_payload,
+                        uint32_t timeout_ms);
+void slm_gpu_prog_finished(void);
+int slm_gpu_prog_l2_evict(void);
+void slm_gpu_prog_dump_fault(void);
 
 #endif /* SLM_FFI_H */

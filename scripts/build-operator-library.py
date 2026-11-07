@@ -65,6 +65,9 @@ _OP_KINDS = {
     "MAXPOOL":     11,
     "Q4K_DEQUANT": 12,
     "SIGMOID":     13,
+    "MM_Q4K":      14,
+    "MM_Q6K":      15,
+    "ADD_F16":     16,
 }
 
 # Mirror of SLM_GPU_TIER_* in kernel/include/gpu_handoff.h.
@@ -83,6 +86,8 @@ _DTYPES = {
     "TF32":  4,
     "INT8":  5,
     "Q4K":   6,
+    "MM_B8": 7,
+    "MM_B64": 8,
 }
 
 # Constants from operator_library.h.

@@ -354,6 +354,9 @@ mod test_ffi_stubs {
     }
 
     #[no_mangle]
+    pub extern "C" fn slm_print(_s: *const core::ffi::c_char) {}
+
+    #[no_mangle]
     pub extern "C" fn slm_alloc_pages(count: usize) -> *mut u8 {
         // 4 KB pages → bytes.
         let bytes = count.saturating_mul(4096);
@@ -6405,6 +6408,9 @@ const SLM_SAMPLER_TOP_K_TOP_P: u32 = 4;
 /// Mirrors `SLM_ERR_BUSY` in `kernel/include/slm_ffi.h`.
 #[cfg(feature = "slm")]
 const SLM_ERR_BUSY: i32 = -3;
+/// `--gpu on` and no GPU program could be built. `rust_slm_session_gpu_info`
+/// says why.
+pub const SLM_ERR_GPU_PROGRAM: i32 = -16;
 /// `rust_slm_prompt_ex` flag: tokenize the text as given.
 #[cfg(feature = "slm")]
 pub(crate) const SLM_PROMPT_RAW: u32 = 1;
@@ -6527,15 +6533,89 @@ pub extern "C" fn rust_slm_session_configure(session_id: u32, gpu_mode: u32, thr
     if threads == 0 || threads > slm::session::MAX_THREADS {
         return -1;
     }
-    let result = slm::session::try_with_session(session_id as usize, |s| {
-        s.gpu_mode = mode;
-        s.threads = threads;
-    });
-    match result {
+    // Leased, not under the table lock: building a program allocates and
+    // zeroes the arena and maps the weights, which takes a while.
+    let mut lease = match slm::session::checkout(session_id as usize) {
+        Ok(l) => l,
+        Err(slm::session::SlotError::Busy) => return SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => return -1,
+    };
+    lease.threads = threads;
+    match lease.choose_path(mode) {
         Ok(()) => 0,
-        Err(slm::session::SlotError::Busy) => SLM_ERR_BUSY,
-        Err(slm::session::SlotError::Empty) => -1,
+        Err(_) => SLM_ERR_GPU_PROGRAM,
     }
+}
+
+/// Where a session's forward steps run, for `slm launch` and `slm gpu`.
+/// Keep in step with `SlmSessionGpuC` in slm_ffi.h.
+#[repr(C)]
+#[cfg(feature = "slm")]
+pub struct SlmSessionGpuC {
+    /// 0 program, 1 per-op tier table, 2 CPU.
+    pub path: u32,
+    pub launches: u32,
+    pub barriers: u32,
+    pub max_batch: u32,
+    pub weights_big: u32,
+    pub pad: u32,
+    pub arena_bytes: u64,
+    pub gpu_tokens: u64,
+    pub cpu_tokens: u64,
+    pub gpu_us_per_token: u64,
+    /// NUL-terminated reason the session isn't on the program; may be empty.
+    pub note: [u8; 96],
+}
+
+/// Fill `*out` for `session_id`. Works while a prompt runs, with values as
+/// of its start. Returns 0, or -1 on a null pointer or unknown session.
+///
+/// # Safety
+/// `out` must point to writable memory of `sizeof(SlmSessionGpuC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut SlmSessionGpuC) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let snap = match slm::session::snapshot(session_id as usize) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut note = [0u8; 96];
+    if let Some(n) = snap.gpu_note {
+        let len = n.len().min(note.len() - 1);
+        note[..len].copy_from_slice(&n.as_bytes()[..len]);
+    }
+    // SAFETY: caller's contract, `out` is writable.
+    unsafe {
+        *out = SlmSessionGpuC {
+            path: match snap.path {
+                slm::session::ForwardPath::Program => 0,
+                slm::session::ForwardPath::PerOp => 1,
+                slm::session::ForwardPath::Cpu => 2,
+            },
+            launches: snap.launches,
+            barriers: snap.barriers,
+            max_batch: snap.max_batch,
+            weights_big: snap.weights_big as u32,
+            pad: 0,
+            arena_bytes: snap.arena_bytes,
+            gpu_tokens: snap.gpu_tokens,
+            cpu_tokens: snap.cpu_tokens,
+            gpu_us_per_token: snap.gpu_us_per_token,
+            note,
+        };
+    }
+    0
+}
+
+/// Barrier kind and QMD flags for the next `slm launch`, for measuring them
+/// on hardware. See `enum ga10b_prog_barrier` and `SLM_PROG_FLAG_*`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_set_options(barrier: u32, flags: u32) {
+    slm::gpu_program::set_options(barrier, flags);
 }
 
 /// 1 if a prompt is running on this session, 0 if not, -1 on a bad id.
@@ -6572,7 +6652,7 @@ pub unsafe extern "C" fn rust_slm_session_info(session_id: u32, out: *mut SlmSes
         Some(s) => s,
         None => return -1,
     };
-    let cpu_only = snap.gpu_mode == slm::session::GpuMode::Cpu;
+    let per_op = snap.path == slm::session::ForwardPath::PerOp;
     let gpu_tensors = slm::registry::with_loaded_slm(snap.model_handle as usize, |m| {
         m.gpu_tensor_map().len() as u32
     })
@@ -6582,7 +6662,7 @@ pub unsafe extern "C" fn rust_slm_session_info(session_id: u32, out: *mut SlmSes
         *out = SlmSessionInfoC {
             gpu_mode: snap.gpu_mode as u32,
             threads: snap.threads,
-            gpu_ops: if cpu_only { 0 } else { slm::decoder::gpu_tier_ops() },
+            gpu_ops: if per_op { slm::decoder::gpu_tier_ops() } else { 0 },
             gpu_tensors,
             max_ctx: snap.max_ctx as u32,
             kv_len: snap.kv_len as u32,

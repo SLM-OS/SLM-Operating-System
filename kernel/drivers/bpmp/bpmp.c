@@ -162,6 +162,31 @@ struct mrq_clk_set_rate_response {
     int64_t rate;
 } __attribute__((packed));
 
+int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out)
+{
+    if (!g_bpmp_initialised) {
+        return -1;
+    }
+    struct mrq_clk_set_rate_request req = {
+        .cmd_and_id = MRQ_CLK_CMD_AND_ID(CMD_CLK_GET_RATE, clock_id),
+    };
+    struct mrq_clk_set_rate_response resp = { .rate = 0 };
+    int32_t err = 0;
+    /* CMD_CLK_GET_RATE takes no payload beyond cmd_and_id. */
+    int rc = mrq_send(MRQ_CLK, &req, sizeof(req.cmd_and_id),
+                      &resp, sizeof(resp), &err);
+    if (rc != 0) {
+        return rc;
+    }
+    if (err != 0) {
+        return (int)err;
+    }
+    if (hz_out) {
+        *hz_out = (uint64_t)resp.rate;
+    }
+    return 0;
+}
+
 int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
                       uint64_t *actual_hz_out)
 {
@@ -346,6 +371,7 @@ int  bpmp_clk_enable(uint32_t id)            { (void)id; return 0; }
 int  bpmp_clk_disable(uint32_t id)           { (void)id; return 0; }
 int  bpmp_clk_is_enabled(uint32_t id, int *out) { (void)id; if (out) *out = 0; return 0; }
 int  bpmp_clk_set_rate(uint32_t id, uint64_t rate, uint64_t *out) { (void)id; (void)rate; if (out) *out = 0; return 0; }
+int  bpmp_clk_get_rate(uint32_t id, uint64_t *out) { (void)id; if (out) *out = 0; return -1; }
 int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
 int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en; return 0; }
