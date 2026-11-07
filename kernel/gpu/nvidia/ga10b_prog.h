@@ -35,6 +35,16 @@
  * The start slot uses FLUSH_DISABLE, so it fires as soon as the host
  * reaches it and separates "channel never ran" from "kernel hung" on a
  * timeout, as the v7 path's pre-launch semaphore does (#838).
+ *
+ * Marks (GA10B_PROG_F_MARKS, `slm stats --profile`). The pushbuffer is
+ * written twice, into two runs of the same region, sharing QMDs and cbufs:
+ * the plain run and a copy with a timestamp after chosen barriers. Choosing
+ * between them is one GPFIFO entry, so a plain step runs exactly the commands
+ * it would without marks, and profiling can start between two tokens. A mark
+ * follows a WAIT_FOR_IDLE, so its release can't overtake launched work, and
+ * it uses FLUSH_DISABLE, so it adds no L2 flush. GA10B_PROG_F_PROFILE stays
+ * the heavier per-launch tool: it drains after every launch, which changes
+ * what it measures.
  */
 #ifndef GPU_NVIDIA_GA10B_PROG_H
 #define GPU_NVIDIA_GA10B_PROG_H
@@ -54,6 +64,7 @@
 #define GA10B_PROG_PAYLOAD_START 0x51A47001u
 #define GA10B_PROG_PAYLOAD_END   0x51A4700Eu
 #define GA10B_PROG_PAYLOAD_OP    0x51A47002u
+#define GA10B_PROG_PAYLOAD_MARK  0x51A47003u
 
 enum ga10b_prog_barrier {
     GA10B_PROG_BARRIER_WFI_FLUSH = 0,  /* WAIT_FOR_IDLE + flush/invalidate data */
@@ -66,6 +77,7 @@ enum ga10b_prog_barrier {
 #define GA10B_PROG_F_LEAN_QMD  (1u << 0)  /* no per-launch icache/texture/const
                                              invalidate, no CWD SYSMEMBAR */
 #define GA10B_PROG_F_PROFILE   (1u << 1)  /* drained timestamp after each launch */
+#define GA10B_PROG_F_MARKS     (1u << 2)  /* second pushbuffer with marks */
 
 /* One region of GPU-visible memory. */
 struct ga10b_prog_mem {
@@ -92,6 +104,9 @@ struct ga10b_prog {
     uint32_t flags;
     enum ga10b_prog_barrier barrier;
     uint32_t pb_dwords;
+    uint32_t marks_base;    /* dwords: where the marked copy starts in pb */
+    uint32_t marks_dwords;
+    uint32_t n_marks;
     uint32_t n_launches;
     uint32_t n_barriers;
     bool finished;
@@ -127,20 +142,36 @@ int ga10b_prog_update_launch(struct ga10b_prog *p, uint32_t idx,
  * after it starts. */
 int ga10b_prog_add_barrier(struct ga10b_prog *p);
 
+/* Append a timestamp to the marked copy only. Call it right after a barrier.
+ * Returns the mark's index, or a negative error. */
+int ga10b_prog_add_mark(struct ga10b_prog *p);
+
 /* Append the end semaphore. Nothing can be added after this. */
 int ga10b_prog_finish(struct ga10b_prog *p);
 
 /* Ampere GPFIFO entry for the whole pushbuffer. */
 uint64_t ga10b_prog_gp_entry(const struct ga10b_prog *p);
+/* The same for the marked copy. 0 without GA10B_PROG_F_MARKS. */
+uint64_t ga10b_prog_gp_entry_marked(const struct ga10b_prog *p);
 
 /* CPU pointer to a launch's cbuf args, or NULL if out of range. */
 uint8_t *ga10b_prog_cbuf_args(const struct ga10b_prog *p, uint32_t idx);
 /* CPU pointer to a launch's QMD, or NULL if out of range. */
 uint32_t *ga10b_prog_qmd(const struct ga10b_prog *p, uint32_t idx);
 
-/* Zero every semaphore slot. Clean them before submitting. */
+/* Zero the start, end and per-launch slots. Clean them before submitting.
+ * Marks live after those and are armed apart, so a plain step doesn't pay
+ * for them. */
 void ga10b_prog_sema_arm(const struct ga10b_prog *p);
 uint32_t ga10b_prog_sema_bytes(const struct ga10b_prog *p);
+/* Slot of mark 0, and the bytes the finished program's marks use. */
+uint32_t ga10b_prog_mark_slot0(const struct ga10b_prog *p);
+uint32_t ga10b_prog_marks_bytes(const struct ga10b_prog *p);
+/* Fill `ns` with the time up to each mark and from the last mark to the end
+ * semaphore: n_marks + 1 values. A mark that didn't fire or a clock that went
+ * backwards gives 0 for the intervals around it, not a huge number. Invalidate
+ * the marks first. Returns the count written, 0 if `cap` is too small. */
+uint32_t ga10b_prog_marks_ns(const struct ga10b_prog *p, uint64_t *ns, uint32_t cap);
 
 /* Read a slot's payload and timestamp (invalidate the range first). */
 static inline uint32_t ga10b_prog_sema_payload(const struct ga10b_prog *p, uint32_t slot)

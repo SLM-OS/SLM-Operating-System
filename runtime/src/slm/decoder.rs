@@ -200,6 +200,7 @@ pub fn run_prompt(
         session.state = SessionState::Open;
         session.last_stop_reason = StopReason::EmptyPrompt;
         session.prompts_completed = session.prompts_completed.saturating_add(1);
+        session.telemetry.prompt_end(StopReason::EmptyPrompt as u32, session.kv.len);
         return Some(DecodeStats {
             prefill_tokens: 0,
             decode_tokens: 0,
@@ -215,12 +216,16 @@ pub fn run_prompt(
     //    the closure, so everything the loop needs is copied out.
     let tokenized = registry::with_loaded_slm(session.model_handle as usize, |slm| {
         let tk = slm.tokenizer()?;
+        let oov_before = tk.oov_pieces();
+        let ids = build_prompt_ids(session, prompt_text, cfg.mode, tk);
         Some((
-            build_prompt_ids(session, prompt_text, cfg.mode, tk),
+            ids,
             cfg.stop_tokens.unwrap_or_else(|| StopTokens::from_tokenizer(tk)),
+            tk.oov_pieces().wrapping_sub(oov_before),
+            slm.weight_bytes().map_or(0, |w| w.len() as u64),
         ))
     });
-    let (prompt_ids, stop_tokens) = match tokenized {
+    let (prompt_ids, stop_tokens, oov, weights_bytes) = match tokenized {
         Some(Some(t)) => t,
         // Missing handle / no tokenizer — the session is still reusable.
         _ => {
@@ -231,6 +236,11 @@ pub fn run_prompt(
 
     session.state = SessionState::Decoding;
     let prefill_tokens = prompt_ids.len() as u32;
+    let resident = weights_bytes
+        + session.kv.bytes_resident() as u64
+        + session.gpu.as_ref().map_or(0, |p| p.data_bytes);
+    session.telemetry.prompt_begin(session.path.code(), session.kv.len, resident);
+    session.telemetry.note_oov(oov);
 
     if session.kv.len.saturating_add(prompt_ids.len()) > session.max_ctx {
         return Some(finish(session, 0, 0, 0, 0, StopReason::ContextFull));
@@ -252,6 +262,7 @@ pub fn run_prompt(
     let chunk = if cfg.prefill_chunk == 0 { 1 } else { cfg.prefill_chunk } as usize;
     let mut last_logits: Vec<f32> = Vec::with_capacity(session.vocab_size as usize);
     let mut i = 0usize;
+    let t_prefill = unsafe { slm_get_time_ns() };
     while i < prompt_ids.len() {
         if stop_wanted(session, cfg) {
             return Some(finish(session, i as u32, 0, 0, 0, StopReason::Stopped));
@@ -271,6 +282,8 @@ pub fn run_prompt(
             step(session, tokens[0], true, &mut scratch, &mut last_logits);
         }
         i += batch;
+        let now = unsafe { slm_get_time_ns() };
+        session.telemetry.prefill_progress(batch as u64, now.saturating_sub(t_prefill), session.kv.len);
         if i % chunk == 0 || batch > 1 {
             unsafe { sched_yield(); }
         }
@@ -287,6 +300,8 @@ pub fn run_prompt(
     let mut next_id = session.sampler_state.sample(&session.sampler_cfg, &mut last_logits);
     let t_first_token = unsafe { slm_get_time_ns() };
     let ttft_ns = t_first_token.saturating_sub(t_start);
+    session.telemetry.first_token(ttft_ns);
+    let mut t_prev_token = t_first_token;
 
     let mut decode_tokens: u32 = 0;
     let mut utf8 = Utf8Stream::new();
@@ -300,6 +315,7 @@ pub fn run_prompt(
             break StopReason::Eos;
         }
         decode_tokens += 1;
+        session.telemetry.token_out();
         session.pending_token = Some(next_id);
         if !emit_token(session, next_id, &mut utf8, &mut emit_buf, cb) {
             break StopReason::Callback;
@@ -322,6 +338,13 @@ pub fn run_prompt(
         }
         session.pending_token = None;
         next_id = session.sampler_state.sample(&session.sampler_cfg, &mut last_logits);
+        let now = unsafe { slm_get_time_ns() };
+        session.telemetry.decode_step(
+            now.saturating_sub(t_prev_token),
+            now.saturating_sub(t_first_token),
+            session.kv.len,
+        );
+        t_prev_token = now;
 
         // Yield between every token so other tasks (and whoever is going
         // to send `slm stop`) get the CPU.
@@ -368,6 +391,7 @@ fn finish(
     session.last_ttft_ns = ttft_ns;
     session.last_decode_ns = decode_ns;
     session.last_stop_reason = stop_reason;
+    session.telemetry.prompt_end(stop_reason as u32, session.kv.len);
     DecodeStats { prefill_tokens, decode_tokens, ttft_ns, decode_ns, stop_reason }
 }
 
@@ -533,9 +557,15 @@ fn step_many(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch
         }
     };
     let pos = session.kv.len;
+    prog.profile = session.telemetry.profile_on();
     // No lock held here: the wait needs IRQs on (runtime/CLAUDE.md, #1093).
     match prog.run(tokens, pos, out) {
         Ok(()) => {
+            let st = prog.last_stats;
+            session.telemetry.gpu_step(st.gpu_ns, st.wait_us, st.evict_us);
+            if prog.last_marked {
+                session.telemetry.classes(&prog.last_class_ns);
+            }
             session.kv.len = pos + tokens.len();
             session.gpu_tokens = session.gpu_tokens.saturating_add(tokens.len() as u64);
             session.gpu_us_per_token = prog.gpu_us_per_token();
@@ -579,6 +609,8 @@ fn fall_back_to_cpu(
     crate::kernel_ffi::print(line.as_bytes());
     session.gpu_note = Some(why);
     session.path = ForwardPath::Cpu;
+    session.telemetry.set_path(ForwardPath::Cpu.code());
+    session.telemetry.set_plan(None, session.arch.block_count);
     session.kv.ensure_storage();
     session.kv.clear();
     run_on_cpu(session, history, scratch, out);

@@ -51,4 +51,5 @@ Per decode step at 64 tokens: GPU 40.9 ms of a 41.4 ms step, evict 52 us; matmul
 - KV append needs no op: K and V projections write the position's cache slot. Kernels read positions and token ids from the step page, so a decode step patches 84 cbufs.
 - A dispatcher that finds a program in flight releases the dispatch lock until it ends; sched-MLP's try-lock takes its CPU fallback. Any CPU can retire the program from its end semaphore, so a waiter with IRQs masked cannot deadlock (#1093 class).
 - A timeout (5 s) dumps GR and MMU fault state once. The session rebuilds its KV cache on the CPU by replaying its tokens.
+- `slm stats --profile` runs decode steps on a second pushbuffer in the same region: same QMDs and cbufs, plus one FLUSH_DISABLE timestamp after each barrier that crosses an op class. `slm gpu opts ... profile` remains the per-launch tool; its drains change timings.
 - After kexec there is no cold channel: `--gpu on` is refused and `--gpu auto` keeps the per-op path.

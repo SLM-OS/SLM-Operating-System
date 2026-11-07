@@ -453,12 +453,12 @@ stats on `/slm/done`. Hot-swap of `slm-runner` preserves the loaded model
 **Goal:** All telemetry the spec promises, plus per-platform benchmark
 reports.
 
-- ☐ Per-op profiling under `slm stats --profile`: rmsnorm, rope, gqa
-  (broken into qkv-proj, attn, oproj), mlp (gate, up, silu*mul, down),
-  lm_head. Implementation: `Timer::elapsed()` ring buffer per op,
-  reported as ms/token average.
-- ☐ GPU PTIMER integration for `slm stats --gpu` (Jetson only).
-- ☐ Best-effort power proxy via BPMP MRQ for `slm stats --power`.
+- ✅ Per-op profiling under `slm stats --profile`, by op class: semaphore
+  timestamps on the GPU path, timers on the CPU path (#475).
+- ✅ GPU busy time for `slm stats --gpu`, from semaphore timestamps, not
+  PTIMER MMIO (#475).
+- ✅ Best-effort `slm stats --power`: BPMP temperatures; power prints `n/a`,
+  since no rail sensor is read (#475).
 - ☐ `slm bench` runs the spec's standard battery: 64/256-token prompt
   prefill + 256-token decode, three runs, reports min/avg/max.
 - ☐ Benchmark report committed to `docs/benchmarks.md` covering CPU and

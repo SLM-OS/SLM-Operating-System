@@ -6610,6 +6610,53 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
     0
 }
 
+/// Live telemetry for `slm stats`. Works while a prompt runs and never holds
+/// it up: see `slm::telemetry`. `gpc_hz` scales the mma issue measure; 0 when
+/// the clock isn't known. Returns 0, or -1 on a null pointer or unknown session.
+///
+/// # Safety
+/// `out` must point to writable memory of `sizeof(SlmTelemetryC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_telemetry(
+    session_id: u32,
+    gpc_hz: u64,
+    out: *mut slm::telemetry::SlmTelemetryC,
+) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    match slm::session::telemetry(session_id as usize) {
+        Some(t) => {
+            // SAFETY: caller's contract, `out` is writable.
+            unsafe { *out = t.snapshot(gpc_hz) };
+            0
+        }
+        None => -1,
+    }
+}
+
+/// `slm stats --profile`: arm or disarm per-op timing from the next forward
+/// step. Works while a prompt runs. Returns 0, or -1 on an unknown session.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_telemetry_profile(session_id: u32, on: u32) -> i32 {
+    match slm::session::telemetry(session_id as usize) {
+        Some(t) => {
+            t.set_profile(on != 0);
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Mean nanoseconds of telemetry writes per token, measured on a scratch block.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_telemetry_token_cost_ns() -> u64 {
+    slm::telemetry::token_cost_ns()
+}
+
 /// `slm gpu profile <session>`: per-step times and per-kernel GPU time.
 /// Returns 0, or -1 if the session isn't on a program or a prompt holds it.
 #[no_mangle]

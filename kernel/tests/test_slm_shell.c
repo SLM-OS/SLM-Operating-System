@@ -659,6 +659,169 @@ static void test_slm_stop_from_second_session_during_prompt(void)
     slm_prompt_teardown();
 }
 
+/* ---- slm stats ---- */
+
+static void test_slm_stats_no_session(void)
+{
+    SLM_PROMPT_SETUP();
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "Usage: slm stats"));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats x"));
+    cap_clear();
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats 0"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "not open"));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats 0 --profile"));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats 0 --follow"));
+    SlmTelemetryC t;
+    TEST_ASSERT_EQUAL_INT(-1, rust_slm_telemetry(0, 0, &t));
+    TEST_ASSERT_EQUAL_INT(-1, rust_slm_telemetry_profile(0, 1));
+    slm_prompt_teardown();
+}
+
+/* A session with no prompt yet shows zeros and no invented rate. */
+static void test_slm_stats_before_any_prompt(void)
+{
+    SLM_PROMPT_SETUP();
+    LAUNCH_GREEDY();
+    cap_clear();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm stats 0 --verbose"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "prompts=0  tokens_in=0  tokens_out=0"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "ttft     : 0 ms"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "decode   : 0 tokens, 0 ms total, 0.0 tok/s"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "itl      : none yet"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "stop     : "));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats 0 --bogus"));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm stats 0 --follow x"));
+    cap_clear();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm stats 0 --follow"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "no prompt running"));
+    slm_prompt_teardown();
+}
+
+static void test_slm_stats_formats_every_section(void)
+{
+    SLM_PROMPT_SETUP();
+    LAUNCH_GREEDY();
+    SCRIPT(0, 'a', 'b', 'c', CLI_IM_END);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm prompt 0 --raw hi"));
+    cap_clear();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm stats 0 --verbose --profile --gpu --power"));
+    static const char *const want[] = {
+        "prompts=1  tokens_in=2  tokens_out=3",
+        "ttft     : ", "prefill  : 2 tokens", "decode   : 3 tokens", "stop     : eos",
+        "kv_used  : ", "peak mem : ", "ops/token: ", "oov      : 0 text pieces",
+        "sampler retries: n/a",
+        "itl      : min ", "tokens\r\n",
+        "profile  : on, 0 tokens timed", "rolling  : last ",
+        "clocks   : EMC", "op tiers :", "matmul-attn", "lm_head",
+        "gpu busy : n/a (not on a GPU program)",
+        "mma issue time / matmul wall (derived): n/a (no op at tier 1)",
+        "tensor-core share of matmul+GQA MACs (derived): n/a (no op at tier 1)",
+        "SM tensor-pipe counter: n/a",
+        "power    : n/a", "temperatures only",
+        "backend=", "threads  : ",
+    };
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        if (!strstr(cap.buf, want[i])) {
+            TEST_FAIL_MESSAGE(want[i]);
+        }
+    }
+    /* --profile stays armed until turned off, and the off form says so. */
+    SlmTelemetryC t;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_telemetry(0, 0, &t));
+    TEST_ASSERT_EQUAL_UINT32(1u, t.profile);
+    cap_clear();
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm stats 0 --profile off"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "profile  : off"));
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_telemetry(0, 0, &t));
+    TEST_ASSERT_EQUAL_UINT32(0u, t.profile);
+    slm_prompt_teardown();
+}
+
+/* A figure read in a second session during a prompt is live: it advances
+ * between two reads, and neither a plain read nor --follow stops the prompt. */
+static volatile uint64_t live_first;
+static volatile uint64_t live_second;
+static volatile uint32_t live_running;
+static volatile int      live_stats_rc;
+static volatile int      live_follow_rc;
+static volatile bool     live_saw_header;
+static volatile bool     live_done;
+
+static void live_session_entry(void *arg)
+{
+    (void)arg;
+    while (!cap.saw_output) {
+        yield();
+    }
+    SlmTelemetryC t;
+    if (rust_slm_telemetry(0, 0, &t) == 0) {
+        live_first = t.decode_tokens;
+        live_running = t.running;
+    }
+    /* Same output sink as the prompt, whose stream fills the capture quickly,
+     * so make room first. */
+    shell_session_bind(task_current(), slm_sess);
+    cap_clear();
+    live_stats_rc = shell_execute("slm stats 0 --verbose --profile --gpu");
+    live_saw_header = strstr(cap.buf, "[prompt running: live]") != NULL;
+    for (int i = 0; i < 2000; i++) {
+        yield();
+    }
+    if (rust_slm_telemetry(0, 0, &t) == 0) {
+        live_second = t.decode_tokens;
+    }
+    (void)shell_execute("slm stop 0");
+    live_follow_rc = shell_execute("slm stats 0 --follow 1");
+    shell_session_unbind(task_current());
+    live_done = true;
+}
+
+static void test_slm_stats_live_from_second_session(void)
+{
+    SLM_PROMPT_SETUP();
+    LAUNCH_GREEDY();
+    SCRIPT(1, 'a');
+    cap_clear();
+    live_first = live_second = 0;
+    live_running = 0;
+    live_stats_rc = live_follow_rc = -99;
+    live_saw_header = false;
+    live_done = false;
+
+    struct task *t = task_create("slm_live", live_session_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task_to_cpu(t, task_current()->assigned_cpu);
+    /* The looping script fills the capture buffer, so the stop reason is
+     * checked from the telemetry below, not the text. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm prompt 0 --raw --max 200000 hi"));
+    for (int i = 0; i < 100000 && !live_done; i++) {
+        yield();
+    }
+    TEST_ASSERT_TRUE(live_done);
+    TEST_ASSERT_EQUAL_UINT32(1u, live_running);
+    TEST_ASSERT_EQUAL_INT(0, live_stats_rc);
+    TEST_ASSERT_EQUAL_INT(0, live_follow_rc);
+    TEST_ASSERT_TRUE(live_second > live_first);
+    TEST_ASSERT_TRUE(live_saw_header);
+    /* The prompt's own figures agree with what the second session saw. */
+    SlmTelemetryC s;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_telemetry(0, 0, &s));
+    TEST_ASSERT_EQUAL_UINT32(0u, s.running);
+    TEST_ASSERT_TRUE(s.decode_tokens >= live_second);
+    TEST_ASSERT_EQUAL_UINT32(SLM_STOP_USER, s.stop_reason);
+    slm_prompt_teardown();
+}
+
+/* The whole per-token cost with stats disabled, on this CPU under TCG, against
+ * 0.1 percent of the 23 ms bar. rust_slm_telemetry_token_cost_ns uses a scratch
+ * block; the same check on the host is in telemetry.rs, with the no-heap one. */
+static void test_slm_stats_disabled_cost_is_not_measurable(void)
+{
+    uint64_t ns = rust_slm_telemetry_token_cost_ns();
+    TEST_ASSERT_TRUE(ns < 23000u);
+}
+
 static void test_slm_stop_idle_session_says_so(void)
 {
     SLM_PROMPT_SETUP();
@@ -737,6 +900,11 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_prompt_ctrl_c_interrupts_prefill);
     RUN_TEST(test_slm_prompt_keeps_typeahead_for_the_next_command);
     RUN_TEST(test_slm_stop_from_second_session_during_prompt);
+    RUN_TEST(test_slm_stats_no_session);
+    RUN_TEST(test_slm_stats_before_any_prompt);
+    RUN_TEST(test_slm_stats_formats_every_section);
+    RUN_TEST(test_slm_stats_live_from_second_session);
+    RUN_TEST(test_slm_stats_disabled_cost_is_not_measurable);
     RUN_TEST(test_slm_stop_idle_session_says_so);
     RUN_TEST(test_slm_prompt_too_long_for_ctx_says_so);
     RUN_TEST(test_slm_prompt_unknown_session_fails_cleanly);

@@ -269,6 +269,88 @@ static void test_prog_profile_slots(void)
     TEST_ASSERT_EQUAL_UINT32(10u * GA10B_PROG_SEMA_SLOT_BYTES, ga10b_prog_sema_bytes(&p));
 }
 
+/* The plain pushbuffer is unchanged by the marked copy, which differs only by
+ * its timestamps, on a separate GPFIFO entry. This is what makes a step with
+ * stats disabled cost nothing. */
+static void test_prog_marks(void)
+{
+    static struct ga10b_prog p, q;
+    static uint32_t plain[PB_DW];
+    uint8_t args[4] = { 1, 2, 3, 4 };
+    struct ga10b_prog_launch l = launch(args, sizeof(args));
+
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&q, 0, GA10B_PROG_BARRIER_WFI));
+    (void)ga10b_prog_add_launch(&q, &l);
+    (void)ga10b_prog_add_barrier(&q);
+    (void)ga10b_prog_add_launch(&q, &l);
+    (void)ga10b_prog_finish(&q);
+    memcpy(plain, g_pb, q.pb_dwords * 4u);
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG, ga10b_prog_add_mark(&q));
+    TEST_ASSERT_EQUAL_UINT64(0, ga10b_prog_gp_entry_marked(&q));
+
+    memset(g_pb, 0, sizeof(g_pb));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, GA10B_PROG_F_MARKS, GA10B_PROG_BARRIER_WFI));
+    (void)ga10b_prog_add_launch(&p, &l);
+    (void)ga10b_prog_add_barrier(&p);
+    TEST_ASSERT_EQUAL_INT(0, ga10b_prog_add_mark(&p));
+    (void)ga10b_prog_add_launch(&p, &l);
+    (void)ga10b_prog_finish(&p);
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_STATE, ga10b_prog_add_mark(&p));
+
+    TEST_ASSERT_EQUAL_UINT32(q.pb_dwords, p.pb_dwords);
+    TEST_ASSERT_EQUAL_MEMORY(plain, g_pb, q.pb_dwords * 4u);
+    TEST_ASSERT_EQUAL_UINT64(ga10b_prog_gp_entry(&q), ga10b_prog_gp_entry(&p));
+    TEST_ASSERT_EQUAL_UINT32(0u, count_dw(GA10B_PROG_PAYLOAD_MARK, p.pb_dwords));
+
+    /* The copy: plain plus one 6-dword release, right after the barrier's WFI. */
+    TEST_ASSERT_EQUAL_UINT32(p.pb_dwords + 6u, p.marks_dwords);
+    TEST_ASSERT_TRUE(p.marks_base >= p.pb_dwords);
+    const uint32_t *m = g_pb + p.marks_base;
+    uint32_t at = 0;
+    while (at < p.marks_dwords && m[at] != GA10B_PROG_PAYLOAD_MARK) at++;
+    TEST_ASSERT_TRUE(at < p.marks_dwords);
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, m[at - 2u]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(S_VA + 2u * GA10B_PROG_SEMA_SLOT_BYTES), m[at + 2u]);
+    TEST_ASSERT_EQUAL_HEX32(1u << 5, m[at + 4u]);   /* FLUSH_DISABLE: no L2 flush */
+    uint64_t e = ga10b_prog_gp_entry_marked(&p);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(PB_VA + p.marks_base * 4u), (uint32_t)e);
+    TEST_ASSERT_EQUAL_UINT32(p.marks_dwords, (uint32_t)(e >> 42));
+
+    /* Plain steps arm the two slots they use, not the marks. */
+    TEST_ASSERT_EQUAL_UINT32(2u * GA10B_PROG_SEMA_SLOT_BYTES, ga10b_prog_sema_bytes(&p));
+    TEST_ASSERT_EQUAL_UINT32(GA10B_PROG_SEMA_SLOT_BYTES, ga10b_prog_marks_bytes(&p));
+
+    /* Times: up to the mark, then from it to the end. */
+    uint64_t ns[2] = { 99, 99 };
+    uint32_t *sem = (uint32_t *)(void *)g_sm;
+    uint64_t *ts = (uint64_t *)(void *)g_sm;
+    TEST_ASSERT_EQUAL_UINT32(0u, ga10b_prog_marks_ns(&p, ns, 1));
+    sem[0] = GA10B_PROG_PAYLOAD_START; ts[1] = 1000u;
+    sem[4] = GA10B_PROG_PAYLOAD_END;   ts[3] = 1300u;
+    sem[8] = GA10B_PROG_PAYLOAD_MARK;  ts[5] = 1100u;
+    TEST_ASSERT_EQUAL_UINT32(2u, ga10b_prog_marks_ns(&p, ns, 2));
+    TEST_ASSERT_EQUAL_UINT64(100u, ns[0]);
+    TEST_ASSERT_EQUAL_UINT64(200u, ns[1]);
+    /* A mark that didn't fire, or a clock running backwards: 0, no wild value. */
+    sem[8] = 0u;
+    (void)ga10b_prog_marks_ns(&p, ns, 2);
+    TEST_ASSERT_EQUAL_UINT64(0u, ns[0]);
+    TEST_ASSERT_EQUAL_UINT64(0u, ns[1]);
+    sem[8] = GA10B_PROG_PAYLOAD_MARK; ts[5] = 500u;
+    (void)ga10b_prog_marks_ns(&p, ns, 2);
+    TEST_ASSERT_EQUAL_UINT64(0u, ns[0]);
+    TEST_ASSERT_EQUAL_UINT64(800u, ns[1]);
+
+    /* A barrier with no idle in it gets one for the timestamp's sake. */
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, GA10B_PROG_F_MARKS, GA10B_PROG_BARRIER_FLUSH));
+    (void)ga10b_prog_add_launch(&p, &l);
+    (void)ga10b_prog_add_barrier(&p);
+    uint32_t before = p.marks_dwords;
+    TEST_ASSERT_EQUAL_INT(0, ga10b_prog_add_mark(&p));
+    TEST_ASSERT_EQUAL_UINT32(before + 7u, p.marks_dwords);
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[p.marks_base + before]);
+}
+
 /* ---- slm_prog_encode: per-kernel ABI ---- */
 
 static uint32_t arg32(const uint8_t *a, uint32_t off)
@@ -806,6 +888,38 @@ static void test_run_ok_and_patch(void)
 
 /* A hang is bounded, dumps the fault state once, doesn't evict, and kills
  * the session so nothing else is queued behind it. */
+/* A session's two runs differ in the GPFIFO entry alone. */
+static void test_run_marked_uses_the_marked_entry(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    int32_t h = o.handle;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(h, 0, &st));
+    uint64_t plain = g_fk.last_gp;
+    uint64_t ns[8];
+    memset(ns, 0xFF, sizeof(ns));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run_marked(h, 0, &st, ns, 8));
+    TEST_ASSERT_NOT_EQUAL(plain, g_fk.last_gp);
+    TEST_ASSERT_EQUAL_UINT64(50, st.gpu_ns);
+    /* No marks in this program: one interval, all of it. */
+    TEST_ASSERT_EQUAL_UINT64(50, ns[0]);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_UINT64(plain, g_fk.last_gp);
+    /* Too short an array: the run still counts, nothing is written. */
+    memset(ns, 0xAB, sizeof(ns));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run_marked(h, 0, &st, ns, 0));
+    TEST_ASSERT_EQUAL_HEX64(0xABABABABABABABABull, ns[0]);
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_run_marked(h, 7, &st, ns, 8));
+    slm_prog_close(h);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 static void test_run_timeout_is_bounded(void)
 {
     fake_up();
@@ -1049,6 +1163,8 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_session_open_failures);
     RUN_TEST(test_session_without_weights);
     RUN_TEST(test_run_ok_and_patch);
+    RUN_TEST(test_prog_marks);
+    RUN_TEST(test_run_marked_uses_the_marked_entry);
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);
     RUN_TEST(test_kernel_lookup_and_batch);

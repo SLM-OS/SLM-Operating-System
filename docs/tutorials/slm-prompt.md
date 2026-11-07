@@ -60,9 +60,13 @@ slmos> slm prompt 0 "Explain virtual memory in two sentences."
 slmos> slm stats 0
 session 0  prompts=1  tokens_in=<n>  tokens_out=<n>
   ttft     : <ms> ms
-  decode   : <ms> ms total
+  prefill  : <n> tokens, <ms> ms, <rate> tok/s
+  decode   : <n> tokens, <ms> ms total, <rate> tok/s
   stop     : eos
   kv_used  : <n> / 4096
+  peak mem : <MB> MB (weights + KV + GPU arena)
+  ops/token: tier-1 <n>, tier-2 <n>, CPU <n>
+  oov      : <n> text pieces; sampler retries: n/a (the sampler never retries)
   backend=CPU(no GPU ops available)
   threads  : 4 (stored; forward is single-threaded)
 
@@ -85,12 +89,33 @@ slmos> slm unload 0
 | `slm unload <handle>` | Release the model slot. Refused while a prompt runs on the model. |
 | `slm close <session>` | Release the session slot. Refused while a prompt runs on it. |
 | `slm status` | One-line summary: model count + session count + pool utilization. |
-| `slm stats <session>` | Last-prompt + cumulative telemetry. |
+| `slm stats <session> [--verbose] [--profile [on\|off]] [--gpu] [--power] [--follow [ms]]` | Telemetry, live during a prompt. See [Telemetry](#telemetry). |
 | `slm gpu` | Per-op tier and dispatch counters. |
 
 Only one prompt runs at a time, across all sessions; a second gets a clear
 error. `slm stats`, `slm status`, `slm list`, `slm info` and `slm gpu` answer
-while a prompt runs. `slm stats` then shows the figures from before it started.
+while a prompt runs. `slm stats` then shows the running prompt's figures.
+
+## Telemetry
+
+`slm stats` reads a block the decode writes once per step and never waits on, so
+a second shell session can read it at any time without slowing the prompt.
+Figures cover the running prompt, or the last one, except the totals on the
+first line.
+
+| Option | Adds |
+|--------|------|
+| `--verbose` | Inter-token latency: min, avg, max over the prompt. |
+| `--profile [on\|off]` | Last token, mean of the last 32, and time per op class per token. `--profile` and `--profile on` turn timing on from the next token until `--profile off`. A profiled GPU run uses a second pushbuffer with a timestamp at each op-class boundary. |
+| `--gpu` | Clocks, tier per op class, launches per token, GPU busy from semaphore timestamps, DRAM estimate from the plan, tensor-core utilization. |
+| `--power` | BPMP temperatures on Jetson. No rail sensor is read, so power itself prints `n/a`. |
+| `--follow [ms]` | One line per interval (default 1000) until the prompt ends or Ctrl-C. Combine `--profile` first to add matmul time. |
+
+Prefill isn't profiled: its batched steps run the plain pushbuffer. Op-class time
+on the CPU path comes from CPU timers, and SwiGLU counts as `matmul-mlp` there.
+Tensor-core utilization prints two derived measures and no counter; the design
+doc's [Tensor-core utilization](../design/slm-integration.md#tensor-core-utilization)
+section says what each one is.
 
 ## Launch options
 

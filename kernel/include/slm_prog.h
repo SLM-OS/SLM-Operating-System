@@ -117,9 +117,12 @@ int slm_prog_available(void);
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
 void slm_prog_close(int32_t h);
 
-/* Build: append a launch (returns its index), a barrier, or finish. */
+/* Build: append a launch (returns its index), a barrier, a timestamp for the
+ * marked copy of the decode shape (right after a barrier; returns its index),
+ * or finish. */
 int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op);
 int slm_prog_barrier(int32_t h, uint32_t shape);
+int slm_prog_mark(int32_t h, uint32_t shape);
 int slm_prog_finish(int32_t h, uint32_t shape);
 
 /* Step: rewrite a launch's cbuf args (patch) or also its QMD, for a
@@ -135,6 +138,13 @@ void slm_prog_invalidate(int32_t h, const void *p, size_t len);
  * evict L2. On a timeout the session is dead: the GR and MMU fault state
  * has been dumped and every later call returns SLM_PROG_ERR_DEAD. */
 int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats);
+
+/* slm_prog_run on the marked copy, then `ns[]` receives the GPU time up to each
+ * mark and from the last mark to the end: marks + 1 values (0 values if `cap`
+ * is short). Same commands as a plain run plus one FLUSH_DISABLE release per
+ * mark. Allocates nothing. */
+int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
+                        uint64_t *ns, uint32_t cap);
 
 /* Largest batch the library's matmuls support (0: they are missing, 8 or 64).
  * With `simt`, the SIMT matmuls, which take any batch: 64. */

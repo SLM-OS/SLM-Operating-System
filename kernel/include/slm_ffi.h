@@ -2061,6 +2061,92 @@ typedef struct {
 
 extern int32_t rust_slm_session_gpu_info(uint32_t session_id, SlmSessionGpuC *out);
 
+/* Op classes of SlmTelemetryC.classes. Mirror of Rust's OpClass. */
+enum {
+    SLM_OPCLASS_EMBED = 0,
+    SLM_OPCLASS_RMSNORM,
+    SLM_OPCLASS_MM_ATTN,    /* Q, K, V, output projections */
+    SLM_OPCLASS_ROPE,
+    SLM_OPCLASS_GQA,
+    SLM_OPCLASS_MM_MLP,     /* gate, up, down; on the CPU path also SwiGLU */
+    SLM_OPCLASS_SWIGLU,
+    SLM_OPCLASS_ADD,
+    SLM_OPCLASS_LM_HEAD,
+    SLM_OPCLASS_COUNT,
+};
+
+/* SlmOpClassC.tier: Rust's gpu_slm::Tier. */
+#define SLM_TIER_HMMA 1u
+#define SLM_TIER_SIMT 2u
+#define SLM_TIER_CPU  3u
+
+/* A figure with no real source right now. */
+#define SLM_TELEMETRY_NA 0xFFFFFFFFu
+
+typedef struct {
+    uint64_t last_ns;   /* in the last profiled token */
+    uint64_t total_ns;  /* over this prompt's profiled tokens */
+    uint32_t ops;       /* per token */
+    uint32_t tier;      /* SLM_TIER_* */
+} SlmOpClassC;
+
+/* Live figures for `slm stats`. Mirror of runtime/src/slm/telemetry.rs. */
+typedef struct {
+    uint32_t running;       /* a prompt is running; figures are live */
+    uint32_t consistent;    /* 0: every read try overlapped a write */
+    uint32_t profile;       /* --profile armed */
+    uint32_t path;          /* SLM_PATH_* */
+    uint32_t stop_reason;   /* SLM_STOP_*, NONE while running */
+    uint32_t kv_used;
+    uint32_t max_ctx;
+    uint32_t prompts;
+    uint64_t tokens_in;
+    uint64_t tokens_out;
+    uint64_t oov_pieces;    /* text pieces with no vocab entry, over the session */
+    /* This prompt, or the last one. */
+    uint64_t ttft_ns;
+    uint64_t prefill_tokens;
+    uint64_t prefill_ns;
+    uint64_t decode_tokens;
+    uint64_t decode_ns;
+    uint64_t itl_count;     /* forward steps since the first token */
+    uint64_t itl_min_ns;
+    uint64_t itl_avg_ns;
+    uint64_t itl_max_ns;
+    uint64_t itl_last_ns;
+    uint64_t itl_rolling_ns; /* mean of the last 32 */
+    uint64_t peak_resident_bytes; /* weights + KV + GPU arena */
+    /* GPU, this prompt, from the semaphore timestamps. */
+    uint64_t gpu_steps;
+    uint64_t gpu_busy_ns;
+    uint64_t gpu_last_ns;
+    uint64_t gpu_wait_us;
+    uint64_t gpu_evict_us;
+    /* Per decode token, from the plan. */
+    uint32_t launches;
+    uint32_t barriers;
+    uint32_t marks;
+    uint32_t ops_tier1;
+    uint32_t ops_tier2;
+    uint32_t ops_cpu;
+    uint64_t weight_bytes;  /* quantized weights the matmuls read */
+    uint64_t kv_read_bytes; /* K and V GQA reads at the current position */
+    uint64_t mma;
+    uint64_t arena_bytes;
+    uint64_t profiled_tokens;
+    uint64_t matmul_avg_ns;
+    uint32_t tc_issue_bp;     /* mma issue time / matmul wall, 0.01 %, or NA */
+    uint32_t tc_mac_share_bp; /* tensor-core share of MACs, 0.01 %, or NA */
+    SlmOpClassC classes[SLM_OPCLASS_COUNT];
+} SlmTelemetryC;
+
+_Static_assert(sizeof(SlmTelemetryC) == 488,
+               "SlmTelemetryC has a Rust mirror with a paired const-assert");
+
+extern int32_t rust_slm_telemetry(uint32_t session_id, uint64_t gpc_hz, SlmTelemetryC *out);
+extern int32_t rust_slm_telemetry_profile(uint32_t session_id, uint32_t on);
+extern uint64_t rust_slm_telemetry_token_cost_ns(void);
+
 typedef struct {
     uint32_t steps;
     int32_t first_bad_step;     /* first logit over tolerance, -1 if none */

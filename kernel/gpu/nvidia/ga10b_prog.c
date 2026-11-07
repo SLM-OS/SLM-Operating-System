@@ -44,6 +44,7 @@
 #define PB_BARRIER_DWORDS   2u  /* two immediates at most */
 #define PB_SEMA_DWORDS      6u  /* 5-method incrementing run */
 #define PB_DRAIN_DWORDS     2u  /* WFI + flush before a timestamp means anything */
+#define PB_MARK_DWORDS      (1u + PB_SEMA_DWORDS)  /* WFI only if the barrier has none */
 
 static inline uint32_t hdr_inc(uint32_t count, uint32_t byte_off)
 {
@@ -66,22 +67,35 @@ void ga10b_prog_sizes(uint32_t max_launches, uint32_t flags, uint32_t *pb_bytes,
         per += PB_DRAIN_DWORDS + PB_SEMA_DWORDS;
         slots += max_launches;
     }
+    uint32_t plain = PB_PROLOGUE_DWORDS + PB_DRAIN_DWORDS + PB_SEMA_DWORDS + per * max_launches;
+    uint32_t total = plain;
+    if (flags & GA10B_PROG_F_MARKS) {
+        total += plain + PB_MARK_DWORDS * max_launches;
+        slots += max_launches;
+    }
     if (pb_bytes) {
-        *pb_bytes = (PB_PROLOGUE_DWORDS + PB_DRAIN_DWORDS + PB_SEMA_DWORDS + per * max_launches) * 4u;
+        *pb_bytes = total * 4u;
     }
     if (qmd_bytes) *qmd_bytes = max_launches * GA10B_QMD_SIZE_BYTES;
     if (cbuf_bytes) *cbuf_bytes = max_launches * GA10B_PROG_CBUF_STRIDE;
     if (sema_bytes) *sema_bytes = slots * GA10B_PROG_SEMA_SLOT_BYTES;
 }
 
-static uint32_t *pb_tail(struct ga10b_prog *p)
+/* Append to the plain pushbuffer and, when there is one, the marked copy. */
+static void pb_put(struct ga10b_prog *p, const uint32_t *w, uint32_t n)
 {
-    return (uint32_t *)(void *)p->pb.cpu + p->pb_dwords;
+    uint32_t *base = (uint32_t *)(void *)p->pb.cpu;
+    memcpy(base + p->pb_dwords, w, n * 4u);
+    p->pb_dwords += n;
+    if (p->flags & GA10B_PROG_F_MARKS) {
+        memcpy(base + p->marks_base + p->marks_dwords, w, n * 4u);
+        p->marks_dwords += n;
+    }
 }
 
-static void emit_sema(struct ga10b_prog *p, uint32_t slot, uint32_t payload, uint32_t bits)
+static void sema_words(const struct ga10b_prog *p, uint32_t *w, uint32_t slot, uint32_t payload,
+                       uint32_t bits)
 {
-    uint32_t *w = pb_tail(p);
     uint64_t va = p->sema.gpu_va + (uint64_t)slot * GA10B_PROG_SEMA_SLOT_BYTES;
     w[0] = hdr_inc(5u, M_REPORT_SEMAPHORE_PAYLOAD_LOWER);
     w[1] = payload;
@@ -89,7 +103,13 @@ static void emit_sema(struct ga10b_prog *p, uint32_t slot, uint32_t payload, uin
     w[3] = (uint32_t)va;
     w[4] = (uint32_t)(va >> 32) & 0xFFu;
     w[5] = SEM_RELEASE_FOUR_WORDS | bits;
-    p->pb_dwords += PB_SEMA_DWORDS;
+}
+
+static void emit_sema(struct ga10b_prog *p, uint32_t slot, uint32_t payload, uint32_t bits)
+{
+    uint32_t w[PB_SEMA_DWORDS];
+    sema_words(p, w, slot, payload, bits);
+    pb_put(p, w, PB_SEMA_DWORDS);
 }
 
 int ga10b_prog_init(struct ga10b_prog *p, const struct ga10b_prog_mem *pb,
@@ -119,8 +139,14 @@ int ga10b_prog_init(struct ga10b_prog *p, const struct ga10b_prog_mem *pb,
     p->max_launches = max_launches;
     p->flags = flags;
     p->barrier = barrier;
+    if (flags & GA10B_PROG_F_MARKS) {
+        /* The marked copy starts where the largest plain program would end. */
+        uint32_t plain;
+        ga10b_prog_sizes(max_launches, flags & ~(uint32_t)GA10B_PROG_F_MARKS, &plain, NULL, NULL, NULL);
+        p->marks_base = plain / 4u;
+    }
 
-    uint32_t *w = pb_tail(p);
+    uint32_t w[PB_PROLOGUE_DWORDS];
     uint32_t n = 0;
     w[n++] = hdr_inc(1u, M_SET_OBJECT);
     w[n++] = COMPUTE_CLASS;
@@ -133,7 +159,7 @@ int ga10b_prog_init(struct ga10b_prog *p, const struct ga10b_prog_mem *pb,
     w[n++] = hdr_immd(M_INVALIDATE_SKED_CACHES, 0u);
     w[n++] = hdr_immd(M_INVALIDATE_TEX_HEADER_NO_WFI, 0u);
     w[n++] = hdr_immd(M_INVALIDATE_SHADER_CACHES, INVALIDATE_ALL);
-    p->pb_dwords = n;
+    pb_put(p, w, n);
     emit_sema(p, GA10B_PROG_SEMA_START, GA10B_PROG_PAYLOAD_START, SEM_FLUSH_DISABLE);
     return GA10B_PROG_OK;
 }
@@ -185,10 +211,11 @@ static bool launch_valid(const struct ga10b_prog_launch *l)
  * uses between launches. */
 static void emit_drain(struct ga10b_prog *p)
 {
-    uint32_t *w = pb_tail(p);
-    w[0] = hdr_immd(M_WAIT_FOR_IDLE, 0u);
-    w[1] = hdr_immd(M_INVALIDATE_SHADER_CACHES, INVALIDATE_DATA_FLUSH);
-    p->pb_dwords += PB_DRAIN_DWORDS;
+    const uint32_t w[PB_DRAIN_DWORDS] = {
+        hdr_immd(M_WAIT_FOR_IDLE, 0u),
+        hdr_immd(M_INVALIDATE_SHADER_CACHES, INVALIDATE_DATA_FLUSH),
+    };
+    pb_put(p, w, PB_DRAIN_DWORDS);
 }
 
 int ga10b_prog_add_launch(struct ga10b_prog *p, const struct ga10b_prog_launch *l)
@@ -201,11 +228,12 @@ int ga10b_prog_add_launch(struct ga10b_prog *p, const struct ga10b_prog_launch *
     write_cbuf(p, idx, l);
 
     uint64_t qva = p->qmd.gpu_va + (uint64_t)idx * GA10B_QMD_SIZE_BYTES;
-    uint32_t *w = pb_tail(p);
-    w[0] = hdr_inc(1u, M_SEND_PCAS_A);
-    w[1] = (uint32_t)(qva >> 8);
-    w[2] = hdr_immd(M_SEND_SIGNALING_PCAS2_B, PCAS2_INVALIDATE_COPY_SCHEDULE);
-    p->pb_dwords += PB_LAUNCH_DWORDS;
+    const uint32_t w[PB_LAUNCH_DWORDS] = {
+        hdr_inc(1u, M_SEND_PCAS_A),
+        (uint32_t)(qva >> 8),
+        hdr_immd(M_SEND_SIGNALING_PCAS2_B, PCAS2_INVALIDATE_COPY_SCHEDULE),
+    };
+    pb_put(p, w, PB_LAUNCH_DWORDS);
     if (p->flags & GA10B_PROG_F_PROFILE) {
         emit_drain(p);
         emit_sema(p, GA10B_PROG_SEMA_OP0 + idx, GA10B_PROG_PAYLOAD_OP, 0u);
@@ -226,7 +254,7 @@ int ga10b_prog_add_barrier(struct ga10b_prog *p)
 {
     if (!p) return GA10B_PROG_ERR_ARG;
     if (p->finished) return GA10B_PROG_ERR_STATE;
-    uint32_t *w = pb_tail(p);
+    uint32_t w[PB_BARRIER_DWORDS];
     uint32_t n = 0;
     if (p->barrier == GA10B_PROG_BARRIER_WFI_FLUSH || p->barrier == GA10B_PROG_BARRIER_WFI) {
         w[n++] = hdr_immd(M_WAIT_FOR_IDLE, 0u);
@@ -234,9 +262,27 @@ int ga10b_prog_add_barrier(struct ga10b_prog *p)
     if (p->barrier == GA10B_PROG_BARRIER_WFI_FLUSH || p->barrier == GA10B_PROG_BARRIER_FLUSH) {
         w[n++] = hdr_immd(M_INVALIDATE_SHADER_CACHES, INVALIDATE_DATA_FLUSH);
     }
-    p->pb_dwords += n;
+    pb_put(p, w, n);
     p->n_barriers++;
     return GA10B_PROG_OK;
+}
+
+int ga10b_prog_add_mark(struct ga10b_prog *p)
+{
+    if (!p || !(p->flags & GA10B_PROG_F_MARKS)) return GA10B_PROG_ERR_ARG;
+    if (p->finished) return GA10B_PROG_ERR_STATE;
+    if (p->n_marks >= p->max_launches) return GA10B_PROG_ERR_FULL;
+    uint32_t *w = (uint32_t *)(void *)p->pb.cpu + p->marks_base + p->marks_dwords;
+    uint32_t n = 0;
+    /* A release doesn't wait for launched work, so a barrier without an idle
+     * needs one here. That only happens in `slm gpu opts flush`. */
+    if (p->barrier == GA10B_PROG_BARRIER_FLUSH) {
+        w[n++] = hdr_immd(M_WAIT_FOR_IDLE, 0u);
+    }
+    sema_words(p, w + n, ga10b_prog_mark_slot0(p) + p->n_marks, GA10B_PROG_PAYLOAD_MARK,
+               SEM_FLUSH_DISABLE);
+    p->marks_dwords += n + PB_SEMA_DWORDS;
+    return (int)p->n_marks++;
 }
 
 int ga10b_prog_finish(struct ga10b_prog *p)
@@ -256,6 +302,15 @@ uint64_t ga10b_prog_gp_entry(const struct ga10b_prog *p)
 {
     uint32_t e0 = (uint32_t)(p->pb.gpu_va & 0xFFFFFFFCu);
     uint32_t e1 = (uint32_t)((p->pb.gpu_va >> 32) & 0xFFu) | (p->pb_dwords << 10);
+    return ((uint64_t)e1 << 32) | e0;
+}
+
+uint64_t ga10b_prog_gp_entry_marked(const struct ga10b_prog *p)
+{
+    if (!(p->flags & GA10B_PROG_F_MARKS)) return 0u;
+    uint64_t va = p->pb.gpu_va + (uint64_t)p->marks_base * 4u;
+    uint32_t e0 = (uint32_t)(va & 0xFFFFFFFCu);
+    uint32_t e1 = (uint32_t)((va >> 32) & 0xFFu) | (p->marks_dwords << 10);
     return ((uint64_t)e1 << 32) | e0;
 }
 
@@ -281,4 +336,34 @@ uint32_t ga10b_prog_sema_bytes(const struct ga10b_prog *p)
 void ga10b_prog_sema_arm(const struct ga10b_prog *p)
 {
     memset(p->sema.cpu, 0, ga10b_prog_sema_bytes(p));
+}
+
+uint32_t ga10b_prog_mark_slot0(const struct ga10b_prog *p)
+{
+    return ga10b_prog_sema_bytes(p) / GA10B_PROG_SEMA_SLOT_BYTES;
+}
+
+uint32_t ga10b_prog_marks_bytes(const struct ga10b_prog *p)
+{
+    return p->n_marks * GA10B_PROG_SEMA_SLOT_BYTES;
+}
+
+uint32_t ga10b_prog_marks_ns(const struct ga10b_prog *p, uint64_t *ns, uint32_t cap)
+{
+    uint32_t count = p->n_marks + 1u;
+    if (!ns || cap < count) return 0u;
+    uint32_t slot0 = ga10b_prog_mark_slot0(p);
+    uint64_t prev = ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_START);
+    bool prev_ok = true;
+    for (uint32_t i = 0; i < count; i++) {
+        bool last = i == p->n_marks;
+        uint32_t slot = last ? GA10B_PROG_SEMA_END : slot0 + i;
+        uint32_t want = last ? GA10B_PROG_PAYLOAD_END : GA10B_PROG_PAYLOAD_MARK;
+        bool ok = ga10b_prog_sema_payload(p, slot) == want;
+        uint64_t t = ga10b_prog_sema_ts(p, slot);
+        ns[i] = (ok && prev_ok && t >= prev) ? t - prev : 0u;
+        if (ok) prev = t;
+        prev_ok = ok;
+    }
+    return count;
 }

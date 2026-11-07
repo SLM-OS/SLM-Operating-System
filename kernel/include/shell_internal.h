@@ -116,6 +116,8 @@ int cmd_cdcdiag(int argc, char **argv);
 int cmd_hspdiag(int argc, char **argv);
 int cmd_bpmp(int argc, char **argv);
 int cmd_thermal(int argc, char **argv);
+/* One line of BPMP temperatures (Jetson only). */
+void shell_thermal_print_line(const char *prefix);
 int cmd_clocks(int argc, char **argv);
 int cmd_pcietrain(int argc, char **argv);
 int cmd_imx219(int argc, char **argv);

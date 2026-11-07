@@ -33,6 +33,7 @@ use crate::slm::{
     kv_cache::KvCache,
     registry,
     sampler::{Sampler, SamplerState},
+    telemetry::Telemetry,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,21 @@ pub enum ForwardPath {
     PerOp,
     /// `forward_one` on this CPU, every op.
     Cpu,
+}
+
+/// `SLM_PATH_*`, the FFI form of [`ForwardPath`].
+pub const PATH_PROGRAM: u32 = 0;
+pub const PATH_PER_OP: u32 = 1;
+pub const PATH_CPU: u32 = 2;
+
+impl ForwardPath {
+    pub fn code(self) -> u32 {
+        match self {
+            ForwardPath::Program => PATH_PROGRAM,
+            ForwardPath::PerOp => PATH_PER_OP,
+            ForwardPath::Cpu => PATH_CPU,
+        }
+    }
 }
 
 /// What `slm launch --gpu` asked for.
@@ -158,6 +174,8 @@ pub struct Session {
     /// forward steps. It's shared with the slot table so `rust_slm_stop`
     /// can set it while this session is checked out for a prompt.
     pub stop_flag: Arc<AtomicBool>,
+    /// What `slm stats` reads, shared with the slot table for the same reason.
+    pub telemetry: Arc<Telemetry>,
     /// What `--gpu` asked for. See [`GpuMode`].
     pub gpu_mode: GpuMode,
     /// Where forward steps run now.
@@ -250,6 +268,11 @@ impl Session {
             sampler_state: SamplerState::new(seed),
             state: SessionState::Open,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            telemetry: {
+                let t = Telemetry::new(info.block_count, max_ctx as u32);
+                t.set_path(PATH_PER_OP);
+                Arc::new(t)
+            },
             gpu_mode: GpuMode::Auto,
             path: ForwardPath::PerOp,
             gpu: None,
@@ -284,6 +307,7 @@ impl Session {
         self.tokens_out = 0;
         self.last_ttft_ns = 0;
         self.last_decode_ns = 0;
+        self.telemetry.reset();
         if self.state != SessionState::Closed {
             self.state = SessionState::Open;
         }
@@ -292,6 +316,14 @@ impl Session {
     /// Apply `--gpu`: build the program if the mode wants one. `Err` is for
     /// `--gpu on` with no program, and leaves the session as it was.
     pub fn choose_path(&mut self, mode: GpuMode) -> Result<(), &'static str> {
+        let r = self.choose_path_inner(mode);
+        self.telemetry.set_path(self.path.code());
+        let facts = self.gpu.as_ref().map(|p| p.plan_facts());
+        self.telemetry.set_plan(facts.as_ref(), self.arch.block_count);
+        r
+    }
+
+    fn choose_path_inner(&mut self, mode: GpuMode) -> Result<(), &'static str> {
         if mode == GpuMode::Cpu {
             // Program's KV cache goes with it, so a session with history
             // starts over: `slm launch` configures before any prompt.
@@ -476,6 +508,7 @@ pub enum SlotError {
 /// Slot record for a session that's out on a [`SessionLease`].
 struct Leased {
     stop: Arc<AtomicBool>,
+    telemetry: Arc<Telemetry>,
     snapshot: SessionSnapshot,
 }
 
@@ -625,6 +658,7 @@ pub fn checkout(index: usize) -> Result<SessionLease, SlotError> {
             snapshot.state = SessionState::Decoding;
             slots[index] = Slot::Leased(Leased {
                 stop: session.stop_flag.clone(),
+                telemetry: session.telemetry.clone(),
                 snapshot,
             });
             Ok(SessionLease { index, session: Some(session) })
@@ -670,6 +704,23 @@ pub fn snapshot(index: usize) -> Option<SessionSnapshot> {
     match &slots[index] {
         Slot::Ready(session) => Some(session.snapshot()),
         Slot::Leased(leased) => Some(leased.snapshot),
+        Slot::Empty => None,
+    }
+}
+
+/// A session's telemetry block, running or not. Takes the table lock only for
+/// the copy, and the decode doesn't take that lock between prompts' ends, so
+/// reading can't hold a forward step up.
+pub fn telemetry(index: usize) -> Option<Arc<Telemetry>> {
+    if index >= SLM_MAX_SESSIONS {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
+    match &slots[index] {
+        Slot::Ready(session) => Some(session.telemetry.clone()),
+        Slot::Leased(leased) => Some(leased.telemetry.clone()),
         Slot::Empty => None,
     }
 }

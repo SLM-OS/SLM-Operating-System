@@ -26,7 +26,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::slm::gguf::{f16_to_f32, f32_to_f16, GgmlType};
+use crate::inference::gpu_slm::Tier;
 use crate::slm::registry::LoadedSlm;
+use crate::slm::telemetry::{OpClass, PlanFacts, OP_CLASSES};
 
 /// Keep in step with `enum slm_prog_kernel`.
 #[repr(u32)]
@@ -101,6 +103,8 @@ pub const FLAG_SIMT: u32 = 4;
 const MM_OUT_F16: u32 = 1;
 const MM_SIMT: u32 = 1;
 const RMS_EPS: f32 = 1e-6;
+/// Keep in step with `slm_prog_encode` and `Q4K_TILE_ROWS` in the kernels.
+const MM_TILE_ROWS: u64 = 15;
 
 extern "C" {
     fn slm_prog_available() -> i32;
@@ -108,12 +112,14 @@ extern "C" {
     fn slm_prog_close(h: i32);
     fn slm_prog_add(h: i32, shape: u32, op: *const ProgOp) -> i32;
     fn slm_prog_barrier(h: i32, shape: u32) -> i32;
+    fn slm_prog_mark(h: i32, shape: u32) -> i32;
     fn slm_prog_finish(h: i32, shape: u32) -> i32;
     fn slm_prog_patch(h: i32, shape: u32, idx: u32, op: *const ProgOp) -> i32;
     fn slm_prog_update(h: i32, shape: u32, idx: u32, op: *const ProgOp) -> i32;
     fn slm_prog_clean(h: i32, p: *const u8, len: usize);
     fn slm_prog_invalidate(h: i32, p: *const u8, len: usize);
     fn slm_prog_run(h: i32, shape: u32, stats: *mut RunStats) -> i32;
+    fn slm_prog_run_marked(h: i32, shape: u32, stats: *mut RunStats, ns: *mut u64, cap: u32) -> i32;
     fn slm_prog_max_batch(simt: bool) -> u32;
     fn slm_prog_profile_ns(h: i32, shape: u32, idx: u32) -> u64;
 }
@@ -475,6 +481,8 @@ impl PlanOp {
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub ops: Vec<PlanOp>,
+    /// Each op's class, for `slm stats`.
+    pub class: Vec<OpClass>,
     pub barrier_before: Vec<bool>,
     /// Indices of ops with position-dependent cbufs.
     pub patch: Vec<u32>,
@@ -483,6 +491,8 @@ pub struct Plan {
 
 struct PlanBuilder {
     plan: Plan,
+    /// Class of the matmuls being pushed.
+    mm_class: OpClass,
     written: Vec<Buf>,
     read: Vec<Buf>,
 }
@@ -490,7 +500,8 @@ struct PlanBuilder {
 impl PlanBuilder {
     fn new(batched: bool) -> Self {
         Self {
-            plan: Plan { ops: Vec::new(), barrier_before: Vec::new(), patch: Vec::new(), batched },
+            plan: Plan { ops: Vec::new(), class: Vec::new(), barrier_before: Vec::new(), patch: Vec::new(), batched },
+            mm_class: OpClass::MatmulAttn,
             written: Vec::new(),
             read: Vec::new(),
         }
@@ -512,6 +523,15 @@ impl PlanBuilder {
         if op.depends_on_pos() {
             self.plan.patch.push(self.plan.ops.len() as u32);
         }
+        self.plan.class.push(match op.kernel {
+            Kernel::RmsNorm => OpClass::RmsNorm,
+            Kernel::Rope => OpClass::Rope,
+            Kernel::SwiGlu => OpClass::SwiGlu,
+            Kernel::Gqa => OpClass::Gqa,
+            Kernel::MmQ4k | Kernel::MmQ6k => self.mm_class,
+            Kernel::Add => OpClass::Add,
+            Kernel::EmbedQ4k | Kernel::EmbedQ6k => OpClass::Embed,
+        });
         self.plan.ops.push(op);
     }
 }
@@ -598,6 +618,7 @@ pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool, simt: bool) -> Plan {
         let v_at = Ref::DataAtPos { off: kv_v, stride: a.kv_per_pos };
         let (attn_norm, ffn_norm) = d.norms[i];
 
+        pb.mm_class = OpClass::MatmulAttn;
         pb.push(norm(Ref::Data(a.x), attn_norm, Ref::Data(a.xn), Buf::X, Buf::Xn, true));
         pb.push(mm_op(&c, &l.q, Ref::Data(a.xn), Ref::Data(a.q), hidden, nqhd, Buf::Xn, Buf::Q, true, true));
         pb.push(mm_op(&c, &l.k, Ref::Data(a.xn), k_at, hidden, nkvhd, Buf::Xn, Buf::KvK(li), true, true));
@@ -615,6 +636,7 @@ pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool, simt: bool) -> Plan {
         });
         pb.push(mm_op(&c, &l.o, Ref::Data(a.attn), Ref::Data(a.o), nqhd, hidden, Buf::Attn, Buf::O, true, true));
         pb.push(add(a.o, Buf::O));
+        pb.mm_class = OpClass::MatmulMlp;
         pb.push(norm(Ref::Data(a.x), ffn_norm, Ref::Data(a.xn), Buf::X, Buf::Xn, true));
         pb.push(mm_op(&c, &l.gate, Ref::Data(a.xn), Ref::Data(a.gate), hidden, inter, Buf::Xn, Buf::Gate, true, true));
         pb.push(mm_op(&c, &l.up, Ref::Data(a.xn), Ref::Data(a.up), hidden, inter, Buf::Xn, Buf::Up, true, true));
@@ -639,6 +661,7 @@ pub fn build_plan(d: &ModelDesc, a: &Arena, batched: bool, simt: bool) -> Plan {
         Buf::Xn,
         false,
     ));
+    pb.mm_class = OpClass::LmHead;
     pb.push(mm_op(&c, &d.lm_head, Ref::Data(a.xn), Ref::Data(a.logits), hidden, dims.vocab, Buf::Xn, Buf::Logits, false, false));
     pb.plan
 }
@@ -710,6 +733,17 @@ pub struct GpuProgram {
     pub launches: u32,
     pub barriers: u32,
     pub data_bytes: u64,
+    /// Run decode steps on the marked pushbuffer, from `slm stats --profile`.
+    pub profile: bool,
+    /// The last step's figures, for the caller's telemetry.
+    pub last_stats: RunStats,
+    pub last_marked: bool,
+    pub last_class_ns: [u64; OP_CLASSES],
+    /// The class each interval between marks belongs to, last one included.
+    mark_class: Vec<OpClass>,
+    /// Filled by a marked run. Sized at build: a step doesn't allocate.
+    mark_ns: Vec<u64>,
+    simt: bool,
 }
 
 // SAFETY: the raw addresses are the program's own memory, used only by the
@@ -809,6 +843,13 @@ impl GpuProgram {
             launches: 0,
             barriers: 0,
             data_bytes: arena.data_bytes,
+            profile: false,
+            last_stats: RunStats::default(),
+            last_marked: false,
+            last_class_ns: [0; OP_CLASSES],
+            mark_class: Vec::new(),
+            mark_ns: Vec::new(),
+            simt,
         });
         // From here on, Drop closes the session.
         p.fill_constants(rope_table).map_err(BuildError::Failed)?;
@@ -857,7 +898,9 @@ impl GpuProgram {
         let h = self.h;
         let plan = self.plan(shape);
         let mut barriers = 0u32;
-        for (op, &bar) in plan.ops.iter().zip(plan.barrier_before.iter()) {
+        let mut mark_class = Vec::new();
+        let mut cur = plan.class.first().copied().unwrap_or(OpClass::Embed);
+        for (i, (op, &bar)) in plan.ops.iter().zip(plan.barrier_before.iter()).enumerate() {
             if bar {
                 // SAFETY: the handle is ours and open.
                 let rc = unsafe { slm_prog_barrier(h, shape) };
@@ -865,6 +908,18 @@ impl GpuProgram {
                     return Err(rc);
                 }
                 barriers += 1;
+                // Op-class boundaries with a barrier get a timestamp in the
+                // marked pushbuffer. Barriers are the only places that time
+                // means something: launches between them overlap.
+                if shape == SHAPE_DECODE && plan.class[i] != cur {
+                    // SAFETY: as above.
+                    let rc = unsafe { slm_prog_mark(h, shape) };
+                    if rc < 0 {
+                        return Err(rc);
+                    }
+                    mark_class.push(cur);
+                    cur = plan.class[i];
+                }
             }
             let m = op.materialize(&bases, &s);
             // SAFETY: `m` outlives the call.
@@ -882,6 +937,9 @@ impl GpuProgram {
         if shape == SHAPE_DECODE {
             self.launches = n;
             self.barriers = barriers;
+            mark_class.push(cur);
+            self.mark_ns = alloc::vec![0; mark_class.len()];
+            self.mark_class = mark_class;
         } else {
             self.prefill_rows = self.max_batch;
         }
@@ -928,10 +986,26 @@ impl GpuProgram {
         self.patch_step(shape, &s).map_err(err_message)?;
 
         let mut stats = RunStats::default();
-        // SAFETY: the handle is ours; stats outlives the call.
-        let rc = unsafe { slm_prog_run(self.h, shape, &mut stats) };
+        let marked = self.profile && shape == SHAPE_DECODE && !self.mark_class.is_empty();
+        // SAFETY: the handle is ours; stats and mark_ns outlive the call.
+        let rc = unsafe {
+            if marked {
+                let cap = self.mark_ns.len() as u32;
+                slm_prog_run_marked(self.h, shape, &mut stats, self.mark_ns.as_mut_ptr(), cap)
+            } else {
+                slm_prog_run(self.h, shape, &mut stats)
+            }
+        };
         if rc != 0 {
             return Err(err_message(rc));
+        }
+        self.last_stats = stats;
+        self.last_marked = marked;
+        if marked {
+            self.last_class_ns = [0; OP_CLASSES];
+            for (class, ns) in self.mark_class.iter().zip(self.mark_ns.iter()) {
+                self.last_class_ns[*class as usize] += *ns;
+            }
         }
         self.read_logits(out);
         if shape == SHAPE_DECODE {
@@ -1039,6 +1113,43 @@ impl GpuProgram {
             let _ = write!(l, "[slm]   {k:?} N={w}: {count} launches, {} us\n\0", ns / 1000);
             crate::kernel_ffi::print(l.as_bytes());
         }
+    }
+
+    /// What a decode token runs, for `slm stats --gpu`.
+    pub fn plan_facts(&self) -> PlanFacts {
+        let mut f = PlanFacts {
+            launches: self.launches,
+            barriers: self.barriers,
+            marks: self.mark_class.len().saturating_sub(1) as u32,
+            arena_bytes: self.data_bytes,
+            ..PlanFacts::default()
+        };
+        f.class_tier = [Tier::Simt as u32; OP_CLASSES];
+        for (op, class) in self.decode.ops.iter().zip(self.decode.class.iter()) {
+            f.class_launches[*class as usize] += 1;
+            let block_bytes = match op.kernel {
+                Kernel::MmQ4k => 144u64,
+                Kernel::MmQ6k => 210,
+                _ => continue,
+            };
+            let (k, n) = (op.dim[0] as u64, op.dim[1] as u64);
+            let blocks = k / 256;
+            f.weight_bytes += blocks * block_bytes * n;
+            if self.simt {
+                f.macs_simt += k * n;
+            } else {
+                f.class_tier[*class as usize] = Tier::Hmma as u32;
+                f.macs_tc += k * n;
+                // scripts/cuda/harness/slm_forward.cu: 16 mma per weight block
+                // per tile, one row. A tile holds MM_TILE_ROWS weight rows.
+                f.mma += n.div_ceil(MM_TILE_ROWS) * blocks * 16;
+            }
+        }
+        let d = &self.dims;
+        let (l, nq, nkv, hd) = (d.layers as u64, d.n_head as u64, d.n_head_kv as u64, d.head_dim as u64);
+        f.gqa_macs_per_pos = 2 * l * nq * hd;
+        f.kv_bytes_per_pos = 2 * l * nkv * hd * FP16;
+        f
     }
 
     /// Mean GPU time per step, in microseconds.
@@ -1908,6 +2019,7 @@ pub mod soft {
     }
 
     pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
+    pub static MARKED_RUNS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     pub static KNOBS: Mutex<Knobs> = Mutex::new(Knobs {
         no_backend: false,
         max_batch: 64,
@@ -1998,6 +2110,21 @@ pub mod soft {
         let at = s.shapes[shape as usize].len();
         s.barriers[shape as usize].push(at);
         0
+    }
+    #[no_mangle]
+    extern "C" fn slm_prog_mark(_h: i32, _shape: u32) -> i32 {
+        0
+    }
+    /// One microsecond per interval, so a test can add up what reaches a class.
+    #[no_mangle]
+    extern "C" fn slm_prog_run_marked(h: i32, shape: u32, stats: *mut RunStats, ns: *mut u64, cap: u32) -> i32 {
+        MARKED_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let rc = slm_prog_run(h, shape, stats);
+        for i in 0..cap as usize {
+            // SAFETY: the caller's array holds `cap` values.
+            unsafe { *ns.add(i) = 1000 };
+        }
+        rc
     }
     #[no_mangle]
     extern "C" fn slm_prog_finish(_h: i32, _shape: u32) -> i32 {
@@ -2378,6 +2505,102 @@ mod tests {
         assert_eq!(snap.cpu_tokens, 0);
         assert_eq!(crate::rust_slm_session_close(sid), 0);
         assert_eq!(soft::KNOBS.lock().unwrap().closes, 1, "close frees the arena");
+        reset_for_tests();
+    }
+
+    /// Every launch is in a class; a class boundary always has a barrier, so
+    /// the marks can attribute all the time; and the plan's figures add up.
+    #[test]
+    fn plan_facts_add_up_and_marks_cover_every_boundary() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        let f = session::with_session(sid as usize, |s| {
+            let p = s.gpu.as_ref().unwrap();
+            let boundaries = (1..p.decode.ops.len())
+                .filter(|&i| p.decode.class[i] != p.decode.class[i - 1])
+                .inspect(|&i| assert!(p.decode.barrier_before[i], "class change at {i} has no barrier"))
+                .count() as u32;
+            assert_eq!(p.mark_class.len() as u32, boundaries + 1);
+            assert_eq!(p.mark_ns.len(), p.mark_class.len());
+            p.plan_facts()
+        })
+        .unwrap();
+        assert_eq!(f.class_launches.iter().sum::<u32>(), f.launches);
+        assert!(f.marks > 0 && f.marks <= f.barriers);
+        assert!(f.mma > 0 && f.macs_tc > 0 && f.weight_bytes > 0);
+        assert_eq!(f.macs_simt, 0);
+        // Only matmuls are on tensor cores.
+        for (i, t) in f.class_tier.iter().enumerate() {
+            let mm = i == OpClass::MatmulAttn as usize || i == OpClass::MatmulMlp as usize || i == OpClass::LmHead as usize;
+            assert_eq!(*t, if mm { Tier::Hmma as u32 } else { Tier::Simt as u32 }, "class {i}");
+        }
+        // What the same layer count looks like on the CPU path.
+        let d = session::with_session(sid as usize, |s| s.gpu.as_ref().unwrap().dims()).unwrap();
+        assert_eq!(f.launches, 15 * d.layers + 3);
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        reset_for_tests();
+    }
+
+    /// Off: only plain runs. On: every decode step uses marks and each class
+    /// gets the intervals that belong to it. Prefill stays plain either way.
+    #[test]
+    fn stats_profile_chooses_the_marked_program_between_steps() {
+        use core::sync::atomic::Ordering::Relaxed;
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        let tel = session::telemetry(sid as usize).unwrap();
+
+        soft::MARKED_RUNS.store(0, Relaxed);
+        let _ = prompt_on_session(sid, r.get("prompt.text").unwrap(), 3);
+        assert_eq!(soft::MARKED_RUNS.load(Relaxed), 0, "stats disabled must not touch the marks");
+        let s = tel.snapshot(0);
+        assert_eq!(s.profiled_tokens, 0);
+        assert!(s.gpu_steps > 0, "GPU busy has a source without --profile");
+        assert_eq!(s.tc_issue_bp, crate::slm::telemetry::NA, "no matmul time measured");
+        assert_ne!(s.tc_mac_share_bp, crate::slm::telemetry::NA);
+        assert_eq!(s.path, session::PATH_PROGRAM);
+        assert_eq!(s.ops_cpu, 0);
+
+        assert_eq!(crate::rust_slm_session_reset(sid), 0);
+        tel.set_profile(true);
+        let _ = prompt_on_session(sid, r.get("prompt.text").unwrap(), 3);
+        let s = tel.snapshot(crate::slm::telemetry::MMA_RATE_GPC_HZ);
+        let runs = soft::MARKED_RUNS.load(Relaxed) as u64;
+        assert!(runs >= 2);
+        assert_eq!(s.profiled_tokens, runs);
+        assert_ne!(s.tc_issue_bp, crate::slm::telemetry::NA);
+        // The soft GPU reports 1 us per interval.
+        let total: u64 = s.classes.iter().map(|c| c.total_ns).sum();
+        let marks = session::with_session(sid as usize, |x| x.gpu.as_ref().unwrap().plan_facts().marks).unwrap();
+        assert_eq!(total, runs * (marks as u64 + 1) * 1000);
+        for c in [OpClass::Embed, OpClass::Gqa, OpClass::MatmulMlp, OpClass::LmHead] {
+            assert!(s.classes[c as usize].last_ns > 0, "{c:?}");
+        }
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        reset_for_tests();
+    }
+
+    /// A session the GPU gave up on stops claiming GPU figures.
+    #[test]
+    fn fallback_moves_the_telemetry_to_the_cpu_too() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        soft::KNOBS.lock().unwrap().fail_run = Some((2, -6));
+        let _ = prompt_on_session(sid, r.get("prompt.text").unwrap(), 4);
+        let s = session::telemetry(sid as usize).unwrap().snapshot(1);
+        assert_eq!(s.path, session::PATH_CPU);
+        assert_eq!((s.ops_tier1, s.ops_tier2, s.launches), (0, 0, 0));
+        assert_eq!(s.tc_mac_share_bp, crate::slm::telemetry::NA);
+        assert_eq!(s.tc_issue_bp, crate::slm::telemetry::NA);
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
         reset_for_tests();
     }
 
