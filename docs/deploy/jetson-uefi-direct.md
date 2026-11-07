@@ -128,6 +128,25 @@ efibootmgr -C -d /dev/nvme0n1 -p 2 -L "SLM-OS NVMe" -l '\EFI\SLMOS\SLMOS.efi'
 The sector numbers are for the 119.2 GiB SPCC drive on jetson-nano-2;
 take the end of the disk from `sgdisk -p`.
 
+`scripts/jetson-uefi-deploy.sh` boots through "SLM-OS NVMe" with BootNext.
+An entry created with `-C` is not in BootOrder, so the F11 boot menu does
+not list it. The menu's SLM-OS option is a second entry, "SLM-OS Direct"
+(Boot0009 on jetson-nano-2), which sits in BootOrder after the UEFI Shell.
+It must point at the same NVMe file, or the menu boots something the deploy
+never updated. Until 2026-11-07 it pointed at `\EFI\BOOT\SLMOS.efi` on the
+SD card's L4T ESP (`mmcblk0p10`), an April 2026 build that stopped the
+board with a CBB "RAS Uncorrectable Error in IOB". To recreate it:
+
+```bash
+order=$(efibootmgr | sed -n 's/^BootOrder: //p')
+efibootmgr -b 0009 -B
+efibootmgr -C -d /dev/nvme0n1 -p 2 -L "SLM-OS Direct" -l '\EFI\SLMOS\SLMOS.efi'
+efibootmgr -o "$order"   # if the new entry got another number, put it in 0009's place
+```
+
+The SD card has no SLM-OS partition; only the NVMe `SLMOS-ESP` holds the
+SLM-OS image.
+
 Do **not** put `\EFI\BOOT\BOOTAA64.efi` on the NVMe ESP. The firmware's
 own NVMe entry (`0008`) is first in BootOrder and boots that removable-
 media path; with the file present every cold boot would start SLM-OS
