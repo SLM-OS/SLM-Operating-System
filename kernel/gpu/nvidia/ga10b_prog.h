@@ -25,8 +25,11 @@
  * (nvk_cmd_flush_wait_dep; methods in
  * ~/slmos-ref/mesa/mesa-clc7c0.h:52,299). No SYSMEMBAR is needed between
  * launches: activations stay in the GPU L2, only the end of the program
- * has to reach DRAM. GA10B_PROG_BARRIER_WFI_FLUSH is that sequence and
- * the default. The other two exist to be measured on hardware.
+ * has to reach DRAM. GA10B_PROG_BARRIER_WFI_FLUSH is that sequence. The
+ * SLM GPU program uses GA10B_PROG_BARRIER_WFI with GA10B_PROG_F_LEAN_QMD
+ * (OPT_BARRIER in runtime/src/slm/gpu_program.rs): the QMD already
+ * invalidates shader data, so the extra flush measured as no gain on
+ * jetson-nano-2. `slm gpu opts` switches between the three to measure.
  *
  * Completion. REPORT_SEMAPHORE with STRUCTURE_SIZE_FOUR_WORDS writes
  * the payload and a GPU timestamp (ns) to a 16 B slot, so a step gets
