@@ -175,7 +175,7 @@ __global__ void slm_mm_q4k_hmma_b8(const half *x, const uint8_t *W, void *out,
     /* First batch of this CTA's x tile. */
     const int base = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y * 8 : 0;
     const bool xact = base + g < B;
-    const size_t xs = slm_xstride(K, flags);
+    const size_t xs = slm_xstride_rt(K, flags);
     const half *xrow = x + (size_t)(base + g) * xs;
     /* q8_1 scale rows of this lane's two output batches. */
     const half *xr0 = x + (size_t)min(base + 2 * c, B - 1) * xs;
@@ -228,8 +228,8 @@ __global__ void slm_mm_q4k_hmma_b8(const half *x, const uint8_t *W, void *out,
             const float sh1 = __shfl_sync(0xFFFFFFFFu, ch3, 28 + c);
 
             const int bl = (b << 3) + 2 * j;
-            const float dl0 = slm_xq_d(xr0, K, flags, bl), dl1 = slm_xq_d(xr1, K, flags, bl);
-            const float dh0 = slm_xq_d(xr0, K, flags, bl + 1), dh1 = slm_xq_d(xr1, K, flags, bl + 1);
+            const float dl0 = slm_xq_d_rt(xr0, K, flags, bl), dl1 = slm_xq_d_rt(xr1, K, flags, bl);
+            const float dh0 = slm_xq_d_rt(xr0, K, flags, bl + 1), dh1 = slm_xq_d_rt(xr1, K, flags, bl + 1);
             float k, off;
             q4k_factors(h0, 2 * j, k, off);
             acc0 += dl0 * (k * cl0 - off * sl0);

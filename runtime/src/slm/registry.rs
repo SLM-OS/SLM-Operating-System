@@ -17,7 +17,7 @@
 //! reparse, and the source buffer the caller passed to [`load_slm`]
 //! can be freed immediately after the call returns.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -174,6 +174,12 @@ impl LoadedSlm {
     /// snapshot — fine for ~340 tensors per Qwen2.5-1.5B.
     pub fn tensor_info(&self, name: &str) -> Option<&OwnedTensorInfo> {
         self.tensors.iter().find(|t| t.name == name)
+    }
+
+    /// A tensor's descriptor to corrupt, for tests of what checks it.
+    #[cfg(test)]
+    pub fn tensor_info_mut_for_tests<'a>(slm: &'a mut LoadedSlm, name: &str) -> Option<&'a mut OwnedTensorInfo> {
+        slm.tensors.iter_mut().find(|t| t.name == name)
     }
 
     /// All cached tensor descriptors in file order.
@@ -343,6 +349,40 @@ static mut SLOTS: [Option<LoadedSlm>; SLM_MAX_SLOTS] = [EMPTY_SLOT; SLM_MAX_SLOT
 /// slot from the model that used to be there. Guarded by the slot lock.
 static mut SLOT_LOAD_SEQ: [u64; SLM_MAX_SLOTS] = [0; SLM_MAX_SLOTS];
 static mut NEXT_LOAD_SEQ: u64 = 1;
+
+/// GPU programs mapping each slot's weights. A program maps the weight
+/// pages into the GPU VM for as long as it lives, including in an idle
+/// session, so `unload_slm` refuses while this is nonzero: freeing them
+/// would leave the GPU reading reused pages. Atomic so [`GpuPin`] can drop
+/// without the slot lock (a program may be dropped anywhere).
+static GPU_PINS: [AtomicU32; SLM_MAX_SLOTS] = [const { AtomicU32::new(0) }; SLM_MAX_SLOTS];
+
+/// Holds a slot's weights against [`unload_slm`] while a GPU program maps
+/// them. Dropping it releases the hold.
+pub struct GpuPin(usize);
+
+impl Drop for GpuPin {
+    fn drop(&mut self) {
+        GPU_PINS[self.0].fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Pin the slot that holds `slm`. Call only from inside
+/// [`with_loaded_slm`]'s closure, which holds the slot lock this reads
+/// under. `None` if `slm` isn't a registry slot (a test's own model).
+pub fn pin_for_gpu(slm: &LoadedSlm) -> Option<GpuPin> {
+    // SAFETY: the caller is inside with_loaded_slm, so the slot lock is
+    // held and SLOTS can't change; only addresses are compared.
+    let slots = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    let index = slots.iter().position(|e| e.as_ref().is_some_and(|e| core::ptr::eq(e, slm)))?;
+    GPU_PINS[index].fetch_add(1, Ordering::AcqRel);
+    Some(GpuPin(index))
+}
+
+/// Whether a GPU program still maps slot `index`'s weights.
+pub fn gpu_pinned(index: usize) -> bool {
+    index < SLM_MAX_SLOTS && GPU_PINS[index].load(Ordering::Acquire) != 0
+}
 
 struct SpinGuard;
 
@@ -661,15 +701,20 @@ fn adopt_pages(
 }
 
 /// Free the slot at `index`. Returns `LoadError::InvalidFormat` if
-/// the slot is empty or the index is out of range.
+/// the slot is empty or the index is out of range, and `LoadError::InUse`
+/// while a GPU program (even an idle session's) maps its weights.
 pub fn unload_slm(index: usize) -> Result<(), LoadError> {
     if index >= SLM_MAX_SLOTS {
         return Err(LoadError::InvalidFormat);
     }
     // Take the slot out under the lock so the page free runs
-    // without the registry lock held.
+    // without the registry lock held. Pins are taken under the same
+    // lock, so none can appear between the check and the take.
     let taken = {
         let _g = SpinGuard::new();
+        if gpu_pinned(index) {
+            return Err(LoadError::InUse);
+        }
         // SAFETY: SpinGuard held — exclusive access to SLOTS.
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
         slot[index].take()

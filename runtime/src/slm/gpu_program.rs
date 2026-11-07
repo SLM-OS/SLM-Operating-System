@@ -225,35 +225,58 @@ impl ModelDesc {
         }
         let base = slm.weight_bytes().ok_or("model has no weight bytes")?.as_ptr() as usize;
         let offset = |bytes: &[u8]| (bytes.as_ptr() as usize - base) as u64;
-        let mm = |w: &str, b: Option<&str>| -> Result<Matmul, &'static str> {
+        // Every tensor is checked against the shape the plan gives its
+        // kernel: the GPU reads `k x n` weights and `n` biases at these
+        // offsets with no bounds of its own, so a malformed GGUF would read
+        // past a tensor or fault the channel (#475 W4).
+        let mm = |w: &str, b: Option<&str>, k: u32, n: u32| -> Result<Matmul, &'static str> {
             let (info, bytes) =
                 slm.tensor_info_and_bytes(w).ok_or("a layer tensor is missing")?;
             let kernel = mm_kernel(GgmlType(info.ggml_type)).ok_or("weights are not Q4_K or Q6_K")?;
-            let bias_off = b.and_then(|n| slm.tensor_bytes(n)).map(&offset);
+            if info.dims.len() != 2 || info.dims[0] != k as u64 || info.dims[1] != n as u64 {
+                return Err("a weight tensor's dims don't match the model's shape");
+            }
+            let row = crate::inference::quant::quant_row_bytes(GgmlType(info.ggml_type), k as usize)
+                .ok_or("a weight tensor's rows don't divide into blocks")?;
+            if Some(bytes.len()) != row.checked_mul(n as usize) {
+                return Err("a weight tensor's byte length doesn't match its dims");
+            }
+            let bias_off = match b.and_then(|name| slm.tensor_info_and_bytes(name)) {
+                None => None,
+                Some((bi, bb)) => {
+                    if bi.ggml_type != GgmlType::F32.0 || bb.len() != n as usize * 4 {
+                        return Err("a bias is not F32 of the layer's width");
+                    }
+                    Some(offset(bb))
+                }
+            };
             Ok(Matmul { kernel, w_off: offset(bytes), bias_off })
         };
         let norm = |n: &str| -> Result<u64, &'static str> {
-            let b = slm.tensor_bytes(n).ok_or("a norm weight is missing")?;
-            if b.len() != dims.hidden as usize * 4 {
+            let (info, b) = slm.tensor_info_and_bytes(n).ok_or("a norm weight is missing")?;
+            if info.ggml_type != GgmlType::F32.0 || b.len() != dims.hidden as usize * 4 {
                 return Err("a norm weight has the wrong size");
             }
             Ok(offset(b))
         };
+        let nqhd = dims.n_head * dims.head_dim;
+        let nkvhd = dims.n_head_kv * dims.head_dim;
+        let (hidden, inter, vocab) = (dims.hidden, dims.intermediate, dims.vocab);
         let mut layers = Vec::with_capacity(dims.layers as usize);
         let mut norms = Vec::with_capacity(dims.layers as usize);
         let mut nb = String::new();
         let mut nb2 = String::new();
         for l in 0..dims.layers {
-            let mut with = |suffix: &str, bias: Option<&str>| -> Result<Matmul, &'static str> {
+            let mut with = |suffix: &str, bias: Option<&str>, k: u32, n: u32| -> Result<Matmul, &'static str> {
                 nb.clear();
                 let _ = write!(nb, "blk.{}.{}", l, suffix);
                 match bias {
                     Some(bs) => {
                         nb2.clear();
                         let _ = write!(nb2, "blk.{}.{}", l, bs);
-                        mm(&nb, Some(&nb2))
+                        mm(&nb, Some(&nb2), k, n)
                     }
-                    None => mm(&nb, None),
+                    None => mm(&nb, None, k, n),
                 }
             };
             let mut name = String::new();
@@ -264,13 +287,13 @@ impl ModelDesc {
             let ffn_norm = norm(&name)?;
             norms.push((attn_norm, ffn_norm));
             layers.push(LayerDesc {
-                q: with("attn_q.weight", Some("attn_q.bias"))?,
-                k: with("attn_k.weight", Some("attn_k.bias"))?,
-                v: with("attn_v.weight", Some("attn_v.bias"))?,
-                o: with("attn_output.weight", None)?,
-                gate: with("ffn_gate.weight", None)?,
-                up: with("ffn_up.weight", None)?,
-                down: with("ffn_down.weight", None)?,
+                q: with("attn_q.weight", Some("attn_q.bias"), hidden, nqhd)?,
+                k: with("attn_k.weight", Some("attn_k.bias"), hidden, nkvhd)?,
+                v: with("attn_v.weight", Some("attn_v.bias"), hidden, nkvhd)?,
+                o: with("attn_output.weight", None, nqhd, hidden)?,
+                gate: with("ffn_gate.weight", None, hidden, inter)?,
+                up: with("ffn_up.weight", None, hidden, inter)?,
+                down: with("ffn_down.weight", None, inter, hidden)?,
             });
         }
         let lm_name = if slm.tensor_info("output.weight").is_some() {
@@ -278,7 +301,7 @@ impl ModelDesc {
         } else {
             "token_embd.weight"
         };
-        let e = mm("token_embd.weight", None)?;
+        let e = mm("token_embd.weight", None, hidden, vocab)?;
         let embed = Matmul {
             kernel: if e.kernel == Kernel::MmQ4k { Kernel::EmbedQ4k } else { Kernel::EmbedQ6k },
             ..e
@@ -286,7 +309,7 @@ impl ModelDesc {
         Ok(Self {
             dims,
             layers,
-            lm_head: mm(lm_name, None)?,
+            lm_head: mm(lm_name, None, hidden, vocab)?,
             embed,
             norms,
             out_norm: norm("output_norm.weight")?,
@@ -746,6 +769,8 @@ pub struct GpuProgram {
     data_cpu: usize,
     step_cpu: usize,
     dims: Dims,
+    /// Positions the KV cache and RoPE table hold.
+    max_ctx: usize,
     pub max_batch: u32,
     prefill_rows: u32,
     /// Tokens the GPU KV cache holds, for the replay if the GPU fails.
@@ -779,6 +804,9 @@ pub struct GpuProgram {
     /// Filled by a marked run. Sized at build: a step doesn't allocate.
     mark_ns: Vec<u64>,
     simt: bool,
+    /// Keeps `slm unload` from freeing the weights this program maps. Dropped
+    /// after `Drop::drop` has closed (unmapped) the session.
+    pin: Option<crate::slm::registry::GpuPin>,
 }
 
 // SAFETY: the raw addresses are the program's own memory, used only by the
@@ -798,6 +826,7 @@ fn err_message(rc: i32) -> &'static str {
         -8 => "GPU program failed earlier",
         -9 => "L2 evict timed out",
         -10 => "GPU step started with IRQs masked",
+        -11 => "another session held the GPU program lock too long",
         _ => "GPU program error",
     }
 }
@@ -865,7 +894,9 @@ impl GpuProgram {
             data_cpu: out.data_cpu,
             step_cpu: out.step_cpu,
             dims: desc.dims,
+            max_ctx,
             max_batch,
+            pin: None,
             prefill_rows: 0,
             history: Vec::new(),
             steps: 0,
@@ -910,6 +941,10 @@ impl GpuProgram {
                 return Err(BuildError::Failed(err_message(rc)));
             }
         }
+        // Last, so no early return drops a pinned program inside the
+        // caller's with_loaded_slm (GpuPin's drop doesn't need the lock, but
+        // nothing else here should run pinned and half-built either).
+        p.pin = crate::slm::registry::pin_for_gpu(slm);
         Ok(p)
     }
 
@@ -1029,6 +1064,11 @@ impl GpuProgram {
     /// call.
     pub fn run(&mut self, tokens: &[u32], pos: usize, out: &mut Vec<f32>) -> Result<(), &'static str> {
         let t0 = crate::kernel_ffi::get_time_ns();
+        // The KV cache and RoPE table hold max_ctx positions: past that the
+        // GPU would write the next layer's cache (or past the arena).
+        if pos.checked_add(tokens.len()).is_none_or(|end| end > self.max_ctx) {
+            return Err("position past the program's context");
+        }
         self.stage_tokens(tokens, pos)?;
         let rows = tokens.len() as u32;
         let shape = if rows > 1 { SHAPE_PREFILL } else { SHAPE_DECODE };
@@ -1132,7 +1172,16 @@ impl GpuProgram {
 
     /// The same step on the CPU over `mem`, with this program's VAs: what the
     /// GPU should have produced.
-    fn reference_step(&self, mem: &reference::Mem, tokens: &[u32], pos: usize, out: &mut Vec<f32>) {
+    fn reference_step(
+        &self,
+        mem: &reference::Mem,
+        tokens: &[u32],
+        pos: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), &'static str> {
+        if tokens.is_empty() || tokens.len() > self.max_batch as usize {
+            return Err("batch larger than the program");
+        }
         let rows = tokens.len() as u32;
         let shape = if rows > 1 { SHAPE_PREFILL } else { SHAPE_DECODE };
         let s = StepArgs { pos: pos as u32, rows };
@@ -1144,14 +1193,18 @@ impl GpuProgram {
             }
         }
         for op in &self.plan(shape).ops {
-            reference::exec(mem, &op.materialize(&self.bases, &s));
+            reference::exec(mem, &op.materialize(&self.bases, &s))?;
         }
         let n = self.dims.vocab as usize;
+        if (self.arena.logits as usize).saturating_add(n * 4) > mem.data_len {
+            return Err("reference: logits outside the arena");
+        }
         out.clear();
-        // SAFETY: the data buffer has the arena's layout.
+        // SAFETY: the data buffer has the arena's layout, checked just above.
         out.extend_from_slice(unsafe {
             core::slice::from_raw_parts((mem.data + self.arena.logits as usize) as *const f32, n)
         });
+        Ok(())
     }
 
     /// Time per decode step, and with `slm gpu opts ... profile` what each
@@ -1556,7 +1609,7 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
     let mut pos = 0usize;
     if batched && ids.len() >= 2 && (prog.max_batch as usize) >= ids.len() {
         prog.run(&ids, 0, &mut out)?;
-        prog.reference_step(&mem, &ids, 0, &mut exact);
+        prog.reference_step(&mem, &ids, 0, &mut exact)?;
         pos = ids.len();
         step = ids.len() - 1;
         compare(step, &out, &exact, rep);
@@ -1570,7 +1623,7 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         };
         let toks = [t];
         prog.run(&toks, pos, &mut out)?;
-        prog.reference_step(&mem, &toks, pos, &mut exact);
+        prog.reference_step(&mem, &toks, pos, &mut exact)?;
         compare(step, &out, &exact, rep);
         pos += 1;
         step += 1;
@@ -1607,40 +1660,67 @@ pub mod reference {
         pub exact: bool,
     }
 
-    fn at(s: &Mem, va: u64) -> *mut u8 {
-        let inside = |base: u64, len: usize| va >= base && va < base + len as u64;
+    /// `len` bytes at `va`, all inside one region, or `Err`. Every pointer
+    /// [`exec`] dereferences comes from here, so an op whose shape or
+    /// pointers don't fit the regions is an error, never a stray access
+    /// (this runs from `slm gpu opcheck` and `slm gpu golden`).
+    fn at(s: &Mem, va: u64, len: usize) -> Result<*mut u8, &'static str> {
+        let inside = |base: u64, size: usize| {
+            va >= base && (va - base).checked_add(len as u64).is_some_and(|end| end <= size as u64)
+        };
         if inside(s.step_va, s.step_len) {
-            (s.step + (va - s.step_va) as usize) as *mut u8
+            Ok((s.step + (va - s.step_va) as usize) as *mut u8)
         } else if inside(s.data_va, s.data_len) {
-            (s.data + (va - s.data_va) as usize) as *mut u8
+            Ok((s.data + (va - s.data_va) as usize) as *mut u8)
         } else if inside(s.weights_va, s.weights_len) {
-            (s.weights + (va - s.weights_va) as usize) as *mut u8
+            Ok((s.weights + (va - s.weights_va) as usize) as *mut u8)
         } else {
-            panic!("reference: unmapped VA {:#x}", va);
+            Err("reference: op reaches outside the program's memory")
         }
     }
 
+    fn bytes(n: usize, size: usize) -> Result<usize, &'static str> {
+        n.checked_mul(size).ok_or("reference: op too large")
+    }
+
     fn u16s<'a>(p: *const u8, n: usize) -> &'a [u16] {
+        // SAFETY: `p` came from `at` with at least `n * 2` bytes, and the
+        // regions are FP16-aligned (256 B arena offsets, 2 B element strides).
         unsafe { core::slice::from_raw_parts(p as *const u16, n) }
     }
     fn u16s_mut<'a>(p: *mut u8, n: usize) -> &'a mut [u16] {
+        // SAFETY: as `u16s`; the caller holds no other slice over this range.
         unsafe { core::slice::from_raw_parts_mut(p as *mut u16, n) }
     }
+    fn rd_u32(p: *const u8, i: usize) -> u32 {
+        // SAFETY: `p` came from `at` with room for `i + 1` u32s.
+        unsafe { core::ptr::read_unaligned((p as *const u32).add(i)) }
+    }
+    fn rd_f32(p: *const u8, i: usize) -> f32 {
+        // SAFETY: `p` came from `at` with room for `i + 1` f32s.
+        unsafe { core::ptr::read_unaligned((p as *const f32).add(i)) }
+    }
 
-    pub fn exec(s: &Mem, op: &ProgOp) {
+    /// Run `op` on the CPU over `s`. `Err` for an op this reference can't
+    /// run or whose memory doesn't fit `s`; nothing panics.
+    pub fn exec(s: &Mem, op: &ProgOp) -> Result<(), &'static str> {
         let rows = op.rows as usize;
         let [a, b, c, d, e] = op.ptr;
         match op.kernel {
             x if x == Kernel::EmbedQ4k as u32 || x == Kernel::EmbedQ6k as u32 => {
                 let quant = if x == Kernel::EmbedQ4k as u32 { GgmlType::Q4_K } else { GgmlType::Q6_K };
                 let n = op.dim[0] as usize;
-                let row_bytes = crate::inference::quant::quant_row_bytes(quant, n).expect("row bytes");
-                let (ip, tp, op_) = (at(s, a), at(s, b), at(s, c));
+                let row_bytes = crate::inference::quant::quant_row_bytes(quant, n).ok_or("reference: bad row")?;
+                let ip = at(s, a, bytes(rows, 4)?)?;
+                let op_ = at(s, c, bytes(rows, bytes(n, 2)?)?)?;
                 let mut f = alloc::vec![0.0f32; n + 256];
                 for r in 0..rows {
-                    let id = unsafe { *(ip as *const u32).add(r) } as usize;
-                    let w = unsafe { core::slice::from_raw_parts(tp.add(id * row_bytes), row_bytes) };
-                    dequantize_row_any(quant, w, &mut f[..n]).expect("dequant");
+                    let id = rd_u32(ip, r) as u64;
+                    let tp = at(s, b.wrapping_add(id.wrapping_mul(row_bytes as u64)), row_bytes)?;
+                    // SAFETY: `at` checked `row_bytes` at `tp`.
+                    let w = unsafe { core::slice::from_raw_parts(tp, row_bytes) };
+                    dequantize_row_any(quant, w, &mut f[..n]).ok_or("reference: dequant failed")?;
+                    // SAFETY: row r is inside the `rows * n * 2` bytes checked at `op_`.
                     let o = u16s_mut(unsafe { op_.add(r * n * 2) }, n);
                     for j in 0..n {
                         o[j] = f32_to_f16(f[j]);
@@ -1651,9 +1731,13 @@ pub mod reference {
                 // As slm_rmsnorm: F32 gamma, F32 accumulator.
                 let n = op.dim[0] as usize;
                 let eps = f32::from_bits(op.scal[0]);
-                let (xp, gp, op_) = (at(s, a), at(s, b), at(s, c));
+                let xp = at(s, a, bytes(rows, bytes(n, 2)?)?)?;
+                let gp = at(s, b, bytes(n, 4)?)?;
+                let op_ = at(s, c, bytes(rows, bytes(n, 2)?)?)?;
                 for r in 0..rows {
+                    // SAFETY: row r is inside the ranges checked above.
                     let x = u16s(unsafe { xp.add(r * n * 2) }, n).to_vec();
+                    // SAFETY: as above.
                     let o = u16s_mut(unsafe { op_.add(r * n * 2) }, n);
                     let mut acc = 0.0f32;
                     for &v in &x {
@@ -1662,8 +1746,7 @@ pub mod reference {
                     }
                     let inv = 1.0 / crate::inference::mathf::sqrtf(acc / n as f32 + eps);
                     for j in 0..n {
-                        let g = unsafe { core::ptr::read_unaligned((gp as *const f32).add(j)) };
-                        o[j] = f32_to_f16(f16_to_f32(x[j]) * inv * g);
+                        o[j] = f32_to_f16(f16_to_f32(x[j]) * inv * rd_f32(gp, j));
                     }
                 }
             }
@@ -1672,15 +1755,19 @@ pub mod reference {
                 let heads = op.dim[0] as usize;
                 let hd = op.dim[1] as usize;
                 let half = hd / 2;
-                assert_eq!(a, b, "the plan runs RoPE in place");
-                let (vp, lp, pp) = (at(s, a), at(s, c), at(s, d));
+                if a != b {
+                    return Err("reference: RoPE runs in place in this plan");
+                }
+                let vp = at(s, a, bytes(rows, bytes(heads, bytes(hd, 2)?)?)?)?;
+                let pp = at(s, d, bytes(rows, 4)?)?;
                 for r in 0..rows {
-                    let pos = unsafe { *(pp as *const u32).add(r) } as usize;
-                    let lut = unsafe { (lp as *const f32).add(pos * hd) };
+                    let pos = rd_u32(pp, r) as u64;
+                    let lut = at(s, c.wrapping_add(pos.wrapping_mul(hd as u64 * 4)), bytes(hd, 4)?)?;
                     for h in 0..heads {
+                        // SAFETY: row r, head h is inside the range checked at `vp`.
                         let v = u16s_mut(unsafe { vp.add((r * heads + h) * hd * 2) }, hd);
                         for i in 0..half {
-                            let (cs, sn) = unsafe { (*lut.add(2 * i), *lut.add(2 * i + 1)) };
+                            let (cs, sn) = (rd_f32(lut, 2 * i), rd_f32(lut, 2 * i + 1));
                             let v0 = f16_to_f32(v[i]);
                             let v1 = f16_to_f32(v[i + half]);
                             v[i] = f32_to_f16(v0 * cs - v1 * sn);
@@ -1690,8 +1777,8 @@ pub mod reference {
                 }
             }
             x if x == Kernel::SwiGlu as u32 => {
-                let n = rows * op.dim[0] as usize;
-                let (gp, up, op_) = (at(s, a), at(s, b), at(s, c));
+                let n = bytes(rows, op.dim[0] as usize)?;
+                let (gp, up, op_) = (at(s, a, bytes(n, 2)?)?, at(s, b, bytes(n, 2)?)?, at(s, c, bytes(n, 2)?)?);
                 let mut g = u16s(gp, n).to_vec();
                 swiglu_elementwise(&mut g, u16s(up, n), n);
                 u16s_mut(op_, n).copy_from_slice(&g);
@@ -1699,30 +1786,42 @@ pub mod reference {
             x if x == Kernel::Gqa as u32 => {
                 // Query row r sees positions 0..=pos[r].
                 let (nq, nkv, hd) = (op.dim[0] as usize, op.dim[1] as usize, op.dim[2] as usize);
-                let (qp, kp, vp, pp, op_) = (at(s, a), at(s, b), at(s, c), at(s, d), at(s, e));
+                let qrow = bytes(nq, bytes(hd, 2)?)?;
+                let qp = at(s, a, bytes(rows, qrow)?)?;
+                let pp = at(s, d, bytes(rows, 4)?)?;
+                let op_ = at(s, e, bytes(rows, qrow)?)?;
                 for r in 0..rows {
-                    let seq = unsafe { *(pp as *const u32).add(r) } as usize + 1;
-                    let q = u16s(unsafe { qp.add(r * nq * hd * 2) }, nq * hd);
+                    let seq = rd_u32(pp, r) as usize + 1;
+                    let kv = bytes(seq, bytes(nkv, bytes(hd, 2)?)?)?;
+                    let (kp, vp) = (at(s, b, kv)?, at(s, c, kv)?);
+                    // SAFETY: row r is inside the ranges checked at `qp` and `op_`.
+                    let q = u16s(unsafe { qp.add(r * qrow) }, nq * hd);
                     let k = u16s(kp, seq * nkv * hd);
                     let v = u16s(vp, seq * nkv * hd);
-                    let o = u16s_mut(unsafe { op_.add(r * nq * hd * 2) }, nq * hd);
+                    // SAFETY: as above.
+                    let o = u16s_mut(unsafe { op_.add(r * qrow) }, nq * hd);
                     let mut scratch = alloc::vec![0.0f32; seq];
-                    gqa_decode_step(q, k, v, nq, nkv, hd, seq, &mut scratch, o).expect("gqa");
+                    gqa_decode_step(q, k, v, nq, nkv, hd, seq, &mut scratch, o).ok_or("reference: gqa failed")?;
                 }
             }
             x if x == Kernel::MmQ4k as u32 || x == Kernel::MmQ6k as u32 => {
                 let quant = if x == Kernel::MmQ4k as u32 { GgmlType::Q4_K } else { GgmlType::Q6_K };
                 let (kk, n) = (op.dim[0] as usize, op.dim[1] as usize);
                 let f16_out = op.scal[0] & MM_OUT_F16 != 0;
-                let (xp, wp, op_) = (at(s, a), at(s, b), at(s, c));
-                let bias = if d != 0 { Some(at(s, d) as *const f32) } else { None };
-                let row_bytes = crate::inference::quant::quant_row_bytes(quant, kk).expect("row bytes");
+                let row_bytes = crate::inference::quant::quant_row_bytes(quant, kk).ok_or("reference: bad row")?;
+                let xp = at(s, a, bytes(rows, bytes(kk, 2)?)?)?;
+                let wp = at(s, b, bytes(n, row_bytes)?)?;
+                let op_ = at(s, c, bytes(rows, bytes(n, if f16_out { 2 } else { 4 })?)?)?;
+                let bias = if d != 0 { Some(at(s, d, bytes(n, 4)?)? as *const u8) } else { None };
+                // SAFETY: `at` checked `n * row_bytes` at `wp`.
                 let w = unsafe { core::slice::from_raw_parts(wp as *const u8, n * row_bytes) };
-                let mut q8 = alloc::vec![0u8; crate::inference::quant::q8_k_byte_size(kk).unwrap()];
+                let q8_len = crate::inference::quant::q8_k_byte_size(kk).ok_or("reference: bad row")?;
+                let mut q8 = alloc::vec![0u8; q8_len];
                 let mut dq = alloc::vec![0.0f32; kk + 256];
                 let mut af = alloc::vec![0.0f32; kk];
                 let mut res = alloc::vec![0.0f32; n];
                 for r in 0..rows {
+                    // SAFETY: row r is inside the range checked at `xp`.
                     let acts = u16s(unsafe { xp.add(r * kk * 2) }, kk);
                     if s.exact {
                         for (a, &h) in af.iter_mut().zip(acts.iter()) {
@@ -1730,7 +1829,7 @@ pub mod reference {
                         }
                         for j in 0..n {
                             dequantize_row_any(quant, &w[j * row_bytes..(j + 1) * row_bytes], &mut dq[..kk])
-                                .expect("dequant");
+                                .ok_or("reference: dequant failed")?;
                             let mut acc = 0.0f64;
                             for t in 0..kk {
                                 acc += dq[t] as f64 * af[t] as f64;
@@ -1739,26 +1838,27 @@ pub mod reference {
                         }
                     } else {
                         matmul_quant_rows(quant, w, n, kk, acts, &mut q8, &mut dq, &mut af, &mut res)
-                            .expect("matmul");
+                            .ok_or("reference: matmul failed")?;
                     }
                     for j in 0..n {
                         let mut v = res[j];
                         if let Some(bp) = bias {
-                            v += unsafe { core::ptr::read_unaligned(bp.add(j)) };
+                            v += rd_f32(bp, j);
                         }
+                        // SAFETY: element (r, j) is inside the range checked at `op_`.
                         unsafe {
                             if f16_out {
                                 *(op_ as *mut u16).add(r * n + j) = f32_to_f16(v);
                             } else {
-                                *(op_ as *mut f32).add(r * n + j) = v;
+                                core::ptr::write_unaligned((op_ as *mut f32).add(r * n + j), v);
                             }
                         }
                     }
                 }
             }
             x if x == Kernel::Add as u32 => {
-                let n = rows * op.dim[0] as usize;
-                let (ap, bp, op_) = (at(s, a), at(s, b), at(s, c));
+                let n = bytes(rows, op.dim[0] as usize)?;
+                let (ap, bp, op_) = (at(s, a, bytes(n, 2)?)?, at(s, b, bytes(n, 2)?)?, at(s, c, bytes(n, 2)?)?);
                 let aa = u16s(ap, n).to_vec();
                 let bb = u16s(bp, n).to_vec();
                 let o = u16s_mut(op_, n);
@@ -1766,10 +1866,10 @@ pub mod reference {
                     o[i] = add_f16(aa[i], bb[i]);
                 }
             }
-            k => panic!("soft GPU: unknown kernel {k}"),
+            _ => return Err("reference: unknown kernel"),
         }
+        Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1875,7 +1975,11 @@ impl OpCheck {
             core::ptr::write_bytes(self.data_cpu as *mut u8, 0, self.data_bytes);
         }
         fill(self);
-        reference::exec(&self.mem, op);
+        if let Err(why) = reference::exec(&self.mem, op) {
+            self.report(name, op, 0, 0, 0, st.gpu_ns, why);
+            self.bad += 1;
+            return;
+        }
         // SAFETY: as above.
         let cpu = unsafe { core::slice::from_raw_parts(outp, out_n * esz) };
         let (mut max_err, mut sq, mut max_val, mut over) = (0.0f32, 0.0f32, 0.0f32, 0u32);
@@ -1928,12 +2032,14 @@ impl OpCheck {
 /// CPU reference with random activations. Returns how many checks failed.
 pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
     let info = crate::slm::registry::get_info(model as usize).ok_or("model not loaded")?;
-    let (weights, wlen, d, rope_base, arch) = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+    // The pin keeps `slm unload` from freeing the weights while the check
+    // has them mapped and reads them on the CPU (#475 W5).
+    let (weights, wlen, d, rope_base, arch, _pin) = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
         let w = slm.weight_bytes().map(|b| (b.as_ptr() as usize, b.len()));
         let d = ModelDesc::from_slm(slm, info.vocab_size);
-        (w, d, slm.arch().rope_freq_base, slm.arch().architecture)
+        (w, d, slm.arch().rope_freq_base, slm.arch().architecture, crate::slm::registry::pin_for_gpu(slm))
     })
-    .map(|(w, d, r, a)| (w.map_or(0, |x| x.0), w.map_or(0, |x| x.1), d, r, a))
+    .map(|(w, d, r, a, pin)| (w.map_or(0, |x| x.0), w.map_or(0, |x| x.1), d, r, a, pin))
     .ok_or("model not loaded")?;
     let d = d?;
     let dims = d.dims;
@@ -2220,7 +2326,7 @@ pub mod soft {
     }
 
     fn exec(s: &mut Soft, op: &ProgOp) {
-        reference::exec(&mem_of(s), op);
+        reference::exec(&mem_of(s), op).unwrap();
     }
 
     #[no_mangle]
@@ -2960,5 +3066,178 @@ mod tests {
         assert_eq!(first, again);
         assert_eq!(crate::rust_slm_session_close(sid), 0);
         reset_for_tests();
+    }
+    /// #475 W5: `slm unload` freed the weights an idle session's GPU program
+    /// still had mapped. The program pins its model until it is dropped.
+    #[test]
+    fn unload_refused_while_an_idle_session_holds_a_program() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        assert_eq!(snapshot(sid).path, ForwardPath::Program);
+        assert!(registry::gpu_pinned(model as usize));
+        assert_eq!(crate::rust_slm_unload(model), crate::SLM_ERR_BUSY);
+        assert!(registry::get_info(model as usize).is_some(), "still loaded");
+        // Back on the CPU, the program and its pin are gone.
+        assert_eq!(crate::rust_slm_session_configure(sid, 1, 4), 0);
+        assert!(!registry::gpu_pinned(model as usize));
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        assert_eq!(crate::rust_slm_unload(model), 0);
+        reset_for_tests();
+    }
+
+    fn build_tiny_result(model: u32) -> Result<Box<GpuProgram>, &'static str> {
+        let vocab = registry::get_info(model as usize).unwrap().vocab_size;
+        with_loaded_slm(model as usize, |slm| {
+            let a = slm.arch();
+            let t = crate::inference::ops_transformer::RopeTable::new(
+                a.head_dim as usize,
+                16,
+                a.rope_freq_base,
+                crate::inference::ops_transformer::RopePairing::HalfSplit,
+            );
+            GpuProgram::build(slm, 16, vocab, &t.cos_sin)
+        })
+        .unwrap()
+        .map_err(|e| match e {
+            BuildError::NoBackend => "no backend",
+            BuildError::Failed(w) => w,
+        })
+    }
+
+    /// #475 W4: the program read GGUF tensors at the plan's shapes without
+    /// checking them. A tensor whose dims, type or length disagree with the
+    /// model's shape now fails the build, and the session stays on the CPU
+    /// with the reason.
+    #[test]
+    fn malformed_tensors_fail_the_build() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        assert!(build_tiny_result(model).is_ok());
+        let set = |name: &str, f: &dyn Fn(&mut crate::slm::registry::OwnedTensorInfo)| {
+            registry::with_loaded_slm_mut(model as usize, |slm| {
+                f(registry::LoadedSlm::tensor_info_mut_for_tests(slm, name).unwrap())
+            })
+            .unwrap();
+        };
+        // Same byte count, transposed: only the dims check catches it.
+        set("blk.0.attn_q.weight", &|t| t.dims.swap(0, 1));
+        let q_square = registry::with_loaded_slm(model as usize, |slm| {
+            let d = &slm.tensor_info("blk.0.attn_q.weight").unwrap().dims;
+            d[0] == d[1]
+        })
+        .unwrap();
+        if !q_square {
+            assert_eq!(
+                build_tiny_result(model).err(),
+                Some("a weight tensor's dims don't match the model's shape")
+            );
+        }
+        set("blk.0.attn_q.weight", &|t| t.dims.swap(0, 1));
+        // One row short of the layer's width.
+        set("blk.1.ffn_down.weight", &|t| t.dims[1] -= 1);
+        assert_eq!(
+            build_tiny_result(model).err(),
+            Some("a weight tensor's dims don't match the model's shape")
+        );
+        set("blk.1.ffn_down.weight", &|t| t.dims[1] += 1);
+        // A bias of the right count but the wrong type.
+        set("blk.0.attn_k.bias", &|t| t.ggml_type = GgmlType::F16.0);
+        assert_eq!(build_tiny_result(model).err(), Some("a bias is not F32 of the layer's width"));
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 0, 4), 0);
+        assert_eq!(snapshot(sid).path, ForwardPath::Cpu);
+        assert_eq!(snapshot(sid).gpu_note, Some("a bias is not F32 of the layer's width"));
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        set("blk.0.attn_k.bias", &|t| t.ggml_type = GgmlType::F32.0);
+        assert!(build_tiny_result(model).is_ok());
+        reset_for_tests();
+    }
+
+    /// Review suggestion: `run` didn't check positions against the context
+    /// the arena was built for, so a step past it wrote the next layer's KV.
+    #[test]
+    fn run_refuses_positions_past_the_context() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let ids = r.u32s("prompt.ids").unwrap();
+        let mut p = build_tiny(model, 8);
+        let mut out = Vec::new();
+        assert!(p.run(&[ids[0]], 7, &mut out).is_ok());
+        assert_eq!(p.run(&[ids[0]], 8, &mut out), Err("position past the program's context"));
+        if ids.len() >= 2 {
+            assert_eq!(p.run(&ids[..2], 7, &mut out), Err("position past the program's context"));
+        }
+        assert_eq!(p.run(&[ids[0]], usize::MAX, &mut out), Err("position past the program's context"));
+        drop(p);
+        reset_for_tests();
+    }
+
+    /// #475 W12: the CPU reference runs from `slm gpu opcheck` and `slm gpu
+    /// golden`. An op it can't run, or one reaching outside the program's
+    /// memory, panicked the kernel; it is now an error.
+    #[test]
+    fn reference_rejects_bad_ops_without_panicking() {
+        let mut data = alloc::vec![0u8; 4096];
+        let mut step = alloc::vec![0u8; 256];
+        let mem = reference::Mem {
+            weights_va: 0x1000_0000,
+            weights: 0,
+            weights_len: 0,
+            data_va: 0x2000_0000,
+            data: data.as_mut_ptr() as usize,
+            data_len: data.len(),
+            step_va: 0x3000_0000,
+            step: step.as_mut_ptr() as usize,
+            step_len: step.len(),
+            exact: true,
+        };
+        let add = |n: u32, c: u64| ProgOp {
+            kernel: Kernel::Add as u32,
+            rows: 1,
+            dim: [n, 0, 0, 0],
+            ptr: [0x2000_0000, 0x2000_0400, c, 0, 0],
+            scal: [0, 0],
+        };
+        assert_eq!(reference::exec(&mem, &add(256, 0x2000_0800)), Ok(()));
+        // Output runs off the end of the data region.
+        assert!(reference::exec(&mem, &add(256, 0x2000_0F00)).is_err());
+        // A pointer into nothing.
+        assert!(reference::exec(&mem, &add(256, 0x9000_0000)).is_err());
+        // Wrapping sizes.
+        assert!(reference::exec(&mem, &add(u32::MAX, 0x2000_0800)).is_err());
+        let mut bad = add(16, 0x2000_0800);
+        bad.kernel = 99;
+        assert_eq!(reference::exec(&mem, &bad), Err("reference: unknown kernel"));
+    }
+
+    /// #475: the q8_1 emulation went into the production b1/b8/bs matmuls as
+    /// a runtime flag SLM-OS never sets, and decode fell from 49.5 to 47.8
+    /// tok/s (19.37 against 20.08 ms of GPU per step on jetson-nano-2). The
+    /// library is built without it now. These budgets are the sizes of that
+    /// build with CUDA 12.0; a kernel that grows past one needs its decode
+    /// measured again before the budget moves.
+    #[test]
+    fn production_matmuls_stay_inside_their_code_budget() {
+        const MANIFEST: &str = include_str!("../../../scripts/cuda/slm/MANIFEST.json");
+        let code_bytes = |name: &str| -> u64 {
+            let key = alloc::format!("\"name\": \"{name}\"");
+            let at = MANIFEST.find(&key).unwrap_or_else(|| panic!("{name} missing"));
+            let rest = &MANIFEST[at..];
+            let c = rest.find("\"code_bytes\": ").unwrap() + "\"code_bytes\": ".len();
+            rest[c..].split(|ch: char| !ch.is_ascii_digit()).next().unwrap().parse().unwrap()
+        };
+        for (name, budget) in [
+            ("slm_mm_q4k_hmma_b1", 11904),
+            ("slm_mm_q6k_hmma_b1", 15232),
+            ("slm_mm_q4k_hmma_b8", 6912),
+            ("slm_mm_q6k_hmma_b8", 10112),
+            ("slm_mm_q4k_hmma_bs", 16000),
+        ] {
+            let got = code_bytes(name);
+            assert!(got <= budget, "{name}: {got} bytes of SASS, budget {budget}");
+        }
     }
 }

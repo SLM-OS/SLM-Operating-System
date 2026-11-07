@@ -37,6 +37,31 @@ SLM_INL float slm_xq_d(const half *row, int K, int flags, int blk)
 {
     return (flags & SLM_MM_XQ) ? reinterpret_cast<const float *>(row + K)[blk] : 1.0f;
 }
+/* b1 and b8 take XQ as a runtime flag only when built with
+ * SLM_MM_XQ_EMULATE (the harness's teacher forcing, run-teacher.sh). The
+ * operator library is built without it: the flag test and the extra multiply
+ * per accumulate cost the decode step about 0.8 ms (#475: 47.8 tok/s against
+ * 49.5 before the q8_1 emulation went in). bs has it as a template parameter. */
+#ifdef SLM_MM_XQ_EMULATE
+#define SLM_XQ_RT true
+#else
+#define SLM_XQ_RT false
+#endif
+SLM_INL size_t slm_xstride_rt(int K, int flags)
+{
+    return SLM_XQ_RT ? slm_xstride(K, flags) : (size_t)K;
+}
+SLM_INL float slm_xq_d_rt(const half *row, int K, int flags, int blk)
+{
+    return SLM_XQ_RT ? slm_xq_d(row, K, flags, blk) : 1.0f;
+}
+/* One Q4_K accumulate, k * c - off * s, scaled by the x block's d under XQ.
+ * Without XQ it keeps the two-FMA form the kernels had before q8_1. */
+template <bool XQ>
+SLM_INL float slm_acc_q4(float acc, float d, float k, float c, float off, float s)
+{
+    return XQ ? fmaf(d, fmaf(-off, s, k * c), acc) : fmaf(-off, s, fmaf(k, c, acc));
+}
 #define SLM_MM_BSTART(flags) (((flags) >> 8) & 0xFF)
 #define SLM_MM_BCOUNT(flags) (((flags) >> 16) & 0xFF)
 

@@ -6,7 +6,7 @@
 cd "$(dirname "$0")" || exit 2
 export PATH=/usr/local/cuda/bin:$PATH
 M=/root/qwen2.5-1.5b-instruct-q4_k_m.gguf
-nvcc -O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm slm_forward.cu -o slm_forward 2>&1 |
+nvcc -O3 -std=c++17 -arch=sm_87 -DSLM_MM_XQ_EMULATE -Xcompiler -fopenmp -lgomp -I../slm slm_forward.cu -o slm_forward 2>&1 |
     grep -v -E "warning|Remark|^$" | tail -5
 OMP_NUM_THREADS=6 timeout 90 ./slm_forward ../fixtures/tiny_qwen2.gguf \
     --golden ../fixtures/tiny_qwen2_greedy.rec --prefill 8 --decode 8 --ctx 128 > fwd-tiny.log 2>&1
