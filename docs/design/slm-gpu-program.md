@@ -163,3 +163,13 @@ Greedy text against llama.cpp CUDA (`run-teacher.sh`, p1 to p3, 256 tokens, llam
 | q8_1, as llama.cpp CUDA | 99.6, 98.4, 98.4 percent | 0.126 logits | 50, 83, 20 |
 
 Every disagreement is a near tie. The FP16 divergences are the ones seen on SLM-OS: "page tables. The" hardware/page, "She had" always/never, "repeatedly" attempt/try. Emulating q8_1 does not track llama.cpp longer, so it is not adopted. On p2, the FP16 harness output does not loop (no sentence more than twice). The q8_1 run loops on "It was a creature that was unlike any she had ever seen before." (8 times), the sentence SLM-OS repeats. So the loop follows from which near-tie branch is taken; it is not a systematic error.
+
+## Concurrency and failure handling
+
+- One lock in `slm_prog.c` covers the global program tables, writes to the shared GPU VM made by `slm_prog`, and each step from submit to the end of its wait. A waiter yields instead of spinning with IRQs masked, and gets `SLM_PROG_ERR_BUSY` after 6 s. A close that cannot take the lock is finished by the holder on release. GPU VM writes outside `slm_prog` (cold bring-up, oplib) are not covered by this lock.
+- The in-flight flag records its owning session, so one session cannot clear another's.
+- After a step timeout or a failed L2 evict, closing the session removes the PTEs but deliberately leaks the arena, control pages and VA (one log line), because dirty GPU lines could otherwise land on reused pages.
+- A GPU program pins its model: `slm unload` returns BUSY while one is mapped.
+- At build, each tensor's dims, type and byte length are checked against the plan; a mismatch keeps the session on the CPU and says why.
+- The q8_1 activation emulation (ADR 0004) is compiled into the matmul kernels only with `-DSLM_MM_XQ_EMULATE` (harness use). Having it in the production kernels cost about 0.7 ms per decode step (47.8 instead of 49.4 tok/s).
+- `slm gpu golden` exists only in a build with `SLM_GPU_GOLDEN=ON`.
