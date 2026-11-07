@@ -318,7 +318,7 @@ __global__ void slm_gqa_w8(const half *q, const half *k, const half *v,
         }
         const float logit = acc * inv_sqrt;
         if (logit > mx) {
-            const float f = first ? 0.0f : expf(mx - logit);
+            const float f = first ? 0.0f : __expf(mx - logit);
             sum *= f;
             for (int c = 0; c < chunks; c++) {
                 acc_w[(c << 5) + l] *= f;
@@ -326,7 +326,7 @@ __global__ void slm_gqa_w8(const half *q, const half *k, const half *v,
             mx = logit;
         }
         first = false;
-        const float p = expf(logit - mx);
+        const float p = __expf(logit - mx);
         sum += p;
         for (int c = 0; c < chunks; c++) {
             const int i = (c << 5) + l;
@@ -411,5 +411,31 @@ __global__ void slm_rmsnorm_w8(const half *x, const float *gamma, half *out,
         if (i < n) {
             o[i] = __float2half(__half2float(xr[i]) * inv * gamma[i]);
         }
+    }
+}
+
+/* ---- 8-warp elementwise variants: grid (ceil(total/256)), block (256,1,1) ----
+ *
+ * Same arguments as slm_add and slm_swiglu. A prefill's SwiGLU is 564000 elements,
+ * so at one warp per CTA most of its time could be CTA launches. The SwiGLU also
+ * uses __expf and __fdividef, which are within 2 ULP of FP32 and well under the
+ * FP16 rounding of the result; the harness checks it against the reference.
+ */
+
+__global__ void slm_add_w8(const half *a, const half *b, half *out, int total)
+{
+    const int i = (blockIdx.x << 8) + threadIdx.x;
+    if (i < total) {
+        out[i] = __float2half(__half2float(a[i]) + __half2float(b[i]));
+    }
+}
+
+__global__ void slm_swiglu_w8(const half *gate, const half *up, half *out, int total)
+{
+    const int i = (blockIdx.x << 8) + threadIdx.x;
+    if (i < total) {
+        const float g = __half2float(gate[i]);
+        const half s = __float2half(__fdividef(g, 1.0f + __expf(-g)));
+        out[i] = __float2half(__half2float(s) * __half2float(up[i]));
     }
 }

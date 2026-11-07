@@ -132,8 +132,10 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
     const bool has1 = gr < 7 && r1 < N;
     const uint8_t *w0 = W + (has0 ? r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? r1 : 0) * row_bytes;
-    const bool xact = gr < B;
-    const half *xrow = x + (size_t)gr * K;
+    /* First batch of this CTA's x tile. */
+    const int base = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y * 8 : 0;
+    const bool xact = base + gr < B;
+    const half *xrow = x + (size_t)(base + gr) * K;
     /* Row 15's bits read as zero, which encodes exactly 1.0. */
     const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
     const int off4 = 4 * c;
@@ -202,8 +204,8 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
         }
     }
 
-    const int b0 = 2 * c;
-    const int b1 = 2 * c + 1;
+    const int b0 = base + 2 * c;
+    const int b1 = base + 2 * c + 1;
     const float bias0 = (bias && has0) ? bias[r0] : 0.0f;
     const float bias1 = (bias && has1) ? bias[r1] : 0.0f;
     if (has0 && b0 < B) {
