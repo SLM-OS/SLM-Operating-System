@@ -811,6 +811,21 @@ static void test_run_other_failures(void)
     pmm_free_pages(w, wp);
 }
 
+/* The arena works without a model: what `slm gpu smoke` opens. */
+static void test_session_without_weights(void)
+{
+    fake_up();
+    struct slm_prog_open_args a = open_args(NULL);
+    a.weights_bytes = 0;
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_HEX64(0, o.weights_gpu_va);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.data_cpu,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.data_gpu_va));
+    slm_prog_close(o.handle);
+    fake_down();
+}
+
 static void test_kernel_lookup_and_batch(void)
 {
     fake_up();
@@ -978,6 +993,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_session_maps_and_frees);
     RUN_TEST(test_session_scattered_weights);
     RUN_TEST(test_session_open_failures);
+    RUN_TEST(test_session_without_weights);
     RUN_TEST(test_run_ok_and_patch);
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);

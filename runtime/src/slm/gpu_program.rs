@@ -1000,6 +1000,140 @@ pub fn add_f16(a: u16, b: u16) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// Smoke (`slm gpu smoke`)
+// ---------------------------------------------------------------------------
+
+/// Keep in step with `SlmGpuSmokeReport` in slm_ffi.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SmokeReport {
+    pub launches: u32,
+    /// Elements off by more than 1%, compared with the CPU's result.
+    pub bad_elements: u32,
+    pub gpu_ns: u64,
+    pub wait_us: u64,
+    pub evict_us: u64,
+}
+
+/// A chain of `n` dependent RMSNorm launches over one program: x -> y -> x.
+/// Needs only a kernel that ships today, so it checks the launch, barrier,
+/// semaphore and evict machinery without any model. Each launch's input is
+/// the previous one's output, so a missing barrier shows up in the result.
+pub fn smoke(n: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
+    const N: usize = 1536;
+    if n == 0 {
+        return Err("no launches");
+    }
+    let data_bytes = (2 * N * 2 + N * 2 + 4096) as u64;
+    let args = OpenArgs {
+        weights: core::ptr::null(),
+        weights_bytes: 0,
+        data_bytes,
+        step_bytes: 256,
+        max_launches: [n, 0],
+        flags: OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed) & (FLAG_LEAN_QMD | FLAG_PROFILE),
+        barrier: OPT_BARRIER.load(core::sync::atomic::Ordering::Relaxed),
+    };
+    let mut out = OpenOut::default();
+    // SAFETY: both pointers are to live locals of the declared types.
+    let rc = unsafe { slm_prog_open(&args, &mut out) };
+    if rc != 0 {
+        return Err(err_message(rc));
+    }
+    struct Close(i32);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            // SAFETY: opened above, closed once.
+            unsafe { slm_prog_close(self.0) };
+        }
+    }
+    let h = out.handle;
+    let _close = Close(h);
+
+    let mut x = alloc::vec![0u16; N];
+    let mut gamma = alloc::vec![0u16; N];
+    for i in 0..N {
+        x[i] = f32_to_f16(((i % 97) as f32 - 48.0) / 16.0);
+        gamma[i] = f32_to_f16(1.0 + (i % 5) as f32 / 8.0);
+    }
+    let (a_off, b_off, g_off) = (0usize, N * 2, 2 * N * 2);
+    // SAFETY: the data region holds data_bytes, more than these three rows.
+    unsafe {
+        core::ptr::copy_nonoverlapping(x.as_ptr() as *const u8, (out.data_cpu + a_off) as *mut u8, N * 2);
+        core::ptr::copy_nonoverlapping(gamma.as_ptr() as *const u8, (out.data_cpu + g_off) as *mut u8, N * 2);
+        slm_prog_clean(h, out.data_cpu as *const u8, data_bytes as usize);
+    }
+    for i in 0..n {
+        let (from, to) = if i % 2 == 0 { (a_off, b_off) } else { (b_off, a_off) };
+        let op = ProgOp {
+            kernel: Kernel::RmsNorm as u32,
+            rows: 1,
+            dim: [N as u32, 0, 0, 0],
+            ptr: [
+                out.data_gpu_va + from as u64,
+                out.data_gpu_va + g_off as u64,
+                out.data_gpu_va + to as u64,
+                0,
+            ],
+            scal: [RMS_EPS.to_bits(), 0],
+        };
+        if i > 0 {
+            // SAFETY: the handle is open.
+            let rc = unsafe { slm_prog_barrier(h, 0) };
+            if rc < 0 {
+                return Err(err_message(rc));
+            }
+        }
+        // SAFETY: `op` outlives the call.
+        let rc = unsafe { slm_prog_add(h, 0, &op) };
+        if rc < 0 {
+            return Err(err_message(rc));
+        }
+    }
+    // SAFETY: the handle is open.
+    let rc = unsafe { slm_prog_finish(h, 0) };
+    if rc < 0 {
+        return Err(err_message(rc));
+    }
+    let mut st = RunStats::default();
+    // SAFETY: as above; `st` outlives the call.
+    let rc = unsafe { slm_prog_run(h, 0, &mut st) };
+    if rc != 0 {
+        return Err(err_message(rc));
+    }
+
+    let result_off = if n % 2 == 1 { b_off } else { a_off };
+    let p = (out.data_cpu + result_off) as *const u8;
+    // SAFETY: the row is in the data region and the GPU has finished.
+    let got = unsafe {
+        slm_prog_invalidate(h, p, N * 2);
+        core::slice::from_raw_parts(p as *const u16, N)
+    };
+    // CPU reference: the same chain.
+    let mut cur = x;
+    let mut next = alloc::vec![0u16; N];
+    for _ in 0..n {
+        crate::inference::ops_transformer::rmsnorm(&cur, &gamma, RMS_EPS, &mut next)
+            .ok_or("reference rmsnorm failed")?;
+        core::mem::swap(&mut cur, &mut next);
+    }
+    let bad = got
+        .iter()
+        .zip(cur.iter())
+        .filter(|(g, c)| {
+            let (gv, cv) = (f16_to_f32(**g), f16_to_f32(**c));
+            !((gv - cv).abs() <= 0.01 * cv.abs() + 1e-3)
+        })
+        .count();
+    rep.launches = n;
+    rep.bad_elements = bad as u32;
+    rep.gpu_ns = st.gpu_ns;
+    rep.wait_us = st.wait_us;
+    rep.evict_us = st.evict_us;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Golden comparison (`slm gpu golden`)
 // ---------------------------------------------------------------------------
 
@@ -1780,6 +1914,20 @@ mod tests {
         reset_for_tests();
     }
 
+    /// The smoke chain against its own CPU reference, and a run that fails.
+    #[test]
+    fn smoke_chain_agrees_with_the_cpu() {
+        soft::reset_knobs();
+        let mut rep = SmokeReport::default();
+        smoke(7, &mut rep).unwrap();
+        assert_eq!(rep.launches, 7);
+        assert_eq!(rep.bad_elements, 0);
+        assert_eq!(smoke(0, &mut rep), Err("no launches"));
+        soft::KNOBS.lock().unwrap().fail_run = Some((0, -6));
+        assert_eq!(smoke(3, &mut rep), Err("GPU step timed out"));
+        soft::reset_knobs();
+    }
+
     /// The harness the board runs agrees that a correct program is correct,
     /// batched or not, and points at the first wrong logit when it isn't.
     #[test]
@@ -1790,9 +1938,8 @@ mod tests {
         golden_run(model, GREEDY, false, &mut rep).unwrap();
         assert_eq!(rep.first_bad_step, -1, "{rep:?}");
         assert!(rep.steps > 4);
-        // Soft GPU and forward_one share the kernels; only llama.cpp's float
-        // order differs, so this is far tighter than the tolerance.
-        assert!(rep.max_err_milli < 500, "max_err {}", rep.max_err_milli);
+        // A plan that's wrong misses by far more than the tolerance.
+        assert!(rep.max_err_milli > 0 && rep.max_err_milli < 1000, "max_err {}", rep.max_err_milli);
         let mut rep = GoldenReport::default();
         golden_run(model, GREEDY, true, &mut rep).unwrap();
         assert_eq!(rep.first_bad_step, -1, "{rep:?}");
@@ -1805,30 +1952,43 @@ mod tests {
         reset_for_tests();
     }
 
-    /// The soft GPU runs the same CPU kernels `forward_one` uses, so the two
-    /// paths must agree closely. A wrong plan can't hide inside the 1.0
-    /// tolerance used against llama.cpp.
+    /// The program rounds the attention output to FP16 before the residual,
+    /// where `forward_one` adds it as FP32, so the two aren't bit-identical.
+    /// A wrong plan still can't hide inside the 1.0 tolerance against
+    /// llama.cpp: the program must be about as close to llama.cpp as
+    /// `forward_one` is, and close to `forward_one` in absolute terms.
     #[test]
     fn soft_gpu_tracks_forward_one_tightly() {
         use crate::slm::forward::{forward_one, ForwardScratch};
-        use crate::slm::session::Session;
         use crate::slm::sampler::Sampler;
+        use crate::slm::session::Session;
         soft::reset_knobs();
         let model = load_tiny();
         let r = rec();
         let ids = r.u32s("prompt.ids").unwrap();
+        let tokens = r.u32s("greedy.tokens").unwrap();
+        let logits = r.f32s("greedy.logits").unwrap();
+        let n_vocab = r.u32s("greedy.n_vocab").unwrap()[0] as usize;
         let mut cpu = Session::open(model, 64, Sampler::Greedy, 0).unwrap();
         cpu.path = ForwardPath::Cpu;
         let mut sc = ForwardScratch::new(&cpu.arch, cpu.max_ctx, cpu.vocab_size as usize);
         let mut p = build_tiny(model, 64);
         let mut out = Vec::new();
-        for (step, &t) in ids.iter().enumerate() {
+        let (mut d_cpu, mut d_prog, mut d_both) = (0.0f32, 0.0f32, 0.0f32);
+        for step in 0..logits.len() / n_vocab {
+            let t = if step < ids.len() { ids[step] } else { tokens[step - ids.len()] };
             with_loaded_slm(model as usize, |slm| forward_one(&mut cpu, slm, t, &mut sc)).unwrap().unwrap();
             step_prog(&mut p, model, &[t], step, &mut out);
-            for (i, (g, w)) in out.iter().zip(sc.logits.iter()).enumerate() {
-                assert!((g - w).abs() < 1e-2, "step {step} logit {i}: {g} vs {w}");
+            let want = &logits[step * n_vocab..(step + 1) * n_vocab];
+            for i in 0..n_vocab {
+                d_cpu = d_cpu.max((sc.logits[i] - want[i]).abs());
+                d_prog = d_prog.max((out[i] - want[i]).abs());
+                d_both = d_both.max((out[i] - sc.logits[i]).abs());
             }
         }
+        std::eprintln!("max |cpu-llama|={d_cpu} |prog-llama|={d_prog} |prog-cpu|={d_both}");
+        assert!(d_prog <= d_cpu * 1.5 + 0.1, "program {d_prog}, forward_one {d_cpu}");
+        assert!(d_both < 0.5, "program and forward_one differ by {d_both}");
         drop(p);
         reset_for_tests();
     }

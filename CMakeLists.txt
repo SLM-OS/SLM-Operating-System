@@ -1183,7 +1183,6 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_acr_blob.c
     kernel/tests/test_ga10b_pmu.c
     kernel/tests/test_ga10b_chan.c
-    kernel/tests/test_slm_prog.c
     kernel/tests/test_ga10b_grctx.c
     kernel/tests/test_ga10b_mnist_pipeline.c
     kernel/tests/test_ga10b_cold.c
@@ -1377,6 +1376,7 @@ endif()
 if(ENABLE_BOOT_TESTS)
     target_sources(slmos.elf PRIVATE
         kernel/tests/test_slm_golden.c
+        kernel/tests/test_slm_prog.c
         kernel/tests/slm_golden_embed.S)
     set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
     set_source_files_properties(
@@ -1391,8 +1391,8 @@ endif()
 # image, to compare the GPU program on hardware (#475). About 790 KB.
 option(SLM_GPU_GOLDEN "Embed the SLM golden fixture for `slm gpu golden`" OFF)
 if(SLM_GPU_GOLDEN)
-    target_sources(slmos PRIVATE kernel/src/slm_gpu_golden_embed.S)
-    target_compile_definitions(slmos PRIVATE SLM_GPU_GOLDEN)
+    target_sources(slmos.elf PRIVATE kernel/src/slm_gpu_golden_embed.S)
+    target_compile_definitions(slmos.elf PRIVATE SLM_GPU_GOLDEN)
     set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
     set_source_files_properties(
         kernel/src/slm_gpu_golden_embed.S

@@ -1944,7 +1944,7 @@ _Static_assert(sizeof(SlmStatsC) == 32,
 /* slm launch --gpu. Mirror of Rust's GpuMode. */
 #define SLM_GPU_AUTO  0u  /* follow the tier table, CPU fallback per op   */
 #define SLM_GPU_CPU   1u  /* never dispatch to the GPU for this session   */
-#define SLM_GPU_ON    2u  /* as auto; launch refuses if no op has a GPU tier */
+#define SLM_GPU_ON    2u  /* GPU program or nothing: launch refuses without one */
 
 /* rust_slm_prompt_ex flag: tokenize the text as given, mapping special
  * token names such as <|im_start|> to their ids, instead of rendering
@@ -2071,6 +2071,17 @@ typedef struct {
     int32_t max_err_milli;
     uint64_t gpu_us_per_token;
 } SlmGpuGoldenReport;
+
+typedef struct {
+    uint32_t launches;
+    uint32_t bad_elements;  /* over 1% from the CPU's result */
+    uint64_t gpu_ns;
+    uint64_t wait_us;
+    uint64_t evict_us;
+} SlmGpuSmokeReport;
+
+/* A chain of n RMSNorm launches in one program. 0, or -1 (console says why). */
+extern int32_t rust_slm_gpu_smoke(uint32_t n, SlmGpuSmokeReport *out);
 
 /* Compare a program on `model` with a *_greedy.rec fixture. 0, or -1 when
  * the program couldn't run (the console says why). */

@@ -293,16 +293,32 @@ impl Session {
     /// `--gpu on` with no program, and leaves the session as it was.
     pub fn choose_path(&mut self, mode: GpuMode) -> Result<(), &'static str> {
         if mode == GpuMode::Cpu {
-            self.gpu = None;
+            // Program's KV cache goes with it, so a session with history
+            // starts over: `slm launch` configures before any prompt.
+            if self.gpu.take().is_some() {
+                self.kv.ensure_storage();
+                self.kv.clear();
+            }
             self.gpu_note = None;
             self.gpu_mode = mode;
-            self.leave_program();
             self.path = ForwardPath::Cpu;
             return Ok(());
         }
         // A program in place stays: the kernel is the same either way.
         if self.gpu.is_some() {
             self.gpu_mode = mode;
+            return Ok(());
+        }
+        // The program starts with an empty cache; a session with history
+        // keeps what it has.
+        if self.kv.len != 0 {
+            const WHY: &str = "session already holds positions";
+            self.gpu_note = Some(WHY);
+            if mode == GpuMode::On {
+                return Err(WHY);
+            }
+            self.gpu_mode = mode;
+            self.path = ForwardPath::Cpu;
             return Ok(());
         }
         let vocab = self.vocab_size;
@@ -319,17 +335,6 @@ impl Session {
         });
         match built {
             Some(Ok(p)) => {
-                if self.kv.len != 0 {
-                    // The program starts with an empty cache; a session
-                    // with history keeps what it has.
-                    self.gpu_note = Some("session already holds positions");
-                    if mode == GpuMode::On {
-                        return Err("session already holds positions");
-                    }
-                    self.gpu_mode = mode;
-                    self.path = ForwardPath::Cpu;
-                    return Ok(());
-                }
                 self.kv.release_storage();
                 self.gpu = Some(p);
                 self.gpu_note = None;
@@ -355,11 +360,6 @@ impl Session {
             }
             None => Err("model not loaded"),
         }
-    }
-
-    /// Storage for the CPU path after a program held the KV cache.
-    fn leave_program(&mut self) {
-        self.kv.ensure_storage();
     }
 
     /// Request cooperative cancellation. The decoder loop notices before

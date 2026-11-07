@@ -40,9 +40,9 @@
 #include "pmm.h"
 #if !defined(PLATFORM_X86_64)
 #include "kbuf.h"
-#include "slm_prog.h"
 #endif
 #include "slm_ffi.h"
+#include "slm_prog.h"
 #include "boot_models.h"
 #include "string.h"
 #include "timer.h"
@@ -1339,9 +1339,33 @@ static int slm_gpu_golden(int argc, char *argv[])
 }
 #endif
 
+/* slm gpu smoke [n]: launch, barrier, semaphore and evict with no model. */
+static int slm_gpu_smoke(int argc, char *argv[])
+{
+    uint32_t n = 400u;
+    if (argc >= 4 && (shell_parse_uint(argv[3], &n) != 0 || n == 0u || n > 2048u)) {
+        shell_puts("Usage: slm gpu smoke [launches, 1..2048]\r\n");
+        return -1;
+    }
+    SlmGpuSmokeReport r;
+    if (rust_slm_gpu_smoke(n, &r) != 0) {
+        shell_puts("slm gpu smoke: FAIL, the program did not run\r\n");
+        return -1;
+    }
+    shell_printf("slm gpu smoke: %s, %lu launches, %lu bad elements, gpu %llu us "
+                 "(%llu ns/launch), wait %llu us, evict %llu us\r\n",
+                 r.bad_elements == 0u ? "PASS" : "FAIL",
+                 (unsigned long)r.launches, (unsigned long)r.bad_elements,
+                 (unsigned long long)(r.gpu_ns / 1000u),
+                 (unsigned long long)(r.gpu_ns / r.launches),
+                 (unsigned long long)r.wait_us, (unsigned long long)r.evict_us);
+    return r.bad_elements == 0u ? 0 : -1;
+}
+
 static int slm_gpu(int argc, char *argv[])
 {
     if (argc >= 3 && strcmp(argv[2], "opts") == 0) return slm_gpu_opts(argc, argv);
+    if (argc >= 3 && strcmp(argv[2], "smoke") == 0) return slm_gpu_smoke(argc, argv);
 #ifdef SLM_GPU_GOLDEN
     if (argc >= 3 && strcmp(argv[2], "golden") == 0) return slm_gpu_golden(argc, argv);
 #endif

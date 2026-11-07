@@ -341,6 +341,10 @@ static int map_weights_fresh(const struct slm_prog_backend *be, struct prog_wmap
         va_put(va, va_size);
         return rc == GA10B_CHAN_ERR_NOMEM ? SLM_PROG_ERR_NOMEM : SLM_PROG_ERR_MAP;
     }
+    /* The loader may have left dirty lines (a copy into PMM pages); GPU reads
+     * go to DRAM. Boot models were cleaned by the stub, this is then a no-op
+     * walk. Once per mapping, not per session. */
+    be->ops->cache_clean(be->ops->ctx, w->cpu, bytes);
     w->va = va;
     w->va_size = va_size;
     w->mapped = true;
@@ -461,7 +465,7 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
 {
     const struct slm_prog_backend *be = backend();
     if (!be) return SLM_PROG_ERR_NO_BACKEND;
-    if (!a || !out || !a->weights || a->weights_bytes == 0u || a->data_bytes == 0u ||
+    if (!a || !out || (a->weights && a->weights_bytes == 0u) || a->data_bytes == 0u ||
         a->data_bytes > 0xFFFF0000ull || a->barrier >= GA10B_PROG_BARRIER_COUNT) {
         return SLM_PROG_ERR_ARG;
     }
@@ -483,11 +487,15 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
     int rc;
     uint32_t tp0 = rd_table_pages(be);
     uint64_t t0 = be->now_us();
-    rc = wmap_get(be, a->weights, a->weights_bytes, &s->wmap);
-    if (rc != 0) goto fail;
-    out->weights_map_us = be->now_us() - t0;
-    out->weights_gpu_va = g_wmaps[s->wmap].va;
-    out->weights_big = g_wmaps[s->wmap].big;
+    /* No weights: `slm gpu smoke`, which only needs the arena. */
+    if (a->weights) {
+        rc = wmap_get(be, a->weights, a->weights_bytes, &s->wmap);
+        if (rc != 0) goto fail;
+        out->weights_map_us = be->now_us() - t0;
+        out->weights_gpu_va = g_wmaps[s->wmap].va;
+        out->weights_big = g_wmaps[s->wmap].big;
+    }
+    if (be->prepare_clocks) be->prepare_clocks();
 
     /* Data: big pages when PMM gives 64 KB alignment (blocks are aligned
      * to their size, so any block this large is). Zeroed by the allocator,
@@ -874,6 +882,23 @@ static bool jb_irqs(void)
     return arch_irqs_enabled() != 0;
 }
 
+/* LPDDR5 at the reference's 3199 MHz (ADR 0001). After a cold boot nothing
+ * has asked for it, so the program would otherwise be measured at whatever
+ * rate the firmware left. A refusal only costs speed, and `slm gpu` prints
+ * the real rate. Asked once per boot. */
+static void jb_prepare_clocks(void)
+{
+    static bool asked;
+    if (asked) return;
+    asked = true;
+    uint64_t before = 0, set = 0;
+    (void)bpmp_clk_get_rate(T234_CLK_EMC, &before);
+    int rc = bpmp_emc_floor_khz(BPMP_BWMGR_CLIENT_GPU, 3199000u, &set);
+    uart_printf("[slm-prog] EMC was %llu MHz; floor request rc=%d, now %llu MHz\n",
+                (unsigned long long)(before / 1000000u), rc,
+                (unsigned long long)(set / 1000000u));
+}
+
 static void jb_dump(const char *why)
 {
     (void)why;
@@ -901,6 +926,7 @@ static const struct slm_prog_backend *jetson_backend(void)
     g_jb.relax = jb_relax;
     g_jb.dump_fault = jb_dump;
     g_jb.irqs_enabled = jb_irqs;
+    g_jb.prepare_clocks = jb_prepare_clocks;
     return &g_jb;
 }
 

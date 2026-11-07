@@ -187,6 +187,41 @@ int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out)
     return 0;
 }
 
+int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz_out)
+{
+    if (!g_bpmp_initialised) {
+        return -1;
+    }
+    /* MRQ_BWMGR_INT / CMD_BWMGR_INT_CALC_AND_SET (bpmp-abi.h), what
+     * tegra234_mc_icc_set sends. Packed: 4 + 16 + 1 bytes. */
+    struct __attribute__((packed)) {
+        uint32_t cmd;
+        uint32_t client_id;
+        uint32_t niso_bw;
+        uint32_t iso_bw;
+        uint32_t mc_floor;
+        uint8_t floor_unit;
+    } req = {
+        .cmd = 2u,          /* CMD_BWMGR_INT_CALC_AND_SET */
+        .client_id = client_id,
+        .mc_floor = floor_khz,
+        .floor_unit = 1u,   /* BWMGR_INT_UNIT_KHZ */
+    };
+    uint64_t rate = 0;
+    int32_t err = 0;
+    int rc = mrq_send(83u /* MRQ_BWMGR_INT */, &req, sizeof(req), &rate, sizeof(rate), &err);
+    if (rc != 0) {
+        return rc;
+    }
+    if (err != 0) {
+        return (int)err;
+    }
+    if (rate_hz_out) {
+        *rate_hz_out = rate;
+    }
+    return 0;
+}
+
 int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
                       uint64_t *actual_hz_out)
 {
@@ -372,6 +407,7 @@ int  bpmp_clk_disable(uint32_t id)           { (void)id; return 0; }
 int  bpmp_clk_is_enabled(uint32_t id, int *out) { (void)id; if (out) *out = 0; return 0; }
 int  bpmp_clk_set_rate(uint32_t id, uint64_t rate, uint64_t *out) { (void)id; (void)rate; if (out) *out = 0; return 0; }
 int  bpmp_clk_get_rate(uint32_t id, uint64_t *out) { (void)id; if (out) *out = 0; return -1; }
+int  bpmp_emc_floor_khz(uint32_t id, uint32_t khz, uint64_t *out) { (void)id; (void)khz; if (out) *out = 0; return -1; }
 int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
 int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en; return 0; }

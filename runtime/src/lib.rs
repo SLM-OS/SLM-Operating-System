@@ -6610,6 +6610,29 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
     0
 }
 
+/// `slm gpu smoke`: a chain of `n` launches with no model. Returns 0 with
+/// `*out` filled, or -1 with the reason on the console.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_gpu_smoke(n: u32, out: *mut slm::gpu_program::SmokeReport) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract.
+    match slm::gpu_program::smoke(n, unsafe { &mut *out }) {
+        Ok(()) => 0,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] smoke: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
 /// Compare a program with llama.cpp on a fixture (see `slm gpu golden`).
 /// Returns 0 with `*out` filled, or -1 if the program couldn't run: nothing to
 /// report beyond the console line.

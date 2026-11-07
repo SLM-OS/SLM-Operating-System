@@ -97,6 +97,14 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *hz_out);
 
 /*
+ * Ask the bandwidth manager for a memory clock floor on behalf of a
+ * client (TEGRA_ICC_BPMP_*), MRQ_BWMGR_INT. *rate_hz_out gets the memory
+ * clock BPMP set. Same return convention as bpmp_clk_enable.
+ */
+#define BPMP_BWMGR_CLIENT_GPU 5u  /* TEGRA_ICC_BPMP_GPU */
+int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz_out);
+
+/*
  * Set a clock's rate in Hz (CMD_CLK_SET_RATE). BPMP rounds to the
  * closest hardware-supported rate; the actual rate it programmed is
  * returned via *actual_hz_out (may be NULL if caller doesn't care).

@@ -742,7 +742,7 @@ static struct {
 static bool prog_flight_busy_locked(void)
 {
     if (!g_prog_flight.active) return false;
-    cache_invalidate_range((const void *)g_prog_flight.end_slot, sizeof(uint32_t));
+    cache_invalidate_range((void *)(uintptr_t)g_prog_flight.end_slot, sizeof(uint32_t));
     if (*g_prog_flight.end_slot == g_prog_flight.end_payload ||
         slm_get_time_ns() >= g_prog_flight.deadline_ns) {
         g_prog_flight.active = false;

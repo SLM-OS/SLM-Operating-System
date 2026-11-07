@@ -186,6 +186,8 @@ struct slm_prog_backend {
     /* Timeout: GR + MMU fault state to the console. */
     void (*dump_fault)(const char *why);
     bool (*irqs_enabled)(void);
+    /* Optional: raise memory clocks for compute, once per boot. */
+    void (*prepare_clocks)(void);
 };
 
 /* Test hook; the Jetson backend is picked automatically on a cold boot.
