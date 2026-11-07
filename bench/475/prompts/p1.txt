@@ -1,0 +1,5 @@
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Explain how virtual memory lets an operating system give every process its own private address space, and describe what happens in the hardware and in the kernel when a program touches a page that is not currently resident in physical memory. Keep it short please.<|im_end|>
+<|im_start|>assistant
