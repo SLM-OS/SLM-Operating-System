@@ -107,6 +107,9 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
                       uint64_t *actual_hz_out);
 
+/* The clock's current rate in Hz. 0 on success. */
+int bpmp_clk_get_rate(uint32_t clock_id, uint64_t *rate_hz_out);
+
 /*
  * Reset control wrappers. Same error convention as bpmp_clk_*.
  */
