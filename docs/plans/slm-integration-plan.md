@@ -430,9 +430,10 @@ slmos> slm prompt 0 "What is virtual memory?"
 service, reachable via the message router.
 
 - ☐ `components/slm-runner/` with manifest from the spec.
-- ☐ Component subscribes `/slm/prompt`; for each message:
+- ✅ Component subscribes `/slm/prompt`; for each message:
   tokenize → render ChatML → run prompt → publish each token to
-  `/slm/token` → publish final stats to `/slm/done`.
+  `/slm/token` → publish final stats to `/slm/done`. See
+  `docs/tutorials/slm-component.md`.
 - ☐ Hot-swap-safe: model handle and KV cache live across replacements
   (similar to how `sensor_monitor` preserves subscriptions).
 - ☐ EL0 isolation: the EL0 task path works on QEMU, Pi 5 and Jetson, but

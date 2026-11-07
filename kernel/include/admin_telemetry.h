@@ -45,7 +45,7 @@
  * via existing `slm.msg_subscribe` or `slm.telemetry_subscribe`.
  *
  * Sample payload format: short ASCII key=value pairs separated by
- * single spaces, capped at 59 chars + nul to fit MAX_MSG_LEN=60.
+ * single spaces, capped at 59 chars + nul, what the telemetry line format allows for.
  *   tel.evi:  "dt=<ns> fb=<0|1>"           e.g. "dt=12345 fb=0"
  *   tel.inf:  "dt=<ns> ok=<0|1>"           e.g. "dt=87654 ok=1"
  *   tel.cpu:  "c0=<ld> c1=<ld> ... c<n>=<ld>"  e.g. "c0=42 c1=99 c2=18 c3=7"

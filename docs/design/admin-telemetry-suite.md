@@ -281,7 +281,7 @@ The banner is emitted once on accept; comment lines start with `#` and consumers
 
 **Security.** Same posture as telnet: trust-the-LAN, no auth, no TLS. Lab-only. SSH or token auth is the right next step when telemetry leaves the lab; an SSH tunnel from the consumer host is the interim workaround.
 
-**Out of scope (deferred decisions, see plan).** §14.8 partially shipped — `tel.cpu` / `tel.stl` / `tel.mem` are 1 Hz publishers driven from `net_poll` via `admin_telemetry_periodic_pump`. The original `/telemetry/<consumer>/aggregate/1s` p50/p99 aggregates remain deferred (those need histogram-snapshot publishers, not raw delta publishers). No richer per-event fields — `MAX_MSG_LEN=60` stays. No UDP emitter; if a dashboard consumer arrives, a sibling `kernel/src/udp_telemetry_emitter.c` can subscribe to the same `tel.*` topics without touching this server.
+**Out of scope (deferred decisions, see plan).** §14.8 partially shipped — `tel.cpu` / `tel.stl` / `tel.mem` are 1 Hz publishers driven from `net_poll` via `admin_telemetry_periodic_pump`. The original `/telemetry/<consumer>/aggregate/1s` p50/p99 aggregates remain deferred (those need histogram-snapshot publishers, not raw delta publishers). No richer per-event fields — payloads stay within 60 bytes. No UDP emitter; if a dashboard consumer arrives, a sibling `kernel/src/udp_telemetry_emitter.c` can subscribe to the same `tel.*` topics without touching this server.
 
 ## 8. Latency & rate measurement
 
