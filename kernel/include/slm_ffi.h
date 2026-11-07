@@ -2080,8 +2080,11 @@ typedef struct {
     uint64_t evict_us;
 } SlmGpuSmokeReport;
 
+/* Every kernel on `model`'s shapes against its CPU reference. Failed checks, or -1. */
+extern int32_t rust_slm_gpu_opcheck(uint32_t model, uint32_t simt);
+
 /* A chain of n RMSNorm launches in one program. 0, or -1 (console says why). */
-extern int32_t rust_slm_gpu_smoke(uint32_t n, SlmGpuSmokeReport *out);
+extern int32_t rust_slm_gpu_smoke(uint32_t n, uint32_t width, SlmGpuSmokeReport *out);
 
 /* Compare a program on `model` with a *_greedy.rec fixture. 0, or -1 when
  * the program couldn't run (the console says why). */

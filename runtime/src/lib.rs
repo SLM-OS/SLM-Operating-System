@@ -6610,6 +6610,22 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
     0
 }
 
+/// `slm gpu opcheck`: every kernel against its CPU reference. Returns the
+/// number of failed checks, or -1 with the reason on the console.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_opcheck(model: u32, simt: u32) -> i32 {
+    match slm::gpu_program::opcheck(model, simt != 0) {
+        Ok(n) => n as i32,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] opcheck: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
 /// `slm gpu smoke`: a chain of `n` launches with no model. Returns 0 with
 /// `*out` filled, or -1 with the reason on the console.
 ///
@@ -6617,12 +6633,12 @@ pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut Sl
 /// `out` must be writable.
 #[no_mangle]
 #[cfg(feature = "slm")]
-pub unsafe extern "C" fn rust_slm_gpu_smoke(n: u32, out: *mut slm::gpu_program::SmokeReport) -> i32 {
+pub unsafe extern "C" fn rust_slm_gpu_smoke(n: u32, width: u32, out: *mut slm::gpu_program::SmokeReport) -> i32 {
     if out.is_null() {
         return -1;
     }
     // SAFETY: caller's contract.
-    match slm::gpu_program::smoke(n, unsafe { &mut *out }) {
+    match slm::gpu_program::smoke(n, width, unsafe { &mut *out }) {
         Ok(()) => 0,
         Err(why) => {
             let mut line = alloc::string::String::new();

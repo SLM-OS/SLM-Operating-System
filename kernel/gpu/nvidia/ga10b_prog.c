@@ -43,6 +43,7 @@
 #define PB_LAUNCH_DWORDS    3u  /* SEND_PCAS_A pair + PCAS2_B immediate */
 #define PB_BARRIER_DWORDS   2u  /* two immediates at most */
 #define PB_SEMA_DWORDS      6u  /* 5-method incrementing run */
+#define PB_DRAIN_DWORDS     2u  /* WFI + flush before a timestamp means anything */
 
 static inline uint32_t hdr_inc(uint32_t count, uint32_t byte_off)
 {
@@ -62,10 +63,12 @@ void ga10b_prog_sizes(uint32_t max_launches, uint32_t flags, uint32_t *pb_bytes,
     uint32_t per = PB_LAUNCH_DWORDS + PB_BARRIER_DWORDS;
     uint32_t slots = GA10B_PROG_SEMA_OP0;
     if (flags & GA10B_PROG_F_PROFILE) {
-        per += PB_SEMA_DWORDS;
+        per += PB_DRAIN_DWORDS + PB_SEMA_DWORDS;
         slots += max_launches;
     }
-    if (pb_bytes) *pb_bytes = (PB_PROLOGUE_DWORDS + PB_SEMA_DWORDS + per * max_launches) * 4u;
+    if (pb_bytes) {
+        *pb_bytes = (PB_PROLOGUE_DWORDS + PB_DRAIN_DWORDS + PB_SEMA_DWORDS + per * max_launches) * 4u;
+    }
     if (qmd_bytes) *qmd_bytes = max_launches * GA10B_QMD_SIZE_BYTES;
     if (cbuf_bytes) *cbuf_bytes = max_launches * GA10B_PROG_CBUF_STRIDE;
     if (sema_bytes) *sema_bytes = slots * GA10B_PROG_SEMA_SLOT_BYTES;
@@ -178,6 +181,16 @@ static bool launch_valid(const struct ga10b_prog_launch *l)
            l->block_x != 0u && l->block_y != 0u && l->block_z != 0u;
 }
 
+/* WAIT_FOR_IDLE + flush of shader data, whatever kind of barrier the program
+ * uses between launches. */
+static void emit_drain(struct ga10b_prog *p)
+{
+    uint32_t *w = pb_tail(p);
+    w[0] = hdr_immd(M_WAIT_FOR_IDLE, 0u);
+    w[1] = hdr_immd(M_INVALIDATE_SHADER_CACHES, INVALIDATE_DATA_FLUSH);
+    p->pb_dwords += PB_DRAIN_DWORDS;
+}
+
 int ga10b_prog_add_launch(struct ga10b_prog *p, const struct ga10b_prog_launch *l)
 {
     if (!p || !launch_valid(l)) return GA10B_PROG_ERR_ARG;
@@ -194,6 +207,7 @@ int ga10b_prog_add_launch(struct ga10b_prog *p, const struct ga10b_prog_launch *
     w[2] = hdr_immd(M_SEND_SIGNALING_PCAS2_B, PCAS2_INVALIDATE_COPY_SCHEDULE);
     p->pb_dwords += PB_LAUNCH_DWORDS;
     if (p->flags & GA10B_PROG_F_PROFILE) {
+        emit_drain(p);
         emit_sema(p, GA10B_PROG_SEMA_OP0 + idx, GA10B_PROG_PAYLOAD_OP, 0u);
     }
     return (int)idx;
@@ -229,7 +243,10 @@ int ga10b_prog_finish(struct ga10b_prog *p)
 {
     if (!p) return GA10B_PROG_ERR_ARG;
     if (p->finished) return GA10B_PROG_ERR_STATE;
-    /* FLUSH_DISABLE clear: waits for compute to drain (see the v7 path). */
+    /* The release alone doesn't wait for launched work: on hardware it fired
+     * about 1 us after a launch whose kernel was still running, so logits read
+     * back half-computed. Idle first, then write everything to memory. */
+    emit_drain(p);
     emit_sema(p, GA10B_PROG_SEMA_END, GA10B_PROG_PAYLOAD_END, 0u);
     p->finished = true;
     return GA10B_PROG_OK;

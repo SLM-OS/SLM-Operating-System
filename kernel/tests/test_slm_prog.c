@@ -118,9 +118,12 @@ static void test_prog_pushbuffer(void)
     TEST_ASSERT_EQUAL_HEX32(HDR_PCAS_A, g_pb[pro + 5]);
     TEST_ASSERT_EQUAL_HEX32((uint32_t)((Q_VA + GA10B_QMD_SIZE_BYTES) >> 8), g_pb[pro + 6]);
     TEST_ASSERT_EQUAL_UINT32(1u, p.n_barriers);
-    /* End semaphore last: incrementing run of 5 from 0x158, four words,
-     * no FLUSH_DISABLE (waits for compute to drain). */
+    /* End semaphore last: incrementing run of 5 from 0x158, four words. A
+     * release alone doesn't wait for launched work, so a WFI and flush come
+     * first, whatever the barrier kind (hardware: half-computed logits). */
     uint32_t e = p.pb_dwords - 6u;
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[e - 2]);
+    TEST_ASSERT_EQUAL_HEX32(HDR_FLUSH, g_pb[e - 1]);
     TEST_ASSERT_EQUAL_HEX32(0x20052056u, g_pb[e]);
     TEST_ASSERT_EQUAL_HEX32(GA10B_PROG_PAYLOAD_END, g_pb[e + 1]);
     TEST_ASSERT_EQUAL_HEX32((uint32_t)(S_VA + GA10B_PROG_SEMA_SLOT_BYTES), g_pb[e + 3]);
@@ -259,6 +262,7 @@ static void test_prog_profile_slots(void)
     (void)ga10b_prog_add_launch(&p, &l);
     /* A drained timestamp right after the launch, in its own slot. */
     uint32_t at = p.pb_dwords - 6u;
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[at - 2]);
     TEST_ASSERT_EQUAL_HEX32(GA10B_PROG_PAYLOAD_OP, g_pb[at + 1]);
     TEST_ASSERT_EQUAL_HEX32((uint32_t)(S_VA + 2u * GA10B_PROG_SEMA_SLOT_BYTES), g_pb[at + 3]);
     TEST_ASSERT_EQUAL_HEX32(0x0u, g_pb[at + 5]);
@@ -655,6 +659,33 @@ static void test_session_maps_and_frees(void)
     pmm_free_pages(w, wp);
 }
 
+/* A freed 2 MB data range holds big-page tables, so a later session's control
+ * region (small pages, same size) must not get it. This failed `slm launch`
+ * on the real model after `slm gpu golden` had run on the tiny one. */
+static void test_session_va_reuse_keeps_page_size(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t old_data = o.data_gpu_va, old_control = o.step_gpu_va;
+    slm_prog_close(o.handle);
+
+    /* Data no longer fits 2 MB, so only the control region can reuse a range. */
+    a.data_bytes = 3u * 1024u * 1024u;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_HEX64(old_control, o.step_gpu_va);
+    TEST_ASSERT_TRUE(o.data_gpu_va != old_data);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.step_cpu,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.step_gpu_va));
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* Scattered weights (kbuf) still map, one 4 KB PTE per page. */
 static void test_session_scattered_weights(void)
 {
@@ -1013,6 +1044,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_prog_profile_slots);
     RUN_TEST(test_encode_kernels);
     RUN_TEST(test_session_maps_and_frees);
+    RUN_TEST(test_session_va_reuse_keeps_page_size);
     RUN_TEST(test_session_scattered_weights);
     RUN_TEST(test_session_open_failures);
     RUN_TEST(test_session_without_weights);

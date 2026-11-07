@@ -31,6 +31,7 @@
  * Completion. REPORT_SEMAPHORE with STRUCTURE_SIZE_FOUR_WORDS writes
  * the payload and a GPU timestamp (ns) to a 16 B slot, so a step gets
  * its GPU time from the start and end slots with no CPU clock in it.
+ * Launched work is not waited for by the release, so the program idles first.
  * The start slot uses FLUSH_DISABLE, so it fires as soon as the host
  * reaches it and separates "channel never ran" from "kernel hung" on a
  * timeout, as the v7 path's pre-launch semaphore does (#838).

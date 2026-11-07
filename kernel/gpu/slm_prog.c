@@ -244,6 +244,7 @@ struct prog_wmap {
 struct prog_va_range {
     uint64_t va;
     uint64_t size;
+    bool big;       /* its PDE0s hold big-page tables */
 };
 
 static struct prog_session g_sessions[SLM_PROG_MAX_SESSIONS];
@@ -267,31 +268,28 @@ void slm_prog_backend_set(const struct slm_prog_backend *b)
     memset(g_sessions, 0, sizeof(g_sessions));
 }
 
-/* All big-page spans are 2 MB aligned and whole, so a reused range can
- * hold either page size only if it stays that way: every range here is
- * 2 MB aligned and never shares a PDE0 span with small-page data, and
- * ga10b_vm_map refuses a span with big PTEs. Control regions use small
- * pages, data and weights big, so a free range keeps its kind. */
-static uint64_t va_get(const struct slm_prog_backend *be, uint64_t size, uint64_t *got)
+/* Ranges are 2 MB aligned and whole, so none shares a PDE0 with another.
+ * A PDE0 keeps the page size it first had (tables are never given back), so
+ * a free range is only reused for the same size and the same page size. */
+static uint64_t va_get(const struct slm_prog_backend *be, uint64_t size, bool big)
 {
     for (unsigned i = 0; i < VA_FREE_MAX; i++) {
-        if (g_va_free[i].va != 0u && g_va_free[i].size == size) {
+        if (g_va_free[i].va != 0u && g_va_free[i].size == size && g_va_free[i].big == big) {
             uint64_t va = g_va_free[i].va;
             g_va_free[i].va = 0u;
-            *got = size;
             return va;
         }
     }
-    *got = size;
     return ga10b_vm_reserve(be->vm, size, GA10B_VM_PDE0_SPAN, false);
 }
 
-static void va_put(uint64_t va, uint64_t size)
+static void va_put(uint64_t va, uint64_t size, bool big)
 {
     for (unsigned i = 0; i < VA_FREE_MAX; i++) {
         if (g_va_free[i].va == 0u) {
             g_va_free[i].va = va;
             g_va_free[i].size = size;
+            g_va_free[i].big = big;
             return;
         }
     }
@@ -320,21 +318,19 @@ static int map_weights_fresh(const struct slm_prog_backend *be, struct prog_wmap
 {
     uint64_t bytes = w->bytes;
     uint64_t va_size = span_round(bytes);
-    uint64_t got = 0;
-    uint64_t va = va_get(be, va_size, &got);
-    if (va == 0u) return SLM_PROG_ERR_MAP;
     uint32_t flags = GA10B_MAP_CACHEABLE | GA10B_MAP_RO;
     uint64_t phys = be->virt_to_phys(w->cpu);
+    w->big = phys != 0u && be->is_contiguous(w->cpu, bytes) &&
+             (phys & (GA10B_BIG_PAGE_SIZE - 1u)) == 0u;
+    const uint8_t *c = (const uint8_t *)w->cpu;
+    if (!w->big && ((uintptr_t)c & (GA10B_PAGE_SIZE - 1u)) != 0u) return SLM_PROG_ERR_ARG;
+    uint64_t va = va_get(be, va_size, w->big);
+    if (va == 0u) return SLM_PROG_ERR_MAP;
     int rc;
-    if (phys != 0u && be->is_contiguous(w->cpu, bytes) &&
-        (phys & (GA10B_BIG_PAGE_SIZE - 1u)) == 0u) {
+    if (w->big) {
         rc = ga10b_vm_map_big(be->ops, be->vm, va, phys, big_round(bytes), flags);
-        w->big = true;
     } else {
         rc = GA10B_CHAN_OK;
-        w->big = false;
-        const uint8_t *c = (const uint8_t *)w->cpu;
-        if (((uintptr_t)c & (GA10B_PAGE_SIZE - 1u)) != 0u) return SLM_PROG_ERR_ARG;
         for (uint64_t off = 0; off < bytes && rc == GA10B_CHAN_OK; off += GA10B_PAGE_SIZE) {
             uint64_t ph = be->virt_to_phys(c + off);
             rc = ph ? ga10b_vm_map(be->ops, be->vm, va + off, ph, GA10B_PAGE_SIZE, flags)
@@ -344,7 +340,7 @@ static int map_weights_fresh(const struct slm_prog_backend *be, struct prog_wmap
     if (rc != GA10B_CHAN_OK) {
         /* Pull down whatever part was written. */
         ga10b_vm_unmap(be->ops, be->vm, va, w->big ? big_round(bytes) : bytes);
-        va_put(va, va_size);
+        va_put(va, va_size, w->big);
         return rc == GA10B_CHAN_ERR_NOMEM ? SLM_PROG_ERR_NOMEM : SLM_PROG_ERR_MAP;
     }
     /* The loader may have left dirty lines (a copy into PMM pages); GPU reads
@@ -375,7 +371,7 @@ static int wmap_get(const struct slm_prog_backend *be, const void *cpu, uint64_t
             struct prog_wmap *w = &g_wmaps[i];
             if (w->refs == 0u) {
                 ga10b_vm_unmap(be->ops, be->vm, w->va, w->big ? big_round(w->bytes) : w->bytes);
-                va_put(w->va, w->va_size);
+                va_put(w->va, w->va_size, w->big);
                 w->mapped = false;
                 free_slot = i;
                 break;
@@ -408,7 +404,7 @@ static void wmap_put(const struct slm_prog_backend *be, int idx)
     if (w->refs > 0u) w->refs--;
     if (w->refs == 0u && w->mapped) {
         ga10b_vm_unmap(be->ops, be->vm, w->va, w->big ? big_round(w->bytes) : w->bytes);
-        va_put(w->va, w->va_size);
+        va_put(w->va, w->va_size, w->big);
         memset(w, 0, sizeof(*w));
     }
 }
@@ -456,8 +452,8 @@ static void session_free(struct prog_session *s)
     } else {
         if (s->data.cpu) ga10b_dma_free(be->ops, &s->data);
         if (s->control.cpu) ga10b_dma_free(be->ops, &s->control);
-        if (s->data_va) va_put(s->data_va, s->data_va_size);
-        if (s->control_va) va_put(s->control_va, s->control_va_size);
+        if (s->data_va) va_put(s->data_va, s->data_va_size, true);
+        if (s->control_va) va_put(s->control_va, s->control_va_size, false);
     }
     memset(s, 0, sizeof(*s));
 }
@@ -512,9 +508,8 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         goto fail;
     }
     ga10b_dma_clean(be->ops, &s->data);
-    uint64_t got = 0;
     s->data_va_size = span_round(data_bytes);
-    s->data_va = va_get(be, s->data_va_size, &got);
+    s->data_va = va_get(be, s->data_va_size, true);
     if (s->data_va == 0u) {
         rc = SLM_PROG_ERR_MAP;
         goto fail;
@@ -538,7 +533,7 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         goto fail;
     }
     s->control_va_size = span_round(cbytes);
-    s->control_va = va_get(be, s->control_va_size, &got);
+    s->control_va = va_get(be, s->control_va_size, false);
     if (s->control_va == 0u || ga10b_vm_map(be->ops, be->vm, s->control_va, s->control.phys,
                                             cbytes, 0u) != GA10B_CHAN_OK) {
         rc = SLM_PROG_ERR_MAP;

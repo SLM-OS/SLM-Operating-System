@@ -1921,6 +1921,9 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # Same isolation pattern as the `lua` and `ai_sched` libraries above.
 # ==========================================================================
 add_library(slm_shell STATIC kernel/src/slm_shell.c)
+if(SLM_GPU_GOLDEN)
+    target_compile_definitions(slm_shell PRIVATE SLM_GPU_GOLDEN)
+endif()
 target_include_directories(slm_shell PRIVATE ${KERNEL_INCLUDES} ${BUILD_INFO_DIR})
 add_dependencies(slm_shell generate_build_info)
 

@@ -1012,10 +1012,17 @@ pub struct SmokeReport {
 /// Needs only a kernel that ships today, so it checks the launch, barrier,
 /// semaphore and evict machinery without any model. Each launch's input is
 /// the previous one's output, so a missing barrier shows up in the result.
-pub fn smoke(n: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
-    const N: usize = 1536;
+///
+/// `width` is the row length, a multiple of 32: a small one leaves mostly the
+/// launch and barrier cost in the per-launch time.
+pub fn smoke(n: u32, width: u32, rep: &mut SmokeReport) -> Result<(), &'static str> {
+    #[allow(non_snake_case)]
+    let N = width as usize;
     if n == 0 {
         return Err("no launches");
+    }
+    if N == 0 || N % 32 != 0 {
+        return Err("width is not a multiple of 32");
     }
     let data_bytes = (2 * N * 2 + N * 4 + 4096) as u64;
     let args = OpenArgs {
@@ -1202,8 +1209,13 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
     let mut step = 0usize;
     let mut compare = |step: usize, out: &[f32], rep: &mut GoldenReport| {
         let want = &logits[step * n_vocab..(step + 1) * n_vocab];
+        let (mut step_max, mut step_sq) = (0.0f32, 0.0f32);
         for (i, (g, w)) in out.iter().zip(want.iter()).enumerate() {
             let e = (g - w).abs();
+            step_sq += e * e;
+            if !(e <= step_max) {
+                step_max = e;
+            }
             if !(e <= max_err) {
                 max_err = e;
             }
@@ -1216,6 +1228,11 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
         }
         rep.max_err_milli = (max_err * 1000.0) as i32;
         rep.steps += 1;
+        let mut line = String::new();
+        let _ = write!(line, "[slm] golden step {step}: max error {} milli, rms {} milli\n\0",
+                       (step_max * 1000.0) as i32,
+                       (crate::inference::mathf::sqrtf(step_sq / n_vocab as f32) * 1000.0) as i32);
+        crate::kernel_ffi::print(line.as_bytes());
     };
     let mut pos = 0usize;
     if batched && ids.len() >= 2 && (prog.max_batch as usize) >= ids.len() {
@@ -1242,67 +1259,40 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
 }
 
 // ---------------------------------------------------------------------------
-// Software GPU for host tests
+// CPU reference of the kernels
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-pub mod soft {
-    //! `slm_prog_*` implemented on the CPU kernels. Interprets the exact
-    //! `ProgOp`s the C layer would encode, including their VAs, so a wrong
-    //! pointer, stride, position or barrier-free dependency shows up as a
-    //! wrong logit against llama.cpp.
+/// What each kernel in `scripts/cuda/slm/` must compute, on the CPU, driven by
+/// the same `ProgOp` the GPU gets. The software GPU in the host tests runs on
+/// it, and `slm gpu opcheck` compares it with the real kernels.
+pub mod reference {
     use super::*;
     use crate::inference::ops_transformer::{gqa_decode_step, matmul_quant_rows, swiglu_elementwise};
     use crate::inference::quant::dequantize_row_any;
-    use std::sync::Mutex;
 
-    pub const W_BASE: u64 = 0x10_0000_0000;
-    pub const D_BASE: u64 = 0x20_0000_0000;
-    pub const S_BASE: u64 = 0x30_0000_0000;
-
-    pub struct Soft {
+    /// Where GPU VAs land for the CPU.
+    pub struct Mem {
+        pub weights_va: u64,
         pub weights: usize,
         pub weights_len: usize,
-        pub data: Vec<u8>,
-        pub step: Vec<u8>,
-        pub shapes: [Vec<(ProgOp, usize)>; 2],
-        pub barriers: [Vec<usize>; 2],
-        pub runs: u32,
-        pub open: bool,
+        pub data_va: u64,
+        pub data: usize,
+        pub data_len: usize,
+        pub step_va: u64,
+        pub step: usize,
+        pub step_len: usize,
     }
 
-    /// Failure injection and backend selection.
-    pub struct Knobs {
-        pub no_backend: bool,
-        pub max_batch: u32,
-        /// Fail run number N (0-based) with this rc.
-        pub fail_run: Option<(u32, i32)>,
-        pub closes: u32,
-    }
-
-    pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
-    pub static KNOBS: Mutex<Knobs> = Mutex::new(Knobs {
-        no_backend: false,
-        max_batch: 64,
-        fail_run: None,
-        closes: 0,
-    });
-
-    pub fn reset_knobs() {
-        let mut k = KNOBS.lock().unwrap();
-        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0 };
-    }
-
-    fn at<'a>(s: &'a mut Soft, va: u64) -> *mut u8 {
-        if va >= S_BASE {
-            unsafe { s.step.as_mut_ptr().add((va - S_BASE) as usize) }
-        } else if va >= D_BASE {
-            unsafe { s.data.as_mut_ptr().add((va - D_BASE) as usize) }
+    fn at(s: &Mem, va: u64) -> *mut u8 {
+        let inside = |base: u64, len: usize| va >= base && va < base + len as u64;
+        if inside(s.step_va, s.step_len) {
+            (s.step + (va - s.step_va) as usize) as *mut u8
+        } else if inside(s.data_va, s.data_len) {
+            (s.data + (va - s.data_va) as usize) as *mut u8
+        } else if inside(s.weights_va, s.weights_len) {
+            (s.weights + (va - s.weights_va) as usize) as *mut u8
         } else {
-            assert!(va >= W_BASE, "unmapped VA {:#x}", va);
-            let off = (va - W_BASE) as usize;
-            assert!(off < s.weights_len, "VA past the weights");
-            (s.weights + off) as *mut u8
+            panic!("reference: unmapped VA {:#x}", va);
         }
     }
 
@@ -1313,7 +1303,7 @@ pub mod soft {
         unsafe { core::slice::from_raw_parts_mut(p as *mut u16, n) }
     }
 
-    fn exec(s: &mut Soft, op: &ProgOp) {
+    pub fn exec(s: &Mem, op: &ProgOp) {
         let rows = op.rows as usize;
         let [a, b, c, d, e] = op.ptr;
         match op.kernel {
@@ -1439,6 +1429,427 @@ pub mod soft {
             }
             k => panic!("soft GPU: unknown kernel {k}"),
         }
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// Kernel check against the CPU reference (`slm gpu opcheck`)
+// ---------------------------------------------------------------------------
+
+/// Deterministic FP16 activations in about +-4.
+struct Lfsr(u32);
+impl Lfsr {
+    fn next_f16(&mut self) -> u16 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 17;
+        self.0 ^= self.0 << 5;
+        let v = (self.0 >> 8) as i32 % 8192;
+        f32_to_f16(v as f32 / 2048.0)
+    }
+}
+
+struct OpCheck {
+    h: i32,
+    mem: reference::Mem,
+    data_cpu: usize,
+    data_bytes: usize,
+    step_cpu: usize,
+    step_bytes: usize,
+    d: u64,
+    s: u64,
+    bad: u32,
+}
+
+impl OpCheck {
+    fn write_u16s(&self, off: usize, n: usize, seed: u32) {
+        let mut r = Lfsr(seed | 1);
+        let p = (self.data_cpu + off) as *mut u16;
+        for i in 0..n {
+            // SAFETY: callers keep off + n * 2 inside the data region.
+            unsafe { p.add(i).write(r.next_f16()) };
+        }
+    }
+
+    /// GPU, then reference, on identical inputs. `fill` writes the inputs.
+    fn one(&mut self, name: &str, op: &ProgOp, out_off: usize, out_n: usize, f32_out: bool, fill: &dyn Fn(&Self)) {
+        let esz = if f32_out { 4 } else { 2 };
+        // SAFETY: both regions are ours and the GPU is idle between checks.
+        unsafe {
+            core::ptr::write_bytes(self.data_cpu as *mut u8, 0, self.data_bytes);
+        }
+        fill(self);
+        // SAFETY: as above. Everything the GPU reads must be in DRAM.
+        unsafe {
+            slm_prog_clean(self.h, self.data_cpu as *const u8, self.data_bytes);
+            slm_prog_clean(self.h, self.step_cpu as *const u8, self.step_bytes);
+        }
+        let mut st = RunStats::default();
+        // SAFETY: `op` and `st` outlive the calls; the handle is open.
+        let rc = unsafe {
+            let u = slm_prog_update(self.h, 0, 0, op);
+            if u < 0 { u } else { slm_prog_run(self.h, 0, &mut st) }
+        };
+        if rc != 0 {
+            self.report(name, op, 0, 0, 0, st.gpu_ns, err_message(rc));
+            self.bad += 1;
+            return;
+        }
+        let outp = (self.data_cpu + out_off) as *const u8;
+        // SAFETY: the output lies in the data region and the GPU has finished.
+        let gpu: Vec<u8> = unsafe {
+            slm_prog_invalidate(self.h, outp, out_n * esz);
+            core::slice::from_raw_parts(outp, out_n * esz).to_vec()
+        };
+        // The reference gets freshly written inputs: some kernels work in place.
+        // SAFETY: as above.
+        unsafe {
+            slm_prog_invalidate(self.h, self.data_cpu as *const u8, self.data_bytes);
+            core::ptr::write_bytes(self.data_cpu as *mut u8, 0, self.data_bytes);
+        }
+        fill(self);
+        reference::exec(&self.mem, op);
+        // SAFETY: as above.
+        let cpu = unsafe { core::slice::from_raw_parts(outp, out_n * esz) };
+        let (mut max_err, mut sq, mut max_val, mut over) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+        for i in 0..out_n {
+            let (g, c) = if f32_out {
+                let j = i * 4;
+                (
+                    f32::from_le_bytes([gpu[j], gpu[j + 1], gpu[j + 2], gpu[j + 3]]),
+                    f32::from_le_bytes([cpu[j], cpu[j + 1], cpu[j + 2], cpu[j + 3]]),
+                )
+            } else {
+                let j = i * 2;
+                (
+                    f16_to_f32(u16::from_le_bytes([gpu[j], gpu[j + 1]])),
+                    f16_to_f32(u16::from_le_bytes([cpu[j], cpu[j + 1]])),
+                )
+            };
+            let e = (g - c).abs();
+            if !(e <= max_err) {
+                max_err = e;
+            }
+            sq += e * e;
+            max_val = max_val.max(c.abs());
+            if !(e <= 0.01 * c.abs() + 0.01) {
+                over += 1;
+            }
+        }
+        let rms = crate::inference::mathf::sqrtf(sq / out_n as f32);
+        let verdict = if over == 0 { "ok" } else { "BAD" };
+        if over != 0 {
+            self.bad += 1;
+        }
+        self.report(name, op, (max_err * 1000.0) as i32, (rms * 1000.0) as i32, over, st.gpu_ns, verdict);
+        let _ = max_val;
+    }
+
+    fn report(&self, name: &str, op: &ProgOp, max_m: i32, rms_m: i32, over: u32, gpu_ns: u64, verdict: &str) {
+        let mut line = String::new();
+        let _ = write!(
+            line,
+            "[opcheck] {name} rows={} {verdict}: max {max_m} rms {rms_m} milli, {over} over, gpu {} us\n\0",
+            op.rows,
+            gpu_ns / 1000
+        );
+        crate::kernel_ffi::print(line.as_bytes());
+    }
+}
+
+/// Every kernel, on the real shapes and tensors of model `model`, against the
+/// CPU reference with random activations. Returns how many checks failed.
+pub fn opcheck(model: u32, simt: bool) -> Result<u32, &'static str> {
+    let info = crate::slm::registry::get_info(model as usize).ok_or("model not loaded")?;
+    let (weights, wlen, d, rope_base, arch) = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
+        let w = slm.weight_bytes().map(|b| (b.as_ptr() as usize, b.len()));
+        let d = ModelDesc::from_slm(slm, info.vocab_size);
+        (w, d, slm.arch().rope_freq_base, slm.arch().architecture)
+    })
+    .map(|(w, d, r, a)| (w.map_or(0, |x| x.0), w.map_or(0, |x| x.1), d, r, a))
+    .ok_or("model not loaded")?;
+    let d = d?;
+    let dims = d.dims;
+    let (hidden, inter, nq, nkv, hd) = (
+        dims.hidden as usize,
+        dims.intermediate as usize,
+        dims.n_head as usize,
+        dims.n_head_kv as usize,
+        dims.head_dim as usize,
+    );
+    const POSITIONS: usize = 16;
+    const ROWS: usize = 9;
+    let rope = crate::inference::ops_transformer::RopeTable::new(
+        hd,
+        POSITIONS + ROWS,
+        rope_base,
+        crate::inference::ops_transformer::RopePairing::for_arch(arch),
+    );
+    // Two activation buffers, one output, all big enough for ROWS rows of the
+    // widest vector, the RoPE table and the logits.
+    let row_max = hidden.max(inter).max(nq * hd).max(dims.vocab as usize * 2);
+    let a_off = 0usize;
+    let b_off = align256((ROWS * row_max * 2) as u64) as usize;
+    let o_off = 2 * b_off;
+    let k_off = 3 * b_off;
+    let kv_bytes = align256(((POSITIONS + ROWS) * nkv * hd * 2) as u64) as usize;
+    let v_off = k_off + kv_bytes;
+    let rope_off = v_off + kv_bytes;
+    let data_bytes = rope_off + rope.cos_sin.len() * 4 + 4096;
+    let args = OpenArgs {
+        weights: weights as *const u8,
+        weights_bytes: wlen as u64,
+        data_bytes: data_bytes as u64,
+        step_bytes: 4096,
+        max_launches: [1, 0],
+        flags: OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed) & FLAG_LEAN_QMD,
+        barrier: OPT_BARRIER.load(core::sync::atomic::Ordering::Relaxed),
+    };
+    let mut out = OpenOut::default();
+    // SAFETY: both pointers are to live locals of the declared types.
+    let rc = unsafe { slm_prog_open(&args, &mut out) };
+    if rc != 0 {
+        return Err(err_message(rc));
+    }
+    struct Close(i32);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            // SAFETY: opened above, closed once.
+            unsafe { slm_prog_close(self.0) };
+        }
+    }
+    let _close = Close(out.handle);
+    let (da, sa, wa) = (out.data_gpu_va, out.step_gpu_va, out.weights_gpu_va);
+    let mut c = OpCheck {
+        h: out.handle,
+        mem: reference::Mem {
+            weights_va: wa,
+            weights,
+            weights_len: wlen,
+            data_va: da,
+            data: out.data_cpu,
+            data_len: data_bytes,
+            step_va: sa,
+            step: out.step_cpu,
+            step_len: 4096,
+        },
+        data_cpu: out.data_cpu,
+        data_bytes,
+        step_cpu: out.step_cpu,
+        step_bytes: 4096,
+        d: da,
+        s: sa,
+        bad: 0,
+    };
+    // Positions and token ids, read by RoPE, GQA and the embedding.
+    let (ids_off, pos_off) = (0usize, 512usize);
+    for r in 0..ROWS {
+        // SAFETY: both arrays fit in the 4096 B step page.
+        unsafe {
+            ((out.step_cpu + ids_off) as *mut u32).add(r).write((17 + 13 * r as u32) % dims.vocab);
+            ((out.step_cpu + pos_off) as *mut u32).add(r).write((POSITIONS + r) as u32);
+        }
+    }
+    let (da_a, da_b, da_o) = (c.d + a_off as u64, c.d + b_off as u64, c.d + o_off as u64);
+    let sa_pos = c.s + pos_off as u64;
+
+    // A one-launch program, rewritten for each check.
+    let add = ProgOp {
+        kernel: Kernel::Add as u32,
+        rows: 1,
+        dim: [32, 0, 0, 0],
+        ptr: [da_a, da_b, da_o, 0, 0],
+        scal: [0, 0],
+    };
+    // SAFETY: the handle is open and `add` outlives the calls.
+    unsafe {
+        let r = slm_prog_add(c.h, 0, &add);
+        if r < 0 {
+            return Err(err_message(r));
+        }
+        let r = slm_prog_finish(c.h, 0);
+        if r < 0 {
+            return Err(err_message(r));
+        }
+    }
+    let simt_flag = if simt { MM_SIMT } else { 0 };
+
+    let l0 = d.layers[0];
+    let fill_a = |n: usize| move |c: &OpCheck| c.write_u16s(a_off, n, 0x1234);
+
+    for rows in [1usize, 2, ROWS] {
+        // Matmuls: both quant types, biased and not, FP16 and FP32 out.
+        let mm = |c: &mut OpCheck, name: &str, m: &Matmul, k: usize, n: usize, f16: bool, r: usize| {
+            let op = ProgOp {
+                kernel: m.kernel as u32,
+                rows: r as u32,
+                dim: [k as u32, n as u32, 0, 0],
+                ptr: [da_a, wa + m.w_off, da_o, m.bias_off.map_or(0, |b| wa + b), 0],
+                scal: [if f16 { MM_OUT_F16 } else { 0 }, simt_flag],
+            };
+            c.one(name, &op, o_off, r * n, !f16, &fill_a(r * k));
+        };
+        mm(&mut c, "mm_q", &l0.q, hidden, nq * hd, true, rows);
+        mm(&mut c, "mm_k", &l0.k, hidden, nkv * hd, true, rows);
+        mm(&mut c, "mm_gate", &l0.gate, hidden, inter, true, rows);
+        mm(&mut c, "mm_down", &l0.down, inter, hidden, true, rows);
+        mm(&mut c, "mm_o", &l0.o, nq * hd, hidden, true, rows);
+
+        let op = ProgOp {
+            kernel: d.embed.kernel as u32,
+            rows: rows as u32,
+            dim: [hidden as u32, 0, 0, 0],
+            ptr: [c.s + ids_off as u64, wa + d.embed.w_off, da_o, 0, 0],
+            scal: [0, 0],
+        };
+        c.one("embed", &op, o_off, rows * hidden, false, &|_| {});
+
+        let op = ProgOp {
+            kernel: Kernel::RmsNorm as u32,
+            rows: rows as u32,
+            dim: [hidden as u32, 0, 0, 0],
+            ptr: [da_a, wa + d.norms[0].0, da_o, 0, 0],
+            scal: [RMS_EPS.to_bits(), 0],
+        };
+        c.one("rmsnorm", &op, o_off, rows * hidden, false, &fill_a(rows * hidden));
+
+        let op = ProgOp {
+            kernel: Kernel::Add as u32,
+            rows: rows as u32,
+            dim: [hidden as u32, 0, 0, 0],
+            ptr: [da_a, da_b, da_o, 0, 0],
+            scal: [0, 0],
+        };
+        c.one("add", &op, o_off, rows * hidden, false, &|c: &OpCheck| {
+            c.write_u16s(a_off, rows * hidden, 0x1234);
+            c.write_u16s(b_off, rows * hidden, 0x777);
+        });
+
+        let op = ProgOp {
+            kernel: Kernel::SwiGlu as u32,
+            rows: rows as u32,
+            dim: [inter as u32, 0, 0, 0],
+            ptr: [da_a, da_b, da_o, 0, 0],
+            scal: [0, 0],
+        };
+        c.one("swiglu", &op, o_off, rows * inter, false, &|c: &OpCheck| {
+            c.write_u16s(a_off, rows * inter, 0x1234);
+            c.write_u16s(b_off, rows * inter, 0x777);
+        });
+
+        // RoPE at positions above 0 (position 0 is the identity), in place.
+        let table = rope.cos_sin.as_ptr() as usize;
+        let table_len = rope.cos_sin.len() * 4;
+        let fill_rope = move |c: &OpCheck| {
+            c.write_u16s(a_off, rows * nq * hd, 0x1234);
+            // SAFETY: rope_off + table_len is inside the data region.
+            unsafe {
+                core::ptr::copy_nonoverlapping(table as *const u8, (c.data_cpu + rope_off) as *mut u8, table_len);
+            }
+        };
+        let op = ProgOp {
+            kernel: Kernel::Rope as u32,
+            rows: rows as u32,
+            dim: [nq as u32, hd as u32, 0, 0],
+            ptr: [da_a, da_a, c.d + rope_off as u64, sa_pos, 0],
+            scal: [0, 0],
+        };
+        c.one("rope", &op, a_off, rows * nq * hd, false, &fill_rope);
+
+        // Attention over POSITIONS + r positions: the mask and GQA grouping.
+        let n_pos = POSITIONS + rows;
+        let op = ProgOp {
+            kernel: Kernel::Gqa as u32,
+            rows: rows as u32,
+            dim: [nq as u32, nkv as u32, hd as u32, 0],
+            ptr: [da_a, c.d + k_off as u64, c.d + v_off as u64, sa_pos, da_o],
+            scal: [0, 0],
+        };
+        c.one("gqa", &op, o_off, rows * nq * hd, false, &|c: &OpCheck| {
+            c.write_u16s(a_off, rows * nq * hd, 0x1234);
+            c.write_u16s(k_off, n_pos * nkv * hd, 0x5555);
+            c.write_u16s(v_off, n_pos * nkv * hd, 0x2468);
+        });
+    }
+    // The LM head: one row, FP32 logits.
+    let lm = d.lm_head;
+    let op = ProgOp {
+        kernel: lm.kernel as u32,
+        rows: 1,
+        dim: [hidden as u32, dims.vocab, 0, 0],
+        ptr: [da_a, wa + lm.w_off, da_o, 0, 0],
+        scal: [0, simt_flag],
+    };
+    c.one("lm_head", &op, o_off, dims.vocab as usize, true, &fill_a(hidden));
+    Ok(c.bad)
+}
+
+// ---------------------------------------------------------------------------
+// Software GPU for host tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub mod soft {
+    //! `slm_prog_*` implemented on the CPU kernels. Interprets the exact
+    //! `ProgOp`s the C layer would encode, including their VAs, so a wrong
+    //! pointer, stride, position or barrier-free dependency shows up as a
+    //! wrong logit against llama.cpp.
+    use super::*;
+    use std::sync::Mutex;
+
+    pub const W_BASE: u64 = 0x10_0000_0000;
+    pub const D_BASE: u64 = 0x20_0000_0000;
+    pub const S_BASE: u64 = 0x30_0000_0000;
+
+    pub struct Soft {
+        pub weights: usize,
+        pub weights_len: usize,
+        pub data: Vec<u8>,
+        pub step: Vec<u8>,
+        pub shapes: [Vec<(ProgOp, usize)>; 2],
+        pub barriers: [Vec<usize>; 2],
+        pub runs: u32,
+        pub open: bool,
+    }
+
+    /// Failure injection and backend selection.
+    pub struct Knobs {
+        pub no_backend: bool,
+        pub max_batch: u32,
+        /// Fail run number N (0-based) with this rc.
+        pub fail_run: Option<(u32, i32)>,
+        pub closes: u32,
+    }
+
+    pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
+    pub static KNOBS: Mutex<Knobs> = Mutex::new(Knobs {
+        no_backend: false,
+        max_batch: 64,
+        fail_run: None,
+        closes: 0,
+    });
+
+    pub fn reset_knobs() {
+        let mut k = KNOBS.lock().unwrap();
+        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0 };
+    }
+
+    fn mem_of(s: &mut Soft) -> reference::Mem {
+        reference::Mem {
+            weights_va: W_BASE,
+            weights: s.weights,
+            weights_len: s.weights_len,
+            data_va: D_BASE,
+            data: s.data.as_mut_ptr() as usize,
+            data_len: s.data.len(),
+            step_va: S_BASE,
+            step: s.step.as_mut_ptr() as usize,
+            step_len: s.step.len(),
+        }
+    }
+
+    fn exec(s: &mut Soft, op: &ProgOp) {
+        reference::exec(&mem_of(s), op);
     }
 
     #[no_mangle]
@@ -1942,17 +2353,31 @@ mod tests {
         reset_for_tests();
     }
 
+    /// The software GPU is the reference, so every check agrees with itself;
+    /// this pins that the harness covers all kernels and reports failure.
+    #[test]
+    fn opcheck_runs_on_the_soft_gpu() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        assert_eq!(opcheck(model, false), Ok(0));
+        soft::KNOBS.lock().unwrap().fail_run = Some((2, -6));
+        assert_eq!(opcheck(model, false), Ok(1));
+        soft::reset_knobs();
+        reset_for_tests();
+    }
+
     /// The smoke chain against its own CPU reference, and a run that fails.
     #[test]
     fn smoke_chain_agrees_with_the_cpu() {
         soft::reset_knobs();
         let mut rep = SmokeReport::default();
-        smoke(7, &mut rep).unwrap();
+        smoke(7, 1536, &mut rep).unwrap();
         assert_eq!(rep.launches, 7);
         assert_eq!(rep.bad_elements, 0);
-        assert_eq!(smoke(0, &mut rep), Err("no launches"));
+        assert_eq!(smoke(0, 1536, &mut rep), Err("no launches"));
+        assert_eq!(smoke(1, 33, &mut rep), Err("width is not a multiple of 32"));
         soft::KNOBS.lock().unwrap().fail_run = Some((0, -6));
-        assert_eq!(smoke(3, &mut rep), Err("GPU step timed out"));
+        assert_eq!(smoke(3, 1536, &mut rep), Err("GPU step timed out"));
         soft::reset_knobs();
     }
 
