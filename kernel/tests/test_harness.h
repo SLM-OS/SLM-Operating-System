@@ -63,6 +63,10 @@ int test_suite_infer_shell(void);
  * out-of-range op_kind safety, NULL-tolerance, op-kind coverage) */
 int test_suite_slm_dispatch_stats(void);
 
+/* SLM golden tests against llama.cpp (#475, DoD item 7): ops, first-step
+ * logits and greedy tokens through the production FFI. All platforms. */
+int test_suite_slm_golden(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 
