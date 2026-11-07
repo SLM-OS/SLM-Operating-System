@@ -205,7 +205,7 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
 /* ===== AI scheduler decision audit (tel.aix) ======================== */
 
 /* Policy identifiers carried in the `p=` field of tel.aix payloads.
- * One char so the whole payload fits MAX_MSG_LEN=60 with room to
+ * One char so the whole payload stays short (MAX_MSG_LEN is 512) with room to
  * spare. Match the dispatch in `sched_ai.c`. The publisher rejects
  * any policy_id outside this set with a fail-open `?` marker — see
  * admin_telemetry_record_ai_decision below for the rationale. */
