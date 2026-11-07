@@ -1868,6 +1868,18 @@ extern uint64_t rust_slm_max_gguf_bytes(void);
  * kernel/tests/test_slm_load.c so the FFI surface can be exercised
  * end-to-end without staging a real GGUF.
  */
+extern int rust_slm_test_build_cli_fixture(uint8_t *out_buf,
+                                           size_t out_capacity,
+                                           size_t *out_size);
+
+/* Test-only: script the logits so greedy sampling produces `ids` in order
+ * (looping != 0 repeats them until something stops the prompt, without
+ * advancing the KV cache). n == 0 disarms. */
+extern int rust_slm_test_script(const uint32_t *ids, size_t n, int looping);
+
+/* Test-only: GPU-tier op count seen by the last scripted forward step. */
+extern uint32_t rust_slm_test_script_gpu_ops_seen(void);
+
 extern int rust_slm_test_build_qwen_fixture(
     uint32_t vocab_size,
     uint8_t *out_buf,
@@ -1887,10 +1899,7 @@ extern void rust_slm_test_reset(void);
  *
  * Per-conversation state and the prefill+decode loop. Builds on the
  * model registry (rust_slm_load above) plus M5.1's KV cache and
- * sampler. The forward pass is structurally complete but operates
- * on placeholder zero weights for M5.2 - real per-tensor lookup
- * lands in M5.3 once the GGUF weights are mmap'd into the model
- * memory pool.
+ * sampler.
  *
  * Sampler-kind tags - keep in sync with rust_slm_session_open():
  *   0 = Greedy (argmax; ignores temperature/top_k/top_p)
@@ -1912,23 +1921,68 @@ typedef struct {
     uint32_t prompts_completed;
     uint32_t tokens_in;        /* cumulative prefill tokens         */
     uint32_t tokens_out;       /* cumulative decoded tokens         */
+    uint32_t last_stop_reason; /* SLM_STOP_*: why the last prompt ended */
     uint64_t last_ttft_ns;     /* time-to-first-token, last prompt  */
     uint64_t last_decode_ns;   /* total decode time, last prompt    */
 } SlmStatsC;
 
 /* FFI size pin: paired with `const _: () = assert!(size_of::<SlmStatsC>() == 32)`
- * in runtime/src/lib.rs. Layout is 3×u32 + 4-byte padding (u64 alignment)
- * + 2×u64 = 32 B. */
+ * in runtime/src/lib.rs. Layout is 4×u32 + 2×u64 = 32 B. */
 _Static_assert(sizeof(SlmStatsC) == 32,
                "SlmStatsC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
 
+/* Values of SlmStatsC.last_stop_reason. Mirror of Rust's StopReason. */
+#define SLM_STOP_NONE          0u  /* no prompt yet                       */
+#define SLM_STOP_EOS           1u  /* sampled an end-of-generation token  */
+#define SLM_STOP_MAX_TOKENS    2u  /* hit --max                           */
+#define SLM_STOP_USER          3u  /* slm stop, Ctrl-C, or the poll cb    */
+#define SLM_STOP_CALLBACK      4u  /* the token callback returned 0       */
+#define SLM_STOP_CONTEXT_FULL  5u  /* prompt didn't fit, or generation filled it */
+#define SLM_STOP_NO_LOGITS     6u  /* forward pass produced nothing       */
+#define SLM_STOP_EMPTY_PROMPT  7u  /* empty text; nothing ran             */
+
+/* slm launch --gpu. Mirror of Rust's GpuMode. */
+#define SLM_GPU_AUTO  0u  /* follow the tier table, CPU fallback per op   */
+#define SLM_GPU_CPU   1u  /* never dispatch to the GPU for this session   */
+#define SLM_GPU_ON    2u  /* as auto; launch refuses if no op has a GPU tier */
+
+/* rust_slm_prompt_ex flag: tokenize the text as given, mapping special
+ * token names such as <|im_start|> to their ids, instead of rendering
+ * the chat template around it. */
+#define SLM_PROMPT_RAW  1u
+
+/*
+ * Session configuration and live state. Populated by
+ * rust_slm_session_info().
+ */
+typedef struct {
+    uint32_t gpu_mode;     /* SLM_GPU_*                                     */
+    uint32_t threads;      /* --threads as given; stored, not used yet      */
+    uint32_t gpu_ops;      /* ops the tier table sends to the GPU now; 0 under --gpu cpu */
+    uint32_t gpu_tensors;  /* weight tensors staged in GPU memory           */
+    uint32_t max_ctx;
+    uint32_t kv_len;
+    uint32_t busy;         /* non-zero while a prompt runs on this session  */
+    uint32_t stopped;      /* non-zero if the last prompt was stopped       */
+} SlmSessionInfoC;
+
+_Static_assert(sizeof(SlmSessionInfoC) == 32,
+               "SlmSessionInfoC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
+
 /*
  * Token-emission callback. Invoked once per decoded token (prefill
- * is silent). `user` is the opaque pointer the caller passed to
- * rust_slm_prompt. `bytes`/`bytes_len` is the UTF-8 form of the
- * sampled token (do NOT retain the pointer past return). Return
- * non-zero to continue, zero to stop generation early.
+ * is silent, and the end-of-generation token ends the prompt without a
+ * call). `user` is the opaque pointer the caller passed to
+ * rust_slm_prompt. `bytes`/`bytes_len` is complete UTF-8 (do NOT retain
+ * the pointer past return): a token ending inside a multi-byte sequence
+ * passes what's complete so far, possibly nothing, and the next call
+ * carries the rest. If output ends part-way through a sequence, one last
+ * call with token_id == SLM_TOKEN_ID_FLUSH passes U+FFFD; that call
+ * isn't a model token. Return non-zero to continue, zero to stop
+ * generation early.
  */
+#define SLM_TOKEN_ID_FLUSH  0xFFFFFFFFu
+
 typedef int32_t (*RustSlmTokenCb)(
     void *user,
     uint32_t token_id,
@@ -1961,15 +2015,44 @@ extern int32_t rust_slm_session_open(
 
 /*
  * Close a session, releasing its slot.
- * Returns 0 on success, -1 on bad session id.
+ * Returns 0 on success, -1 on bad session id, SLM_ERR_BUSY while a
+ * prompt runs on it.
  */
 extern int32_t rust_slm_session_close(uint32_t session_id);
 
 /*
  * Reset a session's KV cache and counters for a fresh
- * conversation. Returns 0 on success, -1 on bad session id.
+ * conversation. Returns 0 on success, -1 on bad session id,
+ * SLM_ERR_BUSY while a prompt runs on it.
  */
 extern int32_t rust_slm_session_reset(uint32_t session_id);
+
+/*
+ * Apply `slm launch --gpu` / `--threads` to an open session.
+ *
+ * @gpu_mode: one of the SLM_GPU_* constants. SLM_GPU_CPU holds every op
+ *           on the CPU tier for the duration of each prompt.
+ * @threads: 1..64. Stored only: the forward path is single-threaded
+ *           until the worker pool lands.
+ * Returns 0 on success, -1 on a bad argument or session id,
+ * SLM_ERR_BUSY while a prompt runs on it.
+ */
+extern int32_t rust_slm_session_configure(uint32_t session_id,
+                                          uint32_t gpu_mode,
+                                          uint32_t threads);
+
+/* Fill *out with a session's configuration and live state. Works while a
+ * prompt runs. Returns 0 on success, -1 on NULL pointer / bad session id. */
+extern int32_t rust_slm_session_info(uint32_t session_id, SlmSessionInfoC *out);
+
+/* Number of ops the tier table currently routes to the GPU (out of 8). */
+extern uint32_t rust_slm_gpu_tier_ops(void);
+
+/*
+ * Stop poll for rust_slm_prompt_ex, called before every forward step
+ * (prefill included). Return non-zero to stop as rust_slm_stop would.
+ */
+typedef int32_t (*RustSlmPollCb)(void *user);
 
 /*
  * Run a prompt against an open session. The decoder calls `cb`
@@ -1978,18 +2061,23 @@ extern int32_t rust_slm_session_reset(uint32_t session_id);
  *
  * @prompt / @prompt_len: UTF-8 prompt bytes. `prompt` may be NULL
  *           when @prompt_len == 0.
+ * @flags: (_ex only) SLM_PROMPT_RAW tokenizes the text as given.
+ *           Without it the text is a user turn in the chat template;
+ *           the plain rust_slm_prompt always does that.
  * @max_new_tokens: cap on decoded tokens. 0 = unlimited (until
  *           EOS, the cooperative stop flag, or the cache fills).
  * @cb: token callback (see RustSlmTokenCb above).
- * @user: opaque cookie passed to the callback.
+ * @poll: (_ex only) stop poll, or NULL.
+ * @user: opaque cookie passed to the callbacks.
  *
- * Returns 0 on success, -1 on error (NULL pointer when length is
- * non-zero, invalid UTF-8, session not in Open state, etc.).
+ * The session lock is not held during the decode, so rust_slm_stop,
+ * rust_slm_stats and rust_slm_session_info work from another task
+ * meanwhile. SlmStatsC.last_stop_reason says why the prompt ended.
  *
- * NOTE (M5.2): non-empty prompts currently return -1 because the
- * runtime doesn't yet stash a per-session tokenizer (M5.3 plumbs
- * the GGUF bytes through). The state machine and stop-flag path
- * are exercisable via empty prompts.
+ * Returns 0 when the prompt ran, including when it stopped early or
+ * didn't fit in the context (SLM_STOP_CONTEXT_FULL). -1 on error (NULL
+ * pointer when length is non-zero, invalid UTF-8, no such session).
+ * SLM_ERR_BUSY when a prompt is already running on any session.
  */
 extern int32_t rust_slm_prompt(
     uint32_t session_id,
@@ -1999,16 +2087,27 @@ extern int32_t rust_slm_prompt(
     RustSlmTokenCb cb,
     void *user);
 
+extern int32_t rust_slm_prompt_ex(
+    uint32_t session_id,
+    const uint8_t *prompt,
+    size_t prompt_len,
+    uint32_t flags,
+    uint32_t max_new_tokens,
+    RustSlmTokenCb cb,
+    RustSlmPollCb poll,
+    void *user);
+
 /*
  * Cooperative-cancel signal for an in-flight rust_slm_prompt call.
- * Sets the session's stop flag; the decoder loop honours it at
- * the next yield boundary. Returns 0 on success, -1 on bad
- * session id.
+ * Sets the session's stop flag; the decoder honours it before its next
+ * forward step. Safe from any task while the prompt runs. Stopping an
+ * idle session does nothing. Returns 0 on success, -1 on bad session id.
  */
 extern int32_t rust_slm_stop(uint32_t session_id);
 
 /*
- * Snapshot a session's telemetry counters into *out.
+ * Snapshot a session's telemetry counters into *out. Works while a
+ * prompt runs: the counters are then as of its start.
  * Returns 0 on success, -1 on NULL pointer / bad session id.
  */
 extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);

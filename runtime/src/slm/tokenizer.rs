@@ -122,6 +122,10 @@ pub struct Bbpe {
     /// Inverse of [`Self::specials`]: special token id → original
     /// bytes. Used by [`Bbpe::decode_with_specials`].
     special_ids_to_bytes: BTreeMap<u32, Vec<u8>>,
+    /// `tokenizer.ggml.eos_token_id` from the GGUF, when present and in
+    /// range. Qwen2.5 stores `<|im_end|>` (151645) here; SmolLM2 stores
+    /// its own id, so the value must never be hard-coded.
+    eos_id: Option<u32>,
     /// 256-entry table of `byte` → `Some(token_id)` for every byte
     /// that appears in the vocab as a single-byte BYTE-type entry.
     /// Populated during [`Bbpe::from_gguf`]; `None` indicates the
@@ -324,12 +328,19 @@ impl Bbpe {
         // bounds-checking against `vocab.len()`.
         debug_assert_eq!(byte_for_id.len(), vocab.len());
 
+        let eos_id = gguf
+            .metadata("tokenizer.ggml.eos_token_id")
+            .and_then(MetaValue::as_u32)
+            .filter(|&id| (id as usize) < vocab.len());
+
+
         Ok(Self {
             vocab,
             bytes_to_id,
             merges,
             specials,
             special_ids_to_bytes,
+            eos_id,
             byte_table,
             byte_for_id,
         })
@@ -347,11 +358,80 @@ impl Bbpe {
         self.specials.get(name).copied()
     }
 
+    /// The GGUF's `tokenizer.ggml.eos_token_id`, if it has a usable one.
+    pub fn eos_id(&self) -> Option<u32> {
+        self.eos_id
+    }
+
+    /// Every token id that ends a generation: the GGUF's EOS id plus
+    /// `<|im_end|>` and `<|endoftext|>` when the vocab has them.
+    /// Duplicates (Qwen2.5's EOS *is* `<|im_end|>`) appear once.
+    pub fn stop_ids(&self) -> [Option<u32>; 3] {
+        let im_end = self.special_id("<|im_end|>");
+        let eot = self.special_id("<|endoftext|>");
+        [
+            self.eos_id,
+            im_end.filter(|id| Some(*id) != self.eos_id),
+            eot.filter(|id| Some(*id) != self.eos_id && Some(*id) != im_end),
+        ]
+    }
+
+    /// Encode text that may contain special-token names. A name that
+    /// the vocab marks as control or user-defined (`<|im_start|>`,
+    /// `<tool_call>`) becomes its single id; the text between them goes
+    /// through [`Self::encode`]. The longest name wins at each position.
+    ///
+    /// This is what `slm prompt --raw` feeds the model. Use it only on
+    /// text the caller rendered on purpose: [`Self::encode`] is the one
+    /// that keeps user text from forging a ChatML turn boundary.
+    pub fn encode_with_specials(&self, text: &str) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::with_capacity(text.len() / 3);
+        // First-byte filter so ordinary text skips the map walk.
+        let mut first = [false; 256];
+        for name in self.specials.keys() {
+            if let Some(&b) = name.as_bytes().first() {
+                first[b as usize] = true;
+            }
+        }
+        let bytes = text.as_bytes();
+        let mut chunk_start = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if first[bytes[i] as usize] && text.is_char_boundary(i) {
+                let rest = &text[i..];
+                let mut best: Option<(usize, u32)> = None;
+                for (name, &id) in &self.specials {
+                    let longer = match best {
+                        Some((len, _)) => name.len() > len,
+                        None => true,
+                    };
+                    if !name.is_empty() && longer && rest.starts_with(name.as_str()) {
+                        best = Some((name.len(), id));
+                    }
+                }
+                if let Some((len, id)) = best {
+                    if chunk_start < i {
+                        out.extend(self.encode(&text[chunk_start..i]));
+                    }
+                    out.push(id);
+                    i += len;
+                    chunk_start = i;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        if chunk_start < bytes.len() {
+            out.extend(self.encode(&text[chunk_start..]));
+        }
+        out
+    }
+
     /// Encode a UTF-8 string into a Vec of token ids. The pre-tokenizer
     /// splits on the GPT-2 regex; BPE merges run within each chunk.
     /// Special-token strings are tokenized as bytes — pass ChatML
-    /// inputs through [`crate::slm::chat_template::encode_chat`] to
-    /// have specials looked up by name.
+    /// inputs through [`crate::slm::chat_template::encode_chat`] or
+    /// [`Self::encode_with_specials`] to have specials looked up by name.
     ///
     /// Each pre-tokenized chunk's raw bytes are run through the GPT-2
     /// byte-to-unicode mapping ([`byte_to_unicode_char`]) before BPE
@@ -384,6 +464,39 @@ impl Bbpe {
     /// Same as [`Self::decode`] but renders specials.
     pub fn decode_with_specials(&self, ids: &[u32]) -> String {
         self.decode_inner(ids, true)
+    }
+
+    /// Append the raw bytes of one token to `out`. Specials and
+    /// out-of-range ids add nothing. Unlike [`Self::decode`] this does
+    /// not repair the bytes: a token can end in the middle of a UTF-8
+    /// sequence, and the streaming path needs those bytes to complete
+    /// the sequence with the next token.
+    pub fn decode_token_bytes(&self, id: u32, out: &mut Vec<u8>) {
+        if self.special_ids_to_bytes.contains_key(&id) {
+            return;
+        }
+        let idx = id as usize;
+        if idx >= self.vocab.len() {
+            return;
+        }
+        if let Some(b) = self.byte_for_id[idx] {
+            out.push(b);
+            return;
+        }
+        match core::str::from_utf8(&self.vocab[idx]) {
+            Ok(body) => {
+                for ch in body.chars() {
+                    if let Some(b) = unicode_char_to_byte(ch) {
+                        out.push(b);
+                    } else {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
+            }
+            // A vocab body that isn't UTF-8 can't be GPT-2 encoded.
+            Err(_) => out.extend_from_slice(&self.vocab[idx]),
+        }
     }
 
     fn decode_inner(&self, ids: &[u32], render_specials: bool) -> String {
@@ -1204,5 +1317,95 @@ mod tests {
             "MAX_TOKEN_BYTES = {MAX_TOKEN_BYTES} < 256; would reject \
              real-world vocabs (Qwen2.5 max = 256). See tokenizer.rs \
              docstring for sizing rationale.");
+    }
+
+    #[test]
+    fn encode_with_specials_maps_names_to_ids() {
+        let bytes = build_tiny_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+        let im_start = tok.special_id("<|im_start|>").expect("im_start");
+        let im_end = tok.special_id("<|im_end|>").expect("im_end");
+
+        let ids = tok.encode_with_specials("<|im_start|>hi<|im_end|>\n<|im_start|>");
+        let mut expected = alloc::vec![im_start];
+        expected.extend(tok.encode("hi"));
+        expected.push(im_end);
+        expected.extend(tok.encode("\n"));
+        expected.push(im_start);
+        assert_eq!(ids, expected);
+
+        // Plain encode must keep treating the same text as bytes, so
+        // user text can't forge a turn boundary in chat mode.
+        assert!(!tok.encode("<|im_start|>").contains(&im_start));
+        // Text without specials takes the same path as encode().
+        assert_eq!(tok.encode_with_specials("hi there"), tok.encode("hi there"));
+        // A near-miss stays text.
+        assert!(!tok.encode_with_specials("<|im_start").contains(&im_start));
+        assert!(tok.encode_with_specials("").is_empty());
+    }
+
+    #[test]
+    fn decode_token_bytes_keeps_partial_utf8() {
+        let bytes = build_tiny_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+        // BYTE tokens are ids 0..=255 in this fixture.
+        let mut out = Vec::new();
+        tok.decode_token_bytes(0xE4, &mut out);
+        assert_eq!(out, [0xE4u8], "a lone lead byte must not become U+FFFD");
+        // decode() is the lossy one: it repairs what it is given.
+        assert_eq!(tok.decode(&[0xE4]), "\u{FFFD}");
+
+        out.clear();
+        tok.decode_token_bytes(tok.special_id("<|im_end|>").expect("im_end"), &mut out);
+        assert!(out.is_empty(), "specials stream as nothing");
+        tok.decode_token_bytes(u32::MAX, &mut out);
+        assert!(out.is_empty(), "out-of-range ids stream as nothing");
+    }
+
+    /// Golden check against the real model. `#[ignore]` because the
+    /// 1.1 GB file isn't in the repo; run with
+    /// `cargo test --target x86_64-unknown-linux-gnu --features slm
+    /// real_qwen -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore = "needs /home/john/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"]
+    fn real_qwen_metadata_and_template() {
+        extern crate std;
+        use crate::slm::chat_template::{
+            encode_chat, render_chatml, ChatTurn, Role, QWEN_SYSTEM_PROMPT,
+        };
+        let data = std::fs::read("/home/john/models/qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            .expect("read model");
+        let gguf = Gguf::parse(&data).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+
+        assert_eq!(tok.eos_id(), Some(151_645));
+        assert_eq!(tok.special_id("<|endoftext|>"), Some(151_643));
+        assert_eq!(tok.special_id("<|im_start|>"), Some(151_644));
+        assert_eq!(tok.special_id("<|im_end|>"), Some(151_645));
+        assert_eq!(tok.stop_ids(), [Some(151_645), None, Some(151_643)]);
+
+        let turns = [
+            ChatTurn { role: Role::System, content: QWEN_SYSTEM_PROMPT },
+            ChatTurn { role: Role::User, content: "Hello" },
+        ];
+        // Ids llama.cpp and HF transformers produce for this rendering.
+        let expected: &[u32] = &[
+            151644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13,
+            1446, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 9707,
+            151645, 198, 151644, 77091, 198,
+        ];
+        assert_eq!(encode_chat(&tok, &turns), expected);
+        // --raw on the rendered text must match the template path.
+        assert_eq!(tok.encode_with_specials(&render_chatml(&turns)), expected);
+
+        // A multi-byte token split across ids streams without damage.
+        let ids = tok.encode("\u{4F60}\u{597D}");
+        let mut raw = Vec::new();
+        for id in &ids {
+            tok.decode_token_bytes(*id, &mut raw);
+        }
+        assert_eq!(raw, "\u{4F60}\u{597D}".as_bytes());
     }
 }

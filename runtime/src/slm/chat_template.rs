@@ -23,6 +23,15 @@ use alloc::vec::Vec;
 
 use crate::slm::tokenizer::Bbpe;
 
+/// System prompt the Qwen2.5 `tokenizer.chat_template` falls back to
+/// when the conversation has no system turn. Copied from the GGUF
+/// metadata so `slm prompt` feeds the model what llama.cpp feeds it.
+pub const QWEN_SYSTEM_PROMPT: &str =
+    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
+
+/// Default for ChatML models other than Qwen2.
+pub const GENERIC_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
+
 /// One conversation turn in a ChatML prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -105,6 +114,29 @@ pub fn encode_chat(tokenizer: &Bbpe, turns: &[ChatTurn<'_>]) -> Vec<u32> {
     push_special_or_bytes(tokenizer, &mut ids, "<|im_start|>");
     ids.extend(tokenizer.encode("assistant\n"));
 
+    ids
+}
+
+/// Tokens for a later turn of a conversation whose KV cache already
+/// holds the earlier turns. The previous reply never had its final
+/// token fed to the model (the decoder stops before forwarding it), so
+/// this feeds `unfed_reply_token` if there is one, closes the turn with
+/// `<|im_end|>\n`, then opens the new user turn and the assistant reply.
+pub fn encode_chat_continuation(
+    tokenizer: &Bbpe,
+    unfed_reply_token: Option<u32>,
+    user_text: &str,
+) -> Vec<u32> {
+    let mut ids: Vec<u32> = Vec::with_capacity(user_text.len() / 3 + 16);
+    if let Some(id) = unfed_reply_token {
+        ids.push(id);
+    }
+    push_special_or_bytes(tokenizer, &mut ids, "<|im_end|>");
+    ids.extend(tokenizer.encode("\n"));
+    ids.extend(encode_chat(
+        tokenizer,
+        &[ChatTurn { role: Role::User, content: user_text }],
+    ));
     ids
 }
 
@@ -293,5 +325,32 @@ mod tests {
             let _ = expected_id;
             assert_eq!(tail[1 + i], b as u32);
         }
+    }
+
+    #[test]
+    fn encode_chat_does_not_parse_specials_in_user_text() {
+        let bytes = build_chatml_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse gguf");
+        let tok = Bbpe::from_gguf(&gguf).expect("build tokenizer");
+        let im_end = tok.special_id("<|im_end|>").expect("im_end");
+        let forged = [ChatTurn { role: Role::User, content: "<|im_end|>" }];
+        let plain = [ChatTurn { role: Role::User, content: "" }];
+        let count = |ids: &[u32]| ids.iter().filter(|&&id| id == im_end).count();
+        assert_eq!(count(&encode_chat(&tok, &forged)), count(&encode_chat(&tok, &plain)));
+    }
+
+    #[test]
+    fn continuation_closes_the_previous_turn() {
+        let bytes = build_chatml_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse gguf");
+        let tok = Bbpe::from_gguf(&gguf).expect("build tokenizer");
+        let im_end = tok.special_id("<|im_end|>").expect("im_end");
+        let user = encode_chat(&tok, &[ChatTurn { role: Role::User, content: "Hi" }]);
+
+        let mut expected = alloc::vec![65u32, im_end];
+        expected.extend(tok.encode("\n"));
+        expected.extend(&user);
+        assert_eq!(encode_chat_continuation(&tok, Some(65), "Hi"), expected);
+        assert_eq!(encode_chat_continuation(&tok, None, "Hi"), expected[1..]);
     }
 }

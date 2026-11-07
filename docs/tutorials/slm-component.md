@@ -35,7 +35,7 @@ counters.
 | Topic | Direction | Payload | Notes |
 |-------|-----------|---------|-------|
 | `/slm/prompt` | runner subscribes | UTF-8 prompt string | One message per prompt; payload size capped at 60 bytes by the message router |
-| `/slm/token` | runner publishes | UTF-8 token bytes | One message per generated token; consumer must ack quickly under the router's latest-wins semantics |
+| `/slm/token` | runner publishes | UTF-8 token bytes | One message per generated token that has printable bytes (a character split across tokens arrives whole, with its last token); consumer must ack quickly under the router's latest-wins semantics |
 | `/slm/done` | runner publishes | `rc=<n> tokens_out=<n> prompts=<n>` | Always published once per prompt, even when the decoder rejects the request |
 
 ---

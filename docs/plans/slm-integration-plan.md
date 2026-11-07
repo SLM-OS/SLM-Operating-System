@@ -405,11 +405,9 @@ token-by-token UART streaming.
   helper. Honors UART back-pressure.
 - ☐ `slm stream` reads from UART line-buffered until blank input; useful
   for interactive testing without copy-paste.
-- ☐ `slm stop` from a separate UART input session signals the stop flag —
-  requires a small change to `shell.c` to allow command interleaving from
-  the same UART (or document that `stop` works via a second session).
-  **Decision needed (M7-D1):** interleaved input vs. require second UART
-  session.
+- ✅ `slm stop` from a second shell session signals an atomic per-session
+  stop flag without taking any lock, and Ctrl-C on the session running the
+  prompt does the same. (M7-D1: both.)
 - ☐ Lua bindings: `slm.load`, `slm.launch`, `slm.prompt`, `slm.stats` —
   matches the existing `slm.component_*` pattern.
 - ☐ Help text + categorization in `builtin_commands[]`.
@@ -494,7 +492,7 @@ reports.
 | M6-D3 | Tensor-core API to target | `nvcuda::wmma` C++ vs inline `mma.sync.aligned…` PTX | **Start with `wmma`** for readability; drop to inline PTX only on the 1–2 hottest kernels (`q4K_dot`, `gqa_attn`) if profiling shows a meaningful gap |
 | M6-D4 | Tier-1 / Tier-2 authoring order per M6.B kernel | Tier-1 first vs Tier-2 first | **Tier-2 first** per kernel — gives a working golden reference before HMMA tile work begins, so any Tier-1 slip leaves the GPU path intact |
 | M6-D5 | HMMA accumulator precision | FP16 vs FP32 | **FP32 accumulator** for attention (`Q·Kᵀ`, `P·V`) and `lm_head`; FP16 acceptable elsewhere. Matches llama.cpp's choices and stays inside the 1e-2 max-abs tolerance |
-| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | **Interleaved** if shell.c supports it cleanly; otherwise document the second-UART workaround for the demo |
+| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | Both: Ctrl-C polled during the decode, and `slm stop` from a second session |
 | M8-D1 | KV cache lifetime across hot-swap | preserve vs reset | **Preserve** — chat continuity matters; component generation counter handles correctness |
 
 ---
