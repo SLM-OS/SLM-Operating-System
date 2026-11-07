@@ -446,15 +446,62 @@ aggregated across sessions for `slm status`.
 | **Decode throughput** (tokens/s) | generated tokens / decode wall-clock | `slm stats`, `slm bench` |
 | **Inter-token latency** (ms, min/avg/max) | per-token timer ring buffer (size 256) | `slm stats --verbose` |
 | **KV utilization** (used / max ctx) | session counter | `slm stats`, `slm status` |
-| **Peak resident MB** | `model_mem` watermark | `slm stats` |
+| **Peak resident MB** | weights + KV + GPU arena at each prompt's start, kept as a watermark. Excludes the per-prompt scratch. | `slm stats` |
 | **Cache miss / eviction events** | inherits from registry counters | `slm status` |
-| **Per-op latency breakdown** (rmsnorm / rope / gqa / mlp / lm_head) | optional `--profile` flag enables per-op `Timer::elapsed()` | `slm stats --profile` |
+| **Per-op latency breakdown** (embed / rmsnorm / matmul-attn / rope / gqa / matmul-mlp / swiglu / add / lm_head) | GPU path: `--profile` selects a pushbuffer with a semaphore timestamp at each op-class boundary. CPU path: `--profile` enables a timer per class. | `slm stats --profile` |
 | **CPU cycle accounting** | inherited per-task `task_cycles_on_cpu` | `top`, `bench smp` |
-| **GPU busy time** (Path A/B) | sample GA10B PTIMER (BAR0+0x9420) before/after each pushbuffer | `slm stats --gpu` |
-| **Tensor-core utilization** (per-op tier in use; TC-busy fraction during matmul ops) | per-op tier flag set at session launch; tier-1 ops sample `sm__inst_executed_pipe_tensor` equivalent counter via the SASS prologue/epilogue | `slm stats --gpu`, `slm stats --profile` |
-| **Power proxy** | sample `tegra-soctherm` via BPMP MRQ (post-kexec only) | `slm stats --power` (best-effort) |
-| **OOV / sampler retries** | counters in sampler | `slm stats` |
+| **GPU busy time** (Path A/B) | start and end semaphore timestamps of each program step (the GPU's own timer, no MMIO) | `slm stats --gpu` |
+| **Launches per token, DRAM bytes per token** | the session's plan; DRAM is an estimate from the bytes the kernels name, before the L2 | `slm stats --gpu` |
+| **Tensor-core utilization** | Per-op tier from the plan, and two derived measures. No hardware counter is read: see below. | `slm stats --gpu` |
+| **Power proxy** | BPMP temperatures (`thermal`'s zones). Power itself prints `n/a`: no rail sensor is read. | `slm stats --power` (best-effort) |
+| **OOV** | text pieces the tokenizer's vocab lacks | `slm stats` |
+| **Sampler retries** | `n/a`: the sampler has no retry path | `slm stats` |
 | **Deadline misses** | inherits from Phase-5 deadline scheduler | `sched stats` |
+
+Telemetry costs, for both forward paths: the decode writes a shared block with
+atomics, no heap and no lock a reader holds, so reads from a second session can't
+stall it (`runtime/src/slm/telemetry.rs`). A readout during a CPU step doesn't
+take the registry lock either. With `--profile` off, a GPU step runs the same
+commands as before; the marked pushbuffer sits unused beside the plain one, and
+choosing between them is one GPFIFO entry. With it on, a GPU step adds one
+FLUSH_DISABLE semaphore release per class boundary, after a WAIT_FOR_IDLE that was
+already there, plus arming and reading those slots.
+
+Measured on jetson-nano-2 (cold UEFI-direct, GPC 1020 MHz, EMC 3199 MHz, p1
+`--raw --max 256`, greedy, 2026-11-07):
+
+| Runs | Decode (tok/s) |
+|---|---|
+| `--profile` off, 3 runs | 49.444, 49.440, 49.440 |
+| `--profile` on (310 timestamps per token), 3 runs | 49.402, 49.396, 49.409 |
+| `--profile` on, a telnet session reading `slm stats` and `--follow 500` throughout | 49.394 |
+
+Profiling costs 0.08 percent, about 16 us per token. The six runs printed the
+same text. The class times add up to 19.32 ms per step, the GPU's whole time
+per step: matmul-mlp 11.34 ms, lm_head 3.59, matmul-attn 1.66, GQA 1.65
+(2.59 at 319 positions), the rest 1.08. The plan gives 6.45M mma per token,
+the same count as C3K's harness. Not measured: a build of the same kernels
+without the telemetry (C3X's 49.52 tok/s came from an earlier build).
+
+### Tensor-core utilization
+
+The target below says "TC-busy / GPU-busy on matmul ops". SLM-OS has no measure of
+exactly that, and `slm stats --gpu` doesn't print one under that name. It prints:
+
+| Line | What it is | Measured on p1 under JetPack (C3K) |
+|---|---|---|
+| mma issue time / matmul wall | `mma` per token (from the plan) at the saturation rate of 3.44 G mma/s (`cpi_mma`, native CUDA 12.6, 1020 MHz, scaled to the GPC clock), over matmul time from the marks. An issue-slot share: an SM decoding weights between mma isn't idle. Needs `--profile`. | 4.6 % |
+| Tensor-core share of matmul+GQA MACs | MACs on tensor cores over all matmul MACs plus GQA's, which are SIMT. How much of the work is on tensor cores, not how busy they are. | 99.47 % |
+| SM tensor-pipe counter | Always `n/a` today. | Nsight's `sm__pipe_tensor_cycles_active`, being checked by C3K |
+
+Why no counter is read: nvgpu programs the performance monitors for its users but
+names no signals. `hal/regops/allowlist_ga10b.c` lists HWPM, perfmux and SMPC
+register offsets as a bare allowlist, `hw_perf_ga10b.h` covers PMA and the routers,
+and `hw_gr_ga10b.h` has no SM counter fields. Which select means "tensor pipe
+active" lives in NVIDIA's closed `libnvperf`. Reading some SMPC register and calling
+it tensor cycles would be a guess. The one open route is logging the regops of a
+Nsight run on JetPack, then replaying them from SLM-OS, which also needs the SMPC
+mode set through FECS and has not been tried. An op below Tier-1 prints `n/a` per class.
 
 Performance targets (Qwen2.5-1.5B-Q4_K_M, 4 K context, GPU Path A,
 Tier-1 HMMA tensor cores):

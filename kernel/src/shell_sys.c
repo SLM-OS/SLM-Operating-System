@@ -12043,6 +12043,11 @@ static void thermal_log_task(void *arg)
     }
 }
 
+void shell_thermal_print_line(const char *prefix)
+{
+    thermal_print_line(shell_printf, prefix);
+}
+
 int cmd_thermal(int argc, char *argv[])
 {
     if (argc >= 2 && strcmp(argv[1], "fan") == 0) {

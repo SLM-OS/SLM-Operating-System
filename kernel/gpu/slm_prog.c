@@ -476,6 +476,12 @@ static uint32_t align256(uint32_t v)
     return (v + 255u) & ~255u;
 }
 
+/* Only decode steps are profiled, so only they carry the marked copy. */
+static uint32_t shape_marks(unsigned shape)
+{
+    return shape == 0u ? GA10B_PROG_F_MARKS : 0u;
+}
+
 static uint64_t control_bytes(const struct slm_prog_open_args *a)
 {
     uint64_t total = align256(a->step_bytes);
@@ -485,7 +491,7 @@ static uint64_t control_bytes(const struct slm_prog_open_args *a)
     for (unsigned s = 0; s < SLM_PROG_SHAPES; s++) {
         if (a->max_launches[s] == 0u) continue;
         uint32_t pb, q, c, se;
-        ga10b_prog_sizes(a->max_launches[s], f, &pb, &q, &c, &se);
+        ga10b_prog_sizes(a->max_launches[s], f | shape_marks(s), &pb, &q, &c, &se);
         total += (uint64_t)align256(pb) + align256(q) + align256(c) + align256(se);
     }
     return (total + GA10B_PAGE_SIZE - 1u) & ~(uint64_t)(GA10B_PAGE_SIZE - 1u);
@@ -609,7 +615,8 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
     for (unsigned i = 0; i < SLM_PROG_SHAPES; i++) {
         if (a->max_launches[i] == 0u) continue;
         uint32_t pb, q, c, se;
-        ga10b_prog_sizes(a->max_launches[i], sized, &pb, &q, &c, &se);
+        uint32_t fi = sized | shape_marks(i);
+        ga10b_prog_sizes(a->max_launches[i], fi, &pb, &q, &c, &se);
         struct ga10b_prog_mem m_pb = { (uint8_t *)s->control.cpu + off, s->control_va + off, pb };
         off += align256(pb);
         struct ga10b_prog_mem m_q = { (uint8_t *)s->control.cpu + off, s->control_va + off, q };
@@ -618,7 +625,7 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         off += align256(c);
         struct ga10b_prog_mem m_s = { (uint8_t *)s->control.cpu + off, s->control_va + off, se };
         off += align256(se);
-        uint32_t spf = pf;
+        uint32_t spf = pf | shape_marks(i);
         if (i == 0u && (a->flags & SLM_PROG_FLAG_INJECT_HANG)) spf |= GA10B_PROG_F_INJECT_HANG;
         if (ga10b_prog_init(&s->shapes[i].p, &m_pb, &m_q, &m_c, &m_s, a->max_launches[i], spf,
                             (enum ga10b_prog_barrier)a->barrier) != GA10B_PROG_OK) {
@@ -685,6 +692,14 @@ int slm_prog_barrier(int32_t h, uint32_t shape)
     struct prog_shape *ps = shape_of(session(h), shape);
     if (!ps) return SLM_PROG_ERR_ARG;
     return ga10b_prog_add_barrier(&ps->p) == GA10B_PROG_OK ? 0 : SLM_PROG_ERR_ARG;
+}
+
+int slm_prog_mark(int32_t h, uint32_t shape)
+{
+    struct prog_shape *ps = shape_of(session(h), shape);
+    if (!ps) return SLM_PROG_ERR_ARG;
+    int rc = ga10b_prog_add_mark(&ps->p);
+    return rc >= 0 ? rc : SLM_PROG_ERR_ARG;
 }
 
 int slm_prog_finish(int32_t h, uint32_t shape)
@@ -755,7 +770,8 @@ static void describe_timeout(const struct prog_session *s, const struct ga10b_pr
     s->be->dump_fault(what);
 }
 
-int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats)
+static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats, bool marked,
+                    uint64_t *ns, uint32_t cap)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -770,9 +786,18 @@ int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats)
     uint32_t sema_len = ga10b_prog_sema_bytes(p);
     ga10b_prog_sema_arm(p);
     ops->cache_clean(ops->ctx, p->sema.cpu, sema_len);
+    uint8_t *marks = NULL;
+    uint32_t marks_len = 0;
+    if (marked) {
+        if (!(p->flags & GA10B_PROG_F_MARKS)) return SLM_PROG_ERR_ARG;
+        marks = p->sema.cpu + ga10b_prog_mark_slot0(p) * GA10B_PROG_SEMA_SLOT_BYTES;
+        marks_len = ga10b_prog_marks_bytes(p);
+        memset(marks, 0, marks_len);
+        ops->cache_clean(ops->ctx, marks, marks_len);
+    }
 
     uint64_t t0 = be->now_us();
-    int rc = be->submit(ga10b_prog_gp_entry(p),
+    int rc = be->submit(marked ? ga10b_prog_gp_entry_marked(p) : ga10b_prog_gp_entry(p),
                         p->sema.cpu + GA10B_PROG_SEMA_END * GA10B_PROG_SEMA_SLOT_BYTES,
                         GA10B_PROG_PAYLOAD_END, SLM_PROG_STEP_TIMEOUT_MS);
     if (rc != 0) {
@@ -808,7 +833,22 @@ int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats)
         stats->gpu_ns = ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_END) -
                         ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_START);
     }
+    if (marked) {
+        ops->cache_inval(ops->ctx, marks, marks_len);
+        (void)ga10b_prog_marks_ns(p, ns, cap);
+    }
     return 0;
+}
+
+int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats)
+{
+    return run_step(h, shape, stats, false, NULL, 0u);
+}
+
+int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
+                        uint64_t *ns, uint32_t cap)
+{
+    return run_step(h, shape, stats, true, ns, cap);
 }
 
 uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)

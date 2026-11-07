@@ -513,7 +513,7 @@ fn top_p_filter(logits: &mut [f32], p: f32, ws: &mut SamplerWorkspace) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::vec;
 
@@ -1162,7 +1162,7 @@ mod tests {
     // Counting allocator. The crate's own allocator is `cfg(not(test))`,
     // so the host test binary can install this one. Counts only on a
     // thread that armed it, so concurrent tests cannot disturb the count.
-    mod counting {
+    pub(crate) mod counting {
         use std::alloc::{GlobalAlloc, Layout, System};
         use std::cell::Cell;
         use std::sync::atomic::{AtomicUsize, Ordering};

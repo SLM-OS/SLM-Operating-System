@@ -134,6 +134,9 @@ impl PreTokenizer {
 
 /// Byte-level BPE tokenizer.
 pub struct Bbpe {
+    /// Pieces of encoded text the vocab has no token for, each encoded
+    /// byte by byte or dropped. `slm stats` reports it as OOV.
+    oov_pieces: core::sync::atomic::AtomicU64,
     /// The pre-tokenizer the GGUF names.
     pre: PreTokenizer,
     /// Token-id → token-bytes.
@@ -365,6 +368,7 @@ impl Bbpe {
 
 
         Ok(Self {
+            oov_pieces: core::sync::atomic::AtomicU64::new(0),
             pre: PreTokenizer::from_gguf(gguf),
             vocab,
             bytes_to_id,
@@ -663,6 +667,11 @@ impl Bbpe {
     /// character boundaries — splitting `Ġ` (UTF-8 `0xC4 0xA0`) into
     /// two single-byte pieces would never re-merge through any vocab
     /// entry.
+    /// Pieces encoded so far with no vocab entry of their own.
+    pub fn oov_pieces(&self) -> u64 {
+        self.oov_pieces.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     fn encode_piece(&self, bytes: &[u8], out: &mut Vec<u32>) {
         if bytes.is_empty() {
             return;
@@ -731,6 +740,7 @@ impl Bbpe {
                 out.push(id);
                 continue;
             }
+            self.oov_pieces.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Byte fallback, one token per ORIGINAL input byte. Each
             // char of the piece is the byte-to-unicode encoding of one
             // input byte (`encode` built it that way), and a BYTE token

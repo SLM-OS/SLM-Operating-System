@@ -21,7 +21,7 @@
  *   slm unload <h>           — rust_slm_unload
  *   slm close <s>            — rust_slm_session_close
  *   slm status               — model count + session count summary
- *   slm stats <s>            — rust_slm_stats pretty-print
+ *   slm stats <s> [opts]     — rust_slm_telemetry pretty-print; live during a prompt
  *   slm gpu                  — per-op tier + dispatch counters
  *
  * NOTE on -mgeneral-regs-only: rust_slm_session_open and
@@ -46,6 +46,8 @@
 #include "boot_models.h"
 #include "string.h"
 #include "timer.h"
+#include "task.h"
+#include "shell_session.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1197,10 +1199,246 @@ static int slm_status(void)
     return 0;
 }
 
+/* ---- slm stats ----
+ *
+ * Everything comes from rust_slm_telemetry, which never waits for a running
+ * prompt. So nothing here may call rust_slm_session_info while one runs: that
+ * takes the registry lock, which a CPU forward step holds throughout. */
+
+/* n tokens over ns as tenths of a token per second. */
+static uint64_t slm_rate_x10(uint64_t n, uint64_t ns)
+{
+    if (ns == 0u) {
+        return 0u;
+    }
+    /* n * 1e10 fits u64 up to about 1.8e9 tokens. */
+    return n * 10000000000ull / ns;
+}
+
+static void slm_print_x10(uint64_t v)
+{
+    shell_printf("%llu.%llu", (unsigned long long)(v / 10u), (unsigned long long)(v % 10u));
+}
+
+/* Nanoseconds as milliseconds with two decimals. */
+static void slm_print_ms(uint64_t ns)
+{
+    uint64_t c = ns / 10000u;
+    shell_printf("%llu.%02llu ms", (unsigned long long)(c / 100u), (unsigned long long)(c % 100u));
+}
+
+static void slm_print_bp(uint32_t bp)
+{
+    shell_printf("%lu.%02lu %%", (unsigned long)(bp / 100u), (unsigned long)(bp % 100u));
+}
+
+static const char *slm_tier_name(uint32_t tier)
+{
+    switch (tier) {
+    case SLM_TIER_HMMA: return "tier-1 HMMA";
+    case SLM_TIER_SIMT: return "tier-2 SIMT";
+    default:            return "CPU";
+    }
+}
+
+static const char *const slm_class_names[SLM_OPCLASS_COUNT] = {
+    [SLM_OPCLASS_EMBED]   = "embed",
+    [SLM_OPCLASS_RMSNORM] = "rmsnorm",
+    [SLM_OPCLASS_MM_ATTN] = "matmul-attn",
+    [SLM_OPCLASS_ROPE]    = "rope",
+    [SLM_OPCLASS_GQA]     = "gqa",
+    [SLM_OPCLASS_MM_MLP]  = "matmul-mlp",
+    [SLM_OPCLASS_SWIGLU]  = "swiglu",
+    [SLM_OPCLASS_ADD]     = "add",
+    [SLM_OPCLASS_LM_HEAD] = "lm_head",
+};
+
+static void slm_stats_verbose(const SlmTelemetryC *t)
+{
+    if (t->itl_count == 0u) {
+        shell_puts("  itl      : none yet\r\n");
+        return;
+    }
+    shell_puts("  itl      : min ");
+    slm_print_ms(t->itl_min_ns);
+    shell_puts("  avg ");
+    slm_print_ms(t->itl_avg_ns);
+    shell_puts("  max ");
+    slm_print_ms(t->itl_max_ns);
+    shell_printf(" over %llu tokens\r\n", (unsigned long long)t->itl_count);
+}
+
+static void slm_stats_profile(const SlmTelemetryC *t)
+{
+    shell_printf("  profile  : %s, %llu tokens timed\r\n", t->profile ? "on" : "off",
+                 (unsigned long long)t->profiled_tokens);
+    if (t->itl_count != 0u) {
+        shell_puts("  rolling  : last ");
+        slm_print_ms(t->itl_last_ns);
+        shell_puts(", last 32 avg ");
+        slm_print_ms(t->itl_rolling_ns);
+        shell_puts(" = ");
+        slm_print_x10(slm_rate_x10(1u, t->itl_rolling_ns));
+        shell_puts(" tok/s\r\n");
+    }
+    if (t->profiled_tokens == 0u) {
+        return;
+    }
+    shell_printf("  per token (%s):\r\n",
+                 t->path == SLM_PATH_PROGRAM ? "GPU timestamps" : "CPU timers");
+    shell_puts("    class        ops  tier          last        avg\r\n");
+    for (unsigned i = 0; i < SLM_OPCLASS_COUNT; i++) {
+        const SlmOpClassC *c = &t->classes[i];
+        shell_printf("    %-11s %4lu  %-11s ", slm_class_names[i],
+                     (unsigned long)c->ops, slm_tier_name(c->tier));
+        slm_print_ms(c->last_ns);
+        shell_puts("  ");
+        slm_print_ms(c->total_ns / t->profiled_tokens);
+        shell_puts("\r\n");
+    }
+}
+
+/* Tensor-core utilization. No number here says more than it is: the two derived
+ * measures are named for what they divide, and the counter the spec asks for is
+ * n/a until something reads it from hardware (docs/design/slm-integration.md,
+ * "Tensor-core utilization"). */
+static void slm_stats_tensor_core(const SlmTelemetryC *t)
+{
+    shell_puts("  tensor core utilization:\r\n");
+    shell_puts("    mma issue time / matmul wall (derived): ");
+    if (t->tc_issue_bp != SLM_TELEMETRY_NA) {
+        slm_print_bp(t->tc_issue_bp);
+        shell_printf(" (%llu mma per token; 3.44 G mma/s measured under JetPack at 1020 MHz, "
+                     "scaled to GPC clock)\r\n", (unsigned long long)t->mma);
+    } else if (t->mma != 0u) {
+        shell_puts("n/a (needs --profile tokens and a known GPC clock)\r\n");
+    } else {
+        shell_puts("n/a (no op at tier 1)\r\n");
+    }
+    shell_puts("    tensor-core share of matmul+GQA MACs (derived): ");
+    if (t->tc_mac_share_bp != SLM_TELEMETRY_NA) {
+        slm_print_bp(t->tc_mac_share_bp);
+        shell_puts("\r\n");
+    } else {
+        shell_puts("n/a (no op at tier 1)\r\n");
+    }
+    shell_puts("    SM tensor-pipe counter: n/a (not read: signal selects are not public)\r\n");
+    for (unsigned i = 0; i < SLM_OPCLASS_COUNT; i++) {
+        const SlmOpClassC *c = &t->classes[i];
+        if (c->ops != 0u && c->tier != SLM_TIER_HMMA) {
+            shell_printf("    %-11s n/a (%s)\r\n", slm_class_names[i], slm_tier_name(c->tier));
+        }
+    }
+}
+
+static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_hz)
+{
+    shell_printf("  clocks   : EMC %llu MHz, GPC %llu MHz\r\n",
+                 (unsigned long long)(emc_hz / 1000000u),
+                 (unsigned long long)(gpc_hz / 1000000u));
+    shell_puts("  op tiers :\r\n");
+    for (unsigned i = 0; i < SLM_OPCLASS_COUNT; i++) {
+        shell_printf("    %-11s %4lu  %s\r\n", slm_class_names[i],
+                     (unsigned long)t->classes[i].ops, slm_tier_name(t->classes[i].tier));
+    }
+    if (t->path == SLM_PATH_PROGRAM) {
+        shell_printf("  launches : %lu per token, %lu barriers, %lu timestamps with --profile\r\n",
+                     (unsigned long)t->launches, (unsigned long)t->barriers,
+                     (unsigned long)t->marks);
+        shell_printf("  dram est : %llu MB weights + %llu MB KV per token (plan, before L2)\r\n",
+                     (unsigned long long)(t->weight_bytes >> 20),
+                     (unsigned long long)(t->kv_read_bytes >> 20));
+        shell_puts("  gpu busy : ");
+        slm_print_ms(t->gpu_busy_ns);
+        shell_printf(" over %llu steps this prompt; last step ", (unsigned long long)t->gpu_steps);
+        slm_print_ms(t->gpu_last_ns);
+        shell_printf("; evict %llu us per step\r\n",
+                     (unsigned long long)(t->gpu_steps ? t->gpu_evict_us / t->gpu_steps : 0u));
+    } else {
+        shell_puts("  gpu busy : n/a (not on a GPU program)\r\n");
+    }
+    slm_stats_tensor_core(t);
+}
+
+static void slm_stats_print(uint32_t sid, const SlmTelemetryC *t)
+{
+    shell_printf("session %lu  prompts=%lu  tokens_in=%llu  tokens_out=%llu%s\r\n",
+                 (unsigned long)sid, (unsigned long)t->prompts,
+                 (unsigned long long)t->tokens_in, (unsigned long long)t->tokens_out,
+                 t->running ? "  [prompt running: live]" : "");
+    shell_printf("  ttft     : %lu ms\r\n", (unsigned long)(t->ttft_ns / 1000000u));
+    shell_printf("  prefill  : %llu tokens, %lu ms, ",
+                 (unsigned long long)t->prefill_tokens, (unsigned long)(t->prefill_ns / 1000000u));
+    slm_print_x10(slm_rate_x10(t->prefill_tokens, t->prefill_ns));
+    shell_puts(" tok/s\r\n");
+    shell_printf("  decode   : %llu tokens, %lu ms total, ",
+                 (unsigned long long)t->decode_tokens, (unsigned long)(t->decode_ns / 1000000u));
+    slm_print_x10(slm_rate_x10(t->itl_count, t->decode_ns));
+    shell_puts(" tok/s\r\n");
+    if (!t->running) {
+        shell_printf("  stop     : %s\r\n", slm_stop_reason_name(t->stop_reason));
+    }
+    shell_printf("  kv_used  : %lu / %lu\r\n", (unsigned long)t->kv_used,
+                 (unsigned long)t->max_ctx);
+    shell_printf("  peak mem : %llu MB (weights + KV + GPU arena)\r\n",
+                 (unsigned long long)(t->peak_resident_bytes >> 20));
+    shell_printf("  ops/token: tier-1 %lu, tier-2 %lu, CPU %lu\r\n",
+                 (unsigned long)t->ops_tier1, (unsigned long)t->ops_tier2,
+                 (unsigned long)t->ops_cpu);
+    shell_printf("  oov      : %llu text pieces; sampler retries: n/a (the sampler never retries)\r\n",
+                 (unsigned long long)t->oov_pieces);
+}
+
+/* One line per interval until the prompt ends or Ctrl-C. Reads only. */
+static int slm_stats_follow(uint32_t sid, uint32_t ms)
+{
+    SlmTelemetryC t;
+    if (rust_slm_telemetry(sid, 0u, &t) != 0) {
+        return -1;
+    }
+    if (!t.running) {
+        shell_puts("no prompt running\r\n");
+        return 0;
+    }
+    while (t.running && !shell_session_poll_interrupt()) {
+        shell_printf("decode %llu tok  ", (unsigned long long)t.decode_tokens);
+        slm_print_x10(slm_rate_x10(t.itl_count, t.decode_ns));
+        shell_puts(" tok/s  last ");
+        slm_print_ms(t.itl_last_ns);
+        shell_puts("  last-32 ");
+        slm_print_ms(t.itl_rolling_ns);
+        shell_printf("  kv %lu/%lu", (unsigned long)t.kv_used, (unsigned long)t.max_ctx);
+        if (t.profiled_tokens != 0u) {
+            shell_puts("  matmul ");
+            slm_print_ms(t.matmul_avg_ns);
+        }
+        shell_puts("\r\n");
+        task_sleep_ms(ms);
+        if (rust_slm_telemetry(sid, 0u, &t) != 0) {
+            break;
+        }
+    }
+    shell_puts("follow ended\r\n");
+    return 0;
+}
+
+static void slm_print_temperatures(void)
+{
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    shell_thermal_print_line("    ");
+#else
+    shell_puts("    n/a (no BPMP on this platform)\r\n");
+#endif
+}
+
+#define SLM_STATS_USAGE \
+    "Usage: slm stats <session> [--verbose] [--gpu] [--power] " \
+    "[--profile [on|off]] [--follow [ms]]\r\n"
+
 static int slm_stats(int argc, char *argv[])
 {
     if (argc < 3) {
-        shell_puts("Usage: slm stats <session>\r\n");
+        shell_puts(SLM_STATS_USAGE);
         return -1;
     }
     uint32_t sid;
@@ -1208,36 +1446,78 @@ static int slm_stats(int argc, char *argv[])
         shell_printf("slm stats: invalid session '%s'\r\n", argv[2]);
         return -1;
     }
-    SlmStatsC st;
-    if (rust_slm_stats(sid, &st) != 0) {
-        shell_printf("slm stats: session %lu not open\r\n",
-                     (unsigned long)sid);
+    bool verbose = false, gpu = false, power = false, profile = false, follow = false;
+    int profile_set = -1;
+    uint32_t follow_ms = 1000u;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--verbose") == 0) {
+            verbose = true;
+        } else if (strcmp(argv[i], "--gpu") == 0) {
+            gpu = true;
+        } else if (strcmp(argv[i], "--power") == 0) {
+            power = true;
+        } else if (strcmp(argv[i], "--profile") == 0) {
+            profile = true;
+            profile_set = 1;
+            if (i + 1 < argc && strcmp(argv[i + 1], "on") == 0) {
+                i++;
+            } else if (i + 1 < argc && strcmp(argv[i + 1], "off") == 0) {
+                profile_set = 0;
+                i++;
+            }
+        } else if (strcmp(argv[i], "--follow") == 0) {
+            follow = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                if (shell_parse_uint(argv[i + 1], &follow_ms) != 0 || follow_ms == 0u) {
+                    shell_printf("slm stats: bad interval '%s'\r\n", argv[i + 1]);
+                    return -1;
+                }
+                i++;
+            }
+        } else {
+            shell_printf("slm stats: unknown option '%s'\r\n", argv[i]);
+            shell_puts(SLM_STATS_USAGE);
+            return -1;
+        }
+    }
+    if (profile_set >= 0 && rust_slm_telemetry_profile(sid, (uint32_t)profile_set) != 0) {
+        shell_printf("slm stats: session %lu not open\r\n", (unsigned long)sid);
         return -1;
     }
-    unsigned long ttft_ms   = (unsigned long)(st.last_ttft_ns / 1000000ull);
-    unsigned long decode_ms = (unsigned long)(st.last_decode_ns / 1000000ull);
-    shell_printf("session %lu  prompts=%lu  tokens_in=%lu  tokens_out=%lu\r\n",
-                 (unsigned long)sid,
-                 (unsigned long)st.prompts_completed,
-                 (unsigned long)st.tokens_in,
-                 (unsigned long)st.tokens_out);
-    shell_printf("  ttft     : %lu ms\r\n", ttft_ms);
-    shell_printf("  decode   : %lu ms total\r\n", decode_ms);
-    shell_printf("  stop     : %s\r\n",
-                 slm_stop_reason_name(st.last_stop_reason));
+    if (follow) {
+        if (slm_stats_follow(sid, follow_ms) != 0) {
+            shell_printf("slm stats: session %lu not open\r\n", (unsigned long)sid);
+            return -1;
+        }
+        return 0;
+    }
+
+    /* A BPMP query is too slow to make every plain `slm stats` pay for it. */
+    uint64_t emc = 0, gpc = 0;
+    if (gpu || profile) {
+        slm_prog_clocks(&emc, &gpc);
+    }
+    SlmTelemetryC t;
+    if (rust_slm_telemetry(sid, gpc, &t) != 0) {
+        shell_printf("slm stats: session %lu not open\r\n", (unsigned long)sid);
+        return -1;
+    }
+    slm_stats_print(sid, &t);
+    if (verbose) slm_stats_verbose(&t);
+    if (profile) slm_stats_profile(&t);
+    if (gpu) slm_stats_gpu(&t, emc, gpc);
+    if (power) {
+        shell_puts("  power    : n/a (no rail sensor is read); temperatures only, in C:\r\n");
+        slm_print_temperatures();
+    }
+    /* Takes the registry lock, so only when no forward step can hold it. */
     SlmSessionInfoC info;
-    if (rust_slm_session_info(sid, &info) == 0) {
-        shell_printf("  kv_used  : %lu / %lu\r\n",
-                     (unsigned long)info.kv_len,
-                     (unsigned long)info.max_ctx);
+    if (!t.running && rust_slm_session_busy(sid) == 0 &&
+        rust_slm_session_info(sid, &info) == 0) {
         shell_puts("  ");
         slm_print_backend(sid, info.gpu_mode);
         shell_printf("\r\n  threads  : %lu (stored; forward is "
                      "single-threaded)\r\n", (unsigned long)info.threads);
-        if (info.busy) {
-            shell_puts("  prompt running: figures are from before it "
-                       "started\r\n");
-        }
     }
     return 0;
 }
@@ -1458,7 +1738,8 @@ static void slm_print_usage(void)
     shell_puts("  reset  <session>               Reset KV cache\r\n");
     shell_puts("  close  <session>               Close a session\r\n");
     shell_puts("  status                         One-line summary\r\n");
-    shell_puts("  stats  <session>               Per-session telemetry\r\n");
+    shell_puts("  stats  <session> [--verbose] [--gpu] [--power] [--profile [on|off]] [--follow [ms]]\r\n"
+               "                                 Per-session telemetry, live during a prompt\r\n");
     shell_puts("  gpu                            GPU dispatch state\r\n");
 }
 

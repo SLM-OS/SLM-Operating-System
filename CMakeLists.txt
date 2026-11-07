@@ -1399,6 +1399,10 @@ add_custom_command(
     DEPENDS "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
             "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
     VERBATIM)
+# Named so `make tidy-db` can generate the header without building the kernel:
+# clang-tidy has to parse the files that include it.
+add_custom_target(slm_kernels_header DEPENDS "${SLM_KERNELS_GEN}")
+add_dependencies(slmos.elf slm_kernels_header)
 target_sources(slmos.elf PRIVATE "${SLM_KERNELS_GEN}")
 target_include_directories(slmos.elf PRIVATE "${CMAKE_BINARY_DIR}/generated")
 

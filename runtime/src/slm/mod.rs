@@ -18,5 +18,6 @@ pub mod numerics_probe;
 pub mod registry;
 pub mod sampler;
 pub mod session;
+pub mod telemetry;
 pub mod tokenizer;
 mod unicode_tables;
