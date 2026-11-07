@@ -277,9 +277,13 @@ pub fn run_prompt(
             .min(prompt_ids.len() - i);
         let tokens = &prompt_ids[i..i + batch];
         if batch > 1 {
-            step_many(session, tokens, &mut scratch, &mut last_logits);
+            step_many(session, tokens, &mut scratch, &mut last_logits, cfg);
         } else {
-            step(session, tokens[0], true, &mut scratch, &mut last_logits);
+            step(session, tokens[0], true, &mut scratch, &mut last_logits, cfg);
+        }
+        if last_logits.is_empty() && session.stop_requested() {
+            // Stopped inside a CPU replay after a GPU failure.
+            return Some(finish(session, i as u32, 0, 0, 0, StopReason::Stopped));
         }
         i += batch;
         let now = unsafe { slm_get_time_ns() };
@@ -332,9 +336,10 @@ pub fn run_prompt(
 
         // Forward + sample for the next token. Reuses last_logits's
         // backing allocation (sized once at vocab capacity above).
-        step(session, next_id, false, &mut scratch, &mut last_logits);
+        step(session, next_id, false, &mut scratch, &mut last_logits, cfg);
         if last_logits.is_empty() {
-            break StopReason::NoLogits;
+            // Stopped inside a CPU replay after a GPU failure, or no output.
+            break if session.stop_requested() { StopReason::Stopped } else { StopReason::NoLogits };
         }
         session.pending_token = None;
         next_id = session.sampler_state.sample(&session.sampler_cfg, &mut last_logits);
@@ -534,11 +539,12 @@ fn step(
     prefill: bool,
     scratch: &mut ForwardScratch,
     out: &mut Vec<f32>,
+    cfg: &DecodeConfig,
 ) {
     if script::armed() {
         script::step(session, prefill, out);
     } else if session.gpu.is_some() {
-        step_many(session, core::slice::from_ref(&token_id), scratch, out);
+        step_many(session, core::slice::from_ref(&token_id), scratch, out, cfg);
     } else {
         session.cpu_tokens = session.cpu_tokens.saturating_add(1);
         forward_step_via_registry(session, token_id, scratch, out);
@@ -547,8 +553,15 @@ fn step(
 
 /// Feed `tokens` through the session's GPU program. If that fails, the
 /// session moves to the CPU for good and these tokens run there, so the
-/// caller gets the same logits either way.
-fn step_many(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch, out: &mut Vec<f32>) {
+/// caller gets the same logits either way. A stop during that replay
+/// leaves `out` empty with the stop flag set.
+fn step_many(
+    session: &mut Session,
+    tokens: &[u32],
+    scratch: &mut ForwardScratch,
+    out: &mut Vec<f32>,
+    cfg: &DecodeConfig,
+) {
     let mut prog = match session.gpu.take() {
         Some(p) => p,
         None => {
@@ -575,8 +588,9 @@ fn step_many(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch
             let history = core::mem::take(&mut prog.history);
             // Drop closes the program: unmaps the arena, frees it.
             drop(prog);
-            fall_back_to_cpu(session, why, &history, scratch, out);
-            run_on_cpu(session, tokens, scratch, out);
+            if fall_back_to_cpu(session, why, &history, scratch, out, cfg) {
+                run_on_cpu(session, tokens, scratch, out);
+            }
         }
     }
 }
@@ -591,13 +605,20 @@ fn run_on_cpu(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratc
 /// The program's KV cache died with it, so the CPU rebuilds its own from
 /// the tokens fed so far. Slow for a long history but always correct, and
 /// it doesn't depend on reading anything back from a wedged GPU.
+///
+/// The replay runs at CPU speed, which for a long history is most of an
+/// hour, so it honours a stop (Ctrl-C, `slm stop`, /slm/stop) between
+/// tokens and yields after each one. A stopped replay leaves the KV cache
+/// empty, since a half-rebuilt one doesn't match the conversation, and
+/// returns false with `out` empty: the next prompt starts a fresh one.
 fn fall_back_to_cpu(
     session: &mut Session,
     why: &'static str,
     history: &[u32],
     scratch: &mut ForwardScratch,
     out: &mut Vec<f32>,
-) {
+    cfg: &DecodeConfig,
+) -> bool {
     let mut line = alloc::string::String::new();
     let _ = core::fmt::Write::write_fmt(
         &mut line,
@@ -613,7 +634,21 @@ fn fall_back_to_cpu(
     session.telemetry.set_plan(None, session.arch.block_count);
     session.kv.ensure_storage();
     session.kv.clear();
-    run_on_cpu(session, history, scratch, out);
+    for &t in history {
+        if stop_wanted(session, cfg) {
+            session.kv.clear();
+            session.pending_token = None;
+            out.clear();
+            crate::kernel_ffi::print(
+                b"[slm] CPU replay stopped; the conversation starts again from empty\n\0",
+            );
+            return false;
+        }
+        run_on_cpu(session, core::slice::from_ref(&t), scratch, out);
+        // SAFETY: the kernel's yield takes no arguments, and no lock is held here.
+        unsafe { sched_yield(); }
+    }
+    true
 }
 
 /// Look up the loaded model's `LoadedSlm` under the registry lock and
@@ -1180,6 +1215,39 @@ mod tests {
         assert_eq!(stats.prefill_tokens, 2, "stopped before the third token");
         assert!(ids_seen().is_empty(), "no output from a stopped prefill");
         assert_eq!(s.state, SessionState::Stopped);
+    }
+
+    /// #475 W6: the CPU replay after a GPU failure honours a stop. It ran
+    /// the whole history regardless, which at 0.4 tok/s on a long chat
+    /// held the shell for about an hour with Ctrl-C and `slm stop` ignored.
+    #[test]
+    fn cpu_replay_after_gpu_failure_honours_stop() {
+        let _serial = TestSerialGuard::new();
+        fn poll() -> bool {
+            POLL_AT_CALL.fetch_sub(1, Ordering::SeqCst) == 1
+        }
+        let history: Vec<u32> = (0..50u32).map(|i| 97 + (i % 26)).collect();
+        let mut cfg = model_cfg(PromptMode::Raw, 0);
+        cfg.poll_stop = Some(poll);
+
+        let mut s = fresh_session();
+        let mut scratch = ForwardScratch::new(&s.arch, s.max_ctx, s.vocab_size as usize);
+        let mut out: Vec<f32> = Vec::new();
+        POLL_AT_CALL.store(4, Ordering::SeqCst);
+        let done = fall_back_to_cpu(&mut s, "test", &history, &mut scratch, &mut out, &cfg);
+        assert!(!done, "a stopped replay says so");
+        assert_eq!(s.cpu_tokens, 3, "stopped before the fourth token, not after 50");
+        assert_eq!(s.kv.len, 0, "a half-rebuilt cache is dropped");
+        assert!(out.is_empty());
+        assert!(s.stop_requested(), "the prompt loop ends the prompt as Stopped");
+        assert_eq!(s.path, ForwardPath::Cpu);
+
+        // Without a stop the whole history runs.
+        let mut s = fresh_session();
+        POLL_AT_CALL.store(u32::MAX, Ordering::SeqCst);
+        cfg.poll_stop = None;
+        assert!(fall_back_to_cpu(&mut s, "test", &history, &mut scratch, &mut out, &cfg));
+        assert_eq!(s.cpu_tokens, 50);
     }
 
     /// The next chat turn feeds the held-back token and closes the turn.
