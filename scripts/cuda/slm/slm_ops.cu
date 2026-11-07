@@ -265,3 +265,151 @@ __global__ void slm_gqa(const half *q, const half *k, const half *v,
         o[i] = __float2half(gqa_acc[i] * inv);
     }
 }
+
+/* ---- GQA across 8 warps: grid (nhq, B, 1), block (32, 8, 1) ----
+ *
+ * Same contract and arguments as slm_gqa. Each warp takes every 8th position
+ * with its own online softmax, then the eight partial results merge, so the
+ * time for T positions drops by up to 8 and no longer runs in series. hd <= 256.
+ */
+
+#define GQA_WARPS 8
+
+__global__ void slm_gqa_w8(const half *q, const half *k, const half *v,
+                           const uint32_t *pos, half *out, int nhq, int nhkv,
+                           int hd, int B)
+{
+    const int hq = blockIdx.x;
+    const int bat = blockIdx.y;
+    const int l = threadIdx.x;
+    const int w = threadIdx.y;
+    const int group = nhq / nhkv;
+    const int hkv = hq / group;
+    const int chunks = hd >> 5;
+    const int kv_per_pos = nhkv * hd;
+    const int T = (int)pos[bat] + 1;
+    const float inv_sqrt = 1.0f / sqrtf((float)hd);
+    const half *qr = q + ((size_t)bat * nhq + hq) * hd;
+
+    __shared__ __align__(16) float gw_acc[GQA_WARPS * GQA_MAX_HD];
+    __shared__ float gw_max[GQA_WARPS];
+    __shared__ float gw_sum[GQA_WARPS];
+    float *acc_w = &gw_acc[w * GQA_MAX_HD];
+
+    for (int c = 0; c < chunks; c++) {
+        acc_w[(c << 5) + l] = 0.0f;
+    }
+
+    float mx = -INFINITY;
+    float sum = 0.0f;
+    bool first = true;
+    for (int t = w; t < T; t += GQA_WARPS) {
+        const size_t off = (size_t)t * kv_per_pos + (size_t)hkv * hd;
+        const half *kt = k + off;
+        const half *vt = v + off;
+        float acc = 0.0f;
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            acc += __half2float(qr[i]) * __half2float(kt[i]);
+        }
+        __syncwarp();
+        for (int m = 16; m > 0; m >>= 1) {
+            acc += __shfl_xor_sync(0xFFFFFFFFu, acc, m);
+        }
+        const float logit = acc * inv_sqrt;
+        if (logit > mx) {
+            const float f = first ? 0.0f : expf(mx - logit);
+            sum *= f;
+            for (int c = 0; c < chunks; c++) {
+                acc_w[(c << 5) + l] *= f;
+            }
+            mx = logit;
+        }
+        first = false;
+        const float p = expf(logit - mx);
+        sum += p;
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            acc_w[i] += p * __half2float(vt[i]);
+        }
+    }
+    if (l == 0) {
+        gw_max[w] = mx;
+        gw_sum[w] = sum;
+    }
+    __syncthreads();
+
+    /* Merge: bring every warp to the largest maximum. A warp that saw no
+     * position has sum 0 and contributes nothing. */
+    if (w == 0) {
+        float gm = -INFINITY;
+#pragma unroll
+        for (int i = 0; i < GQA_WARPS; i++) {
+            gm = fmaxf(gm, gw_max[i]);
+        }
+        float total = 0.0f;
+        float f[GQA_WARPS];
+#pragma unroll
+        for (int i = 0; i < GQA_WARPS; i++) {
+            f[i] = gw_sum[i] > 0.0f ? expf(gw_max[i] - gm) : 0.0f;
+            total += f[i] * gw_sum[i];
+        }
+        const float inv = total > 0.0f ? 1.0f / total : 0.0f;
+        half *o = out + ((size_t)bat * nhq + hq) * hd;
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            float a = 0.0f;
+#pragma unroll
+            for (int m = 0; m < GQA_WARPS; m++) {
+                a += f[m] * gw_acc[m * GQA_MAX_HD + i];
+            }
+            o[i] = __float2half(a * inv);
+        }
+    }
+}
+
+/* ---- RMSNorm across 8 warps: grid (B,1,1), block (32, 8, 1) ----
+ *
+ * Same contract and arguments as slm_rmsnorm, n % 32 == 0. */
+
+__global__ void slm_rmsnorm_w8(const half *x, const float *gamma, half *out,
+                               int n, int B, float eps)
+{
+    const int bat = blockIdx.x;
+    const int l = threadIdx.x;
+    const int w = threadIdx.y;
+    const int steps = (n + 255) >> 8;
+    const half *xr = x + (size_t)bat * n;
+    half *o = out + (size_t)bat * n;
+    const int first = (w << 5) + l;
+
+    float acc = 0.0f;
+    for (int s = 0; s < steps; s++) {
+        const int i = (s << 8) + first;
+        if (i < n) {
+            const float v = __half2float(xr[i]);
+            acc += v * v;
+        }
+    }
+    __syncwarp();
+    for (int m = 16; m > 0; m >>= 1) {
+        acc += __shfl_xor_sync(0xFFFFFFFFu, acc, m);
+    }
+    __shared__ float rn_sum[8];
+    if (l == 0) {
+        rn_sum[w] = acc;
+    }
+    __syncthreads();
+    float total = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        total += rn_sum[i];
+    }
+    const float inv = 1.0f / sqrtf(total / (float)n + eps);
+    for (int s = 0; s < steps; s++) {
+        const int i = (s << 8) + first;
+        if (i < n) {
+            o[i] = __float2half(__half2float(xr[i]) * inv * gamma[i]);
+        }
+    }
+}

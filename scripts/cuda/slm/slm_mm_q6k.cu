@@ -17,7 +17,14 @@
  * Offset encoding as in slm_mm_q4k.cu, one more bit of precision:
  *   hv = 0x3C00 | (q << 4), so hv = 1 + q/64 exactly, and over a sub-block
  *   sum(w * x) = d*sc*(64*H - 96*S)
+ *
+ * Column permutation as in slm_mm_q4k.cu: lane c takes bytes 4c..4c+3 of a
+ * 16-byte sub-block, so one 32-bit value per stream per row. Blocks are only
+ * 2-byte aligned, so q6k_load32 reads the aligned 8 bytes around the value and
+ * shifts; only a lane whose value crosses an 8-byte boundary loads again.
  */
+#include <cmath>
+
 #include "slm_common.cuh"
 
 #define Q6K_BLOCK_BYTES 210
@@ -39,6 +46,19 @@ SLM_INL uint32_t q6k_pack(uint32_t ql, uint32_t qh, int nib_hi, int g)
     const uint32_t hi = (qh >> (2 * g)) & 0x0303u;
     const uint32_t v = lo | (hi << 4);
     return SLM_H_ONE2 | ((v & 0x003Fu) << 4) | ((v & 0x3F00u) << 12);
+}
+
+/* 32 bits at a 2-byte-aligned address. */
+SLM_INL uint32_t q6k_load32(const uint8_t *p)
+{
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const int sh = (int)(a & 6u);
+    const uint8_t *base = p - sh;
+    uint32_t v = (uint32_t)(*reinterpret_cast<const uint64_t *>(base) >> (sh * 8));
+    if (sh == 6) {
+        v |= (uint32_t)*reinterpret_cast<const uint16_t *>(base + 8) << 16;
+    }
+    return v;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -113,9 +133,10 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
     const uint8_t *w0 = W + (has0 ? r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? r1 : 0) * row_bytes;
     const bool xact = gr < B;
-    const char *xp = reinterpret_cast<const char *>(x + (size_t)gr * K);
-    const int e0 = 2 * c;
-    const int e1 = 2 * c + 8;
+    const half *xrow = x + (size_t)gr * K;
+    /* Row 15's bits read as zero, which encodes exactly 1.0. */
+    const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
+    const int off4 = 4 * c;
 
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     __syncwarp();
@@ -127,51 +148,35 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
         const float d1 = has1 ? slm_h2f(q6k_u16(blk1 + 208)) : 0.0f;
 
         for (int h = 0; h < 2; h++) {
-            /* Eight scales per half, four 16-bit loads per row. */
-            const uint8_t *s0 = blk0 + 192 + h * 8;
-            const uint8_t *s1 = blk1 + 192 + h * 8;
-            const uint32_t s0a = q6k_u16(s0) | (q6k_u16(s0 + 2) << 16);
-            const uint32_t s0b = q6k_u16(s0 + 4) | (q6k_u16(s0 + 6) << 16);
-            const uint32_t s1a = q6k_u16(s1) | (q6k_u16(s1 + 2) << 16);
-            const uint32_t s1b = q6k_u16(s1 + 4) | (q6k_u16(s1 + 6) << 16);
+            const uint32_t s0a = q6k_load32(blk0 + 192 + h * 8);
+            const uint32_t s0b = q6k_load32(blk0 + 196 + h * 8);
+            const uint32_t s1a = q6k_load32(blk1 + 192 + h * 8);
+            const uint32_t s1b = q6k_load32(blk1 + 196 + h * 8);
 
             for (int t = 0; t < 2; t++) {
-                const int l = t * 16;
-                const uint8_t *ql0 = blk0 + h * 64 + l;
-                const uint8_t *ql1 = blk1 + h * 64 + l;
-                const uint8_t *qh0 = blk0 + 128 + h * 32 + l;
-                const uint8_t *qh1 = blk1 + 128 + h * 32 + l;
-                const uint32_t l00 = q6k_u16(ql0 + e0);
-                const uint32_t l01 = q6k_u16(ql0 + e1);
-                const uint32_t l02 = q6k_u16(ql0 + 32 + e0);
-                const uint32_t l03 = q6k_u16(ql0 + 32 + e1);
-                const uint32_t l10 = q6k_u16(ql1 + e0);
-                const uint32_t l11 = q6k_u16(ql1 + e1);
-                const uint32_t l12 = q6k_u16(ql1 + 32 + e0);
-                const uint32_t l13 = q6k_u16(ql1 + 32 + e1);
-                const uint32_t h00 = q6k_u16(qh0 + e0);
-                const uint32_t h01 = q6k_u16(qh0 + e1);
-                const uint32_t h10 = q6k_u16(qh1 + e0);
-                const uint32_t h11 = q6k_u16(qh1 + e1);
-                const int kbase = (b << 8) + h * 128 + l;
+                const int l = t * 16 + off4;
+                const uint32_t la0 = q6k_load32(blk0 + h * 64 + l);
+                const uint32_t lb0 = q6k_load32(blk0 + h * 64 + 32 + l);
+                const uint32_t qh0 = q6k_load32(blk0 + 128 + h * 32 + l);
+                const uint32_t la1 = q6k_load32(blk1 + h * 64 + l) & keep1;
+                const uint32_t lb1 = q6k_load32(blk1 + h * 64 + 32 + l) & keep1;
+                const uint32_t qh1 = q6k_load32(blk1 + 128 + h * 32 + l) & keep1;
 
                 for (int g = 0; g < 4; g++) {
                     const int nib_hi = g >> 1;
-                    const bool odd = g & 1;
-                    const uint32_t a0 = q6k_pack(odd ? l02 : l00, h00, nib_hi, g);
-                    const uint32_t a2 = q6k_pack(odd ? l03 : l01, h01, nib_hi, g);
-                    const uint32_t a1 = gr == 7
-                        ? SLM_H_ONE2
-                        : q6k_pack(odd ? l12 : l10, h10, nib_hi, g);
-                    const uint32_t a3 = gr == 7
-                        ? SLM_H_ONE2
-                        : q6k_pack(odd ? l13 : l11, h11, nib_hi, g);
+                    const uint32_t q0 = (g & 1) ? lb0 : la0;
+                    const uint32_t q1 = (g & 1) ? lb1 : la1;
+                    const uint32_t a0 = q6k_pack(q0, qh0, nib_hi, g);
+                    const uint32_t a1 = q6k_pack(q1, qh1, nib_hi, g);
+                    const uint32_t a2 = q6k_pack(q0 >> 16, qh0 >> 16, nib_hi, g);
+                    const uint32_t a3 = q6k_pack(q1 >> 16, qh1 >> 16, nib_hi, g);
 
                     uint32_t b0 = 0, b1 = 0;
                     if (xact) {
-                        const char *xk = xp + 2 * (kbase + g * 32);
-                        b0 = *reinterpret_cast<const uint32_t *>(xk + 2 * e0);
-                        b1 = *reinterpret_cast<const uint32_t *>(xk + 2 * e1);
+                        const uint64_t xv = *reinterpret_cast<const uint64_t *>(
+                            xrow + (b << 8) + h * 128 + g * 32 + l);
+                        b0 = (uint32_t)xv;
+                        b1 = (uint32_t)(xv >> 32);
                     }
                     __syncwarp();
 
@@ -216,8 +221,10 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
 }
 
 /* ---------------------------------------------------------------------- */
-/* HMMA, B in 1..64: eight x tiles per weight tile.                       */
+/* HMMA, B in 1..64: eight x tiles per weight tile, register accumulators. */
 /* ---------------------------------------------------------------------- */
+
+#define Q6K_XTILES 8
 
 __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
                                     const float *bias, int K, int N, int B,
@@ -235,64 +242,55 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
     const bool has1 = gr < 7 && r1 < N;
     const uint8_t *w0 = W + (has0 ? r0 : 0) * row_bytes;
     const uint8_t *w1 = W + (has1 ? r1 : 0) * row_bytes;
-    const int e0 = 2 * c;
-    const int e1 = 2 * c + 8;
+    const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
+    const int off4 = 4 * c;
     const int xtiles = (B + 7) >> 3;
+    const bool running = flags & SLM_MM_BIAS_RUNNING;
+    const int only = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y : -1;
+    const int bstart = SLM_MM_BSTART(flags);
+    const int bend = SLM_MM_BCOUNT(flags) ? bstart + SLM_MM_BCOUNT(flags) : nb;
 
-    __shared__ __align__(16) float q6_acc[8 * 16 * 8];
-    for (int xt = 0; xt < xtiles; xt++) {
-        q6_acc[xt * 128 + gr * 8 + 2 * c] = 0.0f;
-        q6_acc[xt * 128 + gr * 8 + 2 * c + 1] = 0.0f;
-        q6_acc[xt * 128 + (gr + 8) * 8 + 2 * c] = 0.0f;
-        q6_acc[xt * 128 + (gr + 8) * 8 + 2 * c + 1] = 0.0f;
+    float acc[Q6K_XTILES][4];
+#pragma unroll
+    for (int xt = 0; xt < Q6K_XTILES; xt++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            acc[xt][i] = 0.0f;
+        }
     }
     __syncwarp();
 
-    for (int b = 0; b < nb; b++) {
+    for (int b = bstart; b < bend; b++) {
         const uint8_t *blk0 = w0 + b * Q6K_BLOCK_BYTES;
         const uint8_t *blk1 = w1 + b * Q6K_BLOCK_BYTES;
         const float d0 = has0 ? slm_h2f(q6k_u16(blk0 + 208)) : 0.0f;
         const float d1 = has1 ? slm_h2f(q6k_u16(blk1 + 208)) : 0.0f;
 
         for (int h = 0; h < 2; h++) {
-            const uint8_t *s0 = blk0 + 192 + h * 8;
-            const uint8_t *s1 = blk1 + 192 + h * 8;
-            const uint32_t s0a = q6k_u16(s0) | (q6k_u16(s0 + 2) << 16);
-            const uint32_t s0b = q6k_u16(s0 + 4) | (q6k_u16(s0 + 6) << 16);
-            const uint32_t s1a = q6k_u16(s1) | (q6k_u16(s1 + 2) << 16);
-            const uint32_t s1b = q6k_u16(s1 + 4) | (q6k_u16(s1 + 6) << 16);
+            const uint32_t s0a = q6k_load32(blk0 + 192 + h * 8);
+            const uint32_t s0b = q6k_load32(blk0 + 196 + h * 8);
+            const uint32_t s1a = q6k_load32(blk1 + 192 + h * 8);
+            const uint32_t s1b = q6k_load32(blk1 + 196 + h * 8);
+            __syncwarp();
 
             for (int t = 0; t < 2; t++) {
-                const int l = t * 16;
-                const uint8_t *ql0 = blk0 + h * 64 + l;
-                const uint8_t *ql1 = blk1 + h * 64 + l;
-                const uint8_t *qh0 = blk0 + 128 + h * 32 + l;
-                const uint8_t *qh1 = blk1 + 128 + h * 32 + l;
-                const uint32_t l00 = q6k_u16(ql0 + e0);
-                const uint32_t l01 = q6k_u16(ql0 + e1);
-                const uint32_t l02 = q6k_u16(ql0 + 32 + e0);
-                const uint32_t l03 = q6k_u16(ql0 + 32 + e1);
-                const uint32_t l10 = q6k_u16(ql1 + e0);
-                const uint32_t l11 = q6k_u16(ql1 + e1);
-                const uint32_t l12 = q6k_u16(ql1 + 32 + e0);
-                const uint32_t l13 = q6k_u16(ql1 + 32 + e1);
-                const uint32_t h00 = q6k_u16(qh0 + e0);
-                const uint32_t h01 = q6k_u16(qh0 + e1);
-                const uint32_t h10 = q6k_u16(qh1 + e0);
-                const uint32_t h11 = q6k_u16(qh1 + e1);
-                const int kbase = (b << 8) + h * 128 + l;
+                const int l = t * 16 + off4;
+                const uint32_t la0 = q6k_load32(blk0 + h * 64 + l);
+                const uint32_t lb0 = q6k_load32(blk0 + h * 64 + 32 + l);
+                const uint32_t qh0 = q6k_load32(blk0 + 128 + h * 32 + l);
+                const uint32_t la1 = q6k_load32(blk1 + h * 64 + l) & keep1;
+                const uint32_t lb1 = q6k_load32(blk1 + h * 64 + 32 + l) & keep1;
+                const uint32_t qh1 = q6k_load32(blk1 + 128 + h * 32 + l) & keep1;
+                __syncwarp();
 
                 for (int g = 0; g < 4; g++) {
                     const int nib_hi = g >> 1;
-                    const bool odd = g & 1;
-                    const uint32_t a0 = q6k_pack(odd ? l02 : l00, h00, nib_hi, g);
-                    const uint32_t a2 = q6k_pack(odd ? l03 : l01, h01, nib_hi, g);
-                    const uint32_t a1 = gr == 7
-                        ? SLM_H_ONE2
-                        : q6k_pack(odd ? l12 : l10, h10, nib_hi, g);
-                    const uint32_t a3 = gr == 7
-                        ? SLM_H_ONE2
-                        : q6k_pack(odd ? l13 : l11, h11, nib_hi, g);
+                    const uint32_t q0 = (g & 1) ? lb0 : la0;
+                    const uint32_t q1 = (g & 1) ? lb1 : la1;
+                    const uint32_t a0 = q6k_pack(q0, qh0, nib_hi, g);
+                    const uint32_t a1 = q6k_pack(q1, qh1, nib_hi, g);
+                    const uint32_t a2 = q6k_pack(q0 >> 16, qh0 >> 16, nib_hi, g);
+                    const uint32_t a3 = q6k_pack(q1 >> 16, qh1 >> 16, nib_hi, g);
 
                     const int idx = 2 * g + t;
                     const uint32_t sw0 = idx < 4 ? s0a : s0b;
@@ -300,52 +298,72 @@ __global__ void slm_mm_q6k_hmma_b64(const half *x, const uint8_t *W, void *out,
                     const int sh = (idx & 3) * 8;
                     const float f0 = d0 * (float)(int8_t)(sw0 >> sh);
                     const float f1 = d1 * (float)(int8_t)(sw1 >> sh);
-                    const int ek = kbase + g * 32;
+                    const float k0 = 64.0f * f0, off0 = 96.0f * f0;
+                    const float k1 = 64.0f * f1, off1 = 96.0f * f1;
+                    const int ek = (b << 8) + h * 128 + g * 32 + l;
 
-                    for (int xt = 0; xt < xtiles; xt++) {
+#pragma unroll
+                    for (int xt = 0; xt < Q6K_XTILES; xt++) {
+                        if (xt >= xtiles || (only >= 0 && xt != only)) {
+                            continue;
+                        }
                         const int bat = xt * 8 + gr;
                         uint32_t b0 = 0, b1 = 0;
                         if (bat < B) {
-                            const char *xk = reinterpret_cast<const char *>(
+                            const uint64_t xv = *reinterpret_cast<const uint64_t *>(
                                 x + (size_t)bat * K + ek);
-                            b0 = *reinterpret_cast<const uint32_t *>(xk + 2 * e0);
-                            b1 = *reinterpret_cast<const uint32_t *>(xk + 2 * e1);
+                            b0 = (uint32_t)xv;
+                            b1 = (uint32_t)(xv >> 32);
                         }
                         __syncwarp();
                         float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
                         slm_mma(c0, c1, c2, c3, a0, a1, a2, a3, b0, b1);
                         const float s_0 = __shfl_sync(0xFFFFFFFFu, c2, 28 + c);
                         const float s_1 = __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
-                        float *row0 = &q6_acc[xt * 128 + gr * 8 + 2 * c];
-                        float *row1 = &q6_acc[xt * 128 + (gr + 8) * 8 + 2 * c];
-                        row0[0] += f0 * (64.0f * c0 - 96.0f * s_0);
-                        row0[1] += f0 * (64.0f * c1 - 96.0f * s_1);
-                        row1[0] += f1 * (64.0f * c2 - 96.0f * s_0);
-                        row1[1] += f1 * (64.0f * c3 - 96.0f * s_1);
+                        acc[xt][0] = fmaf(-off0, s_0, fmaf(k0, c0, acc[xt][0]));
+                        acc[xt][1] = fmaf(-off0, s_1, fmaf(k0, c1, acc[xt][1]));
+                        acc[xt][2] = fmaf(-off1, s_0, fmaf(k1, c2, acc[xt][2]));
+                        acc[xt][3] = fmaf(-off1, s_1, fmaf(k1, c3, acc[xt][3]));
                     }
                 }
             }
         }
     }
 
-    const float bias0 = (bias && has0) ? bias[r0] : 0.0f;
-    const float bias1 = (bias && has1) ? bias[r1] : 0.0f;
-    for (int xt = 0; xt < xtiles; xt++) {
+    const float bias0 = (!running && bias && has0) ? bias[r0] : 0.0f;
+    const float bias1 = (!running && bias && has1) ? bias[r1] : 0.0f;
+#pragma unroll
+    for (int xt = 0; xt < Q6K_XTILES; xt++) {
+        if (xt >= xtiles || (only >= 0 && xt != only)) {
+            continue;
+        }
         const int n0 = xt * 8 + 2 * c;
         const int n1 = n0 + 1;
-        const float *row0 = &q6_acc[xt * 128 + gr * 8 + 2 * c];
-        const float *row1 = &q6_acc[xt * 128 + (gr + 8) * 8 + 2 * c];
+        if (running) {
+            if (has0 && n0 < B) {
+                acc[xt][0] += bias[(long)n0 * N + r0];
+            }
+            if (has0 && n1 < B) {
+                acc[xt][1] += bias[(long)n1 * N + r0];
+            }
+            if (has1 && n0 < B) {
+                acc[xt][2] += bias[(long)n0 * N + r1];
+            }
+            if (has1 && n1 < B) {
+                acc[xt][3] += bias[(long)n1 * N + r1];
+            }
+        }
         if (has0 && n0 < B) {
-            slm_store_out(out, (long)n0 * N + r0, row0[0] + bias0, flags);
+            slm_store_out(out, (long)n0 * N + r0, acc[xt][0] + bias0, flags);
         }
         if (has0 && n1 < B) {
-            slm_store_out(out, (long)n1 * N + r0, row0[1] + bias0, flags);
+            slm_store_out(out, (long)n1 * N + r0, acc[xt][1] + bias0, flags);
         }
         if (has1 && n0 < B) {
-            slm_store_out(out, (long)n0 * N + r1, row1[0] + bias1, flags);
+            slm_store_out(out, (long)n0 * N + r1, acc[xt][2] + bias1, flags);
         }
         if (has1 && n1 < B) {
-            slm_store_out(out, (long)n1 * N + r1, row1[1] + bias1, flags);
+            slm_store_out(out, (long)n1 * N + r1, acc[xt][3] + bias1, flags);
         }
     }
 }

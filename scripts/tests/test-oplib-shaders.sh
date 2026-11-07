@@ -127,7 +127,9 @@ for e in m["entries"]:
     data = open(os.path.join(sys.argv[2], e["sass"]), "rb").read()
     assert len(data) == e["code_bytes"] and hashlib.sha256(data).hexdigest() == e["sha256"], e["name"]
     assert len(data) % 128 == 0 and data, e["name"]
-    assert e["block"] == [32, 1, 1], e["name"]
+    assert e["block"][0] == 32 and e["block"][2] == 1, e["name"]
+    want = 8 if e["name"].endswith(("_w8", "_bs")) else "nw" if e["name"].endswith("_b1") else 1
+    assert e["block"][1] == want, e["name"]
     assert 0 < e["regs"] < 256, e["name"]
     off = 0x160
     for a in e["abi"]:
@@ -144,5 +146,5 @@ for n, e in names.items():
 print(f"PASS: real build, {len(names)} SLM kernels match the manifest and the checked-in ABI")
 EOF
 n=$(ls "$TMP/out"/*_shader.sass | wc -l)
-[ "$n" -ge 29 ] || fail "only $n shaders built"
+[ "$n" -ge 35 ] || fail "only $n shaders built"
 echo "PASS: $n shaders built"

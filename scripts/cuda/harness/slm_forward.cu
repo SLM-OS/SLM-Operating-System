@@ -26,6 +26,8 @@
 
 #include "../slm/slm_mm_q4k.cu"
 #include "../slm/slm_mm_q6k.cu"
+#include "../slm/slm_mm_b1.cu"
+#include "../slm/slm_mm_bs.cu"
 #include "../slm/slm_ops.cu"
 #include "gguf_lite.h"
 #include "slm_cpu_ref.h"
@@ -72,6 +74,7 @@ struct Op {
     std::string cls; /* class for the per-op table */
     void *func;
     dim3 grid;
+    dim3 block = dim3(32);
     std::vector<void *> params;
     double mma = 0;    /* mma instructions */
     double macs = 0;   /* matmul MACs (tensor-core or SIMT) */
@@ -106,7 +109,7 @@ struct Program {
     void run_op(size_t i)
     {
         Op &o = ops[i];
-        CK(cudaLaunchKernel(o.func, o.grid, dim3(32), o.params.data(), 0, nullptr));
+        CK(cudaLaunchKernel(o.func, o.grid, o.block, o.params.data(), 0, nullptr));
     }
 
     void build_graph(double *inst_ms)
@@ -118,7 +121,7 @@ struct Program {
             cudaKernelNodeParams p = {};
             p.func = o.func;
             p.gridDim = o.grid;
-            p.blockDim = dim3(32);
+            p.blockDim = o.block;
             p.sharedMemBytes = 0;
             p.kernelParams = o.params.data();
             p.extra = nullptr;
@@ -137,6 +140,7 @@ struct Program {
 
 struct Arena {
     uint8_t *w;
+    float *run; /* running FP32 sum across the K ranges of a b64 matmul */
     half *x, *xn, *q, *k, *v, *a, *p, *g, *u, *s, *d;
     std::vector<half *> K, V;
     float *table, *logits;
@@ -152,8 +156,17 @@ struct Model {
 };
 
 static bool g_simt = false;
+static bool g_b64 = false;
 
 static int mm_grid(int N) { return (N + Q4K_TILE_ROWS - 1) / Q4K_TILE_ROWS; }
+
+/* Warps per CTA for a B=1 matmul: enough tiles to fill the SMs, never more
+ * warps than weight blocks. */
+static int mm_nw(int K, int N)
+{
+    const int want = (200 + mm_grid(N) - 1) / mm_grid(N);
+    return std::max(1, std::min(std::min(8, K / 256), want));
+}
 
 static void add_mm(Program &P, const Model &M, const Arena &A, const std::string &name,
                    const std::string &cls, const GgufTensor &t, const float *bias, const half *x,
@@ -167,16 +180,75 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
     }
     void *f;
     dim3 grid(mm_grid(N));
+    int nw = 1;
+    bool ranged = false;
     if (g_simt) {
         f = q6 ? (void *)slm_mm_q6k_simt : (void *)slm_mm_q4k_simt;
         grid = dim3(N, B, 1);
+    } else if (B == 1) {
+        f = q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1;
+        nw = mm_nw(K, N);
     } else if (B <= 8) {
         f = q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8;
     } else {
         f = q6 ? (void *)slm_mm_q6k_hmma_b64 : (void *)slm_mm_q4k_hmma_b64;
+        ranged = true;
+    }
+    /* Prefill path. Big matmuls share x through shared memory; small ones have too
+     * few CTAs to fill the SMs that way and split per x tile instead. */
+    if (ranged && N > 256 && !g_b64) {
+        const dim3 g2((N + 119) / 120);
+        P.add_op(name, cls, q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs, g2);
+        Op &o = P.ops.back();
+        o.block = dim3(32, 8, 1);
+        o.mma = (double)mm_grid(N) * (K / 256) * 16.0 * 8;
+        o.macs = (double)N * K * B;
+        o.bytes = (double)gg_row_bytes(t) * N;
+        o.tc = true;
+        P.arg(x);
+        P.arg((const uint8_t *)(A.w + t.offset));
+        P.arg(out);
+        P.arg(bias);
+        P.arg(K);
+        P.arg(N);
+        P.arg(B);
+        P.arg(flags);
+        return;
+    }
+    if (ranged) {
+        const int xtiles = (B + 7) >> 3;
+        const int nb = K / 256;
+        /* Whole K: ranges fit x in the L1 but measured slower overall (running-sum
+         * reloads, cold starts). The kernel keeps them; see ADR 0003. */
+        const int per = nb;
+        const int split = N <= 256 ? SLM_MM_SPLIT_XT : 0;
+        const dim3 g2(mm_grid(N), split ? xtiles : 1, 1);
+        const int ranges = (nb + per - 1) / per;
+        for (int r = 0; r < ranges; r++) {
+            const int start = r * per, count = std::min(per, nb - start);
+            const bool last = r == ranges - 1;
+            P.add_op(name, cls, f, g2);
+            Op &o = P.ops.back();
+            o.mma = (double)mm_grid(N) * count * 16.0 * xtiles;
+            o.macs = (double)N * count * 256 * B;
+            o.bytes = (double)gg_row_bytes(t) * N * count / nb;
+            o.tc = true;
+            P.arg(x);
+            P.arg((const uint8_t *)(A.w + t.offset));
+            P.arg(last ? out : (void *)A.run);
+            P.arg(r == 0 ? bias : (const float *)A.run);
+            P.arg(K);
+            P.arg(N);
+            P.arg(B);
+            P.arg((last ? flags : 0) | (r ? SLM_MM_BIAS_RUNNING : 0) | split | (start << 8) |
+                  (count << 16));
+        }
+        return;
     }
     P.add_op(name, cls, f, grid);
     Op &o = P.ops.back();
+    o.block = dim3(32, nw, 1);
+    flags |= nw << 8;
     const int xt = (B + 7) >> 3;
     const double nb = K / 256.0;
     /* Q4_K: 4 passes (2 chunks x 2 nibbles) per j, 4 j per block.
@@ -203,7 +275,8 @@ static const float *wf(const Arena &A, const GgufTensor &t)
 static void add_rmsnorm(Program &P, const Model &M, const Arena &A, const std::string &name,
                         const GgufTensor &gt, const half *x, half *out, int B)
 {
-    P.add_op(name, "rmsnorm", (void *)slm_rmsnorm, dim3(B));
+    P.add_op(name, "rmsnorm", (void *)slm_rmsnorm_w8, dim3(B));
+    P.ops.back().block = dim3(32, 8, 1);
     P.arg(x);
     P.arg(wf(A, gt));
     P.arg(out);
@@ -270,7 +343,8 @@ static void build_program(Program &P, const Model &M, const Arena &A, int B)
         add_rope(P, M, A, b + "rope_k", A.k, M.nhkv, B);
         add_kv(P, b + "kv_k", A.k, A.K[l], A.pos, HV, B);
         add_kv(P, b + "kv_v", A.v, A.V[l], A.pos, HV, B);
-        P.add_op(b + "gqa", "gqa", (void *)slm_gqa, dim3(M.nhq, B, 1));
+        P.add_op(b + "gqa", "gqa", (void *)slm_gqa_w8, dim3(M.nhq, B, 1));
+        P.ops.back().block = dim3(32, 8, 1);
         P.arg((const half *)A.q);
         P.arg((const half *)A.K[l]);
         P.arg((const half *)A.V[l]);
@@ -478,6 +552,10 @@ static void check_kernels(const Model &M, Arena &A)
 
             std::vector<std::pair<const char *, void *>> variants;
             const bool q6 = t.type == GGML_Q6_K;
+            if (B == 1) {
+                variants.push_back({"hmma_b1", q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1});
+                variants.push_back({"hmma_b1w", q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1});
+            }
             if (B <= 8) {
                 variants.push_back({"hmma_b8", q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8});
             }
@@ -488,10 +566,15 @@ static void check_kernels(const Model &M, Arena &A)
             for (auto &var : variants) {
                 const bool simt = !strcmp(var.first, "simt");
                 const dim3 grid = simt ? dim3(N, B, 1) : dim3(mm_grid(N));
-                int flags = 0;
+                const bool wide = !strcmp(var.first, "hmma_b1w");
+                const int nw = wide ? std::max(2, mm_nw(K, N)) : 1;
+                if (wide && K / 256 < 2) {
+                    continue;
+                }
+                int flags = wide ? nw << 8 : 0;
                 const uint8_t *wp = A.w + t.offset;
                 void *params[] = {&dx, &wp, &dout, &bias_none, (void *)&K, (void *)&N, &B, &flags};
-                CK(cudaLaunchKernel(var.second, grid, dim3(32), params, 0, nullptr));
+                CK(cudaLaunchKernel(var.second, grid, dim3(32, nw, 1), params, 0, nullptr));
                 const std::vector<float> got = down(dout, ref.size());
                 double worst = 0;
                 for (size_t i = 0; i < ref.size(); i++) {
@@ -502,6 +585,54 @@ static void check_kernels(const Model &M, Arena &A)
                        m.tensor.c_str(), var.first, B, worst, worst / rms, ok ? "PASS" : "FAIL");
                 if (!ok) {
                     g_fails++;
+                }
+            }
+            /* Shared-memory x kernel. */
+            if (B > 8 && !is_head) {
+                int flags = 0;
+                const uint8_t *wp = A.w + t.offset;
+                void *f = q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs;
+                void *params[] = {&dx, &wp, &dout, &bias_none, (void *)&K, (void *)&N, &B, &flags};
+                CK(cudaLaunchKernel(f, dim3((N + 119) / 120), dim3(32, 8, 1), params, 0, nullptr));
+                const std::vector<float> got = down(dout, ref.size());
+                double worst = 0;
+                for (size_t i = 0; i < ref.size(); i++) {
+                    worst = std::max(worst, fabs((double)got[i] - ref[i]));
+                }
+                const bool ok = worst <= 1e-3 * rms;
+                printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
+                       m.tensor.c_str(), "hmma_bs", B, worst, worst / rms, ok ? "PASS" : "FAIL");
+                if (!ok) {
+                    g_fails++;
+                }
+            }
+            /* b64 in K ranges through a running sum, and split per x tile. */
+            if (!is_head && B > 8) {
+                const int nb = K / 256;
+                const int per = std::max(1, nb / 3);
+                const uint8_t *wp = A.w + t.offset;
+                void *f = q6 ? (void *)slm_mm_q6k_hmma_b64 : (void *)slm_mm_q4k_hmma_b64;
+                for (int split = 0; split <= SLM_MM_SPLIT_XT; split += SLM_MM_SPLIT_XT) {
+                    const dim3 grid(mm_grid(N), split ? (B + 7) >> 3 : 1, 1);
+                    for (int st = 0; st < nb; st += per) {
+                        const int count = std::min(per, nb - st);
+                        int flags = (st ? SLM_MM_BIAS_RUNNING : 0) | split | (st << 8) | (count << 16);
+                        const float *bp = st ? dout : nullptr;
+                        void *params[] = {&dx, &wp, &dout, &bp, (void *)&K, (void *)&N, &B, &flags};
+                        CK(cudaLaunchKernel(f, grid, dim3(32), params, 0, nullptr));
+                    }
+                    const std::vector<float> got = down(dout, ref.size());
+                    double worst = 0;
+                    for (size_t i = 0; i < ref.size(); i++) {
+                        worst = std::max(worst, fabs((double)got[i] - ref[i]));
+                    }
+                    const bool ok = worst <= 1e-3 * rms;
+                    printf("  %-26s %-8s B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n",
+                           m.tensor.c_str(), split ? "b64 xt" : "b64 rng", B, worst, worst / rms,
+                           ok ? "PASS" : "FAIL");
+                    if (!ok) {
+                        g_fails++;
+                    }
                 }
             }
             CK(cudaFree(dx));
@@ -566,6 +697,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *params[] = {&in, &gp, &o, (void *)&H, (void *)&B, &eps};
         CK(cudaLaunchKernel((void *)slm_rmsnorm, dim3(B), dim3(32), params, 0, nullptr));
         report_h16("rmsnorm B=5", h_from(A.xn, ref.size()), ref.data(), 2.0);
+        CK(cudaLaunchKernel((void *)slm_rmsnorm_w8, dim3(B), dim3(32, 8, 1), params, 0, nullptr));
+        report_h16("rmsnorm_w8 B=5", h_from(A.xn, ref.size()), ref.data(), 2.0);
     }
 
     /* Residual add. */
@@ -680,6 +813,8 @@ static void check_kernels(const Model &M, Arena &A)
         void *pg[] = {&pq, &pk, &pv, &pp, &pa, &vnh, &vk, &vhd, &vb};
         CK(cudaLaunchKernel((void *)slm_gqa, dim3(nhq, B, 1), dim3(32), pg, 0, nullptr));
         report_h16("gqa B=4 T=14..17 causal", h_from(A.a, ref_a.size()), ref_a.data(), 4.0);
+        CK(cudaLaunchKernel((void *)slm_gqa_w8, dim3(nhq, B, 1), dim3(32, 8, 1), pg, 0, nullptr));
+        report_h16("gqa_w8 B=4 T=14..17", h_from(A.a, ref_a.size()), ref_a.data(), 4.0);
     }
     CK(cudaDeviceSynchronize());
 }
@@ -729,6 +864,8 @@ int main(int argc, char **argv)
         const std::string a = argv[i];
         if (a == "--simt") {
             g_simt = true;
+        } else if (a == "--b64") {
+            g_b64 = true;
         } else if (a == "--no-check") {
             do_check = false;
         } else if (a == "--golden") {
@@ -792,6 +929,7 @@ int main(int argc, char **argv)
         CK(cudaMalloc(&A.K[l], kvb));
         CK(cudaMalloc(&A.V[l], kvb));
     }
+    CK(cudaMalloc(&A.run, (size_t)Bmax * std::max(M.ff, M.hidden) * 4));
     CK(cudaMalloc(&A.table, M.rope.size() * 4));
     up(A.table, M.rope);
     CK(cudaMalloc(&A.logits, (size_t)M.vocab * 4));
@@ -941,10 +1079,33 @@ int main(int argc, char **argv)
                100.0 * macs_tc / (macs + gqa_macs), macs_tc / 1e6, (macs + gqa_macs) / 1e6, T);
     }
 
+    /* Same breakdown for prefill. */
+    if (prefill > 0) {
+        std::map<std::string, std::pair<int, double>> by;
+        set_step(A, prompt, 0);
+        double all = 0;
+        for (size_t i = 0; i < pre.ops.size(); i++) {
+            const double s = now_ms();
+            pre.run_op(i);
+            CK(cudaDeviceSynchronize());
+            const double t = now_ms() - s;
+            auto &e = by[pre.ops[i].cls];
+            e.first++;
+            e.second += t;
+            all += t;
+        }
+        printf("\nper-op prefill breakdown B=%d (op by op with sync):\n", prefill);
+        for (auto &kv : by) {
+            printf("  %-18s %4d ops  total %8.3f ms  %8.1f us/op\n", kv.first.c_str(), kv.second.first,
+                   kv.second.second, kv.second.second * 1e3 / kv.second.first);
+        }
+        printf("  %-18s %4zu ops  total %8.3f ms\n", "ALL", pre.ops.size(), all);
+    }
+
     /* ---- whole-forward comparison with the CPU reference ---- */
     if (do_check) {
         printf("\nwhole-forward comparison with the CPU reference:\n");
-        const int nprompt = std::min(prefill, 8);
+        const int nprompt = std::min(prefill, 12);
         std::vector<uint32_t> ids(prompt.begin(), prompt.begin() + nprompt);
         const double c0 = now_ms();
         std::vector<float> rl;
@@ -962,7 +1123,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < p8.ops.size(); i++) {
             p8.run_op(i);
         }
-        report_logits("prefill B=8", down(A.logits, M.vocab), rl, 2.0);
+        report_logits("prefill B=12", down(A.logits, M.vocab), rl, 0.1);
         /* Two decode steps from there. */
         uint32_t nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         for (int i = 0; i < 2; i++) {
@@ -971,29 +1132,46 @@ int main(int argc, char **argv)
             set_step(A, {nx}, p);
             CK(cudaGraphLaunch(dec.exec, 0));
             CK(cudaStreamSynchronize(0));
-            report_logits("decode", down(A.logits, M.vocab), rl, 2.0);
+            report_logits("decode", down(A.logits, M.vocab), rl, 0.1);
             nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         }
     }
 
-    /* ---- llama.cpp golden, tiny model ---- */
+    /* ---- llama.cpp golden, tiny model ----
+     * greedy.logits row s holds the logits after token s of prompt + generated,
+     * so step one token at a time. llama.cpp quantizes activations to Q8_K and
+     * the GPU does not; ref_variants shows that accounts for the difference (1.40
+     * for exact dot + FP16 on the CPU). A tolerance of 1.5 reflects that measured
+     * gap, and the top token must match at every step. */
     if (golden) {
         auto rec = read_rec(golden);
         const auto &idb = rec.at("prompt.ids");
+        const auto &tb = rec.at("greedy.tokens");
         const auto &lgb = rec.at("greedy.logits");
-        std::vector<uint32_t> ids(idb.size() / 4);
-        memcpy(ids.data(), idb.data(), idb.size());
-        std::vector<float> wantl(M.vocab);
-        memcpy(wantl.data(), lgb.data(), (size_t)M.vocab * 4);
-        Program pg;
-        build_program(pg, M, A, (int)ids.size());
-        set_step(A, ids, 0);
-        for (size_t i = 0; i < pg.ops.size(); i++) {
-            pg.run_op(i);
+        std::vector<uint32_t> seq((idb.size() + tb.size()) / 4);
+        memcpy(seq.data(), idb.data(), idb.size());
+        memcpy(seq.data() + idb.size() / 4, tb.data(), tb.size());
+        const int steps = (int)(lgb.size() / 4 / M.vocab);
+        double worst = 0;
+        int top = 0;
+        for (int st = 0; st < steps; st++) {
+            set_step(A, {seq[st]}, (uint32_t)st);
+            CK(cudaGraphLaunch(dec.exec, 0));
+            CK(cudaStreamSynchronize(0));
+            const std::vector<float> got = down(A.logits, M.vocab);
+            const float *w = reinterpret_cast<const float *>(lgb.data()) + (size_t)st * M.vocab;
+            for (int i = 0; i < M.vocab; i++) {
+                worst = std::max(worst, fabs((double)got[i] - w[i]));
+            }
+            top += std::max_element(got.begin(), got.end()) - got.begin() ==
+                   std::max_element(w, w + M.vocab) - w;
         }
-        /* Q8_K and F32 hidden state in llama.cpp: tolerance 1.5 as in the
-         * greedy margin in scripts/tools/slm-gen-goldens.py. */
-        report_logits("llama.cpp greedy step0", down(A.logits, M.vocab), wantl, 1.5);
+        const bool ok = worst <= 1.5 && top == steps;
+        printf("  llama.cpp greedy, %d steps: max logit error %.4f, tol 1.50; top-1 same %d/%d: %s\n",
+               steps, worst, top, steps, ok ? "PASS" : "FAIL");
+        if (!ok) {
+            g_fails++;
+        }
     }
 
     printf("\n%s (%d failures)\n", g_fails ? "FAIL" : "PASS", g_fails);

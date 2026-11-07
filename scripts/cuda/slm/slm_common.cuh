@@ -15,10 +15,23 @@
 
 /* Flag bits shared by the matmul kernels. */
 #define SLM_MM_OUT_F16 1 /* out is FP16 (activation); clear means FP32 */
+/* b64 only. Each launch covers weight blocks [start, start + count) and bias is
+ * then a running FP32 sum shaped [B][N], which may alias out. */
+#define SLM_MM_BIAS_RUNNING 2
+/* b64 only: one x tile per CTA, grid (ceil(N/15), xtiles, 1). More warps, repeats
+ * the weight decode per tile; for small N, limited by serial warp latency. */
+#define SLM_MM_SPLIT_XT 4
+#define SLM_MM_BSTART(flags) (((flags) >> 8) & 0xFF)
+#define SLM_MM_BCOUNT(flags) (((flags) >> 16) & 0xFF)
 
 /* FP16 1.0. See the "offset encoding" note in slm_mm_q4k.cu. */
 #define SLM_H_ONE 0x3C00u
 #define SLM_H_ONE2 0x3C003C00u
+
+/* One 16-byte load. The address must be 16-byte aligned. */
+struct __align__(16) slm_x16 {
+    uint32_t w0, w1, w2, w3;
+};
 
 SLM_INL float slm_h2f(uint32_t bits)
 {
