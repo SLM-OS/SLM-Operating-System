@@ -69,7 +69,7 @@ single ops against ggml (host and both QEMU kernels), and greedy tokens plus
 logits on a small Qwen2 GGUF through the production registry, forward path and
 FFI (host and both QEMU kernels). A mismatch means the model computes something
 other than llama.cpp does: report it, and never widen a tolerance or regenerate
-a golden to make it pass. The parts blocked by #1156 and #1157 show as ignored.
+a golden to make it pass.
 
 ### 7. Brace check
 ```
