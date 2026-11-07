@@ -21,12 +21,15 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::inference::ops_transformer::{RopePairing, RopeTable};
 use crate::slm::{
     gguf::ArchInfo,
+    gpu_program::{BuildError, GpuProgram},
     kv_cache::KvCache,
     registry,
     sampler::{Sampler, SamplerState},
@@ -59,9 +62,20 @@ pub enum SessionState {
     Closed,
 }
 
-/// What `slm launch --gpu` asked for. [`crate::slm::decoder`] applies
-/// [`GpuMode::Cpu`] for the duration of each prompt; the forward path
-/// can read [`Session::gpu_mode`] directly.
+/// Where a session's forward steps run. Chosen at `slm launch`
+/// ([`Session::choose_path`]) from [`GpuMode`] and what the boot offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardPath {
+    /// [`GpuProgram`]: the whole step as one GPU command stream.
+    Program,
+    /// `forward_one`, each op going to the GPU if the tier table says so.
+    /// Only without a channel the program can use (kexec boots).
+    PerOp,
+    /// `forward_one` on this CPU, every op.
+    Cpu,
+}
+
+/// What `slm launch --gpu` asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum GpuMode {
@@ -146,6 +160,18 @@ pub struct Session {
     pub stop_flag: Arc<AtomicBool>,
     /// What `--gpu` asked for. See [`GpuMode`].
     pub gpu_mode: GpuMode,
+    /// Where forward steps run now.
+    pub path: ForwardPath,
+    /// The program behind [`ForwardPath::Program`].
+    pub gpu: Option<Box<GpuProgram>>,
+    /// Why the session isn't (or stopped being) on the program.
+    pub gpu_note: Option<&'static str>,
+    /// Tokens the program has run for this session, kept after a fallback.
+    pub gpu_tokens: u64,
+    /// Tokens `forward_one` has run.
+    pub cpu_tokens: u64,
+    /// GPU time over [`Self::gpu_tokens`], for `slm gpu`.
+    pub gpu_us_per_token: u64,
     /// What `--threads` asked for. Stored only: the forward path is
     /// single-threaded until the worker pool lands.
     pub threads: u32,
@@ -225,6 +251,12 @@ impl Session {
             state: SessionState::Open,
             stop_flag: Arc::new(AtomicBool::new(false)),
             gpu_mode: GpuMode::Auto,
+            path: ForwardPath::PerOp,
+            gpu: None,
+            gpu_note: None,
+            gpu_tokens: 0,
+            cpu_tokens: 0,
+            gpu_us_per_token: 0,
             threads: DEFAULT_THREADS,
             last_stop_reason: StopReason::None,
             pending_token: None,
@@ -241,6 +273,9 @@ impl Session {
     /// other than [`SessionState::Closed`] back to [`SessionState::Open`].
     pub fn reset(&mut self) {
         self.kv.clear();
+        if let Some(p) = self.gpu.as_mut() {
+            p.history.clear();
+        }
         self.stop_flag.store(false, Ordering::Release);
         self.pending_token = None;
         self.last_stop_reason = StopReason::None;
@@ -251,6 +286,79 @@ impl Session {
         self.last_decode_ns = 0;
         if self.state != SessionState::Closed {
             self.state = SessionState::Open;
+        }
+    }
+
+    /// Apply `--gpu`: build the program if the mode wants one. `Err` is for
+    /// `--gpu on` with no program, and leaves the session as it was.
+    pub fn choose_path(&mut self, mode: GpuMode) -> Result<(), &'static str> {
+        if mode == GpuMode::Cpu {
+            // Program's KV cache goes with it, so a session with history
+            // starts over: `slm launch` configures before any prompt.
+            if self.gpu.take().is_some() {
+                self.kv.ensure_storage();
+                self.kv.clear();
+            }
+            self.gpu_note = None;
+            self.gpu_mode = mode;
+            self.path = ForwardPath::Cpu;
+            return Ok(());
+        }
+        // A program in place stays: the kernel is the same either way.
+        if self.gpu.is_some() {
+            self.gpu_mode = mode;
+            return Ok(());
+        }
+        // The program starts with an empty cache; a session with history
+        // keeps what it has.
+        if self.kv.len != 0 {
+            const WHY: &str = "session already holds positions";
+            self.gpu_note = Some(WHY);
+            if mode == GpuMode::On {
+                return Err(WHY);
+            }
+            self.gpu_mode = mode;
+            self.path = ForwardPath::Cpu;
+            return Ok(());
+        }
+        let vocab = self.vocab_size;
+        let ctx = self.max_ctx;
+        let head_dim = self.arch.head_dim as usize;
+        let rope = RopeTable::new(
+            head_dim,
+            ctx,
+            self.arch.rope_freq_base,
+            RopePairing::for_arch(self.arch.architecture),
+        );
+        let built = registry::with_loaded_slm(self.model_handle as usize, |slm| {
+            GpuProgram::build(slm, ctx, vocab, &rope.cos_sin)
+        });
+        match built {
+            Some(Ok(p)) => {
+                self.kv.release_storage();
+                self.gpu = Some(p);
+                self.gpu_note = None;
+                self.path = ForwardPath::Program;
+                self.gpu_mode = mode;
+                Ok(())
+            }
+            Some(Err(e)) => {
+                let (why, path) = match e {
+                    BuildError::NoBackend => {
+                        ("no SLM-OS-built GPU channel (needs a UEFI-direct boot)", ForwardPath::PerOp)
+                    }
+                    BuildError::Failed(w) => (w, ForwardPath::Cpu),
+                };
+                if mode == GpuMode::On {
+                    self.gpu_note = Some(why);
+                    return Err(why);
+                }
+                self.gpu_note = Some(why);
+                self.gpu_mode = mode;
+                self.path = path;
+                Ok(())
+            }
+            None => Err("model not loaded"),
         }
     }
 
@@ -270,6 +378,16 @@ impl Session {
         SessionSnapshot {
             model_handle: self.model_handle,
             gpu_mode: self.gpu_mode,
+            path: self.path,
+            gpu_note: self.gpu_note,
+            gpu_tokens: self.gpu_tokens,
+            cpu_tokens: self.cpu_tokens,
+            gpu_us_per_token: self.gpu_us_per_token,
+            launches: self.gpu.as_ref().map_or(0, |p| p.launches),
+            barriers: self.gpu.as_ref().map_or(0, |p| p.barriers),
+            arena_bytes: self.gpu.as_ref().map_or(0, |p| p.data_bytes),
+            max_batch: self.gpu.as_ref().map_or(0, |p| p.max_batch),
+            weights_big: self.gpu.as_ref().is_some_and(|p| p.weights_big),
             threads: self.threads,
             max_ctx: self.max_ctx,
             kv_len: self.kv.len,
@@ -322,6 +440,16 @@ fn arch_kind_from_bytes(bytes: &[u8]) -> crate::slm::gguf::ArchKind {
 pub struct SessionSnapshot {
     pub model_handle: u32,
     pub gpu_mode: GpuMode,
+    pub path: ForwardPath,
+    pub gpu_note: Option<&'static str>,
+    pub gpu_tokens: u64,
+    pub cpu_tokens: u64,
+    pub gpu_us_per_token: u64,
+    pub launches: u32,
+    pub barriers: u32,
+    pub arena_bytes: u64,
+    pub max_batch: u32,
+    pub weights_big: bool,
     pub threads: u32,
     pub max_ctx: usize,
     pub kv_len: usize,

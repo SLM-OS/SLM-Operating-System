@@ -1109,15 +1109,18 @@ static void test_runner_honours_session_options(void)
     TEST_ASSERT_EQUAL_INT(0, shell_execute("slm runner stop"));
 
     TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm runner start --gpu maybe"));
-    int rc = shell_execute("slm runner start --gpu on --sampler greedy --ctx 256");
-    if (rust_slm_gpu_tier_ops() == 0) {
-        TEST_ASSERT_EQUAL_INT(-1, rc);
-        ASSERT_OUTPUT("no op has a GPU tier");
-    } else {
-        TEST_ASSERT_EQUAL_INT(0, rc);
-        slm_runner_get_status(&st);
-        TEST_ASSERT_EQUAL_UINT32(SLM_GPU_ON, st.gpu_mode);
-    }
+    /* QEMU has no GPU channel: `slm launch --gpu on` refuses, and so does a
+     * prompt here, saying why, with the runner still up. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --gpu on --sampler greedy --ctx 256 --max 1"));
+    slm_runner_get_status(&st);
+    TEST_ASSERT_EQUAL_UINT32(SLM_GPU_ON, st.gpu_mode);
+    TEST_ASSERT_EQUAL_INT(-1, st.session);
+    bcap_clear();
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("slm ask hi"));
+    ASSERT_OUTPUT("rc=-1 err=no-gpu-program");
+    slm_runner_get_status(&st);
+    TEST_ASSERT_EQUAL_UINT32(1u, st.running);
     bus_end();
 }
 

@@ -245,6 +245,9 @@ static int32_t slm_runner_poll_cb(void *user)
  * Sessions
  * ============================================================================ */
 
+/* Returns the session id, -1, or this when --gpu on has nothing to run on. */
+#define SLM_RUNNER_NO_GPU_PROGRAM (-2)
+
 static int slm_runner_open_session(uint32_t handle, uint32_t max_ctx)
 {
     int32_t session = rust_slm_session_open(handle, max_ctx,
@@ -258,8 +261,17 @@ static int slm_runner_open_session(uint32_t handle, uint32_t max_ctx)
         return -1;
     }
     /* The same call `slm launch --gpu` makes. */
-    if (rust_slm_session_configure((uint32_t)session, g_cfg.gpu_mode,
-                                   g_cfg.threads) != 0) {
+    int32_t crc = rust_slm_session_configure((uint32_t)session, g_cfg.gpu_mode,
+                                             g_cfg.threads);
+    if (crc == SLM_ERR_GPU_PROGRAM) {
+        SlmSessionGpuC g;
+        uart_printf("[slm-runner] ERROR: --gpu on, but no GPU program: %s\r\n",
+                    rust_slm_session_gpu_info((uint32_t)session, &g) == 0 ?
+                    g.note : "unknown");
+        rust_slm_session_close((uint32_t)session);
+        return SLM_RUNNER_NO_GPU_PROGRAM;
+    }
+    if (crc != 0) {
         uart_puts("[slm-runner] ERROR: could not apply --gpu/--threads\r\n");
         rust_slm_session_close((uint32_t)session);
         return -1;
@@ -337,7 +349,7 @@ static int slm_runner_ensure_session(const char **err)
     slm_runner_close_session();
     int session = slm_runner_open_session(handle, g_cfg.max_ctx);
     if (session < 0) {
-        *err = "open-failed";
+        *err = session == SLM_RUNNER_NO_GPU_PROGRAM ? "no-gpu-program" : "open-failed";
         return -1;
     }
     g_runner.session = session;

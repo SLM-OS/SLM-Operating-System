@@ -76,7 +76,7 @@ rc=-1 err=no-model stop=none tokens_in=0 tokens_out=0 msgs=0 dropped=0 prompts=1
 | Field | Meaning |
 |-------|---------|
 | `rc` | 0 if the prompt ran, even if stopped early. -1 on a decoder error such as invalid UTF-8. -3 (`SLM_ERR_BUSY`) if a `slm prompt` was running |
-| `err` | Only when it couldn't start: `no-model`, `bad-handle`, `open-failed` |
+| `err` | Only when it couldn't start: `no-model`, `bad-handle`, `no-gpu-program` (`--gpu on` with no GPU program; the UART line says why), `open-failed` |
 | `stop` | `eos`, `max`, `stopped`, `callback`, `ctx-full`, `no-logits`, `empty`, `none` |
 | `tokens_in` | Tokens fed to the model, chat template included |
 | `tokens_out` | Tokens generated |

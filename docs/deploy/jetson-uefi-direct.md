@@ -503,6 +503,35 @@ Without the SLM-op SASS (`rmsnorm_f16_shader.sass` etc., extracted on a
 Jetson, gitignored) the library only holds the MNIST kernels: lookups
 for the SLM ops miss and every op stays on the CPU.
 
+### SLM GPU program (#475)
+
+`slm launch --gpu auto|on` builds one GPU command stream for a session's
+whole forward step instead of dispatching ops one at a time
+([ADR 0003](../adr/0003-slm-gpu-graph.md)). It needs the cold channel:
+after kexec `--gpu on` is refused and `--gpu auto` keeps the per-op path.
+The weights pool (`nvgpu oplib wpool`) is not used: the GGUF is mapped in
+place.
+
+| Command | Expected |
+|---|---|
+| `slm gpu smoke [n]` | `PASS`, n launches, ns per launch. Needs only `rmsnorm_f16_shader.sass`; no model |
+| `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
+| `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
+| `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
+| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
+| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt |
+| `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a `SLM_GPU_GOLDEN=ON` build (about 790 KB of fixtures) |
+| `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
+| `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
+
+Nothing raises the memory clock after a cold boot: EMC reads 204 MHz until the
+first program opens and asks BPMP for a 3199 MHz floor (`[slm-prog] EMC was ...`).
+
+A step that times out (5 s) prints the GR and MMU fault state once, then
+the session continues on the CPU, replaying its tokens: `[slm] GPU program
+failed (...)`. `slm gpu` keeps saying why. Other GPU consumers on the
+channel then time out and trip their breaker to the CPU; a reboot clears it.
+
 ## Findings
 
 These are the causes found while making the path work, recorded so the

@@ -245,6 +245,24 @@ impl KvCache {
         self.len = 0;
     }
 
+    /// Give the buffers back while a GPU program holds the cache in its
+    /// own arena. `len` keeps counting positions. Only the CPU path needs
+    /// storage: [`KvCache::ensure_storage`] puts it back.
+    pub fn release_storage(&mut self) {
+        self.k = Vec::new();
+        self.v = Vec::new();
+    }
+
+    /// Reallocate after [`KvCache::release_storage`]; the contents are
+    /// whatever gets appended next, so `len` must be reset by the caller.
+    pub fn ensure_storage(&mut self) {
+        if self.k.is_empty() {
+            let total = self.n_layers * self.per_layer();
+            self.k = vec![0u16; total];
+            self.v = vec![0u16; total];
+        }
+    }
+
     /// Total resident bytes across the K and V buffers (for `slm stats`).
     pub fn bytes_resident(&self) -> usize {
         // Multiplication is overflow-checked at `new` time; reuse the

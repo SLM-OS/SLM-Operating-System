@@ -256,6 +256,7 @@ int test_harness_run_all(void)
 #if defined(ENABLE_BOOT_TESTS)
     /* Boot-test kernels only: the suite embeds its 860 KB of fixtures. */
     total_failures += test_suite_slm_golden();
+    total_failures += test_suite_slm_prog();
 #endif
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)

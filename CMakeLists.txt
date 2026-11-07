@@ -688,6 +688,8 @@ set(KERNEL_SOURCES
     # encoder it uses: pure code, memory reached through ga10b_gpu_ops.
     kernel/gpu/nvidia/ga10b_mnist_pipeline.c
     kernel/gpu/nvidia/ga10b_qmd.c
+    kernel/gpu/nvidia/ga10b_prog.c
+    kernel/gpu/slm_prog.c
     # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
     # per-kind handoff store (#1092): pure code. The eviction weights
     # are generated from the Rust model (see the generator block below).
@@ -1375,6 +1377,7 @@ endif()
 if(ENABLE_BOOT_TESTS)
     target_sources(slmos.elf PRIVATE
         kernel/tests/test_slm_golden.c
+        kernel/tests/test_slm_prog.c
         kernel/tests/slm_golden_embed.S)
     set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
     set_source_files_properties(
@@ -1382,6 +1385,35 @@ if(ENABLE_BOOT_TESTS)
         PROPERTIES
         COMPILE_DEFINITIONS "SLM_GOLDEN_OPS_PATH=${SLM_GOLDEN_DIR}/golden_ops.rec;SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
         OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/golden_ops.rec;${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
+# SLM kernels' registers and shared memory, from the manifest of their cubins.
+# Every platform: the table is pure data and the tests read it.
+set(SLM_KERNELS_GEN "${CMAKE_BINARY_DIR}/generated/slm_kernels_gen.h")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+add_custom_command(
+    OUTPUT  "${SLM_KERNELS_GEN}"
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json" "${SLM_KERNELS_GEN}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
+    VERBATIM)
+target_sources(slmos.elf PRIVATE "${SLM_KERNELS_GEN}")
+target_include_directories(slmos.elf PRIVATE "${CMAKE_BINARY_DIR}/generated")
+
+# `slm gpu golden`: the tiny model and llama.cpp's logits in a production
+# image, to compare the GPU program on hardware (#475). About 790 KB.
+option(SLM_GPU_GOLDEN "Embed the SLM golden fixture for `slm gpu golden`" OFF)
+if(SLM_GPU_GOLDEN)
+    target_sources(slmos.elf PRIVATE kernel/src/slm_gpu_golden_embed.S)
+    target_compile_definitions(slmos.elf PRIVATE SLM_GPU_GOLDEN)
+    set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
+    set_source_files_properties(
+        kernel/src/slm_gpu_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
     )
 endif()
 
@@ -1561,9 +1593,12 @@ elseif(OPLIB_SASS_FILES)
         COMMAND python3
                 "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
                 --skip-missing
+                --slm-manifest "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 "${OPLIB_BLOB_FINAL}"
         DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 ${OPLIB_SASS_FILES}
         VERBATIM
@@ -1887,6 +1922,9 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # Same isolation pattern as the `lua` and `ai_sched` libraries above.
 # ==========================================================================
 add_library(slm_shell STATIC kernel/src/slm_shell.c)
+if(SLM_GPU_GOLDEN)
+    target_compile_definitions(slm_shell PRIVATE SLM_GPU_GOLDEN)
+endif()
 target_include_directories(slm_shell PRIVATE ${KERNEL_INCLUDES} ${BUILD_INFO_DIR})
 add_dependencies(slm_shell generate_build_info)
 

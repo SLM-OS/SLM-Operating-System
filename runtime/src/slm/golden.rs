@@ -136,7 +136,7 @@ impl<'a> Records<'a> {
         None
     }
 
-    fn f32s(&self, name: &str) -> Result<Vec<f32>, Mismatch> {
+    pub(crate) fn f32s(&self, name: &str) -> Result<Vec<f32>, Mismatch> {
         let bytes = self.get(name).ok_or_else(|| malformed(name))?;
         Ok(bytes
             .chunks_exact(4)
@@ -144,7 +144,7 @@ impl<'a> Records<'a> {
             .collect())
     }
 
-    fn u32s(&self, name: &str) -> Result<Vec<u32>, Mismatch> {
+    pub(crate) fn u32s(&self, name: &str) -> Result<Vec<u32>, Mismatch> {
         let bytes = self.get(name).ok_or_else(|| malformed(name))?;
         Ok(bytes
             .chunks_exact(4)

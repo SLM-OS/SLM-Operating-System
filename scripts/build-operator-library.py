@@ -120,6 +120,9 @@ def main() -> int:
                     help="JSON manifest path")
     ap.add_argument("out", type=Path,
                     help="Output operator_library.bin path")
+    ap.add_argument("--slm-manifest", type=Path,
+                    help="scripts/cuda/slm/MANIFEST.json: also pack the #475 "
+                         "kernels, filed as gen-slm-kernel-table.py says")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--skip-missing", action="store_true",
                     help="Skip manifest entries whose SASS file doesn't "
@@ -209,6 +212,26 @@ def main() -> int:
         sass_bytes = sass_path.read_bytes()
         resolved.append((op_kind, tier, dtype, flags, sass_bytes,
                          str(sass_path)))
+
+    # The #475 kernels, filed the way kernel/gpu/slm_prog.c looks them up.
+    if args.slm_manifest:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gen_slm_kernel_table",
+            Path(__file__).resolve().parent / "cuda" / "gen-slm-kernel-table.py")
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        for idx, e in enumerate(gen.load(args.slm_manifest)):
+            sass_path = manifest_dir / e["sass"]
+            if not sass_path.exists():
+                sys.stderr.write(f"[build-operator-library] skipping {e['name']} "
+                                 f"- missing SASS: {sass_path}\n")
+                continue
+            sass_bytes = sass_path.read_bytes()
+            if len(sass_bytes) % 64 != 0:
+                raise SystemExit(f"{sass_path}: {len(sass_bytes)} B, not a multiple of 64")
+            resolved.append((gen.SLM_OP_KIND_BASE + idx, _TIERS[e["tier"]], _DTYPES["FP16"],
+                             0, sass_bytes, str(sass_path)))
 
     # Layout: outer header || inner header || entries || SASS region.
     op_count = len(resolved)

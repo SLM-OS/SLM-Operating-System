@@ -1,0 +1,1116 @@
+/*
+ * test_slm_prog.c - GPU program for an SLM forward pass (#475, ADR 0003).
+ *
+ * No GPU here. Layers tested:
+ *
+ *   ga10b_prog      pushbuffer, QMD and cbuf contents, compared with the
+ *                   method encodings the v7 path uses on hardware
+ *   slm_prog_encode cbuf offsets and launch shapes, per kernel
+ *   slm_prog_*      arena, weights mapping and teardown against fake ops;
+ *                   the run loop against a fake channel, including a hang
+ *   end to end      the tiny Qwen2 model through the production FFI with
+ *                   the fake channel: a program built from a real GGUF,
+ *                   and a hung GPU falling back to the CPU with the same
+ *                   tokens llama.cpp picks.
+ *
+ * The plan's dataflow is checked against llama.cpp's logits by the host
+ * tests in runtime/src/slm/gpu_program.rs (software GPU).
+ */
+#include "unity.h"
+#include "../gpu/nvidia/ga10b_chan.h"
+#include "../gpu/nvidia/ga10b_prog.h"
+#include "../gpu/nvidia/ga10b_qmd.h"
+#include "../include/slm_ffi.h"
+#include "../include/slm_prog.h"
+#include "pmm.h"
+#include "slm_kernels_gen.h"
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+extern const uint8_t slm_golden_tiny_start[], slm_golden_tiny_end[];
+extern const uint8_t slm_golden_greedy_start[], slm_golden_greedy_end[];
+extern int32_t rust_slm_golden_open_greedy(uint32_t model, uint32_t max_ctx);
+extern int32_t rust_slm_golden_record(const uint8_t *rec, size_t rec_len,
+                                      const char *name, uint8_t *out, size_t cap);
+
+/* ---- Encoders ---- */
+
+#define PB_DW 512u
+
+static uint32_t g_pb[PB_DW] __attribute__((aligned(256)));
+static uint32_t g_qmd[8u * GA10B_QMD_DWORDS] __attribute__((aligned(256)));
+static uint8_t g_cb[8u * GA10B_PROG_CBUF_STRIDE] __attribute__((aligned(256)));
+static uint8_t g_sm[16u * GA10B_PROG_SEMA_SLOT_BYTES] __attribute__((aligned(16)));
+
+#define PB_VA 0x1000000000ull
+#define Q_VA 0x1000010000ull
+#define C_VA 0x1000020000ull
+#define S_VA 0x1000030000ull
+
+static int prog_init(struct ga10b_prog *p, uint32_t flags, enum ga10b_prog_barrier b)
+{
+    struct ga10b_prog_mem pb = { (uint8_t *)g_pb, PB_VA, sizeof(g_pb) };
+    struct ga10b_prog_mem q = { (uint8_t *)g_qmd, Q_VA, sizeof(g_qmd) };
+    struct ga10b_prog_mem c = { g_cb, C_VA, sizeof(g_cb) };
+    struct ga10b_prog_mem s = { g_sm, S_VA, sizeof(g_sm) };
+    return ga10b_prog_init(p, &pb, &q, &c, &s, 8u, flags, b);
+}
+
+static struct ga10b_prog_launch launch(const void *args, uint32_t len)
+{
+    struct ga10b_prog_launch l;
+    memset(&l, 0, sizeof(l));
+    l.shader_gpu_va = 0x77000100ull;
+    l.register_count_v = 64;
+    l.grid_x = 3;
+    l.grid_y = 1;
+    l.grid_z = 1;
+    l.block_x = 32;
+    l.block_y = 1;
+    l.block_z = 1;
+    l.smem_size_bytes = 512;
+    l.barrier_count = 1;
+    l.args = args;
+    l.args_len = len;
+    return l;
+}
+
+/* Count dwords equal to `v`. */
+static unsigned count_dw(uint32_t v, uint32_t n)
+{
+    unsigned c = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (g_pb[i] == v) c++;
+    }
+    return c;
+}
+
+#define HDR_WFI 0x80002044u     /* immd, subch 1, 0x110 >> 2 */
+#define HDR_FLUSH 0x80142087u   /* immd data 0x14, subch 1, 0x21c >> 2 */
+#define HDR_PCAS2 0x800a20b0u   /* immd data 0xA, subch 1, 0x2c0 >> 2 */
+#define HDR_PCAS_A 0x200120adu  /* inc count 1, subch 1, 0x2b4 >> 2 */
+
+static void test_prog_pushbuffer(void)
+{
+    static struct ga10b_prog p;
+    uint8_t args[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI_FLUSH));
+    /* SET_OBJECT AMPERE_COMPUTE_B on subch 1, as in the v7 builders. */
+    TEST_ASSERT_EQUAL_HEX32(0x20012000u, g_pb[0]);
+    TEST_ASSERT_EQUAL_HEX32(0xC7C0u, g_pb[1]);
+    uint32_t pro = p.pb_dwords;
+
+    struct ga10b_prog_launch l = launch(args, sizeof(args));
+    TEST_ASSERT_EQUAL_INT(0, ga10b_prog_add_launch(&p, &l));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, ga10b_prog_add_barrier(&p));
+    TEST_ASSERT_EQUAL_INT(1, ga10b_prog_add_launch(&p, &l));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, ga10b_prog_finish(&p));
+
+    /* Launch: SEND_PCAS_A with QMD VA >> 8, then PCAS2_B. */
+    TEST_ASSERT_EQUAL_HEX32(HDR_PCAS_A, g_pb[pro]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(Q_VA >> 8), g_pb[pro + 1]);
+    TEST_ASSERT_EQUAL_HEX32(HDR_PCAS2, g_pb[pro + 2]);
+    /* Barrier between the launches: WFI then flush, in that order. */
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[pro + 3]);
+    TEST_ASSERT_EQUAL_HEX32(HDR_FLUSH, g_pb[pro + 4]);
+    TEST_ASSERT_EQUAL_HEX32(HDR_PCAS_A, g_pb[pro + 5]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)((Q_VA + GA10B_QMD_SIZE_BYTES) >> 8), g_pb[pro + 6]);
+    TEST_ASSERT_EQUAL_UINT32(1u, p.n_barriers);
+    /* End semaphore last: incrementing run of 5 from 0x158, four words. A
+     * release alone doesn't wait for launched work, so a WFI and flush come
+     * first, whatever the barrier kind (hardware: half-computed logits). */
+    uint32_t e = p.pb_dwords - 6u;
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[e - 2]);
+    TEST_ASSERT_EQUAL_HEX32(HDR_FLUSH, g_pb[e - 1]);
+    TEST_ASSERT_EQUAL_HEX32(0x20052056u, g_pb[e]);
+    TEST_ASSERT_EQUAL_HEX32(GA10B_PROG_PAYLOAD_END, g_pb[e + 1]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(S_VA + GA10B_PROG_SEMA_SLOT_BYTES), g_pb[e + 3]);
+    TEST_ASSERT_EQUAL_HEX32(0x0u, g_pb[e + 5]);
+
+    /* The GPFIFO entry covers exactly the pushbuffer. */
+    uint64_t gp = ga10b_prog_gp_entry(&p);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)PB_VA, (uint32_t)gp);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(PB_VA >> 32) | (p.pb_dwords << 10), (uint32_t)(gp >> 32));
+
+    /* Done means done. */
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_STATE, ga10b_prog_add_launch(&p, &l));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_STATE, ga10b_prog_add_barrier(&p));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_STATE, ga10b_prog_finish(&p));
+}
+
+static void test_prog_barrier_kinds(void)
+{
+    static struct ga10b_prog p;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI));
+    uint32_t before = p.pb_dwords;
+    (void)ga10b_prog_add_barrier(&p);
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, p.pb_dwords);
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[before]);
+
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_FLUSH));
+    before = p.pb_dwords;
+    (void)ga10b_prog_add_barrier(&p);
+    TEST_ASSERT_EQUAL_HEX32(HDR_FLUSH, g_pb[before]);
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, p.pb_dwords);
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG, prog_init(&p, 0, GA10B_PROG_BARRIER_COUNT));
+}
+
+static void test_prog_qmd_and_cbuf(void)
+{
+    static struct ga10b_prog p;
+    uint32_t args[3] = { 0x11111111u, 0x22222222u, 0x33333333u };
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI_FLUSH));
+    struct ga10b_prog_launch l = launch(args, sizeof(args));
+    (void)ga10b_prog_add_launch(&p, &l);
+    TEST_ASSERT_EQUAL_INT(1, ga10b_prog_add_launch(&p, &l));
+
+    /* Second launch: its own cbuf, its args at 0x160, zero below. */
+    uint8_t *a = ga10b_prog_cbuf_args(&p, 1);
+    TEST_ASSERT_EQUAL_PTR(g_cb + GA10B_PROG_CBUF_STRIDE + 0x160u, a);
+    TEST_ASSERT_EQUAL_HEX32(0x22222222u, ((uint32_t *)(void *)a)[1]);
+    TEST_ASSERT_EQUAL_HEX8(0, g_cb[GA10B_PROG_CBUF_STRIDE]);
+
+    /* A QMD built here equals what the v7 encoder writes for the same
+     * launch, apart from the cbuf address. */
+    uint32_t *q = ga10b_prog_qmd(&p, 1);
+    uint32_t ref[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(ref, l.shader_gpu_va, C_VA + GA10B_PROG_CBUF_STRIDE, 64, 3, 1, 1, 32, 1, 1);
+    ga10b_qmd_set_bits(ref, GA10B_QMD_SHARED_MEMORY_SIZE_HI, GA10B_QMD_SHARED_MEMORY_SIZE_LO, 512);
+    ga10b_qmd_set_bits(ref, GA10B_QMD_BARRIER_COUNT_HI, GA10B_QMD_BARRIER_COUNT_LO, 1);
+    TEST_ASSERT_EQUAL_MEMORY(ref, q, GA10B_QMD_SIZE_BYTES);
+
+    /* Update rewrites QMD and cbuf in place; the pushbuffer stays. */
+    uint32_t dw = p.pb_dwords;
+    l.grid_x = 9;
+    uint32_t args2[1] = { 0x44444444u };
+    l.args = args2;
+    l.args_len = sizeof(args2);
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, ga10b_prog_update_launch(&p, 1, &l));
+    TEST_ASSERT_EQUAL_UINT32(dw, p.pb_dwords);
+    ga10b_qmd_set_bits(ref, GA10B_QMD_CTA_RASTER_WIDTH_HI, GA10B_QMD_CTA_RASTER_WIDTH_LO, 9);
+    TEST_ASSERT_EQUAL_MEMORY(ref, q, GA10B_QMD_SIZE_BYTES);
+    TEST_ASSERT_EQUAL_HEX32(0x44444444u, *(uint32_t *)(void *)a);
+    TEST_ASSERT_EQUAL_HEX32(0, ((uint32_t *)(void *)a)[1]);
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG, ga10b_prog_update_launch(&p, 7, &l));
+
+    /* Lean: no icache, texture or membar work, cbuf invalidate kept. */
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, GA10B_PROG_F_LEAN_QMD,
+                                                   GA10B_PROG_BARRIER_WFI_FLUSH));
+    l.args = args;
+    l.args_len = sizeof(args);
+    (void)ga10b_prog_add_launch(&p, &l);
+    q = ga10b_prog_qmd(&p, 0);
+#define BIT(q_, b) (((q_)[(b) / 32u] >> ((b) % 32u)) & 1u)
+    TEST_ASSERT_EQUAL_UINT32(0, BIT(q, GA10B_QMD_INVALIDATE_INSTRUCTION_CACHE_BIT));
+    TEST_ASSERT_EQUAL_UINT32(0, BIT(q, GA10B_QMD_CWD_MEMBAR_TYPE_LO_BIT));
+    TEST_ASSERT_EQUAL_UINT32(1, BIT(q, GA10B_QMD_INVALIDATE_SHADER_DATA_CACHE_BIT));
+    TEST_ASSERT_EQUAL_UINT32(1, BIT(q, GA10B_QMD_CBUF_INVALIDATE_BASE));
+}
+
+/* Limits: the sizes for a real program, and refusals that protect memory. */
+static void test_prog_limits(void)
+{
+    uint32_t pb, q, c, s;
+    ga10b_prog_sizes(1000u, 0, &pb, &q, &c, &s);
+    /* Well under what one GPFIFO entry can address (21-bit dword count). */
+    TEST_ASSERT_TRUE(pb < (1u << 23));
+    TEST_ASSERT_EQUAL_UINT32(1000u * 256u, q);
+    TEST_ASSERT_EQUAL_UINT32(1000u * 512u, c);
+    TEST_ASSERT_EQUAL_UINT32(32u, s);
+    ga10b_prog_sizes(1000u, GA10B_PROG_F_PROFILE, &pb, NULL, NULL, &s);
+    TEST_ASSERT_EQUAL_UINT32((2u + 1000u) * 16u, s);
+
+    static struct ga10b_prog p;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI));
+    struct ga10b_prog_launch l = launch(g_sm, 4);
+    for (unsigned i = 0; i < 8u; i++) {
+        TEST_ASSERT_EQUAL_INT((int)i, ga10b_prog_add_launch(&p, &l));
+    }
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_FULL, ga10b_prog_add_launch(&p, &l));
+    (void)ga10b_prog_finish(&p);
+    /* Everything fits, with a barrier allowed after every launch. */
+    TEST_ASSERT_TRUE(p.pb_dwords <= PB_DW);
+    TEST_ASSERT_EQUAL_UINT32(8u, count_dw(HDR_PCAS2, p.pb_dwords));
+
+    /* Regions too small or misaligned for the hardware are refused. */
+    struct ga10b_prog_mem pbm = { (uint8_t *)g_pb, PB_VA, sizeof(g_pb) };
+    struct ga10b_prog_mem qm = { (uint8_t *)g_qmd, Q_VA + 4u, sizeof(g_qmd) };
+    struct ga10b_prog_mem cm = { g_cb, C_VA, sizeof(g_cb) };
+    struct ga10b_prog_mem sm = { g_sm, S_VA, sizeof(g_sm) };
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG,
+                          ga10b_prog_init(&p, &pbm, &qm, &cm, &sm, 8u, 0, GA10B_PROG_BARRIER_WFI));
+    qm.gpu_va = Q_VA;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG,
+                          ga10b_prog_init(&p, &pbm, &qm, &cm, &sm, 9u, 0, GA10B_PROG_BARRIER_WFI));
+    /* A launch's args must fit its cbuf; a zero grid never launches. */
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI));
+    l.args_len = GA10B_PROG_CBUF_ARGS_MAX + 1u;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG, ga10b_prog_add_launch(&p, &l));
+    l.args_len = 4;
+    l.grid_x = 0;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_ARG, ga10b_prog_add_launch(&p, &l));
+}
+
+/* `slm gpu inject hang`: an ACQUIRE right before the end semaphore, in the
+ * space ga10b_prog_sizes reserves. */
+static void test_prog_inject_hang(void)
+{
+    static struct ga10b_prog p;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, GA10B_PROG_F_INJECT_HANG, GA10B_PROG_BARRIER_WFI));
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, ga10b_prog_finish(&p));
+    uint32_t e = p.pb_dwords - 12u;
+    TEST_ASSERT_EQUAL_HEX32(0x20052056u, g_pb[e]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)S_VA, g_pb[e + 3]);
+    TEST_ASSERT_EQUAL_HEX32(1u, g_pb[e + 5]);   /* OPERATION = ACQUIRE */
+    TEST_ASSERT_TRUE(g_pb[e + 1] != GA10B_PROG_PAYLOAD_START);
+}
+
+static void test_prog_profile_slots(void)
+{
+    static struct ga10b_prog p;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, GA10B_PROG_F_PROFILE,
+                                                   GA10B_PROG_BARRIER_WFI_FLUSH));
+    struct ga10b_prog_launch l = launch(g_sm, 4);
+    (void)ga10b_prog_add_launch(&p, &l);
+    /* A drained timestamp right after the launch, in its own slot. */
+    uint32_t at = p.pb_dwords - 6u;
+    TEST_ASSERT_EQUAL_HEX32(HDR_WFI, g_pb[at - 2]);
+    TEST_ASSERT_EQUAL_HEX32(GA10B_PROG_PAYLOAD_OP, g_pb[at + 1]);
+    TEST_ASSERT_EQUAL_HEX32((uint32_t)(S_VA + 2u * GA10B_PROG_SEMA_SLOT_BYTES), g_pb[at + 3]);
+    TEST_ASSERT_EQUAL_HEX32(0x0u, g_pb[at + 5]);
+    TEST_ASSERT_EQUAL_UINT32(10u * GA10B_PROG_SEMA_SLOT_BYTES, ga10b_prog_sema_bytes(&p));
+}
+
+/* ---- slm_prog_encode: per-kernel ABI ---- */
+
+static uint32_t arg32(const uint8_t *a, uint32_t off)
+{
+    uint32_t v;
+    memcpy(&v, a + off, 4);
+    return v;
+}
+
+static uint64_t arg64(const uint8_t *a, uint32_t off)
+{
+    uint64_t v;
+    memcpy(&v, a + off, 8);
+    return v;
+}
+
+static void test_encode_kernels(void)
+{
+    struct ga10b_prog_launch l;
+    uint8_t a[GA10B_PROG_CBUF_ARGS_MAX];
+
+    /* slm_mm_*: offsets checked against the manifest at build time, too. */
+    struct slm_prog_op op = {
+        .kernel = SLM_PROG_K_MM_Q4K, .rows = 8, .dim = { 1536, 8960 },
+        .ptr = { 0x1000, 0x2000, 0x3000, 0x4000 }, .scal = { SLM_PROG_MM_OUT_F16 },
+    };
+    /* Choice of kernel, as the harness's add_mm. */
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B8, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0xA000, l.shader_gpu_va);
+    TEST_ASSERT_EQUAL_HEX64(0x1000, arg64(a, 0x00));
+    TEST_ASSERT_EQUAL_HEX64(0x2000, arg64(a, 0x08));
+    TEST_ASSERT_EQUAL_HEX64(0x3000, arg64(a, 0x10));
+    TEST_ASSERT_EQUAL_HEX64(0x4000, arg64(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(8960, arg32(a, 0x24));
+    TEST_ASSERT_EQUAL_UINT32(8, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(1, arg32(a, 0x2C));
+    TEST_ASSERT_EQUAL_UINT32(598, l.grid_x);    /* ceil(8960 / 15) */
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_y);
+    TEST_ASSERT_EQUAL_UINT32(32, l.block_x);
+    /* Registers and shared memory come from the manifest. */
+    TEST_ASSERT_TRUE(l.register_count_v > 0u);
+    TEST_ASSERT_EQUAL_UINT32(0, l.smem_size_bytes % 256u);
+
+    /* B = 1: warps per CTA go in flags and the block. */
+    op.rows = 1;
+    op.dim[1] = 8960;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B1, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B1, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(598, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(1, l.block_y);     /* 598 tiles fill the SMs */
+    TEST_ASSERT_EQUAL_UINT32(1u | (1u << 8), arg32(a, 0x2C));
+    op.dim[1] = 256;                            /* attn_k: 18 tiles, K = 1536 */
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B1, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(18, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(6, l.block_y);     /* min(8, K/256, ceil(200/18)) */
+    TEST_ASSERT_EQUAL_UINT32(1u | (6u << 8), arg32(a, 0x2C));
+    TEST_ASSERT_TRUE(l.barrier_count >= 1u);    /* __syncthreads between warps */
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 512u);
+
+    /* Prefill, big N: x in shared memory. */
+    op.rows = 64;
+    op.dim[1] = 8960;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_BS, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_BS, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(75, l.grid_x);     /* ceil(8960 / 120) */
+    TEST_ASSERT_EQUAL_UINT32(8, l.block_y);
+    TEST_ASSERT_TRUE(l.register_count_v <= 256u);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 8192u);
+    TEST_ASSERT_EQUAL_UINT32(1, arg32(a, 0x2C));
+
+    /* Prefill, small N: one CTA per (tile, x tile). */
+    op.dim[1] = 256;
+    op.rows = 9;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q4K_HMMA_B64, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(18, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(2, l.grid_y);
+    TEST_ASSERT_EQUAL_UINT32(1u | SLM_PROG_MM_SPLIT_XT | (6u << 16), arg32(a, 0x2C));
+    op.rows = 65;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B64, 0xA000, &l, a));
+    op.dim[1] = 8960;
+    op.rows = 8;
+    /* The kernels load 16 bytes of x at a time. */
+    op.ptr[0] = 0x1008;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q4K_HMMA_B8, 0xA000, &l, a));
+    op.ptr[0] = 0x1000;
+
+    /* SIMT: one block per (row, batch). Any batch. */
+    op.rows = 65;
+    op.scal[1] = SLM_PROG_MM_SIMT;
+    op.kernel = SLM_PROG_K_MM_Q6K;
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_MM_Q6K_SIMT, (uint32_t)slm_prog_op_sass(&op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(8960, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(65, l.grid_y);
+    /* A null weight pointer never launches; a null bias is how none is said. */
+    op.ptr[3] = 0;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+    op.ptr[1] = 0;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&op, SLM_SASS_MM_Q6K_SIMT, 0xA000, &l, a));
+
+    struct slm_prog_op e = {
+        .kernel = SLM_PROG_K_EMBED_Q6K, .rows = 4, .dim = { 1536 }, .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&e, SLM_SASS_EMBED_Q6K, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x30, arg64(a, 0x10));
+    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(4, arg32(a, 0x1C));
+    TEST_ASSERT_EQUAL_UINT32(4, l.grid_x);
+
+    struct slm_prog_op n = {
+        .kernel = SLM_PROG_K_RMSNORM, .rows = 4, .dim = { 1536 },
+        .ptr = { 0x10, 0x20, 0x30 }, .scal = { 0x358637BDu },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&n, SLM_SASS_RMSNORM_W8, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x10, arg64(a, 0x00));
+    TEST_ASSERT_EQUAL_HEX64(0x20, arg64(a, 0x08));
+    TEST_ASSERT_EQUAL_UINT32(1536, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(4, arg32(a, 0x1C));
+    TEST_ASSERT_EQUAL_HEX32(0x358637BDu, arg32(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(4, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(8, l.block_y);
+    TEST_ASSERT_TRUE(l.barrier_count >= 1u);
+    /* The kernel covers whole warps only. */
+    n.dim[0] = 1537;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&n, SLM_SASS_RMSNORM_W8, 0xA000, &l, a));
+
+    struct slm_prog_op r = {
+        .kernel = SLM_PROG_K_ROPE, .rows = 2, .dim = { 12, 128 },
+        .ptr = { 0x10, 0x10, 0x30, 0x40 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&r, SLM_SASS_ROPE, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x40, arg64(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(12, arg32(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(128, arg32(a, 0x24));
+    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(12, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(2, l.grid_y);
+    r.dim[1] = 100;  /* heads must be whole warps */
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&r, SLM_SASS_ROPE, 0xA000, &l, a));
+
+    struct slm_prog_op g = {
+        .kernel = SLM_PROG_K_GQA, .rows = 5, .dim = { 12, 2, 128 },
+        .ptr = { 0x10, 0x20, 0x30, 0x40, 0x50 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, SLM_SASS_GQA_W8, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_HEX64(0x40, arg64(a, 0x18));
+    TEST_ASSERT_EQUAL_HEX64(0x50, arg64(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(12, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, 0x2C));
+    TEST_ASSERT_EQUAL_UINT32(128, arg32(a, 0x30));
+    TEST_ASSERT_EQUAL_UINT32(5, arg32(a, 0x34));
+    TEST_ASSERT_EQUAL_UINT32(12, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(5, l.grid_y);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 8256u);
+    TEST_ASSERT_EQUAL_UINT32(8, l.block_y);
+    g.dim[2] = 512;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&g, SLM_SASS_GQA_W8, 0xA000, &l, a));
+
+    /* Total elements: rows * width, rounded up to whole warps. */
+    struct slm_prog_op s = {
+        .kernel = SLM_PROG_K_SWIGLU, .rows = 2, .dim = { 8960 }, .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&s, SLM_SASS_SWIGLU, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(17920, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(560, l.grid_x);
+
+    struct slm_prog_op sum = {
+        .kernel = SLM_PROG_K_ADD, .rows = 1, .dim = { 1537 }, .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&sum, SLM_SASS_ADD, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1537, arg32(a, 0x18));
+    TEST_ASSERT_EQUAL_UINT32(49, l.grid_x);
+
+    /* A kernel VA of 0 means the lookup failed, and unknown kinds fail. */
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, SLM_SASS_ADD, 0, &l, a));
+    sum.kernel = SLM_PROG_K_COUNT;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&sum, SLM_SASS_ADD, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_op_sass(&sum));
+}
+
+/* ---- Sessions on a fake channel ---- */
+
+static void *pm_alloc(void *ctx, uint32_t n, uint64_t *phys)
+{
+    (void)ctx;
+    void *p = pmm_alloc_pages(n);
+    if (p) {
+        memset(p, 0, (size_t)n * 4096u);
+        *phys = (uint64_t)(uintptr_t)p;
+    }
+    return p;
+}
+
+static void pm_free(void *ctx, void *cpu, uint32_t n)
+{
+    (void)ctx;
+    pmm_free_pages(cpu, n);
+}
+
+static void *pm_p2c(void *ctx, uint64_t phys)
+{
+    (void)ctx;
+    return (void *)(uintptr_t)phys;
+}
+
+static void pm_cache(void *ctx, const void *p, size_t n)
+{
+    (void)ctx;
+    (void)p;
+    (void)n;
+}
+
+static uint32_t pm_rd32(void *ctx, uint32_t off)
+{
+    (void)ctx;
+    (void)off;
+    return 0x00018000u;     /* MMU FIFO has space and is empty */
+}
+
+static void pm_wr32(void *ctx, uint32_t off, uint32_t v)
+{
+    (void)ctx;
+    (void)off;
+    (void)v;
+}
+
+static void pm_udelay(void *ctx, uint32_t us)
+{
+    (void)ctx;
+    (void)us;
+}
+
+static const struct ga10b_gpu_ops g_pm_ops = {
+    .rd32 = pm_rd32, .wr32 = pm_wr32, .udelay = pm_udelay,
+    .alloc_pages = pm_alloc, .free_pages = pm_free, .phys_to_cpu = pm_p2c,
+    .cache_clean = pm_cache, .cache_inval = pm_cache,
+};
+
+static struct ga10b_vm g_vm;
+
+/* The fake channel. */
+enum fake_mode { FAKE_COMPLETE, FAKE_HANG, FAKE_REFUSE };
+static struct {
+    enum fake_mode mode;
+    uint64_t now;
+    unsigned submits, finishes, evicts, tlbs, dumps;
+    uint64_t last_gp;
+    int evict_rc;
+    bool irqs_off;
+    bool scattered;
+    bool no_q6k;
+    bool no_b64;
+} g_fk;
+
+static int fk_tlb(void)
+{
+    g_fk.tlbs++;
+    return 0;
+}
+
+static int fk_kernel_va(uint32_t sass, uint64_t *va)
+{
+    if (g_fk.no_q6k && sass == SLM_SASS_MM_Q6K_HMMA_B1) return -1;
+    if (g_fk.no_b64 && (sass == SLM_SASS_MM_Q4K_HMMA_BS || sass == SLM_SASS_MM_Q6K_HMMA_BS)) return -1;
+    *va = 0x7000000ull + 0x1000u * sass;
+    return 0;
+}
+
+/* Pretend memory above the page is split, as kbuf memory is. */
+static uint64_t fk_v2p(const void *p)
+{
+    return (uint64_t)(uintptr_t)p;
+}
+
+static bool fk_contig(const void *p, uint64_t len)
+{
+    (void)p;
+    (void)len;
+    return !g_fk.scattered;
+}
+
+static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, uint32_t ms)
+{
+    (void)ms;
+    g_fk.last_gp = gp;
+    g_fk.submits++;
+    if (g_fk.mode == FAKE_REFUSE) return -1;
+    if (g_fk.mode == FAKE_COMPLETE) {
+        *(volatile uint32_t *)slot = payload;
+        /* Timestamps 50 us apart. */
+        *((volatile uint64_t *)slot + 1) = 1000050u;
+        *((volatile uint64_t *)slot - 1) = 1000000u;
+    }
+    return 0;
+}
+
+static void fk_finished(void)
+{
+    g_fk.finishes++;
+}
+
+static int fk_evict(void)
+{
+    g_fk.evicts++;
+    return g_fk.evict_rc;
+}
+
+static uint64_t fk_now(void)
+{
+    return g_fk.now;
+}
+
+static void fk_relax(void)
+{
+    /* Each wait turn costs 100 ms, so the 5 s bound doesn't take 5 s. */
+    g_fk.now += 100000u;
+}
+
+static void fk_dump(const char *why)
+{
+    (void)why;
+    g_fk.dumps++;
+}
+
+static bool fk_irqs(void)
+{
+    return !g_fk.irqs_off;
+}
+
+static const struct slm_prog_backend g_fake = {
+    .ops = &g_pm_ops, .vm = &g_vm,
+    .tlb_invalidate = fk_tlb, .kernel_va = fk_kernel_va,
+    .virt_to_phys = fk_v2p, .is_contiguous = fk_contig,
+    .submit = fk_submit, .finished = fk_finished, .l2_evict = fk_evict,
+    .now_us = fk_now, .relax = fk_relax, .dump_fault = fk_dump, .irqs_enabled = fk_irqs,
+};
+
+static void fake_up(void)
+{
+    memset(&g_fk, 0, sizeof(g_fk));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_pm_ops, &g_vm));
+    slm_prog_backend_set(&g_fake);
+}
+
+static void fake_down(void)
+{
+    slm_prog_backend_set(NULL);
+    ga10b_vm_destroy(&g_pm_ops, &g_vm);
+}
+
+/* Weights: 2 MiB aligned, as boot models are. */
+#define W_BYTES (3u * 1024u * 1024u)
+
+/* A 2 MiB-aligned run: 1024 pages is an order-10 buddy block, aligned to 4 MiB. */
+static void *alloc_weights(uint32_t *pages)
+{
+    *pages = 1024u;
+    return pmm_alloc_pages(*pages);
+}
+
+static struct slm_prog_open_args open_args(const void *w)
+{
+    struct slm_prog_open_args a;
+    memset(&a, 0, sizeof(a));
+    a.weights = w;
+    a.weights_bytes = W_BYTES;
+    a.data_bytes = 300u * 1024u;
+    a.step_bytes = 8192u;
+    a.max_launches[0] = 8u;
+    a.max_launches[1] = 8u;
+    return a;
+}
+
+static void test_session_maps_and_frees(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    size_t free0 = pmm_get_free_pages();
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_TRUE(o.handle >= 0);
+    /* Weights: in place, 64 KB PTEs, cacheable, read-only. */
+    TEST_ASSERT_EQUAL_UINT32(1, o.weights_big);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)w, ga10b_vm_lookup(&g_pm_ops, &g_vm, o.weights_gpu_va));
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)w + W_BYTES - 16u,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.weights_gpu_va + W_BYTES - 16u));
+    /* Data and control: walks land on the CPU pointers it returned. */
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.data_cpu + 0x12344u,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.data_gpu_va + 0x12344u));
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.step_cpu,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.step_gpu_va));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.tlbs);
+    /* Far fewer table pages than the file has 4 KB pages. */
+    TEST_ASSERT_TRUE(o.table_pages_added < 32u);
+    /* Weights and data are in separate 2 MB spans from anything small. */
+    TEST_ASSERT_EQUAL_UINT64(0, o.weights_gpu_va & (GA10B_VM_PDE0_SPAN - 1u));
+    TEST_ASSERT_EQUAL_UINT64(0, o.data_gpu_va & (GA10B_VM_PDE0_SPAN - 1u));
+
+    uint64_t wva = o.weights_gpu_va, dva = o.data_gpu_va;
+    slm_prog_close(o.handle);
+    /* Close unmaps before it frees, and invalidates between the two. */
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, dva));
+    TEST_ASSERT_EQUAL_UINT32(2, g_fk.tlbs);
+
+    /* The arena came back; only page-table pages stay with the VM. */
+    TEST_ASSERT_TRUE(pmm_get_free_pages() + o.table_pages_added + 4u >= free0);
+
+    /* VA is reused, so reopening doesn't walk the bump allocator. */
+    uint64_t next = g_vm.user_next;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_HEX64(next, g_vm.user_next);
+    TEST_ASSERT_EQUAL_HEX64(wva, o.weights_gpu_va);
+    slm_prog_close(o.handle);
+
+    /* Bad handle calls are harmless. */
+    slm_prog_close(-1);
+    slm_prog_close(99);
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_barrier(0, 0));
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* A freed 2 MB data range holds big-page tables, so a later session's control
+ * region (small pages, same size) must not get it. This failed `slm launch`
+ * on the real model after `slm gpu golden` had run on the tiny one. */
+static void test_session_va_reuse_keeps_page_size(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t old_data = o.data_gpu_va, old_control = o.step_gpu_va;
+    slm_prog_close(o.handle);
+
+    /* Data no longer fits 2 MB, so only the control region can reuse a range. */
+    a.data_bytes = 3u * 1024u * 1024u;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_HEX64(old_control, o.step_gpu_va);
+    TEST_ASSERT_TRUE(o.data_gpu_va != old_data);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.step_cpu,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.step_gpu_va));
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* Scattered weights (kbuf) still map, one 4 KB PTE per page. */
+static void test_session_scattered_weights(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    g_fk.scattered = true;
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_UINT32(0, o.weights_big);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)w + 0x7000u,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.weights_gpu_va + 0x7000u));
+    /* 768 PTEs of 4 KB need several table pages more than 64 KB would. */
+    TEST_ASSERT_TRUE(o.table_pages_added >= 2u);
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* Failures leave nothing mapped or allocated. */
+static void test_session_open_failures(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    a.barrier = 99u;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_open(&a, &o));
+    a = open_args(w);
+    a.data_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_open(&a, &o));
+    /* Asking for more memory than exists fails cleanly. */
+    size_t free0 = pmm_get_free_pages();
+    a = open_args(w);
+    a.data_bytes = 0xF0000000ull;
+    int rc = slm_prog_open(&a, &o);
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NOMEM, rc);
+    TEST_ASSERT_TRUE(pmm_get_free_pages() + 16u >= free0);
+
+    /* All sessions taken. */
+    a = open_args(w);
+    int32_t h[SLM_PROG_MAX_SESSIONS];
+    for (int i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
+        TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+        h[i] = o.handle;
+    }
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NOMEM, slm_prog_open(&a, &o));
+    for (int i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
+        slm_prog_close(h[i]);
+    }
+
+    /* No channel at all: the error Rust maps to the per-op path. */
+    slm_prog_backend_set(NULL);
+    a = open_args(w);
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NO_BACKEND, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_max_batch(false));
+    ga10b_vm_destroy(&g_pm_ops, &g_vm);
+    pmm_free_pages(w, wp);
+}
+
+static void open_built(void *w, struct slm_prog_open_out *o)
+{
+    struct slm_prog_open_args a = open_args(w);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, o));
+    struct slm_prog_op op = {
+        .kernel = SLM_PROG_K_ADD, .rows = 1, .dim = { 256 },
+        .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_add(o->handle, 0, &op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_barrier(o->handle, 0));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_add(o->handle, 0, &op));
+    /* Unfinished programs don't run. */
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_run(o->handle, 0, &st));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_finish(o->handle, 0));
+}
+
+static void test_run_ok_and_patch(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    int32_t h = o.handle;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.submits);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.finishes);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.evicts);
+    TEST_ASSERT_EQUAL_UINT64(50, st.gpu_ns);
+    TEST_ASSERT_TRUE(g_fk.last_gp != 0u);
+
+    /* Patching a launch's args doesn't touch anything the GPU saw before. */
+    struct slm_prog_op op = {
+        .kernel = SLM_PROG_K_ADD, .rows = 1, .dim = { 512 }, .ptr = { 0x10, 0x20, 0x40 },
+    };
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_patch(h, 0, 1, &op));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_patch(h, 0, 2, &op));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_update(h, 0, 1, &op));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_update(h, 0, 2, &op));
+
+    /* The semaphore is re-armed per step: the second run needs a new release. */
+    g_fk.mode = FAKE_HANG;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_TIMEOUT, slm_prog_run(h, 0, &st));
+    slm_prog_close(h);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* A hang is bounded, dumps the fault state once, doesn't evict, and kills
+ * the session so nothing else is queued behind it. */
+static void test_run_timeout_is_bounded(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    int32_t h = o.handle;
+    g_fk.mode = FAKE_HANG;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_TIMEOUT, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_TRUE(g_fk.now >= SLM_PROG_STEP_TIMEOUT_MS * 1000ull);
+    TEST_ASSERT_TRUE(g_fk.now < (SLM_PROG_STEP_TIMEOUT_MS + 200u) * 1000ull);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.finishes);
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.evicts);
+    unsigned sub = g_fk.submits;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_DEAD, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(sub, g_fk.submits);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    slm_prog_close(h);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+static void test_run_other_failures(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)(uintptr_t)w & (GA10B_VM_PDE0_SPAN - 1u));
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    int32_t h = o.handle;
+    struct slm_prog_run_stats st;
+
+    /* Waiting with IRQs masked is how #1093 hung the board: refuse it. */
+    g_fk.irqs_off = true;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_IRQS_OFF, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.submits);
+    g_fk.irqs_off = false;
+
+    /* Submit refused: nothing in flight, nothing to report as finished. */
+    g_fk.mode = FAKE_REFUSE;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_SUBMIT, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.finishes);
+
+    /* A failed evict would hand the CPU stale logits. */
+    g_fk.mode = FAKE_COMPLETE;
+    g_fk.evict_rc = -1;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_EVICT, slm_prog_run(h, 0, &st));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_DEAD, slm_prog_run(h, 0, &st));
+    slm_prog_close(h);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* The arena works without a model: what `slm gpu smoke` opens. */
+static void test_session_without_weights(void)
+{
+    fake_up();
+    struct slm_prog_open_args a = open_args(NULL);
+    a.weights_bytes = 0;
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_EQUAL_HEX64(0, o.weights_gpu_va);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(uintptr_t)o.data_cpu,
+                            ga10b_vm_lookup(&g_pm_ops, &g_vm, o.data_gpu_va));
+    slm_prog_close(o.handle);
+    fake_down();
+}
+
+static void test_kernel_lookup_and_batch(void)
+{
+    fake_up();
+    TEST_ASSERT_EQUAL_UINT32(64u, slm_prog_max_batch(false));
+    g_fk.no_b64 = true;
+    TEST_ASSERT_EQUAL_UINT32(8u, slm_prog_max_batch(false));
+    TEST_ASSERT_EQUAL_UINT32(64u, slm_prog_max_batch(true));
+    g_fk.no_b64 = false;
+    g_fk.no_q6k = true;
+    TEST_ASSERT_EQUAL_UINT32(0u, slm_prog_max_batch(false));
+
+    /* A missing kernel fails the add with the code Rust reports. */
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    struct slm_prog_op op = {
+        .kernel = SLM_PROG_K_MM_Q6K, .rows = 1, .dim = { 256, 256 }, .ptr = { 0x10, 0x20, 0x30 },
+    };
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NO_KERNEL, slm_prog_add(o.handle, 0, &op));
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* ---- End to end: the tiny model through the production FFI ---- */
+
+#define MAX_TOKENS 16u
+
+typedef struct {
+    uint32_t ids[MAX_TOKENS];
+    uint32_t count;
+} collected_t;
+
+static int32_t collect_cb(void *user, uint32_t id, const uint8_t *b, size_t n)
+{
+    (void)b;
+    (void)n;
+    collected_t *c = (collected_t *)user;
+    if (c->count < MAX_TOKENS) c->ids[c->count] = id;
+    c->count++;
+    return 1;
+}
+
+static size_t greedy_len(void)
+{
+    return (size_t)(slm_golden_greedy_end - slm_golden_greedy_start);
+}
+
+static void tiny_load(int *idx)
+{
+    rust_slm_test_reset();
+    *idx = rust_slm_load((const uint8_t *)"tiny-qwen2", slm_golden_tiny_start,
+                         (size_t)(slm_golden_tiny_end - slm_golden_tiny_start));
+    TEST_ASSERT_EQUAL_INT(0, *idx);
+}
+
+/* Greedy sampler, as the golden run. */
+static void open_greedy(int idx, int32_t *out)
+{
+    *out = rust_slm_golden_open_greedy((uint32_t)idx, 64u);
+    TEST_ASSERT_TRUE(*out >= 0);
+}
+
+/* --gpu on builds a program with the expected shape from the real GGUF. */
+static void test_e2e_build(void)
+{
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
+    /* The embedding, two layers of 15, the final norm, the LM head. */
+    TEST_ASSERT_EQUAL_UINT32(1u + 2u * 15u + 2u, g.launches);
+    TEST_ASSERT_EQUAL_UINT32(64u, g.max_batch);
+    /* Layer: 9 barriers inside, 1 before the next one; final norm and head. */
+    TEST_ASSERT_TRUE(g.barriers > 15u);
+    TEST_ASSERT_TRUE(g.barriers < g.launches);
+    /* Model memory came from rust_slm_load: contiguous pages. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g.weights_big);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    rust_slm_test_reset();
+    fake_down();
+}
+
+/* A hung GPU costs the bounded timeout once. The session then rebuilds its
+ * KV cache on the CPU and produces llama.cpp's tokens anyway. */
+static void test_e2e_hang_falls_back_to_cpu(void)
+{
+    uint8_t text[64];
+    uint32_t want[MAX_TOKENS];
+    int32_t text_len = rust_slm_golden_record(slm_golden_greedy_start, greedy_len(),
+                                              "prompt.text", text, sizeof(text));
+    TEST_ASSERT_TRUE(text_len > 0);
+    int32_t wb = rust_slm_golden_record(slm_golden_greedy_start, greedy_len(),
+                                        "greedy.tokens", (uint8_t *)want, sizeof(want));
+    TEST_ASSERT_TRUE(wb > 0);
+    uint32_t want_count = (uint32_t)wb / 4u;
+
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    g_fk.mode = FAKE_HANG;
+    collected_t got = { .count = 0 };
+    int32_t rc = rust_slm_prompt_ex((uint32_t)s, text, (size_t)text_len, SLM_PROMPT_RAW,
+                                    want_count, collect_cb, NULL, &got);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(want_count, got.count);
+    for (uint32_t i = 0; i < want_count; i++) {
+        TEST_ASSERT_EQUAL_UINT32(want[i], got.ids[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.submits);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_CPU, g.path);
+    TEST_ASSERT_EQUAL_STRING("GPU step timed out", g.note);
+    TEST_ASSERT_EQUAL_UINT64(0, g.gpu_tokens);
+    TEST_ASSERT_TRUE(g.cpu_tokens > 0u);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    rust_slm_test_reset();
+    fake_down();
+}
+
+/* The golden harness `slm gpu golden` runs on hardware: on the fake channel
+ * the logits are zeros, so it must say so and where. */
+static void test_e2e_golden_reports_divergence(void)
+{
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    SlmGpuGoldenReport r;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_gpu_golden((uint32_t)idx, slm_golden_greedy_start,
+                                                 greedy_len(), 0u, &r));
+    TEST_ASSERT_EQUAL_INT(0, r.first_bad_step);
+    TEST_ASSERT_TRUE(r.steps > 0u);
+    TEST_ASSERT_TRUE(r.max_err_milli > 1500);
+    TEST_ASSERT_TRUE(r.exact_max_err_milli > 100);
+    TEST_ASSERT_EQUAL_INT(0, r.exact_first_bad_step);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    rust_slm_test_reset();
+    fake_down();
+}
+
+int test_suite_slm_prog(void)
+{
+    UnityBegin("test_slm_prog.c");
+    RUN_TEST(test_prog_pushbuffer);
+    RUN_TEST(test_prog_barrier_kinds);
+    RUN_TEST(test_prog_qmd_and_cbuf);
+    RUN_TEST(test_prog_limits);
+    RUN_TEST(test_prog_inject_hang);
+    RUN_TEST(test_prog_profile_slots);
+    RUN_TEST(test_encode_kernels);
+    RUN_TEST(test_session_maps_and_frees);
+    RUN_TEST(test_session_va_reuse_keeps_page_size);
+    RUN_TEST(test_session_scattered_weights);
+    RUN_TEST(test_session_open_failures);
+    RUN_TEST(test_session_without_weights);
+    RUN_TEST(test_run_ok_and_patch);
+    RUN_TEST(test_run_timeout_is_bounded);
+    RUN_TEST(test_run_other_failures);
+    RUN_TEST(test_kernel_lookup_and_batch);
+    RUN_TEST(test_e2e_build);
+    RUN_TEST(test_e2e_hang_falls_back_to_cpu);
+    RUN_TEST(test_e2e_golden_reports_divergence);
+    return UnityEnd();
+}

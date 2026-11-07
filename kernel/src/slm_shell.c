@@ -47,6 +47,7 @@
 #endif
 #include "slm_ffi.h"
 #include "slm_runner.h"
+#include "slm_prog.h"
 #include "boot_models.h"
 #include "string.h"
 #include "timer.h"
@@ -644,8 +645,17 @@ static void slm_print_backend(uint32_t sid, uint32_t gpu_mode)
         shell_puts("backend=unknown");
         return;
     }
+    SlmSessionGpuC g;
     if (gpu_mode == SLM_GPU_CPU) {
         shell_puts("backend=CPU(--gpu cpu)");
+    } else if (rust_slm_session_gpu_info(sid, &g) == 0 && g.path == SLM_PATH_PROGRAM) {
+        shell_printf("backend=GPU program(launches=%lu barriers=%lu batch=%lu arena=%luMB "
+                     "weights=%s)",
+                     (unsigned long)g.launches, (unsigned long)g.barriers,
+                     (unsigned long)g.max_batch, (unsigned long)(g.arena_bytes >> 20),
+                     g.weights_big ? "64KB" : "4KB");
+    } else if (rust_slm_session_gpu_info(sid, &g) == 0 && g.path == SLM_PATH_CPU) {
+        shell_printf("backend=CPU(%s)", g.note[0] ? g.note : "no GPU program");
     } else if (info.gpu_ops == 0) {
         shell_puts("backend=CPU(no GPU ops available)");
     } else {
@@ -754,12 +764,6 @@ static int slm_parse_session_opts(const char *who, int argc, char *argv[],
         }
     }
 
-
-    if (o->gpu_mode == SLM_GPU_ON && rust_slm_gpu_tier_ops() == 0) {
-        shell_printf("%s: --gpu on, but no op has a GPU tier "
-                     "(see `slm gpu`); use --gpu auto or cpu\r\n", who);
-        return -1;
-    }
     return 0;
 }
 
@@ -802,7 +806,16 @@ static int slm_launch(int argc, char *argv[])
                    "session table full, or KV cache OOM)\r\n");
         return -1;
     }
-    if (rust_slm_session_configure((uint32_t)sid, gpu_mode, threads) != 0) {
+    int32_t crc = rust_slm_session_configure((uint32_t)sid, gpu_mode, threads);
+    if (crc == SLM_ERR_GPU_PROGRAM) {
+        SlmSessionGpuC g;
+        const char *why = rust_slm_session_gpu_info((uint32_t)sid, &g) == 0 ? g.note : "unknown";
+        shell_printf("slm launch: --gpu on, but no GPU program: %s; "
+                     "use --gpu auto or cpu\r\n", why);
+        rust_slm_session_close((uint32_t)sid);
+        return -1;
+    }
+    if (crc != 0) {
         rust_slm_session_close((uint32_t)sid);
         shell_puts("slm launch: could not apply --gpu/--threads\r\n");
         return -1;
@@ -1257,8 +1270,162 @@ static int slm_stats(int argc, char *argv[])
     return 0;
 }
 
-static int slm_gpu(void)
+/* Each open session: the path it's on and how many tokens ran where. */
+static void slm_gpu_sessions(void)
 {
+    uint64_t emc = 0, gpc = 0;
+    slm_prog_clocks(&emc, &gpc);
+    shell_printf("clocks: EMC %llu MHz, GPC %llu MHz\r\n",
+                 (unsigned long long)(emc / 1000000u),
+                 (unsigned long long)(gpc / 1000000u));
+    for (uint32_t sid = 0; sid < 4u; sid++) {
+        SlmSessionGpuC g;
+        if (rust_slm_session_gpu_info(sid, &g) != 0) continue;
+        const char *path = g.path == SLM_PATH_PROGRAM ? "GPU program"
+                         : g.path == SLM_PATH_PER_OP ? "per-op tier table" : "CPU";
+        shell_printf("session %lu: %s, gpu_tokens=%llu cpu_tokens=%llu gpu_us/token=%llu",
+                     (unsigned long)sid, path,
+                     (unsigned long long)g.gpu_tokens, (unsigned long long)g.cpu_tokens,
+                     (unsigned long long)g.gpu_us_per_token);
+        if (g.path == SLM_PATH_PROGRAM) {
+            shell_printf(" launches=%lu barriers=%lu batch=%lu weights=%s",
+                         (unsigned long)g.launches, (unsigned long)g.barriers,
+                         (unsigned long)g.max_batch, g.weights_big ? "64KB" : "4KB");
+        }
+        if (g.note[0]) shell_printf(" (%s)", g.note);
+        shell_puts("\r\n");
+    }
+}
+
+/* slm gpu opts <wfi-flush|flush|wfi> [lean] [profile] [simt]: applies to the next
+ * launch. Exists to measure barriers on hardware, not to be tuned by hand. */
+static int slm_gpu_opts(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("Usage: slm gpu opts <wfi-flush|flush|wfi> [lean] [profile] [simt]\r\n");
+        return -1;
+    }
+    uint32_t barrier;
+    if (strcmp(argv[3], "wfi-flush") == 0) barrier = 0;
+    else if (strcmp(argv[3], "flush") == 0) barrier = 1;
+    else if (strcmp(argv[3], "wfi") == 0) barrier = 2;
+    else {
+        shell_printf("slm gpu opts: unknown barrier '%s'\r\n", argv[3]);
+        return -1;
+    }
+    uint32_t flags = 0;
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "lean") == 0) flags |= SLM_PROG_FLAG_LEAN_QMD;
+        else if (strcmp(argv[i], "profile") == 0) flags |= SLM_PROG_FLAG_PROFILE;
+        else if (strcmp(argv[i], "simt") == 0) flags |= SLM_PROG_FLAG_SIMT;
+        else {
+            shell_printf("slm gpu opts: unknown option '%s'\r\n", argv[i]);
+            return -1;
+        }
+    }
+    rust_slm_gpu_set_options(barrier, flags);
+    shell_puts("ok, for the next `slm launch`\r\n");
+    return 0;
+}
+
+#ifdef SLM_GPU_GOLDEN
+extern const uint8_t slm_gpu_golden_tiny_start[], slm_gpu_golden_tiny_end[];
+extern const uint8_t slm_gpu_golden_rec_start[], slm_gpu_golden_rec_end[];
+
+/* slm gpu golden [batch]: the tiny Qwen2 model on the GPU program, every
+ * step's logits against llama.cpp. Needs a build with SLM_GPU_GOLDEN=ON. */
+static int slm_gpu_golden(int argc, char *argv[])
+{
+    bool batched = argc >= 4 && strcmp(argv[3], "batch") == 0;
+    int idx = rust_slm_load((const uint8_t *)"tiny-qwen2", slm_gpu_golden_tiny_start,
+                            (size_t)(slm_gpu_golden_tiny_end - slm_gpu_golden_tiny_start));
+    if (idx < 0) {
+        shell_puts("slm gpu golden: could not load the fixture\r\n");
+        return -1;
+    }
+    SlmGpuGoldenReport r;
+    int32_t rc = rust_slm_gpu_golden((uint32_t)idx, slm_gpu_golden_rec_start,
+                                     (size_t)(slm_gpu_golden_rec_end - slm_gpu_golden_rec_start),
+                                     batched ? 1u : 0u, &r);
+    (void)rust_slm_unload((uint32_t)idx);
+    if (rc != 0) {
+        shell_puts("slm gpu golden: FAIL, the program did not run\r\n");
+        return -1;
+    }
+    bool ok = r.first_bad_step < 0 && r.exact_first_bad_step < 0 && r.argmax_matches == r.steps;
+    shell_printf("slm gpu golden: %s, %lu steps, %lu same top token, vs llama.cpp max %d milli "
+                 "(first over 1500 at step %d), vs exact max %d milli (first over 100 at step %d), "
+                 "%llu us/token\r\n",
+                 ok ? "PASS" : "FAIL", (unsigned long)r.steps, (unsigned long)r.argmax_matches,
+                 (int)r.max_err_milli, (int)r.first_bad_step, (int)r.exact_max_err_milli,
+                 (int)r.exact_first_bad_step, (unsigned long long)r.gpu_us_per_token);
+    return ok ? 0 : -1;
+}
+#endif
+
+/* slm gpu smoke [n] [width]: launch, barrier, semaphore and evict with no model. */
+static int slm_gpu_smoke(int argc, char *argv[])
+{
+    uint32_t n = 400u, width = 1536u;
+    if ((argc >= 4 && (shell_parse_uint(argv[3], &n) != 0 || n == 0u || n > 2048u)) ||
+        (argc >= 5 && (shell_parse_uint(argv[4], &width) != 0 || width == 0u || (width & 31u) ||
+                       width > 8960u))) {
+        shell_puts("Usage: slm gpu smoke [launches, 1..2048] [width, a multiple of 32]\r\n");
+        return -1;
+    }
+    SlmGpuSmokeReport r;
+    if (rust_slm_gpu_smoke(n, width, &r) != 0) {
+        shell_puts("slm gpu smoke: FAIL, the program did not run\r\n");
+        return -1;
+    }
+    shell_printf("slm gpu smoke: %s, %lu launches, %lu bad elements, gpu %llu us "
+                 "(%llu ns/launch), wait %llu us, evict %llu us\r\n",
+                 r.bad_elements == 0u ? "PASS" : "FAIL",
+                 (unsigned long)r.launches, (unsigned long)r.bad_elements,
+                 (unsigned long long)(r.gpu_ns / 1000u),
+                 (unsigned long long)(r.gpu_ns / r.launches),
+                 (unsigned long long)r.wait_us, (unsigned long long)r.evict_us);
+    return r.bad_elements == 0u ? 0 : -1;
+}
+
+/* slm gpu opcheck <handle> [simt]: each kernel against the CPU reference. */
+static int slm_gpu_opcheck(int argc, char *argv[])
+{
+    uint32_t h = 0;
+    if (argc < 4 || shell_parse_uint(argv[3], &h) != 0) {
+        shell_puts("Usage: slm gpu opcheck <handle> [simt]\r\n");
+        return -1;
+    }
+    bool simt = argc >= 5 && strcmp(argv[4], "simt") == 0;
+    int32_t rc = rust_slm_gpu_opcheck(h, simt ? 1u : 0u);
+    shell_printf("slm gpu opcheck: %ld failed\r\n", (long)rc);
+    return rc == 0 ? 0 : -1;
+}
+
+static int slm_gpu(int argc, char *argv[])
+{
+    if (argc >= 3 && strcmp(argv[2], "opts") == 0) return slm_gpu_opts(argc, argv);
+    if (argc >= 3 && strcmp(argv[2], "opcheck") == 0) return slm_gpu_opcheck(argc, argv);
+    if (argc >= 4 && strcmp(argv[2], "profile") == 0) {
+        uint32_t sid = 0;
+        if (shell_parse_uint(argv[3], &sid) != 0 || rust_slm_session_gpu_profile(sid) != 0) {
+            shell_puts("slm gpu profile: no session on a GPU program there\r\n");
+            return -1;
+        }
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[2], "smoke") == 0) return slm_gpu_smoke(argc, argv);
+    if (argc >= 4 && strcmp(argv[2], "inject") == 0) {
+        uint32_t kind = strcmp(argv[3], "hang") == 0 ? 1u : strcmp(argv[3], "fault") == 0 ? 2u : 0u;
+        rust_slm_gpu_set_inject(kind);
+        shell_printf("next `slm launch`: decode %s\r\n",
+                     kind == 1u ? "hangs" : kind == 2u ? "faults" : "runs normally");
+        return 0;
+    }
+#ifdef SLM_GPU_GOLDEN
+    if (argc >= 3 && strcmp(argv[2], "golden") == 0) return slm_gpu_golden(argc, argv);
+#endif
+    slm_gpu_sessions();
     /* Walk the 8 first-class SLM op kinds and report which tier the
      * forward path will route each one through. The tier table is
      * populated at boot by `oplib_probe_run`, which flips an entry
@@ -1449,7 +1616,7 @@ int cmd_slm(int argc, char *argv[])
     if (strcmp(verb, "info")   == 0) return slm_info(argc, argv);
     if (strcmp(verb, "status") == 0) return slm_status();
     if (strcmp(verb, "stats")  == 0) return slm_stats(argc, argv);
-    if (strcmp(verb, "gpu")    == 0) return slm_gpu();
+    if (strcmp(verb, "gpu")    == 0) return slm_gpu(argc, argv);
     /* Same: they wait on a task, and the task can need the shell to run. */
     if (strcmp(verb, "runner") == 0) return slm_runner_verb(argc, argv);
     if (strcmp(verb, "ask")    == 0) return slm_ask(argc, argv);
