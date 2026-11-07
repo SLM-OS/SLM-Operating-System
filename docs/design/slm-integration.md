@@ -467,6 +467,22 @@ choosing between them is one GPFIFO entry. With it on, a GPU step adds one
 FLUSH_DISABLE semaphore release per class boundary, after a WAIT_FOR_IDLE that was
 already there, plus arming and reading those slots.
 
+Measured on jetson-nano-2 (cold UEFI-direct, GPC 1020 MHz, EMC 3199 MHz, p1
+`--raw --max 256`, greedy, 2026-11-07):
+
+| Runs | Decode (tok/s) |
+|---|---|
+| `--profile` off, 3 runs | 49.444, 49.440, 49.440 |
+| `--profile` on (310 timestamps per token), 3 runs | 49.402, 49.396, 49.409 |
+| `--profile` on, a telnet session reading `slm stats` and `--follow 500` throughout | 49.394 |
+
+Profiling costs 0.08 percent, about 16 us per token. The six runs printed the
+same text. The class times add up to 19.32 ms per step, the GPU's whole time
+per step: matmul-mlp 11.34 ms, lm_head 3.59, matmul-attn 1.66, GQA 1.65
+(2.59 at 319 positions), the rest 1.08. The plan gives 6.45M mma per token,
+the same count as C3K's harness. Not measured: a build of the same kernels
+without the telemetry (C3X's 49.52 tok/s came from an earlier build).
+
 ### Tensor-core utilization
 
 The target below says "TC-busy / GPU-busy on matmul ops". SLM-OS has no measure of
