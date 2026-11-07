@@ -288,6 +288,14 @@ driver and is open-redistribution licensed.
 
 ---
 
+## Jetson Models After a UEFI-Direct Boot
+
+A UEFI-direct boot reads `\slmos\models\*.gguf` through the firmware
+before the kernel starts, and `slm load /boot/models/<name>.gguf` then needs
+no host and no copy. Setup is in
+[`deploy/jetson-uefi-direct.md`](deploy/jetson-uefi-direct.md#models-on-disk).
+The rest of this section applies to the kexec path and to `slm xload`.
+
 ## Jetson SD-Card Layout
 
 When SLM-OS boots on a Jetson Orin Nano (Super Dev Kit) the LittleFS

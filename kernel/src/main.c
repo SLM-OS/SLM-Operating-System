@@ -40,6 +40,7 @@
 #include "blob_autoload.h"
 #include "boot_media.h"
 #include "boot_source.h"
+#include "boot_models.h"
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../gpu/nvidia/ga10b_cold.h"
 #endif
@@ -397,6 +398,10 @@ void kernel_main(void *dtb)
     ga10b_kexec_handoff_register_reserves();
 #endif
 
+    /* Check the model files the EFI stub read and keep their pages out
+     * of the buddy allocator (ADR 0002). Empty on every other boot path. */
+    boot_models_reserve();
+
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();
@@ -485,6 +490,7 @@ void kernel_main(void *dtb)
      * allocations first to avoid concurrent PMM access. */
     INFO("Initializing VFS...");
     vfs_init();
+    boot_models_mount();
 
     /* Initialize Block Device Subsystem and LittleFS */
     INFO("Initializing filesystem subsystems...");
@@ -835,6 +841,31 @@ void kernel_main(void *dtb)
     {
         extern int xhci_init(void);
         (void)xhci_init();
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        /*
+         * UEFI leaves EMC at 204 MHz and nothing like Linux's governors
+         * raises it. BPMP owns the switch and rounds to its DVFS table; a
+         * failure only costs speed. This has to follow the cold GPU and
+         * XUSB bring-up: the same request made right after bpmp_init
+         * succeeded and read 3199 MHz, but the shell later read 204 MHz
+         * (measured on jetson-nano-2, 10 cold boots), while a request
+         * made from the shell held through a 10-minute prompt.
+         */
+        if (boot_source_is_uefi()) {
+            uint64_t before = 0, after = 0;
+            (void)bpmp_clk_get_rate(TEGRA234_CLK_EMC, &before);
+            int emc_rc = bpmp_clk_set_rate(TEGRA234_CLK_EMC,
+                                           TEGRA234_EMC_MAX_HZ, &after);
+            if (emc_rc != 0) {
+                WARN("EMC: set_rate rc=%d, staying at %llu MHz", emc_rc,
+                     (unsigned long long)(before / 1000000u));
+            } else {
+                INFO("EMC: %llu -> %llu MHz",
+                     (unsigned long long)(before / 1000000u),
+                     (unsigned long long)(after / 1000000u));
+            }
+        }
+#endif
     }
 #endif
 

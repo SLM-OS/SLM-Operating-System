@@ -929,8 +929,11 @@ test-jetson-uefi-layout:
 #   2. with ImageBase rewritten to a non-RAM address, so the firmware
 #      loads it elsewhere and the EFI stub must relocate it — the
 #      situation on Jetson, whose firmware never grants 0x80000000.
-# Both must reach the shell prompt. Needs the qemu-efi-aarch64 package
-# (AAVMF firmware) and mtools. Build the kernel first (`make kernel`).
+# Both must reach the shell prompt. Then model delivery (ADR 0002):
+# scripts/test-qemu-uefi-models.sh boots with a small GGUF on the virtual
+# disk, and with each failure the real firmware can be made to produce.
+# Needs the qemu-efi-aarch64 package (AAVMF firmware) and mtools. Build
+# the kernel first (`make kernel`).
 .PHONY: test-qemu-uefi
 test-qemu-uefi:
 	@test -f $(KERNEL_BIN) || { echo "build the QEMU_VIRT kernel first: make kernel"; exit 2; }
@@ -940,7 +943,8 @@ test-qemu-uefi:
 		|| { echo "test-qemu-uefi: relocation path was not taken"; exit 1; }
 	@grep -a -q "Boot source: UEFI-direct" build/qemu-uefi/console.log \
 		|| { echo "test-qemu-uefi: boot source not recorded across the relocation"; exit 1; }
-	@echo "test-qemu-uefi: PASS (in-place and relocated UEFI boots)"
+	@bash scripts/test-qemu-uefi-models.sh $(KERNEL_BIN) $(TEST_TIMEOUT)
+	@echo "test-qemu-uefi: PASS (in-place and relocated UEFI boots, model delivery)"
 
 # VBIOS parser unit tests — runs on the host, no GPU required.
 # Synthetic VBIOS image built in the test, no proprietary binaries.

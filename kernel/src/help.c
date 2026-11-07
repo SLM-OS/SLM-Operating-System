@@ -1507,6 +1507,16 @@ static const struct help_entry help_entries[] = {
         "patch in tools/tfa-patches/0004-*) is needed.\n"
     ),
 
+    HELP_TEXT("clocks",
+        "clocks - EMC and GPU clock rates (Jetson Orin Nano only)\n"
+        "\n"
+        "Usage:\n"
+        "  clocks             Print what BPMP reports for emc, gpc0clk, gpc1clk\n"
+        "                     and gpusysclk.\n"
+        "  clocks emc <MHz>   Request an EMC rate, then print the rates. BPMP picks\n"
+        "                     the nearest rate its DVFS table allows.\n"
+    ),
+
     HELP_TEXT("thermal",
         "thermal - Temperatures, fan PWM and CPU liveness (Jetson Orin Nano only)\n"
         "\n"

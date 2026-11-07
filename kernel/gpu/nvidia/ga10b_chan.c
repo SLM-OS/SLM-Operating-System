@@ -104,6 +104,13 @@ static uint64_t pde0_small_next(const uint32_t *e)
     return ((((uint64_t)e[3] << 24) | ((e[2] >> 8) & 0xffffffu)) << 12);
 }
 
+/* Big-PT address from a dual PDE0 (big half in words 0/1, 256 B units). */
+static uint64_t pde0_big_next(const uint32_t *e)
+{
+    if ((e[0] & 0x6u) == 0u) return 0;
+    return ((((uint64_t)e[1] << 28) | ((e[0] >> 4) & 0xfffffffu)) << 8);
+}
+
 static int ensure_pde(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
                       uint32_t *table, uint32_t idx, uint32_t **next)
 {
@@ -125,6 +132,9 @@ static int ensure_pde0(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
                        uint32_t *table, uint32_t idx, uint32_t **next)
 {
     uint32_t *e = table + idx * (GA10B_VM_PDE0_ENTRY_BYTES / 4u);
+    /* nvgpu treats a PDE0 with both halves set as corrupt
+     * (ga10b_get_pde0_pgsz): each 2 MB of VA is one page size. */
+    if (pde0_big_next(e) != 0) return GA10B_CHAN_ERR_VA;
     uint64_t phys = pde0_small_next(e);
     if (phys == 0) {
         void *t = table_alloc(ops, vm, &phys);
@@ -158,6 +168,114 @@ int ga10b_vm_map(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
         ops->cache_clean(ops->ctx, e, GA10B_VM_PTE_ENTRY_BYTES);
     }
     return GA10B_CHAN_OK;
+}
+
+/* A big-page table is 256 B (32 entries, 8 B each), so one 4 KB page
+ * holds 16 of them. free_level frees the page when it reaches the
+ * table at offset 0; tables are never given back while the VM lives. */
+static void *big_table_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                             uint64_t *phys)
+{
+    if (!vm->big_slab_cpu || vm->big_slab_used == GA10B_VM_BIG_TABLES_PER_PAGE) {
+        uint64_t p = 0;
+        void *c = table_alloc(ops, vm, &p);
+        if (!c) return NULL;
+        vm->big_slab_cpu = c;
+        vm->big_slab_phys = p;
+        vm->big_slab_used = 0;
+    }
+    uint32_t off = vm->big_slab_used++ * GA10B_VM_BIG_TABLE_BYTES;
+    *phys = vm->big_slab_phys + off;
+    return (uint8_t *)vm->big_slab_cpu + off;
+}
+
+static int ensure_pde0_big(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                           uint32_t *table, uint32_t idx, uint32_t **next)
+{
+    uint32_t *e = table + idx * (GA10B_VM_PDE0_ENTRY_BYTES / 4u);
+    if (pde0_small_next(e) != 0) return GA10B_CHAN_ERR_VA;
+    uint64_t phys = pde0_big_next(e);
+    if (phys == 0) {
+        void *t = big_table_alloc(ops, vm, &phys);
+        if (!t) return GA10B_CHAN_ERR_NOMEM;
+        ga10b_pde0_big_encode(phys, e);
+        ops->cache_clean(ops->ctx, e, GA10B_VM_PDE0_ENTRY_BYTES);
+        *next = (uint32_t *)t;
+        return GA10B_CHAN_OK;
+    }
+    *next = (uint32_t *)ops->phys_to_cpu(ops->ctx, phys);
+    return *next ? GA10B_CHAN_OK : GA10B_CHAN_ERR_ARG;
+}
+
+int ga10b_vm_map_big(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                     uint64_t gpu_va, uint64_t phys, uint64_t size, uint32_t flags)
+{
+    if (!ops || !vm || !vm->pdb.cpu || size == 0u) return GA10B_CHAN_ERR_ARG;
+    if ((gpu_va | phys | size) & (GA10B_BIG_PAGE_SIZE - 1u)) return GA10B_CHAN_ERR_VA;
+    if (gpu_va + size < gpu_va || gpu_va + size > (1ull << 49)) return GA10B_CHAN_ERR_VA;
+
+    for (uint64_t off = 0; off < size; ) {
+        uint64_t va = gpu_va + off;
+        uint32_t *l2, *l1, *l0, *pt;
+        int rc = ensure_pde(ops, vm, (uint32_t *)vm->pdb.cpu, ga10b_vm_idx_pde3(va), &l2);
+        if (rc == GA10B_CHAN_OK) rc = ensure_pde(ops, vm, l2, ga10b_vm_idx_pde2(va), &l1);
+        if (rc == GA10B_CHAN_OK) rc = ensure_pde(ops, vm, l1, ga10b_vm_idx_pde1(va), &l0);
+        if (rc == GA10B_CHAN_OK) rc = ensure_pde0_big(ops, vm, l0, ga10b_vm_idx_pde0(va), &pt);
+        if (rc != GA10B_CHAN_OK) return rc;
+        /* Fill this 2 MB's run of entries and clean them together. */
+        uint32_t first = ga10b_vm_idx_pte_big(va);
+        uint32_t n = 0;
+        for (uint32_t i = first; i < GA10B_VM_BIG_PTES && off < size; i++) {
+            ga10b_pte_encode(phys + off, flags, pt + i * (GA10B_VM_PTE_ENTRY_BYTES / 4u));
+            off += GA10B_BIG_PAGE_SIZE;
+            n++;
+        }
+        ops->cache_clean(ops->ctx, pt + first * (GA10B_VM_PTE_ENTRY_BYTES / 4u),
+                         (size_t)n * GA10B_VM_PTE_ENTRY_BYTES);
+    }
+    return GA10B_CHAN_OK;
+}
+
+/* The PDE0 entry covering `va`, or NULL when no PDE1 table reaches it. */
+static const uint32_t *pde0_entry(const struct ga10b_gpu_ops *ops, const struct ga10b_vm *vm,
+                                  uint64_t va)
+{
+    const uint32_t *t = (const uint32_t *)vm->pdb.cpu;
+    uint32_t idx[3] = { ga10b_vm_idx_pde3(va), ga10b_vm_idx_pde2(va), ga10b_vm_idx_pde1(va) };
+    for (unsigned l = 0; l < 3u; l++) {
+        uint64_t n = pde_next(t + idx[l] * 2u);
+        if (n == 0) return NULL;
+        t = (const uint32_t *)ops->phys_to_cpu(ops->ctx, n);
+        if (!t) return NULL;
+    }
+    return t + ga10b_vm_idx_pde0(va) * 4u;
+}
+
+void ga10b_vm_unmap(const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                    uint64_t gpu_va, uint64_t size)
+{
+    if (!ops || !vm || !vm->pdb.cpu) return;
+    uint64_t end = gpu_va + size;
+    for (uint64_t va = gpu_va; va < end; ) {
+        uint64_t next_2m = (va + GA10B_VM_PDE0_SPAN) & ~(uint64_t)(GA10B_VM_PDE0_SPAN - 1u);
+        uint64_t stop = next_2m < end ? next_2m : end;
+        const uint32_t *e = pde0_entry(ops, vm, va);
+        if (e) {
+            uint64_t big = pde0_big_next(e);
+            uint64_t small = pde0_small_next(e);
+            uint64_t pt_phys = big ? big : small;
+            uint32_t *pt = pt_phys ? (uint32_t *)ops->phys_to_cpu(ops->ctx, pt_phys) : NULL;
+            if (pt) {
+                uint32_t step = big ? GA10B_BIG_PAGE_SIZE : GA10B_PAGE_SIZE;
+                uint32_t first = big ? ga10b_vm_idx_pte_big(va) : ga10b_vm_idx_pte(va);
+                uint32_t n = (uint32_t)((stop - va + step - 1u) / step);
+                memset(pt + first * 2u, 0, (size_t)n * GA10B_VM_PTE_ENTRY_BYTES);
+                ops->cache_clean(ops->ctx, pt + first * 2u,
+                                 (size_t)n * GA10B_VM_PTE_ENTRY_BYTES);
+            }
+        }
+        va = stop;
+    }
 }
 
 uint64_t ga10b_vm_reserve(struct ga10b_vm *vm, uint64_t size, uint64_t align,
@@ -200,14 +318,17 @@ uint64_t ga10b_vm_lookup(const struct ga10b_gpu_ops *ops, const struct ga10b_vm 
         t = (const uint32_t *)ops->phys_to_cpu(ops->ctx, n);
         if (!t) return 0;
     }
-    uint64_t pt = pde0_small_next(t + ga10b_vm_idx_pde0(gpu_va) * 4u);
+    const uint32_t *d = t + ga10b_vm_idx_pde0(gpu_va) * 4u;
+    uint64_t big = pde0_big_next(d);
+    uint64_t pt = big ? big : pde0_small_next(d);
     if (pt == 0) return 0;
     t = (const uint32_t *)ops->phys_to_cpu(ops->ctx, pt);
     if (!t) return 0;
-    const uint32_t *e = t + ga10b_vm_idx_pte(gpu_va) * 2u;
+    const uint32_t *e = t + (big ? ga10b_vm_idx_pte_big(gpu_va) : ga10b_vm_idx_pte(gpu_va)) * 2u;
     if ((e[0] & GA10B_GMMU_PTE_VALID) == 0u) return 0;
     uint64_t page = (((uint64_t)(e[1] & 0xffffffu) << 24) | ((e[0] >> 8) & 0xffffffu)) << 12;
-    return page | (gpu_va & (GA10B_PAGE_SIZE - 1u));
+    uint64_t mask = big ? (uint64_t)(GA10B_BIG_PAGE_SIZE - 1u) : (uint64_t)(GA10B_PAGE_SIZE - 1u);
+    return page | (gpu_va & mask);
 }
 
 static void free_level(const struct ga10b_gpu_ops *ops, uint32_t *t, unsigned level)
@@ -230,6 +351,13 @@ static void free_level(const struct ga10b_gpu_ops *ops, uint32_t *t, unsigned le
             uint64_t p = pde0_small_next(t + i * 4u);
             if (p) {
                 void *c = ops->phys_to_cpu(ops->ctx, p);
+                if (c) ops->free_pages(ops->ctx, c, 1u);
+            }
+            /* Big tables share slab pages: free each page once, at the
+             * table at its start (see big_table_alloc). */
+            uint64_t b = pde0_big_next(t + i * 4u);
+            if (b && (b & (GA10B_PAGE_SIZE - 1u)) == 0u) {
+                void *c = ops->phys_to_cpu(ops->ctx, b);
                 if (c) ops->free_pages(ops->ctx, c, 1u);
             }
         }

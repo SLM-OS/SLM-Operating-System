@@ -206,6 +206,7 @@ const shell_cmd_t builtin_commands[] = {
     {"rtldiag",   cmd_rtldiag,   "RTL8168 PCIe probe diagnostic",                             false, SHELL_CAT_HARDWARE},
 #endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"clocks",    cmd_clocks,    "Read EMC and GPU clock rates from BPMP",             false, SHELL_CAT_HARDWARE},
     {"thermal",   cmd_thermal,   "BPMP temperatures and fan control (thermal [fan [auto|<n>] | log <ms>])",  false, SHELL_CAT_HARDWARE},
 #endif
 #if !defined(PLATFORM_X86_64)

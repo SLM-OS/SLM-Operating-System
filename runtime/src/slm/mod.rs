@@ -9,6 +9,7 @@
 pub mod chat_template;
 pub mod decoder;
 pub mod forward;
+pub mod gpu_program;
 pub mod gguf;
 pub mod golden;
 pub mod kv_cache;
