@@ -439,3 +439,169 @@ __global__ void slm_swiglu_w8(const half *gate, const half *up, half *out, int t
         out[i] = __float2half(__half2float(s) * __half2float(up[i]));
     }
 }
+
+/* ---- q8_1 producers, the layout of SLM_MM_XQ ----
+ *
+ * Same arguments as slm_rmsnorm_w8, slm_swiglu_w8 and slm_gqa_w8, but out is a
+ * q8_1 row per batch: n FP16 integers q, then n/32 FP32 scales d, stride
+ * n + n/16 halves. ggml's quantize_q8_1: per 32 values, d = amax/127 and
+ * q = round(v/d) away from zero, with d stored as FP16; the dot product uses that
+ * FP16 d. v is the FP32 result before any FP16 rounding, as in llama.cpp, whose
+ * activations are FP32. Each warp writes exactly one block per step.
+ */
+
+SLM_INL void slm_q8_store(half *row, int n, int i, float v)
+{
+    float amax = fabsf(v);
+#pragma unroll
+    for (int m = 16; m > 0; m >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, m));
+    }
+    const float d = amax / 127.0f;
+    const float q = amax == 0.0f ? 0.0f : roundf(v / d);
+    row[i] = __float2half(q);
+    if ((threadIdx.x & 31) == 0) {
+        reinterpret_cast<float *>(row + n)[i >> 5] = __half2float(__float2half(d));
+    }
+}
+
+__global__ void slm_rmsnorm_q8(const half *x, const float *gamma, half *out, int n, int B,
+                               float eps)
+{
+    const int bat = blockIdx.x;
+    const int l = threadIdx.x;
+    const int w = threadIdx.y;
+    const int steps = (n + 255) >> 8;
+    const half *xr = x + (size_t)bat * n;
+    half *o = out + (size_t)bat * (n + (n >> 4));
+    const int first = (w << 5) + l;
+
+    float acc = 0.0f;
+    for (int s = 0; s < steps; s++) {
+        const int i = (s << 8) + first;
+        if (i < n) {
+            const float v = __half2float(xr[i]);
+            acc += v * v;
+        }
+    }
+    __syncwarp();
+    for (int m = 16; m > 0; m >>= 1) {
+        acc += __shfl_xor_sync(0xFFFFFFFFu, acc, m);
+    }
+    __shared__ float rq_sum[8];
+    if (l == 0) {
+        rq_sum[w] = acc;
+    }
+    __syncthreads();
+    float total = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        total += rq_sum[i];
+    }
+    const float inv = 1.0f / sqrtf(total / (float)n + eps);
+    for (int s = 0; s < steps; s++) {
+        const int i = (s << 8) + first;
+        if (i < n) {
+            slm_q8_store(o, n, i, __half2float(xr[i]) * inv * gamma[i]);
+        }
+    }
+}
+
+/* total = B * n; n is passed through `total`'s companion: the row width is the
+ * last argument, so the layout can be addressed. grid (ceil(total/256)), block 256. */
+__global__ void slm_swiglu_q8(const half *gate, const half *up, half *out, int total, int n)
+{
+    const int i = (blockIdx.x << 8) + threadIdx.x;
+    if (i < total) {
+        const float g = __half2float(gate[i]);
+        const float v = __fdividef(g, 1.0f + __expf(-g)) * __half2float(up[i]);
+        const int row = i / n, col = i - row * n;
+        slm_q8_store(out + (size_t)row * (n + (n >> 4)), n, col, v);
+    }
+}
+
+__global__ void slm_gqa_q8(const half *q, const half *k, const half *v, const uint32_t *pos,
+                           half *out, int nhq, int nhkv, int hd, int B)
+{
+    const int hq = blockIdx.x;
+    const int bat = blockIdx.y;
+    const int l = threadIdx.x;
+    const int w = threadIdx.y;
+    const int group = nhq / nhkv;
+    const int hkv = hq / group;
+    const int chunks = hd >> 5;
+    const int kv_per_pos = nhkv * hd;
+    const int T = (int)pos[bat] + 1;
+    const float inv_sqrt = 1.0f / sqrtf((float)hd);
+    const half *qr = q + ((size_t)bat * nhq + hq) * hd;
+
+    __shared__ __align__(16) float gq_acc[GQA_WARPS * GQA_MAX_HD];
+    __shared__ float gq_max[GQA_WARPS];
+    __shared__ float gq_sum[GQA_WARPS];
+    float *acc_w = &gq_acc[w * GQA_MAX_HD];
+    for (int c = 0; c < chunks; c++) {
+        acc_w[(c << 5) + l] = 0.0f;
+    }
+    float mx = -INFINITY;
+    float sum = 0.0f;
+    bool first = true;
+    for (int t = w; t < T; t += GQA_WARPS) {
+        const size_t off = (size_t)t * kv_per_pos + (size_t)hkv * hd;
+        float acc = 0.0f;
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            acc += __half2float(qr[i]) * __half2float(k[off + i]);
+        }
+        __syncwarp();
+        for (int m = 16; m > 0; m >>= 1) {
+            acc += __shfl_xor_sync(0xFFFFFFFFu, acc, m);
+        }
+        const float logit = acc * inv_sqrt;
+        if (logit > mx) {
+            const float f = first ? 0.0f : __expf(mx - logit);
+            sum *= f;
+            for (int c = 0; c < chunks; c++) {
+                acc_w[(c << 5) + l] *= f;
+            }
+            mx = logit;
+        }
+        first = false;
+        const float p = __expf(logit - mx);
+        sum += p;
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            acc_w[i] += p * __half2float(v[off + i]);
+        }
+    }
+    if (l == 0) {
+        gq_max[w] = mx;
+        gq_sum[w] = sum;
+    }
+    __syncthreads();
+    if (w == 0) {
+        float gm = -INFINITY;
+#pragma unroll
+        for (int i = 0; i < GQA_WARPS; i++) {
+            gm = fmaxf(gm, gq_max[i]);
+        }
+        float total = 0.0f;
+        float f[GQA_WARPS];
+#pragma unroll
+        for (int i = 0; i < GQA_WARPS; i++) {
+            f[i] = gq_sum[i] > 0.0f ? expf(gq_max[i] - gm) : 0.0f;
+            total += f[i] * gq_sum[i];
+        }
+        const float inv = total > 0.0f ? 1.0f / total : 0.0f;
+        const int n = nhq * hd;
+        half *row = out + (size_t)bat * (n + (n >> 4));
+        for (int c = 0; c < chunks; c++) {
+            const int i = (c << 5) + l;
+            float a = 0.0f;
+#pragma unroll
+            for (int m = 0; m < GQA_WARPS; m++) {
+                a += f[m] * gq_acc[m * GQA_MAX_HD + i];
+            }
+            slm_q8_store(row, n, hq * hd + i, a * inv);
+        }
+    }
+}

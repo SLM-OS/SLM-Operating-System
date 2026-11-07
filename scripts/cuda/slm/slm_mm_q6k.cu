@@ -135,7 +135,10 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
     /* First batch of this CTA's x tile. */
     const int base = (flags & SLM_MM_SPLIT_XT) ? (int)blockIdx.y * 8 : 0;
     const bool xact = base + gr < B;
-    const half *xrow = x + (size_t)(base + gr) * K;
+    const size_t xs = slm_xstride(K, flags);
+    const half *xrow = x + (size_t)(base + gr) * xs;
+    const half *xr0 = x + (size_t)min(base + 2 * c, B - 1) * xs;
+    const half *xr1 = x + (size_t)min(base + 2 * c + 1, B - 1) * xs;
     /* Row 15's bits read as zero, which encodes exactly 1.0. */
     const uint32_t keep1 = gr == 7 ? 0u : 0xFFFFFFFFu;
     const int off4 = 4 * c;
@@ -194,11 +197,13 @@ __global__ void slm_mm_q6k_hmma_b8(const half *x, const uint8_t *W, void *out,
                     const int sh = (idx & 3) * 8;
                     const float f0 = d0 * (float)(int8_t)(sw0 >> sh);
                     const float f1 = d1 * (float)(int8_t)(sw1 >> sh);
+                    const int bq = (b << 3) + h * 4 + g;
+                    const float e0 = slm_xq_d(xr0, K, flags, bq), e1 = slm_xq_d(xr1, K, flags, bq);
                     /* f * (64*H - 96*S) */
-                    acc0 += f0 * (64.0f * c0 - 96.0f * s_0);
-                    acc1 += f0 * (64.0f * c1 - 96.0f * s_1);
-                    acc2 += f1 * (64.0f * c2 - 96.0f * s_0);
-                    acc3 += f1 * (64.0f * c3 - 96.0f * s_1);
+                    acc0 += e0 * f0 * (64.0f * c0 - 96.0f * s_0);
+                    acc1 += e1 * f0 * (64.0f * c1 - 96.0f * s_1);
+                    acc2 += e0 * f1 * (64.0f * c2 - 96.0f * s_0);
+                    acc3 += e1 * f1 * (64.0f * c3 - 96.0f * s_1);
                 }
             }
         }

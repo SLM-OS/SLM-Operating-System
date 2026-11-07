@@ -47,6 +47,10 @@ OPS = {
                            MM_DOC + ". B 9..64, x in shared memory; prefer for N > 256."),
     "slm_mm_q6k_hmma_bs": ("matmul", "HMMA", "Q6_K", "ceil(N/120),1,1",
                            MM_DOC + ". B 9..64, x in shared memory; prefer for N > 256."),
+    "slm_mm_q4k_hmma_bsq": ("matmul", "HMMA", "Q4_K", "ceil(N/120),1,1",
+                            MM_DOC + ". As slm_mm_q4k_hmma_bs with x in q8_1 rows (SLM_MM_XQ)."),
+    "slm_mm_q6k_hmma_bsq": ("matmul", "HMMA", "Q6_K", "ceil(N/120),1,1",
+                            MM_DOC + ". As slm_mm_q6k_hmma_bs with x in q8_1 rows (SLM_MM_XQ)."),
     "slm_embed_q4k": ("embed", "SIMT", "Q4_K", "B,1,1", "out[B,K] = table[ids[b]], FP16."),
     "slm_embed_q6k": ("embed", "SIMT", "Q6_K", "B,1,1", "out[B,K] = table[ids[b]], FP16."),
     "slm_rmsnorm": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1", "x and out FP16 [B,n], n % 32 == 0."),
@@ -64,6 +68,12 @@ OPS = {
     "slm_add_w8": ("add", "SIMT", "FP16", "ceil(total/256),1,1", "As slm_add, 8 warps per CTA."),
     "slm_swiglu_w8": ("swiglu", "SIMT", "FP16", "ceil(total/256),1,1",
                       "As slm_swiglu, 8 warps per CTA, fast exponent and divide."),
+    "slm_rmsnorm_q8": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
+                       "As slm_rmsnorm_w8, out in q8_1 rows for SLM_MM_XQ (stride n + n/16 halves)."),
+    "slm_swiglu_q8": ("swiglu", "SIMT", "FP16", "ceil(total/256),1,1",
+                      "As slm_swiglu_w8 plus row width n, out in q8_1 rows for SLM_MM_XQ."),
+    "slm_gqa_q8": ("gqa", "SIMT", "FP16", "nhq,B,1",
+                   "As slm_gqa_w8, out in q8_1 rows of nhq*hd for SLM_MM_XQ."),
     "slm_gqa_w8": ("gqa", "SIMT", "FP16", "nhq,B,1",
                    "As slm_gqa, positions split across 8 warps. Prefer this one."),
     "slm_rmsnorm_w8": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
@@ -76,11 +86,16 @@ BLOCKS = {
     "slm_rmsnorm_w8": [32, 8, 1],
     "slm_add_w8": [256, 1, 1],
     "slm_swiglu_w8": [256, 1, 1],
+    "slm_rmsnorm_q8": [32, 8, 1],
+    "slm_swiglu_q8": [256, 1, 1],
+    "slm_gqa_q8": [32, 8, 1],
     # nw is chosen per shape at launch, 1 is the minimum.
     "slm_mm_q4k_hmma_b1": [32, "nw", 1],
     "slm_mm_q6k_hmma_b1": [32, "nw", 1],
     "slm_mm_q4k_hmma_bs": [32, 8, 1],
     "slm_mm_q6k_hmma_bs": [32, 8, 1],
+    "slm_mm_q4k_hmma_bsq": [32, 8, 1],
+    "slm_mm_q6k_hmma_bsq": [32, 8, 1],
 }
 
 # Parameter names per kernel, checked against the count in the ELF.
@@ -98,6 +113,9 @@ ARGS = {
     "slm_rmsnorm_w8": "x, gamma, out, n, B, eps",
     "slm_add_w8": "a, b, out, total",
     "slm_swiglu_w8": "gate, up, out, total",
+    "slm_rmsnorm_q8": "x, gamma, out, n, B, eps",
+    "slm_swiglu_q8": "gate, up, out, total, n",
+    "slm_gqa_q8": "q, k, v, pos, out, nhq, nhkv, hd, B",
 }
 
 

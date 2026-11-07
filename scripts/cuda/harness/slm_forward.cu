@@ -157,6 +157,11 @@ struct Model {
 
 static bool g_simt = false;
 static bool g_b64 = false;
+/* Quantize every matmul input to ggml q8_1 like llama.cpp's CUDA path. */
+static bool g_q8 = false;
+static int xq_flag() { return g_q8 ? SLM_MM_XQ : 0; }
+/* Row stride of a matmul input of width n, in halves. */
+static size_t in_stride(int n) { return g_q8 ? (size_t)n + (n >> 4) : (size_t)n; }
 
 static int mm_grid(int N) { return (N + Q4K_TILE_ROWS - 1) / Q4K_TILE_ROWS; }
 
@@ -198,7 +203,10 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
      * few CTAs to fill the SMs that way and split per x tile instead. */
     if (ranged && N > 256 && !g_b64) {
         const dim3 g2((N + 119) / 120);
-        P.add_op(name, cls, q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs, g2);
+        void *fbs = (flags & SLM_MM_XQ)
+                        ? (q6 ? (void *)slm_mm_q6k_hmma_bsq : (void *)slm_mm_q4k_hmma_bsq)
+                        : (q6 ? (void *)slm_mm_q6k_hmma_bs : (void *)slm_mm_q4k_hmma_bs);
+        P.add_op(name, cls, fbs, g2);
         Op &o = P.ops.back();
         o.block = dim3(32, 8, 1);
         o.mma = (double)mm_grid(N) * (K / 256) * 16.0 * 8;
@@ -295,7 +303,7 @@ static const float *wf(const Arena &A, const GgufTensor &t)
 static void add_rmsnorm(Program &P, const Model &M, const Arena &A, const std::string &name,
                         const GgufTensor &gt, const half *x, half *out, int B)
 {
-    P.add_op(name, "rmsnorm", (void *)slm_rmsnorm_w8, dim3(B));
+    P.add_op(name, "rmsnorm", g_q8 ? (void *)slm_rmsnorm_q8 : (void *)slm_rmsnorm_w8, dim3(B));
     P.ops.back().block = dim3(32, 8, 1);
     P.arg(x);
     P.arg(wf(A, gt));
@@ -355,16 +363,16 @@ static void build_program(Program &P, const Model &M, const Arena &A, int B)
         const std::string b = "blk." + std::to_string(l) + ".";
         add_rmsnorm(P, M, A, b + "attn_norm", M.t(b + "attn_norm.weight"), A.x, A.xn, B);
         add_mm(P, M, A, b + "attn_q", "matmul 1536x1536", M.t(b + "attn_q.weight"),
-               wf(A, M.t(b + "attn_q.bias")), A.xn, A.q, B, SLM_MM_OUT_F16);
+               wf(A, M.t(b + "attn_q.bias")), A.xn, A.q, B, SLM_MM_OUT_F16 | xq_flag());
         add_mm(P, M, A, b + "attn_k", "matmul 1536x256", M.t(b + "attn_k.weight"),
-               wf(A, M.t(b + "attn_k.bias")), A.xn, A.k, B, SLM_MM_OUT_F16);
+               wf(A, M.t(b + "attn_k.bias")), A.xn, A.k, B, SLM_MM_OUT_F16 | xq_flag());
         add_mm(P, M, A, b + "attn_v", "matmul 1536x256", M.t(b + "attn_v.weight"),
-               wf(A, M.t(b + "attn_v.bias")), A.xn, A.v, B, SLM_MM_OUT_F16);
+               wf(A, M.t(b + "attn_v.bias")), A.xn, A.v, B, SLM_MM_OUT_F16 | xq_flag());
         add_rope(P, M, A, b + "rope_q", A.q, M.nhq, B);
         add_rope(P, M, A, b + "rope_k", A.k, M.nhkv, B);
         add_kv(P, b + "kv_k", A.k, A.K[l], A.pos, HV, B);
         add_kv(P, b + "kv_v", A.v, A.V[l], A.pos, HV, B);
-        P.add_op(b + "gqa", "gqa", (void *)slm_gqa_w8, dim3(M.nhq, B, 1));
+        P.add_op(b + "gqa", "gqa", g_q8 ? (void *)slm_gqa_q8 : (void *)slm_gqa_w8, dim3(M.nhq, B, 1));
         P.ops.back().block = dim3(32, 8, 1);
         P.arg((const half *)A.q);
         P.arg((const half *)A.K[l]);
@@ -376,27 +384,31 @@ static void build_program(Program &P, const Model &M, const Arena &A, int B)
         P.arg(M.hd);
         P.arg(B);
         add_mm(P, M, A, b + "attn_out", "matmul 1536x1536", M.t(b + "attn_output.weight"), nullptr,
-               A.a, A.p, B, SLM_MM_OUT_F16);
+               A.a, A.p, B, SLM_MM_OUT_F16 | xq_flag());
         add_add(P, b + "res_attn", A.x, A.p, A.x, B * H);
         add_rmsnorm(P, M, A, b + "ffn_norm", M.t(b + "ffn_norm.weight"), A.x, A.xn, B);
         add_mm(P, M, A, b + "ffn_gate", "matmul 1536x8960", M.t(b + "ffn_gate.weight"), nullptr,
-               A.xn, A.g, B, SLM_MM_OUT_F16);
+               A.xn, A.g, B, SLM_MM_OUT_F16 | xq_flag());
         add_mm(P, M, A, b + "ffn_up", "matmul 1536x8960", M.t(b + "ffn_up.weight"), nullptr, A.xn,
-               A.u, B, SLM_MM_OUT_F16);
-        P.add_op(b + "swiglu", "swiglu", (void *)slm_swiglu_w8, dim3((B * M.ff + 255) / 256));
+               A.u, B, SLM_MM_OUT_F16 | xq_flag());
+        P.add_op(b + "swiglu", "swiglu", g_q8 ? (void *)slm_swiglu_q8 : (void *)slm_swiglu_w8,
+                 dim3((B * M.ff + 255) / 256));
         P.ops.back().block = dim3(256);
         P.arg((const half *)A.g);
         P.arg((const half *)A.u);
         P.arg(A.s);
         P.arg(B * M.ff);
+        if (g_q8) {
+            P.arg(M.ff);
+        }
         add_mm(P, M, A, b + "ffn_down", "matmul 8960x1536", M.t(b + "ffn_down.weight"), nullptr,
-               A.s, A.d, B, SLM_MM_OUT_F16);
+               A.s, A.d, B, SLM_MM_OUT_F16 | xq_flag());
         add_add(P, b + "res_ffn", A.x, A.d, A.x, B * H);
     }
     add_rmsnorm(P, M, A, "output_norm", M.t("output_norm.weight"), A.x, A.xn, B);
     /* lm_head on the last batch row only. */
-    add_mm(P, M, A, "lm_head", "lm_head", M.t("output.weight"), nullptr, A.xn + (size_t)(B - 1) * H,
-           A.logits, 1, 0);
+    add_mm(P, M, A, "lm_head", "lm_head", M.t("output.weight"), nullptr,
+           A.xn + (size_t)(B - 1) * in_stride(H), A.logits, 1, xq_flag());
 }
 
 /* ---- CPU reference for one step, keeps x after every layer ---- */
@@ -416,6 +428,26 @@ static void ref_step(const Model &M, RefState &R, const uint32_t *ids, const uin
     auto wfc = [&](const std::string &n) {
         return reinterpret_cast<const float *>(data + M.t(n).offset);
     };
+    /* Matmul with the input as llama.cpp's CUDA path sees it in --q8 mode. */
+    auto proj = [&](const std::string &w, const float *bias, const h16 &in, uint16_t *out) {
+        if (!g_q8) {
+            ref_project(g, M.t(w), bias, in.data(), B, out);
+            return;
+        }
+        const int K = (int)M.t(w).dim0, N = (int)M.t(w).dim1;
+        std::vector<float> fin(in.size()), f((size_t)B * N);
+        for (size_t i = 0; i < in.size(); i++) {
+            fin[i] = gg_f16_to_f32(in[i]);
+        }
+        ref_q8_1(fin.data(), (int)fin.size());
+        ref_matmul_f(g, M.t(w), fin.data(), B, f.data());
+        for (int bb = 0; bb < B; bb++) {
+            for (int r = 0; r < N; r++) {
+                out[(size_t)bb * N + r] = gg_f32_to_f16(f[(size_t)bb * N + r] + (bias ? bias[r] : 0.0f));
+            }
+        }
+        (void)K;
+    };
     ref_embed(g, M.t("token_embd.weight"), ids, B, x.data());
     if (layer_x) {
         layer_x->clear();
@@ -423,9 +455,9 @@ static void ref_step(const Model &M, RefState &R, const uint32_t *ids, const uin
     for (int l = 0; l < M.layers; l++) {
         const std::string b = "blk." + std::to_string(l) + ".";
         ref_rmsnorm(x.data(), wfc(b + "attn_norm.weight"), M.eps, H, B, xn.data());
-        ref_project(g, M.t(b + "attn_q.weight"), wfc(b + "attn_q.bias"), xn.data(), B, q.data());
-        ref_project(g, M.t(b + "attn_k.weight"), wfc(b + "attn_k.bias"), xn.data(), B, k.data());
-        ref_project(g, M.t(b + "attn_v.weight"), wfc(b + "attn_v.bias"), xn.data(), B, v.data());
+        proj(b + "attn_q.weight", wfc(b + "attn_q.bias"), xn, q.data());
+        proj(b + "attn_k.weight", wfc(b + "attn_k.bias"), xn, k.data());
+        proj(b + "attn_v.weight", wfc(b + "attn_v.bias"), xn, v.data());
         ref_rope(M.rope, pos, M.nhq, M.hd, B, q.data());
         ref_rope(M.rope, pos, M.nhkv, M.hd, B, k.data());
         for (int i = 0; i < B; i++) {
@@ -433,13 +465,13 @@ static void ref_step(const Model &M, RefState &R, const uint32_t *ids, const uin
             memcpy(&R.V[l][(size_t)pos[i] * HV], &v[(size_t)i * HV], (size_t)HV * 2);
         }
         ref_gqa(q.data(), R.K[l].data(), R.V[l].data(), pos, M.nhq, M.nhkv, M.hd, B, a.data());
-        ref_project(g, M.t(b + "attn_output.weight"), nullptr, a.data(), B, p.data());
+        proj(b + "attn_output.weight", nullptr, a, p.data());
         ref_add(x.data(), p.data(), x.size(), x.data());
         ref_rmsnorm(x.data(), wfc(b + "ffn_norm.weight"), M.eps, H, B, xn.data());
-        ref_project(g, M.t(b + "ffn_gate.weight"), nullptr, xn.data(), B, gt.data());
-        ref_project(g, M.t(b + "ffn_up.weight"), nullptr, xn.data(), B, up.data());
+        proj(b + "ffn_gate.weight", nullptr, xn, gt.data());
+        proj(b + "ffn_up.weight", nullptr, xn, up.data());
         ref_swiglu(gt.data(), up.data(), gt.size(), s.data());
-        ref_project(g, M.t(b + "ffn_down.weight"), nullptr, s.data(), B, d.data());
+        proj(b + "ffn_down.weight", nullptr, s, d.data());
         ref_add(x.data(), d.data(), x.size(), x.data());
         if (layer_x) {
             layer_x->push_back(x);
@@ -447,7 +479,16 @@ static void ref_step(const Model &M, RefState &R, const uint32_t *ids, const uin
     }
     ref_rmsnorm(x.data(), wfc("output_norm.weight"), M.eps, H, B, xn.data());
     logits.resize(M.vocab);
-    ref_matmul(g, M.t("output.weight"), &xn[(size_t)(B - 1) * H], 1, logits.data());
+    if (g_q8) {
+        std::vector<float> fin(H);
+        for (int i = 0; i < H; i++) {
+            fin[i] = gg_f16_to_f32(xn[(size_t)(B - 1) * H + i]);
+        }
+        ref_q8_1(fin.data(), H);
+        ref_matmul_f(g, M.t("output.weight"), fin.data(), 1, logits.data());
+    } else {
+        ref_matmul(g, M.t("output.weight"), &xn[(size_t)(B - 1) * H], 1, logits.data());
+    }
 }
 
 /* ---- per-kernel checks: identical inputs, compare one op's output ---- */
@@ -900,9 +941,351 @@ static void set_step(Arena &A, const std::vector<uint32_t> &ids, uint32_t pos0)
     up(A.pos, pos);
 }
 
+/* ---- q8_1 checks: quantizers against ggml's rule, matmuls against a q8_1 reference ---- */
+
+/* q8_1 rows of width n on the host: q as FP16 integers, then n/32 FP32 scales. */
+static std::vector<uint16_t> q8_rows(const std::vector<float> &v, int B, int n)
+{
+    const size_t st = (size_t)n + (n >> 4);
+    std::vector<uint16_t> r((size_t)B * st, 0);
+    for (int b = 0; b < B; b++) {
+        for (int k = 0; k < n; k += 32) {
+            float amax = 0;
+            for (int i = 0; i < 32; i++) {
+                amax = fmaxf(amax, fabsf(v[(size_t)b * n + k + i]));
+            }
+            const float d = amax / 127.0f;
+            for (int i = 0; i < 32; i++) {
+                const float q = amax == 0.0f ? 0.0f : roundf(v[(size_t)b * n + k + i] / d);
+                r[(size_t)b * st + k + i] = gg_f32_to_f16(q);
+            }
+            const float d16 = gg_f16_to_f32(gg_f32_to_f16(d));
+            memcpy(&r[(size_t)b * st + n + (k >> 5) * 2], &d16, 4);
+        }
+    }
+    return r;
+}
+
+/* Compare a GPU q8_1 row block with the host's: scales within an FP16 ULP, q equal
+ * except where the FP32 value sat within rounding of a half step. */
+static void report_q8(const char *name, const std::vector<uint16_t> &got,
+                      const std::vector<uint16_t> &want, int B, int n)
+{
+    const size_t st = (size_t)n + (n >> 4);
+    size_t qdiff = 0, qbad = 0, dbad = 0;
+    for (int b = 0; b < B; b++) {
+        for (int i = 0; i < n; i++) {
+            const float g = gg_f16_to_f32(got[(size_t)b * st + i]);
+            const float w = gg_f16_to_f32(want[(size_t)b * st + i]);
+            qdiff += g != w;
+            qbad += fabsf(g - w) > 1.0f;
+        }
+        for (int k = 0; k < n / 32; k++) {
+            float g, w;
+            memcpy(&g, &got[(size_t)b * st + n + k * 2], 4);
+            memcpy(&w, &want[(size_t)b * st + n + k * 2], 4);
+            dbad += fabsf(g - w) > ldexpf(fabsf(w), -10);
+        }
+    }
+    const bool ok = qbad == 0 && dbad == 0 && qdiff * 1000 <= (size_t)B * n;
+    printf("  %-26s q differ %zu of %d (off by >1: %zu), scales off: %zu: %s\n", name, qdiff,
+           B * n, qbad, dbad, ok ? "PASS" : "FAIL");
+    if (!ok) {
+        g_fails++;
+    }
+}
+
+static void check_q8(const Model &M, Arena &A)
+{
+    printf("\nq8_1 checks (real weights):\n");
+    std::mt19937 rng(8);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    const int H = M.hidden;
+
+    /* Matmuls: x given as q8_1 rows, reference is the exact dot product of d*q. */
+    std::vector<std::string> names = {"blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.ffn_gate.weight",
+                                      "output.weight"};
+    for (int l = 0; l < M.layers; l++) {
+        const std::string n = "blk." + std::to_string(l) + ".ffn_down.weight";
+        if (M.t(n).type == GGML_Q6_K) {
+            names.push_back(n);
+            break;
+        }
+    }
+    for (const std::string &tn : names) {
+        const GgufTensor &t = M.t(tn);
+        const int K = (int)t.dim0, N = (int)t.dim1;
+        const bool q6 = t.type == GGML_Q6_K;
+        for (int B : {1, 5, 37, 64}) {
+            if (tn == "output.weight" && B > 1) {
+                continue;
+            }
+            std::vector<float> v((size_t)B * K);
+            for (float &f : v) {
+                f = nd(rng);
+            }
+            const std::vector<uint16_t> rows = q8_rows(v, B, K);
+            std::vector<float> deq((size_t)B * K);
+            const size_t st = (size_t)K + (K >> 4);
+            for (int b = 0; b < B; b++) {
+                for (int k = 0; k < K; k++) {
+                    float d;
+                    memcpy(&d, &rows[(size_t)b * st + K + (k >> 5) * 2], 4);
+                    deq[(size_t)b * K + k] = d * gg_f16_to_f32(rows[(size_t)b * st + k]);
+                }
+            }
+            std::vector<float> ref((size_t)B * N);
+            ref_matmul_f(M.g, t, deq.data(), B, ref.data());
+            double rms = 0;
+            for (float f : ref) {
+                rms += (double)f * f;
+            }
+            rms = sqrt(rms / ref.size());
+            half *dx;
+            float *dout;
+            CK(cudaMalloc(&dx, rows.size() * 2));
+            CK(cudaMalloc(&dout, ref.size() * 4));
+            CK(cudaMemcpy(dx, rows.data(), rows.size() * 2, cudaMemcpyHostToDevice));
+            const uint8_t *wp = A.w + t.offset;
+            const float *nb = nullptr;
+            void *f;
+            dim3 grid, block(32);
+            int flags = SLM_MM_XQ;
+            const char *kn;
+            if (B == 1) {
+                f = q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1;
+                const int nw = mm_nw(K, N);
+                flags |= nw << 8;
+                grid = dim3(mm_grid(N));
+                block = dim3(32, nw, 1);
+                kn = "b1";
+            } else if (B <= 8 || N <= 256) {
+                f = q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8;
+                flags |= SLM_MM_SPLIT_XT;
+                grid = dim3(mm_grid(N), (B + 7) >> 3, 1);
+                kn = "b8";
+            } else {
+                f = q6 ? (void *)slm_mm_q6k_hmma_bsq : (void *)slm_mm_q4k_hmma_bsq;
+                grid = dim3((N + 119) / 120);
+                block = dim3(32, 8, 1);
+                kn = "bsq";
+            }
+            void *params[] = {&dx, &wp, &dout, &nb, (void *)&K, (void *)&N, &B, &flags};
+            CK(cudaLaunchKernel(f, grid, block, params, 0, nullptr));
+            const std::vector<float> got = down(dout, ref.size());
+            double worst = 0;
+            for (size_t i = 0; i < ref.size(); i++) {
+                worst = std::max(worst, fabs((double)got[i] - ref[i]));
+            }
+            const bool ok = worst <= 1e-3 * rms;
+            printf("  %-26s %-4s q8 B=%-2d max_err %.2e (%.1e of rms), tol 1e-3: %s\n", tn.c_str(), kn,
+                   B, worst, worst / rms, ok ? "PASS" : "FAIL");
+            if (!ok) {
+                g_fails++;
+            }
+            CK(cudaFree(dx));
+            CK(cudaFree(dout));
+        }
+    }
+
+    /* RMSNorm into q8_1: the host computes the same FP32 values. */
+    {
+        const int B = 5;
+        h16 x((size_t)B * H);
+        for (auto &e : x) {
+            e = gg_f32_to_f16(3.0f * nd(rng));
+        }
+        const float *gamma =
+            reinterpret_cast<const float *>(M.g.data.data() + M.t("blk.0.attn_norm.weight").offset);
+        std::vector<float> v((size_t)B * H);
+        for (int b = 0; b < B; b++) {
+            float acc = 0;
+            for (int i = 0; i < H; i++) {
+                const float f = gg_f16_to_f32(x[(size_t)b * H + i]);
+                acc += f * f;
+            }
+            const float inv = 1.0f / sqrtf(acc / (float)H + M.eps);
+            for (int i = 0; i < H; i++) {
+                v[(size_t)b * H + i] = gg_f16_to_f32(x[(size_t)b * H + i]) * inv * gamma[i];
+            }
+        }
+        h_up(A.x, x);
+        const half *in = A.x;
+        const float *gp = wf(A, M.t("blk.0.attn_norm.weight"));
+        half *o = A.xn;
+        float eps = M.eps;
+        int n = H, bb = B;
+        void *params[] = {&in, &gp, &o, &n, &bb, &eps};
+        CK(cudaLaunchKernel((void *)slm_rmsnorm_q8, dim3(B), dim3(32, 8, 1), params, 0, nullptr));
+        report_q8("rmsnorm_q8 B=5", h_from(A.xn, (size_t)B * (H + H / 16)), q8_rows(v, B, H), B, H);
+    }
+    /* SwiGLU into q8_1. */
+    {
+        const int B = 2, n = M.ff, total = B * n;
+        h16 g(total), u(total);
+        for (int i = 0; i < total; i++) {
+            g[i] = gg_f32_to_f16(2.0f * nd(rng));
+            u[i] = gg_f32_to_f16(2.0f * nd(rng));
+        }
+        std::vector<float> v(total);
+        for (int i = 0; i < total; i++) {
+            const float gf = gg_f16_to_f32(g[i]);
+            v[i] = gf / (1.0f + expf(-gf)) * gg_f16_to_f32(u[i]);
+        }
+        h_up(A.g, g);
+        h_up(A.u, u);
+        const half *pg = A.g, *pu = A.u;
+        half *o = A.s;
+        int tt = total, nn = n;
+        void *params[] = {&pg, &pu, &o, &tt, &nn};
+        CK(cudaLaunchKernel((void *)slm_swiglu_q8, dim3((total + 255) / 256), dim3(256), params, 0, nullptr));
+        report_q8("swiglu_q8 B=2", h_from(A.s, (size_t)B * (n + n / 16)), q8_rows(v, B, n), B, n);
+    }
+    CK(cudaDeviceSynchronize());
+}
+
+/* ---- teacher forcing against llama.cpp CUDA ----
+ *
+ * The record comes from llama_ref_driver: the prompt, llama.cpp's greedy tokens,
+ * and its logits after the prompt and after each token. The harness prefills the
+ * same prompt in batches of 64, feeds llama.cpp's own tokens back one by one, and
+ * compares logits at every step; then it decodes greedily on its own and reports
+ * where its tokens first leave llama.cpp's. */
+
+static void run_teacher(const Model &M, Arena &A, const char *path, int chunk)
+{
+    auto rec = read_rec(path);
+    std::vector<uint32_t> ids(rec.at("prompt.ids").size() / 4), gen(rec.at("greedy.tokens").size() / 4);
+    memcpy(ids.data(), rec.at("prompt.ids").data(), ids.size() * 4);
+    memcpy(gen.data(), rec.at("greedy.tokens").data(), gen.size() * 4);
+    const auto &lb = rec.at("greedy.logits");
+    const int V = M.vocab;
+    const int steps = (int)(lb.size() / 4 / V);
+    const float *want = reinterpret_cast<const float *>(lb.data());
+    const int n = (int)ids.size(), N = (int)gen.size();
+    if (n + N + 1 > M.ctx) {
+        fprintf(stderr, "teacher: prompt %d + %d tokens exceeds --ctx %d\n", n, N, M.ctx);
+        exit(2);
+    }
+    printf("\nteacher forcing: %s, prompt %d tokens, %d llama.cpp tokens, %d logit rows\n", path, n, N,
+           steps);
+
+    std::map<int, Program> progs;
+    auto prog = [&](int B) -> Program & {
+        auto it = progs.find(B);
+        if (it == progs.end()) {
+            double inst;
+            build_program(progs[B], M, A, B);
+            progs[B].build_graph(&inst);
+            it = progs.find(B);
+        }
+        return it->second;
+    };
+    auto run = [&](const std::vector<uint32_t> &tok, uint32_t pos0) {
+        set_step(A, tok, pos0);
+        CK(cudaGraphLaunch(prog((int)tok.size()).exec, 0));
+        CK(cudaStreamSynchronize(0));
+        return down(A.logits, V);
+    };
+    auto prefill = [&]() {
+        std::vector<float> l;
+        for (int at = 0; at < n; at += chunk) {
+            const int len = std::min(chunk, n - at);
+            l = run(std::vector<uint32_t>(ids.begin() + at, ids.begin() + at + len), (uint32_t)at);
+        }
+        return l;
+    };
+    auto top2 = [&](const float *r, int &a, int &b) {
+        a = 0;
+        b = 1;
+        if (r[1] > r[0]) {
+            a = 1;
+            b = 0;
+        }
+        for (int i = 2; i < V; i++) {
+            if (r[i] > r[a]) {
+                b = a;
+                a = i;
+            } else if (r[i] > r[b]) {
+                b = i;
+            }
+        }
+    };
+
+    int agree = 0, shown = 0;
+    double worst = 0, rms = 0;
+    int worst_step = 0;
+    std::vector<double> gaps_at_miss;
+    std::vector<float> got = prefill();
+    for (int s = 0; s < steps; s++) {
+        if (s > 0) {
+            got = run({gen[s - 1]}, (uint32_t)(n + s - 1));
+        }
+        const float *w = want + (size_t)s * V;
+        double m = 0, sq = 0;
+        for (int i = 0; i < V; i++) {
+            const double e = fabs((double)got[i] - w[i]);
+            m = std::max(m, e);
+            sq += e * e;
+        }
+        rms += sq / V;
+        if (m > worst) {
+            worst = m;
+            worst_step = s;
+        }
+        int wa, wb, ga, gb;
+        top2(w, wa, wb);
+        top2(got.data(), ga, gb);
+        if (wa == ga) {
+            agree++;
+        } else {
+            gaps_at_miss.push_back(w[wa] - w[wb]);
+            if (shown++ < 12) {
+                printf("  step %3d: llama.cpp top %6d (%.3f) second %6d (%.3f), gap %.3f; ours top %6d"
+                       " (%.3f), ours on llama's top %.3f\n",
+                       s, wa, (double)w[wa], wb, (double)w[wb], (double)(w[wa] - w[wb]), ga,
+                       (double)got[ga], (double)got[wa]);
+            }
+        }
+    }
+    double mg = 0;
+    for (double gp : gaps_at_miss) {
+        mg = std::max(mg, gp);
+    }
+    printf("  top-1 agreement %d/%d (%.1f%%); largest llama.cpp gap at a disagreement %.3f\n", agree,
+           steps, 100.0 * agree / steps, mg);
+    printf("  logit difference: max %.4f (step %d), mean rms %.4f\n", worst, worst_step,
+           sqrt(rms / steps));
+
+    /* Free run: our own greedy tokens. */
+    got = prefill();
+    std::vector<uint32_t> ours;
+    int first = -1;
+    for (int s = 0; s < N; s++) {
+        const uint32_t t = (uint32_t)(std::max_element(got.begin(), got.end()) - got.begin());
+        ours.push_back(t);
+        if (first < 0 && t != gen[s]) {
+            first = s;
+        }
+        if (s + 1 < N) {
+            got = run({t}, (uint32_t)(n + s));
+        }
+    }
+    printf("  free-run greedy: first token different from llama.cpp at %d of %d\n", first, N);
+    printf("  ours:  ");
+    for (size_t i = 0; i < ours.size(); i++) {
+        printf("%s%u", i ? "," : "", ours[i]);
+    }
+    printf("\n  llama: ");
+    for (size_t i = 0; i < gen.size(); i++) {
+        printf("%s%u", i ? "," : "", gen[i]);
+    }
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
-    const char *path = nullptr, *golden = nullptr;
+    const char *path = nullptr, *golden = nullptr, *teacher = nullptr;
     bool do_check = true;
     int prefill = 63, decode = 32, ctx = 512;
     for (int i = 1; i < argc; i++) {
@@ -911,6 +1294,10 @@ int main(int argc, char **argv)
             g_simt = true;
         } else if (a == "--b64") {
             g_b64 = true;
+        } else if (a == "--q8") {
+            g_q8 = true;
+        } else if (a == "--teacher") {
+            teacher = argv[++i];
         } else if (a == "--no-check") {
             do_check = false;
         } else if (a == "--golden") {
@@ -933,7 +1320,8 @@ int main(int argc, char **argv)
     cudaDeviceProp prop;
     CK(cudaGetDeviceProperties(&prop, 0));
     printf("device %s, SMs %d, clock %d kHz\n", prop.name, prop.multiProcessorCount, prop.clockRate);
-    printf("matmul tier: %s\n", g_simt ? "SIMT" : "HMMA");
+    printf("matmul tier: %s, activations into matmuls: %s\n", g_simt ? "SIMT" : "HMMA",
+           g_q8 ? "q8_1 (as llama.cpp CUDA)" : "FP16");
 
     Model M;
     if (!gguf_read(path, M.g)) {
@@ -959,13 +1347,13 @@ int main(int argc, char **argv)
     const size_t nH = (size_t)Bmax * M.hidden, nF = (size_t)Bmax * M.ff;
     const size_t nV = (size_t)Bmax * M.nhkv * M.hd;
     for (half **p : {&A.x, &A.xn, &A.q, &A.a, &A.p, &A.d}) {
-        CK(cudaMalloc(p, nH * 2));
+        CK(cudaMalloc(p, nH * 2 * 2));
     }
     for (half **p : {&A.k, &A.v}) {
         CK(cudaMalloc(p, nV * 2));
     }
     for (half **p : {&A.g, &A.u, &A.s}) {
-        CK(cudaMalloc(p, nF * 2));
+        CK(cudaMalloc(p, nF * 2 * 2));
     }
     A.K.resize(M.layers);
     A.V.resize(M.layers);
@@ -981,8 +1369,16 @@ int main(int argc, char **argv)
     CK(cudaMalloc(&A.ids, (size_t)Bmax * 4));
     CK(cudaMalloc(&A.pos, (size_t)Bmax * 4));
 
-    if (do_check) {
+    if (do_check && !g_q8) {
         check_kernels(M, A);
+    }
+    if (do_check && g_q8) {
+        check_q8(M, A);
+    }
+    if (teacher) {
+        run_teacher(M, A, teacher, prefill > 0 ? 64 : 64);
+        printf("\n%s (%d failures)\n", g_fails ? "FAIL" : "PASS", g_fails);
+        return g_fails ? 1 : 0;
     }
 
     /* ---- mma issue rate ---- */
@@ -1168,7 +1564,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < p8.ops.size(); i++) {
             p8.run_op(i);
         }
-        report_logits("prefill", down(A.logits, M.vocab), rl, 0.1);
+        report_logits("prefill", down(A.logits, M.vocab), rl, g_q8 ? 0.5 : 0.1);
         /* Two decode steps from there. */
         uint32_t nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         for (int i = 0; i < 2; i++) {
@@ -1177,7 +1573,7 @@ int main(int argc, char **argv)
             set_step(A, {nx}, p);
             CK(cudaGraphLaunch(dec.exec, 0));
             CK(cudaStreamSynchronize(0));
-            report_logits("decode", down(A.logits, M.vocab), rl, 0.1);
+            report_logits("decode", down(A.logits, M.vocab), rl, g_q8 ? 0.5 : 0.1);
             nx = (uint32_t)(std::max_element(rl.begin(), rl.end()) - rl.begin());
         }
     }

@@ -22,6 +22,21 @@
  * warps, repeats the weight decode per tile; for small N, limited by serial warp
  * latency. */
 #define SLM_MM_SPLIT_XT 4
+/* b1, b8 and bs: x holds ggml q8_1 values, as written by slm_rmsnorm_q8,
+ * slm_swiglu_q8 and slm_gqa_q8. Each row is K FP16 integers q in -127..127, then
+ * K/32 FP32 scales d (each an FP16 value), so the row stride is K + K/16 halves
+ * and the value is d * q. llama.cpp's CUDA path quantizes every matmul input this
+ * way; matching it keeps greedy decoding on the reference's path. */
+#define SLM_MM_XQ 8
+SLM_INL size_t slm_xstride(int K, int flags)
+{
+    return (flags & SLM_MM_XQ) ? (size_t)K + (K >> 4) : (size_t)K;
+}
+/* Scale of 32-element block blk of an XQ row; 1 when x is plain FP16. */
+SLM_INL float slm_xq_d(const half *row, int K, int flags, int blk)
+{
+    return (flags & SLM_MM_XQ) ? reinterpret_cast<const float *>(row + K)[blk] : 1.0f;
+}
 #define SLM_MM_BSTART(flags) (((flags) >> 8) & 0xFF)
 #define SLM_MM_BCOUNT(flags) (((flags) >> 16) & 0xFF)
 
