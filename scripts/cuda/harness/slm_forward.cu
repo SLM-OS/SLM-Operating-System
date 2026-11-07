@@ -26,6 +26,7 @@
 
 #include "../slm/slm_mm_q4k.cu"
 #include "../slm/slm_mm_q6k.cu"
+#include "../slm/slm_mm_b1.cu"
 #include "../slm/slm_ops.cu"
 #include "gguf_lite.h"
 #include "slm_cpu_ref.h"
@@ -156,6 +157,14 @@ static bool g_simt = false;
 
 static int mm_grid(int N) { return (N + Q4K_TILE_ROWS - 1) / Q4K_TILE_ROWS; }
 
+/* Warps per CTA for a B=1 matmul: enough tiles to fill the SMs, never more
+ * warps than weight blocks. */
+static int mm_nw(int K, int N)
+{
+    const int want = (200 + mm_grid(N) - 1) / mm_grid(N);
+    return std::max(1, std::min(std::min(8, K / 256), want));
+}
+
 static void add_mm(Program &P, const Model &M, const Arena &A, const std::string &name,
                    const std::string &cls, const GgufTensor &t, const float *bias, const half *x,
                    void *out, int B, int flags)
@@ -168,9 +177,13 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
     }
     void *f;
     dim3 grid(mm_grid(N));
+    int nw = 1;
     if (g_simt) {
         f = q6 ? (void *)slm_mm_q6k_simt : (void *)slm_mm_q4k_simt;
         grid = dim3(N, B, 1);
+    } else if (B == 1) {
+        f = q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1;
+        nw = mm_nw(K, N);
     } else if (B <= 8) {
         f = q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8;
     } else {
@@ -178,6 +191,8 @@ static void add_mm(Program &P, const Model &M, const Arena &A, const std::string
     }
     P.add_op(name, cls, f, grid);
     Op &o = P.ops.back();
+    o.block = dim3(32, nw, 1);
+    flags |= nw << 8;
     const int xt = (B + 7) >> 3;
     const double nb = K / 256.0;
     /* Q4_K: 4 passes (2 chunks x 2 nibbles) per j, 4 j per block.
@@ -481,6 +496,10 @@ static void check_kernels(const Model &M, Arena &A)
 
             std::vector<std::pair<const char *, void *>> variants;
             const bool q6 = t.type == GGML_Q6_K;
+            if (B == 1) {
+                variants.push_back({"hmma_b1", q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1});
+                variants.push_back({"hmma_b1w", q6 ? (void *)slm_mm_q6k_hmma_b1 : (void *)slm_mm_q4k_hmma_b1});
+            }
             if (B <= 8) {
                 variants.push_back({"hmma_b8", q6 ? (void *)slm_mm_q6k_hmma_b8 : (void *)slm_mm_q4k_hmma_b8});
             }
@@ -491,10 +510,15 @@ static void check_kernels(const Model &M, Arena &A)
             for (auto &var : variants) {
                 const bool simt = !strcmp(var.first, "simt");
                 const dim3 grid = simt ? dim3(N, B, 1) : dim3(mm_grid(N));
-                int flags = 0;
+                const bool wide = !strcmp(var.first, "hmma_b1w");
+                const int nw = wide ? std::max(2, mm_nw(K, N)) : 1;
+                if (wide && K / 256 < 2) {
+                    continue;
+                }
+                int flags = wide ? nw << 8 : 0;
                 const uint8_t *wp = A.w + t.offset;
                 void *params[] = {&dx, &wp, &dout, &bias_none, (void *)&K, (void *)&N, &B, &flags};
-                CK(cudaLaunchKernel(var.second, grid, dim3(32), params, 0, nullptr));
+                CK(cudaLaunchKernel(var.second, grid, dim3(32, nw, 1), params, 0, nullptr));
                 const std::vector<float> got = down(dout, ref.size());
                 double worst = 0;
                 for (size_t i = 0; i < ref.size(); i++) {
@@ -983,24 +1007,41 @@ int main(int argc, char **argv)
         }
     }
 
-    /* ---- llama.cpp golden, tiny model ---- */
+    /* ---- llama.cpp golden, tiny model ----
+     * greedy.logits row s holds the logits after token s of prompt + generated,
+     * so step one token at a time. llama.cpp quantizes activations to Q8_K and
+     * the GPU does not; ref_variants shows that accounts for the difference (1.40
+     * for exact dot + FP16 on the CPU). A tolerance of 1.5 reflects that measured
+     * gap, and the top token must match at every step. */
     if (golden) {
         auto rec = read_rec(golden);
         const auto &idb = rec.at("prompt.ids");
+        const auto &tb = rec.at("greedy.tokens");
         const auto &lgb = rec.at("greedy.logits");
-        std::vector<uint32_t> ids(idb.size() / 4);
-        memcpy(ids.data(), idb.data(), idb.size());
-        std::vector<float> wantl(M.vocab);
-        memcpy(wantl.data(), lgb.data(), (size_t)M.vocab * 4);
-        Program pg;
-        build_program(pg, M, A, (int)ids.size());
-        set_step(A, ids, 0);
-        for (size_t i = 0; i < pg.ops.size(); i++) {
-            pg.run_op(i);
+        std::vector<uint32_t> seq((idb.size() + tb.size()) / 4);
+        memcpy(seq.data(), idb.data(), idb.size());
+        memcpy(seq.data() + idb.size() / 4, tb.data(), tb.size());
+        const int steps = (int)(lgb.size() / 4 / M.vocab);
+        double worst = 0;
+        int top = 0;
+        for (int st = 0; st < steps; st++) {
+            set_step(A, {seq[st]}, (uint32_t)st);
+            CK(cudaGraphLaunch(dec.exec, 0));
+            CK(cudaStreamSynchronize(0));
+            const std::vector<float> got = down(A.logits, M.vocab);
+            const float *w = reinterpret_cast<const float *>(lgb.data()) + (size_t)st * M.vocab;
+            for (int i = 0; i < M.vocab; i++) {
+                worst = std::max(worst, fabs((double)got[i] - w[i]));
+            }
+            top += std::max_element(got.begin(), got.end()) - got.begin() ==
+                   std::max_element(w, w + M.vocab) - w;
         }
-        /* Q8_K and F32 hidden state in llama.cpp: tolerance 1.5 as in the
-         * greedy margin in scripts/tools/slm-gen-goldens.py. */
-        report_logits("llama.cpp greedy step0", down(A.logits, M.vocab), wantl, 1.5);
+        const bool ok = worst <= 1.5 && top == steps;
+        printf("  llama.cpp greedy, %d steps: max logit error %.4f, tol 1.50; top-1 same %d/%d: %s\n",
+               steps, worst, top, steps, ok ? "PASS" : "FAIL");
+        if (!ok) {
+            g_fails++;
+        }
     }
 
     printf("\n%s (%d failures)\n", g_fails ? "FAIL" : "PASS", g_fails);

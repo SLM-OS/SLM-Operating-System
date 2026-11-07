@@ -37,6 +37,12 @@ OPS = {
     "slm_mm_q6k_simt": ("matmul", "SIMT", "Q6_K", "N,B,1", MM_DOC + ". Any B."),
     "slm_mm_q6k_hmma_b8": ("matmul", "HMMA", "Q6_K", "ceil(N/15),1,1", MM_DOC + ". B 1..8."),
     "slm_mm_q6k_hmma_b64": ("matmul", "HMMA", "Q6_K", "ceil(N/15),1,1", MM_DOC + ". B 1..64."),
+    "slm_mm_q4k_hmma_b1": ("matmul", "HMMA", "Q4_K", "ceil(N/15),1,1",
+                           MM_DOC + ". B must be 1; flags bits 8..15 = nw, block (32,nw,1). "
+                           "Prefer this one for B=1."),
+    "slm_mm_q6k_hmma_b1": ("matmul", "HMMA", "Q6_K", "ceil(N/15),1,1",
+                           MM_DOC + ". B must be 1; flags bits 8..15 = nw, block (32,nw,1). "
+                           "Prefer this one for B=1."),
     "slm_embed_q4k": ("embed", "SIMT", "Q4_K", "B,1,1", "out[B,K] = table[ids[b]], FP16."),
     "slm_embed_q6k": ("embed", "SIMT", "Q6_K", "B,1,1", "out[B,K] = table[ids[b]], FP16."),
     "slm_rmsnorm": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1", "x and out FP16 [B,n], n % 32 == 0."),
@@ -58,7 +64,13 @@ OPS = {
 }
 
 # Kernels whose block is not (32,1,1).
-BLOCKS = {"slm_gqa_w8": [32, 8, 1], "slm_rmsnorm_w8": [32, 8, 1]}
+BLOCKS = {
+    "slm_gqa_w8": [32, 8, 1],
+    "slm_rmsnorm_w8": [32, 8, 1],
+    # nw is chosen per shape at launch, 1 is the minimum.
+    "slm_mm_q4k_hmma_b1": [32, "nw", 1],
+    "slm_mm_q6k_hmma_b1": [32, "nw", 1],
+}
 
 # Parameter names per kernel, checked against the count in the ELF.
 ARGS = {
