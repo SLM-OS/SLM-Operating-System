@@ -59,6 +59,7 @@ extern void msg_router_unsubscribe_all(int component_idx);
 extern int msg_router_publish_nowait(const uint8_t *topic_name, const uint8_t *data);
 
 extern void slm_runner_test_set_publish_timeout(uint32_t ms);
+extern void (*slm_runner_test_log_hook)(const char *line, bool ask_printing);
 extern uint32_t slm_runner_test_publish_bytes(const uint8_t *bytes, size_t len);
 
 /* ============================================================================
@@ -514,6 +515,7 @@ static void bus_end(void)
     }
     rust_slm_test_script(NULL, 0, 0);
     slm_runner_test_set_publish_timeout(0);
+    slm_runner_test_log_hook = NULL;
     task_set_priority(task_current(), bus_saved_priority);
     shell_session_unbind(task_current());
     bus_sess->io = NULL;
@@ -623,6 +625,57 @@ static void test_runner_runs_at_the_shells_priority(void)
     component_info_t info;
     TEST_ASSERT_EQUAL_INT(0, component_get_info((uint32_t)st.component_idx, &info));
     TEST_ASSERT_EQUAL_UINT32(TASK_PRIORITY_IDLE, info.priority);
+    bus_end();
+}
+
+/* The runner's own UART line waits for `slm ask` to finish printing the
+ * reply: on hardware it landed inside the /slm/done line and changed the
+ * field values on screen. Here the client is slowed down so the runner's
+ * line would go out first without the wait. */
+static volatile uint32_t log_lines;
+static volatile uint32_t log_lines_during_ask;
+static char log_last[80];
+
+static void record_log(const char *line, bool ask_printing)
+{
+    log_lines = log_lines + 1u;
+    if (ask_printing) {
+        log_lines_during_ask = log_lines_during_ask + 1u;
+    }
+    strncpy(log_last, line, sizeof(log_last) - 1u);
+}
+
+/* A slow console, as a UART is: the runner gets the CPU while the client
+ * prints. */
+static void slow_write(struct shell_io *io, const char *buf, size_t len)
+{
+    bcap_write(io, buf, len);
+    task_sleep_ms(2);
+}
+
+static void test_runner_log_waits_for_ask_output(void)
+{
+    bus_begin();
+    SCRIPT(0, 'a', 'b', 'c', 'd', CLI_IM_END);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256"));
+    log_lines = 0;
+    log_lines_during_ask = 0;
+    log_last[0] = '\0';
+    slm_runner_test_log_hook = record_log;
+    bus_io.write = slow_write;
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
+    for (uint32_t i = 0; i < 2000u && log_lines == 0; i++) {
+        task_sleep_ms(1);
+    }
+    slm_runner_test_log_hook = NULL;
+    bus_io.write = bcap_write;
+
+    TEST_ASSERT_EQUAL_UINT32(1u, log_lines);
+    TEST_ASSERT_EQUAL_UINT32(0u, log_lines_during_ask);
+    TEST_ASSERT_NOT_NULL(strstr(log_last, "[slm-runner] prompt #1 rc=0 tokens=4"));
+    ASSERT_OUTPUT("msgs=4 dropped=0");
     bus_end();
 }
 
@@ -1268,6 +1321,7 @@ int test_suite_slm_runner(void)
     /* The bus path, with a real runner task. */
     RUN_BUS_TEST(test_ask_prints_every_token_then_stats);
     RUN_BUS_TEST(test_runner_runs_at_the_shells_priority);
+    RUN_BUS_TEST(test_runner_log_waits_for_ask_output);
     RUN_BUS_TEST(test_slow_reader_gets_every_token_in_order);
     RUN_BUS_TEST(test_dead_subscriber_doesnt_wedge_a_live_client);
     RUN_BUS_TEST(test_long_prompt_arrives_whole);

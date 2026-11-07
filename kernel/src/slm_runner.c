@@ -428,6 +428,39 @@ int slm_runner_handle_prompt(uint32_t session_id,
                                  tokens_emitted_out);
 }
 
+/* Set while `slm ask` runs: it owns its console until it has printed the
+ * whole reply. */
+static uint32_t g_ask_claimed;
+
+/* How long the runner's log line waits for an `slm ask` to finish printing. */
+#define SLM_RUNNER_LOG_WAIT_MS 2000u
+
+/* Test hook: sees each runner log line and whether `slm ask` was still
+ * printing when it went out. */
+void (*slm_runner_test_log_hook)(const char *line, bool ask_printing);
+
+/*
+ * The runner's per-prompt UART line. It goes out after /slm/done, and only
+ * once a `slm ask` has printed that reply: printed any earlier, it lands in
+ * the middle of the client's output on a shared console and garbles the
+ * /slm/done fields there. The wait is bounded, so a client that hangs can't
+ * hold the runner.
+ */
+static void slm_runner_log(const char *line)
+{
+    uint64_t start = timer_get_count();
+    uint64_t limit = (timer_get_frequency() * SLM_RUNNER_LOG_WAIT_MS) / 1000u;
+    while (__atomic_load_n(&g_ask_claimed, __ATOMIC_ACQUIRE) &&
+           timer_get_count() - start < limit) {
+        task_sleep_ms(1);
+    }
+    bool printing = __atomic_load_n(&g_ask_claimed, __ATOMIC_ACQUIRE) != 0;
+    if (slm_runner_test_log_hook) {
+        slm_runner_test_log_hook(line, printing);
+    }
+    uart_puts(line);
+}
+
 /* A prompt off the bus: pick the model, start a fresh conversation, run it. */
 static void slm_runner_serve_prompt(int comp_idx, const char *prompt, size_t prompt_len)
 {
@@ -442,12 +475,14 @@ static void slm_runner_serve_prompt(int comp_idx, const char *prompt, size_t pro
         char done[128];
         g_runner.prompts = g_runner.prompts + 1u;
         __atomic_store_n(&g_runner.busy, 0u, __ATOMIC_RELEASE);
-        uart_printf("[slm-runner] prompt refused: %s\r\n", err);
         uart_snprintf(done, sizeof(done),
                       "rc=-1 err=%s stop=none tokens_in=0 tokens_out=0 msgs=0 "
                       "dropped=0 prompts=%u",
                       err, (unsigned)g_runner.prompts);
         slm_runner_publish_tracked(&ctx, SLM_TOPIC_DONE, done);
+        char line[80];
+        uart_snprintf(line, sizeof(line), "[slm-runner] prompt refused: %s\r\n", err);
+        slm_runner_log(line);
         return;
     }
 
@@ -458,8 +493,10 @@ static void slm_runner_serve_prompt(int comp_idx, const char *prompt, size_t pro
     uint32_t tokens = 0;
     int rc = slm_runner_run_prompt((uint32_t)g_runner.session, prompt, prompt_len,
                                    comp_idx, &tokens);
-    uart_printf("[slm-runner] prompt #%u rc=%d tokens=%u\r\n",
-                (unsigned)g_runner.prompts, rc, tokens);
+    char line[80];
+    uart_snprintf(line, sizeof(line), "[slm-runner] prompt #%u rc=%d tokens=%u\r\n",
+                  (unsigned)g_runner.prompts, rc, tokens);
+    slm_runner_log(line);
 }
 
 /* ============================================================================
@@ -619,8 +656,6 @@ void slm_runner_get_status(slm_runner_status_t *out)
 /* ============================================================================
  * `slm ask`: a client that only uses the bus
  * ============================================================================ */
-
-static uint32_t g_ask_claimed;
 
 /* Value of `key` (with its =) in a /slm/done line, or `fallback`. */
 static long slm_done_field(const char *done, const char *key, long fallback)

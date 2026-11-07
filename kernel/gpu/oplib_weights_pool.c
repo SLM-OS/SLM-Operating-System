@@ -141,7 +141,7 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
         h->shader_size < OPLIB_POOL_MIN_BYTES) {
         /* No helper-staged bounce buffer means we have nowhere to
          * land CPU bytes before the CE picks them up. Return -1 so
-         * the Rust caller falls back to "GPU staging unavailable". */
+         * the Rust caller reports that in its `slm load` line. */
         return -1;
     }
 

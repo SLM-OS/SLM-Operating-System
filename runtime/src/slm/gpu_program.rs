@@ -802,6 +802,13 @@ fn err_message(rc: i32) -> &'static str {
     }
 }
 
+/// Whether a GPU program can be built on this boot: the cold channel of a
+/// UEFI-direct boot. False after kexec, on QEMU and on Pi 5.
+pub fn backend_available() -> bool {
+    // SAFETY: plain FFI query with no arguments.
+    unsafe { slm_prog_available() != 0 }
+}
+
 impl GpuProgram {
     /// Allocate the arena, map the weights, build every launch. On `Err`
     /// nothing is left behind.

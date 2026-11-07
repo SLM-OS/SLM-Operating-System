@@ -1034,25 +1034,35 @@ fn populate_gpu_tensor_map(
         }
     }
 
+    let msg = gpu_load_message(
+        staged,
+        failed,
+        crate::slm::gpu_program::backend_available(),
+    );
+    if let Some(m) = msg {
+        // SAFETY: every message is a NUL-terminated static string.
+        unsafe { kernel_ffi::uart_puts(m.as_ptr()) };
+    }
+}
+
+/// What `slm load` says about the GPU. The per-op weights pool and the GPU
+/// program are separate paths: on a UEFI-direct boot the pool doesn't exist,
+/// and the GPU program is built when a session opens; after kexec the pool
+/// is what serves per-op dispatch. Only say "CPU" when neither can run.
+fn gpu_load_message(staged: usize, failed: usize, program: bool) -> Option<&'static [u8]> {
+    if program {
+        return Some(b"[slm] GPU: the GPU program is built at `slm launch` (--gpu auto|on); no per-op weight staging on this boot\n\0");
+    }
+    if staged > 0 && failed == 0 {
+        return Some(b"[slm] GPU staging: every tensor staged in the weights pool for per-op dispatch\n\0");
+    }
     if staged > 0 {
-        unsafe {
-            kernel_ffi::uart_puts(
-                b"[slm] GPU staging: some tensors landed in the pool\n\0"
-                    .as_ptr(),
-            );
-        }
+        return Some(b"[slm] GPU staging: some tensors staged in the weights pool for per-op dispatch; the rest run on the CPU\n\0");
     }
-    if failed > 0 && staged == 0 {
-        /* All tensors failed — likely no pool available. Emit a
-         * single hint so the operator knows GPU staging is inert
-         * (vs. silently passing). */
-        unsafe {
-            kernel_ffi::uart_puts(
-                b"[slm] GPU staging unavailable; forward path stays on CPU\n\0"
-                    .as_ptr(),
-            );
-        }
+    if failed > 0 {
+        return Some(b"[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU\n\0");
     }
+    None
 }
 
 /// W3: byte range for a tensor inside the owned weight buffer,
@@ -1333,6 +1343,53 @@ fn itoa_simple(n: usize) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod gpu_load_message_tests {
+    use super::gpu_load_message;
+
+    fn text(m: Option<&'static [u8]>) -> &'static str {
+        core::str::from_utf8(m.expect("a message")).unwrap()
+    }
+
+    /// UEFI-direct boot: the pool is absent (every stage fails) but the GPU
+    /// program runs. The old message said "stays on CPU" here.
+    #[test]
+    fn cold_channel_says_gpu_program_not_cpu() {
+        let m = text(gpu_load_message(0, 300, true));
+        assert!(m.contains("GPU program is built at `slm launch`"), "{m}");
+        assert!(!m.contains("CPU"), "{m}");
+    }
+
+    /// kexec: the per-op pool's status, whatever it is.
+    #[test]
+    fn kexec_reports_per_op_staging() {
+        assert!(text(gpu_load_message(300, 0, false)).contains("every tensor staged"));
+        assert!(text(gpu_load_message(10, 290, false)).contains("some tensors staged"));
+        let none = text(gpu_load_message(0, 300, false));
+        assert!(none.contains("no weights pool and no GPU program"), "{none}");
+        assert!(none.contains("stays on CPU"));
+    }
+
+    #[test]
+    fn nothing_to_stage_says_nothing() {
+        assert!(gpu_load_message(0, 0, false).is_none());
+    }
+
+    #[test]
+    fn every_message_is_nul_terminated() {
+        for m in [
+            gpu_load_message(0, 1, true),
+            gpu_load_message(1, 0, false),
+            gpu_load_message(1, 1, false),
+            gpu_load_message(0, 1, false),
+        ] {
+            let m = m.unwrap();
+            assert_eq!(m.last(), Some(&0u8));
+            assert_eq!(m.iter().filter(|&&b| b == 0).count(), 1);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
