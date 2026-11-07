@@ -1599,19 +1599,25 @@ static int slm_gpu_opts(int argc, char *argv[])
         return -1;
     }
     uint32_t barrier;
-    if (strcmp(argv[3], "wfi-flush") == 0) barrier = 0;
-    else if (strcmp(argv[3], "flush") == 0) barrier = 1;
-    else if (strcmp(argv[3], "wfi") == 0) barrier = 2;
-    else {
+    if (strcmp(argv[3], "wfi-flush") == 0) {
+        barrier = 0;
+    } else if (strcmp(argv[3], "flush") == 0) {
+        barrier = 1;
+    } else if (strcmp(argv[3], "wfi") == 0) {
+        barrier = 2;
+    } else {
         shell_printf("slm gpu opts: unknown barrier '%s'\r\n", argv[3]);
         return -1;
     }
     uint32_t flags = 0;
     for (int i = 4; i < argc; i++) {
-        if (strcmp(argv[i], "lean") == 0) flags |= SLM_PROG_FLAG_LEAN_QMD;
-        else if (strcmp(argv[i], "profile") == 0) flags |= SLM_PROG_FLAG_PROFILE;
-        else if (strcmp(argv[i], "simt") == 0) flags |= SLM_PROG_FLAG_SIMT;
-        else {
+        if (strcmp(argv[i], "lean") == 0) {
+            flags |= SLM_PROG_FLAG_LEAN_QMD;
+        } else if (strcmp(argv[i], "profile") == 0) {
+            flags |= SLM_PROG_FLAG_PROFILE;
+        } else if (strcmp(argv[i], "simt") == 0) {
+            flags |= SLM_PROG_FLAG_SIMT;
+        } else {
             shell_printf("slm gpu opts: unknown option '%s'\r\n", argv[i]);
             return -1;
         }
