@@ -738,6 +738,29 @@ static void test_slm_stats_formats_every_section(void)
     slm_prompt_teardown();
 }
 
+/* GPU time is split at the first token, so the decode figure can be read
+ * against the decode wall (it once included the prefill step and exceeded it). */
+static void test_slm_stats_gpu_busy_splits_prefill(void)
+{
+    SLM_PROMPT_SETUP();
+    SlmTelemetryC t;
+    memset(&t, 0, sizeof(t));
+    t.decode_ns = 1210000000ull;
+    t.gpu_decode_steps = 62;
+    t.gpu_decode_ns = 1200010000ull;
+    t.gpu_prefill_steps = 1;
+    t.gpu_prefill_ns = 28680000ull;
+    t.gpu_last_ns = 20290000ull;
+    t.gpu_evict_us = 63u * 52u;
+    cap_clear();
+    slm_stats_print_gpu_busy(&t);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf,
+        "gpu busy : decode 1200.01 ms over 62 steps (decode wall 1210 ms), "
+        "prefill 28.68 ms over 1 steps"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "last step 20.29 ms; evict 52 us per step"));
+    slm_prompt_teardown();
+}
+
 /* A figure read in a second session during a prompt is live: it advances
  * between two reads, and neither a plain read nor --follow stops the prompt. */
 static volatile uint64_t live_first;
@@ -903,6 +926,7 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_stats_no_session);
     RUN_TEST(test_slm_stats_before_any_prompt);
     RUN_TEST(test_slm_stats_formats_every_section);
+    RUN_TEST(test_slm_stats_gpu_busy_splits_prefill);
     RUN_TEST(test_slm_stats_live_from_second_session);
     RUN_TEST(test_slm_stats_disabled_cost_is_not_measurable);
     RUN_TEST(test_slm_stop_idle_session_says_so);

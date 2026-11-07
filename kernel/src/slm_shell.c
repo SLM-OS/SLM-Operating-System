@@ -1359,6 +1359,24 @@ static void slm_stats_tensor_core(const SlmTelemetryC *t)
     }
 }
 
+/* GPU time this prompt, split at the first token: prefill time is part of
+ * the TTFT, decode time part of the decode wall, so neither exceeds its wall. */
+void slm_stats_print_gpu_busy(const SlmTelemetryC *t)
+{
+    uint64_t steps = t->gpu_prefill_steps + t->gpu_decode_steps;
+    shell_puts("  gpu busy : decode ");
+    slm_print_ms(t->gpu_decode_ns);
+    shell_printf(" over %llu steps (decode wall %lu ms), prefill ",
+                 (unsigned long long)t->gpu_decode_steps,
+                 (unsigned long)(t->decode_ns / 1000000u));
+    slm_print_ms(t->gpu_prefill_ns);
+    shell_printf(" over %llu steps\r\n", (unsigned long long)t->gpu_prefill_steps);
+    shell_puts("             last step ");
+    slm_print_ms(t->gpu_last_ns);
+    shell_printf("; evict %llu us per step\r\n",
+                 (unsigned long long)(steps ? t->gpu_evict_us / steps : 0u));
+}
+
 static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_hz)
 {
     shell_printf("  clocks   : EMC %llu MHz, GPC %llu MHz\r\n",
@@ -1376,12 +1394,7 @@ static void slm_stats_gpu(const SlmTelemetryC *t, uint64_t emc_hz, uint64_t gpc_
         shell_printf("  dram est : %llu MB weights + %llu MB KV per token (plan, before L2)\r\n",
                      (unsigned long long)(t->weight_bytes >> 20),
                      (unsigned long long)(t->kv_read_bytes >> 20));
-        shell_puts("  gpu busy : ");
-        slm_print_ms(t->gpu_busy_ns);
-        shell_printf(" over %llu steps this prompt; last step ", (unsigned long long)t->gpu_steps);
-        slm_print_ms(t->gpu_last_ns);
-        shell_printf("; evict %llu us per step\r\n",
-                     (unsigned long long)(t->gpu_steps ? t->gpu_evict_us / t->gpu_steps : 0u));
+        slm_stats_print_gpu_busy(t);
     } else {
         shell_puts("  gpu busy : n/a (not on a GPU program)\r\n");
     }

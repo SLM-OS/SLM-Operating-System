@@ -450,7 +450,7 @@ aggregated across sessions for `slm status`.
 | **Cache miss / eviction events** | inherits from registry counters | `slm status` |
 | **Per-op latency breakdown** (embed / rmsnorm / matmul-attn / rope / gqa / matmul-mlp / swiglu / add / lm_head) | GPU path: `--profile` selects a pushbuffer with a semaphore timestamp at each op-class boundary. CPU path: `--profile` enables a timer per class. | `slm stats --profile` |
 | **CPU cycle accounting** | inherited per-task `task_cycles_on_cpu` | `top`, `bench smp` |
-| **GPU busy time** (Path A/B) | start and end semaphore timestamps of each program step (the GPU's own timer, no MMIO) | `slm stats --gpu` |
+| **GPU busy time** (Path A/B) | start and end semaphore timestamps of each program step (the GPU's own timer, no MMIO); split at the first token into prefill (inside TTFT) and decode (inside the decode wall) | `slm stats --gpu` |
 | **Launches per token, DRAM bytes per token** | the session's plan; DRAM is an estimate from the bytes the kernels name, before the L2 | `slm stats --gpu` |
 | **Tensor-core utilization** | Per-op tier from the plan, and two derived measures. No hardware counter is read: see below. | `slm stats --gpu` |
 | **Power proxy** | BPMP temperatures (`thermal`'s zones). Power itself prints `n/a`: no rail sensor is read. | `slm stats --power` (best-effort) |

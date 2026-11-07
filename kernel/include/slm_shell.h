@@ -23,4 +23,8 @@
  */
 int cmd_slm(int argc, char **argv);
 
+/* `slm stats --gpu`'s GPU-time lines, for tests. */
+#include "slm_ffi.h"
+void slm_stats_print_gpu_busy(const SlmTelemetryC *t);
+
 #endif /* SLM_SHELL_H */
