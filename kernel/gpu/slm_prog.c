@@ -269,6 +269,7 @@ struct prog_shape {
 struct prog_session {
     bool open;
     bool dead;
+    bool close_pending;     /* closed while the lock was held elsewhere */
     const struct slm_prog_backend *be;
     struct ga10b_dma data;
     struct ga10b_dma control;
@@ -307,6 +308,65 @@ static struct prog_session g_sessions[SLM_PROG_MAX_SESSIONS];
 static struct prog_wmap g_wmaps[WMAP_MAX];
 static struct prog_va_range g_va_free[VA_FREE_MAX];
 static const struct slm_prog_backend *g_backend_override;
+static uint32_t g_leaked_sessions;
+
+/* ---- Lock ----
+ *
+ * One lock covers the tables above, the shared GPU VM's page tables (as far
+ * as this file writes them) and the one program in flight: run_step holds
+ * it from submit to the end of its wait, so the in-flight flag in slm_ffi.c
+ * always belongs to the step that set it (the shell and slm-runner each
+ * have a session) and slm_gpu_prog_finished can only clear its own.
+ *
+ * Not a spinlock: the holder waits for the GPU with IRQs on and yields, and
+ * may be preempted. A waiter yields too (be->relax), never spins with IRQs
+ * masked (#1093): with IRQs off it only tries once. A wait is bounded at
+ * one step timeout plus a second, which no healthy holder comes near; past
+ * that the caller gets SLM_PROG_ERR_BUSY. slm_prog_close can't fail, so a
+ * close that can't take the lock marks the session and the holder frees it
+ * on unlock. */
+static uint32_t g_lock;
+
+#define PROG_LOCK_WAIT_US (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u)
+
+static bool lock_try(void)
+{
+    return __atomic_exchange_n(&g_lock, 1u, __ATOMIC_ACQUIRE) == 0u;
+}
+
+static int prog_lock(const struct slm_prog_backend *be)
+{
+    if (lock_try()) return 0;
+    if (!be || (be->irqs_enabled && !be->irqs_enabled())) return SLM_PROG_ERR_BUSY;
+    uint64_t t0 = be->now_us();
+    for (;;) {
+        be->relax();
+        if (lock_try()) return 0;
+        if (be->now_us() - t0 >= PROG_LOCK_WAIT_US) return SLM_PROG_ERR_BUSY;
+    }
+}
+
+static void session_free(struct prog_session *s);
+
+static void prog_unlock(void)
+{
+    for (;;) {
+        for (unsigned i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
+            struct prog_session *s = &g_sessions[i];
+            if (s->open && __atomic_load_n(&s->close_pending, __ATOMIC_ACQUIRE)) {
+                session_free(s);
+            }
+        }
+        __atomic_store_n(&g_lock, 0u, __ATOMIC_RELEASE);
+        /* A close that failed to take the lock after the scan above: take it
+         * back and free that session, or leave it to whoever has it now. */
+        bool pending = false;
+        for (unsigned i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
+            if (__atomic_load_n(&g_sessions[i].close_pending, __ATOMIC_ACQUIRE)) pending = true;
+        }
+        if (!pending || !lock_try()) return;
+    }
+}
 
 static const struct slm_prog_backend *jetson_backend(void);
 static const char *platform_reason(void);
@@ -319,6 +379,8 @@ static const struct slm_prog_backend *backend(void)
 void slm_prog_backend_set(const struct slm_prog_backend *b)
 {
     g_backend_override = b;
+    g_lock = 0u;
+    g_leaked_sessions = 0u;
     /* Tests run against several fake VMs: forget what the last one held. */
     memset(g_wmaps, 0, sizeof(g_wmaps));
     memset(g_va_free, 0, sizeof(g_va_free));
@@ -498,9 +560,21 @@ static uint64_t control_bytes(const struct slm_prog_open_args *a)
     return (total + GA10B_PAGE_SIZE - 1u) & ~(uint64_t)(GA10B_PAGE_SIZE - 1u);
 }
 
+uint32_t slm_prog_leaked_sessions(void)
+{
+    return g_leaked_sessions;
+}
+
 static void session_free(struct prog_session *s)
 {
     const struct slm_prog_backend *be = s->be;
+    /* A dead session's last step timed out or its evict failed: the GPU may
+     * still be running it, and L2 may hold its dirty lines. Either can land
+     * on these pages after they are reused (the CPU KV cache the fallback
+     * allocates next, say). Nothing can quiesce a channel in that state, so
+     * its arena, control pages and VA ranges are leaked on purpose; the
+     * PTEs still go, so a late GPU access faults instead. */
+    bool leak = s->dead;
     if (s->data.cpu) {
         if (s->data_va) {
             ga10b_vm_unmap(be->ops, be->vm, s->data_va, big_round(s->data.size));
@@ -514,6 +588,12 @@ static void session_free(struct prog_session *s)
      * the pages stay allocated rather than reused under a live walk. */
     if (be->tlb_invalidate && be->tlb_invalidate() != 0) {
         uart_puts("[slm-prog] TLB invalidate failed on close: leaking the arena\n");
+        g_leaked_sessions++;
+    } else if (leak) {
+        uart_printf("[slm-prog] GPU step failed: leaking this session's %llu KB arena "
+                    "(the GPU may still write it)\n",
+                    (unsigned long long)((s->data.size + s->control.size) / 1024u));
+        g_leaked_sessions++;
     } else {
         if (s->data.cpu) ga10b_dma_free(be->ops, &s->data);
         if (s->control.cpu) ga10b_dma_free(be->ops, &s->control);
@@ -545,6 +625,9 @@ const char *slm_prog_unavailable_reason(void)
     return platform_reason();
 }
 
+static int open_locked(const struct slm_prog_backend *be, const struct slm_prog_open_args *a,
+                       struct slm_prog_open_out *out);
+
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out)
 {
     const struct slm_prog_backend *be = backend();
@@ -553,6 +636,16 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         a->data_bytes > 0xFFFF0000ull || a->barrier >= GA10B_PROG_BARRIER_COUNT) {
         return SLM_PROG_ERR_ARG;
     }
+    int rc = prog_lock(be);
+    if (rc != 0) return rc;
+    rc = open_locked(be, a, out);
+    prog_unlock();
+    return rc;
+}
+
+static int open_locked(const struct slm_prog_backend *be, const struct slm_prog_open_args *a,
+                       struct slm_prog_open_out *out)
+{
     int32_t h = -1;
     for (int32_t i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
         if (!g_sessions[i].open) {
@@ -672,8 +765,17 @@ fail:
 
 void slm_prog_close(int32_t h)
 {
+    if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return;
+    const struct slm_prog_backend *be = backend();
+    if (prog_lock(be) != 0) {
+        /* The holder frees it in prog_unlock. */
+        if (g_sessions[h].open) __atomic_store_n(&g_sessions[h].close_pending, true, __ATOMIC_RELEASE);
+        if (lock_try()) prog_unlock();
+        return;
+    }
     struct prog_session *s = session(h);
     if (s) session_free(s);
+    prog_unlock();
 }
 
 static struct prog_shape *shape_of(struct prog_session *s, uint32_t shape)
@@ -692,7 +794,7 @@ static int encode_for(const struct prog_session *s, const struct slm_prog_op *op
     return slm_prog_encode(op, (uint32_t)sass, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
 }
 
-int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
+static int slm_prog_add_locked(int32_t h, uint32_t shape, const struct slm_prog_op *op)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -705,14 +807,32 @@ int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
     return rc < 0 ? SLM_PROG_ERR_ARG : rc;
 }
 
-int slm_prog_barrier(int32_t h, uint32_t shape)
+int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_add_locked(h, shape, op);
+    prog_unlock();
+    return rc;
+}
+
+static int slm_prog_barrier_locked(int32_t h, uint32_t shape)
 {
     struct prog_shape *ps = shape_of(session(h), shape);
     if (!ps) return SLM_PROG_ERR_ARG;
     return ga10b_prog_add_barrier(&ps->p) == GA10B_PROG_OK ? 0 : SLM_PROG_ERR_ARG;
 }
 
-int slm_prog_mark(int32_t h, uint32_t shape)
+int slm_prog_barrier(int32_t h, uint32_t shape)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_barrier_locked(h, shape);
+    prog_unlock();
+    return rc;
+}
+
+static int slm_prog_mark_locked(int32_t h, uint32_t shape)
 {
     struct prog_shape *ps = shape_of(session(h), shape);
     if (!ps) return SLM_PROG_ERR_ARG;
@@ -720,7 +840,16 @@ int slm_prog_mark(int32_t h, uint32_t shape)
     return rc >= 0 ? rc : SLM_PROG_ERR_ARG;
 }
 
-int slm_prog_finish(int32_t h, uint32_t shape)
+int slm_prog_mark(int32_t h, uint32_t shape)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_mark_locked(h, shape);
+    prog_unlock();
+    return rc;
+}
+
+static int slm_prog_finish_locked(int32_t h, uint32_t shape)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -730,7 +859,16 @@ int slm_prog_finish(int32_t h, uint32_t shape)
     return 0;
 }
 
-int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
+int slm_prog_finish(int32_t h, uint32_t shape)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_finish_locked(h, shape);
+    prog_unlock();
+    return rc;
+}
+
+static int slm_prog_patch_locked(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -746,7 +884,16 @@ int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pro
     return 0;
 }
 
-int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
+int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_patch_locked(h, shape, idx, op);
+    prog_unlock();
+    return rc;
+}
+
+static int slm_prog_update_locked(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -763,16 +910,39 @@ int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pr
     return 0;
 }
 
-void slm_prog_clean(int32_t h, const void *p, size_t len)
+int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
+{
+    int rc = prog_lock(backend());
+    if (rc != 0) return rc;
+    rc = slm_prog_update_locked(h, shape, idx, op);
+    prog_unlock();
+    return rc;
+}
+
+static void slm_prog_clean_locked(int32_t h, const void *p, size_t len)
 {
     struct prog_session *s = session(h);
     if (s) s->be->ops->cache_clean(s->be->ops->ctx, p, len);
 }
 
-void slm_prog_invalidate(int32_t h, const void *p, size_t len)
+void slm_prog_clean(int32_t h, const void *p, size_t len)
+{
+    if (prog_lock(backend()) != 0) return;
+    slm_prog_clean_locked(h, p, len);
+    prog_unlock();
+}
+
+static void slm_prog_invalidate_locked(int32_t h, const void *p, size_t len)
 {
     struct prog_session *s = session(h);
     if (s) s->be->ops->cache_inval(s->be->ops->ctx, p, len);
+}
+
+void slm_prog_invalidate(int32_t h, const void *p, size_t len)
+{
+    if (prog_lock(backend()) != 0) return;
+    slm_prog_invalidate_locked(h, p, len);
+    prog_unlock();
 }
 
 /* Print once per session: a dead program means every later step of the
@@ -788,8 +958,8 @@ static void describe_timeout(const struct prog_session *s, const struct ga10b_pr
     s->be->dump_fault(what);
 }
 
-static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats, bool marked,
-                    uint64_t *ns, uint32_t cap)
+static int run_step_locked(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
+                           bool marked, uint64_t *ns, uint32_t cap)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -797,8 +967,6 @@ static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
     if (s->dead) return SLM_PROG_ERR_DEAD;
     const struct slm_prog_backend *be = s->be;
     const struct ga10b_gpu_ops *ops = be->ops;
-    /* A wait under masked IRQs is the #1093 hang, so refuse outright. */
-    if (be->irqs_enabled && !be->irqs_enabled()) return SLM_PROG_ERR_IRQS_OFF;
 
     const struct ga10b_prog *p = &ps->p;
     uint32_t sema_len = ga10b_prog_sema_bytes(p);
@@ -823,7 +991,9 @@ static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
          * the session can't run this step; Rust moves it to the CPU. */
         return SLM_PROG_ERR_SUBMIT;
     }
-    uint64_t deadline = t0 + (uint64_t)SLM_PROG_STEP_TIMEOUT_MS * 1000u;
+    /* From the doorbell, not from the call: submit may have waited for the
+     * dispatch lock behind another GPU consumer. */
+    uint64_t deadline = be->now_us() + (uint64_t)SLM_PROG_STEP_TIMEOUT_MS * 1000u;
     bool done = false;
     for (;;) {
         ops->cache_inval(ops->ctx, p->sema.cpu, 2u * GA10B_PROG_SEMA_SLOT_BYTES);
@@ -858,6 +1028,20 @@ static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
     return 0;
 }
 
+static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats, bool marked,
+                    uint64_t *ns, uint32_t cap)
+{
+    const struct slm_prog_backend *be = backend();
+    if (!be) return SLM_PROG_ERR_ARG;
+    /* A wait under masked IRQs is the #1093 hang, so refuse outright. */
+    if (be->irqs_enabled && !be->irqs_enabled()) return SLM_PROG_ERR_IRQS_OFF;
+    int rc = prog_lock(be);
+    if (rc != 0) return rc;
+    rc = run_step_locked(h, shape, stats, marked, ns, cap);
+    prog_unlock();
+    return rc;
+}
+
 int slm_prog_run(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats)
 {
     return run_step(h, shape, stats, false, NULL, 0u);
@@ -869,7 +1053,7 @@ int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *st
     return run_step(h, shape, stats, true, ns, cap);
 }
 
-uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)
+static uint64_t profile_ns_locked(int32_t h, uint32_t shape, uint32_t idx)
 {
     struct prog_session *s = session(h);
     struct prog_shape *ps = shape_of(s, shape);
@@ -880,6 +1064,14 @@ uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)
     uint64_t prev = idx == 0u ? ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_START)
                               : ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_OP0 + idx - 1u);
     return t - prev;
+}
+
+uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)
+{
+    if (prog_lock(backend()) != 0) return 0;
+    uint64_t ns = profile_ns_locked(h, shape, idx);
+    prog_unlock();
+    return ns;
 }
 
 static bool sass_present(const struct slm_prog_backend *be, uint32_t sass)
@@ -922,6 +1114,7 @@ const char *slm_prog_strerror(int err)
     case SLM_PROG_ERR_DEAD: return "GPU program failed earlier";
     case SLM_PROG_ERR_EVICT: return "L2 evict timed out";
     case SLM_PROG_ERR_IRQS_OFF: return "step started with IRQs masked";
+    case SLM_PROG_ERR_BUSY: return "another GPU program held the lock too long";
     default: return "unknown error";
     }
 }

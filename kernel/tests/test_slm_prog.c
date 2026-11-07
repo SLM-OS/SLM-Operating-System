@@ -616,9 +616,21 @@ static const struct ga10b_gpu_ops g_pm_ops = {
 static struct ga10b_vm g_vm;
 
 /* The fake channel. */
-enum fake_mode { FAKE_COMPLETE, FAKE_HANG, FAKE_REFUSE };
+/* FAKE_LATE: the end semaphore is released on wait turn late_turn.
+ * FAKE_SLOW_SUBMIT: submit itself takes 4.9 s (the dispatch lock held by
+ * another consumer), then as FAKE_LATE. */
+enum fake_mode { FAKE_COMPLETE, FAKE_HANG, FAKE_REFUSE, FAKE_LATE, FAKE_SLOW_SUBMIT };
 static struct {
     enum fake_mode mode;
+    volatile uint32_t *late_slot;
+    uint32_t late_payload;
+    unsigned late_turn, turns;
+    int in_flight;          /* submits minus finishes: never above 1 */
+    int max_in_flight;
+    int32_t nested_run;     /* run this handle from inside the first wait turn */
+    int nested_rc;
+    int32_t nested_close;   /* close this handle from inside the first wait turn */
+    bool in_relax;
     uint64_t now;
     unsigned submits, finishes, evicts, tlbs, dumps;
     uint64_t last_gp;
@@ -662,6 +674,12 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
     g_fk.last_gp = gp;
     g_fk.submits++;
     if (g_fk.mode == FAKE_REFUSE) return -1;
+    if (++g_fk.in_flight > g_fk.max_in_flight) g_fk.max_in_flight = g_fk.in_flight;
+    if (g_fk.mode == FAKE_LATE || g_fk.mode == FAKE_SLOW_SUBMIT) {
+        g_fk.late_slot = (volatile uint32_t *)slot;
+        g_fk.late_payload = payload;
+        if (g_fk.mode == FAKE_SLOW_SUBMIT) g_fk.now += 4900000u;
+    }
     if (g_fk.mode == FAKE_COMPLETE) {
         *(volatile uint32_t *)slot = payload;
         /* Timestamps 50 us apart. */
@@ -674,6 +692,7 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
 static void fk_finished(void)
 {
     g_fk.finishes++;
+    g_fk.in_flight--;
 }
 
 static int fk_evict(void)
@@ -691,6 +710,20 @@ static void fk_relax(void)
 {
     /* Each wait turn costs 100 ms, so the 5 s bound doesn't take 5 s. */
     g_fk.now += 100000u;
+    if (g_fk.in_relax) return;
+    g_fk.in_relax = true;
+    g_fk.turns++;
+    /* Another task's session, running while this one waits. */
+    if (g_fk.turns == 1u && g_fk.nested_run >= 0) {
+        struct slm_prog_run_stats st;
+        g_fk.nested_rc = slm_prog_run(g_fk.nested_run, 0, &st);
+    }
+    if (g_fk.turns == 1u && g_fk.nested_close >= 0) slm_prog_close(g_fk.nested_close);
+    if (g_fk.late_slot && g_fk.turns >= g_fk.late_turn) {
+        *g_fk.late_slot = g_fk.late_payload;
+        g_fk.late_slot = NULL;
+    }
+    g_fk.in_relax = false;
 }
 
 static void fk_dump(const char *why)
@@ -715,6 +748,8 @@ static const struct slm_prog_backend g_fake = {
 static void fake_up(void)
 {
     memset(&g_fk, 0, sizeof(g_fk));
+    g_fk.nested_run = -1;
+    g_fk.nested_close = -1;
     TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_pm_ops, &g_vm));
     slm_prog_backend_set(&g_fake);
 }
@@ -1060,6 +1095,126 @@ static void test_run_other_failures(void)
     pmm_free_pages(w, wp);
 }
 
+
+/* W1 (#475 review): a timed-out session's arena went back to the PMM with
+ * no L2 evict, so the GPU's dirty lines could land on the CPU KV cache the
+ * fallback allocates next. A dead session's pages are now leaked, its PTEs
+ * are gone, and its VA is never handed out again. */
+static void test_dead_session_leaks_arena(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    uint64_t dva = o.data_gpu_va;
+    g_fk.mode = FAKE_HANG;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_TIMEOUT, slm_prog_run(o.handle, 0, &st));
+    size_t before = pmm_get_free_pages();
+    slm_prog_close(o.handle);
+    /* The weights mapping may give back table pages, the arena may not. */
+    TEST_ASSERT_TRUE(pmm_get_free_pages() < before + 300u * 1024u / 4096u);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, dva));
+    /* A later session gets fresh VA, not the range a hung GPU may still use. */
+    g_fk.mode = FAKE_COMPLETE;
+    struct slm_prog_open_out o2;
+    open_built(w, &o2);
+    TEST_ASSERT_NOT_EQUAL(dva, o2.data_gpu_va);
+    slm_prog_close(o2.handle);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
+
+    /* A failed evict is the same: L2 still holds the step's lines. */
+    open_built(w, &o);
+    g_fk.evict_rc = -1;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_EVICT, slm_prog_run(o.handle, 0, &st));
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(2, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* W2/W3 (#475 review): the shell and slm-runner each have a session. A step
+ * of one started while the other's was in flight, and its finish cleared the
+ * other's in-flight flag. Now one lock covers a step from submit to the end
+ * of its wait: the second waits, bounded, and never submits under the first. */
+static void test_two_sessions_never_overlap(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out a, b;
+    open_built(w, &a);
+    open_built(w, &b);
+    TEST_ASSERT_NOT_EQUAL(a.handle, b.handle);
+    g_fk.mode = FAKE_LATE;
+    g_fk.late_turn = 1u;
+    g_fk.nested_run = b.handle;
+    g_fk.nested_rc = 1;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(a.handle, 0, &st));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_BUSY, g_fk.nested_rc);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.submits);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.finishes);
+    TEST_ASSERT_EQUAL_INT(1, g_fk.max_in_flight);
+    TEST_ASSERT_EQUAL_INT(0, g_fk.in_flight);
+    /* With the lock free, b runs. */
+    g_fk.nested_run = -1;
+    g_fk.mode = FAKE_COMPLETE;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(b.handle, 0, &st));
+
+    /* A close during another session's step is done when that step ends. */
+    uint64_t bva = b.data_gpu_va;
+    g_fk.mode = FAKE_LATE;
+    g_fk.turns = 0;
+    g_fk.late_turn = 1u;
+    g_fk.nested_close = b.handle;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(a.handle, 0, &st));
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, bva));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_barrier(b.handle, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    slm_prog_close(a.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* Review suggestion: the step deadline counted the time submit spent waiting
+ * for the dispatch lock, so a step queued behind another GPU consumer could
+ * time out (and kill its session) with the GPU never late. */
+static void test_deadline_starts_at_the_doorbell(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    g_fk.mode = FAKE_SLOW_SUBMIT;
+    g_fk.late_turn = 3u;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.dumps);
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* Review suggestion: barriers weren't counted, and the pushbuffer is sized
+ * for one per launch, so extra barriers wrote past it. */
+static void test_prog_barrier_cap(void)
+{
+    static struct ga10b_prog p;
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, prog_init(&p, 0, GA10B_PROG_BARRIER_WFI_FLUSH));
+    for (unsigned i = 0; i < 8u; i++) {
+        TEST_ASSERT_EQUAL_INT(GA10B_PROG_OK, ga10b_prog_add_barrier(&p));
+    }
+    TEST_ASSERT_EQUAL_INT(GA10B_PROG_ERR_FULL, ga10b_prog_add_barrier(&p));
+    TEST_ASSERT_EQUAL_UINT32(8u, p.n_barriers);
+}
+
 /* The arena works without a model: what `slm gpu smoke` opens. */
 static void test_session_without_weights(void)
 {
@@ -1251,6 +1406,10 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_run_marked_uses_the_marked_entry);
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);
+    RUN_TEST(test_dead_session_leaks_arena);
+    RUN_TEST(test_two_sessions_never_overlap);
+    RUN_TEST(test_deadline_starts_at_the_doorbell);
+    RUN_TEST(test_prog_barrier_cap);
     RUN_TEST(test_kernel_lookup_and_batch);
     RUN_TEST(test_e2e_build);
     RUN_TEST(test_e2e_hang_falls_back_to_cpu);

@@ -6244,8 +6244,10 @@ pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
     if slm::session::model_busy(index) {
         return SLM_ERR_BUSY;
     }
+    // An idle session's GPU program still maps the weights (#475 W5).
     match slm::registry::unload_slm(index as usize) {
         Ok(()) => 0,
+        Err(loader::LoadError::InUse) => SLM_ERR_BUSY,
         Err(_) => -1,
     }
 }

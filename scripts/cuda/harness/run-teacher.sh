@@ -18,7 +18,7 @@ step=${1:-all}
 if [ "$step" = build ] || [ "$step" = all ]; then
     g++ -O2 -std=c++17 llama_ref_driver.cpp -I$L/include -I$L/ggml/include -L$L/build/bin \
         -lllama -lggml -lggml-base -Wl,-rpath,$L/build/bin -o llama_ref_driver || exit 1
-    nvcc -O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm slm_forward.cu -o slm_forward 2>&1 |
+    nvcc -O3 -std=c++17 -arch=sm_87 -DSLM_MM_XQ_EMULATE -Xcompiler -fopenmp -lgomp -I../slm slm_forward.cu -o slm_forward 2>&1 |
         grep -v -E "warning|Remark|^$" | tail -5
 fi
 if [ "$step" = ref ] || [ "$step" = all ]; then

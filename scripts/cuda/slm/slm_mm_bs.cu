@@ -180,10 +180,10 @@ SLM_INL void bs_q4k(const half *x, const uint8_t *W, void *out, const float *bia
                     const float s1 = __shfl_sync(0xFFFFFFFFu, c3, 28 + c);
                     const float e0 = XQ ? bsq4_d[set][xt][2 * c][hi] : 1.0f;
                     const float e1 = XQ ? bsq4_d[set][xt][2 * c + 1][hi] : 1.0f;
-                    acc[xt][0] = fmaf(e0, fmaf(-off0, s0, k0 * c0), acc[xt][0]);
-                    acc[xt][1] = fmaf(e1, fmaf(-off0, s1, k0 * c1), acc[xt][1]);
-                    acc[xt][2] = fmaf(e0, fmaf(-off1, s0, k1 * c2), acc[xt][2]);
-                    acc[xt][3] = fmaf(e1, fmaf(-off1, s1, k1 * c3), acc[xt][3]);
+                    acc[xt][0] = slm_acc_q4<XQ>(acc[xt][0], e0, k0, c0, off0, s0);
+                    acc[xt][1] = slm_acc_q4<XQ>(acc[xt][1], e1, k0, c1, off0, s1);
+                    acc[xt][2] = slm_acc_q4<XQ>(acc[xt][2], e0, k1, c2, off1, s0);
+                    acc[xt][3] = slm_acc_q4<XQ>(acc[xt][3], e1, k1, c3, off1, s1);
                 }
             }
             set ^= 1;

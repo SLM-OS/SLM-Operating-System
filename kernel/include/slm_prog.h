@@ -108,12 +108,18 @@ struct slm_prog_run_stats {
 #define SLM_PROG_ERR_DEAD        (-8)  /* an earlier step on this session failed */
 #define SLM_PROG_ERR_EVICT       (-9)
 #define SLM_PROG_ERR_IRQS_OFF    (-10)
+#define SLM_PROG_ERR_BUSY        (-11) /* slm_prog lock not free within a step timeout */
 
 /* Bounds a wait no step on this hardware should come near: the ADR 0001
  * bar is 23 ms per token and 74 ms for a 64-token prefill. */
 #define SLM_PROG_STEP_TIMEOUT_MS 5000u
 
-/* ---- API (called from Rust; all sleepable, IRQs on) ---- */
+/* ---- API (called from Rust; all sleepable, IRQs on) ----
+ *
+ * Every call takes one lock, so two sessions (the shell and slm-runner)
+ * can use the program, and its shared tables and VM, at the same time.
+ * A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s, or at
+ * all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
 
 /* 1 if this boot has a channel programs can run on. */
 int slm_prog_available(void);
@@ -134,6 +140,10 @@ const char *slm_prog_reason_for(bool uefi, bool library_empty, bool channel_up, 
     "GPU cold bring-up stopped before the operator library was attached (see the boot log)"
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
 void slm_prog_close(int32_t h);
+
+/* Sessions whose pages were left allocated on close because the GPU could
+ * still write them (a timed-out step, a failed evict or TLB invalidate). */
+uint32_t slm_prog_leaked_sessions(void);
 
 /* Build: append a launch (returns its index), a barrier, a timestamp for the
  * marked copy of the decode shape (right after a barrier; returns its index),

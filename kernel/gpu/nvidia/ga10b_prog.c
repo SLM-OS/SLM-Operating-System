@@ -256,6 +256,8 @@ int ga10b_prog_add_barrier(struct ga10b_prog *p)
 {
     if (!p) return GA10B_PROG_ERR_ARG;
     if (p->finished) return GA10B_PROG_ERR_STATE;
+    /* ga10b_prog_sizes leaves room for one barrier per launch. */
+    if (p->n_barriers >= p->max_launches) return GA10B_PROG_ERR_FULL;
     uint32_t w[PB_BARRIER_DWORDS];
     uint32_t n = 0;
     if (p->barrier == GA10B_PROG_BARRIER_WFI_FLUSH || p->barrier == GA10B_PROG_BARRIER_WFI) {

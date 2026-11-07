@@ -25,8 +25,10 @@
  * (nvk_cmd_flush_wait_dep; methods in
  * ~/slmos-ref/mesa/mesa-clc7c0.h:52,299). No SYSMEMBAR is needed between
  * launches: activations stay in the GPU L2, only the end of the program
- * has to reach DRAM. GA10B_PROG_BARRIER_WFI_FLUSH is that sequence and
- * the default. The other two exist to be measured on hardware.
+ * has to reach DRAM. GA10B_PROG_BARRIER_WFI_FLUSH is that sequence.
+ * The SLM program uses GA10B_PROG_BARRIER_WFI by default (gpu_program.rs
+ * OPT_BARRIER): with the QMD's own shader-data invalidate the extra flush
+ * added nothing on jetson-nano-2. `slm gpu opts` selects the others.
  *
  * Completion. REPORT_SEMAPHORE with STRUCTURE_SIZE_FOUR_WORDS writes
  * the payload and a GPU timestamp (ns) to a 16 B slot, so a step gets
@@ -140,7 +142,8 @@ int ga10b_prog_update_launch(struct ga10b_prog *p, uint32_t idx,
                              const struct ga10b_prog_launch *l);
 
 /* Append a barrier: everything before it completes before anything
- * after it starts. */
+ * after it starts. The pushbuffer has room for one per launch, so the
+ * max_launches + 1st returns GA10B_PROG_ERR_FULL. */
 int ga10b_prog_add_barrier(struct ga10b_prog *p);
 
 /* Append a timestamp to the marked copy only. Call it right after a barrier.
