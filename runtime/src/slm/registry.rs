@@ -1015,6 +1015,47 @@ fn tensor_byte_range(
 /// the metadata path; they just give `tensor_bytes` lookups
 /// something concrete to check against.
 pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usize> {
+    let dims = FixtureDims { block_count: 28, embedding: 1536, head_count: 12, feed_forward: 8960 };
+    build_fixture(vocab_size, dims, false, out)
+}
+
+/// Vocab of [`build_cli_test_fixture`]: ids below 256 are the bytes, the
+/// last three are the specials.
+pub const CLI_FIXTURE_VOCAB: usize = 512;
+/// `<|endoftext|>` in [`build_cli_test_fixture`].
+pub const CLI_FIXTURE_ENDOFTEXT: u32 = CLI_FIXTURE_VOCAB as u32 - 3;
+/// `<|im_start|>` in [`build_cli_test_fixture`].
+pub const CLI_FIXTURE_IM_START: u32 = CLI_FIXTURE_VOCAB as u32 - 2;
+/// `<|im_end|>` in [`build_cli_test_fixture`]; deliberately not 2.
+pub const CLI_FIXTURE_IM_END: u32 = CLI_FIXTURE_VOCAB as u32 - 1;
+/// `tokenizer.ggml.eos_token_id` in [`build_cli_test_fixture`]: a plain
+/// token, so tests can tell the metadata EOS from the named specials.
+pub const CLI_FIXTURE_EOS: u32 = 300;
+
+/// Small fixture for the prompt path: one block, so a KV cache for a
+/// whole rendered ChatML prompt fits the test kernel's 1 MB Rust heap,
+/// with byte tokens for 0..=255, the ChatML specials and a metadata EOS.
+/// Like [`build_qwen_test_fixture`] it has no layer weights, so tests
+/// drive it with [`crate::slm::decoder::test_script_set`].
+pub fn build_cli_test_fixture(out: &mut [u8]) -> Option<usize> {
+    let dims = FixtureDims { block_count: 1, embedding: 16, head_count: 2, feed_forward: 32 };
+    build_fixture(CLI_FIXTURE_VOCAB, dims, true, out)
+}
+
+#[derive(Clone, Copy)]
+struct FixtureDims {
+    block_count: u32,
+    embedding: u32,
+    head_count: u32,
+    feed_forward: u32,
+}
+
+fn build_fixture(
+    vocab_size: usize,
+    dims: FixtureDims,
+    cli: bool,
+    out: &mut [u8],
+) -> Option<usize> {
     use crate::slm::gguf::{
         DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType, Q4_K_BLOCK_SIZE,
     };
@@ -1038,6 +1079,17 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
             // ASCII byte (0..127) — emit as a single-byte string.
             let s: String = core::iter::once((i as u8) as char).collect();
             tokens.push(MetaValue::String(s));
+        } else if cli && i < 256 {
+            // A high byte in the GPT-2 byte-to-unicode form real vocabs
+            // use, so one token can end mid-way through a UTF-8 sequence.
+            let c = crate::slm::tokenizer::byte_to_unicode_char(i as u8);
+            tokens.push(MetaValue::String(core::iter::once(c).collect()));
+        } else if cli && i as u32 == CLI_FIXTURE_ENDOFTEXT {
+            tokens.push(MetaValue::String(String::from("<|endoftext|>")));
+        } else if cli && i as u32 == CLI_FIXTURE_IM_START {
+            tokens.push(MetaValue::String(String::from("<|im_start|>")));
+        } else if cli && i as u32 == CLI_FIXTURE_IM_END {
+            tokens.push(MetaValue::String(String::from("<|im_end|>")));
         } else {
             let mut s = String::with_capacity(8);
             s.push('t');
@@ -1046,14 +1098,14 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
         }
     }
 
-    let kvs: Vec<(&'static str, MetaValue)> = alloc::vec![
+    let mut kvs: Vec<(&'static str, MetaValue)> = alloc::vec![
         ("general.alignment", MetaValue::Uint32(DEFAULT_ALIGNMENT as u32)),
         ("general.architecture", MetaValue::String(String::from("qwen2"))),
-        ("qwen2.block_count", MetaValue::Uint32(28)),
-        ("qwen2.embedding_length", MetaValue::Uint32(1536)),
-        ("qwen2.attention.head_count", MetaValue::Uint32(12)),
+        ("qwen2.block_count", MetaValue::Uint32(dims.block_count)),
+        ("qwen2.embedding_length", MetaValue::Uint32(dims.embedding)),
+        ("qwen2.attention.head_count", MetaValue::Uint32(dims.head_count)),
         ("qwen2.attention.head_count_kv", MetaValue::Uint32(2)),
-        ("qwen2.feed_forward_length", MetaValue::Uint32(8960)),
+        ("qwen2.feed_forward_length", MetaValue::Uint32(dims.feed_forward)),
         ("qwen2.context_length", MetaValue::Uint32(32_768)),
         ("qwen2.rope.freq_base", MetaValue::Float32(1_000_000.0)),
         (
@@ -1073,6 +1125,9 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
             }),
         ),
     ];
+    if cli {
+        kvs.push(("tokenizer.ggml.eos_token_id", MetaValue::Uint32(CLI_FIXTURE_EOS)));
+    }
 
     // Tensor payloads. Each `(name, ggml_type, dims, data)` entry is
     // emitted in `tensors[]` order; the offsets in the descriptors

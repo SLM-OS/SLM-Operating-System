@@ -11,15 +11,18 @@
  *   slm list                 — iterate rust_slm_count × rust_slm_get_info
  *   slm info <h>             — rust_slm_get_info pretty-print
  *   slm launch <h> [opts]    — rust_slm_session_open with sampler params
- *   slm prompt <s> "<text>"  — rust_slm_prompt with UART token cb
- *   slm stream <s>           — read prompt from UART line, then prompt
- *   slm stop <s>             — rust_slm_stop
+ *   slm prompt <s> [--raw] [--max N] "<text>"
+ *                            — rust_slm_prompt_ex with UART token cb
+ *   slm stream <s> [--raw] [--max N]
+ *                            — read prompt from UART line, then prompt
+ *   slm stop <s>             — rust_slm_stop; no lock, so it gets through
+ *                              while a prompt runs in another session
  *   slm reset <s>            — rust_slm_session_reset
  *   slm unload <h>           — rust_slm_unload
  *   slm close <s>            — rust_slm_session_close
  *   slm status               — model count + session count summary
  *   slm stats <s>            — rust_slm_stats pretty-print
- *   slm gpu                  — placeholder (M6.A-3 not yet wired)
+ *   slm gpu                  — per-op tier + dispatch counters
  *
  * NOTE on -mgeneral-regs-only: rust_slm_session_open and
  * rust_slm_prompt take f32 by value. AAPCS64 puts those in V0/V1 —
@@ -48,21 +51,6 @@
 /* ============================================================================
  * Helpers
  * ========================================================================= */
-
-/* Trim leading/trailing whitespace in place; returns the (possibly
- * advanced) start of the resulting string. NUL-terminates the trimmed
- * end. */
-static char *trim_inplace(char *s)
-{
-    if (!s) return s;
-    while (*s == ' ' || *s == '\t') s++;
-    size_t n = strlen(s);
-    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' ||
-                     s[n - 1] == '\r' || s[n - 1] == '\n')) {
-        s[--n] = '\0';
-    }
-    return s;
-}
 
 /*
  * Parse a decimal float string ("0.7", "1.0", "0.95") into f32.
@@ -156,7 +144,7 @@ static size_t fixed_name_print(const uint8_t *buf, size_t cap)
 typedef struct {
     uint64_t total_bytes;
     uint64_t total_tokens;
-    uint8_t  stop_requested;
+    bool     interrupted;   /* Ctrl-C or the peer went away */
 } slm_token_cb_ctx_t;
 
 static int32_t slm_prompt_token_cb(
@@ -165,7 +153,6 @@ static int32_t slm_prompt_token_cb(
     const uint8_t *bytes,
     size_t bytes_len)
 {
-    (void)token_id;
     slm_token_cb_ctx_t *ctx = (slm_token_cb_ctx_t *)user;
     if (!ctx) {
         return 0; /* defensive — should never happen */
@@ -175,9 +162,25 @@ static int32_t slm_prompt_token_cb(
     for (size_t i = 0; i < bytes_len; i++) {
         shell_putc((char)bytes[i]);
     }
-    ctx->total_bytes  += bytes_len;
-    ctx->total_tokens += 1u;
-    return ctx->stop_requested ? 0 : 1;
+    if (bytes_len > 0) {
+        shell_flush();
+    }
+    ctx->total_bytes += bytes_len;
+    if (token_id != SLM_TOKEN_ID_FLUSH) {
+        ctx->total_tokens += 1u;
+    }
+    return 1;
+}
+
+/* Called before every forward step, prefill included. */
+static int32_t slm_prompt_poll_cb(void *user)
+{
+    slm_token_cb_ctx_t *ctx = (slm_token_cb_ctx_t *)user;
+    if (ctx && shell_session_poll_interrupt()) {
+        ctx->interrupted = true;
+        return 1;
+    }
+    return 0;
 }
 
 /* ============================================================================
@@ -594,7 +597,13 @@ static int slm_unload(int argc, char *argv[])
         shell_printf("slm unload: invalid handle '%s'\r\n", argv[2]);
         return -1;
     }
-    if (rust_slm_unload(idx) != 0) {
+    int rc = rust_slm_unload(idx);
+    if (rc == SLM_ERR_BUSY) {
+        shell_printf("slm unload: a prompt is running on handle %lu "
+                     "(slm stop it first)\r\n", (unsigned long)idx);
+        return -1;
+    }
+    if (rc != 0) {
         shell_printf("slm unload: failed for handle %lu\r\n",
                      (unsigned long)idx);
         return -1;
@@ -606,16 +615,41 @@ static int slm_unload(int argc, char *argv[])
 /*
  * slm launch <handle> [--ctx N] [--sampler ...] [--temp F]
  *                    [--topk N] [--topp F] [--seed N]
+ *                    [--gpu auto|cpu|on] [--threads K]
  *
  * Default sampler: TopKTopP (per the spec). Defaults match the spec
- * "demo" example: ctx=2048, temp=0.7, topk=40, topp=0.9, seed=1.
+ * "demo" example: ctx=2048, temp=0.7, topk=40, topp=0.9, seed=1,
+ * gpu=auto, threads=4.
  */
+/* Print the truth about where this session's ops run: the --gpu mode, and
+ * for anything but cpu, how many ops the tier table sends to the GPU and how
+ * many weight tensors are staged there. Any dispatch can still fall back to
+ * the CPU per op; `slm gpu` counts those. */
+static void slm_print_backend(uint32_t sid, uint32_t gpu_mode)
+{
+    SlmSessionInfoC info;
+    if (rust_slm_session_info(sid, &info) != 0) {
+        shell_puts("backend=unknown");
+        return;
+    }
+    if (gpu_mode == SLM_GPU_CPU) {
+        shell_puts("backend=CPU(--gpu cpu)");
+    } else if (info.gpu_ops == 0) {
+        shell_puts("backend=CPU(no GPU ops available)");
+    } else {
+        shell_printf("backend=GPU+CPU(gpu_ops=%lu/8 staged_tensors=%lu)",
+                     (unsigned long)info.gpu_ops,
+                     (unsigned long)info.gpu_tensors);
+    }
+}
+
 static int slm_launch(int argc, char *argv[])
 {
     if (argc < 3) {
         shell_puts("Usage: slm launch <handle> [--ctx N] [--sampler "
                    "greedy|temp|topk|topp|topkp] [--temp F] [--topk N] "
-                   "[--topp F] [--seed N]\r\n");
+                   "[--topp F] [--seed N] [--gpu auto|cpu|on] "
+                   "[--threads K]\r\n");
         return -1;
     }
     uint32_t handle;
@@ -631,6 +665,8 @@ static int slm_launch(int argc, char *argv[])
     uint32_t top_k         = 40u;
     float    top_p         = 0.9f;
     uint64_t seed          = 1u;
+    uint32_t gpu_mode      = SLM_GPU_AUTO;
+    uint32_t threads       = 4u;
 
     for (int i = 3; i < argc; i++) {
         const char *a = argv[i];
@@ -680,10 +716,37 @@ static int slm_launch(int argc, char *argv[])
             }
             seed = (uint64_t)s32;
             i++;
+        } else if (strcmp(a, "--gpu") == 0 && v) {
+            if (strcmp(v, "auto") == 0) {
+                gpu_mode = SLM_GPU_AUTO;
+            } else if (strcmp(v, "cpu") == 0) {
+                gpu_mode = SLM_GPU_CPU;
+            } else if (strcmp(v, "on") == 0) {
+                gpu_mode = SLM_GPU_ON;
+            } else {
+                shell_printf("slm launch: bad --gpu '%s' "
+                             "(want auto|cpu|on)\r\n", v);
+                return -1;
+            }
+            i++;
+        } else if (strcmp(a, "--threads") == 0 && v) {
+            if (shell_parse_uint(v, &threads) != 0 ||
+                threads == 0 || threads > 64u) {
+                shell_printf("slm launch: bad --threads '%s' "
+                             "(want 1..64)\r\n", v);
+                return -1;
+            }
+            i++;
         } else {
             shell_printf("slm launch: unknown option '%s'\r\n", a);
             return -1;
         }
+    }
+
+    if (gpu_mode == SLM_GPU_ON && rust_slm_gpu_tier_ops() == 0) {
+        shell_puts("slm launch: --gpu on, but no op has a GPU tier "
+                   "(see `slm gpu`); use --gpu auto or cpu\r\n");
+        return -1;
     }
 
     int32_t sid = rust_slm_session_open(handle, max_ctx, sampler_kind,
@@ -691,6 +754,11 @@ static int slm_launch(int argc, char *argv[])
     if (sid < 0) {
         shell_puts("slm launch: session_open failed (model not loaded, "
                    "session table full, or KV cache OOM)\r\n");
+        return -1;
+    }
+    if (rust_slm_session_configure((uint32_t)sid, gpu_mode, threads) != 0) {
+        rust_slm_session_close((uint32_t)sid);
+        shell_puts("slm launch: could not apply --gpu/--threads\r\n");
         return -1;
     }
 
@@ -701,13 +769,13 @@ static int slm_launch(int argc, char *argv[])
         (sampler_kind == SLM_SAMPLER_TOP_P)         ? "topp"   :
         (sampler_kind == SLM_SAMPLER_TOP_K_TOP_P)   ? "topkp"  :
                                                       "?";
-    /* Forward path is M5.3.2 (full Qwen2 transformer chain); per-op
-     * tier is decided at dispatch time from the GPU tier table (see
-     * `slm gpu`). Don't promise SIMT/HMMA here — at launch we just
-     * know the implementation, not what the runtime will pick. */
-    shell_printf("[slm] session=%ld backend=M5.3.2 sampler=%s "
-                 "ctx=%lu",
-                 (long)sid, sname, (unsigned long)max_ctx);
+    shell_printf("[slm] session=%ld ", (long)sid);
+    slm_print_backend((uint32_t)sid, gpu_mode);
+    /* The worker pool isn't here yet: the forward path runs on one core
+     * whatever --threads says, so the banner shouldn't imply otherwise. */
+    shell_printf(" threads=%lu(stored; forward is single-threaded) "
+                 "sampler=%s ctx=%lu",
+                 (unsigned long)threads, sname, (unsigned long)max_ctx);
     if (sampler_kind != SLM_SAMPLER_GREEDY) {
         shell_puts(" temp=");
         print_f32_3(temperature);
@@ -736,7 +804,13 @@ static int slm_close(int argc, char *argv[])
         shell_printf("slm close: invalid session '%s'\r\n", argv[2]);
         return -1;
     }
-    if (rust_slm_session_close(sid) != 0) {
+    int rc = rust_slm_session_close(sid);
+    if (rc == SLM_ERR_BUSY) {
+        shell_printf("slm close: a prompt is running on session %lu "
+                     "(slm stop it first)\r\n", (unsigned long)sid);
+        return -1;
+    }
+    if (rc != 0) {
         shell_printf("slm close: failed for session %lu\r\n",
                      (unsigned long)sid);
         return -1;
@@ -756,7 +830,13 @@ static int slm_reset(int argc, char *argv[])
         shell_printf("slm reset: invalid session '%s'\r\n", argv[2]);
         return -1;
     }
-    if (rust_slm_session_reset(sid) != 0) {
+    int rc = rust_slm_session_reset(sid);
+    if (rc == SLM_ERR_BUSY) {
+        shell_printf("slm reset: a prompt is running on session %lu "
+                     "(slm stop it first)\r\n", (unsigned long)sid);
+        return -1;
+    }
+    if (rc != 0) {
         shell_printf("slm reset: failed for session %lu\r\n",
                      (unsigned long)sid);
         return -1;
@@ -781,40 +861,74 @@ static int slm_stop(int argc, char *argv[])
                      (unsigned long)sid);
         return -1;
     }
+    /* Not rust_slm_session_info: that takes the registry lock, which a
+     * running prompt holds for each forward step. */
+    if (rust_slm_session_busy(sid) == 0) {
+        shell_printf("Session %lu has no prompt running\r\n",
+                     (unsigned long)sid);
+        return 0;
+    }
     shell_printf("Stop signaled for session %lu\r\n", (unsigned long)sid);
     return 0;
 }
 
+/* Words for SlmStatsC.last_stop_reason. */
+static const char *slm_stop_reason_name(uint32_t reason)
+{
+    switch (reason) {
+    case SLM_STOP_EOS:          return "eos";
+    case SLM_STOP_MAX_TOKENS:   return "max";
+    case SLM_STOP_USER:         return "stopped";
+    case SLM_STOP_CALLBACK:     return "callback";
+    case SLM_STOP_CONTEXT_FULL: return "ctx-full";
+    case SLM_STOP_NO_LOGITS:    return "no-logits";
+    case SLM_STOP_EMPTY_PROMPT: return "empty";
+    default:                    return "none";
+    }
+}
+
 /*
- * Run a prompt against an open session. `text` may be NULL/empty
- * for the M5.2 state-machine path that exercises stop / EOS without
- * a tokenizer (real text path lands in M5.3). `max_new_tokens` of
- * 0 means "unlimited" per the FFI contract.
+ * Run a prompt against an open session. `flags` is 0 or SLM_PROMPT_RAW.
+ * `max_new_tokens` of 0 means "unlimited" per the FFI contract.
  */
-static int run_prompt(uint32_t sid, const char *text, uint32_t max_new_tokens)
+static int run_prompt(uint32_t sid, const char *text, uint32_t flags,
+                      uint32_t max_new_tokens)
 {
     slm_token_cb_ctx_t ctx = {
-        .total_bytes    = 0,
-        .total_tokens   = 0,
-        .stop_requested = 0,
+        .total_bytes  = 0,
+        .total_tokens = 0,
+        .interrupted  = false,
     };
 
     size_t plen = (text != NULL) ? strlen(text) : 0;
-    int32_t rc = rust_slm_prompt(sid,
-                                 (const uint8_t *)text,
-                                 plen,
-                                 max_new_tokens,
-                                 slm_prompt_token_cb,
-                                 &ctx);
+
+    /* A decode runs for minutes. Don't hold the shell mutation lock for it:
+     * a second session waiting on the lock would boost this task above
+     * net_pump, which starves that session's own input (#1103). Sessions
+     * have their own busy state, so nothing here depends on the lock. */
+    bool paused = shell_mutation_pause();
+    int32_t rc = rust_slm_prompt_ex(sid,
+                                    (const uint8_t *)text,
+                                    plen,
+                                    flags,
+                                    max_new_tokens,
+                                    slm_prompt_token_cb,
+                                    slm_prompt_poll_cb,
+                                    &ctx);
+    shell_mutation_resume(paused);
 
     /* Always end the streamed line cleanly so the next prompt is
      * on its own row. */
-    shell_puts("\r\n");
+    shell_puts(ctx.interrupted ? "^C\r\n" : "\r\n");
 
+    if (rc == SLM_ERR_BUSY) {
+        shell_puts("slm prompt: a prompt is already running "
+                   "(one at a time; slm stop it first)\r\n");
+        return -1;
+    }
     if (rc != 0) {
-        shell_printf("slm prompt: decode failed rc=%ld "
-                     "(session not open, invalid UTF-8, or M5.2 "
-                     "tokenizer not yet plumbed)\r\n", (long)rc);
+        shell_printf("slm prompt: failed rc=%ld (no such session, invalid "
+                     "UTF-8, or its model was unloaded)\r\n", (long)rc);
         return -1;
     }
 
@@ -823,33 +937,120 @@ static int run_prompt(uint32_t sid, const char *text, uint32_t max_new_tokens)
     if (rust_slm_stats(sid, &st) == 0) {
         unsigned long ttft_ms   = (unsigned long)(st.last_ttft_ns / 1000000ull);
         unsigned long decode_ms = (unsigned long)(st.last_decode_ns / 1000000ull);
-        /* tokens / sec — guard against div-by-zero. */
+        /* last_decode_ns starts after the first token, so it covers one
+         * forward step per later token, plus the one that sampled EOS. */
+        uint64_t steps = ctx.total_tokens > 0 ? ctx.total_tokens - 1u : 0;
+        if (st.last_stop_reason == SLM_STOP_EOS && ctx.total_tokens > 0) {
+            steps += 1u;
+        }
         float tok_per_s = 0.0f;
-        if (st.last_decode_ns > 0 && ctx.total_tokens > 0) {
+        if (st.last_decode_ns > 0 && steps > 0) {
             double sec = (double)st.last_decode_ns / 1.0e9;
-            tok_per_s = (float)((double)ctx.total_tokens / sec);
+            tok_per_s = (float)((double)steps / sec);
         }
         shell_printf("[slm] ttft=%lu ms  decode=", ttft_ms);
         print_f32_3(tok_per_s);
-        shell_printf(" tok/s  total=%lu ms tokens=%lu bytes=%lu\r\n",
+        shell_printf(" tok/s  total=%lu ms tokens=%lu bytes=%lu stop=%s\r\n",
                      decode_ms,
                      (unsigned long)ctx.total_tokens,
-                     (unsigned long)ctx.total_bytes);
+                     (unsigned long)ctx.total_bytes,
+                     slm_stop_reason_name(st.last_stop_reason));
+        if (st.last_stop_reason == SLM_STOP_CONTEXT_FULL) {
+            shell_puts("[slm] context full: `slm reset` for a fresh "
+                       "conversation, or `slm launch --ctx` larger\r\n");
+        } else if (st.last_stop_reason == SLM_STOP_NO_LOGITS) {
+            shell_puts("[slm] the forward pass produced no output "
+                       "(model lacks layer weights?)\r\n");
+        } else if (st.last_stop_reason == SLM_STOP_USER) {
+            shell_puts("[slm] stopped: the next prompt continues this "
+                       "conversation; `slm reset` for a fresh one\r\n");
+        }
     }
     return 0;
 }
 
 /*
- * slm prompt <session> "<text>"
+ * Turn the two-character sequences \n, \t and \\ into what they name, in
+ * place. A shell line can't hold a newline, and a pre-rendered ChatML prompt
+ * is full of them.
+ */
+static void slm_unescape_inplace(char *s)
+{
+    char *out = s;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\\' && (p[1] == 'n' || p[1] == 't' || p[1] == '\\')) {
+            p++;
+            *out++ = (*p == 'n') ? '\n' : (*p == 't') ? '\t' : '\\';
+        } else {
+            *out++ = *p;
+        }
+    }
+    *out = '\0';
+}
+
+#define SLM_DEFAULT_MAX_NEW_TOKENS 256u /* the spec's --max default */
+
+/*
+ * Read [--raw] [--max N] from argv[first..*last], from the front until the
+ * first word that isn't an option, then from the back so a trailing
+ * `"text" --max 8` works too. `--` ends the options, for text that starts
+ * with dashes. Returns the index of the first text word; *last shrinks past
+ * trailing options. Returns -1 after printing an error.
+ */
+static int slm_parse_prompt_opts(const char *verb, int first, int *last,
+                                 char *argv[], uint32_t *flags, uint32_t *max)
+{
+    int i = first;
+    bool ended = false;
+    while (i <= *last) {
+        const char *a = argv[i];
+        if (strcmp(a, "--") == 0) {
+            i++;
+            ended = true;
+            break;
+        } else if (strcmp(a, "--raw") == 0) {
+            *flags |= SLM_PROMPT_RAW;
+            i++;
+        } else if (strcmp(a, "--max") == 0) {
+            if (i == *last || shell_parse_uint(argv[i + 1], max) != 0) {
+                shell_printf("slm %s: --max needs a number\r\n", verb);
+                return -1;
+            }
+            i += 2;
+        } else if (a[0] == '-' && a[1] == '-' && !strchr(a, ' ')) {
+            shell_printf("slm %s: unknown option '%s' (use -- before text "
+                         "that starts with dashes)\r\n", verb, a);
+            return -1;
+        } else {
+            break;
+        }
+    }
+    while (!ended && *last > i) {
+        if (strcmp(argv[*last], "--raw") == 0) {
+            *flags |= SLM_PROMPT_RAW;
+            *last -= 1;
+        } else if (*last - 1 > i && strcmp(argv[*last - 1], "--max") == 0 &&
+                   shell_parse_uint(argv[*last], max) == 0) {
+            *last -= 2;
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+/*
+ * slm prompt <session> [--raw] [--max N] "<text>"
  *
- * The shell tokenizes argv on whitespace, so a quoted prompt arrives
- * as multiple argv slots. Re-stitch them back together into a single
- * prompt buffer (still bounded by SHELL_MAX_LINE).
+ * The parser hands a quoted prompt over as one word. Several words are
+ * joined with single spaces, so an unquoted prompt still works. Empty
+ * text is valid and generates nothing.
  */
 static int slm_prompt(int argc, char *argv[])
 {
     if (argc < 4) {
-        shell_puts("Usage: slm prompt <session> <text...>\r\n");
+        shell_puts("Usage: slm prompt <session> [--raw] [--max N] "
+                   "\"<text>\"\r\n");
         return -1;
     }
     uint32_t sid;
@@ -858,54 +1059,65 @@ static int slm_prompt(int argc, char *argv[])
         return -1;
     }
 
-    /* Stitch argv[3..] into one line buffer. */
-    char text[SHELL_MAX_LINE];
-    size_t pos = 0;
-    for (int i = 3; i < argc; i++) {
+    uint32_t flags = 0;
+    uint32_t max_new = SLM_DEFAULT_MAX_NEW_TOKENS;
+    int last = argc - 1;
+    int first = slm_parse_prompt_opts("prompt", 3, &last, argv, &flags, &max_new);
+    if (first < 0) {
+        return -1;
+    }
+    if (first > last) {
+        shell_puts("slm prompt: no text\r\n");
+        return -1;
+    }
+
+    /* Join the words in place, which also keeps a second line-sized buffer
+     * off the shell task's stack. The words sit in ascending order in the
+     * parser's buffer with a gap between each, so `out` never overtakes the
+     * word being moved. */
+    char *text = argv[first];
+    char *out = text + strlen(text);
+    for (int i = first + 1; i <= last; i++) {
         size_t wl = strlen(argv[i]);
-        if (i > 3) {
-            if (pos + 1 >= sizeof(text)) break;
-            text[pos++] = ' ';
-        }
-        if (pos + wl >= sizeof(text)) {
-            wl = sizeof(text) - pos - 1;
-        }
-        memcpy(text + pos, argv[i], wl);
-        pos += wl;
+        *out++ = ' ';
+        memmove(out, argv[i], wl);
+        out += wl;
     }
-    text[pos] = '\0';
+    *out = '\0';
+    slm_unescape_inplace(text);
 
-    /* Strip a single pair of surrounding quotes if present (the
-     * shell parser doesn't strip them itself). */
-    char *p = trim_inplace(text);
-    size_t pl = strlen(p);
-    if (pl >= 2 && ((p[0] == '"' && p[pl - 1] == '"') ||
-                    (p[0] == '\'' && p[pl - 1] == '\''))) {
-        p[pl - 1] = '\0';
-        p++;
-    }
-
-    /* 256 is the spec default — see "max_new_tokens" in the M5
-     * decode loop documentation. */
-    return run_prompt(sid, p, 256u);
+    return run_prompt(sid, text, flags, max_new);
 }
 
 /*
- * slm stream <session>
+ * slm stream <session> [--raw] [--max N]
  *
  * Read a prompt from the shell I/O until a blank line, then run it.
  * This is the convenience path for serial users who don't want to
- * paste a large quoted block into the verb invocation.
+ * paste a large quoted block into the verb invocation, and it can hold
+ * real newlines, so nothing is unescaped.
  */
 static int slm_stream(int argc, char *argv[])
 {
     if (argc < 3) {
-        shell_puts("Usage: slm stream <session>\r\n");
+        shell_puts("Usage: slm stream <session> [--raw] [--max N]\r\n");
         return -1;
     }
     uint32_t sid;
     if (shell_parse_uint(argv[2], &sid) != 0) {
         shell_printf("slm stream: invalid session '%s'\r\n", argv[2]);
+        return -1;
+    }
+
+    uint32_t flags = 0;
+    uint32_t max_new = SLM_DEFAULT_MAX_NEW_TOKENS;
+    int last = argc - 1;
+    int first = slm_parse_prompt_opts("stream", 3, &last, argv, &flags, &max_new);
+    if (first < 0) {
+        return -1;
+    }
+    if (first <= last) {
+        shell_printf("slm stream: unexpected '%s'\r\n", argv[first]);
         return -1;
     }
 
@@ -945,7 +1157,7 @@ static int slm_stream(int argc, char *argv[])
         return 0;
     }
 
-    return run_prompt(sid, accum, 256u);
+    return run_prompt(sid, accum, flags, max_new);
 }
 
 static int slm_status(void)
@@ -959,8 +1171,8 @@ static int slm_status(void)
     for (uint32_t i = 0; i < 32u; i++) {
         if (rust_slm_stats(i, &st) == 0) sessions++;
     }
-    shell_printf("models=%lu sessions=%lu (M5.3.2 forward — run "
-                 "`slm gpu` for per-op tier state)\r\n",
+    shell_printf("models=%lu sessions=%lu (run `slm gpu` for per-op "
+                 "tier state)\r\n",
                  (unsigned long)models, (unsigned long)sessions);
     return 0;
 }
@@ -991,6 +1203,22 @@ static int slm_stats(int argc, char *argv[])
                  (unsigned long)st.tokens_out);
     shell_printf("  ttft     : %lu ms\r\n", ttft_ms);
     shell_printf("  decode   : %lu ms total\r\n", decode_ms);
+    shell_printf("  stop     : %s\r\n",
+                 slm_stop_reason_name(st.last_stop_reason));
+    SlmSessionInfoC info;
+    if (rust_slm_session_info(sid, &info) == 0) {
+        shell_printf("  kv_used  : %lu / %lu\r\n",
+                     (unsigned long)info.kv_len,
+                     (unsigned long)info.max_ctx);
+        shell_puts("  ");
+        slm_print_backend(sid, info.gpu_mode);
+        shell_printf("\r\n  threads  : %lu (stored; forward is "
+                     "single-threaded)\r\n", (unsigned long)info.threads);
+        if (info.busy) {
+            shell_puts("  prompt running: figures are from before it "
+                       "started\r\n");
+        }
+    }
     return 0;
 }
 
@@ -1047,15 +1275,35 @@ static void slm_print_usage(void)
     shell_puts("  info   <handle>                Show model metadata\r\n");
     shell_puts("  unload <handle>                Unload a model\r\n");
     shell_puts("  launch <handle> [opts]         Open a session "
-               "(--ctx --sampler --temp --topk --topp --seed)\r\n");
-    shell_puts("  prompt <session> <text...>     Run a prompt\r\n");
-    shell_puts("  stream <session>               Read a prompt from UART\r\n");
-    shell_puts("  stop   <session>               Cancel an in-flight decode\r\n");
+               "(--ctx --sampler --temp --topk --topp --seed --gpu --threads)\r\n");
+    shell_puts("  prompt <session> [--raw] [--max N] \"<text>\"  Run a prompt "
+               "(Ctrl-C stops it)\r\n");
+    shell_puts("  stream <session> [--raw] [--max N]  Read a prompt from UART\r\n");
+    shell_puts("  stop   <session>               Stop a running prompt from "
+               "another session\r\n");
     shell_puts("  reset  <session>               Reset KV cache\r\n");
     shell_puts("  close  <session>               Close a session\r\n");
     shell_puts("  status                         One-line summary\r\n");
     shell_puts("  stats  <session>               Per-session telemetry\r\n");
     shell_puts("  gpu                            GPU dispatch state\r\n");
+}
+
+/* Verbs that change global state: the registry, the session table, memory
+ * pools. They serialize on the shell mutation lock. */
+static int slm_dispatch_mutating(const char *verb, int argc, char *argv[])
+{
+    if (strcmp(verb, "load")   == 0) return slm_load(argc, argv);
+    if (strcmp(verb, "xload")  == 0) return slm_xload(argc, argv);
+    if (strcmp(verb, "unload") == 0) return slm_unload(argc, argv);
+    if (strcmp(verb, "launch") == 0) return slm_launch(argc, argv);
+    if (strcmp(verb, "prompt") == 0) return slm_prompt(argc, argv);
+    if (strcmp(verb, "stream") == 0) return slm_stream(argc, argv);
+    if (strcmp(verb, "reset")  == 0) return slm_reset(argc, argv);
+    if (strcmp(verb, "close")  == 0) return slm_close(argc, argv);
+
+    shell_printf("slm: unknown verb '%s'\r\n", verb);
+    slm_print_usage();
+    return -1;
 }
 
 int cmd_slm(int argc, char *argv[])
@@ -1066,23 +1314,19 @@ int cmd_slm(int argc, char *argv[])
     }
     const char *verb = argv[1];
 
-    if (strcmp(verb, "load")   == 0) return slm_load(argc, argv);
-    if (strcmp(verb, "xload")  == 0) return slm_xload(argc, argv);
+    /* These only read, under the runtime's own short locks, and must answer
+     * while another session's command holds the mutation lock. `stop` above
+     * all: the one thing it must never do is wait for what it's stopping. */
+    if (strcmp(verb, "stop")   == 0) return slm_stop(argc, argv);
     if (strcmp(verb, "list")   == 0) return slm_list();
     if (strcmp(verb, "info")   == 0) return slm_info(argc, argv);
-    if (strcmp(verb, "unload") == 0) return slm_unload(argc, argv);
-    if (strcmp(verb, "launch") == 0) return slm_launch(argc, argv);
-    if (strcmp(verb, "prompt") == 0) return slm_prompt(argc, argv);
-    if (strcmp(verb, "stream") == 0) return slm_stream(argc, argv);
-    if (strcmp(verb, "stop")   == 0) return slm_stop(argc, argv);
-    if (strcmp(verb, "reset")  == 0) return slm_reset(argc, argv);
-    if (strcmp(verb, "close")  == 0) return slm_close(argc, argv);
     if (strcmp(verb, "status") == 0) return slm_status();
     if (strcmp(verb, "stats")  == 0) return slm_stats(argc, argv);
     if (strcmp(verb, "gpu")    == 0) return slm_gpu();
     if (strcmp(verb, "help")   == 0) { slm_print_usage(); return 0; }
 
-    shell_printf("slm: unknown verb '%s'\r\n", verb);
-    slm_print_usage();
-    return -1;
+    bool locked = shell_mutation_lock();
+    int ret = slm_dispatch_mutating(verb, argc, argv);
+    shell_mutation_unlock(locked);
+    return ret;
 }

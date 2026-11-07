@@ -136,7 +136,9 @@ const shell_cmd_t builtin_commands[] = {
     {"model",    cmd_model,    "Model management (load/list/info/unload/swap/pools)",       true, SHELL_CAT_PROCESS},
     {"sched",    cmd_sched,    "Scheduler (policy [<name>] | model | stats [gpu-reset])",   true, SHELL_CAT_PROCESS},
     {"sleep",    cmd_sleep,    "Sleep for N ms (sleep <ms>)",                               false, SHELL_CAT_PROCESS},
-    {"slm",      cmd_slm,      "Small language model (load/list/info/launch/prompt/stats)", true, SHELL_CAT_PROCESS},
+    /* mutates=false: cmd_slm takes the lock itself, for the verbs that need
+     * it. `slm stop` must get through while a prompt is running. */
+    {"slm",      cmd_slm,      "Small language model (load/list/info/launch/prompt/stats)", false, SHELL_CAT_PROCESS},
     {"tasks",    cmd_tasks,    "List all tasks",                                            false, SHELL_CAT_PROCESS},
 #if !defined(PLATFORM_X86_64)
     {"userelf",  cmd_userelf,  "Run the embedded EL0 hello ELF (ELF loader follow-up)",     false, SHELL_CAT_PROCESS},
@@ -432,35 +434,71 @@ static const shell_cmd_t *find_command(const char *name)
     return NULL;
 }
 
+#define PARSE_ERR_QUOTE     (-1)
+#define PARSE_ERR_TOO_MANY  (-2)
+
 /*
- * Parse line into argc/argv.
+ * Parse line into argc/argv (#1136).
  * Modifies the line buffer in place.
- * Returns argc.
+ *
+ * A word that starts with " or ' runs to the matching quote, spaces
+ * included, and the quotes are removed. Inside "...", \" and \\ are a
+ * literal " and \; every other backslash stays as written, so
+ * lua -e "print('a\nb')" reaches Lua unchanged. '...' is fully literal.
+ * Text right after a closing quote joins the word. A quote anywhere else
+ * in a word is an ordinary character, so What's stays one word.
+ *
+ * Returns argc, or PARSE_ERR_* rather than running a command with its
+ * arguments silently cut short.
  */
 static int parse_line(char *line, char *argv[], int max_args)
 {
     int argc = 0;
     char *p = line;
 
-    while (*p && argc < max_args) {
+    for (;;) {
         /* Skip leading whitespace */
         while (*p == ' ' || *p == '\t') p++;
 
-        if (*p == '\0') break;
+        if (*p == '\0') return argc;
+        if (argc == max_args) return PARSE_ERR_TOO_MANY;
 
-        /* Start of argument */
-        argv[argc++] = p;
+        /* Start of argument. `out` never passes `p`: unescaping only
+         * shrinks the word. */
+        char *out = p;
+        argv[argc++] = out;
 
-        /* Find end of argument */
-        while (*p && *p != ' ' && *p != '\t') p++;
+        if (*p == '"' || *p == '\'') {
+            char quote = *p++;
+            while (*p && *p != quote) {
+                if (quote == '"' && *p == '\\' &&
+                    (p[1] == '"' || p[1] == '\\')) {
+                    p++;
+                }
+                *out++ = *p++;
+            }
+            if (*p == '\0') return PARSE_ERR_QUOTE;
+            p++;
+        }
+
+        /* Rest of the word */
+        while (*p && *p != ' ' && *p != '\t') *out++ = *p++;
 
         /* Null-terminate argument */
-        if (*p) {
-            *p++ = '\0';
-        }
+        if (*p) p++;
+        *out = '\0';
     }
+}
 
-    return argc;
+/* Report a parse_line error. */
+static void parse_line_report(int err)
+{
+    if (err == PARSE_ERR_QUOTE) {
+        shell_puts("Unterminated quote\r\n");
+    } else {
+        shell_printf("Too many arguments (max %d); "
+                     "quote text that contains spaces\r\n", SHELL_MAX_ARGS);
+    }
 }
 
 /*
@@ -729,6 +767,63 @@ int shell_session_read_raw(char *dst, int max_len)
     return got;
 }
 
+bool shell_session_poll_interrupt(void)
+{
+    struct shell_session *s = shell_session_current();
+    if (!s || !s->io) {
+        return false;
+    }
+    struct shell_io *io = s->io;
+    if (io->is_open && !io->is_open(io)) {
+        return true;
+    }
+
+    /* Type-ahead the prompt can't use goes in the line reader's prefetch
+     * buffer, so a command typed during a long decode runs afterwards. */
+    if (s->read_prefetch_pos >= s->read_prefetch_len) {
+        s->read_prefetch_pos = 0;
+        s->read_prefetch_len = 0;
+    } else if (s->read_prefetch_pos > 0) {
+        size_t held = (size_t)(s->read_prefetch_len - s->read_prefetch_pos);
+        memmove(s->read_prefetch, &s->read_prefetch[s->read_prefetch_pos], held);
+        s->read_prefetch_pos = 0;
+        s->read_prefetch_len = (uint16_t)held;
+    }
+
+    bool interrupted = false;
+    for (uint16_t i = 0; i < s->read_prefetch_len; i++) {
+        if (s->read_prefetch[i] == 0x03) {
+            interrupted = true;
+        }
+    }
+    while (!interrupted && io->try_read_char &&
+           s->read_prefetch_len < sizeof(s->read_prefetch)) {
+        int c = io->try_read_char(io);
+        if (c < 0) {
+            break;
+        }
+        if (c == 0x03) {
+            interrupted = true;
+        } else {
+            s->read_prefetch[s->read_prefetch_len++] = (char)c;
+        }
+    }
+    if (interrupted) {
+        /* Ctrl-C abandons whatever was typed before it. */
+        s->read_prefetch_pos = 0;
+        s->read_prefetch_len = 0;
+    }
+    return interrupted;
+}
+
+void shell_flush(void)
+{
+    struct shell_session *s = shell_session_current();
+    if (s && s->io && s->io->flush) {
+        s->io->flush(s->io);
+    }
+}
+
 /*
  * Toggle binary-mode pass-through on the current session's I/O
  * backend. Used by `cmd_xput_bin` to disable telnet's CR-LF /
@@ -952,6 +1047,10 @@ int shell_execute(const char *cmdline)
     /* Parse into argc/argv */
     argc = parse_line(buf, argv, SHELL_MAX_ARGS);
 
+    if (argc < 0) {
+        parse_line_report(argc);
+        return -1;
+    }
     if (argc == 0) {
         return 0;  /* Empty command */
     }
@@ -964,6 +1063,22 @@ int shell_execute(const char *cmdline)
     }
 
     return dispatch_cmd(cmd, argc, argv);
+}
+
+bool shell_mutation_lock(void)
+{
+    if (pi_mutex_held_by_self(&shell_mutex)) {
+        return false;
+    }
+    pi_mutex_lock(&shell_mutex);
+    return true;
+}
+
+void shell_mutation_unlock(bool locked)
+{
+    if (locked) {
+        pi_mutex_unlock(&shell_mutex);
+    }
 }
 
 bool shell_mutation_pause(void)
@@ -1027,6 +1142,11 @@ void shell_run(void)
 
         /* Parse into argc/argv */
         argc = parse_line(line_buffer, argv, SHELL_MAX_ARGS);
+
+        if (argc < 0) {
+            parse_line_report(argc);
+            continue;
+        }
 
         if (argc == 0) {
             continue;  /* Whitespace only */
