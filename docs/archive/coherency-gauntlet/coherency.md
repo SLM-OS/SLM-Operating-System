@@ -35,7 +35,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
-| C0 | Architecture and firmware facts | building | 0 |
+| C0 | Architecture and firmware facts | built (b4f95d20), critic round 1 running | 1 |
 | C1 | Linux reference bar | building | 0 |
 | C2 | `coherency` verb and litmus suite | building (QEMU stage) | 0 |
 | C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
@@ -60,5 +60,18 @@ Boards: jetson-nano-2 and pi-5-1 only.
 ## Failed approaches
 
 ## Evidence
+
+### C0 builder result (before critic)
+
+- Builder marks H1 and H3 INCONSISTENT and H2 CONSISTENT on both boards
+  (cross-cluster on Jetson unsourced). A76 CPUECTLR bit 6 is RES0, A78AE bit
+  6 is PF_MODE[0]; neither core has SMPEN. Filed #1194: `cpu_has_smpen()`
+  tests the A72 bit, so "SMPEN NOT set" prints on both boards regardless.
+- Safety: CPUECTLR reads from NS-EL2 are safe (SLM-OS already does it every
+  boot); any write to it or to other IMP DEF control registers traps to EL3,
+  and on Jetson BL31 v2.8 that panics. C1 and C2 told: reads only.
+- Negative control: Non-shareable mapping is not guaranteed to show
+  staleness (Arm ARM B2.10.1.1). C2 adds a caches-off reader control
+  (SCTLR.C=0), which A76 7.2.3 and A78AE 2.6.2.3 say looks up no cache.
 
 ### Lab notes
