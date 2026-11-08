@@ -35,10 +35,10 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
-| C0 | Architecture and firmware facts | round 2 FAIL (narrow, 8/9 fixed), builder fixing | 2 |
+| C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | Jetson litmus PASS; Pi 5 boot silent, diagnosing | 0 |
-| C2 | `coherency` verb and litmus suite | building (QEMU stage) | 0 |
-| C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
+| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage waiting for boards | 0 |
+| C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -71,6 +71,10 @@ Boards: jetson-nano-2 and pi-5-1 only.
   boot" (upstream CPU_OFF requests a warm reset through RMR_EL3,
   rpi3_pm.c:184-208). RES0 glossary citation partial; two small unsourced
   statements.
+- C0 round 3: PASS. Open nit, not blocking: Q3 says the cited sources do not
+  state whether a warm reset invalidates the caches, while (b) step 2 says
+  they were invalidated at the last reset; A76 TRM 7.2 does not distinguish
+  warm from cold reset.
 
 ## Failed approaches
 
@@ -106,5 +110,16 @@ Boards: jetson-nano-2 and pi-5-1 only.
   RP1 UART0 for Linux. Second attempt adds `dtparam=uart0=on`,
   `pciex4_reset=0` and earlycon on 0x1f00030000. A second silent boot stops
   this approach.
+
+### C2 QEMU stage (builder report, critic after hardware)
+
+- `coherency regs | litmus | neg`, `test_coherency.c` (12 tests), vmm
+  `VMM_FLAG_NONSHARE` with 2 PTE tests. QEMU ARM64: 65 litmus rows, 0
+  forbidden, 0 timeouts; controls a, b, c all fresh on QEMU (expected, TCG
+  models no caches). Adds about 1.5 s to `make test`. x86-64 passes.
+- Self-checks: synthetic forbidden observations, frozen flags and skipped
+  ping-pong steps are counted, so the checkers can fail.
+- CLUSTERECTLR_EL1 is S3_0_C15_C3_4 (DSU TRM 100453 11.8), not the
+  S3_0_C15_C3_0 the orchestrator first gave (that is CLUSTERCFR_EL1).
 
 ### Lab notes
