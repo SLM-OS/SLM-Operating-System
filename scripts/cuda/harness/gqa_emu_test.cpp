@@ -126,48 +126,55 @@ int main(int argc, char **argv)
             only = argv[++i]; /* cases whose name contains this */
         }
     }
-    const GqaShape S{};
-    const int group = S.nhq / S.nhkv;
     int fails = 0, checks = 0;
-    printf("gqa_emu_test: %s, nhq %d nhkv %d hd %d%s\n", GQA_KERNEL_SRC, S.nhq, S.nhkv, S.hd,
-           quick ? ", quick (kv <= 600)" : "");
-    for (const GqaCase &c : gqa_cases(!quick)) {
-        if ((quick && c.cap > 600) || c.name.find(only) == std::string::npos) {
-            continue;
-        }
-        const GqaData d = gqa_make(S, c, gqa_seed(c.name));
-        std::vector<double> ref;
-        gqa_ref_exact(S, d, ref);
-        Bufs b = upload(d);
-        auto check = [&](const char *name, const std::vector<uint16_t> &got, bool ulp_rule) {
-            const GqaErr e = gqa_compare(got, ref, ulp_rule);
-            gqa_report(name, c, e, ulp_rule);
-            fails += !e.pass;
-            checks++;
-            std::fill(b.out, b.out + b.nq, (uint16_t)0x7E00);
-        };
-        /* Suffix: scheduling (lockstep, serial, reverse serial) and cp.async
-         * landing (late, early), see gqa_emu.h. */
-        auto mode = [](gqemu::Sched s, gqemu::CpMode m) {
-            gqemu::sched_mode() = s;
-            gqemu::cp_mode() = m;
-        };
-        mode(gqemu::GQ_EMU_LOCKSTEP, gqemu::GQ_EMU_CP_LATE);
-        if ((int)c.pos.size() * group <= 16) {
-            check("hmma_dec", run_dec<true>(S, b), true);
-            check("hmma_dec_p16", run_dec<false>(S, b), false);
-            mode(gqemu::GQ_EMU_SERIAL_REV, gqemu::GQ_EMU_CP_LATE);
-            check("hmma_dec/R", run_dec<true>(S, b), true);
+    /* Qwen2.5-1.5B (every case), then the edges of the decode kernel's 16-row
+     * M tile: 16 query heads on one KV head (one row fills it) and 8 KV heads
+     * of one query head each (16 rows do); these two on the cases up to kv 600. */
+    const GqaShape shapes[] = {{12, 2, 128}, {16, 1, 128}, {8, 8, 128}};
+    for (int si = 0; si < 3; si++) {
+        const GqaShape S = shapes[si];
+        const int group = S.nhq / S.nhkv;
+        const bool full = si == 0;
+        printf("gqa_emu_test: %s, nhq %d nhkv %d hd %d%s\n", GQA_KERNEL_SRC, S.nhq, S.nhkv, S.hd,
+               quick || !full ? ", quick (kv <= 600)" : "");
+        for (const GqaCase &c : gqa_cases(!quick && full)) {
+            if (((quick || !full) && c.cap > 600) || c.name.find(only) == std::string::npos) {
+                continue;
+            }
+            const GqaData d = gqa_make(S, c, gqa_seed(c.name));
+            std::vector<double> ref;
+            gqa_ref_exact(S, d, ref);
+            Bufs b = upload(d);
+            auto check = [&](const char *name, const std::vector<uint16_t> &got, bool ulp_rule) {
+                const GqaErr e = gqa_compare(got, ref, ulp_rule);
+                gqa_report(name, c, e, ulp_rule);
+                fails += !e.pass;
+                checks++;
+                std::fill(b.out, b.out + b.nq, (uint16_t)0x7E00);
+            };
+            /* Suffix: scheduling (lockstep, serial, reverse serial) and cp.async
+             * landing (late, early), see gqa_emu.h. */
+            auto mode = [](gqemu::Sched s, gqemu::CpMode m) {
+                gqemu::sched_mode() = s;
+                gqemu::cp_mode() = m;
+            };
             mode(gqemu::GQ_EMU_LOCKSTEP, gqemu::GQ_EMU_CP_LATE);
+            if ((int)c.pos.size() * group <= 16) {
+                check("hmma_dec", run_dec<true>(S, b), true);
+                check("hmma_dec_p16", run_dec<false>(S, b), false);
+                mode(gqemu::GQ_EMU_SERIAL_REV, gqemu::GQ_EMU_CP_LATE);
+                check("hmma_dec/R", run_dec<true>(S, b), true);
+                mode(gqemu::GQ_EMU_LOCKSTEP, gqemu::GQ_EMU_CP_LATE);
+            }
+            check("hmma_pf", run_pf<true>(S, b), true);
+            check("hmma_pf_p16", run_pf<false>(S, b), false);
+            mode(gqemu::GQ_EMU_SERIAL, gqemu::GQ_EMU_CP_EARLY);
+            check("hmma_pf/SE", run_pf<true>(S, b), true);
+            mode(gqemu::GQ_EMU_SERIAL_REV, gqemu::GQ_EMU_CP_LATE);
+            check("hmma_pf/RL", run_pf<true>(S, b), true);
+            release(b);
+            fflush(stdout);
         }
-        check("hmma_pf", run_pf<true>(S, b), true);
-        check("hmma_pf_p16", run_pf<false>(S, b), false);
-        mode(gqemu::GQ_EMU_SERIAL, gqemu::GQ_EMU_CP_EARLY);
-        check("hmma_pf/SE", run_pf<true>(S, b), true);
-        mode(gqemu::GQ_EMU_SERIAL_REV, gqemu::GQ_EMU_CP_LATE);
-        check("hmma_pf/RL", run_pf<true>(S, b), true);
-        release(b);
-        fflush(stdout);
     }
     printf("gqa_emu_test: %d of %d checks failed (%ld mma emulated)\n", fails, checks,
            gqemu::n_mma());

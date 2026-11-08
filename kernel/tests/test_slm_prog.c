@@ -615,6 +615,38 @@ static void test_gqa_selects_hmma(void)
     odd.dim[1] = 5; /* 12 heads over 5 KV heads: no whole groups */
     TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_W8, slm_prog_op_sass(&odd));
     TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&odd, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+
+    /* The 16-row boundary of the decode kernel's one M tile. */
+    struct slm_prog_op b = g;
+    b.rows = 1;
+    b.dim[0] = 16;
+    b.dim[1] = 1;
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_DEC, slm_prog_op_sass(&b));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&b, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_x);
+    b.dim[0] = 17;
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_PF, slm_prog_op_sass(&b));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&b, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&b, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_y); /* 17 rows: 2 M tiles, one CTA */
+
+    /* q, k, v are read 16 bytes at a time and out written 4: refuse less. */
+    struct slm_prog_op m = g;
+    m.rows = 1;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    m.ptr[0] = 0x18;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    m.ptr[0] = 0x10;
+    m.ptr[1] = 0x28;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    m.ptr[1] = 0x20;
+    m.ptr[2] = 0x34;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    m.ptr[2] = 0x30;
+    m.ptr[4] = 0x52;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    /* slm_gqa_w8 has no such requirement. */
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&m, SLM_SASS_GQA_W8, 0xA000, &l, a));
 }
 
 /* ---- Sessions on a fake channel ---- */
@@ -727,6 +759,9 @@ static struct {
     bool scattered;
     bool no_q6k;
     bool no_b64;
+    bool no_gqa_hmma; /* an operator library from before #1167 */
+    bool no_gqa_w8;
+    uint32_t last_sass; /* the last kernel looked up */
 } g_fk;
 
 static int fk_tlb(void)
@@ -737,6 +772,9 @@ static int fk_tlb(void)
 
 static int fk_kernel_va(uint32_t sass, uint64_t *va)
 {
+    g_fk.last_sass = sass;
+    if (g_fk.no_gqa_hmma && (sass == SLM_SASS_GQA_HMMA_DEC || sass == SLM_SASS_GQA_HMMA_PF)) return -1;
+    if (g_fk.no_gqa_w8 && sass == SLM_SASS_GQA_W8) return -1;
     if (g_fk.no_q6k && sass == SLM_SASS_MM_Q6K_HMMA_B1) return -1;
     if (g_fk.no_b64 && (sass == SLM_SASS_MM_Q4K_HMMA_BS || sass == SLM_SASS_MM_Q6K_HMMA_BS)) return -1;
     *va = 0x7000000ull + 0x1000u * sass;
@@ -1554,6 +1592,37 @@ static void test_kernel_lookup_and_batch(void)
     pmm_free_pages(w, wp);
 }
 
+/* #1167: an operator library without the HMMA GQA pair (SASS built before
+ * it) runs GQA on slm_gqa_w8 instead of refusing the program; with neither,
+ * the add fails as any missing kernel does. */
+static void test_gqa_falls_back_to_w8_without_hmma_sass(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    struct slm_prog_op g = {
+        .kernel = SLM_PROG_K_GQA, .rows = 1, .dim = { 12, 2, 128 },
+        .ptr = { 0x100, 0x200, 0x300, 0x400, 0x500 },
+    };
+    TEST_ASSERT_TRUE(slm_prog_add(o.handle, 0, &g) >= 0);
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_GQA_HMMA_DEC, g_fk.last_sass);
+    g_fk.no_gqa_hmma = true;
+    TEST_ASSERT_TRUE(slm_prog_add(o.handle, 0, &g) >= 0);
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_GQA_W8, g_fk.last_sass);
+    g.rows = 64; /* prefill too */
+    TEST_ASSERT_TRUE(slm_prog_add(o.handle, 0, &g) >= 0);
+    TEST_ASSERT_EQUAL_UINT32(SLM_SASS_GQA_W8, g_fk.last_sass);
+    g_fk.no_gqa_w8 = true;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_NO_KERNEL, slm_prog_add(o.handle, 0, &g));
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* ---- One lock for every writer of the GPU VM (#1173) ----
  *
  * The operator library's cold address space writes the same VM as the
@@ -2054,6 +2123,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_deadline_starts_at_the_doorbell);
     RUN_TEST(test_prog_barrier_cap);
     RUN_TEST(test_kernel_lookup_and_batch);
+    RUN_TEST(test_gqa_falls_back_to_w8_without_hmma_sass);
     RUN_TEST(test_vm_oplib_write_during_program_build);
     RUN_TEST(test_vm_program_build_during_oplib_write);
     RUN_TEST(test_vm_lock_irqs_masked_tries_once);

@@ -73,8 +73,11 @@ pub struct PlanFacts {
     /// Matmul MACs on tensor cores and in SIMT.
     pub macs_tc: u64,
     pub macs_simt: u64,
-    /// GQA's Q.K and p.V MACs per KV position, all SIMT.
+    /// GQA's Q.K and p.V MACs per KV position.
     pub gqa_macs_per_pos: u64,
+    /// GQA runs on the HMMA kernels (#1167): the rule of slm_prog.c's
+    /// gqa_sass, head dim 128 and whole groups. Otherwise it is SIMT.
+    pub gqa_on_hmma: bool,
     /// K and V bytes GQA reads per KV position.
     pub kv_bytes_per_pos: u64,
     pub arena_bytes: u64,
@@ -217,6 +220,7 @@ pub struct Telemetry {
     macs_tc: AtomicU64,
     macs_simt: AtomicU64,
     gqa_macs_per_pos: AtomicU64,
+    gqa_on_hmma: AtomicBool,
     kv_bytes_per_pos: AtomicU64,
     arena_bytes: AtomicU64,
 }
@@ -297,6 +301,7 @@ impl Telemetry {
             macs_tc: AtomicU64::new(0),
             macs_simt: AtomicU64::new(0),
             gqa_macs_per_pos: AtomicU64::new(0),
+            gqa_on_hmma: AtomicBool::new(false),
             kv_bytes_per_pos: AtomicU64::new(0),
             arena_bytes: AtomicU64::new(0),
         };
@@ -328,6 +333,7 @@ impl Telemetry {
         self.macs_tc.store(f.macs_tc, Relaxed);
         self.macs_simt.store(f.macs_simt, Relaxed);
         self.gqa_macs_per_pos.store(f.gqa_macs_per_pos, Relaxed);
+        self.gqa_on_hmma.store(f.gqa_on_hmma, Relaxed);
         self.kv_bytes_per_pos.store(f.kv_bytes_per_pos, Relaxed);
         self.arena_bytes.store(f.arena_bytes, Relaxed);
         if facts.is_some() {
@@ -619,6 +625,7 @@ impl Telemetry {
             self.macs_tc.load(Relaxed),
             self.macs_simt.load(Relaxed),
             self.gqa_macs_per_pos.load(Relaxed).saturating_mul(o.kv_used as u64),
+            self.gqa_on_hmma.load(Relaxed),
         );
     }
 }
@@ -650,13 +657,15 @@ pub fn mma_issue_bp(mma: u64, matmul_ns: u64, gpc_hz: u64) -> u32 {
     (issue_ns * 10_000 / matmul_ns as u128).min(u32::MAX as u128 - 1) as u32
 }
 
-/// Tensor-core share of matmul and GQA MACs, in hundredths of a percent.
-pub fn mac_share_bp(macs_tc: u64, macs_simt: u64, macs_gqa: u64) -> u32 {
+/// Tensor-core share of matmul and GQA MACs, in hundredths of a percent. GQA's
+/// count as tensor-core MACs when it runs on the HMMA kernels.
+pub fn mac_share_bp(macs_tc: u64, macs_simt: u64, macs_gqa: u64, gqa_on_hmma: bool) -> u32 {
+    let tc = macs_tc as u128 + if gqa_on_hmma { macs_gqa as u128 } else { 0 };
     if macs_tc == 0 {
         return NA;
     }
     let total = macs_tc as u128 + macs_simt as u128 + macs_gqa as u128;
-    (macs_tc as u128 * 10_000 / total) as u32
+    (tc * 10_000 / total) as u32
 }
 
 /// Mean nanoseconds the per-token writes take, for the cost check in `make test`.
@@ -768,9 +777,19 @@ mod tests {
     }
 
     #[test]
-    fn mac_share_counts_gqa_as_simt() {
-        assert_eq!(mac_share_bp(9947, 0, 53), 9947);
-        assert_eq!(mac_share_bp(0, 100, 5), NA, "SIMT matmuls: nothing on tensor cores");
+    fn mac_share_counts_gqa_where_it_runs() {
+        assert_eq!(mac_share_bp(9947, 0, 53, false), 9947, "SIMT GQA (slm_gqa_w8)");
+        assert_eq!(mac_share_bp(9947, 0, 53, true), 10_000, "HMMA GQA (#1167)");
+        assert_eq!(mac_share_bp(0, 100, 5, false), NA, "SIMT matmuls: nothing on tensor cores");
+        // Through the plan, as `slm stats --gpu` reads it.
+        let t = Telemetry::new(1, 16);
+        let f = PlanFacts { macs_tc: 9947, gqa_macs_per_pos: 1, gqa_on_hmma: true, ..PlanFacts::default() };
+        t.set_plan(Some(&f), 1);
+        t.prompt_begin(0, 53, 0);
+        let s = t.snapshot(0);
+        assert_eq!(s.tc_mac_share_bp, 10_000, "GQA on HMMA counts as tensor-core MACs");
+        t.set_plan(Some(&PlanFacts { gqa_on_hmma: false, ..f }), 1);
+        assert_eq!(t.snapshot(0).tc_mac_share_bp, 9947 * 10_000 / (9947 + 53), "SIMT GQA does not");
     }
 
     #[test]

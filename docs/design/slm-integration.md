@@ -492,7 +492,7 @@ exactly that, and `slm stats --gpu` doesn't print one under that name. It prints
 | Line | What it is | Measured on p1 under JetPack (C3K) |
 |---|---|---|
 | mma issue time / matmul wall | `mma` per token (from the plan) at the saturation rate of 3.44 G mma/s (`cpi_mma`, native CUDA 12.6, 1020 MHz, scaled to the GPC clock), over matmul time from the marks. An issue-slot share: an SM decoding weights between mma isn't idle. Needs `--profile`. | 4.6 % |
-| Tensor-core share of matmul+GQA MACs | MACs on tensor cores over all matmul MACs plus GQA's, which are SIMT. How much of the work is on tensor cores, not how busy they are. | 99.47 % |
+| Tensor-core share of matmul+GQA MACs | MACs on tensor cores over all matmul MACs plus GQA's. GQA's count as tensor-core MACs where it runs on the HMMA kernels (head dim 128, whole groups, #1167; the 99.47 % was measured before) and as SIMT otherwise. How much of the work is on tensor cores, not how busy they are. | 99.47 % |
 | SM tensor-pipe counter | Always `n/a` today. | Nsight's `sm__pipe_tensor_cycles_active`, being checked by C3K |
 
 Why no counter is read: nvgpu programs the performance monitors for its users but

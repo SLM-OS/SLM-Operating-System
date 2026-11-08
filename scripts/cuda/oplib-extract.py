@@ -75,7 +75,8 @@ OPS = {
     "slm_gqa_q8": ("gqa", "SIMT", "FP16", "nhq,B,1",
                    "As slm_gqa_w8, out in q8_1 rows of nhq*hd for SLM_MM_XQ."),
     "slm_gqa_w8": ("gqa", "SIMT", "FP16", "nhq,B,1",
-                   "As slm_gqa, positions split across 8 warps. Prefer this one."),
+                   "As slm_gqa, positions split across 8 warps. Prefer this one where "
+                   "slm_gqa_hmma_dec/_pf do not apply (hd != 128 or nhq not a multiple of nhkv)."),
     "slm_gqa_hmma_dec": ("gqa", "HMMA", "FP16", "nhkv,hd/16,1",
                          "As slm_gqa_w8 with Q.K^T and P.V on HMMA. hd == 128, "
                          "B * (nhq/nhkv) <= 16. Prefer this one for decode (#1167)."),

@@ -63,8 +63,19 @@ L2 scrubbed before each launch), median us per layer:
 | KV length | Decode `w8` | Decode `_hmma_dec` | Prefill 64 rows `w8` | Prefill `_hmma_pf` |
 |---|---|---|---|---|
 | 64 | 32.6 | 14.2 | 225.5 | 24.3 |
+| 128 | 48.0 | 14.3 | 503.9 | 33.8 |
+| 256 | 87.3 | 16.9 | 1061 | 48.8 |
 | 512 | 163.3 | 22.4 | 2182 | 84.2 |
+| 1024 | 314.4 | 32.9 | 4385 | 149.3 |
 | 2048 | 619.4 | 53.8 | 9004 | 279.3 |
+| 4096 | 1400 | 102.3 | 22923 | 534.9 |
+
+On SLM-OS (jetson-nano-2, UEFI-direct, 1020 / 3199 MHz) the pair took
+p1 to p3 from 49.5 to 53.0 tok/s, the 64-row prefill from 72.5 to 67.8 ms
+and the first token from 75 to 70 ms; a 1900-token generation at
+`--ctx 2048` ran at 51.8 tok/s against 37.8 on main, and positions about
+1980 to 2040 at 50.5 against 29.5. Greedy text changed on p2 only, at one
+near tie (#1167, PR #1178).
 
 Checks: `make test-gqa-emu` runs the kernel source lane by lane on the host
 against the exact reference (and three mutants that must fail);

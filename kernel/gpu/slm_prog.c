@@ -279,6 +279,10 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
              * their shape, so refuse it here. */
             uint32_t group = gqa_hmma_group(op);
             if (group == 0u) return -1;
+            /* q, k and v are read 16 bytes at a time, out written 4. */
+            if (((op->ptr[0] | op->ptr[1] | op->ptr[2]) & 15u) != 0u || (op->ptr[4] & 3u) != 0u) {
+                return -1;
+            }
             uint64_t m = (uint64_t)rows * group;
             l->grid_x = op->dim[1];
             if (sass == SLM_SASS_GQA_HMMA_DEC) {
@@ -953,7 +957,15 @@ static int encode_for(const struct prog_session *s, const struct slm_prog_op *op
     int sass = slm_prog_op_sass(op);
     if (sass < 0) return SLM_PROG_ERR_ARG;
     uint64_t va = 0;
-    if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+    if (s->be->kernel_va((uint32_t)sass, &va) != 0) {
+        /* An operator library built before the HMMA GQA pair (#1167) has
+         * slm_gqa_w8 only: run that rather than refuse the whole program. */
+        if (sass != SLM_SASS_GQA_HMMA_DEC && sass != SLM_SASS_GQA_HMMA_PF) {
+            return SLM_PROG_ERR_NO_KERNEL;
+        }
+        sass = SLM_SASS_GQA_W8;
+        if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+    }
     return slm_prog_encode(op, (uint32_t)sass, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
 }
 

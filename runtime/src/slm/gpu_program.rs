@@ -184,6 +184,12 @@ pub struct ModelDesc {
     pub out_norm: u64,
 }
 
+/// Whether `slm_prog.c` runs GQA on the HMMA kernels (#1167): the rule of its
+/// `gqa_sass`, head dim 128 and every query head in a whole group.
+pub fn gqa_on_hmma(n_head: u32, n_head_kv: u32, head_dim: u32) -> bool {
+    head_dim == 128 && n_head != 0 && n_head_kv != 0 && n_head % n_head_kv == 0
+}
+
 fn mm_kernel(t: GgmlType) -> Option<Kernel> {
     match t.0 {
         x if x == GgmlType::Q4_K.0 => Some(Kernel::MmQ4k),
@@ -1344,6 +1350,10 @@ impl GpuProgram {
         let d = &self.dims;
         let (l, nq, nkv, hd) = (d.layers as u64, d.n_head as u64, d.n_head_kv as u64, d.head_dim as u64);
         f.gqa_macs_per_pos = 2 * l * nq * hd;
+        f.gqa_on_hmma = gqa_on_hmma(d.n_head, d.n_head_kv, d.head_dim);
+        if f.gqa_on_hmma {
+            f.class_tier[OpClass::Gqa as usize] = Tier::Hmma as u32;
+        }
         f.kv_bytes_per_pos = 2 * l * nkv * hd * FP16;
         f
     }
@@ -2921,6 +2931,18 @@ mod tests {
 
     /// Every launch is in a class; a class boundary always has a barrier, so
     /// the marks can attribute all the time; and the plan's figures add up.
+    /// The same rule as slm_prog.c's gqa_sass (kernel/tests/test_slm_prog.c
+    /// test_gqa_selects_hmma), so `slm stats --gpu` counts GQA where it runs.
+    #[test]
+    fn gqa_on_hmma_follows_the_kernel_choice() {
+        assert!(gqa_on_hmma(12, 2, 128), "Qwen2.5-1.5B");
+        assert!(gqa_on_hmma(16, 1, 128));
+        assert!(gqa_on_hmma(8, 8, 128));
+        assert!(!gqa_on_hmma(8, 2, 32), "tiny test model: slm_gqa_w8");
+        assert!(!gqa_on_hmma(12, 5, 128), "no whole groups");
+        assert!(!gqa_on_hmma(12, 0, 128));
+    }
+
     #[test]
     fn plan_facts_add_up_and_marks_cover_every_boundary() {
         soft::reset_knobs();
@@ -2942,7 +2964,9 @@ mod tests {
         assert!(f.marks > 0 && f.marks <= f.barriers);
         assert!(f.mma > 0 && f.macs_tc > 0 && f.weight_bytes > 0);
         assert_eq!(f.macs_simt, 0);
-        // Only matmuls are on tensor cores.
+        // The tiny model's head dim is 32, so its GQA stays on slm_gqa_w8 and
+        // only matmuls are on tensor cores.
+        assert!(!f.gqa_on_hmma);
         for (i, t) in f.class_tier.iter().enumerate() {
             let mm = i == OpClass::MatmulAttn as usize || i == OpClass::MatmulMlp as usize || i == OpClass::LmHead as usize;
             assert_eq!(*t, if mm { Tier::Hmma as u32 } else { Tier::Simt as u32 }, "class {i}");

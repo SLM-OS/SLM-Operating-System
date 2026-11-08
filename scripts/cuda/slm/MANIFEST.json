@@ -1328,7 +1328,7 @@
      "size": 4
     }
    ],
-   "doc": "As slm_gqa, positions split across 8 warps. Prefer this one."
+   "doc": "As slm_gqa, positions split across 8 warps. Prefer this one where slm_gqa_hmma_dec/_pf do not apply (hd != 128 or nhq not a multiple of nhkv)."
   },
   {
    "name": "slm_kv_append",

@@ -1844,6 +1844,7 @@ help:
 	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
 	@echo "  oplib-shaders         Build every *_shader.sass and the SLM op table (requires CUDA Toolkit)"
 	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
+	@echo "  test-gqa-emu          HMMA GQA kernel lane by lane on the host, plus mutants (GQA_EMU_ARGS=--quick)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
