@@ -35,7 +35,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
-| C0 | Architecture and firmware facts | built (b4f95d20), critic round 1 running | 1 |
+| C0 | Architecture and firmware facts | round 1 FAIL (narrow), builder fixing | 1 |
 | C1 | Linux reference bar | building | 0 |
 | C2 | `coherency` verb and litmus suite | building (QEMU stage) | 0 |
 | C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
@@ -56,6 +56,16 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - Spinlock `DC CIVAC` path: first appears with `53515d00` (04-16, #215).
 
 ## Critic verdicts
+
+- C0 round 1: FAIL, narrowly. Independent answers to all seven questions
+  agree with the builder; about 60 citations opened, all matched, no claim
+  wrong. Failed on its own labeling rule: three inferences stated as fact
+  (Pi 5 EEPROM BL31 contents, Tegra cross-cluster fabric, the caches-off
+  control returning a deterministic stale value). Missing: HCR_EL2.TIDCP,
+  DSU 5.9 SoC interconnect caveat, EL3 code before BL31, CPU 0 not reset
+  across kexec, the full booting.rst sentence. Overturning observation named
+  by the critic: a Jetson message-passing litmus between CPUs 0-3 and 4-5
+  that reads stale data with identical IS WB mappings, MMU and caches on.
 
 ## Failed approaches
 
