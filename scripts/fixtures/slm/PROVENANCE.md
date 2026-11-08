@@ -19,15 +19,17 @@ top token.
   llama.cpp's Qwen2 graph: `q`, `k` and `v4` in Q4_K, `v6` in Q6_K, with an
   exact dot and per-block sums of |w| for Q6_K.
 - Real model (`qwen25_real_golden.rec`, #1165), the vocabulary source's
-  full GGUF: llama.cpp's greedy run (plain argmax, CPU) on the raw prompt
-  `One, two, three, four, five,` (ids `[3966, 11, 1378, 11, 2326, 11, 3040, 11, 4236, 11]`), tokens `[4743, 11, 8094, 11, 8063, 11, 11627, 11]`, top-1 margin
-  at least 1.0 at every step (1.901 here); and for each of
-  those 8 steps the full row of logits from the exact CPU reference,
-  the GPU program's own reference with exact dot products, run on the host
-  by `golden_real_model_write_fixture`. Rows are i16 with a per-row offset
-  and scale (stored error at most 0.001). `slm golden` compares the GPU
-  program with them on a board (`docs/deploy/jetson-uefi-direct.md`); its
-  `drop-bias` mutation zeroes layer 0's Q, K and V biases.
+  full GGUF. Per case, llama.cpp's greedy run (plain argmax, CPU) with a
+  top-1 margin of at least 1.0 at every step, and for each of those
+  steps the full row of logits from the exact CPU reference, the GPU
+  program's own reference with exact dot products, run on the host one
+  token at a time by `golden_real_model_write_fixture`. Rows are i16 with a
+  per-row offset and scale (stored error at most 0.001). `slm golden`
+  compares the GPU program with them on a board
+  (`docs/deploy/jetson-uefi-direct.md`); its `drop-bias` mutation zeroes
+  layer 0's Q, K and V biases.
+  - `short`: prompt `One, two, three, four, five,` (raw), 10 ids; llama.cpp's tokens `[4743, 11, 8094, 11, 8063, 11, 11627, 11]`, smallest top-1 margin 1.901.
+  - `long`: prompt `bench/475/prompts/p1.txt` (chat template, special tokens parsed), 64 ids; llama.cpp's tokens `[33026, 4938, 374, 264]`, smallest top-1 margin 2.752.
 
 Token 2 is excluded from the greedy run, a leftover from when `rust_slm_prompt`
 hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
@@ -37,7 +39,7 @@ hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
 |---|---|
 | `golden_ops.rec` | 70902 |
 | `golden_qkv_bias.rec` | 286173 |
-| `qwen25_real_golden.rec` | 2431527 |
+| `qwen25_real_golden.rec` | 3648054 |
 | `qwen_vocab.gguf` | 5928416 |
 | `tiny_qwen2.gguf` | 773280 |
 | `tiny_qwen2_greedy.rec` | 12018 |

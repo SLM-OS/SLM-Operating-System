@@ -365,13 +365,25 @@ def gen_qkv_bias(driver, tmp):
 # --- the real model, for the hardware target (#1165) -------------------------------
 
 REAL_MODEL_SHA256 = "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
-# Raw prompts, tried in order; the first whose continuation qualifies is kept.
-REAL_PROMPTS = [
-    "The capital of France is Paris. The capital of Germany is",
-    "Monday, Tuesday, Wednesday, Thursday,",
-    "One, two, three, four, five,",
+# Each case: its name, how many greedy tokens to compare, the prompt length it
+# needs (None: any), and candidate prompts tried in order, the first whose
+# continuation qualifies being kept. A candidate is raw text, or a file under
+# the repository holding a rendered chat prompt (special tokens parsed).
+# `long` is 64 tokens, the most rows one GPU program step takes, so in batch
+# mode its prompt goes through the largest prefill; the benchmark prompts of
+# bench/475 are exactly that long.
+REAL_CASES = [
+    ("short", 8, None, [
+        ("text", "The capital of France is Paris. The capital of Germany is"),
+        ("text", "Monday, Tuesday, Wednesday, Thursday,"),
+        ("text", "One, two, three, four, five,"),
+    ]),
+    ("long", 4, 64, [
+        ("file", "bench/475/prompts/p1.txt"),
+        ("file", "bench/475/prompts/p2.txt"),
+        ("file", "bench/475/prompts/p3.txt"),
+    ]),
 ]
-REAL_GENERATE = 8
 # Every compared step needs a clear winner: the board must match llama.cpp's
 # top token, and llama.cpp's activation quantization moves logits by up to
 # about 1 (ADR 0004), so a near tie would test the reference, not SLM-OS.
@@ -383,44 +395,57 @@ REAL_MUTATE_LAYER = 0
 
 
 def gen_real(llama, driver, model, tmp):
-    """`qwen25_real_golden.rec`: llama.cpp's greedy run on the real model, then
-    the exact CPU reference over the same tokens. The reference comes from the
-    runtime's host test `golden_real_model_write_fixture` (the GPU program on
-    the software GPU, which runs the exact reference), so cargo runs here."""
+    """`qwen25_real_golden.rec`: llama.cpp's greedy run on the real model for
+    each case, then the exact CPU reference over the same tokens. The
+    reference comes from the runtime's host test
+    `golden_real_model_write_fixture` (the GPU program on the software GPU,
+    which runs the exact reference), so cargo runs here."""
     if sha256(model) != REAL_MODEL_SHA256:
         raise SystemExit(f"{model} is not the model the fixture is for")
-    for text in REAL_PROMPTS:
-        ids = llama_tokenize(llama, model, text, False, tmp)
-        greedy = Path(tmp) / "real_greedy.rec"
-        run(driver, "greedy", model, ",".join(map(str, ids)), REAL_GENERATE, greedy)
-        rec = read_records(greedy)
-        toks = np.frombuffer(rec["greedy.tokens"], dtype="<i4")
-        margins = np.frombuffer(rec["greedy.margins"], dtype="<f4")
-        print(f"prompt {text!r}: ids {ids} tokens {toks.tolist()} "
-              f"min margin {margins.min():.3f}")
-        if margins.min() < REAL_MIN_MARGIN or REAL_STOP_IDS & set(toks.tolist()):
-            continue
-        llama_rec = Path(tmp) / "real_llama.rec"
-        write_records(llama_rec, {
-            "prompt.text": text.encode(),
-            "prompt.ids": np.asarray(ids, dtype="<u4").tobytes(),
-            "greedy.tokens": rec["greedy.tokens"],
-            "greedy.margins": rec["greedy.margins"],
-        })
-        out = OUT / "qwen25_real_golden.rec"
-        env = dict(os.environ, SLM_GOLDEN_MODEL=str(model), SLM_REAL_LLAMA_REC=str(llama_rec),
-                   SLM_REAL_LAYER=str(REAL_MUTATE_LAYER), SLM_REAL_OUT=str(out))
-        r = subprocess.run(
-            ["cargo", "test", "--release", "--target", "x86_64-unknown-linux-gnu",
-             "--features", "slm", "golden_real_model_write_fixture", "--",
-             "--ignored", "--nocapture", "--test-threads=1"],
-            cwd=REPO / "runtime", env=env)
-        if r.returncode != 0:
-            # The exact reference disagreed with llama.cpp somewhere.
-            print(f"prompt {text!r}: exact reference rejected it")
-            continue
-        return text, ids, toks.tolist(), float(margins.min())
-    raise SystemExit("no prompt met the criteria")
+    llama_recs = {}
+    chosen = []
+    for name, steps, length, candidates in REAL_CASES:
+        for kind, value in candidates:
+            if kind == "text":
+                text = value
+                ids = llama_tokenize(llama, model, text, False, tmp)
+            else:
+                text = (REPO / value).read_text()
+                ids = llama_tokenize(llama, model, text, True, tmp)
+            greedy = Path(tmp) / "real_greedy.rec"
+            run(driver, "greedy", model, ",".join(map(str, ids)), steps, greedy)
+            rec = read_records(greedy)
+            toks = np.frombuffer(rec["greedy.tokens"], dtype="<i4")
+            margins = np.frombuffer(rec["greedy.margins"], dtype="<f4")
+            print(f"{name}: {kind} {value!r}: {len(ids)} ids, tokens {toks.tolist()} "
+                  f"min margin {margins.min():.3f}")
+            if ((length is not None and len(ids) != length)
+                    or margins.min() < REAL_MIN_MARGIN or REAL_STOP_IDS & set(toks.tolist())):
+                continue
+            llama_recs.update({
+                f"{name}.prompt.text": text.encode(),
+                f"{name}.prompt.ids": np.asarray(ids, dtype="<u4").tobytes(),
+                f"{name}.tokens": rec["greedy.tokens"],
+                f"{name}.margins": rec["greedy.margins"],
+            })
+            chosen.append((name, value, len(ids), toks.tolist(), float(margins.min())))
+            break
+        else:
+            raise SystemExit(f"no prompt met the criteria for case {name}")
+    llama_recs["cases"] = ",".join(c[0] for c in chosen).encode()
+    llama_rec = Path(tmp) / "real_llama.rec"
+    write_records(llama_rec, llama_recs)
+    out = OUT / "qwen25_real_golden.rec"
+    env = dict(os.environ, SLM_GOLDEN_MODEL=str(model), SLM_REAL_LLAMA_REC=str(llama_rec),
+               SLM_REAL_LAYER=str(REAL_MUTATE_LAYER), SLM_REAL_OUT=str(out))
+    r = subprocess.run(
+        ["cargo", "test", "--release", "--target", "x86_64-unknown-linux-gnu",
+         "--features", "slm", "golden_real_model_write_fixture", "--",
+         "--ignored", "--nocapture", "--test-threads=1"],
+        cwd=REPO / "runtime", env=env)
+    if r.returncode != 0:
+        raise SystemExit("the exact reference disagreed with llama.cpp's top token")
+    return chosen
 
 
 # --- tiny model ----------------------------------------------------------------
@@ -603,8 +628,8 @@ def main():
             else:
                 if args.model is None:
                     raise SystemExit("--only real-model needs --model")
-                text, ids, toks, margin = gen_real(llama, driver, args.model.resolve(), tmp)
-                print(f"real model: prompt {text!r} ids {ids} tokens {toks} min margin {margin:.3f}")
+                for case in gen_real(llama, driver, args.model.resolve(), tmp):
+                    print("real model case %s: %r, %d ids, tokens %s, min margin %.3f" % case)
                 name = "qwen25_real_golden.rec"
         model_sha, model_name, seed, toks, margin = provenance_facts()
         write_provenance(sha, model_sha, model_name, seed, toks, margin)
@@ -646,21 +671,30 @@ def real_provenance():
     if not path.exists():
         return ""
     r = read_records(path)
-    text = r["real.prompt.text"].decode()
-    ids = np.frombuffer(r["real.prompt.ids"], dtype="<u4").tolist()
-    toks = np.frombuffer(r["real.tokens"], dtype="<u4").tolist()
-    margins = np.frombuffer(r["real.margins"], dtype="<f4")
     layer = int(np.frombuffer(r["real.mutate.layer"], dtype="<u4")[0])
+    lines = []
+    for name in r["real.cases"].decode().split(","):
+        text = r[f"real.{name}.prompt.text"].decode()
+        ids = np.frombuffer(r[f"real.{name}.prompt.ids"], dtype="<u4").tolist()
+        toks = np.frombuffer(r[f"real.{name}.tokens"], dtype="<u4").tolist()
+        margins = np.frombuffer(r[f"real.{name}.margins"], dtype="<f4")
+        source = next((v for n, _, _, cands in REAL_CASES if n == name
+                       for k, v in cands if k == "file" and (REPO / v).read_text() == text), None)
+        prompt = f"`{source}` (chat template, special tokens parsed)" if source else f"`{text}` (raw)"
+        lines.append(f"  - `{name}`: prompt {prompt}, {len(ids)} ids; llama.cpp's tokens "
+                     f"`{toks}`, smallest top-1 margin {margins.min():.3f}.")
+    cases = "\n".join(lines)
     return f"""- Real model (`qwen25_real_golden.rec`, #1165), the vocabulary source's
-  full GGUF: llama.cpp's greedy run (plain argmax, CPU) on the raw prompt
-  `{text}` (ids `{ids}`), tokens `{toks}`, top-1 margin
-  at least {REAL_MIN_MARGIN} at every step ({margins.min():.3f} here); and for each of
-  those {len(toks)} steps the full row of logits from the exact CPU reference,
-  the GPU program's own reference with exact dot products, run on the host
-  by `golden_real_model_write_fixture`. Rows are i16 with a per-row offset
-  and scale (stored error at most 0.001). `slm golden` compares the GPU
-  program with them on a board (`docs/deploy/jetson-uefi-direct.md`); its
-  `drop-bias` mutation zeroes layer {layer}'s Q, K and V biases.
+  full GGUF. Per case, llama.cpp's greedy run (plain argmax, CPU) with a
+  top-1 margin of at least {REAL_MIN_MARGIN} at every step, and for each of those
+  steps the full row of logits from the exact CPU reference, the GPU
+  program's own reference with exact dot products, run on the host one
+  token at a time by `golden_real_model_write_fixture`. Rows are i16 with a
+  per-row offset and scale (stored error at most 0.001). `slm golden`
+  compares the GPU program with them on a board
+  (`docs/deploy/jetson-uefi-direct.md`); its `drop-bias` mutation zeroes
+  layer {layer}'s Q, K and V biases.
+{cases}
 """
 
 

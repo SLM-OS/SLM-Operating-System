@@ -618,33 +618,39 @@ pub fn check_greedy(model: u32, r: &Records<'_>) -> Result<(), Mismatch> {
 // The real Qwen2.5-1.5B GGUF is 1.1 GB, too big for CI, so its goldens run on
 // a board after a UEFI-direct boot, on the model `/boot/models` delivers. The
 // fixture (`scripts/fixtures/slm/qwen25_real_golden.rec`, made on the host by
-// `scripts/tools/slm-gen-goldens.py --only real-model`) holds a raw prompt,
-// llama.cpp's greedy continuation and, for every step that predicts one of
-// those tokens, the full row of logits from the exact CPU reference: the GPU
-// program's own reference with exact dot products, run on the host (ADR 0004).
-// The board runs the GPU program over the same tokens, teacher-forced, and
-// each step must have every logit within `GOLDEN_EXACT_TOLERANCE` (0.1) of
-// that row and the same top token as llama.cpp.
+// `scripts/tools/slm-gen-goldens.py --only real-model`) holds cases, each a
+// prompt, llama.cpp's greedy continuation of it and, for every step that
+// predicts one of those tokens, the full row of logits from the exact CPU
+// reference: the GPU program's own reference with exact dot products, run on
+// the host (ADR 0004). The board builds the GPU program as `slm launch --gpu
+// on` does and drives it with `GpuProgram::run`, the call a session's decode
+// makes, over the same tokens, teacher-forced. Each step must have every logit
+// within `GOLDEN_EXACT_TOLERANCE` (0.1) of that row and the same top token as
+// llama.cpp. The `long` case's prompt is 64 tokens, so in batch mode it goes
+// through one prefill step of 64 rows, the most the program takes.
 
-/// Feed the prompt as one prefill batch, as `slm prompt` does, instead of one
+/// Feed each prompt as one prefill batch, as `slm prompt` does, instead of one
 /// token at a time. Keep in step with `slm_shell.c`.
 pub const REAL_FLAG_BATCH: u32 = 1;
 /// Deliberate mutation: zero the Q, K and V biases of the layer the fixture
-/// names in the loaded weights for this run, then put them back.
+/// names in the loaded weights the GPU program maps, for this run, then put
+/// them back.
 pub const REAL_FLAG_DROP_BIAS: u32 = 2;
 
-/// Context the program is built with; the fixture's steps must fit.
-const REAL_CTX: usize = 64;
+/// Context the program is built with, as `slm launch --ctx 512`.
+const REAL_CTX: usize = 512;
 
 /// Keep in step with `SlmRealGoldenReport` in `kernel/src/slm_shell.c`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RealGoldenReport {
-    /// Steps compared: one per token of llama.cpp's continuation.
+    /// Steps compared over all cases: one per token of llama.cpp's
+    /// continuations.
     pub steps: u32,
     /// Steps whose top logit is llama.cpp's greedy token.
     pub top_matches: u32,
-    /// First step with a logit more than 0.1 from the exact reference, or -1.
+    /// First step (counted over all cases) with a logit more than 0.1 from
+    /// the exact reference, or -1.
     pub first_bad_step: i32,
     pub first_bad_index: i32,
     /// Thousandths, since kernel C has no floating point.
@@ -658,6 +664,11 @@ pub struct RealGoldenReport {
     pub mutated_bytes: u32,
     /// 1 once a mutation was undone and the bytes read back as they were.
     pub restored: u32,
+    /// Cases run.
+    pub cases: u32,
+    /// Most rows one GPU program step took (the largest prefill batch).
+    pub max_rows: u32,
+    /// GPU time per decode token in the last case.
     pub gpu_us_per_token: u64,
 }
 
@@ -671,52 +682,72 @@ impl RealGoldenReport {
     }
 }
 
-/// The fixture, parsed and checked for consistency.
-struct RealFixture {
+/// One case of the fixture.
+struct RealCase<'a> {
+    name: &'a str,
     ids: Vec<u32>,
     tokens: Vec<u32>,
     margins: Vec<f32>,
-    n_vocab: usize,
-    model_bytes: usize,
     offset: Vec<f32>,
     scale: Vec<f32>,
     /// `steps * n_vocab` little-endian i16, row-major.
-    q: &'static [u8],
+    q: &'a [u8],
+}
+
+/// The fixture, parsed and checked for consistency.
+struct RealFixture<'a> {
+    cases: Vec<RealCase<'a>>,
+    n_vocab: usize,
+    model_bytes: usize,
     mutate_layer: u32,
 }
 
-impl RealFixture {
-    fn parse(r: &Records<'static>) -> Result<Self, &'static str> {
+impl<'a> RealFixture<'a> {
+    fn parse(r: &Records<'a>) -> Result<Self, &'static str> {
         let bad = |_| "record file is missing fields";
-        let ids = r.u32s("real.prompt.ids").map_err(bad)?;
-        let tokens = r.u32s("real.tokens").map_err(bad)?;
-        let margins = r.f32s("real.margins").map_err(bad)?;
-        let n_vocab = *r.u32s("real.n_vocab").map_err(bad)?.first().ok_or("no vocabulary size")? as usize;
-        let model_bytes = *r.u32s("real.model.bytes").map_err(bad)?.first().ok_or("no model size")? as usize;
-        let offset = r.f32s("real.exact.offset").map_err(bad)?;
-        let scale = r.f32s("real.exact.scale").map_err(bad)?;
-        let q = r.bytes("real.exact.q").map_err(bad)?;
-        let mutate_layer = *r.u32s("real.mutate.layer").map_err(bad)?.first().ok_or("no layer")?;
-        let steps = tokens.len();
-        if ids.is_empty()
-            || steps == 0
-            || n_vocab == 0
-            || margins.len() != steps
-            || offset.len() != steps
-            || scale.len() != steps
-            || Some(q.len()) != steps.checked_mul(n_vocab).and_then(|n| n.checked_mul(2))
-        {
+        let one = |name: &str| -> Result<u32, &'static str> {
+            r.u32s(name).map_err(bad)?.first().copied().ok_or("record file is missing fields")
+        };
+        let n_vocab = one("real.n_vocab")? as usize;
+        let model_bytes = one("real.model.bytes")? as usize;
+        let mutate_layer = one("real.mutate.layer")?;
+        let names = core::str::from_utf8(r.bytes("real.cases").map_err(bad)?)
+            .map_err(|_| "record file is missing fields")?;
+        let mut cases = Vec::new();
+        for name in names.split(',') {
+            let field = |f: &str| format!("real.{name}.{f}");
+            let ids = r.u32s(&field("prompt.ids")).map_err(bad)?;
+            let tokens = r.u32s(&field("tokens")).map_err(bad)?;
+            let margins = r.f32s(&field("margins")).map_err(bad)?;
+            let offset = r.f32s(&field("exact.offset")).map_err(bad)?;
+            let scale = r.f32s(&field("exact.scale")).map_err(bad)?;
+            let q = r.bytes(&field("exact.q")).map_err(bad)?;
+            let steps = tokens.len();
+            if ids.is_empty()
+                || steps == 0
+                || margins.len() != steps
+                || offset.len() != steps
+                || scale.len() != steps
+                || Some(q.len()) != steps.checked_mul(n_vocab).and_then(|n| n.checked_mul(2))
+            {
+                return Err("record file fields disagree");
+            }
+            // The last generated token is never fed, so the program sees this many.
+            if ids.len() + steps - 1 > REAL_CTX {
+                return Err("record file is longer than the program's context");
+            }
+            cases.push(RealCase { name, ids, tokens, margins, offset, scale, q });
+        }
+        if n_vocab == 0 || cases.is_empty() {
             return Err("record file fields disagree");
         }
-        // The last generated token is never fed, so the program sees this many.
-        if ids.len() + steps - 1 > REAL_CTX {
-            return Err("record file is longer than the program's context");
-        }
-        Ok(Self { ids, tokens, margins, n_vocab, model_bytes, offset, scale, q, mutate_layer })
+        Ok(Self { cases, n_vocab, model_bytes, mutate_layer })
     }
+}
 
-    fn want(&self, step: usize, i: usize) -> f32 {
-        let at = (step * self.n_vocab + i) * 2;
+impl RealCase<'_> {
+    fn want(&self, n_vocab: usize, step: usize, i: usize) -> f32 {
+        let at = (step * n_vocab + i) * 2;
         let q = i16::from_le_bytes([self.q[at], self.q[at + 1]]);
         self.offset[step] + self.scale[step] * q as f32
     }
@@ -732,7 +763,9 @@ impl BiasMutation {
     /// Zero `blk.<layer>.attn_{q,k,v}.bias` in the loaded weights, under the
     /// registry lock, which every CPU forward pass holds while it reads them.
     /// Refused while a GPU program maps the weights: it reads them without
-    /// that lock.
+    /// that lock. The programs this run builds afterwards map the zeroed
+    /// bytes: each GPU step ends with an L2 flush and sysmem invalidate, and
+    /// the bytes are cleaned to memory here.
     fn apply(model: usize, layer: u32) -> Result<Self, &'static str> {
         let saved = registry::with_loaded_slm(model, |slm| {
             // Under the slot lock, which every new pin takes too.
@@ -761,7 +794,13 @@ impl BiasMutation {
             Ok(saved)
         })
         .ok_or("model not loaded")??;
-        Ok(Self { model, saved })
+        let m = Self { model, saved };
+        let line = format!(
+            "[slm] real golden: drop-bias zeroed blk.{layer}.attn_q/k/v.bias ({} bytes) in the weights the GPU program maps\n\0",
+            m.bytes()
+        );
+        crate::kernel_ffi::print(line.as_bytes());
+        Ok(m)
     }
 
     /// Put the bytes back and read them back. True when they match.
@@ -771,8 +810,8 @@ impl BiasMutation {
                 return false;
             };
             for (off, bytes) in &self.saved {
-                // SAFETY: as in `apply`; the program that read the zeroed
-                // bytes has been dropped, so no GPU mapping is left.
+                // SAFETY: as in `apply`; the programs that read the zeroed
+                // bytes have been dropped, so no GPU mapping is left.
                 unsafe {
                     let p = base.as_ptr().add(*off);
                     core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
@@ -792,12 +831,12 @@ impl BiasMutation {
     }
 }
 
-/// Run the fixture on `model` through the GPU program and compare (see the
-/// section comment). `Err` when the run itself failed; a mismatch is `Ok`
-/// with `rep` saying where ([`RealGoldenReport::passed`]).
+/// Run every case of the fixture on `model` through the GPU program and
+/// compare (see the section comment). `Err` when a run itself failed; a
+/// mismatch is `Ok` with `rep` saying where ([`RealGoldenReport::passed`]).
 pub fn real_golden_run(
     model: u32,
-    rec: &'static [u8],
+    rec: &[u8],
     flags: u32,
     rep: &mut RealGoldenReport,
 ) -> Result<(), &'static str> {
@@ -821,7 +860,15 @@ pub fn real_golden_run(
     } else {
         None
     };
-    let result = real_run_and_compare(model, &fx, flags & REAL_FLAG_BATCH != 0, rep);
+    let mut result = Ok(());
+    let mut max_err = 0.0f32;
+    for case in &fx.cases {
+        result = real_run_case(model, &fx, case, flags & REAL_FLAG_BATCH != 0, &mut max_err, rep);
+        if result.is_err() {
+            break;
+        }
+        rep.cases += 1;
+    }
     if let Some(m) = mutation {
         rep.restored = m.restore() as u32;
         if rep.restored == 0 {
@@ -831,10 +878,12 @@ pub fn real_golden_run(
     result
 }
 
-fn real_run_and_compare(
+fn real_run_case(
     model: u32,
-    fx: &RealFixture,
+    fx: &RealFixture<'_>,
+    case: &RealCase<'_>,
     batched: bool,
+    max_err: &mut f32,
     rep: &mut RealGoldenReport,
 ) -> Result<(), &'static str> {
     use crate::inference::ops_transformer::{RopePairing, RopeTable};
@@ -846,7 +895,8 @@ fn real_run_and_compare(
     .ok_or("model not loaded")?;
     let rope = RopeTable::new(head_dim as usize, REAL_CTX, base, RopePairing::for_arch(arch));
     let vocab = fx.n_vocab as u32;
-    // Read and pin under the registry lock, build without it, as a session does.
+    // Read and pin under the registry lock, build without it, as
+    // `Session::choose_path` does for `slm launch --gpu on`.
     let prep = registry::with_loaded_slm(model as usize, |slm| GpuProgram::prepare(slm, vocab))
         .ok_or("model not loaded")?;
     let mut prog = prep
@@ -855,16 +905,29 @@ fn real_run_and_compare(
             BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
             BuildError::Failed(w) => w,
         })?;
+    let p = case.ids.len();
+    let line = format!(
+        "[slm] real golden {}: GPU program(launches={} barriers={} batch={} arena={}MB), ctx {REAL_CTX}, prompt {p} tokens {}, {} steps\n\0",
+        case.name,
+        prog.launches,
+        prog.barriers,
+        prog.max_batch,
+        prog.data_bytes >> 20,
+        if batched { "in one prefill step" } else { "one decode step each" },
+        case.tokens.len(),
+    );
+    crate::kernel_ffi::print(line.as_bytes());
 
-    let mut max_err = 0.0f32;
+    let first_step = rep.steps;
     let mut compare = |step: usize, out: &[f32], rep: &mut RealGoldenReport| -> Result<(), &'static str> {
         if out.len() != fx.n_vocab {
             return Err("the program returned a short row");
         }
+        let global = (first_step as usize + step) as i32;
         let (mut step_max, mut at) = (0.0f32, 0usize);
         let mut top = 0usize;
         for i in 0..fx.n_vocab {
-            let want = fx.want(step, i);
+            let want = case.want(fx.n_vocab, step, i);
             let e = (out[i] - want).abs();
             // NaN fails both tests.
             if !(e <= step_max) {
@@ -872,7 +935,7 @@ fn real_run_and_compare(
                 at = i;
             }
             if !(e <= GOLDEN_EXACT_TOLERANCE) && rep.first_bad_step < 0 {
-                rep.first_bad_step = step as i32;
+                rep.first_bad_step = global;
                 rep.first_bad_index = i as i32;
                 rep.first_bad_got_milli = (out[i] * 1000.0) as i32;
                 rep.first_bad_want_milli = (want * 1000.0) as i32;
@@ -881,48 +944,51 @@ fn real_run_and_compare(
                 top = i;
             }
         }
-        let want_top = fx.tokens[step];
+        let want_top = case.tokens[step];
         if top as u32 == want_top {
             rep.top_matches += 1;
         } else if rep.first_top_miss_step < 0 {
-            rep.first_top_miss_step = step as i32;
+            rep.first_top_miss_step = global;
         }
-        if !(step_max <= max_err) {
-            max_err = step_max;
+        if !(step_max <= *max_err) {
+            *max_err = step_max;
         }
-        rep.max_err_milli = if max_err.is_finite() { (max_err * 1000.0) as i32 } else { i32::MAX };
+        rep.max_err_milli = if max_err.is_finite() { (*max_err * 1000.0) as i32 } else { i32::MAX };
         rep.steps += 1;
-        let mut line = String::new();
-        let _ = core::fmt::Write::write_fmt(
-            &mut line,
-            format_args!(
-                "[slm] real golden step {step}: max err {} milli at {at}, top {top} want {want_top} (llama.cpp margin {} milli)\n\0",
-                if step_max.is_finite() { (step_max * 1000.0) as i32 } else { i32::MAX },
-                (fx.margins[step] * 1000.0) as i32,
-            ),
+        let line = format!(
+            "[slm] real golden {} step {step}: max err {} milli at {at}, top {top} want {want_top} (llama.cpp margin {} milli)\n\0",
+            case.name,
+            if step_max.is_finite() { (step_max * 1000.0) as i32 } else { i32::MAX },
+            (case.margins[step] * 1000.0) as i32,
         );
         crate::kernel_ffi::print(line.as_bytes());
         Ok(())
     };
 
-    let p = fx.ids.len();
     let mut out = Vec::new();
     if batched {
         if p < 2 || (prog.max_batch as usize) < p {
             return Err("the prompt does not fit one prefill batch");
         }
-        prog.run(&fx.ids, 0, &mut out)?;
+        prog.run(&case.ids, 0, &mut out)?;
+        rep.max_rows = rep.max_rows.max(p as u32);
     } else {
-        for (i, &t) in fx.ids.iter().enumerate() {
+        for (i, &t) in case.ids.iter().enumerate() {
             prog.run(core::slice::from_ref(&t), i, &mut out)?;
         }
+        rep.max_rows = rep.max_rows.max(1);
     }
     compare(0, &out, rep)?;
-    for step in 1..fx.tokens.len() {
-        prog.run(core::slice::from_ref(&fx.tokens[step - 1]), p + step - 1, &mut out)?;
+    for step in 1..case.tokens.len() {
+        prog.run(core::slice::from_ref(&case.tokens[step - 1]), p + step - 1, &mut out)?;
         compare(step, &out, rep)?;
     }
     rep.gpu_us_per_token = prog.gpu_us_per_token();
+    let line = format!(
+        "[slm] real golden {}: {} GPU steps, {} tokens, {} us per decode token\n\0",
+        case.name, prog.steps, prog.tokens, rep.gpu_us_per_token,
+    );
+    crate::kernel_ffi::print(line.as_bytes());
     Ok(())
 }
 
@@ -1266,21 +1332,23 @@ mod tests {
     /// reference: 1% of the 0.1 the board allows.
     const REAL_STORE_ERROR: f32 = 1e-3;
 
-    /// The fixture `slm golden` reads, made on the host. The GPU program runs
-    /// on the software GPU, which executes the exact CPU reference (`exact:
-    /// true`), over the prompt and llama.cpp's tokens, teacher-forced; each
-    /// step that predicts one of those tokens keeps its full row of logits,
-    /// stored as i16 with a per-row offset and scale. Panics if the exact
-    /// reference's top token is not llama.cpp's at some step, since the board
-    /// could then never pass.
-    fn make_real_fixture(
-        model: u32,
-        text: &[u8],
-        ids: &[u32],
-        tokens: &[u32],
-        margins: &[f32],
-        mutate_layer: u32,
-    ) -> Vec<u8> {
+    /// One case of the fixture: a prompt and llama.cpp's greedy run on it.
+    struct LlamaCase {
+        name: String,
+        text: Vec<u8>,
+        ids: Vec<u32>,
+        tokens: Vec<u32>,
+        margins: Vec<f32>,
+    }
+
+    /// The fixture `slm golden` reads, made on the host. For each case the GPU
+    /// program runs on the software GPU, which executes the exact CPU
+    /// reference (`exact: true`), over the prompt and llama.cpp's tokens, one
+    /// token at a time, teacher-forced; each step that predicts one of those
+    /// tokens keeps its full row of logits, stored as i16 with a per-row
+    /// offset and scale. Panics if the exact reference's top token is not
+    /// llama.cpp's at some step, since the board could then never pass.
+    fn make_real_fixture(model: u32, cases: &[LlamaCase], mutate_layer: u32) -> Vec<u8> {
         use crate::inference::ops_transformer::{RopePairing, RopeTable};
         use crate::slm::gpu_program::{soft, GpuProgram};
         soft::reset_knobs();
@@ -1291,67 +1359,75 @@ mod tests {
         .unwrap();
         let vocab = registry::get_info(model as usize).unwrap().vocab_size;
         let rope = RopeTable::new(head_dim as usize, REAL_CTX, base, RopePairing::for_arch(arch));
-        let prep = registry::with_loaded_slm(model as usize, |slm| GpuProgram::prepare(slm, vocab)).unwrap();
-        let Ok(mut prog) = prep.and_then(|i| GpuProgram::build_prepared(i, REAL_CTX, &rope.cos_sin)) else {
-            panic!("the software GPU did not build the program");
-        };
-        let mut out = Vec::new();
-        let mut rows = Vec::new();
-        for (i, &t) in ids.iter().enumerate() {
-            prog.run(&[t], i, &mut out).unwrap();
-        }
-        rows.push(out.clone());
-        for s in 1..tokens.len() {
-            prog.run(&[tokens[s - 1]], ids.len() + s - 1, &mut out).unwrap();
-            rows.push(out.clone());
-        }
-        drop(prog);
-
-        let (mut offset, mut scale, mut q) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut top, mut top_margin) = (Vec::new(), Vec::new());
-        for (s, row) in rows.iter().enumerate() {
-            let lo = row.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-            let hi = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            assert!(lo.is_finite() && hi.is_finite(), "step {s}: non-finite logits");
-            let o = 0.5 * (lo + hi);
-            let k = ((hi - lo) / 65534.0).max(f32::MIN_POSITIVE);
-            for &v in row {
-                let n = libm::roundf((v - o) / k).clamp(-32767.0, 32767.0) as i16;
-                let back = o + k * n as f32;
-                assert!((back - v).abs() <= REAL_STORE_ERROR, "step {s}: stored {back} for {v}");
-                q.extend_from_slice(&n.to_le_bytes());
-            }
-            offset.push(o);
-            scale.push(k);
-            let t = argmax(row);
-            let mut second = f32::NEG_INFINITY;
-            for (i, &v) in row.iter().enumerate() {
-                if i as u32 != t && v > second {
-                    second = v;
-                }
-            }
-            assert_eq!(
-                t, tokens[s],
-                "step {s}: the exact reference's top token is not llama.cpp's (margin {})",
-                margins[s]
-            );
-            top.push(t);
-            top_margin.push(row[t as usize] - second);
-        }
-        write_records(vec![
-            ("real.prompt.text".into(), text.to_vec()),
-            ("real.prompt.ids".into(), u32_bytes(ids)),
-            ("real.tokens".into(), u32_bytes(tokens)),
-            ("real.margins".into(), f32_bytes(margins)),
+        let names: Vec<&str> = cases.iter().map(|c| c.name.as_str()).collect();
+        let mut recs: Vec<(String, Vec<u8>)> = vec![
+            ("real.cases".into(), names.join(",").into_bytes()),
             ("real.n_vocab".into(), u32_bytes(&[vocab])),
             ("real.model.bytes".into(), u32_bytes(&[u32::try_from(len).unwrap()])),
             ("real.mutate.layer".into(), u32_bytes(&[mutate_layer])),
-            ("real.exact.offset".into(), f32_bytes(&offset)),
-            ("real.exact.scale".into(), f32_bytes(&scale)),
-            ("real.exact.q".into(), q),
-            ("real.exact.top".into(), u32_bytes(&top)),
-            ("real.exact.margin".into(), f32_bytes(&top_margin)),
-        ])
+        ];
+        for c in cases {
+            let prep = registry::with_loaded_slm(model as usize, |slm| GpuProgram::prepare(slm, vocab)).unwrap();
+            let Ok(mut prog) = prep.and_then(|i| GpuProgram::build_prepared(i, REAL_CTX, &rope.cos_sin)) else {
+                panic!("the software GPU did not build the program");
+            };
+            let mut out = Vec::new();
+            let mut rows = Vec::new();
+            for (i, &t) in c.ids.iter().enumerate() {
+                prog.run(&[t], i, &mut out).unwrap();
+            }
+            rows.push(out.clone());
+            for s in 1..c.tokens.len() {
+                prog.run(&[c.tokens[s - 1]], c.ids.len() + s - 1, &mut out).unwrap();
+                rows.push(out.clone());
+            }
+            drop(prog);
+
+            let (mut offset, mut scale, mut q) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut top, mut top_margin) = (Vec::new(), Vec::new());
+            for (s, row) in rows.iter().enumerate() {
+                let lo = row.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                let hi = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                assert!(lo.is_finite() && hi.is_finite(), "{} step {s}: non-finite logits", c.name);
+                let o = 0.5 * (lo + hi);
+                let k = ((hi - lo) / 65534.0).max(f32::MIN_POSITIVE);
+                for &v in row {
+                    let n = libm::roundf((v - o) / k).clamp(-32767.0, 32767.0) as i16;
+                    let back = o + k * n as f32;
+                    assert!((back - v).abs() <= REAL_STORE_ERROR, "{} step {s}: stored {back} for {v}", c.name);
+                    q.extend_from_slice(&n.to_le_bytes());
+                }
+                offset.push(o);
+                scale.push(k);
+                let t = argmax(row);
+                let mut second = f32::NEG_INFINITY;
+                for (i, &v) in row.iter().enumerate() {
+                    if i as u32 != t && v > second {
+                        second = v;
+                    }
+                }
+                assert_eq!(
+                    t, c.tokens[s],
+                    "{} step {s}: the exact reference's top token is not llama.cpp's (margin {})",
+                    c.name, c.margins[s]
+                );
+                top.push(t);
+                top_margin.push(row[t as usize] - second);
+            }
+            let field = |f: &str| format!("real.{}.{f}", c.name);
+            recs.extend([
+                (field("prompt.text"), c.text.clone()),
+                (field("prompt.ids"), u32_bytes(&c.ids)),
+                (field("tokens"), u32_bytes(&c.tokens)),
+                (field("margins"), f32_bytes(&c.margins)),
+                (field("exact.offset"), f32_bytes(&offset)),
+                (field("exact.scale"), f32_bytes(&scale)),
+                (field("exact.q"), q),
+                (field("exact.top"), u32_bytes(&top)),
+                (field("exact.margin"), f32_bytes(&top_margin)),
+            ]);
+        }
+        write_records(recs)
     }
 
     fn weights_digest(model: u32) -> u64 {
@@ -1364,31 +1440,38 @@ mod tests {
         .unwrap()
     }
 
-    /// Run the harness three ways and check each verdict: as built (one token
-    /// at a time and batched) it passes, with the bias mutation it fails and
-    /// puts the weights back, and afterwards it passes again.
-    fn assert_real_harness(model: u32, rec: &'static [u8]) {
+    /// Run the harness with each of `flags` and check the verdict: without the
+    /// mutation it passes; with it, it fails and puts the weights back. Ends
+    /// with a run without the mutation, which must pass again.
+    fn assert_real_harness(model: u32, rec: &[u8], flags: &[u32]) {
         let before = weights_digest(model);
-        for flags in [0, REAL_FLAG_BATCH] {
+        let mut last = None;
+        for &f in flags {
             let mut rep = RealGoldenReport::default();
-            real_golden_run(model, rec, flags, &mut rep).unwrap();
-            std::println!("real golden flags {flags}: passed {} {rep:?}", rep.passed());
-            assert!(rep.passed(), "flags {flags}: {rep:?}");
-            assert_eq!(rep.mutated_bytes, 0);
+            real_golden_run(model, rec, f, &mut rep).unwrap();
+            std::println!("real golden flags {f}: passed {} {rep:?}", rep.passed());
+            if f & REAL_FLAG_DROP_BIAS == 0 {
+                assert!(rep.passed(), "flags {f}: {rep:?}");
+                assert_eq!(rep.mutated_bytes, 0);
+            } else {
+                assert!(!rep.passed(), "flags {f}: the mutation passed: {rep:?}");
+                assert!(rep.first_bad_step >= 0, "{rep:?}");
+                assert!(rep.mutated_bytes > 0 && rep.restored == 1, "{rep:?}");
+                assert_eq!(weights_digest(model), before, "flags {f}: weights not restored");
+            }
+            if f & REAL_FLAG_BATCH != 0 {
+                let longest = RealFixture::parse(&Records::new(rec).unwrap())
+                    .unwrap()
+                    .cases
+                    .iter()
+                    .map(|c| c.ids.len() as u32)
+                    .max()
+                    .unwrap();
+                assert_eq!(rep.max_rows, longest, "{rep:?}");
+            }
+            last = Some(f);
         }
-        for flags in [REAL_FLAG_DROP_BIAS, REAL_FLAG_DROP_BIAS | REAL_FLAG_BATCH] {
-            let mut rep = RealGoldenReport::default();
-            real_golden_run(model, rec, flags, &mut rep).unwrap();
-            std::println!("real golden flags {flags}: passed {} {rep:?}", rep.passed());
-            assert!(!rep.passed(), "flags {flags}: the mutation passed: {rep:?}");
-            assert!(rep.first_bad_step >= 0, "{rep:?}");
-            assert!(rep.mutated_bytes > 0 && rep.restored == 1, "{rep:?}");
-            assert_eq!(weights_digest(model), before, "flags {flags}: weights not restored");
-        }
-        let mut rep = RealGoldenReport::default();
-        real_golden_run(model, rec, 0, &mut rep).unwrap();
-        std::println!("real golden after the mutation: passed {} {rep:?}", rep.passed());
-        assert!(rep.passed(), "after the mutation: {rep:?}");
+        assert_eq!(last.map(|f| f & REAL_FLAG_DROP_BIAS), Some(0), "end on a run without the mutation");
     }
 
     /// The harness on the tiny model, in CI: the exact reference made by
@@ -1398,25 +1481,32 @@ mod tests {
     fn golden_real_harness_on_tiny_passes_and_catches_dropped_bias() {
         let model = load_tiny();
         let r = greedy_rec();
-        let rec = make_real_fixture(
+        let case = |name: &str, text: &str, ids: &str, tokens: &str| LlamaCase {
+            name: name.into(),
+            text: r.get(text).unwrap().to_vec(),
+            ids: r.u32s(ids).unwrap(),
+            tokens: r.u32s(tokens).unwrap(),
+            margins: r.f32s("greedy.margins").unwrap(),
+        };
+        let cases = [
+            case("greedy", "prompt.text", "prompt.ids", "greedy.tokens"),
+            // A second case, so the loop over cases is covered too.
+            case("again", "prompt.text", "prompt.ids", "greedy.tokens"),
+        ];
+        let rec = make_real_fixture(model, &cases, 0);
+        assert_real_harness(
             model,
-            r.get("prompt.text").unwrap(),
-            &r.u32s("prompt.ids").unwrap(),
-            &r.u32s("greedy.tokens").unwrap(),
-            &r.f32s("greedy.margins").unwrap(),
-            0,
+            &rec,
+            &[0, REAL_FLAG_BATCH, REAL_FLAG_DROP_BIAS, REAL_FLAG_DROP_BIAS | REAL_FLAG_BATCH, 0],
         );
-        let rec: &'static [u8] = Box::leak(rec.into_boxed_slice());
-        assert_real_harness(model, rec);
 
         // A fixture for another file is refused, not compared.
-        let mut other = rec.to_vec();
+        let mut other = rec.clone();
         let at = other.windows(16).position(|w| w == b"real.model.bytes").unwrap() + 20;
         other[at] ^= 1;
-        let other: &'static [u8] = Box::leak(other.into_boxed_slice());
         let mut rep = RealGoldenReport::default();
         assert_eq!(
-            real_golden_run(model, other, 0, &mut rep),
+            real_golden_run(model, &other, 0, &mut rep),
             Err("the loaded model is not the file the record was made from")
         );
         crate::slm::gpu_program::soft::reset_knobs();
@@ -1425,9 +1515,10 @@ mod tests {
 
     /// Writes the real model's fixture. Run by `slm-gen-goldens.py --only
     /// real-model`, which supplies `SLM_GOLDEN_MODEL` (the GGUF),
-    /// `SLM_REAL_LLAMA_REC` (llama.cpp's greedy run: `prompt.text`,
-    /// `prompt.ids`, `greedy.tokens`, `greedy.margins`), `SLM_REAL_LAYER` (the
-    /// layer the mutation hits) and `SLM_REAL_OUT`. `--release`.
+    /// `SLM_REAL_LLAMA_REC` (llama.cpp's greedy runs: `cases`, then per case
+    /// `<case>.prompt.text`, `.prompt.ids`, `.tokens`, `.margins`),
+    /// `SLM_REAL_LAYER` (the layer the mutation hits) and `SLM_REAL_OUT`.
+    /// `--release`.
     #[test]
     #[ignore = "needs the real model; run by slm-gen-goldens.py"]
     fn golden_real_model_write_fixture() {
@@ -1440,14 +1531,18 @@ mod tests {
         let model = load_slm(b"real", &bytes).expect("real model loads") as u32;
         drop(bytes);
         let r = Records::new(&llama).unwrap();
-        let rec = make_real_fixture(
-            model,
-            r.get("prompt.text").unwrap(),
-            &r.u32s("prompt.ids").unwrap(),
-            &r.u32s("greedy.tokens").unwrap(),
-            &r.f32s("greedy.margins").unwrap(),
-            layer,
-        );
+        let names = String::from_utf8(r.get("cases").unwrap().to_vec()).unwrap();
+        let cases: Vec<LlamaCase> = names
+            .split(',')
+            .map(|n| LlamaCase {
+                name: n.into(),
+                text: r.get(&format!("{n}.prompt.text")).unwrap().to_vec(),
+                ids: r.u32s(&format!("{n}.prompt.ids")).unwrap(),
+                tokens: r.u32s(&format!("{n}.tokens")).unwrap(),
+                margins: r.f32s(&format!("{n}.margins")).unwrap(),
+            })
+            .collect();
+        let rec = make_real_fixture(model, &cases, layer);
         std::fs::write(&out, &rec).unwrap();
         std::println!("wrote {out}: {} bytes", rec.len());
         crate::slm::gpu_program::soft::reset_knobs();
@@ -1456,20 +1551,21 @@ mod tests {
 
     /// The hardware target's check on the host (`make slm-real-golden-host`):
     /// the checked-in fixture against the real model on the software GPU.
-    /// Passes as built, fails with the bias mutation. `SLM_GOLDEN_MODEL` is
-    /// the GGUF. `--release`.
+    /// Batched it passes and with the bias mutation it fails; then one token
+    /// at a time it passes. The software GPU runs about 10 s a token, so the
+    /// per-token run comes once. `SLM_GOLDEN_MODEL` is the GGUF. `--release`.
     #[test]
     #[ignore = "needs the real model; see the doc comment"]
     fn golden_real_model_host() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/fixtures/slm/qwen25_real_golden.rec");
-        let rec: &'static [u8] = Box::leak(std::fs::read(path).expect("the fixture").into_boxed_slice());
+        let rec = std::fs::read(path).expect("the fixture");
         let bytes = std::fs::read(std::env::var("SLM_GOLDEN_MODEL").unwrap()).unwrap();
         ensure_mm_initialized_for_tests();
         reset_for_tests();
         crate::slm::gpu_program::soft::reset_knobs();
         let model = load_slm(b"real", &bytes).expect("real model loads") as u32;
         drop(bytes);
-        assert_real_harness(model, rec);
+        assert_real_harness(model, &rec, &[REAL_FLAG_BATCH, REAL_FLAG_DROP_BIAS | REAL_FLAG_BATCH, 0]);
         crate::slm::gpu_program::soft::reset_knobs();
         reset_for_tests();
     }

@@ -1741,6 +1741,8 @@ typedef struct {
     int32_t first_top_miss_step;
     uint32_t mutated_bytes;
     uint32_t restored;
+    uint32_t cases;
+    uint32_t max_rows;
     uint64_t gpu_us_per_token;
 } SlmRealGoldenReport;
 
@@ -1751,12 +1753,14 @@ extern int32_t rust_slm_golden_real(uint32_t model, const uint8_t *rec, size_t r
                                     uint32_t flags, SlmRealGoldenReport *out);
 
 /* slm golden <handle> [batch] [drop-bias]: the real Qwen2.5-1.5B model (from
- * `slm load /boot/models/...`) on the GPU program, teacher-forced over the
- * fixture's prompt and llama.cpp's greedy tokens. PASS needs every logit of
- * every step within 0.1 of the exact CPU reference made on the host, and
- * llama.cpp's top token at every step (#1165). `batch` feeds the prompt as one
- * prefill batch. `drop-bias` is the deliberate mutation (one layer's Q, K and
- * V biases zeroed for the run, then restored) and must FAIL. */
+ * `slm load /boot/models/...`) on the GPU program, built as `slm launch --gpu
+ * on` builds it, teacher-forced over each of the fixture's prompts and
+ * llama.cpp's greedy tokens. PASS needs every logit of every step within 0.1
+ * of the exact CPU reference made on the host, and llama.cpp's top token at
+ * every step (#1165). `batch` feeds each prompt as one prefill step (64 rows
+ * for the long one). `drop-bias` is the deliberate mutation (one layer's Q, K
+ * and V biases zeroed in the weights the program maps, for the run, then
+ * restored) and must FAIL. */
 static int slm_golden(int argc, char *argv[])
 {
     uint32_t h = 0;
@@ -1785,12 +1789,14 @@ static int slm_golden(int argc, char *argv[])
     }
     bool ok = r.steps > 0u && r.first_bad_step < 0 && r.first_top_miss_step < 0 &&
               r.top_matches == r.steps;
-    shell_printf("slm golden: %s (%s%s), %lu steps, %lu with llama.cpp's top token "
+    shell_printf("slm golden: %s (GPU program, %s%s), %lu cases, largest step %lu rows, "
+                 "%lu steps, %lu with llama.cpp's top token "
                  "(first miss at step %d), vs exact max %d milli (first over 100 at step %d, "
                  "logit %d: got %d want %d milli), %llu us/token\r\n",
                  ok ? "PASS" : "FAIL",
                  (flags & SLM_REAL_FLAG_BATCH) != 0u ? "batch" : "per token",
                  (flags & SLM_REAL_FLAG_DROP_BIAS) != 0u ? ", drop-bias" : "",
+                 (unsigned long)r.cases, (unsigned long)r.max_rows,
                  (unsigned long)r.steps, (unsigned long)r.top_matches,
                  (int)r.first_top_miss_step, (int)r.max_err_milli, (int)r.first_bad_step,
                  (int)r.first_bad_index, (int)r.first_bad_got_milli,

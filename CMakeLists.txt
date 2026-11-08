@@ -1423,7 +1423,7 @@ endif()
 
 # `slm golden`: the real-model golden (#1165). llama.cpp's tokens and the exact
 # CPU reference's logits for Qwen2.5-1.5B; the model comes from /boot/models.
-# About 2.4 MB. `make jetson-real-golden` builds a Jetson image with it.
+# About 3.6 MB. `make jetson-real-golden` builds a Jetson image with it.
 option(SLM_REAL_GOLDEN "Embed the real-model golden fixture for `slm golden`" OFF)
 if(SLM_REAL_GOLDEN)
     target_sources(slmos.elf PRIVATE kernel/src/slm_real_golden_embed.S)
