@@ -138,8 +138,9 @@ extern void task_entry_wrapper(void);
  * timer-preempted on Pi 5 or Jetson, and ticks landed only in idle.
  *
  * Mirrors the unmask rules in scheduler_start: every CPU when the
- * SECONDARY_PREEMPT trampoline is built (or off NC-memory platforms,
- * e.g. QEMU); otherwise CPU 0 only, because without the trampoline a
+ * SECONDARY_PREEMPT trampoline is built (or on QEMU); on Pi 5 and
+ * Jetson otherwise CPU 0 only (keyed on the platform, so NC_AXIS=OFF
+ * does not change it), because without the trampoline a
  * secondary's timer ISR would call schedule() directly, which corrupts
  * the abandoned frame on real hardware. On those builds (e.g. Jetson
  * with JETSON_HW_TICK=OFF, or JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF)
@@ -152,8 +153,8 @@ bool task_entry_unmasks_irq(uint32_t cpu)
 #if defined(PLATFORM_X86_64)
     (void)cpu;
     return false;
-#elif defined(PLATFORM_HAS_NC_MEMORY) && !defined(SECONDARY_PREEMPT) && \
-      !defined(PI5_FIQ_TIMER)
+#elif (defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)) && \
+      !defined(SECONDARY_PREEMPT) && !defined(PI5_FIQ_TIMER)
     return cpu == 0;
 #else
     (void)cpu;
@@ -1184,3 +1185,13 @@ int task_canary_check_all_unlocked(void)
 {
     return task_canary_check_all_impl(true);
 }
+
+#if defined(ENABLE_BOOT_TESTS)
+const volatile void *task_current_slot_addr(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return NULL;
+    }
+    return (const volatile void *)&current_task[cpu];
+}
+#endif

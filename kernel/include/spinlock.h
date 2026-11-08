@@ -32,6 +32,17 @@
 extern volatile int spinlock_hw_enabled;
 #endif
 
+/*
+ * Pi 5 lock-word DRAM flush (kernel/CLAUDE.md "Pi 5 spinlock DRAM
+ * flush"): DC CIVAC + DSB SY before every LDAXR and after every STLR.
+ * It belongs to the NC axis of #1193, so NC_AXIS=OFF (NC_AXIS_OFF)
+ * removes it and Pi 5 takes the generic LDAXR/STXR/STLR path that
+ * every other ARM64 platform uses.
+ */
+#if defined(PLATFORM_RASPI5) && !defined(NC_AXIS_OFF)
+#define SPINLOCK_DRAM_FLUSH 1
+#endif
+
 #if defined(PLATFORM_X86_64)
 /*
  * Memory barrier macros for x86-64.
@@ -165,7 +176,7 @@ static inline void spin_lock(spinlock_t *lock)
      * invalidates the local L2 copy, forcing the next load to
      * read from DRAM where spin_unlock's DC CIVAC has already
      * pushed the unlocked value. */
-#if defined(PLATFORM_RASPI5)
+#if defined(SPINLOCK_DRAM_FLUSH)
     __asm__ volatile(
         "   sevl\n"
         "1: wfe\n"
@@ -216,7 +227,7 @@ static inline int spin_trylock(spinlock_t *lock)
 
     uint32_t tmp, result;
 
-#if defined(PLATFORM_RASPI5)
+#if defined(SPINLOCK_DRAM_FLUSH)
     /* Pi 5: invalidate stale L2 copy before trying (see spin_lock). */
     __asm__ volatile(
         "   dc civac, %2\n"
@@ -270,7 +281,7 @@ static inline void spin_unlock(spinlock_t *lock)
         return;
     }
 
-#if defined(PLATFORM_RASPI5)
+#if defined(SPINLOCK_DRAM_FLUSH)
     /* Pi 5: push unlocked value to DRAM so other CPUs see it.
      * Without DC CIVAC, the STLR stays in this CPU's L2 and
      * other CPUs' LDAXR reads stale "locked" from their own L2. */
