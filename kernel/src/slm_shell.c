@@ -2068,7 +2068,9 @@ static int slm_dispatch_mutating(const char *verb, int argc, char *argv[])
 #ifdef SLM_REAL_GOLDEN
     /* It changes the model's weights for a mutation run, so it takes the
      * lock too: no shell `slm prompt` can run beside it. */
-    if (strcmp(verb, "golden") == 0) return slm_golden(argc, argv);
+    if (strcmp(verb, "golden") == 0) {
+        return slm_golden(argc, argv);
+    }
 #endif
 
     shell_printf("slm: unknown verb '%s'\r\n", verb);
