@@ -75,6 +75,20 @@ static void test_step_names(void)
 }
 #endif
 
+/* #1171: recovery skips the channel-only level when an error is latched,
+ * as nvgpu always resets the engine after an MMU fault. A plain hang (a
+ * pending semaphore acquire) latches nothing. */
+static void test_recover_needs_engine_reset(void)
+{
+    TEST_ASSERT_FALSE(ga10b_cold_recover_needs_engine_reset(0x00000ac2u, 0, 0, 0, 0));
+    TEST_ASSERT_TRUE(ga10b_cold_recover_needs_engine_reset(0x00000020u, 0, 0, 0, 0));
+    TEST_ASSERT_TRUE(ga10b_cold_recover_needs_engine_reset(0, 0x80000000u, 0, 0, 0));
+    TEST_ASSERT_TRUE(ga10b_cold_recover_needs_engine_reset(0, 0, 0x80000000u, 0, 0));
+    TEST_ASSERT_FALSE(ga10b_cold_recover_needs_engine_reset(0, 0x00000100u, 0x40000000u, 0, 0));
+    TEST_ASSERT_TRUE(ga10b_cold_recover_needs_engine_reset(0, 0, 0, 0x00200000u, 0));
+    TEST_ASSERT_TRUE(ga10b_cold_recover_needs_engine_reset(0, 0, 0, 0, 0x00000001u));
+}
+
 int test_suite_ga10b_cold(void)
 {
     UnityBegin("test_ga10b_cold.c");
@@ -83,6 +97,7 @@ int test_suite_ga10b_cold(void)
     RUN_TEST(test_reset_id_mask);
     RUN_TEST(test_mmu_debug_val);
     RUN_TEST(test_acr_image_fits);
+    RUN_TEST(test_recover_needs_engine_reset);
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     RUN_TEST(test_step_names);
 #endif

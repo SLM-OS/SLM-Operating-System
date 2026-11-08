@@ -392,6 +392,137 @@ static void test_chan_create_bounds_gpfifo(void)
     TEST_ASSERT_EQUAL_UINT(before, g_allocs);
 }
 
+/* #1171: ga10b_chan_reset, the channel half of recovery. Recording ops:
+ * every register write in order, reads 0 (polls pass at once). */
+static struct { uint32_t off, val; } g_log[64];
+static unsigned g_nlog;
+static uint32_t r_rd32(void *ctx, uint32_t off) { (void)ctx; (void)off; return 0u; }
+static void r_wr32(void *ctx, uint32_t off, uint32_t v)
+{
+    (void)ctx;
+    if (g_nlog < 64u) {
+        g_log[g_nlog].off = off;
+        g_log[g_nlog].val = v;
+    }
+    g_nlog++;
+}
+
+static const struct ga10b_gpu_ops g_rec_ops = {
+    .rd32 = r_rd32, .wr32 = r_wr32, .udelay = f_udelay,
+    .alloc_pages = f_alloc, .free_pages = f_free, .phys_to_cpu = f_p2c,
+    .cache_clean = f_cache, .cache_inval = f_cache,
+};
+
+static int log_find(uint32_t off, uint32_t val, unsigned from)
+{
+    for (unsigned i = from; i < g_nlog && i < 64u; i++) {
+        if (g_log[i].off == off && g_log[i].val == val) return (int)i;
+    }
+    return -1;
+}
+
+static void test_chan_reset_rebinds_a_clean_channel(void)
+{
+    pool_reset();
+    static uint8_t golden[0x1000], img[0x1000], patch[0x10000], hdr[GA10B_GR_FECS_HEADER_BYTES];
+    struct ga10b_grctx g;
+    memset(&g, 0, sizeof(g));
+    ga10b_gr_config_default(&g.cfg);
+    g.golden.cpu = golden;
+    g.golden.size = sizeof(golden);
+    g.golden_size = sizeof(golden);
+    g.golden_ready = true;
+    struct ga10b_gr_chan_ctx gr;
+    memset(&gr, 0, sizeof(gr));
+    gr.gr_ctx.cpu = img;
+    gr.gr_ctx.size = sizeof(img);
+    gr.patch.cpu = patch;
+    gr.patch.size = sizeof(patch);
+    gr.header.cpu = hdr;
+    gr.header.size = sizeof(hdr);
+
+    struct ga10b_chan ch;
+    memset(&ch, 0, sizeof(ch));
+    ga10b_chan_default_params(&ch.p);
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_dma_alloc(&g_rec_ops, GA10B_INST_BLOCK_BYTES, &ch.inst));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_dma_alloc(&g_rec_ops, 4096u, &ch.userd));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_dma_alloc(&g_rec_ops, 4096u, &ch.runlist));
+    ch.gpfifo_va = 0x40000000ull;
+    ch.chram_base = 0xc20000u;
+    ch.gr = &gr;
+    uint32_t *iw = (uint32_t *)ch.inst.cpu;
+    uint32_t *uw = (uint32_t *)ch.userd.cpu;
+    /* RAMIN as the channel was built; RAMFC and USERD as a hang left them:
+     * GP_GET mid-ring, a pending acquire, GP_PUT ahead. */
+    iw[GA10B_RAMIN_W_PAGE_DIR_BASE_LO] = 0x12345678u;
+    iw[GA10B_RAMIN_W_PAGE_DIR_BASE_LO + 1u] = 0x9u;
+    for (unsigned i = 0; i < GA10B_RAMFC_BYTES / 4u; i++) {
+        iw[i] = 0xdead0000u | i;
+    }
+    uw[GA10B_USERD_W_GP_GET] = 17u;
+    uw[GA10B_USERD_W_GP_PUT] = 19u;
+
+    g_nlog = 0;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_chan_reset(&g_rec_ops, &g, &ch));
+
+    /* RAMFC is what SETUP_BIND programs: compare with a fresh setup. */
+    static uint32_t fresh[GA10B_INST_BLOCK_BYTES / 4u];
+    memset(fresh, 0, sizeof(fresh));
+    struct ga10b_ramfc_params rp = {
+        .gpfifo_va = ch.gpfifo_va, .gpfifo_entries = ch.p.gpfifo_entries,
+        .chid = ch.p.chid, .veid = ch.p.veid,
+    };
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_ramfc_setup(fresh, &rp));
+    TEST_ASSERT_EQUAL_MEMORY(fresh, iw, GA10B_RAMFC_BYTES);
+    TEST_ASSERT_EQUAL_HEX32(0x12345678u, iw[GA10B_RAMIN_W_PAGE_DIR_BASE_LO]);
+    TEST_ASSERT_EQUAL_HEX32(0x9u, iw[GA10B_RAMIN_W_PAGE_DIR_BASE_LO + 1u]);
+    TEST_ASSERT_EQUAL_UINT32(0, uw[GA10B_USERD_W_GP_GET]);
+    TEST_ASSERT_EQUAL_UINT32(0, uw[GA10B_USERD_W_GP_PUT]);
+    /* The golden image is back in the context. */
+    TEST_ASSERT_EQUAL_MEMORY(golden + 0x100, img + 0x100, 0x100);
+
+    /* Order: CHRAM cleared, the runlist submitted, scheduling back on,
+     * then a forced reload and the channel enabled, last. */
+    uint32_t chram = ch.chram_base + ch.p.chid * 4u;
+    uint32_t rl = ch.p.runlist_pri_base;
+    int clear = log_find(chram, GA10B_CHRAM_CLEAR_CHANNEL, 0);
+    int submit = log_find(rl + GA10B_RL_SUBMIT, ga10b_runlist_submit_val(0u, 2u), 0);
+    int sched = log_find(rl + GA10B_RL_SCHED_DISABLE, 0u, 0);
+    int reload = log_find(chram, GA10B_CHRAM_FORCE_CTX_RELOAD, 0);
+    int enable = log_find(chram, GA10B_CHRAM_ENABLE_CHANNEL, 0);
+    TEST_ASSERT_EQUAL_INT(0, clear);
+    TEST_ASSERT_TRUE(submit > clear);
+    TEST_ASSERT_TRUE(sched > submit);
+    TEST_ASSERT_TRUE(reload > sched);
+    TEST_ASSERT_EQUAL_INT((int)g_nlog - 1, enable);
+    TEST_ASSERT_TRUE(ch.enabled);
+
+    /* Without a GR context to reload: refused before touching anything. */
+    ch.gr = NULL;
+    g_nlog = 0;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_ARG, ga10b_chan_reset(&g_rec_ops, &g, &ch));
+    TEST_ASSERT_EQUAL_UINT32(0, g_nlog);
+    ga10b_dma_free(&g_rec_ops, &ch.inst);
+    ga10b_dma_free(&g_rec_ops, &ch.userd);
+    ga10b_dma_free(&g_rec_ops, &ch.runlist);
+}
+
+/* Runlist-wide preempt for recovery: type RUNLIST, then CHRAM polled. */
+static void test_preempt_runlist(void)
+{
+    struct ga10b_chan ch;
+    memset(&ch, 0, sizeof(ch));
+    ga10b_chan_default_params(&ch.p);
+    ch.chram_base = 0xc20000u;
+    g_nlog = 0;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_chan_preempt_runlist(&g_rec_ops, &ch, 100u));
+    TEST_ASSERT_EQUAL_UINT32(1, g_nlog);
+    TEST_ASSERT_EQUAL_HEX32(ch.p.runlist_pri_base + GA10B_RL_PREEMPT, g_log[0].off);
+    TEST_ASSERT_EQUAL_HEX32(GA10B_RL_PREEMPT_TYPE_RUNLIST, g_log[0].val);
+    /* f_rd32 reads 0x18000: ON_PBDMA clear, TSG PENDING clear. */
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_chan_preempt_tsg_within(&g_ops, &ch, 100u));
+}
+
 int test_suite_ga10b_chan(void)
 {
     UnityBegin("test_ga10b_chan.c");
@@ -405,5 +536,7 @@ int test_suite_ga10b_chan(void)
     RUN_TEST(test_chan_create_bounds_gpfifo);
     RUN_TEST(test_runlist_entries);
     RUN_TEST(test_fifo_init_table);
+    RUN_TEST(test_chan_reset_rebinds_a_clean_channel);
+    RUN_TEST(test_preempt_runlist);
     return UnityEnd();
 }

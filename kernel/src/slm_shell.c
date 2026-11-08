@@ -620,6 +620,7 @@ static int slm_unload(int argc, char *argv[])
         shell_printf("slm unload: handle %lu is in use: a prompt is running, "
                      "or a session's GPU program maps it (slm stop the prompt, "
                      "or close that session or relaunch it with --gpu cpu; "
+                     "`slm runner stop` closes slm-runner's session; "
                      "a GPU session closed while the GPU was busy keeps it "
                      "mapped for a few seconds more)\r\n",
                      (unsigned long)idx);

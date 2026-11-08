@@ -200,6 +200,78 @@ static void test_golden_load_fields(void)
     TEST_ASSERT_EQUAL_HEX32(0x1, ga10b_ctx_rd(img, 0x84));
 }
 
+/* #1171: recovery reloads the channel context in place. Whatever FECS
+ * saved into it (the hung acquire, a faulted SM's state) and whatever the
+ * subcontext header holds, a reset leaves the image, the patch list and
+ * the header exactly as the allocation did: golden image, global commits
+ * kept (patch_base), MME timer and CB manager patched again, CILP set. */
+static void f_clean(void *ctx, const void *p, size_t n) { (void)ctx; (void)p; (void)n; }
+
+static void test_chan_reset_restores_the_allocated_context(void)
+{
+    static const struct ga10b_gpu_ops ops = { .rd32 = f_rd32, .wr32 = f_wr32,
+                                              .cache_clean = f_clean, .cache_inval = f_clean };
+    static uint8_t golden[0x1000], img[0x1000], patch[0x10000], hdr[GA10B_GR_FECS_HEADER_BYTES];
+    static uint8_t img0[0x1000], patch0[0x10000], hdr0[GA10B_GR_FECS_HEADER_BYTES];
+    struct ga10b_grctx g;
+    memset(&g, 0, sizeof(g));
+    ga10b_gr_config_default(&g.cfg);
+    TEST_ASSERT_TRUE(ga10b_gr_patch_ctx_bytes(&g.cfg) <= sizeof(patch));
+    for (unsigned i = 0; i < sizeof(golden); i++) {
+        golden[i] = (uint8_t)(i * 7u + 3u);
+    }
+    g.golden.cpu = golden;
+    g.golden.size = sizeof(golden);
+    g.golden_size = sizeof(golden);
+    g.golden_ready = true;
+
+    struct ga10b_gr_chan_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.gr_ctx.cpu = img;
+    c.gr_ctx.size = sizeof(img);
+    c.patch.cpu = patch;
+    c.patch.size = sizeof(patch);
+    c.header.cpu = hdr;
+    c.header.size = sizeof(hdr);
+    c.gr_ctx_va = 0x2000400000ull;
+    c.patch_va = 0x2000081000ull;
+    c.header_va = 0x2000080000ull;
+    trace_vas(&c.global);
+    /* As ctx_prepare leaves it: the global commits in the patch list. */
+    struct ga10b_ctx_writer w = { .ops = &ops, .patch = (uint32_t *)patch,
+                                  .patch_words = sizeof(patch) / 4u, .count = 0 };
+    ga10b_gr_commit_global_ctx_buffers(&w, &g.cfg, &c.global);
+    c.patch_base = w.count;
+
+    TEST_ASSERT_EQUAL_INT(GA10B_GRCTX_OK,
+                          ga10b_grctx_chan_reset(&ops, &g, GA10B_PREEMPT_CILP, &c));
+    TEST_ASSERT_EQUAL_HEX32(0x2, ga10b_ctx_rd(img, 0x84));
+    TEST_ASSERT_TRUE(c.patch_count > c.patch_base);
+    TEST_ASSERT_EQUAL_UINT32(c.patch_count, ga10b_ctx_rd(img, GA10B_CTXSW_PATCH_COUNT));
+    memcpy(img0, img, sizeof(img));
+    memcpy(patch0, patch, sizeof(patch));
+    memcpy(hdr0, hdr, sizeof(hdr));
+    uint32_t count0 = c.patch_count;
+
+    /* What a step timeout leaves: a saved context, a longer patch list. */
+    memset(img, 0xA5, sizeof(img));
+    memset(patch + (size_t)c.patch_base * 8u, 0x5A, 256u);
+    memset(hdr, 0x3C, sizeof(hdr));
+    c.patch_count = count0 + 40u;
+
+    TEST_ASSERT_EQUAL_INT(GA10B_GRCTX_OK,
+                          ga10b_grctx_chan_reset(&ops, &g, GA10B_PREEMPT_CILP, &c));
+    TEST_ASSERT_EQUAL_UINT32(count0, c.patch_count);
+    TEST_ASSERT_EQUAL_MEMORY(img0, img, sizeof(img));
+    TEST_ASSERT_EQUAL_MEMORY(patch0, patch, sizeof(patch));
+    TEST_ASSERT_EQUAL_MEMORY(hdr0, hdr, sizeof(hdr));
+
+    /* No golden image, or a buffer too small for it: refused. */
+    g.golden_ready = false;
+    TEST_ASSERT_EQUAL_INT(GA10B_GRCTX_ERR_STATE,
+                          ga10b_grctx_chan_reset(&ops, &g, GA10B_PREEMPT_CILP, &c));
+}
+
 static void test_fecs_ctx_data_and_tables(void)
 {
     TEST_ASSERT_EQUAL_HEX32(0xb0106b6c, ga10b_fecs_current_ctx_data(0x106b6c000ull));
@@ -218,6 +290,7 @@ int test_suite_ga10b_grctx(void)
     RUN_TEST(test_priv_access_map);
     RUN_TEST(test_ctx_header_layout);
     RUN_TEST(test_golden_load_fields);
+    RUN_TEST(test_chan_reset_restores_the_allocated_context);
     RUN_TEST(test_fecs_ctx_data_and_tables);
     return UnityEnd();
 }

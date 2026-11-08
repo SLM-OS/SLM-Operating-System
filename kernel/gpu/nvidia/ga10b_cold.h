@@ -53,6 +53,31 @@ enum ga10b_cold_step ga10b_cold_progress(void);
 /* Short name for a step, for logs and the shell. */
 const char *ga10b_cold_step_name(enum ga10b_cold_step step);
 
+/* ---- Recovery after a GPU step timeout (#1171) ---- */
+
+struct ga10b_cold_recovery {
+    int rc;                 /* 0: the channel works again (probe passed) */
+    int level;              /* last level tried: 1 channel reset, 2 GR engine reset */
+    int l1_rc, l2_rc;       /* per level: 0, or the step that failed */
+    uint32_t l1_us, l2_us, probe_us;
+    uint32_t latched;       /* a fault was latched: straight to level 2 */
+    uint32_t probe_failed;  /* ga10b_bringup_probe_channel: 1 host, 2 compute */
+    uint32_t evict_failed;
+    /* State when recovery started (and CHRAM before level 2 / at the end). */
+    uint32_t chram, chram_l2, chram_after;
+    uint32_t eng_status0, pbdma_status, pbdma_intr0;
+    uint32_t gr_status, gr_intr, gr_exception;
+    uint32_t fecs_mb0, fecs_mb6;
+    uint32_t fault_status, fault_info, fault_addr_lo;
+};
+
+/* Bring the cold channel back after a timed-out or faulted step. Task
+ * context, IRQs on, no spinlock held; the caller has shut every other
+ * dispatcher out first (slm_ffi.c). `engine_reset` skips level 1.
+ * Returns 0 when the probe passed, else a negative code (also in r->rc).
+ * Prints nothing: the caller prints one line from `r`. */
+int ga10b_cold_recover(bool engine_reset, struct ga10b_cold_recovery *r);
+
 /* One BAR0 register write of a generated init table. */
 struct ga10b_reg_write {
     uint32_t offset;
@@ -106,6 +131,19 @@ static inline bool ga10b_cold_gpc_present(uint32_t fuse_status_opt_gpc,
 static inline uint32_t ga10b_cold_reset_id_mask(uint32_t reset_id)
 {
     return 1u << (reset_id % 32u);
+}
+
+/* Recovery goes straight to a GR engine reset when an error is latched:
+ * an MMU fault (FAULT_STATUS valid, bit 31, or FAULT_INFO valid, bit 31),
+ * the channel's ENG_FAULTED (CHRAM bit 5), or a pending GR interrupt or
+ * exception. nvgpu resets the engine after every MMU fault; a context
+ * with a faulted SM can't be saved by a preempt anyway. */
+static inline bool ga10b_cold_recover_needs_engine_reset(uint32_t chram, uint32_t fault_status,
+                                                        uint32_t fault_info, uint32_t gr_intr,
+                                                        uint32_t gr_exception)
+{
+    return (chram & (1u << 5)) != 0u || (fault_status & 0x80000000u) != 0u ||
+           (fault_info & 0x80000000u) != 0u || gr_intr != 0u || gr_exception != 0u;
 }
 
 /* A PRI read that the ring could not route returns a 0xbadfXXXX

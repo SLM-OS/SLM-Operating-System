@@ -109,6 +109,10 @@ struct slm_prog_run_stats {
 #define SLM_PROG_ERR_EVICT       (-9)
 #define SLM_PROG_ERR_IRQS_OFF    (-10)
 #define SLM_PROG_ERR_BUSY        (-11) /* slm_prog lock not free within a step timeout */
+/* The step timed out (or its L2 evict failed) and the channel was then
+ * recovered (#1171): this session is dead, its memory is safe to free,
+ * and a new program can be built on the same channel. */
+#define SLM_PROG_ERR_RECOVERED   (-12)
 
 /* Bounds a wait no step on this hardware should come near: the ADR 0001
  * bar is 23 ms per token and 74 ms for a 64-token prefill. */
@@ -290,7 +294,16 @@ struct slm_prog_backend {
     bool (*irqs_enabled)(void);
     /* Optional: raise memory clocks for compute, once per boot. */
     void (*prepare_clocks)(void);
+    /* Optional (#1171): after a timed-out step or a failed evict, bring
+     * the channel back (preempt / engine reset, context reload, probe).
+     * `t_timeout_us` is when the failure was seen (now_us). Runs with
+     * this file's lock held and IRQs on. 0: nothing the dead program
+     * queued can run any more and L2 was evicted, so its memory may be
+     * freed. Absent or non-zero: the channel may still run it. */
+    int (*recover)(uint32_t why, uint64_t t_timeout_us);
 };
+#define SLM_PROG_RECOVER_TIMEOUT 1u     /* `why` for recover */
+#define SLM_PROG_RECOVER_EVICT   2u
 
 /* Test hook; the Jetson backend is picked automatically on a cold boot.
  * NULL restores that. */

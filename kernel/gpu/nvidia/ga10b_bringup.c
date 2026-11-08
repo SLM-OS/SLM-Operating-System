@@ -3558,6 +3558,67 @@ int ga10b_bringup_submit_gp_entry(uint64_t entry)
     return 0;
 }
 
+void ga10b_bringup_reset_gpfifo_cursor(void)
+{
+    g_handoff.initial_gp_put = 0u;
+    g_handoff.initial_gp_get = 0u;
+}
+
+/* One probe: `pb_dwords` of pushbuffer at `pb_off` in the channel's
+ * pushbuffer, then wait up to `timeout_us` for `payload` at `sema_off` in
+ * its semaphore page. Quiet: recovery calls it, and prints once itself. */
+static int probe_one(uint32_t pb_off, const uint32_t *pb_words, uint32_t pb_dwords,
+                     volatile uint32_t *sema, uint32_t payload, uint32_t timeout_us)
+{
+    if ((uint64_t)pb_off + pb_dwords * 4u > g_handoff.pushbuf_size) return -1;
+    *sema = 0u;
+    gsp_platform->cache_clean((const void *)sema, sizeof(uint32_t));
+    uint32_t *pb = (uint32_t *)(uintptr_t)(g_handoff.pushbuf_phys + pb_off);
+    memcpy(pb, pb_words, pb_dwords * 4u);
+    gsp_platform->cache_clean(pb, pb_dwords * 4u);
+    gsp_platform->mb();
+    uint64_t va = g_handoff.pushbuf_gpu_va + pb_off;
+    uint64_t entry = ((uint64_t)(((uint32_t)(va >> 32) & 0xFFu) | (pb_dwords << 10)) << 32) |
+                     (uint32_t)(va & 0xFFFFFFFCu);
+    if (ga10b_bringup_submit_gp_entry(entry) != 0) return -1;
+    for (uint32_t us = 0; us <= timeout_us; us += 10u) {
+        gsp_platform->cache_invalidate((void *)sema, sizeof(uint32_t));
+        if (*sema == payload) return 0;
+        timer_busy_wait_us(10u);
+    }
+    return -1;
+}
+
+int ga10b_bringup_probe_channel(uint32_t timeout_us, uint32_t *failed)
+{
+    if (failed) *failed = 0u;
+    if (!gsp_platform || !gsp_platform->cache_clean || !gsp_platform->cache_invalidate ||
+        g_handoff.semaphore_phys == 0u || g_handoff.pushbuf_phys == 0u) {
+        if (failed) *failed = 3u;
+        return -1;
+    }
+    uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    volatile uint32_t *host = (volatile uint32_t *)(uintptr_t)
+        (g_handoff.semaphore_phys + GA10B_PROBE_SEMA_HOST_OFFSET);
+    volatile uint32_t *gr = (volatile uint32_t *)(uintptr_t)
+        (g_handoff.semaphore_phys + GA10B_PROBE_SEMA_GR_OFFSET);
+    /* Host semaphore: PBDMA fetches and runs methods. */
+    uint32_t n = ga10b_build_sema_release_pushbuffer(
+        pb, g_handoff.semaphore_gpu_va + GA10B_PROBE_SEMA_HOST_OFFSET, GA10B_PROBE_PAYLOAD_HOST);
+    if (probe_one(0u, pb, n, host, GA10B_PROBE_PAYLOAD_HOST, timeout_us) != 0) {
+        if (failed) *failed = 1u;
+        return -1;
+    }
+    /* Compute semaphore after a GR drain: the engine loaded the context. */
+    n = ga10b_build_compute_sema_release_pushbuffer(
+        pb, g_handoff.semaphore_gpu_va + GA10B_PROBE_SEMA_GR_OFFSET, GA10B_PROBE_PAYLOAD_GR, 0u);
+    if (probe_one(256u, pb, n, gr, GA10B_PROBE_PAYLOAD_GR, timeout_us) != 0) {
+        if (failed) *failed = 2u;
+        return -1;
+    }
+    return 0;
+}
+
 void ga10b_bringup_dump_fault_state(const char *tag)
 {
     ga10b_dump_gr_state(tag);
