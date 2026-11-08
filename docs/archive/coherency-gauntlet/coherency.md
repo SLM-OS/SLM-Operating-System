@@ -41,6 +41,20 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
+### Record check (git history, times -0700)
+
+- `aedf6e1a` 04-05 01:00 SMPEN investigation (H2). `e0a15259` 04-05 14:50
+  set/way invalidate after MMU enable on secondaries (H3). `0c229442` 04-05
+  21:03 NC memory on Pi 5: its message also records that spinlocks on NC
+  memory hang, so `rq_lock[]` stayed cacheable. `f683c770` 22:41 task table
+  to NC. `a6ab2c2b` and `0c79eaf4` 04-06 06:12 and 07:40 NC on Jetson.
+- Correction to the brief's order: `a5e91676` (14:15), `e70a73b9` (16:32)
+  and `584ace8f` (17:11) land before `2eab51ae` (19:17, "switch_to fails on
+  secondary CPUs regardless" with a cacheable task table). The cacheable-table
+  test therefore ran after the scheduler fixes, and still failed then; the
+  failure it saw was attributed to `switch_to`, not to memory attributes.
+- Spinlock `DC CIVAC` path: first appears with `53515d00` (04-16, #215).
+
 ## Critic verdicts
 
 ## Failed approaches
