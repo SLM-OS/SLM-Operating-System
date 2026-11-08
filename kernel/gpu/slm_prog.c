@@ -313,6 +313,18 @@ static struct prog_va_range g_va_free[VA_FREE_MAX];
 static const struct slm_prog_backend *g_backend_override;
 static uint32_t g_leaked_sessions;
 
+/* Weights whose close found the TLB invalidate failing: their PTEs are gone
+ * but the GPU's TLB may still translate them, so they count as mapped for
+ * good (#1159). Written under the lock, read without it. Past the table's
+ * size every range counts. */
+#define LEAKED_WEIGHTS_MAX 4
+struct prog_leaked_weights {
+    uintptr_t cpu;
+    uint64_t bytes;
+};
+static struct prog_leaked_weights g_leaked_weights[LEAKED_WEIGHTS_MAX];
+static uint32_t g_leaked_weights_n;
+
 /* ---- Lock ----
  *
  * One lock covers the tables above, the cold channel's GPU VM and the one
@@ -475,6 +487,8 @@ void slm_prog_backend_set(const struct slm_prog_backend *b)
     g_lock = HOLD_NONE;
     memset(&g_vm_stats, 0, sizeof(g_vm_stats));
     g_leaked_sessions = 0u;
+    memset(g_leaked_weights, 0, sizeof(g_leaked_weights));
+    g_leaked_weights_n = 0u;
     /* Tests run against several fake VMs: forget what the last one held. */
     memset(g_wmaps, 0, sizeof(g_wmaps));
     memset(g_va_free, 0, sizeof(g_va_free));
@@ -659,6 +673,17 @@ uint32_t slm_prog_leaked_sessions(void)
     return g_leaked_sessions;
 }
 
+/* Under the lock. Published before the session's `open` goes false. */
+static void leak_weights(uintptr_t cpu, uint64_t bytes)
+{
+    uint32_t n = g_leaked_weights_n;
+    if (n < LEAKED_WEIGHTS_MAX) {
+        __atomic_store_n(&g_leaked_weights[n].cpu, cpu, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_leaked_weights[n].bytes, bytes, __ATOMIC_RELAXED);
+    }
+    if (n <= LEAKED_WEIGHTS_MAX) __atomic_store_n(&g_leaked_weights_n, n + 1u, __ATOMIC_RELEASE);
+}
+
 static void session_free(struct prog_session *s)
 {
     const struct slm_prog_backend *be = s->be;
@@ -681,8 +706,13 @@ static void session_free(struct prog_session *s)
     /* Unmapped PTEs are only gone once the TLB says so. If that fails
      * the pages stay allocated rather than reused under a live walk. */
     if (be->tlb_invalidate && be->tlb_invalidate() != 0) {
-        uart_puts("[slm-prog] TLB invalidate failed on close: leaking the arena\n");
+        uart_puts("[slm-prog] TLB invalidate failed on close: leaking the arena, "
+                  "and its weights stay mapped for unload\n");
         g_leaked_sessions++;
+        /* The TLB may still translate the weights: keep `slm unload` from
+         * freeing them (#1159). */
+        uint64_t wb = __atomic_load_n(&s->weights_bytes, __ATOMIC_RELAXED);
+        if (wb != 0u) leak_weights(__atomic_load_n(&s->weights_cpu, __ATOMIC_RELAXED), wb);
     } else if (leak) {
         uart_printf("[slm-prog] GPU step failed: leaking this session's %llu KB arena "
                     "(the GPU may still write it)\n",
@@ -694,7 +724,8 @@ static void session_free(struct prog_session *s)
         if (s->data_va) va_put(s->data_va, s->data_va_size, true);
         if (s->control_va) va_put(s->control_va, s->control_va_size, false);
     }
-    /* Released after the PTEs went and the TLB was invalidated:
+    /* Released after the PTEs went and the TLB was invalidated (or, if
+     * that failed, after the weights went into g_leaked_weights):
      * slm_prog_weights_mapped stops counting this session here (#1159). */
     __atomic_store_n(&s->open, false, __ATOMIC_RELEASE);
     memset(s, 0, sizeof(*s));
@@ -710,6 +741,15 @@ int slm_prog_weights_mapped(const void *cpu, uint64_t bytes)
         uintptr_t w = __atomic_load_n(&s->weights_cpu, __ATOMIC_RELAXED);
         uint64_t n = __atomic_load_n(&s->weights_bytes, __ATOMIC_RELAXED);
         if (n != 0u && w < lo + bytes && lo < w + n) return 1;
+    }
+    /* After the sessions: a session seen closed above leaked its weights
+     * before it closed. */
+    uint32_t leaked = __atomic_load_n(&g_leaked_weights_n, __ATOMIC_ACQUIRE);
+    if (leaked > LEAKED_WEIGHTS_MAX) return 1;
+    for (uint32_t i = 0; i < leaked; i++) {
+        uintptr_t w = __atomic_load_n(&g_leaked_weights[i].cpu, __ATOMIC_RELAXED);
+        uint64_t n = __atomic_load_n(&g_leaked_weights[i].bytes, __ATOMIC_RELAXED);
+        if (w < lo + bytes && lo < w + n) return 1;
     }
     return 0;
 }
@@ -769,7 +809,7 @@ static int open_locked(const struct slm_prog_backend *be, const struct slm_prog_
     memset(s, 0, sizeof(*s));
     s->be = be;
     s->wmap = -1;
-    s->open = true;
+    __atomic_store_n(&s->open, true, __ATOMIC_RELEASE);
     memset(out, 0, sizeof(*out));
 
     int rc;

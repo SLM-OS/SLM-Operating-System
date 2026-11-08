@@ -655,6 +655,7 @@ static struct {
     unsigned submits, finishes, evicts, tlbs, dumps;
     uint64_t last_gp;
     int evict_rc;
+    int tlb_rc;             /* what the TLB invalidate returns */
     bool irqs_off;
     bool scattered;
     bool no_q6k;
@@ -664,7 +665,7 @@ static struct {
 static int fk_tlb(void)
 {
     g_fk.tlbs++;
-    return 0;
+    return g_fk.tlb_rc;
 }
 
 static int fk_kernel_va(uint32_t sass, uint64_t *va)
@@ -1656,6 +1657,48 @@ static void test_deferred_close_keeps_weights_mapped(void)
     pmm_free_pages(w, wp);
 }
 
+/* #1159: a close whose TLB invalidate fails has removed the PTEs, but the
+ * GPU's TLB may still translate the weights, so they must stay counted as
+ * mapped (for the rest of the boot) and `slm unload` must not free them. */
+static void test_tlb_failure_on_close_keeps_weights_mapped(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    const uint8_t *wb = (const uint8_t *)w;
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t wva = o.weights_gpu_va;
+    g_fk.tlb_rc = -1;
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb + W_BYTES - 1u, 1u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb + W_BYTES, 4096u));
+    /* Still counted after later sessions open and close normally. */
+    g_fk.tlb_rc = 0;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+
+    /* More failed closes than the table holds: every range counts. */
+    uint8_t *other = (uint8_t *)w + W_BYTES + 4096u;
+    for (unsigned i = 0; i < 5u; i++) {
+        struct slm_prog_open_args b = open_args(w);
+        b.weights_bytes = 4096u * (i + 1u);
+        TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&b, &o));
+        g_fk.tlb_rc = -1;
+        slm_prog_close(o.handle);
+        g_fk.tlb_rc = 0;
+    }
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(other, 4096u));
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* ---- End to end: the tiny model through the production FFI ---- */
 
 #define MAX_TOKENS 16u
@@ -1850,6 +1893,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_vm_lock_irqs_masked_tries_once);
     RUN_TEST(test_vm_writer_unlock_finishes_a_close);
     RUN_TEST(test_deferred_close_keeps_weights_mapped);
+    RUN_TEST(test_tlb_failure_on_close_keeps_weights_mapped);
     RUN_TEST(test_e2e_build);
     RUN_TEST(test_e2e_hang_falls_back_to_cpu);
     RUN_TEST(test_e2e_unload_waits_for_a_deferred_close);
