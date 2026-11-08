@@ -1743,7 +1743,7 @@ static void test_deferred_close_keeps_weights_mapped(void)
     TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb - 4096, 4096u));
     TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, 0u));
 
-    /* Held past the close's 6 s wait. */
+    /* Held past the close's 9 s wait. */
     TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
     uint64_t t0 = g_fk.now;
     unsigned tlbs = g_fk.tlbs;

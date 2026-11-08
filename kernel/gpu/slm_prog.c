@@ -344,7 +344,7 @@ static uint32_t g_leaked_sessions;
  * Not a spinlock: the holder waits for the GPU with IRQs on and yields, and
  * may be preempted. A waiter yields too (be->relax), never spins with IRQs
  * masked (#1093): with IRQs off it only tries once. A wait is bounded at
- * one step timeout plus a second, which no healthy holder comes near; past
+ * 9 s (PROG_LOCK_WAIT_US below), which no healthy holder comes near; past
  * that the caller gets SLM_PROG_ERR_BUSY. slm_prog_close can't fail, so a
  * close that can't take the lock marks the session and the holder frees it
  * on unlock, whether the holder is slm_prog or another VM writer.

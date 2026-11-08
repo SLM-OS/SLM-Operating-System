@@ -6598,7 +6598,7 @@ static int nvgpu_vmrace_cmd(int argc, char *argv[])
 /* `nvgpu oplib vmhold <ms> [cpu]` (#1159, test only): a task on <cpu>
  * (default 2) takes the GPU VM lock and keeps it for <ms> (1 s to 60 s),
  * as a VM writer, or a step timeout's dump, that holds it past a close's
- * 6 s wait. `slm close` of a GPU session meanwhile is deferred: the
+ * 9 s wait. `slm close` of a GPU session meanwhile is deferred: the
  * session's PTEs stay until this task unlocks. `nvgpu oplib vmhold` prints
  * whether the lock is held and how often an open or close waited on a VM
  * writer. The task prints nothing (on Jetson only CPU 0 prints). */

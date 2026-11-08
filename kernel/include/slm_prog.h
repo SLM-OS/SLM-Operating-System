@@ -123,7 +123,8 @@ struct slm_prog_run_stats {
  * Every call takes one lock, so two sessions (the shell and slm-runner)
  * can use the program, and its shared tables and VM, at the same time.
  * The same lock serializes the other writers of the VM (slm_prog_vm_lock
- * below). A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s,
+ * below). A call that can't get it within 9 s (SLM_PROG_STEP_TIMEOUT_MS,
+ * 3 s for the channel recovery and 1 s of margin, slm_prog.c),
  * or at all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
 
 /* 1 if this boot has a channel programs can run on. */
@@ -221,7 +222,7 @@ void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz);
  * caller with IRQs masked (every dispatch-lock holder is one) makes one
  * try and gets SLM_PROG_ERR_BUSY, so it can't wait for a holder that
  * waits for the dispatch lock. With IRQs on, a waiter yields, bounded as
- * for the program lock (a step timeout plus a second). A holder must not
+ * for the program lock (9 s). A holder must not
  * call into slm_prog (the lock is not recursive) and must release it with
  * slm_prog_vm_unlock, which also finishes any session close that came in
  * meanwhile.
