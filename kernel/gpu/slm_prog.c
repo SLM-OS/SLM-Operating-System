@@ -62,6 +62,28 @@ static enum mm_variant mm_variant_of(uint32_t sass)
     }
 }
 
+/* GQA heads per KV head, or 0 when the HMMA kernels' shape does not hold:
+ * head dim 128 and whole groups (scripts/cuda/slm/slm_gqa_hmma.cu). */
+static uint32_t gqa_hmma_group(const struct slm_prog_op *op)
+{
+    uint32_t nhq = op->dim[0], nhkv = op->dim[1];
+    if (op->dim[2] != 128u || nhkv == 0u || nhq == 0u || nhq % nhkv != 0u) return 0u;
+    return nhq / nhkv;
+}
+
+/* GQA (#1167): Q.K^T and P.V on HMMA when the shape allows, the decode kernel
+ * while one 16-row M tile holds every row's heads of a KV head (Qwen2.5-1.5B:
+ * up to 2 rows), the prefill kernel past that. Faster than slm_gqa_w8 at every
+ * KV length measured (64 to 4096), so the choice depends on rows only, which a
+ * prebuilt program can make. Other shapes (the tiny test model, hd 32) keep
+ * slm_gqa_w8. */
+static int gqa_sass(const struct slm_prog_op *op)
+{
+    uint32_t group = gqa_hmma_group(op);
+    if (group == 0u) return SLM_SASS_GQA_W8;
+    return (uint64_t)op->rows * group <= 16u ? SLM_SASS_GQA_HMMA_DEC : SLM_SASS_GQA_HMMA_PF;
+}
+
 /* Decode: B = 1 kernels. Prefill: b8 to 8 rows; past that x in shared memory
  * (bs) when N is big enough to fill the SMs, otherwise b8 split per x tile.
  * The same choice as scripts/cuda/harness/slm_forward.cu add_mm. */
@@ -75,7 +97,7 @@ int slm_prog_op_sass(const struct slm_prog_op *op)
     case SLM_PROG_K_RMSNORM: return SLM_SASS_RMSNORM_W8;
     case SLM_PROG_K_ROPE: return SLM_SASS_ROPE;
     case SLM_PROG_K_SWIGLU: return SLM_SASS_SWIGLU;
-    case SLM_PROG_K_GQA: return SLM_SASS_GQA_W8;
+    case SLM_PROG_K_GQA: return gqa_sass(op);
     case SLM_PROG_K_ADD: return SLM_SASS_ADD;
     case SLM_PROG_K_EMBED_Q4K: return SLM_SASS_EMBED_Q4K;
     case SLM_PROG_K_EMBED_Q6K: return SLM_SASS_EMBED_Q6K;
@@ -250,6 +272,25 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         put32(args, 0x190, op->dim[2]);
         put32(args, 0x194, rows);
         l->args_len = 0x38;
+        if (sass == SLM_SASS_GQA_HMMA_DEC || sass == SLM_SASS_GQA_HMMA_PF) {
+            /* Grids from slm_gqa_hmma.cu: a CTA per KV head and 16 output
+             * dims (decode, 8 warps), or per KV head and four 16-row M
+             * tiles (prefill, 4 warps). The kernels write nothing outside
+             * their shape, so refuse it here. */
+            uint32_t group = gqa_hmma_group(op);
+            if (group == 0u) return -1;
+            uint64_t m = (uint64_t)rows * group;
+            l->grid_x = op->dim[1];
+            if (sass == SLM_SASS_GQA_HMMA_DEC) {
+                if (m > 16u) return -1;
+                l->grid_y = op->dim[2] / 16u;
+                l->block_y = 8;
+            } else {
+                l->grid_y = (uint32_t)(((m + 15u) / 16u + 3u) / 4u);
+                l->block_y = 4;
+            }
+            return 0;
+        }
         l->grid_x = op->dim[0];
         l->grid_y = rows;
         l->block_y = 8;

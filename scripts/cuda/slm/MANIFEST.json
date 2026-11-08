@@ -5,6 +5,142 @@
  "arch": "sm_87",
  "entries": [
   {
+   "name": "slm_gqa_hmma_dec",
+   "op": "gqa",
+   "tier": "HMMA",
+   "dtype": "FP16",
+   "sass": "slm_gqa_hmma_dec_shader.sass",
+   "source": "scripts/cuda/slm/slm_gqa_hmma.cu",
+   "code_bytes": 19840,
+   "sha256": "eb6c35ca03eae022b19c471aa60e42dd23b1040dc9b561bddb81cb4c7a9c49b6",
+   "grid": "nhkv,hd/16,1",
+   "block": [
+    32,
+    8,
+    1
+   ],
+   "smem_bytes": 13312,
+   "regs": 122,
+   "hmma_instructions": 20,
+   "cbuf0_size": 408,
+   "abi": [
+    {
+     "name": "q",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "k",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "v",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "pos",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 384,
+     "size": 8
+    },
+    {
+     "name": "nhq",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "nhkv",
+     "offset": 396,
+     "size": 4
+    },
+    {
+     "name": "hd",
+     "offset": 400,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 404,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_gqa_w8 with Q.K^T and P.V on HMMA. hd == 128, B * (nhq/nhkv) <= 16. Prefer this one for decode (#1167)."
+  },
+  {
+   "name": "slm_gqa_hmma_pf",
+   "op": "gqa",
+   "tier": "HMMA",
+   "dtype": "FP16",
+   "sass": "slm_gqa_hmma_pf_shader.sass",
+   "source": "scripts/cuda/slm/slm_gqa_hmma.cu",
+   "code_bytes": 25088,
+   "sha256": "3800fb386ddf12fb87304697c6d14a027af53bdd8910bd61bf71adb173d1c44c",
+   "grid": "nhkv,ceil(ceil(B*nhq/nhkv/16)/4),1",
+   "block": [
+    32,
+    4,
+    1
+   ],
+   "smem_bytes": 16384,
+   "regs": 182,
+   "hmma_instructions": 48,
+   "cbuf0_size": 408,
+   "abi": [
+    {
+     "name": "q",
+     "offset": 352,
+     "size": 8
+    },
+    {
+     "name": "k",
+     "offset": 360,
+     "size": 8
+    },
+    {
+     "name": "v",
+     "offset": 368,
+     "size": 8
+    },
+    {
+     "name": "pos",
+     "offset": 376,
+     "size": 8
+    },
+    {
+     "name": "out",
+     "offset": 384,
+     "size": 8
+    },
+    {
+     "name": "nhq",
+     "offset": 392,
+     "size": 4
+    },
+    {
+     "name": "nhkv",
+     "offset": 396,
+     "size": 4
+    },
+    {
+     "name": "hd",
+     "offset": 400,
+     "size": 4
+    },
+    {
+     "name": "B",
+     "offset": 404,
+     "size": 4
+    }
+   ],
+   "doc": "As slm_gqa_w8 with Q.K^T and P.V on HMMA. hd == 128, any B. Prefer this one for prefill (#1167)."
+  },
+  {
    "name": "slm_mm_q4k_hmma_b1",
    "op": "matmul",
    "tier": "HMMA",

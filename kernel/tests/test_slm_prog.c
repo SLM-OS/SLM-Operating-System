@@ -556,6 +556,67 @@ static void test_encode_kernels(void)
     TEST_ASSERT_EQUAL_INT(-1, slm_prog_op_sass(&sum));
 }
 
+/* #1167: GQA runs on the HMMA pair for hd 128 and whole groups, picked by
+ * rows (decode while rows * group <= 16), with the pair's own grids; other
+ * shapes keep slm_gqa_w8, and the encoder refuses an HMMA kernel outside its
+ * shape. */
+static void test_gqa_selects_hmma(void)
+{
+    struct ga10b_prog_launch l;
+    uint8_t a[GA10B_PROG_CBUF_ARGS_MAX];
+    struct slm_prog_op g = {
+        .kernel = SLM_PROG_K_GQA, .rows = 1, .dim = { 12, 2, 128 },
+        .ptr = { 0x10, 0x20, 0x30, 0x40, 0x50 },
+    };
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_DEC, slm_prog_op_sass(&g));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(2, l.grid_x);  /* KV heads */
+    TEST_ASSERT_EQUAL_UINT32(8, l.grid_y);  /* 128 dims / 16 */
+    TEST_ASSERT_EQUAL_UINT32(32, l.block_x);
+    TEST_ASSERT_EQUAL_UINT32(8, l.block_y);
+    TEST_ASSERT_EQUAL_UINT32(1, l.barrier_count);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 13312u);
+    /* Same arguments as slm_gqa_w8. */
+    TEST_ASSERT_EQUAL_HEX64(0x10, arg64(a, 0x00));
+    TEST_ASSERT_EQUAL_HEX64(0x50, arg64(a, 0x20));
+    TEST_ASSERT_EQUAL_UINT32(12, arg32(a, 0x28));
+    TEST_ASSERT_EQUAL_UINT32(2, arg32(a, 0x2C));
+    TEST_ASSERT_EQUAL_UINT32(128, arg32(a, 0x30));
+    TEST_ASSERT_EQUAL_UINT32(1, arg32(a, 0x34));
+
+    g.rows = 2; /* 12 M rows still fit one tile */
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_DEC, slm_prog_op_sass(&g));
+    g.rows = 3; /* 18 do not */
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_PF, slm_prog_op_sass(&g));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&g, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+
+    g.rows = 64; /* 384 M rows: 24 tiles, 4 per CTA */
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_HMMA_PF, slm_prog_op_sass(&g));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(2, l.grid_x);
+    TEST_ASSERT_EQUAL_UINT32(6, l.grid_y);
+    TEST_ASSERT_EQUAL_UINT32(4, l.block_y);
+    TEST_ASSERT_EQUAL_UINT32(1, l.barrier_count);
+    TEST_ASSERT_TRUE(l.smem_size_bytes >= 16384u);
+    TEST_ASSERT_EQUAL_UINT32(64, arg32(a, 0x34));
+    g.rows = 9; /* 54 M rows: 4 tiles, one CTA */
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&g, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_UINT32(1, l.grid_y);
+
+    /* Outside the pair's shape: slm_gqa_w8, and the pair refuses it. */
+    struct slm_prog_op tiny = {
+        .kernel = SLM_PROG_K_GQA, .rows = 1, .dim = { 8, 2, 32 },
+        .ptr = { 0x10, 0x20, 0x30, 0x40, 0x50 },
+    };
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_W8, slm_prog_op_sass(&tiny));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&tiny, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&tiny, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+    struct slm_prog_op odd = g;
+    odd.dim[1] = 5; /* 12 heads over 5 KV heads: no whole groups */
+    TEST_ASSERT_EQUAL_INT(SLM_SASS_GQA_W8, slm_prog_op_sass(&odd));
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&odd, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
+}
+
 /* ---- Sessions on a fake channel ---- */
 
 /* Run once from inside the next single-page allocation: a page-table page,
@@ -1972,6 +2033,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_prog_inject_hang);
     RUN_TEST(test_prog_profile_slots);
     RUN_TEST(test_encode_kernels);
+    RUN_TEST(test_gqa_selects_hmma);
     RUN_TEST(test_session_maps_and_frees);
     RUN_TEST(test_session_va_reuse_keeps_page_size);
     RUN_TEST(test_session_scattered_weights);

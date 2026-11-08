@@ -1,7 +1,7 @@
 #!/bin/bash
-# gqa-emu-test.sh - host checks of the staged HMMA GQA kernels (#1167).
+# gqa-emu-test.sh - host checks of the HMMA GQA kernels (#1167).
 #
-#   1. gqa_emu_test on scripts/cuda/staging/slm_gqa_hmma.cu: every case of
+#   1. gqa_emu_test on scripts/cuda/slm/slm_gqa_hmma.cu: every case of
 #      gqa_check.h, lane by lane, must pass (--quick: KV up to 600 only).
 #   2. Three mutants of the source must fail, which shows the checks can see
 #      each class of defect:
@@ -15,7 +15,7 @@
 # Usage: gqa-emu-test.sh [--quick]. Exit 0 when all of the above hold.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SRC="$HERE/../staging/slm_gqa_hmma.cu"
+SRC="$HERE/../slm/slm_gqa_hmma.cu"
 WORK="$(mktemp -d -t gqa-emu-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 QUICK=""

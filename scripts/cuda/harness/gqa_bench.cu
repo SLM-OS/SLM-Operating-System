@@ -2,11 +2,11 @@
  * gqa_bench.cu - HMMA GQA against slm_gqa_w8 under JetPack (#1167).
  *
  * Build and run on the board (run-gqa-bench.sh does both):
- *   nvcc -O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm -I../staging \
+ *   nvcc -O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm \
  *        gqa_bench.cu -o gqa_bench
  *   ./gqa_bench [--checks-only] [--no-checks] [--only <case>] [--runs N] [--raw file.csv]
  *
- * Checks: every case of gqa_check.h on slm_gqa_w8 and the four staged kernels
+ * Checks: every case of gqa_check.h on slm_gqa_w8 and the four HMMA kernels
  * (slm_gqa_hmma_dec / _dec_p16 for B * group <= 16, slm_gqa_hmma_pf / _pf_p16
  * for all), against the exact reference. KV slots past the causal limit hold
  * NaN and Inf.
@@ -37,9 +37,11 @@
 #include <vector>
 
 #include "../slm/slm_ops.cu"
-/* -DGQA_KERNEL_SRC='"path"' builds another copy (the mutation run). */
+/* -DGQA_KERNEL_SRC='"path"' builds another copy (the mutation run). The _p16
+ * comparison kernels exist only with GQA_P16_VARIANTS. */
+#define GQA_P16_VARIANTS 1
 #ifndef GQA_KERNEL_SRC
-#define GQA_KERNEL_SRC "../staging/slm_gqa_hmma.cu"
+#define GQA_KERNEL_SRC "../slm/slm_gqa_hmma.cu"
 #endif
 #include GQA_KERNEL_SRC
 #include "gqa_check.h"

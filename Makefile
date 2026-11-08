@@ -930,7 +930,7 @@ hailo-clean:
 test-jetson-uefi-layout:
 	@bash scripts/test-jetson-uefi-layout.sh
 
-# HMMA grouped-query attention, staged outside the shader set (#1167): the
+# HMMA grouped-query attention (#1167, scripts/cuda/slm/slm_gqa_hmma.cu): the
 # kernel source runs lane by lane on the host against the exact reference,
 # three deliberate mutants must fail, and with nvcc the cubin must be
 # launchable by SLM-OS. No GPU needed. GQA_EMU_ARGS=--quick limits it to

@@ -1,10 +1,11 @@
 /*
  * slm_gqa_hmma.cu - grouped-query attention with Q.K^T and P.V on HMMA (#1167).
  *
- * Staging: this file is not in scripts/cuda/slm/, so the operator library and
- * the SLM kernel table do not build it. It is written to the same rules as the
- * kernels there (inlined helpers only, no stack, cbuf 0 arguments from 0x160,
- * block (32, NW, 1), no blockDim or gridDim) so that it can move there as is.
+ * kernel/gpu/slm_prog.c selects these for GQA when hd is 128 and nhq is a
+ * multiple of nhkv, slm_gqa_w8 otherwise (the tiny test model has hd 32).
+ * Measured against slm_gqa_w8 on jetson-nano-2 (scripts/cuda/harness/
+ * gqa_bench.cu): decode 14.2 against 32.6 us at kv 64 and 53.8 against 619 us
+ * at kv 2048; 64-row prefill 24.3 against 226 us at kv 64.
  *
  * Contract, the same as slm_gqa_w8: q and out are FP16 [B][nhq][hd]; k and v
  * are FP16 [T][nhkv][hd]; query row b sees positions 0..=pos[b] (the causal
@@ -559,7 +560,9 @@ GQ_FN void gqa_pf_body(const uint16_t *q, const uint16_t *k, const uint16_t *v,
 
 #ifndef SLM_GQA_EMU
 /* Arguments and cbuf ABI as slm_gqa_w8: q, k, v, pos, out, nhq, nhkv, hd, B.
- * The _p16 kernels round P to FP16 alone (see gq_softmax_block). */
+ * The _p16 kernels round P to FP16 alone (see gq_softmax_block); they are
+ * built only with GQA_P16_VARIANTS (the harness's comparison), never into the
+ * operator library. */
 #define GQ_KERNEL(name, body, px, warps, smem_t)                                                   \
     __global__ void __launch_bounds__(32 * (warps))                                                \
         name(const half *q, const half *k, const half *v, const uint32_t *pos, half *out, int nhq, \
@@ -571,9 +574,11 @@ GQ_FN void gqa_pf_body(const uint16_t *q, const uint16_t *k, const uint16_t *v,
                  nhq, nhkv, hd, B, threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, &sm);         \
     }
 GQ_KERNEL(slm_gqa_hmma_dec, gqa_dec_body, true, GQ_DEC_WARPS, gq_dec_smem)
-GQ_KERNEL(slm_gqa_hmma_dec_p16, gqa_dec_body, false, GQ_DEC_WARPS, gq_dec_smem)
 GQ_KERNEL(slm_gqa_hmma_pf, gqa_pf_body, true, GQ_PF_WARPS, gq_pf_smem)
+#ifdef GQA_P16_VARIANTS
+GQ_KERNEL(slm_gqa_hmma_dec_p16, gqa_dec_body, false, GQ_DEC_WARPS, gq_dec_smem)
 GQ_KERNEL(slm_gqa_hmma_pf_p16, gqa_pf_body, false, GQ_PF_WARPS, gq_pf_smem)
+#endif
 #undef GQ_KERNEL
 #endif
 

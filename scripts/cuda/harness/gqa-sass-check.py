@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that the staged HMMA GQA kernels are launchable by SLM-OS (#1167).
+"""Check that the HMMA GQA kernels are launchable by SLM-OS (#1167).
 
 Applies scripts/cuda/oplib-extract.py's own rules to the cubin (no relocation,
 no constant bank beyond cbuf 0, no stack, parameters from 0x160) and two more
@@ -25,7 +25,8 @@ spec.loader.exec_module(ox)
 ABI = ["q", "k", "v", "pos", "out", "nhq", "nhkv", "hd", "B"]
 W8_OFFSETS = [0x160, 0x168, 0x170, 0x178, 0x180, 0x188, 0x18C, 0x190, 0x194]
 ALLOWED_LOW = {0x28, 0x118}
-EXPECT = {"slm_gqa_hmma_dec", "slm_gqa_hmma_dec_p16", "slm_gqa_hmma_pf", "slm_gqa_hmma_pf_p16"}
+# The operator library's build (no GQA_P16_VARIANTS).
+EXPECT = {"slm_gqa_hmma_dec", "slm_gqa_hmma_pf"}
 
 
 def low_cbuf_reads(cubin, mangled):

@@ -1,5 +1,5 @@
 /*
- * gqa_emu.h - run scripts/cuda/staging/slm_gqa_hmma.cu lane by lane on the CPU (#1167).
+ * gqa_emu.h - run scripts/cuda/slm/slm_gqa_hmma.cu lane by lane on the CPU (#1167).
  *
  * The host has no GPU, so the kernel bodies are checked here before they reach
  * the board: every lane is a ucontext coroutine; warp collectives (mma.sync,

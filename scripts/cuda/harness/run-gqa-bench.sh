@@ -1,7 +1,7 @@
 #!/bin/bash
 # run-gqa-bench.sh - HMMA GQA against slm_gqa_w8 on the board, JetPack (#1167).
 #
-# Copy scripts/cuda/{slm,staging,harness} and scripts/cuda/oplib-extract.py to
+# Copy scripts/cuda/{slm,harness} and scripts/cuda/oplib-extract.py to
 # the board (same layout) and run this from anywhere there, as root. It changes
 # no power mode or clock: it reads nvpmodel's mode and the GPU and EMC clocks
 # before and after, and the benchmark reads them around every point.
@@ -40,10 +40,10 @@ clocks() {
 } > env.log 2>&1
 cat env.log
 
-FL=(-O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm -I../staging)
+FL=(-O3 -std=c++17 -arch=sm_87 -Xcompiler -fopenmp -lgomp -I../slm)
 nvcc "${FL[@]}" gqa_bench.cu -o gqa_bench > build.log 2>&1
 echo "build rc=$?"
-nvcc -arch=sm_87 -O3 --cubin -I../slm ../staging/slm_gqa_hmma.cu -o gqa.cubin >> build.log 2>&1 &&
+nvcc -arch=sm_87 -O3 --cubin -I../slm ../slm/slm_gqa_hmma.cu -o gqa.cubin >> build.log 2>&1 &&
     python3 gqa-sass-check.py gqa.cubin > sass.log 2>&1
 echo "sass rc=$?"; cat sass.log
 
@@ -51,8 +51,8 @@ OMP_NUM_THREADS=6 timeout 600 ./gqa_bench --checks-only > checks.log 2>&1
 echo "checks rc=$? $(tail -1 checks.log)"
 
 mkdir -p mut
-sed 's/t < lim\[e >> 1\]/t <= lim[e >> 1]/' ../staging/slm_gqa_hmma.cu > mut/slm_gqa_hmma.cu
-cmp -s ../staging/slm_gqa_hmma.cu mut/slm_gqa_hmma.cu && echo "mutant: sed changed nothing"
+sed 's/t < lim\[e >> 1\]/t <= lim[e >> 1]/' ../slm/slm_gqa_hmma.cu > mut/slm_gqa_hmma.cu
+cmp -s ../slm/slm_gqa_hmma.cu mut/slm_gqa_hmma.cu && echo "mutant: sed changed nothing"
 nvcc "${FL[@]}" -DGQA_KERNEL_SRC='"mut/slm_gqa_hmma.cu"' gqa_bench.cu -o gqa_bench_mut >> build.log 2>&1
 OMP_NUM_THREADS=6 timeout 300 ./gqa_bench_mut --checks-only --only "opcheck rows" > mutant.log 2>&1
 echo "mutant rc=$? (must be 1) $(tail -1 mutant.log)"

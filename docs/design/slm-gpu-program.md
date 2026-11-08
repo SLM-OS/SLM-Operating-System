@@ -34,11 +34,41 @@ measurements behind the ADR. Shell verbs are listed in
 |---|---|---|---|
 | Q4_K / Q6_K matmul, N above 256 | `_b1` | `_b8` | `_bs` (x in shared memory, grid ceil(N/120), block 32x8) |
 | Q4_K / Q6_K matmul, N up to 256 | `_b1` | `_b8` | `_b8` split per x tile of 8 rows (grid y = ceil(B/8)) |
-| RMSNorm, attention | `_w8` (block 32x8) | `_w8` | `_w8` |
+| RMSNorm | `_w8` (block 32x8) | `_w8` | `_w8` |
+| GQA, head dim 128, whole groups | `slm_gqa_hmma_dec` | `_hmma_dec` to 2 rows, then `_hmma_pf` | `slm_gqa_hmma_pf` |
+| GQA, other shapes (tiny test model) | `slm_gqa_w8` | `slm_gqa_w8` | `slm_gqa_w8` |
 
 The `_bs` kernels use 104 (Q4_K) and 118 (Q6_K) registers and 16 KB of
 shared memory. x must be 16-byte aligned. Shaders come from
 `make oplib-shaders` with host CUDA 12.0.
+
+### GQA on tensor cores (#1167)
+
+`scripts/cuda/slm/slm_gqa_hmma.cu` computes Q.K^T and P.V with
+`mma.m16n8k16`. The six query heads that share a KV head form one M tile,
+so a K or V tile serves all of them; `slm_gqa_w8` reads it six times.
+`_hmma_dec` (rows times group up to 16; grid KV heads by 8, block 32x8)
+splits positions over its warps and output dims over its CTAs, so it needs
+no workspace. `_hmma_pf` (grid KV heads by ceil(M tiles / 4), block 32x4)
+gives each warp a 16-row M tile and shares K and V tiles through cp.async.
+P enters P.V as two FP16 parts and each score mma starts from zero (the
+tensor core truncates when it adds into an accumulator), which keeps the
+output within 4 FP16 ULP of an exact reference where `slm_gqa_w8` is.
+Selection depends on rows only, because a prebuilt program cannot change
+kernels with the KV length and the pair is faster at every length measured.
+
+Native harness (`scripts/cuda/harness/gqa_bench.cu`, 25W, GPU 918 MHz,
+L2 scrubbed before each launch), median us per layer:
+
+| KV length | Decode `w8` | Decode `_hmma_dec` | Prefill 64 rows `w8` | Prefill `_hmma_pf` |
+|---|---|---|---|---|
+| 64 | 32.6 | 14.2 | 225.5 | 24.3 |
+| 512 | 163.3 | 22.4 | 2182 | 84.2 |
+| 2048 | 619.4 | 53.8 | 9004 | 279.3 |
+
+Checks: `make test-gqa-emu` runs the kernel source lane by lane on the host
+against the exact reference (and three mutants that must fail);
+`gqa_bench --checks-only` runs the same cases on the board.
 
 ### Concurrency and failure
 
@@ -164,8 +194,8 @@ How each step was found:
   Neither reaches the 60 percent in the DoD.
 - Mma issue cycles over matmul wall time, from known mma counts and the
   measured 3.44 G mma/s: 7.7 percent.
-- MAC share on tensor cores: 99.47 percent. GQA is the only SIMT
-  matmul-class op.
+- MAC share on tensor cores: 99.47 percent, measured while GQA was the
+  only SIMT matmul-class op; since #1167 GQA runs on HMMA for head dim 128.
 - On bare metal these counters are programmed through `tegra-soc-hwpm`, not
   nvgpu. Its `hwpm_dbg_regops` log lists 323 register addresses for one
   `ncu` read but no values, so SLM-OS does not read them yet.

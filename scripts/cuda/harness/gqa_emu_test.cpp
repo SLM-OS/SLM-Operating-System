@@ -2,14 +2,14 @@
  * gqa_emu_test.cpp - the HMMA GQA kernels on the host, lane by lane (#1167).
  *
  * Runs the decode body (B * group <= 16) and the prefill body (every case) of
- * scripts/cuda/staging/slm_gqa_hmma.cu, each with split P (the default
+ * scripts/cuda/slm/slm_gqa_hmma.cu, each with split P (the default
  * kernels) and FP16 P (the _p16 kernels), through gqa_emu.h on every case of
  * gqa_check.h against the exact reference. Split-P kernels also run with
  * warps serialised between barriers, prefill with cp.async landing both at
  * issue and at the wait (see gqa_emu.h). Every buffer ends at a PROT_NONE
  * page, so a read past the end of K, V, q, pos or out faults.
  *
- *   g++ -O2 -std=c++17 -fopenmp -I. -I../staging gqa_emu_test.cpp -o gqa_emu_test
+ *   g++ -O2 -std=c++17 -fopenmp -I. -I../slm gqa_emu_test.cpp -o gqa_emu_test
  *   ./gqa_emu_test [--quick]
  *
  * -DGQA_KERNEL_SRC='"file.cu"' runs another copy of the kernel source (the
