@@ -547,6 +547,7 @@ gives the same reason.
 | `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile`. Refused while a prompt runs on that session |
 | `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
 | `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt. One run at a time |
+| `nvgpu oplib vmrace <rounds> [cpu]` | Test only (#1173). A task (CPU 2 by default) runs the weights-pool build's VM writes about once a millisecond, checks each page and unmaps it, to run during `slm launch --gpu on` / `slm close`. `nvgpu oplib vmrace` prints `bad walks 0, stale after unmap 0` and how often each side found the GPU VM lock held by the other; `... stop` ends it |
 | `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
