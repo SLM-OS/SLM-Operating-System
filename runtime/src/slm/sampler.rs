@@ -39,8 +39,13 @@
 //! [`SamplerState`], sized on the first filtered token, so a session
 //! allocates once and never again.
 //!
-//! The token stream for a given seed is the one the plain algorithm
-//! gives (sort, mask, softmax over the vocabulary; [`reference`]). A tie
+//! The token stream for a given seed is main's (c69438a2), which is the
+//! one the plain algorithm gives (sort, mask, softmax over the
+//! vocabulary; [`reference`]) except in one corner: at `T = 1` after
+//! top-p, main draws with the top-p pass's `exp(logit - max)` even when
+//! a tied cut removed the maximum, where the reference subtracts the
+//! largest kept logit. The weights then differ by at most one ulp, and
+//! main's behaviour is kept. A tie
 //! across a cut makes the kept set depend on `sort_unstable_by`'s
 //! permutation, so that case runs the same sort, and a filter whose last
 //! cut was tied goes straight to it. Logits holding NaN or `+inf`, and a
@@ -289,7 +294,9 @@ impl SamplerState {
                 let w = &mut ws.scratch[..len];
                 let mut denom = 0.0f32;
                 if temperature == 1.0 && exps_ready {
-                    // The top-p pass already holds exp(logit - max).
+                    // The top-p pass already holds exp(logit - max), with
+                    // the pre-cut max even if a tied cut removed it, as
+                    // main draws (see `reference`).
                     for (slot, &i) in w.iter_mut().zip(list.iter()) {
                         let e = if logits[i as usize] == f32::NEG_INFINITY {
                             0.0
@@ -945,9 +952,11 @@ fn top_p_of_vocab(logits: &[f32], p: f32, ws: &mut SamplerWorkspace) -> Option<(
 }
 
 /// The sampler as first specified: sort, mask, then a softmax over the
-/// whole vocabulary. It defines the token stream (the fast paths are
-/// tested against a copy of it) and runs the inputs they leave to it.
-/// Uses only workspace memory.
+/// whole vocabulary. It runs the inputs the fast paths leave to it, and
+/// the fast paths are tested against a copy of it. Main's sampler draws
+/// at `T = 1` with the pre-cut max; the reference differs by at most one
+/// ulp in that corner (a tied top-p cut that removes the maximum), which
+/// none of the inputs routed here can reach. Uses only workspace memory.
 pub(crate) mod reference {
     use super::{argmax, expf, inverse_cdf, note_max, Sampler, SamplerWorkspace};
     use core::cmp::Ordering;
@@ -1088,6 +1097,13 @@ pub(crate) mod reference {
         inverse_cdf(logits, denom, rng)
     }
 }
+
+/// Main's sampler (c69438a2) as the oracle for "the same tokens as main".
+/// Kept verbatim, so rustfmt leaves it alone.
+#[cfg(test)]
+#[rustfmt::skip]
+#[path = "sampler_main_c69438a2.rs"]
+mod main_c69438a2;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1679,7 +1695,7 @@ pub(crate) mod tests {
     #[test]
     fn matches_legacy_across_sizes_shapes_and_cuts() {
         // Small vectors reach every cut position, tie pattern and
-        // chunk boundary in mass_prefix (64, 192).
+        // chunk boundary in nucleus (64, 192).
         let sizes = [1usize, 2, 3, 5, 8, 20, 21, 63, 64, 65, 192, 193, 500];
         let shapes = [
             Shape::Continuous,
@@ -1920,6 +1936,68 @@ pub(crate) mod tests {
         assert_eq!((cut.len, cut.prob_next), (3, 0.25 / denom));
     }
 
+    /// At `T = 1`, main draws with the top-p pass's `exp(logit - max)` even
+    /// when a tied cut removed the maximum; the reference subtracts the
+    /// largest kept logit, and the weights differ by one ulp. Here the first
+    /// draw lands in that ulp, so the two pick different tokens, and the
+    /// sampler must pick main's.
+    #[test]
+    fn t1_draw_after_a_cut_maximum_keeps_mains_token() {
+        // exp(-3.5e-8) rounds to 0.99999994 and exp(-1e-8) to 1.0. The tail
+        // moves the normalizer so the four top probabilities tie; the sort
+        // keeps the first three and cuts the maximum (index 3). Kept weights:
+        // main [a, a, 1] (a = 0.99999994), reference [1, 1, 1], both summing
+        // to 3.0.
+        let base = [
+            -3.5e-8_f32,
+            -3.5e-8,
+            -1.0e-8,
+            0.0,
+            -0.02,
+            -0.02,
+            -0.02,
+            -0.02,
+        ];
+        let sampler = Sampler::TopP {
+            temperature: 1.0,
+            p: 0.3,
+        };
+        // The first xorshift64 output from this seed has top 24 bits
+        // 5592405, so r = 3 * 5592405 / 2^24 = 1 - 2^-24 = a: below the
+        // reference's first boundary (1.0), not below main's (a).
+        let seed = 0x659d_7820_2fb8_6744_u64;
+        let mains = |seed: u64| {
+            let mut st = super::main_c69438a2::SamplerState::new(seed);
+            let tok = st.sample(&sampler, &mut base.to_vec());
+            (tok, st.seed)
+        };
+        let ours = |seed: u64| {
+            let mut st = SamplerState::new(seed);
+            let tok = st.sample(&sampler, &mut base.to_vec());
+            (tok, st.seed)
+        };
+        let mut s = seed;
+        let reference = legacy::sample(&mut s, &sampler, &mut base.to_vec());
+        assert_eq!(mains(seed), (1, s), "main's corner moved");
+        assert_eq!(reference, 0, "the reference no longer differs here");
+        assert_eq!(ours(seed), mains(seed));
+        for seed in 1..=4096u64 {
+            assert_eq!(ours(seed), mains(seed), "seed {seed}");
+        }
+        // The route: the exact sort ran and the maximum was cut.
+        let mut st = SamplerState::new(seed);
+        let _ = probe::take();
+        st.sample(
+            &Sampler::TopP {
+                temperature: 0.25,
+                p: 0.3,
+            },
+            &mut base.to_vec(),
+        );
+        assert_eq!(st.workspace.exact_sorts, 1);
+        assert_eq!(probe::take().1, 2, "maximum not cut");
+    }
+
     #[test]
     fn heap_select_agrees_with_a_sort() {
         // Few distinct levels, some -inf: ties at and around most cuts.
@@ -2107,11 +2185,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn one_softmax_pass_per_token_every_mode() {
+    fn one_max_reduction_and_live_plus_kept_exps_per_token() {
         // Per token: one max reduction, and one exp per live candidate
         // (the vocabulary, or the top-k set). At T != 1 a top-p pass adds
-        // one exp per kept token for the temperature-scaled draw; no
-        // value is exponentiated twice for the same purpose.
+        // a second exp pass over the kept tokens for the
+        // temperature-scaled draw; no value is exponentiated twice for
+        // the same purpose.
         for shape in [Shape::Continuous, Shape::Peaked, Shape::Quantized] {
             let base = make_logits(shape, QWEN_VOCAB, 0x50F7);
             // every_mode() uses k = 40 and p = 0.9 throughout.
@@ -2154,8 +2233,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// Digest of main's token streams (c69438a2), printed by
-    /// `sampler_bench::per_token_counts` on that revision.
+    /// Digest of main's token streams (c69438a2). It also pins std's
+    /// `sort_unstable_by` permutation on ties and libm's `expf` bits, so a
+    /// toolchain or libm bump can change it with no sampler change. To
+    /// regenerate, run main's sampler through the same streams: on
+    /// c69438a2 add `sampler_bench.rs` and this module's `probe` counters,
+    /// then `cargo test --release --target x86_64-unknown-linux-gnu
+    /// --features slm slm::sampler_bench::per_token_counts -- --ignored
+    /// --nocapture` and take the `digest all` line.
     const MAIN_STREAM_DIGEST: u64 = 0x48c8_3e6b_a059_9de0;
 
     #[test]
