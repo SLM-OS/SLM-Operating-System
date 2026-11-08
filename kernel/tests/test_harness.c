@@ -254,7 +254,7 @@ int test_harness_run_all(void)
      * impl + non-Jetson stub in slm_ffi.c). No Rust deps. */
     total_failures += test_suite_slm_dispatch_stats();
 #if defined(ENABLE_BOOT_TESTS)
-    /* Boot-test kernels only: the suite embeds its 860 KB of fixtures. */
+    /* Boot-test kernels only: the suite embeds about 1.1 MB of fixtures. */
     total_failures += test_suite_slm_golden();
     total_failures += test_suite_slm_prog();
 #endif

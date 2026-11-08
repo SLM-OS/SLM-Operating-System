@@ -609,12 +609,17 @@ slmos> slm golden 0 drop-bias
 |---|---|
 | `slm golden <handle>` | Per case a `[slm] real golden <case>: GPU program(launches=.. barriers=.. batch=64 arena=..MB) ...` line, one `[slm] real golden <case> step N` line per step (largest error and where, top token against llama.cpp's), then `slm golden: PASS (GPU program, per token), 2 cases, largest step 1 rows, 12 steps, 12 with llama.cpp's top token ...` |
 | `slm golden <handle> batch` | The same with each prompt in one prefill step, as `slm prompt` feeds it: `PASS (GPU program, batch), 2 cases, largest step 64 rows` |
-| `slm golden <handle> drop-bias` | The deliberate mutation: the Q, K and V biases of layer 0 are zeroed in the weights the GPU program maps for this run and put back afterwards. Must print `FAIL` and `restored: yes`. Refused while a session's GPU program maps the model |
+| `slm golden <handle> drop-bias` | The deliberate mutation: the Q, K and V biases of layer 0 are zeroed in the weights the GPU program maps for this run and put back afterwards. Must print `FAIL` and `restored: yes`. Refused while a session's GPU program maps that handle's weights |
 
-Run it with no prompt running: the verb takes the shell's mutation lock, but
-`slm-runner` and the HTTP API are separate. A `slm golden` that cannot run
-(no GPU channel after kexec, a different model file, a session holding the
-weights) says why and prints `FAIL, the check did not run`.
+`drop-bias` must run with no prompt running anywhere and with no second slot
+borrowing the same boot model (a second `slm load` of the same
+`/boot/models` file shares its pages). Neither is enforced: the verb takes
+the shell's mutation lock, but `slm-runner` and the HTTP API do not, and the
+GPU-program check covers only the handle given. A prompt or another slot that
+reads the weights during the run sees the zeroed biases. The plain and `batch`
+runs change nothing and can run beside other work. A `slm golden` that cannot
+run (no GPU channel after kexec, a different model file, a session holding
+the weights) says why and prints `FAIL, the check did not run`.
 
 The same check runs on the host, on the real model and the software GPU, which
 executes the exact reference: `make slm-real-golden-host` (needs the GGUF,
