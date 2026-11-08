@@ -95,6 +95,7 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
  * client (TEGRA_ICC_BPMP_*), MRQ_BWMGR_INT. *rate_hz_out gets the memory
  * clock BPMP set. Same return convention as bpmp_clk_enable.
  */
+#define BPMP_BWMGR_CLIENT_CPU_CLUSTER0 2u  /* TEGRA_ICC_BPMP_CPU_CLUSTER0 */
 #define BPMP_BWMGR_CLIENT_GPU 5u  /* TEGRA_ICC_BPMP_GPU */
 int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz_out);
 

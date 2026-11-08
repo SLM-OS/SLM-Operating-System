@@ -95,9 +95,15 @@ static int bpmp_emc_get(uint64_t *hz)
     return bpmp_clk_get_rate(TEGRA234_CLK_EMC, hz);
 }
 
+/* The memory clock belongs to BPMP's bandwidth manager: any
+ * MRQ_BWMGR_INT request recomputes it from the clients' floors and
+ * bandwidths, which throws away a rate set with MRQ_CLK (#1161). So ask
+ * for a floor on behalf of CPU cluster 0, as Linux's interconnect
+ * driver does for its clients (tegra234_mc_icc_set). */
 static int bpmp_emc_request(uint64_t hz, uint64_t *got)
 {
-    return bpmp_clk_set_rate(TEGRA234_CLK_EMC, hz, got);
+    return bpmp_emc_floor_khz(BPMP_BWMGR_CLIENT_CPU_CLUSTER0,
+                              (uint32_t)(hz / 1000u), got);
 }
 
 static const struct emc_hold_ops g_bpmp_ops = {
@@ -164,7 +170,7 @@ void emc_hold_boot_begin(void)
     int grc = bpmp_emc_get(&left);
     int src = bpmp_emc_request(TEGRA234_EMC_MAX_HZ, &reply);
     int rrc = bpmp_emc_get(&readback);
-    uart_printf("[emc-hold] UEFI left EMC at %llu MHz (rc=%d); MRQ_CLK set_rate(%llu MHz)"
+    uart_printf("[emc-hold] UEFI left EMC at %llu MHz (rc=%d); bwmgr floor(%llu MHz)"
                 " rc=%d reply %llu MHz; readback %llu MHz (rc=%d)\n",
                 mhz(left), grc, mhz(TEGRA234_EMC_MAX_HZ), src, mhz(reply),
                 mhz(readback), rrc);

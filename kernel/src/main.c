@@ -862,31 +862,6 @@ void kernel_main(void *dtb)
         (void)xhci_init();
         emc_hold_boot_step("xhci_init");
         emc_hold_boot_end();
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-        /*
-         * UEFI leaves EMC at 204 MHz and nothing like Linux's governors
-         * raises it. BPMP owns the switch and rounds to its DVFS table; a
-         * failure only costs speed. This has to follow the cold GPU and
-         * XUSB bring-up: the same request made right after bpmp_init
-         * succeeded and read 3199 MHz, but the shell later read 204 MHz
-         * (measured on jetson-nano-2, 10 cold boots), while a request
-         * made from the shell held through a 10-minute prompt.
-         */
-        if (boot_source_is_uefi()) {
-            uint64_t before = 0, after = 0;
-            (void)bpmp_clk_get_rate(TEGRA234_CLK_EMC, &before);
-            int emc_rc = bpmp_clk_set_rate(TEGRA234_CLK_EMC,
-                                           TEGRA234_EMC_MAX_HZ, &after);
-            if (emc_rc != 0) {
-                WARN("EMC: set_rate rc=%d, staying at %llu MHz", emc_rc,
-                     (unsigned long long)(before / 1000000u));
-            } else {
-                INFO("EMC: %llu -> %llu MHz",
-                     (unsigned long long)(before / 1000000u),
-                     (unsigned long long)(after / 1000000u));
-            }
-        }
-#endif
     }
 #endif
 
