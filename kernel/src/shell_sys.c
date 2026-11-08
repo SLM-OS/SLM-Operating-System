@@ -6483,6 +6483,84 @@ static int nvgpu_vmrace_cmd(int argc, char *argv[])
     return 0;
 }
 
+/* `nvgpu oplib vmhold <ms> [cpu]` (#1159, test only): a task on <cpu>
+ * (default 2) takes the GPU VM lock and keeps it for <ms> (1 s to 60 s),
+ * as a VM writer, or a step timeout's dump, that holds it past a close's
+ * 6 s wait. `slm close` of a GPU session meanwhile is deferred: the
+ * session's PTEs stay until this task unlocks. `nvgpu oplib vmhold` prints
+ * whether the lock is held and how often an open or close waited on a VM
+ * writer. The task prints nothing (on Jetson only CPU 0 prints). */
+#define VMHOLD_MIN_MS 1000u
+#define VMHOLD_MAX_MS 60000u
+enum { VMHOLD_IDLE = 0u, VMHOLD_TAKING, VMHOLD_HOLDING, VMHOLD_BUSY };
+static uint32_t g_vmhold_state;
+static uint32_t g_vmhold_holds;
+
+static void nvgpu_vmhold_task(void *arg)
+{
+    const uint32_t ms = (uint32_t)(uintptr_t)arg;
+    if (slm_prog_vm_lock() != 0) {
+        __atomic_store_n(&g_vmhold_state, VMHOLD_BUSY, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_vmhold_state, VMHOLD_HOLDING, __ATOMIC_RELEASE);
+    for (uint32_t i = 0; i < ms; i++) {
+        timer_busy_wait_us(1000u);
+        yield();
+    }
+    /* Finishes any close deferred meanwhile. */
+    slm_prog_vm_unlock();
+    __atomic_fetch_add(&g_vmhold_holds, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_vmhold_state, VMHOLD_IDLE, __ATOMIC_RELEASE);
+}
+
+static int nvgpu_vmhold_cmd(int argc, char *argv[])
+{
+    if (argc < 4) {
+        static const char *const STATE[] = { "idle", "taking the lock", "holding the lock",
+                                             "gave up (lock busy)" };
+        struct slm_prog_vm_lock_stats ls;
+        slm_prog_vm_lock_stats(&ls);
+        uint32_t st = __atomic_load_n(&g_vmhold_state, __ATOMIC_ACQUIRE);
+        shell_printf("vmhold: %s, %u holds done; open/close waited on VM writer %u\r\n",
+                     STATE[st & 3u], (unsigned)__atomic_load_n(&g_vmhold_holds, __ATOMIC_RELAXED),
+                     (unsigned)ls.map_waited_on_vm);
+        return 0;
+    }
+    uint32_t ms = 0, cpu = 2u;
+    if (shell_parse_uint(argv[3], &ms) != 0 || ms < VMHOLD_MIN_MS || ms > VMHOLD_MAX_MS ||
+        (argc >= 5 && (shell_parse_uint(argv[4], &cpu) != 0 || cpu >= cpu_count))) {
+        shell_printf("usage: nvgpu oplib vmhold [<ms %u..%u> [cpu]]\r\n",
+                     (unsigned)VMHOLD_MIN_MS, (unsigned)VMHOLD_MAX_MS);
+        return -1;
+    }
+    if (!oplib_cold_active()) {
+        shell_puts("oplib vmhold: only for the SLM-OS-built channel "
+                   "(UEFI-direct boot, after `nvgpu cold`)\r\n");
+        return -1;
+    }
+    uint32_t idle = VMHOLD_IDLE;
+    if (!__atomic_compare_exchange_n(&g_vmhold_state, &idle, VMHOLD_TAKING, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        uint32_t busy = VMHOLD_BUSY;
+        if (!__atomic_compare_exchange_n(&g_vmhold_state, &busy, VMHOLD_TAKING, false,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            shell_puts("oplib vmhold: one is already running\r\n");
+            return -1;
+        }
+    }
+    struct task *t = task_create("vm_hold", (task_entry_t)nvgpu_vmhold_task,
+                                 (void *)(uintptr_t)ms);
+    if (!t) {
+        __atomic_store_n(&g_vmhold_state, VMHOLD_IDLE, __ATOMIC_RELEASE);
+        return -1;
+    }
+    t->cpu_affinity = cpu;
+    scheduler_add_task_to_cpu(t, cpu);
+    shell_printf("oplib vmhold: %u ms on CPU %u\r\n", (unsigned)ms, (unsigned)cpu);
+    return 0;
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     /* `b_p` aliases the file-scope `g_nvgpu_b` so the rest of this
@@ -7141,6 +7219,9 @@ oplib_stage_call:
         }
         if (strcmp(argv[2], "vmrace") == 0) {
             return nvgpu_vmrace_cmd(argc, argv);
+        }
+        if (strcmp(argv[2], "vmhold") == 0) {
+            return nvgpu_vmhold_cmd(argc, argv);
         }
         if (strcmp(argv[2], "wpool") == 0) {
             /* #1092: size the cold channel's weights pool once,
