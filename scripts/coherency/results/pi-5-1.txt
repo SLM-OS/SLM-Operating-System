@@ -75,3 +75,31 @@ coh1193_initrd.gz, coh1193_cmdline.txt, coh1193_rpi5.dtb, coh1193_config.txt"
 sdwire_cat config.txt: begins "# SLM-OS bare-metal config for Raspberry Pi 5
 (BCM2712).", size 1297, mtime 2026-05-10T23:01:22Z (the original file).
 sdwire_ls /: the same entries, sizes and mtimes as before the run; no coh1193_* file left.
+
+=== RETRY WITH THE 20 s SETTLE RULE (orchestrator, after the first report) ===
+Rule: sdwire_update reboot=false, then power_cycle delay=20, then
+serial_capture; never power_on right after an SDWire switch.
+~23:18  Restaged the boot 2 file set (same sha256 values as boot 2).
+        sdwire_update copies + renames as at 22:34; config.txt read back as
+        the coh1193 file (721 bytes, pciex4_reset=0, dtparam=uart0_console).
+~23:20  Boot 3: power_cycle delay=20 ("Power cycled: pi-5-1 (delay:
+        20.0s)"), then serial_capture until COH1193_WAIT|Kernel panic, 300 s:
+        "Captured 0 lines in 300.0s, timeout". Silent with the settle
+        applied, so the Linux attempts stopped per the orchestrator.
+~23:26  Card restored as before: renames config.txt -> coh1193_config.txt,
+        config.slmos-1193.txt -> config.txt; the five coh1193_* files
+        deleted. sdwire_cat config.txt: "# SLM-OS bare-metal config for
+        Raspberry Pi 5 (BCM2712).", 1297 bytes, mtime 2026-05-10T23:01:22Z.
+        sdwire_ls: original entries only.
+~23:27  SLM-OS check boot under the same rule: power_cycle delay=20, then
+        serial_capture until slmos>, 90 s: "Captured 0 lines in 90.0s,
+        timeout". serial_send "uptime" (until slmos>, 10 s): 0 lines.
+        health: power on, serial true, ping false.
+State left: pi-5-1 powered ON with the restored SLM-OS card. It is NOT
+confirmed to be at the SLM-OS shell: this session read no console line,
+and ping is false.
+Note: the orchestrator's own power_cycle delay=20 boot reached the SLM-OS
+shell with the network up, while this session has never read a serial
+line from pi-5-1 in any boot. That points at this session's serial view
+(for example another client holding the ser2net port) as well as, or
+instead of, the board.
