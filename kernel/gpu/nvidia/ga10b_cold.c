@@ -1377,7 +1377,12 @@ int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r)
 
     if (recover_opts & GA10B_COLD_RECOVER_CLEAR_FIRST) recover_clear_latched();
     int rc = -1;
-    if (level == 1 || (level == 0 && !r->latched)) {
+    /* Level 1 first in every case but a forced level 2: a latched MMU
+     * fault alone is not a reason to skip it (`nvgpu cold check` leaves
+     * one on a healthy channel, jetson-nano-2 2026-11-08), and level 2
+     * does not bring the channel back yet (#1171: the host keeps the TSG
+     * as on the engine after the GR reset). */
+    if (level != 2) {
         r->level = 1;
         uint64_t t = recover_now_us();
         if (ga10b_chan_preempt_tsg_within(&cold_gpu_ops, &cold_chan, RECOVER_PREEMPT_US) !=

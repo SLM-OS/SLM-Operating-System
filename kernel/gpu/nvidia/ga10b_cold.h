@@ -77,7 +77,7 @@ struct ga10b_cold_recovery {
 
 /* Recovery options: GA10B_CHAN_RESET_* bits for the channel reset, plus: */
 #define GA10B_COLD_RECOVER_CLEAR_FIRST  0x100u  /* clear latched MMU/PBDMA/runlist state first */
-#define GA10B_COLD_RECOVER_DEFAULT_OPTS 0x1u
+#define GA10B_COLD_RECOVER_DEFAULT_OPTS 0x0u
 void ga10b_cold_recover_set_opts(uint32_t opts);
 uint32_t ga10b_cold_recover_get_opts(void);
 
