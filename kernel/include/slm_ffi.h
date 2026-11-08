@@ -2333,7 +2333,8 @@ void slm_gpu_prog_dump_fault(void);
 #define SLM_GPU_RECOVER_STEP_TIMEOUT 1u
 #define SLM_GPU_RECOVER_EVICT        2u
 #define SLM_GPU_RECOVER_MANUAL       3u
-#define SLM_GPU_RECOVER_MANUAL_L2    4u   /* skip level 1 (testing) */
+#define SLM_GPU_RECOVER_MANUAL_L2    4u   /* level 2 only (testing) */
+#define SLM_GPU_RECOVER_MANUAL_L1    5u   /* level 1 only (testing) */
 int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns);
 
 struct slm_gpu_recovery_rec {
@@ -2347,6 +2348,9 @@ struct slm_gpu_recovery_rec {
     uint32_t chram, chram_after, eng_status0, pbdma_status, pbdma_intr0;
     uint32_t gr_status, gr_intr, gr_exception, fecs_mb0, fecs_mb6;
     uint32_t fault_status, fault_info, fault_addr_lo;
+    uint32_t opts;
+    uint32_t eng_status_fail, pbdma_status_fail, gr_status_fail;
+    uint32_t fecs_mb0_fail, fecs_mb6_fail, fecs_ctx_fail;
 };
 #define SLM_GPU_RECOVERY_LOG 64u
 /* Recoveries so far (all, including failed ones) and record `i` of

@@ -1316,7 +1316,8 @@ int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns)
     /* Every dispatcher now sees DOWN, and none is inside the lock: each
      * runs its whole dispatch under it. The hardware is ours. */
     struct ga10b_cold_recovery r;
-    int rc = ga10b_cold_recover(why == SLM_GPU_RECOVER_MANUAL_L2, &r);
+    int level = why == SLM_GPU_RECOVER_MANUAL_L2 ? 2 : why == SLM_GPU_RECOVER_MANUAL_L1 ? 1 : 0;
+    int rc = ga10b_cold_recover(level, &r);
 
     irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     if (rc == 0) {
@@ -1360,6 +1361,13 @@ int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns)
     e->fault_status = r.fault_status;
     e->fault_info = r.fault_info;
     e->fault_addr_lo = r.fault_addr_lo;
+    e->opts = ga10b_cold_recover_get_opts();
+    e->eng_status_fail = r.eng_status_fail;
+    e->pbdma_status_fail = r.pbdma_status_fail;
+    e->gr_status_fail = r.gr_status_fail;
+    e->fecs_mb0_fail = r.fecs_mb0_fail;
+    e->fecs_mb6_fail = r.fecs_mb6_fail;
+    e->fecs_ctx_fail = r.fecs_ctx_fail;
     __atomic_store_n(&g_rec_count, i + 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_rec_running, 0u, __ATOMIC_RELEASE);
 

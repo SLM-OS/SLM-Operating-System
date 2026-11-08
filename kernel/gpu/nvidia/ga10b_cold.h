@@ -69,14 +69,25 @@ struct ga10b_cold_recovery {
     uint32_t gr_status, gr_intr, gr_exception;
     uint32_t fecs_mb0, fecs_mb6;
     uint32_t fault_status, fault_info, fault_addr_lo;
+    uint32_t chan_flags;        /* GA10B_CHAN_RESET_* used */
+    /* When the probe failed: where the channel stood. */
+    uint32_t eng_status_fail, pbdma_status_fail, gr_status_fail;
+    uint32_t fecs_mb0_fail, fecs_mb6_fail, fecs_ctx_fail;
 };
+
+/* Recovery options: GA10B_CHAN_RESET_* bits for the channel reset, plus: */
+#define GA10B_COLD_RECOVER_CLEAR_FIRST  0x100u  /* clear latched MMU/PBDMA/runlist state first */
+#define GA10B_COLD_RECOVER_DEFAULT_OPTS 0x1u
+void ga10b_cold_recover_set_opts(uint32_t opts);
+uint32_t ga10b_cold_recover_get_opts(void);
 
 /* Bring the cold channel back after a timed-out or faulted step. Task
  * context, IRQs on, no spinlock held; the caller has shut every other
- * dispatcher out first (slm_ffi.c). `engine_reset` skips level 1.
+ * dispatcher out first (slm_ffi.c). `level`: 0 chooses (level 1 unless
+ * an error is latched, then level 2), 1 level 1 only, 2 level 2 only.
  * Returns 0 when the probe passed, else a negative code (also in r->rc).
  * Prints nothing: the caller prints one line from `r`. */
-int ga10b_cold_recover(bool engine_reset, struct ga10b_cold_recovery *r);
+int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r);
 
 /* One BAR0 register write of a generated init table. */
 struct ga10b_reg_write {

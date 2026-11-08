@@ -463,7 +463,7 @@ static void test_chan_reset_rebinds_a_clean_channel(void)
     uw[GA10B_USERD_W_GP_PUT] = 19u;
 
     g_nlog = 0;
-    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_chan_reset(&g_rec_ops, &g, &ch));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_chan_reset(&g_rec_ops, &g, &ch, 0u));
 
     /* RAMFC is what SETUP_BIND programs: compare with a fresh setup. */
     static uint32_t fresh[GA10B_INST_BLOCK_BYTES / 4u];
@@ -500,7 +500,7 @@ static void test_chan_reset_rebinds_a_clean_channel(void)
     /* Without a GR context to reload: refused before touching anything. */
     ch.gr = NULL;
     g_nlog = 0;
-    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_ARG, ga10b_chan_reset(&g_rec_ops, &g, &ch));
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_ERR_ARG, ga10b_chan_reset(&g_rec_ops, &g, &ch, 0u));
     TEST_ASSERT_EQUAL_UINT32(0, g_nlog);
     ga10b_dma_free(&g_rec_ops, &ch.inst);
     ga10b_dma_free(&g_rec_ops, &ch.userd);

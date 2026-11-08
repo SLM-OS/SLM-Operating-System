@@ -794,10 +794,15 @@ static int chan_ramfc(struct ga10b_chan *ch)
 }
 
 int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
-                     struct ga10b_chan *ch)
+                     struct ga10b_chan *ch, uint32_t flags)
 {
     if (!ops || !grctx || !ch || !ch->inst.cpu || !ch->userd.cpu || !ch->gr) {
         return GA10B_CHAN_ERR_ARG;
+    }
+    /* gv11b_fifo_locked_abort_runlist_active_tsgs: the TSG off the
+     * runlist first, so the host drops what it still holds of it. */
+    if (flags & GA10B_CHAN_RESET_RL_CLEAR) {
+        (void)ga10b_chan_runlist_clear(ops, ch);
     }
     /* ga10b_channel_unbind: the CHRAM entry back to empty, faulted bits
      * and pending state included. */
@@ -814,7 +819,9 @@ int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
     rc = ga10b_chan_runlist_submit(ops, ch);
     ga10b_chan_sched_enable(ops, ch, true);
     if (rc != GA10B_CHAN_OK) return rc;
-    ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_FORCE_CTX_RELOAD);
+    if (!(flags & GA10B_CHAN_RESET_NO_RELOAD)) {
+        ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_FORCE_CTX_RELOAD);
+    }
     ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_ENABLE_CHANNEL);
     ch->enabled = true;
     return GA10B_CHAN_OK;

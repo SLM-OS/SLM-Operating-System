@@ -528,7 +528,9 @@ void ga10b_chan_sched_enable(const struct ga10b_gpu_ops *ops, const struct ga10b
  * and every mapping are kept, so handoffs built on the channel stay
  * valid; their GPFIFO cursor must go back to 0. */
 int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
-                     struct ga10b_chan *ch);
+                     struct ga10b_chan *ch, uint32_t flags);
+#define GA10B_CHAN_RESET_RL_CLEAR   0x1u    /* empty runlist submit first */
+#define GA10B_CHAN_RESET_NO_RELOAD  0x2u    /* no FORCE_CTX_RELOAD at enable */
 /* Ring the USERMODE doorbell. */
 void ga10b_chan_ring_doorbell(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch);
 

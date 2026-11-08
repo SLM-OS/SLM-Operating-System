@@ -1319,18 +1319,42 @@ static int recover_channel(struct ga10b_cold_recovery *r)
 {
     bar0_wr(NV_PGRAPH_PRI_FECS_CURRENT_CTX, 0u);
     if (ga10b_l2_evict_sysmem() != 0) r->evict_failed = 1u;
-    if (ga10b_chan_reset(&cold_gpu_ops, &cold_grctx, &cold_chan) != GA10B_CHAN_OK) return -20;
+    if (ga10b_chan_reset(&cold_gpu_ops, &cold_grctx, &cold_chan, r->chan_flags) != GA10B_CHAN_OK) {
+        return -20;
+    }
     ga10b_bringup_reset_gpfifo_cursor();
     uint64_t t = recover_now_us();
     int rc = ga10b_bringup_probe_channel(RECOVER_PROBE_US, &r->probe_failed);
     r->probe_us = (uint32_t)(recover_now_us() - t);
+    if (rc != 0) {
+        r->eng_status_fail = bar0_rd(NV_RUNLIST_ENGINE_STATUS0(cold_chan.p.runlist_pri_base));
+        r->pbdma_status_fail = bar0_rd(NV_PPBDMA0_STATUS_SCHED);
+        r->gr_status_fail = bar0_rd(NV_PGRAPH_STATUS);
+        r->fecs_mb0_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
+        r->fecs_mb6_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6));
+        r->fecs_ctx_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CURRENT_CTX);
+    }
     return rc == 0 ? 0 : -21;
 }
 
-int ga10b_cold_recover(bool engine_reset, struct ga10b_cold_recovery *r)
+/* Recovery options (#1171 bring-up), set from the shell. */
+static uint32_t recover_opts = GA10B_COLD_RECOVER_DEFAULT_OPTS;
+
+void ga10b_cold_recover_set_opts(uint32_t opts)
+{
+    recover_opts = opts;
+}
+
+uint32_t ga10b_cold_recover_get_opts(void)
+{
+    return recover_opts;
+}
+
+int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r)
 {
     if (!r) return -1;
     memset(r, 0, sizeof(*r));
+    r->chan_flags = recover_opts & (GA10B_CHAN_RESET_RL_CLEAR | GA10B_CHAN_RESET_NO_RELOAD);
     if (cold_done < GA10B_COLD_CHANNEL || !cold_grctx.golden_ready || !cold_chan.inst.cpu) {
         r->rc = -30;
         return r->rc;
@@ -1351,8 +1375,9 @@ int ga10b_cold_recover(bool engine_reset, struct ga10b_cold_recovery *r)
     ga10b_chan_sched_enable(&cold_gpu_ops, &cold_chan, false);
     cold_quiet = true;
 
+    if (recover_opts & GA10B_COLD_RECOVER_CLEAR_FIRST) recover_clear_latched();
     int rc = -1;
-    if (!engine_reset && !r->latched) {
+    if (level == 1 || (level == 0 && !r->latched)) {
         r->level = 1;
         uint64_t t = recover_now_us();
         if (ga10b_chan_preempt_tsg_within(&cold_gpu_ops, &cold_chan, RECOVER_PREEMPT_US) !=
@@ -1368,7 +1393,7 @@ int ga10b_cold_recover(bool engine_reset, struct ga10b_cold_recovery *r)
             ga10b_chan_sched_enable(&cold_gpu_ops, &cold_chan, false);
         }
     }
-    if (rc != 0) {
+    if (rc != 0 && level != 1) {
         r->level = 2;
         uint64_t t = recover_now_us();
         r->chram_l2 = ga10b_chan_chram_read(&cold_gpu_ops, &cold_chan);

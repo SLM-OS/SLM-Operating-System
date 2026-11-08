@@ -6368,15 +6368,32 @@ static int nvgpu_cold_recover(int argc, char *argv[])
                          (unsigned)r.gr_status, (unsigned)r.gr_intr, (unsigned)r.gr_exception,
                          (unsigned)r.fecs_mb0, (unsigned)r.fecs_mb6, (unsigned)r.fault_status,
                          (unsigned)r.fault_info, (unsigned)r.fault_addr_lo);
+            if (r.rc != 0) {
+                shell_printf("     opts 0x%x; at the failed probe: CHRAM 0x%08x eng0 0x%08x "
+                             "pbdma 0x%08x GR 0x%08x FECS mb0 0x%08x mb6 0x%08x ctx 0x%08x\r\n",
+                             (unsigned)r.opts, (unsigned)r.chram_after,
+                             (unsigned)r.eng_status_fail, (unsigned)r.pbdma_status_fail,
+                             (unsigned)r.gr_status_fail, (unsigned)r.fecs_mb0_fail,
+                             (unsigned)r.fecs_mb6_fail, (unsigned)r.fecs_ctx_fail);
+            }
         }
         return 0;
     }
+    if (argc >= 5 && strcmp(argv[3], "opts") == 0) {
+        uint32_t o = 0;
+        if (shell_parse_uint(argv[4], &o) != 0) return -1;
+        ga10b_cold_recover_set_opts(o);
+        shell_printf("recover opts 0x%x\r\n", (unsigned)o);
+        return 0;
+    }
     bool l2 = argc >= 4 && strcmp(argv[3], "l2") == 0;
+    bool l1 = argc >= 4 && strcmp(argv[3], "l1") == 0;
     if (slm_prog_vm_lock() != 0) {
         shell_puts("nvgpu cold recover: a GPU program holds the lock\r\n");
         return -1;
     }
-    int rc = slm_gpu_channel_recover(l2 ? SLM_GPU_RECOVER_MANUAL_L2 : SLM_GPU_RECOVER_MANUAL,
+    int rc = slm_gpu_channel_recover(l2 ? SLM_GPU_RECOVER_MANUAL_L2 :
+                                     l1 ? SLM_GPU_RECOVER_MANUAL_L1 : SLM_GPU_RECOVER_MANUAL,
                                      slm_get_time_ns());
     slm_prog_vm_unlock();
     shell_printf("nvgpu cold recover: %s\r\n", rc == 0 ? "ok" : rc == -2 ? "no cold channel" :
