@@ -118,8 +118,9 @@ struct slm_prog_run_stats {
  *
  * Every call takes one lock, so two sessions (the shell and slm-runner)
  * can use the program, and its shared tables and VM, at the same time.
- * A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s, or at
- * all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
+ * The same lock serializes the other writers of the VM (slm_prog_vm_lock
+ * below). A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s,
+ * or at all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
 
 /* 1 if this boot has a channel programs can run on. */
 int slm_prog_available(void);
@@ -190,6 +191,46 @@ uint32_t slm_prog_profile(int32_t h, uint32_t shape, uint64_t *ns, uint32_t cap)
 
 /* EMC and GPU clocks, in Hz (0 when unknown). */
 void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz);
+
+/* ---- The cold channel's GPU VM lock (#1173) ----
+ *
+ * One lock serializes every writer of the cold channel's GPU VM: its VA
+ * bump allocator (ga10b_vm_reserve) and its page tables (ga10b_vm_map,
+ * _map_big, _unmap). It is the program lock above, so slm_prog's own
+ * writes (open, close) need nothing more. Every other writer takes it
+ * through these two calls: the operator library's cold address space
+ * (oplib_gpu_as.c: weights pool, SASS pool, cbuf, QMD pool), the cold
+ * sched / eviction / MNIST pipeline builds, and the software walk
+ * oplib_cold_lookup.
+ *
+ * Lock order: this lock, then the GPU dispatch lock (slm_ffi.c). Never
+ * the reverse: nothing that holds the dispatch lock writes the VM, and a
+ * caller with IRQs masked (every dispatch-lock holder is one) makes one
+ * try and gets SLM_PROG_ERR_BUSY, so it can't wait for a holder that
+ * waits for the dispatch lock. With IRQs on, a waiter yields, bounded as
+ * for the program lock (a step timeout plus a second). A holder must not
+ * call into slm_prog (the lock is not recursive) and must release it with
+ * slm_prog_vm_unlock, which also finishes any session close that came in
+ * meanwhile.
+ *
+ * Returns 0 or SLM_PROG_ERR_BUSY. */
+int slm_prog_vm_lock(void);
+void slm_prog_vm_unlock(void);
+
+/* Contention between slm_prog and the other VM writers, for tests and
+ * `nvgpu oplib vmrace`. "map" is slm_prog_open and slm_prog_close (the
+ * calls that write the VM); "prog" is every other slm_prog call (build,
+ * patch, steps). Counts acquisitions, not wait turns. */
+struct slm_prog_vm_lock_stats {
+    uint32_t vm_takes;          /* slm_prog_vm_lock successes */
+    uint32_t vm_busy;           /* slm_prog_vm_lock gave up */
+    uint32_t vm_waited_on_map;  /* VM writer found open/close holding it */
+    uint32_t vm_waited_on_prog; /* VM writer found another slm_prog call holding it */
+    uint32_t vm_waited_on_vm;   /* VM writer found another VM writer holding it */
+    uint32_t map_waited_on_vm;  /* open/close found a VM writer holding it */
+    uint32_t prog_waited_on_vm; /* another slm_prog call found a VM writer holding it */
+};
+void slm_prog_vm_lock_stats(struct slm_prog_vm_lock_stats *out);
 
 const char *slm_prog_strerror(int err);
 

@@ -1131,6 +1131,13 @@ static struct ga10b_gr_chan_ctx cold_chan_gr;
 
 static int step_channel(void)
 {
+    /* The channel's VM is created here and gets its first mappings
+     * (GPFIFO, pushbuffer, semaphore, GR context buffers) without the VM
+     * lock (#1173): nothing else can reach it yet. Its runtime writers,
+     * the SLM GPU program and the operator library's address space,
+     * need oplib_cold_attach, which runs in step_policies, after this
+     * step; ga10b_cold_run runs one bring-up at a time (cold_running)
+     * and never re-runs a step that succeeded. */
     struct ga10b_chan_params p;
     ga10b_chan_default_params(&p);
     int rc = ga10b_chan_create(&cold_gpu_ops, &cold_grctx, &p, &cold_chan_gr, &cold_chan);
