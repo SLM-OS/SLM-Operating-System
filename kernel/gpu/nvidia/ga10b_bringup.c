@@ -3094,8 +3094,17 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      * inherited channel off PBDMA — the inherited channel is fragile to
      * any dispatch-time perturbation. Reverted; the clean minimal-
      * perturbation path is the best (~83%). */
-    ga10b_fecs_set_current_ctx_invalid();
-    ga10b_gmmu_force_ctx_reload(&g_handoff);
+    /* Only for a channel inherited from Linux (kexec). On the channel
+     * SLM-OS built (UEFI-direct, #1088) FECS holds no stale context, and
+     * the forced reload with FECS's context invalidated left the host
+     * expecting a context load after every dispatch: a GR engine reset
+     * then could not bring the channel back (#1171, jetson-nano-2
+     * 2026-11-08: the second recovery of a boot, or the first after a
+     * consumer had run, stopped with the TSG pending on the engine). */
+    if (!ga10b_bringup_handoff_is_local()) {
+        ga10b_fecs_set_current_ctx_invalid();
+        ga10b_gmmu_force_ctx_reload(&g_handoff);
+    }
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
      * contract as the v3 dispatch fields: the helper allocates
