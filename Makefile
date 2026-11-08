@@ -1652,8 +1652,15 @@ check-gpu-shell-lock:
 	@python3 scripts/check-gpu-shell-lock.py
 	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
 
+# #1161: the Jetson memory clock is requested as a bandwidth-manager floor,
+# never with MRQ_CLK (BPMP discards that rate at its next recompute).
+.PHONY: check-emc-rate-path
+check-emc-rate-path:
+	@python3 scripts/check-emc-rate-path.py kernel
+	@out="$$(bash scripts/tests/test-check-emc-rate-path.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

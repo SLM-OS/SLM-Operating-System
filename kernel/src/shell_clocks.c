@@ -4,7 +4,8 @@
  * Memory and GPU clocks bound inference speed, and after a UEFI-direct
  * boot nothing like Linux's governors has raised them, so the rates have
  * to be looked at rather than assumed. `clocks emc <MHz>` requests an EMC
- * rate; BPMP rounds it to a rate in its DVFS table.
+ * floor from BPMP's bandwidth manager (emc_hold.h); BPMP rounds it to a
+ * rate in its DVFS table and may run faster for other clients.
  */
 
 #include "bpmp.h"
@@ -31,30 +32,16 @@ int cmd_clocks(int argc, char *argv[])
             shell_puts("Usage: clocks [emc <MHz>]\r\n");
             return -1;
         }
+        /* A floor through the bandwidth manager, which the boot-time and
+         * runtime checks then hold; an MRQ_CLK rate would not last
+         * (#1161). */
         uint64_t got = 0;
-        int rc = bpmp_clk_set_rate(TEGRA234_CLK_EMC,
-                                   (uint64_t)mhz * 1000000u, &got);
+        int rc = emc_hold_set_target((uint64_t)mhz * 1000000u, &got);
         if (rc != 0) {
-            shell_printf("clocks: emc set_rate rc=%d\r\n", rc);
+            shell_printf("clocks: emc floor rc=%d\r\n", rc);
             return -1;
         }
-        shell_printf("  emc set, BPMP chose %llu MHz\r\n",
-                     (unsigned long long)(got / 1000000u));
-    }
-    /* #1161: a memory clock floor through the bandwidth manager
-     * (MRQ_BWMGR_INT) instead of MRQ_CLK, for a client id (default 2,
-     * CPU cluster 0). */
-    if ((argc == 3 || argc == 4) && strcmp(argv[1], "emc-floor") == 0) {
-        uint32_t mhz = 0, client = 2;
-        if (shell_parse_uint(argv[2], &mhz) != 0 ||
-            (argc == 4 && shell_parse_uint(argv[3], &client) != 0)) {
-            shell_puts("Usage: clocks emc-floor <MHz> [bwmgr client]\r\n");
-            return -1;
-        }
-        uint64_t got = 0;
-        int rc = bpmp_emc_floor_khz(client, mhz * 1000u, &got);
-        shell_printf("  bwmgr floor %u MHz for client %u: rc=%d, BPMP reports %llu MHz\r\n",
-                     (unsigned)mhz, (unsigned)client, rc,
+        shell_printf("  emc floor %u MHz, BPMP chose %llu MHz\r\n", (unsigned)mhz,
                      (unsigned long long)(got / 1000000u));
     }
     static const struct {
@@ -80,7 +67,7 @@ int cmd_clocks(int argc, char *argv[])
     struct emc_hold_state h;
     emc_hold_get_status(&h);
     if (h.target_hz != 0) {
-        shell_printf("  emc hold   target %llu MHz: %u checks, %u drops (first after %s,"
+        shell_printf("  emc hold   floor %llu MHz: %u checks, %u drops (first after %s,"
                      " last after %s), %u restored\r\n",
                      (unsigned long long)(h.target_hz / 1000000u), (unsigned)h.checks,
                      (unsigned)h.drops, h.first_drop[0] ? h.first_drop : "-",

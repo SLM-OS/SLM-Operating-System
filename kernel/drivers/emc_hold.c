@@ -77,15 +77,17 @@ enum emc_hold_result emc_hold_check(struct emc_hold_state *s, const char *where,
 #include "bpmp.h"
 #include "debug.h"
 #include "platform.h"
+#include "spinlock.h"
 #include "timer.h"
 #include "uart.h"
 
-/* Investigation build (#1161): log every BPMP request made during boot
- * with the EMC rate read after it, and poll the rate for a while right
- * after the first request to separate a time-based reset from one a
- * request causes. */
+/* Investigation logging (#1161), off by default. With it on, every BPMP
+ * request made during boot is logged with the EMC rate read after it,
+ * and the rate is polled for 3 s right after the first request, with no
+ * other request in between, to tell a reset inside BPMP from one a
+ * request causes. Set EMC_HOLD_BISECT to 1 here to turn it on. */
 #ifndef EMC_HOLD_BISECT
-#define EMC_HOLD_BISECT 1
+#define EMC_HOLD_BISECT 0
 #endif
 #define EMC_HOLD_DELAY_CHECK_MS   3000u
 #define EMC_HOLD_DELAY_STEP_MS    250u
@@ -95,11 +97,13 @@ static int bpmp_emc_get(uint64_t *hz)
     return bpmp_clk_get_rate(TEGRA234_CLK_EMC, hz);
 }
 
-/* The memory clock belongs to BPMP's bandwidth manager: any
- * MRQ_BWMGR_INT request recomputes it from the clients' floors and
- * bandwidths, which throws away a rate set with MRQ_CLK (#1161). So ask
- * for a floor on behalf of CPU cluster 0, as Linux's interconnect
- * driver does for its clients (tegra234_mc_icc_set). */
+/* The memory clock belongs to BPMP's bandwidth manager. Every
+ * MRQ_BWMGR_INT request, and some event inside BPMP within about 250 ms
+ * of the first request after a UEFI-direct boot, recomputes it from the
+ * clients' floors and bandwidths, which discards a rate set with
+ * MRQ_CLK (#1161, measured on jetson-nano-2). A floor is part of that
+ * computation, so ask for one on behalf of CPU cluster 0, as Linux's
+ * interconnect driver does for its clients (tegra234_mc_icc_set). */
 static int bpmp_emc_request(uint64_t hz, uint64_t *got)
 {
     return bpmp_emc_floor_khz(BPMP_BWMGR_CLIENT_CPU_CLUSTER0,
@@ -111,9 +115,15 @@ static const struct emc_hold_ops g_bpmp_ops = {
     .request = bpmp_emc_request,
 };
 
+/* g_hold is shared by boot (CPU 0 alone), the fan task's runtime check
+ * and the `clocks` shell command; g_hold_lock serialises them. BPMP
+ * requests are made under it (the MRQ lock nests inside). g_hold_busy
+ * stops the boot-time BPMP hook from re-checking the requests a check
+ * makes itself. */
+static spinlock_t g_hold_lock = SPINLOCK_INIT;
 static struct emc_hold_state g_hold;
 static bool g_hold_ready;
-static bool g_boot_done;
+static bool g_hold_busy;
 static uint64_t g_t0;
 
 static unsigned long long ms_since_begin(void)
@@ -128,14 +138,30 @@ static unsigned long long mhz(uint64_t hz)
     return (unsigned long long)(hz / 1000000u);
 }
 
+static enum emc_hold_result locked_check(const char *where, uint64_t *prev,
+                                         uint64_t *before, uint64_t *after,
+                                         uint32_t *drops)
+{
+    irq_flags_t f = spin_lock_irqsave(&g_hold_lock);
+    g_hold_busy = true;
+    *prev = g_hold.last_hz;
+    enum emc_hold_result r = emc_hold_check(&g_hold, where, before, after);
+    *drops = g_hold.drops;
+    g_hold_busy = false;
+    spin_unlock_irqrestore(&g_hold_lock, f);
+    return r;
+}
+
+/* Check, then log outside the lock: drops always, everything else only
+ * when `always` is set. */
 static void log_check(const char *where, uint32_t id, int rc, bool always)
 {
-    uint64_t before = 0, after = 0;
-    uint64_t prev = g_hold.last_hz;
-    enum emc_hold_result r = emc_hold_check(&g_hold, where, &before, &after);
+    uint64_t prev = 0, before = 0, after = 0;
+    uint32_t drops = 0;
+    enum emc_hold_result r = locked_check(where, &prev, &before, &after, &drops);
     switch (r) {
     case EMC_HOLD_OK:
-        if (always || before != prev) {
+        if (always) {
             uart_printf("[emc-hold] +%llu ms %s(%u) rc=%d: EMC %llu MHz%s\n",
                         ms_since_begin(), where, (unsigned)id, rc, mhz(before),
                         before != prev ? " (changed)" : "");
@@ -143,41 +169,45 @@ static void log_check(const char *where, uint32_t id, int rc, bool always)
         break;
     case EMC_HOLD_RESTORED:
     case EMC_HOLD_STILL_LOW:
-        uart_printf("[emc-hold] +%llu ms %s(%u) rc=%d: EMC DROP %llu -> %llu MHz,"
-                    " re-request -> %llu MHz (drop #%u)\n",
-                    ms_since_begin(), where, (unsigned)id, rc, mhz(prev),
-                    mhz(before), mhz(after), (unsigned)g_hold.drops);
+        WARN("EMC dropped %llu -> %llu MHz after %s(%u) at +%llu ms; requested"
+             " again, now %llu MHz (drop #%u)", mhz(prev), mhz(before), where,
+             (unsigned)id, ms_since_begin(), mhz(after), (unsigned)drops);
         break;
     case EMC_HOLD_READ_ERROR:
-        uart_printf("[emc-hold] +%llu ms %s(%u) rc=%d: EMC readback failed\n",
-                    ms_since_begin(), where, (unsigned)id, rc);
+        if (always) {
+            uart_printf("[emc-hold] +%llu ms %s(%u) rc=%d: EMC readback failed\n",
+                        ms_since_begin(), where, (unsigned)id, rc);
+        }
         break;
     }
 }
 
 static void post_op_hook(const char *op, uint32_t id, int rc)
 {
-    /* After boot only changes are logged (the fan task's thermal reads
-     * make this a check every 2 s). */
-    log_check(op, id, rc, EMC_HOLD_BISECT != 0 && !g_boot_done);
+    if (g_hold_busy) return;
+    log_check(op, id, rc, EMC_HOLD_BISECT != 0);
 }
 
 void emc_hold_boot_begin(void)
 {
     g_t0 = timer_get_count();
-    emc_hold_init(&g_hold, &g_bpmp_ops, TEGRA234_EMC_MAX_HZ);
     uint64_t left = 0, reply = 0, readback = 0;
+    irq_flags_t f = spin_lock_irqsave(&g_hold_lock);
+    emc_hold_init(&g_hold, &g_bpmp_ops, TEGRA234_EMC_MAX_HZ);
     int grc = bpmp_emc_get(&left);
     int src = bpmp_emc_request(TEGRA234_EMC_MAX_HZ, &reply);
     int rrc = bpmp_emc_get(&readback);
-    uart_printf("[emc-hold] UEFI left EMC at %llu MHz (rc=%d); bwmgr floor(%llu MHz)"
-                " rc=%d reply %llu MHz; readback %llu MHz (rc=%d)\n",
-                mhz(left), grc, mhz(TEGRA234_EMC_MAX_HZ), src, mhz(reply),
-                mhz(readback), rrc);
     g_hold.last_hz = readback;
     g_hold_ready = true;
+    spin_unlock_irqrestore(&g_hold_lock, f);
+    if (src != 0) {
+        WARN("EMC: bandwidth-manager floor of %llu MHz refused (rc=%d), at %llu MHz",
+             mhz(TEGRA234_EMC_MAX_HZ), src, mhz(readback));
+    } else {
+        INFO("EMC: %llu MHz (rc=%d) -> floor %llu MHz, BPMP chose %llu, reads %llu MHz (rc=%d)",
+             mhz(left), grc, mhz(TEGRA234_EMC_MAX_HZ), mhz(reply), mhz(readback), rrc);
+    }
 #if EMC_HOLD_BISECT
-    /* Delay-only check: no other BPMP request in this window. */
     for (uint32_t t = EMC_HOLD_DELAY_STEP_MS; t <= EMC_HOLD_DELAY_CHECK_MS;
          t += EMC_HOLD_DELAY_STEP_MS) {
         timer_busy_wait_us((uint64_t)EMC_HOLD_DELAY_STEP_MS * 1000u);
@@ -190,39 +220,49 @@ void emc_hold_boot_begin(void)
 void emc_hold_boot_step(const char *step)
 {
     if (!g_hold_ready) return;
-    log_check(step, 0, 0, true);
+    log_check(step, 0, 0, EMC_HOLD_BISECT != 0);
 }
 
 void emc_hold_boot_end(void)
 {
     if (!g_hold_ready) return;
-#if !EMC_HOLD_BISECT
+    /* After boot the fan task checks every 2 s (emc_hold_runtime_check);
+     * the hook is boot-only because it assumes a single CPU. */
     bpmp_set_post_op_hook(NULL);
-#endif
-    g_boot_done = true;
-    log_check("boot_end", 0, 0, true);
-    uart_printf("[emc-hold] boot: %u checks, %u drops (first after %s, last after %s),"
-                " %u restored, %u read errors\n",
-                (unsigned)g_hold.checks, (unsigned)g_hold.drops,
-                g_hold.first_drop[0] ? g_hold.first_drop : "-",
-                g_hold.last_drop[0] ? g_hold.last_drop : "-",
-                (unsigned)g_hold.reasserts, (unsigned)g_hold.read_errors);
+    log_check("boot_end", 0, 0, EMC_HOLD_BISECT != 0);
+    struct emc_hold_state s;
+    emc_hold_get_status(&s);
+    INFO("EMC: %llu MHz at the end of boot (%u checks, %u drops%s%s)",
+         mhz(s.last_hz), (unsigned)s.checks, (unsigned)s.drops,
+         s.drops ? ", first after " : "", s.drops ? s.first_drop : "");
 }
 
 void emc_hold_runtime_check(void)
 {
     if (!g_hold_ready) return;
-    uint64_t before = 0, after = 0;
-    enum emc_hold_result r = emc_hold_check(&g_hold, "runtime", &before, &after);
-    if (r == EMC_HOLD_RESTORED || r == EMC_HOLD_STILL_LOW) {
-        WARN("EMC dropped to %llu MHz at runtime; re-requested, now %llu MHz (drop #%u)",
-             mhz(before), mhz(after), (unsigned)g_hold.drops);
+    log_check("runtime", 0, 0, false);
+}
+
+int emc_hold_set_target(uint64_t hz, uint64_t *got)
+{
+    uint64_t reply = 0;
+    irq_flags_t f = spin_lock_irqsave(&g_hold_lock);
+    if (!g_hold_ready) {
+        emc_hold_init(&g_hold, &g_bpmp_ops, hz);
+        g_hold_ready = true;
     }
+    g_hold.target_hz = hz;
+    int rc = bpmp_emc_request(hz, &reply);
+    spin_unlock_irqrestore(&g_hold_lock, f);
+    if (got != NULL) *got = reply;
+    return rc;
 }
 
 void emc_hold_get_status(struct emc_hold_state *out)
 {
+    irq_flags_t f = spin_lock_irqsave(&g_hold_lock);
     *out = g_hold;
+    spin_unlock_irqrestore(&g_hold_lock, f);
 }
 
 #else /* !PLATFORM_JETSON_ORIN_NANO */
@@ -231,6 +271,12 @@ void emc_hold_boot_begin(void) {}
 void emc_hold_boot_step(const char *step) { (void)step; }
 void emc_hold_boot_end(void) {}
 void emc_hold_runtime_check(void) {}
+int emc_hold_set_target(uint64_t hz, uint64_t *got)
+{
+    (void)hz;
+    if (got != NULL) *got = 0;
+    return -1;
+}
 void emc_hold_get_status(struct emc_hold_state *out)
 {
     emc_hold_init(out, NULL, 0);

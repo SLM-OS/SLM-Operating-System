@@ -358,7 +358,7 @@ variables its header lists for models and shell input.
 | GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
 | Models from disk | Works ([ADR 0002](../adr/0002-uefi-model-delivery.md), [Models on disk](#models-on-disk)): a 1.04 GiB GGUF reads in 780 ms from NVMe, 68 s from SD; 20/20 cold boots verified it, 55.6 s from power-on to `slmos>`; `slm load` takes 346 ms |
-| Memory clock | UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU and XUSB bring-up; `clocks` shows the rates, `clocks emc <MHz>` requests one |
+| Memory clock | UEFI leaves EMC at 204 MHz. Right after `bpmp_init`, `main.c` asks BPMP's bandwidth manager for a 3199 MHz floor (finding 18); the rate is checked after every boot step and every 2 s after boot. `clocks` shows the rates and the check counters, `clocks emc <MHz>` requests another floor |
 
 ### XUSB cold bring-up
 
@@ -551,10 +551,11 @@ gives the same reason.
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
 
-UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU
-and XUSB bring-up, so `slm gpu` reads 3199 MHz before any prompt; the first
-program to open asks for the same floor again (`[slm-prog] EMC was ...`), which
-covers a request that failed at boot.
+UEFI leaves EMC at 204 MHz. `main.c` asks BPMP's bandwidth manager for a
+3199 MHz floor right after `bpmp_init` (finding 18), so `slm gpu` reads
+3199 MHz before any prompt; the first program to open asks for a floor of its
+own as the GPU client (`[slm-prog] EMC was ...`), which covers a request that
+failed at boot.
 
 A step that times out (5 s) prints the GR and MMU fault state once, then
 the session continues on the CPU, replaying its tokens: `[slm] GPU program
@@ -701,6 +702,27 @@ where the two disagree.
     pulses, and the tachometer keeps its last period without setting
     its overflow bit, so the shell labels the reading at level 0 as
     stale.
+18. **EMC has to be asked for as a bandwidth-manager floor, not set with
+    MRQ_CLK** (#1161). BPMP's bandwidth manager owns the memory clock. A
+    rate set with MRQ_CLK `CMD_CLK_SET_RATE` takes effect, but the next
+    recompute puts it back to what the clients' floors and bandwidths
+    call for, 204 MHz when none has asked. On jetson-nano-2 after a
+    UEFI-direct boot, the first MRQ_CLK request (right after `bpmp_init`)
+    read 3199 MHz and then 204 MHz 250 ms later, with no other request
+    from SLM-OS in between. Any `MRQ_BWMGR_INT` request triggers the same
+    recompute, even a zero floor from another client. The old workaround
+    (an MRQ_CLK request after `xhci_init`) only worked because nothing
+    recomputed afterwards on most boots; the baseline run on main saw
+    204 MHz again when the GPU program opened. A floor
+    (`CMD_BWMGR_INT_CALC_AND_SET`, client CPU cluster 0, in kHz) is part
+    of the computation: it read 3199 MHz through the whole boot (63
+    checks, no drop) and through another client's recompute. An MRQ_CLK
+    request can still pull the rate below a floor until the next
+    recompute, so `make check-emc-rate-path` (part of `make test`) rejects
+    any `bpmp_clk_set_rate` on the EMC clock. The bisection used a
+    post-request hook in `bpmp.c` that reads EMC back after every BPMP
+    request at boot (`kernel/drivers/emc_hold.c`; build with
+    `EMC_HOLD_BISECT` set to 1 in that file to log every request).
 
 ## Troubleshooting
 

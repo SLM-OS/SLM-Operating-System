@@ -704,8 +704,11 @@ void kernel_main(void *dtb)
             bool responding = bpmp_is_available();
             INFO("BPMP: %s", responding ? "MRQ_PING round-trip OK"
                                          : "no PING response (firmware busy?)");
-            /* UEFI leaves EMC at 204 MHz (#1161): ask for 3199 MHz now
-             * and check it after every boot step and BPMP request. */
+            /* UEFI leaves EMC at 204 MHz. Ask BPMP's bandwidth manager
+             * for a 3199 MHz floor now; an MRQ_CLK rate would be put
+             * back to 204 MHz by its next recompute (#1161). The rate
+             * is checked after every boot step and BPMP request, and by
+             * the fan task after boot (emc_hold.h). */
             if (boot_source_is_uefi()) {
                 emc_hold_boot_begin();
             }
