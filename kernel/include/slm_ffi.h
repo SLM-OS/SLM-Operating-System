@@ -1683,14 +1683,19 @@ extern int slm_runtime_get_tier(uint32_t op_kind);
  * SIMT, FP16)` through the inherited GA10B channel, then copies
  * the GPU output back to `out_cpu_out`.
  *
- * Returns 0 on success, -1 on:
+ * Returns 0 on success, SLM_GPU_ERR_CHANNEL_DOWN when the cold
+ * channel is turning dispatchers away (a program past its deadline, a
+ * recovery in progress or a failed one, #1171), -1 on:
  *   - `nvgpu inherit / channel / oplib stage` not yet run (no
  *     handoff, or shader_size below OPLIB_POOL_MIN_BYTES)
  *   - row dims that don't fit in a 64 KB scratch slot
  *   - GPU dispatch failure (timeout, gr_exception, etc.)
+ * Every slm_runtime_dispatch_*_simt below and slm_runtime_stage_weight
+ * return SLM_GPU_ERR_CHANNEL_DOWN the same way.
  *
- * The Rust caller treats any -1 as `BackendError::NotAvailable`
- * and falls back to the existing CPU NEON path.
+ * The Rust caller treats any non-zero return as
+ * `BackendError::NotAvailable` and falls back to the existing CPU NEON
+ * path.
  *
  * Jetson-only. On other platforms returns -1 without side effects.
  */
@@ -1713,8 +1718,9 @@ extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
  *   - the per-page GMMU walk that resolves CPU-writable phys for
  *     each destination page fails.
  *
- * The Rust caller (`LoadedSlm::stage_tensor_to_gpu`) treats -1 as
- * "no GPU staging available", logs once per `slm load`, and leaves
+ * Returns SLM_GPU_ERR_CHANNEL_DOWN while the cold channel is down
+ * (#1171). The Rust caller (`LoadedSlm::stage_tensor_to_gpu`) treats
+ * any non-zero return as "no GPU staging available", logs once per `slm load`, and leaves
  * the tensor name out of `gpu_tensor_map` so forward.rs's hybrid
  * wrappers fall through to the CPU path.
  *

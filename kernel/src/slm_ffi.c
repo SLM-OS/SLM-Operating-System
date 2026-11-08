@@ -2124,7 +2124,7 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
      * `g_handoff`; without the lock the channel-state mutations
      * race. The lock is cleared on every return path. */
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     /* #832: prefer the helper-published shader region; fall back to
      * oplib_pool's self-allocated 256 KB scratch when the helper's
@@ -2209,7 +2209,7 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
 
     op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2301,7 +2301,7 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
 
     op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2392,7 +2392,7 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
 
     op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2469,7 +2469,7 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
 
     op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2532,7 +2532,7 @@ int slm_runtime_stage_weight(const void *cpu_bytes,
     }
 
     irq_flags_t irq;
-    if (!dispatch_lock_acquire(&irq)) return -1;   /* channel down: CPU (#1171) */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t gva = oplib_weights_pool_alloc((size_t)len, 0);
     if (gva == 0) {

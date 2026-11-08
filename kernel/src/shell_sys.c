@@ -6236,9 +6236,7 @@ static int race_one(int c)
             ro[i] = 0u;
         }
         rc = slm_runtime_dispatch_rmsnorm_simt(rx, rg, ro, 1u, RACE_RMS_N, 0x358637BDu);
-        if (rc != 0) {
-            return slm_gpu_channel_mode() != 0u ? -2 : -1;
-        }
+        if (rc != 0) return rc == SLM_GPU_ERR_CHANNEL_DOWN ? -2 : -1;
         for (uint32_t i = 0; i < RACE_RMS_N; i++) {
             uint16_t want = (uint16_t)(rg[i] | (rx[i] & 0x8000u));
             uint16_t d = ro[i] > want ? (uint16_t)(ro[i] - want) : (uint16_t)(want - ro[i]);
