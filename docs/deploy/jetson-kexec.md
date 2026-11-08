@@ -392,8 +392,8 @@ python3 scripts/tools/slm-xload.py <JETSON_IP> qwen \
     ~/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ```
 
-The 1117320736-byte Qwen2.5-1.5B Q4_K_M file took 780 s (1.37 MB/s,
-host on Wi-Fi) and registered as handle 0.
+The 1117320736-byte Qwen2.5-1.5B Q4_K_M file took 780 s (1.37 MB/s)
+and registered as handle 0.
 
 **The three `--gpu` modes,** each launched as
 `slm launch 0 --ctx 512 --sampler greedy --gpu <mode>`:
@@ -404,19 +404,20 @@ host on Wi-Fi) and registered as handle 0.
 | `auto` | `backend=CPU(no GPU ops available)`. `slm gpu` lists the session on the per-op tier table with every op on the CPU | Same text and timing |
 | `on` | Refused: `--gpu on, but no GPU program: no SLM-OS-built GPU channel (needs a UEFI-direct boot); use --gpu auto or cpu` | n/a |
 
-The CPU path is slower than after a UEFI-direct boot (0.41 tok/s in
-#1164), where the cores and EMC run at different clocks; the cause was
-not measured.
-
 **Per-op GPU dispatch does not work after kexec (#1189).** Nothing at
 boot moves an op off the CPU. `nvgpu inherit`, `nvgpu channel` and
 `nvgpu oplib stage` succeed and move RMSNORM, ROPE, EMBEDDING, Q4K_DOT,
 GQA_ATTN and SWIGLU to SIMT, but the first dispatch
 (`nvgpu oplib dispatch-rmsnorm 4 16`) times out in PBDMA: `GP_GET`
-never moves and `current_ctx=0`. A failed dispatch does not return the
-op to the CPU, so after `nvgpu oplib stage` every per-op call waits out
-the timeout (12 s for that dispatch) before falling back. Do not stage
-the operator library before a prompt on a kexec boot. The default
+never moves and `current_ctx=0`; that one dispatch took 12.2 s. No
+prompt was run on the SIMT tiers. From the code, a failed dispatch
+leaves the op's tier at SIMT (`OperatorLibraryBackend` in
+`runtime/src/inference/gpu_slm.rs` falls back to the CPU for that call
+only), and each failed dispatch costs the 2 s semaphore poll
+(`GA10B_DISPATCH_POLL_TIMEOUT_US` in
+`kernel/gpu/nvidia/ga10b_bringup.c`) plus the diagnostic dump, so every
+per-op call of a prompt is expected to pay that cost. Do not stage the
+operator library before a prompt on a kexec boot. The default
 helpers also start no weights pool, so the matmul weights are never
 staged. GPU inference needs a UEFI-direct boot
 ([`jetson-uefi-direct.md`](jetson-uefi-direct.md)), where `--gpu auto`
