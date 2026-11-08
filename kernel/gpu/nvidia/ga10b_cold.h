@@ -60,7 +60,7 @@ struct ga10b_cold_recovery {
     int level;              /* last level tried: 1 channel reset, 2 GR engine reset */
     int l1_rc, l2_rc;       /* per level: 0, or the step that failed */
     uint32_t l1_us, l2_us, probe_us;
-    uint32_t latched;       /* a fault was latched: straight to level 2 */
+    uint32_t latched;       /* an error was latched at the start */
     uint32_t probe_failed;  /* ga10b_bringup_probe_channel: 1 host, 2 compute */
     uint32_t evict_failed;
     /* State when recovery started (and CHRAM before level 2 / at the end). */
@@ -75,7 +75,12 @@ struct ga10b_cold_recovery {
     uint32_t fecs_mb0_fail, fecs_mb6_fail, fecs_ctx_fail;
 };
 
-/* Recovery options: GA10B_CHAN_RESET_* bits for the channel reset, plus: */
+/* Recovery options: GA10B_CHAN_RESET_* bits for the channel reset, plus
+ * CLEAR_FIRST. The default re-enables the channel without a forced
+ * context reload: a reload still pending when the GR engine is reset
+ * leaves the TSG marked as on the engine and the channel never runs
+ * again (jetson-nano-2, 2026-11-08; ADR 0006). The other bits are kept
+ * for `nvgpu cold recover opts <n>` experiments. */
 #define GA10B_COLD_RECOVER_CLEAR_FIRST  0x100u  /* clear latched MMU/PBDMA/runlist state first */
 #define GA10B_COLD_RECOVER_DEFAULT_OPTS 0x2u   /* GA10B_CHAN_RESET_NO_RELOAD */
 void ga10b_cold_recover_set_opts(uint32_t opts);
@@ -83,8 +88,8 @@ uint32_t ga10b_cold_recover_get_opts(void);
 
 /* Bring the cold channel back after a timed-out or faulted step. Task
  * context, IRQs on, no spinlock held; the caller has shut every other
- * dispatcher out first (slm_ffi.c). `level`: 0 chooses (level 1 unless
- * an error is latched, then level 2), 1 level 1 only, 2 level 2 only.
+ * dispatcher out first (slm_ffi.c). `level`: 0 tries level 1, then level 2
+ * if level 1 fails; 1 level 1 only; 2 level 2 only.
  * Returns 0 when the probe passed, else a negative code (also in r->rc).
  * Prints nothing: the caller prints one line from `r`. */
 int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r);
@@ -144,11 +149,12 @@ static inline uint32_t ga10b_cold_reset_id_mask(uint32_t reset_id)
     return 1u << (reset_id % 32u);
 }
 
-/* Recovery goes straight to a GR engine reset when an error is latched:
- * an MMU fault (FAULT_STATUS valid, bit 31, or FAULT_INFO valid, bit 31),
- * the channel's ENG_FAULTED (CHRAM bit 5), or a pending GR interrupt or
- * exception. nvgpu resets the engine after every MMU fault; a context
- * with a faulted SM can't be saved by a preempt anyway. */
+/* An error latched when recovery starts: an MMU fault (FAULT_STATUS
+ * valid, bit 31, or FAULT_INFO valid, bit 31), the channel's ENG_FAULTED
+ * (CHRAM bit 5), or a pending GR interrupt or exception. nvgpu resets the
+ * engine after every MMU fault. Recorded in the recovery log only: level
+ * 1 is still tried first, because `nvgpu cold check` leaves an MMU fault
+ * latched on a healthy channel (see ga10b_cold_recover). */
 static inline bool ga10b_cold_recover_needs_engine_reset(uint32_t chram, uint32_t fault_status,
                                                         uint32_t fault_info, uint32_t gr_intr,
                                                         uint32_t gr_exception)

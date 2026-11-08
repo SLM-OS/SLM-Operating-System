@@ -6338,8 +6338,9 @@ static int nvgpu_cold_race_status(void)
     return pass ? 0 : -1;
 }
 
-/* `nvgpu cold recover [l2|status]` (#1171): recover the channel by hand
- * (l2: straight to the GR engine reset), or list the recoveries so far
+/* `nvgpu cold recover [l1|l2|status|opts <n>]` (#1171): recover the
+ * channel by hand (l1: channel reset only; l2: straight to the GR engine
+ * reset), set the channel-reset options, or list the recoveries so far
  * with the state each one found. Holds slm_prog's lock so no program step
  * runs meanwhile. */
 static int nvgpu_cold_recover(int argc, char *argv[])

@@ -1379,9 +1379,10 @@ int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r)
     int rc = -1;
     /* Level 1 first in every case but a forced level 2: a latched MMU
      * fault alone is not a reason to skip it (`nvgpu cold check` leaves
-     * one on a healthy channel, jetson-nano-2 2026-11-08), and level 2
-     * does not bring the channel back yet (#1171: the host keeps the TSG
-     * as on the engine after the GR reset). */
+     * one on a healthy channel, jetson-nano-2 2026-11-08). A hang the
+     * TSG preempt cannot stop costs the 100 ms preempt wait before
+     * level 2 (25 of 25 injected hangs and faults on jetson-nano-2,
+     * 2026-11-08: level 2 in about 7 ms after it). */
     if (level != 2) {
         r->level = 1;
         uint64_t t = recover_now_us();
