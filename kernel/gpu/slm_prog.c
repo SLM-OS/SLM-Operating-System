@@ -279,8 +279,10 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
              * their shape, so refuse it here. */
             uint32_t group = gqa_hmma_group(op);
             if (group == 0u) return -1;
-            /* q, k and v are read 16 bytes at a time, out written 4. */
-            if (((op->ptr[0] | op->ptr[1] | op->ptr[2]) & 15u) != 0u || (op->ptr[4] & 3u) != 0u) {
+            /* q, k and v are read 16 bytes at a time, pos as u32, out
+             * written 4 bytes at a time. */
+            if (((op->ptr[0] | op->ptr[1] | op->ptr[2]) & 15u) != 0u ||
+                ((op->ptr[3] | op->ptr[4]) & 3u) != 0u) {
                 return -1;
             }
             uint64_t m = (uint64_t)rows * group;
@@ -327,6 +329,8 @@ struct prog_session {
     uint8_t *step_cpu;
     uint32_t step_bytes;
     int wmap;
+    /* GQA fell back to slm_gqa_w8 (no HMMA SASS) and that was printed. */
+    bool gqa_w8_noted;
     struct prog_shape shapes[SLM_PROG_SHAPES];
 };
 
@@ -951,8 +955,9 @@ static struct prog_shape *shape_of(struct prog_session *s, uint32_t shape)
     return &s->shapes[shape];
 }
 
+/* *fell_back (may be NULL) is set when GQA had to take slm_gqa_w8. */
 static int encode_for(const struct prog_session *s, const struct slm_prog_op *op,
-                      struct ga10b_prog_launch *l, uint8_t *args)
+                      struct ga10b_prog_launch *l, uint8_t *args, bool *fell_back)
 {
     int sass = slm_prog_op_sass(op);
     if (sass < 0) return SLM_PROG_ERR_ARG;
@@ -965,6 +970,7 @@ static int encode_for(const struct prog_session *s, const struct slm_prog_op *op
         }
         sass = SLM_SASS_GQA_W8;
         if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+        if (fell_back) *fell_back = true;
     }
     return slm_prog_encode(op, (uint32_t)sass, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
 }
@@ -976,8 +982,15 @@ static int slm_prog_add_locked(int32_t h, uint32_t shape, const struct slm_prog_
     if (!ps || !op) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    bool fell_back = false;
+    int rc = encode_for(s, op, &l, args, &fell_back);
     if (rc != 0) return rc;
+    /* Building the program, never on the dispatch path: one line a session. */
+    if (fell_back && !s->gqa_w8_noted) {
+        s->gqa_w8_noted = true;
+        uart_puts("[slm-prog] no HMMA GQA kernel in the operator library (SASS older than "
+                  "#1167): GQA runs on slm_gqa_w8\n");
+    }
     rc = ga10b_prog_add_launch(&ps->p, &l);
     return rc < 0 ? SLM_PROG_ERR_ARG : rc;
 }
@@ -1052,7 +1065,7 @@ static int slm_prog_patch_locked(int32_t h, uint32_t shape, uint32_t idx, const 
     if (!dst) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    int rc = encode_for(s, op, &l, args, NULL);
     if (rc != 0) return rc;
     memcpy(dst, args, l.args_len);
     s->be->ops->cache_clean(s->be->ops->ctx, dst, l.args_len);
@@ -1075,7 +1088,7 @@ static int slm_prog_update_locked(int32_t h, uint32_t shape, uint32_t idx, const
     if (!ps || !op) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    int rc = encode_for(s, op, &l, args, NULL);
     if (rc != 0) return rc;
     if (ga10b_prog_update_launch(&ps->p, idx, &l) != GA10B_PROG_OK) return SLM_PROG_ERR_ARG;
     const struct ga10b_gpu_ops *ops = s->be->ops;

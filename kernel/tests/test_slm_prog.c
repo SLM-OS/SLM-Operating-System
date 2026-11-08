@@ -630,7 +630,8 @@ static void test_gqa_selects_hmma(void)
     TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&b, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
     TEST_ASSERT_EQUAL_UINT32(1, l.grid_y); /* 17 rows: 2 M tiles, one CTA */
 
-    /* q, k, v are read 16 bytes at a time and out written 4: refuse less. */
+    /* q, k, v are read 16 bytes at a time, pos as u32 and out written 4:
+     * refuse less. */
     struct slm_prog_op m = g;
     m.rows = 1;
     TEST_ASSERT_EQUAL_INT(0, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
@@ -643,6 +644,9 @@ static void test_gqa_selects_hmma(void)
     m.ptr[2] = 0x34;
     TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
     m.ptr[2] = 0x30;
+    m.ptr[3] = 0x42;
+    TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_DEC, 0xA000, &l, a));
+    m.ptr[3] = 0x40;
     m.ptr[4] = 0x52;
     TEST_ASSERT_EQUAL_INT(-1, slm_prog_encode(&m, SLM_SASS_GQA_HMMA_PF, 0xA000, &l, a));
     /* slm_gqa_w8 has no such requirement. */

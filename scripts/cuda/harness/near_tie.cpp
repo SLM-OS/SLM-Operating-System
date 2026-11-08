@@ -72,6 +72,13 @@ int main(int argc, char **argv)
         printf("the two replies do not diverge within their tokens\n");
         return 1;
     }
+    /* The forced tokens are the ones both runs produced. */
+    for (size_t i = 0; i < d; i++) {
+        if (a[i] != b[i]) {
+            fprintf(stderr, "a and b differ at %zu before the divergence\n", i);
+            return 3;
+        }
+    }
 
     Gguf g;
     if (!gguf_read(argv[1], g)) {
