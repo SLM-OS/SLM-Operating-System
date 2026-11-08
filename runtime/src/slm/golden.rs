@@ -46,7 +46,7 @@ use crate::inference::quant::{
     dequantize_row_q4_k, dequantize_row_q6_k, q8_k_byte_size, quantize_row_q8_k,
     vec_dot_q4_k_q8_k,
 };
-use crate::slm::forward::{forward_one, ForwardScratch};
+use crate::slm::forward::{forward_one, project_with_bias, ForwardScratch};
 use crate::slm::gguf::{f16_to_f32, f32_to_f16, GgmlType};
 use crate::slm::{registry, sampler::Sampler, session::Session};
 
@@ -395,6 +395,97 @@ pub fn check_lm_head(r: &Records<'_>) -> Result<(), Mismatch> {
     compare_f32("matmul q4k", &got, &want, 0.0, DOT_NOISE)
 }
 
+/// The production Q/K/V projection, [`project_with_bias`], with its own
+/// scratch. `name` is the projection's name in the fixture, unused here.
+fn production_projection(
+    _name: &str,
+    ty: GgmlType,
+    weights: &[u8],
+    rows: usize,
+    x: &[u16],
+    bias: Option<&[u8]>,
+    out: &mut [u16],
+) -> Option<()> {
+    let cols = x.len();
+    let mut q8 = vec![0u8; q8_k_byte_size(cols)?];
+    let (mut mm, mut dequant, mut acts) = (Vec::new(), Vec::new(), Vec::new());
+    project_with_bias(ty, weights, rows, cols, x, bias, &mut q8, &mut mm, &mut dequant, &mut acts, out)
+}
+
+/// Q, K and V with their biases, `matmul(x, W) + b` rounded to FP16, as
+/// `forward_one` builds them (`golden_qkv_bias.rec`, #1165). The reference is
+/// ggml's `ggml_add(ggml_mul_mat(W, x), b)`, llama.cpp's Qwen2 graph. Q4_K takes
+/// the same integer Q8_K path on both sides, so [`DOT_NOISE`] plus the FP16
+/// rounding of the result, as `check_lm_head`'s Q4_K. Q6_K takes an F32 dot
+/// here: [`Q6K_DOT_NOISE`] against an exact dot plus the bias, and the Q8_K
+/// bound (module doc) against ggml's own result.
+pub fn check_qkv_bias(r: &Records<'_>) -> Result<(), Mismatch> {
+    check_qkv_bias_with(r, &mut production_projection)
+}
+
+/// [`check_qkv_bias`] on any projection, so a test can show that a wrong one
+/// (bias dropped, misindexed, another projection's) fails it.
+pub(crate) fn check_qkv_bias_with(
+    r: &Records<'_>,
+    project: &mut dyn FnMut(&str, GgmlType, &[u8], usize, &[u16], Option<&[u8]>, &mut [u16]) -> Option<()>,
+) -> Result<(), Mismatch> {
+    let x = r.fp16s("qkv_bias.x")?;
+    let x_f32 = r.f32s("qkv_bias.x")?;
+    let names = core::str::from_utf8(r.bytes("qkv_bias.names")?)
+        .map_err(|_| malformed("qkv_bias.names"))?;
+    let blocks = x.len() / 256;
+    if blocks == 0 || x.len() % 256 != 0 {
+        return Err(malformed("qkv_bias.x"));
+    }
+    let mut checked = 0usize;
+    for name in names.split(',') {
+        let field = |f: &str| format!("qkv_bias.{name}.{f}");
+        let ty = GgmlType(*r.f32s(&field("type"))?.first().ok_or_else(|| malformed("qkv type"))? as u32);
+        let weights = r.bytes(&field("w"))?;
+        let bias = r.bytes(&field("b"))?;
+        let want = r.f32s(&field("out"))?;
+        let rows = want.len();
+        if bias.len() != rows * 4 {
+            return Err(malformed(&field("b")));
+        }
+        let mut got = vec![0u16; rows];
+        project(name, ty, weights, rows, &x, Some(bias), &mut got)
+            .ok_or_else(|| malformed(&field("projection")))?;
+        let label = format!("qkv_bias {name}");
+        if ty == GgmlType::Q4_K {
+            compare_fp16(&label, &got, &want, DOT_NOISE)?;
+        } else if ty == GgmlType::Q6_K {
+            let exact = r.f32s(&field("out_exact"))?;
+            compare_fp16(&format!("{label} exact"), &got, &exact, Q6K_DOT_NOISE)?;
+            let wabs = r.f32s(&field("wabs"))?;
+            if wabs.len() != rows * blocks {
+                return Err(malformed(&field("wabs")));
+            }
+            for row in 0..rows {
+                let mut bound = 0.0f32;
+                for block in 0..blocks {
+                    let max = x_f32[block * 256..(block + 1) * 256]
+                        .iter()
+                        .fold(0.0f32, |a, &b| a.max(b.abs()));
+                    bound += wabs[row * blocks + block] * 0.5 * max / 127.0;
+                }
+                let g = f16_to_f32(got[row]);
+                let tol = 1.01 * fp16_half_ulp(want[row]) + bound + F32_NOISE * want[row].abs();
+                if !((g - want[row]).abs() <= tol) {
+                    return Err(mismatch(&label, row, g, want[row], tol));
+                }
+            }
+        } else {
+            return Err(malformed(&field("type")));
+        }
+        checked += 1;
+    }
+    if checked == 0 {
+        return Err(malformed("qkv_bias.names"));
+    }
+    Ok(())
+}
+
 /// Every single-op check.
 pub fn check_ops(r: &Records<'_>) -> Result<(), Mismatch> {
     check_rmsnorm(r)?;
@@ -521,6 +612,354 @@ pub fn check_greedy(model: u32, r: &Records<'_>) -> Result<(), Mismatch> {
 }
 
 // ---------------------------------------------------------------------------
+// The real model on hardware (`slm golden`, #1165)
+// ---------------------------------------------------------------------------
+//
+// The real Qwen2.5-1.5B GGUF is 1.1 GB, too big for CI, so its goldens run on
+// a board after a UEFI-direct boot, on the model `/boot/models` delivers. The
+// fixture (`scripts/fixtures/slm/qwen25_real_golden.rec`, made on the host by
+// `scripts/tools/slm-gen-goldens.py --only real-model`) holds a raw prompt,
+// llama.cpp's greedy continuation and, for every step that predicts one of
+// those tokens, the full row of logits from the exact CPU reference: the GPU
+// program's own reference with exact dot products, run on the host (ADR 0004).
+// The board runs the GPU program over the same tokens, teacher-forced, and
+// each step must have every logit within `GOLDEN_EXACT_TOLERANCE` (0.1) of
+// that row and the same top token as llama.cpp.
+
+/// Feed the prompt as one prefill batch, as `slm prompt` does, instead of one
+/// token at a time. Keep in step with `slm_shell.c`.
+pub const REAL_FLAG_BATCH: u32 = 1;
+/// Deliberate mutation: zero the Q, K and V biases of the layer the fixture
+/// names in the loaded weights for this run, then put them back.
+pub const REAL_FLAG_DROP_BIAS: u32 = 2;
+
+/// Context the program is built with; the fixture's steps must fit.
+const REAL_CTX: usize = 64;
+
+/// Keep in step with `SlmRealGoldenReport` in `kernel/src/slm_shell.c`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RealGoldenReport {
+    /// Steps compared: one per token of llama.cpp's continuation.
+    pub steps: u32,
+    /// Steps whose top logit is llama.cpp's greedy token.
+    pub top_matches: u32,
+    /// First step with a logit more than 0.1 from the exact reference, or -1.
+    pub first_bad_step: i32,
+    pub first_bad_index: i32,
+    /// Thousandths, since kernel C has no floating point.
+    pub first_bad_got_milli: i32,
+    pub first_bad_want_milli: i32,
+    /// Largest error against the exact reference over all steps, in thousandths.
+    pub max_err_milli: i32,
+    /// First step whose top token isn't llama.cpp's, or -1.
+    pub first_top_miss_step: i32,
+    /// Bytes the mutation zeroed, 0 without one.
+    pub mutated_bytes: u32,
+    /// 1 once a mutation was undone and the bytes read back as they were.
+    pub restored: u32,
+    pub gpu_us_per_token: u64,
+}
+
+impl RealGoldenReport {
+    /// Every step within the tolerance with llama.cpp's top token.
+    pub fn passed(&self) -> bool {
+        self.steps > 0
+            && self.first_bad_step < 0
+            && self.first_top_miss_step < 0
+            && self.top_matches == self.steps
+    }
+}
+
+/// The fixture, parsed and checked for consistency.
+struct RealFixture {
+    ids: Vec<u32>,
+    tokens: Vec<u32>,
+    margins: Vec<f32>,
+    n_vocab: usize,
+    model_bytes: usize,
+    offset: Vec<f32>,
+    scale: Vec<f32>,
+    /// `steps * n_vocab` little-endian i16, row-major.
+    q: &'static [u8],
+    mutate_layer: u32,
+}
+
+impl RealFixture {
+    fn parse(r: &Records<'static>) -> Result<Self, &'static str> {
+        let bad = |_| "record file is missing fields";
+        let ids = r.u32s("real.prompt.ids").map_err(bad)?;
+        let tokens = r.u32s("real.tokens").map_err(bad)?;
+        let margins = r.f32s("real.margins").map_err(bad)?;
+        let n_vocab = *r.u32s("real.n_vocab").map_err(bad)?.first().ok_or("no vocabulary size")? as usize;
+        let model_bytes = *r.u32s("real.model.bytes").map_err(bad)?.first().ok_or("no model size")? as usize;
+        let offset = r.f32s("real.exact.offset").map_err(bad)?;
+        let scale = r.f32s("real.exact.scale").map_err(bad)?;
+        let q = r.bytes("real.exact.q").map_err(bad)?;
+        let mutate_layer = *r.u32s("real.mutate.layer").map_err(bad)?.first().ok_or("no layer")?;
+        let steps = tokens.len();
+        if ids.is_empty()
+            || steps == 0
+            || n_vocab == 0
+            || margins.len() != steps
+            || offset.len() != steps
+            || scale.len() != steps
+            || Some(q.len()) != steps.checked_mul(n_vocab).and_then(|n| n.checked_mul(2))
+        {
+            return Err("record file fields disagree");
+        }
+        // The last generated token is never fed, so the program sees this many.
+        if ids.len() + steps - 1 > REAL_CTX {
+            return Err("record file is longer than the program's context");
+        }
+        Ok(Self { ids, tokens, margins, n_vocab, model_bytes, offset, scale, q, mutate_layer })
+    }
+
+    fn want(&self, step: usize, i: usize) -> f32 {
+        let at = (step * self.n_vocab + i) * 2;
+        let q = i16::from_le_bytes([self.q[at], self.q[at + 1]]);
+        self.offset[step] + self.scale[step] * q as f32
+    }
+}
+
+/// Zeroed bias bytes and what they held.
+struct BiasMutation {
+    model: usize,
+    saved: Vec<(usize, Vec<u8>)>,
+}
+
+impl BiasMutation {
+    /// Zero `blk.<layer>.attn_{q,k,v}.bias` in the loaded weights, under the
+    /// registry lock, which every CPU forward pass holds while it reads them.
+    /// Refused while a GPU program maps the weights: it reads them without
+    /// that lock.
+    fn apply(model: usize, layer: u32) -> Result<Self, &'static str> {
+        let saved = registry::with_loaded_slm(model, |slm| {
+            // Under the slot lock, which every new pin takes too.
+            if registry::gpu_pinned(model) {
+                return Err("a GPU program maps this model; close its sessions first");
+            }
+            let base = slm.weight_base_for_mutation().ok_or("model has no weight bytes")?;
+            let start = slm.weight_bytes().ok_or("model has no weight bytes")?.as_ptr() as usize;
+            let mut saved = Vec::new();
+            for which in ["q", "k", "v"] {
+                let name = format!("blk.{layer}.attn_{which}.bias");
+                let bytes = slm.tensor_bytes(&name).ok_or("the model has no such bias")?;
+                saved.push((bytes.as_ptr() as usize - start, bytes.to_vec()));
+            }
+            for (off, bytes) in &saved {
+                // SAFETY: `off..off + len` is a tensor inside the weight
+                // buffer, `base` is that buffer with write access, and the
+                // registry lock keeps every CPU reader out while it changes.
+                // No GPU program maps it (checked above).
+                unsafe {
+                    let p = base.as_ptr().add(*off);
+                    core::ptr::write_bytes(p, 0, bytes.len());
+                    crate::kernel_ffi::slm_gpu_sync_for_device(p, bytes.len());
+                }
+            }
+            Ok(saved)
+        })
+        .ok_or("model not loaded")??;
+        Ok(Self { model, saved })
+    }
+
+    /// Put the bytes back and read them back. True when they match.
+    fn restore(self) -> bool {
+        registry::with_loaded_slm(self.model, |slm| {
+            let Some(base) = slm.weight_base_for_mutation() else {
+                return false;
+            };
+            for (off, bytes) in &self.saved {
+                // SAFETY: as in `apply`; the program that read the zeroed
+                // bytes has been dropped, so no GPU mapping is left.
+                unsafe {
+                    let p = base.as_ptr().add(*off);
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+                    crate::kernel_ffi::slm_gpu_sync_for_device(p, bytes.len());
+                }
+            }
+            let Some(all) = slm.weight_bytes() else {
+                return false;
+            };
+            self.saved.iter().all(|(off, bytes)| &all[*off..*off + bytes.len()] == bytes.as_slice())
+        })
+        .unwrap_or(false)
+    }
+
+    fn bytes(&self) -> u32 {
+        self.saved.iter().map(|(_, b)| b.len() as u32).sum()
+    }
+}
+
+/// Run the fixture on `model` through the GPU program and compare (see the
+/// section comment). `Err` when the run itself failed; a mismatch is `Ok`
+/// with `rep` saying where ([`RealGoldenReport::passed`]).
+pub fn real_golden_run(
+    model: u32,
+    rec: &'static [u8],
+    flags: u32,
+    rep: &mut RealGoldenReport,
+) -> Result<(), &'static str> {
+    *rep = RealGoldenReport { first_bad_step: -1, first_bad_index: -1, first_top_miss_step: -1, ..Default::default() };
+    let r = Records::new(rec).ok_or("bad record file")?;
+    let fx = RealFixture::parse(&r)?;
+    let info = registry::get_info(model as usize).ok_or("model not loaded")?;
+    if info.vocab_size as usize != fx.n_vocab {
+        return Err("record file is for another model");
+    }
+    let len = registry::with_loaded_slm(model as usize, |slm| slm.weight_bytes().map(|b| b.len()))
+        .flatten()
+        .ok_or("model has no weight bytes")?;
+    if len != fx.model_bytes {
+        return Err("the loaded model is not the file the record was made from");
+    }
+    let mutation = if flags & REAL_FLAG_DROP_BIAS != 0 {
+        let m = BiasMutation::apply(model as usize, fx.mutate_layer)?;
+        rep.mutated_bytes = m.bytes();
+        Some(m)
+    } else {
+        None
+    };
+    let result = real_run_and_compare(model, &fx, flags & REAL_FLAG_BATCH != 0, rep);
+    if let Some(m) = mutation {
+        rep.restored = m.restore() as u32;
+        if rep.restored == 0 {
+            return Err("the mutated biases did not read back as they were");
+        }
+    }
+    result
+}
+
+fn real_run_and_compare(
+    model: u32,
+    fx: &RealFixture,
+    batched: bool,
+    rep: &mut RealGoldenReport,
+) -> Result<(), &'static str> {
+    use crate::inference::ops_transformer::{RopePairing, RopeTable};
+    use crate::slm::gpu_program::{BuildError, GpuProgram, GOLDEN_EXACT_TOLERANCE};
+
+    let (head_dim, base, arch) = registry::with_loaded_slm(model as usize, |slm| {
+        (slm.arch().head_dim, slm.arch().rope_freq_base, slm.arch().architecture)
+    })
+    .ok_or("model not loaded")?;
+    let rope = RopeTable::new(head_dim as usize, REAL_CTX, base, RopePairing::for_arch(arch));
+    let vocab = fx.n_vocab as u32;
+    // Read and pin under the registry lock, build without it, as a session does.
+    let prep = registry::with_loaded_slm(model as usize, |slm| GpuProgram::prepare(slm, vocab))
+        .ok_or("model not loaded")?;
+    let mut prog = prep
+        .and_then(|i| GpuProgram::build_prepared(i, REAL_CTX, &rope.cos_sin))
+        .map_err(|e| match e {
+            BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
+            BuildError::Failed(w) => w,
+        })?;
+
+    let mut max_err = 0.0f32;
+    let mut compare = |step: usize, out: &[f32], rep: &mut RealGoldenReport| -> Result<(), &'static str> {
+        if out.len() != fx.n_vocab {
+            return Err("the program returned a short row");
+        }
+        let (mut step_max, mut at) = (0.0f32, 0usize);
+        let mut top = 0usize;
+        for i in 0..fx.n_vocab {
+            let want = fx.want(step, i);
+            let e = (out[i] - want).abs();
+            // NaN fails both tests.
+            if !(e <= step_max) {
+                step_max = e;
+                at = i;
+            }
+            if !(e <= GOLDEN_EXACT_TOLERANCE) && rep.first_bad_step < 0 {
+                rep.first_bad_step = step as i32;
+                rep.first_bad_index = i as i32;
+                rep.first_bad_got_milli = (out[i] * 1000.0) as i32;
+                rep.first_bad_want_milli = (want * 1000.0) as i32;
+            }
+            if out[i] > out[top] {
+                top = i;
+            }
+        }
+        let want_top = fx.tokens[step];
+        if top as u32 == want_top {
+            rep.top_matches += 1;
+        } else if rep.first_top_miss_step < 0 {
+            rep.first_top_miss_step = step as i32;
+        }
+        if !(step_max <= max_err) {
+            max_err = step_max;
+        }
+        rep.max_err_milli = if max_err.is_finite() { (max_err * 1000.0) as i32 } else { i32::MAX };
+        rep.steps += 1;
+        let mut line = String::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut line,
+            format_args!(
+                "[slm] real golden step {step}: max err {} milli at {at}, top {top} want {want_top} (llama.cpp margin {} milli)\n\0",
+                if step_max.is_finite() { (step_max * 1000.0) as i32 } else { i32::MAX },
+                (fx.margins[step] * 1000.0) as i32,
+            ),
+        );
+        crate::kernel_ffi::print(line.as_bytes());
+        Ok(())
+    };
+
+    let p = fx.ids.len();
+    let mut out = Vec::new();
+    if batched {
+        if p < 2 || (prog.max_batch as usize) < p {
+            return Err("the prompt does not fit one prefill batch");
+        }
+        prog.run(&fx.ids, 0, &mut out)?;
+    } else {
+        for (i, &t) in fx.ids.iter().enumerate() {
+            prog.run(core::slice::from_ref(&t), i, &mut out)?;
+        }
+    }
+    compare(0, &out, rep)?;
+    for step in 1..fx.tokens.len() {
+        prog.run(core::slice::from_ref(&fx.tokens[step - 1]), p + step - 1, &mut out)?;
+        compare(step, &out, rep)?;
+    }
+    rep.gpu_us_per_token = prog.gpu_us_per_token();
+    Ok(())
+}
+
+/// Run the real-model golden from C (`slm golden`). Returns 0 when it ran
+/// (pass or fail is in `out`), -1 on a bad argument, -2 when it could not
+/// run, with the reason on the console.
+///
+/// # Safety
+/// `rec` must point to `rec_len` bytes that stay readable and unchanged for
+/// the life of the kernel (the embedded fixture), and `out` to a writable
+/// [`RealGoldenReport`].
+#[no_mangle]
+pub unsafe extern "C" fn rust_slm_golden_real(
+    model: u32,
+    rec: *const u8,
+    rec_len: usize,
+    flags: u32,
+    out: *mut RealGoldenReport,
+) -> i32 {
+    if rec.is_null() || rec_len == 0 || out.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's contract: static, immutable data.
+    let rec: &'static [u8] = unsafe { core::slice::from_raw_parts(rec, rec_len) };
+    // SAFETY: the caller's contract.
+    let rep = unsafe { &mut *out };
+    match real_golden_run(model, rec, flags, rep) {
+        Ok(()) => 0,
+        Err(why) => {
+            let line = format!("[slm] real golden: {why}\n\0");
+            crate::kernel_ffi::print(line.as_bytes());
+            -2
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FFI for kernel/tests/test_slm_golden.c
 // ---------------------------------------------------------------------------
 
@@ -560,6 +999,7 @@ const GOLDEN_OPS: u32 = 0;
 const GOLDEN_FIRST_STEP: u32 = 1;
 const GOLDEN_GREEDY: u32 = 2;
 const GOLDEN_ROPE: u32 = 3;
+const GOLDEN_QKV_BIAS: u32 = 4;
 
 /// Run one golden check from C. Returns 0 on a match, 1 on a mismatch (printed
 /// on the UART), -1 on a bad argument. `model` is ignored by the op checks.
@@ -582,6 +1022,7 @@ pub unsafe extern "C" fn rust_slm_golden_check(
         GOLDEN_FIRST_STEP => ffi_result(check_first_step(model, &r)),
         GOLDEN_GREEDY => ffi_result(check_greedy(model, &r)),
         GOLDEN_ROPE => ffi_result(check_rope(&r)),
+        GOLDEN_QKV_BIAS => ffi_result(check_qkv_bias(&r)),
         _ => -1,
     }
 }
@@ -647,6 +1088,7 @@ mod tests {
     use crate::slm::tokenizer::Bbpe;
 
     const OPS: &[u8] = include_bytes!("../../../scripts/fixtures/slm/golden_ops.rec");
+    const QKV: &[u8] = include_bytes!("../../../scripts/fixtures/slm/golden_qkv_bias.rec");
     const TINY: &[u8] = include_bytes!("../../../scripts/fixtures/slm/tiny_qwen2.gguf");
     const GREEDY: &[u8] = include_bytes!("../../../scripts/fixtures/slm/tiny_qwen2_greedy.rec");
     const TOK_CASES: &str = include_str!("../../../scripts/fixtures/slm/tokenizer_goldens.tsv");
@@ -732,6 +1174,304 @@ mod tests {
     #[test]
     fn golden_lm_head() {
         pass(check_lm_head(&ops()));
+    }
+
+    fn qkv() -> Records<'static> {
+        Records::new(QKV).expect("golden_qkv_bias.rec")
+    }
+
+    #[test]
+    fn golden_qkv_bias() {
+        pass(check_qkv_bias(&qkv()));
+    }
+
+    /// The vector catches the bias defects it is there for, in every
+    /// projection on its own: the bias dropped, read one row off, read
+    /// back to front, or another projection's bias added.
+    #[test]
+    fn golden_qkv_bias_catches_wrong_bias() {
+        let r = qkv();
+        let names: Vec<String> = core::str::from_utf8(r.get("qkv_bias.names").unwrap())
+            .unwrap()
+            .split(',')
+            .map(String::from)
+            .collect();
+        assert_eq!(names, ["q", "k", "v4", "v6"]);
+        let other = |name: &str| -> Vec<u8> {
+            // K and V share a width; Q's is wider, so it takes K's twice.
+            let src = if name == "k" { "v4" } else { "k" };
+            let b = r.get(&format!("qkv_bias.{src}.b")).unwrap();
+            b.iter().cycle().take(r.get(&format!("qkv_bias.{name}.b")).unwrap().len()).copied().collect()
+        };
+        type Mutant = fn(&[u8]) -> Option<Vec<u8>>;
+        let mutants: [(&str, Mutant); 3] = [
+            ("dropped", |_| None),
+            ("one row off", |b| {
+                let mut v = b.to_vec();
+                v.rotate_left(4);
+                Some(v)
+            }),
+            ("reversed", |b| Some(b.chunks_exact(4).rev().flatten().copied().collect())),
+        ];
+        for target in &names {
+            for (what, mutant) in mutants {
+                let mut project = |name: &str, ty, w: &[u8], rows, x: &[u16], b: Option<&[u8]>, out: &mut [u16]| {
+                    if name != target.as_str() {
+                        return production_projection(name, ty, w, rows, x, b, out);
+                    }
+                    let m = mutant(b?);
+                    production_projection(name, ty, w, rows, x, m.as_deref(), out)
+                };
+                let err = check_qkv_bias_with(&r, &mut project);
+                let m = err.expect_err(&format!("{target}: bias {what} passed"));
+                assert!(m.what.contains(target.as_str()), "{target} {what}: {m:?}");
+            }
+            let swapped = other(target);
+            let mut project = |name: &str, ty, w: &[u8], rows, x: &[u16], b: Option<&[u8]>, out: &mut [u16]| {
+                let b = if name == target.as_str() { Some(swapped.as_slice()) } else { b };
+                production_projection(name, ty, w, rows, x, b, out)
+            };
+            let m = check_qkv_bias_with(&r, &mut project)
+                .expect_err(&format!("{target}: another projection's bias passed"));
+            assert!(m.what.contains(target.as_str()), "{target} swapped: {m:?}");
+        }
+    }
+
+    // ---- the real-model golden's harness (`slm golden`, #1165) -------------
+
+    /// `SGR1` records, sorted by name as the Python generator writes them.
+    fn write_records(mut recs: Vec<(String, Vec<u8>)>) -> Vec<u8> {
+        recs.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out = b"SGR1".to_vec();
+        out.extend_from_slice(&(recs.len() as u32).to_le_bytes());
+        for (name, data) in recs {
+            out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&data);
+            out.resize(out.len() + (((data.len() + 3) & !3) - data.len()), 0);
+        }
+        out
+    }
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    fn f32_bytes(v: &[f32]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// Largest error the fixture's 16-bit rows may add to the exact
+    /// reference: 1% of the 0.1 the board allows.
+    const REAL_STORE_ERROR: f32 = 1e-3;
+
+    /// The fixture `slm golden` reads, made on the host. The GPU program runs
+    /// on the software GPU, which executes the exact CPU reference (`exact:
+    /// true`), over the prompt and llama.cpp's tokens, teacher-forced; each
+    /// step that predicts one of those tokens keeps its full row of logits,
+    /// stored as i16 with a per-row offset and scale. Panics if the exact
+    /// reference's top token is not llama.cpp's at some step, since the board
+    /// could then never pass.
+    fn make_real_fixture(
+        model: u32,
+        text: &[u8],
+        ids: &[u32],
+        tokens: &[u32],
+        margins: &[f32],
+        mutate_layer: u32,
+    ) -> Vec<u8> {
+        use crate::inference::ops_transformer::{RopePairing, RopeTable};
+        use crate::slm::gpu_program::{soft, GpuProgram};
+        soft::reset_knobs();
+        let (head_dim, base, arch, len) = registry::with_loaded_slm(model as usize, |slm| {
+            let a = slm.arch();
+            (a.head_dim, a.rope_freq_base, a.architecture, slm.weight_bytes().unwrap().len())
+        })
+        .unwrap();
+        let vocab = registry::get_info(model as usize).unwrap().vocab_size;
+        let rope = RopeTable::new(head_dim as usize, REAL_CTX, base, RopePairing::for_arch(arch));
+        let prep = registry::with_loaded_slm(model as usize, |slm| GpuProgram::prepare(slm, vocab)).unwrap();
+        let Ok(mut prog) = prep.and_then(|i| GpuProgram::build_prepared(i, REAL_CTX, &rope.cos_sin)) else {
+            panic!("the software GPU did not build the program");
+        };
+        let mut out = Vec::new();
+        let mut rows = Vec::new();
+        for (i, &t) in ids.iter().enumerate() {
+            prog.run(&[t], i, &mut out).unwrap();
+        }
+        rows.push(out.clone());
+        for s in 1..tokens.len() {
+            prog.run(&[tokens[s - 1]], ids.len() + s - 1, &mut out).unwrap();
+            rows.push(out.clone());
+        }
+        drop(prog);
+
+        let (mut offset, mut scale, mut q) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut top, mut top_margin) = (Vec::new(), Vec::new());
+        for (s, row) in rows.iter().enumerate() {
+            let lo = row.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+            let hi = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            assert!(lo.is_finite() && hi.is_finite(), "step {s}: non-finite logits");
+            let o = 0.5 * (lo + hi);
+            let k = ((hi - lo) / 65534.0).max(f32::MIN_POSITIVE);
+            for &v in row {
+                let n = libm::roundf((v - o) / k).clamp(-32767.0, 32767.0) as i16;
+                let back = o + k * n as f32;
+                assert!((back - v).abs() <= REAL_STORE_ERROR, "step {s}: stored {back} for {v}");
+                q.extend_from_slice(&n.to_le_bytes());
+            }
+            offset.push(o);
+            scale.push(k);
+            let t = argmax(row);
+            let mut second = f32::NEG_INFINITY;
+            for (i, &v) in row.iter().enumerate() {
+                if i as u32 != t && v > second {
+                    second = v;
+                }
+            }
+            assert_eq!(
+                t, tokens[s],
+                "step {s}: the exact reference's top token is not llama.cpp's (margin {})",
+                margins[s]
+            );
+            top.push(t);
+            top_margin.push(row[t as usize] - second);
+        }
+        write_records(vec![
+            ("real.prompt.text".into(), text.to_vec()),
+            ("real.prompt.ids".into(), u32_bytes(ids)),
+            ("real.tokens".into(), u32_bytes(tokens)),
+            ("real.margins".into(), f32_bytes(margins)),
+            ("real.n_vocab".into(), u32_bytes(&[vocab])),
+            ("real.model.bytes".into(), u32_bytes(&[u32::try_from(len).unwrap()])),
+            ("real.mutate.layer".into(), u32_bytes(&[mutate_layer])),
+            ("real.exact.offset".into(), f32_bytes(&offset)),
+            ("real.exact.scale".into(), f32_bytes(&scale)),
+            ("real.exact.q".into(), q),
+            ("real.exact.top".into(), u32_bytes(&top)),
+            ("real.exact.margin".into(), f32_bytes(&top_margin)),
+        ])
+    }
+
+    fn weights_digest(model: u32) -> u64 {
+        registry::with_loaded_slm(model as usize, |slm| {
+            // FNV-1a: enough to see any byte change.
+            slm.weight_bytes().unwrap().iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+            })
+        })
+        .unwrap()
+    }
+
+    /// Run the harness three ways and check each verdict: as built (one token
+    /// at a time and batched) it passes, with the bias mutation it fails and
+    /// puts the weights back, and afterwards it passes again.
+    fn assert_real_harness(model: u32, rec: &'static [u8]) {
+        let before = weights_digest(model);
+        for flags in [0, REAL_FLAG_BATCH] {
+            let mut rep = RealGoldenReport::default();
+            real_golden_run(model, rec, flags, &mut rep).unwrap();
+            std::println!("real golden flags {flags}: passed {} {rep:?}", rep.passed());
+            assert!(rep.passed(), "flags {flags}: {rep:?}");
+            assert_eq!(rep.mutated_bytes, 0);
+        }
+        for flags in [REAL_FLAG_DROP_BIAS, REAL_FLAG_DROP_BIAS | REAL_FLAG_BATCH] {
+            let mut rep = RealGoldenReport::default();
+            real_golden_run(model, rec, flags, &mut rep).unwrap();
+            std::println!("real golden flags {flags}: passed {} {rep:?}", rep.passed());
+            assert!(!rep.passed(), "flags {flags}: the mutation passed: {rep:?}");
+            assert!(rep.first_bad_step >= 0, "{rep:?}");
+            assert!(rep.mutated_bytes > 0 && rep.restored == 1, "{rep:?}");
+            assert_eq!(weights_digest(model), before, "flags {flags}: weights not restored");
+        }
+        let mut rep = RealGoldenReport::default();
+        real_golden_run(model, rec, 0, &mut rep).unwrap();
+        std::println!("real golden after the mutation: passed {} {rep:?}", rep.passed());
+        assert!(rep.passed(), "after the mutation: {rep:?}");
+    }
+
+    /// The harness on the tiny model, in CI: the exact reference made by
+    /// [`make_real_fixture`] on the software GPU, llama.cpp's greedy tokens
+    /// from the tiny fixture. Also refuses a model the fixture isn't for.
+    #[test]
+    fn golden_real_harness_on_tiny_passes_and_catches_dropped_bias() {
+        let model = load_tiny();
+        let r = greedy_rec();
+        let rec = make_real_fixture(
+            model,
+            r.get("prompt.text").unwrap(),
+            &r.u32s("prompt.ids").unwrap(),
+            &r.u32s("greedy.tokens").unwrap(),
+            &r.f32s("greedy.margins").unwrap(),
+            0,
+        );
+        let rec: &'static [u8] = Box::leak(rec.into_boxed_slice());
+        assert_real_harness(model, rec);
+
+        // A fixture for another file is refused, not compared.
+        let mut other = rec.to_vec();
+        let at = other.windows(16).position(|w| w == b"real.model.bytes").unwrap() + 20;
+        other[at] ^= 1;
+        let other: &'static [u8] = Box::leak(other.into_boxed_slice());
+        let mut rep = RealGoldenReport::default();
+        assert_eq!(
+            real_golden_run(model, other, 0, &mut rep),
+            Err("the loaded model is not the file the record was made from")
+        );
+        crate::slm::gpu_program::soft::reset_knobs();
+        reset_for_tests();
+    }
+
+    /// Writes the real model's fixture. Run by `slm-gen-goldens.py --only
+    /// real-model`, which supplies `SLM_GOLDEN_MODEL` (the GGUF),
+    /// `SLM_REAL_LLAMA_REC` (llama.cpp's greedy run: `prompt.text`,
+    /// `prompt.ids`, `greedy.tokens`, `greedy.margins`), `SLM_REAL_LAYER` (the
+    /// layer the mutation hits) and `SLM_REAL_OUT`. `--release`.
+    #[test]
+    #[ignore = "needs the real model; run by slm-gen-goldens.py"]
+    fn golden_real_model_write_fixture() {
+        let bytes = std::fs::read(std::env::var("SLM_GOLDEN_MODEL").unwrap()).unwrap();
+        let llama = std::fs::read(std::env::var("SLM_REAL_LLAMA_REC").unwrap()).unwrap();
+        let layer: u32 = std::env::var("SLM_REAL_LAYER").unwrap().parse().unwrap();
+        let out = std::env::var("SLM_REAL_OUT").unwrap();
+        ensure_mm_initialized_for_tests();
+        reset_for_tests();
+        let model = load_slm(b"real", &bytes).expect("real model loads") as u32;
+        drop(bytes);
+        let r = Records::new(&llama).unwrap();
+        let rec = make_real_fixture(
+            model,
+            r.get("prompt.text").unwrap(),
+            &r.u32s("prompt.ids").unwrap(),
+            &r.u32s("greedy.tokens").unwrap(),
+            &r.f32s("greedy.margins").unwrap(),
+            layer,
+        );
+        std::fs::write(&out, &rec).unwrap();
+        std::println!("wrote {out}: {} bytes", rec.len());
+        crate::slm::gpu_program::soft::reset_knobs();
+        reset_for_tests();
+    }
+
+    /// The hardware target's check on the host (`make slm-real-golden-host`):
+    /// the checked-in fixture against the real model on the software GPU.
+    /// Passes as built, fails with the bias mutation. `SLM_GOLDEN_MODEL` is
+    /// the GGUF. `--release`.
+    #[test]
+    #[ignore = "needs the real model; see the doc comment"]
+    fn golden_real_model_host() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/fixtures/slm/qwen25_real_golden.rec");
+        let rec: &'static [u8] = Box::leak(std::fs::read(path).expect("the fixture").into_boxed_slice());
+        let bytes = std::fs::read(std::env::var("SLM_GOLDEN_MODEL").unwrap()).unwrap();
+        ensure_mm_initialized_for_tests();
+        reset_for_tests();
+        crate::slm::gpu_program::soft::reset_knobs();
+        let model = load_slm(b"real", &bytes).expect("real model loads") as u32;
+        drop(bytes);
+        assert_real_harness(model, rec);
+        crate::slm::gpu_program::soft::reset_knobs();
+        reset_for_tests();
     }
 
     #[test]

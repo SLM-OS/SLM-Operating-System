@@ -1373,7 +1373,7 @@ endif()
 
 # SLM golden tests against llama.cpp (#475). On every platform, since the
 # runtime takes different code paths per architecture, but only in boot-test
-# kernels: TEST_SOURCES go into every image, and these fixtures are about 860 KB.
+# kernels: TEST_SOURCES go into every image, and these fixtures are about 1.1 MB.
 if(ENABLE_BOOT_TESTS)
     target_sources(slmos.elf PRIVATE
         kernel/tests/test_slm_golden.c
@@ -1383,8 +1383,8 @@ if(ENABLE_BOOT_TESTS)
     set_source_files_properties(
         kernel/tests/slm_golden_embed.S
         PROPERTIES
-        COMPILE_DEFINITIONS "SLM_GOLDEN_OPS_PATH=${SLM_GOLDEN_DIR}/golden_ops.rec;SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
-        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/golden_ops.rec;${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        COMPILE_DEFINITIONS "SLM_GOLDEN_OPS_PATH=${SLM_GOLDEN_DIR}/golden_ops.rec;SLM_GOLDEN_QKV_BIAS_PATH=${SLM_GOLDEN_DIR}/golden_qkv_bias.rec;SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/golden_ops.rec;${SLM_GOLDEN_DIR}/golden_qkv_bias.rec;${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
     )
 endif()
 
@@ -1418,6 +1418,21 @@ if(SLM_GPU_GOLDEN)
         PROPERTIES
         COMPILE_DEFINITIONS "SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
         OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
+# `slm golden`: the real-model golden (#1165). llama.cpp's tokens and the exact
+# CPU reference's logits for Qwen2.5-1.5B; the model comes from /boot/models.
+# About 2.4 MB. `make jetson-real-golden` builds a Jetson image with it.
+option(SLM_REAL_GOLDEN "Embed the real-model golden fixture for `slm golden`" OFF)
+if(SLM_REAL_GOLDEN)
+    target_sources(slmos.elf PRIVATE kernel/src/slm_real_golden_embed.S)
+    set(SLM_REAL_GOLDEN_REC ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm/qwen25_real_golden.rec)
+    set_source_files_properties(
+        kernel/src/slm_real_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_REAL_GOLDEN_PATH=${SLM_REAL_GOLDEN_REC}"
+        OBJECT_DEPENDS      "${SLM_REAL_GOLDEN_REC}"
     )
 endif()
 
@@ -1928,6 +1943,9 @@ target_link_libraries(slmos.elf PRIVATE lua)
 add_library(slm_shell STATIC kernel/src/slm_shell.c)
 if(SLM_GPU_GOLDEN)
     target_compile_definitions(slm_shell PRIVATE SLM_GPU_GOLDEN)
+endif()
+if(SLM_REAL_GOLDEN)
+    target_compile_definitions(slm_shell PRIVATE SLM_REAL_GOLDEN)
 endif()
 target_include_directories(slm_shell PRIVATE ${KERNEL_INCLUDES} ${BUILD_INFO_DIR})
 add_dependencies(slm_shell generate_build_info)

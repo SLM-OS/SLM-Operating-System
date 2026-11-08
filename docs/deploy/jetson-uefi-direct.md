@@ -561,6 +561,61 @@ the session continues on the CPU, replaying its tokens: `[slm] GPU program
 failed (...)`. `slm gpu` keeps saying why. Other GPU consumers on the
 channel then time out and trip their breaker to the CPU; a reboot clears it.
 
+### Real-model golden (#1165)
+
+The goldens that `/ci` runs use a 773 KB tiny model; the real Qwen2.5-1.5B
+GGUF (1.1 GB) is too big for CI, so its golden is a hardware target. It runs
+the GPU program, the production path for `slm prompt --gpu on`, on the model
+`/boot/models` delivers, and compares it with reference data made on the host
+(`scripts/fixtures/slm/qwen25_real_golden.rec`, provenance in
+`PROVENANCE.md` there):
+
+- a fixed raw prompt and llama.cpp's greedy continuation of it (pinned
+  llama.cpp commit, CPU, plain argmax), with every step's top-1 margin at
+  least 1.0;
+- for each step that predicts one of those tokens, all 151936 logits of the
+  exact CPU reference: the GPU program's own reference with exact dot
+  products (ADR 0004), run on the host. They are stored as 16-bit values with
+  a per-row offset and scale, at most 0.001 from the reference.
+
+The board feeds the prompt and llama.cpp's tokens, teacher-forced. A step
+passes when every one of its logits is within 0.1 of the exact reference
+(`GOLDEN_EXACT_TOLERANCE`, the bound ADR 0004 sets for the real model) and its
+top token is llama.cpp's. The verdict is `PASS` only when every step passes.
+
+Build, deploy and run:
+
+```bash
+make jetson-real-golden                       # Jetson image with the fixture (about 2.4 MB)
+scripts/jetson-uefi-deploy.sh <board-ip>      # as above
+```
+
+```
+slmos> slm load /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+slmos> slm golden 0
+slmos> slm golden 0 batch
+slmos> slm golden 0 drop-bias
+```
+
+| Command | Expected |
+|---|---|
+| `slm golden <handle>` | One `[slm] real golden step N` line per step (largest error and where, top token against llama.cpp's), then `slm golden: PASS (per token), 8 steps, 8 with llama.cpp's top token ...` |
+| `slm golden <handle> batch` | The same with the prompt as one prefill batch, as `slm prompt` feeds it: `PASS (batch)` |
+| `slm golden <handle> drop-bias` | The deliberate mutation: the Q, K and V biases of layer 0 are zeroed in the loaded weights for this run and put back afterwards. Must print `FAIL` and `restored: yes`. Refused while a session's GPU program maps the model |
+
+Run it with no prompt running: the verb takes the shell's mutation lock, but
+`slm-runner` and the HTTP API are separate. A `slm golden` that cannot run
+(no GPU channel after kexec, a different model file, a session holding the
+weights) says why and prints `FAIL, the check did not run`.
+
+The same check runs on the host, on the real model and the software GPU, which
+executes the exact reference: `make slm-real-golden-host` (needs the GGUF,
+`SLM_GOLDEN_MODEL=`, default `~/models/qwen2.5-1.5b-instruct-q4_k_m.gguf`). It
+passes both ways and fails with the mutation, so it shows the fixture and the
+harness agree; only the board tests the GPU kernels. Regenerate the fixture only
+when the reference itself moves: `scripts/tools/slm-gen-goldens.py --only
+real-model --llama-cpp <dir> --model <gguf>`.
+
 ## Findings
 
 These are the causes found while making the path work, recorded so the

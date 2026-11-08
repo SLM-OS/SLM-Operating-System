@@ -18,6 +18,7 @@
 #include <stddef.h>
 
 extern const uint8_t slm_golden_ops_start[], slm_golden_ops_end[];
+extern const uint8_t slm_golden_qkv_bias_start[], slm_golden_qkv_bias_end[];
 extern const uint8_t slm_golden_tiny_start[], slm_golden_tiny_end[];
 extern const uint8_t slm_golden_greedy_start[], slm_golden_greedy_end[];
 
@@ -33,12 +34,18 @@ extern int32_t rust_slm_golden_open_greedy(uint32_t model, uint32_t max_ctx);
 #define GOLDEN_FIRST_STEP 1u
 #define GOLDEN_GREEDY     2u
 #define GOLDEN_ROPE       3u
+#define GOLDEN_QKV_BIAS   4u
 
 #define MAX_TOKENS 16u
 
 static size_t ops_len(void)
 {
     return (size_t)(slm_golden_ops_end - slm_golden_ops_start);
+}
+
+static size_t qkv_bias_len(void)
+{
+    return (size_t)(slm_golden_qkv_bias_end - slm_golden_qkv_bias_start);
 }
 
 static size_t greedy_len(void)
@@ -130,6 +137,14 @@ static void test_golden_rope(void)
                                                    slm_golden_ops_start, ops_len()));
 }
 
+/* Q, K and V with their biases against ggml (#1165): the NEON Q4_K path on
+ * ARM64, scalar on x86-64. */
+static void test_golden_qkv_bias(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_golden_check(GOLDEN_QKV_BIAS, 0u,
+                                                   slm_golden_qkv_bias_start, qkv_bias_len()));
+}
+
 /* Position 0: RoPE is the identity and attention has one entry, so everything
  * but Q, K and the softmax, which test_golden_greedy_logits covers. */
 static void test_golden_first_step_logits(void)
@@ -166,6 +181,7 @@ int test_suite_slm_golden(void)
 
     RUN_TEST(test_golden_ops);
     RUN_TEST(test_golden_rope);
+    RUN_TEST(test_golden_qkv_bias);
     RUN_TEST(test_golden_first_step_logits);
     RUN_TEST(test_golden_ffi_first_token);
     RUN_TEST(test_golden_greedy_logits);

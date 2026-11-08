@@ -6,6 +6,8 @@
 //
 //   slm-golden-driver ops <in.rec> <out.rec>
 //       Runs ggml's own operators over the inputs in <in.rec>.
+//   slm-golden-driver qkv-bias <in.rec> <out.rec>
+//       Q/K/V projections with their bias adds, as llama.cpp's Qwen2 graph.
 //   slm-golden-driver greedy <model.gguf> <id,id,...> <n_predict> <out.rec>
 //       Runs llama.cpp on the CPU, one token per decode, and picks each
 //       next token by plain argmax over the raw logits.
@@ -220,6 +222,53 @@ static int cmd_ops(const char *in_path, const char *out_path) {
     return 0;
 }
 
+// Q, K and V with their biases, as llama.cpp's Qwen2 graph builds them
+// (llm_graph_context::build_qkv, separate Q/K/V path):
+//   Qcur = ggml_add(ggml_mul_mat(wq, cur), bq), and the same for K and V.
+// One projection per entry of qkv_bias.names, each with its own weights, type
+// and bias, all over the same activation qkv_bias.x.
+static int cmd_qkv_bias(const char *in_path, const char *out_path) {
+    Records in = read_records(in_path);
+    Records out;
+    auto x = floats(in, "qkv_bias.x");
+    const int64_t cols = (int64_t)x.size();
+    auto names_it = in.find("qkv_bias.names");
+    if (names_it == in.end()) { fprintf(stderr, "missing record qkv_bias.names\n"); return 1; }
+    std::string names(names_it->second.begin(), names_it->second.end());
+    std::stringstream ss(names);
+    std::string p;
+    while (std::getline(ss, p, ',')) {
+        const std::string pre = "qkv_bias." + p + ".";
+        auto src = floats(in, (pre + "src").c_str());
+        auto bias = floats(in, (pre + "b").c_str());
+        auto type_f = floats(in, (pre + "type").c_str());  // ggml_type as a float
+        const ggml_type type = (ggml_type)(int)type_f[0];
+        const int64_t rows = (int64_t)bias.size();
+        if ((int64_t)src.size() != rows * cols) { fprintf(stderr, "%s shape\n", p.c_str()); return 1; }
+        auto q = quantize(type, src, cols, rows);
+        std::vector<float> d(cols * rows);
+        if (type == GGML_TYPE_Q4_K) {
+            dequantize_row_q4_K(q.data(), d.data(), cols * rows);
+        } else if (type == GGML_TYPE_Q6_K) {
+            dequantize_row_q6_K(q.data(), d.data(), cols * rows);
+        } else {
+            fprintf(stderr, "%s: unsupported type %d\n", p.c_str(), (int)type);
+            return 1;
+        }
+        Graph g;
+        ggml_tensor *w = ggml_new_tensor_2d(g.ctx, type, cols, rows);
+        memcpy(w->data, q.data(), q.size());
+        ggml_tensor *mm = ggml_mul_mat(g.ctx, w, tensor1(g, x));
+        ggml_tensor *r = ggml_add(g.ctx, mm, tensor1(g, bias));
+        g.run(r);
+        out[pre + "w"] = q;
+        out[pre + "dequant"] = bytes_of(d);
+        out[pre + "out"] = bytes_of(out_floats(r));
+    }
+    write_records(out_path, out);
+    return 0;
+}
+
 static int cmd_greedy(const char *model_path, const char *ids_csv, int n_predict,
                       const char *out_path) {
     llama_backend_init();
@@ -288,7 +337,9 @@ static int cmd_greedy(const char *model_path, const char *ids_csv, int n_predict
 
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "ops")) return cmd_ops(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "qkv-bias")) return cmd_qkv_bias(argv[2], argv[3]);
     if (argc == 6 && !strcmp(argv[1], "greedy")) return cmd_greedy(argv[2], argv[3], atoi(argv[4]), argv[5]);
-    fprintf(stderr, "usage: %s ops <in> <out> | greedy <model> <ids> <n> <out>\n", argv[0]);
+    fprintf(stderr, "usage: %s ops <in> <out> | qkv-bias <in> <out> | greedy <model> <ids> <n> <out>\n",
+            argv[0]);
     return 2;
 }

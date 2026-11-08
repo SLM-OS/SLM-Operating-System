@@ -19,9 +19,18 @@ Outputs:
     qwen_vocab.gguf        Tokenizer metadata of the real model, no tensors.
     tokenizer_goldens.tsv  llama-tokenize ids over that vocabulary.
     golden_ops.rec         ggml / numpy reference vectors for single ops.
+    golden_qkv_bias.rec    ggml's Q/K/V projections with their bias adds.
     tiny_qwen2.gguf        A small Qwen2 model quantized by llama-quantize.
     tiny_qwen2_greedy.rec  llama.cpp's greedy tokens and logits on that model.
+    qwen25_real_golden.rec llama.cpp's greedy tokens on the real model and the
+                           exact CPU reference's logits for the same steps, for
+                           `slm golden` on hardware (also needs cargo).
     PROVENANCE.md          Reference commit, inputs and how to read the files.
+
+`--only qkv-bias` or `--only real-model` adds that one fixture, at the
+llama.cpp commit PROVENANCE.md pins, without touching the others. A llama.cpp
+tree without its .git directory (a GitHub source archive) needs
+`--llama-commit`.
 """
 
 import argparse
@@ -299,6 +308,121 @@ def gen_ops(driver, tmp):
     write_records(OUT / "golden_ops.rec", merged)
 
 
+# --- Q/K/V projections with their biases (#1165) ---------------------------------
+
+# Shaped like one Qwen2 attention block, scaled down: 8 query heads and 2 KV
+# heads of 64, so Q has 4 times the rows of K and V. V comes in both types
+# Qwen2.5-1.5B Q4_K_M uses for it (14 layers each).
+QKV_HIDDEN = 512
+QKV_PROJECTIONS = [
+    # name, ggml type, rows, bias sigma. The sigmas follow the real model's
+    # biases (layer 0: Q std 2.6, K std 69 with entries near +/-300, V 0.23).
+    ("q", 12, 512, 2.5),    # Q4_K
+    ("k", 12, 128, 60.0),   # Q4_K
+    ("v4", 12, 128, 0.25),  # Q4_K
+    ("v6", 14, 128, 0.25),  # Q6_K
+]
+
+
+def gen_qkv_bias(driver, tmp):
+    """`golden_qkv_bias.rec`: ggml's `mul_mat` plus `add`, per projection.
+
+    A file of its own, so adding it changed no existing golden. Q6_K also gets
+    an exact dot over ggml's dequantized weights and each block's sum of
+    |w|, because SLM-OS takes an F32 dot there and ggml goes through Q8_K
+    (see `check_lm_head` in runtime/src/slm/golden.rs)."""
+    rng = np.random.default_rng(1165)
+    x = half_exact(rng.normal(0, 1.0, QKV_HIDDEN))
+    inp = {"qkv_bias.x": f32(x),
+           "qkv_bias.names": ",".join(p[0] for p in QKV_PROJECTIONS).encode()}
+    biases = {}
+    for name, gtype, rows, sigma in QKV_PROJECTIONS:
+        pre = f"qkv_bias.{name}."
+        inp[pre + "type"] = f32([gtype])
+        inp[pre + "src"] = f32(rng.normal(0, 0.05, rows * QKV_HIDDEN))
+        b = rng.normal(0, sigma, rows).astype(np.float32)
+        biases[name] = b
+        inp[pre + "b"] = f32(b)
+    in_path = Path(tmp) / "qkv_in.rec"
+    out_path = Path(tmp) / "qkv_out.rec"
+    write_records(in_path, inp)
+    run(driver, "qkv-bias", in_path, out_path)
+    out = read_records(out_path)
+
+    keep = {k: v for k, v in inp.items() if not k.endswith(".src")}
+    for name, gtype, rows, _ in QKV_PROJECTIONS:
+        pre = f"qkv_bias.{name}."
+        keep[pre + "w"] = out[pre + "w"]
+        keep[pre + "out"] = out[pre + "out"]
+        if gtype == 14:
+            w = np.frombuffer(out[pre + "dequant"], dtype="<f4").astype(np.float64)
+            w = w.reshape(rows, QKV_HIDDEN)
+            keep[pre + "out_exact"] = f32(w @ x.astype(np.float64) + biases[name])
+            keep[pre + "wabs"] = f32(np.abs(w).reshape(rows, QKV_HIDDEN // 256, 256).sum(axis=2))
+    write_records(OUT / "golden_qkv_bias.rec", keep)
+
+
+# --- the real model, for the hardware target (#1165) -------------------------------
+
+REAL_MODEL_SHA256 = "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+# Raw prompts, tried in order; the first whose continuation qualifies is kept.
+REAL_PROMPTS = [
+    "The capital of France is Paris. The capital of Germany is",
+    "Monday, Tuesday, Wednesday, Thursday,",
+    "One, two, three, four, five,",
+]
+REAL_GENERATE = 8
+# Every compared step needs a clear winner: the board must match llama.cpp's
+# top token, and llama.cpp's activation quantization moves logits by up to
+# about 1 (ADR 0004), so a near tie would test the reference, not SLM-OS.
+REAL_MIN_MARGIN = 1.0
+# <|endoftext|> and <|im_end|>: a continuation that stops early is no use.
+REAL_STOP_IDS = {151643, 151645}
+# The layer whose Q, K and V biases `slm golden ... drop-bias` zeroes.
+REAL_MUTATE_LAYER = 0
+
+
+def gen_real(llama, driver, model, tmp):
+    """`qwen25_real_golden.rec`: llama.cpp's greedy run on the real model, then
+    the exact CPU reference over the same tokens. The reference comes from the
+    runtime's host test `golden_real_model_write_fixture` (the GPU program on
+    the software GPU, which runs the exact reference), so cargo runs here."""
+    if sha256(model) != REAL_MODEL_SHA256:
+        raise SystemExit(f"{model} is not the model the fixture is for")
+    for text in REAL_PROMPTS:
+        ids = llama_tokenize(llama, model, text, False, tmp)
+        greedy = Path(tmp) / "real_greedy.rec"
+        run(driver, "greedy", model, ",".join(map(str, ids)), REAL_GENERATE, greedy)
+        rec = read_records(greedy)
+        toks = np.frombuffer(rec["greedy.tokens"], dtype="<i4")
+        margins = np.frombuffer(rec["greedy.margins"], dtype="<f4")
+        print(f"prompt {text!r}: ids {ids} tokens {toks.tolist()} "
+              f"min margin {margins.min():.3f}")
+        if margins.min() < REAL_MIN_MARGIN or REAL_STOP_IDS & set(toks.tolist()):
+            continue
+        llama_rec = Path(tmp) / "real_llama.rec"
+        write_records(llama_rec, {
+            "prompt.text": text.encode(),
+            "prompt.ids": np.asarray(ids, dtype="<u4").tobytes(),
+            "greedy.tokens": rec["greedy.tokens"],
+            "greedy.margins": rec["greedy.margins"],
+        })
+        out = OUT / "qwen25_real_golden.rec"
+        env = dict(os.environ, SLM_GOLDEN_MODEL=str(model), SLM_REAL_LLAMA_REC=str(llama_rec),
+                   SLM_REAL_LAYER=str(REAL_MUTATE_LAYER), SLM_REAL_OUT=str(out))
+        r = subprocess.run(
+            ["cargo", "test", "--release", "--target", "x86_64-unknown-linux-gnu",
+             "--features", "slm", "golden_real_model_write_fixture", "--",
+             "--ignored", "--nocapture", "--test-threads=1"],
+            cwd=REPO / "runtime", env=env)
+        if r.returncode != 0:
+            # The exact reference disagreed with llama.cpp somewhere.
+            print(f"prompt {text!r}: exact reference rejected it")
+            continue
+        return text, ids, toks.tolist(), float(margins.min())
+    raise SystemExit("no prompt met the criteria")
+
+
 # --- tiny model ----------------------------------------------------------------
 
 def gpt2_byte_chars():
@@ -431,38 +555,127 @@ def sha256(path):
     return h.hexdigest()
 
 
+def llama_commit(llama, given):
+    """The llama.cpp commit: `git rev-parse` in a clone, else `--llama-commit`
+    (a GitHub source archive has no .git; its pax header names the commit)."""
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=llama,
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        sha = r.stdout.strip()
+        if given and given != sha:
+            raise SystemExit(f"--llama-commit {given} but the checkout is at {sha}")
+        return sha
+    if not given:
+        raise SystemExit(f"{llama} is not a git checkout: pass --llama-commit")
+    return given
+
+
+def pinned_commit():
+    for line in (OUT / "PROVENANCE.md").read_text().splitlines():
+        if line.startswith("- llama.cpp commit:"):
+            return line.split("`")[1]
+    raise SystemExit("no llama.cpp commit in PROVENANCE.md")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--llama-cpp", required=True, type=Path)
-    ap.add_argument("--model", required=True, type=Path)
+    ap.add_argument("--model", type=Path)
+    ap.add_argument("--llama-commit", help="commit of a --llama-cpp tree that is not a git clone")
+    ap.add_argument("--only", choices=["qkv-bias", "real-model"],
+                    help="add one fixture at the commit PROVENANCE.md pins, leaving the others alone")
     args = ap.parse_args()
     llama = args.llama_cpp.resolve()
     sys.path.insert(0, str(llama / "gguf-py"))
     import gguf
 
     OUT.mkdir(parents=True, exist_ok=True)
-    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=llama, check=True,
-                         capture_output=True, text=True).stdout.strip()
+    sha = llama_commit(llama, args.llama_commit)
+    if args.only:
+        # A new vector must come from the same reference as the rest.
+        if sha != pinned_commit():
+            raise SystemExit(f"llama.cpp {sha}, but PROVENANCE.md pins {pinned_commit()}")
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = build_driver(llama, Path(tmp))
+            if args.only == "qkv-bias":
+                gen_qkv_bias(driver, tmp)
+                name = "golden_qkv_bias.rec"
+            else:
+                if args.model is None:
+                    raise SystemExit("--only real-model needs --model")
+                text, ids, toks, margin = gen_real(llama, driver, args.model.resolve(), tmp)
+                print(f"real model: prompt {text!r} ids {ids} tokens {toks} min margin {margin:.3f}")
+                name = "qwen25_real_golden.rec"
+        model_sha, model_name, seed, toks, margin = provenance_facts()
+        write_provenance(sha, model_sha, model_name, seed, toks, margin)
+        print(f"llama.cpp {sha}; wrote {name} ({(OUT / name).stat().st_size} bytes)")
+        return
+    if args.model is None:
+        raise SystemExit("--model is required for a full regeneration")
     with tempfile.TemporaryDirectory() as tmp:
         driver = build_driver(llama, Path(tmp))
         vocab_path = OUT / "qwen_vocab.gguf"
         extract_vocab(gguf, args.model, vocab_path)
         gen_tokenizer(llama, vocab_path, args.model, tmp)
         gen_ops(driver, tmp)
+        gen_qkv_bias(driver, tmp)
         seed, toks, margin, prompt, first = gen_tiny(gguf, llama, driver, tmp)
+        gen_real(llama, driver, args.model.resolve(), tmp)
     print(f"llama.cpp {sha}; tiny seed {seed}; prompt {prompt}; first {first}; "
           f"tokens {toks}; min margin {margin:.3f}")
     write_provenance(sha, sha256(args.model), args.model.name, seed, toks, margin)
+
+
+def provenance_facts():
+    """What `write_provenance` needs, read back from the current PROVENANCE.md,
+    for an `--only` run that leaves the other fixtures alone."""
+    import re
+    text = (OUT / "PROVENANCE.md").read_text()
+    model = re.search(r"Vocabulary source: `(.+?)`, sha256 `([0-9a-f]{64})`", text)
+    seed = re.search(r"default_rng\((\d+)\)` weights", text)
+    margin = re.search(r"\(([\d.]+) here\)", text)
+    toks = re.search(r"Greedy tokens: `(\[[\d, ]*\])`", text)
+    if not (model and seed and margin and toks):
+        raise SystemExit("PROVENANCE.md is not in the generator's format")
+    return (model.group(2), model.group(1), int(seed.group(1)),
+            [int(t) for t in toks.group(1).strip("[]").split(",")], float(margin.group(1)))
+
+
+def real_provenance():
+    path = OUT / "qwen25_real_golden.rec"
+    if not path.exists():
+        return ""
+    r = read_records(path)
+    text = r["real.prompt.text"].decode()
+    ids = np.frombuffer(r["real.prompt.ids"], dtype="<u4").tolist()
+    toks = np.frombuffer(r["real.tokens"], dtype="<u4").tolist()
+    margins = np.frombuffer(r["real.margins"], dtype="<f4")
+    layer = int(np.frombuffer(r["real.mutate.layer"], dtype="<u4")[0])
+    return f"""- Real model (`qwen25_real_golden.rec`, #1165), the vocabulary source's
+  full GGUF: llama.cpp's greedy run (plain argmax, CPU) on the raw prompt
+  `{text}` (ids `{ids}`), tokens `{toks}`, top-1 margin
+  at least {REAL_MIN_MARGIN} at every step ({margins.min():.3f} here); and for each of
+  those {len(toks)} steps the full row of logits from the exact CPU reference,
+  the GPU program's own reference with exact dot products, run on the host
+  by `golden_real_model_write_fixture`. Rows are i16 with a per-row offset
+  and scale (stored error at most 0.001). `slm golden` compares the GPU
+  program with them on a board (`docs/deploy/jetson-uefi-direct.md`); its
+  `drop-bias` mutation zeroes layer {layer}'s Q, K and V biases.
+"""
 
 
 def write_provenance(sha, model_sha, model_name, seed, toks, margin):
     sizes = "\n".join(
         f"| `{p.name}` | {p.stat().st_size} |"
         for p in sorted(OUT.iterdir()) if p.name != "PROVENANCE.md")
+    real = real_provenance()
     (OUT / "PROVENANCE.md").write_text(f"""# SLM golden fixtures
 
 Generated by `scripts/tools/slm-gen-goldens.py`; do not edit by hand. The
-reference is upstream llama.cpp and ggml, CPU build, never SLM-OS code.
+reference is upstream llama.cpp and ggml, CPU build, never SLM-OS code. The
+one exception is the real model's exact CPU reference (below): ADR 0004 sets
+SLM-OS's own exact computation as the tight reference, next to llama.cpp's
+top token.
 
 - llama.cpp commit: `{sha}`
 - Vocabulary source: `{model_name}`, sha256 `{model_sha}`. Qwen2.5 is
@@ -471,7 +684,12 @@ reference is upstream llama.cpp and ggml, CPU build, never SLM-OS code.
   `llama-quantize` to Q4_K_M, not a trained model. The seed is the first with
   at least 5 distinct greedy tokens, no token 2 and a top-1 margin of at least
   {TINY_MIN_MARGIN} at every step ({margin:.3f} here). Greedy tokens: `{toks}`.
-
+- Q/K/V bias vector (`golden_qkv_bias.rec`, #1165): numpy `default_rng(1165)`
+  inputs shaped like one Qwen2 attention block (hidden {QKV_HIDDEN}; Q 512 rows,
+  K and V 128), ggml's `ggml_add(ggml_mul_mat(W, x), b)` per projection, as
+  llama.cpp's Qwen2 graph: `q`, `k` and `v4` in Q4_K, `v6` in Q6_K, with an
+  exact dot and per-block sums of |w| for Q6_K.
+{real}
 Token 2 is excluded from the greedy run, a leftover from when `rust_slm_prompt`
 hardcoded it as EOS. `golden_stop_ids_are_the_real_models_not_token_2` and
 `golden_ffi_runs_past_token_2_and_stops_at_gguf_eos` cover that bug (#1158).

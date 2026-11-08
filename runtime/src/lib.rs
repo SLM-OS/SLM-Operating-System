@@ -263,6 +263,11 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn slm_gpu_get_info(_info: *mut crate::kernel_ffi::GpuInfoFfi) -> i32 { -1 }
 
+    /// The host's software GPU reads host memory directly: nothing to clean
+    /// (the real-model golden's bias mutation, #1165).
+    #[no_mangle]
+    pub extern "C" fn slm_gpu_sync_for_device(_addr: *mut u8, _size: usize) {}
+
     #[no_mangle]
     pub extern "C" fn slm_gpu_run_mnist(_logits_bytes_out: *mut u8) -> i32 { -1 }
 
