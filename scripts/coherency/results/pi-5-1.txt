@@ -1,0 +1,77 @@
+# #1193 C1 Linux reference run, pi-5-1
+# RESULT: NO DATA. The Linux reference run produced no serial output, and a
+# known-good SLM-OS boot of the restored card produced none either. No litmus
+# row was observed on this board; nothing below is a measurement.
+
+=== HEADER (host side; the board-side header never printed) ===
+Kernel under test (not observed running):
+  Raspberry Pi OS trixie (stable, Release dated 2026-11-07) package
+  linux-image-6.18.60+rpt-rpi-2712_6.18.60-1+rpt1_arm64.deb
+    sha256 663099a4badd7e583ae28bbb0ef60fc3b6d1faafabbb8c6252a989730b9224e9
+    (matches the Packages index, whose sha256 matches the Release file)
+  /boot/vmlinuz-6.18.60+rpt-rpi-2712 (gzip) decompressed to an arm64 Image
+    sha256 99e8a8ac8338c8079344a0d2d1d38d069604ceb1ebe03f4f3e2e028d9cec8a26
+  DTB from linux-base-6.18.60+rpt-rpi-2712, dtb/broadcom/bcm2712-rpi-5-b.dtb
+    sha256 03ce4742452ad52e3e8ec2259a0c705b496970e2b75e6e0b4e5446475ea1b926
+  Config: CONFIG_MFD_RP1=y, CONFIG_PCIE_BRCMSTB=y, CONFIG_SERIAL_AMBA_PL011=y,
+    CONFIG_SERIAL_AMBA_PL011_CONSOLE=y, CONFIG_NR_CPUS=4 (RP1 UART is built in).
+Initramfs: scripts/coherency/pi5/mkcpio.py with busybox-static
+  1:1.37.0-6+b9 (Debian trixie, sha256 c833be48...cd15c), /init =
+  scripts/coherency/pi5/init.sh, litmus sha256
+  1b1bb0bbeda7b736c3a9a8129f3a6a55d2f6d1ee644a61ea012dd681bbf05b11 (same
+  binary as the Jetson run), and for boot 2 also ectlr.ko (sha256
+  ce8f40a6cff7c2b94b06979a853be7262ae4bcc34d2d66a87374b4be7fd9ef30).
+Firmware: NOT RECORDED. /proc/device-tree/chosen/bootloader/* is printed by
+  /init, which was never observed. The EEPROM banner goes to the debug UART,
+  not to the lab console on GPIO 14/15. No armstub line was used, so the
+  firmware's embedded BL31 would have run.
+CPU part/revision per core: NOT RECORDED (same reason).
+
+=== ATTEMPT LOG (UTC) ===
+22:34  Card checked: one FAT32 partition, label SLMOS, config.txt starts
+       "# SLM-OS bare-metal config". sdwire_update copied coh1193_kernel.img,
+       coh1193_initrd.gz, coh1193_cmdline.txt, coh1193_rpi5.dtb,
+       coh1193_config.txt and renamed config.txt -> config.slmos-1193.txt,
+       coh1193_config.txt -> config.txt. config.txt read back as the coh1193
+       file.
+22:36  Boot 1. config: arm_64bit=1, kernel=coh1193_kernel.img, initramfs
+       coh1193_initrd.gz followkernel, device_tree=coh1193_rpi5.dtb,
+       cmdline=coh1193_cmdline.txt, enable_uart=1, uart_2ndstage=1,
+       dtparam=uart0_console (the packaged DTB has RP1 uart0 status
+       "disabled"; uart0_console is in its __overrides__). cmdline:
+       console=ttyAMA0,115200 rdinit=/init.
+       serial_capture (until COH1193_END_MARKER, 1260 s) issued in the same
+       tool batch as power_on: "Captured 0 lines in 1260.0s, timeout".
+22:57  health: power on, serial true, ping false. 5 s capture: 0 lines.
+23:03  Boot 2, with the orchestrator's changes: pciex4_reset=0 added (as in
+       the SLM-OS config), cmdline earlycon=pl011,mmio32,0x1f00030000
+       console=ttyAMA0,115200 rdinit=/init, init pauses 20 s on
+       COH1193_WAIT and loads ectlr.ko after the run.
+       serial_capture (until COH1193_WAIT|Kernel panic, 300 s) with power_on
+       in the same batch: "Captured 0 lines in 300.0s, timeout".
+       Second recurrence: Linux attempts stopped per the orchestrator.
+~23:09 Card restored (see below).
+~23:10 Control boot of the restored SLM-OS card. serial_capture 90 s (until
+       slmos>) with power_on in the same batch: 0 lines. serial_send
+       "uptime" (10 s, until slmos>): 0 lines. health: power on, serial true.
+~23:13 Sequential control: power_off, then power_on, then serial_capture
+       60 s (until slmos>): "Captured 0 lines in 60.0s, timeout".
+       pi-5-1 powered OFF and left off.
+
+Conclusion: the silence is not specific to the Linux kernel or its config.
+The known-good SLM-OS image on the restored card is equally silent on this
+console, with the capture started right after power_on returned. Either
+pi-5-1 is not booting from the card, or the console path (RP1 UART0 on
+GPIO 14/15 -> lab adapter -> ser2net) is not carrying data. Neither can be
+told apart through labctl from here. The litmus spec was not run on Pi 5.
+
+=== CARD RESTORE ===
+sdwire_update renames config.txt -> coh1193_config.txt,
+config.slmos-1193.txt -> config.txt; deletes coh1193_kernel.img,
+coh1193_initrd.gz, coh1193_cmdline.txt, coh1193_rpi5.dtb, coh1193_config.txt.
+Result: "Partition 1: Renamed: config.txt -> coh1193_config.txt,
+config.slmos-1193.txt -> config.txt; Deleted: coh1193_kernel.img,
+coh1193_initrd.gz, coh1193_cmdline.txt, coh1193_rpi5.dtb, coh1193_config.txt"
+sdwire_cat config.txt: begins "# SLM-OS bare-metal config for Raspberry Pi 5
+(BCM2712).", size 1297, mtime 2026-05-10T23:01:22Z (the original file).
+sdwire_ls /: the same entries, sizes and mtimes as before the run; no coh1193_* file left.
