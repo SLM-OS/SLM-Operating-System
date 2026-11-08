@@ -6133,12 +6133,16 @@ static int nvgpu_cold_check(void)
 
 /* `nvgpu cold race <n>` (#475): a task runs both consumer pipelines n times
  * while a GPU program may be in flight, checks each result, and reports once.
- * For testing that a consumer and a program interleave on the channel. */
-static uint32_t g_race_n;
+ * For testing that a consumer and a program interleave on the channel.
+ *
+ * One at a time: the buffers below are shared, so two runs at once would
+ * report each other's results as wrong. Set from the command until the task
+ * reports; a task killed from outside leaves it set until reboot. */
+static uint32_t g_race_running;
 
 static void nvgpu_cold_race_task(void *arg)
 {
-    (void)arg;
+    const uint32_t n = (uint32_t)(uintptr_t)arg;
     static uint32_t sched_out[GA10B_CP_SCHED_ACTIONS];
     static uint32_t ev_in[GA10B_CP_EVICT_BATCH * GA10B_CP_EVICT_FEATURES];
     static uint32_t ev_out[GA10B_CP_EVICT_BATCH];
@@ -6146,7 +6150,7 @@ static void nvgpu_cold_race_task(void *arg)
     memset(ev_in, 0, sizeof(ev_in));
     memcpy(ev_in, ga10b_cp_evict_input_synth, sizeof(ga10b_cp_evict_input_synth));
     uint64_t worst = 0;
-    for (uint32_t i = 0; i < g_race_n; i++) {
+    for (uint32_t i = 0; i < n; i++) {
         uint64_t t0 = slm_get_time_ns();
         int rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP, ga10b_cp_sched_input_synth,
                                         sizeof(ga10b_cp_sched_input_synth), sched_out,
@@ -6175,6 +6179,7 @@ static void nvgpu_cold_race_task(void *arg)
     }
     uart_printf("[race] consumers: %u ok, %u wrong, %u errors, slowest pair %llu us\n",
                 (unsigned)ok, (unsigned)bad, (unsigned)err, (unsigned long long)(worst / 1000u));
+    __atomic_store_n(&g_race_running, 0u, __ATOMIC_RELEASE);
 }
 
 int cmd_nvgpu(int argc, char *argv[])
@@ -6227,9 +6232,18 @@ int cmd_nvgpu(int argc, char *argv[])
             return -1;
         }
         if (argc >= 4 && strcmp(argv[2], "race") == 0) {
-            if (shell_parse_uint(argv[3], &g_race_n) != 0 || g_race_n == 0u) return -1;
-            struct task *t = task_create("gpu_race", (task_entry_t)nvgpu_cold_race_task, NULL);
-            if (!t) return -1;
+            uint32_t n = 0;
+            if (shell_parse_uint(argv[3], &n) != 0 || n == 0u) return -1;
+            if (__atomic_exchange_n(&g_race_running, 1u, __ATOMIC_ACQUIRE) != 0u) {
+                shell_puts("nvgpu cold race: one is already running\r\n");
+                return -1;
+            }
+            struct task *t = task_create("gpu_race", (task_entry_t)nvgpu_cold_race_task,
+                                         (void *)(uintptr_t)n);
+            if (!t) {
+                __atomic_store_n(&g_race_running, 0u, __ATOMIC_RELEASE);
+                return -1;
+            }
             /* On CPU 0: it ends with a UART line, and on Jetson only CPU 0
              * prints (kernel/CLAUDE.md, "UART Lock on Pi 5 / Jetson"). */
             t->cpu_affinity = 0;

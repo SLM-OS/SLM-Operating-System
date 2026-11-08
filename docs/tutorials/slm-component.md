@@ -50,7 +50,7 @@ and its KV cache don't carry over.
 | Topic | Direction | Payload | Notes |
 |-------|-----------|---------|-------|
 | `/slm/prompt` | runner subscribes | UTF-8 prompt, up to 511 bytes | One message per prompt. A longer publish is refused, never cut |
-| `/slm/stop` | runner subscribes | ignored | Ends the running prompt before its next forward step. Does nothing when idle |
+| `/slm/stop` | runner subscribes | ignored | Ends the running prompt before its next forward step. Does nothing when idle, and one that arrives after a prompt's last step is dropped when the next prompt is taken, so it can't stop that one |
 | `/slm/token` | runner publishes | UTF-8 text | One message per generated token that has printable bytes |
 | `/slm/done` | runner publishes | see below | Exactly one per prompt, on every path |
 
@@ -150,7 +150,8 @@ Other defaults: `--ctx 4096`, sampler `topkp` with temperature 0.7, top-k 40,
 top-p 0.9, seed 1, `--gpu auto`.
 
 `component run slm-runner` also starts it, with the options of the last `slm
-runner start`, or the defaults if there hasn't been one.
+runner start`, or the defaults if there hasn't been one. It is the same start
+as `slm runner start`, and waits the same way until the runner serves the bus.
 
 **Which model.** Without `--handle`, each prompt uses the model loaded most
 recently that's still loaded: not slot 0, and not the highest slot. If that
@@ -196,9 +197,10 @@ Without a client, `msg send /slm/prompt "Say hello"` starts a prompt too, and
 `[slm-runner] prompt #1 rc=0 tokens=12` shows up on the UART when it ends, as
 one whole line.
 
-**One start or stop at a time.** `slm runner start` and `slm runner stop` from
-two shells at once don't overlap: the second says `another start or stop is in
-progress` and changes nothing.
+**One start or stop at a time.** `slm runner start`, `slm runner stop` and
+`component run slm-runner` from two shells at once don't overlap: the second
+says `another start or stop is in progress` (`component run`: `is starting or
+stopping elsewhere`) and changes nothing.
 
 **Its own session.** The runner checks before each prompt that its session is
 still the one it opened. If a shell closed it (`slm close`) and a later `slm

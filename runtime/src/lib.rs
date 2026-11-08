@@ -6695,18 +6695,27 @@ pub extern "C" fn rust_slm_telemetry_token_cost_ns() -> u64 {
 }
 
 /// `slm gpu profile <session>`: per-step times and per-kernel GPU time.
-/// Returns 0, or -1 if the session isn't on a program or a prompt holds it.
+/// Returns 0, -1 if the session isn't on a program, or SLM_ERR_BUSY while a
+/// prompt holds it.
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_session_gpu_profile(session_id: u32) -> i32 {
-    let r = slm::session::try_with_session(session_id as usize, |s| match s.gpu.as_ref() {
+    // Leased, not under the table lock: printing allocates and writes to the
+    // console, and the runner's lease drop and `slm list` must not spin on
+    // the table meanwhile (#1164 review W1). The lease also makes this the
+    // session's owner, which slm_prog_profile requires.
+    let lease = match slm::session::checkout(session_id as usize) {
+        Ok(l) => l,
+        Err(slm::session::SlotError::Busy) => return SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => return -1,
+    };
+    match lease.gpu.as_ref() {
         Some(p) => {
             p.print_profile();
             0
         }
         None => -1,
-    });
-    r.unwrap_or(-1)
+    }
 }
 
 /// `slm gpu inject`: failure for the next launch's decode program. 0 none,

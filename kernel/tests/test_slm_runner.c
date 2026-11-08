@@ -56,12 +56,15 @@ extern int  msg_router_subscribe(const char *topic_name, int component_idx);
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
 extern void msg_router_unsubscribe_all(int component_idx);
+extern void msg_router_get_subscriptions(int component_idx, char topic_names[][16],
+                                         int *count_out, int max_topics);
 extern int msg_router_publish_nowait(const uint8_t *topic_name, const uint8_t *data);
 
 extern void slm_runner_test_set_publish_timeout(uint32_t ms);
 extern void (*slm_runner_test_log_hook)(const char *line, bool handed_to_ask);
 extern void (*slm_runner_test_start_hook)(void);
 extern uint32_t slm_runner_test_publish_bytes(const uint8_t *bytes, size_t len);
+extern void component_test_run_cleanup(int idx, uint32_t task_id);
 
 /* ============================================================================
  * Fixture
@@ -745,6 +748,8 @@ static void test_runner_does_not_adopt_a_reused_session_id(void)
 static volatile int nested_start_rc;
 static volatile int nested_stop_rc;
 static volatile int nested_configure_rc;
+static volatile int nested_component_run_rc;
+static volatile int nested_spawn_rc;
 
 static void nested_start(void)
 {
@@ -753,6 +758,11 @@ static void nested_start(void)
     nested_start_rc = slm_runner_start();
     nested_stop_rc = slm_runner_stop();
     nested_configure_rc = slm_runner_configure(&cfg);
+    /* #1164 review W3: `component run` took none of that claim, replaced the
+     * starting runner's entry and ran a second task on the same state. */
+    nested_component_run_rc = component_run("slm-runner");
+    /* Underneath, the entry's task is alive, so it isn't stale. */
+    nested_spawn_rc = component_spawn("slm-runner");
 }
 
 static void test_runner_start_is_serialized(void)
@@ -763,6 +773,8 @@ static void test_runner_start_is_serialized(void)
     nested_start_rc = 99;
     nested_stop_rc = 99;
     nested_configure_rc = 99;
+    nested_component_run_rc = 99;
+    nested_spawn_rc = 99;
     slm_runner_test_start_hook = nested_start;
     TEST_ASSERT_EQUAL_INT(0, shell_execute(
         "slm runner start --sampler greedy --ctx 256 --max 2"));
@@ -770,9 +782,52 @@ static void test_runner_start_is_serialized(void)
     TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_start_rc);
     TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_stop_rc);
     TEST_ASSERT_EQUAL_INT(SLM_RUNNER_ERR_BUSY, nested_configure_rc);
+    TEST_ASSERT_EQUAL_INT(-1, nested_component_run_rc);
+    TEST_ASSERT_EQUAL_INT(-1, nested_spawn_rc);
     TEST_ASSERT_EQUAL_UINT32(components_before + 1u, component_count());
 
     /* The first start's runner is the one serving, with its options. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
+    ASSERT_OUTPUT("tokens_out=2 msgs=2");
+    bus_end();
+}
+
+/* #1164 review W3, the stop side: a runner on its way out is not stale. Its
+ * task runs until it's destroyed, and a spawn is refused until then. */
+static void test_component_run_refused_while_runner_stops(void)
+{
+    bus_begin();
+    SCRIPT(1, 'k');
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256 --max 2"));
+    slm_runner_status_t st;
+    slm_runner_get_status(&st);
+    TEST_ASSERT_GREATER_OR_EQUAL(0, st.component_idx);
+    uint32_t idx = (uint32_t)st.component_idx;
+
+    /* The state a stop leaves before the task is gone. */
+    TEST_ASSERT_EQUAL_INT(0, component_set_state(idx, COMPONENT_TERMINATING));
+    TEST_ASSERT_EQUAL_INT(-1, component_spawn("slm-runner"));
+    component_info_t info;
+    TEST_ASSERT_EQUAL_INT(0, component_get_info(idx, &info));
+    TEST_ASSERT_EQUAL_INT(COMPONENT_TERMINATING, info.state);
+    TEST_ASSERT_EQUAL_INT(0, component_set_state(idx, COMPONENT_RUNNING));
+
+    /* A task from an earlier generation of this slot (a hot swap reused the
+     * index) exits: its cleanup unsubscribed and unloaded the runner. */
+    component_test_run_cleanup((int)idx, 0xFFFF0001u);
+    TEST_ASSERT_EQUAL_INT(0, component_get_info(idx, &info));
+    TEST_ASSERT_EQUAL_INT(COMPONENT_RUNNING, info.state);
+    char topics[8][16];
+    int ntopics = 0;
+    msg_router_get_subscriptions((int)idx, topics, &ntopics, 8);
+    TEST_ASSERT_EQUAL_INT(2, ntopics);
+
+    /* Once it is gone, the entry is stale and a new runner starts. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm runner stop"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("component run slm-runner"));
+    slm_runner_get_status(&st);
+    TEST_ASSERT_EQUAL_UINT32(1u, st.running);
     TEST_ASSERT_EQUAL_INT(0, shell_execute("slm ask hi"));
     ASSERT_OUTPUT("tokens_out=2 msgs=2");
     bus_end();
@@ -1055,6 +1110,56 @@ static void test_stop_leaves_a_queued_prompt_queued(void)
     TEST_ASSERT_EQUAL_UINT32(8u, client_drain_to_done(done, sizeof(done)));
     TEST_ASSERT_NOT_NULL(strstr(done, "stop=max"));
     TEST_ASSERT_NOT_NULL(strstr(done, "prompts=2"));
+    bus_end();
+}
+
+/* #1164 review W2: a stop that lands after a prompt's last poll (Ctrl-C as
+ * it ends) stayed queued and stopped the next prompt at its first step. A
+ * stop counts only for the prompt running when it was sent. */
+static void test_late_stop_does_not_cancel_the_next_prompt(void)
+{
+    bus_begin();
+    SCRIPT(1, 'x');
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256 --max 1"));
+    client_subscribe();
+    TEST_ASSERT_EQUAL_INT(1, client_publish_prompt("first"));
+
+    /* Its one token, then /slm/done: the runner polled after the token and
+     * now waits on this unacked /slm/done, so a stop is too late for it. */
+    char topic[MSG_ROUTER_TOPIC_LEN];
+    TEST_ASSERT_NOT_NULL(client_next(topic));
+    TEST_ASSERT_EQUAL_STRING(SLM_TOPIC_TOKEN, topic);
+    msg_router_ack(CLIENT_IDX);
+    const char *data = client_next(topic);
+    TEST_ASSERT_NOT_NULL(data);
+    TEST_ASSERT_EQUAL_STRING(SLM_TOPIC_DONE, topic);
+    TEST_ASSERT_NOT_NULL(strstr(data, "stop=max"));
+    TEST_ASSERT_NOT_NULL(strstr(data, "prompts=1"));
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)SLM_TOPIC_STOP, (const uint8_t *)"stop"));
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)SLM_TOPIC_PROMPT, (const uint8_t *)"second"));
+    msg_router_ack(CLIENT_IDX);
+
+    /* The second prompt runs in full. */
+    char done[256];
+    TEST_ASSERT_EQUAL_UINT32(1u, client_drain_to_done(done, sizeof(done)));
+    TEST_ASSERT_NOT_NULL(strstr(done, "stop=max"));
+    TEST_ASSERT_NOT_NULL(strstr(done, "prompts=2"));
+
+    /* A stop sent while a prompt runs still stops it. */
+    SCRIPT(1, 'z');
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("slm runner stop"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(
+        "slm runner start --sampler greedy --ctx 256 --max 0"));
+    TEST_ASSERT_EQUAL_INT(1, client_publish_prompt("third"));
+    TEST_ASSERT_NOT_NULL(client_next(topic));
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)SLM_TOPIC_STOP, (const uint8_t *)"stop"));
+    msg_router_ack(CLIENT_IDX);
+    client_drain_to_done(done, sizeof(done));
+    TEST_ASSERT_NOT_NULL(strstr(done, "stop=stopped"));
     bus_end();
 }
 
@@ -1423,6 +1528,7 @@ int test_suite_slm_runner(void)
     RUN_BUS_TEST(test_runner_line_prints_before_the_prompt);
     RUN_BUS_TEST(test_runner_does_not_adopt_a_reused_session_id);
     RUN_BUS_TEST(test_runner_start_is_serialized);
+    RUN_BUS_TEST(test_component_run_refused_while_runner_stops);
     RUN_BUS_TEST(test_slow_reader_gets_every_token_in_order);
     RUN_BUS_TEST(test_dead_subscriber_doesnt_wedge_a_live_client);
     RUN_BUS_TEST(test_long_prompt_arrives_whole);
@@ -1431,6 +1537,7 @@ int test_suite_slm_runner(void)
     RUN_BUS_TEST(test_long_token_is_split_on_character_boundaries);
     RUN_BUS_TEST(test_slm_stop_topic_stops_the_prompt);
     RUN_BUS_TEST(test_stop_leaves_a_queued_prompt_queued);
+    RUN_BUS_TEST(test_late_stop_does_not_cancel_the_next_prompt);
     RUN_BUS_TEST(test_slm_stop_verb_stops_the_prompt);
     RUN_BUS_TEST(test_ask_ctrl_c_publishes_stop);
     RUN_BUS_TEST(test_runner_restart);

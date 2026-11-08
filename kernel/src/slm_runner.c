@@ -243,6 +243,26 @@ static int32_t slm_runner_poll_cb(void *user)
     return __atomic_load_n(&g_runner.exit_requested, __ATOMIC_ACQUIRE) ? 1 : 0;
 }
 
+/*
+ * A stop counts for the prompt running when it was sent. One still queued as
+ * a prompt is taken was sent while idle, or after the previous prompt's last
+ * poll (Ctrl-C as it ended), and stopped this prompt at its first step
+ * (#1164 review W2). Drop those before the prompt's ack: until then its own
+ * client, waiting on that ack, can't have sent a stop for it. Bounded, in
+ * case a publisher keeps sending.
+ */
+#define SLM_RUNNER_STALE_STOPS_MAX 8u
+
+static void slm_runner_drop_stale_stops(int comp_idx)
+{
+    for (uint32_t i = 0; i < SLM_RUNNER_STALE_STOPS_MAX; i++) {
+        if (msg_router_receive_topic(comp_idx, SLM_TOPIC_STOP) == NULL) {
+            return;
+        }
+        msg_router_ack(comp_idx);
+    }
+}
+
 /* ============================================================================
  * Sessions
  * ============================================================================ */
@@ -649,7 +669,11 @@ void slm_runner_entry(void *arg)
         /* Copy before the ack releases the mailbox to the next publisher. */
         size_t prompt_len = strlen(data);
         memcpy(g_prompt, data, prompt_len + 1u);
-        msg_router_ack(comp_idx);
+        slm_runner_drop_stale_stops(comp_idx);
+        /* The drain moved the router's ack target: point it back. */
+        if (msg_router_receive_topic(comp_idx, SLM_TOPIC_PROMPT) != NULL) {
+            msg_router_ack(comp_idx);
+        }
 
         slm_runner_serve_prompt(comp_idx, g_prompt, prompt_len);
     }
@@ -724,6 +748,23 @@ int slm_runner_start(void)
     return rc;
 }
 
+/* `component run slm-runner`: the start `slm runner start` makes, under the
+ * same claim. Spawned directly it could land while another start or a stop
+ * was bringing a runner up or down, and component_run then replaced that
+ * runner's entry and started a second task on g_runner and g_prompt
+ * (#1164 review W3). */
+int slm_runner_component_run(void)
+{
+    int rc = slm_runner_start();
+    if (rc == 0) {
+        return g_runner.comp_idx;
+    }
+    uart_printf("Component 'slm-runner' %s\n",
+                rc == SLM_RUNNER_ERR_BUSY ? "is starting or stopping elsewhere" :
+                slm_runner_alive() ? "is already running" : "did not start");
+    return -1;
+}
+
 int slm_runner_start_with(const slm_runner_config_t *cfg)
 {
     if (!slm_runner_control_claim()) {
@@ -745,7 +786,7 @@ static int slm_runner_start_locked(void)
     }
     /* Left set only by a task killed from outside. */
     __atomic_store_n(&g_runner.running, 0u, __ATOMIC_RELEASE);
-    if (component_run("slm-runner") < 0) {
+    if (component_spawn("slm-runner") < 0) {
         return -1;
     }
     if (slm_runner_test_start_hook) {

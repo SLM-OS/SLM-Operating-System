@@ -181,9 +181,12 @@ int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *st
  * With `simt`, the SIMT matmuls, which take any batch: 64. */
 uint32_t slm_prog_max_batch(bool simt);
 
-/* Per-launch GPU time when opened with SLM_PROG_FLAG_PROFILE. Returns
- * nanoseconds between launch idx - 1 and idx ending, 0 otherwise. */
-uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx);
+/* Per-launch GPU time of the last run, when opened with SLM_PROG_FLAG_PROFILE:
+ * ns[i] is the nanoseconds from launch i - 1 (or the start) to launch i
+ * ending. Returns how many values it wrote, min(launches, cap), or 0 without
+ * profiling. Takes no lock, so the caller must own the session, with no step
+ * of it running, as for slm_prog_clean. */
+uint32_t slm_prog_profile(int32_t h, uint32_t shape, uint64_t *ns, uint32_t cap);
 
 /* EMC and GPU clocks, in Hz (0 when unknown). */
 void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz);

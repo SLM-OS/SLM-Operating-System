@@ -52,6 +52,13 @@ When `component run my_component` is invoked from the shell, the runtime:
 4. Links the task ID back to the component slot
 5. Sets up a cleanup callback that marks the component as Unloaded when the task exits
 
+`component run` refuses a component that is running, and one whose earlier task
+is still alive in any other state (starting or stopping): that entry isn't
+stale yet, and replacing it would put a second task on the same component. Once
+the task is gone, the entry is replaced. A component that manages its own
+starts (`slm-runner`) sets `.run` in its table entry; `component run` calls
+that instead, and it spawns with `component_spawn`.
+
 ---
 
 ## Entry Function Pattern

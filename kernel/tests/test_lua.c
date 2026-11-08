@@ -903,18 +903,19 @@ static void test_slm_component_hot_swap(void)
     lua_State *L = test_lua_open_admin();
     TEST_ASSERT_NOT_NULL(L);
 
-    /* Start a listener, then hot-swap it with echo */
+    /* Start a listener, then hot-swap it for a new listener. Every other
+     * builtin still has a live task from the tests above (echo waits 60 s),
+     * and component_run refuses one that is starting or running. Swapping
+     * to echo passed only while the earlier echo was still starting, by
+     * running a second echo task beside it (#1164 review W3). */
     const char *code =
         "idx1 = slm.component_run('listener')\n"
         "assert(idx1 ~= nil, 'listener should start')\n"
-        "idx2 = slm.component_hot_swap('listener', 'echo')\n"
+        "idx2 = slm.component_hot_swap('listener', 'listener')\n"
         "assert(idx2 ~= nil, 'hot_swap should return new index')\n"
-        /* old component should no longer be findable by old name */
-        "old = slm.component_find('listener')\n"
-        "assert(old == nil, 'old component should be gone')\n"
-        /* new component should be findable */
-        "new = slm.component_find('echo')\n"
-        "assert(new ~= nil, 'new component should be findable')";
+        /* the name now finds the new component */
+        "new = slm.component_find('listener')\n"
+        "assert(new == idx2, 'new component should be findable')";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);

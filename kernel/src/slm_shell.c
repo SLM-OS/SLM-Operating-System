@@ -1397,9 +1397,12 @@ void slm_stats_print_gpu_busy(const SlmTelemetryC *t)
 /* Jetson Orin Nano LPDDR5: 128-bit bus, two transfers per EMC clock. */
 #define SLM_DRAM_BYTES_PER_EMC_CLOCK 32u
 /* ADR 0005 target: llama.cpp CUDA's decode bandwidth fraction on the same
- * board and clocks, for the same bytes per token. Its decode rate (ADR 0001,
- * MAXN_SUPER median 43.03 tok/s) times this session's plan bytes per pass,
- * so the target grows with context exactly as the measured figure does. */
+ * board and clocks, for the same bytes: this session's plan bytes per pass at
+ * llama.cpp's decode rate (ADR 0001, MAXN_SUPER median 43.03 tok/s). Both
+ * sides use the same bytes, so the test comes down to decode passes per
+ * second against 43.03. That rate was measured on 64-token prompts; at long
+ * context llama.cpp slows down too, so there the target is high and errs
+ * toward "not met". */
 #define SLM_LLAMA_DECODE_MILLITOK_S 43030u
 
 /* Decode DRAM bandwidth (ADR 0005): the plan's bytes per decode forward pass
@@ -1415,21 +1418,21 @@ void slm_stats_print_dram_bw(const SlmTelemetryC *t, uint64_t emc_hz)
         shell_puts("n/a (no decode steps or EMC clock unknown)\r\n");
         return;
     }
-    uint64_t per_tok = t->weight_bytes + t->kv_read_bytes;
-    /* Bytes per microsecond is MB/s (decimal). per_tok (about 1e9) times
+    uint64_t per_pass = t->weight_bytes + t->kv_read_bytes;
+    /* Bytes per microsecond is MB/s (decimal). per_pass (about 1e9) times
      * decode steps (at most max_ctx, 32768) stays far inside 64 bits. */
     uint64_t us = t->decode_ns / 1000u;
-    uint64_t mb_s = us ? per_tok * t->itl_count / us : 0u;
+    uint64_t mb_s = us ? per_pass * t->itl_count / us : 0u;
     uint64_t peak_mb_s = emc_hz / 1000000u * SLM_DRAM_BYTES_PER_EMC_CLOCK;
     uint64_t bp = peak_mb_s ? mb_s * 10000u / peak_mb_s : 0u;
     shell_printf("%llu.%01llu GB/s = ", (unsigned long long)(mb_s / 1000u),
                  (unsigned long long)((mb_s % 1000u) / 100u));
     slm_print_bp((uint32_t)bp);
-    shell_printf(" of %llu.%01llu GB/s LPDDR5 peak (derived from plan bytes per token); "
+    shell_printf(" of %llu.%01llu GB/s LPDDR5 peak (derived from plan bytes per pass); "
                  "target llama.cpp parity ",
                  (unsigned long long)(peak_mb_s / 1000u),
                  (unsigned long long)((peak_mb_s % 1000u) / 100u));
-    uint64_t parity_mb_s = per_tok * SLM_LLAMA_DECODE_MILLITOK_S / 1000000000u;
+    uint64_t parity_mb_s = per_pass * SLM_LLAMA_DECODE_MILLITOK_S / 1000000000u;
     uint64_t parity_bp = peak_mb_s ? parity_mb_s * 10000u / peak_mb_s : 0u;
     slm_print_bp((uint32_t)parity_bp);
     shell_puts(bp >= parity_bp ? ": met\r\n" : ": not met\r\n");
@@ -1766,7 +1769,12 @@ static int slm_gpu(int argc, char *argv[])
     if (argc >= 3 && strcmp(argv[2], "opcheck") == 0) return slm_gpu_opcheck(argc, argv);
     if (argc >= 4 && strcmp(argv[2], "profile") == 0) {
         uint32_t sid = 0;
-        if (shell_parse_uint(argv[3], &sid) != 0 || rust_slm_session_gpu_profile(sid) != 0) {
+        int32_t rc = shell_parse_uint(argv[3], &sid) == 0 ? rust_slm_session_gpu_profile(sid) : -1;
+        if (rc == SLM_ERR_BUSY) {
+            shell_puts("slm gpu profile: a prompt is running on that session\r\n");
+            return -1;
+        }
+        if (rc != 0) {
             shell_puts("slm gpu profile: no session on a GPU program there\r\n");
             return -1;
         }

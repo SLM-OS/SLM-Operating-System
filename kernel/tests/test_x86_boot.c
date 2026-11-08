@@ -3697,8 +3697,12 @@ static void test_component_hot_swap_basic(void)
     extern int component_hot_swap(const char *old_name, const char *new_name);
     extern void sleep_ms(uint32_t ms);
 
-    /* Run listener, then hot-swap it with a new listener */
-    int idx1 = component_run("listener");
+    /* Run listener, then hot-swap it with a new listener. The one
+     * test_component_run_listener started may still be alive, even still
+     * starting: component_run refuses a component whose task is alive
+     * (#1164 review W3), so swap that one. */
+    int idx1 = component_find("listener");
+    if (idx1 < 0) idx1 = component_run("listener");
     TEST_ASSERT_TRUE(idx1 >= 0);
     sleep_ms(100);
 

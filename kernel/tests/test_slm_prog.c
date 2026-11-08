@@ -635,6 +635,10 @@ static struct {
     int nested_rc;
     int32_t nested_close;   /* close this handle from inside the first wait turn */
     int32_t nested_clean;   /* clean + invalidate g_cache_watch of this handle there */
+    int32_t nested_profile; /* read this handle's profile there */
+    uint32_t nested_profile_n;
+    uint64_t nested_profile_ns[4];
+    bool profile_ts;        /* FAKE_COMPLETE also writes two launches' timestamps */
     bool in_relax;
     uint64_t now;
     unsigned submits, finishes, evicts, tlbs, dumps;
@@ -690,6 +694,11 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
         /* Timestamps 50 us apart. */
         *((volatile uint64_t *)slot + 1) = 1000050u;
         *((volatile uint64_t *)slot - 1) = 1000000u;
+        if (g_fk.profile_ts) {
+            /* OP0 and OP1, the slots after END: 10 and 20 us after START. */
+            *((volatile uint64_t *)slot + 3) = 1000010u;
+            *((volatile uint64_t *)slot + 5) = 1000030u;
+        }
     }
     return 0;
 }
@@ -728,6 +737,9 @@ static void fk_relax(void)
         slm_prog_clean(g_fk.nested_clean, g_cache_watch, 64u);
         slm_prog_invalidate(g_fk.nested_clean, g_cache_watch, 64u);
     }
+    if (g_fk.turns == 1u && g_fk.nested_profile >= 0) {
+        g_fk.nested_profile_n = slm_prog_profile(g_fk.nested_profile, 0, g_fk.nested_profile_ns, 4u);
+    }
     if (g_fk.late_slot && g_fk.turns >= g_fk.late_turn) {
         *g_fk.late_slot = g_fk.late_payload;
         g_fk.late_slot = NULL;
@@ -760,6 +772,7 @@ static void fake_up(void)
     g_fk.nested_run = -1;
     g_fk.nested_close = -1;
     g_fk.nested_clean = -1;
+    g_fk.nested_profile = -1;
     g_cache_watch = NULL;
     g_cache_watch_hits = 0;
     TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_pm_ops, &g_vm));
@@ -942,9 +955,10 @@ static void test_session_open_failures(void)
     pmm_free_pages(w, wp);
 }
 
-static void open_built(void *w, struct slm_prog_open_out *o)
+static void open_built_flags(void *w, struct slm_prog_open_out *o, uint32_t flags)
 {
     struct slm_prog_open_args a = open_args(w);
+    a.flags = flags;
     TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, o));
     struct slm_prog_op op = {
         .kernel = SLM_PROG_K_ADD, .rows = 1, .dim = { 256 },
@@ -957,6 +971,11 @@ static void open_built(void *w, struct slm_prog_open_out *o)
     struct slm_prog_run_stats st;
     TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_run(o->handle, 0, &st));
     TEST_ASSERT_EQUAL_INT(0, slm_prog_finish(o->handle, 0));
+}
+
+static void open_built(void *w, struct slm_prog_open_out *o)
+{
+    open_built_flags(w, o, 0u);
 }
 
 static void test_run_ok_and_patch(void)
@@ -1227,6 +1246,59 @@ static void test_cache_ops_never_skipped_while_another_step_runs(void)
     pmm_free_pages(w, wp);
 }
 
+/* #1164 review W1: `slm gpu profile` read each launch's time under the
+ * program lock, so while another session's steps ran it could wait up to a
+ * step timeout per launch, about 400 of them, with the Rust session table
+ * locked. The read now takes no lock, like clean and invalidate: it returns
+ * the owner's last run at once, whoever holds the lock. */
+static void test_profile_reads_without_the_lock(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out a, b;
+    open_built_flags(w, &a, SLM_PROG_FLAG_PROFILE);
+    open_built(w, &b);
+    struct slm_prog_run_stats st;
+    g_fk.profile_ts = true;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(a.handle, 0, &st));
+    g_fk.profile_ts = false;
+    uint64_t ns[4];
+    memset(ns, 0xAB, sizeof(ns));
+    TEST_ASSERT_EQUAL_UINT32(2, slm_prog_profile(a.handle, 0, ns, 4u));
+    TEST_ASSERT_EQUAL_UINT64(10, ns[0]);
+    TEST_ASSERT_EQUAL_UINT64(20, ns[1]);
+    TEST_ASSERT_EQUAL_HEX64(0xABABABABABABABABull, ns[2]);
+    /* A short array gets the first launches only. */
+    memset(ns, 0xAB, sizeof(ns));
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_profile(a.handle, 0, ns, 1u));
+    TEST_ASSERT_EQUAL_HEX64(0xABABABABABABABABull, ns[1]);
+    /* Not profiled, bad shape, no array: nothing. */
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_profile(b.handle, 0, ns, 4u));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_profile(a.handle, 7, ns, 4u));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_profile(a.handle, 0, NULL, 4u));
+
+    /* During b's step, which holds the lock, and with IRQs masked. */
+    g_fk.mode = FAKE_LATE;
+    g_fk.late_turn = 1u;
+    g_fk.nested_profile = a.handle;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(b.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(2, g_fk.nested_profile_n);
+    TEST_ASSERT_EQUAL_UINT64(10, g_fk.nested_profile_ns[0]);
+    TEST_ASSERT_EQUAL_UINT64(20, g_fk.nested_profile_ns[1]);
+    g_fk.irqs_off = true;
+    TEST_ASSERT_EQUAL_UINT32(2, slm_prog_profile(a.handle, 0, ns, 4u));
+    g_fk.irqs_off = false;
+
+    /* A closed handle reads nothing. */
+    slm_prog_close(a.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_profile(a.handle, 0, ns, 4u));
+    slm_prog_close(b.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* Review suggestion: the step deadline counted the time submit spent waiting
  * for the dispatch lock, so a step queued behind another GPU consumer could
  * time out (and kill its session) with the GPU never late. */
@@ -1455,6 +1527,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_dead_session_leaks_arena);
     RUN_TEST(test_two_sessions_never_overlap);
     RUN_TEST(test_cache_ops_never_skipped_while_another_step_runs);
+    RUN_TEST(test_profile_reads_without_the_lock);
     RUN_TEST(test_deadline_starts_at_the_doorbell);
     RUN_TEST(test_prog_barrier_cap);
     RUN_TEST(test_kernel_lookup_and_batch);

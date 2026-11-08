@@ -666,6 +666,16 @@ extern int msg_router_publish_priority(const uint8_t *topic_name,
                                        const uint8_t *data, uint8_t priority);
 
 /*
+ * msg_router_publish_priority for a publisher that is itself a subscriber
+ * (component index `publisher_idx`, such as a Lua state): its own mailbox
+ * gets the message without the ack wait, which could only time out because
+ * nothing drains that mailbox until this returns. Other subscribers are
+ * waited for as usual. Returns: Number of subscribers that received it.
+ */
+extern int msg_router_publish_from(int publisher_idx, const uint8_t *topic_name,
+                                   const uint8_t *data, uint8_t priority);
+
+/*
  * Publish a large message. Currently delegates to msg_router_publish
  * (copies data). Future: will pass by reference for true zero-copy.
  * Returns: Number of subscribers that received the message.
@@ -2174,7 +2184,8 @@ typedef struct {
 /* Make the next launch's decode program fail: 0 none, 1 hang, 2 MMU fault. */
 extern void rust_slm_gpu_set_inject(uint32_t kind);
 
-/* Per-step times and per-kernel GPU time to the console. 0, or -1. */
+/* Per-step times and per-kernel GPU time to the console. 0, -1 if the
+ * session isn't on a GPU program, or SLM_ERR_BUSY while a prompt runs on it. */
 extern int32_t rust_slm_session_gpu_profile(uint32_t session_id);
 
 /* Every kernel on `model`'s shapes against its CPU reference. Failed checks, or -1. */

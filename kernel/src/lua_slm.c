@@ -838,9 +838,8 @@ static int l_model_preload_wait(lua_State *L) {
  * Returns number of subscribers that received the message
  */
 /* A state subscribed to the topic it publishes on drains its mailbox only
- * after this returns: don't wait the ack timeout on itself. */
-extern int msg_router_publish_from(int publisher_idx, const uint8_t *topic_name,
-                                   const uint8_t *data, uint8_t priority);
+ * after this returns: msg_router_publish_from doesn't wait the ack timeout
+ * on itself. */
 static int lua_state_component_idx(lua_State *L);
 
 static int l_msg_publish(lua_State *L) {

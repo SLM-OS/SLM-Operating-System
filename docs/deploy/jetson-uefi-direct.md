@@ -544,9 +544,9 @@ gives the same reason.
 | `slm gpu smoke [n]` | `PASS`, n launches, ns per launch. Needs only `rmsnorm_f16_shader.sass`; no model |
 | `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
 | `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
-| `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile` |
+| `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile`. Refused while a prompt runs on that session |
 | `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
-| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt |
+| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt. One run at a time |
 | `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |

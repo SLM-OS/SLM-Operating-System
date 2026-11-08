@@ -160,12 +160,23 @@ int component_find(const char *name);
 /**
  * Run a built-in component by name.
  *
- * Registers it in the component system, creates a task, and links them.
+ * Registers it in the component system, creates a task, and links them. A
+ * component with its own start (slm-runner) goes through that instead.
+ * Refuses while the component runs, or while a task it ran earlier is still
+ * alive (starting or stopping).
  *
  * @param name Built-in component name (e.g., "counter", "echo", "listener")
  * @return Component index on success, -1 on error
  */
 int component_run(const char *name);
+
+/**
+ * component_run without the component's own start: for that start itself
+ * (slm_runner_start), which serializes its starts and stops.
+ *
+ * @return Component index on success, -1 on error
+ */
+int component_spawn(const char *name);
 
 /**
  * Hot-swap a running component with a new version.

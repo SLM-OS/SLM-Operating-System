@@ -132,7 +132,7 @@ extern "C" {
     fn slm_prog_run(h: i32, shape: u32, stats: *mut RunStats) -> i32;
     fn slm_prog_run_marked(h: i32, shape: u32, stats: *mut RunStats, ns: *mut u64, cap: u32) -> i32;
     fn slm_prog_max_batch(simt: bool) -> u32;
-    fn slm_prog_profile_ns(h: i32, shape: u32, idx: u32) -> u64;
+    fn slm_prog_profile(h: i32, shape: u32, ns: *mut u64, cap: u32) -> u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -1254,10 +1254,16 @@ impl GpuProgram {
         );
         crate::kernel_ffi::print(line.as_bytes());
         // One line per (kernel, output width), summed over the layers.
+        // Launch i is decode op i. Zeros unless opened with profile.
+        let n = self.decode.ops.len();
+        let mut times = alloc::vec![0u64; n];
+        let cap = u32::try_from(n).unwrap_or(u32::MAX);
+        // SAFETY: the handle is open and `times` holds `cap` values. The
+        // caller owns the session (it holds a lease, see
+        // rust_slm_session_gpu_profile), so no step of it is running.
+        unsafe { slm_prog_profile(self.h, SHAPE_DECODE, times.as_mut_ptr(), cap) };
         let mut rows: Vec<(Kernel, u32, u32, u64)> = Vec::new();
-        for (i, op) in self.decode.ops.iter().enumerate() {
-            // SAFETY: the handle is open; returns 0 unless opened with profile.
-            let ns = unsafe { slm_prog_profile_ns(self.h, SHAPE_DECODE, i as u32) };
+        for (op, &ns) in self.decode.ops.iter().zip(times.iter()) {
             let w = if matches!(op.kernel, Kernel::MmQ4k | Kernel::MmQ6k) { op.dim[1] } else { 0 };
             match rows.iter_mut().find(|r| r.0 == op.kernel && r.1 == w) {
                 Some(r) => {
@@ -2478,7 +2484,7 @@ pub mod soft {
         0
     }
     #[no_mangle]
-    extern "C" fn slm_prog_profile_ns(_h: i32, _shape: u32, _idx: u32) -> u64 {
+    extern "C" fn slm_prog_profile(_h: i32, _shape: u32, _ns: *mut u64, _cap: u32) -> u32 {
         0
     }
     #[no_mangle]

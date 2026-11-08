@@ -1052,25 +1052,27 @@ int slm_prog_run_marked(int32_t h, uint32_t shape, struct slm_prog_run_stats *st
     return run_step(h, shape, stats, true, ns, cap);
 }
 
-static uint64_t profile_ns_locked(int32_t h, uint32_t shape, uint32_t idx)
+/* No lock, for the reason session_ops gives: the timestamps are this
+ * session's own memory, written only by its own steps, and the caller owns
+ * the session, so no step of it runs meanwhile. Waiting on the lock here
+ * held `slm gpu profile` behind other sessions' steps once per launch, with
+ * the Rust session table locked (#1164 review W1). */
+uint32_t slm_prog_profile(int32_t h, uint32_t shape, uint64_t *ns, uint32_t cap)
 {
-    struct prog_session *s = session(h);
-    struct prog_shape *ps = shape_of(s, shape);
-    if (!ps || !(ps->p.flags & GA10B_PROG_F_PROFILE) || idx >= ps->p.n_launches) return 0;
+    if (!ns || !session_ops(h)) return 0;
+    struct prog_shape *ps = shape_of(&g_sessions[h], shape);
+    if (!ps || !(ps->p.flags & GA10B_PROG_F_PROFILE)) return 0;
     const struct ga10b_prog *p = &ps->p;
-    s->be->ops->cache_inval(s->be->ops->ctx, p->sema.cpu, ga10b_prog_sema_bytes(p));
-    uint64_t t = ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_OP0 + idx);
-    uint64_t prev = idx == 0u ? ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_START)
-                              : ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_OP0 + idx - 1u);
-    return t - prev;
-}
-
-uint64_t slm_prog_profile_ns(int32_t h, uint32_t shape, uint32_t idx)
-{
-    if (prog_lock(backend()) != 0) return 0;
-    uint64_t ns = profile_ns_locked(h, shape, idx);
-    prog_unlock();
-    return ns;
+    const struct ga10b_gpu_ops *ops = g_sessions[h].be->ops;
+    ops->cache_inval(ops->ctx, p->sema.cpu, ga10b_prog_sema_bytes(p));
+    uint32_t n = p->n_launches < cap ? p->n_launches : cap;
+    uint64_t prev = ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_START);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t t = ga10b_prog_sema_ts(p, GA10B_PROG_SEMA_OP0 + i);
+        ns[i] = t >= prev ? t - prev : 0u;
+        prev = t;
+    }
+    return n;
 }
 
 static bool sass_present(const struct slm_prog_backend *be, uint32_t sass)

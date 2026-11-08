@@ -55,25 +55,44 @@ static inline int hw_timeout_expired(uint64_t start, uint32_t seconds) {
 
 struct component_task_ctx {
     int component_idx;
+    uint32_t task_id;
 };
+
+/* Task component_run created for each registry slot, 0 once it's destroyed.
+ * An entry whose task is still alive isn't stale, whatever its state: it is
+ * starting (INITIALIZING) or on its way out (TERMINATING). Replacing it put
+ * a second task on the same component, both with the same index (#1164
+ * review W3). Cleared by the task's own cleanup, which runs when the task is
+ * destroyed, whether it returned or was killed. */
+static uint32_t g_component_task[COMPONENT_MAX_COUNT];
 
 extern void msg_router_unsubscribe_all(int component_idx);
 
 /*
  * Cleanup callback invoked by task_destroy() when a component task exits.
- * The ctx is heap-allocated per task (one page) in component_start() — this
- * gives each task its own cleanup state, so a surviving task from an earlier
- * component cannot fire a cleanup meant for a new component that reused the
- * same registry slot.
+ * The ctx is heap-allocated per task (one page) in component_spawn_builtin():
+ * it names this task, so a task from an earlier generation can tell that a
+ * new component reused its registry slot (g_component_task holds the new
+ * task) and leave that one alone.
  */
 static void component_task_cleanup(void *arg)
 {
     struct component_task_ctx *ctx = (struct component_task_ctx *)arg;
     if (!ctx) return;
 
+    /* Released first, so a waiter that sees UNLOADED can run the next one.
+     * If the slot is someone else's now (a hot swap reused the index), its
+     * entry and subscriptions aren't this task's to clear. */
+    bool owner = true;
+    if (ctx->component_idx >= 0 && ctx->component_idx < COMPONENT_MAX_COUNT) {
+        uint32_t mine = ctx->task_id;
+        owner = __atomic_compare_exchange_n(&g_component_task[ctx->component_idx], &mine, 0u,
+                                            false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+
     /* Only clean up if this component still owns the slot (not hot-swapped) */
     component_info_t info;
-    if (component_get_info((uint32_t)ctx->component_idx, &info) == 0 &&
+    if (owner && component_get_info((uint32_t)ctx->component_idx, &info) == 0 &&
         (info.state == COMPONENT_TERMINATING || info.state == COMPONENT_RUNNING)) {
         msg_router_unsubscribe_all(ctx->component_idx);
         component_set_state((uint32_t)ctx->component_idx, COMPONENT_UNLOADED);
@@ -81,6 +100,17 @@ static void component_task_cleanup(void *arg)
     DEBUG_PRINT("Component %d task exited", ctx->component_idx);
 
     pmm_free_page(ctx);
+}
+
+/* Test hook: run the cleanup a component task with `task_id` runs when it is
+ * destroyed, against slot `idx`, as if that task had been spawned there. */
+void component_test_run_cleanup(int idx, uint32_t task_id)
+{
+    struct component_task_ctx *ctx = pmm_alloc_page();
+    if (!ctx) return;
+    ctx->component_idx = idx;
+    ctx->task_id = task_id;
+    component_task_cleanup(ctx);
 }
 
 /* ============================================================================
@@ -240,6 +270,10 @@ struct builtin_component {
     uint8_t priority;
     component_entry_t entry;
     const char *model_name;  /* Model to preload on start (NULL = none) */
+    /* The component's own start, for one that serializes its starts and
+     * stops itself. component_run calls it instead of spawning, and it
+     * spawns with component_spawn. Returns the index or -1. NULL: none. */
+    int (*run)(void);
 };
 
 /* ============================================================================
@@ -423,6 +457,7 @@ static void digit_classifier_entry(void *arg)
  * ============================================================================ */
 
 extern void slm_runner_entry(void *arg);
+extern int slm_runner_component_run(void);
 
 static const struct builtin_component builtin_components[] = {
     {
@@ -477,6 +512,8 @@ static const struct builtin_component builtin_components[] = {
          * higher priority the shell, and every client on it, never runs. */
         .priority = COMPONENT_PRIORITY_IDLE,
         .entry = slm_runner_entry,
+        /* `slm runner start`, so it can't land on a start or stop under way. */
+        .run = slm_runner_component_run,
     },
 };
 
@@ -486,38 +523,56 @@ static const struct builtin_component builtin_components[] = {
  * Component Execution API
  * ============================================================================ */
 
-/*
- * Run a built-in component by name.
- * Registers it in the component system, creates a task, links them.
- * Returns component index on success, -1 on failure.
- */
-int component_run(const char *name)
+static const struct builtin_component *builtin_find(const char *name)
 {
-    /* Find built-in component */
-    const struct builtin_component *bc = NULL;
     for (size_t i = 0; i < NUM_BUILTIN_COMPONENTS; i++) {
         /* strcmp equivalent */
         const char *a = name;
         const char *b = builtin_components[i].name;
         while (*a && *b && *a == *b) { a++; b++; }
         if (*a == '\0' && *b == '\0') {
-            bc = &builtin_components[i];
-            break;
+            return &builtin_components[i];
         }
     }
 
+    uart_printf("Unknown component: '%s'\n", name);
+    uart_printf("Available components:\n");
+    for (size_t i = 0; i < NUM_BUILTIN_COMPONENTS; i++) {
+        uart_printf("  %-12s %s — %s\n",
+                    builtin_components[i].name,
+                    builtin_components[i].version,
+                    builtin_components[i].description);
+    }
+    return NULL;
+}
+
+static int component_spawn_builtin(const struct builtin_component *bc, const char *name);
+
+/*
+ * Run a built-in component by name: through its own start if it has one,
+ * otherwise register it, create a task and link them.
+ * Returns component index on success, -1 on failure.
+ */
+int component_run(const char *name)
+{
+    const struct builtin_component *bc = builtin_find(name);
     if (!bc) {
-        uart_printf("Unknown component: '%s'\n", name);
-        uart_printf("Available components:\n");
-        for (size_t i = 0; i < NUM_BUILTIN_COMPONENTS; i++) {
-            uart_printf("  %-12s %s — %s\n",
-                        builtin_components[i].name,
-                        builtin_components[i].version,
-                        builtin_components[i].description);
-        }
         return -1;
     }
+    if (bc->run) {
+        return bc->run();
+    }
+    return component_spawn_builtin(bc, name);
+}
 
+int component_spawn(const char *name)
+{
+    const struct builtin_component *bc = builtin_find(name);
+    return bc ? component_spawn_builtin(bc, name) : -1;
+}
+
+static int component_spawn_builtin(const struct builtin_component *bc, const char *name)
+{
     /* Check if already running */
     int existing = component_find(bc->name);
     if (existing >= 0) {
@@ -525,6 +580,11 @@ int component_run(const char *name)
         if (component_get_info((uint32_t)existing, &info) == 0 &&
             info.state == COMPONENT_RUNNING) {
             uart_printf("Component '%s' is already running (idx %d)\n", name, existing);
+            return -1;
+        }
+        if (existing < COMPONENT_MAX_COUNT &&
+            __atomic_load_n(&g_component_task[existing], __ATOMIC_ACQUIRE) != 0u) {
+            uart_printf("Component '%s' is starting or stopping (idx %d)\n", name, existing);
             return -1;
         }
         /* Remove stale entry */
@@ -625,7 +685,11 @@ int component_run(const char *name)
         return -1;
     }
     ctx->component_idx = comp_idx;
+    ctx->task_id = task->id;
     task_set_cleanup(task, component_task_cleanup, ctx);
+    if (comp_idx < COMPONENT_MAX_COUNT) {
+        __atomic_store_n(&g_component_task[comp_idx], task->id, __ATOMIC_RELEASE);
+    }
 
     /* Add to scheduler — don't yield here, timer preemption will start the task */
     scheduler_add_task(task);
