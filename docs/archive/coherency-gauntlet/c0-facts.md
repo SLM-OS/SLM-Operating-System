@@ -272,7 +272,7 @@ Build: `NV-ATF/plat/nvidia/tegra/soc/t234/platform_t234.mk` compiles only
 
 | Location (`NV-ATF/...`) | Register | Bits and meaning | Active on t234 |
 |---|---|---|---|
-| `lib/cpus/aarch64/cortex_a78_ae.S:33-46` | CPUECTLR_EL1 | clear bit 8 (PF_STI_DIS), erratum 1941500 | No: `ERRATA_A78_AE_1941500 ?=0` (`cpu-ops.mk:367`) |
+| `lib/cpus/aarch64/cortex_a78_ae.S:33-46` | CPUECTLR_EL1 | clear bit 8 (PF_STI_DIS), erratum 1941500. The source comment says "Set bit 8" (`:39`) but the code is `bic` (`:41`) | No: `ERRATA_A78_AE_1941500 ?=0` (`cpu-ops.mk:367`) |
 | `cortex_a78_ae.S:63-98` | S3_6_C15_C8_* | erratum 1951502 patch | No: default 0 (`cpu-ops.mk:371`) |
 | `cortex_a78_ae.S:115-135` | CPUACTLR2_EL1 bit 0 | erratum 2376748 | No: default 0 (`cpu-ops.mk:375`) |
 | `cortex_a78_ae.S:152-170` | CPUACTLR2_EL1 bit 40 | erratum 2395408 | No: default 0 (`cpu-ops.mk:379`) |
@@ -311,15 +311,17 @@ from any EL3 code, not only BL31.
   `:174-176`). The page does not give MB2's exception level. **Unsourced:** whether MB2 (closed
   source) runs at EL3 on CPU 0 and whether it writes ACTLR_EL3, ACTLR_EL2 or CPUECTLR_EL1.
   **Inference:** MB2 runs at EL3, because BL31 is entered after it on the same core.
-- **Jetson CPU 0 across kexec and UEFI-direct.** kexec does not reset CPU 0, and neither
-  does the UEFI-direct path. CPU 0's ACTLR_EL3 and CPUECTLR_EL1 therefore hold whatever
+- **Jetson CPU 0 across kexec and UEFI-direct.** kexec does not reset CPU 0.
+  **Inference** (no citation): the UEFI-direct path does not reset CPU 0 either, since UEFI
+  hands off to SLM-OS on the core it booted on. CPU 0's ACTLR_EL3 and CPUECTLR_EL1 therefore hold whatever
   MB2 and BL31 left at cold boot, plus any EL3 writes made at runtime (none found in BL31
   for ECTLREN). Linux at EL2 cannot write ACTLR_EL3. Only BL31's part of this is sourced.
 - **Jetson secondaries.** CPU_ON goes to the MCE (`MCE_CMD_ONLINE_CORE`,
   `NV-ATF/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c:315`) and BL31's reset handler
   runs again on the woken core. A core that Linux offlined before kexec went through
-  CPU_OFF, which is the Off mode (A78AE TRM §2.4.6.2: "all core state is lost").
-  **Inference:** a secondary brought up by CPU_ON comes out of a core reset, so its
+  PSCI CPU_OFF. **Inference:** the MCE firmware chose the Off power mode for it (on Tegra
+  the MCE picks the power state; A78AE TRM §2.4.6.2 says Off loses "all core state"), and
+  a secondary brought up by CPU_ON comes out of a core reset, so its
   ACTLR_EL3 starts at 0 and only BL31's warm-boot writes apply; MB2 does not run on it.
 - **Pi 5, EL3 code before BL31.** `RESET_TO_BL31 := 1` and "All CPUs enter armstub8.bin"
   (`COLD_BOOT_SINGLE_CPU := 0`) (`~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk:33-36`): in the
@@ -331,15 +333,28 @@ from any EL3 code, not only BL31.
   mailbox (`~/slmos-ref/tf-a/plat/rpi/common/aarch64/plat_helpers.S:83-124`).
   `rpi3_pwr_domain_on()` only writes GO to the mailbox and issues SEV
   (`~/slmos-ref/tf-a/plat/rpi/common/rpi3_pm.c:146-166`). The core then jumps to the warm-boot
-  entry point. Its ACTLR_EL3 and CPUECTLR_EL1 are cold-reset values plus BL31 writes. Its
-  caches were invalidated at cold reset, not at CPU_ON, and it has executed BL31 code
-  since then. PSCI still requires the caches to be clean and coherent from the caller's
+  entry point. On a core's **first** CPU_ON after cold boot, its ACTLR_EL3 and CPUECTLR_EL1
+  are cold-reset values plus BL31 writes. Its caches were invalidated at cold reset, not at
+  CPU_ON, and it has executed BL31 code since then. A later CPU_OFF ends in
+  `rpi3_pwr_down_wfi()`, which calls `write_rmr_el3(RMR_EL3_RR_BIT | RMR_EL3_AA64_BIT)`, a
+  warm reset request. The core then re-enters BL31 and the holding pen
+  (`~/slmos-ref/tf-a/plat/rpi/common/rpi3_pm.c:184-208`, comment "The secondaries will always
+  be in a wait for warm boot on reset"). So a CPU_ON after an earlier CPU_OFF follows a warm
+  reset. Whether a warm reset invalidates the caches is not stated in the cached sources.
+  SLM-OS brings each secondary up once on the normal boot path (`kernel/sched/smp.c:523`).
+  The exceptions are the fault path, which calls `psci_cpu_off()`
+  (`kernel/arch/arm64/exceptions.c:259`), and the CPU supervisor's resurrect, which calls
+  CPU_ON again (`kernel/sched/cpu_supervisor.c:24`). PSCI still requires the caches to be clean and coherent from the caller's
   view at entry (PSCI DEN0022 F.b §6.4.3.4).
   **Inference:** the running Raspberry Pi BL31 uses the same holding-pen scheme.
-- **Effect on the SLM-OS "SMPEN" read.** On A76, bit 6 of CPUECTLR_EL1 is RES0. A RES0 bit
-  in a read/write register returns the last value written, or the reset value if never
-  written, and "must have no effect on the operation of the PE" (Arm ARM DDI 0487 M.d,
-  Glossary, RES0, `arm-ddi0487-Md.txt:1091430-1091445`). On A78AE, bit 6 is PF_MODE[0],
+- **Effect on the SLM-OS "SMPEN" read.** On A76, bit 6 of CPUECTLR_EL1 is RES0. For a bit
+  that is RES0 in all contexts of a read/write register, the Arm ARM gives two behaviors and
+  makes the choice "IMPLEMENTATION DEFINED on a bit-by-bit basis" (Arm ARM DDI 0487 M.d,
+  Glossary, RES0, `arm-ddi0487-Md.txt:1091390-1091425`). Either (1) the bit is hardwired to
+  0, so reads return 0 and writes are ignored, or (2) the bit is stored, so a read returns
+  the last value written (or the reset value) and the value "must have no effect on the
+  operation of the PE". The A76 TRM does not say which applies to bit 6. In both cases the
+  bit has no effect. On A78AE, bit 6 is PF_MODE[0],
   which only affects prefetch. The value SLM-OS reads is therefore 0 unless some EL3 code
   wrote bit 6, and either way it has no bearing on coherency. The value itself is sourced
   only for BL31.
@@ -353,8 +368,9 @@ the shared L3 is maintained in hardware by the SCU and snoop filter; a core join
 coherency domain at power-up with no software steps and leaves it automatically on the
 transition to Off. The software-visible trigger for leaving is
 CPUPWRCTLR_EL1.CORE_PWRDN_EN=1, ISB, WFI (issued by TF-A on CPU_OFF). Re-entry is
-reset, which PSCI CPU_ON causes on Jetson; on Pi 5 a core is reset only at cold boot
-(Q3). There is no software coherency-enable bit. Cross-cluster coherency on Tegra234:
+reset. On Jetson, PSCI CPU_ON causes it (inference, Q3). On Pi 5 under upstream TF-A, a
+core's first CPU_ON follows the cold reset, and a CPU_ON after CPU_OFF follows the warm
+reset requested by `rpi3_pwr_down_wfi()` (Q3). There is no software coherency-enable bit. Cross-cluster coherency on Tegra234:
 **inference** that NVIDIA's CCPLEX fabric (the "SCF" named in TF-A) provides it in
 hardware. No public primary document describing it was reachable. Only firmware
 configuration and Linux behavior support it.
@@ -526,8 +542,9 @@ EL and that "from the point of view of the caller the caches must be clean and c
 with main memory". The architecture leaves cache state at reset IMPLEMENTATION DEFINED;
 A76 and A78AE invalidate their caches automatically at reset deassertion (unless the core
 was initialised to Debug recovery mode) and join coherency with no software steps. On Pi 5,
-upstream TF-A's CPU_ON releases a holding pen rather than resetting the core, so that reset
-was the cold boot (Q3, "EL3 state not written by BL31"). The PSCI clean-and-coherent
+upstream TF-A's CPU_ON releases a holding pen rather than resetting the core. For a core's
+first CPU_ON after cold boot the last reset was the cold reset. After a CPU_OFF it was the
+warm reset requested by `rpi3_pwr_down_wfi()` (Q3, "EL3 state not written by BL31"). The PSCI clean-and-coherent
 guarantee covers that case. The OS does not need to invalidate data caches before enabling
 them. Linux's secondary path
 (`secondary_entry` -> `init_kernel_el` -> `__cpu_setup` -> `__enable_mmu`) performs a local
@@ -712,9 +729,10 @@ Arm ARM B2.11, D7.5.9.16.1, and the Linux 6.18 / 5.15 secondary path:
    clean and coherent from the caller's view (PSCI §6.4.3.4), and already in the coherency
    domain (A76 §5.9 "no software steps are required"). The caches were invalidated by
    hardware at the core's last reset (A76 §7.2, A78AE §2.6.2). On Jetson that is the CPU_ON
-   itself (inference, Q3). On Pi 5 it is cold boot, because upstream TF-A releases
-   secondaries from a holding pen without a reset (Q3); the PSCI guarantee is what applies
-   there.
+   itself (inference, Q3). On Pi 5, for the first CPU_ON after cold boot, it is the cold
+   reset, because upstream TF-A releases secondaries from a holding pen without a reset.
+   After a CPU_OFF it is the warm reset from `rpi3_pwr_down_wfi()` (Q3). The PSCI guarantee
+   is what applies in both cases.
 3. Do not invalidate or clean by set/way, and do not touch CPUECTLR, CLUSTERECTLR, CPUACTLR*
    or ACTLR_EL2 for coherency: none is needed (Q1, Q4), set/way is discouraged on live SMP
    (Arm ARM D7.5.9.16.1), and writes trap (Q2). Linux does none of these.
