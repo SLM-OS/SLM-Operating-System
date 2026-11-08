@@ -1,1 +1,1 @@
-earlycon=pl011,mmio32,0x1f00030000 console=ttyAMA0,115200 rdinit=/init
+console=ttyAMA0,115200 rdinit=/init

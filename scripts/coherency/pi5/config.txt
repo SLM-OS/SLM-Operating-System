@@ -12,6 +12,6 @@ uart_2ndstage=1
 # The packaged DTB ships RP1 uart0 (GPIO 14/15, ttyAMA0) disabled; this
 # base-DT override enables it and points the console alias at it.
 dtparam=uart0_console
-# As in the SLM-OS config: keep firmware from resetting PCIe x4 (RP1), so
-# RP1's BAR stays live for earlycon at 0x1f00030000.
-pciex4_reset=0
+# pciex4_reset is left at the Raspberry Pi OS default: results come over
+# HTTP (RP1 ethernet), so no earlycon needs RP1's BAR before Linux
+# re-trains the link.

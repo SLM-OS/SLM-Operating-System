@@ -1,18 +1,60 @@
 #!/bin/busybox sh
 # /init for the #1193 Pi 5 Linux reference run (initramfs only, no rootfs).
-# Mounts proc/sys/devtmpfs, prints the version header, runs the litmus set
-# for LITMUS_MINUTES, prints an end marker and idles. Never powers off.
+#
+# Results do not depend on the serial console: everything /init prints
+# goes to /www/status.txt, which busybox httpd serves on port 80 once eth0
+# is up (DHCP, falling back to the lab address 192.168.4.25/24). A
+# background tail copies the same file to /dev/console, so a dead or
+# blocking console cannot stall the run.
+#
+# Sequence: mount proc/sys/devtmpfs, network, httpd, version header,
+# litmus for LITMUS_MINUTES, read-only ectlr.ko dump (cluster=1), DONE
+# marker, idle. Never powers off.
 B=/bin/busybox
-$B mkdir -p /proc /sys /dev /tmp
+$B mkdir -p /proc /sys /dev /tmp /www /etc
 $B mount -t proc proc /proc
 $B mount -t sysfs sysfs /sys
 $B mount -t devtmpfs devtmpfs /dev
 $B --install -s /bin
 export PATH=/bin
-exec </dev/console >/dev/console 2>&1
 LITMUS_MINUTES=10
+OUT=/www/status.txt
+: > $OUT
+exec < /dev/null > $OUT 2>&1
+(tail -f $OUT > /dev/console 2>/dev/null &)
 
 hexval() { od -An -tx1 "$1" | tr -d ' \n'; }
+
+echo "=== COH1193 pi-5-1 status (HTTP + console) ==="
+echo "COH1193_NET_START uptime_s=$(cut -d' ' -f1 /proc/uptime)"
+cat > /etc/udhcpc.script <<'EOS'
+#!/bin/sh
+case "$1" in
+bound|renew)
+	ip addr flush dev "$interface"
+	ip addr add "$ip/${mask:-24}" dev "$interface"
+	if [ -n "$router" ]; then
+		ip route add default via "${router%% *}" dev "$interface"
+	fi
+	;;
+deconfig)
+	ip addr flush dev "$interface"
+	ip link set "$interface" up
+	;;
+esac
+exit 0
+EOS
+chmod 755 /etc/udhcpc.script
+ip link set lo up
+ip link set eth0 up
+udhcpc -i eth0 -n -q -t 10 -T 3 -s /etc/udhcpc.script
+if ! ip addr show dev eth0 | grep -q 'inet '; then
+	echo "no DHCP lease: static 192.168.4.25/24"
+	ip addr add 192.168.4.25/24 dev eth0
+fi
+ip addr show dev eth0
+httpd -p 80 -h /www
+echo "COH1193_HTTP_UP uptime_s=$(cut -d' ' -f1 /proc/uptime)"
 
 echo "=== COH1193_HEADER pi-5-1 ==="
 echo "board_uptime_s: $(cut -d' ' -f1 /proc/uptime)"
@@ -20,8 +62,8 @@ echo "--- uname -a"; uname -a
 echo "--- /proc/cmdline"; cat /proc/cmdline
 echo "--- /sys/devices/system/cpu/online: $(cat /sys/devices/system/cpu/online)"
 echo "--- /sys/devices/system/cpu/offline: $(cat /sys/devices/system/cpu/offline)"
-echo "--- /proc/cpuinfo (processor, implementer, variant, part, revision, features)"
-grep -E '^(processor|CPU implementer|CPU variant|CPU part|CPU revision|Features)' /proc/cpuinfo
+echo "--- /proc/cpuinfo"
+cat /proc/cpuinfo
 echo "--- MIDR_EL1 per cpu (sysfs)"
 for c in /sys/devices/system/cpu/cpu[0-9]*; do
 	echo "${c##*/} midr=$(cat $c/regs/identification/midr_el1 2>/dev/null) revidr=$(cat $c/regs/identification/revidr_el1 2>/dev/null)"
@@ -43,30 +85,29 @@ for f in /proc/device-tree/chosen/bootloader/*; do
 	echo "$n: str='$(strings -n 1 $f | tr '\n' ' ')' hex=$(hexval $f)"
 done
 echo "--- /proc/device-tree/system/linux,revision: $(hexval /proc/device-tree/system/linux,revision 2>/dev/null)"
-echo "--- dmesg firmware and CPU lines"
-dmesg | grep -iE 'psci|smccc|Booting Linux|Machine model|CPU features|erratum|raspberrypi-firmware|firmware: |SMP: |CPU[0-9]+: Booted' | head -60
+echo "--- /proc/device-tree/serial-number: $(tr '\0' ' ' < /proc/device-tree/serial-number 2>/dev/null)"
 echo "--- litmus sha256"; sha256sum /coherency/litmus
+echo "--- dmesg (boot)"
+dmesg
 echo "=== COH1193_HEADER_END ==="
 
-# Keep kernel messages off the console while rows print.
 echo 1 > /proc/sys/kernel/printk
-# Give the host time to start a fresh serial capture that covers the run.
-echo "COH1193_WAIT 20s"
-sleep 20
 echo "COH1193_LITMUS_START uptime_s=$(cut -d' ' -f1 /proc/uptime)"
 /coherency/litmus -m $LITMUS_MINUTES
 rc=$?
 echo "COH1193_LITMUS_EXIT rc=$rc uptime_s=$(cut -d' ' -f1 /proc/uptime)"
 echo "--- dmesg tail after run"
-dmesg | tail -15
+dmesg | tail -20
 # Phase 2 (#1193 C0 cleared, reads only): CPUECTLR/CLUSTERECTLR dump.
 if [ -f /coherency/ectlr.ko ]; then
 	echo "COH1193_ECTLR_BEGIN"
+	sha256sum /coherency/ectlr.ko
 	echo 7 > /proc/sys/kernel/printk
 	insmod /coherency/ectlr.ko cluster=1
 	echo "insmod rc=$?"
 	dmesg | grep ectlr1193
 	echo "COH1193_ECTLR_END"
 fi
+echo "COH1193_DONE uptime_s=$(cut -d' ' -f1 /proc/uptime)"
 echo "COH1193_END_MARKER"
 while :; do sleep 3600; done
