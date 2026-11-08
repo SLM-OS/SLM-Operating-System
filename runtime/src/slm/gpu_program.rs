@@ -2931,6 +2931,47 @@ mod tests {
 
     /// Every launch is in a class; a class boundary always has a barrier, so
     /// the marks can attribute all the time; and the plan's figures add up.
+    /// Token ids for scripts/cuda/harness/near_tie.cpp (#1167, G4): the
+    /// prompt as `slm prompt --raw` encodes it and two runs' replies, with the
+    /// real model's tokenizer. Env: SLM_GOLDEN_MODEL (the GGUF),
+    /// SLM_NEAR_TIE_PROMPT, SLM_NEAR_TIE_A, SLM_NEAR_TIE_B (text files) and
+    /// SLM_NEAR_TIE_OUT. Run by scripts/cuda/harness/near-tie.sh.
+    #[test]
+    #[ignore = "needs the real model; run by scripts/cuda/harness/near-tie.sh"]
+    fn near_tie_token_ids() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
+        let read = |k: &str| std::fs::read_to_string(var(k)).unwrap();
+        let bytes = std::fs::read(var("SLM_GOLDEN_MODEL")).unwrap();
+        crate::slm::registry::ensure_mm_initialized_for_tests();
+        crate::slm::registry::reset_for_tests();
+        let model = crate::slm::registry::load_slm(b"real", &bytes).expect("real model loads");
+        drop(bytes);
+        let (prompt, a, b) = (read("SLM_NEAR_TIE_PROMPT"), read("SLM_NEAR_TIE_A"), read("SLM_NEAR_TIE_B"));
+        let out = crate::slm::registry::with_loaded_slm(model, |slm| {
+            let tk = slm.tokenizer().expect("tokenizer");
+            let (p, ta, tb) = (tk.encode_with_specials(&prompt), tk.encode(&a), tk.encode(&b));
+            // The replies must decode back to the text the runs printed.
+            assert_eq!(tk.decode(&ta), a, "reply a does not round-trip");
+            assert_eq!(tk.decode(&tb), b, "reply b does not round-trip");
+            let d = ta.iter().zip(tb.iter()).take_while(|(x, y)| x == y).count();
+            let piece = |ids: &[u32]| format!("{:?}", tk.decode(ids));
+            let join = |v: &[u32]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ");
+            std::println!(
+                "prompt {} tokens; replies share {d} tokens, ending {}; then a {} {} / b {} {}",
+                p.len(),
+                piece(&ta[d.saturating_sub(4)..d]),
+                ta[d],
+                piece(&ta[d..d + 1]),
+                tb[d],
+                piece(&tb[d..d + 1])
+            );
+            format!("prompt {}\na {}\nb {}\n", join(&p), join(&ta), join(&tb))
+        })
+        .unwrap();
+        std::fs::write(var("SLM_NEAR_TIE_OUT"), out).unwrap();
+        crate::slm::registry::reset_for_tests();
+    }
+
     /// The same rule as slm_prog.c's gqa_sass (kernel/tests/test_slm_prog.c
     /// test_gqa_selects_hmma), so `slm stats --gpu` counts GQA where it runs.
     #[test]
