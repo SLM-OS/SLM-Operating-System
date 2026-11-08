@@ -687,4 +687,13 @@ void task_destroy(struct task *task);
  */
 void task_set_cleanup(struct task *task, task_cleanup_t cleanup, void *cleanup_arg);
 
+#if defined(ENABLE_BOOT_TESTS)
+/*
+ * Test helper (#1193): address of `cpu`'s current-task slot, so
+ * test_nc_axis.c can check which mapping (NC block or cacheable)
+ * holds it. NULL for an out-of-range CPU.
+ */
+const volatile void *task_current_slot_addr(uint32_t cpu);
+#endif
+
 #endif /* TASK_H */

@@ -198,9 +198,21 @@ secondary_entry:
     msr     sctlr_el1, x1
     isb
 
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#if (defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)) && \
+    !defined(SETWAY_INVAL_OFF)
     /*
      * Invalidate all data cache lines (L1 + L2) by set/way.
+     *
+     * #1193 audit (docs/archive/coherency-gauntlet/c3-audit.md §2): the
+     * rationale below does not hold on Cortex-A76 / A78AE. With
+     * SCTLR.C=0, loads do not access the L1/L2/L3 arrays at all (A76 TRM
+     * §7.2.3, A78AE TRM §2.6.2.3), so the pre-MMU reads allocated
+     * nothing, and the caches were invalidated at the core's reset. On
+     * these cores DC ISW is a local clean+invalidate, so the loop is
+     * harmless but not needed. It stays until hardware measurement says
+     * otherwise; build with SETWAY_INVAL=OFF to drop it.
+     *
+     * Original rationale:
      * Required on real hardware (Pi 5, Jetson) — QEMU's coherency works without this.
      *
      * Pre-MMU reads (secondary_mmu_ttbr, _mair, _tcr above) entered
@@ -262,7 +274,7 @@ secondary_entry:
 
     dsb     sy
     isb
-#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */
+#endif /* (PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO) && !SETWAY_INVAL_OFF */
 
 .Lsec_skip_mmu:
     /*

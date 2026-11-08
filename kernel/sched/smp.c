@@ -741,6 +741,14 @@ void smp_init(void)
     uint32_t booted = 0;
 
     INFO("SMP: initializing");
+    /* #1193 build switches: print only when switched off, so the default
+     * build is unchanged and a board log shows which variant booted. */
+#if defined(NC_AXIS_OFF)
+    INFO("SMP: NC_AXIS=OFF, CPU-shared state in cacheable memory (#1193)");
+#endif
+#if defined(SETWAY_INVAL_OFF)
+    INFO("SMP: SETWAY_INVAL=OFF, no set/way loop on secondaries (#1193)");
+#endif
 
     /* Check if SMPEN was successfully set from EL2 during boot */
     if (cpu_has_smpen()) {

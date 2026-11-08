@@ -106,6 +106,25 @@ ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
 
+# Coherency gauntlet switches (#1193), Pi 5 and Jetson only. Both default
+# to the current behaviour (ON); empty means ON and passes nothing to
+# CMake, so default builds are unchanged.
+#
+#   NC_AXIS=OFF       CPU-to-CPU shared state (run queues, task table,
+#                     current-task pointers, steal deques, sched_diag_*,
+#                     boot/init flags, preemption state) moves from the
+#                     NC block to cacheable memory; the UART lock becomes
+#                     a real spinlock; Pi 5 spinlocks drop the DC CIVAC
+#                     lock-word flush. The NC block stays mapped for
+#                     device DMA. See kernel/include/ncmem.h.
+#   SETWAY_INVAL=OFF  Drops the post-MMU DC ISW L1/L2 loop that every
+#                     Pi 5 / Jetson secondary runs in smp_boot.S.
+#
+#   make kernel PLATFORM=RASPI5 NC_AXIS=OFF
+#   make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF SETWAY_INVAL=OFF
+NC_AXIS ?=
+SETWAY_INVAL ?=
+
 # CMake arguments for the preemption flags. Every kernel configure rule
 # (kernel, kexec, bzImage, test) passes this one variable, and
 # print-preempt-config prints it, so scripts/check-preempt-config.sh
@@ -287,6 +306,8 @@ KERNEL_COMMON_CMAKE_ARGS = \
 	$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 	$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 	$(KERNEL_PREEMPT_CMAKE_ARGS) \
+	$(if $(filter OFF,$(NC_AXIS)),-DNC_AXIS=OFF) \
+	$(if $(filter OFF,$(SETWAY_INVAL)),-DSETWAY_INVAL=OFF) \
 	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \

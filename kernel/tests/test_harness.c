@@ -249,6 +249,8 @@ int test_harness_run_all(void)
     /* Coherency litmus + negative controls (#1193): runs pinned tasks on
      * every CPU, so it sits with the other scheduler-backed suites. */
     total_failures += test_suite_coherency();
+    /* NC_AXIS placement of run queues / task table / current_task (#1193). */
+    total_failures += test_suite_nc_axis();
     total_failures += test_suite_lua();
     /* libc-stub regression: strtol/strtod chain rewrite in lua_stubs.c. */
     total_failures += test_suite_lua_stubs();
