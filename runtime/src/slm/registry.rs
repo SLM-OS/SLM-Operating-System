@@ -391,6 +391,26 @@ pub fn gpu_pinned(index: usize) -> bool {
     index < SLM_MAX_SLOTS && GPU_PINS[index].load(Ordering::Acquire) != 0
 }
 
+extern "C" {
+    /// `kernel/gpu/slm_prog.c`: 1 while a GPU program session maps any
+    /// byte of `[cpu, cpu + bytes)`, a closed one whose close was deferred
+    /// included. Takes no lock.
+    fn slm_prog_weights_mapped(cpu: *const u8, bytes: u64) -> i32;
+}
+
+/// Whether the GPU VM still maps `e`'s weights although no [`GpuPin`]
+/// holds them (#1159). A close that finds the GPU program lock held
+/// elsewhere (another session's step timeout, an operator-library VM
+/// writer) is finished by that holder later; the program and its pin are
+/// gone by then, but its PTEs are not. Unload waits for those too.
+fn gpu_still_maps(e: &LoadedSlm) -> bool {
+    let Some(p) = e.weight_pages else { return false };
+    let bytes = (e.weight_pages_count as u64).saturating_mul(4096);
+    // SAFETY: the kernel only compares the address range with its session
+    // table; it takes no lock and dereferences nothing.
+    unsafe { slm_prog_weights_mapped(p.as_ptr(), bytes) != 0 }
+}
+
 struct SpinGuard;
 
 impl SpinGuard {
@@ -709,14 +729,17 @@ fn adopt_pages(
 
 /// Free the slot at `index`. Returns `LoadError::InvalidFormat` if
 /// the slot is empty or the index is out of range, and `LoadError::InUse`
-/// while a GPU program (even an idle session's) maps its weights.
+/// while a GPU program (even an idle session's) maps its weights, or a
+/// closed program's deferred close has not yet removed its mappings.
 pub fn unload_slm(index: usize) -> Result<(), LoadError> {
     if index >= SLM_MAX_SLOTS {
         return Err(LoadError::InvalidFormat);
     }
     // Take the slot out under the lock so the page free runs
     // without the registry lock held. Pins are taken under the same
-    // lock, so none can appear between the check and the take.
+    // lock, so none can appear between the check and the take, and a
+    // program can only map these weights while it holds a pin: once
+    // the kernel says no session maps them, none will.
     let taken = {
         let _g = SpinGuard::new();
         if gpu_pinned(index) {
@@ -724,6 +747,11 @@ pub fn unload_slm(index: usize) -> Result<(), LoadError> {
         }
         // SAFETY: SpinGuard held — exclusive access to SLOTS.
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
+        // After the pin check: a pin is dropped only after its program's
+        // close returned, deferred or not (#1159).
+        if slot[index].as_ref().is_some_and(gpu_still_maps) {
+            return Err(LoadError::InUse);
+        }
         slot[index].take()
     };
     let entry = match taken {

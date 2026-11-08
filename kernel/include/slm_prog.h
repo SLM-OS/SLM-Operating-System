@@ -142,6 +142,15 @@ const char *slm_prog_reason_for(bool uefi, bool library_empty, bool channel_up, 
 int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *out);
 void slm_prog_close(int32_t h);
 
+/* 1 while some session maps any byte of [cpu, cpu + bytes) as its weights,
+ * else 0. That includes a session whose close was deferred because another
+ * holder had the lock (a step timeout's dump, an operator-library VM
+ * writer): its PTEs stay until that holder finishes the close, after the
+ * caller has dropped its registry pin. The registry's `slm unload` refuses
+ * while this is 1 (#1159). Takes no lock: safe under the registry spinlock
+ * and with IRQs masked. */
+int slm_prog_weights_mapped(const void *cpu, uint64_t bytes);
+
 /* Sessions whose pages were left allocated on close because the GPU could
  * still write them (a timed-out step, a failed evict or TLB invalidate). */
 uint32_t slm_prog_leaked_sessions(void);
