@@ -6704,6 +6704,11 @@ pub extern "C" fn rust_slm_session_gpu_profile(session_id: u32) -> i32 {
     // console, and the runner's lease drop and `slm list` must not spin on
     // the table meanwhile (#1164 review W1). The lease also makes this the
     // session's owner, which slm_prog_profile requires.
+    //
+    // While it prints, the session reads as busy and Decoding in `slm list`
+    // and `slm stats`. A prompt for it that arrives then (`slm prompt`, or a
+    // bus prompt when this is slm-runner's session) gets SLM_ERR_BUSY instead
+    // of waiting. The print takes milliseconds, so neither matters.
     let lease = match slm::session::checkout(session_id as usize) {
         Ok(l) => l,
         Err(slm::session::SlotError::Busy) => return SLM_ERR_BUSY,

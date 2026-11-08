@@ -179,6 +179,16 @@ int component_run(const char *name);
 int component_spawn(const char *name);
 
 /**
+ * Test hook: run the cleanup that a component task with `task_id` runs when
+ * it is destroyed, against slot `idx`, as if that task had been spawned
+ * there. Lets a test play a task from an earlier generation of a slot.
+ *
+ * @param idx Registry slot
+ * @param task_id Task the cleanup speaks for
+ */
+void component_test_run_cleanup(int idx, uint32_t task_id);
+
+/**
  * Hot-swap a running component with a new version.
  *
  * Saves the old component's topic subscriptions, unregisters the old

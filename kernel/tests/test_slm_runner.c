@@ -64,7 +64,6 @@ extern void slm_runner_test_set_publish_timeout(uint32_t ms);
 extern void (*slm_runner_test_log_hook)(const char *line, bool handed_to_ask);
 extern void (*slm_runner_test_start_hook)(void);
 extern uint32_t slm_runner_test_publish_bytes(const uint8_t *bytes, size_t len);
-extern void component_test_run_cleanup(int idx, uint32_t task_id);
 
 /* ============================================================================
  * Fixture

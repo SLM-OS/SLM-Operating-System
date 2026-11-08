@@ -82,7 +82,15 @@ static void component_task_cleanup(void *arg)
 
     /* Released first, so a waiter that sees UNLOADED can run the next one.
      * If the slot is someone else's now (a hot swap reused the index), its
-     * entry and subscriptions aren't this task's to clear. */
+     * entry and subscriptions aren't this task's to clear.
+     *
+     * The release opens a narrow window. If this cleanup is preempted
+     * between here and the unload below, a `component run` of the same
+     * builtin can treat the entry as stale and register a new one at the
+     * same index. If that new task also reaches RUNNING before this resumes,
+     * the unload below hits the new component. slm-runner can't get there:
+     * its starts and stops share one claim, and a stop waits for UNLOADED.
+     * Any other builtin would need a restart inside that window. */
     bool owner = true;
     if (ctx->component_idx >= 0 && ctx->component_idx < COMPONENT_MAX_COUNT) {
         uint32_t mine = ctx->task_id;
