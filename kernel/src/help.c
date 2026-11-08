@@ -1521,6 +1521,31 @@ static const struct help_entry help_entries[] = {
         "patch in tools/tfa-patches/0004-*) is needed.\n"
     ),
 
+    HELP_TEXT("coherency",
+        "coherency - Cache-coherency litmus suite (ARM64 only, #1193)\n"
+        "\n"
+        "Usage:\n"
+        "  coherency regs          Per-CPU CurrentEL, SCTLR, HCR_EL2, TCR, MAIR,\n"
+        "                          CLIDR, MIDR, MPIDR, CTR and CCSIDR per cache level,\n"
+        "                          plus raw CPUECTLR_EL1 and CLUSTERECTLR_EL1 on Pi 5\n"
+        "                          and Jetson (read only, never written).\n"
+        "  coherency litmus [s]    P1-P6 and S1 over every CPU pair (P4, P6 over all\n"
+        "                          CPUs) on cacheable memory with no cache\n"
+        "                          maintenance. s divides the spec iteration counts\n"
+        "                          (default 1). Rows: pattern cpus iters forbidden\n"
+        "                          timeouts ms, then coherency: PASS or FAIL (n rows).\n"
+        "  coherency neg [s]       Negative controls, report only: P2 and P4 with the\n"
+        "                          reader on a Non-shareable alias (a), then on a\n"
+        "                          Non-cacheable alias (b), of the page holding the\n"
+        "                          variables; then (c) a reader with SCTLR.C=0 against\n"
+        "                          a writer that leaves P1 dirty, then cleans it.\n"
+        "\n"
+        "A row fails on any forbidden outcome or any 1 s no-progress timeout. S1\n"
+        "has no barriers and is reported, never judged. The calling CPU plays its\n"
+        "own side of a pair inline; other CPUs run pinned worker tasks that never\n"
+        "print. Spec: docs/archive/coherency-gauntlet/litmus-spec.md.\n"
+    ),
+
     HELP_TEXT("clocks",
         "clocks - EMC and GPU clock rates (Jetson Orin Nano only)\n"
         "\n"

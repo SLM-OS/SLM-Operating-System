@@ -120,6 +120,16 @@ static struct {
  */
 
 /*
+ * Shareability field for a Normal-memory descriptor: Inner Shareable,
+ * unless the caller asked for VMM_FLAG_NONSHARE (SH=00). Only the #1193
+ * negative controls ask for Non-shareable, on a temporary alias.
+ */
+static uint64_t vmm_normal_shareability(uint32_t flags)
+{
+    return (flags & VMM_FLAG_NONSHARE) ? PTE_SH_NON : PTE_SH_INNER;
+}
+
+/*
  * Build a block descriptor (L2 entry for 2MB block).
  *
  * Block descriptors are kernel-mappings only — the per-task user L1
@@ -148,10 +158,10 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;     /* Device memory: non-shareable */
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;   /* Normal NC: inner shareable */
+        desc |= vmm_normal_shareability(flags);   /* default: inner shareable */
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;   /* Normal WB: inner shareable */
+        desc |= vmm_normal_shareability(flags);   /* default: inner shareable */
     }
 
     /* Access permissions */
@@ -227,10 +237,10 @@ static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     }
 
     /* Access permissions */
@@ -287,10 +297,10 @@ static uint64_t make_page_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     }
 
     if (flags & VMM_FLAG_USER) {
