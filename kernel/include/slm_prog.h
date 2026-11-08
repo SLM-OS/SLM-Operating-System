@@ -151,9 +151,11 @@ void slm_prog_close(int32_t h);
  * else 0. That includes a session whose close was deferred because another
  * holder had the lock (a step timeout's dump, an operator-library VM
  * writer): its PTEs stay until that holder finishes the close, after the
- * caller has dropped its registry pin. The registry's `slm unload` refuses
- * while this is 1 (#1159). Takes no lock: safe under the registry spinlock
- * and with IRQs masked. */
+ * caller has dropped its registry pin. A close whose TLB invalidate failed
+ * keeps its weights counted for the rest of the boot: the GPU's TLB may still
+ * translate them. The registry's `slm unload` refuses while this is 1
+ * (#1159). Takes no lock: safe under the registry spinlock and with IRQs
+ * masked. */
 int slm_prog_weights_mapped(const void *cpu, uint64_t bytes);
 
 /* Sessions whose pages were left allocated on close because the GPU could
