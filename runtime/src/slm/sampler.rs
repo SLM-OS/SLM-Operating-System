@@ -727,6 +727,58 @@ fn nucleus(exps: &mut [f32], denom: f32, p: f32) -> Option<Cut> {
     None
 }
 
+/// A power of two whose exps and those above it should already reach
+/// `p`, from `hist`, the count of exps by exponent field: each is worth
+/// at least its bucket's floor, and those floors alone sum to more than
+/// `p * denom`, with 1/64 to spare for the rounding of the walk's running
+/// sum. 0 when no bucket qualifies. Only a bound: [`nucleus`] still makes
+/// the cut, and the caller walks every exp if the cut does not fall
+/// strictly inside the bound.
+fn nucleus_floor(hist: &[u32; 128], denom: f32, p: f32) -> f32 {
+    let target = f64::from(p) * f64::from(denom) * (1.0 + 1.0 / 64.0);
+    let mut lower = 0.0f64;
+    for field in (1..128u32).rev() {
+        let floor = f32::from_bits(field << 23);
+        lower += f64::from(hist[field as usize]) * f64::from(floor);
+        if lower >= target {
+            return floor;
+        }
+    }
+    0.0
+}
+
+/// [`nucleus`] over the positive `exps`, ordering only those at or above
+/// `floor` when that settles it. They are a prefix of the full
+/// descending order, so the walk is the same; but if the cut lands on
+/// their last value, the next value is below the floor, so walk them all.
+fn cut_from_floor(
+    exps: &[f32],
+    scratch: &mut [f32],
+    denom: f32,
+    p: f32,
+    floor: f32,
+) -> Option<Cut> {
+    let gather = |scratch: &mut [f32], floor: f32| {
+        let mut live = 0usize;
+        for &e in exps.iter() {
+            if e > 0.0 && e >= floor {
+                scratch[live] = e;
+                live += 1;
+            }
+        }
+        live
+    };
+    if floor > 0.0 {
+        let live = gather(scratch, floor);
+        let cut = nucleus(&mut scratch[..live], denom, p);
+        if cut.is_some_and(|c| c.len < live) {
+            return cut;
+        }
+    }
+    let live = gather(scratch, 0.0);
+    nucleus(&mut scratch[..live], denom, p)
+}
+
 /// The exact top-p cut: sort token ids by `probs` (descending) and keep
 /// the shortest prefix whose mass reaches `p`. Returns its length (`n`
 /// if the mass never reaches `p`), with the prefix in `idx[..len]`.
@@ -841,7 +893,9 @@ fn top_p_of_vocab(logits: &[f32], p: f32, ws: &mut SamplerWorkspace) -> Option<(
     let n = logits.len();
     let max = max_of_finite(logits)?;
     let mut denom: f32 = 0.0;
-    let mut live = 0usize;
+    // Count of exps by binary exponent: each is in [0, 1], so its
+    // exponent field is at most 127.
+    let mut hist = [0u32; 128];
     for (slot, &x) in ws.exps[..n].iter_mut().zip(logits.iter()) {
         if x == f32::NEG_INFINITY {
             *slot = 0.0;
@@ -850,17 +904,15 @@ fn top_p_of_vocab(logits: &[f32], p: f32, ws: &mut SamplerWorkspace) -> Option<(
         let e = expf(x - max);
         *slot = e;
         denom += e;
-        if e > 0.0 {
-            ws.scratch[live] = e;
-            live += 1;
-        }
+        hist[(e.to_bits() >> 23) as usize & 127] += 1;
     }
     if !finite_positive(denom) {
         return None;
     }
 
     if !ws.p_cut_tied {
-        let Some(cut) = nucleus(&mut ws.scratch[..live], denom, p) else {
+        let floor = nucleus_floor(&hist, denom, p);
+        let Some(cut) = cut_from_floor(&ws.exps[..n], &mut ws.scratch, denom, p, floor) else {
             return Some((Kept::All, max));
         };
         if cut.prob_next != cut.prob_last {
@@ -1823,6 +1875,42 @@ pub(crate) mod tests {
         let cut = nucleus(&mut exps, 4.0, 250.0).expect("reached");
         assert_eq!((cut.len, cut.prob_last, cut.prob_next), (1, 250.0, 249.75));
         assert_eq!(nucleus(&mut [], 1.0, 0.5), None);
+    }
+
+    #[test]
+    fn the_nucleus_floor_bounds_the_walk_and_falls_back() {
+        // Exact powers of two, so every sum below is exact.
+        let tiny = f32::from_bits(107 << 23); // 2^-20
+        let exps = [0.25_f32, 1.0, 0.5, 0.125, 0.5, tiny, 0.0];
+        let denom: f32 = exps.iter().sum();
+        let mut hist = [0u32; 128];
+        for &e in exps.iter() {
+            hist[(e.to_bits() >> 23) as usize & 127] += 1;
+        }
+        // Floors: 1.0 + 0.5 + 0.5 = 2.0 covers 0.8 * 2.375 * (1 + 1/64).
+        assert_eq!(nucleus_floor(&hist, denom, 0.8), 0.5);
+        // Nothing covers almost all of the mass with 1/64 to spare.
+        assert_eq!(nucleus_floor(&hist, denom, 0.999), 0.0);
+
+        let full = |p: f32| {
+            let mut v: Vec<f32> = exps.iter().copied().filter(|&e| e > 0.0).collect();
+            nucleus(&mut v, denom, p)
+        };
+        let mut scratch = [0.0_f32; 7];
+        for (p, floor) in [
+            (0.8, 0.25),      // cut inside the floor: three of four values
+            (0.8, 0.5),       // cut on the floor's last value: walk everything
+            (0.99, 0.125),    // the same, with a value below the floor
+            (0.99, 0.0),      // no floor
+            (0.9999999, 0.5), // never reached above the floor
+        ] {
+            let got = cut_from_floor(&exps, &mut scratch, denom, p, floor);
+            assert_eq!(got, full(p), "p={p} floor={floor}");
+        }
+        // The fallback matters: on the floor's last value the next one
+        // is below it.
+        let cut = cut_from_floor(&exps, &mut scratch, denom, 0.99, 0.125).expect("reached");
+        assert_eq!((cut.len, cut.prob_next), (5, tiny / denom));
     }
 
     #[test]
