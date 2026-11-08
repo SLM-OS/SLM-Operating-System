@@ -1233,6 +1233,82 @@ static void test_efi_range_os_owned_nc_block(void)
  * Test Suite Entry Point
  * ============================================================================ */
 
+/* ============================================================================
+ * #1193: VMM_FLAG_NONSHARE (Non-shareable Normal alias for `coherency neg`)
+ * ============================================================================ */
+
+#define PTE_SH_MASK         (3UL << 8)
+#define PTE_ATTRIDX_MASK    (7UL << 2)
+
+/* Builder: NONSHARE clears SH to 00 and keeps the Normal WB index. */
+static void test_nonshare_block_desc_attributes(void)
+{
+    uint64_t pa = RAM_BASE + 0x4000000UL;
+    uint64_t wb = vmm_test_make_block_desc(pa, VMM_FLAGS_KERNEL_DATA);
+    uint64_t ns = vmm_test_make_block_desc(pa, VMM_FLAGS_KERNEL_DATA | VMM_FLAG_NONSHARE);
+    uint64_t nc = vmm_test_make_block_desc(pa, VMM_FLAGS_DMA);
+
+    TEST_ASSERT_EQUAL_HEX64(PTE_SH_INNER, wb & PTE_SH_MASK);
+    TEST_ASSERT_EQUAL_HEX64(PTE_SH_NON, ns & PTE_SH_MASK);
+    TEST_ASSERT_EQUAL_HEX64(PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB), ns & PTE_ATTRIDX_MASK);
+    TEST_ASSERT_EQUAL_HEX64(PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC), nc & PTE_ATTRIDX_MASK);
+    TEST_ASSERT_EQUAL_HEX64(PTE_SH_INNER, nc & PTE_SH_MASK);
+    /* Everything but the SH field is identical. */
+    TEST_ASSERT_EQUAL_HEX64(wb & ~PTE_SH_MASK, ns & ~PTE_SH_MASK);
+}
+
+/*
+ * Live mapping: install the alias the way `coherency neg` does at
+ * COH_ALIAS_VA, read the descriptor back from the L2 table, check data
+ * written through the identity map reads back through the alias, then
+ * unmap and check the VA is gone.
+ */
+static void test_nonshare_alias_mapping_reads_back(void)
+{
+    const uint64_t alias = 0xFFFFFF9000000000UL - BLOCK_SIZE;  /* COH_ALIAS_VA */
+    void *blk = pmm_alloc_pages(BLOCK_SIZE / PAGE_SIZE);
+    TEST_ASSERT_NOT_NULL(blk);
+    uint64_t pa = (uint64_t)(uintptr_t)blk;
+    TEST_ASSERT_EQUAL_HEX64(0, pa & (BLOCK_SIZE - 1));
+
+    TEST_ASSERT_EQUAL_INT(0, vmm_ensure_kernel_l2_table(alias));
+    TEST_ASSERT_FALSE(vmm_is_mapped(alias));
+
+    static const uint32_t flags[2] = {
+        VMM_FLAGS_KERNEL_DATA | VMM_FLAG_NONSHARE,
+        VMM_FLAGS_DMA,
+    };
+    static const uint64_t want_sh[2] = { PTE_SH_NON, PTE_SH_INNER };
+    static const uint64_t want_idx[2] = {
+        PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB), PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC),
+    };
+    volatile uint64_t *ident = (volatile uint64_t *)blk;
+    volatile uint64_t *via = (volatile uint64_t *)alias;
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_INT(0, vmm_map_block(alias, pa, flags[i]));
+        uint64_t pte = vmm_test_get_l2_entry(alias);
+        TEST_ASSERT_EQUAL_HEX64(PTE_TYPE_BLOCK, pte & PTE_TYPE_MASK);
+        TEST_ASSERT_EQUAL_HEX64(pa, pte & 0x0000FFFFFFE00000UL);
+        TEST_ASSERT_EQUAL_HEX64(want_sh[i], pte & PTE_SH_MASK);
+        TEST_ASSERT_EQUAL_HEX64(want_idx[i], pte & PTE_ATTRIDX_MASK);
+        TEST_ASSERT_EQUAL_UINT64(pa, vmm_virt_to_phys(alias));
+
+        uint64_t marker = 0xC0DE119300000000UL | (uint64_t)i;
+        ident[0] = marker;
+        __asm__ volatile("dsb ish" ::: "memory");
+        /* QEMU models no caches, so both aliases read the same value;
+         * on hardware the NC read could be stale and is not asserted. */
+#if defined(PLATFORM_QEMU_VIRT)
+        TEST_ASSERT_EQUAL_HEX64(marker, via[0]);
+#else
+        (void)via[0];
+#endif
+        TEST_ASSERT_EQUAL_INT(0, vmm_unmap_block(alias));
+        TEST_ASSERT_FALSE(vmm_is_mapped(alias));
+    }
+    pmm_free_pages(blk, BLOCK_SIZE / PAGE_SIZE);
+}
+
 int test_suite_vmm(void)
 {
     UnityBegin("VMM/TLB Functional Tests");
@@ -1299,6 +1375,10 @@ int test_suite_vmm(void)
     RUN_TEST(test_free_asid_zero_noop);
     RUN_TEST(test_user_pte_has_ng_bit);
     RUN_TEST(test_kernel_pte_global);
+
+    /* #1193: Non-shareable alias flag for the coherency controls */
+    RUN_TEST(test_nonshare_block_desc_attributes);
+    RUN_TEST(test_nonshare_alias_mapping_reads_back);
 
     return UnityEnd();
 }

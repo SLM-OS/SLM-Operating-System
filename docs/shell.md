@@ -107,6 +107,7 @@ Network:                              # only when ENABLE_NETWORKING=ON
 
 Hardware control & diagnostics:       # mix of always-available + platform-gated
   bpmp         BPMP IPC smoke test (Jetson only)
+  coherency    Cache-coherency litmus (coherency regs | litmus [scale] | neg [scale]) (non-x86)
   diag         Pi 5 IRQ-delivery diagnostics (PI5_IRQ_DIAG only)
   gpu          Show GPU info (non-x86); see also nvidia_gpu_register on x86-64
   hailo        Hailo NPU control
@@ -677,6 +678,41 @@ Network Statistics:
   RX errors:  0  dropped: 0
   TX errors:  0
 ```
+
+### Coherency Command (ARM64 only)
+
+The `coherency` verb (#1193) measures whether ordinary cacheable memory is
+coherent between CPUs, with the litmus patterns defined in
+`docs/archive/coherency-gauntlet/litmus-spec.md`. The Linux harness in
+`scripts/coherency/` runs the same patterns, and both print rows in the
+same field order so results compare row for row. Code:
+`kernel/include/coherency_litmus.h` (patterns), `kernel/src/coherency.c`
+(driver and verb), `kernel/tests/test_coherency.c` (tests).
+
+| Command | Description |
+|---------|-------------|
+| `coherency regs` | For every online CPU: CurrentEL, SCTLR_EL2 and HCR_EL2 (EL2 only), the EL1 copy of SCTLR (SCTLR_EL12 when E2H=1), the TCR and MAIR in use, CLIDR_EL1, CTR_EL0, MIDR_EL1, MPIDR_EL1 and CCSIDR_EL1 for each data or unified cache level. On Pi 5 and Jetson it also prints CPUECTLR_EL1 and CLUSTERECTLR_EL1 as raw values: read only, never written (a denied write traps to EL3), and not decoded, because bit meanings differ between Cortex-A76 and A78AE. QEMU builds do not read them. |
+| `coherency litmus [scale]` | P1 to P6 and S1 over every ordered pair of online CPUs (P4 once per writer CPU over all CPUs, P6 over all CPUs). `scale` divides the spec iteration counts (default 1: 10^6 per pair for P1, P2, P4 and S1, 10^5 rounds for P3 and P5, 10^6 per CPU for P6). Prints `pattern cpus iters forbidden timeouts ms` rows, then `coherency: PASS` or `coherency: FAIL (n rows)`. A row fails on any forbidden outcome or any 1 s no-progress timeout; S1 has no barriers and is reported, never judged. |
+| `coherency neg [scale]` | Negative controls, report only. (a) P2 and P4 with the writer on the normal mapping and the reader on a Normal WB Non-shareable alias (SH=00) of the same 2 MB block; (b) the same with the reader on a Normal Non-cacheable alias; (c) every pair with a reader whose data cache is off (SCTLR.C=0, IRQs masked, register-only loop): the writer cleans P0 to the Point of Coherency, stores P1 with no clean, and the reader counts stale P0 reads (phase 1), then the writer cleans P1 and the reader counts fresh P1 reads (phase 2). Only (c) is guaranteed by the core TRMs to show stale reads on hardware; (a) and (b) are findings either way. QEMU TCG models no caches, so every control reads fresh data there. |
+
+Cells: `cpus` is `A>B` for pair patterns (A is the writer, T0, or the
+even side of P5), `w<W>/<lo>-<hi>` for P4 with writer W, and `<lo>-<hi>`
+for P6.
+
+Dispatch: the CPU running the shell plays its own role inline (the shell
+task is pinned there and raised to high priority for the run), and every
+other participant runs as a high-priority worker task pinned with
+`task_set_affinity()` and queued with `scheduler_add_task_to_cpu()`.
+Workers never print. Each writes its counts into its own cacheable result
+slot and publishes it with STLR; the shell prints. A worker that finishes
+without its result becoming visible within 1 s is reported as a lost
+result and counted as a timeout, so a stale line can never read as a pass.
+
+All pattern variables live in ordinary cacheable memory (`.bss`, or a 2 MB
+PMM block for the controls), one variable per 128-byte line, with no cache
+maintenance in any pattern. The control aliases are mapped at the top 2 MB
+of the kbuf VA window only while a control runs, then unmapped with a TLB
+invalidate.
 
 ### NVIDIA GPU Command (x86-64 only)
 

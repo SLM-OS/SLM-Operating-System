@@ -836,6 +836,8 @@ set(KERNEL_SOURCES
     kernel/src/shell_session.c
     kernel/src/shell_sys.c
     kernel/src/timdiag_pi5_probes.c
+    # `coherency` verb + litmus driver (#1193). ARM64 only (inline asm).
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/coherency.c>
     kernel/src/shell_fs.c
     kernel/src/boot_models.c
     kernel/src/shell_clocks.c
@@ -1151,6 +1153,8 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
+    # Coherency litmus suite + negative controls (#1193). ARM64 only.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coherency.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net_http.c>
     # USB core tests (Phase 1 of #266). Platform-neutral — the mock

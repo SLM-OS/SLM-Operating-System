@@ -262,6 +262,14 @@
  */
 #define VMM_FLAG_PMM_OWNED      (1U << 11)  /* Free leaf page on user-L1 destroy */
 
+/*
+ * Normal memory with the Non-shareable attribute (SH=00) instead of the
+ * default Inner Shareable. Ignored for Device memory (always SH=00).
+ * Used only by the `coherency neg` control (#1193) to build a temporary
+ * Non-shareable alias of a cacheable block; nothing else should need it.
+ */
+#define VMM_FLAG_NONSHARE       (1U << 12)  /* Normal memory, SH=00 */
+
 /* Common flag combinations */
 #define VMM_FLAGS_KERNEL_CODE   (VMM_FLAG_READ | VMM_FLAG_EXEC)
 #define VMM_FLAGS_KERNEL_DATA   (VMM_FLAG_READ | VMM_FLAG_WRITE)
