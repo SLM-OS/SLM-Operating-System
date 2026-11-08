@@ -36,8 +36,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | Jetson PASS (47ab164a, 44809f4b); Pi 5 attempt 4 (network-served results) | 0 |
-| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); Jetson hardware stage running | 0 |
+| C1 | Linux reference bar | both boards PASS (10237853); critic round 1 running | 1 |
+| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
 | C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
