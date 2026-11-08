@@ -58,10 +58,13 @@ enum emc_hold_result emc_hold_check(struct emc_hold_state *s, const char *where,
         return EMC_HOLD_STILL_LOW;
     }
     /* Trust a readback over the request's reply: the reply is the rate
-     * BPMP chose, not necessarily the one that stays. */
+     * BPMP chose, not necessarily the one that stays. Without a readback
+     * the rate is unknown, so the re-request is not counted as restoring
+     * it (#1161 review). */
     uint64_t now = 0;
     if (s->ops->get_rate(&now) != 0) {
-        now = got;
+        s->read_errors++;
+        return EMC_HOLD_READ_ERROR;
     }
     s->last_hz = now;
     if (after_hz != NULL) *after_hz = now;
@@ -174,7 +177,13 @@ static void log_check(const char *where, uint32_t id, int rc, bool always)
              (unsigned)id, ms_since_begin(), mhz(after), (unsigned)drops);
         break;
     case EMC_HOLD_READ_ERROR:
-        if (always) {
+        if (before != 0) {
+            /* The first readback worked and was low: a drop, re-requested,
+             * but the readback after the request failed. */
+            WARN("EMC dropped %llu -> %llu MHz after %s(%u) at +%llu ms; requested"
+                 " again, readback failed (drop #%u)", mhz(prev), mhz(before), where,
+                 (unsigned)id, ms_since_begin(), (unsigned)drops);
+        } else if (always) {
             uart_printf("[emc-hold] +%llu ms %s(%u) rc=%d: EMC readback failed\n",
                         ms_since_begin(), where, (unsigned)id, rc);
         }

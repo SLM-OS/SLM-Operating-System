@@ -17,6 +17,7 @@ static struct {
     uint64_t rate;          /* what get_rate reports */
     uint64_t grant;         /* what a request sets the rate to */
     int get_rc;
+    unsigned get_fail_from;  /* if non-zero, gets from this one on fail */
     int req_rc;
     unsigned gets;
     unsigned requests;
@@ -27,6 +28,7 @@ static int fake_get(uint64_t *hz)
 {
     fake.gets++;
     if (fake.get_rc != 0) return fake.get_rc;
+    if (fake.get_fail_from != 0 && fake.gets >= fake.get_fail_from) return -4;
     *hz = fake.rate;
     return 0;
 }
@@ -124,6 +126,28 @@ static void test_read_error_does_not_request(void)
     TEST_ASSERT_EQUAL_UINT(0, fake.requests);
 }
 
+static void test_failed_readback_after_rerequest_is_unknown(void)
+{
+    /* The re-request is granted, but the readback after it fails: the
+     * reply alone must not count as restored (#1161 review). */
+    struct emc_hold_state s;
+    fake_reset(MHZ(204), MHZ(3199));
+    fake.get_fail_from = 2;
+    emc_hold_init(&s, &fake_ops, MHZ(3199));
+    uint64_t before = 0, after = 0;
+    /* Unity's macros evaluate their arguments twice: check once. */
+    enum emc_hold_result r = emc_hold_check(&s, "pg_on", &before, &after);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_READ_ERROR, r);
+    TEST_ASSERT_EQUAL_UINT(1, fake.requests);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(204), before);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(204), after);
+    TEST_ASSERT_EQUAL_UINT32(1, s.drops);
+    TEST_ASSERT_EQUAL_UINT32(0, s.reasserts);
+    TEST_ASSERT_EQUAL_UINT32(1, s.read_errors);
+    TEST_ASSERT_EQUAL_UINT32(1, s.checks);
+    TEST_ASSERT_EQUAL_STRING("pg_on", s.first_drop);
+}
+
 static void test_observe_only_never_requests(void)
 {
     struct emc_hold_state s;
@@ -177,6 +201,7 @@ int test_suite_emc_hold(void)
     RUN_TEST(test_readback_wins_over_request_reply);
     RUN_TEST(test_failed_rerequest_is_still_low);
     RUN_TEST(test_read_error_does_not_request);
+    RUN_TEST(test_failed_readback_after_rerequest_is_unknown);
     RUN_TEST(test_observe_only_never_requests);
     RUN_TEST(test_boot_sequence_catches_every_reset);
     RUN_TEST(test_long_where_is_truncated);

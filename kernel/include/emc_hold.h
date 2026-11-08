@@ -52,7 +52,7 @@ enum emc_hold_result {
     EMC_HOLD_OK = 0,          /* at or above target (or observe only) */
     EMC_HOLD_RESTORED,        /* was below target, re-request brought it back */
     EMC_HOLD_STILL_LOW,       /* was below target, re-request did not help */
-    EMC_HOLD_READ_ERROR,      /* the readback itself failed */
+    EMC_HOLD_READ_ERROR,      /* a readback failed: the rate is unknown */
 };
 
 void emc_hold_init(struct emc_hold_state *s, const struct emc_hold_ops *ops,
@@ -61,7 +61,11 @@ void emc_hold_init(struct emc_hold_state *s, const struct emc_hold_ops *ops,
 /*
  * Read the rate. If it is below target_hz, count a drop, record `where`,
  * and request target_hz again. *before_hz / *after_hz (either may be NULL)
- * get the rate read and, after a re-request, the rate read back.
+ * get the rate read and, after a re-request, the rate read back. Only a
+ * readback counts a re-request as restored: if the readback after it
+ * fails, the result is EMC_HOLD_READ_ERROR (read_errors counts it, the
+ * drop stays counted, reasserts does not) and *after_hz is left at the
+ * rate read before.
  */
 enum emc_hold_result emc_hold_check(struct emc_hold_state *s, const char *where,
                                     uint64_t *before_hz, uint64_t *after_hz);
@@ -69,8 +73,9 @@ enum emc_hold_result emc_hold_check(struct emc_hold_state *s, const char *where,
 /* ---- Jetson boot and runtime binding (stubs elsewhere) ---- */
 
 /*
- * After bpmp_init: log the rate UEFI left, request the target through
- * MRQ_CLK, read it back, and arm the per-BPMP-request watch. Boot steps
+ * After bpmp_init: log the rate UEFI left, request the target as a
+ * bandwidth-manager floor (MRQ_BWMGR_INT), read it back, and arm the
+ * per-BPMP-request watch. Boot steps
  * then call emc_hold_boot_step(); emc_hold_boot_end() disarms the watch
  * and prints a summary.
  */
