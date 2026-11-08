@@ -1706,6 +1706,11 @@ extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                               uint32_t n,
                                               uint32_t eps_bits);
 
+/* Copy `bytes` of operator-library scratch slot `slot` (0: x, 1: gamma,
+ * 2: output of the last RMSNorm) out of DRAM, for `nvgpu cold race`
+ * (#1186). 0, SLM_GPU_ERR_CHANNEL_DOWN, or -1. Jetson only. */
+extern int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes);
+
 /*
  * W2: stage `len` bytes of CPU-resident weight data into the GPU
  * weights pool published by gpu-channel-helper's --weights-pool-size

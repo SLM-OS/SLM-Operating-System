@@ -1236,8 +1236,8 @@ static int step_policies(void)
  *       PBDMA, then the GR part of the engines step, the non-context
  *       loads, the PMU's FECS/GPCCS bootstrap and the GR init table, as
  *       nvgpu_engine_gr_reset -> nvgpu_gr_reset, then ga10b_chan_reset.
- *       Taken when L1 fails, or straight away when a fault is latched
- *       (nvgpu always resets the engine after an MMU fault).
+ *       Taken when L1 fails. A latched fault does not skip L1: `nvgpu
+ *       cold check` leaves one on a healthy channel.
  *
  * Both reload the channel's GR context from the golden image (the saved
  * one may hold the hung work), evict L2 (the dead program's dirty lines

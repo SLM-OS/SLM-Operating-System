@@ -75,9 +75,9 @@ static void test_step_names(void)
 }
 #endif
 
-/* #1171: recovery skips the channel-only level when an error is latched,
- * as nvgpu always resets the engine after an MMU fault. A plain hang (a
- * pending semaphore acquire) latches nothing. */
+/* #1171: which state counts as a latched error, recorded with each
+ * recovery (level 1 is still tried first). A plain hang (a pending
+ * semaphore acquire) latches nothing. */
 static void test_recover_needs_engine_reset(void)
 {
     TEST_ASSERT_FALSE(ga10b_cold_recover_needs_engine_reset(0x00000ac2u, 0, 0, 0, 0));

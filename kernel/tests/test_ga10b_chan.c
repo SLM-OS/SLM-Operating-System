@@ -497,6 +497,24 @@ static void test_chan_reset_rebinds_a_clean_channel(void)
     TEST_ASSERT_EQUAL_INT((int)g_nlog - 1, enable);
     TEST_ASSERT_TRUE(ch.enabled);
 
+    /* GA10B_CHAN_RESET_NO_RELOAD, the recovery's default (#1171): the
+     * same order with no forced context reload at all. A reload still
+     * pending when the GR engine is reset left the channel DEAD on
+     * hardware. */
+    g_nlog = 0;
+    TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK,
+                          ga10b_chan_reset(&g_rec_ops, &g, &ch, GA10B_CHAN_RESET_NO_RELOAD));
+    clear = log_find(chram, GA10B_CHRAM_CLEAR_CHANNEL, 0);
+    submit = log_find(rl + GA10B_RL_SUBMIT, ga10b_runlist_submit_val(0u, 2u), 0);
+    sched = log_find(rl + GA10B_RL_SCHED_DISABLE, 0u, 0);
+    enable = log_find(chram, GA10B_CHRAM_ENABLE_CHANNEL, 0);
+    TEST_ASSERT_EQUAL_INT(-1, log_find(chram, GA10B_CHRAM_FORCE_CTX_RELOAD, 0));
+    TEST_ASSERT_EQUAL_INT(0, clear);
+    TEST_ASSERT_TRUE(submit > clear);
+    TEST_ASSERT_TRUE(sched > submit);
+    TEST_ASSERT_EQUAL_INT((int)g_nlog - 1, enable);
+    TEST_ASSERT_TRUE(enable > sched);
+
     /* Without a GR context to reload: refused before touching anything. */
     ch.gr = NULL;
     g_nlog = 0;

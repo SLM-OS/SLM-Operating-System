@@ -2080,6 +2080,31 @@ static int slm_ffi_resolve_scratch_base(uint64_t *out_phys,
     return oplib_pool_scratch_base(out_phys, out_gva);
 }
 
+/* Read `bytes` from operator-library scratch slot 0-2 as the GPU left it
+ * in DRAM, for `nvgpu cold race` to tell a wrong result apart (#1186):
+ * inputs overwritten by another writer, an output the CPU copy missed,
+ * or a kernel that computed a wrong value from the right inputs. Takes
+ * the dispatch lock like a dispatch; the L2 was evicted by the last one. */
+int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes)
+{
+    static const uint64_t off[3] = { OPLIB_POOL_OFF_SCRATCH0, OPLIB_POOL_OFF_SCRATCH1,
+                                     OPLIB_POOL_OFF_SCRATCH2 };
+    if (slot > 2u || dst == NULL || bytes == 0u || bytes > OPLIB_POOL_SLOT_BYTES) return -1;
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
+    uint64_t base_phys = 0;
+    uint64_t base_gva = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    void *src = (void *)(uintptr_t)(base_phys + off[slot]);
+    cache_invalidate_range(src, (size_t)((bytes + 4095u) & ~4095u));
+    memcpy(dst, src, bytes);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,
                                        void *out_cpu_out,
@@ -2550,6 +2575,14 @@ int slm_runtime_stage_weight(const void *cpu_bytes,
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
+
+int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes)
+{
+    (void)slot;
+    (void)dst;
+    (void)bytes;
+    return -1;
+}
 
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,

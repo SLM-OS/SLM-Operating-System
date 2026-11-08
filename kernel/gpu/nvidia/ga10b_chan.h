@@ -523,8 +523,9 @@ void ga10b_chan_sched_enable(const struct ga10b_gpu_ops *ops, const struct ga10b
  * back to what ga10b_chan_create left (#1171): CHRAM cleared, the GR
  * context reloaded from the golden image, RAMFC as at SETUP_BIND
  * (GP_GET 0, no pending method or acquire), USERD GP_GET/GP_PUT 0, the
- * runlist resubmitted and scheduling on, the channel enabled with a
- * forced context reload. Instance block (RAMIN), VM, GPFIFO, pushbuffer
+ * runlist resubmitted and scheduling on, the channel enabled; with a
+ * forced context reload first unless `flags` has GA10B_CHAN_RESET_NO_RELOAD
+ * (what recovery passes, ga10b_cold.h). Instance block (RAMIN), VM, GPFIFO, pushbuffer
  * and every mapping are kept, so handoffs built on the channel stay
  * valid; their GPFIFO cursor must go back to 0. */
 int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
