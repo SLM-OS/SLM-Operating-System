@@ -107,6 +107,7 @@ static const struct emc_hold_ops g_bpmp_ops = {
 
 static struct emc_hold_state g_hold;
 static bool g_hold_ready;
+static bool g_boot_done;
 static uint64_t g_t0;
 
 static unsigned long long ms_since_begin(void)
@@ -150,7 +151,9 @@ static void log_check(const char *where, uint32_t id, int rc, bool always)
 
 static void post_op_hook(const char *op, uint32_t id, int rc)
 {
-    log_check(op, id, rc, EMC_HOLD_BISECT != 0);
+    /* After boot only changes are logged (the fan task's thermal reads
+     * make this a check every 2 s). */
+    log_check(op, id, rc, EMC_HOLD_BISECT != 0 && !g_boot_done);
 }
 
 void emc_hold_boot_begin(void)
@@ -187,7 +190,10 @@ void emc_hold_boot_step(const char *step)
 void emc_hold_boot_end(void)
 {
     if (!g_hold_ready) return;
+#if !EMC_HOLD_BISECT
     bpmp_set_post_op_hook(NULL);
+#endif
+    g_boot_done = true;
     log_check("boot_end", 0, 0, true);
     uart_printf("[emc-hold] boot: %u checks, %u drops (first after %s, last after %s),"
                 " %u restored, %u read errors\n",
