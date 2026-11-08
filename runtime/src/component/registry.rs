@@ -227,6 +227,11 @@ pub fn set_state(index: usize, state: ComponentState) -> Result<(), &'static str
             Err("Component slot not active")
         } else {
             reg.components[index].state = state;
+            // Unloaded frees the slot, the way unregister does. Without this
+            // every component task that exited left `count` one too high.
+            if matches!(state, ComponentState::Unloaded) && reg.count > 0 {
+                reg.count -= 1;
+            }
             Ok(())
         }
     };

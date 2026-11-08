@@ -45,6 +45,7 @@
 
 struct ga10b_gpu_ops;
 struct ga10b_chan;
+struct ga10b_vm;
 struct oplib_gpu_as;
 struct oplib_wpool;
 
@@ -65,6 +66,14 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
 
 /* True when the attached cold channel's handoff is the active one. */
 bool oplib_cold_active(void);
+
+/* True when the embedded operator library holds no SASS: the kernel was built
+ * without `make oplib-shaders`, so no GPU consumer can run. */
+bool oplib_cold_library_empty(void);
+
+/* The channel's ops and VM, for the SLM GPU program (kernel/gpu/slm_prog.c).
+ * 0 when active, -1 otherwise. */
+int oplib_cold_vm(const struct ga10b_gpu_ops **ops, struct ga10b_vm **vm);
 
 /* The cold address space, or NULL when not active. */
 const struct oplib_gpu_as *oplib_cold_as(void);

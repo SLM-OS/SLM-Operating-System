@@ -572,6 +572,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/pmu.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_model.c>
     # Per-arch RNG TRNG probes (FEAT_RNG / RDRAND). Compiled unconditionally —
     # rng_init's jitter path is useful even without SSH and is what the
     # boot banner reports. See `kernel/include/rng.h`. #199a / #893.
@@ -687,6 +688,8 @@ set(KERNEL_SOURCES
     # encoder it uses: pure code, memory reached through ga10b_gpu_ops.
     kernel/gpu/nvidia/ga10b_mnist_pipeline.c
     kernel/gpu/nvidia/ga10b_qmd.c
+    kernel/gpu/nvidia/ga10b_prog.c
+    kernel/gpu/slm_prog.c
     # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
     # per-kind handoff store (#1092): pure code. The eviction weights
     # are generated from the Rust model (see the generator block below).
@@ -831,6 +834,8 @@ set(KERNEL_SOURCES
     kernel/src/shell_sys.c
     kernel/src/timdiag_pi5_probes.c
     kernel/src/shell_fs.c
+    kernel/src/boot_models.c
+    kernel/src/shell_clocks.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/shell_top.c
@@ -1171,6 +1176,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
     # UEFI-direct relocation decision (#26) — same platforms as efi_stub.c
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_efi_reloc.c>
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_boot_models.c>
     kernel/tests/test_tegra_cpufreq.c
     kernel/tests/test_tegra_fan.c
     kernel/tests/test_ga10b_netlist.c
@@ -1365,6 +1371,56 @@ else()
     target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fno-pie)
 endif()
 
+# SLM golden tests against llama.cpp (#475). On every platform, since the
+# runtime takes different code paths per architecture, but only in boot-test
+# kernels: TEST_SOURCES go into every image, and these fixtures are about 860 KB.
+if(ENABLE_BOOT_TESTS)
+    target_sources(slmos.elf PRIVATE
+        kernel/tests/test_slm_golden.c
+        kernel/tests/test_slm_prog.c
+        kernel/tests/slm_golden_embed.S)
+    set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
+    set_source_files_properties(
+        kernel/tests/slm_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_GOLDEN_OPS_PATH=${SLM_GOLDEN_DIR}/golden_ops.rec;SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/golden_ops.rec;${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
+# SLM kernels' registers and shared memory, from the manifest of their cubins.
+# Every platform: the table is pure data and the tests read it.
+set(SLM_KERNELS_GEN "${CMAKE_BINARY_DIR}/generated/slm_kernels_gen.h")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+add_custom_command(
+    OUTPUT  "${SLM_KERNELS_GEN}"
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json" "${SLM_KERNELS_GEN}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+            "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
+    VERBATIM)
+# Named so `make tidy-db` can generate the header without building the kernel:
+# clang-tidy has to parse the files that include it.
+add_custom_target(slm_kernels_header DEPENDS "${SLM_KERNELS_GEN}")
+add_dependencies(slmos.elf slm_kernels_header)
+target_sources(slmos.elf PRIVATE "${SLM_KERNELS_GEN}")
+target_include_directories(slmos.elf PRIVATE "${CMAKE_BINARY_DIR}/generated")
+
+# `slm gpu golden`: the tiny model and llama.cpp's logits in a production
+# image, to compare the GPU program on hardware (#475). About 790 KB.
+option(SLM_GPU_GOLDEN "Embed the SLM golden fixture for `slm gpu golden`" OFF)
+if(SLM_GPU_GOLDEN)
+    target_sources(slmos.elf PRIVATE kernel/src/slm_gpu_golden_embed.S)
+    target_compile_definitions(slmos.elf PRIVATE SLM_GPU_GOLDEN)
+    set(SLM_GOLDEN_DIR ${CMAKE_SOURCE_DIR}/scripts/fixtures/slm)
+    set_source_files_properties(
+        kernel/src/slm_gpu_golden_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SLM_GOLDEN_TINY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;SLM_GOLDEN_GREEDY_PATH=${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+        OBJECT_DEPENDS      "${SLM_GOLDEN_DIR}/tiny_qwen2.gguf;${SLM_GOLDEN_DIR}/tiny_qwen2_greedy.rec"
+    )
+endif()
+
 # Feed absolute paths of the demo Lua scripts to demo_scripts.S so GAS's
 # .incbin can resolve them regardless of the assembler's working directory.
 # OBJECT_DEPENDS makes the .S file rebuild when the scripts change so the
@@ -1541,9 +1597,12 @@ elseif(OPLIB_SASS_FILES)
         COMMAND python3
                 "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
                 --skip-missing
+                --slm-manifest "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 "${OPLIB_BLOB_FINAL}"
         DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/gen-slm-kernel-table.py"
+                "${CMAKE_SOURCE_DIR}/scripts/cuda/slm/MANIFEST.json"
                 "${OPLIB_MANIFEST}"
                 ${OPLIB_SASS_FILES}
         VERBATIM
@@ -1867,6 +1926,9 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # Same isolation pattern as the `lua` and `ai_sched` libraries above.
 # ==========================================================================
 add_library(slm_shell STATIC kernel/src/slm_shell.c)
+if(SLM_GPU_GOLDEN)
+    target_compile_definitions(slm_shell PRIVATE SLM_GPU_GOLDEN)
+endif()
 target_include_directories(slm_shell PRIVATE ${KERNEL_INCLUDES} ${BUILD_INFO_DIR})
 add_dependencies(slm_shell generate_build_info)
 

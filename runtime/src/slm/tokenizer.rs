@@ -5,8 +5,8 @@
 //! §M2 and `docs/design/slm-integration.md`). Vocab + merges + special-token
 //! tables are loaded from the GGUF metadata produced by the M1.x parser
 //! ([`crate::slm::gguf`]). No external regex / tokenizer crate is pulled
-//! in: the GPT-2 pre-tokenization split is implemented as a hand-rolled
-//! DFA.
+//! in: the pre-tokenization splits ([`PreTokenizer`], chosen by the GGUF's
+//! `tokenizer.ggml.pre`) are implemented by hand.
 //!
 //! The tokenizer is `no_std` + `alloc`, the same constraint envelope as
 //! the rest of the SLM runtime stack.
@@ -18,6 +18,7 @@
 //! | `tokenizer.ggml.tokens`      | `Array<String>`  | One entry per id, indexed by token id.   |
 //! | `tokenizer.ggml.merges`      | `Array<String>`  | `"left right"` per entry; first-space.   |
 //! | `tokenizer.ggml.token_type`  | `Array<I32>`     | Optional. 1 = NORMAL, 2 = BYTE, 3 = CTRL.|
+//! | `tokenizer.ggml.pre`         | `String`         | Optional. Selects the [`PreTokenizer`].  |
 //!
 //! For absent `token_type` metadata the loader falls back to detecting
 //! special tokens by the `<|...|>` pattern and assumes any single-byte
@@ -43,6 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::slm::gguf::{Gguf, MetaType, MetaValue};
+use crate::slm::unicode_tables::{LETTER_RANGES, NUMBER_RANGES};
 
 // ---------------------------------------------------------------------------
 // Plausibility gates
@@ -104,8 +106,39 @@ pub enum TokenizerError {
 // Tokenizer state
 // ---------------------------------------------------------------------------
 
+/// The regex that cuts text into chunks before BPE merging. Different splits
+/// give different token ids for the same text, and a model only ever saw the
+/// one it was trained with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreTokenizer {
+    /// `'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`.
+    /// Any GGUF that does not name a pre-tokenizer below.
+    Gpt2,
+    /// Qwen2's split, see [`next_chunk_qwen2`]. `tokenizer.ggml.pre` of `qwen2`
+    /// and the other names llama.cpp maps to `LLAMA_VOCAB_PRE_TYPE_QWEN2`.
+    Qwen2,
+}
+
+impl PreTokenizer {
+    fn from_gguf(gguf: &Gguf<'_>) -> Self {
+        match gguf.metadata("tokenizer.ggml.pre") {
+            Some(MetaValue::String(s))
+                if matches!(s.as_str(), "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2") =>
+            {
+                PreTokenizer::Qwen2
+            }
+            _ => PreTokenizer::Gpt2,
+        }
+    }
+}
+
 /// Byte-level BPE tokenizer.
 pub struct Bbpe {
+    /// Pieces of encoded text the vocab has no token for, each encoded
+    /// byte by byte or dropped. `slm stats` reports it as OOV.
+    oov_pieces: core::sync::atomic::AtomicU64,
+    /// The pre-tokenizer the GGUF names.
+    pre: PreTokenizer,
     /// Token-id → token-bytes.
     vocab: Vec<Vec<u8>>,
     /// Reverse lookup: token-bytes → token-id. Built from [`Self::vocab`]
@@ -122,6 +155,10 @@ pub struct Bbpe {
     /// Inverse of [`Self::specials`]: special token id → original
     /// bytes. Used by [`Bbpe::decode_with_specials`].
     special_ids_to_bytes: BTreeMap<u32, Vec<u8>>,
+    /// `tokenizer.ggml.eos_token_id` from the GGUF, when present and in
+    /// range. Qwen2.5 stores `<|im_end|>` (151645) here; SmolLM2 stores
+    /// its own id, so the value must never be hard-coded.
+    eos_id: Option<u32>,
     /// 256-entry table of `byte` → `Some(token_id)` for every byte
     /// that appears in the vocab as a single-byte BYTE-type entry.
     /// Populated during [`Bbpe::from_gguf`]; `None` indicates the
@@ -324,15 +361,29 @@ impl Bbpe {
         // bounds-checking against `vocab.len()`.
         debug_assert_eq!(byte_for_id.len(), vocab.len());
 
+        let eos_id = gguf
+            .metadata("tokenizer.ggml.eos_token_id")
+            .and_then(MetaValue::as_u32)
+            .filter(|&id| (id as usize) < vocab.len());
+
+
         Ok(Self {
+            oov_pieces: core::sync::atomic::AtomicU64::new(0),
+            pre: PreTokenizer::from_gguf(gguf),
             vocab,
             bytes_to_id,
             merges,
             specials,
             special_ids_to_bytes,
+            eos_id,
             byte_table,
             byte_for_id,
         })
+    }
+
+    /// The pre-tokenizer this vocabulary uses.
+    pub fn pre_tokenizer(&self) -> PreTokenizer {
+        self.pre
     }
 
     /// Number of tokens in the vocabulary. Always fits in `u32` because
@@ -347,11 +398,80 @@ impl Bbpe {
         self.specials.get(name).copied()
     }
 
-    /// Encode a UTF-8 string into a Vec of token ids. The pre-tokenizer
-    /// splits on the GPT-2 regex; BPE merges run within each chunk.
+    /// The GGUF's `tokenizer.ggml.eos_token_id`, if it has a usable one.
+    pub fn eos_id(&self) -> Option<u32> {
+        self.eos_id
+    }
+
+    /// Every token id that ends a generation: the GGUF's EOS id plus
+    /// `<|im_end|>` and `<|endoftext|>` when the vocab has them.
+    /// Duplicates (Qwen2.5's EOS *is* `<|im_end|>`) appear once.
+    pub fn stop_ids(&self) -> [Option<u32>; 3] {
+        let im_end = self.special_id("<|im_end|>");
+        let eot = self.special_id("<|endoftext|>");
+        [
+            self.eos_id,
+            im_end.filter(|id| Some(*id) != self.eos_id),
+            eot.filter(|id| Some(*id) != self.eos_id && Some(*id) != im_end),
+        ]
+    }
+
+    /// Encode text that may contain special-token names. A name that
+    /// the vocab marks as control or user-defined (`<|im_start|>`,
+    /// `<tool_call>`) becomes its single id; the text between them goes
+    /// through [`Self::encode`]. The longest name wins at each position.
+    ///
+    /// This is what `slm prompt --raw` feeds the model. Use it only on
+    /// text the caller rendered on purpose: [`Self::encode`] is the one
+    /// that keeps user text from forging a ChatML turn boundary.
+    pub fn encode_with_specials(&self, text: &str) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::with_capacity(text.len() / 3);
+        // First-byte filter so ordinary text skips the map walk.
+        let mut first = [false; 256];
+        for name in self.specials.keys() {
+            if let Some(&b) = name.as_bytes().first() {
+                first[b as usize] = true;
+            }
+        }
+        let bytes = text.as_bytes();
+        let mut chunk_start = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if first[bytes[i] as usize] && text.is_char_boundary(i) {
+                let rest = &text[i..];
+                let mut best: Option<(usize, u32)> = None;
+                for (name, &id) in &self.specials {
+                    let longer = match best {
+                        Some((len, _)) => name.len() > len,
+                        None => true,
+                    };
+                    if !name.is_empty() && longer && rest.starts_with(name.as_str()) {
+                        best = Some((name.len(), id));
+                    }
+                }
+                if let Some((len, id)) = best {
+                    if chunk_start < i {
+                        out.extend(self.encode(&text[chunk_start..i]));
+                    }
+                    out.push(id);
+                    i += len;
+                    chunk_start = i;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        if chunk_start < bytes.len() {
+            out.extend(self.encode(&text[chunk_start..]));
+        }
+        out
+    }
+
+    /// Encode a UTF-8 string into a Vec of token ids. The GGUF's
+    /// [`PreTokenizer`] splits the text; BPE merges run within each chunk.
     /// Special-token strings are tokenized as bytes — pass ChatML
-    /// inputs through [`crate::slm::chat_template::encode_chat`] to
-    /// have specials looked up by name.
+    /// inputs through [`crate::slm::chat_template::encode_chat`] or
+    /// [`Self::encode_with_specials`] to have specials looked up by name.
     ///
     /// Each pre-tokenized chunk's raw bytes are run through the GPT-2
     /// byte-to-unicode mapping ([`byte_to_unicode_char`]) before BPE
@@ -363,7 +483,7 @@ impl Bbpe {
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out: Vec<u32> = Vec::with_capacity(text.len() / 3);
         let mut encoded: String = String::new();
-        for chunk in pre_tokenize(text) {
+        for chunk in pre_tokenize(text, self.pre) {
             encoded.clear();
             encoded.reserve(chunk.len() * 2);
             for &b in chunk.as_bytes() {
@@ -384,6 +504,39 @@ impl Bbpe {
     /// Same as [`Self::decode`] but renders specials.
     pub fn decode_with_specials(&self, ids: &[u32]) -> String {
         self.decode_inner(ids, true)
+    }
+
+    /// Append the raw bytes of one token to `out`. Specials and
+    /// out-of-range ids add nothing. Unlike [`Self::decode`] this does
+    /// not repair the bytes: a token can end in the middle of a UTF-8
+    /// sequence, and the streaming path needs those bytes to complete
+    /// the sequence with the next token.
+    pub fn decode_token_bytes(&self, id: u32, out: &mut Vec<u8>) {
+        if self.special_ids_to_bytes.contains_key(&id) {
+            return;
+        }
+        let idx = id as usize;
+        if idx >= self.vocab.len() {
+            return;
+        }
+        if let Some(b) = self.byte_for_id[idx] {
+            out.push(b);
+            return;
+        }
+        match core::str::from_utf8(&self.vocab[idx]) {
+            Ok(body) => {
+                for ch in body.chars() {
+                    if let Some(b) = unicode_char_to_byte(ch) {
+                        out.push(b);
+                    } else {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
+            }
+            // A vocab body that isn't UTF-8 can't be GPT-2 encoded.
+            Err(_) => out.extend_from_slice(&self.vocab[idx]),
+        }
     }
 
     fn decode_inner(&self, ids: &[u32], render_specials: bool) -> String {
@@ -514,6 +667,11 @@ impl Bbpe {
     /// character boundaries — splitting `Ġ` (UTF-8 `0xC4 0xA0`) into
     /// two single-byte pieces would never re-merge through any vocab
     /// entry.
+    /// Pieces encoded so far with no vocab entry of their own.
+    pub fn oov_pieces(&self) -> u64 {
+        self.oov_pieces.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     fn encode_piece(&self, bytes: &[u8], out: &mut Vec<u32>) {
         if bytes.is_empty() {
             return;
@@ -582,6 +740,7 @@ impl Bbpe {
                 out.push(id);
                 continue;
             }
+            self.oov_pieces.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Byte fallback, one token per ORIGINAL input byte. Each
             // char of the piece is the byte-to-unicode encoding of one
             // input byte (`encode` built it that way), and a BYTE token
@@ -717,25 +876,20 @@ fn hex_digit(c: u8) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// GPT-2 pre-tokenization split
+// Pre-tokenization splits
 // ---------------------------------------------------------------------------
 
-/// Pre-tokenize `text` into chunks per the GPT-2 split regex used by
-/// Qwen2 and Llama:
-///
-/// ```text
-/// '(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-/// ```
-///
-/// Implemented as a hand-rolled DFA — no regex crate.
-pub(crate) fn pre_tokenize(text: &str) -> PreTokens<'_> {
-    PreTokens { text, pos: 0 }
+/// Pre-tokenize `text` into chunks per `kind`'s split. Implemented by hand: no
+/// regex crate.
+pub(crate) fn pre_tokenize(text: &str, kind: PreTokenizer) -> PreTokens<'_> {
+    PreTokens { text, pos: 0, kind }
 }
 
 /// Iterator returned by [`pre_tokenize`].
 pub(crate) struct PreTokens<'a> {
     text: &'a str,
     pos: usize,
+    kind: PreTokenizer,
 }
 
 impl<'a> Iterator for PreTokens<'a> {
@@ -746,12 +900,136 @@ impl<'a> Iterator for PreTokens<'a> {
             return None;
         }
         let rest = &self.text[self.pos..];
-        let (start, end) = next_chunk(rest)?;
+        let (start, end) = match self.kind {
+            PreTokenizer::Gpt2 => next_chunk(rest)?,
+            PreTokenizer::Qwen2 => (0, next_chunk_qwen2(rest)?),
+        };
         let abs_start = self.pos + start;
         let abs_end = self.pos + end;
         self.pos = abs_end;
         Some(&self.text[abs_start..abs_end])
     }
+}
+
+/// Membership in a sorted table of inclusive ranges.
+fn in_ranges(c: char, table: &[(u32, u32)]) -> bool {
+    let c = c as u32;
+    table
+        .binary_search_by(|&(lo, hi)| {
+            if c < lo {
+                core::cmp::Ordering::Greater
+            } else if c > hi {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// `\p{L}`. Not `char::is_alphabetic`, which also accepts marks and so would
+/// keep a Devanagari virama inside a letter run.
+fn is_letter(c: char) -> bool {
+    in_ranges(c, LETTER_RANGES)
+}
+
+/// `\p{N}`, from the same data as [`is_letter`].
+fn is_number(c: char) -> bool {
+    in_ranges(c, NUMBER_RANGES)
+}
+
+/// `[^\s\p{L}\p{N}]`.
+fn is_other(c: char) -> bool {
+    !c.is_whitespace() && !is_letter(c) && !is_number(c)
+}
+
+/// Byte length of the next Qwen2 chunk of `rest`, `None` when it is empty:
+///
+/// ```text
+/// (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+/// ```
+///
+/// Port of llama.cpp's `unicode_regex_split_custom_qwen2`, which the tokenizer
+/// goldens in `scripts/fixtures/slm/` come from. The alternatives run in order,
+/// and each `at` below is a char boundary because it only moves by whole chars.
+fn next_chunk_qwen2(rest: &str) -> Option<usize> {
+    let at = |pos: usize| rest[pos..].chars().next();
+    let c0 = at(0)?;
+    let p1 = c0.len_utf8();
+    let c1 = at(p1);
+
+    // (?i:'s|'t|'re|'ve|'m|'ll|'d). ASCII lowercasing is enough:
+    // slm-gen-unicode-tables.py checks no other char lowercases to these.
+    if c0 == '\'' {
+        if let Some(next) = c1 {
+            let n1 = next.to_ascii_lowercase();
+            if matches!(n1, 's' | 't' | 'm' | 'd') {
+                return Some(p1 + 1);
+            }
+            if let Some(n2) = at(p1 + next.len_utf8()) {
+                let n2 = n2.to_ascii_lowercase();
+                if matches!((n1, n2), ('r', 'e') | ('v', 'e') | ('l', 'l')) {
+                    return Some(p1 + 2);
+                }
+            }
+        }
+    }
+
+    // [^\r\n\p{L}\p{N}]?\p{L}+. Taken as "any char, then letters" when either
+    // of the first two chars is a letter, so one leading space or symbol joins.
+    if c0 != '\r' && c0 != '\n' && !is_number(c0) && (is_letter(c0) || c1.is_some_and(is_letter)) {
+        let mut pos = p1;
+        while let Some(c) = at(pos).filter(|&c| is_letter(c)) {
+            pos += c.len_utf8();
+        }
+        return Some(pos);
+    }
+
+    // \p{N}: one digit per chunk.
+    if is_number(c0) {
+        return Some(p1);
+    }
+
+    // <space>?[^\s\p{L}\p{N}]+[\r\n]*. A lone final space comes through here
+    // too, as itself.
+    let body = if c0 == ' ' { p1 } else { 0 };
+    if at(body).map_or(true, is_other) {
+        let mut pos = body;
+        while let Some(c) = at(pos).filter(|&c| is_other(c)) {
+            pos += c.len_utf8();
+        }
+        while let Some(c) = at(pos).filter(|&c| c == '\r' || c == '\n') {
+            pos += c.len_utf8();
+        }
+        return Some(pos);
+    }
+
+    // What is left starts with whitespace, so measure the run.
+    let mut count = 0usize;
+    let mut run_end = 0usize;
+    let mut before_last = 0usize;
+    let mut after_newline = 0usize;
+    for (i, c) in rest.char_indices() {
+        if !c.is_whitespace() {
+            break;
+        }
+        count += 1;
+        before_last = i;
+        run_end = i + c.len_utf8();
+        if c == '\r' || c == '\n' {
+            after_newline = run_end;
+        }
+    }
+    // \s*[\r\n]+
+    if after_newline > 0 {
+        return Some(after_newline);
+    }
+    // \s+(?!\S): the last space stays for the chunk after it.
+    if count > 1 && run_end < rest.len() {
+        return Some(before_last);
+    }
+    // \s+
+    Some(run_end.max(p1))
 }
 
 /// Find the next chunk in `rest` and return its `(start, end)` byte
@@ -886,6 +1164,76 @@ mod tests {
     use super::*;
     use crate::slm::gguf::Gguf;
     use alloc::vec;
+
+    /// One expected split per alternative of the Qwen2 regex, in order.
+    #[test]
+    fn qwen2_split_follows_each_regex_alternative() {
+        let cases: &[(&str, &[&str])] = &[
+            // Contractions, case-insensitive.
+            ("IT'S don't WE'LL", &["IT", "'S", " don", "'t", " WE", "'LL"]),
+            // Bare apostrophe: nothing to contract with.
+            ("a'", &["a", "'"]),
+            // One leading non-space char joins the letters behind it.
+            ("a+b=c", &["a", "+b", "=c"]),
+            ("?q=1&r=2", &["?q", "=", "1", "&r", "=", "2"]),
+            // Digits go one at a time, without the leading space.
+            ("in 42", &["in", " ", "4", "2"]),
+            // Punctuation takes the newlines right behind it, and a leading space.
+            ("End.\nNext !!\n\nx", &["End", ".\n", "Next", " !!\n\n", "x"]),
+            // Whitespace run ending in a newline stays together.
+            ("a \n\n  b", &["a", " \n\n", " ", " b"]),
+            ("x\r\ny", &["x", "\r\n", "y"]),
+            // Whitespace before a word leaves its last space to that word.
+            ("a   b", &["a", "  ", " b"]),
+            // Trailing whitespace stays together, a lone final space too.
+            ("a   ", &["a", "   "]),
+            ("a ", &["a", " "]),
+            (" ", &[" "]),
+            ("\t", &["\t"]),
+            // Marks are not letters: the virama and vowel sign end the run.
+            ("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}",
+             &["\u{0928}\u{092E}\u{0938}", "\u{094D}\u{0924}", "\u{0947}"]),
+        ];
+        for (text, want) in cases {
+            let got: Vec<&str> = pre_tokenize(text, PreTokenizer::Qwen2).collect();
+            assert_eq!(&got, want, "{text:?}");
+        }
+    }
+
+    /// No input may lose bytes or stall the split, whatever it holds.
+    #[test]
+    fn qwen2_split_covers_every_byte() {
+        let text = "a\u{0301} \u{00A0}\u{3000}x'\r\n\t\u{FFFD}\u{1F600}9 \u{0660}' ";
+        for start in text.char_indices().map(|(i, _)| i) {
+            let tail = &text[start..];
+            let joined: String = pre_tokenize(tail, PreTokenizer::Qwen2).collect();
+            assert_eq!(joined, tail);
+        }
+    }
+
+    #[test]
+    fn letter_and_number_tables_are_sorted_and_classify() {
+        for t in [LETTER_RANGES, NUMBER_RANGES] {
+            assert!(t.windows(2).all(|w| w[0].1 < w[1].0));
+        }
+        assert!(is_letter('a') && is_letter('\u{4E2D}') && is_letter('\u{0928}'));
+        assert!(!is_letter('\u{094D}'), "virama is a mark");
+        assert!(!is_letter('1') && !is_letter(' '));
+        assert!(is_number('7') && is_number('\u{0660}') && !is_number('a'));
+    }
+
+    /// `tokenizer.ggml.pre` picks the split: SmolLM2 and fixtures that name
+    /// nothing else keep GPT-2's.
+    #[test]
+    fn pre_tokenizer_comes_from_gguf_metadata() {
+        let tiny = build_tiny_gguf();
+        let gguf = Gguf::parse(&tiny).expect("fixture parses");
+        assert_eq!(Bbpe::from_gguf(&gguf).unwrap().pre_tokenizer(), PreTokenizer::Gpt2);
+
+        let vocab = include_bytes!("../../../scripts/fixtures/slm/qwen_vocab.gguf");
+        let gguf = Gguf::parse(vocab).expect("vocab fixture parses");
+        assert_eq!(Bbpe::from_gguf(&gguf).unwrap().pre_tokenizer(), PreTokenizer::Qwen2);
+    }
 
     /// Build a tiny synthetic GGUF whose tokenizer metadata covers the
     /// pieces a tokenizer test needs: ASCII byte tokens, a few merges,
@@ -1122,13 +1470,13 @@ mod tests {
 
     #[test]
     fn pre_tokenize_splits_letters_digits_punct() {
-        let chunks: Vec<&str> = pre_tokenize("Hi 42!").collect();
+        let chunks: Vec<&str> = pre_tokenize("Hi 42!", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["Hi", " 42", "!"]);
     }
 
     #[test]
     fn pre_tokenize_handles_apostrophe_contractions() {
-        let chunks: Vec<&str> = pre_tokenize("don't").collect();
+        let chunks: Vec<&str> = pre_tokenize("don't", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["don", "'t"]);
     }
 
@@ -1138,7 +1486,7 @@ mod tests {
         // alternation should keep two spaces with the whitespace run
         // and hand the last one off to the next chunk's optional
         // leading-space rule.
-        let chunks: Vec<&str> = pre_tokenize("Hi   x").collect();
+        let chunks: Vec<&str> = pre_tokenize("Hi   x", PreTokenizer::Gpt2).collect();
         assert_eq!(chunks, vec!["Hi", "  ", " x"]);
     }
 
@@ -1204,5 +1552,95 @@ mod tests {
             "MAX_TOKEN_BYTES = {MAX_TOKEN_BYTES} < 256; would reject \
              real-world vocabs (Qwen2.5 max = 256). See tokenizer.rs \
              docstring for sizing rationale.");
+    }
+
+    #[test]
+    fn encode_with_specials_maps_names_to_ids() {
+        let bytes = build_tiny_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+        let im_start = tok.special_id("<|im_start|>").expect("im_start");
+        let im_end = tok.special_id("<|im_end|>").expect("im_end");
+
+        let ids = tok.encode_with_specials("<|im_start|>hi<|im_end|>\n<|im_start|>");
+        let mut expected = alloc::vec![im_start];
+        expected.extend(tok.encode("hi"));
+        expected.push(im_end);
+        expected.extend(tok.encode("\n"));
+        expected.push(im_start);
+        assert_eq!(ids, expected);
+
+        // Plain encode must keep treating the same text as bytes, so
+        // user text can't forge a turn boundary in chat mode.
+        assert!(!tok.encode("<|im_start|>").contains(&im_start));
+        // Text without specials takes the same path as encode().
+        assert_eq!(tok.encode_with_specials("hi there"), tok.encode("hi there"));
+        // A near-miss stays text.
+        assert!(!tok.encode_with_specials("<|im_start").contains(&im_start));
+        assert!(tok.encode_with_specials("").is_empty());
+    }
+
+    #[test]
+    fn decode_token_bytes_keeps_partial_utf8() {
+        let bytes = build_tiny_gguf();
+        let gguf = Gguf::parse(&bytes).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+        // BYTE tokens are ids 0..=255 in this fixture.
+        let mut out = Vec::new();
+        tok.decode_token_bytes(0xE4, &mut out);
+        assert_eq!(out, [0xE4u8], "a lone lead byte must not become U+FFFD");
+        // decode() is the lossy one: it repairs what it is given.
+        assert_eq!(tok.decode(&[0xE4]), "\u{FFFD}");
+
+        out.clear();
+        tok.decode_token_bytes(tok.special_id("<|im_end|>").expect("im_end"), &mut out);
+        assert!(out.is_empty(), "specials stream as nothing");
+        tok.decode_token_bytes(u32::MAX, &mut out);
+        assert!(out.is_empty(), "out-of-range ids stream as nothing");
+    }
+
+    /// Golden check against the real model. `#[ignore]` because the
+    /// 1.1 GB file isn't in the repo; run with
+    /// `cargo test --target x86_64-unknown-linux-gnu --features slm
+    /// real_qwen -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore = "needs /home/john/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"]
+    fn real_qwen_metadata_and_template() {
+        extern crate std;
+        use crate::slm::chat_template::{
+            encode_chat, render_chatml, ChatTurn, Role, QWEN_SYSTEM_PROMPT,
+        };
+        let data = std::fs::read("/home/john/models/qwen2.5-1.5b-instruct-q4_k_m.gguf")
+            .expect("read model");
+        let gguf = Gguf::parse(&data).expect("parse");
+        let tok = Bbpe::from_gguf(&gguf).expect("build");
+
+        assert_eq!(tok.eos_id(), Some(151_645));
+        assert_eq!(tok.special_id("<|endoftext|>"), Some(151_643));
+        assert_eq!(tok.special_id("<|im_start|>"), Some(151_644));
+        assert_eq!(tok.special_id("<|im_end|>"), Some(151_645));
+        assert_eq!(tok.stop_ids(), [Some(151_645), None, Some(151_643)]);
+
+        let turns = [
+            ChatTurn { role: Role::System, content: QWEN_SYSTEM_PROMPT },
+            ChatTurn { role: Role::User, content: "Hello" },
+        ];
+        // Ids llama.cpp and HF transformers produce for this rendering.
+        let expected: &[u32] = &[
+            151644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13,
+            1446, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 9707,
+            151645, 198, 151644, 77091, 198,
+        ];
+        assert_eq!(encode_chat(&tok, &turns), expected);
+        // --raw on the rendered text must match the template path.
+        assert_eq!(tok.encode_with_specials(&render_chatml(&turns)), expected);
+
+        // A multi-byte token split across ids streams without damage.
+        let ids = tok.encode("\u{4F60}\u{597D}");
+        let mut raw = Vec::new();
+        for id in &ids {
+            tok.decode_token_bytes(*id, &mut raw);
+        }
+        assert_eq!(raw, "\u{4F60}\u{597D}".as_bytes());
     }
 }

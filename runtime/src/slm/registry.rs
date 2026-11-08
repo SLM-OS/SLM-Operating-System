@@ -17,7 +17,7 @@
 //! reparse, and the source buffer the caller passed to [`load_slm`]
 //! can be freed immediately after the call returns.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -124,6 +124,10 @@ pub struct LoadedSlm {
     weight_pages_count: u32,
     /// Number of valid bytes inside [`Self::weight_pages`].
     weight_data_len: usize,
+    /// True when [`Self::weight_pages`] belongs to someone else (the
+    /// boot-delivered models, which stay reserved for the life of the
+    /// boot): unloading drops the slot and leaves the pages alone.
+    weight_borrowed: bool,
 
     /// Pre-built tokenizer for this model. Sessions reuse this via
     /// [`with_loaded_slm`] / [`LoadedSlm::tokenizer`] rather than
@@ -170,6 +174,12 @@ impl LoadedSlm {
     /// snapshot — fine for ~340 tensors per Qwen2.5-1.5B.
     pub fn tensor_info(&self, name: &str) -> Option<&OwnedTensorInfo> {
         self.tensors.iter().find(|t| t.name == name)
+    }
+
+    /// A tensor's descriptor to corrupt, for tests of what checks it.
+    #[cfg(test)]
+    pub fn tensor_info_mut_for_tests<'a>(slm: &'a mut LoadedSlm, name: &str) -> Option<&'a mut OwnedTensorInfo> {
+        slm.tensors.iter_mut().find(|t| t.name == name)
     }
 
     /// All cached tensor descriptors in file order.
@@ -334,6 +344,52 @@ const _: () = assert!(core::mem::size_of::<SlmModelInfoC>() == 92);
 
 static SLM_LOCK: AtomicBool = AtomicBool::new(false);
 static mut SLOTS: [Option<LoadedSlm>; SLM_MAX_SLOTS] = [EMPTY_SLOT; SLM_MAX_SLOTS];
+/// When each occupied slot was filled, counting loads since boot from 1.
+/// Tells "most recently loaded" apart from "highest slot", and a reloaded
+/// slot from the model that used to be there. Guarded by the slot lock.
+static mut SLOT_LOAD_SEQ: [u64; SLM_MAX_SLOTS] = [0; SLM_MAX_SLOTS];
+static mut NEXT_LOAD_SEQ: u64 = 1;
+
+/// GPU programs mapping each slot's weights. A program maps the weight
+/// pages into the GPU VM for as long as it lives, including in an idle
+/// session, so `unload_slm` refuses while this is nonzero: freeing them
+/// would leave the GPU reading reused pages. Atomic so [`GpuPin`] can drop
+/// without the slot lock (a program may be dropped anywhere).
+static GPU_PINS: [AtomicU32; SLM_MAX_SLOTS] = [const { AtomicU32::new(0) }; SLM_MAX_SLOTS];
+
+/// Holds a slot's weights against [`unload_slm`] while a GPU program maps
+/// them. Dropping it releases the hold.
+pub struct GpuPin(usize);
+
+impl Drop for GpuPin {
+    fn drop(&mut self) {
+        GPU_PINS[self.0].fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Pin the slot that holds `slm`. Call only from inside
+/// [`with_loaded_slm`]'s closure, which holds the slot lock this reads
+/// under. `None` if `slm` isn't a registry slot (a test's own model).
+pub fn pin_for_gpu(slm: &LoadedSlm) -> Option<GpuPin> {
+    // SAFETY: the caller is inside with_loaded_slm, so the slot lock is
+    // held and SLOTS can't change; only addresses are compared.
+    let slots = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    let index = slots.iter().position(|e| e.as_ref().is_some_and(|e| core::ptr::eq(e, slm)))?;
+    GPU_PINS[index].fetch_add(1, Ordering::AcqRel);
+    Some(GpuPin(index))
+}
+
+/// Whether some task holds the slot lock, for tests that check nothing
+/// waits under it.
+#[cfg(test)]
+pub fn lock_held_for_tests() -> bool {
+    SLM_LOCK.load(Ordering::Acquire)
+}
+
+/// Whether a GPU program still maps slot `index`'s weights.
+pub fn gpu_pinned(index: usize) -> bool {
+    index < SLM_MAX_SLOTS && GPU_PINS[index].load(Ordering::Acquire) != 0
+}
 
 struct SpinGuard;
 
@@ -530,6 +586,7 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data.len(),
+        weight_borrowed: false,
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
@@ -592,6 +649,34 @@ pub fn load_slm_take_pages(
     pages: usize,
     data_len: usize,
 ) -> Result<usize, LoadError> {
+    adopt_pages(name, weight_ptr, pages, data_len, false)
+}
+
+/// Like [`load_slm_take_pages`], but the registry only borrows the
+/// pages: neither an error here nor [`unload_slm`] frees them. Used for
+/// models the EFI stub read into reserved boot memory (`slm load
+/// /boot/models/...`, docs/adr/0002-uefi-model-delivery.md); there is no
+/// copy, so peak memory is the file size, and the same pages can be
+/// loaded again after an unload.
+///
+/// The caller must guarantee that the `data_len` initialized bytes at
+/// `weight_ptr` stay valid and unmodified for as long as the slot lives.
+pub fn load_slm_borrow_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+) -> Result<usize, LoadError> {
+    adopt_pages(name, weight_ptr, pages, data_len, true)
+}
+
+fn adopt_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+    borrowed: bool,
+) -> Result<usize, LoadError> {
     let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
 
     // SAFETY: The caller's contract requires `weight_ptr` to point to
@@ -611,6 +696,7 @@ pub fn load_slm_take_pages(
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data_len,
+        weight_borrowed: borrowed,
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
@@ -622,15 +708,20 @@ pub fn load_slm_take_pages(
 }
 
 /// Free the slot at `index`. Returns `LoadError::InvalidFormat` if
-/// the slot is empty or the index is out of range.
+/// the slot is empty or the index is out of range, and `LoadError::InUse`
+/// while a GPU program (even an idle session's) maps its weights.
 pub fn unload_slm(index: usize) -> Result<(), LoadError> {
     if index >= SLM_MAX_SLOTS {
         return Err(LoadError::InvalidFormat);
     }
     // Take the slot out under the lock so the page free runs
-    // without the registry lock held.
+    // without the registry lock held. Pins are taken under the same
+    // lock, so none can appear between the check and the take.
     let taken = {
         let _g = SpinGuard::new();
+        if gpu_pinned(index) {
+            return Err(LoadError::InUse);
+        }
         // SAFETY: SpinGuard held — exclusive access to SLOTS.
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
         slot[index].take()
@@ -639,6 +730,9 @@ pub fn unload_slm(index: usize) -> Result<(), LoadError> {
         Some(e) => e,
         None => return Err(LoadError::InvalidFormat),
     };
+    if entry.weight_borrowed {
+        return Ok(());
+    }
     if let Some(ptr) = entry.weight_pages {
         // SAFETY: `ptr` was returned by `alloc_pages(weight_pages_count)`
         // in `load_slm` and has not been freed since. The slot was
@@ -706,6 +800,36 @@ where
 }
 
 /// Number of currently-occupied slots.
+pub fn load_seq(index: usize) -> Option<u64> {
+    if index >= SLM_MAX_SLOTS {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slot = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    slot[index].as_ref()?;
+    // SAFETY: SpinGuard held.
+    Some(unsafe { SLOT_LOAD_SEQ[index] })
+}
+
+/// The occupied slot loaded last, with its load sequence number.
+pub fn latest_loaded() -> Option<(usize, u64)> {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held.
+    let slot = unsafe { &*core::ptr::addr_of!(SLOTS) };
+    let mut best = None;
+    for (i, s) in slot.iter().enumerate() {
+        if s.is_some() {
+            // SAFETY: SpinGuard held.
+            let seq = unsafe { SLOT_LOAD_SEQ[i] };
+            if best.map_or(true, |(_, b)| seq > b) {
+                best = Some((i, seq));
+            }
+        }
+    }
+    best
+}
+
 pub fn count() -> usize {
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
@@ -723,6 +847,9 @@ pub(crate) fn reset_for_tests() {
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
         for s in slot.iter_mut() {
             if let Some(entry) = s.take() {
+                if entry.weight_borrowed {
+                    continue;
+                }
                 if let Some(ptr) = entry.weight_pages {
                     // SAFETY: ptr came from `alloc_pages(count)` in
                     // `load_slm`. The slot was just taken out of the
@@ -762,6 +889,11 @@ fn insert_entry(entry: LoadedSlm) -> Result<usize, LoadError> {
     for (i, s) in slot.iter_mut().enumerate() {
         if s.is_none() {
             *s = Some(entry);
+            // SAFETY: SpinGuard held.
+            unsafe {
+                SLOT_LOAD_SEQ[i] = NEXT_LOAD_SEQ;
+                NEXT_LOAD_SEQ += 1;
+            }
             return Ok(i);
         }
     }
@@ -954,25 +1086,35 @@ fn populate_gpu_tensor_map(
         }
     }
 
+    let msg = gpu_load_message(
+        staged,
+        failed,
+        crate::slm::gpu_program::backend_available(),
+    );
+    if let Some(m) = msg {
+        // SAFETY: every message is a NUL-terminated static string.
+        unsafe { kernel_ffi::uart_puts(m.as_ptr()) };
+    }
+}
+
+/// What `slm load` says about the GPU. The per-op weights pool and the GPU
+/// program are separate paths: on a UEFI-direct boot the pool doesn't exist,
+/// and the GPU program is built when a session opens; after kexec the pool
+/// is what serves per-op dispatch. Only say "CPU" when neither can run.
+fn gpu_load_message(staged: usize, failed: usize, program: bool) -> Option<&'static [u8]> {
+    if program {
+        return Some(b"[slm] GPU: the GPU program is built at `slm launch` (--gpu auto|on); no per-op weight staging on this boot\n\0");
+    }
+    if staged > 0 && failed == 0 {
+        return Some(b"[slm] GPU staging: every tensor staged in the weights pool for per-op dispatch\n\0");
+    }
     if staged > 0 {
-        unsafe {
-            kernel_ffi::uart_puts(
-                b"[slm] GPU staging: some tensors landed in the pool\n\0"
-                    .as_ptr(),
-            );
-        }
+        return Some(b"[slm] GPU staging: some tensors staged in the weights pool for per-op dispatch; the rest run on the CPU\n\0");
     }
-    if failed > 0 && staged == 0 {
-        /* All tensors failed — likely no pool available. Emit a
-         * single hint so the operator knows GPU staging is inert
-         * (vs. silently passing). */
-        unsafe {
-            kernel_ffi::uart_puts(
-                b"[slm] GPU staging unavailable; forward path stays on CPU\n\0"
-                    .as_ptr(),
-            );
-        }
+    if failed > 0 {
+        return Some(b"[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU\n\0");
     }
+    None
 }
 
 /// W3: byte range for a tensor inside the owned weight buffer,
@@ -1015,6 +1157,47 @@ fn tensor_byte_range(
 /// the metadata path; they just give `tensor_bytes` lookups
 /// something concrete to check against.
 pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usize> {
+    let dims = FixtureDims { block_count: 28, embedding: 1536, head_count: 12, feed_forward: 8960 };
+    build_fixture(vocab_size, dims, false, out)
+}
+
+/// Vocab of [`build_cli_test_fixture`]: ids below 256 are the bytes, the
+/// last three are the specials.
+pub const CLI_FIXTURE_VOCAB: usize = 512;
+/// `<|endoftext|>` in [`build_cli_test_fixture`].
+pub const CLI_FIXTURE_ENDOFTEXT: u32 = CLI_FIXTURE_VOCAB as u32 - 3;
+/// `<|im_start|>` in [`build_cli_test_fixture`].
+pub const CLI_FIXTURE_IM_START: u32 = CLI_FIXTURE_VOCAB as u32 - 2;
+/// `<|im_end|>` in [`build_cli_test_fixture`]; deliberately not 2.
+pub const CLI_FIXTURE_IM_END: u32 = CLI_FIXTURE_VOCAB as u32 - 1;
+/// `tokenizer.ggml.eos_token_id` in [`build_cli_test_fixture`]: a plain
+/// token, so tests can tell the metadata EOS from the named specials.
+pub const CLI_FIXTURE_EOS: u32 = 300;
+
+/// Small fixture for the prompt path: one block, so a KV cache for a
+/// whole rendered ChatML prompt fits the test kernel's 1 MB Rust heap,
+/// with byte tokens for 0..=255, the ChatML specials and a metadata EOS.
+/// Like [`build_qwen_test_fixture`] it has no layer weights, so tests
+/// drive it with [`crate::slm::decoder::test_script_set`].
+pub fn build_cli_test_fixture(out: &mut [u8]) -> Option<usize> {
+    let dims = FixtureDims { block_count: 1, embedding: 16, head_count: 2, feed_forward: 32 };
+    build_fixture(CLI_FIXTURE_VOCAB, dims, true, out)
+}
+
+#[derive(Clone, Copy)]
+struct FixtureDims {
+    block_count: u32,
+    embedding: u32,
+    head_count: u32,
+    feed_forward: u32,
+}
+
+fn build_fixture(
+    vocab_size: usize,
+    dims: FixtureDims,
+    cli: bool,
+    out: &mut [u8],
+) -> Option<usize> {
     use crate::slm::gguf::{
         DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType, Q4_K_BLOCK_SIZE,
     };
@@ -1038,6 +1221,17 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
             // ASCII byte (0..127) — emit as a single-byte string.
             let s: String = core::iter::once((i as u8) as char).collect();
             tokens.push(MetaValue::String(s));
+        } else if cli && i < 256 {
+            // A high byte in the GPT-2 byte-to-unicode form real vocabs
+            // use, so one token can end mid-way through a UTF-8 sequence.
+            let c = crate::slm::tokenizer::byte_to_unicode_char(i as u8);
+            tokens.push(MetaValue::String(core::iter::once(c).collect()));
+        } else if cli && i as u32 == CLI_FIXTURE_ENDOFTEXT {
+            tokens.push(MetaValue::String(String::from("<|endoftext|>")));
+        } else if cli && i as u32 == CLI_FIXTURE_IM_START {
+            tokens.push(MetaValue::String(String::from("<|im_start|>")));
+        } else if cli && i as u32 == CLI_FIXTURE_IM_END {
+            tokens.push(MetaValue::String(String::from("<|im_end|>")));
         } else {
             let mut s = String::with_capacity(8);
             s.push('t');
@@ -1046,14 +1240,14 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
         }
     }
 
-    let kvs: Vec<(&'static str, MetaValue)> = alloc::vec![
+    let mut kvs: Vec<(&'static str, MetaValue)> = alloc::vec![
         ("general.alignment", MetaValue::Uint32(DEFAULT_ALIGNMENT as u32)),
         ("general.architecture", MetaValue::String(String::from("qwen2"))),
-        ("qwen2.block_count", MetaValue::Uint32(28)),
-        ("qwen2.embedding_length", MetaValue::Uint32(1536)),
-        ("qwen2.attention.head_count", MetaValue::Uint32(12)),
+        ("qwen2.block_count", MetaValue::Uint32(dims.block_count)),
+        ("qwen2.embedding_length", MetaValue::Uint32(dims.embedding)),
+        ("qwen2.attention.head_count", MetaValue::Uint32(dims.head_count)),
         ("qwen2.attention.head_count_kv", MetaValue::Uint32(2)),
-        ("qwen2.feed_forward_length", MetaValue::Uint32(8960)),
+        ("qwen2.feed_forward_length", MetaValue::Uint32(dims.feed_forward)),
         ("qwen2.context_length", MetaValue::Uint32(32_768)),
         ("qwen2.rope.freq_base", MetaValue::Float32(1_000_000.0)),
         (
@@ -1073,6 +1267,9 @@ pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usiz
             }),
         ),
     ];
+    if cli {
+        kvs.push(("tokenizer.ggml.eos_token_id", MetaValue::Uint32(CLI_FIXTURE_EOS)));
+    }
 
     // Tensor payloads. Each `(name, ggml_type, dims, data)` entry is
     // emitted in `tensors[]` order; the offsets in the descriptors
@@ -1200,6 +1397,53 @@ fn itoa_simple(n: usize) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod gpu_load_message_tests {
+    use super::gpu_load_message;
+
+    fn text(m: Option<&'static [u8]>) -> &'static str {
+        core::str::from_utf8(m.expect("a message")).unwrap()
+    }
+
+    /// UEFI-direct boot: the pool is absent (every stage fails) but the GPU
+    /// program runs. The old message said "stays on CPU" here.
+    #[test]
+    fn cold_channel_says_gpu_program_not_cpu() {
+        let m = text(gpu_load_message(0, 300, true));
+        assert!(m.contains("GPU program is built at `slm launch`"), "{m}");
+        assert!(!m.contains("CPU"), "{m}");
+    }
+
+    /// kexec: the per-op pool's status, whatever it is.
+    #[test]
+    fn kexec_reports_per_op_staging() {
+        assert!(text(gpu_load_message(300, 0, false)).contains("every tensor staged"));
+        assert!(text(gpu_load_message(10, 290, false)).contains("some tensors staged"));
+        let none = text(gpu_load_message(0, 300, false));
+        assert!(none.contains("no weights pool and no GPU program"), "{none}");
+        assert!(none.contains("stays on CPU"));
+    }
+
+    #[test]
+    fn nothing_to_stage_says_nothing() {
+        assert!(gpu_load_message(0, 0, false).is_none());
+    }
+
+    #[test]
+    fn every_message_is_nul_terminated() {
+        for m in [
+            gpu_load_message(0, 1, true),
+            gpu_load_message(1, 0, false),
+            gpu_load_message(1, 1, false),
+            gpu_load_message(0, 1, false),
+        ] {
+            let m = m.unwrap();
+            assert_eq!(m.last(), Some(&0u8));
+            assert_eq!(m.iter().filter(|&&b| b == 0).count(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
@@ -1283,6 +1527,50 @@ mod tests {
         // M5.3.1: fixture now ships output_norm.weight + token_embd.weight.
         assert_eq!(info.tensor_count, 2);
         assert_eq!(info.source_bytes, bytes.len() as u32);
+    }
+
+    #[test]
+    fn borrowed_pages_are_not_freed_and_can_be_reloaded() {
+        let _serial = TestSerialGuard::new();
+        ensure_mm_initialized();
+        reset_for_tests();
+        let mut bytes = build_qwen_gguf_with_vocab(64);
+        let snapshot = bytes.clone();
+        let len = bytes.len();
+        let pages = len.div_ceil(4096);
+        let ptr = core::ptr::NonNull::new(bytes.as_mut_ptr()).unwrap();
+        let frees = crate::test_ffi_stubs::free_page_calls();
+
+        let idx = load_slm_borrow_pages(b"boot", ptr, pages, len).expect("borrow");
+        // Zero-copy: the slot's weights are the caller's bytes.
+        let base = with_loaded_slm(idx, |m| m.weight_bytes().unwrap().as_ptr()).unwrap();
+        assert_eq!(base, ptr.as_ptr() as *const u8);
+        unload_slm(idx).expect("unload");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees);
+        assert_eq!(bytes, snapshot);
+
+        // Unloading left the pages usable, and a load that fails to
+        // parse doesn't take them either.
+        let idx = load_slm_borrow_pages(b"boot", ptr, pages, len).expect("reload");
+        unload_slm(idx).expect("unload again");
+        let mut junk = vec![0u8; 64];
+        let junk_ptr = core::ptr::NonNull::new(junk.as_mut_ptr()).unwrap();
+        assert!(load_slm_borrow_pages(b"junk", junk_ptr, 1, 64).is_err());
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees);
+    }
+
+    #[test]
+    fn take_pages_are_freed_on_unload() {
+        let _serial = TestSerialGuard::new();
+        ensure_mm_initialized();
+        reset_for_tests();
+        let mut bytes = build_qwen_gguf_with_vocab(64);
+        let len = bytes.len();
+        let ptr = core::ptr::NonNull::new(bytes.as_mut_ptr()).unwrap();
+        let frees = crate::test_ffi_stubs::free_page_calls();
+        let idx = load_slm_take_pages(b"owned", ptr, len.div_ceil(4096), len).expect("take");
+        unload_slm(idx).expect("unload");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees + 1);
     }
 
     #[test]

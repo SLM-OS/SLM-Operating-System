@@ -134,7 +134,7 @@ typedef void (*vfs_list_fn)(struct vfs_node *child, void *ctx);
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `VFS_MAX_PATH` | 128 | Maximum path length |
-| `VFS_MAX_NAME` | 32 | Maximum node name length |
+| `VFS_MAX_NAME` | 64 | Maximum node name length, NUL included (long enough for the model files in `/boot/models`) |
 | `VFS_MAX_CHILDREN` | 16 | Maximum children per directory |
 | `VFS_MAX_OPEN_FILES` | 8 | Maximum open file descriptors |
 

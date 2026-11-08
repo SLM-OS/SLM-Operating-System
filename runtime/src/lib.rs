@@ -272,6 +272,9 @@ mod test_ffi_stubs {
     #[no_mangle]
     pub extern "C" fn slm_pmu_read_cycles() -> u64 { 0 }
 
+    #[no_mangle]
+    pub extern "C" fn task_sleep_ms(_ms: u32) {}
+
     /// The host has no interrupts to mask (model_mem's guard, #1093).
     #[no_mangle]
     pub extern "C" fn slm_irq_save() -> u64 { 0 }
@@ -344,6 +347,18 @@ mod test_ffi_stubs {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static TEST_ALLOC_BUMP: AtomicUsize = AtomicUsize::new(0);
 
+    /// How many times the host `slm_free_pages` stub has run, so tests
+    /// can tell whether an owner released its pages.
+    static FREE_PAGE_CALLS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    pub fn free_page_calls() -> usize {
+        FREE_PAGE_CALLS.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn slm_print(_s: *const core::ffi::c_char) {}
+
     #[no_mangle]
     pub extern "C" fn slm_alloc_pages(count: usize) -> *mut u8 {
         // 4 KB pages → bytes.
@@ -370,6 +385,7 @@ mod test_ffi_stubs {
 
     #[no_mangle]
     pub extern "C" fn slm_free_pages(_addr: *mut u8, _count: usize) {
+        FREE_PAGE_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         // Host stub: leak the allocation. The host process exits
         // shortly after each test invocation; tests that loop alloc/
         // free pairs are bounded and the OS reclaims everything on
@@ -6176,14 +6192,62 @@ pub unsafe extern "C" fn rust_slm_load_take_pages(
     }
 }
 
+/// Load a SLM from memory the registry only borrows: boot-delivered
+/// models in reserved pages (`kernel/src/boot_models.c`). Neither a
+/// failure here nor a later unload frees the pages, and there is no
+/// copy. See `slm::registry::load_slm_borrow_pages`.
+///
+/// Returns the slot index (>= 0), or -1.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer.
+/// - `data` must point to `data_len` initialized bytes that stay valid
+///   and unmodified for the life of the boot.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load_borrow_pages(
+    name: *const u8,
+    data: *const u8,
+    pages: usize,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 || pages == 0 {
+        return -1;
+    }
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let weight_ptr = match core::ptr::NonNull::new(data as *mut u8) {
+        Some(p) => p,
+        None => return -1,
+    };
+    match slm::registry::load_slm_borrow_pages(name_slice, weight_ptr, pages, data_len) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
 /// Unload a SLM by slot index.
 ///
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
+    // The shell doesn't hold its mutation lock across a decode, so a
+    // second session can get here while a prompt uses this model.
+    if slm::session::model_busy(index) {
+        return SLM_ERR_BUSY;
+    }
+    // An idle session's GPU program still maps the weights (#475 W5).
     match slm::registry::unload_slm(index as usize) {
         Ok(()) => 0,
+        Err(loader::LoadError::InUse) => SLM_ERR_BUSY,
         Err(_) => -1,
     }
 }
@@ -6218,6 +6282,38 @@ pub unsafe extern "C" fn rust_slm_get_info(
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_count() -> u32 {
     slm::registry::count() as u32
+}
+
+/// The most recently loaded SLM still in the registry: its slot in `*handle`
+/// and its load sequence number in `*seq`. Returns 0, or -1 if none is loaded.
+/// Takes the registry lock, which a running prompt holds for each forward
+/// step, so don't call this from an IRQs-off path (#1093).
+///
+/// # Safety
+/// `handle` and `seq` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_latest_loaded(handle: *mut u32, seq: *mut u64) -> i32 {
+    if handle.is_null() || seq.is_null() {
+        return -1;
+    }
+    match slm::registry::latest_loaded() {
+        Some((slot, s)) => {
+            *handle = slot as u32;
+            *seq = s;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Load sequence number of the model in `index`, or 0 if that slot is empty.
+/// A slot that was reloaded gets a new number. Same lock rule as
+/// [`rust_slm_latest_loaded`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_load_seq(index: u32) -> u64 {
+    slm::registry::load_seq(index as usize).unwrap_or(0)
 }
 
 /// Maximum GGUF buffer size accepted by `rust_slm_load`, in bytes.
@@ -6267,6 +6363,55 @@ pub unsafe extern "C" fn rust_slm_test_build_qwen_fixture(
     }
 }
 
+/// Test-only: the small fixture for prompt-path tests. See
+/// [`slm::registry::build_cli_test_fixture`].
+///
+/// # Safety
+/// - `out_buf` must point to `out_capacity` writable bytes.
+/// - `out_size` must be a valid `*mut usize`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_test_build_cli_fixture(
+    out_buf: *mut u8,
+    out_capacity: usize,
+    out_size: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_size.is_null() {
+        return -1;
+    }
+    let buf = core::slice::from_raw_parts_mut(out_buf, out_capacity);
+    match slm::registry::build_cli_test_fixture(buf) {
+        Some(n) => {
+            *out_size = n;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Test-only: script the logits so greedy sampling produces `ids` in
+/// order. See [`slm::decoder::test_script_set`]. `n == 0` disarms.
+///
+/// # Safety
+/// `ids` must point to `n` readable `u32`s, or be anything when `n == 0`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_test_script(ids: *const u32, n: usize, looping: i32) -> i32 {
+    let slice: &[u32] = if n == 0 || ids.is_null() {
+        &[]
+    } else {
+        core::slice::from_raw_parts(ids, n)
+    };
+    if slm::decoder::test_script_set(slice, looping != 0) { 0 } else { -1 }
+}
+
+/// Test-only: GPU-tier op count seen by the last scripted forward step.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_test_script_gpu_ops_seen() -> u32 {
+    slm::decoder::test_script_gpu_ops_seen()
+}
+
 /// Reset the SLM registry to its initial empty state. Test-only —
 /// `kernel/tests/test_slm_load.c` calls this between cases so each
 /// test sees a known empty slot table.
@@ -6297,6 +6442,16 @@ const SLM_SAMPLER_TOP_K: u32 = 2;
 const SLM_SAMPLER_TOP_P: u32 = 3;
 const SLM_SAMPLER_TOP_K_TOP_P: u32 = 4;
 
+/// Mirrors `SLM_ERR_BUSY` in `kernel/include/slm_ffi.h`.
+#[cfg(feature = "slm")]
+const SLM_ERR_BUSY: i32 = -3;
+/// `--gpu on` and no GPU program could be built. `rust_slm_session_gpu_info`
+/// says why.
+pub const SLM_ERR_GPU_PROGRAM: i32 = -16;
+/// `rust_slm_prompt_ex` flag: tokenize the text as given.
+#[cfg(feature = "slm")]
+pub(crate) const SLM_PROMPT_RAW: u32 = 1;
+
 /// C-layout snapshot of session telemetry. Mirrors `SlmStatsC` in
 /// the kernel header.
 #[cfg(feature = "slm")]
@@ -6305,16 +6460,43 @@ pub struct SlmStatsC {
     pub prompts_completed: u32,
     pub tokens_in: u32,
     pub tokens_out: u32,
+    /// One of `SLM_STOP_*`: why the last prompt stopped.
+    pub last_stop_reason: u32,
     pub last_ttft_ns: u64,
     pub last_decode_ns: u64,
 }
 
 // FFI size pin: paired with `_Static_assert(sizeof(SlmStatsC) == 32,
-// ...)` in `kernel/include/slm_ffi.h`. Layout is 3×u32 + 4-byte
-// padding (u64 alignment) + 2×u64 = 32 bytes. Failing here surfaces
-// any field add/reorder at compile time before C and Rust drift.
+// ...)` in `kernel/include/slm_ffi.h`. Layout is 4×u32 + 2×u64 = 32
+// bytes. Failing here surfaces any field add/reorder at compile time
+// before C and Rust drift.
 #[cfg(feature = "slm")]
 const _: () = assert!(core::mem::size_of::<SlmStatsC>() == 32);
+
+/// C-layout view of a session's configuration and live state, for
+/// `slm launch`'s banner and `slm stats`. Mirrors `SlmSessionInfoC`.
+#[cfg(feature = "slm")]
+#[repr(C)]
+pub struct SlmSessionInfoC {
+    /// `SLM_GPU_*`: what `--gpu` asked for.
+    pub gpu_mode: u32,
+    /// What `--threads` asked for. Stored; the forward path doesn't use
+    /// it until the worker pool lands.
+    pub threads: u32,
+    /// Ops the tier table currently sends to the GPU; 0 under `--gpu cpu`.
+    pub gpu_ops: u32,
+    /// Weight tensors staged in GPU memory for this model.
+    pub gpu_tensors: u32,
+    pub max_ctx: u32,
+    pub kv_len: u32,
+    /// Non-zero while a prompt runs on this session.
+    pub busy: u32,
+    /// Non-zero if the last prompt was stopped.
+    pub stopped: u32,
+}
+
+#[cfg(feature = "slm")]
+const _: () = assert!(core::mem::size_of::<SlmSessionInfoC>() == 32);
 
 /// Open a session over a loaded SLM.
 ///
@@ -6373,29 +6555,341 @@ pub extern "C" fn rust_slm_session_open(
     }
 }
 
-/// Close a session, releasing its slot. Returns 0 on success, -1 if
-/// the slot was empty or out of range.
+/// Apply `slm launch --gpu` / `--threads` to an open session.
+///
+/// `gpu_mode` is one of the `SLM_GPU_*` constants. `threads` must be
+/// `1..=MAX_THREADS`. Returns 0 on success, -1 on a bad argument or
+/// unknown session, `SLM_ERR_BUSY` while a prompt runs on it.
 #[no_mangle]
 #[cfg(feature = "slm")]
-pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
-    // Mark closed first (best-effort; ignored if slot is empty), then
-    // free the slot. The two steps don't have to be atomic — a
-    // racing FFI call against the same id is invalid usage.
-    let _ = slm::session::with_session(session_id as usize, |s| s.close());
-    match slm::session::remove(session_id as usize) {
-        Some(_) => 0,
+pub extern "C" fn rust_slm_session_configure(session_id: u32, gpu_mode: u32, threads: u32) -> i32 {
+    let mode = match slm::session::GpuMode::from_u32(gpu_mode) {
+        Some(m) => m,
+        None => return -1,
+    };
+    if threads == 0 || threads > slm::session::MAX_THREADS {
+        return -1;
+    }
+    // Leased, not under the table lock: building a program allocates and
+    // zeroes the arena and maps the weights, which takes a while.
+    let mut lease = match slm::session::checkout(session_id as usize) {
+        Ok(l) => l,
+        Err(slm::session::SlotError::Busy) => return SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => return -1,
+    };
+    lease.threads = threads;
+    match lease.choose_path(mode) {
+        Ok(()) => 0,
+        Err(_) => SLM_ERR_GPU_PROGRAM,
+    }
+}
+
+/// Where a session's forward steps run, for `slm launch` and `slm gpu`.
+/// Keep in step with `SlmSessionGpuC` in slm_ffi.h.
+#[repr(C)]
+#[cfg(feature = "slm")]
+pub struct SlmSessionGpuC {
+    /// 0 program, 1 per-op tier table, 2 CPU.
+    pub path: u32,
+    pub launches: u32,
+    pub barriers: u32,
+    pub max_batch: u32,
+    pub weights_big: u32,
+    pub pad: u32,
+    pub arena_bytes: u64,
+    pub gpu_tokens: u64,
+    pub cpu_tokens: u64,
+    pub gpu_us_per_token: u64,
+    /// NUL-terminated reason the session isn't on the program; may be empty.
+    pub note: [u8; 96],
+}
+
+/// Fill `*out` for `session_id`. Works while a prompt runs, with values as
+/// of its start. Returns 0, or -1 on a null pointer or unknown session.
+///
+/// # Safety
+/// `out` must point to writable memory of `sizeof(SlmSessionGpuC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_session_gpu_info(session_id: u32, out: *mut SlmSessionGpuC) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let snap = match slm::session::snapshot(session_id as usize) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let mut note = [0u8; 96];
+    if let Some(n) = snap.gpu_note {
+        let len = n.len().min(note.len() - 1);
+        note[..len].copy_from_slice(&n.as_bytes()[..len]);
+    }
+    // SAFETY: caller's contract, `out` is writable.
+    unsafe {
+        *out = SlmSessionGpuC {
+            path: match snap.path {
+                slm::session::ForwardPath::Program => 0,
+                slm::session::ForwardPath::PerOp => 1,
+                slm::session::ForwardPath::Cpu => 2,
+            },
+            launches: snap.launches,
+            barriers: snap.barriers,
+            max_batch: snap.max_batch,
+            weights_big: snap.weights_big as u32,
+            pad: 0,
+            arena_bytes: snap.arena_bytes,
+            gpu_tokens: snap.gpu_tokens,
+            cpu_tokens: snap.cpu_tokens,
+            gpu_us_per_token: snap.gpu_us_per_token,
+            note,
+        };
+    }
+    0
+}
+
+/// Live telemetry for `slm stats`. Works while a prompt runs and never holds
+/// it up: see `slm::telemetry`. `gpc_hz` scales the mma issue measure; 0 when
+/// the clock isn't known. Returns 0, or -1 on a null pointer or unknown session.
+///
+/// # Safety
+/// `out` must point to writable memory of `sizeof(SlmTelemetryC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_telemetry(
+    session_id: u32,
+    gpc_hz: u64,
+    out: *mut slm::telemetry::SlmTelemetryC,
+) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    match slm::session::telemetry(session_id as usize) {
+        Some(t) => {
+            // SAFETY: caller's contract, `out` is writable.
+            unsafe { *out = t.snapshot(gpc_hz) };
+            0
+        }
         None => -1,
     }
 }
 
+/// `slm stats --profile`: arm or disarm per-op timing from the next forward
+/// step. Works while a prompt runs. Returns 0, or -1 on an unknown session.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_telemetry_profile(session_id: u32, on: u32) -> i32 {
+    match slm::session::telemetry(session_id as usize) {
+        Some(t) => {
+            t.set_profile(on != 0);
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Mean nanoseconds of telemetry writes per token, measured on a scratch block.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_telemetry_token_cost_ns() -> u64 {
+    slm::telemetry::token_cost_ns()
+}
+
+/// `slm gpu profile <session>`: per-step times and per-kernel GPU time.
+/// Returns 0, -1 if the session isn't on a program, or SLM_ERR_BUSY while a
+/// prompt holds it.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_gpu_profile(session_id: u32) -> i32 {
+    // Leased, not under the table lock: printing allocates and writes to the
+    // console, and the runner's lease drop and `slm list` must not spin on
+    // the table meanwhile (#1164 review W1). The lease also makes this the
+    // session's owner, which slm_prog_profile requires.
+    //
+    // While it prints, the session reads as busy and Decoding in `slm list`
+    // and `slm stats`. A prompt for it that arrives then (`slm prompt`, or a
+    // bus prompt when this is slm-runner's session) gets SLM_ERR_BUSY instead
+    // of waiting. The print takes milliseconds, so neither matters.
+    let lease = match slm::session::checkout(session_id as usize) {
+        Ok(l) => l,
+        Err(slm::session::SlotError::Busy) => return SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => return -1,
+    };
+    match lease.gpu.as_ref() {
+        Some(p) => {
+            p.print_profile();
+            0
+        }
+        None => -1,
+    }
+}
+
+/// `slm gpu inject`: failure for the next launch's decode program. 0 none,
+/// 1 a hang, 2 an MMU fault.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_set_inject(kind: u32) {
+    slm::gpu_program::set_inject(kind);
+}
+
+/// `slm gpu opcheck`: every kernel against its CPU reference. Returns the
+/// number of failed checks, or -1 with the reason on the console.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_opcheck(model: u32, simt: u32) -> i32 {
+    match slm::gpu_program::opcheck(model, simt != 0) {
+        Ok(n) => n as i32,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] opcheck: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
+/// `slm gpu smoke`: a chain of `n` launches with no model. Returns 0 with
+/// `*out` filled, or -1 with the reason on the console.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_gpu_smoke(n: u32, width: u32, out: *mut slm::gpu_program::SmokeReport) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract.
+    match slm::gpu_program::smoke(n, width, unsafe { &mut *out }) {
+        Ok(()) => 0,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] smoke: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
+/// Compare a program with llama.cpp on a fixture (see `slm gpu golden`).
+/// Returns 0 with `*out` filled, or -1 if the program couldn't run: nothing to
+/// report beyond the console line.
+///
+/// # Safety
+/// `rec` must point to `rec_len` readable bytes; `out` must be writable.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_gpu_golden(
+    model: u32,
+    rec: *const u8,
+    rec_len: usize,
+    batched: u32,
+    out: *mut slm::gpu_program::GoldenReport,
+) -> i32 {
+    if rec.is_null() || out.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract.
+    let (rec, out) = unsafe { (core::slice::from_raw_parts(rec, rec_len), &mut *out) };
+    match slm::gpu_program::golden_run(model, rec, batched != 0, out) {
+        Ok(()) => 0,
+        Err(why) => {
+            let mut line = alloc::string::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!("[slm] golden: {why}\n\0"));
+            kernel_ffi::print(line.as_bytes());
+            -1
+        }
+    }
+}
+
+/// Barrier kind and QMD flags for the next `slm launch`, for measuring them
+/// on hardware. See `enum ga10b_prog_barrier` and `SLM_PROG_FLAG_*`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_set_options(barrier: u32, flags: u32) {
+    slm::gpu_program::set_options(barrier, flags);
+}
+
+/// 1 if a prompt is running on this session, 0 if not, -1 on a bad id.
+/// Takes only the session table lock, which a prompt doesn't hold.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_busy(session_id: u32) -> i32 {
+    match slm::session::snapshot(session_id as usize) {
+        Some(snap) => snap.busy as i32,
+        None => -1,
+    }
+}
+
+/// Number of ops the tier table currently routes to the GPU.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_gpu_tier_ops() -> u32 {
+    slm::decoder::gpu_tier_ops()
+}
+
+/// Fill `*out` with a session's configuration and live state. Works
+/// while a prompt runs. Returns 0 on success, -1 on a null pointer or
+/// unknown session.
+///
+/// # Safety
+/// `out` must point to writable memory of `sizeof(SlmSessionInfoC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_session_info(session_id: u32, out: *mut SlmSessionInfoC) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let snap = match slm::session::snapshot(session_id as usize) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let per_op = snap.path == slm::session::ForwardPath::PerOp;
+    let gpu_tensors = slm::registry::with_loaded_slm(snap.model_handle as usize, |m| {
+        m.gpu_tensor_map().len() as u32
+    })
+    .unwrap_or(0);
+    // SAFETY: caller's contract — `out` is writable.
+    unsafe {
+        *out = SlmSessionInfoC {
+            gpu_mode: snap.gpu_mode as u32,
+            threads: snap.threads,
+            gpu_ops: if per_op { slm::decoder::gpu_tier_ops() } else { 0 },
+            gpu_tensors,
+            max_ctx: snap.max_ctx as u32,
+            kv_len: snap.kv_len as u32,
+            busy: snap.busy as u32,
+            stopped: (snap.state == slm::session::SessionState::Stopped) as u32,
+        };
+    }
+    0
+}
+
+/// Close a session, releasing its slot. Returns 0 on success, -1 if
+/// the slot was empty or out of range, `SLM_ERR_BUSY` while a prompt
+/// runs on it.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
+    match slm::session::remove(session_id as usize) {
+        Ok(mut session) => {
+            session.close();
+            0
+        }
+        Err(slm::session::SlotError::Busy) => SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => -1,
+    }
+}
+
 /// Reset a session's KV cache and counters for a fresh conversation.
-/// Returns 0 on success, -1 if the slot is empty / out of range.
+/// Returns 0 on success, -1 if the slot is empty / out of range,
+/// `SLM_ERR_BUSY` while a prompt runs on it.
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_session_reset(session_id: u32) -> i32 {
-    match slm::session::with_session(session_id as usize, |s| s.reset()) {
-        Some(()) => 0,
-        None => -1,
+    match slm::session::try_with_session(session_id as usize, |s| s.reset()) {
+        Ok(()) => 0,
+        Err(slm::session::SlotError::Busy) => SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => -1,
     }
 }
 
@@ -6410,6 +6904,11 @@ pub type RustSlmTokenCb = unsafe extern "C" fn(
     bytes_len: usize,
 ) -> i32;
 
+/// C-callable stop poll: called before every forward step. Non-zero
+/// stops the prompt as `slm stop` would.
+#[cfg(feature = "slm")]
+pub type RustSlmPollCb = unsafe extern "C" fn(user: *mut core::ffi::c_void) -> i32;
+
 /// Pointer-typed bridge so the static `TokenCallback` (which has a
 /// `fn(...) -> bool` signature) can dispatch to a caller's
 /// `RustSlmTokenCb` via thread-local context. Storing the C
@@ -6420,6 +6919,7 @@ mod ffi_cb {
     use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
     static CB: AtomicUsize = AtomicUsize::new(0);
+    static POLL: AtomicUsize = AtomicUsize::new(0);
     static USER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(core::ptr::null_mut());
     /// Single-prompt-at-a-time gate. The cb + user pointer pair is a
     /// shared mutable static; without serialization, two concurrent
@@ -6433,6 +6933,7 @@ mod ffi_cb {
     /// flight. Pairs with [`clear`].
     pub fn try_install(
         cb: super::RustSlmTokenCb,
+        poll: Option<super::RustSlmPollCb>,
         user: *mut core::ffi::c_void,
     ) -> bool {
         if BUSY
@@ -6442,12 +6943,14 @@ mod ffi_cb {
             return false;
         }
         CB.store(cb as usize, Ordering::SeqCst);
+        POLL.store(poll.map_or(0, |p| p as usize), Ordering::SeqCst);
         USER.store(user, Ordering::SeqCst);
         true
     }
 
     pub fn clear() {
         CB.store(0, Ordering::SeqCst);
+        POLL.store(0, Ordering::SeqCst);
         USER.store(core::ptr::null_mut(), Ordering::SeqCst);
         BUSY.store(false, Ordering::Release);
     }
@@ -6468,6 +6971,17 @@ mod ffi_cb {
         let rc = unsafe { cb(user, token_id, bytes.as_ptr(), bytes.len()) };
         rc != 0
     }
+
+    pub fn poll() -> bool {
+        let raw = POLL.load(Ordering::SeqCst);
+        if raw == 0 {
+            return false;
+        }
+        // SAFETY: `raw` was installed via `try_install` from a valid
+        // function pointer of `RustSlmPollCb` type.
+        let poll: super::RustSlmPollCb = unsafe { core::mem::transmute(raw) };
+        unsafe { poll(USER.load(Ordering::SeqCst)) != 0 }
+    }
 }
 
 #[cfg(feature = "slm")]
@@ -6475,22 +6989,11 @@ fn ffi_cb_trampoline(token_id: u32, bytes: &[u8]) -> bool {
     ffi_cb::dispatch(token_id, bytes)
 }
 
-/// Run a prompt against an open session.
-///
-/// `prompt` / `prompt_len` is a UTF-8 string (not necessarily
-/// null-terminated; the length is authoritative).
-/// `max_new_tokens == 0` means "until EOS or stop flag".
-/// `cb` is called once per emitted token; returning 0 stops
-/// generation. `user` is passed through opaquely.
-///
-/// Returns 0 on success, -1 on error (invalid pointers, session
-/// not in `Open` state, etc.).
+/// Run a prompt against an open session, as a user turn in the model's
+/// chat template. See [`rust_slm_prompt_ex`].
 ///
 /// # Safety
-/// - `prompt` must be a valid pointer to `prompt_len` bytes of UTF-8
-///   data, or null when `prompt_len == 0`.
-/// - `cb` must be a valid C function pointer of type
-///   [`RustSlmTokenCb`].
+/// As [`rust_slm_prompt_ex`].
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub unsafe extern "C" fn rust_slm_prompt(
@@ -6499,6 +7002,47 @@ pub unsafe extern "C" fn rust_slm_prompt(
     prompt_len: usize,
     max_new_tokens: u32,
     cb: RustSlmTokenCb,
+    user: *mut core::ffi::c_void,
+) -> i32 {
+    rust_slm_prompt_ex(session_id, prompt, prompt_len, 0, max_new_tokens, cb, None, user)
+}
+
+/// Run a prompt against an open session.
+///
+/// `prompt` / `prompt_len` is a UTF-8 string (not necessarily
+/// null-terminated; the length is authoritative).
+/// `flags`: `SLM_PROMPT_RAW` tokenizes the text as given, mapping
+/// special-token names to ids, instead of rendering the chat template.
+/// `max_new_tokens == 0` means "until EOS or stop flag".
+/// `cb` is called once per emitted token; returning 0 stops
+/// generation. `poll`, if not null, is called before every forward step;
+/// returning non-zero acts like `rust_slm_stop`. `user` is passed through
+/// opaquely to both.
+///
+/// The session lock isn't held during the decode, so `rust_slm_stop`,
+/// `rust_slm_stats` and `rust_slm_session_info` work from another task
+/// meanwhile. Why the prompt ended is in `SlmStatsC.last_stop_reason`.
+///
+/// Returns 0 when the prompt ran (including when it stopped early or
+/// didn't fit), -1 on error (invalid pointers, invalid UTF-8, no such
+/// session), `SLM_ERR_BUSY` when a prompt is already running.
+///
+/// # Safety
+/// - `prompt` must be a valid pointer to `prompt_len` bytes of UTF-8
+///   data, or null when `prompt_len == 0`.
+/// - `cb` must be a valid C function pointer of type
+///   [`RustSlmTokenCb`], and `poll` null or of type [`RustSlmPollCb`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn rust_slm_prompt_ex(
+    session_id: u32,
+    prompt: *const u8,
+    prompt_len: usize,
+    flags: u32,
+    max_new_tokens: u32,
+    cb: RustSlmTokenCb,
+    poll: Option<RustSlmPollCb>,
     user: *mut core::ffi::c_void,
 ) -> i32 {
     if prompt.is_null() && prompt_len != 0 {
@@ -6523,48 +7067,63 @@ pub unsafe extern "C" fn rust_slm_prompt(
         Err(_) => return -1,
     };
 
-    // M5.3.1: the decoder fetches the tokenizer from the registry
-    // via `with_loaded_slm` — the FFI shim no longer needs to
-    // synthesize one. Empty prompts go straight through and exit
-    // cleanly without entering the decode loop; non-empty prompts
-    // tokenize against the loaded model's `Bbpe`.
     let cfg = slm::decoder::DecodeConfig {
         max_new_tokens,
-        eos_token_id: 2,
-        prefill_chunk: 64,
+        stop_tokens: None,
+        // Yield after every prefill token: a token takes tens of ms on
+        // the CPU path, far longer than a yield, and `slm stop` from a
+        // second session needs the CPU to arrive on cooperative builds.
+        prefill_chunk: 1,
+        mode: if flags & SLM_PROMPT_RAW != 0 {
+            slm::decoder::PromptMode::Raw
+        } else {
+            slm::decoder::PromptMode::Chat
+        },
+        poll_stop: Some(ffi_poll_trampoline),
     };
 
-    // Acquire the FFI bridge — fails (returns -1) if another prompt
-    // is already in flight on a different session, so the cb + user
-    // pointer pair can't get clobbered cross-CPU.
-    if !ffi_cb::try_install(cb, user) {
-        return -1;
+    // Acquire the FFI bridge — fails if another prompt is already in
+    // flight on a different session, so the cb + user pointer pair
+    // can't get clobbered cross-CPU.
+    if !ffi_cb::try_install(cb, poll, user) {
+        return SLM_ERR_BUSY;
     }
-    let result = slm::session::with_session(session_id as usize, |s| {
-        slm::decoder::run_prompt(s, prompt_str, &cfg, ffi_cb_trampoline)
-    });
+    let rc = match slm::session::checkout(session_id as usize) {
+        Ok(mut lease) => {
+            match slm::decoder::run_prompt(&mut lease, prompt_str, &cfg, ffi_cb_trampoline) {
+                Some(_) => 0,
+                None => -1,
+            }
+        }
+        Err(slm::session::SlotError::Busy) => SLM_ERR_BUSY,
+        Err(slm::session::SlotError::Empty) => -1,
+    };
     ffi_cb::clear();
+    rc
+}
 
-    match result {
-        Some(Some(_stats)) => 0,
-        _ => -1,
-    }
+#[cfg(feature = "slm")]
+fn ffi_poll_trampoline() -> bool {
+    ffi_cb::poll()
 }
 
 /// Cooperative-cancel signal for an in-flight `rust_slm_prompt` call.
-/// Sets the session's stop flag; the decoder loop notices at the
-/// next yield boundary. Returns 0 on success, -1 on bad index.
+/// Sets the session's stop flag; the decoder notices before its next
+/// forward step. Safe to call from any task while the prompt runs.
+/// Stopping an idle session does nothing. Returns 0 on success, -1 on
+/// bad index.
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_stop(session_id: u32) -> i32 {
-    match slm::session::with_session(session_id as usize, |s| s.request_stop()) {
-        Some(()) => 0,
-        None => -1,
+    match slm::session::request_stop(session_id as usize) {
+        Ok(_) => 0,
+        Err(_) => -1,
     }
 }
 
-/// Snapshot a session's telemetry counters into `*out`. Returns 0
-/// on success, -1 on null pointer / unknown session id.
+/// Snapshot a session's telemetry counters into `*out`. Works while a
+/// prompt runs: the counters are then as of its start. Returns 0 on
+/// success, -1 on null pointer / unknown session id.
 ///
 /// # Safety
 /// - `out` must point to writable memory of at least
@@ -6575,17 +7134,19 @@ pub unsafe extern "C" fn rust_slm_stats(session_id: u32, out: *mut SlmStatsC) ->
     if out.is_null() {
         return -1;
     }
-    let snap = slm::session::with_session(session_id as usize, |s| SlmStatsC {
-        prompts_completed: s.prompts_completed,
-        tokens_in: s.tokens_in,
-        tokens_out: s.tokens_out,
-        last_ttft_ns: s.last_ttft_ns,
-        last_decode_ns: s.last_decode_ns,
-    });
-    match snap {
-        Some(stats) => {
+    match slm::session::snapshot(session_id as usize) {
+        Some(s) => {
             // SAFETY: caller's contract — `out` is writable.
-            unsafe { *out = stats; }
+            unsafe {
+                *out = SlmStatsC {
+                    prompts_completed: s.prompts_completed,
+                    tokens_in: s.tokens_in,
+                    tokens_out: s.tokens_out,
+                    last_stop_reason: s.last_stop_reason as u32,
+                    last_ttft_ns: s.last_ttft_ns,
+                    last_decode_ns: s.last_decode_ns,
+                };
+            }
             0
         }
         None => -1,

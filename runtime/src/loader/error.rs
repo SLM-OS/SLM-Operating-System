@@ -27,6 +27,9 @@ pub enum LoadError {
     /// Currently only the CPU ONNX backend supports it; Hailo's
     /// CCW-reupload swap path is tracked separately in #532.
     SwapNotSupported,
+    /// Something still uses the slot's memory (a session's GPU program
+    /// maps its weights), so it can't be freed now.
+    InUse,
 }
 
 impl From<AllocError> for LoadError {

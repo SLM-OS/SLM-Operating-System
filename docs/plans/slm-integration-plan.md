@@ -272,6 +272,9 @@ output token-for-token.
 the Qwen2.5-1.5B forward pass on the GA10B GPU, **driving the Ampere
 tensor cores via HMMA as the main-line implementation**. Sustained
 decode ≥ 25 tok/s with ≥ 60 % tensor-core utilization on matmul ops.
+*Superseded by [ADR 0005](../adr/0005-dod6-decode-bandwidth.md): single-stream
+decode is memory-bound, so the target is parity speed plus decode DRAM
+bandwidth, with tensor-core figures for information only.*
 
 The Orin Nano has no NVDLA / no separate TPU — the GA10B's 32 third-gen
 tensor cores are the only AI silicon on the board, and the 67-TOPS
@@ -362,8 +365,10 @@ one variant.
   - ☐ With Tier-2 CUDA-core fallback on all matmul kernels: **≥ 10 tok/s**
     sustained (degraded-mode floor).
 - ☐ TTFT for a 64-token prompt ≤ 400 ms (Tier-1).
-- ☐ `slm stats --gpu` reports tensor-core utilization ≥ 60 % during
-  matmul ops in Tier-1 mode.
+- ⏸️ `slm stats --gpu` reports tensor-core utilization ≥ 60 % during
+  matmul ops in Tier-1 mode. *Superseded by ADR 0005: `slm stats --gpu`
+  reports decode DRAM bandwidth against the LPDDR5 peak (target: parity
+  with llama.cpp for the same bytes, about 41.3 %; measured 47.8-48.1 %) and tensor-core use for information only.*
 - ☐ Per-op tier selection visible via `slm gpu` (e.g. one op stuck on
   Tier 2 while others run Tier 1 is a supported, non-failure state).
 
@@ -405,11 +410,9 @@ token-by-token UART streaming.
   helper. Honors UART back-pressure.
 - ☐ `slm stream` reads from UART line-buffered until blank input; useful
   for interactive testing without copy-paste.
-- ☐ `slm stop` from a separate UART input session signals the stop flag —
-  requires a small change to `shell.c` to allow command interleaving from
-  the same UART (or document that `stop` works via a second session).
-  **Decision needed (M7-D1):** interleaved input vs. require second UART
-  session.
+- ✅ `slm stop` from a second shell session signals an atomic per-session
+  stop flag without taking any lock, and Ctrl-C on the session running the
+  prompt does the same. (M7-D1: both.)
 - ☐ Lua bindings: `slm.load`, `slm.launch`, `slm.prompt`, `slm.stats` —
   matches the existing `slm.component_*` pattern.
 - ☐ Help text + categorization in `builtin_commands[]`.
@@ -432,9 +435,10 @@ slmos> slm prompt 0 "What is virtual memory?"
 service, reachable via the message router.
 
 - ☐ `components/slm-runner/` with manifest from the spec.
-- ☐ Component subscribes `/slm/prompt`; for each message:
+- ✅ Component subscribes `/slm/prompt`; for each message:
   tokenize → render ChatML → run prompt → publish each token to
-  `/slm/token` → publish final stats to `/slm/done`.
+  `/slm/token` → publish final stats to `/slm/done`. See
+  `docs/tutorials/slm-component.md`.
 - ☐ Hot-swap-safe: model handle and KV cache live across replacements
   (similar to how `sensor_monitor` preserves subscriptions).
 - ☐ EL0 isolation: the EL0 task path works on QEMU, Pi 5 and Jetson, but
@@ -455,12 +459,12 @@ stats on `/slm/done`. Hot-swap of `slm-runner` preserves the loaded model
 **Goal:** All telemetry the spec promises, plus per-platform benchmark
 reports.
 
-- ☐ Per-op profiling under `slm stats --profile`: rmsnorm, rope, gqa
-  (broken into qkv-proj, attn, oproj), mlp (gate, up, silu*mul, down),
-  lm_head. Implementation: `Timer::elapsed()` ring buffer per op,
-  reported as ms/token average.
-- ☐ GPU PTIMER integration for `slm stats --gpu` (Jetson only).
-- ☐ Best-effort power proxy via BPMP MRQ for `slm stats --power`.
+- ✅ Per-op profiling under `slm stats --profile`, by op class: semaphore
+  timestamps on the GPU path, timers on the CPU path (#475).
+- ✅ GPU busy time for `slm stats --gpu`, from semaphore timestamps, not
+  PTIMER MMIO (#475).
+- ✅ Best-effort `slm stats --power`: BPMP temperatures; power prints `n/a`,
+  since no rail sensor is read (#475).
 - ☐ `slm bench` runs the spec's standard battery: 64/256-token prompt
   prefill + 256-token decode, three runs, reports min/avg/max.
 - ☐ Benchmark report committed to `docs/benchmarks.md` covering CPU and
@@ -494,7 +498,7 @@ reports.
 | M6-D3 | Tensor-core API to target | `nvcuda::wmma` C++ vs inline `mma.sync.aligned…` PTX | **Start with `wmma`** for readability; drop to inline PTX only on the 1–2 hottest kernels (`q4K_dot`, `gqa_attn`) if profiling shows a meaningful gap |
 | M6-D4 | Tier-1 / Tier-2 authoring order per M6.B kernel | Tier-1 first vs Tier-2 first | **Tier-2 first** per kernel — gives a working golden reference before HMMA tile work begins, so any Tier-1 slip leaves the GPU path intact |
 | M6-D5 | HMMA accumulator precision | FP16 vs FP32 | **FP32 accumulator** for attention (`Q·Kᵀ`, `P·V`) and `lm_head`; FP16 acceptable elsewhere. Matches llama.cpp's choices and stays inside the 1e-2 max-abs tolerance |
-| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | **Interleaved** if shell.c supports it cleanly; otherwise document the second-UART workaround for the demo |
+| M7-D1 | `slm stop` signaling | interleaved UART input vs second UART | Both: Ctrl-C polled during the decode, and `slm stop` from a second session |
 | M8-D1 | KV cache lifetime across hot-swap | preserve vs reset | **Preserve** — chat continuity matters; component generation counter handles correctness |
 
 ---
@@ -556,10 +560,15 @@ boot can:
 4. Show real-time per-token telemetry on `slm stats --profile`.
 5. Demonstrate `slm-runner` answering prompts published to `/slm/prompt`
    on the message bus.
-6. Hold ≥ 25 tok/s decode and < 400 ms TTFT on a 64-token prompt with
-   Tier-1 HMMA tensor-core kernels engaged on all matmul ops, and report
-   ≥ 60 % tensor-core utilization during decode via `slm stats --gpu`.
+6. Hold ≥ 25 tok/s decode, at least parity with llama.cpp CUDA at the same
+   GPU clock (ADR 0001), and < 400 ms TTFT on a 64-token prompt, with Tier-1
+   HMMA tensor-core kernels on all weight matmuls. `slm stats --gpu` reports
+   decode DRAM bandwidth as a fraction of the LPDDR5 peak (target: at least llama.cpp's fraction for the same bytes, about 41.3 %) and
+   tensor-core use, the latter for information only (meaningful for prefill).
    Degraded-mode (Tier-2 fallback only) acceptance floor is ≥ 10 tok/s.
+   *Amended 2026-11-07 by [ADR 0005](../adr/0005-dod6-decode-bandwidth.md);
+   the original wording required ≥ 60 % tensor-core utilization during
+   decode and HMMA on all matmul ops, including attention.*
 7. Pass the full `/ci` sweep (QEMU ARM64 + x86-64) with the new test
    suites, including golden-vector tokenizer, golden-vector ops, and an
    end-to-end deterministic-greedy completion test.

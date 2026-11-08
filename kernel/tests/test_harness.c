@@ -156,6 +156,7 @@ int test_harness_run_all(void)
     /* UEFI-direct relocation decision (#26); efi_stub.c is built on
      * every ARM64 platform with a PE header (not Pi 5). */
     total_failures += test_suite_efi_reloc();
+    total_failures += test_suite_boot_models();
 #endif
     total_failures += test_suite_tegra_cpufreq();
     total_failures += test_suite_tegra_fan();
@@ -252,6 +253,11 @@ int test_harness_run_all(void)
      * `_reset`, which are defined on every platform (Jetson real
      * impl + non-Jetson stub in slm_ffi.c). No Rust deps. */
     total_failures += test_suite_slm_dispatch_stats();
+#if defined(ENABLE_BOOT_TESTS)
+    /* Boot-test kernels only: the suite embeds its 860 KB of fixtures. */
+    total_failures += test_suite_slm_golden();
+    total_failures += test_suite_slm_prog();
+#endif
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_net();

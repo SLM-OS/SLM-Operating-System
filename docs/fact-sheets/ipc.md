@@ -18,7 +18,7 @@ Message routing, pub/sub, shared buffers, priority-inheritance mutexes.
 | Cross-mailbox priority ordering | `receive()` returns highest-priority ready mailbox under lock-held scan | Same | Same | Same |
 | LAST_RECEIVED ack-targeting | `ack` clears exactly the mailbox the most recent `receive` returned, even under cross-CPU activity | Same | Same | Same |
 | Single-slot mailbox flow control | Delivery to an unacked mailbox is refused, never overwritten (#948): blocking publish retries for up to the ack timeout (5 s, separate from the 5 s ack-wait), nowait publish drops and counts it (`msg_router_flow_control_stats`) | Same | Same | Same |
-| Message shape | Pointer + NUL-terminated bytes (`MAX_MSG_LEN = 60`) | Same | Same | Same |
+| Message shape | Pointer + NUL-terminated bytes (`MAX_MSG_LEN = 512`) | Same | Same | Same |
 | Ack model | Per-message ack with 5 s CNTPCT timeout (no-ack-wait variant available) | Same | Same | Same |
 | Ack timeout source | `timer_get_count()` CNTPCT | Same | Same | LAPIC timer |
 | Shared buffers | Ring buffers with producer/consumer pointers | Same | Same | Same |

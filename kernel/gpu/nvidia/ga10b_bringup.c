@@ -3526,6 +3526,43 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
     return -1;
 }
 
+/* One GPFIFO entry for a prebuilt program (kernel/gpu/slm_prog.c): no
+ * QMD writes, no FECS recovery, no poll. Caller holds g_gpu_dispatch_lock.
+ * Advances the same cursor every other dispatch on the channel uses, so
+ * they interleave on the ring. */
+int ga10b_bringup_submit_gp_entry(uint64_t entry)
+{
+    if (!gsp_platform || g_handoff.gpfifo_phys == 0u || g_handoff.gpfifo_entries == 0u ||
+        g_handoff.userd_phys == 0u) {
+        return -1;
+    }
+    uint32_t ring_mask = g_handoff.gpfifo_entries - 1u;
+    uint32_t put = g_handoff.initial_gp_put;
+    volatile uint64_t *gpfifo = (volatile uint64_t *)(uintptr_t)g_handoff.gpfifo_phys;
+    gpfifo[put & ring_mask] = entry;
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean((const void *)&gpfifo[put & ring_mask], sizeof(uint64_t));
+    }
+    gsp_platform->mb();
+    uint32_t new_put = (put + 1u) & ring_mask;
+    volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)g_handoff.userd_phys;
+    uint32_t gp_put_word = g_handoff.userd_gp_put_offset / 4u;
+    userd[gp_put_word] = new_put;
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean((const void *)&userd[gp_put_word], sizeof(uint32_t));
+    }
+    gsp_platform->mb();
+    *(volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS = g_handoff.work_submit_token;
+    gsp_platform->mb();
+    g_handoff.initial_gp_put = new_put;
+    return 0;
+}
+
+void ga10b_bringup_dump_fault_state(const char *tag)
+{
+    ga10b_dump_gr_state(tag);
+}
+
 /* Thin wrapper preserving the original
  * `ga10b_dispatch_v7_pipeline(b)` entry-point: validates the v7
  * handoff fields, reads the ops_v7 array from

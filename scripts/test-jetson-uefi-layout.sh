@@ -337,6 +337,15 @@ else
     err "entry window unavailable — PAN checks not run"
 fi
 
+# The stub writes this table before boot.S copies code + .data, and
+# primary_cpu clears .bss: in .bss the record would never reach the kernel.
+printf '\n== Boot model table (ADR 0002) ==\n'
+models_sec=$("$NM" "$ELF" | awk '$3 == "slmos_boot_models" {print $2}')
+case "$models_sec" in
+    D|d) pass "slmos_boot_models is in .data" ;;
+    *)   err "slmos_boot_models has symbol type '$models_sec', expected .data" ;;
+esac
+
 printf '\n== Summary ==\n'
 if [ "$fail" -eq 0 ]; then
     printf '  \033[32mAll checks passed.\033[0m\n'

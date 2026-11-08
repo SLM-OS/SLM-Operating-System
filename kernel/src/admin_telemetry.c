@@ -85,7 +85,7 @@ static int append_kv_uint(char *buf, size_t cap, size_t *pos,
     return 0;
 }
 
-/* msg_router caps MAX_MSG_LEN at 60 bytes (incl. nul); 64 here is the
+/* Telemetry payloads stay within 60 bytes (incl. nul); 64 here is the
  * scratch budget on the publish path. Sized so the fixed key strings
  * `dt=<20-digit ns>` + `fb=<bit>` + separating space + nul fit with
  * room to spare. */

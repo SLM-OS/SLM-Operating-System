@@ -666,6 +666,16 @@ extern int msg_router_publish_priority(const uint8_t *topic_name,
                                        const uint8_t *data, uint8_t priority);
 
 /*
+ * msg_router_publish_priority for a publisher that is itself a subscriber
+ * (component index `publisher_idx`, such as a Lua state): its own mailbox
+ * gets the message without the ack wait, which could only time out because
+ * nothing drains that mailbox until this returns. Other subscribers are
+ * waited for as usual. Returns: Number of subscribers that received it.
+ */
+extern int msg_router_publish_from(int publisher_idx, const uint8_t *topic_name,
+                                   const uint8_t *data, uint8_t priority);
+
+/*
  * Publish a large message. Currently delegates to msg_router_publish
  * (copies data). Future: will pass by reference for true zero-copy.
  * Returns: Number of subscribers that received the message.
@@ -1868,6 +1878,18 @@ extern uint64_t rust_slm_max_gguf_bytes(void);
  * kernel/tests/test_slm_load.c so the FFI surface can be exercised
  * end-to-end without staging a real GGUF.
  */
+extern int rust_slm_test_build_cli_fixture(uint8_t *out_buf,
+                                           size_t out_capacity,
+                                           size_t *out_size);
+
+/* Test-only: script the logits so greedy sampling produces `ids` in order
+ * (looping != 0 repeats them until something stops the prompt, without
+ * advancing the KV cache). n == 0 disarms. */
+extern int rust_slm_test_script(const uint32_t *ids, size_t n, int looping);
+
+/* Test-only: GPU-tier op count seen by the last scripted forward step. */
+extern uint32_t rust_slm_test_script_gpu_ops_seen(void);
+
 extern int rust_slm_test_build_qwen_fixture(
     uint32_t vocab_size,
     uint8_t *out_buf,
@@ -1887,10 +1909,7 @@ extern void rust_slm_test_reset(void);
  *
  * Per-conversation state and the prefill+decode loop. Builds on the
  * model registry (rust_slm_load above) plus M5.1's KV cache and
- * sampler. The forward pass is structurally complete but operates
- * on placeholder zero weights for M5.2 - real per-tensor lookup
- * lands in M5.3 once the GGUF weights are mmap'd into the model
- * memory pool.
+ * sampler.
  *
  * Sampler-kind tags - keep in sync with rust_slm_session_open():
  *   0 = Greedy (argmax; ignores temperature/top_k/top_p)
@@ -1912,23 +1931,68 @@ typedef struct {
     uint32_t prompts_completed;
     uint32_t tokens_in;        /* cumulative prefill tokens         */
     uint32_t tokens_out;       /* cumulative decoded tokens         */
+    uint32_t last_stop_reason; /* SLM_STOP_*: why the last prompt ended */
     uint64_t last_ttft_ns;     /* time-to-first-token, last prompt  */
     uint64_t last_decode_ns;   /* total decode time, last prompt    */
 } SlmStatsC;
 
 /* FFI size pin: paired with `const _: () = assert!(size_of::<SlmStatsC>() == 32)`
- * in runtime/src/lib.rs. Layout is 3×u32 + 4-byte padding (u64 alignment)
- * + 2×u64 = 32 B. */
+ * in runtime/src/lib.rs. Layout is 4×u32 + 2×u64 = 32 B. */
 _Static_assert(sizeof(SlmStatsC) == 32,
                "SlmStatsC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
 
+/* Values of SlmStatsC.last_stop_reason. Mirror of Rust's StopReason. */
+#define SLM_STOP_NONE          0u  /* no prompt yet                       */
+#define SLM_STOP_EOS           1u  /* sampled an end-of-generation token  */
+#define SLM_STOP_MAX_TOKENS    2u  /* hit --max                           */
+#define SLM_STOP_USER          3u  /* slm stop, Ctrl-C, or the poll cb    */
+#define SLM_STOP_CALLBACK      4u  /* the token callback returned 0       */
+#define SLM_STOP_CONTEXT_FULL  5u  /* prompt didn't fit, or generation filled it */
+#define SLM_STOP_NO_LOGITS     6u  /* forward pass produced nothing       */
+#define SLM_STOP_EMPTY_PROMPT  7u  /* empty text; nothing ran             */
+
+/* slm launch --gpu. Mirror of Rust's GpuMode. */
+#define SLM_GPU_AUTO  0u  /* follow the tier table, CPU fallback per op   */
+#define SLM_GPU_CPU   1u  /* never dispatch to the GPU for this session   */
+#define SLM_GPU_ON    2u  /* GPU program or nothing: launch refuses without one */
+
+/* rust_slm_prompt_ex flag: tokenize the text as given, mapping special
+ * token names such as <|im_start|> to their ids, instead of rendering
+ * the chat template around it. */
+#define SLM_PROMPT_RAW  1u
+
+/*
+ * Session configuration and live state. Populated by
+ * rust_slm_session_info().
+ */
+typedef struct {
+    uint32_t gpu_mode;     /* SLM_GPU_*                                     */
+    uint32_t threads;      /* --threads as given; stored, not used yet      */
+    uint32_t gpu_ops;      /* ops the tier table sends to the GPU now; 0 under --gpu cpu */
+    uint32_t gpu_tensors;  /* weight tensors staged in GPU memory           */
+    uint32_t max_ctx;
+    uint32_t kv_len;
+    uint32_t busy;         /* non-zero while a prompt runs on this session  */
+    uint32_t stopped;      /* non-zero if the last prompt was stopped       */
+} SlmSessionInfoC;
+
+_Static_assert(sizeof(SlmSessionInfoC) == 32,
+               "SlmSessionInfoC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
+
 /*
  * Token-emission callback. Invoked once per decoded token (prefill
- * is silent). `user` is the opaque pointer the caller passed to
- * rust_slm_prompt. `bytes`/`bytes_len` is the UTF-8 form of the
- * sampled token (do NOT retain the pointer past return). Return
- * non-zero to continue, zero to stop generation early.
+ * is silent, and the end-of-generation token ends the prompt without a
+ * call). `user` is the opaque pointer the caller passed to
+ * rust_slm_prompt. `bytes`/`bytes_len` is complete UTF-8 (do NOT retain
+ * the pointer past return): a token ending inside a multi-byte sequence
+ * passes what's complete so far, possibly nothing, and the next call
+ * carries the rest. If output ends part-way through a sequence, one last
+ * call with token_id == SLM_TOKEN_ID_FLUSH passes U+FFFD; that call
+ * isn't a model token. Return non-zero to continue, zero to stop
+ * generation early.
  */
+#define SLM_TOKEN_ID_FLUSH  0xFFFFFFFFu
+
 typedef int32_t (*RustSlmTokenCb)(
     void *user,
     uint32_t token_id,
@@ -1961,15 +2025,203 @@ extern int32_t rust_slm_session_open(
 
 /*
  * Close a session, releasing its slot.
- * Returns 0 on success, -1 on bad session id.
+ * Returns 0 on success, -1 on bad session id, SLM_ERR_BUSY while a
+ * prompt runs on it.
  */
 extern int32_t rust_slm_session_close(uint32_t session_id);
 
 /*
  * Reset a session's KV cache and counters for a fresh
- * conversation. Returns 0 on success, -1 on bad session id.
+ * conversation. Returns 0 on success, -1 on bad session id,
+ * SLM_ERR_BUSY while a prompt runs on it.
  */
 extern int32_t rust_slm_session_reset(uint32_t session_id);
+
+/*
+ * Apply `slm launch --gpu` / `--threads` to an open session.
+ *
+ * @gpu_mode: one of the SLM_GPU_* constants. SLM_GPU_CPU holds every op
+ *           on the CPU tier for the duration of each prompt.
+ * @threads: 1..64. Stored only: the forward path is single-threaded
+ *           until the worker pool lands.
+ * Returns 0 on success, -1 on a bad argument or session id,
+ * SLM_ERR_BUSY while a prompt runs on it.
+ */
+/* Returned by rust_slm_session_configure for --gpu on without a program. */
+#define SLM_ERR_GPU_PROGRAM  (-16)
+
+/* Where a session's forward steps run. */
+#define SLM_PATH_PROGRAM 0u
+#define SLM_PATH_PER_OP  1u
+#define SLM_PATH_CPU     2u
+
+typedef struct {
+    uint32_t path;          /* SLM_PATH_* */
+    uint32_t launches;      /* per decode step */
+    uint32_t barriers;
+    uint32_t max_batch;     /* prefill rows per step, 0 off the program */
+    uint32_t weights_big;   /* weights mapped with 64 KB PTEs */
+    uint32_t pad;
+    uint64_t arena_bytes;
+    uint64_t gpu_tokens;    /* tokens run on the program, kept after a fallback */
+    uint64_t cpu_tokens;    /* tokens run by forward_one */
+    uint64_t gpu_us_per_token;
+    char note[96];          /* why the session isn't on the program; may be "" */
+} SlmSessionGpuC;
+
+extern int32_t rust_slm_session_gpu_info(uint32_t session_id, SlmSessionGpuC *out);
+
+/* Op classes of SlmTelemetryC.classes. Mirror of Rust's OpClass. */
+enum {
+    SLM_OPCLASS_EMBED = 0,
+    SLM_OPCLASS_RMSNORM,
+    SLM_OPCLASS_MM_ATTN,    /* Q, K, V, output projections */
+    SLM_OPCLASS_ROPE,
+    SLM_OPCLASS_GQA,
+    SLM_OPCLASS_MM_MLP,     /* gate, up, down; on the CPU path also SwiGLU */
+    SLM_OPCLASS_SWIGLU,
+    SLM_OPCLASS_ADD,
+    SLM_OPCLASS_LM_HEAD,
+    SLM_OPCLASS_COUNT,
+};
+
+/* SlmOpClassC.tier: Rust's gpu_slm::Tier. */
+#define SLM_TIER_HMMA 1u
+#define SLM_TIER_SIMT 2u
+#define SLM_TIER_CPU  3u
+
+/* A figure with no real source right now. */
+#define SLM_TELEMETRY_NA 0xFFFFFFFFu
+
+typedef struct {
+    uint64_t last_ns;   /* in the last profiled token */
+    uint64_t total_ns;  /* over this prompt's profiled tokens */
+    uint32_t ops;       /* per token */
+    uint32_t tier;      /* SLM_TIER_* */
+} SlmOpClassC;
+
+/* Live figures for `slm stats`. Mirror of runtime/src/slm/telemetry.rs. */
+typedef struct {
+    uint32_t running;       /* a prompt is running; figures are live */
+    uint32_t consistent;    /* 0: every read try overlapped a write */
+    uint32_t profile;       /* --profile armed */
+    uint32_t path;          /* SLM_PATH_* */
+    uint32_t stop_reason;   /* SLM_STOP_*, NONE while running */
+    uint32_t kv_used;
+    uint32_t max_ctx;
+    uint32_t prompts;
+    uint64_t tokens_in;
+    uint64_t tokens_out;
+    uint64_t oov_pieces;    /* text pieces with no vocab entry, over the session */
+    /* This prompt, or the last one. */
+    uint64_t ttft_ns;
+    uint64_t prefill_tokens;
+    uint64_t prefill_ns;
+    uint64_t decode_tokens;
+    uint64_t decode_ns;
+    uint64_t itl_count;     /* forward steps since the first token */
+    uint64_t itl_min_ns;
+    uint64_t itl_avg_ns;
+    uint64_t itl_max_ns;
+    uint64_t itl_last_ns;
+    uint64_t itl_rolling_ns; /* mean of the last 32 */
+    uint64_t peak_resident_bytes; /* weights + KV + GPU arena */
+    /* GPU, this prompt, from the semaphore timestamps. */
+    uint64_t gpu_prefill_steps; /* before the first token; inside ttft_ns */
+    uint64_t gpu_prefill_ns;
+    uint64_t gpu_decode_steps;  /* after it; inside decode_ns */
+    uint64_t gpu_decode_ns;
+    uint64_t gpu_last_ns;
+    uint64_t gpu_wait_us;
+    uint64_t gpu_evict_us;
+    /* Per decode token, from the plan. */
+    uint32_t launches;
+    uint32_t barriers;
+    uint32_t marks;
+    uint32_t ops_tier1;
+    uint32_t ops_tier2;
+    uint32_t ops_cpu;
+    uint64_t weight_bytes;  /* quantized weights the matmuls read */
+    uint64_t kv_read_bytes; /* K and V GQA reads at the current position */
+    uint64_t mma;
+    uint64_t arena_bytes;
+    uint64_t profiled_tokens;
+    uint64_t matmul_avg_ns;
+    uint32_t tc_issue_bp;     /* mma issue time / matmul wall, 0.01 %, or NA */
+    uint32_t tc_mac_share_bp; /* tensor-core share of MACs, 0.01 %, or NA */
+    SlmOpClassC classes[SLM_OPCLASS_COUNT];
+} SlmTelemetryC;
+
+_Static_assert(sizeof(SlmTelemetryC) == 504,
+               "SlmTelemetryC has a Rust mirror with a paired const-assert");
+
+extern int32_t rust_slm_telemetry(uint32_t session_id, uint64_t gpc_hz, SlmTelemetryC *out);
+extern int32_t rust_slm_telemetry_profile(uint32_t session_id, uint32_t on);
+extern uint64_t rust_slm_telemetry_token_cost_ns(void);
+
+typedef struct {
+    uint32_t steps;
+    int32_t first_bad_step;     /* first logit over tolerance, -1 if none */
+    int32_t first_bad_index;
+    /* Thousandths: kernel C has no floating point. */
+    int32_t first_bad_got_milli;
+    int32_t first_bad_want_milli;
+    int32_t max_err_milli;
+    uint32_t argmax_matches;    /* steps whose top token is llama.cpp's */
+    int32_t exact_first_bad_step;  /* first over 0.1 from the exact CPU reference, or -1 */
+    int32_t exact_max_err_milli;
+    uint64_t gpu_us_per_token;
+} SlmGpuGoldenReport;
+
+typedef struct {
+    uint32_t launches;
+    uint32_t bad_elements;  /* over 1% from the CPU's result */
+    uint64_t gpu_ns;
+    uint64_t wait_us;
+    uint64_t evict_us;
+} SlmGpuSmokeReport;
+
+/* Make the next launch's decode program fail: 0 none, 1 hang, 2 MMU fault. */
+extern void rust_slm_gpu_set_inject(uint32_t kind);
+
+/* Per-step times and per-kernel GPU time to the console. 0, -1 if the
+ * session isn't on a GPU program, or SLM_ERR_BUSY while a prompt runs on it. */
+extern int32_t rust_slm_session_gpu_profile(uint32_t session_id);
+
+/* Every kernel on `model`'s shapes against its CPU reference. Failed checks, or -1. */
+extern int32_t rust_slm_gpu_opcheck(uint32_t model, uint32_t simt);
+
+/* A chain of n RMSNorm launches in one program. 0, or -1 (console says why). */
+extern int32_t rust_slm_gpu_smoke(uint32_t n, uint32_t width, SlmGpuSmokeReport *out);
+
+/* Compare a program on `model` with a *_greedy.rec fixture. 0, or -1 when
+ * the program couldn't run (the console says why). */
+extern int32_t rust_slm_gpu_golden(uint32_t model, const uint8_t *rec, size_t rec_len,
+                                   uint32_t batched, SlmGpuGoldenReport *out);
+
+/* Barrier kind and flags for the next launch (see kernel/include/slm_prog.h). */
+extern void rust_slm_gpu_set_options(uint32_t barrier, uint32_t flags);
+
+extern int32_t rust_slm_session_configure(uint32_t session_id,
+                                          uint32_t gpu_mode,
+                                          uint32_t threads);
+
+/* Fill *out with a session's configuration and live state. Works while a
+ * prompt runs. Returns 0 on success, -1 on NULL pointer / bad session id. */
+extern int32_t rust_slm_session_info(uint32_t session_id, SlmSessionInfoC *out);
+
+/* 1 if a prompt is running on this session, 0 if not, -1 on bad session id.
+ * Takes no lock that a running prompt holds for long. */
+extern int32_t rust_slm_session_busy(uint32_t session_id);
+
+/* Number of ops the tier table currently routes to the GPU (out of 8). */
+extern uint32_t rust_slm_gpu_tier_ops(void);
+
+/*
+ * Stop poll for rust_slm_prompt_ex, called before every forward step
+ * (prefill included). Return non-zero to stop as rust_slm_stop would.
+ */
+typedef int32_t (*RustSlmPollCb)(void *user);
 
 /*
  * Run a prompt against an open session. The decoder calls `cb`
@@ -1978,18 +2230,23 @@ extern int32_t rust_slm_session_reset(uint32_t session_id);
  *
  * @prompt / @prompt_len: UTF-8 prompt bytes. `prompt` may be NULL
  *           when @prompt_len == 0.
+ * @flags: (_ex only) SLM_PROMPT_RAW tokenizes the text as given.
+ *           Without it the text is a user turn in the chat template;
+ *           the plain rust_slm_prompt always does that.
  * @max_new_tokens: cap on decoded tokens. 0 = unlimited (until
  *           EOS, the cooperative stop flag, or the cache fills).
  * @cb: token callback (see RustSlmTokenCb above).
- * @user: opaque cookie passed to the callback.
+ * @poll: (_ex only) stop poll, or NULL.
+ * @user: opaque cookie passed to the callbacks.
  *
- * Returns 0 on success, -1 on error (NULL pointer when length is
- * non-zero, invalid UTF-8, session not in Open state, etc.).
+ * The session lock is not held during the decode, so rust_slm_stop,
+ * rust_slm_stats and rust_slm_session_info work from another task
+ * meanwhile. SlmStatsC.last_stop_reason says why the prompt ended.
  *
- * NOTE (M5.2): non-empty prompts currently return -1 because the
- * runtime doesn't yet stash a per-session tokenizer (M5.3 plumbs
- * the GGUF bytes through). The state machine and stop-flag path
- * are exercisable via empty prompts.
+ * Returns 0 when the prompt ran, including when it stopped early or
+ * didn't fit in the context (SLM_STOP_CONTEXT_FULL). -1 on error (NULL
+ * pointer when length is non-zero, invalid UTF-8, no such session).
+ * SLM_ERR_BUSY when a prompt is already running on any session.
  */
 extern int32_t rust_slm_prompt(
     uint32_t session_id,
@@ -1999,18 +2256,39 @@ extern int32_t rust_slm_prompt(
     RustSlmTokenCb cb,
     void *user);
 
+extern int32_t rust_slm_prompt_ex(
+    uint32_t session_id,
+    const uint8_t *prompt,
+    size_t prompt_len,
+    uint32_t flags,
+    uint32_t max_new_tokens,
+    RustSlmTokenCb cb,
+    RustSlmPollCb poll,
+    void *user);
+
 /*
  * Cooperative-cancel signal for an in-flight rust_slm_prompt call.
- * Sets the session's stop flag; the decoder loop honours it at
- * the next yield boundary. Returns 0 on success, -1 on bad
- * session id.
+ * Sets the session's stop flag; the decoder honours it before its next
+ * forward step. Safe from any task while the prompt runs. Stopping an
+ * idle session does nothing. Returns 0 on success, -1 on bad session id.
  */
 extern int32_t rust_slm_stop(uint32_t session_id);
 
 /*
- * Snapshot a session's telemetry counters into *out.
+ * Snapshot a session's telemetry counters into *out. Works while a
+ * prompt runs: the counters are then as of its start.
  * Returns 0 on success, -1 on NULL pointer / bad session id.
  */
 extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);
+
+/* ---- GPU program submission (#475, Jetson; slm_ffi.c) ----
+ *
+ * The backend half of kernel/gpu/slm_prog.c: everything that touches
+ * the dispatch lock. See g_prog_flight in slm_ffi.c. */
+int slm_gpu_prog_submit(uint64_t gp_entry, const volatile void *end_slot, uint32_t end_payload,
+                        uint32_t timeout_ms);
+void slm_gpu_prog_finished(void);
+int slm_gpu_prog_l2_evict(void);
+void slm_gpu_prog_dump_fault(void);
 
 #endif /* SLM_FFI_H */

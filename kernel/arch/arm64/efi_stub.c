@@ -19,6 +19,7 @@
 
 #include "efi.h"
 #include "boot_source.h"
+#include "boot_models.h"
 #include <stddef.h>
 
 /*
@@ -36,7 +37,7 @@
  * "\n" alone as line-feed without carriage return, producing the
  * staircase effect seen in some early bring-ups.
  */
-static void efi_print(efi_system_table_t *sys_table, const efi_char16_t *str)
+void efi_print(efi_system_table_t *sys_table, const efi_char16_t *str)
 {
     if (sys_table == NULL || sys_table->con_out == NULL) {
         return;
@@ -237,12 +238,12 @@ efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
  * slack for later re-reads (the allocation itself, and anything the
  * firmware does while we print, can grow the map).
  */
-static efi_status_t efi_read_map(efi_boot_services_t *bs,
-                                 efi_memory_desc_t **map_out,
-                                 uint64_t *buf_size_out,
-                                 uint64_t *map_size_out,
-                                 uint64_t *map_key_out,
-                                 uint64_t *desc_size_out)
+efi_status_t efi_read_map(efi_boot_services_t *bs,
+                          efi_memory_desc_t **map_out,
+                          uint64_t *buf_size_out,
+                          uint64_t *map_size_out,
+                          uint64_t *map_key_out,
+                          uint64_t *desc_size_out)
 {
     efi_status_t status;
     uint64_t map_size = 0;
@@ -346,7 +347,7 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
  * reported "RAS Uncorrectable Error in IOB ... Error response from
  * slave" (docs/deploy/jetson-uefi-direct.md, Findings 1-2).
  */
-static void efi_dcache_clean_inval(uint64_t start, uint64_t len)
+void efi_dcache_clean_inval(uint64_t start, uint64_t len)
 {
     uint64_t ctr;
     __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
@@ -515,6 +516,43 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
         return EFI_STUB_ABORT;
     }
 
+    /*
+     * Read any model files while the firmware's file protocols are
+     * alive (ADR 0002). This grows the memory map, so the map is read
+     * again afterwards and the relocation decision repeated on the map
+     * the machine is actually handed over with. Model pages are
+     * LoaderData, which counts as OS-owned, so that check would not
+     * notice a model inside the link range: the range picker keeps them
+     * apart and efi_stub_entry's exclusion list below is what enforces
+     * it. Nothing in this block can stop the boot.
+     */
+    efi_models_stats_t model_stats;
+    efi_models_cfg_t model_cfg = {
+        .floor = EFI_MODEL_FLOOR,
+        .limit = EFI_MODEL_LIMIT,
+        .excl_start = { link_base, load_base, (uint64_t)(uintptr_t)fdt },
+        .excl_len = { image_size, image_size, fdt ? (fdt_size ? fdt_size : 1) : 0 },
+    };
+    efi_models_load(sys_table, &model_cfg, &slmos_boot_models, &model_stats);
+
+    bs->free_pool(map);
+    status = efi_read_map(bs, &map, &buf_size, &map_size, &map_key,
+                          &desc_size);
+    if (status != EFI_SUCCESS) {
+        efi_print(sys_table, u"[slmos] ! GetMemoryMap failed\r\n");
+        efi_models_release(sys_table, &slmos_boot_models);
+        return EFI_STUB_ABORT;
+    }
+    verdict = efi_check_relocation(map, map_size, desc_size, load_base,
+                                   link_base, image_size,
+                                   (uint64_t)(uintptr_t)fdt, fdt_size);
+    if (verdict != EFI_RELOC_OK && verdict != EFI_RELOC_NOT_NEEDED) {
+        efi_print_verdict(sys_table, verdict);
+        efi_models_release(sys_table, &slmos_boot_models);
+        bs->free_pool(map);
+        return EFI_STUB_ABORT;
+    }
+
     /* Exit boot services — takes over the machine.
      *
      * Per UEFI §7.4.1, Boot Services (including ConOut) become
@@ -600,6 +638,8 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
      *     line from UEFI's earlier use of that memory can be evicted
      *     over the relocated kernel later;
      *   - the DTB: kernel_main parses it before the MMU comes back.
+     * Model files were cleaned the same way when they were read
+     * (efi_model.c) and nothing has written them since.
      * Nothing after this point may write memory that the MMU-off code
      * reads: the C epilogue only loads from the stack, and boot.S
      * abandons the UEFI stack after the return.

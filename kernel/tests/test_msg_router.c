@@ -7,6 +7,10 @@
 
 #include "unity.h"
 #include "../include/timer.h"
+#include "../include/slm_runner.h"
+#include "../include/string.h"
+#include "../include/task.h"
+#include "../include/sched.h"
 #include <stdint.h>
 
 /* Rust FFI declarations (msg_router_publish is in slm_ffi.h, others are not) */
@@ -475,6 +479,164 @@ static void test_publish_nowait_basic_contract(void)
     msg_router_unsubscribe_all(9);
 }
 
+/* The header's limit is the router's, and exactly that much gets through. */
+static void test_max_payload_round_trips_and_one_more_is_rejected(void)
+{
+    static char big[MSG_ROUTER_MAX_PAYLOAD + 2];
+    TEST_ASSERT_EQUAL_UINT32(MSG_ROUTER_MAX_PAYLOAD, msg_router_max_payload());
+
+    msg_router_init();
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/big", 9));
+    memset(big, 'z', MSG_ROUTER_MAX_PAYLOAD);
+    big[MSG_ROUTER_MAX_PAYLOAD] = '\0';
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)"/t/big", (const uint8_t *)big));
+    uint8_t topic[16];
+    const uint8_t *got = msg_router_receive(9, topic);
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_UINT32(MSG_ROUTER_MAX_PAYLOAD, (uint32_t)strlen((const char *)got));
+    msg_router_ack(9);
+
+    /* One byte over: refused by every publish path, nothing delivered. */
+    big[MSG_ROUTER_MAX_PAYLOAD] = 'z';
+    big[MSG_ROUTER_MAX_PAYLOAD + 1] = '\0';
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_nowait(
+        (const uint8_t *)"/t/big", (const uint8_t *)big));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish(
+        (const uint8_t *)"/t/big", (const uint8_t *)big));
+    TEST_ASSERT_EQUAL_INT(-1, msg_router_publish_reliable(
+        (const uint8_t *)"/t/big", (const uint8_t *)big, 100u, NULL));
+    TEST_ASSERT_NULL(msg_router_receive(9, topic));
+    msg_router_init();
+}
+
+/* A reader that doesn't read: unacked first (not lost), then dropped (lost),
+ * and the caller can tell which. No subscriber at all isn't a loss. */
+static void test_publish_reliable_reports_what_happened(void)
+{
+    msg_router_init();
+    msg_publish_stats_t st = { -1, -1, -1, -1 };
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_reliable(
+        (const uint8_t *)"/t/none", (const uint8_t *)"x", 50u, &st));
+    TEST_ASSERT_EQUAL_INT(0, st.targets);
+    TEST_ASSERT_EQUAL_INT(0, st.dropped);
+    TEST_ASSERT_EQUAL_INT(0, st.unacked);
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/rel", 9));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_reliable(
+        (const uint8_t *)"/t/rel", (const uint8_t *)"first", 50u, &st));
+    TEST_ASSERT_EQUAL_INT(1, st.targets);
+    TEST_ASSERT_EQUAL_INT(0, st.acked);
+    TEST_ASSERT_EQUAL_INT(0, st.dropped);
+    TEST_ASSERT_EQUAL_INT(1, st.unacked);
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_reliable(
+        (const uint8_t *)"/t/rel", (const uint8_t *)"second", 50u, &st));
+    TEST_ASSERT_EQUAL_INT(1, st.dropped);
+    TEST_ASSERT_EQUAL_INT(0, st.unacked);
+
+    /* The first one is still there, the second is gone. */
+    uint8_t topic[16];
+    const uint8_t *got = msg_router_receive(9, topic);
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_STRING("first", (const char *)got);
+    msg_router_ack(9);
+    TEST_ASSERT_NULL(msg_router_receive(9, topic));
+    msg_router_init();
+}
+
+/* Waiting on a reader of lower priority on the same CPU works. A yield never
+ * runs that reader; only a sleep does. */
+#define LOW_PRIO_READER_IDX 9
+static volatile bool low_prio_read_one;
+
+static void low_prio_reader(void *arg)
+{
+    (void)arg;
+    uint8_t topic[16];
+    while (msg_router_receive(LOW_PRIO_READER_IDX, topic) == NULL) {
+        yield();
+    }
+    msg_router_ack(LOW_PRIO_READER_IDX);
+    low_prio_read_one = true;
+}
+
+static void test_publish_reliable_lets_a_lower_priority_reader_run(void)
+{
+    msg_router_init();
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/low", LOW_PRIO_READER_IDX));
+    low_prio_read_one = false;
+    struct task *t = task_create_with_priority("low-reader", low_prio_reader,
+                                               NULL, TASK_PRIORITY_IDLE);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, task_current()->cpu_affinity);
+    scheduler_add_task(t);
+
+    msg_publish_stats_t st;
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_reliable(
+        (const uint8_t *)"/t/low", (const uint8_t *)"x", 3000u, &st));
+    TEST_ASSERT_EQUAL_INT(1, st.acked);
+    msg_router_init();
+}
+
+/* receive_topic takes the named topic and leaves the other one pending. */
+static void test_receive_topic_leaves_other_topics_alone(void)
+{
+    msg_router_init();
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/work", 9));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/ctrl", 9));
+    TEST_ASSERT_NULL(msg_router_receive_topic(9, "/t/ctrl"));
+
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)"/t/work", (const uint8_t *)"job"));
+    TEST_ASSERT_NULL(msg_router_receive_topic(9, "/t/ctrl"));
+
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_nowait(
+        (const uint8_t *)"/t/ctrl", (const uint8_t *)"stop"));
+    const char *got = msg_router_receive_topic(9, "/t/ctrl");
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_STRING("stop", got);
+    msg_router_ack(9);
+    TEST_ASSERT_NULL(msg_router_receive_topic(9, "/t/ctrl"));
+
+    uint8_t topic[16];
+    const uint8_t *job = msg_router_receive(9, topic);
+    TEST_ASSERT_NOT_NULL(job);
+    TEST_ASSERT_EQUAL_STRING("job", (const char *)job);
+    msg_router_ack(9);
+
+    TEST_ASSERT_NULL(msg_router_receive_topic(-1, "/t/work"));
+    TEST_ASSERT_NULL(msg_router_receive_topic(64, "/t/work"));
+    TEST_ASSERT_NULL(msg_router_receive_topic(9, NULL));
+    msg_router_init();
+}
+
+/* A publisher subscribed to its own topic (a Lua state) can't ack until the
+ * publish returns. It isn't waited on: the message lands, or is dropped if
+ * its mailbox is still full, at once instead of after the 5 s timeout. */
+extern int msg_router_publish_from(int publisher_idx, const uint8_t *topic_name,
+                                   const uint8_t *data, uint8_t priority);
+
+static void test_publish_from_does_not_wait_on_itself(void)
+{
+    msg_router_init();
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/t/self", 9));
+    uint64_t freq = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    TEST_ASSERT_EQUAL_INT(1, msg_router_publish_from(9, (const uint8_t *)"/t/self",
+                                                     (const uint8_t *)"one", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_from(9, (const uint8_t *)"/t/self",
+                                                     (const uint8_t *)"two", 0));
+    TEST_ASSERT_LESS_THAN(freq, timer_get_count() - t0);
+
+    uint8_t topic[16];
+    const uint8_t *got = msg_router_receive(9, topic);
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_STRING("one", (const char *)got);
+    msg_router_ack(9);
+    msg_router_init();
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -489,6 +651,11 @@ int test_suite_msg_router(void)
     RUN_TEST(test_wildcard_only_delivers_once);
     RUN_TEST(test_msg_router_ack_targets_last_received);
     RUN_TEST(test_publish_nowait_basic_contract);
+    RUN_TEST(test_max_payload_round_trips_and_one_more_is_rejected);
+    RUN_TEST(test_publish_reliable_reports_what_happened);
+    RUN_TEST(test_publish_reliable_lets_a_lower_priority_reader_run);
+    RUN_TEST(test_receive_topic_leaves_other_topics_alone);
+    RUN_TEST(test_publish_from_does_not_wait_on_itself);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }

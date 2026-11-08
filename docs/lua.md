@@ -14,10 +14,13 @@ Lua integration provides:
 
 ```
 lua              # Enter interactive REPL
-lua -e "code"    # Execute Lua code directly
+lua -e "code"    # Execute Lua code directly; non-zero status on a Lua error
 lua <file>       # Run script from filesystem
 lua-admin        # Full admin/global-control Lua REPL
 ```
+
+In `"code"`, write `\"` for a double quote, or use `'code'` when the code has
+double quotes of its own.
 
 `lua` is the default concurrent-safe surface. It exposes the
 session-local / read-mostly bindings intended for multiple interactive

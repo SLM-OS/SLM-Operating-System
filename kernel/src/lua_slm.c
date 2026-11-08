@@ -837,11 +837,18 @@ static int l_model_preload_wait(lua_State *L) {
  * slm.msg_publish(topic, data) - Publish a message to a topic
  * Returns number of subscribers that received the message
  */
+/* A state subscribed to the topic it publishes on drains its mailbox only
+ * after this returns: msg_router_publish_from doesn't wait the ack timeout
+ * on itself. */
+static int lua_state_component_idx(lua_State *L);
+
 static int l_msg_publish(lua_State *L) {
     if (!L) return 0;
     const char *topic = luaL_checkstring(L, 1);
     const char *data = luaL_checkstring(L, 2);
-    int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)data);
+    int delivered = msg_router_publish_from(lua_state_component_idx(L),
+                                            (const uint8_t *)topic,
+                                            (const uint8_t *)data, 0);
     lua_pushinteger(L, delivered);
     return 1;
 }
@@ -858,7 +865,7 @@ static int l_msg_publish_priority(lua_State *L) {
     int prio = (int)luaL_checkinteger(L, 3);
     if (prio < 0) prio = 0;
     if (prio > 255) prio = 255;
-    int delivered = msg_router_publish_priority(
+    int delivered = msg_router_publish_from(lua_state_component_idx(L),
         (const uint8_t *)topic, (const uint8_t *)data, (uint8_t)prio);
     lua_pushinteger(L, delivered);
     return 1;

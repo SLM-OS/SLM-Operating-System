@@ -160,12 +160,33 @@ int component_find(const char *name);
 /**
  * Run a built-in component by name.
  *
- * Registers it in the component system, creates a task, and links them.
+ * Registers it in the component system, creates a task, and links them. A
+ * component with its own start (slm-runner) goes through that instead.
+ * Refuses while the component runs, or while a task it ran earlier is still
+ * alive (starting or stopping).
  *
  * @param name Built-in component name (e.g., "counter", "echo", "listener")
  * @return Component index on success, -1 on error
  */
 int component_run(const char *name);
+
+/**
+ * component_run without the component's own start: for that start itself
+ * (slm_runner_start), which serializes its starts and stops.
+ *
+ * @return Component index on success, -1 on error
+ */
+int component_spawn(const char *name);
+
+/**
+ * Test hook: run the cleanup that a component task with `task_id` runs when
+ * it is destroyed, against slot `idx`, as if that task had been spawned
+ * there. Lets a test play a task from an earlier generation of a slot.
+ *
+ * @param idx Registry slot
+ * @param task_id Task the cleanup speaks for
+ */
+void component_test_run_cleanup(int idx, uint32_t task_id);
 
 /**
  * Hot-swap a running component with a new version.

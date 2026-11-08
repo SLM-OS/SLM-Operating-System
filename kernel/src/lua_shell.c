@@ -39,6 +39,8 @@ static int cmd_lua_common(int argc, char *argv[], bool admin) {
         return -1;
     }
 
+    int rc = 0;
+
     /* Each invocation gets a fresh `arg` view. Persistent per-session
      * Lua states must not leak argv from a prior script or -e run. */
     lua_pushnil(L);
@@ -49,7 +51,7 @@ static int cmd_lua_common(int argc, char *argv[], bool admin) {
         lua_slm_repl(L);
     } else if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'e') {
         /* -e "code" - execute code */
-        lua_slm_dostring(L, argv[2]);
+        rc = lua_slm_dostring(L, argv[2]) == 0 ? 0 : -1;
     } else if (argc >= 2) {
         /* Filename + optional positional args. Populate Lua's `arg`
          * global with argv[2..argc-1] so scripts like demo_hailo.lua
@@ -64,7 +66,7 @@ static int cmd_lua_common(int argc, char *argv[], bool admin) {
         lua_setglobal(L, "arg");
         if (lua_slm_dofile(L, argv[1]) != 0) {
             /* File loading failed - try as inline code */
-            lua_slm_dostring(L, argv[1]);
+            rc = lua_slm_dostring(L, argv[1]) == 0 ? 0 : -1;
         }
     } else {
         shell_printf("Usage:\n");
@@ -80,7 +82,7 @@ static int cmd_lua_common(int argc, char *argv[], bool admin) {
         lua_slm_close(L);
     }
 
-    return 0;
+    return rc;
 }
 
 static int cmd_lua(int argc, char *argv[]) {
