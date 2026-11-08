@@ -815,7 +815,7 @@ static void test_slm_stats_dram_bw_against_peak(void)
     slm_stats_print_dram_bw(&t, 3199000000ull);
     TEST_ASSERT_NOT_NULL(strstr(cap.buf,
         "dram bw  : decode 48.7 GB/s = 47.59 % of 102.3 GB/s LPDDR5 peak"));
-    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "target llama.cpp parity 41.28 %: met"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "target llama.cpp parity 41.27 %: met"));
     /* 30 GB/s is below llama.cpp's fraction. */
     t.decode_ns = 8380000000ull;
     cap_clear();
