@@ -930,6 +930,15 @@ hailo-clean:
 test-jetson-uefi-layout:
 	@bash scripts/test-jetson-uefi-layout.sh
 
+# HMMA grouped-query attention, staged outside the shader set (#1167): the
+# kernel source runs lane by lane on the host against the exact reference,
+# three deliberate mutants must fail, and with nvcc the cubin must be
+# launchable by SLM-OS. No GPU needed. GQA_EMU_ARGS=--quick limits it to
+# KV lengths up to 600 (about a minute instead of about fifteen).
+.PHONY: test-gqa-emu
+test-gqa-emu:
+	@bash scripts/cuda/harness/gqa-emu-test.sh $(GQA_EMU_ARGS)
+
 # UEFI-direct boot under QEMU's AArch64 UEFI firmware (#26). Boots the
 # QEMU_VIRT PE image (build/kernel/slmos.bin) from a FAT ESP twice:
 #   1. as built — firmware honours ImageBase (= link address);
