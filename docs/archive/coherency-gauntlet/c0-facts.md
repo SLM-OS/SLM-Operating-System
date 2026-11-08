@@ -93,10 +93,12 @@ aliased in `cortex_a78_ae.h:23`).
   `cortex_a57.h:28-30`, `cortex_a72.h:21-23`).
 - SLM-OS `cpu_has_smpen()` reads S3_0_C15_C1_4 and tests bit 6
   (`kernel/include/cache.h:32-43`), that is, the A72 bit position at the A76 encoding.
-  On A76 that bit is RES0 and on A78AE it is PF_MODE[0], reset 0, and no TF-A path on
-  either board writes PF_MODE (Q3). **Inference:** the boot messages "SMPEN NOT set"
-  (`kernel/sched/smp.c:406`, `:749`) are produced by construction on both boards and say
-  nothing about coherency; the lab record "Reading CPUECTLR_EL1 from EL1 works, confirmed
+  On A76 that bit is RES0 and on A78AE it is PF_MODE[0], reset 0, and no cached TF-A path
+  for either board writes bit 6 (Q3). **Inference:** the boot messages "SMPEN NOT set"
+  (`kernel/sched/smp.c:406`, `:749`) say nothing about coherency on either board. The bit
+  has no coherency function whatever its value. It reads 0 unless EL3 code other than the
+  cached BL31 sources wrote it; that part is unsourced (Q3, "EL3 state not written by
+  BL31"). The lab record "Reading CPUECTLR_EL1 from EL1 works, confirmed
   SMPEN=0 on all 4 CPUs" (commit aedf6e1a) is this read.
 
 ---
@@ -104,7 +106,9 @@ aliased in `cortex_a78_ae.h:23`).
 ## Q2. Who may read and write CPUECTLR_EL1; ACTLR_EL3.ECTLREN and ACTLR_EL2.ECTLREN
 
 **Short answer.** Reads are permitted at NS-EL1, NS-EL2 and EL3 regardless of ECTLREN.
-ECTLREN gates writes only. ACTLR_EL3.ECTLREN (bit 1, reset 0) gates writes from EL2 and
+ECTLREN gates writes only. Separately, at NS-EL1 the architectural HCR_EL2.TIDCP trap
+applies to reads and writes: when the EL2 software sets it, every NS-EL1 access to this
+encoding traps to EL2. It never applies at EL2. ACTLR_EL3.ECTLREN (bit 1, reset 0) gates writes from EL2 and
 Secure EL1; ACTLR_EL2.ECTLREN (bit 1, reset 0) additionally gates writes from Non-secure
 EL1. The core TRMs say only "not write-accessible" and do not name the exception. The
 DSU TRM, for CLUSTERECTLR, which is gated by the same ECTLREN bits, says: "If write access
@@ -149,6 +153,26 @@ Citations:
 - EL0: Arm ARM D24.2.61 HCR_EL2.TIDCP (`arm-ddi0487-Md.txt:557480`): EL0 access to
   IMPLEMENTATION DEFINED encodings is UNDEFINED, performed, or trapped, IMPLEMENTATION
   DEFINED per encoding, when TIDCP is 0. The TRM table lists EL0 as "-".
+- NS-EL1 and HCR_EL2.TIDCP (Arm ARM D24.2.61, `arm-ddi0487-Md.txt:557480-557492`): "Traps
+  EL1 accesses to the encodings reserved for IMPLEMENTATION DEFINED functionality to EL2,
+  when EL2 is enabled in the current Security state". In AArch64 this covers "IMPLEMENTATION
+  DEFINED System registers, which are accessed using MRS and MSR with the
+  S3_<op1>_<Cn>_<Cm>_<op2> register name" with CRn == {11, 15}, reported as EC 0x18. CPUECTLR_EL1
+  is CRn=15, so with TIDCP=1 a **read** from NS-EL1 also traps to EL2. The TRM accessibility
+  table describes the access once it is not trapped. TIDCP traps EL1 accesses only, so it
+  never affects code running at EL2.
+  What this means under Linux:
+  - Linux at EL2 with VHE (the normal case on both boards, Q6): the kernel runs at EL2,
+    TIDCP does not apply, and the read reaches the register.
+  - Linux at EL1 (nVHE host): whether the read traps depends on the HCR_EL2 the Linux EL2
+    stub or nVHE hypervisor programs. HCR_HOST_NVHE_FLAGS and
+    HCR_HOST_NVHE_PROTECTED_FLAGS do not contain TIDCP
+    (`~/slmos-ref/rpi/linux-rpi-6.18.y/arch/arm64/include/asm/kvm_arm.h:104-105`), so the
+    read is not trapped.
+  - KVM guest at EL1: `HCR_GUEST_FLAGS` contains TIDCP (`kvm_arm.h:100-103`), so the read
+    traps to the host. Unknown registers get an injected UNDEF (`arch/arm64/kvm/sys_regs.c:4961-4977`).
+  - SLM-OS at EL2 (E2H=1, TGE=1 after kexec on Jetson and on Pi 5; E2H=0 at UEFI-direct
+    entry): TIDCP is irrelevant.
 - Lab record (observation, not a register-behavior source): commit aedf6e1a, Pi 5:
   "writing CPUECTLR_EL1 from EL2 traps to EL3 (hangs). Reading CPUECTLR_EL1 from EL1
   works".
@@ -176,31 +200,45 @@ Which exception reaches NS software for a denied write:
 
 ## Q3. What TF-A writes on each board
 
-**Short answer.** Neither board's BL31 sets ACTLR_EL3.ECTLREN or ACTLR_EL2.ECTLREN, so
-both stay at reset value 0 and CPUECTLR_EL1 and CLUSTERECTLR are not writable from
-NS-EL2. Pi 5 (upstream rpi5 platform, A76 r4p1) writes no CPUECTLR, ACTLR_EL3/EL2,
-CLUSTERECTLR or DSU register at all. Jetson (NVIDIA t234) writes CPUECTLR bit 46 (HPA_DIS),
-several CPUACTLR* errata bits, ACTLR_EL3.CLUSTERPMUEN (bit 12, non-production fuse only),
-and CLUSTERECTLR bits 0 and 14. None of these is a coherency enable. Both platforms
-declare `HW_ASSISTED_COHERENCY := 1`.
+**Short answer.** No cached TF-A source for either board sets ACTLR_EL3.ECTLREN or
+ACTLR_EL2.ECTLREN.
+
+- Pi 5, sourced for **upstream** TF-A only (`plat/rpi/rpi5`, A76 r4p1): it writes no
+  CPUECTLR, ACTLR_EL3/EL2, CLUSTERECTLR or DSU register. The BL31 that actually runs on
+  pi-5-1 is a Raspberry Pi build of undetermined version and source (see "Version of the
+  Pi 5 stock BL31" below). **Inference:** the running BL31 behaves like upstream here.
+- Jetson, sourced for the NVIDIA t234 tree that the running BL31 is built from: it writes
+  CPUECTLR bit 46 (HPA_DIS), several CPUACTLR* errata bits, ACTLR_EL3.CLUSTERPMUEN (bit 12,
+  non-production fuse only) and CLUSTERECTLR bits 0 and 14. None of these is a coherency
+  enable.
+- Both platforms declare `HW_ASSISTED_COHERENCY := 1`.
+- BL31 is not the only EL3 code that may set these registers, and CPU 0 is not reset
+  across kexec. "ECTLREN = 0" is therefore sourced for BL31's writes only. "EL3 state not
+  written by BL31" below covers the rest and marks what has no source.
 
 ### Pi 5 (upstream TF-A `plat/rpi/rpi5`, Cortex-A76)
 
+Two upstream trees are cited: `~/slmos-ref/tf-a/` (v2.14.0, SLM-OS IRQ patches applied)
+and `~/slmos-ref/rpi/arm-trusted-firmware-master/` (unpatched master snapshot of
+2024-05-09). Both have the same rpi5 platform lines quoted here. The original brief named
+`~/slmos-ref/tf-a/arm-trusted-firmware-master/`, which does not exist.
+
 | Location | Register | Write | Applies on Pi 5 |
 |---|---|---|---|
-| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:489-532` (`cpu_reset_func_start`) | CPUACTLR2_EL1 bit 16 | DISABLE_LOAD_PASS_STORE, CVE-2018-3639, only under `DYNAMIC_WORKAROUND_CVE_2018_3639` and only if ID_AA64PFR1_EL1.SSBS is 0 (`:491-503`) | No: `DYNAMIC_WORKAROUND_CVE_2018_3639 ?=0` (`lib/cpus/cpu-ops.mk:32`), not set by rpi5 |
+| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:489-532` (`cpu_reset_func_start`) | CPUACTLR2_EL1 bit 16 | DISABLE_LOAD_PASS_STORE, CVE-2018-3639, only under `DYNAMIC_WORKAROUND_CVE_2018_3639` and only if ID_AA64PFR1_EL1.SSBS is 0 (`:491-503`) | No: `DYNAMIC_WORKAROUND_CVE_2018_3639 ?=0` (`~/slmos-ref/tf-a/lib/cpus/cpu-ops.mk:32`), not set by rpi5 |
 | `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:373-375` | CPUECTLR_EL1 WS_THR_L2 | erratum 1220197 | No: revisions up to r2p0 only (`:377`) |
 | `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:391-393` | CPUECTLR_EL1 bit 51 | erratum 1262888 | No: up to r3p0 (`:395`) |
-| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:426-455` | CPUPSELR/CPUPOR/CPUPMR/CPUPCR_EL3 (S3_6_C15_C8_*) | erratum 1946160 instruction patch | Yes (`plat/rpi/rpi5/platform.mk:51`); EL3-only patch registers, not ECTLR |
-| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:538-549` | CPUPWRCTLR_EL1.CORE_PWRDN_EN | set on PSCI CPU_OFF / suspend path | Only on power-down; erratum 2743102 enabled (`platform.mk:52`) |
-| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:309-325` | CLUSTERACTLR_EL1 | DSU errata 798953 / 936184 | No: flags not set by rpi5 (`platform.mk`), default 0 |
-| `plat/rpi/common/aarch64/plat_helpers.S:247-267` (`plat_reset_handler`) | CORTEX_A72_L2CTLR_EL1 | L2 latency | No: runs only when MIDR is A72 (RPi4) |
+| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:426-455` | CPUPSELR/CPUPOR/CPUPMR/CPUPCR_EL3 (S3_6_C15_C8_*) | erratum 1946160 instruction patch | Yes (`~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk:51`); EL3-only patch registers, not ECTLR |
+| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:538-549` | CPUPWRCTLR_EL1.CORE_PWRDN_EN | set on PSCI CPU_OFF / suspend path | Only on power-down; erratum 2743102 enabled (`~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk:52`) |
+| `~/slmos-ref/tf-a/lib/cpus/aarch64/cortex_a76.S:309-325` | CLUSTERACTLR_EL1 | DSU errata 798953 / 936184 | No: flags not set in `~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk`, default 0 |
+| `~/slmos-ref/tf-a/plat/rpi/common/aarch64/plat_helpers.S:247-267` (`plat_reset_handler`) | CORTEX_A72_L2CTLR_EL1 | L2 latency | No: runs only when MIDR is A72 (RPi4) |
 
-- `grep -i 'actlr\|ectlr'` over `plat/rpi/rpi5/*.c`, `plat/rpi/common/*.c`, `plat/rpi/common/aarch64/*.S`
-  (snapshot tree) finds only the A72 L2CTLR line. Generic TF-A code reads ACTLR_EL2 only
+- `grep -i 'actlr\|ectlr'` over `~/slmos-ref/rpi/arm-trusted-firmware-master/plat/rpi/rpi5/*.c`,
+  `plat/rpi/common/*.c` and `plat/rpi/common/aarch64/*.S` (snapshot tree) finds only the A72
+  L2CTLR line. Generic TF-A code reads ACTLR_EL2 only
   to save EL2 context (`~/slmos-ref/tf-a/lib/el3_runtime/aarch64/context_mgmt.c:141-144`,
   `:1540`, `:1575`); it never sets ECTLREN.
-- A76 revision r4p1: `plat/rpi/rpi5/platform.mk:50` ("Enable all errata workarounds for
+- A76 revision r4p1: `~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk:50` ("Enable all errata workarounds for
   Cortex-A76 r4p1"). Not measured; a MIDR_EL1 read would confirm.
 - `HW_ASSISTED_COHERENCY := 1` with the comment "Hardware-managed coherency"
   (`~/slmos-ref/rpi/arm-trusted-firmware-master/plat/rpi/rpi5/platform.mk:67`). TF-A doc:
@@ -258,6 +296,54 @@ Build: `NV-ATF/plat/nvidia/tegra/soc/t234/platform_t234.mk` compiles only
 - Stock vs patched BL31: jetson-nano-2 runs a BL31 built from this tree plus SLM-OS patch
   0004 (IRQ routing only). For every write listed above the two are identical.
 
+### EL3 state not written by BL31
+
+ACTLR_EL3, ACTLR_EL2 and CPUECTLR_EL1 are per-core registers. A register's value at the
+time SLM-OS runs is its reset value plus every write since the last reset of that core,
+from any EL3 code, not only BL31.
+
+- **Jetson, EL3 code before BL31.** NVIDIA: "MB2 runs on CCPLEX" (Jetson Developer Guide
+  r36.4, Jetson Orin Series Boot Flow, section MB2;
+  `~/slmos-ref/nvidia/DevGuide/web/nvidia-r36.4-JetsonOrinSeriesBootFlow.html`). The same
+  page says MB1 (on BPMP) "initializes certain parts of the SoC, including the CPU". BL31 is
+  built `RESET_TO_BL31 := 1`, `COLD_BOOT_SINGLE_CPU := 1` (`NV-ATF/plat/nvidia/tegra/soc/t234/platform_t234.mk:24-26`)
+  and takes its parameters from the previous bootloader (`NV-ATF/plat/nvidia/tegra/common/tegra_bl31_setup.c:135-145`,
+  `:174-176`). The page does not give MB2's exception level. **Unsourced:** whether MB2 (closed
+  source) runs at EL3 on CPU 0 and whether it writes ACTLR_EL3, ACTLR_EL2 or CPUECTLR_EL1.
+  **Inference:** MB2 runs at EL3, because BL31 is entered after it on the same core.
+- **Jetson CPU 0 across kexec and UEFI-direct.** kexec does not reset CPU 0, and neither
+  does the UEFI-direct path. CPU 0's ACTLR_EL3 and CPUECTLR_EL1 therefore hold whatever
+  MB2 and BL31 left at cold boot, plus any EL3 writes made at runtime (none found in BL31
+  for ECTLREN). Linux at EL2 cannot write ACTLR_EL3. Only BL31's part of this is sourced.
+- **Jetson secondaries.** CPU_ON goes to the MCE (`MCE_CMD_ONLINE_CORE`,
+  `NV-ATF/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c:315`) and BL31's reset handler
+  runs again on the woken core. A core that Linux offlined before kexec went through
+  CPU_OFF, which is the Off mode (A78AE TRM §2.4.6.2: "all core state is lost").
+  **Inference:** a secondary brought up by CPU_ON comes out of a core reset, so its
+  ACTLR_EL3 starts at 0 and only BL31's warm-boot writes apply; MB2 does not run on it.
+- **Pi 5, EL3 code before BL31.** `RESET_TO_BL31 := 1` and "All CPUs enter armstub8.bin"
+  (`COLD_BOOT_SINGLE_CPU := 0`) (`~/slmos-ref/tf-a/plat/rpi/rpi5/platform.mk:33-36`): in the
+  upstream design BL31 is the first code the A76 cores execute. **Unsourced:** whether the
+  Raspberry Pi firmware runs any other code on the A76 cores at EL3 before its BL31 and
+  what its own BL31 build writes (Q3 version note).
+- **Pi 5 secondaries are not reset by CPU_ON** in upstream TF-A. All four cores enter BL31
+  at cold reset. Secondaries park in `plat_wait_for_warm_boot`, a WFE loop on a hold
+  mailbox (`~/slmos-ref/tf-a/plat/rpi/common/aarch64/plat_helpers.S:83-124`).
+  `rpi3_pwr_domain_on()` only writes GO to the mailbox and issues SEV
+  (`~/slmos-ref/tf-a/plat/rpi/common/rpi3_pm.c:146-166`). The core then jumps to the warm-boot
+  entry point. Its ACTLR_EL3 and CPUECTLR_EL1 are cold-reset values plus BL31 writes. Its
+  caches were invalidated at cold reset, not at CPU_ON, and it has executed BL31 code
+  since then. PSCI still requires the caches to be clean and coherent from the caller's
+  view at entry (PSCI DEN0022 F.b §6.4.3.4).
+  **Inference:** the running Raspberry Pi BL31 uses the same holding-pen scheme.
+- **Effect on the SLM-OS "SMPEN" read.** On A76, bit 6 of CPUECTLR_EL1 is RES0. A RES0 bit
+  in a read/write register returns the last value written, or the reset value if never
+  written, and "must have no effect on the operation of the PE" (Arm ARM DDI 0487 M.d,
+  Glossary, RES0, `arm-ddi0487-Md.txt:1091430-1091445`). On A78AE, bit 6 is PF_MODE[0],
+  which only affects prefetch. The value SLM-OS reads is therefore 0 unless some EL3 code
+  wrote bit 6, and either way it has no bearing on coherency. The value itself is sourced
+  only for BL31.
+
 ---
 
 ## Q4. DSU coherency, what removes a core from the domain, and Tegra234 cross-cluster coherency
@@ -267,9 +353,11 @@ the shared L3 is maintained in hardware by the SCU and snoop filter; a core join
 coherency domain at power-up with no software steps and leaves it automatically on the
 transition to Off. The software-visible trigger for leaving is
 CPUPWRCTLR_EL1.CORE_PWRDN_EN=1, ISB, WFI (issued by TF-A on CPU_OFF). Re-entry is
-reset (PSCI CPU_ON). There is no software coherency-enable bit. Cross-cluster coherency
-on Tegra234 is provided by NVIDIA's CCPLEX fabric (the "SCF" in TF-A); no public primary
-document describing it was reachable.
+reset, which PSCI CPU_ON causes on Jetson; on Pi 5 a core is reset only at cold boot
+(Q3). There is no software coherency-enable bit. Cross-cluster coherency on Tegra234:
+**inference** that NVIDIA's CCPLEX fabric (the "SCF" named in TF-A) provides it in
+hardware. No public primary document describing it was reachable. Only firmware
+configuration and Linux behavior support it.
 
 Citations:
 
@@ -279,7 +367,12 @@ Citations:
 - DSU TRM §5.9: "The cluster is taken out of coherence with the interconnect automatically
   when it is powered down. No software sequence is required." §5.9.1: "The cluster enables
   coherency during powerup and disables it during powerdown", using SYSCOREQ/SYSCOACK
-  (`.txt:2697-2760`).
+  (`.txt:2697-2760`). The §5.9 note qualifies the automatic part: "To support automated
+  removal from coherency, the interconnect must support the SYSCOREQ and SYSCOACK handshake
+  protocol. If not, the SoC is responsible for programming the interconnect to remove the
+  cluster from coherency." (`.txt:2706-2709`). §5.9.1 adds that if the interconnect lacks
+  these signals, Arm recommends connecting them to the power controller, which "must take
+  any actions necessary to make the transition" (`.txt:2722-2736`).
 - DSU TRM Appendix B.2.10, BROADCASTOUTER: "Within the cluster, Inner Shareable and Outer
   Shareable memory are treated identically." (`.txt:12715-12722`)
 - A76 TRM §5.9 "Core powerup and powerdown sequences": powerdown is (1) save state,
@@ -316,10 +409,31 @@ Tegra234 (two populated clusters, 4 + 2):
   **Inference:** a coherent fabric (SCF) with its own cache level sits above the per-cluster
   DSU L3s and keeps clusters coherent in hardware; the name expansion and topology are not
   in any cached source.
+- Relation to DSU §5.9. Each Tegra234 cluster's DSU must enter and leave coherency with
+  that fabric, either through SYSCOREQ/SYSCOACK or with the SoC (power controller)
+  programming the interconnect. In NVIDIA BL31, cluster and core power transitions are
+  requests to the MCE firmware (`MCE_CMD_ONLINE_CORE`, `plat_psci_handlers.c:315`; C-state
+  updates `mce_update_cstate_info`). No BL31 code programs an interconnect coherency
+  register directly; the only fabric-level operation is the SCF clean and invalidate.
+  **Unsourced:** whether the Tegra234 fabric implements the SYSCOREQ/SYSCOACK handshake or
+  whether the MCE or another controller performs the "SoC is responsible" step.
+  **Inference:** cluster coherency entry and exit on Tegra234 are handled by hardware and
+  NVIDIA firmware below NS software; nothing in SLM-OS or Linux takes part, and Linux
+  operates both clusters coherently after CPU_ON.
 - Linux runs all six CPUs as one SMP system with Inner Shareable mappings
   (`PTE_SHARED ... inner shareable`, `~/slmos-ref/rpi/linux-rpi-6.18.y/arch/arm64/include/asm/pgtable-hwdef.h:169`)
-  and its boot protocol requires "All CPUs to be booted by the kernel must be part of the
-  same coherency domain on entry to the kernel" (`Documentation/arch/arm64/booting.rst:200-204`).
+  and its boot protocol requires: "All CPUs to be booted by the kernel must be part of the
+  same coherency domain on entry to the kernel. This may require IMPLEMENTATION DEFINED
+  initialisation to enable the receiving of maintenance operations on each CPU."
+  (`~/slmos-ref/rpi/linux-rpi-6.18.y/Documentation/arch/arm64/booting.rst:200-204`).
+  The second sentence describes the A53/A57/A72 SMPEN bit almost word for word ("Enables
+  the processor to receive instruction cache and TLB maintenance operations broadcast",
+  A72 TRM §4.3.67). **Inference:** it is a plausible origin of the H1 belief. On A76 and
+  A78AE no such initialisation exists. CPUECTLR has no receive-enable field (Q1), and the
+  cores join coherency with no software steps (A76 TRM §5.9, A78AE TRM §2.4.9). The
+  sentence is also addressed to firmware, which must deliver the CPUs to the kernel already
+  in one domain. Linux itself never performs such a step (Q6). Even where SMPEN exists, it
+  governs broadcast I-cache and TLB maintenance, not data coherency (A72 TRM §4.3.67 note).
   Arm ARM B2.10.1.1: "This architecture assumes that all PEs that use the same operating
   system or hypervisor are in the same Inner Shareable shareability domain."
 - Not reachable: the Orin TRM (login required; local copy listed in CLAUDE.md is on a
@@ -341,10 +455,11 @@ Tegra234 (two populated clusters, 4 + 2):
 - NC accesses with the MMU on: the TRMs say only "downgraded to Non-cacheable"; they do not
   say whether an NC access looks up the caches. At the external interface the DSU issues
   NC loads as ReadNoSnoop and NC stores as WriteNoSnoop.
-- Non-shareable WB: neither core TRM nor the DSU TRM says it is treated as Inner
-  Shareable; the DSU says IS and OS are treated identically inside the cluster and that
-  Non-shareable linefills/evictions use ReadNoSnoop/WriteNoSnoop externally. The Arm ARM
-  explicitly forbids relying on Non-shareable to produce incoherence.
+- Non-shareable WB: neither core TRM nor the DSU TRM says how it is handled inside the
+  cluster. The DSU says only that Inner Shareable and Outer Shareable are treated
+  identically inside the cluster (Non-shareable is not mentioned there), and that
+  Non-shareable linefills and evictions use ReadNoSnoop/WriteNoSnoop on the external
+  interface. The Arm ARM explicitly forbids relying on Non-shareable to produce incoherence.
 - Mismatched aliases: the Arm ARM says loss of coherency "might" occur. A cacheable
   writer with an NC reader is not architecturally guaranteed to read stale data.
 
@@ -390,13 +505,17 @@ Citations:
   initialization routine must ..." (`.txt:475662-475680`). The A76/A78AE TRM §7.2.3 /
   §2.6.2.3 statement settles that these cores do not hit when C=0.
 
-**Inference for the negative control.** A Non-shareable WB mapping on Pi 5 is expected to
-behave coherently inside the single cluster, because the SCU tracks lines in the private
-L2s and the DSU treats shareability levels identically inside the cluster; the only
-documented difference for Non-shareable is the external transaction type. On Jetson the
-same holds within a cluster; across clusters Non-shareable lines use ReadNoSnoop externally,
-so cross-cluster staleness is possible but not documented as guaranteed. A Non-shareable
-mapping is not a reliable negative control on either board.
+**Inference for the negative control.** How the SCU treats Non-shareable WB lines inside
+a cluster is not documented. DSU Appendix B.2.10 states identical treatment only for Inner
+Shareable and Outer Shareable, and the only documented Non-shareable behavior is the
+external transaction type (ReadNoSnoop/WriteNoSnoop). The result of a Non-shareable mapping
+inside one cluster is therefore unknown in advance: the SCU may still keep it coherent (the
+Arm ARM B2.10.1.1 note warns that implementations may), or it may not. Across Tegra234
+clusters, Non-shareable linefills use ReadNoSnoop, so cross-cluster staleness is possible
+but not documented. Arm ARM B2.10.1.1 forbids relying on it either way. A Non-shareable
+mapping is not a reliable negative control on either board. A run that shows staleness
+would show only that this implementation does not keep Non-shareable lines coherent; a run
+that does not show it proves nothing.
 
 ---
 
@@ -406,8 +525,11 @@ mapping is not a reliable negative control on either board.
 EL and that "from the point of view of the caller the caches must be clean and coherent
 with main memory". The architecture leaves cache state at reset IMPLEMENTATION DEFINED;
 A76 and A78AE invalidate their caches automatically at reset deassertion (unless the core
-was initialised to Debug recovery mode) and join coherency with no software steps. The OS
-does not need to invalidate data caches before enabling them. Linux's secondary path
+was initialised to Debug recovery mode) and join coherency with no software steps. On Pi 5,
+upstream TF-A's CPU_ON releases a holding pen rather than resetting the core, so that reset
+was the cold boot (Q3, "EL3 state not written by BL31"). The PSCI clean-and-coherent
+guarantee covers that case. The OS does not need to invalidate data caches before enabling
+them. Linux's secondary path
 (`secondary_entry` -> `init_kernel_el` -> `__cpu_setup` -> `__enable_mmu`) performs a local
 TLB invalidate and no data-cache invalidate, no set/way operation, and no CPUECTLR or
 ACTLR access, in both 6.18 and the Jetson 5.15 kernel. Linux enters at EL2 on both boards
@@ -533,7 +655,7 @@ Citations:
 
 | Hypothesis | Pi 5 (BCM2712, 4x A76, one DSU) | Jetson (Tegra234, 6x A78AE, 2 clusters) |
 |---|---|---|
-| H1: TF-A does not set CPUECTLR_EL1.SMPEN, so private L2s are incoherent; the bit is writable only at EL3 | **INCONSISTENT.** There is no SMPEN: A76 TRM 100798 r4p1 §13.32 (bit 6 RES0). Private L2s are coherent in hardware with no software step: A76 TRM §5.9 "Core powerup", §7.2.5 (MESI), DSU TRM 100453 r4p1 §2.1 (SCU). Sub-claim "writable only at EL3" is true in practice: ACTLR_EL3.ECTLREN resets to 0 (A76 TRM §13.7) and no rpi5 BL31 code sets it (Q3) | **INCONSISTENT.** No SMPEN: A78AE TRM 101779 r0p3 §3.2.47 (bit 6 is PF_MODE[0]). Coherent at power-up: A78AE TRM §2.4.9, §2.6.2.5; DSU TRM §2.1. Sub-claim "writable only at EL3" true in practice: ECTLREN reset 0 (A78AE TRM §3.2.7), NVIDIA TF-A sets ECTLR access only for A57 (`NV-ATF/plat/nvidia/tegra/common/aarch64/tegra_helpers.S:66-103`) |
+| H1: TF-A does not set CPUECTLR_EL1.SMPEN, so private L2s are incoherent; the bit is writable only at EL3 | **INCONSISTENT.** There is no SMPEN: A76 TRM 100798 r4p1 §13.32 (bit 6 RES0). Private L2s are coherent in hardware with no software step: A76 TRM §5.9 "Core powerup", §7.2.5 (MESI), DSU TRM 100453 r4p1 §2.1 (SCU). Sub-claim "writable only at EL3": ACTLR_EL3.ECTLREN resets to 0 (A76 TRM §13.7) and upstream TF-A rpi5 code never sets it (Q3). That it stays 0 under the Raspberry Pi BL31 actually running is **inference** (BL31 version and source undetermined; consistent with the lab record of a hang on an EL2 write) | **INCONSISTENT.** No SMPEN: A78AE TRM 101779 r0p3 §3.2.47 (bit 6 is PF_MODE[0]). Coherent at power-up: A78AE TRM §2.4.9, §2.6.2.5; DSU TRM §2.1. Sub-claim "writable only at EL3": ECTLREN reset 0 (A78AE TRM §3.2.7), NVIDIA TF-A sets ECTLR access only for A57 (`NV-ATF/plat/nvidia/tegra/common/aarch64/tegra_helpers.S:66-103`). Writes by MB2 on CPU 0 (not reset across kexec) are unsourced (Q3, "EL3 state not written by BL31") |
 | H2: no SMPEN bit on A76; the DSU keeps coherency automatically; writing CPUECTLR_EL1 from EL2 traps to EL3 | **CONSISTENT.** A76 TRM §13.32; DSU TRM §2.1, §5.9.1; A76 TRM §5.9. Trap to EL3: DSU TRM §11.8 states the trap for the same ECTLREN control (CLUSTERECTLR); for CPUECTLR the trap target is inference (A76 TRM §13.7 says only "not write-accessible"), consistent with QEMU `cpu64.c:544-559` and the lab record | **CONSISTENT** within each cluster (A78AE TRM §3.2.47, §2.4.9; DSU TRM §2.1, §11.8). Cross-cluster coherency: no primary hardware source; consistent with `HW_ASSISTED_COHERENCY := 1` (`platform_t234.mk:69`) and Linux running 6 CPUs in one IS domain (inference). Trapped write then panics in NVIDIA BL31 (`NV-ATF/bl31/aarch64/runtime_exceptions.S:581-597`, `bl31_traps.c:13-30`) |
 | H3: pre-MMU reads (SCTLR.C=0) left stale lines in L1/L2 not coherent with later cacheable writes; set/way invalidate after MMU enable fixed it | **INCONSISTENT.** With the data cache disabled, loads and stores do not access L1/L2/L3 arrays: A76 TRM §7.2.3. Caches are invalidated at reset: A76 TRM §7.2. DC ISW is local and discouraged for coherency: Arm ARM DDI 0487 M.d D7.5.9.16.1. The documented mechanism does not exist; what the observed "fix" was is not determinable from documents | **INCONSISTENT.** A78AE TRM §2.6.2.3 (same text), §2.6.2 reset invalidate; Arm ARM D7.5.9.16.1 |
 | H4 (`ncmem.h` comment): L2s incoherent "despite SMPEN being set" | **INCONSISTENT.** No SMPEN field exists (A76 TRM §13.32); the SLM-OS check reads RES0 bit 6 (`kernel/include/cache.h:41-42`) | **INCONSISTENT.** A78AE TRM §3.2.47 (bit 6 = PF_MODE[0], reset 0) |
@@ -561,7 +683,9 @@ Citations:
   that is a guest exception, not a board hang. EL0 must not attempt it (UNDEFINED or IMPDEF,
   Arm ARM D24.2.61).
 - **Writes are not safe on either board, from NS-EL2 or NS-EL1.** ACTLR_EL3.ECTLREN = 0 on
-  both (Q3). The denied write traps to EL3 (DSU TRM §11.8 for the shared control; inference
+  both as far as BL31 is concerned (Q3). Other EL3 code is unsourced, and on Pi 5 the running
+  BL31 is not the upstream source. That uncertainty is a further reason not to write: a
+  write is safe only if ECTLREN is known to be 1. The denied write traps to EL3 (DSU TRM §11.8 for the shared control; inference
   for CPUECTLR). On Jetson, NVIDIA BL31 v2.8 panics at EL3: the board stops until power
   cycle. On Pi 5 the outcome depends on the undetermined EEPROM BL31 version (panic before
   TF-A v2.11, UNDEF injected into EL2 from v2.11); the lab record says it hung. The same
@@ -585,9 +709,12 @@ Arm ARM B2.11, D7.5.9.16.1, and the Linux 6.18 / 5.15 secondary path:
    are Non-cacheable and do not look up any cache (A76 TRM §7.2.3), so a dirty line in the
    primary's cache is invisible to them (booting.rst:183-187 states the same for the image).
 2. PSCI CPU_ON. The secondary enters at NS-EL2 with SCTLR.{I,C,M}=0 and caches that are
-   clean and coherent from the caller's view (PSCI §6.4.3.4), invalidated by hardware at
-   reset (A76 §7.2, A78AE §2.6.2), and already in the coherency domain (A76 §5.9 "no software
-   steps are required").
+   clean and coherent from the caller's view (PSCI §6.4.3.4), and already in the coherency
+   domain (A76 §5.9 "no software steps are required"). The caches were invalidated by
+   hardware at the core's last reset (A76 §7.2, A78AE §2.6.2). On Jetson that is the CPU_ON
+   itself (inference, Q3). On Pi 5 it is cold boot, because upstream TF-A releases
+   secondaries from a holding pen without a reset (Q3); the PSCI guarantee is what applies
+   there.
 3. Do not invalidate or clean by set/way, and do not touch CPUECTLR, CLUSTERECTLR, CPUACTLR*
    or ACTLR_EL2 for coherency: none is needed (Q1, Q4), set/way is discouraged on live SMP
    (Arm ARM D7.5.9.16.1), and writes trap (Q2). Linux does none of these.
@@ -605,24 +732,69 @@ Arm ARM B2.11, D7.5.9.16.1, and the Linux 6.18 / 5.15 secondary path:
 
 ### (c) Which negative control is guaranteed to show staleness on this hardware
 
-- **Not guaranteed:** a Non-shareable WB mapping (Arm ARM B2.10.1.1 note forbids relying on
-  it; inside a DSU cluster the SCU still tracks the lines; inference that Pi 5 will show no
-  staleness). A cacheable-writer / NC-reader alias with the MMU on is also not guaranteed:
-  B2.11 says coherency "might" be lost, and the TRMs do not state whether an NC access with
+**No negative control is guaranteed by any source.** The strongest one the TRMs support is
+a reader with its data cache off. The value that reader returns is inference.
+
+- **Not reliable: a Non-shareable WB mapping.** Arm ARM B2.10.1.1 forbids relying on it,
+  and the SCU's handling of Non-shareable lines inside a cluster is undocumented (Q5). A
+  result showing no staleness proves nothing.
+- **Not reliable: a cacheable-writer / NC-reader alias with the MMU on.** B2.11 says
+  coherency "might" be lost, and the TRMs do not state whether an NC access with
   SCTLR.C=1 looks up the caches.
-- **Documented by the core TRMs:** a reader whose data cache is disabled (SCTLR_EL2.C=0,
-  equivalently a secondary that has not yet enabled its MMU) reading a location whose
-  newest value sits dirty in a cache. A76 TRM §7.2.3 / A78AE TRM §2.6.2.3: such loads "do
-  not access any of the L1 data, L2 cache, and ... DSU L3 cache arrays" and "are incoherent
-  with the caches in both this core and other cores in the cluster". Recipe: write P0 to a
-  line and clean it to the PoC (DC CVAC, DSB); on the writer CPU store P1 cacheably with no
-  clean; on a CPU with its data cache off (a secondary before its MMU/cache enable is the
-  natural case, already present in SLM-OS bring-up) load the line: it returns P0. Then
-  DC CVAC on the writer and the reload returns P1, which shows the mechanism.
-  **Inference:** the result is deterministic as long as the dirty line is not written back
-  to DRAM between the store and the load; an eviction from L2 into the DSU L3 does not
-  break it (the NC load does not access L3 either), only a write-back to DRAM does. Keep
-  the window short and the writer otherwise idle.
+- **What the TRMs document for a reader with the data cache off** (SCTLR_EL2.C=0, or a
+  secondary that has not yet enabled its MMU). A76 TRM §7.2.3 / A78AE TRM §2.6.2.3 say its
+  loads "do not access any of the L1 data, L2 cache, and ... DSU L3 cache arrays" and "are
+  incoherent with the caches in both this core and other cores in the cluster". That
+  documents incoherence. It does not document which value the load returns.
+- **Inference: which value the reader sees** depends on where the newest copy of the line
+  is when the NC read is served, and on what serves it:
+  1. Dirty in the writer's L1/L2, or in the DSU L3 of the writer's cluster. The
+     caches-off load does not look in any of these arrays, so the newest value is not
+     returned from them. The read goes out of the cluster (ReadNoSnoop for NC loads, DSU
+     TRM §7.6) and returns whatever the next level holds.
+  2. Evicted out of the cluster into an outer cache. Jetson has a fabric-level cache: the
+     MCE "SCF level Cache Clean" and "Cache invalidate and Clean" commands
+     (`NV-ATF/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c:383-405`) are issued at cold boot
+     and before the NS hand-off (`plat_setup.c:232`, `:546-549`). A write-back from the
+     cluster could land there. Whether a ReadNoSnoop from a cluster is served from that
+     cache is undocumented. If it is, the reader sees the new value with no coherency
+     involved. For BCM2712, no cached source says whether any cache exists downstream of
+     the DSU; the same caveat applies. An eviction therefore can make the reader return the
+     new value. A write-back to DRAM is not the only way the control can fail.
+  3. Jetson reader cluster. A reader in the same cluster as the writer (CPUs 0-3 together,
+     or 4-5 together) fits case 1 directly: its own DSU L3 and the writer's L1/L2 are both
+     arrays it does not access. A reader in the other cluster sends its NC read across the
+     fabric. Whether the fabric snoops the writer's cluster for an NC read, or serves it
+     from the SCF-level cache, is undocumented. Same-cluster and cross-cluster runs are two
+     different experiments and must be reported separately.
+- **Recipe.** Use one 64-byte line L, at a PA used for nothing else, mapped WB Inner
+  Shareable for the writer.
+  1. Writer, caches on: store P0 to L, DC CIVAC L, DSB SY. P0 is now at the PoC and no
+     cache holds L.
+  2. Writer: store P1 to L, DSB SY, no cache maintenance. The writer then waits (WFE) and
+     touches no other memory, to keep eviction pressure low.
+  3. Reader, data cache off: read back SCTLR_EL2 to confirm C=0 (an MMU-off secondary
+     before enable is the natural case). Load L, giving V1. Record the time since step 2.
+  4. Writer: DC CVAC L, DSB SY, then signal. Reader loads L again, giving V2.
+  5. Repeat with: (i) a reader in the writer's cluster and, on Jetson, in the other
+     cluster; (ii) a longer delay before step 3; (iii) the writer streaming through more
+     than L2 plus L3 (Pi 5: 512 KB L2 per core and 2 MB L3,
+     `~/slmos-ref/rpi/rpi-linux-bcm2712.dtsi:818-869`; Jetson: 256 KB L2 per core and 2 MB L3
+     per cluster, `~/slmos-ref/linux/linux/arch/arm64/boot/dts/nvidia/tegra234.dtsi:5625-5760`)
+     between steps 2 and 3, to force the line out of the cluster.
+- **Interpreting results** (inference):
+  - V1 = P0 and V2 = P1: staleness of a dirty line with respect to a caches-off reader is
+    shown, and step 4 shows that cleaning to the PoC makes P1 visible. This is the expected
+    result for case 1.
+  - V1 = P1 (V2 = P1): **inconclusive.** Possible causes are a write-back before the read,
+    an outer cache serving the read (Jetson SCF level, or an undocumented BCM2712 cache),
+    fabric snooping (cross-cluster case), the reader's cache not actually off, or the two
+    accesses not reaching the same PA. This result does not show coherency or the
+    absence of a defect.
+  - V2 = P0: the setup is invalid (wrong PA or alias, or the clean did not complete). The
+    run must be discarded.
+  - Variant (iii) is expected to move results from the first case towards the inconclusive
+    one. It tests the eviction caveat, not coherency.
 - The same mechanism in reverse (writer with caches off, reader with a cached copy) depends
   on the reader holding a cached copy and on the SCU not snooping NC writes, which no source
   states; it is a weaker control.
@@ -646,3 +818,12 @@ Arm ARM B2.11, D7.5.9.16.1, and the Linux 6.18 / 5.15 secondary path:
   transaction type is documented.
 - A76 and A78AE revision numbers on the actual boards (A76 r4p1 is from the TF-A rpi5
   makefile comment; neither MIDR was read).
+- EL3 writes to ACTLR_EL3, ACTLR_EL2 or CPUECTLR_EL1 by code other than the cached BL31
+  sources: MB2 on Jetson CPU 0 (closed source; its exception level is not stated in the
+  NVIDIA boot-flow page), any Raspberry Pi firmware code on the A76 cores before or instead
+  of upstream BL31. Jetson CPU 0 keeps these values across kexec and UEFI-direct boot.
+- Whether the Tegra234 fabric implements SYSCOREQ/SYSCOACK, or whether the MCE or another
+  controller performs the DSU §5.9 "SoC is responsible" step.
+- Whether an NC read leaving a cluster is served from the Tegra SCF-level cache or snooped
+  in the other cluster, and whether BCM2712 has any cache downstream of the DSU L3. These
+  decide whether the caches-off negative control can return the new value after an eviction.
