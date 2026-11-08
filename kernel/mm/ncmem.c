@@ -5,7 +5,8 @@
  * Memory is never freed — these are kernel-lifetime structures like
  * scheduler run queues and cross-CPU boot flags.
  *
- * Works on any platform that defines NC_MEM_BASE (Pi 5, Jetson).
+ * Works on any platform with PLATFORM_HAS_NC_REGION (Pi 5, Jetson),
+ * including NC_AXIS=OFF builds: device DMA still allocates here.
  */
 
 #include "ncmem.h"
@@ -13,7 +14,7 @@
 #include "debug.h"
 #include <stdint.h>
 
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(PLATFORM_HAS_NC_REGION)
 
 static uintptr_t nc_next_free;
 static size_t nc_total_allocated;
@@ -75,4 +76,4 @@ size_t ncmem_used(void)
     return nc_total_allocated;
 }
 
-#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */
+#endif /* PLATFORM_HAS_NC_REGION */

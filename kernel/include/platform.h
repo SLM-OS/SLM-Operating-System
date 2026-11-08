@@ -507,7 +507,8 @@
  * (issue #166). Switching to the runtime flag matches the Pi 5 model.
  *
  * The UART lock remains IRQ-disable-only (see `kernel/src/kprintf.c`) —
- * that path keys off `PLATFORM_HAS_NC_MEMORY`, not this flag.
+ * that path keys off `PLATFORM_HAS_NC_MEMORY` (undefined under
+ * NC_AXIS=OFF, where the UART lock is a real spinlock), not this flag.
  */
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

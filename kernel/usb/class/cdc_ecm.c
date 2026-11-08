@@ -79,7 +79,7 @@
 /* -------------------------------------------------------------------------- */
 
 struct cdc_rx_slot {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     uint8_t        *buf;
 #else
     uint8_t         buf[CDC_ECM_BUF_SIZE];
@@ -98,7 +98,7 @@ struct cdc_rx_slot {
 };
 
 struct cdc_tx_slot {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     uint8_t        *buf;
 #else
     uint8_t         buf[CDC_ECM_BUF_SIZE];
@@ -120,7 +120,7 @@ struct cdc_tx_slot {
 };
 
 struct cdc_notify_slot {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     uint8_t        *buf;
 #else
     uint8_t         buf[CDC_ECM_NOTIFY_BUF_SIZE];
@@ -228,7 +228,7 @@ static uint8_t *cdc_notify_buf(struct cdc_notify_slot *slot)
  */
 static int cdc_ecm_dma_init(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     static bool logged_dma_pool;
 
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {

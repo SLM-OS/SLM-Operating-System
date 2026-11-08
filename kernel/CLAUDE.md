@@ -106,6 +106,8 @@ _Alignas(16) uint8_t buffer[64];
 
 On Pi 5, TF-A does not set SMPEN for secondary cores. Use `cache.h` helpers for cross-CPU data:
 
+> **#1193 note:** the Cortex-A76 and Cortex-A78AE TRMs have no SMPEN field (CPUECTLR_EL1 bit 6 is RES0 on A76 and PF_MODE[0] on A78AE), and both cores keep their L1/L2 coherent in hardware. This section and the NC section below describe the design as built; whether the hardware needs it is being measured with the `NC_AXIS=OFF` build (`docs/archive/coherency-gauntlet/c3-audit.md`).
+
 **Critical rule: DC CIVAC writes back dirty data before invalidating.**
 
 If CPU 0 has a dirty cacheline and you call `cache_invalidate()` (DC CIVAC), it first writes CPU 0's stale data to PoC, overwriting any newer value written by another CPU. Always `cache_clean()` or `cache_clean_range()` shared data on the writer side before another CPU uses `cache_invalidate()` to read it.
@@ -135,6 +137,8 @@ val = shared_data[cpu].field;
 On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite SMPEN. DC CIVAC doesn't propagate through per-core L2. Non-cacheable (NC) memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs. Enabled when `PLATFORM_HAS_NC_MEMORY` is defined (set in `ncmem.h`).
 
 **NC region:** Platform-specific 2MB block mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`.
+
+**Two macros (#1193):** `PLATFORM_HAS_NC_REGION` (Pi 5, Jetson, every build) means the block is mapped and `ncmem_alloc` works; device DMA (xHCI, MACB, CDC-ECM, USB bounce, camera RCE) and fixed-address diagnostics key on it. `PLATFORM_HAS_NC_MEMORY` means CPU-to-CPU shared state lives in the block; it is undefined when the build passes `NC_AXIS=OFF` (CMake defines `NC_AXIS_OFF`), and every user then takes its cacheable `#else` branch. Do not use `PLATFORM_HAS_NC_MEMORY` as a stand-in for "Pi 5 or Jetson": board behavior (idle WFI/WFE, which CPUs unmask IRQs) keys on the platform macros, DMA keys on the region. `SETWAY_INVAL=OFF` separately drops the post-MMU set/way loop in `smp_boot.S`. `kernel/tests/test_nc_axis.c` checks the placement (MAIR index, shareability, PA) of run queues, the task table, `current_task`, `sched_diag_*` and the preemption state in each configuration.
 - Pi 5: `0xFFE00000` (last 2MB of 4GB RAM)
 - Jetson: `0xBDE00000` (last 2MB of region 1, before OP-TEE carveout)
 
@@ -148,7 +152,7 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 
 **Spinlock hardware mode (Pi 5 + Jetson):** Both platforms now share the same `spinlock_hw_enabled` runtime-flag model (set by `vmm_init` after MMU enable). Pre-MMU the flag is 0 and every `spin_lock_irqsave` falls through to a barrier-only path. Post-MMU it is 1, so LDAXR/STXR run for real and provide proper cross-CPU mutual exclusion on cacheable memory. Jetson previously defined `SPINLOCK_SKIP_LOCKING` unconditionally in `platform.h`, which silently turned every cacheable spinlock (PMM, task-table, rq_lock, steal_deque_lock) into a no-op. That surfaced as issue #166 — a `pmm_free_pages` free-list page fault during `bench stealing` with WORK_STEALING=ON, because multiple CPUs mutated the buddy free list without serialization. If you need a cross-CPU critical section on Jetson, a plain cacheable `spinlock_t` + `spin_lock_irqsave` is the right primitive (not barrier-only, not NC-embedded).
 
-**Pi 5 spinlock DRAM flush (April 16, 2026):** On BCM2712 with SMPEN unset, `STLR` from `spin_unlock` stays in the releaser's L2 and never propagates to other CPUs' L2. A waiter's `LDAXR` then reads a stale "locked" cacheline from its own L2 and spins forever (observed as effective deadlock under `sched_try_steal` contention during yield-heavy workloads). `kernel/include/spinlock.h` gates a Pi 5-only path under `#if defined(PLATFORM_RASPI5)` that adds `DC CIVAC` + `DSB SY` before every `LDAXR` (invalidate stale local copy so the load goes to DRAM) and after every `STLR` (push the unlocked value through to DRAM so other CPUs' reads see it). QEMU, Jetson, and x86-64 are unaffected. This fix is what makes cross-CPU integration tests reliable on Pi 5; without it, any scheduler path that contends `rq_lock` or `steal_deque_lock` across CPUs can stall.
+**Pi 5 spinlock DRAM flush (April 16, 2026):** On BCM2712 with SMPEN unset, `STLR` from `spin_unlock` stays in the releaser's L2 and never propagates to other CPUs' L2. A waiter's `LDAXR` then reads a stale "locked" cacheline from its own L2 and spins forever (observed as effective deadlock under `sched_try_steal` contention during yield-heavy workloads). `kernel/include/spinlock.h` gates a Pi 5-only path under `SPINLOCK_DRAM_FLUSH` (defined for `PLATFORM_RASPI5` unless `NC_AXIS=OFF`) that adds `DC CIVAC` + `DSB SY` before every `LDAXR` (invalidate stale local copy so the load goes to DRAM) and after every `STLR` (push the unlocked value through to DRAM so other CPUs' reads see it). QEMU, Jetson, and x86-64 are unaffected. This fix is what makes cross-CPU integration tests reliable on Pi 5; without it, any scheduler path that contends `rq_lock` or `steal_deque_lock` across CPUs can stall.
 
 **Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on platforms without NC memory. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
 
@@ -783,6 +787,8 @@ existing fixtures keep working.
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).
 
 This is safe because secondary CPUs do not print after boot (the `secondary_init` comment at smp.c:328 documents this). All UART output during normal operation comes from CPU 0 (shell, tests, INFO logs). One deliberate exception: the Jetson `thermal log <ms>` diagnostic (#1093) prints from a task pinned to the last CPU, so it keeps reporting while CPU 0 is wedged. Its lines can interleave with, or garble, concurrent CPU 0 output, which is acceptable for an opt-in debug aid. If secondary CPU printing is needed beyond that, an NC-memory-based lock must be implemented.
+
+Under `NC_AXIS=OFF` (#1193) `PLATFORM_HAS_NC_MEMORY` is undefined and the UART lock is the same cacheable `spin_lock_irqsave` lock QEMU uses: a real cross-CPU lock once `vmm_init` sets `spinlock_hw_enabled`, so secondary CPUs may print on that build. Panic and exception output use the `_unlocked` variants and never take it.
 
 ---
 
