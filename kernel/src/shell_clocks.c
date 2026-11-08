@@ -32,6 +32,12 @@ int cmd_clocks(int argc, char *argv[])
             shell_puts("Usage: clocks [emc <MHz>]\r\n");
             return -1;
         }
+        if ((uint64_t)mhz * 1000000u > TEGRA234_EMC_MAX_HZ) {
+            shell_printf("clocks: emc %u MHz is above the %llu MHz top rate\r\n",
+                         (unsigned)mhz,
+                         (unsigned long long)(TEGRA234_EMC_MAX_HZ / 1000000u));
+            return -1;
+        }
         /* A floor through the bandwidth manager, which the boot-time and
          * runtime checks then hold; an MRQ_CLK rate would not last
          * (#1161). */

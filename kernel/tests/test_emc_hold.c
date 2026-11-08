@@ -148,6 +148,104 @@ static void test_failed_readback_after_rerequest_is_unknown(void)
     TEST_ASSERT_EQUAL_STRING("pg_on", s.first_drop);
 }
 
+/* -95: what a refused floor comes back as (-BPMP_ENOTSUP). */
+#define FAKE_ENOTSUP (-95)
+
+static void test_set_holds_the_granted_rate_not_the_request(void)
+{
+    /* `clocks emc 3200`: BPMP grants its top rate, 3199. Holding 3200
+     * would count a drop and re-request on every check (#1161 review). */
+    struct emc_hold_state s;
+    fake_reset(MHZ(204), MHZ(3199));
+    emc_hold_init(&s, &fake_ops, 0);
+    struct emc_hold_grant g;
+    int rc = emc_hold_set(&s, MHZ(3200), &g);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_INT(0, g.read_rc);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(3199), g.read_hz);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(3199), s.target_hz);
+    for (int i = 0; i < 3; i++) {
+        enum emc_hold_result r = emc_hold_check(&s, "runtime", NULL, NULL);
+        TEST_ASSERT_EQUAL_INT(EMC_HOLD_OK, r);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, s.drops);
+    TEST_ASSERT_EQUAL_UINT(1, fake.requests);
+}
+
+static void test_refused_set_keeps_the_target(void)
+{
+    /* Held at 3199; a refused request leaves that target alone. */
+    struct emc_hold_state s;
+    fake_reset(MHZ(3199), MHZ(3199));
+    emc_hold_init(&s, &fake_ops, MHZ(3199));
+    fake.req_rc = FAKE_ENOTSUP;
+    struct emc_hold_grant g;
+    int rc = emc_hold_set(&s, MHZ(4000), &g);
+    TEST_ASSERT_EQUAL_INT(FAKE_ENOTSUP, rc);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(3199), s.target_hz);
+    enum emc_hold_result r = emc_hold_check(&s, "runtime", NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_OK, r);
+    TEST_ASSERT_EQUAL_UINT32(0, s.drops);
+
+    /* From observe only (a refused boot request): still nothing to hold,
+     * so a 204 MHz reading is no drop and asks for nothing. */
+    fake_reset(MHZ(204), MHZ(204));
+    fake.req_rc = FAKE_ENOTSUP;
+    emc_hold_init(&s, &fake_ops, 0);
+    rc = emc_hold_set(&s, MHZ(3199), &g);
+    TEST_ASSERT_EQUAL_INT(FAKE_ENOTSUP, rc);
+    TEST_ASSERT_EQUAL_UINT64(0, s.target_hz);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(204), s.last_hz);
+    r = emc_hold_check(&s, "runtime", NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_OK, r);
+    TEST_ASSERT_EQUAL_UINT32(0, s.drops);
+    TEST_ASSERT_EQUAL_UINT(1, fake.requests);
+}
+
+static void test_set_below_another_clients_floor(void)
+{
+    /* `clocks emc 204` while another floor keeps EMC at 3199: hold 204,
+     * which 3199 satisfies. */
+    struct emc_hold_state s;
+    fake_reset(MHZ(3199), MHZ(3199));
+    emc_hold_init(&s, &fake_ops, MHZ(3199));
+    struct emc_hold_grant g;
+    int rc = emc_hold_set(&s, MHZ(204), &g);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(204), s.target_hz);
+    enum emc_hold_result r = emc_hold_check(&s, "runtime", NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_OK, r);
+}
+
+static void test_set_without_readback_uses_the_reply(void)
+{
+    struct emc_hold_state s;
+    fake_reset(MHZ(204), MHZ(3199));
+    fake.get_rc = -4;
+    emc_hold_init(&s, &fake_ops, 0);
+    struct emc_hold_grant g;
+    int rc = emc_hold_set(&s, MHZ(3199), &g);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_INT(-4, g.read_rc);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(3199), g.reply_hz);
+    TEST_ASSERT_EQUAL_UINT64(MHZ(3199), s.target_hz);
+}
+
+static void test_failed_rerequest_reports_its_rc(void)
+{
+    struct emc_hold_state s;
+    fake_reset(MHZ(204), MHZ(3199));
+    fake.req_rc = FAKE_ENOTSUP;
+    emc_hold_init(&s, &fake_ops, MHZ(3199));
+    enum emc_hold_result r = emc_hold_check(&s, "runtime", NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_STILL_LOW, r);
+    TEST_ASSERT_EQUAL_INT(FAKE_ENOTSUP, s.last_request_rc);
+    fake.req_rc = 0;
+    r = emc_hold_check(&s, "runtime", NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(EMC_HOLD_RESTORED, r);
+    TEST_ASSERT_EQUAL_INT(0, s.last_request_rc);
+}
+
 static void test_observe_only_never_requests(void)
 {
     struct emc_hold_state s;
@@ -202,6 +300,11 @@ int test_suite_emc_hold(void)
     RUN_TEST(test_failed_rerequest_is_still_low);
     RUN_TEST(test_read_error_does_not_request);
     RUN_TEST(test_failed_readback_after_rerequest_is_unknown);
+    RUN_TEST(test_set_holds_the_granted_rate_not_the_request);
+    RUN_TEST(test_refused_set_keeps_the_target);
+    RUN_TEST(test_set_below_another_clients_floor);
+    RUN_TEST(test_set_without_readback_uses_the_reply);
+    RUN_TEST(test_failed_rerequest_reports_its_rc);
     RUN_TEST(test_observe_only_never_requests);
     RUN_TEST(test_boot_sequence_catches_every_reset);
     RUN_TEST(test_long_where_is_truncated);

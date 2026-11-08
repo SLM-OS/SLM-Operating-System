@@ -43,6 +43,7 @@ struct emc_hold_state {
     uint32_t read_errors;    /* readbacks that failed */
     uint32_t drops;          /* readbacks below target_hz */
     uint32_t reasserts;      /* re-requests after a drop that read back >= target */
+    int last_request_rc;     /* result of the latest re-request (0 = sent) */
     char first_drop[EMC_HOLD_WHERE_LEN];   /* where the first drop was seen */
     char last_drop[EMC_HOLD_WHERE_LEN];    /* where the latest drop was seen */
 };
@@ -70,6 +71,23 @@ void emc_hold_init(struct emc_hold_state *s, const struct emc_hold_ops *ops,
 enum emc_hold_result emc_hold_check(struct emc_hold_state *s, const char *where,
                                     uint64_t *before_hz, uint64_t *after_hz);
 
+/* What one emc_hold_set request got. */
+struct emc_hold_grant {
+    int rc;              /* the request's result (0 = granted) */
+    uint64_t reply_hz;   /* the rate BPMP reported choosing */
+    int read_rc;         /* the readback after the request */
+    uint64_t read_hz;    /* that readback, valid when read_rc == 0 */
+};
+
+/*
+ * Request hz and, only if BPMP grants it, hold what was granted: the
+ * target becomes min(hz, readback), or min(hz, reply) when the readback
+ * fails. A refused request (BPMP answers -ENOTSUP with the current rate
+ * for a floor above its table, for one) leaves the target unchanged, so
+ * the checks do not chase a rate BPMP will not give. Returns g->rc.
+ */
+int emc_hold_set(struct emc_hold_state *s, uint64_t hz, struct emc_hold_grant *g);
+
 /* ---- Jetson boot and runtime binding (stubs elsewhere) ---- */
 
 /*
@@ -89,10 +107,10 @@ void emc_hold_boot_end(void);
 void emc_hold_runtime_check(void);
 
 /*
- * Request a new floor (the `clocks emc` shell command) and make it the
- * rate the checks hold. BPMP may still run EMC faster for other
- * clients' floors (the GPU program asks for its own). 0 on success;
- * *got is the rate BPMP chose.
+ * Request a new floor (the `clocks emc` shell command) and, if BPMP
+ * grants it, hold the granted rate (emc_hold_set). BPMP may still run EMC
+ * faster for other clients' floors (the GPU program asks for its own).
+ * 0 on success; *got is the rate BPMP chose.
  */
 int emc_hold_set_target(uint64_t hz, uint64_t *got);
 

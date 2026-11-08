@@ -709,7 +709,7 @@ void kernel_main(void *dtb)
              * back to 204 MHz by its next recompute (#1161). The rate
              * is checked after every boot step and BPMP request, and by
              * the fan task after boot (emc_hold.h). */
-            if (boot_source_is_uefi()) {
+            if (responding && boot_source_is_uefi()) {
                 emc_hold_boot_begin();
             }
             /* Nothing else drives the fan on either boot path (#1105):
