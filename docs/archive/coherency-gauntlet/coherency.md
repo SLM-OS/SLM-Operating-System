@@ -36,7 +36,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | Jetson PASS (47ab164a, 44809f4b); Pi 5 retry with SDWire settle | 0 |
+| C1 | Linux reference bar | Jetson PASS (47ab164a, 44809f4b); Pi 5 attempt 4 (network-served results) | 0 |
 | C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); Jetson hardware stage running | 0 |
 | C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -125,6 +125,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC.
-- pi-5-1 needs about 20 s powered off after an SDWire switch to DUT before
-  power-on, or it does not boot at all. Deploy rule for this run:
-  sdwire_update reboot=false, then power_cycle delay=20.
+- pi-5-1 boots only after a read-only SDWire round trip while off, then a
+  20 s off period (#1195; the first "20 s settle" rule was incomplete).
+  Deploy rule: sdwire_update reboot=false, sdwire_info, power_cycle
+  delay=20. `boot_test` cannot do the round trip between boots, so Pi 5
+  reliability counts use this sequence by hand.
