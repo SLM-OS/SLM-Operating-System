@@ -753,9 +753,13 @@ impl RealCase<'_> {
     }
 }
 
-/// Zeroed bias bytes and what they held.
+/// Zeroed bias bytes and what they held, and the buffer they are in.
 struct BiasMutation {
     model: usize,
+    /// The weight buffer's address and length when the bytes were zeroed:
+    /// `restore` writes only into that same buffer.
+    base: usize,
+    len: usize,
     saved: Vec<(usize, Vec<u8>)>,
 }
 
@@ -767,13 +771,14 @@ impl BiasMutation {
     /// bytes: each GPU step ends with an L2 flush and sysmem invalidate, and
     /// the bytes are cleaned to memory here.
     fn apply(model: usize, layer: u32) -> Result<Self, &'static str> {
-        let saved = registry::with_loaded_slm(model, |slm| {
+        let (base, len, saved) = registry::with_loaded_slm(model, |slm| {
             // Under the slot lock, which every new pin takes too.
             if registry::gpu_pinned(model) {
                 return Err("a GPU program maps this model; close its sessions first");
             }
             let base = slm.weight_base_for_mutation().ok_or("model has no weight bytes")?;
-            let start = slm.weight_bytes().ok_or("model has no weight bytes")?.as_ptr() as usize;
+            let all = slm.weight_bytes().ok_or("model has no weight bytes")?;
+            let (start, len) = (all.as_ptr() as usize, all.len());
             let mut saved = Vec::new();
             for which in ["q", "k", "v"] {
                 let name = format!("blk.{layer}.attn_{which}.bias");
@@ -791,10 +796,10 @@ impl BiasMutation {
                     crate::kernel_ffi::slm_gpu_sync_for_device(p, bytes.len());
                 }
             }
-            Ok(saved)
+            Ok((base.as_ptr() as usize, len, saved))
         })
         .ok_or("model not loaded")??;
-        let m = Self { model, saved };
+        let m = Self { model, base, len, saved };
         let line = format!(
             "[slm] real golden: drop-bias zeroed blk.{layer}.attn_q/k/v.bias ({} bytes) in the weights the GPU program maps\n\0",
             m.bytes()
@@ -803,15 +808,27 @@ impl BiasMutation {
         Ok(m)
     }
 
-    /// Put the bytes back and read them back. True when they match.
+    /// Put the bytes back and read them back. True when they match. False,
+    /// writing nothing, when the slot no longer holds the buffer the bytes
+    /// came from (another model loaded there) or a range falls outside it.
     fn restore(self) -> bool {
         registry::with_loaded_slm(self.model, |slm| {
-            let Some(base) = slm.weight_base_for_mutation() else {
+            let (Some(base), Some(len)) = (slm.weight_base_for_mutation(), slm.weight_bytes().map(|b| b.len()))
+            else {
                 return false;
             };
+            if base.as_ptr() as usize != self.base || len != self.len {
+                return false;
+            }
+            let fits = |off: usize, n: usize| off.checked_add(n).is_some_and(|end| end <= len);
+            if !self.saved.iter().all(|(off, bytes)| fits(*off, bytes.len())) {
+                return false;
+            }
             for (off, bytes) in &self.saved {
-                // SAFETY: as in `apply`; the programs that read the zeroed
-                // bytes have been dropped, so no GPU mapping is left.
+                // SAFETY: as in `apply`: the same buffer (checked above),
+                // `off..off + len` inside it (checked above), and the
+                // programs that read the zeroed bytes have been dropped, so
+                // no GPU mapping is left.
                 unsafe {
                     let p = base.as_ptr().add(*off);
                     core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
@@ -1472,6 +1489,31 @@ mod tests {
             last = Some(f);
         }
         assert_eq!(last.map(|f| f & REAL_FLAG_DROP_BIAS), Some(0), "end on a run without the mutation");
+    }
+
+    /// `restore` writes only into the buffer it zeroed: a slot that now holds
+    /// another buffer, or a range past its end, is refused with nothing written.
+    #[test]
+    fn golden_real_restore_refuses_another_buffer() {
+        let model = load_tiny();
+        let clean = weights_digest(model);
+        let m = BiasMutation::apply(model as usize, 0).unwrap();
+        let zeroed = weights_digest(model);
+        assert_ne!(zeroed, clean);
+        let forged = |base: usize, len: usize, saved: Vec<(usize, Vec<u8>)>| BiasMutation {
+            model: m.model,
+            base,
+            len,
+            saved,
+        };
+        assert!(!forged(m.base + 4096, m.len, m.saved.clone()).restore(), "another base");
+        assert!(!forged(m.base, m.len + 1, m.saved.clone()).restore(), "another length");
+        assert!(!forged(m.base, m.len, vec![(m.len - 4, vec![1u8; 8])]).restore(), "past the end");
+        assert!(!forged(m.base, m.len, vec![(usize::MAX, vec![1u8; 8])]).restore(), "offset overflow");
+        assert_eq!(weights_digest(model), zeroed, "a refused restore wrote");
+        assert!(m.restore());
+        assert_eq!(weights_digest(model), clean);
+        reset_for_tests();
     }
 
     /// The harness on the tiny model, in CI: the exact reference made by

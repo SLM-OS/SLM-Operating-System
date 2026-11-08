@@ -1779,7 +1779,7 @@ static int slm_golden(int argc, char *argv[])
             return -1;
         }
     }
-    SlmRealGoldenReport r;
+    SlmRealGoldenReport r = {0};
     int32_t rc = rust_slm_golden_real(h, slm_real_golden_rec_start,
                                       (size_t)(slm_real_golden_rec_end - slm_real_golden_rec_start),
                                       flags, &r);
