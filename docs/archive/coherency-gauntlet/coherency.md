@@ -35,8 +35,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
-| C0 | Architecture and firmware facts | round 1 FAIL (narrow), builder fixing | 1 |
-| C1 | Linux reference bar | building | 0 |
+| C0 | Architecture and firmware facts | round 2 FAIL (narrow, 8/9 fixed), builder fixing | 2 |
+| C1 | Linux reference bar | Jetson litmus PASS; Pi 5 boot silent, diagnosing | 0 |
 | C2 | `coherency` verb and litmus suite | building (QEMU stage) | 0 |
 | C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -66,6 +66,11 @@ Boards: jetson-nano-2 and pi-5-1 only.
   across kexec, the full booting.rst sentence. Overturning observation named
   by the critic: a Jetson message-passing litmus between CPUs 0-3 and 4-5
   that reads stale data with identical IS WB mappings, MMU and caches on.
+- C0 round 2: FAIL, narrowly. Eight of nine gaps fixed; all new citations
+  matched. One new wrong statement: "on Pi 5 a core is reset only at cold
+  boot" (upstream CPU_OFF requests a warm reset through RMR_EL3,
+  rpi3_pm.c:184-208). RES0 glossary citation partial; two small unsourced
+  statements.
 
 ## Failed approaches
 
@@ -83,5 +88,23 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - Negative control: Non-shareable mapping is not guaranteed to show
   staleness (Arm ARM B2.10.1.1). C2 adds a caches-off reader control
   (SCTLR.C=0), which A76 7.2.3 and A78AE 2.6.2.3 say looks up no cache.
+
+### C1 Jetson Linux litmus (builder report, critic pending)
+
+- jetson-nano-2, 5.15.148-tegra, 6 CPUs: 40 passes of the full set, 606 s.
+  Every P row forbidden 0, timeouts 0. S1 (no barriers) relaxed outcomes
+  82,271,035 of 1.2e9, so the harness observes reordering on this core.
+- CPUECTLR module: `msr` count 0 in both .ko files; Jetson cleared to load
+  with cluster=0 (DSU-AE CLUSTERECTLR encoding unconfirmed).
+
+### C1 Pi 5 boot, attempt 1
+
+- Raspberry Pi OS kernel 6.18.60+rpt-rpi-2712 plus initramfs from the SLM-OS
+  card: 0 serial lines in 1260 s. Cause under test: the lab console is RP1
+  UART0 at 0x1F00030000 (`platform.h:591`), while firmware `uart_2ndstage`
+  output goes to the BCM2712 debug UART, and the first config did not enable
+  RP1 UART0 for Linux. Second attempt adds `dtparam=uart0=on`,
+  `pciex4_reset=0` and earlycon on 0x1f00030000. A second silent boot stops
+  this approach.
 
 ### Lab notes
