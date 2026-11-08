@@ -12,9 +12,10 @@
 #   sass.log       gqa-sass-check.py on the board-built cubin
 #   checks.log     every gqa_check.h case, exact reference
 #   mutant.log     the same checks on a mask-off-by-one mutant (must fail)
-#   memcheck.log   compute-sanitizer memcheck over the long-context checks
 #   timing.log     timing (gqa_bench_raw.csv holds every launch)
 #   env-after.log  clocks after
+#   memcheck.log   compute-sanitizer memcheck over the kv 2048 checks
+#                  (MEMCHECK_TIMEOUT seconds, default 900)
 cd "$(dirname "$0")" || exit 2
 export PATH=/usr/local/cuda/bin:$PATH
 GPUF=$(ls -d /sys/class/devfreq/*17000000.gpu* /sys/devices/platform/bus@0/17000000.gpu/devfreq/* \
@@ -56,16 +57,18 @@ nvcc "${FL[@]}" -DGQA_KERNEL_SRC='"mut/slm_gqa_hmma.cu"' gqa_bench.cu -o gqa_ben
 OMP_NUM_THREADS=6 timeout 300 ./gqa_bench_mut --checks-only --only "opcheck rows" > mutant.log 2>&1
 echo "mutant rc=$? (must be 1) $(tail -1 mutant.log)"
 
-if command -v compute-sanitizer > /dev/null; then
-    OMP_NUM_THREADS=6 timeout 900 compute-sanitizer --tool memcheck ./gqa_bench --checks-only \
-        --only "kv 2048" > memcheck.log 2>&1
-    echo "memcheck rc=$? $(grep -E 'ERROR SUMMARY' memcheck.log | tail -1)"
-else
-    echo "memcheck: compute-sanitizer not found" | tee memcheck.log
-fi
-
 timeout 900 ./gqa_bench --no-checks --runs 21 --raw gqa_bench_raw.csv > timing.log 2>&1
 echo "timing rc=$?"
 sed -n '/^summary/,$p' timing.log
 clocks > env-after.log 2>&1
 cat env-after.log
+
+# Last, so a slow sanitizer cannot crowd out the timing in a short board slot.
+if command -v compute-sanitizer > /dev/null; then
+    OMP_NUM_THREADS=6 timeout "${MEMCHECK_TIMEOUT:-900}" compute-sanitizer --tool memcheck \
+        ./gqa_bench --checks-only --only "kv 2048" > memcheck.log 2>&1
+    echo "memcheck rc=$? $(grep -E 'ERROR SUMMARY' memcheck.log | tail -1)"
+else
+    echo "memcheck: compute-sanitizer not found" | tee memcheck.log
+fi
+echo "run-gqa-bench: done $(date -u +%FT%TZ)"

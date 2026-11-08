@@ -216,7 +216,13 @@ GQ_FN void gq_load_q(gq_u4 (&qr)[4], const uint16_t *q, int m, int M, int group,
 }
 
 /* S[16 rows][16 positions] = Q.K^T. kr[u][jj] is the lane's chunk jj of the K
- * row at position t0 + 8u + g. */
+ * row at position t0 + 8u + g.
+ *
+ * Each k-step's mma starts from zero and the eight partial sums are added in
+ * FP32. The tensor core adds into its accumulator by truncation, so feeding it
+ * the running score let the error grow with every k-step; on jetson-nano-2
+ * that put large-score outputs at up to 11 FP16 ULP from the exact result,
+ * against slm_gqa_w8's 2.9 (#1167). */
 GQ_FN void gq_scores(float (&s)[2][4], const gq_u4 (&qa)[4], const gq_u4 (&qb)[4],
                      const gq_u4 (&kr)[2][4])
 {
@@ -227,8 +233,13 @@ GQ_FN void gq_scores(float (&s)[2][4], const gq_u4 (&qa)[4], const gq_u4 (&qb)[4
         for (int jj = 0; jj < 4; jj++) {
 #pragma unroll
             for (int h = 0; h < 2; h++) {
-                gq_mma(s[u], gq_w(qa[jj], 2 * h), gq_w(qb[jj], 2 * h), gq_w(qa[jj], 2 * h + 1),
+                float t[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                gq_mma(t, gq_w(qa[jj], 2 * h), gq_w(qb[jj], 2 * h), gq_w(qa[jj], 2 * h + 1),
                        gq_w(qb[jj], 2 * h + 1), gq_w(kr[u][jj], 2 * h), gq_w(kr[u][jj], 2 * h + 1));
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    s[u][e] += t[e];
+                }
             }
         }
     }
