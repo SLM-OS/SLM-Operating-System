@@ -8,6 +8,7 @@
  */
 
 #include "bpmp.h"
+#include "emc_hold.h"
 #include "platform.h"
 #include "shell.h"
 #include "shell_internal.h"
@@ -40,6 +41,22 @@ int cmd_clocks(int argc, char *argv[])
         shell_printf("  emc set, BPMP chose %llu MHz\r\n",
                      (unsigned long long)(got / 1000000u));
     }
+    /* #1161: a memory clock floor through the bandwidth manager
+     * (MRQ_BWMGR_INT) instead of MRQ_CLK, for a client id (default 2,
+     * CPU cluster 0). */
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "emc-floor") == 0) {
+        uint32_t mhz = 0, client = 2;
+        if (shell_parse_uint(argv[2], &mhz) != 0 ||
+            (argc == 4 && shell_parse_uint(argv[3], &client) != 0)) {
+            shell_puts("Usage: clocks emc-floor <MHz> [bwmgr client]\r\n");
+            return -1;
+        }
+        uint64_t got = 0;
+        int rc = bpmp_emc_floor_khz(client, mhz * 1000u, &got);
+        shell_printf("  bwmgr floor %u MHz for client %u: rc=%d, BPMP reports %llu MHz\r\n",
+                     (unsigned)mhz, (unsigned)client, rc,
+                     (unsigned long long)(got / 1000000u));
+    }
     static const struct {
         uint32_t id;
         const char *name;
@@ -59,6 +76,15 @@ int cmd_clocks(int argc, char *argv[])
                          (unsigned long long)(hz / 1000000u),
                          (unsigned long long)hz);
         }
+    }
+    struct emc_hold_state h;
+    emc_hold_get_status(&h);
+    if (h.target_hz != 0) {
+        shell_printf("  emc hold   target %llu MHz: %u checks, %u drops (first after %s,"
+                     " last after %s), %u restored\r\n",
+                     (unsigned long long)(h.target_hz / 1000000u), (unsigned)h.checks,
+                     (unsigned)h.drops, h.first_drop[0] ? h.first_drop : "-",
+                     h.last_drop[0] ? h.last_drop : "-", (unsigned)h.reasserts);
     }
 #endif
     return 0;

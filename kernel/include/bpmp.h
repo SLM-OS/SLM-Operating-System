@@ -183,4 +183,16 @@ struct bpmp_thermal_request {
  */
 int bpmp_thermal_get_temp(uint32_t zone, int32_t *temp_mc);
 
+/*
+ * Post-request hook (#1161). When set, every public wrapper above that
+ * sends a request (clk enable/disable/set_rate, bwmgr floor, reset,
+ * uphy, pg, thermal) calls hook(op, id, rc) after the round-trip, outside
+ * the MRQ lock. bpmp_clk_get_rate and bpmp_is_available do not call it.
+ * The hook may itself call BPMP wrappers; nested calls do not re-enter
+ * it. NULL removes it. Boot-time diagnostic: set it only while a single
+ * CPU runs.
+ */
+typedef void (*bpmp_post_op_hook_t)(const char *op, uint32_t id, int rc);
+void bpmp_set_post_op_hook(bpmp_post_op_hook_t hook);
+
 #endif /* BPMP_H */

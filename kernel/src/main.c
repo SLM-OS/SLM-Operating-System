@@ -30,6 +30,7 @@
 #endif
 #include "bpmp.h"
 #include "tegra_fan.h"
+#include "emc_hold.h"
 #include "vfs.h"
 #include "component.h"
 #include "blkdev.h"
@@ -703,10 +704,16 @@ void kernel_main(void *dtb)
             bool responding = bpmp_is_available();
             INFO("BPMP: %s", responding ? "MRQ_PING round-trip OK"
                                          : "no PING response (firmware busy?)");
+            /* UEFI leaves EMC at 204 MHz (#1161): ask for 3199 MHz now
+             * and check it after every boot step and BPMP request. */
+            if (boot_source_is_uefi()) {
+                emc_hold_boot_begin();
+            }
             /* Nothing else drives the fan on either boot path (#1105):
              * UEFI leaves PWM3 unclocked, Linux disables it on the way
              * out of kexec. The control task starts with the others. */
             (void)tegra_fan_init();
+            emc_hold_boot_step("tegra_fan_init");
         }
     }
     {
@@ -724,8 +731,10 @@ void kernel_main(void *dtb)
         WARN("GPU init failed (code=%d)", gpu_ret);
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+    emc_hold_boot_step("gpu_init");
     if (gpu_ret == GPU_OK) {
         jetson_gsp_platform_install();
+        emc_hold_boot_step("gsp_platform_install");
         /* GA10B does not use the discrete-Ampere GSP-RM stack that
          * gsp_init() drives (#579). After kexec, compute inherits
          * Linux's GPU state lazily (slm_ffi.c ensure_bringup). After a
@@ -734,7 +743,14 @@ void kernel_main(void *dtb)
          * golden context and an SLM-OS-created channel. A failure
          * leaves inference on the CPU. */
         if (boot_source_is_uefi()) {
-            int cold_rc = ga10b_cold_run(GA10B_COLD_STEP_COUNT - 1);
+            /* One step at a time so the EMC rate is checked after each
+             * (#1161); ga10b_cold_run resumes after the last step done. */
+            int cold_rc = 0;
+            for (int s = 1; s < (int)GA10B_COLD_STEP_COUNT; s++) {
+                cold_rc = ga10b_cold_run((enum ga10b_cold_step)s);
+                emc_hold_boot_step(ga10b_cold_step_name((enum ga10b_cold_step)s));
+                if (cold_rc != 0) break;
+            }
             if (cold_rc == GA10B_COLD_ERR_BUSY) {
                 WARN("GA10B cold bring-up already running elsewhere");
             } else if (cold_rc == -(int)GA10B_COLD_MNIST) {
@@ -787,6 +803,7 @@ void kernel_main(void *dtb)
         extern int pcie_init(void);
         int pcie_rc = pcie_init();
         (void)pcie_rc;  /* logged by pcie_init itself */
+        emc_hold_boot_step("pcie_init");
     }
 
     /* Install the Hailo-8 platform shim. On RASPI5 this finds the
@@ -796,6 +813,7 @@ void kernel_main(void *dtb)
     {
         extern int hailo_platform_install(void);
         (void)hailo_platform_install();
+        emc_hold_boot_step("hailo_platform_install");
     }
 #endif
 
@@ -825,6 +843,7 @@ void kernel_main(void *dtb)
          */
         extern int cdc_ecm_probe_and_register(void);
         (void)cdc_ecm_probe_and_register();
+        emc_hold_boot_step("cdc_ecm_probe");
     }
 #endif
 #endif
@@ -841,6 +860,8 @@ void kernel_main(void *dtb)
     {
         extern int xhci_init(void);
         (void)xhci_init();
+        emc_hold_boot_step("xhci_init");
+        emc_hold_boot_end();
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         /*
          * UEFI leaves EMC at 204 MHz and nothing like Linux's governors

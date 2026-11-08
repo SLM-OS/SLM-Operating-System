@@ -732,6 +732,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
     kernel/drivers/tegra_cpufreq.c
     kernel/drivers/tegra_fan.c
+    kernel/drivers/emc_hold.c
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
     # BPMP IPC stack — Jetson only.
