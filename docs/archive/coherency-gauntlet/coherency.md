@@ -36,8 +36,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | Jetson litmus PASS; Pi 5 boot silent, diagnosing | 0 |
-| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage waiting for boards | 0 |
+| C1 | Linux reference bar | Jetson PASS (47ab164a, 44809f4b); Pi 5 retry with SDWire settle | 0 |
+| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); Jetson hardware stage running | 0 |
 | C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
@@ -123,3 +123,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
   S3_0_C15_C3_0 the orchestrator first gave (that is CLUSTERCFR_EL1).
 
 ### Lab notes
+
+- 23:18 UTC: both claims renewed to 05:18 UTC.
+- pi-5-1 needs about 20 s powered off after an SDWire switch to DUT before
+  power-on, or it does not boot at all. Deploy rule for this run:
+  sdwire_update reboot=false, then power_cycle delay=20.
