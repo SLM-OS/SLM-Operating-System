@@ -6169,6 +6169,11 @@ static struct {
     /* slm_get_time_ns of the first correct result in epoch e (index e;
      * 0 is the boot epoch), 0 for none yet. */
     uint64_t first_ok_ns[RACE_EPOCHS + 1u][RACE_N];
+    /* The first wrong result per consumer (#1186): when, in which epoch
+     * and mode, and for oplib which output and the value read and wanted. */
+    uint64_t wrong_ns[RACE_N];
+    uint32_t wrong_epoch[RACE_N], wrong_mode[RACE_N], wrong_round[RACE_N];
+    uint32_t wrong_idx, wrong_got, wrong_want;
 } g_race;
 
 extern const uint8_t mnist_input_synth_start[];
@@ -6240,7 +6245,14 @@ static int race_one(int c)
         for (uint32_t i = 0; i < RACE_RMS_N; i++) {
             uint16_t want = (uint16_t)(rg[i] | (rx[i] & 0x8000u));
             uint16_t d = ro[i] > want ? (uint16_t)(ro[i] - want) : (uint16_t)(want - ro[i]);
-            if (d > 1u) return 0;
+            if (d > 1u) {
+                if (g_race.wrong[RACE_OPLIB] == 0u) {
+                    g_race.wrong_idx = i;
+                    g_race.wrong_got = ro[i];
+                    g_race.wrong_want = want;
+                }
+                return 0;
+            }
         }
         return 1;
     }
@@ -6267,6 +6279,12 @@ static void nvgpu_cold_race_task(void *arg)
                     g_race.first_ok_ns[e1][c] = slm_get_time_ns();
                 }
             } else if (r == 0) {
+                if (g_race.wrong[c] == 0u) {
+                    g_race.wrong_ns[c] = slm_get_time_ns();
+                    g_race.wrong_epoch[c] = e1;
+                    g_race.wrong_mode[c] = m0;
+                    g_race.wrong_round[c] = g_race.iters;
+                }
                 g_race.wrong[c]++;
             } else if (r == -2 || m0 != 0u || e0 != e1 || slm_gpu_channel_mode() != 0u) {
                 g_race.down[c]++;
@@ -6327,6 +6345,25 @@ static int nvgpu_cold_race_status(void)
                 if (ms > 5000u) late++;
                 shell_printf(" %8llu", (unsigned long long)ms);
             }
+        }
+        shell_puts("\r\n");
+    }
+    for (int c = 0; c < RACE_N; c++) {
+        if (g_race.wrong[c] == 0u) continue;
+        shell_printf("  first wrong %s: round %u, epoch %u, mode %u, %llu ms after boot",
+                     race_names[c], (unsigned)g_race.wrong_round[c],
+                     (unsigned)g_race.wrong_epoch[c], (unsigned)g_race.wrong_mode[c],
+                     (unsigned long long)(g_race.wrong_ns[c] / 1000000u));
+        for (uint32_t i = 0; i < n; i++) {
+            struct slm_gpu_recovery_rec r;
+            if (slm_gpu_recovery_get(i, &r) == 0 && r.rc == 0 && r.epoch == g_race.wrong_epoch[c]) {
+                shell_printf(" (%llu ms after that epoch's timeout line)",
+                             (unsigned long long)((g_race.wrong_ns[c] - r.t_timeout_ns) / 1000000u));
+            }
+        }
+        if (c == RACE_OPLIB) {
+            shell_printf("; out[%u] 0x%04x, want 0x%04x", (unsigned)g_race.wrong_idx,
+                         (unsigned)g_race.wrong_got, (unsigned)g_race.wrong_want);
         }
         shell_puts("\r\n");
     }
