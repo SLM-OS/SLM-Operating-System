@@ -1348,10 +1348,20 @@ static void jb_prepare_clocks(void)
                 (unsigned long long)(set / 1000000u));
 }
 
+/* The full GR / MMU / PBDMA dump is about 270 UART lines (some 2 s at
+ * 115200 baud), all of it before the recovery can start. Once per boot;
+ * after that each recovery's line carries the key registers and
+ * `nvgpu cold recover status` lists them (#1171). */
 static void jb_dump(const char *why)
 {
     (void)why;
-    slm_gpu_prog_dump_fault();
+    static uint32_t dumped;
+    if (__atomic_exchange_n(&dumped, 1u, __ATOMIC_RELAXED) == 0u) {
+        slm_gpu_prog_dump_fault();
+    } else {
+        uart_puts("[slm-prog] (full fault state printed at the first timeout of this boot; "
+                  "`nvgpu cold recover status` lists each recovery's registers)\n");
+    }
 }
 
 /* The channel recovery in slm_ffi.c (#1171), which ends the flight. */

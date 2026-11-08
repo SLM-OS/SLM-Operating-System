@@ -727,7 +727,8 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
 static void fk_finished(void)
 {
     g_fk.finishes++;
-    g_fk.in_flight--;
+    /* As the real flight flag: a recovery that failed already ended it. */
+    if (g_fk.in_flight > 0) g_fk.in_flight--;
 }
 
 static int fk_evict(void)

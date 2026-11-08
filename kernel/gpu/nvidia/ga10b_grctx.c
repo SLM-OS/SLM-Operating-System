@@ -1028,7 +1028,9 @@ int ga10b_grctx_chan_reset(const struct ga10b_gpu_ops *ops, const struct ga10b_g
         return GA10B_GRCTX_ERR_ARG;
     }
     if (!g->golden_ready || c->gr_ctx.size < g->golden_size) return GA10B_GRCTX_ERR_STATE;
-    /* The subcontext header too: FECS writes it when it saves. */
+    /* The subcontext header too, from zero as ga10b_dma_alloc left it:
+     * FECS writes it when it saves. */
+    memset(c->header.cpu, 0, c->header.size);
     ga10b_ctx_header_load(c->header.cpu, c->global.va[GA10B_GR_BUF_PRIV_ACCESS_MAP],
                           c->patch_va, c->gr_ctx_va);
     return chan_load_golden(ops, g, preempt, c);

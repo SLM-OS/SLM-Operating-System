@@ -253,9 +253,10 @@ static void test_chan_reset_restores_the_allocated_context(void)
     memcpy(hdr0, hdr, sizeof(hdr));
     uint32_t count0 = c.patch_count;
 
-    /* What a step timeout leaves: a saved context, a longer patch list. */
+    /* What a step timeout leaves: a saved context, other patch entries
+     * after the global commits, a longer patch list, another header. */
     memset(img, 0xA5, sizeof(img));
-    memset(patch + (size_t)c.patch_base * 8u, 0x5A, 256u);
+    memset(patch + (size_t)c.patch_base * 8u, 0x5A, (size_t)(count0 - c.patch_base) * 8u);
     memset(hdr, 0x3C, sizeof(hdr));
     c.patch_count = count0 + 40u;
 
@@ -263,7 +264,8 @@ static void test_chan_reset_restores_the_allocated_context(void)
                           ga10b_grctx_chan_reset(&ops, &g, GA10B_PREEMPT_CILP, &c));
     TEST_ASSERT_EQUAL_UINT32(count0, c.patch_count);
     TEST_ASSERT_EQUAL_MEMORY(img0, img, sizeof(img));
-    TEST_ASSERT_EQUAL_MEMORY(patch0, patch, sizeof(patch));
+    /* FECS reads the first patch_count entries (8 bytes each). */
+    TEST_ASSERT_EQUAL_MEMORY(patch0, patch, (size_t)count0 * 8u);
     TEST_ASSERT_EQUAL_MEMORY(hdr0, hdr, sizeof(hdr));
 
     /* No golden image, or a buffer too small for it: refused. */
