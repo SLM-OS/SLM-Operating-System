@@ -17,6 +17,8 @@ pub mod kv_cache;
 pub mod numerics_probe;
 pub mod registry;
 pub mod sampler;
+#[cfg(test)]
+mod sampler_bench;
 pub mod session;
 pub mod telemetry;
 pub mod tokenizer;

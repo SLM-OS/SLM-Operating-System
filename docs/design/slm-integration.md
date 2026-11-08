@@ -141,7 +141,7 @@ like a `model_idx` today.
 | Transformer ops (CPU) | `runtime/src/inference/ops_transformer.rs` | New. RMSNorm, RoPE, GQA, SwiGLU, Q4 dot. NEON-accelerated where it matters. ~1200 LOC. |
 | Q4 quant kernels | `runtime/src/inference/quant.rs` | **Vendored, audited subset of GGML's `ggml-quants.c`** — specifically `dequantize_row_q4_K`, `vec_dot_q4_K_q8_K`, and `quantize_row_q8_K`. Re-license-compatible (MIT). ~800 LOC, no libc, no malloc. |
 | KV cache | `runtime/src/slm/kv_cache.rs` | New. FP16 K and V tensors per layer in a single workspace allocation; ring-buffer indexing for sliding-window prefills. ~250 LOC. |
-| Sampler | `runtime/src/slm/sampler.rs` | New. Greedy + temperature + top-k + top-p. Deterministic seed for reproducibility. ~150 LOC. |
+| Sampler | `runtime/src/slm/sampler.rs` | New. Greedy + temperature + top-k + top-p. Deterministic seed for reproducibility. Per token: one softmax pass and no heap allocation after the first token (#522); top-k finds its k tokens in one sweep of the vocabulary and the later steps run on that list. |
 | Session state machine | `runtime/src/slm/session.rs` | New. Owns model handle, tokenizer, KV cache, sampler, telemetry. ~400 LOC. |
 | Decode loop | `runtime/src/slm/decoder.rs` | New. Prefill (chunked) → autoregressive decode → token callback. Cooperative `yield()` between tokens for scheduler fairness. ~300 LOC. |
 | GPU backend hooks | extends `runtime/src/inference/gpu.rs` | Reuses Phase-5 framework. `select_backend()` extended with model-size + layer-type heuristics. |
