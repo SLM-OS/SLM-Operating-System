@@ -311,8 +311,10 @@ static void test_periodic_memory_payload_format(void)
 
 static void test_periodic_payload_capped_at_max_msg_len(void)
 {
-    /* Every published payload must be < MAX_MSG_LEN=60 (msg_router cap)
-     * regardless of how many CPUs the publish_cpu_util loop iterated.
+    /* Every published payload must stay under the 60-byte telemetry
+     * payload budget (admin_telemetry.c; the msg_router itself allows
+     * MAX_MSG_LEN = 512) regardless of how many CPUs the publish_cpu_util
+     * loop iterated.
      * The append_kv_uint helper enforces this internally; verify the
      * post-publish length is in spec for every topic. */
     admin_telemetry_periodic_reset_for_tests();
@@ -322,13 +324,13 @@ static void test_periodic_payload_capped_at_max_msg_len(void)
     char buf[64] = {0};
     admin_telemetry_get_last_cpu_payload_for_tests(buf, sizeof(buf));
     TEST_ASSERT_MESSAGE(strlen(buf) < 60,
-        "tel.cpu payload must fit MAX_MSG_LEN=60");
+        "tel.cpu payload must fit the 60-byte telemetry budget");
     admin_telemetry_get_last_steal_payload_for_tests(buf, sizeof(buf));
     TEST_ASSERT_MESSAGE(strlen(buf) < 60,
-        "tel.stl payload must fit MAX_MSG_LEN=60");
+        "tel.stl payload must fit the 60-byte telemetry budget");
     admin_telemetry_get_last_memory_payload_for_tests(buf, sizeof(buf));
     TEST_ASSERT_MESSAGE(strlen(buf) < 60,
-        "tel.mem payload must fit MAX_MSG_LEN=60");
+        "tel.mem payload must fit the 60-byte telemetry budget");
 }
 
 static void test_periodic_payload_empty_before_publish(void)
@@ -474,8 +476,9 @@ static void test_ai_decision_policy_ids(void)
 
 static void test_ai_decision_payload_capped_at_max_msg_len(void)
 {
-    /* Worst case: largest plausible values in every field still fit
-     * MAX_MSG_LEN=60. Pin so future schema additions are caught. */
+    /* Worst case: largest plausible values in every field still fit the
+     * 60-byte telemetry payload budget (the router allows 512). Pin so
+     * future schema additions are caught. */
     admin_telemetry_ai_decision_reset_for_tests();
     admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_HAILO,
                                        255u, 255u, 1u,
@@ -484,7 +487,7 @@ static void test_ai_decision_payload_capped_at_max_msg_len(void)
     char payload[64];
     admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
     TEST_ASSERT_MESSAGE(strlen(payload) < 60,
-        "tel.aix worst-case payload must fit MAX_MSG_LEN=60");
+        "tel.aix worst-case payload must fit the 60-byte telemetry budget");
 }
 
 static void test_ai_decision_topic_fits_msg_router(void)

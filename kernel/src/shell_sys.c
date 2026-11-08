@@ -5155,12 +5155,14 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_ce.h"
 #include "../gpu/nvidia/ga10b_cold.h"
 #include "../gpu/nvidia/ga10b_cold_pipelines.h"
+#include "../gpu/nvidia/ga10b_mnist_pipeline.h"
 #include "boot_source.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
 #include "oplib_probe.h"
 #include "oplib_dispatch.h"
 #include "oplib_cold.h"
+#include "slm_prog.h"           /* slm_prog_vm_lock_stats (#1173) */
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
  * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
  * `cache.h` here — gpu.h declares cache_clean_range as
@@ -6131,55 +6133,544 @@ static int nvgpu_cold_check(void)
     return fails == 0 ? 0 : -1;
 }
 
-/* `nvgpu cold race <n>` (#475): a task runs both consumer pipelines n times
- * while a GPU program may be in flight, checks each result, and reports once.
- * For testing that a consumer and a program interleave on the channel.
+/* `nvgpu cold race <n>` (#475, #1171): a task runs every GPU consumer on
+ * the cold channel n times while GPU programs run, steps time out and the
+ * channel recovers, and checks each result:
+ *   sched     scheduler MLP on the helper's synthetic state: argmax and
+ *             every logit within 1e-3 of the CPU reference;
+ *   eviction  Q-net row 0 within 1e-4 of the CPU reference;
+ *   mnist     the embedded synthetic image: the sentinel logit within 1e-3
+ *             of the CPU reference, and all 10 logits bit-identical to
+ *             the run's first result;
+ *   oplib     the operator library's per-op RMSNorm (slm_runtime_dispatch_
+ *             rmsnorm_simt): x = +-2, gamma in {0.5, 1, 1.5, 2}, so the
+ *             exact output is +-gamma (1 FP16 ulp allowed).
+ * A call refused because the channel was down (a program past its
+ * deadline, a recovery) counts as `down`, not as an error. For each
+ * channel epoch the first correct result of each consumer is kept;
+ * `nvgpu cold race status` prints, per recovery, how long after the
+ * failure each consumer was correct again. `nvgpu cold race stop` ends it.
  *
  * One at a time: the buffers below are shared, so two runs at once would
  * report each other's results as wrong. Set from the command until the task
- * reports; a task killed from outside leaves it set until reboot. */
+ * ends; a task killed from outside leaves it set until reboot. */
 static uint32_t g_race_running;
+static uint32_t g_race_stop;
+
+enum { RACE_SCHED, RACE_EVICT, RACE_MNIST, RACE_OPLIB, RACE_N };
+static const char *const race_names[RACE_N] = { "sched", "eviction", "mnist", "oplib" };
+#define RACE_EPOCHS SLM_GPU_RECOVERY_LOG
+#define RACE_RMS_N  256u
+
+static struct {
+    uint32_t ok[RACE_N], wrong[RACE_N], down[RACE_N], err[RACE_N];
+    uint32_t iters;
+    uint64_t worst_ns;
+    /* slm_get_time_ns of the first correct result in epoch e (index e;
+     * 0 is the boot epoch), 0 for none yet. */
+    uint64_t first_ok_ns[RACE_EPOCHS + 1u][RACE_N];
+    /* The first wrong result per consumer (#1186): when, in which epoch
+     * and mode, and for oplib which output and the value read and wanted. */
+    uint64_t wrong_ns[RACE_N];
+    uint32_t wrong_epoch[RACE_N], wrong_mode[RACE_N], wrong_round[RACE_N];
+    uint32_t wrong_first_in_epoch[RACE_N];   /* its first call in that epoch */
+    uint32_t last_epoch[RACE_N];             /* epoch of the consumer's last call */
+    /* RMSNorm detail of the first wrong result: up to 4 wrong outputs,
+     * how many of 256 were wrong or zero, what the scratch slots held
+     * right after (x, gamma intact? output slot equal to what was
+     * copied?) and whether an immediate re-run was correct. */
+    uint32_t rms_nwrong, rms_nzero, rms_nshow;
+    uint16_t rms_idx[4], rms_got[4], rms_want[4];
+    int32_t rms_x_ok, rms_g_ok, rms_out_same, rms_rerun_ok;
+    /* Over all wrong RMSNorm results. */
+    uint32_t rms_bad_inputs, rms_out_differs, rms_rerun_good;
+} g_race;
+
+extern const uint8_t mnist_input_synth_start[];
+extern const uint8_t mnist_input_synth_end[];
+
+static uint32_t race_mnist_base[10];
+static bool race_mnist_have_base;
+#if defined(SLMOS_AI_WEIGHTS_REAL)
+static uint32_t race_sched_base[GA10B_CP_SCHED_ACTIONS];
+#endif
+static bool race_sched_have_base;
+
+/* One consumer call, checked. 1 correct, 0 wrong, -1 failed, -2 down. */
+static int race_one(int c)
+{
+    static uint32_t sched_out[GA10B_CP_SCHED_ACTIONS];
+    static uint32_t ev_in[GA10B_CP_EVICT_BATCH * GA10B_CP_EVICT_FEATURES];
+    static uint32_t ev_out[GA10B_CP_EVICT_BATCH];
+    static uint32_t mn_out[10];
+    static uint16_t rx[RACE_RMS_N], rg[RACE_RMS_N], ro[RACE_RMS_N];
+    int rc;
+    switch (c) {
+    case RACE_SCHED:
+        rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP, ga10b_cp_sched_input_synth,
+                                    sizeof(ga10b_cp_sched_input_synth), sched_out,
+                                    sizeof(sched_out));
+        if (rc != 0) return rc == SLM_GPU_ERR_CHANNEL_DOWN ? -2 : -1;
+#if defined(SLMOS_AI_WEIGHTS_REAL)
+        /* Real weights have no stored reference: every result must
+         * equal the run's first one, bit for bit (as MNIST below). */
+        if (!race_sched_have_base) {
+            memcpy(race_sched_base, sched_out, sizeof(sched_out));
+            race_sched_have_base = true;
+            return 1;
+        }
+        return memcmp(race_sched_base, sched_out, sizeof(sched_out)) == 0;
+#else
+        return ga10b_cp_count_mismatch(sched_out, ga10b_cp_sched_expected_logits,
+                                       GA10B_CP_SCHED_ACTIONS, 1000u) == 0u &&
+               ga10b_cp_argmax(sched_out, GA10B_CP_SCHED_ACTIONS) ==
+                   GA10B_CP_SCHED_EXPECTED_ARGMAX;
+#endif
+    case RACE_EVICT: {
+        memset(ev_in, 0, sizeof(ev_in));
+        memcpy(ev_in, ga10b_cp_evict_input_synth, sizeof(ga10b_cp_evict_input_synth));
+        rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_EVICTION_QNET, ev_in, sizeof(ev_in),
+                                    ev_out, sizeof(ev_out));
+        if (rc != 0) return rc == SLM_GPU_ERR_CHANNEL_DOWN ? -2 : -1;
+        const uint32_t want = GA10B_CP_EVICT_EXPECTED_SCORE;
+        return ga10b_cp_count_mismatch(ev_out, &want, 1, 100u) == 0u;
+    }
+    case RACE_MNIST: {
+        if ((size_t)(mnist_input_synth_end - mnist_input_synth_start) != GA10B_MNIST_INPUT_BYTES) {
+            return -1;
+        }
+        rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_MNIST, mnist_input_synth_start,
+                                    GA10B_MNIST_INPUT_BYTES, mn_out, sizeof(mn_out));
+        if (rc != 0) return rc == SLM_GPU_ERR_CHANNEL_DOWN ? -2 : -1;
+        uint32_t cell = ga10b_mnist_ops[GA10B_MNIST_N_OPS - 1u].sentinel_cell;
+        const uint32_t want = GA10B_MNIST_OP7_SENTINEL_BITS;
+        if (cell >= 10u || ga10b_cp_count_mismatch(&mn_out[cell], &want, 1, 1000u) != 0u) {
+            return 0;
+        }
+        if (!race_mnist_have_base) {
+            memcpy(race_mnist_base, mn_out, sizeof(mn_out));
+            race_mnist_have_base = true;
+            return 1;
+        }
+        return memcmp(race_mnist_base, mn_out, sizeof(mn_out)) == 0;
+    }
+    case RACE_OPLIB: {
+        static const uint16_t gam[4] = { 0x3800u, 0x3C00u, 0x3E00u, 0x4000u };
+        static uint16_t sx[RACE_RMS_N], sg[RACE_RMS_N], so[RACE_RMS_N];
+        for (uint32_t i = 0; i < RACE_RMS_N; i++) {
+            rx[i] = (i & 1u) ? 0xC000u : 0x4000u;      /* -2, +2: rms 2 */
+            rg[i] = gam[(i >> 1) & 3u];
+            ro[i] = 0u;
+        }
+        rc = slm_runtime_dispatch_rmsnorm_simt(rx, rg, ro, 1u, RACE_RMS_N, 0x358637BDu);
+        if (rc != 0) return rc == SLM_GPU_ERR_CHANNEL_DOWN ? -2 : -1;
+        uint32_t nwrong = 0, nzero = 0, nshow = 0;
+        bool first = g_race.wrong[RACE_OPLIB] == 0u;
+        for (uint32_t i = 0; i < RACE_RMS_N; i++) {
+            uint16_t want = (uint16_t)(rg[i] | (rx[i] & 0x8000u));
+            uint16_t d = ro[i] > want ? (uint16_t)(ro[i] - want) : (uint16_t)(want - ro[i]);
+            if (ro[i] == 0u) nzero++;
+            if (d <= 1u) continue;
+            if (first && nshow < 4u) {
+                g_race.rms_idx[nshow] = (uint16_t)i;
+                g_race.rms_got[nshow] = ro[i];
+                g_race.rms_want[nshow] = want;
+                nshow++;
+            }
+            nwrong++;
+        }
+        if (nwrong == 0u) return 1;
+        /* Wrong: look at the slots as the GPU left them, then run again. */
+        int x_ok = -1, g_ok = -1, out_same = -1;
+        if (slm_runtime_oplib_scratch_read(0u, sx, sizeof(sx)) == 0) x_ok = memcmp(sx, rx, sizeof(sx)) == 0;
+        if (slm_runtime_oplib_scratch_read(1u, sg, sizeof(sg)) == 0) g_ok = memcmp(sg, rg, sizeof(sg)) == 0;
+        if (slm_runtime_oplib_scratch_read(2u, so, sizeof(so)) == 0) out_same = memcmp(so, ro, sizeof(so)) == 0;
+        int rerun_ok = -1;
+        if (slm_runtime_dispatch_rmsnorm_simt(rx, rg, so, 1u, RACE_RMS_N, 0x358637BDu) == 0) {
+            rerun_ok = 1;
+            for (uint32_t i = 0; i < RACE_RMS_N; i++) {
+                uint16_t want = (uint16_t)(rg[i] | (rx[i] & 0x8000u));
+                uint16_t d = so[i] > want ? (uint16_t)(so[i] - want) : (uint16_t)(want - so[i]);
+                if (d > 1u) rerun_ok = 0;
+            }
+        }
+        if (x_ok == 0 || g_ok == 0) g_race.rms_bad_inputs++;
+        if (out_same == 0) g_race.rms_out_differs++;
+        if (rerun_ok == 1) g_race.rms_rerun_good++;
+        if (first) {
+            g_race.rms_nwrong = nwrong;
+            g_race.rms_nzero = nzero;
+            g_race.rms_nshow = nshow;
+            g_race.rms_x_ok = x_ok;
+            g_race.rms_g_ok = g_ok;
+            g_race.rms_out_same = out_same;
+            g_race.rms_rerun_ok = rerun_ok;
+        }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
 
 static void nvgpu_cold_race_task(void *arg)
 {
     const uint32_t n = (uint32_t)(uintptr_t)arg;
-    static uint32_t sched_out[GA10B_CP_SCHED_ACTIONS];
-    static uint32_t ev_in[GA10B_CP_EVICT_BATCH * GA10B_CP_EVICT_FEATURES];
-    static uint32_t ev_out[GA10B_CP_EVICT_BATCH];
-    uint32_t ok = 0, bad = 0, err = 0;
-    memset(ev_in, 0, sizeof(ev_in));
-    memcpy(ev_in, ga10b_cp_evict_input_synth, sizeof(ga10b_cp_evict_input_synth));
-    uint64_t worst = 0;
-    for (uint32_t i = 0; i < n; i++) {
+    for (uint32_t i = 0; i < n && !__atomic_load_n(&g_race_stop, __ATOMIC_ACQUIRE); i++) {
         uint64_t t0 = slm_get_time_ns();
-        int rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP, ga10b_cp_sched_input_synth,
-                                        sizeof(ga10b_cp_sched_input_synth), sched_out,
-                                        sizeof(sched_out));
-        if (rc != 0) {
-            err++;
-        } else if (ga10b_cp_count_mismatch(sched_out, ga10b_cp_sched_expected_logits,
-                                           GA10B_CP_SCHED_ACTIONS, 1000u) == 0u) {
-            ok++;
-        } else {
-            bad++;
+        for (int c = 0; c < RACE_N; c++) {
+            uint32_t e0 = slm_gpu_channel_epoch();
+            uint32_t m0 = slm_gpu_channel_mode();
+            int r = race_one(c);
+            uint32_t e1 = slm_gpu_channel_epoch();
+            bool first_in_epoch = false;
+            if (r == 0 || r == 1) {
+                first_in_epoch = e1 != g_race.last_epoch[c];
+                g_race.last_epoch[c] = e1;
+            }
+            if (r == 1) {
+                g_race.ok[c]++;
+                /* Correct and wholly inside one epoch: the first one after
+                 * that epoch's recovery. */
+                if (e0 == e1 && m0 == 0u && e1 <= RACE_EPOCHS && g_race.first_ok_ns[e1][c] == 0u) {
+                    g_race.first_ok_ns[e1][c] = slm_get_time_ns();
+                }
+            } else if (r == 0) {
+                if (g_race.wrong[c] == 0u) {
+                    g_race.wrong_ns[c] = slm_get_time_ns();
+                    g_race.wrong_epoch[c] = e1;
+                    g_race.wrong_mode[c] = m0;
+                    g_race.wrong_round[c] = g_race.iters;
+                    g_race.wrong_first_in_epoch[c] = first_in_epoch;
+                }
+                g_race.wrong[c]++;
+            } else if (r == -2 || m0 != 0u || e0 != e1 || slm_gpu_channel_mode() != 0u) {
+                g_race.down[c]++;
+            } else {
+                g_race.err[c]++;
+            }
         }
-        rc = slm_gpu_run_with_input(GA10B_PIPELINE_KIND_EVICTION_QNET, ev_in, sizeof(ev_in),
-                                    ev_out, sizeof(ev_out));
-        const uint32_t want = GA10B_CP_EVICT_EXPECTED_SCORE;
-        if (rc != 0) {
-            err++;
-        } else if (ga10b_cp_count_mismatch(ev_out, &want, 1, 100u) == 0u) {
-            ok++;
-        } else {
-            bad++;
-        }
+        g_race.iters++;
         uint64_t dt = slm_get_time_ns() - t0;
-        if (dt > worst) worst = dt;
+        if (dt > g_race.worst_ns) g_race.worst_ns = dt;
         task_sleep_ms(2);
     }
-    uart_printf("[race] consumers: %u ok, %u wrong, %u errors, slowest pair %llu us\n",
-                (unsigned)ok, (unsigned)bad, (unsigned)err, (unsigned long long)(worst / 1000u));
+    uart_printf("[race] done after %u rounds: `nvgpu cold race status` for the results\n",
+                (unsigned)g_race.iters);
     __atomic_store_n(&g_race_running, 0u, __ATOMIC_RELEASE);
+}
+
+/* The totals, then one line per recovery: per consumer, ms from the
+ * failure (the timeout line) to its first correct result afterwards.
+ * PASS when every consumer was correct within 5000 ms after every
+ * recovery that brought the channel back. */
+static int nvgpu_cold_race_status(void)
+{
+    shell_printf("race: %s, %u rounds, slowest round %llu us, channel %s epoch %u\r\n",
+                 __atomic_load_n(&g_race_running, __ATOMIC_ACQUIRE) ? "running" : "idle",
+                 (unsigned)g_race.iters, (unsigned long long)(g_race.worst_ns / 1000u),
+                 slm_gpu_channel_mode() == 0u ? "up" :
+                 slm_gpu_channel_mode() == 1u ? "recovering" : "DEAD",
+                 (unsigned)slm_gpu_channel_epoch());
+    uint32_t wrong = 0, err = 0;
+    for (int c = 0; c < RACE_N; c++) {
+        shell_printf("  %-8s ok %u wrong %u down %u errors %u\r\n", race_names[c],
+                     (unsigned)g_race.ok[c], (unsigned)g_race.wrong[c],
+                     (unsigned)g_race.down[c], (unsigned)g_race.err[c]);
+        wrong += g_race.wrong[c];
+        err += g_race.err[c];
+    }
+    uint32_t n = slm_gpu_recovery_count();
+    uint32_t late = 0, missing = 0, recovered = 0;
+    shell_puts("  rec epoch why lvl rc  recover_ms | first correct after the failure, ms: "
+               "sched eviction mnist oplib\r\n");
+    for (uint32_t i = 0; i < n; i++) {
+        struct slm_gpu_recovery_rec r;
+        if (slm_gpu_recovery_get(i, &r) != 0) continue;
+        shell_printf("  %3u %5u %3u %3d %3d %10llu |", (unsigned)i, (unsigned)r.epoch,
+                     (unsigned)r.why, (int)r.level, (int)r.rc,
+                     (unsigned long long)((r.t_end_ns - r.t_begin_ns) / 1000000u));
+        if (r.rc == 0) recovered++;
+        for (int c = 0; c < RACE_N; c++) {
+            uint64_t f = (r.rc == 0 && r.epoch <= RACE_EPOCHS) ? g_race.first_ok_ns[r.epoch][c] : 0u;
+            if (r.rc != 0) {
+                shell_puts("        -");
+            } else if (f == 0u) {
+                shell_puts("     none");
+                missing++;
+            } else {
+                uint64_t ms = (f - r.t_timeout_ns) / 1000000u;
+                if (ms > 5000u) late++;
+                shell_printf(" %8llu", (unsigned long long)ms);
+            }
+        }
+        shell_puts("\r\n");
+    }
+    for (int c = 0; c < RACE_N; c++) {
+        if (g_race.wrong[c] == 0u) continue;
+        shell_printf("  first wrong %s: round %u, epoch %u, mode %u, %llu ms after boot",
+                     race_names[c], (unsigned)g_race.wrong_round[c],
+                     (unsigned)g_race.wrong_epoch[c], (unsigned)g_race.wrong_mode[c],
+                     (unsigned long long)(g_race.wrong_ns[c] / 1000000u));
+        for (uint32_t i = 0; i < n; i++) {
+            struct slm_gpu_recovery_rec r;
+            if (slm_gpu_recovery_get(i, &r) == 0 && r.rc == 0 && r.epoch == g_race.wrong_epoch[c]) {
+                shell_printf(" (%llu ms after that epoch's timeout line)",
+                             (unsigned long long)((g_race.wrong_ns[c] - r.t_timeout_ns) / 1000000u));
+            }
+        }
+        shell_printf("; %s call of this consumer in the epoch",
+                     g_race.wrong_first_in_epoch[c] ? "first" : "not the first");
+        if (c == RACE_OPLIB) {
+            shell_printf("\r\n    %u of %u outputs wrong, %u zero;", (unsigned)g_race.rms_nwrong,
+                         (unsigned)RACE_RMS_N, (unsigned)g_race.rms_nzero);
+            for (uint32_t k = 0; k < g_race.rms_nshow; k++) {
+                shell_printf(" out[%u] 0x%04x want 0x%04x", (unsigned)g_race.rms_idx[k],
+                             (unsigned)g_race.rms_got[k], (unsigned)g_race.rms_want[k]);
+            }
+            shell_printf("\r\n    scratch after: x %s, gamma %s, output slot %s; re-run %s",
+                         g_race.rms_x_ok < 0 ? "unread" : g_race.rms_x_ok ? "intact" : "CHANGED",
+                         g_race.rms_g_ok < 0 ? "unread" : g_race.rms_g_ok ? "intact" : "CHANGED",
+                         g_race.rms_out_same < 0 ? "unread" :
+                         g_race.rms_out_same ? "same as copied" : "DIFFERS from copied",
+                         g_race.rms_rerun_ok < 0 ? "not run" : g_race.rms_rerun_ok ? "correct" : "WRONG");
+            shell_printf("\r\n    all wrong RMSNorm results: %u with changed inputs, %u with the output "
+                         "slot differing, %u correct on re-run",
+                         (unsigned)g_race.rms_bad_inputs, (unsigned)g_race.rms_out_differs,
+                         (unsigned)g_race.rms_rerun_good);
+        }
+        shell_puts("\r\n");
+    }
+    bool pass = wrong == 0u && err == 0u && late == 0u && missing == 0u;
+    shell_printf("race: %s (%u recoveries, %u brought the channel back; %u results wrong, "
+                 "%u errors, %u consumer results later than 5000 ms, %u never correct)\r\n",
+                 pass ? "PASS" : "FAIL", (unsigned)n, (unsigned)recovered, (unsigned)wrong,
+                 (unsigned)err, (unsigned)late, (unsigned)missing);
+    return pass ? 0 : -1;
+}
+
+/* `nvgpu cold recover [l1|l2|status|opts <n>]` (#1171): recover the
+ * channel by hand (l1: channel reset only; l2: straight to the GR engine
+ * reset), set the channel-reset options, or list the recoveries so far
+ * with the state each one found. Holds slm_prog's lock so no program step
+ * runs meanwhile. */
+static int nvgpu_cold_recover(int argc, char *argv[])
+{
+    if (argc >= 4 && strcmp(argv[3], "status") == 0) {
+        uint32_t n = slm_gpu_recovery_count();
+        shell_printf("recoveries: %u, channel %s, epoch %u\r\n", (unsigned)n,
+                     slm_gpu_channel_mode() == 0u ? "up" :
+                     slm_gpu_channel_mode() == 1u ? "recovering" : "DEAD",
+                     (unsigned)slm_gpu_channel_epoch());
+        for (uint32_t i = 0; i < n; i++) {
+            struct slm_gpu_recovery_rec r;
+            if (slm_gpu_recovery_get(i, &r) != 0) continue;
+            shell_printf("  %u: epoch %u why %u level %d rc %d (L1 %d L2 %d) latched %u "
+                         "probe_fail %u, %llu us after the failure, CHRAM 0x%08x->0x%08x "
+                         "eng0 0x%08x pbdma 0x%08x/0x%08x GR 0x%08x intr 0x%08x exc 0x%08x "
+                         "FECS 0x%08x/0x%08x fault 0x%08x/0x%08x @0x%08x\r\n",
+                         (unsigned)i, (unsigned)r.epoch, (unsigned)r.why, (int)r.level,
+                         (int)r.rc, (int)r.l1_rc, (int)r.l2_rc, (unsigned)r.latched,
+                         (unsigned)r.probe_failed,
+                         (unsigned long long)((r.t_end_ns - r.t_timeout_ns) / 1000u),
+                         (unsigned)r.chram, (unsigned)r.chram_after, (unsigned)r.eng_status0,
+                         (unsigned)r.pbdma_status, (unsigned)r.pbdma_intr0,
+                         (unsigned)r.gr_status, (unsigned)r.gr_intr, (unsigned)r.gr_exception,
+                         (unsigned)r.fecs_mb0, (unsigned)r.fecs_mb6, (unsigned)r.fault_status,
+                         (unsigned)r.fault_info, (unsigned)r.fault_addr_lo);
+            if (r.rc != 0) {
+                shell_printf("     opts 0x%x; at the failed probe: CHRAM 0x%08x eng0 0x%08x "
+                             "pbdma 0x%08x GR 0x%08x FECS mb0 0x%08x mb6 0x%08x ctx 0x%08x\r\n",
+                             (unsigned)r.opts, (unsigned)r.chram_after,
+                             (unsigned)r.eng_status_fail, (unsigned)r.pbdma_status_fail,
+                             (unsigned)r.gr_status_fail, (unsigned)r.fecs_mb0_fail,
+                             (unsigned)r.fecs_mb6_fail, (unsigned)r.fecs_ctx_fail);
+            }
+        }
+        return 0;
+    }
+    if (argc >= 5 && strcmp(argv[3], "opts") == 0) {
+        uint32_t o = 0;
+        if (shell_parse_uint(argv[4], &o) != 0) return -1;
+        ga10b_cold_recover_set_opts(o);
+        shell_printf("recover opts 0x%x\r\n", (unsigned)o);
+        return 0;
+    }
+    bool l2 = argc >= 4 && strcmp(argv[3], "l2") == 0;
+    bool l1 = argc >= 4 && strcmp(argv[3], "l1") == 0;
+    if (slm_prog_vm_lock() != 0) {
+        shell_puts("nvgpu cold recover: a GPU program holds the lock\r\n");
+        return -1;
+    }
+    int rc = slm_gpu_channel_recover(l2 ? SLM_GPU_RECOVER_MANUAL_L2 :
+                                     l1 ? SLM_GPU_RECOVER_MANUAL_L1 : SLM_GPU_RECOVER_MANUAL,
+                                     slm_get_time_ns());
+    slm_prog_vm_unlock();
+    shell_printf("nvgpu cold recover: %s\r\n", rc == 0 ? "ok" : rc == -2 ? "no cold channel" :
+                                                       "failed (channel DEAD)");
+    return rc == 0 ? 0 : -1;
+}
+
+/* `nvgpu oplib vmrace <rounds> [cpu]` (#1173, test only): a task runs
+ * oplib_cold_vmrace_round (the VM writes `nvgpu oplib wpool` makes, each
+ * round checked and undone) about once a millisecond, so they overlap the
+ * VM writes of `slm launch --gpu on` / `slm close` typed meanwhile.
+ * `nvgpu oplib vmrace` prints the counts and the VM lock's contention
+ * counters, `nvgpu oplib vmrace stop` ends it early. The task prints
+ * nothing (on Jetson only CPU 0 prints). */
+#define VMRACE_MAX_ROUNDS 200000u
+static struct oplib_cold_vmrace_stats g_vmrace;
+static uint32_t g_vmrace_running;
+static uint32_t g_vmrace_stop;
+
+static void nvgpu_vmrace_task(void *arg)
+{
+    const uint32_t n = (uint32_t)(uintptr_t)arg;
+    for (uint32_t i = 0; i < n && !__atomic_load_n(&g_vmrace_stop, __ATOMIC_ACQUIRE); i++) {
+        (void)oplib_cold_vmrace_round(&g_vmrace);
+        timer_busy_wait_us(1000u);
+        yield();
+    }
+    __atomic_store_n(&g_vmrace_running, 0u, __ATOMIC_RELEASE);
+}
+
+static void nvgpu_vmrace_print(void)
+{
+    struct slm_prog_vm_lock_stats ls;
+    slm_prog_vm_lock_stats(&ls);
+    shell_printf("vmrace: %s, rounds %u, busy %u, map errors %u, bad walks %u, "
+                 "stale after unmap %u\r\n",
+                 __atomic_load_n(&g_vmrace_running, __ATOMIC_ACQUIRE) ? "running" : "idle",
+                 (unsigned)__atomic_load_n(&g_vmrace.rounds, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.busy, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.map_err, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.bad_walk, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.stale, __ATOMIC_RELAXED));
+    shell_printf("vm lock: %u VM-writer takes, %u busy; VM writer waited on "
+                 "open/close %u, on other slm_prog %u, on VM writer %u; "
+                 "open/close waited on VM writer %u, other slm_prog %u\r\n",
+                 (unsigned)ls.vm_takes, (unsigned)ls.vm_busy,
+                 (unsigned)ls.vm_waited_on_map, (unsigned)ls.vm_waited_on_prog,
+                 (unsigned)ls.vm_waited_on_vm, (unsigned)ls.map_waited_on_vm,
+                 (unsigned)ls.prog_waited_on_vm);
+}
+
+static int nvgpu_vmrace_cmd(int argc, char *argv[])
+{
+    if (argc < 4) {
+        nvgpu_vmrace_print();
+        return 0;
+    }
+    if (strcmp(argv[3], "stop") == 0) {
+        __atomic_store_n(&g_vmrace_stop, 1u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    uint32_t n = 0, cpu = 2u;
+    if (shell_parse_uint(argv[3], &n) != 0 || n == 0u || n > VMRACE_MAX_ROUNDS ||
+        (argc >= 5 && (shell_parse_uint(argv[4], &cpu) != 0 || cpu >= cpu_count))) {
+        shell_printf("usage: nvgpu oplib vmrace [<rounds 1..%u> [cpu] | stop]\r\n",
+                     (unsigned)VMRACE_MAX_ROUNDS);
+        return -1;
+    }
+    if (!oplib_cold_active()) {
+        shell_puts("oplib vmrace: only for the SLM-OS-built channel "
+                   "(UEFI-direct boot, after `nvgpu cold`)\r\n");
+        return -1;
+    }
+    if (__atomic_exchange_n(&g_vmrace_running, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        shell_puts("oplib vmrace: one is already running\r\n");
+        return -1;
+    }
+    memset(&g_vmrace, 0, sizeof(g_vmrace));
+    __atomic_store_n(&g_vmrace_stop, 0u, __ATOMIC_RELEASE);
+    struct task *t = task_create("vm_race", (task_entry_t)nvgpu_vmrace_task,
+                                 (void *)(uintptr_t)n);
+    if (!t) {
+        __atomic_store_n(&g_vmrace_running, 0u, __ATOMIC_RELEASE);
+        return -1;
+    }
+    t->cpu_affinity = cpu;
+    scheduler_add_task_to_cpu(t, cpu);
+    shell_printf("oplib vmrace: %u rounds on CPU %u\r\n", (unsigned)n, (unsigned)cpu);
+    return 0;
+}
+
+/* `nvgpu oplib vmhold <ms> [cpu]` (#1159, test only): a task on <cpu>
+ * (default 2) takes the GPU VM lock and keeps it for <ms> (1 s to 60 s),
+ * as a VM writer, or a step timeout's dump, that holds it past a close's
+ * 6 s wait. `slm close` of a GPU session meanwhile is deferred: the
+ * session's PTEs stay until this task unlocks. `nvgpu oplib vmhold` prints
+ * whether the lock is held and how often an open or close waited on a VM
+ * writer. The task prints nothing (on Jetson only CPU 0 prints). */
+#define VMHOLD_MIN_MS 1000u
+#define VMHOLD_MAX_MS 60000u
+enum { VMHOLD_IDLE = 0u, VMHOLD_TAKING, VMHOLD_HOLDING, VMHOLD_BUSY };
+static uint32_t g_vmhold_state;
+static uint32_t g_vmhold_holds;
+
+static void nvgpu_vmhold_task(void *arg)
+{
+    const uint32_t ms = (uint32_t)(uintptr_t)arg;
+    if (slm_prog_vm_lock() != 0) {
+        __atomic_store_n(&g_vmhold_state, VMHOLD_BUSY, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_vmhold_state, VMHOLD_HOLDING, __ATOMIC_RELEASE);
+    for (uint32_t i = 0; i < ms; i++) {
+        timer_busy_wait_us(1000u);
+        yield();
+    }
+    /* Finishes any close deferred meanwhile. */
+    slm_prog_vm_unlock();
+    __atomic_fetch_add(&g_vmhold_holds, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_vmhold_state, VMHOLD_IDLE, __ATOMIC_RELEASE);
+}
+
+static int nvgpu_vmhold_cmd(int argc, char *argv[])
+{
+    if (argc < 4) {
+        static const char *const STATE[] = { "idle", "taking the lock", "holding the lock",
+                                             "gave up (lock busy)" };
+        struct slm_prog_vm_lock_stats ls;
+        slm_prog_vm_lock_stats(&ls);
+        uint32_t st = __atomic_load_n(&g_vmhold_state, __ATOMIC_ACQUIRE);
+        shell_printf("vmhold: %s, %u holds done; open/close waited on VM writer %u\r\n",
+                     STATE[st & 3u], (unsigned)__atomic_load_n(&g_vmhold_holds, __ATOMIC_RELAXED),
+                     (unsigned)ls.map_waited_on_vm);
+        return 0;
+    }
+    uint32_t ms = 0, cpu = 2u;
+    if (shell_parse_uint(argv[3], &ms) != 0 || ms < VMHOLD_MIN_MS || ms > VMHOLD_MAX_MS ||
+        (argc >= 5 && (shell_parse_uint(argv[4], &cpu) != 0 || cpu >= cpu_count))) {
+        shell_printf("usage: nvgpu oplib vmhold [<ms %u..%u> [cpu]]\r\n",
+                     (unsigned)VMHOLD_MIN_MS, (unsigned)VMHOLD_MAX_MS);
+        return -1;
+    }
+    if (!oplib_cold_active()) {
+        shell_puts("oplib vmhold: only for the SLM-OS-built channel "
+                   "(UEFI-direct boot, after `nvgpu cold`)\r\n");
+        return -1;
+    }
+    uint32_t idle = VMHOLD_IDLE;
+    if (!__atomic_compare_exchange_n(&g_vmhold_state, &idle, VMHOLD_TAKING, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        uint32_t busy = VMHOLD_BUSY;
+        if (!__atomic_compare_exchange_n(&g_vmhold_state, &busy, VMHOLD_TAKING, false,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            shell_puts("oplib vmhold: one is already running\r\n");
+            return -1;
+        }
+    }
+    struct task *t = task_create("vm_hold", (task_entry_t)nvgpu_vmhold_task,
+                                 (void *)(uintptr_t)ms);
+    if (!t) {
+        __atomic_store_n(&g_vmhold_state, VMHOLD_IDLE, __ATOMIC_RELEASE);
+        return -1;
+    }
+    t->cpu_affinity = cpu;
+    scheduler_add_task_to_cpu(t, cpu);
+    shell_printf("oplib vmhold: %u ms on CPU %u\r\n", (unsigned)ms, (unsigned)cpu);
+    return 0;
 }
 
 int cmd_nvgpu(int argc, char *argv[])
@@ -6231,6 +6722,16 @@ int cmd_nvgpu(int argc, char *argv[])
                        "would reset it)\r\n");
             return -1;
         }
+        if (argc >= 3 && strcmp(argv[2], "recover") == 0) {
+            return nvgpu_cold_recover(argc, argv);
+        }
+        if (argc >= 4 && strcmp(argv[2], "race") == 0 && strcmp(argv[3], "status") == 0) {
+            return nvgpu_cold_race_status();
+        }
+        if (argc >= 4 && strcmp(argv[2], "race") == 0 && strcmp(argv[3], "stop") == 0) {
+            __atomic_store_n(&g_race_stop, 1u, __ATOMIC_RELEASE);
+            return 0;
+        }
         if (argc >= 4 && strcmp(argv[2], "race") == 0) {
             uint32_t n = 0;
             if (shell_parse_uint(argv[3], &n) != 0 || n == 0u) return -1;
@@ -6238,6 +6739,10 @@ int cmd_nvgpu(int argc, char *argv[])
                 shell_puts("nvgpu cold race: one is already running\r\n");
                 return -1;
             }
+            memset(&g_race, 0, sizeof(g_race));
+            race_mnist_have_base = false;
+            race_sched_have_base = false;
+            __atomic_store_n(&g_race_stop, 0u, __ATOMIC_RELEASE);
             struct task *t = task_create("gpu_race", (task_entry_t)nvgpu_cold_race_task,
                                          (void *)(uintptr_t)n);
             if (!t) {
@@ -6825,11 +7330,18 @@ oplib_stage_call:
             oplib_cold_status_print();
             return 0;
         }
+        if (strcmp(argv[2], "vmrace") == 0) {
+            return nvgpu_vmrace_cmd(argc, argv);
+        }
+        if (strcmp(argv[2], "vmhold") == 0) {
+            return nvgpu_vmhold_cmd(argc, argv);
+        }
         if (strcmp(argv[2], "wpool") == 0) {
             /* #1092: size the cold channel's weights pool once,
              *   nvgpu oplib wpool <MB>
-             * when oplib_cold_attach ran without one. Run before
-             * inference starts (it invalidates the GPU TLB). */
+             * when oplib_cold_attach ran without one. Safe beside a
+             * running `slm launch` or prompt: the VM writes hold the VM
+             * lock (#1173), the TLB invalidate the dispatch lock. */
             if (argc < 4 || atoi(argv[3]) <= 0) {
                 shell_puts("usage: nvgpu oplib wpool <MB>\r\n");
                 return -1;
@@ -7318,7 +7830,7 @@ oplib_stage_call:
             return 0;
         }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
-                   "cold | wpool <MB> | "
+                   "cold | wpool <MB> | vmrace [<rounds> [cpu] | stop] | "
                    "probe <op_kind> <tier> <dtype> | "
                    "prep-rmsnorm <n_rows> <n> | "
                    "dispatch-rmsnorm <n_rows> <n> | "

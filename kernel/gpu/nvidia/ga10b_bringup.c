@@ -3094,8 +3094,17 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
      * inherited channel off PBDMA — the inherited channel is fragile to
      * any dispatch-time perturbation. Reverted; the clean minimal-
      * perturbation path is the best (~83%). */
-    ga10b_fecs_set_current_ctx_invalid();
-    ga10b_gmmu_force_ctx_reload(&g_handoff);
+    /* Only for a channel inherited from Linux (kexec). On the channel
+     * SLM-OS built (UEFI-direct, #1088) FECS holds no stale context, and
+     * the forced reload with FECS's context invalidated left the host
+     * expecting a context load after every dispatch: a GR engine reset
+     * then could not bring the channel back (#1171, jetson-nano-2
+     * 2026-11-08: the second recovery of a boot, or the first after a
+     * consumer had run, stopped with the TSG pending on the engine). */
+    if (!ga10b_bringup_handoff_is_local()) {
+        ga10b_fecs_set_current_ctx_invalid();
+        ga10b_gmmu_force_ctx_reload(&g_handoff);
+    }
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
      * contract as the v3 dispatch fields: the helper allocates
@@ -3555,6 +3564,67 @@ int ga10b_bringup_submit_gp_entry(uint64_t entry)
     *(volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS = g_handoff.work_submit_token;
     gsp_platform->mb();
     g_handoff.initial_gp_put = new_put;
+    return 0;
+}
+
+void ga10b_bringup_reset_gpfifo_cursor(void)
+{
+    g_handoff.initial_gp_put = 0u;
+    g_handoff.initial_gp_get = 0u;
+}
+
+/* One probe: `pb_dwords` of pushbuffer at `pb_off` in the channel's
+ * pushbuffer, then wait up to `timeout_us` for `payload` at `sema_off` in
+ * its semaphore page. Quiet: recovery calls it, and prints once itself. */
+static int probe_one(uint32_t pb_off, const uint32_t *pb_words, uint32_t pb_dwords,
+                     volatile uint32_t *sema, uint32_t payload, uint32_t timeout_us)
+{
+    if ((uint64_t)pb_off + pb_dwords * 4u > g_handoff.pushbuf_size) return -1;
+    *sema = 0u;
+    gsp_platform->cache_clean((const void *)sema, sizeof(uint32_t));
+    uint32_t *pb = (uint32_t *)(uintptr_t)(g_handoff.pushbuf_phys + pb_off);
+    memcpy(pb, pb_words, pb_dwords * 4u);
+    gsp_platform->cache_clean(pb, pb_dwords * 4u);
+    gsp_platform->mb();
+    uint64_t va = g_handoff.pushbuf_gpu_va + pb_off;
+    uint64_t entry = ((uint64_t)(((uint32_t)(va >> 32) & 0xFFu) | (pb_dwords << 10)) << 32) |
+                     (uint32_t)(va & 0xFFFFFFFCu);
+    if (ga10b_bringup_submit_gp_entry(entry) != 0) return -1;
+    for (uint32_t us = 0; us <= timeout_us; us += 10u) {
+        gsp_platform->cache_invalidate((void *)sema, sizeof(uint32_t));
+        if (*sema == payload) return 0;
+        timer_busy_wait_us(10u);
+    }
+    return -1;
+}
+
+int ga10b_bringup_probe_channel(uint32_t timeout_us, uint32_t *failed)
+{
+    if (failed) *failed = 0u;
+    if (!gsp_platform || !gsp_platform->cache_clean || !gsp_platform->cache_invalidate ||
+        g_handoff.semaphore_phys == 0u || g_handoff.pushbuf_phys == 0u) {
+        if (failed) *failed = 3u;
+        return -1;
+    }
+    uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    volatile uint32_t *host = (volatile uint32_t *)(uintptr_t)
+        (g_handoff.semaphore_phys + GA10B_PROBE_SEMA_HOST_OFFSET);
+    volatile uint32_t *gr = (volatile uint32_t *)(uintptr_t)
+        (g_handoff.semaphore_phys + GA10B_PROBE_SEMA_GR_OFFSET);
+    /* Host semaphore: PBDMA fetches and runs methods. */
+    uint32_t n = ga10b_build_sema_release_pushbuffer(
+        pb, g_handoff.semaphore_gpu_va + GA10B_PROBE_SEMA_HOST_OFFSET, GA10B_PROBE_PAYLOAD_HOST);
+    if (probe_one(0u, pb, n, host, GA10B_PROBE_PAYLOAD_HOST, timeout_us) != 0) {
+        if (failed) *failed = 1u;
+        return -1;
+    }
+    /* Compute semaphore after a GR drain: the engine loaded the context. */
+    n = ga10b_build_compute_sema_release_pushbuffer(
+        pb, g_handoff.semaphore_gpu_va + GA10B_PROBE_SEMA_GR_OFFSET, GA10B_PROBE_PAYLOAD_GR, 0u);
+    if (probe_one(256u, pb, n, gr, GA10B_PROBE_PAYLOAD_GR, timeout_us) != 0) {
+        if (failed) *failed = 2u;
+        return -1;
+    }
     return 0;
 }
 

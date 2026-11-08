@@ -690,6 +690,8 @@ set(KERNEL_SOURCES
     kernel/gpu/nvidia/ga10b_qmd.c
     kernel/gpu/nvidia/ga10b_prog.c
     kernel/gpu/slm_prog.c
+    # Cold channel state for dispatchers (#1171): pure.
+    kernel/gpu/gpu_chan_state.c
     # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
     # per-kind handoff store (#1092): pure code. The eviction weights
     # are generated from the Rust model (see the generator block below).
@@ -1189,6 +1191,7 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_cold.c
     kernel/tests/test_ga10b_cold_pipelines.c
     kernel/tests/test_oplib_gpu_as.c
+    kernel/tests/test_gpu_chan_state.c
 )
 
 # lwIP library sources (QEMU networking only)

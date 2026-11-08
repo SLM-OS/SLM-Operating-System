@@ -737,15 +737,94 @@ void ga10b_chan_chram_write(const struct ga10b_gpu_ops *ops, const struct ga10b_
 
 int ga10b_chan_preempt_tsg(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch)
 {
+    return ga10b_chan_preempt_tsg_within(ops, ch, 200000u);
+}
+
+int ga10b_chan_preempt_tsg_within(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                                  uint32_t timeout_us)
+{
     uint32_t b = ch->p.runlist_pri_base;
     ops->wr32(ops->ctx, b + GA10B_RL_PREEMPT,
               (ch->p.tsgid & 0xfffu) | GA10B_RL_PREEMPT_TYPE_TSG);
-    return poll_clear(ops, b + GA10B_RL_PREEMPT, GA10B_RL_PREEMPT_TSG_PENDING, 200000u);
+    return poll_clear(ops, b + GA10B_RL_PREEMPT, GA10B_RL_PREEMPT_TSG_PENDING, timeout_us);
+}
+
+int ga10b_chan_preempt_runlist(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                               uint32_t timeout_us)
+{
+    uint32_t b = ch->p.runlist_pri_base;
+    /* nvgpu_fifo_preempt_runlists_for_rc: kicks everything off the
+     * runlist and cancels a pending context load. Only the PBDMA half
+     * is waited for, as gv11b_fifo_recover does: the engine half may
+     * never finish on a hung engine, which the caller resets next. */
+    ops->wr32(ops->ctx, b + GA10B_RL_PREEMPT, GA10B_RL_PREEMPT_TYPE_RUNLIST);
+    return poll_clear(ops, ch->chram_base + ch->p.chid * 4u, GA10B_CHRAM_ON_PBDMA, timeout_us);
+}
+
+uint32_t ga10b_chan_chram_read(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch)
+{
+    return ops->rd32(ops->ctx, ch->chram_base + ch->p.chid * 4u);
+}
+
+void ga10b_chan_sched_enable(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                             bool enable)
+{
+    ops->wr32(ops->ctx, ch->p.runlist_pri_base + GA10B_RL_SCHED_DISABLE, enable ? 0u : 1u);
 }
 
 void ga10b_chan_ring_doorbell(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch)
 {
     ops->wr32(ops->ctx, GA10B_USERMODE_DOORBELL, ch->work_submit_token);
+}
+
+/* RAMFC as SETUP_BIND programs it: GP_GET/GP_PUT 0, no pending method,
+ * no semaphore acquire in progress. */
+static int chan_ramfc(struct ga10b_chan *ch)
+{
+    struct ga10b_ramfc_params rp = {
+        .gpfifo_va = ch->gpfifo_va,
+        .gpfifo_entries = ch->p.gpfifo_entries,
+        .chid = ch->p.chid,
+        .veid = ch->p.veid,
+        .rleng_id = 0,
+        .eng_intr_vector = 0,
+        .acquire_timeout_ms = 0,    /* WDT disabled before SETUP_BIND */
+    };
+    return ga10b_ramfc_setup((uint32_t *)ch->inst.cpu, &rp);
+}
+
+int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
+                     struct ga10b_chan *ch, uint32_t flags)
+{
+    if (!ops || !grctx || !ch || !ch->inst.cpu || !ch->userd.cpu || !ch->gr) {
+        return GA10B_CHAN_ERR_ARG;
+    }
+    /* gv11b_fifo_locked_abort_runlist_active_tsgs: the TSG off the
+     * runlist first, so the host drops what it still holds of it. */
+    if (flags & GA10B_CHAN_RESET_RL_CLEAR) {
+        (void)ga10b_chan_runlist_clear(ops, ch);
+    }
+    /* ga10b_channel_unbind: the CHRAM entry back to empty, faulted bits
+     * and pending state included. */
+    ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_CLEAR_CHANNEL);
+    if (ga10b_grctx_chan_reset(ops, grctx, ch->p.compute_preempt, ch->gr) != 0) {
+        return GA10B_CHAN_ERR_HW;
+    }
+    int rc = chan_ramfc(ch);
+    if (rc != GA10B_CHAN_OK) return rc;
+    ga10b_dma_clean(ops, &ch->inst);
+    ga10b_userd_init((uint32_t *)ch->userd.cpu);
+    ga10b_dma_clean(ops, &ch->userd);
+    /* Bind again as ga10b_chan_create does, then let the runlist run. */
+    rc = ga10b_chan_runlist_submit(ops, ch);
+    ga10b_chan_sched_enable(ops, ch, true);
+    if (rc != GA10B_CHAN_OK) return rc;
+    if (!(flags & GA10B_CHAN_RESET_NO_RELOAD)) {
+        ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_FORCE_CTX_RELOAD);
+    }
+    ga10b_chan_chram_write(ops, ch, GA10B_CHRAM_ENABLE_CHANNEL);
+    ch->enabled = true;
+    return GA10B_CHAN_OK;
 }
 
 int ga10b_chan_create(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
@@ -806,16 +885,7 @@ int ga10b_chan_create(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx
         goto fail;
     }
 
-    struct ga10b_ramfc_params rp = {
-        .gpfifo_va = ch->gpfifo_va,
-        .gpfifo_entries = p->gpfifo_entries,
-        .chid = p->chid,
-        .veid = p->veid,
-        .rleng_id = 0,
-        .eng_intr_vector = 0,
-        .acquire_timeout_ms = 0,    /* WDT disabled before SETUP_BIND */
-    };
-    if ((rc = ga10b_ramfc_setup(iw, &rp)) != GA10B_CHAN_OK) goto fail;
+    if ((rc = chan_ramfc(ch)) != GA10B_CHAN_OK) goto fail;
 
     /* channel.bind -> gv11b_tsg_add_subctx_channel_hw: subctx PDB array
      * and valid mask (not replayable: SETUP_BIND without the flag). */

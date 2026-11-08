@@ -363,8 +363,11 @@ static void slm_runner_forget_session(void)
 
 static void slm_runner_close_session(void)
 {
-    if (slm_runner_owns_session()) {
-        rust_slm_session_close((uint32_t)g_runner.session);
+    /* Closes only the session it opened, checked with the close itself
+     * (#1171): a check first and a close after left a window for a shell
+     * to close it and open another in the same slot. */
+    if (g_runner.session >= 0 && g_runner.session_seq != 0) {
+        rust_slm_session_close_seq((uint32_t)g_runner.session, g_runner.session_seq);
     }
     slm_runner_forget_session();
 }
@@ -421,11 +424,14 @@ static int slm_runner_run_prompt(uint32_t session_id, const char *prompt,
         .timeout_ms = g_runner.publish_timeout_ms,
     };
 
-    int32_t rc = rust_slm_prompt_ex(session_id, (const uint8_t *)prompt,
-                                    prompt_len, g_cfg.prompt_flags,
-                                    g_cfg.max_new_tokens,
-                                    slm_runner_token_cb, slm_runner_poll_cb,
-                                    &cb_ctx);
+    /* Only on the session the runner opened (#1171): -1 if a shell closed
+     * it and another took the slot since slm_runner_ensure_session. */
+    int32_t rc = rust_slm_prompt_ex_seq(session_id, g_runner.session_seq,
+                                        (const uint8_t *)prompt,
+                                        prompt_len, g_cfg.prompt_flags,
+                                        g_cfg.max_new_tokens,
+                                        slm_runner_token_cb, slm_runner_poll_cb,
+                                        &cb_ctx);
 
     SlmStatsC stats = {0};
     if (rc != 0 || rust_slm_stats(session_id, &stats) != 0) {
@@ -601,7 +607,7 @@ static void slm_runner_serve_prompt(int comp_idx, const char *prompt, size_t pro
 
     /* Each prompt is its own conversation. A shared session on a bus would
      * leak one client's text into another's reply, and fill up for good. */
-    rust_slm_session_reset((uint32_t)g_runner.session);
+    rust_slm_session_reset_seq((uint32_t)g_runner.session, g_runner.session_seq);
 
     uint32_t tokens = 0;
     int rc = slm_runner_run_prompt((uint32_t)g_runner.session, prompt, prompt_len,
@@ -823,8 +829,8 @@ static int slm_runner_stop_locked(void)
     int32_t idx = g_runner.comp_idx;
     __atomic_store_n(&g_runner.exit_requested, 1u, __ATOMIC_RELEASE);
     int32_t session = g_runner.session;
-    if (session >= 0 && slm_runner_owns_session()) {
-        rust_slm_stop((uint32_t)session);
+    if (session >= 0 && g_runner.session_seq != 0) {
+        rust_slm_stop_seq((uint32_t)session, g_runner.session_seq);
     }
 
     /* Wait for the task's cleanup, not just the flag: it unsubscribes by

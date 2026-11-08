@@ -11,6 +11,7 @@
 #include "gpu_handoff.h"        /* SLM_GPU_OP_*, SLM_GPU_TIER_*, SLM_GPU_DTYPE_* */
 #include "oplib_pool.h"
 #include "operator_library.h"
+#include "slm_prog.h"           /* slm_prog_vm_lock */
 #include "string.h"
 
 #include <stdint.h>
@@ -83,7 +84,16 @@ int ga10b_mnist_cold_install(const struct ga10b_gpu_ops *ops, struct ga10b_chan 
     struct ga10b_mnist_sources src;
     if (ga10b_mnist_sources_embedded(&src) != 0) return -1;
 
+    /* Before the operator library is attached nothing else writes this
+     * VM (the SLM GPU program and `nvgpu oplib wpool` need the attach,
+     * which runs in a later step), but the step can be re-run by
+     * `nvgpu cold`, so it takes the VM lock like every writer (#1173). */
+    if (slm_prog_vm_lock() != 0) {
+        WARN("mnist-gpu: GPU VM lock busy - pipeline not built");
+        return GA10B_MNIST_ERR_ARG;
+    }
     int rc = ga10b_mnist_pipeline_build(ops, &ch->vm, &src, &cold_mnist);
+    slm_prog_vm_unlock();
     if (rc != GA10B_MNIST_OK) {
         WARN("mnist-gpu: pipeline build failed rc=%d", rc);
         return rc;

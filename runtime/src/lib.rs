@@ -6244,7 +6244,8 @@ pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
     if slm::session::model_busy(index) {
         return SLM_ERR_BUSY;
     }
-    // An idle session's GPU program still maps the weights (#475 W5).
+    // An idle session's GPU program still maps the weights (#475 W5), or
+    // a closed one's deferred close has not removed its PTEs yet (#1159).
     match slm::registry::unload_slm(index as usize) {
         Ok(()) => 0,
         Err(loader::LoadError::InUse) => SLM_ERR_BUSY,
@@ -6870,7 +6871,17 @@ pub unsafe extern "C" fn rust_slm_session_info(session_id: u32, out: *mut SlmSes
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
-    match slm::session::remove(session_id as usize) {
+    rust_slm_session_close_seq(session_id, 0)
+}
+
+/// [`rust_slm_session_close`], only if the slot still holds the session
+/// opened as `seq` (`rust_slm_session_open_seq`; 0 means any). Checked
+/// under the session table lock with the close itself, so the slm-runner
+/// can't close a session a shell opened in its slot meanwhile (#1171).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_close_seq(session_id: u32, seq: u64) -> i32 {
+    match slm::session::remove_seq(session_id as usize, seq) {
         Ok(mut session) => {
             session.close();
             0
@@ -6886,7 +6897,14 @@ pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_session_reset(session_id: u32) -> i32 {
-    match slm::session::try_with_session(session_id as usize, |s| s.reset()) {
+    rust_slm_session_reset_seq(session_id, 0)
+}
+
+/// [`rust_slm_session_reset`], only on the session opened as `seq` (0: any).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_reset_seq(session_id: u32, seq: u64) -> i32 {
+    match slm::session::try_with_session_seq(session_id as usize, seq, |s| s.reset()) {
         Ok(()) => 0,
         Err(slm::session::SlotError::Busy) => SLM_ERR_BUSY,
         Err(slm::session::SlotError::Empty) => -1,
@@ -7045,6 +7063,31 @@ pub unsafe extern "C" fn rust_slm_prompt_ex(
     poll: Option<RustSlmPollCb>,
     user: *mut core::ffi::c_void,
 ) -> i32 {
+    // SAFETY: the caller's contract is this function's.
+    unsafe {
+        rust_slm_prompt_ex_seq(session_id, 0, prompt, prompt_len, flags, max_new_tokens, cb, poll, user)
+    }
+}
+
+/// [`rust_slm_prompt_ex`], only on the session opened as `seq` (0: any):
+/// -1 if the slot holds another session (#1171).
+///
+/// # Safety
+/// As [`rust_slm_prompt_ex`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn rust_slm_prompt_ex_seq(
+    session_id: u32,
+    seq: u64,
+    prompt: *const u8,
+    prompt_len: usize,
+    flags: u32,
+    max_new_tokens: u32,
+    cb: RustSlmTokenCb,
+    poll: Option<RustSlmPollCb>,
+    user: *mut core::ffi::c_void,
+) -> i32 {
     if prompt.is_null() && prompt_len != 0 {
         return -1;
     }
@@ -7088,7 +7131,7 @@ pub unsafe extern "C" fn rust_slm_prompt_ex(
     if !ffi_cb::try_install(cb, poll, user) {
         return SLM_ERR_BUSY;
     }
-    let rc = match slm::session::checkout(session_id as usize) {
+    let rc = match slm::session::checkout_seq(session_id as usize, seq) {
         Ok(mut lease) => {
             match slm::decoder::run_prompt(&mut lease, prompt_str, &cfg, ffi_cb_trampoline) {
                 Some(_) => 0,
@@ -7115,7 +7158,14 @@ fn ffi_poll_trampoline() -> bool {
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_stop(session_id: u32) -> i32 {
-    match slm::session::request_stop(session_id as usize) {
+    rust_slm_stop_seq(session_id, 0)
+}
+
+/// [`rust_slm_stop`], only to the session opened as `seq` (0: any).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_stop_seq(session_id: u32, seq: u64) -> i32 {
+    match slm::session::request_stop_seq(session_id as usize, seq) {
         Ok(_) => 0,
         Err(_) => -1,
     }

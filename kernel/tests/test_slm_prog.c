@@ -20,6 +20,7 @@
 #include "../gpu/nvidia/ga10b_chan.h"
 #include "../gpu/nvidia/ga10b_prog.h"
 #include "../gpu/nvidia/ga10b_qmd.h"
+#include "../include/oplib_gpu_as.h"
 #include "../include/slm_ffi.h"
 #include "../include/slm_prog.h"
 #include "pmm.h"
@@ -557,9 +558,19 @@ static void test_encode_kernels(void)
 
 /* ---- Sessions on a fake channel ---- */
 
+/* Run once from inside the next single-page allocation: a page-table page,
+ * when ga10b_vm_map has found an entry empty and not yet written it. Models
+ * another task getting the CPU at that point (#1173). */
+static void (*g_alloc_hook)(void);
+
 static void *pm_alloc(void *ctx, uint32_t n, uint64_t *phys)
 {
     (void)ctx;
+    if (n == 1u && g_alloc_hook) {
+        void (*hook)(void) = g_alloc_hook;
+        g_alloc_hook = NULL;
+        hook();
+    }
     void *p = pmm_alloc_pages(n);
     if (p) {
         memset(p, 0, (size_t)n * 4096u);
@@ -645,6 +656,13 @@ static struct {
     uint64_t last_gp;
     int evict_rc;
     bool irqs_off;
+    /* recover (#1171): its return code, calls, last `why`, and the call
+     * order against dump_fault (a sequence number for each). */
+    int recover_rc;
+    unsigned recovers;
+    uint32_t recover_why;
+    unsigned seq, dump_seq, recover_seq;
+    bool hang_once;         /* FAKE_HANG for the first submit only */
     bool scattered;
     bool no_q6k;
     bool no_b64;
@@ -689,6 +707,9 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
         g_fk.late_payload = payload;
         if (g_fk.mode == FAKE_SLOW_SUBMIT) g_fk.now += 4900000u;
     }
+    if (g_fk.mode == FAKE_HANG && g_fk.hang_once && g_fk.submits > 1u) {
+        g_fk.mode = FAKE_COMPLETE;
+    }
     if (g_fk.mode == FAKE_COMPLETE) {
         *(volatile uint32_t *)slot = payload;
         /* Timestamps 50 us apart. */
@@ -706,7 +727,8 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
 static void fk_finished(void)
 {
     g_fk.finishes++;
-    g_fk.in_flight--;
+    /* As the real flight flag: a recovery that failed already ended it. */
+    if (g_fk.in_flight > 0) g_fk.in_flight--;
 }
 
 static int fk_evict(void)
@@ -751,6 +773,18 @@ static void fk_dump(const char *why)
 {
     (void)why;
     g_fk.dumps++;
+    g_fk.dump_seq = ++g_fk.seq;
+}
+
+/* The real one (slm_ffi.c) ends the program's flight, success or not. */
+static int fk_recover(uint32_t why, uint64_t t_us)
+{
+    (void)t_us;
+    g_fk.recovers++;
+    g_fk.recover_why = why;
+    g_fk.recover_seq = ++g_fk.seq;
+    if (g_fk.in_flight > 0) g_fk.in_flight--;
+    return g_fk.recover_rc;
 }
 
 static bool fk_irqs(void)
@@ -764,11 +798,14 @@ static const struct slm_prog_backend g_fake = {
     .virt_to_phys = fk_v2p, .is_contiguous = fk_contig,
     .submit = fk_submit, .finished = fk_finished, .l2_evict = fk_evict,
     .now_us = fk_now, .relax = fk_relax, .dump_fault = fk_dump, .irqs_enabled = fk_irqs,
+    .recover = fk_recover,
 };
 
 static void fake_up(void)
 {
+    g_alloc_hook = NULL;
     memset(&g_fk, 0, sizeof(g_fk));
+    g_fk.recover_rc = -1;       /* as when the channel can't be recovered */
     g_fk.nested_run = -1;
     g_fk.nested_close = -1;
     g_fk.nested_clean = -1;
@@ -1167,6 +1204,87 @@ static void test_dead_session_leaks_arena(void)
     pmm_free_pages(w, wp);
 }
 
+/* #1171: a timed-out step whose channel the backend recovers. The failure
+ * state is dumped first, then the channel recovered (which ends the
+ * flight: finished() is not called, or another dispatcher could queue
+ * behind the hung program in between). The session is dead, but nothing
+ * of it can run any more, so its arena and VA come back on close, and the
+ * next session runs on the same channel. Before #1171 every timeout
+ * leaked the arena and the channel stayed wedged until a reboot. */
+static void test_timeout_with_recovery_frees_and_runs_again(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    uint64_t dva = o.data_gpu_va;
+    g_fk.mode = FAKE_HANG;
+    g_fk.recover_rc = 0;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_RECOVERED, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(SLM_PROG_RECOVER_TIMEOUT, g_fk.recover_why);
+    TEST_ASSERT_TRUE(g_fk.dump_seq < g_fk.recover_seq);
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.finishes);
+    TEST_ASSERT_EQUAL_INT(0, g_fk.in_flight);
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.evicts);
+    /* Dead all the same: its program is half-run. */
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_DEAD, slm_prog_run(o.handle, 0, &st));
+    size_t before = pmm_get_free_pages();
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    TEST_ASSERT_TRUE(pmm_get_free_pages() >= before + 300u * 1024u / 4096u);
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, dva));
+    /* The next session gets the arena VA back and runs. */
+    g_fk.mode = FAKE_COMPLETE;
+    struct slm_prog_open_out o2;
+    open_built(w, &o2);
+    TEST_ASSERT_EQUAL_HEX64(dva, o2.data_gpu_va);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(o2.handle, 0, &st));
+    slm_prog_close(o2.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* A failed L2 evict leaves dirty lines of the step in L2: recover too. A
+ * recovery that fails keeps the old behaviour: TIMEOUT / EVICT, finished,
+ * arena leaked. */
+static void test_recovery_after_evict_and_when_it_fails(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    struct slm_prog_run_stats st;
+    open_built(w, &o);
+    g_fk.evict_rc = -1;
+    g_fk.recover_rc = 0;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_RECOVERED, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PROG_RECOVER_EVICT, g_fk.recover_why);
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+
+    g_fk.evict_rc = 0;
+    g_fk.recover_rc = -1;
+    g_fk.recovers = 0;
+    g_fk.finishes = 0;
+    open_built(w, &o);
+    g_fk.mode = FAKE_HANG;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_TIMEOUT, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.finishes);
+    TEST_ASSERT_EQUAL_INT(0, g_fk.in_flight);
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* W2/W3 (#475 review): the shell and slm-runner each have a session. A step
  * of one started while the other's was in flight, and its finish cleared the
  * other's in-flight flag. Now one lock covers a step from submit to the end
@@ -1375,6 +1493,275 @@ static void test_kernel_lookup_and_batch(void)
     pmm_free_pages(w, wp);
 }
 
+/* ---- One lock for every writer of the GPU VM (#1173) ----
+ *
+ * The operator library's cold address space writes the same VM as the
+ * program: `nvgpu oplib wpool` during `slm launch --gpu on`. Both used a
+ * bump allocator and ga10b_vm_map with no lock in common, so one could
+ * overwrite a page-table entry the other had just pointed at its new
+ * table, losing every mapping below it. g_alloc_hook runs one side inside
+ * the other's page-table write, where that happens. */
+
+#define OPL_CHUNK (64u * 1024u)
+#define OPL_CHUNKS 2u
+
+static struct oplib_gpu_as g_oas;
+static struct oplib_cold_as_ctx g_octx;
+static struct oplib_wpool g_opool;
+static int g_opool_rc;
+static uint64_t g_opool_wait;
+static struct slm_prog_open_args g_nested_args;
+static struct slm_prog_open_out g_nested_out;
+static int g_nested_open_rc;
+static int32_t g_nested_close_h;
+
+/* The operator library's side, attached as on the cold channel. */
+static void oplib_side_up(void)
+{
+    oplib_gpu_as_init_cold(&g_oas, &g_octx, &g_pm_ops, &g_vm, slm_prog_vm_lock,
+                           slm_prog_vm_unlock);
+    memset(&g_opool, 0, sizeof(g_opool));
+    g_opool_rc = 1;
+    g_opool_wait = 0;
+    g_nested_open_rc = 1;
+    g_nested_close_h = -1;
+}
+
+static void oplib_side_free(const struct oplib_wpool *w)
+{
+    for (uint32_t i = 0; i < w->n_chunks; i++) {
+        pmm_free_pages(w->chunk[i].cpu, OPL_CHUNK / 4096u);
+    }
+}
+
+/* `nvgpu oplib wpool`'s build, small. */
+static int oplib_wpool(struct oplib_wpool *w)
+{
+    return oplib_wpool_build(&g_oas, OPL_CHUNKS * OPL_CHUNK, OPL_CHUNK, w);
+}
+
+static void hook_oplib_wpool(void)
+{
+    uint64_t t0 = g_fk.now;
+    g_opool_rc = oplib_wpool(&g_opool);
+    g_opool_wait = g_fk.now - t0;
+}
+
+static void hook_prog_open(void)
+{
+    g_nested_open_rc = slm_prog_open(&g_nested_args, &g_nested_out);
+}
+
+static void hook_prog_close(void)
+{
+    slm_prog_close(g_nested_close_h);
+}
+
+static bool overlaps(uint64_t a, uint64_t alen, uint64_t b, uint64_t blen)
+{
+    return a < b + blen && b < a + alen;
+}
+
+/* Every page of both sides walks to its memory, and their VAs are apart. */
+static void check_both_mapped(const struct slm_prog_open_out *o, const void *w,
+                              const struct oplib_wpool *pool)
+{
+    for (uint64_t off = 0; off < W_BYTES; off += 64u * 1024u) {
+        TEST_ASSERT_TRUE_MESSAGE((uint64_t)(uintptr_t)w + off ==
+                                     ga10b_vm_lookup(&g_pm_ops, &g_vm, o->weights_gpu_va + off),
+                                 "program weights page lost");
+    }
+    TEST_ASSERT_TRUE_MESSAGE((uint64_t)(uintptr_t)o->data_cpu ==
+                                 ga10b_vm_lookup(&g_pm_ops, &g_vm, o->data_gpu_va),
+                             "program arena page lost");
+    TEST_ASSERT_TRUE_MESSAGE((uint64_t)(uintptr_t)o->step_cpu ==
+                                 ga10b_vm_lookup(&g_pm_ops, &g_vm, o->step_gpu_va),
+                             "program control page lost");
+    TEST_ASSERT_EQUAL_UINT32(OPL_CHUNKS, pool->n_chunks);
+    for (uint32_t c = 0; c < pool->n_chunks; c++) {
+        for (uint32_t off = 0; off < OPL_CHUNK; off += 4096u) {
+            uint64_t va = pool->gpu_va + (uint64_t)c * OPL_CHUNK + off;
+            TEST_ASSERT_TRUE_MESSAGE(pool->chunk[c].phys + off ==
+                                         ga10b_vm_lookup(&g_pm_ops, &g_vm, va),
+                                     "operator library pool page lost");
+        }
+    }
+    /* Weights take a 4 MB span, data and control 2 MB each. */
+    TEST_ASSERT_FALSE(overlaps(o->weights_gpu_va, 4u << 20, pool->gpu_va, pool->size));
+    TEST_ASSERT_FALSE(overlaps(o->data_gpu_va, 2u << 20, pool->gpu_va, pool->size));
+    TEST_ASSERT_FALSE(overlaps(o->step_gpu_va, 2u << 20, pool->gpu_va, pool->size));
+}
+
+/* `nvgpu oplib wpool` while `slm launch` maps its weights: the pool build
+ * stays out until the open is done (here it times out, since the fake clock
+ * runs while the open can't), then both are whole. */
+static void test_vm_oplib_write_during_program_build(void)
+{
+    fake_up();
+    oplib_side_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    g_alloc_hook = hook_oplib_wpool;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    TEST_ASSERT_NULL(g_alloc_hook);
+    if (g_opool_rc != OPLIB_AS_OK) {
+        TEST_ASSERT_EQUAL_INT(OPLIB_AS_ERR_BUSY, g_opool_rc);
+        TEST_ASSERT_EQUAL_INT(OPLIB_AS_OK, oplib_wpool(&g_opool));
+    }
+    check_both_mapped(&o, w, &g_opool);
+    TEST_ASSERT_EQUAL_INT(OPLIB_AS_ERR_BUSY, g_opool_rc);
+    struct slm_prog_vm_lock_stats ls;
+    slm_prog_vm_lock_stats(&ls);
+    TEST_ASSERT_EQUAL_UINT32(1, ls.vm_waited_on_map);
+    TEST_ASSERT_EQUAL_UINT32(1, ls.vm_busy);
+    /* The retry: one reserve and one map per chunk. */
+    TEST_ASSERT_EQUAL_UINT32(1u + OPL_CHUNKS, ls.vm_takes);
+    slm_prog_close(o.handle);
+    oplib_side_free(&g_opool);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* The reverse: `slm launch` while the pool build writes a page table. */
+static void test_vm_program_build_during_oplib_write(void)
+{
+    fake_up();
+    oplib_side_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    g_nested_args = open_args(w);
+    g_alloc_hook = hook_prog_open;
+    struct oplib_wpool pool;
+    TEST_ASSERT_EQUAL_INT(OPLIB_AS_OK, oplib_wpool(&pool));
+    TEST_ASSERT_NULL(g_alloc_hook);
+    struct slm_prog_open_out o = g_nested_out;
+    if (g_nested_open_rc != 0) {
+        TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_BUSY, g_nested_open_rc);
+        TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&g_nested_args, &o));
+    }
+    check_both_mapped(&o, w, &pool);
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_BUSY, g_nested_open_rc);
+    struct slm_prog_vm_lock_stats ls;
+    slm_prog_vm_lock_stats(&ls);
+    TEST_ASSERT_EQUAL_UINT32(1, ls.map_waited_on_vm);
+    TEST_ASSERT_EQUAL_UINT32(0, ls.vm_busy);
+    slm_prog_close(o.handle);
+    oplib_side_free(&pool);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* With IRQs masked (as under the GPU dispatch lock) a VM writer can't wait
+ * for a holder that may need that lock: one try, then BUSY, with no wait
+ * turn and nothing mapped. With the lock free it gets it at once. */
+static void test_vm_lock_irqs_masked_tries_once(void)
+{
+    fake_up();
+    oplib_side_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    g_fk.irqs_off = true;
+    g_alloc_hook = hook_oplib_wpool;
+    g_opool_wait = 99u;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    g_fk.irqs_off = false;
+    TEST_ASSERT_EQUAL_INT(OPLIB_AS_ERR_BUSY, g_opool_rc);
+    TEST_ASSERT_EQUAL_UINT64(0, g_opool_wait);
+    TEST_ASSERT_EQUAL_UINT32(0, g_opool.n_chunks);
+
+    g_fk.irqs_off = true;
+    uint64_t t0 = g_fk.now;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_BUSY, slm_prog_vm_lock());
+    slm_prog_vm_unlock();
+    TEST_ASSERT_EQUAL_UINT64(t0, g_fk.now);
+    g_fk.irqs_off = false;
+    slm_prog_close(o.handle);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* A session closed while another VM writer holds the lock is freed when that
+ * writer unlocks, as when slm_prog itself holds it. */
+static void test_vm_writer_unlock_finishes_a_close(void)
+{
+    fake_up();
+    oplib_side_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t dva = o.data_gpu_va;
+    unsigned tlbs = g_fk.tlbs;
+    g_nested_close_h = o.handle;
+    g_alloc_hook = hook_prog_close;
+    struct oplib_wpool pool;
+    TEST_ASSERT_EQUAL_INT(OPLIB_AS_OK, oplib_wpool(&pool));
+    TEST_ASSERT_NULL(g_alloc_hook);
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, dva));
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_ARG, slm_prog_barrier(o.handle, 0));
+    TEST_ASSERT_EQUAL_UINT32(tlbs + 1u, g_fk.tlbs);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    oplib_side_free(&pool);
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* #1159: a close that finds the lock held past its wait (here by another VM
+ * writer; on hardware also a step timeout's dump) leaves the session, its
+ * weights PTEs included, until the holder's unlock frees it. Its caller has
+ * returned and dropped the registry pin by then, so slm_prog_weights_mapped,
+ * which the registry's unload asks, must keep counting it until the PTEs
+ * are gone. */
+static void test_deferred_close_keeps_weights_mapped(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    const uint8_t *wb = (const uint8_t *)w;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, W_BYTES));
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t wva = o.weights_gpu_va;
+    TEST_ASSERT_NOT_EQUAL(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+    /* Any overlap counts, and only an overlap. */
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb + W_BYTES - 1u, 4096u));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb - 4096, 4097u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb + W_BYTES, 4096u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb - 4096, 4096u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, 0u));
+
+    /* Held past the close's 6 s wait. */
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
+    uint64_t t0 = g_fk.now;
+    unsigned tlbs = g_fk.tlbs;
+    slm_prog_close(o.handle);
+    TEST_ASSERT_TRUE(g_fk.now - t0 >= ((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u);
+    TEST_ASSERT_NOT_EQUAL(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_UINT32(tlbs, g_fk.tlbs);
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+
+    slm_prog_vm_unlock();
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_UINT32(tlbs + 1u, g_fk.tlbs);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, W_BYTES));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* ---- End to end: the tiny model through the production FFI ---- */
 
 #define MAX_TOKENS 16u
@@ -1483,6 +1870,78 @@ static void test_e2e_hang_falls_back_to_cpu(void)
     fake_down();
 }
 
+/* #1171 through the production FFI: the first step hangs and the backend
+ * recovers the channel. The decoder builds the program again and the
+ * session stays on the GPU: two opens, the dead one closed without a leak,
+ * no CPU tokens. (The fake GPU computes nothing, so the tokens themselves
+ * are checked by the Rust test with the software GPU.) */
+static void test_e2e_hang_recovers_and_stays_on_the_gpu(void)
+{
+    uint8_t text[64];
+    int32_t text_len = rust_slm_golden_record(slm_golden_greedy_start, greedy_len(),
+                                              "prompt.text", text, sizeof(text));
+    TEST_ASSERT_TRUE(text_len > 0);
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    g_fk.mode = FAKE_HANG;
+    g_fk.hang_once = true;
+    g_fk.recover_rc = 0;
+    collected_t got = { .count = 0 };
+    int32_t rc = rust_slm_prompt_ex((uint32_t)s, text, (size_t)text_len, SLM_PROMPT_RAW,
+                                    4u, collect_cb, NULL, &got);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    TEST_ASSERT_TRUE(g_fk.submits >= 2u);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
+    TEST_ASSERT_EQUAL_UINT64(0, g.cpu_tokens);
+    TEST_ASSERT_TRUE(g.gpu_tokens > 0u);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    rust_slm_test_reset();
+    fake_down();
+}
+
+/* #1159 through the production FFI: an idle GPU session is closed while
+ * another VM writer holds the lock past the close's wait. The close is
+ * deferred and the program's pin is dropped, but its weights PTEs stay
+ * until that writer unlocks. rust_slm_load copied the model into pages the
+ * registry owns, which unload frees, so unload must refuse until then. */
+static void test_e2e_unload_waits_for_a_deferred_close(void)
+{
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
+    TEST_ASSERT_EQUAL_INT(SLM_ERR_BUSY, rust_slm_unload((uint32_t)idx));
+
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    int unload_rc = rust_slm_unload((uint32_t)idx);
+    SlmModelInfoC info;
+    int still_loaded = rust_slm_get_info((uint32_t)idx, &info);
+    slm_prog_vm_unlock();
+    TEST_ASSERT_EQUAL_INT(SLM_ERR_BUSY, unload_rc);
+    TEST_ASSERT_EQUAL_INT(0, still_loaded);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    rust_slm_test_reset();
+    fake_down();
+}
+
 /* The golden harness `slm gpu golden` runs on hardware: on the fake channel
  * the logits are zeros, so it must say so and where. */
 static void test_e2e_golden_reports_divergence(void)
@@ -1525,14 +1984,23 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);
     RUN_TEST(test_dead_session_leaks_arena);
+    RUN_TEST(test_timeout_with_recovery_frees_and_runs_again);
+    RUN_TEST(test_recovery_after_evict_and_when_it_fails);
     RUN_TEST(test_two_sessions_never_overlap);
     RUN_TEST(test_cache_ops_never_skipped_while_another_step_runs);
     RUN_TEST(test_profile_reads_without_the_lock);
     RUN_TEST(test_deadline_starts_at_the_doorbell);
     RUN_TEST(test_prog_barrier_cap);
     RUN_TEST(test_kernel_lookup_and_batch);
+    RUN_TEST(test_vm_oplib_write_during_program_build);
+    RUN_TEST(test_vm_program_build_during_oplib_write);
+    RUN_TEST(test_vm_lock_irqs_masked_tries_once);
+    RUN_TEST(test_vm_writer_unlock_finishes_a_close);
+    RUN_TEST(test_deferred_close_keeps_weights_mapped);
     RUN_TEST(test_e2e_build);
     RUN_TEST(test_e2e_hang_falls_back_to_cpu);
+    RUN_TEST(test_e2e_hang_recovers_and_stays_on_the_gpu);
+    RUN_TEST(test_e2e_unload_waits_for_a_deferred_close);
     RUN_TEST(test_e2e_golden_reports_divergence);
     return UnityEnd();
 }

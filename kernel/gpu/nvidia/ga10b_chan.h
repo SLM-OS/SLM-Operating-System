@@ -370,6 +370,9 @@ void ga10b_runlist_chan_entry(uint32_t w[4], uint32_t chid, uint64_t inst_phys,
 #define GA10B_RL_SUBMIT_INFO_PENDING    0x8000u
 #define GA10B_RL_PREEMPT_TSG_PENDING    0x100000u
 #define GA10B_RL_PREEMPT_TYPE_TSG       0x1000000u
+#define GA10B_RL_PREEMPT_TYPE_RUNLIST   0x0u
+#define GA10B_RL_PREEMPT_RUNLIST_PENDING 0x200000u
+#define GA10B_RL_INTR_0                 0x100u
 #define GA10B_GR_RUNLIST_PRI_BASE       0xc00000u
 #define GA10B_GR_RUNLIST_ID             0u
 
@@ -398,6 +401,14 @@ static inline uint32_t ga10b_chram_base_from_config(uint32_t channel_config)
 #define GA10B_CHRAM_DISABLE_CHANNEL     0x3u
 #define GA10B_CHRAM_FORCE_CTX_RELOAD    0x200u
 #define GA10B_CHRAM_CLEAR_CHANNEL       0xffffffffu
+#define GA10B_CHRAM_RESET_PBDMA_FAULTED 0x11u
+#define GA10B_CHRAM_RESET_ENG_FAULTED   0x21u
+/* CHRAM read fields (runlist_chram_channel_*). */
+#define GA10B_CHRAM_ENABLED             (1u << 1)
+#define GA10B_CHRAM_ENG_FAULTED         (1u << 5)
+#define GA10B_CHRAM_ON_PBDMA            (1u << 6)
+#define GA10B_CHRAM_ON_ENG              (1u << 7)
+#define GA10B_CHRAM_PENDING             (1u << 8)
 
 /* USERMODE doorbell (func_full_phys_offset 0xb80000 + func_doorbell
  * 0x30090) and token (tu104_usermode_doorbell_token: channel_base is 0
@@ -496,6 +507,31 @@ void ga10b_chan_chram_write(const struct ga10b_gpu_ops *ops, const struct ga10b_
                             uint32_t update);
 /* runlist_preempt for this TSG and wait for the pending bit to clear. */
 int ga10b_chan_preempt_tsg(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch);
+/* The same with a bound of `timeout_us` (in 2 us polls). */
+int ga10b_chan_preempt_tsg_within(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                                  uint32_t timeout_us);
+/* Runlist-wide preempt (recovery), then wait for this channel to leave
+ * the PBDMA. The engine may stay busy: the caller resets it. */
+int ga10b_chan_preempt_runlist(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                               uint32_t timeout_us);
+/* This channel's CHRAM entry. */
+uint32_t ga10b_chan_chram_read(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch);
+/* runlist_sched_disable: false stops the runlist scheduler (recovery). */
+void ga10b_chan_sched_enable(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch,
+                             bool enable);
+/* Put a channel that is off the GPU (preempted, or its engine reset)
+ * back to what ga10b_chan_create left (#1171): CHRAM cleared, the GR
+ * context reloaded from the golden image, RAMFC as at SETUP_BIND
+ * (GP_GET 0, no pending method or acquire), USERD GP_GET/GP_PUT 0, the
+ * runlist resubmitted and scheduling on, the channel enabled; with a
+ * forced context reload first unless `flags` has GA10B_CHAN_RESET_NO_RELOAD
+ * (what recovery passes, ga10b_cold.h). Instance block (RAMIN), VM, GPFIFO, pushbuffer
+ * and every mapping are kept, so handoffs built on the channel stay
+ * valid; their GPFIFO cursor must go back to 0. */
+int ga10b_chan_reset(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *grctx,
+                     struct ga10b_chan *ch, uint32_t flags);
+#define GA10B_CHAN_RESET_RL_CLEAR   0x1u    /* empty runlist submit first */
+#define GA10B_CHAN_RESET_NO_RELOAD  0x2u    /* no FORCE_CTX_RELOAD at enable */
 /* Ring the USERMODE doorbell. */
 void ga10b_chan_ring_doorbell(const struct ga10b_gpu_ops *ops, const struct ga10b_chan *ch);
 

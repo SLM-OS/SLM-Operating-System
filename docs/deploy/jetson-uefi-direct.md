@@ -545,8 +545,10 @@ gives the same reason.
 | `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
 | `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
 | `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile`. Refused while a prompt runs on that session |
-| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
-| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt. One run at a time |
+| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path and the channel recovery (#1171). One launch only: the build that uses it clears it |
+| `nvgpu cold race <n>` | A task runs every GPU consumer on the channel (sched, eviction, MNIST, the operator library's per-op RMSNorm) n times and checks each result against its reference, to run during prompts and step timeouts. One run at a time. `nvgpu cold race status` prints the counts and, per recovery, how many ms after the failure each consumer was correct again (`race: PASS` when all within 5000 ms); `... stop` ends it |
+| `nvgpu cold recover [l1\|l2\|status\|opts <n>]` | Recover the channel by hand (`l1`: channel reset only; `l2`: straight to the GR engine reset), or list the recoveries so far with the level, time and the state each one found. `opts` sets the channel-reset options for experiments (default 0x2, no forced context reload; `ga10b_cold.h`) |
+| `nvgpu oplib vmrace <rounds> [cpu]` | Test only (#1173). A task (CPU 2 by default) runs the weights-pool build's VM writes about once a millisecond, checks each page and unmaps it, to run during `slm launch --gpu on` / `slm close`. `nvgpu oplib vmrace` prints `bad walks 0, stale after unmap 0` and how often each side found the GPU VM lock held by the other; `... stop` ends it |
 | `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
@@ -556,10 +558,22 @@ and XUSB bring-up, so `slm gpu` reads 3199 MHz before any prompt; the first
 program to open asks for the same floor again (`[slm-prog] EMC was ...`), which
 covers a request that failed at boot.
 
-A step that times out (5 s) prints the GR and MMU fault state once, then
-the session continues on the CPU, replaying its tokens: `[slm] GPU program
-failed (...)`. `slm gpu` keeps saying why. Other GPU consumers on the
-channel then time out and trip their breaker to the CPU; a reboot clears it.
+A step that times out (5 s) prints the GR and MMU fault state (in full at
+the first timeout of a boot only), then the channel is recovered (#1171,
+[ADR 0006](../adr/0006-gpu-channel-recovery.md)):
+`[gpu] channel recovered: level N ...`. Level 1 preempts the channel and
+resets it; level 2, when level 1 fails, also resets the GR engine. The
+injected hang and fault both need level 2: about 125 ms from the timeout to a
+working channel. The session then builds its program again and replays its
+steps on the GPU: `[slm] GPU step timed out; the channel was recovered, the
+program rebuilt and N tokens replayed on the GPU`. Its output is the same as
+without the timeout, and the other consumers are correct again within about
+0.2 s of the timeout line (jetson-nano-2, 25 recoveries in one boot). While the program is past its deadline and during the recovery, the
+other GPU consumers take their CPU path at once instead of queueing behind the
+hung step. If the recovery fails, the channel stays down
+(`[gpu] channel DEAD`), the consumers stay on the CPU without touching it, and
+the session replays on the CPU: `[slm] GPU program failed (...)`.
+`nvgpu cold recover` tries again.
 
 ## Findings
 

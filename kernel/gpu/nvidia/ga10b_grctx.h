@@ -229,6 +229,7 @@ struct ga10b_gr_chan_ctx {
     uint64_t header_va;
     struct ga10b_gr_global_vas global;
     uint32_t patch_count;
+    uint32_t patch_base;        /* patch_count after the global buffer commits */
 };
 
 #define GA10B_GRCTX_OK              0
@@ -272,6 +273,16 @@ int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *
                            enum ga10b_compute_preempt preempt,
                            struct ga10b_gr_chan_ctx *c);
 void ga10b_grctx_chan_free(const struct ga10b_gpu_ops *ops, struct ga10b_gr_chan_ctx *c);
+
+/* Put a channel context back to what ga10b_grctx_chan_alloc left: the
+ * golden image, the patch list as at allocation and the subcontext
+ * header, in the buffers and mappings it already has (#1171). Recovery
+ * uses it after a step timeout, whose saved context may hold the hung
+ * work (a pending semaphore acquire, a faulted SM). Writes memory only,
+ * plus two GR register reads (the MME timer bits). The caller makes
+ * sure FECS is not using the context. */
+int ga10b_grctx_chan_reset(const struct ga10b_gpu_ops *ops, const struct ga10b_grctx *g,
+                           enum ga10b_compute_preempt preempt, struct ga10b_gr_chan_ctx *c);
 
 /* fb_flush + l2_flush_dirty + l2_system_invalidate (gk20a_mm_*). */
 int ga10b_gr_l2_flush(const struct ga10b_gpu_ops *ops, bool invalidate);
