@@ -2332,6 +2332,19 @@ pub mod soft {
         pub closes: u32,
         /// An open ran while the registry spinlock was held (#475 W-B).
         pub opened_under_registry_lock: bool,
+        /// Closes find the program lock held elsewhere (#1159): the
+        /// program's weights stay mapped, in [`DEFERRED`], until
+        /// [`finish_deferred_closes`] plays the lock holder's unlock.
+        pub defer_close: bool,
+    }
+
+    /// Weight ranges (address, bytes) of closed programs whose PTEs the
+    /// kernel has not removed yet.
+    pub static DEFERRED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+    /// The lock holder's unlock: it finishes every deferred close.
+    pub fn finish_deferred_closes() {
+        DEFERRED.lock().unwrap().clear();
     }
 
     pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
@@ -2342,11 +2355,20 @@ pub mod soft {
         fail_run: None,
         closes: 0,
         opened_under_registry_lock: false,
+        defer_close: false,
     });
 
     pub fn reset_knobs() {
         let mut k = KNOBS.lock().unwrap();
-        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0, opened_under_registry_lock: false };
+        *k = Knobs {
+            no_backend: false,
+            max_batch: 64,
+            fail_run: None,
+            closes: 0,
+            opened_under_registry_lock: false,
+            defer_close: false,
+        };
+        finish_deferred_closes();
     }
 
     fn mem_of(s: &mut Soft) -> reference::Mem {
@@ -2413,8 +2435,26 @@ pub mod soft {
     }
     #[no_mangle]
     extern "C" fn slm_prog_close(_h: i32) {
-        KNOBS.lock().unwrap().closes += 1;
-        *STATE.lock().unwrap() = None;
+        let defer = {
+            let mut k = KNOBS.lock().unwrap();
+            k.closes += 1;
+            k.defer_close
+        };
+        let closed = STATE.lock().unwrap().take();
+        if let (true, Some(s)) = (defer, closed) {
+            DEFERRED.lock().unwrap().push((s.weights, s.weights_len));
+        }
+    }
+    /// As the kernel's: an open program, or a deferred close, mapping any
+    /// byte of the range.
+    #[no_mangle]
+    extern "C" fn slm_prog_weights_mapped(cpu: *const u8, bytes: u64) -> i32 {
+        let lo = cpu as usize;
+        let hi = lo + bytes as usize;
+        let hits = |w: usize, n: usize| n != 0 && w < hi && lo < w + n;
+        let open = STATE.lock().unwrap().as_ref().is_some_and(|s| s.open && hits(s.weights, s.weights_len));
+        let deferred = DEFERRED.lock().unwrap().iter().any(|&(w, n)| hits(w, n));
+        (open || deferred) as i32
     }
     #[no_mangle]
     extern "C" fn slm_prog_add(_h: i32, shape: u32, op: *const ProgOp) -> i32 {
@@ -3126,6 +3166,34 @@ mod tests {
         assert_eq!(crate::rust_slm_session_configure(sid, 1, 4), 0);
         assert!(!registry::gpu_pinned(model as usize));
         assert_eq!(crate::rust_slm_session_close(sid), 0);
+        assert_eq!(crate::rust_slm_unload(model), 0);
+        reset_for_tests();
+    }
+
+    /// #1159: a close that can't take the GPU program lock in time (another
+    /// session's step timeout holds it through its dump, or an
+    /// operator-library VM writer does) is finished by the holder later.
+    /// The program and its pin are gone at once, its PTEs only then, so
+    /// unload must wait for the kernel, not only for the pin.
+    #[test]
+    fn unload_refused_until_a_deferred_close_finishes() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        assert_eq!(snapshot(sid).path, ForwardPath::Program);
+        soft::KNOBS.lock().unwrap().defer_close = true;
+        // Back on the CPU: the program is dropped, its close deferred.
+        assert_eq!(crate::rust_slm_session_configure(sid, 1, 4), 0);
+        assert!(!registry::gpu_pinned(model as usize), "the pin went with the program");
+        assert_eq!(soft::DEFERRED.lock().unwrap().len(), 1);
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        let frees = crate::test_ffi_stubs::free_page_calls();
+        assert_eq!(crate::rust_slm_unload(model), crate::SLM_ERR_BUSY);
+        assert!(registry::get_info(model as usize).is_some(), "still loaded");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees, "pages freed under a mapping");
+        // The holder's unlock removes the PTEs; unload then goes through.
+        soft::finish_deferred_closes();
         assert_eq!(crate::rust_slm_unload(model), 0);
         reset_for_tests();
     }

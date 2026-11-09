@@ -268,7 +268,7 @@ session-oriented and prompt-aware.
 | `slm stop <session_id>` | Stops a running decode from another shell session: sets an atomic per-session flag without taking any lock. The decoder checks it before each forward step. A stopped session takes new prompts; the conversation continues. |
 | `slm reset <session_id>` | Clears KV cache for a fresh conversation; keeps model loaded. Refused while a prompt runs on the session. |
 | `slm close <session_id>` | Releases a session (frees KV slot). Refused while a prompt runs on it. |
-| `slm unload <handle>` | Releases a model. Refused while a prompt runs on it. |
+| `slm unload <handle>` | Releases a model. Refused while a prompt runs on it, or while a GPU program maps its weights: an idle `--gpu on` session's, or a closed one whose close still waits for the GPU program lock (#1159). |
 | `slm status` | One-line summary: loaded models, active sessions, pool utilization. |
 | `slm stats [<session_id>]` | Last-prompt and cumulative stats (see "Telemetry" below). |
 | `slm bench <handle> [--prompt-len N] [--gen-len M] [--runs R]` | Synthetic throughput benchmark: warm-up, R runs, reports prefill tok/s, decode tok/s, TTFT, peak-resident MB. |

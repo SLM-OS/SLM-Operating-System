@@ -655,6 +655,7 @@ static struct {
     unsigned submits, finishes, evicts, tlbs, dumps;
     uint64_t last_gp;
     int evict_rc;
+    int tlb_rc;             /* what the TLB invalidate returns */
     bool irqs_off;
     bool scattered;
     bool no_q6k;
@@ -664,7 +665,7 @@ static struct {
 static int fk_tlb(void)
 {
     g_fk.tlbs++;
-    return 0;
+    return g_fk.tlb_rc;
 }
 
 static int fk_kernel_va(uint32_t sass, uint64_t *va)
@@ -1610,6 +1611,94 @@ static void test_vm_writer_unlock_finishes_a_close(void)
     pmm_free_pages(w, wp);
 }
 
+/* #1159: a close that finds the lock held past its wait (here by another VM
+ * writer; on hardware also a step timeout's dump) leaves the session, its
+ * weights PTEs included, until the holder's unlock frees it. Its caller has
+ * returned and dropped the registry pin by then, so slm_prog_weights_mapped,
+ * which the registry's unload asks, must keep counting it until the PTEs
+ * are gone. */
+static void test_deferred_close_keeps_weights_mapped(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    const uint8_t *wb = (const uint8_t *)w;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, W_BYTES));
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t wva = o.weights_gpu_va;
+    TEST_ASSERT_NOT_EQUAL(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+    /* Any overlap counts, and only an overlap. */
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb + W_BYTES - 1u, 4096u));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb - 4096, 4097u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb + W_BYTES, 4096u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb - 4096, 4096u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, 0u));
+
+    /* Held past the close's 6 s wait. */
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
+    uint64_t t0 = g_fk.now;
+    unsigned tlbs = g_fk.tlbs;
+    slm_prog_close(o.handle);
+    TEST_ASSERT_TRUE(g_fk.now - t0 >= ((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u);
+    TEST_ASSERT_NOT_EQUAL(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_UINT32(tlbs, g_fk.tlbs);
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+
+    slm_prog_vm_unlock();
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_UINT32(tlbs + 1u, g_fk.tlbs);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, W_BYTES));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* #1159: a close whose TLB invalidate fails has removed the PTEs, but the
+ * GPU's TLB may still translate the weights, so they must stay counted as
+ * mapped (for the rest of the boot) and `slm unload` must not free them. */
+static void test_tlb_failure_on_close_keeps_weights_mapped(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    const uint8_t *wb = (const uint8_t *)w;
+    struct slm_prog_open_args a = open_args(w);
+    struct slm_prog_open_out o;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    uint64_t wva = o.weights_gpu_va;
+    g_fk.tlb_rc = -1;
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, wva));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(wb + W_BYTES - 1u, 1u));
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb + W_BYTES, 4096u));
+    /* Still counted after later sessions open and close normally. */
+    g_fk.tlb_rc = 0;
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&a, &o));
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(w, W_BYTES));
+
+    /* More failed closes than the table holds: every range counts. */
+    uint8_t *other = (uint8_t *)w + W_BYTES + 4096u;
+    for (unsigned i = 0; i < 5u; i++) {
+        struct slm_prog_open_args b = open_args(w);
+        b.weights_bytes = 4096u * (i + 1u);
+        TEST_ASSERT_EQUAL_INT(0, slm_prog_open(&b, &o));
+        g_fk.tlb_rc = -1;
+        slm_prog_close(o.handle);
+        g_fk.tlb_rc = 0;
+    }
+    TEST_ASSERT_EQUAL_INT(1, slm_prog_weights_mapped(other, 4096u));
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
 /* ---- End to end: the tiny model through the production FFI ---- */
 
 #define MAX_TOKENS 16u
@@ -1718,6 +1807,39 @@ static void test_e2e_hang_falls_back_to_cpu(void)
     fake_down();
 }
 
+/* #1159 through the production FFI: an idle GPU session is closed while
+ * another VM writer holds the lock past the close's wait. The close is
+ * deferred and the program's pin is dropped, but its weights PTEs stay
+ * until that writer unlocks. rust_slm_load copied the model into pages the
+ * registry owns, which unload frees, so unload must refuse until then. */
+static void test_e2e_unload_waits_for_a_deferred_close(void)
+{
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
+    TEST_ASSERT_EQUAL_INT(SLM_ERR_BUSY, rust_slm_unload((uint32_t)idx));
+
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    int unload_rc = rust_slm_unload((uint32_t)idx);
+    SlmModelInfoC info;
+    int still_loaded = rust_slm_get_info((uint32_t)idx, &info);
+    slm_prog_vm_unlock();
+    TEST_ASSERT_EQUAL_INT(SLM_ERR_BUSY, unload_rc);
+    TEST_ASSERT_EQUAL_INT(0, still_loaded);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    rust_slm_test_reset();
+    fake_down();
+}
+
 /* The golden harness `slm gpu golden` runs on hardware: on the fake channel
  * the logits are zeros, so it must say so and where. */
 static void test_e2e_golden_reports_divergence(void)
@@ -1770,8 +1892,11 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_vm_program_build_during_oplib_write);
     RUN_TEST(test_vm_lock_irqs_masked_tries_once);
     RUN_TEST(test_vm_writer_unlock_finishes_a_close);
+    RUN_TEST(test_deferred_close_keeps_weights_mapped);
+    RUN_TEST(test_tlb_failure_on_close_keeps_weights_mapped);
     RUN_TEST(test_e2e_build);
     RUN_TEST(test_e2e_hang_falls_back_to_cpu);
+    RUN_TEST(test_e2e_unload_waits_for_a_deferred_close);
     RUN_TEST(test_e2e_golden_reports_divergence);
     return UnityEnd();
 }
