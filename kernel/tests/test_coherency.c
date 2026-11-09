@@ -15,6 +15,12 @@
  * corrupt the start state (P6 sum offset). Each injected run must count
  * the fault in the right row and end in `coherency: FAIL (n rows)` with
  * return code 1, so the path from a failing row to the verdict is covered.
+ *
+ * Revision 3 (row-tagged values): the tag rules are checked one
+ * observation at a time, a flag preloaded with another row's final value
+ * must time out instead of finishing the reader, and the MP-stale-flag
+ * injection (another row's final values, silent writer) must fail every
+ * row it touches.
  */
 
 #include "unity.h"
@@ -38,12 +44,20 @@
 #define TEST_COH_SCALE      10u
 
 /*
+ * P4 straddle target for the `make test` litmus run. QEMU TCG runs the
+ * reader's two back-to-back loads in one translation block, so a write
+ * lands between them in only about 0.1% of pairs (revision 3 build); the
+ * scaled target of 10^4 would make every P4 row run its full 2 s budget.
+ */
+#define TEST_COH_P4_TARGET  500u
+
+/*
  * The negative controls are report-only on QEMU (TCG models no caches),
- * so `make test` runs them at a larger divisor: P2 10^3 per pair, P4 at
- * least 10^4 writes and 10^3 straddles per reader. Their time-budgeted P4
+ * so `make test` runs them at a larger divisor: P2 100 per pair, P4 at
+ * least 1000 writes and 100 straddles per reader. Their time-budgeted P4
  * rows on the alias mappings are the slowest part of the suite.
  */
-#define TEST_COH_NEG_SCALE  100u
+#define TEST_COH_NEG_SCALE  1000u
 
 /* Fault-injection runs: the largest scale (16 iterations, P4 straddle
  * target 1) keeps each one short. */
@@ -60,6 +74,7 @@ static struct {
     uint32_t s2_rows;
     uint32_t p4_rows;           /* rows carrying coverage= */
     uint32_t p4_weak;           /* ... with coverage=weak */
+    uint32_t mp_rows;           /* P1/P2/S1 rows carrying observed= */
     uint32_t pass_lines;        /* "coherency: PASS" */
     uint32_t fail_lines;        /* "coherency: FAIL (...)" */
     char verdict[48];           /* last verdict line, without CR/LF */
@@ -87,6 +102,9 @@ static int cap_out(const char *fmt, ...)
         }
     } else if (strncmp(buf, "S2 ", 3) == 0) {
         cap.s2_rows++;
+    } else if ((strncmp(buf, "P1 ", 3) == 0 || strncmp(buf, "P2 ", 3) == 0 ||
+                strncmp(buf, "S1 ", 3) == 0) && strstr(buf, " observed=") != NULL) {
+        cap.mp_rows++;
     } else if (strncmp(buf, "P4 ", 3) == 0 && strstr(buf, " pairs=") != NULL &&
                strstr(buf, " straddles=") != NULL) {
         if (strstr(buf, " coverage=weak") != NULL) {
@@ -146,59 +164,190 @@ static void test_predicates_flag_forbidden_outcomes(void)
     TEST_ASSERT_FALSE(coh_final_is_forbidden(200, 200));
 }
 
+/* Row tags for the single-CPU checks: this row's, and another row's. */
+#define TEST_TAG        5ull
+#define TEST_TAG_OTHER  6ull
+#define T(i)            coh_tagged(TEST_TAG, (i))
+#define TO(i)           coh_tagged(TEST_TAG_OTHER, (i))
+
+/* Revision 3 tag helpers: round trip, reserved tag never given to a row. */
+static void test_row_tags(void)
+{
+    TEST_ASSERT_EQUAL_UINT64(TEST_TAG, coh_tag_of(T(1234)));
+    TEST_ASSERT_EQUAL_UINT64(1234, coh_idx_of(T(1234)));
+    TEST_ASSERT_EQUAL_UINT64(COH_TAG_RESERVED, coh_tag_of(COH_TAGGED_INIT));
+    TEST_ASSERT_EQUAL_UINT64(COH_IDX_MASK, coh_idx_of(COH_TAGGED_INIT));
+    static const uint64_t nonces[] = { 1, 2, COH_TAG_RESERVED - 1u, COH_TAG_RESERVED,
+                                       COH_TAG_RESERVED + 1u, 0x123456789ull };
+    for (unsigned i = 0; i < sizeof(nonces) / sizeof(nonces[0]); i++) {
+        uint64_t t = coh_row_tag(nonces[i]);
+        TEST_ASSERT_TRUE(t != 0);
+        TEST_ASSERT_TRUE(t != COH_TAG_RESERVED);
+    }
+    TEST_ASSERT_TRUE(coh_row_tag(7) != coh_row_tag(8));
+}
+
+/* The revision 3 MP judgement, one observation at a time. */
+static void test_mp_check_rules(void)
+{
+    struct coh_mp_state st = { .seen = false, .done = false, .observed = 0 };
+    /* Foreign flag before the row's tag: not started, not judged. */
+    TEST_ASSERT_EQUAL_UINT32(0, coh_mp_check(TEST_TAG, 100, TO(100), TO(100), &st));
+    TEST_ASSERT_EQUAL_UINT32(0, coh_mp_check(TEST_TAG, 100, COH_TAGGED_INIT, 0, &st));
+    TEST_ASSERT_FALSE(st.seen);
+    TEST_ASSERT_FALSE(st.done);
+    TEST_ASSERT_EQUAL_UINT64(0, st.observed);
+    /* Own flag, data at or past it: fine, observed. */
+    TEST_ASSERT_EQUAL_UINT32(0, coh_mp_check(TEST_TAG, 100, T(10), T(10), &st));
+    TEST_ASSERT_EQUAL_UINT32(0, coh_mp_check(TEST_TAG, 100, T(10), T(11), &st));
+    TEST_ASSERT_EQUAL_UINT64(2, st.observed);
+    /* d < f, and data from before the row under an own flag. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, T(12), T(11), &st));
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, T(12), TO(99), &st));
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, T(12), COH_TAGGED_INIT, &st));
+    /* Data index above n. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, T(12), T(101), &st));
+    /* Foreign flag after the row's tag was seen. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, TO(100), T(12), &st));
+    TEST_ASSERT_FALSE(st.done);
+    /* Own flag index above n: forbidden, and the reader stops. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_mp_check(TEST_TAG, 100, T(101), T(101), &st));
+    TEST_ASSERT_TRUE(st.done);
+    /* Own flag at exactly n: done, not counted as observed. */
+    struct coh_mp_state st2 = { .seen = false, .done = false, .observed = 0 };
+    TEST_ASSERT_EQUAL_UINT32(0, coh_mp_check(TEST_TAG, 100, T(100), T(100), &st2));
+    TEST_ASSERT_TRUE(st2.done);
+    TEST_ASSERT_EQUAL_UINT64(0, st2.observed);
+}
+
+/* The revision 3 P4 judgement, one read pair at a time. */
+static void test_corr_check_rules(void)
+{
+    struct coh_corr_state st = { .seen = false, .straddles = 0 };
+    TEST_ASSERT_EQUAL_UINT32(0, coh_corr_check(TEST_TAG, COH_TAGGED_INIT, COH_TAGGED_INIT, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, coh_corr_check(TEST_TAG, TO(9), TO(9), &st));
+    TEST_ASSERT_FALSE(st.seen);
+    TEST_ASSERT_EQUAL_UINT64(0, st.straddles);
+    /* The row's first write lands between the two reads: a straddle. */
+    TEST_ASSERT_EQUAL_UINT32(0, coh_corr_check(TEST_TAG, COH_TAGGED_INIT, T(1), &st));
+    TEST_ASSERT_TRUE(st.seen);
+    TEST_ASSERT_EQUAL_UINT64(1, st.straddles);
+    TEST_ASSERT_EQUAL_UINT32(0, coh_corr_check(TEST_TAG, T(3), T(3), &st));
+    TEST_ASSERT_EQUAL_UINT32(0, coh_corr_check(TEST_TAG, T(3), T(5), &st));
+    TEST_ASSERT_EQUAL_UINT64(2, st.straddles);
+    /* b < a. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_corr_check(TEST_TAG, T(9), T(8), &st));
+    TEST_ASSERT_EQUAL_UINT64(3, st.straddles);
+    /* Own then foreign within a pair, and foreign after own was seen. */
+    TEST_ASSERT_EQUAL_UINT32(1, coh_corr_check(TEST_TAG, T(9), TO(9), &st));
+    TEST_ASSERT_EQUAL_UINT32(1, coh_corr_check(TEST_TAG, TO(9), T(10), &st));
+    TEST_ASSERT_EQUAL_UINT32(1, coh_corr_check(TEST_TAG, COH_TAGGED_INIT, COH_TAGGED_INIT, &st));
+}
+
 /* A synthetic stale observation through the real P1, P2 and S1 readers:
- * flag already at N while data still holds an older value. */
+ * flag already at N of this row while data still holds an older index. */
 static void test_mp_reader_counts_synthetic_forbidden(void)
 {
     static const enum coh_mp_kind kinds[] = { COH_MP_REL_ACQ, COH_MP_DMB, COH_MP_NONE };
     for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
         test_vars.abort.v = 0;
-        test_vars.flag.v = 100;
-        test_vars.data.v = 37;
+        test_vars.flag.v = T(100);
+        test_vars.data.v = T(37);
         struct coh_env env = test_env();
         struct coh_result res = {0};
-        coh_mp_reader(kinds[i], &test_vars.data.v, &test_vars.flag.v, 100, &env, &res);
+        coh_mp_reader(kinds[i], &test_vars.data.v, &test_vars.flag.v, TEST_TAG, 100, &env,
+                      &res);
         TEST_ASSERT_EQUAL_UINT64(1, res.forbidden);
         TEST_ASSERT_EQUAL_UINT64(0, res.timeouts);
+        TEST_ASSERT_EQUAL_UINT64(0, res.observed);
     }
 }
 
-/* A flag that never moves is a timeout, and it raises the abort flag. */
+/* A flag of this row that never moves is a timeout, and it raises the
+ * abort flag; every look at it counted as observed. */
 static void test_mp_reader_times_out_without_progress(void)
 {
     test_vars.abort.v = 0;
-    test_vars.flag.v = 3;
-    test_vars.data.v = 3;
+    test_vars.flag.v = T(3);
+    test_vars.data.v = T(3);
     struct coh_env env = test_env();
     struct coh_result res = {0};
-    coh_mp_reader(COH_MP_DMB, &test_vars.data.v, &test_vars.flag.v, 100, &env, &res);
+    coh_mp_reader(COH_MP_DMB, &test_vars.data.v, &test_vars.flag.v, TEST_TAG, 100, &env, &res);
     TEST_ASSERT_EQUAL_UINT64(0, res.forbidden);
     TEST_ASSERT_EQUAL_UINT64(1, res.timeouts);
+    TEST_ASSERT_TRUE(res.observed > 0);
     TEST_ASSERT_EQUAL_UINT64(1, test_vars.abort.v);
 
     /* With abort already raised, a second reader leaves without counting. */
     struct coh_result res2 = {0};
-    coh_mp_reader(COH_MP_DMB, &test_vars.data.v, &test_vars.flag.v, 100, &env, &res2);
+    coh_mp_reader(COH_MP_DMB, &test_vars.data.v, &test_vars.flag.v, TEST_TAG, 100, &env,
+                  &res2);
     TEST_ASSERT_EQUAL_UINT64(0, res2.timeouts);
     test_vars.abort.v = 0;
 }
 
-/* CoRR reader with the writer already done: it stops at its first done
- * check, with pairs counted, no straddle and the count published. */
+/*
+ * Revision 3 regression: a flag preloaded with another row's final value
+ * (what a stale line or old DRAM behind an alias holds) must not finish
+ * the reader. Before revision 3 the reader returned at once on f >= n with
+ * zero forbidden outcomes. Now it waits for its own tag and times out.
+ */
+static void test_mp_reader_foreign_final_value_does_not_finish(void)
+{
+    const uint64_t stale[] = { TO(100), TO(1000000), COH_TAGGED_INIT };
+    for (unsigned i = 0; i < sizeof(stale) / sizeof(stale[0]); i++) {
+        test_vars.abort.v = 0;
+        test_vars.flag.v = stale[i];
+        test_vars.data.v = stale[i];
+        struct coh_env env = test_env();
+        struct coh_result res = {0};
+        coh_mp_reader(COH_MP_DMB, &test_vars.data.v, &test_vars.flag.v, TEST_TAG, 100, &env,
+                      &res);
+        TEST_ASSERT_EQUAL_UINT64(1, res.timeouts);
+        TEST_ASSERT_EQUAL_UINT64(0, res.forbidden);
+        TEST_ASSERT_EQUAL_UINT64(0, res.observed);
+        /* ...and the row it would print does not pass. */
+        TEST_ASSERT_TRUE(coherency_row_fails(COH_P2, res.forbidden, res.timeouts,
+                                             res.observed == 0));
+    }
+    test_vars.abort.v = 0;
+}
+
+/* CoRR reader with this row's writer already done: it stops at its first
+ * done check, with pairs counted, no straddle and the count published. */
 static void test_corr_reader_stops_on_done(void)
 {
     test_vars.abort.v = 0;
-    test_vars.x.v = 50;
-    test_vars.p4_done.v = 1;
+    test_vars.x.v = T(50);
+    test_vars.p4_done.v = T(1);
     test_vars.strad[0].v = 77;
     struct coh_env env = test_env();
     struct coh_result res = {0};
-    coh_corr_reader(&test_vars.x.v, &test_vars.p4_done.v, &test_vars.strad[0].v, &env, &res);
+    coh_corr_reader(&test_vars.x.v, &test_vars.p4_done.v, &test_vars.strad[0].v, TEST_TAG,
+                    &env, &res);
     TEST_ASSERT_EQUAL_UINT64(0, res.forbidden);
     TEST_ASSERT_EQUAL_UINT64(0, res.timeouts);
     TEST_ASSERT_EQUAL_UINT64(COH_CORR_DONE_MASK + 1u, res.pairs);
     TEST_ASSERT_EQUAL_UINT64(0, res.straddles);
-    TEST_ASSERT_EQUAL_UINT64(0, test_vars.strad[0].v);
+    TEST_ASSERT_EQUAL_HEX64(T(0), test_vars.strad[0].v);
+    test_vars.p4_done.v = 0;
+}
+
+/* A done flag left by another row does not stop the reader: with x never
+ * changing, it times out instead. */
+static void test_corr_reader_ignores_foreign_done(void)
+{
+    test_vars.abort.v = 0;
+    test_vars.x.v = TO(50);
+    test_vars.p4_done.v = TO(1);
+    struct coh_env env = test_env();
+    struct coh_result res = {0};
+    coh_corr_reader(&test_vars.x.v, &test_vars.p4_done.v, &test_vars.strad[0].v, TEST_TAG,
+                    &env, &res);
+    TEST_ASSERT_EQUAL_UINT64(1, res.timeouts);
+    TEST_ASSERT_EQUAL_UINT64(0, res.straddles);
+    TEST_ASSERT_TRUE(res.pairs > COH_CORR_DONE_MASK + 1u);
+    test_vars.abort.v = 0;
     test_vars.p4_done.v = 0;
 }
 
@@ -206,22 +355,24 @@ static void test_corr_reader_stops_on_done(void)
 static void test_corr_reader_times_out_without_writes(void)
 {
     test_vars.abort.v = 0;
-    test_vars.x.v = 9;
-    test_vars.p4_done.v = 0;
+    test_vars.x.v = COH_TAGGED_INIT;
+    test_vars.p4_done.v = COH_TAGGED_INIT;
     struct coh_env env = test_env();
     struct coh_result res = {0};
-    coh_corr_reader(&test_vars.x.v, &test_vars.p4_done.v, &test_vars.strad[0].v, &env, &res);
+    coh_corr_reader(&test_vars.x.v, &test_vars.p4_done.v, &test_vars.strad[0].v, TEST_TAG,
+                    &env, &res);
     TEST_ASSERT_EQUAL_UINT64(1, res.timeouts);
     TEST_ASSERT_EQUAL_UINT64(0, res.straddles);
     TEST_ASSERT_TRUE(res.pairs > 0);
     test_vars.abort.v = 0;
+    test_vars.p4_done.v = 0;
 }
 
 /*
  * CoRR writer stop rule: at least n writes (rounded up to the stop-check
- * period), then on until every reader's published straddles reach the
- * target or the budget runs out, then done. The descending variant (the
- * self-test's fake writer) counts down from its start value.
+ * period), then on until every reader's published straddles (tagged with
+ * this row) reach the target or the budget runs out, then done. The
+ * descending variant (the self-test's fake writer) counts down.
  */
 static void test_corr_writer_stop_rule(void)
 {
@@ -232,54 +383,58 @@ static void test_corr_writer_stop_rule(void)
     test_vars.abort.v = 0;
     test_vars.x.v = 0;
     test_vars.p4_done.v = 0;
-    test_vars.strad[0].v = 10;
-    test_vars.strad[1].v = 10;
+    test_vars.strad[0].v = T(10);
+    test_vars.strad[1].v = T(10);
     uint64_t w = coh_corr_writer(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 2,
-                                 period + 1u, 10, coh_cntfrq(), &env);
+                                 TEST_TAG, period + 1u, 10, coh_cntfrq(), &env);
     TEST_ASSERT_EQUAL_UINT64(2u * period, w);
-    TEST_ASSERT_EQUAL_UINT64(2u * period, test_vars.x.v);
-    TEST_ASSERT_EQUAL_UINT64(1, test_vars.p4_done.v);
+    TEST_ASSERT_EQUAL_HEX64(T(2u * period), test_vars.x.v);
+    TEST_ASSERT_EQUAL_HEX64(T(1), test_vars.p4_done.v);
 
-    /* One reader short of the target: runs until the budget (20 ms). */
-    test_vars.x.v = 0;
-    test_vars.p4_done.v = 0;
-    test_vars.strad[1].v = 9;
-    uint64_t budget = coh_cntfrq() / 50u;
-    uint64_t t0 = coh_cntpct();
-    w = coh_corr_writer(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 2,
-                        16, 10, budget, &env);
-    uint64_t took = coh_cntpct() - t0;
-    TEST_ASSERT_TRUE(took >= budget);
-    TEST_ASSERT_TRUE(w >= period);
-    TEST_ASSERT_EQUAL_UINT64(0, w % period);
-    TEST_ASSERT_EQUAL_UINT64(w, test_vars.x.v);
-    TEST_ASSERT_EQUAL_UINT64(1, test_vars.p4_done.v);
+    /* One reader short of the target, or with another row's count:
+     * runs until the budget (20 ms). */
+    const uint64_t short_counts[] = { T(9), TO(1000) };
+    for (unsigned k = 0; k < 2; k++) {
+        test_vars.x.v = 0;
+        test_vars.p4_done.v = 0;
+        test_vars.strad[1].v = short_counts[k];
+        uint64_t budget = coh_cntfrq() / 50u;
+        uint64_t t0 = coh_cntpct();
+        w = coh_corr_writer(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 2,
+                            TEST_TAG, 16, 10, budget, &env);
+        uint64_t took = coh_cntpct() - t0;
+        TEST_ASSERT_TRUE(took >= budget);
+        TEST_ASSERT_TRUE(w >= period);
+        TEST_ASSERT_EQUAL_UINT64(0, w % period);
+        TEST_ASSERT_EQUAL_HEX64(T(w), test_vars.x.v);
+        TEST_ASSERT_EQUAL_HEX64(T(1), test_vars.p4_done.v);
+    }
 
     /* No writes and no budget (the weak-row fault): done at once. */
-    test_vars.x.v = 5;
+    test_vars.x.v = COH_TAGGED_INIT;
     test_vars.p4_done.v = 0;
     w = coh_corr_writer(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 2,
-                        0, 10, 0, &env);
+                        TEST_TAG, 0, 10, 0, &env);
     TEST_ASSERT_EQUAL_UINT64(0, w);
-    TEST_ASSERT_EQUAL_UINT64(5, test_vars.x.v);
-    TEST_ASSERT_EQUAL_UINT64(1, test_vars.p4_done.v);
+    TEST_ASSERT_EQUAL_HEX64(COH_TAGGED_INIT, test_vars.x.v);
+    TEST_ASSERT_EQUAL_HEX64(T(1), test_vars.p4_done.v);
 
-    /* Descending: values go down from the start value. */
+    /* Descending: indices go down from the start index. */
     test_vars.x.v = 0;
     test_vars.p4_done.v = 0;
     w = coh_corr_writer_ex(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 0,
-                           1, 1, coh_cntfrq(), 1000000, true, &env);
+                           TEST_TAG, 1, 1, coh_cntfrq(), 1000000, true, &env);
     TEST_ASSERT_EQUAL_UINT64(period, w);
-    TEST_ASSERT_EQUAL_UINT64(1000000 - period, test_vars.x.v);
+    TEST_ASSERT_EQUAL_HEX64(T(1000000 - period), test_vars.x.v);
 
     /* Abort raised: stops at once and still sets done. */
     test_vars.abort.v = 1;
     test_vars.x.v = 0;
     test_vars.p4_done.v = 0;
     w = coh_corr_writer(&test_vars.x.v, &test_vars.p4_done.v, test_vars.strad, 2,
-                        1000, 10, coh_cntfrq(), &env);
+                        TEST_TAG, 1000, 10, coh_cntfrq(), &env);
     TEST_ASSERT_EQUAL_UINT64(0, w);
-    TEST_ASSERT_EQUAL_UINT64(1, test_vars.p4_done.v);
+    TEST_ASSERT_EQUAL_HEX64(T(1), test_vars.p4_done.v);
     test_vars.abort.v = 0;
     test_vars.p4_done.v = 0;
     test_vars.strad[0].v = 0;
@@ -345,7 +500,10 @@ static void test_row_judgement(void)
     TEST_ASSERT_FALSE(coherency_row_fails(COH_P4, 0, 0, false));
     TEST_ASSERT_TRUE(coherency_row_fails(COH_P4, 0, 0, true));
     TEST_ASSERT_TRUE(coherency_row_fails(COH_P4, 1, 0, false));
-    TEST_ASSERT_FALSE(coherency_row_fails(COH_P2, 0, 0, true));
+    /* Revision 3: an MP row whose reader observed nothing fails too. */
+    TEST_ASSERT_TRUE(coherency_row_fails(COH_P1, 0, 0, true));
+    TEST_ASSERT_TRUE(coherency_row_fails(COH_P2, 0, 0, true));
+    TEST_ASSERT_FALSE(coherency_row_fails(COH_P3, 0, 0, true));
     /* S1 and S2 are sensitivity only. */
     TEST_ASSERT_FALSE(coherency_row_fails(COH_S1, 12345, 0, false));
     TEST_ASSERT_FALSE(coherency_row_fails(COH_S1, 0, 7, false));
@@ -410,7 +568,14 @@ static void test_litmus_patterns_pass(void)
     static struct coh_summary sum;
     cap_reset();
     uint64_t t0 = timer_get_count();
-    int rc = coherency_litmus_run(TEST_COH_SCALE, cap_out, &sum);
+    struct coh_run_opts opts = {
+        .scale = TEST_COH_SCALE,
+        .patterns = COH_PAT_ALL,
+        .inject = COH_INJECT_NONE,
+        .timeout_ms = 0,
+        .p4_target = TEST_COH_P4_TARGET,
+    };
+    int rc = coherency_litmus_run_opts(&opts, cap_out, &sum);
     uint64_t ms = (timer_get_count() - t0) * 1000u / timer_get_frequency();
     uart_printf("[INFO] coherency litmus scale %u: %u rows in %llu ms\r\n",
                 (unsigned)TEST_COH_SCALE, (unsigned)sum.rows, (unsigned long long)ms);
@@ -425,7 +590,10 @@ static void test_litmus_patterns_pass(void)
     /* P4 coverage: every reader of every row saw writes land. */
     TEST_ASSERT_EQUAL_UINT32(0, sum.p4_weak_rows);
     TEST_ASSERT_TRUE(sum.p4_min_straddles > 0);
-    TEST_ASSERT_EQUAL_UINT64(coherency_p4_target(TEST_COH_SCALE), sum.p4_target);
+    /* MP progress: every P1/P2/S1 reader observed its row in progress. */
+    TEST_ASSERT_EQUAL_UINT32(0, sum.mp_weak_rows);
+    TEST_ASSERT_EQUAL_UINT32(3u * pairs, cap.mp_rows);
+    TEST_ASSERT_EQUAL_UINT64(TEST_COH_P4_TARGET, sum.p4_target);
     TEST_ASSERT_EQUAL_UINT32(0, sum.failed_rows);
     TEST_ASSERT_EQUAL_INT(0, rc);
     /* Output shape shared with the C1 harness. */
@@ -551,6 +719,43 @@ static void test_inject_p6_sum_offset_fails(void)
     TEST_ASSERT_EQUAL_UINT64(0, sum.timeouts[COH_P6]);
 }
 
+/*
+ * Revision 3 end to end: flag and data preloaded with another row's final
+ * values and a silent writer (a stale line that never updates). Before
+ * revision 3 every such P2 row passed at 0 ms; now each one times out and
+ * is weak, and the run fails. A 50 ms no-progress budget keeps it short.
+ */
+static void test_inject_mp_stale_flag_fails(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("needs 2+ CPUs");
+    }
+    static struct coh_summary sum;
+    uint32_t pairs = cpu_count * (cpu_count - 1);
+    struct coh_run_opts opts = {
+        .scale = TEST_COH_INJECT_SCALE,
+        .patterns = COH_PAT_BIT(COH_P2),
+        .inject = COH_INJECT_MP_STALE_FLAG,
+        .timeout_ms = 50,
+    };
+    cap_reset();
+    uint64_t t0 = timer_get_count();
+    int rc = coherency_litmus_run_opts(&opts, cap_out, &sum);
+    uart_printf("[INFO] coherency inject %d: %u rows, %u failed, %llu ms\r\n",
+                (int)COH_INJECT_MP_STALE_FLAG, (unsigned)sum.rows, (unsigned)sum.failed_rows,
+                (unsigned long long)((timer_get_count() - t0) * 1000u / timer_get_frequency()));
+    char want[48];
+    uart_snprintf(want, sizeof(want), "coherency: FAIL (%u rows)", (unsigned)pairs);
+    TEST_ASSERT_EQUAL_INT(1, rc);
+    TEST_ASSERT_EQUAL_UINT32(pairs, sum.rows);
+    TEST_ASSERT_EQUAL_UINT32(pairs, sum.failed_rows);
+    TEST_ASSERT_EQUAL_UINT64(pairs, sum.timeouts[COH_P2]);
+    TEST_ASSERT_EQUAL_UINT64(0, sum.forbidden[COH_P2]);
+    TEST_ASSERT_EQUAL_UINT32(pairs, sum.mp_weak_rows);
+    TEST_ASSERT_EQUAL_UINT32(pairs, cap.mp_rows);
+    TEST_ASSERT_EQUAL_STRING(want, cap.verdict);
+}
+
 /* Control for the injection runs: the same subsets with no fault pass. */
 static void test_subset_without_injection_passes(void)
 {
@@ -637,9 +842,14 @@ int test_suite_coherency(void)
     uint64_t t0 = timer_get_count();
     UnityBegin("test_coherency.c");
     RUN_TEST(test_predicates_flag_forbidden_outcomes);
+    RUN_TEST(test_row_tags);
+    RUN_TEST(test_mp_check_rules);
+    RUN_TEST(test_corr_check_rules);
     RUN_TEST(test_mp_reader_counts_synthetic_forbidden);
     RUN_TEST(test_mp_reader_times_out_without_progress);
+    RUN_TEST(test_mp_reader_foreign_final_value_does_not_finish);
     RUN_TEST(test_corr_reader_stops_on_done);
+    RUN_TEST(test_corr_reader_ignores_foreign_done);
     RUN_TEST(test_corr_reader_times_out_without_writes);
     RUN_TEST(test_corr_writer_stop_rule);
     RUN_TEST(test_pingpong_counts_lost_step);
@@ -654,6 +864,7 @@ int test_suite_coherency(void)
     RUN_TEST(test_inject_p4_descending_writer_fails);
     RUN_TEST(test_inject_p4_weak_row_fails);
     RUN_TEST(test_inject_p6_sum_offset_fails);
+    RUN_TEST(test_inject_mp_stale_flag_fails);
     RUN_TEST(test_negative_controls_report);
     RUN_TEST(test_negative_controls_rerun_uses_fresh_slots);
     uart_printf("[INFO] test_coherency.c: %llu ms\r\n",
