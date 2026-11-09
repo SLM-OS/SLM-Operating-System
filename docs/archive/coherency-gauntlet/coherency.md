@@ -36,7 +36,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | both boards PASS (10237853); critic round 1 running | 1 |
+| C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
 | C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
 | C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -76,7 +76,22 @@ Boards: jetson-nano-2 and pi-5-1 only.
   they were invalidated at the last reset; A76 TRM 7.2 does not distinguish
   warm from cold reset.
 
+- C1 round 1: PASS on the measured claim, FAIL as worded. Critic rebuilt
+  the binary (hash matched), parsed every ROW: 0 forbidden, 0 timeouts,
+  coverage contiguous (Jetson 40 passes x 30 pairs incl. 16 cross-cluster;
+  Pi 5 390 passes x 12 pairs), counts add up. Gaps: no SB+none control, so
+  P3's zero has no shown sensitivity; P4 got 0.07 to 0.2 percent of runtime
+  with no straddle count; P3, P4 and P6 checkers not fault-injected; card
+  config not quoted (the repo template `deploy/pi5/config.txt:46` uses
+  `armstub=armstub8-2712.bin`, the pi-5-1 card does not); Jetson BL31
+  version unrecorded. Spec revision 2 (5e82fdb8) adds S2 and P4 coverage
+  counters; the same applies to C2's kernel suite.
+
 ## Failed approaches
+
+- Pi 5 Linux attempts 1 to 3 (console-only result path; then a 20 s settle
+  without an SDWire round trip). Cause: rig defect #1195 plus possibly
+  earlycon on RP1. Replaced by attempt 4 (round trip + HTTP results).
 
 ## Evidence
 
