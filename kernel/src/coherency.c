@@ -7,7 +7,17 @@
  *   pattern cpus iters forbidden timeouts ms
  *
  * cpus is `A>B` for the pair patterns (A = writer / T0 / even side of P5),
- * `w<W>/<lo>-<hi>` for P4 (writer W) and `<lo>-<hi>` for P6.
+ * `w<W>/<lo>-<hi>` for P4 (writer W) and `<lo>-<hi>` for P6. Rows come in
+ * the order P1 P2 P3 P4 P5 P6 S1 S2. P4 rows append
+ * ` pairs=<r1>,<r2>,... straddles=<r1>,<r2>,... coverage=ok|weak`, one
+ * value per reader in ascending CPU order, and their iters is the number
+ * of writes made. After the rows, one line per ordered pair:
+ *
+ *   SENS cpus=a>b S1=<n> S2=<n> P2_sensitive=yes|no P3_sensitive=yes|no
+ *
+ * then `coherency: PASS` or `coherency: FAIL (n rows)`. A P row fails on
+ * any forbidden outcome or timeout, and a P4 row also when it is weak (a
+ * reader saw no straddle); S1 and S2 are never judged.
  *
  * Per-CPU dispatch: a worker task per remote participant, created at
  * TASK_PRIORITY_HIGH, pinned with task_set_affinity() and queued with
@@ -43,6 +53,7 @@
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
+#include "uart.h"
 #include "vmm.h"
 
 /* A worker that has neither published nor finished after this long is
@@ -71,6 +82,9 @@ struct coh_part {
     uint64_t n;
     struct coh_vars *wv;            /* writer view (all shared state) */
     struct coh_vars *rv;            /* reader view of data/flag/x */
+    uint64_t p4_target;             /* P4: straddles each reader should reach */
+    uint64_t p4_budget_ticks;       /* P4: writer time budget */
+    uint32_t inject;                /* enum coh_inject (self-test only) */
     uint64_t check;
 
     alignas(COH_LINE_BYTES) struct coh_result res;
@@ -84,6 +98,8 @@ struct coh_part {
 };
 static_assert(offsetof(struct coh_part, done) - offsetof(struct coh_part, res) ==
               COH_LINE_BYTES, "coh_part outputs must fit one line");
+static_assert(offsetof(struct coh_part, res) == COH_LINE_BYTES,
+              "coh_part parameters must fit one line");
 
 /*
  * Negative control (c) runs as an internal pattern after the public ones.
@@ -108,17 +124,26 @@ struct coh_remote {
 struct coh_row {
     enum coh_pattern pat;
     char cpus[20];
-    uint64_t n;
+    uint64_t n;                     /* P4: writes made */
     uint64_t forbidden;
     uint64_t timeouts;
     uint64_t ms;
     uint32_t misplaced;             /* workers that ran on the wrong CPU */
     uint32_t lost;                  /* results never published */
     uint64_t aux[4];                /* control c: from the reader */
+    /* P4 only: per reader (role - 1), ascending CPU order. */
+    uint32_t nreaders;
+    uint64_t pairs[MAX_CPUS];
+    uint64_t straddles[MAX_CPUS];
+    bool weak;                      /* some reader saw no straddle */
 };
 
 static const char *const g_pattern_names[COH_PATTERN_COUNT] = {
-    "P1", "P2", "P3", "P4", "P5", "P6", "S1",
+    "P1", "P2", "P3", "P4", "P5", "P6", "S1", "S2",
+};
+
+static const char *const g_inject_names[COH_INJECT_COUNT] = {
+    "none", "P3-stale-partner", "P4-descending", "P4-no-writes", "P6-sum-offset",
 };
 
 const char *coherency_pattern_name(enum coh_pattern p)
@@ -126,12 +151,24 @@ const char *coherency_pattern_name(enum coh_pattern p)
     return ((unsigned)p < COH_PATTERN_COUNT) ? g_pattern_names[p] : "??";
 }
 
-bool coherency_row_fails(enum coh_pattern p, uint64_t forbidden, uint64_t timeouts)
+bool coherency_row_fails(enum coh_pattern p, uint64_t forbidden, uint64_t timeouts, bool weak)
 {
-    if (p == COH_S1) {
+    if (p == COH_S1 || p == COH_S2) {
         return false;
     }
+    if (p == COH_P4 && weak) {
+        return true;
+    }
     return forbidden != 0 || timeouts != 0;
+}
+
+uint64_t coherency_p4_target(uint32_t scale)
+{
+    if (scale == 0) {
+        scale = 1;
+    }
+    uint64_t t = COH_P4_STRADDLE_TARGET / scale;
+    return (t == 0) ? 1 : t;
 }
 
 uint64_t coherency_iters(enum coh_pattern p, uint32_t scale)
@@ -140,6 +177,7 @@ uint64_t coherency_iters(enum coh_pattern p, uint32_t scale)
     switch (p) {
     case COH_P3:
     case COH_P5:
+    case COH_S2:
         base = COH_ITERS_ROUNDS;
         break;
     case COH_P6:
@@ -167,6 +205,7 @@ static uint64_t coh_part_checksum(const struct coh_part *p)
     uint64_t f[] = {
         p->pattern, p->role, p->cpu, p->nparts, p->n,
         (uint64_t)(uintptr_t)p->wv, (uint64_t)(uintptr_t)p->rv,
+        p->p4_target, p->p4_budget_ticks, p->inject,
     };
     for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
         h ^= f[i] + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -187,17 +226,43 @@ static void coh_reset_vars(struct coh_vars *v)
  * Participant body (runs on the target CPU, worker task or inline)
  * ------------------------------------------------------------------------ */
 
-static void coh_part_body(uint32_t pattern, uint32_t role, uint32_t nparts, uint64_t n,
-                          struct coh_vars *wv, struct coh_vars *rv,
-                          uint64_t *local_sense, const struct coh_env *env,
-                          struct coh_result *res)
+/*
+ * Self-test fake for P3 T1 (COH_INJECT_P3_STALE_PARTNER): takes part in
+ * every barrier of the real thread but never stores y and reports, for
+ * round r, that it read x = r - 1. T0 runs the real code, reads y = 0, and
+ * must count every round as forbidden.
+ */
+static void coh_sb_fake_partner(struct coh_vars *v, uint64_t n, uint64_t *local_sense,
+                                const struct coh_env *env, struct coh_result *res)
 {
-    switch (pattern) {
+    for (uint64_t r = 1; r <= n + 1; r++) {
+        if (coh_barrier_wait(&v->bar_count.v, &v->bar_sense.v, 2, local_sense,
+                             env, res) != COH_WAIT_OK) {
+            return;
+        }
+        if (r <= n) {
+            coh_st(&v->res1[r & 1].v, r - 1);
+        }
+    }
+}
+
+/* Start value of the self-test's descending P4 writer. */
+#define COH_P4_DESC_FIRST       (1ull << 62)
+
+static void coh_part_body(const struct coh_part *pp, uint64_t *local_sense,
+                          const struct coh_env *env, struct coh_result *res)
+{
+    uint32_t role = pp->role;
+    uint64_t n = pp->n;
+    struct coh_vars *wv = pp->wv;
+    struct coh_vars *rv = pp->rv;
+
+    switch (pp->pattern) {
     case COH_P1:
     case COH_P2:
     case COH_S1: {
-        enum coh_mp_kind kind = (pattern == COH_P1) ? COH_MP_REL_ACQ :
-                                (pattern == COH_P2) ? COH_MP_DMB : COH_MP_NONE;
+        enum coh_mp_kind kind = (pp->pattern == COH_P1) ? COH_MP_REL_ACQ :
+                                (pp->pattern == COH_P2) ? COH_MP_DMB : COH_MP_NONE;
         if (role == 0) {
             coh_mp_writer(kind, &wv->data.v, &wv->flag.v, n, env);
         } else {
@@ -206,13 +271,31 @@ static void coh_part_body(uint32_t pattern, uint32_t role, uint32_t nparts, uint
         break;
     }
     case COH_P3:
-        coh_sb_thread(role, wv, n, local_sense, env, res);
+        if (role == 1 && pp->inject == COH_INJECT_P3_STALE_PARTNER) {
+            coh_sb_fake_partner(wv, n, local_sense, env, res);
+        } else {
+            coh_sb_thread(role, true, wv, n, local_sense, env, res);
+        }
+        break;
+    case COH_S2:
+        coh_sb_thread(role, false, wv, n, local_sense, env, res);
         break;
     case COH_P4:
         if (role == 0) {
-            coh_corr_writer(&wv->x.v, n, env);
+            uint32_t nr = pp->nparts - 1u;
+            if (pp->inject == COH_INJECT_P4_DESCENDING) {
+                res->writes = coh_corr_writer_ex(&wv->x.v, &wv->p4_done.v, wv->strad, nr, n,
+                                                 pp->p4_target, pp->p4_budget_ticks,
+                                                 COH_P4_DESC_FIRST, true, env);
+            } else if (pp->inject == COH_INJECT_P4_NO_WRITES) {
+                res->writes = coh_corr_writer(&wv->x.v, &wv->p4_done.v, wv->strad, nr, 0,
+                                              pp->p4_target, 0, env);
+            } else {
+                res->writes = coh_corr_writer(&wv->x.v, &wv->p4_done.v, wv->strad, nr, n,
+                                              pp->p4_target, pp->p4_budget_ticks, env);
+            }
         } else {
-            coh_corr_reader(&rv->x.v, n, env, res);
+            coh_corr_reader(&rv->x.v, &wv->p4_done.v, &wv->strad[role - 1u].v, env, res);
         }
         break;
     case COH_P5:
@@ -224,7 +307,6 @@ static void coh_part_body(uint32_t pattern, uint32_t role, uint32_t nparts, uint
     default:
         break;
     }
-    (void)nparts;
 }
 
 /* ------------------------------------------------------------------------
@@ -430,10 +512,14 @@ static void coh_part_run(struct coh_part *p)
     params.n = p->n;
     params.wv = p->wv;
     params.rv = p->rv;
+    params.p4_target = p->p4_target;
+    params.p4_budget_ticks = p->p4_budget_ticks;
+    params.inject = p->inject;
     uint64_t check = p->check;
 
     if (coh_part_checksum(&params) != check || params.wv == NULL ||
-        params.rv == NULL || params.pattern > COH_PAT_DCOFF) {
+        params.rv == NULL || params.pattern > COH_PAT_DCOFF ||
+        params.role >= params.nparts || params.nparts > MAX_CPUS) {
         /* Stale or torn parameters: touch no shared state at all. */
         bad = 1;
         res.timeouts++;
@@ -457,8 +543,7 @@ static void coh_part_run(struct coh_part *p)
                     coh_dcoff_role(params.role, params.wv, params.n, params.nonce,
                                    p, &env, &res, aux);
                 } else {
-                    coh_part_body(params.pattern, params.role, params.nparts, params.n,
-                                  params.wv, params.rv, &local_sense, &env, &res);
+                    coh_part_body(&params, &local_sense, &env, &res);
                 }
                 t1 = coh_cntpct();
             }
@@ -608,15 +693,28 @@ static void coh_leave(struct coh_caller *c)
  * One run of one pattern over one CPU set
  * ------------------------------------------------------------------------ */
 
+/* Per-run settings shared by every job of one litmus or neg run. */
+struct coh_job_cfg {
+    uint32_t local;                 /* CPU the caller plays inline */
+    uint64_t p4_target;
+    uint64_t p4_budget_ticks;
+    enum coh_inject inject;
+};
+
 static void coh_run_job(enum coh_pattern pat, uint64_t n, const uint32_t *cpus,
                         uint32_t nparts, struct coh_vars *wv, struct coh_vars *rv,
-                        uint32_t local, struct coh_row *row)
+                        const struct coh_job_cfg *cfg, struct coh_row *row)
 {
     struct coh_remote rem[MAX_CPUS] = {0};
     bool started[MAX_CPUS] = {false};
     int local_idx = -1;
+    uint32_t local = cfg->local;
 
     coh_reset_vars(wv);
+    if (pat == COH_P6 && cfg->inject == COH_INJECT_P6_SUM_OFFSET) {
+        coh_st(&wv->sum.v, 1);      /* fault: the sum starts one too high */
+        coh_dmb_ish();
+    }
     uint64_t nonce = ++g_nonce;
     for (uint32_t i = 0; i < nparts; i++) {
         struct coh_part *p = &g_parts[i];
@@ -628,9 +726,11 @@ static void coh_run_job(enum coh_pattern pat, uint64_t n, const uint32_t *cpus,
         p->n = n;
         p->wv = wv;
         p->rv = rv;
+        p->p4_target = cfg->p4_target;
+        p->p4_budget_ticks = cfg->p4_budget_ticks;
+        p->inject = (uint32_t)cfg->inject;
         p->check = coh_part_checksum(p);
-        p->res.forbidden = 0;
-        p->res.timeouts = 0;
+        p->res = (struct coh_result){0};
         p->t_start = 0;
         p->t_end = 0;
         p->ran_on = 0;
@@ -667,6 +767,15 @@ static void coh_run_job(enum coh_pattern pat, uint64_t n, const uint32_t *cpus,
     for (int k = 0; k < 4; k++) {
         row->aux[k] = 0;
     }
+    row->nreaders = (pat == COH_P4 && nparts > 0) ? nparts - 1u : 0u;
+    row->weak = false;
+    for (uint32_t k = 0; k < MAX_CPUS; k++) {
+        row->pairs[k] = 0;
+        row->straddles[k] = 0;
+    }
+    if (pat == COH_P4) {
+        row->n = 0;                 /* writes made, from the writer */
+    }
     uint64_t t_min = UINT64_MAX;
     uint64_t t_max = 0;
     for (uint32_t i = 0; i < nparts; i++) {
@@ -687,6 +796,14 @@ static void coh_run_job(enum coh_pattern pat, uint64_t n, const uint32_t *cpus,
         for (int k = 0; k < 4; k++) {
             row->aux[k] += p->aux[k];
         }
+        if (pat == COH_P4) {
+            if (i == 0) {
+                row->n = p->res.writes;
+            } else {
+                row->pairs[i - 1u] = p->res.pairs;
+                row->straddles[i - 1u] = p->res.straddles;
+            }
+        }
         if (p->t_start != 0 && p->t_start < t_min) {
             t_min = p->t_start;
         }
@@ -695,6 +812,11 @@ static void coh_run_job(enum coh_pattern pat, uint64_t n, const uint32_t *cpus,
         }
     }
     row->timeouts += row->lost;
+    for (uint32_t k = 0; k < row->nreaders; k++) {
+        if (row->straddles[k] == 0) {
+            row->weak = true;       /* includes a reader whose result was lost */
+        }
+    }
 
     /* End-state checks, once every role finished cleanly. */
     if (row->timeouts == 0) {
@@ -768,15 +890,38 @@ static void coh_print_header(coh_out_fn out)
     }
 }
 
+/* Appends ` <key>=v0,v1,...` for @n values to @buf at *@pos. */
+static void coh_list_append(char *buf, size_t size, size_t *pos, const char *key,
+                            const uint64_t *v, uint32_t n)
+{
+    int len = uart_snprintf(buf + *pos, size - *pos, " %s=", key);
+    *pos = (len > 0 && *pos + (size_t)len < size) ? *pos + (size_t)len : size - 1u;
+    for (uint32_t k = 0; k < n; k++) {
+        len = uart_snprintf(buf + *pos, size - *pos, "%s%llu", (k == 0) ? "" : ",",
+                            (unsigned long long)v[k]);
+        *pos = (len > 0 && *pos + (size_t)len < size) ? *pos + (size_t)len : size - 1u;
+    }
+}
+
 static void coh_print_row(coh_out_fn out, const struct coh_row *r)
 {
     if (!out) {
         return;
     }
-    out("%-7s %-9s %9llu %9llu %8llu %7llu\r\n",
-        coherency_pattern_name(r->pat), r->cpus,
-        (unsigned long long)r->n, (unsigned long long)r->forbidden,
-        (unsigned long long)r->timeouts, (unsigned long long)r->ms);
+    /* One out() call per row, so a capturing sink sees whole rows. */
+    char line[384];
+    int len = uart_snprintf(line, sizeof(line), "%-7s %-9s %9llu %9llu %8llu %7llu",
+                            coherency_pattern_name(r->pat), r->cpus,
+                            (unsigned long long)r->n, (unsigned long long)r->forbidden,
+                            (unsigned long long)r->timeouts, (unsigned long long)r->ms);
+    size_t pos = (len > 0 && (size_t)len < sizeof(line)) ? (size_t)len : sizeof(line) - 1u;
+    if (r->pat == COH_P4) {
+        coh_list_append(line, sizeof(line), &pos, "pairs", r->pairs, r->nreaders);
+        coh_list_append(line, sizeof(line), &pos, "straddles", r->straddles, r->nreaders);
+        (void)uart_snprintf(line + pos, sizeof(line) - pos, " coverage=%s",
+                            r->weak ? "weak" : "ok");
+    }
+    out("%s\r\n", line);
     if (r->misplaced != 0) {
         out("# %s %s: %u worker(s) ran on the wrong CPU (counted as timeouts)\r\n",
             coherency_pattern_name(r->pat), r->cpus, (unsigned)r->misplaced);
@@ -792,14 +937,24 @@ static void coh_sum_row(struct coh_summary *sum, const struct coh_row *r)
     sum->rows++;
     sum->forbidden[r->pat] += r->forbidden;
     sum->timeouts[r->pat] += r->timeouts;
-    if (coherency_row_fails(r->pat, r->forbidden, r->timeouts)) {
+    if (r->pat == COH_P4) {
+        if (r->weak) {
+            sum->p4_weak_rows++;
+        }
+        for (uint32_t k = 0; k < r->nreaders; k++) {
+            if (r->straddles[k] < sum->p4_min_straddles) {
+                sum->p4_min_straddles = r->straddles[k];
+            }
+        }
+    }
+    if (coherency_row_fails(r->pat, r->forbidden, r->timeouts, r->weak)) {
         sum->failed_rows++;
     }
 }
 
 /* Pair patterns over every ordered pair (a != b), row-major. */
 static void coh_run_pairs(enum coh_pattern pat, uint64_t n, struct coh_vars *wv,
-                          struct coh_vars *rv, uint32_t local, coh_out_fn out,
+                          struct coh_vars *rv, const struct coh_job_cfg *cfg, coh_out_fn out,
                           struct coh_summary *sum)
 {
     for (uint32_t a = 0; a < cpu_count; a++) {
@@ -810,16 +965,22 @@ static void coh_run_pairs(enum coh_pattern pat, uint64_t n, struct coh_vars *wv,
             uint32_t cpus[2] = { a, b };
             struct coh_row row;
             coh_cpus_pair(row.cpus, sizeof(row.cpus), a, b);
-            coh_run_job(pat, n, cpus, 2, wv, rv, local, &row);
+            coh_run_job(pat, n, cpus, 2, wv, rv, cfg, &row);
             coh_print_row(out, &row);
             coh_sum_row(sum, &row);
+            if (pat == COH_S1) {
+                sum->s1_pair[a][b] += row.forbidden;
+            } else if (pat == COH_S2) {
+                sum->s2_pair[a][b] += row.forbidden;
+            }
         }
     }
 }
 
 /* P4: one run per writer, every other online CPU reads. */
 static void coh_run_corr(uint64_t n, struct coh_vars *wv, struct coh_vars *rv,
-                         uint32_t local, coh_out_fn out, struct coh_summary *sum)
+                         const struct coh_job_cfg *cfg, coh_out_fn out,
+                         struct coh_summary *sum)
 {
     for (uint32_t w = 0; w < cpu_count; w++) {
         uint32_t cpus[MAX_CPUS];
@@ -832,7 +993,7 @@ static void coh_run_corr(uint64_t n, struct coh_vars *wv, struct coh_vars *rv,
         }
         struct coh_row row;
         coh_cpus_range(row.cpus, sizeof(row.cpus), (int)w, 0, cpu_count - 1);
-        coh_run_job(COH_P4, n, cpus, k, wv, rv, local, &row);
+        coh_run_job(COH_P4, n, cpus, k, wv, rv, cfg, &row);
         coh_print_row(out, &row);
         coh_sum_row(sum, &row);
     }
@@ -842,60 +1003,115 @@ static void coh_run_corr(uint64_t n, struct coh_vars *wv, struct coh_vars *rv,
  * coherency litmus
  * ------------------------------------------------------------------------ */
 
-int coherency_litmus_run(uint32_t scale, coh_out_fn out, struct coh_summary *sum)
+static void coh_print_sens(coh_out_fn out, const struct coh_summary *sum)
 {
-    struct coh_summary local_sum;
-    if (sum == NULL) {
-        sum = &local_sum;
+    for (uint32_t a = 0; a < cpu_count; a++) {
+        for (uint32_t b = 0; b < cpu_count; b++) {
+            if (a == b) {
+                continue;
+            }
+            uint64_t s1 = sum->s1_pair[a][b];
+            uint64_t s2 = sum->s2_pair[a][b];
+            out("SENS cpus=%u>%u S1=%llu S2=%llu P2_sensitive=%s P3_sensitive=%s\r\n",
+                (unsigned)a, (unsigned)b, (unsigned long long)s1, (unsigned long long)s2,
+                s1 ? "yes" : "no", s2 ? "yes" : "no");
+        }
     }
-    memset(sum, 0, sizeof(*sum));
-    if (scale == 0) {
-        scale = 1;
-    }
+}
+
+int coherency_litmus_run_opts(const struct coh_run_opts *opts, coh_out_fn out,
+                              struct coh_summary *sum)
+{
+    static struct coh_summary local_sum;    /* serialized by g_busy */
+    uint32_t scale = (opts->scale == 0) ? 1u : opts->scale;
+    uint32_t mask = (opts->patterns == 0) ? COH_PAT_ALL : (opts->patterns & COH_PAT_ALL);
+    enum coh_inject inject = ((unsigned)opts->inject < COH_INJECT_COUNT) ? opts->inject
+                                                                         : COH_INJECT_NONE;
     if (cpu_count < 2 || cpu_count > MAX_CPUS) {
         if (out) {
             out("coherency: needs 2..%u online CPUs (have %u)\r\n",
                 (unsigned)MAX_CPUS, (unsigned)cpu_count);
         }
+        if (sum != NULL) {
+            memset(sum, 0, sizeof(*sum));
+        }
         return -1;
     }
     struct coh_caller caller;
     if (coh_enter(&caller, out) != 0) {
+        if (sum != NULL) {
+            memset(sum, 0, sizeof(*sum));
+        }
         return -1;
     }
+    if (sum == NULL) {
+        sum = &local_sum;
+    }
+    memset(sum, 0, sizeof(*sum));
+    sum->p4_min_straddles = UINT64_MAX;
+
+    struct coh_job_cfg cfg = {
+        .local = caller.cpu,
+        .p4_target = coherency_p4_target(scale),
+        .p4_budget_ticks = coh_ms_to_ticks(COH_P4_BUDGET_MS),
+        .inject = inject,
+    };
+    sum->p4_target = cfg.p4_target;
 
     if (out) {
-        out("# coherency litmus: cpus=0-%u scale=%u timeout=%ums caller=cpu%u\r\n",
+        out("# coherency litmus: cpus=0-%u scale=%u timeout=%ums caller=cpu%u "
+            "p4_target=%llu p4_budget_ms=%u\r\n",
             (unsigned)(cpu_count - 1), (unsigned)scale, (unsigned)COH_TIMEOUT_MS,
-            (unsigned)caller.cpu);
+            (unsigned)caller.cpu, (unsigned long long)cfg.p4_target,
+            (unsigned)COH_P4_BUDGET_MS);
+        if (mask != COH_PAT_ALL || inject != COH_INJECT_NONE) {
+            out("# self-test run: patterns=0x%x inject=%s (not a spec run)\r\n",
+                (unsigned)mask, g_inject_names[inject]);
+        }
     }
     coh_print_header(out);
 
     struct coh_vars *v = &g_vars;
-    coh_run_pairs(COH_P1, coherency_iters(COH_P1, scale), v, v, caller.cpu, out, sum);
-    coh_run_pairs(COH_P2, coherency_iters(COH_P2, scale), v, v, caller.cpu, out, sum);
-    coh_run_pairs(COH_P3, coherency_iters(COH_P3, scale), v, v, caller.cpu, out, sum);
-    coh_run_corr(coherency_iters(COH_P4, scale), v, v, caller.cpu, out, sum);
-    coh_run_pairs(COH_P5, coherency_iters(COH_P5, scale), v, v, caller.cpu, out, sum);
-    {
-        uint32_t cpus[MAX_CPUS];
-        for (uint32_t c = 0; c < cpu_count; c++) {
-            cpus[c] = c;
+    for (int p = COH_P1; p < COH_PATTERN_COUNT; p++) {
+        if ((mask & COH_PAT_BIT(p)) == 0) {
+            continue;
         }
-        struct coh_row row;
-        coh_cpus_range(row.cpus, sizeof(row.cpus), -1, 0, cpu_count - 1);
-        coh_run_job(COH_P6, coherency_iters(COH_P6, scale), cpus, cpu_count, v, v,
-                    caller.cpu, &row);
-        coh_print_row(out, &row);
-        coh_sum_row(sum, &row);
+        uint64_t n = coherency_iters((enum coh_pattern)p, scale);
+        if (p == COH_P4) {
+            coh_run_corr(n, v, v, &cfg, out, sum);
+        } else if (p == COH_P6) {
+            uint32_t cpus[MAX_CPUS];
+            for (uint32_t c = 0; c < cpu_count; c++) {
+                cpus[c] = c;
+            }
+            struct coh_row row;
+            coh_cpus_range(row.cpus, sizeof(row.cpus), -1, 0, cpu_count - 1);
+            coh_run_job(COH_P6, n, cpus, cpu_count, v, v, &cfg, &row);
+            coh_print_row(out, &row);
+            coh_sum_row(sum, &row);
+        } else {
+            coh_run_pairs((enum coh_pattern)p, n, v, v, &cfg, out, sum);
+        }
     }
-    coh_run_pairs(COH_S1, coherency_iters(COH_S1, scale), v, v, caller.cpu, out, sum);
 
     coh_leave(&caller);
+    if (sum->p4_min_straddles == UINT64_MAX) {
+        sum->p4_min_straddles = 0;      /* P4 did not run */
+    }
 
     if (out) {
-        out("# S1 relaxed outcomes: %llu (reported, not judged)\r\n",
-            (unsigned long long)sum->forbidden[COH_S1]);
+        bool both = (mask & COH_PAT_BIT(COH_S1)) != 0 && (mask & COH_PAT_BIT(COH_S2)) != 0;
+        if (both) {
+            coh_print_sens(out, sum);
+        }
+        out("# S1 relaxed outcomes: %llu, S2 relaxed outcomes: %llu (reported, not judged)\r\n",
+            (unsigned long long)sum->forbidden[COH_S1],
+            (unsigned long long)sum->forbidden[COH_S2]);
+        if ((mask & COH_PAT_BIT(COH_P4)) != 0) {
+            out("# P4 weak rows: %u, fewest straddles of any reader: %llu (target %llu)\r\n",
+                (unsigned)sum->p4_weak_rows, (unsigned long long)sum->p4_min_straddles,
+                (unsigned long long)sum->p4_target);
+        }
         if (sum->failed_rows == 0) {
             out("coherency: PASS\r\n");
         } else {
@@ -903,6 +1119,16 @@ int coherency_litmus_run(uint32_t scale, coh_out_fn out, struct coh_summary *sum
         }
     }
     return (sum->failed_rows == 0) ? 0 : 1;
+}
+
+int coherency_litmus_run(uint32_t scale, coh_out_fn out, struct coh_summary *sum)
+{
+    struct coh_run_opts opts = {
+        .scale = scale,
+        .patterns = COH_PAT_ALL,
+        .inject = COH_INJECT_NONE,
+    };
+    return coherency_litmus_run_opts(&opts, out, sum);
 }
 
 /* ------------------------------------------------------------------------
@@ -917,7 +1143,7 @@ static const char *const g_neg_names[COH_NEG_COUNT] = {
 };
 
 /* Control (c) over every ordered pair: a = writer, b = reader. */
-static void coh_run_dcoff(struct coh_vars *wv, uint32_t local, coh_out_fn out,
+static void coh_run_dcoff(struct coh_vars *wv, const struct coh_job_cfg *cfg, coh_out_fn out,
                           struct coh_neg_summary *sum)
 {
     if (out) {
@@ -935,7 +1161,7 @@ static void coh_run_dcoff(struct coh_vars *wv, uint32_t local, coh_out_fn out,
             struct coh_row row;
             coh_cpus_pair(row.cpus, sizeof(row.cpus), a, b);
             coh_run_job((enum coh_pattern)COH_PAT_DCOFF, COH_DCOFF_LOADS, cpus, 2, wv, wv,
-                        local, &row);
+                        cfg, &row);
             sum->dcoff_loads += COH_DCOFF_LOADS;
             sum->dcoff_p1_stale += row.aux[0];
             sum->dcoff_p1_fresh += row.aux[1];
@@ -1009,6 +1235,12 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
     if (n < COH_MIN_ITERS) {
         n = COH_MIN_ITERS;
     }
+    struct coh_job_cfg cfg = {
+        .local = caller.cpu,
+        .p4_target = coherency_p4_target(scale),
+        .p4_budget_ticks = coh_ms_to_ticks(COH_P4_BUDGET_MS),
+        .inject = COH_INJECT_NONE,
+    };
     static const uint32_t flags[2] = {
         VMM_FLAGS_KERNEL_DATA | VMM_FLAG_NONSHARE,
         VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE,
@@ -1034,12 +1266,13 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
         }
         coh_print_header(out);
 
-        struct coh_summary s2;
+        static struct coh_summary s2;       /* serialized by g_busy */
         memset(&s2, 0, sizeof(s2));
-        coh_run_pairs(COH_P2, n, wv, rv, caller.cpu, out, &s2);
-        struct coh_summary s4;
+        coh_run_pairs(COH_P2, n, wv, rv, &cfg, out, &s2);
+        static struct coh_summary s4;
         memset(&s4, 0, sizeof(s4));
-        coh_run_corr(n, wv, rv, caller.cpu, out, &s4);
+        s4.p4_min_straddles = UINT64_MAX;
+        coh_run_corr(n, wv, rv, &cfg, out, &s4);
 
         /* Tear the alias down; vmm_unmap_block broadcasts the TLBI. */
         vmm_unmap_block(COH_ALIAS_VA);
@@ -1061,7 +1294,7 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
     }
 
     if (rc == 0) {
-        coh_run_dcoff(wv, caller.cpu, out, sum);
+        coh_run_dcoff(wv, &cfg, out, sum);
     }
 
     coh_leave(&caller);

@@ -23,6 +23,14 @@ forbidden-outcome count, timeouts, and elapsed time.
 | P5 | Ping-pong | Two CPUs alternate on one counter: CPU A waits for an even value and writes value+1, CPU B waits for odd and writes value+1, plain loads, `STLR` stores, N round trips. | a lost or duplicated step (final != 2N), or no progress within the timeout |
 | P6 | Atomic sum | All online CPUs add 1 to one word N times with exclusive or LSE atomics. | final != CPUs x N |
 | S1 | MP+none (sensitivity) | As P2 with both DMBs removed. | none: relaxed outcomes are ALLOWED on Armv8. Report the count to show the harness can observe reordering. |
+| S2 | SB+none (sensitivity for P3) | As P3 with both DMBs removed. | none: `r0 < r && r1 < r` is ALLOWED without barriers. Report the count per pair. |
+
+P4 coverage (revision 2): each P4 reader also counts `pairs` (read pairs
+taken) and `straddles` (pairs whose two reads returned different values,
+that is, pairs that observed a write in between). A P4 row reports both, and
+P4 runs for a time budget instead of a fixed count: the writer keeps
+incrementing until every reader has at least 10^5 straddles or 2 s pass. A
+P4 row with zero straddles is reported as `weak`, not as a pass.
 
 Timeouts: any wait loop that makes no progress for 1 s counts as a timeout
 and is reported as a failure of that row (a stale line that never updates
@@ -31,4 +39,11 @@ S1, 10^5 rounds per pair for P3 and P5, 10^6 per CPU for P6; the Linux run
 loops the whole set for at least 10 minutes per board.
 
 Pass criterion for a board: every P row has zero forbidden outcomes and
-zero timeouts. S1 is reported, never judged.
+zero timeouts, and every P4 row has nonzero straddles. S1 and S2 are
+reported, never judged, but a P3 or P2 result counts as sensitive on a CPU
+pair only if S2 or S1 respectively showed relaxed outcomes on that pair.
+
+Revision 2 (2026-11-09, after C1 critic round 1): adds S2 and the P4
+coverage counters. The checkers for every forbidden predicate (P1-P6) and
+the path from a failing row to the final FAIL verdict must be fault-injected
+in the self-test.
