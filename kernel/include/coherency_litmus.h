@@ -1,10 +1,11 @@
 /*
  * coherency_litmus.h - Freestanding cache-coherency litmus patterns (#1193)
  *
- * Implements P1-P6 and S1 from docs/archive/coherency-gauntlet/litmus-spec.md
- * with the same code shapes, barriers and forbidden-outcome definitions as
- * the Linux harness (scripts/coherency/, C1), so the two produce rows that
- * compare line for line.
+ * Implements P1-P6, S1 and S2 from docs/archive/coherency-gauntlet/litmus-spec.md
+ * (revision 2: S2 = SB+none, P4 time budget with pairs / straddles
+ * counters) with the same code shapes, barriers and forbidden-outcome
+ * definitions as the Linux harness (scripts/coherency/, C1), so the two
+ * produce rows that compare line for line.
  *
  * Rules every pattern here follows:
  *   - Shared variables live in ordinary cacheable memory (Normal WB, Inner
@@ -12,7 +13,8 @@
  *     callers place them in .bss or PMM pages, never in ncmem.
  *   - No DC or IC cache maintenance anywhere. Only plain LDR/STR (volatile
  *     accesses), LDAR, STLR, DMB ISH / ISHST / ISHLD and LDXR/STXR
- *     (LDAXR/STLXR for the barrier counter).
+ *     (LDAXR/STLXR for the barrier counter). S2 replaces each DMB ISH of
+ *     P3 with a compiler-only barrier.
  *   - Every wait loop has a no-progress timeout measured with CNTPCT_EL0
  *     against a tick budget the caller derives from CNTFRQ_EL0 (1 s in the
  *     spec). A loop that sees no change in its watched value for the whole
@@ -35,6 +37,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "config.h"     /* MAX_CPUS */
 
 #if !defined(PLATFORM_X86_64)
 
@@ -47,6 +50,12 @@
 
 /* Writers poll the abort flag once per this many iterations. */
 #define COH_WRITER_ABORT_MASK   0xFFFu
+
+/* P4 readers publish their straddle count once per this many pairs and
+ * check the writer's done flag once per COH_CORR_DONE_MASK + 1 pairs
+ * (the same cadence as the C1 harness). */
+#define COH_CORR_PUBLISH_MASK   0x3FFu
+#define COH_CORR_DONE_MASK      0x3Fu
 
 struct coh_line {
     alignas(COH_LINE_BYTES) volatile uint64_t v;
@@ -71,6 +80,8 @@ struct coh_vars {
     struct coh_line bar_count;  /* sense-reversing barrier: arrivals */
     struct coh_line bar_sense;  /* sense-reversing barrier: sense */
     struct coh_line abort;      /* non-zero once any role timed out */
+    struct coh_line p4_done;    /* P4: writer finished (STLR) */
+    struct coh_line strad[MAX_CPUS];    /* P4: straddles per reader (role - 1) */
 };
 
 /* ------------------------------------------------------------------------
@@ -112,6 +123,13 @@ static inline void coh_dmb_ishst(void)
 static inline void coh_dmb_ishld(void)
 {
     __asm__ volatile("dmb ishld" ::: "memory");
+}
+
+/* Compiler-only barrier: keeps program order in the emitted code, orders
+ * nothing in hardware (S2). */
+static inline void coh_cbar(void)
+{
+    __asm__ volatile("" ::: "memory");
 }
 
 /* Fetch-and-add with acquire + release (LDAXR/STLXR), for the barrier. */
@@ -170,7 +188,8 @@ static inline bool coh_mp_is_forbidden(uint64_t f, uint64_t d)
     return d < f;
 }
 
-/* P3: in round r both threads read the other's variable from before r. */
+/* P3 (and S2, where the outcome is allowed): in round r both threads read
+ * the other's variable from before r. */
 static inline bool coh_sb_is_forbidden(uint64_t r, uint64_t r0, uint64_t r1)
 {
     return r0 < r && r1 < r;
@@ -200,6 +219,9 @@ struct coh_env {
 struct coh_result {
     uint64_t forbidden;             /* forbidden outcomes observed by this role */
     uint64_t timeouts;              /* wait loops that made no progress */
+    uint64_t pairs;                 /* P4 reader: read pairs taken */
+    uint64_t straddles;             /* P4 reader: pairs whose two reads differed */
+    uint64_t writes;                /* P4 writer: writes made */
 };
 
 enum coh_wait_status {
@@ -393,17 +415,20 @@ static inline void coh_mp_reader(enum coh_mp_kind kind, const volatile uint64_t 
 }
 
 /* ------------------------------------------------------------------------
- * P3: store buffering with DMB ISH, rounds separated by the barrier
+ * P3 / S2: store buffering, rounds separated by the barrier
  * ------------------------------------------------------------------------ */
 
 /*
+ * @dmb true is P3 (DMB ISH between the store and the load); false is S2,
+ * where a compiler barrier takes its place and the relaxed outcome is
+ * allowed.
  * @me is 0 for T0 (stores x, reads y) and 1 for T1 (stores y, reads x).
  * Each round's read goes to res<me>[r & 1]. T0 judges round r - 1 right
  * after the barrier that opens round r (and round n after a final
  * barrier); T1 cannot overwrite that slot until round r + 1, which needs
  * T0 at the next barrier first.
  */
-static inline void coh_sb_thread(uint32_t me, struct coh_vars *v, uint64_t n,
+static inline void coh_sb_thread(uint32_t me, bool dmb, struct coh_vars *v, uint64_t n,
                                  uint64_t *local_sense, const struct coh_env *env,
                                  struct coh_result *res)
 {
@@ -424,7 +449,11 @@ static inline void coh_sb_thread(uint32_t me, struct coh_vars *v, uint64_t n,
             }
         }
         coh_st(mine, r);
-        coh_dmb_ish();
+        if (dmb) {
+            coh_dmb_ish();
+        } else {
+            coh_cbar();
+        }
         uint64_t got = coh_ld(other);
         coh_st(&my_res[r & 1].v, got);
     }
@@ -441,40 +470,102 @@ static inline void coh_sb_thread(uint32_t me, struct coh_vars *v, uint64_t n,
 }
 
 /* ------------------------------------------------------------------------
- * P4: read-read coherence (CoRR) with plain accesses
+ * P4: read-read coherence (CoRR) with plain accesses, time budgeted
  * ------------------------------------------------------------------------ */
 
-static inline void coh_corr_writer(volatile uint64_t *x, uint64_t n,
-                                   const struct coh_env *env)
+/*
+ * Writer: plain stores of successive values (@first + 1, @first + 2, ...,
+ * or @first - 1, @first - 2, ... with @down, which only the self-test's
+ * fake writer uses). It makes at least @n writes, then keeps going until
+ * every one of the @nreaders readers has published at least @target
+ * straddles in @strad[0..nreaders) or @budget_ticks have passed since it
+ * started, and finally sets @done with STLR. The stop test runs once per
+ * COH_WRITER_ABORT_MASK + 1 writes, so the count is rounded up to that.
+ * Returns the number of writes made.
+ */
+static inline uint64_t coh_corr_writer_ex(volatile uint64_t *x, volatile uint64_t *done,
+                                          const struct coh_line *strad, uint32_t nreaders,
+                                          uint64_t n, uint64_t target, uint64_t budget_ticks,
+                                          uint64_t first, bool down,
+                                          const struct coh_env *env)
 {
-    for (uint64_t i = 1; i <= n; i++) {
-        coh_st(x, i);
-        if ((i & COH_WRITER_ABORT_MASK) == 0 && coh_ld(env->abort) != 0) {
-            return;
+    uint64_t t_start = coh_cntpct();
+    uint64_t i = 0;
+    uint64_t val = first;
+    for (;;) {
+        if ((i & COH_WRITER_ABORT_MASK) == 0) {
+            if (coh_ld(env->abort) != 0) {
+                break;
+            }
+            if (i >= n) {
+                bool all = true;
+                for (uint32_t k = 0; k < nreaders; k++) {
+                    if (coh_ld(&strad[k].v) < target) {
+                        all = false;
+                        break;
+                    }
+                }
+                if (all || coh_cntpct() - t_start >= budget_ticks) {
+                    break;
+                }
+            }
         }
+        i++;
+        val = down ? val - 1u : val + 1u;
+        coh_st(x, val);
     }
+    coh_stlr(done, 1);
+    return i;
 }
 
-static inline void coh_corr_reader(const volatile uint64_t *x, uint64_t n,
-                                   const struct coh_env *env, struct coh_result *res)
+static inline uint64_t coh_corr_writer(volatile uint64_t *x, volatile uint64_t *done,
+                                       const struct coh_line *strad, uint32_t nreaders,
+                                       uint64_t n, uint64_t target, uint64_t budget_ticks,
+                                       const struct coh_env *env)
 {
-    uint64_t a = coh_ld(x);
-    uint64_t b = coh_ld(x);
+    return coh_corr_writer_ex(x, done, strad, nreaders, n, target, budget_ticks, 0, false,
+                              env);
+}
+
+/*
+ * Reader: two plain loads of @x in a row. A pair whose loads differ is a
+ * straddle (a write landed between them); b < a is the CoRR violation.
+ * The straddle count goes to @my_strad every COH_CORR_PUBLISH_MASK + 1
+ * pairs (so the writer can stop early) and once more at the end. The
+ * reader stops when it sees @done, on abort, or after 1 s with no change
+ * in @x.
+ */
+static inline void coh_corr_reader(const volatile uint64_t *x, const volatile uint64_t *done,
+                                   volatile uint64_t *my_strad, const struct coh_env *env,
+                                   struct coh_result *res)
+{
+    uint64_t pairs = 0;
+    uint64_t straddles = 0;
     struct coh_wait w;
-    coh_wait_init(&w, b);
+    coh_wait_init(&w, coh_ld(x));
     for (;;) {
-        if (coh_corr_is_forbidden(a, b)) {
-            res->forbidden++;
+        uint64_t a = coh_ld(x);
+        uint64_t b = coh_ld(x);
+        pairs++;
+        if (a != b) {
+            straddles++;
+            if (coh_corr_is_forbidden(a, b)) {
+                res->forbidden++;
+            }
         }
-        if (b >= n) {
-            return;
+        if ((pairs & COH_CORR_PUBLISH_MASK) == 0) {
+            coh_st(my_strad, straddles);
+        }
+        if ((pairs & COH_CORR_DONE_MASK) == 0 && coh_ldar(done) != 0) {
+            break;
         }
         if (coh_wait_tick(&w, b, env, res) != COH_WAIT_OK) {
-            return;
+            break;
         }
-        a = coh_ld(x);
-        b = coh_ld(x);
     }
+    coh_st(my_strad, straddles);
+    res->pairs = pairs;
+    res->straddles = straddles;
 }
 
 /* ------------------------------------------------------------------------
