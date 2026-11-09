@@ -36,7 +36,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | rev 3 Jetson PASS (4fd7cde8, ee4838bb); Pi 5 rev 3 rerun next | 1 |
+| C1 | Linux reference bar | rev 3 PASS on both boards (4337b132); critic round 2 running | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL (false-pass flaw); rev 3 suite being built | 1 |
 | C3 | Boot-sequence audit and cacheable build | NC_AXIS=OFF @ c2122932 page-faults at boot (extern mismatch); fix + rev 3 suite in progress | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -269,6 +269,12 @@ Boards: jetson-nano-2 and pi-5-1 only.
   closed in the Linux harness.
 - Earlier v1 and v2 Linux P1/P2/S1 rows carry the rev 3 flaw; kept as a
   record, marked in the results file.
+- pi-5-1 rev 3 (same binary): 03:54:40 to 04:04:45 UTC, 265 passes, 600.9 s,
+  20670 rows, 0 weak. Every P row 0 / 0. P1 min observed 862,338, P2
+  863,230, P4 min straddles 100,000. S1 353,880,832 relaxed, S2 3,616.
+  Sensitivity: P2 12 of 12 pairs, P3 12 of 12 (S2 per pair 3 to 701).
+  Registers again identical to boot 4. First boot under the #1195 sequence
+  worked; card restored and the SLM-OS shell confirmed.
 
 ### Lab notes
 
