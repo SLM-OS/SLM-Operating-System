@@ -37,8 +37,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
-| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
-| C3 | Boot-sequence audit and cacheable build | QEMU stage done; hardware build is c3-hw-1193 @ c2122932 (C3 + suite rev 2 + neg fresh-lines fix), waits for boards | 0 |
+| C2 | `coherency` verb and litmus suite | hardware done (Jetson f9e4df48, Pi 5 e6da2f1b); critic round 1 running | 1 |
+| C3 | Boot-sequence audit and cacheable build | hardware stage running on c3-hw-1193 @ c2122932 (Pi 5 now, Jetson after C1) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -194,6 +194,39 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - Checked that a cached NC_AXIS=OFF cannot leak into a default build: the
   Makefile only passes `-DNC_AXIS=OFF`, but a signature change wipes the
   build directory (`Makefile:349-358`).
+
+### NC baseline, SLM-OS (C2 builder reports, critic running)
+
+| | Jetson kexec | Jetson UEFI | Pi 5 |
+|---|---|---|---|
+| Build | 9a13b9ee / 62a0217e | 62a0217e | 9a13b9ee |
+| Litmus P rows forbidden / timeouts | 0 / 0 (2 runs) | 0 / 0 | 0 / 0 (2 runs) |
+| S1 relaxed (sensitivity) | 1,227,299; 1,178,323 | 1,397,948 | 391,659; 394,730 |
+| Control a, Non-shareable alias | same cluster 0; cross 16/16 time out | same cluster 0; cross 7 forbidden, 4 timeouts | 0 on all 12 pairs |
+| Control b, NC alias | 30/30 time out (memory read 0) | 15 forbidden, 2 timeouts | P2 forbidden 1 on each of 12 pairs |
+| Control c, caches-off reader, phase 1 stale | same 14/14, cross 16/16 and 10/16 | same 14/14, cross 13/16 and 14/16 | 12/12 |
+| Integration | 19/19 (hwset kernel) | 19/19 | not captured |
+| bench stealing (us) | 10625 / 10627 / 11234 | 9831 / 11007 / 7933 | 13062 / 13266 / 17035 |
+| bench context avg (ns) | 5464 / 5457 / 5448 | 18063 / 17927 / 18034 | 2321 / 2318 / 2315 |
+| bench ipc avg (ns) | 128 / 112 / 113 | 163 / 86 / 92 | 817 / 810 / 812 |
+| bench smp | 5/5 | 5/5 | completes; tasks for CPUs 2, 3 report CPU 1 |
+| Boots to shell | 10/10 | 10/10 | 8 of 20 attempts (0 partial, 10 silent, 2 unclassified) |
+
+- Registers: SLM-OS reads the same CPUECTLR_EL1 and CLUSTERECTLR_EL1 as
+  Linux on every CPU of both boards (Jetson 0xa000400b40543000 / 0x4501;
+  Pi 5 cpu0 0x2000000961563000, cpu1-3 0x0000000961563000 / 0x500). All CPUs
+  at EL2 with E2H=1 TGE=1 and identical TCR_EL2 0x12b5193519, MAIR_EL2
+  0xff440400 on both boards. Jetson CPU 0 SCTLR_EL2 differs (0x30c01805
+  after kexec, 0x30c5183d after UEFI; others 0x30c51835).
+- Jetson BL31 from the TCU banner: `v2.8(release)`, built 11:44:32 May 9 2026.
+- The Non-shareable control (brief's required negative control) does fail
+  on hardware, but only between Jetson clusters; inside a DSU cluster it
+  stays coherent, as C0 predicted. The caches-off control shows staleness on
+  every same-cluster pair on both boards, and on 10 to 16 of 16 cross-cluster
+  pairs on Jetson (unexplained variation).
+- Unexplained, reported: Jetson context switch about 3.3x slower after UEFI
+  than after kexec; Pi 5 `bench smp` tasks for CPUs 2 and 3 report CPU 1.
+- #1199 filed: full Jetson test kernel page-faults in a Lua test.
 
 ### Lab notes
 
