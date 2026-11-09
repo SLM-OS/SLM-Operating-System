@@ -186,6 +186,24 @@ gate (step 3), together with the rest of the instruction.
   a failure in 10 repeated boots of the f546a126 test kernel; that run was
   started at once.
 
+- C3 round 1, final (07:37 UTC): **Pi 5 PASS**, with the gaps above plus
+  #1202 (one extra test failure in 12 removal test-kernel boots). **Jetson
+  not PASS (incomplete).** Coherence is supported on both paths (every row
+  clean on 30 pairs; control (a) times out on exactly the 16 cross-cluster
+  pairs and passes every same-cluster pair, so the suite sees cross-cluster
+  staleness on hardware). Missing: removal-build boots, integration and any
+  UEFI-direct run. **Correction to this log: in all 6 NC_AXIS=OFF stealing
+  runs on Jetson, CPUs 2 and 3 executed 0 stolen tasks (10 to 12 attempts,
+  0 successes), on both paths. Maintenance cost alone would slow every CPU,
+  not zero two of them, so "leftover maintenance cost" is not a shown cause;
+  the removal may mask a timing-dependent steal defect.** Under the removal
+  on kexec, CPUs 2-3 steal again. `test_work_stealing_distributes_load`
+  passed while CPUs 2-3 never stole, so it cannot see this. D6 (#1197): with
+  the removal, `task_table_fallback` and `current_task` rely on the
+  caches-off BSS clear (`boot.S:955`), a narrow window on Jetson where CPU 0
+  is not reset; same exposure in V1, which passed 20 boots. Suggested fix:
+  zero them with caches on in `task_table_init`.
+
 ## Failed approaches
 
 - Pi 5 Linux attempts 1 to 3 (console-only result path; then a 20 s settle
