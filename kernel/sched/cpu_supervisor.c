@@ -46,7 +46,6 @@
 #include "timer.h"
 #include "spinlock.h"
 #include "debug.h"
-#include "cache.h"
 #include "cpu_supervisor.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -145,6 +144,8 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     /* (4) Reset boot flag so the secondary's STLR is the only writer
      * the polling loop sees. */
     __atomic_store_n(&cpu_boot_flag[cpu], 0, __ATOMIC_RELEASE);
+    /* Complete the stores above before CPU_ON, as boot_secondary does. */
+    __asm__ volatile("dsb sy" ::: "memory");
 
     /* (5) PSCI CPU_ON. Forward the same arguments boot_secondary uses
      * the first time around — the secondary_entry assembly reads x0

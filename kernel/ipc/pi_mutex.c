@@ -10,7 +10,6 @@
 #include "spinlock.h"
 #include "debug.h"
 #include "smp.h"
-#include "cache.h"
 
 /* Statistics */
 static volatile uint32_t total_inversions = 0;

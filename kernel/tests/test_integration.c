@@ -21,7 +21,6 @@
 #include "../include/spinlock.h"
 #include "../include/pmm.h"
 #include "../include/platform.h"
-#include "../include/cache.h"
 #include "../include/slm_ffi.h"
 #include "../include/timer.h"
 #include "../include/preempt_point.h"
@@ -702,8 +701,8 @@ static void steal_test_task(void *arg)
      * effectively "sticky" to whichever CPU started it and stealers
      * pick up later tasks from the deque instead. That's fine for
      * stealing in theory, but when the whole task only does ~0.3 ms
-     * of work it finishes before stealers on Pi 5 (whose yield path
-     * is slowed by the DC CIVAC spinlock work) can claim their share.
+     * of work it finishes before stealers on Pi 5 can claim their
+     * share.
      *
      * A pure CPU-bound loop holds the task on its owner for long
      * enough that stealers reliably claim the other deque entries.
