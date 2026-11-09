@@ -18,6 +18,7 @@
 #include "ncmem.h"
 #include "nc_trace.h"
 #include "tegra_cpufreq.h"
+#include "vmm.h"        /* secondary_mmu_* */
 
 #include <stddef.h>
 
@@ -399,12 +400,12 @@ void secondary_init(uint32_t logical_cpu_id)
      * No-op when SECONDARY_PREEMPT is undefined. */
     preempt_check_cpu_mpidr(logical_cpu_id);
 
-    /* Verify SMPEN was set from EL2 on this secondary core */
-    if (cpu_has_smpen()) {
-        DEBUG_PRINT("CPU %u: SMPEN set", logical_cpu_id);
-    } else {
-        WARN("CPU %u: SMPEN NOT set", logical_cpu_id);
-    }
+    /* CPUECTLR_EL1 bit 6 is not an SMPEN bit on A76 / A78AE (see
+     * cpu_has_smpen in cache.h); debug log only. This used to WARN
+     * "SMPEN NOT set" from every secondary, which is meaningless on
+     * these cores (#1193 audit D9). */
+    DEBUG_PRINT("CPU %u: CPUECTLR_EL1 bit 6 = %d", logical_cpu_id,
+                cpu_has_smpen() ? 1 : 0);
 
     /* Initialize per-CPU GIC interface */
     DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
@@ -750,12 +751,15 @@ void smp_init(void)
     INFO("SMP: SETWAY_INVAL=OFF, no set/way loop on secondaries (#1193)");
 #endif
 
-    /* Check if SMPEN was successfully set from EL2 during boot */
-    if (cpu_has_smpen()) {
-        INFO("SMP: SMPEN set on CPU 0 — hardware cache coherency active");
-    } else {
-        WARN("SMP: SMPEN NOT set — using DC CVAC/CIVAC workaround");
-    }
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+    /* CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on
+     * Cortex-A78AE: neither core has an SMPEN bit, and both keep L1/L2
+     * coherent with no software enable (#1193, C0 facts Q1/Q4). The old
+     * "SMPEN NOT set, using DC CVAC/CIVAC workaround" WARN read a
+     * meaning into this bit that it does not have (audit D9). */
+    INFO("SMP: CPUECTLR_EL1 bit 6 = %d (not an SMPEN bit on this core)",
+         cpu_has_smpen() ? 1 : 0);
+#endif
 
     DEBUG_PRINT("  About to run spinlock tests...");
 
@@ -788,6 +792,20 @@ void smp_init(void)
      * CIVAC would overwrite the secondary's online=true at PoC.
      */
     cache_clean_range(cpu_data, sizeof(cpu_data));
+
+    /*
+     * smp_boot.S loads secondary_mmu_{ttbr,mair,tcr} with the MMU and
+     * caches off, so those loads bypass every cache and read DRAM.
+     * vmm_init wrote the words with caches on, so clean them to the PoC
+     * before CPU_ON (C0 facts section (b) step 1, #1193 audit D1). The
+     * secondary's own DC IVAC only worked because Cortex-A76 / A78AE
+     * execute DC IVAC as DC CIVAC, which writes back this CPU's dirty
+     * line; architecturally an invalidate may discard it, and the
+     * secondary would then read TTBR 0 and skip MMU enable.
+     */
+    cache_clean(&secondary_mmu_ttbr);
+    cache_clean(&secondary_mmu_mair);
+    cache_clean(&secondary_mmu_tcr);
 
     /* Boot secondary CPUs via PSCI CPU_ON */
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {

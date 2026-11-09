@@ -29,9 +29,15 @@
 #define CACHE_LINE_SIZE 64
 
 /*
- * Check if SMPEN (bit 6) is set in CPUECTLR_EL1.
- * On Cortex-A76, this register is encoded as S3_0_C15_C1_4.
- * Returns true if the current core has cache coherency enabled.
+ * Read bit 6 of CPUECTLR_EL1 (S3_0_C15_C1_4).
+ *
+ * The name is historical: SMPEN is a Cortex-A53/A57/A72 bit at a
+ * different encoding (S3_1_C15_C2_1). On Cortex-A76 bit 6 is RES0 and
+ * on Cortex-A78AE it is PF_MODE[0] (prefetch aggressiveness); neither
+ * core has a coherency-enable bit, and both keep L1/L2 coherent in
+ * hardware (A76 TRM §13.32, §5.9; A78AE TRM §3.2.47, §2.4.9; #1193 C0
+ * facts Q1). The value says nothing about coherency. Reads are
+ * permitted at NS-EL2; never write this register (it traps to EL3).
  */
 #if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 #include <stdbool.h>
