@@ -72,23 +72,44 @@ bool oplib_cold_active(void);
 bool oplib_cold_library_empty(void);
 
 /* The channel's ops and VM, for the SLM GPU program (kernel/gpu/slm_prog.c).
- * 0 when active, -1 otherwise. */
+ * 0 when active, -1 otherwise. Anything that reserves VA in that VM or
+ * writes its page tables holds slm_prog_vm_lock (slm_prog.h, #1173). */
 int oplib_cold_vm(const struct ga10b_gpu_ops **ops, struct ga10b_vm **vm);
 
 /* The cold address space, or NULL when not active. */
 const struct oplib_gpu_as *oplib_cold_as(void);
 
 /* Allocate + map the weights pool once (after attach). Returns 0, 1 if
- * one already exists (unchanged), or negative. Not safe to race with a
- * GPU dispatch (the TLB invalidate): call it before inference starts. */
+ * one already exists (unchanged), or negative (OPLIB_AS_ERR_BUSY when
+ * the VM lock stayed busy). Safe while other GPU work runs: the VA and
+ * page-table writes hold the VM lock (#1173) and the TLB invalidate the
+ * dispatch lock. */
 int oplib_cold_weights_pool_init(uint64_t bytes);
 
 /* The cold weights pool, or NULL when not active / not allocated. */
 const struct oplib_wpool *oplib_cold_wpool(void);
 
 /* Physical address the cold VM maps at `gpu_va` (software walk of the
- * page tables, 0 if unmapped or not active). For smoke tests. */
+ * page tables under the VM lock, so it never reads a half-written entry;
+ * 0 if unmapped, not active or the lock stayed busy). For smoke tests. */
 uint64_t oplib_cold_lookup(uint64_t gpu_va);
+
+/* `nvgpu oplib vmrace` (#1173, test only): one round of the VM writes
+ * `nvgpu oplib wpool` makes, for racing them against `slm launch --gpu
+ * on`. oplib_wpool_build through the cold address space (each reserve
+ * and map under the VM lock) on a reused 4 KB page, then, under the
+ * lock, every page walked and unmapped. The GPU never uses these VAs.
+ * Each round leaves 16 KB of VA and a page-table page every 128 rounds
+ * behind. Returns 0, or -1 when the round found a fault or could not
+ * run (counted in *st). */
+struct oplib_cold_vmrace_stats {
+    uint32_t rounds;
+    uint32_t busy;       /* the VM lock stayed busy */
+    uint32_t map_err;    /* the build failed, or mapped fewer chunks */
+    uint32_t bad_walk;   /* a page did not walk to the page it mapped */
+    uint32_t stale;      /* a page still walked after the unmap */
+};
+int oplib_cold_vmrace_round(struct oplib_cold_vmrace_stats *st);
 
 /* `nvgpu oplib cold` status lines. */
 void oplib_cold_status_print(void);

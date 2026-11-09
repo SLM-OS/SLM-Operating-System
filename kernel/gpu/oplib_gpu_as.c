@@ -27,26 +27,50 @@ static void *cold_alloc(void *ctx, uint32_t npages, uint64_t *phys)
     return c->ops->alloc_pages(c->ops->ctx, npages, phys);
 }
 
-static uint64_t cold_reserve(void *ctx, uint64_t bytes, uint64_t align)
+/* The VM's writer lock (#1173), see oplib_cold_as_ctx. Every call below
+ * that reserves VA or writes a page table holds it; the VM is the cold
+ * channel's, which the SLM GPU program and the cold pipelines write too. */
+static bool cold_lock(const struct oplib_cold_as_ctx *c)
+{
+    return c->lock == NULL || c->lock() == 0;
+}
+
+static void cold_unlock(const struct oplib_cold_as_ctx *c)
+{
+    if (c->unlock != NULL) c->unlock();
+}
+
+static int cold_reserve(void *ctx, uint64_t bytes, uint64_t align, uint64_t *gpu_va)
 {
     struct oplib_cold_as_ctx *c = ctx;
-    return ga10b_vm_reserve(c->vm, bytes, align, false);
+    if (!cold_lock(c)) return OPLIB_AS_ERR_BUSY;
+    uint64_t va = ga10b_vm_reserve(c->vm, bytes, align, false);
+    cold_unlock(c);
+    if (va == 0) return OPLIB_AS_ERR_MAP;
+    *gpu_va = va;
+    return OPLIB_AS_OK;
 }
 
 static int cold_map_at(void *ctx, uint64_t gpu_va, uint64_t phys, uint64_t bytes)
 {
     struct oplib_cold_as_ctx *c = ctx;
-    return ga10b_vm_map(c->ops, c->vm, gpu_va, phys, bytes, 0u) == GA10B_CHAN_OK
-               ? OPLIB_AS_OK : OPLIB_AS_ERR_MAP;
+    if (!cold_lock(c)) return OPLIB_AS_ERR_BUSY;
+    int rc = ga10b_vm_map(c->ops, c->vm, gpu_va, phys, bytes, 0u);
+    cold_unlock(c);
+    return rc == GA10B_CHAN_OK ? OPLIB_AS_OK : OPLIB_AS_ERR_MAP;
 }
 
 static int cold_map(void *ctx, uint64_t phys, uint64_t bytes, uint64_t *gpu_va)
 {
-    uint64_t va = cold_reserve(ctx, bytes, PAGE_BYTES);
-    if (va == 0) return OPLIB_AS_ERR_MAP;
-    int rc = cold_map_at(ctx, va, phys, bytes);
-    if (rc == OPLIB_AS_OK) *gpu_va = va;
-    return rc;
+    struct oplib_cold_as_ctx *c = ctx;
+    if (!cold_lock(c)) return OPLIB_AS_ERR_BUSY;
+    uint64_t va = ga10b_vm_reserve(c->vm, bytes, PAGE_BYTES, false);
+    int rc = va == 0 ? GA10B_CHAN_ERR_VA
+                     : ga10b_vm_map(c->ops, c->vm, va, phys, bytes, 0u);
+    cold_unlock(c);
+    if (rc != GA10B_CHAN_OK) return OPLIB_AS_ERR_MAP;
+    *gpu_va = va;
+    return OPLIB_AS_OK;
 }
 
 static int cold_tlb_invalidate(void *ctx)
@@ -63,10 +87,13 @@ static void cold_clean(void *ctx, const void *p, size_t len)
 }
 
 void oplib_gpu_as_init_cold(struct oplib_gpu_as *as, struct oplib_cold_as_ctx *ctx,
-                            const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm)
+                            const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                            int (*lock)(void), void (*unlock)(void))
 {
     ctx->ops = ops;
     ctx->vm = vm;
+    ctx->lock = lock;
+    ctx->unlock = unlock;
     *as = (struct oplib_gpu_as){
         .name = "cold-vm",
         .ctx = ctx,
@@ -104,7 +131,7 @@ static int alloc_map(const struct oplib_gpu_as *as, uint32_t npages,
     int rc = as->map(as->ctx, pa, (uint64_t)npages * PAGE_BYTES, &va);
     if (rc != OPLIB_AS_OK || va == 0) {
         if (as->free) as->free(as->ctx, p, npages);
-        return OPLIB_AS_ERR_MAP;
+        return rc == OPLIB_AS_ERR_BUSY ? rc : OPLIB_AS_ERR_MAP;
     }
     *cpu = p;
     *phys = pa;
@@ -131,9 +158,10 @@ int oplib_gpu_as_stage_pool(const struct oplib_gpu_as *as,
     as->clean(as->ctx, p, (size_t)bytes);
 
     uint64_t va = 0;
-    if (as->map(as->ctx, pa, bytes, &va) != OPLIB_AS_OK || va == 0) {
+    int rc = as->map(as->ctx, pa, bytes, &va);
+    if (rc != OPLIB_AS_OK || va == 0) {
         if (as->free) as->free(as->ctx, p, npages);
-        return OPLIB_AS_ERR_MAP;
+        return rc == OPLIB_AS_ERR_BUSY ? rc : OPLIB_AS_ERR_MAP;
     }
     out->pool_cpu = p;
     out->pool_phys = pa;
@@ -193,7 +221,9 @@ int oplib_wpool_build(const struct oplib_gpu_as *as, uint64_t request,
     while (align < chunk_bytes && align < (2ull << 20)) {
         align <<= 1;
     }
-    uint64_t base = as->reserve(as->ctx, want * chunk_bytes, align);
+    uint64_t base = 0;
+    int rrc = as->reserve(as->ctx, want * chunk_bytes, align, &base);
+    if (rrc != OPLIB_AS_OK) return rrc;
     if (base == 0) return OPLIB_AS_ERR_MAP;
 
     const uint32_t npages = (uint32_t)(chunk_bytes / PAGE_BYTES);
@@ -202,12 +232,12 @@ int oplib_wpool_build(const struct oplib_gpu_as *as, uint64_t request,
         uint64_t pa = 0;
         void *p = as->alloc(as->ctx, npages, &pa);
         if (!p) break;
-        if (as->map_at(as->ctx, base + (uint64_t)n * chunk_bytes, pa, chunk_bytes)
-                != OPLIB_AS_OK) {
+        int mrc = as->map_at(as->ctx, base + (uint64_t)n * chunk_bytes, pa, chunk_bytes);
+        if (mrc != OPLIB_AS_OK) {
             /* Possibly half-mapped: leak `p` unless the backend can
              * free safely, and stop growing. */
             if (as->free) as->free(as->ctx, p, npages);
-            if (n == 0) return OPLIB_AS_ERR_MAP;
+            if (n == 0) return mrc == OPLIB_AS_ERR_BUSY ? mrc : OPLIB_AS_ERR_MAP;
             break;
         }
         out->chunk[n].cpu = p;

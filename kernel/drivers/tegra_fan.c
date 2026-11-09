@@ -10,6 +10,7 @@
 
 #include "bpmp.h"
 #include "cache.h"
+#include "emc_hold.h"
 #include "debug.h"
 #include "platform.h"
 #include "sched.h"
@@ -246,6 +247,9 @@ static void fan_task(void *arg)
     (void)arg;
     for (;;) {
         tegra_fan_poll();
+        /* The only periodic task on Jetson: also catch a memory clock
+         * that fell below its floor (#1161). */
+        emc_hold_runtime_check();
         task_sleep_ms(TEGRA_FAN_POLL_MS);
     }
 }

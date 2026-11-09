@@ -25,7 +25,7 @@ At `slm launch --gpu auto|on`, build one GPU program per session on the cold cha
 
 ## Consequences
 
-A UEFI-direct session runs every token in the program. The CPU forward path stays as the reference for the goldens and as the fallback: after a step timeout the session replays its tokens on the CPU. The per-op hybrid path remains only for kexec boots, which have no cold channel. New kernels need nvcc (`make oplib-shaders`).
+A UEFI-direct session runs every token in the program. The CPU forward path stays as the reference for the goldens and as the fallback. After a step timeout the channel is recovered and the session replays its steps on a rebuilt program on the GPU; the CPU replay is used only if that fails ([ADR 0006](0006-gpu-channel-recovery.md), #1171). The per-op hybrid path remains only for kexec boots, which have no cold channel. New kernels need nvcc (`make oplib-shaders`).
 
 ## Evidence
 

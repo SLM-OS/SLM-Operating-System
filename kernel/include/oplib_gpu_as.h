@@ -52,9 +52,10 @@ struct oplib_gpu_as {
     /* Map [phys, phys + bytes) (4 KB aligned) at a fresh GPU VA. */
     int (*map)(void *ctx, uint64_t phys, uint64_t bytes, uint64_t *gpu_va);
     /* Optional split form of `map`, needed by the weights pool (one VA
-     * range backed by several physical chunks): reserve VA, then map a
+     * range backed by several physical chunks): reserve VA (into
+     * *gpu_va; returns OPLIB_AS_OK or a negative code), then map a
      * physical range at a VA inside it. NULL when unsupported. */
-    uint64_t (*reserve)(void *ctx, uint64_t bytes, uint64_t align);
+    int (*reserve)(void *ctx, uint64_t bytes, uint64_t align, uint64_t *gpu_va);
     int (*map_at)(void *ctx, uint64_t gpu_va, uint64_t phys, uint64_t bytes);
     /* Make new mappings visible to a GPU that may already have walked
      * this address space. NULL when `map` already does it. */
@@ -70,6 +71,7 @@ struct oplib_gpu_as {
 #define OPLIB_AS_ERR_MAP      (-3)
 #define OPLIB_AS_ERR_TOO_BIG  (-4)
 #define OPLIB_AS_ERR_UNSUPP   (-5)
+#define OPLIB_AS_ERR_BUSY     (-6)  /* the VM's writer lock stayed busy */
 
 /* ---- Cold backend: an SLM-OS-built struct ga10b_vm ----
  *
@@ -77,14 +79,25 @@ struct oplib_gpu_as {
  * reserves VA in the VM's user range and calls ga10b_vm_map with
  * flags 0 (GPU-uncached, like the helper's MAP_BUFFER_EX and the cold
  * MNIST pipeline). `free` is NULL: ga10b_vm_map can fail after writing
- * some PTEs and there is no unmap. */
+ * some PTEs and there is no unmap.
+ *
+ * Other code writes the same VM (the SLM GPU program, the cold
+ * pipelines), so reserve, map_at and map each run under the VM's
+ * writer lock, `lock` / `unlock` (#1173; on Jetson slm_prog_vm_lock).
+ * map reserves and maps in one hold. A lock that stays busy fails the
+ * call with OPLIB_AS_ERR_BUSY and changes nothing. Allocation and
+ * cleaning happen outside the lock. NULL hooks: nothing else writes
+ * this VM (tests). */
 struct oplib_cold_as_ctx {
     const struct ga10b_gpu_ops *ops;
     struct ga10b_vm *vm;
+    int (*lock)(void);          /* 0 when taken */
+    void (*unlock)(void);
 };
 
 void oplib_gpu_as_init_cold(struct oplib_gpu_as *as, struct oplib_cold_as_ctx *ctx,
-                            const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm);
+                            const struct ga10b_gpu_ops *ops, struct ga10b_vm *vm,
+                            int (*lock)(void), void (*unlock)(void));
 
 /* ---- SASS pool + cbuf staging ----
  *
@@ -162,7 +175,8 @@ struct oplib_wpool {
  * then smaller than requested (out->size says how big). Returns
  * OPLIB_AS_OK when at least one chunk was mapped, OPLIB_AS_ERR_NOMEM
  * when none could be allocated, OPLIB_AS_ERR_UNSUPP when `as` lacks
- * reserve/map_at, or another negative code. `chunk_bytes` must be a
+ * reserve/map_at, OPLIB_AS_ERR_BUSY when the VM's writer lock stayed
+ * busy before the first chunk was mapped, or another negative code. `chunk_bytes` must be a
  * multiple of 4 KB (0 = OPLIB_WPOOL_CHUNK_BYTES). Chunks are not
  * zeroed here (the allocator may zero them). Does not invalidate the
  * TLB. */

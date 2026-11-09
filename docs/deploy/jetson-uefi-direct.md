@@ -358,7 +358,7 @@ variables its header lists for models and shell input.
 | GPU | Works (#1088). Brought up from cold during boot (see [GA10B cold bring-up](#ga10b-cold-bring-up)); the MNIST GPU pipeline (`slm.gpu_run_mnist`, `slm.model_infer_file` with `gpu use inference on`) runs on an SLM-OS-created channel. The sched and eviction GPU consumers still need the kexec path's helper channels |
 | PCIe | No backend on Jetson on either path (`pcie: no backend available`); nothing to gate |
 | Models from disk | Works ([ADR 0002](../adr/0002-uefi-model-delivery.md), [Models on disk](#models-on-disk)): a 1.04 GiB GGUF reads in 780 ms from NVMe, 68 s from SD; 20/20 cold boots verified it, 55.6 s from power-on to `slmos>`; `slm load` takes 346 ms |
-| Memory clock | UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU and XUSB bring-up; `clocks` shows the rates, `clocks emc <MHz>` requests one |
+| Memory clock | UEFI leaves EMC at 204 MHz. Right after `bpmp_init`, `main.c` asks BPMP's bandwidth manager for a 3199 MHz floor (finding 18); the rate is checked after every boot step and every 2 s after boot. `clocks` shows the rates and the check counters, `clocks emc <MHz>` requests another floor |
 
 ### XUSB cold bring-up
 
@@ -545,21 +545,37 @@ gives the same reason.
 | `slm gpu opts <wfi-flush\|flush\|wfi> [lean] [profile] [simt]` | Barrier and QMD options for the next launch, to measure them. The default is `wfi lean` |
 | `slm gpu opcheck <handle> [simt]` | Each kernel on the model's shapes against its CPU reference, one line per kernel and batch size |
 | `slm gpu profile <session>` | Time per decode step, and per kernel with `opts ... profile`. Refused while a prompt runs on that session |
-| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path. Reboot afterwards: the channel stays dead |
-| `nvgpu cold race <n>` | A task runs the sched and eviction pipelines n times and checks each result, to run during a prompt. One run at a time |
+| `slm gpu inject <hang\|fault\|off>` | Make the next launch's decode program fail, to test the timeout path and the channel recovery (#1171). One launch only: the build that uses it clears it |
+| `nvgpu cold race <n>` | A task runs every GPU consumer on the channel (sched, eviction, MNIST, the operator library's per-op RMSNorm) n times and checks each result against its reference, to run during prompts and step timeouts. One run at a time. `nvgpu cold race status` prints the counts and, per recovery, how many ms after the failure each consumer was correct again (`race: PASS` when all within 5000 ms); `... stop` ends it |
+| `nvgpu cold recover [l1\|l2\|status\|opts <n>]` | Recover the channel by hand (`l1`: channel reset only; `l2`: straight to the GR engine reset), or list the recoveries so far with the level, time and the state each one found. `opts` sets the channel-reset options for experiments (default 0x2, no forced context reload; `ga10b_cold.h`) |
+| `nvgpu oplib vmrace <rounds> [cpu]` | Test only (#1173). A task (CPU 2 by default) runs the weights-pool build's VM writes about once a millisecond, checks each page and unmaps it, to run during `slm launch --gpu on` / `slm close`. `nvgpu oplib vmrace` prints `bad walks 0, stale after unmap 0` and how often each side found the GPU VM lock held by the other; `... stop` ends it |
+| `nvgpu oplib vmhold <ms> [cpu]` | Test only (#1159). A task (CPU 2 by default) holds the GPU VM lock for 1000 to 60000 ms, so a `slm close` of a `--gpu on` session meanwhile is deferred (it returns after 9 s). `slm unload` of that model then answers `in use` until the hold ends. `nvgpu oplib vmhold` prints `holding the lock` or `idle`, and how often an open or close waited on a VM writer |
 | `slm gpu golden [batch]` | `PASS`: same top token every step, within 1.5 of llama.cpp and 0.1 of the exact CPU reference on the tiny model. Needs a build with the fixtures embedded (about 790 KB): `make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DSLM_GPU_GOLDEN=ON`, then deploy as above |
 | `slm launch 0 --gpu on` | `backend=GPU program(launches=.. barriers=.. batch=.. arena=..MB weights=64KB)`, or the reason it was refused |
 | `slm gpu` | EMC and GPC clocks, and per session the path and tokens run on it |
 
-UEFI leaves EMC at 204 MHz. `main.c` asks BPMP for 3199 MHz after the cold GPU
-and XUSB bring-up, so `slm gpu` reads 3199 MHz before any prompt; the first
-program to open asks for the same floor again (`[slm-prog] EMC was ...`), which
-covers a request that failed at boot.
+UEFI leaves EMC at 204 MHz. `main.c` asks BPMP's bandwidth manager for a
+3199 MHz floor right after `bpmp_init` (finding 18), so `slm gpu` reads
+3199 MHz before any prompt; the first program to open asks for a floor of its
+own as the GPU client (`[slm-prog] EMC was ...`), which covers a request that
+failed at boot.
 
-A step that times out (5 s) prints the GR and MMU fault state once, then
-the session continues on the CPU, replaying its tokens: `[slm] GPU program
-failed (...)`. `slm gpu` keeps saying why. Other GPU consumers on the
-channel then time out and trip their breaker to the CPU; a reboot clears it.
+A step that times out (5 s) prints the GR and MMU fault state (in full at
+the first timeout of a boot only), then the channel is recovered (#1171,
+[ADR 0006](../adr/0006-gpu-channel-recovery.md)):
+`[gpu] channel recovered: level N ...`. Level 1 preempts the channel and
+resets it; level 2, when level 1 fails, also resets the GR engine. The
+injected hang and fault both need level 2: about 125 ms from the timeout to a
+working channel. The session then builds its program again and replays its
+steps on the GPU: `[slm] GPU step timed out; the channel was recovered, the
+program rebuilt and N tokens replayed on the GPU`. Its output is the same as
+without the timeout, and the other consumers are correct again within about
+0.2 s of the timeout line (jetson-nano-2, 25 recoveries in one boot). While the program is past its deadline and during the recovery, the
+other GPU consumers take their CPU path at once instead of queueing behind the
+hung step. If the recovery fails, the channel stays down
+(`[gpu] channel DEAD`), the consumers stay on the CPU without touching it, and
+the session replays on the CPU: `[slm] GPU program failed (...)`.
+`nvgpu cold recover` tries again.
 
 ### Real-model golden (#1165)
 
@@ -769,6 +785,27 @@ where the two disagree.
     pulses, and the tachometer keeps its last period without setting
     its overflow bit, so the shell labels the reading at level 0 as
     stale.
+18. **EMC has to be asked for as a bandwidth-manager floor, not set with
+    MRQ_CLK** (#1161). BPMP's bandwidth manager owns the memory clock. A
+    rate set with MRQ_CLK `CMD_CLK_SET_RATE` takes effect, but the next
+    recompute puts it back to what the clients' floors and bandwidths
+    call for, 204 MHz when none has asked. On jetson-nano-2 after a
+    UEFI-direct boot, the first MRQ_CLK request (right after `bpmp_init`)
+    read 3199 MHz and then 204 MHz 250 ms later, with no other request
+    from SLM-OS in between. Any `MRQ_BWMGR_INT` request triggers the same
+    recompute, even a zero floor from another client. The old workaround
+    (an MRQ_CLK request after `xhci_init`) only worked because nothing
+    recomputed afterwards on most boots; the baseline run on main saw
+    204 MHz again when the GPU program opened. A floor
+    (`CMD_BWMGR_INT_CALC_AND_SET`, client CPU cluster 0, in kHz) is part
+    of the computation: it read 3199 MHz through the whole boot (63
+    checks, no drop) and through another client's recompute. An MRQ_CLK
+    request can still pull the rate below a floor until the next
+    recompute, so `make check-emc-rate-path` (part of `make test`) rejects
+    any `bpmp_clk_set_rate` on the EMC clock. The bisection used a
+    post-request hook in `bpmp.c` that reads EMC back after every BPMP
+    request at boot (`kernel/drivers/emc_hold.c`; build with
+    `EMC_HOLD_BISECT` set to 1 in that file to log every request).
 
 ## Troubleshooting
 

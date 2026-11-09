@@ -541,6 +541,7 @@ static int ctx_prepare(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *g,
     ga10b_gr_commit_global_ctx_buffers(&w, &g->cfg, &c->global);
     if (w.overflow) return GA10B_GRCTX_ERR_STATE;
     c->patch_count = w.count;
+    c->patch_base = w.count;
     ga10b_ctx_wr(c->gr_ctx.cpu, GA10B_CTXSW_PATCH_COUNT, c->patch_count);
 
     /* commit_inst: subctx header, then the inst block GR pointer. */
@@ -958,24 +959,17 @@ out:
  * Per-channel context
  * ================================================================== */
 
-int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *g,
-                           struct ga10b_vm *vm, uint32_t *inst_words, uint32_t veid,
-                           enum ga10b_compute_preempt preempt,
-                           struct ga10b_gr_chan_ctx *c)
+/* The image part of ALLOC_OBJ_CTX + SET_PREEMPTION_MODE, on buffers
+ * ctx_prepare set up: golden image, MME timer, compute preemption mode.
+ * c->patch_base is where the patch list stands after the global buffer
+ * commits; everything after it is written again here, so a reset puts
+ * the context back exactly as a fresh allocation leaves it. */
+static int chan_load_golden(const struct ga10b_gpu_ops *ops, const struct ga10b_grctx *g,
+                            enum ga10b_compute_preempt preempt, struct ga10b_gr_chan_ctx *c)
 {
-    if (!ops || !g || !vm || !inst_words || !c || veid >= GA10B_MAX_SUBCTX) {
-        return GA10B_GRCTX_ERR_ARG;
-    }
-    if (!g->golden_ready) return GA10B_GRCTX_ERR_STATE;
-
-    int rc = ctx_prepare(ops, g, vm, inst_words, c);
-    if (rc != 0) {
-        ga10b_grctx_chan_free(ops, c);
-        return rc;
-    }
-
     /* nvgpu_gr_ctx_load_golden_ctx_image. */
     memcpy(c->gr_ctx.cpu, g->golden.cpu, g->golden_size);
+    c->patch_count = c->patch_base;
     ga10b_ctx_image_after_golden_load(c->gr_ctx.cpu, c->global.va[GA10B_GR_BUF_PRIV_ACCESS_MAP],
                                       c->patch_count, c->patch_va);
 
@@ -998,10 +992,7 @@ int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *
         ga10b_ctx_image_set_compute_preempt(c->gr_ctx.cpu, preempt);
         ga10b_gr_commit_cb_manager(&w, &g->cfg);
     }
-    if (w.overflow) {
-        ga10b_grctx_chan_free(ops, c);
-        return GA10B_GRCTX_ERR_STATE;
-    }
+    if (w.overflow) return GA10B_GRCTX_ERR_STATE;
     c->patch_count = w.count;
     ga10b_ctx_wr(c->gr_ctx.cpu, GA10B_CTXSW_PATCH_COUNT, c->patch_count);
 
@@ -1009,4 +1000,38 @@ int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *
     ga10b_dma_clean(ops, &c->gr_ctx);
     ga10b_dma_clean(ops, &c->patch);
     return GA10B_GRCTX_OK;
+}
+
+int ga10b_grctx_chan_alloc(const struct ga10b_gpu_ops *ops, struct ga10b_grctx *g,
+                           struct ga10b_vm *vm, uint32_t *inst_words, uint32_t veid,
+                           enum ga10b_compute_preempt preempt,
+                           struct ga10b_gr_chan_ctx *c)
+{
+    if (!ops || !g || !vm || !inst_words || !c || veid >= GA10B_MAX_SUBCTX) {
+        return GA10B_GRCTX_ERR_ARG;
+    }
+    if (!g->golden_ready) return GA10B_GRCTX_ERR_STATE;
+
+    int rc = ctx_prepare(ops, g, vm, inst_words, c);
+    if (rc == 0) rc = chan_load_golden(ops, g, preempt, c);
+    if (rc != 0) {
+        ga10b_grctx_chan_free(ops, c);
+        return rc;
+    }
+    return GA10B_GRCTX_OK;
+}
+
+int ga10b_grctx_chan_reset(const struct ga10b_gpu_ops *ops, const struct ga10b_grctx *g,
+                           enum ga10b_compute_preempt preempt, struct ga10b_gr_chan_ctx *c)
+{
+    if (!ops || !g || !c || !c->gr_ctx.cpu || !c->patch.cpu || !c->header.cpu) {
+        return GA10B_GRCTX_ERR_ARG;
+    }
+    if (!g->golden_ready || c->gr_ctx.size < g->golden_size) return GA10B_GRCTX_ERR_STATE;
+    /* The subcontext header too, from zero as ga10b_dma_alloc left it:
+     * FECS writes it when it saves. */
+    memset(c->header.cpu, 0, c->header.size);
+    ga10b_ctx_header_load(c->header.cpu, c->global.va[GA10B_GR_BUF_PRIV_ACCESS_MAP],
+                          c->patch_va, c->gr_ctx_va);
+    return chan_load_golden(ops, g, preempt, c);
 }

@@ -94,6 +94,9 @@ pub struct RunStats {
 
 pub const ERR_NO_BACKEND: i32 = -1;
 pub const ERR_NO_KERNEL: i32 = -5;
+/// `SLM_PROG_ERR_RECOVERED`: the step timed out and the channel was
+/// recovered (#1171). The program is dead; a new one can be built.
+pub const ERR_RECOVERED: i32 = -12;
 
 pub const FLAG_LEAN_QMD: u32 = 1;
 pub const FLAG_PROFILE: u32 = 2;
@@ -179,6 +182,12 @@ pub struct ModelDesc {
     /// File offsets of the FP32 gammas: per layer attention, feed-forward.
     pub norms: Vec<(u64, u64)>,
     pub out_norm: u64,
+}
+
+/// Whether `slm_prog.c` runs GQA on the HMMA kernels (#1167): the rule of its
+/// `gqa_sass`, head dim 128 and every query head in a whole group.
+pub fn gqa_on_hmma(n_head: u32, n_head_kv: u32, head_dim: u32) -> bool {
+    head_dim == 128 && n_head != 0 && n_head_kv != 0 && n_head % n_head_kv == 0
 }
 
 fn mm_kernel(t: GgmlType) -> Option<Kernel> {
@@ -715,7 +724,8 @@ static OPT_BARRIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 static OPT_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(FLAG_LEAN_QMD);
 
 /// `slm gpu inject`: the next launch's decode program fails on purpose.
-/// 0 none, 1 a hang on a semaphore, 2 an MMU fault.
+/// 0 none, 1 a hang on a semaphore, 2 an MMU fault. One launch only: the
+/// build that uses it clears it.
 pub fn set_inject(kind: u32) {
     let mut f = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
     f &= !(FLAG_INJECT_HANG | FLAG_INJECT_FAULT);
@@ -775,6 +785,13 @@ pub struct GpuProgram {
     prefill_rows: u32,
     /// Tokens the GPU KV cache holds, for the replay if the GPU fails.
     pub history: Vec<u32>,
+    /// Rows of each successful step, in order: `history` cut the way it ran.
+    /// A replay on a rebuilt program runs the same steps, so its KV cache
+    /// comes out bit-identical (#1171).
+    pub runs: Vec<u32>,
+    /// The last failed step's return code, so the caller can tell a
+    /// recovered channel (`ERR_RECOVERED`) from a dead one.
+    pub last_rc: i32,
     pub steps: u64,
     pub tokens: u64,
     decode_steps: u64,
@@ -827,6 +844,7 @@ fn err_message(rc: i32) -> &'static str {
         -9 => "L2 evict timed out",
         -10 => "GPU step started with IRQs masked",
         -11 => "another session held the GPU program lock too long",
+        ERR_RECOVERED => "GPU step timed out; channel recovered",
         _ => "GPU program error",
     }
 }
@@ -880,7 +898,10 @@ impl GpuProgram {
     /// registry lock could hang CPU 0 (#475 W-B).
     pub fn build_prepared(input: BuildInput, max_ctx: usize, rope_table: &[f32]) -> Result<Box<Self>, BuildError> {
         let BuildInput { desc, weights, weights_len, pin } = input;
-        let mut flags = OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed);
+        // `slm gpu inject` arms the next launch only: take its flags, so the
+        // program rebuilt after the recovery runs normally (#1171).
+        let mut flags = OPT_FLAGS.fetch_and(!(FLAG_INJECT_HANG | FLAG_INJECT_FAULT),
+                                            core::sync::atomic::Ordering::Relaxed);
         let simt = flags & FLAG_SIMT != 0;
         let inject_fault = flags & FLAG_INJECT_FAULT != 0;
         flags &= FLAG_LEAN_QMD | FLAG_PROFILE | FLAG_INJECT_HANG;
@@ -931,6 +952,8 @@ impl GpuProgram {
             pin: None,
             prefill_rows: 0,
             history: Vec::new(),
+            runs: Vec::new(),
+            last_rc: 0,
             steps: 0,
             tokens: 0,
             decode_steps: 0,
@@ -1119,6 +1142,7 @@ impl GpuProgram {
             }
         };
         if rc != 0 {
+            self.last_rc = rc;
             return Err(err_message(rc));
         }
         self.last_stats = stats;
@@ -1147,7 +1171,20 @@ impl GpuProgram {
         self.wait_us_total = self.wait_us_total.wrapping_add(stats.wait_us);
         self.evict_us_total = self.evict_us_total.wrapping_add(stats.evict_us);
         self.history.extend_from_slice(tokens);
+        self.runs.push(rows);
         Ok(())
+    }
+
+    /// A new conversation: the KV cache's contents no longer count.
+    pub fn forget_history(&mut self) {
+        self.history.clear();
+        self.runs.clear();
+    }
+
+    /// Whether the last failure left the channel recovered, so a rebuilt
+    /// program can carry on where this one stopped.
+    pub fn channel_recovered(&self) -> bool {
+        self.last_rc == ERR_RECOVERED
     }
 
     fn patch_step(&mut self, shape: u32, s: &StepArgs) -> Result<(), i32> {
@@ -1313,6 +1350,10 @@ impl GpuProgram {
         let d = &self.dims;
         let (l, nq, nkv, hd) = (d.layers as u64, d.n_head as u64, d.n_head_kv as u64, d.head_dim as u64);
         f.gqa_macs_per_pos = 2 * l * nq * hd;
+        f.gqa_on_hmma = gqa_on_hmma(d.n_head, d.n_head_kv, d.head_dim);
+        if f.gqa_on_hmma {
+            f.class_tier[OpClass::Gqa as usize] = Tier::Hmma as u32;
+        }
         f.kv_bytes_per_pos = 2 * l * nkv * hd * FP16;
         f
     }
@@ -1550,9 +1591,9 @@ pub fn golden_run(model: u32, rec: &[u8], batched: bool, rep: &mut GoldenReport)
     let mut prog = prep
         .and_then(|i| GpuProgram::build_prepared(i, ctx, &rope.cos_sin))
         .map_err(|e| match e {
-        BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
-        BuildError::Failed(w) => w,
-    })?;
+            BuildError::NoBackend => "no SLM-OS-built GPU channel (needs a UEFI-direct boot)",
+            BuildError::Failed(w) => w,
+        })?;
 
     // The exact CPU reference, in memory of its own with the arena's layout.
     let weights = crate::slm::registry::with_loaded_slm(model as usize, |slm| {
@@ -2332,6 +2373,23 @@ pub mod soft {
         pub closes: u32,
         /// An open ran while the registry spinlock was held (#475 W-B).
         pub opened_under_registry_lock: bool,
+        /// Closes find the program lock held elsewhere (#1159): the
+        /// program's weights stay mapped, in [`DEFERRED`], until
+        /// [`finish_deferred_closes`] plays the lock holder's unlock.
+        pub defer_close: bool,
+        /// Programs opened, and the rows of every successful run in order
+        /// (the first op's rows), across programs.
+        pub opens: u32,
+        pub run_rows: Vec<u32>,
+    }
+
+    /// Weight ranges (address, bytes) of closed programs whose PTEs the
+    /// kernel has not removed yet.
+    pub static DEFERRED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+    /// The lock holder's unlock: it finishes every deferred close.
+    pub fn finish_deferred_closes() {
+        DEFERRED.lock().unwrap().clear();
     }
 
     pub static STATE: Mutex<Option<Soft>> = Mutex::new(None);
@@ -2342,11 +2400,24 @@ pub mod soft {
         fail_run: None,
         closes: 0,
         opened_under_registry_lock: false,
+        defer_close: false,
+        opens: 0,
+        run_rows: Vec::new(),
     });
 
     pub fn reset_knobs() {
         let mut k = KNOBS.lock().unwrap();
-        *k = Knobs { no_backend: false, max_batch: 64, fail_run: None, closes: 0, opened_under_registry_lock: false };
+        *k = Knobs {
+            no_backend: false,
+            max_batch: 64,
+            fail_run: None,
+            closes: 0,
+            opened_under_registry_lock: false,
+            defer_close: false,
+            opens: 0,
+            run_rows: Vec::new(),
+        };
+        finish_deferred_closes();
     }
 
     fn mem_of(s: &mut Soft) -> reference::Mem {
@@ -2378,8 +2449,8 @@ pub mod soft {
         if crate::slm::registry::lock_held_for_tests() {
             KNOBS.lock().unwrap().opened_under_registry_lock = true;
         }
-        let k = KNOBS.lock().unwrap();
-        let _ = &k;
+        let mut k = KNOBS.lock().unwrap();
+        k.opens += 1;
         let a = unsafe { &*a };
         let mut st = STATE.lock().unwrap();
         // 8-aligned host memory stands in for PMM pages.
@@ -2413,8 +2484,26 @@ pub mod soft {
     }
     #[no_mangle]
     extern "C" fn slm_prog_close(_h: i32) {
-        KNOBS.lock().unwrap().closes += 1;
-        *STATE.lock().unwrap() = None;
+        let defer = {
+            let mut k = KNOBS.lock().unwrap();
+            k.closes += 1;
+            k.defer_close
+        };
+        let closed = STATE.lock().unwrap().take();
+        if let (true, Some(s)) = (defer, closed) {
+            DEFERRED.lock().unwrap().push((s.weights, s.weights_len));
+        }
+    }
+    /// As the kernel's: an open program, or a deferred close, mapping any
+    /// byte of the range.
+    #[no_mangle]
+    extern "C" fn slm_prog_weights_mapped(cpu: *const u8, bytes: u64) -> i32 {
+        let lo = cpu as usize;
+        let hi = lo + bytes as usize;
+        let hits = |w: usize, n: usize| n != 0 && w < hi && lo < w + n;
+        let open = STATE.lock().unwrap().as_ref().is_some_and(|s| s.open && hits(s.weights, s.weights_len));
+        let deferred = DEFERRED.lock().unwrap().iter().any(|&(w, n)| hits(w, n));
+        (open || deferred) as i32
     }
     #[no_mangle]
     extern "C" fn slm_prog_add(_h: i32, shape: u32, op: *const ProgOp) -> i32 {
@@ -2472,10 +2561,16 @@ pub mod soft {
         let s = g.as_mut().unwrap();
         let run = s.runs;
         s.runs += 1;
-        if let Some((n, rc)) = KNOBS.lock().unwrap().fail_run {
-            if n == run {
-                return rc;
+        {
+            let mut k = KNOBS.lock().unwrap();
+            if let Some((n, rc)) = k.fail_run {
+                if n == run {
+                    // Once: a program rebuilt after a recovery runs (#1171).
+                    k.fail_run = None;
+                    return rc;
+                }
             }
+            k.run_rows.push(s.shapes[shape as usize].first().map_or(0, |x| x.0.rows));
         }
         let ops: Vec<ProgOp> = s.shapes[shape as usize].iter().map(|x| x.0).collect();
         for op in &ops {
@@ -2836,6 +2931,59 @@ mod tests {
 
     /// Every launch is in a class; a class boundary always has a barrier, so
     /// the marks can attribute all the time; and the plan's figures add up.
+    /// Token ids for scripts/cuda/harness/near_tie.cpp (#1167, G4): the
+    /// prompt as `slm prompt --raw` encodes it and two runs' replies, with the
+    /// real model's tokenizer. Env: SLM_GOLDEN_MODEL (the GGUF),
+    /// SLM_NEAR_TIE_PROMPT, SLM_NEAR_TIE_A, SLM_NEAR_TIE_B (text files) and
+    /// SLM_NEAR_TIE_OUT. Run by scripts/cuda/harness/near-tie.sh.
+    #[test]
+    #[ignore = "needs the real model; run by scripts/cuda/harness/near-tie.sh"]
+    fn near_tie_token_ids() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
+        let read = |k: &str| std::fs::read_to_string(var(k)).unwrap();
+        let bytes = std::fs::read(var("SLM_GOLDEN_MODEL")).unwrap();
+        crate::slm::registry::ensure_mm_initialized_for_tests();
+        crate::slm::registry::reset_for_tests();
+        let model = crate::slm::registry::load_slm(b"real", &bytes).expect("real model loads");
+        drop(bytes);
+        let (prompt, a, b) = (read("SLM_NEAR_TIE_PROMPT"), read("SLM_NEAR_TIE_A"), read("SLM_NEAR_TIE_B"));
+        let out = crate::slm::registry::with_loaded_slm(model, |slm| {
+            let tk = slm.tokenizer().expect("tokenizer");
+            let (p, ta, tb) = (tk.encode_with_specials(&prompt), tk.encode(&a), tk.encode(&b));
+            // The replies must decode back to the text the runs printed.
+            assert_eq!(tk.decode(&ta), a, "reply a does not round-trip");
+            assert_eq!(tk.decode(&tb), b, "reply b does not round-trip");
+            let d = ta.iter().zip(tb.iter()).take_while(|(x, y)| x == y).count();
+            let piece = |ids: &[u32]| format!("{:?}", tk.decode(ids));
+            let join = |v: &[u32]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ");
+            std::println!(
+                "prompt {} tokens; replies share {d} tokens, ending {}; then a {} {} / b {} {}",
+                p.len(),
+                piece(&ta[d.saturating_sub(4)..d]),
+                ta[d],
+                piece(&ta[d..d + 1]),
+                tb[d],
+                piece(&tb[d..d + 1])
+            );
+            format!("prompt {}\na {}\nb {}\n", join(&p), join(&ta), join(&tb))
+        })
+        .unwrap();
+        std::fs::write(var("SLM_NEAR_TIE_OUT"), out).unwrap();
+        crate::slm::registry::reset_for_tests();
+    }
+
+    /// The same rule as slm_prog.c's gqa_sass (kernel/tests/test_slm_prog.c
+    /// test_gqa_selects_hmma), so `slm stats --gpu` counts GQA where it runs.
+    #[test]
+    fn gqa_on_hmma_follows_the_kernel_choice() {
+        assert!(gqa_on_hmma(12, 2, 128), "Qwen2.5-1.5B");
+        assert!(gqa_on_hmma(16, 1, 128));
+        assert!(gqa_on_hmma(8, 8, 128));
+        assert!(!gqa_on_hmma(8, 2, 32), "tiny test model: slm_gqa_w8");
+        assert!(!gqa_on_hmma(12, 5, 128), "no whole groups");
+        assert!(!gqa_on_hmma(12, 0, 128));
+    }
+
     #[test]
     fn plan_facts_add_up_and_marks_cover_every_boundary() {
         soft::reset_knobs();
@@ -2857,7 +3005,9 @@ mod tests {
         assert!(f.marks > 0 && f.marks <= f.barriers);
         assert!(f.mma > 0 && f.macs_tc > 0 && f.weight_bytes > 0);
         assert_eq!(f.macs_simt, 0);
-        // Only matmuls are on tensor cores.
+        // The tiny model's head dim is 32, so its GQA stays on slm_gqa_w8 and
+        // only matmuls are on tensor cores.
+        assert!(!f.gqa_on_hmma);
         for (i, t) in f.class_tier.iter().enumerate() {
             let mm = i == OpClass::MatmulAttn as usize || i == OpClass::MatmulMlp as usize || i == OpClass::LmHead as usize;
             assert_eq!(*t, if mm { Tier::Hmma as u32 } else { Tier::Simt as u32 }, "class {i}");
@@ -2951,6 +3101,82 @@ mod tests {
         assert!(snap.cpu_tokens > 0);
         assert_eq!(soft::KNOBS.lock().unwrap().closes, 1, "the program is gone");
         assert_eq!(crate::rust_slm_session_close(sid), 0);
+        reset_for_tests();
+    }
+
+    /// #1171: a step timed out and the kernel recovered the channel. The
+    /// session builds its program again, replays its steps on it with the
+    /// same rows in the same order, and carries on on the GPU: same output,
+    /// nothing on the CPU.
+    #[test]
+    fn recovered_channel_resumes_on_a_rebuilt_program_with_same_output() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let want = r.u32s("greedy.tokens").unwrap();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        // Prefill is run 0; recover two decode steps in.
+        soft::KNOBS.lock().unwrap().fail_run = Some((3, ERR_RECOVERED));
+        let got = prompt_on_session(sid, r.get("prompt.text").unwrap(), want.len() as u32);
+        assert_eq!(got, want, "the recovery changed the output");
+        let snap = snapshot(sid);
+        assert_eq!(snap.path, ForwardPath::Program);
+        assert_eq!(snap.cpu_tokens, 0, "nothing ran on the CPU");
+        assert_eq!(snap.gpu_note, None);
+        {
+            let k = soft::KNOBS.lock().unwrap();
+            assert_eq!((k.opens, k.closes), (2, 1), "one program rebuilt");
+            // Runs 0..3 succeeded on the first program; the second ran
+            // the same three again before going on.
+            assert!(k.run_rows.len() > 6);
+            assert_eq!(k.run_rows[3..6], k.run_rows[0..3]);
+            assert!(k.run_rows[0] > 1, "the replay batched the prompt as the first run did");
+        }
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        reset_for_tests();
+    }
+
+    /// A recovered channel whose rebuild fails: the CPU replay as before.
+    #[test]
+    fn recovered_channel_without_a_rebuild_replays_on_the_cpu() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let r = rec();
+        let want = r.u32s("greedy.tokens").unwrap();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        {
+            let mut k = soft::KNOBS.lock().unwrap();
+            k.fail_run = Some((3, ERR_RECOVERED));
+            k.max_batch = 0; // the rebuild finds a kernel missing
+        }
+        let got = prompt_on_session(sid, r.get("prompt.text").unwrap(), want.len() as u32);
+        assert_eq!(got, want, "the fallback changed the output");
+        let snap = snapshot(sid);
+        assert_eq!(snap.path, ForwardPath::Cpu);
+        assert_eq!(snap.gpu_note, Some("GPU step timed out; channel recovered"));
+        assert!(snap.cpu_tokens > 0);
+        assert_eq!(soft::KNOBS.lock().unwrap().opens, 1);
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        reset_for_tests();
+    }
+
+    /// `slm gpu inject` arms one launch: the build that uses it clears it,
+    /// or the program rebuilt after the recovery would hang again.
+    #[test]
+    fn inject_arms_one_launch_only() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        set_inject(1);
+        assert_ne!(OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed) & FLAG_INJECT_HANG, 0);
+        let p = build_tiny_result(model).unwrap();
+        assert_eq!(
+            OPT_FLAGS.load(core::sync::atomic::Ordering::Relaxed) & (FLAG_INJECT_HANG | FLAG_INJECT_FAULT),
+            0
+        );
+        drop(p);
+        set_inject(0);
         reset_for_tests();
     }
 
@@ -3130,6 +3356,34 @@ mod tests {
         reset_for_tests();
     }
 
+    /// #1159: a close that can't take the GPU program lock in time (another
+    /// session's step timeout holds it through its dump, or an
+    /// operator-library VM writer does) is finished by the holder later.
+    /// The program and its pin are gone at once, its PTEs only then, so
+    /// unload must wait for the kernel, not only for the pin.
+    #[test]
+    fn unload_refused_until_a_deferred_close_finishes() {
+        soft::reset_knobs();
+        let model = load_tiny();
+        let sid = open_session(model);
+        assert_eq!(crate::rust_slm_session_configure(sid, 2, 4), 0);
+        assert_eq!(snapshot(sid).path, ForwardPath::Program);
+        soft::KNOBS.lock().unwrap().defer_close = true;
+        // Back on the CPU: the program is dropped, its close deferred.
+        assert_eq!(crate::rust_slm_session_configure(sid, 1, 4), 0);
+        assert!(!registry::gpu_pinned(model as usize), "the pin went with the program");
+        assert_eq!(soft::DEFERRED.lock().unwrap().len(), 1);
+        assert_eq!(crate::rust_slm_session_close(sid), 0);
+        let frees = crate::test_ffi_stubs::free_page_calls();
+        assert_eq!(crate::rust_slm_unload(model), crate::SLM_ERR_BUSY);
+        assert!(registry::get_info(model as usize).is_some(), "still loaded");
+        assert_eq!(crate::test_ffi_stubs::free_page_calls(), frees, "pages freed under a mapping");
+        // The holder's unlock removes the PTEs; unload then goes through.
+        soft::finish_deferred_closes();
+        assert_eq!(crate::rust_slm_unload(model), 0);
+        reset_for_tests();
+    }
+
     fn build_tiny_result(model: u32) -> Result<Box<GpuProgram>, &'static str> {
         let vocab = registry::get_info(model as usize).unwrap().vocab_size;
         with_loaded_slm(model as usize, |slm| {
@@ -3299,7 +3553,7 @@ mod tests {
         assert!(registry::gpu_pinned(model as usize), "pinned before the lock was dropped");
         assert_eq!(crate::rust_slm_session_close(sid), 0);
         let mut rep = GoldenReport::default();
-        let _ = golden_run(model, GREEDY, false, &mut rep);
+        assert_eq!(golden_run(model, GREEDY, false, &mut rep), Ok(()));
         assert!(!soft::KNOBS.lock().unwrap().opened_under_registry_lock);
         reset_for_tests();
     }

@@ -690,6 +690,8 @@ set(KERNEL_SOURCES
     kernel/gpu/nvidia/ga10b_qmd.c
     kernel/gpu/nvidia/ga10b_prog.c
     kernel/gpu/slm_prog.c
+    # Cold channel state for dispatchers (#1171): pure.
+    kernel/gpu/gpu_chan_state.c
     # Sched-MLP / eviction-MLP GPU pipelines on the same channel + the
     # per-kind handoff store (#1092): pure code. The eviction weights
     # are generated from the Rust model (see the generator block below).
@@ -732,6 +734,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
     kernel/drivers/tegra_cpufreq.c
     kernel/drivers/tegra_fan.c
+    kernel/drivers/emc_hold.c
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
     # BPMP IPC stack — Jetson only.
@@ -1179,6 +1182,7 @@ set(TEST_SOURCES
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_boot_models.c>
     kernel/tests/test_tegra_cpufreq.c
     kernel/tests/test_tegra_fan.c
+    kernel/tests/test_emc_hold.c
     kernel/tests/test_ga10b_netlist.c
     kernel/tests/test_ga10b_ctxsw_ucode.c
     kernel/tests/test_ga10b_acr_blob.c
@@ -1189,6 +1193,7 @@ set(TEST_SOURCES
     kernel/tests/test_ga10b_cold.c
     kernel/tests/test_ga10b_cold_pipelines.c
     kernel/tests/test_oplib_gpu_as.c
+    kernel/tests/test_gpu_chan_state.c
 )
 
 # lwIP library sources (QEMU networking only)

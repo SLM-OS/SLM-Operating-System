@@ -62,6 +62,28 @@ static enum mm_variant mm_variant_of(uint32_t sass)
     }
 }
 
+/* GQA heads per KV head, or 0 when the HMMA kernels' shape does not hold:
+ * head dim 128 and whole groups (scripts/cuda/slm/slm_gqa_hmma.cu). */
+static uint32_t gqa_hmma_group(const struct slm_prog_op *op)
+{
+    uint32_t nhq = op->dim[0], nhkv = op->dim[1];
+    if (op->dim[2] != 128u || nhkv == 0u || nhq == 0u || nhq % nhkv != 0u) return 0u;
+    return nhq / nhkv;
+}
+
+/* GQA (#1167): Q.K^T and P.V on HMMA when the shape allows, the decode kernel
+ * while one 16-row M tile holds every row's heads of a KV head (Qwen2.5-1.5B:
+ * up to 2 rows), the prefill kernel past that. Faster than slm_gqa_w8 at every
+ * KV length measured (64 to 4096), so the choice depends on rows only, which a
+ * prebuilt program can make. Other shapes (the tiny test model, hd 32) keep
+ * slm_gqa_w8. */
+static int gqa_sass(const struct slm_prog_op *op)
+{
+    uint32_t group = gqa_hmma_group(op);
+    if (group == 0u) return SLM_SASS_GQA_W8;
+    return (uint64_t)op->rows * group <= 16u ? SLM_SASS_GQA_HMMA_DEC : SLM_SASS_GQA_HMMA_PF;
+}
+
 /* Decode: B = 1 kernels. Prefill: b8 to 8 rows; past that x in shared memory
  * (bs) when N is big enough to fill the SMs, otherwise b8 split per x tile.
  * The same choice as scripts/cuda/harness/slm_forward.cu add_mm. */
@@ -75,7 +97,7 @@ int slm_prog_op_sass(const struct slm_prog_op *op)
     case SLM_PROG_K_RMSNORM: return SLM_SASS_RMSNORM_W8;
     case SLM_PROG_K_ROPE: return SLM_SASS_ROPE;
     case SLM_PROG_K_SWIGLU: return SLM_SASS_SWIGLU;
-    case SLM_PROG_K_GQA: return SLM_SASS_GQA_W8;
+    case SLM_PROG_K_GQA: return gqa_sass(op);
     case SLM_PROG_K_ADD: return SLM_SASS_ADD;
     case SLM_PROG_K_EMBED_Q4K: return SLM_SASS_EMBED_Q4K;
     case SLM_PROG_K_EMBED_Q6K: return SLM_SASS_EMBED_Q6K;
@@ -250,6 +272,31 @@ int slm_prog_encode(const struct slm_prog_op *op, uint32_t sass, uint64_t shader
         put32(args, 0x190, op->dim[2]);
         put32(args, 0x194, rows);
         l->args_len = 0x38;
+        if (sass == SLM_SASS_GQA_HMMA_DEC || sass == SLM_SASS_GQA_HMMA_PF) {
+            /* Grids from slm_gqa_hmma.cu: a CTA per KV head and 16 output
+             * dims (decode, 8 warps), or per KV head and four 16-row M
+             * tiles (prefill, 4 warps). The kernels write nothing outside
+             * their shape, so refuse it here. */
+            uint32_t group = gqa_hmma_group(op);
+            if (group == 0u) return -1;
+            /* q, k and v are read 16 bytes at a time, pos as u32, out
+             * written 4 bytes at a time. */
+            if (((op->ptr[0] | op->ptr[1] | op->ptr[2]) & 15u) != 0u ||
+                ((op->ptr[3] | op->ptr[4]) & 3u) != 0u) {
+                return -1;
+            }
+            uint64_t m = (uint64_t)rows * group;
+            l->grid_x = op->dim[1];
+            if (sass == SLM_SASS_GQA_HMMA_DEC) {
+                if (m > 16u) return -1;
+                l->grid_y = op->dim[2] / 16u;
+                l->block_y = 8;
+            } else {
+                l->grid_y = (uint32_t)(((m + 15u) / 16u + 3u) / 4u);
+                l->block_y = 4;
+            }
+            return 0;
+        }
         l->grid_x = op->dim[0];
         l->grid_y = rows;
         l->block_y = 8;
@@ -269,8 +316,12 @@ struct prog_shape {
 struct prog_session {
     bool open;
     bool dead;
+    bool quiesced;          /* dead, but the channel was recovered: the GPU can't touch it */
     bool close_pending;     /* closed while the lock was held elsewhere */
     const struct slm_prog_backend *be;
+    /* The model bytes this session maps, for slm_prog_weights_mapped. */
+    uintptr_t weights_cpu;
+    uint64_t weights_bytes;
     struct ga10b_dma data;
     struct ga10b_dma control;
     uint64_t data_va, control_va;
@@ -278,6 +329,8 @@ struct prog_session {
     uint8_t *step_cpu;
     uint32_t step_bytes;
     int wmap;
+    /* GQA fell back to slm_gqa_w8 (no HMMA SASS) and that was printed. */
+    bool gqa_w8_noted;
     struct prog_shape shapes[SLM_PROG_SHAPES];
 };
 
@@ -310,38 +363,111 @@ static struct prog_va_range g_va_free[VA_FREE_MAX];
 static const struct slm_prog_backend *g_backend_override;
 static uint32_t g_leaked_sessions;
 
+/* Weights whose close found the TLB invalidate failing: their PTEs are gone
+ * but the GPU's TLB may still translate them, so they count as mapped for
+ * good (#1159). Written under the lock, read without it. Past the table's
+ * size every range counts. */
+#define LEAKED_WEIGHTS_MAX 4
+struct prog_leaked_weights {
+    uintptr_t cpu;
+    uint64_t bytes;
+};
+static struct prog_leaked_weights g_leaked_weights[LEAKED_WEIGHTS_MAX];
+static uint32_t g_leaked_weights_n;
+
 /* ---- Lock ----
  *
- * One lock covers the tables above, the shared GPU VM's page tables (as far
- * as this file writes them) and the one program in flight: run_step holds
- * it from submit to the end of its wait, so the in-flight flag in slm_ffi.c
- * always belongs to the step that set it (the shell and slm-runner each
- * have a session) and slm_gpu_prog_finished can only clear its own.
+ * One lock covers the tables above, the cold channel's GPU VM and the one
+ * program in flight.
+ *
+ * The VM: its VA bump allocator and its page tables, whoever writes them.
+ * This file writes them under the lock (open and close); every other
+ * writer takes the same lock through slm_prog_vm_lock (#1173): the
+ * operator library's cold address space (oplib_gpu_as.c, including
+ * `nvgpu oplib wpool`), the cold sched / eviction / MNIST pipeline builds
+ * and oplib_cold_lookup. ga10b_vm_reserve is a plain bump allocator and
+ * ga10b_vm_map allocates a table and then writes the entry pointing at
+ * it, so two writers at once could get the same VA, or one could
+ * overwrite the other's new table and lose its mappings.
+ *
+ * The program in flight: run_step holds the lock from submit to the end
+ * of its wait, so the in-flight flag in slm_ffi.c always belongs to the
+ * step that set it (the shell and slm-runner each have a session) and
+ * slm_gpu_prog_finished can only clear its own.
+ *
+ * Lock order: this lock, then the GPU dispatch lock (submit, l2_evict and
+ * the TLB invalidate take it inside). Never the reverse: no VM writer
+ * holds the dispatch lock, and a taker with IRQs masked, as every
+ * dispatch-lock holder is, makes one try and gets SLM_PROG_ERR_BUSY, so
+ * no ABBA is possible. The VM writers outside this file take no other
+ * lock of slm_prog's and never call back into it while they hold this one.
  *
  * Not a spinlock: the holder waits for the GPU with IRQs on and yields, and
  * may be preempted. A waiter yields too (be->relax), never spins with IRQs
  * masked (#1093): with IRQs off it only tries once. A wait is bounded at
- * one step timeout plus a second, which no healthy holder comes near; past
+ * 9 s (PROG_LOCK_WAIT_US below), which no healthy holder comes near; past
  * that the caller gets SLM_PROG_ERR_BUSY. slm_prog_close can't fail, so a
  * close that can't take the lock marks the session and the holder frees it
- * on unlock. */
+ * on unlock, whether the holder is slm_prog or another VM writer.
+ *
+ * Such a deferred close keeps the session's PTEs, its weights mapping
+ * included, until the holder finishes it, but its caller (GpuProgram's
+ * Drop) has already returned and dropped the registry pin that kept
+ * `slm unload` from freeing those weights (#1159). The registry's unload
+ * therefore also asks slm_prog_weights_mapped, which reads the session
+ * table without this lock: a session counts until session_free has
+ * removed its PTEs and invalidated the TLB.
+ *
+ * g_lock holds who has it (enum lock_holder), for the contention counters
+ * in slm_prog_vm_lock_stats. */
+enum lock_holder {
+    HOLD_NONE = 0u,
+    HOLD_PROG,      /* build, patch, steps: no VM writes */
+    HOLD_MAP,       /* slm_prog_open / slm_prog_close: VM writes */
+    HOLD_VM,        /* another VM writer, through slm_prog_vm_lock */
+};
 static uint32_t g_lock;
+static struct slm_prog_vm_lock_stats g_vm_stats;
 
-#define PROG_LOCK_WAIT_US (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u)
+/* A step timeout, then the channel recovery it starts (#1171), then a
+ * second. */
+#define PROG_RECOVERY_BUDGET_MS 3000u
+#define PROG_LOCK_WAIT_US \
+    (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + PROG_RECOVERY_BUDGET_MS + 1000u) * 1000u)
 
-static bool lock_try(void)
+static bool lock_try(uint32_t who)
 {
-    return __atomic_exchange_n(&g_lock, 1u, __ATOMIC_ACQUIRE) == 0u;
+    uint32_t free_word = HOLD_NONE;
+    return __atomic_compare_exchange_n(&g_lock, &free_word, who, false, __ATOMIC_ACQUIRE,
+                                       __ATOMIC_RELAXED);
 }
 
-static int prog_lock(const struct slm_prog_backend *be)
+static void count(uint32_t *c)
 {
-    if (lock_try()) return 0;
+    __atomic_fetch_add(c, 1u, __ATOMIC_RELAXED);
+}
+
+/* An acquisition by `who` found the lock held by `holder`. */
+static void note_wait(uint32_t who, uint32_t holder)
+{
+    if (who == HOLD_VM) {
+        if (holder == HOLD_MAP) count(&g_vm_stats.vm_waited_on_map);
+        if (holder == HOLD_PROG) count(&g_vm_stats.vm_waited_on_prog);
+        if (holder == HOLD_VM) count(&g_vm_stats.vm_waited_on_vm);
+    } else if (holder == HOLD_VM) {
+        count(who == HOLD_MAP ? &g_vm_stats.map_waited_on_vm : &g_vm_stats.prog_waited_on_vm);
+    }
+}
+
+static int prog_lock(const struct slm_prog_backend *be, uint32_t who)
+{
+    if (lock_try(who)) return 0;
+    note_wait(who, __atomic_load_n(&g_lock, __ATOMIC_RELAXED));
     if (!be || (be->irqs_enabled && !be->irqs_enabled())) return SLM_PROG_ERR_BUSY;
     uint64_t t0 = be->now_us();
     for (;;) {
         be->relax();
-        if (lock_try()) return 0;
+        if (lock_try(who)) return 0;
         if (be->now_us() - t0 >= PROG_LOCK_WAIT_US) return SLM_PROG_ERR_BUSY;
     }
 }
@@ -357,18 +483,19 @@ static void prog_unlock(void)
                 session_free(s);
             }
         }
-        __atomic_store_n(&g_lock, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_lock, HOLD_NONE, __ATOMIC_RELEASE);
         /* A close that failed to take the lock after the scan above: take it
          * back and free that session, or leave it to whoever has it now. */
         bool pending = false;
         for (unsigned i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
             if (__atomic_load_n(&g_sessions[i].close_pending, __ATOMIC_ACQUIRE)) pending = true;
         }
-        if (!pending || !lock_try()) return;
+        if (!pending || !lock_try(HOLD_MAP)) return;
     }
 }
 
 static const struct slm_prog_backend *jetson_backend(void);
+static const struct slm_prog_backend *platform_lock_backend(void);
 static const char *platform_reason(void);
 
 static const struct slm_prog_backend *backend(void)
@@ -376,11 +503,46 @@ static const struct slm_prog_backend *backend(void)
     return g_backend_override ? g_backend_override : jetson_backend();
 }
 
+/* What a VM writer outside this file waits with. Not backend(): on Jetson
+ * that is NULL until the operator library is attached, and attach itself
+ * writes the VM. */
+static const struct slm_prog_backend *lock_backend(void)
+{
+    return g_backend_override ? g_backend_override : platform_lock_backend();
+}
+
+int slm_prog_vm_lock(void)
+{
+    int rc = prog_lock(lock_backend(), HOLD_VM);
+    count(rc == 0 ? &g_vm_stats.vm_takes : &g_vm_stats.vm_busy);
+    return rc;
+}
+
+void slm_prog_vm_unlock(void)
+{
+    prog_unlock();
+}
+
+void slm_prog_vm_lock_stats(struct slm_prog_vm_lock_stats *out)
+{
+    if (!out) return;
+    out->vm_takes = __atomic_load_n(&g_vm_stats.vm_takes, __ATOMIC_RELAXED);
+    out->vm_busy = __atomic_load_n(&g_vm_stats.vm_busy, __ATOMIC_RELAXED);
+    out->vm_waited_on_map = __atomic_load_n(&g_vm_stats.vm_waited_on_map, __ATOMIC_RELAXED);
+    out->vm_waited_on_prog = __atomic_load_n(&g_vm_stats.vm_waited_on_prog, __ATOMIC_RELAXED);
+    out->vm_waited_on_vm = __atomic_load_n(&g_vm_stats.vm_waited_on_vm, __ATOMIC_RELAXED);
+    out->map_waited_on_vm = __atomic_load_n(&g_vm_stats.map_waited_on_vm, __ATOMIC_RELAXED);
+    out->prog_waited_on_vm = __atomic_load_n(&g_vm_stats.prog_waited_on_vm, __ATOMIC_RELAXED);
+}
+
 void slm_prog_backend_set(const struct slm_prog_backend *b)
 {
     g_backend_override = b;
-    g_lock = 0u;
+    g_lock = HOLD_NONE;
+    memset(&g_vm_stats, 0, sizeof(g_vm_stats));
     g_leaked_sessions = 0u;
+    memset(g_leaked_weights, 0, sizeof(g_leaked_weights));
+    g_leaked_weights_n = 0u;
     /* Tests run against several fake VMs: forget what the last one held. */
     memset(g_wmaps, 0, sizeof(g_wmaps));
     memset(g_va_free, 0, sizeof(g_va_free));
@@ -565,16 +727,29 @@ uint32_t slm_prog_leaked_sessions(void)
     return g_leaked_sessions;
 }
 
+/* Under the lock. Published before the session's `open` goes false. */
+static void leak_weights(uintptr_t cpu, uint64_t bytes)
+{
+    uint32_t n = g_leaked_weights_n;
+    if (n < LEAKED_WEIGHTS_MAX) {
+        __atomic_store_n(&g_leaked_weights[n].cpu, cpu, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_leaked_weights[n].bytes, bytes, __ATOMIC_RELAXED);
+    }
+    if (n <= LEAKED_WEIGHTS_MAX) __atomic_store_n(&g_leaked_weights_n, n + 1u, __ATOMIC_RELEASE);
+}
+
 static void session_free(struct prog_session *s)
 {
     const struct slm_prog_backend *be = s->be;
     /* A dead session's last step timed out or its evict failed: the GPU may
      * still be running it, and L2 may hold its dirty lines. Either can land
      * on these pages after they are reused (the CPU KV cache the fallback
-     * allocates next, say). Nothing can quiesce a channel in that state, so
-     * its arena, control pages and VA ranges are leaked on purpose; the
-     * PTEs still go, so a late GPU access faults instead. */
-    bool leak = s->dead;
+     * allocates next, say). Unless the channel recovery that followed
+     * (#1171) quiesced it, its arena, control pages and VA ranges are
+     * leaked on purpose; the PTEs still go, so a late GPU access faults
+     * instead. A recovered channel preempted or reset the program,
+     * restarted its GPFIFO and evicted L2: nothing of it is left to run. */
+    bool leak = s->dead && !s->quiesced;
     if (s->data.cpu) {
         if (s->data_va) {
             ga10b_vm_unmap(be->ops, be->vm, s->data_va, big_round(s->data.size));
@@ -587,8 +762,13 @@ static void session_free(struct prog_session *s)
     /* Unmapped PTEs are only gone once the TLB says so. If that fails
      * the pages stay allocated rather than reused under a live walk. */
     if (be->tlb_invalidate && be->tlb_invalidate() != 0) {
-        uart_puts("[slm-prog] TLB invalidate failed on close: leaking the arena\n");
+        uart_puts("[slm-prog] TLB invalidate failed on close: leaking the arena, "
+                  "and its weights stay mapped for unload\n");
         g_leaked_sessions++;
+        /* The TLB may still translate the weights: keep `slm unload` from
+         * freeing them (#1159). */
+        uint64_t wb = __atomic_load_n(&s->weights_bytes, __ATOMIC_RELAXED);
+        if (wb != 0u) leak_weights(__atomic_load_n(&s->weights_cpu, __ATOMIC_RELAXED), wb);
     } else if (leak) {
         uart_printf("[slm-prog] GPU step failed: leaking this session's %llu KB arena "
                     "(the GPU may still write it)\n",
@@ -600,7 +780,34 @@ static void session_free(struct prog_session *s)
         if (s->data_va) va_put(s->data_va, s->data_va_size, true);
         if (s->control_va) va_put(s->control_va, s->control_va_size, false);
     }
+    /* Released after the PTEs went and the TLB was invalidated (or, if
+     * that failed, after the weights went into g_leaked_weights):
+     * slm_prog_weights_mapped stops counting this session here (#1159). */
+    __atomic_store_n(&s->open, false, __ATOMIC_RELEASE);
     memset(s, 0, sizeof(*s));
+}
+
+int slm_prog_weights_mapped(const void *cpu, uint64_t bytes)
+{
+    uintptr_t lo = (uintptr_t)cpu;
+    if (bytes == 0u) return 0;
+    for (unsigned i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
+        struct prog_session *s = &g_sessions[i];
+        if (!__atomic_load_n(&s->open, __ATOMIC_ACQUIRE)) continue;
+        uintptr_t w = __atomic_load_n(&s->weights_cpu, __ATOMIC_RELAXED);
+        uint64_t n = __atomic_load_n(&s->weights_bytes, __ATOMIC_RELAXED);
+        if (n != 0u && w < lo + bytes && lo < w + n) return 1;
+    }
+    /* After the sessions: a session seen closed above leaked its weights
+     * before it closed. */
+    uint32_t leaked = __atomic_load_n(&g_leaked_weights_n, __ATOMIC_ACQUIRE);
+    if (leaked > LEAKED_WEIGHTS_MAX) return 1;
+    for (uint32_t i = 0; i < leaked; i++) {
+        uintptr_t w = __atomic_load_n(&g_leaked_weights[i].cpu, __ATOMIC_RELAXED);
+        uint64_t n = __atomic_load_n(&g_leaked_weights[i].bytes, __ATOMIC_RELAXED);
+        if (w < lo + bytes && lo < w + n) return 1;
+    }
+    return 0;
 }
 
 int slm_prog_available(void)
@@ -636,7 +843,7 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         a->data_bytes > 0xFFFF0000ull || a->barrier >= GA10B_PROG_BARRIER_COUNT) {
         return SLM_PROG_ERR_ARG;
     }
-    int rc = prog_lock(be);
+    int rc = prog_lock(be, HOLD_MAP);
     if (rc != 0) return rc;
     rc = open_locked(be, a, out);
     prog_unlock();
@@ -658,7 +865,7 @@ static int open_locked(const struct slm_prog_backend *be, const struct slm_prog_
     memset(s, 0, sizeof(*s));
     s->be = be;
     s->wmap = -1;
-    s->open = true;
+    __atomic_store_n(&s->open, true, __ATOMIC_RELEASE);
     memset(out, 0, sizeof(*out));
 
     int rc;
@@ -668,6 +875,8 @@ static int open_locked(const struct slm_prog_backend *be, const struct slm_prog_
     if (a->weights) {
         rc = wmap_get(be, a->weights, a->weights_bytes, &s->wmap);
         if (rc != 0) goto fail;
+        __atomic_store_n(&s->weights_cpu, (uintptr_t)a->weights, __ATOMIC_RELAXED);
+        __atomic_store_n(&s->weights_bytes, a->weights_bytes, __ATOMIC_RELAXED);
         out->weights_map_us = be->now_us() - t0;
         out->weights_gpu_va = g_wmaps[s->wmap].va;
         out->weights_big = g_wmaps[s->wmap].big;
@@ -767,10 +976,12 @@ void slm_prog_close(int32_t h)
 {
     if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return;
     const struct slm_prog_backend *be = backend();
-    if (prog_lock(be) != 0) {
-        /* The holder frees it in prog_unlock. */
+    if (prog_lock(be, HOLD_MAP) != 0) {
+        /* The holder frees it in prog_unlock. Until then the session stays
+         * open with its PTEs, so slm_prog_weights_mapped keeps `slm unload`
+         * from freeing its weights after the caller drops its pin. */
         if (g_sessions[h].open) __atomic_store_n(&g_sessions[h].close_pending, true, __ATOMIC_RELEASE);
-        if (lock_try()) prog_unlock();
+        if (lock_try(HOLD_MAP)) prog_unlock();
         return;
     }
     struct prog_session *s = session(h);
@@ -784,13 +995,23 @@ static struct prog_shape *shape_of(struct prog_session *s, uint32_t shape)
     return &s->shapes[shape];
 }
 
+/* *fell_back (may be NULL) is set when GQA had to take slm_gqa_w8. */
 static int encode_for(const struct prog_session *s, const struct slm_prog_op *op,
-                      struct ga10b_prog_launch *l, uint8_t *args)
+                      struct ga10b_prog_launch *l, uint8_t *args, bool *fell_back)
 {
     int sass = slm_prog_op_sass(op);
     if (sass < 0) return SLM_PROG_ERR_ARG;
     uint64_t va = 0;
-    if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+    if (s->be->kernel_va((uint32_t)sass, &va) != 0) {
+        /* An operator library built before the HMMA GQA pair (#1167) has
+         * slm_gqa_w8 only: run that rather than refuse the whole program. */
+        if (sass != SLM_SASS_GQA_HMMA_DEC && sass != SLM_SASS_GQA_HMMA_PF) {
+            return SLM_PROG_ERR_NO_KERNEL;
+        }
+        sass = SLM_SASS_GQA_W8;
+        if (s->be->kernel_va((uint32_t)sass, &va) != 0) return SLM_PROG_ERR_NO_KERNEL;
+        if (fell_back) *fell_back = true;
+    }
     return slm_prog_encode(op, (uint32_t)sass, va, l, args) == 0 ? 0 : SLM_PROG_ERR_ARG;
 }
 
@@ -801,15 +1022,22 @@ static int slm_prog_add_locked(int32_t h, uint32_t shape, const struct slm_prog_
     if (!ps || !op) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    bool fell_back = false;
+    int rc = encode_for(s, op, &l, args, &fell_back);
     if (rc != 0) return rc;
+    /* Building the program, never on the dispatch path: one line a session. */
+    if (fell_back && !s->gqa_w8_noted) {
+        s->gqa_w8_noted = true;
+        uart_puts("[slm-prog] no HMMA GQA kernel in the operator library (SASS older than "
+                  "#1167): GQA runs on slm_gqa_w8\n");
+    }
     rc = ga10b_prog_add_launch(&ps->p, &l);
     return rc < 0 ? SLM_PROG_ERR_ARG : rc;
 }
 
 int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_add_locked(h, shape, op);
     prog_unlock();
@@ -825,7 +1053,7 @@ static int slm_prog_barrier_locked(int32_t h, uint32_t shape)
 
 int slm_prog_barrier(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_barrier_locked(h, shape);
     prog_unlock();
@@ -842,7 +1070,7 @@ static int slm_prog_mark_locked(int32_t h, uint32_t shape)
 
 int slm_prog_mark(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_mark_locked(h, shape);
     prog_unlock();
@@ -861,7 +1089,7 @@ static int slm_prog_finish_locked(int32_t h, uint32_t shape)
 
 int slm_prog_finish(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_finish_locked(h, shape);
     prog_unlock();
@@ -877,7 +1105,7 @@ static int slm_prog_patch_locked(int32_t h, uint32_t shape, uint32_t idx, const 
     if (!dst) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    int rc = encode_for(s, op, &l, args, NULL);
     if (rc != 0) return rc;
     memcpy(dst, args, l.args_len);
     s->be->ops->cache_clean(s->be->ops->ctx, dst, l.args_len);
@@ -886,7 +1114,7 @@ static int slm_prog_patch_locked(int32_t h, uint32_t shape, uint32_t idx, const 
 
 int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_patch_locked(h, shape, idx, op);
     prog_unlock();
@@ -900,7 +1128,7 @@ static int slm_prog_update_locked(int32_t h, uint32_t shape, uint32_t idx, const
     if (!ps || !op) return SLM_PROG_ERR_ARG;
     struct ga10b_prog_launch l;
     uint8_t args[GA10B_PROG_CBUF_ARGS_MAX];
-    int rc = encode_for(s, op, &l, args);
+    int rc = encode_for(s, op, &l, args, NULL);
     if (rc != 0) return rc;
     if (ga10b_prog_update_launch(&ps->p, idx, &l) != GA10B_PROG_OK) return SLM_PROG_ERR_ARG;
     const struct ga10b_gpu_ops *ops = s->be->ops;
@@ -912,7 +1140,7 @@ static int slm_prog_update_locked(int32_t h, uint32_t shape, uint32_t idx, const
 
 int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_update_locked(h, shape, idx, op);
     prog_unlock();
@@ -920,10 +1148,14 @@ int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pr
 }
 
 /* Cache maintenance takes no lock. It touches only the caller's own session
- * memory (its arena or step page), which nothing else frees while that
- * session is open: the caller owns the session, and a close from elsewhere
- * waits for the holder. Taking the lock here would let a busy lock skip
- * the clean or invalidate silently and compute on stale data (#475 W-A). */
+ * memory (its arena or step page). Only the session's owner closes it
+ * (GpuProgram's Drop; the session table hands a session to one task at a
+ * time), and the owner makes no call on the handle after slm_prog_close
+ * returns. A close that finds the lock busy is finished later by the
+ * holder, but by then the owner has stopped using the memory, so no free
+ * can overlap its clean or invalidate. Taking the lock here would let a
+ * busy lock skip the clean or invalidate silently and compute on stale
+ * data (#475 W-A). */
 static const struct ga10b_gpu_ops *session_ops(int32_t h)
 {
     if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return NULL;
@@ -946,6 +1178,16 @@ void slm_prog_invalidate(int32_t h, const void *p, size_t len)
 
 /* Print once per session: a dead program means every later step of the
  * session is on the CPU, which Rust reports. */
+/* After a failed step: recover the channel if the backend can. True when
+ * the session's memory is safe to free (see slm_prog_backend.recover). */
+static bool recover_after(struct prog_session *s, uint32_t why, uint64_t t_us)
+{
+    if (!s->be->recover) return false;
+    if (s->be->recover(why, t_us) != 0) return false;
+    s->quiesced = true;
+    return true;
+}
+
 static void describe_timeout(const struct prog_session *s, const struct ga10b_prog *p)
 {
     uint32_t start = ga10b_prog_sema_payload(p, GA10B_PROG_SEMA_START);
@@ -1003,15 +1245,22 @@ static int run_step_locked(int32_t h, uint32_t shape, struct slm_prog_run_stats 
         if (be->now_us() >= deadline) break;
         be->relax();
     }
-    be->finished();
     if (!done) {
+        uint64_t t_fail = be->now_us();
         s->dead = true;
         describe_timeout(s, p);
+        /* The recovery ends the flight itself, after it has shut the
+         * other dispatchers out: finished() first would let them queue
+         * behind the hung program in between (#1171). */
+        if (recover_after(s, SLM_PROG_RECOVER_TIMEOUT, t_fail)) return SLM_PROG_ERR_RECOVERED;
+        be->finished();
         return SLM_PROG_ERR_TIMEOUT;
     }
+    be->finished();
     uint64_t t1 = be->now_us();
     if (be->l2_evict() != 0) {
         s->dead = true;
+        if (recover_after(s, SLM_PROG_RECOVER_EVICT, be->now_us())) return SLM_PROG_ERR_RECOVERED;
         return SLM_PROG_ERR_EVICT;
     }
     if (stats) {
@@ -1034,7 +1283,7 @@ static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
     if (!be) return SLM_PROG_ERR_ARG;
     /* A wait under masked IRQs is the #1093 hang, so refuse outright. */
     if (be->irqs_enabled && !be->irqs_enabled()) return SLM_PROG_ERR_IRQS_OFF;
-    int rc = prog_lock(be);
+    int rc = prog_lock(be, HOLD_PROG);
     if (rc != 0) return rc;
     rc = run_step_locked(h, shape, stats, marked, ns, cap);
     prog_unlock();
@@ -1116,6 +1365,7 @@ const char *slm_prog_strerror(int err)
     case SLM_PROG_ERR_EVICT: return "L2 evict timed out";
     case SLM_PROG_ERR_IRQS_OFF: return "step started with IRQs masked";
     case SLM_PROG_ERR_BUSY: return "another GPU program held the lock too long";
+    case SLM_PROG_ERR_RECOVERED: return "GPU step timed out; channel recovered";
     default: return "unknown error";
     }
 }
@@ -1204,10 +1454,28 @@ static void jb_prepare_clocks(void)
                 (unsigned long long)(set / 1000000u));
 }
 
+/* The full GR / MMU / PBDMA dump is about 270 UART lines (some 2 s at
+ * 115200 baud), all of it before the recovery can start. Once per boot;
+ * after that each recovery's line carries the key registers and
+ * `nvgpu cold recover status` lists them (#1171). */
 static void jb_dump(const char *why)
 {
     (void)why;
-    slm_gpu_prog_dump_fault();
+    static uint32_t dumped;
+    if (__atomic_exchange_n(&dumped, 1u, __ATOMIC_RELAXED) == 0u) {
+        slm_gpu_prog_dump_fault();
+    } else {
+        uart_puts("[slm-prog] (full fault state printed at the first timeout of this boot; "
+                  "`nvgpu cold recover status` lists each recovery's registers)\n");
+    }
+}
+
+/* The channel recovery in slm_ffi.c (#1171), which ends the flight. */
+static int jb_recover(uint32_t why, uint64_t t_us)
+{
+    return slm_gpu_channel_recover(why == SLM_PROG_RECOVER_EVICT ? SLM_GPU_RECOVER_EVICT
+                                                                 : SLM_GPU_RECOVER_STEP_TIMEOUT,
+                                   t_us * 1000u);
 }
 
 static struct slm_prog_backend g_jb;
@@ -1232,7 +1500,20 @@ static const struct slm_prog_backend *jetson_backend(void)
     g_jb.dump_fault = jb_dump;
     g_jb.irqs_enabled = jb_irqs;
     g_jb.prepare_clocks = jb_prepare_clocks;
+    g_jb.recover = jb_recover;
     return &g_jb;
+}
+
+/* prog_lock reads only these three. */
+static const struct slm_prog_backend g_jb_lock = {
+    .now_us = jb_now_us,
+    .relax = jb_relax,
+    .irqs_enabled = jb_irqs,
+};
+
+static const struct slm_prog_backend *platform_lock_backend(void)
+{
+    return &g_jb_lock;
 }
 
 static const char *platform_reason(void)
@@ -1253,6 +1534,12 @@ void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz)
 #else
 
 static const struct slm_prog_backend *jetson_backend(void)
+{
+    return NULL;
+}
+
+/* No cold channel, so no other VM writer: a VM lock caller tries once. */
+static const struct slm_prog_backend *platform_lock_backend(void)
 {
     return NULL;
 }

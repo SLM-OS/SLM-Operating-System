@@ -28,6 +28,8 @@
 #include <stdint.h>
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "../gpu/nvidia/ga10b_cold.h"
+#include "gpu_chan_state.h"
 #include "boot_source.h"
 #include "../gpu/nvidia/ga10b_cold_pipelines.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
@@ -715,12 +717,13 @@ void slm_gpu_sched_dispatch_stats_reset(void)
  * FFI dispatch, and #1143 tracks them. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 
-/* A GPU program in flight (#475, kernel/gpu/slm_prog.c). The program is
- * submitted under the lock and waited for without it, with IRQs on, so
- * a 20 ms token doesn't mask IRQs for 20 ms. Everything else on the
- * channel appends to the same GPFIFO, and its IRQs-off poll would then
- * spin for the rest of the program, so a dispatcher that finds a program
- * in flight lets go of the lock until it ends:
+/* The cold channel's state and the GPU program in flight (#475, #1171;
+ * kernel/gpu/slm_prog.c, gpu_chan_state.h). The program is submitted
+ * under the lock and waited for without it, with IRQs on, so a 20 ms
+ * token doesn't mask IRQs for 20 ms. Everything else on the channel
+ * appends to the same GPFIFO, and its IRQs-off poll would then spin for
+ * the rest of the program, so a dispatcher that finds a program in
+ * flight lets go of the lock until it ends:
  *
  *   dispatch_lock_acquire   spins with the caller's IRQ state restored.
  *                           Bounded by the program's deadline.
@@ -732,33 +735,40 @@ static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
  * it doesn't need the owner to run (#1093 class). Written under the
  * lock. There is no owner field: slm_prog.c's run_step holds its own lock
  * from slm_gpu_prog_submit to slm_gpu_prog_finished, so at most one
- * program is in flight and finished always clears its own. */
-static struct {
-    bool active;
-    const volatile uint32_t *end_slot;
-    uint32_t end_payload;
-    uint64_t deadline_ns;
-} g_prog_flight;
+ * program is in flight and finished always clears its own.
+ *
+ * A program past its deadline, a recovery in progress and a channel
+ * recovery could not bring back all make dispatch_lock_acquire return
+ * false: the caller takes its CPU fallback at once, without touching
+ * the channel and without counting toward the breaker (#1171). */
+static struct gpu_chan_state g_chan;
+static const volatile uint32_t *g_prog_end_slot;
+static uint32_t g_prog_end_payload;
 
-/* Caller holds the lock. True while a program still owns the channel. */
-static bool prog_flight_busy_locked(void)
+/* Caller holds the lock. */
+static enum gpu_chan_gate chan_gate_locked(void)
 {
-    if (!g_prog_flight.active) return false;
-    cache_invalidate_range((void *)(uintptr_t)g_prog_flight.end_slot, sizeof(uint32_t));
-    if (*g_prog_flight.end_slot == g_prog_flight.end_payload ||
-        slm_get_time_ns() >= g_prog_flight.deadline_ns) {
-        g_prog_flight.active = false;
-        return false;
+    bool end_seen = false;
+    if (g_chan.flight && g_prog_end_slot) {
+        cache_invalidate_range((void *)(uintptr_t)g_prog_end_slot, sizeof(uint32_t));
+        end_seen = *g_prog_end_slot == g_prog_end_payload;
     }
-    return true;
+    return gpu_chan_gate(&g_chan, end_seen, slm_get_time_ns());
 }
 
-static irq_flags_t dispatch_lock_acquire(void)
+/* Take g_gpu_dispatch_lock for a dispatch. False: the channel is down
+ * (see above); the lock is not held and *irq is untouched. */
+static bool dispatch_lock_acquire(irq_flags_t *irq)
 {
     for (;;) {
-        irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-        if (!prog_flight_busy_locked()) return irq;
-        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        irq_flags_t f = spin_lock_irqsave(&g_gpu_dispatch_lock);
+        enum gpu_chan_gate g = chan_gate_locked();
+        if (g == GPU_CHAN_GO) {
+            *irq = f;
+            return true;
+        }
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, f);
+        if (g == GPU_CHAN_DOWN) return false;
         __asm__ volatile("yield");
     }
 }
@@ -1213,7 +1223,8 @@ int slm_gpu_install_handoff(struct ga10b_bringup *b,
         uart_puts("[gpu] install_handoff: invalid handoff\n");
         return -1;
     }
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return -1;
     int rc = ga10b_bringup_install_handoff(b, h);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
@@ -1224,13 +1235,14 @@ int slm_gpu_install_handoff(struct ga10b_bringup *b,
 int slm_gpu_prog_submit(uint64_t gp_entry, const volatile void *end_slot, uint32_t end_payload,
                         uint32_t timeout_ms)
 {
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return -1;
     int rc = ga10b_bringup_submit_gp_entry(gp_entry);
     if (rc == 0) {
-        g_prog_flight.active = true;
-        g_prog_flight.end_slot = (const volatile uint32_t *)end_slot;
-        g_prog_flight.end_payload = end_payload;
-        g_prog_flight.deadline_ns = slm_get_time_ns() + (uint64_t)timeout_ms * 1000000ull;
+        g_prog_end_slot = (const volatile uint32_t *)end_slot;
+        g_prog_end_payload = end_payload;
+        gpu_chan_flight_start(&g_chan,
+                              slm_get_time_ns() + (uint64_t)timeout_ms * 1000000ull);
     }
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
@@ -1239,13 +1251,14 @@ int slm_gpu_prog_submit(uint64_t gp_entry, const volatile void *end_slot, uint32
 void slm_gpu_prog_finished(void)
 {
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    g_prog_flight.active = false;
+    gpu_chan_flight_end(&g_chan);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
 }
 
 int slm_gpu_prog_l2_evict(void)
 {
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return -1;
     int rc = ga10b_l2_evict_sysmem();
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
@@ -1258,10 +1271,126 @@ void slm_gpu_prog_dump_fault(void)
     ga10b_bringup_dump_fault_state("slm-prog");
 }
 
+/* ---- Channel recovery (#1171): see slm_gpu_channel_recover ---- */
+
+static struct slm_gpu_recovery_rec g_rec_log[SLM_GPU_RECOVERY_LOG];
+static uint32_t g_rec_count;
+static uint32_t g_rec_running;
+
+uint32_t slm_gpu_channel_mode(void)
+{
+    return __atomic_load_n(&g_chan.mode, __ATOMIC_RELAXED);
+}
+
+uint32_t slm_gpu_channel_epoch(void)
+{
+    return __atomic_load_n(&g_chan.epoch, __ATOMIC_RELAXED);
+}
+
+uint32_t slm_gpu_recovery_count(void)
+{
+    return __atomic_load_n(&g_rec_count, __ATOMIC_ACQUIRE);
+}
+
+int slm_gpu_recovery_get(uint32_t i, struct slm_gpu_recovery_rec *out)
+{
+    uint32_t n = slm_gpu_recovery_count();
+    if (!out || i >= n || n - i > SLM_GPU_RECOVERY_LOG) return -1;
+    *out = g_rec_log[i % SLM_GPU_RECOVERY_LOG];
+    return 0;
+}
+
+int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns)
+{
+    if (!boot_source_is_uefi() || ga10b_cold_progress() < GA10B_COLD_CHANNEL) return -2;
+    /* One recovery at a time; a second caller finds the channel down. */
+    if (__atomic_exchange_n(&g_rec_running, 1u, __ATOMIC_ACQUIRE) != 0u) return -1;
+    uint64_t t0 = slm_get_time_ns();
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    bool mine = gpu_chan_recover_begin(&g_chan);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    if (!mine) {
+        __atomic_store_n(&g_rec_running, 0u, __ATOMIC_RELEASE);
+        return -1;
+    }
+    /* Every dispatcher now sees DOWN, and none is inside the lock: each
+     * runs its whole dispatch under it. The hardware is ours. */
+    struct ga10b_cold_recovery r;
+    int level = why == SLM_GPU_RECOVER_MANUAL_L2 ? 2 : why == SLM_GPU_RECOVER_MANUAL_L1 ? 1 : 0;
+    int rc = ga10b_cold_recover(level, &r);
+
+    irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    if (rc == 0) {
+        /* RAMFC/USERD restarted the GPFIFO at 0 (ga10b_cold_recover
+         * reset the active handoff's cursor), and the GR context is a
+         * fresh golden copy: give each kind its warmup again. */
+        for (uint32_t k = 0; k < GA10B_PIPELINE_KIND_COUNT; k++) {
+            g_cold_warmed[k] = false;
+            g_bringups[k].state = GA10B_BRINGUP_INIT;
+        }
+    }
+    gpu_chan_recover_end(&g_chan, rc == 0);
+    uint32_t epoch = g_chan.epoch;
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    uint64_t t1 = slm_get_time_ns();
+
+    uint32_t i = g_rec_count;
+    struct slm_gpu_recovery_rec *e = &g_rec_log[i % SLM_GPU_RECOVERY_LOG];
+    memset(e, 0, sizeof(*e));
+    e->epoch = epoch;
+    e->why = why;
+    e->rc = rc;
+    e->level = r.level;
+    e->l1_rc = r.l1_rc;
+    e->l2_rc = r.l2_rc;
+    e->latched = r.latched;
+    e->probe_failed = r.probe_failed;
+    e->t_timeout_ns = t_timeout_ns ? t_timeout_ns : t0;
+    e->t_begin_ns = t0;
+    e->t_end_ns = t1;
+    e->chram = r.chram;
+    e->chram_after = r.chram_after;
+    e->eng_status0 = r.eng_status0;
+    e->pbdma_status = r.pbdma_status;
+    e->pbdma_intr0 = r.pbdma_intr0;
+    e->gr_status = r.gr_status;
+    e->gr_intr = r.gr_intr;
+    e->gr_exception = r.gr_exception;
+    e->fecs_mb0 = r.fecs_mb0;
+    e->fecs_mb6 = r.fecs_mb6;
+    e->fault_status = r.fault_status;
+    e->fault_info = r.fault_info;
+    e->fault_addr_lo = r.fault_addr_lo;
+    e->opts = ga10b_cold_recover_get_opts();
+    e->eng_status_fail = r.eng_status_fail;
+    e->pbdma_status_fail = r.pbdma_status_fail;
+    e->gr_status_fail = r.gr_status_fail;
+    e->fecs_mb0_fail = r.fecs_mb0_fail;
+    e->fecs_mb6_fail = r.fecs_mb6_fail;
+    e->fecs_ctx_fail = r.fecs_ctx_fail;
+    __atomic_store_n(&g_rec_count, i + 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_rec_running, 0u, __ATOMIC_RELEASE);
+
+    if (rc == 0) slm_gpu_dispatch_breaker_reset();
+    uart_printf("[gpu] channel %s: level %d (L1 %d, L2 %d), %llu us after the failure "
+                "(recovery %llu us), epoch %u; CHRAM 0x%08x->0x%08x GR_STATUS 0x%08x "
+                "GR_INTR 0x%08x EXC 0x%08x FECS mb0 0x%08x mb6 0x%08x MMU fault 0x%08x/0x%08x "
+                "PBDMA intr 0x%08x\n",
+                rc == 0 ? "recovered" : "DEAD (GPU consumers stay on the CPU)", r.level,
+                r.l1_rc, r.l2_rc,
+                (unsigned long long)((t1 - e->t_timeout_ns) / 1000u),
+                (unsigned long long)((t1 - t0) / 1000u), (unsigned)epoch, (unsigned)r.chram,
+                (unsigned)r.chram_after, (unsigned)r.gr_status, (unsigned)r.gr_intr,
+                (unsigned)r.gr_exception, (unsigned)r.fecs_mb0, (unsigned)r.fecs_mb6,
+                (unsigned)r.fault_status, (unsigned)r.fault_info, (unsigned)r.pbdma_intr0);
+    return rc == 0 ? 0 : -1;
+}
+
 int slm_gpu_call_locked(int (*fn)(void *), void *arg)
 {
     if (!fn) return -1;
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
     int rc = fn(arg);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return rc;
@@ -1272,7 +1401,9 @@ int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
     if (!output) return -1;
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
 
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    /* Down: CPU fallback, not a dispatch failure (#1171). */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
     int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
     struct ga10b_bringup *b = &g_bringups[kind];
@@ -1298,7 +1429,9 @@ int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap)
      * returns -3 — preserves the error mapping (-1 no v6 handoff,
      * -2 cap too large, -3 bad arg) callers depend on. */
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    /* Down: CPU fallback, not a dispatch failure (#1171). */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
     int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
     int n = ga10b_bringup_set_input(&g_bringups[kind], bytes, cap);
@@ -1316,7 +1449,9 @@ int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
                            uint32_t n_floats)
 {
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    /* Down: CPU fallback, not a dispatch failure (#1171). */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
     int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
     int n = ga10b_bringup_set_input_fill(&g_bringups[kind], value_bits,
@@ -1375,7 +1510,9 @@ int slm_gpu_run_with_input(uint32_t kind,
     if (!input || !output) return -1;
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
 
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    /* Down: CPU fallback, not a dispatch failure (#1171). */
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
     int rc = slm_gpu_dispatch_locked(kind, input, input_cap,
                                       output, output_cap);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
@@ -1417,8 +1554,9 @@ static int slm_gpu_try_run_with_input(uint32_t kind,
         return -1;
     }
     /* A program in flight is the same thing: this dispatch would spin
-     * with IRQs off until the program ended. */
-    if (prog_flight_busy_locked()) {
+     * with IRQs off until the program ended. A channel that is down
+     * takes the fallback too. */
+    if (chan_gate_locked() != GPU_CHAN_GO) {
         spin_unlock(&g_gpu_dispatch_lock);
         irq_restore(irq);
         return -1;
@@ -1698,6 +1836,20 @@ int slm_gpu_run_eviction_batch(const float *features, size_t n_rows,
     return -1;
 }
 void slm_gpu_dispatch_breaker_reset(void) { }
+/* No cold channel off Jetson: nothing to recover (#1171). */
+int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns)
+{
+    (void)why; (void)t_timeout_ns;
+    return -2;
+}
+uint32_t slm_gpu_recovery_count(void) { return 0; }
+int slm_gpu_recovery_get(uint32_t i, struct slm_gpu_recovery_rec *out)
+{
+    (void)i; (void)out;
+    return -1;
+}
+uint32_t slm_gpu_channel_mode(void) { return 0; }
+uint32_t slm_gpu_channel_epoch(void) { return 0; }
 bool slm_gpu_dispatch_breaker_is_tripped(void) { return false; }
 void slm_gpu_dispatch_breaker_test_record(int rc) { (void)rc; }
 int  slm_gpu_dispatch_breaker_test_count(void) { return 0; }
@@ -1928,6 +2080,31 @@ static int slm_ffi_resolve_scratch_base(uint64_t *out_phys,
     return oplib_pool_scratch_base(out_phys, out_gva);
 }
 
+/* Read `bytes` from operator-library scratch slot 0-2 as the GPU left it
+ * in DRAM, for `nvgpu cold race` to tell a wrong result apart (#1186):
+ * inputs overwritten by another writer, an output the CPU copy missed,
+ * or a kernel that computed a wrong value from the right inputs. Takes
+ * the dispatch lock like a dispatch; the L2 was evicted by the last one. */
+int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes)
+{
+    static const uint64_t off[3] = { OPLIB_POOL_OFF_SCRATCH0, OPLIB_POOL_OFF_SCRATCH1,
+                                     OPLIB_POOL_OFF_SCRATCH2 };
+    if (slot > 2u || dst == NULL || bytes == 0u || bytes > OPLIB_POOL_SLOT_BYTES) return -1;
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;
+    uint64_t base_phys = 0;
+    uint64_t base_gva = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    void *src = (void *)(uintptr_t)(base_phys + off[slot]);
+    cache_invalidate_range(src, (size_t)((bytes + 4095u) & ~4095u));
+    memcpy(dst, src, bytes);
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,
                                        void *out_cpu_out,
@@ -1971,7 +2148,8 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
      * (pushbuffer / semaphore / QMD pool) through `g_nvgpu_b` +
      * `g_handoff`; without the lock the channel-state mutations
      * race. The lock is cleared on every return path. */
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     /* #832: prefer the helper-published shader region; fall back to
      * oplib_pool's self-allocated 256 KB scratch when the helper's
@@ -2055,7 +2233,8 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
     }
 
     op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2146,7 +2325,8 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
     }
 
     op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2236,7 +2416,8 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
     }
 
     op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2312,7 +2493,8 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
     }
 
     op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t base_phys = 0;
     uint64_t base_gva  = 0;
@@ -2374,7 +2556,8 @@ int slm_runtime_stage_weight(const void *cpu_bytes,
         return -1;
     }
 
-    irq_flags_t irq = dispatch_lock_acquire();
+    irq_flags_t irq;
+    if (!dispatch_lock_acquire(&irq)) return SLM_GPU_ERR_CHANNEL_DOWN;   /* CPU (#1171) */
 
     uint64_t gva = oplib_weights_pool_alloc((size_t)len, 0);
     if (gva == 0) {
@@ -2392,6 +2575,14 @@ int slm_runtime_stage_weight(const void *cpu_bytes,
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
+
+int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes)
+{
+    (void)slot;
+    (void)dst;
+    (void)bytes;
+    return -1;
+}
 
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,

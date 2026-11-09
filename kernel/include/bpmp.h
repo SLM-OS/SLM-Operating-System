@@ -95,6 +95,7 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
  * client (TEGRA_ICC_BPMP_*), MRQ_BWMGR_INT. *rate_hz_out gets the memory
  * clock BPMP set. Same return convention as bpmp_clk_enable.
  */
+#define BPMP_BWMGR_CLIENT_CPU_CLUSTER0 2u  /* TEGRA_ICC_BPMP_CPU_CLUSTER0 */
 #define BPMP_BWMGR_CLIENT_GPU 5u  /* TEGRA_ICC_BPMP_GPU */
 int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz_out);
 
@@ -182,5 +183,19 @@ struct bpmp_thermal_request {
  * sensor driver).
  */
 int bpmp_thermal_get_temp(uint32_t zone, int32_t *temp_mc);
+
+/*
+ * Post-request hook (#1161). When set, these wrappers call hook(op, id,
+ * rc) after the round-trip, outside the MRQ lock: bpmp_clk_enable,
+ * bpmp_clk_disable, bpmp_clk_set_rate, bpmp_emc_floor_khz,
+ * bpmp_reset_assert, bpmp_reset_deassert, bpmp_uphy_pcie_controller_state,
+ * bpmp_pg_set_state and bpmp_thermal_get_temp. bpmp_clk_get_rate,
+ * bpmp_clk_is_enabled and bpmp_is_available do not call it.
+ * The hook may itself call BPMP wrappers; nested calls do not re-enter
+ * it. NULL removes it. Boot-time diagnostic: set it only while a single
+ * CPU runs.
+ */
+typedef void (*bpmp_post_op_hook_t)(const char *op, uint32_t id, int rc);
+void bpmp_set_post_op_hook(bpmp_post_op_hook_t hook);
 
 #endif /* BPMP_H */

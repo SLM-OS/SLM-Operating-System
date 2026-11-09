@@ -518,6 +518,23 @@ int ga10b_bringup_submit_gp_entry(uint64_t entry);
 /* GR, FECS, MMU fault and PBDMA state to the console. */
 void ga10b_bringup_dump_fault_state(const char *tag);
 
+/* Channel recovery (#1171). The active handoff's GPFIFO cursor back to 0,
+ * after ga10b_chan_reset put RAMFC and USERD there. Every stored
+ * pipeline kind takes its cursor from the active handoff when it is
+ * switched in, so this covers them all. Caller excludes dispatchers. */
+void ga10b_bringup_reset_gpfifo_cursor(void);
+
+/* Probe the active channel after a recovery: a host semaphore release
+ * (PBDMA alive) and a compute one after a GR drain (the engine loads the
+ * context and runs methods), each waited for up to `timeout_us`. 0 when
+ * both land. On failure *failed says which: 1 host, 2 compute, 3 no
+ * handoff. Prints nothing. Caller excludes dispatchers. */
+int ga10b_bringup_probe_channel(uint32_t timeout_us, uint32_t *failed);
+#define GA10B_PROBE_SEMA_HOST_OFFSET   0xA00u   /* clear of GA10B_SEMA_PAGE_OFFSET */
+#define GA10B_PROBE_SEMA_GR_OFFSET     0xA40u
+#define GA10B_PROBE_PAYLOAD_HOST       0x1171A001u
+#define GA10B_PROBE_PAYLOAD_GR         0x1171A002u
+
 /* Size of the launch-kernel-with-semaphore pushbuffer in dwords.
  *
  * Extends GA10B_LAUNCH_KERNEL_PB_DWORDS (14) with a REPORT_SEMAPHORE

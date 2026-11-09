@@ -930,6 +930,15 @@ hailo-clean:
 test-jetson-uefi-layout:
 	@bash scripts/test-jetson-uefi-layout.sh
 
+# HMMA grouped-query attention (#1167, scripts/cuda/slm/slm_gqa_hmma.cu): the
+# kernel source runs lane by lane on the host against the exact reference,
+# three deliberate mutants must fail, and with nvcc the cubin must be
+# launchable by SLM-OS. No GPU needed. GQA_EMU_ARGS=--quick limits it to
+# KV lengths up to 600 (about a minute instead of about fifteen).
+.PHONY: test-gqa-emu
+test-gqa-emu:
+	@bash scripts/cuda/harness/gqa-emu-test.sh $(GQA_EMU_ARGS)
+
 # The real-model golden (#1165). The 1.1 GB Qwen2.5-1.5B GGUF is too big for
 # CI, so the check runs on hardware: this builds a Jetson image with the
 # fixture for `slm golden` embedded (scripts/fixtures/slm/
@@ -1674,8 +1683,15 @@ check-gpu-shell-lock:
 	@python3 scripts/check-gpu-shell-lock.py
 	@out="$$(bash scripts/tests/test-check-gpu-shell-lock.sh 2>&1)" || { echo "$$out"; exit 1; }
 
+# #1161: the Jetson memory clock is requested as a bandwidth-manager floor,
+# never with MRQ_CLK (BPMP discards that rate at its next recompute).
+.PHONY: check-emc-rate-path
+check-emc-rate-path:
+	@python3 scripts/check-emc-rate-path.py kernel
+	@out="$$(bash scripts/tests/test-check-emc-rate-path.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)
@@ -1859,6 +1875,7 @@ help:
 	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
 	@echo "  jetson-real-golden    Jetson image with the real-model golden for \`slm golden\` (#1165)"
 	@echo "  slm-real-golden-host  The real-model golden on the host (needs the 1.1 GB GGUF)"
+	@echo "  test-gqa-emu          HMMA GQA kernel lane by lane on the host, plus mutants (GQA_EMU_ARGS=--quick)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

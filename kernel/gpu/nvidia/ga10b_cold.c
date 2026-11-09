@@ -35,6 +35,8 @@
 #include "ga10b_mnist_pipeline.h"
 #include "ga10b_cold_pipelines.h"
 #include "oplib_cold.h"
+#include "sched.h"
+#include "slm_ffi.h"
 #include "cache.h"
 #include "string.h"
 
@@ -194,6 +196,16 @@
 #define GA10B_COLD_MAX_GPCS             2u
 
 static enum ga10b_cold_step cold_done = GA10B_COLD_NONE;
+
+/* Set while a ga10b_cold_run or ga10b_cold_recover is driving the
+ * hardware. A flag rather than a spinlock: the steps spin for up to
+ * seconds. */
+static atomic_flag cold_running = ATOMIC_FLAG_INIT;
+
+/* Set while ga10b_cold_recover reruns GR steps: their progress lines
+ * would print once per recovery (#1171); failures still print. */
+static bool cold_quiet;
+#define CINFO(...) do { if (!cold_quiet) INFO(__VA_ARGS__); } while (0)
 
 static const char *const step_names[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_NONE]  = "none",
@@ -676,7 +688,7 @@ static int step_gr_hw(void)
         return -1;
     }
     if (wait_gr_idle() != 0) return -1;
-    INFO("ga10b-cold: GR non-ctx loads done (%d writes)", total);
+    CINFO("ga10b-cold: GR non-ctx loads done (%d writes)", total);
     return 0;
 }
 
@@ -909,7 +921,7 @@ static int step_falcons(void)
         WARN("ga10b-cold: FECS did not answer DISCOVER_IMAGE_SIZE");
         return -1;
     }
-    INFO("ga10b-cold: FECS/GPCCS running, GR context image 0x%x bytes",
+    CINFO("ga10b-cold: FECS/GPCCS running, GR context image 0x%x bytes",
          (unsigned)gr_ctx_image_size);
     return 0;
 }
@@ -969,7 +981,7 @@ static int step_gr_init(void)
 
     if (device_enable(GA10B_LCE_DEVICE_ENABLE_MASK, true) != 0) return -1;
     if (wait_gr_idle() != 0) return -1;
-    INFO("ga10b-cold: GR init support done (%u table writes)",
+    CINFO("ga10b-cold: GR init support done (%u table writes)",
          ga10b_gr_init_support_writes_count);
     return 0;
 }
@@ -996,7 +1008,7 @@ static void ops_free_pages(void *ctx, void *cpu, uint32_t npages)
 static void *ops_phys_to_cpu(void *ctx, uint64_t phys) { (void)ctx; return (void *)(uintptr_t)phys; }
 static void ops_clean(void *ctx, const void *p, size_t n) { (void)ctx; cache_clean_range(p, n); }
 static void ops_inval(void *ctx, const void *p, size_t n) { (void)ctx; cache_invalidate_range(p, n); }
-static void ops_log(void *ctx, const char *line) { (void)ctx; INFO("pmu-fw: %s", line); }
+static void ops_log(void *ctx, const char *line) { (void)ctx; CINFO("pmu-fw: %s", line); }
 
 static const struct ga10b_gpu_ops cold_gpu_ops = {
     .rd32 = ops_rd32, .wr32 = ops_wr32, .udelay = ops_udelay,
@@ -1131,6 +1143,13 @@ static struct ga10b_gr_chan_ctx cold_chan_gr;
 
 static int step_channel(void)
 {
+    /* The channel's VM is created here and gets its first mappings
+     * (GPFIFO, pushbuffer, semaphore, GR context buffers) without the VM
+     * lock (#1173): nothing else can reach it yet. Its runtime writers,
+     * the SLM GPU program and the operator library's address space,
+     * need oplib_cold_attach, which runs in step_policies, after this
+     * step; ga10b_cold_run runs one bring-up at a time (cold_running)
+     * and never re-runs a step that succeeded. */
     struct ga10b_chan_params p;
     ga10b_chan_default_params(&p);
     int rc = ga10b_chan_create(&cold_gpu_ops, &cold_grctx, &p, &cold_chan_gr, &cold_chan);
@@ -1204,6 +1223,206 @@ static int step_policies(void)
     return (ok_s && ok_e) ? 0 : -1;
 }
 
+/* ---- Recovery after a GPU step timeout (#1171) ----
+ *
+ * nvgpu's gv11b_fifo_recover, for SLM-OS's one channel. The caller has
+ * already shut every dispatcher out (slm_ffi.c, channel state
+ * RECOVERING), so the channel is ours alone; this runs in task context
+ * with IRQs on and no spinlock held, and every wait is bounded.
+ *
+ *   L1  channel reset: TSG preempt (the context saves), then
+ *       ga10b_chan_reset. Enough when only the channel is stuck.
+ *   L2  GR engine reset: runlist preempt until the channel is off the
+ *       PBDMA, then the GR part of the engines step, the non-context
+ *       loads, the PMU's FECS/GPCCS bootstrap and the GR init table, as
+ *       nvgpu_engine_gr_reset -> nvgpu_gr_reset, then ga10b_chan_reset.
+ *       Taken when L1 fails. A latched fault does not skip L1: `nvgpu
+ *       cold check` leaves one on a healthy channel.
+ *
+ * Both reload the channel's GR context from the golden image (the saved
+ * one may hold the hung work), evict L2 (the dead program's dirty lines
+ * reach its pages before they are freed), clear FECS's current context
+ * and finish with ga10b_bringup_probe_channel. The GPFIFO cursor goes
+ * back to 0 with RAMFC and USERD. */
+
+#define RECOVER_PREEMPT_US      100000u
+#define RECOVER_PROBE_US        100000u
+#define NV_PGRAPH_INTR          0x400100u
+#define NV_PGRAPH_EXCEPTION     0x400108u
+#define NV_PFB_MMU_FAULT_ADDR_LO 0x100e4cu
+#define NV_PFB_MMU_FAULT_INFO   0x100e5cu
+#define NV_PFB_MMU_FAULT_STATUS 0x100e60u
+#define FB_MMU_FAULT_STATUS_VALID_CLEAR 0x80000000u
+#define NV_PPBDMA0_INTR_0       0x040108u
+#define NV_PPBDMA0_INTR_1       0x040148u
+#define NV_PPBDMA0_STATUS_SCHED 0x04015cu
+#define NV_RUNLIST_ENGINE_STATUS0(base) ((base) + 0x200u)
+
+static void recover_snapshot(struct ga10b_cold_recovery *r)
+{
+    r->chram = ga10b_chan_chram_read(&cold_gpu_ops, &cold_chan);
+    r->eng_status0 = bar0_rd(NV_RUNLIST_ENGINE_STATUS0(cold_chan.p.runlist_pri_base));
+    r->pbdma_status = bar0_rd(NV_PPBDMA0_STATUS_SCHED);
+    r->pbdma_intr0 = bar0_rd(NV_PPBDMA0_INTR_0);
+    r->gr_status = bar0_rd(NV_PGRAPH_STATUS);
+    r->gr_intr = bar0_rd(NV_PGRAPH_INTR);
+    r->gr_exception = bar0_rd(NV_PGRAPH_EXCEPTION);
+    r->fecs_mb0 = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
+    r->fecs_mb6 = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6));
+    r->fault_status = bar0_rd(NV_PFB_MMU_FAULT_STATUS);
+    r->fault_info = bar0_rd(NV_PFB_MMU_FAULT_INFO);
+    r->fault_addr_lo = bar0_rd(NV_PFB_MMU_FAULT_ADDR_LO);
+}
+
+/* Latched error state nvgpu clears during recovery: the MMU fault
+ * registers and the PBDMA / runlist interrupt bits (write 1 to clear).
+ * SLM-OS polls rather than takes these interrupts, but a pending PBDMA
+ * interrupt stalls the PBDMA. */
+static void recover_clear_latched(void)
+{
+    bar0_wr(NV_PFB_MMU_FAULT_STATUS, FB_MMU_FAULT_STATUS_VALID_CLEAR);
+    bar0_wr(NV_PPBDMA0_INTR_0, bar0_rd(NV_PPBDMA0_INTR_0));
+    bar0_wr(NV_PPBDMA0_INTR_1, bar0_rd(NV_PPBDMA0_INTR_1));
+    uint32_t rl = cold_chan.p.runlist_pri_base + GA10B_RL_INTR_0;
+    bar0_wr(rl, bar0_rd(rl));
+}
+
+/* nvgpu_gr_reset's hardware part, from the boot steps. The global
+ * context buffers, the golden image and the channel's VM stay: only GR
+ * itself (with FECS and GPCCS inside it) was reset. */
+static int recover_gr_engine(void)
+{
+    uint32_t gr_mask = ga10b_cold_reset_id_mask(GA10B_GR_RESET_ID);
+    if (device_enable(gr_mask, false) != 0) return -1;
+    bar0_wr(NV_PGRAPH_PRI_GPCS_GPCCS_ENGINE_RESET_CTL, 0u);
+    udelay(10);
+    bar0_wr(NV_PGRAPH_PRI_GPCS_GPCCS_ENGINE_RESET_CTL, 1u);
+    if ((bar0_rd(NV_PGRAPH_PRI_GPC0_GPCCS_ENGINE_RESET_CTL) & 1u) == 0u) return -2;
+    if (device_enable(gr_mask, true) != 0) return -3;
+    if (ga10b_cold_is_pri_poison(bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX0))) return -4;
+    uint32_t image = gr_ctx_image_size;
+    if (step_gr_hw() != 0) return -5;
+    if (step_falcons() != 0) return -6;
+    if (gr_ctx_image_size != image) return -7;    /* not the ucode the golden came from */
+    if (step_gr_init() != 0) return -8;
+    if (ga10b_grctx_init_support(&cold_gpu_ops, &cold_grctx) != GA10B_GRCTX_OK) return -9;
+    return 0;
+}
+
+static uint64_t recover_now_us(void)
+{
+    return slm_get_time_ns() / 1000u;
+}
+
+/* Channel back to as built, then probe it. 0 or a negative step code. */
+static int recover_channel(struct ga10b_cold_recovery *r)
+{
+    bar0_wr(NV_PGRAPH_PRI_FECS_CURRENT_CTX, 0u);
+    if (ga10b_l2_evict_sysmem() != 0) r->evict_failed = 1u;
+    if (ga10b_chan_reset(&cold_gpu_ops, &cold_grctx, &cold_chan, r->chan_flags) != GA10B_CHAN_OK) {
+        return -20;
+    }
+    ga10b_bringup_reset_gpfifo_cursor();
+    uint64_t t = recover_now_us();
+    int rc = ga10b_bringup_probe_channel(RECOVER_PROBE_US, &r->probe_failed);
+    r->probe_us = (uint32_t)(recover_now_us() - t);
+    if (rc != 0) {
+        r->eng_status_fail = bar0_rd(NV_RUNLIST_ENGINE_STATUS0(cold_chan.p.runlist_pri_base));
+        r->pbdma_status_fail = bar0_rd(NV_PPBDMA0_STATUS_SCHED);
+        r->gr_status_fail = bar0_rd(NV_PGRAPH_STATUS);
+        r->fecs_mb0_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(0));
+        r->fecs_mb6_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CTXSW_MAILBOX(6));
+        r->fecs_ctx_fail = bar0_rd(NV_PGRAPH_PRI_FECS_CURRENT_CTX);
+    }
+    return rc == 0 ? 0 : -21;
+}
+
+/* Recovery options (#1171 bring-up), set from the shell. */
+static uint32_t recover_opts = GA10B_COLD_RECOVER_DEFAULT_OPTS;
+
+void ga10b_cold_recover_set_opts(uint32_t opts)
+{
+    recover_opts = opts;
+}
+
+uint32_t ga10b_cold_recover_get_opts(void)
+{
+    return recover_opts;
+}
+
+int ga10b_cold_recover(int level, struct ga10b_cold_recovery *r)
+{
+    if (!r) return -1;
+    memset(r, 0, sizeof(*r));
+    r->chan_flags = recover_opts & (GA10B_CHAN_RESET_RL_CLEAR | GA10B_CHAN_RESET_NO_RELOAD);
+    if (cold_done < GA10B_COLD_CHANNEL || !cold_grctx.golden_ready || !cold_chan.inst.cpu) {
+        r->rc = -30;
+        return r->rc;
+    }
+    /* Exclude a `nvgpu cold` step run; one can't start while we hold it. */
+    uint64_t t0 = recover_now_us();
+    while (atomic_flag_test_and_set_explicit(&cold_running, memory_order_acquire)) {
+        if (recover_now_us() - t0 > 1000000u) {
+            r->rc = -31;
+            return r->rc;
+        }
+        yield();
+    }
+    recover_snapshot(r);
+    r->latched = ga10b_cold_recover_needs_engine_reset(r->chram, r->fault_status, r->fault_info,
+                                                       r->gr_intr, r->gr_exception);
+    ga10b_chan_chram_write(&cold_gpu_ops, &cold_chan, GA10B_CHRAM_DISABLE_CHANNEL);
+    ga10b_chan_sched_enable(&cold_gpu_ops, &cold_chan, false);
+    cold_quiet = true;
+
+    if (recover_opts & GA10B_COLD_RECOVER_CLEAR_FIRST) recover_clear_latched();
+    int rc = -1;
+    /* Level 1 first in every case but a forced level 2: a latched MMU
+     * fault alone is not a reason to skip it (`nvgpu cold check` leaves
+     * one on a healthy channel, jetson-nano-2 2026-11-08). A hang the
+     * TSG preempt cannot stop costs the 100 ms preempt wait before
+     * level 2 (25 of 25 injected hangs and faults on jetson-nano-2,
+     * 2026-11-08: level 2 in about 7 ms after it). */
+    if (level != 2) {
+        r->level = 1;
+        uint64_t t = recover_now_us();
+        if (ga10b_chan_preempt_tsg_within(&cold_gpu_ops, &cold_chan, RECOVER_PREEMPT_US) !=
+            GA10B_CHAN_OK) {
+            r->l1_rc = -10;
+        } else {
+            r->l1_rc = recover_channel(r);
+        }
+        r->l1_us = (uint32_t)(recover_now_us() - t);
+        rc = r->l1_rc;
+        if (rc != 0) {
+            ga10b_chan_chram_write(&cold_gpu_ops, &cold_chan, GA10B_CHRAM_DISABLE_CHANNEL);
+            ga10b_chan_sched_enable(&cold_gpu_ops, &cold_chan, false);
+        }
+    }
+    if (rc != 0 && level != 1) {
+        r->level = 2;
+        uint64_t t = recover_now_us();
+        r->chram_l2 = ga10b_chan_chram_read(&cold_gpu_ops, &cold_chan);
+        if (ga10b_chan_preempt_runlist(&cold_gpu_ops, &cold_chan, RECOVER_PREEMPT_US) !=
+            GA10B_CHAN_OK) {
+            /* nvgpu gives up here too ("PBDMA seems stuck"): the GPU
+             * stays down until a reboot. */
+            r->l2_rc = -11;
+        } else {
+            r->l2_rc = recover_gr_engine();
+            recover_clear_latched();
+            if (r->l2_rc == 0) r->l2_rc = recover_channel(r);
+        }
+        r->l2_us = (uint32_t)(recover_now_us() - t);
+        rc = r->l2_rc;
+    }
+    cold_quiet = false;
+    r->chram_after = ga10b_chan_chram_read(&cold_gpu_ops, &cold_chan);
+    r->rc = rc;
+    atomic_flag_clear_explicit(&cold_running, memory_order_release);
+    return rc;
+}
+
 typedef int (*cold_step_fn)(void);
 
 static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
@@ -1222,9 +1441,6 @@ static const cold_step_fn step_fns[GA10B_COLD_STEP_COUNT] = {
     [GA10B_COLD_POLICIES] = step_policies,
 };
 
-/* Set while a ga10b_cold_run is driving the hardware. A flag rather
- * than a spinlock: the steps spin for up to seconds. */
-static atomic_flag cold_running = ATOMIC_FLAG_INIT;
 
 int ga10b_cold_run(enum ga10b_cold_step last)
 {

@@ -22,6 +22,26 @@
 
 static bool g_bpmp_initialised;
 
+/* #1161: see bpmp_set_post_op_hook in bpmp.h. */
+static bpmp_post_op_hook_t g_post_op_hook;
+static bool g_in_post_op_hook;
+
+void bpmp_set_post_op_hook(bpmp_post_op_hook_t hook)
+{
+    g_post_op_hook = hook;
+}
+
+static int post_op(const char *op, uint32_t id, int rc)
+{
+    bpmp_post_op_hook_t hook = g_post_op_hook;
+    if (hook != NULL && !g_in_post_op_hook) {
+        g_in_post_op_hook = true;
+        hook(op, id, rc);
+        g_in_post_op_hook = false;
+    }
+    return rc;
+}
+
 int bpmp_init(void)
 {
     if (g_bpmp_initialised) {
@@ -111,12 +131,14 @@ static int bpmp_clk_command(uint32_t cmd, uint32_t clock_id)
 
 int bpmp_clk_enable(uint32_t clock_id)
 {
-    return bpmp_clk_command(CMD_CLK_ENABLE, clock_id);
+    return post_op("clk_enable", clock_id,
+                   bpmp_clk_command(CMD_CLK_ENABLE, clock_id));
 }
 
 int bpmp_clk_disable(uint32_t clock_id)
 {
-    return bpmp_clk_command(CMD_CLK_DISABLE, clock_id);
+    return post_op("clk_disable", clock_id,
+                   bpmp_clk_command(CMD_CLK_DISABLE, clock_id));
 }
 
 int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out)
@@ -186,15 +208,15 @@ int bpmp_emc_floor_khz(uint32_t client_id, uint32_t floor_khz, uint64_t *rate_hz
     int32_t err = 0;
     int rc = mrq_send(83u /* MRQ_BWMGR_INT */, &req, sizeof(req), &rate, sizeof(rate), &err);
     if (rc != 0) {
-        return rc;
+        return post_op("bwmgr_floor", client_id, rc);
     }
     if (err != 0) {
-        return (int)err;
+        return post_op("bwmgr_floor", client_id, (int)err);
     }
     if (rate_hz_out) {
         *rate_hz_out = rate;
     }
-    return 0;
+    return post_op("bwmgr_floor", client_id, 0);
 }
 
 int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
@@ -215,16 +237,16 @@ int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
     int rc = mrq_send(MRQ_CLK, &req, sizeof(req),
                       &resp, sizeof(resp), &err);
     if (rc != 0) {
-        return rc;
+        return post_op("clk_set_rate", clock_id, rc);
     }
     if (err != 0) {
-        return (int)err;
+        return post_op("clk_set_rate", clock_id, (int)err);
     }
 
     if (actual_hz_out) {
         *actual_hz_out = (uint64_t)resp.rate;
     }
-    return 0;
+    return post_op("clk_set_rate", clock_id, 0);
 }
 
 /* CMD_CLK_GET_RATE: empty request body, response int64_t rate. */
@@ -278,12 +300,14 @@ static int bpmp_reset_command(uint32_t cmd, uint32_t reset_id)
 
 int bpmp_reset_assert(uint32_t reset_id)
 {
-    return bpmp_reset_command(CMD_RESET_ASSERT, reset_id);
+    return post_op("reset_assert", reset_id,
+                   bpmp_reset_command(CMD_RESET_ASSERT, reset_id));
 }
 
 int bpmp_reset_deassert(uint32_t reset_id)
 {
-    return bpmp_reset_command(CMD_RESET_DEASSERT, reset_id);
+    return post_op("reset_deassert", reset_id,
+                   bpmp_reset_command(CMD_RESET_DEASSERT, reset_id));
 }
 
 /* ============================================================================
@@ -325,10 +349,7 @@ int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id, bool enable)
 
     int32_t err = 0;
     int rc = mrq_send(MRQ_UPHY, &req, sizeof(req), NULL, 0, &err);
-    if (rc != 0) {
-        return rc;
-    }
-    return (int)err;
+    return post_op("uphy_pcie", pcie_controller_id, rc != 0 ? rc : (int)err);
 }
 
 /* ============================================================================
@@ -362,10 +383,7 @@ int bpmp_pg_set_state(uint32_t domain_id, bool on)
 
     int32_t err = 0;
     int rc = mrq_send(MRQ_PG, &req, sizeof(req), NULL, 0, &err);
-    if (rc != 0) {
-        return rc;
-    }
-    return (int)err;
+    return post_op(on ? "pg_on" : "pg_off", domain_id, rc != 0 ? rc : (int)err);
 }
 
 _Static_assert(sizeof(struct bpmp_thermal_request) == 20,
@@ -386,13 +404,13 @@ int bpmp_thermal_get_temp(uint32_t zone, int32_t *temp_mc)
     int32_t err = 0;
     int rc = mrq_send(MRQ_THERMAL, &req, sizeof(req), &temp, sizeof(temp), &err);
     if (rc != 0) {
-        return rc;
+        return post_op("thermal", zone, rc);
     }
     if (err != 0) {
-        return (int)err;
+        return post_op("thermal", zone, (int)err);
     }
     *temp_mc = temp;
-    return 0;
+    return post_op("thermal", zone, 0);
 }
 
 #else /* !PLATFORM_JETSON_ORIN_NANO */
@@ -413,5 +431,6 @@ int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en;
 int  bpmp_pg_set_state(uint32_t id, bool on) { (void)id; (void)on; return 0; }
 /* No BPMP: there is no temperature to report. */
 int  bpmp_thermal_get_temp(uint32_t zone, int32_t *t) { (void)zone; (void)t; return -1; }
+void bpmp_set_post_op_hook(bpmp_post_op_hook_t hook) { (void)hook; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */
