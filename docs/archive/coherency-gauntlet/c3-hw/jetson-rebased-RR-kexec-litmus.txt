@@ -1,0 +1,232 @@
+# jetson-nano-2, kexec from JetPack Linux 5.15.148-tegra, rebased removal branch
+# origin/coherency-remove-nc-axis @ af8d01ba (on origin/main 85f51ffd; includes #1175 and #1177), suite rev 3
+# RR: make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+# slmos.elf sha256 f3a9e3bec8dc21b0f75ca022119a6cf53655fe696fad738a102b3f2b05f86edc
+# kexec'd as /root/slmos-1193-RR.elf (scp + sync + sha check); capture started first, kexec 15 s later; boot
+# capture ran 109.7 s and stopped on "slmos>". Same boot as jetson-rebased-RR-kexec-regs.txt.
+# command: coherency litmus (scale 1), 22.1 s. Raw capture below (first line garbled by the known labctl echo issue).
+���͕���litmus
+# coherency litmus: cpus=0-5 scale=1 timeout=1000ms caller=cpu0 p4_target=100000 p4_budget_ms=2000
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1         1000000         0        0      98 observed=2534952
+P1      0>2         1000000         0        0      98 observed=2487900
+P1      0>3         1000000         0        0      89 observed=2285799
+P1      0>4         1000000         0        0     351 observed=4840072
+P1      0>5         1000000         0        0     354 observed=4885446
+P1      1>0         1000000         0        0      80 observed=2081261
+P1      1>2         1000000         0        0      94 observed=2410152
+P1      1>3         1000000         0        0      91 observed=2313022
+P1      1>4         1000000         0        0     332 observed=4584287
+P1      1>5         1000000         0        0     341 observed=4692805
+P1      2>0         1000000         0        0      88 observed=2304318
+P1      2>1         1000000         0        0      89 observed=2296136
+P1      2>3         1000000         0        0      94 observed=2379965
+P1      2>4         1000000         0        0     313 observed=4317690
+P1      2>5         1000000         0        0     323 observed=4457032
+P1      3>0         1000000         0        0      97 observed=2502215
+P1      3>1         1000000         0        0      97 observed=2528947
+P1      3>2         1000000         0        0      97 observed=2512332
+P1      3>4         1000000         0        0     352 observed=4850157
+P1      3>5         1000000         0        0     342 observed=4719577
+P1      4>0         1000000         0        0     357 observed=4914761
+P1      4>1         1000000         0        0     356 observed=4911541
+P1      4>2         1000000         0        0     356 observed=4903405
+P1      4>3         1000000         0        0     353 observed=4856331
+P1      4>5         1000000         0        0      96 observed=2487583
+P1      5>0         1000000         0        0     357 observed=4929476
+P1      5>1         1000000         0        0     356 observed=4915825
+P1      5>2         1000000         0        0     346 observed=4772825
+P1      5>3         1000000         0        0     352 observed=4860786
+P1      5>4         1000000         0        0     100 observed=2515160
+P2      0>1         1000000         0        0      41 observed=1092247
+P2      0>2         1000000         0        0      40 observed=1078481
+P2      0>3         1000000         0        0      41 observed=1071761
+P2      0>4         1000000         0        0     178 observed=1020360
+P2      0>5         1000000         0        0     178 observed=1034043
+P2      1>0         1000000         0        0      41 observed=1101104
+P2      1>2         1000000         0        0      41 observed=1085566
+P2      1>3         1000000         0        0      42 observed=1081386
+P2      1>4         1000000         0        0     177 observed=1030631
+P2      1>5         1000000         0        0     178 observed=1036936
+P2      2>0         1000000         0        0      42 observed=1087189
+P2      2>1         1000000         0        0      41 observed=1089015
+P2      2>3         1000000         0        0      41 observed=1072629
+P2      2>4         1000000         0        0     177 observed=1022670
+P2      2>5         1000000         0        0     178 observed=1032396
+P2      3>0         1000000         0        0      42 observed=1096058
+P2      3>1         1000000         0        0      42 observed=1083480
+P2      3>2         1000000         0        0      41 observed=1084431
+P2      3>4         1000000         0        0     177 observed=1025748
+P2      3>5         1000000         0        0     177 observed=1033800
+P2      4>0         1000000         0        0     179 observed=1040031
+P2      4>1         1000000         0        0     178 observed=1030920
+P2      4>2         1000000         0        0     178 observed=1024296
+P2      4>3         1000000         0        0     177 observed=1027936
+P2      4>5         1000000         0        0      41 observed=1077083
+P2      5>0         1000000         0        0     179 observed=1027665
+P2      5>1         1000000         0        0     178 observed=1031922
+P2      5>2         1000000         0        0     178 observed=1035132
+P2      5>3         1000000         0        0     177 observed=1025378
+P2      5>4         1000000         0        0      41 observed=1082395
+P3      0>1          100000         0        0      33
+P3      0>2          100000         0        0      32
+P3      0>3          100000         0        0      33
+P3      0>4          100000         0        0      97
+P3      0>5          100000         0        0      99
+P3      1>0          100000         0        0      33
+P3      1>2          100000         0        0      33
+P3      1>3          100000         0        0      33
+P3      1>4          100000         0        0      99
+P3      1>5          100000         0        0     101
+P3      2>0          100000         0        0      33
+P3      2>1          100000         0        0      34
+P3      2>3          100000         0        0      33
+P3      2>4          100000         0        0      98
+P3      2>5          100000         0        0     100
+P3      3>0          100000         0        0      33
+P3      3>1          100000         0        0      33
+P3      3>2          100000         0        0      34
+P3      3>4          100000         0        0      99
+P3      3>5          100000         0        0     101
+P3      4>0          100000         0        0     101
+P3      4>1          100000         0        0      98
+P3      4>2          100000         0        0      98
+P3      4>3          100000         0        0      99
+P3      4>5          100000         0        0      33
+P3      5>0          100000         0        0     102
+P3      5>1          100000         0        0      99
+P3      5>2          100000         0        0      99
+P3      5>3          100000         0        0      99
+P3      5>4          100000         0        0      33
+P4      w0/0-5    511504384         0        0     575 pairs=14405120,8686656,17408384,30341184,30332416 straddles=121850,100002,127229,165042,161914 coverage=ok
+P4      w1/0-5    406458368         0        0     457 pairs=15710080,8710272,14592640,24097792,24088576 straddles=126789,100008,116953,125240,124636 coverage=ok
+P4      w2/0-5    412450816         0        0     463 pairs=15036608,8875072,15673600,24526912,24496448 straddles=119473,100009,123727,126118,129335 coverage=ok
+P4      w3/0-5    503029760         0        0     566 pairs=17548928,8744000,13792064,30036672,30017920 straddles=129769,100000,118377,164174,163192 coverage=ok
+P4      w4/0-5    376299520         0        0     420 pairs=20886144,18256064,18302336,20869312,7529536 straddles=142999,143377,143176,142249,100005 coverage=ok
+P4      w5/0-5    364769280         0        0     406 pairs=20109568,17582464,17609920,20070592,7754816 straddles=136917,135601,136931,136129,100007 coverage=ok
+P5      0>1          100000         0        0      22
+P5      0>2          100000         0        0      22
+P5      0>3          100000         0        0      23
+P5      0>4          100000         0        0      72
+P5      0>5          100000         0        0      72
+P5      1>0          100000         0        0      22
+P5      1>2          100000         0        0      22
+P5      1>3          100000         0        0      22
+P5      1>4          100000         0        0      72
+P5      1>5          100000         0        0      72
+P5      2>0          100000         0        0      22
+P5      2>1          100000         0        0      22
+P5      2>3          100000         0        0      22
+P5      2>4          100000         0        0      72
+P5      2>5          100000         0        0      72
+P5      3>0          100000         0        0      22
+P5      3>1          100000         0        0      22
+P5      3>2          100000         0        0      23
+P5      3>4          100000         0        0      72
+P5      3>5          100000         0        0      72
+P5      4>0          100000         0        0      72
+P5      4>1          100000         0        0      72
+P5      4>2          100000         0        0      72
+P5      4>3          100000         0        0      72
+P5      4>5          100000         0        0      22
+P5      5>0          100000         0        0      72
+P5      5>1          100000         0        0      72
+P5      5>2          100000         0        0      72
+P5      5>3          100000         0        0      72
+P5      5>4          100000         0        0      22
+P6      0-5         1000000         0        0     405
+S1      0>1         1000000     44766        0       1 observed=102790
+S1      0>2         1000000     45370        0       1 observed=102524
+S1      0>3         1000000     44021        0       1 observed=103070
+S1      0>4         1000000     19443        0       1 observed=40069
+S1      0>5         1000000     19817        0       1 observed=39564
+S1      1>0         1000000     44154        0       1 observed=104043
+S1      1>2         1000000     43778        0       1 observed=102974
+S1      1>3         1000000     43969        0       1 observed=102972
+S1      1>4         1000000     19364        0       1 observed=39261
+S1      1>5         1000000     19338        0       1 observed=39204
+S1      2>0         1000000     44218        0       1 observed=103595
+S1      2>1         1000000     45383        0       1 observed=102966
+S1      2>3         1000000     44150        0       1 observed=102991
+S1      2>4         1000000     19850        0       1 observed=39866
+S1      2>5         1000000     19370        0       1 observed=39187
+S1      3>0         1000000     42305        0       1 observed=103808
+S1      3>1         1000000     44276        0       1 observed=102981
+S1      3>2         1000000     45519        0       1 observed=103010
+S1      3>4         1000000     19459        0       1 observed=39645
+S1      3>5         1000000     19400        0       1 observed=39833
+S1      4>0         1000000     19804        0       1 observed=39941
+S1      4>1         1000000     19770        0       1 observed=39931
+S1      4>2         1000000     19543        0       1 observed=39378
+S1      4>3         1000000     19901        0       1 observed=39616
+S1      4>5         1000000     45264        0       1 observed=102982
+S1      5>0         1000000     19456        0       1 observed=39306
+S1      5>1         1000000     19550        0       1 observed=39695
+S1      5>2         1000000     19844        0       1 observed=40030
+S1      5>3         1000000     19803        0       1 observed=39900
+S1      5>4         1000000     44665        0       1 observed=103014
+S2      0>1          100000         0        0      31
+S2      0>2          100000         0        0      31
+S2      0>3          100000         0        0      31
+S2      0>4          100000         0        0      95
+S2      0>5          100000         0        0      95
+S2      1>0          100000         0        0      31
+S2      1>2          100000         0        0      31
+S2      1>3          100000         0        0      32
+S2      1>4          100000         0        0      96
+S2      1>5          100000         0        0      96
+S2      2>0          100000         0        0      31
+S2      2>1          100000         0        0      31
+S2      2>3          100000         0        0      31
+S2      2>4          100000         0        0      95
+S2      2>5          100000         0        0      96
+S2      3>0          100000         0        0      31
+S2      3>1          100000         0        0      32
+S2      3>2          100000         0        0      32
+S2      3>4          100000         0        0      96
+S2      3>5          100000         0        0      96
+S2      4>0          100000         0        0      95
+S2      4>1          100000         0        0      95
+S2      4>2          100000         0        0      95
+S2      4>3          100000         0        0      96
+S2      4>5          100000         0        0      32
+S2      5>0          100000         0        0      96
+S2      5>1          100000         0        0      97
+S2      5>2          100000         0        0      96
+S2      5>3          100000         1        0      96
+S2      5>4          100000         0        0      31
+SENS cpus=0>1 S1=44766 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>2 S1=45370 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>3 S1=44021 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>4 S1=19443 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>5 S1=19817 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>0 S1=44154 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>2 S1=43778 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>3 S1=43969 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>4 S1=19364 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>5 S1=19338 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>0 S1=44218 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>1 S1=45383 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>3 S1=44150 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>4 S1=19850 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>5 S1=19370 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>0 S1=42305 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>1 S1=44276 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>2 S1=45519 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>4 S1=19459 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>5 S1=19400 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>0 S1=19804 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>1 S1=19770 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>2 S1=19543 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>3 S1=19901 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>5 S1=45264 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>0 S1=19456 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>1 S1=19550 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>2 S1=19844 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>3 S1=19803 S2=1 P2_sensitive=yes P3_sensitive=yes
+SENS cpus=5>4 S1=44665 S2=0 P2_sensitive=yes P3_sensitive=no
+# S1 relaxed outcomes: 935550, S2 relaxed outcomes: 1 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 100000 (target 100000)
+coherency: PASS
+slmos>
