@@ -97,7 +97,7 @@ gate (step 3), together with the rest of the instruction.
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
-| C3 | Boot-sequence audit and cacheable build | Pi 5 hardware complete (05f86132); Jetson running; critic round 1 started on Pi 5 | 1 |
+| C3 | Boot-sequence audit and cacheable build | complete 07:54 UTC; critic: Pi 5 PASS, Jetson FAIL against the removal bar | 1 |
 | C4 | Decision, ADR 0007, draft PR | ADR 0007 PASS (round 3); removal pending on both boards; PR gated (see Budget) | 3 |
 
 ### Record check (git history, times -0700)
@@ -215,6 +215,18 @@ gate (step 3), together with the rest of the instruction.
   #10 partial (Jetson integration ran on one boot per path).
 - C4 ADR round 3: PASS at 694 words. Afterwards the critic-recommended Pi 5
   integration line (16/16 in 11 test-kernel boots) was added, 700 words.
+
+- C3-Jetson final (07:54 UTC): removal UEFI boots 8 of 8 at the shell, 7
+  with captured logs; kexec 7 of 7, 4 captured. f546a126 hw-set test kernel
+  built, not run, so no removal integration on Jetson. Builder summary again
+  omitted CPU 4's zero steals in removal UEFI runs 4-5 (critic-established
+  from the raw log); the ADR keeps the critic's counts. ADR line updated to
+  "4 kexec and 7 UEFI boots with captured logs" after the critic's PASS
+  (count only; decision unaffected). Open, unexplained: removal UEFI
+  cross-cluster litmus rows about 2x slower than NC_AXIS=OFF UEFI at the
+  same NDIV 135.
+- Gate opened about 07:55 UTC (ADR PASS, C3 complete on Jetson): applying
+  the user's standing instruction (see Budget).
 
 ## Failed approaches
 

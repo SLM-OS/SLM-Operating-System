@@ -27,7 +27,7 @@ The removal does not land until both boards meet the bar:
 - Pi 5: the integration "match" criterion is unmet. The removal test kernel
   failed one extra test in 1 of 11 boots (#1202); the NC test kernel has a
   single boot. Next: 10-boot NC test-kernel series and the #1202 experiment.
-- Jetson: the removal has 4 kexec and 2 UEFI boots with captured logs, no
+- Jetson: the removal has 4 kexec and 7 UEFI boots with captured logs (10 each required), no
   integration run, and a steal stall the NC build does not show (a CPU with
   0 successful steals): `NC_AXIS=OFF` CPUs 2 and 3 in 6 of 6 runs; removal
   CPU 4 in 2 of 2 UEFI runs with per-CPU deltas, 0 of 5 on kexec; NC 0 of
