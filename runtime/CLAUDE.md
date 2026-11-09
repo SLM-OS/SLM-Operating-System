@@ -263,15 +263,11 @@ every lock it takes:
   (`mm::eviction::try_with_active_policy`).
 - Never allocate from IRQs-off context. The telemetry path uses
   `count_evictable_blocks`, not `snapshot_evictable_blocks().len()`.
-- The kernel UART lock is IRQ-disable-only on default Pi 5 / Jetson
-  builds but a real IRQ-saving cross-CPU spinlock on QEMU, x86-64 and
-  Pi 5 / Jetson built with `NC_AXIS=OFF` (#1193). A Rust guard that
-  calls `uart_puts`/`uart_printf` while held therefore nests
-  `<rust lock>` → `uart_lock` on those builds; that is safe only because
-  the UART code never calls back into Rust. Keep such guards
-  IRQ-saving, as `msg_router` does. The runtime is one library for all
-  ARM64 platforms with no platform `cfg`, so it cannot assume either
-  UART lock flavour.
+- The kernel UART lock is a real IRQ-saving cross-CPU spinlock on
+  every platform. A Rust guard that calls `uart_puts`/`uart_printf`
+  while held therefore nests `<rust lock>` → `uart_lock`; that is safe
+  only because the UART code never calls back into Rust. Keep such
+  guards IRQ-saving, as `msg_router` does.
 
 ### Module-level RAII guards (`EngineGuard`, `OpsGuard`)
 

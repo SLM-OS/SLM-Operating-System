@@ -288,9 +288,10 @@ modification since the Jetson platform supports all required subsystems
 ### Garbled output during hot-swap
 
 Output from the old and new `sensor_monitor` instances may interleave
-briefly during the hot-swap transition. The UART has no cross-CPU lock
-on Pi 5 (see `kernel/CLAUDE.md` §"UART Lock on Pi 5 / Jetson"). The
-garbling is cosmetic and does not indicate a functional error.
+briefly during the hot-swap transition. The UART lock serializes each
+print call (see `kernel/CLAUDE.md` §"UART Lock"), so lines from the two
+instances can alternate. The interleaving is cosmetic and does not
+indicate a functional error.
 
 ---
 

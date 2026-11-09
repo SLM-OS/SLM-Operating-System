@@ -926,7 +926,7 @@ See `docs/ffi.md` for complete FFI documentation.
 - x86-64 SSE support for AI inference (FXSAVE/FXRSTOR)
 
 **Pi 5 Hardware Stability**
-- UART lock: IRQ-disable-only on platforms with incoherent L2 (replaces deadlocking `ldaxr`/`stxr` spinlock)
+- UART lock: IRQ-saving cross-CPU spinlock on every platform (#1193; Pi 5 and Jetson used an IRQ-disable-only lock before)
 - `sched_set_policy`: IRQ-safe wrapper prevents timer preemption during policy switch
 - Idle task: CPU 0 does `daifclr`+`wfi` for timer-driven preemption; secondary CPUs use WFE for cooperative scheduling
 - Component timeouts: hardware counter (`timer_get_count`) replaces `pit_ticks` which doesn't advance while tasks run with IRQs masked

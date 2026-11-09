@@ -38,9 +38,8 @@ Comparison is between two builds of the same kernel:
   comparable.
 - **Task count:** 8 by default, override via `bench stealing N` up to
   64.
-- **Coordination:** per-task slot in NC memory on Pi 5 / Jetson,
-  cacheable BSS on QEMU ARM64 / x86-64 (caches coherent on those
-  targets, no maintenance required).
+- **Coordination:** per-task slot in cacheable BSS on every platform
+  (the caches are coherent, #1193).
 
 ## QEMU ARM64 — captured 2026-04-14
 

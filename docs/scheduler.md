@@ -336,7 +336,7 @@ struct cpu_runqueue {
     uint32_t ready_count;
 };
 /* Per-CPU spinlocks are separate (rq_lock[]) because ARM64 exclusive
- * load/store requires cacheable memory, but run queues may be in NC memory. */
+ * load/store requires cacheable memory. */
 ```
 
 **Lock strategy:**
@@ -902,7 +902,7 @@ Statistics are logged when the policy is deactivated via `shutdown()`.
 #### Scheduler Counters (CONFIG_AI_SCHEDULER)
 
 When `CONFIG_AI_SCHEDULER` is defined, the scheduler tracks additional metrics:
-- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`). `scheduler_init` zeroes each run queue whole with `sched_runqueue_clear()`. On Pi 5 and Jetson the queues live in NC memory from `ncmem_alloc`, which does not zero. Before #1045 the init cleared the queue fields one by one and missed these two counters, so after a Jetson kexec they started from leftover Linux data: `sched stats` showed utilization such as 337%, and `ai_mlp` / `ai_ppo` read the same garbage as their per-CPU utilization feature.
+- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`). `scheduler_init` zeroes each run queue whole with `sched_runqueue_clear()`. Before #1193 the queues on Pi 5 and Jetson lived in NC memory from `ncmem_alloc`, which does not zero. Before #1045 the init cleared the queue fields one by one and missed these two counters, so after a Jetson kexec they started from leftover Linux data: `sched stats` showed utilization such as 337%, and `ai_mlp` / `ai_ppo` read the same garbage as their per-CPU utilization feature.
   A tick counts as running when the current task is neither the idle task nor waiting for console input (`task_counts_as_running()`, #1047). The UART console waits for a keystroke by polling with `yield()`, so before #1047 the shell counted as running on every tick and CPU 0 read 100% at an idle prompt. `uart_read_char()` and `shell_getc()` now bracket that wait with `task_input_wait_begin()` / `task_input_wait_end()`, which set `task::input_wait`. On jetson-nano-2 and pi-5-2, CPU 0 now accumulates about 1% running ticks while the shell sits idle at the prompt (the cumulative figure also includes boot-time work), and four 5 s spinners add 500 running ticks to each CPU they run on.
 - **Per-task**: `arrival_time_ns` (set in `scheduler_add_task()`), `completion_time_ns` (set in `task_exit()`)
 - **Global**: deadline miss rolling window (100 entries), cumulative latency, top-8 task cache (updated every 10 ticks)
@@ -1116,9 +1116,8 @@ Override: `make kernel PLATFORM=<p> WORK_STEALING=ON` or `WORK_STEALING=OFF` map
 The deque's bookkeeping (`buf`, `gen_buf`, `bottom`, `top`) is
 serialized by `steal_deque_lock[MAX_CPUS]` — a separate cacheable
 `spinlock_t` array in `kernel/sched/sched.c`, same pattern as
-`rq_lock[]`. The deque struct itself lives in NC memory on
-`PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson) for instant cross-CPU
-visibility without cache maintenance. The deque used to embed its
+`rq_lock[]`. The deque array itself is cacheable BSS on every
+platform (#1193). The deque used to embed its
 own spinlock; on Jetson the former blanket `SPINLOCK_SKIP_LOCKING`
 reduced it to a barrier-only no-op, letting concurrent pushes/pops
 corrupt the deque — see #158 and commit `a3b3a0e` for the move to

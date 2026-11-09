@@ -22,11 +22,11 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Stack size (per task) | 256 KB (`STACK_SIZE`, raised from 64 KB in #643 for SLM forward) | Same | Same | Same |
 | Stack overflow detection | Bottom-of-stack canary (64 B) + `schedule()`-time SP-range assert (#644) | Same | Same | Same (RSP-side) |
 | Kernel VA = PA? | Identity | Identity | Identity | Higher-half (not yet) |
-| Cache coherency (hardware) | ✅ | ❌ treated as incoherent (NC model) | ❌ treated as incoherent (NC model) | ✅ MESI |
-| Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY | Same + DC CVAC before secondary boot | — |
-| Non-cacheable shared region | — | `0xFFE00000`, 2 MB, MAIR idx 2 | `0xBDE00000`, 2 MB, MAIR idx 2 | — (coherent BSS) |
+| Cache coherency (hardware, CPU-to-CPU) | ✅ | ✅ (A76, no enable bit; ADR 0006) | ✅ (A78AE, no enable bit; ADR 0006) | ✅ MESI |
+| Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY for device DMA (scheduler calls redundant) | Same | — |
+| Non-cacheable DMA region | — | `0xFFE00000`, 2 MB, MAIR idx 2 | `0xBDE00000`, 2 MB, MAIR idx 2 | — |
 | NC allocator | — | `ncmem_alloc` (bump) | Same | — |
-| NC uses | — | runqueues, task table, current-task ptrs, steal deques | Same | — |
+| NC uses | — | device DMA (xHCI, MACB, CDC-ECM, USB bounce), diagnostics | Same + camera RCE, kexec handoff pages | — |
 | Steal deque lock location | In-struct | External cacheable (`steal_deque_lock[MAX_CPUS]`) | External cacheable | In-struct |
 | Spinlock hardware enable | N/A | Runtime flag `spinlock_hw_enabled` set by `vmm_init` | Same pattern | N/A |
 | Max tasks supported | 64 | 64 | 64 | 64 |
@@ -39,7 +39,6 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 
 - **Jetson OP-TEE carveout reclamation** — 64 MB at `0xBE000000–0xC2000000` is CBB-protected. Writes trigger RAS error and power off the CPU core. PMM skips the range.
 - **Jetson high-memory regions (>4 GB)** — mapped via 1-GB block descriptors L1 indices 4-8 (`0x100000000–0x23FFFFFFF`). Works; no issues noted.
-- **Pi 5 cross-CPU coherency**: handled with NC memory + manual DC CVAC/CIVAC + spinlock DRAM flush. Not an SMPEN issue: CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on Cortex-A78AE; neither core has an SMPEN or other coherency-enable bit (#1194). #1193 re-examines the model.
 - **Larger Pi 5 RAM variants (8 GB)** — not regression-tested. PMM should Just Work; unverified.
 - **Higher-half kernel** — not implemented on any platform. All kernels use identity-mapped low memory.
 - **x86-64 EL0-equivalent (CPL=3) user mode** — syscall path present in tree but never wired into component or task execution. ARM64 has the full per-task TTBR0 + ASID + EL0 path; x86-64 lags.
@@ -51,4 +50,4 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 - `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory"
 - `kernel/CLAUDE.md` §"Buddy Allocator (PMM)"
 
-*Last updated: 8 May 2026*
+*Last updated: 8 November 2026*

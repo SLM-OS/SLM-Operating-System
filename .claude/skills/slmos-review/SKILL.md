@@ -61,14 +61,14 @@ SLM-OS is a bare-metal OS with no libc, Linux or POSIX. The kernel runs at EL1/E
 - **Shell commands race the system:** a shell command can re-run a bring-up or install step while another CPU is dispatching. Shared state must be replaced under the lock its readers use.
 - **Publish order:** write the fields, do any invalidate or barrier, then set the flag or pointer last with release semantics. Readers test the flag first. Check this for handoffs, TLB invalidates and pool swaps.
 - ARM64 barriers: `dsb ishst` + `isb` after page table writes; barriers around MMIO configuration and cross-CPU signaling. x86-64: `mfence`/`sfence`/`lfence` equivalents.
-- Cross-CPU data on Pi 5 and Jetson: see "Cache Maintenance" and "Non-Cacheable Shared Memory" in `kernel/CLAUDE.md`. QEMU won't show these bugs.
+- Cross-CPU data on Pi 5 and Jetson: see "Cross-CPU Coherency" and "Non-Cacheable DMA Memory" in `kernel/CLAUDE.md`. CPU-shared state belongs in cacheable memory; the NC block is for device DMA only. DMA buffers need the `cache.h` clean/invalidate discipline, which QEMU won't check.
 
 **IRQ safety**
 - ISRs and IRQs-off paths (`spin_lock_irqsave` sections, the GPU dispatch lock, the lwIP core lock) must not allocate, sleep, `yield()`, `schedule()` or loop without a bound.
 - Flag a spinlock newly held across allocation or slow device I/O, unless that is its documented design (the UART lock, `g_gpu_dispatch_lock`, the runtime's long-work locks).
 - **No unconditional UART output on these paths.** UART writes are slow and IRQs stay masked throughout, so per-dispatch prints cost milliseconds. Log before taking the lock, print once, or put it behind a debug switch.
 - **Rust reached from IRQs-off paths:** check every lock taken below the call. Short sections use IRQ-saving guards; long-held locks use a one-shot try-lock and skip on busy; nothing allocates. Also check nothing allocates or takes a plain lock under an IRQ-saving guard. See "Locks reached from IRQs-off context" in `runtime/CLAUDE.md`.
-- Secondary CPUs don't print after boot on platforms with `PLATFORM_HAS_NC_MEMORY`: the UART lock there has no cross-CPU exclusion. The Jetson `thermal log` and fan tasks are the known exceptions.
+- Secondary CPUs may print: the UART lock is an IRQ-saving cross-CPU spinlock on every platform. The no-UART-on-IRQs-off-paths rule above still applies.
 
 **Hardware access**
 - MMIO goes through `volatile` access at the width the spec gives. Read-modify-write on a shared register is synchronized and leaves write-1-to-clear or write-1-to-disable bits alone.
