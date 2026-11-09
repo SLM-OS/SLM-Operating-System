@@ -37,8 +37,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
-| C2 | `coherency` verb and litmus suite | round 1 FAIL (false-pass flaw); rev 3 suite being built | 1 |
-| C3 | Boot-sequence audit and cacheable build | NC_AXIS=OFF @ c2122932 page-faults at boot (extern mismatch); fix + rev 3 suite in progress | 0 |
+| C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
+| C3 | Boot-sequence audit and cacheable build | hardware stage on c3-hw-1193 @ 10f8688e, both boards | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -283,6 +283,20 @@ Boards: jetson-nano-2 and pi-5-1 only.
   Sensitivity: P2 12 of 12 pairs, P3 12 of 12 (S2 per pair 3 to 701).
   Registers again identical to boot 4. First boot under the #1195 sequence
   worked; card restored and the SLM-OS shell confirmed.
+
+### c3-hw-1193 @ 10f8688e (suite rev 3 + NC_AXIS=OFF declaration fix)
+
+- Suite rev 3 in the kernel: row-tagged values (reserved init tag with the
+  maximum index, so a tag-blind reader would think the row finished),
+  `observed` rule, sentinel + DC CIVAC before controls (a)/(b). QEMU
+  coherency 26/26, including a new `MP-stale-flag` injection that ends in
+  `coherency: FAIL (12 rows)` with every reader at observed=0.
+- `kernel/include/sched_diag.h` declares the nine `sched_diag_*` counters
+  once, included from `sched.h`, so a pointer/array disagreement is a
+  compile error in both configurations. It found a second NC_AXIS=OFF defect
+  at once: `cpu_supervisor.c` NULL-checked an array (`-Werror=address`).
+- All six Pi 5 / Jetson kernel builds (default, NC_AXIS=OFF, both OFF), both
+  NC_AXIS=OFF test kernels and x86-64 build; check-braces 0.
 
 ### Lab notes
 
