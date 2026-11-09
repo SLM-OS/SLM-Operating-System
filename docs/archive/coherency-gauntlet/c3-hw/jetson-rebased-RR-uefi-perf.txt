@@ -1,0 +1,245 @@
+# jetson-nano-2, UEFI-direct, rebased removal branch @ af8d01ba
+# RR: make kernel PLATFORM=JETSON_ORIN_NANO; slmos.bin sha256 dc7c1584fbc15d933f6ea1ff9c33c05a39494bbc33531c82fea07a897df7abbe
+# Same boot as jetson-rebased-RR-uefi-{regs,litmus}.txt, after the litmus run. bench smp x3, bench stealing x5
+# (full per-CPU execution and steal-delta tables), thermal, thermal fan. Raw captures (garbled first
+# characters are the known labctl echo issue).
+
+===== bench smp, run 1 =====
+nench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 3)
+  CPU 2: COMPLETED (ran on CPU 5)
+  CPU 3: COMPLETED (ran on CPU 3)
+  CPU 4: COMPLETED (ran on CPU 3)
+  CPU 5: COMPLETED (ran on CPU 3)
+
+slmos>
+===== bench smp, run 2 =====
+nench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 3)
+  CPU 2: COMPLETED (ran on CPU 5)
+  CPU 3: COMPLETED (ran on CPU 3)
+  CPU 4: COMPLETED (ran on CPU 3)
+  CPU 5: COMPLETED (ran on CPU 3)
+
+slmos>
+===== bench smp, run 3 =====
+bench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched '[INFO] Task 'smp5' (id=366) exiting
+smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 3)
+  CPU 2: COMPLETED (ran on CPU 3)
+  CPU 3: COMPLETED (ran on CPU 3)
+  CPU 4: COMPLETED (ran on CPU 4)
+  CPU 5: COMPLETED (ran on CPU 0)
+
+slmos>
+===== bench stealing, run 1 =====
+cuocm�stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=367) exiting
+[INFO] Task 's3_2' (id=369) exiting
+[INFO] Task 's3_11' (id=378) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   9 ms (9802 us)
+    Per-task avg: 612 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 2 tasks
+      CPU 2: 2 tasks
+      CPU 3: 4 tasks
+      CPU 4: 2 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         4          3         0
+      1        10          0         0
+      2        12          2         0
+      3        16          4         0
+      4        14          2         0
+      5        15          3         0
+
+slmos>
+===== bench stealing, run 2 =====
+uocm�stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=383) exiting
+[INFO] Task 's3_5' (id=388) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   7 ms (7269 us)
+    Per-task avg: 454 us
+
+    Per-CPU execution distribution:
+      CPU 0: 2 tasks
+      CPU 1: 2 tasks
+      CPU 2: 2 tasks
+      CPU 3: 4 tasks
+      CPU 4: 3 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0      3104          2         0
+      1        10          0         0
+      2        12          2         0
+      3        16          4         0
+      4        15          3         0
+      5        15          3         0
+
+slmos>
+===== bench stealing, run 3 =====
+cuoc��ѕ�����5
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=399) exiting
+[INFO] Task 's3_11' (id=410) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   6 ms (6564 us)
+    Per-task avg: 410 us
+
+    Per-CPU execution distribution:
+      CPU 0: 2 tasks
+      CPU 1: 3 tasks
+      CPU 2: 3 tasks
+      CPU 3: 0 tasks
+      CPU 4: 4 tasks
+      CPU 5: 4 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         3          2         0
+      1        10          0         0
+      2        13          3         0
+      3        10          0         0
+      4        16          4         0
+      5        16          4         0
+
+slmos>
+===== bench stealing, run 4 =====
+uocm�stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=415) exiting
+[INFO] Task 's3_3' (id=418) exiting
+[INFO] Task 's3_12' (id=427) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   9 ms (9801 us)
+    Per-task avg: 612 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 1 task
+      CPU 2: 1 task
+      CPU 3: 5 tasks
+      CPU 4: 3 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         5          3         0
+      1        10          0         0
+      2        11          1         0
+      3        17          5         0
+      4        15          3         0
+      5        15          3         0
+
+slmos>
+===== bench stealing, run 5 =====
+uocm�stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=431) exiting
+[INFO] Task 's3_2' (id=433) exiting
+[INFO] Task 's3_7' (id=438) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   9 ms (9923 us)
+    Per-task avg: 620 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 1 task
+      CPU 2: 1 task
+      CPU 3: 5 tasks
+      CPU 4: 3 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       798          3         0
+      1        10          0         0
+      2        11          1         0
+      3        17          5         0
+      4        15          3         0
+      5        15          3         0
+
+slmos>
+===== thermal =====
+thermal
+thermal (C): cpu=50.5 gpu=53.0 soc0=50.0 soc1=49.6 soc2=50.2 tj=53.0
+slmos>
+===== thermal fan (added: `thermal` alone prints temperatures only) =====
+umermal fan
+fan: auto pwm=86/255 target=86 hottest=53.0 C
+fan: 1793 rpm  CSR=0x80560000  pwm3 clk=9600000 Hz
+slmos>

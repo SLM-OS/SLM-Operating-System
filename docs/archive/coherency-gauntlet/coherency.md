@@ -671,6 +671,34 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
   rebase against 13021 before (NC 15715).** Sent to a critic round, not
   footnoted. Pi 5 stealing is bimodal by task split (C3 critic round 1).
 
+### Extension step 1, Jetson, rebased (c3-jetson, 10:47 UTC; new rows, pre-rebase rows above unchanged)
+
+| Jetson | pre-rebase removal 072bd707 kexec | rebased af8d01ba kexec | pre-rebase removal UEFI | rebased af8d01ba UEFI |
+|---|---|---|---|---|
+| Image (elf) | 84e7946c | f3a9e3be (RR), 8684e9ff (RRT) | 84e7946c | same |
+| Litmus (rev 3) | PASS | PASS; S1 935,550, S2 1, weak 0, min straddles 100,000 | PASS (summary only) | PASS (raw); S1 951,738, S2 1, weak 0 |
+| bench smp | 5/5 x3 | 5/5 x3 | 5/5 x3 | 5/5 x3 |
+| bench stealing (us) | 9803 / 10154 / 9802 / 10485 / 13040 | 13039 / 7573 / 9802 / 10356 / 10136, median 10136 (NC 10627) | 9801 / 6976 / 7363 / 9802 / 9802 | 9802 / 7269 / 6564 / 9801 / 9923, median 9801 (NC 9831) |
+| Steal stall (#1203) | 0 of 5 runs | 0 of 5 | CPU 4 in 2 of 2 with deltas | **CPU 3 in 1 of 5 (run 3: 10 attempts, 0 successes)** |
+| Coherency / integration (test kernel) | n.a. pre-rebase (f546a126: 26/26, 16/16) | 26/26, 16/16 | f546a126: 26/26, 16/16 | 26/26, 16/16 |
+| Boots, log-verified | 4 of 7 | **10 of 10** | 7 of 8 | **10 of 10** |
+| Controls a / b / c | not run | 16 P2 timeouts / 30 / stale 30720 | not run | 16 / 30 / stale 29696 of 30720 |
+
+- labctl boot_test cannot drive kexec or BootNext; each boot was a power
+  cycle, a delayed background kexec or BootNext, and a capture started
+  before the boot, stopping on `slmos>|not visible|PANIC|...`. No boot
+  lacked a log; none matched a failure pattern.
+- #1175 fan/EMC task alive on both paths (`thermal fan`: kexec pwm 51,
+  936 rpm; UEFI pwm 86, 1793 rpm).
+- #1204 not reproduced: rebased UEFI cross-cluster P1 rows 235-256 ms, as
+  NC_AXIS=OFF UEFI.
+- Deviation: the UEFI regs file is assembled (79 register lines copied from
+  the V1 UEFI capture after checking the values match; echo line from this
+  capture).
+- Step 1 of the extension is complete on both boards. Gate step 5: no draft
+  PR, because the Pi 5 NC-series condition failed (#1202, #1205) and Jetson
+  stays undecided (#1203 recurred once in 10 rebased stealing runs).
+
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.

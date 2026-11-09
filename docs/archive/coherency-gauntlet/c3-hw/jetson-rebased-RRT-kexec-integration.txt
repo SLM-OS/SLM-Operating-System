@@ -1,0 +1,977 @@
+# jetson-nano-2, kexec from JetPack Linux 5.15.148-tegra, rebased removal branch
+# origin/coherency-remove-nc-axis @ af8d01ba (on origin/main 85f51ffd; includes #1175 and #1177)
+# RRT: make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
+# test slmos.elf sha256 8684e9ff57019228fde043cffcb035b3014c754c36e013a94cf4cd3516a85551
+#   (slmos.bin b8c289d4b54bfbfb446cef2f24acf8ba71c65842e75c8adc3e11b414f42844cd)
+# /root/slmos-1193-RRT.elf (scp + sync + sha check). After a power cycle to SD Linux, the labctl serial_capture
+# (no tail limit, until "All test suites passed!|total failure\(s\)|PANIC|Unhandled Exception|Synchronous
+# Exception") was started first and slmos-kexec was fired 20 s later by a delayed background job (kexec firing
+# 09:34:21 UTC). The capture ran 243.4 s and stopped on the final summary line. Everything below this header
+# is the capture exactly as labctl returned it (first line is labctl's status line), unedited and untruncated.
+# Integration count is 16 (the three NC tests are compiled out without PLATFORM_HAS_NC_MEMORY).
+[Captured 965 lines in 243.4s, pattern 'All test suites passed!|total failure\(s\)|PANIC|Unhandled Exception|Synchronous Exception' matched]
+[   73.452602] tegra-ivc-bus bc00000.rtcpu:ivc-bus:echo@0: ivc channel driver missing
+[   73.452614] tegra-ivc-bus bc00000.rtcpu:ivc-bus:dbg@1: ivc channel driver missing
+[   73.452618] tegra-ivc-bus bc00000.rtcpu:ivc-bus:dbg@2: ivc channel driver missing
+[   73.452623] tegra-ivc-bus bc00000.rtcpu:ivc-bus:diag@5: ivc channel driver missing
+[   77.711527] nvgpu: 17000000.gpu               nvgpu_wait_for_idle:150  [WRN]  Timed out waiting for idle (2)!
+[   77.711527]
+[   79.571529] tegra-hda 3510000.hda: azx_get_response timeout, switching to polling mode: last cmd=0x004f0900
+[   81.939538] nvgpu: 17000000.gpu               nvgpu_wait_for_idle:150  [WRN]  Timed out waiting for idle (2)!
+[   81.939538]
+[   81.939546] nvgpu: 17000000.gpu                     nvgpu_quiesce:1306 [ERR]  failed to idle GPU, err=-110
+[   81.940164] kexec_core: Starting new kernel
+EL2
+
+========================================
+  SLM-OS v0.4.0 build 20261109083131 (af8d01ba)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Jetson Orin Nano
+[INFO] DTB parsed successfully at 0x82cf5000
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x80000000 - 0x280000000 (8192 MB)
+  UART:      0xc280000 (IRQ 146)
+  GIC dist:  0xf400000
+  GIC cpu:   0xf440000
+  CPUs:      6
+  Timer IRQ: 26
+  Firmware entropy: rng-seed=0 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000000 - 0x8029b758
+  .data:   0x809a0000 - 0x809c4400
+  .bss:    0x809d0000 - 0x82cf06f0
+  End:     0x82d00000
+  RAM:     0x80000000 - 0x280000000 (8192 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x80bf7000
+  Blocks mapped: 1025
+  Bytes mapped: 2050 MB
+  L1[0]: 0x80bf5003 (covers VA 0x0)
+  L1[1]: 0x80bf2003 (covers VA 0x40000000)
+  L1[2]: 0x80bf6003 (covers VA 0x80000000)
+  L1[3]: 0x80bf4003 (covers VA 0xc0000000)
+  L1[4]: 0x4000010000070d (covers VA 0x100000000)
+  L1[5]: 0x4000014000070d (covers VA 0x140000000)
+  L1[6]: 0x4000018000070d (covers VA 0x180000000)
+  L1[7]: 0x400001c000070d (covers VA 0x1c0000000)
+  L1[8]: 0x4000020000070d (covers VA 0x200000000)
+  L1[212]: 0x80bf3003 (covers VA 0x3500000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x80000000) = 0x80000000
+  [PASS] virt_to_phys(0xffffff8080000000) = 0x80000000
+  [PASS] is_mapped(0x80000000) = true
+  [PASS] is_mapped(0x2c0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+[ga10b-reserve] reserved kexec'd channel inst block at phys=0x13a066000 (size=4096, FECS_CURRENT_CTX=0x3013a066, target=3)
+[IRQ] Unhandled IRQ 102 — masking at GIC
+[preempt] IRQ taken pre-preempt_init (elr=0x80023b9c spsr=0x60000009) — bail
+[ga10b-reserve] runlist submit_base reads poison (lo=0xbadf1100 hi=0xbadf1100) — wrong pri_base offset or GPU power-gated. Skipping.
+[ga10b-reserve] scanning DRAM for handoff magic (all pipeline kinds)...
+[ga10b-reserve] kind=0 (mnist): handoff @0x115d1b000
+[ga10b-reserve]   reserved handoff dmabuf @0x115d1b000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x13b465000
+[ga10b-reserve]   reserved userd @0x12bc94000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x13b4b2000 (4096 B)
+[ga10b-reserve]   reserved pushbuf @0x13a0d0000 (65536 B)
+[ga10b-reserve]   reserved sem @0x13b24c000 (4096 B)
+[ga10b-reserve]   reserved qmd_pool @0x13b1c0000 (262144 B)
+[ga10b-reserve]   reserved pipeline_ops @0x12b667000 (4096 B)
+[ga10b-reserve]   per-op shader (v7.1): 8 direct, 0 walked (0 ok), 4 unique reservations
+[ga10b-reserve]   reserved gr_ctx_extents array @0x12bc5f000
+[ga10b-reserve]   gr_ctx: 15 extents reserved (4412 KB total), 0 skipped
+[ga10b-reserve]   handoff@0x115d1b000 v=7 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x13b45b000
+[ga10b-reserve]   reserved handoff dmabuf @0x13b45b000 (4 KB)
+[ga10b-reserve]   reserved userd @0x13b45f000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x12bc80000 (4096 B)
+[ga10b-reserve]   reserved pushbuf @0x13b9d0000 (65536 B)
+[ga10b-reserve]   reserved sem @0x13b3bc000 (4096 B)
+[ga10b-reserve]   reserved pipeline_ops @0x13b3ba000 (4096 B)
+[ga10b-reserve]   per-op shader: v6 ops carry no shader fields — covered by the channel-VM reserve
+[ga10b-reserve]   reserved gr_ctx_extents array @0x11e404000
+[ga10b-reserve]   gr_ctx: 17 extents reserved (4920 KB total), 0 skipped
+[ga10b-reserve]   handoff@0x13b45b000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[ga10b-reserve]   vm @inst 0x13b465000: 8 tables, 910 pages (3640 KB) in 90 ranges
+[ga10b-reserve]   vm @inst 0x13a066000: 8 tables, 917 pages (3668 KB) in 77 ranges
+[ga10b-reserve]   vm @inst 0x13a066000: PDB 0x11ec2c000 already reserved
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x82d00000 - 0x280000000
+  Total pages:     2085632 (8342528 KB)
+  Free pages:      1803831 (7215324 KB)
+  Used pages:      281801 (1127204 KB)
+  Reserved:        11520 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 125 blocks
+    Order  1 (    8 KB): 121 blocks
+    Order  2 (   16 KB): 100 blocks
+    Order  3 (   32 KB): 85 blocks
+    Order  4 (   64 KB): 81 blocks
+    Order  5 (  128 KB): 64 blocks
+    Order  6 (  256 KB): 44 blocks
+    Order  7 (  512 KB): 33 blocks
+    Order  8 ( 1024 KB): 20 blocks
+    Order  9 ( 2048 KB): 12 blocks
+    Order 10 ( 4096 KB): 13 blocks
+    Order 11 ( 8192 KB): 7 blocks
+    Order 12 (16384 KB): 10 blocks
+    Order 13 (32768 KB): 9 blocks
+    Order 14 (65536 KB): 10 blocks
+    Order 15 (131072 KB): 7 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 18 (1048576 KB): 2 blocks
+    Order 19 (2097152 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xbde00000 - 0xbe000000 (2048 KB)
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv3
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=8B
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 6 CPUs configured
+[INFO] SMP: 5/5 secondary CPUs online
+[INFO] SMP: total 6 CPUs active
+[INFO] cpufreq: CPU 1 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 2 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 3 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 4 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 5 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+
+SMP Validation Tests:
+  [PASS] All 6 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU 4 online flag set
+  [PASS] CPU 5 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 65536 KB (16384 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (16384 blocks x 4096 bytes = 65536 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (16384 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x200000000 (1024 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (1024 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[INFO] HSP@0x3c00000: DIMENSIONING=0x0008a228 (SM=8 SS=2 AS=2)
+[INFO] HSP doorbells: CCPLEX@0x3c90100 BPMP@0x3c90300
+[INFO] BPMP/IVC: TX@0x40070000 RX@0x40071000 (pre-handshake)
+[INFO] BPMP/IVC: initial TX state=0x00000000 count=11189 (rx-count observed by us=11189)
+[INFO] BPMP/IVC: initial RX state=0x00000000 count=11189 (rx-count observed by us=11189)
+[INFO] IVC: handshake complete (us=Established, peer observed Ack)
+[INFO] BPMP init: rc=0
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] BPMP: MRQ_PING round-trip OK
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] fan: PWM3 at 11027028 Hz (pfm 0), level 128/255, tachometer on
+[INFO] GPU raw BOOT_0 read: 0xb7b000a1 (expect 0xB7B000A1 for GA10B)
+[GPU] Registered driver: nvidia
+[GPU] Initializing nvidia driver...
+[INFO] GPU-NV: Probing NVIDIA GPU at 0x17000000...
+[GPU-NV] NVIDIA GPU detected: GA10B (Jetson Orin)
+[GPU-NV]   BOOT_0:  0xb7b000a1
+[GPU-NV]   BOOT_42: 0x17ba1000
+[GPU-NV]   Chip ID: 0x17b (arch=0x17, impl=0xb)
+[GPU-NV]   Silicon: rev 10.1
+[GPU-NV]   Ampere:  yes
+[GPU-NV]   Enable:  0x50000000
+[GPU] Initialization complete
+[GSP-JETSON] platform shim installed
+[INFO] pcie: no backend available on this platform (-4)
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+[INFO] xhci: FPCI dev/vendor=0x229810de (expect 0x229810de), BAR2[0]=0x00140009
+[INFO] xhci: pre-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: post-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: CSB probe FALC_CPUCTL=0xffffffff (STARTCPU=1 HALTED=1 STOPPED=1)
+[INFO] xhci: CSB probe MP_APMAP=0xffffffff (BOOTPATH=1)
+[INFO] xhci: CSB probe CSBRANGE readback=0x0000080c (expected 0x0000080c — MP_APMAP's page)
+[INFO] xhci: HCI v1.20, 36 slots, 8 ports, 5 intrs, 64-bit addr, 64-byte ctx
+[INFO] xhci: pre-reset USBCMD=0x00000000 USBSTS=0x00000001
+[INFO] xhci: skipping HCRST on Tegra (Falcon-reset is BPMP-only); using the Linux-left halted state as the init baseline
+[INFO] xhci: allocated 3 scratchpads (4096 bytes each)
+[INFO] xhci: pre-program DCBAAP=0000007ffffff000 CRCR=0000000000000000 CONFIG=0x00000024 USBSTS=0x00000001
+[INFO] xhci: inherited DCBAA probe skipped (ptr=0x7ffffff000)
+[INFO] xhci: slot1 fdt-node handoff devctx=0x7fffff6000 root=6 slot_dw3=0x10000001 ep0_dw2=0xffff4611 ep0_dw3=0x0000007f
+[INFO] xhci: slot3 bootarg handoff skipped code=3
+[INFO] xhci: dtb path probe rc: /=0 /cpus=-4 /aliases=-4
+[INFO] xhci: dtb root dump aborted (bad token=0x0)
+[INFO] xhci: slot3 handoff raw magic=0x6ee3fc0e version=182633433 slot=1699579497 root=560369680 devctx=0xd6b938069cd11dd1 dcbaap=0x734d34b33878d53d
+[INFO] xhci: slot3 handoff rejected
+[INFO] xhci: post-RUN write USBCMD=0x00000001 USBSTS=0x00000000
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: cached Tegra FPCI context hs_pls=0x00000000 fs_pls=0x00000000 hsfs_speed=0x00000000 hsfs_pp=0x00000000 aru_ctx=0x00000000 axi=0x0000000a cfg24=0x00002032 cfg16=0x00000000
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS)
+[INFO] xhci: inherited-slot probe leaving slot 1 EP0 untouched for adoption
+[INFO] xhci: inherited-slot probe leaving slot 3 EP0 untouched for adoption
+[INFO] xhci: inherited-slot scrub keeping slot 1 for adoption probe
+[INFO] xhci: inherited-slot scrub disabled stale slot 2
+[INFO] xhci: inherited-slot scrub disabled stale slot 3
+[INFO] xhci: inherited-slot scrub cleared 2 stale slot(s)
+[INFO] xhci: registered with usb_core — running Phase 3A Steps 5-7
+[INFO] xhci: port 0 portsc=0x0c001663 connected=1 speed=0
+[INFO] xhci: port 1 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 2 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 3 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 4 portsc=0x000002a0 connected=0 speed=0
+[INFO] xhci: port 5 portsc=0x00000e63 connected=1 speed=3
+[INFO] xhci: USB 2.0 device attached at init on PORTSC[5] — unplug and re-insert to enumerate (see #309)
+[INFO] xhci: stale port on PORTSC[5] is already enabled and matches inherited slot1 handoff (0x00000e63) — skipping reset and reusing retained slot1 state
+[INFO] xhci: pre-reset UTMI lane 1 mux 0x00000055->0x00000055 cap 0x00000113->0x00000113 bias 0x060e0338->0x060e0338 ctl0 0x06cc88d1->0x02cc88d1 ctl1 0x1e10100c->0x1e101008
+[INFO] xhci: PORTSC[5] request-resume for connected-disabled reuse (0x00000e63 -> 0x00000fe3, pls 3 -> 15)
+[INFO] xhci: skipping root-port reset on connected-disabled PORTSC[5] (0x00000fe3, pls=15)
+[INFO] xhci: PORTSC[5] finish-resume for device_open pre-ep0 (0x00000fe3 -> 0x00400e03, pls 15 -> 0)
+[INFO] xhci: PORTSC[5] acked change bits for device_open pre-ep0 (0x00400e03 -> 0x00000e03)
+[INFO] xhci: PORTSC[5] post-resume change-ack for device_open pre-ep0 (0x00400e03 -> 0x00000e03)
+[INFO] xhci: adopt slot 1 skipping STOP_EP(ep0) because inherited state is stopped
+[INFO] xhci: adopted inherited slot 1 for high-speed root device (root_port=6 ring=0xbde0a9c0 retained_devctx=0x7fffff6000)
+[INFO] xhci: post-adopt local devctx=0xbde09980 slot route=0x0 speed=3 ctx=1 root=6 addr=1 state=addressed dw0=0x08300000 dw1=0x00060000 dw2=0x00000000 dw3=0x10000001
+[INFO] xhci: post-adopt local devctx ep0 state=stopped type=4 mps=64 tr=0xbde0a9c0 dcs=1 avg=0 dw0=0x00000003 dw1=0x00400026 dw2=0xbde0a9c1 dw3=0x00000000 dw4=0x00000000
+[INFO] xhci: post-adopt inherited-slot1 phys=0x7fffff6000 slot route=0x0 speed=3 ctx=1 root=6 addr=1 state=addressed dw0=0x08300000 dw1=0x00060000 dw2=0x00000000 dw3=0x10000001
+[INFO] xhci: post-adopt inherited-slot1 ep0 state=stopped type=4 mps=64 tr=0x7fffff4610 dcs=1 avg=0 dw0=0x00000003 dw1=0x00400026 dw2=0xffff4611 dw3=0x0000007f dw4=0x00000000
+[INFO] usb_core: retained descriptor bounce @0xbde0adc0 len=256
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xbde0adc0 len=64
+[INFO] usb_core: reusing inherited device address 1 after initial descriptor
+[INFO] xhci: configure ep 0x81 slot=1 dci=3 speed=3 raw_interval=12 encoded_interval=11 ep_dw0=0x000b0000 ep_dw1=0x0001003e ep_dw2=0xbde0aec1 ep_dw3=0x00000000 ep_dw4=0x00010001
+[INFO] xhci: ep 0x81 configured (dci=3, type=7, mps=1)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x5489 class=0x09
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] xhci: slot 2 enabled for port 6
+[INFO] xhci: address ctx route=0x3 speed_id=3 root_port=6 slot_dw0=0x08300003 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0c301 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: slot 2 addressed (speed=3, port=6, BSR=1)
+[INFO] xhci: post-address local devctx=0xbde0b2c0 slot route=0x3 speed=3 ctx=1 root=6 addr=0 state=default dw0=0x08300003 dw1=0x00060000 dw2=0x00000000 dw3=0x08000000
+[INFO] xhci: post-address local devctx ep0 state=running type=4 mps=64 tr=0xbde0c300 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0c301 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: using NC bounce for child initial descriptor buf=0xbde0adc0 len=64 route=0x3 root_port=6
+[INFO] xhci: queueing child post-short NO_OP after event retirement (slot=2)
+[INFO] xhci: child post-short NO_OP cc=1 (slot=2)
+[INFO] xhci: address ctx route=0x3 speed_id=3 root_port=6 slot_dw0=0x08300003 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0c301 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: syncing child slot 2 with ADDRESS_DEVICE(BSR=0) route=0x3 root_port=6 addr=0
+[INFO] xhci: post-live-address-bsr0 local devctx=0xbde0b2c0 slot route=0x3 speed=3 ctx=1 root=6 addr=6 state=addressed dw0=0x08300003 dw1=0x00060000 dw2=0x00000000 dw3=0x10000006
+[INFO] xhci: post-live-address-bsr0 local devctx ep0 state=running type=4 mps=64 tr=0xbde0c300 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0c301 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: child ADDRESS_DEVICE(BSR=0) sync after initial descriptor rc=0 route=0x3 root_port=6 target=2
+[INFO] usb_core: selecting CDC-ECM config index 1 value 2 over default config index 0
+[INFO] xhci: batching CONFIGURE_ENDPOINT slot=2 endpoints=3 max_dci=7 first_ep=0x83
+[INFO] xhci: patching fresh slot 2 configure ctx addr/state (addr 6->2 state 2->2 ep=0x83)
+[INFO] xhci: configure ep 0x83 slot=2 dci=7 speed=3 raw_interval=8 encoded_interval=7 ep_dw0=0x00070000 ep_dw1=0x0010003e ep_dw2=0xbde0c701 ep_dw3=0x00000000 ep_dw4=0x00100010
+[INFO] xhci: configure ep 0x81 slot=2 dci=3 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000036 ep_dw2=0xbde0cb01 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: configure ep 0x02 slot=2 dci=4 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000016 ep_dw2=0xbde0cf01 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: ep 0x83 configured (dci=7, type=7, mps=16)
+[INFO] xhci: ep 0x81 configured (dci=3, type=6, mps=512)
+[INFO] xhci: ep 0x02 configured (dci=4, type=2, mps=512)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] xhci: ep 0x02 already configured (dci=4)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x00
+[INFO] usb_core: hub port 3: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+[INFO] xhci: hot-plug ready — waiting for USB device attach (see #309 for the re-plug requirement on kexec boots)
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[INFO] BOOT_TESTS_HW_SET: coherency + integration suites only
+[TEST] test_coherency.c
+  [PASS] test_predicates_flag_forbidden_outcomes
+  [PASS] test_row_tags
+  [PASS] test_mp_check_rules
+  [PASS] test_corr_check_rules
+  [PASS] test_mp_reader_counts_synthetic_forbidden
+  [PASS] test_mp_reader_times_out_without_progress
+  [PASS] test_mp_reader_foreign_final_value_does_not_finish
+  [PASS] test_corr_reader_stops_on_done
+  [PASS] test_corr_reader_ignores_foreign_done
+  [PASS] test_corr_reader_times_out_without_writes
+  [PASS] test_corr_writer_stop_rule
+  [PASS] test_pingpong_counts_lost_step
+  [PASS] test_barrier_single_participant
+  [PASS] test_barrier_times_out_alone
+  [PASS] test_row_judgement
+  [PASS] test_iteration_counts
+Lua 5.4 scripting initialized
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos> cpu0: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81000000
+  SCTLR_EL2  0x0000000030c01805 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030500800 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81000100
+  SCTLR_EL2  0x0000000030c51835 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d50838 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81000200
+  SCTLR_EL2  0x0000000030c51835 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d50838 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81000300
+  SCTLR_EL2  0x0000000030c51835 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d50838 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu4: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81010200
+  SCTLR_EL2  0x0000000030c51835 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d50838 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu5: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81010300
+  SCTLR_EL2  0x0000000030c51835 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d50838 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000703fe03a (64 B lines, 8-way, 512 sets, 256 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [PASS] test_regs_every_cpu_reports
+# coherency litmus: cpus=0-5 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       9 observed=253735
+P1      0>2          100000         0        0       5 observed=136800
+P1      0>3          100000         0        0       9 observed=251450
+P1      0>4          100000         0        0      29 observed=406062
+P1      0>5          100000         0        0      29 observed=405988
+P1      1>0          100000         0        0       9 observed=250443
+P1      1>2          100000         0        0      10 observed=263577
+P1      1>3          100000         0        0      10 observed=250353
+P1      1>4          100000         0        0      25 observed=349967
+P1      1>5          100000         0        0      35 observed=481339
+P1      2>0          100000         0        0       9 observed=247045
+P1      2>1          100000         0        0      10 observed=249568
+P1      2>3          100000         0        0       5 observed=136295
+P1      2>4          100000         0        0      25 observed=349672
+P1      2>5          100000         0        0      25 observed=349263
+P1      3>0          100000         0        0       9 observed=250944
+P1      3>1          100000         0        0       9 observed=253769
+P1      3>2          100000         0        0       9 observed=258195
+P1      3>4          100000         0        0      25 observed=349534
+P1      3>5          100000         0        0      34 observed=481354
+P1      4>0          100000         0        0      35 observed=491511
+P1      4>1          100000         0        0      35 observed=491333
+P1      4>2          100000         0        0      25 observed=353197
+P1      4>3          100000         0        0      35 observed=491363
+P1      4>5          100000         0        0       9 observed=246971
+P1      5>0          100000         0        0      35 observed=489522
+P1      5>1          100000         0        0      35 observed=492190
+P1      5>2          100000         0        0      35 observed=491934
+P1      5>3          100000         0        0      35 observed=493767
+P1      5>4          100000         0        0      10 observed=246399
+P2      0>1          100000         0        0       4 observed=108079
+P2      0>2          100000         0        0       4 observed=107433
+P2      0>3          100000         0        0       4 observed=107961
+P2      0>4          100000         0        0      17 observed=102666
+P2      0>5          100000         0        0      17 observed=103722
+P2      1>0          100000         0        0       4 observed=109387
+P2      1>2          100000         0        0       4 observed=106822
+P2      1>3          100000         0        0       4 observed=108438
+P2      1>4          100000         0        0      17 observed=102805
+P2      1>5          100000         0        0      17 observed=102620
+P2      2>0          100000         0        0       4 observed=108663
+P2      2>1          100000         0        0       4 observed=106766
+P2      2>3          100000         0        0       4 observed=108015
+P2      2>4          100000         0        0      17 observed=100122
+P2      2>5          100000         0        0      17 observed=101024
+P2      3>0          100000         0        0       4 observed=109279
+P2      3>1          100000         0        0       4 observed=108301
+P2      3>2          100000         0        0       4 observed=108771
+P2      3>4          100000         0        0      17 observed=100531
+P2      3>5          100000         0        0      17 observed=100579
+P2      4>0          100000         0        0      17 observed=102534
+P2      4>1          100000         0        0      17 observed=101104
+P2      4>2          100000         0        0      17 observed=101124
+P2      4>3          100000         0        0      17 observed=102650
+P2      4>5          100000         0        0       4 observed=107520
+P2      5>0          100000         0        0      17 observed=103942
+P2      5>1          100000         0        0      17 observed=102236
+P2      5>2          100000         0        0      17 observed=101358
+P2      5>3          100000         0        0      17 observed=102912
+P2      5>4          100000         0        0       4 observed=108909
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       3
+P3      0>3           10000         0        0       3
+P3      0>4           10000         0        0       9
+P3      0>5           10000         0        0       9
+P3      1>0           10000         0        0       3
+P3      1>2           10000         0        0       3
+P3      1>3           10000         0        0       3
+P3      1>4           10000         0        0       9
+P3      1>5           10000         0        0       9
+P3      2>0           10000         0        0       3
+P3      2>1           10000         0        0       3
+P3      2>3           10000         0        0       3
+P3      2>4           10000         0        0       9
+P3      2>5           10000         0        0       9
+P3      3>0           10000         0        0       3
+P3      3>1           10000         0        0       3
+P3      3>2           10000         0        0       3
+P3      3>4           10000         0        0       9
+P3      3>5           10000         0        0      10
+P3      4>0           10000         0        0      10
+P3      4>1           10000         0        0      10
+P3      4>2           10000         0        0       9
+P3      4>3           10000         0        0       9
+P3      4>5           10000         0        0       3
+P3      5>0           10000         0        0      10
+P3      5>1           10000         0        0      10
+P3      5>2           10000         0        0      10
+P3      5>3           10000         0        0       9
+P3      5>4           10000         0        0       3
+P4      w0/0-5      2953216         0        0       3 pairs=74432,44160,91264,159040,159424 straddles=604,513,611,792,841 coverage=ok
+P4      w1/0-5      2310144         0        0       2 pairs=80192,44096,76416,123584,123904 straddles=617,514,581,693,591 coverage=ok
+P4      w2/0-5      2183168         0        0       2 pairs=78784,47232,84224,130432,130496 straddles=648,505,663,646,674 coverage=ok
+P4      w3/0-5      2924544         0        0       2 pairs=91840,47168,72896,156544,157696 straddles=674,506,672,901,834 coverage=ok
+P4      w4/0-5      2105344         0        0       2 pairs=106368,92864,92864,105984,37952 straddles=698,726,688,676,503 coverage=ok
+P4      w5/0-5      1892352         0        0       2 pairs=104832,91328,91840,104320,41088 straddles=725,714,699,732,506 coverage=ok
+P5      0>1           10000         0        0       2
+P5      0>2           10000         0        0       2
+P5      0>3           10000         0        0       2
+P5      0>4           10000         0        0       7
+P5      0>5           10000         0        0       7
+P5      1>0           10000         0        0       2
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      1>4           10000         0        0       7
+P5      1>5           10000         0        0       7
+P5      2>0           10000         0        0       2
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      2>4           10000         0        0       7
+P5      2>5           10000         0        0       7
+P5      3>0           10000         0        0       2
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P5      3>4           10000         0        0       7
+P5      3>5           10000         0        0       7
+P5      4>0           10000         0        0       7
+P5      4>1           10000         0        0       7
+P5      4>2           10000         0        0       7
+P5      4>3           10000         0        0       7
+P5      4>5           10000         0        0       2
+P5      5>0           10000         0        0       7
+P5      5>1           10000         0        0       7
+P5      5>2           10000         0        0       7
+P5      5>3           10000         0        0       7
+P5      5>4           10000         0        0       2
+P6      0-5          100000         0        0      40
+S1      0>1          100000      4675        0       0 observed=10291
+S1      0>2          100000      4309        0       0 observed=10306
+S1      0>3          100000      4588        0       0 observed=10231
+S1      0>4          100000      1864        0       0 observed=4451
+S1      0>5          100000      2198        0       0 observed=4145
+S1      1>0          100000      4115        0       0 observed=10329
+S1      1>2          100000      4369        0       0 observed=10255
+S1      1>3          100000      4106        0       0 observed=10280
+S1      1>4          100000      1907        0       0 observed=4005
+S1      1>5          100000      1933        0       0 observed=3915
+S1      2>0          100000      4088        0       0 observed=10365
+S1      2>1          100000      4562        0       0 observed=10250
+S1      2>3          100000      4217        0       0 observed=10240
+S1      2>4          100000      1937        0       0 observed=3911
+S1      2>5          100000      1952        0       0 observed=3936
+S1      3>0          100000      4500        0       0 observed=10321
+S1      3>1          100000      4022        0       0 observed=10328
+S1      3>2          100000      4605        0       0 observed=10235
+S1      3>4          100000      1916        0       0 observed=3889
+S1      3>5          100000      1950        0       0 observed=3937
+S1      4>0          100000      2061        0       0 observed=4071
+S1      4>1          100000      1907        0       0 observed=4037
+S1      4>2          100000      1926        0       0 observed=4198
+S1      4>3          100000      1849        0       0 observed=4445
+S1      4>5          100000      4557        0       0 observed=10163
+S1      5>0          100000      1927        0       0 observed=3904
+S1      5>1          100000      2070        0       0 observed=4037
+S1      5>2          100000      2081        0       0 observed=4082
+S1      5>3          100000      2340        0       0 observed=4323
+S1      5>4          100000      4766        0       0 observed=10292
+S2      0>1           10000         0        0       3
+S2      0>2           10000         0        0       3
+S2      0>3           10000         0        0       3
+S2      0>4           10000         0        0       9
+S2      0>5           10000         0        0       9
+S2      1>0           10000         0        0       3
+S2      1>2           10000         0        0       3
+S2      1>3           10000         0        0       3
+S2      1>4           10000         0        0       9
+S2      1>5           10000         0        0       9
+S2      2>0           10000         0        0       3
+S2      2>1           10000         0        0       3
+S2      2>3           10000         0        0       3
+S2      2>4           10000         0        0       9
+S2      2>5           10000         0        0       9
+S2      3>0           10000         0        0       3
+S2      3>1           10000         0        0       3
+S2      3>2           10000         0        0       3
+S2      3>4           10000         0        0       9
+S2      3>5           10000         0        0       9
+S2      4>0           10000         0        0       9
+S2      4>1           10000         0        0       9
+S2      4>2           10000         0        0       9
+S2      4>3           10000         0        0       9
+S2      4>5           10000         1        0       3
+S2      5>0           10000         0        0       9
+S2      5>1           10000         0        0       9
+S2      5>2           10000         0        0       9
+S2      5>3           10000         0        0       9
+S2      5>4           10000         0        0       3
+SENS cpus=0>1 S1=4675 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>2 S1=4309 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>3 S1=4588 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>4 S1=1864 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>5 S1=2198 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>0 S1=4115 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>2 S1=4369 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>3 S1=4106 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>4 S1=1907 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>5 S1=1933 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>0 S1=4088 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>1 S1=4562 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>3 S1=4217 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>4 S1=1937 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>5 S1=1952 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>0 S1=4500 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>1 S1=4022 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>2 S1=4605 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>4 S1=1916 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>5 S1=1950 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>0 S1=2061 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>1 S1=1907 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>2 S1=1926 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>3 S1=1849 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=4>5 S1=4557 S2=1 P2_sensitive=yes P3_sensitive=yes
+SENS cpus=5>0 S1=1927 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>1 S1=2070 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>2 S1=2081 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>3 S1=2340 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=5>4 S1=4766 S2=0 P2_sensitive=yes P3_sensitive=no
+# S1 relaxed outcomes: 93297, S2 relaxed outcomes: 1 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 503 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 187 rows in 3990 ms
+[INFO] coherency S1 relaxed outcomes: 93297, timeouts 0; S2 relaxed outcomes: 1, timeouts 0 (not judged)
+  [PASS] test_litmus_patterns_pass
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x2c inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P3      0>1              16         0        0       0
+P3      0>2              16         0        0       0
+P3      0>3              16         0        0       0
+P3      0>4              16         0        0       0
+P3      0>5              16         0        0       0
+P3      1>0              16         0        0       0
+P3      1>2              16         0        0       0
+P3      1>3              16         0        0       0
+P3      1>4              16         0        0       0
+P3      1>5              16         0        0       0
+P3      2>0              16         0        0       0
+P3      2>1              16         0        0       0
+P3      2>3              16         0        0       0
+P3      2>4              16         0        0       0
+P3      2>5              16         0        0       0
+P3      3>0              16         0        0       0
+P3      3>1              16         0        0       0
+P3      3>2              16         0        0       0
+P3      3>4              16         0        0       0
+P3      3>5              16         0        0       0
+P3      4>0              16         0        0       0
+P3      4>1              16         0        0       0
+P3      4>2              16         0        0       0
+P3      4>3              16         0        0       0
+P3      4>5              16         0        0       0
+P3      5>0              16         0        0       0
+P3      5>1              16         0        0       0
+P3      5>2              16         0        0       0
+P3      5>3              16         0        0       0
+P3      5>4              16         0        0       0
+P4      w0/0-5        57344         0        0       0 pairs=1664,1088,2048,3392,3392 straddles=15,16,7,16,11 coverage=ok
+P4      w1/0-5        57344         0        0       0 pairs=2176,1088,2304,3392,3328 straddles=20,19,19,21,20 coverage=ok
+P4      w2/0-5        57344         0        0       0 pairs=1984,1088,2304,3648,3712 straddles=17,14,20,12,15 coverage=ok
+P4      w3/0-5        65536         0        0       0 pairs=2496,1088,1600,4096,4096 straddles=18,15,16,23,19 coverage=ok
+P4      w4/0-5        53248         0        0       0 pairs=3072,2752,2688,3072,1088 straddles=15,17,17,24,13 coverage=ok
+P4      w5/0-5        53248         0        0       0 pairs=2944,2624,2496,2880,1152 straddles=19,19,22,17,13 coverage=ok
+P6      0-5              16         0        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 0, fewest straddles of any reader: 7 (target 1)
+coherency: PASS
+  [PASS] test_subset_without_injection_passes
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x4 inject=P3-stale-partner (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P3      0>1              16        16        0       0
+P3      0>2              16        16        0       0
+P3      0>3              16        16        0       0
+P3      0>4              16        16        0       0
+P3      0>5              16        16        0       0
+P3      1>0              16        16        0       0
+P3      1>2              16        16        0       0
+P3      1>3              16        16        0       0
+P3      1>4              16        16        0       0
+P3      1>5              16        16        0       0
+P3      2>0              16        16        0       0
+P3      2>1              16        16        0       0
+P3      2>3              16        16        0       0
+P3      2>4              16        16        0       0
+P3      2>5              16        16        0       0
+P3      3>0              16        16        0       0
+P3      3>1              16        16        0       0
+P3      3>2              16        16        0       0
+P3      3>4              16        16        0       0
+P3      3>5              16        16        0       0
+P3      4>0              16        16        0       0
+P3      4>1              16        16        0       0
+P3      4>2              16        16        0       0
+P3      4>3              16        16        0       0
+P3      4>5              16        16        0       0
+P3      5>0              16        16        0       0
+P3      5>1              16        16        0       0
+P3      5>2              16        16        0       0
+P3      5>3              16        16        0       0
+P3      5>4              16        16        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+coherency: FAIL (30 rows)
+[INFO] coherency inject 1: 30 rows, 30 failed, 546 ms
+  [PASS] test_inject_p3_stale_partner_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x8 inject=P4-descending (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P4      w0/0-5        36864        72        0       0 pairs=1088,1152,1728,2944,2816 straddles=11,11,13,16,22 coverage=ok
+P4      w1/0-5        36864        77        0       0 pairs=1920,1152,1600,2816,2752 straddles=19,6,17,17,19 coverage=ok
+P4      w2/0-5        36864        71        0       0 pairs=1856,1088,2048,2880,2816 straddles=15,13,15,14,15 coverage=ok
+P4      w3/0-5        57344        98        0       0 pairs=2496,1152,2112,4544,4416 straddles=16,19,16,17,30 coverage=ok
+P4      w4/0-5        40960        85        0       0 pairs=3008,2624,2816,2944,1152 straddles=20,17,20,18,10 coverage=ok
+P4      w5/0-5        40960       104        0       0 pairs=2880,2432,2496,2816,1152 straddles=17,23,22,18,24 coverage=ok
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 0, fewest straddles of any reader: 6 (target 1)
+coherency: FAIL (6 rows)
+[INFO] coherency inject 2: 6 rows, 6 failed, 115 ms
+  [PASS] test_inject_p4_descending_writer_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x8 inject=P4-no-writes (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P4      w0/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w1/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w2/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w3/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w4/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w5/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 6, fewest straddles of any reader: 0 (target 1)
+coherency: FAIL (6 rows)
+[INFO] coherency inject 3: 6 rows, 6 failed, 100 ms
+  [PASS] test_inject_p4_weak_row_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x20 inject=P6-sum-offset (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P6      0-5              16         1        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+coherency: FAIL (1 rows)
+[INFO] coherency inject 4: 1 rows, 1 failed, 50 ms
+  [PASS] test_inject_p6_sum_offset_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=50ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x2 inject=MP-stale-flag (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1              16         0        1      50 observed=0
+P2      0>2              16         0        1      50 observed=0
+P2      0>3              16         0        1      50 observed=0
+P2      0>4              16         0        1      50 observed=0
+P2      0>5              16         0        1      50 observed=0
+P2      1>0              16         0        1      50 observed=0
+P2      1>2              16         0        1      50 observed=0
+P2      1>3              16         0        1      50 observed=0
+P2      1>4              16         0        1      50 observed=0
+P2      1>5              16         0        1      50 observed=0
+P2      2>0              16         0        1      50 observed=0
+P2      2>1              16         0        1      50 observed=0
+P2      2>3              16         0        1      50 observed=0
+P2      2>4              16         0        1      50 observed=0
+P2      2>5              16         0        1      50 observed=0
+P2      3>0              16         0        1      50 observed=0
+P2      3>1              16         0        1      50 observed=0
+P2      3>2              16         0        1      50 observed=0
+P2      3>4              16         0        1      50 observed=0
+P2      3>5              16         0        1      50 observed=0
+P2      4>0              16         0        1      50 observed=0
+P2      4>1              16         0        1      50 observed=0
+P2      4>2              16         0        1      50 observed=0
+P2      4>3              16         0        1      50 observed=0
+P2      4>5              16         0        1      50 observed=0
+P2      5>0              16         0        1      50 observed=0
+P2      5>1              16         0        1      50 observed=0
+P2      5>2              16         0        1      50 observed=0
+P2      5>3              16         0        1      50 observed=0
+P2      5>4              16         0        1      50 observed=0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# MP weak rows (a reader observed nothing): 30
+coherency: FAIL (30 rows)
+[INFO] coherency inject 5: 30 rows, 30 failed, 2066 ms
+  [PASS] test_inject_mp_stale_flag_fails
+# control a: reader on Normal WB Non-shareable alias (SH=00)
+# writer VA 0x12ac00000, reader VA 0xffffff8fffe00000, PA 0x12ac00000, alias descriptor 0x006000012ac0040d
+# fresh 4 KB slot per row, first slot 0
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1             100         0        0       0 observed=108
+P2      0>2             100         0        0       0 observed=122
+P2      0>3             100         0        0       0 observed=104
+P2      0>4             100         0        1    1000 observed=0
+P2      0>5             100         0        1    1000 observed=0
+P2      1>0             100         0        0       0 observed=120
+P2      1>2             100         0        0       0 observed=88
+P2      1>3             100         0        0       0 observed=115
+P2      1>4             100         0        1    1000 observed=0
+P2      1>5             100         0        1    1000 observed=0
+P2      2>0             100         0        0       0 observed=106
+P2      2>1             100         0        0       0 observed=107
+P2      2>3             100         0        0       0 observed=101
+P2      2>4             100         0        1    1000 observed=0
+P2      2>5             100         0        1    1000 observed=0
+P2      3>0             100         0        0       0 observed=109
+P2      3>1             100         0        0       0 observed=98
+P2      3>2             100         0        0       0 observed=82
+P2      3>4             100         0        1    1000 observed=0
+P2      3>5             100         0        1    1000 observed=0
+P2      4>0             100         0        1    1000 observed=0
+P2      4>1             100         0        1    1000 observed=0
+P2      4>2             100         0        1    1000 observed=0
+P2      4>3             100         0        1    1000 observed=0
+P2      4>5             100         0        0       0 observed=95
+P2      5>0             100         0        1    1000 observed=0
+P2      5>1             100         0        1    1000 observed=0
+P2      5>2             100         0        1    1000 observed=0
+P2      5>3             100         0        1    1000 observed=0
+P2      5>4             100         0        0       0 observed=101
+P4      w0/0-5    876052480         0        2    1000 pairs=58915456,30715712,59034432,151369728,150257792 straddles=519238,427573,516113,0,0 coverage=weak
+P4      w1/0-5    867815424         0        2    1000 pairs=58423104,48246976,41617152,151277632,150206848 straddles=514903,470684,458713,0,0 coverage=weak
+P4      w2/0-5    886575104         0        1    1000 pairs=40380224,48970880,59076416,151284160,150651456 straddles=468562,491428,504686,0,0 coverage=weak
+P4      w3/0-5    877858816         0        1    1000 pairs=58189248,31792256,59064000,151319936,150334848 straddles=520424,432276,501389,0,0 coverage=weak
+P4      w4/0-5    889991168         0        2    1000 pairs=150518784,151305216,151523520,150316864,63335808 straddles=0,0,0,0,600517 coverage=weak
+P4      w5/0-5    881778688         0        1    1000 pairs=150527808,151321216,151217088,150303360,63557632 straddles=0,0,0,0,584315 coverage=weak
+# control a totals: P2 forbidden=0 timeouts=16, P4 forbidden=0 timeouts=9
+# control b: reader on Normal Non-cacheable alias
+# writer VA 0x12ac00000, reader VA 0xffffff8fffe00000, PA 0x12ac00000, alias descriptor 0x006000012ac00709
+# fresh 4 KB slot per row, first slot 36
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1             100         0        1    1000 observed=0
+P2      0>2             100         0        1    1000 observed=0
+P2      0>3             100         0        1    1000 observed=0
+P2      0>4             100         0        1    1000 observed=0
+P2      0>5             100         0        1    1000 observed=0
+P2      1>0             100         0        1    1000 observed=0
+P2      1>2             100         0        1    1000 observed=0
+P2      1>3             100         0        1    1000 observed=0
+P2      1>4             100         0        1    1000 observed=0
+P2      1>5             100         0        1    1000 observed=0
+P2      2>0             100         0        1    1000 observed=0
+P2      2>1             100         0        1    1000 observed=0
+P2      2>3             100         0        1    1000 observed=0
+P2      2>4             100         0        1    1000 observed=0
+P2      2>5             100         0        1    1000 observed=0
+P2      3>0             100         0        1    1000 observed=0
+P2      3>1             100         0        1    1000 observed=0
+P2      3>2             100         0        1    1000 observed=0
+P2      3>4             100         0        1    1000 observed=0
+P2      3>5             100         0        1    1000 observed=0
+P2      4>0             100         0        1    1000 observed=0
+P2      4>1             100         0        1    1000 observed=0
+P2      4>2             100         0        1    1000 observed=0
+P2      4>3             100         0        1    1000 observed=0
+P2      4>5             100         0        1    1000 observed=0
+P2      5>0             100         0        1    1000 observed=0
+P2      5>1             100         0        1    1000 observed=0
+P2      5>2             100         0        1    1000 observed=0
+P2      5>3             100         0        1    1000 observed=0
+P2      5>4             100         0        1    1000 observed=0
+P4      w0/0-5    904982528         0        1    1000 pairs=10874048,10720320,10818560,10653056,10805184 straddles=0,0,0,0,0 coverage=weak
+P4      w1/0-5    862539776         0        1    1000 pairs=10993792,10931200,11050560,10896704,11058112 straddles=0,0,0,0,0 coverage=weak
+P4      w2/0-5    901922816         0        1    1000 pairs=11209024,11403008,11260928,11095680,11291520 straddles=0,0,0,0,0 coverage=weak
+P4      w3/0-5    906723328         0        1    1000 pairs=11237120,11431424,11237824,11122176,11315904 straddles=0,0,0,0,0 coverage=weak
+P4      w4/0-5    909627392         0        2    1000 pairs=10962240,11158656,10974272,10861440,11034496 straddles=0,0,0,0,0 coverage=weak
+P4      w5/0-5    897024000         0        1    1000 pairs=10673728,10932352,10763008,10655488,10655616 straddles=0,0,0,0,0 coverage=weak
+# control b totals: P2 forbidden=0 timeouts=30, P4 forbidden=0 timeouts=7
+# control c: reader with its data cache off (SCTLR.C=0); writer cleans P0 to PoC, stores P1 with no clean (phase 1), then cleans P1 (phase 2)
+# expected with real caches: p1_stale = iters, p2_fresh = iters
+pattern cpus          iters  p1_stale  p1_fresh  p2_stale  p2_fresh timeouts
+DCOFF   0>1            1024      1024         0         0      1024        0
+DCOFF   0>2            1024      1024         0         0      1024        0
+DCOFF   0>3            1024      1024         0         0      1024        0
+DCOFF   0>4            1024      1024         0         0      1024        0
+DCOFF   0>5            1024      1024         0         0      1024        0
+DCOFF   1>0            1024      1024         0         0      1024        0
+DCOFF   1>2            1024      1024         0         0      1024        0
+DCOFF   1>3            1024      1024         0         0      1024        0
+DCOFF   1>4            1024      1024         0         0      1024        0
+DCOFF   1>5            1024      1024         0         0      1024        0
+DCOFF   2>0            1024      1024         0         0      1024        0
+DCOFF   2>1            1024      1024         0         0      1024        0
+DCOFF   2>3            1024      1024         0         0      1024        0
+DCOFF   2>4            1024      1024         0         0      1024        0
+DCOFF   2>5            1024      1024         0         0      1024        0
+DCOFF   3>0            1024      1024         0         0      1024        0
+DCOFF   3>1            1024      1024         0         0      1024        0
+DCOFF   3>2            1024      1024         0         0      1024        0
+DCOFF   3>4            1024      1024         0         0      1024        0
+DCOFF   3>5            1024      1024         0         0      1024        0
+DCOFF   4>0            1024      1024         0         0      1024        0
+DCOFF   4>1            1024      1024         0         0      1024        0
+DCOFF   4>2            1024      1024         0         0      1024        0
+DCOFF   4>3            1024      1024         0         0      1024        0
+DCOFF   4>5            1024      1024         0         0      1024        0
+DCOFF   5>0            1024      1024         0         0      1024        0
+DCOFF   5>1            1024      1024         0         0      1024        0
+DCOFF   5>2            1024      1024         0         0      1024        0
+DCOFF   5>3            1024      1024         0         0      1024        0
+DCOFF   5>4            1024      1024         0         0      1024        0
+# control c totals: loads/phase=30720 p1_stale=30720 p1_fresh=0 p2_stale=0 p2_fresh=30720 timeouts=0
+coherency neg: done (report only: control c should show stale phase-1 reads on hardware with real caches, a and b may or may not; QEMU TCG models no caches)
+[INFO] coherency neg scale 1000: 59552 ms
+[INFO] coherency neg a: P2 forbidden 0 timeouts 16, P4 forbidden 0 timeouts 9 (report only)
+[INFO] coherency neg b: P2 forbidden 0 timeouts 30, P4 forbidden 0 timeouts 7 (report only)
+[INFO] coherency neg c: loads/phase 30720, phase 1 stale 30720 fresh 0, phase 2 stale 0 fresh 30720, timeouts 0 (report only)
+  [PASS] test_negative_controls_report
+  [PASS] test_negative_controls_rerun_uses_fresh_slots
+[INFO] test_coherency.c: 126653 ms
+
+----------------------------------------
+Tests: 26  Passed: 26  Failed: 0
+[PASS] All tests passed
+
+========================================
+Integration Tests (Multi-Core)
+========================================
+[TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-aef4cb3eef243d97a/kernel/tests/test_integration.c
+  [PASS] test_multicore_basic
+  [PASS] test_task_migration
+  [PASS] test_stress_multicpu
+  [PASS] test_lock_contention
+  [PASS] test_task_lifecycle
+  [PASS] test_boot_order_pmm_before_scheduler
+  [PASS] test_hw_timeout_with_yield
+  [PASS] test_timer_running_after_boot
+  [PASS] test_msg_router_cross_cpu
+  [PASS] test_msg_router_multi_subscriber
+  [PASS] test_msg_router_priority_concurrent
+  [PASS] test_msg_router_ack_targets_last_received_cross_cpu
+  [PASS] test_msg_router_same_mailbox_zero_loss
+  [PASS] test_smp_notify_cpu_safe
+  [PASS] test_smp_notify_cpu_wakes_secondary
+  [PASS] test_work_stealing_distributes_load
+
+----------------------------------------
+Tests: 16  Passed: 16  Failed: 0
+[PASS] All tests passed
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Task 'main' (id=7) exiting

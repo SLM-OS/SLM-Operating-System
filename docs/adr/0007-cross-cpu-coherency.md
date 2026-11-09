@@ -13,10 +13,10 @@ incoherent. Nothing re-tested it after the set/way fix in `e0a15259`.
 
 Status: proposed; the removal is pending on both boards.
 
-Measured: on both boards Inner Shareable Write-Back memory is coherent
-across all CPUs, including between the Jetson clusters, under Linux and
-SLM-OS. The NC axis is not required for coherency, and the SMPEN account
-is wrong. The target is decision (a): CPU-shared state in ordinary
+Measured: Inner Shareable Write-Back memory is coherent across all CPUs on
+both boards, including between the Jetson clusters, under Linux and SLM-OS.
+The NC axis is not required for coherency; the SMPEN account is wrong. The
+target is decision (a): CPU-shared state in ordinary
 cacheable memory, no CPU-to-CPU cache maintenance, ordering by barriers,
 acquire and release; maintenance only for DMA, page tables written before
 the MMU is on, and `secondary_mmu_*` (read with the MMU off); the NC block
@@ -30,20 +30,18 @@ The removal does not land until both boards meet the bar:
   (#1205) in 1 of 10; the NC test kernel failed neither in 11. Both waits
   are bounded by yield count, so a much faster context switch may expire
   them early (untested). Next: the #1202 experiment.
-- Jetson: the removal has 4 kexec and 7 UEFI boots with captured logs (10 each required), no
-  integration run, and a steal stall the NC build does not show (a CPU with
-  0 successful steals): `NC_AXIS=OFF` CPUs 2 and 3 in 6 of 6 runs; removal
-  CPU 4 in 2 of 2 UEFI runs with per-CPU deltas, 0 of 5 on kexec; NC 0 of
-  6. Next: 10+ `bench stealing` runs with per-CPU deltas per build per path.
-  A removal-only stall that stays unexplained would make (b), keeping the
-  axis on Jetson, the outcome.
+- Jetson: boots and integration now meet the bar (rebased removal: 10/10
+  log-verified boots and integration 16/16 per path), but a CPU sometimes
+  makes 0 successful steals (#1203): `NC_AXIS=OFF` CPUs 2-3 in 6 of 6 runs;
+  removal 3 of 17 runs with per-CPU deltas; NC 0 of 6. Next: 10+ such
+  runs per build per path. An unexplained removal-only stall makes (b),
+  keeping the axis on Jetson, the outcome.
 
 ## Alternatives considered
 
 - Keep the axis everywhere with a measured justification (c): no
   measurement on either board shows incoherence.
 - Keep it on Jetson only (b): open until the steal experiment.
-- Keep `NC_AXIS=OFF` as an option: it shows the stall above.
 
 ## Consequences
 
@@ -79,8 +77,7 @@ a different Pi 5 EEPROM or BL31 (version not determined here).
   coherence detector, so late or out-of-order lines are not ruled out.
 - Removal against NC: context switch Pi 5 2318 to 105 ns, Jetson 5456 to
   84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 131 ns, Jetson
-  equal; stealing equal on Pi 5, equal or better on Jetson; `bench smp`
-  completed in every run on both boards.
-- Boots: Pi 5 removal 10/10; integration 16/16 in 11 test-kernel boots.
-  Jetson `NC_AXIS=OFF` 10/10 per path, integration 16/16 on one boot per
-  path.
+  equal; stealing equal (Pi 5 bimodal by task split; Jetson medians 10136
+  and 9801 against 10627 and 9831 us); `bench smp` always completed.
+- Boots, rebased removal: Pi 5 10/10 and 21 test-kernel boots
+  (integration 16/16 each); Jetson 10/10 per path, log-verified.

@@ -1,0 +1,26 @@
+# jetson-nano-2, kexec from JetPack Linux, rebased removal branch @ af8d01ba
+# RR: make kernel PLATFORM=JETSON_ORIN_NANO; slmos.elf sha256 f3a9e3bec8dc21b0f75ca022119a6cf53655fe696fad738a102b3f2b05f86edc
+# 10 boots reaching slmos>. labctl boot_test cannot drive a kexec from SD Linux, so this hand loop replaces it.
+# Method per boot: (boot 1) board already in SD Linux; (boots 2-10) labctl power_cycle (15 s). Then a background
+# job waited for SD Linux ssh, waited 10 s (boot 1: 15 s), re-checked the sha of /root/slmos-1193-RR.elf and
+# fired `setsid nohup slmos-kexec /root/slmos-1193-RR.elf`; the labctl serial_capture was started right after
+# the job was launched, before the kexec (until "slmos>|not visible|PANIC|Unhandled Exception|Synchronous
+# Exception", tail=3). A boot counts only when that capture stopped on "slmos>". The capture durations exceed
+# the time from capture start to kexec plus the ~90 s SLM-OS boot, so each capture was connected before its
+# boot. Captured tails were identical every time: "Type 'help' for available commands." / "" / "slmos>".
+#
+# boot  ssh up    kexec fired  capture
+#  1    (up)      08:35:32     3 lines in 109.7 s, matched slmos>   (also the session boot for regs/litmus/perf)
+#  2    09:40:12  09:40:26     3 lines in 156.0 s, matched slmos>
+#  3    09:43:29  09:43:43     3 lines in 159.7 s, matched slmos>
+#  4    09:46:46  09:47:00     3 lines in 161.7 s, matched slmos>
+#  5    09:49:58  09:50:11     3 lines in 159.7 s, matched slmos>
+#  6    09:53:11  09:53:25     3 lines in 161.5 s, matched slmos>
+#  7    09:56:22  09:56:35     3 lines in 159.4 s, matched slmos>
+#  8    09:59:34  09:59:48     3 lines in 161.2 s, matched slmos>
+#  9    10:02:46  10:03:00     3 lines in 160.9 s, matched slmos>
+# 10    10:06:31  10:06:44     3 lines in 176.2 s, matched slmos>
+#
+# Result: 10/10 log-verified boots reached slmos>; none stopped on "not visible", PANIC or an exception.
+# No uncaptured boots in this series. (The RRT boot at 09:34:21, jetson-rebased-RRT-kexec-integration.txt,
+# also shows "SMP: 5/5 secondary CPUs online" with no "not visible" line; it is not counted here.)
