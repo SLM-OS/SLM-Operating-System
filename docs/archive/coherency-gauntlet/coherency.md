@@ -35,16 +35,113 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
-| C0 | Architecture and firmware facts | building | 0 |
-| C1 | Linux reference bar | building | 0 |
-| C2 | `coherency` verb and litmus suite | building (QEMU stage) | 0 |
-| C3 | Boot-sequence audit and cacheable build | waiting on C0, C1 | 0 |
+| C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
+| C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
+| C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
+| C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
+
+### Record check (git history, times -0700)
+
+- `aedf6e1a` 04-05 01:00 SMPEN investigation (H2). `e0a15259` 04-05 14:50
+  set/way invalidate after MMU enable on secondaries (H3). `0c229442` 04-05
+  21:03 NC memory on Pi 5: its message also records that spinlocks on NC
+  memory hang, so `rq_lock[]` stayed cacheable. `f683c770` 22:41 task table
+  to NC. `a6ab2c2b` and `0c79eaf4` 04-06 06:12 and 07:40 NC on Jetson.
+- Correction to the brief's order: `a5e91676` (14:15), `e70a73b9` (16:32)
+  and `584ace8f` (17:11) land before `2eab51ae` (19:17, "switch_to fails on
+  secondary CPUs regardless" with a cacheable task table). The cacheable-table
+  test therefore ran after the scheduler fixes, and still failed then; the
+  failure it saw was attributed to `switch_to`, not to memory attributes.
+- Spinlock `DC CIVAC` path: first appears with `53515d00` (04-16, #215).
 
 ## Critic verdicts
 
+- C0 round 1: FAIL, narrowly. Independent answers to all seven questions
+  agree with the builder; about 60 citations opened, all matched, no claim
+  wrong. Failed on its own labeling rule: three inferences stated as fact
+  (Pi 5 EEPROM BL31 contents, Tegra cross-cluster fabric, the caches-off
+  control returning a deterministic stale value). Missing: HCR_EL2.TIDCP,
+  DSU 5.9 SoC interconnect caveat, EL3 code before BL31, CPU 0 not reset
+  across kexec, the full booting.rst sentence. Overturning observation named
+  by the critic: a Jetson message-passing litmus between CPUs 0-3 and 4-5
+  that reads stale data with identical IS WB mappings, MMU and caches on.
+- C0 round 2: FAIL, narrowly. Eight of nine gaps fixed; all new citations
+  matched. One new wrong statement: "on Pi 5 a core is reset only at cold
+  boot" (upstream CPU_OFF requests a warm reset through RMR_EL3,
+  rpi3_pm.c:184-208). RES0 glossary citation partial; two small unsourced
+  statements.
+- C0 round 3: PASS. Open nit, not blocking: Q3 says the cited sources do not
+  state whether a warm reset invalidates the caches, while (b) step 2 says
+  they were invalidated at the last reset; A76 TRM 7.2 does not distinguish
+  warm from cold reset.
+
+- C1 round 1: PASS on the measured claim, FAIL as worded. Critic rebuilt
+  the binary (hash matched), parsed every ROW: 0 forbidden, 0 timeouts,
+  coverage contiguous (Jetson 40 passes x 30 pairs incl. 16 cross-cluster;
+  Pi 5 390 passes x 12 pairs), counts add up. Gaps: no SB+none control, so
+  P3's zero has no shown sensitivity; P4 got 0.07 to 0.2 percent of runtime
+  with no straddle count; P3, P4 and P6 checkers not fault-injected; card
+  config not quoted (the repo template `deploy/pi5/config.txt:46` uses
+  `armstub=armstub8-2712.bin`, the pi-5-1 card does not); Jetson BL31
+  version unrecorded. Spec revision 2 (5e82fdb8) adds S2 and P4 coverage
+  counters; the same applies to C2's kernel suite.
+
 ## Failed approaches
+
+- Pi 5 Linux attempts 1 to 3 (console-only result path; then a 20 s settle
+  without an SDWire round trip). Cause: rig defect #1195 plus possibly
+  earlycon on RP1. Replaced by attempt 4 (round trip + HTTP results).
 
 ## Evidence
 
+### C0 builder result (before critic)
+
+- Builder marks H1 and H3 INCONSISTENT and H2 CONSISTENT on both boards
+  (cross-cluster on Jetson unsourced). A76 CPUECTLR bit 6 is RES0, A78AE bit
+  6 is PF_MODE[0]; neither core has SMPEN. Filed #1194: `cpu_has_smpen()`
+  tests the A72 bit, so "SMPEN NOT set" prints on both boards regardless.
+- Safety: CPUECTLR reads from NS-EL2 are safe (SLM-OS already does it every
+  boot); any write to it or to other IMP DEF control registers traps to EL3,
+  and on Jetson BL31 v2.8 that panics. C1 and C2 told: reads only.
+- Negative control: Non-shareable mapping is not guaranteed to show
+  staleness (Arm ARM B2.10.1.1). C2 adds a caches-off reader control
+  (SCTLR.C=0), which A76 7.2.3 and A78AE 2.6.2.3 say looks up no cache.
+
+### C1 Jetson Linux litmus (builder report, critic pending)
+
+- jetson-nano-2, 5.15.148-tegra, 6 CPUs: 40 passes of the full set, 606 s.
+  Every P row forbidden 0, timeouts 0. S1 (no barriers) relaxed outcomes
+  82,271,035 of 1.2e9, so the harness observes reordering on this core.
+- CPUECTLR module: `msr` count 0 in both .ko files; Jetson cleared to load
+  with cluster=0 (DSU-AE CLUSTERECTLR encoding unconfirmed).
+
+### C1 Pi 5 boot, attempt 1
+
+- Raspberry Pi OS kernel 6.18.60+rpt-rpi-2712 plus initramfs from the SLM-OS
+  card: 0 serial lines in 1260 s. Cause under test: the lab console is RP1
+  UART0 at 0x1F00030000 (`platform.h:591`), while firmware `uart_2ndstage`
+  output goes to the BCM2712 debug UART, and the first config did not enable
+  RP1 UART0 for Linux. Second attempt adds `dtparam=uart0=on`,
+  `pciex4_reset=0` and earlycon on 0x1f00030000. A second silent boot stops
+  this approach.
+
+### C2 QEMU stage (builder report, critic after hardware)
+
+- `coherency regs | litmus | neg`, `test_coherency.c` (12 tests), vmm
+  `VMM_FLAG_NONSHARE` with 2 PTE tests. QEMU ARM64: 65 litmus rows, 0
+  forbidden, 0 timeouts; controls a, b, c all fresh on QEMU (expected, TCG
+  models no caches). Adds about 1.5 s to `make test`. x86-64 passes.
+- Self-checks: synthetic forbidden observations, frozen flags and skipped
+  ping-pong steps are counted, so the checkers can fail.
+- CLUSTERECTLR_EL1 is S3_0_C15_C3_4 (DSU TRM 100453 11.8), not the
+  S3_0_C15_C3_0 the orchestrator first gave (that is CLUSTERCFR_EL1).
+
 ### Lab notes
+
+- 23:18 UTC: both claims renewed to 05:18 UTC.
+- pi-5-1 boots only after a read-only SDWire round trip while off, then a
+  20 s off period (#1195; the first "20 s settle" rule was incomplete).
+  Deploy rule: sdwire_update reboot=false, sdwire_info, power_cycle
+  delay=20. `boot_test` cannot do the round trip between boots, so Pi 5
+  reliability counts use this sequence by hand.
