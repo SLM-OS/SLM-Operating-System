@@ -690,8 +690,9 @@ void task_exit(void)
 #endif
 
     /* Atomically set TASK_TERMINATED and dequeue under rq_lock.
-     * Without this, a scheduler on another CPU could observe the task still in the queue after the state flip but
-     * before dequeue runs, picking a terminated task and panicking. */
+     * Without this, a scheduler on another CPU could observe the task
+     * still in the queue after the state flip but before dequeue runs,
+     * picking a terminated task and panicking. */
     scheduler_terminate_task(task);
 
     /* Context-switch away. schedule() -> spin_lock_irqsave saves our
