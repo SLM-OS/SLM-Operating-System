@@ -6,7 +6,7 @@ Since April 2026 run queues, the task table, current-task pointers and boot
 flags lived in a Normal Non-cacheable block on Pi 5 and Jetson
 (`PLATFORM_HAS_NC_MEMORY`) with hand-written cache maintenance. The reason
 given was that firmware leaves `CPUECTLR_EL1.SMPEN` clear, so private L2s
-are incoherent. Nothing re-tested it after `e0a15259`.
+are incoherent. Nothing re-tested it after the set/way fix `e0a15259`.
 
 ## Decision
 

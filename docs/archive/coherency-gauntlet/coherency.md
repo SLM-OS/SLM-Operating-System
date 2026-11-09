@@ -139,10 +139,10 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
-| C2 | `coherency` verb and litmus suite | round 2 PASS on a narrowed claim (extension step 3) | 2 |
-| C3 | Boot-sequence audit and cacheable build | complete 07:54 UTC; critic: Pi 5 PASS, Jetson FAIL against the removal bar | 1 |
-| C4 | Decision, ADR 0007, draft PR | ADR 0007 PASS (round 3); removal pending on both boards; PR gated (see Budget) | 3 |
+| C1 | Linux reference bar | PASS (round 2), merged | 2 |
+| C2 | `coherency` verb and litmus suite | round 2 PASS on a narrowed claim (rev 3 detects a reader that never sees the writer's lines) | 2 |
+| C3 | Boot-sequence audit and cacheable build | critic: Pi 5 PASS (coherence and removal mechanics), Jetson FAIL against the removal bar (#1203); rebased re-validation logged | 1 + final |
+| C4 | Decision, ADR 0007, draft PR | ADR 0007 PASS (final critic round 2, 3a474b2c); no PR: Pi 5 NC-series condition failed (#1202, #1205), Jetson undecided (#1203) | 3 + 2 |
 
 ### Record check (git history, times -0700)
 
@@ -290,6 +290,22 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
   not exist yet at review time. Overturning observation: any control-(b)
   row passing on any board or path. ADR 0007 evidence line narrowed to this
   claim (wording only, no measurement changed).
+
+- Final critic (rebased rows + ADR edits), round 1: (A) PASS with
+  corrections: Pi 5 stealing median move (13021 to 16146 us) is the
+  bimodal task split (3 of 5 uneven runs against 2 of 5), not a shown
+  regression, but undetermined at 5 runs; NT/RT counts confirmed (#1202
+  removal 5 of 22, not 21; #1205 1 of 22); Jetson rebased boots reached the
+  shell but captures were tail=3, so banner and SMP lines were not logged;
+  the UEFI regs file header wrongly said raw (fixed: lines copied from the V1
+  UEFI capture); steal stall 3 of 17 confirmed, all on UEFI (3 of 7, kexec 0
+  of 10); #1204 not reproduced. (B) FAIL: the overturn condition "NC
+  10-boot series passes where the removal repeats it" had been met and was
+  not acknowledged; denominators; Jetson "meets the bar" overclaim;
+  "no forbidden predicate has fired" false as worded (S1/S2 and the NC
+  control rows carry forbidden counts); pre-rebase perf unlabelled.
+- Final critic round 2: (B) PASS at 3a474b2c (710 words). Afterwards the
+  four words "the set/way fix" were restored in Context.
 
 ## Failed approaches
 
@@ -698,6 +714,26 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
 - Step 1 of the extension is complete on both boards. Gate step 5: no draft
   PR, because the Pi 5 NC-series condition failed (#1202, #1205) and Jetson
   stays undecided (#1203 recurred once in 10 rebased stealing runs).
+
+### Close-out (11:10 UTC)
+
+- No draft PR this run, per the user's extension step 5 and the approved
+  Pi 5 condition: the Pi 5 NC-series comparison failed (#1202 removal 5 of
+  22 boots against NC 0 of 11; #1205 removal-only), and Jetson stays
+  undecided (#1203). The rebased removal branch is pushed
+  (`coherency-remove-nc-axis` @ af8d01ba); its copy of ADR 0007 is older
+  than the gauntlet branch's and must be synced before any future PR.
+- Re-run on the rebased branches: /ci (all steps), Pi 5 labctl boot_test
+  10 (removal), 10 (removal test kernel), 10 (NC test kernel on main);
+  Jetson 10 log-verified boots per path, litmus, bench smp and stealing,
+  hw-set test kernel per path. Not re-run: Linux reference (firmware and
+  boards unchanged), negative controls on the Pi 5 removal test kernel
+  beyond the in-suite ones, bench context and ipc on the rebased builds,
+  and the full Jetson test kernel (#1199).
+- Next run's work: #1202 / #1205 experiments (wall-clock bound, helper
+  pinned same CPU vs other CPU, NC vs removal), #1203 (10+ stealing runs
+  with per-CPU deltas per build per path), #1204 (one raw UEFI litmus on
+  the pre-rebase image), #1197 (zero the task table with caches on).
 
 ### Lab notes
 
