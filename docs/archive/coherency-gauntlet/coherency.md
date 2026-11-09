@@ -36,7 +36,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | rev 3 PASS on both boards (4337b132); critic round 2 running | 2 |
+| C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL (false-pass flaw); rev 3 suite being built | 1 |
 | C3 | Boot-sequence audit and cacheable build | NC_AXIS=OFF @ c2122932 page-faults at boot (extern mismatch); fix + rev 3 suite in progress | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -86,6 +86,14 @@ Boards: jetson-nano-2 and pi-5-1 only.
   `armstub=armstub8-2712.bin`, the pi-5-1 card does not); Jetson BL31
   version unrecorded. Spec revision 2 (5e82fdb8) adds S2 and P4 coverage
   counters; the same applies to C2's kernel suite.
+- C1 round 2: PASS. All five round-1 gaps fixed (BL31 partial: banner from
+  a cold boot that night, not the v3 boot). Critic rebuilt the binary (sha
+  matched), ran the self-test (STALE injection ends in VERDICT FAIL), parsed
+  every v3 row: 0 forbidden, 0 timeouts, 0 weak, all ordered pairs. Residual
+  gap: P3 and S2 values are not row-tagged, so a stale line at a previous
+  round's value would silently satisfy P3; P3 tests ordering, not staleness,
+  and the coherence claim rests on P1, P2, P4, P5, P6. Supported wording is
+  in `scripts/coherency/results/summary.md`.
 
 - C2 round 1: FAIL. Coherence clause supported (every P row parsed: 0
   forbidden, 0 timeouts; S1 nonzero on every pair; registers match Linux).
