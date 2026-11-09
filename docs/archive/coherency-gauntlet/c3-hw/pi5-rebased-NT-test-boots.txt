@@ -1,0 +1,62 @@
+# pi-5-1, NC baseline boot-test kernel NT on current main: origin/main @ 85f51ffd (NC memory build)
+# build: export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+#        git checkout -q --detach origin/main; make kernel-test-clean; make kernel-test PLATFORM=RASPI5
+# image build/kernel-test/slmos.bin 8733328 B, sha256
+#   2bea2457cee29f427709c83de492d89e273be4fbb6a94cff354cdf22fac4680c
+#   staged /var/lib/labctl/images/kernel_2712-1193r-NT.img, on kernel_2712.img and kernel8.img
+#   (originals kept as *.pre1193r during the run)
+# 2026-11-09 09:12 to 09:32 UTC. User-approved NC 10-boot series (gauntlet log, "## Budget",
+# answer "Add NC 10-boot series"), for comparison with the removal's extra failure (#1202).
+#
+# Method: labctl boot_test, image already on the card, runs=10,
+# expect_pattern "All test suites passed|total failure\(s\)", timeout 330,
+# output_dir /var/lib/labctl/output/1193r-pi5-NT. No SDWire round trip needed (no silent boot).
+# Raw UART per boot: pi5-rebased-NT-test-B<nn>.txt, copied unchanged from boot_test's run_<nn>.txt.
+#
+# boot_test result, verbatim:
+#   Run  1/10: PASS (118.8s) - pattern matched
+#   Run  2/10: PASS (118.6s) - pattern matched
+#   Run  3/10: PASS (112.6s) - pattern matched
+#   Run  4/10: PASS (118.3s) - pattern matched
+#   Run  5/10: PASS (125.0s) - pattern matched
+#   Run  6/10: PASS (107.5s) - pattern matched
+#   Run  7/10: PASS (118.5s) - pattern matched
+#   Run  8/10: PASS (118.3s) - pattern matched
+#   Run  9/10: PASS (112.9s) - pattern matched
+#   Run 10/10: PASS (119.2s) - pattern matched
+#   Result: 10/10 boots successful (100%)
+#   Average boot time (successful): 117.0s
+#
+# main has no test_coherency.c and no test_nc_axis.c (git cat-file on origin/main), so those
+# columns are "n/a". main's "Integration Tests (Multi-Core)" has 19 tests: the 16 of the removal
+# build plus test_nc_memory_accessible, test_nc_alloc_alignment, test_nc_region_used_by_scheduler
+# (the three the removal branch deletes); the 16 common tests pass in every NT and RT boot.
+#
+# boot lines  banner    3/3 online  WARN  coherency  integration  suite    extra failures (beyond the 18)  dorm-enter  wedge  panic
+B01  9466   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            100         100    0
+B02  9513   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            109         109    0
+B03  9557   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            118         118    0
+B04  9451   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            97          97     0
+B05  9503   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            107         107    0
+B06  9521   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            111         111    0
+B07  9512   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            109         109    0
+B08  9496   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            106         106    0
+B09  9574   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            121         121    0
+B10  9554   85f51ffd  yes         0     n/a        19/19        FAIL 18  none                            117         117    0
+#
+# Unity totals (B01): 98 suites, 2495 tests, 2445 passed, 18 failed. The 18 are the same names in
+# every boot and the same names as RT (test_timer_irq_is_physical is at test_scheduler.c:2498 on
+# main, :2494 on af8d01ba; same test). SLM shell suite 40/40 and component suite 24/24 in B01-B10.
+#
+# NT vs RT failure frequency (boots in which the test failed):
+#   test                                         NT (85f51ffd, NC)  RT (af8d01ba, removal)
+#   the 18 known #1109 failures, each             10/10              10/10
+#   test_slm_stats_live_from_second_session       0/10               4/10 (B02, B03, B08, B10)
+#     kernel/tests/test_slm_shell.c:892 - live_done (#1202)
+#   test_component_cleanup_ctx_is_per_task         0/10               1/10 (B02)
+#     kernel/tests/test_component.c:476 - not all c4 cleanups fired
+#   any other test                                0/10               0/10
+# With the earlier runs on this board: test_slm_stats_live_from_second_session failed in 1 of the
+# 11 pre-rebase removal runs (f546a126, W9) and in 0 of the 2 single pre-rebase NC/NC_AXIS=OFF
+# runs. Totals: removal builds 5 of 21 boots, NC builds 0 of 11 (10 NT + pi5-nc-test-suite.txt).
+# NT failures do not match RT failures: NT shows only the 18; RT adds two bounded-wait failures.
