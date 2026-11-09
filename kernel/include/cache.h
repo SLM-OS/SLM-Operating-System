@@ -15,8 +15,8 @@
  * CPU-to-CPU sharing does not need them. Cortex-A76 and Cortex-A78AE keep
  * their L1 and L2 coherent in hardware, with no software enable, for
  * Normal Write-Back Inner Shareable memory (docs/adr/0006-cross-cpu-coherency.md,
- * #1193). The scheduler calls that remain on shared fields are redundant
- * but harmless. Spinlocks never call them for the lock word.
+ * #1193). Scheduler, task, SMP and IPC code do not call them for
+ * CPU-shared state; spinlocks never call them for the lock word.
  *
  * On QEMU these are DMB ISH only; on x86-64, compiler barriers.
  */

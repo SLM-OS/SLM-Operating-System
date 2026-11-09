@@ -97,20 +97,15 @@ static volatile uint64_t dormancy_warnings;
  * become non-zero. Returns the elapsed microseconds when the flag
  * was observed, or `timeout_us` if the wait expired.
  *
- * Each iteration tries a load-acquire, then a cache_invalidate and a
- * plain read. The caches are coherent (#1193), so the load-acquire is
- * enough and the second read is redundant but harmless. Mirrors the
- * wait loop in smp.c's boot path.
+ * The secondary publishes the flag with a store-release; a load-acquire
+ * is enough on coherent hardware (#1193). Mirrors the wait loop in
+ * smp.c's boot path.
  */
 static uint32_t wait_for_boot_flag(uint32_t cpu, uint32_t timeout_us)
 {
     uint32_t waited_us = 0;
     while (waited_us < timeout_us) {
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            return waited_us;
-        }
-        cache_invalidate(&cpu_boot_flag[cpu]);
-        if (cpu_boot_flag[cpu]) {
             return waited_us;
         }
         timer_busy_wait_us(RESURRECT_POLL_US);
@@ -134,9 +129,9 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     /* (1) Take the CPU offline. The work-stealer reads cpu_data->online
      * to decide whether a CPU's deque is stealable; setting this here
      * stops a thief from racing into the run queue we're about to
-     * reset. cache_clean already issues dsb sy internally. */
+     * reset. The barrier orders the store before the drain. */
     cpu_data[cpu].online = false;
-    cache_clean(&cpu_data[cpu].online);
+    smp_mb();
 
     /* (2) Reset run queue (drains under rq_lock internally). */
     sched_drain_cpu_runqueue(cpu);
@@ -147,10 +142,9 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     last_idle_loops[cpu] = 0;
     frozen_samples[cpu]  = 0;
 
-    /* (4) Reset boot flag and clean it so the secondary's STLR is
-     * the only writer the polling loop sees. */
+    /* (4) Reset boot flag so the secondary's STLR is the only writer
+     * the polling loop sees. */
     __atomic_store_n(&cpu_boot_flag[cpu], 0, __ATOMIC_RELEASE);
-    cache_clean(&cpu_boot_flag[cpu]);
 
     /* (5) PSCI CPU_ON. Forward the same arguments boot_secondary uses
      * the first time around — the secondary_entry assembly reads x0
@@ -168,7 +162,7 @@ int cpu_supervisor_resurrect(uint32_t cpu)
          * the CPU as a valid target again and its idle loop picks
          * up new work on the next SEV. */
         cpu_data[cpu].online = true;
-        cache_clean(&cpu_data[cpu].online);
+        smp_mb();
         WARN("cpu_supervisor: CPU %u was ALREADY_ON (software wedge); "
              "queue drained, online flag restored", cpu);
         return -2;
@@ -197,7 +191,7 @@ int cpu_supervisor_resurrect(uint32_t cpu)
      * idle_loops will still be frozen on the next supervisor tick and
      * it is resurrected again. */
     cpu_data[cpu].online = true;
-    cache_clean(&cpu_data[cpu].online);
+    smp_mb();
     resurrect_successes[cpu]++;
 
     if (waited_us < RESURRECT_TIMEOUT_US) {
