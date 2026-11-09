@@ -16,11 +16,17 @@
  *   -I fault    self-test only: inject a fault to prove that a bad row
  *               reaches VERDICT FAIL. "P6" starts the P6 sum at 1 (final
  *               mismatch); "P4W" gives P4 no writes and no budget, so
- *               every P4 row has zero straddles (weak).
+ *               every P4 row has zero straddles (weak); "STALE" preloads
+ *               every P1 row's flag and data with the previous row's final
+ *               value and runs an idle writer, so the reader only ever
+ *               sees a foreign nonce (revision 3: timeout, observed=0).
  *
  * Output lines (one per run, fixed key order):
  *   ROW pass=<k> pattern=<id> cpus=<set> iters=<n> forbidden=<n>
  *       timeouts=<n> ms=<t>
+ * P1, P2 and S1 rows append: observed=<n> (reader iterations that saw
+ *   this row's nonce with index < n); observed=0 makes the row weak.
+ * Values in P1, P2, S1 and P4 carry a per-row nonce (revision 3).
  * P4 rows append: pairs=<r1>,<r2>,... straddles=<r1>,<r2>,...
  *   coverage=ok|weak, per reader in ascending CPU order (writer excluded);
  *   iters is the number of writes made. coverage=weak means at least one
@@ -52,7 +58,7 @@
 #define HWCAP_ATOMICS (1 << 8)
 #endif
 
-#define LIT_VERSION "1193-c1-v2"
+#define LIT_VERSION "1193-c1-v3"
 
 static struct lit_shared g_shared __attribute__((aligned(LIT_LINE)));
 
@@ -100,6 +106,30 @@ static int cpus[LIT_MAX_THREADS];
 static int ncpus;
 static int contiguous; /* online set is lo..hi with no gaps */
 static const char *inject;
+static unsigned long row_nonce = LIT_NONCE_INIT; /* last nonce used */
+
+/* Next row nonce: 2..LIT_NONCE_MAX, never LIT_NONCE_INIT, never repeated back to back. */
+static unsigned long next_nonce(void)
+{
+	row_nonce = row_nonce >= LIT_NONCE_MAX ? 2 : row_nonce + 1;
+	if (row_nonce == LIT_NONCE_INIT) {
+		row_nonce = 2;
+	}
+	return row_nonce;
+}
+
+/* STALE injection: a role 0 that takes part in the barriers but never writes. */
+static void *idle_role(void *p)
+{
+	struct role_arg *a = p;
+	lit_u32 sense = 0;
+
+	a->pin_ok = 1;
+	if (lit_barrier(&g_shared, &sense, &a->res) == 0) {
+		lit_barrier_w(&g_shared, &sense, &g_shared.data.v, &a->res);
+	}
+	return NULL;
+}
 
 static double now_s(void)
 {
@@ -160,8 +190,17 @@ static void run_one(int pass, const struct pattern_info *pi, lit_u64 iters,
 	int pin_fail = 0;
 	double ms;
 
+	unsigned long prev = row_nonce;
+	unsigned long nonce = next_nonce();
+	int stale = inject && strcmp(inject, "STALE") == 0 && pi->id == LIT_P1;
+
 	memset(args, 0, sizeof(args));
-	lit_init(&g_shared, pi->id, iters, (lit_u32)n);
+	lit_init(&g_shared, pi->id, iters, (lit_u32)n, nonce);
+	if (stale) {
+		/* fault: the line still holds the previous row's final value */
+		g_shared.flag.v = lit_tag(prev, iters);
+		g_shared.data.v = lit_tag(prev, iters);
+	}
 	if (inject && strcmp(inject, "P6") == 0 && pi->id == LIT_P6) {
 		g_shared.data.v = 1; /* fault: the sum starts one too high */
 	}
@@ -172,7 +211,8 @@ static void run_one(int pass, const struct pattern_info *pi, lit_u64 iters,
 	for (int i = 0; i < n; i++) {
 		args[i].cpu = cpu_list[i];
 		args[i].role = (lit_u32)i;
-		if (pthread_create(&args[i].tid, NULL, role_main, &args[i]) != 0) {
+		if (pthread_create(&args[i].tid, NULL,
+				   stale && i == 0 ? idle_role : role_main, &args[i]) != 0) {
 			fprintf(stderr, "pthread_create failed: %s\n", strerror(errno));
 			exit(2);
 		}
@@ -211,6 +251,16 @@ static void run_one(int pass, const struct pattern_info *pi, lit_u64 iters,
 		snprintf(cov, sizeof(cov), " pairs=%s straddles=%s coverage=%s", pairs,
 			 strad, weak ? "weak" : "ok");
 		t->weak += (unsigned long long)weak;
+	}
+	if (pi->id == LIT_P1 || pi->id == LIT_P2 || pi->id == LIT_S1) {
+		int weak = args[1].res.observed == 0;
+
+		snprintf(cov, sizeof(cov), " observed=%llu%s",
+			 (unsigned long long)args[1].res.observed, weak ? " coverage=weak" : "");
+		t->weak += (unsigned long long)weak;
+		if (t->runs == 0 || args[1].res.observed < t->min_straddles) {
+			t->min_straddles = args[1].res.observed; /* min observed for MP */
+		}
 	}
 	if (pi->kind == 0) {
 		int a = -1, b = -1;
@@ -340,7 +390,7 @@ int main(int argc, char **argv)
 			inject = optarg;
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-m minutes] [-d divisor] [-1] [-I P6|P4W]\n",
+			fprintf(stderr, "usage: %s [-m minutes] [-d divisor] [-1] [-I P6|P4W|STALE]\n",
 				argv[0]);
 			return 2;
 		}
@@ -395,6 +445,10 @@ int main(int argc, char **argv)
 		}
 		if (patterns[k].id == LIT_P4) {
 			snprintf(extra, sizeof(extra), " weak_rows=%llu min_straddles=%llu",
+				 t->weak, t->min_straddles);
+		} else if (patterns[k].id == LIT_P1 || patterns[k].id == LIT_P2 ||
+			   patterns[k].id == LIT_S1) {
+			snprintf(extra, sizeof(extra), " weak_rows=%llu min_observed=%llu",
 				 t->weak, t->min_straddles);
 		}
 		printf("TOTAL pattern=%s runs=%llu iters=%llu forbidden=%llu timeouts=%llu pin_fail=%llu ms=%.0f%s judged=%s result=%s\n",

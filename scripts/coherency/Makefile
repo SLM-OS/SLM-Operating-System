@@ -52,6 +52,13 @@ test: all
 	grep -q '^TOTAL pattern=P4 .*result=FAIL' $(OUT)/inject-p4w.txt
 	grep -q '^VERDICT FAIL' $(OUT)/inject-p4w.txt
 	grep -q '^exit=1' $(OUT)/inject-p4w.txt
+	@echo "== inject STALE (P1 flag holds the previous row's final value, idle writer): expect P1 timeouts, observed=0, VERDICT FAIL, exit 1"
+	$(SMOKE) -I STALE > $(OUT)/inject-stale.txt; echo "exit=$$?" >> $(OUT)/inject-stale.txt
+	@grep -E '^(ROW pass=1 pattern=P1 cpus=0>1 |TOTAL pattern=P1 |VERDICT|exit=)' $(OUT)/inject-stale.txt
+	grep -q '^ROW pass=1 pattern=P1 cpus=0>1 .*timeouts=1 .*observed=0 coverage=weak' $(OUT)/inject-stale.txt
+	grep -q '^TOTAL pattern=P1 .*result=FAIL' $(OUT)/inject-stale.txt
+	grep -q '^VERDICT FAIL' $(OUT)/inject-stale.txt
+	grep -q '^exit=1' $(OUT)/inject-stale.txt
 	@echo "== all harness tests passed"
 
 clean:
