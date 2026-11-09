@@ -102,79 +102,33 @@ _Alignas(16) uint8_t buffer[64];
 
 ---
 
-## Cache Maintenance (Pi 5 / No SMPEN)
+## Cross-CPU Coherency (Pi 5 + Jetson)
 
-On Pi 5, TF-A does not set SMPEN for secondary cores. Use `cache.h` helpers for cross-CPU data:
+Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their L1 and L2 caches coherent in hardware for Normal Write-Back Inner Shareable memory, with no software enable; neither core has an SMPEN bit. CPU-to-CPU shared state (run queues, task table, `current_task`, steal deques, `sched_diag_*`, boot and init flags, preemption state) lives in ordinary cacheable memory and is protected by ordinary spinlocks. The decision and its evidence are in `docs/adr/0006-cross-cpu-coherency.md` (#1193). The earlier design assumed incoherent per-core L2 caches and moved that state into Non-Cacheable memory; it is described in `docs/archive/coherency-gauntlet/`.
 
-> **#1193 note:** the Cortex-A76 and Cortex-A78AE TRMs have no SMPEN field (CPUECTLR_EL1 bit 6 is RES0 on A76 and PF_MODE[0] on A78AE), and both cores keep their L1/L2 coherent in hardware. This section and the NC section below describe the design as built; whether the hardware needs it is being measured with the `NC_AXIS=OFF` build (`docs/archive/coherency-gauntlet/c3-audit.md`).
+**`cache.h` helpers** (`cache_clean`, `cache_invalidate`, `cache_clean_range`, `cache_invalidate_range`, `cache_discard_range`) issue DC CVAC / CIVAC / IVAC by VA plus DSB SY on Pi 5 and Jetson, and barriers only on QEMU and x86-64. They are required for device DMA (devices that do not snoop the CPU caches) and for data written with caches off during boot. The calls that remain on scheduler and task fields are redundant on coherent hardware but harmless; new CPU-to-CPU sharing code does not need them.
 
-**Critical rule: DC CIVAC writes back dirty data before invalidating.**
-
-If CPU 0 has a dirty cacheline and you call `cache_invalidate()` (DC CIVAC), it first writes CPU 0's stale data to PoC, overwriting any newer value written by another CPU. Always `cache_clean()` or `cache_clean_range()` shared data on the writer side before another CPU uses `cache_invalidate()` to read it.
-
-**Pattern for cross-CPU data init:**
-```c
-/* CPU 0: initialize shared data, then clean before secondary boot */
-for (uint32_t i = 0; i < cpu_count; i++)
-    init_data(i);
-cache_clean_range(shared_data, sizeof(shared_data));
-
-/* Secondary CPU: write, then clean */
-shared_data[cpu].field = value;
-cache_clean(&shared_data[cpu].field);
-
-/* CPU 0 (reader): invalidate, then read */
-cache_invalidate(&shared_data[cpu].field);
-val = shared_data[cpu].field;
-```
-
-**False sharing:** `struct per_cpu` is 40 bytes. Adjacent entries share 64-byte cachelines. A dirty write to `cpu_data[0]` can be written back by CIVAC when invalidating `cpu_data[1]`.
+**DMA rule: DC CIVAC writes back dirty data before invalidating.** If the CPU holds a dirty line for a buffer a device has just written, `cache_invalidate()` first writes the stale CPU data to the PoC, over the device's data. Clean a DMA buffer before handing it to the device, and do not write it from the CPU while the device owns it.
 
 ---
 
-## Non-Cacheable Shared Memory (Pi 5 + Jetson)
+## Non-Cacheable DMA Memory (Pi 5 + Jetson)
 
-On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite SMPEN. DC CIVAC doesn't propagate through per-core L2. Non-cacheable (NC) memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs. Enabled when `PLATFORM_HAS_NC_MEMORY` is defined (set in `ncmem.h`).
-
-**NC region:** Platform-specific 2MB block mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`.
-
-**Two macros (#1193):** `PLATFORM_HAS_NC_REGION` (Pi 5, Jetson, every build) means the block is mapped and `ncmem_alloc` works; device DMA (xHCI, MACB, CDC-ECM, USB bounce, camera RCE) and fixed-address diagnostics key on it. `PLATFORM_HAS_NC_MEMORY` means CPU-to-CPU shared state lives in the block; it is undefined when the build passes `NC_AXIS=OFF` (CMake defines `NC_AXIS_OFF`), and every user then takes its cacheable `#else` branch. Do not use `PLATFORM_HAS_NC_MEMORY` as a stand-in for "Pi 5 or Jetson": board behavior (idle WFI/WFE, which CPUs unmask IRQs) keys on the platform macros, DMA keys on the region. `SETWAY_INVAL=OFF` separately drops the post-MMU set/way loop in `smp_boot.S`. `kernel/tests/test_nc_axis.c` checks the placement (MAIR index, shareability, PA) of run queues, the task table, `current_task`, `sched_diag_*` and the preemption state in each configuration.
+**NC region:** Platform-specific 2MB block mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`. `PLATFORM_HAS_NC_REGION` (`ncmem.h`, Pi 5 and Jetson) marks the platforms that have it. Its users are device DMA buffers (xHCI rings, MACB, CDC-ECM and USB bounce buffers, camera RCE), the Jetson handoff pages at the front of the block, and the fixed-address `PI5_IRQ_DIAG` slots (`diag_pi5.h`). Do not put CPU-shared state in it: `kernel/tests/test_nc_axis.c` checks that run queues, the task table, `current_task`, `sched_diag_*` and the preemption state are cacheable WB Inner Shareable and outside the block, and that `ncmem_alloc` still returns NC memory.
 - Pi 5: `0xFFE00000` (last 2MB of 4GB RAM)
 - Jetson: `0xBDE00000` (last 2MB of region 1, before OP-TEE carveout)
 
-**Allocator:** `ncmem_alloc(size, align)` in `kernel/include/ncmem.h` / `kernel/mm/ncmem.c`. Simple bump allocator, no free. Used for permanent kernel-lifetime structures.
+**Allocator:** `ncmem_alloc(size, align)` in `kernel/include/ncmem.h` / `kernel/mm/ncmem.c`. Simple bump allocator, no free, starting after `NC_MEM_RESERVED_BYTES`. Used for permanent kernel-lifetime DMA buffers.
 
-**Scheduler run queues:** `cpu_rq(cpu)` returns an NC address computed from `NC_MEM_BASE` (compile-time constant). No cacheable pointer indirection — secondary CPUs can compute the address without reading any cacheable data.
+**Lock placement:** `rq_lock[MAX_CPUS]` and `steal_deque_lock[MAX_CPUS]` in `kernel/sched/sched.c` are separate cacheable arrays, not embedded in the structs they guard; take them through `rq_lock_irqsave(cpu)` / `rq_unlock_irqrestore(cpu, flags)` and `steal_deque_lock[cpu]`. Pre-S4 the steal lock was embedded in `steal_deque_t`, which caused Pi 5's WORK_STEALING=ON boot to hang (#158) because concurrent pushes corrupted the deque. Acquire `steal_deque_lock[cpu]` before every `steal_deque_*` call; the deque's own API is lockless. See `docs/scheduler.md` §Work stealing for the full model.
 
-**Spinlock separation:** `rq_lock[MAX_CPUS]` is a separate cacheable array. ARM exclusive load/store (`ldaxr`/`stxr`) used by spinlocks requires cacheable memory on BCM2712. The lock is NOT in the `cpu_runqueue` struct — it's accessed via `rq_lock_irqsave(cpu)` / `rq_unlock_irqrestore(cpu, flags)`.
+**Spinlock hardware mode (Pi 5 + Jetson):** Both platforms now share the same `spinlock_hw_enabled` runtime-flag model (set by `vmm_init` after MMU enable). Pre-MMU the flag is 0 and every `spin_lock_irqsave` falls through to a barrier-only path. Post-MMU it is 1, so LDAXR/STXR run for real and provide proper cross-CPU mutual exclusion on cacheable memory. Jetson previously defined `SPINLOCK_SKIP_LOCKING` unconditionally in `platform.h`, which silently turned every cacheable spinlock (PMM, task-table, rq_lock, steal_deque_lock) into a no-op. That surfaced as issue #166 — a `pmm_free_pages` free-list page fault during `bench stealing` with WORK_STEALING=ON, because multiple CPUs mutated the buddy free list without serialization. A cross-CPU critical section on Jetson uses a plain cacheable `spinlock_t` + `spin_lock_irqsave` (not barrier-only, not NC-embedded). The Pi 5 DC CIVAC lock-word flush (`SPINLOCK_DRAM_FLUSH`) is gone (#1193): Pi 5 runs the same LDAXR/STXR/STLR sequence as every other ARM64 platform.
 
-**Same pattern for work-stealing:** `steal_deque_lock[MAX_CPUS]` in `kernel/sched/sched.c` is also a separate cacheable array. The deque struct itself (`steal_deque_t`) lives in NC memory on `PLATFORM_HAS_NC_MEMORY` for cross-CPU visibility, but the lock guarding it must be cacheable — LDAXR/STXR on NC memory is never executed. Pre-S4 the lock was embedded in `steal_deque_t` in NC memory, which caused Pi 5's WORK_STEALING=ON boot to hang (#158) because concurrent pushes corrupted the deque. Acquire `steal_deque_lock[cpu]` before every `steal_deque_*` call; the deque's own API is lockless. See `docs/scheduler.md` §Work stealing for the full model.
-
-**Spinlock hardware mode (Pi 5 + Jetson):** Both platforms now share the same `spinlock_hw_enabled` runtime-flag model (set by `vmm_init` after MMU enable). Pre-MMU the flag is 0 and every `spin_lock_irqsave` falls through to a barrier-only path. Post-MMU it is 1, so LDAXR/STXR run for real and provide proper cross-CPU mutual exclusion on cacheable memory. Jetson previously defined `SPINLOCK_SKIP_LOCKING` unconditionally in `platform.h`, which silently turned every cacheable spinlock (PMM, task-table, rq_lock, steal_deque_lock) into a no-op. That surfaced as issue #166 — a `pmm_free_pages` free-list page fault during `bench stealing` with WORK_STEALING=ON, because multiple CPUs mutated the buddy free list without serialization. If you need a cross-CPU critical section on Jetson, a plain cacheable `spinlock_t` + `spin_lock_irqsave` is the right primitive (not barrier-only, not NC-embedded).
-
-**Pi 5 spinlock DRAM flush (April 16, 2026):** On BCM2712 with SMPEN unset, `STLR` from `spin_unlock` stays in the releaser's L2 and never propagates to other CPUs' L2. A waiter's `LDAXR` then reads a stale "locked" cacheline from its own L2 and spins forever (observed as effective deadlock under `sched_try_steal` contention during yield-heavy workloads). `kernel/include/spinlock.h` gates a Pi 5-only path under `SPINLOCK_DRAM_FLUSH` (defined for `PLATFORM_RASPI5` unless `NC_AXIS=OFF`) that adds `DC CIVAC` + `DSB SY` before every `LDAXR` (invalidate stale local copy so the load goes to DRAM) and after every `STLR` (push the unlocked value through to DRAM so other CPUs' reads see it). QEMU, Jetson, and x86-64 are unaffected. This fix is what makes cross-CPU integration tests reliable on Pi 5; without it, any scheduler path that contends `rq_lock` or `steal_deque_lock` across CPUs can stall.
-
-**Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on platforms without NC memory. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
-
-**Current-task pointers:** `current_task[MAX_CPUS]` is also allocated from NC memory in `task_table_init()` (SCHED-C2 fix, April 2026). Previously this lived in BSS and relied on DC CIVAC for cross-CPU visibility, which has a known failure mode on Pi 5 (writer's stale cacheline can be written back during an invalidate, clobbering a newer cross-CPU write). NC relocation makes writes from one CPU's `task_set_current` instantly visible to other CPUs' `task_current` without cache maintenance. `current_task_fallback[MAX_CPUS]` is the BSS fallback if NC allocation fails.
-
-**When to use NC memory:** Only for data that MUST be visible across CPUs without cache maintenance. NC memory is slower than cached memory (every access goes to DRAM). Do not use for hot-path per-CPU data.
-
-**NC memory layout** (allocator is a bump allocator — offsets shown are approximate, based on allocation order in `scheduler_init` then `task_table_init`):
-| Contents | Size | Notes |
-|---|---|---|
-| `cpu_runqueue[MAX_CPUS]` | ~256B | First alloc; address pinned via `cpu_rq()` computing from `NC_MEM_BASE` |
-| `nc_cpu_logical_map[MAX_CPUS]` | ~32B | MPIDR→logical CPU map |
-| `sched_diag_*[MAX_CPUS]` | ~1KB | Diagnostic counters (tick, schedule, picked, idle_loops) |
-| `task_table[MAX_TASKS]` | ~24KB | All task structs |
-| `current_task[MAX_CPUS]` | ~32B | Per-CPU current running task pointer |
-| (Trace slots at `NC_MEM_SIZE - 256`) | 256B | Reserved for `nc_trace.h` diagnostics (not allocated) |
-
-**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs is hardware-driven on Jetson under default `JETSON_HW_TICK=ON` (PR #746/#755) and on Pi 5 under `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742), which has been the Pi 5 default since #777. Tasks are switched in with `DAIF.I=1`, and `task_entry_trampoline` unmasks IRQs before the entry function runs (#1047). Before #1047 nothing unmasked them (`spin_unlock_irqrestore` restores the saved, still-masked flags), so timer IRQs landed only in idle. Under HW-preempt builds the timer ISR now preempts running tasks via the ELR trampoline. NC run queues, NC task table, NC current-task pointers. See this file's "Pi 5 spinlock DRAM flush" section for what unblocked the last cross-CPU dispatch gap.
+**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs is hardware-driven on Jetson under default `JETSON_HW_TICK=ON` (PR #746/#755) and on Pi 5 under `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742), which has been the Pi 5 default since #777. Tasks are switched in with `DAIF.I=1`, and `task_entry_trampoline` unmasks IRQs before the entry function runs (#1047). Before #1047 nothing unmasked them (`spin_unlock_irqrestore` restores the saved, still-masked flags), so timer IRQs landed only in idle. Under HW-preempt builds the timer ISR now preempts running tasks via the ELR trampoline.
 
 **`test_work_stealing_distributes_load` success criterion (April 16, 2026):** The test now asserts "at least one task ran on a CPU other than the owner (CPU 1)" — the semantic meaning of "stealing distributes load". The earlier assertion required ≥2 distinct stealer CPUs per attempt, which flaked under the #216 dormancy pattern whenever only one of CPUs 2/3 was alive (a single awake stealer grabs all 5 tasks before the others wake, giving `distinct == 1` but still successfully moving work off the owner). On `PLATFORM_RASPI5`, the test prints a `ws-diag` line per attempt with per-CPU `(steal_attempts / successes / stale / schedule / picked)` deltas so future flake investigations can tell "no stealer awake" apart from "one stealer monopolized" apart from "stealing rejected" without reflashing diagnostic builds.
 
-**`sched_migrate_task` double-queue race (fixed April 16, 2026):** Between `task->assigned_cpu` read at the top and `rq_lock` acquire, a work-stealing thief on another CPU can pull the task from `old_cpu`'s queue onto its own. The original code then called `remove_from_cpu_queue_locked(task, old_cpu)` — which returned 0 silently because the task was no longer there — and followed it with `add_to_cpu_queue_locked(task, target_cpu)` unconditionally, linking the task into `target_cpu`'s queue while it was still on the thief's queue. Two CPUs then picked the same task and ran its entry wrapper on shared stack state. Fix in `sched.c`: check the `remove_from_cpu_queue_locked` return value; if zero, just update `task->assigned_cpu` for future placement instead of queuing. Also added `smp_notify_cpu(target_cpu)` after the unlock so the target CPU reliably wakes from WFE even when the post-unlock broadcast SEV is missed. The DC CIVAC spinlock fix made stealing effective enough that this race surfaced on every test run; before it, stealing rarely succeeded so the race was hidden.
+**`sched_migrate_task` double-queue race (fixed April 16, 2026):** Between `task->assigned_cpu` read at the top and `rq_lock` acquire, a work-stealing thief on another CPU can pull the task from `old_cpu`'s queue onto its own. The original code then called `remove_from_cpu_queue_locked(task, old_cpu)` — which returned 0 silently because the task was no longer there — and followed it with `add_to_cpu_queue_locked(task, target_cpu)` unconditionally, linking the task into `target_cpu`'s queue while it was still on the thief's queue. Two CPUs then picked the same task and ran its entry wrapper on shared stack state. Fix in `sched.c`: check the `remove_from_cpu_queue_locked` return value; if zero, just update `task->assigned_cpu` for future placement instead of queuing. Also added `smp_notify_cpu(target_cpu)` after the unlock so the target CPU reliably wakes from WFE even when the post-unlock broadcast SEV is missed. Once stealing succeeded reliably the race surfaced on every test run; before that it was hidden.
 
 **Leaky tests that block CPU 1 (fixed April 16, 2026):** `task_destroy` silently refuses to reclaim tasks that are not in state `TASK_TERMINATED` (it warns and returns). Test loops that time out waiting for a task to run and then call `task_destroy` therefore LEAK the unterminated task into its target CPU's run queue. On Pi 5, `test_isolated_core_latency` was the worst offender — 10+ `lat_iso` tasks at `TASK_PRIORITY_HIGH` pinned to CPU 1 could accumulate and block every subsequent multi-CPU integration test. When writing or modifying a test that creates a task it expects to run to completion, ALWAYS `scheduler_terminate_task(t)` on the timeout branch before `task_destroy(t)`. The same pattern applies to any code that drops a task reference it expected to finish.
 
@@ -782,13 +736,9 @@ existing fixtures keep working.
 
 ---
 
-## UART Lock on Pi 5 / Jetson
+## UART Lock
 
-On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).
-
-This is safe because secondary CPUs do not print after boot (the `secondary_init` comment at smp.c:328 documents this). All UART output during normal operation comes from CPU 0 (shell, tests, INFO logs). One deliberate exception: the Jetson `thermal log <ms>` diagnostic (#1093) prints from a task pinned to the last CPU, so it keeps reporting while CPU 0 is wedged. Its lines can interleave with, or garble, concurrent CPU 0 output, which is acceptable for an opt-in debug aid. If secondary CPU printing is needed beyond that, an NC-memory-based lock must be implemented.
-
-Under `NC_AXIS=OFF` (#1193) `PLATFORM_HAS_NC_MEMORY` is undefined and the UART lock is the same cacheable `spin_lock_irqsave` lock QEMU uses: a real cross-CPU lock once `vmm_init` sets `spinlock_hw_enabled`, so secondary CPUs may print on that build. Panic and exception output use the `_unlocked` variants and never take it.
+The UART lock (`kernel/src/kprintf.c`) is a cacheable `spin_lock_irqsave` lock on every platform: a real cross-CPU lock once `vmm_init` sets `spinlock_hw_enabled` (barrier only before that, while only CPU 0 runs). Secondary CPUs may print through it; each call holds the lock for its whole line, so output from different CPUs interleaves by line, not by character. It used to be IRQ-disable-only on Pi 5 and Jetson, with a rule that secondaries do not print after boot; that rule went with the NC design (#1193, `docs/adr/0006-cross-cpu-coherency.md`). Panic and exception output use the `_unlocked` variants and never take it. The lock is held with IRQs masked, so do not print from paths that must stay short under another IRQs-off lock (the GPU dispatch path, see the root `CLAUDE.md`).
 
 ---
 

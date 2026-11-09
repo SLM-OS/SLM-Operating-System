@@ -97,9 +97,9 @@ Include one test per identified risk area for the new hardware:
       `docs/networking.md` §"Descriptor Ring Cache Maintenance" and
       the verification plan in
       [`docs/net-dma-coherence.md`](net-dma-coherence.md) for the
-      first real-hardware driver). Only applicable on platforms with
-      `PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson) — x86-64 is coherent,
-      QEMU ARM64 is trivially coherent
+      first real-hardware driver). Only applicable on Pi 5 and
+      Jetson, where devices do not snoop the CPU caches; x86-64 DMA is
+      coherent, QEMU ARM64 is trivially coherent
 - [ ] Large packet (MTU-sized) TX and RX round-trip
 - [ ] Back-to-back burst of ≥64 packets without `rx_no_buffers`
       increment (validates the re-post path)
