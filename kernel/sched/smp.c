@@ -347,13 +347,6 @@ void secondary_init(uint32_t logical_cpu_id)
      * No-op when SECONDARY_PREEMPT is undefined. */
     preempt_check_cpu_mpidr(logical_cpu_id);
 
-    /* CPUECTLR_EL1 bit 6 is not an SMPEN bit on A76 / A78AE (see
-     * cpu_has_smpen in cache.h); debug log only. This used to WARN
-     * "SMPEN NOT set" from every secondary, which is meaningless on
-     * these cores (#1193 audit D9). */
-    DEBUG_PRINT("CPU %u: CPUECTLR_EL1 bit 6 = %d", logical_cpu_id,
-                cpu_has_smpen() ? 1 : 0);
-
     /* Initialize per-CPU GIC interface */
     DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
     gic_percpu_init();
@@ -670,16 +663,6 @@ void smp_init(void)
      * build is unchanged and a board log shows which variant booted. */
 #if defined(SETWAY_INVAL_OFF)
     INFO("SMP: SETWAY_INVAL=OFF, no set/way loop on secondaries (#1193)");
-#endif
-
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
-    /* CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on
-     * Cortex-A78AE: neither core has an SMPEN bit, and both keep L1/L2
-     * coherent with no software enable (#1193, C0 facts Q1/Q4). The old
-     * "SMPEN NOT set, using DC CVAC/CIVAC workaround" WARN read a
-     * meaning into this bit that it does not have (audit D9). */
-    INFO("SMP: CPUECTLR_EL1 bit 6 = %d (not an SMPEN bit on this core)",
-         cpu_has_smpen() ? 1 : 0);
 #endif
 
     DEBUG_PRINT("  About to run spinlock tests...");
