@@ -1,0 +1,277 @@
+# jetson-nano-2, kexec from JetPack Linux, SLM-OS 9a13b9ee (NC baseline build, default flags)
+# slmos.elf sha256 1f46c9acc3aceff645ba88cc2c960a38bceb40607d9a448af273de55d8759fd7
+# Same boot as jetson-kexec-litmus.txt, after one `coherency neg`. Commands, each run 3 times:
+#   bench smp / bench stealing / bench context / bench ipc
+# (garbled first characters are the known labctl echo issue)
+
+===== bench smp, run 1 =====
+rench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 1)
+  CPU 2: COMPLETED (ran on CPU 5)
+  CPU 3: COMPLETED (ran on CPU 2)
+  CPU 4: COMPLETED (ran on CPU 1)
+  CPU 5: COMPLETED (ran on CPU 3)
+
+slmos>
+===== bench smp, run 2 =====
+bench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 1)
+  CPU 2: COMPLETED (ran on CPU 2)
+  CPU 3: COMPLETED (ran on CPU 5)
+  CPU 4: COMPLETED (ran on CPU 4)
+  CPU 5: COMPLETED (ran on CPU 1)
+
+slmos>
+===== bench smp, run 3 =====
+rench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched '[INFO] Task 'smp4' (id=525) exiting
+smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+  CPU 1: COMPLETED (ran on CPU 4)
+  CPU 2: COMPLETED (ran on CPU 1)
+  CPU 3: COMPLETED (ran on CPU 3)
+  CPU 4: COMPLETED (ran on CPU 0)
+  CPU 5: COMPLETED (ran on CPU 3)
+
+slmos>
+===== bench stealing, run 1 =====
+cu�l-�ѕ�����5
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=527) exiting
+[INFO] Task 's3_3' (id=530) exiting
+[INFO] Task 's3_8' (id=535) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   10 ms (10625 us)
+    Per-task avg: 664 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 1 task
+      CPU 2: 1 task
+      CPU 3: 1 task
+      CPU 4: 5 tasks
+      CPU 5: 5 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       128          3         0
+      1        10          0         0
+      2        11          1         0
+      3        11          1         0
+      4        17          5         0
+      5        19          5         0
+
+slmos>
+===== bench stealing, run 2 =====
+c����stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=543) exiting
+[INFO] Task 's3_1' (id=544) exiting
+[INFO] Task 's3_8' (id=551) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   10 ms (10627 us)
+    Per-task avg: 664 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 4 tasks
+      CPU 2: 3 tasks
+      CPU 3: 4 tasks
+      CPU 4: 1 task
+      CPU 5: 1 task
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       131          3         0
+      1        10          0         0
+      2        13          3         0
+      3        16          4         0
+      4        13          1         0
+      5        13          1         0
+
+slmos>
+===== bench stealing, run 3 =====
+�����stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=559) exiting
+[INFO] Task 's3_3' (id=562) exiting
+[INFO] Task 's3_6' (id=565) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   11 ms (11234 us)
+    Per-task avg: 702 us
+
+    Per-CPU execution distribution:
+      CPU 0: 3 tasks
+      CPU 1: 2 tasks
+      CPU 2: 1 task
+      CPU 3: 2 tasks
+      CPU 4: 4 tasks
+      CPU 5: 4 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       213          3         0
+      1        10          0         0
+      2        11          1         0
+      3        12          2         0
+      4        16          4         0
+      5        18          4         0
+
+slmos>
+===== bench context, run 1 =====
+��{���ntext
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=575) exiting
+  Context switch: 99 round-trips
+    Average: 5464 ns (5 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:     0
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:    99 ########################################
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 5344 ns   Max: 5984 ns   Mean: 5464 ns
+  p50: 5472 ns   p95: 5536 ns   p99: 5984 ns
+
+slmos>
+===== bench context, run 2 =====
+se�-�context
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=576) exiting
+  Context switch: 99 round-trips
+    Average: 5457 ns (5 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:     0
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:    99 ########################################
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 5312 ns   Max: 5760 ns   Mean: 5457 ns
+  p50: 5440 ns   p95: 5664 ns   p99: 5760 ns
+
+slmos>
+===== bench context, run 3 =====
+seosl context
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=577) exiting
+  Context switch: 99 round-trips
+    Average: 5448 ns (5 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:     0
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:    99 ########################################
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 5312 ns   Max: 5792 ns   Mean: 5448 ns
+  p50: 5440 ns   p95: 5536 ns   p99: 5792 ns
+
+slmos>
+===== bench ipc, run 1 =====
+bench ipc
+
+IPC Latency Benchmark
+=====================
+  IPC send+recv round-trip (100 iterations):
+    Total: 12896 ns
+    Average: 128 ns (0 us)
+
+slmos>
+===== bench ipc, run 2 =====
+bench ipc
+
+IPC Latency Benchmark
+=====================
+  IPC send+recv round-trip (100 iterations):
+    Total: 11264 ns
+    Average: 112 ns (0 us)
+
+slmos>
+===== bench ipc, run 3 =====
+bench ipc
+
+IPC Latency Benchmark
+=====================
+  IPC send+recv round-trip (100 iterations):
+    Total: 11360 ns
+    Average: 113 ns (0 us)
+
+slmos>
