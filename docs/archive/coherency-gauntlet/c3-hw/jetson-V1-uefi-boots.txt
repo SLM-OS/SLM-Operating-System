@@ -1,0 +1,26 @@
+# jetson-nano-2, UEFI-direct, SLM-OS 10f8688e
+# V1: make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF
+# slmos.bin sha256 01952fd0a73751d0cd8fc8b40f96ae18f5c69677a5a236819e693e4d12fa5477 (\EFI\SLMOS\SLMOS.efi on the
+#   NVMe ESP, written once at 05:18 UTC)
+# Each boot: labctl power_cycle (15 s) -> SD Linux -> over ssh: fsck.vfat -n (clean every time), read-only mount
+#   sha256 of SLMOS.efi (= 01952fd0... every time), efibootmgr --bootnext 000E ("SLM-OS NVMe"), reboot ->
+#   labctl serial_capture(until "slmos>|boot flag not visible|SMP: [0-4]/5|PANIC|panic|Unhandled Exception|
+#   Synchronous Exception|Powering off|ABORT", tail=4). A boot passes when the capture stops on "slmos>".
+# (The "rebooting hh:mm:ss" stamps the script printed come from the board's clock, which is not synced;
+#  the times below are host UTC when the script returned.)
+#
+# boot  reboot issued  capture                 last lines
+#  1    05:30:29       4 lines, 57.6 s, match  "SLM-OS Debug Shell" / "Type 'help' ..." / "" / "slmos>"
+#  2    05:32:59       4 lines, 57.6 s, match  same
+#  3    05:35:25       4 lines, 57.5 s, match  same
+#  4    05:37:51       4 lines, 57.7 s, match  same
+#  5    05:40:40       4 lines, 57.5 s, match  same
+#  6    05:43:28       4 lines, 57.5 s, match  same
+#  7    05:46:01       4 lines, 57.6 s, match  same
+#  8    05:48:25       4 lines, 56.8 s, match  same
+#  9    05:51:07       4 lines, 45.0 s, match  same
+# 10    05:53:33       4 lines, 57.7 s, match  same
+#
+# Result: 10/10 reached slmos>; none stopped on "boot flag not visible", a partial "SMP: n/5" line, a panic,
+# an exception, a firmware ABORT or "Powering off". (The first UEFI boot of this image, used for regs/litmus/
+# neg/perf, also showed "SMP: 5/5 secondary CPUs online" and the NC_AXIS=OFF banner; it is not counted here.)

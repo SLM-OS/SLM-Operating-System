@@ -1,0 +1,69 @@
+# jetson-nano-2, UEFI-direct, SLM-OS 10f8688e (suite rev 3)
+# V1T: make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
+# test slmos.bin sha256 3d3ddc2e4abb9525f99fa4f737ab4fd87398f8633973d1be8d44bbf6c991d933
+#   written to \EFI\SLMOS\SLMOS.efi at 05:56 UTC; fsck.vfat -n clean, read-only mount sha256 = 3d3ddc2e...
+# BootNext reboot at 05:56:48 UTC; one capture of 184.0 s (labctl tail=60), stopped on "Test Suite Summary"
+#   (the trailing "[PA" was cut at the match). Only the last 60 lines were kept by the capture.
+# Integration count is 16, not 19: the three NC tests are compiled out under NC_AXIS=OFF
+#   (test_integration.c:2345), see jetson-V1T-kexec-integration.txt.
+DCOFF   2>3            1024      1024         0         0      1024        0
+DCOFF   2>4            1024      1024         0         0      1024        0
+DCOFF   2>5            1024      1024         0         0      1024        0
+DCOFF   3>0            1024      1024         0         0      1024        0
+DCOFF   3>1            1024      1024         0         0      1024        0
+DCOFF   3>2            1024      1024         0         0      1024        0
+DCOFF   3>4            1024      1024         0         0      1024        0
+DCOFF   3>5            1024      1024         0         0      1024        0
+DCOFF   4>0            1024      1024         0         0      1024        0
+DCOFF   4>1            1024      1024         0         0      1024        0
+DCOFF   4>2            1024      1024         0         0      1024        0
+DCOFF   4>3            1024      1024         0         0      1024        0
+DCOFF   4>5            1024      1024         0         0      1024        0
+DCOFF   5>0            1024      1024         0         0      1024        0
+DCOFF   5>1            1024      1024         0         0      1024        0
+DCOFF   5>2            1024      1024         0         0      1024        0
+DCOFF   5>3            1024      1024         0         0      1024        0
+DCOFF   5>4            1024      1024         0         0      1024        0
+# control c totals: loads/phase=30720 p1_stale=28672 p1_fresh=2048 p2_stale=0 p2_fresh=30720 timeouts=0
+coherency neg: done (report only: control c should show stale phase-1 reads on hardware with real caches, a and b may or may not; QEMU TCG models no caches)
+[INFO] coherency neg scale 1000: 59458 ms
+[INFO] coherency neg a: P2 forbidden 0 timeouts 16, P4 forbidden 0 timeouts 8 (report only)
+[INFO] coherency neg b: P2 forbidden 0 timeouts 30, P4 forbidden 0 timeouts 7 (report only)
+[INFO] coherency neg c: loads/phase 30720, phase 1 stale 28672 fresh 2048, phase 2 stale 0 fresh 30720, timeouts 0 (report only)
+  [PASS] test_negative_controls_report
+  [PASS] test_negative_controls_rerun_uses_fresh_slots
+[INFO] test_coherency.c: 125955 ms
+
+----------------------------------------
+Tests: 26  Passed: 26  Failed: 0
+[PASS] All tests passed
+
+========================================
+Integration Tests (Multi-Core)
+========================================
+[TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-aef4cb3eef243d97a/kernel/tests/test_integration.c
+  [PASS] test_multicore_basic
+  [PASS] test_task_migration
+  [PASS] test_stress_multicpu
+  [PASS] test_lock_contention
+  [PASS] test_task_lifecycle
+  [PASS] test_boot_order_pmm_before_scheduler
+  [PASS] test_hw_timeout_with_yield
+  [PASS] test_timer_running_after_boot
+  [PASS] test_msg_router_cross_cpu
+  [PASS] test_msg_router_multi_subscriber
+  [PASS] test_msg_router_priority_concurrent
+  [PASS] test_msg_router_ack_targets_last_received_cross_cpu
+  [PASS] test_msg_router_same_mailbox_zero_loss
+  [PASS] test_smp_notify_cpu_safe
+  [PASS] test_smp_notify_cpu_wakes_secondary
+  [PASS] test_work_stealing_distributes_load
+
+----------------------------------------
+Tests: 16  Passed: 16  Failed: 0
+[PASS] All tests passed
+
+========================================
+Test Suite Summary
+========================================
+[PA
