@@ -108,6 +108,25 @@ Boards: jetson-nano-2 and pi-5-1 only.
   revision 3 (021f3041): row nonces in every value, an `observed` progress
   rule, sentinel + clean to PoC before controls (a)/(b).
 
+- C3 round 1, Pi 5 (provisional): PASS with gaps. Every rev 3 row parsed:
+  0 forbidden, 0 timeouts, 0 weak; registers equal to Linux in all builds;
+  removal diff checked call by call: no dropped maintenance serves DMA or a
+  caches-off reader. bench ipc (812 to 130 ns) and context (2318 to 105 ns)
+  improve; bench stealing is bimodal by task split (4/4/4/4 12.9-14.6 ms,
+  5/4/4/3 15.7-18.0 ms), equal inside a mode, so "equal", not "beats". The
+  3 integration tests dropped under NC_AXIS=OFF test the removed property or
+  are covered elsewhere. Gaps: P3 not sensitive in SLM-OS (S2 0 on all 60
+  rows); the forbidden checkers have failed on hardware only through
+  timeouts and weak rows; litmus runs seconds, not minutes; NC baseline
+  reliability is 8 of 20 with silent boots unclassified, so the reliability
+  comparison is confounded; one integration boot per build; bench context's
+  switch count unverified; `kprintf.c:30` UART lock is now a cross-CPU
+  IRQ-saving spinlock (latency hazard); `task.c:25, 38` task table and
+  current_task are BSS cleared with caches off (#1197), to be checked on
+  Jetson where CPU 0's caches are not reset. Overturning observation named:
+  a failure in 10 repeated boots of the f546a126 test kernel; that run was
+  started at once.
+
 ## Failed approaches
 
 - Pi 5 Linux attempts 1 to 3 (console-only result path; then a 20 s settle
