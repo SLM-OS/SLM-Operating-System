@@ -11,62 +11,75 @@ incoherent. Nothing re-tested it after the set/way fix in `e0a15259`.
 
 ## Decision
 
-Status: proposed.
+Status: proposed; the removal is pending on both boards.
 
-Measured on both boards: the hardware keeps Inner Shareable Write-Back
-memory coherent across all CPUs, including between the Jetson clusters. The
-NC axis is not required by the hardware.
+Measured: on both boards Inner Shareable Write-Back memory is coherent
+across all CPUs, including between the Jetson clusters, under Linux and
+SLM-OS. The NC axis is not required for coherency, and the SMPEN account
+is wrong. The target is decision (a): CPU-shared state in ordinary
+cacheable memory, no CPU-to-CPU cache maintenance, ordering by barriers,
+acquire and release; maintenance only for DMA, page tables written before
+the MMU is on, and `secondary_mmu_*` (read with the MMU off); the NC block
+for DMA only.
 
-Pi 5: decision (a). CPU-shared state is ordinary cacheable memory with no
-CPU-to-CPU cache maintenance; ordering uses barriers, acquire and release.
-Maintenance stays for DMA, for page tables written before the MMU is on,
-and for `secondary_mmu_*`, read by secondaries with the MMU off. The NC
-block stays, for DMA only.
+The removal does not land until both boards meet the bar:
 
-Jetson: not decided. The removal build has 4 kexec and 2 UEFI boots with
-captured logs, against 10, and no integration run. In both cacheable builds
-one CPU sometimes makes 0 successful steals in a `bench stealing` run (CPUs
-2-3 under `NC_AXIS=OFF`, CPU 4 under the removal); it is not shown absent
-from the NC build. Next: at least 10 runs with per-CPU steal deltas per
-build per boot path. A stall in both builds is a separate stealing defect;
-a stall only without NC is a removal regression. The code is shared, so the
-removal does not land until Jetson is decided.
+- Pi 5: the integration "match" criterion is unmet. The removal test kernel
+  failed one extra test in 1 of 11 boots (#1202); the NC test kernel has a
+  single boot. Next: 10-boot NC test-kernel series and the #1202 experiment.
+- Jetson: the removal has 4 kexec and 2 UEFI boots with captured logs, no
+  integration run, and a steal stall the NC build does not show (a CPU with
+  0 successful steals): `NC_AXIS=OFF` CPUs 2 and 3 in 6 of 6 runs; removal
+  CPU 4 in 2 of 2 UEFI runs with per-CPU deltas, 0 of 5 on kexec; NC 0 of
+  6. Next: 10+ `bench stealing` runs with per-CPU deltas per build per path.
+  A removal-only stall that stays unexplained would make (b), keeping the
+  axis on Jetson, the outcome.
 
 ## Alternatives considered
 
-- Keep the axis on one board, or everywhere with a measured justification
-  (b, c): no measurement on either board shows incoherence.
+- Keep the axis everywhere with a measured justification (c): no
+  measurement on either board shows incoherence.
+- Keep it on Jetson only (b): open until the steal experiment.
 - Set an enable bit in BL31: neither core has one.
-- Keep `NC_AXIS=OFF` as an option: it was slower than both the NC build and
-  the removal on Jetson stealing, and a second path must be tested twice.
+- Keep `NC_AXIS=OFF` as an option: slower than NC on Jetson stealing.
 
 ## Consequences
 
 Neither core has SMPEN (A76 CPUECTLR bit 6 RES0, TRM 100798 13.32; A78AE
-bit 6 is PF_MODE[0], 101779 3.2.47); both join coherency with no software
-step (A76 5.9, A78AE 2.4.9, DSU 100453 2.1). Caches-off loads do not
-allocate (A76 7.2.3), so "pre-MMU reads left stale lines" cannot hold. The
-defect found was uncleaned `secondary_mmu_*` (fixed). `make test` rejects
-new cache maintenance in scheduler, IPC, spinlock and print code. Open:
-#1202, #1197, #1201 and the steal stall.
+bit 6 is PF_MODE[0], 101779 3.2.47); a core joins its cluster's coherency
+with no software step (A76 5.9, A78AE 2.4.9, DSU 100453 2.1). Coherency
+between the Jetson clusters has no public source and rests on measurement.
+Caches-off loads do not allocate (A76 7.2.3), so "pre-MMU reads left stale
+lines" cannot hold. Defects fixed: uncleaned `secondary_mmu_*` (D1), page
+tables cleaned instead of invalidated (D2), `#else` paths that only worked on
+QEMU (D12), and a pointer and array mismatch that page-faulted the first
+cacheable build. `make test` rejects new cache maintenance in scheduler,
+IPC, spinlock and print code. Open: #1196, #1197, #1201, #1202, the stall.
 
 ## What would overturn this
 
 A row-tagged litmus failure on any CPU pair with identical Inner Shareable
-Write-Back mappings, MMU and caches on, or #1202 resolving as lost
-cross-CPU visibility.
+Write-Back mappings, MMU and caches on; #1202 resolving as lost cross-CPU
+visibility, or an NC 10-boot series passing where the removal repeats it;
+a different Pi 5 EEPROM or BL31 (version not determined here).
 
 ## Evidence
 
-- Linux, same boards and firmware, row-tagged suite, 10 min each: 0
+- Linux, same boards and firmware, row-tagged suite, about 10 min each: 0
   forbidden, 0 timeouts, 0 weak on every ordered pair. SLM-OS reads the same
-  `CPUECTLR_EL1` and `CLUSTERECTLR_EL1` on every CPU.
-- SLM-OS, NC, `NC_AXIS=OFF` and removal builds, both boards and Jetson
-  paths: every row 0 / 0 / 0 weak. The suite sees staleness on hardware:
-  caches-off readers on every same-cluster pair; a Non-shareable alias on
-  exactly the 16 Jetson cross-cluster pairs.
+  `CPUECTLR_EL1` as Linux on each CPU of both boards (Pi 5 CPU 0 differs
+  from CPUs 1-3 under both); `CLUSTERECTLR_EL1` compared on Pi 5 only.
+- SLM-OS row-tagged suite, every row 0 / 0 / 0 weak: Pi 5 NC, `NC_AXIS=OFF`
+  and removal; Jetson NC on kexec, `NC_AXIS=OFF` and removal on both paths
+  (removal UEFI kept as a summary only). Staleness seen on hardware:
+  caches-off readers on every same-cluster pair; under `NC_AXIS=OFF` a
+  Non-shareable alias timed out on exactly the 16 cross-cluster pairs (the
+  earlier NC run: 11 of 16); control (a) not run on the removal.
 - Removal against NC: context switch Pi 5 2318 to 105 ns, Jetson 5456 to
-  84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 130 ns, Jetson
-  equal; stealing equal on Pi 5, equal or better on Jetson.
-- Pi 5 removal: 10/10 boots, 11 test-kernel boots, integration 16/16 each.
+  84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 131 ns, Jetson
+  equal; stealing equal on Pi 5, equal or better on Jetson; `bench smp`
+  completed in every run on both boards.
+- Boots: Pi 5 removal 10/10 plus 11 test-kernel boots (integration 16/16);
+  Pi 5 NC 8 of 20 attempts (rig defect #1195). Jetson `NC_AXIS=OFF` 10/10
+  per path with integration 16/16.
 - Data: `docs/archive/coherency-gauntlet/coherency.md`.
