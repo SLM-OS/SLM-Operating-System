@@ -38,7 +38,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
 | C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
-| C3 | Boot-sequence audit and cacheable build | QEMU stage done; hardware build is c3-hw-1193 @ cf7866f2 (C3 + suite rev 2), waits for boards | 0 |
+| C3 | Boot-sequence audit and cacheable build | QEMU stage done; hardware build is c3-hw-1193 @ c2122932 (C3 + suite rev 2 + neg fresh-lines fix), waits for boards | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -184,6 +184,16 @@ Boards: jetson-nano-2 and pi-5-1 only.
   30 of 30 pairs, so the litmus suite can see staleness on this board.
 - UEFI-direct: regs, litmus PASS, neg done; perf, boots, integration in
   progress. bench context about 18 us on UEFI vs 5.4 us on kexec.
+
+### c3-hw-1193 @ c2122932
+
+- Merge of C2's 62a0217e (fresh lines per neg row) and 18ad1210
+  (BOOT_TESTS_HW_SET) onto suite rev 2; conflicts resolved keeping both.
+  QEMU `make test`: coherency 20/20, real run and no-fault control PASS,
+  four injected runs FAIL. RASPI5 and JETSON build, default and NC_AXIS=OFF.
+- Checked that a cached NC_AXIS=OFF cannot leak into a default build: the
+  Makefile only passes `-DNC_AXIS=OFF`, but a signature change wipes the
+  build directory (`Makefile:349-358`).
 
 ### Lab notes
 
