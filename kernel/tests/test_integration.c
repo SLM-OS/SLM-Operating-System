@@ -167,7 +167,7 @@ static void reset_test_state(void)
  * ============================================================================ */
 
 #if defined(PLATFORM_RASPI5)
-extern volatile uint32_t *sched_diag_idle_loops;
+/* sched_diag_idle_loops: declared in sched_diag.h, matched to sched.c. */
 
 /* A "dormant" CPU is one whose idle_loops counter hasn't moved
  * across THIS many consecutive tearDowns. Single tests can finish
@@ -1079,20 +1079,8 @@ static void test_work_stealing_distributes_load(void)
      * the deque; any delta indicates `scheduler_add_task_to_cpu` thinks
      * it couldn't push and either a workload regression (e.g. capacity
      * shrunk) or a counter-bookkeeping bug. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    extern volatile uint32_t *sched_diag_steal_push_full;
-#else
-    extern volatile uint32_t sched_diag_steal_push_full[];
-#endif
-#if defined(PLATFORM_RASPI5)
-    /* Per-attempt ws-diag dump only references these on Pi 5. */
-    extern volatile uint32_t *sched_diag_steal_attempts;
-    extern volatile uint32_t *sched_diag_steal_successes;
-    extern volatile uint32_t *sched_diag_steal_stale;
-    extern volatile uint32_t *sched_diag_schedule;
-    extern volatile uint32_t *sched_diag_picked;
-    extern volatile uint32_t *sched_diag_idle_loops;
-#endif
+    /* sched_diag_* counters: declared in sched_diag.h, matched to
+     * sched.c in both NC_AXIS configurations (#1193). */
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++) {
         pre_push_full[c] = sched_diag_steal_push_full[c];

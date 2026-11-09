@@ -3,9 +3,18 @@
  *
  * Implements P1-P6, S1 and S2 from docs/archive/coherency-gauntlet/litmus-spec.md
  * (revision 2: S2 = SB+none, P4 time budget with pairs / straddles
- * counters) with the same code shapes, barriers and forbidden-outcome
- * definitions as the Linux harness (scripts/coherency/, C1), so the two
- * produce rows that compare line for line.
+ * counters; revision 3: row-tagged values and the observed-progress rule)
+ * with the same code shapes, barriers and forbidden-outcome definitions as
+ * the Linux harness (scripts/coherency/, C1), so the two produce rows that
+ * compare line for line.
+ *
+ * Row tags (revision 3): every value P1, P2, S1 and P4 store is
+ * (tag << 40) | index, with a fresh nonzero tag per row, and the row's
+ * variables start at a value with the reserved tag COH_TAG_RESERVED. A
+ * reader that sees a foreign tag has not seen the row start; one that
+ * never sees its own tag times out, so a stale line left by an earlier row
+ * (or old DRAM behind a Non-cacheable alias) can never read as a finished,
+ * clean row.
  *
  * Rules every pattern here follows:
  *   - Shared variables live in ordinary cacheable memory (Normal WB, Inner
@@ -60,6 +69,41 @@
 struct coh_line {
     alignas(COH_LINE_BYTES) volatile uint64_t v;
 };
+
+/* ------------------------------------------------------------------------
+ * Row tags (spec revision 3)
+ * ------------------------------------------------------------------------ */
+
+#define COH_TAG_SHIFT           40u
+#define COH_IDX_MASK            ((1ull << COH_TAG_SHIFT) - 1u)
+#define COH_TAG_MAX             ((1ull << (64u - COH_TAG_SHIFT)) - 1u)
+/* Tag of the start value; never handed to a row. */
+#define COH_TAG_RESERVED        COH_TAG_MAX
+/* Start value of every tagged variable: reserved tag, largest index, so a
+ * reader that ignored tags would take it for a finished row. */
+#define COH_TAGGED_INIT         ((COH_TAG_RESERVED << COH_TAG_SHIFT) | COH_IDX_MASK)
+
+static inline uint64_t coh_tagged(uint64_t tag, uint64_t idx)
+{
+    return (tag << COH_TAG_SHIFT) | (idx & COH_IDX_MASK);
+}
+
+static inline uint64_t coh_tag_of(uint64_t v)
+{
+    return v >> COH_TAG_SHIFT;
+}
+
+static inline uint64_t coh_idx_of(uint64_t v)
+{
+    return v & COH_IDX_MASK;
+}
+
+/* Row tag for run nonce @nonce: 1 .. COH_TAG_RESERVED - 1, never 0 and
+ * never the reserved tag. */
+static inline uint64_t coh_row_tag(uint64_t nonce)
+{
+    return ((nonce - 1u) % (COH_TAG_RESERVED - 1u)) + 1u;
+}
 static_assert(sizeof(struct coh_line) == COH_LINE_BYTES,
               "coh_line must fill exactly one 128-byte line");
 
@@ -219,6 +263,7 @@ struct coh_env {
 struct coh_result {
     uint64_t forbidden;             /* forbidden outcomes observed by this role */
     uint64_t timeouts;              /* wait loops that made no progress */
+    uint64_t observed;              /* MP reader: iterations with own flag, index < n */
     uint64_t pairs;                 /* P4 reader: read pairs taken */
     uint64_t straddles;             /* P4 reader: pairs whose two reads differed */
     uint64_t writes;                /* P4 writer: writes made */
@@ -328,15 +373,17 @@ enum coh_mp_kind {
     COH_MP_NONE = 2,        /* S1: no barriers (relaxed outcome allowed) */
 };
 
+/* Writer for i = 1..n stores data = flag = coh_tagged(@tag, i). */
 static inline void coh_mp_writer(enum coh_mp_kind kind, volatile uint64_t *data,
-                                 volatile uint64_t *flag, uint64_t n,
+                                 volatile uint64_t *flag, uint64_t tag, uint64_t n,
                                  const struct coh_env *env)
 {
     switch (kind) {
     case COH_MP_REL_ACQ:
         for (uint64_t i = 1; i <= n; i++) {
-            coh_st(data, i);
-            coh_stlr(flag, i);
+            uint64_t v = coh_tagged(tag, i);
+            coh_st(data, v);
+            coh_stlr(flag, v);
             if ((i & COH_WRITER_ABORT_MASK) == 0 && coh_ld(env->abort) != 0) {
                 return;
             }
@@ -344,9 +391,10 @@ static inline void coh_mp_writer(enum coh_mp_kind kind, volatile uint64_t *data,
         break;
     case COH_MP_DMB:
         for (uint64_t i = 1; i <= n; i++) {
-            coh_st(data, i);
+            uint64_t v = coh_tagged(tag, i);
+            coh_st(data, v);
             coh_dmb_ishst();
-            coh_st(flag, i);
+            coh_st(flag, v);
             if ((i & COH_WRITER_ABORT_MASK) == 0 && coh_ld(env->abort) != 0) {
                 return;
             }
@@ -354,8 +402,9 @@ static inline void coh_mp_writer(enum coh_mp_kind kind, volatile uint64_t *data,
         break;
     case COH_MP_NONE:
         for (uint64_t i = 1; i <= n; i++) {
-            coh_st(data, i);
-            coh_st(flag, i);
+            uint64_t v = coh_tagged(tag, i);
+            coh_st(data, v);
+            coh_st(flag, v);
             if ((i & COH_WRITER_ABORT_MASK) == 0 && coh_ld(env->abort) != 0) {
                 return;
             }
@@ -390,28 +439,63 @@ static inline void coh_mp_read_once(enum coh_mp_kind kind, const volatile uint64
     *d_out = d;
 }
 
-/* Reads until flag reaches @n; counts every d < f observation. */
+/* MP reader state across observations (revision 3). */
+struct coh_mp_state {
+    bool seen;                      /* the flag has held this row's tag */
+    bool done;                      /* own flag reached index n: stop */
+    uint64_t observed;              /* observations with own flag, index < n */
+};
+
+/*
+ * Judges one (f, d) observation of row @tag with @n writes; returns 1 if
+ * it is forbidden. A flag with a foreign tag before the row's tag was seen
+ * means "not started" (not counted); after it, a foreign flag is a
+ * coherence violation. With an own flag: index above n is forbidden, and
+ * d < f is forbidden where a data value with a foreign tag counts as index
+ * 0 (it predates the row), as does a data index above n.
+ */
+static inline uint32_t coh_mp_check(uint64_t tag, uint64_t n, uint64_t f, uint64_t d,
+                                    struct coh_mp_state *st)
+{
+    if (coh_tag_of(f) != tag) {
+        return st->seen ? 1u : 0u;
+    }
+    st->seen = true;
+    uint64_t fi = coh_idx_of(f);
+    uint64_t di = (coh_tag_of(d) == tag) ? coh_idx_of(d) : 0;
+    uint32_t bad = (fi > n || di > n || coh_mp_is_forbidden(fi, di)) ? 1u : 0u;
+    if (fi < n) {
+        st->observed++;
+    } else {
+        st->done = true;
+    }
+    return bad;
+}
+
+/* Reads until the flag holds this row's index n; counts forbidden
+ * observations and, in res->observed, observations of the row in
+ * progress. A flag that never shows the row's tag is a timeout. */
 static inline void coh_mp_reader(enum coh_mp_kind kind, const volatile uint64_t *data,
-                                 const volatile uint64_t *flag, uint64_t n,
+                                 const volatile uint64_t *flag, uint64_t tag, uint64_t n,
                                  const struct coh_env *env, struct coh_result *res)
 {
     uint64_t f;
     uint64_t d;
+    struct coh_mp_state st = { .seen = false, .done = false, .observed = 0 };
     coh_mp_read_once(kind, data, flag, &f, &d);
     struct coh_wait w;
     coh_wait_init(&w, f);
     for (;;) {
-        if (coh_mp_is_forbidden(f, d)) {
-            res->forbidden++;
-        }
-        if (f >= n) {
-            return;
+        res->forbidden += coh_mp_check(tag, n, f, d, &st);
+        if (st.done) {
+            break;
         }
         if (coh_wait_tick(&w, f, env, res) != COH_WAIT_OK) {
-            return;
+            break;
         }
         coh_mp_read_once(kind, data, flag, &f, &d);
     }
+    res->observed = st.observed;
 }
 
 /* ------------------------------------------------------------------------
@@ -474,24 +558,26 @@ static inline void coh_sb_thread(uint32_t me, bool dmb, struct coh_vars *v, uint
  * ------------------------------------------------------------------------ */
 
 /*
- * Writer: plain stores of successive values (@first + 1, @first + 2, ...,
- * or @first - 1, @first - 2, ... with @down, which only the self-test's
- * fake writer uses). It makes at least @n writes, then keeps going until
- * every one of the @nreaders readers has published at least @target
- * straddles in @strad[0..nreaders) or @budget_ticks have passed since it
- * started, and finally sets @done with STLR. The stop test runs once per
+ * Writer: plain stores of coh_tagged(@tag, idx) with idx = @first + 1,
+ * @first + 2, ... (or @first - 1, @first - 2, ... with @down, which only
+ * the self-test's fake writer uses). It makes at least @n writes, then
+ * keeps going until every one of the @nreaders readers has published at
+ * least @target straddles in @strad[0..nreaders) (a published count is
+ * coh_tagged(@tag, count); any other tag counts as zero) or @budget_ticks
+ * have passed since it started, and finally sets @done to
+ * coh_tagged(@tag, 1) with STLR. The stop test runs once per
  * COH_WRITER_ABORT_MASK + 1 writes, so the count is rounded up to that.
  * Returns the number of writes made.
  */
 static inline uint64_t coh_corr_writer_ex(volatile uint64_t *x, volatile uint64_t *done,
                                           const struct coh_line *strad, uint32_t nreaders,
-                                          uint64_t n, uint64_t target, uint64_t budget_ticks,
-                                          uint64_t first, bool down,
+                                          uint64_t tag, uint64_t n, uint64_t target,
+                                          uint64_t budget_ticks, uint64_t first, bool down,
                                           const struct coh_env *env)
 {
     uint64_t t_start = coh_cntpct();
     uint64_t i = 0;
-    uint64_t val = first;
+    uint64_t idx = first;
     for (;;) {
         if ((i & COH_WRITER_ABORT_MASK) == 0) {
             if (coh_ld(env->abort) != 0) {
@@ -500,7 +586,8 @@ static inline uint64_t coh_corr_writer_ex(volatile uint64_t *x, volatile uint64_
             if (i >= n) {
                 bool all = true;
                 for (uint32_t k = 0; k < nreaders; k++) {
-                    if (coh_ld(&strad[k].v) < target) {
+                    uint64_t sv = coh_ld(&strad[k].v);
+                    if (coh_tag_of(sv) != tag || coh_idx_of(sv) < target) {
                         all = false;
                         break;
                     }
@@ -511,61 +598,95 @@ static inline uint64_t coh_corr_writer_ex(volatile uint64_t *x, volatile uint64_
             }
         }
         i++;
-        val = down ? val - 1u : val + 1u;
-        coh_st(x, val);
+        idx = down ? idx - 1u : idx + 1u;
+        coh_st(x, coh_tagged(tag, idx));
     }
-    coh_stlr(done, 1);
+    coh_stlr(done, coh_tagged(tag, 1));
     return i;
 }
 
 static inline uint64_t coh_corr_writer(volatile uint64_t *x, volatile uint64_t *done,
                                        const struct coh_line *strad, uint32_t nreaders,
-                                       uint64_t n, uint64_t target, uint64_t budget_ticks,
-                                       const struct coh_env *env)
+                                       uint64_t tag, uint64_t n, uint64_t target,
+                                       uint64_t budget_ticks, const struct coh_env *env)
 {
-    return coh_corr_writer_ex(x, done, strad, nreaders, n, target, budget_ticks, 0, false,
-                              env);
+    return coh_corr_writer_ex(x, done, strad, nreaders, tag, n, target, budget_ticks, 0,
+                              false, env);
+}
+
+/* P4 reader state across read pairs (revision 3). */
+struct coh_corr_state {
+    bool seen;                      /* x has held this row's tag */
+    uint64_t straddles;
+};
+
+/*
+ * Judges one read pair (a, b) of row @tag; returns 1 if it is forbidden.
+ * Both reads own: a straddle when they differ, forbidden when b < a.
+ * A foreign first read and an own second read is the row's first write
+ * landing in between (a straddle). A foreign value after an own one,
+ * within the pair or after the row's tag was seen, is forbidden. Two
+ * foreign reads before the row's tag was seen mean "not started".
+ */
+static inline uint32_t coh_corr_check(uint64_t tag, uint64_t a, uint64_t b,
+                                      struct coh_corr_state *st)
+{
+    bool ao = coh_tag_of(a) == tag;
+    bool bo = coh_tag_of(b) == tag;
+    uint32_t bad = 0;
+    if ((st->seen && !ao) || (ao && !bo)) {
+        bad = 1;
+    } else if (ao && bo) {
+        if (a != b) {
+            st->straddles++;
+            if (coh_corr_is_forbidden(coh_idx_of(a), coh_idx_of(b))) {
+                bad = 1;
+            }
+        }
+    } else if (bo) {
+        st->straddles++;
+    }
+    if (ao || bo) {
+        st->seen = true;
+    }
+    return bad;
 }
 
 /*
- * Reader: two plain loads of @x in a row. A pair whose loads differ is a
- * straddle (a write landed between them); b < a is the CoRR violation.
- * The straddle count goes to @my_strad every COH_CORR_PUBLISH_MASK + 1
- * pairs (so the writer can stop early) and once more at the end. The
- * reader stops when it sees @done, on abort, or after 1 s with no change
- * in @x.
+ * Reader: two plain loads of @x in a row, judged by coh_corr_check. The
+ * straddle count goes to @my_strad (as coh_tagged(@tag, count)) every
+ * COH_CORR_PUBLISH_MASK + 1 pairs, so the writer can stop early, and once
+ * more at the end. The reader stops when @done holds coh_tagged(@tag, 1)
+ * (a done flag left by another row does not stop it), on abort, or after
+ * 1 s with no change in @x.
  */
 static inline void coh_corr_reader(const volatile uint64_t *x, const volatile uint64_t *done,
-                                   volatile uint64_t *my_strad, const struct coh_env *env,
-                                   struct coh_result *res)
+                                   volatile uint64_t *my_strad, uint64_t tag,
+                                   const struct coh_env *env, struct coh_result *res)
 {
     uint64_t pairs = 0;
-    uint64_t straddles = 0;
+    uint64_t done_val = coh_tagged(tag, 1);
+    struct coh_corr_state st = { .seen = false, .straddles = 0 };
     struct coh_wait w;
     coh_wait_init(&w, coh_ld(x));
     for (;;) {
         uint64_t a = coh_ld(x);
         uint64_t b = coh_ld(x);
         pairs++;
-        if (a != b) {
-            straddles++;
-            if (coh_corr_is_forbidden(a, b)) {
-                res->forbidden++;
-            }
-        }
+        res->forbidden += coh_corr_check(tag, a, b, &st);
         if ((pairs & COH_CORR_PUBLISH_MASK) == 0) {
-            coh_st(my_strad, straddles);
+            coh_st(my_strad, coh_tagged(tag, st.straddles));
         }
-        if ((pairs & COH_CORR_DONE_MASK) == 0 && coh_ldar(done) != 0) {
+        if ((pairs & COH_CORR_DONE_MASK) == 0 && coh_ldar(done) == done_val) {
             break;
         }
         if (coh_wait_tick(&w, b, env, res) != COH_WAIT_OK) {
             break;
         }
     }
-    coh_st(my_strad, straddles);
+    coh_st(my_strad, coh_tagged(tag, st.straddles));
     res->pairs = pairs;
-    res->straddles = straddles;
+    res->straddles = st.straddles;
 }
 
 /* ------------------------------------------------------------------------

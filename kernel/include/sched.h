@@ -12,6 +12,7 @@
 #include "task.h"
 #include "smp.h"
 #include "config.h"
+#include "sched_diag.h"     /* sched_diag_* externs, matched to sched.c (#1193) */
 
 /*
  * Per-CPU run queue.

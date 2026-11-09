@@ -72,6 +72,7 @@ struct coh_summary {
     uint64_t forbidden[COH_PATTERN_COUNT];      /* totals per pattern */
     uint64_t timeouts[COH_PATTERN_COUNT];
     uint32_t p4_weak_rows;                      /* P4 rows with a 0-straddle reader */
+    uint32_t mp_weak_rows;                      /* P1/P2/S1 rows whose reader observed nothing */
     uint64_t p4_min_straddles;                  /* fewest straddles of any P4 reader */
     uint64_t p4_target;                         /* straddle target this run used */
     /* S1 / S2 relaxed outcomes per ordered pair [a][b], for the SENS lines. */
@@ -90,6 +91,8 @@ enum coh_inject {
     COH_INJECT_P4_DESCENDING,       /* P4 writer stores descending values */
     COH_INJECT_P4_NO_WRITES,        /* P4 writer makes no writes: every row weak */
     COH_INJECT_P6_SUM_OFFSET,       /* P6 sum starts at 1 */
+    COH_INJECT_MP_STALE_FLAG,       /* P1/P2/S1: flag and data preloaded with another
+                                     * row's final values, writer silent */
     COH_INJECT_COUNT
 };
 
@@ -97,6 +100,8 @@ struct coh_run_opts {
     uint32_t scale;                 /* divides the spec counts; 0 means 1 */
     uint32_t patterns;              /* COH_PAT_BIT() mask; 0 means COH_PAT_ALL */
     enum coh_inject inject;
+    uint32_t timeout_ms;            /* no-progress budget; 0 means the spec's 1 s */
+    uint64_t p4_target;             /* P4 straddle target; 0 means coherency_p4_target(scale) */
 };
 
 enum coh_neg_control {
@@ -188,7 +193,8 @@ void coherency_regs_print(coh_out_fn out, const struct coh_cpu_regs regs[MAX_CPU
                           uint32_t ncpus);
 
 /* True when a row with these counts fails the board. S1 and S2 never
- * fail; a P4 row also fails when @weak (a reader saw no straddle). */
+ * fail; a P1, P2 or P4 row also fails when @weak (an MP reader observed
+ * no write in progress, or a P4 reader saw no straddle). */
 bool coherency_row_fails(enum coh_pattern p, uint64_t forbidden, uint64_t timeouts, bool weak);
 
 /* P4 straddle target at @scale (COH_P4_STRADDLE_TARGET / scale, floor 1). */
