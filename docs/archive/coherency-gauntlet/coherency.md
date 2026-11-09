@@ -38,7 +38,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
-| C3 | Boot-sequence audit and cacheable build | hardware stage on c3-hw-1193 @ 10f8688e, both boards | 0 |
+| C3 | Boot-sequence audit and cacheable build | Pi 5 hardware complete (05f86132); Jetson running; critic round 1 started on Pi 5 | 1 |
 | C4 | Decision, ADR 0006, draft PR | removal branch prepared ahead of the decision (contingent): coherency-remove-nc-axis @ 072bd707, measuring on both boards | 0 |
 
 ### Record check (git history, times -0700)
@@ -360,6 +360,19 @@ Boards: jetson-nano-2 and pi-5-1 only.
   12934 / 17958 us, median 13021 (5-run medians: NC 15715, NC_AXIS=OFF
   14550). bench smp complete x3. About 2 us of every Pi 5 context switch was
   CPU-to-CPU cache maintenance on memory the hardware keeps coherent.
+
+### C3 Pi 5, final (builder report, critic running)
+
+- Every rev 3 configuration: litmus 0 forbidden, 0 timeouts, 0 weak; S2 0
+  on every pair (P3 not sensitive in SLM-OS on Pi 5; P2 sensitive on 12/12).
+- Removal 072bd707: integration 16/16, coherency suite 26/26, nc_axis 7/7
+  (test kernel at f546a126), full suite the same 18 #1109 failures as the
+  NC baseline, boots 10/10. Stealing medians of 5: removal 13021 us,
+  NC_AXIS=OFF 14550, NC 15715.
+- Boot attempts after the rev 3 fix: 41, all reached the shell (33 with a
+  full log, 8 without), 0 partial, 0 silent. The #1195 rig was far healthier
+  than earlier in the night.
+- Card restored at 06:18 UTC; pi-5-1 ON at the shell on its original kernel.
 
 ### Lab notes
 
