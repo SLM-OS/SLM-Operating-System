@@ -28,17 +28,31 @@ enum coh_pattern {
     COH_P4,         /* CoRR */
     COH_P5,         /* ping-pong */
     COH_P6,         /* atomic sum */
-    COH_S1,         /* MP+none, sensitivity only: reported, never judged */
+    COH_S1,         /* MP+none, sensitivity for P2: reported, never judged */
+    COH_S2,         /* SB+none, sensitivity for P3: reported, never judged */
     COH_PATTERN_COUNT
 };
 
+/* Bit for @p in struct coh_run_opts.patterns. */
+#define COH_PAT_BIT(p)          (1u << (unsigned)(p))
+#define COH_PAT_ALL             ((1u << (unsigned)COH_PATTERN_COUNT) - 1u)
+
 /* Spec iteration counts (scale 1). `coherency litmus <scale>` divides. */
-#define COH_ITERS_MP            1000000ull  /* P1, P2, P4, S1 per pair */
-#define COH_ITERS_ROUNDS        100000ull   /* P3, P5 rounds per pair */
+#define COH_ITERS_MP            1000000ull  /* P1, P2, S1 per pair; P4 minimum writes */
+#define COH_ITERS_ROUNDS        100000ull   /* P3, P5, S2 rounds per pair */
 #define COH_ITERS_SUM           1000000ull  /* P6 per CPU */
 #define COH_ITERS_NEG           100000ull   /* negative-control P2 / P4 */
 #define COH_MIN_ITERS           16ull
 #define COH_MAX_SCALE           1000000u
+
+/*
+ * P4 coverage (spec revision 2): after its minimum writes the P4 writer
+ * keeps going until every reader has COH_P4_STRADDLE_TARGET straddles or
+ * COH_P4_BUDGET_MS have passed. A scaled run divides the target by the
+ * scale too (floor 1); the budget stays 2 s.
+ */
+#define COH_P4_STRADDLE_TARGET  100000ull
+#define COH_P4_BUDGET_MS        2000u
 
 /* No-progress budget (spec: 1 s) and the start-barrier budget, which
  * also covers the time a worker task needs to be scheduled. */
@@ -54,9 +68,35 @@ enum coh_pattern {
 
 struct coh_summary {
     uint32_t rows;                              /* rows printed */
-    uint32_t failed_rows;                       /* judged rows with forbidden or timeouts */
+    uint32_t failed_rows;                       /* judged rows that failed */
     uint64_t forbidden[COH_PATTERN_COUNT];      /* totals per pattern */
     uint64_t timeouts[COH_PATTERN_COUNT];
+    uint32_t p4_weak_rows;                      /* P4 rows with a 0-straddle reader */
+    uint64_t p4_min_straddles;                  /* fewest straddles of any P4 reader */
+    uint64_t p4_target;                         /* straddle target this run used */
+    /* S1 / S2 relaxed outcomes per ordered pair [a][b], for the SENS lines. */
+    uint64_t s1_pair[MAX_CPUS][MAX_CPUS];
+    uint64_t s2_pair[MAX_CPUS][MAX_CPUS];
+};
+
+/*
+ * Self-test fault injection (kernel/tests/test_coherency.c). Each one
+ * replaces a role with a fake or corrupts the start state so that a known
+ * checker must count the fault and the run must end in FAIL.
+ */
+enum coh_inject {
+    COH_INJECT_NONE = 0,
+    COH_INJECT_P3_STALE_PARTNER,    /* P3 T1 never stores y and reports x as r - 1 */
+    COH_INJECT_P4_DESCENDING,       /* P4 writer stores descending values */
+    COH_INJECT_P4_NO_WRITES,        /* P4 writer makes no writes: every row weak */
+    COH_INJECT_P6_SUM_OFFSET,       /* P6 sum starts at 1 */
+    COH_INJECT_COUNT
+};
+
+struct coh_run_opts {
+    uint32_t scale;                 /* divides the spec counts; 0 means 1 */
+    uint32_t patterns;              /* COH_PAT_BIT() mask; 0 means COH_PAT_ALL */
+    enum coh_inject inject;
 };
 
 enum coh_neg_control {
@@ -113,12 +153,18 @@ struct coh_cpu_regs {
 };
 
 /*
- * Run P1-P6 and S1 over every ordered pair of online CPUs (P4, P6 over all
- * CPUs) with the spec counts divided by @scale (1 = spec). Prints rows to
- * @out (NULL = silent). Returns 0 on PASS, 1 on FAIL, -1 if the run could
- * not start (busy, a stray worker from an earlier run, or < 2 CPUs).
+ * Run P1-P6, S1 and S2 over every ordered pair of online CPUs (P4, P6 over
+ * all CPUs) with the spec counts divided by @scale (1 = spec). Prints rows
+ * to @out (NULL = silent), then one SENS line per ordered pair and the
+ * verdict. Returns 0 on PASS, 1 on FAIL, -1 if the run could not start
+ * (busy, a stray worker from an earlier run, or < 2 CPUs).
  */
 int coherency_litmus_run(uint32_t scale, coh_out_fn out, struct coh_summary *sum);
+
+/* As coherency_litmus_run, for a subset of patterns and with an optional
+ * fault injected. SENS lines print only when S1 and S2 both ran. */
+int coherency_litmus_run_opts(const struct coh_run_opts *opts, coh_out_fn out,
+                              struct coh_summary *sum);
 
 /*
  * Negative controls, report only: (a) P2 and P4 with the reader on a
@@ -141,8 +187,12 @@ int coherency_regs_collect(struct coh_cpu_regs regs[MAX_CPUS], bool impdef);
 void coherency_regs_print(coh_out_fn out, const struct coh_cpu_regs regs[MAX_CPUS],
                           uint32_t ncpus);
 
-/* True when a row with these counts fails the board (S1 never fails). */
-bool coherency_row_fails(enum coh_pattern p, uint64_t forbidden, uint64_t timeouts);
+/* True when a row with these counts fails the board. S1 and S2 never
+ * fail; a P4 row also fails when @weak (a reader saw no straddle). */
+bool coherency_row_fails(enum coh_pattern p, uint64_t forbidden, uint64_t timeouts, bool weak);
+
+/* P4 straddle target at @scale (COH_P4_STRADDLE_TARGET / scale, floor 1). */
+uint64_t coherency_p4_target(uint32_t scale);
 
 /* Iterations a pattern runs at @scale (spec count / scale, floor 16). */
 uint64_t coherency_iters(enum coh_pattern p, uint32_t scale);
