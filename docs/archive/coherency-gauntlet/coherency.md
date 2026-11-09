@@ -37,8 +37,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
-| C2 | `coherency` verb and litmus suite | hardware done (Jetson f9e4df48, Pi 5 e6da2f1b); critic round 1 running | 1 |
-| C3 | Boot-sequence audit and cacheable build | hardware stage running on c3-hw-1193 @ c2122932 (Pi 5 now, Jetson after C1) | 0 |
+| C2 | `coherency` verb and litmus suite | round 1 FAIL (false-pass flaw); rev 3 suite being built | 1 |
+| C3 | Boot-sequence audit and cacheable build | NC_AXIS=OFF @ c2122932 page-faults at boot (extern mismatch); fix + rev 3 suite in progress | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -87,11 +87,32 @@ Boards: jetson-nano-2 and pi-5-1 only.
   version unrecorded. Spec revision 2 (5e82fdb8) adds S2 and P4 coverage
   counters; the same applies to C2's kernel suite.
 
+- C2 round 1: FAIL. Coherence clause supported (every P row parsed: 0
+  forbidden, 0 timeouts; S1 nonzero on every pair; registers match Linux).
+  Detection clause not supported: MP and CoRR readers return on `f >= n`
+  without checking the value belongs to the row, so a stale reader holding a
+  previous row's final value passes at once. Hardware shows it: Jetson UEFI
+  control (b) reported 13 of 30 P2 rows and 5 of 6 P4 rows as 0/0 at 0 ms
+  through a Non-cacheable alias. Control slots were not initialised, so
+  controls (a)/(b) depended on old DRAM; the run-1 "contamination"
+  explanation was never isolated. Control (c) missed on some cross-cluster
+  pairs, unexplained. The Linux harness shares the reader flaw. Spec
+  revision 3 (021f3041): row nonces in every value, an `observed` progress
+  rule, sentinel + clean to PoC before controls (a)/(b).
+
 ## Failed approaches
 
 - Pi 5 Linux attempts 1 to 3 (console-only result path; then a 20 s settle
   without an SDWire round trip). Cause: rig defect #1195 plus possibly
   earlycon on RP1. Replaced by attempt 4 (round trip + HTTP results).
+- NC_AXIS=OFF at c2122932 on Pi 5 (attempt N1): Data Abort on CPU 0 in
+  `cpu_supervisor_task_entry` reading 0xaaaf0000aaaa, right after "Enabling
+  interrupts", with the NC_AXIS=OFF banner printed and 3/3 secondaries
+  online. Cause: `cpu_supervisor.c:57` declares `sched_diag_idle_loops` as a
+  pointer while `sched.c:399` defines an array under NC_AXIS=OFF; same in
+  `test_integration.c:169, 1066-1071`. A software defect in the switch, not a
+  coherency failure; C3's audit missed cpu_supervisor.c. Fix in progress
+  with a compile-time check.
 
 ## Evidence
 
