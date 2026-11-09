@@ -475,6 +475,15 @@ gate (step 3), together with the rest of the instruction.
   13043): the stealing regression came from the leftover CPU-to-CPU
   maintenance and is gone. bench context 85 / 83 / 84 ns (NC about 5450).
   bench ipc 125 / 112 / 112 ns (NC 128 / 112 / 113). bench smp 5/5 x3.
+- Jetson removal, later runs (builder report 07:40 UTC): kexec boots 7, all
+  reached the shell (4 with captured logs, 3 confirmed by `cpu` 6/6 after
+  an empty capture); series stopped at 7 for time. UEFI-direct: regs 6/6,
+  litmus PASS (S1 1,706,767, S2 7, weak 0), bench stealing 9801 / 6976 /
+  7363 / 9802 / 9802 us (NC UEFI 9831 / 11007 / 7933); CPUs 2 and 3 steal
+  (runs 4-5: 4 tasks, 16 attempts, 4 successes each; runs 1-3 per-CPU lines
+  cut by the capture); on kexec all 5 runs CPU 2/3 executed 1-3 tasks.
+  context 102 / 67 / 66 ns (NC 18008), ipc 154 / 90 / 90 ns, smp 5/5 x3.
+  UEFI boots 3/3 so far. f546a126 test kernel not run on Jetson.
 - Jetson NC_AXIS=OFF priority 1 complete: kexec and UEFI all checks PASS,
   10/10 boots on each path; default build kexec litmus PASS. Removal build
   boots, test kernel and UEFI-direct run in progress.
