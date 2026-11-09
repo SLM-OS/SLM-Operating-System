@@ -38,7 +38,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
 | C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
-| C3 | Boot-sequence audit and cacheable build | audit + switches building (QEMU stage) | 0 |
+| C3 | Boot-sequence audit and cacheable build | QEMU stage done (118c146d switches, a6c2242a fixes); hardware waits for suite rev 2 | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -136,6 +136,31 @@ Boards: jetson-nano-2 and pi-5-1 only.
   ping-pong steps are counted, so the checkers can fail.
 - CLUSTERECTLR_EL1 is S3_0_C15_C3_4 (DSU TRM 100453 11.8), not the
   S3_0_C15_C3_0 the orchestrator first gave (that is CLUSTERCFR_EL1).
+
+### C3 QEMU stage (builder report, critic after hardware)
+
+- Audit `c3-audit.md`, 12 items. D1 (medium): `secondary_mmu_{ttbr,mair,tcr}`
+  are written by CPU 0 with caches on and never cleaned, then read by each
+  secondary with its MMU off (`vmm.c:2097-2100`, `smp.c:775-789`,
+  `smp_boot.S:161-178`); it works only because A76/A78AE execute DC IVAC as
+  DC CIVAC. Fixed with a clean and a test. D2: pre-MMU page tables were
+  cleaned, not invalidated; fixed (DC IVAC, as Linux head.S). D7: the
+  set/way loop is unnecessary and its comment's reasoning is wrong (caches-off
+  loads do not allocate, A76 TRM 7.2.3); kept, `SETWAY_INVAL=OFF` added. D9 is
+  #1194, fixed. Filed: #1196 (Jetson CPU 0 may hold dirty WB lines for the NC
+  block after kexec/UEFI), #1197 (primary caches-off writes never
+  invalidated), #1198 (`mmu_enable` unmasks all of DAIF); D3/D4 on #1128.
+- Switches: `NC_AXIS=OFF` (CPU-shared state cacheable; NC block kept for
+  DMA as `PLATFORM_HAS_NC_REGION`; Pi 5 spinlock CIVAC path removed, 226
+  CIVACs to 0) and `SETWAY_INVAL=OFF`. Default builds object-identical to the
+  base except the new test. Several `#else` branches were QEMU-only shortcuts
+  and were fixed (`sched.c:609`, `sched.c:2617`, `task.c:155`, USB DMA,
+  `bench smp`); `preempt.c` used NC memory with no gate at all.
+- `sched.c` conditionals: 84 before, 84 after (the switch keeps both paths;
+  removal is C4's PR).
+- QEMU: `make test` PASS, x86-64 PASS, check-braces 0, test-build-order
+  PASS; new `test_nc_axis.c` walks live page tables to check where run
+  queues, task table and `current_task` live.
 
 ### Lab notes
 
