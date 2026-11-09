@@ -1701,8 +1701,13 @@ check-emc-rate-path:
 	@python3 scripts/check-emc-rate-path.py kernel
 	@out="$$(bash scripts/tests/test-check-emc-rate-path.sh 2>&1)" || { echo "$$out"; exit 1; }
 
+.PHONY: check-cpu-cache-maint
+check-cpu-cache-maint:
+	@python3 scripts/check-cpu-cache-maint.py
+	@out="$$(bash scripts/tests/test-check-cpu-cache-maint.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path check-cpu-cache-maint test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

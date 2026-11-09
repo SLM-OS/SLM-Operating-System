@@ -234,7 +234,7 @@ void tegra_fan_poll(void)
 static uint32_t fan_task_cpu(void)
 {
     for (uint32_t c = cpu_count; c > 1u; c--) {
-        cache_invalidate(&cpu_data[c - 1u].online);
+        smp_mb();
         if (cpu_data[c - 1u].online) {
             return c - 1u;
         }
