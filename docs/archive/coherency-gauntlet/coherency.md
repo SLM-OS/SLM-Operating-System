@@ -16,6 +16,65 @@ Boards: jetson-nano-2 and pi-5-1 only.
   firmware flashing, C0 and C2 disagree with no source to settle it, or a
   board becomes unreachable.
 
+### Standing instruction from the user (recorded verbatim, 2026-11-09 ~07:35 UTC)
+
+```
+Standing instruction. Do not act on it now. Record it verbatim under
+"## Budget" in docs/archive/coherency-gauntlet/coherency.md on your next
+turn, then continue C3 and C4 as planned. Apply it at the gate named
+below.
+
+Gate: after C3 completes on Jetson and the C4 critic round on the ADR
+passes, and BEFORE opening the draft PR. If the 12 h budget ends first,
+push the rebased branch, state in the log what was and was not re-run,
+and do not open the PR.
+
+main moved: ten #475 follow-up PRs (#1175 through #1192) merged at
+22:55-23:00 PT; origin/main is now 85f51ffd. The branches are based on
+c69438a2. Do this, in order:
+
+1. git fetch origin main. Rebase coherency-remove-nc-axis onto
+   origin/main, then c3-hw-1193 and gauntlet/coherency-1193 (those two
+   merge clean).
+
+2. Exactly two conflicts are expected on coherency-remove-nc-axis;
+   resolve them as follows and report anything beyond them:
+   - Makefile: take the union. Keep -DSLM_REAL_GOLDEN=ON and
+     SLM_REAL_GOLDEN (from #1176); keep the removal of
+     SCHED_DEBUG_NC_TRACE from both the -D list and the bare-name list;
+     the test: target depends on both check-emc-rate-path (from #1175)
+     and check-cpu-cache-maint.
+   - kernel/drivers/tegra_fan.c: keep #include "emc_hold.h", drop
+     #include "cache.h", keep the branch's removal of
+     cache_invalidate(&cpu_data[...].online). Confirm no cache_* call
+     remains in the file.
+
+3. ADR number: docs/adr/0006-gpu-channel-recovery.md landed with #1183.
+   The coherency ADR is 0007. Update every reference: CLAUDE.md (the
+   NC memory line, about line 248), the docstring of
+   scripts/check-cpu-cache-maint.py, the gauntlet log, docs/smp.md,
+   the SMP fact sheet and kernel/CLAUDE.md.
+
+4. Re-validate on the rebased branch before anything else: /ci (it now
+   includes the real-model goldens and check-emc-rate-path), then
+   boot_test --count 10 on both boards with Jetson on both boot paths,
+   plus test_coherency, the 20 integration tests, bench smp and bench
+   stealing. Reason: #1175 runs emc_hold_runtime_check() inside the
+   fan task on the last CPU and #1177 holds a new lock across GPU VM
+   writes with IRQs off; the branch's hardware evidence predates both.
+   Add the results as new rows beside the pre-rebase rows in the log;
+   do not overwrite the old rows. A changed measurement is a critic
+   round, not a footnote.
+
+5. Only then open the draft PR against origin/main. Do not merge to
+   main and do not touch the ten merged PRs.
+```
+
+Orchestrator note: the new ADR file is created as
+`docs/adr/0007-cross-cpu-coherency.md` from the start, since 0006 is taken
+on main; the existing 0006 references on the branches are renumbered at the
+gate (step 3), together with the rest of the instruction.
+
 ## State found at start (main @ c69438a2)
 
 - Tracking issue #1193 opened 22:15 UTC.
