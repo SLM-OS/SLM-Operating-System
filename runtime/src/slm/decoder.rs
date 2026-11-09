@@ -585,14 +585,72 @@ fn step_many(
             session.gpu = Some(prog);
         }
         Err(why) => {
+            let recovered = prog.channel_recovered();
             let history = core::mem::take(&mut prog.history);
+            let runs = core::mem::take(&mut prog.runs);
             // Drop closes the program: unmaps the arena, frees it.
             drop(prog);
+            if recovered && resume_on_gpu(session, &history, &runs, tokens, out) {
+                return;
+            }
             if fall_back_to_cpu(session, why, &history, scratch, out, cfg) {
                 run_on_cpu(session, tokens, scratch, out);
             }
         }
     }
+}
+
+/// After a step timed out, the kernel recovered the channel (#1171): build
+/// the program again and replay the session's steps on it, the same rows
+/// in the same order, so the new KV cache holds exactly what the dead one
+/// did; then run `tokens`. The output is then what an uninterrupted run
+/// gives. False if any of it fails, with nothing kept: the caller replays
+/// on the CPU instead.
+fn resume_on_gpu(
+    session: &mut Session,
+    history: &[u32],
+    runs: &[u32],
+    tokens: &[u32],
+    out: &mut Vec<f32>,
+) -> bool {
+    let t0 = crate::kernel_ffi::get_time_ns();
+    if history.len() != session.kv.len || runs.iter().map(|&r| r as usize).sum::<usize>() != history.len() {
+        return false;
+    }
+    let mut prog = match session.build_program() {
+        Some(Ok(p)) => p,
+        _ => return false,
+    };
+    prog.profile = session.telemetry.profile_on();
+    let mut pos = 0usize;
+    for &rows in runs {
+        let end = pos + rows as usize;
+        // No lock held: the wait needs IRQs on (runtime/CLAUDE.md, #1093).
+        if prog.run(&history[pos..end], pos, out).is_err() {
+            return false;
+        }
+        pos = end;
+    }
+    if prog.run(tokens, pos, out).is_err() {
+        return false;
+    }
+    let st = prog.last_stats;
+    session.telemetry.gpu_step(st.gpu_ns, st.wait_us, st.evict_us);
+    session.kv.len = pos + tokens.len();
+    session.gpu_tokens = session.gpu_tokens.saturating_add(tokens.len() as u64);
+    session.gpu_us_per_token = prog.gpu_us_per_token();
+    session.gpu = Some(prog);
+    let mut line = alloc::string::String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut line,
+        format_args!(
+            "[slm] GPU step timed out; the channel was recovered, the program rebuilt and {} tokens replayed on the GPU in {} ms\n\0",
+            history.len(),
+            crate::kernel_ffi::get_time_ns().wrapping_sub(t0) / 1_000_000
+        ),
+    );
+    crate::kernel_ffi::print(line.as_bytes());
+    true
 }
 
 fn run_on_cpu(session: &mut Session, tokens: &[u32], scratch: &mut ForwardScratch, out: &mut Vec<f32>) {

@@ -109,6 +109,10 @@ struct slm_prog_run_stats {
 #define SLM_PROG_ERR_EVICT       (-9)
 #define SLM_PROG_ERR_IRQS_OFF    (-10)
 #define SLM_PROG_ERR_BUSY        (-11) /* slm_prog lock not free within a step timeout */
+/* The step timed out (or its L2 evict failed) and the channel was then
+ * recovered (#1171): this session is dead, its memory is safe to free,
+ * and a new program can be built on the same channel. */
+#define SLM_PROG_ERR_RECOVERED   (-12)
 
 /* Bounds a wait no step on this hardware should come near: the ADR 0001
  * bar is 23 ms per token and 74 ms for a 64-token prefill. */
@@ -119,7 +123,8 @@ struct slm_prog_run_stats {
  * Every call takes one lock, so two sessions (the shell and slm-runner)
  * can use the program, and its shared tables and VM, at the same time.
  * The same lock serializes the other writers of the VM (slm_prog_vm_lock
- * below). A call that can't get it within SLM_PROG_STEP_TIMEOUT_MS + 1 s,
+ * below). A call that can't get it within 9 s (SLM_PROG_STEP_TIMEOUT_MS,
+ * 3 s for the channel recovery and 1 s of margin, slm_prog.c),
  * or at all with IRQs masked, returns SLM_PROG_ERR_BUSY. */
 
 /* 1 if this boot has a channel programs can run on. */
@@ -219,7 +224,7 @@ void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz);
  * caller with IRQs masked (every dispatch-lock holder is one) makes one
  * try and gets SLM_PROG_ERR_BUSY, so it can't wait for a holder that
  * waits for the dispatch lock. With IRQs on, a waiter yields, bounded as
- * for the program lock (a step timeout plus a second). A holder must not
+ * for the program lock (9 s). A holder must not
  * call into slm_prog (the lock is not recursive) and must release it with
  * slm_prog_vm_unlock, which also finishes any session close that came in
  * meanwhile.
@@ -292,7 +297,16 @@ struct slm_prog_backend {
     bool (*irqs_enabled)(void);
     /* Optional: raise memory clocks for compute, once per boot. */
     void (*prepare_clocks)(void);
+    /* Optional (#1171): after a timed-out step or a failed evict, bring
+     * the channel back (preempt / engine reset, context reload, probe).
+     * `t_timeout_us` is when the failure was seen (now_us). Runs with
+     * this file's lock held and IRQs on. 0: nothing the dead program
+     * queued can run any more and L2 was evicted, so its memory may be
+     * freed. Absent or non-zero: the channel may still run it. */
+    int (*recover)(uint32_t why, uint64_t t_timeout_us);
 };
+#define SLM_PROG_RECOVER_TIMEOUT 1u     /* `why` for recover */
+#define SLM_PROG_RECOVER_EVICT   2u
 
 /* Test hook; the Jetson backend is picked automatically on a cold boot.
  * NULL restores that. */

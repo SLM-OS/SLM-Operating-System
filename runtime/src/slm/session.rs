@@ -302,7 +302,7 @@ impl Session {
     pub fn reset(&mut self) {
         self.kv.clear();
         if let Some(p) = self.gpu.as_mut() {
-            p.history.clear();
+            p.forget_history();
         }
         self.stop_flag.store(false, Ordering::Release);
         self.pending_token = None;
@@ -358,22 +358,7 @@ impl Session {
             self.path = ForwardPath::Cpu;
             return Ok(());
         }
-        let vocab = self.vocab_size;
-        let ctx = self.max_ctx;
-        let head_dim = self.arch.head_dim as usize;
-        let rope = RopeTable::new(
-            head_dim,
-            ctx,
-            self.arch.rope_freq_base,
-            RopePairing::for_arch(self.arch.architecture),
-        );
-        // Read and pin the model under the registry lock, build without it:
-        // the build may wait for another session's GPU step (#475 W-B).
-        let built = registry::with_loaded_slm(self.model_handle as usize, |slm| {
-            GpuProgram::prepare(slm, vocab)
-        })
-        .map(|prep| prep.and_then(|i| GpuProgram::build_prepared(i, ctx, &rope.cos_sin)));
-        match built {
+        match self.build_program() {
             Some(Ok(p)) => {
                 self.kv.release_storage();
                 self.gpu = Some(p);
@@ -400,6 +385,26 @@ impl Session {
             }
             None => Err("model not loaded"),
         }
+    }
+
+    /// A new GPU program for this session's model and context, empty: what
+    /// `--gpu auto|on` builds, and what the decoder builds again after the
+    /// channel recovered from a step timeout (#1171). `None` when the model
+    /// is no longer loaded. Takes no lock but the registry's, briefly.
+    pub fn build_program(&self) -> Option<Result<Box<GpuProgram>, BuildError>> {
+        let vocab = self.vocab_size;
+        let ctx = self.max_ctx;
+        let head_dim = self.arch.head_dim as usize;
+        let rope = RopeTable::new(
+            head_dim,
+            ctx,
+            self.arch.rope_freq_base,
+            RopePairing::for_arch(self.arch.architecture),
+        );
+        // Read and pin the model under the registry lock, build without it:
+        // the build may wait for another session's GPU step (#475 W-B).
+        registry::with_loaded_slm(self.model_handle as usize, |slm| GpuProgram::prepare(slm, vocab))
+            .map(|prep| prep.and_then(|i| GpuProgram::build_prepared(i, ctx, &rope.cos_sin)))
     }
 
     /// Request cooperative cancellation. The decoder loop notices before
@@ -530,6 +535,20 @@ enum Slot {
 
 const EMPTY_SLOT: Slot = Slot::Empty;
 
+/// Whether `slot` holds the session opened as `seq`, or any session for
+/// `seq == 0`. The slm-runner passes the [`Session::open_seq`] it saw at
+/// open, so a session a shell closed and reopened in the same slot is not
+/// taken for its own. Checked under the table lock together with the use,
+/// which closes the window #475 W8's check-then-use left (#1171).
+fn slot_is(slot: &Slot, seq: u64) -> bool {
+    seq == 0
+        || match slot {
+            Slot::Ready(s) => s.open_seq == seq,
+            Slot::Leased(l) => l.snapshot.open_seq == seq,
+            Slot::Empty => false,
+        }
+}
+
 static SESSION_LOCK: AtomicBool = AtomicBool::new(false);
 /// Next [`Session::open_seq`]. Starts at 1: 0 means "no session".
 static NEXT_OPEN_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -577,12 +596,20 @@ pub fn insert(mut session: Session) -> Option<usize> {
 /// Free the slot at `index` and return the session, so the caller can
 /// run any extra teardown.
 pub fn remove(index: usize) -> Result<Session, SlotError> {
+    remove_seq(index, 0)
+}
+
+/// [`remove`], only if the slot holds the session opened as `seq` (0: any).
+pub fn remove_seq(index: usize, seq: u64) -> Result<Session, SlotError> {
     if index >= SLM_MAX_SESSIONS {
         return Err(SlotError::Empty);
     }
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
+    if !slot_is(&slots[index], seq) {
+        return Err(SlotError::Empty);
+    }
     match core::mem::replace(&mut slots[index], Slot::Empty) {
         Slot::Ready(session) => Ok(session),
         Slot::Empty => Err(SlotError::Empty),
@@ -600,6 +627,14 @@ pub fn try_with_session<R, F>(index: usize, f: F) -> Result<R, SlotError>
 where
     F: FnOnce(&mut Session) -> R,
 {
+    try_with_session_seq(index, 0, f)
+}
+
+/// [`try_with_session`], only on the session opened as `seq` (0: any).
+pub fn try_with_session_seq<R, F>(index: usize, seq: u64, f: F) -> Result<R, SlotError>
+where
+    F: FnOnce(&mut Session) -> R,
+{
     if index >= SLM_MAX_SESSIONS {
         return Err(SlotError::Empty);
     }
@@ -607,6 +642,9 @@ where
     // SAFETY: SpinGuard held — exclusive access to SESSIONS for the
     // duration of `f`.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
+    if !slot_is(&slots[index], seq) {
+        return Err(SlotError::Empty);
+    }
     match &mut slots[index] {
         Slot::Ready(session) => Ok(f(session)),
         Slot::Empty => Err(SlotError::Empty),
@@ -658,12 +696,20 @@ impl Drop for SessionLease {
 
 /// Take the session at `index` out of the table for a prompt.
 pub fn checkout(index: usize) -> Result<SessionLease, SlotError> {
+    checkout_seq(index, 0)
+}
+
+/// [`checkout`], only the session opened as `seq` (0: any).
+pub fn checkout_seq(index: usize, seq: u64) -> Result<SessionLease, SlotError> {
     if index >= SLM_MAX_SESSIONS {
         return Err(SlotError::Empty);
     }
     let _g = SpinGuard::new();
     // SAFETY: SpinGuard held.
     let slots = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
+    if !slot_is(&slots[index], seq) {
+        return Err(SlotError::Empty);
+    }
     match core::mem::replace(&mut slots[index], Slot::Empty) {
         Slot::Ready(session) => {
             let mut snapshot = session.snapshot();
@@ -688,6 +734,11 @@ pub fn checkout(index: usize) -> Result<SessionLease, SlotError> {
 /// running; stopping an idle session changes nothing, so a stale stop
 /// can't cancel the next prompt.
 pub fn request_stop(index: usize) -> Result<bool, SlotError> {
+    request_stop_seq(index, 0)
+}
+
+/// [`request_stop`], only to the session opened as `seq` (0: any).
+pub fn request_stop_seq(index: usize, seq: u64) -> Result<bool, SlotError> {
     if index >= SLM_MAX_SESSIONS {
         return Err(SlotError::Empty);
     }
@@ -695,6 +746,9 @@ pub fn request_stop(index: usize) -> Result<bool, SlotError> {
     // SAFETY: SpinGuard held; the flag itself is atomic and the decoder
     // reads it without this lock.
     let slots = unsafe { &*core::ptr::addr_of!(SESSIONS) };
+    if !slot_is(&slots[index], seq) {
+        return Err(SlotError::Empty);
+    }
     match &slots[index] {
         Slot::Leased(leased) => {
             leased.stop.store(true, Ordering::Release);
@@ -946,6 +1000,39 @@ mod tests {
         assert_eq!(again, idx, "same slot");
         assert_ne!(open_seq(idx), first, "a different session");
         assert_eq!(rust_slm_session_open_seq(99), 0);
+    }
+
+    /// #1171 (the race #475 W8 left): the slm-runner checked a session's
+    /// open sequence, then used it in a second call, so a shell could close
+    /// it and open another in the same slot in between. The `_seq` calls
+    /// check and act under one lock: a stale sequence touches nothing.
+    #[test]
+    fn seq_checked_calls_leave_a_reused_slot_alone() {
+        let _serial = TestSerialGuard::new();
+        reset_registry();
+        reset_for_tests();
+        let idx = insert(make_session()).expect("insert");
+        let stale = open_seq(idx);
+        remove(idx).expect("remove");
+        let again = insert(make_session()).expect("insert again");
+        assert_eq!(again, idx, "same slot");
+        let now = open_seq(idx);
+        assert_ne!(now, stale);
+
+        assert!(matches!(checkout_seq(idx, stale), Err(SlotError::Empty)));
+        assert!(matches!(try_with_session_seq(idx, stale, |_| ()), Err(SlotError::Empty)));
+        assert!(matches!(request_stop_seq(idx, stale), Err(SlotError::Empty)));
+        assert!(matches!(remove_seq(idx, stale), Err(SlotError::Empty)));
+        assert_eq!(open_seq(idx), now, "still open");
+        {
+            let _lease = checkout_seq(idx, now).expect("its own number");
+            assert!(matches!(request_stop_seq(idx, stale), Err(SlotError::Empty)));
+            assert_eq!(request_stop_seq(idx, now).ok(), Some(true));
+        }
+        assert!(try_with_session_seq(idx, now, |_| ()).is_ok());
+        assert!(try_with_session_seq(idx, 0, |_| ()).is_ok(), "0 means any");
+        remove_seq(idx, now).expect("remove its own");
+        assert_eq!(open_seq(idx), 0);
     }
 
     /// The lock must be free while a prompt holds the session, or `slm

@@ -657,6 +657,13 @@ static struct {
     int evict_rc;
     int tlb_rc;             /* what the TLB invalidate returns */
     bool irqs_off;
+    /* recover (#1171): its return code, calls, last `why`, and the call
+     * order against dump_fault (a sequence number for each). */
+    int recover_rc;
+    unsigned recovers;
+    uint32_t recover_why;
+    unsigned seq, dump_seq, recover_seq;
+    bool hang_once;         /* FAKE_HANG for the first submit only */
     bool scattered;
     bool no_q6k;
     bool no_b64;
@@ -701,6 +708,9 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
         g_fk.late_payload = payload;
         if (g_fk.mode == FAKE_SLOW_SUBMIT) g_fk.now += 4900000u;
     }
+    if (g_fk.mode == FAKE_HANG && g_fk.hang_once && g_fk.submits > 1u) {
+        g_fk.mode = FAKE_COMPLETE;
+    }
     if (g_fk.mode == FAKE_COMPLETE) {
         *(volatile uint32_t *)slot = payload;
         /* Timestamps 50 us apart. */
@@ -718,7 +728,8 @@ static int fk_submit(uint64_t gp, const volatile void *slot, uint32_t payload, u
 static void fk_finished(void)
 {
     g_fk.finishes++;
-    g_fk.in_flight--;
+    /* As the real flight flag: a recovery that failed already ended it. */
+    if (g_fk.in_flight > 0) g_fk.in_flight--;
 }
 
 static int fk_evict(void)
@@ -763,6 +774,18 @@ static void fk_dump(const char *why)
 {
     (void)why;
     g_fk.dumps++;
+    g_fk.dump_seq = ++g_fk.seq;
+}
+
+/* The real one (slm_ffi.c) ends the program's flight, success or not. */
+static int fk_recover(uint32_t why, uint64_t t_us)
+{
+    (void)t_us;
+    g_fk.recovers++;
+    g_fk.recover_why = why;
+    g_fk.recover_seq = ++g_fk.seq;
+    if (g_fk.in_flight > 0) g_fk.in_flight--;
+    return g_fk.recover_rc;
 }
 
 static bool fk_irqs(void)
@@ -776,12 +799,14 @@ static const struct slm_prog_backend g_fake = {
     .virt_to_phys = fk_v2p, .is_contiguous = fk_contig,
     .submit = fk_submit, .finished = fk_finished, .l2_evict = fk_evict,
     .now_us = fk_now, .relax = fk_relax, .dump_fault = fk_dump, .irqs_enabled = fk_irqs,
+    .recover = fk_recover,
 };
 
 static void fake_up(void)
 {
     g_alloc_hook = NULL;
     memset(&g_fk, 0, sizeof(g_fk));
+    g_fk.recover_rc = -1;       /* as when the channel can't be recovered */
     g_fk.nested_run = -1;
     g_fk.nested_close = -1;
     g_fk.nested_clean = -1;
@@ -1176,6 +1201,87 @@ static void test_dead_session_leaks_arena(void)
     TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_EVICT, slm_prog_run(o.handle, 0, &st));
     slm_prog_close(o.handle);
     TEST_ASSERT_EQUAL_UINT32(2, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* #1171: a timed-out step whose channel the backend recovers. The failure
+ * state is dumped first, then the channel recovered (which ends the
+ * flight: finished() is not called, or another dispatcher could queue
+ * behind the hung program in between). The session is dead, but nothing
+ * of it can run any more, so its arena and VA come back on close, and the
+ * next session runs on the same channel. Before #1171 every timeout
+ * leaked the arena and the channel stayed wedged until a reboot. */
+static void test_timeout_with_recovery_frees_and_runs_again(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    open_built(w, &o);
+    uint64_t dva = o.data_gpu_va;
+    g_fk.mode = FAKE_HANG;
+    g_fk.recover_rc = 0;
+    struct slm_prog_run_stats st;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_RECOVERED, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(SLM_PROG_RECOVER_TIMEOUT, g_fk.recover_why);
+    TEST_ASSERT_TRUE(g_fk.dump_seq < g_fk.recover_seq);
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.finishes);
+    TEST_ASSERT_EQUAL_INT(0, g_fk.in_flight);
+    TEST_ASSERT_EQUAL_UINT32(0, g_fk.evicts);
+    /* Dead all the same: its program is half-run. */
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_DEAD, slm_prog_run(o.handle, 0, &st));
+    size_t before = pmm_get_free_pages();
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    TEST_ASSERT_TRUE(pmm_get_free_pages() >= before + 300u * 1024u / 4096u);
+    TEST_ASSERT_EQUAL_HEX64(0, ga10b_vm_lookup(&g_pm_ops, &g_vm, dva));
+    /* The next session gets the arena VA back and runs. */
+    g_fk.mode = FAKE_COMPLETE;
+    struct slm_prog_open_out o2;
+    open_built(w, &o2);
+    TEST_ASSERT_EQUAL_HEX64(dva, o2.data_gpu_va);
+    TEST_ASSERT_EQUAL_INT(0, slm_prog_run(o2.handle, 0, &st));
+    slm_prog_close(o2.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    fake_down();
+    pmm_free_pages(w, wp);
+}
+
+/* A failed L2 evict leaves dirty lines of the step in L2: recover too. A
+ * recovery that fails keeps the old behaviour: TIMEOUT / EVICT, finished,
+ * arena leaked. */
+static void test_recovery_after_evict_and_when_it_fails(void)
+{
+    fake_up();
+    uint32_t wp;
+    void *w = alloc_weights(&wp);
+    TEST_ASSERT_NOT_NULL(w);
+    struct slm_prog_open_out o;
+    struct slm_prog_run_stats st;
+    open_built(w, &o);
+    g_fk.evict_rc = -1;
+    g_fk.recover_rc = 0;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_RECOVERED, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PROG_RECOVER_EVICT, g_fk.recover_why);
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+
+    g_fk.evict_rc = 0;
+    g_fk.recover_rc = -1;
+    g_fk.recovers = 0;
+    g_fk.finishes = 0;
+    open_built(w, &o);
+    g_fk.mode = FAKE_HANG;
+    TEST_ASSERT_EQUAL_INT(SLM_PROG_ERR_TIMEOUT, slm_prog_run(o.handle, 0, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.finishes);
+    TEST_ASSERT_EQUAL_INT(0, g_fk.in_flight);
+    slm_prog_close(o.handle);
+    TEST_ASSERT_EQUAL_UINT32(1, slm_prog_leaked_sessions());
     fake_down();
     pmm_free_pages(w, wp);
 }
@@ -1638,7 +1744,7 @@ static void test_deferred_close_keeps_weights_mapped(void)
     TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(wb - 4096, 4096u));
     TEST_ASSERT_EQUAL_INT(0, slm_prog_weights_mapped(w, 0u));
 
-    /* Held past the close's 6 s wait. */
+    /* Held past the close's 9 s wait. */
     TEST_ASSERT_EQUAL_INT(0, slm_prog_vm_lock());
     uint64_t t0 = g_fk.now;
     unsigned tlbs = g_fk.tlbs;
@@ -1807,6 +1913,45 @@ static void test_e2e_hang_falls_back_to_cpu(void)
     fake_down();
 }
 
+/* #1171 through the production FFI: the first step hangs and the backend
+ * recovers the channel. The decoder builds the program again and the
+ * session stays on the GPU: two opens, the dead one closed without a leak,
+ * no CPU tokens. (The fake GPU computes nothing, so the tokens themselves
+ * are checked by the Rust test with the software GPU.) */
+static void test_e2e_hang_recovers_and_stays_on_the_gpu(void)
+{
+    uint8_t text[64];
+    int32_t text_len = rust_slm_golden_record(slm_golden_greedy_start, greedy_len(),
+                                              "prompt.text", text, sizeof(text));
+    TEST_ASSERT_TRUE(text_len > 0);
+    fake_up();
+    int idx = -1;
+    tiny_load(&idx);
+    int32_t s = -1;
+    open_greedy(idx, &s);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_configure((uint32_t)s, SLM_GPU_ON, 4u));
+    g_fk.mode = FAKE_HANG;
+    g_fk.hang_once = true;
+    g_fk.recover_rc = 0;
+    collected_t got = { .count = 0 };
+    int32_t rc = rust_slm_prompt_ex((uint32_t)s, text, (size_t)text_len, SLM_PROMPT_RAW,
+                                    4u, collect_cb, NULL, &got);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.recovers);
+    TEST_ASSERT_EQUAL_UINT32(1, g_fk.dumps);
+    TEST_ASSERT_TRUE(g_fk.submits >= 2u);
+    TEST_ASSERT_EQUAL_UINT32(0, slm_prog_leaked_sessions());
+    SlmSessionGpuC g;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_gpu_info((uint32_t)s, &g));
+    TEST_ASSERT_EQUAL_UINT32(SLM_PATH_PROGRAM, g.path);
+    TEST_ASSERT_EQUAL_UINT64(0, g.cpu_tokens);
+    TEST_ASSERT_TRUE(g.gpu_tokens > 0u);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_session_close((uint32_t)s));
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+    rust_slm_test_reset();
+    fake_down();
+}
+
 /* #1159 through the production FFI: an idle GPU session is closed while
  * another VM writer holds the lock past the close's wait. The close is
  * deferred and the program's pin is dropped, but its weights PTEs stay
@@ -1882,6 +2027,8 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_run_timeout_is_bounded);
     RUN_TEST(test_run_other_failures);
     RUN_TEST(test_dead_session_leaks_arena);
+    RUN_TEST(test_timeout_with_recovery_frees_and_runs_again);
+    RUN_TEST(test_recovery_after_evict_and_when_it_fails);
     RUN_TEST(test_two_sessions_never_overlap);
     RUN_TEST(test_cache_ops_never_skipped_while_another_step_runs);
     RUN_TEST(test_profile_reads_without_the_lock);
@@ -1896,6 +2043,7 @@ int test_suite_slm_prog(void)
     RUN_TEST(test_tlb_failure_on_close_keeps_weights_mapped);
     RUN_TEST(test_e2e_build);
     RUN_TEST(test_e2e_hang_falls_back_to_cpu);
+    RUN_TEST(test_e2e_hang_recovers_and_stays_on_the_gpu);
     RUN_TEST(test_e2e_unload_waits_for_a_deferred_close);
     RUN_TEST(test_e2e_golden_reports_divergence);
     return UnityEnd();

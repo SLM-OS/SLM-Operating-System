@@ -1254,6 +1254,10 @@ int slm_gpu_run_mnist(void *logits_bytes_out);
  * the other failures it does not count toward the #552 circuit
  * breaker. (slm_gpu_set_input keeps returning -2 for the same case.) */
 #define SLM_GPU_ERR_INPUT_TOO_LARGE  (-20)
+/* The cold channel is down: a GPU program is past its deadline, a
+ * recovery is running, or recovery failed (#1171). Nothing reached the
+ * GPU and the breaker doesn't count it; the caller takes its CPU path. */
+#define SLM_GPU_ERR_CHANNEL_DOWN     (-21)
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap);
 int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap);
 int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
@@ -1679,14 +1683,19 @@ extern int slm_runtime_get_tier(uint32_t op_kind);
  * SIMT, FP16)` through the inherited GA10B channel, then copies
  * the GPU output back to `out_cpu_out`.
  *
- * Returns 0 on success, -1 on:
+ * Returns 0 on success, SLM_GPU_ERR_CHANNEL_DOWN when the cold
+ * channel is turning dispatchers away (a program past its deadline, a
+ * recovery in progress or a failed one, #1171), -1 on:
  *   - `nvgpu inherit / channel / oplib stage` not yet run (no
  *     handoff, or shader_size below OPLIB_POOL_MIN_BYTES)
  *   - row dims that don't fit in a 64 KB scratch slot
  *   - GPU dispatch failure (timeout, gr_exception, etc.)
+ * Every slm_runtime_dispatch_*_simt below and slm_runtime_stage_weight
+ * return SLM_GPU_ERR_CHANNEL_DOWN the same way.
  *
- * The Rust caller treats any -1 as `BackendError::NotAvailable`
- * and falls back to the existing CPU NEON path.
+ * The Rust caller treats any non-zero return as
+ * `BackendError::NotAvailable` and falls back to the existing CPU NEON
+ * path.
  *
  * Jetson-only. On other platforms returns -1 without side effects.
  */
@@ -1696,6 +1705,11 @@ extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                               uint32_t n_rows,
                                               uint32_t n,
                                               uint32_t eps_bits);
+
+/* Copy `bytes` of operator-library scratch slot `slot` (0: x, 1: gamma,
+ * 2: output of the last RMSNorm) out of DRAM, for `nvgpu cold race`
+ * (#1186). 0, SLM_GPU_ERR_CHANNEL_DOWN, or -1. Jetson only. */
+extern int slm_runtime_oplib_scratch_read(uint32_t slot, void *dst, uint32_t bytes);
 
 /*
  * W2: stage `len` bytes of CPU-resident weight data into the GPU
@@ -1709,8 +1723,9 @@ extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
  *   - the per-page GMMU walk that resolves CPU-writable phys for
  *     each destination page fails.
  *
- * The Rust caller (`LoadedSlm::stage_tensor_to_gpu`) treats -1 as
- * "no GPU staging available", logs once per `slm load`, and leaves
+ * Returns SLM_GPU_ERR_CHANNEL_DOWN while the cold channel is down
+ * (#1171). The Rust caller (`LoadedSlm::stage_tensor_to_gpu`) treats
+ * any non-zero return as "no GPU staging available", logs once per `slm load`, and leaves
  * the tensor name out of `gpu_tensor_map` so forward.rs's hybrid
  * wrappers fall through to the CPU path.
  *
@@ -2275,6 +2290,27 @@ extern int32_t rust_slm_prompt_ex(
 extern int32_t rust_slm_stop(uint32_t session_id);
 
 /*
+ * The same four calls, only on the session opened as `seq`
+ * (rust_slm_session_open_seq; 0 means any). The check and the use happen
+ * under the session table lock, so the slm-runner can't act on a session
+ * a shell closed and reopened in its slot meanwhile (#1171, the race
+ * #475 W8's check-then-use left). A mismatch returns -1, as an empty slot.
+ */
+extern int32_t rust_slm_session_close_seq(uint32_t session_id, uint64_t seq);
+extern int32_t rust_slm_session_reset_seq(uint32_t session_id, uint64_t seq);
+extern int32_t rust_slm_stop_seq(uint32_t session_id, uint64_t seq);
+extern int32_t rust_slm_prompt_ex_seq(
+    uint32_t session_id,
+    uint64_t seq,
+    const uint8_t *prompt,
+    size_t prompt_len,
+    uint32_t flags,
+    uint32_t max_new_tokens,
+    RustSlmTokenCb cb,
+    RustSlmPollCb poll,
+    void *user);
+
+/*
  * Snapshot a session's telemetry counters into *out. Works while a
  * prompt runs: the counters are then as of its start.
  * Returns 0 on success, -1 on NULL pointer / bad session id.
@@ -2284,11 +2320,56 @@ extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);
 /* ---- GPU program submission (#475, Jetson; slm_ffi.c) ----
  *
  * The backend half of kernel/gpu/slm_prog.c: everything that touches
- * the dispatch lock. See g_prog_flight in slm_ffi.c. */
+ * the dispatch lock. See g_chan in slm_ffi.c. */
 int slm_gpu_prog_submit(uint64_t gp_entry, const volatile void *end_slot, uint32_t end_payload,
                         uint32_t timeout_ms);
 void slm_gpu_prog_finished(void);
 int slm_gpu_prog_l2_evict(void);
 void slm_gpu_prog_dump_fault(void);
+
+/* ---- Cold channel recovery (#1171, Jetson UEFI-direct; slm_ffi.c) ----
+ *
+ * slm_gpu_channel_recover shuts every dispatcher out (they take their
+ * CPU path, SLM_GPU_ERR_CHANNEL_DOWN), ends a program flight, runs
+ * ga10b_cold_recover with IRQs on and no spinlock held, then puts the
+ * channel back UP (new epoch, breaker reset, every kind's warmup armed
+ * again) or leaves it DEAD. Task context only: it waits for seconds at
+ * worst. Must not be called with slm_prog's lock held by someone else's
+ * program (slm_prog's own timeout path holds it, which is the point).
+ * `t_timeout_ns` is when the failure was seen (slm_get_time_ns), for
+ * the per-consumer latency the race test reports; `why` is a
+ * SLM_GPU_RECOVER_* code. Prints one line. Returns 0 if the channel
+ * works again (its probe passed), -1 if it is DEAD or a recovery was
+ * already running, -2 when this boot has no cold channel. */
+#define SLM_GPU_RECOVER_STEP_TIMEOUT 1u
+#define SLM_GPU_RECOVER_EVICT        2u
+#define SLM_GPU_RECOVER_MANUAL       3u
+#define SLM_GPU_RECOVER_MANUAL_L2    4u   /* level 2 only (testing) */
+#define SLM_GPU_RECOVER_MANUAL_L1    5u   /* level 1 only (testing) */
+int slm_gpu_channel_recover(uint32_t why, uint64_t t_timeout_ns);
+
+struct slm_gpu_recovery_rec {
+    uint32_t epoch;             /* channel epoch after this recovery */
+    uint32_t why;               /* SLM_GPU_RECOVER_* */
+    int32_t rc;                 /* 0 ok, else ga10b_cold_recover's code */
+    int32_t level;              /* 1 channel reset, 2 GR engine reset */
+    int32_t l1_rc, l2_rc;
+    uint32_t latched, probe_failed;
+    uint64_t t_timeout_ns, t_begin_ns, t_end_ns;
+    uint32_t chram, chram_after, eng_status0, pbdma_status, pbdma_intr0;
+    uint32_t gr_status, gr_intr, gr_exception, fecs_mb0, fecs_mb6;
+    uint32_t fault_status, fault_info, fault_addr_lo;
+    uint32_t opts;
+    uint32_t eng_status_fail, pbdma_status_fail, gr_status_fail;
+    uint32_t fecs_mb0_fail, fecs_mb6_fail, fecs_ctx_fail;
+};
+#define SLM_GPU_RECOVERY_LOG 64u
+/* Recoveries so far (all, including failed ones) and record `i` of
+ * them (0 = first); 0 when `i` has rolled out of the log. */
+uint32_t slm_gpu_recovery_count(void);
+int slm_gpu_recovery_get(uint32_t i, struct slm_gpu_recovery_rec *out);
+/* Channel mode (enum gpu_chan_mode) and epoch, read without the lock. */
+uint32_t slm_gpu_channel_mode(void);
+uint32_t slm_gpu_channel_epoch(void);
 
 #endif /* SLM_FFI_H */

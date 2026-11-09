@@ -269,6 +269,7 @@ struct prog_shape {
 struct prog_session {
     bool open;
     bool dead;
+    bool quiesced;          /* dead, but the channel was recovered: the GPU can't touch it */
     bool close_pending;     /* closed while the lock was held elsewhere */
     const struct slm_prog_backend *be;
     /* The model bytes this session maps, for slm_prog_weights_mapped. */
@@ -355,7 +356,7 @@ static uint32_t g_leaked_weights_n;
  * Not a spinlock: the holder waits for the GPU with IRQs on and yields, and
  * may be preempted. A waiter yields too (be->relax), never spins with IRQs
  * masked (#1093): with IRQs off it only tries once. A wait is bounded at
- * one step timeout plus a second, which no healthy holder comes near; past
+ * 9 s (PROG_LOCK_WAIT_US below), which no healthy holder comes near; past
  * that the caller gets SLM_PROG_ERR_BUSY. slm_prog_close can't fail, so a
  * close that can't take the lock marks the session and the holder frees it
  * on unlock, whether the holder is slm_prog or another VM writer.
@@ -379,7 +380,11 @@ enum lock_holder {
 static uint32_t g_lock;
 static struct slm_prog_vm_lock_stats g_vm_stats;
 
-#define PROG_LOCK_WAIT_US (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u)
+/* A step timeout, then the channel recovery it starts (#1171), then a
+ * second. */
+#define PROG_RECOVERY_BUDGET_MS 3000u
+#define PROG_LOCK_WAIT_US \
+    (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + PROG_RECOVERY_BUDGET_MS + 1000u) * 1000u)
 
 static bool lock_try(uint32_t who)
 {
@@ -690,10 +695,12 @@ static void session_free(struct prog_session *s)
     /* A dead session's last step timed out or its evict failed: the GPU may
      * still be running it, and L2 may hold its dirty lines. Either can land
      * on these pages after they are reused (the CPU KV cache the fallback
-     * allocates next, say). Nothing can quiesce a channel in that state, so
-     * its arena, control pages and VA ranges are leaked on purpose; the
-     * PTEs still go, so a late GPU access faults instead. */
-    bool leak = s->dead;
+     * allocates next, say). Unless the channel recovery that followed
+     * (#1171) quiesced it, its arena, control pages and VA ranges are
+     * leaked on purpose; the PTEs still go, so a late GPU access faults
+     * instead. A recovered channel preempted or reset the program,
+     * restarted its GPFIFO and evicted L2: nothing of it is left to run. */
+    bool leak = s->dead && !s->quiesced;
     if (s->data.cpu) {
         if (s->data_va) {
             ga10b_vm_unmap(be->ops, be->vm, s->data_va, big_round(s->data.size));
@@ -1075,10 +1082,14 @@ int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_pr
 }
 
 /* Cache maintenance takes no lock. It touches only the caller's own session
- * memory (its arena or step page), which nothing else frees while that
- * session is open: the caller owns the session, and a close from elsewhere
- * waits for the holder. Taking the lock here would let a busy lock skip
- * the clean or invalidate silently and compute on stale data (#475 W-A). */
+ * memory (its arena or step page). Only the session's owner closes it
+ * (GpuProgram's Drop; the session table hands a session to one task at a
+ * time), and the owner makes no call on the handle after slm_prog_close
+ * returns. A close that finds the lock busy is finished later by the
+ * holder, but by then the owner has stopped using the memory, so no free
+ * can overlap its clean or invalidate. Taking the lock here would let a
+ * busy lock skip the clean or invalidate silently and compute on stale
+ * data (#475 W-A). */
 static const struct ga10b_gpu_ops *session_ops(int32_t h)
 {
     if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return NULL;
@@ -1101,6 +1112,16 @@ void slm_prog_invalidate(int32_t h, const void *p, size_t len)
 
 /* Print once per session: a dead program means every later step of the
  * session is on the CPU, which Rust reports. */
+/* After a failed step: recover the channel if the backend can. True when
+ * the session's memory is safe to free (see slm_prog_backend.recover). */
+static bool recover_after(struct prog_session *s, uint32_t why, uint64_t t_us)
+{
+    if (!s->be->recover) return false;
+    if (s->be->recover(why, t_us) != 0) return false;
+    s->quiesced = true;
+    return true;
+}
+
 static void describe_timeout(const struct prog_session *s, const struct ga10b_prog *p)
 {
     uint32_t start = ga10b_prog_sema_payload(p, GA10B_PROG_SEMA_START);
@@ -1158,15 +1179,22 @@ static int run_step_locked(int32_t h, uint32_t shape, struct slm_prog_run_stats 
         if (be->now_us() >= deadline) break;
         be->relax();
     }
-    be->finished();
     if (!done) {
+        uint64_t t_fail = be->now_us();
         s->dead = true;
         describe_timeout(s, p);
+        /* The recovery ends the flight itself, after it has shut the
+         * other dispatchers out: finished() first would let them queue
+         * behind the hung program in between (#1171). */
+        if (recover_after(s, SLM_PROG_RECOVER_TIMEOUT, t_fail)) return SLM_PROG_ERR_RECOVERED;
+        be->finished();
         return SLM_PROG_ERR_TIMEOUT;
     }
+    be->finished();
     uint64_t t1 = be->now_us();
     if (be->l2_evict() != 0) {
         s->dead = true;
+        if (recover_after(s, SLM_PROG_RECOVER_EVICT, be->now_us())) return SLM_PROG_ERR_RECOVERED;
         return SLM_PROG_ERR_EVICT;
     }
     if (stats) {
@@ -1271,6 +1299,7 @@ const char *slm_prog_strerror(int err)
     case SLM_PROG_ERR_EVICT: return "L2 evict timed out";
     case SLM_PROG_ERR_IRQS_OFF: return "step started with IRQs masked";
     case SLM_PROG_ERR_BUSY: return "another GPU program held the lock too long";
+    case SLM_PROG_ERR_RECOVERED: return "GPU step timed out; channel recovered";
     default: return "unknown error";
     }
 }
@@ -1359,10 +1388,28 @@ static void jb_prepare_clocks(void)
                 (unsigned long long)(set / 1000000u));
 }
 
+/* The full GR / MMU / PBDMA dump is about 270 UART lines (some 2 s at
+ * 115200 baud), all of it before the recovery can start. Once per boot;
+ * after that each recovery's line carries the key registers and
+ * `nvgpu cold recover status` lists them (#1171). */
 static void jb_dump(const char *why)
 {
     (void)why;
-    slm_gpu_prog_dump_fault();
+    static uint32_t dumped;
+    if (__atomic_exchange_n(&dumped, 1u, __ATOMIC_RELAXED) == 0u) {
+        slm_gpu_prog_dump_fault();
+    } else {
+        uart_puts("[slm-prog] (full fault state printed at the first timeout of this boot; "
+                  "`nvgpu cold recover status` lists each recovery's registers)\n");
+    }
+}
+
+/* The channel recovery in slm_ffi.c (#1171), which ends the flight. */
+static int jb_recover(uint32_t why, uint64_t t_us)
+{
+    return slm_gpu_channel_recover(why == SLM_PROG_RECOVER_EVICT ? SLM_GPU_RECOVER_EVICT
+                                                                 : SLM_GPU_RECOVER_STEP_TIMEOUT,
+                                   t_us * 1000u);
 }
 
 static struct slm_prog_backend g_jb;
@@ -1387,6 +1434,7 @@ static const struct slm_prog_backend *jetson_backend(void)
     g_jb.dump_fault = jb_dump;
     g_jb.irqs_enabled = jb_irqs;
     g_jb.prepare_clocks = jb_prepare_clocks;
+    g_jb.recover = jb_recover;
     return &g_jb;
 }
 
