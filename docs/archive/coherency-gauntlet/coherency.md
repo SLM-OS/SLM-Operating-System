@@ -315,6 +315,12 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 - NC_AXIS=OFF banner printed, no "boot flag not visible" warning, 4/4 CPUs.
 - The rig was silent on 0 of 10 attempts this time, against 10 of 20 before.
+- Default build at 10f8688e (NC, rev 3 suite): litmus PASS (S1 679,058, S2
+  0, min straddles 100,003); one-run spot check stealing 19448 us, context
+  2323 ns, ipc 869 ns.
+- NC_AXIS=OFF SETWAY_INVAL=OFF (90d4caa9): both banners, regs 4/4, litmus
+  PASS (S1 678,512, S2 0, min straddles 100,004), bench smp complete, boots
+  10/10. Removing the post-MMU set/way loop changes nothing observable.
 - SLM-OS shows no store buffering without barriers on Pi 5 (S2 0), while
   Linux on the same board showed 3,616 in 3.18e8 rounds; P3 carries no
   information in SLM-OS on Pi 5.
