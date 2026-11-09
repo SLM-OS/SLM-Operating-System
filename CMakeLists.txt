@@ -376,6 +376,13 @@ option(ENABLE_BOOT_TESTS "Run tests at boot instead of interactive shell" OFF)
 if(ENABLE_BOOT_TESTS)
     add_compile_definitions(ENABLE_BOOT_TESTS=1)
 endif()
+# Hardware measurement set for #1193: a boot-test kernel that runs only
+# the coherency and multi-core integration suites. Use with
+#   make kernel-test PLATFORM=<P> EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
+option(BOOT_TESTS_HW_SET "Boot tests: run only the coherency + integration suites" OFF)
+if(BOOT_TESTS_HW_SET)
+    add_compile_definitions(BOOT_TESTS_HW_SET=1)
+endif()
 
 # Embed Lua demo scripts (scripts/demo.lua, scripts/demo_menu.lua) into the
 # kernel image via .incbin (#13, #14). When ON (the default), the scripts

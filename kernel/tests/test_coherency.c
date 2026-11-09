@@ -615,6 +615,23 @@ static void test_negative_controls_report(void)
     TEST_ASSERT_FALSE(vmm_is_mapped(COH_ALIAS_VA));
 }
 
+/*
+ * A second `coherency neg` in the same boot takes new slots (rows never
+ * reuse a line an earlier alias read touched) and still runs every control.
+ */
+static void test_negative_controls_rerun_uses_fresh_slots(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("needs 2+ CPUs");
+    }
+    struct coh_neg_summary sum;
+    TEST_ASSERT_EQUAL_INT(0, coherency_neg_run(1000u, NULL, &sum));
+    for (int c = 0; c < COH_NEG_COUNT; c++) {
+        TEST_ASSERT_TRUE(sum.ran[c]);
+    }
+    TEST_ASSERT_FALSE(vmm_is_mapped(COH_ALIAS_VA));
+}
+
 int test_suite_coherency(void)
 {
     uint64_t t0 = timer_get_count();
@@ -638,6 +655,7 @@ int test_suite_coherency(void)
     RUN_TEST(test_inject_p4_weak_row_fails);
     RUN_TEST(test_inject_p6_sum_offset_fails);
     RUN_TEST(test_negative_controls_report);
+    RUN_TEST(test_negative_controls_rerun_uses_fresh_slots);
     uart_printf("[INFO] test_coherency.c: %llu ms\r\n",
                 (unsigned long long)((timer_get_count() - t0) * 1000u / timer_get_frequency()));
     return UnityEnd();
