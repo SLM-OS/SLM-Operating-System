@@ -1,0 +1,74 @@
+# pi-5-1, rebased removal boot-test kernel RT: origin/coherency-remove-nc-axis @ af8d01ba
+# (rebased onto origin/main 85f51ffd)
+# build: export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+#        make kernel-test PLATFORM=RASPI5   (fresh build/kernel-test, configured in this run)
+# image build/kernel-test/slmos.bin 8770192 B, sha256
+#   31f63e62dd855b2681a6e032dfbf42ffbc2bc6a21a933efa14982a27be3baee4
+#   staged /var/lib/labctl/images/kernel_2712-1193r-RT.img, on kernel_2712.img and kernel8.img
+#   (originals kept as *.pre1193r during the run)
+# 2026-11-09 08:44 to 09:10 UTC.
+#
+# Method: labctl boot_test, image already on the card (no image argument), runs=10,
+# expect_pattern "All test suites passed|total failure\(s\)", timeout 330,
+# output_dir /var/lib/labctl/output/1193r-pi5-RT. No SDWire round trip (#1195 fallback not
+# needed: no silent boot). Raw UART per boot: pi5-rebased-RT-test-B<nn>.txt, copied unchanged from
+# boot_test's run_<nn>.txt (each starts at the first kernel banner line and ends at the
+# "[FAIL] N total failure(s)" summary line, which ends the capture).
+#
+# boot_test result, verbatim:
+#   Run  1/10: PASS (160.6s) - pattern matched
+#   Run  2/10: PASS (154.6s) - pattern matched
+#   Run  3/10: PASS (158.0s) - pattern matched
+#   Run  4/10: PASS (146.9s) - pattern matched
+#   Run  5/10: PASS (155.5s) - pattern matched
+#   Run  6/10: PASS (159.4s) - pattern matched
+#   Run  7/10: PASS (146.5s) - pattern matched
+#   Run  8/10: PASS (147.7s) - pattern matched
+#   Run  9/10: PASS (152.2s) - pattern matched
+#   Run 10/10: PASS (144.3s) - pattern matched
+#   Result: 10/10 boots successful (100%)
+#   Average boot time (successful): 152.6s
+#
+# Counts are grep over each raw file: "not visible" (smp.c boot-flag WARN), "dormancy-enter",
+# "ALREADY_ON (software wedge)", panic/fault lines (KERNEL PANIC|system unable to continue|
+# Synchronous|SError). coherency = test_coherency.c Unity line; integration = the
+# "Integration Tests (Multi-Core)" Unity line; S1 from "[INFO] coherency S1 relaxed outcomes".
+#
+# boot lines  banner    3/3 online  WARN  coherency  S1     nc_axis  integration  suite    extra failures (beyond the 18)                          dorm-enter  wedge  panic
+B01  9842   af8d01ba  yes         0     26/26      67840  7/7      16/16        FAIL 18  none                                                    107         107    0
+B02  9974   af8d01ba  yes         0     26/26      67947  7/7      16/16        FAIL 20  test_slm_stats_live_from_second_session,                133         133    0
+                                                                                             test_component_cleanup_ctx_is_per_task
+B03  9898   af8d01ba  yes         0     26/26      67371  7/7      16/16        FAIL 19  test_slm_stats_live_from_second_session                 118         118    0
+B04  9931   af8d01ba  yes         0     26/26      67583  7/7      16/16        FAIL 18  none                                                    125         125    0
+B05  9878   af8d01ba  yes         0     26/26      67422  7/7      16/16        FAIL 18  none                                                    114         114    0
+B06  9906   af8d01ba  yes         0     26/26      67932  7/7      16/16        FAIL 18  none                                                    120         120    0
+B07  9909   af8d01ba  yes         0     26/26      68071  7/7      16/16        FAIL 18  none                                                    120         120    0
+B08  9852   af8d01ba  yes         0     26/26      67584  7/7      16/16        FAIL 19  test_slm_stats_live_from_second_session                 109         109    0
+B09  9866   af8d01ba  yes         0     26/26      67158  7/7      16/16        FAIL 18  none                                                    112         112    0
+B10  9917   af8d01ba  yes         0     26/26      68271  7/7      16/16        FAIL 19  test_slm_stats_live_from_second_session                 122         122    0
+#
+# S2 relaxed outcomes 0 and timeouts 0 in every boot; "coherency litmus scale 10: 77 rows" in
+# 1406-1496 ms. Unity totals (B01): 100 suites, 2527 tests, 2477 passed, 18 failed.
+#
+# The 18 (every boot, all ten): test_shell.c 2 (test_builtin_commands_grouped_and_sorted
+# kernel/tests/test_shell.c:2674, test_every_command_has_help_entry kernel/tests/test_shell.c:2770,
+# "no help entry for built-in 'emmc-bringup'"), test_blob_autoload.c 14 (lines 538, 570, 614, 710,
+# 971, 1050, 1132, 1190, 1236, 1356, 1453, 1484, 1551, 1690), test_eviction.c 1
+# (test_eviction_run_tests_passes kernel/tests/test_eviction.c:506, sub-check
+# mlp_finish_nan_never_wins), test_scheduler.c 1 (test_timer_irq_is_physical
+# kernel/tests/test_scheduler.c:2494). The same names as the pre-rebase removal and NC runs.
+#
+# Extra failures:
+#   test_slm_stats_live_from_second_session, 4 of 10 boots (B02, B03, B08, B10):
+#     FAILED at kernel/tests/test_slm_shell.c:892 - live_done   (#1202; SLM shell suite 39/40)
+#   test_component_cleanup_ctx_is_per_task, 1 of 10 boots (B02):
+#     FAILED at kernel/tests/test_component.c:476 - not all c4 cleanups fired   (component suite 23/24)
+#     The test starts three "c4_multi" tasks on CPU 0 and waits at most 1000 yield() calls for all
+#     three cleanup callbacks. B02 prints two "Task 'c4_multi' ... exiting" lines (id=356, id=358)
+#     before the assertion; passing boots print 1 to 3 such lines (B05 3, the rest 1), so the
+#     count of exit lines says nothing about which cleanup did not fire. The FAIL line appears in
+#     no other capture in c2-hw/ or c3-hw/ (grep -l): not in any NT boot, the eleven pre-rebase
+#     removal runs W1-W11, pi5-removal-test-suite.txt, pi5-nc-test-suite.txt or
+#     pi5-ncoff-test-suite.txt.
+#     Recorded only; not investigated (same bounded-yield shape as #1202).
+# Neither extra failure appears in any of the 10 NT boots (pi5-rebased-NT-test-boots.txt).

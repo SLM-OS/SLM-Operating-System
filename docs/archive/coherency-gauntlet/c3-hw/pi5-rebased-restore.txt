@@ -1,0 +1,41 @@
+# pi-5-1 card restore after the rebased Pi 5 series (R, RT, NT), 2026-11-09 ~09:33 UTC
+#
+# Card at start (sdwire_info, board off): one msdos partition, fat32, label SLMOS, 29818 MiB,
+# partuuid 589f3b5b-01, mount_status clean. config.txt has kernel=kernel_2712.img.
+# Originals at start (sdwire_ls): kernel_2712.img and kernel8.img, 6935256 B each,
+# mtime 2026-10-29T04:54:04Z.
+#
+# First sdwire_update (R): copies kernel_2712-1193r-R.img -> kernel_2712.img.new and
+# kernel8.img.new; renames kernel_2712.img -> kernel_2712.img.pre1193r,
+# kernel8.img -> kernel8.img.pre1193r, *.new -> kernel_2712.img / kernel8.img.
+# RT and NT: copies straight onto kernel_2712.img and kernel8.img (the originals stayed as
+# *.pre1193r; checked with sdwire_ls before RT: kernel_2712.img and kernel8.img 8770192 B,
+# both *.pre1193r 6935256 B, 2026-10-29T04:54:04Z).
+#
+# Restore (sdwire_update, reboot=false), result verbatim:
+#   Partition 1: Renamed: kernel_2712.img -> kernel_2712.img.1193r-del, kernel8.img ->
+#   kernel8.img.1193r-del, kernel_2712.img.pre1193r -> kernel_2712.img, kernel8.img.pre1193r ->
+#   kernel8.img; Deleted: kernel_2712.img.1193r-del, kernel8.img.1193r-del
+#
+# sdwire_ls after restore (board off; sdwire_ls refuses while the board is on), kernel entries:
+#   {"name": "kernel8.img", "size": 6935256, "mtime": "2026-10-29T04:54:04Z", "mode": "0755"}
+#   {"name": "kernel_2712.img", "size": 6935256, "mtime": "2026-10-29T04:54:04Z", "mode": "0755"}
+#   no *.pre1193r, *.new or *.1193r-del entries remain; every other entry has the same name,
+#   size and mtime as in the listing taken at start.
+#
+# Then power_on and serial_capture (timeout 60, until "slmos>", tail 12):
+#   [Captured 12 lines in 13.1s, pattern 'slmos>' matched]
+#   [INFO] Network interface initialized: sl0
+#   [INFO]   MAC: 2c:cf:67:24:ba:c5
+#   [INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+#   [INFO] DHCP client started (at boot)
+#   [INFO] DHCP auto-start armed (timeout 10000 ms)
+#   [TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+#   [TELNETD] autostart: listening on port 2323
+#
+#   SLM-OS Debug Shell
+#   Type 'help' for available commands.
+#
+#   slmos>
+# run_health_check afterwards: ping true, serial true, power on, status online.
+# pi-5-1 left ON at slmos> on the original kernel; claim untouched (orchestrator holds it).
