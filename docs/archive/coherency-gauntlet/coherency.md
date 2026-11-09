@@ -360,6 +360,16 @@ Boards: jetson-nano-2 and pi-5-1 only.
   12934 / 17958 us, median 13021 (5-run medians: NC 15715, NC_AXIS=OFF
   14550). bench smp complete x3. About 2 us of every Pi 5 context switch was
   CPU-to-CPU cache maintenance on memory the hardware keeps coherent.
+- Jetson kexec, 072bd707 (elf 84e7946c, builder report): no NC line, 6/6
+  CPUs, regs identical to NC_AXIS=OFF, litmus PASS (S1 933,567, S2 0, weak 0,
+  min straddles 100,001). bench stealing 9803 / 10154 / 9802 / 10485 / 13040
+  us, median 10154 (NC 10625 / 10627 / 11234; NC_AXIS=OFF 13892 / 13043 /
+  13043): the stealing regression came from the leftover CPU-to-CPU
+  maintenance and is gone. bench context 85 / 83 / 84 ns (NC about 5450).
+  bench ipc 125 / 112 / 112 ns (NC 128 / 112 / 113). bench smp 5/5 x3.
+- Jetson NC_AXIS=OFF priority 1 complete: kexec and UEFI all checks PASS,
+  10/10 boots on each path; default build kexec litmus PASS. Removal build
+  boots, test kernel and UEFI-direct run in progress.
 
 ### C3 Pi 5, final (builder report, critic running)
 
