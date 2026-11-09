@@ -1,11 +1,11 @@
-# ADR 0007: cross-CPU state is cacheable on Pi 5 and Jetson
+# ADR 0007: cross-CPU state should be cacheable on Pi 5 and Jetson
 
 ## Context
 
 Since April 2026 run queues, the task table, current-task pointers and boot
 flags lived in a Normal Non-cacheable block on Pi 5 and Jetson
-(`PLATFORM_HAS_NC_MEMORY`), shared fields were cleaned and invalidated by
-hand, and Pi 5 spinlocks were wrapped in `DC CIVAC`. The reason given was
+(`PLATFORM_HAS_NC_MEMORY`) with hand-written cache maintenance. The reason
+given was
 that firmware leaves `CPUECTLR_EL1.SMPEN` clear, so private L2s are
 incoherent. Nothing re-tested it after the set/way fix in `e0a15259`.
 
@@ -40,8 +40,7 @@ The removal does not land until both boards meet the bar:
 - Keep the axis everywhere with a measured justification (c): no
   measurement on either board shows incoherence.
 - Keep it on Jetson only (b): open until the steal experiment.
-- Set an enable bit in BL31: neither core has one.
-- Keep `NC_AXIS=OFF` as an option: slower than NC on Jetson stealing.
+- Keep `NC_AXIS=OFF` as an option: it shows the stall above.
 
 ## Consequences
 
@@ -50,10 +49,8 @@ bit 6 is PF_MODE[0], 101779 3.2.47); a core joins its cluster's coherency
 with no software step (A76 5.9, A78AE 2.4.9, DSU 100453 2.1). Coherency
 between the Jetson clusters has no public source and rests on measurement.
 Caches-off loads do not allocate (A76 7.2.3), so "pre-MMU reads left stale
-lines" cannot hold. Defects fixed: uncleaned `secondary_mmu_*` (D1), page
-tables cleaned instead of invalidated (D2), `#else` paths that only worked on
-QEMU (D12), and a pointer and array mismatch that page-faulted the first
-cacheable build. `make test` rejects new cache maintenance in scheduler,
+lines" cannot hold. Defects fixed: D1, D2, D12 and an extern mismatch
+that page-faulted the first cacheable build (C3 audit). `make test` rejects new cache maintenance in scheduler,
 IPC, spinlock and print code. Open: #1196, #1197, #1201, #1202, the stall.
 
 ## What would overturn this
@@ -79,7 +76,5 @@ a different Pi 5 EEPROM or BL31 (version not determined here).
   84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 131 ns, Jetson
   equal; stealing equal on Pi 5, equal or better on Jetson; `bench smp`
   completed in every run on both boards.
-- Boots: Pi 5 removal 10/10 plus 11 test-kernel boots (integration 16/16);
-  Pi 5 NC 8 of 20 attempts (rig defect #1195). Jetson `NC_AXIS=OFF` 10/10
-  per path with integration 16/16.
-- Data: `docs/archive/coherency-gauntlet/coherency.md`.
+- Boots: Pi 5 removal 10/10. Jetson `NC_AXIS=OFF` 10/10 per path,
+  integration 16/16 on one boot per path.
