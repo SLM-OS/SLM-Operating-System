@@ -24,9 +24,12 @@ for DMA only.
 
 The removal does not land until both boards meet the bar:
 
-- Pi 5: the integration "match" criterion is unmet. The removal test kernel
-  failed one extra test in 1 of 11 boots (#1202); the NC test kernel has a
-  single boot. Next: 10-boot NC test-kernel series and the #1202 experiment.
+- Pi 5: the integration "match" criterion fails. Across all runs, the
+  removal test kernel failed `test_slm_stats_live_from_second_session`
+  (#1202) in 5 of 21 boots and `test_component_cleanup_ctx_is_per_task`
+  (#1205) in 1 of 10; the NC test kernel failed neither in 11. Both waits
+  are bounded by yield count, so a much faster context switch may expire
+  them early (untested). Next: the #1202 experiment.
 - Jetson: the removal has 4 kexec and 7 UEFI boots with captured logs (10 each required), no
   integration run, and a steal stall the NC build does not show (a CPU with
   0 successful steals): `NC_AXIS=OFF` CPUs 2 and 3 in 6 of 6 runs; removal
