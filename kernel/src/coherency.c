@@ -952,15 +952,64 @@ static void coh_sum_row(struct coh_summary *sum, const struct coh_row *r)
     }
 }
 
+/*
+ * Where a row's shared variables live. The litmus run uses one fixed set
+ * (g_vars) for every row. The negative controls take a fresh 4 KB slot of
+ * their 2 MB block for every row (cursor != NULL) and never reuse one in
+ * the same boot: a reader that went through the Non-shareable alias can
+ * keep a Non-shareable copy of a line in its cache, and a later row that
+ * reused the line would hit that copy (seen on jetson-nano-2, see
+ * docs/archive/coherency-gauntlet/c2-hw/jetson-kexec-neg-run1-contaminated.txt).
+ */
+struct coh_view_src {
+    struct coh_vars *wv;            /* fixed views when cursor == NULL */
+    struct coh_vars *rv;
+    uint8_t *wbase;                 /* slot 0, writer view */
+    uint8_t *rbase;                 /* slot 0, reader view */
+    uint32_t *cursor;               /* next free slot */
+    uint32_t limit;                 /* one past the last slot */
+    bool exhausted;
+};
+
+#define COH_NEG_SLOT_BYTES      4096u
+#define COH_NEG_SLOTS_AB        256u    /* first 1 MB: controls a and b */
+#define COH_NEG_SLOTS_C         256u    /* second 1 MB: control c, never aliased-read */
+static_assert(sizeof(struct coh_vars) <= COH_NEG_SLOT_BYTES, "coh_vars must fit a slot");
+
+static uint32_t g_neg_cursor_ab;        /* 0 .. COH_NEG_SLOTS_AB */
+static uint32_t g_neg_cursor_c;         /* 0 .. COH_NEG_SLOTS_C, in the second MB */
+
+static bool coh_view_next(struct coh_view_src *src, struct coh_vars **wv, struct coh_vars **rv)
+{
+    if (src->cursor == NULL) {
+        *wv = src->wv;
+        *rv = src->rv;
+        return true;
+    }
+    if (*src->cursor >= src->limit) {
+        src->exhausted = true;
+        return false;
+    }
+    uint64_t off = (uint64_t)(*src->cursor)++ * COH_NEG_SLOT_BYTES;
+    *wv = (struct coh_vars *)(void *)(src->wbase + off);
+    *rv = (struct coh_vars *)(void *)(src->rbase + off);
+    return true;
+}
+
 /* Pair patterns over every ordered pair (a != b), row-major. */
-static void coh_run_pairs(enum coh_pattern pat, uint64_t n, struct coh_vars *wv,
-                          struct coh_vars *rv, const struct coh_job_cfg *cfg, coh_out_fn out,
+static void coh_run_pairs(enum coh_pattern pat, uint64_t n, struct coh_view_src *src,
+                          const struct coh_job_cfg *cfg, coh_out_fn out,
                           struct coh_summary *sum)
 {
     for (uint32_t a = 0; a < cpu_count; a++) {
         for (uint32_t b = 0; b < cpu_count; b++) {
             if (a == b) {
                 continue;
+            }
+            struct coh_vars *wv;
+            struct coh_vars *rv;
+            if (!coh_view_next(src, &wv, &rv)) {
+                return;
             }
             uint32_t cpus[2] = { a, b };
             struct coh_row row;
@@ -978,11 +1027,16 @@ static void coh_run_pairs(enum coh_pattern pat, uint64_t n, struct coh_vars *wv,
 }
 
 /* P4: one run per writer, every other online CPU reads. */
-static void coh_run_corr(uint64_t n, struct coh_vars *wv, struct coh_vars *rv,
+static void coh_run_corr(uint64_t n, struct coh_view_src *src,
                          const struct coh_job_cfg *cfg, coh_out_fn out,
                          struct coh_summary *sum)
 {
     for (uint32_t w = 0; w < cpu_count; w++) {
+        struct coh_vars *wv;
+        struct coh_vars *rv;
+        if (!coh_view_next(src, &wv, &rv)) {
+            return;
+        }
         uint32_t cpus[MAX_CPUS];
         uint32_t k = 0;
         cpus[k++] = w;
@@ -1072,13 +1126,14 @@ int coherency_litmus_run_opts(const struct coh_run_opts *opts, coh_out_fn out,
     coh_print_header(out);
 
     struct coh_vars *v = &g_vars;
+    struct coh_view_src src = { .wv = v, .rv = v };
     for (int p = COH_P1; p < COH_PATTERN_COUNT; p++) {
         if ((mask & COH_PAT_BIT(p)) == 0) {
             continue;
         }
         uint64_t n = coherency_iters((enum coh_pattern)p, scale);
         if (p == COH_P4) {
-            coh_run_corr(n, v, v, &cfg, out, sum);
+            coh_run_corr(n, &src, &cfg, out, sum);
         } else if (p == COH_P6) {
             uint32_t cpus[MAX_CPUS];
             for (uint32_t c = 0; c < cpu_count; c++) {
@@ -1090,7 +1145,7 @@ int coherency_litmus_run_opts(const struct coh_run_opts *opts, coh_out_fn out,
             coh_print_row(out, &row);
             coh_sum_row(sum, &row);
         } else {
-            coh_run_pairs((enum coh_pattern)p, n, v, v, &cfg, out, sum);
+            coh_run_pairs((enum coh_pattern)p, n, &src, &cfg, out, sum);
         }
     }
 
@@ -1143,8 +1198,8 @@ static const char *const g_neg_names[COH_NEG_COUNT] = {
 };
 
 /* Control (c) over every ordered pair: a = writer, b = reader. */
-static void coh_run_dcoff(struct coh_vars *wv, const struct coh_job_cfg *cfg, coh_out_fn out,
-                          struct coh_neg_summary *sum)
+static void coh_run_dcoff(struct coh_view_src *src, const struct coh_job_cfg *cfg,
+                          coh_out_fn out, struct coh_neg_summary *sum)
 {
     if (out) {
         out("# control %s\r\n", g_neg_names[COH_NEG_DCACHE_OFF]);
@@ -1157,10 +1212,15 @@ static void coh_run_dcoff(struct coh_vars *wv, const struct coh_job_cfg *cfg, co
             if (a == b) {
                 continue;
             }
+            struct coh_vars *wv;
+            struct coh_vars *rv;
+            if (!coh_view_next(src, &wv, &rv)) {
+                return;
+            }
             uint32_t cpus[2] = { a, b };
             struct coh_row row;
             coh_cpus_pair(row.cpus, sizeof(row.cpus), a, b);
-            coh_run_job((enum coh_pattern)COH_PAT_DCOFF, COH_DCOFF_LOADS, cpus, 2, wv, wv,
+            coh_run_job((enum coh_pattern)COH_PAT_DCOFF, COH_DCOFF_LOADS, cpus, 2, wv, rv,
                         cfg, &row);
             sum->dcoff_loads += COH_DCOFF_LOADS;
             sum->dcoff_p1_stale += row.aux[0];
@@ -1176,7 +1236,7 @@ static void coh_run_dcoff(struct coh_vars *wv, const struct coh_job_cfg *cfg, co
             }
         }
     }
-    sum->ran[COH_NEG_DCACHE_OFF] = true;
+    sum->ran[COH_NEG_DCACHE_OFF] = !src->exhausted;
     if (out) {
         out("# control c totals: loads/phase=%llu p1_stale=%llu p1_fresh=%llu "
             "p2_stale=%llu p2_fresh=%llu timeouts=%llu\r\n",
@@ -1228,9 +1288,22 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
         return -1;
     }
 
-    struct coh_vars *wv = (struct coh_vars *)g_neg_block;    /* identity map, WB ISH */
-    struct coh_vars *rv = (struct coh_vars *)COH_ALIAS_VA;
+    uint8_t *wbase = (uint8_t *)g_neg_block;        /* identity map, WB ISH */
+    uint8_t *rbase = (uint8_t *)COH_ALIAS_VA;
     uint64_t pa = (uint64_t)(uintptr_t)g_neg_block;
+    /* Every control row needs a slot no earlier row (of this or an earlier
+     * `coherency neg`) touched; refuse instead of reusing one. */
+    uint32_t need_ab = 2u * (cpu_count * (cpu_count - 1u) + cpu_count);
+    uint32_t need_c = cpu_count * (cpu_count - 1u);
+    if (g_neg_cursor_ab + need_ab > COH_NEG_SLOTS_AB ||
+        g_neg_cursor_c + need_c > COH_NEG_SLOTS_C) {
+        if (out) {
+            out("coherency neg: no unused slots left in the control block; reboot to "
+                "run the controls again\r\n");
+        }
+        coh_leave(&caller);
+        return -1;
+    }
     uint64_t n = COH_ITERS_NEG / scale;
     if (n < COH_MIN_ITERS) {
         n = COH_MIN_ITERS;
@@ -1258,21 +1331,26 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
         }
         /* Read-only look at the descriptor just installed, for the log. */
         sum->alias_pte[c] = vmm_test_get_l2_entry(COH_ALIAS_VA);
+        struct coh_view_src src = {
+            .wbase = wbase, .rbase = rbase, .cursor = &g_neg_cursor_ab,
+            .limit = COH_NEG_SLOTS_AB,
+        };
         if (out) {
             out("# control %s\r\n", g_neg_names[c]);
             out("# writer VA 0x%lx, reader VA 0x%lx, PA 0x%lx, alias descriptor 0x%016lx\r\n",
-                (unsigned long)(uintptr_t)wv, (unsigned long)COH_ALIAS_VA,
+                (unsigned long)(uintptr_t)wbase, (unsigned long)COH_ALIAS_VA,
                 (unsigned long)pa, (unsigned long)sum->alias_pte[c]);
+            out("# fresh 4 KB slot per row, first slot %u\r\n", (unsigned)g_neg_cursor_ab);
         }
         coh_print_header(out);
 
         static struct coh_summary s2;       /* serialized by g_busy */
         memset(&s2, 0, sizeof(s2));
-        coh_run_pairs(COH_P2, n, wv, rv, &cfg, out, &s2);
+        coh_run_pairs(COH_P2, n, &src, &cfg, out, &s2);
         static struct coh_summary s4;
         memset(&s4, 0, sizeof(s4));
         s4.p4_min_straddles = UINT64_MAX;
-        coh_run_corr(n, wv, rv, &cfg, out, &s4);
+        coh_run_corr(n, &src, &cfg, out, &s4);
 
         /* Tear the alias down; vmm_unmap_block broadcasts the TLBI. */
         vmm_unmap_block(COH_ALIAS_VA);
@@ -1294,7 +1372,14 @@ int coherency_neg_run(uint32_t scale, coh_out_fn out, struct coh_neg_summary *su
     }
 
     if (rc == 0) {
-        coh_run_dcoff(wv, &cfg, out, sum);
+        /* Second MB of the block: the aliases cover it but no alias read
+         * ever touches it, so no reader holds a Non-shareable copy. */
+        uint8_t *cbase = wbase + (uint64_t)COH_NEG_SLOTS_AB * COH_NEG_SLOT_BYTES;
+        struct coh_view_src src = {
+            .wbase = cbase, .rbase = cbase, .cursor = &g_neg_cursor_c,
+            .limit = COH_NEG_SLOTS_C,
+        };
+        coh_run_dcoff(&src, &cfg, out, sum);
     }
 
     coh_leave(&caller);
