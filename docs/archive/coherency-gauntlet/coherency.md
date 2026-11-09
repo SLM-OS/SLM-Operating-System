@@ -298,6 +298,27 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - All six Pi 5 / Jetson kernel builds (default, NC_AXIS=OFF, both OFF), both
   NC_AXIS=OFF test kernels and x86-64 build; check-braces 0.
 
+### C3 Pi 5, NC_AXIS=OFF on 10f8688e (builder report, critic pending)
+
+| Pi 5 | NC baseline | NC_AXIS=OFF |
+|---|---|---|
+| Litmus | rev 1, PASS x2 | rev 3, PASS x2; MP weak 0, P4 weak 0, min straddles 100,002 |
+| S1 / S2 relaxed | 391,659 / n.a. | 677,865 and 678,895 / 0 and 0 (P3 sensitive on no pair) |
+| Control a / b / c | 0 / P2 forbidden 1 per pair / stale 12/12 | 0 / P2 12 timeouts (observed 0), P4 5 timeouts / stale 12288 of 12288 |
+| bench stealing (us) | 13062 / 13266 / 17035 | 16147 / 12936 / 17240 |
+| bench context avg (ns) | 2321 / 2318 / 2315 | 2165 / 2159 / 2167 |
+| bench ipc avg (ns) | 817 / 810 / 812 | 141 / 132 / 132 |
+| bench smp | completes; placement odd | completes; placement odd (#1200) |
+| Integration | 19/19 | 16/16 (3 NC-only tests not compiled) |
+| Full test kernel | 18 failures (#1109) | the same 18 |
+| Boots | 8 of 20 attempts | 10 of 10 attempts (8 full log, 2 shell, 0 silent) |
+
+- NC_AXIS=OFF banner printed, no "boot flag not visible" warning, 4/4 CPUs.
+- The rig was silent on 0 of 10 attempts this time, against 10 of 20 before.
+- SLM-OS shows no store buffering without barriers on Pi 5 (S2 0), while
+  Linux on the same board showed 3,616 in 3.18e8 rounds; P3 carries no
+  information in SLM-OS on Pi 5.
+
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.
