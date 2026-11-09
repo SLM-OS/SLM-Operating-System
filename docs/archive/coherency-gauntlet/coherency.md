@@ -352,6 +352,14 @@ Boards: jetson-nano-2 and pi-5-1 only.
   `secondary_mmu_*` clean, page-table maintenance, all DMA maintenance.
 - 072bd707 is measured on both boards because NC_AXIS=OFF missed the
   stealing bar on Jetson; 44a94994 is not measured (functionally NC_AXIS=OFF).
+- Pi 5, 072bd707 (slmos.bin 7701d4a1, builder report): no NC lines in the
+  boot log, 3/3 secondaries, regs 4/4, litmus PASS (S1 677,905, S2 0, MP and
+  P4 weak 0, min straddles 100,006). bench context 108 / 104 / 104 ns
+  (NC 2321 / 2318 / 2315, NC_AXIS=OFF 2165 / 2159 / 2167). bench ipc
+  136 / 129 / 131 ns (NC about 813). bench stealing 16312 / 13020 / 13021 /
+  12934 / 17958 us, median 13021 (5-run medians: NC 15715, NC_AXIS=OFF
+  14550). bench smp complete x3. About 2 us of every Pi 5 context switch was
+  CPU-to-CPU cache maintenance on memory the hardware keeps coherent.
 
 ### Lab notes
 
