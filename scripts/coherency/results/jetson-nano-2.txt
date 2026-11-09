@@ -132,14 +132,19 @@ fdt
 UEFI: EDK II 36.4.7-gcid-42132812 (DMI bios_version, bios_date 09/18/2025);
   ESRT entry0 fw_version=2360327 (0x240407 = 36.4.7), last_attempt_status=0;
   nvbootctrl: Current version 36.4.7, bootloader slot B active.
-BL31: LIMITATION, version NOT RECORDED. No BL31/TF-A version string is
-  visible from Linux (not in dmesg, /proc/device-tree, /sys/firmware, DMI or
-  ESRT). The TF-A banner prints only on the TCU boot log at power-on, and
-  this run was not allowed to reboot or kexec the board. The BL31 version
-  is to be read from the TCU boot banner at the next sanctioned reboot.
-  The repo record (docs/plans/jetson-preemption-restoration-plan.md,
-  2026-05-09) says jetson-nano-2 runs the patched tegra234 BL31 from
-  tools/tfa-patches/; that is a record, not a measurement of this run.
+BL31: v2.8(release), built 11:44:32 May 9 2026. Not visible from Linux
+  (not in dmesg, /proc/device-tree, /sys/firmware, DMI or ESRT). Provenance:
+  the TCU boot banner on jetson-nano-2 cold boots on the night of
+  2026-11-08/09, captured by the C2 builder and forwarded by the
+  orchestrator. Raw lines:
+    NOTICE:  BL31: v2.8(release):
+    NOTICE:  BL31: Built : 11:44:32, May  9 2026
+  The build date matches the repo record of the patched tegra234 BL31
+  (tools/tfa-patches/, verified on this board 2026-05-09). The v1 run
+  (2026-11-08 22:29 UTC) predates that capture; the v2 run (2026-11-09
+  03:27 UTC) followed it. Jetson firmware is measurement-only in this
+  gauntlet (#976), so the same BL31 is expected for both runs; this
+  harness did not verify that independently.
   PSCI v1.1 and SMCCC v1.2 per dmesg; SMCCC SOC_ID jep106:036b:0234 rev 0x401.
 OP-TEE: revision 4.2 (dmesg).
 nvpmodel: mode 1 (25W); not changed. cpufreq: schedutil, 729.6-1344 MHz; not changed.
