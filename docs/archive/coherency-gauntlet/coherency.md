@@ -612,6 +612,21 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
   ignored as Jetson hardware targets), braces 0, build order, Jetson UEFI
   layout, check-emc-rate-path rc=0. 99 files, +7577/-2263 against main.
 
+### Extension step 2: removal test kernel on Jetson (f546a126, hw-set)
+
+- Image elf 3396ba33 / bin 8c0fb999. Capture started before the trigger;
+  every file runs from Linux's last console lines to the final suite line.
+- kexec run 1 (966 lines), run 2 (965 lines), UEFI-direct (2027 lines): 5/5
+  secondaries online, no boot-flag warning, no panic or exception; no
+  "run queues in NC memory" line (the NC block line is the DMA region).
+  Coherency suite 26/26 and integration 16/16 (all 16 named, the 3 NC-only
+  tests compiled out) in all three. `[PASS] All test suites passed!`.
+- Controls (report only): (a) Non-shareable P2 timeouts 16 of 30 pairs
+  (the cross-cluster ones) on every run; (b) NC alias 30 of 30; (c)
+  caches-off reader stale 30720, 29696 and 28672 of 30720 loads.
+- This closes "no removal integration on Jetson". It does not close the
+  steal stall (#1203) or the boot shortfall on the pre-rebase build.
+
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.
