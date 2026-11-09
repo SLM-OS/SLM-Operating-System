@@ -23,7 +23,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Stack overflow detection | Bottom-of-stack canary (64 B) + `schedule()`-time SP-range assert (#644) | Same | Same | Same (RSP-side) |
 | Kernel VA = PA? | Identity | Identity | Identity | Higher-half (not yet) |
 | Cache coherency (hardware, CPU-to-CPU) | ✅ | ✅ (A76, no enable bit; ADR 0006) | ✅ (A78AE, no enable bit; ADR 0006) | ✅ MESI |
-| Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY for device DMA (scheduler calls redundant) | Same | — |
+| Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY for device DMA, page tables, caches-off readers | Same | — |
 | Non-cacheable DMA region | — | `0xFFE00000`, 2 MB, MAIR idx 2 | `0xBDE00000`, 2 MB, MAIR idx 2 | — |
 | NC allocator | — | `ncmem_alloc` (bump) | Same | — |
 | NC uses | — | device DMA (MACB rings), `PI5_IRQ_DIAG` slots | device DMA (xHCI, CDC-ECM, USB bounce, camera RCE), kexec handoff pages | — |

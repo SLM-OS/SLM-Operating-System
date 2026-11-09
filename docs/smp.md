@@ -234,7 +234,7 @@ Since there's no thread-local storage in bare metal, per-CPU data is accessed vi
 
 This requires a memory access for every per-CPU operation but is simple and reliable.
 
-**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines (false sharing, a performance cost only). The caches are coherent on every supported core; the `cache_clean_range(cpu_data, ...)` before secondary boot is kept but redundant (see `docs/adr/0006-cross-cpu-coherency.md`).
+**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines (false sharing, a performance cost only). The caches are coherent on every supported core, so `cpu_data[]` needs no cache maintenance before secondary boot (see `docs/adr/0006-cross-cpu-coherency.md`).
 
 ---
 
@@ -696,7 +696,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 
 **Cache coherency:** Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their L1 and L2 caches coherent in hardware for Normal Write-Back Inner Shareable memory, with no software enable. Neither core has an SMPEN bit: bit 6 of CPUECTLR_EL1 is RES0 on A76 and PF_MODE[0] on A78AE. Run queues, the task table, current-task pointers, steal deques and scheduler counters live in ordinary cacheable memory, and spinlocks are plain LDAXR/STXR/STLR. The Non-Cacheable block stays mapped for device DMA only. The decision record is `docs/adr/0006-cross-cpu-coherency.md` (#1193).
 
-An earlier version of this section described a workaround for incoherent per-core caches: DC CVAC/CIVAC on shared fields, a DC CIVAC lock-word flush in every Pi 5 spinlock, and NC-memory placement of the scheduler state. That diagnosis rested on reading CPUECTLR_EL1 bit 6 as SMPEN, which the TRMs contradict. The `cache.h` helpers (`cache_clean()`, `cache_invalidate()`, `cache_clean_range()`, `cache_invalidate_range()`) are still called on some scheduler fields; on coherent hardware those calls are redundant but harmless, and the helpers remain required for device DMA.
+An earlier version of this section described a workaround for incoherent per-core caches: DC CVAC/CIVAC on shared fields, a DC CIVAC lock-word flush in every Pi 5 spinlock, and NC-memory placement of the scheduler state. That diagnosis rested on reading CPUECTLR_EL1 bit 6 as SMPEN, which the TRMs contradict. All three are gone: scheduler, task, SMP and IPC code make no `cache.h` calls on CPU-shared state, and use locks or acquire/release for ordering. The `cache.h` helpers remain for device DMA, page tables and the caches-off `secondary_mmu_*` reads.
 
 **Cross-CPU Task Dispatch (complete, April 16, 2026):** Tasks without explicit CPU affinity are distributed by the heuristic scheduler policy's round-robin selection, work-stealing rebalances across idle CPUs, and `sched_migrate_task` moves between queues. The earlier "pinned to CPU 0" workaround is removed.
 

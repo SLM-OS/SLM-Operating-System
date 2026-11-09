@@ -33,8 +33,7 @@ uint32_t cpu_count = 0;
 /* Number of CPUs currently online */
 volatile uint32_t cpus_online = 0;
 
-/* Per-CPU boot handshake flags, cacheline-aligned so the DC CIVAC on one
- * flag never writes back a neighbouring CPU's flag. */
+/* Per-CPU boot handshake flags, one cacheline each. */
 volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
@@ -422,13 +421,11 @@ static int boot_secondary(uint32_t cpu)
     uintptr_t entry = (uintptr_t)secondary_entry;
     int ret;
 
-    /* Clear boot flag before starting the CPU.
-     * Must clean the cacheline after writing so our L1 doesn't hold a
-     * dirty copy of 0. Otherwise, cache_invalidate (DC IVAC) in the
-     * polling loop below would write back our stale 0 to PoC, overwriting
-     * the secondary's flag=1 that was already cleaned to PoC. */
+    /* Clear boot flag before starting the CPU. The secondary writes it
+     * from secondary_init with its MMU and caches on, so no cache
+     * maintenance is needed (#1193); the DSB completes this store and
+     * the cpu_data writes before CPU_ON. */
     cpu_boot_flag[cpu] = 0;
-    cache_clean(&cpu_boot_flag[cpu]);
     __asm__ volatile("dsb sy" ::: "memory");
 
     DEBUG_PRINT("CPU %u: booting (MPIDR=0x%lx, entry=0x%lx)",
@@ -457,13 +454,7 @@ static int boot_secondary(uint32_t cpu)
      * The flag is a separate volatile uint32_t for reliable cross-core visibility.
      */
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
-        /* The load-acquire is enough on coherent hardware; the
-         * cache_invalidate + reload is redundant but harmless (#1193). */
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            return PSCI_SUCCESS;
-        }
-        cache_invalidate(&cpu_boot_flag[cpu]);
-        if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
         /* Brief delay between checks (~100us). #94. */
@@ -607,7 +598,6 @@ static int smp_run_tests(void)
 
     /* Test 2: Each CPU's online flag set */
     for (uint32_t i = 0; i < cpu_count; i++) {
-        cache_invalidate(&cpu_data[i].online);
         if (cpu_data[i].online) {
             uart_printf("  [PASS] CPU %u online flag set\n", i);
         } else {
@@ -689,15 +679,6 @@ void smp_init(void)
      * boot. Each secondary records its own slot
      * from secondary_init. */
     cpu_record_current_el(0);
-
-    /*
-     * Clean all cpu_data cachelines to PoC before booting secondaries.
-     * DC CIVAC (used later to read secondary updates) first writes
-     * back any dirty data from this CPU's L1. If cpu_data
-     * is still dirty here (from init_cpu_data writing online=false),
-     * CIVAC would overwrite the secondary's online=true at PoC.
-     */
-    cache_clean_range(cpu_data, sizeof(cpu_data));
 
     /*
      * smp_boot.S loads secondary_mmu_{ttbr,mair,tcr} with the MMU and

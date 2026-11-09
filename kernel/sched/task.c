@@ -34,9 +34,8 @@ static spinlock_t task_lock = SPINLOCK_INIT;
     spin_unlock_irqrestore(&task_lock, _task_flags)
 
 /* Per-CPU current running task (set by scheduler), in cacheable BSS.
- * The cache_clean/cache_invalidate calls in task_current_on_cpu and
- * task_set_current are redundant on coherent hardware but harmless
- * (cache.h, #1193). */
+ * Hardware coherency makes a CPU's write visible to other CPUs with no
+ * cache maintenance (#1193). */
 static struct task *current_task[MAX_CPUS];
 
 void task_table_init(void)
@@ -393,13 +392,6 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->user_va_next = 0;
     task->user_asid = 0;
 
-    /* Clean the context struct to PoC; redundant on coherent hardware
-     * but kept with the other cache.h calls (#1193).
-     * scheduler_add_task_to_cpu() intentionally skips cleaning the
-     * context (to avoid overwriting a running task's live state), so
-     * any cleaning happens here at creation time. */
-    cache_clean_range(&task->context, sizeof(task->context));
-
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
                 task->priority);
@@ -718,7 +710,6 @@ struct task *task_current_on_cpu(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return NULL;
     }
-    cache_invalidate(&current_task[cpu]);
     return current_task[cpu];
 }
 
@@ -729,7 +720,6 @@ void task_set_current(struct task *task)
 {
     uint32_t cpu = cpu_id();
     current_task[cpu] = task;
-    cache_clean(&current_task[cpu]);
 }
 
 /*
@@ -827,7 +817,6 @@ void task_destroy(struct task *task)
      * not reachable by a realistic workload.
      */
     task->generation++;
-    cache_clean(&task->generation);
 
     TASK_UNLOCK_IRQRESTORE();
 
@@ -881,12 +870,10 @@ void task_set_affinity(struct task *task, uint32_t cpu)
     if (!task) return;
 
     task->cpu_affinity = cpu;
-    cache_clean(&task->cpu_affinity);
 
     /* If pinning to a specific CPU, update assigned_cpu */
     if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
         task->assigned_cpu = cpu;
-        cache_clean(&task->assigned_cpu);
     }
 }
 
@@ -916,16 +903,11 @@ void task_set_priority(struct task *task, uint8_t priority)
     /* An explicit priority overrides the last AI decision (#1069). */
     task->ai_priority = TASK_AI_PRIORITY_NONE;
 #endif
-    cache_clean(&task->priority);
-#ifdef CONFIG_AI_SCHEDULER
-    cache_clean(&task->ai_priority);
-#endif
 
     /* Update effective priority (may be boosted by deadline) */
     if (task->effective_priority < priority) {
         task->effective_priority = priority;
     }
-    cache_clean(&task->effective_priority);
 }
 
 /*
@@ -953,7 +935,6 @@ void task_set_deadline(struct task *task, uint64_t deadline_ns)
 {
     if (!task) return;
     task->deadline_ns = deadline_ns;
-    cache_clean(&task->deadline_ns);
 }
 
 /*
