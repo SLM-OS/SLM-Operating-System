@@ -2083,12 +2083,12 @@ static void rapid_exit_task(void *arg)
     /* task_exit() is called automatically by task_entry_trampoline */
 }
 
-/* Poll condition for the rapid-exit wait; keeps the cache_invalidate the
- * old loop did before each read of the state. */
+/* Poll condition for the rapid-exit wait; keeps the barrier the old loop
+ * issued before each read of the state. */
 static bool rapid_exit_done(void *ctx)
 {
     struct task *t = ctx;
-    cache_invalidate(&t->state);
+    smp_mb();
     return t->state == TASK_TERMINATED;
 }
 
@@ -2871,8 +2871,8 @@ static void test_all_cpus_online(void)
 {
     extern volatile uint32_t cpus_online;
     extern uint32_t cpu_count;
-    cache_invalidate(&cpus_online);
-    cache_invalidate(&cpu_count);
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_EQUAL_INT(cpu_count, cpus_online);
 }
 
@@ -2885,7 +2885,7 @@ static void test_cpu_data_online_flags(void)
     extern struct per_cpu cpu_data[];
     extern uint32_t cpu_count;
     for (uint32_t i = 0; i < cpu_count; i++) {
-        cache_invalidate(&cpu_data[i].online);
+        smp_mb();
         TEST_ASSERT_TRUE(cpu_data[i].online);
     }
 }
@@ -2902,8 +2902,8 @@ static void test_boot_cpu_is_cpu0(void)
 /*
  * Test: cpus_online counter matches per-CPU online flags.
  * Verifies consistency between the global counter and per-CPU structs.
- * This catches the DC CIVAC writeback bug where CPU 0's stale dirty cacheline
- * for cpu_data[] would overwrite secondary CPUs' online=true at PoC.
+ * (Once also a check for a DC CIVAC writeback of a stale cpu_data[]
+ * line; the cache maintenance is gone with #1193.)
  */
 static void test_cpus_online_matches_flags(void)
 {
@@ -2911,12 +2911,12 @@ static void test_cpus_online_matches_flags(void)
     extern volatile uint32_t cpus_online;
     extern uint32_t cpu_count;
 
-    cache_invalidate(&cpus_online);
+    smp_mb();
     uint32_t counter = cpus_online;
     uint32_t flags_count = 0;
 
     for (uint32_t i = 0; i < cpu_count; i++) {
-        cache_invalidate(&cpu_data[i].online);
+        smp_mb();
         if (cpu_data[i].online) {
             flags_count++;
         }
@@ -2928,8 +2928,7 @@ static void test_cpus_online_matches_flags(void)
 /*
  * Test: Per-CPU struct fields are consistent after boot.
  * Verifies that cpu_data[i] has correct cpu_id and valid mpidr after
- * cache maintenance. This tests that cache_clean_range on cpu_data before
- * secondary boot doesn't corrupt neighboring struct fields (false sharing).
+ * secondary boot, with neighbouring per_cpu structs sharing cachelines.
  */
 static void test_cpu_data_fields_consistent(void)
 {
@@ -2938,8 +2937,7 @@ static void test_cpu_data_fields_consistent(void)
     extern uint64_t cpu_logical_map[];
 
     for (uint32_t i = 0; i < cpu_count; i++) {
-        /* Invalidate the entire per-CPU struct to get fresh data */
-        cache_invalidate_range(&cpu_data[i], sizeof(struct per_cpu));
+        smp_mb();
 
         TEST_ASSERT_EQUAL_UINT32(i, cpu_data[i].cpu_id);
         TEST_ASSERT_EQUAL_HEX64(cpu_logical_map[i], cpu_data[i].mpidr);

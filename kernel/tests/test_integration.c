@@ -200,7 +200,7 @@ void tearDown(void)
  * Task Functions for Tests
  * ============================================================================ */
 
-/* Migration test state: cacheable BSS with cache_clean/invalidate. */
+/* Migration test state: cacheable BSS, ordered with smp_mb() (#1193). */
 static volatile bool migration_ready = false;
 static volatile bool migration_done = false;
 static volatile uint32_t migration_cpu_before = 0;
@@ -212,20 +212,20 @@ static void migration_test_task(void *arg)
 
     uint32_t my_cpu = cpu_id();
     migration_cpu_before = my_cpu;
-    cache_clean(&migration_cpu_before);
+    smp_mb();
     migration_ready = true;
-    cache_clean(&migration_ready);
+    smp_mb();
 
     /* Wait for migration to complete */
     while (1) {
-        cache_invalidate(&migration_done);
+        smp_mb();
         if (migration_done) break;
         delay(10000);
         yield();
     }
 
     migration_cpu_after = cpu_id();
-    cache_clean(&migration_cpu_after);
+    smp_mb();
 
     /* Do some work to prove we're running */
     for (int i = 0; i < 3; i++) {
@@ -234,7 +234,7 @@ static void migration_test_task(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-    cache_clean(&test_state.tasks_completed);
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -275,7 +275,7 @@ static void stress_task_func(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-    cache_clean(&test_state.tasks_completed);
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -290,14 +290,14 @@ static void contention_task(void *arg)
     for (int i = 0; i < increments; i++) {
         irq_flags_t flags = spin_lock_irqsave(&contention_lock);
         contention_counter++;
-        cache_clean(&contention_counter);
+        smp_mb();
         spin_unlock_irqrestore(&contention_lock, flags);
         delay(1000);
     }
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-    cache_clean(&test_state.tasks_completed);
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -311,7 +311,7 @@ static void lifecycle_task_func(void *arg)
     /* Atomic increment using spinlock for reliability */
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     lifecycle_completed++;
-    cache_clean(&lifecycle_completed);
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -337,14 +337,13 @@ static void test_multicore_basic(void)
     scheduler_add_task_to_cpu(task_b, 2);
     scheduler_add_task_to_cpu(task_c, 3);
 
-    /* Wait for completion with timeout: poll task state with cache
-     * invalidate. */
+    /* Wait for completion with timeout: poll task state. */
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate(&task_a->state);
-        cache_invalidate(&task_b->state);
-        cache_invalidate(&task_c->state);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (task_a->state == TASK_TERMINATED &&
             task_b->state == TASK_TERMINATED &&
             task_c->state == TASK_TERMINATED) break;
@@ -407,7 +406,7 @@ static void test_task_migration(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate(&migration_ready);
+        smp_mb();
         if (migration_ready) break;
         yield();
     }
@@ -415,7 +414,7 @@ static void test_task_migration(void)
 
     /* Let task finish */
     migration_done = true;
-    cache_clean(&migration_done);
+    smp_mb();
 
     /* Wait for completion */
     start = timer_get_count();
@@ -427,7 +426,7 @@ static void test_task_migration(void)
 
     TEST_ASSERT_MESSAGE(mig_task->state == TASK_TERMINATED,
         "Migration task did not complete");
-    cache_invalidate(&migration_cpu_before);
+    smp_mb();
     TEST_ASSERT_MESSAGE(migration_cpu_before == 3, "Task should run on CPU 3 after migration");
 }
 
@@ -468,7 +467,7 @@ static void test_stress_multicpu(void)
         yield();
     }
 
-    cache_invalidate(&test_state.tasks_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(test_state.tasks_completed == 6,
         "Timeout waiting for stress tasks");
 }
@@ -501,15 +500,15 @@ static void test_lock_contention(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate(&test_state.tasks_completed);
+        smp_mb();
         if (test_state.tasks_completed >= CONTENTION_TASKS) break;
         yield();
     }
 
-    cache_invalidate(&test_state.tasks_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(test_state.tasks_completed >= CONTENTION_TASKS,
         "Timeout waiting for contention tasks");
-    cache_invalidate(&contention_counter);
+    smp_mb();
     uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
     TEST_ASSERT_MESSAGE(contention_counter == expected,
         "Race condition detected in lock contention");
@@ -552,12 +551,12 @@ static void test_task_lifecycle(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate(&lifecycle_completed);
+        smp_mb();
         if (lifecycle_completed >= LIFECYCLE_CYCLES) break;
         yield();
     }
 
-    cache_invalidate(&lifecycle_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
         "Timeout: not all lifecycle tasks completed");
 
@@ -715,7 +714,7 @@ static void steal_test_task(void *arg)
     uint32_t idx = (uint32_t)(uintptr_t)arg;
     if (idx < STEAL_TASK_COUNT) {
         steal_cpu_recorded[idx] = cpu_id() + 1;  /* +1 so 0 means "not run" */
-        cache_clean((void *)&steal_cpu_recorded[idx]);
+        smp_mb();
     }
     /*
      * CPU-bound arithmetic — mirrors bench stealing's workload.
@@ -740,7 +739,7 @@ static void steal_test_task(void *arg)
 
     irq_flags_t f = spin_lock_irqsave(&test_state.lock);
     steal_done_count++;
-    cache_clean((void *)&steal_done_count);
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, f);
 }
 
@@ -789,7 +788,7 @@ static void test_work_stealing_distributes_load(void)
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
         for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
         steal_done_count = 0;
-        cache_clean((void *)&steal_done_count);
+        smp_mb();
 
         /* Flakiness diagnostic: per-attempt snapshot of steal
          * attempts/successes/stale and schedule()/picked so we
@@ -831,7 +830,7 @@ static void test_work_stealing_distributes_load(void)
         uint64_t start = timer_get_count();
         uint64_t limit = timer_get_frequency() * 4;
         while ((timer_get_count() - start) < limit) {
-            cache_invalidate((void *)&steal_done_count);
+            smp_mb();
             if (steal_done_count >= STEAL_TASK_COUNT) break;
             yield();
         }
@@ -839,7 +838,7 @@ static void test_work_stealing_distributes_load(void)
         uint64_t t_done = timer_get_count();
 #endif
 
-        cache_invalidate((void *)&steal_done_count);
+        smp_mb();
         TEST_ASSERT_MESSAGE(steal_done_count == STEAL_TASK_COUNT,
             "work-steal test: not all tasks completed");
 
@@ -853,7 +852,7 @@ static void test_work_stealing_distributes_load(void)
 #endif
         int ran_off_owner = 0;
         for (int i = 0; i < STEAL_TASK_COUNT; i++) {
-            cache_invalidate((void *)&steal_cpu_recorded[i]);
+            smp_mb();
             uint32_t r = steal_cpu_recorded[i];
             TEST_ASSERT_MESSAGE(r != 0, "task did not record a CPU");
 #if defined(PLATFORM_RASPI5)
@@ -971,7 +970,7 @@ static void msg_x_subscriber(void *arg)
         const uint8_t *data = msg_router_receive(MSG_X_COMPONENT, topic_buf);
         if (data) {
             msg_x_received++;
-            cache_clean((void *)&msg_x_received);
+            smp_mb();
             msg_router_ack(MSG_X_COMPONENT);
         } else {
             yield();
@@ -979,7 +978,7 @@ static void msg_x_subscriber(void *arg)
     }
 
     msg_x_subscriber_done = 1;
-    cache_clean((void *)&msg_x_subscriber_done);
+    smp_mb();
 }
 
 static void msg_x_publisher(void *arg)
@@ -993,12 +992,12 @@ static void msg_x_publisher(void *arg)
         int delivered = msg_router_publish(MSG_X_TOPIC, payload);
         if (delivered == 1) {
             msg_x_published++;
-            cache_clean((void *)&msg_x_published);
+            smp_mb();
         }
     }
 
     msg_x_publisher_done = 1;
-    cache_clean((void *)&msg_x_publisher_done);
+    smp_mb();
 }
 
 static void test_msg_router_cross_cpu(void)
@@ -1014,10 +1013,10 @@ static void test_msg_router_cross_cpu(void)
     msg_x_published = 0;
     msg_x_subscriber_done = 0;
     msg_x_publisher_done = 0;
-    cache_clean((void *)&msg_x_received);
-    cache_clean((void *)&msg_x_published);
-    cache_clean((void *)&msg_x_subscriber_done);
-    cache_clean((void *)&msg_x_publisher_done);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     int ret = msg_router_subscribe(MSG_X_TOPIC, MSG_X_COMPONENT);
     TEST_ASSERT_MESSAGE(ret == 0, "subscribe failed");
@@ -1033,16 +1032,16 @@ static void test_msg_router_cross_cpu(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 8;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&msg_x_subscriber_done);
-        cache_invalidate((void *)&msg_x_publisher_done);
+        smp_mb();
+        smp_mb();
         if (msg_x_subscriber_done && msg_x_publisher_done) break;
         yield();
     }
 
     msg_router_unsubscribe_all(MSG_X_COMPONENT);
 
-    cache_invalidate((void *)&msg_x_received);
-    cache_invalidate((void *)&msg_x_published);
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(msg_x_published == MSG_X_MESSAGES,
         "publisher did not publish all messages");
     TEST_ASSERT_MESSAGE(msg_x_received == MSG_X_MESSAGES,
@@ -1098,10 +1097,10 @@ static void ms_subscriber(void *arg)
             count++;
             if (which == 0) {
                 ms_a_received = count;
-                cache_clean((void *)&ms_a_received);
+                smp_mb();
             } else {
                 ms_b_received = count;
-                cache_clean((void *)&ms_b_received);
+                smp_mb();
             }
             msg_router_ack(component);
         } else {
@@ -1111,10 +1110,10 @@ static void ms_subscriber(void *arg)
 
     if (which == 0) {
         ms_sub_a_done = 1;
-        cache_clean((void *)&ms_sub_a_done);
+        smp_mb();
     } else {
         ms_sub_b_done = 1;
-        cache_clean((void *)&ms_sub_b_done);
+        smp_mb();
     }
 }
 
@@ -1134,8 +1133,8 @@ static void ms_publisher(void *arg)
     }
     ms_delivered_total = total;
     ms_pub_done = 1;
-    cache_clean((void *)&ms_delivered_total);
-    cache_clean((void *)&ms_pub_done);
+    smp_mb();
+    smp_mb();
 }
 
 static void test_msg_router_multi_subscriber(void)
@@ -1153,12 +1152,12 @@ static void test_msg_router_multi_subscriber(void)
     ms_sub_a_done = 0;
     ms_sub_b_done = 0;
     ms_delivered_total = 0;
-    cache_clean((void *)&ms_a_received);
-    cache_clean((void *)&ms_b_received);
-    cache_clean((void *)&ms_pub_done);
-    cache_clean((void *)&ms_sub_a_done);
-    cache_clean((void *)&ms_sub_b_done);
-    cache_clean((void *)&ms_delivered_total);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_A_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_B_COMPONENT));
@@ -1183,9 +1182,9 @@ static void test_msg_router_multi_subscriber(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&ms_pub_done);
-        cache_invalidate((void *)&ms_sub_a_done);
-        cache_invalidate((void *)&ms_sub_b_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (ms_pub_done && ms_sub_a_done && ms_sub_b_done) break;
         yield();
     }
@@ -1193,12 +1192,12 @@ static void test_msg_router_multi_subscriber(void)
     msg_router_unsubscribe_all(MS_A_COMPONENT);
     msg_router_unsubscribe_all(MS_B_COMPONENT);
 
-    cache_invalidate((void *)&ms_a_received);
-    cache_invalidate((void *)&ms_b_received);
-    cache_invalidate((void *)&ms_pub_done);
-    cache_invalidate((void *)&ms_sub_a_done);
-    cache_invalidate((void *)&ms_sub_b_done);
-    cache_invalidate((void *)&ms_delivered_total);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(ms_pub_done, "publisher did not finish all publishes");
     TEST_ASSERT_MESSAGE(ms_sub_a_done, "subscriber A did not finish");
     TEST_ASSERT_MESSAGE(ms_sub_b_done, "subscriber B did not finish");
@@ -1267,8 +1266,8 @@ static void pr_publisher_hi(void *arg)
     }
     pr_hi_delivered = total;
     pr_pub_hi_done = 1;
-    cache_clean((void *)&pr_hi_delivered);
-    cache_clean((void *)&pr_pub_hi_done);
+    smp_mb();
+    smp_mb();
 }
 
 static void pr_publisher_lo(void *arg)
@@ -1283,8 +1282,8 @@ static void pr_publisher_lo(void *arg)
     }
     pr_lo_delivered = total;
     pr_pub_lo_done = 1;
-    cache_clean((void *)&pr_lo_delivered);
-    cache_clean((void *)&pr_pub_lo_done);
+    smp_mb();
+    smp_mb();
 }
 
 static void pr_subscriber(void *arg)
@@ -1309,8 +1308,8 @@ static void pr_subscriber(void *arg)
             }
             pr_hi_received = hi;
             pr_lo_received = lo;
-            cache_clean((void *)&pr_hi_received);
-            cache_clean((void *)&pr_lo_received);
+            smp_mb();
+            smp_mb();
             msg_router_ack(PR_C_COMPONENT);
         } else {
             yield();
@@ -1318,7 +1317,7 @@ static void pr_subscriber(void *arg)
     }
 
     pr_sub_done = 1;
-    cache_clean((void *)&pr_sub_done);
+    smp_mb();
 }
 
 static void test_msg_router_priority_concurrent(void)
@@ -1337,13 +1336,13 @@ static void test_msg_router_priority_concurrent(void)
     pr_sub_done = 0;
     pr_hi_delivered = 0;
     pr_lo_delivered = 0;
-    cache_clean((void *)&pr_hi_received);
-    cache_clean((void *)&pr_lo_received);
-    cache_clean((void *)&pr_pub_hi_done);
-    cache_clean((void *)&pr_pub_lo_done);
-    cache_clean((void *)&pr_sub_done);
-    cache_clean((void *)&pr_hi_delivered);
-    cache_clean((void *)&pr_lo_delivered);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_HI, PR_C_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_LO, PR_C_COMPONENT));
@@ -1362,22 +1361,22 @@ static void test_msg_router_priority_concurrent(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&pr_pub_hi_done);
-        cache_invalidate((void *)&pr_pub_lo_done);
-        cache_invalidate((void *)&pr_sub_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (pr_pub_hi_done && pr_pub_lo_done && pr_sub_done) break;
         yield();
     }
 
     msg_router_unsubscribe_all(PR_C_COMPONENT);
 
-    cache_invalidate((void *)&pr_hi_received);
-    cache_invalidate((void *)&pr_lo_received);
-    cache_invalidate((void *)&pr_pub_hi_done);
-    cache_invalidate((void *)&pr_pub_lo_done);
-    cache_invalidate((void *)&pr_sub_done);
-    cache_invalidate((void *)&pr_hi_delivered);
-    cache_invalidate((void *)&pr_lo_delivered);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(pr_pub_hi_done, "hi publisher hung");
     TEST_ASSERT_MESSAGE(pr_pub_lo_done, "lo publisher hung");
     TEST_ASSERT_MESSAGE(pr_sub_done, "subscriber hung");
@@ -1439,7 +1438,7 @@ static void ar_helper(void *arg)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&ar_trigger);
+        smp_mb();
         if (ar_trigger) break;
         yield();
     }
@@ -1451,7 +1450,7 @@ static void ar_helper(void *arg)
     (void)msg_router_publish_nowait(AR_TOPIC_B, (const uint8_t *)"B1");
 
     ar_helper_done = 1;
-    cache_clean((void *)&ar_helper_done);
+    smp_mb();
 }
 
 static void test_msg_router_ack_targets_last_received_cross_cpu(void)
@@ -1465,8 +1464,8 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
     msg_router_init();
     ar_trigger = 0;
     ar_helper_done = 0;
-    cache_clean((void *)&ar_trigger);
-    cache_clean((void *)&ar_helper_done);
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_A, AR_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_B, AR_COMPONENT));
@@ -1493,15 +1492,15 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
      * confirmation that the publish has landed. After HELPER_DONE we
      * know MB.ready=1. */
     ar_trigger = 1;
-    cache_clean((void *)&ar_trigger);
+    smp_mb();
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&ar_helper_done);
+        smp_mb();
         if (ar_helper_done) break;
         yield();
     }
-    cache_invalidate((void *)&ar_helper_done);
+    smp_mb();
     TEST_ASSERT_MESSAGE(ar_helper_done,
         "helper task did not complete /ar/b publish within timeout");
 
@@ -1585,8 +1584,8 @@ static void sm_publisher_a(void *arg)
     }
     sm_a_delivered = total;
     sm_pub_a_done = 1;
-    cache_clean((void *)&sm_a_delivered);
-    cache_clean((void *)&sm_pub_a_done);
+    smp_mb();
+    smp_mb();
 }
 
 static void sm_publisher_b(void *arg)
@@ -1601,8 +1600,8 @@ static void sm_publisher_b(void *arg)
     }
     sm_b_delivered = total;
     sm_pub_b_done = 1;
-    cache_clean((void *)&sm_b_delivered);
-    cache_clean((void *)&sm_pub_b_done);
+    smp_mb();
+    smp_mb();
 }
 
 static void sm_subscriber(void *arg)
@@ -1625,8 +1624,8 @@ static void sm_subscriber(void *arg)
             }
             sm_sub_a_seen = a;
             sm_sub_b_seen = b;
-            cache_clean((void *)&sm_sub_a_seen);
-            cache_clean((void *)&sm_sub_b_seen);
+            smp_mb();
+            smp_mb();
             msg_router_ack(SM_C_COMPONENT);
         } else {
             yield();
@@ -1634,7 +1633,7 @@ static void sm_subscriber(void *arg)
     }
 
     sm_sub_done = 1;
-    cache_clean((void *)&sm_sub_done);
+    smp_mb();
 }
 
 static void test_msg_router_same_mailbox_zero_loss(void)
@@ -1653,13 +1652,13 @@ static void test_msg_router_same_mailbox_zero_loss(void)
     sm_pub_a_done = 0;
     sm_pub_b_done = 0;
     sm_sub_done = 0;
-    cache_clean((void *)&sm_a_delivered);
-    cache_clean((void *)&sm_b_delivered);
-    cache_clean((void *)&sm_sub_a_seen);
-    cache_clean((void *)&sm_sub_b_seen);
-    cache_clean((void *)&sm_pub_a_done);
-    cache_clean((void *)&sm_pub_b_done);
-    cache_clean((void *)&sm_sub_done);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(SM_TOPIC, SM_C_COMPONENT));
 
@@ -1677,22 +1676,22 @@ static void test_msg_router_same_mailbox_zero_loss(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&sm_pub_a_done);
-        cache_invalidate((void *)&sm_pub_b_done);
-        cache_invalidate((void *)&sm_sub_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (sm_pub_a_done && sm_pub_b_done && sm_sub_done) break;
         yield();
     }
 
     msg_router_unsubscribe_all(SM_C_COMPONENT);
 
-    cache_invalidate((void *)&sm_pub_a_done);
-    cache_invalidate((void *)&sm_pub_b_done);
-    cache_invalidate((void *)&sm_sub_done);
-    cache_invalidate((void *)&sm_sub_a_seen);
-    cache_invalidate((void *)&sm_sub_b_seen);
-    cache_invalidate((void *)&sm_a_delivered);
-    cache_invalidate((void *)&sm_b_delivered);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(sm_pub_a_done, "pub_a hung");
     TEST_ASSERT_MESSAGE(sm_pub_b_done, "pub_b hung");
     TEST_ASSERT_MESSAGE(sm_sub_done,   "subscriber hung");
@@ -1765,7 +1764,7 @@ static void smp_notify_probe_task(void *arg)
 {
     (void)arg;
     smp_notify_sentinel = NOTIFY_SENTINEL;
-    cache_clean((void *)&smp_notify_sentinel);
+    smp_mb();
 }
 
 static void test_smp_notify_cpu_wakes_secondary(void)
@@ -1776,7 +1775,7 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     }
 
     smp_notify_sentinel = 0;
-    cache_clean((void *)&smp_notify_sentinel);
+    smp_mb();
 
     struct task *probe = task_create("smp_notify_probe",
                                      smp_notify_probe_task, NULL);
@@ -1790,12 +1789,12 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 3;  /* 3 s */
     while ((timer_get_count() - start) < limit) {
-        cache_invalidate((void *)&smp_notify_sentinel);
+        smp_mb();
         if (smp_notify_sentinel == NOTIFY_SENTINEL) break;
         yield();
     }
 
-    cache_invalidate((void *)&smp_notify_sentinel);
+    smp_mb();
     TEST_ASSERT_MESSAGE(smp_notify_sentinel == NOTIFY_SENTINEL,
         "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
 }
