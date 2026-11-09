@@ -47,3 +47,28 @@ Revision 2 (2026-11-09, after C1 critic round 1): adds S2 and the P4
 coverage counters. The checkers for every forbidden predicate (P1-P6) and
 the path from a failing row to the final FAIL verdict must be fault-injected
 in the self-test.
+
+Revision 3 (2026-11-09, after C2 critic round 1): row-tagged values.
+The P1, P2 and S1 readers returned as soon as they read `f >= n`, without
+checking that the value came from the current row, so a reader holding a
+stale line with a previous row's final value finished at once with zero
+forbidden outcomes (seen on hardware through the Non-cacheable control
+alias). From revision 3:
+
+- Every value a writer stores in P1, P2, S1 and P4 carries a per-row nonce
+  in its upper bits: `v = (nonce << 40) | i`, with a fresh nonzero nonce per
+  row. The row's shared variables are initialised to a value tagged with a
+  different, reserved nonce before the start barrier.
+- A reader treats a value with a foreign nonce as "row not started"; if it
+  never sees its own nonce, that is a timeout. A value with its own nonce
+  and an index above n, or a foreign nonce after its own nonce has been
+  seen, counts as forbidden.
+- Each MP reader counts `observed`: loop iterations in which the flag held
+  its own nonce with index below n. A row in which any reader has
+  `observed == 0` is `weak` and fails, like a P4 row with zero straddles.
+  MP rows print ` observed=<per reader>`.
+- Negative controls (a) and (b): each slot is written with a sentinel and
+  cleaned to PoC (DC CIVAC + DSB) through the normal mapping before the
+  alias is created, so a control result does not depend on old DRAM.
+- Self-test: preload the flag with a foreign-nonce final value; the row must
+  not pass. The test that codified the early return is removed.
