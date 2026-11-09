@@ -81,7 +81,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 
 **Key bugs fixed to achieve reliable cross-CPU dispatch:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
-2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
+2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries; superseded by #1193, where the caches are coherent and the clean is removed)
 3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
 4. **Spinlock cross-CPU visibility (April 16, 2026):** `STLR`-released locks stayed in the releaser's L2 and waiters' `LDAXR` read stale "locked" from their own L2 forever. Fixed in `spinlock.h` for `PLATFORM_RASPI5` with `DC CIVAC` + `DSB SY` around `LDAXR` and `STLR`, forcing lock state through DRAM. (Superseded by #1193: the caches are coherent and the DC CIVAC path is removed; see `docs/adr/0006-cross-cpu-coherency.md`.)
 5. **sched_migrate_task double-queue (April 16, 2026):** Between the `task->assigned_cpu` read and the rq_lock acquire, a work-stealing thief could pull the task from old_cpu's queue. The old code then called `add_to_cpu_queue_locked(target)` unconditionally, linking the task into two queues. Fixed by checking the `remove_from_cpu_queue_locked` return value; if the task was stolen, only update `assigned_cpu` and let the thief run it.

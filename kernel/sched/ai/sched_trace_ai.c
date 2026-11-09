@@ -23,7 +23,6 @@
 #include "ai_state.h"
 #include "task.h"
 #include "smp.h"
-#include "cache.h"
 #include "pmm.h"
 #include "spinlock.h"   /* irq_save / irq_restore */
 #include "string.h"

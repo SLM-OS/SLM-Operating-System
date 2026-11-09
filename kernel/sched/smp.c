@@ -362,17 +362,14 @@ void secondary_init(uint32_t logical_cpu_id)
      * kernel_main, secondaries from here. The return value is intentionally
      * discarded: a per-CPU PMU enable failure stamps the readiness flag
      * to false, and `pmu probe` (#875) is the surface that reports it.
-     * Secondaries cannot WARN/INFO directly — Pi 5 / Jetson UART writes
-     * from secondaries deadlock the UART lock (kernel/CLAUDE.md "UART
-     * Lock on Pi 5 / Jetson"). */
+     * The readiness flag, not a print, reports the result: CPU 0 is
+     * printing the boot log at this point. */
     (void)pmu_enable_self();
 #endif
 
-    /* Signal the primary CPU that we're online.
-     * Use atomic store-release (STLR) to ensure the write is globally
-     * visible. On platforms where DC CVAC doesn't propagate through
-     * per-core L2 (Pi 5, possibly Jetson), STLR bypasses this issue
-     * because ARM's release semantics guarantee multi-copy atomicity. */
+    /* Signal the primary CPU that we're online. The store-release
+     * (STLR) orders cpu_data[].online and everything before it ahead of
+     * the flag that boot_secondary polls with a load-acquire. */
     cpu_data[logical_cpu_id].online = true;
     __atomic_store_n(&cpu_boot_flag[logical_cpu_id], 1, __ATOMIC_RELEASE);
     __asm__ volatile("dsb sy" ::: "memory");

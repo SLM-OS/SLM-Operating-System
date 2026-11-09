@@ -730,8 +730,6 @@ static void update_deadline_boost(struct task *task)
         return;
     }
 
-    /* Deadline may have been set by another CPU */
-
     if (task->deadline_ns == 0) {
         /* No deadline: the base priority, or the inherited floor if higher */
         set_effective_priority(task, effective_base_priority(task));
@@ -1136,8 +1134,6 @@ void scheduler_add_task(struct task *task)
 #endif
 
     uint32_t target_cpu;
-
-    /* Affinity may have been set by another CPU */
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
@@ -2373,8 +2369,6 @@ void schedule(void)
     struct task *next = pick_next_task(this_cpu);
 
     /* If current task is still running and ready, re-add to queue */
-    if (current) {
-    }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
 
@@ -2438,8 +2432,6 @@ void schedule(void)
      * It will be destroyed on the next schedule() call after we've
      * safely switched to a different stack.
      */
-    if (current) {
-    }
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
     }

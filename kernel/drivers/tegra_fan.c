@@ -9,7 +9,6 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
 #include "bpmp.h"
-#include "cache.h"
 #include "emc_hold.h"
 #include "debug.h"
 #include "platform.h"

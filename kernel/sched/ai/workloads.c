@@ -156,9 +156,8 @@ static struct bench_wl_slot wl_slots[BENCH_WORKLOAD_MAX_TASKS] __attribute__((al
  * non-shell entry point) would silently corrupt records. Mirrors the
  * `in_split` pattern documented in kernel/CLAUDE.md §"Buddy Allocator".
  *
- * Best-effort fail-loud, NOT a cross-CPU lock — on Pi 5 / Jetson the
- * `volatile bool` write isn't guaranteed visible to a concurrent reader
- * on another CPU without cache maintenance. The documented precondition
+ * Best-effort fail-loud, NOT a cross-CPU lock: the check and the set of
+ * the `volatile bool` are not one atomic step. The documented precondition
  * (shell task on CPU 0, single-threaded) makes this a non-issue in
  * practice. A future Lua/IPC binding that legitimately needs concurrent
  * access must add an external spinlock around the whole run rather than

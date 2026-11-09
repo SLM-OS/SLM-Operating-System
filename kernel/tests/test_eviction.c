@@ -22,7 +22,6 @@
 #include "../include/spinlock.h"   /* smp_mb */
 #include "../include/sched.h"
 #include "../include/smp.h"
-#include "../include/cache.h"
 #include "../include/timer.h"
 #include "../include/gpu_consumer.h"
 #include "../include/slm_ffi_test.h"

@@ -9,7 +9,6 @@
 #include "debug.h"
 #include "smp.h"
 #include "spinlock.h"
-#include "cache.h"
 #include "arch.h"
 #include "steal_trace.h"
 #if !defined(PLATFORM_X86_64)
