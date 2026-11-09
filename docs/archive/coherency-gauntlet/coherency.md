@@ -38,7 +38,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
 | C2 | `coherency` verb and litmus suite | QEMU stage done (9a13b9ee); hardware stage running, Jetson and Pi 5 in parallel | 0 |
-| C3 | Boot-sequence audit and cacheable build | QEMU stage done (118c146d switches, a6c2242a fixes); hardware waits for suite rev 2 | 0 |
+| C3 | Boot-sequence audit and cacheable build | QEMU stage done; hardware build is c3-hw-1193 @ cf7866f2 (C3 + suite rev 2), waits for boards | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
 
 ### Record check (git history, times -0700)
@@ -161,6 +161,16 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - QEMU: `make test` PASS, x86-64 PASS, check-braces 0, test-build-order
   PASS; new `test_nc_axis.c` walks live page tables to check where run
   queues, task table and `current_task` live.
+
+### Suite revision 2 in the kernel (c2-rev2, 09028b54)
+
+- S2 rows, SENS lines and P4 coverage in C1's format; 19 self-tests,
+  including end-to-end fault injection for P3, P4 b<a, weak P4 and P6, each
+  ending in `coherency: FAIL`. Integration branch `c3-hw-1193` @ cf7866f2
+  (C3 a6c2242a + 09028b54): QEMU `make test` PASS, with the real run and the
+  no-fault control passing and the four injected runs failing, as designed.
+- On QEMU, S2 is nonzero on 11 of 12 pairs while S1 stays 0, so QEMU cannot
+  show P2 sensitivity; only hardware can.
 
 ### Lab notes
 
