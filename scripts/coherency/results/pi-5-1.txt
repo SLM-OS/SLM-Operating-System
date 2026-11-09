@@ -37,6 +37,64 @@ Times (the board has no wall clock; host-side UTC):
   END marker fetched 23:49:48, so the run spans about 23:39:40 to 23:49:45.
 status.txt as fetched: 27054 lines, sha256 d0d3f3b0...6686.
 
+=== CARD CONFIG.TXT BEFORE ANY #1193 CHANGE (verbatim) ===
+Provenance: file pi-5-1-config.txt in the session scratchpad, written by
+the orchestrator; its first two lines are the orchestrator's provenance
+header, the rest is the card's config.txt byte for byte as returned by
+mcp__labctl__sdwire_cat (size 1297, mtime 2026-05-10T23:01:22Z, the same
+size and mtime this harness saw before and after its own changes).
+----8<----
+# Captured by the orchestrator with mcp__labctl__sdwire_cat pi-5-1 partition 1 config.txt
+# at 2026-11-08 ~22:20 UTC, before any #1193 change; size 1297, mtime 2026-05-10T23:01:22Z
+# SLM-OS bare-metal config for Raspberry Pi 5 (BCM2712).
+# Single-purpose card — no Linux.
+#
+# Pi 5 firmware loads this file at every normal boot. When the bootloader
+# tryboot flag is armed (one-shot, set by `kernel activate` via the
+# bcm_mailbox SET_REBOOT_FLAGS / NOTIFY_REBOOT tag pair), the firmware
+# instead loads `tryboot.txt` for that one boot — see ./tryboot.txt.
+
+# Tell firmware not to validate the kernel as a Linux image — SLM-OS
+# is bare-metal AArch64 and won't pass Linux header checks.
+os_check=0
+
+# Don't try to load an initramfs (we have no Linux).
+auto_initramfs=0
+
+# Run AArch64 mode (Pi 5 default but explicit is safer).
+arm_64bit=1
+
+# Run at full firmware-allowed clock.
+arm_boost=1
+
+# Kill overscan (no display anyway, but keeps cmdline.txt-free behavior clean).
+disable_overscan=1
+
+# Firmware-stage UART output on the GPIO 14/15 PL011 (UART0). Lets the
+# Pi firmware print pre-kernel status to the serial console, useful for
+# diagnosing boot failures before SLM-OS's own UART comes up.
+uart_2ndstage=1
+
+dtparam=pciex1
+
+# Keep PCIe x4 reset GPIO untouched at firmware time. SLM-OS handles
+# PCIe setup itself; firmware-side reset can wedge the BCM root complex.
+pciex4_reset=0
+
+# The kernel filename Pi 5 firmware loads from this partition.
+kernel=kernel_2712.img
+----8<----
+BL31 note: the repository template deploy/pi5/config.txt:46 has
+`armstub=armstub8-2712.bin` (the custom TF-A from tools/tfa-patches/),
+while this card's config.txt has no armstub line and the card root holds
+no armstub8-2712.bin (sdwire_ls listings in the restore records below). The template's own comment says
+the firmware would auto-load that file if present. So both SLM-OS on this
+card and the Linux reference run used the stock BL31 embedded in the
+EEPROM firmware (2024-09-23), and the comparison holds for this card's
+configuration only, not for the repository template's custom-BL31 setup.
+The Linux run's config.txt (scripts/coherency/pi5/config.txt) also has no
+armstub line.
+
 === RESULT ===
 VERDICT PASS passes=390 seconds=600.7. Every P row forbidden=0 timeouts=0,
 pin_fail 0. S1 relaxed outcomes per pair over 390 runs of 1e6:

@@ -132,11 +132,14 @@ fdt
 UEFI: EDK II 36.4.7-gcid-42132812 (DMI bios_version, bios_date 09/18/2025);
   ESRT entry0 fw_version=2360327 (0x240407 = 36.4.7), last_attempt_status=0;
   nvbootctrl: Current version 36.4.7, bootloader slot B active.
-BL31: no version string is exposed to Linux (not in dmesg, /proc/device-tree,
-  /sys/firmware or DMI). The TF-A banner prints only on the TCU boot log at
-  power-on, and the brief forbids a reboot, so it was not captured. The repo
-  record (docs/plans/jetson-preemption-restoration-plan.md, 2026-05-09) says
-  jetson-nano-2 runs the patched tegra234 BL31 from tools/tfa-patches/.
+BL31: LIMITATION, version NOT RECORDED. No BL31/TF-A version string is
+  visible from Linux (not in dmesg, /proc/device-tree, /sys/firmware, DMI or
+  ESRT). The TF-A banner prints only on the TCU boot log at power-on, and
+  this run was not allowed to reboot or kexec the board. The BL31 version
+  is to be read from the TCU boot banner at the next sanctioned reboot.
+  The repo record (docs/plans/jetson-preemption-restoration-plan.md,
+  2026-05-09) says jetson-nano-2 runs the patched tegra234 BL31 from
+  tools/tfa-patches/; that is a record, not a measurement of this run.
   PSCI v1.1 and SMCCC v1.2 per dmesg; SMCCC SOC_ID jep106:036b:0234 rev 0x401.
 OP-TEE: revision 4.2 (dmesg).
 nvpmodel: mode 1 (25W); not changed. cpufreq: schedutil, 729.6-1344 MHz; not changed.
