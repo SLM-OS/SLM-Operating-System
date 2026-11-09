@@ -1,0 +1,290 @@
+# jetson-nano-2, kexec from JetPack Linux, SLM-OS 10f8688e (suite rev 3)
+# V1T: make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
+# test slmos.elf sha256 ce414b83a395cca5b42fa4c8e527e47db3c65d04abbfaa590f5e26ca10ce27eb
+# kexec'd as /root/slmos-1193-V1T.elf at 04:26:27 UTC after a power cycle to SD Linux;
+# one continuous capture (220.6 s from before the kexec, labctl tail=300), stopped on "Test Suite Summary".
+# The first 37 captured lines (the tail of the subset self-test's P3 rows) are omitted here; the
+# capture's last characters ("[PA") were cut at the match and a follow-up 8 s capture got nothing.
+# Integration count is 16, not 19: under NC_AXIS=OFF PLATFORM_HAS_NC_MEMORY is undefined and
+# test_integration.c:2345 compiles out test_nc_memory_accessible, test_nc_alloc_alignment,
+# test_nc_region_used_by_scheduler (by design, C3 audit section 5).
+P4      w0/0-5        69632         0        0       0 pairs=1920,1088,2240,4736,4736 straddles=10,19,16,26,17 coverage=ok
+P4      w1/0-5        40960         0        0       0 pairs=1344,1088,1472,2880,3008 straddles=10,8,9,8,11 coverage=ok
+P4      w2/0-5        57344         0        0       0 pairs=1984,1152,2048,3776,3776 straddles=18,12,21,17,14 coverage=ok
+P4      w3/0-5        65536         0        0       0 pairs=2176,1088,1984,4416,4480 straddles=14,17,13,21,22 coverage=ok
+P4      w4/0-5        45056         0        0       0 pairs=3072,2880,2944,3072,1088 straddles=22,15,11,11,13 coverage=ok
+P4      w5/0-5        49152         0        0       0 pairs=3200,2944,2944,3520,1152 straddles=16,15,17,21,14 coverage=ok
+P6      0-5              16         0        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 0, fewest straddles of any reader: 8 (target 1)
+coherency: PASS
+  [PASS] test_subset_without_injection_passes
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x4 inject=P3-stale-partner (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P3      0>1              16        16        0       0
+P3      0>2              16        16        0       0
+P3      0>3              16        16        0       0
+P3      0>4              16        16        0       0
+P3      0>5              16        16        0       0
+P3      1>0              16        16        0       0
+P3      1>2              16        16        0       0
+P3      1>3              16        16        0       0
+P3      1>4              16        16        0       0
+P3      1>5              16        16        0       0
+P3      2>0              16        16        0       0
+P3      2>1              16        16        0       0
+P3      2>3              16        16        0       0
+P3      2>4              16        16        0       0
+P3      2>5              16        16        0       0
+P3      3>0              16        16        0       0
+P3      3>1              16        16        0       0
+P3      3>2              16        16        0       0
+P3      3>4              16        16        0       0
+P3      3>5              16        16        0       0
+P3      4>0              16        16        0       0
+P3      4>1              16        16        0       0
+P3      4>2              16        16        0       0
+P3      4>3              16        16        0       0
+P3      4>5              16        16        0       0
+P3      5>0              16        16        0       0
+P3      5>1              16        16        0       0
+P3      5>2              16        16        0       0
+P3      5>3              16        16        0       0
+P3      5>4              16        16        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+coherency: FAIL (30 rows)
+[INFO] coherency inject 1: 30 rows, 30 failed, 343 ms
+  [PASS] test_inject_p3_stale_partner_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x8 inject=P4-descending (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P4      w0/0-5        53248        83        0       0 pairs=1600,1152,2304,4608,4672 straddles=13,9,17,25,19 coverage=ok
+P4      w1/0-5        40960        78        0       0 pairs=2176,1152,1920,3456,3456 straddles=23,11,16,13,15 coverage=ok
+P4      w2/0-5        36864        49        0       0 pairs=1728,1152,1728,3008,2944 straddles=13,7,6,10,13 coverage=ok
+P4      w3/0-5        57344        83        0       0 pairs=2432,1088,1920,4992,5056 straddles=18,9,14,17,26 coverage=ok
+P4      w4/0-5        40960        77        0       0 pairs=3392,3136,3264,3584,1088 straddles=16,24,11,15,12 coverage=ok
+P4      w5/0-5        36864        68        0       0 pairs=3200,2944,2880,3264,1088 straddles=17,12,12,19,8 coverage=ok
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 0, fewest straddles of any reader: 6 (target 1)
+coherency: FAIL (6 rows)
+[INFO] coherency inject 2: 6 rows, 6 failed, 121 ms
+  [PASS] test_inject_p4_descending_writer_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x8 inject=P4-no-writes (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P4      w0/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w1/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w2/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w3/0-5            0         0        0       0 pairs=64,64,64,64,64 straddles=0,0,0,0,0 coverage=weak
+P4      w4/0-5            0         0        0       0 pairs=128,128,192,128,64 straddles=0,0,0,0,0 coverage=weak
+P4      w5/0-5            0         0        0       0 pairs=128,128,128,192,64 straddles=0,0,0,0,0 coverage=weak
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# P4 weak rows: 6, fewest straddles of any reader: 0 (target 1)
+coherency: FAIL (6 rows)
+[INFO] coherency inject 3: 6 rows, 6 failed, 139 ms
+  [PASS] test_inject_p4_weak_row_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=1000ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x20 inject=P6-sum-offset (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P6      0-5              16         1        0       0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+coherency: FAIL (1 rows)
+[INFO] coherency inject 4: 1 rows, 1 failed, 50 ms
+  [PASS] test_inject_p6_sum_offset_fails
+# coherency litmus: cpus=0-5 scale=1000000 timeout=50ms caller=cpu0 p4_target=1 p4_budget_ms=2000
+# self-test run: patterns=0x2 inject=MP-stale-flag (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1              16         0        1      50 observed=0
+P2      0>2              16         0        1      50 observed=0
+P2      0>3              16         0        1      50 observed=0
+P2      0>4              16         0        1      50 observed=0
+P2      0>5              16         0        1      50 observed=0
+P2      1>0              16         0        1      50 observed=0
+P2      1>2              16         0        1      50 observed=0
+P2      1>3              16         0        1      50 observed=0
+P2      1>4              16         0        1      50 observed=0
+P2      1>5              16         0        1      50 observed=0
+P2      2>0              16         0        1      50 observed=0
+P2      2>1              16         0        1      50 observed=0
+P2      2>3              16         0        1      50 observed=0
+P2      2>4              16         0        1      50 observed=0
+P2      2>5              16         0        1      50 observed=0
+P2      3>0              16         0        1      50 observed=0
+P2      3>1              16         0        1      50 observed=0
+P2      3>2              16         0        1      50 observed=0
+P2      3>4              16         0        1      50 observed=0
+P2      3>5              16         0        1      50 observed=0
+P2      4>0              16         0        1      50 observed=0
+P2      4>1              16         0        1      50 observed=0
+P2      4>2              16         0        1      50 observed=0
+P2      4>3              16         0        1      50 observed=0
+P2      4>5              16         0        1      50 observed=0
+P2      5>0              16         0        1      50 observed=0
+P2      5>1              16         0        1      50 observed=0
+P2      5>2              16         0        1      50 observed=0
+P2      5>3              16         0        1      50 observed=0
+P2      5>4              16         0        1      50 observed=0
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 0 (reported, not judged)
+# MP weak rows (a reader observed nothing): 30
+coherency: FAIL (30 rows)
+[INFO] coherency inject 5: 30 rows, 30 failed, 2036 ms
+  [PASS] test_inject_mp_stale_flag_fails
+# control a: reader on Normal WB Non-shareable alias (SH=00)
+# writer VA 0x139c00000, reader VA 0xffffff8fffe00000, PA 0x139c00000, alias descriptor 0x0060000139c0040d
+# fresh 4 KB slot per row, first slot 0
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1             100         0        0       0 observed=109
+P2      0>2             100         0        0       0 observed=113
+P2      0>3             100         0        0       0 observed=108
+P2      0>4             100         0        1    1000 observed=0
+P2      0>5             100         0        1    1000 observed=0
+P2      1>0             100         0        0       0 observed=120
+P2      1>2             100         0        0       0 observed=128
+P2      1>3             100         0        0       0 observed=104
+P2      1>4             100         0        1    1000 observed=0
+P2      1>5             100         0        1    1000 observed=0
+P2      2>0             100         0        0       0 observed=126
+P2      2>1             100         0        0       0 observed=104
+P2      2>3             100         0        0       0 observed=111
+P2      2>4             100         0        1    1000 observed=0
+P2      2>5             100         0        1    1000 observed=0
+P2      3>0             100         0        0       0 observed=112
+P2      3>1             100         0        0       0 observed=105
+P2      3>2             100         0        0       0 observed=84
+P2      3>4             100         0        1    1000 observed=0
+P2      3>5             100         0        1    1000 observed=0
+P2      4>0             100         0        1    1000 observed=0
+P2      4>1             100         0        1    1000 observed=0
+P2      4>2             100         0        1    1000 observed=0
+P2      4>3             100         0        1    1000 observed=0
+P2      4>5             100         0        0       0 observed=110
+P2      5>0             100         0        1    1000 observed=0
+P2      5>1             100         0        1    1000 observed=0
+P2      5>2             100         0        1    1000 observed=0
+P2      5>3             100         0        1    1000 observed=0
+P2      5>4             100         0        0       0 observed=98
+P4      w0/0-5    874713088         0        2    1000 pairs=58947072,30788352,58936256,150995584,150023104 straddles=520625,439907,516644,0,0 coverage=weak
+P4      w1/0-5    878182400         0        2    1000 pairs=58420416,48432896,41471616,150961600,149920000 straddles=519472,493734,454750,0,0 coverage=weak
+P4      w2/0-5    882528256         0        2    1000 pairs=40609152,48941248,58954560,150970048,149912192 straddles=465143,478940,506771,0,0 coverage=weak
+P4      w3/0-5    870821888         0        2    1000 pairs=58294720,31715328,59149632,151021056,149966080 straddles=524661,422856,525050,0,0 coverage=weak
+P4      w4/0-5    871809024         0        3    1000 pairs=150469504,151255104,150144640,151409984,63322816 straddles=0,0,0,0,596131 coverage=weak
+P4      w5/0-5    895238144         0        1    1000 pairs=150396544,151351936,150200128,151394176,63456320 straddles=0,0,0,0,578827 coverage=weak
+# control a totals: P2 forbidden=0 timeouts=16, P4 forbidden=0 timeouts=12
+# control b: reader on Normal Non-cacheable alias
+# writer VA 0x139c00000, reader VA 0xffffff8fffe00000, PA 0x139c00000, alias descriptor 0x0060000139c00709
+# fresh 4 KB slot per row, first slot 36
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1             100         0        1    1000 observed=0
+P2      0>2             100         0        1    1000 observed=0
+P2      0>3             100         0        1    1000 observed=0
+P2      0>4             100         0        1    1000 observed=0
+P2      0>5             100         0        1    1000 observed=0
+P2      1>0             100         0        1    1000 observed=0
+P2      1>2             100         0        1    1000 observed=0
+P2      1>3             100         0        1    1000 observed=0
+P2      1>4             100         0        1    1000 observed=0
+P2      1>5             100         0        1    1000 observed=0
+P2      2>0             100         0        1    1000 observed=0
+P2      2>1             100         0        1    1000 observed=0
+P2      2>3             100         0        1    1000 observed=0
+P2      2>4             100         0        1    1000 observed=0
+P2      2>5             100         0        1    1000 observed=0
+P2      3>0             100         0        1    1000 observed=0
+P2      3>1             100         0        1    1000 observed=0
+P2      3>2             100         0        1    1000 observed=0
+P2      3>4             100         0        1    1000 observed=0
+P2      3>5             100         0        1    1000 observed=0
+P2      4>0             100         0        1    1000 observed=0
+P2      4>1             100         0        1    1000 observed=0
+P2      4>2             100         0        1    1000 observed=0
+P2      4>3             100         0        1    1000 observed=0
+P2      4>5             100         0        1    1000 observed=0
+P2      5>0             100         0        1    1000 observed=0
+P2      5>1             100         0        1    1000 observed=0
+P2      5>2             100         0        1    1000 observed=0
+P2      5>3             100         0        1    1000 observed=0
+P2      5>4             100         0        1    1000 observed=0
+P4      w0/0-5    908529664         0        1    1000 pairs=11289088,11406976,11354304,11451904,11296000 straddles=0,0,0,0,0 coverage=weak
+P4      w1/0-5    902807552         0        1    1000 pairs=11106496,11402880,11364224,11396160,11232576 straddles=0,0,0,0,0 coverage=weak
+P4      w2/0-5    913199104         0        1    1000 pairs=10819712,11024192,11083200,11103808,10973568 straddles=0,0,0,0,0 coverage=weak
+P4      w3/0-5    901599232         0        1    1000 pairs=10615488,10830400,10906688,10940608,10789824 straddles=0,0,0,0,0 coverage=weak
+P4      w4/0-5    894648320         0        3    1000 pairs=11116096,11293696,11377408,11330944,11288704 straddles=0,0,0,0,0 coverage=weak
+P4      w5/0-5    911912960         0        1    1000 pairs=11097536,11311936,11385600,11350464,11430656 straddles=0,0,0,0,0 coverage=weak
+# control b totals: P2 forbidden=0 timeouts=30, P4 forbidden=0 timeouts=8
+# control c: reader with its data cache off (SCTLR.C=0); writer cleans P0 to PoC, stores P1 with no clean (phase 1), then cleans P1 (phase 2)
+# expected with real caches: p1_stale = iters, p2_fresh = iters
+pattern cpus          iters  p1_stale  p1_fresh  p2_stale  p2_fresh timeouts
+DCOFF   0>1            1024      1024         0         0      1024        0
+DCOFF   0>2            1024      1024         0         0      1024        0
+DCOFF   0>3            1024      1024         0         0      1024        0
+DCOFF   0>4            1024      1024         0         0      1024        0
+DCOFF   0>5            1024      1024         0         0      1024        0
+DCOFF   1>0            1024      1024         0         0      1024        0
+DCOFF   1>2            1024      1024         0         0      1024        0
+DCOFF   1>3            1024      1024         0         0      1024        0
+DCOFF   1>4            1024      1024         0         0      1024        0
+DCOFF   1>5            1024      1024         0         0      1024        0
+DCOFF   2>0            1024      1024         0         0      1024        0
+DCOFF   2>1            1024      1024         0         0      1024        0
+DCOFF   2>3            1024      1024         0         0      1024        0
+DCOFF   2>4            1024      1024         0         0      1024        0
+DCOFF   2>5            1024      1024         0         0      1024        0
+DCOFF   3>0            1024      1024         0         0      1024        0
+DCOFF   3>1            1024      1024         0         0      1024        0
+DCOFF   3>2            1024      1024         0         0      1024        0
+DCOFF   3>4            1024      1024         0         0      1024        0
+DCOFF   3>5            1024      1024         0         0      1024        0
+DCOFF   4>0            1024      1024         0         0      1024        0
+DCOFF   4>1            1024      1024         0         0      1024        0
+DCOFF   4>2            1024      1024         0         0      1024        0
+DCOFF   4>3            1024      1024         0         0      1024        0
+DCOFF   4>5            1024      1024         0         0      1024        0
+DCOFF   5>0            1024      1024         0         0      1024        0
+DCOFF   5>1            1024      1024         0         0      1024        0
+DCOFF   5>2            1024      1024         0         0      1024        0
+DCOFF   5>3            1024      1024         0         0      1024        0
+DCOFF   5>4            1024      1024         0         0      1024        0
+# control c totals: loads/phase=30720 p1_stale=30720 p1_fresh=0 p2_stale=0 p2_fresh=30720 timeouts=0
+coherency neg: done (report only: control c should show stale phase-1 reads on hardware with real caches, a and b may or may not; QEMU TCG models no caches)
+[INFO] coherency neg scale 1000: 59765 ms
+[INFO] coherency neg a: P2 forbidden 0 timeouts 16, P4 forbidden 0 timeouts 12 (report only)
+[INFO] coherency neg b: P2 forbidden 0 timeouts 30, P4 forbidden 0 timeouts 8 (report only)
+[INFO] coherency neg c: loads/phase 30720, phase 1 stale 30720 fresh 0, phase 2 stale 0 fresh 30720, timeouts 0 (report only)
+  [PASS] test_negative_controls_report
+  [PASS] test_negative_controls_rerun_uses_fresh_slots
+[INFO] test_coherency.c: 126691 ms
+
+----------------------------------------
+Tests: 26  Passed: 26  Failed: 0
+[PASS] All tests passed
+
+========================================
+Integration Tests (Multi-Core)
+========================================
+[TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-aef4cb3eef243d97a/kernel/tests/test_integration.c
+  [PASS] test_multicore_basic
+  [PASS] test_task_migration
+  [PASS] test_stress_multicpu
+  [PASS] test_lock_contention
+  [PASS] test_task_lifecycle
+  [PASS] test_boot_order_pmm_before_scheduler
+  [PASS] test_hw_timeout_with_yield
+  [PASS] test_timer_running_after_boot
+  [PASS] test_msg_router_cross_cpu
+  [PASS] test_msg_router_multi_subscriber
+  [PASS] test_msg_router_priority_concurrent
+  [PASS] test_msg_router_ack_targets_last_received_cross_cpu
+  [PASS] test_msg_router_same_mailbox_zero_loss
+  [PASS] test_smp_notify_cpu_safe
+  [PASS] test_smp_notify_cpu_wakes_secondary
+  [PASS] test_work_stealing_distributes_load
+
+----------------------------------------
+Tests: 16  Passed: 16  Failed: 0
+[PASS] All tests passed
+
+========================================
+Test Suite Summary
+========================================
+[PA
