@@ -276,6 +276,7 @@ int test_suite_boot_models(void);
 /* Tegra234 CPU NDIV helpers (#1053) */
 int test_suite_tegra_cpufreq(void);
 int test_suite_tegra_fan(void);
+int test_suite_emc_hold(void);
 
 /* GA10B netlist / ctxsw surface / ACR LS blob builders (#1088) */
 int test_suite_ga10b_netlist(void);

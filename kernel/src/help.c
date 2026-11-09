@@ -1527,8 +1527,17 @@ static const struct help_entry help_entries[] = {
         "Usage:\n"
         "  clocks             Print what BPMP reports for emc, gpc0clk, gpc1clk\n"
         "                     and gpusysclk.\n"
-        "  clocks emc <MHz>   Request an EMC rate, then print the rates. BPMP picks\n"
-        "                     the nearest rate its DVFS table allows.\n"
+        "  clocks emc <MHz>   Request an EMC floor from BPMP's bandwidth manager,\n"
+        "                     then print the rates. BPMP picks the nearest rate its\n"
+        "                     DVFS table allows, and may run faster for another\n"
+        "                     client's floor (the GPU program asks for 3199 MHz).\n"
+        "                     Above 3199 MHz is refused. The checks then hold the\n"
+        "                     rate BPMP granted; a refused floor changes nothing.\n"
+        "\n"
+        "After a UEFI-direct boot SLM-OS asks for a 3199 MHz floor right after\n"
+        "BPMP comes up, checks the rate after every boot step and every 2 s after\n"
+        "boot, and asks again if it fell. The 'emc hold' line counts the checks\n"
+        "and the drops, and names where the first and last drop were seen.\n"
     ),
 
     HELP_TEXT("thermal",
