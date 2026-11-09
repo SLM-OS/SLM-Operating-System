@@ -1,0 +1,18 @@
+# jetson-nano-2, kexec path reliability: 10 boots of SLM-OS 62a0217e (default flags)
+# slmos.elf sha256 351022ea63f51c5371fc9013241fde92abfd45a9267c06707b65b4603278329a (/root/slmos-1193.elf)
+# Each boot: labctl power_cycle (15 s) -> SD JetPack Linux -> ssh `setsid nohup slmos-kexec
+# /root/slmos-1193.elf` -> labctl serial_capture until `slmos>|PANIC|PAGE FAULT|System halted|
+# Unhandled Exception`. Seconds are from the start of the capture (just after kexec started).
+# 2026-11-09 ~01:00-01:40 UTC.
+boot  result  seconds  last lines
+ 1    PASS    83.0     SLM-OS Debug Shell / Type 'help' for available commands. / slmos>
+ 2    PASS    84.4     same
+ 3    PASS    80.8     same
+ 4    PASS    39.3     same
+ 5    PASS    36.6     same
+ 6    PASS    80.9     same
+ 7    PASS    72.1     same
+ 8    PASS    89.5     same
+ 9    PASS    90.7     same
+10    PASS    82.1     same
+total: 10/10 reached slmos>; no PANIC, PAGE FAULT, halt or EL3 exception in any capture.

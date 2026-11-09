@@ -1,0 +1,26 @@
+# pi-5-1 card restore (C3-Pi5, ~06:18 UTC)
+# One sdwire_update (reboot=false): renames kernel_2712.img -> kernel_2712.img.test1193,
+# kernel8.img -> kernel8.img.test1193, kernel_2712.img.pre1193 -> kernel_2712.img,
+# kernel8.img.pre1193 -> kernel8.img; deletes *.test1193.
+# sdwire_ls afterwards:
+#   kernel_2712.img  6935256 B  mtime 2026-10-29T04:54:04Z
+#   kernel8.img      6935256 B  mtime 2026-10-29T04:54:04Z
+#   no *.pre1193 / *.test1193 left; config.txt 1297 B 2026-05-10T23:01:22Z unchanged.
+# Restore boot: sdwire_info -> power_cycle delay=20 || serial_capture timeout 75 until "slmos>":
+#   class A, tail 6 in 12.9 s:
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>
+# `coherency` -> "Unknown command: coherency" (original kernel, no #1193 code).
+# run_health_check: ping true, power on, online. pi-5-1 left ON at the slmos> shell.
+# (A first restore at ~04:00 UTC for the Linux builder's window followed the same procedure.)
+# Staged images left in /var/lib/labctl/images: kernel_2712-1193-ncoff.img (unfixed c2122932),
+# -ncoff-r3.img, -ncoff-r3-test.img, -default-r3.img, -ncoff-swoff-r3.img,
+# -removal-072bd707.img, -removal-f546a126-test.img (plus the pre-existing -nc.img, -nc-test.img).
+# Second restore (~07:37 UTC, after the W1-W11 removal test-kernel boots): same single sdwire_update;
+# sdwire_ls: kernel_2712.img and kernel8.img 6935256 B mtime 2026-10-29T04:54:04Z, no *.pre1193 /
+# *.test1193, config.txt 1297 B 2026-05-10T23:01:22Z. Restore boot class A (tail 6, 13.1 s to slmos>),
+# `coherency` -> "Unknown command: coherency", ping true. pi-5-1 left ON at the shell.

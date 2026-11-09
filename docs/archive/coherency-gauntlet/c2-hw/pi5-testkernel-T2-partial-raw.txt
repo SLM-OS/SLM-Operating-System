@@ -1,0 +1,1074 @@
+[Captured 1072 lines in 24.9s, pattern 'All test suites passed|total failure|PANIC|panic' matched]
+B���������������������������j
+  2. Load HEF — slm.hailo.load(path)
+============================================================
+  Failed to load HEF from /mnt/files/does_not_exist.hef
+  Common causes:
+    - File not staged on the VFS (write it with `write /mnt/files/does_not_exist.hef ...`)
+    - HEF header mismatch or file truncated
+    - All four NPU slots already in use
+  [dormancy-recover] CPU 1 resumed at test_demo_hailo_file_dofile_runs_cleanly (abs 16 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_demo_hailo_file_dofile_runs_cleanly (abs 13 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_demo_hailo_file_dofile_runs_cleanly (abs 10 after 3 stalled samples)
+  [PASS] test_demo_hailo_file_dofile_runs_cleanly
+lua: cannot open /mnt/files/no_such_file.lua
+  [PASS] test_slm_dofile_nonexistent
+  [PASS] test_slm_dofile_null_safe
+  [PASS] test_slm_dofile_executes_script
+Lua error: [string "/mnt/files/bad_syntax.lua"]:1: unexpected symbol
+  [PASS] test_slm_dofile_syntax_error
+  [PASS] test_slm_dofile_empty_file
+  [PASS] test_slm_dofile_uses_slm_api
+Lua error: [string "/mnt/files/runtime_err.lua"]:1: deliberate test error
+  [PASS] test_slm_dofile_runtime_error[counter] Count: 3
+
+  [PASS] test_slm_dofile_near_max_size
+lua: /mnt/files/oversize.lua exceeds 32767 bytes
+  [PASS] test_slm_dofile_oversize_rejected
+  [PASS] test_calloc_overflow_returns_null
+  [PASS] test_calloc_near_overflow_returns_null
+  [PASS] test_calloc_normal_zeroes
+[HEAP] Corruption detected in free() at 0x254d0f0
+  [PASS] test_free_corrupted_magic_no_crash
+[HEAP] Corruption detected in realloc() at 0x254d0f0
+  [PASS] test_realloc_corrupted_magic_returns_null
+  [PASS] test_free_null_safe
+  [PASS] test_lua_heap_reset_across_sessions
+Lua error: [string "error('boom')"]:1: boom
+  [PASS] test_lua_dostring_stack_clean_after_error
+  [PASS] test_lua_dostring_stack_clean_after_success
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+Lua error: [string "error('iter')"]:1: iter
+  [PASS] test_lua_dostring_no_stack_leak_over_iterations
+  [PASS] test_lua_dostring_null_state
+[WARN] asin() is a stub returning 0.0; see docs/lua.md
+  [PASS] test_lua_trig_stubs_return_zero
+  [PASS] test_teardown_reclaims_leaked_state
+  [PASS] test_teardown_handles_no_open_states
+
+----------------------------------------
+Tests: 142  Passed: 142  Failed: 0
+[PASS] All tests passed
+[TEST] strtol / strtod regression (chain rewrite)
+  [PASS] test_strtol_decimal_basic
+  [PASS] test_strtol_lowercase_letters
+  [PASS] test_strtol_uppercase_letters
+  [PASS] test_strtol_endptr_stops_at_non_digit
+  [PASS] test_strtol_hex_prefix
+  [PASS] test_strtol_skips_whitespace
+  [PASS] test_strtod_integer
+  [PASS] test_strtod_fraction
+  [PASS] test_strtod_exponent_positive
+  [PASS] test_strtod_exponent_negative
+  [PASS] test_strtod_endptr_stops_at_non_digit
+
+----------------------------------------
+Tests: 11  Passed: 11  Failed: 0
+[PASS] All tests passed
+[TEST] SLM GPU Dispatch Stats FFI Tests
+  [PASS] test_reset_clears_all_counters
+  [PASS] test_stats_tolerates_null_out_parameters
+  [PASS] test_stats_rejects_out_of_range_op_kind
+  [PASS] test_stats_covers_every_transformer_op
+
+----------------------------------------
+Tests: 4  Passed: 4  Failed: 0
+[PASS] All tests passed
+[TEST] SLM Golden Tests
+  [PASS] test_golden_ops
+  [PASS] test_golden_rope
+[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU
+  [PASS] test_golden_first_step_logits
+[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU
+  [PASS] test_golden_ffi_first_token
+[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU
+  [PASS] test_golden_greedy_logits
+[slm] GPU: no weights pool and no GPU program on this boot; forward path stays on CPU
+  [PASS] test_golden_ffi_greedy
+
+----------------------------------------
+Tests: 6  Passed: 6  Failed: 0
+[PASS] All tests passed
+[TEST] test_slm_prog.c
+  [PASS] test_prog_pushbuffer
+  [PASS] test_prog_barrier_kinds
+  [PASS] test_prog_qmd_and_cbuf
+  [dormancy-enter] CPU 1 dormant at test_prog_limits (idle_abs frozen at 73 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 1 (idle_loops=74, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 1 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 1 rc=-2
+  [dormancy-enter] CPU 2 dormant at test_prog_limits (idle_abs frozen at 70 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 2 (idle_loops=74, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 2 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 2 rc=-2
+  [dormancy-enter] CPU 3 dormant at test_prog_limits (idle_abs frozen at 67 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 3 (idle_loops=74, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 3 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 3 rc=-2
+  [PASS] test_prog_limits
+  [dormancy-recover] CPU 1 resumed at test_prog_inject_hang (abs 7 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_prog_inject_hang (abs 4 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_prog_inject_hang (abs 1 after 3 stalled samples)
+  [PASS] test_prog_inject_hang
+  [PASS] test_prog_profile_slots
+  [PASS] test_encode_kernels
+  [PASS] test_session_maps_and_frees
+  [PASS] test_session_va_reuse_keeps_page_size
+  [PASS] test_session_scattered_weights
+[WARN] PMM: Requested 983040 pages exceeds max order
+  [PASS] test_session_open_failures
+  [PASS] test_session_without_weights
+[slm-prog] step timed out after 5000 ms: start semaphore never fired: the channel did not run
+[slm-prog] GPU step failed: leaking this session's 344 KB arena (the GPU may still write it)
+  [PASS] test_run_ok_and_patch
+  [PASS] test_prog_marks
+  [PASS] test_unavailable_reason_names_the_cause
+  [PASS] test_run_marked_uses_the_marked_entry
+[slm-prog] step timed out after 5000 ms: start semaphore never fired: the channel did not run
+[slm-prog] GPU step failed: leaking this session's 344 KB arena (the GPU may still write it)
+  [PASS] test_run_timeout_is_bounded
+[slm-prog] GPU step failed: leaking this session's 344 KB arena (the GPU may still write it)
+  [PASS] test_run_other_failures
+[slm-prog] step timed out after 5000 ms: start semaphore never fired: the channel did not run
+[slm-prog] GPU step failed: leaking this session's 344 KB arena (the GPU may still write it)
+[slm-prog] GPU step failed: leaking this session's 344 KB arena (the GPU may still write it)
+  [PASS] test_dead_session_leaks_arena
+  [PASS] test_two_sessions_never_overlap
+  [PASS] test_cache_ops_never_skipped_while_another_step_runs
+  [PASS] test_profile_reads_without_the_lock
+  [PASS] test_deadline_starts_at_the_doorbell
+  [PASS] test_prog_barrier_cap
+  [PASS] test_kernel_lookup_and_batch
+[slm] GPU: the GPU program is built at `slm launch` (--gpu auto|on); no per-op weight staging on this boot
+  [PASS] test_e2e_build
+[slm] GPU: the GPU program is built at `slm launch` (--gpu auto|on); no per-op weight staging on this boot
+[slm-prog] step timed out after 5000 ms: start semaphore never fired: the channel did not run
+[slm-prog] GPU step failed: leaking this session's 504 KB arena (the GPU may still write it)
+[slm] GPU program failed (GPU step timed out); session continues on the CPU, replaying 0 tokens
+  [PASS] test_e2e_hang_falls_back_to_cpu
+[slm] GPU: the GPU program is built at `slm launch` (--gpu auto|on); no per-op weight staging on this boot
+[slm] golden step 0: vs llama.cpp 15588 milli, vs exact 15620 milli
+[slm] golden step 1: vs llama.cpp 12550 milli, vs exact 12701 milli
+[slm] golden step 2: vs llama.cpp 15196 milli, vs exact 15129 milli
+[slm] golden step 3: vs llama.cpp 16525 milli, vs exact 16291 milli
+[slm] golden step 4: vs llama.cpp 15617 milli, vs exact 15690 milli
+[slm] golden step 5: vs llama.cpp 18521 milli, vs exact 18481 milli
+[slm] golden step 6: vs llama.cpp 17472 milli, vs exact 17362 milli
+[slm] golden step 7: vs llama.cpp 14360 milli, vs exact 14981 milli
+[slm] golden step 8: vs llama.cpp 14620 milli, vs exact 14419 milli
+[slm] golden step 9: vs llama.cpp 14271 milli, vs exact 14167 milli
+  [PASS] test_e2e_golden_reports_divergence
+
+----------------------------------------
+Tests: 28  Passed: 28  Failed: 0
+[PASS] All tests passed
+[TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a496f2fb5903970c7/kernel/tests/test_net.c
+  [PASS] test_net_ip4_addr_basic
+  [PASS] test_net_ip4_addr_edge_cases
+  [PASS] test_net_ip_to_str_basic
+  [PASS] test_net_ip_to_str_edge_cases
+  [PASS] test_net_str_to_ip_valid
+  [PASS] test_net_str_to_ip_invalid
+  [PASS] test_net_ip_roundtrip
+  [PASS] test_net_strerror_coverage
+  [PASS] test_net_error_codes_are_negative
+  [IGNORE] test_net_is_up_before_init - smoke test: network state depends on test order
+  [PASS] test_net_get_info_not_initialized
+  [PASS] test_net_get_info_null_pointer
+  [PASS] test_net_commands_without_init
+  [PASS] test_net_get_stats_safety
+  [PASS] test_net_watchdog_get_null_safe
+  [PASS] test_net_watchdog_initial_state
+  [PASS] test_net_watchdog_threshold_clamps
+  [PASS] test_tcp_shell_server_get_stats_null_safe
+  [PASS] test_tcp_shell_server_stats_invariants
+[INFO] shell-tcp: session 3735928559 closed: reason=unknown heap_delta=256 pool_delta=
+  [PASS] test_tcp_shell_server_note_session_pair
+[WARN] shell-tcp: session 3735928559 write timeout (>=100 ms drain stall, dropping 257 bytes) — marking degraded, closing
+  [PASS] test_shell_io_tcp_write_buf_timeout
+[INFO] shell-tcp: session 3405691582 closed: reason=unknown heap_delta=0 pool_delta=
+  [PASS] test_shell_io_tcp_close_settling
+  [PASS] test_shell_io_tcp_read_buf_drains_ring
+  [PASS] test_shell_io_tcp_read_buf_handles_wrap
+  [PASS] test_shell_io_tcp_write_raw_iac_stuffing
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[counter] Count: 6
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+[INFO] shell-tcp: session 3238793303 closed: reason=unknown heap_delta=0 pool_delta=
+  [PASS] test_tcp_shell_no_false_leak_over_50_close_cycles
+  [PASS] test_net_stats_initial_values
+  [PASS] test_lwip_rand_seed_changes_output
+  [PASS] test_lwip_rand_seed_null_or_zero_len_does_not_crash
+  [PASS] test_lwip_rand_seed_different_inputs_diverge
+  [PASS] test_net_driver_registered
+[INFO] Initializing network subsystem...
+[INFO] Initializing Cadence MACB/GEM driver (Pi 5 RP1)...
+[INFO]   ETH IP base:  0x1f00100000
+[INFO]   MACB IRQ:     166 (MIP0 vec 6 → SPI 134)
+[INFO]   Descriptor rings:  NC memory (tx=0xffe10200 rx=0xffe10280)
+[INFO]   Cadence MACB/GEM: idnum=0x0007 rev=0x0 fab=0x109
+[INFO]   Released PHY reset via GPIO 32
+[INFO]   PHY @addr 1: ID1=0x600d ID2=0x84a2
+[INFO]   Waiting for PHY auto-negotiate / link up...
+[counter] Count: 9
+[counter] Done (count=10)
+[INFO] Task 'counter' (id=545) exiting
+[INFO]   PHY link up (BMSR=0x796d after 31×100 ms)
+[INFO]   Negotiated: 1000 Mbps full-duplex (LPA=0xc5e1 STAT1000=0x3800)
+[WARN] VC mailbox doesn't implement GET_BOARD_MAC on this Pi 5 EEPROM revision (tag added 2025-05-08, rpi-eeprom #698), and DTB lookup at /axi/pcie@1000120000/rp1/ethernet@100000 also failed.
+[WARN] Falling back to fixed 02:00:00:5A:00:01 — single-board safe, collision-prone on a shared subnet (see #250/#255).
+[INFO]   MAC address: 02:00:00:5a:00:01
+[INFO]   MACB IRQ 166 armed via MIP0 vec 6 (SPI 134)
+[INFO] MACB driver: network operational (polled + IRQ)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: 02:00:00:5a:00:01
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP client started (at boot)
+[INFO] DHCP auto-start armed (timeout 10000 ms)
+  [PASS] test_net_init_live
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+  [PASS] test_net_poll_after_init
+  [PASS] test_net_auto_dhcp_at_boot
+  [IGNORE] test_net_dhcp_binds - DHCP did not bind within 2s (QEMU SLIRP may not be active)
+  [IGNORE] test_net_dhcp_bind_notification - DHCP not bound — precondition for notify test
+[INFO] Static IP set: 10.0.2.15
+[INFO] DHCP client started (manual request)
+[WARN] DHCP timeout after 3 ms; falling back to static IP
+  [PASS] test_net_dhcp_fallback
+[INFO] Static IP set: 10.0.2.15
+[INFO] Network link down
+[INFO] DHCP request deferred until link-ready
+[INFO] Network link up
+[INFO] DHCP client started (after link-ready)
+[INFO] Static IP set: 10.0.2.15
+  [PASS] test_net_dhcp_fallback_while_link_down
+[INFO] Static IP set: 10.0.2.15
+[INFO] DHCP client started (manual request)
+[WARN] DHCP timeout after 3 ms; falling back to static IP
+  [PASS] test_net_dhcp_duplicate_request_preserves_timeout
+[INFO] Static IP set: 10.0.2.15
+[INFO] Network link down
+[INFO] Static IP set: 10.0.2.15
+[INFO] Network link up
+  [PASS] test_net_boot_deferred_dhcp_waits_for_real_start
+[INFO] Static IP set: 10.0.2.15
+[ERROR] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a496f2fb5903970c7/kernel/net/lwip_slm.c:109: Failed to start DHCP client
+  [PASS] test_net_dhcp_start_failure_clears_pending_state
+[INFO] Static IP set: 10.0.2.15
+[INFO] DHCP client started (manual request)
+[INFO] DHCP paused waiting for link restore
+[INFO] Network link down
+[INFO] Network link up
+[INFO] DHCP client started (after link-ready)
+  [PASS] test_net_dhcp_link_drop_restarts_timeout
+  [PASS] test_net_driver_tx
+  [PASS] test_net_driver_has_tx_reap
+  [PASS] test_net_rx_burst_uses_pbuf_pool_not_heap
+  [PASS] test_net_poll_drains_all_buffered_frames
+  [PASS] test_net_rx_chained_pbuf_assembly
+  [PASS] test_net_send_returns_quickly
+  [PASS] test_net_send_oversized_rejected
+  [PASS] test_net_send_pool_exhaustion
+  [PASS] test_net_burst_8_sends_async
+  [PASS] test_net_rx_no_buffers_clean
+[INFO] Shutting down network subsystem...
+[INFO] Network subsystem shut down
+[INFO] Initializing network subsystem...
+[INFO] Initializing Cadence MACB/GEM driver (Pi 5 RP1)...
+[INFO]   ETH IP base:  0x1f00100000
+[INFO]   MACB IRQ:     166 (MIP0 vec 6 → SPI 134)
+[INFO]   Descriptor rings:  NC memory (tx=0xffe10300 rx=0xffe10380)
+[INFO]   Cadence MACB/GEM: idnum=0x0007 rev=0x0 fab=0x109
+[INFO]   Released PHY reset via GPIO 32
+[INFO]   PHY @addr 1: ID1=0x600d ID2=0x84a2
+[INFO]   Waiting for PHY auto-negotiate / link up...
+[INFO]   PHY link up (BMSR=0x796d after 39×100 ms)
+[INFO]   Negotiated: 1000 Mbps full-duplex (LPA=0xc5e1 STAT1000=0x3800)
+[WARN] VC mailbox doesn't implement GET_BOARD_MAC on this Pi 5 EEPROM revision (tag added 2025-05-08, rpi-eeprom #698), and DTB lookup at /axi/pcie@1000120000/rp1/ethernet@100000 also failed.
+[WARN] Falling back to fixed 02:00:00:5A:00:01 — single-board safe, collision-prone on a shared subnet (see #250/#255).
+[INFO]   MAC address: 02:00:00:5a:00:01
+[INFO]   MACB IRQ 166 armed via MIP0 vec 6 (SPI 134)
+[INFO] MACB driver: network operational (polled + IRQ)
+[INFO] lwIP subsystem already initialized — re-attaching netif only
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: 02:00:00:5a:00:01
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP client started (at boot)
+[INFO] DHCP auto-start armed (timeout 10000 ms)
+  [PASS] test_net_shutdown_then_init_succeeds
+[TCPSH] Listening on 0.0.0.0:2324 (unauthenticated — trusted networks only)
+[TELD] Listening on 0.0.0.0:2325 (telemetry feed)
+[INFO] Shutting down network subsystem...
+[INFO] Network subsystem shut down
+[INFO] Initializing network subsystem...
+[INFO] Initializing Cadence MACB/GEM driver (Pi 5 RP1)...
+[INFO]   ETH IP base:  0x1f00100000
+[INFO]   MACB IRQ:     166 (MIP0 vec 6 → SPI 134)
+[INFO]   Descriptor rings:  NC memory (tx=0xffe10400 rx=0xffe10480)
+[INFO]   Cadence MACB/GEM: idnum=0x0007 rev=0x0 fab=0x109
+[INFO]   Released PHY reset via GPIO 32
+[INFO]   PHY @addr 1: ID1=0x600d ID2=0x84a2
+[INFO]   Waiting for PHY auto-negotiate / link up...
+[INFO]   PHY link up (BMSR=0x796d after 38×100 ms)
+[INFO]   Negotiated: 1000 Mbps full-duplex (LPA=0xc5e1 STAT1000=0x3800)
+[WARN] VC mailbox doesn't implement GET_BOARD_MAC on this Pi 5 EEPROM revision (tag added 2025-05-08, rpi-eeprom #698), and DTB lookup at /axi/pcie@1000120000/rp1/ethernet@100000 also failed.
+[WARN] Falling back to fixed 02:00:00:5A:00:01 — single-board safe, collision-prone on a shared subnet (see #250/#255).
+[INFO]   MAC address: 02:00:00:5a:00:01
+[INFO]   MACB IRQ 166 armed via MIP0 vec 6 (SPI 134)
+[INFO] MACB driver: network operational (polled + IRQ)
+[INFO] lwIP subsystem already initialized — re-attaching netif only
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: 02:00:00:5a:00:01
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP client started (at boot)
+[INFO] DHCP auto-start armed (timeout 10000 ms)
+  [PASS] test_net_shutdown_clears_in_tree_listeners
+[TCPSH] Listening on 0.0.0.0:2325 (unauthenticated — trusted networks only)
+[TELD] Listening on 0.0.0.0:2325 (telemetry feed)
+[WARN] lwIP raw API called without lwip_core_lock (cpu 0, irqs UNMASKED, caller 0x212504)
+  [PASS] test_lwip_core_lock_held_by_task_context_paths
+
+----------------------------------------
+Tests: 55  Passed: 52  Failed: 0  Ignored: 3
+[PASS] All tests passed
+[TEST] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a496f2fb5903970c7/kernel/tests/test_net_http.c
+  [PASS] test_parse_http_url_basic
+  [PASS] test_parse_http_url_with_port_and_root_default
+  [PASS] test_parse_http_url_query_only_uses_root_path
+  [PASS] test_parse_http_url_rejects_invalid_inputs
+  [PASS] test_parse_http_url_accepts_long_signed_uri
+  [PASS] test_parse_sha256_hex_accepts_valid_and_rejects_invalid
+Usage: http get <url> <dest> [sha256]
+  Example: http get http://10.0.2.2:8080/blob.bin /mnt/files/blob.bin
+Usage: http get <url> <dest> [sha256]
+  Example: http get http://10.0.2.2:8080/blob.bin /mnt/files/blob.bin
+http: fetch failed (rc=-2 status=0 result=0 lwip=0 sha256=(none))
+http: invalid sha256 digest
+  [PASS] test_http_shell_usage_and_validation
+  [IGNORE] test_http_shell_requires_network_for_valid_request - network already initialized in this test target
+  [IGNORE] test_http_shell_accepts_max_length_destination_path - network already initialized in this test target
+
+----------------------------------------
+Tests: 9  Passed: 7  Failed: 0  Ignored: 2
+[PASS] All tests passed
+[TEST] test_usb_core.c
+  [PASS] test_urb_status_strings
+  [PASS] test_hcd_registration
+[INFO] usb_core: retained descriptor bounce @0xffe10500 len=256
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_start_and_enumerate
+[INFO] usb_core: no device on root port
+  [PASS] test_enumerate_no_device
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_enumerate_speed_low_propagates
+[WARN] usb_core: port_reset failed
+  [PASS] test_enumerate_port_reset_failure
+[WARN] usb_core: device_open failed
+  [PASS] test_enumerate_device_open_failure
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x09 type=0x00 wValue=0x0001 wIndex=0x0000 wLength=0 status=STALL actual=0
+[WARN] usb_core: SET_CONFIGURATION failed: STALL
+  [PASS] test_enumerate_set_config_failure
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: endpoint_configure(ep 0x81) failed: -1
+  [PASS] test_enumerate_endpoint_configure_failure
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 1/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_enumerate_initial_descriptor_retries_once_then_succeeds
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 1/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 2/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 3/3)
+  [PASS] test_enumerate_initial_descriptor_fails_after_retry_budget
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 1/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 2/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 3/3)
+  [PASS] test_enumerate_resets_previous_device
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_descriptor_parse
+  [PASS] test_find_endpoint_direction_filter
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_find_endpoint_mismatch
+  [PASS] test_descriptor_parse_invalid_header
+  [PASS] test_descriptor_parse_too_short
+[WARN] usb_core: no iface slot for ifnum=4 alt=0
+  [PASS] test_descriptor_parse_interface_overflow
+[WARN] usb_core: too many endpoints (> 8)
+[WARN] usb_core: too many endpoints (> 8)
+  [PASS] test_descriptor_parse_endpoint_overflow
+  [PASS] test_descriptor_parse_orphan_endpoint
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_cancel_pending_urb
+  [PASS] test_cancel_with_no_hcd
+  [PASS] test_submit_urb_no_hcd
+  [PASS] test_submit_urb_null_args
+[WARN] usb_core: HCD 'positive-return-hcd' replaces 'mock-hcd' — only one HCD allowed
+  [PASS] test_submit_urb_hcd_positive_normalized
+  [PASS] test_poll_no_hcd_is_safe
+  [PASS] test_poll_calls_hcd
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[WARN] usb_core: control timeout req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=0
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=0 status=TIMEOUT actual=0
+  [PASS] test_control_msg_timeout
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 1/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 2/3)
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x06 type=0x80 wValue=0x0100 wIndex=0x0000 wLength=64 status=IO_ERROR actual=0
+[WARN] usb_core: short GET_DESCRIPTOR(device, 64) n=-6 (attempt 3/3)
+  [PASS] test_enumerate_closes_device_on_control_failure
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[WARN] usb_core: control failed req=0x09 type=0x00 wValue=0x0001 wIndex=0x0000 wLength=0 status=STALL actual=0
+[WARN] usb_core: SET_CONFIGURATION failed: STALL
+  [PASS] test_enumerate_closes_device_on_set_config_failure
+[WARN] usb_core: port_reset failed
+  [PASS] test_enumerate_no_close_on_port_reset_failure
+[WARN] usb_core: device_open failed
+  [PASS] test_enumerate_no_close_on_device_open_failure
+  [PASS] test_descriptor_parse_bad_config_blength
+  [PASS] test_descriptor_parse_oversized_rejected
+  [PASS] test_descriptor_parse_exact_cap_accepted
+  [PASS] test_hcd_reregister_same_is_silent
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_control_msg_returns_actual_length
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[WARN] usb_core: control failed req=0xfe type=0x80 wValue=0x0000 wIndex=0x0000 wLength=0 status=IO_ERROR actual=0
+  [PASS] test_control_msg_unknown_request_returns_error
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_core_reset_clears_device_without_touching_hcd
+  [PASS] test_core_reset_no_device_is_safe
+  [PASS] test_hotplug_poll_no_hcd_is_safe
+  [PASS] test_hotplug_poll_no_device_connected
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_hotplug_poll_enumerates_on_attach
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_hotplug_poll_idempotent_after_enumeration
+[WARN] usb_core: device_open failed
+[WARN] usb_core: hotplug enumerate failed rc=-1
+  [PASS] test_hotplug_poll_propagates_enumerate_failure
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] usb_core: using NC bounce for child initial descriptor buf=0xffe10500 len=64 route=0x1 root_port=0
+[INFO] usb_core: device configured — vid=0x046d pid=0xc077 class=0x03
+[INFO] usb_core: hub port 1: device class=0x03 not CDC-ECM, releasing and trying next port
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: hub port 2: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+  [PASS] test_enumerate_hub_walks_past_non_cdc_child
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] usb_core: hub has no connected downstream device
+  [PASS] test_enumerate_hub_with_no_connected_children
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] usb_core: device configured — vid=0x046d pid=0xc077 class=0x03
+[INFO] usb_core: hub port 1: device class=0x03 not CDC-ECM, releasing and trying next port
+[INFO] usb_core: device configured — vid=0x046d pid=0xc077 class=0x03
+[INFO] usb_core: hub port 2: device class=0x03 not CDC-ECM, releasing and trying next port
+[INFO] usb_core: hub had 2 connected child(ren), 2 enumerated, none expose CDC-ECM
+  [PASS] test_enumerate_hub_with_no_cdc_children_returns_error
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] usb_core: hub port 1: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+  [PASS] test_enumerate_hub_with_cdc_on_first_port
+
+----------------------------------------
+Tests: 49  Passed: 49  Failed: 0
+[PASS] All tests passed
+[TEST] test_cdc_ecm.c
+  [PASS] test_parse_mac_string_happy
+  [PASS] test_parse_mac_string_rejects_short_buffer
+  [PASS] test_parse_mac_string_rejects_wrong_type
+  [PASS] test_parse_mac_string_rejects_non_ascii
+  [PASS] test_parse_mac_string_rejects_non_hex
+  [PASS] test_parse_mac_string_null_args
+[WARN] usb_core: HCD 'cdc-ecm-test-hcd' replaces 'mock-hcd' — only one HCD allowed
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_probe_binds_and_registers
+[WARN] usb_core: HCD 'empty' replaces 'cdc-ecm-test-hcd' — only one HCD allowed
+[INFO] usb_core: no device on root port
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+  [PASS] test_probe_skips_when_no_device
+[WARN] usb_core: HCD 'cdc-ecm-test-hcd' replaces 'empty' — only one HCD allowed
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: NC DMA pools ready (rx=4 tx=4 size=2048 notify=16)
+  [PASS] test_net_init_queues_rx_urbs
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_net_init_queues_notification_urb
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: network connection up (if=0)
+[INFO] cdc_ecm: network connection down (if=0)
+  [PASS] test_link_status_tracks_network_connection_notification
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: inferred link up from speed change (100000000/100000000 bps)
+  [PASS] test_link_status_infers_up_from_speed_change
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: inferred link up from speed change (100000000/100000000 bps)
+[INFO] cdc_ecm: inferred link down from speed change (0/0 bps)
+  [PASS] test_link_status_tracks_down_from_zero_speed_change
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[WARN] cdc_ecm: no link notification after 10 ms; falling back to probe-based link up
+  [PASS] test_link_status_falls_back_after_silent_notification_timeout
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[WARN] cdc_ecm: no link notification after 0 ms; falling back to probe-based link up
+  [PASS] test_link_status_falls_back_when_notify_wait_started_at_zero
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[WARN] cdc_ecm: no notification endpoint on ctrl iface 0; falling back to probe-based link up
+  [PASS] test_link_status_falls_back_when_notification_endpoint_missing
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_send_goes_to_bulk_out
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_send_busy_when_pool_full
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_send_rejects_oversized
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_send_rejects_null
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_recv_returns_frame_and_resubmits
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_recv_zero_when_nothing_ready
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_recv_handles_small_buffer
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:53:4c:4d:00:01 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_mac_fallback_when_imac_zero
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: network connection up (if=0)
+[WARN] cdc_ecm: no CDC-ECM interface pair (ctrl=-1 data=-1)
+  [PASS] test_probe_rejects_non_cdc_device
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[WARN] cdc_ecm: no CDC-ECM interface pair (ctrl=-1 data=-1)
+  [PASS] test_probe_failure_clears_public_mac
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[WARN] cdc_ecm: no CDC-ECM interface pair (ctrl=-1 data=-1)
+  [PASS] test_net_driver_ops_fail_when_unprobed
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[WARN] cdc_ecm: no CDC-ECM interface pair (ctrl=-1 data=-1)
+  [PASS] test_poll_before_probe_is_noop
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_poll_after_probe_dispatches_to_hcd
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_default_mtu_when_mss_zero
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:53:4c:4d:00:02 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_probe_without_functional_descriptor
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_rx_completion_error_drops_slot
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_cdc_ecm_reset_forces_reprobe
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+[INFO] DHCP paused waiting for link restore
+[INFO] Network link down
+  [PASS] test_net_poll_binds_cdc_ecm_on_enumeration
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+[INFO] cdc_ecm: probed — mac=02:11:22:33:44:55 mtu=1514 bulk_in=0x82 bulk_out=0x02
+[INFO] cdc_ecm: notification endpoint 0x81 on ctrl iface 0
+  [PASS] test_net_poll_is_idempotent_after_bind
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xffe10500 len=64
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x02
+  [PASS] test_net_poll_no_hcd_is_safe
+
+----------------------------------------
+Tests: 36  Passed: 36  Failed: 0
+[PASS] All tests passed
+[TEST] test_xhci_ring.c
+  [PASS] test_ring_init_rejects_null
+  [PASS] test_ring_init_rejects_tiny
+  [PASS] test_ring_init_zeroes_and_writes_link
+  [PASS] test_enqueue_rejects_null
+  [PASS] test_enqueue_sets_cycle_to_pcs
+  [PASS] test_enqueue_preserves_non_cycle_bits
+  [PASS] test_enqueue_copies_payload
+  [PASS] test_enqueue_wraps_at_link_trb
+  [PASS] test_enqueue_double_wrap_toggles_pcs_back
+  [PASS] test_event_ring_init
+  [PASS] test_event_ring_peek_empty
+  [PASS] test_event_ring_peek_consumes_matching_cycle
+  [PASS] test_event_ring_peek_wraps_and_toggles_ecs
+  [PASS] test_event_ring_dequeue_phys
+  [PASS] test_event_ring_peek_null_args
+  [PASS] test_event_ring_peek_then_dequeue_phys_tracks_advance
+  [PASS] test_event_ring_peek_skip_then_match_advances_through_all
+  [PASS] test_event_ring_dequeue_phys_after_wrap
+  [PASS] test_erst_entry_layout
+
+----------------------------------------
+Tests: 19  Passed: 19  Failed: 0
+[PASS] All tests passed
+[TEST] test_xhci_tegra.c
+  [PASS] test_csb_page_math_zero
+  [PASS] test_csb_page_math_falc_cpuctl
+  [PASS] test_csb_page_math_mp_apmap
+  [PASS] test_csb_page_math_mp_iload_base_hi
+  [PASS] test_csb_page_math_aru_scratch0
+  [PASS] test_csb_page_math_roundtrip_boundaries
+  [PASS] test_csb_page_math_masks_are_sane
+  [PASS] test_fpci_cfg_offsets_match_linux
+  [PASS] test_fpci_cfg1_bus_master_bit
+  [PASS] test_fpci_bar_address_masks
+  [PASS] test_bar2_offsets_match_linux
+  [PASS] test_falcon_csb_offsets_match_linux
+  [PASS] test_falcon_cpuctl_bits
+  [PASS] test_fw_header_created_time_offset
+  [PASS] test_fw_ioctl_shift
+  [PASS] test_xusb_calib_decode_matches_nano2
+  [PASS] test_xusb_otg_pad_ctl_values_match_linux
+  [PASS] test_xusb_bias_and_mux_values_match_linux
+  [PASS] test_xusb_tracking_timers_and_vbus_id
+  [PASS] test_xusb_cold_port_mask_skips_otg_port
+
+----------------------------------------
+Tests: 20  Passed: 20  Failed: 0
+[PASS] All tests passed
+[TEST] test_xhci_device.c
+  [PASS] test_portsc_disconnected
+  [PASS] test_portsc_high_speed
+  [PASS] test_portsc_full_speed
+  [PASS] test_portsc_low_speed
+  [PASS] test_portsc_super_speed
+  [dormancy-enter] CPU 1 dormant at test_portsc_unknown_speed_id (idle_abs frozen at 2322 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 1 (idle_loops=2323, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 1 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 1 rc=-2
+  [dormancy-enter] CPU 2 dormant at test_portsc_unknown_speed_id (idle_abs frozen at 2319 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 2 (idle_loops=2323, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 2 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 2 rc=-2
+  [dormancy-enter] CPU 3 dormant at test_portsc_unknown_speed_id (idle_abs frozen at 2316 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 3 (idle_loops=2323, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 3 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 3 rc=-2
+  [PASS] test_portsc_unknown_speed_id
+  [dormancy-recover] CPU 1 resumed at test_portsc_ignores_change_bits (abs 8 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_portsc_ignores_change_bits (abs 5 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_portsc_ignores_change_bits (abs 2 after 3 stalled samples)
+  [PASS] test_portsc_ignores_change_bits
+  [PASS] test_portsc_null_output_safe
+  [PASS] test_portsc_neutral_drops_ped
+  [PASS] test_portsc_neutral_keeps_power_and_sticky_bits
+  [PASS] test_portsc_neutral_drops_every_change_bit
+  [PASS] test_cold_pick_selects_connected_usb2_port_without_speed
+  [PASS] test_cold_pick_ignores_superspeed_ports
+  [PASS] test_cold_pick_bounded_by_port_count
+  [PASS] test_ctx_stride_matches_csz
+  [PASS] test_ctx_dev_bytes
+  [PASS] test_ctx_in_bytes
+  [PASS] test_ctx_dev_offset
+  [PASS] test_ctx_in_offset
+  [PASS] test_dci_ep_addresses
+  [dormancy-enter] CPU 1 dormant at test_ctx_accessor_round_trip_csz0 (idle_abs frozen at 15 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 1 (idle_loops=16, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 1 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 1 rc=-2
+  [dormancy-enter] CPU 2 dormant at test_ctx_accessor_round_trip_csz0 (idle_abs frozen at 12 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 2 (idle_loops=16, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 2 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 2 rc=-2
+  [dormancy-enter] CPU 3 dormant at test_ctx_accessor_round_trip_csz0 (idle_abs frozen at 9 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 3 (idle_loops=16, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 3 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 3 rc=-2
+  [PASS] test_ctx_accessor_round_trip_csz0
+  [dormancy-recover] CPU 1 resumed at test_ctx_accessor_round_trip_csz1 (abs 8 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_ctx_accessor_round_trip_csz1 (abs 5 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_ctx_accessor_round_trip_csz1 (abs 2 after 3 stalled samples)
+  [PASS] test_ctx_accessor_round_trip_csz1
+  [PASS] test_ctx_dev_neighbours_csz0
+  [PASS] test_ctx_dev_neighbours_csz1
+  [PASS] test_attach_stale_hides_connected_device
+  [PASS] test_attach_stale_unplug_advances_to_wait
+  [PASS] test_attach_wait_reports_disconnected_while_empty
+  [PASS] test_attach_wait_reconnect_advances_on_attach
+  [PASS] test_attach_fresh_passes_through_connected
+  [PASS] test_attach_fresh_passes_through_disconnect
+  [PASS] test_attach_full_replug_sequence
+  [PASS] test_attach_is_idempotent
+
+----------------------------------------
+Tests: 32  Passed: 32  Failed: 0
+[PASS] All tests passed
+[TEST] test_xhci_xfer.c
+  [PASS] test_setup_stage_no_data
+  [PASS] test_setup_stage_data_out
+  [PASS] test_setup_stage_data_in
+  [PASS] test_data_stage_in
+  [PASS] test_data_stage_out
+  [dormancy-enter] CPU 1 dormant at test_data_stage_length_truncates (idle_abs frozen at 17 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 1 (idle_loops=19, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 1 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 1 rc=-2
+  [dormancy-enter] CPU 2 dormant at test_data_stage_length_truncates (idle_abs frozen at 14 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 2 (idle_loops=19, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 2 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 2 rc=-2
+  [dormancy-enter] CPU 3 dormant at test_data_stage_length_truncates (idle_abs frozen at 11 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 3 (idle_loops=19, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 3 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 3 rc=-2
+  [PASS] test_data_stage_length_truncates
+  [dormancy-recover] CPU 1 resumed at test_status_stage_in (abs 8 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_status_stage_in (abs 5 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_status_stage_in (abs 2 after 3 stalled samples)
+  [PASS] test_status_stage_in
+  [PASS] test_status_stage_out
+  [PASS] test_normal_sets_ioc_isp
+  [PASS] test_normal_64bit_address
+  [dormancy-enter] CPU 1 dormant at test_normal_cycle_0 (idle_abs frozen at 11 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 1 (idle_loops=12, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 1 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 1 rc=-2
+  [dormancy-enter] CPU 2 dormant at test_normal_cycle_0 (idle_abs frozen at 8 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 2 (idle_loops=12, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 2 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 2 rc=-2
+  [dormancy-enter] CPU 3 dormant at test_normal_cycle_0 (idle_abs frozen at 5 for 3 consecutive tests)
+[INFO] cpu_supervisor: attempting resurrect of CPU 3 (idle_loops=12, frozen 0 samples)
+[WARN] cpu_supervisor: CPU 3 was ALREADY_ON (software wedge); queue drained, online flag restored
+  [dormancy-recover-attempt] CPU 3 rc=-2
+  [PASS] test_normal_cycle_0
+  [dormancy-recover] CPU 1 resumed at test_builders_zero_scratch (abs 7 after 3 stalled samples)
+  [dormancy-recover] CPU 2 resumed at test_builders_zero_scratch (abs 4 after 3 stalled samples)
+  [dormancy-recover] CPU 3 resumed at test_builders_zero_scratch (abs 1 after 3 stalled samples)
+  [PASS] test_builders_zero_scratch
+  [PASS] test_actual_from_residual_status_stage_success
+  [PASS] test_actual_from_residual_data_stage_short_packet
+  [PASS] test_actual_from_residual_zero_received
+  [PASS] test_actual_from_residual_clamps_overflow
+  [PASS] test_actual_from_residual_zero_requested
+
+----------------------------------------
+Tests: 17  Passed: 17  Failed: 0
+[PASS] All tests passed
+
+========================================
+Model Loader Tests
+========================================
+[TEST] Running model loader tests...
+  [PASS] protobuf: varint single byte
+  [PASS] protobuf: varint multi-byte (300)
+  [PASS] protobuf: varint EOF error
+  [PASS] protobuf: varint over-length rejected
+  [PASS] protobuf: varint u64::MAX (10 bytes)
+  [PASS] protobuf: MAX_VARINT_{BITS,BYTES} values
+  [PASS] protobuf: field iteration
+  [PASS] registry: init empty
+  [PASS] graph: OpType::from_name
+  [PASS] graph: TensorName ops
+  [PASS] graph: TensorShape sizing
+  [PASS] onnx: parse MNIST model
+  [PASS] onnx: ir_version > 0
+  [PASS] onnx: has nodes
+  [PASS] onnx: has initializers
+  [PASS] onnx: weight size > 0
+  [PASS] onnx: has inputs and outputs
+  [PASS] onnx: build_graph succeeds
+  [PASS] onnx: graph structure valid
+  [PASS] registry: load MNIST model
+  [PASS] registry: get_info after load
+  [PASS] registry: model metadata valid
+  [PASS] registry: find_by_name
+  [PASS] registry: count == 1
+  [PASS] registry: unload model
+  [PASS] registry: count == 0 after unload
+[TEST] Running model loader error/edge case tests...
+  [PASS] error: corrupted ONNX data handled
+  [PASS] error: empty input handled
+  [PASS] error: truncated ONNX handled
+  [PASS] error: truncated ONNX rejected by registry
+  [PASS] multi: load first model
+  [PASS] multi: load second model
+  [PASS] multi: count == 2
+  [PASS] multi: both findable by name
+  [PASS] multi: count == 0 after unload both
+  [PASS] registry: load 3 models
+  [PASS] registry: cleanup 3 models
+  [PASS] find: nonexistent returns None
+  [PASS] unload: invalid index returns Err
+  [PASS] double unload: load succeeds
+  [PASS] double unload: first unload succeeds
+  [PASS] double unload: second unload fails
+[TEST] Running FP16 conversion tests...
+  [PASS] fp16: ElemType::Float16 size is 2
+  [PASS] fp16: OnnxDataType::Float16 size is 2
+  [PASS] fp16: ElemType::from_onnx(10) = Float16
+  [PASS] fp16: 0x3C00 -> 1.0
+  [PASS] fp16: 0x3800 -> 0.5
+  [PASS] fp16: 0xC000 -> -2.0
+  [PASS] fp16: 0x0000 -> 0.0
+  [PASS] fp16: 0x8000 -> -0.0
+  [PASS] fp16: 0x7BFF -> 65504.0
+  [PASS] fp16: 0x7C00 -> +inf
+  [PASS] fp16: 0x0001 -> subnormal
+[TEST] Running LRU cache tests...
+  [PASS] lru: touch_model works
+  [PASS] lru: pin/unpin model
+  [PASS] lru: pin/unpin invalid index fails
+  [PASS] lru: touch invalid index no-op
+  [PASS] lru: fill 8 slots
+  [PASS] lru: 9th model triggers eviction
+  [PASS] lru: oldest model evicted
+  [PASS] lru: new model loaded in evicted slot
+  [PASS] lru: count still 8 after eviction
+  [PASS] lru: fill 8 + pin oldest
+  [PASS] lru: eviction skips pinned model
+  [PASS] lru: pinned model survives eviction
+  [PASS] lru: unpinned oldest evicted instead
+  [PASS] lru: share_weights returns handle
+  [PASS] lru: share_weights invalid index fails
+  [PASS] gpu-toggle: default enabled at load
+  [PASS] gpu-toggle: setter flips to OFF
+  [PASS] gpu-toggle: setter flips back to ON
+  [PASS] gpu-toggle: invalid index rejected cleanly
+  [PASS] gpu-toggle: unloaded slot reads FALSE
+  [PASS] shape: MNIST expects 784 fp32 input elements
+  [PASS] shape: inactive / OOB index returns None
+[INFO] Model loader tests passed
+[TEST] Model Loader FFI Tests
+  [PASS] test_model_load_null_name
+  [PASS] test_model_load_null_data
+  [PASS] test_model_load_zero_length
+  [PASS] test_model_get_info_invalid_index
+  [PASS] test_model_find_null
+  [PASS] test_model_unload_invalid_index
+  [PASS] test_model_count_after_init
+
+----------------------------------------
+Tests: 7  Passed: 7  Failed: 0
+[PASS] All tests passed
+
+========================================
+Inference Engine Tests
+========================================
+[TEST] Running inference tests...
+  [PASS] workspace: bump alloc/reset
+  [PASS] workspace: tensor alloc
+  [PASS] ops: matmul 2x3 * 3x2
+  [PASS] ops: add broadcast [2,3]+[3]
+  [PASS] ops: relu
+  [PASS] ops: softmax sums to 1.0
+  [PASS] ops: reshape preserves elements
+  [PASS] ops: conv2d 1x1x4x4 k=2x2
+  [PASS] simd: conv2d 1x3x7x11 k=3x3 pad=1 (non-aligned)
+  [PASS] simd: layer_norm 2x5 with gamma+beta
+  [PASS] simd: layer_norm shape mismatch rejected
+  [PASS] simd: rms_norm 2x6 with gamma
+  [PASS] simd: gelu tanh approximation
+  [PASS] simd: mathf sqrtf 14 known values + neg guard
+  [PASS] simd: mathf tanhf 6 known values + saturation
+  [PASS] ops: maxpool2d 2x2 stride 2
+  [PASS] ops: gemm A*B+C
+  [PASS] ops: matmul shape mismatch
+  [PASS] workspace: exhaustion returns WorkspaceExhausted
+  [PASS] workspace: shape overflow returns ShapeOverflow
+  [PASS] workspace: alloc size overflow returns null
+  [PASS] loader: truncated ONNX rejected without panic
+  [PASS] loader: empty ONNX rejected without panic
+[msg]

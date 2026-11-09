@@ -1,0 +1,27 @@
+# pi-5-1 reliability, make kernel PLATFORM=RASPI5 NC_AXIS=OFF SETWAY_INVAL=OFF at 10f8688e
+# (+ log-only commits, banner 94cac476), slmos.bin sha256
+# 90d4caa922863e6845c678b2c732f064b1e1463bab93c75d036ed27b7996193a
+# (kernel_2712-1193-ncoff-swoff-r3.img on kernel_2712.img and kernel8.img)
+# 2026-11-09 ~05:05 to ~05:31 UTC
+#
+# Sequence per attempt (#1195): board off (sdwire_update for S1, power_off afterwards) ->
+# sdwire_info -> power_cycle delay=20 || serial_capture timeout 75 in the same message.
+# S1-S3 until "slmos>|system unable to continue|KERNEL PANIC", full output; S4-S10 add
+# "|not visible" and tail=15. S3 is the logged boot with both banner lines
+# ("SMP: NC_AXIS=OFF, CPU-shared state in cacheable memory (#1193)" and
+# "SMP: SETWAY_INVAL=OFF, no set/way loop on secondaries (#1193)"), 3/3 secondaries online,
+# no "boot flag not visible": pi5-ncoff-swoff-bootlog-S3.txt.
+#
+# attempt  ~time  class    lines             proof
+S1         05:06  A-noLog  0 (75 s timeout)  ping true; uptime 0:03:01; regs/litmus/bench smp run on this boot
+S2         05:12  A-noLog  0 (75 s timeout)  ping true; uptime 0:03:10; prompt answered
+S3         05:15  A        221 (13.7 s)      full log to slmos>
+S4         05:18  A        tail 15 (14.0 s)  slmos> matched
+S5         05:20  A        tail 15 (14.0 s)  slmos> matched
+S6         05:22  A        tail 15 (14.0 s)  slmos> matched
+S7         05:24  A        tail 15 (13.9 s)  slmos> matched
+S8         05:25  A        tail 15 (13.7 s)  slmos> matched
+S9         05:28  A        tail 15 (13.6 s)  slmos> matched
+S10        05:31  A        tail 15 (13.9 s)  slmos> matched
+#
+# Totals: 10 attempts, A 8, A-noLog 2, B 0, C 0. 10 of 10 reached the shell.

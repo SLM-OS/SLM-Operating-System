@@ -1,0 +1,70 @@
+# pi-5-1, SLM-OS 10f8688e (suite rev 3), make kernel PLATFORM=RASPI5 NC_AXIS=OFF
+# slmos.bin sha256 d56b5f3d2b6741343c603faf5ca09359f7d1187348d1d5fc5e76353c8f57ceee
+# Boot R1, after litmus x2. Command `coherency neg` (scale 1), 17.7 s.
+# (a) Non-shareable WB alias: P2 forbidden 0 timeouts 0, P4 forbidden 0 timeouts 0, all P4 coverage ok.
+# (b) Non-cacheable alias: P2 forbidden 0 timeouts 12 (every row, observed=0), P4 forbidden 0
+#     timeouts 5, straddles 0 on every reader (coverage=weak): the NC reader never saw the writer's
+#     cached stores within 1 s.
+# (c) caches-off reader: p1_stale 12288 of 12288, p2_fresh 12288 of 12288, timeouts 0.
+coherency neg
+# control a: reader on Normal WB Non-shareable alias (SH=00)
+# writer VA 0xff800000, reader VA 0xffffff8fffe00000, PA 0xff800000, alias descriptor 0x00600000ff80040d
+# fresh 4 KB slot per row, first slot 0
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1          100000         0        0       5 observed=100145
+P2      0>2          100000         0        0       5 observed=100614
+P2      0>3          100000         0        0       5 observed=100462
+P2      1>0          100000         0        0       5 observed=100186
+P2      1>2          100000         0        0       5 observed=100384
+P2      1>3          100000         0        0       5 observed=100419
+P2      2>0          100000         0        0       5 observed=100006
+P2      2>1          100000         0        0       5 observed=100272
+P2      2>3          100000         0        0       5 observed=100453
+P2      3>0          100000         0        0       5 observed=100106
+P2      3>1          100000         0        0       5 observed=100138
+P2      3>2          100000         0        0       5 observed=100636
+P4      w0/0-3    151646208         0        0     222 pairs=10773440,5010560,10885056 straddles=137055,100009,138810 coverage=ok
+P4      w1/0-3    130347008         0        0     190 pairs=9422784,7623744,6489856 straddles=107964,100013,102621 coverage=ok
+P4      w2/0-3    139083776         0        0     203 pairs=6952064,8087936,10168512 straddles=100016,109604,131433 coverage=ok
+P4      w3/0-3    153227264         0        0     224 pairs=11207936,5145664,10811712 straddles=125009,100020,131716 coverage=ok
+# control a totals: P2 forbidden=0 timeouts=0, P4 forbidden=0 timeouts=0
+# control b: reader on Normal Non-cacheable alias
+# writer VA 0xff800000, reader VA 0xffffff8fffe00000, PA 0xff800000, alias descriptor 0x00600000ff800709
+# fresh 4 KB slot per row, first slot 16
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1          100000         0        1    1000 observed=0
+P2      0>2          100000         0        1    1000 observed=0
+P2      0>3          100000         0        1    1000 observed=0
+P2      1>0          100000         0        1    1000 observed=0
+P2      1>2          100000         0        1    1000 observed=0
+P2      1>3          100000         0        1    1000 observed=0
+P2      2>0          100000         0        1    1000 observed=0
+P2      2>1          100000         0        1    1000 observed=0
+P2      2>3          100000         0        1    1000 observed=0
+P2      3>0          100000         0        1    1000 observed=0
+P2      3>1          100000         0        1    1000 observed=0
+P2      3>2          100000         0        1    1000 observed=0
+P4      w0/0-3    681979904         0        1    1000 pairs=22855936,22868992,22869056 straddles=0,0,0 coverage=weak
+P4      w1/0-3    682156032         0        2    1000 pairs=22855296,22868736,22868800 straddles=0,0,0 coverage=weak
+P4      w2/0-3    682041344         0        1    1000 pairs=22854720,22868800,22868992 straddles=0,0,0 coverage=weak
+P4      w3/0-3    681979904         0        1    1000 pairs=22852992,22868032,22868288 straddles=0,0,0 coverage=weak
+# control b totals: P2 forbidden=0 timeouts=12, P4 forbidden=0 timeouts=5
+# control c: reader with its data cache off (SCTLR.C=0); writer cleans P0 to PoC, stores P1 with no clean (phase 1), then cleans P1 (phase 2)
+# expected with real caches: p1_stale = iters, p2_fresh = iters
+pattern cpus          iters  p1_stale  p1_fresh  p2_stale  p2_fresh timeouts
+DCOFF   0>1            1024      1024         0         0      1024        0
+DCOFF   0>2            1024      1024         0         0      1024        0
+DCOFF   0>3            1024      1024         0         0      1024        0
+DCOFF   1>0            1024      1024         0         0      1024        0
+DCOFF   1>2            1024      1024         0         0      1024        0
+DCOFF   1>3            1024      1024         0         0      1024        0
+DCOFF   2>0            1024      1024         0         0      1024        0
+DCOFF   2>1            1024      1024         0         0      1024        0
+DCOFF   2>3            1024      1024         0         0      1024        0
+DCOFF   3>0            1024      1024         0         0      1024        0
+DCOFF   3>1            1024      1024         0         0      1024        0
+DCOFF   3>2            1024      1024         0         0      1024        0
+# control c totals: loads/phase=12288 p1_stale=12288 p1_fresh=0 p2_stale=0 p2_fresh=12288 timeouts=0
+coherency neg: done (report only: control c should show stale phase-1 reads on hardware with real caches, a and b may or may not; QEMU TCG models no caches)
+slmos>
+slmos>

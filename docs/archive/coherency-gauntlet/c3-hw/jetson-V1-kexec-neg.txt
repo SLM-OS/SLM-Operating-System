@@ -1,0 +1,124 @@
+# jetson-nano-2, kexec from JetPack Linux, SLM-OS 10f8688e (suite rev 3)
+# V1: make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF
+# slmos.elf sha256 e053b3018b476b219039e95a550dd20632c18dd05638120732a1c0420cf4be2a
+# same boot, after two `coherency litmus` runs; command: coherency neg (scale 1), 59.8 s
+# CPUs 0-3 are cluster 0, CPUs 4-5 cluster 1 (MPIDR 0x81000x00 / 0x8101xx00)
+# capture stopped on the "coherency neg: done" line (its tail was cut at the match)
+comK����y neg
+# control a: reader on Normal WB Non-shareable alias (SH=00)
+# writer VA 0x13c200000, reader VA 0xffffff8fffe00000, PA 0x13c200000, alias descriptor 0x006000013c20040d
+# fresh 4 KB slot per row, first slot 0
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1          100000         0        0       4 observed=108568
+P2      0>2          100000         0        0       4 observed=107054
+P2      0>3          100000         0        0       4 observed=107421
+P2      0>4          100000         0        1    1000 observed=0
+P2      0>5          100000         0        1    1000 observed=0
+P2      1>0          100000         0        0       4 observed=108853
+P2      1>2          100000         0        0       4 observed=108841
+P2      1>3          100000         0        0       4 observed=107129
+P2      1>4          100000         0        1    1000 observed=0
+P2      1>5          100000         0        1    1000 observed=0
+P2      2>0          100000         0        0       4 observed=108256
+P2      2>1          100000         0        0       4 observed=107005
+P2      2>3          100000         0        0       4 observed=108174
+P2      2>4          100000         0        1    1000 observed=0
+P2      2>5          100000         0        1    1000 observed=0
+P2      3>0          100000         0        0       4 observed=109570
+P2      3>1          100000         0        0       4 observed=108337
+P2      3>2          100000         0        0       4 observed=108022
+P2      3>4          100000         0        1    1000 observed=0
+P2      3>5          100000         0        1    1000 observed=0
+P2      4>0          100000         0        1    1000 observed=0
+P2      4>1          100000         0        1    1000 observed=0
+P2      4>2          100000         0        1    1000 observed=0
+P2      4>3          100000         0        1    1000 observed=0
+P2      4>5          100000         0        0       4 observed=106741
+P2      5>0          100000         0        1    1000 observed=0
+P2      5>1          100000         0        1    1000 observed=0
+P2      5>2          100000         0        1    1000 observed=0
+P2      5>3          100000         0        1    1000 observed=0
+P2      5>4          100000         0        0       4 observed=108694
+P4      w0/0-5    873484288         0        1    1000 pairs=58826752,30582208,58863808,151184512,151440896 straddles=515657,432196,505676,0,0 coverage=weak
+P4      w1/0-5    877785088         0        2    1000 pairs=58370560,48122560,41279232,150830656,151433792 straddles=523540,486188,458115,0,0 coverage=weak
+P4      w2/0-5    851607552         0        1    1000 pairs=40320064,48743808,58817344,150897088,151435904 straddles=469660,473323,510397,0,0 coverage=weak
+P4      w3/0-5    886013952         0        1    1000 pairs=58299968,31534656,58880064,150872704,151413504 straddles=525047,420623,524285,0,0 coverage=weak
+P4      w4/0-5    879190016         0        3    1000 pairs=151422336,150889728,151546176,150979968,63375168 straddles=0,0,0,0,653327 coverage=weak
+P4      w5/0-5    864661504         0        3    1000 pairs=151477632,150913472,151478336,150944960,63405504 straddles=0,0,0,0,599683 coverage=weak
+# control a totals: P2 forbidden=0 timeouts=16, P4 forbidden=0 timeouts=11
+# control b: reader on Normal Non-cacheable alias
+# writer VA 0x13c200000, reader VA 0xffffff8fffe00000, PA 0x13c200000, alias descriptor 0x006000013c200709
+# fresh 4 KB slot per row, first slot 36
+pattern cpus          iters forbidden timeouts      ms
+P2      0>1          100000         0        1    1000 observed=0
+P2      0>2          100000         0        1    1000 observed=0
+P2      0>3          100000         0        1    1000 observed=0
+P2      0>4          100000         0        1    1000 observed=0
+P2      0>5          100000         0        1    1000 observed=0
+P2      1>0          100000         0        1    1000 observed=0
+P2      1>2          100000         0        1    1000 observed=0
+P2      1>3          100000         0        1    1000 observed=0
+P2      1>4          100000         0        1    1000 observed=0
+P2      1>5          100000         0        1    1000 observed=0
+P2      2>0          100000         0        1    1000 observed=0
+P2      2>1          100000         0        1    1000 observed=0
+P2      2>3          100000         0        1    1000 observed=0
+P2      2>4          100000         0        1    1000 observed=0
+P2      2>5          100000         0        1    1000 observed=0
+P2      3>0          100000         0        1    1000 observed=0
+P2      3>1          100000         0        1    1000 observed=0
+P2      3>2          100000         0        1    1000 observed=0
+P2      3>4          100000         0        1    1000 observed=0
+P2      3>5          100000         0        1    1000 observed=0
+P2      4>0          100000         0        1    1000 observed=0
+P2      4>1          100000         0        1    1000 observed=0
+P2      4>2          100000         0        1    1000 observed=0
+P2      4>3          100000         0        1    1000 observed=0
+P2      4>5          100000         0        1    1000 observed=0
+P2      5>0          100000         0        1    1000 observed=0
+P2      5>1          100000         0        1    1000 observed=0
+P2      5>2          100000         0        1    1000 observed=0
+P2      5>3          100000         0        1    1000 observed=0
+P2      5>4          100000         0        1    1000 observed=0
+P4      w0/0-5    896860160         0        1    1000 pairs=10789120,10929664,10686080,10823296,10804672 straddles=0,0,0,0,0 coverage=weak
+P4      w1/0-5    902832128         0        1    1000 pairs=11085184,11101312,10883200,11039808,11082560 straddles=0,0,0,0,0 coverage=weak
+P4      w2/0-5    906452992         0        1    1000 pairs=11303872,11377216,11162176,11312192,11367808 straddles=0,0,0,0,0 coverage=weak
+P4      w3/0-5    914415616         0        2    1000 pairs=11327104,11378048,11426944,11326144,11395840 straddles=0,0,0,0,0 coverage=weak
+P4      w4/0-5    892551168         0        1    1000 pairs=11027008,11092736,11119360,10863360,11076608 straddles=0,0,0,0,0 coverage=weak
+P4      w5/0-5    904765440         0        1    1000 pairs=10805248,10890944,10953408,10691648,10827072 straddles=0,0,0,0,0 coverage=weak
+# control b totals: P2 forbidden=0 timeouts=30, P4 forbidden=0 timeouts=7
+# control c: reader with its data cache off (SCTLR.C=0); writer cleans P0 to PoC, stores P1 with no clean (phase 1), then cleans P1 (phase 2)
+# expected with real caches: p1_stale = iters, p2_fresh = iters
+pattern cpus          iters  p1_stale  p1_fresh  p2_stale  p2_fresh timeouts
+DCOFF   0>1            1024      1024         0         0      1024        0
+DCOFF   0>2            1024      1024         0         0      1024        0
+DCOFF   0>3            1024      1024         0         0      1024        0
+DCOFF   0>4            1024      1024         0         0      1024        0
+DCOFF   0>5            1024      1024         0         0      1024        0
+DCOFF   1>0            1024      1024         0         0      1024        0
+DCOFF   1>2            1024      1024         0         0      1024        0
+DCOFF   1>3            1024      1024         0         0      1024        0
+DCOFF   1>4            1024      1024         0         0      1024        0
+DCOFF   1>5            1024      1024         0         0      1024        0
+DCOFF   2>0            1024      1024         0         0      1024        0
+DCOFF   2>1            1024      1024         0         0      1024        0
+DCOFF   2>3            1024      1024         0         0      1024        0
+DCOFF   2>4            1024      1024         0         0      1024        0
+DCOFF   2>5            1024      1024         0         0      1024        0
+DCOFF   3>0            1024      1024         0         0      1024        0
+DCOFF   3>1            1024      1024         0         0      1024        0
+DCOFF   3>2            1024      1024         0         0      1024        0
+DCOFF   3>4            1024      1024         0         0      1024        0
+DCOFF   3>5            1024      1024         0         0      1024        0
+DCOFF   4>0            1024      1024         0         0      1024        0
+DCOFF   4>1            1024      1024         0         0      1024        0
+DCOFF   4>2            1024      1024         0         0      1024        0
+DCOFF   4>3            1024      1024         0         0      1024        0
+DCOFF   4>5            1024      1024         0         0      1024        0
+DCOFF   5>0            1024      1024         0         0      1024        0
+DCOFF   5>1            1024      1024         0         0      1024        0
+DCOFF   5>2            1024      1024         0         0      1024        0
+DCOFF   5>3            1024      1024         0         0      1024        0
+DCOFF   5>4            1024      1024         0         0      1024        0
+# control c totals: loads/phase=30720 p1_stale=30720 p1_fresh=0 p2_stale=0 p2_fresh=30720 timeouts=0
+coherency neg: done (report only: control c should show stale phase-1 read

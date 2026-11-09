@@ -1,0 +1,28 @@
+# jetson-nano-2, kexec from JetPack Linux, SLM-OS 10f8688e
+# V1: make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF
+# slmos.elf sha256 e053b3018b476b219039e95a550dd20632c18dd05638120732a1c0420cf4be2a (/root/slmos-1193-V1.elf,
+#   sha re-checked on the board before every kexec)
+# Each boot: labctl power_cycle (15 s) -> SD Linux -> ssh `setsid nohup slmos-kexec /root/slmos-1193-V1.elf`
+#   -> labctl serial_capture(until "slmos>|boot flag not visible|SMP: [0-4]/5|PANIC|panic|Unhandled Exception|
+#   Synchronous Exception", tail=4). A boot passes when the capture stops on "slmos>".
+#
+# boot  kexec fired  capture                 last lines
+#  1    04:33:33     4 lines, 87.9 s, match  "SLM-OS Debug Shell" / "Type 'help' ..." / "" / "slmos>"
+#  2    04:36:51     4 lines, 79.8 s, match  same
+#  3    04:39:56     4 lines, 92.6 s, match  same
+#  4    04:43:01     4 lines, 73.9 s, match  same
+#  5    04:47:11     4 lines, 90.9 s, match  same
+#  6    04:50:23     0 lines in 400.0 s, timeout (labctl capture received nothing, not even Linux's last lines)
+#                    Follow-up at 04:59: health online, ssh refused (Linux gone), `cpu` on the serial console
+#                    answered: "CPUs: 6 online / 6 total", all EL2h, CPU0 Ticks 46900 (~469 s), every
+#                    "CPU N boot: 0x44". So the board did boot SLM-OS to the shell, but its boot log is
+#                    not available; counted as unverified and replaced by boot 11.
+#  7    05:01:20     4 lines, 92.6 s, match  same as 1
+#  8    05:04:33     4 lines, 88.5 s, match  same
+#  9    05:08:07     4 lines, 82.1 s, match  same
+# 10    05:11:24     4 lines, 92.6 s, match  same
+# 11    05:14:58     4 lines, 81.9 s, match  same
+#
+# Result: 10/10 captured boots reached slmos> (boots 1-5, 7-11), none stopped on "boot flag not visible",
+# a partial "SMP: n/5" line, a panic or an exception. Boot 6 also reached the shell (verified afterwards
+# with `cpu`), log not captured.

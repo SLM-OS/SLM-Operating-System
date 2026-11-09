@@ -1,0 +1,179 @@
+# pi-5-1, origin/coherency-remove-nc-axis @ 072bd7076b37a4fb577012b3bde7e31c506e7f0a (NC axis removed,
+# CPU-sharing DC CVAC/CIVAC dropped), make kernel PLATFORM=RASPI5 (ENABLE_AI_SCHEDULER=ON
+# SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF ENABLE_WORK_STEALING=ON SETWAY_INVAL=ON; no NC_AXIS option)
+# slmos.bin sha256 7701d4a1a807cda5bda2b4fcb5e5bd54365318c9d987b678f979456829b39320 (7504432 B)
+# image kernel_2712-1193-removal-072bd707.img on kernel_2712.img and kernel8.img
+# Boot X1 (~05:40 UTC), class A: 218 lines in 13.4 s to slmos>, banner "build 20261109053735
+# (072bd707)". SMP lines: "SMP: initializing", "SMP: 3/3 secondary CPUs online", "SMP: total 4 CPUs
+# active"; no "run queues in NC memory" line, no NC_AXIS line, no CPUECTLR bit 6 line (dropped in
+# 9c4e0d30), no "boot flag not visible". MACB rings still in NC memory (tx=0xffe01000 rx=0xffe01080).
+# The rest of the X1 log matches pi5-ncoff-swoff-bootlog-S3.txt line for line except the build
+# banner, the .text/.data ends (0x2c7c70 / 0x7a81e8), "PHY link up ... after 31x100 ms", and the
+# three S3 lines that X1 does not print (NC_AXIS=OFF, SETWAY_INVAL=OFF, CPUECTLR_EL1 bit 6).
+# SMP section of X1, verbatim:
+#   [INFO] SMP: initializing
+#   (blank line, then the Spinlock Validation Tests block, all PASS)
+#   [INFO] CPU map: 4 CPUs configured
+#   [INFO] SMP: 3/3 secondary CPUs online
+#   [INFO] SMP: total 4 CPUs active
+#   (SMP Validation Tests: All 4 CPUs online, CPU 0-3 online flag set, logical map valid, all PASS)
+# coherency regs: 4 of 4 (identical values to the other builds). coherency litmus (scale 1) once:
+# PASS, 4.2 s, S1 677905, S2 0, MP weak 0, P4 weak 0, fewest straddles 100006.
+
+===== coherency regs =====
+coherency regs
+cpu0: CurrentEL=EL2 MIDR=0x414fd0b1 MPIDR=0x81000000
+  SCTLR_EL2  0x0000000030c01805 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d00800 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR   0x2000000961563000 (raw)
+  CLUSTERECTLR 0x0000000000000500 (raw)
+cpu1: CurrentEL=EL2 MIDR=0x414fd0b1 MPIDR=0x81000100
+  SCTLR_EL2  0x0000000030c01805 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d00800 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR   0x0000000961563000 (raw)
+  CLUSTERECTLR 0x0000000000000500 (raw)
+cpu2: CurrentEL=EL2 MIDR=0x414fd0b1 MPIDR=0x81000200
+  SCTLR_EL2  0x0000000030c01805 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d00800 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR   0x0000000961563000 (raw)
+  CLUSTERECTLR 0x0000000000000500 (raw)
+cpu3: CurrentEL=EL2 MIDR=0x414fd0b1 MPIDR=0x81000300
+  SCTLR_EL2  0x0000000030c01805 (M=1 C=1 I=1)
+  HCR_EL2    0x0000000488000000 (E2H=1 TGE=1)
+  SCTLR_EL1  0x0000000030d00800 (M=0 C=0 I=0)
+  TCR_EL2    0x00000012b5193519
+  MAIR_EL2   0x00000000ff440400
+  CLIDR_EL1  0x00000000c3000123
+  CTR_EL0    0x000000009444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  L3  CCSIDR 0x0000000070ffe07a (64 B lines, 16-way, 2048 sets, 2048 KB)
+  CPUECTLR   0x0000000961563000 (raw)
+  CLUSTERECTLR 0x0000000000000500 (raw)
+coherency regs: 4 of 4 CPUs reported
+slmos>
+slmos>
+
+===== coherency litmus =====
+coherency litmus
+# coherency litmus: cpus=0-3 scale=1 timeout=1000ms caller=cpu0 p4_target=100000 p4_budget_ms=2000
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1         1000000         0        0      22 observed=638097
+P1      0>2         1000000         0        0      22 observed=646963
+P1      0>3         1000000         0        0      22 observed=641134
+P1      1>0         1000000         0        0      22 observed=659349
+P1      1>2         1000000         0        0      22 observed=634402
+P1      1>3         1000000         0        0      28 observed=808780
+P1      2>0         1000000         0        0      22 observed=665424
+P1      2>1         1000000         0        0      22 observed=630972
+P1      2>3         1000000         0        0      27 observed=797705
+P1      3>0         1000000         0        0      23 observed=667609
+P1      3>1         1000000         0        0      22 observed=647053
+P1      3>2         1000000         0        0      22 observed=635738
+P2      0>1         1000000         0        0      51 observed=1004226
+P2      0>2         1000000         0        0      51 observed=1003724
+P2      0>3         1000000         0        0      51 observed=1005966
+P2      1>0         1000000         0        0      51 observed=1003708
+P2      1>2         1000000         0        0      51 observed=1004527
+P2      1>3         1000000         0        0      51 observed=1004120
+P2      2>0         1000000         0        0      51 observed=1000492
+P2      2>1         1000000         0        0      51 observed=1003678
+P2      2>3         1000000         0        0      51 observed=1003348
+P2      3>0         1000000         0        0      51 observed=1000018
+P2      3>1         1000000         0        0      51 observed=1004480
+P2      3>2         1000000         0        0      51 observed=1006059
+P3      0>1          100000         0        0      31
+P3      0>2          100000         0        0      31
+P3      0>3          100000         0        0      31
+P3      1>0          100000         0        0      31
+P3      1>2          100000         0        0      31
+P3      1>3          100000         0        0      31
+P3      2>0          100000         0        0      31
+P3      2>1          100000         0        0      31
+P3      2>3          100000         0        0      31
+P3      3>0          100000         0        0      31
+P3      3>1          100000         0        0      30
+P3      3>2          100000         0        0      31
+P4      w0/0-3    152801280         0        0     223 pairs=10865408,5041216,10954496 straddles=135381,100010,139420 coverage=ok
+P4      w1/0-3    130121728         0        0     190 pairs=9411776,7606400,6446336 straddles=107076,100006,102109 coverage=ok
+P4      w2/0-3    138297344         0        0     202 pairs=6907136,8046976,10075648 straddles=100006,107786,129636 coverage=ok
+P4      w3/0-3    151191552         0        0     221 pairs=11086976,5039168,10659712 straddles=122420,100012,128994 coverage=ok
+P5      0>1          100000         0        0      21
+P5      0>2          100000         0        0      21
+P5      0>3          100000         0        0      21
+P5      1>0          100000         0        0      21
+P5      1>2          100000         0        0      21
+P5      1>3          100000         0        0      21
+P5      2>0          100000         0        0      21
+P5      2>1          100000         0        0      21
+P5      2>3          100000         0        0      21
+P5      3>0          100000         0        0      21
+P5      3>1          100000         0        0      21
+P5      3>2          100000         0        0      21
+P6      0-3         1000000         0        0     162
+S1      0>1         1000000     55978        0       2 observed=128582
+S1      0>2         1000000     56849        0       2 observed=128556
+S1      0>3         1000000     56418        0       2 observed=128397
+S1      1>0         1000000     57266        0       2 observed=129653
+S1      1>2         1000000     56615        0       2 observed=128296
+S1      1>3         1000000     55782        0       2 observed=128392
+S1      2>0         1000000     57262        0       2 observed=129630
+S1      2>1         1000000     56088        0       2 observed=128633
+S1      2>3         1000000     55854        0       2 observed=128693
+S1      3>0         1000000     56454        0       2 observed=130001
+S1      3>1         1000000     56152        0       2 observed=128687
+S1      3>2         1000000     57187        0       2 observed=128584
+S2      0>1          100000         0        0      30
+S2      0>2          100000         0        0      30
+S2      0>3          100000         0        0      30
+S2      1>0          100000         0        0      30
+S2      1>2          100000         0        0      30
+S2      1>3          100000         0        0      30
+S2      2>0          100000         0        0      30
+S2      2>1          100000         0        0      30
+S2      2>3          100000         0        0      29
+S2      3>0          100000         0        0      30
+S2      3>1          100000         0        0      30
+S2      3>2          100000         0        0      30
+SENS cpus=0>1 S1=55978 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>2 S1=56849 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=0>3 S1=56418 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>0 S1=57266 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>2 S1=56615 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=1>3 S1=55782 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>0 S1=57262 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>1 S1=56088 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=2>3 S1=55854 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>0 S1=56454 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>1 S1=56152 S2=0 P2_sensitive=yes P3_sensitive=no
+SENS cpus=3>2 S1=57187 S2=0 P2_sensitive=yes P3_sensitive=no
+# S1 relaxed outcomes: 677905, S2 relaxed outcomes: 0 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 100006 (target 100000)
+coherency: PASS
+slmos>
+slmos>

@@ -1,0 +1,244 @@
+# pi-5-1, SLM-OS c2122932, make kernel PLATFORM=RASPI5 NC_AXIS=OFF (other flags default:
+# ENABLE_AI_SCHEDULER=ON SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF ENABLE_WORK_STEALING=ON SETWAY_INVAL=ON)
+# slmos.bin sha256 0d8e2691a2a61494b272d1890fcffedfe490eee05226d32690a41586a955e123 (7504432 B)
+# staged /var/lib/labctl/images/kernel_2712-1193-ncoff.img, copied to kernel_2712.img and kernel8.img
+# Attempt N1 (2026-11-09 ~03:31 UTC): power_off -> sdwire_update (rename, copy) -> sdwire_info ->
+# power_cycle delay=20 || serial_capture timeout 75 until "slmos>". 228 lines, timeout (no prompt).
+# Class B: CPU 0 page fault in cpu_supervisor right after "Enabling interrupts".
+#
+# Symbolized (aarch64-none-elf-addr2line/objdump on build/kernel/slmos.elf):
+#   ELR 0x9bf48 = cpu_supervisor_task_entry: `ldr w3, [x2], #4` with x2 loaded from
+#   0x8feb50 = sched_diag_idle_loops (B, size 0x20, i.e. the NC_AXIS=OFF array form).
+#   kernel/sched/cpu_supervisor.c:57 declares `extern volatile uint32_t *sched_diag_idle_loops;`
+#   unconditionally; sched.c:399 defines `volatile uint32_t sched_diag_idle_loops[MAX_CPUS]`
+#   when PLATFORM_HAS_NC_MEMORY is off. The "pointer" is idle_loops[0..1] =
+#   0x0000aaaf_0000aaaa (sched.c:2647 seeds 0xAAAA). Software defect of the NC_AXIS split.
+# Raw UART as returned by labctl:
+
+========================================
+  SLM-OS v0.4.0 build 20261109032907 (c2122932)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Raspberry Pi 5
+[INFO] DTB parsed successfully at 0x2efec700
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x0 - 0x100000000 (4096 MB)
+  UART:      0x1f00030000 (IRQ 185)
+  GIC dist:  0x107fff9000
+  GIC cpu:   0x107fffa000
+  CPUs:      4
+  Timer IRQ: 26
+  /memreserve/:
+    [0] 0x3fc00000 + 0x400000
+  Bootloader:
+    version:      2682625908f5585e5f4832bb82e74e7d757ec48f
+    capabilities: 0x7f
+    build-ts:     0x66f16700
+  Firmware entropy: rng-seed=64 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000 - 0x2c7100
+  .data:   0x784000 - 0x7a81e8
+  .bss:    0x7b0000 - 0x296e270
+  End:     0x2973000
+  RAM:     0x0 - 0x100000000 (4096 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x8cf000
+  Blocks mapped: 2057
+  Bytes mapped: 4114 MB
+  L1[0]: 0x4000000000070d (covers VA 0x0)
+  L1[1]: 0x4000004000070d (covers VA 0x40000000)
+  L1[2]: 0x4000008000070d (covers VA 0x80000000)
+  L1[3]: 0x8cb003 (covers VA 0xc0000000)
+  L1[64]: 0x8ce003 (covers VA 0x1000000000)
+  L1[65]: 0x8cd003 (covers VA 0x1040000000)
+  L1[110]: 0x8ca003 (covers VA 0x1b80000000)
+  L1[124]: 0x8cc003 (covers VA 0x1f00000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x0) = 0x0
+  [PASS] virt_to_phys(0xffffff8000000000) = 0x0
+  [PASS] is_mapped(0x0) = true
+  [PASS] is_mapped(0x140000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x2973000 - 0xffe00000
+  Total pages:     1037453 (4149812 KB)
+  Free pages:      1036429 (4145716 KB)
+  Used pages:      1024 (4096 KB)
+  Reserved:        10611 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 1 blocks
+    Order  2 (   16 KB): 1 blocks
+    Order  3 (   32 KB): 1 blocks
+    Order  7 (  512 KB): 1 blocks
+    Order  9 ( 2048 KB): 2 blocks
+    Order 10 ( 4096 KB): 3 blocks
+    Order 11 ( 8192 KB): 2 blocks
+    Order 12 (16384 KB): 3 blocks
+    Order 13 (32768 KB): 2 blocks
+    Order 14 (65536 KB): 3 blocks
+    Order 15 (131072 KB): 3 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 17 (524288 KB): 1 blocks
+    Order 18 (1048576 KB): 2 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xffe00000 - 0x100000000 (2048 KB)
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=64B kaslr_seed=8B
+
+[INFO] SMP: initializing
+[INFO] SMP: NC_AXIS=OFF, CPU-shared state in cacheable memory (#1193)
+[INFO] SMP: CPUECTLR_EL1 bit 6 = 0 (not an SMPEN bit on this core)
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] UART IRQ: post-init diag: MIS=0x0 INTSTAT=0x0 MIP_status=0x0 MIP_raised=0x0 GIC_ISPENDR=0x0
+[INFO] UART IRQ enabled (GIC IRQ 185 = SPI 153, RP1 vec 25)
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0xe0000000 (256 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (512 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie1: training link (status=0x1e08f before reset)
+[INFO] pcie1: link up (status=0x3e0bf) after 0 ms
+[INFO] pcie1: RC LNKCTL 0x0000 ASPM_L0S already off
+[INFO] pcie: 01:00.0 BAR0 assigned 0x80000000 (size 0x4000)
+[INFO] pcie: 01:00.0 BAR2 assigned 0x80004000 (size 0x1000)
+[INFO] pcie: 01:00.0 BAR4 assigned 0x80008000 (size 0x4000)
+[INFO] pcie: bcm2712-pcie1 backend, 2 device(s) enumerated
+[INFO] hailo: endpoint at 01:00.0
+[INFO] hailo: endpoint LNKCTL 0x0000 ASPM_L0S already off
+[INFO] hailo: endpoint DEVCTL=0x2910 MPS=128 MRRS=512 LNKSTA=0x1012 speed=Gen2 width=x1
+[INFO] hailo: platform 'pi5-pcie1' initialized
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[INFO] cpu_supervisor: started (sample 1000 ms, threshold 6 samples)
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'cpu_supervisor'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+
+*********************************
+***       PAGE FAULT          ***
+*********************************
+
+Type:    Data Abort (READ)
+Address: 0xaaaf0000aaaa
+Reason:  Translation fault, level 0
+
+Task Context:
+  Task ID:   6
+  Task Name: cpu_supervisor
+  CPU:       0
+
+Fault Location:
+  ELR (PC):  0x9bf48
+
+Raw Exception State:
+  ESR_EL1:   0x96000004
+  EC:        0x25 (Data Abort (same EL))
+  FSC:       0x4
+  WnR:       0 (read)
+  SPSR_EL1:  0x80000009
+
+General Purpose Registers:
+  x0 =0x0000000000000001  x1 =0x0000000000000000  x2 =0x0000aaaf0000aaaa  x3 =0x0000000000000080
+  x4 =0x0000000000b10128  x5 =0x00000000029720f0  x6 =0x00000000029720f0  x7 =0x00000000029720f0
+  x8 =0x0000000100000000  x9 =0x0000000000000000  x10=0x00000000008c573d  x11=0x0000000000000000
+  x12=0x00000000008c9000  x13=0x0000000000000007  x14=0x0000000000000040  x15=0x0000000002973000
+  x16=0x0000000000000001  x17=0x00000000000fd38d  x18=0x0000000000001000  x19=0x000000000009bf0c
+  x20=0x0000000000000000  x21=0x0000000000000000  x22=0x0000000000b10108  x23=0x0000000000000000
+  x24=0x0000000000000000  x25=0x0000000000000000  x26=0x0000000000000000  x27=0x0000000000000000
+  x28=0x0000000000000000  x29=0x00000000ffcfff90  x30=0x00000000000870d0
+
+Stack Canaries:
+[canary] Task stack inventory:
+  id=1 name='idle' stack=[0x2980000..0x29c0000)
+  id=2 name='idle_2' stack=[0x29c0000..0x2a00000)
+  id=3 name='idle_1' stack=[0xffc00000..0xffc40000)
+  id=4 name='idle_3' stack=[0xffc40000..0xffc80000)
+  id=7 name='net_pump' stack=[0xffc80000..0xffcc0000)
+  id=6 name='cpu_supervisor' stack=[0xffcc0000..0xffd00000)
+  id=8 name='shell' stack=[0xffd00000..0xffd40000)
+  (all task stacks intact)
+
+CPU 0 faulted — system unable to continue (PSCI-offing the boot CPU means no supervisor can resurrect it).

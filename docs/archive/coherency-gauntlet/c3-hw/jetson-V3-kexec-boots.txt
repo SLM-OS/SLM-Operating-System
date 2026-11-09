@@ -1,0 +1,26 @@
+# jetson-nano-2, kexec from JetPack Linux, removal branch origin/coherency-remove-nc-axis @ 072bd707
+# V3: make kernel PLATFORM=JETSON_ORIN_NANO (default flags)
+# slmos.elf sha256 84e7946c015e4f9665d993850f5b2525dfdc675e506617db88113c545e6c6ce4 (/root/slmos-1193-V3.elf,
+#   sha re-checked on the board before every kexec)
+# Each boot: labctl power_cycle -> SD Linux -> ssh `setsid nohup slmos-kexec /root/slmos-1193-V3.elf` ->
+#   labctl serial_capture(until "slmos>|boot flag not visible|SMP: [0-4]/5|PANIC|panic|Unhandled Exception|
+#   Synchronous Exception", tail=4). Series stopped at 7 boots for the 08:15 UTC hard stop (target was 10).
+#
+# boot  kexec fired  capture                      result
+#  1    06:23:04     4 lines, 92.7 s, match       "SLM-OS Debug Shell" ... "slmos>"
+#  2    06:26:17     4 lines, 92.6 s, match       same
+#  3    06:29:27     4 lines, 92.6 s, match       same
+#  4    06:32:31     0 lines in 300.0 s, timeout  `cpu` afterwards: "CPUs: 6 online / 6 total", CPU0 Ticks 35207,
+#                                                 every "CPU N boot: 0x44", diag_tick ptr=0x80ad6b70
+#  5    06:41:42     4 lines, 17.4 s, match       "SLM-OS Debug Shell" ... "slmos>"
+#  6    06:44:53     0 lines in 200.0 s, timeout  `cpu` afterwards: "CPUs: 6 online / 6 total"
+#  7    06:57:25     0 lines in 200.0 s, timeout  ssh to Linux refused at 07:03 (Linux gone); `cpu`:
+#                                                 "CPUs: 6 online / 6 total"
+#
+# Result: 7/7 boots reached the SLM-OS shell; 4 of them with the boot capture stopping on "slmos>" and none on
+# a failure pattern; boots 4, 6, 7 verified only afterwards with `cpu` (6/6 online), their boot logs were not
+# captured, so the "boot flag not visible" check is unverified for those three.
+# Capture note: the kexec helper script waited for the dying ssh session (up to 60 s) before returning, so
+# the capture could start after the boot had finished; from boot 7 the ssh was detached, and boot 7 still got
+# 0 lines, as did the first UEFI capture at 07:07 and the first UEFI removal boot at 07:30, while later UEFI
+# captures worked again. The cause on the labctl side is not known.

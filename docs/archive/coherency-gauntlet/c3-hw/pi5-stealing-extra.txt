@@ -1,0 +1,153 @@
+# pi-5-1, two extra `bench stealing` runs per build (orchestrator request, ~05:31-05:37 UTC), each on
+# a fresh boot with no litmus/neg before it (the first three runs of each build were taken after
+# litmus/neg on the deploy boot). Boot sequence #1195; both boots class A (tail 15, slmos> matched).
+#
+# NC_AXIS=OFF, 10f8688e, slmos.bin d56b5f3d2b6741343c603faf5ca09359f7d1187348d1d5fc5e76353c8f57ceee
+#   (boot R11, 13.6 s): runs 4-5 = 13138, 14550 us
+#   all five: 16147, 12936, 17240, 13138, 14550 us (mean 14802, median 14550)
+# NC baseline, 9a13b9ee, kernel_2712-1193-nc.img sha256
+#   24ce106b9f97a4bf3693739b5b250c6e71c18253c20926a1f3a6ef3af7bbad3b (boot NB1, 13.4 s):
+#   runs 4-5 = 17884, 15715 us
+#   all five: 13062, 13266, 17035 (c2-hw/pi5-perf.txt), 17884, 15715 us (mean 15392, median 15715)
+
+## NC_AXIS=OFF, bench stealing, run 4
+bench stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       4
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=10) exiting
+[INFO] Task 's3_1' (id=11) exiting
+[INFO] Task 's3_8' (id=18) exiting
+[INFO] Task 's3_12' (id=22) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   13 ms (13138 us)
+    Per-task avg: 821 us
+
+    Per-CPU execution distribution:
+      CPU 0: 4 tasks
+      CPU 1: 4 tasks
+      CPU 2: 4 tasks
+      CPU 3: 4 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       245          4         0
+      1        10          0         0
+      2        14          4         0
+      3        16          4         0
+
+slmos>
+slmos>
+
+## NC_AXIS=OFF, bench stealing, run 5
+bench stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       4
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=26) exiting
+[INFO] Task 's3_1' (id=27) exiting
+[INFO] Task 's3_5' (id=31) exiting
+[INFO] Task 's3_9' (id=35) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   14 ms (14550 us)
+    Per-task avg: 909 us
+
+    Per-CPU execution distribution:
+      CPU 0: 4 tasks
+      CPU 1: 4 tasks
+      CPU 2: 4 tasks
+      CPU 3: 4 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       899          4         0
+      1        10          0         0
+      2        14          4         0
+      3        16          4         0
+
+slmos>
+slmos>
+
+## NC baseline, bench stealing, run 4
+bench stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       4
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=10) exiting
+[INFO] Task 's3_1' (id=11) exiting
+[INFO] Task 's3_2' (id=12) exiting
+[INFO] Task 's3_6' (id=16) exiting
+[INFO] Task 's3_10' (id=20) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   17 ms (17884 us)
+    Per-task avg: 1117 us
+
+    Per-CPU execution distribution:
+      CPU 0: 5 tasks
+      CPU 1: 4 tasks
+      CPU 2: 4 tasks
+      CPU 3: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       534          5         0
+      1        10          0         0
+      2        14          4         0
+      3        13          3         0
+
+slmos>
+slmos>
+
+## NC baseline, bench stealing, run 5
+bench stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       4
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=26) exiting
+[INFO] Task 's3_1' (id=27) exiting
+[INFO] Task 's3_5' (id=31) exiting
+[INFO] Task 's3_9' (id=35) exiting
+[INFO] Task 's3_13' (id=39) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   15 ms (15715 us)
+    Per-task avg: 982 us
+
+    Per-CPU execution distribution:
+      CPU 0: 5 tasks
+      CPU 1: 4 tasks
+      CPU 2: 4 tasks
+      CPU 3: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         6          5         0
+      1        10          0         0
+      2        14          4         0
+      3        15          3         0
+
+slmos>
+slmos>

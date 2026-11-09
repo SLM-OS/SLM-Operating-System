@@ -1,0 +1,27 @@
+# jetson-nano-2, UEFI-direct reliability: 10 boots of SLM-OS 62a0217e (default flags)
+# slmos.bin sha256 a86850dbd705fb68723cc3c8e53b70def2656d223346292bf4160bb425e3f0b7, staged once
+# as \EFI\SLMOS\SLMOS.efi on the NVMe ESP (fsck.vfat -n clean, sha256 re-read from a fresh
+# read-only mount after drop_caches). No ESP writes during the loop.
+# Each boot: labctl power_cycle (15 s) -> SD JetPack Linux -> ssh `efibootmgr --bootnext 000E`
+# ("SLM-OS NVMe") + clean `systemctl reboot` -> labctl serial_capture until
+# `slmos>|PANIC|PAGE FAULT|System halted|Unhandled Exception|reloc: ABORT|Powering off`.
+# Seconds: boot 1 from the reboot command; boots 3-10 from the power cycle (SD Linux boot,
+# reboot and UEFI boot included). 2026-11-09 ~02:05-02:45 UTC.
+#
+# TCU banner on these cold boots (raw):
+#   NOTICE:  BL31: v2.8(release):
+#   NOTICE:  BL31: Built : 11:44:32, May  9 2026
+boot  result  seconds  last lines
+ 1    PASS     30.7    SLM-OS Debug Shell / Type 'help' for available commands. / slmos>
+ 2    PASS      n/a    prompt printed before the capture attached (0 lines in 180 s); the shell
+                       then answered `uptime` with "Uptime: 0:04:47" and slmos>
+ 3    PASS     96.5    same as boot 1
+ 4    PASS    115.8    same
+ 5    PASS    118.8    same
+ 6    PASS     97.9    same
+ 7    PASS    116.2    same
+ 8    PASS    118.5    same
+ 9    PASS     96.0    same
+10    PASS    119.1    same
+total: 10/10 reached slmos> (boot 2 confirmed through the shell, not the prompt line); no
+PANIC, PAGE FAULT, halt, relocation ABORT or EL3 exception in any capture.

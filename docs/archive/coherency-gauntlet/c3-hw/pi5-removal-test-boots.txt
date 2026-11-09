@@ -1,0 +1,48 @@
+# pi-5-1, removal boot-test kernel at origin/coherency-remove-nc-axis f546a126 (C3 critic request)
+# make kernel-test PLATFORM=RASPI5, slmos.bin sha256
+#   ef9202938a920ea63b18a11232f94e8a4e0b49b236ad420f1879266b61803dd8
+#   (kernel_2712-1193-removal-f546a126-test.img on kernel_2712.img and kernel8.img, originals kept as
+#   *.pre1193 during the run)
+# 2026-11-09 06:31 to 07:36 UTC. Sequence per boot (#1195): board off -> sdwire_info ->
+# power_cycle delay=20 || serial_capture timeout 330 until
+# "All test suites passed|total failure\(s\)|KERNEL PANIC|system unable to continue", no tail.
+# Raw UART per boot: pi5-removal-test-W<n>.txt (first line is the labctl capture header).
+# Counts are grep -c over each raw file: "dormancy-enter", "ALREADY_ON (software wedge)",
+# "not visible" (smp.c boot-flag WARN); failure list compared with sort/cmp against the earlier
+# removal test-kernel run (pi5-removal-test-suite.txt, the same 18 as the NC baseline and NC_AXIS=OFF).
+#
+# boot ~UTC  capture                    banner (f546a126)  3/3 online  boot-flag WARN  coherency  integration  suite                 18-list  dorm-enter  wedge
+W1   06:32  full, 9740 lines, 143.6 s  yes                yes         0               26/26      16/16        FAIL 18               same     98          98
+W2   06:41  LATE: began mid-suite,     missing            missing     0 (in window)   26/26      16/16        FAIL 18               same     81 (part)   81 (part)
+            8878 lines, 139.7 s
+--   06:44  aborted: capture issued before power_cycle in one message ran first (330 s, 0 lines); the
+            power_cycle token then expired; no boot happened (operator error, not counted)
+W3   06:54  full, 9789 lines, 153.6 s  yes                yes         0               26/26      16/16        FAIL 18               same     108         108
+W4   06:58  full, 9818 lines, 154.7 s  yes                yes         0               26/26      16/16        FAIL 18               same     114         114
+W5   07:05  full, 9774 lines, 157.6 s  yes                yes         0               26/26      16/16        FAIL 18               same     105         105
+W6   07:08  full, 9790 lines, 148.5 s  yes                yes         0               26/26      16/16        FAIL 18               same     108         108
+W7   07:15  full, 9795 lines, 143.4 s  yes                yes         0               26/26      16/16        FAIL 18               same     109         109
+W8   07:18  full, 9788 lines, 148.1 s  yes                yes         0               26/26      16/16        FAIL 18               same     108         108
+W9   07:23  LATE: began inside          missing            missing     0 (in window)   26/26      16/16        FAIL 19               DIFFERENT 64 (part)  64 (part)
+            test_blob_autoload, 6187 lines, 127.3 s
+W10  07:27  full, 9835 lines, 154.8 s  yes                yes         0               26/26      16/16        FAIL 18               same     117         117
+W11  07:33  full, 9787 lines, 148.5 s  yes                yes         0               26/26      16/16        FAIL 18               same     107         107
+#
+# Totals: 11 boots, all reached the final summary (none silent, no panic or fault line in any
+# capture). Whole-run captures: 9 (W1, W3-W8, W10, W11). W2 and W9 connected late (the capture
+# missed the start of the run), so their banner, SMP lines and event counts are partial.
+# Full captures: dormancy-enter 98-117 per run (mean 108.2), ALREADY_ON (software wedge) equal to
+# dormancy-enter in every run (each enter is followed by one supervisor resurrect that finds the CPU
+# already on). For comparison, single runs: NC baseline test kernel 116/116, NC_AXIS=OFF 115/115,
+# earlier removal run 104/104. "dormancy-recover" lines are exactly 2x dormancy-enter in every run.
+#
+# W9 extra failure (19 instead of 18), not seen in the other 10 removal runs nor in the NC baseline
+# or NC_AXIS=OFF runs:
+#     FAILED at kernel/tests/test_slm_shell.c:892 - live_done
+#   [FAIL] test_slm_stats_live_from_second_session      (SLM shell suite: Tests: 40 Passed: 39 Failed: 1)
+# The test starts a second task on the caller's CPU and waits at most 100000 yield() calls for it to
+# set `static volatile bool live_done` after running "slm stats ... --follow 1" and "slm stop 0";
+# the assertion is the bounded wait expiring. Cause not investigated here (bounded-yield timing vs a
+# missed cross-CPU store if the task was stolen to another CPU are both possible).
+# W9's blob_autoload count is 7 only because the capture began inside that suite; its suite line
+# still reads "[FAIL] 14 test(s) failed".

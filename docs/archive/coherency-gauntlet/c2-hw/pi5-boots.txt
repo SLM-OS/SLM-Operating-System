@@ -1,0 +1,58 @@
+# pi-5-1 reliability, SLM-OS NC baseline, commit 9a13b9ee
+# image sha256 24ce106b9f97a4bf3693739b5b250c6e71c18253c20926a1f3a6ef3af7bbad3b (kernel_2712.img and kernel8.img)
+# 2026-11-09 00:40 to 02:08 UTC
+#
+# Sequence per attempt (rig defect #1195): power_off -> sdwire_info (read-only SDWire
+# round trip while off) -> power_cycle delay=20 -> serial_capture until "slmos>".
+# R1-R3: capture issued after power_cycle returned (90/60/45 s).
+# R4-R20: power_cycle and serial_capture (timeout 75, until "slmos>") issued as two
+# parallel calls in one message, per orchestrator instruction.
+# After each attempt: run_health_check (ping) and serial_send "uptime".
+#
+# Classes (orchestrator definitions):
+#   A        full SLM-OS log to slmos> in the capture
+#   A-noLog  capture got 0 lines, but ping true + fresh uptime + prompt answers
+#   B        partial SLM-OS log that stops (kernel failure)  -- none seen
+#   C        0 lines, no ping, no reply to uptime after the capture window. From this
+#            session's view C cannot be separated from an early kernel hang, because no
+#            capture shows any output on these boots; counted as rig defect #1195.
+#   unclassified  R2/R3, observed with the old (non-parallel) method; both silent,
+#            no ping, no reply to uptime.
+#
+# attempt  class          lines  capture time  proof after capture
+D(deploy)  A-noLog        0      90 s timeout  coherency regs answered; measurements taken on this boot
+R1         A-noLog        0      90 s timeout  ping true; uptime 0:16:54 (fresh vs deploy boot ~1 h earlier)
+R2         unclassified   0      60 s timeout  ping false; uptime no reply (2 tries); later capture 30 s 0 lines
+R3         unclassified   0      45 s timeout  ping false; uptime no reply
+R4         A-noLog        0      75 s timeout  ping true; uptime 0:02:58
+R5         C              0      75 s timeout  ping false; uptime no reply
+R6         C              0      75 s timeout  ping false; uptime no reply
+R7         A              225    13.5 s match  ping true; uptime 0:01:57; full log in pi5-bootlog-R7.txt
+R8         C              0      75 s timeout  ping false; uptime no reply
+R9         A-noLog        0      75 s timeout  ping true; uptime 0:02:59
+R10        A              tail 6 13.6 s match  ping true; tail ends "SLM-OS Debug Shell ... slmos>"
+R11        C              0      75 s timeout  ping false; uptime no reply
+R12        C              0      75 s timeout  ping false; uptime no reply
+R13        C              0      75 s timeout  ping false; uptime no reply
+R14        C              0      75 s timeout  ping false; uptime no reply
+R15        C              0      75 s timeout  ping false; uptime no reply
+R16        A              tail 6 13.3 s match  ping true
+R17        A              tail 6 13.6 s match  ping true
+R18        C              0      75 s timeout  ping false; uptime no reply
+R19        C              0      75 s timeout  ping false; uptime no reply
+R20        A-noLog        0      75 s timeout  ping true; uptime 0:05:00
+#
+# Totals over R1-R20 (cap reached): A 4 (R7 R10 R16 R17), A-noLog 4 (R1 R4 R9 R20),
+# B 0, C 10 (R5 R6 R8 R11-R15 R18 R19), unclassified 2 (R2 R3).
+# Booted to the shell: 8 of 20 attempts. Target of 10 A/A-noLog/B boots NOT reached
+# within the 20-attempt cap. No attempt produced partial SLM-OS output.
+# R10/R16/R17 used tail=6, so "lines" is the tail size, not the full log length.
+#
+# Card restore (~03:05 UTC): one sdwire_update renamed kernel_2712.img/kernel8.img to
+# *.test1193, renamed *.pre1193 back, deleted *.test1193. sdwire_ls afterwards:
+#   kernel_2712.img  6935256 B  mtime 2026-10-29T04:54:04Z
+#   kernel8.img      6935256 B  mtime 2026-10-29T04:54:04Z
+#   no *.pre1193 / *.test1193 / *.new left. config.txt unchanged (1297 B, 2026-05-10T23:01:22Z).
+# Restore boot (same sequence, parallel capture): A-noLog, 0 lines in 75 s, ping true,
+# uptime 0:01:36, `coherency` -> "Unknown command: coherency" (original kernel).
+# pi-5-1 left ON at the slmos> shell.

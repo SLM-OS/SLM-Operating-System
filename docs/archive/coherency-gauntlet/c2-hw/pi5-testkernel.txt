@@ -1,0 +1,42 @@
+# pi-5-1 boot-test kernel (integration tests), NC baseline, commit 9a13b9ee
+# build: export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+#        make kernel-test-clean && make kernel-test PLATFORM=RASPI5   (default flags)
+#   CMakeCache: PLATFORM=RASPI5 ENABLE_BOOT_TESTS=ON ENABLE_AI_SCHEDULER=ON
+#               SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF ENABLE_WORK_STEALING=ON
+# image build/kernel-test/slmos.bin, 8409648 bytes,
+#   sha256 ee6e7587844fa62b906b92dc4a60cdff449c64048b9c9dd813297048a72e00a3
+#   staged as /var/lib/labctl/images/kernel_2712-1193-nc-test.img, copied to
+#   kernel_2712.img and kernel8.img (the .pre1193 backups untouched)
+#
+# The integration suite is test_suite_integration() in kernel/tests/test_integration.c:
+# 19 RUN_TESTs on Pi 5 (PLATFORM_HAS_NC_MEMORY and CONFIG_WORK_STEALING both on).
+# No shell verb runs it; it runs only inside the ENABLE_BOOT_TESTS kernel, after every
+# other suite, from test_harness_run_all() (kernel/tests/test_harness.c).
+#
+# Sequence per attempt: power_off -> sdwire_info -> power_cycle delay=20 issued in
+# parallel with serial_capture; after the capture, serial_send "uptime".
+#
+# attempt  result
+# T1  capture 300 s, until "All test suites passed|total failure|PANIC|panic": 0 lines;
+#     uptime no reply. Silent (class C).
+# T2  same pattern: 1072 lines in 24.9 s, then the capture STOPPED EARLY because the
+#     test name "loader: truncated ONNX rejected without panic" matched "panic" in my
+#     pattern (operator error, not a kernel failure). The capture also began mid-suite
+#     (first line is a partial "2. Load HEF" line), so the start of the run is missing.
+#     Suites seen: 14 Unity suite totals, 435 tests, 430 passed, 0 failed, 5 ignored;
+#     the run had reached "Inference Engine Tests" (Rust FFI) and had NOT yet reached
+#     "Integration Tests (Multi-Core)". A second capture started right after
+#     (300 s, until "All test suites passed|total failure\(s\)|PANIC|KERNEL PANIC")
+#     got 0 lines: the rest of the run went by between the two connections.
+#     Afterwards the shell answered ("Unknown command: Wuptime", garbled first char,
+#     then slmos>), so this boot completed the suite and reached the shell.
+#     Raw partial capture: pi5-testkernel-T2-partial-raw.txt
+# T3  capture 400 s, until "All test suites passed!|\] total failure": 0 lines; uptime
+#     no reply. Silent (class C).
+# T4  capture 400 s, until "All test suites passed|total failure": 0 lines; uptime no
+#     reply. Silent (class C).
+# T5  same as T4: 0 lines; uptime no reply. Silent (class C).
+#
+# Result: retry cap (5 attempts) reached. The integration suite output was NOT captured
+# on any attempt, so there is no integration pass/fail count and no overall suite
+# verdict for the NC baseline from this session.

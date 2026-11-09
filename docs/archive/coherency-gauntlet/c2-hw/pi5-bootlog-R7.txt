@@ -1,0 +1,231 @@
+# pi-5-1, SLM-OS NC baseline, commit 9a13b9ee, image sha256 24ce106b9f97a4bf3693739b5b250c6e71c18253c20926a1f3a6ef3af7bbad3b
+# reliability attempt R7 (~01:22 UTC 2026-11-09), class A: full boot log to slmos>
+# sequence: power_off -> sdwire_info -> power_cycle delay=20 issued in parallel with
+# serial_capture timeout=75 until_pattern="slmos>"; capture: 225 lines in 13.5 s.
+# afterwards: ping true, `uptime` = 0:01:57
+# raw UART as returned by labctl serial_capture
+
+========================================
+  SLM-OS v0.4.0 build 20261108235613 (9a13b9ee)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Raspberry Pi 5
+[INFO] DTB parsed successfully at 0x2efec700
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x0 - 0x100000000 (4096 MB)
+  UART:      0x1f00030000 (IRQ 185)
+  GIC dist:  0x107fff9000
+  GIC cpu:   0x107fffa000
+  CPUs:      4
+  Timer IRQ: 26
+  /memreserve/:
+    [0] 0x3fc00000 + 0x400000
+  Bootloader:
+    version:      2682625908f5585e5f4832bb82e74e7d757ec48f
+    capabilities: 0x7f
+    build-ts:     0x66f16700
+  Firmware entropy: rng-seed=64 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000 - 0x2c58e0
+  .data:   0x782000 - 0x7a61e8
+  .bss:    0x7b0000 - 0x296c270
+  End:     0x2971000
+  RAM:     0x0 - 0x100000000 (4096 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x8cf000
+  Blocks mapped: 2057
+  Bytes mapped: 4114 MB
+  L1[0]: 0x4000000000070d (covers VA 0x0)
+  L1[1]: 0x4000004000070d (covers VA 0x40000000)
+  L1[2]: 0x4000008000070d (covers VA 0x80000000)
+  L1[3]: 0x8cb003 (covers VA 0xc0000000)
+  L1[64]: 0x8ce003 (covers VA 0x1000000000)
+  L1[65]: 0x8cd003 (covers VA 0x1040000000)
+  L1[110]: 0x8ca003 (covers VA 0x1b80000000)
+  L1[124]: 0x8cc003 (covers VA 0x1f00000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x0) = 0x0
+  [PASS] virt_to_phys(0xffffff8000000000) = 0x0
+  [PASS] is_mapped(0x0) = true
+  [PASS] is_mapped(0x140000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x2971000 - 0xffe00000
+  Total pages:     1037455 (4149820 KB)
+  Free pages:      1036431 (4145724 KB)
+  Used pages:      1024 (4096 KB)
+  Reserved:        10609 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 1 blocks
+    Order  1 (    8 KB): 1 blocks
+    Order  2 (   16 KB): 1 blocks
+    Order  3 (   32 KB): 1 blocks
+    Order  7 (  512 KB): 1 blocks
+    Order  9 ( 2048 KB): 2 blocks
+    Order 10 ( 4096 KB): 3 blocks
+    Order 11 ( 8192 KB): 2 blocks
+    Order 12 (16384 KB): 3 blocks
+    Order 13 (32768 KB): 2 blocks
+    Order 14 (65536 KB): 3 blocks
+    Order 15 (131072 KB): 3 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 17 (524288 KB): 1 blocks
+    Order 18 (1048576 KB): 2 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xffe00000 - 0x100000000 (2048 KB)
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=64B kaslr_seed=8B
+
+[INFO] SMP: initializing
+[WARN] SMP: SMPEN NOT set — using DC CVAC/CIVAC workaround
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[WARN] CPU 1: SMPEN NOT set
+[WARN] CPU 2: SMPEN NOT set
+[WARN] CPU 3: SMPEN NOT set
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] UART IRQ: post-init diag: MIS=0x0 INTSTAT=0x0 MIP_status=0x0 MIP_raised=0x0 GIC_ISPENDR=0x0
+[INFO] UART IRQ enabled (GIC IRQ 185 = SPI 153, RP1 vec 25)
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0xe0000000 (256 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (512 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie1: training link (status=0x1e08f before reset)
+[INFO] pcie1: link up (status=0x3e0bf) after 0 ms
+[INFO] pcie1: RC LNKCTL 0x0000 ASPM_L0S already off
+[INFO] pcie: 01:00.0 BAR0 assigned 0x80000000 (size 0x4000)
+[INFO] pcie: 01:00.0 BAR2 assigned 0x80004000 (size 0x1000)
+[INFO] pcie: 01:00.0 BAR4 assigned 0x80008000 (size 0x4000)
+[INFO] pcie: bcm2712-pcie1 backend, 2 device(s) enumerated
+[INFO] hailo: endpoint at 01:00.0
+[INFO] hailo: endpoint LNKCTL 0x0000 ASPM_L0S already off
+[INFO] hailo: endpoint DEVCTL=0x2910 MPS=128 MRRS=512 LNKSTA=0x1012 speed=Gen2 width=x1
+[INFO] hailo: platform 'pi5-pcie1' initialized
+
+[INFO] SMP: run queues in NC memory at 0xffe01080
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[INFO] cpu_supervisor: started (sample 1000 ms, threshold 6 samples)
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'cpu_supervisor'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 model preload(s) from /mnt/files/preload.conf
+[INFO] sdhci: probing emmc2 @ 0x1000fff000 (HC version=0x1002, caps=0x55eec832)
+[INFO] sdhci: card type = SDHC/SDXC (block-addressed)
+[INFO] sdhci: card RCA=0x00010000
+[INFO] sdhci: card capacity = 61069312 blocks (29819 MB)
+[INFO] sdhci: emmc2 ready (61069312 blocks @ 512 bytes)
+[INFO] blob_autoload: activated eviction xgboost from 0:/slmstore/autoload/eviction-xgboost.blob
+[INFO] blob_autoload: activated eviction mlp from 0:/slmstore/autoload/eviction-mlp.blob
+[INFO] blob_autoload: activated eviction cacheus_config from 0:/slmstore/autoload/eviction-cacheus_config.blob
+[INFO] Initializing network subsystem...
+[INFO] Initializing Cadence MACB/GEM driver (Pi 5 RP1)...
+[INFO]   ETH IP base:  0x1f00100000
+[INFO]   MACB IRQ:     166 (MIP0 vec 6 → SPI 134)
+[INFO]   Descriptor rings:  NC memory (tx=0xffe0fa00 rx=0xffe0fa80)
+[INFO]   Cadence MACB/GEM: idnum=0x0007 rev=0x0 fab=0x109
+[INFO]   Released PHY reset via GPIO 32
+[INFO]   PHY @addr 1: ID1=0x600d ID2=0x84a2
+[INFO]   Waiting for PHY auto-negotiate / link up...
+[INFO]   PHY link up (BMSR=0x796d after 30×100 ms)
+[INFO]   Negotiated: 1000 Mbps full-duplex (LPA=0xc5e1 STAT1000=0x3800)
+[INFO]   MAC from DTB: 2c:cf:67:24:ba:c5 (bootloader-patched local-mac-address; EEPROM predates 2025-05-08 mailbox-tag support)
+[INFO]   MAC address: 2c:cf:67:24:ba:c5
+[INFO]   MACB IRQ 166 armed via MIP0 vec 6 (SPI 134)
+[INFO] MACB driver: network operational (polled + IRQ)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: 2c:cf:67:24:ba:c5
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP client started (at boot)
+[INFO] DHCP auto-start armed (timeout 10000 ms)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>

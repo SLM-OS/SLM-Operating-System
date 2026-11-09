@@ -1,0 +1,23 @@
+# pi-5-1 reliability, origin/coherency-remove-nc-axis @ 072bd707, make kernel PLATFORM=RASPI5
+# slmos.bin sha256 7701d4a1a807cda5bda2b4fcb5e5bd54365318c9d987b678f979456829b39320
+# (kernel_2712-1193-removal-072bd707.img on kernel_2712.img and kernel8.img)
+# 2026-11-09 ~05:40 to ~06:07 UTC
+#
+# Sequence per attempt (#1195): board off (sdwire_update for X1, power_off afterwards) ->
+# sdwire_info -> power_cycle delay=20 || serial_capture timeout 75 in the same message.
+# X1 full log (until "slmos>|system unable to continue|KERNEL PANIC"); X2-X10 add "|not visible"
+# and tail=15. X1 is described in pi5-removal-regs-litmus.txt (3/3 secondaries online, no WARN).
+#
+# attempt  ~time  class    lines             proof
+X1         05:40  A        218 (13.4 s)      full log to slmos>; regs/litmus/perf on this boot
+X2         05:50  A-noLog  0 (75 s timeout)  ping true; uptime 0:02:38; prompt answered
+X3         05:52  A        tail 15 (13.9 s)  slmos> matched
+X4         05:54  A        tail 15 (13.9 s)  slmos> matched
+X5         05:57  A        tail 15 (13.9 s)  slmos> matched
+X6         05:59  A        tail 15 (13.6 s)  slmos> matched
+X7         06:01  A        tail 15 (13.9 s)  slmos> matched
+X8         06:03  A-noLog  0 (75 s timeout)  ping true; uptime 0:03:02; prompt answered
+X9         06:05  A        tail 15 (13.8 s)  slmos> matched
+X10        06:07  A        tail 15 (13.9 s)  slmos> matched
+#
+# Totals: 10 attempts, A 8, A-noLog 2, B 0, C 0. 10 of 10 reached the shell.

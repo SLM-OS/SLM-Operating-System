@@ -1,0 +1,43 @@
+# pi-5-1 reliability, NC_AXIS=OFF, SLM-OS 10f8688e (suite rev 3; banner c27956d3 = 10f8688e + log-only
+# commits), make kernel PLATFORM=RASPI5 NC_AXIS=OFF
+# slmos.bin sha256 d56b5f3d2b6741343c603faf5ca09359f7d1187348d1d5fc5e76353c8f57ceee
+# (kernel_2712-1193-ncoff-r3.img on kernel_2712.img and kernel8.img)
+# 2026-11-09 04:16 to 04:47 UTC
+#
+# Sequence per attempt (#1195): board off (sdwire_update for R1, power_off afterwards) ->
+# sdwire_info -> power_cycle delay=20 || serial_capture timeout 75 until
+# "slmos>|system unable to continue|KERNEL PANIC|not visible" in the same message.
+# R1 captured the whole log (pi5-ncoff-bootlog-R1.txt); R2-R10 used tail=15, so "lines" is the
+# tail size. The pattern includes "not visible", so the smp.c "boot flag not visible" WARN would
+# have stopped any capture that was connected when it printed; R1's full log shows 3/3 secondaries
+# online with no WARN. A-noLog: ping true + fresh uptime + prompt answers.
+#
+# attempt  ~time  class    lines             proof
+R1         04:16  A        220 (13.2 s)      full log to slmos>; regs/litmus/neg/perf on this boot
+R2         04:25  A        tail 15 (13.9 s)  slmos> matched
+R3         04:28  A        tail 15 (5.7 s)   slmos> matched
+R4         04:32  A        tail 15 (13.8 s)  slmos> matched
+R5         04:34  A        tail 15 (13.8 s)  slmos> matched
+R6         04:37  A-noLog  0 (75 s timeout)  ping true; uptime 0:03:16; prompt answered
+R7         04:40  A        tail 15 (13.8 s)  slmos> matched
+R8         04:42  A        tail 15 (13.5 s)  slmos> matched
+R9         04:44  A-noLog  0 (75 s timeout)  ping true; uptime 0:02:48; prompt answered
+R10        04:47  A        tail 15 (13.9 s)  slmos> matched
+#
+# Totals: 10 attempts, A 8, A-noLog 2, B 0, C 0. 10 of 10 reached the shell.
+# Tail seen on every A attempt (R2-R10 identical):
+[INFO]   MACB IRQ 166 armed via MIP0 vec 6 (SPI 134)
+[INFO] MACB driver: network operational (polled + IRQ)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: 2c:cf:67:24:ba:c5
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP client started (at boot)
+[INFO] DHCP auto-start armed (timeout 10000 ms)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>
