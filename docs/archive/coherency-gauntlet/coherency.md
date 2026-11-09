@@ -319,6 +319,22 @@ Boards: jetson-nano-2 and pi-5-1 only.
   Linux on the same board showed 3,616 in 3.18e8 rounds; P3 carries no
   information in SLM-OS on Pi 5.
 
+### C3 Jetson, NC_AXIS=OFF on 10f8688e (builder progress, 05:29 UTC)
+
+- kexec: regs 6/6, litmus PASS x2 (0 forbidden, 0 timeouts, MP weak 0, P4
+  weak 0, min straddles 100,001; S1 932,520 / 933,220; S2 0 / 3), neg (a)
+  same-cluster 0 / cross-cluster 16 of 16 time out, (b) 30 of 30, (c) stale.
+  bench smp 5/5 x3; context 5299 / 5357 / 5305 ns (NC 5464 / 5457 / 5448);
+  ipc 127 / 112 / 111 ns (NC 128 / 112 / 113); integration 16/16 (3 NC-only
+  tests compiled out), coherency suite 26/26; boots 10/10.
+- **bench stealing 13892 / 13043 / 13043 us against NC 10625 / 10627 /
+  11234: about 20 percent slower, so the cacheable build does NOT meet the
+  match-or-beat bar on this benchmark.** Suspected cause: the NC_AXIS=OFF
+  cacheable branches still run DC CVAC/CIVAC on CPU-shared state (Jetson
+  CIVAC count 49 to 111, C3 audit). Under test: the removal branch drops
+  CPU-sharing maintenance and will be measured on Jetson kexec.
+- UEFI so far: boot, banner, 5/5, regs, litmus PASS x2 (S2 0 / 1), neg done.
+
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.
