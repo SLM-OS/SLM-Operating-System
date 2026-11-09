@@ -5,15 +5,11 @@
  * CPU writes only its own slots; no cross-CPU lock or atomic
  * fetch-add on the hot path. The owning CPU cache_cleans every
  * write so the dump path (typically on CPU 0) sees up-to-date data
- * after cache_invalidate. This mirrors the sched_diag NC-counter
- * pattern called out in `kernel/CLAUDE.md`.
+ * after cache_invalidate.
  *
- * Per-CPU vs single-global was chosen because Pi 5 / Jetson have
- * incoherent per-core L2 caches (no SMPEN) — a single global head
- * index updated via atomic fetch-add would either need explicit DC
- * CIVAC/DSB SY around every increment (expensive) or NC memory for
- * the head (the run-queue NC region is small and the ring buffer
- * itself can't fit there). Per-CPU rings sidestep both problems.
+ * Per-CPU rings were chosen when Pi 5 / Jetson were believed to have
+ * incoherent per-core L2 caches (overturned by #1193). They still
+ * avoid a shared fetch-add head, so they stay.
  *
  * Dump format documented in `docs/sched-trace-format.md`. The
  * sibling-repo ingester (#879 / 61c) parses the same bytes.

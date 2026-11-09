@@ -252,7 +252,7 @@ Six new subsystems on top of what already exists.
   descriptor is resolved by RCE through the **camera-rtcpu's** SMMU
   domain, not VI's own stream-id (see Risk 3 for the reframed SMMU
   question). The non-cacheable carveout pattern in
-  `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory" still applies for
+  `kernel/CLAUDE.md` §"Non-Cacheable DMA Memory" still applies for
   the descriptor memory shared with RCE.
 - BPMP clocks: `TEGRA234_CLK_VI`, plus power-domain
   `TEGRA234_POWER_DOMAIN_VI` (id 28). The original draft listed
@@ -916,7 +916,7 @@ alternatives.
   pattern.
 - `docs/archive/plans/jetson-bpmp-ipc-plan.md` + `kernel/drivers/bpmp/` — BPMP
   MRQ stack used for clock / reset / power control.
-- `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory" — DMA-friendly
+- `kernel/CLAUDE.md` §"Non-Cacheable DMA Memory" — DMA-friendly
   memory carveout pattern that VI may be able to reuse.
 - `runtime/` + `slm.model_infer_bytes` (PR #386, `886dd0d`) —
   inference-side contract that camera frames feed into.

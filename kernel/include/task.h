@@ -106,7 +106,7 @@ struct cpu_context {
  *   New tasks are created with DAIF.I=1 (IRQ masked). See task.c where
  *   task->context.daif is initialized to 0x080, and context.S where DAIF
  *   is restored early in the switch sequence. This invariant is platform-
- *   required: on real hardware without SMPEN, a timer IRQ taken mid-
+ *   required: on real hardware (Pi 5, Jetson), a timer IRQ taken mid-
  *   context-restore corrupts the partially-restored task state. On QEMU
  *   the same masking applies for uniformity.
  *   Rationale: docs/smp.md and kernel/CLAUDE.md §Pi-5-Timer-IRQs.

@@ -46,7 +46,7 @@ void cpu_supervisor_start(void);
  *   - Calls psci_cpu_on() with secondary_entry as the entry point.
  *   - Polls cpu_boot_flag for up to RESURRECT_TIMEOUT_US.
  *
- * Returns 0 on success (including the cache-incoherency fallback —
+ * Returns 0 on success (including the boot-flag timeout fallback:
  * PSCI succeeded but the boot flag wasn't visible within the polling
  * window; the next supervisor tick is the ground truth), negative on
  * failure:

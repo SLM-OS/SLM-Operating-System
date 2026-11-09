@@ -6689,8 +6689,7 @@ int cmd_nvgpu(int argc, char *argv[])
                 __atomic_store_n(&g_race_running, 0u, __ATOMIC_RELEASE);
                 return -1;
             }
-            /* On CPU 0: it ends with a UART line, and on Jetson only CPU 0
-             * prints (kernel/CLAUDE.md, "UART Lock on Pi 5 / Jetson"). */
+            /* On CPU 0, next to the shell: it ends with a UART line. */
             t->cpu_affinity = 0;
             scheduler_add_task_to_cpu(t, 0);
             return 0;

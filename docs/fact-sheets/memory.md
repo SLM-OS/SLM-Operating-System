@@ -26,7 +26,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY for device DMA (scheduler calls redundant) | Same | — |
 | Non-cacheable DMA region | — | `0xFFE00000`, 2 MB, MAIR idx 2 | `0xBDE00000`, 2 MB, MAIR idx 2 | — |
 | NC allocator | — | `ncmem_alloc` (bump) | Same | — |
-| NC uses | — | device DMA (xHCI, MACB, CDC-ECM, USB bounce), diagnostics | Same + camera RCE, kexec handoff pages | — |
+| NC uses | — | device DMA (MACB rings), `PI5_IRQ_DIAG` slots | device DMA (xHCI, CDC-ECM, USB bounce, camera RCE), kexec handoff pages | — |
 | Steal deque lock location | In-struct | External cacheable (`steal_deque_lock[MAX_CPUS]`) | External cacheable | In-struct |
 | Spinlock hardware enable | N/A | Runtime flag `spinlock_hw_enabled` set by `vmm_init` | Same pattern | N/A |
 | Max tasks supported | 64 | 64 | 64 | 64 |
@@ -47,7 +47,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 
 - `docs/mmu.md` (narrative)
 - `docs/memory-map.md` (per-platform maps)
-- `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory"
+- `kernel/CLAUDE.md` §"Non-Cacheable DMA Memory"
 - `kernel/CLAUDE.md` §"Buddy Allocator (PMM)"
 
 *Last updated: 8 November 2026*

@@ -688,8 +688,8 @@ int vmm_create_user_l1(uint64_t *out_pa)
 
     /* The page-table walker reads PAs directly. Clean the L1 page to
      * Point of Coherency so the data is in DRAM before any future
-     * TTBR0 swap reads from it. Critical on Pi 5 / Jetson where
-     * SMPEN is not set and per-CPU L2 caches are incoherent. */
+     * TTBR0 swap reads from it. Redundant on coherent hardware (the
+     * walk is WB Inner Shareable, #1193) but harmless. */
     cache_clean_range(user_l1, TABLE_SIZE);
 
     *out_pa = (uint64_t)(uintptr_t)page;
@@ -1531,14 +1531,14 @@ static void vmm_setup_platform(void)
     }
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Entry 495: NC 2MB block at 0xBDE00000 for cross-CPU shared data.
+    /* Entry 495: NC 2MB block at 0xBDE00000 for device DMA (ncmem.h).
      * This is the last 2MB of region 1 (before OP-TEE carveout at 0xBE000000).
      * Mapped as Normal Non-Cacheable, Inner Shareable (MAIR index 2). */
     {
         uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
         l2_kernel[495] = make_block_desc(0xBDE00000UL, nc_flags);
         vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  L2[495]: NC block at 0xBDE00000 (cross-CPU shared memory)");
+        DEBUG_PRINT("  L2[495]: NC block at 0xBDE00000 (DMA)");
     }
 #endif
 
@@ -1846,8 +1846,8 @@ static void vmm_setup_platform(void)
      *
      * L1[0-2]: 1GB block descriptors (write-back cacheable).
      * L1[3]:   L2 table — 511 WB 2MB blocks + 1 NC 2MB block at the top.
-     *          The NC block (PA 0xFFE00000) is used for cross-CPU shared data
-     *          that must bypass L1/L2 caches (see ncmem.h).
+     *          The NC block (PA 0xFFE00000) holds device DMA buffers that
+     *          must bypass the CPU caches (see ncmem.h).
      */
     uint32_t ram_gb = RAM_SIZE / L1_BLOCK_SIZE;
     if (ram_gb > 512) ram_gb = 512;
@@ -1873,7 +1873,7 @@ static void vmm_setup_platform(void)
             l2_ram_gb3[i] = make_block_desc(gb3_base + (uint64_t)i * BLOCK_SIZE,
                                             ram_flags);
         }
-        /* L2[511]: Non-cacheable 2MB block for cross-CPU shared memory */
+        /* L2[511]: Non-cacheable 2MB block for device DMA (ncmem.h) */
         l2_ram_gb3[ENTRIES_PER_TABLE - 1] = make_block_desc(
             gb3_base + (uint64_t)(ENTRIES_PER_TABLE - 1) * BLOCK_SIZE, nc_flags);
 

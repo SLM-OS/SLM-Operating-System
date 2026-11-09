@@ -1,5 +1,5 @@
 /*
- * ncmem.c - Non-cacheable shared memory bump allocator
+ * ncmem.c - Non-cacheable DMA memory bump allocator
  *
  * Provides permanent, boot-time allocations from the 2MB NC region for
  * device DMA buffers (see ncmem.h). Memory is never freed.
