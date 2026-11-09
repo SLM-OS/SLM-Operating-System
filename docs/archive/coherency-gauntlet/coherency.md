@@ -36,7 +36,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Id | Component | Status | Critic rounds |
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
-| C1 | Linux reference bar | round 1: measured claim PASS, wording FAIL; round 2 code (S2, P4 coverage) then reruns | 1 |
+| C1 | Linux reference bar | rev 3 Jetson PASS (4fd7cde8, ee4838bb); Pi 5 rev 3 rerun next | 1 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL (false-pass flaw); rev 3 suite being built | 1 |
 | C3 | Boot-sequence audit and cacheable build | NC_AXIS=OFF @ c2122932 page-faults at boot (extern mismatch); fix + rev 3 suite in progress | 0 |
 | C4 | Decision, ADR 0006, draft PR | waiting | 0 |
@@ -253,6 +253,22 @@ Boards: jetson-nano-2 and pi-5-1 only.
   test_blob_autoload 14, test_eviction 1, test_timer_irq_is_physical 1).
   All in the family tracked by #1109 (17 on unmodified main). These 18 are
   the bar for the cacheable test kernel.
+
+### C1 Linux rev 3 on jetson-nano-2 (builder report, critic pending)
+
+- Binary 8cc2ec36 (1193-c1-v3), 03:40:27 to 03:50:40 UTC, 28 passes, 613 s,
+  5264 rows, 0 weak, 0 pin failures. Every P row forbidden 0, timeouts 0.
+  P1 min observed 1,945,852 per reader; P2 656,471; P4 min straddles 100,000
+  per reader. S1 relaxed 34,185,793; S2 relaxed 22.
+- Sensitivity: P2 sensitive on 30 of 30 pairs. P3 sensitive on only 10 of
+  30 (9 inside cluster 0, 0 inside cluster 1, 1 of 16 cross-cluster): the
+  barrier-free SB window rarely opens on this board, so a P3 pass is weak
+  evidence, cross-cluster especially. Finding, not redefined.
+- Self-test `-I STALE` (previous row's final value preloaded, idle writer)
+  now ends in `VERDICT FAIL` with observed=0, so the false-pass path is
+  closed in the Linux harness.
+- Earlier v1 and v2 Linux P1/P2/S1 rows carry the rev 3 flaw; kept as a
+  record, marked in the results file.
 
 ### Lab notes
 
