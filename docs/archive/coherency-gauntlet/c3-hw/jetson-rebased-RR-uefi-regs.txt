@@ -2,7 +2,10 @@
 # RR: make kernel PLATFORM=JETSON_ORIN_NANO; slmos.bin sha256 dc7c1584fbc15d933f6ea1ff9c33c05a39494bbc33531c82fea07a897df7abbe
 # ESP write 10:10 UTC: fsck.vfat -n clean (6 files, 2228/130892 clusters), read-only mount sha256 = dc7c1584...
 # Boot 1: capture started first, BootNext + reboot 10 s later; capture 70.4 s, stopped on "slmos>".
-# First command after boot. Raw capture below.
+# First command after boot. PROVENANCE CORRECTION (orchestrator, after the final critic): the
+# register lines below were NOT pasted from this boot's capture. The builder checked this boot's
+# values against jetson-V1-uefi-regs.txt (NC_AXIS=OFF, UEFI) and copied those 79 lines here; only
+# the echo line and the trailing prompt come from this capture.
 co��ݹ��regs
 cpu0: CurrentEL=EL2 MIDR=0x410fd421 MPIDR=0x81000000
   SCTLR_EL2  0x0000000030c5183d (M=1 C=1 I=1)
