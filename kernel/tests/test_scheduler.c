@@ -14,7 +14,6 @@
 #include "timer.h"
 #include "platform.h"
 #include "uart.h"
-#include "cache.h"
 #include "string.h"
 #include "test_wait.h"
 #include <stdint.h>
@@ -2223,8 +2222,8 @@ static void test_isolated_core_latency(void)
             if (sample < isolated_min) isolated_min = sample;
         }
 
-        /* On Pi 5 the isolated-core task can time out waiting to run
-         * (slow schedule path under DC CIVAC contention). task_destroy
+        /* On Pi 5 the isolated-core task can time out waiting to run.
+         * task_destroy
          * silently refuses to reclaim non-TERMINATED tasks, so without
          * forced termination these leak into CPU 1's run queue and
          * then block later tests (notably test_multicore_basic) whose

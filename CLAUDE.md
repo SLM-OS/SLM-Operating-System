@@ -247,7 +247,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - VHE set up on all secondary CPUs in `smp_boot.S`
 - NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for device DMA; cross-CPU shared data is cacheable (#1193, `docs/adr/0006-cross-cpu-coherency.md`)
 - Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs. Under default `JETSON_HW_TICK=ON` build (PR #746/#755), secondaries WFI and wake from per-CPU PPI 26 timer IRQs (SEV broadcast is redundant but harmless). Under `JETSON_HW_TICK=OFF` cooperative fallback, secondaries WFE and wake from cross-CPU SEV.
-- DC CVAC/CIVAC cache maintenance active (cache.h), page tables flushed to DRAM before secondary boot
+- No cache maintenance on CPU-shared state (#1193); `cache.h` DC CVAC/CIVAC serves DMA, page tables and the caches-off `secondary_mmu_*` reads before secondary boot
 
 **Preemptive multitasking:** Default `JETSON_HW_TICK=ON` build runs
 true hardware quantum preemption at 100 Hz on every CPU under the

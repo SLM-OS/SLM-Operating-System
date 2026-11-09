@@ -131,7 +131,8 @@ records skew toward the end of the capture window.
 Targets ≤5% overhead per `scheduler_add_task` (per #880 acceptance).
 At AI MLP decision-latency of ~42 µs on Pi 5, the budget is ~2 µs
 per decision — comfortably above the trace-write cost (one
-`ai_extract_state` call + memcpy + `cache_clean_range`).
+`ai_extract_state` call + memcpy + one `smp_wmb`; no cache maintenance
+since #1193).
 
 Measure with `bench sched-policy --workload mixed --all` (#882) with
 `sched aitrace stop` vs `sched aitrace start` — the table's `Tasks/s`

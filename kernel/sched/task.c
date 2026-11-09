@@ -9,7 +9,6 @@
 #include "debug.h"
 #include "smp.h"
 #include "spinlock.h"
-#include "cache.h"
 #include "arch.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
