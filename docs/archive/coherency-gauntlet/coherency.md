@@ -172,9 +172,22 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - On QEMU, S2 is nonzero on 11 of 12 pairs while S1 stays 0, so QEMU cannot
   show P2 sensitivity; only hardware can.
 
+### C2 Jetson progress (builder note, 01:55 UTC)
+
+- kexec path complete: regs 6/6, litmus PASS twice, neg a/b/c, perf x3,
+  integration 19/19 on a BOOT_TESTS_HW_SET test kernel (the full Jetson test
+  kernel page-faults in `test_lua_client_gets_the_reply`, 3 of 3, #1199),
+  boots 10/10. The brief's "20 integration tests" is 19 here.
+- First neg run was contaminated (alias rows reused lines, leaving stale
+  Non-shareable copies in reader caches); fixed in 62a0217e with fresh lines
+  per row. With the fix, control (c) (caches-off reader) shows p1_stale on
+  30 of 30 pairs, so the litmus suite can see staleness on this board.
+- UEFI-direct: regs, litmus PASS, neg done; perf, boots, integration in
+  progress. bench context about 18 us on UEFI vs 5.4 us on kexec.
+
 ### Lab notes
 
-- 23:18 UTC: both claims renewed to 05:18 UTC.
+- 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.
 - pi-5-1 boots only after a read-only SDWire round trip while off, then a
   20 s off period (#1195; the first "20 s settle" rule was incomplete).
   Deploy rule: sdwire_update reboot=false, sdwire_info, power_cycle
