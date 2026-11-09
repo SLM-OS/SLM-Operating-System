@@ -146,10 +146,8 @@ const struct bench_workload *bench_workload_get(uint32_t idx)
  * The driver's input (`dispatch_ns`, `runtime_us`, `deadline_ns`)
  * lives in the same struct as the worker's output so a single
  * cache_clean_range on the slot covers everything the worker reads
- * before scheduler_add_task hands it off — without this, on Pi 5 a
- * worker dispatched to a non-CPU-0 core would read stale zeros for
- * `runtime_us` and busy-wait for zero cycles (incoherent per-core
- * L2; see kernel/CLAUDE.md §"Cache Maintenance"). */
+ * before scheduler_add_task hands it off (redundant on coherent
+ * hardware; see kernel/CLAUDE.md §"Cross-CPU Coherency"). */
 struct __attribute__((aligned(64))) bench_wl_slot {
     struct bench_wl_record rec;
     uint8_t  _pad[64 - sizeof(struct bench_wl_record)];
@@ -364,8 +362,8 @@ int bench_workload_run(const struct sched_policy_ops *policy,
                 now_ns + (uint64_t)tpl->deadline_slack_us * 1000ULL;
             task_set_deadline(t, wl_slots[i].rec.deadline_ns);
         }
-        /* Push slot to PoC so the worker (which may run on a
-         * different CPU with an incoherent L2) sees these fields. */
+        /* Clean the slot to PoC before the hand-off (redundant on
+         * coherent hardware, kept with the other cache.h calls). */
         cache_clean_range(&wl_slots[i], sizeof(wl_slots[i]));
 
         scheduler_add_task(t);

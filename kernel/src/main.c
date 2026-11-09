@@ -494,10 +494,10 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize Virtual Filesystem and perform all initial PMM allocations
-     * BEFORE scheduler_init(). On Pi 5 the PMM spinlock was found not to
-     * provide cross-CPU mutual exclusion. Secondary CPUs will allocate
-     * idle task stacks after scheduler_init(), so CPU 0 must finish its
-     * allocations first to avoid concurrent PMM access. */
+     * BEFORE scheduler_init(). Secondary CPUs allocate idle task stacks
+     * after scheduler_init(), so CPU 0 finishes its boot allocations
+     * first. (This ordering dates from the incoherent-cache diagnosis
+     * that #1193 overturned; it is kept because it is harmless.) */
     INFO("Initializing VFS...");
     vfs_init();
     boot_models_mount();
@@ -878,10 +878,9 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.
-     * On Pi 5 the PMM spinlock was found not to provide cross-CPU
-     * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
-     * with their own allocations (idle task stacks). Doing it here ensures
-     * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */
+     * scheduler_init() signals secondary CPUs to proceed with their own
+     * allocations (idle task stacks). Doing it here ensures CPU 0's
+     * allocations (ramdisk, Rust heap, model memory) are complete. */
     uart_puts("\n");
     scheduler_init();
 

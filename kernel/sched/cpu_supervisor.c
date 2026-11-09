@@ -97,14 +97,10 @@ static volatile uint64_t dormancy_warnings;
  * become non-zero. Returns the elapsed microseconds when the flag
  * was observed, or `timeout_us` if the wait expired.
  *
- * Pi 5 / Jetson per-core L2 caches are incoherent, so we try BOTH
- * visibility paths each iteration:
- *   1. LDAR (atomic load-acquire) — works when caches happen to be
- *      coherent.
- *   2. DC IVAC + plain read — forces the local L2 line to be
- *      invalidated and re-fetched from the PoC where the secondary's
- *      STLR has been pushed via cache_clean.
- * Mirrors the pattern in kernel/sched/smp.c around line 459.
+ * Each iteration tries a load-acquire, then a cache_invalidate and a
+ * plain read. The caches are coherent (#1193), so the load-acquire is
+ * enough and the second read is redundant but harmless. Mirrors the
+ * wait loop in smp.c's boot path.
  */
 static uint32_t wait_for_boot_flag(uint32_t cpu, uint32_t timeout_us)
 {
@@ -195,10 +191,11 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     uint32_t waited_us = wait_for_boot_flag(cpu, RESURRECT_TIMEOUT_US);
 
     /* Whether the flag was observed or we timed out, the CPU is up
-     * (PSCI returned success). Restore online + bump successes. The
-     * timeout case is the cache-incoherency fallback: if the CPU
-     * actually isn't running, idle_loops will still be frozen on
-     * the next supervisor tick and we'll resurrect again. */
+     * (PSCI returned success). Restore online + bump successes. In
+     * the timeout case (the WARN below still calls it the
+     * "cache-incoherency fallback"), if the CPU actually isn't running,
+     * idle_loops will still be frozen on the next supervisor tick and
+     * it is resurrected again. */
     cpu_data[cpu].online = true;
     cache_clean(&cpu_data[cpu].online);
     resurrect_successes[cpu]++;

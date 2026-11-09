@@ -257,7 +257,7 @@ networking follow-on), the PR must include:
 - `docs/networking.md` — §"Descriptor Ring Cache Maintenance"
   already discusses this at a high level; expand with the real-
   hardware evidence once it's available
-- `kernel/CLAUDE.md` — §"Non-Cacheable Shared Memory" add a row
+- `kernel/CLAUDE.md` — §"Non-Cacheable DMA Memory" add a row
   for NIC descriptor rings if Q4's proposal is confirmed
 - Driver file (virtio_net.c, bcm_genet.c, etc.) — comment block
   explaining which allocations are cacheable vs NC and why

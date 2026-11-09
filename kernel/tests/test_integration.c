@@ -604,9 +604,9 @@ static void test_task_lifecycle(void)
 /*
  * Regression test: verify boot order — PMM allocations before scheduler.
  *
- * On Pi 5, concurrent PMM access from multiple CPUs causes
- * deadlock because the PMM spinlock (ldaxr/stxr on cacheable memory)
- * doesn't provide cross-CPU mutual exclusion. The fix: CPU 0 completes
+ * The ordering was introduced when the PMM spinlock was believed not
+ * to give cross-CPU mutual exclusion on Pi 5 (overturned by #1193); it
+ * is kept. CPU 0 completes
  * all initial PMM allocations (ramdisk, Rust heap, model memory) BEFORE
  * scheduler_init() signals secondary CPUs to allocate idle task stacks.
  *

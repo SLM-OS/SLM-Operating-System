@@ -1314,9 +1314,8 @@ static int bcm2712_bind_irq_handler(const struct pcie_msi_handle *h,
     }
     mip1_slots[vec].handler = handler;
     mip1_slots[vec].ctx = ctx;
-    /* DSB SY publishes the slot to DRAM before we enable the GIC
-     * line. Required on Pi 5 (per-core L2 caches are treated as
-     * incoherent, see kernel/CLAUDE.md). */
+    /* DSB SY completes the slot stores before the GIC line is
+     * enabled, so the handler never sees a half-written slot. */
     __asm__ volatile("dsb sy" ::: "memory");
     spin_unlock_irqrestore(&msi_lock, msi_flags);
 

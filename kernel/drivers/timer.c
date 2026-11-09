@@ -149,9 +149,8 @@ void timer_start(void)
     /* Enable timer, unmask interrupt */
     write_timer_ctl(CNTP_CTL_ENABLE);
 
-    /* INFO print removed — called from per-CPU scheduler_start where
-     * secondary CPUs cannot safely use uart_lock (L2 incoherency).
-     * CPU 0 prints "Timer started" from scheduler_start directly. */
+    /* No INFO print here: this runs on every CPU from scheduler_start,
+     * and CPU 0 prints "Timer started" from scheduler_start directly. */
 }
 
 /*

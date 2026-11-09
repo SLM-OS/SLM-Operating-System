@@ -21,10 +21,9 @@
 //! The global `EVICTED_CONTENT_TRACKER` instance lives in
 //! `mm::model_mem` behind the allocator's `LOCK`. Its cross-CPU
 //! visibility inherits from that lock, which uses `Acquire`/`Release`
-//! ordering (→ `DMB ISH` on ARM64). On platforms where per-core L2
-//! caches are incoherent (Pi 5), the same concern applies to the
-//! whole `ModelAllocator` and is tracked under #116; no eviction-
-//! specific workaround is needed.
+//! ordering (→ `DMB ISH` on ARM64). The CPU caches are coherent on
+//! every supported core (#1193), so no eviction-specific cache
+//! maintenance is needed.
 
 use alloc::collections::VecDeque;
 

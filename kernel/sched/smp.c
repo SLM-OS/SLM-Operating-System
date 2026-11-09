@@ -470,9 +470,11 @@ static int boot_secondary(uint32_t cpu)
         timer_busy_wait_us(100);
     }
 
-    /* Boot flag may not be visible due to cache incoherency (Pi 5, Jetson).
-     * If PSCI CPU_ON returned success, the secondary is likely running
-     * but the flag write didn't propagate. Accept it as online.
+    /* PSCI CPU_ON succeeded but the boot flag never became visible.
+     * The caches are coherent (#1193), so this means the secondary did
+     * not reach secondary_init in time; the fallback still counts it as
+     * online, and the WARN text predates #1193. Treat the WARN as a
+     * failure signal.
      *
      * `ret` is unconditionally PSCI_SUCCESS at this point (the
      * non-success branch above returns early at line 437-441). The
