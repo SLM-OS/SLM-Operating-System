@@ -14,7 +14,7 @@
  *
  * CPU-to-CPU sharing does not need them. Cortex-A76 and Cortex-A78AE keep
  * their L1 and L2 coherent in hardware, with no software enable, for
- * Normal Write-Back Inner Shareable memory (docs/adr/0006-cross-cpu-coherency.md,
+ * Normal Write-Back Inner Shareable memory (docs/adr/0007-cross-cpu-coherency.md,
  * #1193). Scheduler, task, SMP and IPC code do not call them for
  * CPU-shared state; spinlocks never call them for the lock word.
  *
