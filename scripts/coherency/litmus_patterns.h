@@ -1,0 +1,770 @@
+/*
+ * litmus_patterns.h - #1193 coherency litmus pattern bodies (AArch64).
+ *
+ * Implements P1-P6, S1 and S2 of docs/archive/coherency-gauntlet/litmus-spec.md
+ * (revision 2: S2 = SB+none, P4 time budget with pairs/straddles counters;
+ * revision 3: row-tagged values and the MP observed counter).
+ *
+ * Freestanding by design: no libc, no allocation, no OS calls. The only
+ * dependencies are the AArch64 instructions issued through inline asm
+ * (LDR/STR, LDAR/STLR, DMB ISH*, LDXR/STXR, LDADD) and the generic timer
+ * (CNTVCT_EL0/CNTFRQ_EL0) for the 1 s no-progress timeout. A host harness
+ * (scripts/coherency/litmus.c) and a kernel test can both include this file:
+ * the caller allocates one struct lit_shared on cacheable Normal Write-Back
+ * Inner Shareable memory, starts one thread per role pinned to the chosen
+ * CPU, and calls lit_run_role() on each.
+ *
+ * Every shared variable sits on its own LIT_LINE-byte line. No pattern
+ * issues a cache maintenance instruction.
+ *
+ * Roles:
+ *   P1, P2, S1, P3, P5: role 0 and role 1 (two CPUs, nthreads == 2).
+ *     P1/P2/S1: role 0 writer, role 1 reader.
+ *     P3:       role 0 is T0, role 1 is T1.
+ *     P5:       role 0 is CPU A (waits for even), role 1 is CPU B (odd).
+ *   S2: as P3 (role 0 is T0, role 1 is T1), no DMB.
+ *   P4: role 0 is the writer, roles 1..nthreads-1 are readers.
+ *   P6, P6L: every role adds (P6 with LDXR/STXR, P6L with LSE LDADD).
+ *
+ * Result accounting: each role writes its own struct lit_result. The
+ * caller sums forbidden and timeouts over all roles of one run; role 0
+ * reports elapsed ticks between the start and end barriers.
+ */
+#ifndef LITMUS_PATTERNS_H
+#define LITMUS_PATTERNS_H
+
+typedef unsigned long lit_u64;
+typedef unsigned int lit_u32;
+
+#define LIT_LINE 128 /* 64 B is the A76/A78AE line; 128 B is allowed */
+
+#define LIT_MAX_THREADS 16
+
+enum lit_pattern {
+	LIT_P1 = 0, /* MP+rel+acq */
+	LIT_P2,     /* MP+dmbs */
+	LIT_P3,     /* SB+dmbs */
+	LIT_P4,     /* CoRR, one writer, all others read */
+	LIT_P5,     /* ping-pong */
+	LIT_P6,     /* atomic sum, LDXR/STXR */
+	LIT_P6L,    /* atomic sum, LSE LDADD (extra row, same criterion as P6) */
+	LIT_S1,     /* MP+none, sensitivity only */
+	LIT_S2,     /* SB+none, sensitivity for P3 only */
+	LIT_NPATTERNS
+};
+
+/*
+ * Row tags (litmus-spec.md revision 3). P1, P2, S1 and P4 store
+ * v = (nonce << 40) | i, with a fresh nonzero nonce per row chosen by the
+ * caller. lit_init() sets the row's variables to a value tagged with the
+ * reserved nonce LIT_NONCE_INIT, which no row uses. A reader treats a
+ * foreign nonce as "row not started" until it has seen its own nonce; a
+ * foreign nonce after its own, or its own nonce with an index above n, is
+ * forbidden. A reader that never sees its own nonce times out.
+ */
+#define LIT_TAG_SHIFT 40
+#define LIT_TAG_INDEX_MASK ((1UL << LIT_TAG_SHIFT) - 1)
+#define LIT_NONCE_INIT 1UL
+#define LIT_NONCE_MAX 0xffffffUL
+
+static inline unsigned long lit_tag(unsigned long nonce, unsigned long i)
+{
+	return (nonce << LIT_TAG_SHIFT) | (i & LIT_TAG_INDEX_MASK);
+}
+
+static inline unsigned long lit_nonce_of(unsigned long v)
+{
+	return v >> LIT_TAG_SHIFT;
+}
+
+static inline unsigned long lit_index_of(unsigned long v)
+{
+	return v & LIT_TAG_INDEX_MASK;
+}
+
+/* P4 coverage defaults (litmus-spec.md revision 2). */
+#define LIT_P4_STRADDLE_TARGET 100000UL
+#define LIT_P4_BUDGET_SECONDS 2UL
+
+struct lit_line {
+	volatile lit_u64 v;
+	char pad[LIT_LINE - sizeof(lit_u64)];
+} __attribute__((aligned(LIT_LINE)));
+
+/*
+ * All state shared between roles. The caller zeroes it (lit_init) before
+ * starting threads; thread creation must publish the zeroed state, which
+ * pthread_create and any kernel IPI-based start path both do.
+ */
+struct lit_shared {
+	struct lit_line data;    /* P1/P2/S1 data, P3 x, P4 x, P5 counter, P6 sum */
+	struct lit_line flag;    /* P1/P2/S1 flag, P3 y */
+	struct lit_line res[2];  /* P3 per-round results of T0, T1 */
+	struct lit_line bar_count;
+	struct lit_line bar_sense;
+	struct lit_line abort;   /* set by any role that timed out */
+	struct lit_line done;    /* P4: writer finished (STLR) */
+	struct lit_line strad[LIT_MAX_THREADS]; /* P4: per-reader straddles */
+	lit_u64 iters;           /* N, read-only after lit_init */
+	lit_u64 budget_ticks;    /* P4 writer time budget (CNTVCT ticks) */
+	lit_u64 straddle_target; /* P4 straddles each reader should reach */
+	lit_u64 nonce;           /* row tag for P1/P2/S1/P4 (revision 3) */
+	lit_u32 nthreads;        /* read-only after lit_init */
+	lit_u32 pattern;         /* read-only after lit_init */
+} __attribute__((aligned(LIT_LINE)));
+
+struct lit_result {
+	lit_u64 forbidden;   /* forbidden outcomes (S1/S2: relaxed outcomes) */
+	lit_u64 timeouts;    /* wait loops with no progress for 1 s */
+	lit_u64 ticks;       /* role 0 only: CNTVCT ticks start barrier to end */
+	lit_u64 final_value; /* P5/P6: final counter (role 0); P4: writes done */
+	lit_u64 pairs;       /* P4 reader: read pairs taken */
+	lit_u64 straddles;   /* P4 reader: pairs whose two reads differed */
+	lit_u64 observed;    /* MP reader: iterations with own nonce, index < n */
+};
+
+/* ---- instruction helpers ------------------------------------------------ */
+
+static inline lit_u64 lit_ldr(volatile lit_u64 *p)
+{
+	lit_u64 v;
+	__asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+	return v;
+}
+
+static inline void lit_str(volatile lit_u64 *p, lit_u64 v)
+{
+	__asm__ volatile("str %0, [%1]" : : "r"(v), "r"(p) : "memory");
+}
+
+static inline lit_u64 lit_ldar(volatile lit_u64 *p)
+{
+	lit_u64 v;
+	__asm__ volatile("ldar %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+	return v;
+}
+
+static inline void lit_stlr(volatile lit_u64 *p, lit_u64 v)
+{
+	__asm__ volatile("stlr %0, [%1]" : : "r"(v), "r"(p) : "memory");
+}
+
+static inline void lit_dmb_ish(void)
+{
+	__asm__ volatile("dmb ish" : : : "memory");
+}
+
+static inline void lit_dmb_ishst(void)
+{
+	__asm__ volatile("dmb ishst" : : : "memory");
+}
+
+static inline void lit_dmb_ishld(void)
+{
+	__asm__ volatile("dmb ishld" : : : "memory");
+}
+
+/* Compiler-only barrier; S1 uses it so the compiler keeps program order. */
+static inline void lit_cbar(void)
+{
+	__asm__ volatile("" : : : "memory");
+}
+
+/* Exclusive add with no ordering (P6 counts only; barriers order the rest). */
+static inline void lit_add_excl(volatile lit_u64 *p, lit_u64 inc)
+{
+	lit_u64 tmp;
+	lit_u32 fail;
+	__asm__ volatile("1: ldxr %0, [%2]\n"
+			 "   add %0, %0, %3\n"
+			 "   stxr %w1, %0, [%2]\n"
+			 "   cbnz %w1, 1b\n"
+			 : "=&r"(tmp), "=&r"(fail)
+			 : "r"(p), "r"(inc)
+			 : "memory");
+}
+
+/* Exclusive fetch-add with acquire+release (barrier arrival). */
+static inline lit_u64 lit_fetch_add_acqrel(volatile lit_u64 *p, lit_u64 inc)
+{
+	lit_u64 old, tmp;
+	lit_u32 fail;
+	__asm__ volatile("1: ldaxr %0, [%3]\n"
+			 "   add %1, %0, %4\n"
+			 "   stlxr %w2, %1, [%3]\n"
+			 "   cbnz %w2, 1b\n"
+			 : "=&r"(old), "=&r"(tmp), "=&r"(fail)
+			 : "r"(p), "r"(inc)
+			 : "memory");
+	return old;
+}
+
+/* LSE atomic add (Armv8.1). Only called when the caller saw LSE support. */
+static inline void lit_add_lse(volatile lit_u64 *p, lit_u64 inc)
+{
+	__asm__ volatile(".arch_extension lse\n"
+			 "stadd %0, [%1]\n"
+			 : : "r"(inc), "r"(p) : "memory");
+}
+
+static inline lit_u64 lit_cntvct(void)
+{
+	lit_u64 v;
+	__asm__ volatile("isb\n mrs %0, cntvct_el0" : "=r"(v) : : "memory");
+	return v;
+}
+
+static inline lit_u64 lit_cntfrq(void)
+{
+	lit_u64 v;
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v));
+	return v;
+}
+
+/* ---- no-progress timeout ------------------------------------------------ */
+
+/*
+ * A waiter tracks the last observed value of the location being waited on.
+ * lit_wait_step() returns 1 once the value has not changed for one second
+ * (one CNTFRQ period). The counter is read only every 1024 calls, so the
+ * hot loop issues no ISB/MRS between samples.
+ */
+struct lit_waiter {
+	lit_u64 last;
+	lit_u64 since;
+	lit_u64 limit;
+	lit_u32 spins;
+	lit_u32 progressed;
+};
+
+static inline void lit_wait_begin(struct lit_waiter *w, lit_u64 first)
+{
+	w->last = first;
+	w->limit = lit_cntfrq();
+	w->since = lit_cntvct();
+	w->spins = 0;
+	w->progressed = 0;
+}
+
+static inline int lit_wait_step(struct lit_waiter *w, lit_u64 seen)
+{
+	lit_u64 now;
+
+	if (seen != w->last) {
+		w->last = seen;
+		w->progressed = 1;
+	}
+	if (++w->spins < 1024) {
+		return 0;
+	}
+	w->spins = 0;
+	now = lit_cntvct();
+	if (w->progressed) {
+		w->progressed = 0;
+		w->since = now;
+		return 0;
+	}
+	return (now - w->since) > w->limit;
+}
+
+static inline int lit_aborted(struct lit_shared *s)
+{
+	return lit_ldar(&s->abort.v) != 0;
+}
+
+static inline void lit_raise_abort(struct lit_shared *s, struct lit_result *r)
+{
+	r->timeouts++;
+	lit_stlr(&s->abort.v, 1);
+}
+
+/* ---- sense-reversing spin barrier ------------------------------------------ */
+
+/*
+ * Returns 0 on success, -1 on timeout or abort. *local_sense is per role
+ * and starts at 0. The last arriver resets the count with a plain store and
+ * publishes the new sense with STLR, which orders the reset before it.
+ *
+ * Progress for the timeout is any change of the sense, the arrival count,
+ * or *work (when non-null): a role that finished early and waits for slower
+ * roles still working on *work is not a stall.
+ */
+static inline lit_u64 lit_bar_state(struct lit_shared *s, volatile lit_u64 *work)
+{
+	lit_u64 v = lit_ldar(&s->bar_sense.v);
+
+	v ^= lit_ldr(&s->bar_count.v) * 0x9E3779B97F4A7C15UL;
+	if (work) {
+		v ^= lit_ldr(work) * 0xC2B2AE3D27D4EB4FUL;
+	}
+	return v;
+}
+
+static inline int lit_barrier_w(struct lit_shared *s, lit_u32 *local_sense,
+				volatile lit_u64 *work, struct lit_result *r)
+{
+	lit_u64 sense = (*local_sense ^= 1);
+	lit_u64 old = lit_fetch_add_acqrel(&s->bar_count.v, 1);
+	struct lit_waiter w;
+
+	if (old == (lit_u64)s->nthreads - 1) {
+		lit_str(&s->bar_count.v, 0);
+		lit_stlr(&s->bar_sense.v, sense);
+		return 0;
+	}
+	lit_wait_begin(&w, lit_bar_state(s, work));
+	for (;;) {
+		if (lit_ldar(&s->bar_sense.v) == sense) {
+			return 0;
+		}
+		if (lit_aborted(s)) {
+			return -1;
+		}
+		if (lit_wait_step(&w, lit_bar_state(s, work))) {
+			lit_raise_abort(s, r);
+			return -1;
+		}
+	}
+}
+
+static inline int lit_barrier(struct lit_shared *s, lit_u32 *local_sense,
+			      struct lit_result *r)
+{
+	return lit_barrier_w(s, local_sense, (volatile lit_u64 *)0, r);
+}
+
+/* ---- setup ---------------------------------------------------------------- */
+
+static inline int lit_is_tagged(enum lit_pattern p)
+{
+	return p == LIT_P1 || p == LIT_P2 || p == LIT_S1 || p == LIT_P4;
+}
+
+/*
+ * nonce: the row's tag, nonzero, != LIT_NONCE_INIT, <= LIT_NONCE_MAX, and
+ * different from the previous row's (the caller cycles it). Untagged
+ * patterns ignore it.
+ */
+static inline void lit_init(struct lit_shared *s, enum lit_pattern p,
+			    lit_u64 iters, lit_u32 nthreads, lit_u64 nonce)
+{
+	lit_u64 init = lit_is_tagged(p) ? lit_tag(LIT_NONCE_INIT, 0) : 0;
+
+	s->data.v = init;
+	s->flag.v = init;
+	s->nonce = nonce;
+	s->res[0].v = 0;
+	s->res[1].v = 0;
+	s->bar_count.v = 0;
+	s->bar_sense.v = 0;
+	s->abort.v = 0;
+	s->done.v = 0;
+	for (lit_u32 k = 0; k < LIT_MAX_THREADS; k++) {
+		s->strad[k].v = 0;
+	}
+	s->iters = iters;
+	s->budget_ticks = LIT_P4_BUDGET_SECONDS * lit_cntfrq();
+	s->straddle_target = LIT_P4_STRADDLE_TARGET;
+	s->nthreads = nthreads;
+	s->pattern = (lit_u32)p;
+}
+
+/* ---- P1, P2, S1: message passing ------------------------------------------- */
+
+static inline void lit_mp_writer(struct lit_shared *s, enum lit_pattern p)
+{
+	lit_u64 n = s->iters;
+	lit_u64 nonce = s->nonce;
+
+	for (lit_u64 i = 1; i <= n; i++) {
+		lit_u64 v = lit_tag(nonce, i);
+
+		if ((i & 0xfff) == 0 && lit_aborted(s)) {
+			return;
+		}
+		lit_str(&s->data.v, v);
+		if (p == LIT_P1) {
+			lit_stlr(&s->flag.v, v);
+		} else if (p == LIT_P2) {
+			lit_dmb_ishst();
+			lit_str(&s->flag.v, v);
+		} else {
+			lit_cbar();
+			lit_str(&s->flag.v, v);
+		}
+	}
+}
+
+/*
+ * MP check for one (flag, data) sample, revision 3. Returns the number of
+ * forbidden outcomes (0 or 1) and updates *own_seen. Data is stored before
+ * the flag, so once the flag carries this row's nonce the data must carry
+ * it too, with an index no lower than the flag's (the classic d < f).
+ */
+static inline int lit_mp_check(lit_u64 f, lit_u64 d, lit_u64 nonce, lit_u64 n,
+			       int *own_seen)
+{
+	if (lit_nonce_of(f) != nonce) {
+		return *own_seen ? 1 : 0; /* foreign after own, else not started */
+	}
+	*own_seen = 1;
+	if (lit_index_of(f) > n) {
+		return 1;
+	}
+	if (lit_nonce_of(d) != nonce || lit_index_of(d) < lit_index_of(f)) {
+		return 1;
+	}
+	return 0;
+}
+
+static inline void lit_mp_reader(struct lit_shared *s, enum lit_pattern p,
+				 struct lit_result *r)
+{
+	lit_u64 n = s->iters;
+	lit_u64 nonce = s->nonce;
+	lit_u64 f, d;
+	int own_seen = 0;
+	struct lit_waiter w;
+
+	lit_wait_begin(&w, lit_ldr(&s->flag.v));
+	for (;;) {
+		if (p == LIT_P1) {
+			f = lit_ldar(&s->flag.v);
+			d = lit_ldr(&s->data.v);
+		} else if (p == LIT_P2) {
+			f = lit_ldr(&s->flag.v);
+			lit_dmb_ishld();
+			d = lit_ldr(&s->data.v);
+		} else {
+			f = lit_ldr(&s->flag.v);
+			lit_cbar();
+			d = lit_ldr(&s->data.v);
+		}
+		r->forbidden += (lit_u64)lit_mp_check(f, d, nonce, n, &own_seen);
+		if (lit_nonce_of(f) == nonce) {
+			if (lit_index_of(f) >= n) {
+				return;
+			}
+			r->observed++;
+		}
+		if (lit_wait_step(&w, f)) {
+			lit_raise_abort(s, r);
+			return;
+		}
+	}
+}
+
+/* ---- P3, S2: store buffering --------------------------------------------- */
+
+/* The P3/S2 forbidden predicate: both loads missed the other side's store. */
+static inline int lit_sb_relaxed(lit_u64 r0, lit_u64 r1, lit_u64 round)
+{
+	return r0 < round && r1 < round;
+}
+
+/*
+ * P3 puts DMB ISH between the store and the load; S2 (sensitivity) keeps
+ * only a compiler barrier, so the store buffer may delay the store past the
+ * load and the relaxed outcome becomes observable.
+ */
+static inline void lit_sb(struct lit_shared *s, enum lit_pattern p,
+			  lit_u32 role, lit_u32 *sense, struct lit_result *r)
+{
+	lit_u64 n = s->iters;
+	volatile lit_u64 *mine = role == 0 ? &s->data.v : &s->flag.v; /* x : y */
+	volatile lit_u64 *other = role == 0 ? &s->flag.v : &s->data.v;
+
+	for (lit_u64 round = 1; round <= n; round++) {
+		lit_u64 seen;
+
+		if (lit_barrier(s, sense, r) != 0) {
+			return;
+		}
+		lit_str(mine, round);
+		if (p == LIT_P3) {
+			lit_dmb_ish();
+		} else {
+			lit_cbar();
+		}
+		seen = lit_ldr(other);
+		lit_str(&s->res[role].v, seen);
+		if (lit_barrier(s, sense, r) != 0) {
+			return;
+		}
+		if (role == 0) {
+			lit_u64 r0 = lit_ldr(&s->res[0].v);
+			lit_u64 r1 = lit_ldr(&s->res[1].v);
+
+			if (lit_sb_relaxed(r0, r1, round)) {
+				r->forbidden++;
+			}
+		}
+	}
+}
+
+/* ---- P4: CoRR -------------------------------------------------------------- */
+
+/*
+ * Writer (role 0): plain stores of 1, 2, 3, ... It writes at least s->iters
+ * values, then keeps going until every reader has published at least
+ * s->straddle_target straddles or s->budget_ticks have passed since it
+ * started, and finally sets s->done with STLR. r->final_value is the number
+ * of writes made.
+ *
+ * Readers: two plain loads in a row. A pair whose loads differ is a
+ * straddle (a write landed between them); b < a is the CoRR violation.
+ * Each reader publishes its straddle count every 1024 pairs so the writer
+ * can stop early.
+ */
+static inline int lit_corr_forbidden(lit_u64 a, lit_u64 b)
+{
+	return b < a;
+}
+
+static inline void lit_corr_writer(struct lit_shared *s, struct lit_result *r)
+{
+	lit_u64 n = s->iters;
+	lit_u64 nonce = s->nonce;
+	lit_u64 start = lit_cntvct();
+	lit_u64 i = 0;
+
+	for (;;) {
+		if ((i & 0xfff) == 0) {
+			if (lit_aborted(s)) {
+				break;
+			}
+			if (i >= n) {
+				int all = 1;
+
+				for (lit_u32 k = 1; k < s->nthreads; k++) {
+					if (lit_ldr(&s->strad[k].v) < s->straddle_target) {
+						all = 0;
+					}
+				}
+				if (all || lit_cntvct() - start >= s->budget_ticks) {
+					break;
+				}
+			}
+		}
+		i++;
+		lit_str(&s->data.v, lit_tag(nonce, i));
+	}
+	r->final_value = i;
+	/* done carries the nonce too: a stale done from an earlier row never ends this one */
+	lit_stlr(&s->done.v, nonce);
+}
+
+/*
+ * One P4 read pair, revision 3. Both reads must carry this row's nonce to
+ * be compared; a foreign value after the row's own nonce has been seen is
+ * forbidden. P4 has no upper index bound (the writer is time-budgeted).
+ * Returns the number of forbidden outcomes; *straddle is set when both
+ * reads are the row's own and differ.
+ */
+static inline int lit_corr_check(lit_u64 a, lit_u64 b, lit_u64 nonce,
+				 int *own_seen, int *straddle)
+{
+	int an = lit_nonce_of(a) == nonce;
+	int bn = lit_nonce_of(b) == nonce;
+
+	*straddle = 0;
+	if (!an || !bn) {
+		int foreign_after_own = *own_seen || (an && !bn);
+
+		*own_seen |= an | bn;
+		return foreign_after_own ? 1 : 0;
+	}
+	*own_seen = 1;
+	if (a != b) {
+		*straddle = 1;
+		return lit_corr_forbidden(lit_index_of(a), lit_index_of(b));
+	}
+	return 0;
+}
+
+static inline void lit_corr_reader(struct lit_shared *s, lit_u32 role,
+				   struct lit_result *r)
+{
+	lit_u64 nonce = s->nonce;
+	lit_u64 pairs = 0, straddles = 0;
+	int own_seen = 0;
+	struct lit_waiter w;
+
+	lit_wait_begin(&w, lit_ldr(&s->data.v));
+	for (;;) {
+		lit_u64 a = lit_ldr(&s->data.v);
+		lit_u64 b = lit_ldr(&s->data.v);
+		int straddle;
+
+		pairs++;
+		r->forbidden += (lit_u64)lit_corr_check(a, b, nonce, &own_seen, &straddle);
+		straddles += (lit_u64)straddle;
+		if ((pairs & 0x3ff) == 0) {
+			lit_str(&s->strad[role].v, straddles);
+		}
+		if ((pairs & 0x3f) == 0) {
+			if (lit_ldar(&s->done.v) == nonce || lit_aborted(s)) {
+				break;
+			}
+		}
+		if (lit_wait_step(&w, b)) {
+			lit_raise_abort(s, r);
+			break;
+		}
+	}
+	if (!own_seen && !lit_aborted(s)) {
+		r->timeouts++; /* the row ended without this reader seeing it */
+	}
+	lit_str(&s->strad[role].v, straddles);
+	r->pairs = pairs;
+	r->straddles = straddles;
+}
+
+/* ---- P5: ping-pong --------------------------------------------------------- */
+
+/*
+ * Role 0 (A) owns even values and role 1 (B) owns odd values. Each role
+ * knows exactly which value it must see next; seeing any other value of
+ * its own parity is a lost or duplicated step and is counted. Plain loads,
+ * STLR stores.
+ */
+static inline void lit_pingpong(struct lit_shared *s, lit_u32 role,
+				struct lit_result *r)
+{
+	lit_u64 n = s->iters;
+	lit_u64 expect = role; /* A expects 0, 2, 4...; B expects 1, 3, 5... */
+	struct lit_waiter w;
+
+	lit_wait_begin(&w, lit_ldr(&s->data.v));
+	for (lit_u64 k = 0; k < n; k++) {
+		lit_u64 v;
+
+		for (;;) {
+			v = lit_ldr(&s->data.v);
+			if ((v & 1) == role) {
+				break;
+			}
+			if (lit_aborted(s)) {
+				return;
+			}
+			if (lit_wait_step(&w, v)) {
+				lit_raise_abort(s, r);
+				return;
+			}
+		}
+		if (v != expect) {
+			r->forbidden++;
+		}
+		lit_stlr(&s->data.v, v + 1);
+		expect = v + 2;
+	}
+}
+
+/* ---- P6: atomic sum -------------------------------------------------------- */
+
+static inline void lit_atomic_sum(struct lit_shared *s, enum lit_pattern p)
+{
+	lit_u64 n = s->iters;
+
+	for (lit_u64 i = 0; i < n; i++) {
+		if (p == LIT_P6L) {
+			lit_add_lse(&s->data.v, 1);
+		} else {
+			lit_add_excl(&s->data.v, 1);
+		}
+	}
+}
+
+/* ---- final-value checks ------------------------------------------------- */
+
+/*
+ * P5: the counter must end at exactly 2N. P6/P6L: at exactly CPUs x N.
+ * Returns 1 (one forbidden outcome) on a mismatch.
+ */
+static inline int lit_final_mismatch(enum lit_pattern p, lit_u64 final,
+				     lit_u64 iters, lit_u32 nthreads)
+{
+	if (p == LIT_P5) {
+		return final != 2 * iters;
+	}
+	if (p == LIT_P6 || p == LIT_P6L) {
+		return final != (lit_u64)nthreads * iters;
+	}
+	return 0;
+}
+
+/* ---- entry point ----------------------------------------------------------- */
+
+/*
+ * Run one role of the pattern set up by lit_init(). All roles must be
+ * started; each returns after the end barrier (or after an abort). The
+ * caller sums the per-role results. For P5 and P6 role 0 also checks the
+ * final value and counts a mismatch as one forbidden outcome.
+ */
+static inline void lit_run_role(struct lit_shared *s, lit_u32 role,
+				struct lit_result *r)
+{
+	enum lit_pattern p = (enum lit_pattern)s->pattern;
+	lit_u32 sense = 0;
+	lit_u64 t0;
+
+	r->forbidden = 0;
+	r->timeouts = 0;
+	r->ticks = 0;
+	r->final_value = 0;
+	r->pairs = 0;
+	r->straddles = 0;
+	r->observed = 0;
+
+	if (lit_barrier(s, &sense, r) != 0) {
+		return;
+	}
+	t0 = lit_cntvct();
+
+	switch (p) {
+	case LIT_P1:
+	case LIT_P2:
+	case LIT_S1:
+		if (role == 0) {
+			lit_mp_writer(s, p);
+		} else {
+			lit_mp_reader(s, p, r);
+		}
+		break;
+	case LIT_P3:
+	case LIT_S2:
+		lit_sb(s, p, role, &sense, r);
+		break;
+	case LIT_P4:
+		if (role == 0) {
+			lit_corr_writer(s, r);
+		} else {
+			lit_corr_reader(s, role, r);
+		}
+		break;
+	case LIT_P5:
+		lit_pingpong(s, role, r);
+		break;
+	case LIT_P6:
+	case LIT_P6L:
+		lit_atomic_sum(s, p);
+		break;
+	default:
+		break;
+	}
+
+	if (lit_barrier_w(s, &sense, &s->data.v, r) != 0) {
+		return;
+	}
+	if (role != 0) {
+		return;
+	}
+	r->ticks = lit_cntvct() - t0;
+	if (p == LIT_P5 || p == LIT_P6 || p == LIT_P6L) {
+		r->final_value = lit_ldr(&s->data.v);
+		r->forbidden += (lit_u64)lit_final_mismatch(p, r->final_value,
+							    s->iters, s->nthreads);
+	}
+}
+
+#endif /* LITMUS_PATTERNS_H */
