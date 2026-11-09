@@ -39,7 +39,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
 | C3 | Boot-sequence audit and cacheable build | hardware stage on c3-hw-1193 @ 10f8688e, both boards | 0 |
-| C4 | Decision, ADR 0006, draft PR | waiting | 0 |
+| C4 | Decision, ADR 0006, draft PR | removal branch prepared ahead of the decision (contingent): coherency-remove-nc-axis @ 072bd707, measuring on both boards | 0 |
 
 ### Record check (git history, times -0700)
 
@@ -340,6 +340,18 @@ Boards: jetson-nano-2 and pi-5-1 only.
   CIVAC count 49 to 111, C3 audit). Under test: the removal branch drops
   CPU-sharing maintenance and will be measured on Jetson kexec.
 - UEFI so far: boot, banner, 5/5, regs, litmus PASS x2 (S2 0 / 1), neg done.
+
+### Removal branch (contingent, prepared during the hardware stage)
+
+- `coherency-remove-nc-axis` built on 10f8688e: removes the CPU-sharing NC
+  axis (`f7189f08`), the bit 6 check (`9c4e0d30`, #1194), docs (`05ff31da`,
+  `44a94994`), and at 072bd707 the cache.h calls that served only CPU-to-CPU
+  sharing (sched.c, task.c, pi_mutex.c, smp.c, cpu_supervisor.c,
+  sched_trace_ai.c, workloads.c), with smp_wmb/smp_rmb where a pair also gave
+  ordering and release/acquire on `sched.initialized`. Kept: the
+  `secondary_mmu_*` clean, page-table maintenance, all DMA maintenance.
+- 072bd707 is measured on both boards because NC_AXIS=OFF missed the
+  stealing bar on Jetson; 44a94994 is not measured (functionally NC_AXIS=OFF).
 
 ### Lab notes
 
