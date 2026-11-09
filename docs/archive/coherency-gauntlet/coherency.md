@@ -39,7 +39,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
 | C3 | Boot-sequence audit and cacheable build | Pi 5 hardware complete (05f86132); Jetson running; critic round 1 started on Pi 5 | 1 |
-| C4 | Decision, ADR 0006, draft PR | removal branch prepared ahead of the decision (contingent): coherency-remove-nc-axis @ 072bd707, measuring on both boards | 0 |
+| C4 | Decision, ADR 0006, draft PR | removal branch ready (bf5f8fb3), ADR drafting, waits for Jetson + critic | 0 |
 
 ### Record check (git history, times -0700)
 
@@ -379,6 +379,18 @@ Boards: jetson-nano-2 and pi-5-1 only.
   12934 / 17958 us, median 13021 (5-run medians: NC 15715, NC_AXIS=OFF
   14550). bench smp complete x3. About 2 us of every Pi 5 context switch was
   CPU-to-CPU cache maintenance on memory the hardware keeps coherent.
+- Branch final at bf5f8fb3 (review fixes plus a DSB before CPU_ON in the
+  Pi 5 supervisor resurrect path; scheduler hot path identical to
+  072bd707). `sched.c` conditional lines 84 to 37. DC CIVAC / CVAC in the
+  image: Jetson 112 / 179 to 13 / 44, Pi 5 108 / 165 to 9 / 26. 72 files,
+  +699 / -2399. `scripts/check-cpu-cache-maint.py` in `make test` rejects
+  new cache.h calls in scheduler, IPC, kprintf and spinlock code. QEMU
+  ARM64 and x86-64 pass; all board builds and test kernels build.
+- Review findings left open: #1201 (unbounded Tegra UART LSR wait, now under
+  a cross-CPU lock); boot-flag WARN text still says "cache incoherency".
+- ADR number: `0006` is also used by `docs/adr/0006-gpu-channel-recovery.md`
+  on the unmerged branches `gauntlet/1167-gqa-hmma` and
+  `gauntlet/1171-chan-recovery`; whichever lands second renumbers.
 - Jetson kexec, 072bd707 (elf 84e7946c, builder report): no NC line, 6/6
   CPUs, regs identical to NC_AXIS=OFF, litmus PASS (S1 933,567, S2 0, weak 0,
   min straddles 100,001). bench stealing 9803 / 10154 / 9802 / 10485 / 13040
