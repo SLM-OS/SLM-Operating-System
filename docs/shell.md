@@ -692,12 +692,20 @@ same field order so results compare row for row. Code:
 | Command | Description |
 |---------|-------------|
 | `coherency regs` | For every online CPU: CurrentEL, SCTLR_EL2 and HCR_EL2 (EL2 only), the EL1 copy of SCTLR (SCTLR_EL12 when E2H=1), the TCR and MAIR in use, CLIDR_EL1, CTR_EL0, MIDR_EL1, MPIDR_EL1 and CCSIDR_EL1 for each data or unified cache level. On Pi 5 and Jetson it also prints CPUECTLR_EL1 and CLUSTERECTLR_EL1 as raw values: read only, never written (a denied write traps to EL3), and not decoded, because bit meanings differ between Cortex-A76 and A78AE. QEMU builds do not read them. |
-| `coherency litmus [scale]` | P1 to P6 and S1 over every ordered pair of online CPUs (P4 once per writer CPU over all CPUs, P6 over all CPUs). `scale` divides the spec iteration counts (default 1: 10^6 per pair for P1, P2, P4 and S1, 10^5 rounds for P3 and P5, 10^6 per CPU for P6). Prints `pattern cpus iters forbidden timeouts ms` rows, then `coherency: PASS` or `coherency: FAIL (n rows)`. A row fails on any forbidden outcome or any 1 s no-progress timeout; S1 has no barriers and is reported, never judged. |
+| `coherency litmus [scale]` | P1 to P6, S1 and S2 (spec revision 2) over every ordered pair of online CPUs (P4 once per writer CPU over all CPUs, P6 over all CPUs), in the row order P1 P2 P3 P4 P5 P6 S1 S2. `scale` divides the spec iteration counts (default 1: 10^6 per pair for P1, P2 and S1, 10^5 rounds for P3, P5 and S2, 10^6 per CPU for P6). P4 is time budgeted: the writer makes at least 10^6 writes, then keeps going until every reader has 10^5 straddles (read pairs that saw a write land between the two reads; the target is divided by `scale` too) or 2 s pass. Prints `pattern cpus iters forbidden timeouts ms` rows; P4 rows append `pairs=<r1>,<r2>,... straddles=<r1>,<r2>,... coverage=ok\|weak`, one value per reader in ascending CPU order, and their `iters` is the number of writes made. Then one `SENS cpus=a>b S1=<n> S2=<n> P2_sensitive=yes\|no P3_sensitive=yes\|no` line per ordered pair, then `coherency: PASS` or `coherency: FAIL (n rows)`. A P row fails on any forbidden outcome or any 1 s no-progress timeout, and a P4 row also fails when it is weak (some reader saw no straddle). S1 (P2 without its DMBs) and S2 (P3 with each DMB ISH replaced by a compiler barrier) are reported, never judged: P2 or P3 counts as sensitive on a pair only where S1 or S2 showed relaxed outcomes there. |
 | `coherency neg [scale]` | Negative controls, report only. (a) P2 and P4 with the writer on the normal mapping and the reader on a Normal WB Non-shareable alias (SH=00) of the same 2 MB block; (b) the same with the reader on a Normal Non-cacheable alias; (c) every pair with a reader whose data cache is off (SCTLR.C=0, IRQs masked, register-only loop): the writer cleans P0 to the Point of Coherency, stores P1 with no clean, and the reader counts stale P0 reads (phase 1), then the writer cleans P1 and the reader counts fresh P1 reads (phase 2). Only (c) is guaranteed by the core TRMs to show stale reads on hardware; (a) and (b) are findings either way. QEMU TCG models no caches, so every control reads fresh data there. |
 
 Cells: `cpus` is `A>B` for pair patterns (A is the writer, T0, or the
 even side of P5), `w<W>/<lo>-<hi>` for P4 with writer W, and `<lo>-<hi>`
 for P6.
+
+Self-test: `kernel/tests/test_coherency.c` drives
+`coherency_litmus_run_opts()` with one fault injected per run (a P3
+partner that never stores and reports stale reads, a descending P4
+writer, a P4 writer that makes no writes, a P6 sum that starts at 1) and
+checks that the fault is counted in the right row and that the run ends
+in `coherency: FAIL (n rows)`. Injected runs print a `# self-test run`
+line and are never spec runs; the shell verb does not inject.
 
 Dispatch: the CPU running the shell plays its own role inline (the shell
 task is pinned there and raised to high priority for the run), and every
