@@ -13,6 +13,7 @@
 #include "spinlock.h"
 #include "cache.h"
 #include "dtb.h"
+#include "ncmem.h"     /* NC_MEM_BASE for the Pi 5 layout assert */
 #include <stddef.h>
 
 /*
@@ -2015,6 +2016,52 @@ static void vmm_setup_platform(void)
 }
 #endif /* PLATFORM_RASPI5 */
 
+/* DC IVAC over [p, p + len), 64-byte lines (A76 / A78AE / QEMU). */
+static void vmm_inval_table(const void *p, size_t len)
+{
+    const char *c = (const char *)((uintptr_t)p & ~(uintptr_t)63);
+    const char *end = (const char *)p + len;
+    for (; c < end; c += 64) {
+        __asm__ volatile("dc ivac, %0" :: "r"(c) : "memory");
+    }
+}
+
+/* Every table vmm_setup_platform can write before the MMU is on. */
+static void vmm_inval_static_tables(void)
+{
+    vmm_inval_table(l1_table, sizeof(l1_table));
+#if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_JETSON_ORIN_NANO)
+    vmm_inval_table(l2_kernel, sizeof(l2_kernel));
+    vmm_inval_table(l2_mmio, sizeof(l2_mmio));
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    vmm_inval_table(l2_ram_c0, sizeof(l2_ram_c0));
+    vmm_inval_table(l2_pcie_bar, sizeof(l2_pcie_bar));
+    vmm_inval_table(l2_sysram, sizeof(l2_sysram));
+    vmm_inval_table(l2_fw_dtb, sizeof(l2_fw_dtb));
+    vmm_inval_table(l3_fw_dtb, sizeof(l3_fw_dtb));
+#endif
+#if defined(PLATFORM_RASPI5)
+    vmm_inval_table(l2_mmio_pcie, sizeof(l2_mmio_pcie));
+    vmm_inval_table(l2_mmio_gic, sizeof(l2_mmio_gic));
+    vmm_inval_table(l2_mmio_rp1, sizeof(l2_mmio_rp1));
+    vmm_inval_table(l2_ram_gb3, sizeof(l2_ram_gb3));
+    vmm_inval_table(l2_pcie_bar_win, sizeof(l2_pcie_bar_win));
+#endif
+}
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * The Pi 5 NC block is mapped NC only because it is the last 2 MB of
+ * the GB that vmm_setup_platform splits into l2_ram_gb3, which is the
+ * last GB of RAM_SIZE. NC_MEM_BASE is a separate constant: if RAM_SIZE
+ * changed, 0xFFE00000 would be mapped Write-Back while every NC user
+ * still treats it as Non-Cacheable (#1193 audit D11).
+ */
+_Static_assert(NC_MEM_BASE + NC_MEM_SIZE == RAM_BASE + RAM_SIZE,
+               "Pi 5 NC block must be the last 2 MB of RAM_SIZE (see l2_ram_gb3)");
+#endif
+
 /*
  * Set up initial page tables and enable MMU.
  *
@@ -2035,35 +2082,22 @@ void vmm_init(void)
     vmm_setup_platform();
 
     /*
-     * Flush page tables to DRAM before MMU enable.
-     * On real hardware (Pi 5, Jetson), secondary CPUs' page table walkers
-     * read from DRAM, not from CPU 0's L1/L2 cache. Without this flush,
-     * secondary CPUs read stale L2 entries (0 = unmapped), making the NC
-     * region invisible. Uses raw DC CVAC since cache.h wrappers may not
-     * be initialized yet (MMU is still off). */
-    {
-        const char *p = (const char *)l1_table;
-        const char *end = p + sizeof(l1_table);
-        for (; p < end; p += 64) {
-            __asm__ volatile("dc cvac, %0" ::"r"(p) : "memory");
-        }
-    }
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-    {
-        const char *p = (const char *)l2_kernel;
-        const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
-        for (; p < end; p += 64) {
-            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
-        }
-    }
-    {
-        const char *p = (const char *)l2_ram_c0;
-        const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
-        for (; p < end; p += 64) {
-            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
-        }
-    }
-#endif
+     * Invalidate every static table by VA before the MMU comes on.
+     *
+     * vmm_setup_platform wrote them with the MMU and data cache off, so
+     * the stores went straight to DRAM and nothing needs cleaning. What
+     * must not survive is a stale cache line for a table address (left
+     * by the previous owner of this CPU, or a speculative fill): once
+     * the MMU is on, CPU 0's walker and every secondary's walker read
+     * the tables through the cacheable Inner Shareable mapping (TCR
+     * IRGN/ORGN WB, SH IS) and would hit it. Linux invalidates its
+     * caches-off-written tables for the same reason (head.S). This used
+     * to be a DC CVAC of three tables, which is a no-op for caches-off
+     * data (#1193 audit D2). On Cortex-A76 / A78AE DC IVAC is executed
+     * as DC CIVAC. Raw instructions: cache.h's helpers assume the MMU
+     * is on.
+     */
+    vmm_inval_static_tables();
     __asm__ volatile("dsb sy" ::: "memory");
 
     DEBUG_PRINT("  L1 table at PA: 0x%lx", (uint64_t)l1_table);

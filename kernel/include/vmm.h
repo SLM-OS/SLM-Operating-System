@@ -666,6 +666,15 @@ uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags);
 /* Enable MMU (implemented in assembly) */
 extern void mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair, uint64_t sctlr);
 
+/*
+ * MMU configuration published by vmm_init for smp_boot.S, which reads it
+ * on each secondary with the MMU and caches off. smp_init cleans it to
+ * the PoC before CPU_ON (#1193 audit D1).
+ */
+extern volatile uint64_t secondary_mmu_ttbr;
+extern volatile uint64_t secondary_mmu_mair;
+extern volatile uint64_t secondary_mmu_tcr;
+
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);
 
