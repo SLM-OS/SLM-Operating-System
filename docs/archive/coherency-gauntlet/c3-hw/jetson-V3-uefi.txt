@@ -124,3 +124,13 @@ run 3: CPU 1: COMPLETED (ran on CPU 1) / CPU 2: COMPLETED (ran on CPU 4) / CPU 3
 boot 1  07:30:17  capture 0 lines in 120 s; `cpu`: "CPUs: 6 online / 6 total", NDIV 135/1728 MHz all CPUs
 boot 2  07:36:09  4 lines, 57.6 s, stopped on "slmos>"
 boot 3  07:38:34  4 lines, 57.4 s, stopped on "slmos>"
+boot 4  07:41:52  4 lines, 57.5 s, stopped on "slmos>"
+boot 5  07:44:18  4 lines, 57.7 s, stopped on "slmos>"
+boot 6  07:46:46  4 lines, 58.1 s, stopped on "slmos>"
+boot 7  07:49:22  4 lines, 57.5 s, stopped on "slmos>"
+boot 8  07:51:46  4 lines, 57.7 s, stopped on "slmos>"
+Result: 8/8 reached the shell (7 with the capture stopping on "slmos>", none on a failure pattern; boot 1
+verified with `cpu`). Series stopped at 8 for the 08:15 UTC hard stop (target was 10).
+After the series: power cycle to SD Linux, \EFI\SLMOS\SLMOS.efi restored from /root/slmos-efi-pre1193.efi at
+07:54 UTC: fsck.vfat -n clean (6 files, 2196/130892 clusters), read-only mount sha256 789cba62...1f7d, ESP not
+mounted, BootCurrent 0001 (UEFI SD Device), no BootNext.
