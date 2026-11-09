@@ -320,10 +320,9 @@ bool pmu_is_ready(void)
  * READER (`pmu_get_cache_pressure_q16`, called from
  * `ai_state.c::extract_per_core` to fill the per-core feature
  * vector) reads every CPU's slot from a single calling CPU. The
- * array is in cacheable BSS, so on Pi 5 / Jetson (where DC CIVAC
- * doesn't propagate through per-core L2 — see `kernel/CLAUDE.md`
- * "Non-Cacheable Shared Memory") the read may return stale values
- * for a few ticks. This is acceptable for the AI scheduler feature
+ * array is in cacheable BSS and the caches are coherent (`kernel/CLAUDE.md`
+ * "Cross-CPU Coherency"), but a read races the owning CPU's update
+ * and may return the previous tick's value. This is acceptable for the AI scheduler feature
  * input — the policy already tolerates noisy inputs, and the EWMA
  * smooths out single-sample noise. Matches the existing lock-free
  * `ready_count` cross-CPU read pattern in

@@ -151,8 +151,7 @@ make kernel AI_SCHED=ON                        # QEMU ARM64 with AI scheduler
 make test AI_SCHED=ON                          # Run tests with AI scheduler
 make kernel PLATFORM=X86_64 AI_SCHED=ON        # x86-64 with AI scheduler (SSE)
 
-# Coherency gauntlet switches (#1193, Pi 5 and Jetson only; default ON = current behavior):
-make kernel PLATFORM=RASPI5 NC_AXIS=OFF        # CPU-shared state in cacheable memory, real UART lock
+# Coherency gauntlet switch (#1193, Pi 5 and Jetson only; default ON = current behavior):
 make kernel PLATFORM=RASPI5 SETWAY_INVAL=OFF   # no post-MMU set/way loop on secondaries
 ```
 
@@ -246,7 +245,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - All CPU-id resolution goes through `cpu_logical_map[]` (asm via `ARM64_GET_LOGICAL_CPU`, C via `cpu_logical_id()`); regression coverage in `kernel/tests/test_mpidr_lookup.c` (PR #647)
 - Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5)
 - VHE set up on all secondary CPUs in `smp_boot.S`
-- NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for cross-CPU shared data
+- NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for device DMA; cross-CPU shared data is cacheable (#1193, `docs/adr/0006-cross-cpu-coherency.md`)
 - Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs. Under default `JETSON_HW_TICK=ON` build (PR #746/#755), secondaries WFI and wake from per-CPU PPI 26 timer IRQs (SEV broadcast is redundant but harmless). Under `JETSON_HW_TICK=OFF` cooperative fallback, secondaries WFE and wake from cross-CPU SEV.
 - DC CVAC/CIVAC cache maintenance active (cache.h), page tables flushed to DRAM before secondary boot
 

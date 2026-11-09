@@ -10,7 +10,6 @@
 #include "smp.h"
 #include "spinlock.h"
 #include "cache.h"
-#include "ncmem.h"
 #include "arch.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
@@ -21,83 +20,27 @@
 #endif
 #include <stddef.h>
 
-/* Task table - NC on Pi 5, BSS fallback otherwise */
+/* Task table: cacheable BSS (task_table_init points task_table at it). */
 static struct task *task_table;
 static struct task task_table_fallback[MAX_TASKS];
 static uint32_t next_task_id = 1;       /* ID 0 reserved for idle task */
 
-/* Lock protecting task_table and next_task_id.
- * On Pi 5, standard ldaxr/stxr spinlocks fail under cross-CPU contention
- * (L2 retains stale lock values). Use atomic test-and-set instead. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-/* Use standard spinlock but add DC CIVAC after release to push
- * "unlocked" state through L2 to DRAM. Secondary CPUs' first lock
- * attempt reads from DRAM (cold L2) and sees "unlocked". */
-static spinlock_t task_lock __attribute__((aligned(64))) = SPINLOCK_INIT;
-#define TASK_LOCK_IRQSAVE() \
-    irq_flags_t _task_flags = spin_lock_irqsave(&task_lock)
-#define TASK_UNLOCK_IRQRESTORE() \
-    do { \
-        spin_unlock_irqrestore(&task_lock, _task_flags); \
-        __asm__ volatile("dc civac, %0" :: "r"(&task_lock) : "memory"); \
-        __asm__ volatile("dsb sy" ::: "memory"); \
-        __asm__ volatile("isb" ::: "memory"); \
-    } while(0)
-#else
+/* Lock protecting task_table and next_task_id. */
 static spinlock_t task_lock = SPINLOCK_INIT;
 #define TASK_LOCK_IRQSAVE() \
     irq_flags_t _task_flags = spin_lock_irqsave(&task_lock)
 #define TASK_UNLOCK_IRQRESTORE() \
     spin_unlock_irqrestore(&task_lock, _task_flags)
-#endif
 
-/* Per-CPU current running task (set by scheduler).
- *
- * On Pi 5 / Jetson (PLATFORM_HAS_NC_MEMORY), this lives in non-cacheable
- * memory so cross-CPU readers see writes immediately without cache
- * maintenance. DC CIVAC has a known failure mode on this topology
- * (writer's stale cacheline can be written back, clobbering a newer
- * cross-CPU write), so NC relocation is preferred over cache maintenance.
- *
- * On other platforms, we keep the BSS array and the existing
- * cache_clean/cache_invalidate pattern in task_current/task_set_current. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-static struct task **current_task;
-#else
+/* Per-CPU current running task (set by scheduler), in cacheable BSS.
+ * The cache_clean/cache_invalidate calls in task_current_on_cpu and
+ * task_set_current are redundant on coherent hardware but harmless
+ * (cache.h, #1193). */
 static struct task *current_task[MAX_CPUS];
-#endif
 
 void task_table_init(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    task_table = ncmem_alloc(MAX_TASKS * sizeof(struct task), CACHE_LINE_SIZE);
-    if (!task_table) {
-        task_table = task_table_fallback;
-    } else {
-        volatile uint8_t *p = (volatile uint8_t *)task_table;
-        for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++) {
-            p[i] = 0;
-        }
-    }
-
-    current_task = ncmem_alloc(MAX_CPUS * sizeof(struct task *),
-                               CACHE_LINE_SIZE);
-    if (!current_task) {
-        /* NC exhaustion is fatal on platforms that need NC for cross-
-         * CPU coherency (Pi 5, Jetson). Falling back to BSS would let
-         * `task_set_current` run without `cache_clean` (the NC build
-         * path elides it), so a remote CPU's `task_current_on_cpu`
-         * would see stale data — silent corruption with no diagnostic.
-         * Better to halt here with a clear message: NC arena sizing
-         * needs to be raised in the platform header. */
-        panic("current_task: NC arena exhausted — bump NC_MEM_SIZE in kernel/include/ncmem.h");
-    }
-    for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        current_task[i] = NULL;
-    }
-#else
     task_table = task_table_fallback;
-#endif
 }
 
 /*
@@ -139,8 +82,7 @@ extern void task_entry_wrapper(void);
  *
  * Mirrors the unmask rules in scheduler_start: every CPU when the
  * SECONDARY_PREEMPT trampoline is built (or on QEMU); on Pi 5 and
- * Jetson otherwise CPU 0 only (keyed on the platform, so NC_AXIS=OFF
- * does not change it), because without the trampoline a
+ * Jetson otherwise CPU 0 only, because without the trampoline a
  * secondary's timer ISR would call schedule() directly, which corrupts
  * the abandoned frame on real hardware. On those builds (e.g. Jetson
  * with JETSON_HW_TICK=OFF, or JETSON_HW_TICK=ON SECONDARY_PREEMPT=OFF)
@@ -170,21 +112,6 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 {
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
-
-    /* NC debug marker: 0xDD = trampoline reached.
-     * If this appears in diagnostics, context.S restore completed. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    {
-        uint64_t _mpidr;
-        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        /* cpu_logical_map[] lookup — correct on every platform incl.
-         * Jetson dual-cluster (#647). */
-        int _cpu = cpu_logical_id(_mpidr);
-        if (_cpu >= 0 && _cpu < (int)MAX_CPUS) {
-            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
-        }
-    }
-#endif
 
     /* Clear preempt_disabled for this CPU.
      * scheduler_start() sets it to 1 before switch_to(NULL, first),
@@ -463,33 +390,16 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->user_va_next = 0;
     task->user_asid = 0;
 
-    /* Clean the context struct to PoC so a secondary CPU can read it
-     * during switch_to(). Without SMPEN, task_create's writes to
-     * context.sp, context.x30, etc. stay in this CPU's L1 cache.
+    /* Clean the context struct to PoC; redundant on coherent hardware
+     * but kept with the other cache.h calls (#1193).
      * scheduler_add_task_to_cpu() intentionally skips cleaning the
-     * context (to avoid overwriting a running task's live state),
-     * so we must clean it here at creation time. */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
+     * context (to avoid overwriting a running task's live state), so
+     * any cleaning happens here at creation time. */
     cache_clean_range(&task->context, sizeof(task->context));
-#endif
 
-    /* Skip DEBUG_PRINT on secondary CPUs — uart_lock contention with
-     * CPU 0's boot output causes deadlock/hang on real hardware. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    {
-        uint64_t _mpidr;
-        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        if (cpu_logical_id(_mpidr) == 0) {
-            DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
-                        task->name, task->id, task->stack_base, task->stack_top,
-                        task->priority);
-        }
-    }
-#else
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
                 task->priority);
-#endif
 
     return task;
 }
@@ -777,8 +687,7 @@ void task_exit(void)
 #endif
 
     /* Atomically set TASK_TERMINATED and dequeue under rq_lock.
-     * Without this, a cross-CPU scheduler on Pi 5 (no SMPEN, per-core L2)
-     * could observe the task still in the queue after the state flip but
+     * Without this, a scheduler on another CPU could observe the task still in the queue after the state flip but
      * before dequeue runs, picking a terminated task and panicking. */
     scheduler_terminate_task(task);
 
@@ -793,10 +702,6 @@ void task_exit(void)
 
 /*
  * Get current running task (for this CPU).
- *
- * On PLATFORM_HAS_NC_MEMORY, current_task is in non-cacheable memory —
- * every read bypasses L1/L2 and hits DRAM directly, so writes from other
- * CPUs are instantly visible without cache maintenance.
  */
 struct task *task_current(void)
 {
@@ -809,9 +714,7 @@ struct task *task_current_on_cpu(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return NULL;
     }
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&current_task[cpu]);
-#endif
     return current_task[cpu];
 }
 
@@ -822,9 +725,7 @@ void task_set_current(struct task *task)
 {
     uint32_t cpu = cpu_id();
     current_task[cpu] = task;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&current_task[cpu]);
-#endif
 }
 
 /*
@@ -920,18 +821,9 @@ void task_destroy(struct task *task)
      * naturally — collisions require 2^32 reuses of the same slot
      * between a push and a still-outstanding steal probe, which is
      * not reachable by a realistic workload.
-     *
-     * On non-NC platforms the bumped generation must be flushed to
-     * PoC for cross-CPU thieves to observe it; otherwise a thief on
-     * another CPU validating a captured generation against
-     * `task->generation` reads a stale cacheline and accepts a slot
-     * that was just recycled. NC platforms (Pi 5, Jetson) keep
-     * task_table in non-cacheable memory so the write is visible
-     * without maintenance. */
+     */
     task->generation++;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->generation);
-#endif
 
     TASK_UNLOCK_IRQRESTORE();
 
@@ -985,16 +877,12 @@ void task_set_affinity(struct task *task, uint32_t cpu)
     if (!task) return;
 
     task->cpu_affinity = cpu;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->cpu_affinity);
-#endif
 
     /* If pinning to a specific CPU, update assigned_cpu */
     if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
         task->assigned_cpu = cpu;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->assigned_cpu);
-#endif
     }
 }
 
@@ -1024,20 +912,16 @@ void task_set_priority(struct task *task, uint8_t priority)
     /* An explicit priority overrides the last AI decision (#1069). */
     task->ai_priority = TASK_AI_PRIORITY_NONE;
 #endif
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->priority);
 #ifdef CONFIG_AI_SCHEDULER
     cache_clean(&task->ai_priority);
-#endif
 #endif
 
     /* Update effective priority (may be boosted by deadline) */
     if (task->effective_priority < priority) {
         task->effective_priority = priority;
     }
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->effective_priority);
-#endif
 }
 
 /*
@@ -1065,9 +949,7 @@ void task_set_deadline(struct task *task, uint64_t deadline_ns)
 {
     if (!task) return;
     task->deadline_ns = deadline_ns;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->deadline_ns);
-#endif
 }
 
 /*

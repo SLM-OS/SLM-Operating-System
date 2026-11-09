@@ -1,35 +1,19 @@
 /*
- * ncmem.h - Non-cacheable shared memory allocator
+ * ncmem.h - Non-cacheable memory allocator for device DMA
  *
  * Pi 5 and Jetson reserve one 2 MB block of DRAM that vmm.c maps with
  * MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via an L2 table
- * entry. The physical address is platform-specific. Two separate uses
- * share it, with two macros:
+ * entry and pmm.c keeps out of the page allocator. The physical address
+ * is platform-specific. PLATFORM_HAS_NC_REGION marks the platforms that
+ * have it, and ncmem_alloc() hands out pieces of it.
  *
- *   PLATFORM_HAS_NC_REGION  The block exists, is mapped NC and reserved
- *                           from the PMM, and ncmem_alloc() hands out
- *                           pieces of it. Device DMA (xHCI rings, MACB,
- *                           CDC-ECM and USB bounce buffers, camera RCE)
- *                           and the fixed-address diagnostic slots use
- *                           it. Defined on Pi 5 and Jetson in every
- *                           build.
- *
- *   PLATFORM_HAS_NC_MEMORY  CPU-to-CPU shared state (run queues, task
- *                           table, current-task pointers, steal deques,
- *                           sched_diag_* counters, boot/init flags,
- *                           preemption state) lives in the block, and
- *                           the UART lock is IRQ-disable only. This is
- *                           the "NC axis" measured by #1193. Defined on
- *                           Pi 5 and Jetson unless the build passes
- *                           NC_AXIS=OFF (CMake defines NC_AXIS_OFF),
- *                           in which case every such user takes its
- *                           cacheable branch.
- *
- * The NC axis was introduced on the belief that the per-core L2 caches
- * are incoherent; the Cortex-A76 and Cortex-A78AE TRMs say they are
- * coherent in hardware and that the "SMPEN" bit SLM-OS checked does not
- * exist on these cores (docs/archive/coherency-gauntlet/c3-audit.md,
- * C0 facts Q1/Q4). NC_AXIS=OFF exists so that question can be measured.
+ * Its users are devices that do not snoop the CPU caches: xHCI rings,
+ * MACB, CDC-ECM and USB bounce buffers, camera RCE, plus the fixed-
+ * address diagnostic slots (diag_pi5.h). CPU-to-CPU shared state (run
+ * queues, task table, current-task pointers, steal deques, counters)
+ * lives in ordinary cacheable memory: the cores keep their caches
+ * coherent in hardware (docs/adr/0006-cross-cpu-coherency.md, #1193).
+ * Do not allocate CPU-shared state here.
  */
 
 #ifndef NCMEM_H
@@ -42,12 +26,6 @@
 
 /* The NC block and its allocator (see the header comment). */
 #define PLATFORM_HAS_NC_REGION 1
-
-/* CPU-to-CPU shared state in the NC block: use this macro in
- * scheduler/SMP code instead of platform-specific guards. */
-#if !defined(NC_AXIS_OFF)
-#define PLATFORM_HAS_NC_MEMORY 1
-#endif
 
 #if defined(PLATFORM_RASPI5)
 #define NC_MEM_BASE     0xFFE00000UL    /* Last 2MB of 4GB RAM */

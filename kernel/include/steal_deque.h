@@ -11,12 +11,9 @@
  * Every public function in this header is **lockless internally**.
  * The caller MUST hold the external per-CPU lock
  * `steal_deque_lock[cpu]` (cacheable `spinlock_t` array in
- * `kernel/sched/sched.c`) across the call. The deque struct itself
- * lives in NC memory on `PLATFORM_HAS_NC_MEMORY`, where an embedded
- * spinlock would either be barrier-only (historical Jetson, see
- * #166) or have its exclusive monitor fail silently on NC memory —
- * neither is safe cross-CPU. Keeping the lock in a separate
- * cacheable array sidesteps both hazards.
+ * `kernel/sched/sched.c`) across the call. An embedded spinlock was
+ * once barrier-only on Jetson (#166); keeping the lock in a separate
+ * cacheable array keeps the deque API lockless.
  *
  * The one exception is `steal_deque_init`: it is invoked during
  * `scheduler_init` before any CPU other than the boot CPU is online,

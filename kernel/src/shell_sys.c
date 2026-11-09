@@ -41,7 +41,6 @@
 #include "timdiag_pi5_probes.h"
 #include "slm_ffi.h"
 #include "platform.h"
-#include "ncmem.h"
 #include "dtb.h"
 #include "help.h"
 #include "sdhci.h"
@@ -358,24 +357,10 @@ int cmd_cpu(int argc, char *argv[])
 
     /* Per-CPU scheduler diagnostics */
     {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        extern volatile uint32_t *sched_diag_tick;
-        extern volatile uint32_t *sched_diag_schedule;
-        extern volatile uint32_t *sched_diag_picked;
-#else
-        extern volatile uint32_t sched_diag_tick[];
-        extern volatile uint32_t sched_diag_schedule[];
-        extern volatile uint32_t sched_diag_picked[];
-#endif
         extern volatile uint32_t timer_handler_count;
         shell_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
         shell_printf("  CPU  Ticks     Schedule  Picked    IdleLoops\r\n");
         shell_printf("  ---  --------  --------  ------    ---------\r\n");
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        extern volatile uint32_t *sched_diag_idle_loops;
-#else
-        extern volatile uint32_t sched_diag_idle_loops[];
-#endif
         shell_printf("  diag_tick ptr=0x%lx val[0]=0x%x\r\n",
                     (unsigned long)(uintptr_t)sched_diag_tick,
                     *(volatile uint32_t *)sched_diag_tick);
@@ -406,19 +391,6 @@ int cmd_cpu(int argc, char *argv[])
          * thief in sched_try_steal; helpful for tuning Phase C
          * benchmarks and deciding whether CONFIG_WORK_STEALING should
          * default to ON. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        extern volatile uint32_t *sched_diag_steal_attempts;
-        extern volatile uint32_t *sched_diag_steal_successes;
-        extern volatile uint32_t *sched_diag_steal_stale;
-        extern volatile uint32_t *sched_diag_steal_empty_victim;
-        extern volatile uint32_t *sched_diag_steal_push_full;
-#else
-        extern volatile uint32_t sched_diag_steal_attempts[];
-        extern volatile uint32_t sched_diag_steal_successes[];
-        extern volatile uint32_t sched_diag_steal_stale[];
-        extern volatile uint32_t sched_diag_steal_empty_victim[];
-        extern volatile uint32_t sched_diag_steal_push_full[];
-#endif
         shell_printf("\r\n  Per-CPU work-stealing counters:\r\n");
         shell_printf("  CPU  Attempts  Success   Stale     EmptyVic  PushFull\r\n");
         shell_printf("  ---  --------  --------  --------  --------  --------\r\n");
@@ -442,30 +414,8 @@ int cmd_cpu(int argc, char *argv[])
             shell_printf("  CPU 0 TTBR0: 0x%lx\r\n", (unsigned long)my_ttbr0);
             for (uint32_t i = 1; i < cpu_count; i++) {
                 uint32_t val = __atomic_load_n(&cpu_boot_flag[i], __ATOMIC_ACQUIRE);
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                volatile uint32_t *nc_dbg_addr = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + i * 4);
-                uint32_t nc_dbg = *nc_dbg_addr;
-                uint32_t nc_flag_read = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + i * 4);
-                shell_printf("  CPU %u boot: 0x%x  NC_DBG@%lx: 0x%x  NC_FLAG_READ: 0x%x\r\n",
-                            i, val, (unsigned long)nc_dbg_addr, nc_dbg, nc_flag_read);
-#else
                 shell_printf("  CPU %u boot: 0x%x\r\n", i, val);
-#endif
             }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            /* Write-readback test: CPU 0 writes to NC_DBG[0], reads back */
-            {
-                volatile uint32_t *test_addr = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256);
-                uint32_t before = *test_addr;
-                *test_addr = 0xDEAD;
-                uint32_t after = *test_addr;
-                *test_addr = before;  /* restore */
-                /* Also read nc_flag directly */
-                uint32_t nc_flag_val = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-                shell_printf("  NC test@%lx: before=0x%x wrote=0xDEAD read=0x%x nc_flag=%u\r\n",
-                            (unsigned long)test_addr, before, after, nc_flag_val);
-            }
-#endif
         }
 #endif
     }
@@ -1807,44 +1757,33 @@ static void bench_sched_stats(void)
 /* --- Deadline accuracy benchmark --- */
 
 /*
- * Cross-CPU result slots for bench deadline / isolate / smp (Pi 5,
- * Jetson). PLATFORM_HAS_NC_MEMORY puts them at fixed offsets near the
- * end of the NC block. Under NC_AXIS=OFF they are cacheable statics,
- * and BENCH_SLOT_FENCE() orders the data word before the done flag on
- * the writer and after it on the reader.
+ * Cross-CPU result slots for bench deadline / isolate / smp, which are
+ * built on Pi 5 and Jetson only. Cacheable statics; BENCH_SLOT_FENCE()
+ * orders the data word before the done flag on the writer and after it
+ * on the reader.
  */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-/* NC offsets for deadline bench: -384 from end of NC region */
-#define DL_NC_DONE   (NC_MEM_BASE + NC_MEM_SIZE - 384)
-#define DL_NC_TIME   (NC_MEM_BASE + NC_MEM_SIZE - 376)  /* 8 bytes for uint64_t */
-/* NC offsets for isolation bench: -400 from end of NC region */
-#define ISO_NC_DONE  (NC_MEM_BASE + NC_MEM_SIZE - 400)
-#define ISO_NC_CPU   (NC_MEM_BASE + NC_MEM_SIZE - 404)
-/* bench smp per-CPU done flags: -320 from end of NC region */
-#define SMP_DONE_SLOT(cpu) \
-    ((volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + (cpu) * 4))
-#define BENCH_SLOT_FENCE() do { } while (0)
-#elif defined(PLATFORM_HAS_NC_REGION)
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#define BENCH_CROSS_CPU 1
 static volatile uint32_t dl_done_wb;
 static volatile uint64_t dl_time_wb;
 static volatile uint32_t iso_done_wb;
 static volatile uint32_t iso_cpu_wb;
 static volatile uint32_t smp_done_wb[MAX_CPUS];
-#define DL_NC_DONE   ((uintptr_t)&dl_done_wb)
-#define DL_NC_TIME   ((uintptr_t)&dl_time_wb)
-#define ISO_NC_DONE  ((uintptr_t)&iso_done_wb)
-#define ISO_NC_CPU   ((uintptr_t)&iso_cpu_wb)
+#define DL_DONE   ((uintptr_t)&dl_done_wb)
+#define DL_TIME   ((uintptr_t)&dl_time_wb)
+#define ISO_DONE  ((uintptr_t)&iso_done_wb)
+#define ISO_CPU   ((uintptr_t)&iso_cpu_wb)
 #define SMP_DONE_SLOT(cpu) (&smp_done_wb[(cpu)])
 #define BENCH_SLOT_FENCE() __asm__ volatile("dmb ish" ::: "memory")
 #endif
 
-#if defined(PLATFORM_HAS_NC_REGION)
+#if defined(BENCH_CROSS_CPU)
 static void deadline_bench_task(void *arg)
 {
     (void)arg;
-    *(volatile uint64_t *)DL_NC_TIME = slm_get_time_ns();
+    *(volatile uint64_t *)DL_TIME = slm_get_time_ns();
     BENCH_SLOT_FENCE();
-    *(volatile uint32_t *)DL_NC_DONE = 1;
+    *(volatile uint32_t *)DL_DONE = 1;
 }
 #endif
 
@@ -1856,8 +1795,8 @@ static void bench_deadline_accuracy(void)
     shell_puts("  Testing deadline-boosted task dispatch latency:\r\n");
 
     for (int d = 0; d < num_deadlines; d++) {
-#if defined(PLATFORM_HAS_NC_REGION)
-        *(volatile uint32_t *)DL_NC_DONE = 0;
+#if defined(BENCH_CROSS_CPU)
+        *(volatile uint32_t *)DL_DONE = 0;
         uint64_t start_ns = slm_get_time_ns();
 
         struct task *t = task_create("dl_bench", deadline_bench_task, NULL);
@@ -1867,13 +1806,13 @@ static void bench_deadline_accuracy(void)
         scheduler_add_task(t);
 
         for (int wait = 0; wait < 1000000; wait++) {
-            if (*(volatile uint32_t *)DL_NC_DONE) break;
+            if (*(volatile uint32_t *)DL_DONE) break;
             for (volatile int x = 0; x < 100; x++) {}
         }
 
-        if (*(volatile uint32_t *)DL_NC_DONE) {
+        if (*(volatile uint32_t *)DL_DONE) {
             BENCH_SLOT_FENCE();
-            uint64_t end_ns = *(volatile uint64_t *)DL_NC_TIME;
+            uint64_t end_ns = *(volatile uint64_t *)DL_TIME;
             uint64_t latency_us = (end_ns - start_ns) / 1000;
             uint64_t deadline_us = deadlines_ms[d] * 1000;
             const char *met = (latency_us < deadline_us) ? "MET" : "MISSED";
@@ -1884,7 +1823,7 @@ static void bench_deadline_accuracy(void)
                         (unsigned long)deadlines_ms[d]);
         }
 #else
-        shell_printf("    Deadline %3lu ms: (NC memory required for cross-CPU)\r\n",
+        shell_printf("    Deadline %3lu ms: (Pi 5 / Jetson only)\r\n",
                     (unsigned long)deadlines_ms[d]);
 #endif
     }
@@ -1892,14 +1831,14 @@ static void bench_deadline_accuracy(void)
 
 /* --- Core isolation benchmark --- */
 
-/* Result slots: see DL_NC_DONE above. */
-#if defined(PLATFORM_HAS_NC_REGION)
+/* Result slots: see DL_DONE above. */
+#if defined(BENCH_CROSS_CPU)
 static void isolation_bench_task(void *arg)
 {
     (void)arg;
-    *(volatile uint32_t *)ISO_NC_CPU = cpu_id();
+    *(volatile uint32_t *)ISO_CPU = cpu_id();
     BENCH_SLOT_FENCE();
-    *(volatile uint32_t *)ISO_NC_DONE = 1;
+    *(volatile uint32_t *)ISO_DONE = 1;
 }
 #endif
 
@@ -1914,21 +1853,21 @@ static void bench_core_isolation(void)
     shell_puts("  Isolating CPU 2, dispatching 8 tasks:\r\n");
     sched_isolate_core(2);
 
-#if defined(PLATFORM_HAS_NC_REGION)
+#if defined(BENCH_CROSS_CPU)
     int cpu_hits[4] = {0, 0, 0, 0};
     for (int i = 0; i < 8; i++) {
-        *(volatile uint32_t *)ISO_NC_DONE = 0;
+        *(volatile uint32_t *)ISO_DONE = 0;
         struct task *t = task_create("iso_test", isolation_bench_task, NULL);
         if (!t) continue;
         scheduler_add_task(t);
 
         for (int wait = 0; wait < 500000; wait++) {
-            if (*(volatile uint32_t *)ISO_NC_DONE) break;
+            if (*(volatile uint32_t *)ISO_DONE) break;
             for (volatile int x = 0; x < 100; x++) {}
         }
-        if (*(volatile uint32_t *)ISO_NC_DONE) {
+        if (*(volatile uint32_t *)ISO_DONE) {
             BENCH_SLOT_FENCE();
-            uint32_t ran_on = *(volatile uint32_t *)ISO_NC_CPU;
+            uint32_t ran_on = *(volatile uint32_t *)ISO_CPU;
             if (ran_on < 4) cpu_hits[ran_on]++;
         }
     }
@@ -1938,7 +1877,7 @@ static void bench_core_isolation(void)
     shell_printf("    CPU 2 (isolated): %s\r\n",
                 cpu_hits[2] == 0 ? "PASS — no tasks dispatched" : "FAIL — tasks reached isolated core");
 #else
-    shell_puts("    (NC memory required for cross-CPU isolation test)\r\n");
+    shell_puts("    (cross-CPU isolation test: Pi 5 / Jetson only)\r\n");
 #endif
 
     sched_unisolate_core(2);
@@ -2002,10 +1941,9 @@ static void bench_shared_buffer(void)
 void smp_test_task(void *arg)
 {
     (void)arg;
-#if defined(PLATFORM_HAS_NC_REGION)
+#if defined(BENCH_CROSS_CPU)
     uint32_t target_cpu = (uint32_t)(uintptr_t)arg;
-    /* Per-CPU done flag (SMP_DONE_SLOT: NC block, or cacheable under
-     * NC_AXIS=OFF). */
+    /* Per-CPU done flag (SMP_DONE_SLOT). */
     *SMP_DONE_SLOT(target_cpu) = cpu_id() + 1;
 #endif
 }
@@ -2021,29 +1959,13 @@ void smp_test_task(void *arg)
  * run sequentially on CPU 1.
  *
  * Completion detection uses a *per-task* non-zero write — the driver
- * scans all N slots and counts non-zero entries. This avoids a
- * central atomic counter, which is unreliable on Pi 5's NC memory:
- * per ARM ARM and kernel/CLAUDE.md "NC memory atomic ops may fault
- * (implementation-defined per ARM ARM)". A per-slot single-writer
- * u32 store is guaranteed-visible on NC (no atomic needed) and is
- * benign under regular stores on cacheable BSS.
- *
- * Shared state is per-platform:
- *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson): NC memory at
- *     NC_MEM_BASE + NC_MEM_SIZE - 512, no cache maintenance needed.
- *   - Other (QEMU ARM64, x86-64): cacheable BSS arrays. Caches are
- *     coherent on these targets so cross-CPU visibility is
- *     automatic.
+ * scans all N slots and counts non-zero entries, so no central atomic
+ * counter is needed. The slots are cacheable BSS on every platform.
  */
 #define S3_MAX_TASKS 64
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-#define S3_SLOT_BASE_OFFSET   (NC_MEM_SIZE - 512)
-#define S3_SLOT_ADDR(i) ((volatile uint32_t *)(NC_MEM_BASE + S3_SLOT_BASE_OFFSET + (i) * 4))
-#else
 static volatile uint32_t s3_slots[S3_MAX_TASKS];
 #define S3_SLOT_ADDR(i) (&s3_slots[(i)])
-#endif
 
 static void s3_steal_work_task(void *arg)
 {
@@ -2059,9 +1981,7 @@ static void s3_steal_work_task(void *arg)
     (void)x;
 
     /* Single-writer release store: cpu_id()+1 into this task's slot.
-     * The driver treats non-zero == done. No atomic; NC memory on
-     * Pi 5 / Jetson would potentially fault an LSE op (per
-     * kernel/CLAUDE.md). */
+     * The driver treats non-zero == done. */
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
 }
 
@@ -2241,9 +2161,9 @@ int cmd_bench(int argc, char *argv[])
     } else if (strcmp(argv[1], "smp") == 0) {
         shell_puts("SMP Cross-CPU Dispatch Test\r\n");
         shell_puts("===========================\r\n");
-        /* Dispatch a task to each secondary CPU and verify it completes.
-         * Uses NC memory for done flags — instantly visible cross-CPU. */
-#if defined(PLATFORM_HAS_NC_REGION)
+        /* Dispatch a task to each secondary CPU and verify it completes
+         * through the SMP_DONE_SLOT flags. */
+#if defined(BENCH_CROSS_CPU)
         /* Zero the done flags — one slot per CPU (skip slot 0, unused). */
         for (uint32_t i = 0; i < cpu_count; i++) {
             *SMP_DONE_SLOT(i) = 0;
@@ -2260,11 +2180,11 @@ int cmd_bench(int argc, char *argv[])
                 shell_printf("  Dispatched '%s' to CPU %u\r\n", name, cpu);
             }
         }
-        /* Wait for all to complete (NC read — no CIVAC needed) */
+        /* Wait for all to complete */
         for (int wait = 0; wait < 500000; wait++) {
             int all_done = 1;
             for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-#if defined(PLATFORM_HAS_NC_REGION)
+#if defined(BENCH_CROSS_CPU)
                 if (!*SMP_DONE_SLOT(cpu))
                     { all_done = 0; break; }
 #endif
@@ -2273,12 +2193,12 @@ int cmd_bench(int argc, char *argv[])
             for (volatile int d = 0; d < 1000; d++) {}
         }
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-#if defined(PLATFORM_HAS_NC_REGION)
+#if defined(BENCH_CROSS_CPU)
             uint32_t result = *SMP_DONE_SLOT(cpu);
             shell_printf("  CPU %u: %s (ran on CPU %u)\r\n", cpu,
                         result ? "COMPLETED" : "TIMEOUT", result ? result - 1 : 0);
 #else
-            shell_printf("  CPU %u: (NC memory required)\r\n", cpu);
+            shell_printf("  CPU %u: (Pi 5 / Jetson only)\r\n", cpu);
 #endif
         }
     } else if (strcmp(argv[1], "deadline") == 0) {
@@ -2369,15 +2289,6 @@ int cmd_bench(int argc, char *argv[])
         uint32_t pre_attempts[MAX_CPUS] = {0};
         uint32_t pre_successes[MAX_CPUS] = {0};
         uint32_t pre_push_full[MAX_CPUS] = {0};
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        extern volatile uint32_t *sched_diag_steal_attempts;
-        extern volatile uint32_t *sched_diag_steal_successes;
-        extern volatile uint32_t *sched_diag_steal_push_full;
-#else
-        extern volatile uint32_t sched_diag_steal_attempts[];
-        extern volatile uint32_t sched_diag_steal_successes[];
-        extern volatile uint32_t sched_diag_steal_push_full[];
-#endif
         for (uint32_t c = 0; c < cpu_count; c++) {
             pre_attempts[c] = sched_diag_steal_attempts[c];
             pre_successes[c] = sched_diag_steal_successes[c];
@@ -12547,15 +12458,7 @@ static int thermal_uart_out(const char *fmt, ...)
 /* Per-CPU liveness for the log line: timer ticks taken, schedule()
  * calls and the running task. A CPU whose ticks stop advancing is
  * spinning with IRQs masked; one whose ticks advance while the same
- * task stays current is stuck at task level. NC-backed counters
- * (sched.c) so another CPU reads them coherently. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-extern volatile uint32_t *sched_diag_tick;
-extern volatile uint32_t *sched_diag_schedule;
-#else
-extern volatile uint32_t sched_diag_tick[];
-extern volatile uint32_t sched_diag_schedule[];
-#endif
+ * task stays current is stuck at task level. */
 
 static void thermal_print_cpus(void)
 {

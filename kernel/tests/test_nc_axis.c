@@ -1,16 +1,16 @@
 /*
  * test_nc_axis.c - Where CPU-shared scheduler state lives (#1193)
  *
- * The NC_AXIS build switch decides whether run queues, the task table,
- * the current-task pointers, the sched_diag_* counters and the
- * SECONDARY_PREEMPT state live in the 2 MB Normal Non-Cacheable block
- * (PLATFORM_HAS_NC_MEMORY, default on Pi 5 and Jetson) or in cacheable
- * Normal Write-Back Inner Shareable memory (NC_AXIS=OFF, and always on
- * QEMU). These tests walk the live translation tables and check the
- * MAIR attribute index, shareability and physical address of each
- * structure, so a build that silently keeps (or loses) the NC placement
- * fails here. They also check that the NC block itself stays mapped NC
- * for device DMA in every Pi 5 / Jetson build.
+ * Run queues, the task table, the current-task pointers, the
+ * sched_diag_* counters and the SECONDARY_PREEMPT state live in
+ * cacheable Normal Write-Back Inner Shareable memory on every platform;
+ * the "NC axis" that once put them in the 2 MB Normal Non-Cacheable
+ * block on Pi 5 and Jetson is gone (docs/adr/0006-cross-cpu-coherency.md).
+ * These tests walk the live translation tables and check the MAIR
+ * attribute index, shareability and physical address of each structure,
+ * so a change that moves one back into the NC block fails here. They
+ * also check that the NC block itself stays mapped NC for device DMA on
+ * Pi 5 and Jetson.
  */
 
 #include "unity.h"
@@ -28,27 +28,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Compile-time consistency of the switch. */
-#if defined(NC_AXIS_OFF) && defined(PLATFORM_HAS_NC_MEMORY)
-#error "NC_AXIS_OFF must leave PLATFORM_HAS_NC_MEMORY undefined"
-#endif
-#if defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_HAS_NC_REGION)
-#error "PLATFORM_HAS_NC_MEMORY needs the NC region"
-#endif
-#if defined(NC_AXIS_OFF) && defined(SPINLOCK_DRAM_FLUSH)
-#error "NC_AXIS_OFF must drop the Pi 5 spinlock DC CIVAC path"
+/* The NC axis and its Pi 5 spinlock DC CIVAC path stay removed. */
+#if defined(PLATFORM_HAS_NC_MEMORY) || defined(NC_AXIS_OFF) || \
+    defined(SPINLOCK_DRAM_FLUSH)
+#error "the CPU-sharing NC axis was removed (#1193); keep shared state cacheable"
 #endif
 #if (defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)) && \
     !defined(PLATFORM_HAS_NC_REGION)
 #error "Pi 5 and Jetson always have the NC region (device DMA)"
 #endif
 
-/* sched.c defines these as NC pointers or as BSS arrays. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-extern volatile uint32_t *sched_diag_tick;
-#else
-extern volatile uint32_t sched_diag_tick[];
-#endif
+/* sched_diag.h declares the counters as arrays (no NC pointer form). */
+_Static_assert(sizeof(sched_diag_tick) == MAX_CPUS * sizeof(uint32_t),
+               "sched_diag_tick must be a MAX_CPUS array");
 
 #define DESC_VALID      0x1UL
 #define DESC_TABLE      0x2UL           /* bit 1 at L1/L2: table, at L3: page */
@@ -100,23 +92,17 @@ static bool pa_in_nc_block(uint64_t pa)
 }
 
 /*
- * Assert the placement the build asks for: the NC block with MAIR index
- * 2 under PLATFORM_HAS_NC_MEMORY, otherwise cacheable WB (index 3),
- * Inner Shareable, outside the NC block.
+ * Assert cacheable WB placement (MAIR index 3), Inner Shareable, outside
+ * the NC block.
  */
 static void assert_cpu_shared_placement(const volatile void *p, const char *what)
 {
     struct leaf l = walk((uint64_t)(uintptr_t)p);
 
     TEST_ASSERT_MESSAGE(l.desc != 0, what);
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(DESC_ATTR(l.desc) == MAIR_IDX_NORMAL_NC, what);
-    TEST_ASSERT_TRUE_MESSAGE(pa_in_nc_block(l.pa), what);
-#else
     TEST_ASSERT_MESSAGE(DESC_ATTR(l.desc) == MAIR_IDX_NORMAL_WB, what);
     TEST_ASSERT_MESSAGE(DESC_SH(l.desc) == PTE_SH_INNER, what);
     TEST_ASSERT_FALSE_MESSAGE(pa_in_nc_block(l.pa), what);
-#endif
 }
 
 /* The walker itself: a known cacheable kernel symbol and the NC block. */
@@ -182,7 +168,7 @@ static void test_preempt_state_placement(void)
 #endif
 }
 
-/* Device DMA keeps the NC allocator in every Pi 5 / Jetson build. */
+/* Device DMA keeps the NC allocator on Pi 5 and Jetson. */
 static void test_nc_region_serves_dma(void)
 {
 #if defined(PLATFORM_HAS_NC_REGION)
@@ -199,11 +185,7 @@ static void test_nc_region_serves_dma(void)
 int test_suite_nc_axis(void)
 {
     UnityBegin("test_nc_axis.c");
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    uart_puts("  [nc_axis] PLATFORM_HAS_NC_MEMORY: CPU-shared state in the NC block\n");
-#else
     uart_puts("  [nc_axis] CPU-shared state in cacheable memory\n");
-#endif
     RUN_TEST(test_walker_finds_kernel_and_nc_block);
     RUN_TEST(test_run_queues_placement);
     RUN_TEST(test_task_table_placement);

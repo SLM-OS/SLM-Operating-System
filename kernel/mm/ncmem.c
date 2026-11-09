@@ -1,12 +1,10 @@
 /*
  * ncmem.c - Non-cacheable shared memory bump allocator
  *
- * Provides permanent, boot-time allocations from the 2MB NC region.
- * Memory is never freed — these are kernel-lifetime structures like
- * scheduler run queues and cross-CPU boot flags.
+ * Provides permanent, boot-time allocations from the 2MB NC region for
+ * device DMA buffers (see ncmem.h). Memory is never freed.
  *
- * Works on any platform with PLATFORM_HAS_NC_REGION (Pi 5, Jetson),
- * including NC_AXIS=OFF builds: device DMA still allocates here.
+ * Works on any platform with PLATFORM_HAS_NC_REGION (Pi 5, Jetson).
  */
 
 #include "ncmem.h"

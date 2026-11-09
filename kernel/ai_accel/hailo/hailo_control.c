@@ -295,9 +295,9 @@ static void control_msi_handler(void *ctx)
      * ctx); the trace consumer can identify by mech=IRQ + phase.
      *
      * IRQ-context UART note: hailo_trace_emit_irq calls uart_printf,
-     * which on Pi 5 / Jetson uses an IRQ-disable-only lock (no
-     * cross-CPU spinlock — see kernel/CLAUDE.md "UART Lock on Pi 5
-     * / Jetson"), so this is safe to call from the MSI handler. The
+     * which takes the IRQ-saving UART spinlock (kernel/CLAUDE.md
+     * "UART Lock"). A holder on this CPU has IRQs masked, so the MSI
+     * handler never interrupts it, and this is safe to call here. The
      * emit blocks for the duration of the serial drain (~hundreds
      * of bytes at 115200 baud = several ms) and lengthens the ISR
      * accordingly — acceptable for diagnostics, not for production. */

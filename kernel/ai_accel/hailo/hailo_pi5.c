@@ -440,9 +440,8 @@ static void pi5_udelay(uint32_t usec)
  * concurrent callers and, more importantly, closes the window where
  * two CPUs could both observe `user_irq_handler == NULL` in the
  * bind-once check and both proceed to register. The trampoline
- * itself reads the globals unlocked (spinlocks aren't safe from
- * ISR context on this platform — see `UART Lock on Pi 5 / Jetson`
- * note in kernel/CLAUDE.md). The ordering that makes the unlocked
+ * itself reads the globals unlocked, so it never spins in ISR
+ * context. The ordering that makes the unlocked
  * read safe is: (1) writers hold irq_lock; (2) writers DSB SY
  * before pcie_bind_irq_handler enables the GIC line; (3) GIC enable
  * is the edge that lets the IRQ fire. The trampoline therefore only
