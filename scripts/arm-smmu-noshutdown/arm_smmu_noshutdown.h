@@ -14,7 +14,7 @@
  * buffer SLM-OS's xHCI driver hands to the controller (DCBAA,
  * scratchpads, command/event ring TRBs, ERST) comes out of this
  * range via `ncmem_alloc`. See SLM-OS kernel/mm/vmm.c and
- * kernel/CLAUDE.md "Non-Cacheable Shared Memory" for why the region
+ * kernel/CLAUDE.md "Non-Cacheable DMA Memory" for why the region
  * is where it is.
  *
  * An identity mapping covering these 2 MB on the xusb stream's

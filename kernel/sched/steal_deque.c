@@ -13,9 +13,8 @@
  *   - All entry points are **lockless internally** — the caller is
  *     responsible for serializing access. sched.c holds
  *     `steal_deque_lock[cpu]` (cacheable) across every push / pop /
- *     steal / remove. The deque itself lives in NC memory on
- *     PLATFORM_HAS_NC_MEMORY, where an embedded spinlock would be
- *     neutered by SPINLOCK_SKIP_LOCKING.
+ *     steal / remove. (An embedded spinlock was once neutered by
+ *     SPINLOCK_SKIP_LOCKING on Jetson, #166.)
  */
 
 #include "steal_deque.h"

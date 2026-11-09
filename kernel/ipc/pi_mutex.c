@@ -11,7 +11,6 @@
 #include "debug.h"
 #include "smp.h"
 #include "cache.h"
-#include "ncmem.h"              /* PLATFORM_HAS_NC_MEMORY */
 
 /* Statistics */
 static volatile uint32_t total_inversions = 0;
@@ -44,9 +43,7 @@ void pi_mutex_init(pi_mutex_t *mutex)
 static void note_mutex_acquired(struct task *task)
 {
     task->pi_mutexes_held++;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->pi_mutexes_held);
-#endif
 }
 
 /*
@@ -64,14 +61,10 @@ static bool raise_inherited_priority(struct task *task, uint8_t priority)
     bool raised = false;
     irq_flags_t flags = spin_lock_irqsave(&pi_floor.lock);
 
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->pi_priority);
-#endif
     if (priority > task->pi_priority) {
         task->pi_priority = priority;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->pi_priority);
-#endif
         raised = true;
     }
 
@@ -105,9 +98,7 @@ static bool try_boost_owner(pi_mutex_t *mutex, struct task *caller)
              caller->name, caller->effective_priority);
 
         owner->effective_priority = caller->effective_priority;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&owner->effective_priority);
-#endif
         total_inversions++;
         last_inversion_flag = 1;
         changed = true;
@@ -239,10 +230,8 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
                      owner->name, boosted, owner->effective_priority);
             }
         }
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&owner->pi_mutexes_held);
         cache_clean(&owner->pi_priority);
-#endif
     }
 
     /* Pick the highest-priority waiter from the wait queue. Walk the

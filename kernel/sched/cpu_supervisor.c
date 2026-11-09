@@ -52,9 +52,9 @@
 #include <stdbool.h>
 
 /* sched_diag_idle_loops is declared in sched_diag.h (via sched.h), which
- * matches sched.c's definition in both NC_AXIS configurations (#1193:
- * a pointer extern here against the NC_AXIS=OFF array faulted on Pi 5).
- * cpu_boot_flag and secondary_entry are declared in smp.h. */
+ * matches sched.c's definition (#1193: a local pointer extern here
+ * against the array faulted on Pi 5). cpu_boot_flag and secondary_entry
+ * are declared in smp.h. */
 
 /* PSCI return codes used here. psci_call returns the raw int; we
  * don't import the full enum. PSCI_ALREADY_ON is the discriminant
@@ -147,7 +147,7 @@ int cpu_supervisor_resurrect(uint32_t cpu)
 
     /* (3) Reset diag counters so the dormancy detector starts fresh
      * after the resurrection attempt. */
-    if (SCHED_DIAG_READY(sched_diag_idle_loops)) sched_diag_idle_loops[cpu] = 0;
+    sched_diag_idle_loops[cpu] = 0;
     last_idle_loops[cpu] = 0;
     frozen_samples[cpu]  = 0;
 
@@ -236,8 +236,6 @@ void cpu_supervisor_get_stats(struct cpu_supervisor_stats *out)
  */
 static void supervisor_tick(void)
 {
-    if (!SCHED_DIAG_READY(sched_diag_idle_loops)) return;
-
     for (uint32_t c = 1; c < cpu_count; c++) {
         uint32_t cur = sched_diag_idle_loops[c];
         if (cur != last_idle_loops[c]) {
@@ -272,11 +270,9 @@ static void cpu_supervisor_task_entry(void *arg)
 {
     (void)arg;
     /* Seed `last_idle_loops` so the first sample doesn't insta-trip. */
-    if (SCHED_DIAG_READY(sched_diag_idle_loops)) {
-        for (uint32_t c = 0; c < MAX_CPUS; c++) {
-            last_idle_loops[c] = sched_diag_idle_loops[c];
-            frozen_samples[c]  = 0;
-        }
+    for (uint32_t c = 0; c < MAX_CPUS; c++) {
+        last_idle_loops[c] = sched_diag_idle_loops[c];
+        frozen_samples[c]  = 0;
     }
 
     while (true) {

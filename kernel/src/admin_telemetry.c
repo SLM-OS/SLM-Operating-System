@@ -270,22 +270,10 @@ void admin_telemetry_reset_inference(void)
  * not publish — deltas are meaningless on the first sample. Subsequent
  * calls publish the per-CPU and aggregate-eviction deltas.
  *
- * sched_diag_* counters live in NC memory on PLATFORM_HAS_NC_MEMORY
- * (Pi 5, Jetson) and in BSS otherwise. The pointer-vs-array distinction
- * doesn't matter at the indexing site (both index uniformly), but the
- * extern declarations have to match the underlying definition or the
- * linker quietly resolves the wrong type. Mirrors the existing pattern
- * in kernel/src/shell_sys.c.
+ * The sched_diag_* counters are MAX_CPUS arrays defined in sched.c
+ * (sized declarations in sched_diag.h); the unsized externs below are
+ * compatible with them.
  */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-extern volatile uint32_t *sched_diag_picked;
-extern volatile uint32_t *sched_diag_idle_loops;
-extern volatile uint32_t *sched_diag_steal_attempts;
-extern volatile uint32_t *sched_diag_steal_successes;
-extern volatile uint32_t *sched_diag_steal_stale;
-extern volatile uint32_t *sched_diag_steal_empty_victim;
-extern volatile uint32_t *sched_diag_steal_push_full;
-#else
 extern volatile uint32_t sched_diag_picked[];
 extern volatile uint32_t sched_diag_idle_loops[];
 extern volatile uint32_t sched_diag_steal_attempts[];
@@ -293,7 +281,6 @@ extern volatile uint32_t sched_diag_steal_successes[];
 extern volatile uint32_t sched_diag_steal_stale[];
 extern volatile uint32_t sched_diag_steal_empty_victim[];
 extern volatile uint32_t sched_diag_steal_push_full[];
-#endif
 
 static uint32_t g_periodic_last_pump_ms;
 static bool     g_periodic_baseline;
