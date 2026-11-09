@@ -646,6 +646,31 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
 - This closes "no removal integration on Jetson". It does not close the
   steal stall (#1203) or the boot shortfall on the pre-rebase build.
 
+### Extension step 1, Pi 5, rebased (s1-pi5, 09:40 UTC; new rows, pre-rebase rows above unchanged)
+
+| Pi 5 | pre-rebase removal (072bd707 / f546a126) | rebased removal af8d01ba (R / RT) | NC on main 85f51ffd (NT) |
+|---|---|---|---|
+| slmos.bin | 7701d4a1 / ef920293 | 7a8ce887 / 31f63e62 | test 2bea2457 |
+| Litmus (rev 3) | PASS | PASS, 4.2 s; S1 679,406, S2 0, weak 0, min straddles 100,003 | n.a. (no suite on main) |
+| Neg a / b / c | 0 / P2 12 + P4 5 timeouts / stale 12288 | 0 / P2 12 + P4 4 timeouts / stale 12288 | n.a. |
+| bench smp | complete x3 | complete x3 | n.a. |
+| bench stealing (us) | 16312 / 13020 / 13021 / 12934 / 17958, median 13021 | **16146 / 19505 / 18173 / 14911 / 13533, median 16146** | NC (9a13b9ee) median 15715 |
+| Boots | 10/10 (round trip) | **10/10 by labctl boot_test** | n.a. |
+| Test kernel boots | 11 | **10 by boot_test** | **10 by boot_test** |
+| Coherency / nc_axis / integration | 26/26 / 7/7 / 16/16 | 26/26 / 7/7 / 16/16 every boot | 19/19 every boot |
+| Failures beyond the 18 #1109 | #1202 in 1 of 11 | **#1202 in 4 of 10 (B02, B03, B08, B10); #1205 in 1 of 10 (B02)** | **none in 10 of 10** |
+
+- #1195 did not recur in 33 Pi 5 boots; labctl boot_test worked unaided.
+- **Pi 5 NC-series condition (user, extension): failures do not match.**
+  #1202: removal 5 of 21 boots, NC 0 of 11. New failure #1205
+  (`test_component_cleanup_ctx_is_per_task`, 1000-yield bound), removal
+  only. Per the user's rule, no Pi 5 draft PR. Untested hypothesis for both:
+  yield-count-bounded waits expire about 22x sooner in wall time once a
+  context switch drops from 2318 to 105 ns.
+- **Changed measurement: Pi 5 removal stealing median 16146 us after the
+  rebase against 13021 before (NC 15715).** Sent to a critic round, not
+  footnoted. Pi 5 stealing is bimodal by task split (C3 critic round 1).
+
 ### Lab notes
 
 - 23:18 UTC: both claims renewed to 05:18 UTC. 01:51 UTC: renewed to 09:51 UTC.
