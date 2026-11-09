@@ -484,6 +484,17 @@ gate (step 3), together with the rest of the instruction.
   cut by the capture); on kexec all 5 runs CPU 2/3 executed 1-3 tasks.
   context 102 / 67 / 66 ns (NC 18008), ipc 154 / 90 / 90 ns, smp 5/5 x3.
   UEFI boots 3/3 so far. f546a126 test kernel not run on Jetson.
+- **Correction (C3 critic, 07:41 UTC): the builder's "CPUs 2 and 3 steal"
+  was selective. In removal UEFI stealing runs 4-5 (the only ones with
+  per-CPU lines), CPU 4 executed 0 tasks, 12 attempts, 0 successes. The
+  CPU-dependent steal stall is present in both cacheable builds (CPUs 2-3
+  under NC_AXIS=OFF, CPU 4 under the removal); in the NC baseline runs
+  every CPU succeeded at least once. Removal UEFI litmus file is a
+  hand-written summary for P1, P2, P3, P5 rows, not raw.** Log-verified
+  removal boots: kexec 4 of 7, UEFI 2 of 3.
+- C3 round 1, Jetson update: FAIL against the removal bar (boots, no
+  integration, non-raw UEFI litmus, steal stall, D6). Coherence evidence
+  good on both paths.
 - Jetson NC_AXIS=OFF priority 1 complete: kexec and UEFI all checks PASS,
   10/10 boots on each path; default build kexec litmus PASS. Removal build
   boots, test kernel and UEFI-direct run in progress.
