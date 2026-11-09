@@ -1,0 +1,27 @@
+# jetson-nano-2, UEFI-direct, rebased removal branch @ af8d01ba
+# RR: make kernel PLATFORM=JETSON_ORIN_NANO; slmos.bin sha256 dc7c1584fbc15d933f6ea1ff9c33c05a39494bbc33531c82fea07a897df7abbe
+#   (\EFI\SLMOS\SLMOS.efi on the NVMe ESP, written once at 10:10 UTC)
+# 10 boots reaching slmos>. labctl boot_test cannot set efibootmgr --bootnext from SD Linux, so this hand loop
+# replaces it. Method per boot: (boot 1) board already in SD Linux; (boots 2-10) labctl power_cycle (15 s).
+# Then a background job waited for SD Linux ssh, waited 10 s, ran fsck.vfat -n (clean every time: 6 files,
+# 2228/130892 clusters) and a read-only mount sha256 of SLMOS.efi (= dc7c1584... every time), set
+# efibootmgr --bootnext 000E and rebooted; the labctl serial_capture was started right after the job was
+# launched, before the reboot (until "slmos>|not visible|PANIC|Unhandled Exception|Synchronous Exception",
+# tail=3). A boot counts only when that capture stopped on "slmos>". Captured tails were identical every time:
+# "Type 'help' for available commands." / "" / "slmos>". (The board's own clock printed a stale time in the
+# "rebooting" line; times below are host UTC when the reboot was issued.)
+#
+# boot  ssh up    reboot issued  capture
+#  1    (up)      10:10:43       3 lines in 70.4 s, matched slmos>   (also the session boot for regs/litmus/perf)
+#  2    10:16:56  10:17:07       3 lines in 120.4 s, matched slmos>
+#  3    10:19:33  10:19:45       3 lines in 119.5 s, matched slmos>
+#  4    10:22:14  10:22:26       3 lines in 120.7 s, matched slmos>
+#  5    10:24:55  10:25:06       3 lines in 116.5 s, matched slmos>
+#  6    10:27:32  10:27:43       3 lines in 122.4 s, matched slmos>
+#  7    10:30:08  10:30:20       3 lines in 123.6 s, matched slmos>
+#  8    10:32:45  10:32:56       3 lines in 123.6 s, matched slmos>
+#  9    10:35:21  10:35:33       3 lines in 123.3 s, matched slmos>
+# 10    10:37:59  10:38:11       3 lines in 124.4 s, matched slmos>
+#
+# Result: 10/10 log-verified boots reached slmos>; none stopped on "not visible", PANIC or an exception.
+# No uncaptured boots in this series.
