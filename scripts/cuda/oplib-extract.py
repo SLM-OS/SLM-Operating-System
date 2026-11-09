@@ -75,8 +75,15 @@ OPS = {
     "slm_gqa_q8": ("gqa", "SIMT", "FP16", "nhq,B,1",
                    "As slm_gqa_w8, out in q8_1 rows of nhq*hd for SLM_MM_XQ."),
     "slm_gqa_w8": ("gqa", "SIMT", "FP16", "nhq,B,1",
-                   "As slm_gqa, positions split across 8 warps. Prefer this one."),
-    "slm_rmsnorm_w8": ("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
+                   "As slm_gqa, positions split across 8 warps. Prefer this one where "
+                   "slm_gqa_hmma_dec/_pf do not apply (hd != 128 or nhq not a multiple of nhkv)."),
+    "slm_gqa_hmma_dec": ("gqa", "HMMA", "FP16", "nhkv,hd/16,1",
+                         "As slm_gqa_w8 with Q.K^T and P.V on HMMA. hd == 128, "
+                         "B * (nhq/nhkv) <= 16. Prefer this one for decode (#1167)."),
+    "slm_gqa_hmma_pf": ("gqa", "HMMA", "FP16", "nhkv,ceil(ceil(B*nhq/nhkv/16)/4),1",
+                        "As slm_gqa_w8 with Q.K^T and P.V on HMMA. hd == 128, any B. "
+                        "Prefer this one for prefill (#1167)."),
+    "slm_rmsnorm_w8":("rmsnorm", "SIMT", "F32 gamma", "B,1,1",
                        "As slm_rmsnorm, across 8 warps. Prefer this one."),
 }
 
@@ -89,6 +96,8 @@ BLOCKS = {
     "slm_rmsnorm_q8": [32, 8, 1],
     "slm_swiglu_q8": [256, 1, 1],
     "slm_gqa_q8": [32, 8, 1],
+    "slm_gqa_hmma_dec": [32, 8, 1],
+    "slm_gqa_hmma_pf": [32, 4, 1],
     # nw is chosen per shape at launch, 1 is the minimum.
     "slm_mm_q4k_hmma_b1": [32, "nw", 1],
     "slm_mm_q6k_hmma_b1": [32, "nw", 1],
@@ -116,6 +125,8 @@ ARGS = {
     "slm_rmsnorm_q8": "x, gamma, out, n, B, eps",
     "slm_swiglu_q8": "gate, up, out, total, n",
     "slm_gqa_q8": "q, k, v, pos, out, nhq, nhkv, hd, B",
+    "slm_gqa_hmma_dec": "q, k, v, pos, out, nhq, nhkv, hd, B",
+    "slm_gqa_hmma_pf": "q, k, v, pos, out, nhq, nhkv, hd, B",
 }
 
 

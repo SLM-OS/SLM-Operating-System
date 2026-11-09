@@ -930,6 +930,15 @@ hailo-clean:
 test-jetson-uefi-layout:
 	@bash scripts/test-jetson-uefi-layout.sh
 
+# HMMA grouped-query attention (#1167, scripts/cuda/slm/slm_gqa_hmma.cu): the
+# kernel source runs lane by lane on the host against the exact reference,
+# three deliberate mutants must fail, and with nvcc the cubin must be
+# launchable by SLM-OS. No GPU needed. GQA_EMU_ARGS=--quick limits it to
+# KV lengths up to 600 (about a minute instead of about fifteen).
+.PHONY: test-gqa-emu
+test-gqa-emu:
+	@bash scripts/cuda/harness/gqa-emu-test.sh $(GQA_EMU_ARGS)
+
 # UEFI-direct boot under QEMU's AArch64 UEFI firmware (#26). Boots the
 # QEMU_VIRT PE image (build/kernel/slmos.bin) from a FAT ESP twice:
 #   1. as built — firmware honours ImageBase (= link address);
@@ -1835,6 +1844,7 @@ help:
 	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
 	@echo "  oplib-shaders         Build every *_shader.sass and the SLM op table (requires CUDA Toolkit)"
 	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
+	@echo "  test-gqa-emu          HMMA GQA kernel lane by lane on the host, plus mutants (GQA_EMU_ARGS=--quick)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

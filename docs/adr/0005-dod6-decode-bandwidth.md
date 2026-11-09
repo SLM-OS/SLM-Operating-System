@@ -15,7 +15,7 @@ The bandwidth figure is derived: plan bytes per decode pass (weights plus KV at 
 - A fixed 50 percent bandwidth target: rejected. SLM-OS measures 48.1 percent; the reference reaches about 41 percent, so 50 percent would ask for more than parity, which is the bar of ADR 0001.
 - Keep 60 percent: rejected; no implementation meets it in single-stream decode, and llama.cpp measures 0.2 to 0.9 percent.
 - Redefine utilization as the share of MACs on tensor cores: rejected; it reads about 98 percent and says nothing about speed.
-- Move GQA to HMMA: rejected for now. At batch 1 it is a memory-bound vector operation over the KV cache, about 0.5 percent of the multiply work.
+- Move GQA to HMMA: rejected at first as about 0.5 percent of the multiply work. Done later (#1167), because the cost was latency, not multiplies: with the six query heads of a KV head in one tile, decode takes 14 against 33 us per layer at KV 64 and 54 against 619 at KV 2048, and 64-row prefill 24 against 226 us at KV 64. This item is unchanged by it.
 
 ## Consequences
 

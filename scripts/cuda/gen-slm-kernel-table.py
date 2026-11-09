@@ -41,6 +41,11 @@ SLM_SASS = {
                  ("hd", 0x184), ("B", 0x188)],
     "slm_gqa_w8": [("q", 0x160), ("k", 0x168), ("v", 0x170), ("pos", 0x178), ("out", 0x180),
                 ("nhq", 0x188), ("nhkv", 0x18C), ("hd", 0x190), ("B", 0x194)],
+    # #1167: the HMMA GQA pair, same arguments as slm_gqa_w8.
+    "slm_gqa_hmma_dec": [("q", 0x160), ("k", 0x168), ("v", 0x170), ("pos", 0x178), ("out", 0x180),
+                         ("nhq", 0x188), ("nhkv", 0x18C), ("hd", 0x190), ("B", 0x194)],
+    "slm_gqa_hmma_pf": [("q", 0x160), ("k", 0x168), ("v", 0x170), ("pos", 0x178), ("out", 0x180),
+                        ("nhq", 0x188), ("nhkv", 0x18C), ("hd", 0x190), ("B", 0x194)],
 }
 
 
