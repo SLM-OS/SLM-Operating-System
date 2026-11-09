@@ -9,7 +9,8 @@ Boards: jetson-nano-2 and pi-5-1 only.
 
 ## Budget
 
-- Started: 2026-11-08 22:15 UTC. Limit: 12 h (2026-11-09 10:15 UTC). At most
+- Started: 2026-11-08 22:15 UTC. Limit: 12 h (2026-11-09 10:15 UTC), extended
+  by the user to 2026-11-09 14:15 UTC (below). At most
   5 critic rounds per component.
 - Stop and report if the same failure recurs twice without a new strategy,
   two critic rounds in a row show no measurable gain, progress needs Jetson
@@ -74,6 +75,49 @@ Orchestrator note: the new ADR file is created as
 `docs/adr/0007-cross-cpu-coherency.md` from the start, since 0006 is taken
 on main; the existing 0006 references on the branches are renumbered at the
 gate (step 3), together with the rest of the instruction.
+
+### Budget extension from the user (recorded verbatim, 2026-11-09 ~08:00 UTC)
+
+```
+Budget extension: the 12 h limit moves to 2026-11-09 14:15 UTC
+(06:15 PT). Stop rules are unchanged. Renew both board claims before
+09:51 UTC and again before any gap.
+
+Scope of the extension, in order, nothing else:
+1. Finish the standing instruction's gate steps on the rebased
+   branches: rebase, the two conflict resolutions, ADR 0007
+   renumbering, /ci, then boot_test --count 10 on Pi 5 and on
+   Jetson kexec and UEFI-direct with the suites named there.
+2. Run the f546a126 removal test kernel on Jetson on both boot paths;
+   it was built and never run, and it is the missing Jetson
+   integration evidence. Capture raw UART, not summaries.
+3. Give C2 its own critic round on the revision 3 litmus suite and the
+   negative control, using the raw captures from steps 1 and 2.
+4. Do not investigate the CPU-dependent steal stall or the 2x slower
+   cross-cluster litmus rows. File each as its own issue with the
+   per-CPU raw data and link them to #1193; they are the next run's
+   work.
+5. The decision stays as ADR 0007 states it: Pi 5 removal, Jetson
+   undecided. If a draft PR is opened, it removes the axis for Pi 5
+   and leaves Jetson on NC memory behind the existing macro, with the
+   steal-stall issue cited as the reason. No redefinition of the
+   removal bar to reach a Jetson decision in this run.
+6. If the extension ends before step 1 completes, push the rebased
+   branches, state in the log what was and was not re-run, and do not
+   open the PR.
+```
+
+User answers to two orchestrator questions (same time):
+
+- ADR 0007 as passed says the Pi 5 removal is pending (integration "match"
+  criterion unmet: #1202 against a single NC test-kernel boot). Answer:
+  "Add NC 10-boot series": a 10-boot NC test-kernel series on Pi 5 after
+  step 2; if its failures match the removal's, the criterion is met and a
+  Pi 5-only draft PR may open; otherwise no PR. ADR text unchanged.
+- Step 2 timing: "Run in the idle window": step 2 runs on Jetson while the
+  rebase and /ci run.
+
+Claims renewed at 07:59 UTC to 13:59 UTC.
 
 ## State found at start (main @ c69438a2)
 
@@ -544,6 +588,29 @@ gate (step 3), together with the rest of the instruction.
   CPU. Cause undetermined (timing bound or lost visibility); filed #1202.**
   W2 and W9 captures began mid-run. Every whole-run boot logs 98 to 117
   dormancy-enter / ALREADY_ON wedge pairs, as in the NC builds (116, 115).
+
+### Gate steps 1-3 and /ci (rebase builder, 08:22 UTC)
+
+- Rebased onto origin/main 85f51ffd: coherency-remove-nc-axis bf5f8fb3 to
+  af8d01ba (ADR commit on rebased 4d6b0674), c3-hw-1193 10f8688e to
+  4367c899, gauntlet/coherency-1193 d4f3553a to 3cc11bdd. `--rebase-merges`
+  was aborted (it reran internal merges without their resolutions and
+  reverted the help text); each commit was rebuilt as its own tree plus
+  main's changes. c3-hw-1193 and gauntlet trees equal a 3-way merge of main
+  and the old tip; the removal differs only in the two hand-resolved files.
+- Conflicts: only Makefile (union: SLM_REAL_GOLDEN kept, SCHED_DEBUG_NC_TRACE
+  removed from both lists, `test:` depends on check-emc-rate-path and
+  check-cpu-cache-maint) and tegra_fan.c (emc_hold.h kept, cache.h dropped,
+  no cache_* call left; emc_hold_runtime_check() at line 251).
+- check-cpu-cache-maint: OK (36 files). main's new cache calls are GPU DMA
+  only (ga10b_bringup.c semaphore/pushbuffer, slm_ffi.c GPU-written slots).
+- ADR renumber: 11 files on the removal branch, `grep 0006-cross` empty;
+  ADR 0007 copied onto the removal branch.
+- /ci on af8d01ba, all PASS: ARM64 and x86-64 builds, Jetson real-weights
+  build, `make test` (check-cpu-cache-maint OK), x86-64 test, AI_SCHED=ON
+  test, runtime tests (308 and 328 passed; the real-model goldens are
+  ignored as Jetson hardware targets), braces 0, build order, Jetson UEFI
+  layout, check-emc-rate-path rc=0. 99 files, +7577/-2263 against main.
 
 ### Lab notes
 
