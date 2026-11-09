@@ -166,7 +166,21 @@ Every disagreement is a near tie. The FP16 divergences are the ones seen on SLM-
 
 ## Concurrency and failure handling
 
-- One lock in `slm_prog.c` covers the global program tables, writes to the shared GPU VM made by `slm_prog`, and each step from submit to the end of its wait. A waiter yields instead of spinning with IRQs masked, and gets `SLM_PROG_ERR_BUSY` after 6 s. A close that cannot take the lock is finished by the holder on release. GPU VM writes outside `slm_prog` (cold bring-up, oplib) are not covered by this lock.
+- One lock in `slm_prog.c` covers the global program tables, every write to the cold channel's GPU VM, and each step from submit to the end of its wait. A waiter yields instead of spinning with IRQs masked, and gets `SLM_PROG_ERR_BUSY` after 6 s. A close that cannot take the lock is finished by the holder on release, whether the holder is `slm_prog` or another VM writer.
+- The GPU VM lock (#1173). `ga10b_vm_reserve` is a bump allocator and `ga10b_vm_map` allocates a table and then writes the entry that points at it, so two writers at once could get the same VA, or one could overwrite an entry the other had just written and lose its mappings (`nvgpu oplib wpool` during `slm launch --gpu on`). The program lock is the VM lock: writers outside `slm_prog` take it through `slm_prog_vm_lock` / `slm_prog_vm_unlock` (`slm_prog.h`), and `slm_prog_vm_lock_stats` counts how often each side found the other holding it.
+
+  | Writer | Where | Lock |
+  |---|---|---|
+  | `slm launch` / `slm close`: weights, arena and control maps, unmaps, VA reuse | `slm_prog.c`: `open_locked`, `wmap_get`, `map_weights_fresh`, `va_get`, `session_free`, `wmap_put` | program lock (`slm_prog_open` / `_close`) |
+  | Operator library cold address space: `nvgpu oplib wpool` (`oplib_wpool_build`), `nvgpu oplib stage` and attach (SASS pool, cbuf, QMD pool) | `oplib_gpu_as.c`: `cold_reserve`, `cold_map_at`, `cold_map` | VM lock around each call; `map` reserves and maps in one hold |
+  | Sched-MLP and eviction Q-net pipelines, re-run by `nvgpu cold` after a failed policies step | `ga10b_cold_pipelines_embed.c`: `ga10b_cold_pipeline_build` around `ga10b_cp_build` | VM lock, released before the publish (dispatch lock) |
+  | MNIST pipeline | `ga10b_mnist_embed.c`: `ga10b_mnist_cold_install` around `ga10b_mnist_pipeline_build` | VM lock |
+  | Software walk (reader) | `oplib_cold.c`: `oplib_cold_lookup` | VM lock, so it never follows a half-written entry |
+  | Race driver, test only | `oplib_cold.c`: `oplib_cold_vmrace_round` (`nvgpu oplib vmrace`) | VM lock (through the cold address space, then for the walk and unmap) |
+  | Channel VM creation and first maps (GPFIFO, pushbuffer, semaphore, GR context buffers) | `ga10b_chan.c`: `ga10b_chan_create`, `ga10b_grctx.c`: `ctx_prepare` | none: boot step `channel`, before `oplib_cold_attach` (step `policies`) makes any other writer possible; `ga10b_cold_run` runs one bring-up at a time and never repeats a step that succeeded |
+  | PMU VM, golden-context VM | `ga10b_cold.c`: `step_pmu`; `ga10b_grctx.c`: golden create | none: separate VMs, boot only |
+
+  Lock order: the program (VM) lock, then the GPU dispatch lock (`submit`, `l2_evict` and the TLB invalidates take it inside). No VM writer holds the dispatch lock, and a taker with IRQs masked, as every dispatch-lock holder is, makes one try and gets BUSY, so there is no ABBA. VM writers outside `slm_prog` never call back into it while they hold the lock (it is not recursive). The fake-backend tests in `kernel/tests/test_slm_prog.c` (`test_vm_*`) run one side inside the other's page-table write, where the lost write happened, and fail with the operator library's lock removed.
 - The in-flight flag (`g_prog_flight` in `slm_ffi.c`) has no owner field. One session cannot clear another's because `run_step` holds the `slm_prog` lock from submit to `slm_gpu_prog_finished`, so only one program is ever in flight. Cache clean and invalidate take no lock, so they never skip. `slm launch` reads and pins the model under the registry lock and opens the program after releasing it.
 - After a step timeout or a failed L2 evict, closing the session removes the PTEs but deliberately leaks the arena, control pages and VA (one log line), because dirty GPU lines could otherwise land on reused pages.
 - A GPU program pins its model: `slm unload` returns BUSY while one is mapped.

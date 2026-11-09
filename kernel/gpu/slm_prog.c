@@ -312,11 +312,30 @@ static uint32_t g_leaked_sessions;
 
 /* ---- Lock ----
  *
- * One lock covers the tables above, the shared GPU VM's page tables (as far
- * as this file writes them) and the one program in flight: run_step holds
- * it from submit to the end of its wait, so the in-flight flag in slm_ffi.c
- * always belongs to the step that set it (the shell and slm-runner each
- * have a session) and slm_gpu_prog_finished can only clear its own.
+ * One lock covers the tables above, the cold channel's GPU VM and the one
+ * program in flight.
+ *
+ * The VM: its VA bump allocator and its page tables, whoever writes them.
+ * This file writes them under the lock (open and close); every other
+ * writer takes the same lock through slm_prog_vm_lock (#1173): the
+ * operator library's cold address space (oplib_gpu_as.c, including
+ * `nvgpu oplib wpool`), the cold sched / eviction / MNIST pipeline builds
+ * and oplib_cold_lookup. ga10b_vm_reserve is a plain bump allocator and
+ * ga10b_vm_map allocates a table and then writes the entry pointing at
+ * it, so two writers at once could get the same VA, or one could
+ * overwrite the other's new table and lose its mappings.
+ *
+ * The program in flight: run_step holds the lock from submit to the end
+ * of its wait, so the in-flight flag in slm_ffi.c always belongs to the
+ * step that set it (the shell and slm-runner each have a session) and
+ * slm_gpu_prog_finished can only clear its own.
+ *
+ * Lock order: this lock, then the GPU dispatch lock (submit, l2_evict and
+ * the TLB invalidate take it inside). Never the reverse: no VM writer
+ * holds the dispatch lock, and a taker with IRQs masked, as every
+ * dispatch-lock holder is, makes one try and gets SLM_PROG_ERR_BUSY, so
+ * no ABBA is possible. The VM writers outside this file take no other
+ * lock of slm_prog's and never call back into it while they hold this one.
  *
  * Not a spinlock: the holder waits for the GPU with IRQs on and yields, and
  * may be preempted. A waiter yields too (be->relax), never spins with IRQs
@@ -324,24 +343,54 @@ static uint32_t g_leaked_sessions;
  * one step timeout plus a second, which no healthy holder comes near; past
  * that the caller gets SLM_PROG_ERR_BUSY. slm_prog_close can't fail, so a
  * close that can't take the lock marks the session and the holder frees it
- * on unlock. */
+ * on unlock, whether the holder is slm_prog or another VM writer.
+ *
+ * g_lock holds who has it (enum lock_holder), for the contention counters
+ * in slm_prog_vm_lock_stats. */
+enum lock_holder {
+    HOLD_NONE = 0u,
+    HOLD_PROG,      /* build, patch, steps: no VM writes */
+    HOLD_MAP,       /* slm_prog_open / slm_prog_close: VM writes */
+    HOLD_VM,        /* another VM writer, through slm_prog_vm_lock */
+};
 static uint32_t g_lock;
+static struct slm_prog_vm_lock_stats g_vm_stats;
 
 #define PROG_LOCK_WAIT_US (((uint64_t)SLM_PROG_STEP_TIMEOUT_MS + 1000u) * 1000u)
 
-static bool lock_try(void)
+static bool lock_try(uint32_t who)
 {
-    return __atomic_exchange_n(&g_lock, 1u, __ATOMIC_ACQUIRE) == 0u;
+    uint32_t free_word = HOLD_NONE;
+    return __atomic_compare_exchange_n(&g_lock, &free_word, who, false, __ATOMIC_ACQUIRE,
+                                       __ATOMIC_RELAXED);
 }
 
-static int prog_lock(const struct slm_prog_backend *be)
+static void count(uint32_t *c)
 {
-    if (lock_try()) return 0;
+    __atomic_fetch_add(c, 1u, __ATOMIC_RELAXED);
+}
+
+/* An acquisition by `who` found the lock held by `holder`. */
+static void note_wait(uint32_t who, uint32_t holder)
+{
+    if (who == HOLD_VM) {
+        if (holder == HOLD_MAP) count(&g_vm_stats.vm_waited_on_map);
+        if (holder == HOLD_PROG) count(&g_vm_stats.vm_waited_on_prog);
+        if (holder == HOLD_VM) count(&g_vm_stats.vm_waited_on_vm);
+    } else if (holder == HOLD_VM) {
+        count(who == HOLD_MAP ? &g_vm_stats.map_waited_on_vm : &g_vm_stats.prog_waited_on_vm);
+    }
+}
+
+static int prog_lock(const struct slm_prog_backend *be, uint32_t who)
+{
+    if (lock_try(who)) return 0;
+    note_wait(who, __atomic_load_n(&g_lock, __ATOMIC_RELAXED));
     if (!be || (be->irqs_enabled && !be->irqs_enabled())) return SLM_PROG_ERR_BUSY;
     uint64_t t0 = be->now_us();
     for (;;) {
         be->relax();
-        if (lock_try()) return 0;
+        if (lock_try(who)) return 0;
         if (be->now_us() - t0 >= PROG_LOCK_WAIT_US) return SLM_PROG_ERR_BUSY;
     }
 }
@@ -357,18 +406,19 @@ static void prog_unlock(void)
                 session_free(s);
             }
         }
-        __atomic_store_n(&g_lock, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_lock, HOLD_NONE, __ATOMIC_RELEASE);
         /* A close that failed to take the lock after the scan above: take it
          * back and free that session, or leave it to whoever has it now. */
         bool pending = false;
         for (unsigned i = 0; i < SLM_PROG_MAX_SESSIONS; i++) {
             if (__atomic_load_n(&g_sessions[i].close_pending, __ATOMIC_ACQUIRE)) pending = true;
         }
-        if (!pending || !lock_try()) return;
+        if (!pending || !lock_try(HOLD_MAP)) return;
     }
 }
 
 static const struct slm_prog_backend *jetson_backend(void);
+static const struct slm_prog_backend *platform_lock_backend(void);
 static const char *platform_reason(void);
 
 static const struct slm_prog_backend *backend(void)
@@ -376,10 +426,43 @@ static const struct slm_prog_backend *backend(void)
     return g_backend_override ? g_backend_override : jetson_backend();
 }
 
+/* What a VM writer outside this file waits with. Not backend(): on Jetson
+ * that is NULL until the operator library is attached, and attach itself
+ * writes the VM. */
+static const struct slm_prog_backend *lock_backend(void)
+{
+    return g_backend_override ? g_backend_override : platform_lock_backend();
+}
+
+int slm_prog_vm_lock(void)
+{
+    int rc = prog_lock(lock_backend(), HOLD_VM);
+    count(rc == 0 ? &g_vm_stats.vm_takes : &g_vm_stats.vm_busy);
+    return rc;
+}
+
+void slm_prog_vm_unlock(void)
+{
+    prog_unlock();
+}
+
+void slm_prog_vm_lock_stats(struct slm_prog_vm_lock_stats *out)
+{
+    if (!out) return;
+    out->vm_takes = __atomic_load_n(&g_vm_stats.vm_takes, __ATOMIC_RELAXED);
+    out->vm_busy = __atomic_load_n(&g_vm_stats.vm_busy, __ATOMIC_RELAXED);
+    out->vm_waited_on_map = __atomic_load_n(&g_vm_stats.vm_waited_on_map, __ATOMIC_RELAXED);
+    out->vm_waited_on_prog = __atomic_load_n(&g_vm_stats.vm_waited_on_prog, __ATOMIC_RELAXED);
+    out->vm_waited_on_vm = __atomic_load_n(&g_vm_stats.vm_waited_on_vm, __ATOMIC_RELAXED);
+    out->map_waited_on_vm = __atomic_load_n(&g_vm_stats.map_waited_on_vm, __ATOMIC_RELAXED);
+    out->prog_waited_on_vm = __atomic_load_n(&g_vm_stats.prog_waited_on_vm, __ATOMIC_RELAXED);
+}
+
 void slm_prog_backend_set(const struct slm_prog_backend *b)
 {
     g_backend_override = b;
-    g_lock = 0u;
+    g_lock = HOLD_NONE;
+    memset(&g_vm_stats, 0, sizeof(g_vm_stats));
     g_leaked_sessions = 0u;
     /* Tests run against several fake VMs: forget what the last one held. */
     memset(g_wmaps, 0, sizeof(g_wmaps));
@@ -636,7 +719,7 @@ int slm_prog_open(const struct slm_prog_open_args *a, struct slm_prog_open_out *
         a->data_bytes > 0xFFFF0000ull || a->barrier >= GA10B_PROG_BARRIER_COUNT) {
         return SLM_PROG_ERR_ARG;
     }
-    int rc = prog_lock(be);
+    int rc = prog_lock(be, HOLD_MAP);
     if (rc != 0) return rc;
     rc = open_locked(be, a, out);
     prog_unlock();
@@ -767,10 +850,10 @@ void slm_prog_close(int32_t h)
 {
     if (h < 0 || h >= SLM_PROG_MAX_SESSIONS) return;
     const struct slm_prog_backend *be = backend();
-    if (prog_lock(be) != 0) {
+    if (prog_lock(be, HOLD_MAP) != 0) {
         /* The holder frees it in prog_unlock. */
         if (g_sessions[h].open) __atomic_store_n(&g_sessions[h].close_pending, true, __ATOMIC_RELEASE);
-        if (lock_try()) prog_unlock();
+        if (lock_try(HOLD_MAP)) prog_unlock();
         return;
     }
     struct prog_session *s = session(h);
@@ -809,7 +892,7 @@ static int slm_prog_add_locked(int32_t h, uint32_t shape, const struct slm_prog_
 
 int slm_prog_add(int32_t h, uint32_t shape, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_add_locked(h, shape, op);
     prog_unlock();
@@ -825,7 +908,7 @@ static int slm_prog_barrier_locked(int32_t h, uint32_t shape)
 
 int slm_prog_barrier(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_barrier_locked(h, shape);
     prog_unlock();
@@ -842,7 +925,7 @@ static int slm_prog_mark_locked(int32_t h, uint32_t shape)
 
 int slm_prog_mark(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_mark_locked(h, shape);
     prog_unlock();
@@ -861,7 +944,7 @@ static int slm_prog_finish_locked(int32_t h, uint32_t shape)
 
 int slm_prog_finish(int32_t h, uint32_t shape)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_finish_locked(h, shape);
     prog_unlock();
@@ -886,7 +969,7 @@ static int slm_prog_patch_locked(int32_t h, uint32_t shape, uint32_t idx, const 
 
 int slm_prog_patch(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_patch_locked(h, shape, idx, op);
     prog_unlock();
@@ -912,7 +995,7 @@ static int slm_prog_update_locked(int32_t h, uint32_t shape, uint32_t idx, const
 
 int slm_prog_update(int32_t h, uint32_t shape, uint32_t idx, const struct slm_prog_op *op)
 {
-    int rc = prog_lock(backend());
+    int rc = prog_lock(backend(), HOLD_PROG);
     if (rc != 0) return rc;
     rc = slm_prog_update_locked(h, shape, idx, op);
     prog_unlock();
@@ -1034,7 +1117,7 @@ static int run_step(int32_t h, uint32_t shape, struct slm_prog_run_stats *stats,
     if (!be) return SLM_PROG_ERR_ARG;
     /* A wait under masked IRQs is the #1093 hang, so refuse outright. */
     if (be->irqs_enabled && !be->irqs_enabled()) return SLM_PROG_ERR_IRQS_OFF;
-    int rc = prog_lock(be);
+    int rc = prog_lock(be, HOLD_PROG);
     if (rc != 0) return rc;
     rc = run_step_locked(h, shape, stats, marked, ns, cap);
     prog_unlock();
@@ -1235,6 +1318,18 @@ static const struct slm_prog_backend *jetson_backend(void)
     return &g_jb;
 }
 
+/* prog_lock reads only these three. */
+static const struct slm_prog_backend g_jb_lock = {
+    .now_us = jb_now_us,
+    .relax = jb_relax,
+    .irqs_enabled = jb_irqs,
+};
+
+static const struct slm_prog_backend *platform_lock_backend(void)
+{
+    return &g_jb_lock;
+}
+
 static const char *platform_reason(void)
 {
     return slm_prog_reason_for(boot_source_is_uefi(), oplib_cold_library_empty(),
@@ -1253,6 +1348,12 @@ void slm_prog_clocks(uint64_t *emc_hz, uint64_t *gpc_hz)
 #else
 
 static const struct slm_prog_backend *jetson_backend(void)
+{
+    return NULL;
+}
+
+/* No cold channel, so no other VM writer: a VM lock caller tries once. */
+static const struct slm_prog_backend *platform_lock_backend(void)
 {
     return NULL;
 }

@@ -96,7 +96,7 @@ static void reset(void)
     g_allocs = g_frees = g_cleans = g_wr32s = 0;
     g_fail_after = -1;
     TEST_ASSERT_EQUAL_INT(GA10B_CHAN_OK, ga10b_vm_init(&g_ops, &g_vm));
-    oplib_gpu_as_init_cold(&g_as, &g_ctx, &g_ops, &g_vm);
+    oplib_gpu_as_init_cold(&g_as, &g_ctx, &g_ops, &g_vm, NULL, NULL);
 }
 
 /* Every page of [va, va + bytes) translates to phys + offset. */

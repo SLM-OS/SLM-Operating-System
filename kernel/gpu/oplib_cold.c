@@ -13,6 +13,7 @@
 #include "oplib_pool.h"
 #include "oplib_probe.h"
 #include "oplib_weights_pool.h"
+#include "slm_prog.h"
 #include "uart.h"
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
@@ -44,10 +45,16 @@ static struct {
  * to the cold channel's VM while the sched / eviction / MNIST consumers
  * may be dispatching on it from another CPU. The new PTEs cover VA no
  * dispatch uses, and dispatches never modify the VM, so writing them
- * needs no lock (and the page-table pages they may allocate must not
- * be allocated under it). The all-VA TLB invalidate that publishes them
- * is different: in the middle of a dispatch it can disturb PBDMA's
- * fetch (#844), so it runs under the dispatch lock. */
+ * needs no dispatch lock (and the page-table pages they may allocate
+ * must not be allocated under it). Other writers of the VM do exist:
+ * the SLM GPU program maps weights and arenas at `slm launch`, and the
+ * cold pipelines map theirs. Every VA reservation and page-table write
+ * therefore holds the VM lock, slm_prog_vm_lock (#1173), which the cold
+ * address space takes itself (g_cold.as_ctx). The all-VA TLB invalidate
+ * that publishes them is different: in the middle of a dispatch it can
+ * disturb PBDMA's fetch (#844), so it runs under the dispatch lock.
+ * Lock order: VM lock, then dispatch lock; nothing here takes the VM
+ * lock under the dispatch lock. */
 static int cold_tlb_locked_cb(void *ctx)
 {
     return g_cold.raw_tlb_invalidate(ctx);
@@ -100,10 +107,85 @@ const struct oplib_wpool *oplib_cold_wpool(void)
 
 uint64_t oplib_cold_lookup(uint64_t gpu_va)
 {
-    if (!oplib_cold_active()) {
+    if (!oplib_cold_active() || slm_prog_vm_lock() != 0) {
         return 0;
     }
-    return ga10b_vm_lookup(g_cold.ops, &g_cold.ch->vm, gpu_va);
+    uint64_t pa = ga10b_vm_lookup(g_cold.ops, &g_cold.ch->vm, gpu_va);
+    slm_prog_vm_unlock();
+    return pa;
+}
+
+/* ---- `nvgpu oplib vmrace` (#1173): see oplib_cold.h ---- */
+
+#define VMRACE_PAGE   4096u
+#define VMRACE_CHUNKS 4u
+
+static void *g_vmrace_page;
+static uint64_t g_vmrace_phys;
+
+/* The weights pool's chunk allocator, handing out the same page each
+ * time: the build's VA and page-table work is real, its memory is not. */
+static void *vmrace_alloc(void *ctx, uint32_t npages, uint64_t *phys)
+{
+    (void)ctx;
+    if (npages != 1u || g_vmrace_page == NULL) return NULL;
+    *phys = g_vmrace_phys;
+    return g_vmrace_page;
+}
+
+int oplib_cold_vmrace_round(struct oplib_cold_vmrace_stats *st)
+{
+    if (st == NULL || !oplib_cold_active()) return -1;
+    if (g_vmrace_page == NULL) {
+        uint64_t pa = 0;
+        void *p = g_cold.ops->alloc_pages(g_cold.ops->ctx, 1u, &pa);
+        if (p == NULL) return -1;
+        g_vmrace_phys = pa;
+        g_vmrace_page = p;
+    }
+    st->rounds++;
+
+    /* `nvgpu oplib wpool`'s build, through the same callbacks. */
+    struct oplib_gpu_as as = g_cold.as;
+    as.alloc = vmrace_alloc;
+    as.free = NULL;
+    struct oplib_wpool w;
+    int rc = oplib_wpool_build(&as, VMRACE_CHUNKS * VMRACE_PAGE, VMRACE_PAGE, &w);
+    if (rc == OPLIB_AS_ERR_BUSY) {
+        st->busy++;
+        return -1;
+    }
+    if (rc != OPLIB_AS_OK) {
+        st->map_err++;
+        return -1;
+    }
+    int bad = 0;
+    if (w.n_chunks != VMRACE_CHUNKS) {
+        st->map_err++;
+        bad = -1;
+    }
+    if (slm_prog_vm_lock() != 0) {
+        /* Left mapped: VA the GPU never uses. */
+        st->busy++;
+        return -1;
+    }
+    struct ga10b_vm *vm = &g_cold.ch->vm;
+    for (uint32_t i = 0; i < w.n_chunks; i++) {
+        if (ga10b_vm_lookup(g_cold.ops, vm, w.gpu_va + (uint64_t)i * VMRACE_PAGE) !=
+            g_vmrace_phys) {
+            st->bad_walk++;
+            bad = -1;
+        }
+    }
+    ga10b_vm_unmap(g_cold.ops, vm, w.gpu_va, w.size);
+    for (uint32_t i = 0; i < w.n_chunks; i++) {
+        if (ga10b_vm_lookup(g_cold.ops, vm, w.gpu_va + (uint64_t)i * VMRACE_PAGE) != 0u) {
+            st->stale++;
+            bad = -1;
+        }
+    }
+    slm_prog_vm_unlock();
+    return bad;
 }
 
 /* Build + map the weights pool; no TLB invalidate (caller's). */
@@ -266,7 +348,8 @@ int oplib_cold_attach(const struct ga10b_gpu_ops *ops, struct ga10b_chan *ch,
 
     g_cold.ops = ops;
     g_cold.ch = ch;
-    oplib_gpu_as_init_cold(&g_cold.as, &g_cold.as_ctx, ops, &ch->vm);
+    oplib_gpu_as_init_cold(&g_cold.as, &g_cold.as_ctx, ops, &ch->vm,
+                           slm_prog_vm_lock, slm_prog_vm_unlock);
     cold_lock_ops();
     if (attach_qmd_pool(h) != 0) {
         return -1;
@@ -359,6 +442,12 @@ uint64_t oplib_cold_lookup(uint64_t gpu_va)
 {
     (void)gpu_va;
     return 0;
+}
+
+int oplib_cold_vmrace_round(struct oplib_cold_vmrace_stats *st)
+{
+    (void)st;
+    return -1;
 }
 
 void oplib_cold_status_print(void)

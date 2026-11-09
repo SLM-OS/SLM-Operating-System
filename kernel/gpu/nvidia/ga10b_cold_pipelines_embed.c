@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "gpu_handoff.h"        /* SLM_GPU_TIER_*, SLM_GPU_DTYPE_* */
 #include "oplib_pool.h"
+#include "slm_prog.h"           /* slm_prog_vm_lock */
 #include "string.h"
 
 #include <stdint.h>
@@ -133,7 +134,17 @@ int ga10b_cold_pipeline_build(const struct ga10b_gpu_ops *ops, struct ga10b_chan
         struct ga10b_cp_sources src;
         if (ga10b_cold_pipeline_sources(kind, &src) != 0) return GA10B_CP_SKIP;
 
+        /* The cold channel's VM has other writers once the operator
+         * library is attached (the SLM GPU program, `nvgpu oplib wpool`),
+         * and `nvgpu cold` re-runs this step after boot when it failed:
+         * reserve and map under the VM lock (#1173). Released before the
+         * publish below, which takes the dispatch lock. */
+        if (slm_prog_vm_lock() != 0) {
+            WARN("%s-gpu: GPU VM lock busy - pipeline not built", s->name);
+            return GA10B_CP_ERR_ARG;
+        }
         rc = ga10b_cp_build(ops, &ch->vm, s, &src, p);
+        slm_prog_vm_unlock();
         if (rc != GA10B_CP_OK) {
             /* Pages already mapped in the channel's VM are leaked, not freed. */
             WARN("%s-gpu: pipeline build failed rc=%d", s->name, rc);

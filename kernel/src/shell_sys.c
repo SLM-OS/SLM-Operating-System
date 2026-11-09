@@ -5161,6 +5161,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "oplib_probe.h"
 #include "oplib_dispatch.h"
 #include "oplib_cold.h"
+#include "slm_prog.h"           /* slm_prog_vm_lock_stats (#1173) */
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
  * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
  * `cache.h` here — gpu.h declares cache_clean_range as
@@ -6182,6 +6183,90 @@ static void nvgpu_cold_race_task(void *arg)
     __atomic_store_n(&g_race_running, 0u, __ATOMIC_RELEASE);
 }
 
+/* `nvgpu oplib vmrace <rounds> [cpu]` (#1173, test only): a task runs
+ * oplib_cold_vmrace_round (the VM writes `nvgpu oplib wpool` makes, each
+ * round checked and undone) about once a millisecond, so they overlap the
+ * VM writes of `slm launch --gpu on` / `slm close` typed meanwhile.
+ * `nvgpu oplib vmrace` prints the counts and the VM lock's contention
+ * counters, `nvgpu oplib vmrace stop` ends it early. The task prints
+ * nothing (on Jetson only CPU 0 prints). */
+#define VMRACE_MAX_ROUNDS 200000u
+static struct oplib_cold_vmrace_stats g_vmrace;
+static uint32_t g_vmrace_running;
+static uint32_t g_vmrace_stop;
+
+static void nvgpu_vmrace_task(void *arg)
+{
+    const uint32_t n = (uint32_t)(uintptr_t)arg;
+    for (uint32_t i = 0; i < n && !__atomic_load_n(&g_vmrace_stop, __ATOMIC_ACQUIRE); i++) {
+        (void)oplib_cold_vmrace_round(&g_vmrace);
+        timer_busy_wait_us(1000u);
+        yield();
+    }
+    __atomic_store_n(&g_vmrace_running, 0u, __ATOMIC_RELEASE);
+}
+
+static void nvgpu_vmrace_print(void)
+{
+    struct slm_prog_vm_lock_stats ls;
+    slm_prog_vm_lock_stats(&ls);
+    shell_printf("vmrace: %s, rounds %u, busy %u, map errors %u, bad walks %u, "
+                 "stale after unmap %u\r\n",
+                 __atomic_load_n(&g_vmrace_running, __ATOMIC_ACQUIRE) ? "running" : "idle",
+                 (unsigned)__atomic_load_n(&g_vmrace.rounds, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.busy, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.map_err, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.bad_walk, __ATOMIC_RELAXED),
+                 (unsigned)__atomic_load_n(&g_vmrace.stale, __ATOMIC_RELAXED));
+    shell_printf("vm lock: %u VM-writer takes, %u busy; VM writer waited on "
+                 "open/close %u, on other slm_prog %u, on VM writer %u; "
+                 "open/close waited on VM writer %u, other slm_prog %u\r\n",
+                 (unsigned)ls.vm_takes, (unsigned)ls.vm_busy,
+                 (unsigned)ls.vm_waited_on_map, (unsigned)ls.vm_waited_on_prog,
+                 (unsigned)ls.vm_waited_on_vm, (unsigned)ls.map_waited_on_vm,
+                 (unsigned)ls.prog_waited_on_vm);
+}
+
+static int nvgpu_vmrace_cmd(int argc, char *argv[])
+{
+    if (argc < 4) {
+        nvgpu_vmrace_print();
+        return 0;
+    }
+    if (strcmp(argv[3], "stop") == 0) {
+        __atomic_store_n(&g_vmrace_stop, 1u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    uint32_t n = 0, cpu = 2u;
+    if (shell_parse_uint(argv[3], &n) != 0 || n == 0u || n > VMRACE_MAX_ROUNDS ||
+        (argc >= 5 && (shell_parse_uint(argv[4], &cpu) != 0 || cpu >= cpu_count))) {
+        shell_printf("usage: nvgpu oplib vmrace [<rounds 1..%u> [cpu] | stop]\r\n",
+                     (unsigned)VMRACE_MAX_ROUNDS);
+        return -1;
+    }
+    if (!oplib_cold_active()) {
+        shell_puts("oplib vmrace: only for the SLM-OS-built channel "
+                   "(UEFI-direct boot, after `nvgpu cold`)\r\n");
+        return -1;
+    }
+    if (__atomic_exchange_n(&g_vmrace_running, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        shell_puts("oplib vmrace: one is already running\r\n");
+        return -1;
+    }
+    memset(&g_vmrace, 0, sizeof(g_vmrace));
+    __atomic_store_n(&g_vmrace_stop, 0u, __ATOMIC_RELEASE);
+    struct task *t = task_create("vm_race", (task_entry_t)nvgpu_vmrace_task,
+                                 (void *)(uintptr_t)n);
+    if (!t) {
+        __atomic_store_n(&g_vmrace_running, 0u, __ATOMIC_RELEASE);
+        return -1;
+    }
+    t->cpu_affinity = cpu;
+    scheduler_add_task_to_cpu(t, cpu);
+    shell_printf("oplib vmrace: %u rounds on CPU %u\r\n", (unsigned)n, (unsigned)cpu);
+    return 0;
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     /* `b_p` aliases the file-scope `g_nvgpu_b` so the rest of this
@@ -6825,11 +6910,15 @@ oplib_stage_call:
             oplib_cold_status_print();
             return 0;
         }
+        if (strcmp(argv[2], "vmrace") == 0) {
+            return nvgpu_vmrace_cmd(argc, argv);
+        }
         if (strcmp(argv[2], "wpool") == 0) {
             /* #1092: size the cold channel's weights pool once,
              *   nvgpu oplib wpool <MB>
-             * when oplib_cold_attach ran without one. Run before
-             * inference starts (it invalidates the GPU TLB). */
+             * when oplib_cold_attach ran without one. Safe beside a
+             * running `slm launch` or prompt: the VM writes hold the VM
+             * lock (#1173), the TLB invalidate the dispatch lock. */
             if (argc < 4 || atoi(argv[3]) <= 0) {
                 shell_puts("usage: nvgpu oplib wpool <MB>\r\n");
                 return -1;
@@ -7318,7 +7407,7 @@ oplib_stage_call:
             return 0;
         }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
-                   "cold | wpool <MB> | "
+                   "cold | wpool <MB> | vmrace [<rounds> [cpu] | stop] | "
                    "probe <op_kind> <tier> <dtype> | "
                    "prep-rmsnorm <n_rows> <n> | "
                    "dispatch-rmsnorm <n_rows> <n> | "
