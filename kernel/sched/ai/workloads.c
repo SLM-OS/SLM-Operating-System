@@ -16,12 +16,12 @@
  * in a BSS records array. The driver loops `slm_get_time_ns()` until
  * all slots show `done==1` or the per-run timeout expires.
  *
- * Cross-CPU coherency: each worker writes only its own slot, then
- * calls cache_clean on it; the driver invalidates the array before
- * reading. Every record is on its own 64-byte cacheline. On coherent
- * hardware the clean/invalidate pair is redundant but harmless
- * (kernel/CLAUDE.md §"Cross-CPU Coherency"); every platform uses the
- * same code path.
+ * Cross-CPU ordering: each worker writes only its own slot, then
+ * smp_wmb, then `done`; the driver polls `done` with smp_rmb between
+ * passes. Every record is on its own 64-byte cacheline. No cache
+ * maintenance: the caches are coherent (kernel/CLAUDE.md §"Cross-CPU
+ * Coherency"). The driver's inputs reach the worker through the
+ * run-queue lock that scheduler_add_task takes.
  */
 
 #if defined(CONFIG_AI_SCHEDULER)
@@ -31,7 +31,7 @@
 #include "sched.h"
 #include "sched_policy.h"
 #include "smp.h"
-#include "cache.h"
+#include "spinlock.h"     /* smp_wmb / smp_rmb */
 #include "timer.h"
 #include "string.h"
 #include "preempt_point.h"
@@ -144,10 +144,7 @@ const struct bench_workload *bench_workload_get(uint32_t idx)
  * single-threaded).
  *
  * The driver's input (`dispatch_ns`, `runtime_us`, `deadline_ns`)
- * lives in the same struct as the worker's output so a single
- * cache_clean_range on the slot covers everything the worker reads
- * before scheduler_add_task hands it off (redundant on coherent
- * hardware; see kernel/CLAUDE.md §"Cross-CPU Coherency"). */
+ * lives in the same struct as the worker's output. */
 struct __attribute__((aligned(64))) bench_wl_slot {
     struct bench_wl_record rec;
     uint8_t  _pad[64 - sizeof(struct bench_wl_record)];
@@ -195,11 +192,6 @@ static void workload_task_body(void *arg)
         return;
     }
 
-    /* Invalidate this slot so we read the driver's just-cleaned
-     * dispatch_ns / runtime_us / deadline_ns rather than any stale
-     * local L1 contents on Pi 5 / Jetson. */
-    cache_invalidate_range(&wl_slots[slot], sizeof(wl_slots[slot]));
-
     uint32_t runtime_us = wl_slots[slot].rec.runtime_us;
     uint64_t dispatch_ns = wl_slots[slot].rec.dispatch_ns;
     uint64_t deadline_ns = wl_slots[slot].rec.deadline_ns;
@@ -214,8 +206,8 @@ static void workload_task_body(void *arg)
     wl_slots[slot].rec.ran_on_cpu = (uint8_t)cpu_id();
     wl_slots[slot].rec.deadline_met =
         (deadline_ns == 0 || end_ns <= deadline_ns) ? 1u : 0u;
+    smp_wmb();          /* results before the done flag */
     wl_slots[slot].rec.done = 1;
-    cache_clean_range(&wl_slots[slot], sizeof(wl_slots[slot]));
 }
 
 /* ---- Quantile + stddev helpers (integer-only) ---- */
@@ -317,8 +309,8 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     }
 
     /* Clear records. The dispatch loop below fills in dispatch_ns /
-     * runtime_us / deadline_ns per slot and then cache_cleans the
-     * slot before scheduler_add_task hands the worker off. */
+     * runtime_us / deadline_ns per slot before scheduler_add_task
+     * hands the worker off. */
     for (uint32_t i = 0; i < BENCH_WORKLOAD_MAX_TASKS; i++) {
         wl_slots[i].rec.dispatch_ns = 0;
         wl_slots[i].rec.runtime_us = 0;
@@ -329,7 +321,6 @@ int bench_workload_run(const struct sched_policy_ops *policy,
         wl_slots[i].rec.deadline_met = 0;
         wl_slots[i].rec.done = 0;
     }
-    cache_clean_range(wl_slots, sizeof(wl_slots));
 
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         out->cpu_completions[i] = 0;
@@ -362,9 +353,6 @@ int bench_workload_run(const struct sched_policy_ops *policy,
                 now_ns + (uint64_t)tpl->deadline_slack_us * 1000ULL;
             task_set_deadline(t, wl_slots[i].rec.deadline_ns);
         }
-        /* Clean the slot to PoC before the hand-off (redundant on
-         * coherent hardware, kept with the other cache.h calls). */
-        cache_clean_range(&wl_slots[i], sizeof(wl_slots[i]));
 
         scheduler_add_task(t);
         dispatched++;
@@ -386,7 +374,7 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     uint64_t timeout_ns = (uint64_t)expected_us * 4000ULL + 1000000000ULL;
 
     for (;;) {
-        cache_invalidate_range(wl_slots, sizeof(wl_slots));
+        smp_rmb();      /* re-read the done flags each pass */
         uint32_t done = 0;
         for (uint32_t i = 0; i < dispatched; i++) {
             if (wl_slots[i].rec.done) done++;
@@ -402,7 +390,7 @@ int bench_workload_run(const struct sched_policy_ops *policy,
     }
 
     uint64_t bench_end_ns = slm_get_time_ns();
-    cache_invalidate_range(wl_slots, sizeof(wl_slots));
+    smp_rmb();          /* done flags before the results they publish */
 
     /* Tally. */
     out->tasks_dispatched = dispatched;

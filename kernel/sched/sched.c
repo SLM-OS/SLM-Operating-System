@@ -654,7 +654,6 @@ void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
     if (!task || !ai_priority_actions) {
         return;
     }
-    cache_invalidate(&task->pi_priority);
     /* While a task runs on a borrowed priority (#1103) its effective priority
      * says nothing about the task itself: stepping from it would leave the
      * borrowed level behind as the AI's choice after the mutex is released.
@@ -665,16 +664,13 @@ void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
     if (task->pi_priority > effective_base_priority(task)) {
         return;
     }
-    cache_invalidate(&task->effective_priority);
     task->ai_priority = sched_ai_step_priority(task->effective_priority,
                                                priority_adj);
-    cache_clean(&task->ai_priority);
 }
 
 /* Base priority for a recompute: the AI's level while one is set. */
 static uint8_t effective_base_priority(struct task *task)
 {
-    cache_invalidate(&task->ai_priority);
     if (ai_priority_actions && task->ai_priority != TASK_AI_PRIORITY_NONE) {
         return task->ai_priority;
     }
@@ -693,9 +689,7 @@ static uint8_t effective_base_priority(struct task *task)
  */
 static void set_effective_priority(struct task *task, uint8_t priority)
 {
-    cache_invalidate(&task->pi_priority);
     task->effective_priority = (task->pi_priority > priority) ? task->pi_priority : priority;
-    cache_clean(&task->effective_priority);
 }
 
 /*
@@ -715,7 +709,6 @@ static void update_deadline_boost(struct task *task)
     }
 
     /* Deadline may have been set by another CPU */
-    cache_invalidate(&task->deadline_ns);
 
     if (task->deadline_ns == 0) {
         /* No deadline: the base priority, or the inherited floor if higher */
@@ -811,8 +804,9 @@ void scheduler_init(void)
     /* Register built-in policy */
     sched_register_policy(&sched_policy_heuristic);
 
-    sched.initialized = 1;
-    cache_clean(&sched.initialized);
+    /* Release: run queues, idle task and policy are visible to a
+     * secondary that observes the flag with acquire. */
+    __atomic_store_n(&sched.initialized, 1, __ATOMIC_RELEASE);
 
     /* Wake any secondary CPUs waiting for scheduler init */
 #if !defined(PLATFORM_X86_64)
@@ -827,8 +821,7 @@ void scheduler_init(void)
  */
 int scheduler_is_initialized(void)
 {
-    cache_invalidate(&sched.initialized);
-    return sched.initialized;
+    return __atomic_load_n(&sched.initialized, __ATOMIC_ACQUIRE);
 }
 
 /*
@@ -846,8 +839,6 @@ void scheduler_init_secondary(uint32_t cpu)
     {
         extern volatile uint32_t cpu_boot_flag[];
         cpu_boot_flag[cpu] = 0x33;  /* Distinctive: entered scheduler_init_secondary */
-        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
-        __asm__ volatile("dsb sy" ::: "memory");
     }
 #endif
 
@@ -873,8 +864,6 @@ void scheduler_init_secondary(uint32_t cpu)
     {
         extern volatile uint32_t cpu_boot_flag[];
         cpu_boot_flag[cpu] = 0x44;  /* Distinctive value to verify current binary */
-        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
-        __asm__ volatile("dsb sy" ::: "memory");
     }
 #endif
 
@@ -996,20 +985,6 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 
     DEBUG_PRINT("Added task '%s' to CPU %u run queue (ready=%u)",
                 task->name, cpu, rq->ready_count);
-
-    /* Clean specific fields written inside the lock to PoC (redundant
-     * on coherent hardware, kept with the other cache.h calls, #1193).
-     * The target CPU's schedule() invalidates before reading. Only
-     * clean the fields that were modified, NOT the entire task struct
-     * (which includes the task's context/stack that may be in active
-     * use). */
-    cache_clean(&rq->head);
-    cache_clean(&rq->tail);
-    cache_clean(&rq->ready_count);
-    cache_clean(&task->next);
-    cache_clean(&task->assigned_cpu);
-    cache_clean(&task->state);
-    cache_clean(&task->effective_priority);
 
     rq_unlock_irqrestore(cpu, flags);
 
@@ -1135,7 +1110,6 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
-    cache_invalidate(&task->cpu_affinity);
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
@@ -1295,7 +1269,6 @@ void sched_reposition_task(struct task *task)
     }
 
     for (int attempts = 0; attempts < 8; attempts++) {
-        cache_invalidate(&task->assigned_cpu);
         uint32_t cpu = task->assigned_cpu;
         if (cpu >= cpu_count) {
             return;  /* Defensive: corrupt assigned_cpu — bail. */
@@ -1309,14 +1282,6 @@ void sched_reposition_task(struct task *task)
         }
 
         bool moved = reposition_locked(task, cpu);
-        if (moved) {
-            struct cpu_runqueue *rq = cpu_rq(cpu);
-            cache_clean(&rq->head);
-            cache_clean(&rq->tail);
-            cache_clean(&rq->ready_count);
-            cache_clean(&task->next);
-        }
-
         rq_unlock_irqrestore(cpu, flags);
         if (moved) {
             smp_notify_cpu(cpu);
@@ -1372,9 +1337,6 @@ void scheduler_terminate_task(struct task *task)
         struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
 
         task->state = TASK_TERMINATED;
-#if !defined(PLATFORM_X86_64)
-        cache_clean(&task->state);
-#endif
 
         if (remove_from_cpu_queue_locked(task, cpu)) {
             sched.task_count--;
@@ -1485,20 +1447,6 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         /* Task is blocked - just update assigned_cpu */
         task->assigned_cpu = target_cpu;
     }
-
-    /* Clean modified fields to PoC (redundant on coherent hardware,
-     * kept with the other cache.h calls, #1193). The target CPU's
-     * schedule() invalidates before reading. */
-    cache_clean(&rq_old->head);
-    cache_clean(&rq_old->tail);
-    cache_clean(&rq_old->ready_count);
-    cache_clean(&rq_new->head);
-    cache_clean(&rq_new->tail);
-    cache_clean(&rq_new->ready_count);
-    cache_clean(&task->next);
-    cache_clean(&task->assigned_cpu);
-    cache_clean(&task->state);
-    cache_clean(&task->effective_priority);
 
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
@@ -1999,10 +1947,6 @@ void schedule(void)
     coop_preempt_maybe_tick(this_cpu);
 #endif
 
-    /* Invalidate the run queue before reading it: redundant on coherent
-     * hardware, kept with the other cache.h calls (#1193). */
-    cache_invalidate_range(rq, sizeof(*rq));
-
 #if CONFIG_WORK_STEALING
     /*
      * Work-stealing: if the local queue is empty, try to pull a task
@@ -2039,7 +1983,6 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
-        cache_clean(&rq->zombie);
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
@@ -2053,11 +1996,9 @@ void schedule(void)
 
     /* If current task is still running and ready, re-add to queue */
     if (current) {
-        cache_invalidate(&current->state);
     }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
-        cache_clean(&current->state);
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
@@ -2111,9 +2052,7 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
-    cache_clean(&next->state);
     next->switches++;
-    cache_clean(&next->switches);
     sched.context_switches++;  /* Racy but acceptable for stats */
 
     /*
@@ -2122,7 +2061,6 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current) {
-        cache_invalidate(&current->state);
     }
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
@@ -2135,15 +2073,6 @@ void schedule(void)
      * when tracing is disabled. */
     sched_trace_record_switch(this_cpu, current, next);
 
-    /* Clean run queue fields modified in this schedule() cycle.
-     * Without this, the next dc civac at the start of schedule() would
-     * write back our stale dirty cacheline, overwriting another CPU's
-     * fresh data (e.g., a newly added task from scheduler_add_task). */
-    cache_clean(&rq->head);
-    cache_clean(&rq->tail);
-    cache_clean(&rq->ready_count);
-    cache_clean(&rq->zombie);
-
     /*
      * Disable preemption during the context switch window.
      *
@@ -2155,7 +2084,7 @@ void schedule(void)
      * schedule() call during this window. The timer still fires and
      * increments tick counters — it just doesn't try to context-switch.
      *
-     * Placement: AFTER the task_set_current / cache_clean sequence is
+     * Placement: AFTER the task_set_current call is
      * correct because rq_lock_irqsave (above) has already disabled local
      * IRQs, so no timer can deliver between task_set_current and
      * preempt_disabled=1. (SCHED-M1 originally proposed moving this

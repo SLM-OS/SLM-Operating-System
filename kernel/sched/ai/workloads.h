@@ -55,10 +55,7 @@ struct bench_workload {
 /* Per-task slot: combines the worker's input (runtime_us +
  * dispatch_ns, written by the driver before scheduler_add_task) and
  * the worker's output (completion_ns, ran_on_cpu, deadline_met,
- * done). Both halves live in one struct so a single
- * cache_clean_range(&wl_slots[i], sizeof(wl_slots[i])) on the driver
- * side covers everything the worker reads from this slot. See
- * kernel/CLAUDE.md §"Cross-CPU Coherency". */
+ * done). See kernel/CLAUDE.md §"Cross-CPU Coherency". */
 struct bench_wl_record {
     /* --- Driver-written input (read by worker) --- */
     uint64_t dispatch_ns;     /* slm_get_time_ns() at scheduler_add_task time */
