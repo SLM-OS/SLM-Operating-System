@@ -992,7 +992,7 @@ fn f32_bytes_into_fp16_slice(bytes: &[u8], out: &mut [u16]) -> Option<()> {
 /// passed explicitly so this function works for Q4_K (Qwen2.5
 /// attention), Q5_0 (SmolLM attention), Q8_0 (SmolLM V), and
 /// anything else `matmul_quant_rows` supports.
-fn project_with_bias(
+pub(crate) fn project_with_bias(
     weight_quant: GgmlType,
     weight: &[u8],
     rows: usize,

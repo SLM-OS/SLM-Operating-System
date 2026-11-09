@@ -1728,6 +1728,91 @@ static int slm_gpu_golden(int argc, char *argv[])
 }
 #endif
 
+#ifdef SLM_REAL_GOLDEN
+extern const uint8_t slm_real_golden_rec_start[], slm_real_golden_rec_end[];
+
+/* runtime/src/slm/golden.rs, test-only surface like the golden FFI in
+ * kernel/tests/test_slm_golden.c, so declared here and not in slm_ffi.h.
+ * Keep in step with RealGoldenReport and REAL_FLAG_* there. */
+typedef struct {
+    uint32_t steps;
+    uint32_t top_matches;
+    int32_t first_bad_step;
+    int32_t first_bad_index;
+    int32_t first_bad_got_milli;
+    int32_t first_bad_want_milli;
+    int32_t max_err_milli;
+    int32_t first_top_miss_step;
+    uint32_t mutated_bytes;
+    uint32_t restored;
+    uint32_t cases;
+    uint32_t max_rows;
+    uint64_t gpu_us_per_token;
+} SlmRealGoldenReport;
+
+#define SLM_REAL_FLAG_BATCH     1u
+#define SLM_REAL_FLAG_DROP_BIAS 2u
+
+extern int32_t rust_slm_golden_real(uint32_t model, const uint8_t *rec, size_t rec_len,
+                                    uint32_t flags, SlmRealGoldenReport *out);
+
+/* slm golden <handle> [batch] [drop-bias]: the real Qwen2.5-1.5B model (from
+ * `slm load /boot/models/...`) on the GPU program, built as `slm launch --gpu
+ * on` builds it, teacher-forced over each of the fixture's prompts and
+ * llama.cpp's greedy tokens. PASS needs every logit of every step within 0.1
+ * of the exact CPU reference made on the host, and llama.cpp's top token at
+ * every step (#1165). `batch` feeds each prompt as one prefill step (64 rows
+ * for the long one). `drop-bias` is the deliberate mutation (one layer's Q, K
+ * and V biases zeroed in the weights the program maps, for the run, then
+ * restored) and must FAIL. */
+static int slm_golden(int argc, char *argv[])
+{
+    uint32_t h = 0;
+    if (argc < 3 || shell_parse_uint(argv[2], &h) != 0) {
+        shell_puts("Usage: slm golden <handle> [batch] [drop-bias]\r\n");
+        return -1;
+    }
+    uint32_t flags = 0u;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "batch") == 0) {
+            flags |= SLM_REAL_FLAG_BATCH;
+        } else if (strcmp(argv[i], "drop-bias") == 0) {
+            flags |= SLM_REAL_FLAG_DROP_BIAS;
+        } else {
+            shell_printf("slm golden: unknown option '%s'\r\n", argv[i]);
+            return -1;
+        }
+    }
+    SlmRealGoldenReport r = {0};
+    int32_t rc = rust_slm_golden_real(h, slm_real_golden_rec_start,
+                                      (size_t)(slm_real_golden_rec_end - slm_real_golden_rec_start),
+                                      flags, &r);
+    if (rc != 0) {
+        shell_puts("slm golden: FAIL, the check did not run\r\n");
+        return -1;
+    }
+    bool ok = r.steps > 0u && r.first_bad_step < 0 && r.first_top_miss_step < 0 &&
+              r.top_matches == r.steps;
+    shell_printf("slm golden: %s (GPU program, %s%s), %lu cases, largest step %lu rows, "
+                 "%lu steps, %lu with llama.cpp's top token "
+                 "(first miss at step %d), vs exact max %d milli (first over 100 at step %d, "
+                 "logit %d: got %d want %d milli), %llu us/token\r\n",
+                 ok ? "PASS" : "FAIL",
+                 (flags & SLM_REAL_FLAG_BATCH) != 0u ? "batch" : "per token",
+                 (flags & SLM_REAL_FLAG_DROP_BIAS) != 0u ? ", drop-bias" : "",
+                 (unsigned long)r.cases, (unsigned long)r.max_rows,
+                 (unsigned long)r.steps, (unsigned long)r.top_matches,
+                 (int)r.first_top_miss_step, (int)r.max_err_milli, (int)r.first_bad_step,
+                 (int)r.first_bad_index, (int)r.first_bad_got_milli,
+                 (int)r.first_bad_want_milli, (unsigned long long)r.gpu_us_per_token);
+    if ((flags & SLM_REAL_FLAG_DROP_BIAS) != 0u) {
+        shell_printf("slm golden: mutation zeroed %lu bias bytes, restored: %s\r\n",
+                     (unsigned long)r.mutated_bytes, r.restored != 0u ? "yes" : "NO");
+    }
+    return ok ? 0 : -1;
+}
+#endif
+
 /* slm gpu smoke [n] [width]: launch, barrier, semaphore and evict with no model. */
 static int slm_gpu_smoke(int argc, char *argv[])
 {
@@ -1963,6 +2048,10 @@ static void slm_print_usage(void)
     shell_puts("  stats  <session> [--verbose] [--gpu] [--power] [--profile [on|off]] [--follow [ms]]\r\n"
                "                                 Per-session telemetry, live during a prompt\r\n");
     shell_puts("  gpu                            GPU dispatch state\r\n");
+#ifdef SLM_REAL_GOLDEN
+    shell_puts("  golden <handle> [batch] [drop-bias]\r\n"
+               "                                 Real-model golden on the GPU program\r\n");
+#endif
     shell_puts("  runner start|stop|status       The slm-runner bus service\r\n");
     shell_puts("  ask    [--timeout S] \"<text>\"  Ask slm-runner over the "
                "message bus\r\n");
@@ -1980,6 +2069,13 @@ static int slm_dispatch_mutating(const char *verb, int argc, char *argv[])
     if (strcmp(verb, "stream") == 0) return slm_stream(argc, argv);
     if (strcmp(verb, "reset")  == 0) return slm_reset(argc, argv);
     if (strcmp(verb, "close")  == 0) return slm_close(argc, argv);
+#ifdef SLM_REAL_GOLDEN
+    /* It changes the model's weights for a mutation run, so it takes the
+     * lock too: no shell `slm prompt` can run beside it. */
+    if (strcmp(verb, "golden") == 0) {
+        return slm_golden(argc, argv);
+    }
+#endif
 
     shell_printf("slm: unknown verb '%s'\r\n", verb);
     slm_print_usage();

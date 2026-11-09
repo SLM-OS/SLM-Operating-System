@@ -939,6 +939,27 @@ test-jetson-uefi-layout:
 test-gqa-emu:
 	@bash scripts/cuda/harness/gqa-emu-test.sh $(GQA_EMU_ARGS)
 
+# The real-model golden (#1165). The 1.1 GB Qwen2.5-1.5B GGUF is too big for
+# CI, so the check runs on hardware: this builds a Jetson image with the
+# fixture for `slm golden` embedded (scripts/fixtures/slm/
+# qwen25_real_golden.rec). Deploy it UEFI-direct, `slm load` the model from
+# /boot/models, then `slm golden <handle> [batch]`: see "Real-model golden"
+# in docs/deploy/jetson-uefi-direct.md.
+.PHONY: jetson-real-golden
+jetson-real-golden:
+	$(MAKE) kernel-clean
+	$(MAKE) kernel PLATFORM=JETSON_ORIN_NANO EXTRA_KERNEL_CMAKE_ARGS="-DSLM_REAL_GOLDEN=ON $(EXTRA_KERNEL_CMAKE_ARGS)"
+
+# The same check on the host: the real model on the software GPU, which runs
+# the exact CPU reference, so it shows the fixture and the harness agree and
+# that the `drop-bias` mutation fails. Needs the GGUF (sha256 in PROVENANCE.md).
+SLM_GOLDEN_MODEL ?= $(HOME)/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+.PHONY: slm-real-golden-host
+slm-real-golden-host:
+	cd runtime && SLM_GOLDEN_MODEL="$(SLM_GOLDEN_MODEL)" cargo test --release \
+		--target x86_64-unknown-linux-gnu --features slm golden_real_model_host \
+		-- --ignored --nocapture --test-threads=1
+
 # UEFI-direct boot under QEMU's AArch64 UEFI firmware (#26). Boots the
 # QEMU_VIRT PE image (build/kernel/slmos.bin) from a FAT ESP twice:
 #   1. as built — firmware honours ImageBase (= link address);
@@ -1606,13 +1627,14 @@ TIDY_WIDE_MAKE_ARGS = $(if $(filter X86_64,$(PLATFORM)),,NET_SSHD=ON NET_SSHD_AU
 	HAILO_WIRE_DEBUG=ON AI_SCHED=ON AI_WEIGHTS=real
 TIDY_WIDE_CMAKE_ARGS = -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -DSECONDARY_PREEMPT=OFF \
 	-DJETSON_HW_TICK=OFF \
-	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON -DSLM_GPU_GOLDEN=ON
+	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON -DSLM_GPU_GOLDEN=ON \
+	-DSLM_REAL_GOLDEN=ON
 TIDY_WIDE_CFLAGS = -DSCHED_DEBUG_NC_TRACE -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
 # Defines each wide database must contain, because CMake can silently drop an
 # option: on Pi 5, COOP_PREEMPT also needs PI5_COOP_PREEMPT. The check fails if
 # one is missing.
 TIDY_WIDE_DEFINES = HAILO_WIRE_DEBUG SLMOS_AI_WEIGHTS_REAL CONFIG_AI_SCHEDULER \
-	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART SLM_GPU_GOLDEN \
+	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART SLM_GPU_GOLDEN SLM_REAL_GOLDEN \
 	SCHED_DEBUG_NC_TRACE JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
 TIDY_WIDE_SSH_DEFINES = NET_SSHD NET_SSHD_AUTOSTART
 TIDY_WIDE_DEFINES_QEMU_VIRT = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES)
@@ -1851,6 +1873,8 @@ help:
 	@echo "  test-mnist-shaders    Host-only test of the shader build script (stubbed toolkit)"
 	@echo "  oplib-shaders         Build every *_shader.sass and the SLM op table (requires CUDA Toolkit)"
 	@echo "  test-oplib-shaders    Test oplib-shaders; real toolkit run when nvcc is present"
+	@echo "  jetson-real-golden    Jetson image with the real-model golden for \`slm golden\` (#1165)"
+	@echo "  slm-real-golden-host  The real-model golden on the host (needs the 1.1 GB GGUF)"
 	@echo "  test-gqa-emu          HMMA GQA kernel lane by lane on the host, plus mutants (GQA_EMU_ARGS=--quick)"
 	@echo ""
 	@echo "Utility targets:"

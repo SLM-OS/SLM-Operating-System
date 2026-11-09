@@ -577,6 +577,74 @@ hung step. If the recovery fails, the channel stays down
 the session replays on the CPU: `[slm] GPU program failed (...)`.
 `nvgpu cold recover` tries again.
 
+### Real-model golden (#1165)
+
+The goldens that `/ci` runs use a 773 KB tiny model; the real Qwen2.5-1.5B
+GGUF (1.1 GB) is too big for CI, so its golden is a hardware target. It runs
+the GPU program, the production path for `slm prompt --gpu on` and the one
+part of the stack only a board runs, on the model `/boot/models` delivers, and
+compares it with reference data made on the host
+(`scripts/fixtures/slm/qwen25_real_golden.rec`, provenance in
+`PROVENANCE.md` there). The fixture holds two cases:
+
+- `short`: a 10-token raw prompt and 8 greedy tokens;
+- `long`: the 64-token benchmark prompt `bench/475/prompts/p1.txt` and 4
+  greedy tokens. 64 rows is the most one program step takes, so in batch mode
+  this is the largest prefill.
+
+Each case holds llama.cpp's greedy continuation (pinned llama.cpp commit, CPU,
+plain argmax), with every step's top-1 margin at least 1.0, and for each step
+that predicts one of those tokens all 151936 logits of the exact CPU
+reference: the GPU program's own reference with exact dot products (ADR 0004),
+run on the host one token at a time. They are stored as 16-bit values with a
+per-row offset and scale, at most 0.001 from the reference.
+
+For each case the board builds the GPU program as `slm launch --gpu on`
+builds it (context 512) and feeds the prompt and llama.cpp's tokens,
+teacher-forced, through `GpuProgram::run`, the call a session's decode makes.
+A step passes when every one of its logits is within 0.1 of the exact
+reference (`GOLDEN_EXACT_TOLERANCE`, the bound ADR 0004 sets for the real
+model) and its top token is llama.cpp's. The verdict is `PASS` only when every
+step of every case passes.
+
+Build, deploy and run:
+
+```bash
+make jetson-real-golden                       # Jetson image with the fixture
+scripts/jetson-uefi-deploy.sh <board-ip>      # as above
+```
+
+```
+slmos> slm load /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+slmos> slm golden 0
+slmos> slm golden 0 batch
+slmos> slm golden 0 drop-bias
+```
+
+| Command | Expected |
+|---|---|
+| `slm golden <handle>` | Per case a `[slm] real golden <case>: GPU program(launches=.. barriers=.. batch=64 arena=..MB) ...` line, one `[slm] real golden <case> step N` line per step (largest error and where, top token against llama.cpp's), then `slm golden: PASS (GPU program, per token), 2 cases, largest step 1 rows, 12 steps, 12 with llama.cpp's top token ...` |
+| `slm golden <handle> batch` | The same with each prompt in one prefill step, as `slm prompt` feeds it: `PASS (GPU program, batch), 2 cases, largest step 64 rows` |
+| `slm golden <handle> drop-bias` | The deliberate mutation: the Q, K and V biases of layer 0 are zeroed in the weights the GPU program maps for this run and put back afterwards. Must print `FAIL` and `restored: yes`. Refused while a session's GPU program maps that handle's weights |
+
+`drop-bias` must run with no prompt running anywhere and with no second slot
+borrowing the same boot model (a second `slm load` of the same
+`/boot/models` file shares its pages). Neither is enforced: the verb takes
+the shell's mutation lock, but `slm-runner` and the HTTP API do not, and the
+GPU-program check covers only the handle given. A prompt or another slot that
+reads the weights during the run sees the zeroed biases. The plain and `batch`
+runs change nothing and can run beside other work. A `slm golden` that cannot
+run (no GPU channel after kexec, a different model file, a session holding
+the weights) says why and prints `FAIL, the check did not run`.
+
+The same check runs on the host, on the real model and the software GPU, which
+executes the exact reference: `make slm-real-golden-host` (needs the GGUF,
+`SLM_GOLDEN_MODEL=`, default `~/models/qwen2.5-1.5b-instruct-q4_k_m.gguf`). It
+passes both ways and fails with the mutation, so it shows the fixture and the
+harness agree; only the board tests the GPU kernels. Regenerate the fixture only
+when the reference itself moves: `scripts/tools/slm-gen-goldens.py --only
+real-model --llama-cpp <dir> --model <gguf>`.
+
 ## Findings
 
 These are the causes found while making the path work, recorded so the

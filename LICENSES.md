@@ -56,5 +56,14 @@ tokenizer test reads it, and it is not linked into any kernel. See
 - Original source: <https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct>
 - License: Apache License 2.0, <https://www.apache.org/licenses/LICENSE-2.0>
 
+`scripts/fixtures/slm/qwen25_real_golden.rec` is data derived from the same
+Qwen2.5-1.5B-Instruct model (its full GGUF, sha256 in `PROVENANCE.md`), so the
+Apache License 2.0 above applies to it. It holds two prompts, text and token
+ids (one written for SLM-OS, one from `bench/475/prompts/p1.txt`), llama.cpp's greedy
+tokens and top-1 margins for them (llama.cpp is MIT, see above), and logits
+that SLM-OS's own exact CPU reference computed from the model's weights. It
+holds no weights. It is linked only into images built with
+`SLM_REAL_GOLDEN=ON`.
+
 The other fixtures in that directory are outputs of llama.cpp / ggml (MIT, see
 above) on inputs SLM-OS generated.

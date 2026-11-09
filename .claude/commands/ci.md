@@ -65,11 +65,20 @@ A link error naming a kernel symbol means `test_ffi_stubs` in
 the SLM stack with upstream llama.cpp (`runtime/src/slm/golden.rs`,
 `kernel/tests/test_slm_golden.c`, fixtures and reference commit in
 `scripts/fixtures/slm/`): tokenizer against the real Qwen vocabulary (host),
-single ops against ggml (host and both QEMU kernels), and greedy tokens plus
+single ops against ggml (host and both QEMU kernels), the Q/K/V projections with
+their bias adds against ggml (`golden_qkv_bias.rec`, host `golden_qkv_bias` and
+the kernels' `test_golden_qkv_bias`), and greedy tokens plus
 logits on a small Qwen2 GGUF through the production registry, forward path and
 FFI (host and both QEMU kernels). A mismatch means the model computes something
 other than llama.cpp does: report it, and never widen a tolerance or regenerate
 a golden to make it pass.
+
+The real 1.1 GB model's golden is not a `/ci` step: it is a hardware target on
+jetson-nano-2 (`make jetson-real-golden`, then `slm golden` after a UEFI-direct
+boot, see "Real-model golden" in `docs/deploy/jetson-uefi-direct.md`). Its harness
+runs here on the tiny model (`golden_real_harness_on_tiny_passes_and_catches_dropped_bias`,
+step 6), and `make slm-real-golden-host` runs it on the real model on the host
+when the GGUF is there.
 
 ### 7. Brace check
 ```

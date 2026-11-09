@@ -223,6 +223,15 @@ impl LoadedSlm {
         self.weight_buffer()
     }
 
+    /// The weight buffer's base, with write access, for the one caller
+    /// that changes weights in place: the real-model golden's deliberate
+    /// mutation (`crate::slm::golden::real_golden_run`), which restores
+    /// them before returning. Writing through it while any reader runs
+    /// (a forward pass, a GPU program) is a data race.
+    pub(crate) fn weight_base_for_mutation(&self) -> Option<core::ptr::NonNull<u8>> {
+        self.weight_pages
+    }
+
     /// Resident byte cost of this slot, including page-rounding
     /// padding. `slm status` aggregates this across slots so the
     /// shell can show a "real" memory footprint rather than just
