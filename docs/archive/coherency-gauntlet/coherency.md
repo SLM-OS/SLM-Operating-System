@@ -98,7 +98,7 @@ gate (step 3), together with the rest of the instruction.
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
 | C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
 | C3 | Boot-sequence audit and cacheable build | Pi 5 hardware complete (05f86132); Jetson running; critic round 1 started on Pi 5 | 1 |
-| C4 | Decision, ADR 0006, draft PR | removal branch ready (bf5f8fb3), ADR drafting, waits for Jetson + critic | 0 |
+| C4 | Decision, ADR 0007, draft PR | ADR 0007 PASS (round 3); removal pending on both boards; PR gated (see Budget) | 3 |
 
 ### Record check (git history, times -0700)
 
@@ -203,6 +203,18 @@ gate (step 3), together with the rest of the instruction.
   caches-off BSS clear (`boot.S:955`), a narrow window on Jetson where CPU 0
   is not reset; same exposure in V1, which passed 20 boots. Suggested fix:
   zero them with caches on in `task_table_init`.
+
+- C4 ADR round 1: FAIL, 12 line-level fixes. Pi 5 had been marked decided
+  while the integration "match" criterion was unmet (NC test kernel booted
+  once; removal failed one extra test in 1 of 11 boots); the steal stall
+  was understated (NC_AXIS=OFF 6 of 6 runs, removal 2 of 2 UEFI runs with
+  deltas and 0 of 5 kexec, NC 0 of 6); register, litmus-scope and
+  control-(a) claims were broader than the runs; cross-cluster coherency
+  has no public source; #1196 and firmware-version overturn missing.
+- C4 ADR round 2: FAIL on length only (748 words); 11 of 12 fixes landed,
+  #10 partial (Jetson integration ran on one boot per path).
+- C4 ADR round 3: PASS at 694 words. Afterwards the critic-recommended Pi 5
+  integration line (16/16 in 11 test-kernel boots) was added, 700 words.
 
 ## Failed approaches
 

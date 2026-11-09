@@ -50,8 +50,9 @@ with no software step (A76 5.9, A78AE 2.4.9, DSU 100453 2.1). Coherency
 between the Jetson clusters has no public source and rests on measurement.
 Caches-off loads do not allocate (A76 7.2.3), so "pre-MMU reads left stale
 lines" cannot hold. Defects fixed: D1, D2, D12 and an extern mismatch
-that page-faulted the first cacheable build (C3 audit). `make test` rejects new cache maintenance in scheduler,
-IPC, spinlock and print code. Open: #1196, #1197, #1201, #1202, the stall.
+that page-faulted the first cacheable build (C3 audit). `make test`
+rejects new cache maintenance in scheduler, IPC, spinlock and print code.
+Open: #1196, #1197, #1201, #1202, the stall.
 
 ## What would overturn this
 
@@ -76,5 +77,6 @@ a different Pi 5 EEPROM or BL31 (version not determined here).
   84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 131 ns, Jetson
   equal; stealing equal on Pi 5, equal or better on Jetson; `bench smp`
   completed in every run on both boards.
-- Boots: Pi 5 removal 10/10. Jetson `NC_AXIS=OFF` 10/10 per path,
-  integration 16/16 on one boot per path.
+- Boots: Pi 5 removal 10/10; integration 16/16 in 11 test-kernel boots.
+  Jetson `NC_AXIS=OFF` 10/10 per path, integration 16/16 on one boot per
+  path.
