@@ -226,7 +226,7 @@ Boards: jetson-nano-2 and pi-5-1 only.
 | Control a, Non-shareable alias | same cluster 0; cross 16/16 time out | same cluster 0; cross 7 forbidden, 4 timeouts | 0 on all 12 pairs |
 | Control b, NC alias | 30/30 time out (memory read 0) | 15 forbidden, 2 timeouts | P2 forbidden 1 on each of 12 pairs |
 | Control c, caches-off reader, phase 1 stale | same 14/14, cross 16/16 and 10/16 | same 14/14, cross 13/16 and 14/16 | 12/12 |
-| Integration | 19/19 (hwset kernel) | 19/19 | not captured |
+| Integration | 19/19 (hwset kernel) | 19/19 | 19/19 (full test kernel, C3-Pi5 run T1) |
 | bench stealing (us) | 10625 / 10627 / 11234 | 9831 / 11007 / 7933 | 13062 / 13266 / 17035 |
 | bench context avg (ns) | 5464 / 5457 / 5448 | 18063 / 17927 / 18034 | 2321 / 2318 / 2315 |
 | bench ipc avg (ns) | 128 / 112 / 113 | 163 / 86 / 92 | 817 / 810 / 812 |
@@ -248,6 +248,11 @@ Boards: jetson-nano-2 and pi-5-1 only.
 - Unexplained, reported: Jetson context switch about 3.3x slower after UEFI
   than after kexec; Pi 5 `bench smp` tasks for CPUs 2 and 3 report CPU 1.
 - #1199 filed: full Jetson test kernel page-faults in a Lua test.
+- Pi 5 full NC baseline test kernel: 2473 tests, 2422 pass, 33 ignored, 18
+  failures, none in coherency, SMP or integration (test_shell 2,
+  test_blob_autoload 14, test_eviction 1, test_timer_irq_is_physical 1).
+  All in the family tracked by #1109 (17 on unmodified main). These 18 are
+  the bar for the cacheable test kernel.
 
 ### Lab notes
 
