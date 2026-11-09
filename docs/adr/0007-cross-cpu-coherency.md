@@ -69,10 +69,11 @@ a different Pi 5 EEPROM or BL31 (version not determined here).
   from CPUs 1-3 under both); `CLUSTERECTLR_EL1` compared on Pi 5 only.
 - SLM-OS row-tagged suite, every row 0 / 0 / 0 weak: Pi 5 NC, `NC_AXIS=OFF`
   and removal; Jetson NC on kexec, `NC_AXIS=OFF` and removal on both paths
-  (removal UEFI kept as a summary only). Staleness seen on hardware:
-  caches-off readers on every same-cluster pair; under `NC_AXIS=OFF` a
-  Non-shareable alias timed out on exactly the 16 cross-cluster pairs (the
-  earlier NC run: 11 of 16); control (a) not run on the removal.
+  (removal UEFI kept as a summary only). The suite detects a reader that
+  never sees the writer's lines: an NC-alias reader fails every pair, a
+  Non-shareable alias the 16 Jetson cross-cluster pairs, both by timeout.
+  No forbidden predicate has fired on real hardware, and P3 is not a
+  coherence detector, so late or out-of-order lines are not ruled out.
 - Removal against NC: context switch Pi 5 2318 to 105 ns, Jetson 5456 to
   84 ns (kexec), 18008 to 66-102 ns (UEFI); IPC Pi 5 812 to 131 ns, Jetson
   equal; stealing equal on Pi 5, equal or better on Jetson; `bench smp`

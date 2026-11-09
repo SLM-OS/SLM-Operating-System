@@ -140,7 +140,7 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
 |---|---|---|---|
 | C0 | Architecture and firmware facts | PASS (round 3), merged | 3 |
 | C1 | Linux reference bar | PASS (round 2), merged (58331fd2) | 2 |
-| C2 | `coherency` verb and litmus suite | round 1 FAIL; rev 3 suite pushed (10f8688e), hardware evidence via C3 runs | 1 |
+| C2 | `coherency` verb and litmus suite | round 2 PASS on a narrowed claim (extension step 3) | 2 |
 | C3 | Boot-sequence audit and cacheable build | complete 07:54 UTC; critic: Pi 5 PASS, Jetson FAIL against the removal bar | 1 |
 | C4 | Decision, ADR 0007, draft PR | ADR 0007 PASS (round 3); removal pending on both boards; PR gated (see Budget) | 3 |
 
@@ -271,6 +271,25 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
   same NDIV 135.
 - Gate opened about 07:55 UTC (ADR PASS, C3 complete on Jetson): applying
   the user's standing instruction (see Budget).
+
+- C2 round 2 (extension step 3, 09:40 UTC): PASS on a narrowed claim.
+  Rev 3 closes the stale-reader false pass for P1, P2 and P4 (tags, init
+  tag, foreign-after-own forbidden, observed rule, tagged P4 done). With
+  control (b), the suite detects a reader that never sees the writer's lines
+  on Pi 5 (12/12 P2, 4/4 P4 rows) and on Jetson same-cluster (14/14) and
+  cross-cluster (16/16) pairs on both paths; control (a) adds the Jetson
+  cross-cluster pairs only; detection is always by timeout or weak, never by
+  a forbidden count. Gaps: no forbidden predicate has fired on real
+  incoherence, so intermittent or ordering-level staleness is not shown
+  detectable; P3 is a DMB ordering test, not a coherence detector, and is
+  unsensitized in SLM-OS; P1 and P5 are not injected end to end; regressions
+  between successive read pairs are unchecked; controls are report-only;
+  each run lasts seconds (Pi 5 about 4 s, Jetson 14-19 s) against Linux's
+  10 minutes; control (c) cross-cluster misses (UEFI 0>5, 1>5, 2>5, 3>5;
+  kexec V3T run 2 5>3) inconclusive by c0 (c). Step-1 rebased captures did
+  not exist yet at review time. Overturning observation: any control-(b)
+  row passing on any board or path. ADR 0007 evidence line narrowed to this
+  claim (wording only, no measurement changed).
 
 ## Failed approaches
 
