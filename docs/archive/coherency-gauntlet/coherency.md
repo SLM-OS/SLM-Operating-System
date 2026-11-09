@@ -473,6 +473,15 @@ gate (step 3), together with the rest of the instruction.
   full log, 8 without), 0 partial, 0 silent. The #1195 rig was far healthier
   than earlier in the night.
 - Card restored at 06:18 UTC; pi-5-1 ON at the shell on its original kernel.
+- Critic-requested series, removal test kernel at f546a126 (ef920293), 11
+  boots 06:31 to 07:36 UTC: all 11 reached the suite summary, 0 boot-flag
+  warnings, coherency 26/26 and integration 16/16 on every boot. 10 boots
+  show exactly the 18 #1109 failures; **boot W9 adds a 19th,
+  `test_slm_stats_live_from_second_session` (`test_slm_shell.c:892`), a
+  100000-yield bounded wait on a volatile flag set by a helper on the same
+  CPU. Cause undetermined (timing bound or lost visibility); filed #1202.**
+  W2 and W9 captures began mid-run. Every whole-run boot logs 98 to 117
+  dormancy-enter / ALREADY_ON wedge pairs, as in the NC builds (116, 115).
 
 ### Lab notes
 
