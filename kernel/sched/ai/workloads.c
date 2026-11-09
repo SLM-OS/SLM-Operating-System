@@ -18,13 +18,10 @@
  *
  * Cross-CPU coherency: each worker writes only its own slot, then
  * calls cache_clean on it; the driver invalidates the array before
- * reading. On NC-memory platforms the records still live in BSS for
- * simplicity — every record is on its own 64-byte cacheline and the
- * "writer-side clean + reader-side invalidate" pattern is exactly
- * the one called out in kernel/CLAUDE.md §"Cache Maintenance (Pi 5
- * / Jetson)". This is the same approach `bench stealing` uses on
- * cacheable BSS platforms; we follow it uniformly so the harness has
- * one code path.
+ * reading. Every record is on its own 64-byte cacheline. On coherent
+ * hardware the clean/invalidate pair is redundant but harmless
+ * (kernel/CLAUDE.md §"Cross-CPU Coherency"); every platform uses the
+ * same code path.
  */
 
 #if defined(CONFIG_AI_SCHEDULER)

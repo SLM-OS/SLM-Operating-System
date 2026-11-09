@@ -419,7 +419,7 @@ void kernel_main(void *dtb)
     pmm_dump_stats();
 #endif
 
-    /* Initialize non-cacheable shared memory region (Pi 5 only) */
+    /* Initialize the non-cacheable DMA region (Pi 5, Jetson) */
     ncmem_init();
 
     /* Parse the embedded operator-library blob (#714). Pure CPU side
@@ -428,12 +428,6 @@ void kernel_main(void *dtb)
      * -DOPLIB_BLOB=path to embed a real library produced by
      * scripts/build-operator-library.py. */
     (void)oplib_pool_init();
-
-    /* Move UART lock to NC memory for cross-CPU safety */
-    {
-        extern void kprintf_init_nc_lock(void);
-        kprintf_init_nc_lock();
-    }
 
     /* Initialize interrupt controller */
     uart_puts("\n");
@@ -489,18 +483,6 @@ void kernel_main(void *dtb)
          * jitter source's CNTPCT samples remain the floor. */
         WARN("RNG firmware seed absent — boot entropy is jitter-only");
     }
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.
-     * Must be after vmm_init() so the write targets NC memory (DRAM),
-     * not the cacheable identity map from boot.S. Secondary CPUs will
-     * poll this flag after booting — it must be 0 until scheduler_init
-     * sets it to 1. */
-    {
-        extern void nc_zero_sched_init_flag(void);
-        nc_zero_sched_init_flag();
-    }
-#endif
 
     /* Initialize SMP and boot secondary CPUs */
     uart_puts("\n");

@@ -7,7 +7,6 @@
 #include "unity.h"
 #include "task.h"
 #include "sched.h"
-#include "ncmem.h"
 #include "sched_policy.h"
 #include "slm_ffi.h"
 #include "spinlock.h"
@@ -3591,11 +3590,9 @@ static void test_reposition_only_moves_queued_task(void)
 /*
  * Test (#1103): a reposition from CPU 0 moves a holder queued on CPU 1. A
  * CRITICAL task keeps CPU 1 busy so the queue stays put while it's inspected.
- * The flags are in NC memory where the platform has it, because they cross CPUs.
+ * The flags cross CPUs.
  */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
 static volatile uint32_t repos_flags_storage[5];
-#endif
 
 static void repos_spinner_entry(void *arg)
 {
@@ -3648,12 +3645,7 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
     if (cpu_count < 2) {
         TEST_IGNORE_MESSAGE("Need 2+ CPUs");
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    volatile uint32_t *f = ncmem_alloc(5 * sizeof(uint32_t), sizeof(uint32_t));
-    TEST_ASSERT_NOT_NULL(f);
-#else
     volatile uint32_t *f = repos_flags_storage;
-#endif
     /* 0: spinner running, 1: release it, 2-4: spinner, peer, holder done. */
     for (int i = 0; i < 5; i++) {
         f[i] = 0;
@@ -5490,10 +5482,10 @@ static void test_fp_save_restore_callable(void)
 
 /*
  * #1045: sched_runqueue_clear must zero the whole run queue, the AI
- * tick counters included. On NC-memory platforms the queues come from
- * ncmem_alloc, which does not zero, so a field-by-field init that
- * missed the counters left them holding leftover data after kexec.
- * QEMU uses a zeroed BSS fallback, so poison a local queue instead.
+ * tick counters included. A field-by-field init once missed the
+ * counters, which then held leftover data after kexec (the queues lived
+ * in unzeroed NC memory at the time). BSS starts zeroed, so poison a
+ * local queue instead.
  */
 static void test_sched_runqueue_clear_zeroes_all_fields(void)
 {
@@ -5614,12 +5606,8 @@ static void test_hw_timer_counter_advances(void)
 }
 
 /*
- * Regression: UART output must work after kprintf_init_nc_lock.
- *
- * On Pi 5, the UART lock was changed from ldaxr/stxr spinlock to
- * IRQ-disable-only to avoid deadlocks with incoherent L2 caches.
- * This test verifies uart_puts works correctly mid-boot and
- * doesn't deadlock.
+ * Regression: UART output works mid-boot and the locked variants do
+ * not deadlock.
  */
 static void test_uart_output_after_init(void)
 {

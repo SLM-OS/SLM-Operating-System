@@ -27,7 +27,6 @@
 #include "gic.h"
 #include "timer.h"
 #include "cache.h"
-#include "ncmem.h"
 #include "preempt.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
@@ -97,12 +96,12 @@ _Static_assert(CACHE_LINE_SIZE == 64,
 
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
- * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
+ * used by spinlocks needs cacheable memory. */
 static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
 
 #if CONFIG_WORK_STEALING
 /*
- * Per-CPU stealable task deque (#59 Phase B, S1 NC placement). One
+ * Per-CPU stealable task deque (#59 Phase B). One
  * entry per CPU. Tasks are pushed here (in addition to the linked-list
  * run queue) when scheduler_add_task_to_cpu is called with a task whose
  * cpu_affinity is CPU_AFFINITY_ANY. Idle CPUs drain these in
@@ -112,35 +111,20 @@ static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
  * been terminated); sched_try_steal() validates under victim's rq_lock
  * and the per-slot generation counter (#139) before accepting a steal.
  *
- * Placement:
- *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson) — allocated from NC memory
- *     at scheduler_init(). Cross-CPU steals see writes instantly, no
- *     DC CIVAC/CVAC needed.
- *   - Other (QEMU ARM64, x86-64) — cacheable BSS array. Caches are
- *     coherent; no NC backing needed.
+ * Placement: cacheable BSS on every platform; the caches are coherent
+ * (docs/adr/0006-cross-cpu-coherency.md, #1193).
  *
  * Locking: see `steal_deque_lock[MAX_CPUS]` below. The deque's own
  * `steal_deque_*` functions are lockless and the callers in sched.c
  * are responsible for serializing access. The steal_deque_t used to
  * embed its own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` made
- * that lock a no-op (exclusive monitors don't work on NC memory /
- * post-kexec A78AE), so concurrent push/pop/steal could corrupt the
+ * that lock a no-op, so concurrent push/pop/steal could corrupt the
  * deque — observed as Instruction Abort at ELR=0x0 during `bench
  * stealing` on jetson-nano-2. The external-lock pattern matches
  * `rq_lock[]`: the lock lives in cacheable memory and uses real
  * exclusive monitors on every platform that supports them.
- *
- * The two configurations share the same access pattern through
- * `cpu_steal_deques[cpu]`; the definition below selects storage.
  */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-/* cpu_steal_deques is a pointer into NC memory, assigned in
- * scheduler_init() from ncmem_alloc. Indexed via cpu_steal_deques[cpu]
- * at every call site, same spelling as the BSS array below. */
-static steal_deque_t *cpu_steal_deques;
-#else
 static steal_deque_t cpu_steal_deques[MAX_CPUS];
-#endif
 
 /* Per-CPU steal-deque locks. Cacheable so exclusive-monitor
  * primitives work on every platform, unlike the embedded lock in
@@ -179,15 +163,8 @@ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 }
 
 /*
- * Per-CPU run queue access.
- *
- * On Pi 5, run queues are in non-cacheable memory at NC_MEM_BASE to bypass
- * the L1/L2 incoherency (the NC-memory model). The address is computed
- * from compile-time constants — no cacheable pointer indirection that would
- * itself be invisible to other CPUs.
- *
- * On other platforms (QEMU, Jetson), caches are coherent and run queues
- * live in the normal BSS-resident fallback array.
+ * Per-CPU run queue access. The run queues live in cacheable BSS
+ * (sched.cpu_fallback) on every platform.
  */
 /* Forward declaration — defined below after sched struct */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu);
@@ -389,32 +366,8 @@ uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
 
 #endif /* CONFIG_AI_SCHEDULER */
 
-/* Per-CPU diagnostic counters for cross-CPU dispatch debugging.
- * On Pi 5 these must be in NC memory for cross-CPU visibility —
- * secondary CPU writes to cacheable BSS are invisible to CPU 0. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-/* Allocated from NC region in scheduler_init for cross-CPU visibility */
-volatile uint32_t *sched_diag_tick;
-volatile uint32_t *sched_diag_schedule;
-volatile uint32_t *sched_diag_picked;
-volatile uint32_t *sched_diag_idle_loops;  /* idle task iteration count per CPU */
-/* Work-stealing observability counters (#105). Incremented by
- * sched_try_steal on the thief's CPU and read by the `cpu` shell
- * command. NC-backed on PLATFORM_HAS_NC_MEMORY for the same
- * cross-CPU visibility reasons as the other sched_diag_* counters.
- * All four are initialised to zero by scheduler_init. */
-volatile uint32_t *sched_diag_steal_attempts;      /* sched_try_steal entries  */
-volatile uint32_t *sched_diag_steal_successes;     /* live task returned       */
-volatile uint32_t *sched_diag_steal_stale;         /* stale pointer discarded  */
-volatile uint32_t *sched_diag_steal_empty_victim;  /* victim had nothing to take */
-volatile uint32_t *sched_diag_steal_push_full;     /* push failed — deque full (#175) */
-static struct cpu_runqueue *nc_runqueues;
-/* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
- * handshake: cacheline-aligned, atomic store + cache_invalidate polling
- * with delay for natural L2 eviction. */
-static volatile uint32_t sched_init_flag __attribute__((aligned(64)));
-#define nc_sched_initialized sched_init_flag
-#else
+/* Per-CPU diagnostic counters for cross-CPU dispatch debugging,
+ * declared in sched_diag.h. */
 volatile uint32_t sched_diag_tick[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
 volatile uint32_t sched_diag_picked[MAX_CPUS];
@@ -424,16 +377,11 @@ volatile uint32_t sched_diag_steal_successes[MAX_CPUS];
 volatile uint32_t sched_diag_steal_stale[MAX_CPUS];
 volatile uint32_t sched_diag_steal_empty_victim[MAX_CPUS];
 volatile uint32_t sched_diag_steal_push_full[MAX_CPUS];
-#endif
 
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    return &nc_runqueues[cpu];
-#else
     return &sched.cpu_fallback[cpu];
-#endif
 }
 
 /*
@@ -581,44 +529,11 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
-        /* Idle-loop heartbeat. The sched_diag_idle_loops array is
-         * NC-backed on PLATFORM_HAS_NC_MEMORY (see scheduler_init)
-         * and plain BSS elsewhere — both paths produce a counter
-         * that CPU 0 can read without cache maintenance. Used by
-         * `ws-diag` (integration tests) and `cpu` (shell) to
-         * distinguish "secondary never reached idle" (counter==0)
-         * from "secondary is idling but SEV is not reaching it"
-         * (counter frozen after initial iterations).
-         *
-         * NULL guard applies only on PLATFORM_HAS_NC_MEMORY where
-         * the symbol is pointer-backed (scheduler_init allocates
-         * via ncmem_alloc, which could in principle return NULL if
-         * the 2 MB NC arena is exhausted; scheduler_init panics
-         * first in practice). On other platforms the symbol is a
-         * BSS array whose address is always non-NULL — GCC's
-         * -Werror=address would flag an unconditional `if (arr)`
-         * there, so the check is gated. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (sched_diag_idle_loops) {
-            sched_diag_idle_loops[cpu_id()]++;
-        }
-#else
+        /* Idle-loop heartbeat, read by `ws-diag` (integration tests)
+         * and `cpu` (shell) to distinguish "secondary never reached
+         * idle" (counter==0) from "secondary is idling but SEV is not
+         * reaching it" (counter frozen after initial iterations). */
         sched_diag_idle_loops[cpu_id()]++;
-#endif
-#if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
-        /* Belt-and-braces trace slot at a fixed NC address so early-
-         * boot analysis can confirm the counter is wired up even
-         * before scheduler_init finishes. cpu_logical_map[] lookup —
-         * Jetson dual-cluster safe (#647). */
-        {
-            uint64_t mpidr;
-            __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-            int hw_cpu = cpu_logical_id(mpidr);
-            if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
-                (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
-            }
-        }
-#endif
 
         /* Unmask IRQ so timer interrupts can fire.
          * This must be inside the loop because context switch saves/restores
@@ -629,9 +544,8 @@ static void idle_task_func(void *arg)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
 #elif defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
-        /* Pi 5/Jetson idle loop. Keyed on the platform, not on
-         * PLATFORM_HAS_NC_MEMORY: which CPUs may WFI is a timer-IRQ
-         * delivery question, and it must not change under NC_AXIS=OFF.
+        /* Pi 5/Jetson idle loop. Which CPUs may WFI is a timer-IRQ
+         * delivery question, keyed on the platform.
          *
          * With SECONDARY_PREEMPT: all CPUs unmask IRQs and WFI so
          * timer-driven preemption works on secondary CPUs too.
@@ -762,9 +676,7 @@ void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
     if (!task || !ai_priority_actions) {
         return;
     }
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->pi_priority);
-#endif
     /* While a task runs on a borrowed priority (#1103) its effective priority
      * says nothing about the task itself: stepping from it would leave the
      * borrowed level behind as the AI's choice after the mutex is released.
@@ -775,22 +687,16 @@ void sched_ai_apply_priority_action(struct task *task, uint8_t priority_adj)
     if (task->pi_priority > effective_base_priority(task)) {
         return;
     }
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->effective_priority);
-#endif
     task->ai_priority = sched_ai_step_priority(task->effective_priority,
                                                priority_adj);
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->ai_priority);
-#endif
 }
 
 /* Base priority for a recompute: the AI's level while one is set. */
 static uint8_t effective_base_priority(struct task *task)
 {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->ai_priority);
-#endif
     if (ai_priority_actions && task->ai_priority != TASK_AI_PRIORITY_NONE) {
         return task->ai_priority;
     }
@@ -809,13 +715,9 @@ static uint8_t effective_base_priority(struct task *task)
  */
 static void set_effective_priority(struct task *task, uint8_t priority)
 {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->pi_priority);
-#endif
     task->effective_priority = (task->pi_priority > priority) ? task->pi_priority : priority;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->effective_priority);
-#endif
 }
 
 /*
@@ -835,9 +737,7 @@ static void update_deadline_boost(struct task *task)
     }
 
     /* Deadline may have been set by another CPU */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->deadline_ns);
-#endif
 
     if (task->deadline_ns == 0) {
         /* No deadline: the base priority, or the inherited floor if higher */
@@ -884,23 +784,6 @@ void sched_refresh_effective_priority(struct task *task)
 /*
  * Initialize the scheduler (called on boot CPU).
  */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-/* Called from main.c after vmm_init, before smp_init */
-void nc_zero_sched_init_flag(void)
-{
-    volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-    *nc_flag = 0;
-    __asm__ volatile("dc civac, %0" :: "r"(nc_flag) : "memory");
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /* Zero NC_DBG and NC_FLAG_READ regions so stale previous-boot data
-     * is cleared. Any non-zero value after boot = written by current boot. */
-    for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + i * 4) = 0;
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + i * 4) = 0;
-    }
-}
-#endif
 
 void scheduler_init(void)
 {
@@ -911,55 +794,12 @@ void scheduler_init(void)
     sched.timer_ticks = 0;
     sched.isolated_cores = 0;
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_runqueues = ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue),
-                               CACHE_LINE_SIZE);
-    if (!nc_runqueues) {
-        INFO("SMP: NC run queue allocation failed");
-        for (;;) {
-            ;
-        }
-    }
-    INFO("SMP: run queues in NC memory at 0x%lx",
-         (unsigned long)nc_runqueues);
-#endif
-
-    /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */
+    /* Initialize task table */
     extern void task_table_init(void);
     task_table_init();
 
     /* Initialize sleep queue (#319) */
     task_sleep_init();
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Allocate diagnostic counters from NC memory for cross-CPU visibility */
-    sched_diag_tick = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_schedule = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_picked = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        sched_diag_tick[i] = 0;
-        sched_diag_schedule[i] = 0;
-        sched_diag_picked[i] = 0;
-    }
-    sched_diag_idle_loops = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        sched_diag_idle_loops[i] = 0;
-    }
-
-    /* Work-stealing observability counters (#105, #175). */
-    sched_diag_steal_attempts     = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_steal_successes    = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_steal_stale        = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_steal_empty_victim = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    sched_diag_steal_push_full    = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        sched_diag_steal_attempts[i] = 0;
-        sched_diag_steal_successes[i] = 0;
-        sched_diag_steal_stale[i] = 0;
-        sched_diag_steal_empty_victim[i] = 0;
-        sched_diag_steal_push_full[i] = 0;
-    }
-#endif
 
     /* Secondary-CPU preemption state (Pi 5 only). No-op on other platforms. */
     preempt_init();
@@ -968,25 +808,11 @@ void scheduler_init(void)
      * undefined. */
     preempt_check_cpu_mpidr(0);
 
-#if CONFIG_WORK_STEALING && defined(PLATFORM_HAS_NC_MEMORY)
-    /* Allocate the per-CPU steal deque array from NC memory so cross-CPU
-     * steals see writes without cache maintenance. `steal_deque_t`
-     * contains a spinlock, which relies on SPINLOCK_SKIP_LOCKING
-     * (barrier-only) on NC-memory platforms; ldaxr/stxr on NC memory
-     * is never executed. See the comment above the cpu_steal_deques
-     * declaration. */
-    cpu_steal_deques = ncmem_alloc(MAX_CPUS * sizeof(steal_deque_t),
-                                   CACHE_LINE_SIZE);
-    if (!cpu_steal_deques) {
-        panic("scheduler_init: failed to allocate cpu_steal_deques from NC memory");
-    }
-#endif
-
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         spin_init(&rq_lock[i]);
         /* Whole struct, not field by field: the AI tick counters were
-         * missed that way and started from leftover NC data (#1045). */
+         * missed that way and started from leftover data (#1045). */
         sched_runqueue_clear(cpu_rq(i));
 #if CONFIG_WORK_STEALING
         spin_init(&steal_deque_lock[i]);
@@ -1009,36 +835,6 @@ void scheduler_init(void)
 
     sched.initialized = 1;
     cache_clean(&sched.initialized);
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Also set an NC flag for secondary CPUs.
-     * The cacheable sched.initialized + cache_clean/invalidate doesn't
-     * work because DC CIVAC doesn't propagate through L2 on Pi 5.
-     * Secondary CPUs poll the NC flag instead. */
-    /* Signal via cpu_boot_flag — the ONLY proven cross-CPU channel.
-     * Write value 2 to each secondary CPU's boot flag slot.
-     * Same pattern as boot handshake (atomic store + cache_clean). */
-    nc_sched_initialized = 1;
-    /* Write to NC flag AND CIVAC to push through any cacheable TLB stale entry.
-     * Even if CPU 0's TLB maps this address as cacheable (stale from boot.S),
-     * CIVAC pushes L1→L2→DRAM. Secondary CPUs read from NC (DRAM). */
-    {
-        volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-        *nc_flag = 1;
-        __asm__ volatile("dc civac, %0" :: "r"(nc_flag) : "memory");
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
-    {
-        extern volatile uint32_t cpu_boot_flag[];
-        for (uint32_t i = 1; i < cpu_count; i++) {
-            cpu_boot_flag[i] = 2;
-            /* DC CIVAC: clean L1→L2→PoC (main memory on BCM2712).
-             * DC CVAC only goes to L2. DC CIVAC cleans then invalidates,
-             * which forces the line all the way to DRAM. */
-            __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[i]) : "memory");
-            __asm__ volatile("dsb sy" ::: "memory");
-        }
-    }
-#endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
 #if !defined(PLATFORM_X86_64)
@@ -1053,15 +849,8 @@ void scheduler_init(void)
  */
 int scheduler_is_initialized(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Read the NC flag at a fixed NC address.
-     * CPU 0 writes 1 to this address in scheduler_init().
-     * NC reads bypass L2, going directly to DRAM. */
-    return *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64) == 1;
-#else
     cache_invalidate(&sched.initialized);
     return sched.initialized;
-#endif
 }
 
 /*
@@ -1111,18 +900,8 @@ void scheduler_init_secondary(uint32_t cpu)
     }
 #endif
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xB0 = about to acquire rq_lock */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB0;
-#endif
-
     /* Lock this CPU's queue to update idle task */
     irq_flags_t flags = rq_lock_irqsave(cpu);
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xB1 = acquired rq_lock */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB1;
-#endif
 
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
@@ -1131,11 +910,6 @@ void scheduler_init_secondary(uint32_t cpu)
     cpu_rq(cpu)->idle_task = idle;
 
     rq_unlock_irqrestore(cpu, flags);
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xB2 = released rq_lock, function about to return */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB2;
-#endif
 
     /* Skip INFO print on secondary CPUs — uart_lock contention may hang */
     if (cpu == 0) {
@@ -1245,13 +1019,12 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     DEBUG_PRINT("Added task '%s' to CPU %u run queue (ready=%u)",
                 task->name, cpu, rq->ready_count);
 
-    /* Clean specific fields written inside the lock to PoC.
-     * Under the NC-memory model these are treated as staying in our
-     * L1 cache. The target CPU's
-     * schedule() invalidates before reading. Only clean the fields
-     * that were modified — NOT the entire task struct (which includes
-     * the task's context/stack that may be in active use). */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
+    /* Clean specific fields written inside the lock to PoC (redundant
+     * on coherent hardware, kept with the other cache.h calls, #1193).
+     * The target CPU's schedule() invalidates before reading. Only
+     * clean the fields that were modified, NOT the entire task struct
+     * (which includes the task's context/stack that may be in active
+     * use). */
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
@@ -1259,7 +1032,6 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     cache_clean(&task->assigned_cpu);
     cache_clean(&task->state);
     cache_clean(&task->effective_priority);
-#endif
 
     rq_unlock_irqrestore(cpu, flags);
 
@@ -1391,9 +1163,7 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->cpu_affinity);
-#endif
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
@@ -1553,9 +1323,7 @@ void sched_reposition_task(struct task *task)
     }
 
     for (int attempts = 0; attempts < 8; attempts++) {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&task->assigned_cpu);
-#endif
         uint32_t cpu = task->assigned_cpu;
         if (cpu >= cpu_count) {
             return;  /* Defensive: corrupt assigned_cpu — bail. */
@@ -1570,13 +1338,11 @@ void sched_reposition_task(struct task *task)
 
         bool moved = reposition_locked(task, cpu);
         if (moved) {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
             struct cpu_runqueue *rq = cpu_rq(cpu);
             cache_clean(&rq->head);
             cache_clean(&rq->tail);
             cache_clean(&rq->ready_count);
             cache_clean(&task->next);
-#endif
         }
 
         rq_unlock_irqrestore(cpu, flags);
@@ -1634,7 +1400,7 @@ void scheduler_terminate_task(struct task *task)
         struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
 
         task->state = TASK_TERMINATED;
-#if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
+#if !defined(PLATFORM_X86_64)
         cache_clean(&task->state);
 #endif
 
@@ -1663,9 +1429,8 @@ void scheduler_terminate_task(struct task *task)
      * doesn't grab a stale entry that later refers to a recycled task
      * slot (ABA race). See docs/archive/plans/jetson-capstone-execution-plan.md S1
      * for the panic that surfaced this — became observable on Jetson
-     * after cpu_steal_deques moved to NC memory in commit <pending>
-     * (before that, incoherent caches hid the race by failing the
-     * steal silently). Serialized by steal_deque_lock[cpu]. */
+     * once stealing started succeeding reliably. Serialized by
+     * steal_deque_lock[cpu]. */
     {
         irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
         steal_deque_remove(&cpu_steal_deques[cpu], task);
@@ -1735,9 +1500,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
      *
      * If the task was stolen, just update assigned_cpu so future
      * placements prefer target_cpu; the thief (or whoever has the
-     * task) will run it. The test still observes the task running
-     * because the body is written to NC memory from whichever CPU
-     * executes it. */
+     * task) will run it. */
     if (task->state == TASK_READY) {
         if (remove_from_cpu_queue_locked(task, old_cpu)) {
             add_to_cpu_queue_locked(task, target_cpu);
@@ -1751,11 +1514,9 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         task->assigned_cpu = target_cpu;
     }
 
-    /* Clean modified fields to PoC for cross-CPU visibility.
-     * Under the NC-memory model writes are treated as staying in this
-     * CPU's L1 cache. The target
-     * CPU's schedule() invalidates before reading. */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
+    /* Clean modified fields to PoC (redundant on coherent hardware,
+     * kept with the other cache.h calls, #1193). The target CPU's
+     * schedule() invalidates before reading. */
     cache_clean(&rq_old->head);
     cache_clean(&rq_old->tail);
     cache_clean(&rq_old->ready_count);
@@ -1766,7 +1527,6 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     cache_clean(&task->assigned_cpu);
     cache_clean(&task->state);
     cache_clean(&task->effective_priority);
-#endif
 
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
@@ -2617,11 +2377,9 @@ void schedule(void)
     coop_preempt_maybe_tick(this_cpu);
 #endif
 
-    /* On non-NC platforms, invalidate cached copy of run queue before reading.
-     * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
+    /* Invalidate the run queue before reading it: redundant on coherent
+     * hardware, kept with the other cache.h calls (#1193). */
     cache_invalidate_range(rq, sizeof(*rq));
-#endif
 
 #if CONFIG_WORK_STEALING
     /*
@@ -2659,9 +2417,7 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&rq->zombie);
-#endif
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
@@ -2675,15 +2431,11 @@ void schedule(void)
 
     /* If current task is still running and ready, re-add to queue */
     if (current) {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
-#endif
     }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&current->state);
-#endif
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
@@ -2737,13 +2489,9 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->state);
-#endif
     next->switches++;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->switches);
-#endif
     sched.context_switches++;  /* Racy but acceptable for stats */
 
     /*
@@ -2752,9 +2500,7 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current) {
-#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
-#endif
     }
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
@@ -2771,12 +2517,10 @@ void schedule(void)
      * Without this, the next dc civac at the start of schedule() would
      * write back our stale dirty cacheline, overwriting another CPU's
      * fresh data (e.g., a newly added task from scheduler_add_task). */
-#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
     cache_clean(&rq->zombie);
-#endif
 
     /*
      * Disable preemption during the context switch window.
@@ -2889,25 +2633,11 @@ void yield(void)
  */
 void scheduler_start(uint32_t this_cpu)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC0 = entered scheduler_start */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC0;
-#endif
-
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
 
     if (!sched.initialized) {
-        /* Write panic marker to NC before panic (uart may deadlock) */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xE1;
-#endif
         panic("scheduler_start: scheduler not initialized");
     }
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC1 = passed initialized check */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC1;
-#endif
 
     if (this_cpu == 0) {
         INFO("CPU %u: Starting scheduler", this_cpu);
@@ -2915,25 +2645,12 @@ void scheduler_start(uint32_t this_cpu)
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC2 = acquired rq lock */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC2;
-#endif
-
     /* Pick first task */
     struct task *first = pick_next_task(this_cpu);
     if (!first) {
         rq_unlock_irqrestore(this_cpu, flags);
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xE2;
-#endif
         panic("scheduler_start: no tasks to run");
     }
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC3 = picked a task */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC3;
-#endif
 
     /* Remove from queue */
     if (first != rq->idle_task && rq->head == first) {
@@ -2956,11 +2673,6 @@ void scheduler_start(uint32_t this_cpu)
 
     rq_unlock_irqrestore(this_cpu, flags);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC4 = unlocked, about to start timer */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC4;
-#endif
-
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
@@ -2968,11 +2680,6 @@ void scheduler_start(uint32_t this_cpu)
         INFO("Starting timer (100 Hz)...");
     }
     timer_start();
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC5 = timer started */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC5;
-#endif
 
     /* Guard against timer re-entrancy during switch_to.
      * The trampoline clears this after context restore. */
@@ -2984,11 +2691,6 @@ void scheduler_start(uint32_t this_cpu)
     if (this_cpu == 0) {
         INFO("Enabling interrupts...");
     }
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC6 = pre-daifclr */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC6;
-#endif
 
     /* Unmask IRQs.
      * With SECONDARY_PREEMPT: all CPUs enable here so the first timer
@@ -3021,18 +2723,8 @@ void scheduler_start(uint32_t this_cpu)
     __asm__ volatile("isb" ::: "memory");
 #endif
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xC7 = past daifclr */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC7;
-#endif
-
     /* Debug: mark that we reached pre-switch point */
     sched_diag_idle_loops[this_cpu] = 0xAAAA;
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xCC = about to call switch_to */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xCC;
-#endif
 
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.
@@ -3061,15 +2753,7 @@ void scheduler_tick(void)
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
     sched.timer_ticks++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* sched_diag_tick pointer is in cacheable BSS — secondary CPUs
-     * may have stale L2 data for it. Use direct NC address if available. */
-    if (sched_diag_tick) {
-        sched_diag_tick[cpu]++;
-    }
-#else
     sched_diag_tick[cpu]++;
-#endif
 
 #ifdef CONFIG_AI_SCHEDULER
     /* Per-CPU utilization tracking */

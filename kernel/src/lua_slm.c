@@ -2299,16 +2299,6 @@ static int l_ai_sched_decision(lua_State *L) {
  */
 static int l_cpu_info(lua_State *L) {
     if (!L) return 0;
-    /* Declared as pointer (into NC memory) on PLATFORM_HAS_NC_MEMORY
-     * platforms, as a plain BSS array elsewhere — must extern-declare
-     * in the matching shape or subscripting dereferences garbage. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    extern volatile uint32_t *sched_diag_tick;
-    extern volatile uint32_t *sched_diag_schedule;
-#else
-    extern volatile uint32_t sched_diag_tick[];
-    extern volatile uint32_t sched_diag_schedule[];
-#endif
 
     lua_createtable(L, 0, 4);
 
@@ -2336,10 +2326,10 @@ static int l_cpu_info(lua_State *L) {
         lua_pushboolean(L, sched_is_core_isolated(i));
         lua_setfield(L, -2, "isolated");
 
-        lua_pushinteger(L, sched_diag_tick ? (lua_Integer)sched_diag_tick[i] : 0);
+        lua_pushinteger(L, (lua_Integer)sched_diag_tick[i]);
         lua_setfield(L, -2, "ticks");
 
-        lua_pushinteger(L, sched_diag_schedule ? (lua_Integer)sched_diag_schedule[i] : 0);
+        lua_pushinteger(L, (lua_Integer)sched_diag_schedule[i]);
         lua_setfield(L, -2, "schedules");
 
         lua_rawseti(L, -2, (int)i + 1);

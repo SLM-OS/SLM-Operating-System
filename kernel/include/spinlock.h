@@ -32,17 +32,6 @@
 extern volatile int spinlock_hw_enabled;
 #endif
 
-/*
- * Pi 5 lock-word DRAM flush (kernel/CLAUDE.md "Pi 5 spinlock DRAM
- * flush"): DC CIVAC + DSB SY before every LDAXR and after every STLR.
- * It belongs to the NC axis of #1193, so NC_AXIS=OFF (NC_AXIS_OFF)
- * removes it and Pi 5 takes the generic LDAXR/STXR/STLR path that
- * every other ARM64 platform uses.
- */
-#if defined(PLATFORM_RASPI5) && !defined(NC_AXIS_OFF)
-#define SPINLOCK_DRAM_FLUSH 1
-#endif
-
 #if defined(PLATFORM_X86_64)
 /*
  * Memory barrier macros for x86-64.
@@ -165,32 +154,10 @@ static inline void spin_lock(spinlock_t *lock)
 
     uint32_t tmp;
 
-    /* Use WFE for low-power spinning.
-     *
-     * Pi 5 (BCM2712): per-core L2 caches are incoherent.
-     * STLR in spin_unlock writes to the releaser's L2 but never
-     * propagates to other CPUs' L2. Without DC CIVAC before LDAXR,
-     * a waiter reads its own stale "locked" cacheline and spins
-     * forever — observed as deadlock under contention in
-     * sched_try_steal (steal_deque_lock cross-CPU). DC CIVAC
-     * invalidates the local L2 copy, forcing the next load to
-     * read from DRAM where spin_unlock's DC CIVAC has already
-     * pushed the unlocked value. */
-#if defined(SPINLOCK_DRAM_FLUSH)
-    __asm__ volatile(
-        "   sevl\n"
-        "1: wfe\n"
-        "   dc civac, %1\n"            /* Invalidate stale L2 copy */
-        "   dsb sy\n"                  /* Ensure invalidate completes */
-        "   ldaxr   %w0, [%1]\n"       /* Load-acquire exclusive */
-        "   cbnz    %w0, 1b\n"         /* If locked, retry */
-        "   stxr    %w0, %w2, [%1]\n"  /* Try to store 1 (locked) */
-        "   cbnz    %w0, 1b\n"         /* If store failed, retry */
-        : "=&r"(tmp)
-        : "r"(&lock->lock), "r"(1)
-        : "memory"
-    );
-#else
+    /* Use WFE for low-power spinning. The lock word is Normal WB Inner
+     * Shareable memory, so the waiter sees the STLR in spin_unlock
+     * through hardware coherency and the global monitor; no cache
+     * maintenance is needed (#1193). */
     __asm__ volatile(
         "   sevl\n"                     /* Set event locally (avoid initial WFE block) */
         "1: wfe\n"                      /* Wait for event (low power spin) */
@@ -202,7 +169,6 @@ static inline void spin_lock(spinlock_t *lock)
         : "r"(&lock->lock), "r"(1)
         : "memory"
     );
-#endif
 #endif
 }
 
@@ -227,24 +193,6 @@ static inline int spin_trylock(spinlock_t *lock)
 
     uint32_t tmp, result;
 
-#if defined(SPINLOCK_DRAM_FLUSH)
-    /* Pi 5: invalidate stale L2 copy before trying (see spin_lock). */
-    __asm__ volatile(
-        "   dc civac, %2\n"
-        "   dsb sy\n"
-        "   ldaxr   %w0, [%2]\n"
-        "   cbnz    %w0, 1f\n"
-        "   stxr    %w0, %w3, [%2]\n"
-        "   cbnz    %w0, 1f\n"
-        "   mov     %w1, #1\n"
-        "   b       2f\n"
-        "1: mov     %w1, #0\n"
-        "2:\n"
-        : "=&r"(tmp), "=&r"(result)
-        : "r"(&lock->lock), "r"(1)
-        : "memory"
-    );
-#else
     __asm__ volatile(
         "   ldaxr   %w0, [%2]\n"
         "   cbnz    %w0, 1f\n"
@@ -258,7 +206,6 @@ static inline int spin_trylock(spinlock_t *lock)
         : "r"(&lock->lock), "r"(1)
         : "memory"
     );
-#endif
 
     return result;
 #endif
@@ -281,20 +228,6 @@ static inline void spin_unlock(spinlock_t *lock)
         return;
     }
 
-#if defined(SPINLOCK_DRAM_FLUSH)
-    /* Pi 5: push unlocked value to DRAM so other CPUs see it.
-     * Without DC CIVAC, the STLR stays in this CPU's L2 and
-     * other CPUs' LDAXR reads stale "locked" from their own L2. */
-    __asm__ volatile(
-        "   stlr    wzr, [%0]\n"
-        "   dc civac, %0\n"
-        "   dsb sy\n"
-        "   sev\n"
-        :
-        : "r"(&lock->lock)
-        : "memory"
-    );
-#else
     __asm__ volatile(
         "   stlr    wzr, [%0]\n"
         "   sev\n"
@@ -302,7 +235,6 @@ static inline void spin_unlock(spinlock_t *lock)
         : "r"(&lock->lock)
         : "memory"
     );
-#endif
 #endif
 }
 

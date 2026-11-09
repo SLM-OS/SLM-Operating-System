@@ -106,23 +106,14 @@ ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
 
-# Coherency gauntlet switches (#1193), Pi 5 and Jetson only. Both default
-# to the current behaviour (ON); empty means ON and passes nothing to
-# CMake, so default builds are unchanged.
+# Coherency gauntlet switch (#1193), Pi 5 and Jetson only. Defaults to
+# the current behaviour (ON); empty means ON and passes nothing to CMake,
+# so default builds are unchanged.
 #
-#   NC_AXIS=OFF       CPU-to-CPU shared state (run queues, task table,
-#                     current-task pointers, steal deques, sched_diag_*,
-#                     boot/init flags, preemption state) moves from the
-#                     NC block to cacheable memory; the UART lock becomes
-#                     a real spinlock; Pi 5 spinlocks drop the DC CIVAC
-#                     lock-word flush. The NC block stays mapped for
-#                     device DMA. See kernel/include/ncmem.h.
 #   SETWAY_INVAL=OFF  Drops the post-MMU DC ISW L1/L2 loop that every
 #                     Pi 5 / Jetson secondary runs in smp_boot.S.
 #
-#   make kernel PLATFORM=RASPI5 NC_AXIS=OFF
-#   make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF SETWAY_INVAL=OFF
-NC_AXIS ?=
+#   make kernel PLATFORM=JETSON_ORIN_NANO SETWAY_INVAL=OFF
 SETWAY_INVAL ?=
 
 # CMake arguments for the preemption flags. Every kernel configure rule
@@ -306,7 +297,6 @@ KERNEL_COMMON_CMAKE_ARGS = \
 	$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 	$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 	$(KERNEL_PREEMPT_CMAKE_ARGS) \
-	$(if $(filter OFF,$(NC_AXIS)),-DNC_AXIS=OFF) \
 	$(if $(filter OFF,$(SETWAY_INVAL)),-DSETWAY_INVAL=OFF) \
 	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
@@ -1650,13 +1640,13 @@ TIDY_WIDE_CMAKE_ARGS = -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -DSECONDARY_PREEM
 	-DJETSON_HW_TICK=OFF \
 	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON -DSLM_GPU_GOLDEN=ON \
 	-DSLM_REAL_GOLDEN=ON
-TIDY_WIDE_CFLAGS = -DSCHED_DEBUG_NC_TRACE -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
+TIDY_WIDE_CFLAGS = -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
 # Defines each wide database must contain, because CMake can silently drop an
 # option: on Pi 5, COOP_PREEMPT also needs PI5_COOP_PREEMPT. The check fails if
 # one is missing.
 TIDY_WIDE_DEFINES = HAILO_WIRE_DEBUG SLMOS_AI_WEIGHTS_REAL CONFIG_AI_SCHEDULER \
 	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART SLM_GPU_GOLDEN SLM_REAL_GOLDEN \
-	SCHED_DEBUG_NC_TRACE JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
+	JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
 TIDY_WIDE_SSH_DEFINES = NET_SSHD NET_SSHD_AUTOSTART
 TIDY_WIDE_DEFINES_QEMU_VIRT = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES)
 TIDY_WIDE_DEFINES_RASPI5 = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES) COOP_PREEMPT

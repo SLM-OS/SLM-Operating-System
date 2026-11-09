@@ -13,7 +13,6 @@
 
 #if defined(SECONDARY_PREEMPT)
 
-#include "ncmem.h"
 #include "smp.h"
 #include "trap.h"
 #include "debug.h"
@@ -29,10 +28,9 @@ _Static_assert(ARM64_MAX_CPUS_LITERAL == MAX_CPUS,
                "update kernel/include/cpu_id_asm.h");
 
 
-/* Per-CPU state, allocated from NC memory in preempt_init() on
- * PLATFORM_HAS_NC_MEMORY builds so writes from one CPU are visible to
- * any CPU that samples them without cache maintenance; cacheable BSS
- * under NC_AXIS=OFF. */
+/* Per-CPU state. preempt_init() points these at the cacheable BSS
+ * arrays below; the asm trampoline and maybe_arm_resched_trampoline
+ * reach the state through the pointers. */
 volatile uint32_t *reschedule_pending;
 volatile uint64_t *orig_elr;
 volatile uint64_t *orig_spsr;
@@ -55,38 +53,15 @@ volatile uint64_t *orig_spsr;
 
 extern volatile int preempt_disabled[MAX_CPUS];
 
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-/* NC_AXIS=OFF: the same per-CPU state in cacheable BSS. The trampoline
- * and maybe_arm_resched_trampoline reach it through the pointers above
- * either way, so nothing else changes. */
 static volatile uint32_t reschedule_pending_wb[MAX_CPUS] __attribute__((aligned(64)));
 static volatile uint64_t orig_elr_wb[MAX_CPUS] __attribute__((aligned(64)));
 static volatile uint64_t orig_spsr_wb[MAX_CPUS] __attribute__((aligned(64)));
-#endif
 
 void preempt_init(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    reschedule_pending = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
-    orig_elr  = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
-    orig_spsr = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
-#else
     reschedule_pending = reschedule_pending_wb;
     orig_elr  = orig_elr_wb;
     orig_spsr = orig_spsr_wb;
-#endif
-
-    /* NC allocation failure is non-recoverable: maybe_arm_resched_trampoline
-     * and the asm trampoline both unconditionally dereference these
-     * pointers on every timer IRQ, so a NULL would take down the first
-     * preempted task with an unrecoverable fault. Fail early with a
-     * clear panic message instead. */
-    if (!reschedule_pending || !orig_elr || !orig_spsr) {
-        panic("preempt_init: ncmem_alloc failed (pending=%p elr=%p spsr=%p, "
-              "ncmem used=%lu/%lu)",
-              reschedule_pending, orig_elr, orig_spsr,
-              (unsigned long)ncmem_used(), (unsigned long)NC_MEM_SIZE);
-    }
 
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         reschedule_pending[i] = 0;
@@ -184,8 +159,8 @@ void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
 {
     /* Pre-preempt_init bail (#750).
      *
-     * preempt_init() — which allocates reschedule_pending / orig_elr /
-     * orig_spsr from NC memory — runs inside scheduler_init(). Under
+     * preempt_init(), which points reschedule_pending / orig_elr /
+     * orig_spsr at their arrays, runs inside scheduler_init(). Under
      * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, kernel_main unmasks
      * IRQs on the primary right after timer_init() (#1198; before
      * that, the `msr daifclr, #0xf` at the tail of mmu_enable did it

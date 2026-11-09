@@ -19,49 +19,14 @@
 #include "kprintf_float.h"
 #include "uart.h"
 #include "spinlock.h"
-#include "ncmem.h"
 #include "string.h"
 #include <stdint.h>
 
-/* UART lock for thread-safe printf.
- *
- * Two locking strategies, selected by PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson,
- * unless built with NC_AXIS=OFF):
- *
- *   PLATFORM_HAS_NC_MEMORY: IRQ-disable only, no cross-CPU lock.
- *     On these platforms per-core L2 caches are treated as incoherent, so
- *     standard ldaxr/stxr spinlocks on cacheable memory deadlock under
- *     cross-CPU contention — each CPU sees its own stale "unlocked" state.
- *     This is safe because secondary CPUs only print during early boot
- *     (before scheduler start). After scheduler start, all UART output
- *     comes from CPU 0 (shell, tests, INFO logs). See smp.c:secondary_init.
- *     One deliberate exception: the Jetson `thermal log` diagnostic
- *     (#1093) prints from a task pinned to the last CPU, so it keeps
- *     reporting when CPU 0 is wedged. Its lines can interleave with,
- *     or garble, concurrent CPU 0 output; it is an opt-in debug aid.
- *     If secondary CPU printing is needed beyond that, an NC-memory-
- *     based lock must be added.
- *
- *   Default (QEMU, x86-64, and Pi 5 / Jetson under NC_AXIS=OFF):
- *     standard cacheable spinlock with IRQ save/restore. It is a real
- *     cross-CPU lock once vmm_init sets spinlock_hw_enabled (barrier
- *     only before that, when only CPU 0 runs), so secondary CPUs may
- *     print on this path. Panic and exception paths use the _unlocked
- *     variants and never take it. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-
-#define UART_LOCK_IRQSAVE() \
-    irq_flags_t _uart_flags; \
-    do { \
-        __asm__ volatile("mrs %0, daif" : "=r"(_uart_flags)); \
-        __asm__ volatile("msr daifset, #2" ::: "memory"); \
-    } while(0)
-
-#define UART_UNLOCK_IRQRESTORE() \
-    do { \
-        __asm__ volatile("msr daif, %0" :: "r"(_uart_flags) : "memory"); \
-    } while(0)
-#else
+/* UART lock for thread-safe printf: a cacheable spinlock with IRQ
+ * save/restore on every platform. It is a real cross-CPU lock once
+ * vmm_init sets spinlock_hw_enabled (barrier only before that, when only
+ * CPU 0 runs), so secondary CPUs may print. Panic and exception paths use
+ * the _unlocked variants and never take it. */
 static spinlock_t uart_lock = SPINLOCK_INIT;
 
 #define UART_LOCK_IRQSAVE() \
@@ -69,13 +34,6 @@ static spinlock_t uart_lock = SPINLOCK_INIT;
 
 #define UART_UNLOCK_IRQRESTORE() \
     spin_unlock_irqrestore(&uart_lock, _uart_flags)
-#endif
-
-void kprintf_init_nc_lock(void)
-{
-    /* On Pi 5/Jetson: UART lock is IRQ-disable only (no cross-CPU lock).
-     * Nothing to initialize. See comment above UART_LOCK_IRQSAVE. */
-}
 
 /* ========================================================================
  * Output Abstraction
