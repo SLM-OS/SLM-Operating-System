@@ -972,6 +972,23 @@ static void test_boot_caches_off_range_covers_caches_off_writes(void)
                         "range does not cover the L1 page table");
 }
 
+/*
+ * #1198: mmu_enable must return with the caller's DAIF. It used to end
+ * with `msr daifclr, #0xf`, unmasking IRQ, FIQ, SError and Debug on
+ * the primary before gic_init. vmm_init is entered with all four
+ * masked (boot.S primary_cpu), so the mask must still be 0xF after.
+ */
+static void test_mmu_enable_restores_caller_daif(void)
+{
+    uint64_t before = 0, after = 0;
+
+    vmm_mmu_enable_daif(&before, &after);
+
+    TEST_ASSERT_MESSAGE((before & 0x3C0ULL) == 0x3C0ULL,
+        "vmm_init was not entered with D, A, I and F masked");
+    TEST_ASSERT_EQUAL_HEX64(before, after);
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -983,6 +1000,7 @@ int test_suite_vmm(void)
     /* Page table verification */
     RUN_TEST(test_virt_to_phys_accuracy);
     RUN_TEST(test_boot_caches_off_range_covers_caches_off_writes);
+    RUN_TEST(test_mmu_enable_restores_caller_daif);
     RUN_TEST(test_va_pa_coherency);
 
     /* Platform-specific mapping granularity */
