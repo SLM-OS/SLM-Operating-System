@@ -492,3 +492,43 @@ Milestone for any issue filed this run: Backlog.
   (`c1/labctl-call-times.txt`) to test the one-call-at-a-time hypothesis
   against C2's concurrent Jetson traffic.
 - pi-5-1 granted to C1.
+
+## Entry 13 (09:38 UTC): C1 critic, code half and step-1 rows: PASS (partial) (critic-2-C1.md)
+
+- Verdict file: `critic-2-C1.md` (partial); QEMU logs and range-diff under
+  `run2-critic/c1/`.
+- Critic's own count: 30 capture files (NC 10/10 banner b8e71420, removal
+  20/20 banner 375ad4dd), every test name present, every failure counted:
+  #1202 removal 2/20 (run03, run16), NC 0/10; #1205 0/30; #1211 removal
+  2/20 (run01, run05), NC 0/10; the 18 #1109 failures in 30/30. In both
+  #1202 failures the waiter first saw the flag 1549 and 1294 us after
+  expiry, equal to the helper's own done stamp to the microsecond. Clause 1
+  of the brief's timing bar is met; clause 2 (wall-clock 20/20 both
+  kernels) has not run, so "timing artifact" is a supported hypothesis, not
+  a finding, and does not go into #1202 yet.
+- Reproduced: `make test` ARM64 and x86-64 at PR head a03fc75b (30dc24bc +
+  docs/testing.md); removal e94c251a equals 7d500e0e outside kernel/tests
+  and CMakeLists.txt, PR commits patch-id equal beneath the removal stack.
+- Critic findings: (1) `test_scheduler.c:3593` (`repos_read_queue`) is a
+  bare-count wait on CPU 1's run queue that the PR leaves with a reason the
+  critic disputes; convert or measure. (2) The `live_done` and
+  `second_done` writers are plain volatile stores, not release stores
+  (same as before; not a regression). (3) The PR body is stale (head
+  30dc24bc, "7 files" where conversions are in 6, docs/testing.md "not in
+  this PR") and omits `test_coop_preempt.c:147`, `test_net.c:2186` and
+  three sleep-count loops from its left-alone list. (4) The 2 s #1205 bound
+  is 1000 times the mean of the 2 or 3 yields the loop actually spent, not
+  a measurement of 1,000 NC yields.
+- Orchestrator ruling on (4), stated in the open: the brief's "what 1,000
+  yields took under NC" read literally as bare yields gives 2.3 ms, which
+  is below NC's own completion time in that test (3.48 to 10.6 ms in 30 of
+  30 boots), so a literal bound would fail the brief's own 20/20-under-NC
+  bar. The 2 s bound stands as the ruling of Entry 7, derived from the
+  in-loop yield cost; it is labelled an extrapolation, not a measurement.
+  The forced variant on NC (running now) measures 1,000 NC yields with the
+  slots forced remote.
+- Ruling on (1) to (3): no test-code change while C1's step-6 series runs,
+  so the 40 boots stay on the tested code. After step 6, C1 puts the
+  `repos_read_queue` conversion and the release stores in one follow-up
+  commit on a stacked draft PR based on #1215, and corrects #1215's body
+  (head, file count, left-alone list).
