@@ -254,3 +254,53 @@ Milestone for any issue filed this run: Backlog.
   32 tasks. P3-low, no reachable failure shown, not fixed.
 - Cells for the hardware stage: nc 983bddc9, ncoff cbab2fc6 (10f8688e,
   `NC_AXIS=OFF`), removal c1846b3b (7d500e0e). Waiting on jetson-nano-2.
+
+## Entry 7 (08:28 UTC): C1 checkpoint A (steps 1 and 2, builder report, critic pending)
+
+- Builds: NC `c1/instrument-1202-1205` @ b8e71420 (main 85f51ffd +
+  test-only instrumentation); removal `c1/instrument-1202-1205-removal` @
+  375ad4dd (f87d9e47, the pre-C0-rebase removal head, + the same commit).
+  `make test` passed on both. Raw captures on `gauntlet-2-hw-pi5` @ faa58639:
+  `c1/nc-instr-test-run{01..10}.txt` (banner b8e71420, 10 of 10),
+  `c1/removal-instr-test-run{01..20}.txt` (banner 375ad4dd, 20 of 20),
+  summary `c1/instr-boots.txt`. Each file is labctl boot_test's
+  `run_NN.txt` copied unchanged. Deviation: the MCP client stopped waiting
+  at 1800 s during the 20-boot series; the server finished all 20 runs
+  (07:25:58 to 08:17:42 UTC) and every file ends with its summary line.
+- `test_slm_stats_live_from_second_session` (#1202): NC 0/10, removal 2/20
+  (run03, run16). In both failures the flag was false at the 1 ms re-poll
+  and true at 10 ms and 100 ms; first true 1549 and 1294 us after expiry.
+  At expiry the helper was READY on CPU 2 in the `--follow` stage (10871 and
+  10686 us, one 10 ms tick of `task_sleep_ms(1)`); the waiter's 100,000
+  yields lasted 9312 and 9383 us. Builder verdict: timing bound, not lost
+  visibility. The run stop condition (flag never observed) did not fire.
+- `test_component_cleanup_ctx_is_per_task` (#1205): NC 0/10, removal 0/20.
+  Completion in 2 to 3 yields on both kernels, 3.48 to 10.6 ms after
+  dispatch. Cause of the run-1 failure not established. Hypothesis
+  (untested): 1,000 bare removal yields (70 to 127 us) are shorter than the
+  1.4 to 1.8 ms a slot on another CPU needs to run and be reaped; 1,000 NC
+  yields (2.3 ms) are longer.
+- Yield cost: NC bare 2298 to 2306 ns (20 samples), removal 70 to 127 ns
+  (40 samples).
+- New: `test_task_lifecycle` "Memory leak detected"
+  (`test_integration.c:576` on the removal branch) removal 2/20 (run01,
+  run05), NC 0/10, run-1 captures 0/34. Cause undetermined; its cleanup
+  window is a bare loop count (50 x yield + delay(50000)).
+- Orchestrator rulings: (1) bounds 250 ms (live; 100,000 NC yields =
+  230 ms) and 2 s (c4; 1,000 NC yields in that loop lasted at least 1.16 s
+  because each NC yield there waited 1.2 to 5.3 ms; the bare 2.3 ms is below
+  NC's own completion time and so is not the NC-equivalent). (2) #1205
+  needs a discriminating run because 0 of 30 failed: a temporary variant
+  (not in the PR) with the original 1,000-yield bound, slots forced to CPUs
+  1 to 3, re-polls after expiry, at least 20 iterations per boot. (3)
+  `test_task_lifecycle` filed as an issue, its cleanup window converted in
+  the step-4 sweep with the same discriminator (free pages re-polled at
+  10/100/1000 ms). An unexplained removal-only failure there blocks C4
+  under the removal bar even if #1202 and #1205 clear. (4) C1 owns the
+  removal rebase onto its helper commits (between `fix/boot-path-1193` and
+  the removal commits; test-file conflicts only; range-diff check). (5)
+  Step 6 NC kernel = C1 PR head (main + helper), per the brief; the removal
+  head also carries the fix stack, a recorded confound; the separating run
+  if needed is `fix/boot-path-1193` + helper.
+- pi-5-1 handed to C0 for checkpoint B (boot_test 10 on 167330f5). C1
+  continues steps 3 to 5 without a board.
