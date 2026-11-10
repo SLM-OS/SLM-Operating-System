@@ -80,6 +80,32 @@ set(TEST_SOURCES
 )
 ```
 
+### Waiting for Another Task
+
+A test that waits for a task or CPU to set a flag bounds the wait by wall
+clock, with the helpers in `kernel/tests/test_wait.h`, never by a count of
+`yield()` calls or loop iterations. A yield that finds nothing to run cost
+2.3 us on Pi 5 with the NC axis and 0.07 to 0.13 us without it (#1193), so a
+count expires about 20 times sooner once a context switch gets faster, while
+the work being waited for takes as long as before. That is what failed
+`test_slm_stats_live_from_second_session` in 2 of 20 Pi 5 boots (#1202).
+
+```c
+#include "test_wait.h"
+
+TEST_ASSERT_TRUE(test_wait_flag("helper", &helper_done, TEST_WAIT_S(1)) >= 0);
+long long us = test_wait_task_terminated("worker", t, TEST_WAIT_S(1));
+```
+
+`test_wait_until()` takes any condition function; `test_wait_until_v()` also
+logs a value (for example a free-page count). Each returns the elapsed
+microseconds, or -1 on a timeout. On a timeout the helper keeps yielding for
+1 s and logs whether the condition holds 1, 10, 100 and 1000 ms after the
+bound, which separates a slow helper (it holds late) from one that never
+finished. Bound a wait at no less than what it needs on the slowest kernel,
+rounded up, and at 1 s or more unless measured: a pass returns as soon as the
+condition holds. `test_wait.h` gives the rule.
+
 ### Test Output Format
 
 ```
