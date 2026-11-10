@@ -17,6 +17,7 @@
 #include "uart.h"
 #include "cache.h"
 #include "string.h"
+#include "test_wait.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -42,6 +43,38 @@ static void test_delay(volatile uint32_t count)
     while (count--) {
         __asm__ volatile("nop");
     }
+}
+
+/* Wall-clock wait for every task in ts[0..n) to reach TASK_TERMINATED
+ * (#1202, #1205: a wait bounded by a yield count expires sooner when a
+ * context switch gets faster). Returns elapsed us, or -1 on a timeout. */
+struct sched_wait_tasks {
+    struct task *const *ts;
+    int n;
+    uint32_t delay;     /* test_delay() count before each check, as the old
+                         * loops did between yields; 0 for none */
+};
+
+static bool sched_all_terminated(void *ctx)
+{
+    const struct sched_wait_tasks *w = ctx;
+    if (w->delay) {
+        test_delay(w->delay);
+    }
+    for (int i = 0; i < w->n; i++) {
+        if (__atomic_load_n(&w->ts[i]->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static long long sched_wait_all_terminated(const char *what,
+                                           struct task *const *ts, int n,
+                                           uint32_t delay, uint64_t timeout_us)
+{
+    struct sched_wait_tasks w = { ts, n, delay };
+    return test_wait_until(what, sched_all_terminated, &w, timeout_us);
 }
 
 /*
@@ -1024,14 +1057,11 @@ static void test_ffi_task_create_returns_id(void)
     struct task *t = task_get(id);
     TEST_ASSERT_NOT_NULL(t);
 
-    /* Wait for task to complete (it yields once then exits).
-     * Large timeout because cross-CPU dispatch on QEMU may be slow. */
-    int timeout = 500000;
-    while (t->state != TASK_TERMINATED && timeout > 0) {
-        yield();
-        timeout--;
-    }
-    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_test task did not complete");
+    /* Wait for task to complete (it yields once then exits). Wall-clock
+     * bound: the old 500,000 yields lasted 1.15 s on Pi 5 with the NC axis
+     * (2.3 us per yield, C1 run 2); 2 s, rounded up. */
+    TEST_ASSERT_MESSAGE(test_wait_task_terminated("ffi_test", t, TEST_WAIT_S(2)) >= 0,
+                        "ffi_test task did not complete");
     task_destroy(t);
 }
 
@@ -1068,13 +1098,9 @@ static void test_ffi_set_priority(void)
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, prio);
 
-    /* Wait for task to complete */
-    int timeout = 500000;
-    while (t->state != TASK_TERMINATED && timeout > 0) {
-        yield();
-        timeout--;
-    }
-    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_pri task did not complete");
+    /* Wait for task to complete (2 s: see test_ffi_task_create_returns_id). */
+    TEST_ASSERT_MESSAGE(test_wait_task_terminated("ffi_pri", t, TEST_WAIT_S(2)) >= 0,
+                        "ffi_pri task did not complete");
     task_destroy(t);
 }
 
@@ -1105,13 +1131,9 @@ static void test_ffi_set_deadline(void)
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
     TEST_ASSERT_EQUAL_UINT64(deadline, got);
 
-    /* Wait for task to complete */
-    int timeout = 500000;
-    while (t->state != TASK_TERMINATED && timeout > 0) {
-        yield();
-        timeout--;
-    }
-    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_dl task did not complete");
+    /* Wait for task to complete (2 s: see test_ffi_task_create_returns_id). */
+    TEST_ASSERT_MESSAGE(test_wait_task_terminated("ffi_dl", t, TEST_WAIT_S(2)) >= 0,
+                        "ffi_dl task did not complete");
     task_destroy(t);
 }
 
@@ -1212,12 +1234,13 @@ static void test_high_priority_runs_first(void)
     order_barrier_released = true;
     irq_restore(flags);
 
-    /* Wait for both tasks to complete, yielding to let them run */
-    int timeout = 100;
-    while ((low->state != TASK_TERMINATED || high->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for both tasks to complete, yielding to let them run.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { low, high };
+        (void)sched_wait_all_terminated("prio_order", ts, 2, 10000, TEST_WAIT_S(1));
     }
 
     /* Restore our priority */
@@ -1296,16 +1319,13 @@ static void test_priority_ordering_multiple_levels(void)
     order_barrier_released = true;
     irq_restore(flags);
 
-    /* Wait for all tasks to complete, yielding to let them run */
-    int timeout = 200;
-    while ((idle->state != TASK_TERMINATED ||
-            low->state != TASK_TERMINATED ||
-            normal->state != TASK_TERMINATED ||
-            high->state != TASK_TERMINATED ||
-            critical->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for all tasks to complete, yielding to let them run.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { idle, low, normal, high, critical };
+        (void)sched_wait_all_terminated("prio_all_levels", ts, 5, 10000, TEST_WAIT_S(1));
     }
 
     /* Restore our priority */
@@ -1379,13 +1399,13 @@ static void test_deadline_boost_affects_order(void)
     order_barrier_released = true;
     irq_restore(flags);
 
-    /* Wait for completion, yielding to let tasks run */
-    int timeout = 100;
-    while ((no_deadline->state != TASK_TERMINATED ||
-            urgent->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for completion, yielding to let tasks run.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { no_deadline, urgent };
+        (void)sched_wait_all_terminated("deadline_order", ts, 2, 10000, TEST_WAIT_S(1));
     }
 
     /* Restore our priority */
@@ -1865,13 +1885,13 @@ static void test_no_starvation(void)
     self->priority = TASK_PRIORITY_IDLE;
     self->effective_priority = TASK_PRIORITY_IDLE;
 
-    /* Wait for both to complete */
-    int timeout = 300;
-    while ((low_task->state != TASK_TERMINATED ||
-            high_task->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for both to complete.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { low_task, high_task };
+        (void)sched_wait_all_terminated("starvation", ts, 2, 10000, TEST_WAIT_S(1));
     }
 
     /* Restore our priority */
@@ -2000,16 +2020,13 @@ static void test_stress_mixed_priorities(void)
     self->priority = TASK_PRIORITY_IDLE;
     self->effective_priority = TASK_PRIORITY_IDLE;
 
-    /* Wait for all to complete, yielding to let them run */
-    int timeout = 300;
-    while ((t_idle->state != TASK_TERMINATED ||
-            t_low_dl->state != TASK_TERMINATED ||
-            t_normal->state != TASK_TERMINATED ||
-            t_high->state != TASK_TERMINATED ||
-            t_crit->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for all to complete, yielding to let them run.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { t_idle, t_low_dl, t_normal, t_high, t_crit };
+        (void)sched_wait_all_terminated("deadline_mixed", ts, 5, 10000, TEST_WAIT_S(1));
     }
 
     /* Restore our priority */
@@ -2069,6 +2086,15 @@ static void rapid_exit_task(void *arg)
     /* task_exit() is called automatically by task_entry_trampoline */
 }
 
+/* Poll condition for the rapid-exit wait; keeps the cache_invalidate the
+ * old loop did before each read of the state. */
+static bool rapid_exit_done(void *ctx)
+{
+    struct task *t = ctx;
+    cache_invalidate(&t->state);
+    return t->state == TASK_TERMINATED;
+}
+
 /*
  * Test: Rapidly create and destroy tasks on CPU 0 with timer running.
  * Exercises the task_exit/schedule race window. Before the IRQ mask fix,
@@ -2085,15 +2111,13 @@ static void test_rapid_task_exit_no_panic(void)
         /* Pin to CPU 0 — this tests the local task_exit race, not cross-CPU */
         scheduler_add_task_to_cpu(t, 0);
 
-        /* Wait for task to complete — polling with yield to let scheduler run */
-        int timeout = 200;
-        while (timeout > 0) {
-            cache_invalidate(&t->state);
-            if (t->state == TASK_TERMINATED) break;
-            yield();
-            timeout--;
-        }
-        TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for rapid exit task");
+        /* Wait for task to complete, polling with yield to let the
+         * scheduler run. Wall-clock bound: the old 200 yields lasted
+         * 0.46 ms on Pi 5 with the NC axis (2.3 us per yield, C1 run 2);
+         * 1 s, the floor in test_wait.h. */
+        TEST_ASSERT_MESSAGE(test_wait_until("rapid_exit", rapid_exit_done, t,
+                                            TEST_WAIT_S(1)) >= 0,
+                            "Timeout waiting for rapid exit task");
 
         /* Give scheduler time to clean up zombie */
         yield();
@@ -2181,7 +2205,11 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* Wait for completion */
+        /* Wait for completion. Left as a count on purpose (#1213): a
+         * wall-clock bound lets these tasks run, and in QEMU CPU 1 then
+         * stops running tasks; on Pi 5 this short bound expires before
+         * the task runs in almost every iteration (isolated 0/10 in C1
+         * run 2), and the test asserts nothing about completion. */
         int timeout = 100;
         while (t->state != TASK_TERMINATED && timeout > 0) {
             yield();
@@ -2228,6 +2256,7 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
+        /* Left as a count on purpose: see the isolated phase (#1213). */
         int timeout = 100;
         while (t->state != TASK_TERMINATED && timeout > 0) {
             yield();
@@ -2345,12 +2374,13 @@ static void test_benchmark_context_switch(void)
     scheduler_add_task_to_cpu(b, 0);
     irq_restore(flags);
 
-    /* Wait for benchmark to complete */
-    int timeout = 500;
-    while ((a->state != TASK_TERMINATED || b->state != TASK_TERMINATED) && timeout > 0) {
-        yield();
-        test_delay(10000);
-        timeout--;
+    /* Wait for benchmark to complete.
+     * Wall-clock bound, 1 s: the old count of yields with a short delay
+     * lasted milliseconds, and a yield can run other tasks for milliseconds
+     * (C1 run 2), so 1 s is the floor for a wait not measured on its own. */
+    {
+        struct task *const ts[] = { a, b };
+        (void)sched_wait_all_terminated("bench_context", ts, 2, 10000, TEST_WAIT_S(1));
     }
 
     /* Calculate results */
@@ -3620,11 +3650,10 @@ static void test_reposition_moves_task_queued_on_other_cpu(void)
     TEST_ASSERT_NOT_NULL(spin);
     task_set_affinity(spin, 1);
     scheduler_add_task_to_cpu(spin, 1);
-    int timeout = 200000;
-    while (!f[0] && timeout-- > 0) {
-        yield();
-    }
-    bool spinning = f[0] != 0;
+    /* Wall-clock bound: the old 200,000 yields lasted 460 ms on Pi 5 with
+     * the NC axis (2.3 us per yield, C1 run 2); 1 s, rounded up. */
+    bool spinning = test_wait_u32_nonzero("repos_spinner", &f[0],
+                                          TEST_WAIT_S(1)) >= 0;
 
     struct task *peer = task_create_with_priority("pi_peer", repos_done_entry, (void *)&f[3],
                                                   TASK_PRIORITY_NORMAL);
@@ -5619,19 +5648,17 @@ static void daif_probe_on(uint32_t cpu)
     TEST_ASSERT_NOT_NULL(t);
     t->cpu_affinity = cpu;
     scheduler_add_task_to_cpu(t, cpu);
-    int timeout = 200000;
-    while (!daif_probe_done && timeout-- > 0) {
-        yield();
-    }
+    /* Wall-clock bound: the old 200,000 yields lasted 460 ms on Pi 5 with
+     * the NC axis (2.3 us per yield, C1 run 2); 1 s, rounded up. */
+    (void)test_wait_int_at_least("daif_probe", &daif_probe_done, 1,
+                                 TEST_WAIT_S(1));
     if (!daif_probe_done) {
         scheduler_terminate_task(t);
         task_destroy(t);
         TEST_FAIL_MESSAGE("daif_probe task never ran");
         return;
     }
-    while (t->state != TASK_TERMINATED && timeout-- > 0) {
-        yield();
-    }
+    (void)test_wait_task_terminated("daif_probe_exit", t, TEST_WAIT_S(1));
     if (t->state != TASK_TERMINATED) {
         /* Still queued or running: take it off the run queue before
          * freeing it, as the never-ran path does. */
@@ -5719,12 +5746,9 @@ static void test_task_pinned_to_cpu0(void)
     scheduler_add_task_to_cpu(t, 0);
     TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
 
-    /* Clean up */
-    int timeout = 100000;
-    while (t->state != TASK_TERMINATED && timeout > 0) {
-        yield();
-        timeout--;
-    }
+    /* Clean up. Wall-clock bound: the old 100,000 yields lasted 230 ms on
+     * Pi 5 with the NC axis (2.3 us per yield, C1 run 2); 1 s floor. */
+    (void)test_wait_task_terminated("pin_test", t, TEST_WAIT_S(1));
     task_destroy(t);
 }
 

@@ -21,6 +21,7 @@
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #include "sched.h"
+#include "test_wait.h"
 #include "smp.h"
 #endif
 #include <stdint.h>
@@ -746,9 +747,10 @@ static void test_kernel_pan_not_armed(void)
     }
 
     for (uint32_t cpu = 0; cpu < cpu_count; cpu++) {
-        for (int i = 0; i < 100000 && !pan_check_done[cpu]; i++) {
-            yield();
-        }
+        /* Wall-clock bound: the old 100,000 yields lasted 230 ms on Pi 5
+         * with the NC axis (2.3 us per yield, C1 run 2); 1 s floor. */
+        (void)test_wait_u32_nonzero("pan_check", &pan_check_done[cpu],
+                                    TEST_WAIT_S(1));
         TEST_ASSERT_TRUE_MESSAGE(pan_check_done[cpu], "PAN check task never ran");
         TEST_ASSERT_EQUAL_UINT32(PAN_CHECK_ALL, pan_check_result[cpu]);
     }
