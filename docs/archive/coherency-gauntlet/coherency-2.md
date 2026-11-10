@@ -532,3 +532,193 @@ Milestone for any issue filed this run: Backlog.
   `repos_read_queue` conversion and the release stores in one follow-up
   commit on a stacked draft PR based on #1215, and corrects #1215's body
   (head, file count, left-alone list).
+
+## Entry 14 (written 17:24 UTC): C2 checkpoint B (#1203 hardware, builder report; no critic)
+
+- Received about 10:30 UTC. Cells nc 983bddc9, ncoff cbab2fc6 (10f8688e,
+  `NC_AXIS=OFF`), removal c1846b3b (7d500e0e). Evidence
+  `gauntlet-2-hw-jetson` @ eb6f0f4f, `run2-hw/c2/`, 56 files; each file is
+  a header plus the labctl reply text extracted verbatim from the builder's
+  transcript by script.
+- ncoff-kexec complete: boot log with banner, burst 20/20, sustained
+  20/20, litmus PASS (0 forbidden, 0 timeouts). ncoff-uefi partial: burst
+  6/20; both UEFI boot captures returned 0 lines because labctl held each
+  call (call 09:19:01Z, reply 09:31:19Z for a 240 s capture); identity
+  from `cat /sys/version` (cbab2fc6). nc and removal cells not run.
+- Burst: CPU 3 executed 0 tasks in 17/20 kexec runs and 6/6 UEFI runs,
+  CPU 2 in 10/20 and 6/6; 41 of CPU 3's 57 kexec attempts ended on the
+  `preempt_disabled[victim]` early-out with the victim's deque holding
+  work (v_pd_work 36).
+- Sustained (2.5 s supply): CPUs 2 and 3 shares 11.1% and 11.4% against
+  19.5 to 19.8% for CPUs 0, 4, 5; f_pd 6494 and 6554 of 8629 and 8783
+  attempts; first success median 215 and 230 ms, max 1514 ms. Run 16:
+  CPU 3 508 attempts, 0 successes, f_pd 505, v_pd_work 587
+  (`ncoff-kexec-sustained-run16.txt`).
+- Run 1's per-CPU attempt counts were read after the results printed and
+  include post-run idle attempts (CPU 1: table 10, trace 2,
+  `ncoff-kexec-burst-run01.txt`).
+- Hypothesis H3 (separating experiment not run): idle CPUs wake only on
+  their own 100 Hz tick (WFI; `smp_notify_cpu` is SEV only); cluster-0
+  ticks are phase-aligned, so CPUs 2 and 3 wake while CPU 1 is in its
+  tick-driven `schedule()` window and skip it, then sleep a tick.
+- The early-out is load-bearing: in the window the outgoing task is READY
+  in the run queue with its context unsaved. Proposed fix A (bounded
+  re-check) and fix B (per-task on-CPU flag, release/acquire under
+  rq_lock). Neither landed.
+- Orchestrator verification (not a critic): re-read the run-16 row from
+  the raw file (`cpu=3 exec=0 att=508 ok=0 f_pd=505 v_pd_work=587`, CPUs 4
+  and 5 exec 180 and 178); `preempt_disabled[]` is a plain `volatile int`
+  with plain stores and loads on main (`sched.c:83`, early-out `:1850`)
+  and on the removal branch (`:82`, `:1558`).
+
+## Entry 15 (written 17:24 UTC): run stop condition fired (about 10:34 UTC)
+
+- **Stop condition: "C2 finds a defect whose fix touches the memory model
+  of the deque or the scheduler locking in a way that
+  check-cpu-cache-maint.py or the existing lints do not cover."** Fired at
+  about 10:34 UTC on Entry 14.
+- Why it applies, independently of choosing fix B over fix A: a thief with
+  0 successes over 2.5 s of sustained supply is, in the brief's words, a
+  stuck thief and a kernel defect. Fix B adds a release/acquire-published
+  per-task on-CPU flag. Fix A (spin until the victim's flag clears, then
+  steal) is correct only if the victim clears `preempt_disabled` with a
+  store-release after saving the outgoing context and the thief reads it
+  with an acquire; neither holds today, and no lint checks it. Every
+  candidate fix changes cross-CPU scheduler ordering.
+- Action per the brief: record the finding and the proposed fix, land
+  nothing, open no PR, stop. Filed #1216 (finding, evidence, mechanism
+  hypothesis, both fixes and the checks that would fail on the old code).
+  C4 not started; the gate not evaluated.
+- Wind-down: C1 told to stop after its in-flight `boot_test` call (it had
+  none in flight; block 6 returned 10:33:31), push its files, restore the
+  card, open no new PR. The reminders for 13:27 and 15:27 were deleted.
+- **Orchestrator gap.** After the stop message to C1 (about 10:34 UTC) the
+  next orchestrator action ran at 17:20 UTC. The two reminders fired at
+  13:29 and 15:27 and both failed with ACCESS_DENIED. No hardware ran in
+  the gap (last evidence commits: Pi 5 10:37 UTC, Jetson 10:26 UTC). Cause
+  not visible from inside the session.
+
+## Entry 16 (written 17:24 UTC): C1 wind-down (builder report; counts re-checked by the orchestrator)
+
+- Forced #1205 variant (temporary branches, original 1,000-yield bound,
+  tasks pinned to CPUs 1 to 3, 20 iterations per boot, 3 boots per
+  kernel): removal ee2f9c97 60/60 iterations hit the bound (1,000 yields
+  71 to 76 us), all cleanups 442 to 10,723 us after expiry; NC 7f85d478
+  28/60 hit the bound (2303 to 2307 us), cleanups 5927 to 7670 us after
+  expiry. 0 of 120 never completed. Orchestrator count from the raw files:
+  removal 60 FAIL rows, 60 complete by +100 ms; NC 28 FAIL rows, 28
+  complete by +100 ms (`c1/{removal,nc}-force1205-run01..03.txt`).
+- Step 6 stopped at 9 + 9 of 20 + 20 (interleaved blocks of 3): NC
+  30dc24bc and removal e94c251a each 9/9 for
+  `test_slm_stats_live_from_second_session`,
+  `test_component_cleanup_ctx_is_per_task` and `test_task_lifecycle`; no
+  `[test_wait]` timeout. Orchestrator count from the raw files: banners
+  match in 18/18; 18 failures in 16 files, 19 in `nc-step6-run04`
+  (`test_slm_stop_from_second_session_during_prompt`, a capture check
+  before the converted wait) and `nc-step6-run06`
+  (`test_proactive_load_balance_runtime_config_aggressive`, a placement
+  assert). Both extras are NC-only, once each in 9; not filed.
+- labctl call times (`c1/labctl-call-times.txt`): 3-boot boot_test calls
+  6:22 to 8:47; two switch phases took about 4 min (09:27:49 to 09:31:52,
+  09:57:50 to 10:01:57), others 21 to 40 s.
+- PR #1215 body corrected (head a03fc75b, 6 converted files, docs/testing.md
+  included, five more left-alone sites, the 2 s bound labelled an
+  extrapolation, forced-variant and partial step-6 results). No follow-up
+  PR. pi-5-1 restored to the card's original `kernel_2712.img`, at the
+  SLM-OS shell, powered on.
+- Issue comments posted by the orchestrator: #1202, #1205, #1211, #1203,
+  #1204 (end states below).
+
+## Entry 17 (written 17:24 UTC): labctl serialization, measured
+
+- Hypothesis from Entry 10 (the stdio labctl server runs one call at a
+  time) now has two direct observations: C2's 240 s capture issued at
+  09:19:01Z returned at 09:31:19Z, empty, having started after the boot
+  it was meant to capture; C1's two 4-minute switch phases overlap C2
+  traffic. Not separated from other causes, but every long stall in this
+  run overlapped another agent's long call. Consequence for any next run:
+  two boards cannot be driven in parallel through one stdio labctl server
+  without losing boot captures; either serialize board time or give each
+  agent its own labctl connection.
+- C2's procedure notes and scripts archived for a next run under
+  `run2-tools/c2/` (lab IP replaced by a pointer to `lab://sbcs`).
+
+## Close-out and final report (written 17:25 UTC)
+
+The run ended on a stop condition (Entry 15), not on the gate. No removal
+PR was opened. ADR 0007 status unchanged ("proposed; the removal is
+pending on both boards"), sha1 d1d68952 on `gauntlet/coherency-1193`,
+`coherency-remove-nc-axis` (e94c251a) and `fix/boot-path-1193` (167330f5).
+
+### Blockers: the three possible states and where each ended
+
+| Blocker | Artifact, fixed | Kernel defect, root-caused, fixed | Open, experiment run, result recorded |
+|---|---|---|---|
+| #1202 (Pi 5) | not reached: 9/9 per kernel of the 20/20 bar | no | **here** |
+| #1205 (Pi 5) | not reached: 9/9 per kernel of the 20/20 bar | no | **here** |
+| #1203 (Jetson) | no | defect found (#1216), root cause a hypothesis, fix not landed (stop condition) | **here** |
+| #1204 (Jetson) | n/a (deliverable: a raw row) | n/a | row produced; critic incomplete; open |
+
+- **#1202.** What it was: a 100,000-yield wait for a helper's flag.
+  What ran: identical instrumentation on NC (10 boots) and removal (20),
+  then a 250 ms wall-clock bound on both (9 + 9 boots before the stop).
+  Rows: removal 2/20 failures, flag true 1.3 and 1.5 ms after expiry; NC
+  0/10; wall-clock 9/9 and 9/9. State: open; timing supported, clause 2
+  of the bar incomplete. Critic: code half and step-1 rows passed
+  (`critic-2-C1.md`); hardware half not run.
+- **#1205.** What it was: a 1,000-yield wait for three cleanups. What ran:
+  step 1 (0/30 failures), a forced variant on both kernels, a 2 s bound
+  (9 + 9 boots). Rows: forced removal 60/60 and NC 28/60 hit the bound,
+  all 88 completed after expiry, 0/120 lost; wall-clock 9/9 and 9/9.
+  State: open; timing on the remote-cleanup path shown, the run-1 path a
+  hypothesis, clause 2 incomplete.
+- **#1203.** What it was: a Jetson thief with attempts and no successes.
+  What ran: per-attempt instrumentation; 1.15 of 6 cells (NC_AXIS=OFF
+  kexec 40 runs, NC_AXIS=OFF UEFI 6). Rows: on NC_AXIS=OFF the stalled
+  thieves fail on the `preempt_disabled[victim]` early-out with work
+  present; one thief 508 attempts, 0 successes over 2.5 s. State: open;
+  defect filed as #1216; every fix changes scheduler memory ordering;
+  removal and NC cells unmeasured. No critic.
+- **#1204.** What ran: 5 pre-rebase and 3 rebased UEFI-direct boots.
+  Rows: slow cross-cluster rows in 1 of 5 pre-rebase boots (the only warm
+  reboot), fast in the rest. State: deliverable produced; per-boot state,
+  build dependence a hypothesis; C3 critic offline stage only.
+
+### Boot-path fixes (C0)
+
+- #1194, #1197, #1198: PR #1208 (pre-existing, not a draft); per-issue
+  before/after posted as a comment. #1196: draft PR #1209 (stacked on
+  #1208), merge order in its body.
+- /ci green on 167330f5 and 7d500e0e (critic-reproduced). pi-5-1 boot_test
+  10/10 on 167330f5. **Jetson 10 kexec + 10 UEFI-direct boots not run.**
+- C0 critic, code half: FAIL on two rows (`critic-2-C0.md`): #1194's
+  commit message carries no before/after (left to the user: 6f0385ec
+  would need rewording on #1208's branch); #1209 links no closing issue
+  (the commit carries "Fixes #1196"; merge order documented). Hardware
+  half not run.
+
+### The removal
+
+- No PR (stop condition). `coherency-remove-nc-axis` @ e94c251a, rebased
+  onto `fix/boot-path-1193` + the #1215 commits (`c1/boot-path-plus-helper`
+  @ 63eed0c4); 40 commits; /ci green at 7d500e0e (critic), `make test` at
+  e94c251a (builder).
+- What remains: #1216 decided (it lives in shared scheduler code, so the
+  question is whether NC shows it under sustained load too), the five
+  unmeasured C2 cells, the 11 + 11 remaining C1 boots, C0's Jetson boots,
+  and every critic's hardware half.
+
+### Tracker delta
+
+Issues opened 6 (#1210, #1211, #1212, #1213, #1214, #1216), closed 0.
+Draft PRs opened 2 (#1209, #1215). Nothing merged.
+
+### Single most useful next experiment
+
+Run `bench stealing --sustain 2500` with the C2 instrumentation, 20 runs,
+on **NC (main) kexec and UEFI-direct** and on the removal at the same two
+paths, adding a victim-side timestamp of the `preempt_disabled` window. If
+NC shows the sustained stall, #1216 is a pre-existing scheduler defect
+that the removal does not introduce, and #1203 stops blocking the removal;
+if only cacheable builds show it, the removal exposes it and needs the
+#1216 fix first. Run it with board time serialized (Entry 17).
