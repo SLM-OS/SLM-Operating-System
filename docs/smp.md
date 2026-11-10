@@ -234,7 +234,7 @@ Since there's no thread-local storage in bare metal, per-CPU data is accessed vi
 
 This requires a memory access for every per-CPU operation but is simple and reliable.
 
-**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines (false sharing, a performance cost only). The caches are coherent on every supported core, so `cpu_data[]` needs no cache maintenance before secondary boot (see `docs/adr/0006-cross-cpu-coherency.md`).
+**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines (false sharing, a performance cost only). The caches are coherent on every supported core, so `cpu_data[]` needs no cache maintenance before secondary boot (see `docs/adr/0007-cross-cpu-coherency.md`).
 
 ---
 
@@ -694,7 +694,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 
 **4-Core SMP Status:** All 4 Cortex-A76 cores boot successfully and reach C code. The shell reports "4 online / 4 total". Exclusive monitor operations (spinlocks via ldaxr/stxr) work correctly between all cores without any workaround.
 
-**Cache coherency:** Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their L1 and L2 caches coherent in hardware for Normal Write-Back Inner Shareable memory, with no software enable. Neither core has an SMPEN bit: bit 6 of CPUECTLR_EL1 is RES0 on A76 and PF_MODE[0] on A78AE. Run queues, the task table, current-task pointers, steal deques and scheduler counters live in ordinary cacheable memory, and spinlocks are plain LDAXR/STXR/STLR. The Non-Cacheable block stays mapped for device DMA only. The decision record is `docs/adr/0006-cross-cpu-coherency.md` (#1193).
+**Cache coherency:** Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their L1 and L2 caches coherent in hardware for Normal Write-Back Inner Shareable memory, with no software enable. Neither core has an SMPEN bit: bit 6 of CPUECTLR_EL1 is RES0 on A76 and PF_MODE[0] on A78AE. Run queues, the task table, current-task pointers, steal deques and scheduler counters live in ordinary cacheable memory, and spinlocks are plain LDAXR/STXR/STLR. The Non-Cacheable block stays mapped for device DMA only. The decision record is `docs/adr/0007-cross-cpu-coherency.md` (#1193).
 
 An earlier version of this section described a workaround for incoherent per-core caches: DC CVAC/CIVAC on shared fields, a DC CIVAC lock-word flush in every Pi 5 spinlock, and NC-memory placement of the scheduler state. That diagnosis rested on reading CPUECTLR_EL1 bit 6 as SMPEN, which the TRMs contradict. All three are gone: scheduler, task, SMP and IPC code make no `cache.h` calls on CPU-shared state, and use locks or acquire/release for ordering. The `cache.h` helpers remain for device DMA, page tables and the caches-off `secondary_mmu_*` reads.
 

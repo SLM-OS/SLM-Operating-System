@@ -5,7 +5,7 @@
  * sched_diag_* counters and the SECONDARY_PREEMPT state live in
  * cacheable Normal Write-Back Inner Shareable memory on every platform;
  * the "NC axis" that once put them in the 2 MB Normal Non-Cacheable
- * block on Pi 5 and Jetson is gone (docs/adr/0006-cross-cpu-coherency.md).
+ * block on Pi 5 and Jetson is gone (docs/adr/0007-cross-cpu-coherency.md).
  * These tests walk the live translation tables and check the MAIR
  * attribute index, shareability and physical address of each structure,
  * so a change that moves one back into the NC block fails here. They

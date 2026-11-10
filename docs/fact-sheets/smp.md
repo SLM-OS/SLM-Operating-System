@@ -32,7 +32,7 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 
 ## See also
 
-- `docs/adr/0006-cross-cpu-coherency.md` (#1193: why shared state is cacheable)
+- `docs/adr/0007-cross-cpu-coherency.md` (#1193: why shared state is cacheable)
 - `kernel/CLAUDE.md` §"Cross-CPU Coherency"
 - `kernel/CLAUDE.md` §"Cross-CPU notification — `smp_notify_cpu()`"
 - `docs/smp.md` (narrative)

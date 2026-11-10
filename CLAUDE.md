@@ -245,7 +245,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - All CPU-id resolution goes through `cpu_logical_map[]` (asm via `ARM64_GET_LOGICAL_CPU`, C via `cpu_logical_id()`); regression coverage in `kernel/tests/test_mpidr_lookup.c` (PR #647)
 - Boot flag visibility has a PSCI-success fallback; the caches are coherent (#1193), so its WARN is a failure signal
 - VHE set up on all secondary CPUs in `smp_boot.S`
-- NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for device DMA; cross-CPU shared data is cacheable (#1193, `docs/adr/0006-cross-cpu-coherency.md`)
+- NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for device DMA; cross-CPU shared data is cacheable (#1193, `docs/adr/0007-cross-cpu-coherency.md`)
 - Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs. Under default `JETSON_HW_TICK=ON` build (PR #746/#755), secondaries WFI and wake from per-CPU PPI 26 timer IRQs (SEV broadcast is redundant but harmless). Under `JETSON_HW_TICK=OFF` cooperative fallback, secondaries WFE and wake from cross-CPU SEV.
 - No cache maintenance on CPU-shared state (#1193); `cache.h` DC CVAC/CIVAC serves DMA, page tables and the caches-off `secondary_mmu_*` reads before secondary boot
 
