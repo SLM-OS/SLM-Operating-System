@@ -151,6 +151,21 @@ void preempt_check_cpu_mpidr(uint32_t this_cpu)
  */
 void maybe_arm_resched_trampoline(struct trap_frame *tf)
 {
+    maybe_arm_resched_trampoline_on(tf, reschedule_pending);
+}
+
+/*
+ * The body, with the reschedule_pending array passed in. The #750 test
+ * calls it with NULL instead of setting the shared global to NULL: a
+ * NULL global is also seen by every other CPU's scheduler tick
+ * (sched.c writes reschedule_pending[cpu] = 1 unguarded), and once
+ * #1198 stopped the boot from consuming the one-shot warning below,
+ * the warning's uart_printf made that window long enough for those
+ * ticks to fault on every CPU.
+ */
+void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
+                                     volatile uint32_t *pending)
+{
     /* Pre-preempt_init bail (#750).
      *
      * preempt_init() — which allocates reschedule_pending / orig_elr /
@@ -180,7 +195,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
      * fact that IRQs are firing pre-init (useful diagnostic for any
      * future regression in the boot sequence) without flooding the
      * console under an IRQ storm. */
-    if (!reschedule_pending) {
+    if (!pending) {
         static volatile int warned = 0;
         if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
             uart_printf("[preempt] IRQ taken pre-preempt_init "
@@ -192,7 +207,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
 
     uint32_t cpu = cpu_id();
 
-    if (!reschedule_pending[cpu]) {
+    if (!pending[cpu]) {
         return;
     }
     if (preempt_disabled[cpu]) {
@@ -209,7 +224,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
      * for resched_trampoline to replay. orig_spsr is the interrupted
      * context's PSTATE (which may have had IRQs unmasked — e.g. the
      * idle task does `daifclr + wfi`). */
-    reschedule_pending[cpu] = 0;
+    pending[cpu] = 0;
     orig_elr[cpu]  = tf->elr;
     orig_spsr[cpu] = tf->spsr;
 
