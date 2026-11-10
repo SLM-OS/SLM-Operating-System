@@ -1,0 +1,11 @@
+# labctl serial_send reply 1 of 1
+# call 2026-11-10T10:01:58.653Z  reply 2026-11-10T10:01:58.899Z  tool_use_id toolu_01Rn7gKKBVoj4g3La2iUcJJV
+# args {"capture_timeout": 15, "capture_until": "slmos>", "data": "cat /sys/version", "port_name": "jetson-nano-2"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+������ͽversion
+name:    SLM-OS
+version: 0.4.0
+build:   20261110070132
+commit:  cbab2fc6
+slmos>
+slmos>

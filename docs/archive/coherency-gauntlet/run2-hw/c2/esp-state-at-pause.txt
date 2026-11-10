@@ -1,0 +1,13 @@
+check at 2026-11-10T10:25:43Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2212/130892 clusters
+fsck rc=0
+73b7f47929a142facc65af5618d86898ada9f6c408e87cb2eefe2a8196e903c3  /tmp/tmp.yAXXjlmCTi/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.yAXXjlmCTi/EFI/L4T/l4t.efi
+ESP unmounted
+-rwxr-xr-x 1 root root 10869360 Nov 10 01:01 /root/slmos-c2-ncoff.elf
+-rwxr-xr-x 1 root root  8864840 Nov  8 05:40 /root/slmos-efi-pre1193.efi
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /root/slmos-efi-pre1193.efi

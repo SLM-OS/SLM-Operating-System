@@ -1,0 +1,5 @@
+# labctl serial_capture reply 1 of 1
+# call 2026-11-10T09:19:00.985Z  reply 2026-11-10T09:31:19.401Z  tool_use_id toolu_016Wx68QfkjP8Yto6kY4SUVF
+# args {"port_name": "jetson-nano-2", "timeout": 240, "until_pattern": "slmos>|PANIC|panic|not visible"}
+[Captured 0 lines in 240.0s, timeout]
+

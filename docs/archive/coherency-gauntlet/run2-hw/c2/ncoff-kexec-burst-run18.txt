@@ -1,0 +1,50 @@
+# labctl serial_send reply 1 of 1
+# call 2026-11-10T09:09:42.377Z  reply 2026-11-10T09:09:42.884Z  tool_use_id toolu_01TLuGtNk1JaXxHRwzACd2Au
+# args {"capture_timeout": 30, "capture_until": "slmos>", "data": "bench stealing", "port_name": "jetson-nano-2"}
+[Captured 46 lines in 0.3s, pattern 'None' matched]
+cuol-�ѕ�����5
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=284) exiting
+[INFO] Task 's3_1' (id=285) exiting
+[INFO] Task 's3_4' (id=288) exiting
+[INFO] Task 's3_9' (id=293) exiting
+[INFO] Task 's3_15' (id=299) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   16 ms (16281 us)
+    Per-task avg: 1017 us
+
+    Per-CPU execution distribution:
+      CPU 0: 5 tasks
+      CPU 1: 5 tasks
+      CPU 2: 0 tasks
+      CPU 3: 0 tasks
+      CPU 4: 3 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         7          5         0
+      1        12          0         0
+      2        12          0         0
+      3        12          0         0
+      4        15          3         0
+      5        17          3         0
+
+  c2t-format v1 mode=burst run=18 cntfrq=31250000 cpus=6 tasks=16 depth=0 work=1 sustain_ms=0
+  times in us from dispatch start; log = first 16 attempts as us-since-first-attempt + outcome (S ok, E empty, P preempt_disabled skip, X stale, I isolated, O other)
+  c2t cpu=0 exec=5 att=5 diag_att=5 ok=5 diag_ok=5 iso=0 f_stale=0 f_pd=0 f_empty=0 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=0 v_empty=0 v_gen=0 v_state=2 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=88 first_ok_us=88 last_att_us=12956 ticks=1 idle=0 sched=13 lk_hw=1 log=0S,3153S,6398S,9629S,12867S
+  c2t cpu=1 exec=5 att=4 diag_att=4 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=1 f_empty=3 f_other=0 chk=0 v_pd=1 v_pd_work=0 v_busy=0 v_empty=19 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=16 dq_drains=1 dq_drain_us=12956 dq_last_push_us=74 first_att_us=13144 first_ok_us=- last_att_us=14183 ticks=2 idle=2 sched=9 lk_hw=1 log=0E,5E,1035P,1038E
+  c2t cpu=2 exec=0 att=4 diag_att=4 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=2 f_empty=2 f_other=0 chk=0 v_pd=3 v_pd_work=2 v_busy=0 v_empty=17 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=4179 first_ok_us=- last_att_us=14186 ticks=2 idle=2 sched=4 lk_hw=1 log=0P,3P,10004E,10007E
+  c2t cpu=3 exec=0 att=4 diag_att=4 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=3 f_empty=1 f_other=0 chk=0 v_pd=4 v_pd_work=2 v_busy=0 v_empty=16 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=4179 first_ok_us=- last_att_us=14182 ticks=2 idle=2 sched=4 lk_hw=1 log=0P,2P,10000P,10002E
+  c2t cpu=4 exec=3 att=5 diag_att=5 ok=3 diag_ok=3 iso=0 f_stale=0 f_pd=0 f_empty=2 f_other=0 chk=0 v_pd=1 v_pd_work=0 v_busy=1 v_empty=15 v_gen=0 v_state=1 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=8851 first_ok_us=8851 last_att_us=14250 ticks=1 idle=1 sched=5 lk_hw=1 log=0S,1797S,3593S,5391E,5398E
+  c2t cpu=5 exec=3 att=5 diag_att=5 ok=3 diag_ok=3 iso=0 f_stale=0 f_pd=0 f_empty=2 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=1 v_empty=13 v_gen=0 v_state=1 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=8851 first_ok_us=8851 last_att_us=14249 ticks=1 idle=1 sched=5 lk_hw=1 log=0S,1797S,3593S,5391E,5398E
+
+slmos>

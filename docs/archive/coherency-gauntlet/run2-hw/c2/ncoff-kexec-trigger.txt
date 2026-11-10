@@ -1,0 +1,5 @@
+kexec trigger at 2026-11-10T09:03:56Z
+ssh rc=0
+local  877d4c537e799db2a6b211ad8787d2e8bc362ca89a8c9c9b0abd0d42878a0f94
+remote 877d4c537e799db2a6b211ad8787d2e8bc362ca89a8c9c9b0abd0d42878a0f94  /root/slmos-c2-ncoff.elf
+STAGED OK

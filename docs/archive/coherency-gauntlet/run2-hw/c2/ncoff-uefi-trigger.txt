@@ -1,0 +1,31 @@
+check at 2026-11-10T09:18:43Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.uiKFjPvI5Q/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.uiKFjPvI5Q/EFI/L4T/l4t.efi
+ESP unmounted
+uefi deploy start 2026-11-10T09:19:07Z
+73b7f47929a142facc65af5618d86898ada9f6c408e87cb2eefe2a8196e903c3  /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/cells/slmos-c2-ncoff.bin
+staged sha256=73b7f47929a1 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+
+[exited with code 0]
+check at 2026-11-10T09:49:05Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2212/130892 clusters
+fsck rc=0
+73b7f47929a142facc65af5618d86898ada9f6c408e87cb2eefe2a8196e903c3  /tmp/tmp.BVYvoefwe9/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.BVYvoefwe9/EFI/L4T/l4t.efi
+ESP unmounted
+uefi deploy start 2026-11-10T09:49:53Z
+staged sha256=73b7f47929a1 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+
+[exited with code 0]
