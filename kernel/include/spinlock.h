@@ -156,7 +156,7 @@ static inline void spin_lock(spinlock_t *lock)
 
     /* Use WFE for low-power spinning.
      *
-     * Pi 5 (BCM2712, no SMPEN): per-core L2 caches are incoherent.
+     * Pi 5 (BCM2712): per-core L2 caches are incoherent.
      * STLR in spin_unlock writes to the releaser's L2 but never
      * propagates to other CPUs' L2. Without DC CIVAC before LDAXR,
      * a waiter reads its own stale "locked" cacheline and spins

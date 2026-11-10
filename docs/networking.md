@@ -645,7 +645,7 @@ operator action rather than failing the whole transport.
 
 VirtIO devices DMA through the point of coherency (PoC). On platforms
 where secondary-CPU L1/L2 caches do not participate in coherency
-(`PLATFORM_HAS_NC_MEMORY` — Pi 5, Jetson — SMPEN not set), a plain
+(`PLATFORM_HAS_NC_MEMORY`: Pi 5, Jetson), a plain
 `dsb sy` is not enough: dirty cachelines for the descriptor table, the
 `avail` ring slot, and `avail->idx` stay in L1/L2 and the device reads
 stale data from DRAM.

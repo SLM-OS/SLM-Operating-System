@@ -1,9 +1,10 @@
 /*
  * cache.h - Cache maintenance helpers for cross-CPU data sharing
  *
- * On Pi 5, TF-A doesn't set CPUECTLR_EL1.SMPEN for secondary cores,
- * so L1 cache writes don't participate in the coherency protocol.
- * Regular stores from one CPU are invisible to other CPUs.
+ * Pi 5 and Jetson treat cross-CPU data as needing explicit maintenance
+ * (the NC-memory model, kernel/CLAUDE.md). SMPEN plays no part in
+ * this: CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on
+ * Cortex-A78AE, and neither core has a coherency-enable bit (#1194).
  *
  * These helpers provide explicit cache maintenance:
  *   cache_clean(addr)      — push dirty cacheline to Point of Coherency
@@ -12,7 +13,7 @@
  *
  * On QEMU and platforms with working coherency, these are no-ops.
  * Spinlocks are NOT exempt: the exclusive monitor does not provide
- * coherency on Pi 5 — without SMPEN, a waiter's ldaxr can spin
+ * coherency on Pi 5: a waiter's ldaxr was observed to spin
  * forever on a stale "locked" cacheline. spinlock.h's
  * PLATFORM_RASPI5 path does its own DC CIVAC + DSB SY around
  * ldaxr/stlr, so lock users still never call these helpers for the
@@ -29,24 +30,7 @@
 #define CACHE_LINE_SIZE 64
 
 /*
- * Check if SMPEN (bit 6) is set in CPUECTLR_EL1.
- * On Cortex-A76, this register is encoded as S3_0_C15_C1_4.
- * Returns true if the current core has cache coherency enabled.
- */
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
-#include <stdbool.h>
-static inline bool cpu_has_smpen(void)
-{
-    uint64_t val;
-    __asm__ volatile("mrs %0, S3_0_C15_C1_4" : "=r"(val));
-    return (val & (1UL << 6)) != 0;
-}
-#else
-static inline bool cpu_has_smpen(void) { return true; }
-#endif
-
-/*
- * Pi 5: explicit cache maintenance needed (SMPEN not set by TF-A).
+ * Pi 5 and Jetson: explicit cache maintenance by VA.
  * Other platforms: coherency works, these are just barriers.
  */
 #if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)

@@ -160,7 +160,7 @@ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
  * Per-CPU run queue access.
  *
  * On Pi 5, run queues are in non-cacheable memory at NC_MEM_BASE to bypass
- * the L1/L2 incoherency (SMPEN not set by TF-A). The address is computed
+ * the L1/L2 incoherency (the NC-memory model). The address is computed
  * from compile-time constants — no cacheable pointer indirection that would
  * itself be invisible to other CPUs.
  *
@@ -1222,7 +1222,8 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
                 task->name, cpu, rq->ready_count);
 
     /* Clean specific fields written inside the lock to PoC.
-     * Without SMPEN, these stay in our L1 cache. The target CPU's
+     * Under the NC-memory model these are treated as staying in our
+     * L1 cache. The target CPU's
      * schedule() invalidates before reading. Only clean the fields
      * that were modified — NOT the entire task struct (which includes
      * the task's context/stack that may be in active use). */
@@ -1721,7 +1722,8 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     }
 
     /* Clean modified fields to PoC for cross-CPU visibility.
-     * Without SMPEN, writes stay in this CPU's L1 cache. The target
+     * Under the NC-memory model writes are treated as staying in this
+     * CPU's L1 cache. The target
      * CPU's schedule() invalidates before reading. */
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq_old->head);

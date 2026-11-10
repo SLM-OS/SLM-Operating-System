@@ -485,7 +485,7 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize Virtual Filesystem and perform all initial PMM allocations
-     * BEFORE scheduler_init(). On Pi 5 without SMPEN, PMM spinlock doesn't
+     * BEFORE scheduler_init(). On Pi 5 the PMM spinlock was found not to
      * provide cross-CPU mutual exclusion. Secondary CPUs will allocate
      * idle task stacks after scheduler_init(), so CPU 0 must finish its
      * allocations first to avoid concurrent PMM access. */
@@ -869,7 +869,7 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.
-     * On Pi 5 without SMPEN, PMM spinlock doesn't provide cross-CPU
+     * On Pi 5 the PMM spinlock was found not to provide cross-CPU
      * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
      * with their own allocations (idle task stacks). Doing it here ensures
      * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */

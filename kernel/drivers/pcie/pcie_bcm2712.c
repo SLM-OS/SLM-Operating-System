@@ -1315,8 +1315,8 @@ static int bcm2712_bind_irq_handler(const struct pcie_msi_handle *h,
     mip1_slots[vec].handler = handler;
     mip1_slots[vec].ctx = ctx;
     /* DSB SY publishes the slot to DRAM before we enable the GIC
-     * line. Required on Pi 5 (BCM2712 has no SMPEN, per-core L2
-     * caches are incoherent — see kernel/CLAUDE.md). */
+     * line. Required on Pi 5 (per-core L2 caches are treated as
+     * incoherent, see kernel/CLAUDE.md). */
     __asm__ volatile("dsb sy" ::: "memory");
     spin_unlock_irqrestore(&msi_lock, msi_flags);
 
