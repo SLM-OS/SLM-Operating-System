@@ -937,23 +937,26 @@ static void test_kernel_pte_global(void)
  * ============================================================================ */
 
 /*
- * mmu_enable invalidates vmm_boot_caches_off_range() by VA before the
- * primary turns its data cache on. Everything written with caches off
- * must be inside it: the BSS clear, the boot stack, the static page
- * tables (L1 is in BSS) and the initialised data (the UEFI relocation
- * copy and the pre-MMU globals). Narrowing the range below any of
- * these reopens #1197.
+ * mmu_enable invalidates [start, end) by VA before the primary turns
+ * its data cache on. vmm_init records the bounds it actually passed and
+ * the number of lines mmu_enable reports it invalidated. Everything
+ * written with caches off must be inside those bounds: the BSS clear,
+ * the boot stack, the static page tables (L1 is in BSS) and the
+ * initialised data (the UEFI relocation copy and the pre-MMU globals).
+ * The line count must match the range, so a removed or short loop in
+ * mmu.S, or zero bounds, fails here.
  */
 static void test_boot_caches_off_range_covers_caches_off_writes(void)
 {
     extern char _start[], __data_start[], __data_end[];
     extern char __bss_start[], __bss_end[];
     extern char __stack_bottom[], __stack_top[], __kernel_end[];
-    uint64_t start = 0, end = 0;
+    uint64_t start = 0, end = 0, lines = 0;
 
-    vmm_boot_caches_off_range(&start, &end);
+    vmm_mmu_enable_inval(&start, &end, &lines);
 
-    TEST_ASSERT_MESSAGE(start < end, "empty caches-off range");
+    TEST_ASSERT_MESSAGE(start != 0 && start < end,
+                        "mmu_enable got an empty invalidate range");
     TEST_ASSERT_MESSAGE(start <= (uint64_t)(uintptr_t)_start &&
                         end >= (uint64_t)(uintptr_t)__kernel_end,
                         "range does not cover the whole image");
@@ -970,6 +973,16 @@ static void test_boot_caches_off_range_covers_caches_off_writes(void)
     uint64_t l1 = vmm_get_ttbr1() & 0x0000FFFFFFFFF000ULL;
     TEST_ASSERT_MESSAGE(l1 >= start && l1 + 4096 <= end,
                         "range does not cover the L1 page table");
+
+    /* Same line size and rounding as mmu.S: CTR_EL0.DminLine, start
+     * aligned down, one DC IVAC per line up to end. */
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    uint64_t line = 4ULL << ((ctr >> 16) & 0xF);
+    uint64_t aligned = start & ~(line - 1);
+    uint64_t expect = (end - aligned + line - 1) / line;
+    TEST_ASSERT_MESSAGE(lines > 0, "mmu_enable invalidated no lines");
+    TEST_ASSERT_EQUAL_UINT64(expect, lines);
 }
 
 /*
