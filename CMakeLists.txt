@@ -1027,6 +1027,8 @@ set(KERNEL_SOURCES
 set(TEST_SOURCES
     kernel/tests/unity.c
     kernel/tests/test_harness.c
+    # Wall-clock bounded waits shared by the tests (#1202, #1205)
+    kernel/tests/test_wait.c
     kernel/tests/test_ipc.c
     kernel/tests/test_pi_mutex.c
     kernel/tests/test_steal_deque.c

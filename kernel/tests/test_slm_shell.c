@@ -29,6 +29,8 @@
 #include "../include/shell_session.h"
 #include "../include/task.h"
 #include "../include/sched.h"
+#include "../include/uart.h"
+#include "test_wait.h"
 
 /* ============================================================================
  * Tests
@@ -677,10 +679,11 @@ static void test_slm_stop_from_second_session_during_prompt(void)
     TEST_ASSERT_NULL(strstr(cap.buf, "stop=max"));
     TEST_ASSERT_NOT_NULL(strstr(cap.buf, "stop=stopped"));
 
-    for (int i = 0; i < 100000 && !second_done; i++) {
-        yield();
-    }
-    TEST_ASSERT_TRUE(second_done);
+    /* Wall-clock bound, not a yield count (#1202): 250 ms is what the old
+     * 100,000-yield bound lasted on Pi 5 with the NC axis (2.3 us per
+     * yield, 230 ms, C1 run 2), rounded up. */
+    TEST_ASSERT_TRUE(test_wait_flag("slm_second", &second_done,
+                                    TEST_WAIT_MS(250)) >= 0);
     TEST_ASSERT_TRUE(second_saw_busy);
     TEST_ASSERT_EQUAL_INT(0, second_stats_rc);
     TEST_ASSERT_EQUAL_INT(-1, second_close_rc);
@@ -886,10 +889,16 @@ static void test_slm_stats_live_from_second_session(void)
     /* The looping script fills the capture buffer, so the stop reason is
      * checked from the telemetry below, not the text. */
     TEST_ASSERT_EQUAL_INT(0, shell_execute("slm prompt 0 --raw --max 200000 hi"));
-    for (int i = 0; i < 100000 && !live_done; i++) {
-        yield();
-    }
-    TEST_ASSERT_TRUE(live_done);
+    /* Wall-clock bound, not a yield count (#1202). The helper's last step,
+     * `slm stats 0 --follow 1`, can sleep until the next 10 ms tick; the old
+     * 100,000-yield bound lasted about 9.3 ms without the NC axis and expired
+     * first in 2 of 20 Pi 5 boots. 250 ms is what that bound lasted with the
+     * NC axis (2.3 us per yield, 230 ms, C1 run 2), rounded up. */
+    long long live_us = test_wait_flag("slm_live", &live_done,
+                                       TEST_WAIT_MS(250));
+    uart_printf("[test_wait] slm_live: flag after %lld us (bound 250000 us)\n",
+                live_us);
+    TEST_ASSERT_TRUE(live_us >= 0);
     TEST_ASSERT_EQUAL_UINT32(1u, live_running);
     TEST_ASSERT_EQUAL_INT(0, live_stats_rc);
     TEST_ASSERT_EQUAL_INT(0, live_follow_rc);
