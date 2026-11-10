@@ -449,3 +449,46 @@ Milestone for any issue filed this run: Backlog.
   already up) and records SD Linux uptime, which tests the warm-reboot
   observation once.
 - The C3 critic waits for jetson-nano-2 after C2.
+
+## Entry 12 (09:16 UTC): C1 checkpoint B (steps 3 to 5, builder report, critic pending)
+
+- Helper and sweep: draft PR #1215 (`c1/test-wait-helper` @ 30dc24bc, based
+  on main 85f51ffd; closes nothing). `kernel/tests/test_wait.{h,c}`: yield
+  until a condition holds or a CNTPCT bound passes; on a timeout, 1 s of
+  re-polls logged at +1/10/100/1000 ms. Live test 250 ms (100,000 NC yields
+  = 230 ms); c4 test 2 s (1,000 NC yields in that loop at least 1.16 s; the
+  bare 2.3 ms is below NC's own 3.5 to 10.6 ms completion). 22 waits
+  converted in 7 files; the rest left with a reason each (sweep table in
+  the PR body). Rule for the rest: bound at least old count x 2.3 us,
+  rounded up, and at least 1 s unless measured. `make test` ARM64 and
+  x86-64 passed; check-braces 0 violations. slmos-review not run.
+- Filed #1211 (`test_task_lifecycle`, removal 2/20 vs NC 0/10; its window
+  is now a 1 s free-page wait with the discriminator logged) and #1213
+  (`test_isolated_core_latency`: with a 1 s wait its CPU-1 tasks run, and in
+  QEMU CPU 1 stopped scheduling in 2 of 2 runs; that wait keeps its count,
+  with a comment pointing at #1213; on Pi 5 the count expired before the
+  task ran in 10 of 10 step-1 boots, "isolated=0/10").
+- Removal rebase: `coherency-remove-nc-axis` 7d500e0e to **e94c251a** on
+  63eed0c4 (`fix/boot-path-1193` 167330f5 + the two PR commits; pushed as
+  `c1/boot-path-plus-helper`, the base for the confound-separating run).
+  Trees outside kernel/tests and CMakeLists.txt match for 40 of 40
+  commits; range-diff without kernel/tests 35 of 35 "="; one kernel/tests
+  conflict (fa17ba52, rapid-exit wait; `smp_mb()` kept as fa17ba52 does).
+  `make test` passed. Evidence `c1/removal-rebase-verify.txt`
+  (gauntlet-2-hw-pi5 @ c5f0665f).
+- Forced #1205 variant: `c1/force-1205` @ ee2f9c97 (temporary; original
+  1,000-yield bound, tasks pinned to CPUs 1 to 3, 20 iterations per boot).
+  QEMU: 19 of 20 iterations hit the bound, all cleanups fired 0.2 to
+  8.7 ms after expiry, 0 never (`c1/qemu-removal-force-ee2f9c97-make-test.txt`).
+  NC counterpart `c1/force-1205-nc` @ 7f85d478.
+- C2's removal cell (c1846b3b, on 7d500e0e) now differs from the removal
+  head e94c251a only in kernel/tests and two CMakeLists.txt lines of the
+  test source list; the non-test Jetson image is built from the same
+  kernel sources, but its banner hash is not the branch head. Evidence at
+  the PR head is C4's job.
+- Rulings: docs/testing.md section allowed in #1215 (that file only).
+  Forced variant on both kernels, 3 boots each. Step 6 interleaved in
+  blocks of 3 per kernel. Every labctl call's start and return time logged
+  (`c1/labctl-call-times.txt`) to test the one-call-at-a-time hypothesis
+  against C2's concurrent Jetson traffic.
+- pi-5-1 granted to C1.
