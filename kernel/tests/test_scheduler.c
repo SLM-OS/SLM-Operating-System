@@ -2843,6 +2843,20 @@ static void test_secondary_mmu_ttbr_set(void)
     TEST_ASSERT_TRUE(secondary_mmu_ttbr != 0);
     TEST_ASSERT_TRUE(secondary_mmu_mair != 0);
     TEST_ASSERT_TRUE(secondary_mmu_tcr != 0);
+#if !defined(PLATFORM_X86_64)
+    /* ...and equal to what CPU 0 runs with, so a secondary that reads
+     * them from DRAM (smp_boot.S, MMU off; smp_init cleans them to the
+     * PoC first, #1193 audit D1) builds the same translation regime. */
+    {
+        uint64_t ttbr1, mair, tcr;
+        __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
+        __asm__ volatile("mrs %0, mair_el1" : "=r"(mair));
+        __asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
+        TEST_ASSERT_EQUAL_HEX64(ttbr1, secondary_mmu_ttbr);
+        TEST_ASSERT_EQUAL_HEX64(mair, secondary_mmu_mair);
+        TEST_ASSERT_EQUAL_HEX64(tcr, secondary_mmu_tcr);
+    }
+#endif
 #else
     TEST_IGNORE_MESSAGE("SPINLOCK_SKIP_LOCKING: secondary MMU vars not defined");
 #endif

@@ -163,14 +163,14 @@ own.
 |---|---|---|---|---|
 | D1 | Medium | `vmm.c:2097-2100`, `smp.c:775-789`, `smp_boot.S:148-178` | `secondary_mmu_{ttbr,mair,tcr}` are written with caches on and never cleaned to the PoC before CPU_ON (C0 (b) step 1). The secondary reads them caches-off after DC IVAC, which works only because A76/A78AE execute DC IVAC as clean+invalidate, which cleans CPU 0's dirty line. Architecturally an invalidate may discard it; the secondary would then read 0 and take `cbz x0, .Lsec_skip_mmu` (`smp_boot.S:165`), running C with the MMU off. | Fixed: `smp_init` cleans the three words before the CPU_ON loop. |
 | D2 | Low | `vmm.c:2034-2064` | Page tables written caches-off are "cleaned" (DC CVAC). The data is already in DRAM, so the clean is a no-op; a stale clean line would survive and be hit by the cacheable walker, and only some tables are covered. The comment's reason (secondary walkers read DRAM, not CPU 0's cache) is wrong: walks are WB Inner Shareable and coherent. Linux invalidates its caches-off-written tables (`head.S:96-105`). | Fixed: DC IVAC over every static table before `mmu_enable`. |
-| D3 | Low | `boot.S:865-869`, `smp_boot.S:40-53`, `:194-198` | Jetson never writes a known SCTLR baseline: the primary inherits Linux's or UEFI's SCTLR (the UEFI value is reinterpreted after the E2H flip) and secondaries inherit TF-A's. Pi 5 writes 0x30d00800 on every CPU. | Filed (needs Jetson hardware). |
-| D4 | Low | `boot.S:817-821` | Jetson primary HCR_EL2 is read-modify-write, so DC, VM, TVM or trap bits left by the previous owner persist. HCR_EL2.DC=1 would make every caches-off access cacheable and void the assumptions above. Neither Linux's VHE flags nor UEFI set it today. | Filed with D3. |
-| D5 | Medium (latent, NC axis) | `ncmem.c:21-40`, `efi_stub.c:659-666`, `vmm.c:1538` | On Jetson, CPU 0 is not reset across kexec or the UEFI hand-off, and its caches may hold dirty WB lines for the NC block from the previous owner. SLM-OS maps the block Normal NC and never cleans it by VA. An eviction of such a line later writes stale data over NC data (run queues, task table, DMA rings): Arm ARM B2.11 "values reverted". | Filed (needs hardware). |
-| D6 | Low | `boot.S:950-960`, `boot.S:347-363`, `main.c:225-352` | Caches-off stores by the primary (BSS, boot stack, DTB globals, UEFI relocation) are never invalidated by VA before they are read through the cacheable mapping. Safe only while no cache holds those lines: true on Pi 5 (cold reset); on Jetson it rests on Linux's segment flush and the EFI stub's CIVAC, each with a speculative re-fetch window. #608 was this class of bug for PMM free lists. | Filed. |
+| D3 | Low | `boot.S:865-869`, `smp_boot.S:40-53`, `:194-198` | Jetson never writes a known SCTLR baseline: the primary inherits Linux's or UEFI's SCTLR (the UEFI value is reinterpreted after the E2H flip) and secondaries inherit TF-A's. Pi 5 writes 0x30d00800 on every CPU. | Recorded on the existing issue 🎫 #1128 (same root cause; needs Jetson hardware). |
+| D4 | Low | `boot.S:817-821` | Jetson primary HCR_EL2 is read-modify-write, so DC, VM, TVM or trap bits left by the previous owner persist. HCR_EL2.DC=1 would make every caches-off access cacheable and void the assumptions above. Neither Linux's VHE flags nor UEFI set it today. | Recorded on 🎫 #1128 with D3. |
+| D5 | Medium (latent, NC axis) | `ncmem.c:21-40`, `efi_stub.c:659-666`, `vmm.c:1538` | On Jetson, CPU 0 is not reset across kexec or the UEFI hand-off, and its caches may hold dirty WB lines for the NC block from the previous owner. SLM-OS maps the block Normal NC and never cleans it by VA. An eviction of such a line later writes stale data over NC data (run queues, task table, DMA rings): Arm ARM B2.11 "values reverted". | Filed: 🎫 #1196 (needs hardware). |
+| D6 | Low | `boot.S:950-960`, `boot.S:347-363`, `main.c:225-352` | Caches-off stores by the primary (BSS, boot stack, DTB globals, UEFI relocation) are never invalidated by VA before they are read through the cacheable mapping. Safe only while no cache holds those lines: true on Pi 5 (cold reset); on Jetson it rests on Linux's segment flush and the EFI stub's CIVAC, each with a speculative re-fetch window. #608 was this class of bug for PMM free lists. | Filed: 🎫 #1197. |
 | D7 | Info | `smp_boot.S:201-265` | Set/way loop: unnecessary, rationale wrong, safe on these cores, not portable (section 2). | Kept; `SETWAY_INVAL=OFF` added. |
 | D8 | Low | `smp_boot.S:165` | If `secondary_mmu_ttbr` reads 0 the secondary continues into C with the MMU and caches off, instead of parking. Silent incoherent execution. | Documented (reachable only through D1, now fixed). |
 | D9 | Low | `cache.h:28-43`, `smp.c:402-407`, `smp.c:745-750`, `ncmem.h:4-6` | "SMPEN" check reads CPUECTLR_EL1 bit 6, RES0 on A76 and PF_MODE[0] on A78AE (C0 Q1). The log lines ("SMPEN NOT set, using DC CVAC/CIVAC workaround") and the `ncmem.h` claim "incoherent despite SMPEN being set" (H4) are contradicted by the TRMs. | Fixed: messages and comments say what the bit is. |
-| D10 | Low (unrelated) | `mmu.S:147` | `mmu_enable` ends with `msr daifclr, #0xf`, unmasking IRQ, FIQ, SError and Debug on the primary before `gic_init`, instead of restoring the caller's DAIF. | Filed. |
+| D10 | Low (unrelated) | `mmu.S:147` | `mmu_enable` ends with `msr daifclr, #0xf`, unmasking IRQ, FIQ, SError and Debug on the primary before `gic_init`, instead of restoring the caller's DAIF. | Filed: 🎫 #1198. |
 | D11 | Low (latent) | `vmm.c:1851-1880`, `ncmem.h:30` | Pi 5 NC block is mapped NC only because `RAM_SIZE` is 4 GB: the code splits the last GB of RAM, while `NC_MEM_BASE` is a constant. An 8 GB `RAM_SIZE` would map 0xFFE00000 WB while every user treats it as NC. | Fixed: compile-time assert. |
 | D12 | Medium (for NC_AXIS=OFF) | `sched.c:609`, `sched.c:2617`, `task.c:155`, `preempt.c:57-59`, `cdc_ecm.c:82-123`, `usb_core.c:54-80`, `shell_sys.c:1813-1990`, `shell_sys.c:2217-2253`, `diag_pi5.h:21` | `PLATFORM_HAS_NC_MEMORY` was also used as "this is Pi 5 or Jetson" (idle-loop WFI/WFE choice, IRQ unmask rules), as "this platform has the DMA-safe NC region" (USB/CDC-ECM buffers) and to gate shell benches. Their `#else` branches are QEMU-only shortcuts. `preempt.c` allocates its per-CPU state from NC with no gate at all. | Fixed in Part 2 (see section 5). |
 
@@ -219,3 +219,17 @@ helpers serve device DMA. On coherent hardware they are redundant but
 correct. A build that removes CPU-to-CPU maintenance as well would need
 separate helpers for CPU sharing and for DMA; that is not part of this
 stage.
+
+## 6. Status on the C3 branch
+
+- Commit "Add NC_AXIS and SETWAY_INVAL build switches and the C3 audit":
+  Part 2 (section 5) and this document. Default builds compile to the
+  same objects as `c3-base-1193`, apart from the new test.
+- Commit "Fix secondary MMU publication and pre-MMU table maintenance":
+  D1, D2, D9, D11. These change the default build on purpose (`smp.c`,
+  `vmm.c`, `test_scheduler.c` only).
+- Not fixed here: D3 and D4 (🎫 #1128), D5 (🎫 #1196), D6 (🎫 #1197),
+  D10 (🎫 #1198), D8 (reachable only through D1).
+- `make check-braces` does not parse the branches that exist only under
+  `NC_AXIS=OFF` on Pi 5 and Jetson (no lint configuration defines it);
+  the Pi 5 and Jetson `NC_AXIS=OFF` builds compile them with `-Werror`.

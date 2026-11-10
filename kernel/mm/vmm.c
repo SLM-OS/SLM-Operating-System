@@ -13,6 +13,7 @@
 #include "spinlock.h"
 #include "cache.h"
 #include "dtb.h"
+#include "ncmem.h"     /* NC_MEM_BASE for the Pi 5 layout assert */
 #include <stddef.h>
 
 /*
@@ -2052,6 +2053,18 @@ void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
     *start = (uint64_t)(uintptr_t)_start;
     *end = (uint64_t)(uintptr_t)__kernel_end;
 }
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * The Pi 5 NC block is mapped NC only because it is the last 2 MB of
+ * the GB that vmm_setup_platform splits into l2_ram_gb3, which is the
+ * last GB of RAM_SIZE. NC_MEM_BASE is a separate constant: if RAM_SIZE
+ * changed, 0xFFE00000 would be mapped Write-Back while every NC user
+ * still treats it as Non-Cacheable (#1193 audit D11).
+ */
+_Static_assert(NC_MEM_BASE + NC_MEM_SIZE == RAM_BASE + RAM_SIZE,
+               "Pi 5 NC block must be the last 2 MB of RAM_SIZE (see l2_ram_gb3)");
+#endif
 
 /*
  * Set up initial page tables and enable MMU.

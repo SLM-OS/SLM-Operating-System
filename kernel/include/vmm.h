@@ -689,6 +689,15 @@ void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after);
  * cache lines the loop invalidated. */
 void vmm_mmu_enable_inval(uint64_t *start, uint64_t *end, uint64_t *lines);
 
+/*
+ * MMU configuration published by vmm_init for smp_boot.S, which reads it
+ * on each secondary with the MMU and caches off. smp_init cleans it to
+ * the PoC before CPU_ON (#1193 audit D1).
+ */
+extern volatile uint64_t secondary_mmu_ttbr;
+extern volatile uint64_t secondary_mmu_mair;
+extern volatile uint64_t secondary_mmu_tcr;
+
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);
 

@@ -18,6 +18,7 @@
 #include "ncmem.h"
 #include "nc_trace.h"
 #include "tegra_cpufreq.h"
+#include "vmm.h"        /* secondary_mmu_* */
 
 #include <stddef.h>
 
@@ -775,6 +776,20 @@ void smp_init(void)
      * CIVAC would overwrite the secondary's online=true at PoC.
      */
     cache_clean_range(cpu_data, sizeof(cpu_data));
+
+    /*
+     * smp_boot.S loads secondary_mmu_{ttbr,mair,tcr} with the MMU and
+     * caches off, so those loads bypass every cache and read DRAM.
+     * vmm_init wrote the words with caches on, so clean them to the PoC
+     * before CPU_ON (C0 facts section (b) step 1, #1193 audit D1). The
+     * secondary's own DC IVAC only worked because Cortex-A76 / A78AE
+     * execute DC IVAC as DC CIVAC, which writes back this CPU's dirty
+     * line; architecturally an invalidate may discard it, and the
+     * secondary would then read TTBR 0 and skip MMU enable.
+     */
+    cache_clean(&secondary_mmu_ttbr);
+    cache_clean(&secondary_mmu_mair);
+    cache_clean(&secondary_mmu_tcr);
 
     /* Boot secondary CPUs via PSCI CPU_ON */
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
