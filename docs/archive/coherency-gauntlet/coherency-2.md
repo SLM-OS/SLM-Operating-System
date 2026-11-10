@@ -363,3 +363,52 @@ Milestone for any issue filed this run: Backlog.
     record; whether it is cured is for the critic's hardware-half pass.
   - Hardware half for C0 adds, from the critic: the EFI-stub `nc block`
     decision line on UEFI-direct, and the #1196 hash line per path.
+
+## Entry 10 (08:59 UTC): C3 builder report (#1204, critic pending); jetson-nano-2 to C2
+
+- Image 072bd707 (default Jetson flags) rebuilt: elf af515aa5, bin
+  b42c2c08. Run 1's elf 84e7946c has identical .text and .data; the 1925
+  differing .rodata bytes are worktree path (1905) and build stamp (20)
+  (`c3/build-elf-compare.txt`). Rebased af8d01ba rebuilt: elf c8a9ecd1, bin
+  1cf14065 (run 1 f3a9e3be; 1935 path and 24 stamp bytes differ).
+- Pre-rebase, 5 UEFI-direct boots on jetson-nano-2, full serial log each,
+  litmus PASS 5/5 (0 forbidden, 0 timeouts, 0 weak), NDIV 135 on all CPUs
+  5/5. Cross-cluster rows slow in 1 of 5 (run01, 06:40 UTC: P1 506-603 ms,
+  P2 296-302, P3 131-132, P5 133, S2 125-126, S1 1,606,163, litmus 30.3 s)
+  and in the `NC_AXIS=OFF` range in 4 of 5 (P1 205-257, P2 129-130, P3
+  63-64, P5 56, S2 59, S1 950,955 to 955,794, litmus 17.0 to 17.5 s)
+  (`c3/prerebase-072bd707-uefi-boot-run{01..05}.txt`, gauntlet-2-hw-jetson
+  @ ca5e56e9).
+- Rebased af8d01ba, 3 UEFI-direct boots: fast in 3 of 3 (P1 213-257);
+  run03 has no boot log (capture returned 0 lines after about 26 min),
+  banner from `cat /sys/version` (`c3/rebased-af8d01ba-uefi-boot-run{01..03}.txt`).
+- Builder's reading: run 1's 463-602 ms summary was real; the slow rows are
+  a per-boot state of UEFI-direct boots, not a property of the removal
+  build (one image gave both modes on one board within 2 h). Pooled with
+  run 1: pre-rebase slow 2 of 6, rebased 0 of 4, `NC_AXIS=OFF` 0 of 1; too
+  few to separate builds. Hypothesis (untested): the inter-cluster path,
+  since cluster-1-internal rows (4>5, 5>4) and NDIV did not change. The one
+  slow boot followed 73 min of SD Linux uptime; 20 min (run05) was fast.
+- #1204 comment: issuecomment-6763220747 (not closed; waits for the critic).
+- Deviations, recorded: (1) the builder read the board IP from labctl's
+  database file read-only, outside the labctl MCP; from here the
+  orchestrator reads `lab://sbcs` and passes the IP in each grant. (2) A
+  hand-written BootNext helper over ssh drove 5 of 8 UEFI boots, with
+  `fsck.vfat -n` and a fresh read-only sha check before each reboot; not
+  permitted for later grants. (3) Four extra pre-rebase boots, three
+  rebased boots and one 20-min-uptime check beyond the brief's one boot,
+  to separate image from boot.
+- labctl stall: serial calls stalled 26 to 30 min between about 06:56 and
+  08:17 UTC (one capture with 0 lines, one send aborted after 1800 s). The
+  window ends within a minute of C1's 20-boot `boot_test` call ending
+  (08:17:42, Entry 7), and its start fits C1's earlier 10-boot NC call.
+  Hypothesis, untested: the stdio labctl MCP server runs one call at a
+  time, so a long `boot_test` blocks every other agent's labctl calls.
+  Scheduling rule from now: no `boot_test` call longer than 3 runs while
+  another agent is using the other board.
+- Board at hand-over: SD Linux, powered on, BootCurrent 0001, no BootNext,
+  ESP `SLMOS.efi` 789cba62 (fsck clean, read-only sha checked).
+- jetson-nano-2 granted to C2 for its 240-run series (IP 192.168.4.5 from
+  `lab://sbcs`). C2 also runs one `coherency litmus` per boot where the
+  cell has it, to tag each boot's inter-cluster state. C3 critic started
+  offline; its one UEFI boot is slotted after C2.
