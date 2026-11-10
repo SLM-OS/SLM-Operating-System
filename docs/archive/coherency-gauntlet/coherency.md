@@ -743,3 +743,25 @@ Claims renewed at 07:59 UTC to 13:59 UTC.
   Deploy rule: sdwire_update reboot=false, sdwire_info, power_cycle
   delay=20. `boot_test` cannot do the round trip between boots, so Pi 5
   reliability counts use this sequence by hand.
+
+### Correction from run 2 (2026-11-10): #1203 attempt counts
+
+This corrects the per-CPU steal attempt counts recorded for #1203 in three
+places above: the "Critic verdicts" C3 round 1 final entry ("10 to 12
+attempts, 0 successes" for CPUs 2 and 3 under `NC_AXIS=OFF`), the "Removal
+branch (contingent, prepared during the hardware stage)" C3 critic
+correction of 07:41 UTC ("CPU 4 executed 0 tasks, 12 attempts, 0
+successes"), and the "Steal stall (#1203)" row of "Extension step 1,
+Jetson, rebased" ("run 3: 10 attempts, 0 successes").
+
+Those counts come from the `bench stealing` "Steal counter deltas" table,
+which is read after the results print, so they include idle steal attempts
+made while the UART printed the results, not only attempts made while the
+16 tasks were supplied. Run 2 measured the difference with per-attempt
+instrumentation snapshotted at the last task completion: CPU 1 showed 10
+attempts in the deltas table and 2 in the trace in the same run
+(`gauntlet-2-hw-jetson:docs/archive/coherency-gauntlet/run2-hw/c2/ncoff-kexec-burst-run01.txt`;
+run-2 log `gauntlet/coherency-2:docs/archive/coherency-gauntlet/coherency-2.md`
+Entry 14). The "0 successes" and "executed 0 tasks" observations stand; the
+attempt counts overstate the in-run attempts. Run 2's sustained rows
+(#1216) supersede these burst counts as #1203's evidence.
