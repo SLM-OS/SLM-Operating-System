@@ -722,3 +722,19 @@ NC shows the sustained stall, #1216 is a pre-existing scheduler defect
 that the removal does not introduce, and #1203 stops blocking the removal;
 if only cacheable builds show it, the removal exposes it and needs the
 #1216 fix first. Run it with board time serialized (Entry 17).
+
+## Entry 18 (17:26 UTC): Jetson ESP restored; boards released
+
+- jetson-nano-2: ESP `SLMOS.efi` 73b7f479 (C2's NC_AXIS=OFF image) to
+  789cba62 (as found) via `scripts/jetson-uefi-deploy.sh`; the as-found
+  image booted UEFI-direct to `slmos>` (banner 6c0735b7,
+  `run2-hw/restore/restore-boot.txt`). After a power cycle to SD Linux:
+  `fsck.vfat -n` clean (rc 0, 6 files), fresh read-only mount
+  `SLMOS.efi` 789cba62, `l4t.efi` 91db497c unchanged, no BootNext
+  (`run2-hw/restore/restore-checks.txt`, gauntlet-2-hw-jetson @ 261f82f3).
+  `/root/slmos-c2-ncoff.elf` removed; `/root/slmos-efi-pre1193.efi` left
+  in place. One extra read-only ESP mount was made to record the "before"
+  hashes.
+- Final board state: jetson-nano-2 at SD Linux, powered on; pi-5-1 at the
+  SLM-OS shell on the card's original `kernel_2712.img`, powered on. Both
+  were powered on at the start, so both stay on. Both claims released.
