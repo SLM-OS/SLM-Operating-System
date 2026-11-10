@@ -187,3 +187,12 @@ ASSERT(_kernel_data_va + _kernel_data_virtual_size == _kernel_size,
  * virt is placed below 0x44000000 (PMM starts at __kernel_end), and
  * the 1 GB of guest RAM leaves ample room. */
 ASSERT(__kernel_end < 0x44000000, "Kernel image too large!")
+
+/* #1197: mmu_enable invalidates [_start, __kernel_end) by VA before the
+ * primary turns its caches on (vmm_boot_caches_off_range). The BSS
+ * clear and the boot stack are written with caches off, so both must
+ * lie inside that range. */
+ASSERT(__bss_start >= _start && __bss_end <= __kernel_end,
+       "BSS outside the caches-off invalidate range (#1197)")
+ASSERT(__stack_bottom >= _start && __stack_top <= __kernel_end,
+       "Boot stack outside the caches-off invalidate range (#1197)")

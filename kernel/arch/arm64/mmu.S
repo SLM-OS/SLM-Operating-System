@@ -15,11 +15,38 @@
  *   x1 = TCR_EL1 value
  *   x2 = MAIR_EL1 value
  *   x3 = SCTLR_EL1 value (with M bit set)
+ *   x4 = start of the range written with caches off (PA == VA here)
+ *   x5 = end of that range (exclusive)
  *
  * This function:
- * 1. Sets up MAIR, TCR, TTBR registers
- * 2. Enables MMU via SCTLR
- * 3. Returns to caller (which must be identity-mapped)
+ * 1. Invalidates [x4, x5) by VA to the PoC (#1197, see below)
+ * 2. Sets up MAIR, TCR, TTBR registers
+ * 3. Enables MMU via SCTLR
+ * 4. Returns to caller (which must be identity-mapped)
+ *
+ * Caches-off invalidate (#1197). Everything the primary CPU writes
+ * before this point (the BSS clear and boot stack in boot.S, the
+ * globals and static page tables kernel_main and vmm_init fill in, and
+ * on UEFI-direct boots the relocation copy) is written with SCTLR.C=0,
+ * so the stores go straight to DRAM. Once SCTLR.C=1 the same addresses
+ * are read through the Write-Back mapping, and any line for them still
+ * held in this CPU's caches (left by the loader, or refilled
+ * speculatively in the window before the previous owner turned its
+ * caches off) would be hit instead of DRAM. Linux invalidates its
+ * caches-off writes for the same reason (arch/arm64/kernel/head.S).
+ * vmm_boot_caches_off_range() passes the whole image, _start to
+ * __kernel_end, which holds all of those writes.
+ *
+ * This runs after the last caches-off store: mmu_enable is a leaf and
+ * touches no memory, so no store lands between the invalidate and the
+ * SCTLR write. It uses DC IVAC by VA only, never set/way (the Jetson
+ * UEFI-direct rule; set/way does not reach the PoC there). On
+ * Cortex-A76 and A78AE DC IVAC is executed as DC CIVAC, so a dirty
+ * stale line would be written back over the caches-off data; the
+ * loader-side clean (Pi 5 cold reset, the kexec segment flush, the EFI
+ * stub's DC CIVAC) is what rules that out. The invalidate is skipped
+ * if SCTLR.C is already set, because a true invalidate would then
+ * discard live dirty data.
  *
  * IMPORTANT: The caller must ensure identity mapping exists for this code.
  *
@@ -42,6 +69,28 @@ mmu_enable:
      * We'll re-enable them after MMU is stable.
      */
     msr     daifset, #0xf
+
+    /*
+     * Invalidate the caches-off range by VA (#1197, see the header).
+     * Line size from CTR_EL0.DminLine (log2 of the line size in words).
+     */
+    mrs     x7, sctlr_el1
+    tbnz    x7, #2, .Lmmu_inval_done        /* C already set: skip */
+    mrs     x8, ctr_el0
+    ubfx    x8, x8, #16, #4                 /* DminLine */
+    mov     x9, #4
+    lsl     x9, x9, x8                      /* line size in bytes */
+    sub     x10, x9, #1
+    bic     x4, x4, x10                     /* align start down */
+.Lmmu_inval_loop:
+    cmp     x4, x5
+    b.hs    .Lmmu_inval_end
+    dc      ivac, x4
+    add     x4, x4, x9
+    b       .Lmmu_inval_loop
+.Lmmu_inval_end:
+    dsb     sy
+.Lmmu_inval_done:
 
     /*
      * Invalidate all TLB entries before we start.
@@ -108,10 +157,10 @@ mmu_enable:
      * Read current SCTLR_EL1 and merge with requested value.
      * This preserves any bits we don't want to change.
      */
-    mrs     x4, sctlr_el1
+    mrs     x7, sctlr_el1
 
     /* Set the bits we want: M (MMU), C (data cache), I (instruction cache) */
-    orr     x4, x4, x3
+    orr     x7, x7, x3
 
     /*
      * CRITICAL: Enable MMU by writing SCTLR_EL1.
@@ -122,7 +171,7 @@ mmu_enable:
      * Because we have identity mapping, the physical address in LR
      * is also a valid virtual address, so the return works.
      */
-    msr     sctlr_el1, x4
+    msr     sctlr_el1, x7
     isb
 
     /*

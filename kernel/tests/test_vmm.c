@@ -933,6 +933,46 @@ static void test_kernel_pte_global(void)
 }
 
 /* ============================================================================
+ * #1197: caches-off invalidate range
+ * ============================================================================ */
+
+/*
+ * mmu_enable invalidates vmm_boot_caches_off_range() by VA before the
+ * primary turns its data cache on. Everything written with caches off
+ * must be inside it: the BSS clear, the boot stack, the static page
+ * tables (L1 is in BSS) and the initialised data (the UEFI relocation
+ * copy and the pre-MMU globals). Narrowing the range below any of
+ * these reopens #1197.
+ */
+static void test_boot_caches_off_range_covers_caches_off_writes(void)
+{
+    extern char _start[], __data_start[], __data_end[];
+    extern char __bss_start[], __bss_end[];
+    extern char __stack_bottom[], __stack_top[], __kernel_end[];
+    uint64_t start = 0, end = 0;
+
+    vmm_boot_caches_off_range(&start, &end);
+
+    TEST_ASSERT_MESSAGE(start < end, "empty caches-off range");
+    TEST_ASSERT_MESSAGE(start <= (uint64_t)(uintptr_t)_start &&
+                        end >= (uint64_t)(uintptr_t)__kernel_end,
+                        "range does not cover the whole image");
+    TEST_ASSERT_MESSAGE(start <= (uint64_t)(uintptr_t)__data_start &&
+                        end >= (uint64_t)(uintptr_t)__data_end,
+                        "range does not cover .data");
+    TEST_ASSERT_MESSAGE(start <= (uint64_t)(uintptr_t)__bss_start &&
+                        end >= (uint64_t)(uintptr_t)__bss_end,
+                        "range does not cover .bss");
+    TEST_ASSERT_MESSAGE(start <= (uint64_t)(uintptr_t)__stack_bottom &&
+                        end >= (uint64_t)(uintptr_t)__stack_top,
+                        "range does not cover the boot stack");
+
+    uint64_t l1 = vmm_get_ttbr1() & 0x0000FFFFFFFFF000ULL;
+    TEST_ASSERT_MESSAGE(l1 >= start && l1 + 4096 <= end,
+                        "range does not cover the L1 page table");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -942,6 +982,7 @@ int test_suite_vmm(void)
 
     /* Page table verification */
     RUN_TEST(test_virt_to_phys_accuracy);
+    RUN_TEST(test_boot_caches_off_range_covers_caches_off_writes);
     RUN_TEST(test_va_pa_coherency);
 
     /* Platform-specific mapping granularity */
