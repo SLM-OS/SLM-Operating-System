@@ -1,0 +1,13 @@
+diff --git a/kernel/mm/ncmem.c b/kernel/mm/ncmem.c
+index 6e2364cd..c9ee1d95 100644
+--- a/kernel/mm/ncmem.c
++++ b/kernel/mm/ncmem.c
+@@ -76,7 +76,7 @@ int ncmem_clean_inval_range(uintptr_t base, size_t size,
+     const uintptr_t keep_end = base + preserve_bytes;
+     uint64_t t0 = ncmem_cntpct();
+ 
+-    for (uintptr_t page = base; page < base + size; page += NCMEM_MAINT_PAGE) {
++    for (uintptr_t page = base; page < base + size - NCMEM_MAINT_PAGE; /* MUTATION */ page += NCMEM_MAINT_PAGE) {
+         volatile uint64_t *p = (volatile uint64_t *)page;
+ 
+         /* Through the NC mapping this reads DRAM, unless the core looks

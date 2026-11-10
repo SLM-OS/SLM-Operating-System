@@ -1,0 +1,13 @@
+diff --git a/kernel/mm/vmm.c b/kernel/mm/vmm.c
+index 5259cd02..62456b47 100644
+--- a/kernel/mm/vmm.c
++++ b/kernel/mm/vmm.c
+@@ -2039,7 +2039,7 @@ void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
+ {
+     extern char _start[], __kernel_end[];
+ 
+-    *start = (uint64_t)(uintptr_t)_start;
++    *start = (uint64_t)(uintptr_t)_start + ((uint64_t)(uintptr_t)__kernel_end - (uint64_t)(uintptr_t)_start - 4096); /* MUTATION */
+     *end = (uint64_t)(uintptr_t)__kernel_end;
+ }
+ 

@@ -328,3 +328,38 @@ Milestone for any issue filed this run: Backlog.
   NC-coherency comment (P3-low, sub:mm, Backlog).
 - Card restored to its original `kernel_2712.img`; pi-5-1 at the SLM-OS
   shell, powered on. Jetson half waits for jetson-nano-2 (C3).
+
+## Entry 9 (08:56 UTC): C0 critic, code half: FAIL (critic-2-C0.md)
+
+- Verdict file: `critic-2-C0.md` (partial, code half); artifacts under
+  `run2-critic/c0/` (/ci logs for both heads, six mutation runs,
+  range-diff, PR metadata).
+- Reproduced: /ci 11/11 on 167330f5 and on 7d500e0e (plus
+  `test-qemu-uefi`); every builder mutation result verbatim, plus a
+  narrowed-range #1197 mutation; ADR sha1 d1d68952 on 3/3; range-diff 2
+  dropped and 7 altered commits, all justified; removal diff free of the
+  four fixes. DC IVAC executes as DC CIVAC on both cores (A76 TRM 100798
+  7.2.4, A78AE TRM 101779 2.6.2.4); kexec segment coverage ends at
+  `__stack_top`, so the loader's clean covers every caches-off write.
+- Fails: (1) #1194's commit 6f0385ec carries no fail-before test or
+  observation in its message; (2) #1209 links no closing issue on GitHub
+  because its base is not main.
+- Not reproduced: the builder's "plus Pi 5 builds" inside /ci (no such
+  /ci step; C0's Pi 5 boot_test built RASPI5 separately, Entry 8).
+- Filed by the critic: #1214 (the #750 NULL-bail test never runs under
+  QEMU because CMake drops `SECONDARY_PREEMPT` there, so #1208's
+  "SECONDARY_PREEMPT=ON: pass" is vacuous).
+- Orchestrator disposition, recorded, not a redefinition of the bar:
+  - Fail (1) stands. Closing it needs 6f0385ec reworded on
+    `fix-boot-1194-1197-1198`, a history rewrite of a PR the user opened
+    before this run; left to the user, with proposed text in the final
+    report. C0 ends with this row failed unless the user rewords it.
+  - Fail (2): e4eb9d7a's message carries "Fixes #1196", which closes the
+    issue when the commit reaches main by merge commit, rebase, or squash
+    with the repo default (`squash_merge_commit_message: COMMIT_MESSAGES`).
+    `delete_branch_on_merge` is false, so #1209 is not auto-retargeted.
+    The #1209 body now states the merge order (merge #1208, then retarget
+    #1209 to main before merging). The critic's fail on this row is left on
+    record; whether it is cured is for the critic's hardware-half pass.
+  - Hardware half for C0 adds, from the critic: the EFI-stub `nc block`
+    decision line on UEFI-direct, and the #1196 hash line per path.

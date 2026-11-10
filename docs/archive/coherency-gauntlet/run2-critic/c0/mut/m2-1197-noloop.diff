@@ -1,0 +1,13 @@
+diff --git a/kernel/arch/arm64/mmu.S b/kernel/arch/arm64/mmu.S
+index 8f5e6be4..8781c700 100644
+--- a/kernel/arch/arm64/mmu.S
++++ b/kernel/arch/arm64/mmu.S
+@@ -84,7 +84,7 @@ mmu_enable:
+      */
+     mov     x11, #0                         /* lines invalidated */
+     mrs     x7, sctlr_el1
+-    tbnz    x7, #2, .Lmmu_inval_done        /* C already set: skip */
++    b       .Lmmu_inval_done                /* MUTATION: no invalidate */
+     mrs     x8, ctr_el0
+     ubfx    x8, x8, #16, #4                 /* DminLine */
+     mov     x9, #4

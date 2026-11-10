@@ -1,0 +1,13 @@
+diff --git a/kernel/arch/arm64/mmu.S b/kernel/arch/arm64/mmu.S
+index 8f5e6be4..3dbab4f2 100644
+--- a/kernel/arch/arm64/mmu.S
++++ b/kernel/arch/arm64/mmu.S
+@@ -203,7 +203,7 @@ mmu_enable:
+     /*
+      * Restore the caller's DAIF (#1198).
+      */
+-    msr     daif, x6
++    msr     daifclr, #0xf
+ 
+     mov     x0, x11                         /* lines invalidated */
+     ret

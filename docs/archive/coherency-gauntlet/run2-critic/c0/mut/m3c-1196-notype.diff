@@ -1,0 +1,13 @@
+diff --git a/kernel/arch/arm64/efi_stub.c b/kernel/arch/arm64/efi_stub.c
+index b3a5363b..ff6c74cd 100644
+--- a/kernel/arch/arm64/efi_stub.c
++++ b/kernel/arch/arm64/efi_stub.c
+@@ -264,7 +264,7 @@ bool efi_range_os_owned(const efi_memory_desc_t *map, uint64_t map_size,
+         if (!efi_ranges_overlap(d->phys_start, dlen, base, len)) {
+             continue;
+         }
+-        if (!efi_mem_type_free_after_ebs(d->type)) {
++        if (0 && !efi_mem_type_free_after_ebs(d->type)) { /* MUTATION */
+             return false;
+         }
+         uint64_t lo = d->phys_start > base ? d->phys_start : base;

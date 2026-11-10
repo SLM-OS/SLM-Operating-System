@@ -1,0 +1,13 @@
+diff --git a/kernel/mm/ncmem.c b/kernel/mm/ncmem.c
+index 6e2364cd..a5d8b234 100644
+--- a/kernel/mm/ncmem.c
++++ b/kernel/mm/ncmem.c
+@@ -106,7 +106,7 @@ int ncmem_clean_inval_range(uintptr_t base, size_t size,
+             st->changed++;
+             if (page + w * sizeof(uint64_t) < keep_end) {
+                 for (size_t k = 0; k < line_words; k++) {
+-                    p[w + k] = ncmem_maint_page[w + k];
++                    (void)0; /* MUTATION: no restore */
+                 }
+                 st->restored++;
+                 restored_any = true;

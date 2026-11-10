@@ -1,0 +1,24 @@
+HEAD 167330f54e6ee91bca754b8663b43c37d5ce3bfc
+=== 01-arm64: make kernel-clean && make kernel PLATFORM=QEMU_VIRT
+01-arm64 rc=0
+=== 02-x86: make kernel-clean && make kernel PLATFORM=X86_64
+02-x86 rc=0
+=== 03-jetson-real: make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real
+03-jetson-real rc=0
+=== 04-test: make test
+04-test rc=0
+=== 04b-test-x86: make test PLATFORM=X86_64
+04b-test-x86 rc=0
+=== 05-test-aisched: make test AI_SCHED=ON
+05-test-aisched rc=0
+=== 06-runtime: make runtime-test
+06-runtime rc=0
+=== 07-braces: make test-check-braces && make check-braces
+07-braces rc=0
+=== 08-buildorder: make test-build-order
+08-buildorder rc=0
+=== 09-jetson-layout: make test-jetson-uefi-layout
+09-jetson-layout rc=0
+=== 10-diff: git diff origin/main...HEAD --stat
+10-diff rc=0
+ALLDONE
