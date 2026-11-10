@@ -31,7 +31,7 @@ _Static_assert(ARM64_MAX_CPUS_LITERAL == MAX_CPUS,
 
 /* Per-CPU state, allocated from NC memory in preempt_init() so writes
  * from one CPU are immediately visible to any CPU that samples them
- * (no DSU-level coherency on Pi 5 without SMPEN). */
+ * (the NC-memory model on Pi 5, kernel/CLAUDE.md). */
 volatile uint32_t *reschedule_pending;
 volatile uint64_t *orig_elr;
 volatile uint64_t *orig_spsr;

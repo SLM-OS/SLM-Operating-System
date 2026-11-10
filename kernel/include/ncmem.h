@@ -2,7 +2,7 @@
  * ncmem.h - Non-cacheable shared memory allocator
  *
  * On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent
- * across CPUs despite SMPEN being set. DC CIVAC doesn't propagate through
+ * across CPUs. DC CIVAC doesn't propagate through
  * per-core L2, so cross-CPU data visibility requires non-cacheable memory.
  *
  * NC memory bypasses L1/L2 entirely — writes are instantly visible to all

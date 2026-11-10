@@ -9,7 +9,7 @@
  * pattern called out in `kernel/CLAUDE.md`.
  *
  * Per-CPU vs single-global was chosen because Pi 5 / Jetson have
- * incoherent per-core L2 caches (no SMPEN) — a single global head
+ * incoherent per-core L2 caches (the NC-memory model) — a single global head
  * index updated via atomic fetch-add would either need explicit DC
  * CIVAC/DSB SY around every increment (expensive) or NC memory for
  * the head (the run-queue NC region is small and the ring buffer

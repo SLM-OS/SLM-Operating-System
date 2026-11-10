@@ -678,7 +678,7 @@ int vmm_create_user_l1(uint64_t *out_pa)
     /* The page-table walker reads PAs directly. Clean the L1 page to
      * Point of Coherency so the data is in DRAM before any future
      * TTBR0 swap reads from it. Critical on Pi 5 / Jetson where
-     * SMPEN is not set and per-CPU L2 caches are incoherent. */
+     * per-CPU L2 caches are treated as incoherent. */
     cache_clean_range(user_l1, TABLE_SIZE);
 
     *out_pa = (uint64_t)(uintptr_t)page;

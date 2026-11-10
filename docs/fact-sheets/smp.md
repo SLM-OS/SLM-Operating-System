@@ -14,7 +14,7 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 | Per-CPU current-task ptr | NC | NC | NC | BSS |
 | Cross-CPU dispatch | ✅ full | ✅ full | ✅ full | ✅ full |
 | IPI / wake mechanism | SEV broadcast | SEV broadcast | SEV broadcast | LAPIC vector 49 |
-| Hardware cache coherency | ✅ automatic | ❌ SMPEN unset by TF-A | ❌ SMPEN unset by TF-A | ✅ MESI |
+| Hardware cache coherency | ✅ automatic | ❌ treated as incoherent (NC model) | ❌ treated as incoherent (NC model) | ✅ MESI |
 | Manual DC CVAC/CIVAC needed | — | ✅ | ✅ | — |
 | Spinlock model | LDAXR/STXR | Runtime `spinlock_hw_enabled`; barrier-only pre-MMU; DC CIVAC around LDAXR/STLR | Runtime `spinlock_hw_enabled`; same as Pi 5 | `lock cmpxchg` |
 | Work stealing | ON | ON | ON | ON |

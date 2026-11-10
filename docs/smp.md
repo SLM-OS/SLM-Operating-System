@@ -234,7 +234,7 @@ Since there's no thread-local storage in bare metal, per-CPU data is accessed vi
 
 This requires a memory access for every per-CPU operation but is simple and reliable.
 
-**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines. On Pi 5 (no SMPEN), CPU 0 must `cache_clean_range(cpu_data, ...)` before booting secondary CPUs to avoid DC CIVAC writeback corruption. See `kernel/CLAUDE.md` for details.
+**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines. On Pi 5, CPU 0 must `cache_clean_range(cpu_data, ...)` before booting secondary CPUs to avoid DC CIVAC writeback corruption. See `kernel/CLAUDE.md` for details.
 
 ---
 
@@ -450,7 +450,7 @@ The idle task's IRQ unmask (`msr daifclr, #2`) must be inside the `while(1)` loo
 
 All tasks are created with `DAIF.I=1` (IRQ masked). `task_create()` in `kernel/sched/task.c` writes `task->context.daif = 0x080`, and `context.S:126-128` restores DAIF early in the switch sequence — before GP registers and SP are fully loaded.
 
-Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting the switch with IRQs masked closes this window.
+Rationale: on real ARM64 hardware (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting the switch with IRQs masked closes this window.
 
 Once the restore is complete, `task_entry_trampoline()` (also in `task.c`) unmasks IRQs before calling the task's entry function. `task_entry_unmasks_irq(cpu)` decides where, using the same rules `scheduler_start()` applies:
 
@@ -640,7 +640,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 4. **Lock Contention** — 3 tasks across 3 CPUs increment shared counter with no races
 5. **Task Lifecycle** — Rapid create/destroy cycles
 
-**Pi 5 (as of April 16, 2026):** All 5 multi-core integration tests PASS on Pi 5 hardware. Cross-CPU task dispatch is fully working without SMPEN — the DC CIVAC spinlock path in `spinlock.h` forces lock state through DRAM so waiters on other CPUs see the current value, and NC-memory-backed run queues / task table / current-task pointers avoid cache coherency traps for the shared state that schedulers read. `test_work_stealing_distributes_load` passes on any boot where at least one non-owner secondary CPU is alive (its success criterion is "tasks ran off the owner CPU", not "≥ 2 distinct CPUs ran tasks"). Separately, issue #216 tracks a boot-to-boot dormancy pattern where one or more secondary CPUs fail to enter `schedule()` post-boot — when multiple secondaries are dormant the same boot, several multi-CPU tests fail together.
+**Pi 5 (as of April 16, 2026):** All 5 multi-core integration tests PASS on Pi 5 hardware. Cross-CPU task dispatch is fully working: the DC CIVAC spinlock path in `spinlock.h` forces lock state through DRAM so waiters on other CPUs see the current value, and NC-memory-backed run queues / task table / current-task pointers avoid cache coherency traps for the shared state that schedulers read. `test_work_stealing_distributes_load` passes on any boot where at least one non-owner secondary CPU is alive (its success criterion is "tasks ran off the owner CPU", not "≥ 2 distinct CPUs ran tasks"). Separately, issue #216 tracks a boot-to-boot dormancy pattern where one or more secondary CPUs fail to enter `schedule()` post-boot — when multiple secondaries are dormant the same boot, several multi-CPU tests fail together.
 
 ### Key Implementation Details
 
@@ -694,7 +694,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 
 **4-Core SMP Status:** All 4 Cortex-A76 cores boot successfully and reach C code. The shell reports "4 online / 4 total". Exclusive monitor operations (spinlocks via ldaxr/stxr) work correctly between all cores without any workaround.
 
-**Cache Coherency Workaround (DC CVAC/CIVAC):** Hardware cache coherency for regular cached writes between cores is broken because TF-A does not set SMPEN (bit 6 of CPUECTLR_EL1) before dropping secondary cores to EL2. SMPEN controls whether the core participates in the inner-shareable coherency domain; without it, normal cached stores on one core are not visible to other cores. Since CPUECTLR_EL1 is only writable at EL3, the OS cannot fix this from EL1.
+**Cache Coherency Workaround (DC CVAC/CIVAC):** Cross-CPU visibility of regular cached writes is treated as unreliable on Pi 5, so shared data uses explicit maintenance (and NC memory). An earlier version of this section blamed TF-A for not setting SMPEN; that was wrong: CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on Cortex-A78AE; neither core has an SMPEN or other coherency-enable bit (#1194). The old boot-log "SMPEN NOT set" line read that bit and has been removed; #1193 re-examines the coherency model itself.
 
 The workaround uses explicit ARM64 cache maintenance instructions:
 - **DC CVAC** (Data Cache Clean by VA to PoC) — flushes dirty cache lines to the point of coherency, making writes visible to other cores
@@ -708,7 +708,7 @@ The raw DC CVAC/CIVAC instructions have been refactored into portable helpers in
 
 The fix: `cache_clean_range(cpu_data, sizeof(cpu_data))` is called after `init_cpu_data()` but before booting any secondary CPUs. This ensures CPU 0's cachelines are clean (not dirty) in L1, so subsequent DC CIVAC operations have nothing stale to write back. The `struct per_cpu` is 40 bytes, meaning adjacent CPU entries share cachelines (64-byte lines), which exacerbated the false-sharing aspect of this bug.
 
-**Cross-CPU Task Dispatch (complete, April 16, 2026):** Fully working without SMPEN. Tasks without explicit CPU affinity are distributed by the heuristic scheduler policy's round-robin selection, work-stealing rebalances across idle CPUs, and `sched_migrate_task` moves between queues. The earlier "pinned to CPU 0" workaround is removed. Three layered fixes made this viable without firmware cooperation:
+**Cross-CPU Task Dispatch (complete, April 16, 2026):** Fully working. Tasks without explicit CPU affinity are distributed by the heuristic scheduler policy's round-robin selection, work-stealing rebalances across idle CPUs, and `sched_migrate_task` moves between queues. The earlier "pinned to CPU 0" workaround is removed. Three layered fixes made this viable without firmware cooperation:
 
 1. **NC-memory shared scheduler state** — `cpu_runqueue[]`, `task_table[]`, `current_task[]`, and the work-stealing deque array all live in Non-Cacheable memory at `NC_MEM_BASE` (`0xFFE00000`). Reads and writes bypass L1/L2 and hit DRAM directly, so cross-CPU visibility is automatic for these structures.
 2. **DC CIVAC spinlocks** (`kernel/include/spinlock.h`, `#if defined(PLATFORM_RASPI5)`) — every `spin_lock`/`spin_trylock` invalidates its stale L2 copy of the lock before `LDAXR`, and `spin_unlock` pushes the unlocked value through to DRAM after `STLR` + DSB SY. Without this, `STLR`-released locks stayed in the releaser's L2 and waiters' `LDAXR` read stale "locked" forever under contention (`sched_try_steal` / `rq_lock` cross-CPU).
