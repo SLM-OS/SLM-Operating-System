@@ -115,3 +115,13 @@ Milestone for any issue filed this run: Backlog.
   starts with (f87d9e47) and records the hash.
 - Evidence branches opened: `gauntlet-2-hw-pi5` @ ea86a89c,
   `gauntlet-2-hw-jetson` @ a52f3758, both from main 85f51ffd.
+
+## Entry 2 (06:36 UTC): correction to Entry 1, critic protocol
+
+- Correction to Entry 1: the builders started at about 06:32 UTC, not
+  06:43, and the entry was written at 06:33, not 06:45.
+- Critic protocol committed as `run2-critic-protocol.md` (the brief's
+  "Critic protocol" section, unchanged in substance). Critics get it, the
+  component's definition of done, the issue numbers, the evidence path and
+  the branch heads to reproduce from.
+- Reminders set: hour-7 checkpoint 13:27 UTC, gate deadline 15:27 UTC.
