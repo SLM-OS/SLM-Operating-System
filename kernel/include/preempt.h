@@ -55,6 +55,12 @@ void resched_trampoline(void);
 struct trap_frame;
 void maybe_arm_resched_trampoline(struct trap_frame *tf);
 
+/* Same, with the reschedule_pending array passed in (NULL means
+ * preempt_init has not run). For tests: lets the #750 test exercise
+ * the NULL bail without making the shared global NULL. */
+void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
+                                     volatile uint32_t *pending);
+
 /* Initialize per-CPU preemption state. Called from scheduler_init(). */
 void preempt_init(void);
 
