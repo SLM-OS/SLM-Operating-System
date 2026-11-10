@@ -1,0 +1,91 @@
+# jetson-nano-2 ESP restore checks, coherency run 2 (#1193). Command outputs verbatim.
+# Board clock is the board's own (not synced with the host).
+
+## Before restore (ssh root@192.168.4.5, read-only; last line is the local sha of the scp'd copy)
+Tue Nov 10 05:22:01 PM UTC 2026
+== efibootmgr
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+Boot0001* UEFI SD Device
+Boot0002* UEFI PXEv4 (MAC:3C6D66B54908)
+Boot0003* UEFI PXEv6 (MAC:3C6D66B54908)
+Boot0004* UEFI HTTPv4 (MAC:3C6D66B54908)
+Boot0005* UEFI HTTPv6 (MAC:3C6D66B54908)
+Boot0006* BootManagerMenuApp
+Boot0007* UEFI Shell
+Boot0008* UEFI SPCC M.2 PCIe SSD AA000000000000003172 1
+Boot0009* SLM-OS Direct
+Boot000A* UEFI PXEv4 (MAC:A0CEC80E9A21)
+Boot000B* UEFI PXEv6 (MAC:A0CEC80E9A21)
+Boot000C* UEFI HTTPv4 (MAC:A0CEC80E9A21)
+Boot000D* UEFI HTTPv6 (MAC:A0CEC80E9A21)
+Boot000E* SLM-OS NVMe
+== mounts (SLMOS-ESP / nvme)
+/dev/nvme0n1p2
+ESP not mounted
+== sha
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /root/slmos-efi-pre1193.efi
+-rwxr-xr-x 1 root root 10869360 Nov 10 01:01 /root/slmos-c2-ncoff.elf
+-rwxr-xr-x 1 root root  8864840 Nov  8 05:40 /root/slmos-efi-pre1193.efi
+Tue Nov 10 05:22:12 PM UTC 2026
+mounted ro at /mnt/esp-before.NgCM
+73b7f47929a142facc65af5618d86898ada9f6c408e87cb2eefe2a8196e903c3  /mnt/esp-before.NgCM/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /mnt/esp-before.NgCM/EFI/L4T/l4t.efi
+ESP not mounted
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/restore/slmos-efi-pre1193.efi
+
+## After restore and power cycle back to SD Linux (ssh root@192.168.4.5)
++ date -u
+Tue Nov 10 05:23:00 PM UTC 2026
++ uname -r
+5.15.148-tegra
++ grep nvme0n1p2 /proc/mounts
+ESP not mounted
++ echo 'ESP not mounted'
++ fsck.vfat -n /dev/disk/by-partlabel/SLMOS-ESP
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
++ echo 'fsck rc=0'
++ sync
++ echo 3
+++ mktemp -d /mnt/esp-after.XXXX
++ m=/mnt/esp-after.4uwN
++ mount -o ro /dev/disk/by-partlabel/SLMOS-ESP /mnt/esp-after.4uwN
++ sha256sum /mnt/esp-after.4uwN/EFI/SLMOS/SLMOS.efi /mnt/esp-after.4uwN/EFI/L4T/l4t.efi
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /mnt/esp-after.4uwN/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /mnt/esp-after.4uwN/EFI/L4T/l4t.efi
++ umount /mnt/esp-after.4uwN
++ rmdir /mnt/esp-after.4uwN
++ grep nvme0n1p2 /proc/mounts
+ESP not mounted
++ echo 'ESP not mounted'
++ efibootmgr
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+Boot0001* UEFI SD Device
+Boot0002* UEFI PXEv4 (MAC:3C6D66B54908)
+Boot0003* UEFI PXEv6 (MAC:3C6D66B54908)
+Boot0004* UEFI HTTPv4 (MAC:3C6D66B54908)
+Boot0005* UEFI HTTPv6 (MAC:3C6D66B54908)
+Boot0006* BootManagerMenuApp
+Boot0007* UEFI Shell
+Boot0008* UEFI SPCC M.2 PCIe SSD AA000000000000003172 1
+Boot0009* SLM-OS Direct
+Boot000A* UEFI PXEv4 (MAC:A0CEC80E9A21)
+Boot000B* UEFI PXEv6 (MAC:A0CEC80E9A21)
+Boot000C* UEFI HTTPv4 (MAC:A0CEC80E9A21)
+Boot000D* UEFI HTTPv6 (MAC:A0CEC80E9A21)
+Boot000E* SLM-OS NVMe
++ ls -l /root/slmos-c2-ncoff.elf
+-rwxr-xr-x 1 root root 10869360 Nov 10 01:01 /root/slmos-c2-ncoff.elf
++ rm -f /root/slmos-c2-ncoff.elf
++ sync
++ ls -l /root/slmos-c2-ncoff.elf
+ls: cannot access '/root/slmos-c2-ncoff.elf': No such file or directory
++ ls -l /root/slmos-efi-pre1193.efi
+-rwxr-xr-x 1 root root 8864840 Nov  8 05:40 /root/slmos-efi-pre1193.efi
