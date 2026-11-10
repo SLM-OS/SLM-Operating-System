@@ -138,8 +138,9 @@ static void test_unknown_mpidr_returns_negative(void)
  * `preempt_init()` has allocated `reschedule_pending` from NC memory.
  * Without this guard, the original `if (!reschedule_pending[cpu])`
  * dereferenced a NULL pointer; on Jetson with patched BL31 routing
- * IRQs to NS-EL2, an inherited xudc IRQ delivered between mmu_enable's
- * `daifclr` and scheduler_init's `preempt_init` triggered a level-3
+ * IRQs to NS-EL2, an inherited xudc IRQ delivered between the boot IRQ
+ * unmask (mmu_enable's `daifclr` then; kernel_main after timer_init
+ * since #1198) and scheduler_init's `preempt_init` triggered a level-3
  * TTW external abort that BL31's RAS handler turned into a core
  * power-off (#750). The fix is a single `if (!reschedule_pending)
  * return;` at function entry; this test pins that semantics by

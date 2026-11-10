@@ -155,10 +155,10 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
      *
      * preempt_init() — which allocates reschedule_pending / orig_elr /
      * orig_spsr from NC memory — runs inside scheduler_init(). Under
-     * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, IRQs are unmasked by
-     * the `msr daifclr, #0xf` at the tail of mmu_enable (kernel/arch/
-     * arm64/mmu.S), which is reached from vmm_init() — long before
-     * scheduler_init() runs. Any IRQ delivered in that window (a
+     * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, kernel_main unmasks
+     * IRQs on the primary right after timer_init() (#1198; until then
+     * the `msr daifclr, #0xf` at the tail of mmu_enable did it, from
+     * vmm_init()), long before scheduler_init() runs. Any IRQ delivered in that window (a
      * pending xudc IRQ 198 inherited from Linux is the canonical
      * trigger on Jetson) takes the el1_irq vector path, which under
      * SECONDARY_PREEMPT calls `bl maybe_arm_resched_trampoline`.

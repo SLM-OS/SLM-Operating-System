@@ -22,7 +22,8 @@
  * 1. Invalidates [x4, x5) by VA to the PoC (#1197, see below)
  * 2. Sets up MAIR, TCR, TTBR registers
  * 3. Enables MMU via SCTLR
- * 4. Returns to caller (which must be identity-mapped)
+ * 4. Returns to caller (which must be identity-mapped) with the
+ *    caller's DAIF restored (#1198)
  *
  * Caches-off invalidate (#1197). Everything the primary CPU writes
  * before this point (the BSS clear and boot stack in boot.S, the
@@ -65,9 +66,13 @@
 .type mmu_enable, @function
 mmu_enable:
     /*
-     * Disable interrupts during this critical section.
-     * We'll re-enable them after MMU is stable.
+     * Mask D, A, I and F during this critical section and restore the
+     * caller's DAIF on exit (#1198). This used to end with
+     * `msr daifclr, #0xf`, which unmasked all four on the primary
+     * before gic_init and timer_init; kernel_main now unmasks them
+     * explicitly (D and A after vmm_init, I and F after timer_init).
      */
+    mrs     x6, daif
     msr     daifset, #0xf
 
     /*
@@ -191,9 +196,9 @@ mmu_enable:
     isb
 
     /*
-     * Re-enable interrupts.
+     * Restore the caller's DAIF (#1198).
      */
-    msr     daifclr, #0xf
+    msr     daif, x6
 
     ret
 

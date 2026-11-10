@@ -911,8 +911,10 @@ primary_cpu:
      * Note: on non-Pi5 platforms, some code at real_start runs before we
      * reach primary_cpu (EFI detection, UART debug). That code does not
      * allocate a stack or touch BSS, so a spurious exception would only
-     * corrupt scratch GPRs — survivable. After this instruction, DAIF is
-     * masked until vectors_init() installs a handler.
+     * corrupt scratch GPRs — survivable. After this instruction, DAIF
+     * stays masked through vmm_init (mmu_enable restores it rather than
+     * clearing it); kernel_main unmasks D and A after vmm_init and I
+     * and F after gic_init and timer_init (#1198).
      *
      * DAIF bits: D=Debug, A=SError, I=IRQ, F=FIQ
      */

@@ -669,6 +669,11 @@ extern void mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair, uint64_t sct
  */
 void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end);
 
+/* DAIF read just before and just after the boot mmu_enable call
+ * (#1198, test_vmm.c): equal when mmu_enable restores the caller's
+ * mask instead of clearing it. */
+void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after);
+
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);
 

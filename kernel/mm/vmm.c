@@ -2013,6 +2013,16 @@ static void vmm_setup_platform(void)
  * linker scripts ASSERT that .bss and .stack end at or before
  * __kernel_end.
  */
+/* DAIF just before and just after mmu_enable on the primary (#1198):
+ * mmu_enable must restore the caller's mask, not clear it. */
+static uint64_t mmu_enable_daif_before, mmu_enable_daif_after;
+
+void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after)
+{
+    *before = mmu_enable_daif_before;
+    *after = mmu_enable_daif_after;
+}
+
 void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
 {
     extern char _start[], __kernel_end[];
@@ -2096,8 +2106,10 @@ void vmm_init(void)
     /* mmu_enable invalidates this range by VA before setting SCTLR.C,
      * after the last caches-off store (#1197). */
     vmm_boot_caches_off_range(&inval_start, &inval_end);
+    __asm__ volatile("mrs %0, daif" : "=r"(mmu_enable_daif_before));
     mmu_enable(ttbr1, TCR_EL1_VALUE, MAIR_EL1_VALUE, sctlr,
                inval_start, inval_end);
+    __asm__ volatile("mrs %0, daif" : "=r"(mmu_enable_daif_after));
 
     /* If we get here, MMU is enabled and we're running at virtual addresses */
     vmm_state.initialized = true;

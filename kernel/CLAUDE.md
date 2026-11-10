@@ -462,7 +462,8 @@ abandoned exception frame on real ARM64 hardware).
   fixes were needed before the trampoline path was hardware-stable:
   PR #752 added a NULL-safe entry guard to `maybe_arm_resched_trampoline`
   (Linux's xudc IRQ 198 was firing the moment `mmu_enable` unmasked
-  IRQs and dereferencing `reschedule_pending` before `preempt_init`
+  IRQs, which since #1198 happens in `kernel_main` after `timer_init`
+  instead, and dereferencing `reschedule_pending` before `preempt_init`
   allocated it — #750 root cause, manifested as a BL31 power-off
   via DFSC=0x17 / RAS), and PR #753 expanded the IRQ trap-frame to
   save the full FP/SIMD register file (q0-q31 + FPCR + FPSR, frame
