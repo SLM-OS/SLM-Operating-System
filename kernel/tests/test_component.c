@@ -12,6 +12,8 @@
 #include "task.h"
 #include "sched.h"
 #include "test_wait.h"
+#include "smp.h"
+#include "timer.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -449,14 +451,43 @@ static volatile void *c4_multi_ptrs[C4_MULTI_N];
 static volatile uint32_t c4_multi_values[C4_MULTI_N];
 static volatile int c4_multi_done;
 
+/* #1205 instrumentation (coherency run 2, C1): each task records the CPU
+ * it ran on and when; each cleanup records the CPU that reaped it and when
+ * (CNTPCT). */
+static volatile uint32_t c4_multi_run_cpu[C4_MULTI_N];
+static volatile uint64_t c4_multi_run_ts[C4_MULTI_N];
+static volatile uint32_t c4_multi_cleanup_cpu[C4_MULTI_N];
+static volatile uint64_t c4_multi_cleanup_ts[C4_MULTI_N];
+
+static void c4_multi_exit_recorded(void *arg)
+{
+    int slot = (int)(uintptr_t)arg;
+    c4_multi_run_ts[slot] = timer_get_count();
+    c4_multi_run_cpu[slot] = cpu_id();
+    /* Returning hands off to task_entry_trampoline which calls task_exit(). */
+}
+
 static void c4_multi_spy(void *arg)
 {
     uint32_t *ctx = (uint32_t *)arg;
     int slot = (int)(*ctx & 0xFF);  /* low byte encodes which task */
+    c4_multi_cleanup_ts[slot] = timer_get_count();
+    c4_multi_cleanup_cpu[slot] = cpu_id();
     c4_multi_ptrs[slot] = arg;
     c4_multi_values[slot] = *ctx;
     pmm_free_page(ctx);
     __atomic_fetch_add(&c4_multi_done, 1, __ATOMIC_RELEASE);
+}
+
+/* Microseconds from CNTPCT stamp a to b; -1 when b was never written (0)
+ * or precedes a. */
+static long long c1_us(uint64_t a, uint64_t b)
+{
+    uint64_t f = timer_get_frequency();
+    if (b == 0 || b < a || f == 0) {
+        return -1;
+    }
+    return (long long)((b - a) * 1000000ull / f);
 }
 
 static void test_component_cleanup_ctx_is_per_task(void)
@@ -465,33 +496,94 @@ static void test_component_cleanup_ctx_is_per_task(void)
     for (int i = 0; i < C4_MULTI_N; i++) {
         c4_multi_ptrs[i] = NULL;
         c4_multi_values[i] = 0;
+        c4_multi_run_cpu[i] = 0xFFu;
+        c4_multi_run_ts[i] = 0;
+        c4_multi_cleanup_cpu[i] = 0xFFu;
+        c4_multi_cleanup_ts[i] = 0;
     }
 
     /* Start N tasks, each with a distinct heap-allocated ctx whose
      * contents encode the slot index. */
+    uint32_t waiter_cpu0 = cpu_id();
+    uint64_t t_dispatch = timer_get_count();
     for (int i = 0; i < C4_MULTI_N; i++) {
         uint32_t *ctx = (uint32_t *)pmm_alloc_page();
         TEST_ASSERT_NOT_NULL(ctx);
         *ctx = 0x1000u | (uint32_t)i;
 
-        struct task *t = task_create("c4_multi", c4_exit_immediately, NULL);
+        struct task *t = task_create("c4_multi", c4_multi_exit_recorded,
+                                     (void *)(uintptr_t)i);
         TEST_ASSERT_NOT_NULL(t);
         task_set_cleanup(t, c4_multi_spy, ctx);
         scheduler_add_task_to_cpu(t, 0);
     }
 
-    /* Wait for all cleanups to fire, bounded by wall clock (#1205). The
-     * old bound was 1,000 yields. On Pi 5 with the NC axis a yield in this
-     * loop lasted 1.16 to 5.3 ms, because it ran another CPU-0 task, so
-     * 1,000 of them lasted at least 1.16 s; the bare cost of 2.3 us per
-     * yield (2.3 ms for 1,000) is below the 3.5 to 10.6 ms the cleanups
-     * took on both kernels, so it is not the NC equivalent (C1 run 2).
-     * 2 s, rounded up. */
-    long long c4_us = test_wait_int_at_least("c4_multi", &c4_multi_done,
-                                             C4_MULTI_N, TEST_WAIT_S(2));
-    uart_printf("[test_wait] c4_multi: cleanups after %lld us (bound 2000000 us)\n",
-                c4_us);
-    TEST_ASSERT_MESSAGE(c4_us >= 0, "not all c4 cleanups fired");
+    /* Wait for all cleanups to fire. */
+    uint64_t t_loop = timer_get_count();
+    int timeout = 1000;
+    while (__atomic_load_n(&c4_multi_done, __ATOMIC_ACQUIRE) < C4_MULTI_N
+           && timeout > 0) {
+        yield();
+        timeout--;
+    }
+    uint64_t t_end = timer_get_count();
+    int done_at_bound = __atomic_load_n(&c4_multi_done, __ATOMIC_ACQUIRE);
+    uint32_t waiter_cpu1 = cpu_id();
+    int yields = 1000 - timeout;
+
+    /* #1205 instrumentation: on a timeout, keep yielding for up to 1 s of
+     * wall clock and record the cleanup count 1, 10 and 100 ms after
+     * expiry (load-acquire), and when it first reached C4_MULTI_N. */
+    int rp[3] = { -1, -1, -1 };
+    long long first_true_us = -1;
+    if (timeout <= 0) {
+        static const long long marks_us[3] = { 1000, 10000, 100000 };
+        int next = 0;
+        for (;;) {
+            long long dt = c1_us(t_end, timer_get_count());
+            int v = __atomic_load_n(&c4_multi_done, __ATOMIC_ACQUIRE);
+            if (v >= C4_MULTI_N && first_true_us < 0) {
+                first_true_us = dt;
+            }
+            while (next < 3 && dt >= marks_us[next]) {
+                rp[next++] = v;
+            }
+            if (next >= 3 && (first_true_us >= 0 || dt >= 1000000)) {
+                break;
+            }
+            yield();
+        }
+    }
+    uint64_t tb0 = timer_get_count();
+    for (int i = 0; i < 1000; i++) {
+        yield();
+    }
+    long long bare1000_us = c1_us(tb0, timer_get_count());
+    long long loop_us = c1_us(t_loop, t_end);
+    uart_printf("[C1-1205] c4 %s waiter_cpu=%u->%u done_at_bound=%d/%d "
+                "yields=%d/1000 loop_us=%lld ns_per_yield=%lld "
+                "bare_ns_per_yield=%lld\n",
+                timeout > 0 ? "PASS" : "FAIL",
+                (unsigned)waiter_cpu0, (unsigned)waiter_cpu1, done_at_bound,
+                C4_MULTI_N, yields, loop_us,
+                yields > 0 ? loop_us * 1000 / yields : -1,
+                bare1000_us >= 0 ? bare1000_us : -1);
+    for (int i = 0; i < C4_MULTI_N; i++) {
+        uart_printf("[C1-1205] c4 slot %d ran_cpu=%u ran_us=%lld "
+                    "cleanup_cpu=%u cleanup_us=%lld (from dispatch; loop at "
+                    "%lld, expiry at %lld)\n",
+                    i, (unsigned)c4_multi_run_cpu[i],
+                    c1_us(t_dispatch, c4_multi_run_ts[i]),
+                    (unsigned)c4_multi_cleanup_cpu[i],
+                    c1_us(t_dispatch, c4_multi_cleanup_ts[i]),
+                    c1_us(t_dispatch, t_loop), c1_us(t_dispatch, t_end));
+    }
+    if (timeout <= 0) {
+        uart_printf("[C1-1205] c4 FAIL repoll 1ms=%d 10ms=%d 100ms=%d "
+                    "all_done_after_expiry_us=%lld\n",
+                    rp[0], rp[1], rp[2], first_true_us);
+    }
+    TEST_ASSERT_MESSAGE(timeout > 0, "not all c4 cleanups fired");
 
     /* Each slot must have been touched exactly once with its own encoded
      * value — proving each task carried its own ctx. */

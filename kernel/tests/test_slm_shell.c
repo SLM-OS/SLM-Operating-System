@@ -31,6 +31,8 @@
 #include "../include/sched.h"
 #include "../include/uart.h"
 #include "test_wait.h"
+#include "../include/smp.h"
+#include "../include/timer.h"
 
 /* ============================================================================
  * Tests
@@ -842,12 +844,29 @@ static volatile int      live_follow_rc;
 static volatile bool     live_saw_header;
 static volatile bool     live_done;
 
+/* #1202 instrumentation (coherency run 2, C1): the helper records its CPU
+ * and a CNTPCT stamp at each stage, so a timeout shows how far it got and
+ * when. Stages: entry, saw output, stats done, 2000 yields done, stop done,
+ * follow done, flag set. */
+enum { LIVE_ST_ENTRY, LIVE_ST_SAW, LIVE_ST_STATS, LIVE_ST_Y2000, LIVE_ST_STOP,
+       LIVE_ST_FOLLOW, LIVE_ST_DONE, LIVE_ST_N };
+static volatile uint64_t live_st_ts[LIVE_ST_N];
+static volatile uint32_t live_st_cpu[LIVE_ST_N];
+
+static inline void live_stage(int st)
+{
+    live_st_ts[st] = timer_get_count();
+    live_st_cpu[st] = cpu_id();
+}
+
 static void live_session_entry(void *arg)
 {
     (void)arg;
+    live_stage(LIVE_ST_ENTRY);
     while (!cap.saw_output) {
         yield();
     }
+    live_stage(LIVE_ST_SAW);
     SlmTelemetryC t;
     if (rust_slm_telemetry(0, 0, &t) == 0) {
         live_first = t.decode_tokens;
@@ -859,16 +878,32 @@ static void live_session_entry(void *arg)
     cap_clear();
     live_stats_rc = shell_execute("slm stats 0 --verbose --profile --gpu");
     live_saw_header = strstr(cap.buf, "[prompt running: live]") != NULL;
+    live_stage(LIVE_ST_STATS);
     for (int i = 0; i < 2000; i++) {
         yield();
     }
+    live_stage(LIVE_ST_Y2000);
     if (rust_slm_telemetry(0, 0, &t) == 0) {
         live_second = t.decode_tokens;
     }
     (void)shell_execute("slm stop 0");
+    live_stage(LIVE_ST_STOP);
     live_follow_rc = shell_execute("slm stats 0 --follow 1");
+    live_stage(LIVE_ST_FOLLOW);
     shell_session_unbind(task_current());
+    live_stage(LIVE_ST_DONE);
     live_done = true;
+}
+
+/* Microseconds from CNTPCT stamp a to b; -1 when b was never written (0)
+ * or precedes a. */
+static long long c1_us(uint64_t a, uint64_t b)
+{
+    uint64_t f = timer_get_frequency();
+    if (b == 0 || b < a || f == 0) {
+        return -1;
+    }
+    return (long long)((b - a) * 1000000ull / f);
 }
 
 static void test_slm_stats_live_from_second_session(void)
@@ -882,23 +917,104 @@ static void test_slm_stats_live_from_second_session(void)
     live_stats_rc = live_follow_rc = -99;
     live_saw_header = false;
     live_done = false;
+    for (int st = 0; st < LIVE_ST_N; st++) {
+        live_st_ts[st] = 0;
+        live_st_cpu[st] = 0xFFu;
+    }
 
     struct task *t = task_create("slm_live", live_session_entry, NULL);
     TEST_ASSERT_NOT_NULL(t);
+    uint32_t waiter_cpu0 = cpu_id();
+    uint64_t t_dispatch = timer_get_count();
     scheduler_add_task_to_cpu(t, task_current()->assigned_cpu);
     /* The looping script fills the capture buffer, so the stop reason is
      * checked from the telemetry below, not the text. */
     TEST_ASSERT_EQUAL_INT(0, shell_execute("slm prompt 0 --raw --max 200000 hi"));
-    /* Wall-clock bound, not a yield count (#1202). The helper's last step,
-     * `slm stats 0 --follow 1`, can sleep until the next 10 ms tick; the old
-     * 100,000-yield bound lasted about 9.3 ms without the NC axis and expired
-     * first in 2 of 20 Pi 5 boots. 250 ms is what that bound lasted with the
-     * NC axis (2.3 us per yield, 230 ms, C1 run 2), rounded up. */
-    long long live_us = test_wait_flag("slm_live", &live_done,
-                                       TEST_WAIT_MS(250));
-    uart_printf("[test_wait] slm_live: flag after %lld us (bound 250000 us)\n",
-                live_us);
-    TEST_ASSERT_TRUE(live_us >= 0);
+    uint64_t t_loop = timer_get_count();
+    int yields = 0;
+    for (int i = 0; i < 100000 && !live_done; i++) {
+        yield();
+        yields++;
+    }
+    uint64_t t_end = timer_get_count();
+    bool done_at_bound = live_done;
+    uint32_t waiter_cpu1 = cpu_id();
+    uint32_t h_state = (uint32_t)t->state;
+    uint32_t h_assigned = t->assigned_cpu;
+    uint64_t h_switches = t->switches;
+
+    /* #1202 instrumentation: on a timeout, keep yielding for up to 1 s of
+     * wall clock and record whether the flag is set 1, 10 and 100 ms after
+     * expiry (load-acquire), and when it first turned true. */
+    int rp[3] = { -1, -1, -1 };
+    long long first_true_us = -1;
+    if (!done_at_bound) {
+        static const long long marks_us[3] = { 1000, 10000, 100000 };
+        int next = 0;
+        for (;;) {
+            long long dt = c1_us(t_end, timer_get_count());
+            bool v = __atomic_load_n(&live_done, __ATOMIC_ACQUIRE);
+            if (v && first_true_us < 0) {
+                first_true_us = dt;
+            }
+            while (next < 3 && dt >= marks_us[next]) {
+                rp[next++] = v ? 1 : 0;
+            }
+            if (next >= 3 && (first_true_us >= 0 || dt >= 1000000)) {
+                break;
+            }
+            yield();
+        }
+    }
+    /* Cost of a bare yield here, after the wait: 1000 yields timed. */
+    uint64_t tb0 = timer_get_count();
+    for (int i = 0; i < 1000; i++) {
+        yield();
+    }
+    long long bare1000_us = c1_us(tb0, timer_get_count());
+    long long loop_us = c1_us(t_loop, t_end);
+    uart_printf("[C1-1202] live %s waiter_cpu=%u->%u helper_cpu=%u..%u "
+                "assigned=%u state=%u switches=%llu yields=%d/100000 "
+                "loop_us=%lld dispatch_to_end_us=%lld ns_per_yield=%lld "
+                "bare_ns_per_yield=%lld\n",
+                done_at_bound ? "PASS" : "FAIL",
+                (unsigned)waiter_cpu0, (unsigned)waiter_cpu1,
+                (unsigned)live_st_cpu[LIVE_ST_ENTRY],
+                (unsigned)live_st_cpu[LIVE_ST_DONE],
+                (unsigned)h_assigned, (unsigned)h_state,
+                (unsigned long long)h_switches, yields, loop_us,
+                c1_us(t_dispatch, t_end),
+                yields > 0 ? loop_us * 1000 / yields : -1,
+                bare1000_us >= 0 ? bare1000_us : -1);
+    uart_printf("[C1-1202] live stages_us(from dispatch; loop at %lld, "
+                "expiry at %lld) entry=%lld@%u saw=%lld@%u stats=%lld@%u "
+                "y2000=%lld@%u stop=%lld@%u follow=%lld@%u done=%lld@%u\n",
+                c1_us(t_dispatch, t_loop), c1_us(t_dispatch, t_end),
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_ENTRY]),
+                (unsigned)live_st_cpu[LIVE_ST_ENTRY],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_SAW]),
+                (unsigned)live_st_cpu[LIVE_ST_SAW],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_STATS]),
+                (unsigned)live_st_cpu[LIVE_ST_STATS],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_Y2000]),
+                (unsigned)live_st_cpu[LIVE_ST_Y2000],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_STOP]),
+                (unsigned)live_st_cpu[LIVE_ST_STOP],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_FOLLOW]),
+                (unsigned)live_st_cpu[LIVE_ST_FOLLOW],
+                c1_us(t_dispatch, live_st_ts[LIVE_ST_DONE]),
+                (unsigned)live_st_cpu[LIVE_ST_DONE]);
+    if (!done_at_bound) {
+        uart_printf("[C1-1202] live FAIL repoll 1ms=%d 10ms=%d 100ms=%d "
+                    "first_true_after_expiry_us=%lld stats_rc=%d follow_rc=%d "
+                    "first=%llu second=%llu running=%u saw_header=%d\n",
+                    rp[0], rp[1], rp[2], first_true_us,
+                    (int)live_stats_rc, (int)live_follow_rc,
+                    (unsigned long long)live_first,
+                    (unsigned long long)live_second,
+                    (unsigned)live_running, live_saw_header ? 1 : 0);
+    }
+    TEST_ASSERT_TRUE(done_at_bound);
     TEST_ASSERT_EQUAL_UINT32(1u, live_running);
     TEST_ASSERT_EQUAL_INT(0, live_stats_rc);
     TEST_ASSERT_EQUAL_INT(0, live_follow_rc);
