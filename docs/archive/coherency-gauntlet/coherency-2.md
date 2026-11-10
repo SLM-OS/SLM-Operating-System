@@ -101,3 +101,17 @@ Milestone for any issue filed this run: Backlog.
 | ~2 h onward | C1 | C2 (C3 critic reproduction slotted in) |
 | gaps | C0 boot_test 10 | C0 boot_test 10 per path |
 | after gate | C4 | C4 |
+
+## Entry 1 (06:45 UTC): builders started
+
+- C0, C1, C2 and C3 builders started at 06:43 UTC, each in its own
+  worktree, each with `run2-rules.md` (fa989a38) and its component text
+  from the brief.
+- Grants: pi-5-1 to C1 until its checkpoint A (step 1 rows and the step 2
+  reading). jetson-nano-2 to C3 until done. C0 and C2 have no board until
+  they report their pre-hardware checkpoint.
+- Removal branch writes: C0 first (rebase onto `fix/boot-path-1193`); C1
+  told not to rebase it; C2 builds its removal cell from the head it
+  starts with (f87d9e47) and records the hash.
+- Evidence branches opened: `gauntlet-2-hw-pi5` @ ea86a89c,
+  `gauntlet-2-hw-jetson` @ a52f3758, both from main 85f51ffd.
