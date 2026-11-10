@@ -412,3 +412,40 @@ Milestone for any issue filed this run: Backlog.
   `lab://sbcs`). C2 also runs one `coherency litmus` per boot where the
   cell has it, to tag each boot's inter-cluster state. C3 critic started
   offline; its one UEFI boot is slotted after C2.
+
+## Entry 11 (09:09 UTC): C3 critic stage 1 (offline); rulings on ESP restore and the scratchpad
+
+- C3 critic, offline (critic report, verdict pending its one boot): counted
+  10 files in `run2-hw/c3/` (2 support, 8 boot), opened all 10. 7 boot logs
+  complete (1406 or 1407 lines, Linux reboot to `slmos>`), byte-identical
+  to the builder's raw scratchpad captures; every litmus section has 187
+  rows, 30 SENS rows and `coherency: PASS`; NDIV 135 on six CPUs in 8 of 8.
+  Rebased run03 has no boot log and counts as missing under the protocol,
+  so the rebased fast count is 2 of 2 with a log (3 of 3 including run03).
+  Rebuild of 072bd707: .text, .data, .got identical to the builder's and to
+  run 1's elf; .rodata differs only in path and build stamp. Additional
+  observations from the raw files: in pre-rebase run01 P4 (up to 861
+  against about 585) and P6 (404 against 349) were also slow; run01 is the
+  only one of 7 logged boots reached by a warm reboot from SD Linux up
+  76 min with no power cycle before it.
+- Two critic disclosures, recorded: (1) its first `gh issue view 1204
+  --comments` printed the builder's 2026-11-10 comment, so it read the
+  builder's claim before its verdict (protocol step 4 broken for C3); it
+  did not open this log. (2) It overwrote the builder's
+  `build-072bd707.log` in the shared session scratchpad.
+- Ruling: every agent writes new scratchpad files under
+  `scratchpad/<agent>/` from now on.
+- Ruling on ESP restore: the ESP is written only by
+  `scripts/jetson-uefi-deploy.sh`, never by a hand mount and copy. The
+  as-found image (`/root/slmos-efi-pre1193.efi` on the board, sha 789cba62)
+  is copied down, sha-checked, deployed with the script (one UEFI boot,
+  captured), then the board is power-cycled to SD Linux and checked
+  read-only (`fsck.vfat -n`, fresh read-only mount sha). Told to C2; given
+  to the C3 critic with its grant. The C3 builder's hand restore (Entry 10)
+  is a recorded deviation.
+- C3 critic boots its own rebuild of 072bd707 (sha256 40622202), for
+  independence; .text and .data are identical to the builder's image. Its
+  plan keeps the board's state as found (no extra power cycle if Linux is
+  already up) and records SD Linux uptime, which tests the warm-reboot
+  observation once.
+- The C3 critic waits for jetson-nano-2 after C2.
