@@ -2005,14 +2005,6 @@ static void vmm_setup_platform(void)
 }
 #endif /* PLATFORM_RASPI5 */
 
-/*
- * The range the primary writes with the MMU and caches off (#1197).
- * Everything boot.S, kernel_main and vmm_init store before mmu_enable
- * lies in the image: .data, .bss (static page tables included), the
- * boot stack and, on UEFI-direct boots, the relocated copy itself. The
- * linker scripts ASSERT that .bss and .stack end at or before
- * __kernel_end.
- */
 /* DAIF just before and just after mmu_enable on the primary (#1198):
  * mmu_enable must restore the caller's mask, not clear it. */
 static uint64_t mmu_enable_daif_before, mmu_enable_daif_after;
@@ -2023,6 +2015,26 @@ void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after)
     *after = mmu_enable_daif_after;
 }
 
+/* The invalidate bounds vmm_init passed to mmu_enable and the number of
+ * lines mmu_enable reports it invalidated (#1197). */
+static uint64_t mmu_enable_inval_start, mmu_enable_inval_end;
+static uint64_t mmu_enable_inval_lines;
+
+void vmm_mmu_enable_inval(uint64_t *start, uint64_t *end, uint64_t *lines)
+{
+    *start = mmu_enable_inval_start;
+    *end = mmu_enable_inval_end;
+    *lines = mmu_enable_inval_lines;
+}
+
+/*
+ * The range the primary writes with the MMU and caches off (#1197).
+ * Everything boot.S, kernel_main and vmm_init store before mmu_enable
+ * lies in the image: .data, .bss (static page tables included), the
+ * boot stack and, on UEFI-direct boots, the relocated copy itself. The
+ * linker scripts ASSERT that .bss and .stack end at or before
+ * __kernel_end.
+ */
 void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
 {
     extern char _start[], __kernel_end[];
@@ -2107,9 +2119,14 @@ void vmm_init(void)
      * after the last caches-off store (#1197). */
     vmm_boot_caches_off_range(&inval_start, &inval_end);
     __asm__ volatile("mrs %0, daif" : "=r"(mmu_enable_daif_before));
-    mmu_enable(ttbr1, TCR_EL1_VALUE, MAIR_EL1_VALUE, sctlr,
-               inval_start, inval_end);
+    uint64_t inval_lines = mmu_enable(ttbr1, TCR_EL1_VALUE, MAIR_EL1_VALUE,
+                                      sctlr, inval_start, inval_end);
     __asm__ volatile("mrs %0, daif" : "=r"(mmu_enable_daif_after));
+    /* Recorded after the caches are on, from registers and the stack, so
+     * these stores are cacheable like every later one. */
+    mmu_enable_inval_start = inval_start;
+    mmu_enable_inval_end = inval_end;
+    mmu_enable_inval_lines = inval_lines;
 
     /* If we get here, MMU is enabled and we're running at virtual addresses */
     vmm_state.initialized = true;

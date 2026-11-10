@@ -532,7 +532,8 @@ static int boot_secondary(uint32_t cpu)
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
         /* Try multiple visibility mechanisms:
          * 1. Atomic load-acquire (LDAR) — works with coherent caches
-         * 2. DC CIVAC, then a plain load from the PoC
+         * 2. DC CIVAC, then a plain cacheable load (coherent by
+         *    hardware; the DC CIVAC is belt and braces)
          * Either may succeed depending on platform cache topology. */
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
             return PSCI_SUCCESS;

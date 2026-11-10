@@ -25,6 +25,9 @@
  * 4. Returns to caller (which must be identity-mapped) with the
  *    caller's DAIF restored (#1198)
  *
+ * Returns (x0) the number of cache lines invalidated in step 1, so
+ * test_vmm.c can check that the loop ran over the whole range.
+ *
  * Caches-off invalidate (#1197). Everything the primary CPU writes
  * before this point (the BSS clear and boot stack in boot.S, the
  * globals and static page tables kernel_main and vmm_init fill in, and
@@ -79,6 +82,7 @@ mmu_enable:
      * Invalidate the caches-off range by VA (#1197, see the header).
      * Line size from CTR_EL0.DminLine (log2 of the line size in words).
      */
+    mov     x11, #0                         /* lines invalidated */
     mrs     x7, sctlr_el1
     tbnz    x7, #2, .Lmmu_inval_done        /* C already set: skip */
     mrs     x8, ctr_el0
@@ -92,6 +96,7 @@ mmu_enable:
     b.hs    .Lmmu_inval_end
     dc      ivac, x4
     add     x4, x4, x9
+    add     x11, x11, #1
     b       .Lmmu_inval_loop
 .Lmmu_inval_end:
     dsb     sy
@@ -200,6 +205,7 @@ mmu_enable:
      */
     msr     daif, x6
 
+    mov     x0, x11                         /* lines invalidated */
     ret
 
 .size mmu_enable, . - mmu_enable

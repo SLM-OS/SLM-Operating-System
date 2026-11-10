@@ -656,9 +656,11 @@ uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags);
  */
 
 /* Enable MMU (implemented in assembly). [inval_start, inval_end) is
- * invalidated by VA before the caches are turned on (#1197). */
-extern void mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair, uint64_t sctlr,
-                       uint64_t inval_start, uint64_t inval_end);
+ * invalidated by VA before the caches are turned on (#1197); returns
+ * the number of cache lines invalidated. */
+extern uint64_t mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair,
+                           uint64_t sctlr, uint64_t inval_start,
+                           uint64_t inval_end);
 
 /*
  * The range the primary CPU writes with the MMU and caches off before
@@ -673,6 +675,11 @@ void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end);
  * (#1198, test_vmm.c): equal when mmu_enable restores the caller's
  * mask instead of clearing it. */
 void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after);
+
+/* What the boot vmm_init call actually passed to mmu_enable and what it
+ * returned (#1197, test_vmm.c): the invalidate bounds and the number of
+ * cache lines the loop invalidated. */
+void vmm_mmu_enable_inval(uint64_t *start, uint64_t *end, uint64_t *lines);
 
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);
