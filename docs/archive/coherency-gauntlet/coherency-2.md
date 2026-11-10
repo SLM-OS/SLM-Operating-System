@@ -224,3 +224,15 @@ Milestone for any issue filed this run: Backlog.
   f87d9e47) is rebuilt on 7d500e0e before its series so the evidence
   matches the branch head.
 - C0 waits for pi-5-1 (C1) and jetson-nano-2 (C3).
+
+## Entry 5 (08:10 UTC): C0 critic started on the code half; C2 removal cell rebuild
+
+- Deviation from the critic protocol: the C0 critic started before the C0
+  builder finished, because C0's code is final and only its boot runs
+  remain, and `/ci` alone took the builder about 80 minutes. The critic
+  has not read the builder's report or this log; its first pass covers
+  `/ci` on both branches, before/after reproduction of each fix, the #1196
+  design, the rebase, the ADR copies, and the DC IVAC behaviour on A76 and
+  A78AE from the TRMs. Its hardware half follows C0's checkpoint B.
+- C2 resumed without a board: rebuild the removal cell on 7d500e0e and file
+  the `STEAL_DEQUE_CAPACITY` issue.
