@@ -12,7 +12,7 @@
  * address diagnostic slots (diag_pi5.h). CPU-to-CPU shared state (run
  * queues, task table, current-task pointers, steal deques, counters)
  * lives in ordinary cacheable memory: the cores keep their caches
- * coherent in hardware (docs/adr/0006-cross-cpu-coherency.md, #1193).
+ * coherent in hardware (docs/adr/0007-cross-cpu-coherency.md, #1193).
  * Do not allocate CPU-shared state here.
  */
 

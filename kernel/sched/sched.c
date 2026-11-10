@@ -112,7 +112,7 @@ static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
  * and the per-slot generation counter (#139) before accepting a steal.
  *
  * Placement: cacheable BSS on every platform; the caches are coherent
- * (docs/adr/0006-cross-cpu-coherency.md, #1193).
+ * (docs/adr/0007-cross-cpu-coherency.md, #1193).
  *
  * Locking: see `steal_deque_lock[MAX_CPUS]` below. The deque's own
  * `steal_deque_*` functions are lockless and the callers in sched.c

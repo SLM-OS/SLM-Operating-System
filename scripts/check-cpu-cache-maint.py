@@ -4,7 +4,7 @@
 Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their caches coherent in
 hardware for Normal WB Inner Shareable memory, so DC CVAC / DC CIVAC on
 scheduler, task, SMP and IPC state is pure cost (#1193,
-docs/adr/0006-cross-cpu-coherency.md). Ordering comes from locks,
+docs/adr/0007-cross-cpu-coherency.md). Ordering comes from locks,
 __atomic_* acquire/release or smp_*mb(). The cache.h helpers stay for
 device DMA, page tables and data read with caches off.
 
