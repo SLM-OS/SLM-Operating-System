@@ -1,0 +1,106 @@
+# pi-5-1, C1 step 1: instrumented #1202 / #1205 waits, NC and removal test kernels
+#
+# NC (nc-instr-test-run01..10.txt): c1/instrument-1202-1205 @ b8e71420
+#   = origin/main 85f51ffd + one test-only commit (instrumentation).
+# Removal (removal-instr-test-run01..20.txt): c1/instrument-1202-1205-removal @ 375ad4dd
+#   = origin/coherency-remove-nc-axis f87d9e47 + the same commit, cherry-picked.
+# Build: export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+#        make kernel-test PLATFORM=RASPI5   (defaults; one build at a time)
+# Images (build/kernel-test/slmos.bin, staged in the main checkout's build/kernel):
+#   slmos-c1-nc-instr-b8e71420.bin       8737424 B  sha256 6d0d813a80e2057b0b5d290dacc7984a797d2936928d6140a60be1c360b38e3b
+#   slmos-c1-removal-instr-375ad4dd.bin  sha256 3aa43c83e7e792a1e9fcc80e9930bcfea731643f55651ba0a9dcfb29e2c06e8e
+#   Each copied to kernel_2712.img and kernel8.img with sdwire_update (sdwire_info first).
+#   The card's originals (6935256 B, 2026-10-29) were renamed to kernel_2712.img.prec1 and
+#   kernel8.img.prec1 before the run.
+# QEMU first: make test passed on both branches (All test suites passed).
+#
+# Method: labctl boot_test, image already on the card, expect_pattern
+# "All test suites passed|total failure\(s\)", timeout 330 s, cycle delay 5 s.
+#   NC: runs=10, output_dir /var/lib/labctl/output/c1-run2-nc-instr, 2026-11-10 06:56 to 07:17 UTC.
+#   Removal: runs=20, output_dir /var/lib/labctl/output/c1-run2-removal-instr, 07:23 to 08:17 UTC.
+# Each capture file is boot_test's run_<nn>.txt copied unchanged (cmp-verified): first kernel
+# banner line to the "[FAIL] N total failure(s)" summary.
+#
+# boot_test result, NC, verbatim:
+#   Run  1/10: PASS (117.5s) - pattern matched
+#   Run  2/10: PASS (122.5s) - pattern matched
+#   Run  3/10: PASS (125.2s) - pattern matched
+#   Run  4/10: PASS (121.6s) - pattern matched
+#   Run  5/10: PASS (119.5s) - pattern matched
+#   Run  6/10: PASS (119.5s) - pattern matched
+#   Run  7/10: PASS (117.1s) - pattern matched
+#   Run  8/10: PASS (119.0s) - pattern matched
+#   Run  9/10: PASS (111.2s) - pattern matched
+#   Run 10/10: PASS (112.3s) - pattern matched
+#   Result: 10/10 boots successful (100%)
+#   Average boot time (successful): 118.5s
+# boot_test result, removal: not returned. The MCP client stopped waiting after 1800 s
+# (no progress messages); the server finished all 20 runs (run_01 written 07:25:58 UTC,
+# run_20 08:17:42 UTC), and every file ends with the summary line.
+#
+# Banner hash: b8e71420 in all 10 NC files, 375ad4dd in all 20 removal files.
+# Extra failures are the "[FAIL] test_*" lines not in the 18 known (#1109) failures of
+# nc-instr-test-run01.txt; no boot lacked any of the 18.
+#   NC: none in 10 of 10.
+#   Removal: run03 test_slm_stats_live_from_second_session; run16 the same;
+#            run01 and run05 test_task_lifecycle (test_integration.c:576 "Memory leak detected").
+#
+# Columns, from the [C1-1202] / [C1-1205] lines (times in us, from CNTPCT):
+#   build | run | banner | total failures |
+#   live: result | waiter CPU start->end | helper CPU entry..done | yields spent | loop_us |
+#         ns per yield in the loop | ns per bare yield (1000 timed after the wait) |
+#         follow stage duration (stop stamp to follow stamp) |
+#   c4:   result | waiter CPU | ran CPU per slot | cleanup CPU per slot | yields spent |
+#         loop_us | last cleanup (us from dispatch) | ns per bare yield
+| build | run | banner | fails | live | waiter | helper | yields | loop_us | ns/yield | bare ns | follow_us | c4 | waiter | ran | cleanup | yields | loop_us | last_cleanup_us | bare ns |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| NC | 01 | b8e71420 | 18 | PASS | 0->0 | 0..3 | 0 | 0 | -1 | 2306 | 4 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3481 | 3492 | 2302 |
+| NC | 02 | b8e71420 | 18 | PASS | 0->0 | 0..3 | 4106 | 9459 | 2303 | 2302 | 9474 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3481 | 3492 | 2301 |
+| NC | 03 | b8e71420 | 18 | PASS | 0->0 | 0..1 | 4103 | 9455 | 2304 | 2303 | 9470 | PASS | 0->0 | 0/0/0 | 1/0/0 | 2 | 10594 | 10605 | 2301 |
+| NC | 04 | b8e71420 | 18 | PASS | 0->0 | 0..1 | 4097 | 9442 | 2304 | 2305 | 9458 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3482 | 3493 | 2301 |
+| NC | 05 | b8e71420 | 18 | PASS | 0->0 | 0..2 | 2215 | 5105 | 2304 | 2302 | 5112 | PASS | 0->0 | 0/2/2 | 0/2/2 | 3 | 3484 | 3494 | 2300 |
+| NC | 06 | b8e71420 | 18 | PASS | 0->0 | 0..1 | 0 | 0 | -1 | 2306 | 4 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3481 | 3492 | 2300 |
+| NC | 07 | b8e71420 | 18 | PASS | 0->0 | 0..3 | 0 | 0 | -1 | 2305 | 4 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3482 | 3493 | 2299 |
+| NC | 08 | b8e71420 | 18 | PASS | 0->0 | 0..3 | 4039 | 9306 | 2304 | 2300 | 9321 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3482 | 3493 | 2298 |
+| NC | 09 | b8e71420 | 18 | PASS | 0->0 | 0..3 | 4098 | 9444 | 2304 | 2301 | 9459 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3482 | 3493 | 2300 |
+| NC | 10 | b8e71420 | 18 | PASS | 0->0 | 0..1 | 2193 | 5052 | 2303 | 2301 | 5061 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3483 | 3493 | 2300 |
+| removal | 01 | 375ad4dd | 19 | PASS | 0->0 | 0..2 | 16471 | 1210 | 73 | 101 | 1219 | PASS | 0->0 | 0/2/2 | 0/2/2 | 2 | 3478 | 3481 | 74 |
+| removal | 02 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 22334 | 1660 | 74 | 72 | 1669 | PASS | 0->0 | 0/2/3 | 0/2/3 | 3 | 3481 | 3484 | 71 |
+| removal | 03 | 375ad4dd | 19 | FAIL | 0->0 | 0..2 | 100000 | 9312 | 93 | 71 | 10871 | PASS | 0->0 | 0/1/2 | 0/1/2 | 3 | 3480 | 3482 | 70 |
+| removal | 04 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 21165 | 1541 | 72 | 127 | 1550 | PASS | 0->0 | 0/0/0 | 1/0/0 | 2 | 10597 | 10600 | 72 |
+| removal | 05 | 375ad4dd | 19 | PASS | 0->0 | 0..2 | 28427 | 2187 | 76 | 126 | 2197 | PASS | 0->0 | 0/3/2 | 0/3/2 | 2 | 3479 | 3482 | 72 |
+| removal | 06 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 29784 | 2270 | 76 | 126 | 2280 | PASS | 0->0 | 0/3/3 | 0/3/3 | 3 | 3481 | 3484 | 73 |
+| removal | 07 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 87082 | 7993 | 91 | 126 | 8002 | PASS | 0->0 | 0/0/0 | 1/0/0 | 2 | 10598 | 10601 | 73 |
+| removal | 08 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 28472 | 2104 | 73 | 75 | 2113 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3481 | 3483 | 71 |
+| removal | 09 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 82637 | 7983 | 96 | 126 | 7992 | PASS | 0->0 | 0/0/0 | 0/0/0 | 3 | 10600 | 10602 | 71 |
+| removal | 10 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 83803 | 7985 | 95 | 126 | 7994 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3480 | 3483 | 72 |
+| removal | 11 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 31589 | 2283 | 72 | 73 | 2293 | PASS | 0->0 | 0/0/0 | 0/0/0 | 3 | 10599 | 10601 | 71 |
+| removal | 12 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 20186 | 1478 | 73 | 127 | 1487 | PASS | 0->0 | 0/0/0 | 2/0/0 | 2 | 10597 | 10600 | 71 |
+| removal | 13 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 31378 | 2287 | 72 | 127 | 2296 | PASS | 0->0 | 0/0/0 | 2/0/0 | 2 | 10598 | 10600 | 71 |
+| removal | 14 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 31223 | 2269 | 72 | 101 | 2279 | PASS | 0->0 | 0/0/0 | 2/0/0 | 2 | 10598 | 10601 | 73 |
+| removal | 15 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 84359 | 7992 | 94 | 126 | 8001 | PASS | 0->0 | 0/1/1 | 0/1/1 | 3 | 3480 | 3483 | 72 |
+| removal | 16 | 375ad4dd | 19 | FAIL | 0->0 | 0..1 | 100000 | 9383 | 93 | 72 | 10686 | PASS | 0->0 | 0/0/1 | 0/0/1 | 2 | 7039 | 7041 | 72 |
+| removal | 17 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 86915 | 7996 | 91 | 126 | 8006 | PASS | 0->0 | 0/1/1 | 0/1/1 | 2 | 3480 | 3482 | 70 |
+| removal | 18 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 29837 | 2285 | 76 | 126 | 2293 | PASS | 0->0 | 0/1/1 | 0/1/1 | 2 | 3479 | 3482 | 72 |
+| removal | 19 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 30690 | 2295 | 74 | 102 | 2304 | PASS | 0->0 | 0/0/0 | 1/0/0 | 2 | 10597 | 10600 | 72 |
+| removal | 20 | 375ad4dd | 18 | PASS | 0->0 | 0..2 | 88029 | 7993 | 90 | 126 | 8002 | PASS | 0->0 | 0/1/3 | 0/1/3 | 3 | 3480 | 3483 | 70 |
+#
+# Image sizes: NC 8737424 B, removal 8774288 B.
+#
+# Failure rows, verbatim.
+# removal-instr-test-run03.txt:
+# [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..2 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9312 dispatch_to_end_us=13603 ns_per_yield=93 bare_ns_per_yield=71
+# [C1-1202] live stages_us(from dispatch; loop at 4290, expiry at 13603) entry=56@0 saw=60@0 stats=83@0 y2000=4278@0 stop=4281@0 follow=15152@2 done=15152@2
+# [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1549 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-acaf8b3c4a92d945f/kernel/tests/test_slm_shell.c:1015 - done_at_bound
+#   [FAIL] test_slm_stats_live_from_second_session
+# removal-instr-test-run16.txt:
+# [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9383 dispatch_to_end_us=13674 ns_per_yield=93 bare_ns_per_yield=72
+# [C1-1202] live stages_us(from dispatch; loop at 4291, expiry at 13674) entry=56@0 saw=60@0 stats=82@0 y2000=4279@0 stop=4282@0 follow=14968@1 done=14968@1
+# [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1294 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-acaf8b3c4a92d945f/kernel/tests/test_slm_shell.c:1015 - done_at_bound
+#   [FAIL] test_slm_stats_live_from_second_session
+# removal-instr-test-run01.txt and run05.txt (identical text in both):
+#     FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-acaf8b3c4a92d945f/kernel/tests/test_integration.c:576 - Memory leak detected
+#   [FAIL] test_task_lifecycle
+# (state values: 0 READY, 1 RUNNING, 3 TERMINATED, kernel/include/task.h)
