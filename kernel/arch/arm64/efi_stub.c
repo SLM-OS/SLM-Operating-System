@@ -20,6 +20,7 @@
 #include "efi.h"
 #include "boot_source.h"
 #include "boot_models.h"
+#include "ncmem.h"
 #include <stddef.h>
 
 /*
@@ -231,6 +232,47 @@ efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
         return EFI_RELOC_DEST_NOT_RAM;
     }
     return EFI_RELOC_OK;
+}
+
+/*
+ * Pure helper (#1196): true when every page of [base, base + len) is
+ * described by the map with a type the OS owns after ExitBootServices,
+ * the same rule efi_check_relocation applies to the link range. Such
+ * memory is RAM that UEFI allocates from and maps, so cleaning it by
+ * VA with UEFI's identity map live cannot fault. Descriptors whose size
+ * or end overflows make the answer false.
+ */
+bool efi_range_os_owned(const efi_memory_desc_t *map, uint64_t map_size,
+                        uint64_t desc_size, uint64_t base, uint64_t len)
+{
+    if (len == 0 || base > UINT64_MAX - len ||
+        desc_size < sizeof(efi_memory_desc_t)) {
+        return false;
+    }
+
+    uint64_t covered = 0;
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        const efi_memory_desc_t *d =
+            (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        if (d->num_pages > UINT64_MAX / EFI_PAGE_SIZE) {
+            return false;
+        }
+        uint64_t dlen = d->num_pages * EFI_PAGE_SIZE;
+        if (d->phys_start > UINT64_MAX - dlen) {
+            return false;
+        }
+        if (!efi_ranges_overlap(d->phys_start, dlen, base, len)) {
+            continue;
+        }
+        if (!efi_mem_type_free_after_ebs(d->type)) {
+            return false;
+        }
+        uint64_t lo = d->phys_start > base ? d->phys_start : base;
+        uint64_t hi_d = d->phys_start + dlen;
+        uint64_t hi = hi_d < base + len ? hi_d : base + len;
+        covered += hi - lo;
+    }
+    return covered >= len;
 }
 
 /*
@@ -553,6 +595,31 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
         return EFI_STUB_ABORT;
     }
 
+#if defined(NC_MEM_BASE)
+    /*
+     * #1196: UEFI ran with the NC block in its Write-Back identity map, so
+     * CPU 0, which is not reset at the hand-off, may hold dirty lines for
+     * it. They are cleaned below, after ExitBootServices, together with
+     * the image. Only if the map says the block is OS-owned RAM, which
+     * UEFI maps: a by-VA clean of an unmapped address would fault with no
+     * console left. The descriptors are printed for the record.
+     */
+    bool nc_clean = efi_range_os_owned(map, map_size, desc_size,
+                                       NC_MEM_BASE, NC_MEM_SIZE);
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        const efi_memory_desc_t *d =
+            (const efi_memory_desc_t *)((const uint8_t *)map + off);
+        if (d->num_pages <= UINT64_MAX / EFI_PAGE_SIZE &&
+            efi_ranges_overlap(d->phys_start, d->num_pages * EFI_PAGE_SIZE,
+                               NC_MEM_BASE, NC_MEM_SIZE)) {
+            efi_print_desc(sys_table, d, u"nc");
+        }
+    }
+    efi_print(sys_table, nc_clean
+              ? u"[slmos] nc block: OS-owned, clean+invalidate at exit\r\n"
+              : u"[slmos] ! nc block: not OS-owned RAM, not cleaned\r\n");
+#endif
+
     /* Exit boot services — takes over the machine.
      *
      * Per UEFI §7.4.1, Boot Services (including ConOut) become
@@ -637,7 +704,9 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
      *   - the copy destination: clean+invalidate so no stale dirty
      *     line from UEFI's earlier use of that memory can be evicted
      *     over the relocated kernel later;
-     *   - the DTB: kernel_main parses it before the MMU comes back.
+     *   - the DTB: kernel_main parses it before the MMU comes back;
+     *   - the NC block (Jetson, #1196): SLM-OS maps it Non-cacheable,
+     *     so a dirty UEFI line left there would be evicted over it.
      * Model files were cleaned the same way when they were read
      * (efi_model.c) and nothing has written them since.
      * Nothing after this point may write memory that the MMU-off code
@@ -664,6 +733,14 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table,
         efi_dcache_clean_inval((uint64_t)(uintptr_t)fdt,
                                fdt_size ? fdt_size : EFI_PAGE_SIZE);
     }
+#if defined(NC_MEM_BASE)
+    /* The NC block (#1196, decided before ExitBootServices above): no
+     * dirty line from UEFI may survive into SLM-OS's Non-cacheable
+     * mapping of it. ncmem_init cleans it again with the MMU on. */
+    if (nc_clean) {
+        efi_dcache_clean_inval(NC_MEM_BASE, NC_MEM_SIZE);
+    }
+#endif
 
     return fdt;
 }
