@@ -236,3 +236,21 @@ Milestone for any issue filed this run: Backlog.
   A78AE from the TRMs. Its hardware half follows C0's checkpoint B.
 - C2 resumed without a board: rebuild the removal cell on 7d500e0e and file
   the `STEAL_DEQUE_CAPACITY` issue.
+
+## Entry 6 (08:02 UTC): correction to Entry 5; C2 removal cell rebuilt
+
+- Correction to Entry 5: written at 07:56 UTC, not 08:10. Entry times
+  from here on come from `date -u` at the time of writing.
+- C2 (builder report): `c2/steal-instrument-1203-removal` re-cherry-picked
+  onto `coherency-remove-nc-axis` @ 7d500e0e, new head c1846b3b, no
+  conflict, 4 files +642/-8 (same as the nc and ncoff cells). Jetson image
+  from a clean tree: slmos.elf b9ac772d, slmos.bin 611a5c75, banner
+  (c1846b3b), not dirty. check-cpu-cache-maint OK (37 files). `make test
+  WORK_STEALING=ON`: all suites passed, 3006 PASS and 0 FAIL lines. The
+  f87d9e47 image (d4af31aa; elf 3b5ad40b) is kept in the C2 scratchpad for
+  comparison.
+- Filed #1210: `STEAL_DEQUE_CAPACITY` 32 below `MAX_TASKS` 64, contrary to
+  `steal_deque.h:45`; a deque no thief drains stops accepting pushes after
+  32 tasks. P3-low, no reachable failure shown, not fixed.
+- Cells for the hardware stage: nc 983bddc9, ncoff cbab2fc6 (10f8688e,
+  `NC_AXIS=OFF`), removal c1846b3b (7d500e0e). Waiting on jetson-nano-2.
