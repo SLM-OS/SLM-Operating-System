@@ -437,6 +437,15 @@ efi_reloc_verdict_t efi_check_relocation(const efi_memory_desc_t *map,
                                          uint64_t fdt, uint64_t fdt_size);
 
 /*
+ * True when every page of [base, base + len) is described by the map
+ * with a type the OS owns after ExitBootServices (#1196: whether the NC
+ * block may be cleaned by VA before the hand-off). Pure; safe to call
+ * from tests.
+ */
+bool efi_range_os_owned(const efi_memory_desc_t *map, uint64_t map_size,
+                        uint64_t desc_size, uint64_t base, uint64_t len);
+
+/*
  * Shared between efi_stub.c and efi_model.c. All usable only before
  * ExitBootServices, except efi_dcache_clean_inval. See efi_stub.c.
  */
