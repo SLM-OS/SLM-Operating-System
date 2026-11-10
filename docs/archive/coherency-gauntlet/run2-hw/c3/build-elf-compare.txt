@@ -1,0 +1,27 @@
+# Rebuilt images against run 1's images on jetson-nano-2 (/root/slmos-1193-V3.elf, /root/slmos-1193-RR.elf).
+# Rebuilt in worktree agent-ad2c18ff4720f3fd1 on 2026-11-10: make kernel-clean; make kernel PLATFORM=JETSON_ORIN_NANO
+# at 072bd707 (pre-rebase) and af8d01ba (rebased). Toolchain /opt/arm-gnu-toolchain. Comparison: objcopy -O binary -j
+# <section> on each allocated PROGBITS section, byte compare; .rodata differing bytes classified by the
+# NUL-terminated string they sit in.
+===== pre-rebase 072bd707: run 1 V3 elf vs rebuild =====
+old 84e7946c015e4f9665d993850f5b2525dfdc675e506617db88113c545e6c6ce4  slmos-1193-V3.elf
+new af515aa51ab7d8ba43b8159d8bd4fba10607d9518bf2c096e9ed6a227774275d  slmos-c3-prerebase-072bd707.elf
+.text        size old=2619056 new=2619056 differing bytes=0
+.rodata      size old=6087602 new=6087602 differing bytes=1925
+    .rodata differing bytes in build stamp: 20
+    .rodata differing bytes in worktree path: 1905
+.text.user   size old=4096 new=4096 differing bytes=0
+.data        size old=148480 new=148480 differing bytes=0
+.got         size old=48 new=48 differing bytes=0
+.got.plt     size old=24 new=24 differing bytes=0
+===== rebased af8d01ba: run 1 RR elf vs rebuild =====
+old f3a9e3bec8dc21b0f75ca022119a6cf53655fe696fad738a102b3f2b05f86edc  slmos-1193-RR.elf
+new c8a9ecd1ab646797b3c4d6538ca927a19433efd5fc2f56faa1a137b19c736a0f  slmos-c3-rebased-af8d01ba.elf
+.text        size old=2669528 new=2669528 differing bytes=0
+.rodata      size old=6142882 new=6142882 differing bytes=1959
+    .rodata differing bytes in build stamp: 24
+    .rodata differing bytes in worktree path: 1935
+.text.user   size old=4096 new=4096 differing bytes=0
+.data        size old=148480 new=148480 differing bytes=0
+.got         size old=48 new=48 differing bytes=0
+.got.plt     size old=24 new=24 differing bytes=0

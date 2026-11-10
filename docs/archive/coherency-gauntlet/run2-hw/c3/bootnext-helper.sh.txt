@@ -1,0 +1,27 @@
+# Host helper used for prerebase runs 04-05 and rebased runs 02-03 (scratchpad copy, verbatim).
+#!/bin/bash
+# Wait for SD Linux, check the ESP (fsck -n, fresh read-only sha), then
+# one-shot BootNext to "SLM-OS NVMe" (000E) and a clean reboot.
+# usage: bootnext.sh <expected sha256 of SLMOS.efi>
+want="$1"
+until ssh -o BatchMode=yes -o ConnectTimeout=5 root@192.168.4.5 true 2>/dev/null; do sleep 3; done
+date -u +"ssh up %H:%M:%S UTC"
+sleep 10
+ssh -o BatchMode=yes root@192.168.4.5 "bash -s -- $want" <<'REMOTE'
+set -e
+want="$1"
+dev=/dev/disk/by-partlabel/SLMOS-ESP
+if grep -q "$(readlink -f $dev)" /proc/mounts; then echo "ESP mounted, abort"; exit 1; fi
+fsck.vfat -n "$dev"
+echo 3 > /proc/sys/vm/drop_caches
+m=$(mktemp -d); mount -o ro "$dev" "$m"
+got=$(sha256sum "$m/EFI/SLMOS/SLMOS.efi" | cut -d' ' -f1)
+umount "$m"; rmdir "$m"
+echo "ro sha256 $got"
+[ "$got" = "$want" ] || { echo "sha mismatch, abort"; exit 1; }
+efibootmgr --bootnext 000E | grep BootNext
+sync
+(sleep 1; systemctl reboot) >/dev/null 2>&1 &
+REMOTE
+echo "rc=$?"
+date -u +"reboot issued %H:%M:%S UTC"
