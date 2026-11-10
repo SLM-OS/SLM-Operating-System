@@ -1,0 +1,32 @@
+# C1 labctl call times on pi-5-1 (coherency run 2), UTC.
+# Each line: stamp taken by a shell command run immediately before ('start') or after ('return')
+# the MCP call, so each interval includes up to a few seconds of tool-call overhead.
+2026-11-10T09:16:57Z start run_health_check pi-5-1
+2026-11-10T09:16:59Z return run_health_check (online, power on); start power_off
+2026-11-10T09:17:16Z return power_off, sdwire_ls, sdwire_info (clean); start sdwire_update rename originals to *.prec1
+2026-11-10T09:18:51Z return sdwire_update renames, sdwire_info, sdwire_update copy removal-force ee2f9c97; start boot_test count 3 -> c1-r2-force-removal
+2026-11-10T09:27:38Z return boot_test c1-r2-force-removal (3/3 pattern matched)
+2026-11-10T09:27:49Z start power_off, sdwire_info, sdwire_update copy nc-force 7f85d478
+2026-11-10T09:31:52Z return power_off, sdwire_info, sdwire_update nc-force; start boot_test count 3 -> c1-r2-force-nc
+2026-11-10T09:38:15Z return boot_test c1-r2-force-nc
+2026-11-10T09:39:09Z block01 NC: start power_off, sdwire_info, sdwire_update nc-step6 30dc24bc
+2026-11-10T09:39:49Z block01 NC: return switch; start boot_test count 3 -> c1-r2-s6-b01-nc
+2026-11-10T09:46:11Z block01 NC: return boot_test
+2026-11-10T09:46:50Z block02 RM: start power_off, sdwire_info, sdwire_update removal-step6 e94c251a
+2026-11-10T09:49:03Z block02 RM: return switch; start boot_test count 3 -> c1-r2-s6-b02-rm
+2026-11-10T09:57:29Z block02 RM: return boot_test
+2026-11-10T09:57:50Z block03 NC: start power_off, sdwire_info, sdwire_update nc-step6
+2026-11-10T10:01:57Z block03 NC: return switch; start boot_test count 3 -> c1-r2-s6-b03-nc
+2026-11-10T10:08:15Z block03 NC: return boot_test
+2026-11-10T10:08:56Z block04 RM: start power_off, sdwire_info, sdwire_update removal-step6
+2026-11-10T10:09:19Z block04 RM: return switch; start boot_test count 3 -> c1-r2-s6-b04-rm
+2026-11-10T10:17:42Z block04 RM: return boot_test
+2026-11-10T10:17:50Z block05 NC: start power_off, sdwire_info, sdwire_update nc-step6
+2026-11-10T10:18:11Z block05 NC: return switch; start boot_test count 3 -> c1-r2-s6-b05-nc
+2026-11-10T10:24:26Z block05 NC: return boot_test
+2026-11-10T10:24:47Z block06 RM: start power_off, sdwire_info, sdwire_update removal-step6
+2026-11-10T10:25:12Z block06 RM: return switch; start boot_test count 3 -> c1-r2-s6-b06-rm
+2026-11-10T10:33:31Z block06 RM: return boot_test
+2026-11-10T10:33:56Z restore: start power_off, sdwire_info, sdwire_update delete test kernels
+2026-11-10T10:34:49Z restore: return sdwire_update deletes, sdwire_info, sdwire_update renames + reboot; start serial_capture (wait for shell)
+2026-11-10T10:35:09Z restore: return serial_capture (slmos> after 13 s); pi-5-1 at SLM-OS shell on original kernel_2712.img, powered on

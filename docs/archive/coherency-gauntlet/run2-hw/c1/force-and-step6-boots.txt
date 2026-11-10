@@ -1,0 +1,82 @@
+# pi-5-1, C1: forced #1205 variant (both kernels) and step 6 (stopped early by the run stop condition)
+#
+# Images (main checkout build/kernel; card files kernel_2712.img and kernel8.img; sdwire_info before
+# every sdwire_update; card originals kept as *.prec1 and restored at 10:34 UTC):
+#   removal forced  c1/force-1205 ee2f9c97     slmos-c1-removal-force-ee2f9c97.bin   8778384 B  86050b6bd5a93c7112a610bd63b4d0f9c8ffc7f0c9f20b9644dc8aaf5e40f00b
+#   NC forced       c1/force-1205-nc 7f85d478  slmos-c1-nc-force-7f85d478.bin        8737424 B  e9c1e3eb12aecfb4a44ac763ee04d951eff8fb90b4c6f36d0927a7dc2623b483
+#   NC step 6       c1/test-wait-helper 30dc24bc (PR #1215 head a03fc75b adds docs/testing.md only)
+#                                              slmos-c1-nc-step6-30dc24bc.bin        8733328 B  e04f138b2fbb3ca27f549b63f256db025d869629dc35ba9e7aa219dfc019994d
+#   removal step 6  coherency-remove-nc-axis e94c251a
+#                                              slmos-c1-removal-step6-e94c251a.bin   8778384 B  3b99145fb0709730c7c7dc165956280ee74c7be5190ee5a5f316584ef0bb7f6b
+# Method: labctl boot_test runs=3 per call (orchestrator rule: no call over 3 runs while another agent
+# uses the other board), expect_pattern "All test suites passed|total failure\(s\)", timeout 330 s,
+# one output_dir per call under /var/lib/labctl/output/. Each capture is the call's run_NN.txt copied
+# unchanged (cmp-verified). Every boot_test call returned 3/3 "pattern matched".
+#
+# File map:
+#   removal-force1205-run01..03 <- c1-r2-force-removal/run_01..03   (09:18-09:27 UTC)
+#   nc-force1205-run01..03      <- c1-r2-force-nc/run_01..03        (09:31-09:38)
+#   nc-step6-run01..03          <- c1-r2-s6-b01-nc   (09:39-09:46)
+#   removal-step6-run01..03     <- c1-r2-s6-b02-rm   (09:49-09:57)
+#   nc-step6-run04..06          <- c1-r2-s6-b03-nc   (10:01-10:08)
+#   removal-step6-run04..06     <- c1-r2-s6-b04-rm   (10:09-10:17)
+#   nc-step6-run07..09          <- c1-r2-s6-b05-nc   (10:18-10:24)
+#   removal-step6-run07..09     <- c1-r2-s6-b06-rm   (10:25-10:33)
+# Step 6 stopped after 9 + 9 of the planned 20 + 20 boots (run stop condition from C2, 10:33 UTC).
+#
+# Columns: output dir | run | banner | total failures | slm_live flag us (#1202) | c4_multi cleanups us (#1205)
+#   | task_lifecycle (free at start of wait minus initial pages / met after us) (#1211)
+#   | failures beyond the 18 #1109 ones | #1109 ones missing | [test_wait] TIMEOUT lines | over-a-quarter lines
+#
+# Forced-variant boots (same columns):
+| dir | run | banner | fails | slm_live us | c4_multi us | lifecycle | extra failures | missing | TIMEOUT | over 1/4 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| c1-r2-force-removal | 01 | ee2f9c97 | 19 | 1432 | 3481 | -128/2 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+| c1-r2-force-removal | 02 | ee2f9c97 | 19 | 2108 | 3481 | -128/2 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+| c1-r2-force-removal | 03 | ee2f9c97 | 19 | 2340 | 3480 | -128/2 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+| c1-r2-force-nc | 01 | 7f85d478 | 19 | 0 | 3482 | -192/14 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+| c1-r2-force-nc | 02 | 7f85d478 | 19 | 0 | 3482 | -192/13 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+| c1-r2-force-nc | 03 | 7f85d478 | 19 | 0 | 3483 | -192/13 | test_component_cleanup_forced_remote_1205 | 0 | - | - |
+
+# Forced #1205 variant, [C1-F1205] summary lines (60 iterations per kernel, 20 per boot):
+#   removal ee2f9c97: 20/20, 20/20, 20/20 iterations hit the 1000-yield bound (loop 71-76 us);
+#     0 never completed within 1 s; all three cleanups fired 442 to 10723 us after expiry.
+#   NC 7f85d478: 9/20, 10/20, 9/20 iterations hit the bound (loop 2303-2307 us); 0 never completed;
+#     failing iterations completed 5927 to 7670 us after expiry; passing iterations took 164-1079 us.
+# Failures beyond the 18 in the forced boots: test_component_cleanup_forced_remote_1205 only (6 of 6).
+#
+# Step 6 boots:
+| dir | run | banner | fails | slm_live us | c4_multi us | lifecycle | extra failures | missing | TIMEOUT | over 1/4 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| c1-r2-s6-b01-nc | 01 | 30dc24bc | 18 | 5078 | 3481 | -128/7 | none | 0 | - | - |
+| c1-r2-s6-b01-nc | 02 | 30dc24bc | 18 | 7573 | 3484 | -192/14 | none | 0 | - | - |
+| c1-r2-s6-b01-nc | 03 | 30dc24bc | 18 | 8455 | 3481 | -192/14 | none | 0 | - | - |
+| c1-r2-s6-b02-rm | 01 | e94c251a | 18 | 8039 | 3480 | -128/2 | none | 0 | - | - |
+| c1-r2-s6-b02-rm | 02 | e94c251a | 18 | 2316 | 3480 | -320/3 | none | 0 | - | - |
+| c1-r2-s6-b02-rm | 03 | e94c251a | 18 | 2318 | 10598 | -192/3 | none | 0 | - | - |
+| c1-r2-s6-b03-nc | 01 | 30dc24bc | 19 | 6332 | 3481 | -192/13 | test_slm_stop_from_second_session_during_prompt | 0 | - | - |
+| c1-r2-s6-b03-nc | 02 | 30dc24bc | 18 | 8328 | 3481 | -128/13 | none | 0 | - | - |
+| c1-r2-s6-b03-nc | 03 | 30dc24bc | 19 | 9442 | 8935 | -192/14 | test_proactive_load_balance_runtime_config_aggressive | 0 | - | - |
+| c1-r2-s6-b04-rm | 01 | e94c251a | 18 | 2326 | 10599 | -128/2 | none | 0 | - | - |
+| c1-r2-s6-b04-rm | 02 | e94c251a | 18 | 2330 | 10598 | -320/4 | none | 0 | - | - |
+| c1-r2-s6-b04-rm | 03 | e94c251a | 18 | 2343 | 10598 | -128/2 | none | 0 | - | - |
+| c1-r2-s6-b05-nc | 01 | 30dc24bc | 18 | 0 | 3481 | -128/8 | none | 0 | - | - |
+| c1-r2-s6-b05-nc | 02 | 30dc24bc | 18 | 5128 | 3481 | -128/13 | none | 0 | - | - |
+| c1-r2-s6-b05-nc | 03 | 30dc24bc | 18 | 8595 | 3481 | -128/7 | none | 0 | - | - |
+| c1-r2-s6-b06-rm | 01 | e94c251a | 18 | 2355 | 10598 | -128/2 | none | 0 | - | - |
+| c1-r2-s6-b06-rm | 02 | e94c251a | 18 | 2356 | 10598 | -128/2 | none | 0 | - | - |
+| c1-r2-s6-b06-rm | 03 | e94c251a | 18 | 2338 | 7038 | -128/2 | none | 0 | - | - |
+#
+# Failure text of the two extra step-6 failures, verbatim (UART interleaving as captured):
+# nc-step6-run04.txt (c1-r2-s6-b03-nc/run_01):
+#   S   FAiLED at /home/joion 0
+#   cts/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-acaf8b3c4a92d945f/kernel/tests/test_slm_shell.c:680 - strstr(cap.buf, "stop=stopped") expected not NULL
+#     [FAIL] test_slm_stop_from_second_session_during_prompt
+#   (line 680 is the check before the converted wait; no [test_wait] line was logged)
+# nc-step6-run06.txt (c1-r2-s6-b03-nc/run_03):
+#       FAILED at .../kernel/tests/test_scheduler.c:4380
+#         Expected: 0
+#         Actual:   3
+#     [FAIL] test_proactive_load_balance_runtime_config_aggressive
+#   (TEST_ASSERT_EQUAL_UINT32(0, a_cpu): placement check, no wait)
+# Neither failure appears in the 30 step-1 boots (c1/*-instr-test-run*.txt) or the 9 removal step-6 boots.
