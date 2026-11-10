@@ -738,3 +738,209 @@ if only cacheable builds show it, the removal exposes it and needs the
 - Final board state: jetson-nano-2 at SD Linux, powered on; pi-5-1 at the
   SLM-OS shell on the card's original `kernel_2712.img`, powered on. Both
   were powered on at the start, so both stay on. Both claims released.
+
+## Entry 19 (19:33 UTC): wrap-up, correction to Entry 15 (the reminders and the waiting call)
+
+- Corrects Entry 15's "Orchestrator gap ... Cause not visible from inside
+  the session". The user confirmed that the session raised a permission
+  prompt with no one present to answer it; it was not an explicit refusal.
+- The reminders were both fired and deleted, in that order, which is not a
+  contradiction. Each `delete_trigger` response (in this session's
+  transcript) carried the task's last state: `last_run` fired 13:29:49Z
+  (hour-7) and 15:27:41Z (gate), status FAILED, `ACCESS_DENIED`; still
+  `enabled: true` with an empty `ended_reason`, because a one-shot that
+  fails to deliver does not disable itself. The deletes then removed both.
+- `list_triggers` with completed tasks included, run now: no scheduled
+  tasks exist. Nothing from run 2 is left to delete.
+- What can be determined about the waiting call: both deletes were sent
+  at about 10:34Z, and their responses include fires at 13:29Z and 15:27Z,
+  so they executed after 15:27Z. They waited about 6.7 h. The third call in
+  the same batch was a read-only `git show ... | sed -n`, a form that ran
+  without a prompt all day. The prompt was therefore most likely on
+  `mcp__claude-code-remote__delete_trigger`, the only kind of call in the
+  batch not used before. Not confirmed: the session's event log, which
+  would show it, can only be read from one of the owner's trusted devices
+  (`list_events` refused with `elevated_session_untrusted_device`). Why
+  the reminders failed with `ACCESS_DENIED` while the session waited is
+  not determined (hypothesis: a reminder cannot be delivered into a
+  session blocked on a pending prompt).
+
+## Entry 20 (19:33 UTC): wrap-up, run-1 record corrected (#1203 attempt counts)
+
+- Appended "Correction from run 2 (2026-11-10): #1203 attempt counts" to
+  run 1's `coherency.md` on `gauntlet/coherency-1193` (now 92060ad3). It
+  cites the three run-1 places that recorded the counts: the "Critic
+  verdicts" C3 round 1 final entry, the 07:41 UTC C3 critic correction in
+  "Removal branch (contingent ...)", and the "Steal stall (#1203)" row of
+  "Extension step 1, Jetson, rebased"; and run 2's evidence (Entry 14;
+  `ncoff-kexec-burst-run01.txt`, CPU 1 deltas table 10 vs trace 2).
+- #1203: not reposted. The run-2 comment (issuecomment-6774236603) already
+  says the counts were read after the results printed and include
+  post-run idle attempts, with the same file and numbers.
+
+## Entry 21 (19:33 UTC): wrap-up, #1216 detail
+
+- Comment issuecomment-6777130385 on #1216: the complete run-16 table (six
+  CPUs: exec, att, ok, f_pd, v_pd_work, first success), the per-CPU
+  sustained aggregates over the 20 NC_AXIS=OFF kexec runs, both computed
+  from the raw files (`ncoff-kexec-sustained-run01..20.txt`) and matching
+  Entry 14; H3 stated as a hypothesis with its separating experiment
+  (sustained bench with `smp_notify_cpu` sending an IPI, idle CPUs in WFE,
+  or the secondaries' tick phase offset; prediction: CPUs 2 and 3 equalize
+  and first success drops to microseconds); the NC cell; and fix C (wake
+  on push) beside A and B, with A and B addressing the early-out's ordering
+  and C the wake path.
+
+## Entry 22 (19:33 UTC): wrap-up, ADR 0007 copies no longer kept identical
+
+- ADR 0007's home is now `fix/boot-path-1193` (PR #1209). One commit,
+  59a85926, adds a "Run 2 (2026-11-10)" paragraph (#1202 and #1205 timing,
+  lost visibility excluded by the forced variant, 0 of 120 lost, 9/9 of the
+  20/20 bar; #1203's run-1 evidence superseded by #1216, run 1's counts
+  inflated; status unchanged). File sha1 now 0d574d33.
+- The copies on `gauntlet/coherency-1193` and `coherency-remove-nc-axis`
+  (e94c251a) stay at d1d68952 and are no longer kept identical. Why: three
+  copies of one decision record drift with every edit; the copy that
+  reaches main is the one in #1209, so that is the only one maintained.
+  The gauntlet copy is a historical snapshot of run 1; the removal
+  branch's copy came from its base and will be replaced when the removal
+  is rebased onto the merged #1209. The removal branch's base,
+  `c1/boot-path-plus-helper`, still points at the pre-ADR-edit 167330f5.
+
+## Entry 23 (19:33 UTC): wrap-up, instrumentation PR; run-3 starting head
+
+- Draft PR #1217 against main from `c2/steal-instrument-1203` @ 983bddc9
+  (bench and instrumentation only: `kernel/sched/steal_trace.h` new,
+  `kernel/sched/sched.c`, the `bench stealing` branch of
+  `kernel/src/shell_sys.c`, `kernel/src/help.c`). Labels platform:jetson,
+  sub:sched; milestone Backlog. /ci on 983bddc9 started; its result is
+  recorded in a later entry.
+- **Run 3 starts from 983bddc9** and re-applies that commit onto whatever
+  heads it measures.
+- Deleted `c2/steal-instrument-1203-ncoff` (cbab2fc6) and
+  `c2/steal-instrument-1203-removal` (c1846b3b) after archiving their tip
+  commits as patches under `run2-tools/deleted-branch-tips/`; their
+  banners appear in C2's evidence files.
+
+## Entry 24 (19:34 UTC): wrap-up, branches run 2 created or moved
+
+Heads as of this entry. "Archived" means the tip commit is saved as a
+patch under `run2-tools/deleted-branch-tips/`.
+
+| Branch | Head | Base | Purpose | Disposition |
+|---|---|---|---|---|
+| `gauntlet/coherency-2` | this commit | `gauntlet/coherency-1193` @ 6c35db00 | Run-2 log, rules, critic verdicts, critic artifacts, tools | Keep (run 3 reads it) |
+| `gauntlet-2-hw-pi5` | a560451f | main 85f51ffd | Pi 5 raw evidence (c0, c1) | Keep |
+| `gauntlet-2-hw-jetson` | 261f82f3 | main 85f51ffd | Jetson raw evidence (c2, c3, restore) | Keep |
+| `gauntlet/coherency-1193` | 92060ad3 (moved: run-1 correction appended, Entry 20) | (run-1 branch) | Run-1 log | Keep |
+| `fix/boot-path-1193` | 59a85926 | `fix-boot-1194-1197-1198` @ ad8e4fa7 | #1196 fix; ADR 0007 home | PR #1209 |
+| `coherency-remove-nc-axis` | e94c251a (moved: f87d9e47 to 7d500e0e (C0) to e94c251a (C1)) | `c1/boot-path-plus-helper` @ 63eed0c4 | The NC-axis removal | Keep for run 3 |
+| `c1/boot-path-plus-helper` | 63eed0c4 | `fix/boot-path-1193` @ 167330f5 | #1209 stack + #1215 commits; base of the removal | Keep until #1208, #1209 and #1215 merge |
+| `c1/test-wait-helper` | a03fc75b | main 85f51ffd | Wall-clock wait helper and sweep | PR #1215 |
+| `c1/instrument-1202-1205` | b8e71420 | main 85f51ffd | Step-1 NC instrumentation (banner of `c1/nc-instr-test-run*.txt`) | Keep for run 3 (reproduces step 1) |
+| `c1/instrument-1202-1205-removal` | 375ad4dd | f87d9e47 | Step-1 removal instrumentation (banner of `c1/removal-instr-test-run*.txt`) | Keep for run 3 (reproduces step 1) |
+| `c1/force-1205` | ee2f9c97 | e94c251a | Temporary forced #1205 variant (removal) | Deleted; archived; evidence `c1/removal-force1205-run01..03.txt` and `c1/qemu-removal-force-ee2f9c97-make-test.txt` confirmed on `gauntlet-2-hw-pi5` first |
+| `c1/force-1205-nc` | 7f85d478 | 30dc24bc | Temporary forced #1205 variant (NC) | Deleted; archived; evidence `c1/nc-force1205-run01..03.txt` confirmed first |
+| `c2/steal-instrument-1203` | 983bddc9 | main 85f51ffd | Steal instrumentation and sustained bench | PR #1217; run 3 starts here |
+| `c2/steal-instrument-1203-ncoff` | cbab2fc6 | 10f8688e | C2 NC_AXIS=OFF cell | Deleted; archived |
+| `c2/steal-instrument-1203-removal` | c1846b3b | 7d500e0e | C2 removal cell | Deleted; archived |
+| `docs/labctl-serializes-calls` | 90f0d9e3 | main 85f51ffd | CLAUDE.md labctl paragraph (Entry 26) | PR #1218 |
+
+Not created or moved by run 2: `fix-boot-1194-1197-1198` (ad8e4fa7, PR
+#1208, opened 05:26 UTC before the run started; untouched), `main`.
+Local-only branches in builder worktrees (`c0-merge-probe`,
+`c0-hw-pi5`, the orchestrator's `wrap-*` helpers) were never pushed.
+
+## Entry 25 (19:34 UTC): wrap-up, tracker
+
+- #1210 to #1216 all carry labels and milestone Backlog (the milestone
+  named in Entry 0). Evidence filenames: #1211 and #1216 already cited
+  theirs; added by comment on #1210 (`ncoff-kexec-sustained-run01.txt`,
+  `pushfull=0`), #1212 (`critic-2-C0.md` F3), #1213
+  (`nc-instr-test-run01.txt` line 7322; its body already cited
+  `{nc,removal}-instr-test-run0[1-5].txt`; the two QEMU runs were not
+  saved) and #1214 (`run2-critic/c0/ci/fixboot/12-test-secondary-preempt.log`).
+- Duplicate checks: #1213 searched open issues for "isolated",
+  "isolated_core", "isolcpus", "CPU 1 stops": no duplicate (related #1109,
+  #606). #1214 searched "SECONDARY_PREEMPT", "750", "IGNORE", "QEMU
+  ignore", "trampoline": no duplicate (related #380, #977). Said in a
+  comment on each.
+- #1215 (a PR): labels platform:pi5, sub:sched, milestone Backlog; body now
+  has "What closes #1202, #1205 and #1211": the remaining 11 + 11 boots
+  with 20/20 under both kernels and a critic re-run of at least 5 (#1202,
+  #1205), plus a re-run of the pre-conversion `test_task_lifecycle` under
+  the removal with free pages logged at +10/100/1000 ms (#1211). Its
+  evidence files were already cited (`c1/instr-boots.txt`,
+  `c1/force-and-step6-boots.txt`).
+- #1217 also labelled platform:jetson, sub:sched, milestone Backlog.
+
+## Entry 26 (19:34 UTC): wrap-up, labctl finding in the repository
+
+- One paragraph added to CLAUDE.md, section "labctl Is the Only Hardware
+  Interface", on `docs/labctl-serializes-calls` @ 90f0d9e3, draft PR
+  #1218 (docs only, sub:docs, Backlog). It states that one stdio labctl
+  server serializes calls across boards, with both measurements (the
+  240 s Jetson capture returned 12 min late and empty; pi-5-1 switch
+  phases of 21 to 40 s stretching to about 4 min). Main is not changed
+  until the user merges it. Nothing filed against labctl.
+
+## Entry 27 (19:34 UTC): wrap-up, tools and commands the run used (allowlist)
+
+From the orchestrator's own calls and the builders' and critics' reports.
+`*` marks the call believed to have raised the unanswered prompt (Entry 19).
+
+- labctl MCP (`mcp__labctl__`): `claim_sbc`, `release_sbc`,
+  `list_claims`, `get_claim`, `run_health_check`, `bindings_list`,
+  `actuation_status`, `boot_test`, `list_images`, `sdwire_info`,
+  `sdwire_ls`, `sdwire_cat`, `sdwire_update`, `power_cycle`,
+  `power_off`, `serial_capture`, `serial_send`; resource read
+  `ReadMcpResourceTool` on `lab://sbcs`.
+- Session scheduling (`mcp__claude-code-remote__`): `send_later`,
+  `list_triggers`, `delete_trigger`\*, `list_sessions`, `list_events`
+  (refused: trusted device only).
+- Agents: `Agent` (background, `isolation: worktree`), `SendMessage`,
+  `Monitor`, `Skill` (`ci`, `deploy-and-test`).
+- gh: `gh pr list`, `gh pr view`, `gh pr create --draft`, `gh pr edit`
+  (body, labels, milestone), `gh issue view`, `gh issue list --search`,
+  `gh issue create`, `gh issue comment`, `gh label list`, `gh api
+  repos/SLM-OS/SLM-Operating-System`.
+- git: `fetch`, `push`, `push -u origin <branch>`, `push
+  --force-with-lease=<branch>:<sha>` (removal rebases, own branches),
+  `push origin --delete <branch>`, `pull --rebase`, `worktree add`,
+  `worktree remove`, `format-patch`, `range-diff`, `commit-tree`,
+  `read-tree`, `update-index`, `hash-object` (evidence-branch creation).
+- Shell to the board: `ssh`/`scp` to `root@<jetson-nano-2 IP>` as the
+  deploy skill documents, `scripts/jetson-uefi-deploy.sh`; build and test:
+  `make kernel`, `make kernel-clean`, `make test` (with `PLATFORM`,
+  `WORK_STEALING`, `SECONDARY_PREEMPT`, `AI_SCHED`), `make run`,
+  `make check-braces`.
+
+## Entry 28 (19:34 UTC): wrap-up, boards
+
+- labctl: no active claims; pi-5-1 and jetson-nano-2 both `claimed:
+  false`, online, powered on (as found at the start). No other hardware
+  action in the wrap-up.
+
+## Wrap-up addendum to the close-out (19:34 UTC)
+
+What changed after the close-out, with no hardware, no merges, no new
+fixes and #1208 untouched:
+
+- Entry 15 corrected (Entry 19): the gap was a permission prompt with no
+  one present, most likely on `delete_trigger`; no scheduled tasks remain.
+- Run 1's log corrected for the #1203 attempt counts (Entry 20).
+- #1216: full run-16 table, sustained aggregates, H3 experiment, NC cell,
+  fix C (Entry 21).
+- ADR 0007: Run 2 paragraph on `fix/boot-path-1193` (59a85926); the other
+  two copies are no longer kept identical (Entry 22).
+- Draft PR #1217 (instrumentation, 983bddc9); **run 3 starts from
+  983bddc9** (Entry 23). Four branches deleted, tips archived (Entry 24).
+- Tracker: evidence and duplicate checks on #1210 to #1216; #1215 states
+  what closes #1202, #1205 and #1211 (Entry 25).
+- labctl paragraph in CLAUDE.md via draft PR #1218 (Entry 26).
+- Allowlist (Entry 27). Boards released, powered as found (Entry 28).
+- Evidence branches at their final heads: **`gauntlet-2-hw-pi5` @ a560451f**,
+  **`gauntlet-2-hw-jetson` @ 261f82f3**, both pushed.
+- Tracker delta for the whole run, updated: issues opened 6 (#1210 to
+  #1214, #1216), closed 0; draft PRs opened 4 (#1209, #1215, #1217, #1218);
+  nothing merged.
