@@ -170,3 +170,57 @@ Milestone for any issue filed this run: Backlog.
   `kernel/tests/`. (3) `STEAL_DEQUE_CAPACITY` 32 below `MAX_TASKS` 64,
   against the header's stated invariant: C2 files it, does not fix it.
 - jetson-nano-2 grant to C2 waits for C3's return.
+
+## Entry 4: C0 checkpoint A (builder report, critic pending)
+
+- `fix/boot-path-1193` @ 167330f5 = `fix-boot-1194-1197-1198` @ ad8e4fa7 +
+  e4eb9d7a (#1196: DC CIVAC by VA over the 2 MB NC block in `ncmem_init`,
+  page by page; handoff pages (`NC_MEM_RESERVED_BYTES`) keep their DRAM
+  contents; per-boot hash and changed-line count printed, WARN if any line
+  changed; the EFI stub adds the block to `efi_dcache_clean_inval` after
+  ExitBootServices when the memory map shows it OS-owned) + 167330f5 (ADR
+  0007). Draft PR #1209, base `fix-boot-1194-1197-1198`.
+- **Ruling: two stacked PRs.** #1194, #1197 and #1198 are reviewed in
+  #1208 (open, not draft, opened before this run); #1196 in #1209.
+- /ci passed on 167330f5 and on the rebased removal branch: all steps, plus
+  Pi 5 builds and `test-qemu-uefi` (e4eb9d7a touches the EFI stub).
+  Builder-reported; the C0 critic runs /ci itself.
+- Mutation evidence (QEMU `make test`, builder scratchpad logs): page loop
+  one page short fails both range tests (192 vs 128 lines); restore store
+  removed fails ("kept prefix lost its DRAM contents"); EFI type check
+  removed fails `test_vmm.c:1218`. #1198 test with main's `msr daifclr,
+  #0xf` restored fails `test_vmm.c:1006 Expected: 0x3c0 Actual: 0x0`.
+- `coherency-remove-nc-axis` rebased f87d9e47 to **7d500e0e** (40 commits;
+  98 files +7449/-2210 against `fix/boot-path-1193`; 108 files +8418/-2279
+  against main; before: 99 files +7579/-2263 against main). 753e78ad and
+  f87d9e47 dropped as already in the base; fd1d98d3 reduced to D1 and D11
+  (D2 covered by #1197, D9 by #1194); af8d01ba no longer adds the ADR.
+  Files outside the fix set identical to the original commits in 40 of 40
+  (builder script). Pushed with an explicit lease on f87d9e47 after /ci.
+- Orchestrator check (this entry): removal is a descendant of
+  `fix/boot-path-1193`; its diff against it touches none of mmu.S, boot.S,
+  efi_stub.c or docs/adr; `cpu_has_smpen` appears only in archived run-1
+  text, not in code. ADR 0007 sha1 d1d68952 on `gauntlet/coherency-1193`,
+  `coherency-remove-nc-axis` and `fix/boot-path-1193`.
+- #1208 audit (builder): #1197 spans 726a7689 and 30f8022d; #1194 has no
+  before/after capture cited (a before exists:
+  `gauntlet-1193-hw-pi5:docs/archive/coherency-gauntlet/c2-hw/pi5-bootlog-R7.txt`
+  lines 112 and 126-128); #1197's reasoning omits that A76 and A78AE
+  execute DC IVAC as DC CIVAC; #1198's "fails before" is now recorded
+  (above). #1208's own hardware captures are on no branch found.
+- **Correction to Entry 0, decision 2.** "An invalidate discards it" holds
+  architecturally, but per #1197 and the run-1 C3 audit these cores execute
+  DC IVAC as DC CIVAC, so the #1197 invalidate removes stale clean lines
+  only; a stale dirty line over the image rests on the loader's clean
+  (Linux kexec segment flush, `efi_dcache_clean_inval`). Cited from the
+  issue and audit, not re-checked in the TRMs; the C0 critic checks it.
+- Rulings: #1208's body is not edited; after C0's checkpoint B boots on
+  167330f5 (which contains #1208's commits), C0 posts per-issue before and
+  after evidence as a comment on #1208. The now-redundant DC CVAC table
+  flush in `vmm_init` is filed as a follow-up issue, not changed in #1208.
+  `c3-audit.md` on the removal branch still marks D2 and D9 fixed by
+  removal commits; noted for C4.
+- Removal branch handed to C1 at 7d500e0e. C2's removal cell (built on
+  f87d9e47) is rebuilt on 7d500e0e before its series so the evidence
+  matches the branch head.
+- C0 waits for pi-5-1 (C1) and jetson-nano-2 (C3).
