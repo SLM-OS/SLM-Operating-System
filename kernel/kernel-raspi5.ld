@@ -129,3 +129,12 @@ SECTIONS
  * headroom without colliding with anything else. Update in lockstep
  * if the stack base in boot.S moves. */
 ASSERT(__kernel_end < 0x04000000, "Kernel image too large!")
+
+/* #1197: mmu_enable invalidates [_start, __kernel_end) by VA before the
+ * primary turns its caches on (vmm_boot_caches_off_range). The BSS
+ * clear and the boot stack are written with caches off, so both must
+ * lie inside that range. */
+ASSERT(__bss_start >= _start && __bss_end <= __kernel_end,
+       "BSS outside the caches-off invalidate range (#1197)")
+ASSERT(__stack_bottom >= _start && __stack_top <= __kernel_end,
+       "Boot stack outside the caches-off invalidate range (#1197)")

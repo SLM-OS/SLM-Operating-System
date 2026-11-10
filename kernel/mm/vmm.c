@@ -2006,6 +2006,22 @@ static void vmm_setup_platform(void)
 #endif /* PLATFORM_RASPI5 */
 
 /*
+ * The range the primary writes with the MMU and caches off (#1197).
+ * Everything boot.S, kernel_main and vmm_init store before mmu_enable
+ * lies in the image: .data, .bss (static page tables included), the
+ * boot stack and, on UEFI-direct boots, the relocated copy itself. The
+ * linker scripts ASSERT that .bss and .stack end at or before
+ * __kernel_end.
+ */
+void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
+{
+    extern char _start[], __kernel_end[];
+
+    *start = (uint64_t)(uintptr_t)_start;
+    *end = (uint64_t)(uintptr_t)__kernel_end;
+}
+
+/*
  * Set up initial page tables and enable MMU.
  *
  * With 39-bit VA and shared L1 table (TTBR0 = TTBR1), each mapping
@@ -2075,8 +2091,13 @@ void vmm_init(void)
 
     uint64_t ttbr1 = (uint64_t)l1_table;
     uint64_t sctlr = SCTLR_M | SCTLR_C | SCTLR_I;  /* MMU + caches */
+    uint64_t inval_start, inval_end;
 
-    mmu_enable(ttbr1, TCR_EL1_VALUE, MAIR_EL1_VALUE, sctlr);
+    /* mmu_enable invalidates this range by VA before setting SCTLR.C,
+     * after the last caches-off store (#1197). */
+    vmm_boot_caches_off_range(&inval_start, &inval_end);
+    mmu_enable(ttbr1, TCR_EL1_VALUE, MAIR_EL1_VALUE, sctlr,
+               inval_start, inval_end);
 
     /* If we get here, MMU is enabled and we're running at virtual addresses */
     vmm_state.initialized = true;
