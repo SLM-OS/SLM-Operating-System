@@ -125,3 +125,48 @@ Milestone for any issue filed this run: Backlog.
   component's definition of done, the issue numbers, the evidence path and
   the branch heads to reproduce from.
 - Reminders set: hour-7 checkpoint 13:27 UTC, gate deadline 15:27 UTC.
+
+## Entry 3: C2 checkpoint A (#1203 instrumentation, builder report, critic pending)
+
+- Instrumentation and sustained variant: `c2/steal-instrument-1203` @
+  983bddc9 (origin/main 85f51ffd), cherry-picked without conflict to
+  `c2/steal-instrument-1203-ncoff` @ cbab2fc6 (10f8688e, `NC_AXIS=OFF`) and
+  `c2/steal-instrument-1203-removal` @ d4af31aa (`coherency-remove-nc-axis`
+  f87d9e47). Files: `kernel/sched/steal_trace.h` (new),
+  `kernel/sched/sched.c`, the `bench stealing` branch of
+  `kernel/src/shell_sys.c`, `kernel/src/help.c`.
+- `sched_try_steal` records one outcome per attempt (S ok, I isolated, X
+  stale, P preempt_disabled skip, E all empty, O other), per-victim visit
+  counts (v_pd, v_pd_work, v_busy, v_empty, v_gen, v_state, v_cpu, v_aff,
+  v_rm), first and last attempt, first success, the first 16 attempts,
+  `spinlock_hw_enabled` as each thief saw it, and per-deque pushes, drains
+  and last-non-empty time. Per-CPU cacheable BSS written only by its CPU;
+  no locks, atomics or prints added on the steal path (builder's reading of
+  the source; no disassembly diff).
+- The brief's "CAS lost" category has no counterpart: the deque is guarded
+  by `steal_deque_lock`, with no lock-free top/bottom CAS. Losses to the
+  owner or rebalancer appear as v_state or v_rm.
+- `bench stealing` prints a `c2t-format v1` header and one `c2t` line per
+  CPU from snapshots at dispatch and last completion. `bench stealing
+  --sustain [ms] [--depth D] [--work W]` (defaults 2500, 16, 8) keeps D
+  tasks outstanding on CPU 1.
+- Jetson images (sha256 prefix, elf / bin): nc 26d8f532 / 2a86ef84, ncoff
+  877d4c53 / 73b7f479, removal 3b5ad40b / 39d647df. check-cpu-cache-maint
+  OK (37 files) on the removal cell.
+- `make test` on 983bddc9: all suites passed, default and
+  `WORK_STEALING=ON`. QEMU `make run WORK_STEALING=ON`: complete c2t lines,
+  chk=0 and att equal to diag_att on 8 of 8 lines.
+- Hypothesis H1 (untested): Jetson idle thieves sit in WFI and
+  `smp_notify_cpu` is SEV only (`smp.c:179`), so they should wake only on
+  interrupts (100 Hz tick), yet run 1 recorded 10 to 19 attempts per thief
+  per 13 ms burst.
+- Orchestrator rulings: (1) the `NC_AXIS=OFF` cell stays on 10f8688e, the
+  exact run-1 V1 commit that stalled 6 of 6; it is based on c69438a2, not
+  85f51ffd like the other two cells, and that confound is recorded here; if
+  the stall reproduces there and not under the removal, a short series on
+  4367c899 (the same change rebased onto 85f51ffd) separates base from
+  flag. (2) No regression test for diagnostic instrumentation; whatever C2
+  ships carries its own test, coordinated with C1, which owns
+  `kernel/tests/`. (3) `STEAL_DEQUE_CAPACITY` 32 below `MAX_TASKS` 64,
+  against the header's stated invariant: C2 files it, does not fix it.
+- jetson-nano-2 grant to C2 waits for C3's return.
