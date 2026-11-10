@@ -304,3 +304,27 @@ Milestone for any issue filed this run: Backlog.
   if needed is `fix/boot-path-1193` + helper.
 - pi-5-1 handed to C0 for checkpoint B (boot_test 10 on 167330f5). C1
   continues steps 3 to 5 without a board.
+
+## Entry 8 (08:40 UTC): C0 checkpoint B, Pi 5 half (builder report, critic pending)
+
+- pi-5-1 labctl `boot_test` 10/10 to `slmos>` (12.6 to 12.8 s) on
+  `fix/boot-path-1193` @ 167330f5 (`make kernel PLATFORM=RASPI5`, image
+  sha256 9b15962d, deployed to `kernel_2712.img` per the card's
+  `config.txt`). Raw files: `gauntlet-2-hw-pi5` @ 88d2faa2,
+  `run2-hw/c0/fixboot-167330f5-pi5-boot{01..10}.txt` (218 lines each).
+- In 10 of 10: banner `(167330f5)`; no SMPEN line; `SMP: 3/3 secondary
+  CPUs online` and `total 4 CPUs active`; 0 `[WARN]`, `[ERROR]`, panic or
+  exception lines; `NC memory: clean+invalidate by VA, 32768 lines of
+  64 B`, 6143 to 6165 us, 0 changed, 0 restored, handoff hash equal before
+  and after (the negative control on cold-reset Pi 5 cores).
+- Unexplained, not affecting the check: the handoff-page hash was
+  0x7dc3432433700b4e on boot01 (after the card's previous kernel) and
+  0x1665006763620925 on boots 02 to 10.
+- Comment on #1208 with per-issue before/after: issuecomment-6762883596
+  (#1194 before `pi5-bootlog-R7.txt` lines 112, 126-128, after the 10
+  files above; #1197 mutation tests and the DC IVAC-as-CIVAC scope note;
+  #1198 mutation `Expected: 0x3c0 Actual: 0x0`). #1208's body unchanged.
+- Filed #1212: redundant `vmm_init` DC CVAC page-table flush with a wrong
+  NC-coherency comment (P3-low, sub:mm, Backlog).
+- Card restored to its original `kernel_2712.img`; pi-5-1 at the SLM-OS
+  shell, powered on. Jetson half waits for jetson-nano-2 (C3).
