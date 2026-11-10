@@ -15,6 +15,7 @@
 #include "../include/uart.h"
 #include "../include/task.h"   /* struct task, task_create_with_priority, task_destroy */
 #include "../include/sched.h"  /* yield() */
+#include "test_wait.h"
 #include "../lib/lua/src/lua.h"  /* lua_gettop, lua_settop — CORE-H2 test */
 #include <stdint.h>
 #include <stdbool.h>
@@ -2237,16 +2238,42 @@ static void lua_publish_task_body(void *arg)
     task_exit();
 }
 
+struct lua_drain_ctx {
+    struct task *t;
+    lua_State *L1;
+    lua_State *L2;
+    int drain_rc;
+};
+
+/* One poll: drain both states, then report whether the publisher ended. */
+static bool lua_drain_poll(void *arg)
+{
+    struct lua_drain_ctx *c = arg;
+    if (c->t->state == TASK_TERMINATED) {
+        return true;
+    }
+    if (c->L1 && lua_slm_dostring(c->L1, "slm.msg_drain()") != 0) {
+        c->drain_rc = -1;
+        return true;
+    }
+    if (c->L2 && lua_slm_dostring(c->L2, "slm.msg_drain()") != 0) {
+        c->drain_rc = -1;
+        return true;
+    }
+    return false;
+}
+
 static void drain_lua_states_until_task_done(struct task *t,
                                              lua_State *L1,
                                              lua_State *L2)
 {
-    int timeout = 20000;
-    while (t->state != TASK_TERMINATED && timeout-- > 0) {
-        if (L1) TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1, "slm.msg_drain()"));
-        if (L2) TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2, "slm.msg_drain()"));
-        yield();
-    }
+    /* Wall-clock bound, not 20,000 iterations (#1202, #1205). Each
+     * iteration ran up to two Lua calls, not measured on hardware, so the
+     * old bound's duration is unknown; 5 s leaves a wide margin over the
+     * 1 s floor in test_wait.h. */
+    struct lua_drain_ctx c = { t, L1, L2, 0 };
+    (void)test_wait_until("lua_drain", lua_drain_poll, &c, TEST_WAIT_S(5));
+    TEST_ASSERT_EQUAL_INT(0, c.drain_rc);
     TEST_ASSERT_MESSAGE(t->state == TASK_TERMINATED,
         "publisher task should terminate once all Lua subscribers ack");
 }

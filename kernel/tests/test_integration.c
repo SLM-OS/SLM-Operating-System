@@ -27,6 +27,7 @@
 #include "../include/timer.h"
 #include "../include/preempt_point.h"
 #include "../include/cpu_supervisor.h"
+#include "test_wait.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -699,6 +700,18 @@ static void test_lock_contention(void)
 #endif
 }
 
+/* Lifecycle cleanup: the free-page count is back within the slack. */
+static bool lifecycle_pages_back(void *ctx)
+{
+    return pmm_get_free_pages() >= *(uint64_t *)ctx;
+}
+
+static long long lifecycle_free_pages(void *ctx)
+{
+    (void)ctx;
+    return (long long)pmm_get_free_pages();
+}
+
 /*
  * Test: Task Lifecycle
  * Rapidly create and destroy tasks to verify cleanup.
@@ -746,33 +759,43 @@ static void test_task_lifecycle(void)
 #endif
 
     /*
-     * Give scheduler time to clean up zombies. Under
+     * Give the scheduler time to clean up zombies. Under
      * CONFIG_WORK_STEALING=ON, lifecycle tasks get distributed
      * across CPUs 1-3 (via the dispatch above) and each CPU's
-     * `schedule()` cycle is what actually frees its zombies. A
-     * short sleep with only CPU 0 yielding can leave stacks
-     * allocated while the owning CPUs are idle. Yield in a long
-     * enough loop for every CPU to run schedule() several times
-     * after the last task terminates.
-     */
-    for (int i = 0; i < 50; i++) {
-        yield();
-        delay(50000);
-    }
-
-    /*
-     * Verify no major memory leak. Threshold is generous enough to
-     * tolerate one full task stack (4 pages) lingering after the
-     * cleanup window because its owning CPU has not run
-     * schedule() again — this can happen when a secondary CPU
-     * parks in WFE right after its test task exits and doesn't
-     * wake until a timer tick. 16 pages (~64 KB) covers the
+     * `schedule()` cycle is what actually frees its zombies, so the
+     * pages come back only after every owning CPU schedules again.
+     *
+     * Then verify no major memory leak. Threshold is generous enough to
+     * tolerate one full task stack (4 pages) lingering because its
+     * owning CPU has not run schedule() again; this can happen when a
+     * secondary CPU parks in WFE right after its test task exits and
+     * doesn't wake until a timer tick. 16 pages (~64 KB) covers the
      * worst case of one stack per stealable CPU without hiding a
      * real per-task leak. Every `LIFECYCLE_CYCLES` tasks would
      * leak 32 pages, which this threshold would still catch.
+     *
+     * The window used to be 50 x (yield + delay(50000)), a loop count
+     * (#1211: it failed in 2 of 20 Pi 5 boots of one kernel and 0 of 10
+     * of another). It is now a wall-clock wait for the pages, 1 s (the
+     * floor in test_wait.h; the old window's duration was not measured),
+     * and a timeout logs the free-page count at the bound and 10, 100 and
+     * 1000 ms after it: pages that come back late are a timing window,
+     * pages that never come back are a leak. Every run logs the deficit
+     * when the wait starts and how long it took.
      */
-    uint64_t final_free = pmm_get_free_pages();
-    TEST_ASSERT_MESSAGE(final_free >= initial_free - 16, "Memory leak detected");
+    uint64_t target = initial_free - 16;
+    uint64_t free_at_start = pmm_get_free_pages();
+    long long lc_us = test_wait_until_v("task_lifecycle_pages",
+                                        lifecycle_pages_back,
+                                        lifecycle_free_pages, &target,
+                                        TEST_WAIT_S(1));
+    uart_printf("[test_wait] task_lifecycle: initial %llu, target %llu, "
+                "free at start of wait %llu, met after %lld us "
+                "(bound 1000000 us)\n",
+                (unsigned long long)initial_free,
+                (unsigned long long)target,
+                (unsigned long long)free_at_start, lc_us);
+    TEST_ASSERT_MESSAGE(lc_us >= 0, "Memory leak detected");
 }
 
 /* ============================================================================
