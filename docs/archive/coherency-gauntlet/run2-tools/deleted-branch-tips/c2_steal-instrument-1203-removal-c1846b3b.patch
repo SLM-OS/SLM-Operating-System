@@ -1,0 +1,869 @@
+From c1846b3b2a7dfb26116365f10eb7bfbdfab9ef86 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Mon, 9 Nov 2026 22:53:04 -0800
+Subject: [PATCH] bench stealing: per-CPU failure-reason trace and a sustained
+ variant (#1203)
+
+sched_try_steal() now records, per thief CPU, how every attempt ended
+(ok, isolated, stale entry, preempt_disabled skip, all victims empty,
+other) and how every victim visit ended (preempt_disabled skip and
+whether the skipped deque looked non-empty, lock held on arrival,
+empty, generation / state / assigned_cpu / affinity mismatch, not on
+the victim's run queue). It also keeps the first and last attempt
+time, the first success time, the first 16 attempts with their
+outcome, the time each deque was last non-empty and the
+spinlock_hw_enabled value the thief saw. Storage is per-CPU cacheable
+BSS written only by its CPU (deque fields only under
+steal_deque_lock); no locks, atomics or prints on the steal path, and
+the validation conjunction is unrolled in the same order with the same
+short-circuit.
+
+bench stealing prints one c2t line per CPU after the burst, from
+snapshots taken before dispatch and when the last task reports done.
+bench stealing --sustain [ms] [--depth D] [--work W] keeps D tasks
+outstanding on CPU 1 for ms milliseconds so a stuck thief can be told
+apart from one that lost a race to drain a 16-task burst.
+
+Refs #1203.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/sched/sched.c       | 159 ++++++++++++++-
+ kernel/sched/steal_trace.h | 101 ++++++++++
+ kernel/src/help.c          |   7 +-
+ kernel/src/shell_sys.c     | 383 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 642 insertions(+), 8 deletions(-)
+ create mode 100644 kernel/sched/steal_trace.h
+
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 1bdc0f67..47c04bb6 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -35,6 +35,7 @@
+ #include "runtime_model.h"
+ #if CONFIG_WORK_STEALING
+ #include "steal_deque.h"
++#include "steal_trace.h"
+ #endif
+ #include <stdint.h>
+ 
+@@ -128,6 +129,14 @@ static steal_deque_t cpu_steal_deques[MAX_CPUS];
+  * Jetson. Acquire the victim's lock before any steal_deque_*
+  * operation; never held across other locks. */
+ static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
++
++/* Failure-reason trace for `bench stealing` (#1203). Layout, writers
++ * and the visibility argument are in steal_trace.h. Cacheable BSS on
++ * every platform: steal_trace[c] is written only by CPU c inside
++ * sched_try_steal, steal_trace_dq[v] only under steal_deque_lock[v]. */
++static struct steal_trace_cpu steal_trace[MAX_CPUS];
++static struct steal_trace_dq steal_trace_dq[MAX_CPUS];
++static volatile uint32_t steal_trace_run;  /* 0 = never armed */
+ #endif /* CONFIG_WORK_STEALING */
+ 
+ /* Lock helpers that use the correct lock for a given CPU */
+@@ -1002,6 +1011,12 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
+         task != cpu_rq(cpu)->idle_task) {
+         irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+         int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
++        if (rc == 0) {
++            /* #1203 trace: written under steal_deque_lock[cpu]. */
++            steal_trace_dq[cpu].pushes++;
++            steal_trace_dq[cpu].last_push = timer_get_count();
++            steal_trace_dq[cpu].push_run = steal_trace_run;
++        }
+         spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+         if (rc < 0) {
+             sched_diag_steal_push_full[cpu]++;
+@@ -1506,6 +1521,53 @@ static struct task *pick_next_task(uint32_t cpu)
+ }
+ 
+ #if CONFIG_WORK_STEALING
++uint32_t sched_steal_trace_arm(void)
++{
++    /* Single caller (the bench, on CPU 0); the release orders the
++     * caller's earlier stores before the new run number. Thieves only
++     * compare the number against their own copy. */
++    uint32_t run = steal_trace_run + 1;
++    if (run == 0) {
++        run = 1;
++    }
++    __atomic_store_n(&steal_trace_run, run, __ATOMIC_RELEASE);
++    return run;
++}
++
++const struct steal_trace_cpu *sched_steal_trace_cpu(uint32_t cpu)
++{
++    return (cpu < MAX_CPUS) ? &steal_trace[cpu] : NULL;
++}
++
++const struct steal_trace_dq *sched_steal_trace_dq(uint32_t cpu)
++{
++    return (cpu < MAX_CPUS) ? &steal_trace_dq[cpu] : NULL;
++}
++
++/* Record the outcome of one sched_try_steal() call on this CPU (#1203).
++ * Plain stores to this CPU's own trace block only. */
++static inline void steal_trace_note(struct steal_trace_cpu *tr,
++                                    uint64_t now, uint8_t out)
++{
++    switch (out) {
++    case STEAL_OUT_OK:    tr->ok++;      break;
++    case STEAL_OUT_ISO:   tr->iso++;     break;
++    case STEAL_OUT_STALE: tr->f_stale++; break;
++    case STEAL_OUT_PD:    tr->f_pd++;    break;
++    case STEAL_OUT_EMPTY: tr->f_empty++; break;
++    default:              tr->f_other++; break;
++    }
++    if (out == STEAL_OUT_OK && tr->first_ok == 0) {
++        tr->first_ok = now;
++    }
++    uint32_t n = tr->nlog;
++    if (n < STEAL_TRACE_LOG_LEN) {
++        tr->log_dt[n] = (uint32_t)(now - tr->first_att);
++        tr->log_out[n] = out;
++        tr->nlog = n + 1;
++    }
++}
++
+ /*
+  * Attempt to steal one READY task from another CPU's run queue.
+  *
+@@ -1517,6 +1579,14 @@ static struct task *pick_next_task(uint32_t cpu)
+  * Stale pointers in the deque are discarded during validation; each
+  * failed validation pops one stale entry so the deque does not
+  * accumulate garbage indefinitely.
++ *
++ * #1203 instrumentation: every exit records an outcome in
++ * steal_trace[this_cpu] (see steal_trace.h). It adds per-CPU counter
++ * stores, one CNTPCT read per call, one plain load of the victim's
++ * lock word before each spin_lock_irqsave, two loads of the deque
++ * indices under the lock and, on a preempt_disabled skip, an unlocked
++ * load of the victim deque's top and bottom. No locks, no atomics and
++ * no prints; every branch the steal takes is unchanged.
+  */
+ static struct task *sched_try_steal(uint32_t this_cpu)
+ {
+@@ -1529,6 +1599,23 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+      * we just choose not to probe victims. */
+     sched_diag_steal_attempts[this_cpu]++;
+ 
++    struct steal_trace_cpu *tr = &steal_trace[this_cpu];
++    uint64_t now = timer_get_count();
++    uint32_t run = steal_trace_run;
++    if (tr->run != run) {
++        tr->run = run;
++#if defined(SPINLOCK_SKIP_LOCKING)
++        tr->lk_hw = 2;
++#else
++        tr->lk_hw = (uint32_t)spinlock_hw_enabled;
++#endif
++        tr->first_att = now;
++        tr->first_ok = 0;
++        tr->nlog = 0;
++    }
++    tr->att++;
++    tr->last_att = now;
++
+     /* Isolated cores must never pull work from other CPUs — that's
+      * the whole point of isolation. The S5 placement override
+      * already refuses to *target* an isolated CPU; this closes the
+@@ -1538,9 +1625,15 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+      * away from it (test_proactive_load_balance_respects_isolation
+      * would otherwise flake when CPU 2 or 3 acted as a thief). */
+     if (sched.isolated_cores & (1U << this_cpu)) {
++        steal_trace_note(tr, now, STEAL_OUT_ISO);
+         return NULL;
+     }
+ 
++    uint32_t probed = 0;      /* victims whose deque was locked and read */
++    uint32_t n_empty = 0;     /* ... of which empty                      */
++    uint32_t n_stale = 0;     /* entries popped and rejected             */
++    uint32_t n_pd = 0;        /* victims skipped on preempt_disabled     */
++
+     for (uint32_t i = 1; i < cpu_count; i++) {
+         uint32_t victim = (this_cpu + i) % cpu_count;
+         if (victim == this_cpu) {
+@@ -1556,14 +1649,27 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+          * the steal race-free; this is belt-and-suspenders per the
+          * cross-plan review (B3 / P2-3). */
+         if (preempt_disabled[victim]) {
++            n_pd++;
++            tr->v_pd++;
++            /* Unlocked snapshot: did the skipped victim look like it
++             * had work? Diagnostic only, never acted on. */
++            if (!steal_deque_is_empty(&cpu_steal_deques[victim])) {
++                tr->v_pd_work++;
++            }
+             continue;
+         }
+ 
+         /* Drain any stale pointers along with finding a live one. Bounded
+          * by deque capacity so this loop cannot spin forever. */
+         int victim_had_entry = 0;
++        probed++;
+         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
+             uint32_t captured_gen = 0;
++            /* #1203: was the lock held when this thief arrived? Plain
++             * load; the acquisition below is unchanged. */
++            if (steal_deque_lock[victim].lock != 0) {
++                tr->v_busy++;
++            }
+             /* Serialize this steal against owner's pushes / other
+              * thieves' steals on the same victim's deque. Held
+              * briefly (for the pop) and released before we take
+@@ -1572,8 +1678,18 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+              * them. */
+             irq_flags_t sd_flags =
+                 spin_lock_irqsave(&steal_deque_lock[victim]);
++            int was_nonempty =
++                !steal_deque_is_empty(&cpu_steal_deques[victim]);
+             struct task *candidate =
+                 steal_deque_steal(&cpu_steal_deques[victim], &captured_gen);
++            if (was_nonempty &&
++                steal_deque_is_empty(&cpu_steal_deques[victim])) {
++                /* #1203: this steal took the last entry (or skipped the
++                 * last NULL slots): the deque was last non-empty now. */
++                steal_trace_dq[victim].drains++;
++                steal_trace_dq[victim].drain_ts = now;
++                steal_trace_dq[victim].drain_run = run;
++            }
+             spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
+             if (!candidate) {
+                 break;  /* Empty — try next victim */
+@@ -1589,29 +1705,58 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+              * though state/affinity/assigned_cpu may all read as
+              * valid for the current resident. Checked first so we
+              * don't bother with the full structural validation for
+-             * an entry we already know is stale. */
+-            int stealable =
+-                candidate->generation == captured_gen &&
+-                candidate->state == TASK_READY &&
+-                candidate->assigned_cpu == victim &&
+-                candidate->cpu_affinity == CPU_AFFINITY_ANY &&
+-                remove_from_cpu_queue_locked(candidate, victim);
++             * an entry we already know is stale.
++             *
++             * #1203: the conjunction is unrolled so the trace can name
++             * the first clause that failed. Evaluation order and the
++             * short-circuit (remove only when every check before it
++             * held) match the original single && expression. */
++            int stealable = 0;
++            if (candidate->generation != captured_gen) {
++                tr->v_gen++;
++            } else if (candidate->state != TASK_READY) {
++                tr->v_state++;
++            } else if (candidate->assigned_cpu != victim) {
++                tr->v_cpu++;
++            } else if (candidate->cpu_affinity != CPU_AFFINITY_ANY) {
++                tr->v_aff++;
++            } else if (!remove_from_cpu_queue_locked(candidate, victim)) {
++                tr->v_rm++;
++            } else {
++                stealable = 1;
++            }
+ 
+             rq_unlock_irqrestore(victim, flags);
+ 
+             if (stealable) {
+                 sched_diag_steal_successes[this_cpu]++;
++                steal_trace_note(tr, now, STEAL_OUT_OK);
+                 return candidate;
+             }
+             /* Otherwise: stale pointer (structural mismatch or
+              * generation mismatch), already popped from deque. Loop
+              * again to drain another entry on the same victim. */
+             sched_diag_steal_stale[this_cpu]++;
++            n_stale++;
+         }
+         if (!victim_had_entry) {
+             sched_diag_steal_empty_victim[this_cpu]++;
++            tr->v_empty++;
++            n_empty++;
+         }
+     }
++
++    uint8_t out;
++    if (n_stale > 0) {
++        out = STEAL_OUT_STALE;
++    } else if (n_pd > 0) {
++        out = STEAL_OUT_PD;
++    } else if (probed > 0 && n_empty == probed) {
++        out = STEAL_OUT_EMPTY;
++    } else {
++        out = STEAL_OUT_OTHER;
++    }
++    steal_trace_note(tr, now, out);
+     return NULL;
+ }
+ #endif /* CONFIG_WORK_STEALING */
+diff --git a/kernel/sched/steal_trace.h b/kernel/sched/steal_trace.h
+new file mode 100644
+index 00000000..4e31bbb7
+--- /dev/null
++++ b/kernel/sched/steal_trace.h
+@@ -0,0 +1,101 @@
++/*
++ * steal_trace.h - Per-CPU work-stealing failure-reason trace (#1203)
++ *
++ * `bench stealing` on jetson-nano-2 showed a non-owner CPU making 10 to
++ * 16 steal attempts and 0 successes in cacheable builds. The existing
++ * sched_diag_steal_* counters say an attempt failed but not why. This
++ * trace records, for every sched_try_steal() call, how each victim
++ * visit ended and how the attempt as a whole ended, plus a few
++ * timestamps, so a stalled thief can be told apart from a thief that
++ * lost a race to drain.
++ *
++ * Writers and memory:
++ *   - struct steal_trace_cpu[c] is written only by CPU c, inside
++ *     sched_try_steal() (plain stores to its own 64-byte-aligned
++ *     block; no locks, no atomics, no prints).
++ *   - struct steal_trace_dq[v] is written only under
++ *     steal_deque_lock[v] (by the owner's push or a thief's steal).
++ *   - Both live in ordinary cacheable BSS on every platform. The bench
++ *     reads them on CPU 0 after every task has completed. Cross-CPU
++ *     visibility relies on the hardware coherence ADR 0007 measured on
++ *     Pi 5 and Jetson; `att` duplicates sched_diag_steal_attempts so a
++ *     reader can check one against the other.
++ *
++ * Counters run forever; the bench reports deltas. Timestamps and the
++ * attempt log are per run: sched_steal_trace_arm() bumps a run number
++ * and each CPU resets its own timestamp fields the first time it
++ * attempts a steal in the new run.
++ */
++
++#ifndef SCHED_STEAL_TRACE_H
++#define SCHED_STEAL_TRACE_H
++
++#include <stdint.h>
++
++#define STEAL_TRACE_LOG_LEN 16
++
++/* Attempt outcome codes (one per sched_try_steal call). */
++#define STEAL_OUT_OK     'S'  /* returned a live task                    */
++#define STEAL_OUT_ISO    'I'  /* this CPU is isolated: no victim probed  */
++#define STEAL_OUT_STALE  'X'  /* some victim gave an entry, none valid   */
++#define STEAL_OUT_PD     'P'  /* no stale entry; some victim skipped on
++                                 preempt_disabled[victim]               */
++#define STEAL_OUT_EMPTY  'E'  /* every probed victim's deque was empty   */
++#define STEAL_OUT_OTHER  'O'  /* none of the above (no victim probed)    */
++
++struct steal_trace_cpu {
++    /* Attempt level: att = ok + iso + f_stale + f_pd + f_empty + f_other */
++    volatile uint32_t att;
++    volatile uint32_t ok;
++    volatile uint32_t iso;
++    volatile uint32_t f_stale;
++    volatile uint32_t f_pd;
++    volatile uint32_t f_empty;
++    volatile uint32_t f_other;
++
++    /* Victim-visit level, summed over victims. */
++    volatile uint32_t v_pd;        /* skipped: preempt_disabled[victim] != 0 */
++    volatile uint32_t v_pd_work;   /* ... while victim deque looked non-empty
++                                      (unlocked read of top/bottom)          */
++    volatile uint32_t v_busy;      /* steal_deque_lock[victim] read held just
++                                      before spin_lock_irqsave              */
++    volatile uint32_t v_empty;     /* deque empty under the lock            */
++    volatile uint32_t v_gen;       /* entry popped, generation mismatch     */
++    volatile uint32_t v_state;     /* entry popped, task state != READY     */
++    volatile uint32_t v_cpu;       /* entry popped, assigned_cpu != victim  */
++    volatile uint32_t v_aff;       /* entry popped, affinity pinned         */
++    volatile uint32_t v_rm;        /* entry popped, not on victim's run
++                                      queue (owner or rebalancer had it)    */
++
++    /* Per run (valid when run == steal_trace_run). Raw CNTPCT. */
++    volatile uint32_t run;
++    volatile uint32_t lk_hw;       /* spinlock_hw_enabled as this CPU saw it
++                                      at its first attempt of the run
++                                      (2 = no such flag on this platform)   */
++    volatile uint64_t first_att;
++    volatile uint64_t last_att;
++    volatile uint64_t first_ok;
++    volatile uint32_t nlog;        /* attempts logged this run (saturates)  */
++    volatile uint32_t log_dt[STEAL_TRACE_LOG_LEN];  /* CNTPCT - first_att  */
++    volatile uint8_t  log_out[STEAL_TRACE_LOG_LEN]; /* STEAL_OUT_*         */
++} __attribute__((aligned(64)));
++
++struct steal_trace_dq {
++    volatile uint32_t pushes;      /* successful pushes (counter)           */
++    volatile uint32_t drains;      /* steals that left it empty (counter)   */
++    volatile uint32_t drain_run;   /* run number of drain_ts                */
++    volatile uint32_t push_run;    /* run number of last_push               */
++    volatile uint64_t drain_ts;    /* CNTPCT when a steal left it empty:
++                                      the deque was last non-empty here     */
++    volatile uint64_t last_push;   /* CNTPCT of the last push               */
++} __attribute__((aligned(64)));
++
++/* Start a new trace run; returns the run number. Call from the bench
++ * before dispatching work. */
++uint32_t sched_steal_trace_arm(void);
++
++/* Read-only views for the bench (cpu < MAX_CPUS, else NULL). */
++const struct steal_trace_cpu *sched_steal_trace_cpu(uint32_t cpu);
++const struct steal_trace_dq *sched_steal_trace_dq(uint32_t cpu);
++
++#endif /* SCHED_STEAL_TRACE_H */
+diff --git a/kernel/src/help.c b/kernel/src/help.c
+index 73d4844a..e5a361d9 100644
+--- a/kernel/src/help.c
++++ b/kernel/src/help.c
+@@ -1025,7 +1025,12 @@ static const struct help_entry help_entries[] = {
+         "  isolate        Core-isolation benchmark\n"
+         "  shared         Shared-buffer throughput\n"
+         "  smp            Cross-CPU dispatch test (one task per CPU)\n"
+-        "  stealing       Work-stealing scheduler exercise\n"
++        "  stealing [N]   Work-stealing burst: N tasks (default 16) to CPU 1\n"
++        "  stealing --sustain [ms] [--depth D] [--work W]\n"
++        "                 Keep D tasks (default 16) queued on CPU 1 for ms\n"
++        "                 (default 2500); each task runs W (default 8) burst\n"
++        "                 work units. Both print one c2t line per CPU with\n"
++        "                 the reason every failed steal attempt failed\n"
+         "  matmul [N]     NEON FP32 matmul (default 20 iters)\n"
+         "  conv           NEON FP32 conv2d\n"
+         "  quant          int8 quantization throughput\n"
+diff --git a/kernel/src/shell_sys.c b/kernel/src/shell_sys.c
+index 0cd2cae5..bcb3be77 100644
+--- a/kernel/src/shell_sys.c
++++ b/kernel/src/shell_sys.c
+@@ -50,6 +50,10 @@
+ #include "../gpu/nvidia/ga10b_qmd.h"
+ #include "ga10b_qmd_selftest_reference.h"
+ #endif
++#if CONFIG_WORK_STEALING
++#include "../sched/steal_trace.h"
++#endif
++#include <stdarg.h>
+ #include <stdint.h>
+ 
+ /* Command table access (defined in shell.c) */
+@@ -1985,6 +1989,333 @@ static void s3_steal_work_task(void *arg)
+     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
+ }
+ 
++#if CONFIG_WORK_STEALING
++/* ---- bench stealing: sustained variant and failure-reason trace (#1203)
++ *
++ * The 16-task burst drains CPU 1's deque in a few milliseconds, so a
++ * thief that woke late fails every attempt whether or not anything is
++ * wrong with it. The sustained variant keeps `depth` tasks outstanding
++ * on CPU 1 for `ms` milliseconds: the driver (the shell, CPU 0)
++ * re-issues a task into each slot as soon as the slot reports done.
++ * A thief with 0 successes over seconds of supply is stuck; one with
++ * 0 in the burst and a normal share here was racing.
++ *
++ * Each sustained task runs the burst task's loop `work` times so the
++ * task count (and CPU 0's per-task "exiting" UART line) stays in the
++ * hundreds rather than thousands. */
++static volatile uint32_t s3_work_mult = 1;
++
++static void s3_steal_work_task_n(void *arg)
++{
++    uintptr_t slot = (uintptr_t)arg;
++    uint32_t mult = s3_work_mult;
++    volatile uint64_t x = 1;
++    for (uint32_t m = 0; m < mult; m++) {
++        for (uint64_t i = 1; i < 400000; i++) {
++            x = x * 1103515245 + 12345;
++        }
++    }
++    (void)x;
++    *S3_SLOT_ADDR(slot) = cpu_id() + 1;
++}
++
++/* Counter snapshot taken just before dispatch and again the moment the
++ * last task reports done, so idle CPUs that keep attempting while the
++ * results print do not move the numbers. */
++struct s3_snap {
++    uint32_t diag_att[MAX_CPUS];
++    uint32_t diag_ok[MAX_CPUS];
++    uint32_t diag_pf[MAX_CPUS];
++    uint32_t ticks[MAX_CPUS];
++    uint32_t idle[MAX_CPUS];
++    uint32_t sched[MAX_CPUS];
++    struct steal_trace_cpu tr[MAX_CPUS];
++    struct steal_trace_dq dq[MAX_CPUS];
++};
++
++static struct s3_snap s3_pre;
++static struct s3_snap s3_post;
++
++#if defined(PLATFORM_HAS_NC_MEMORY)
++extern volatile uint32_t *sched_diag_steal_attempts;
++extern volatile uint32_t *sched_diag_steal_successes;
++extern volatile uint32_t *sched_diag_steal_push_full;
++extern volatile uint32_t *sched_diag_schedule;
++extern volatile uint32_t *sched_diag_idle_loops;
++extern volatile uint32_t *sched_diag_tick;
++#else
++extern volatile uint32_t sched_diag_steal_attempts[];
++extern volatile uint32_t sched_diag_steal_successes[];
++extern volatile uint32_t sched_diag_steal_push_full[];
++extern volatile uint32_t sched_diag_schedule[];
++extern volatile uint32_t sched_diag_idle_loops[];
++extern volatile uint32_t sched_diag_tick[];
++#endif
++
++static void s3_take_snap(struct s3_snap *s)
++{
++    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
++        s->diag_att[c] = sched_diag_steal_attempts[c];
++        s->diag_ok[c] = sched_diag_steal_successes[c];
++        s->diag_pf[c] = sched_diag_steal_push_full[c];
++        s->ticks[c] = sched_diag_tick[c];
++        s->idle[c] = sched_diag_idle_loops[c];
++        s->sched[c] = sched_diag_schedule[c];
++        s->tr[c] = *sched_steal_trace_cpu(c);
++        s->dq[c] = *sched_steal_trace_dq(c);
++    }
++}
++
++/* Signed microseconds of (ts - t0); `valid` false prints "-". */
++static int s3_fmt_us(char *buf, size_t n, bool valid, uint64_t ts,
++                     uint64_t t0, uint64_t freq)
++{
++    if (!valid) {
++        return uart_snprintf(buf, n, "-");
++    }
++    if (ts >= t0) {
++        return uart_snprintf(buf, n, "%lu",
++                             (unsigned long)((ts - t0) * 1000000ULL / freq));
++    }
++    return uart_snprintf(buf, n, "-%lu",
++                         (unsigned long)((t0 - ts) * 1000000ULL / freq));
++}
++
++/* Append to buf at *pos, never past cap - 1 (uart_snprintf returns the
++ * untruncated length, so *pos is clamped). */
++static void s3_append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
++{
++    if (*pos >= cap - 1) {
++        return;
++    }
++    va_list args;
++    va_start(args, fmt);
++    int n = uart_vsnprintf(buf + *pos, cap - *pos, fmt, args);
++    va_end(args);
++    if (n > 0) {
++        *pos += (size_t)n;
++    }
++    if (*pos > cap - 1) {
++        *pos = cap - 1;
++    }
++}
++
++/* One complete line per CPU, built in a buffer and written with a
++ * single call so nothing interleaves inside it. Field meanings are in
++ * kernel/sched/steal_trace.h. */
++static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
++                           const uint32_t *exec)
++{
++    static char line[1024];
++    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
++        const struct steal_trace_cpu *a = &s3_pre.tr[c];
++        const struct steal_trace_cpu *b = &s3_post.tr[c];
++        const struct steal_trace_dq *qa = &s3_pre.dq[c];
++        const struct steal_trace_dq *qb = &s3_post.dq[c];
++        bool live = (b->run == run);
++        uint32_t att = b->att - a->att;
++        uint32_t ok = b->ok - a->ok;
++        uint32_t iso = b->iso - a->iso;
++        uint32_t fs = b->f_stale - a->f_stale;
++        uint32_t fp = b->f_pd - a->f_pd;
++        uint32_t fe = b->f_empty - a->f_empty;
++        uint32_t fo = b->f_other - a->f_other;
++        uint32_t datt = s3_post.diag_att[c] - s3_pre.diag_att[c];
++        char t_first[24], t_last[24], t_ok[24], t_drain[24], t_push[24];
++        s3_fmt_us(t_first, sizeof(t_first), live, b->first_att, t0, freq);
++        s3_fmt_us(t_last, sizeof(t_last), live, b->last_att, t0, freq);
++        s3_fmt_us(t_ok, sizeof(t_ok), live && b->first_ok != 0,
++                  b->first_ok, t0, freq);
++        s3_fmt_us(t_drain, sizeof(t_drain), qb->drain_run == run,
++                  qb->drain_ts, t0, freq);
++        s3_fmt_us(t_push, sizeof(t_push), qb->push_run == run,
++                  qb->last_push, t0, freq);
++
++        size_t pos = 0;
++        s3_append(line, sizeof(line) - 2, &pos,
++            "  c2t cpu=%lu exec=%lu att=%lu diag_att=%lu ok=%lu"
++            " diag_ok=%lu iso=%lu f_stale=%lu f_pd=%lu f_empty=%lu"
++            " f_other=%lu chk=%ld",
++            (unsigned long)c, (unsigned long)exec[c],
++            (unsigned long)att, (unsigned long)datt, (unsigned long)ok,
++            (unsigned long)(s3_post.diag_ok[c] - s3_pre.diag_ok[c]),
++            (unsigned long)iso, (unsigned long)fs, (unsigned long)fp,
++            (unsigned long)fe, (unsigned long)fo,
++            (long)att - (long)(ok + iso + fs + fp + fe + fo));
++        s3_append(line, sizeof(line) - 2, &pos,
++            " v_pd=%lu v_pd_work=%lu v_busy=%lu v_empty=%lu v_gen=%lu"
++            " v_state=%lu v_cpu=%lu v_aff=%lu v_rm=%lu",
++            (unsigned long)(b->v_pd - a->v_pd),
++            (unsigned long)(b->v_pd_work - a->v_pd_work),
++            (unsigned long)(b->v_busy - a->v_busy),
++            (unsigned long)(b->v_empty - a->v_empty),
++            (unsigned long)(b->v_gen - a->v_gen),
++            (unsigned long)(b->v_state - a->v_state),
++            (unsigned long)(b->v_cpu - a->v_cpu),
++            (unsigned long)(b->v_aff - a->v_aff),
++            (unsigned long)(b->v_rm - a->v_rm));
++        s3_append(line, sizeof(line) - 2, &pos,
++            " pushfull=%lu dq_push=%lu dq_drains=%lu dq_drain_us=%s"
++            " dq_last_push_us=%s first_att_us=%s first_ok_us=%s"
++            " last_att_us=%s ticks=%lu idle=%lu sched=%lu lk_hw=%lu log=",
++            (unsigned long)(s3_post.diag_pf[c] - s3_pre.diag_pf[c]),
++            (unsigned long)(qb->pushes - qa->pushes),
++            (unsigned long)(qb->drains - qa->drains),
++            t_drain, t_push, t_first, t_ok, t_last,
++            (unsigned long)(s3_post.ticks[c] - s3_pre.ticks[c]),
++            (unsigned long)(s3_post.idle[c] - s3_pre.idle[c]),
++            (unsigned long)(s3_post.sched[c] - s3_pre.sched[c]),
++            live ? (unsigned long)b->lk_hw : 9UL);
++        uint32_t nlog = live ? b->nlog : 0;
++        if (nlog > STEAL_TRACE_LOG_LEN) {
++            nlog = STEAL_TRACE_LOG_LEN;
++        }
++        if (nlog == 0) {
++            s3_append(line, sizeof(line) - 2, &pos, "-");
++        }
++        for (uint32_t k = 0; k < nlog; k++) {
++            s3_append(line, sizeof(line) - 2, &pos,
++                "%s%lu%c", k ? "," : "",
++                (unsigned long)((uint64_t)b->log_dt[k] * 1000000ULL / freq),
++                (char)b->log_out[k]);
++        }
++        /* Appends stop at sizeof(line) - 3, so the terminator fits. */
++        line[pos++] = '\r';
++        line[pos++] = '\n';
++        line[pos] = '\0';
++        shell_puts(line);
++    }
++}
++
++static void s3_print_trace_header(const char *mode, uint32_t run,
++                                  uint64_t freq, uint32_t tasks,
++                                  uint32_t depth, uint32_t work, uint32_t ms)
++{
++    shell_printf("\r\n  c2t-format v1 mode=%s run=%lu cntfrq=%lu cpus=%lu"
++                 " tasks=%lu depth=%lu work=%lu sustain_ms=%lu\r\n",
++                 mode, (unsigned long)run, (unsigned long)freq,
++                 (unsigned long)cpu_count, (unsigned long)tasks,
++                 (unsigned long)depth, (unsigned long)work,
++                 (unsigned long)ms);
++    shell_puts("  times in us from dispatch start; log = first 16 attempts"
++               " as us-since-first-attempt + outcome (S ok, E empty,"
++               " P preempt_disabled skip, X stale, I isolated, O other)\r\n");
++}
++
++/* bench stealing --sustain: keep `depth` tasks outstanding on CPU 1 for
++ * `ms` milliseconds, then wait for the outstanding ones to finish. */
++static void s3_bench_sustained(uint32_t ms, uint32_t depth, uint32_t work)
++{
++    uint32_t exec[MAX_CPUS] = {0};
++    uint64_t outstanding = 0;   /* bit j: slot j has a task in flight */
++    uint32_t n_out = 0;
++    uint32_t issued = 0, completed = 0, create_fail = 0;
++    uint32_t starved_polls = 0, polls = 0;
++    uint32_t next_slot = 0;
++
++    shell_puts("Work-Stealing Sustained-Supply Benchmark (#1203)\r\n");
++    shell_puts("================================================\r\n");
++    shell_printf("  Supply: %lu ms, %lu tasks outstanding on CPU 1, work x%lu\r\n",
++                 (unsigned long)ms, (unsigned long)depth, (unsigned long)work);
++    shell_printf("  Online CPUs:       %lu\r\n", (unsigned long)cpu_count);
++
++    s3_work_mult = work;
++    for (uint32_t j = 0; j < S3_MAX_TASKS; j++) {
++        *S3_SLOT_ADDR(j) = 0;
++    }
++
++    uint64_t freq = timer_get_frequency();
++    s3_take_snap(&s3_pre);
++    uint64_t t0 = timer_get_count();
++    uint32_t run = sched_steal_trace_arm();
++    uint64_t supply_end = t0 + (uint64_t)ms * freq / 1000ULL;
++    uint64_t deadline = supply_end + 30ULL * freq;
++    uint64_t last_issue = t0;
++    bool timed_out = false;
++
++    while (1) {
++        uint64_t now = timer_get_count();
++        if (now < supply_end) {
++            while (n_out < depth) {
++                uint32_t j = next_slot;
++                while (outstanding & (1ULL << j)) {
++                    j = (j + 1) % S3_MAX_TASKS;
++                }
++                *S3_SLOT_ADDR(j) = 0;
++                char name[8] = { 's', '3', 's', '_',
++                                 (char)('0' + j / 10), (char)('0' + j % 10),
++                                 '\0', '\0' };
++                struct task *t = task_create(name, s3_steal_work_task_n,
++                                             (void *)(uintptr_t)j);
++                if (!t) {
++                    create_fail++;
++                    break;
++                }
++                outstanding |= (1ULL << j);
++                n_out++;
++                issued++;
++                next_slot = (j + 1) % S3_MAX_TASKS;
++                scheduler_add_task_to_cpu(t, 1);
++                last_issue = timer_get_count();
++            }
++        }
++        for (uint32_t j = 0; j < S3_MAX_TASKS; j++) {
++            if (!(outstanding & (1ULL << j))) {
++                continue;
++            }
++            uint32_t v = *S3_SLOT_ADDR(j);
++            if (v != 0) {
++                if (v <= MAX_CPUS) {
++                    exec[v - 1]++;
++                }
++                completed++;
++                outstanding &= ~(1ULL << j);
++                n_out--;
++            }
++        }
++        polls++;
++        if (n_out == 0 && now < supply_end) {
++            starved_polls++;
++        }
++        if (now >= supply_end && n_out == 0) {
++            break;
++        }
++        if (now > deadline) {
++            timed_out = true;
++            break;
++        }
++        yield();
++    }
++    s3_take_snap(&s3_post);
++    uint64_t t1 = timer_get_count();
++
++    if (timed_out) {
++        shell_printf("  TIMEOUT 30 s after supply end: %lu of %lu tasks done\r\n",
++                     (unsigned long)completed, (unsigned long)issued);
++    }
++    shell_printf("\r\n  Results:\r\n");
++    shell_printf("    Issued:       %lu (create failures %lu)\r\n",
++                 (unsigned long)issued, (unsigned long)create_fail);
++    shell_printf("    Completed:    %lu / %lu\r\n",
++                 (unsigned long)completed, (unsigned long)issued);
++    shell_printf("    Supply:       %lu us (dispatch start to last issue)\r\n",
++                 (unsigned long)((last_issue - t0) * 1000000ULL / freq));
++    shell_printf("    Wall-clock:   %lu us (dispatch start to last completion)\r\n",
++                 (unsigned long)((t1 - t0) * 1000000ULL / freq));
++    shell_printf("    Polls:        %lu, with nothing outstanding during supply: %lu\r\n",
++                 (unsigned long)polls, (unsigned long)starved_polls);
++    shell_puts("\r\n    Per-CPU execution distribution:\r\n");
++    for (uint32_t c = 0; c < cpu_count; c++) {
++        uint32_t pct10 = completed ? (exec[c] * 1000U) / completed : 0;
++        shell_printf("      CPU %lu: %lu tasks (%lu.%lu%%)\r\n",
++                     (unsigned long)c, (unsigned long)exec[c],
++                     (unsigned long)(pct10 / 10), (unsigned long)(pct10 % 10));
++    }
++    s3_print_trace_header("sustained", run, freq, issued, depth, work, ms);
++    s3_print_trace(run, t0, freq, exec);
++}
++#endif /* CONFIG_WORK_STEALING */
++
+ /* ---- bench eviction-e2e (#979): storage-backed eviction harness ----
+  *
+  * Replays the embedded simulator per-scenario access traces through the
+@@ -2256,16 +2587,58 @@ int cmd_bench(int argc, char *argv[])
+          * and diff the wall-clock numbers. Input to S4 (default flip).
+          */
+         uint32_t n_tasks = 16;
++#if CONFIG_WORK_STEALING
++        /* #1203 options: --sustain [ms] [--depth D] [--work W]. A bare
++         * number keeps its old meaning (burst task count). */
++        uint32_t sustain_ms = 0;
++        uint32_t depth = 16;
++        uint32_t work = 8;
++        for (int ai = 2; ai < argc; ai++) {
++            uint32_t n;
++            if (strcmp(argv[ai], "--sustain") == 0) {
++                sustain_ms = 2500;
++                if (ai + 1 < argc &&
++                    shell_parse_uint(argv[ai + 1], &n) == 0) {
++                    ai++;
++                    if (n >= 100 && n <= 60000) {
++                        sustain_ms = n;
++                    }
++                }
++            } else if (strcmp(argv[ai], "--depth") == 0 && ai + 1 < argc) {
++                ai++;
++                if (shell_parse_uint(argv[ai], &n) == 0 && n >= 1 &&
++                    n <= 32) {
++                    depth = n;
++                }
++            } else if (strcmp(argv[ai], "--work") == 0 && ai + 1 < argc) {
++                ai++;
++                if (shell_parse_uint(argv[ai], &n) == 0 && n >= 1 &&
++                    n <= 64) {
++                    work = n;
++                }
++            } else if (shell_parse_uint(argv[ai], &n) == 0 && n > 0 &&
++                       n <= S3_MAX_TASKS) {
++                n_tasks = n;
++            }
++        }
++#else
+         if (argc >= 3) {
+             uint32_t n;
+             if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= S3_MAX_TASKS) {
+                 n_tasks = n;
+             }
+         }
++#endif
+         if (cpu_count < 2) {
+             shell_puts("  Need at least 2 CPUs for load-imbalance test\r\n");
+             return 0;
+         }
++#if CONFIG_WORK_STEALING
++        if (sustain_ms != 0) {
++            s3_bench_sustained(sustain_ms, depth, work);
++            return 0;
++        }
++#endif
+         shell_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
+         shell_puts("=====================================================\r\n");
+         shell_printf("  Tasks dispatched:  %lu (all to CPU 1)\r\n",
+@@ -2294,9 +2667,14 @@ int cmd_bench(int argc, char *argv[])
+             pre_successes[c] = sched_diag_steal_successes[c];
+             pre_push_full[c] = sched_diag_steal_push_full[c];
+         }
++        /* #1203 trace: snapshot, then start a trace run at t0. */
++        s3_take_snap(&s3_pre);
+ #endif
+ 
+         uint64_t t0 = timer_get_count();
++#if CONFIG_WORK_STEALING
++        uint32_t trace_run = sched_steal_trace_arm();
++#endif
+         for (uint32_t i = 0; i < n_tasks; i++) {
+             char name[16];
+             name[0] = 's'; name[1] = '3'; name[2] = '_';
+@@ -2337,6 +2715,9 @@ int cmd_bench(int argc, char *argv[])
+             /* Cooperative yield so CPU 0 doesn't spin at 100%. */
+             yield();
+         }
++#if CONFIG_WORK_STEALING
++        s3_take_snap(&s3_post);
++#endif
+         uint64_t t1 = timer_get_count();
+         uint64_t elapsed_ns = (t1 - t0) * 1000000000ULL / freq;
+ 
+@@ -2375,6 +2756,8 @@ int cmd_bench(int argc, char *argv[])
+             shell_printf("    %3lu  %8u  %9u  %8u\r\n",
+                         (unsigned long)c, da, ds, dpf);
+         }
++        s3_print_trace_header("burst", trace_run, freq, n_tasks, 0, 1, 0);
++        s3_print_trace(trace_run, t0, freq, cpu_count_exec);
+ #endif
+     } else if (strcmp(argv[1], "quant") == 0) {
+         /* G4: run FP32, FP16, and INT8 matmuls at the same shape so the
+-- 
+2.43.0
+
