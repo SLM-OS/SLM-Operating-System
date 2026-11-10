@@ -61,6 +61,20 @@ determined here). The NC 10-boot condition was met (NC 0 of 10, removal
 4 of 10), so Pi 5 stays pending until those experiments separate a timing
 bound from lost visibility.
 
+## Run 2 (2026-11-10)
+
+#1202 and #1205 are timing: both waits were bounded by yield counts, and
+a yield costs 2.30 us under NC against 0.07 to 0.13 us under the removal.
+Lost visibility is excluded by a forced variant of #1205 (0 of 120
+cleanups lost; every one completed after the bound expired, on both
+kernels), and #1202's flag was seen 1.3 and 1.5 ms after expiry. With
+wall-clock bounds both passed 9 of 9 boots per kernel, short of the 20 of
+20 bar. #1203's run-1 evidence is superseded by #1216's sustained rows;
+run 1's attempt counts were read after the results printed and are
+inflated. #1216 (a thief failing on the `preempt_disabled[victim]`
+early-out for 2.5 s, NC_AXIS=OFF) is unmeasured on NC and the removal.
+Status unchanged.
+
 ## Evidence
 
 - Linux, same boards and firmware, row-tagged suite, about 10 min each: 0
