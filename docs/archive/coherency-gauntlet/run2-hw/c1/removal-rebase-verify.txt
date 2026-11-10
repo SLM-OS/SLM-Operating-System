@@ -1,0 +1,192 @@
+# C1 step 5: rebase of coherency-remove-nc-axis onto fix/boot-path-1193 + PR #1215 commits
+# old: 167330f5..7d500e0e (40 commits incl. 5 merges); new: 63eed0c4..e94c251a
+# new base 63eed0c4 = fix/boot-path-1193 167330f5 + 19d1787c, 63eed0c4 (cherry-picks of PR #1215
+#   4141843a, 30dc24bc; both applied cleanly)
+# Method: git rebase -i --rebase-merges; after each recreated merge, files outside kernel/tests/ and
+# CMakeLists.txt were restored to the original merge commit (04bb2c4b carried a hand resolution of
+# kernel/src/help.c that auto-merge did not reproduce; its conflicts in docs/shell.md,
+# kernel/src/coherency.c and kernel/tests/test_coherency.c took the original merge's files). One
+# conflict in a file the PR touches: fa17ba52, kernel/tests/test_scheduler.c, rapid-exit wait (kept
+# the wall-clock wait; its predicate's cache_invalidate became smp_mb(), as fa17ba52 does to the
+# old loop). make test on e94c251a: All test suites passed.
+#
+# 1. Tree comparison, every commit paired by subject: files differing outside kernel/tests/ and
+#    CMakeLists.txt ("same" = none), and CMakeLists.txt changed lines (2 = the test_wait.c entry):
+same     52ac8aa2 -> 8f81a3ca cmake+-=2  Add C0 architecture and firmware facts for the #1193 coherency gauntlet
+same     bf16a572 -> 0f310422 cmake+-=2  Start the #1193 coherency gauntlet log
+same     4badadc7 -> e3905cc9 cmake+-=2  Gauntlet log: record check of the April timeline
+same     0ef6b26e -> 5e16fe68 cmake+-=2  Gauntlet log: C0 builder result
+same     029cbf16 -> 5ba49517 cmake+-=2  C0 facts: address critic round 1 (#1193)
+same     d11b4141 -> 15f34227 cmake+-=2  Gauntlet log: C0 critic round 1
+same     d397d801 -> 073ecc4e cmake+-=2  C0 facts: address critic round 2 (#1193)
+same     99a3e9e1 -> 056501b1 cmake+-=2  Gauntlet log: C0 round 2, C1 Jetson pass, Pi 5 boot attempt 1
+same     5934b78b -> 98aaa2c1 cmake+-=2  Merge C0 architecture and firmware facts (#1193, critic PASS round 3)
+same     93fd278c -> fa316928 cmake+-=2  Gauntlet log: C0 pass, C2 QEMU stage, C3 started
+same     104c4a75 -> e18b6617 cmake+-=2  Gauntlet log: C1 Jetson register read, Pi 5 SDWire settle diagnosis
+same     8dc790eb -> c672a226 cmake+-=2  Gauntlet log: Pi 5 rig finding (#1195), C1 attempt 4
+same     d8cb198c -> 6ffd9e11 cmake+-=2  Gauntlet log: C3 QEMU stage
+same     bfbc3490 -> 631ec4e0 cmake+-=2  Gauntlet log: C1 Pi 5 Linux pass, registers
+same     58b82b25 -> 4f1eb029 cmake+-=2  Gauntlet log: suite rev 2 and the C3 hardware build
+same     38a104b6 -> a9a9b2ed cmake+-=2  Litmus spec revision 2: SB+none sensitivity row, P4 coverage counters
+same     ab7f4218 -> e2f568a4 cmake+-=2  Gauntlet log: C2 Jetson kexec results
+same     39ff0f7f -> ee67d3e3 cmake+-=2  Gauntlet log: C1 critic round 1
+same     73b866dc -> 6c34a54d cmake+-=2  Gauntlet log: c3-hw-1193 at c2122932
+same     d61b824c -> aec043f8 cmake+-=2  Coherency litmus specification for #1193
+same     f7a24367 -> 0b68cce9 cmake+-=2  Merge branch 'gauntlet/coherency-1193' into worktree-agent-a75242966a70d25a9
+same     c11d9067 -> f5f0f05b cmake+-=2  coherency neg: fresh lines per control row
+same     9cb8eb6f -> 9c9c54ca cmake+-=2  Gauntlet log: NC baseline on both boards
+same     465125bb -> 2a19105e cmake+-=2  Add the coherency verb and litmus suite (QEMU stage)
+same     55da99d6 -> 2b6eb673 cmake+-=2  coherency: litmus spec revision 2 (S2, P4 coverage, fault injection)
+same     85b87b7c -> cf6ba105 cmake+-=2  Boot-test option for the hardware measurement set; Jetson kexec logs
+same     48b77590 -> 7c63e4e1 cmake+-=2  Litmus spec revision 3: row-tagged values, observed-progress rule
+same     15c4d6ef -> 6fc21eaa cmake+-=2  Add NC_AXIS and SETWAY_INVAL build switches and the C3 audit
+same     46bf52d6 -> afb7f6e7 cmake+-=2  Fix secondary MMU publication; assert the Pi 5 NC block layout
+same     4aef083a -> e2f2c107 cmake+-=2  Merge branch 'worktree-agent-a75242966a70d25a9' into c3-hw-1193
+same     04bb2c4b -> 242a233c cmake+-=2  Merge 18ad1210 (coherency neg fresh lines, BOOT_TESTS_HW_SET) into c3-hw-1193
+same     2fd6fa03 -> 6df64a7c cmake+-=2  Merge remote-tracking branch 'origin/gauntlet/coherency-1193' into c3-hw-1193-v3
+same     a67a644d -> fab9ef34 cmake+-=2  coherency: litmus spec revision 3; one declaration for sched_diag_*
+same     35dfecc8 -> 564f30f0 cmake+-=2  Remove the CPU-sharing NC axis on Pi 5 and Jetson
+same     acaad1a8 -> 0c3e7e76 cmake+-=2  Docs: cross-CPU state is cacheable; NC memory is for DMA
+same     6f1610cb -> a598a680 cmake+-=2  Reword comments that still describe incoherent caches
+same     1620bdba -> a5661830 cmake+-=2  Drop CPU-to-CPU cache maintenance on shared scheduler state
+same     fa17ba52 -> 7d7c2edf cmake+-=2  Tests and the fan task: barriers instead of CPU-sharing cache maintenance
+same     23924efb -> b2204e6b cmake+-=2  Review follow-up: comments, unused includes, stricter maintenance check
+same     7d500e0e -> e94c251a cmake+-=2  Coherency ADR is 0007; point references at it
+#
+# 2. git range-diff 167330f5..7d500e0e 63eed0c4..e94c251a -- . ':(exclude)kernel/tests' ':(exclude)CMakeLists.txt'
+#    (range-diff lists non-merge commits only; the 5 merges are covered by section 1)
+ 1:  bf16a572 =  1:  0f310422 Start the #1193 coherency gauntlet log
+ 2:  52ac8aa2 =  2:  8f81a3ca Add C0 architecture and firmware facts for the #1193 coherency gauntlet
+ 6:  029cbf16 =  3:  5ba49517 C0 facts: address critic round 1 (#1193)
+ 3:  d61b824c =  4:  aec043f8 Coherency litmus specification for #1193
+ 8:  d397d801 =  5:  073ecc4e C0 facts: address critic round 2 (#1193)
+ 4:  4badadc7 =  6:  e3905cc9 Gauntlet log: record check of the April timeline
+ 5:  0ef6b26e =  7:  5e16fe68 Gauntlet log: C0 builder result
+ 7:  d11b4141 =  8:  15f34227 Gauntlet log: C0 critic round 1
+ 9:  99a3e9e1 =  9:  056501b1 Gauntlet log: C0 round 2, C1 Jetson pass, Pi 5 boot attempt 1
+10:  93fd278c = 10:  fa316928 Gauntlet log: C0 pass, C2 QEMU stage, C3 started
+11:  104c4a75 = 11:  e18b6617 Gauntlet log: C1 Jetson register read, Pi 5 SDWire settle diagnosis
+12:  8dc790eb = 12:  c672a226 Gauntlet log: Pi 5 rig finding (#1195), C1 attempt 4
+13:  bfbc3490 = 13:  631ec4e0 Gauntlet log: C1 Pi 5 Linux pass, registers
+14:  38a104b6 = 14:  a9a9b2ed Litmus spec revision 2: SB+none sensitivity row, P4 coverage counters
+15:  39ff0f7f = 15:  ee67d3e3 Gauntlet log: C1 critic round 1
+16:  d8cb198c = 16:  6ffd9e11 Gauntlet log: C3 QEMU stage
+17:  58b82b25 = 17:  4f1eb029 Gauntlet log: suite rev 2 and the C3 hardware build
+19:  465125bb = 18:  2a19105e Add the coherency verb and litmus suite (QEMU stage)
+18:  ab7f4218 = 19:  e2f568a4 Gauntlet log: C2 Jetson kexec results
+26:  15c4d6ef = 20:  6fc21eaa Add NC_AXIS and SETWAY_INVAL build switches and the C3 audit
+20:  73b866dc = 21:  6c34a54d Gauntlet log: c3-hw-1193 at c2122932
+21:  c11d9067 = 22:  f5f0f05b coherency neg: fresh lines per control row
+23:  55da99d6 = 23:  2b6eb673 coherency: litmus spec revision 2 (S2, P4 coverage, fault injection)
+27:  46bf52d6 = 24:  afb7f6e7 Fix secondary MMU publication; assert the Pi 5 NC block layout
+22:  9cb8eb6f = 25:  9c9c54ca Gauntlet log: NC baseline on both boards
+24:  85b87b7c = 26:  cf6ba105 Boot-test option for the hardware measurement set; Jetson kexec logs
+25:  48b77590 = 27:  7c63e4e1 Litmus spec revision 3: row-tagged values, observed-progress rule
+28:  a67a644d = 28:  fab9ef34 coherency: litmus spec revision 3; one declaration for sched_diag_*
+29:  35dfecc8 = 29:  564f30f0 Remove the CPU-sharing NC axis on Pi 5 and Jetson
+30:  acaad1a8 = 30:  0c3e7e76 Docs: cross-CPU state is cacheable; NC memory is for DMA
+31:  6f1610cb = 31:  a598a680 Reword comments that still describe incoherent caches
+32:  1620bdba = 32:  a5661830 Drop CPU-to-CPU cache maintenance on shared scheduler state
+33:  fa17ba52 = 33:  7d7c2edf Tests and the fan task: barriers instead of CPU-sharing cache maintenance
+34:  23924efb = 34:  b2204e6b Review follow-up: comments, unused includes, stricter maintenance check
+35:  7d500e0e = 35:  e94c251a Coherency ADR is 0007; point references at it
+#
+# 3. git range-diff 167330f5..7d500e0e 63eed0c4..e94c251a (full)
+ 1:  bf16a572 =  1:  0f310422 Start the #1193 coherency gauntlet log
+ 2:  52ac8aa2 =  2:  8f81a3ca Add C0 architecture and firmware facts for the #1193 coherency gauntlet
+ 6:  029cbf16 =  3:  5ba49517 C0 facts: address critic round 1 (#1193)
+ 3:  d61b824c =  4:  aec043f8 Coherency litmus specification for #1193
+ 8:  d397d801 =  5:  073ecc4e C0 facts: address critic round 2 (#1193)
+ 4:  4badadc7 =  6:  e3905cc9 Gauntlet log: record check of the April timeline
+ 5:  0ef6b26e =  7:  5e16fe68 Gauntlet log: C0 builder result
+ 7:  d11b4141 =  8:  15f34227 Gauntlet log: C0 critic round 1
+ 9:  99a3e9e1 =  9:  056501b1 Gauntlet log: C0 round 2, C1 Jetson pass, Pi 5 boot attempt 1
+10:  93fd278c = 10:  fa316928 Gauntlet log: C0 pass, C2 QEMU stage, C3 started
+11:  104c4a75 = 11:  e18b6617 Gauntlet log: C1 Jetson register read, Pi 5 SDWire settle diagnosis
+12:  8dc790eb = 12:  c672a226 Gauntlet log: Pi 5 rig finding (#1195), C1 attempt 4
+13:  bfbc3490 = 13:  631ec4e0 Gauntlet log: C1 Pi 5 Linux pass, registers
+14:  38a104b6 = 14:  a9a9b2ed Litmus spec revision 2: SB+none sensitivity row, P4 coverage counters
+15:  39ff0f7f = 15:  ee67d3e3 Gauntlet log: C1 critic round 1
+16:  d8cb198c = 16:  6ffd9e11 Gauntlet log: C3 QEMU stage
+17:  58b82b25 = 17:  4f1eb029 Gauntlet log: suite rev 2 and the C3 hardware build
+19:  465125bb = 18:  2a19105e Add the coherency verb and litmus suite (QEMU stage)
+18:  ab7f4218 = 19:  e2f568a4 Gauntlet log: C2 Jetson kexec results
+26:  15c4d6ef = 20:  6fc21eaa Add NC_AXIS and SETWAY_INVAL build switches and the C3 audit
+20:  73b866dc = 21:  6c34a54d Gauntlet log: c3-hw-1193 at c2122932
+21:  c11d9067 = 22:  f5f0f05b coherency neg: fresh lines per control row
+23:  55da99d6 = 23:  2b6eb673 coherency: litmus spec revision 2 (S2, P4 coverage, fault injection)
+27:  46bf52d6 = 24:  afb7f6e7 Fix secondary MMU publication; assert the Pi 5 NC block layout
+22:  9cb8eb6f = 25:  9c9c54ca Gauntlet log: NC baseline on both boards
+24:  85b87b7c = 26:  cf6ba105 Boot-test option for the hardware measurement set; Jetson kexec logs
+25:  48b77590 = 27:  7c63e4e1 Litmus spec revision 3: row-tagged values, observed-progress rule
+28:  a67a644d = 28:  fab9ef34 coherency: litmus spec revision 3; one declaration for sched_diag_*
+29:  35dfecc8 ! 29:  564f30f0 Remove the CPU-sharing NC axis on Pi 5 and Jetson
+    @@ kernel/tests/test_integration.c: static void test_lock_contention(void)
+     -#endif
+      }
+      
+    - /*
+    + /* Lifecycle cleanup: the free-page count is back within the slack. */
+     @@ kernel/tests/test_integration.c: static void test_task_lifecycle(void)
+      
+          uint64_t initial_free = pmm_get_free_pages();
+    @@ kernel/tests/test_integration.c: static void test_task_lifecycle(void)
+     -#endif
+      
+          /*
+    -      * Give scheduler time to clean up zombies. Under
+    +      * Give the scheduler time to clean up zombies. Under
+     @@ kernel/tests/test_integration.c: static void test_task_lifecycle(void)
+    -     TEST_ASSERT_MESSAGE(final_free >= initial_free - 16, "Memory leak detected");
+    +     TEST_ASSERT_MESSAGE(lc_us >= 0, "Memory leak detected");
+      }
+      
+     -/* ============================================================================
+30:  acaad1a8 = 30:  0c3e7e76 Docs: cross-CPU state is cacheable; NC memory is for DMA
+31:  6f1610cb = 31:  a598a680 Reword comments that still describe incoherent caches
+32:  1620bdba = 32:  a5661830 Drop CPU-to-CPU cache maintenance on shared scheduler state
+33:  fa17ba52 ! 33:  7d7c2edf Tests and the fan task: barriers instead of CPU-sharing cache maintenance
+    @@ kernel/tests/test_integration.c: static void test_smp_notify_cpu_wakes_secondary
+      }
+     
+      ## kernel/tests/test_scheduler.c ##
+    -@@ kernel/tests/test_scheduler.c: static void test_rapid_task_exit_no_panic(void)
+    -         /* Wait for task to complete — polling with yield to let scheduler run */
+    -         int timeout = 200;
+    -         while (timeout > 0) {
+    --            cache_invalidate(&t->state);
+    -+            smp_mb();
+    -             if (t->state == TASK_TERMINATED) break;
+    -             yield();
+    -             timeout--;
+    +@@ kernel/tests/test_scheduler.c: static void rapid_exit_task(void *arg)
+    +     /* task_exit() is called automatically by task_entry_trampoline */
+    + }
+    + 
+    +-/* Poll condition for the rapid-exit wait; keeps the cache_invalidate the
+    +- * old loop did before each read of the state. */
+    ++/* Poll condition for the rapid-exit wait; keeps the barrier the old loop
+    ++ * issued before each read of the state. */
+    + static bool rapid_exit_done(void *ctx)
+    + {
+    +     struct task *t = ctx;
+    +-    cache_invalidate(&t->state);
+    ++    smp_mb();
+    +     return t->state == TASK_TERMINATED;
+    + }
+    + 
+     @@ kernel/tests/test_scheduler.c: static void test_all_cpus_online(void)
+      {
+          extern volatile uint32_t cpus_online;
+34:  23924efb ! 34:  b2204e6b Review follow-up: comments, unused includes, stricter maintenance check
+    @@ kernel/tests/test_scheduler.c
+      #include "uart.h"
+     -#include "cache.h"
+      #include "string.h"
+    + #include "test_wait.h"
+      #include <stdint.h>
+    - #include <stdbool.h>
+     @@ kernel/tests/test_scheduler.c: static void test_isolated_core_latency(void)
+                  if (sample < isolated_min) isolated_min = sample;
+              }
+35:  7d500e0e = 35:  e94c251a Coherency ADR is 0007; point references at it
