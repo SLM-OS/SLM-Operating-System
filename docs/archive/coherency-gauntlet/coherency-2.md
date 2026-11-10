@@ -944,3 +944,16 @@ fixes and #1208 untouched:
 - Tracker delta for the whole run, updated: issues opened 6 (#1210 to
   #1214, #1216), closed 0; draft PRs opened 4 (#1209, #1215, #1217, #1218);
   nothing merged.
+
+## Entry 29 (19:49 UTC): wrap-up, /ci on the run-3 starting head
+
+- /ci on 983bddc9 (`c2/steal-instrument-1203`, PR #1217): every step
+  passed; logs under `run2-tools/ci-983bddc9/` (`summary.txt` opens
+  `HEAD 983bddc93e22...`). Re-read by the orchestrator: `make test`
+  ARM64, `AI_SCHED=ON` and `WORK_STEALING=ON` each `PASSED - All tests
+  passed (exit code 0)`; x86-64 `PASSED ... (isa-debug-exit code 1 =
+  success)`; runtime-test 308 and 328 passed, 0 failed; check-braces 0
+  violations, 0 unparsed, 12 configurations; build order passed; Jetson
+  UEFI layout `All checks passed.`; diff 4 files +642/-8. No warning in
+  the four changed files.
+- Run 3 starts from 983bddc9, /ci green.

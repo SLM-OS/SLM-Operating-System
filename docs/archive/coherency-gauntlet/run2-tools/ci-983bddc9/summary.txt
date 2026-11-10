@@ -1,0 +1,30 @@
+HEAD 983bddc93e227b03cc940e4e34578f79340535fa
+Branch: origin/c2/steal-instrument-1203 (remote head matched 983bddc9; clean tree)
+Date: 2026-11-10, local /ci (ci skill), PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+Runner: run serially, one build at a time.
+
+| Step | Status | Decisive line | Log |
+|------|--------|---------------|-----|
+| 1 ARM64 build (QEMU_VIRT) | PASS | rc=0 | 01-build-arm64.log |
+| 2 x86-64 build | PASS | rc=0 | 02-build-x86_64.log |
+| 3 Jetson AI_WEIGHTS=real (kernel + kernel-test) | PASS | rc=0 | 03-build-jetson-real.log |
+| 4 make test (ARM64) | PASS | PASSED - All tests passed (exit code 0) | 04-test-arm64.log |
+| 4b make test PLATFORM=X86_64 | PASS | PASSED - All tests passed (isa-debug-exit code 1 = success) | 04b-test-x86_64.log |
+| 5 make test AI_SCHED=ON | PASS | PASSED - All tests passed (exit code 0) | 05-test-ai-sched.log |
+| 6 make runtime-test | PASS | test result: ok. 308 passed; 0 failed; 10 ignored / test result: ok. 328 passed; 0 failed; 10 ignored | 06-runtime-test.log |
+| 7 test-check-braces + check-braces | PASS | All check-c-braces tests passed / check-braces: 0 violation(s), 0 file(s) unparsed; all 12 configurations parsed | 07-check-braces.log |
+| 8 make test-build-order | PASS | All build-order tests passed | 08-build-order.log |
+| 9 make test-jetson-uefi-layout | PASS | All checks passed. (no skipped "!" checks, no failures) | 09-jetson-uefi-layout.log, 09-jetson-layout-build.log |
+| 10 diff check | PASS | 4 files changed, 642 insertions(+), 8 deletions(-); no untracked or build artifacts | 10-diff-check.log |
+| extra make test WORK_STEALING=ON | PASS | PASSED - All tests passed (exit code 0) | 11-test-work-stealing.log |
+
+Warnings in changed files (kernel/sched/steal_trace.h, kernel/sched/sched.c,
+kernel/src/shell_sys.c, kernel/src/help.c): none in any build or test log.
+Other warnings (pre-existing, files not touched by the branch): vendored
+kernel/lib/lua/src (-Wpedantic, lauxlib.c strerror), kernel/src/lua_slm.c
+(-Wcomment at 910/985/1081, -Waddress at 2339/2342), and on x86-64 the two
+ld notes (build-id discarded, RWX LOAD segment).
+
+Brace check: no "could not parse" and no "not checked" lines.
+
+Result: Ready for PR.
