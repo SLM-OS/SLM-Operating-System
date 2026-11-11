@@ -1,0 +1,47 @@
+From 0dfaae0c13af14ab79e5964add636f7bb5378208 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Tue, 10 Nov 2026 20:01:56 -0800
+Subject: [PATCH] V1 (#1216 experiment): idle WFE so the push SEV wakes idle
+ thieves
+
+H3 for #1216 says idle CPUs sleep in WFI, smp_notify_cpu() is SEV only,
+and SEV does not end WFI, so an idle thief on Jetson wakes only on its
+own 100 Hz tick. This changes the one idle wait compiled on Pi 5 and on
+Jetson with JETSON_HW_TICK (the SECONDARY_PREEMPT branch of
+idle_task_func) from WFI to WFE. WFE ends on SEV and on every interrupt
+that ends WFI, so the change only adds wake events. The other idle-loop
+wait branches are mutually exclusive preprocessor alternatives for
+other configurations and are unchanged; QEMU builds compile none of
+them.
+
+Experiment commit for cells B and G of coherency run 3, not for merge.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/sched/sched.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 83dbfc5b..a4cb017d 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -569,10 +569,14 @@ static void idle_task_func(void *arg)
+          * tools/tfa-patches/0004-*. Both: per-CPU CNTHP fires Group
+          * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFI sleeps
+          * until the next tick. The ELR trampoline handles the
+-         * switch_to-in-ISR problem on secondary CPUs. */
++         * switch_to-in-ISR problem on secondary CPUs.
++         *
++         * V1 (#1216 experiment): WFE instead of WFI, so the SEV that
++         * smp_notify_cpu() already issues on every push wakes idle
++         * thieves; WFE also wakes on every interrupt WFI wakes on. */
+         __asm__ volatile("msr daifclr, #2" ::: "memory");
+         __asm__ volatile("isb" ::: "memory");
+-        __asm__ volatile("wfi");
++        __asm__ volatile("wfe" ::: "memory");
+ #elif defined(PLATFORM_JETSON_ORIN_NANO)
+         /* Jetson without JETSON_HW_TICK (stock BL31): hardware timer
+          * IRQs do not deliver to EL1/EL2 because the GIC group/route
+-- 
+2.43.0
+

@@ -1,0 +1,692 @@
+From 8fc7c88abf3c1625b27e04af784ad0d65706ea2e Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Tue, 10 Nov 2026 20:01:43 -0800
+Subject: [PATCH] bench stealing: victim-side preempt_disabled windows and tick
+ phase (#1216)
+
+Run 2 found thieves on Jetson CPUs 2 and 3 ending most sustained steal
+attempts on the preempt_disabled[victim] early-out while CPU 1's deque
+held work (#1216). Its mechanism hypothesis (H3) is that idle thieves
+wake only on their own tick and land inside CPU 1's tick-driven
+schedule() window. The trace could say that an attempt hit the
+early-out, but not when CPU 1's window opened, why, or where the
+attempt fell against either CPU's tick.
+
+Victim side: every store to preempt_disabled[cpu] on ARM64 (schedule()'s
+switch window and resume, the coop tick, scheduler_start,
+task_entry_wrapper and the SECONDARY_PREEMPT trampoline) is followed by
+a call that mirrors the flag into a per-CPU window record: open on
+0 -> 1, close on 1 -> 0, nested sets ignored. A window's reason is T
+(tick trampoline), C (coop tick), P (schedule() called directly after a
+push onto this CPU's deque since its last window), O (any other direct
+schedule()) or B (boot). Each CPU keeps per-run counts, total and
+longest duration per reason, the phase of each window's opening against
+its own last hardware tick, and its first 128 windows (entry, duration,
+reason). sched_note_hw_tick() records each CPU's hardware tick times.
+
+Thief side: at the start of each attempt, a thief reads CPU 1's flag,
+open window and last tick with plain loads and counts the attempts that
+started inside CPU 1's window (by reason), their offset into it, and
+histograms of the attempt's time after CPU 1's tick (all attempts and
+those that ended on the early-out) and after its own tick.
+
+bench stealing prints these as new fields at the end of each c2t line
+(format v2) from the post-run snapshot, so nothing recorded after the
+run is counted; CPU 1's line also carries its window log.
+
+No behaviour change: every branch the scheduler and the steal take is
+unchanged. Storage follows 983bddc9: per-CPU cacheable BSS written only
+by its own CPU, no locks, atomics or prints; the hooks add a CNTPCT read
+and a few stores per window, and the steal path a few plain loads per
+attempt. Without work stealing the hooks are empty functions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/arch/arm64/vectors.S |   7 ++
+ kernel/sched/sched.c        | 238 +++++++++++++++++++++++++++++++++++-
+ kernel/sched/steal_trace.h  |  87 +++++++++++++
+ kernel/sched/task.c         |   3 +
+ kernel/src/shell_sys.c      |  95 +++++++++++++-
+ 5 files changed, 427 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/arch/arm64/vectors.S b/kernel/arch/arm64/vectors.S
+index be2b6368..c7e3e2cb 100644
+--- a/kernel/arch/arm64/vectors.S
++++ b/kernel/arch/arm64/vectors.S
+@@ -559,6 +559,10 @@ resched_trampoline:
+     add     x5, x5, #:lo12:preempt_disabled
+     mov     w6, #1
+     str     w6, [x5, x0, lsl #2]
++    /* #1216 trace: open a 'T' window (x0 = cpu). Clobbers x0-x18 and
++     * x30, all saved in the frame above; nothing below reads them
++     * before bl schedule. */
++    bl      steal_pdwin_set_tick_asm
+ 
+     STAGE25_TRACE_CHAR 'B'              /* Trace: trampoline before schedule */
+     /* Unmask IRQs and call schedule(). If schedule() picks a different
+@@ -578,6 +582,9 @@ resched_trampoline:
+     adrp    x5, preempt_disabled
+     add     x5, x5, #:lo12:preempt_disabled
+     str     wzr, [x5, x0, lsl #2]
++    /* #1216 trace: close the window if one is still open (x0 = cpu).
++     * Every register it clobbers is reloaded from the frame below. */
++    bl      steal_pdwin_clear_asm
+ 
+     /* Restore orig_elr/orig_spsr into the system registers. */
+     ldp     x3, x4, [sp, #168]
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 47c04bb6..83dbfc5b 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -35,8 +35,11 @@
+ #include "runtime_model.h"
+ #if CONFIG_WORK_STEALING
+ #include "steal_deque.h"
+-#include "steal_trace.h"
+ #endif
++/* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
++ * are referenced from schedule() in every configuration (they are
++ * empty functions without work stealing). */
++#include "steal_trace.h"
+ #include <stdint.h>
+ 
+ /* Deadline boost thresholds (in nanoseconds) */
+@@ -137,6 +140,16 @@ static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
+ static struct steal_trace_cpu steal_trace[MAX_CPUS];
+ static struct steal_trace_dq steal_trace_dq[MAX_CPUS];
+ static volatile uint32_t steal_trace_run;  /* 0 = never armed */
++
++/* Victim-side preempt_disabled window trace (#1216); see steal_trace.h.
++ * steal_pdwin[c] is written only by CPU c. The bin bounds and t0 are
++ * written by sched_steal_trace_arm() before its release store of the
++ * run number. */
++#define STEAL_TRACE_WATCH 1U
++static struct steal_pdwin_cpu steal_pdwin[MAX_CPUS];
++static uint64_t steal_ph_bound[STEAL_PH_BINS - 1];
++static uint64_t steal_woff_bound[STEAL_WOFF_BINS - 1];
++static volatile uint64_t steal_trace_t0_cnt;
+ #endif /* CONFIG_WORK_STEALING */
+ 
+ /* Lock helpers that use the correct lock for a given CPU */
+@@ -1530,10 +1543,166 @@ uint32_t sched_steal_trace_arm(void)
+     if (run == 0) {
+         run = 1;
+     }
++    /* #1216 bin bounds in counter ticks, and the window-log origin. */
++    static const uint32_t ph_us[STEAL_PH_BINS - 1] = {
++        10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
++    static const uint32_t woff_us[STEAL_WOFF_BINS - 1] = {
++        1, 2, 4, 8, 16, 32, 64 };
++    uint64_t freq = timer_get_frequency();
++    for (uint32_t i = 0; i < STEAL_PH_BINS - 1; i++) {
++        steal_ph_bound[i] = (uint64_t)ph_us[i] * freq / 1000000ULL;
++    }
++    for (uint32_t i = 0; i < STEAL_WOFF_BINS - 1; i++) {
++        steal_woff_bound[i] = (uint64_t)woff_us[i] * freq / 1000000ULL;
++    }
++    steal_trace_t0_cnt = timer_get_count();
+     __atomic_store_n(&steal_trace_run, run, __ATOMIC_RELEASE);
+     return run;
+ }
+ 
++uint32_t sched_steal_trace_watch(void)
++{
++    return STEAL_TRACE_WATCH;
++}
++
++uint64_t sched_steal_trace_t0(void)
++{
++    return steal_trace_t0_cnt;
++}
++
++const struct steal_pdwin_cpu *sched_steal_pdwin(uint32_t cpu)
++{
++    return (cpu < MAX_CPUS) ? &steal_pdwin[cpu] : NULL;
++}
++
++static inline uint32_t steal_bin(const uint64_t *bound, uint32_t nbins,
++                                 uint64_t d)
++{
++    uint32_t i = 0;
++    while (i < nbins - 1 && d >= bound[i]) {
++        i++;
++    }
++    return i;
++}
++
++/* Reset this CPU's per-run window fields at its first event of a new
++ * run. The open window, its entry time and last_tick carry over. */
++static inline void steal_pdwin_roll(struct steal_pdwin_cpu *w)
++{
++    uint32_t run = steal_trace_run;
++    if (w->run == run) {
++        return;
++    }
++    w->run = run;
++    w->first_tick = 0;
++    w->tick_n = 0;
++    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
++        w->n[r] = 0;
++        w->sum[r] = 0;
++        w->max[r] = 0;
++    }
++    for (uint32_t b = 0; b < STEAL_PH_BINS; b++) {
++        w->wph[b] = 0;
++    }
++    w->nlog = 0;
++}
++
++/* Called on `cpu` right after it set preempt_disabled[cpu]. A set
++ * while a window is open (a nested set) is a no-op. */
++void steal_pdwin_set(uint32_t cpu, uint32_t reason)
++{
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
++    steal_pdwin_roll(w);
++    if (w->win_open) {
++        return;
++    }
++    uint64_t now = timer_get_count();
++    w->cur_entry = now;
++    w->cur_reason = reason;
++    uint64_t lt = w->last_tick;
++    if (lt != 0 && now >= lt) {
++        w->wph[steal_bin(steal_ph_bound, STEAL_PH_BINS, now - lt)]++;
++    }
++    w->win_open = 1;
++}
++
++/* schedule()'s own set: 'P' if someone pushed onto this CPU's deque
++ * since its last window closed, else 'O'. Inside a trampoline window
++ * this is a nested set and keeps 'T'. */
++void steal_pdwin_set_sched(uint32_t cpu)
++{
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    uint32_t pushed = steal_trace_dq[cpu].pushes !=
++                      steal_pdwin[cpu].pushes_at_close;
++    steal_pdwin_set(cpu, pushed ? STEAL_WIN_PUSH : STEAL_WIN_OTHER);
++}
++
++/* Called on `cpu` right after it cleared preempt_disabled[cpu]. */
++void steal_pdwin_clear(uint32_t cpu)
++{
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
++    steal_pdwin_roll(w);
++    if (!w->win_open) {
++        return;
++    }
++    uint64_t now = timer_get_count();
++    uint64_t dur = now - w->cur_entry;
++    uint32_t r = w->cur_reason;
++    if (r < STEAL_WIN_NREASON) {
++        w->n[r]++;
++        w->sum[r] += dur;
++        uint32_t d32 = dur > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)dur;
++        if (d32 > w->max[r]) {
++            w->max[r] = d32;
++        }
++    }
++    uint32_t k = w->nlog;
++    if (k < STEAL_WIN_LOG_LEN) {
++        w->log_entry[k] = (int32_t)(int64_t)(w->cur_entry -
++                                             steal_trace_t0_cnt);
++        w->log_dur[k] = dur > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)dur;
++        w->log_reason[k] = (uint8_t)r;
++        w->nlog = k + 1;
++    }
++    w->pushes_at_close = steal_trace_dq[cpu].pushes;
++    w->win_open = 0;
++}
++
++/* Hardware timer tick on `cpu`, from sched_note_hw_tick() in the timer
++ * ISR (the coop path's synthetic ticks are not counted). */
++void steal_pdwin_tick(uint32_t cpu)
++{
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
++    steal_pdwin_roll(w);
++    uint64_t now = timer_get_count();
++    w->last_tick = now;
++    if (w->first_tick == 0) {
++        w->first_tick = now;
++    }
++    w->tick_n++;
++}
++
++void steal_pdwin_set_tick_asm(uint32_t cpu)
++{
++    steal_pdwin_set(cpu, STEAL_WIN_TICK);
++}
++
++void steal_pdwin_clear_asm(uint32_t cpu)
++{
++    steal_pdwin_clear(cpu);
++}
++
+ const struct steal_trace_cpu *sched_steal_trace_cpu(uint32_t cpu)
+ {
+     return (cpu < MAX_CPUS) ? &steal_trace[cpu] : NULL;
+@@ -1612,10 +1781,58 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+         tr->first_att = now;
+         tr->first_ok = 0;
+         tr->nlog = 0;
++        for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
++            tr->w_in[r] = 0;
++        }
++        tr->w_in_unk = 0;
++        for (uint32_t b = 0; b < STEAL_WOFF_BINS; b++) {
++            tr->w_off[b] = 0;
++        }
++        for (uint32_t b = 0; b < STEAL_PH_BINS; b++) {
++            tr->ph_w[b] = 0;
++            tr->ph_w_pd[b] = 0;
++            tr->ph_own[b] = 0;
++        }
+     }
+     tr->att++;
+     tr->last_att = now;
+ 
++    /* #1216: where this attempt falls against the watched CPU's tick
++     * and preempt_disabled window, and against this CPU's own tick.
++     * Plain loads of the watched CPU's flag and trace block; diagnostic
++     * only, never acted on. */
++    uint32_t ph_w_bin = STEAL_PH_BINS;   /* none: watched CPU not ticked */
++    {
++        uint32_t wc = STEAL_TRACE_WATCH;
++        if (wc < cpu_count && wc != this_cpu) {
++            const struct steal_pdwin_cpu *w = &steal_pdwin[wc];
++            uint64_t wt = w->last_tick;
++            if (wt != 0 && now >= wt) {
++                ph_w_bin = steal_bin(steal_ph_bound, STEAL_PH_BINS, now - wt);
++                tr->ph_w[ph_w_bin]++;
++            }
++            if (preempt_disabled[wc]) {
++                if (w->win_open) {
++                    uint32_t r = w->cur_reason;
++                    if (r < STEAL_WIN_NREASON) {
++                        tr->w_in[r]++;
++                    }
++                    uint64_t e = w->cur_entry;
++                    if (now >= e) {
++                        tr->w_off[steal_bin(steal_woff_bound,
++                                            STEAL_WOFF_BINS, now - e)]++;
++                    }
++                } else {
++                    tr->w_in_unk++;
++                }
++            }
++        }
++        uint64_t ot = steal_pdwin[this_cpu].last_tick;
++        if (ot != 0 && now >= ot) {
++            tr->ph_own[steal_bin(steal_ph_bound, STEAL_PH_BINS, now - ot)]++;
++        }
++    }
++
+     /* Isolated cores must never pull work from other CPUs — that's
+      * the whole point of isolation. The S5 placement override
+      * already refuses to *target* an isolated CPU; this closes the
+@@ -1751,6 +1968,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+         out = STEAL_OUT_STALE;
+     } else if (n_pd > 0) {
+         out = STEAL_OUT_PD;
++        if (ph_w_bin < STEAL_PH_BINS) {
++            tr->ph_w_pd[ph_w_bin]++;
++        }
+     } else if (probed > 0 && n_empty == probed) {
+         out = STEAL_OUT_EMPTY;
+     } else {
+@@ -1759,6 +1979,14 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+     steal_trace_note(tr, now, out);
+     return NULL;
+ }
++#else
++/* #1216 window hooks: no trace without work stealing. */
++void steal_pdwin_set(uint32_t cpu, uint32_t reason) { (void)cpu; (void)reason; }
++void steal_pdwin_set_sched(uint32_t cpu) { (void)cpu; }
++void steal_pdwin_clear(uint32_t cpu) { (void)cpu; }
++void steal_pdwin_tick(uint32_t cpu) { (void)cpu; }
++void steal_pdwin_set_tick_asm(uint32_t cpu) { (void)cpu; }
++void steal_pdwin_clear_asm(uint32_t cpu) { (void)cpu; }
+ #endif /* CONFIG_WORK_STEALING */
+ 
+ /*
+@@ -1794,6 +2022,7 @@ void sched_note_hw_tick(uint32_t cpu)
+     if (cpu < MAX_CPUS) {
+         coop_last_tick_cntpct[cpu] = timer_get_count();
+     }
++    steal_pdwin_tick(cpu);   /* #1216 trace: no-op without work stealing */
+ }
+ 
+ uint64_t sched_last_tick_cntpct(uint32_t cpu)
+@@ -1872,8 +2101,12 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
+      * pre-sets preempt_disabled=1 before first switch_to). */
+     int prev_preempt_disabled = preempt_disabled[cpu];
+     preempt_disabled[cpu] = 1;
++    steal_pdwin_set(cpu, STEAL_WIN_COOP);           /* #1216 trace */
+     scheduler_tick();
+     preempt_disabled[cpu] = prev_preempt_disabled;
++    if (!prev_preempt_disabled) {
++        steal_pdwin_clear(cpu);                     /* #1216 trace */
++    }
+ }
+ 
+ /*
+@@ -2229,6 +2462,7 @@ void schedule(void)
+      * already closes the window.)
+      */
+     preempt_disabled[this_cpu] = 1;
++    steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
+ 
+     rq_unlock_irqrestore(this_cpu, flags);
+ 
+@@ -2298,6 +2532,7 @@ void schedule(void)
+     /* Resumed on our stack after being switched back.
+      * Re-enable preemption so timer ticks can trigger scheduling. */
+     preempt_disabled[this_cpu] = 0;
++    steal_pdwin_clear(this_cpu);                    /* #1216 trace */
+ #if defined(SECONDARY_PREEMPT)
+     /* Clear any pending reschedule flag set by scheduler_tick while
+      * we were mid-switch — we just scheduled, so an immediate re-arm
+@@ -2370,6 +2605,7 @@ void scheduler_start(uint32_t this_cpu)
+     /* Guard against timer re-entrancy during switch_to.
+      * The trampoline clears this after context restore. */
+     preempt_disabled[this_cpu] = 1;
++    steal_pdwin_set(this_cpu, STEAL_WIN_BOOT);      /* #1216 trace */
+ 
+     /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
+      * and skips schedule(). Ticks still count for sleep/uptime. */
+diff --git a/kernel/sched/steal_trace.h b/kernel/sched/steal_trace.h
+index 4e31bbb7..cc138191 100644
+--- a/kernel/sched/steal_trace.h
++++ b/kernel/sched/steal_trace.h
+@@ -34,6 +34,26 @@
+ 
+ #define STEAL_TRACE_LOG_LEN 16
+ 
++/* Phase bins (#1216). An attempt's or a window's time relative to a
++ * tick is binned at [0,10us) [10,20) [20,50) [50,100) [100,200)
++ * [200,500) [500us,1ms) [1,2ms) [2,5ms) [5,10ms) [>=10ms]. The bench
++ * computes the bounds in counter ticks at arm time. */
++#define STEAL_PH_BINS 11
++/* Offset of an attempt into the watched CPU's open preempt_disabled
++ * window: [0,1us) [1,2) [2,4) [4,8) [8,16) [16,32) [32,64) [>=64us]. */
++#define STEAL_WOFF_BINS 8
++/* Windows logged per CPU per run (the first ones of the run). */
++#define STEAL_WIN_LOG_LEN 128
++
++/* preempt_disabled window reasons (#1216). */
++#define STEAL_WIN_TICK   0  /* 'T': SECONDARY_PREEMPT tick trampoline   */
++#define STEAL_WIN_COOP   1  /* 'C': coop tick inside schedule()         */
++#define STEAL_WIN_PUSH   2  /* 'P': direct schedule() after a push onto
++                               this CPU's deque since its last window  */
++#define STEAL_WIN_OTHER  3  /* 'O': any other direct schedule()         */
++#define STEAL_WIN_BOOT   4  /* 'B': scheduler_start                     */
++#define STEAL_WIN_NREASON 5
++
+ /* Attempt outcome codes (one per sched_try_steal call). */
+ #define STEAL_OUT_OK     'S'  /* returned a live task                    */
+ #define STEAL_OUT_ISO    'I'  /* this CPU is isolated: no victim probed  */
+@@ -78,6 +98,56 @@ struct steal_trace_cpu {
+     volatile uint32_t nlog;        /* attempts logged this run (saturates)  */
+     volatile uint32_t log_dt[STEAL_TRACE_LOG_LEN];  /* CNTPCT - first_att  */
+     volatile uint8_t  log_out[STEAL_TRACE_LOG_LEN]; /* STEAL_OUT_*         */
++
++    /* Per run, against the watched CPU w (steal_trace_watch, CPU 1;
++     * #1216). Read at the start of each attempt with plain loads of
++     * w's flag and w's window and tick blocks; nothing is written to
++     * w's memory. */
++    volatile uint32_t w_in[STEAL_WIN_NREASON]; /* attempts that started
++                                      with preempt_disabled[w] set, by
++                                      w's open window reason             */
++    volatile uint32_t w_in_unk;    /* ... flag set, no window open in w's
++                                      tracker (set by an untracked site)  */
++    volatile uint32_t w_off[STEAL_WOFF_BINS]; /* offset into w's window   */
++    volatile uint32_t ph_w[STEAL_PH_BINS];    /* now - w's last tick      */
++    volatile uint32_t ph_w_pd[STEAL_PH_BINS]; /* ... attempts ending 'P'  */
++    volatile uint32_t ph_own[STEAL_PH_BINS];  /* now - this CPU's tick    */
++} __attribute__((aligned(64)));
++
++/*
++ * Victim-side preempt_disabled window trace (#1216).
++ *
++ * Every store to preempt_disabled[c] in the ARM64 scheduler (schedule(),
++ * the coop tick, scheduler_start, task_entry_wrapper and the
++ * SECONDARY_PREEMPT trampoline) is paired with a call that mirrors the
++ * flag: 0 -> 1 opens a window, 1 -> 0 closes it, nested sets are
++ * no-ops. Each block is written only by its own CPU, from those sites
++ * and from sched_note_hw_tick() in the timer ISR; thieves read win_open, cur_reason,
++ * cur_entry and last_tick with plain loads. Times are raw CNTPCT; the
++ * log stores signed offsets from the bench's arm time. Per-run fields
++ * reset lazily at the CPU's first event of a new run, keeping the
++ * currently open window.
++ */
++struct steal_pdwin_cpu {
++    volatile uint32_t run;
++    volatile uint32_t win_open;    /* mirrors preempt_disabled[c]        */
++    volatile uint32_t cur_reason;  /* STEAL_WIN_* of the open window     */
++    volatile uint32_t pushes_at_close; /* steal_trace_dq[c].pushes when the
++                                      last window closed                 */
++    volatile uint64_t cur_entry;   /* CNTPCT the open window opened      */
++    volatile uint64_t last_tick;   /* CNTPCT of the last hardware tick   */
++
++    /* Per run. */
++    volatile uint64_t first_tick;
++    volatile uint32_t tick_n;      /* hardware timer ticks this run      */
++    volatile uint32_t n[STEAL_WIN_NREASON];      /* windows closed       */
++    volatile uint64_t sum[STEAL_WIN_NREASON];    /* total open counts    */
++    volatile uint32_t max[STEAL_WIN_NREASON];    /* longest, counts      */
++    volatile uint32_t wph[STEAL_PH_BINS];        /* entry - last_tick    */
++    volatile uint32_t nlog;
++    volatile int32_t  log_entry[STEAL_WIN_LOG_LEN]; /* entry - arm time  */
++    volatile uint32_t log_dur[STEAL_WIN_LOG_LEN];   /* counts            */
++    volatile uint8_t  log_reason[STEAL_WIN_LOG_LEN];
+ } __attribute__((aligned(64)));
+ 
+ struct steal_trace_dq {
+@@ -97,5 +167,22 @@ uint32_t sched_steal_trace_arm(void);
+ /* Read-only views for the bench (cpu < MAX_CPUS, else NULL). */
+ const struct steal_trace_cpu *sched_steal_trace_cpu(uint32_t cpu);
+ const struct steal_trace_dq *sched_steal_trace_dq(uint32_t cpu);
++const struct steal_pdwin_cpu *sched_steal_pdwin(uint32_t cpu);
++
++/* The CPU thieves record windows and tick phase against, and the arm
++ * time window logs are relative to (set by sched_steal_trace_arm). */
++uint32_t sched_steal_trace_watch(void);
++uint64_t sched_steal_trace_t0(void);
++
++/* Window hooks (#1216). Called on CPU `cpu` right after it stores
++ * preempt_disabled[cpu]; defined as no-ops without work stealing. The
++ * _asm variants take the CPU in x0 and are called from vectors.S with
++ * IRQs masked. */
++void steal_pdwin_set(uint32_t cpu, uint32_t reason);
++void steal_pdwin_set_sched(uint32_t cpu);
++void steal_pdwin_clear(uint32_t cpu);
++void steal_pdwin_tick(uint32_t cpu);
++void steal_pdwin_set_tick_asm(uint32_t cpu);
++void steal_pdwin_clear_asm(uint32_t cpu);
+ 
+ #endif /* SCHED_STEAL_TRACE_H */
+diff --git a/kernel/sched/task.c b/kernel/sched/task.c
+index 47234cfc..fbebb788 100644
+--- a/kernel/sched/task.c
++++ b/kernel/sched/task.c
+@@ -10,6 +10,7 @@
+ #include "smp.h"
+ #include "spinlock.h"
+ #include "arch.h"
++#include "steal_trace.h"
+ #if !defined(PLATFORM_X86_64)
+ #include "vmm.h"
+ #include "elf.h"
+@@ -127,6 +128,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+         int hw_cpu = cpu_logical_id(mpidr);
+         if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
+             preempt_disabled[hw_cpu] = 0;
++            steal_pdwin_clear((uint32_t)hw_cpu);    /* #1216 trace */
+         }
+         __asm__ volatile("dsb sy" ::: "memory");
+         if (hw_cpu >= 0 && task_entry_unmasks_irq((uint32_t)hw_cpu)) {
+@@ -142,6 +144,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+     {
+         extern volatile int preempt_disabled[];
+         preempt_disabled[cpu_id()] = 0;
++        steal_pdwin_clear(cpu_id());                /* #1216 trace */
+         __asm__ volatile("mfence" ::: "memory");
+     }
+ #endif
+diff --git a/kernel/src/shell_sys.c b/kernel/src/shell_sys.c
+index bcb3be77..9778b90b 100644
+--- a/kernel/src/shell_sys.c
++++ b/kernel/src/shell_sys.c
+@@ -2031,6 +2031,7 @@ struct s3_snap {
+     uint32_t sched[MAX_CPUS];
+     struct steal_trace_cpu tr[MAX_CPUS];
+     struct steal_trace_dq dq[MAX_CPUS];
++    struct steal_pdwin_cpu pw[MAX_CPUS];   /* #1216 */
+ };
+ 
+ static struct s3_snap s3_pre;
+@@ -2063,6 +2064,7 @@ static void s3_take_snap(struct s3_snap *s)
+         s->sched[c] = sched_diag_schedule[c];
+         s->tr[c] = *sched_steal_trace_cpu(c);
+         s->dq[c] = *sched_steal_trace_dq(c);
++        s->pw[c] = *sched_steal_pdwin(c);
+     }
+ }
+ 
+@@ -2103,10 +2105,89 @@ static void s3_append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
+ /* One complete line per CPU, built in a buffer and written with a
+  * single call so nothing interleaves inside it. Field meanings are in
+  * kernel/sched/steal_trace.h. */
++/* Append `n` uint32 values as a comma list after " key=". */
++static void s3_append_u32s(char *buf, size_t cap, size_t *pos,
++                           const char *key, const volatile uint32_t *v,
++                           uint32_t n)
++{
++    s3_append(buf, cap, pos, " %s=", key);
++    for (uint32_t i = 0; i < n; i++) {
++        s3_append(buf, cap, pos, "%s%lu", i ? "," : "", (unsigned long)v[i]);
++    }
++}
++
++static const char s3_win_reason_ch[STEAL_WIN_NREASON] = {
++    'T', 'C', 'P', 'O', 'B' };
++
++/* #1216 fields, appended to a c2t line: the thief's attempts against
++ * the watched CPU's window and tick, this CPU's ticks and windows, and
++ * (watched CPU only) its first STEAL_WIN_LOG_LEN windows. */
++static void s3_append_pdwin(char *line, size_t cap, size_t *pos,
++                            uint32_t c, uint32_t run, uint64_t t0,
++                            uint64_t freq)
++{
++    const struct steal_trace_cpu *b = &s3_post.tr[c];
++    const struct steal_pdwin_cpu *w = &s3_post.pw[c];
++    bool tlive = (b->run == run);
++    bool wlive = (w->run == run);
++    if (tlive) {
++        s3_append_u32s(line, cap, pos, "w_in", b->w_in, STEAL_WIN_NREASON);
++        s3_append(line, cap, pos, " w_in_unk=%lu", (unsigned long)b->w_in_unk);
++        s3_append_u32s(line, cap, pos, "w_off", b->w_off, STEAL_WOFF_BINS);
++        s3_append_u32s(line, cap, pos, "ph_w", b->ph_w, STEAL_PH_BINS);
++        s3_append_u32s(line, cap, pos, "ph_w_pd", b->ph_w_pd, STEAL_PH_BINS);
++        s3_append_u32s(line, cap, pos, "ph_own", b->ph_own, STEAL_PH_BINS);
++    } else {
++        s3_append(line, cap, pos, " w_in=- w_in_unk=- w_off=- ph_w=-"
++                  " ph_w_pd=- ph_own=-");
++    }
++    if (!wlive) {
++        s3_append(line, cap, pos, " tick_n=- tick_first_us=- tick_last_us=-"
++                  " win_n=- win_sum_us=- win_max_us=- wph=- wlog=-");
++        return;
++    }
++    char t_tf[24], t_tl[24];
++    s3_fmt_us(t_tf, sizeof(t_tf), w->first_tick != 0, w->first_tick, t0, freq);
++    s3_fmt_us(t_tl, sizeof(t_tl), w->first_tick != 0, w->last_tick, t0, freq);
++    s3_append(line, cap, pos, " tick_n=%lu tick_first_us=%s tick_last_us=%s",
++              (unsigned long)w->tick_n, t_tf, t_tl);
++    s3_append_u32s(line, cap, pos, "win_n", w->n, STEAL_WIN_NREASON);
++    s3_append(line, cap, pos, " win_sum_us=");
++    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
++        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
++                  (unsigned long)(w->sum[r] * 1000000ULL / freq));
++    }
++    s3_append(line, cap, pos, " win_max_us=");
++    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
++        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
++                  (unsigned long)((uint64_t)w->max[r] * 1000000ULL / freq));
++    }
++    s3_append_u32s(line, cap, pos, "wph", w->wph, STEAL_PH_BINS);
++    s3_append(line, cap, pos, " wlog=");
++    uint32_t nlog = (c == sched_steal_trace_watch()) ? w->nlog : 0;
++    if (nlog > STEAL_WIN_LOG_LEN) {
++        nlog = STEAL_WIN_LOG_LEN;
++    }
++    if (nlog == 0) {
++        s3_append(line, cap, pos, "-");
++    }
++    /* entry as signed us from arm time : duration in ns : reason */
++    for (uint32_t k = 0; k < nlog; k++) {
++        int64_t e = (int64_t)w->log_entry[k];
++        uint64_t ae = (uint64_t)(e < 0 ? -e : e);
++        uint32_t r = w->log_reason[k];
++        s3_append(line, cap, pos, "%s%s%lu:%lu:%c", k ? "," : "",
++                  e < 0 ? "-" : "",
++                  (unsigned long)(ae * 1000000ULL / freq),
++                  (unsigned long)((uint64_t)w->log_dur[k] * 1000000000ULL / freq),
++                  r < STEAL_WIN_NREASON ? s3_win_reason_ch[r] : '?');
++    }
++}
++
+ static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
+                            const uint32_t *exec)
+ {
+-    static char line[1024];
++    static char line[4096];
+     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+         const struct steal_trace_cpu *a = &s3_pre.tr[c];
+         const struct steal_trace_cpu *b = &s3_post.tr[c];
+@@ -2179,6 +2260,7 @@ static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
+                 (unsigned long)((uint64_t)b->log_dt[k] * 1000000ULL / freq),
+                 (char)b->log_out[k]);
+         }
++        s3_append_pdwin(line, sizeof(line) - 2, &pos, c, run, t0, freq);
+         /* Appends stop at sizeof(line) - 3, so the terminator fits. */
+         line[pos++] = '\r';
+         line[pos++] = '\n';
+@@ -2191,7 +2273,7 @@ static void s3_print_trace_header(const char *mode, uint32_t run,
+                                   uint64_t freq, uint32_t tasks,
+                                   uint32_t depth, uint32_t work, uint32_t ms)
+ {
+-    shell_printf("\r\n  c2t-format v1 mode=%s run=%lu cntfrq=%lu cpus=%lu"
++    shell_printf("\r\n  c2t-format v2 mode=%s run=%lu cntfrq=%lu cpus=%lu"
+                  " tasks=%lu depth=%lu work=%lu sustain_ms=%lu\r\n",
+                  mode, (unsigned long)run, (unsigned long)freq,
+                  (unsigned long)cpu_count, (unsigned long)tasks,
+@@ -2200,6 +2282,15 @@ static void s3_print_trace_header(const char *mode, uint32_t run,
+     shell_puts("  times in us from dispatch start; log = first 16 attempts"
+                " as us-since-first-attempt + outcome (S ok, E empty,"
+                " P preempt_disabled skip, X stale, I isolated, O other)\r\n");
++    shell_printf("  #1216 watch=cpu%lu; reasons T tick trampoline, C coop tick,"
++                 " P schedule() after a push, O other schedule(), B boot;"
++                 " w_in/win_n/win_sum_us/win_max_us in that order;"
++                 " w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched"
++                 " window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,"
++                 "<500 us,<1,<2,<5,<10,>=10 ms after the tick;"
++                 " wlog = entry_us:dur_ns:reason, first %lu windows\r\n",
++                 (unsigned long)sched_steal_trace_watch(),
++                 (unsigned long)STEAL_WIN_LOG_LEN);
+ }
+ 
+ /* bench stealing --sustain: keep `depth` tasks outstanding on CPU 1 for
+-- 
+2.43.0
+
