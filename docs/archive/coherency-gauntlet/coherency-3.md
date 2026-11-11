@@ -1050,3 +1050,79 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
 - Idle wakes at rest 99.8 to 100.0/s on every CPU (the tick); during the
   sustained runs 0.0 to 5.7/s. The removal alone already balances the
   shares, without the idle-loop cost (agrees with run 3's cells D and E).
+
+## Entry 31 (22:45 UTC): fix C block 4 of 4 (removal + fix); fix C draft PR #1226
+
+- Agent `coherency-closeout-fixc-removalfix`, image removalfix (5fe8c70b =
+  5d70fdbd + `--assert-shares` + idle WFE; elf 35a73609, checked), one
+  kexec boot; files `run3-hw/fixc/removalfix-*.txt` on
+  `gauntlet-3-hw-jetson` @ 20dbc30c (45 files, `commit: 5fe8c70b`).
+- `--assert-shares`: **PASS 20 of 20**; median share 16.4, 16.2, 16.8, 16.8,
+  16.7, 16.7% (every range within 16.1 to 17.1%). Burst median 11856 us
+  with a range of 6916 to 28073 us, against 10327 us (7856 to 11624)
+  without the fix on the same kernel. `bench smp` 5/5.
+- Idle wakes at rest: CPUs 0 to 3 at 294.8, 231.4, 211.8, 296.6/s with
+  their ticks at about 74 to 76/s instead of 100; CPUs 4 and 5 (cluster 1)
+  at 203901 and 205744/s. During the sustained runs 0.0, 2248, 11808,
+  16335, 13481, 6738/s. Uneven, and different from ncfix; cause not
+  determined (hypothesis for the general cost: Entry 29).
+- **Fix C draft PR #1226** (head `c2/wake-on-push-v1` @ 37939418, base
+  main, refs #1216, labels platform:jetson, sub:sched, Backlog): the two
+  commits; a table of all four images with filenames; the cost (idle
+  polling at 53k to 77k passes/s per CPU on NC, the uneven pattern and
+  slower burst on the removal) labelled the user's decision; the H3
+  history as the user asked (clause 3 missed only because its 200 ms
+  threshold came from run 2's baseline and run 3's baseline was 167 ms,
+  every other clause passed), with clause 2's baseline stated as measured
+  (65.9 and 67.2% against the clause's "about 75%"); /ci and the #1219
+  analysis. Not merged.
+- Summary of fix C on Jetson, kexec, 20 runs each: `--assert-shares`
+  passes 18/20 on NC without the fix, 20/20 with it, 20/20 on the removal
+  without it, 20/20 on the removal with it. The removal alone balances the
+  shares at the tick-rate idle cost.
+
+## Entry 32 (22:45 UTC): branches, worktrees, lab state
+
+| Branch | Head | Disposition |
+|---|---|---|
+| main | e73b9b61 | #1208 8a27711d, #1209 cf34214d, #1215 73d8deb7, #1217 88b28c15, #1218 e4a33790 squash-merged; ADR 0007 status and run 3 paragraph e73b9b61 |
+| `coherency-remove-nc-axis` | 5d70fdbd (moved from 79c10261: rebased onto e4a33790, Entry 23) | PR #1225, ready for review |
+| `c2/wake-on-push-v1` | 37939418 (moved from 292eee0a: A + B on main) | PR #1226, draft |
+| `coherency-nc-axis-pi5` | e5b24894 | Kept (closed PR #1222), as the user asked |
+| `c1/instrument-1211-removal` | 9f375c19 | Kept: cited in open #1211 |
+| `c1/isolated-1s` | f8ff72d6 | Kept: cited in open #1213 |
+| `gauntlet/coherency-3` | this commit | Keep: log, verdicts, tools, /ci logs |
+| `gauntlet-3-hw-pi5` | 45c86b7f | Keep: Pi 5 and QEMU evidence |
+| `gauntlet-3-hw-jetson` | 20dbc30c | Keep: Jetson evidence |
+| `c2/fixc-removal`, `c2/fixc-removal-fix` | c77156b2, 5fe8c70b | Deleted; tips archived (`run3-tools/deleted-branch-tips/`) |
+| `c1/boot-path-plus-helper` | 638e297d | Deleted; content on main |
+| `fix-boot-1194-1197-1198`, `fix/boot-path-1193`, `c1/test-wait-helper`, `c2/steal-instrument-1203`, `docs/labctl-serializes-calls` | 58cc6832, b849e2ee, a03fc75b, 1b27eea4, 90f0d9e3 | Deleted after squash-merge; tips remain as the PRs' heads on GitHub |
+
+The deletion record is in `run3-tools/deleted-branch-tips/README.md`. The
+orchestrator's scratch worktrees and local temporary branches were
+removed; one (`ev-pi5`) held only staged deletions of files already
+pushed, and was reset before removal.
+
+Lab at the end: no active claims; pi-5-1 at the SLM-OS shell on its
+original card, powered on, online; jetson-nano-2 at SD Linux, ESP
+SLMOS.efi 789cba62 with no BootNext, `recovery_mode` released (relay
+open, cycle count 14), powered on, online. Both as found.
+
+## Close-out addendum (written 22:45 UTC)
+
+- Merged, in order, each followed by /ci on main with the ci skill's
+  steps green: #1208, #1209 (after a 10/10 Jetson UEFI-direct boot test at
+  its head), #1215, #1217, #1218. No conflicts. The extra
+  `WORK_STEALING=ON` step failed 2 of 6 times on main with #1219's
+  signature, independent of the merged changes.
+- Issues closed: #1194, #1196, #1197, #1198, #1202 on merge; #1205 by
+  hand (73d8deb7). #1222 closed (branch kept).
+- Removal PR #1225 (ready): Jetson 10/10 kexec and 10/10 UEFI-direct, Pi 5
+  10/10 boots and 10/10 integration at 5d70fdbd; the Jetson integration
+  suite fails identically on main (#1199, #1224), so it is not counted
+  against the removal (orchestrator's reading, stated in the PR).
+- Fix C draft PR #1226: the check fails on main without the fix (2/20)
+  and passes with it (20/20); the cost is idle polling (53k to 77k idle
+  passes/s per CPU at rest against 100) and is the user's decision.
+- Filed during the close-out: #1224 (Jetson test-kernel camera fault, by
+  the removal lab agent). Updated: #1219 (twice), #1205.
