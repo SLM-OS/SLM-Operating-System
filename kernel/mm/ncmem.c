@@ -5,8 +5,10 @@
  * Memory is never freed — these are kernel-lifetime structures like
  * scheduler run queues and cross-CPU boot flags.
  *
- * Works on any platform that defines NC_MEM_BASE (Pi 5, Jetson). The
- * by-VA block maintenance (#1196) is built on every ARM64 platform so
+ * Works on any platform with PLATFORM_HAS_NC_REGION (Pi 5, Jetson),
+ * including NC_AXIS=OFF builds: device DMA still allocates here.
+ *
+ * The by-VA block maintenance (#1196) is built on every ARM64 platform so
  * the QEMU test suite can drive it.
  */
 
@@ -128,7 +130,7 @@ int ncmem_clean_inval_range(uintptr_t base, size_t size,
     return 0;
 }
 
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(PLATFORM_HAS_NC_REGION)
 
 static uintptr_t nc_next_free;
 static size_t nc_total_allocated;
@@ -258,4 +260,4 @@ void ncmem_boot_maint_stats(ncmem_maint_stats_t *out)
     *out = (ncmem_maint_stats_t){ 0 };
 }
 
-#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */
+#endif /* PLATFORM_HAS_NC_REGION */

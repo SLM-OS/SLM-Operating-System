@@ -160,6 +160,9 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"bpmp",      cmd_bpmp,      "BPMP IPC smoke test (PING + clock query)",                  false, SHELL_CAT_HARDWARE},
 #endif
+#if !defined(PLATFORM_X86_64)
+    {"coherency", cmd_coherency, "Cache-coherency litmus (coherency regs | litmus [scale] | neg [scale])", true, SHELL_CAT_HARDWARE},
+#endif
 #if defined(PI5_IRQ_DIAG)
     {"diag",      cmd_diag,      "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)",    false, SHELL_CAT_HARDWARE},
 #endif

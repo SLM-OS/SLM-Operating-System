@@ -136,9 +136,9 @@ endif()
 # is kept as a backward-compatible alias below so existing Pi 5
 # Makefile / CMake invocations keep working.
 #
-# Only applicable on platforms that have the exception-frame problem
-# AND the NC memory backing for the trampoline's per-CPU state. That is
-# the PLATFORM_HAS_NC_MEMORY platforms today — Pi 5 and Jetson. QEMU
+# Only applicable on platforms that have the exception-frame problem:
+# Pi 5 and Jetson. The trampoline's per-CPU state lives in the NC block
+# (or in cacheable BSS under NC_AXIS=OFF, see below). QEMU
 # virt does not need the trampoline (its emulated timer IRQ allows
 # schedule-from-ISR), and x86-64 has no ELR. If SECONDARY_PREEMPT=ON
 # is passed on a non-applicable platform it is silently ignored, with
@@ -162,6 +162,42 @@ if(SECONDARY_PREEMPT)
     else()
         message(STATUS "SECONDARY_PREEMPT=ON ignored on PLATFORM=${PLATFORM} "
                        "(only Pi 5 and Jetson use the ELR trampoline)")
+    endif()
+endif()
+
+# Coherency gauntlet switches (#1193). Pi 5 and Jetson only; both ON by
+# default, which is the existing behaviour and adds no definition.
+#
+# NC_AXIS=OFF defines NC_AXIS_OFF. kernel/include/ncmem.h then leaves
+# PLATFORM_HAS_NC_MEMORY undefined, so run queues, the task table,
+# current-task pointers, steal deques, sched_diag_* counters, boot and
+# init flags and the SECONDARY_PREEMPT state take their cacheable
+# branches; the UART lock (kprintf.c) becomes a real spinlock; and the
+# Pi 5 DC CIVAC lock-word flush in spinlock.h is dropped.
+# PLATFORM_HAS_NC_REGION stays defined: the NC block is still mapped and
+# ncmem_alloc still serves device DMA (xHCI, MACB, CDC-ECM, USB, RCE).
+#
+# SETWAY_INVAL=OFF defines SETWAY_INVAL_OFF, which removes the post-MMU
+# DC ISW L1/L2 loop that Pi 5 and Jetson secondaries run in smp_boot.S,
+# so its necessity can be measured separately from the NC axis.
+option(NC_AXIS "Keep CPU-to-CPU shared state in the NC block (Pi 5, Jetson)" ON)
+if(NOT NC_AXIS)
+    if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        add_compile_definitions(NC_AXIS_OFF=1)
+        message(STATUS "NC_AXIS=OFF: CPU-shared state in cacheable memory (#1193)")
+    else()
+        message(STATUS "NC_AXIS=OFF ignored on PLATFORM=${PLATFORM} "
+                       "(only Pi 5 and Jetson have an NC axis)")
+    endif()
+endif()
+option(SETWAY_INVAL "Post-MMU set/way L1/L2 invalidate on Pi 5 / Jetson secondaries" ON)
+if(NOT SETWAY_INVAL)
+    if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        add_compile_definitions(SETWAY_INVAL_OFF=1)
+        message(STATUS "SETWAY_INVAL=OFF: no set/way loop on secondaries (#1193)")
+    else()
+        message(STATUS "SETWAY_INVAL=OFF ignored on PLATFORM=${PLATFORM} "
+                       "(only Pi 5 and Jetson run the set/way loop)")
     endif()
 endif()
 
@@ -339,6 +375,13 @@ endif()
 option(ENABLE_BOOT_TESTS "Run tests at boot instead of interactive shell" OFF)
 if(ENABLE_BOOT_TESTS)
     add_compile_definitions(ENABLE_BOOT_TESTS=1)
+endif()
+# Hardware measurement set for #1193: a boot-test kernel that runs only
+# the coherency and multi-core integration suites. Use with
+#   make kernel-test PLATFORM=<P> EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
+option(BOOT_TESTS_HW_SET "Boot tests: run only the coherency + integration suites" OFF)
+if(BOOT_TESTS_HW_SET)
+    add_compile_definitions(BOOT_TESTS_HW_SET=1)
 endif()
 
 # Embed Lua demo scripts (scripts/demo.lua, scripts/demo_menu.lua) into the
@@ -836,6 +879,8 @@ set(KERNEL_SOURCES
     kernel/src/shell_session.c
     kernel/src/shell_sys.c
     kernel/src/timdiag_pi5_probes.c
+    # `coherency` verb + litmus driver (#1193). ARM64 only (inline asm).
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/coherency.c>
     kernel/src/shell_fs.c
     kernel/src/boot_models.c
     kernel/src/shell_clocks.c
@@ -1151,6 +1196,10 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
+    # Coherency litmus suite + negative controls (#1193). ARM64 only.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coherency.c>
+    # Where CPU-shared scheduler state lives under NC_AXIS (#1193).
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_nc_axis.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net_http.c>
     # USB core tests (Phase 1 of #266). Platform-neutral — the mock

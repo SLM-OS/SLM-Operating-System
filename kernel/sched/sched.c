@@ -628,8 +628,10 @@ static void idle_task_func(void *arg)
 #if defined(PLATFORM_X86_64)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
-#elif defined(PLATFORM_HAS_NC_MEMORY)
-        /* Pi 5/Jetson idle loop.
+#elif defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+        /* Pi 5/Jetson idle loop. Keyed on the platform, not on
+         * PLATFORM_HAS_NC_MEMORY: which CPUs may WFI is a timer-IRQ
+         * delivery question, and it must not change under NC_AXIS=OFF.
          *
          * With SECONDARY_PREEMPT: all CPUs unmask IRQs and WFI so
          * timer-driven preemption works on secondary CPUs too.
@@ -2997,7 +2999,9 @@ void scheduler_start(uint32_t this_cpu)
      * path. */
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
-#elif defined(PLATFORM_HAS_NC_MEMORY)
+#elif defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Keyed on the platform, as in idle_task_func: the unmask rule is
+     * about timer-IRQ delivery, not about where run queues live. */
 #if defined(PI5_FIQ_TIMER)
     /* Unmask both I and F — timer arrives as FIQ on this GICv2. */
     __asm__ volatile("msr daifclr, #0x3" ::: "memory");

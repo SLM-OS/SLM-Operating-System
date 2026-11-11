@@ -1810,15 +1810,44 @@ static void bench_sched_stats(void)
 
 /* --- Deadline accuracy benchmark --- */
 
+/*
+ * Cross-CPU result slots for bench deadline / isolate / smp (Pi 5,
+ * Jetson). PLATFORM_HAS_NC_MEMORY puts them at fixed offsets near the
+ * end of the NC block. Under NC_AXIS=OFF they are cacheable statics,
+ * and BENCH_SLOT_FENCE() orders the data word before the done flag on
+ * the writer and after it on the reader.
+ */
+#if defined(PLATFORM_HAS_NC_MEMORY)
 /* NC offsets for deadline bench: -384 from end of NC region */
 #define DL_NC_DONE   (NC_MEM_BASE + NC_MEM_SIZE - 384)
 #define DL_NC_TIME   (NC_MEM_BASE + NC_MEM_SIZE - 376)  /* 8 bytes for uint64_t */
+/* NC offsets for isolation bench: -400 from end of NC region */
+#define ISO_NC_DONE  (NC_MEM_BASE + NC_MEM_SIZE - 400)
+#define ISO_NC_CPU   (NC_MEM_BASE + NC_MEM_SIZE - 404)
+/* bench smp per-CPU done flags: -320 from end of NC region */
+#define SMP_DONE_SLOT(cpu) \
+    ((volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + (cpu) * 4))
+#define BENCH_SLOT_FENCE() do { } while (0)
+#elif defined(PLATFORM_HAS_NC_REGION)
+static volatile uint32_t dl_done_wb;
+static volatile uint64_t dl_time_wb;
+static volatile uint32_t iso_done_wb;
+static volatile uint32_t iso_cpu_wb;
+static volatile uint32_t smp_done_wb[MAX_CPUS];
+#define DL_NC_DONE   ((uintptr_t)&dl_done_wb)
+#define DL_NC_TIME   ((uintptr_t)&dl_time_wb)
+#define ISO_NC_DONE  ((uintptr_t)&iso_done_wb)
+#define ISO_NC_CPU   ((uintptr_t)&iso_cpu_wb)
+#define SMP_DONE_SLOT(cpu) (&smp_done_wb[(cpu)])
+#define BENCH_SLOT_FENCE() __asm__ volatile("dmb ish" ::: "memory")
+#endif
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
 static void deadline_bench_task(void *arg)
 {
     (void)arg;
     *(volatile uint64_t *)DL_NC_TIME = slm_get_time_ns();
+    BENCH_SLOT_FENCE();
     *(volatile uint32_t *)DL_NC_DONE = 1;
 }
 #endif
@@ -1831,7 +1860,7 @@ static void bench_deadline_accuracy(void)
     shell_puts("  Testing deadline-boosted task dispatch latency:\r\n");
 
     for (int d = 0; d < num_deadlines; d++) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
         *(volatile uint32_t *)DL_NC_DONE = 0;
         uint64_t start_ns = slm_get_time_ns();
 
@@ -1847,6 +1876,7 @@ static void bench_deadline_accuracy(void)
         }
 
         if (*(volatile uint32_t *)DL_NC_DONE) {
+            BENCH_SLOT_FENCE();
             uint64_t end_ns = *(volatile uint64_t *)DL_NC_TIME;
             uint64_t latency_us = (end_ns - start_ns) / 1000;
             uint64_t deadline_us = deadlines_ms[d] * 1000;
@@ -1866,15 +1896,13 @@ static void bench_deadline_accuracy(void)
 
 /* --- Core isolation benchmark --- */
 
-/* NC offsets for isolation bench: -400 from end of NC region */
-#define ISO_NC_DONE  (NC_MEM_BASE + NC_MEM_SIZE - 400)
-#define ISO_NC_CPU   (NC_MEM_BASE + NC_MEM_SIZE - 404)
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
+/* Result slots: see DL_NC_DONE above. */
+#if defined(PLATFORM_HAS_NC_REGION)
 static void isolation_bench_task(void *arg)
 {
     (void)arg;
     *(volatile uint32_t *)ISO_NC_CPU = cpu_id();
+    BENCH_SLOT_FENCE();
     *(volatile uint32_t *)ISO_NC_DONE = 1;
 }
 #endif
@@ -1890,7 +1918,7 @@ static void bench_core_isolation(void)
     shell_puts("  Isolating CPU 2, dispatching 8 tasks:\r\n");
     sched_isolate_core(2);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     int cpu_hits[4] = {0, 0, 0, 0};
     for (int i = 0; i < 8; i++) {
         *(volatile uint32_t *)ISO_NC_DONE = 0;
@@ -1903,6 +1931,7 @@ static void bench_core_isolation(void)
             for (volatile int x = 0; x < 100; x++) {}
         }
         if (*(volatile uint32_t *)ISO_NC_DONE) {
+            BENCH_SLOT_FENCE();
             uint32_t ran_on = *(volatile uint32_t *)ISO_NC_CPU;
             if (ran_on < 4) cpu_hits[ran_on]++;
         }
@@ -1977,11 +2006,11 @@ static void bench_shared_buffer(void)
 void smp_test_task(void *arg)
 {
     (void)arg;
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     uint32_t target_cpu = (uint32_t)(uintptr_t)arg;
-    /* Write to NC memory — instantly visible to CPU 0 without CIVAC.
-     * Offset -320 from end of NC region: per-CPU done flags. */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + target_cpu * 4) = cpu_id() + 1;
+    /* Per-CPU done flag (SMP_DONE_SLOT: NC block, or cacheable under
+     * NC_AXIS=OFF). */
+    *SMP_DONE_SLOT(target_cpu) = cpu_id() + 1;
 #endif
 }
 
@@ -2636,10 +2665,10 @@ int cmd_bench(int argc, char *argv[])
         shell_puts("===========================\r\n");
         /* Dispatch a task to each secondary CPU and verify it completes.
          * Uses NC memory for done flags — instantly visible cross-CPU. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        /* Zero done flags in NC memory — one slot per CPU (skip slot 0, unused). */
+#if defined(PLATFORM_HAS_NC_REGION)
+        /* Zero the done flags — one slot per CPU (skip slot 0, unused). */
         for (uint32_t i = 0; i < cpu_count; i++) {
-            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + i * 4) = 0;
+            *SMP_DONE_SLOT(i) = 0;
         }
 #endif
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
@@ -2657,8 +2686,8 @@ int cmd_bench(int argc, char *argv[])
         for (int wait = 0; wait < 500000; wait++) {
             int all_done = 1;
             for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                if (!*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + cpu * 4))
+#if defined(PLATFORM_HAS_NC_REGION)
+                if (!*SMP_DONE_SLOT(cpu))
                     { all_done = 0; break; }
 #endif
             }
@@ -2666,8 +2695,8 @@ int cmd_bench(int argc, char *argv[])
             for (volatile int d = 0; d < 1000; d++) {}
         }
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            uint32_t result = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + cpu * 4);
+#if defined(PLATFORM_HAS_NC_REGION)
+            uint32_t result = *SMP_DONE_SLOT(cpu);
             shell_printf("  CPU %u: %s (ran on CPU %u)\r\n", cpu,
                         result ? "COMPLETED" : "TIMEOUT", result ? result - 1 : 0);
 #else

@@ -262,6 +262,14 @@
  */
 #define VMM_FLAG_PMM_OWNED      (1U << 11)  /* Free leaf page on user-L1 destroy */
 
+/*
+ * Normal memory with the Non-shareable attribute (SH=00) instead of the
+ * default Inner Shareable. Ignored for Device memory (always SH=00).
+ * Used only by the `coherency neg` control (#1193) to build a temporary
+ * Non-shareable alias of a cacheable block; nothing else should need it.
+ */
+#define VMM_FLAG_NONSHARE       (1U << 12)  /* Normal memory, SH=00 */
+
 /* Common flag combinations */
 #define VMM_FLAGS_KERNEL_CODE   (VMM_FLAG_READ | VMM_FLAG_EXEC)
 #define VMM_FLAGS_KERNEL_DATA   (VMM_FLAG_READ | VMM_FLAG_WRITE)
@@ -680,6 +688,15 @@ void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after);
  * returned (#1197, test_vmm.c): the invalidate bounds and the number of
  * cache lines the loop invalidated. */
 void vmm_mmu_enable_inval(uint64_t *start, uint64_t *end, uint64_t *lines);
+
+/*
+ * MMU configuration published by vmm_init for smp_boot.S, which reads it
+ * on each secondary with the MMU and caches off. smp_init cleans it to
+ * the PoC before CPU_ON (#1193 audit D1).
+ */
+extern volatile uint64_t secondary_mmu_ttbr;
+extern volatile uint64_t secondary_mmu_mair;
+extern volatile uint64_t secondary_mmu_tcr;
 
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);

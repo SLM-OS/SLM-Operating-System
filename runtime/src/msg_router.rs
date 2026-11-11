@@ -436,11 +436,15 @@ static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none()
 ///    enabled (#57).
 ///
 /// 4. **UART calls (`uart_puts`, `uart_printf`) are permitted** inside
-///    the critical section: on platforms with `PLATFORM_HAS_NC_MEMORY`
-///    the UART lock is IRQ-disable-only (no cross-CPU spin), so it
-///    cannot create a circular wait with `MSG_ROUTER_LOCK`. On QEMU the
-///    UART lock is a plain spinlock but is never held across a router
-///    call, so no inversion is possible.
+///    the critical section. With `PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson
+///    default builds) the kernel UART lock is IRQ-disable-only, so there
+///    is no second lock at all. Elsewhere (QEMU, x86-64, and Pi 5 /
+///    Jetson built with `NC_AXIS=OFF`, #1193) it is an IRQ-saving
+///    cross-CPU spinlock, so the order is `MSG_ROUTER_LOCK` →
+///    `uart_lock`; the UART code never calls back into the router while
+///    holding it, so no inversion is possible. This runtime is one
+///    library for every ARM64 platform and has no platform `cfg`: the
+///    choice is made entirely in `kernel/src/kprintf.c`.
 ///
 /// 5. **No nested `SpinGuard::new()` calls.** The guard uses a simple
 ///    test-and-set, not a recursive lock; re-entering from the same task
