@@ -303,9 +303,19 @@ static void contention_task(void *arg)
 /* Lifecycle task - completes immediately */
 static volatile uint32_t lifecycle_completed = 0;
 
+/* #1211 instrumentation (coherency run 3, C1): CPU each lifecycle task ran
+ * on and when (CNTPCT). arg is the cycle index. */
+#define LC1211_MAX 8
+static volatile uint32_t lc1211_ran_cpu[LC1211_MAX];
+static volatile uint64_t lc1211_ran_ts[LC1211_MAX];
+
 static void lifecycle_task_func(void *arg)
 {
-    (void)arg;
+    uint32_t idx = (uint32_t)(uintptr_t)arg;
+    if (idx < LC1211_MAX) {
+        lc1211_ran_ts[idx] = timer_get_count();
+        lc1211_ran_cpu[idx] = cpu_id();
+    }
 
     /* Atomic increment using spinlock for reliability */
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
@@ -513,16 +523,12 @@ static void test_lock_contention(void)
         "Race condition detected in lock contention");
 }
 
-/* Lifecycle cleanup: the free-page count is back within the slack. */
-static bool lifecycle_pages_back(void *ctx)
+/* #1211: snapshot of the schedule() counts of CPUs 0-3 (0 past cpu_count). */
+static void lc1211_sched_snapshot(uint32_t out[4])
 {
-    return pmm_get_free_pages() >= *(uint64_t *)ctx;
-}
-
-static long long lifecycle_free_pages(void *ctx)
-{
-    (void)ctx;
-    return (long long)pmm_get_free_pages();
+    for (uint32_t c = 0; c < 4; c++) {
+        out[c] = (c < cpu_count && c < MAX_CPUS) ? sched_diag_schedule[c] : 0;
+    }
 }
 
 /*
@@ -536,12 +542,19 @@ static void test_task_lifecycle(void)
 
     uint64_t initial_free = pmm_get_free_pages();
     lifecycle_completed = 0;
+    for (int i = 0; i < LC1211_MAX; i++) {
+        lc1211_ran_cpu[i] = 0xFFu;
+        lc1211_ran_ts[i] = 0;
+    }
+    smp_mb();
 
+    uint64_t t_dispatch = timer_get_count();
     for (int cycle = 0; cycle < LIFECYCLE_CYCLES; cycle++) {
         char name[8];
         name[0] = 'l'; name[1] = 'c'; name[2] = '0' + (char)cycle; name[3] = '\0';
 
-        struct task *t = task_create(name, lifecycle_task_func, NULL);
+        struct task *t = task_create(name, lifecycle_task_func,
+                                     (void *)(uintptr_t)cycle);
         TEST_ASSERT_NOT_NULL(t);
         scheduler_add_task_to_cpu(t, (uint32_t)(cycle % 3) + 1);
     }
@@ -556,47 +569,125 @@ static void test_task_lifecycle(void)
     }
 
     smp_mb();
+    uint64_t t_completed = timer_get_count();
     TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
         "Timeout: not all lifecycle tasks completed");
 
     /*
-     * Give the scheduler time to clean up zombies. Under
+     * Give scheduler time to clean up zombies. Under
      * CONFIG_WORK_STEALING=ON, lifecycle tasks get distributed
      * across CPUs 1-3 (via the dispatch above) and each CPU's
-     * `schedule()` cycle is what actually frees its zombies, so the
-     * pages come back only after every owning CPU schedules again.
+     * `schedule()` cycle is what actually frees its zombies. A
+     * short sleep with only CPU 0 yielding can leave stacks
+     * allocated while the owning CPUs are idle. Yield in a long
+     * enough loop for every CPU to run schedule() several times
+     * after the last task terminates.
      *
-     * Then verify no major memory leak. Threshold is generous enough to
-     * tolerate one full task stack (4 pages) lingering because its
-     * owning CPU has not run schedule() again; this can happen when a
-     * secondary CPU parks in WFE right after its test task exits and
-     * doesn't wake until a timer tick. 16 pages (~64 KB) covers the
+     * #1211 (coherency run 3, C1): this is the window as it was before
+     * #1215 converted it, instrumented. Every run logs waiter CPU, the CPU
+     * each task ran on, the window's wall time, free pages and the
+     * per-CPU schedule() counts; when the count at the bound is short,
+     * the waiter keeps yielding and logs whether it is back 1, 10, 100
+     * and 1000 ms after the bound.
+     */
+    uint32_t waiter_cpu0 = cpu_id();
+    uint32_t sc_start[4], sc_bound[4];
+    lc1211_sched_snapshot(sc_start);
+    uint64_t free_at_start = pmm_get_free_pages();
+    uint64_t t_win = timer_get_count();
+    for (int i = 0; i < 50; i++) {
+        yield();
+        delay(50000);
+    }
+
+    /*
+     * Verify no major memory leak. Threshold is generous enough to
+     * tolerate one full task stack (4 pages) lingering after the
+     * cleanup window because its owning CPU has not run
+     * schedule() again — this can happen when a secondary CPU
+     * parks in WFE right after its test task exits and doesn't
+     * wake until a timer tick. 16 pages (~64 KB) covers the
      * worst case of one stack per stealable CPU without hiding a
      * real per-task leak. Every `LIFECYCLE_CYCLES` tasks would
      * leak 32 pages, which this threshold would still catch.
-     *
-     * The window used to be 50 x (yield + delay(50000)), a loop count
-     * (#1211: it failed in 2 of 20 Pi 5 boots of one kernel and 0 of 10
-     * of another). It is now a wall-clock wait for the pages, 1 s (the
-     * floor in test_wait.h; the old window's duration was not measured),
-     * and a timeout logs the free-page count at the bound and 10, 100 and
-     * 1000 ms after it: pages that come back late are a timing window,
-     * pages that never come back are a leak. Every run logs the deficit
-     * when the wait starts and how long it took.
      */
+    uint64_t final_free = pmm_get_free_pages();
+    uint64_t t_bound = timer_get_count();
+    uint32_t waiter_cpu1 = cpu_id();
+    lc1211_sched_snapshot(sc_bound);
     uint64_t target = initial_free - 16;
-    uint64_t free_at_start = pmm_get_free_pages();
-    long long lc_us = test_wait_until_v("task_lifecycle_pages",
-                                        lifecycle_pages_back,
-                                        lifecycle_free_pages, &target,
-                                        TEST_WAIT_S(1));
-    uart_printf("[test_wait] task_lifecycle: initial %llu, target %llu, "
-                "free at start of wait %llu, met after %lld us "
-                "(bound 1000000 us)\n",
+    bool ok_at_bound = final_free >= target;
+
+    uart_printf("[C1-1211] lifecycle %s waiter_cpu=%u->%u initial=%llu "
+                "target=%llu free_win_start=%llu free_at_bound=%llu "
+                "window_us=%lld dispatch_to_bound_us=%lld "
+                "dispatch_to_completed_us=%lld\n",
+                ok_at_bound ? "PASS" : "FAIL",
+                (unsigned)waiter_cpu0, (unsigned)waiter_cpu1,
                 (unsigned long long)initial_free,
                 (unsigned long long)target,
-                (unsigned long long)free_at_start, lc_us);
-    TEST_ASSERT_MESSAGE(lc_us >= 0, "Memory leak detected");
+                (unsigned long long)free_at_start,
+                (unsigned long long)final_free,
+                test_wait_us_between(t_win, t_bound),
+                test_wait_us_between(t_dispatch, t_bound),
+                test_wait_us_between(t_dispatch, t_completed));
+    uart_printf("[C1-1211] lifecycle ran(dispatch_cpu>ran_cpu@us_from_dispatch)"
+                " 0:%u>%u@%lld 1:%u>%u@%lld 2:%u>%u@%lld 3:%u>%u@%lld "
+                "4:%u>%u@%lld 5:%u>%u@%lld 6:%u>%u@%lld 7:%u>%u@%lld\n",
+                1u, (unsigned)lc1211_ran_cpu[0], test_wait_us_between(t_dispatch, lc1211_ran_ts[0]),
+                2u, (unsigned)lc1211_ran_cpu[1], test_wait_us_between(t_dispatch, lc1211_ran_ts[1]),
+                3u, (unsigned)lc1211_ran_cpu[2], test_wait_us_between(t_dispatch, lc1211_ran_ts[2]),
+                1u, (unsigned)lc1211_ran_cpu[3], test_wait_us_between(t_dispatch, lc1211_ran_ts[3]),
+                2u, (unsigned)lc1211_ran_cpu[4], test_wait_us_between(t_dispatch, lc1211_ran_ts[4]),
+                3u, (unsigned)lc1211_ran_cpu[5], test_wait_us_between(t_dispatch, lc1211_ran_ts[5]),
+                1u, (unsigned)lc1211_ran_cpu[6], test_wait_us_between(t_dispatch, lc1211_ran_ts[6]),
+                2u, (unsigned)lc1211_ran_cpu[7], test_wait_us_between(t_dispatch, lc1211_ran_ts[7]));
+    uart_printf("[C1-1211] lifecycle schedule() cpu0..3 win_start=%u/%u/%u/%u "
+                "bound=%u/%u/%u/%u\n",
+                (unsigned)sc_start[0], (unsigned)sc_start[1],
+                (unsigned)sc_start[2], (unsigned)sc_start[3],
+                (unsigned)sc_bound[0], (unsigned)sc_bound[1],
+                (unsigned)sc_bound[2], (unsigned)sc_bound[3]);
+
+    if (!ok_at_bound) {
+        static const long long marks_us[4] = { 1000, 10000, 100000, 1000000 };
+        int held[4] = { -1, -1, -1, -1 };
+        unsigned long long free_at[4] = { 0, 0, 0, 0 };
+        uint32_t sc_at[4][4];
+        long long first_true_us = -1;
+        int next = 0;
+        for (;;) {
+            long long dt = test_wait_us_between(t_bound, timer_get_count());
+            uint64_t f = pmm_get_free_pages();
+            bool c = f >= target;
+            if (c && first_true_us < 0) {
+                first_true_us = dt;
+            }
+            while (next < 4 && dt >= marks_us[next]) {
+                held[next] = c ? 1 : 0;
+                free_at[next] = (unsigned long long)f;
+                lc1211_sched_snapshot(sc_at[next]);
+                next++;
+            }
+            if (next >= 4) {
+                break;
+            }
+            yield();
+        }
+        uart_printf("[C1-1211] FAIL repoll +1ms=%d(%llu) +10ms=%d(%llu) "
+                    "+100ms=%d(%llu) +1000ms=%d(%llu) first_held_after_bound_us=%lld "
+                    "(-1 = never)\n",
+                    held[0], free_at[0], held[1], free_at[1],
+                    held[2], free_at[2], held[3], free_at[3], first_true_us);
+        for (int k = 0; k < 4; k++) {
+            uart_printf("[C1-1211] FAIL repoll +%lldus schedule() cpu0..3 "
+                        "%u/%u/%u/%u\n", marks_us[k],
+                        (unsigned)sc_at[k][0], (unsigned)sc_at[k][1],
+                        (unsigned)sc_at[k][2], (unsigned)sc_at[k][3]);
+        }
+    }
+
+    TEST_ASSERT_MESSAGE(final_free >= initial_free - 16, "Memory leak detected");
 }
 
 /*
