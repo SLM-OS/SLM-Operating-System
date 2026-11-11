@@ -1035,3 +1035,18 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   `sevl; wfe` to consume it, then `wfe`) or re-check the run queue and
   the steal deques first; a design choice for the user, not made here.
 - Fix C block 3 of 4 (removal, no fix) started about 21:58Z.
+
+## Entry 30 (22:22 UTC): fix C Jetson block 3 of 4 (removal, no fix)
+
+- Agent `coherency-closeout-fixc-removal`, image removal (c77156b2 =
+  5d70fdbd + `--assert-shares`; elf dad6ca01, checked), one kexec boot;
+  board back at SD Linux, released. Files `run3-hw/fixc/removal-*.txt` on
+  `gauntlet-3-hw-jetson` @ f94cd467 (45 files, `commit: c77156b2`). Its
+  boot log has no "run queues in NC memory" line, as expected.
+- `--assert-shares`: **PASS 20 of 20**. Median share 16.60, 16.30, 16.80,
+  16.55, 16.70, 16.90% on CPUs 0 to 5 (every range within 15.5 to 17.6%).
+  Burst median 10327 us (7856 to 11624), 20 of 20 completed. `bench smp`
+  5/5 completed.
+- Idle wakes at rest 99.8 to 100.0/s on every CPU (the tick); during the
+  sustained runs 0.0 to 5.7/s. The removal alone already balances the
+  shares, without the idle-loop cost (agrees with run 3's cells D and E).
