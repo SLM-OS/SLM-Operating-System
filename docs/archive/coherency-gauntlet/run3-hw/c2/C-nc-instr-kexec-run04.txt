@@ -1,0 +1,223 @@
+# labctl serial_send reply 1 of 2
+# call 2026-11-11T08:12:34.281Z  reply 2026-11-11T08:12:34.543Z  tool_use_id toolu_0171KxzbM4QC2knPfM2Dmz7B
+# args {"capture_timeout": 15, "capture_until": "slmos>", "data": "cat /sys/version", "port_name": "jetson-nano-2"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+���z��ͽversion
+name:    SLM-OS
+version: 0.4.0
+build:   20261111042111
+commit:  1b27eea4
+slmos>
+slmos>
+# labctl serial_send reply 2 of 2
+# call 2026-11-11T08:12:43.036Z  reply 2026-11-11T08:12:46.446Z  tool_use_id toolu_011CpDmgyxapePtgGjEfEYGZ
+# args {"capture_timeout": 45, "capture_until": "slmos>", "data": "bench stealing --sustain 2500", "port_name": "jetson-nano-2"}
+[Captured 208 lines in 3.2s, pattern 'None' matched]
+cuoc��/�+���������wwain 2500
+
+Work-Stealing Sustained-Supply Benchmark (#1203)
+================================================
+  Supply: 2500 ms, 16 tasks outstanding on CPU 1, work x8
+  Online CPUs:       6
+[INFO] Task 's3s_00' (id=2810) exiting
+[INFO] Task 's3s_07' (id=2817) exiting
+[INFO] Task 's3s_13' (id=2823) exiting
+[INFO] Task 's3s_20' (id=2830) exiting
+[INFO] Task 's3s_25' (id=2835) exiting
+[INFO] Task 's3s_32' (id=2842) exiting
+[INFO] Task 's3s_35' (id=2845) exiting
+[INFO] Task 's3s_42' (id=2852) exiting
+[INFO] Task 's3s_45' (id=2855) exiting
+[INFO] Task 's3s_50' (id=2860) exiting
+[INFO] Task 's3s_54' (id=2864) exiting
+[INFO] Task 's3s_58' (id=2868) exiting
+[INFO] Task 's3s_00' (id=2874) exiting
+[INFO] Task 's3s_01' (id=2875) exiting
+[INFO] Task 's3s_02' (id=2876) exiting
+[INFO] Task 's3s_10' (id=2884) exiting
+[INFO] Task 's3s_14' (id=2888) exiting
+[INFO] Task 's3s_19' (id=2893) exiting
+[INFO] Task 's3s_22' (id=2896) exiting
+[INFO] Task 's3s_29' (id=2903) exiting
+[INFO] Task 's3s_32' (id=2906) exiting
+[INFO] Task 's3s_37' (id=2911) exiting
+[INFO] Task 's3s_42' (id=2916) exiting
+[INFO] Task 's3s_45' (id=2919) exiting
+[INFO] Task 's3s_50' (id=2924) exiting
+[INFO] Task 's3s_52' (id=2926) exiting
+[INFO] Task 's3s_58' (id=2932) exiting
+[INFO] Task 's3s_62' (id=2936) exiting
+[INFO] Task 's3s_04' (id=2942) exiting
+[INFO] Task 's3s_06' (id=2944) exiting
+[INFO] Task 's3s_13' (id=2951) exiting
+[INFO] Task 's3s_19' (id=2957) exiting
+[INFO] Task 's3s_23' (id=2961) exiting
+[INFO] Task 's3s_31' (id=2969) exiting
+[INFO] Task 's3s_33' (id=2971) exiting
+[INFO] Task 's3s_38' (id=2976) exiting
+[INFO] Task 's3s_44' (id=2982) exiting
+[INFO] Task 's3s_48' (id=2986) exiting
+[INFO] Task 's3s_55' (id=2993) exiting
+[INFO] Task 's3s_57' (id=2995) exiting
+[INFO] Task 's3s_63' (id=3001) exiting
+[INFO] Task 's3s_02' (id=3004) exiting
+[INFO] Task 's3s_07' (id=3009) exiting
+[INFO] Task 's3s_08' (id=3010) exiting
+[INFO] Task 's3s_11' (id=3013) exiting
+[INFO] Task 's3s_15' (id=3017) exiting
+[INFO] Task 's3s_18' (id=3020) exiting
+[INFO] Task 's3s_24' (id=3026) exiting
+[INFO] Task 's3s_25' (id=3027) exiting
+[INFO] Task 's3s_28' (id=3030) exiting
+[INFO] Task 's3s_35' (id=3037) exiting
+[INFO] Task 's3s_38' (id=3040) exiting
+[INFO] Task 's3s_42' (id=3044) exiting
+[INFO] Task 's3s_45' (id=3047) exiting
+[INFO] Task 's3s_50' (id=3052) exiting
+[INFO] Task 's3s_55' (id=3057) exiting
+[INFO] Task 's3s_59' (id=3061) exiting
+[INFO] Task 's3s_63' (id=3065) exiting
+[INFO] Task 's3s_03' (id=3069) exiting
+[INFO] Task 's3s_08' (id=3074) exiting
+[INFO] Task 's3s_11' (id=3077) exiting
+[INFO] Task 's3s_16' (id=3082) exiting
+[INFO] Task 's3s_21' (id=3087) exiting
+[INFO] Task 's3s_27' (id=3093) exiting
+[INFO] Task 's3s_32' (id=3098) exiting
+[INFO] Task 's3s_39' (id=3105) exiting
+[INFO] Task 's3s_45' (id=3111) exiting
+[INFO] Task 's3s_47' (id=3113) exiting
+[INFO] Task 's3s_53' (id=3119) exiting
+[INFO] Task 's3s_59' (id=3125) exiting
+[INFO] Task 's3s_63' (id=3129) exiting
+[INFO] Task 's3s_02' (id=3132) exiting
+[INFO] Task 's3s_10' (id=3140) exiting
+[INFO] Task 's3s_14' (id=3144) exiting
+[INFO] Task 's3s_23' (id=3153) exiting
+[INFO] Task 's3s_24' (id=3154) exiting
+[INFO] Task 's3s_30' (id=3160) exiting
+[INFO] Task 's3s_33' (id=3163) exiting
+[INFO] Task 's3s_37' (id=3167) exiting
+[INFO] Task 's3s_43' (id=3173) exiting
+[INFO] Task 's3s_46' (id=3176) exiting
+[INFO] Task 's3s_50' (id=3180) exiting
+[INFO] Task 's3s_55' (id=3185) exiting
+[INFO] Task 's3s_59' (id=3189) exiting
+[INFO] Task 's3s_00' (id=3194) exiting
+[INFO] Task 's3s_02' (id=3196) exiting
+[INFO] Task 's3s_08' (id=3202) exiting
+[INFO] Task 's3s_12' (id=3206) exiting
+[INFO] Task 's3s_15' (id=3209) exiting
+[INFO] Task 's3s_19' (id=3213) exiting
+[INFO] Task 's3s_21' (id=3215) exiting
+[INFO] Task 's3s_24' (id=3218) exiting
+[INFO] Task 's3s_28' (id=3222) exiting
+[INFO] Task 's3s_32' (id=3226) exiting
+[INFO] Task 's3s_38' (id=3232) exiting
+[INFO] Task 's3s_44' (id=3238) exiting
+[INFO] Task 's3s_47' (id=3241) exiting
+[INFO] Task 's3s_54' (id=3248) exiting
+[INFO] Task 's3s_59' (id=3253) exiting
+[INFO] Task 's3s_00' (id=3258) exiting
+[INFO] Task 's3s_06' (id=3264) exiting
+[INFO] Task 's3s_08' (id=3266) exiting
+[INFO] Task 's3s_14' (id=3272) exiting
+[INFO] Task 's3s_17' (id=3275) exiting
+[INFO] Task 's3s_24' (id=3282) exiting
+[INFO] Task 's3s_27' (id=3285) exiting
+[INFO] Task 's3s_32' (id=3290) exiting
+[INFO] Task 's3s_36' (id=3294) exiting
+[INFO] Task 's3s_40' (id=3298) exiting
+[INFO] Task 's3s_44' (id=3302) exiting
+[INFO] Task 's3s_47' (id=3305) exiting
+[INFO] Task 's3s_53' (id=3311) exiting
+[INFO] Task 's3s_56' (id=3314) exiting
+[INFO] Task 's3s_60' (id=3318) exiting
+[INFO] Task 's3s_00' (id=3322) exiting
+[INFO] Task 's3s_05' (id=3327) exiting
+[INFO] Task 's3s_10' (id=3332) exiting
+[INFO] Task 's3s_12' (id=3334) exiting
+[INFO] Task 's3s_16' (id=3338) exiting
+[INFO] Task 's3s_18' (id=3340) exiting
+[INFO] Task 's3s_24' (id=3346) exiting
+[INFO] Task 's3s_25' (id=3347) exiting
+[INFO] Task 's3s_28' (id=3350) exiting
+[INFO] Task 's3s_35' (id=3357) exiting
+[INFO] Task 's3s_39' (id=3361) exiting
+[INFO] Task 's3s_43' (id=3365) exiting
+[INFO] Task 's3s_47' (id=3369) exiting
+[INFO] Task 's3s_51' (id=3373) exiting
+[INFO] Task 's3s_54' (id=3376) exiting
+[INFO] Task 's3s_60' (id=3382) exiting
+[INFO] Task 's3s_63' (id=3385) exiting
+[INFO] Task 's3s_05' (id=3391) exiting
+[INFO] Task 's3s_08' (id=3394) exiting
+[INFO] Task 's3s_14' (id=3400) exiting
+[INFO] Task 's3s_19' (id=3405) exiting
+[INFO] Task 's3s_25' (id=3411) exiting
+[INFO] Task 's3s_32' (id=3418) exiting
+[INFO] Task 's3s_40' (id=3426) exiting
+[INFO] Task 's3s_43' (id=3429) exiting
+[INFO] Task 's3s_50' (id=3436) exiting
+[INFO] Task 's3s_55' (id=3441) exiting
+[INFO] Task 's3s_59' (id=3445) exiting
+[INFO] Task 's3s_63' (id=3449) exiting
+[INFO] Task 's3s_05' (id=3455) exiting
+[INFO] Task 's3s_10' (id=3460) exiting
+[INFO] Task 's3s_19' (id=3469) exiting
+[INFO] Task 's3s_25' (id=3475) exiting
+[INFO] Task 's3s_32' (id=3482) exiting
+[INFO] Task 's3s_37' (id=3487) exiting
+[INFO] Task 's3s_44' (id=3494) exiting
+[INFO] Task 's3s_51' (id=3501) exiting
+[INFO] Task 's3s_54' (id=3504) exiting
+[INFO] Task 's3s_59' (id=3509) exiting
+[INFO] Task 's3s_63' (id=3513) exiting
+[INFO] Task 's3s_05' (id=3519) exiting
+[INFO] Task 's3s_12' (id=3526) exiting
+[INFO] Task 's3s_18' (id=3532) exiting
+[INFO] Task 's3s_24' (id=3538) exiting
+[INFO] Task 's3s_30' (id=3544) exiting
+[INFO] Task 's3s_37' (id=3551) exiting
+[INFO] Task 's3s_44' (id=3558) exiting
+[INFO] Task 's3s_50' (id=3564) exiting
+[INFO] Task 's3s_55' (id=3569) exiting
+[INFO] Task 's3s_61' (id=3575) exiting
+[INFO] Task 's3s_05' (id=3583) exiting
+[INFO] Task 's3s_10' (id=3588) exiting
+[INFO] Task 's3s_17' (id=3595) exiting
+[INFO] Task 's3s_22' (id=3600) exiting
+[INFO] Task 's3s_29' (id=3607) exiting
+[INFO] Task 's3s_36' (id=3614) exiting
+[INFO] Task 's3s_40' (id=3618) exiting
+[INFO] Task 's3s_44' (id=3622) exiting
+[INFO] Task 's3s_49' (id=3627) exiting
+[INFO] Task 's3s_53' (id=3631) exiting
+[INFO] Task 's3s_59' (id=3637) exiting
+
+  Results:
+    Issued:       829 (create failures 0)
+    Completed:    829 / 829
+    Supply:       2478537 us (dispatch start to last issue)
+    Wall-clock:   2518100 us (dispatch start to last completion)
+    Polls:        1631, with nothing outstanding during supply: 0
+
+    Per-CPU execution distribution:
+      CPU 0: 175 tasks (21.1%)
+      CPU 1: 162 tasks (19.5%)
+      CPU 2: 60 tasks (7.2%)
+      CPU 3: 81 tasks (9.7%)
+      CPU 4: 174 tasks (20.9%)
+      CPU 5: 177 tasks (21.3%)
+
+  c2t-format v2 mode=sustained run=4 cntfrq=31250000 cpus=6 tasks=829 depth=16 work=8 sustain_ms=2500
+  times in us from dispatch start; log = first 16 attempts as us-since-first-attempt + outcome (S ok, E empty, P preempt_disabled skip, X stale, I isolated, O other)
+  #1216 watch=cpu1; reasons T tick trampoline, C coop tick, P schedule() after a push, O other schedule(), B boot; w_in/win_n/win_sum_us/win_max_us in that order; w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,<500 us,<1,<2,<5,<10,>=10 ms after the tick; wlog = entry_us:dur_ns:reason, first 128 windows
+  c2t cpu=0 exec=175 att=1504 diag_att=1504 ok=175 diag_ok=175 iso=0 f_stale=1 f_pd=3 f_empty=1325 f_other=0 chk=0 v_pd=5 v_pd_work=0 v_busy=6 v_empty=6639 v_gen=0 v_state=50 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=131 first_ok_us=131 last_att_us=2518082 ticks=252 idle=0 sched=2184 lk_hw=1 log=0S,14805S,29614S,44466S,59286S,74124S,86218S,95306S,110177S,125020S,139815S,154620S,169469S,184278S,189057S,203905S w_in=1,0,0,1,0 w_in_unk=0 w_off=0,1,1,0,0,0,0,0 ph_w=1,1,4,9,14,45,77,151,449,753,0 ph_w_pd=1,0,0,0,0,0,1,0,1,0,0 ph_own=1,2,4,11,16,40,73,148,456,753,0 tick_n=252 tick_first_us=4825 tick_last_us=2516982 win_n=252,0,0,604,0 win_sum_us=1601,0,0,1857,0 win_max_us=8,0,0,3,0 wph=244,16,10,8,4,0,23,77,229,245,0 wlog=-
+  c2t cpu=1 exec=162 att=5 diag_att=5 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=2 f_empty=2 f_other=0 chk=1 v_pd=3 v_pd_work=0 v_busy=1 v_empty=19 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=829 dq_drains=36 dq_drain_us=2494313 dq_last_push_us=2478536 first_att_us=44185 first_ok_us=- last_att_us=2518090 ticks=252 idle=1 sched=415 lk_hw=1 log=0P,960047P,960707E,960713E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,0,0,0,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=2,0,0,0,0,0,2,0,1,0,0 tick_n=252 tick_first_us=4176 tick_last_us=2514304 win_n=252,0,38,123,0 win_sum_us=2695,0,112,361,0 win_max_us=18,0,3,3,0 wph=252,0,0,0,0,5,2,4,91,59,0 wlog=4179:4864:T,14179:10240:T,24181:9088:T,34180:8512:T,38487:3552:O,42798:2912:O,44184:11008:T,47125:3392:P,54181:11232:T,64183:9312:T,71434:3168:O,74185:10304:T,78501:3360:P,84184:11584:T,94184:8672:T,104185:7520:T,108498:3392:O,112810:2656:P,114185:13440:T,124187:9216:T,134186:10336:T,144187:11328:T,154188:9856:T,158509:3520:P,164188:12832:T,168505:3520:O,172819:2592:P,174188:13952:T,184189:10240:T,192820:3232:P,194190:12608:T,204190:9600:T,207145:3104:O,214193:11968:T,224190:9280:T,234192:8832:T,238508:3424:O,244192:10464:T,248514:3008:P,252825:2720:O,253046:2848:O,254194:12608:T,264194:7936:T,274193:7488:T,284195:10176:T,288515:3456:O,292827:2720:O,294196:12096:T,304195:8288:T,314197:11552:T,317371:3232:O,324197:11552:T,328517:3776:O,334197:12192:T,344198:10208:T,348513:3200:O,354199:11776:T,364198:8864:T,374200:10656:T,378519:2880:O,378960:2592:O,383273:2624:O,384202:11232:T,394199:7712:T,398512:3232:P,402828:2656:O,404200:11776:T,414204:8480:T,424202:7136:T,434202:9536:T,438519:3168:O,444203:13280:T,454204:9248:T,458516:3040:P,464205:12832:T,474204:9632:T,482829:3200:O,484205:12416:T,492828:3616:O,494206:10880:T,498524:3328:O,501472:2816:P,504207:13600:T,514207:9056:T,524207:7968:T,534208:10496:T,538528:3584:O,542839:2656:O,544209:10272:T,554208:7360:T,554418:2848:O,564210:13760:T,568530:3360:O,574210:11712:T,584210:8256:T,594211:10240:T,597368:2432:O,604212:11488:T,614212:8288:T,624212:9920:T,628525:3488:O,630313:2624:O,634214:10816:T,644213:11296:T,654215:9536:T,658527:3232:O,664214:14432:T,674216:10048:T,678533:3520:P,684215:12832:T,694217:8448:T,704216:10496:T,712838:3392:O,714217:11968:T,718536:3264:O,724217:11296:T,728536:2848:P,734219:14208:T,742852:2240:O,744219:12576:T,754219:8576:T,764220:10848:T,774220:10400:T,775802:2496:O,780117:2624:O,784221:12736:T,794221:10944:T,798536:3104:O
+  c2t cpu=2 exec=60 att=475 diag_att=475 ok=58 diag_ok=58 iso=0 f_stale=2 f_pd=407 f_empty=8 f_other=0 chk=0 v_pd=637 v_pd_work=373 v_busy=80 v_empty=1678 v_gen=0 v_state=19 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=2 dq_drains=2 dq_drain_us=1884280 dq_last_push_us=1876594 first_att_us=4180 first_ok_us=4184 last_att_us=2514315 ticks=252 idle=170 sched=482 lk_hw=1 log=0P,4S,10000P,14317S,20000P,28632S,30001P,40002P,42960S,50003P,57276S,60004P,70004P,71606S,80005P,85922S w_in=271,0,0,0,0 w_in_unk=0 w_off=21,42,76,130,2,0,0,0 ph_w=394,20,0,0,0,3,2,5,21,30,0 ph_w_pd=389,18,0,0,0,0,0,0,0,0,0 ph_own=389,25,0,0,0,3,2,5,21,30,0 tick_n=252 tick_first_us=4176 tick_last_us=2514304 win_n=252,0,0,64,0 win_sum_us=1695,0,0,186,0 win_max_us=21,0,0,3,0 wph=252,3,1,0,0,3,2,4,22,29,0 wlog=-
+  c2t cpu=3 exec=81 att=469 diag_att=469 ok=81 diag_ok=81 iso=0 f_stale=3 f_pd=363 f_empty=22 f_other=0 chk=0 v_pd=610 v_pd_work=336 v_busy=135 v_empty=1570 v_gen=0 v_state=30 v_cpu=1 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=4179 first_ok_us=4184 last_att_us=2514312 ticks=252 idle=141 sched=474 lk_hw=1 log=0P,5S,10001P,14320S,20003P,28637S,30003P,40004P,42965S,50004P,57283S,60004P,70005P,71608S,80005P,85921S w_in=233,0,0,1,0 w_in_unk=0 w_off=16,56,69,92,1,0,0,0 ph_w=367,14,0,0,0,5,3,7,38,35,0 ph_w_pd=351,12,0,0,0,0,0,0,0,0,0 ph_own=363,18,0,0,0,5,3,7,38,35,0 tick_n=252 tick_first_us=4176 tick_last_us=2514304 win_n=252,0,0,84,0 win_sum_us=1892,0,0,216,0 win_max_us=24,0,0,3,0 wph=252,2,1,0,0,5,2,7,32,35,0 wlog=-
+  c2t cpu=4 exec=174 att=199 diag_att=199 ok=174 diag_ok=174 iso=0 f_stale=1 f_pd=10 f_empty=14 f_other=0 chk=0 v_pd=83 v_pd_work=0 v_busy=62 v_empty=389 v_gen=0 v_state=35 v_cpu=1 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=6563 first_ok_us=6563 last_att_us=2516705 ticks=252 idle=8 sched=434 lk_hw=1 log=0S,9998S,28621S,29999S,57259S,60000S,85897S,90006S,114536S,120005S,140006S,157491S,160006S,186127S,190008S,214763S w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,3,1,0,2,6,5,121,61,0 ph_w_pd=0,0,0,0,0,0,0,0,10,0,0 ph_own=117,0,0,0,0,0,0,0,22,60,0 tick_n=252 tick_first_us=6557 tick_last_us=2516696 win_n=252,0,0,174,0 win_sum_us=2731,0,0,489,0 win_max_us=20,0,0,3,0 wph=252,0,0,0,0,1,1,2,86,84,0 wlog=-
+  c2t cpu=5 exec=177 att=200 diag_att=200 ok=177 diag_ok=177 iso=0 f_stale=1 f_pd=11 f_empty=11 f_other=0 chk=0 v_pd=12 v_pd_work=0 v_busy=18 v_empty=279 v_gen=0 v_state=29 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=6561 first_ok_us=6561 last_att_us=2516705 ticks=252 idle=9 sched=439 lk_hw=1 log=0S,10000S,28623S,30001S,57259S,60004S,85898S,90005S,114533S,120006S,140007S,156120S,160008S,184757S,190010S,210011S w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,3,0,4,8,5,118,62,0 ph_w_pd=0,0,0,0,0,0,0,0,11,0,0 ph_own=116,1,0,0,0,0,1,0,16,66,0 tick_n=252 tick_first_us=6557 tick_last_us=2516696 win_n=252,0,0,178,0 win_sum_us=2682,0,0,505,0 win_max_us=19,0,0,3,0 wph=252,0,0,0,0,1,2,2,87,86,0 wlog=-
+slmos>
+slmos>

@@ -1,0 +1,8 @@
+staged at 2026-11-11T07:32:16Z
+local  556bb72436a5f859594f2b9a6dbc8d38e124872a08d5e7a78aabfd64ba373a66
+remote 556bb72436a5f859594f2b9a6dbc8d38e124872a08d5e7a78aabfd64ba373a66  /root/slmos-r3-fixboot-59a85926.elf
+STAGED OK
+staged at 2026-11-11T08:05:01Z
+local  77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5
+remote 77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5  /root/slmos-r3-nc-instr.elf
+STAGED OK

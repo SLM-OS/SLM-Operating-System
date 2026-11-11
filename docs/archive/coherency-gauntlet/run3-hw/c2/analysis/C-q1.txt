@@ -1,0 +1,5 @@
+Q1: counted `C-nc-instr-kexec-run01.txt` .. `C-nc-instr-kexec-run20.txt` (20 files)
+  best thief CPU 5: median share 18.27%; 60% of it = 10.96%
+  CPU 2: median share 13.02% = 0.713 of best -> better than 60%
+  CPU 3: median share 15.16% = 0.830 of best -> better than 60%
+  runs with a non-owner CPU at ok=0: 0 of 20
