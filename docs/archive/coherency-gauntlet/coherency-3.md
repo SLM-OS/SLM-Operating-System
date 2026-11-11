@@ -1000,3 +1000,23 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   command echoes kept; five replies with a cut duplicate prompt, output
   complete.
 - 21:3xZ: block 2 of 4 (ncfix) started.
+
+## Entry 28 (21:58 UTC): fix C Jetson block 2 of 4 (ncfix, with the fix)
+
+- Agent `coherency-closeout-fixc-ncfix`, image ncfix (37939418 = main +
+  `--assert-shares` + idle WFE; elf 9def416e, checked), one kexec boot;
+  board back at SD Linux, released. Files `run3-hw/fixc/ncfix-*.txt` on
+  `gauntlet-3-hw-jetson` @ 9e28b3f7 (45 files, `commit: 37939418` in each).
+- `--assert-shares`: **PASS 20 of 20**, FAIL 0. Median share CPU 0 16.5%,
+  1 16.3%, 2 16.7%, 3 16.7%, 4 16.8%, 5 16.7%; every CPU's range within
+  16.0 to 17.0% (`ncfix-sustain-run01..20.txt`). Burst median 6923 us
+  (6917 to 6934), against nc's 10332 (7303 to 13756); 20 of 20 completed.
+  `bench smp` 5/5 completed.
+- **Idle wake rate (the cost):** at rest 77449, 73477, 72782, 76370, 55864,
+  53548 idle-loop passes per second on CPUs 0 to 5 (median of
+  `ncfix-idlewakes-run01..03.txt`), against 100.0 on every CPU without the
+  fix (nc); ticks 99.9 to 100.1/s in both. During the sustained runs 0.0,
+  1737, 2367, 2766, 2535, 2718/s against nc's 0.0 to 14.2/s. WFE returns
+  almost at once: idle CPUs effectively poll. Hypothesis, untested: the
+  generic-timer event stream (CNTKCTL_EL1.EVNTEN) or an event left
+  pending by frequent SEVs. The cost is the user's decision.
