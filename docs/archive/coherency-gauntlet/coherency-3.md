@@ -1126,3 +1126,22 @@ open, cycle count 14), powered on, online. Both as found.
   passes/s per CPU at rest against 100) and is the user's decision.
 - Filed during the close-out: #1224 (Jetson test-kernel camera fault, by
   the removal lab agent). Updated: #1219 (twice), #1205.
+
+## Entry 33 (23:25 UTC): item 1, #1225 rebased onto current main; /ci running
+
+- The user authorized merging #1225 and a split-out check PR (no other
+  merges; no lab time unless a step needs it).
+- main had moved since #1225's base by one commit, e73b9b61 (the ADR 0007
+  status and run 3 paragraph), which touches only
+  `docs/adr/0007-cross-cpu-coherency.md`; no removal commit touches that
+  file (0 commits in e4a33790..5d70fdbd), so nothing outside the removal's
+  files can conflict. Re-parented the 8 commits onto e73b9b61 with the ADR
+  file from main (`run3-tools/c0/graft.sh.txt`): **#1225 head 0ae17e0f**
+  (lease on 5d70fdbd); `git diff <base> <tip>` byte-identical before and
+  after; 0ae17e0f's tree differs from 5d70fdbd's only by that file.
+- /ci on 0ae17e0f running. GitHub's mergeable state read UNKNOWN before the
+  push (still computing); it is read again before the merge.
+- Item 2 prepared: the `--assert-shares` commit on `c2/wake-on-push-v1`
+  (d7ede5d0) differs from the form that ran in image c77156b2 only by an
+  `#if defined(PLATFORM_HAS_NC_MEMORY)` branch around two `extern` lines,
+  dead after the removal. The split branch takes the c77156b2 form.
