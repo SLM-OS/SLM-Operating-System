@@ -900,3 +900,29 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   5d70fdbd): one `#if defined(PLATFORM_HAS_NC_MEMORY)` extern block that
   #1217 added to `kernel/src/shell_sys.c` is dead text under the removal
   (the macro is never defined there; the cacheable branch compiles).
+
+## Entry 25 (19:18 UTC): fix C offline report (lab and PR pending)
+
+- Builder handed back about 19:30Z before the Jetson grant; no labctl
+  call, no PR. Heads: `c2/wake-on-push-v1` @ 37939418 = e4a33790 + A
+  d7ede5d0 (`--assert-shares`, pure `steal_shares_check()` in
+  `steal_trace.h`, `kernel/tests/test_steal_shares.c` with 9 cases,
+  `bench idle-wakes [ms]`, an `iw mode=sustained` line per CPU, docs) +
+  B 37939418 (idle WFI to WFE, production message, comments and docs);
+  `c2/fixc-removal` c77156b2, `c2/fixc-removal-fix` 5fe8c70b on 5d70fdbd.
+- /ci on 37939418: the ten ci skill steps passed
+  (`run3-tools/fixc/ci-37939418/` @ 11788aee). Extra `WORK_STEALING=ON`:
+  A+B 2 of 5 passed, every failure #1219's signature; A alone 4 of 4
+  passed; the QEMU objects at A and A+B are identical apart from two smp.c
+  `__LINE__` constants moved by B's comment (`run3-tools/fixc/ws-compare/`),
+  so the failures are #1219, not B. `make test` on A passed. A defect of
+  the builder's own (a test expecting 1300 instead of 1400) was caught by
+  `make test` and fixed before any result was claimed
+  (`test-A-43d07cf1-failed/`).
+- Jetson images (`run3-tools/fixc/images/MANIFEST.txt`): nc d7ede5d0
+  (elf 9272611b, idle 1 wfi), ncfix 37939418 (9def416e, 1 wfe), removal
+  c77156b2 (dad6ca01, 1 wfi), removalfix 5fe8c70b (35a73609, 1 wfe).
+- Noted: B also changes Pi 5's default idle wait (same branch); Pi 5 is not
+  measured by this step. `kernel/CLAUDE.md` ("Idle Task DAIF") would need
+  updating if B lands. Each sustained run is about 15 KB of serial output,
+  so the fix C lab runs as one agent per image.
