@@ -220,3 +220,10 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   overlapping other host builds; same configurations passed without the
   overlap. Labels bug, platform:qemu, sub:ai-runtime, P3-low; Backlog.
   Not worked this run.
+
+## Entry 3 (04:50 UTC): C3's bare removal image built
+
+- `removal-bare-79c10261`, head 79c10261, default Jetson vars, banner
+  `build 20261111044836 (79c10261)`; elf sha256 502f78ba, bin sha256
+  1ef9dc39 (`run3-tools/c0/cells-MANIFEST.txt`). This is the image C3
+  boot-tests on both Jetson paths.

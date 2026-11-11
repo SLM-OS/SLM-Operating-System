@@ -16,3 +16,6 @@ removal-instr head=8fc7c88a vars="" banner="  SLM-OS v0.4.0 build 20261111042552
 removal-instr-v1 head=0dfaae0c vars="" banner="  SLM-OS v0.4.0 build 20261111042725 (0dfaae0c)"
   elf sha256=94cb467aaaf4c7b8408db63627d270a38095d6058b8d323df49a9751c78f4acb size=11024664
   bin sha256=54c4975b45a9542bb6c65bfd25db197ebc478395fef79da05f33a57dc54fceee size=9061448
+removal-bare-79c10261 head=79c10261 vars="" banner="  SLM-OS v0.4.0 build 20261111044836 (79c10261)"
+  elf sha256=502f78ba5477c5ef54efbb1e1acb705c83c784f7ab9e6f18d4ac374d0e012d16 size=10957824
+  bin sha256=1ef9dc3922cc45d6e7f3873dbcd80956162e0841a12c33de5399c3e34ee4bb63 size=8995912
