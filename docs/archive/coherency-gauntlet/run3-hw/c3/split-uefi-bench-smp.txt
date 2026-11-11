@@ -1,0 +1,34 @@
+# coherency run 3 C3, PR head coherency-nc-axis-pi5 @ e5b24894 (jetson prod slmos.bin 977bafa0), jetson-nano-2, UEFI-direct boot 01, bench smp
+# labctl serial_send reply 1 of 2
+# call 2026-11-11T11:21:52.769Z  reply 2026-11-11T11:21:52.944Z  tool_use_id toolu_013rbeD8XfBCjsUwDGaVYGxu
+# args {"capture_timeout": 10, "capture_until": "slmos>", "data": "cat /sys/version", "port_name": "jetson-nano-2"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+s�����ͽversion
+name:    SLM-OS
+version: 0.4.0
+build:   20261111102554
+commit:  e5b24894
+slmos>
+slmos>
+# labctl serial_send reply 2 of 2
+# call 2026-11-11T11:21:59.526Z  reply 2026-11-11T11:21:59.740Z  tool_use_id toolu_018b4kruST34fnoQTFiEtG1o
+# args {"capture_timeout": 60, "capture_until": "slmos>", "data": "bench smp", "port_name": "jetson-nano-2"}
+[Captured 18 lines in 0.0s, pattern 'None' matched]
+rench smp
+
+SMP Cross-CPU Dispatch Test
+===========================
+  Dispatched 'smp1' to CPU 1
+  Dispatched 'smp2' to CPU 2
+  Dispatched 'smp3' to CPU 3
+  Dispatched 'smp4' to CPU 4
+  Dispatched 'smp5' to CPU 5
+[INFO] Task 'smp4' (id=15) exiting
+  CPU 1: COMPLETED (ran on CPU 3)
+  CPU 2: COMPLETED (ran on CPU 3)
+  CPU 3: COMPLETED (ran on CPU 3)
+  CPU 4: COMPLETED (ran on CPU 0)
+  CPU 5: COMPLETED (ran on CPU 3)
+
+slmos>
+slmos>

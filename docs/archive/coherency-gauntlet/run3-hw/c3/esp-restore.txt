@@ -1,0 +1,19 @@
+# coherency run 3 C3, ESP restore on jetson-nano-2 after the PR-head (e5b24894) UEFI block
+# 1. /root/slmos-efi-pre1193.efi fetched by scp; local sha256:
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  slmos-efi-pre1193.efi
+# 2. scripts/jetson-uefi-deploy.sh 192.168.4.5 slmos-efi-pre1193.efi:
+staged sha256=789cba626338 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+# 3. one BootNext boot of that image (esp-restore-boot.txt), then power_cycle to SD Linux
+# 4. esp-check.sh from SD Linux:
+check at 2026-11-11T11:53:48Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.az8yiG5MUW/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.az8yiG5MUW/EFI/L4T/l4t.efi
+ESP unmounted
+# Result: SLMOS.efi 789cba62, l4t.efi 91db497c, BootCurrent 0001, no BootNext line, fsck rc=0, ESP unmounted.
+# Board left at SD Linux, powered on; claim released.

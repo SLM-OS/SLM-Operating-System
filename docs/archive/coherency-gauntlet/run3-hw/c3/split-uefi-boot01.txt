@@ -1,0 +1,384 @@
+# coherency run 3 C3, PR head coherency-nc-axis-pi5 @ e5b24894 (jetson prod slmos.bin 977bafa0), jetson-nano-2, UEFI-direct boot 01, from SD Linux: esp-check.sh (previous ESP write, uefi-log.txt), scripts/jetson-uefi-deploy.sh (BootNext, reboot), then this capture to slmos>; power_cycle to SD Linux before each deploy; power_cycle and serial_capture separate calls, no other labctl caller (capture began at the firmware menu, after the Linux shutdown)
+# labctl serial_capture reply 1 of 1
+# call 2026-11-11T11:20:50.056Z  reply 2026-11-11T11:21:40.445Z  tool_use_id toolu_01QJfRsNHbLUwEUdVDNdbuVL
+# args {"port_name": "jetson-nano-2", "timeout": 240, "until_pattern": "slmos>|PANIC|Unhandled Exception|Powering off|ABORT"}
+[Captured 379 lines in 50.3s, pattern 'slmos>|PANIC|Unhandled Exception|Powering off|ABORT' matched]
+
+
+
+
+
+
+
+
+
+
+Jetson System firmware version 36.4.7-gcid-42132812 date 2025-09-18T22:10:05+00:
+00
+ESC   to enter Setup.
+F11   to enter Boot Manager Menu.
+Enter to continue boot.
+......[slmos] A efi_entry
+[slmos] CurrentEL=0x0000000000000008
+[slmos] HCR_EL2  =0x0000000088000000
+[slmos] load     =0x000000025B5F0000
+[slmos] link     =0x0000000080000000
+[slmos] size     =0x0000000002BD0000
+[slmos] fdt      =0x00000002679DF000
+[slmos] fdt_size =0x00000000000F39DC
+[slmos]  mm 07 0x0000000080000000 +0x0003E000 link
+[slmos]  mm 01 0x000000025B5E3000 +0x00002BE0 load
+[slmos]  mm 04 0x0000000266CAC000 +0x00003CA4 fdt
+[slmos] reloc: copy to link address after EBS
+[slmos] model qwen2.5-1.5b-instruct-q4_k_m.gguf: reading 1117320736 bytes to 0x0
+0000001FD600000
+[slmos] model 128 / 1065 MiB
+[slmos] model 256 / 1065 MiB
+[slmos] model 384 / 1065 MiB
+[slmos] model 512 / 1065 MiB
+[slmos] model 640 / 1065 MiB
+[slmos] model 768 / 1065 MiB
+[slmos] model 896 / 1065 MiB
+[slmos] model 1024 / 1065 MiB
+[slmos] model qwen2.5-1.5b-instruct-q4_k_m.gguf: read 5960 ms (178 MiB/s), hash
+613 ms, clean 38 ms
+[slmos]  mm 07 0x0000000080000000 +0x0003E000 nc
+[slmos] nc block: OS-owned, clean+invalidate at exit
+[slmos] C calling ExitBootServices
+EL2
+
+========================================
+  SLM-OS v0.4.0 build 20261111102554 (e5b24894)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: UEFI-direct (EFI stub)
+[INFO] Running at EL2 (VHE) on Jetson Orin Nano
+[INFO] DTB parsed successfully at 0x2679df000
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x80000000 - 0x280000000 (8192 MB)
+  UART:      0xc280000 (IRQ 146)
+  GIC dist:  0xf400000
+  GIC cpu:   0xf440000
+  CPUs:      6
+  Timer IRQ: 26
+
+Memory Layout:
+  .text:   0x80000000 - 0x8028e5e8
+  .data:   0x80870000 - 0x80894400
+  .bss:    0x808a0000 - 0x82bc0170
+  End:     0x82bd0000
+  RAM:     0x80000000 - 0x280000000 (8192 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x80ac7000
+  Blocks mapped: 1025
+  Bytes mapped: 2050 MB
+  L1[0]: 0x80ac5003 (covers VA 0x0)
+  L1[1]: 0x80ac2003 (covers VA 0x40000000)
+  L1[2]: 0x80ac6003 (covers VA 0x80000000)
+  L1[3]: 0x80ac4003 (covers VA 0xc0000000)
+  L1[4]: 0x4000010000070d (covers VA 0x100000000)
+  L1[5]: 0x4000014000070d (covers VA 0x140000000)
+  L1[6]: 0x4000018000070d (covers VA 0x180000000)
+  L1[7]: 0x400001c000070d (covers VA 0x1c0000000)
+  L1[8]: 0x4000020000070d (covers VA 0x200000000)
+  L1[9]: 0x80ac1003 (covers VA 0x240000000)
+  L1[212]: 0x80ac3003 (covers VA 0x3500000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x80000000) = 0x80000000
+  [PASS] virt_to_phys(0xffffff8080000000) = 0x80000000
+  [PASS] is_mapped(0x80000000) = true
+  [PASS] is_mapped(0x2c0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+[ga10b-reserve] FECS_CURRENT_CTX=0xbadf5546 (priv-bad poison — GPU likely power-gated). Skipping inst-block reservation.
+[ga10b-reserve] scanning DRAM for handoff magic (all pipeline kinds)...
+[ga10b-reserve] kind=0 (mnist): no handoff
+[ga10b-reserve] kind=1 (sched_mlp): no handoff
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[INFO] Boot model qwen2.5-1.5b-instruct-q4_k_m.gguf: 1065 MiB at 0x1fd600000 (stub read 5960 ms, hash 613 ms, clean 38 ms; kernel verify 270 ms)
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x82bd0000 - 0x280000000
+  Total pages:     2085936 (8343744 KB)
+  Free pages:      1533056 (6132224 KB)
+  Used pages:      552880 (2211520 KB)
+  Reserved:        11216 pages (kernel)
+
+  Free list distribution:
+    Order  4 (   64 KB): 2 blocks
+    Order  5 (  128 KB): 3 blocks
+    Order  6 (  256 KB): 2 blocks
+    Order  7 (  512 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 3 blocks
+    Order 10 ( 4096 KB): 5 blocks
+    Order 11 ( 8192 KB): 3 blocks
+    Order 12 (16384 KB): 5 blocks
+    Order 13 (32768 KB): 3 blocks
+    Order 14 (65536 KB): 6 blocks
+    Order 15 (131072 KB): 6 blocks
+    Order 16 (262144 KB): 4 blocks
+    Order 17 (524288 KB): 1 blocks
+    Order 18 (1048576 KB): 1 blocks
+    Order 19 (2097152 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xbde00000 - 0xbe000000 (2048 KB)
+[INFO] NC memory: clean+invalidate by VA, 32768 lines of 64 B, 54165 us; 0 changed, 0 restored in the first 20 KB (hash 0xf594a267d429d586 -> 0xf594a267d429d586)
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv3
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 6 CPUs configured
+[INFO] SMP: 5/5 secondary CPUs online
+[INFO] SMP: total 6 CPUs active
+[INFO] cpufreq: CPU 1 NDIV 157 (2009 MHz) -> 135 (1728 MHz), matching CPU 0
+[INFO] cpufreq: CPU 2 NDIV 157 (2009 MHz) -> 135 (1728 MHz), matching CPU 0
+[INFO] cpufreq: CPU 3 NDIV 157 (2009 MHz) -> 135 (1728 MHz), matching CPU 0
+[INFO] cpufreq: CPU 4 NDIV 157 (2009 MHz) -> 135 (1728 MHz), matching CPU 0
+[INFO] cpufreq: CPU 5 NDIV 157 (2009 MHz) -> 135 (1728 MHz), matching CPU 0
+
+SMP Validation Tests:
+  [PASS] All 6 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU 4 online flag set
+  [PASS] CPU 5 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO]   1 boot model(s) at /boot/models
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 65536 KB (16384 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (16384 blocks x 4096 bytes = 65536 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (16384 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x180000000 (1024 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (1024 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[INFO] HSP@0x3c00000: DIMENSIONING=0x0008a228 (SM=8 SS=2 AS=2)
+[INFO] HSP doorbells: CCPLEX@0x3c90100 BPMP@0x3c90300
+[INFO] BPMP/IVC: TX@0x40070000 RX@0x40071000 (pre-handshake)
+[INFO] BPMP/IVC: initial TX state=0x00000000 count=696 (rx-count observed by us=696)
+[INFO] BPMP/IVC: initial RX state=0x00000000 count=696 (rx-count observed by us=696)
+[INFO] IVC: handshake complete (us=Established, peer observed Ack)
+[INFO] BPMP init: rc=0
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] BPMP: MRQ_PING round-trip OK
+[INFO] EMC: 204 MHz (rc=0) -> floor 3199 MHz, BPMP chose 3199, reads 3199 MHz (rc=0)
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] fan: PWM3 at 9600000 Hz (pfm 0), level 64/255, tachometer on
+[INFO] GPU raw BOOT_0 read: 0xb7b000a1 (expect 0xB7B000A1 for GA10B)
+[GPU] Registered driver: nvidia
+[GPU] Initializing nvidia driver...
+[INFO] GPU-NV: Probing NVIDIA GPU at 0x17000000...
+[GPU-NV] NVIDIA GPU detected: GA10B (Jetson Orin)
+[GPU-NV]   BOOT_0:  0xb7b000a1
+[GPU-NV]   BOOT_42: 0x17ba1000
+[GPU-NV]   Chip ID: 0x17b (arch=0x17, impl=0xb)
+[GPU-NV]   Silicon: rev 10.1
+[GPU-NV]   Ampere:  yes
+[GPU-NV]   Enable:  0x40000000
+[GPU] Initialization complete
+[GSP-JETSON] platform shim installed
+[INFO] ga10b-cold: step 1 (power)
+[INFO] ga10b-cold: clk gpusysclk at 1020 MHz
+[INFO] ga10b-cold: clk gpc0clk at 1020 MHz
+[INFO] ga10b-cold: power on, BOOT_0=0xb7b000a1 PMC_ENABLE=0x40000000 opt_gpc=0x2
+[INFO] ga10b-cold: step 2 (pri)
+[INFO] ga10b-cold: PRI ring up (fbp=0x2 gpc=0x1)
+[INFO] ga10b-cold: step 3 (engines)
+[INFO] ga10b-cold: engines up: DEVICE_ENABLE=0x00001002 PMC_ENABLE=0x50000000 FECS_MAILBOX0=0x00000000
+[INFO] ga10b-cold: step 4 (fb)
+[INFO] ga10b-cold: FB flush page 0x23ff91000, MMU debug wr 0x23ff92000 rd 0x23ff93000
+[INFO] ga10b-cold: step 5 (gr_hw)
+[INFO] ga10b-cold: GR non-ctx loads done (582 writes)
+[INFO] ga10b-cold: step 6 (acr)
+[INFO] ga10b-cold: LS blob 0xfff00000 (266496 bytes), desc 0x23ff94000, WPR 0x27d000000+0x7e0000
+[INFO] ga10b-cold: ACR done CPUCTL=0x00000010 MAILBOX0=0x00000000 MAILBOX1=0x00000002
+[INFO] ga10b-cold: step 7 (pmu)
+[INFO] pmu-fw: ELF-in-place enabled, mapping all eligible sections as elf-in-place!
+[INFO] pmu-fw: ELF ODP copy-on-write enabled, double-mapping paged RW sections as copy-on-write run-in-place ELF
+[INFO] pmu-fw: Normalized section addrs for 5 run-in-place ELF sections!
+[INFO] pmu-fw: ***Initializing PMU application***
+[INFO] pmu-fw: initPmuApp
+[INFO] ga10b-cold: PMU RTOS up (cmd queue 1, 0 msgs)
+[INFO] ga10b-cold: step 8 (falcons)
+[INFO] ga10b-cold: FECS/GPCCS running, GR context image 0x7d500 bytes
+[INFO] ga10b-cold: step 9 (gr_init)
+[INFO] ga10b-cold: GR init support done (157 table writes)
+[INFO] ga10b-cold: step 10 (golden)
+[INFO] ga10b-cold: golden context image saved (0x7d500 bytes)
+[INFO] ga10b-cold: step 11 (channel)
+[INFO] ga10b-cold: channel 1 (TSG 1) on the runlist, doorbell token 0x1, inst 0x82bd9000
+[INFO] ga10b-cold: step 12 (mnist)
+[INFO] mnist-gpu: 8-op pipeline installed (v7): ops 0xfff91000, input 0xfffdb000, logits 0xfff90000, QMD pool 0xffd00000 (1024 slots), shaders 3200/896/17664/3584 B
+[INFO] ga10b-cold: step 13 (policies)
+[INFO] sched-mlp-gpu: 8-op pipeline built (v7, kind 1, stored): ops 0xffdd7000, input 0xfff96000 (432 B), result 0xffdd6000 (168 B), QMD pool 0xbdc00000 (1024 slots)
+[INFO] eviction-qnet-gpu: 9-op pipeline built (v7, kind 2, stored): ops 0xbdc78000, input 0xbdc54000 (6912 B), result 0xbdc77000 (256 B), QMD pool 0xbdc80000 (1024 slots)
+[oplib] stage_to_gpu: 307456 B SASS staged at gpu_va=0x4266000 (cold-vm, self-allocated 512 KB pool, base phys=0xbdd00000, cbuf gpu_va=0x42e6000)
+[oplib-probe] RMSNORM=Simt ROPE=Simt EMBEDDING=Simt Q4K_DOT=Simt Q4K_GEMM=Cpu GQA_ATTN=Simt SWIGLU=Simt LM_HEAD=Cpu
+[oplib-cold] attached to channel 1 (inst 0x82bd9000): pool gpu_va=0x4266000, cbuf 0x42e6000, QMD pool from handoff, weights pool 0 MB, 6 ops at Simt
+[INFO] GA10B cold bring-up complete — GPU compute available
+[INFO] pcie: no backend available on this platform (-4)
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+[INFO] xhci: UEFI-direct boot — bringing XUSB up from cold
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] xusb-cold: step 1/5
+[INFO] xusb-cold: step 2/5
+[INFO] xusb-cold: step 3/5
+[INFO] xusb-cold: fuse USB_CALIB=0x08a08890 EXT=0x00002227 squelch=0 rpd=7
+[INFO] xusb-cold: step 4/5
+[INFO] xusb-cold: step 5/5
+[INFO] xusb-cold: controller ready, CAPLENGTH=0x20 USBSTS=0x00000011
+[INFO] xhci: FPCI dev/vendor=0x229810de (expect 0x229810de), BAR2[0]=0x00140009
+[INFO] xhci: pre-config CFG_1=0x00b00006 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: post-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: CSB probe FALC_CPUCTL=0xffffffff (STARTCPU=1 HALTED=1 STOPPED=1)
+[INFO] xhci: CSB probe MP_APMAP=0xffffffff (BOOTPATH=1)
+[INFO] xhci: CSB probe CSBRANGE readback=0x0000080c (expected 0x0000080c — MP_APMAP's page)
+[INFO] xhci: HCI v1.20, 36 slots, 8 ports, 5 intrs, 64-bit addr, 64-byte ctx
+[INFO] xhci: pre-reset USBCMD=0x00000000 USBSTS=0x00000011
+[INFO] xhci: skipping HCRST on Tegra (Falcon-reset is BPMP-only); using the freshly powered halted state as the init baseline
+[INFO] xhci: allocated 3 scratchpads (4096 bytes each)
+[INFO] xhci: pre-program DCBAAP=0000000000000000 CRCR=0000000000000000 CONFIG=0x00000000 USBSTS=0x00000011
+[INFO] xhci: inherited DCBAA probe skipped (ptr=0x0)
+[INFO] xhci: post-RUN write USBCMD=0x00000001 USBSTS=0x00000010
+[INFO] xhci: controller running (USBSTS=0x00000010)
+[INFO] xhci: cached Tegra FPCI context hs_pls=0x00000000 fs_pls=0x00000000 hsfs_speed=0x00000000 hsfs_pp=0x00000000 aru_ctx=0x00000000 axi=0x00000005 cfg24=0x00002032 cfg16=0x00000000
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS)
+[INFO] xhci: inherited-slot probe leaving slot 1 EP0 untouched for adoption
+[INFO] xhci: inherited-slot probe leaving slot 3 EP0 untouched for adoption
+[INFO] xhci: inherited-slot scrub found no live slots
+[INFO] xhci: registered with usb_core — running Phase 3A Steps 5-7
+[INFO] xhci: cold boot — device on USB2 PORTSC[5]=0x000202e1, enumerating
+[INFO] xhci: pre-reset UTMI lane 1 mux 0x00000055->0x00000055 cap 0x00000111->0x00000111 bias 0x060e0338->0x060e0338 ctl0 0x02cc88d1->0x02cc88d1 ctl1 0x1e101008->0x1e101008
+[INFO] xhci: PORTSC[5] acked change bits for pre-reset cleanup (0x000202e1 -> 0x000002e1)
+[INFO] xhci: PORTSC[5] reset complete (attempt 1, portsc=0x00200e03 -> 0x00000e03)
+[INFO] xhci: post-reset speed 3 (was 0 on pre-reset scan)
+[INFO] xhci: retained slot1 handoff unavailable on high-speed root path
+[INFO] xhci: slot 1 enabled for port 6
+[INFO] xhci: address ctx route=0x0 speed_id=3 root_port=6 slot_dw0=0x08300000 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0a9c1 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: slot 1 addressed (speed=3, port=6, BSR=0, address 1)
+[INFO] xhci: post-address local devctx=0xbde09980 slot route=0x0 speed=3 ctx=1 root=6 addr=1 state=addressed dw0=0x08300000 dw1=0x00060000 dw2=0x00000000 dw3=0x10000001
+[INFO] xhci: post-address local devctx ep0 state=running type=4 mps=64 tr=0xbde0a9c0 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0a9c1 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: retained descriptor bounce @0xbde0adc0 len=256
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xbde0adc0 len=64
+[INFO] usb_core: reusing inherited device address 1 after initial descriptor
+[INFO] xhci: batching CONFIGURE_ENDPOINT slot=1 endpoints=2 max_dci=3 first_ep=0x81
+[INFO] xhci: configure ep 0x81 slot=1 dci=3 speed=3 raw_interval=12 encoded_interval=11 ep_dw0=0x000b0000 ep_dw1=0x0001003e ep_dw2=0xbde0aec1 ep_dw3=0x00000000 ep_dw4=0x00010001
+[INFO] xhci: configure ep 0x81 slot=1 dci=3 speed=3 raw_interval=12 encoded_interval=11 ep_dw0=0x000b0000 ep_dw1=0x0001003e ep_dw2=0xbde0b2c1 ep_dw3=0x00000000 ep_dw4=0x00010001
+[INFO] xhci: ep 0x81 configured (dci=3, type=7, mps=1)
+[INFO] xhci: ep 0x81 configured (dci=3, type=7, mps=1)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x5489 class=0x09
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] xhci: slot 2 enabled for port 6
+[INFO] xhci: address ctx route=0x3 speed_id=3 root_port=6 slot_dw0=0x08300003 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0c701 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: slot 2 addressed (speed=3, port=6, BSR=0, address 2)
+[INFO] xhci: post-address local devctx=0xbde0b6c0 slot route=0x3 speed=3 ctx=1 root=6 addr=2 state=addressed dw0=0x08300003 dw1=0x00060000 dw2=0x00000000 dw3=0x10000002
+[INFO] xhci: post-address local devctx ep0 state=running type=4 mps=64 tr=0xbde0c700 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0c701 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: using NC bounce for child initial descriptor buf=0xbde0adc0 len=64 route=0x3 root_port=6
+[INFO] xhci: queueing child post-short NO_OP after event retirement (slot=2)
+[INFO] xhci: child post-short NO_OP cc=1 (slot=2)
+[INFO] usb_core: reusing inherited device address 2 after initial descriptor
+[INFO] usb_core: selecting CDC-ECM config index 1 value 2 over default config index 0
+[INFO] xhci: batching CONFIGURE_ENDPOINT slot=2 endpoints=3 max_dci=7 first_ep=0x83
+[INFO] xhci: configure ep 0x83 slot=2 dci=7 speed=3 raw_interval=8 encoded_interval=7 ep_dw0=0x00070000 ep_dw1=0x0010003e ep_dw2=0xbde0cb01 ep_dw3=0x00000000 ep_dw4=0x00100010
+[INFO] xhci: configure ep 0x81 slot=2 dci=3 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000036 ep_dw2=0xbde0cf01 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: configure ep 0x02 slot=2 dci=4 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000016 ep_dw2=0xbde0d301 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: ep 0x83 configured (dci=7, type=7, mps=16)
+[INFO] xhci: ep 0x81 configured (dci=3, type=6, mps=512)
+[INFO] xhci: ep 0x02 configured (dci=4, type=2, mps=512)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] xhci: ep 0x02 already configured (dci=4)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x00
+[INFO] usb_core: hub port 3: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+[INFO] xhci: hot-plug ready — waiting for USB device attach (see #309 for the re-plug requirement on kexec boots)
+[INFO] EMC: 3199 MHz at the end of boot (51 checks, 0 drops)
+
+[INFO] SMP: run queues in NC memory at 0xbde0d700
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'net_pump'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] cdc_ecm: activated interface 1 alt 1
+[INFO] cdc_ecm: probed — mac=a0:ce:c8:0e:9a:21 mtu=1514 bulk_in=0x81 bulk_out=0x02
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 mode[INFO] cdc_ecm: notification endpoint 0x83 on ctrl iface 0
+l preload(s) from /mnt/files/preload.conf
+[INFO] Initializing network subsystem...
+[INFO] cdc_ecm: NC DMA pools ready (rx=4 tx=4 size=2048 notify=16)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: a0:ce:c8:0e:9a:21
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP auto-start deferred until link-ready (timeout 10000 ms)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+[INFO] cdc_ecm: network connection down (if=0)
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>

@@ -1,0 +1,150 @@
+=== uefi-boot01: esp-check before deploy
+check at 2026-11-11T11:20:24Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+405c7b43c9e428fb20f4570506b779853176e10e9dbfd482c31c9d1ad6535d8a  /tmp/tmp.zamue7dKw9/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.zamue7dKw9/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot01: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:20:25Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot02: esp-check before deploy
+check at 2026-11-11T11:24:01Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.F7r27zrt3Q/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.F7r27zrt3Q/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot02: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:24:03Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot03: esp-check before deploy
+check at 2026-11-11T11:27:10Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.I8Ytu4JbcZ/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.I8Ytu4JbcZ/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot03: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:27:11Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot04: esp-check before deploy
+check at 2026-11-11T11:30:14Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.siKOcqYmN3/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.siKOcqYmN3/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot04: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:30:15Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot05: esp-check before deploy
+check at 2026-11-11T11:33:02Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.1kp9A5QvYm/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.1kp9A5QvYm/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot05: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:33:04Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot06: esp-check before deploy
+check at 2026-11-11T11:35:45Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.28RNuc8iG9/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.28RNuc8iG9/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot06: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:35:46Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot07: esp-check before deploy
+check at 2026-11-11T11:38:31Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.b96GDs40d0/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.b96GDs40d0/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot07: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:38:33Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot08: esp-check before deploy
+check at 2026-11-11T11:41:20Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.hHqHu8ejwH/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.hHqHu8ejwH/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot08: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:41:21Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot09: esp-check before deploy
+check at 2026-11-11T11:44:32Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.Tr5DUb7gqM/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.Tr5DUb7gqM/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot09: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:44:33Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
+=== uefi-boot10: esp-check before deploy
+check at 2026-11-11T11:47:18Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2228/130892 clusters
+fsck rc=0
+977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  /tmp/tmp.3l3NjnoUeD/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.3l3NjnoUeD/EFI/L4T/l4t.efi
+ESP unmounted
+=== uefi-boot10: deploy 977bafa0689f3390fa37d9d9bd20a1b08633198d97a114f4eb7d82e09f729a57  img/jetson-prod-e5b24894.bin
+deploy at 2026-11-11T11:47:19Z
+staged sha256=977bafa0689f on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+deploy rc=0
