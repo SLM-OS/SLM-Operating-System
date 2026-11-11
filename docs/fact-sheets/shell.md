@@ -13,7 +13,7 @@ Interactive shell, command surface, observability commands, multi-session.
 | Dispatch table | `builtin_commands[]` | Same | Same | Same |
 | Help / help `<cmd>` | ✅ | ✅ | ✅ | ✅ |
 | System info (`mem`, `tasks`, `cpu`, `uptime`, `vmm`, `ipc`) | ✅ | ✅ | ✅ | ✅ |
-| Benchmarks (`bench context`, `bench irq`, `bench ipc`, `bench smp`, `bench stealing`, `bench all`) | ✅ | ✅ | ✅ | ✅ |
+| Benchmarks (`bench context`, `bench irq`, `bench ipc`, `bench smp`, `bench stealing`, `bench idle-wakes`, `bench all`) | ✅ | ✅ | ✅ | ✅ |
 | Latency histograms (#196) | ✅ | ✅ | ✅ | ✅ |
 | `top`-like live display (#191) | ✅ | ✅ | ✅ | ✅ |
 | `sched trace` (#192) | ✅ | ✅ | ✅ | ✅ |

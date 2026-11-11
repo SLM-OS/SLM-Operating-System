@@ -131,6 +131,7 @@ int test_harness_run_all(void)
 
     total_failures += test_suite_pi_mutex();
     total_failures += test_suite_steal_deque();
+    total_failures += test_suite_steal_shares();
     total_failures += test_suite_sched_trace();
     total_failures += test_suite_latency_hist();
     total_failures += test_suite_gpu_consumer();
