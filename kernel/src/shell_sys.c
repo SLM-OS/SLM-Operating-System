@@ -51,6 +51,10 @@
 #include "../gpu/nvidia/ga10b_qmd.h"
 #include "ga10b_qmd_selftest_reference.h"
 #endif
+#if CONFIG_WORK_STEALING
+#include "../sched/steal_trace.h"
+#endif
+#include <stdarg.h>
 #include <stdint.h>
 
 /* Command table access (defined in shell.c) */
@@ -2036,6 +2040,424 @@ static void s3_steal_work_task(void *arg)
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
 }
 
+#if CONFIG_WORK_STEALING
+/* ---- bench stealing: sustained variant and failure-reason trace (#1203)
+ *
+ * The 16-task burst drains CPU 1's deque in a few milliseconds, so a
+ * thief that woke late fails every attempt whether or not anything is
+ * wrong with it. The sustained variant keeps `depth` tasks outstanding
+ * on CPU 1 for `ms` milliseconds: the driver (the shell, CPU 0)
+ * re-issues a task into each slot as soon as the slot reports done.
+ * A thief with 0 successes over seconds of supply is stuck; one with
+ * 0 in the burst and a normal share here was racing.
+ *
+ * Each sustained task runs the burst task's loop `work` times so the
+ * task count (and CPU 0's per-task "exiting" UART line) stays in the
+ * hundreds rather than thousands. */
+static volatile uint32_t s3_work_mult = 1;
+
+static void s3_steal_work_task_n(void *arg)
+{
+    uintptr_t slot = (uintptr_t)arg;
+    uint32_t mult = s3_work_mult;
+    volatile uint64_t x = 1;
+    for (uint32_t m = 0; m < mult; m++) {
+        for (uint64_t i = 1; i < 400000; i++) {
+            x = x * 1103515245 + 12345;
+        }
+    }
+    (void)x;
+    *S3_SLOT_ADDR(slot) = cpu_id() + 1;
+}
+
+/* Counter snapshot taken just before dispatch and again the moment the
+ * last task reports done, so idle CPUs that keep attempting while the
+ * results print do not move the numbers. */
+struct s3_snap {
+    uint32_t diag_att[MAX_CPUS];
+    uint32_t diag_ok[MAX_CPUS];
+    uint32_t diag_pf[MAX_CPUS];
+    uint32_t ticks[MAX_CPUS];
+    uint32_t idle[MAX_CPUS];
+    uint32_t sched[MAX_CPUS];
+    struct steal_trace_cpu tr[MAX_CPUS];
+    struct steal_trace_dq dq[MAX_CPUS];
+    struct steal_pdwin_cpu pw[MAX_CPUS];   /* #1216 */
+};
+
+static struct s3_snap s3_pre;
+static struct s3_snap s3_post;
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+extern volatile uint32_t *sched_diag_steal_attempts;
+extern volatile uint32_t *sched_diag_steal_successes;
+extern volatile uint32_t *sched_diag_steal_push_full;
+extern volatile uint32_t *sched_diag_schedule;
+extern volatile uint32_t *sched_diag_idle_loops;
+extern volatile uint32_t *sched_diag_tick;
+#else
+extern volatile uint32_t sched_diag_steal_attempts[];
+extern volatile uint32_t sched_diag_steal_successes[];
+extern volatile uint32_t sched_diag_steal_push_full[];
+extern volatile uint32_t sched_diag_schedule[];
+extern volatile uint32_t sched_diag_idle_loops[];
+extern volatile uint32_t sched_diag_tick[];
+#endif
+
+static void s3_take_snap(struct s3_snap *s)
+{
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        s->diag_att[c] = sched_diag_steal_attempts[c];
+        s->diag_ok[c] = sched_diag_steal_successes[c];
+        s->diag_pf[c] = sched_diag_steal_push_full[c];
+        s->ticks[c] = sched_diag_tick[c];
+        s->idle[c] = sched_diag_idle_loops[c];
+        s->sched[c] = sched_diag_schedule[c];
+        s->tr[c] = *sched_steal_trace_cpu(c);
+        s->dq[c] = *sched_steal_trace_dq(c);
+        s->pw[c] = *sched_steal_pdwin(c);
+    }
+}
+
+/* Signed microseconds of (ts - t0); `valid` false prints "-". */
+static int s3_fmt_us(char *buf, size_t n, bool valid, uint64_t ts,
+                     uint64_t t0, uint64_t freq)
+{
+    if (!valid) {
+        return uart_snprintf(buf, n, "-");
+    }
+    if (ts >= t0) {
+        return uart_snprintf(buf, n, "%lu",
+                             (unsigned long)((ts - t0) * 1000000ULL / freq));
+    }
+    return uart_snprintf(buf, n, "-%lu",
+                         (unsigned long)((t0 - ts) * 1000000ULL / freq));
+}
+
+/* Append to buf at *pos, never past cap - 1 (uart_snprintf returns the
+ * untruncated length, so *pos is clamped). */
+static void s3_append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
+{
+    if (*pos >= cap - 1) {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    int n = uart_vsnprintf(buf + *pos, cap - *pos, fmt, args);
+    va_end(args);
+    if (n > 0) {
+        *pos += (size_t)n;
+    }
+    if (*pos > cap - 1) {
+        *pos = cap - 1;
+    }
+}
+
+/* One complete line per CPU, built in a buffer and written with a
+ * single call so nothing interleaves inside it. Field meanings are in
+ * kernel/sched/steal_trace.h. */
+/* Append `n` uint32 values as a comma list after " key=". */
+static void s3_append_u32s(char *buf, size_t cap, size_t *pos,
+                           const char *key, const volatile uint32_t *v,
+                           uint32_t n)
+{
+    s3_append(buf, cap, pos, " %s=", key);
+    for (uint32_t i = 0; i < n; i++) {
+        s3_append(buf, cap, pos, "%s%lu", i ? "," : "", (unsigned long)v[i]);
+    }
+}
+
+static const char s3_win_reason_ch[STEAL_WIN_NREASON] = {
+    'T', 'C', 'P', 'O', 'B' };
+
+/* #1216 fields, appended to a c2t line: the thief's attempts against
+ * the watched CPU's window and tick, this CPU's ticks and windows, and
+ * (watched CPU only) its first STEAL_WIN_LOG_LEN windows. */
+static void s3_append_pdwin(char *line, size_t cap, size_t *pos,
+                            uint32_t c, uint32_t run, uint64_t t0,
+                            uint64_t freq)
+{
+    const struct steal_trace_cpu *b = &s3_post.tr[c];
+    const struct steal_pdwin_cpu *w = &s3_post.pw[c];
+    bool tlive = (b->run == run);
+    bool wlive = (w->run == run);
+    if (tlive) {
+        s3_append_u32s(line, cap, pos, "w_in", b->w_in, STEAL_WIN_NREASON);
+        s3_append(line, cap, pos, " w_in_unk=%lu", (unsigned long)b->w_in_unk);
+        s3_append_u32s(line, cap, pos, "w_off", b->w_off, STEAL_WOFF_BINS);
+        s3_append_u32s(line, cap, pos, "ph_w", b->ph_w, STEAL_PH_BINS);
+        s3_append_u32s(line, cap, pos, "ph_w_pd", b->ph_w_pd, STEAL_PH_BINS);
+        s3_append_u32s(line, cap, pos, "ph_own", b->ph_own, STEAL_PH_BINS);
+    } else {
+        s3_append(line, cap, pos, " w_in=- w_in_unk=- w_off=- ph_w=-"
+                  " ph_w_pd=- ph_own=-");
+    }
+    if (!wlive) {
+        s3_append(line, cap, pos, " tick_n=- tick_first_us=- tick_last_us=-"
+                  " win_n=- win_sum_us=- win_max_us=- wph=- wlog=-");
+        return;
+    }
+    char t_tf[24], t_tl[24];
+    s3_fmt_us(t_tf, sizeof(t_tf), w->first_tick != 0, w->first_tick, t0, freq);
+    s3_fmt_us(t_tl, sizeof(t_tl), w->first_tick != 0, w->last_tick, t0, freq);
+    s3_append(line, cap, pos, " tick_n=%lu tick_first_us=%s tick_last_us=%s",
+              (unsigned long)w->tick_n, t_tf, t_tl);
+    s3_append_u32s(line, cap, pos, "win_n", w->n, STEAL_WIN_NREASON);
+    s3_append(line, cap, pos, " win_sum_us=");
+    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
+                  (unsigned long)(w->sum[r] * 1000000ULL / freq));
+    }
+    s3_append(line, cap, pos, " win_max_us=");
+    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
+                  (unsigned long)((uint64_t)w->max[r] * 1000000ULL / freq));
+    }
+    s3_append_u32s(line, cap, pos, "wph", w->wph, STEAL_PH_BINS);
+    s3_append(line, cap, pos, " wlog=");
+    uint32_t nlog = (c == sched_steal_trace_watch()) ? w->nlog : 0;
+    if (nlog > STEAL_WIN_LOG_LEN) {
+        nlog = STEAL_WIN_LOG_LEN;
+    }
+    if (nlog == 0) {
+        s3_append(line, cap, pos, "-");
+    }
+    /* entry as signed us from arm time : duration in ns : reason */
+    for (uint32_t k = 0; k < nlog; k++) {
+        int64_t e = (int64_t)w->log_entry[k];
+        uint64_t ae = (uint64_t)(e < 0 ? -e : e);
+        uint32_t r = w->log_reason[k];
+        s3_append(line, cap, pos, "%s%s%lu:%lu:%c", k ? "," : "",
+                  e < 0 ? "-" : "",
+                  (unsigned long)(ae * 1000000ULL / freq),
+                  (unsigned long)((uint64_t)w->log_dur[k] * 1000000000ULL / freq),
+                  r < STEAL_WIN_NREASON ? s3_win_reason_ch[r] : '?');
+    }
+}
+
+static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
+                           const uint32_t *exec)
+{
+    static char line[4096];
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        const struct steal_trace_cpu *a = &s3_pre.tr[c];
+        const struct steal_trace_cpu *b = &s3_post.tr[c];
+        const struct steal_trace_dq *qa = &s3_pre.dq[c];
+        const struct steal_trace_dq *qb = &s3_post.dq[c];
+        bool live = (b->run == run);
+        uint32_t att = b->att - a->att;
+        uint32_t ok = b->ok - a->ok;
+        uint32_t iso = b->iso - a->iso;
+        uint32_t fs = b->f_stale - a->f_stale;
+        uint32_t fp = b->f_pd - a->f_pd;
+        uint32_t fe = b->f_empty - a->f_empty;
+        uint32_t fo = b->f_other - a->f_other;
+        uint32_t datt = s3_post.diag_att[c] - s3_pre.diag_att[c];
+        char t_first[24], t_last[24], t_ok[24], t_drain[24], t_push[24];
+        s3_fmt_us(t_first, sizeof(t_first), live, b->first_att, t0, freq);
+        s3_fmt_us(t_last, sizeof(t_last), live, b->last_att, t0, freq);
+        s3_fmt_us(t_ok, sizeof(t_ok), live && b->first_ok != 0,
+                  b->first_ok, t0, freq);
+        s3_fmt_us(t_drain, sizeof(t_drain), qb->drain_run == run,
+                  qb->drain_ts, t0, freq);
+        s3_fmt_us(t_push, sizeof(t_push), qb->push_run == run,
+                  qb->last_push, t0, freq);
+
+        size_t pos = 0;
+        s3_append(line, sizeof(line) - 2, &pos,
+            "  c2t cpu=%lu exec=%lu att=%lu diag_att=%lu ok=%lu"
+            " diag_ok=%lu iso=%lu f_stale=%lu f_pd=%lu f_empty=%lu"
+            " f_other=%lu chk=%ld",
+            (unsigned long)c, (unsigned long)exec[c],
+            (unsigned long)att, (unsigned long)datt, (unsigned long)ok,
+            (unsigned long)(s3_post.diag_ok[c] - s3_pre.diag_ok[c]),
+            (unsigned long)iso, (unsigned long)fs, (unsigned long)fp,
+            (unsigned long)fe, (unsigned long)fo,
+            (long)att - (long)(ok + iso + fs + fp + fe + fo));
+        s3_append(line, sizeof(line) - 2, &pos,
+            " v_pd=%lu v_pd_work=%lu v_busy=%lu v_empty=%lu v_gen=%lu"
+            " v_state=%lu v_cpu=%lu v_aff=%lu v_rm=%lu",
+            (unsigned long)(b->v_pd - a->v_pd),
+            (unsigned long)(b->v_pd_work - a->v_pd_work),
+            (unsigned long)(b->v_busy - a->v_busy),
+            (unsigned long)(b->v_empty - a->v_empty),
+            (unsigned long)(b->v_gen - a->v_gen),
+            (unsigned long)(b->v_state - a->v_state),
+            (unsigned long)(b->v_cpu - a->v_cpu),
+            (unsigned long)(b->v_aff - a->v_aff),
+            (unsigned long)(b->v_rm - a->v_rm));
+        s3_append(line, sizeof(line) - 2, &pos,
+            " pushfull=%lu dq_push=%lu dq_drains=%lu dq_drain_us=%s"
+            " dq_last_push_us=%s first_att_us=%s first_ok_us=%s"
+            " last_att_us=%s ticks=%lu idle=%lu sched=%lu lk_hw=%lu log=",
+            (unsigned long)(s3_post.diag_pf[c] - s3_pre.diag_pf[c]),
+            (unsigned long)(qb->pushes - qa->pushes),
+            (unsigned long)(qb->drains - qa->drains),
+            t_drain, t_push, t_first, t_ok, t_last,
+            (unsigned long)(s3_post.ticks[c] - s3_pre.ticks[c]),
+            (unsigned long)(s3_post.idle[c] - s3_pre.idle[c]),
+            (unsigned long)(s3_post.sched[c] - s3_pre.sched[c]),
+            live ? (unsigned long)b->lk_hw : 9UL);
+        uint32_t nlog = live ? b->nlog : 0;
+        if (nlog > STEAL_TRACE_LOG_LEN) {
+            nlog = STEAL_TRACE_LOG_LEN;
+        }
+        if (nlog == 0) {
+            s3_append(line, sizeof(line) - 2, &pos, "-");
+        }
+        for (uint32_t k = 0; k < nlog; k++) {
+            s3_append(line, sizeof(line) - 2, &pos,
+                "%s%lu%c", k ? "," : "",
+                (unsigned long)((uint64_t)b->log_dt[k] * 1000000ULL / freq),
+                (char)b->log_out[k]);
+        }
+        s3_append_pdwin(line, sizeof(line) - 2, &pos, c, run, t0, freq);
+        /* Appends stop at sizeof(line) - 3, so the terminator fits. */
+        line[pos++] = '\r';
+        line[pos++] = '\n';
+        line[pos] = '\0';
+        shell_puts(line);
+    }
+}
+
+static void s3_print_trace_header(const char *mode, uint32_t run,
+                                  uint64_t freq, uint32_t tasks,
+                                  uint32_t depth, uint32_t work, uint32_t ms)
+{
+    shell_printf("\r\n  c2t-format v2 mode=%s run=%lu cntfrq=%lu cpus=%lu"
+                 " tasks=%lu depth=%lu work=%lu sustain_ms=%lu\r\n",
+                 mode, (unsigned long)run, (unsigned long)freq,
+                 (unsigned long)cpu_count, (unsigned long)tasks,
+                 (unsigned long)depth, (unsigned long)work,
+                 (unsigned long)ms);
+    shell_puts("  times in us from dispatch start; log = first 16 attempts"
+               " as us-since-first-attempt + outcome (S ok, E empty,"
+               " P preempt_disabled skip, X stale, I isolated, O other)\r\n");
+    shell_printf("  #1216 watch=cpu%lu; reasons T tick trampoline, C coop tick,"
+                 " P schedule() after a push, O other schedule(), B boot;"
+                 " w_in/win_n/win_sum_us/win_max_us in that order;"
+                 " w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched"
+                 " window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,"
+                 "<500 us,<1,<2,<5,<10,>=10 ms after the tick;"
+                 " wlog = entry_us:dur_ns:reason, first %lu windows\r\n",
+                 (unsigned long)sched_steal_trace_watch(),
+                 (unsigned long)STEAL_WIN_LOG_LEN);
+}
+
+/* bench stealing --sustain: keep `depth` tasks outstanding on CPU 1 for
+ * `ms` milliseconds, then wait for the outstanding ones to finish. */
+static void s3_bench_sustained(uint32_t ms, uint32_t depth, uint32_t work)
+{
+    uint32_t exec[MAX_CPUS] = {0};
+    uint64_t outstanding = 0;   /* bit j: slot j has a task in flight */
+    uint32_t n_out = 0;
+    uint32_t issued = 0, completed = 0, create_fail = 0;
+    uint32_t starved_polls = 0, polls = 0;
+    uint32_t next_slot = 0;
+
+    shell_puts("Work-Stealing Sustained-Supply Benchmark (#1203)\r\n");
+    shell_puts("================================================\r\n");
+    shell_printf("  Supply: %lu ms, %lu tasks outstanding on CPU 1, work x%lu\r\n",
+                 (unsigned long)ms, (unsigned long)depth, (unsigned long)work);
+    shell_printf("  Online CPUs:       %lu\r\n", (unsigned long)cpu_count);
+
+    s3_work_mult = work;
+    for (uint32_t j = 0; j < S3_MAX_TASKS; j++) {
+        *S3_SLOT_ADDR(j) = 0;
+    }
+
+    uint64_t freq = timer_get_frequency();
+    s3_take_snap(&s3_pre);
+    uint64_t t0 = timer_get_count();
+    uint32_t run = sched_steal_trace_arm();
+    uint64_t supply_end = t0 + (uint64_t)ms * freq / 1000ULL;
+    uint64_t deadline = supply_end + 30ULL * freq;
+    uint64_t last_issue = t0;
+    bool timed_out = false;
+
+    while (1) {
+        uint64_t now = timer_get_count();
+        if (now < supply_end) {
+            while (n_out < depth) {
+                uint32_t j = next_slot;
+                while (outstanding & (1ULL << j)) {
+                    j = (j + 1) % S3_MAX_TASKS;
+                }
+                *S3_SLOT_ADDR(j) = 0;
+                char name[8] = { 's', '3', 's', '_',
+                                 (char)('0' + j / 10), (char)('0' + j % 10),
+                                 '\0', '\0' };
+                struct task *t = task_create(name, s3_steal_work_task_n,
+                                             (void *)(uintptr_t)j);
+                if (!t) {
+                    create_fail++;
+                    break;
+                }
+                outstanding |= (1ULL << j);
+                n_out++;
+                issued++;
+                next_slot = (j + 1) % S3_MAX_TASKS;
+                scheduler_add_task_to_cpu(t, 1);
+                last_issue = timer_get_count();
+            }
+        }
+        for (uint32_t j = 0; j < S3_MAX_TASKS; j++) {
+            if (!(outstanding & (1ULL << j))) {
+                continue;
+            }
+            uint32_t v = *S3_SLOT_ADDR(j);
+            if (v != 0) {
+                if (v <= MAX_CPUS) {
+                    exec[v - 1]++;
+                }
+                completed++;
+                outstanding &= ~(1ULL << j);
+                n_out--;
+            }
+        }
+        polls++;
+        if (n_out == 0 && now < supply_end) {
+            starved_polls++;
+        }
+        if (now >= supply_end && n_out == 0) {
+            break;
+        }
+        if (now > deadline) {
+            timed_out = true;
+            break;
+        }
+        yield();
+    }
+    s3_take_snap(&s3_post);
+    uint64_t t1 = timer_get_count();
+
+    if (timed_out) {
+        shell_printf("  TIMEOUT 30 s after supply end: %lu of %lu tasks done\r\n",
+                     (unsigned long)completed, (unsigned long)issued);
+    }
+    shell_printf("\r\n  Results:\r\n");
+    shell_printf("    Issued:       %lu (create failures %lu)\r\n",
+                 (unsigned long)issued, (unsigned long)create_fail);
+    shell_printf("    Completed:    %lu / %lu\r\n",
+                 (unsigned long)completed, (unsigned long)issued);
+    shell_printf("    Supply:       %lu us (dispatch start to last issue)\r\n",
+                 (unsigned long)((last_issue - t0) * 1000000ULL / freq));
+    shell_printf("    Wall-clock:   %lu us (dispatch start to last completion)\r\n",
+                 (unsigned long)((t1 - t0) * 1000000ULL / freq));
+    shell_printf("    Polls:        %lu, with nothing outstanding during supply: %lu\r\n",
+                 (unsigned long)polls, (unsigned long)starved_polls);
+    shell_puts("\r\n    Per-CPU execution distribution:\r\n");
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        uint32_t pct10 = completed ? (exec[c] * 1000U) / completed : 0;
+        shell_printf("      CPU %lu: %lu tasks (%lu.%lu%%)\r\n",
+                     (unsigned long)c, (unsigned long)exec[c],
+                     (unsigned long)(pct10 / 10), (unsigned long)(pct10 % 10));
+    }
+    s3_print_trace_header("sustained", run, freq, issued, depth, work, ms);
+    s3_print_trace(run, t0, freq, exec);
+}
+#endif /* CONFIG_WORK_STEALING */
+
 /* ---- bench eviction-e2e (#979): storage-backed eviction harness ----
  *
  * Replays the embedded simulator per-scenario access traces through the
@@ -2307,16 +2729,58 @@ int cmd_bench(int argc, char *argv[])
          * and diff the wall-clock numbers. Input to S4 (default flip).
          */
         uint32_t n_tasks = 16;
+#if CONFIG_WORK_STEALING
+        /* #1203 options: --sustain [ms] [--depth D] [--work W]. A bare
+         * number keeps its old meaning (burst task count). */
+        uint32_t sustain_ms = 0;
+        uint32_t depth = 16;
+        uint32_t work = 8;
+        for (int ai = 2; ai < argc; ai++) {
+            uint32_t n;
+            if (strcmp(argv[ai], "--sustain") == 0) {
+                sustain_ms = 2500;
+                if (ai + 1 < argc &&
+                    shell_parse_uint(argv[ai + 1], &n) == 0) {
+                    ai++;
+                    if (n >= 100 && n <= 60000) {
+                        sustain_ms = n;
+                    }
+                }
+            } else if (strcmp(argv[ai], "--depth") == 0 && ai + 1 < argc) {
+                ai++;
+                if (shell_parse_uint(argv[ai], &n) == 0 && n >= 1 &&
+                    n <= 32) {
+                    depth = n;
+                }
+            } else if (strcmp(argv[ai], "--work") == 0 && ai + 1 < argc) {
+                ai++;
+                if (shell_parse_uint(argv[ai], &n) == 0 && n >= 1 &&
+                    n <= 64) {
+                    work = n;
+                }
+            } else if (shell_parse_uint(argv[ai], &n) == 0 && n > 0 &&
+                       n <= S3_MAX_TASKS) {
+                n_tasks = n;
+            }
+        }
+#else
         if (argc >= 3) {
             uint32_t n;
             if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= S3_MAX_TASKS) {
                 n_tasks = n;
             }
         }
+#endif
         if (cpu_count < 2) {
             shell_puts("  Need at least 2 CPUs for load-imbalance test\r\n");
             return 0;
         }
+#if CONFIG_WORK_STEALING
+        if (sustain_ms != 0) {
+            s3_bench_sustained(sustain_ms, depth, work);
+            return 0;
+        }
+#endif
         shell_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
         shell_puts("=====================================================\r\n");
         shell_printf("  Tasks dispatched:  %lu (all to CPU 1)\r\n",
@@ -2354,9 +2818,14 @@ int cmd_bench(int argc, char *argv[])
             pre_successes[c] = sched_diag_steal_successes[c];
             pre_push_full[c] = sched_diag_steal_push_full[c];
         }
+        /* #1203 trace: snapshot, then start a trace run at t0. */
+        s3_take_snap(&s3_pre);
 #endif
 
         uint64_t t0 = timer_get_count();
+#if CONFIG_WORK_STEALING
+        uint32_t trace_run = sched_steal_trace_arm();
+#endif
         for (uint32_t i = 0; i < n_tasks; i++) {
             char name[16];
             name[0] = 's'; name[1] = '3'; name[2] = '_';
@@ -2397,6 +2866,9 @@ int cmd_bench(int argc, char *argv[])
             /* Cooperative yield so CPU 0 doesn't spin at 100%. */
             yield();
         }
+#if CONFIG_WORK_STEALING
+        s3_take_snap(&s3_post);
+#endif
         uint64_t t1 = timer_get_count();
         uint64_t elapsed_ns = (t1 - t0) * 1000000000ULL / freq;
 
@@ -2435,6 +2907,8 @@ int cmd_bench(int argc, char *argv[])
             shell_printf("    %3lu  %8u  %9u  %8u\r\n",
                         (unsigned long)c, da, ds, dpf);
         }
+        s3_print_trace_header("burst", trace_run, freq, n_tasks, 0, 1, 0);
+        s3_print_trace(trace_run, t0, freq, cpu_count_exec);
 #endif
     } else if (strcmp(argv[1], "quant") == 0) {
         /* G4: run FP32, FP16, and INT8 matmuls at the same shape so the

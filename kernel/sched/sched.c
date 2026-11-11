@@ -37,6 +37,10 @@
 #if CONFIG_WORK_STEALING
 #include "steal_deque.h"
 #endif
+/* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
+ * are referenced from schedule() in every configuration (they are
+ * empty functions without work stealing). */
+#include "steal_trace.h"
 #include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
@@ -144,6 +148,24 @@ static steal_deque_t cpu_steal_deques[MAX_CPUS];
  * Jetson. Acquire the victim's lock before any steal_deque_*
  * operation; never held across other locks. */
 static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
+
+/* Failure-reason trace for `bench stealing` (#1203). Layout, writers
+ * and the visibility argument are in steal_trace.h. Cacheable BSS on
+ * every platform: steal_trace[c] is written only by CPU c inside
+ * sched_try_steal, steal_trace_dq[v] only under steal_deque_lock[v]. */
+static struct steal_trace_cpu steal_trace[MAX_CPUS];
+static struct steal_trace_dq steal_trace_dq[MAX_CPUS];
+static volatile uint32_t steal_trace_run;  /* 0 = never armed */
+
+/* Victim-side preempt_disabled window trace (#1216); see steal_trace.h.
+ * steal_pdwin[c] is written only by CPU c. The bin bounds and t0 are
+ * written by sched_steal_trace_arm() before its release store of the
+ * run number. */
+#define STEAL_TRACE_WATCH 1U
+static struct steal_pdwin_cpu steal_pdwin[MAX_CPUS];
+static uint64_t steal_ph_bound[STEAL_PH_BINS - 1];
+static uint64_t steal_woff_bound[STEAL_WOFF_BINS - 1];
+static volatile uint64_t steal_trace_t0_cnt;
 #endif /* CONFIG_WORK_STEALING */
 
 /* Lock helpers that use the correct lock for a given CPU */
@@ -1255,6 +1277,12 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
         task != cpu_rq(cpu)->idle_task) {
         irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
         int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
+        if (rc == 0) {
+            /* #1203 trace: written under steal_deque_lock[cpu]. */
+            steal_trace_dq[cpu].pushes++;
+            steal_trace_dq[cpu].last_push = timer_get_count();
+            steal_trace_dq[cpu].push_run = steal_trace_run;
+        }
         spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
         if (rc < 0) {
             sched_diag_steal_push_full[cpu]++;
@@ -1800,6 +1828,209 @@ static struct task *pick_next_task(uint32_t cpu)
 }
 
 #if CONFIG_WORK_STEALING
+uint32_t sched_steal_trace_arm(void)
+{
+    /* Single caller (the bench, on CPU 0); the release orders the
+     * caller's earlier stores before the new run number. Thieves only
+     * compare the number against their own copy. */
+    uint32_t run = steal_trace_run + 1;
+    if (run == 0) {
+        run = 1;
+    }
+    /* #1216 bin bounds in counter ticks, and the window-log origin. */
+    static const uint32_t ph_us[STEAL_PH_BINS - 1] = {
+        10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
+    static const uint32_t woff_us[STEAL_WOFF_BINS - 1] = {
+        1, 2, 4, 8, 16, 32, 64 };
+    uint64_t freq = timer_get_frequency();
+    for (uint32_t i = 0; i < STEAL_PH_BINS - 1; i++) {
+        steal_ph_bound[i] = (uint64_t)ph_us[i] * freq / 1000000ULL;
+    }
+    for (uint32_t i = 0; i < STEAL_WOFF_BINS - 1; i++) {
+        steal_woff_bound[i] = (uint64_t)woff_us[i] * freq / 1000000ULL;
+    }
+    steal_trace_t0_cnt = timer_get_count();
+    __atomic_store_n(&steal_trace_run, run, __ATOMIC_RELEASE);
+    return run;
+}
+
+uint32_t sched_steal_trace_watch(void)
+{
+    return STEAL_TRACE_WATCH;
+}
+
+uint64_t sched_steal_trace_t0(void)
+{
+    return steal_trace_t0_cnt;
+}
+
+const struct steal_pdwin_cpu *sched_steal_pdwin(uint32_t cpu)
+{
+    return (cpu < MAX_CPUS) ? &steal_pdwin[cpu] : NULL;
+}
+
+static inline uint32_t steal_bin(const uint64_t *bound, uint32_t nbins,
+                                 uint64_t d)
+{
+    uint32_t i = 0;
+    while (i < nbins - 1 && d >= bound[i]) {
+        i++;
+    }
+    return i;
+}
+
+/* Reset this CPU's per-run window fields at its first event of a new
+ * run. The open window, its entry time and last_tick carry over. */
+static inline void steal_pdwin_roll(struct steal_pdwin_cpu *w)
+{
+    uint32_t run = steal_trace_run;
+    if (w->run == run) {
+        return;
+    }
+    w->run = run;
+    w->first_tick = 0;
+    w->tick_n = 0;
+    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+        w->n[r] = 0;
+        w->sum[r] = 0;
+        w->max[r] = 0;
+    }
+    for (uint32_t b = 0; b < STEAL_PH_BINS; b++) {
+        w->wph[b] = 0;
+    }
+    w->nlog = 0;
+}
+
+/* Called on `cpu` right after it set preempt_disabled[cpu]. A set
+ * while a window is open (a nested set) is a no-op. */
+void steal_pdwin_set(uint32_t cpu, uint32_t reason)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
+    steal_pdwin_roll(w);
+    if (w->win_open) {
+        return;
+    }
+    uint64_t now = timer_get_count();
+    w->cur_entry = now;
+    w->cur_reason = reason;
+    uint64_t lt = w->last_tick;
+    if (lt != 0 && now >= lt) {
+        w->wph[steal_bin(steal_ph_bound, STEAL_PH_BINS, now - lt)]++;
+    }
+    w->win_open = 1;
+}
+
+/* schedule()'s own set: 'P' if someone pushed onto this CPU's deque
+ * since its last window closed, else 'O'. Inside a trampoline window
+ * this is a nested set and keeps 'T'. */
+void steal_pdwin_set_sched(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    uint32_t pushed = steal_trace_dq[cpu].pushes !=
+                      steal_pdwin[cpu].pushes_at_close;
+    steal_pdwin_set(cpu, pushed ? STEAL_WIN_PUSH : STEAL_WIN_OTHER);
+}
+
+/* Called on `cpu` right after it cleared preempt_disabled[cpu]. */
+void steal_pdwin_clear(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
+    steal_pdwin_roll(w);
+    if (!w->win_open) {
+        return;
+    }
+    uint64_t now = timer_get_count();
+    uint64_t dur = now - w->cur_entry;
+    uint32_t r = w->cur_reason;
+    if (r < STEAL_WIN_NREASON) {
+        w->n[r]++;
+        w->sum[r] += dur;
+        uint32_t d32 = dur > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)dur;
+        if (d32 > w->max[r]) {
+            w->max[r] = d32;
+        }
+    }
+    uint32_t k = w->nlog;
+    if (k < STEAL_WIN_LOG_LEN) {
+        w->log_entry[k] = (int32_t)(int64_t)(w->cur_entry -
+                                             steal_trace_t0_cnt);
+        w->log_dur[k] = dur > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)dur;
+        w->log_reason[k] = (uint8_t)r;
+        w->nlog = k + 1;
+    }
+    w->pushes_at_close = steal_trace_dq[cpu].pushes;
+    w->win_open = 0;
+}
+
+/* Hardware timer tick on `cpu`, from sched_note_hw_tick() in the timer
+ * ISR (the coop path's synthetic ticks are not counted). */
+void steal_pdwin_tick(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    struct steal_pdwin_cpu *w = &steal_pdwin[cpu];
+    steal_pdwin_roll(w);
+    uint64_t now = timer_get_count();
+    w->last_tick = now;
+    if (w->first_tick == 0) {
+        w->first_tick = now;
+    }
+    w->tick_n++;
+}
+
+void steal_pdwin_set_tick_asm(uint32_t cpu)
+{
+    steal_pdwin_set(cpu, STEAL_WIN_TICK);
+}
+
+void steal_pdwin_clear_asm(uint32_t cpu)
+{
+    steal_pdwin_clear(cpu);
+}
+
+const struct steal_trace_cpu *sched_steal_trace_cpu(uint32_t cpu)
+{
+    return (cpu < MAX_CPUS) ? &steal_trace[cpu] : NULL;
+}
+
+const struct steal_trace_dq *sched_steal_trace_dq(uint32_t cpu)
+{
+    return (cpu < MAX_CPUS) ? &steal_trace_dq[cpu] : NULL;
+}
+
+/* Record the outcome of one sched_try_steal() call on this CPU (#1203).
+ * Plain stores to this CPU's own trace block only. */
+static inline void steal_trace_note(struct steal_trace_cpu *tr,
+                                    uint64_t now, uint8_t out)
+{
+    switch (out) {
+    case STEAL_OUT_OK:    tr->ok++;      break;
+    case STEAL_OUT_ISO:   tr->iso++;     break;
+    case STEAL_OUT_STALE: tr->f_stale++; break;
+    case STEAL_OUT_PD:    tr->f_pd++;    break;
+    case STEAL_OUT_EMPTY: tr->f_empty++; break;
+    default:              tr->f_other++; break;
+    }
+    if (out == STEAL_OUT_OK && tr->first_ok == 0) {
+        tr->first_ok = now;
+    }
+    uint32_t n = tr->nlog;
+    if (n < STEAL_TRACE_LOG_LEN) {
+        tr->log_dt[n] = (uint32_t)(now - tr->first_att);
+        tr->log_out[n] = out;
+        tr->nlog = n + 1;
+    }
+}
+
 /*
  * Attempt to steal one READY task from another CPU's run queue.
  *
@@ -1811,6 +2042,14 @@ static struct task *pick_next_task(uint32_t cpu)
  * Stale pointers in the deque are discarded during validation; each
  * failed validation pops one stale entry so the deque does not
  * accumulate garbage indefinitely.
+ *
+ * #1203 instrumentation: every exit records an outcome in
+ * steal_trace[this_cpu] (see steal_trace.h). It adds per-CPU counter
+ * stores, one CNTPCT read per call, one plain load of the victim's
+ * lock word before each spin_lock_irqsave, two loads of the deque
+ * indices under the lock and, on a preempt_disabled skip, an unlocked
+ * load of the victim deque's top and bottom. No locks, no atomics and
+ * no prints; every branch the steal takes is unchanged.
  */
 static struct task *sched_try_steal(uint32_t this_cpu)
 {
@@ -1823,6 +2062,71 @@ static struct task *sched_try_steal(uint32_t this_cpu)
      * we just choose not to probe victims. */
     sched_diag_steal_attempts[this_cpu]++;
 
+    struct steal_trace_cpu *tr = &steal_trace[this_cpu];
+    uint64_t now = timer_get_count();
+    uint32_t run = steal_trace_run;
+    if (tr->run != run) {
+        tr->run = run;
+#if defined(SPINLOCK_SKIP_LOCKING)
+        tr->lk_hw = 2;
+#else
+        tr->lk_hw = (uint32_t)spinlock_hw_enabled;
+#endif
+        tr->first_att = now;
+        tr->first_ok = 0;
+        tr->nlog = 0;
+        for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+            tr->w_in[r] = 0;
+        }
+        tr->w_in_unk = 0;
+        for (uint32_t b = 0; b < STEAL_WOFF_BINS; b++) {
+            tr->w_off[b] = 0;
+        }
+        for (uint32_t b = 0; b < STEAL_PH_BINS; b++) {
+            tr->ph_w[b] = 0;
+            tr->ph_w_pd[b] = 0;
+            tr->ph_own[b] = 0;
+        }
+    }
+    tr->att++;
+    tr->last_att = now;
+
+    /* #1216: where this attempt falls against the watched CPU's tick
+     * and preempt_disabled window, and against this CPU's own tick.
+     * Plain loads of the watched CPU's flag and trace block; diagnostic
+     * only, never acted on. */
+    uint32_t ph_w_bin = STEAL_PH_BINS;   /* none: watched CPU not ticked */
+    {
+        uint32_t wc = STEAL_TRACE_WATCH;
+        if (wc < cpu_count && wc != this_cpu) {
+            const struct steal_pdwin_cpu *w = &steal_pdwin[wc];
+            uint64_t wt = w->last_tick;
+            if (wt != 0 && now >= wt) {
+                ph_w_bin = steal_bin(steal_ph_bound, STEAL_PH_BINS, now - wt);
+                tr->ph_w[ph_w_bin]++;
+            }
+            if (preempt_disabled[wc]) {
+                if (w->win_open) {
+                    uint32_t r = w->cur_reason;
+                    if (r < STEAL_WIN_NREASON) {
+                        tr->w_in[r]++;
+                    }
+                    uint64_t e = w->cur_entry;
+                    if (now >= e) {
+                        tr->w_off[steal_bin(steal_woff_bound,
+                                            STEAL_WOFF_BINS, now - e)]++;
+                    }
+                } else {
+                    tr->w_in_unk++;
+                }
+            }
+        }
+        uint64_t ot = steal_pdwin[this_cpu].last_tick;
+        if (ot != 0 && now >= ot) {
+            tr->ph_own[steal_bin(steal_ph_bound, STEAL_PH_BINS, now - ot)]++;
+        }
+    }
+
     /* Isolated cores must never pull work from other CPUs — that's
      * the whole point of isolation. The S5 placement override
      * already refuses to *target* an isolated CPU; this closes the
@@ -1832,8 +2136,14 @@ static struct task *sched_try_steal(uint32_t this_cpu)
      * away from it (test_proactive_load_balance_respects_isolation
      * would otherwise flake when CPU 2 or 3 acted as a thief). */
     if (sched.isolated_cores & (1U << this_cpu)) {
+        steal_trace_note(tr, now, STEAL_OUT_ISO);
         return NULL;
     }
+
+    uint32_t probed = 0;      /* victims whose deque was locked and read */
+    uint32_t n_empty = 0;     /* ... of which empty                      */
+    uint32_t n_stale = 0;     /* entries popped and rejected             */
+    uint32_t n_pd = 0;        /* victims skipped on preempt_disabled     */
 
     for (uint32_t i = 1; i < cpu_count; i++) {
         uint32_t victim = (this_cpu + i) % cpu_count;
@@ -1850,14 +2160,27 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * the steal race-free; this is belt-and-suspenders per the
          * cross-plan review (B3 / P2-3). */
         if (preempt_disabled[victim]) {
+            n_pd++;
+            tr->v_pd++;
+            /* Unlocked snapshot: did the skipped victim look like it
+             * had work? Diagnostic only, never acted on. */
+            if (!steal_deque_is_empty(&cpu_steal_deques[victim])) {
+                tr->v_pd_work++;
+            }
             continue;
         }
 
         /* Drain any stale pointers along with finding a live one. Bounded
          * by deque capacity so this loop cannot spin forever. */
         int victim_had_entry = 0;
+        probed++;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             uint32_t captured_gen = 0;
+            /* #1203: was the lock held when this thief arrived? Plain
+             * load; the acquisition below is unchanged. */
+            if (steal_deque_lock[victim].lock != 0) {
+                tr->v_busy++;
+            }
             /* Serialize this steal against owner's pushes / other
              * thieves' steals on the same victim's deque. Held
              * briefly (for the pop) and released before we take
@@ -1866,8 +2189,18 @@ static struct task *sched_try_steal(uint32_t this_cpu)
              * them. */
             irq_flags_t sd_flags =
                 spin_lock_irqsave(&steal_deque_lock[victim]);
+            int was_nonempty =
+                !steal_deque_is_empty(&cpu_steal_deques[victim]);
             struct task *candidate =
                 steal_deque_steal(&cpu_steal_deques[victim], &captured_gen);
+            if (was_nonempty &&
+                steal_deque_is_empty(&cpu_steal_deques[victim])) {
+                /* #1203: this steal took the last entry (or skipped the
+                 * last NULL slots): the deque was last non-empty now. */
+                steal_trace_dq[victim].drains++;
+                steal_trace_dq[victim].drain_ts = now;
+                steal_trace_dq[victim].drain_run = run;
+            }
             spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
             if (!candidate) {
                 break;  /* Empty — try next victim */
@@ -1883,31 +2216,71 @@ static struct task *sched_try_steal(uint32_t this_cpu)
              * though state/affinity/assigned_cpu may all read as
              * valid for the current resident. Checked first so we
              * don't bother with the full structural validation for
-             * an entry we already know is stale. */
-            int stealable =
-                candidate->generation == captured_gen &&
-                candidate->state == TASK_READY &&
-                candidate->assigned_cpu == victim &&
-                candidate->cpu_affinity == CPU_AFFINITY_ANY &&
-                remove_from_cpu_queue_locked(candidate, victim);
+             * an entry we already know is stale.
+             *
+             * #1203: the conjunction is unrolled so the trace can name
+             * the first clause that failed. Evaluation order and the
+             * short-circuit (remove only when every check before it
+             * held) match the original single && expression. */
+            int stealable = 0;
+            if (candidate->generation != captured_gen) {
+                tr->v_gen++;
+            } else if (candidate->state != TASK_READY) {
+                tr->v_state++;
+            } else if (candidate->assigned_cpu != victim) {
+                tr->v_cpu++;
+            } else if (candidate->cpu_affinity != CPU_AFFINITY_ANY) {
+                tr->v_aff++;
+            } else if (!remove_from_cpu_queue_locked(candidate, victim)) {
+                tr->v_rm++;
+            } else {
+                stealable = 1;
+            }
 
             rq_unlock_irqrestore(victim, flags);
 
             if (stealable) {
                 sched_diag_steal_successes[this_cpu]++;
+                steal_trace_note(tr, now, STEAL_OUT_OK);
                 return candidate;
             }
             /* Otherwise: stale pointer (structural mismatch or
              * generation mismatch), already popped from deque. Loop
              * again to drain another entry on the same victim. */
             sched_diag_steal_stale[this_cpu]++;
+            n_stale++;
         }
         if (!victim_had_entry) {
             sched_diag_steal_empty_victim[this_cpu]++;
+            tr->v_empty++;
+            n_empty++;
         }
     }
+
+    uint8_t out;
+    if (n_stale > 0) {
+        out = STEAL_OUT_STALE;
+    } else if (n_pd > 0) {
+        out = STEAL_OUT_PD;
+        if (ph_w_bin < STEAL_PH_BINS) {
+            tr->ph_w_pd[ph_w_bin]++;
+        }
+    } else if (probed > 0 && n_empty == probed) {
+        out = STEAL_OUT_EMPTY;
+    } else {
+        out = STEAL_OUT_OTHER;
+    }
+    steal_trace_note(tr, now, out);
     return NULL;
 }
+#else
+/* #1216 window hooks: no trace without work stealing. */
+void steal_pdwin_set(uint32_t cpu, uint32_t reason) { (void)cpu; (void)reason; }
+void steal_pdwin_set_sched(uint32_t cpu) { (void)cpu; }
+void steal_pdwin_clear(uint32_t cpu) { (void)cpu; }
+void steal_pdwin_tick(uint32_t cpu) { (void)cpu; }
+void steal_pdwin_set_tick_asm(uint32_t cpu) { (void)cpu; }
+void steal_pdwin_clear_asm(uint32_t cpu) { (void)cpu; }
 #endif /* CONFIG_WORK_STEALING */
 
 /*
@@ -1943,6 +2316,7 @@ void sched_note_hw_tick(uint32_t cpu)
     if (cpu < MAX_CPUS) {
         coop_last_tick_cntpct[cpu] = timer_get_count();
     }
+    steal_pdwin_tick(cpu);   /* #1216 trace: no-op without work stealing */
 }
 
 uint64_t sched_last_tick_cntpct(uint32_t cpu)
@@ -2021,8 +2395,12 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
      * pre-sets preempt_disabled=1 before first switch_to). */
     int prev_preempt_disabled = preempt_disabled[cpu];
     preempt_disabled[cpu] = 1;
+    steal_pdwin_set(cpu, STEAL_WIN_COOP);           /* #1216 trace */
     scheduler_tick();
     preempt_disabled[cpu] = prev_preempt_disabled;
+    if (!prev_preempt_disabled) {
+        steal_pdwin_clear(cpu);                     /* #1216 trace */
+    }
 }
 
 /*
@@ -2417,6 +2795,7 @@ void schedule(void)
      * already closes the window.)
      */
     preempt_disabled[this_cpu] = 1;
+    steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
 
     rq_unlock_irqrestore(this_cpu, flags);
 
@@ -2486,6 +2865,7 @@ void schedule(void)
     /* Resumed on our stack after being switched back.
      * Re-enable preemption so timer ticks can trigger scheduling. */
     preempt_disabled[this_cpu] = 0;
+    steal_pdwin_clear(this_cpu);                    /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
      * we were mid-switch — we just scheduled, so an immediate re-arm
@@ -2595,6 +2975,7 @@ void scheduler_start(uint32_t this_cpu)
     /* Guard against timer re-entrancy during switch_to.
      * The trampoline clears this after context restore. */
     preempt_disabled[this_cpu] = 1;
+    steal_pdwin_set(this_cpu, STEAL_WIN_BOOT);      /* #1216 trace */
 
     /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
      * and skips schedule(). Ticks still count for sleep/uptime. */
