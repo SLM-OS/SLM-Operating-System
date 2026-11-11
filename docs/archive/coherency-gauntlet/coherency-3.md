@@ -244,3 +244,68 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
 - Schedule: C1's lab work ended 18 min after the 06:31 mark (the mark
   assumed the lab from 04:16; C1 claimed at 04:20). C2's step 0 moves
   from about 07:01 to after the critic, expected about 07:30.
+
+## Entry 5 (07:27 UTC): C1 critic verdict; jetson-nano-2 to C2
+
+- Correction to Entry 4: its times were written at 06:54Z; the critic
+  handover was at about 06:53Z, not 06:54 or 06:55.
+- **C1 critic verdict (`critic-3-C1.md`): fail, definition-of-done row 3
+  only.** Row 1 met and reproduced: NC 20/20 (`run2-hw/c1/nc-step6-run01..09.txt`
+  on `gauntlet-2-hw-pi5`, banner 30dc24bc, kernel/runtime diff to a03fc75b
+  empty; `run3-hw/c1/nc-step6-run10..20.txt`, banner a03fc75b), removal
+  20/20 (`run3-hw/c1/removal-step6-run01..20.txt`, banner 79c10261), the
+  three named tests passing in all 40, 0 `[test_wait]` timeout lines.
+  Reproduction 5/5 NC and 5/5 removal (`run3-hw/critic-c1/{nc,removal}-repro-run01..05.txt`,
+  `gauntlet-3-hw-pi5` @ 9352c948). Row 2 met: #1211 0 of 20
+  (`run3-hw/c1/removal-1211-run01..20.txt`, banner 9f375c19), so "not
+  reproduced" is the only classification that follows; the branch
+  reverts only the `test_task_lifecycle` conversion plus the step-1
+  instrumentation. Row 3 not met: two failures beyond the 18 known #1109
+  ones, in run 2 boots that count toward the NC 20
+  (`test_slm_stop_from_second_session_during_prompt`,
+  `run2-hw/c1/nc-step6-run04.txt`;
+  `test_proactive_load_balance_runtime_config_aggressive`,
+  `run2-hw/c1/nc-step6-run06.txt`), have no issue (run 2 recorded them
+  "not filed", Entry 16 of run 2). The critic compared every row of the
+  builder's summaries with its own parse: 31 + 20 rows, 0 mismatches.
+- Action: the C1 builder files the two issues; the critic then re-checks
+  row 3 only. The gate reads the re-verdict. No bar changes: the filing
+  is the missing deliverable, not a re-measurement.
+- The critic restored pi-5-1's card (one `sdwire_update`: test kernels
+  renamed aside, `*.prec3` originals back as `kernel_2712.img` and
+  `kernel8.img`, renamed test kernels deleted; nothing else touched),
+  booted it to `slmos>` (banner b42b2c1d, `run3-hw/critic-c1/restore-boot.txt`),
+  left it powered on and released it at about 07:22Z.
+- **07:25Z: jetson-nano-2 to C2** (claims as `coherency-3-C2`), with the
+  Entry 1 rulings. C2's lab time ends about 11:15Z.
+
+## Entry 6 (07:27 UTC, written after the C1 critic filed): C1 builder report, step 6 and #1211
+
+- Images (`make kernel-test PLATFORM=RASPI5`, staged in the main
+  checkout's `build/kernel/`): NC a03fc75b `slmos-r3-c1-nc-a03fc75b.bin`
+  8733328 B sha256 5c10222e; removal 79c10261
+  `slmos-r3-c1-removal-79c10261.bin` 8778384 B sha256 41e4319f; #1211
+  9f375c19 `slmos-r3-c1-removal1211-9f375c19.bin` 8782480 B sha256
+  082933c9. pi-5-1 claimed by `coherency-3-C1` 04:20 to 06:49Z; card
+  originals kept as `*.prec3`.
+- Step 6, interleaved blocks of 3, `boot_test` runs=3, timeout 330 s,
+  04:23 to 05:51Z: NC 11/11 (`run3-hw/c1/nc-step6-run10..20.txt`), with
+  run 2's 9/9 NC 20/20; removal 20/20 (`run3-hw/c1/removal-step6-run01..20.txt`);
+  no failure beyond the 18 in the 31 run-3 boots (`run3-hw/c1/step6-boots.txt`).
+  In `removal-step6-run13.txt` the lifecycle wait was met after 9998 us
+  (deficit 192 pages at its start); the other 19 removal boots after 2 to
+  3 us, the 11 NC boots after 6 to 14 us. Hypothesis (untested): about one
+  10 ms tick, a reaping CPU waiting for its tick; it would have failed the
+  old 1.69 ms window.
+- #1211 on `c1/instrument-1211-removal` @ 9f375c19 (79c10261 + 375ad4dd
+  re-applied as edadfb2e + the lifecycle window reverted and instrumented),
+  05:51 to 06:49Z: `test_task_lifecycle` failed 0/20
+  (`run3-hw/c1/removal-1211-run01..20.txt`, `removal-1211-boots.txt`):
+  not reproduced; #1211 stays open and blocks nothing. Free pages at the
+  bound back to the initial count in 20/20; window 1688 to 1691 us.
+- Side result on the same branch: the re-applied count-bounded #1202 wait
+  failed 8/20 (runs 03, 07, 08, 10, 11, 12, 13, 20); in 8/8 the flag was
+  observed 364 to 3032 us after the bound expired (timing).
+- Evidence `gauntlet-3-hw-pi5` @ 127428e7. One claim without a file (a
+  QEMU `make test` pass on the #1211 tree, labelled dirty) is struck from
+  this entry, per the critic.
