@@ -1,0 +1,4 @@
+make test rc=0
+make test WORK_STEALING=ON run 1 rc=0
+make test WORK_STEALING=ON run 2 rc=0
+WSDONE
