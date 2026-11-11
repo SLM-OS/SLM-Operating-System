@@ -1,0 +1,6 @@
+Q1: counted `A-ncoff-instr-kexec-run01.txt` .. `A-ncoff-instr-kexec-run20.txt` (20 files)
+  best thief CPU 0: median share 18.47%; 60% of it = 11.08%
+  CPU 2: median share 13.82% = 0.748 of best -> better than 60%
+  CPU 3: median share 14.17% = 0.767 of best -> better than 60%
+  runs with a non-owner CPU at ok=0: 3 of 20: A-ncoff-instr-kexec-run06.txt, A-ncoff-instr-kexec-run15.txt, A-ncoff-instr-kexec-run20.txt
+    CPU 3: A-ncoff-instr-kexec-run06.txt, A-ncoff-instr-kexec-run15.txt, A-ncoff-instr-kexec-run20.txt

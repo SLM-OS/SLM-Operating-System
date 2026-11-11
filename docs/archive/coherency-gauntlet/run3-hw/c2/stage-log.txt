@@ -6,3 +6,11 @@ staged at 2026-11-11T08:05:01Z
 local  77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5
 remote 77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5  /root/slmos-r3-nc-instr.elf
 STAGED OK
+staged at 2026-11-11T08:38:22Z
+local  48eb2cc23b11d69948076e817a4a967b625aa295369f26e029e62553ab780dd4
+remote 48eb2cc23b11d69948076e817a4a967b625aa295369f26e029e62553ab780dd4  /root/slmos-r3-ncoff-instr.elf
+STAGED OK
+staged at 2026-11-11T08:38:26Z
+local  d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927
+remote d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927  /root/slmos-r3-ncoff-instr-v1.elf
+STAGED OK
