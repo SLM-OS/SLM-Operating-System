@@ -821,3 +821,25 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   3's record (mDNS did not resolve).
 - **#1209 marked ready and squash-merged as main cf34214d** (tree equals
   b849e2ee). /ci on cf34214d running.
+
+## Entry 22 (17:45 UTC): /ci on cf34214d green; #1222 closed; #1215 merged; fix C started
+
+- /ci on main cf34214d (`run3-tools/ci-main-cf34214d/`): all ten ci skill
+  steps passed (runtime-test 308 and 328 passed, 0 failed), and the extra
+  `make test WORK_STEALING=ON` passed this time (0 `[FAIL]` lines).
+- #1222 closed with the comment the user specified (gate row followed as
+  written; cells D and E show no #1216 signature under the removal, C and
+  F show it under NC; the split head panics on Pi 5, #1223, while 79c10261
+  was 20/20). Branch `coherency-nc-axis-pi5` kept at e5b24894.
+- **#1215 marked ready and squash-merged as main 73d8deb7**, no conflict;
+  its tree equals the git-only projection (b849e2ee plus #1215's three
+  commits, 73b56bb2). /ci on 73d8deb7 running.
+- Rehearsal recorded: on the projected final main (#1209 + #1215 + #1217 +
+  #1218, no conflicts), the removal applies cleanly as one squashed commit
+  for its 33 pre-removal commits (run 1's history with five hand-resolved
+  merges, which no rebase replays) followed by the 7 removal commits
+  cherry-picked; the result's tree differs from cell D/E's measured tree
+  (8fc7c88a) only by #1218's CLAUDE.md paragraph and the ADR status line.
+- Fix C builder started about 17:30Z (offline: `--assert-shares` with a
+  regression test, an idle wake-rate measurement, the V1 commit, /ci, four
+  Jetson images). Its Jetson time comes after the removal's lab work.
