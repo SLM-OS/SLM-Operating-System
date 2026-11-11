@@ -1,1 +1,2 @@
 staged sha256=061645b327c6 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+staged sha256=405c7b43c9e4 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting

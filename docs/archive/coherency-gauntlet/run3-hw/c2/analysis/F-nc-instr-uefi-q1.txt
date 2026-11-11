@@ -1,0 +1,5 @@
+Q1: counted `F-nc-instr-uefi-run01.txt` .. `F-nc-instr-uefi-run20.txt` (20 files)
+  best thief CPU 0: median share 20.38%; 60% of it = 12.23%
+  CPU 2: median share 8.08% = 0.397 of best -> no better than 60%
+  CPU 3: median share 11.33% = 0.556 of best -> no better than 60%
+  runs with a non-owner CPU at ok=0: 0 of 20
