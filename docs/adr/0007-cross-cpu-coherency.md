@@ -10,7 +10,7 @@ are incoherent. Nothing re-tested it after the set/way fix `e0a15259`.
 
 ## Decision
 
-Status: proposed; the removal is pending on both boards.
+Status: accepted for Pi 5 and QEMU; deferred for Jetson pending #1216; implementation in PR #1222.
 
 Measured: Inner Shareable Write-Back memory is coherent across all CPUs on
 both boards, including between the Jetson clusters, under Linux and SLM-OS.
