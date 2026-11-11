@@ -843,3 +843,28 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
 - Fix C builder started about 17:30Z (offline: `--assert-shares` with a
   regression test, an idle wake-rate measurement, the V1 commit, /ci, four
   Jetson images). Its Jetson time comes after the removal's lab work.
+
+## Entry 23 (18:26 UTC): stack landed; issues closed; removal rebased to 5d70fdbd
+
+- /ci on main 73d8deb7 and on main 88b28c15: every ci skill step passed,
+  and the extra `WORK_STEALING=ON` passed on both
+  (`run3-tools/ci-main-73d8deb7/`, `run3-tools/ci-main-88b28c15/`).
+- **#1217 squash-merged as main 88b28c15**, **#1218 squash-merged as main
+  e4a33790**; no conflicts, each marked ready first; both trees equal the
+  git-only projection. All five merges are done: #1208 8a27711d, #1209
+  cf34214d, #1215 73d8deb7, #1217 88b28c15, #1218 e4a33790. /ci on
+  e4a33790 queued after the removal's /ci (one /ci at a time).
+- Issues: #1194, #1197, #1198 closed by #1208's merge (16:37Z); #1196 by
+  #1209 (17:25Z); #1202 by #1215 (17:44Z). **#1205 did not auto-close**
+  (#1215's body linked only #1202 as closing); closed by hand with a
+  comment naming 73d8deb7 and the evidence.
+- **Removal rebased onto main e4a33790: `coherency-remove-nc-axis` @
+  5d70fdbd** (lease on 79c10261), 8 commits: one squashed commit for the
+  pre-removal coherency work (net diff 638e297d..7acee1fc, the 28
+  non-merge commits listed in its message; 33 with run 1's five merges,
+  which no rebase replays), then the 7 removal commits cherry-picked
+  without conflict. Its tree equals the rehearsal's, which differs from
+  cells D and E's measured tree (8fc7c88a) only by #1218's CLAUDE.md
+  paragraph and the ADR status line. The Pi 5 20/20 was on 79c10261 before
+  this rebase; the new head gets its own Pi 5 boots. /ci on 5d70fdbd
+  running.
