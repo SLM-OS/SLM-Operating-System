@@ -1,0 +1,20 @@
+#!/bin/bash
+# Build one Jetson kexec image at a given commit (default flags).
+# Usage: build_image.sh <tag> <commit>
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a8e4eba4c69b43ffd
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad
+TAG=$1; C=$2
+mkdir -p $S/images
+cd $W || exit 1
+git checkout -q --detach $C || exit 1
+H=$(git rev-parse --short=8 HEAD)
+make kernel-clean > /dev/null 2>&1
+make kernel PLATFORM=JETSON_ORIN_NANO > $S/images/build-$TAG.log 2>&1
+rc=$?
+echo "$TAG head=$H rc=$rc" >> $S/images/MANIFEST.txt
+[ $rc -eq 0 ] || exit 1
+cp build/kernel/slmos.elf $S/images/slmos-fixc-$TAG.elf
+SHA=$(sha256sum $S/images/slmos-fixc-$TAG.elf | cut -d' ' -f1)
+BAN=$(strings $S/images/slmos-fixc-$TAG.elf | grep -m3 -E "$H" | tr '\n' '|')
+echo "$TAG head=$H subject=\"$(git log -1 --format=%s)\" elf_sha256=$SHA banner_strings=$BAN" >> $S/images/MANIFEST.txt

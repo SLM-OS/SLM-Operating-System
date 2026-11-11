@@ -1,0 +1,16 @@
+#!/bin/bash
+# Push fix C offline evidence (ci logs, tests, image manifest, tools) to
+# gauntlet/coherency-3 under run3-tools/fixc/.
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad
+P=$S/push_evidence.sh
+D=docs/archive/coherency-gauntlet/run3-tools/fixc
+T=$S/tools-txt; mkdir -p $T
+for f in run_a_tests.sh run_ci.sh build_image.sh build_all.sh check_images.sh run_final_tests.sh run_ws_A.sh ws_compare.sh push_evidence.sh push_offline.sh; do cp $S/$f $T/$f.txt; done
+bash $P gauntlet/coherency-3 $D/ci-37939418 "fix C (#1216): /ci logs on c2/wake-on-push-v1 37939418" $S/ci-37939418/* || exit 1
+bash $P gauntlet/coherency-3 $D/ci-cdeb9c9e "fix C (#1216): /ci logs on cdeb9c9e (pre-#1218 base)" $S/ci-cdeb9c9e/* || exit 1
+bash $P gauntlet/coherency-3 $D/test-A-d7ede5d0 "fix C (#1216): make test and WS runs on A d7ede5d0" $S/test-A-d7ede5d0/* || exit 1
+bash $P gauntlet/coherency-3 $D/test-A-1924e87e "fix C (#1216): make test and WS on A 1924e87e (old base)" $S/logs-A/* || exit 1
+bash $P gauntlet/coherency-3 $D/test-A-43d07cf1-failed "fix C (#1216): first A test run, test_owner_excluded arithmetic defect" $S/logs-A-attempt1/* || exit 1
+bash $P gauntlet/coherency-3 $D/ws-compare "fix C (#1216): QEMU object compare A vs A+B, extra WS runs" $S/ws-compare/* || exit 1
+bash $P gauntlet/coherency-3 $D/images "fix C (#1216): Jetson image manifest, build logs, idle_task_func disassembly" $S/images/MANIFEST.txt $S/images/build-*.log $S/images/idle-*.dis || exit 1
+bash $P gauntlet/coherency-3 $D/tools "fix C (#1216): runner scripts" $T/* || exit 1

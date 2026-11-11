@@ -1,0 +1,31 @@
+#!/bin/bash
+# /ci steps 1-10 plus make test WORK_STEALING=ON, on the worktree HEAD.
+# Usage: run_ci.sh <logdir>
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a8e4eba4c69b43ffd
+L=$1
+mkdir -p $L
+cd $W || exit 1
+git log --oneline -1 > $L/head.txt
+S=$L/status.txt
+step() { # name, command...
+  local n=$1; shift
+  echo "$(date -u +%H:%M:%SZ) start $n" >> $S
+  bash -c "$*" > $L/$n.log 2>&1
+  local rc=$?
+  echo "$(date -u +%H:%M:%SZ) $n rc=$rc" >> $S
+  return $rc
+}
+step 1-build-arm64 "make kernel-clean && make kernel PLATFORM=QEMU_VIRT" || { echo STOP >> $S; exit 1; }
+step 2-build-x86 "make kernel-clean && make kernel PLATFORM=X86_64" || { echo STOP >> $S; exit 1; }
+step 3-build-jetson-real "make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real" || { echo STOP >> $S; exit 1; }
+step 4-test-arm64 "make kernel-test-clean && make test" || { echo STOP >> $S; exit 1; }
+step 4b-test-x86 "make kernel-test-clean && make test PLATFORM=X86_64" || { echo STOP >> $S; exit 1; }
+step 5-test-aisched "make kernel-test-clean && make test AI_SCHED=ON" || { echo STOP >> $S; exit 1; }
+step 6-runtime-test "make runtime-test" || { echo STOP >> $S; exit 1; }
+step 7-braces "make test-check-braces && make check-braces" || { echo STOP >> $S; exit 1; }
+step 8-build-order "make test-build-order" || { echo STOP >> $S; exit 1; }
+step 9-jetson-layout "make test-jetson-uefi-layout" || { echo STOP >> $S; exit 1; }
+step 10-diff "git diff origin/main...HEAD --stat; git status --short"
+step x-test-ws "make kernel-test-clean && make test WORK_STEALING=ON"
+echo DONE >> $S

@@ -1,0 +1,16 @@
+#!/bin/bash
+# Two make test WORK_STEALING=ON runs on A alone (d7ede5d0), for comparison
+# with the A+B head's 0 of 2 (#1219 signature).
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a8e4eba4c69b43ffd
+L=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/test-A-d7ede5d0
+cd $W || exit 1
+git checkout -q --detach d7ede5d0
+for i in 1 2; do
+  make kernel-test-clean > /dev/null 2>&1
+  make test WORK_STEALING=ON > $L/make-test-ws-$i.log 2>&1
+  rc=$?
+  echo "make test WORK_STEALING=ON run $i rc=$rc" >> $L/status.txt
+done
+git checkout -q fixc-work
+echo WSDONE >> $L/status.txt
