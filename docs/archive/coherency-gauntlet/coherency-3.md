@@ -336,3 +336,41 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   after the C1 critic's offline check of the same files (assigned at about
   08:00Z, not a gate input), so that #1213 is not updated on a builder
   claim alone.
+
+## Entry 9 (08:05 UTC, written after the critic's #1213 check): #1213 result
+
+- C1 builder (QEMU only, no labctl), `c1/isolated-1s` @ f8ff72d6 (a03fc75b
+  plus the temporary 1 s waits; matches run 2's patch), `make test`'s QEMU
+  command with `-accel tcg,tb-size=128,thread=<mode>`, QMP PC sampling (10
+  samples of all 4 vCPUs, 200 ms apart, from the first isolated-phase
+  TIMEOUT) and one gdbstub read per stall, under the CLAUDE.md guard.
+- CPU 1 stopped scheduling in 6/15 runs with `thread=multi`
+  (`qemu-1213-multi-run{02,03,07,12,14,15}.txt`), 0/15 with `thread=single`
+  (`qemu-1213-single-run01..15.txt`), and 0/10 with `thread=multi` and gdb
+  attached from boot (`qemu-1213-multi-trace-run01..10.txt`; why is not
+  measured).
+- In 5/6 stalls CPU 1's PC cycles between the EL1h synchronous vector and
+  `el1_sync`+4 with all exceptions masked; in the three with registers (07,
+  12, 15) ESR 0x96000045 (EL1 write data abort, level-1 translation
+  fault), FAR = SP_EL1, SP far outside RAM and walking down 0x320 per entry,
+  and the rest of CPU 1's registers a fresh `task_create` image of the
+  latency task (x19 `latency_task_entry`, x30 `task_entry_wrapper`, DAIF
+  0x80). SP_EL1 is a multiple of 0x320 in 6/6 readings; that the saved SP
+  was 0 is an inference from that, not a measurement. In 1/6 (run14) CPU 1
+  panicked with `task_exit: schedule returned!` (task 180, lat_iso). The
+  first fault is not in any file.
+- CPU 0's waiter calls `yield()` between polls (PC `timer_get_count` 60/60,
+  return addresses in `test_wait_until_v`'s two loops 40/40 where
+  recorded); no WFE or WFI. CPUs 2 and 3 in `idle_task_func` WFI 60/60.
+- **Outcome: a kernel fault on isolated CPU 1, seen only with parallel
+  vCPUs (6/15 vs 0/15); not a lock, WFE or WFI hang and not a host
+  scheduling delay; a TCG fault cannot be excluded from these files.**
+  Hypothesis (untested): a task slot is reused (the test's
+  `task_destroy` plus `task_create`) while CPU 1 is still leaving the
+  previous task in it, with a second destroyer through `rq->zombie`;
+  `task_create` stores x19/x20 and x29/x30 before sp, and `switch_to`
+  reads sp first.
+- **C1 critic, #1213 (`critic-3-C1.md` section 8): pass**; every number
+  agrees; the two wording points above are the critic's.
+- Also filed by C1: #1220, #1221 (Entry 7). Evidence `gauntlet-3-hw-pi5` @
+  6569a660.

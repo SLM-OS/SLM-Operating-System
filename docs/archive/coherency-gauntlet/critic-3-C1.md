@@ -278,3 +278,152 @@ NC, `run3-hw/c1/removal-step6-run01..20.txt` for the removal, reproduced in
 `run3-hw/c1/removal-1211-run01..20.txt`, not reproduced, 0 of 20. Row 3 holds:
 #1220 and #1221. Section 5's fail is superseded by this section. It is recorded
 that row 3 was met only after the critic's first verdict.
+
+## 8. #1213 (QEMU, not a gate input)
+
+Requested by the orchestrator at about 08:00 UTC; offline, no labctl call, no
+QEMU run. Files: `gauntlet-3-hw-pi5` @ 6569a660,
+`run3-hw/c1/qemu-1213-*.txt`. `qemu-1213-summary.txt` was not opened until
+8.1 to 8.3 were written.
+
+### 8.1 Head and method checks
+
+- `origin/c1/isolated-1s` = f8ff72d6, parent a03fc75b. `git diff a03fc75b
+  f8ff72d6` is identical to the diff in run 2's
+  `run2-hw/c1/qemu-isolated-1s-f8ff72d6.patch` (`gauntlet-2-hw-pi5`), apart
+  from one trailing blank line in the patch file: both
+  `test_isolated_core_latency` waits (isolated and normal phase) become
+  `test_wait_task_terminated(..., TEST_WAIT_S(1))`.
+- First line of every run file (15 single, 15 multi, 10 multi-trace, 1
+  self-test) names `c1/isolated-1s head f8ff72d6`; all 41 give ELF sha256
+  6776d68c0a14...f7b1. `qemu-1213-maketest-build-f8ff72d6.txt` is the build's
+  `make test` log (head f8ff72d6).
+- `qemu-1213-sampler.sh.txt` holds run.sh, all.sh, sampler.py, trace.sh,
+  gdbtrace.py, analyze.py, table.py. The QEMU command is the `make test` one
+  plus `-accel tcg,tb-size=128,thread=<mode>`, a QMP socket and a gdbstub,
+  under the same systemd-run/timeout 120 guard. The sampler fires at the first
+  `iso_latency_isolated: TIMEOUT` line and takes 10 samples, 200 ms apart, of
+  every vCPU's PC, x30 and `current_task[cpu]`, symbolized with addr2line and
+  objdump, then one gdbstub read of system registers.
+- Sampler versions: `multi-run02` and `multi-run03` have no x30 lines, no
+  `info registers` dump and no gdbstub block (earlier sampler); runs 07, 12,
+  14, 15 have all three.
+- The critic built f8ff72d6 (`make kernel-test`, QEMU ARM64; banner
+  `f8ff72d6-dirty` from the untracked verdict file only) to disassemble
+  `test_wait_until_v`; the instructions after both sampled CPU 0 return
+  addresses match the files' objdump text (`sub x2, x0, x23` at 0x4007d1c4,
+  `mov x27, x0` at 0x4007d288), so the layout is the same.
+
+### 8.2 Runs and stalls, counted from the files
+
+| Mode | Files | Runs | Stalled (an `iso_latency_isolated: TIMEOUT` line) | QEMU rc 124 |
+|---|---|---|---|---|
+| thread=single | qemu-1213-single-run01..15.txt | 15 | 0/15 | 0/15 (rc 0, isolated 10/10 and normal 10/10 in 15/15) |
+| thread=multi | qemu-1213-multi-run01..15.txt | 15 | 6/15: runs 02, 03, 07, 12, 14, 15 | 6/15, the same six |
+| thread=multi, gdb attached from boot (trace) | qemu-1213-multi-trace-run01..10.txt | 10 | 0/10 | 0/10; breakpoint on the EL1h sync vector hit 0 times in 10/10 |
+| self-test (trigger on the summary line) | qemu-1213-sampler-selftest-multi-run99.txt | 1 | not a stall run | rc 0 |
+
+Isolated-phase TIMEOUT lines per stalled run: 9 (02), 3 (03), 2 (07), 6 (12),
+8 (14), 2 (15). In 6/6 the first one reads `value at bound 1` (task state 1,
+RUNNING) at the bound and at +1, +10, +100 and +1000 ms. In 6/6 the stall is
+the first isolated-phase iteration after `CPU 1: isolated from general
+scheduling` (line 6557 in each file).
+
+Sampling: 10 samples of all 4 vCPUs in 6/6, spanning 2.95 s (02, 03) to 4.0 s
+(07, 12, 14, 15) by their timestamps.
+
+### 8.3 Per stalled run
+
+| Run | CPU 1 PCs (count of 10) | CPU 1 PSTATE | CPU 1 function | CPU 1 x30 | CPU 1 SP / ESR / FAR / ELR (sample-01 `info registers`; gdbstub after sampling) | `current_task[1]` | CPU 0 PC; return addresses |
+|---|---|---|---|---|---|---|---|
+| multi-run02 | 0x40010f94 x8, 0x40010a00 x2 | 0x3c5 (EL1h, DAIF masked) 10/10 | `el1_sync`+4 (`stp x0, x1, [sp]`), `exception_vectors`+0x200 (`b el1_sync`) | not recorded | not recorded | 0x407ce4f0 10/10; reads lat_iso id 180/181, READY | 0x4002fda8 `timer_get_count` 10/10; x30 not recorded |
+| multi-run03 | 0x40010a00 x5, 0x40010f94 x5 | 0x3c5 10/10 | same | not recorded | not recorded | 0x407ce4f0 10/10; lat_iso 186, lat_norm 187, READY | `timer_get_count` 10/10; not recorded |
+| multi-run07 | 0x40010f94 x5, 0x40010a00 x5 | 0x3c5 10/10 | same | 0x40017ca0 `task_entry_wrapper` 10/10 | SP 0xffffffffa2dff600; ESR 0x96000045, FAR = SP_EL1 = 0xfffffffee23e0860, ELR 0x40010f94 | 0x407ce4f0 10/10; lat_norm 187 to 189, READY | `timer_get_count` 10/10; x30 0x4007d1c4 x6, 0x4007d288 x4 (`test_wait_until_v`); gdb bt `timer_get_count` <- `test_wait_until_v` <- `test_isolated_core_latency` |
+| multi-run12 | 0x40010f94 x9, 0x40010a00 x1 | 0x3c5 10/10 | same | `task_entry_wrapper` 10/10 | SP 0xffffffffa1504740; ESR 0x96000045, FAR = SP_EL1 = 0xfffffffede0619e0, ELR 0x40010f94 | 0x407ce4f0 10/10; lat_iso 183 to 185, READY | same; x30 0x4007d1c4 x6, 0x4007d288 x4 |
+| multi-run14 | 0x40042b98 x6 (`wfi`), 0x40042b9c x4 (`b panic+0x1f4`) | 0x600003c5 10/10 | `panic` (WFI loop) | 0x40042b94 `panic` | SP 0x421ffed0; ESR 0x0, FAR 0x0; gdb bt `panic` <- `task_exit` <- `task_entry_trampoline` | 0x407ce4f0 10/10; lat_iso 181 to 183, READY | same; x30 0x4007d1c4 x5, 0x4007d288 x5 |
+| multi-run15 | 0x40010a00 x7, 0x40010f94 x3 | 0x3c5 10/10 | `el1_sync`/vector | `task_entry_wrapper` 10/10 | SP 0xffffffffa6739c40; ESR 0x96000045, FAR = SP_EL1 = 0xfffffffee3a396c0, ELR 0x40010f94 | 0x407ce4f0 10/10; lat_norm 187 to 189, READY | same; x30 0x4007d1c4 x5, 0x4007d288 x5 |
+
+`multi-run14.txt` also prints, at the stall (line 6560 on), `KERNEL PANIC`
+`task_exit: schedule returned!` for task 180 `lat_iso` on CPU 1, SP 0x421ffed0
+inside that task's stack [0x421c0000..0x42200000), ELR 0x4001a8c4, all task
+canaries intact. No other run file has a `KERNEL PANIC` line.
+
+Reading of the rows:
+
+- CPU 1's PC moves in 6/6, but only inside a two-instruction cycle: the EL1h
+  synchronous vector and `el1_sync`+4 in 5/6, `panic`'s WFI loop in 1/6. It
+  never returns to task or scheduler code in any sample.
+- In the 3 runs with registers (07, 12, 15): ESR 0x96000045 is a data abort
+  taken at EL1 (EC 0x25), write, level-1 translation fault; FAR equals SP_EL1;
+  ELR is `el1_sync`+4, the `stp` to the stack after `sub sp, sp, #0x320`. SP
+  lies far outside RAM and is lower at the gdbstub read than at sample 01 in
+  each run (by about 3 GB in 07). CPU 1 is re-entering its own exception
+  vector on an invalid stack, each entry 0x320 bytes lower. The first fault is
+  not in any file: the trace runs that were to catch it never stalled.
+- RUNNING task on CPU 1: no sampled task is RUNNING. `current_task[1]` points
+  to the same struct (0x407ce4f0) in all 60 samples, and the task awaited at
+  the first timeout was RUNNING (state 1) at the bound in 6/6. Later reads of
+  that struct show newer lat_iso/lat_norm tasks in READY state, so the
+  struct was reused by later iterations while CPU 1 stayed in its loop.
+- CPU 0 executes its poll loop with `yield()` between polls in 4/4 runs with
+  x30: 0x4007d1c4 is the main-loop poll (`now - start`, then `bl yield`) and
+  0x4007d288 the post-timeout re-poll loop (also `bl yield`); neither loop
+  contains WFE or WFI. Every CPU 0 PC sample is in `timer_get_count`, so the
+  `yield()` call itself is not sampled; the two alternating call sites and
+  the repeating TIMEOUT lines show CPU 0 passing through iterations. Runs 02
+  and 03 have no x30, so for them this is from the PC and the code only.
+- Kernel fault or TCG artifact: the rows show a guest-visible kernel failure
+  on CPU 1, a recursive data abort on an invalid SP in 5/6 and a kernel panic
+  `task_exit: schedule returned!` in 1/6, not a vCPU that is merely not being
+  scheduled by the host. Thread mode: 6/15 under thread=multi, 0/15 under
+  thread=single, 0/10 under thread=multi with gdb attached. Outcome that
+  follows: a kernel hang/fault on isolated CPU 1, seen only under MTTCG; a
+  TCG fault cannot be excluded from these files, and the cause of the first
+  fault is not observed.
+
+Numbers that cannot be traced to a file: none in 8.1 to 8.3 other than the
+critic's own build (banner `f8ff72d6-dirty`, local, not committed), used only
+to map two return addresses.
+
+### 8.4 Builder's summary compared (read after 8.1 to 8.3 were written)
+
+Read: `run3-hw/c1/qemu-1213-summary.txt` (`gauntlet-3-hw-pi5` @ 6569a660).
+
+| Builder's number or claim | Critic | Agree |
+|---|---|---|
+| Head f8ff72d6 = a03fc75b + one TEMPORARY commit; patch identical to run 2's | Same (8.1) | yes |
+| ELF sha256 6776d68c...f7b1, same ELF in every run | 41/41 files | yes |
+| thread=single 0 of 15; brief's set 0 of 5 | 0/15 | yes |
+| thread=multi 6 of 15 (02, 03, 07, 12, 14, 15); brief's set 2 of 5 (02, 03) | Same | yes |
+| multi with gdb from boot 0 of 10; 0 breakpoint hits | 0/10, 0 hits | yes |
+| Per-run table, 40 rows: rc, isolated/normal, TIMEOUT line counts (9, 3, 2, 6, 8, 2), first state at bound 1, CPU 1 PCs and functions, CPU 0 PC, gdbstub ESR/FAR/ELR/SP_EL1 | Same values in every row checked (all 6 stalled rows field by field; the 34 others by rc, sample counts and TIMEOUT count) | yes |
+| 5 of 6 alternate 0x40010a00 / 0x40010f94; run14 in `panic` after `task_exit: schedule returned!` (task 180, lat_iso, CPU 1) | Same | yes |
+| PSTATE 0x3c5 in the 5 loop runs, 0x600003c5 in run14 | Same | yes |
+| ESR 0x96000045, FAR = SP_EL1, ELR = `el1_sync+4` in run07, 12, 15 | Same | yes |
+| SP_EL1 = 0 mod 0x320 in 6 of 6 readings, 1.88 to 6.08 million steps below 0 | Recomputed: remainder 0 in 6/6; 1.878 to 6.081 million | yes |
+| CPU 1 sample-01 registers identical in run07, 12, 15: x19 = x0 = `latency_task_entry`, x20 = 0, x29 = 0, x30 = `task_entry_wrapper` entry, x2 = 0x407ce510, x3 = 0x80 | Same values in 3/3; 0x40111c80 = `latency_task_entry` and 0x40017ca0 = `task_entry_wrapper`'s entry in the critic's f8ff72d6 build | yes |
+| `task_entry_trampoline`'s first instruction is `stp x29, x30, [sp, #-32]!` | Same at 0x400187a8 in the critic's build | yes |
+| First timed-out isolated task RUNNING at the bound in 6 of 6; `current_task[1]` 0x407ce4f0 in every sample, slot reused | Same | yes |
+| CPU 0 ran `main` in 60/60, PC `timer_get_count` 60/60, x30 in `test_wait_until_v` 40/40, gdb bt 4/4; `bl yield` every pass, no WFE/WFI | Same (22 + 18 = 40 x30 samples) | yes |
+| CPUs 2 and 3 in `idle_task_func` after `wfi` in every sample | 60/60 each | yes |
+| "Attaching gdb changes the timing enough to hide the stall" | 0/10 under gdb is measured; the reason is not | wording: this is a hypothesis stated as a cause |
+| Outcome: "a kernel fault on CPU 1 that is exposed only by truly parallel vCPUs" | Follows from the rows (8.3) | yes |
+| Outcome: "CPU 1 switched into a task whose saved SP was 0 while its x19, x20, x29, x30 and DAIF already held a new task's initial values" | The register image is measured; "saved SP was 0" is inferred from the 0 mod 0x320 remainders, which any SP that is a multiple of 0x320 would also give. Strong, but an inference listed under "Measured outcome" | wording; does not change the outcome class |
+| Hypothesis (slot reused while CPU 1 is still leaving the old task; two destroyers; `task_create` store order against `switch_to` load order) | Labelled untested and not worked | recorded, not judged |
+| Discarded first multi run01 attempt at 06:59 (QMP socket path too long) | No file; not a count | recorded |
+
+### 8.5 Verdict for #1213 (not a gate input)
+
+**pass**. Every item of the definition of done is met from the files:
+at least 5 runs per mode (15 thread=single, 15 thread=multi); 6/6 stalled
+runs carry 10 symbolized PC samples of all 4 vCPUs over 2.95 to 4.0 s; each
+stalled run gives whether CPU 1's PC moves (yes, inside the fault or panic
+loop only), its function (`el1_sync`/EL1h sync vector in 5, `panic` in 1),
+the RUNNING task (the first awaited lat task, state 1 at the bound, struct
+0x407ce4f0 later reused), and CPU 0's loop (`yield()` between polls, no WFE or
+WFI; for multi-run02 and 03 from PC and code only, as the summary states);
+and the outcome sentence (kernel fault on isolated CPU 1, thread=multi only,
+6/15 against 0/15) follows from the rows. Two wording points are recorded
+above (gdb hiding the stall, SP = 0 under "measured"); neither redefines the
+bar or changes the class. The first fault was not observed, and #1213 stays an
+open kernel defect.
