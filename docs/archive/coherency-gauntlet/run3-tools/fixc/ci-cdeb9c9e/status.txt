@@ -1,0 +1,25 @@
+18:05:42Z start 1-build-arm64
+18:07:03Z 1-build-arm64 rc=0
+18:07:03Z start 2-build-x86
+18:07:41Z 2-build-x86 rc=0
+18:07:41Z start 3-build-jetson-real
+18:10:46Z 3-build-jetson-real rc=0
+18:10:46Z start 4-test-arm64
+18:13:11Z 4-test-arm64 rc=0
+18:13:11Z start 4b-test-x86
+18:14:35Z 4b-test-x86 rc=0
+18:14:35Z start 5-test-aisched
+18:17:04Z 5-test-aisched rc=0
+18:17:04Z start 6-runtime-test
+18:19:37Z 6-runtime-test rc=0
+18:19:37Z start 7-braces
+18:20:39Z 7-braces rc=0
+18:20:39Z start 8-build-order
+18:21:24Z 8-build-order rc=0
+18:21:24Z start 9-jetson-layout
+18:22:59Z 9-jetson-layout rc=0
+18:22:59Z start 10-diff
+18:22:59Z 10-diff rc=0
+18:22:59Z start x-test-ws
+18:26:26Z x-test-ws rc=2
+DONE
