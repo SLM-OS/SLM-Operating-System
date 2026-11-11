@@ -1,0 +1,8 @@
+local  d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927  <scratchpad>/cells/slmos-r3-ncoff-instr-v1.elf
+remote d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927  /root/slmos-r3-ncoff-instr-v1.elf
+kexec trigger at 2026-11-11T09:45:28Z
+ssh rc=0
+local  d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927  <scratchpad>/cells/slmos-r3-ncoff-instr-v1.elf
+remote d325404dcb522670d9967ed66d4853a9c8ffb8451fa36f980b6d8caef4849927  /root/slmos-r3-ncoff-instr-v1.elf
+kexec trigger at 2026-11-11T09:48:49Z
+ssh rc=0

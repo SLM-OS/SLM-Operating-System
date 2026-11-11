@@ -1,0 +1,7 @@
+# labctl serial_capture reply 1 of 1
+# call 2026-11-11T09:47:35.699Z  reply 2026-11-11T09:48:33.852Z  tool_use_id toolu_01V7RCYPuUTE7XNT7CUZkZsh
+# args {"port_name": "jetson-nano-2", "tail": 3, "timeout": 150, "until_pattern": "login:"}
+[Captured 3 lines in 58.1s, pattern 'login:' matched]
+Ubuntu 22.04.5 LTS gradient-desktop ttyTCU0
+
+gradient-desktop login:

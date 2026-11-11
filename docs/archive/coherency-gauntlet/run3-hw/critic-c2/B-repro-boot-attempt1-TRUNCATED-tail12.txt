@@ -1,0 +1,16 @@
+# labctl serial_capture reply 1 of 1
+# call 2026-11-11T09:45:32.759Z  reply 2026-11-11T09:47:00.978Z  tool_use_id toolu_014XZCKxDHeeWEX5fBx7QWTU
+# args {"port_name": "jetson-nano-2", "tail": 12, "timeout": 150, "until_pattern": "slmos>|PANIC|panic"}
+[Captured 12 lines in 88.2s, pattern 'slmos>|PANIC|panic' matched]
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: a0:ce:c8:0e:9a:21
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP auto-start deferred until link-ready (timeout 10000 ms)
+[INFO] cdc_ecm: network connection down (if=0)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>

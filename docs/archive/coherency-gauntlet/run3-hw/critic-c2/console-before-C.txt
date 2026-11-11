@@ -1,0 +1,11 @@
+# labctl serial_capture reply 1 of 2
+# call 2026-11-11T09:37:42.103Z  reply 2026-11-11T09:37:47.166Z  tool_use_id toolu_01Dh3wSudk6pF9CZ62G9B57Q
+# args {"port_name": "jetson-nano-2", "timeout": 5}
+[Captured 0 lines in 5.0s, timeout]
+# labctl serial_send reply 2 of 2
+# call 2026-11-11T09:37:59.791Z  reply 2026-11-11T09:38:00.193Z  tool_use_id toolu_01GXxkq3U4zruJ9edZ6A1P4w
+# args {"capture_timeout": 5, "capture_until": "login:|slmos>|\\$ |# ", "data": "", "port_name": "jetson-nano-2"}
+[Captured 3 lines in 0.2s, pattern 'None' matched]
+
+gradient-desktop login:
+gradient-desktop login:

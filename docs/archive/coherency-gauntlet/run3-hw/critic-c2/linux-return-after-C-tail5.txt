@@ -1,0 +1,9 @@
+# labctl serial_capture reply 1 of 1
+# call 2026-11-11T09:44:13.069Z  reply 2026-11-11T09:45:10.473Z  tool_use_id toolu_01SKUThh5XnaaaSu3auUi7xi
+# args {"port_name": "jetson-nano-2", "tail": 5, "timeout": 150, "until_pattern": "login:"}
+[Captured 5 lines in 57.3s, pattern 'login:' matched]
+[   20.917269] overlayfs: idmapped layers are currently not supported
+
+Ubuntu 22.04.5 LTS gradient-desktop ttyTCU0
+
+gradient-desktop login:

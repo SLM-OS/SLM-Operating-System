@@ -1,0 +1,4 @@
+local  77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5  <scratchpad>/cells/slmos-r3-nc-instr.elf
+remote 77803fb221477cdd814f06b7ae0fe7c0883753bdcd65afb2d54884f5c17a0cc5  /root/slmos-r3-nc-instr.elf
+kexec trigger at 2026-11-11T09:38:42Z
+ssh rc=0
