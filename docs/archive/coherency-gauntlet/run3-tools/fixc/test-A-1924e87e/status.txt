@@ -1,0 +1,3 @@
+make test rc=0
+make test WORK_STEALING=ON rc=0
+DONE
