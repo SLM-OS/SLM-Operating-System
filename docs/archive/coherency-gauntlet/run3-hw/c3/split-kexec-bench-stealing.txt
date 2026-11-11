@@ -1,0 +1,53 @@
+# coherency run 3 C3, PR head coherency-nc-axis-pi5 @ e5b24894 (jetson prod elf c794e298), jetson-nano-2, kexec boot 01, bench stealing (burst)
+# labctl serial_send reply 1 of 2
+# call 2026-11-11T10:30:17.367Z  reply 2026-11-11T10:30:17.582Z  tool_use_id toolu_01H5rg96ybH4PkfGMrA12PFJ
+# args {"capture_timeout": 10, "capture_until": "slmos>", "data": "cat /sys/version", "port_name": "jetson-nano-2"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+sm��{�ͽversion
+name:    SLM-OS
+version: 0.4.0
+build:   20261111102554
+commit:  e5b24894
+slmos>
+slmos>
+# labctl serial_send reply 2 of 2
+# call 2026-11-11T10:30:37.740Z  reply 2026-11-11T10:30:38.060Z  tool_use_id toolu_01PdSpVzQvXKeYqZFKC8DTfh
+# args {"capture_timeout": 60, "capture_until": "slmos>", "data": "bench stealing", "port_name": "jetson-nano-2"}
+[Captured 37 lines in 0.1s, pattern 'None' matched]
+cuocm�stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_0' (id=17) exiting
+[INFO] Task 's3_1' (id=18) exiting
+[INFO] Task 's3_2' (id=19) exiting
+[INFO] Task 's3_8' (id=25) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   13 ms (13873 us)
+    Per-task avg: 867 us
+
+    Per-CPU execution distribution:
+      CPU 0: 4 tasks
+      CPU 1: 2 tasks
+      CPU 2: 2 tasks
+      CPU 3: 3 tasks
+      CPU 4: 2 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0       182          4         0
+      1        10          0         0
+      2        12          2         0
+      3        15          3         0
+      4        14          2         0
+      5        15          3         0
+
+slmos>
+slmos>
