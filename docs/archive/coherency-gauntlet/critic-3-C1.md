@@ -240,3 +240,41 @@ The comparison does not change the verdict: **fail**, definition-of-done row 3,
 and `run2-hw/c1/nc-step6-run06.txt`
 (`test_proactive_load_balance_runtime_config_aggressive`) have no issue.
 Rows 1 and 2 are met and reproduced.
+
+## 7. Row 3 re-check (after #1220, #1221)
+
+Requested by the orchestrator at 07:41 UTC; done offline, no labctl call. Rows 1
+and 2 stand as written in section 5 and were not re-opened. The issues were read
+with `gh issue view` (title, state, labels, milestone, body). Both were created
+at 07:35 UTC, after the critic's issue search in section 5 (about 07:26 UTC),
+which is why that search found neither.
+
+| Check | #1220 | #1221 |
+|---|---|---|
+| Names its test | `test_slm_stop_from_second_session_during_prompt` (title and body) | `test_proactive_load_balance_runtime_config_aggressive` (title and body) |
+| Names the evidence file | `docs/archive/coherency-gauntlet/run2-hw/c1/nc-step6-run04.txt` on `gauntlet-2-hw-pi5` | `docs/archive/coherency-gauntlet/run2-hw/c1/nc-step6-run06.txt` on `gauntlet-2-hw-pi5` |
+| Labels | bug, platform:pi5, sub:shell, P3-low | bug, platform:pi5, sub:sched, P3-low |
+| Milestone | Backlog | Backlog |
+| State | OPEN | OPEN |
+| Banner quoted | `SLM-OS v0.4.0 build 20261110091028 (30dc24bc)`: matches line 3 of the file | Same: matches line 3 of the file |
+| Failure text quoted | File lines 6763 to 6765: match the file verbatim (`test_slm_shell.c:680`, `stop=stopped`) | File lines 7404 to 7409: match the file verbatim (`test_scheduler.c:4380`, Expected 0, Actual 3) |
+| Observed rate stated | NC 1 of 20 (`run2-hw/c1/nc-step6-run01..09.txt`, `run3-hw/c1/nc-step6-run10..20.txt`); removal 0 of 20 (`run3-hw/c1/removal-step6-run01..20.txt`) | Same files, NC 1 of 20, removal 0 of 20 |
+| Rate against the files | grep for `[FAIL] <test>` over the 40 step-6 files and the critic's 10 reproduction files: one file, `nc-step6-run04.txt`; `[PASS] <test>` in the other 49. NC 1/20 and removal 0/20 hold | grep the same way: one file, `nc-step6-run06.txt`; `[PASS]` in the other 49. NC 1/20 and removal 0/20 hold |
+
+One remark, not a defect against row 3: both issues give the critic's
+reproduction result as "the orchestrator reports 0 failures" with no
+filename. The files show it: 0 of 10 for each test in
+`run3-hw/critic-c1/nc-repro-run01..05.txt` and `removal-repro-run01..05.txt`
+(`gauntlet-3-hw-pi5` @ 9352c948).
+
+Row 3 is now met. The two failures beyond the 18 in the step-6 boots are
+counted (section 1), named and filed: #1220 and #1221, each with its evidence
+filename.
+
+Verdict for the whole component after the re-check: **pass**. Row 1 holds:
+`run2-hw/c1/nc-step6-run01..09.txt` and `run3-hw/c1/nc-step6-run10..20.txt` for
+NC, `run3-hw/c1/removal-step6-run01..20.txt` for the removal, reproduced in
+`run3-hw/critic-c1/{nc,removal}-repro-run01..05.txt`. Row 2 holds:
+`run3-hw/c1/removal-1211-run01..20.txt`, not reproduced, 0 of 20. Row 3 holds:
+#1220 and #1221. Section 5's fail is superseded by this section. It is recorded
+that row 3 was met only after the critic's first verdict.

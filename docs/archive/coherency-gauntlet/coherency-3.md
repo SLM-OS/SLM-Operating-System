@@ -309,3 +309,20 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
 - Evidence `gauntlet-3-hw-pi5` @ 127428e7. One claim without a file (a
   QEMU `make test` pass on the #1211 tree, labelled dirty) is struck from
   this entry, per the critic.
+
+## Entry 7 (07:42 UTC): C1 critic re-check, row 3: C1 passes
+
+- Correction to Entries 5 and 6: both were written at 07:31Z, not 07:27Z.
+- 07:35Z: the C1 builder filed #1220 (`test_slm_stop_from_second_session_during_prompt`,
+  `run2-hw/c1/nc-step6-run04.txt`; bug, platform:pi5, sub:shell, P3-low)
+  and #1221 (`test_proactive_load_balance_runtime_config_aggressive`,
+  `run2-hw/c1/nc-step6-run06.txt`; bug, platform:pi5, sub:sched, P3-low),
+  both Backlog, both file-don't-fix.
+- **C1 critic re-check (`critic-3-C1.md` section 7): pass.** Both issues
+  name their test and file, quote the banner and failure lines verbatim,
+  and state NC 1 of 20, removal 0 of 20, which the critic confirmed by grep
+  over the 40 step-6 files and its 10 reproduction files. Section 5's fail
+  is superseded; the verdict records that row 3 was met only after the
+  first verdict.
+- **C1 at the gate: clear** (the critic counted 20 of 20 under both
+  kernels, and #1211 is not reproduced).
