@@ -1,0 +1,714 @@
+
+Disassembly of section .text:
+
+0000000000000000 <cpu_record_current_el>:
+   0:	cmp	w0, #0x7
+   4:	b.hi	18 <cpu_record_current_el+0x18>  // b.pmore
+   8:	mrs	x2, currentel
+   c:	adrp	x1, 0 <cpu_record_current_el>
+  10:	add	x1, x1, #0x0
+  14:	str	x2, [x1, w0, uxtw #3]
+  18:	ret
+  1c:	nop
+
+0000000000000020 <cpu_get_current_el>:
+  20:	cmp	w0, #0x7
+  24:	b.hi	38 <cpu_get_current_el+0x18>  // b.pmore
+  28:	adrp	x1, 0 <cpu_record_current_el>
+  2c:	add	x1, x1, #0x0
+  30:	ldr	x0, [x1, w0, uxtw #3]
+  34:	ret
+  38:	mov	x0, #0xffffffff            	// #4294967295
+  3c:	ret
+
+0000000000000040 <cpu_logical_id>:
+  40:	adrp	x2, 0 <cpu_record_current_el>
+  44:	and	x3, x0, #0xffffffffff
+  48:	add	x2, x2, #0x0
+  4c:	and	x3, x3, #0xffffffff00ffffff
+  50:	ldr	w4, [x2, #64]
+  54:	cbz	w4, 84 <cpu_logical_id+0x44>
+  58:	mov	w4, w4
+  5c:	add	x2, x2, #0x48
+  60:	mov	x0, #0x0                   	// #0
+  64:	b	74 <cpu_logical_id+0x34>
+  68:	add	x0, x0, #0x1
+  6c:	cmp	x0, x4
+  70:	b.eq	84 <cpu_logical_id+0x44>  // b.none
+  74:	ldr	x1, [x2, x0, lsl #3]
+  78:	cmp	x1, x3
+  7c:	b.ne	68 <cpu_logical_id+0x28>  // b.any
+  80:	ret
+  84:	mov	w0, #0xffffffff            	// #-1
+  88:	ret
+
+000000000000008c <smp_notify_cpu>:
+  8c:	mrs	x4, mpidr_el1
+  90:	adrp	x3, 0 <cpu_record_current_el>
+  94:	and	x4, x4, #0xffffffffff
+  98:	add	x3, x3, #0x0
+  9c:	and	x4, x4, #0xffffffff00ffffff
+  a0:	ldr	w6, [x3, #64]
+  a4:	cbz	w6, e0 <smp_notify_cpu+0x54>
+  a8:	add	x3, x3, #0x48
+  ac:	mov	w5, w6
+  b0:	mov	x1, #0x0                   	// #0
+  b4:	b	c4 <smp_notify_cpu+0x38>
+  b8:	add	x1, x1, #0x1
+  bc:	cmp	x5, x1
+  c0:	b.eq	e4 <smp_notify_cpu+0x58>  // b.none
+  c4:	ldr	x2, [x3, x1, lsl #3]
+  c8:	cmp	x4, x2
+  cc:	b.ne	b8 <smp_notify_cpu+0x2c>  // b.any
+  d0:	cmp	w6, w0
+  d4:	ccmp	w0, w1, #0x4, hi	// hi = pmore
+  d8:	b.eq	e0 <smp_notify_cpu+0x54>  // b.none
+  dc:	sev
+  e0:	ret
+  e4:	mov	w1, #0x0                   	// #0
+  e8:	b	d0 <smp_notify_cpu+0x44>
+
+00000000000000ec <psci_cpu_on>:
+  ec:	mov	x5, x0
+  f0:	mov	x4, x1
+  f4:	mov	x0, #0x3                   	// #3
+  f8:	mov	x3, x2
+  fc:	mov	x1, x5
+ 100:	mov	x2, x4
+ 104:	movk	x0, #0xc400, lsl #16
+ 108:	hvc	#0x0
+ 10c:	ret
+
+0000000000000110 <psci_cpu_off>:
+ 110:	mov	x0, #0x2                   	// #2
+ 114:	mov	x1, #0x0                   	// #0
+ 118:	movk	x0, #0x8400, lsl #16
+ 11c:	mov	x2, #0x0                   	// #0
+ 120:	mov	x3, #0x0                   	// #0
+ 124:	hvc	#0x0
+ 128:	wfi
+ 12c:	wfi
+ 130:	b	128 <psci_cpu_off+0x18>
+ 134:	nop
+ 138:	nop
+ 13c:	nop
+
+0000000000000140 <psci_system_reset>:
+ 140:	mov	x0, #0x9                   	// #9
+ 144:	mov	x1, #0x0                   	// #0
+ 148:	movk	x0, #0x8400, lsl #16
+ 14c:	mov	x2, #0x0                   	// #0
+ 150:	mov	x3, #0x0                   	// #0
+ 154:	hvc	#0x0
+ 158:	wfi
+ 15c:	wfi
+ 160:	b	158 <psci_system_reset+0x18>
+
+0000000000000164 <psci_system_off>:
+ 164:	mov	x0, #0x8                   	// #8
+ 168:	mov	x1, #0x0                   	// #0
+ 16c:	movk	x0, #0x8400, lsl #16
+ 170:	mov	x2, #0x0                   	// #0
+ 174:	mov	x3, #0x0                   	// #0
+ 178:	hvc	#0x0
+ 17c:	wfi
+ 180:	wfi
+ 184:	b	17c <psci_system_off+0x18>
+
+0000000000000188 <secondary_init>:
+ 188:	stp	x29, x30, [sp, #-64]!
+ 18c:	mov	x29, sp
+ 190:	stp	x19, x20, [sp, #16]
+ 194:	stp	x21, x22, [sp, #32]
+ 198:	str	x23, [sp, #48]
+ 19c:	mov	w23, w0
+ 1a0:	cmp	w0, #0x7
+ 1a4:	b.hi	2a0 <secondary_init+0x118>  // b.pmore
+ 1a8:	mrs	x0, currentel
+ 1ac:	adrp	x19, 0 <cpu_record_current_el>
+ 1b0:	mov	w20, w23
+ 1b4:	add	x19, x19, #0x0
+ 1b8:	str	x0, [x19, x20, lsl #3]
+ 1bc:	bl	0 <gic_percpu_init>
+ 1c0:	bl	0 <timer_percpu_init>
+ 1c4:	bl	0 <pmu_enable_self>
+ 1c8:	add	x1, x20, x20, lsl #2
+ 1cc:	add	x3, x19, #0x88
+ 1d0:	mov	w2, #0x1                   	// #1
+ 1d4:	lsl	x20, x20, #2
+ 1d8:	add	x0, x19, #0x200
+ 1dc:	add	x1, x3, x1, lsl #3
+ 1e0:	strb	w2, [x1, #16]
+ 1e4:	mov	w1, #0x1                   	// #1
+ 1e8:	add	x0, x0, x20
+ 1ec:	stlr	w1, [x0]
+ 1f0:	dsb	sy
+ 1f4:	ldr	w0, [x19, #544]
+ 1f8:	mov	x21, #0x34db                	// #13531
+ 1fc:	mov	w20, #0xe848                	// #59464
+ 200:	movk	x21, #0xd7b6, lsl #16
+ 204:	mov	x22, #0x423f                	// #16959
+ 208:	movk	x21, #0xde82, lsl #32
+ 20c:	movk	w20, #0x1, lsl #16
+ 210:	movk	x22, #0xf, lsl #16
+ 214:	movk	x21, #0x431b, lsl #48
+ 218:	add	w0, w0, w1
+ 21c:	str	w0, [x19, #544]
+ 220:	bl	0 <scheduler_is_initialized>
+ 224:	cbnz	w0, 268 <secondary_init+0xe0>
+ 228:	bl	0 <timer_get_frequency>
+ 22c:	mov	x19, x0
+ 230:	cbz	x0, 260 <secondary_init+0xd8>
+ 234:	add	x19, x19, x19, lsl #2
+ 238:	bl	0 <timer_get_count>
+ 23c:	add	x19, x19, x19, lsl #2
+ 240:	add	x19, x22, x19, lsl #2
+ 244:	umulh	x19, x19, x21
+ 248:	add	x19, x0, x19, lsr #18
+ 24c:	b	254 <secondary_init+0xcc>
+ 250:	yield
+ 254:	bl	0 <timer_get_count>
+ 258:	cmp	x19, x0
+ 25c:	b.hi	250 <secondary_init+0xc8>  // b.pmore
+ 260:	subs	w20, w20, #0x1
+ 264:	b.ne	220 <secondary_init+0x98>  // b.any
+ 268:	bl	0 <scheduler_is_initialized>
+ 26c:	cbnz	w0, 280 <secondary_init+0xf8>
+ 270:	adrp	x0, 0 <cpu_record_current_el>
+ 274:	mov	w1, w23
+ 278:	add	x0, x0, #0x0
+ 27c:	bl	0 <panic>
+ 280:	mov	w0, w23
+ 284:	bl	0 <scheduler_init_secondary>
+ 288:	mov	w0, w23
+ 28c:	bl	0 <scheduler_start>
+ 290:	adrp	x0, 0 <cpu_record_current_el>
+ 294:	mov	w1, w23
+ 298:	add	x0, x0, #0x0
+ 29c:	bl	0 <panic>
+ 2a0:	adrp	x19, 0 <cpu_record_current_el>
+ 2a4:	mov	w20, w0
+ 2a8:	add	x19, x19, #0x0
+ 2ac:	b	1bc <secondary_init+0x34>
+
+00000000000002b0 <smp_init>:
+ 2b0:	adrp	x0, 0 <cpu_record_current_el>
+ 2b4:	stp	x29, x30, [sp, #-128]!
+ 2b8:	mov	x29, sp
+ 2bc:	add	x0, x0, #0x0
+ 2c0:	stp	x19, x20, [sp, #16]
+ 2c4:	stp	x21, x22, [sp, #32]
+ 2c8:	stp	x23, x24, [sp, #48]
+ 2cc:	bl	0 <uart_printf>
+ 2d0:	adrp	x0, 0 <cpu_record_current_el>
+ 2d4:	str	wzr, [sp, #112]
+ 2d8:	add	x0, x0, #0x0
+ 2dc:	str	wzr, [sp, #120]
+ 2e0:	bl	0 <uart_puts>
+ 2e4:	ldr	w0, [sp, #112]
+ 2e8:	cbnz	w0, 568 <smp_init+0x2b8>
+ 2ec:	adrp	x0, 0 <cpu_record_current_el>
+ 2f0:	adrp	x19, 0 <spinlock_hw_enabled>
+ 2f4:	add	x0, x0, #0x0
+ 2f8:	mov	w20, #0x0                   	// #0
+ 2fc:	bl	0 <uart_printf>
+ 300:	ldr	w0, [x19]
+ 304:	cbz	w0, 584 <smp_init+0x2d4>
+ 308:	add	x0, sp, #0x70
+ 30c:	mov	w1, #0x1                   	// #1
+ 310:	sevl
+ 314:	wfe
+ 318:	ldaxr	w2, [x0]
+ 31c:	cbnz	w2, 314 <smp_init+0x64>
+ 320:	stxr	w2, w1, [x0]
+ 324:	cbnz	w2, 314 <smp_init+0x64>
+ 328:	ldr	w0, [sp, #112]
+ 32c:	cbz	w0, 52c <smp_init+0x27c>
+ 330:	adrp	x0, 0 <cpu_record_current_el>
+ 334:	add	x0, x0, #0x0
+ 338:	bl	0 <uart_printf>
+ 33c:	ldr	w0, [x19]
+ 340:	cbz	w0, 544 <smp_init+0x294>
+ 344:	add	x0, sp, #0x70
+ 348:	mov	w1, #0x1                   	// #1
+ 34c:	ldaxr	w3, [x0]
+ 350:	cbnz	w3, 364 <smp_init+0xb4>
+ 354:	stxr	w3, w1, [x0]
+ 358:	cbnz	w3, 364 <smp_init+0xb4>
+ 35c:	mov	w2, #0x1                   	// #1
+ 360:	b	368 <smp_init+0xb8>
+ 364:	mov	w2, #0x0                   	// #0
+ 368:	cbnz	w2, 548 <smp_init+0x298>
+ 36c:	adrp	x0, 0 <cpu_record_current_el>
+ 370:	add	x0, x0, #0x0
+ 374:	bl	0 <uart_printf>
+ 378:	ldr	w0, [x19]
+ 37c:	cbz	w0, 560 <smp_init+0x2b0>
+ 380:	add	x0, sp, #0x70
+ 384:	stlr	wzr, [x0]
+ 388:	sev
+ 38c:	ldr	w0, [sp, #112]
+ 390:	cbnz	w0, 4ec <smp_init+0x23c>
+ 394:	adrp	x0, 0 <cpu_record_current_el>
+ 398:	add	x0, x0, #0x0
+ 39c:	bl	0 <uart_printf>
+ 3a0:	ldr	w0, [x19]
+ 3a4:	cbz	w0, 504 <smp_init+0x254>
+ 3a8:	add	x0, sp, #0x70
+ 3ac:	mov	w1, #0x1                   	// #1
+ 3b0:	ldaxr	w3, [x0]
+ 3b4:	cbnz	w3, 3c8 <smp_init+0x118>
+ 3b8:	stxr	w3, w1, [x0]
+ 3bc:	cbnz	w3, 3c8 <smp_init+0x118>
+ 3c0:	mov	w2, #0x1                   	// #1
+ 3c4:	b	3cc <smp_init+0x11c>
+ 3c8:	mov	w2, #0x0                   	// #0
+ 3cc:	cmp	w2, w1
+ 3d0:	b.eq	508 <smp_init+0x258>  // b.none
+ 3d4:	adrp	x0, 0 <cpu_record_current_el>
+ 3d8:	add	w20, w20, #0x1
+ 3dc:	add	x0, x0, #0x0
+ 3e0:	bl	0 <uart_printf>
+ 3e4:	add	x0, sp, #0x78
+ 3e8:	ldaxrh	w1, [x0]
+ 3ec:	add	w2, w1, #0x1
+ 3f0:	stxrh	w3, w2, [x0]
+ 3f4:	cbnz	w3, 3e8 <smp_init+0x138>
+ 3f8:	and	w1, w1, #0xffff
+ 3fc:	add	x2, sp, #0x7a
+ 400:	ldarh	w0, [x2]
+ 404:	cmp	w1, w0, uxth
+ 408:	b.eq	41c <smp_init+0x16c>  // b.none
+ 40c:	wfe
+ 410:	ldarh	w0, [x2]
+ 414:	cmp	w1, w0, uxth
+ 418:	b.ne	40c <smp_init+0x15c>  // b.any
+ 41c:	ldrh	w0, [sp, #122]
+ 420:	and	w0, w0, #0xffff
+ 424:	add	w0, w0, #0x1
+ 428:	and	w0, w0, #0xffff
+ 42c:	dmb	ish
+ 430:	strh	w0, [sp, #122]
+ 434:	sev
+ 438:	adrp	x0, 0 <cpu_record_current_el>
+ 43c:	add	x0, x0, #0x0
+ 440:	bl	0 <uart_printf>
+ 444:	mrs	x0, daif
+ 448:	msr	daifset, #0x2
+ 44c:	msr	daif, x0
+ 450:	adrp	x0, 0 <cpu_record_current_el>
+ 454:	add	x0, x0, #0x0
+ 458:	bl	0 <uart_printf>
+ 45c:	mrs	x1, daif
+ 460:	msr	daifset, #0x2
+ 464:	ldr	w0, [x19]
+ 468:	cbz	w0, a3c <smp_init+0x78c>
+ 46c:	add	x0, sp, #0x70
+ 470:	mov	w2, #0x1                   	// #1
+ 474:	sevl
+ 478:	wfe
+ 47c:	ldaxr	w3, [x0]
+ 480:	cbnz	w3, 478 <smp_init+0x1c8>
+ 484:	stxr	w3, w2, [x0]
+ 488:	cbnz	w3, 478 <smp_init+0x1c8>
+ 48c:	ldr	w0, [sp, #112]
+ 490:	cbz	w0, 58c <smp_init+0x2dc>
+ 494:	ldr	w0, [x19]
+ 498:	cbz	w0, a90 <smp_init+0x7e0>
+ 49c:	add	x0, sp, #0x70
+ 4a0:	stlr	wzr, [x0]
+ 4a4:	sev
+ 4a8:	msr	daif, x1
+ 4ac:	ldr	w0, [sp, #112]
+ 4b0:	cbnz	w0, a84 <smp_init+0x7d4>
+ 4b4:	adrp	x0, 0 <cpu_record_current_el>
+ 4b8:	add	x0, x0, #0x0
+ 4bc:	bl	0 <uart_printf>
+ 4c0:	dmb	ish
+ 4c4:	dmb	ishld
+ 4c8:	dmb	ishst
+ 4cc:	adrp	x0, 0 <cpu_record_current_el>
+ 4d0:	add	x0, x0, #0x0
+ 4d4:	bl	0 <uart_printf>
+ 4d8:	cbnz	w20, 5b4 <smp_init+0x304>
+ 4dc:	adrp	x0, 0 <cpu_record_current_el>
+ 4e0:	add	x0, x0, #0x0
+ 4e4:	bl	0 <uart_printf>
+ 4e8:	b	5d0 <smp_init+0x320>
+ 4ec:	adrp	x0, 0 <cpu_record_current_el>
+ 4f0:	add	w20, w20, #0x1
+ 4f4:	add	x0, x0, #0x0
+ 4f8:	bl	0 <uart_printf>
+ 4fc:	ldr	w0, [x19]
+ 500:	cbnz	w0, 3a8 <smp_init+0xf8>
+ 504:	dmb	ish
+ 508:	adrp	x0, 0 <cpu_record_current_el>
+ 50c:	add	x0, x0, #0x0
+ 510:	bl	0 <uart_printf>
+ 514:	ldr	w0, [x19]
+ 518:	cbz	w0, aa0 <smp_init+0x7f0>
+ 51c:	add	x0, sp, #0x70
+ 520:	stlr	wzr, [x0]
+ 524:	sev
+ 528:	b	3e4 <smp_init+0x134>
+ 52c:	adrp	x0, 0 <cpu_record_current_el>
+ 530:	add	w20, w20, #0x1
+ 534:	add	x0, x0, #0x0
+ 538:	bl	0 <uart_printf>
+ 53c:	ldr	w0, [x19]
+ 540:	cbnz	w0, 344 <smp_init+0x94>
+ 544:	dmb	ish
+ 548:	adrp	x0, 0 <cpu_record_current_el>
+ 54c:	add	w20, w20, #0x1
+ 550:	add	x0, x0, #0x0
+ 554:	bl	0 <uart_printf>
+ 558:	ldr	w0, [x19]
+ 55c:	cbnz	w0, 380 <smp_init+0xd0>
+ 560:	dmb	ish
+ 564:	b	38c <smp_init+0xdc>
+ 568:	adrp	x0, 0 <cpu_record_current_el>
+ 56c:	adrp	x19, 0 <spinlock_hw_enabled>
+ 570:	add	x0, x0, #0x0
+ 574:	mov	w20, #0x1                   	// #1
+ 578:	bl	0 <uart_printf>
+ 57c:	ldr	w0, [x19]
+ 580:	cbnz	w0, 308 <smp_init+0x58>
+ 584:	dmb	ish
+ 588:	b	328 <smp_init+0x78>
+ 58c:	adrp	x0, 0 <cpu_record_current_el>
+ 590:	add	x0, x0, #0x0
+ 594:	bl	0 <uart_printf>
+ 598:	add	w20, w20, #0x1
+ 59c:	dmb	ish
+ 5a0:	dmb	ishld
+ 5a4:	dmb	ishst
+ 5a8:	adrp	x0, 0 <cpu_record_current_el>
+ 5ac:	add	x0, x0, #0x0
+ 5b0:	bl	0 <uart_printf>
+ 5b4:	adrp	x1, 0 <cpu_record_current_el>
+ 5b8:	adrp	x0, 0 <cpu_record_current_el>
+ 5bc:	mov	w3, w20
+ 5c0:	add	x1, x1, #0x0
+ 5c4:	add	x0, x0, #0x0
+ 5c8:	mov	w2, #0x298                 	// #664
+ 5cc:	bl	0 <uart_printf>
+ 5d0:	adrp	x19, 0 <cpu_record_current_el>
+ 5d4:	mov	x0, #0xffffffff            	// #4294967295
+ 5d8:	add	x21, x19, #0x0
+ 5dc:	stp	x0, x0, [x21]
+ 5e0:	stp	x0, x0, [x21, #16]
+ 5e4:	stp	x0, x0, [x21, #32]
+ 5e8:	stp	x0, x0, [x21, #48]
+ 5ec:	mrs	x0, mpidr_el1
+ 5f0:	and	x0, x0, #0xffffffffff
+ 5f4:	mov	w1, #0x1                   	// #1
+ 5f8:	and	x0, x0, #0xffffffff00ffffff
+ 5fc:	str	w1, [x21, #64]
+ 600:	str	x0, [x21, #72]
+ 604:	bl	0 <dtb_get_info>
+ 608:	cbz	x0, 614 <smp_init+0x364>
+ 60c:	ldrb	w1, [x0, #56]
+ 610:	tbnz	w1, #0, a1c <smp_init+0x76c>
+ 614:	mov	w2, #0x4                   	// #4
+ 618:	ldr	w3, [x21, #64]
+ 61c:	mov	x0, #0x1                   	// #1
+ 620:	add	x1, x21, #0x48
+ 624:	str	x0, [x1, x0, lsl #3]
+ 628:	add	x0, x0, #0x1
+ 62c:	cmp	w2, w0
+ 630:	b.hi	624 <smp_init+0x374>  // b.pmore
+ 634:	sub	w1, w3, #0x1
+ 638:	add	w1, w1, w2
+ 63c:	str	w1, [x21, #64]
+ 640:	adrp	x0, 0 <cpu_record_current_el>
+ 644:	add	x0, x0, #0x0
+ 648:	bl	0 <uart_printf>
+ 64c:	ldr	w5, [x21, #64]
+ 650:	cbz	w5, 6a4 <smp_init+0x3f4>
+ 654:	add	x1, x21, #0x88
+ 658:	adrp	x3, 230 <secondary_init+0xa8>
+ 65c:	mov	w5, w5
+ 660:	mov	x7, x1
+ 664:	add	x3, x3, #0x0
+ 668:	mov	x0, #0x0                   	// #0
+ 66c:	add	x6, x21, #0x48
+ 670:	ldr	x4, [x6, x0, lsl #3]
+ 674:	ubfiz	x2, x0, #2, #32
+ 678:	add	x2, x2, w0, uxtw
+ 67c:	add	x2, x7, x2, lsl #3
+ 680:	str	w0, [x1]
+ 684:	add	x0, x0, #0x1
+ 688:	str	x4, [x1, #8]
+ 68c:	strb	wzr, [x2, #16]
+ 690:	stp	x3, xzr, [x1, #24]
+ 694:	add	x3, x3, #0x40, lsl #12
+ 698:	add	x1, x1, #0x28
+ 69c:	cmp	x0, x5
+ 6a0:	b.ne	670 <smp_init+0x3c0>  // b.any
+ 6a4:	mov	w2, #0x1                   	// #1
+ 6a8:	mov	w0, #0x1                   	// #1
+ 6ac:	strb	w2, [x21, #152]
+ 6b0:	str	w0, [x21, #544]
+ 6b4:	mrs	x1, currentel
+ 6b8:	str	x1, [x19]
+ 6bc:	dmb	ish
+ 6c0:	ldr	w2, [x21, #64]
+ 6c4:	cmp	w2, w0
+ 6c8:	b.ls	aa8 <smp_init+0x7f8>  // b.plast
+ 6cc:	stp	x27, x28, [sp, #80]
+ 6d0:	mov	x27, #0x34db                	// #13531
+ 6d4:	adrp	x0, 0 <secondary_entry>
+ 6d8:	movk	x27, #0xd7b6, lsl #16
+ 6dc:	mov	x28, #0x423f                	// #16959
+ 6e0:	movk	x27, #0xde82, lsl #32
+ 6e4:	add	x0, x0, #0x0
+ 6e8:	add	x22, x21, #0x204
+ 6ec:	movk	x28, #0xf, lsl #16
+ 6f0:	stp	x25, x26, [sp, #64]
+ 6f4:	movk	x27, #0x431b, lsl #48
+ 6f8:	mov	x25, #0x1                   	// #1
+ 6fc:	str	wzr, [sp, #100]
+ 700:	str	x0, [sp, #104]
+ 704:	add	x23, x21, #0x200
+ 708:	mov	w0, w25
+ 70c:	str	w25, [sp, #96]
+ 710:	add	x1, x21, #0x48
+ 714:	ldr	x1, [x1, x25, lsl #3]
+ 718:	str	wzr, [x23, x0, lsl #2]
+ 71c:	dmb	ish
+ 720:	dsb	sy
+ 724:	mov	x0, #0x3                   	// #3
+ 728:	ldr	x2, [sp, #104]
+ 72c:	mov	x3, x25
+ 730:	movk	x0, #0xc400, lsl #16
+ 734:	hvc	#0x0
+ 738:	cbnz	w0, 9ac <smp_init+0x6fc>
+ 73c:	str	wzr, [sp, #120]
+ 740:	mov	w26, #0x1387                	// #4999
+ 744:	ldr	w0, [sp, #120]
+ 748:	ldr	w20, [sp, #96]
+ 74c:	cmp	w0, w26
+ 750:	b.gt	a98 <smp_init+0x7e8>
+ 754:	nop
+ 758:	nop
+ 75c:	nop
+ 760:	ldapr	w0, [x22]
+ 764:	cbnz	w0, 7ec <smp_init+0x53c>
+ 768:	dmb	ish
+ 76c:	ldr	w0, [x23, x20, lsl #2]
+ 770:	mov	x24, x20
+ 774:	cbnz	w0, 7ec <smp_init+0x53c>
+ 778:	bl	0 <timer_get_frequency>
+ 77c:	mov	x19, x0
+ 780:	cbz	x0, 7b0 <smp_init+0x500>
+ 784:	add	x19, x19, x19, lsl #2
+ 788:	bl	0 <timer_get_count>
+ 78c:	add	x19, x19, x19, lsl #2
+ 790:	add	x19, x28, x19, lsl #2
+ 794:	umulh	x19, x19, x27
+ 798:	add	x19, x0, x19, lsr #18
+ 79c:	b	7a4 <smp_init+0x4f4>
+ 7a0:	yield
+ 7a4:	bl	0 <timer_get_count>
+ 7a8:	cmp	x19, x0
+ 7ac:	b.hi	7a0 <smp_init+0x4f0>  // b.pmore
+ 7b0:	ldr	w0, [sp, #120]
+ 7b4:	add	w0, w0, #0x1
+ 7b8:	str	w0, [sp, #120]
+ 7bc:	ldr	w0, [sp, #120]
+ 7c0:	cmp	w0, w26
+ 7c4:	b.le	760 <smp_init+0x4b0>
+ 7c8:	adrp	x0, 0 <cpu_record_current_el>
+ 7cc:	ldr	w1, [sp, #96]
+ 7d0:	add	x24, x24, x24, lsl #2
+ 7d4:	add	x0, x0, #0x0
+ 7d8:	bl	0 <uart_printf>
+ 7dc:	add	x0, x21, #0x88
+ 7e0:	mov	w1, #0x1                   	// #1
+ 7e4:	add	x0, x0, x24, lsl #3
+ 7e8:	strb	w1, [x0, #16]
+ 7ec:	ldr	w0, [sp, #100]
+ 7f0:	add	w0, w0, #0x1
+ 7f4:	str	w0, [sp, #100]
+ 7f8:	ldr	w2, [x21, #64]
+ 7fc:	add	x25, x25, #0x1
+ 800:	add	x22, x22, #0x4
+ 804:	cmp	w2, w25
+ 808:	b.hi	704 <smp_init+0x454>  // b.pmore
+ 80c:	ldr	w0, [sp, #100]
+ 810:	ldp	x25, x26, [sp, #64]
+ 814:	ldp	x27, x28, [sp, #80]
+ 818:	add	w19, w0, #0x1
+ 81c:	adrp	x0, 0 <cpu_record_current_el>
+ 820:	sub	w2, w2, #0x1
+ 824:	add	x0, x0, #0x0
+ 828:	ldr	w1, [sp, #100]
+ 82c:	bl	0 <uart_printf>
+ 830:	adrp	x0, 0 <cpu_record_current_el>
+ 834:	str	w19, [x21, #544]
+ 838:	add	x0, x0, #0x0
+ 83c:	ldr	w1, [x21, #544]
+ 840:	bl	0 <uart_printf>
+ 844:	adrp	x0, 0 <cpu_record_current_el>
+ 848:	add	x0, x0, #0x0
+ 84c:	bl	0 <uart_puts>
+ 850:	ldr	w1, [x21, #64]
+ 854:	ldr	w0, [x21, #544]
+ 858:	cmp	w0, w1
+ 85c:	b.eq	a58 <smp_init+0x7a8>  // b.none
+ 860:	adrp	x0, 0 <cpu_record_current_el>
+ 864:	ldr	w2, [x21, #544]
+ 868:	mov	w19, #0x1                   	// #1
+ 86c:	add	x0, x0, #0x0
+ 870:	bl	0 <uart_printf>
+ 874:	ldr	w0, [x21, #64]
+ 878:	cbz	w0, a74 <smp_init+0x7c4>
+ 87c:	adrp	x22, 0 <cpu_record_current_el>
+ 880:	adrp	x24, 0 <cpu_record_current_el>
+ 884:	add	x22, x22, #0x0
+ 888:	add	x24, x24, #0x0
+ 88c:	mov	w20, #0x0                   	// #0
+ 890:	add	x23, x21, #0x88
+ 894:	b	8b0 <smp_init+0x600>
+ 898:	mov	x0, x24
+ 89c:	add	w20, w20, #0x1
+ 8a0:	bl	0 <uart_printf>
+ 8a4:	ldr	w2, [x21, #64]
+ 8a8:	cmp	w20, w2
+ 8ac:	b.cs	8e8 <smp_init+0x638>  // b.hs, b.nlast
+ 8b0:	dmb	ish
+ 8b4:	ubfiz	x2, x20, #2, #32
+ 8b8:	add	x2, x2, w20, uxtw
+ 8bc:	add	x2, x23, x2, lsl #3
+ 8c0:	mov	w1, w20
+ 8c4:	mov	x0, x22
+ 8c8:	ldrb	w2, [x2, #16]
+ 8cc:	tbnz	w2, #0, 898 <smp_init+0x5e8>
+ 8d0:	bl	0 <uart_printf>
+ 8d4:	ldr	w2, [x21, #64]
+ 8d8:	add	w20, w20, #0x1
+ 8dc:	add	w19, w19, #0x1
+ 8e0:	cmp	w20, w2
+ 8e4:	b.cc	8b0 <smp_init+0x600>  // b.lo, b.ul, b.last
+ 8e8:	cbz	w2, a74 <smp_init+0x7c4>
+ 8ec:	adrp	x20, 0 <cpu_record_current_el>
+ 8f0:	mov	x24, #0xffffffffff          	// #1099511627775
+ 8f4:	mov	x23, #0x0                   	// #0
+ 8f8:	add	x20, x20, #0x0
+ 8fc:	mov	w4, #0x1                   	// #1
+ 900:	add	x22, x21, #0x48
+ 904:	movk	x24, #0xff, lsl #16
+ 908:	ldr	x3, [x22, x23, lsl #3]
+ 90c:	mov	w2, w2
+ 910:	mov	x0, #0x0                   	// #0
+ 914:	and	x3, x3, x24
+ 918:	b	928 <smp_init+0x678>
+ 91c:	add	x0, x0, #0x1
+ 920:	cmp	x2, x0
+ 924:	b.eq	9e8 <smp_init+0x738>  // b.none
+ 928:	ldr	x1, [x22, x0, lsl #3]
+ 92c:	cmp	x3, x1
+ 930:	b.ne	91c <smp_init+0x66c>  // b.any
+ 934:	cmp	w0, w23
+ 938:	b.eq	950 <smp_init+0x6a0>  // b.none
+ 93c:	mov	w1, w23
+ 940:	mov	x0, x20
+ 944:	bl	0 <uart_printf>
+ 948:	add	w19, w19, #0x1
+ 94c:	mov	w4, #0x0                   	// #0
+ 950:	ldr	w2, [x21, #64]
+ 954:	add	x23, x23, #0x1
+ 958:	cmp	w2, w23
+ 95c:	b.hi	908 <smp_init+0x658>  // b.pmore
+ 960:	cbnz	w4, a74 <smp_init+0x7c4>
+ 964:	mrs	x2, mpidr_el1
+ 968:	ldr	x1, [x21, #72]
+ 96c:	and	x2, x2, #0xffffffffff
+ 970:	and	x2, x2, #0xffffffff00ffffff
+ 974:	cmp	x2, x1
+ 978:	b.eq	a44 <smp_init+0x794>  // b.none
+ 97c:	adrp	x0, 0 <cpu_record_current_el>
+ 980:	add	w19, w19, #0x1
+ 984:	add	x0, x0, #0x0
+ 988:	bl	0 <uart_printf>
+ 98c:	cbnz	w19, 9f0 <smp_init+0x740>
+ 990:	adrp	x0, 0 <cpu_record_current_el>
+ 994:	ldp	x19, x20, [sp, #16]
+ 998:	add	x0, x0, #0x0
+ 99c:	ldp	x21, x22, [sp, #32]
+ 9a0:	ldp	x23, x24, [sp, #48]
+ 9a4:	ldp	x29, x30, [sp], #128
+ 9a8:	b	0 <uart_printf>
+ 9ac:	add	w1, w0, #0x9
+ 9b0:	cmp	w1, #0x9
+ 9b4:	b.hi	9dc <smp_init+0x72c>  // b.pmore
+ 9b8:	adrp	x2, 0 <cpu_record_current_el>
+ 9bc:	add	x2, x2, #0x0
+ 9c0:	ldr	x2, [x2, w1, uxtw #3]
+ 9c4:	adrp	x4, 0 <cpu_record_current_el>
+ 9c8:	mov	w3, w0
+ 9cc:	mov	w1, w25
+ 9d0:	add	x0, x4, #0x0
+ 9d4:	bl	0 <uart_printf>
+ 9d8:	b	7f8 <smp_init+0x548>
+ 9dc:	adrp	x2, 0 <cpu_record_current_el>
+ 9e0:	add	x2, x2, #0x0
+ 9e4:	b	9c4 <smp_init+0x714>
+ 9e8:	mov	w0, #0xffffffff            	// #-1
+ 9ec:	b	934 <smp_init+0x684>
+ 9f0:	adrp	x1, 0 <cpu_record_current_el>
+ 9f4:	adrp	x0, 0 <cpu_record_current_el>
+ 9f8:	ldp	x21, x22, [sp, #32]
+ 9fc:	mov	w3, w19
+ a00:	add	x1, x1, #0x0
+ a04:	add	x0, x0, #0x0
+ a08:	mov	w2, #0x2da                 	// #730
+ a0c:	ldp	x19, x20, [sp, #16]
+ a10:	ldp	x23, x24, [sp, #48]
+ a14:	ldp	x29, x30, [sp], #128
+ a18:	b	0 <uart_printf>
+ a1c:	ldr	w2, [x0, #48]
+ a20:	cbz	w2, 614 <smp_init+0x364>
+ a24:	cmp	w2, #0x8
+ a28:	b.hi	ab4 <smp_init+0x804>  // b.pmore
+ a2c:	ldr	w1, [x21, #64]
+ a30:	cmp	w2, #0x1
+ a34:	b.eq	640 <smp_init+0x390>  // b.none
+ a38:	b	618 <smp_init+0x368>
+ a3c:	dmb	ish
+ a40:	b	48c <smp_init+0x1dc>
+ a44:	adrp	x0, 0 <cpu_record_current_el>
+ a48:	mov	x1, x2
+ a4c:	add	x0, x0, #0x0
+ a50:	bl	0 <uart_printf>
+ a54:	b	98c <smp_init+0x6dc>
+ a58:	adrp	x0, 0 <cpu_record_current_el>
+ a5c:	ldr	w1, [x21, #544]
+ a60:	mov	w19, #0x0                   	// #0
+ a64:	add	x0, x0, #0x0
+ a68:	bl	0 <uart_printf>
+ a6c:	ldr	w0, [x21, #64]
+ a70:	cbnz	w0, 87c <smp_init+0x5cc>
+ a74:	adrp	x0, 0 <cpu_record_current_el>
+ a78:	add	x0, x0, #0x0
+ a7c:	bl	0 <uart_printf>
+ a80:	b	964 <smp_init+0x6b4>
+ a84:	adrp	x0, 0 <cpu_record_current_el>
+ a88:	add	x0, x0, #0x0
+ a8c:	b	594 <smp_init+0x2e4>
+ a90:	dmb	ish
+ a94:	b	4a8 <smp_init+0x1f8>
+ a98:	mov	x24, x20
+ a9c:	b	7c8 <smp_init+0x518>
+ aa0:	dmb	ish
+ aa4:	b	3e4 <smp_init+0x134>
+ aa8:	mov	w19, w0
+ aac:	str	wzr, [sp, #100]
+ ab0:	b	81c <smp_init+0x56c>
+ ab4:	adrp	x0, 0 <cpu_record_current_el>
+ ab8:	mov	w1, w2
+ abc:	add	x0, x0, #0x0
+ ac0:	mov	w2, #0x8                   	// #8
+ ac4:	bl	0 <uart_printf>
+ ac8:	mov	w2, #0x8                   	// #8
+ acc:	b	618 <smp_init+0x368>

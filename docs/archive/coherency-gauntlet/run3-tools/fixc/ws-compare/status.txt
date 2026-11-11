@@ -1,0 +1,8 @@
+d7ede5d0 make test WORK_STEALING=ON rc=0
+667e0dbc3eac999284ebe847bdfb4ab1512f7afb3bb24ee63bd9ccd82e51a629  build/kernel-test/slmos.elf
+37939418 make test WORK_STEALING=ON rc=0
+906882b0495d3ce19ecb152336804ad004ff24b115086d95160763aeebd5a186  build/kernel-test/slmos.elf
+sched: 0 differing disassembly lines
+smp: 4 differing disassembly lines
+37939418 make test WORK_STEALING=ON (second) rc=0
+DONE
