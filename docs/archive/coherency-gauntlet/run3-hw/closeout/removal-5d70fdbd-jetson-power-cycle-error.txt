@@ -1,0 +1,75 @@
+# jetson-nano-2: labctl power_cycle error at about 20:15 UTC, after UEFI-direct boot run10 (board at slmos>, 5d70fdbd). The confirmed power_cycle returned 'Error executing tool power_cycle'; run_health_check then read power off, ping false, serial true. The claim (coherency-closeout-removal) was intact and the recovery_mode relay open (released). One power_on succeeded; SD Linux answered ssh for the run10 ESP check at 20:16:50Z. Not an SLM-OS event (the board was halted at the shell under a power operation). No retry of power_cycle was made.
+# boot banner: NONE
+# cat /sys/version commit: NONE
+
+===== 1. power_cycle (confirmed)
+===== labctl power_cycle tool_use_id=toolu_012ksVK3zipq2tH2vpFexd6f args={"sbc_name": "jetson-nano-2", "confirm_token": "P-MTt3bjxM9qigYpTLUWnw"}
+[raw tool result, not JSON]
+Error executing tool power_cycle
+
+===== 2. run_health_check
+===== labctl run_health_check tool_use_id=toolu_01EDgAZ9WcSGuFtAZroKBtA3 args={"sbc_name": "jetson-nano-2"}
+[
+  {
+    "sbc": "jetson-nano-2",
+    "ping": false,
+    "serial": true,
+    "power": "off",
+    "status": "offline"
+  }
+]
+
+===== 3. list_claims
+===== labctl list_claims tool_use_id=toolu_01NxASNJxs66NtEWkd8qQwrV args={}
+{
+  "active_claims": [
+    {
+      "agent_name": "coherency-closeout-removal",
+      "session_kind": "mcp-stdio",
+      "reason": "#1193 close-out: NC-axis removal 5d70fdbd hardware evidence (kexec + UEFI boots, integration)",
+      "acquired_at": "2026-11-11T18:50:08.103736Z",
+      "expires_at": "2026-11-11T22:45:06.863288Z",
+      "last_activity": "2026-11-11T20:15:06.863288Z",
+      "duration_seconds": 9000,
+      "renewal_count": 1,
+      "is_active": true,
+      "time_remaining_seconds": 8969,
+      "context": {
+        "branch": "coherency-remove-nc-axis",
+        "head": "5d70fdbd",
+        "issue": 1193
+      },
+      "sbc_name": "jetson-nano-2"
+    }
+  ]
+}
+
+===== 4. actuation_status recovery_mode
+===== labctl actuation_status tool_use_id=toolu_01B4nKNtGfQbupCwHteSj7QE args={"sbc_name": "jetson-nano-2", "purpose": "recovery_mode"}
+{
+  "binding": {
+    "sbc": "jetson-nano-2",
+    "purpose": "recovery_mode",
+    "shape_mode": "latch",
+    "shape_active": "closed",
+    "sample_phase": "pre_power",
+    "momentary_pulse_ms": null,
+    "desired_state": "released"
+  },
+  "actuator": {
+    "name": "relay-a",
+    "driver": "lcus1_serial",
+    "device_path": "/dev/lab/relay-a"
+  },
+  "channel": {
+    "index": 1,
+    "default_state": "open",
+    "last_state": "open",
+    "last_changed_at": "2026-11-11T20:12:15.000000Z",
+    "cycle_count": 14
+  }
+}
+
+===== 5. power_on
+===== labctl power_on tool_use_id=toolu_01MCguax7fyCdZv7NusUAydZ args={"sbc_name": "jetson-nano-2"}
+Power ON: jetson-nano-2
