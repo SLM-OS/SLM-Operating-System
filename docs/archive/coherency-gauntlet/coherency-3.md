@@ -374,3 +374,17 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   agrees; the two wording points above are the critic's.
 - Also filed by C1: #1220, #1221 (Entry 7). Evidence `gauntlet-3-hw-pi5` @
   6569a660.
+
+## Entry 10 (09:31 UTC): C2 builder done; jetson-nano-2 to the C2 critic
+
+- C2 builder held jetson-nano-2 07:31 to 09:29Z (claim released 09:29Z),
+  board left at SD Linux, powered on. Evidence `gauntlet-3-hw-jetson` @
+  68f5690e, `run3-hw/c2/`. ESP at hand-back: BootCurrent 0001, no
+  BootNext, SLMOS.efi 405c7b43 (cell F's image), l4t.efi 91db497c, fsck
+  rc=0 (`esp-handback.txt`); as found at take-over: SLMOS.efi 789cba62
+  (`esp-takeover.txt`). C3 restores it. C2's counts and classifications go
+  into the log after its critic files.
+- 09:31Z: jetson-nano-2 to the blind C2 critic (`coherency-3-C2-critic`),
+  with the definition of done (bars and the Entry 1 rulings), the heads and
+  image hashes, and the evidence path only; it reproduces 5 runs each of
+  cells C and B by kexec.
