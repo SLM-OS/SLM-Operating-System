@@ -11,6 +11,7 @@
 #include "pmm.h"
 #include "task.h"
 #include "sched.h"
+#include "test_wait.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -387,6 +388,19 @@ static void c4_exit_immediately(void *arg)
  * would still pass trivially (no allocation happened), so see the
  * multi-task test below for unique-pointer coverage.
  */
+/* True once the free-page count is above the count held before the task
+ * ran, so the ctx page is back. */
+static bool c4_pages_back(void *ctx)
+{
+    return pmm_get_free_pages() >= *(size_t *)ctx + 1;
+}
+
+static long long c4_free_pages(void *ctx)
+{
+    (void)ctx;
+    return (long long)pmm_get_free_pages();
+}
+
 static void test_component_cleanup_ctx_payload_preserved(void)
 {
     c4_observed_value = 0;
@@ -403,24 +417,24 @@ static void test_component_cleanup_ctx_payload_preserved(void)
     task_set_cleanup(t, c4_cleanup_spy, ctx);
     scheduler_add_task_to_cpu(t, 0);
 
-    int timeout = 500;
-    while (c4_observed_value == 0 && timeout > 0) {
-        yield();
-        timeout--;
-    }
-
-    TEST_ASSERT_MESSAGE(timeout > 0, "c4 cleanup callback never fired");
+    /* Wall-clock bound (#1205): the same wait as the multi-task test below,
+     * where a yield on CPU 0 can run other work for 1.16 to 5.3 ms (C1 run
+     * 2), so the old 500-yield bound lasted at least 0.58 s with the NC
+     * axis; 1 s, rounded up. */
+    TEST_ASSERT_MESSAGE(test_wait_u32_nonzero("c4_payload",
+                                              &c4_observed_value,
+                                              TEST_WAIT_S(1)) >= 0,
+                        "c4 cleanup callback never fired");
     TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, c4_observed_value);
     TEST_ASSERT_EQUAL_PTR(ctx, (void *)c4_observed_ctx_ptr);
 
-    /* Let the scheduler finish task_destroy so the stack is reclaimed. */
-    for (int i = 0; i < 4; i++) yield();
-
-    /* The ctx page should have returned to the pool; task stack freed on
-     * top of that. A conservative >= check tolerates unrelated test-harness
-     * allocations that may happen concurrently. */
-    size_t free_after = pmm_get_free_pages();
-    TEST_ASSERT_MESSAGE(free_after >= free_held + 1,
+    /* The ctx page should return to the pool; the spy sets the value just
+     * before freeing it, so wait for the count instead of a fixed number of
+     * yields (the old 4 yields). A conservative >= check tolerates unrelated
+     * test-harness allocations that may happen concurrently. */
+    TEST_ASSERT_MESSAGE(test_wait_until_v("c4_payload_page", c4_pages_back,
+                                          c4_free_pages, &free_held,
+                                          TEST_WAIT_S(1)) >= 0,
         "cleanup did not free the per-task ctx page");
 }
 
@@ -466,14 +480,18 @@ static void test_component_cleanup_ctx_is_per_task(void)
         scheduler_add_task_to_cpu(t, 0);
     }
 
-    /* Wait for all cleanups to fire. */
-    int timeout = 1000;
-    while (__atomic_load_n(&c4_multi_done, __ATOMIC_ACQUIRE) < C4_MULTI_N
-           && timeout > 0) {
-        yield();
-        timeout--;
-    }
-    TEST_ASSERT_MESSAGE(timeout > 0, "not all c4 cleanups fired");
+    /* Wait for all cleanups to fire, bounded by wall clock (#1205). The
+     * old bound was 1,000 yields. On Pi 5 with the NC axis a yield in this
+     * loop lasted 1.16 to 5.3 ms, because it ran another CPU-0 task, so
+     * 1,000 of them lasted at least 1.16 s; the bare cost of 2.3 us per
+     * yield (2.3 ms for 1,000) is below the 3.5 to 10.6 ms the cleanups
+     * took on both kernels, so it is not the NC equivalent (C1 run 2).
+     * 2 s, rounded up. */
+    long long c4_us = test_wait_int_at_least("c4_multi", &c4_multi_done,
+                                             C4_MULTI_N, TEST_WAIT_S(2));
+    uart_printf("[test_wait] c4_multi: cleanups after %lld us (bound 2000000 us)\n",
+                c4_us);
+    TEST_ASSERT_MESSAGE(c4_us >= 0, "not all c4 cleanups fired");
 
     /* Each slot must have been touched exactly once with its own encoded
      * value — proving each task carried its own ctx. */
