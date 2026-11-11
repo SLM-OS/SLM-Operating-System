@@ -10,7 +10,7 @@ are incoherent. Nothing re-tested it after the set/way fix `e0a15259`.
 
 ## Decision
 
-Status: accepted for Pi 5 and QEMU; deferred for Jetson pending #1216; implementation in PR #1222.
+Status: accepted; implementation in PR #1225.
 
 Measured: Inner Shareable Write-Back memory is coherent across all CPUs on
 both boards, including between the Jetson clusters, under Linux and SLM-OS.
@@ -74,6 +74,23 @@ run 1's attempt counts were read after the results printed and are
 inflated. #1216 (a thief failing on the `preempt_disabled[victim]`
 early-out for 2.5 s, NC_AXIS=OFF) is unmeasured on NC and the removal.
 Status unchanged.
+
+## Run 3 (2026-11-11)
+
+The removal cleared #1216's signature on Jetson. In 20 runs per cell of
+`bench stealing --sustain 2500` with victim-window instrumentation, CPUs 2
+and 3 executed 0.713 and 0.830 of the best thief's median share under the
+NC kernel over kexec and 0.397 and 0.556 over UEFI-direct, ending 63 to
+76% of their steal attempts on the `preempt_disabled[victim]` early-out;
+under the removal they executed 0.990 and 1.000 (kexec) and 0.955 and
+0.935 (UEFI-direct), with no thief at 0 successes in any run. #1216 stays
+open as an NC-kernel scheduler defect; its wake-path mechanism is a
+hypothesis with a separate fix. Pi 5 met its bar: 20 of 20 integration
+boots under each kernel, #1202 and #1205 passing with wall-clock waits.
+Evidence: `coherency-3.md`, `critic-3-C1.md` and `critic-3-C2.md` on
+`gauntlet/coherency-3`; raw rows under
+`docs/archive/coherency-gauntlet/run3-hw/` on `gauntlet-3-hw-jetson` and
+`gauntlet-3-hw-pi5`.
 
 ## Evidence
 
