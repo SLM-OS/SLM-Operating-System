@@ -777,3 +777,24 @@ Entry 19. Evidence at final heads: **`gauntlet-3-hw-pi5` @ 6569a660**,
 pi-5-1: SLM-OS shell on its original card, powered on, unclaimed.
 jetson-nano-2: SD Linux, ESP SLMOS.efi 789cba62 with no BootNext, recovery
 relay released, powered on, unclaimed. Both as found at 03:46Z.
+
+## Entry 20 (16:41 UTC): close-out authorized; #1208 reworded and merged; #1209 rebased
+
+- The user authorized the close-out on 2026-11-11 (land the stack, replace
+  #1222 with the full removal, fix C as a standalone draft PR). Board time
+  stays serialized; this log continues.
+- #1208: 6f0385ec reworded to carry before and after evidence (before:
+  `c2-hw/pi5-bootlog-R7.txt` lines 112 and 126 to 128 on
+  `gauntlet/coherency-2`, four "SMPEN NOT set" lines, checked; after: 0
+  SMPEN lines in `run2-hw/c0/fixboot-167330f5-pi5-boot{01..10}.txt` on
+  `gauntlet-2-hw-pi5`, checked, all ten banners 167330f5). The four later
+  commits were re-parented with identical trees and authorship; branch
+  `fix-boot-1194-1197-1198` ad8e4fa7 to 58cc6832 (lease on ad8e4fa7), tree
+  unchanged. **Squash-merged as main 8a27711d** (the repository's recent
+  merges are squashes; the squash body carries every commit message,
+  including the evidence paragraph). main's tree equals 58cc6832's.
+- #1209: `fix/boot-path-1193` re-parented from ad8e4fa7 onto main 8a27711d
+  (same trees): fd2a361c to **b849e2ee** (lease); PR base changed to main.
+  Jetson image at b849e2ee built (bin 87ab14e5); its UEFI-direct
+  `boot_test --count 10` is running (lab agent `coherency-closeout-1209`).
+- /ci on main 8a27711d running.
