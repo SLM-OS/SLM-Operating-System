@@ -163,3 +163,51 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
    another component holds the lab. C2 prepares offline until its grant;
    C1 runs #1213 in QEMU after its lab work. Handovers are log entries.
 9. **Milestone for issues filed this run: Backlog.**
+
+## Entry 1 (04:47 UTC): C2 offline report; bar rulings before any Jetson data
+
+- C2 builder offline report received 04:45Z (no labctl call, no board
+  ssh). V1 confirmed, no V2: C2 disassembled `idle_task_func` in every
+  manifest image; each has exactly one wait instruction, and the V1 images
+  differ from their bases only there (`wfi` to `wfe`). On the ncoff and
+  removal bases the branch condition stays true under NC_AXIS=OFF. QEMU
+  compiles none of the platform branches; `make test` on 292eee0a PASSED.
+  C2 notes that V2 as worded (an IPI to the target CPU) would wake CPU 1,
+  the owner, not the idle thieves. Runner, analyzer (`analyze.py`,
+  `bars.py`) and procedure notes are in the orchestrator's scratchpad
+  `c2/bin/`, to be archived under `run3-tools/c2/`. The analyzer
+  reproduces #1216's run-2 aggregate table exactly from
+  `ncoff-kexec-sustained-run01..20.txt` (shares 11.1, 11.4, 19.8, 19.8%;
+  f_pd 75.3 and 74.6%; first success 214.6 and 229.6 ms; CPU 3 ok=0 in
+  run 16 only). QEMU smoke at 1b27eea4 with `make run WORK_STEALING=ON`
+  printed a complete c2t v2 block (4 lines, CPU 1's 2509 chars with 128
+  `wlog` entries).
+- **Orchestrator rulings, made before any run-3 Jetson row exists** (they
+  interpret the brief's bars; they do not change them):
+  - Question 1, share clause: "CPUs 2 and 3 at a median share no better
+    than 60% of the best thief's" holds only if each of CPU 2 and CPU 3
+    is at or below 60%; both ratios are printed. The 0-success clause is
+    an independent "or", as written. (On run 2's rows the reading
+    matters: CPU 2 0.545, CPU 3 0.602; run 2's run 16 decides
+    "pre-existing" through the 0-success clause either way.)
+  - Question 2, clause 1 (shares within 10 points): applied as written.
+    Recorded: on run 2's NC_AXIS=OFF rows it already holds (largest gap
+    8.95 points), so it does not discriminate; the decision rests on the
+    other three clauses, all of which are required.
+  - Phase tables carry a uniform-phase reference row (log-spaced bins: 50%
+    in 5 to 10 ms, 2% within 200 us of the tick) so "clustered" is read
+    against it.
+- Instrumentation gate, `NC_AXIS=OFF WORK_STEALING=ON` (not a gate input):
+  6608cbd0 failed 2 of 3 (batch stress plus cap; `mp_weak_rows` 1) and
+  passed attempt 3 at 04:45Z; control cbab2fc6 passed attempt 1 at 04:42Z
+  (`run3-tools/c0/instr-gate/status.txt`). A second control is running.
+- 04:48Z: second control on cbab2fc6 PASSED. Totals for `NC_AXIS=OFF
+  WORK_STEALING=ON` QEMU: 6608cbd0 1 of 3 passed, cbab2fc6 2 of 2 passed
+  (`run3-tools/c0/instr-gate/status.txt`; `5-...-attempt1.log` is attempt
+  1, `5-cellA-test-ncoff-ws.log` attempt 2, `8-...` attempt 3). Too few
+  runs to tell the instrumentation from the base; not a gate input, and
+  cell A is a Jetson measurement build, not merge code. The batch-stress
+  failure with the 120 s cap occurred on 79c10261 too, which has no
+  instrumentation, so it is not the instrumentation's; filed (Entry 2).
+  The `mp_weak_rows` failure occurred once in 3 on run 1's lineage only;
+  recorded, not filed.

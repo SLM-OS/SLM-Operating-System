@@ -1,0 +1,11 @@
+1-instr-test-default rc=0 04:23:38 PASSED - All tests passed (exit code 0)
+2-instr-test-ws rc=0 04:26:05 PASSED - All tests passed (exit code 0)
+3-instr-test-ws-ai rc=0 04:28:36 PASSED - All tests passed (exit code 0)
+4-cellA-test-ncoff rc=0 04:31:09 PASSED - All tests passed (exit code 0)
+5-cellA-test-ncoff-ws rc=2 04:34:35 
+6-instr-x86 rc=0 04:36:04 PASSED - All tests passed (isa-debug-exit code 1 = success)
+DONE
+5-cellA-test-ncoff-ws rc=2 04:39:00 FAILED - Test failures detected: (attempt 2; load avg 1.28)
+7-control-cbab2fc6-ncoff-ws rc=0 04:42:39 PASSED - All tests passed (exit code 0) fails:  load 2.11
+8-cellA-test-ncoff-ws-attempt3 rc=0 04:45:08 PASSED - All tests passed (exit code 0) fails:  load 2.37
+9-control-cbab2fc6-ncoff-ws-2 rc=0 04:47:30 PASSED - All tests passed (exit code 0) fails:  load 2.20
