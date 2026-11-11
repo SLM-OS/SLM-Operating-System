@@ -868,3 +868,35 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   paragraph and the ADR status line. The Pi 5 20/20 was on 79c10261 before
   this rebase; the new head gets its own Pi 5 boots. /ci on 5d70fdbd
   running.
+
+## Entry 24 (19:09 UTC): /ci on the removal head and on final main; labs queued
+
+- /ci on removal 5d70fdbd (`run3-tools/ci-removal-5d70fdbd/`): every ci
+  skill step passed (runtime-test 308 and 328 passed, 0 failed;
+  check-braces 0 violations, 0 unparsed, 12 configurations; layout clean,
+  no `!` lines), and the extra `WORK_STEALING=ON` passed.
+- /ci on final main e4a33790 (`run3-tools/ci-main-e4a33790/`): every ci
+  skill step passed; the extra `WORK_STEALING=ON` failed with #1219's
+  signature. #1218 is CLAUDE.md-only on top of 88b28c15, where it passed.
+  Tally for the extra step in this close-out: 2 of 6 failed (8a27711d,
+  e4a33790), all with the same line; recorded on #1219
+  (issuecomment-6804840396). Not a ci skill step.
+- 18:47Z: lab to `coherency-closeout-removal` (Jetson steps 1 to 6, then
+  Pi 5 steps 7 to 9) at 5d70fdbd. Images (agent's manifest): Jetson prod
+  elf e2ad2300 / bin 4de7aa7d, Jetson test elf a6db487a / bin 18fc982f, Pi
+  5 prod 172d8e8b, Pi 5 test 750174f8, each banner 5d70fdbd; a main
+  e4a33790 Jetson test kernel (elf 9718c97e) prebuilt as a control, used
+  only if a Jetson integration run does not complete.
+- Fix C offline work done (19:15Z): `c2/wake-on-push-v1` @ 37939418 =
+  e4a33790 + A (d7ede5d0, `--assert-shares` and the idle wake-rate
+  bench, with a regression test) + B (37939418, idle WFE); removal
+  variants `c2/fixc-removal` @ c77156b2 and `c2/fixc-removal-fix` @
+  5fe8c70b. /ci on 37939418: the ten ci skill steps passed; the extra
+  `WORK_STEALING=ON` failed twice there with #1219's signature and passed
+  2 of 2 on A alone; QEMU compiles none of B's code, and the builder is
+  comparing the QEMU objects. Four Jetson images built and hashed. Waits
+  for the Jetson after the removal lab.
+- Noted for the removal PR (not changed, so the measured head stays
+  5d70fdbd): one `#if defined(PLATFORM_HAS_NC_MEMORY)` extern block that
+  #1217 added to `kernel/src/shell_sys.c` is dead text under the removal
+  (the macro is never defined there; the cacheable branch compiles).
