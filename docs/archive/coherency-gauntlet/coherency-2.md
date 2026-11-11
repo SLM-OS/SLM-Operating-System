@@ -957,3 +957,31 @@ fixes and #1208 untouched:
   UEFI layout `All checks passed.`; diff 4 files +642/-8. No warning in
   the four changed files.
 - Run 3 starts from 983bddc9, /ci green.
+
+## Entry 30 (2026-11-11 01:45 UTC): #1213 QEMU reproduction (no hardware)
+
+- Head: the C1 step-4 tree on which #1213 was seen was never committed. It
+  is reconstructed as **f8ff72d6** = a03fc75b (#1215 head, code identical
+  to 30dc24bc) + one temporary commit replacing both
+  `test_isolated_core_latency` waits with
+  `test_wait_task_terminated(..., TEST_WAIT_S(1))`
+  (`run2-hw/c1/qemu-isolated-1s-f8ff72d6.patch`, not pushed as a branch).
+  Control a03fc75b. `make test`, QEMU ARM64 default, 5 runs each,
+  sequential, 01:28 to 01:43 UTC.
+- Files on `gauntlet-2-hw-pi5` @ 1691dbe3, `run2-hw/c1/`:
+  `qemu-isolated-1s-f8ff72d6-run0{1..5}.txt`,
+  `qemu-isolated-count-a03fc75b-run0{1..5}.txt`,
+  `qemu-isolated-summary.txt`, `qemu-isolated-runner.sh.txt`.
+- **CPU 1 stopped scheduling: 1 s 3 of 5 (run01, run04, run05); count 0 of
+  5.** In the stalled runs: isolated 3/10, 4/10 and 7/10, normal 0/10;
+  the first timed-out task RUNNING at the bound and through 1 s of
+  re-polls, later ones READY; `test_reposition_moves_task_queued_on_other_cpu`,
+  `test_task_entry_unmasks_irq` and
+  `test_slm_msg_subscribe_multiple_states_independent_delivery` failed;
+  the suite hit the 120 s cap. Runs 02 and 03 passed with 10/10 and 10/10.
+  Count runs: 5 of 5 passed, isolated 0/10 in 4 and 1/10 in 1.
+- **The 2 of 2 did not reproduce as recorded:** the rate was 3 of 5, and
+  the stall began in the isolated phase in all three, where #1213's body
+  records the isolated phase completing 10/10 and the stall in phase 2.
+  Said in #1213 (issuecomment-6784536690). Hypotheses unchanged and
+  untested.
