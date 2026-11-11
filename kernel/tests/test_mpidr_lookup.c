@@ -138,17 +138,15 @@ static void test_unknown_mpidr_returns_negative(void)
  * `preempt_init()` has allocated `reschedule_pending` from NC memory.
  * Without this guard, the original `if (!reschedule_pending[cpu])`
  * dereferenced a NULL pointer; on Jetson with patched BL31 routing
- * IRQs to NS-EL2, an inherited xudc IRQ delivered between mmu_enable's
- * `daifclr` and scheduler_init's `preempt_init` triggered a level-3
+ * IRQs to NS-EL2, an inherited xudc IRQ delivered between the boot IRQ
+ * unmask (mmu_enable's `daifclr` then; kernel_main after timer_init
+ * since #1198) and scheduler_init's `preempt_init` triggered a level-3
  * TTW external abort that BL31's RAS handler turned into a core
- * power-off (#750). The fix is a single `if (!reschedule_pending)
- * return;` at function entry; this test pins that semantics by
- * temporarily clearing the global and confirming the call doesn't
- * fault.
- *
- * Tests run after scheduler_init has populated reschedule_pending;
- * we save and restore the pointer around the call so the harness's
- * other tests still see a valid pointer afterwards.
+ * power-off (#750). The fix is a NULL check at function entry; this
+ * test pins that semantics by calling the body,
+ * maybe_arm_resched_trampoline_on(), with a NULL array and confirming
+ * the call doesn't fault. It leaves the shared global alone (see the
+ * comment in the test for why).
  *
  * Gated on SECONDARY_PREEMPT because the function and the global
  * only exist when that build flag is on. The default `make test`
@@ -159,8 +157,12 @@ static void test_unknown_mpidr_returns_negative(void)
 static void test_maybe_arm_resched_trampoline_null_safe(void)
 {
 #if defined(SECONDARY_PREEMPT)
-    /* Snapshot, clear, call, restore. The call returns void — surviving
-     * it without faulting IS the assertion. */
+    /* Call the body with a NULL array. The call returns void, so
+     * surviving it without faulting IS the assertion. The shared
+     * global is left alone: while it was NULL, every other CPU's
+     * scheduler tick wrote through it (sched.c), and once #1198 moved
+     * the boot IRQ unmask after gic_init the one-shot warning printed
+     * inside that window and every CPU faulted. */
     volatile uint32_t *saved = reschedule_pending;
     struct trap_frame tf;
     /* zero-init: ELR / SPSR fields aren't touched on the bail path,
@@ -172,14 +174,11 @@ static void test_maybe_arm_resched_trampoline_null_safe(void)
     tf.elr  = 0xdeadbeefULL;
     tf.spsr = 0x60400009ULL; /* EL2h, IRQs unmasked — matches the real trigger */
 
-    reschedule_pending = NULL;
-    maybe_arm_resched_trampoline(&tf);
-    reschedule_pending = saved;
+    maybe_arm_resched_trampoline_on(&tf, NULL);
 
     /* If we reach here, the bail worked. */
     TEST_ASSERT_MESSAGE(reschedule_pending == saved,
-        "reschedule_pending was not restored after the test — "
-        "subsequent tests would see a stale NULL");
+        "reschedule_pending changed under the test");
 #else
     TEST_IGNORE_MESSAGE("SECONDARY_PREEMPT off — test_maybe_arm_resched_"
                         "trampoline_null_safe requires it (run "

@@ -342,7 +342,9 @@ real_start:
      * 16-byte aligned (both bases are 64 KB aligned and
      * _kernel_file_size ends on a 512-byte boundary). The I-cache is
      * invalidated afterwards so no stale lines for the destination
-     * survive from UEFI's use of that memory.
+     * survive from UEFI's use of that memory. The D-side lines for the
+     * destination are invalidated by VA in mmu_enable, after the last
+     * caches-off store (#1197).
      */
     adr     x1, _start                  /* src: where UEFI loaded us */
     ldr     x2, =_start                 /* dst: link address */
@@ -909,8 +911,10 @@ primary_cpu:
      * Note: on non-Pi5 platforms, some code at real_start runs before we
      * reach primary_cpu (EFI detection, UART debug). That code does not
      * allocate a stack or touch BSS, so a spurious exception would only
-     * corrupt scratch GPRs — survivable. After this instruction, DAIF is
-     * masked until vectors_init() installs a handler.
+     * corrupt scratch GPRs — survivable. After this instruction, DAIF
+     * stays masked through vmm_init (mmu_enable restores it rather than
+     * clearing it); kernel_main unmasks D and A after vmm_init and I
+     * and F after gic_init and timer_init (#1198).
      *
      * DAIF bits: D=Debug, A=SError, I=IRQ, F=FIQ
      */
@@ -946,6 +950,11 @@ primary_cpu:
      * Clear the BSS section.
      * BSS contains uninitialized global/static variables.
      * Calculate addresses relative to actual _start location.
+     *
+     * These stores (and every other one before vmm_init turns the
+     * caches on) go to DRAM with SCTLR.C=0. mmu_enable invalidates
+     * the whole image by VA before setting SCTLR.C, so no stale line
+     * for the BSS or the boot stack is read afterwards (#1197).
      */
     adr     x0, _start                      /* x0 = actual runtime address of _start */
     ldr     x1, .Lbss_start_offset          /* x1 = offset to __bss_start */

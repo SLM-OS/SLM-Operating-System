@@ -655,8 +655,31 @@ uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags);
  * ==========================================================================
  */
 
-/* Enable MMU (implemented in assembly) */
-extern void mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair, uint64_t sctlr);
+/* Enable MMU (implemented in assembly). [inval_start, inval_end) is
+ * invalidated by VA before the caches are turned on (#1197); returns
+ * the number of cache lines invalidated. */
+extern uint64_t mmu_enable(uint64_t ttbr1, uint64_t tcr, uint64_t mair,
+                           uint64_t sctlr, uint64_t inval_start,
+                           uint64_t inval_end);
+
+/*
+ * The range the primary CPU writes with the MMU and caches off before
+ * mmu_enable: the whole image, _start to __kernel_end, which holds the
+ * BSS, the boot stack, the static page tables, the pre-MMU globals and
+ * (UEFI-direct) the relocation copy (#1197). Pinned by test_vmm.c and
+ * by link-time ASSERTs in the ARM64 linker scripts.
+ */
+void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end);
+
+/* DAIF read just before and just after the boot mmu_enable call
+ * (#1198, test_vmm.c): equal when mmu_enable restores the caller's
+ * mask instead of clearing it. */
+void vmm_mmu_enable_daif(uint64_t *before, uint64_t *after);
+
+/* What the boot vmm_init call actually passed to mmu_enable and what it
+ * returned (#1197, test_vmm.c): the invalidate bounds and the number of
+ * cache lines the loop invalidated. */
+void vmm_mmu_enable_inval(uint64_t *start, uint64_t *end, uint64_t *lines);
 
 /* Get current page table base */
 uint64_t vmm_get_ttbr1(void);

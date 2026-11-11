@@ -1047,7 +1047,7 @@ static void test_ffi_set_priority(void)
      * This test validates the FFI priority API, not cross-CPU dispatch.
      * slm_task_create dispatches immediately via round-robin, which on
      * Pi 5 may send the task to a secondary CPU where the cacheable
-     * ffi_task_proceed flag is invisible (incoherent L2, no SMPEN).
+     * ffi_task_proceed flag is invisible (incoherent L2).
      * Pinning to CPU 0 is the correct fix — the alternative (NC memory
      * for the flag) would add complexity for no functional benefit. */
     struct task *t = task_create("ffi_pri", (task_entry_t)blocking_ffi_task, NULL);

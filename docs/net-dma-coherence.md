@@ -76,7 +76,7 @@ drivers run on QEMU where every region is coherent regardless.
 ### Q1: Is `dc cvac` + `dsb sy` sufficient for device-visible writes?
 
 On Pi 5 and Jetson, secondary-CPU L1/L2 caches don't participate in
-the coherency protocol (no SMPEN). `dc cvac` pushes dirty data from
+the coherency protocol (the NC-memory model). `dc cvac` pushes dirty data from
 the issuing CPU's cache to PoC. A DMA-capable device that reads
 through PoC sees the up-to-date data.
 
@@ -275,7 +275,7 @@ networking follow-on), the PR must include:
 - Linux `drivers/net/ethernet/stmicro/stmmac/` — reference for
   Synopsys DWC-EQOS (Jetson's controller)
 - `docs/networking.md` §"Descriptor Ring Cache Maintenance"
-- `kernel/CLAUDE.md` §"Cache Maintenance (Pi 5 / No SMPEN)"
+- `kernel/CLAUDE.md` §"Cache Maintenance (Pi 5 / Jetson)"
 
 ---
 

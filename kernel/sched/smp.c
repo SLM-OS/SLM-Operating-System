@@ -399,13 +399,6 @@ void secondary_init(uint32_t logical_cpu_id)
      * No-op when SECONDARY_PREEMPT is undefined. */
     preempt_check_cpu_mpidr(logical_cpu_id);
 
-    /* Verify SMPEN was set from EL2 on this secondary core */
-    if (cpu_has_smpen()) {
-        DEBUG_PRINT("CPU %u: SMPEN set", logical_cpu_id);
-    } else {
-        WARN("CPU %u: SMPEN NOT set", logical_cpu_id);
-    }
-
     /* Initialize per-CPU GIC interface */
     DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
     gic_percpu_init();
@@ -539,7 +532,8 @@ static int boot_secondary(uint32_t cpu)
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
         /* Try multiple visibility mechanisms:
          * 1. Atomic load-acquire (LDAR) — works with coherent caches
-         * 2. DC IVAC — works if SMPEN propagates to PoC
+         * 2. DC CIVAC, then a plain cacheable load (coherent by
+         *    hardware; the DC CIVAC is belt and braces)
          * Either may succeed depending on platform cache topology. */
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
             return PSCI_SUCCESS;
@@ -742,13 +736,6 @@ void smp_init(void)
 
     INFO("SMP: initializing");
 
-    /* Check if SMPEN was successfully set from EL2 during boot */
-    if (cpu_has_smpen()) {
-        INFO("SMP: SMPEN set on CPU 0 — hardware cache coherency active");
-    } else {
-        WARN("SMP: SMPEN NOT set — using DC CVAC/CIVAC workaround");
-    }
-
     DEBUG_PRINT("  About to run spinlock tests...");
 
     /* Run spinlock tests before booting secondary cores */
@@ -774,7 +761,7 @@ void smp_init(void)
 
     /*
      * Clean all cpu_data cachelines to PoC before booting secondaries.
-     * Without SMPEN, DC CIVAC (used later to read secondary updates)
+     * DC CIVAC (used later to read secondary updates)
      * first writes back any dirty data from this CPU's L1. If cpu_data
      * is still dirty here (from init_cpu_data writing online=false),
      * CIVAC would overwrite the secondary's online=true at PoC.

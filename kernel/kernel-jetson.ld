@@ -154,6 +154,15 @@ SECTIONS
  * is needed. */
 ASSERT(__kernel_end < 0x84000000, "Kernel image too large!")
 
+/* #1197: mmu_enable invalidates [_start, __kernel_end) by VA before the
+ * primary turns its caches on (vmm_boot_caches_off_range). The BSS
+ * clear and the boot stack are written with caches off, so both must
+ * lie inside that range. */
+ASSERT(__bss_start >= _start && __bss_end <= __kernel_end,
+       "BSS outside the caches-off invalidate range (#1197)")
+ASSERT(__stack_bottom >= _start && __stack_top <= __kernel_end,
+       "Boot stack outside the caches-off invalidate range (#1197)")
+
 /* PE/COFF invariants (SectionAlignment=0x10000, FileAlignment=0x200).
  * These must hold for UEFI to accept the PE/COFF image built from
  * this layout. Each assert would catch a specific regression in the

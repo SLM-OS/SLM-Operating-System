@@ -463,7 +463,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->user_asid = 0;
 
     /* Clean the context struct to PoC so a secondary CPU can read it
-     * during switch_to(). Without SMPEN, task_create's writes to
+     * during switch_to(). Under the NC-memory model, task_create's writes to
      * context.sp, context.x30, etc. stay in this CPU's L1 cache.
      * scheduler_add_task_to_cpu() intentionally skips cleaning the
      * context (to avoid overwriting a running task's live state),
@@ -776,7 +776,7 @@ void task_exit(void)
 #endif
 
     /* Atomically set TASK_TERMINATED and dequeue under rq_lock.
-     * Without this, a cross-CPU scheduler on Pi 5 (no SMPEN, per-core L2)
+     * Without this, a cross-CPU scheduler on Pi 5 (per-core L2)
      * could observe the task still in the queue after the state flip but
      * before dequeue runs, picking a terminated task and panicking. */
     scheduler_terminate_task(task);

@@ -31,7 +31,7 @@ _Static_assert(ARM64_MAX_CPUS_LITERAL == MAX_CPUS,
 
 /* Per-CPU state, allocated from NC memory in preempt_init() so writes
  * from one CPU are immediately visible to any CPU that samples them
- * (no DSU-level coherency on Pi 5 without SMPEN). */
+ * (the NC-memory model on Pi 5, kernel/CLAUDE.md). */
 volatile uint32_t *reschedule_pending;
 volatile uint64_t *orig_elr;
 volatile uint64_t *orig_spsr;
@@ -151,16 +151,32 @@ void preempt_check_cpu_mpidr(uint32_t this_cpu)
  */
 void maybe_arm_resched_trampoline(struct trap_frame *tf)
 {
+    maybe_arm_resched_trampoline_on(tf, reschedule_pending);
+}
+
+/*
+ * The body, with the reschedule_pending array passed in. The #750 test
+ * calls it with NULL instead of setting the shared global to NULL: a
+ * NULL global is also seen by every other CPU's scheduler tick
+ * (sched.c writes reschedule_pending[cpu] = 1 unguarded), and once
+ * #1198 stopped the boot from consuming the one-shot warning below,
+ * the warning's uart_printf made that window long enough for those
+ * ticks to fault on every CPU.
+ */
+void maybe_arm_resched_trampoline_on(struct trap_frame *tf,
+                                     volatile uint32_t *pending)
+{
     /* Pre-preempt_init bail (#750).
      *
      * preempt_init() — which allocates reschedule_pending / orig_elr /
      * orig_spsr from NC memory — runs inside scheduler_init(). Under
-     * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, IRQs are unmasked by
-     * the `msr daifclr, #0xf` at the tail of mmu_enable (kernel/arch/
-     * arm64/mmu.S), which is reached from vmm_init() — long before
-     * scheduler_init() runs. Any IRQ delivered in that window (a
-     * pending xudc IRQ 198 inherited from Linux is the canonical
-     * trigger on Jetson) takes the el1_irq vector path, which under
+     * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, kernel_main unmasks
+     * IRQs on the primary right after timer_init() (#1198; before
+     * that, the `msr daifclr, #0xf` at the tail of mmu_enable did it
+     * from vmm_init()), long before scheduler_init() runs. Any IRQ
+     * delivered in that window (a pending xudc IRQ 198 inherited from
+     * Linux is the canonical trigger on Jetson) takes the el1_irq
+     * vector path, which under
      * SECONDARY_PREEMPT calls `bl maybe_arm_resched_trampoline`.
      * Without this guard, the original `if (!reschedule_pending[cpu])`
      * dereffed a NULL pointer; the resulting page-table walk for VA 0
@@ -179,7 +195,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
      * fact that IRQs are firing pre-init (useful diagnostic for any
      * future regression in the boot sequence) without flooding the
      * console under an IRQ storm. */
-    if (!reschedule_pending) {
+    if (!pending) {
         static volatile int warned = 0;
         if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
             uart_printf("[preempt] IRQ taken pre-preempt_init "
@@ -191,7 +207,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
 
     uint32_t cpu = cpu_id();
 
-    if (!reschedule_pending[cpu]) {
+    if (!pending[cpu]) {
         return;
     }
     if (preempt_disabled[cpu]) {
@@ -208,7 +224,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
      * for resched_trampoline to replay. orig_spsr is the interrupted
      * context's PSTATE (which may have had IRQs unmasked — e.g. the
      * idle task does `daifclr + wfi`). */
-    reschedule_pending[cpu] = 0;
+    pending[cpu] = 0;
     orig_elr[cpu]  = tf->elr;
     orig_spsr[cpu] = tf->spsr;
 

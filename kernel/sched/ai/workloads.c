@@ -22,7 +22,7 @@
  * simplicity — every record is on its own 64-byte cacheline and the
  * "writer-side clean + reader-side invalidate" pattern is exactly
  * the one called out in kernel/CLAUDE.md §"Cache Maintenance (Pi 5
- * / No SMPEN)". This is the same approach `bench stealing` uses on
+ * / Jetson)". This is the same approach `bench stealing` uses on
  * cacheable BSS platforms; we follow it uniformly so the harness has
  * one code path.
  */

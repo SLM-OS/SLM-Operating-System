@@ -28,7 +28,7 @@
  * Two locking strategies, selected by PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson):
  *
  *   PLATFORM_HAS_NC_MEMORY: IRQ-disable only, no cross-CPU lock.
- *     On these platforms per-core L2 caches are incoherent (no SMPEN), so
+ *     On these platforms per-core L2 caches are treated as incoherent, so
  *     standard ldaxr/stxr spinlocks on cacheable memory deadlock under
  *     cross-CPU contention — each CPU sees its own stale "unlocked" state.
  *     This is safe because secondary CPUs only print during early boot

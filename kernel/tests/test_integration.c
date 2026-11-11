@@ -74,7 +74,7 @@ static struct {
 /*
  * NC test sync slots: cross-CPU signaling via non-cacheable memory.
  *
- * On Pi 5 (no SMPEN), cache_invalidate (DC CIVAC) doesn't propagate through
+ * On Pi 5, cache_invalidate (DC CIVAC) doesn't propagate through
  * per-core L2. Cacheable BSS variables written by one CPU are invisible to
  * others. NC memory bypasses L1/L2 entirely — writes are instantly visible.
  *
@@ -872,7 +872,7 @@ static void test_nc_region_used_by_scheduler(void)
 /*
  * Regression test: verify boot order — PMM allocations before scheduler.
  *
- * On Pi 5 without SMPEN, concurrent PMM access from multiple CPUs causes
+ * On Pi 5, concurrent PMM access from multiple CPUs causes
  * deadlock because the PMM spinlock (ldaxr/stxr on cacheable memory)
  * doesn't provide cross-CPU mutual exclusion. The fix: CPU 0 completes
  * all initial PMM allocations (ramdisk, Rust heap, model memory) BEFORE

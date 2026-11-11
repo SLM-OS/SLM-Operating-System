@@ -384,6 +384,17 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     vmm_init();
 
+    /*
+     * Unmask Debug and SError (#1198). boot.S masks all of DAIF at
+     * primary_cpu and mmu_enable now returns with the caller's DAIF
+     * instead of clearing it. VBAR is installed and the MMU is on, so
+     * an SError raised by the MMIO accesses from here on (GPU BAR0,
+     * GIC, the drivers) is taken and reported when it happens, as it
+     * was before #1198. IRQ and FIQ stay masked until the GIC and the
+     * timer are set up below.
+     */
+    __asm__ volatile("msr daifclr, #0xc\n\tisb" ::: "memory");  /* D + A */
+
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* #788 root-cause fix: register the kexec'd nvgpu channel's
      * inst block as a PMM user-reserve BEFORE pmm_init publishes
@@ -432,6 +443,22 @@ void kernel_main(void *dtb)
     /* Initialize timer (but don't start yet) */
     INFO("Initializing timer...");
     timer_init();
+
+#if !defined(PLATFORM_X86_64)
+    /*
+     * Unmask IRQ and FIQ on the primary now that the GIC and the timer
+     * are configured (#1198). Until #1198 mmu_enable did this from
+     * vmm_init, before gic_init; everything from here to
+     * scheduler_start (SMP bring-up, the Pi 5 UART RX IRQ, PCIe, the
+     * network and USB drivers) runs with IRQs unmasked as before. The
+     * periodic tick is not running yet (timer_start is called from
+     * scheduler_start). An interrupt left pending by the previous
+     * owner (Linux's xudc IRQ 198 after a Jetson kexec, #750) is taken
+     * here, still before preempt_init, and maybe_arm_resched_trampoline
+     * keeps its NULL guard for that case.
+     */
+    __asm__ volatile("msr daifclr, #0x3\n\tisb" ::: "memory");  /* I + F */
+#endif
 
 #if !defined(PLATFORM_X86_64)
     /* Initialize PMU on the primary CPU (#874). Secondary CPUs do the
@@ -485,7 +512,7 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize Virtual Filesystem and perform all initial PMM allocations
-     * BEFORE scheduler_init(). On Pi 5 without SMPEN, PMM spinlock doesn't
+     * BEFORE scheduler_init(). On Pi 5 the PMM spinlock was found not to
      * provide cross-CPU mutual exclusion. Secondary CPUs will allocate
      * idle task stacks after scheduler_init(), so CPU 0 must finish its
      * allocations first to avoid concurrent PMM access. */
@@ -869,7 +896,7 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.
-     * On Pi 5 without SMPEN, PMM spinlock doesn't provide cross-CPU
+     * On Pi 5 the PMM spinlock was found not to provide cross-CPU
      * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
      * with their own allocations (idle task stacks). Doing it here ensures
      * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */

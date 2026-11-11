@@ -268,8 +268,8 @@ int virtqueue_add_buf(struct virtqueue *vq, void *addr, uint32_t len, bool write
      * Cache maintenance for platforms without device coherency.
      *
      * virtio_mb() (dsb sy) orders stores between CPUs but does not push
-     * dirty cachelines out to PoC on platforms where SMPEN is disabled
-     * (Pi 5, Jetson). VirtIO devices do DMA reads through PoC, so they
+     * dirty cachelines out to PoC on platforms under the NC-memory
+     * model (Pi 5, Jetson). VirtIO devices do DMA reads through PoC, so they
      * see stale data if the descriptor / avail ring updates are still
      * sitting in a dirty L1/L2 cacheline. Clean the three ranges we
      * just wrote: the descriptor entry, the avail ring slot, and the

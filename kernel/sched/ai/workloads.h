@@ -58,8 +58,8 @@ struct bench_workload {
  * done). Both halves live in one struct so a single
  * cache_clean_range(&wl_slots[i], sizeof(wl_slots[i])) on the driver
  * side covers everything the worker reads from this slot — important
- * on Pi 5 / Jetson where per-core L2 caches are incoherent (no SMPEN).
- * See kernel/CLAUDE.md §"Cache Maintenance (Pi 5 / No SMPEN)". */
+ * on Pi 5 / Jetson where per-core L2 caches are treated as incoherent.
+ * See kernel/CLAUDE.md §"Cache Maintenance (Pi 5 / Jetson)". */
 struct bench_wl_record {
     /* --- Driver-written input (read by worker) --- */
     uint64_t dispatch_ns;     /* slm_get_time_ns() at scheduler_add_task time */
