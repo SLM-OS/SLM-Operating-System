@@ -227,3 +227,20 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   `build 20261111044836 (79c10261)`; elf sha256 502f78ba, bin sha256
   1ef9dc39 (`run3-tools/c0/cells-MANIFEST.txt`). This is the image C3
   boot-tests on both Jetson paths.
+
+## Entry 4 (06:55 UTC): C1 builder done on pi-5-1; lab to the C1 critic
+
+- C1 builder released pi-5-1 at 06:49:47Z (claimed 04:20Z) and reported.
+  Evidence `gauntlet-3-hw-pi5` @ 127428e7, `run3-hw/c1/` (51 raw captures
+  and two summaries); new branch `c1/instrument-1211-removal` @ 9f375c19.
+  Its counts go into the log after the critic files, as the protocol
+  requires (Entry 5 or later).
+- 06:54Z: pi-5-1 handed to the blind C1 critic (claims as
+  `coherency-3-C1-critic`), with the definition of done, the issue
+  numbers, the evidence path and the heads only. It reproduces 5 boots
+  per kernel from the staged images, then restores the card's originals
+  (`*.prec3`) and leaves pi-5-1 at the SLM-OS shell, powered on.
+- 06:55Z: C1 builder resumed offline for #1213 (QEMU only, no labctl).
+- Schedule: C1's lab work ended 18 min after the 06:31 mark (the mark
+  assumed the lab from 04:16; C1 claimed at 04:20). C2's step 0 moves
+  from about 07:01 to after the critic, expected about 07:30.
