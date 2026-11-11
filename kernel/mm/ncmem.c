@@ -1,12 +1,12 @@
 /*
- * ncmem.c - Non-cacheable shared memory bump allocator
+ * ncmem.c - Non-cacheable DMA memory bump allocator
  *
- * Provides permanent, boot-time allocations from the 2MB NC region.
- * Memory is never freed — these are kernel-lifetime structures like
- * scheduler run queues and cross-CPU boot flags.
+ * Provides permanent, boot-time allocations from the 2MB NC region for
+ * device DMA buffers (see ncmem.h). Memory is never freed.
  *
- * Works on any platform that defines NC_MEM_BASE (Pi 5, Jetson). The
- * by-VA block maintenance (#1196) is built on every ARM64 platform so
+ * Works on any platform with PLATFORM_HAS_NC_REGION (Pi 5, Jetson).
+ *
+ * The by-VA block maintenance (#1196) is built on every ARM64 platform so
  * the QEMU test suite can drive it.
  */
 
@@ -128,7 +128,7 @@ int ncmem_clean_inval_range(uintptr_t base, size_t size,
     return 0;
 }
 
-#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(PLATFORM_HAS_NC_REGION)
 
 static uintptr_t nc_next_free;
 static size_t nc_total_allocated;
@@ -166,9 +166,9 @@ void ncmem_init(void)
      * block from Linux's linear map or UEFI's identity map. SLM-OS maps
      * it Normal NC, so such a line is a mismatched-attribute alias: if
      * dirty, its eviction at any later time would write the previous
-     * owner's data over run queues, the task table or DMA rings (Arm ARM
-     * B2.11). Maintenance by VA reaches the PoC whatever the cacheability
-     * of the mapping used.
+     * owner's data over DMA rings and buffers or the diagnostic slots
+     * (Arm ARM B2.11). Maintenance by VA reaches the PoC whatever the
+     * cacheability of the mapping used.
      *
      * Nothing has written the block through the NC mapping yet (vmm_init
      * to here touches page tables, PMM metadata and the GPU reserve), and
@@ -258,4 +258,4 @@ void ncmem_boot_maint_stats(ncmem_maint_stats_t *out)
     *out = (ncmem_maint_stats_t){ 0 };
 }
 
-#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */
+#endif /* PLATFORM_HAS_NC_REGION */

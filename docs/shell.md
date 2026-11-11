@@ -107,6 +107,7 @@ Network:                              # only when ENABLE_NETWORKING=ON
 
 Hardware control & diagnostics:       # mix of always-available + platform-gated
   bpmp         BPMP IPC smoke test (Jetson only)
+  coherency    Cache-coherency litmus (coherency regs | litmus [scale] | neg [scale]) (non-x86)
   diag         Pi 5 IRQ-delivery diagnostics (PI5_IRQ_DIAG only)
   gpu          Show GPU info (non-x86); see also nvidia_gpu_register on x86-64
   hailo        Hailo NPU control
@@ -147,7 +148,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `mem` | Show PMM statistics (total pages, free, allocated) |
 | `tasks` | List all tasks with ID, state, CPU affinity, priority, and name |
 | `cpu` | Show per-core status (online state, current task) |
-| `cpu resurrect <N>` | Pi 5 only. Manually resurrect a dormant secondary CPU via `psci_cpu_on`. Drains the target's run queue (any tasks left there are leaked), then re-issues PSCI CPU_ON. Returns 0 on success (incl. cache-incoherency fallback), `-1` invalid CPU id, `-2` ALREADY_ON (software wedge — drain alone was the recovery), `-4` real PSCI failure (CPU left offline). The auto-supervisor (kernel/sched/cpu_supervisor.c, #216 Tier 2) drives this same path automatically when a secondary's `sched_diag_idle_loops` counter is frozen for 6 samples; the manual subcommand exists for integration tests and operator use. Stubs to `-1` on Jetson / QEMU / x86-64. |
+| `cpu resurrect <N>` | Pi 5 only. Manually resurrect a dormant secondary CPU via `psci_cpu_on`. Drains the target's run queue (any tasks left there are leaked), then re-issues PSCI CPU_ON. Returns 0 on success (incl. the boot-flag timeout fallback), `-1` invalid CPU id, `-2` ALREADY_ON (software wedge — drain alone was the recovery), `-4` real PSCI failure (CPU left offline). The auto-supervisor (kernel/sched/cpu_supervisor.c, #216 Tier 2) drives this same path automatically when a secondary's `sched_diag_idle_loops` counter is frozen for 6 samples; the manual subcommand exists for integration tests and operator use. Stubs to `-1` on Jetson / QEMU / x86-64. |
 | `uptime` | Show system uptime in seconds and milliseconds |
 | `vmm` | Show virtual memory statistics (page tables, mapped regions) |
 | `ipc` | Show IPC statistics (message queues, shared buffers) |
@@ -677,6 +678,51 @@ Network Statistics:
   RX errors:  0  dropped: 0
   TX errors:  0
 ```
+
+### Coherency Command (ARM64 only)
+
+The `coherency` verb (#1193) measures whether ordinary cacheable memory is
+coherent between CPUs, with the litmus patterns defined in
+`docs/archive/coherency-gauntlet/litmus-spec.md`. The Linux harness in
+`scripts/coherency/` runs the same patterns, and both print rows in the
+same field order so results compare row for row. Code:
+`kernel/include/coherency_litmus.h` (patterns), `kernel/src/coherency.c`
+(driver and verb), `kernel/tests/test_coherency.c` (tests).
+
+| Command | Description |
+|---------|-------------|
+| `coherency regs` | For every online CPU: CurrentEL, SCTLR_EL2 and HCR_EL2 (EL2 only), the EL1 copy of SCTLR (SCTLR_EL12 when E2H=1), the TCR and MAIR in use, CLIDR_EL1, CTR_EL0, MIDR_EL1, MPIDR_EL1 and CCSIDR_EL1 for each data or unified cache level. On Pi 5 and Jetson it also prints CPUECTLR_EL1 and CLUSTERECTLR_EL1 as raw values: read only, never written (a denied write traps to EL3), and not decoded, because bit meanings differ between Cortex-A76 and A78AE. QEMU builds do not read them. |
+| `coherency litmus [scale]` | P1 to P6, S1 and S2 (spec revision 3) over every ordered pair of online CPUs (P4 once per writer CPU over all CPUs, P6 over all CPUs), in the row order P1 P2 P3 P4 P5 P6 S1 S2. `scale` divides the spec iteration counts (default 1: 10^6 per pair for P1, P2 and S1, 10^5 rounds for P3, P5 and S2, 10^6 per CPU for P6). P4 is time budgeted: the writer makes at least 10^6 writes, then keeps going until every reader has 10^5 straddles (read pairs that saw a write land between the two reads; the target is divided by `scale` too) or 2 s pass. Prints `pattern cpus iters forbidden timeouts ms` rows; P4 rows append `pairs=<r1>,<r2>,... straddles=<r1>,<r2>,... coverage=ok\|weak`, one value per reader in ascending CPU order, and their `iters` is the number of writes made. Then one `SENS cpus=a>b S1=<n> S2=<n> P2_sensitive=yes\|no P3_sensitive=yes\|no` line per ordered pair, then `coherency: PASS` or `coherency: FAIL (n rows)`. Revision 3 tags every value P1, P2, S1 and P4 store with the row: `(tag << 40) \| index`, with a fresh tag per row, and the row's variables start at a value with a reserved tag. A reader treats another tag as "row not started" and times out if its own tag never appears; its own tag with an index above n, or another tag after its own was seen, is forbidden. MP rows (P1, P2, S1) append `observed=<n>`: the reader's iterations that saw the flag with its own tag and an index below n. A P row fails on any forbidden outcome or any 1 s no-progress timeout, and also when it is weak: a P1 or P2 reader observed nothing, or a P4 reader saw no straddle. S1 (P2 without its DMBs) and S2 (P3 with each DMB ISH replaced by a compiler barrier) are reported, never judged: P2 or P3 counts as sensitive on a pair only where S1 or S2 showed relaxed outcomes there. |
+| `coherency neg [scale]` | Negative controls, report only. (a) P2 and P4 with the writer on the normal mapping and the reader on a Normal WB Non-shareable alias (SH=00) of the same 2 MB block; (b) the same with the reader on a Normal Non-cacheable alias; (c) every pair with a reader whose data cache is off (SCTLR.C=0, IRQs masked, register-only loop): the writer cleans P0 to the Point of Coherency, stores P1 with no clean, and the reader counts stale P0 reads (phase 1), then the writer cleans P1 and the reader counts fresh P1 reads (phase 2). Before an alias exists, every slot controls (a) and (b) will use is filled with a reserved-tag sentinel and cleaned to the Point of Coherency (DC CIVAC, DSB) through the normal mapping, so a reader on an alias never sees old DRAM contents as a result; P2 and P4 rows use the revision 3 row tags and print `observed` and `coverage` as in `coherency litmus`, for the record only. Every control row uses a fresh 4 KB slot of a dedicated 2 MB block, never reused in the same boot (a Non-shareable alias read can leave a Non-shareable copy of a line in the reader's cache that a later row would hit), and control (c) uses the second MB, which no alias read touches; after about three runs at 6 CPUs the command asks for a reboot. Only (c) is guaranteed by the core TRMs to show stale reads on hardware; (a) and (b) are findings either way. QEMU TCG models no caches, so every control reads fresh data there. |
+
+Cells: `cpus` is `A>B` for pair patterns (A is the writer, T0, or the
+even side of P5), `w<W>/<lo>-<hi>` for P4 with writer W, and `<lo>-<hi>`
+for P6.
+
+Self-test: `kernel/tests/test_coherency.c` drives
+`coherency_litmus_run_opts()` with one fault injected per run (a P3
+partner that never stores and reports stale reads, a descending P4
+writer, a P4 writer that makes no writes, a P6 sum that starts at 1, and
+P2 rows whose flag and data hold another row's final values with a
+silent writer) and
+checks that the fault is counted in the right row and that the run ends
+in `coherency: FAIL (n rows)`. Injected runs print a `# self-test run`
+line and are never spec runs; the shell verb does not inject.
+
+Dispatch: the CPU running the shell plays its own role inline (the shell
+task is pinned there and raised to high priority for the run), and every
+other participant runs as a high-priority worker task pinned with
+`task_set_affinity()` and queued with `scheduler_add_task_to_cpu()`.
+Workers never print. Each writes its counts into its own cacheable result
+slot and publishes it with STLR; the shell prints. A worker that finishes
+without its result becoming visible within 1 s is reported as a lost
+result and counted as a timeout, so a stale line can never read as a pass.
+
+All pattern variables live in ordinary cacheable memory (`.bss`, or a 2 MB
+PMM block for the controls), one variable per 128-byte line, with no cache
+maintenance in any pattern. The control aliases are mapped at the top 2 MB
+of the kbuf VA window only while a control runs, then unmapped with a TLB
+invalidate.
 
 ### NVIDIA GPU Command (x86-64 only)
 

@@ -51,14 +51,14 @@ static bool                  usb_child_initial_desc_bounce = true;
 static bool                  usb_child_followup_desc_bounce = true;
 static bool                  usb_hotplug_retry_blocked;
 static bool                  usb_hotplug_retry_blocked_logged;
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
 static uint8_t              *usb_retained_desc_bounce;
 static size_t                usb_retained_desc_bounce_len;
 #endif
 
 static void *usb_get_retained_desc_bounce(size_t min_len)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     if (usb_retained_desc_bounce_len < min_len) {
         size_t alloc_len = (min_len < 256u) ? 256u : min_len;
         void *buf = ncmem_alloc(alloc_len, 64);

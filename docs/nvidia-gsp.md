@@ -293,7 +293,7 @@ void (*cache_invalidate)(void *addr, size_t size);
 
 **Platform notes:**
 - x86-64: no-ops (PCIe DMA is cache-coherent)
-- Jetson: DC CVAC (clean) / DC IVAC (invalidate) via `cache.h` helpers; Jetson's per-core L2 is incoherent
+- Jetson: DC CVAC (clean) / DC IVAC (invalidate) via `cache.h` helpers; the GPU does not snoop the CPU caches
 - VFIO: no-ops (Linux manages coherency)
 
 **Called from:** `bringup.c` (after memcpy/patching firmware buffers, before Falcon DMA reads), `rpc.c` (RPC mailbox words for cross-CPU coherency)

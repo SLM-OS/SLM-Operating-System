@@ -23,9 +23,8 @@ networking transport PR.
 
 ### Cache-maintenance helpers
 
-Defined in `kernel/include/cache.h`. On `PLATFORM_HAS_NC_MEMORY`
-platforms (Pi 5, Jetson), they expand to real ARM64 cache
-instructions; elsewhere they are barriers or no-ops.
+Defined in `kernel/include/cache.h`. On Pi 5 and Jetson they expand
+to real ARM64 cache instructions; elsewhere they are barriers or no-ops.
 
 | Helper | ARM64 instruction | Purpose |
 |---|---|---|
@@ -75,8 +74,8 @@ drivers run on QEMU where every region is coherent regardless.
 
 ### Q1: Is `dc cvac` + `dsb sy` sufficient for device-visible writes?
 
-On Pi 5 and Jetson, secondary-CPU L1/L2 caches don't participate in
-the coherency protocol (the NC-memory model). `dc cvac` pushes dirty data from
+On Pi 5 and Jetson, devices do not snoop the CPU caches (the CPUs are
+coherent with each other, #1193). `dc cvac` pushes dirty data from
 the issuing CPU's cache to PoC. A DMA-capable device that reads
 through PoC sees the up-to-date data.
 
@@ -135,9 +134,9 @@ variable). For each new platform:
 
 `kernel/include/ncmem.h` provides a bump allocator for Normal
 Non-Cacheable memory on Pi 5 (`0xFFE00000`, 2 MB) and Jetson
-(`0xBDE00000`, 2 MB, before OP-TEE carveout). Scheduler run queues,
-task tables, and current-task pointers already live there (see
-`kernel/CLAUDE.md` §"Non-Cacheable Shared Memory").
+(`0xBDE00000`, 2 MB, before OP-TEE carveout). It holds DMA buffers
+only; CPU-shared scheduler state is cacheable (see `kernel/CLAUDE.md`
+§"Non-Cacheable DMA Memory").
 
 **For descriptor rings** specifically:
 
@@ -258,7 +257,7 @@ networking follow-on), the PR must include:
 - `docs/networking.md` — §"Descriptor Ring Cache Maintenance"
   already discusses this at a high level; expand with the real-
   hardware evidence once it's available
-- `kernel/CLAUDE.md` — §"Non-Cacheable Shared Memory" add a row
+- `kernel/CLAUDE.md` — §"Non-Cacheable DMA Memory" add a row
   for NIC descriptor rings if Q4's proposal is confirmed
 - Driver file (virtio_net.c, bcm_genet.c, etc.) — comment block
   explaining which allocations are cacheable vs NC and why
@@ -275,7 +274,7 @@ networking follow-on), the PR must include:
 - Linux `drivers/net/ethernet/stmicro/stmmac/` — reference for
   Synopsys DWC-EQOS (Jetson's controller)
 - `docs/networking.md` §"Descriptor Ring Cache Maintenance"
-- `kernel/CLAUDE.md` §"Cache Maintenance (Pi 5 / Jetson)"
+- `kernel/CLAUDE.md` §"Cross-CPU Coherency"
 
 ---
 

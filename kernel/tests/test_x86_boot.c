@@ -1497,9 +1497,8 @@ static void b2_tight_loop_worker(void *arg)
 static void test_all_cpus_timer_preempt_under_load(void)
 {
     extern uint32_t cpu_count;
-    /* x86-64: sched_diag_tick is a cacheable BSS array (see sched.c:282).
-     * ARM platforms put a pointer here; this test is x86-64-only so the
-     * array form is correct. */
+    /* sched_diag_tick is a cacheable BSS array on every platform
+     * (sched_diag.h). */
     extern volatile uint32_t sched_diag_tick[];
     extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
     extern void scheduler_add_task(struct task *task);

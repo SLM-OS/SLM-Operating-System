@@ -46,15 +46,14 @@
 #include "timer.h"
 #include "spinlock.h"
 #include "debug.h"
-#include "cache.h"
 #include "cpu_supervisor.h"
 #include <stdint.h>
 #include <stdbool.h>
 
-/* sched_diag_idle_loops is exposed by sched.c; same backing as the
- * `cpu` / per-test dormancy detector reads.
- * cpu_boot_flag and secondary_entry are declared in smp.h. */
-extern volatile uint32_t *sched_diag_idle_loops;
+/* sched_diag_idle_loops is declared in sched_diag.h (via sched.h), which
+ * matches sched.c's definition (#1193: a local pointer extern here
+ * against the array faulted on Pi 5). cpu_boot_flag and secondary_entry
+ * are declared in smp.h. */
 
 /* PSCI return codes used here. psci_call returns the raw int; we
  * don't import the full enum. PSCI_ALREADY_ON is the discriminant
@@ -97,24 +96,15 @@ static volatile uint64_t dormancy_warnings;
  * become non-zero. Returns the elapsed microseconds when the flag
  * was observed, or `timeout_us` if the wait expired.
  *
- * Pi 5 / Jetson per-core L2 caches are incoherent, so we try BOTH
- * visibility paths each iteration:
- *   1. LDAR (atomic load-acquire) — works when caches happen to be
- *      coherent.
- *   2. DC IVAC + plain read — forces the local L2 line to be
- *      invalidated and re-fetched from the PoC where the secondary's
- *      STLR has been pushed via cache_clean.
- * Mirrors the pattern in kernel/sched/smp.c around line 459.
+ * The secondary publishes the flag with a store-release; a load-acquire
+ * is enough on coherent hardware (#1193). Mirrors the wait loop in
+ * smp.c's boot path.
  */
 static uint32_t wait_for_boot_flag(uint32_t cpu, uint32_t timeout_us)
 {
     uint32_t waited_us = 0;
     while (waited_us < timeout_us) {
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            return waited_us;
-        }
-        cache_invalidate(&cpu_boot_flag[cpu]);
-        if (cpu_boot_flag[cpu]) {
             return waited_us;
         }
         timer_busy_wait_us(RESURRECT_POLL_US);
@@ -138,23 +128,24 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     /* (1) Take the CPU offline. The work-stealer reads cpu_data->online
      * to decide whether a CPU's deque is stealable; setting this here
      * stops a thief from racing into the run queue we're about to
-     * reset. cache_clean already issues dsb sy internally. */
+     * reset. The barrier orders the store before the drain. */
     cpu_data[cpu].online = false;
-    cache_clean(&cpu_data[cpu].online);
+    smp_mb();
 
     /* (2) Reset run queue (drains under rq_lock internally). */
     sched_drain_cpu_runqueue(cpu);
 
     /* (3) Reset diag counters so the dormancy detector starts fresh
      * after the resurrection attempt. */
-    if (sched_diag_idle_loops) sched_diag_idle_loops[cpu] = 0;
+    sched_diag_idle_loops[cpu] = 0;
     last_idle_loops[cpu] = 0;
     frozen_samples[cpu]  = 0;
 
-    /* (4) Reset boot flag and clean it so the secondary's STLR is
-     * the only writer the polling loop sees. */
+    /* (4) Reset boot flag so the secondary's STLR is the only writer
+     * the polling loop sees. */
     __atomic_store_n(&cpu_boot_flag[cpu], 0, __ATOMIC_RELEASE);
-    cache_clean(&cpu_boot_flag[cpu]);
+    /* Complete the stores above before CPU_ON, as boot_secondary does. */
+    __asm__ volatile("dsb sy" ::: "memory");
 
     /* (5) PSCI CPU_ON. Forward the same arguments boot_secondary uses
      * the first time around — the secondary_entry assembly reads x0
@@ -172,7 +163,7 @@ int cpu_supervisor_resurrect(uint32_t cpu)
          * the CPU as a valid target again and its idle loop picks
          * up new work on the next SEV. */
         cpu_data[cpu].online = true;
-        cache_clean(&cpu_data[cpu].online);
+        smp_mb();
         WARN("cpu_supervisor: CPU %u was ALREADY_ON (software wedge); "
              "queue drained, online flag restored", cpu);
         return -2;
@@ -195,12 +186,13 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     uint32_t waited_us = wait_for_boot_flag(cpu, RESURRECT_TIMEOUT_US);
 
     /* Whether the flag was observed or we timed out, the CPU is up
-     * (PSCI returned success). Restore online + bump successes. The
-     * timeout case is the cache-incoherency fallback: if the CPU
-     * actually isn't running, idle_loops will still be frozen on
-     * the next supervisor tick and we'll resurrect again. */
+     * (PSCI returned success). Restore online + bump successes. In
+     * the timeout case (the WARN below still calls it the
+     * "cache-incoherency fallback"), if the CPU actually isn't running,
+     * idle_loops will still be frozen on the next supervisor tick and
+     * it is resurrected again. */
     cpu_data[cpu].online = true;
-    cache_clean(&cpu_data[cpu].online);
+    smp_mb();
     resurrect_successes[cpu]++;
 
     if (waited_us < RESURRECT_TIMEOUT_US) {
@@ -236,8 +228,6 @@ void cpu_supervisor_get_stats(struct cpu_supervisor_stats *out)
  */
 static void supervisor_tick(void)
 {
-    if (!sched_diag_idle_loops) return;
-
     for (uint32_t c = 1; c < cpu_count; c++) {
         uint32_t cur = sched_diag_idle_loops[c];
         if (cur != last_idle_loops[c]) {
@@ -272,11 +262,9 @@ static void cpu_supervisor_task_entry(void *arg)
 {
     (void)arg;
     /* Seed `last_idle_loops` so the first sample doesn't insta-trip. */
-    if (sched_diag_idle_loops) {
-        for (uint32_t c = 0; c < MAX_CPUS; c++) {
-            last_idle_loops[c] = sched_diag_idle_loops[c];
-            frozen_samples[c]  = 0;
-        }
+    for (uint32_t c = 0; c < MAX_CPUS; c++) {
+        last_idle_loops[c] = sched_diag_idle_loops[c];
+        frozen_samples[c]  = 0;
     }
 
     while (true) {

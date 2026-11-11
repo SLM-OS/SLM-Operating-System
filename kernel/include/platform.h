@@ -506,8 +506,8 @@
  * free-list page fault during `bench stealing` with WORK_STEALING=ON
  * (issue #166). Switching to the runtime flag matches the Pi 5 model.
  *
- * The UART lock remains IRQ-disable-only (see `kernel/src/kprintf.c`) —
- * that path keys off `PLATFORM_HAS_NC_MEMORY`, not this flag.
+ * The UART lock (`kernel/src/kprintf.c`) is a cacheable spinlock like
+ * every other lock and follows the same runtime flag.
  */
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

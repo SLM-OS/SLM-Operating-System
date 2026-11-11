@@ -79,8 +79,8 @@ void hailo_fw_dump_logs_hex(uint32_t max_bytes);
  * MSI dispatch.
  *
  * Safe to call from ISR context (the underlying read/write/uart_printf
- * are all ISR-safe under SLM-OS's IRQ-disable-only UART lock on Pi 5
- * / Jetson; see kernel/CLAUDE.md "UART Lock on Pi 5 / Jetson"). Do
+ * are all ISR-safe; the UART lock is IRQ-saving, see kernel/CLAUDE.md
+ * "UART Lock"). Do
  * NOT replace with `hailo_fw_drain_d2h_notifications(N)` from ISR —
  * that helper sleeps 5 ms between events.
  *

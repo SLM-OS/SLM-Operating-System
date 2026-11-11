@@ -18,8 +18,8 @@
 
 #if defined(PI5_IRQ_DIAG)
 
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-#error "PI5_IRQ_DIAG requires a platform with NC memory"
+#if !defined(PLATFORM_HAS_NC_REGION)
+#error "PI5_IRQ_DIAG requires a platform with an NC region"
 #endif
 
 /*

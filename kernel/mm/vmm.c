@@ -13,6 +13,7 @@
 #include "spinlock.h"
 #include "cache.h"
 #include "dtb.h"
+#include "ncmem.h"     /* NC_MEM_BASE for the Pi 5 layout assert */
 #include <stddef.h>
 
 /*
@@ -120,6 +121,16 @@ static struct {
  */
 
 /*
+ * Shareability field for a Normal-memory descriptor: Inner Shareable,
+ * unless the caller asked for VMM_FLAG_NONSHARE (SH=00). Only the #1193
+ * negative controls ask for Non-shareable, on a temporary alias.
+ */
+static uint64_t vmm_normal_shareability(uint32_t flags)
+{
+    return (flags & VMM_FLAG_NONSHARE) ? PTE_SH_NON : PTE_SH_INNER;
+}
+
+/*
  * Build a block descriptor (L2 entry for 2MB block).
  *
  * Block descriptors are kernel-mappings only — the per-task user L1
@@ -148,10 +159,10 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;     /* Device memory: non-shareable */
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;   /* Normal NC: inner shareable */
+        desc |= vmm_normal_shareability(flags);   /* default: inner shareable */
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;   /* Normal WB: inner shareable */
+        desc |= vmm_normal_shareability(flags);   /* default: inner shareable */
     }
 
     /* Access permissions */
@@ -227,10 +238,10 @@ static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     }
 
     /* Access permissions */
@@ -287,10 +298,10 @@ static uint64_t make_page_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SH_NON;
     } else if (flags & VMM_FLAG_NOCACHE) {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     } else {
         desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
-        desc |= PTE_SH_INNER;
+        desc |= vmm_normal_shareability(flags);
     }
 
     if (flags & VMM_FLAG_USER) {
@@ -677,8 +688,8 @@ int vmm_create_user_l1(uint64_t *out_pa)
 
     /* The page-table walker reads PAs directly. Clean the L1 page to
      * Point of Coherency so the data is in DRAM before any future
-     * TTBR0 swap reads from it. Critical on Pi 5 / Jetson where
-     * per-CPU L2 caches are treated as incoherent. */
+     * TTBR0 swap reads from it. Redundant on coherent hardware (the
+     * walk is WB Inner Shareable, #1193) but harmless. */
     cache_clean_range(user_l1, TABLE_SIZE);
 
     *out_pa = (uint64_t)(uintptr_t)page;
@@ -1520,14 +1531,14 @@ static void vmm_setup_platform(void)
     }
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Entry 495: NC 2MB block at 0xBDE00000 for cross-CPU shared data.
+    /* Entry 495: NC 2MB block at 0xBDE00000 for device DMA (ncmem.h).
      * This is the last 2MB of region 1 (before OP-TEE carveout at 0xBE000000).
      * Mapped as Normal Non-Cacheable, Inner Shareable (MAIR index 2). */
     {
         uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
         l2_kernel[495] = make_block_desc(0xBDE00000UL, nc_flags);
         vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  L2[495]: NC block at 0xBDE00000 (cross-CPU shared memory)");
+        DEBUG_PRINT("  L2[495]: NC block at 0xBDE00000 (DMA)");
     }
 #endif
 
@@ -1835,8 +1846,8 @@ static void vmm_setup_platform(void)
      *
      * L1[0-2]: 1GB block descriptors (write-back cacheable).
      * L1[3]:   L2 table — 511 WB 2MB blocks + 1 NC 2MB block at the top.
-     *          The NC block (PA 0xFFE00000) is used for cross-CPU shared data
-     *          that must bypass L1/L2 caches (see ncmem.h).
+     *          The NC block (PA 0xFFE00000) holds device DMA buffers that
+     *          must bypass the CPU caches (see ncmem.h).
      */
     uint32_t ram_gb = RAM_SIZE / L1_BLOCK_SIZE;
     if (ram_gb > 512) ram_gb = 512;
@@ -1862,7 +1873,7 @@ static void vmm_setup_platform(void)
             l2_ram_gb3[i] = make_block_desc(gb3_base + (uint64_t)i * BLOCK_SIZE,
                                             ram_flags);
         }
-        /* L2[511]: Non-cacheable 2MB block for cross-CPU shared memory */
+        /* L2[511]: Non-cacheable 2MB block for device DMA (ncmem.h) */
         l2_ram_gb3[ENTRIES_PER_TABLE - 1] = make_block_desc(
             gb3_base + (uint64_t)(ENTRIES_PER_TABLE - 1) * BLOCK_SIZE, nc_flags);
 
@@ -2042,6 +2053,18 @@ void vmm_boot_caches_off_range(uint64_t *start, uint64_t *end)
     *start = (uint64_t)(uintptr_t)_start;
     *end = (uint64_t)(uintptr_t)__kernel_end;
 }
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * The Pi 5 NC block is mapped NC only because it is the last 2 MB of
+ * the GB that vmm_setup_platform splits into l2_ram_gb3, which is the
+ * last GB of RAM_SIZE. NC_MEM_BASE is a separate constant: if RAM_SIZE
+ * changed, 0xFFE00000 would be mapped Write-Back while every NC user
+ * still treats it as Non-Cacheable (#1193 audit D11).
+ */
+_Static_assert(NC_MEM_BASE + NC_MEM_SIZE == RAM_BASE + RAM_SIZE,
+               "Pi 5 NC block must be the last 2 MB of RAM_SIZE (see l2_ram_gb3)");
+#endif
 
 /*
  * Set up initial page tables and enable MMU.

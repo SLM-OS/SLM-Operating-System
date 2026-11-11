@@ -1,17 +1,19 @@
 /*
- * ncmem.h - Non-cacheable shared memory allocator
+ * ncmem.h - Non-cacheable memory allocator for device DMA
  *
- * On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent
- * across CPUs. DC CIVAC doesn't propagate through
- * per-core L2, so cross-CPU data visibility requires non-cacheable memory.
+ * Pi 5 and Jetson reserve one 2 MB block of DRAM that vmm.c maps with
+ * MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via an L2 table
+ * entry and pmm.c keeps out of the page allocator. The physical address
+ * is platform-specific. PLATFORM_HAS_NC_REGION marks the platforms that
+ * have it, and ncmem_alloc() hands out pieces of it.
  *
- * NC memory bypasses L1/L2 entirely — writes are instantly visible to all
- * CPUs. Used for boot flags, scheduler run queues, and other cross-CPU
- * shared data structures.
- *
- * The NC region is a 2MB block mapped with MAIR index 2 (Normal
- * Non-Cacheable, Inner Shareable) via an L2 table entry in vmm.c.
- * The physical address is platform-specific.
+ * Its users are devices that do not snoop the CPU caches: xHCI rings,
+ * MACB, CDC-ECM and USB bounce buffers, camera RCE, plus the fixed-
+ * address diagnostic slots (diag_pi5.h). CPU-to-CPU shared state (run
+ * queues, task table, current-task pointers, steal deques, counters)
+ * lives in ordinary cacheable memory: the cores keep their caches
+ * coherent in hardware (docs/adr/0007-cross-cpu-coherency.md, #1193).
+ * Do not allocate CPU-shared state here.
  */
 
 #ifndef NCMEM_H
@@ -22,9 +24,8 @@
 
 #if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 
-/* Platforms with NC memory — use this macro in scheduler/SMP code
- * instead of platform-specific guards. */
-#define PLATFORM_HAS_NC_MEMORY 1
+/* The NC block and its allocator (see the header comment). */
+#define PLATFORM_HAS_NC_REGION 1
 
 #if defined(PLATFORM_RASPI5)
 #define NC_MEM_BASE     0xFFE00000UL    /* Last 2MB of 4GB RAM */
@@ -47,7 +48,7 @@ void *ncmem_alloc(size_t size, size_t align);
 /* Return bytes allocated so far */
 size_t ncmem_used(void);
 
-#else /* No NC memory needed (QEMU caches are coherent) */
+#else /* No NC region (QEMU, x86-64) */
 
 static inline void ncmem_init(void) {}
 static inline void *ncmem_alloc(size_t size, size_t align)

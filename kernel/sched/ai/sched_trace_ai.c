@@ -3,17 +3,14 @@
  *
  * Design: per-CPU ring buffer of fixed-size 480-byte records. Each
  * CPU writes only its own slots; no cross-CPU lock or atomic
- * fetch-add on the hot path. The owning CPU cache_cleans every
- * write so the dump path (typically on CPU 0) sees up-to-date data
- * after cache_invalidate. This mirrors the sched_diag NC-counter
- * pattern called out in `kernel/CLAUDE.md`.
+ * fetch-add on the hot path. The owning CPU orders each record before
+ * the counter bump that publishes it (smp_wmb); the dump path
+ * (typically on CPU 0) reads the counters, then smp_rmb, then the
+ * records. No cache maintenance: the caches are coherent (#1193).
  *
- * Per-CPU vs single-global was chosen because Pi 5 / Jetson have
- * incoherent per-core L2 caches (the NC-memory model) — a single global head
- * index updated via atomic fetch-add would either need explicit DC
- * CIVAC/DSB SY around every increment (expensive) or NC memory for
- * the head (the run-queue NC region is small and the ring buffer
- * itself can't fit there). Per-CPU rings sidestep both problems.
+ * Per-CPU rings were chosen when Pi 5 / Jetson were believed to have
+ * incoherent per-core L2 caches (overturned by #1193). They still
+ * avoid a shared fetch-add head, so they stay.
  *
  * Dump format documented in `docs/sched-trace-format.md`. The
  * sibling-repo ingester (#879 / 61c) parses the same bytes.
@@ -26,7 +23,6 @@
 #include "ai_state.h"
 #include "task.h"
 #include "smp.h"
-#include "cache.h"
 #include "pmm.h"
 #include "spinlock.h"   /* irq_save / irq_restore */
 #include "string.h"
@@ -92,9 +88,6 @@ int sched_trace_ai_init(void)
         return -1;
     }
     memset(tracer_percpu, 0, total);
-    /* Initial cache_clean so secondary CPUs reading their own counter
-     * see 0 rather than uninitialized garbage. */
-    cache_clean_range(tracer_percpu, total);
     tracer_initialized = 1;
     return 0;
 }
@@ -114,8 +107,6 @@ static void clear_rings_unsynchronized(void)
          * doesn't leak prior recording's contents. */
         memset(tracer_percpu[i].ring, 0, sizeof(tracer_percpu[i].ring));
     }
-    cache_clean_range(tracer_percpu,
-                      sizeof(struct sched_trace_ai_percpu) * MAX_CPUS);
 }
 
 void sched_trace_ai_start(void)
@@ -162,8 +153,6 @@ static uint64_t total_written_sum(void)
     if (!tracer_initialized || !tracer_percpu) return 0;
     uint64_t sum = 0;
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i],
-                               offsetof(struct sched_trace_ai_percpu, ring));
         sum += tracer_percpu[i].total_written;
     }
     return sum;
@@ -174,8 +163,6 @@ uint32_t sched_trace_ai_records_used(void)
     if (!tracer_initialized || !tracer_percpu) return 0;
     uint32_t used = 0;
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i],
-                               offsetof(struct sched_trace_ai_percpu, ring));
         uint64_t w = tracer_percpu[i].total_written;
         used += (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
     }
@@ -192,8 +179,6 @@ uint64_t sched_trace_ai_dropped(void)
     if (!tracer_initialized || !tracer_percpu) return 0;
     uint64_t dropped = 0;
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i],
-                               offsetof(struct sched_trace_ai_percpu, ring));
         uint64_t w = tracer_percpu[i].total_written;
         if (w > PERCPU_ENTRIES) {
             dropped += (w - PERCPU_ENTRIES);
@@ -289,9 +274,9 @@ void sched_trace_ai_record_decision(struct task *task,
     ai_extract_state(state_buf);
     memcpy(r->u.decision.state, state_buf, sizeof(state_buf));
 
-    /* Push the record to PoC so dump (on a possibly different CPU)
-     * sees it without depending on an L2 coherency event. */
-    cache_clean_range(r, sizeof(*r));
+    /* Order the record before the counter bump that publishes it to a
+     * dump on another CPU. */
+    smp_wmb();
 
     /* Bump the per-CPU counter and push it. Slot index is derived
      * from `total_written % PERCPU_ENTRIES` everywhere it's needed
@@ -299,8 +284,6 @@ void sched_trace_ai_record_decision(struct task *task,
      * field, no cross-CPU write-order race between two counter
      * stores. */
     pc->total_written++;
-    cache_clean_range(pc,
-                      offsetof(struct sched_trace_ai_percpu, ring));
 
     irq_restore(irq_flags);
 }
@@ -345,10 +328,8 @@ void sched_trace_ai_record_completion(struct task *task)
     r->u.completion._completion_pad[1] = 0;
     memset(r->u.completion._tail_pad, 0, sizeof(r->u.completion._tail_pad));
 
-    cache_clean_range(r, sizeof(*r));
+    smp_wmb();          /* record before the counter that publishes it */
     pc->total_written++;
-    cache_clean_range(pc,
-                      offsetof(struct sched_trace_ai_percpu, ring));
 
     irq_restore(irq_flags);
 }
@@ -383,8 +364,6 @@ static void take_snapshot(struct trace_snapshot snap[MAX_CPUS],
     uint64_t total = 0;
     uint64_t dropped = 0;
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        cache_invalidate_range(&tracer_percpu[i],
-                               offsetof(struct sched_trace_ai_percpu, ring));
         uint64_t w = tracer_percpu[i].total_written;
         snap[i].total = w;
         snap[i].count = (w > PERCPU_ENTRIES) ? PERCPU_ENTRIES : (uint32_t)w;
@@ -430,10 +409,7 @@ size_t sched_trace_ai_dump_stream(sched_trace_ai_dump_cb cb, void *ctx)
 
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         if (snap[i].count == 0) continue;
-        /* Re-invalidate the ring portion only; the header was
-         * already invalidated by take_snapshot. */
-        cache_invalidate_range(tracer_percpu[i].ring,
-                               sizeof(tracer_percpu[i].ring));
+        smp_rmb();      /* counters (take_snapshot) before records */
         for (uint32_t k = 0; k < snap[i].count; k++) {
             uint32_t idx = (snap[i].start + k) % PERCPU_ENTRIES;
             if (cb(ctx, &tracer_percpu[i].ring[idx],
@@ -483,8 +459,7 @@ size_t sched_trace_ai_dump_to_buf(uint8_t *buf, size_t buflen)
     uint8_t *out = buf + sizeof(hdr);
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         if (snap[i].count == 0) continue;
-        cache_invalidate_range(tracer_percpu[i].ring,
-                               sizeof(tracer_percpu[i].ring));
+        smp_rmb();      /* counters (take_snapshot) before records */
         for (uint32_t k = 0; k < snap[i].count; k++) {
             uint32_t idx = (snap[i].start + k) % PERCPU_ENTRIES;
             memcpy(out, &tracer_percpu[i].ring[idx],

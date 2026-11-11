@@ -106,6 +106,16 @@ ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
 
+# Coherency gauntlet switch (#1193), Pi 5 and Jetson only. Defaults to
+# the current behaviour (ON); empty means ON and passes nothing to CMake,
+# so default builds are unchanged.
+#
+#   SETWAY_INVAL=OFF  Drops the post-MMU DC ISW L1/L2 loop that every
+#                     Pi 5 / Jetson secondary runs in smp_boot.S.
+#
+#   make kernel PLATFORM=JETSON_ORIN_NANO SETWAY_INVAL=OFF
+SETWAY_INVAL ?=
+
 # CMake arguments for the preemption flags. Every kernel configure rule
 # (kernel, kexec, bzImage, test) passes this one variable, and
 # print-preempt-config prints it, so scripts/check-preempt-config.sh
@@ -287,6 +297,7 @@ KERNEL_COMMON_CMAKE_ARGS = \
 	$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 	$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 	$(KERNEL_PREEMPT_CMAKE_ARGS) \
+	$(if $(filter OFF,$(SETWAY_INVAL)),-DSETWAY_INVAL=OFF) \
 	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
 	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
@@ -1629,13 +1640,13 @@ TIDY_WIDE_CMAKE_ARGS = -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -DSECONDARY_PREEM
 	-DJETSON_HW_TICK=OFF \
 	-DJETSON_XHCI_REBOOT_ON_NOOP=ON -DNET_TELEMETRYD_AUTOSTART=ON -DSLM_GPU_GOLDEN=ON \
 	-DSLM_REAL_GOLDEN=ON
-TIDY_WIDE_CFLAGS = -DSCHED_DEBUG_NC_TRACE -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
+TIDY_WIDE_CFLAGS = -DJETSON_REBOOT_CHECKPOINT -DHAILO_HYP_A_RPC
 # Defines each wide database must contain, because CMake can silently drop an
 # option: on Pi 5, COOP_PREEMPT also needs PI5_COOP_PREEMPT. The check fails if
 # one is missing.
 TIDY_WIDE_DEFINES = HAILO_WIRE_DEBUG SLMOS_AI_WEIGHTS_REAL CONFIG_AI_SCHEDULER \
 	JETSON_XHCI_REBOOT_ON_NOOP NET_TELEMETRYD_AUTOSTART SLM_GPU_GOLDEN SLM_REAL_GOLDEN \
-	SCHED_DEBUG_NC_TRACE JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
+	JETSON_REBOOT_CHECKPOINT HAILO_HYP_A_RPC
 TIDY_WIDE_SSH_DEFINES = NET_SSHD NET_SSHD_AUTOSTART
 TIDY_WIDE_DEFINES_QEMU_VIRT = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES)
 TIDY_WIDE_DEFINES_RASPI5 = $(TIDY_WIDE_DEFINES) $(TIDY_WIDE_SSH_DEFINES) COOP_PREEMPT
@@ -1690,8 +1701,13 @@ check-emc-rate-path:
 	@python3 scripts/check-emc-rate-path.py kernel
 	@out="$$(bash scripts/tests/test-check-emc-rate-path.sh 2>&1)" || { echo "$$out"; exit 1; }
 
+.PHONY: check-cpu-cache-maint
+check-cpu-cache-maint:
+	@python3 scripts/check-cpu-cache-maint.py
+	@out="$$(bash scripts/tests/test-check-cpu-cache-maint.sh 2>&1)" || { echo "$$out"; exit 1; }
+
 .PHONY: test
-test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs check-preempt-config check-build-signatures check-gpu-shell-lock check-emc-rate-path check-cpu-cache-maint test-ensure-oplib-shaders kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

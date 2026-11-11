@@ -12,12 +12,13 @@
 #include "task.h"
 #include "smp.h"
 #include "config.h"
+#include "sched_diag.h"     /* sched_diag_* externs, matched to sched.c (#1193) */
 
 /*
  * Per-CPU run queue.
  *
- * On Pi 5, the data fields live in NC memory for cross-CPU visibility,
- * but the lock stays in cacheable memory (ldaxr/stxr require cacheable).
+ * The queues are cacheable BSS; the lock is a separate cacheable array
+ * (rq_lock[] in sched.c), not a field.
  *
  * Exposed in the header so scheduling policies can inspect queue state
  * (e.g., ready_count, head) for CPU assignment decisions. Policies must
@@ -51,12 +52,11 @@ void sched_drain_cpu_runqueue(uint32_t cpu);
 
 /*
  * Zero every field of a run queue, the AI tick counters included
- * (#1045). Scheduler-internal: scheduler_init calls it for each CPU,
- * because the NC-memory run queues come from ncmem_alloc, which does
- * not zero, and after a Jetson kexec that memory holds Linux data.
- * Exposed only so tests can run it on a poisoned queue. Byte-wise
- * volatile stores, as in task_table_init, so no wide or DC ZVA store
- * is emitted against NC memory.
+ * (#1045). Scheduler-internal: scheduler_init calls it for each CPU
+ * (the run queues once came from unzeroed NC memory that held Linux
+ * data after a Jetson kexec). Exposed only so tests can run it on a
+ * poisoned queue. The byte-wise volatile stores date from that NC
+ * placement, where no wide or DC ZVA store could be emitted.
  */
 void sched_runqueue_clear(struct cpu_runqueue *rq);
 
@@ -143,8 +143,8 @@ void yield(void);
 /*
  * Start the scheduler on the specified CPU.
  *
- * Caller passes the logical CPU ID to avoid stale cpu_id() reads on
- * secondary CPUs (L2 cache incoherency on Pi 5). Enables timer,
+ * Caller passes the logical CPU ID, so the function does not depend on
+ * cpu_id() during bring-up. Enables timer,
  * unmasks interrupts, and switches to the first task. Does not return.
  */
 void scheduler_start(uint32_t cpu);

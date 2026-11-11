@@ -108,6 +108,8 @@ int test_suite_tcp_telemetry_server(void);
 
 /* VMM/TLB tests */
 int test_suite_vmm(void);
+int test_suite_coherency(void);   /* #1193, ARM64 only */
+int test_suite_nc_axis(void);     /* #1193 cacheable placement, ARM64 only */
 
 /* PMM buddy allocator tests */
 int test_suite_pmm(void);

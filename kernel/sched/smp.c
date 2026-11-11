@@ -15,25 +15,17 @@
 #include "pmu.h"
 #include "dtb.h"
 #include "cache.h"
-#include "ncmem.h"
-#include "nc_trace.h"
 #include "tegra_cpufreq.h"
+#include "vmm.h"        /* secondary_mmu_* */
 
 #include <stddef.h>
 
 /* Per-CPU data array */
 struct per_cpu cpu_data[MAX_CPUS];
 
-/* Maps logical CPU ID -> MPIDR value.
- * On platforms with NC memory, this points to NC-allocated storage.
- * On others, it's the static array declared here. */
+/* Maps logical CPU ID -> MPIDR value. */
 uint64_t cpu_logical_map[MAX_CPUS];
-#if defined(PLATFORM_HAS_NC_MEMORY)
-static uint64_t *nc_cpu_logical_map;  /* NC copy for cross-CPU reads */
-static uint64_t *nc_cpu_current_el;   /* Per-CPU CurrentEL captured at boot (#683 PR-3 SMP-EL2 verification) */
-#else
 static uint64_t cpu_current_el_fallback[MAX_CPUS];
-#endif
 
 /* Number of CPUs in the system */
 uint32_t cpu_count = 0;
@@ -41,9 +33,7 @@ uint32_t cpu_count = 0;
 /* Number of CPUs currently online */
 volatile uint32_t cpus_online = 0;
 
-/* Per-CPU boot handshake flags.
- * On NC platforms, allocated from NC region for instant cross-CPU visibility.
- * Otherwise cacheline-aligned to avoid DC CIVAC corruption of adjacent data. */
+/* Per-CPU boot handshake flags, one cacheline each. */
 volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
@@ -51,7 +41,7 @@ volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 _Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
 
 /*
- * Record CurrentEL for the calling CPU into a per-CPU NC slot.
+ * Record CurrentEL for the calling CPU into its per-CPU slot.
  * Used by both the primary boot path (CPU 0) and secondary_init
  * (CPUs 1..N) so the kernel can later verify every CPU landed at
  * the same EL — the explicit acceptance criterion for #683 PR-3.
@@ -61,9 +51,8 @@ _Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
  * reads 0x4. cpu_get_current_el() returns the recorded value or
  * CPU_EL_NOT_RECORDED if not yet captured.
  *
- * Ordering: no explicit barrier here. The NC mapping bypasses cache
- * so writes are observable to other CPUs without DC CIVAC, but the
- * happens-before edge between "EL recorded" and "CPU 0 reads it" is
+ * Ordering: no explicit barrier here. The happens-before edge between
+ * "EL recorded" and "CPU 0 reads it" is
  * established by the caller — secondary_init records the EL BEFORE
  * the online-handshake atomic store-release on cpu_boot_flag, and
  * the primary's smp_init waits on that flag before reading. Move
@@ -77,13 +66,7 @@ void cpu_record_current_el(uint32_t cpu)
     }
     uint64_t cur;
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur));
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    if (nc_cpu_current_el) {
-        nc_cpu_current_el[cpu] = cur;
-    }
-#else
     cpu_current_el_fallback[cpu] = cur;
-#endif
 }
 
 uint64_t cpu_get_current_el(uint32_t cpu)
@@ -91,11 +74,7 @@ uint64_t cpu_get_current_el(uint32_t cpu)
     if (cpu >= MAX_CPUS) {
         return CPU_EL_NOT_RECORDED;
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    return nc_cpu_current_el ? nc_cpu_current_el[cpu] : CPU_EL_NOT_RECORDED;
-#else
     return cpu_current_el_fallback[cpu];
-#endif
 }
 
 /*
@@ -137,8 +116,8 @@ int cpu_logical_id(uint64_t mpidr)
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* Hardcoded MPIDR table — avoids all cache visibility issues.
-     * Secondary CPUs call this during GIC init before any NC pointers
-     * or cacheable data from the primary is visible. */
+     * Secondary CPUs call this during GIC init, before they have read
+     * any data the primary wrote. */
     static const uint64_t jetson_map[] = {
         0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
     };
@@ -251,29 +230,9 @@ static void *cpu_stack_top(uint32_t cpu)
  */
 static void init_cpu_map(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Allocate NC copies of cross-CPU data structures.
-     * Secondary CPUs read these via NC addresses for instant visibility. */
-    nc_cpu_logical_map = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
-    for (int i = 0; i < MAX_CPUS; i++) {
-        if (nc_cpu_logical_map) {
-            nc_cpu_logical_map[i] = 0xFFFFFFFFUL;  /* sentinel */
-        }
-    }
-    /* Per-CPU CurrentEL slot — each CPU writes its own at boot, CPU 0
-     * reads back to verify all CPUs landed at the expected EL (#683
-     * PR-3 acceptance: 4/4 CPUs at EL2h on pi-5-2). */
-    nc_cpu_current_el = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
-    for (int i = 0; i < MAX_CPUS; i++) {
-        if (nc_cpu_current_el) {
-            nc_cpu_current_el[i] = CPU_EL_NOT_RECORDED;
-        }
-    }
-#else
     for (int i = 0; i < MAX_CPUS; i++) {
         cpu_current_el_fallback[i] = CPU_EL_NOT_RECORDED;
     }
-#endif
 
     /* CPU 0 is always the boot CPU - get its real MPIDR */
     cpu_logical_map[0] = cpu_get_mpidr() & MPIDR_AFF_MASK;
@@ -331,16 +290,6 @@ static void init_cpu_map(void)
     }
 #endif
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Copy the logical map to NC memory so secondary CPUs can read it.
-     * cpu_logical_id() on secondaries uses this NC copy. */
-    if (nc_cpu_logical_map) {
-        for (uint32_t i = 0; i < cpu_count; i++) {
-            nc_cpu_logical_map[i] = cpu_logical_map[i];
-        }
-    }
-#endif
-
     INFO("CPU map: %u CPUs configured", cpu_count);
 }
 
@@ -384,11 +333,9 @@ static const char *psci_error_str(int err)
  */
 void secondary_init(uint32_t logical_cpu_id)
 {
-    /* Trace: 0xEE = reached C entry from smp_boot.S */
-    nc_trace(logical_cpu_id, 0xEE);
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
 
-    /* Capture CurrentEL into the NC slot before any further setup so
+    /* Capture CurrentEL into its per-CPU slot before any further setup so
      * CPU 0's `cpu` shell command can confirm this CPU landed at the
      * expected EL (EL2h with VHE on Pi 5/Jetson, EL1h on QEMU). */
     cpu_record_current_el(logical_cpu_id);
@@ -415,41 +362,26 @@ void secondary_init(uint32_t logical_cpu_id)
      * kernel_main, secondaries from here. The return value is intentionally
      * discarded: a per-CPU PMU enable failure stamps the readiness flag
      * to false, and `pmu probe` (#875) is the surface that reports it.
-     * Secondaries cannot WARN/INFO directly — Pi 5 / Jetson UART writes
-     * from secondaries deadlock the UART lock (kernel/CLAUDE.md "UART
-     * Lock on Pi 5 / Jetson"). */
+     * The readiness flag, not a print, reports the result: CPU 0 is
+     * printing the boot log at this point. */
     (void)pmu_enable_self();
 #endif
 
-    /* Signal the primary CPU that we're online.
-     * Use atomic store-release (STLR) to ensure the write is globally
-     * visible. On platforms where DC CVAC doesn't propagate through
-     * per-core L2 (Pi 5, possibly Jetson), STLR bypasses this issue
-     * because ARM's release semantics guarantee multi-copy atomicity. */
+    /* Signal the primary CPU that we're online. The store-release
+     * (STLR) orders cpu_data[].online and everything before it ahead of
+     * the flag that boot_secondary polls with a load-acquire. */
     cpu_data[logical_cpu_id].online = true;
     __atomic_store_n(&cpu_boot_flag[logical_cpu_id], 1, __ATOMIC_RELEASE);
     __asm__ volatile("dsb sy" ::: "memory");
     cpus_online++;
 
-    /* Skip INFO print — uart_lock (ldaxr/stxr) deadlocks cross-CPU
-     * when CPU 0 holds it during boot output. The boot handshake above
-     * already confirms the CPU is online. */
+    /* No INFO print: the boot handshake above already confirms the
+     * CPU is online, and CPU 0 is printing the boot log. */
 
     /*
      * Wait for CPU 0 to initialize the scheduler.
      * This is necessary because smp_init() runs before scheduler_init().
      */
-    /* Trace: 0xAA = about to poll scheduler_is_initialized.
-     * Second slot records the observed NC init flag value — useful for
-     * confirming secondary CPUs can read CPU 0's NC writes. */
-#if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
-    nc_trace(logical_cpu_id, 0xAA);
-    {
-        uint32_t flag_val = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-        nc_trace_at(192, logical_cpu_id, flag_val);
-    }
-#endif
-
     /* Poll scheduler_is_initialized with a timer-driven delay between
      * retries (#94). timer_busy_wait_us uses CNTPCT_EL0, which is
      * readable at any EL after timer_init() has run. */
@@ -462,24 +394,15 @@ void secondary_init(uint32_t logical_cpu_id)
             timer_busy_wait_us(100);
         }
         if (!scheduler_is_initialized()) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256
-                + logical_cpu_id * 4) = 0xDEAD0001;
-#endif
             panic("CPU %u: scheduler init timeout", logical_cpu_id);
         }
     }
 
-    nc_trace(logical_cpu_id, 0xBD);  /* scheduler init observed */
-
     /* Initialize scheduler for this CPU (creates idle task) */
     scheduler_init_secondary(logical_cpu_id);
 
-    nc_trace(logical_cpu_id, 0xBC);  /* returned from scheduler_init_secondary */
-
     /* Start scheduler — this starts the timer, enables interrupts,
      * and switches to the idle task. Does not return. */
-    nc_trace(logical_cpu_id, 0xBE);  /* about to call scheduler_start */
     scheduler_start(logical_cpu_id);
 
     /* Should never reach here */
@@ -495,13 +418,11 @@ static int boot_secondary(uint32_t cpu)
     uintptr_t entry = (uintptr_t)secondary_entry;
     int ret;
 
-    /* Clear boot flag before starting the CPU.
-     * Must clean the cacheline after writing so our L1 doesn't hold a
-     * dirty copy of 0. Otherwise, cache_invalidate (DC IVAC) in the
-     * polling loop below would write back our stale 0 to PoC, overwriting
-     * the secondary's flag=1 that was already cleaned to PoC. */
+    /* Clear boot flag before starting the CPU. The secondary writes it
+     * from secondary_init with its MMU and caches on, so no cache
+     * maintenance is needed (#1193); the DSB completes this store and
+     * the cpu_data writes before CPU_ON. */
     cpu_boot_flag[cpu] = 0;
-    cache_clean(&cpu_boot_flag[cpu]);
     __asm__ volatile("dsb sy" ::: "memory");
 
     DEBUG_PRINT("CPU %u: booting (MPIDR=0x%lx, entry=0x%lx)",
@@ -530,25 +451,18 @@ static int boot_secondary(uint32_t cpu)
      * The flag is a separate volatile uint32_t for reliable cross-core visibility.
      */
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
-        /* Try multiple visibility mechanisms:
-         * 1. Atomic load-acquire (LDAR) — works with coherent caches
-         * 2. DC CIVAC, then a plain cacheable load (coherent by
-         *    hardware; the DC CIVAC is belt and braces)
-         * Either may succeed depending on platform cache topology. */
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            return PSCI_SUCCESS;
-        }
-        cache_invalidate(&cpu_boot_flag[cpu]);
-        if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
         /* Brief delay between checks (~100us). #94. */
         timer_busy_wait_us(100);
     }
 
-    /* Boot flag may not be visible due to cache incoherency (Pi 5, Jetson).
-     * If PSCI CPU_ON returned success, the secondary is likely running
-     * but the flag write didn't propagate. Accept it as online.
+    /* PSCI CPU_ON succeeded but the boot flag never became visible.
+     * The caches are coherent (#1193), so this means the secondary did
+     * not reach secondary_init in time; the fallback still counts it as
+     * online, and the WARN text predates #1193. Treat the WARN as a
+     * failure signal.
      *
      * `ret` is unconditionally PSCI_SUCCESS at this point (the
      * non-success branch above returns early at line 437-441). The
@@ -681,7 +595,6 @@ static int smp_run_tests(void)
 
     /* Test 2: Each CPU's online flag set */
     for (uint32_t i = 0; i < cpu_count; i++) {
-        cache_invalidate(&cpu_data[i].online);
         if (cpu_data[i].online) {
             uart_printf("  [PASS] CPU %u online flag set\n", i);
         } else {
@@ -735,6 +648,11 @@ void smp_init(void)
     uint32_t booted = 0;
 
     INFO("SMP: initializing");
+    /* #1193 build switch: print only when switched off, so the default
+     * build is unchanged and a board log shows which variant booted. */
+#if defined(SETWAY_INVAL_OFF)
+    INFO("SMP: SETWAY_INVAL=OFF, no set/way loop on secondaries (#1193)");
+#endif
 
     DEBUG_PRINT("  About to run spinlock tests...");
 
@@ -753,20 +671,25 @@ void smp_init(void)
     cpu_data[0].online = true;
     cpus_online = 1;
 
-    /* Record CPU 0's CurrentEL into the per-CPU NC slot — must come
-     * after init_cpu_map() (which allocates nc_cpu_current_el) but
-     * before secondaries boot. Each secondary records its own slot
+    /* Record CPU 0's CurrentEL into its per-CPU slot. Must come after
+     * init_cpu_map() (which resets every slot) but before secondaries
+     * boot. Each secondary records its own slot
      * from secondary_init. */
     cpu_record_current_el(0);
 
     /*
-     * Clean all cpu_data cachelines to PoC before booting secondaries.
-     * DC CIVAC (used later to read secondary updates)
-     * first writes back any dirty data from this CPU's L1. If cpu_data
-     * is still dirty here (from init_cpu_data writing online=false),
-     * CIVAC would overwrite the secondary's online=true at PoC.
+     * smp_boot.S loads secondary_mmu_{ttbr,mair,tcr} with the MMU and
+     * caches off, so those loads bypass every cache and read DRAM.
+     * vmm_init wrote the words with caches on, so clean them to the PoC
+     * before CPU_ON (C0 facts section (b) step 1, #1193 audit D1). The
+     * secondary's own DC IVAC only worked because Cortex-A76 / A78AE
+     * execute DC IVAC as DC CIVAC, which writes back this CPU's dirty
+     * line; architecturally an invalidate may discard it, and the
+     * secondary would then read TTBR 0 and skip MMU enable.
      */
-    cache_clean_range(cpu_data, sizeof(cpu_data));
+    cache_clean(&secondary_mmu_ttbr);
+    cache_clean(&secondary_mmu_mair);
+    cache_clean(&secondary_mmu_tcr);
 
     /* Boot secondary CPUs via PSCI CPU_ON */
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {

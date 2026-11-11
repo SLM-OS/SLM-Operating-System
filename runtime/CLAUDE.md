@@ -263,6 +263,11 @@ every lock it takes:
   (`mm::eviction::try_with_active_policy`).
 - Never allocate from IRQs-off context. The telemetry path uses
   `count_evictable_blocks`, not `snapshot_evictable_blocks().len()`.
+- The kernel UART lock is a real IRQ-saving cross-CPU spinlock on
+  every platform. A Rust guard that calls `uart_puts`/`uart_printf`
+  while held therefore nests `<rust lock>` → `uart_lock`; that is safe
+  only because the UART code never calls back into Rust. Keep such
+  guards IRQ-saving, as `msg_router` does.
 
 ### Module-level RAII guards (`EngineGuard`, `OpsGuard`)
 

@@ -21,9 +21,7 @@
 #include "../include/spinlock.h"
 #include "../include/pmm.h"
 #include "../include/platform.h"
-#include "../include/cache.h"
 #include "../include/slm_ffi.h"
-#include "../include/ncmem.h"
 #include "../include/timer.h"
 #include "../include/preempt_point.h"
 #include "../include/cpu_supervisor.h"
@@ -72,72 +70,6 @@ static struct {
     .cpu_task_count = {0}
 };
 
-/*
- * NC test sync slots: cross-CPU signaling via non-cacheable memory.
- *
- * On Pi 5, cache_invalidate (DC CIVAC) doesn't propagate through
- * per-core L2. Cacheable BSS variables written by one CPU are invisible to
- * others. NC memory bypasses L1/L2 entirely — writes are instantly visible.
- *
- * NC_SYNC region runs from NC_MEM_SIZE - 768 up to INTEG_NC_DONE at
- * NC_MEM_SIZE - 384, so 384 bytes / 4 = 96 uint32_t slots are available
- * (slot 0..95). Slots 0..30 are currently in use (high-water mark below;
- * update when adding new slot families). Each test zeroes its slots
- * before use; tasks write, CPU 0 polls.
- */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-#define NC_SYNC_BASE    (NC_MEM_BASE + NC_MEM_SIZE - 768)
-#define NC_SYNC(n)      (*(volatile uint32_t *)(NC_SYNC_BASE + (n) * 4))
-
-/* Slot assignments */
-#define NC_TASKS_COMPLETED    0
-#define NC_CONTENTION_COUNTER 1
-#define NC_LIFECYCLE_DONE     2
-#define NC_MIG_READY          3
-#define NC_MIG_DONE           4
-#define NC_MIG_CPU_BEFORE     5
-#define NC_MIG_CPU_AFTER      6
-#define NC_MSG_RECEIVED       7
-#define NC_MSG_PUBLISHED      8
-#define NC_MSG_SUB_DONE       9
-#define NC_MSG_PUB_DONE      10
-#define NC_NOTIFY_SENTINEL   11
-#define NC_STEAL_DONE        12
-#define NC_STEAL_CPU_BASE    13  /* 13-17: steal_cpu_recorded[0-4] */
-/* msg_router #67a: multi-subscriber + priority ordering stress tests. */
-#define NC_MSGMS_A_RECEIVED  18
-#define NC_MSGMS_B_RECEIVED  19
-#define NC_MSGMS_PUB_DONE    20
-#define NC_MSGMS_SUB_A_DONE  21
-#define NC_MSGMS_SUB_B_DONE  22
-#define NC_MSGMS_DELIVERED   23  /* sum of every publish's delivered count */
-#define NC_MSGPR_HI_RECEIVED 24
-#define NC_MSGPR_LO_RECEIVED 25
-#define NC_MSGPR_PUB_HI_DONE 26
-#define NC_MSGPR_PUB_LO_DONE 27
-#define NC_MSGPR_SUB_DONE    28
-#define NC_MSGPR_HI_DELIVERED 29
-#define NC_MSGPR_LO_DELIVERED 30
-/* msg_router #67c: cross-CPU LAST_RECEIVED ack-targeting test. */
-#define NC_MSGAR_TRIGGER     31  /* main → helper: publish /b now */
-#define NC_MSGAR_HELPER_DONE 32  /* helper → main: publish complete */
-/* msg_router #869: same-mailbox concurrent-publisher zero-loss test. */
-#define NC_MSGSM_A_DELIVERED 33  /* pub_a's total delivered count */
-#define NC_MSGSM_B_DELIVERED 34  /* pub_b's total delivered count */
-#define NC_MSGSM_SUB_A_SEEN  35  /* subscriber's count of A-payloads */
-#define NC_MSGSM_SUB_B_SEEN  36  /* subscriber's count of B-payloads */
-#define NC_MSGSM_PUB_A_DONE  37
-#define NC_MSGSM_PUB_B_DONE  38
-#define NC_MSGSM_SUB_DONE    39
-
-static void nc_sync_clear(uint32_t start, uint32_t count)
-{
-    for (uint32_t i = start; i < start + count; i++) {
-        NC_SYNC(i) = 0;
-    }
-}
-#endif
-
 static void reset_test_state(void)
 {
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
@@ -167,7 +99,7 @@ static void reset_test_state(void)
  * ============================================================================ */
 
 #if defined(PLATFORM_RASPI5)
-extern volatile uint32_t *sched_diag_idle_loops;
+/* sched_diag_idle_loops: declared in sched_diag.h, matched to sched.c. */
 
 /* A "dormant" CPU is one whose idle_loops counter hasn't moved
  * across THIS many consecutive tearDowns. Single tests can finish
@@ -267,9 +199,7 @@ void tearDown(void)
  * Task Functions for Tests
  * ============================================================================ */
 
-/* Migration test state.
- * On NC platforms, use NC sync slots for cross-CPU visibility.
- * On coherent platforms, use cacheable BSS with cache_clean/invalidate. */
+/* Migration test state: cacheable BSS, ordered with smp_mb() (#1193). */
 static volatile bool migration_ready = false;
 static volatile bool migration_done = false;
 static volatile uint32_t migration_cpu_before = 0;
@@ -280,34 +210,21 @@ static void migration_test_task(void *arg)
     (void)arg;
 
     uint32_t my_cpu = cpu_id();
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MIG_CPU_BEFORE) = my_cpu;
-    NC_SYNC(NC_MIG_READY) = 1;
-#else
     migration_cpu_before = my_cpu;
-    cache_clean(&migration_cpu_before);
+    smp_mb();
     migration_ready = true;
-    cache_clean(&migration_ready);
-#endif
+    smp_mb();
 
     /* Wait for migration to complete */
     while (1) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MIG_DONE)) break;
-#else
-        cache_invalidate(&migration_done);
+        smp_mb();
         if (migration_done) break;
-#endif
         delay(10000);
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MIG_CPU_AFTER) = cpu_id();
-#else
     migration_cpu_after = cpu_id();
-    cache_clean(&migration_cpu_after);
-#endif
+    smp_mb();
 
     /* Do some work to prove we're running */
     for (int i = 0; i < 3; i++) {
@@ -316,20 +233,11 @@ static void migration_test_task(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
-#else
-    cache_clean(&test_state.tasks_completed);
-#endif
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
-/* Simple named tasks for basic multi-core test.
- * On NC platforms, write a done flag to NC memory for reliable cross-CPU
- * completion detection (task->state is also NC but this matches bench smp). */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-#define INTEG_NC_DONE(cpu) (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 384 + (cpu) * 4))
-#endif
+/* Simple named tasks for basic multi-core test. */
 
 static void task_a_func(void *arg)
 {
@@ -337,9 +245,6 @@ static void task_a_func(void *arg)
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    INTEG_NC_DONE(1) = 1;
-#endif
 }
 
 static void task_b_func(void *arg)
@@ -348,9 +253,6 @@ static void task_b_func(void *arg)
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    INTEG_NC_DONE(2) = 1;
-#endif
 }
 
 static void task_c_func(void *arg)
@@ -359,9 +261,6 @@ static void task_c_func(void *arg)
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    INTEG_NC_DONE(3) = 1;
-#endif
 }
 
 /* Stress task function */
@@ -375,11 +274,7 @@ static void stress_task_func(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
-#else
-    cache_clean(&test_state.tasks_completed);
-#endif
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -394,22 +289,14 @@ static void contention_task(void *arg)
     for (int i = 0; i < increments; i++) {
         irq_flags_t flags = spin_lock_irqsave(&contention_lock);
         contention_counter++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        NC_SYNC(NC_CONTENTION_COUNTER) = contention_counter;
-#else
-        cache_clean(&contention_counter);
-#endif
+        smp_mb();
         spin_unlock_irqrestore(&contention_lock, flags);
         delay(1000);
     }
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
-#else
-    cache_clean(&test_state.tasks_completed);
-#endif
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -423,11 +310,7 @@ static void lifecycle_task_func(void *arg)
     /* Atomic increment using spinlock for reliability */
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     lifecycle_completed++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_LIFECYCLE_DONE) = lifecycle_completed;
-#else
-    cache_clean(&lifecycle_completed);
-#endif
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -441,13 +324,6 @@ static void lifecycle_task_func(void *arg)
  */
 static void test_multicore_basic(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Clear NC done flags */
-    INTEG_NC_DONE(1) = 0;
-    INTEG_NC_DONE(2) = 0;
-    INTEG_NC_DONE(3) = 0;
-#endif
-
     struct task *task_a = task_create("task_a", task_a_func, (void *)3);
     struct task *task_b = task_create("task_b", task_b_func, (void *)3);
     struct task *task_c = task_create("task_c", task_c_func, (void *)3);
@@ -460,34 +336,22 @@ static void test_multicore_basic(void)
     scheduler_add_task_to_cpu(task_b, 2);
     scheduler_add_task_to_cpu(task_c, 3);
 
-    /* Wait for completion with timeout.
-     * On NC platforms, poll NC done flags (same pattern as bench smp).
-     * On non-NC, poll task state with cache invalidate. */
+    /* Wait for completion with timeout: poll task state. */
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (INTEG_NC_DONE(1) && INTEG_NC_DONE(2) && INTEG_NC_DONE(3)) break;
-#else
-        cache_invalidate(&task_a->state);
-        cache_invalidate(&task_b->state);
-        cache_invalidate(&task_c->state);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (task_a->state == TASK_TERMINATED &&
             task_b->state == TASK_TERMINATED &&
             task_c->state == TASK_TERMINATED) break;
-#endif
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(1), "task_a did not complete (NC flag)");
-    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(2), "task_b did not complete (NC flag)");
-    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(3), "task_c did not complete (NC flag)");
-#else
     TEST_ASSERT_MESSAGE(task_a->state == TASK_TERMINATED, "task_a did not complete");
     TEST_ASSERT_MESSAGE(task_b->state == TASK_TERMINATED, "task_b did not complete");
     TEST_ASSERT_MESSAGE(task_c->state == TASK_TERMINATED, "task_c did not complete");
-#endif
 }
 
 /*
@@ -502,12 +366,6 @@ static void test_task_migration(void)
     migration_cpu_before = 0;
     migration_cpu_after = 0;
     reset_test_state();
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MIG_READY, 4);  /* Clear MIG_READY through MIG_CPU_AFTER */
-    nc_sync_clear(NC_TASKS_COMPLETED, 1);
-    INTEG_NC_DONE(1) = 0;
-    INTEG_NC_DONE(3) = 0;
-#endif
 
     struct task *mig_task = task_create("migrate", migration_test_task, NULL);
     TEST_ASSERT_NOT_NULL_MESSAGE(mig_task, "Failed to create migration task");
@@ -547,29 +405,17 @@ static void test_task_migration(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MIG_READY)) break;
-#else
-        cache_invalidate(&migration_ready);
+        smp_mb();
         if (migration_ready) break;
-#endif
         yield();
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MIG_READY), "Timeout waiting for migration_ready");
-#else
     TEST_ASSERT_MESSAGE(migration_ready, "Timeout waiting for migration_ready");
-#endif
 
     /* Let task finish */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MIG_DONE) = 1;
-#else
     migration_done = true;
-    cache_clean(&migration_done);
-#endif
+    smp_mb();
 
-    /* Wait for completion — use NC task state (task_table is NC on Pi 5) */
+    /* Wait for completion */
     start = timer_get_count();
     while ((timer_get_count() - start) < limit) {
         if (mig_task->state == TASK_TERMINATED &&
@@ -579,13 +425,8 @@ static void test_task_migration(void)
 
     TEST_ASSERT_MESSAGE(mig_task->state == TASK_TERMINATED,
         "Migration task did not complete");
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MIG_CPU_BEFORE) == 3,
-        "Task should run on CPU 3 after migration");
-#else
-    cache_invalidate(&migration_cpu_before);
+    smp_mb();
     TEST_ASSERT_MESSAGE(migration_cpu_before == 3, "Task should run on CPU 3 after migration");
-#endif
 }
 
 /*
@@ -596,9 +437,6 @@ static void test_stress_multicpu(void)
 {
     /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_TASKS_COMPLETED) = 0;
-#endif
 
     struct task *tasks[6];
     static const char *names[6] = {"s0", "s1", "s2", "s3", "s4", "s5"};
@@ -620,26 +458,17 @@ static void test_stress_multicpu(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;  /* 10 second timeout */
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_TASKS_COMPLETED) >= 6) break;
-#else
         bool all_done = true;
         for (int j = 0; j < 6; j++) {
             if (tasks[j]->state != TASK_TERMINATED) { all_done = false; break; }
         }
         if (all_done) break;
-#endif
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_TASKS_COMPLETED) >= 6,
-        "Timeout waiting for stress tasks");
-#else
-    cache_invalidate(&test_state.tasks_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(test_state.tasks_completed == 6,
         "Timeout waiting for stress tasks");
-#endif
 }
 
 /*
@@ -651,10 +480,6 @@ static void test_lock_contention(void)
     /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
     contention_counter = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_TASKS_COMPLETED) = 0;
-    NC_SYNC(NC_CONTENTION_COUNTER) = 0;
-#endif
 
     #define CONTENTION_TASKS 3
     #define INCREMENTS_PER_TASK 50
@@ -674,30 +499,18 @@ static void test_lock_contention(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_TASKS_COMPLETED) >= CONTENTION_TASKS) break;
-#else
-        cache_invalidate(&test_state.tasks_completed);
+        smp_mb();
         if (test_state.tasks_completed >= CONTENTION_TASKS) break;
-#endif
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_TASKS_COMPLETED) >= CONTENTION_TASKS,
-        "Timeout waiting for contention tasks");
-    uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_CONTENTION_COUNTER) == expected,
-        "Race condition detected in lock contention");
-#else
-    cache_invalidate(&test_state.tasks_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(test_state.tasks_completed >= CONTENTION_TASKS,
         "Timeout waiting for contention tasks");
-    cache_invalidate(&contention_counter);
+    smp_mb();
     uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
     TEST_ASSERT_MESSAGE(contention_counter == expected,
         "Race condition detected in lock contention");
-#endif
 }
 
 /* Lifecycle cleanup: the free-page count is back within the slack. */
@@ -723,9 +536,6 @@ static void test_task_lifecycle(void)
 
     uint64_t initial_free = pmm_get_free_pages();
     lifecycle_completed = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_LIFECYCLE_DONE) = 0;
-#endif
 
     for (int cycle = 0; cycle < LIFECYCLE_CYCLES; cycle++) {
         char name[8];
@@ -740,23 +550,14 @@ static void test_task_lifecycle(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_LIFECYCLE_DONE) >= LIFECYCLE_CYCLES) break;
-#else
-        cache_invalidate(&lifecycle_completed);
+        smp_mb();
         if (lifecycle_completed >= LIFECYCLE_CYCLES) break;
-#endif
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_LIFECYCLE_DONE) >= LIFECYCLE_CYCLES,
-        "Timeout: not all lifecycle tasks completed");
-#else
-    cache_invalidate(&lifecycle_completed);
+    smp_mb();
     TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
         "Timeout: not all lifecycle tasks completed");
-#endif
 
     /*
      * Give the scheduler time to clean up zombies. Under
@@ -798,106 +599,12 @@ static void test_task_lifecycle(void)
     TEST_ASSERT_MESSAGE(lc_us >= 0, "Memory leak detected");
 }
 
-/* ============================================================================
- * NC Memory Cross-CPU Visibility Test
- *
- * Validates that non-cacheable memory bypasses L1/L2 and is instantly
- * visible across CPUs — the foundation for cross-CPU task dispatch on Pi 5.
- * ============================================================================ */
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-
-/*
- * Test: NC memory region is correctly mapped and accessible.
- * Validates the VMM/PMM/ncmem infrastructure before Phase 2 (NC run queues).
- * Cross-CPU visibility is tested after run queues move to NC memory.
- */
-static void test_nc_memory_accessible(void)
-{
-    /* Verify ncmem_alloc works */
-    volatile uint64_t *nc_val = (volatile uint64_t *)ncmem_alloc(sizeof(uint64_t), 64);
-    TEST_ASSERT_NOT_NULL(nc_val);
-
-    /* Verify address is within NC region */
-    TEST_ASSERT_MESSAGE((uintptr_t)nc_val >= NC_MEM_BASE,
-                        "NC alloc below NC_MEM_BASE");
-    TEST_ASSERT_MESSAGE((uintptr_t)nc_val < NC_MEM_BASE + NC_MEM_SIZE,
-                        "NC alloc above NC region end");
-
-    /* Write and read back — confirms NC mapping is valid */
-    *nc_val = 0xDEADBEEFCAFEBABEULL;
-    __asm__ volatile("dmb sy" ::: "memory");
-    TEST_ASSERT_EQUAL_HEX64(0xDEADBEEFCAFEBABEULL, *nc_val);
-
-    /* Write a different pattern to verify no stale data */
-    *nc_val = 0x1234567890ABCDEFULL;
-    __asm__ volatile("dmb sy" ::: "memory");
-    TEST_ASSERT_EQUAL_HEX64(0x1234567890ABCDEFULL, *nc_val);
-
-    /* Allocate a larger block and verify stride access */
-    volatile uint32_t *nc_arr = (volatile uint32_t *)ncmem_alloc(256, 64);
-    TEST_ASSERT_NOT_NULL(nc_arr);
-    for (int i = 0; i < 64; i++) {
-        nc_arr[i] = (uint32_t)((uint32_t)i * 0x11111111U);
-    }
-    __asm__ volatile("dmb sy" ::: "memory");
-    for (int i = 0; i < 64; i++) {
-        TEST_ASSERT_EQUAL_HEX32((uint32_t)((uint32_t)i * 0x11111111U), nc_arr[i]);
-    }
-}
-
-/*
- * Test: NC allocator alignment and edge cases.
- */
-static void test_nc_alloc_alignment(void)
-{
-    /* Allocate with different alignments and verify */
-    void *a64 = ncmem_alloc(8, 64);
-    TEST_ASSERT_NOT_NULL(a64);
-    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)a64 % 64);
-
-    void *a128 = ncmem_alloc(8, 128);
-    TEST_ASSERT_NOT_NULL(a128);
-    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)a128 % 128);
-
-    /* Different allocations return different addresses */
-    TEST_ASSERT_MESSAGE(a64 != a128, "Two NC allocs returned same address");
-
-    /* Zero size returns NULL */
-    TEST_ASSERT_NULL(ncmem_alloc(0, 64));
-
-    /* ncmem_used() returns non-zero after allocations */
-    TEST_ASSERT_MESSAGE(ncmem_used() > 0, "ncmem_used should be non-zero");
-}
-
-/*
- * Test: NC region is used for scheduler data (run queues start at NC_MEM_BASE).
- * Verifies the first ncmem allocation (run queues in scheduler_init) landed
- * at the expected NC base address.
- */
-static void test_nc_region_used_by_scheduler(void)
-{
-    /* ncmem_used() should be non-zero (scheduler allocated run queues) */
-    TEST_ASSERT_MESSAGE(ncmem_used() > 0,
-                        "NC region unused — scheduler should have allocated run queues");
-
-    /* The NC region should be writable at the base (run queue data lives there) */
-    volatile uint32_t *nc_base = (volatile uint32_t *)NC_MEM_BASE;
-    uint32_t saved = *nc_base;
-    *nc_base = 0xA5A5A5A5;
-    __asm__ volatile("dmb sy" ::: "memory");
-    TEST_ASSERT_EQUAL_HEX32(0xA5A5A5A5, *nc_base);
-    *nc_base = saved;  /* Restore (this is the spinlock field) */
-}
-
-#endif /* PLATFORM_HAS_NC_MEMORY */
-
 /*
  * Regression test: verify boot order — PMM allocations before scheduler.
  *
- * On Pi 5, concurrent PMM access from multiple CPUs causes
- * deadlock because the PMM spinlock (ldaxr/stxr on cacheable memory)
- * doesn't provide cross-CPU mutual exclusion. The fix: CPU 0 completes
+ * The ordering was introduced when the PMM spinlock was believed not
+ * to give cross-CPU mutual exclusion on Pi 5 (overturned by #1193); it
+ * is kept. CPU 0 completes
  * all initial PMM allocations (ramdisk, Rust heap, model memory) BEFORE
  * scheduler_init() signals secondary CPUs to allocate idle task stacks.
  *
@@ -1006,11 +713,7 @@ static void steal_test_task(void *arg)
     uint32_t idx = (uint32_t)(uintptr_t)arg;
     if (idx < STEAL_TASK_COUNT) {
         steal_cpu_recorded[idx] = cpu_id() + 1;  /* +1 so 0 means "not run" */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        NC_SYNC(NC_STEAL_CPU_BASE + idx) = cpu_id() + 1;
-#else
-        cache_clean((void *)&steal_cpu_recorded[idx]);
-#endif
+        smp_mb();
     }
     /*
      * CPU-bound arithmetic — mirrors bench stealing's workload.
@@ -1021,8 +724,8 @@ static void steal_test_task(void *arg)
      * effectively "sticky" to whichever CPU started it and stealers
      * pick up later tasks from the deque instead. That's fine for
      * stealing in theory, but when the whole task only does ~0.3 ms
-     * of work it finishes before stealers on Pi 5 (whose yield path
-     * is slowed by the DC CIVAC spinlock work) can claim their share.
+     * of work it finishes before stealers on Pi 5 can claim their
+     * share.
      *
      * A pure CPU-bound loop holds the task on its owner for long
      * enough that stealers reliably claim the other deque entries.
@@ -1035,11 +738,7 @@ static void steal_test_task(void *arg)
 
     irq_flags_t f = spin_lock_irqsave(&test_state.lock);
     steal_done_count++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_STEAL_DONE) = steal_done_count;
-#else
-    cache_clean((void *)&steal_done_count);
-#endif
+    smp_mb();
     spin_unlock_irqrestore(&test_state.lock, f);
 }
 
@@ -1079,20 +778,7 @@ static void test_work_stealing_distributes_load(void)
      * the deque; any delta indicates `scheduler_add_task_to_cpu` thinks
      * it couldn't push and either a workload regression (e.g. capacity
      * shrunk) or a counter-bookkeeping bug. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    extern volatile uint32_t *sched_diag_steal_push_full;
-#else
-    extern volatile uint32_t sched_diag_steal_push_full[];
-#endif
-#if defined(PLATFORM_RASPI5)
-    /* Per-attempt ws-diag dump only references these on Pi 5. */
-    extern volatile uint32_t *sched_diag_steal_attempts;
-    extern volatile uint32_t *sched_diag_steal_successes;
-    extern volatile uint32_t *sched_diag_steal_stale;
-    extern volatile uint32_t *sched_diag_schedule;
-    extern volatile uint32_t *sched_diag_picked;
-    extern volatile uint32_t *sched_diag_idle_loops;
-#endif
+    /* sched_diag_* counters: declared in sched_diag.h (#1193). */
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++) {
         pre_push_full[c] = sched_diag_steal_push_full[c];
@@ -1101,14 +787,7 @@ static void test_work_stealing_distributes_load(void)
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
         for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
         steal_done_count = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        NC_SYNC(NC_STEAL_DONE) = 0;
-        for (int i = 0; i < STEAL_TASK_COUNT; i++) {
-            NC_SYNC(NC_STEAL_CPU_BASE + i) = 0;
-        }
-#else
-        cache_clean((void *)&steal_done_count);
-#endif
+        smp_mb();
 
         /* Flakiness diagnostic: per-attempt snapshot of steal
          * attempts/successes/stale and schedule()/picked so we
@@ -1150,26 +829,17 @@ static void test_work_stealing_distributes_load(void)
         uint64_t start = timer_get_count();
         uint64_t limit = timer_get_frequency() * 4;
         while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            if (NC_SYNC(NC_STEAL_DONE) >= STEAL_TASK_COUNT) break;
-#else
-            cache_invalidate((void *)&steal_done_count);
+            smp_mb();
             if (steal_done_count >= STEAL_TASK_COUNT) break;
-#endif
             yield();
         }
 #if defined(PLATFORM_RASPI5)
         uint64_t t_done = timer_get_count();
 #endif
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        TEST_ASSERT_MESSAGE(NC_SYNC(NC_STEAL_DONE) == STEAL_TASK_COUNT,
-            "work-steal test: not all tasks completed");
-#else
-        cache_invalidate((void *)&steal_done_count);
+        smp_mb();
         TEST_ASSERT_MESSAGE(steal_done_count == STEAL_TASK_COUNT,
             "work-steal test: not all tasks completed");
-#endif
 
         /* Tally per-attempt stats: distinct CPUs (diagnostic only;
          * kept in the Pi 5 ws-diag output) and whether any task
@@ -1181,12 +851,8 @@ static void test_work_stealing_distributes_load(void)
 #endif
         int ran_off_owner = 0;
         for (int i = 0; i < STEAL_TASK_COUNT; i++) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            uint32_t r = NC_SYNC(NC_STEAL_CPU_BASE + i);
-#else
-            cache_invalidate((void *)&steal_cpu_recorded[i]);
+            smp_mb();
             uint32_t r = steal_cpu_recorded[i];
-#endif
             TEST_ASSERT_MESSAGE(r != 0, "task did not record a CPU");
 #if defined(PLATFORM_RASPI5)
             recorded[i] = r;
@@ -1303,11 +969,7 @@ static void msg_x_subscriber(void *arg)
         const uint8_t *data = msg_router_receive(MSG_X_COMPONENT, topic_buf);
         if (data) {
             msg_x_received++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            NC_SYNC(NC_MSG_RECEIVED) = msg_x_received;
-#else
-            cache_clean((void *)&msg_x_received);
-#endif
+            smp_mb();
             msg_router_ack(MSG_X_COMPONENT);
         } else {
             yield();
@@ -1315,11 +977,7 @@ static void msg_x_subscriber(void *arg)
     }
 
     msg_x_subscriber_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSG_SUB_DONE) = 1;
-#else
-    cache_clean((void *)&msg_x_subscriber_done);
-#endif
+    smp_mb();
 }
 
 static void msg_x_publisher(void *arg)
@@ -1333,20 +991,12 @@ static void msg_x_publisher(void *arg)
         int delivered = msg_router_publish(MSG_X_TOPIC, payload);
         if (delivered == 1) {
             msg_x_published++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-            NC_SYNC(NC_MSG_PUBLISHED) = msg_x_published;
-#else
-            cache_clean((void *)&msg_x_published);
-#endif
+            smp_mb();
         }
     }
 
     msg_x_publisher_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSG_PUB_DONE) = 1;
-#else
-    cache_clean((void *)&msg_x_publisher_done);
-#endif
+    smp_mb();
 }
 
 static void test_msg_router_cross_cpu(void)
@@ -1362,14 +1012,10 @@ static void test_msg_router_cross_cpu(void)
     msg_x_published = 0;
     msg_x_subscriber_done = 0;
     msg_x_publisher_done = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MSG_RECEIVED, 4);  /* Clear MSG slots */
-#else
-    cache_clean((void *)&msg_x_received);
-    cache_clean((void *)&msg_x_published);
-    cache_clean((void *)&msg_x_subscriber_done);
-    cache_clean((void *)&msg_x_publisher_done);
-#endif
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     int ret = msg_router_subscribe(MSG_X_TOPIC, MSG_X_COMPONENT);
     TEST_ASSERT_MESSAGE(ret == 0, "subscribe failed");
@@ -1385,31 +1031,20 @@ static void test_msg_router_cross_cpu(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 8;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSG_SUB_DONE) && NC_SYNC(NC_MSG_PUB_DONE)) break;
-#else
-        cache_invalidate((void *)&msg_x_subscriber_done);
-        cache_invalidate((void *)&msg_x_publisher_done);
+        smp_mb();
+        smp_mb();
         if (msg_x_subscriber_done && msg_x_publisher_done) break;
-#endif
         yield();
     }
 
     msg_router_unsubscribe_all(MSG_X_COMPONENT);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSG_PUBLISHED) == MSG_X_MESSAGES,
-        "publisher did not publish all messages");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSG_RECEIVED) == MSG_X_MESSAGES,
-        "subscriber did not receive all messages");
-#else
-    cache_invalidate((void *)&msg_x_received);
-    cache_invalidate((void *)&msg_x_published);
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(msg_x_published == MSG_X_MESSAGES,
         "publisher did not publish all messages");
     TEST_ASSERT_MESSAGE(msg_x_received == MSG_X_MESSAGES,
         "subscriber did not receive all messages");
-#endif
 }
 
 /* ============================================================================
@@ -1428,8 +1063,8 @@ static void test_msg_router_cross_cpu(void)
  * (msg_router_ack, which re-takes MSG_ROUTER_LOCK) from deadlocking the
  * publisher.
  *
- * Pattern follows test_msg_router_cross_cpu: NC-sync slots for cross-CPU
- * counters, CNTPCT-based wall-clock timeout, TEST_IGNORE on cpu_count < 4
+ * Pattern follows test_msg_router_cross_cpu: shared sync slots for
+ * cross-CPU counters, CNTPCT-based wall-clock timeout, TEST_IGNORE on cpu_count < 4
  * (shell + pub + 2 subs).
  * ============================================================================ */
 
@@ -1461,18 +1096,10 @@ static void ms_subscriber(void *arg)
             count++;
             if (which == 0) {
                 ms_a_received = count;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGMS_A_RECEIVED) = count;
-#else
-                cache_clean((void *)&ms_a_received);
-#endif
+                smp_mb();
             } else {
                 ms_b_received = count;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGMS_B_RECEIVED) = count;
-#else
-                cache_clean((void *)&ms_b_received);
-#endif
+                smp_mb();
             }
             msg_router_ack(component);
         } else {
@@ -1482,18 +1109,10 @@ static void ms_subscriber(void *arg)
 
     if (which == 0) {
         ms_sub_a_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        NC_SYNC(NC_MSGMS_SUB_A_DONE) = 1;
-#else
-        cache_clean((void *)&ms_sub_a_done);
-#endif
+        smp_mb();
     } else {
         ms_sub_b_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        NC_SYNC(NC_MSGMS_SUB_B_DONE) = 1;
-#else
-        cache_clean((void *)&ms_sub_b_done);
-#endif
+        smp_mb();
     }
 }
 
@@ -1513,13 +1132,8 @@ static void ms_publisher(void *arg)
     }
     ms_delivered_total = total;
     ms_pub_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGMS_DELIVERED) = total;
-    NC_SYNC(NC_MSGMS_PUB_DONE) = 1;
-#else
-    cache_clean((void *)&ms_delivered_total);
-    cache_clean((void *)&ms_pub_done);
-#endif
+    smp_mb();
+    smp_mb();
 }
 
 static void test_msg_router_multi_subscriber(void)
@@ -1537,16 +1151,12 @@ static void test_msg_router_multi_subscriber(void)
     ms_sub_a_done = 0;
     ms_sub_b_done = 0;
     ms_delivered_total = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MSGMS_A_RECEIVED, 6);
-#else
-    cache_clean((void *)&ms_a_received);
-    cache_clean((void *)&ms_b_received);
-    cache_clean((void *)&ms_pub_done);
-    cache_clean((void *)&ms_sub_a_done);
-    cache_clean((void *)&ms_sub_b_done);
-    cache_clean((void *)&ms_delivered_total);
-#endif
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_A_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(MS_TOPIC, MS_B_COMPONENT));
@@ -1571,42 +1181,22 @@ static void test_msg_router_multi_subscriber(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSGMS_PUB_DONE) &&
-            NC_SYNC(NC_MSGMS_SUB_A_DONE) &&
-            NC_SYNC(NC_MSGMS_SUB_B_DONE)) break;
-#else
-        cache_invalidate((void *)&ms_pub_done);
-        cache_invalidate((void *)&ms_sub_a_done);
-        cache_invalidate((void *)&ms_sub_b_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (ms_pub_done && ms_sub_a_done && ms_sub_b_done) break;
-#endif
         yield();
     }
 
     msg_router_unsubscribe_all(MS_A_COMPONENT);
     msg_router_unsubscribe_all(MS_B_COMPONENT);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_PUB_DONE),
-        "publisher did not finish all publishes");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_SUB_A_DONE),
-        "subscriber A did not finish");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_SUB_B_DONE),
-        "subscriber B did not finish");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_A_RECEIVED) == MS_MESSAGES,
-        "subscriber A did not receive all messages");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_B_RECEIVED) == MS_MESSAGES,
-        "subscriber B did not receive all messages");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGMS_DELIVERED) == MS_MESSAGES * 2u,
-        "publisher: not every message reached both subscribers (delivered != 2*N)");
-#else
-    cache_invalidate((void *)&ms_a_received);
-    cache_invalidate((void *)&ms_b_received);
-    cache_invalidate((void *)&ms_pub_done);
-    cache_invalidate((void *)&ms_sub_a_done);
-    cache_invalidate((void *)&ms_sub_b_done);
-    cache_invalidate((void *)&ms_delivered_total);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(ms_pub_done, "publisher did not finish all publishes");
     TEST_ASSERT_MESSAGE(ms_sub_a_done, "subscriber A did not finish");
     TEST_ASSERT_MESSAGE(ms_sub_b_done, "subscriber B did not finish");
@@ -1616,7 +1206,6 @@ static void test_msg_router_multi_subscriber(void)
         "subscriber B did not receive all messages");
     TEST_ASSERT_MESSAGE(ms_delivered_total == MS_MESSAGES * 2u,
         "publisher: not every message reached both subscribers (delivered != 2*N)");
-#endif
 }
 
 /* ============================================================================
@@ -1676,13 +1265,8 @@ static void pr_publisher_hi(void *arg)
     }
     pr_hi_delivered = total;
     pr_pub_hi_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGPR_HI_DELIVERED) = total;
-    NC_SYNC(NC_MSGPR_PUB_HI_DONE) = 1;
-#else
-    cache_clean((void *)&pr_hi_delivered);
-    cache_clean((void *)&pr_pub_hi_done);
-#endif
+    smp_mb();
+    smp_mb();
 }
 
 static void pr_publisher_lo(void *arg)
@@ -1697,13 +1281,8 @@ static void pr_publisher_lo(void *arg)
     }
     pr_lo_delivered = total;
     pr_pub_lo_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGPR_LO_DELIVERED) = total;
-    NC_SYNC(NC_MSGPR_PUB_LO_DONE) = 1;
-#else
-    cache_clean((void *)&pr_lo_delivered);
-    cache_clean((void *)&pr_pub_lo_done);
-#endif
+    smp_mb();
+    smp_mb();
 }
 
 static void pr_subscriber(void *arg)
@@ -1723,21 +1302,13 @@ static void pr_subscriber(void *arg)
              * the topic_buf — both are valid signals; payload is cheaper. */
             if (data[0] == 'H') {
                 hi++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGPR_HI_RECEIVED) = hi;
-#endif
             } else if (data[0] == 'L') {
                 lo++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGPR_LO_RECEIVED) = lo;
-#endif
             }
             pr_hi_received = hi;
             pr_lo_received = lo;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-            cache_clean((void *)&pr_hi_received);
-            cache_clean((void *)&pr_lo_received);
-#endif
+            smp_mb();
+            smp_mb();
             msg_router_ack(PR_C_COMPONENT);
         } else {
             yield();
@@ -1745,11 +1316,7 @@ static void pr_subscriber(void *arg)
     }
 
     pr_sub_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGPR_SUB_DONE) = 1;
-#else
-    cache_clean((void *)&pr_sub_done);
-#endif
+    smp_mb();
 }
 
 static void test_msg_router_priority_concurrent(void)
@@ -1768,17 +1335,13 @@ static void test_msg_router_priority_concurrent(void)
     pr_sub_done = 0;
     pr_hi_delivered = 0;
     pr_lo_delivered = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MSGPR_HI_RECEIVED, 7);
-#else
-    cache_clean((void *)&pr_hi_received);
-    cache_clean((void *)&pr_lo_received);
-    cache_clean((void *)&pr_pub_hi_done);
-    cache_clean((void *)&pr_pub_lo_done);
-    cache_clean((void *)&pr_sub_done);
-    cache_clean((void *)&pr_hi_delivered);
-    cache_clean((void *)&pr_lo_delivered);
-#endif
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_HI, PR_C_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(PR_TOPIC_LO, PR_C_COMPONENT));
@@ -1797,41 +1360,22 @@ static void test_msg_router_priority_concurrent(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSGPR_PUB_HI_DONE) &&
-            NC_SYNC(NC_MSGPR_PUB_LO_DONE) &&
-            NC_SYNC(NC_MSGPR_SUB_DONE)) break;
-#else
-        cache_invalidate((void *)&pr_pub_hi_done);
-        cache_invalidate((void *)&pr_pub_lo_done);
-        cache_invalidate((void *)&pr_sub_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (pr_pub_hi_done && pr_pub_lo_done && pr_sub_done) break;
-#endif
         yield();
     }
 
     msg_router_unsubscribe_all(PR_C_COMPONENT);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_PUB_HI_DONE), "hi publisher hung");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_PUB_LO_DONE), "lo publisher hung");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_SUB_DONE), "subscriber hung");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_HI_DELIVERED) == PR_MESSAGES,
-        "hi publisher: not every publish was acked");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_LO_DELIVERED) == PR_MESSAGES,
-        "lo publisher: not every publish was acked (priority starvation?)");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_HI_RECEIVED) == PR_MESSAGES,
-        "subscriber: missed at least one /pr/hi message");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGPR_LO_RECEIVED) == PR_MESSAGES,
-        "subscriber: missed at least one /pr/lo message");
-#else
-    cache_invalidate((void *)&pr_hi_received);
-    cache_invalidate((void *)&pr_lo_received);
-    cache_invalidate((void *)&pr_pub_hi_done);
-    cache_invalidate((void *)&pr_pub_lo_done);
-    cache_invalidate((void *)&pr_sub_done);
-    cache_invalidate((void *)&pr_hi_delivered);
-    cache_invalidate((void *)&pr_lo_delivered);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(pr_pub_hi_done, "hi publisher hung");
     TEST_ASSERT_MESSAGE(pr_pub_lo_done, "lo publisher hung");
     TEST_ASSERT_MESSAGE(pr_sub_done, "subscriber hung");
@@ -1843,7 +1387,6 @@ static void test_msg_router_priority_concurrent(void)
         "subscriber: missed at least one /pr/hi message");
     TEST_ASSERT_MESSAGE(pr_lo_received == PR_MESSAGES,
         "subscriber: missed at least one /pr/lo message");
-#endif
 }
 
 /* ============================================================================
@@ -1859,9 +1402,9 @@ static void test_msg_router_priority_concurrent(void)
  *   T0: test (CPU 0): subscribe /ar/a + /ar/b
  *   T0: test (CPU 0): publish_nowait /ar/a (prio 5) — MA.ready=1
  *   T0: test (CPU 0): receive — returns /ar/a, sets LAST_RECEIVED[C]
- *   T0: test (CPU 0): NC_SYNC(TRIGGER) = 1 (signal helper)
+ *   T0: test (CPU 0): TRIGGER = 1 (signal helper)
  *   T1: helper (CPU 1): wakes, publish_nowait /ar/b (prio 5) — MB.ready=1
- *   T1: helper (CPU 1): NC_SYNC(HELPER_DONE) = 1
+ *   T1: helper (CPU 1): HELPER_DONE = 1
  *   T0: test (CPU 0): spin on HELPER_DONE
  *   T0: test (CPU 0): ack() — clears MA, NOT MB
  *   T0: test (CPU 0): receive — returns /ar/b
@@ -1894,12 +1437,8 @@ static void ar_helper(void *arg)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSGAR_TRIGGER)) break;
-#else
-        cache_invalidate((void *)&ar_trigger);
+        smp_mb();
         if (ar_trigger) break;
-#endif
         yield();
     }
 
@@ -1910,11 +1449,7 @@ static void ar_helper(void *arg)
     (void)msg_router_publish_nowait(AR_TOPIC_B, (const uint8_t *)"B1");
 
     ar_helper_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGAR_HELPER_DONE) = 1;
-#else
-    cache_clean((void *)&ar_helper_done);
-#endif
+    smp_mb();
 }
 
 static void test_msg_router_ack_targets_last_received_cross_cpu(void)
@@ -1928,12 +1463,8 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
     msg_router_init();
     ar_trigger = 0;
     ar_helper_done = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MSGAR_TRIGGER, 2);
-#else
-    cache_clean((void *)&ar_trigger);
-    cache_clean((void *)&ar_helper_done);
-#endif
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_A, AR_COMPONENT));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(AR_TOPIC_B, AR_COMPONENT));
@@ -1960,30 +1491,17 @@ static void test_msg_router_ack_targets_last_received_cross_cpu(void)
      * confirmation that the publish has landed. After HELPER_DONE we
      * know MB.ready=1. */
     ar_trigger = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGAR_TRIGGER) = 1;
-#else
-    cache_clean((void *)&ar_trigger);
-#endif
+    smp_mb();
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 5;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSGAR_HELPER_DONE)) break;
-#else
-        cache_invalidate((void *)&ar_helper_done);
+        smp_mb();
         if (ar_helper_done) break;
-#endif
         yield();
     }
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGAR_HELPER_DONE),
-        "helper task did not complete /ar/b publish within timeout");
-#else
-    cache_invalidate((void *)&ar_helper_done);
+    smp_mb();
     TEST_ASSERT_MESSAGE(ar_helper_done,
         "helper task did not complete /ar/b publish within timeout");
-#endif
 
     /* Step 4: ack — targets MA (the receive's source), NOT MB. */
     msg_router_ack(AR_COMPONENT);
@@ -2065,13 +1583,8 @@ static void sm_publisher_a(void *arg)
     }
     sm_a_delivered = total;
     sm_pub_a_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGSM_A_DELIVERED) = total;
-    NC_SYNC(NC_MSGSM_PUB_A_DONE) = 1;
-#else
-    cache_clean((void *)&sm_a_delivered);
-    cache_clean((void *)&sm_pub_a_done);
-#endif
+    smp_mb();
+    smp_mb();
 }
 
 static void sm_publisher_b(void *arg)
@@ -2086,13 +1599,8 @@ static void sm_publisher_b(void *arg)
     }
     sm_b_delivered = total;
     sm_pub_b_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGSM_B_DELIVERED) = total;
-    NC_SYNC(NC_MSGSM_PUB_B_DONE) = 1;
-#else
-    cache_clean((void *)&sm_b_delivered);
-    cache_clean((void *)&sm_pub_b_done);
-#endif
+    smp_mb();
+    smp_mb();
 }
 
 static void sm_subscriber(void *arg)
@@ -2110,21 +1618,13 @@ static void sm_subscriber(void *arg)
         if (data) {
             if (data[0] == 'A') {
                 a++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGSM_SUB_A_SEEN) = a;
-#endif
             } else if (data[0] == 'B') {
                 b++;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-                NC_SYNC(NC_MSGSM_SUB_B_SEEN) = b;
-#endif
             }
             sm_sub_a_seen = a;
             sm_sub_b_seen = b;
-#if !defined(PLATFORM_HAS_NC_MEMORY)
-            cache_clean((void *)&sm_sub_a_seen);
-            cache_clean((void *)&sm_sub_b_seen);
-#endif
+            smp_mb();
+            smp_mb();
             msg_router_ack(SM_C_COMPONENT);
         } else {
             yield();
@@ -2132,11 +1632,7 @@ static void sm_subscriber(void *arg)
     }
 
     sm_sub_done = 1;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_MSGSM_SUB_DONE) = 1;
-#else
-    cache_clean((void *)&sm_sub_done);
-#endif
+    smp_mb();
 }
 
 static void test_msg_router_same_mailbox_zero_loss(void)
@@ -2155,17 +1651,13 @@ static void test_msg_router_same_mailbox_zero_loss(void)
     sm_pub_a_done = 0;
     sm_pub_b_done = 0;
     sm_sub_done = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    nc_sync_clear(NC_MSGSM_A_DELIVERED, 7);
-#else
-    cache_clean((void *)&sm_a_delivered);
-    cache_clean((void *)&sm_b_delivered);
-    cache_clean((void *)&sm_sub_a_seen);
-    cache_clean((void *)&sm_sub_b_seen);
-    cache_clean((void *)&sm_pub_a_done);
-    cache_clean((void *)&sm_pub_b_done);
-    cache_clean((void *)&sm_sub_done);
-#endif
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
 
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(SM_TOPIC, SM_C_COMPONENT));
 
@@ -2183,37 +1675,22 @@ static void test_msg_router_same_mailbox_zero_loss(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_MSGSM_PUB_A_DONE) &&
-            NC_SYNC(NC_MSGSM_PUB_B_DONE) &&
-            NC_SYNC(NC_MSGSM_SUB_DONE)) break;
-#else
-        cache_invalidate((void *)&sm_pub_a_done);
-        cache_invalidate((void *)&sm_pub_b_done);
-        cache_invalidate((void *)&sm_sub_done);
+        smp_mb();
+        smp_mb();
+        smp_mb();
         if (sm_pub_a_done && sm_pub_b_done && sm_sub_done) break;
-#endif
         yield();
     }
 
     msg_router_unsubscribe_all(SM_C_COMPONENT);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_PUB_A_DONE), "pub_a hung");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_PUB_B_DONE), "pub_b hung");
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSGSM_SUB_DONE),   "subscriber hung");
-    uint32_t a_seen = NC_SYNC(NC_MSGSM_SUB_A_SEEN);
-    uint32_t b_seen = NC_SYNC(NC_MSGSM_SUB_B_SEEN);
-    uint32_t a_del  = NC_SYNC(NC_MSGSM_A_DELIVERED);
-    uint32_t b_del  = NC_SYNC(NC_MSGSM_B_DELIVERED);
-#else
-    cache_invalidate((void *)&sm_pub_a_done);
-    cache_invalidate((void *)&sm_pub_b_done);
-    cache_invalidate((void *)&sm_sub_done);
-    cache_invalidate((void *)&sm_sub_a_seen);
-    cache_invalidate((void *)&sm_sub_b_seen);
-    cache_invalidate((void *)&sm_a_delivered);
-    cache_invalidate((void *)&sm_b_delivered);
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
+    smp_mb();
     TEST_ASSERT_MESSAGE(sm_pub_a_done, "pub_a hung");
     TEST_ASSERT_MESSAGE(sm_pub_b_done, "pub_b hung");
     TEST_ASSERT_MESSAGE(sm_sub_done,   "subscriber hung");
@@ -2221,7 +1698,6 @@ static void test_msg_router_same_mailbox_zero_loss(void)
     uint32_t b_seen = sm_sub_b_seen;
     uint32_t a_del  = sm_a_delivered;
     uint32_t b_del  = sm_b_delivered;
-#endif
 
     /* Invariant: every message a publisher counted as delivered must
      * have been seen by the subscriber. With single-slot semantics the
@@ -2269,7 +1745,7 @@ static void test_smp_notify_cpu_safe(void)
 /*
  * Verify that smp_notify_cpu wakes a secondary CPU from its idle WFE.
  *
- * Approach: we queue a task that writes a sentinel to an NC slot.
+ * Approach: we queue a task that writes a sentinel to a shared slot.
  * scheduler_add_task_to_cpu() in turn calls smp_notify_cpu(). Without
  * the wake, the secondary CPU could be stuck in WFE and the sentinel
  * would never be written. A timeout proves the negative.
@@ -2287,11 +1763,7 @@ static void smp_notify_probe_task(void *arg)
 {
     (void)arg;
     smp_notify_sentinel = NOTIFY_SENTINEL;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_NOTIFY_SENTINEL) = NOTIFY_SENTINEL;
-#else
-    cache_clean((void *)&smp_notify_sentinel);
-#endif
+    smp_mb();
 }
 
 static void test_smp_notify_cpu_wakes_secondary(void)
@@ -2302,11 +1774,7 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     }
 
     smp_notify_sentinel = 0;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    NC_SYNC(NC_NOTIFY_SENTINEL) = 0;
-#else
-    cache_clean((void *)&smp_notify_sentinel);
-#endif
+    smp_mb();
 
     struct task *probe = task_create("smp_notify_probe",
                                      smp_notify_probe_task, NULL);
@@ -2320,23 +1788,14 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 3;  /* 3 s */
     while ((timer_get_count() - start) < limit) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        if (NC_SYNC(NC_NOTIFY_SENTINEL) == NOTIFY_SENTINEL) break;
-#else
-        cache_invalidate((void *)&smp_notify_sentinel);
+        smp_mb();
         if (smp_notify_sentinel == NOTIFY_SENTINEL) break;
-#endif
         yield();
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_ASSERT_MESSAGE(NC_SYNC(NC_NOTIFY_SENTINEL) == NOTIFY_SENTINEL,
-        "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
-#else
-    cache_invalidate((void *)&smp_notify_sentinel);
+    smp_mb();
     TEST_ASSERT_MESSAGE(smp_notify_sentinel == NOTIFY_SENTINEL,
         "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
-#endif
 }
 
 /* ============================================================================
@@ -2376,13 +1835,6 @@ int test_suite_integration(void)
     RUN_TEST(test_stress_multicpu);
     RUN_TEST(test_lock_contention);
     RUN_TEST(test_task_lifecycle);
-
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC memory validation */
-    RUN_TEST(test_nc_memory_accessible);
-    RUN_TEST(test_nc_alloc_alignment);
-    RUN_TEST(test_nc_region_used_by_scheduler);
-#endif
 
     /* Boot order regression test (Pi 5 PMM deadlock prevention) */
     RUN_TEST(test_boot_order_pmm_before_scheduler);

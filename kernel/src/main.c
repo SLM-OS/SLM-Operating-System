@@ -419,7 +419,7 @@ void kernel_main(void *dtb)
     pmm_dump_stats();
 #endif
 
-    /* Initialize non-cacheable shared memory region (Pi 5 only) */
+    /* Initialize the non-cacheable DMA region (Pi 5, Jetson) */
     ncmem_init();
 
     /* Parse the embedded operator-library blob (#714). Pure CPU side
@@ -428,12 +428,6 @@ void kernel_main(void *dtb)
      * -DOPLIB_BLOB=path to embed a real library produced by
      * scripts/build-operator-library.py. */
     (void)oplib_pool_init();
-
-    /* Move UART lock to NC memory for cross-CPU safety */
-    {
-        extern void kprintf_init_nc_lock(void);
-        kprintf_init_nc_lock();
-    }
 
     /* Initialize interrupt controller */
     uart_puts("\n");
@@ -490,18 +484,6 @@ void kernel_main(void *dtb)
         WARN("RNG firmware seed absent — boot entropy is jitter-only");
     }
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.
-     * Must be after vmm_init() so the write targets NC memory (DRAM),
-     * not the cacheable identity map from boot.S. Secondary CPUs will
-     * poll this flag after booting — it must be 0 until scheduler_init
-     * sets it to 1. */
-    {
-        extern void nc_zero_sched_init_flag(void);
-        nc_zero_sched_init_flag();
-    }
-#endif
-
     /* Initialize SMP and boot secondary CPUs */
     uart_puts("\n");
     smp_init();
@@ -512,10 +494,10 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize Virtual Filesystem and perform all initial PMM allocations
-     * BEFORE scheduler_init(). On Pi 5 the PMM spinlock was found not to
-     * provide cross-CPU mutual exclusion. Secondary CPUs will allocate
-     * idle task stacks after scheduler_init(), so CPU 0 must finish its
-     * allocations first to avoid concurrent PMM access. */
+     * BEFORE scheduler_init(). Secondary CPUs allocate idle task stacks
+     * after scheduler_init(), so CPU 0 finishes its boot allocations
+     * first. (This ordering dates from the incoherent-cache diagnosis
+     * that #1193 overturned; it is kept because it is harmless.) */
     INFO("Initializing VFS...");
     vfs_init();
     boot_models_mount();
@@ -896,10 +878,9 @@ void kernel_main(void *dtb)
 #endif
 
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.
-     * On Pi 5 the PMM spinlock was found not to provide cross-CPU
-     * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
-     * with their own allocations (idle task stacks). Doing it here ensures
-     * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */
+     * scheduler_init() signals secondary CPUs to proceed with their own
+     * allocations (idle task stacks). Doing it here ensures CPU 0's
+     * allocations (ramdisk, Rust heap, model memory) are complete. */
     uart_puts("\n");
     scheduler_init();
 

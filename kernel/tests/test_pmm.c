@@ -858,7 +858,7 @@ static void test_mixed_workload_stress(void)
  * NC Memory Allocator Tests (Pi 5 / Jetson only)
  * ============================================================================ */
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
 
 /*
  * Test: zero size / zero alignment are rejected
@@ -929,7 +929,7 @@ static void test_ncmem_overflow_rejected(void)
     TEST_ASSERT_EQUAL_UINT64(used_before, ncmem_used());
 }
 
-#endif /* PLATFORM_HAS_NC_MEMORY */
+#endif /* PLATFORM_HAS_NC_REGION */
 
 /* ============================================================================
  * pmm_carve_reserves — pure carve helper (kernel/include/pmm_internal.h)
@@ -1222,7 +1222,7 @@ int test_suite_pmm(void)
     RUN_TEST(test_carve_zero_size_reserve_skipped);
     RUN_TEST(test_carve_null_output_returns_zero);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PLATFORM_HAS_NC_REGION)
     /* NC allocator (Pi 5 / Jetson only) */
     RUN_TEST(test_ncmem_rejects_invalid_args);
     RUN_TEST(test_ncmem_alignment);

@@ -19,9 +19,9 @@
 #include "../include/string.h"
 #include "../include/uart.h"
 #include "../include/task.h"
+#include "../include/spinlock.h"   /* smp_mb */
 #include "../include/sched.h"
 #include "../include/smp.h"
-#include "../include/cache.h"
 #include "../include/timer.h"
 #include "../include/gpu_consumer.h"
 #include "../include/slm_ffi_test.h"
@@ -1627,7 +1627,7 @@ static void ev_smp_worker_task(void *arg)
             (void)rust_model_touch(h);
         }
         ev_smp_done[my_cpu] = r + 1u;
-        cache_clean((void *)&ev_smp_done[my_cpu]);
+        smp_mb();
         yield();
     }
     /* Barrier: wait until every worker has reached EV_SMP_ROUNDS
@@ -1645,7 +1645,7 @@ static void ev_smp_worker_task(void *arg)
         while ((timer_get_count() - bar_start) < bar_limit) {
             int all_alloc_done = 1;
             for (uint32_t c = 0; c < ev_smp_n_workers_active; c++) {
-                cache_invalidate((void *)&ev_smp_done[c]);
+                smp_mb();
                 if (ev_smp_done[c] < EV_SMP_ROUNDS) {
                     all_alloc_done = 0;
                     break;
@@ -1683,7 +1683,7 @@ static void ev_smp_swapper_task(void *arg)
     uint32_t idx = 0;
 
     while (1) {
-        cache_invalidate((void *)&ev_smp_stop_swapper);
+        smp_mb();
         if (ev_smp_stop_swapper) {
             break;
         }
@@ -1721,12 +1721,12 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
      * workers can use it in the barrier wait. */
     for (uint32_t c = 0; c < EV_SMP_MAX_WORKERS; c++) {
         ev_smp_done[c] = 0;
-        cache_clean((void *)&ev_smp_done[c]);
+        smp_mb();
     }
     ev_smp_stop_swapper = 0;
-    cache_clean((void *)&ev_smp_stop_swapper);
+    smp_mb();
     ev_smp_n_workers_active = n_workers;
-    cache_clean((void *)&ev_smp_n_workers_active);
+    smp_mb();
 
     /* Pre-saturate the workspace pool down to EV_SMP_PREFILL_LEAVE
      * free blocks. This makes the SMP loop hammer the eviction slow
@@ -1800,7 +1800,7 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
     while ((timer_get_count() - start) < limit) {
         int done = 1;
         for (uint32_t c = 0; c < n_workers; c++) {
-            cache_invalidate(&workers[c]->state);
+            smp_mb();
             if (workers[c]->state != TASK_TERMINATED) {
                 done = 0;
                 break;
@@ -1815,11 +1815,11 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
 
     /* Signal swapper to stop and wait briefly for it to wind down. */
     ev_smp_stop_swapper = 1;
-    cache_clean((void *)&ev_smp_stop_swapper);
+    smp_mb();
     uint64_t sw_start = timer_get_count();
     uint64_t sw_limit = timer_get_frequency() * 2u;
     while ((timer_get_count() - sw_start) < sw_limit) {
-        cache_invalidate(&swapper->state);
+        smp_mb();
         if (swapper->state == TASK_TERMINATED) {
             break;
         }
@@ -1830,13 +1830,13 @@ static void test_eviction_smp_alloc_under_concurrent_swap(void)
      * before task_destroy per the in-tree convention (see
      * kernel/CLAUDE.md §"Leaky tests that block CPU 1"). */
     for (uint32_t c = 0; c < n_workers; c++) {
-        cache_invalidate(&workers[c]->state);
+        smp_mb();
         if (workers[c]->state != TASK_TERMINATED) {
             scheduler_terminate_task(workers[c]);
         }
         task_destroy(workers[c]);
     }
-    cache_invalidate(&swapper->state);
+    smp_mb();
     if (swapper->state != TASK_TERMINATED) {
         scheduler_terminate_task(swapper);
     }

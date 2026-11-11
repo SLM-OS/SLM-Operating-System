@@ -112,9 +112,26 @@ void test_harness_init(void)
 #endif
 }
 
+static int test_harness_finish(int total_failures);
+
 int test_harness_run_all(void)
 {
     int total_failures = 0;
+
+#if defined(BOOT_TESTS_HW_SET) && !defined(PLATFORM_X86_64)
+    /* Hardware measurement set (#1193): only the coherency litmus suite
+     * and the multi-core integration tests, so a board can run them
+     * without the rest of the suite (whose known hardware failures,
+     * #1109 / #1199, can halt the run before it gets here). */
+    uart_puts("[INFO] BOOT_TESTS_HW_SET: coherency + integration suites only\n");
+    total_failures += test_suite_coherency();
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Integration Tests (Multi-Core)\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_integration();
+    return test_harness_finish(total_failures);
+#endif
 
     /* Run model_mem smoke test FIRST so an init regression (e.g.
      * silent PMM oversubscribe on a tight-RAM platform) surfaces
@@ -246,6 +263,11 @@ int test_harness_run_all(void)
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
+    /* Coherency litmus + negative controls (#1193): runs pinned tasks on
+     * every CPU, so it sits with the other scheduler-backed suites. */
+    total_failures += test_suite_coherency();
+    /* Run queues / task table / current_task stay cacheable (#1193). */
+    total_failures += test_suite_nc_axis();
     total_failures += test_suite_lua();
     /* libc-stub regression: strtol/strtod chain rewrite in lua_stubs.c. */
     total_failures += test_suite_lua_stubs();
@@ -352,6 +374,11 @@ int test_harness_run_all(void)
     total_failures += test_suite_integration();
 #endif
 
+    return test_harness_finish(total_failures);
+}
+
+static int test_harness_finish(int total_failures)
+{
     /* Final summary */
     uart_puts("\n");
     uart_puts("========================================\n");
