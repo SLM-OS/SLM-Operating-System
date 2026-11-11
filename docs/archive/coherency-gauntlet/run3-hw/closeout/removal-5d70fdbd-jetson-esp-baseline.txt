@@ -1,0 +1,26 @@
+# jetson-nano-2, close-out for removal 5d70fdbd: ESP baseline before any write (esp-check.sh, read-only; no BootNext, SLMOS.efi 789cba62 = as-found, fsck rc=0) and staging of both kexec ELFs (scp, sync, sha256 compare). Linux only; no SLM-OS banner applies.
+
+===== esp-check.sh 192.168.4.5, 18:50Z
+check at 2026-11-11T18:50:20Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.HTzdPW8JTK/EFI/SLMOS/SLMOS.efi
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  /tmp/tmp.HTzdPW8JTK/EFI/L4T/l4t.efi
+ESP unmounted
+
+===== stage production ELF (5d70fdbd)
+stage at 2026-11-11T18:50:35Z
+local  e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735  /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/closeout-removal/img/jetson-prod-5d70fdbd.elf
+board  e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735  /root/slmos-closeout-removal-5d70fdbd.elf
+sha MATCH
+
+===== stage test ELF (5d70fdbd)
+stage at 2026-11-11T18:50:51Z
+local  a6db487ad6a20c3f91faf42dc5a6b2ffe3d5849d6a04a2d48244ea3e925cbd86  /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/closeout-removal/img/jetson-test-5d70fdbd.elf
+board  a6db487ad6a20c3f91faf42dc5a6b2ffe3d5849d6a04a2d48244ea3e925cbd86  /root/slmos-closeout-removal-test-5d70fdbd.elf
+sha MATCH
+

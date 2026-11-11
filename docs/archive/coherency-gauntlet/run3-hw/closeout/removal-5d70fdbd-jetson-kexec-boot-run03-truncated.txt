@@ -1,0 +1,55 @@
+# jetson-nano-2 kexec boot run03, production kernel, coherency-remove-nc-axis @ 5d70fdbd (make kernel PLATFORM=JETSON_ORIN_NANO, slmos.elf sha256 e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735, staged as /root/slmos-closeout-removal-5d70fdbd.elf). Board at SD Linux before the kexec (power_cycle to Linux between boots); slmos-kexec started detached over ssh (deploy skill form) about 8 s after the capture call; console: one labctl serial_capture (a separate call from the power_cycle and the kexec; this agent was the only labctl caller).
+# boot banner: NONE
+# cat /sys/version commit: 5d70fdbd
+
+===== NOT COUNTED. The console capture below was requested with tail=25 by agent error, so it holds only the last 25 lines (no banner, no kexec start). The boot reached slmos> and cat /sys/version reads 5d70fdbd, but the capture is not a whole boot log; an extra boot (run11) replaces it in the count of 10.
+===== file null
+
+
+===== 1. kexec trigger (fire.sh: staged sha re-check, then setsid nohup slmos-kexec over ssh)
+===== file fire-k03.log
+ssh up 2026-11-11T18:59:21Z
+board  e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735  /root/slmos-closeout-removal-5d70fdbd.elf
+sha MATCH
+kexec fire 2026-11-11T18:59:29Z
+fire ssh rc=0
+
+===== 2. console, Linux kexec to slmos>
+===== labctl serial_capture tool_use_id=toolu_01W1YSyWpMFyWsS9UTpsyd4A args={"port_name": "jetson-nano-2", "timeout": 330, "until_pattern": "slmos>|KERNEL PANIC|PAGE FAULT|Unhandled Exception|System halted", "tail": 25}
+[Captured 25 lines in 154.3s, pattern 'slmos>|KERNEL PANIC|PAGE FAULT|Unhandled Exception|System halted' matched]
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'net_pump'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] cdc_ecm: activated interface 1 alt 1
+[INFO] cdc_ecm: probed — mac=a0:ce:c8:0e:9a:21 mtu=1514 bulk_in=0x81 bulk_out=0x02
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 mode[INFO] cdc_ecm: notification endpoint 0x83 on ctrl iface 0
+l preload(s) from /mnt/files/preload.conf
+[INFO] Initializing network subsystem...
+[INFO] cdc_ecm: NC DMA pools ready (rx=4 tx=4 size=2048 notify=16)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: a0:ce:c8:0e:9a:21
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP auto-start deferred until link-ready (timeout 10000 ms)
+[INFO] cdc_ecm: network connection down (if=0)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>
+
+===== 3. cat /sys/version
+===== labctl serial_send tool_use_id=toolu_011jVYoRg4BmPWo1MNbMSWD2 args={"port_name": "jetson-nano-2", "data": "cat /sys/version", "capture_until": "slmos>", "capture_timeout": 15, "confirm_token": "lNWGamwvx8saxuGT37z76g"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+smu�{�ͽversion
+name:    SLM-OS
+version: 0.4.0
+build:   20261111182808
+commit:  5d70fdbd
+slmos>
+slmos>

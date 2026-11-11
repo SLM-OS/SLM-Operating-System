@@ -1,0 +1,781 @@
+# jetson-nano-2 kexec boot 02 of 10, production kernel, coherency-remove-nc-axis @ 5d70fdbd (make kernel PLATFORM=JETSON_ORIN_NANO, slmos.elf sha256 e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735, staged as /root/slmos-closeout-removal-5d70fdbd.elf). Board at SD Linux before the kexec (power_cycle to Linux between boots); slmos-kexec started detached over ssh (deploy skill form) about 8 s after the capture call; console: one labctl serial_capture (a separate call from the power_cycle and the kexec; this agent was the only labctl caller).
+# boot banner: SLM-OS v0.4.0 build 20261111182808 (5d70fdbd)
+# cat /sys/version commit: 5d70fdbd
+
+===== 0. power_cycle to SD Linux
+===== labctl power_cycle tool_use_id=toolu_015b2UvbVxoA1d3na3GSeAF2 args={"sbc_name": "jetson-nano-2", "confirm_token": "GNfmD2mUluGyXD4Q6_FdHQ"}
+Power cycled: jetson-nano-2 (delay: 15.0s)
+
+===== 0b. console during the SD Linux boot, FIRST capture call (tail=400, so the earliest Linux lines are not in this reply; it stopped early because the pattern 'panic' matched an OP-TEE 'TA panicked' line from Linux userspace, before the kexec; the next capture was started at once)
+===== labctl serial_capture tool_use_id=toolu_01W6kyQPXktxZ5RyphsSe2Lz args={"port_name": "jetson-nano-2", "timeout": 330, "until_pattern": "slmos>|PANIC|panic|Unhandled Exception|PAGE FAULT", "tail": 400}
+[Captured 400 lines in 37.8s, pattern 'slmos>|PANIC|panic|Unhandled Exception|PAGE FAULT' matched]
+[    0.000000] 	Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+[    0.000000] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=6
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] GICv3: GIC: Using split EOI/Deactivate mode
+[    0.000000] GICv3: 960 SPIs implemented
+[    0.000000] GICv3: 0 Extended SPIs implemented
+[    0.000000] GICv3: Distributor has no Range Selector support
+[    0.000000] Root IRQ handler: gic_handle_irq
+[    0.000000] GICv3: 16 PPIs implemented
+[    0.000000] GICv3: CPU0: found redistributor 0 region 0:0x000000000f440000
+[    0.000000] arch_timer: cp15 timer(s) running at 31.25MHz (phys).
+[    0.000000] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0xe6a171046, max_idle_ns: 881590405314 ns
+[    0.000001] sched_clock: 56 bits at 31MHz, resolution 32ns, wraps every 4398046511088ns
+[    0.000377] Console: colour dummy device 80x25
+[    0.000386] printk: console [tty0] enabled
+[    0.000446] Calibrating delay loop (skipped), value calculated using timer frequency.. 62.50 BogoMIPS (lpj=125000)
+[    0.000454] pid_max: default: 32768 minimum: 301
+[    0.000497] LSM: Security Framework initializing
+[    0.000526] Yama: becoming mindful.
+[    0.000542] SELinux:  Initializing.
+[    0.000624] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.000640] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.001749] rcu: Hierarchical SRCU implementation.
+[    0.004005] Tegra Revision: A01 SKU: 213 CPU Process: 0 SoC Process: 0
+[    0.004274] Remapping and enabling EFI services.
+[    0.005068] smp: Bringing up secondary CPUs ...
+[    0.005559] Detected PIPT I-cache on CPU1
+[    0.005603] GICv3: CPU1: found redistributor 100 region 0:0x000000000f460000
+[    0.005628] CPU1: Booted secondary processor 0x0000000100 [0x410fd421]
+[    0.006079] Detected PIPT I-cache on CPU2
+[    0.006090] GICv3: CPU2: found redistributor 200 region 0:0x000000000f480000
+[    0.006104] CPU2: Booted secondary processor 0x0000000200 [0x410fd421]
+[    0.006519] Detected PIPT I-cache on CPU3
+[    0.006529] GICv3: CPU3: found redistributor 300 region 0:0x000000000f4a0000
+[    0.006542] CPU3: Booted secondary processor 0x0000000300 [0x410fd421]
+[    0.009000] Detected PIPT I-cache on CPU4
+[    0.009028] GICv3: CPU4: found redistributor 10200 region 0:0x000000000f500000
+[    0.009055] CPU4: Booted secondary processor 0x0000010200 [0x410fd421]
+[    0.009548] Detected PIPT I-cache on CPU5
+[    0.009559] GICv3: CPU5: found redistributor 10300 region 0:0x000000000f520000
+[    0.009574] CPU5: Booted secondary processor 0x0000010300 [0x410fd421]
+[    0.009629] smp: Brought up 1 node, 6 CPUs
+[    0.009633] SMP: Total of 6 processors activated.
+[    0.009636] CPU features: detected: 32-bit EL0 Support
+[    0.009638] CPU features: detected: Data cache clean to the PoU not required for I/D coherence
+[    0.009640] CPU features: detected: Common not Private translations
+[    0.009642] CPU features: detected: CRC32 instructions
+[    0.009643] CPU features: detected: Data cache clean to Point of Persistence
+[    0.009645] CPU features: detected: Generic authentication (architected algorithm)
+[    0.009646] CPU features: detected: RCpc load-acquire (LDAPR)
+[    0.009648] CPU features: detected: LSE atomic instructions
+[    0.009649] CPU features: detected: Privileged Access Never
+[    0.009650] CPU features: detected: RAS Extension Support
+[    0.009653] CPU features: detected: Speculative Store Bypassing Safe (SSBS)
+[    0.025220] spectre-bhb mitigation disabled by command line option
+[    0.025220] spectre-bhb mitigation disabled by command line option
+[    0.044831] CPU: All CPU(s) started at EL2
+[    0.047968] devtmpfs: initialized
+[    0.067640] KASLR enabled
+[    0.067842] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+[    0.067872] futex hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    0.072842] pinctrl core: initialized pinctrl subsystem
+[    0.073917] SMBIOS 3.6.0 present.
+[    0.073930] DMI: NVIDIA NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super/Jetson, BIOS 36.4.7-gcid-42132812 09/18/2025
+[    0.074509] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.076417] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
+[    0.076566] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.076666] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.076735] audit: initializing netlink subsys (disabled)
+[    0.076859] audit: type=2000 audit(0.076:1): state=initialized audit_enabled=0 res=1
+[    0.078928] thermal_sys: Registered thermal governor 'step_wise'
+[    0.078935] thermal_sys: Registered thermal governor 'user_space'
+[    0.078938] thermal_sys: Registered thermal governor 'power_allocator'
+[    0.082854] cpuidle: using governor menu
+[    0.083083] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.083187] ASID allocator initialised with 32768 entries
+[    0.085251] Serial: AMBA PL011 UART driver
+[    0.096785] 31d0000.serial: ttyAMA0 at MMIO 0x31d0000 (irq = 117, base_baud = 0) is a SBSA
+[    0.108448] platform bpmp: Fixing up cyclic dependency with 2c60000.external-memory-controller
+[    0.118113] HugeTLB registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.118119] HugeTLB registered 32.0 MiB page size, pre-allocated 0 pages
+[    0.118120] HugeTLB registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.118121] HugeTLB registered 64.0 KiB page size, pre-allocated 0 pages
+[    0.119040] cryptd: max_cpu_qlen set to 1000
+[    0.120779] ACPI: Interpreter disabled.
+[    0.122191] VDD_1V8_AO: supplied by VDD_5V0_SYS
+[    0.122356] VDD_3V3_AO: supplied by VDD_5V0_SYS
+[    0.122615] VDD_AV10_HUB: supplied by VDD_5V0_SYS
+[    0.123125] iommu: Default domain type: Translated
+[    0.123132] iommu: DMA domain TLB invalidation policy: strict mode
+[    0.123456] SCSI subsystem initialized
+[    0.123651] vgaarb: loaded
+[    0.123840] usbcore: registered new interface driver usbfs
+[    0.123867] usbcore: registered new interface driver hub
+[    0.123885] usbcore: registered new device driver usb
+[    0.124330] pps_core: LinuxPPS API ver. 1 registered
+[    0.124336] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.124352] PTP clock support registered
+[    0.124444] EDAC MC: Ver: 3.0.0
+[    0.125548] Registered efivars operations
+[    0.126157] FPGA manager framework
+[    0.126255] Advanced Linux Sound Architecture Driver Initialized.
+[    0.126899] Bluetooth: Core ver 2.22
+[    0.126936] NET: Registered PF_BLUETOOTH protocol family
+[    0.126940] Bluetooth: HCI device and connection manager initialized
+[    0.126954] Bluetooth: HCI socket layer initialized
+[    0.126959] Bluetooth: L2CAP socket layer initialized
+[    0.126978] Bluetooth: SCO socket layer initialized
+[    0.127424] clocksource: Switched to clocksource arch_sys_counter
+[    0.162388] VFS: Disk quotas dquot_6.6.0
+[    0.162455] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[    0.162690] pnp: PnP ACPI: disabled
+[    0.165695] NET: Registered PF_INET protocol family
+[    0.166031] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[    0.167604] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
+[    0.167703] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.167718] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    0.167975] TCP bind hash table entries: 65536 (order: 8, 1048576 bytes, linear)
+[    0.169387] TCP: Hash tables configured (established 65536 bind 65536)
+[    0.169580] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.169682] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[    0.169944] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.170330] RPC: Registered named UNIX socket transport module.
+[    0.170334] RPC: Registered udp transport module.
+[    0.170335] RPC: Registered tcp transport module.
+[    0.170336] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    0.170351] PCI: CLS 0 bytes, default 64
+[    0.170645] Unpacking initramfs...
+[    0.184763] hw perfevents: enabled with armv8_cortex_a78 PMU driver, 7 counters available
+[    0.185135] kvm [1]: IPA Size Limit: 48 bits
+[    0.185172] kvm [1]: GICv3: no GICV resource entry
+[    0.185179] kvm [1]: disabling GICv2 emulation
+[    0.185202] kvm [1]: GIC system register CPU interface enabled
+[    0.185278] kvm [1]: vgic interrupt IRQ9
+[    0.185441] kvm [1]: VHE mode initialized successfully
+[    0.188801] Initialise system trusted keyrings
+[    0.188851] Key type blacklist registered
+[    0.188944] workingset: timestamp_bits=42 max_order=21 bucket_order=0
+[    0.192845] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    0.193268] NFS: Registering the id_resolver key type
+[    0.193308] Key type id_resolver registered
+[    0.193313] Key type id_legacy registered
+[    0.193373] nfs4filelayout_init: NFSv4 File Layout Driver Registering...
+[    0.193388] nfs4flexfilelayout_init: NFSv4 Flexfile Layout Driver Registering...
+[    0.193409] ntfs: driver 2.1.32 [Flags: R/O].
+[    0.193659] 9p: Installing v9fs 9p2000 file system support
+[    0.194344] integrity: Platform Keyring initialized
+[    0.207244] Key type asymmetric registered
+[    0.207249] Asymmetric key parser 'x509' registered
+[    0.207318] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 245)
+[    0.207328] io scheduler mq-deadline registered
+[    0.207335] io scheduler kyber registered
+[    0.217976] EINJ: ACPI disabled.
+[    0.230428] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    0.232201] SuperH (H)SCI(F) driver initialized
+[    0.232550] msm_serial: driver initialized
+[    0.233234] printk: console [ttyTCU0] enabled
+[    0.234181] arm-smmu 8000000.iommu: probing hardware configuration...
+[    0.234188] arm-smmu 8000000.iommu: SMMUv2 with:
+[    0.234198] arm-smmu 8000000.iommu: 	stage 1 translation
+[    0.234202] arm-smmu 8000000.iommu: 	stage 2 translation
+[    0.234206] arm-smmu 8000000.iommu: 	nested translation
+[    0.234211] arm-smmu 8000000.iommu: 	stream matching with 128 register groups
+[    0.234217] arm-smmu 8000000.iommu: 	128 context banks (0 stage-2 only)
+[    0.234226] arm-smmu 8000000.iommu: 	Supported page sizes: 0x61311000
+[    0.234230] arm-smmu 8000000.iommu: 	Stage-1: 48-bit VA -> 48-bit IPA
+[    0.234234] arm-smmu 8000000.iommu: 	Stage-2: 48-bit IPA -> 48-bit PA
+[    0.235265] arm-smmu 10000000.iommu: probing hardware configuration...
+[    0.235269] arm-smmu 10000000.iommu: SMMUv2 with:
+[    0.235273] arm-smmu 10000000.iommu: 	stage 1 translation
+[    0.235277] arm-smmu 10000000.iommu: 	stage 2 translation
+[    0.235280] arm-smmu 10000000.iommu: 	nested translation
+[    0.235285] arm-smmu 10000000.iommu: 	stream matching with 128 register groups
+[    0.235288] arm-smmu 10000000.iommu: 	128 context banks (0 stage-2 only)
+[    0.235292] arm-smmu 10000000.iommu: 	Supported page sizes: 0x61311000
+[    0.235294] arm-smmu 10000000.iommu: 	Stage-1: 48-bit VA -> 48-bit IPA
+[    0.235296] arm-smmu 10000000.iommu: 	Stage-2: 48-bit IPA -> 48-bit PA
+[    0.235690] arm-smmu 12000000.iommu: probing hardware configuration...
+[    0.235695] arm-smmu 12000000.iommu: SMMUv2 with:
+[    0.235697] arm-smmu 12000000.iommu: 	stage 1 translation
+[    0.235698] arm-smmu 12000000.iommu: 	stage 2 translation
+[    0.235699] arm-smmu 12000000.iommu: 	nested translation
+[    0.235701] arm-smmu 12000000.iommu: 	stream matching with 128 register groups
+[    0.235704] arm-smmu 12000000.iommu: 	128 context banks (0 stage-2 only)
+[    0.235717] arm-smmu 12000000.iommu: 	Supported page sizes: 0x61311000
+[    0.235718] arm-smmu 12000000.iommu: 	Stage-1: 48-bit VA -> 48-bit IPA
+[    0.235719] arm-smmu 12000000.iommu: 	Stage-2: 48-bit IPA -> 48-bit PA
+[    0.243009] loop: module loaded
+[    0.243957] megasas: 07.717.02.00-rc1
+[    0.247917] tun: Universal TUN/TAP device driver, 1.6
+[    0.248499] thunder_xcv, ver 1.0
+[    0.248527] thunder_bgx, ver 1.0
+[    0.248549] nicpf, ver 1.0
+[    0.249387] hclge is initializing
+[    0.249417] hns3: Hisilicon Ethernet Network Driver for Hip08 Family - version
+[    0.249425] hns3: Copyright (c) 2017 Huawei Corporation.
+[    0.249466] e1000: Intel(R) PRO/1000 Network Driver
+[    0.249471] e1000: Copyright (c) 1999-2006 Intel Corporation.
+[    0.249502] e1000e: Intel(R) PRO/1000 Network Driver
+[    0.249507] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
+[    0.249536] igb: Intel(R) Gigabit Ethernet Network Driver
+[    0.249541] igb: Copyright (c) 2007-2014 Intel Corporation.
+[    0.249557] igbvf: Intel(R) Gigabit Virtual Function Network Driver
+[    0.249560] igbvf: Copyright (c) 2009 - 2012 Intel Corporation.
+[    0.249770] sky2: driver version 1.30
+[    0.250432] VFIO - User Level meta-driver version: 0.3
+[    0.251999] ehci_hcd: USB 2.0 'Enhanced' Host Controller (EHCI) Driver
+[    0.252010] ehci-pci: EHCI PCI platform driver
+[    0.252037] ehci-platform: EHCI generic platform driver
+[    0.252124] ehci-orion: EHCI orion driver
+[    0.252193] ehci-exynos: EHCI Exynos driver
+[    0.252247] ohci_hcd: USB 1.1 'Open' Host Controller (OHCI) Driver
+[    0.252271] ohci-pci: OHCI PCI platform driver
+[    0.252296] ohci-platform: OHCI generic platform driver
+[    0.252370] ohci-exynos: OHCI Exynos driver
+[    0.252869] usbcore: registered new interface driver usb-storage
+[    0.254781] i2c_dev: i2c /dev entries driver
+[    0.256133] pps pps0: new PPS source ktimer
+[    0.256142] pps pps0: ktimer PPS source registered
+[    0.256149] pps_ldisc: PPS line discipline registered
+[    0.258248] device-mapper: ioctl: 4.45.0-ioctl (2021-03-22) initialised: dm-devel@redhat.com
+[    0.260065] sdhci: Secure Digital Host Controller Interface driver
+[    0.260070] sdhci: Copyright(c) Pierre Ossman
+[    0.260537] Synopsys Designware Multimedia Card Interface Driver
+[    0.261162] sdhci-pltfm: SDHCI platform and OF driver helper
+[    0.262333] ledtrig-cpu: registered to indicate activity on CPUs
+[    0.263272] SMCCC: SOC_ID: ID = jep106:036b:0234 Revision = 0x00000401
+[    0.263910] tegra-bpmp bpmp: Adding to iommu group 0
+[    0.265280] tegra-bpmp bpmp: firmware: e941463f35523d12ee54-da583751bbf
+[    0.449205] Freeing initrd memory: 15484K
+[    3.786031] clocksource: tsc: mask: 0xffffffffffffff max_cycles: 0xe6a171046, max_idle_ns: 881590405314 ns
+[    3.786058] clocksource: osc: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 49772407460 ns
+[    3.786063] clocksource: usec: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275 ns
+[    3.786271] hid: raw HID events driver (C) Jiri Kosina
+[    3.786662] usbcore: registered new interface driver usbhid
+[    3.786667] usbhid: USB HID core driver
+[    3.791400] optee: probing for conduit method.
+[    3.791461] optee: revision 4.2
+[    3.850875] optee: dynamic shared memory is enabled
+[    3.851127] optee: initialized driver
+[    3.854254] usbcore: registered new interface driver snd-usb-audio
+[    3.855772] NET: Registered PF_PACKET protocol family
+[    3.856131] Bluetooth: RFCOMM TTY layer initialized
+[    3.856144] Bluetooth: RFCOMM socket layer initialized
+[    3.856200] Bluetooth: RFCOMM ver 1.11
+[    3.856433] 9pnet: Installing 9P2000 support
+[    3.856542] Key type dns_resolver registered
+[    3.857365] printk: console [tty0]: printing thread started
+[    3.857436] printk: console [ttyTCU0]: printing thread started
+[    3.857502] Loading compiled-in X.509 certificates
+[    3.859137] Loaded X.509 cert 'Build time autogenerated kernel key: 9709b2c1b7afae80ccbf49cf4e8a5d004d951f84'
+[    3.893494] tegra-gpcdma 2600000.dma-controller: Adding to iommu group 1
+[    3.895668] tegra-gpcdma 2600000.dma-controller: GPC DMA driver register 31 channels
+[    3.898193] serial-tegra 3100000.serial: RX in PIO mode
+[    3.898199] serial-tegra 3100000.serial: TX in PIO mode
+[    3.898330] 3100000.serial: ttyTHS1 at MMIO 0x3100000 (irq = 112, base_baud = 0) is a TEGRA_UART
+[    3.899084] 3140000.serial: ttyTHS2 at MMIO 0x3140000 (irq = 113, base_baud = 0) is a TEGRA_UART
+[    3.903164] tegra_rtc c2a0000.rtc: registered as rtc1
+[    3.903182] tegra_rtc c2a0000.rtc: Tegra internal Real Time Clock
+[    3.903811] tegra-i2c 3160000.i2c: Adding to iommu group 1
+[    3.911622] tegra-i2c 3180000.i2c: Adding to iommu group 1
+[    3.916010] tegra-i2c 31b0000.i2c: Adding to iommu group 1
+[    3.922444] tegra-i2c c240000.i2c: Adding to iommu group 1
+[    3.929048] i2c 1-0025: Fixing up cyclic dependency with 3520000.padctl
+[    3.929873] tegra-i2c c250000.i2c: Adding to iommu group 1
+[    3.960197] cpufreq: cpufreq_online: CPU4: Running at unlisted initial frequency: 1771000 KHz, changing to: 1728000 KHz
+[    3.965006] tegra-xusb 3610000.usb: Adding to iommu group 2
+[    3.983023] tegra-xusb 3610000.usb: Firmware timestamp: 2023-02-10 03:48:10 UTC
+[    3.983032] tegra-xusb 3610000.usb: xHCI Host Controller
+[    3.983048] tegra-xusb 3610000.usb: new USB bus registered, assigned bus number 1
+[    3.983799] tegra-xusb 3610000.usb: hcc params 0x0180ff05 hci version 0x120 quirks 0x0000000000010810
+[    3.983820] tegra-xusb 3610000.usb: irq 124, io mem 0x03610000
+[    3.983938] tegra-xusb 3610000.usb: xHCI Host Controller
+[    3.983941] tegra-xusb 3610000.usb: new USB bus registered, assigned bus number 2
+[    3.983945] tegra-xusb 3610000.usb: Host supports USB 3.1 Enhanced SuperSpeed
+[    3.984450] hub 1-0:1.0: USB hub found
+[    3.984464] hub 1-0:1.0: 4 ports detected
+[    3.984733] hub 2-0:1.0: USB hub found
+[    3.984744] hub 2-0:1.0: 4 ports detected
+[    3.986325] sdhci-tegra 3400000.mmc: Adding to iommu group 3
+[    3.987009] irq: IRQ228: trimming hierarchy from :bus@0:pmc@c360000
+[    3.987071] irq: IRQ229: trimming hierarchy from :bus@0:interrupt-controller@f400000-1
+[    3.987148] input: gpio-keys as /devices/platform/gpio-keys/input/input0
+[    4.026376] ALSA device list:
+[    4.026382]   No soundcards found.
+[    4.027849] sdhci-tegra 3400000.mmc: Got CD GPIO
+[    4.073635] irq: IRQ230: trimming hierarchy from :bus@0:interrupt-controller@f400000-1
+[    4.074074] mmc0: SDHCI controller on 3400000.mmc [3400000.mmc] using ADMA 64-bit
+[    4.075035] Freeing unused kernel memory: 7680K
+[    4.075115] Run /init as init process
+[    4.086278] Checking overlayfs setting...
+[    4.099891] Overlayfs is disabled...
+[    4.104563] Root device found: mmcblk0p1
+[    4.323425] usb 1-2: new high-speed USB device number 2 using tegra-xusb
+[    4.442057] mmc0: new ultra high speed SDR104 SDXC card at address aaaa
+[    4.442522] mmcblk0: mmc0:aaaa SR256 238 GiB
+[    4.452381]  mmcblk0: p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15
+[    4.494565] hub 1-2:1.0: USB hub found
+[    4.495687] hub 1-2:1.0: 4 ports detected
+[    4.608305] usb 2-1: new SuperSpeed Plus Gen 2x1 USB device number 2 using tegra-xusb
+[    4.656735] hub 2-1:1.0: USB hub found
+[    4.658976] hub 2-1:1.0: 4 ports detected
+[    4.771419] usb 1-3: new full-speed USB device number 3 using tegra-xusb
+[    5.215420] usb 1-2.3: new high-speed USB device number 4 using tegra-xusb
+[    7.962229] Found dev node: /dev/mmcblk0p1
+[    9.758668] EXT4-fs (mmcblk0p1): recovery complete
+[    9.765109] EXT4-fs (mmcblk0p1): mounted filesystem with ordered data mode. Opts: (null). Quota mode: none.
+[    9.776774] Rootfs mounted over mmcblk0p1
+[    9.795515] Switching from initrd to actual rootfs
+[   10.173440] systemd[1]: System time before build time, advancing clock.
+[   10.262663] NET: Registered PF_INET6 protocol family
+[   10.263386] Segment Routing with IPv6
+[   10.263394] In-situ OAM (IOAM) with IPv6
+[   10.302423] systemd[1]: systemd 249.11-0ubuntu3.17 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT +GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY -P11KIT -QRENCODE +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[   10.302774] systemd[1]: Detected architecture arm64.
+[   10.312203] systemd[1]: Hostname set to <gradient-desktop>.
+[   10.330014] systemd[1]: Using hardware watchdog 'NVIDIA Tegra186 WDT', version 0, device /dev/watchdog
+[   10.330033] systemd[1]: Set hardware watchdog to 2min.
+[   10.752081] systemd[1]: /lib/systemd/system/snapd.service:23: Unknown key name 'RestartMode' in section 'Service', ignoring.
+[   10.768950] systemd[1]: /etc/systemd/system/nvs-service.service:41: Standard output type syslog is obsolete, automatically updating to journal. Please update your unit file, and consider removing the setting altogether.
+[   10.781149] systemd[1]: /etc/systemd/system/nvargus-daemon.service:42: Standard output type syslog is obsolete, automatically updating to journal. Please update your unit file, and consider removing the setting altogether.
+[   10.874576] systemd[1]: Queued start job for default target Graphical Interface.
+[   10.876479] systemd[1]: Created slice Slice /system/modprobe.
+[   10.877226] systemd[1]: Created slice Slice /system/serial-getty.
+[   10.877859] systemd[1]: Created slice Slice /system/systemd-fsck.
+[   10.878332] systemd[1]: Created slice User and Session Slice.
+[   10.878499] systemd[1]: Started Forward Password Requests to Wall Directory Watch.
+[   10.878862] systemd[1]: Set up automount Arbitrary Executable File Formats File System Automount Point.
+[   10.879030] systemd[1]: Reached target Slice Units.
+[   10.879087] systemd[1]: Reached target Mounting snaps.
+[   10.879134] systemd[1]: Reached target Mounted snaps.
+[   10.879191] systemd[1]: Reached target Swaps.
+[   10.879244] systemd[1]: Reached target Local Verity Protected Volumes.
+[   10.879397] systemd[1]: Listening on Device-mapper event daemon FIFOs.
+[   10.879662] systemd[1]: Listening on LVM2 poll daemon socket.
+[   10.886093] systemd[1]: Listening on RPCbind Server Activation Socket.
+[   10.886460] systemd[1]: Listening on Syslog Socket.
+[   10.886714] systemd[1]: Listening on fsck to fsckd communication Socket.
+[   10.886873] systemd[1]: Listening on initctl Compatibility Named Pipe.
+[   10.887243] systemd[1]: Listening on Journal Audit Socket.
+[   10.887470] systemd[1]: Listening on Journal Socket (/dev/log).
+[   10.907117] systemd[1]: Listening on Journal Socket.
+[   10.907451] systemd[1]: Listening on udev Control Socket.
+[   10.917309] systemd[1]: Listening on udev Kernel Socket.
+[   10.918641] systemd[1]: Mounting Huge Pages File System...
+[   10.919969] systemd[1]: Mounting POSIX Message Queue File System...
+[   10.935680] systemd[1]: Mounting Kernel Debug File System...
+[   10.937032] systemd[1]: Mounting Kernel Trace File System...
+[   10.939306] systemd[1]: Starting Journal Service...
+[   10.939740] systemd[1]: Finished Availability of block devices.
+[   10.958576] systemd[1]: Starting Set the console keyboard layout...
+[   10.960132] systemd[1]: Starting Create List of Static Device Nodes...
+[   10.971281] systemd[1]: Starting Monitoring of LVM2 mirrors, snapshots etc. using dmeventd or progress polling...
+[   10.972658] systemd[1]: Starting Load Kernel Module configfs...
+[   10.987949] systemd[1]: Starting Load Kernel Module drm...
+[   10.989377] systemd[1]: Starting Load Kernel Module efi_pstore...
+[   10.990961] systemd[1]: Starting Load Kernel Module fuse...
+[   10.992967] systemd[1]: Starting NVIDIA specific first-boot udev script...
+[   11.012251] systemd[1]: Started Nameserver information manager.
+[   11.012555] systemd[1]: Reached target Preparation for Network.
+[   11.012831] systemd[1]: Condition check resulted in File System Check on Root Device being skipped.
+[   11.043733] systemd[1]: Starting Load Kernel Modules...
+[   11.045393] systemd[1]: Starting Remount Root and Kernel File Systems...
+[   11.046779] systemd[1]: Starting Coldplug All udev Devices...
+[   11.049075] systemd[1]: Started Journal Service.
+[   11.054092] fuse: init (API version 7.34)
+[   11.061105] EXT4-fs (mmcblk0p1): re-mounted. Opts: (null). Quota mode: none.
+[   11.086311] systemd-journald[230]: Received client request to flush runtime journal.
+[   11.123560] nvsciipc: loading out-of-tree module taints kernel.
+[   11.124580] nvsciipc: loaded module
+[   11.185018] nvmap_heap_init: nvmap_heap_init: created heap block cache
+[   11.185624] nvmap_page_pool_init: Total RAM pages: 1950580
+[   11.185628] nvmap_page_pool_init: nvmap page pool size: 243822 pages (952 MB)
+[   11.185895] nvmap_background_zero_thread: PP zeroing thread starting.
+[   11.208454] tegra-host1x 13e00000.host1x: Adding to iommu group 4
+[   11.209247] host1x-context host1x-ctx.0: Adding to iommu group 5
+[   11.209424] host1x-context host1x-ctx.1: Adding to iommu group 6
+[   11.209543] host1x-context host1x-ctx.2: Adding to iommu group 7
+[   11.209660] host1x-context host1x-ctx.3: Adding to iommu group 8
+[   11.209784] host1x-context host1x-ctx.4: Adding to iommu group 9
+[   11.209904] host1x-context host1x-ctx.5: Adding to iommu group 10
+[   11.210020] host1x-context host1x-ctx.6: Adding to iommu group 11
+[   11.210135] host1x-context host1x-ctx.7: Adding to iommu group 12
+[   11.210299] host1x-context host1x-ctx.8: Adding to iommu group 13
+[   11.210421] host1x-context host1x-ctx.9: Adding to iommu group 14
+[   11.210536] host1x-context host1x-ctx.10: Adding to iommu group 15
+[   11.210670] host1x-context host1x-ctx.11: Adding to iommu group 16
+[   11.210820] host1x-context host1x-ctx.12: Adding to iommu group 17
+[   11.210932] host1x-context host1x-ctx.13: Adding to iommu group 18
+[   11.211060] host1x-context host1x-ctx.14: Adding to iommu group 19
+[   11.211176] host1x-context host1x-ctx.15: Adding to iommu group 20
+[   11.466754] nvgpu: module verification failed: signature and/or required key missing - tainting kernel
+[   11.479350] nvgpu: 17000000.gpu          nvgpu_nvhost_syncpt_init:122  [INFO]  syncpt_unit_base 60000000 syncpt_unit_size 4000000 size 10000
+[   11.479350]
+��I/TC: WARNING (insecure configuration): Failed to get monotonic counter for REE FS, using 0
+E/TC:?? 00 syscall_storage_obj_open:221 Object corrupt
+E/TC:?? 00
+E/TC:?? 00 TA panicked with code 0xffff0007
+E/LD:   Status
+
+===== 1. kexec trigger (fire.sh: staged sha re-check, then setsid nohup slmos-kexec over ssh)
+===== file fire-k02.log
+ssh up 2026-11-11T18:55:20Z
+board  e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735  /root/slmos-closeout-removal-5d70fdbd.elf
+sha MATCH
+kexec fire 2026-11-11T18:55:29Z
+fire ssh rc=0
+
+===== 2. console, Linux kexec to slmos>
+===== labctl serial_capture tool_use_id=toolu_019cCBvXbKqcCnChnBNzAUUZ args={"port_name": "jetson-nano-2", "timeout": 300, "until_pattern": "slmos>|KERNEL PANIC|PAGE FAULT|Unhandled Exception|System halted"}
+[Captured 347 lines in 107.8s, pattern 'slmos>|KERNEL PANIC|PAGE FAULT|Unhandled Exception|System halted' matched]
+[   22.426787] overlayfs: idmapped layers are currently not supported
+
+Ubuntu 22.04.5 LTS gradient-desktop ttyTCU0
+
+gradient-desktop login: [   49.641273] tegra-ivc-bus bc00000.rtcpu:ivc-bus:echo@0: ivc channel driver missing
+[   49.641286] tegra-ivc-bus bc00000.rtcpu:ivc-bus:dbg@1: ivc channel driver missing
+[   49.641289] tegra-ivc-bus bc00000.rtcpu:ivc-bus:dbg@2: ivc channel driver missing
+[   49.641292] tegra-ivc-bus bc00000.rtcpu:ivc-bus:diag@5: ivc channel driver missing
+[   53.895418] nvgpu: 17000000.gpu               nvgpu_wait_for_idle:150  [WRN]  Timed out waiting for idle (2)!
+[   53.895418]
+[   55.763421] tegra-hda 3510000.hda: azx_get_response timeout, switching to polling mode: last cmd=0x004f0900
+[   58.123425] nvgpu: 17000000.gpu               nvgpu_wait_for_idle:150  [WRN]  Timed out waiting for idle (2)!
+[   58.123425]
+[   58.123436] nvgpu: 17000000.gpu                     nvgpu_quiesce:1306 [ERR]  failed to idle GPU, err=-110
+[   58.123810] kexec_core: Starting new kernel
+EL2
+
+========================================
+  SLM-OS v0.4.0 build 20261111182808 (5d70fdbd)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Jetson Orin Nano
+[INFO] DTB parsed successfully at 0x82bd5000
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x80000000 - 0x280000000 (8192 MB)
+  UART:      0xc280000 (IRQ 146)
+  GIC dist:  0xf400000
+  GIC cpu:   0xf440000
+  CPUs:      6
+  Timer IRQ: 26
+  Firmware entropy: rng-seed=0 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000000 - 0x8028fcb8
+  .data:   0x80870000 - 0x80894400
+  .bss:    0x808a0000 - 0x82bd0170
+  End:     0x82be0000
+  RAM:     0x80000000 - 0x280000000 (8192 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x80ac7000
+  Blocks mapped: 1025
+  Bytes mapped: 2050 MB
+  L1[0]: 0x80ac5003 (covers VA 0x0)
+  L1[1]: 0x80ac2003 (covers VA 0x40000000)
+  L1[2]: 0x80ac6003 (covers VA 0x80000000)
+  L1[3]: 0x80ac4003 (covers VA 0xc0000000)
+  L1[4]: 0x4000010000070d (covers VA 0x100000000)
+  L1[5]: 0x4000014000070d (covers VA 0x140000000)
+  L1[6]: 0x4000018000070d (covers VA 0x180000000)
+  L1[7]: 0x400001c000070d (covers VA 0x1c0000000)
+  L1[8]: 0x4000020000070d (covers VA 0x200000000)
+  L1[212]: 0x80ac3003 (covers VA 0x3500000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x80000000) = 0x80000000
+  [PASS] virt_to_phys(0xffffff8080000000) = 0x80000000
+  [PASS] is_mapped(0x80000000) = true
+  [PASS] is_mapped(0x2c0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+[ga10b-reserve] reserved kexec'd channel inst block at phys=0x13cb0c000 (size=4096, FECS_CURRENT_CTX=0x3013cb0c, target=3)
+[ga10b-reserve] runlist submit_base reads poison (lo=0xbadf1100 hi=0xbadf1100) — wrong pri_base offset or GPU power-gated. Skipping.
+[ga10b-reserve] scanning DRAM for handoff magic (all pipeline kinds)...
+[ga10b-reserve] kind=0 (mnist): handoff @0x13c2b6000
+[ga10b-reserve]   reserved handoff dmabuf @0x13c2b6000 (4 KB)
+[ga10b-reserve]   reserved handoff inst block @0x1351e7000
+[ga10b-reserve]   reserved userd @0x135245000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x135246000 (4096 B)
+[ga10b-reserve]   reserved pushbuf @0x13c5d0000 (65536 B)
+[ga10b-reserve]   reserved sem @0x13c9f4000 (4096 B)
+[ga10b-reserve]   reserved qmd_pool @0x13ca80000 (262144 B)
+[ga10b-reserve]   reserved pipeline_ops @0x13c43b000 (4096 B)
+[ga10b-reserve]   per-op shader (v7.1): 8 direct, 0 walked (0 ok), 4 unique reservations
+[ga10b-reserve]   reserved gr_ctx_extents array @0x13c2b7000
+[ga10b-reserve]   gr_ctx: 15 extents reserved (4412 KB total), 0 skipped
+[ga10b-reserve]   handoff@0x13c2b6000 v=7 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=1 (sched_mlp): handoff @0x13cae4000
+[ga10b-reserve]   reserved handoff dmabuf @0x13cae4000 (4 KB)
+[ga10b-reserve]   reserved userd @0x13cb0d000 (4096 B)
+[ga10b-reserve]   reserved gpfifo @0x13cb0e000 (4096 B)
+[ga10b-reserve]   reserved pushbuf @0x13cba0000 (65536 B)
+[ga10b-reserve]   reserved sem @0x13cad8000 (4096 B)
+[ga10b-reserve]   reserved pipeline_ops @0x13cad3000 (4096 B)
+[ga10b-reserve]   per-op shader: v6 ops carry no shader fields — covered by the channel-VM reserve
+[ga10b-reserve]   reserved gr_ctx_extents array @0x13c39a000
+[ga10b-reserve]   gr_ctx: 17 extents reserved (4920 KB total), 0 skipped
+[ga10b-reserve]   handoff@0x13cae4000 v=6 no v9 extents (n=0 extents_phys=0x0) — skipping
+[ga10b-reserve] kind=2 (eviction_qnet): no handoff
+[ga10b-reserve]   vm @inst 0x1351e7000: 8 tables, 910 pages (3640 KB) in 84 ranges
+[ga10b-reserve]   vm @inst 0x13cb0c000: 8 tables, 917 pages (3668 KB) in 54 ranges
+[ga10b-reserve]   vm @inst 0x13cb0c000: PDB 0x13cb04000 already reserved
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x82be0000 - 0x280000000
+  Total pages:     2085920 (8343680 KB)
+  Free pages:      1804168 (7216672 KB)
+  Used pages:      281752 (1127008 KB)
+  Reserved:        11232 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 92 blocks
+    Order  1 (    8 KB): 80 blocks
+    Order  2 (   16 KB): 63 blocks
+    Order  3 (   32 KB): 56 blocks
+    Order  4 (   64 KB): 53 blocks
+    Order  5 (  128 KB): 44 blocks
+    Order  6 (  256 KB): 32 blocks
+    Order  7 (  512 KB): 28 blocks
+    Order  8 ( 1024 KB): 19 blocks
+    Order  9 ( 2048 KB): 13 blocks
+    Order 10 ( 4096 KB): 14 blocks
+    Order 11 ( 8192 KB): 8 blocks
+    Order 12 (16384 KB): 14 blocks
+    Order 13 (32768 KB): 11 blocks
+    Order 14 (65536 KB): 10 blocks
+    Order 15 (131072 KB): 6 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 18 (1048576 KB): 2 blocks
+    Order 19 (2097152 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xbde00000 - 0xbe000000 (2048 KB)
+[INFO] NC memory: clean+invalidate by VA, 32768 lines of 64 B, 10666 us; 0 changed, 0 restored in the first 20 KB (hash 0x2992b6aa5054cfdb -> 0x2992b6aa5054cfdb)
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv3
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=8B
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 6 CPUs configured
+[INFO] SMP: 5/5 secondary CPUs online
+[INFO] SMP: total 6 CPUs active
+[INFO] cpufreq: CPU 1 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 2 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 3 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 4 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+[INFO] cpufreq: CPU 5 NDIV 9 (115 MHz) -> 105 (1344 MHz), matching CPU 0
+
+SMP Validation Tests:
+  [PASS] All 6 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU 4 online flag set
+  [PASS] CPU 5 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 65536 KB (16384 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (16384 blocks x 4096 bytes = 65536 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (16384 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x200000000 (1024 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (1024 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[INFO] HSP@0x3c00000: DIMENSIONING=0x0008a228 (SM=8 SS=2 AS=2)
+[INFO] HSP doorbells: CCPLEX@0x3c90100 BPMP@0x3c90300
+[INFO] BPMP/IVC: TX@0x40070000 RX@0x40071000 (pre-handshake)
+[INFO] BPMP/IVC: initial TX state=0x00000000 count=11401 (rx-count observed by us=11401)
+[INFO] BPMP/IVC: initial RX state=0x00000000 count=11401 (rx-count observed by us=11401)
+[INFO] IVC: handshake complete (us=Established, peer observed Ack)
+[INFO] BPMP init: rc=0
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] BPMP: MRQ_PING round-trip OK
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+[INFO] fan: PWM3 at 11027028 Hz (pfm 0), level 73/255, tachometer on
+[INFO] GPU raw BOOT_0 read: 0xb7b000a1 (expect 0xB7B000A1 for GA10B)
+[GPU] Registered driver: nvidia
+[GPU] Initializing nvidia driver...
+[INFO] GPU-NV: Probing NVIDIA GPU at 0x17000000...
+[GPU-NV] NVIDIA GPU detected: GA10B (Jetson Orin)
+[GPU-NV]   BOOT_0:  0xb7b000a1
+[GPU-NV]   BOOT_42: 0x17ba1000
+[GPU-NV]   Chip ID: 0x17b (arch=0x17, impl=0xb)
+[GPU-NV]   Silicon: rev 10.1
+[GPU-NV]   Ampere:  yes
+[GPU-NV]   Enable:  0x50000000
+[GPU] Initialization complete
+[GSP-JETSON] platform shim installed
+[INFO] pcie: no backend available on this platform (-4)
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+[INFO] xhci: FPCI dev/vendor=0x229810de (expect 0x229810de), BAR2[0]=0x00140009
+[INFO] xhci: pre-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: post-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+[INFO] xhci: CSB probe FALC_CPUCTL=0xffffffff (STARTCPU=1 HALTED=1 STOPPED=1)
+[INFO] xhci: CSB probe MP_APMAP=0xffffffff (BOOTPATH=1)
+[INFO] xhci: CSB probe CSBRANGE readback=0x0000080c (expected 0x0000080c — MP_APMAP's page)
+[INFO] xhci: HCI v1.20, 36 slots, 8 ports, 5 intrs, 64-bit addr, 64-byte ctx
+[INFO] xhci: pre-reset USBCMD=0x00000000 USBSTS=0x00000001
+[INFO] xhci: skipping HCRST on Tegra (Falcon-reset is BPMP-only); using the Linux-left halted state as the init baseline
+[INFO] xhci: allocated 3 scratchpads (4096 bytes each)
+[INFO] xhci: pre-program DCBAAP=0000007ffffff000 CRCR=0000000000000000 CONFIG=0x00000024 USBSTS=0x00000001
+[INFO] xhci: inherited DCBAA probe skipped (ptr=0x7ffffff000)
+[INFO] xhci: slot1 fdt-node handoff devctx=0x7fffff6000 root=6 slot_dw3=0x10000001 ep0_dw2=0xffff4641 ep0_dw3=0x0000007f
+[INFO] xhci: slot3 bootarg handoff skipped code=3
+[INFO] xhci: dtb path probe rc: /=0 /cpus=-4 /aliases=-4
+[INFO] xhci: dtb root dump aborted (bad token=0x0)
+[INFO] xhci: slot3 handoff raw magic=0xca5996fa version=755432506 slot=258498889 root=3884501888 devctx=0xdc491ff584f66b57 dcbaap=0xc356f6794b508908
+[INFO] xhci: slot3 handoff rejected
+[INFO] xhci: post-RUN write USBCMD=0x00000001 USBSTS=0x00000000
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: cached Tegra FPCI context hs_pls=0x00000000 fs_pls=0x00000000 hsfs_speed=0x00000000 hsfs_pp=0x00000000 aru_ctx=0x00000000 axi=0x0000000a cfg24=0x00002032 cfg16=0x00000000
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS)
+[INFO] xhci: inherited-slot probe leaving slot 1 EP0 untouched for adoption
+[INFO] xhci: inherited-slot probe leaving slot 3 EP0 untouched for adoption
+[INFO] xhci: inherited-slot scrub keeping slot 1 for adoption probe
+[INFO] xhci: inherited-slot scrub disabled stale slot 2
+[INFO] xhci: inherited-slot scrub disabled stale slot 3
+[INFO] xhci: inherited-slot scrub cleared 2 stale slot(s)
+[INFO] xhci: registered with usb_core — running Phase 3A Steps 5-7
+[INFO] xhci: port 0 portsc=0x0c001663 connected=1 speed=0
+[INFO] xhci: port 1 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 2 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 3 portsc=0x0a0002a0 connected=0 speed=0
+[INFO] xhci: port 4 portsc=0x000002a0 connected=0 speed=0
+[INFO] xhci: port 5 portsc=0x00000e63 connected=1 speed=3
+[INFO] xhci: USB 2.0 device attached at init on PORTSC[5] — unplug and re-insert to enumerate (see #309)
+[INFO] xhci: stale port on PORTSC[5] is already enabled and matches inherited slot1 handoff (0x00000e63) — skipping reset and reusing retained slot1 state
+[INFO] xhci: pre-reset UTMI lane 1 mux 0x00000055->0x00000055 cap 0x00000113->0x00000113 bias 0x060e0338->0x060e0338 ctl0 0x06cc88d1->0x02cc88d1 ctl1 0x1e10100c->0x1e101008
+[INFO] xhci: PORTSC[5] request-resume for connected-disabled reuse (0x00000e63 -> 0x00000fe3, pls 3 -> 15)
+[INFO] xhci: skipping root-port reset on connected-disabled PORTSC[5] (0x00000fe3, pls=15)
+[INFO] xhci: PORTSC[5] finish-resume for device_open pre-ep0 (0x00000fe3 -> 0x00400e03, pls 15 -> 0)
+[INFO] xhci: PORTSC[5] acked change bits for device_open pre-ep0 (0x00400e03 -> 0x00000e03)
+[INFO] xhci: PORTSC[5] post-resume change-ack for device_open pre-ep0 (0x00400e03 -> 0x00000e03)
+[INFO] xhci: adopt slot 1 skipping STOP_EP(ep0) because inherited state is stopped
+[INFO] xhci: adopted inherited slot 1 for high-speed root device (root_port=6 ring=0xbde0a9c0 retained_devctx=0x7fffff6000)
+[INFO] xhci: post-adopt local devctx=0xbde09980 slot route=0x0 speed=3 ctx=1 root=6 addr=1 state=addressed dw0=0x08300000 dw1=0x00060000 dw2=0x00000000 dw3=0x10000001
+[INFO] xhci: post-adopt local devctx ep0 state=stopped type=4 mps=64 tr=0xbde0a9c0 dcs=1 avg=0 dw0=0x00000003 dw1=0x00400026 dw2=0xbde0a9c1 dw3=0x00000000 dw4=0x00000000
+[INFO] xhci: post-adopt inherited-slot1 phys=0x7fffff6000 slot route=0x0 speed=3 ctx=1 root=6 addr=1 state=addressed dw0=0x08300000 dw1=0x00060000 dw2=0x00000000 dw3=0x10000001
+[INFO] xhci: post-adopt inherited-slot1 ep0 state=stopped type=4 mps=64 tr=0x7fffff4640 dcs=1 avg=0 dw0=0x00000003 dw1=0x00400026 dw2=0xffff4641 dw3=0x0000007f dw4=0x00000000
+[INFO] usb_core: retained descriptor bounce @0xbde0adc0 len=256
+[INFO] usb_core: using NC bounce for root initial descriptor buf=0xbde0adc0 len=64
+[INFO] usb_core: reusing inherited device address 1 after initial descriptor
+[INFO] xhci: configure ep 0x81 slot=1 dci=3 speed=3 raw_interval=12 encoded_interval=11 ep_dw0=0x000b0000 ep_dw1=0x0001003e ep_dw2=0xbde0aec1 ep_dw3=0x00000000 ep_dw4=0x00010001
+[INFO] xhci: ep 0x81 configured (dci=3, type=7, mps=1)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x5489 class=0x09
+[INFO] usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child
+[INFO] xhci: slot 2 enabled for port 6
+[INFO] xhci: address ctx route=0x3 speed_id=3 root_port=6 slot_dw0=0x08300003 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0c301 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: slot 2 addressed (speed=3, port=6, BSR=1)
+[INFO] xhci: post-address local devctx=0xbde0b2c0 slot route=0x3 speed=3 ctx=1 root=6 addr=0 state=default dw0=0x08300003 dw1=0x00060000 dw2=0x00000000 dw3=0x08000000
+[INFO] xhci: post-address local devctx ep0 state=running type=4 mps=64 tr=0xbde0c300 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0c301 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: using NC bounce for child initial descriptor buf=0xbde0adc0 len=64 route=0x3 root_port=6
+[INFO] xhci: queueing child post-short NO_OP after event retirement (slot=2)
+[INFO] xhci: child post-short NO_OP cc=1 (slot=2)
+[INFO] xhci: address ctx route=0x3 speed_id=3 root_port=6 slot_dw0=0x08300003 slot_dw1=0x00060000 ep0_dw0=0x00000000 ep0_dw1=0x00400026 ep0_dw2=0xbde0c301 ep0_dw3=0x00000000 ep0_dw4=0x00000000
+[INFO] xhci: syncing child slot 2 with ADDRESS_DEVICE(BSR=0) route=0x3 root_port=6 addr=0
+[INFO] xhci: post-live-address-bsr0 local devctx=0xbde0b2c0 slot route=0x3 speed=3 ctx=1 root=6 addr=6 state=addressed dw0=0x08300003 dw1=0x00060000 dw2=0x00000000 dw3=0x10000006
+[INFO] xhci: post-live-address-bsr0 local devctx ep0 state=running type=4 mps=64 tr=0xbde0c300 dcs=1 avg=0 dw0=0x00000001 dw1=0x00400026 dw2=0xbde0c301 dw3=0x00000000 dw4=0x00000000
+[INFO] usb_core: child ADDRESS_DEVICE(BSR=0) sync after initial descriptor rc=0 route=0x3 root_port=6 target=2
+[INFO] usb_core: selecting CDC-ECM config index 1 value 2 over default config index 0
+[INFO] xhci: batching CONFIGURE_ENDPOINT slot=2 endpoints=3 max_dci=7 first_ep=0x83
+[INFO] xhci: patching fresh slot 2 configure ctx addr/state (addr 6->2 state 2->2 ep=0x83)
+[INFO] xhci: configure ep 0x83 slot=2 dci=7 speed=3 raw_interval=8 encoded_interval=7 ep_dw0=0x00070000 ep_dw1=0x0010003e ep_dw2=0xbde0c701 ep_dw3=0x00000000 ep_dw4=0x00100010
+[INFO] xhci: configure ep 0x81 slot=2 dci=3 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000036 ep_dw2=0xbde0cb01 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: configure ep 0x02 slot=2 dci=4 speed=3 raw_interval=0 encoded_interval=0 ep_dw0=0x00000000 ep_dw1=0x02000016 ep_dw2=0xbde0cf01 ep_dw3=0x00000000 ep_dw4=0x00000000
+[INFO] xhci: ep 0x83 configured (dci=7, type=7, mps=16)
+[INFO] xhci: ep 0x81 configured (dci=3, type=6, mps=512)
+[INFO] xhci: ep 0x02 configured (dci=4, type=2, mps=512)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] xhci: ep 0x02 already configured (dci=4)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x00
+[INFO] usb_core: hub port 3: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+[INFO] xhci: hot-plug ready — waiting for USB device attach (see #309 for the re-plug requirement on kexec boots)
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'net_pump'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] cdc_ecm: activated interface 1 alt 1
+[INFO] cdc_ecm: probed — mac=a0:ce:c8:0e:9a:21 mtu=1514 bulk_in=0x81 bulk_out=0x02
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 mode[INFO] cdc_ecm: notification endpoint 0x83 on ctrl iface 0
+l preload(s) from /mnt/files/preload.conf
+[INFO] Initializing network subsystem...
+[INFO] cdc_ecm: NC DMA pools ready (rx=4 tx=4 size=2048 notify=16)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: a0:ce:c8:0e:9a:21
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP auto-start deferred until link-ready (timeout 10000 ms)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+[INFO] cdc_ecm: network connection down (if=0)
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>
+
+===== 3. cat /sys/version
+===== labctl serial_send tool_use_id=toolu_01H1aRK17ac9AFUrcGYakdof args={"port_name": "jetson-nano-2", "data": "cat /sys/version", "capture_until": "slmos>", "capture_timeout": 15, "confirm_token": "B7g8uvMHwm-j510C9T8Chw"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+smu��s��ɕ�ͥ��5
+name:    SLM-OS
+version: 0.4.0
+build:   20261111182808
+commit:  5d70fdbd
+slmos>
+slmos>
