@@ -1,0 +1,12 @@
+#!/bin/bash
+# build-cell.sh <worktree> <tag> [make vars...] : Jetson build of one cell; copies elf+bin, records hashes.
+W=$1 T=$2; shift 2; S=$(dirname "$0"); export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+L=$S/cells/$T.build.log
+( cd "$W" && make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO "$@" ) > "$L" 2>&1; rc=$?
+if [ $rc -ne 0 ]; then echo "$T FAILED rc=$rc" | tee -a $S/cells/MANIFEST.txt; exit 1; fi
+cp "$W/build/kernel/slmos.elf" $S/cells/slmos-r3-$T.elf; cp "$W/build/kernel/slmos.bin" $S/cells/slmos-r3-$T.bin
+B=$(strings -a $S/cells/slmos-r3-$T.elf | grep -m1 -E 'build [0-9]{14} \(' )
+printf '%s head=%s vars="%s" banner="%s"\n  elf sha256=%s size=%s\n  bin sha256=%s size=%s\n' "$T" "$(git -C "$W" rev-parse --short=8 HEAD)" "$*" "$B" \
+  "$(sha256sum < $S/cells/slmos-r3-$T.elf | cut -c1-64)" "$(stat -c %s $S/cells/slmos-r3-$T.elf)" \
+  "$(sha256sum < $S/cells/slmos-r3-$T.bin | cut -c1-64)" "$(stat -c %s $S/cells/slmos-r3-$T.bin)" >> $S/cells/MANIFEST.txt
+echo "$T ok"

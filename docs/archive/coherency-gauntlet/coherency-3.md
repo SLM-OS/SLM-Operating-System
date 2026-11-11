@@ -65,3 +65,101 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
 4. **Log and evidence branches.** `gauntlet/coherency-3` from
    `gauntlet/coherency-2` @ b6f0beed; `gauntlet-3-hw-pi5` and
    `gauntlet-3-hw-jetson` from main 85f51ffd.
+5. **The stack (heads at 03:46Z).** main 85f51ffd (nothing merged since
+   2026-11-09); #1208 `fix-boot-1194-1197-1198` ad8e4fa7 (not touched);
+   #1209 `fix/boot-path-1193` 59a85926; #1215 `c1/test-wait-helper`
+   a03fc75b (three commits: 4141843a, 30dc24bc, a03fc75b); #1217
+   `c2/steal-instrument-1203` 983bddc9; #1218 90f0d9e3; removal
+   `coherency-remove-nc-axis` e94c251a on `c1/boot-path-plus-helper`
+   63eed0c4. None merged, so the base is the stack, not main.
+   - New base `c1/boot-path-plus-helper` **638e297d** = 59a85926 plus
+     #1215's three commits cherry-picked (3675de05, 13cdb4ec, 638e297d).
+     The old base carried only #1215's first two; the third adds
+     `docs/testing.md` only. Pushed with a lease on 63eed0c4.
+   - The removal range has 40 commits including 5 merges from run 1, whose
+     hand-resolved conflicts neither a plain rebase nor `--rebase-merges`
+     replays (both stopped on conflicts in `kernel/src/coherency.c`,
+     `kernel/tests/test_coherency.c`, `docs/shell.md`). The base delta
+     (63eed0c4 to 638e297d) touches only `docs/adr/0007-cross-cpu-coherency.md`
+     and `docs/testing.md`, no removal commit touches either, and the range
+     has one root (0f310422, parent 63eed0c4). So every commit was
+     re-parented with its tree's two files replaced by the new base's copies
+     (`run3-tools/c0/graft.sh.txt`), which is the result a conflict-free
+     rebase gives. Checks: the new head descends from 638e297d and 59a85926;
+     `git diff <base> <tip>` is byte-identical for old and new; old tip and
+     new tip differ only in those two files (+14, +26 lines); 40 commits, 5
+     merges.
+   - **Removal head for every Pi 5 count and every removal cell this run:
+     `coherency-remove-nc-axis` @ 79c10261** (pushed with a lease on
+     e94c251a).
+   - /ci on 79c10261 (`run3-tools/ci-79c10261/summary.txt`, logs beside
+     it): steps 1 to 10 passed (ARM64, x86-64 and Jetson real-weights
+     builds; `make test` ARM64, x86-64 and `AI_SCHED=ON`; runtime-test 308
+     and 328 passed, 0 failed; check-braces 0 violations, 0 unparsed, 12
+     configurations, one "not checked" host-tool header under `scripts/`;
+     build order; Jetson UEFI layout `All checks passed.`, no `!` lines;
+     diff check, no artifacts). `make test WORK_STEALING=ON`: attempt 1 at
+     04:11Z, run while the orchestrator's Jetson cell builds ran, failed
+     (`[FAIL] batch: stress workload (4x8) completes + rejects bad args`,
+     then the 120 s cap, signal 15;
+     `11-test-work-stealing-attempt1-concurrent-builds.log`); attempt 2 at
+     04:18Z, alone, `PASSED - All tests passed (exit code 0)`, 0 `[FAIL]`
+     lines. Recorded as green on attempt 2, with attempt 1 kept and the
+     load explanation labelled a hypothesis (load average was about 2.8 on
+     8 cores, which is not heavy). See item 6 for a second occurrence.
+6. **Instrumentation head: `c2/steal-instrument-1203` @ 1b27eea4** (PR
+   #1217, fast-forward from 983bddc9; body updated). One commit:
+   victim-side `preempt_disabled` windows mirrored at every ARM64 write
+   site (schedule()'s switch window and resume, coop tick,
+   scheduler_start, task_entry_wrapper, the SECONDARY_PREEMPT trampoline)
+   with reasons T, C, P, O, B; per-CPU hardware tick times from
+   `sched_note_hw_tick()`; per-thief position of each attempt against CPU
+   1's window and tick and its own tick; c2t format v2 from the post-run
+   snapshot. No branch changed; no lock, atomic or print on the steal path.
+   The first version, 26063dfd (never pushed), failed to build without
+   work stealing (`STEAL_WIN_BOOT` undeclared, `instr-gate-26063dfd`);
+   1b27eea4 includes `steal_trace.h` unconditionally, and every cell was
+   rebuilt from it. Gate on 1b27eea4 (`run3-tools/c0/instr-gate/`):
+   `make test` default PASSED; `WORK_STEALING=ON` PASSED; `WORK_STEALING=ON
+   AI_SCHED=ON` PASSED; x86-64 `WORK_STEALING=ON` PASSED; on cell A's head
+   6608cbd0 `NC_AXIS=OFF` PASSED (the switch exists only on run 1's
+   lineage, not on main, so this is where it was tested). An extra
+   combination, `NC_AXIS=OFF WORK_STEALING=ON` on 6608cbd0, failed twice:
+   attempt 1 the same batch-stress failure and 120 s cap as /ci attempt 1;
+   attempt 2 (load average 1.3) `test_litmus_patterns_pass`,
+   `test_coherency.c:594`, `mp_weak_rows` 1 where 0 is expected (a reader
+   that never saw its row in progress; `forbidden` and `timeouts` were 0).
+   A control on cbab2fc6 (run 2's cell without this commit) is recorded
+   in Entry 1.
+7. **Cell images, built 04:03 to 04:27Z** (`run3-tools/c0/cells-MANIFEST.txt`,
+   images in the orchestrator's scratchpad `cells/`; one Jetson build per
+   cell serves kexec (`.elf`) and UEFI-direct (`.bin`); the banner string
+   is what `cat /sys/version` prints):
+
+   | Tag | Cell | Head | Vars | elf sha256 | bin sha256 |
+   |---|---|---|---|---|---|
+   | fixboot-59a85926 | C2 step 0 | 59a85926 | | 556bb724 | f5df040b |
+   | nc-instr | C (kexec), F (UEFI) | 1b27eea4 | | 77803fb2 | 405c7b43 |
+   | removal-instr | D (UEFI), E (kexec) | 8fc7c88a = 79c10261 + 983bddc9 + 1b27eea4 | | d740b83f | 061645b3 |
+   | ncoff-instr | A | 6608cbd0 = cbab2fc6 + 1b27eea4 | NC_AXIS=OFF | 48eb2cc2 | eec25e09 |
+   | ncoff-instr-v1 | B | 579b155a = 6608cbd0 + V1 | NC_AXIS=OFF | d325404d | a75e8850 |
+   | removal-instr-v1 | G | 0dfaae0c = 8fc7c88a + V1 | | 94cb467a | 54c4975b |
+
+   Cell A uses run 2's exact NC_AXIS=OFF code (cbab2fc6, 41 commits behind
+   main) so its rows compare with run 2's 20 files; B is A plus V1 only.
+   **V1 = `c2/wake-on-push-v1` @ 292eee0a**: the idle wait compiled on Pi 5
+   and on Jetson with JETSON_HW_TICK (the SECONDARY_PREEMPT branch of
+   `idle_task_func`) goes from `wfi` to `wfe`. The function has four other
+   `wfi`/`wfe` branches, all preprocessor alternatives for other
+   configurations; QEMU compiles none of them. The orchestrator chose V1
+   on that basis; C2 confirms or overrides before the first V cell. The
+   bare removal image for C3 is built later, offline. Pi 5 images are
+   built by C1 (two heads, independent of the instrumentation).
+8. **Lab schedule (single lane).** C1 holds pi-5-1 from 04:19Z (started
+   before the end of C0, because its builds and lab work do not depend on
+   the instrumentation; recorded as an orchestrator decision) until its
+   critic's reproduction is done; then C2 holds jetson-nano-2 until its
+   critic's reproduction is done; then C3. Nobody else calls labctl while
+   another component holds the lab. C2 prepares offline until its grant;
+   C1 runs #1213 in QEMU after its lab work. Handovers are log entries.
+9. **Milestone for issues filed this run: Backlog.**

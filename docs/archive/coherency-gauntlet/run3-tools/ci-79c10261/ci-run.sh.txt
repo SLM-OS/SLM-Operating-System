@@ -1,0 +1,18 @@
+#!/bin/bash
+# Serial /ci runner: one build at a time. Usage: ci-run.sh <worktree> <logdir>
+W=$1 L=$2; export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH; cd "$W" || exit 1
+git rev-parse HEAD > "$L/head.txt"; : > "$L/status.txt"
+step() { n=$1; shift; bash -c "$*" > "$L/$n.log" 2>&1; rc=$?; echo "$n rc=$rc $(date -u +%H:%M:%S)" >> "$L/status.txt"; [ $rc -eq 0 ] || { echo FAILED >> "$L/status.txt"; exit 1; }; }
+step 01-build-arm64 "make kernel-clean && make kernel PLATFORM=QEMU_VIRT"
+step 02-build-x86_64 "make kernel-clean && make kernel PLATFORM=X86_64"
+step 03-build-jetson-real "make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real"
+step 04-test-arm64 "make kernel-test-clean && make test"
+step 04b-test-x86_64 "make kernel-test-clean && make test PLATFORM=X86_64"
+step 05-test-ai-sched "make kernel-test-clean && make test AI_SCHED=ON"
+step 06-runtime-test "make runtime-test"
+step 07-check-braces "make test-check-braces && make check-braces"
+step 08-build-order "make test-build-order"
+step 09-jetson-uefi-layout "make test-jetson-uefi-layout; rc=\$?; cp build/jetson-layout-build.log $L/09-jetson-layout-build.log 2>/dev/null; exit \$rc"
+step 10-diff-check "git diff origin/main...HEAD --stat | tail -3; git status --short --untracked-files=all | grep -E '\.(o|obj|bin|elf|iso|a)\$' && exit 1 || true"
+step 11-test-work-stealing "make kernel-test-clean && make test WORK_STEALING=ON"
+echo DONE >> "$L/status.txt"

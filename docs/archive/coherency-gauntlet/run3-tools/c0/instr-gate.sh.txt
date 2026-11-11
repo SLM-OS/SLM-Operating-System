@@ -1,0 +1,10 @@
+#!/bin/bash
+S=$(dirname "$0"); export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH; L=$S/instr-gate; : > $L/status.txt
+g() { n=$1 w=$2; shift 2; ( cd $S/$w && git rev-parse HEAD && make kernel-test-clean && make "$@" ) > $L/$n.log 2>&1; echo "$n rc=$? $(date -u +%T) $(grep -m1 -E 'PASSED|FAILED' $L/$n.log)" >> $L/status.txt; }
+g 1-instr-test-default instr-test test
+g 2-instr-test-ws instr-test test WORK_STEALING=ON
+g 3-instr-test-ws-ai instr-test test WORK_STEALING=ON AI_SCHED=ON
+g 4-cellA-test-ncoff cellA-test test NC_AXIS=OFF
+g 5-cellA-test-ncoff-ws cellA-test test NC_AXIS=OFF WORK_STEALING=ON
+g 6-instr-x86 instr-test test PLATFORM=X86_64 WORK_STEALING=ON
+echo DONE >> $L/status.txt

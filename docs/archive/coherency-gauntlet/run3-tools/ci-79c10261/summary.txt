@@ -1,0 +1,29 @@
+HEAD 79c1026115ec98914665d75c23e4c3682dc3a8cc
+Branch: origin/coherency-remove-nc-axis (remote head matched 79c10261; clean tree)
+Date: 2026-11-11, local /ci (ci skill steps 1-10 plus make test WORK_STEALING=ON), PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+
+01-build-arm64 rc=0 03:50:55
+02-build-x86_64 rc=0 03:51:36
+03-build-jetson-real rc=0 03:55:01
+04-test-arm64 rc=0 03:57:29
+04b-test-x86_64 rc=0 03:58:54
+05-test-ai-sched rc=0 04:01:33
+06-runtime-test rc=0 04:04:19
+07-check-braces rc=0 04:05:24
+08-build-order rc=0 04:06:09
+09-jetson-uefi-layout rc=0 04:07:45
+10-diff-check rc=0 04:07:45
+11-test-work-stealing rc=2 04:11:16 (attempt 1, concurrent with Jetson cell builds; log renamed 11-test-work-stealing-attempt1-concurrent-builds.log)
+11-test-work-stealing rc=0 04:18:20 (attempt 2, alone)
+
+4  PASSED - All tests passed (exit code 0)
+4b PASSED - All tests passed (isa-debug-exit code 1 = success)
+5  PASSED - All tests passed (exit code 0)
+6  test result: ok. 308 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 75.65s test result: ok. 328 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 78.32s 
+7  All check-c-braces tests passed check-braces: no parse reached these, not checked: scripts/arm-smmu-noshutdown/arm_smmu_noshutdown.h check-braces: 0 violation(s), 0 file(s) unparsed; parses: JETSON_ORIN_NANO 288, JETSON_ORIN_NANO-test 290, JETSON_ORIN_NANO-wide 298, QEMU_VIRT 256, QEMU_VIRT-test 258, QEMU_VIRT-wide 277, RASPI5 264, RASPI5-test 266, RASPI5-wide 274, X86_64 204, X86_64-test 206, X86_64-wide 215 
+   could-not-parse lines: 0; not-checked lines: 1
+8  All build-order tests passed
+9  [32mAll checks passed.[0m  skipped(!) lines: 0
+10  scripts/check-cpu-cache-maint.py                   |   85 +  scripts/tests/test-check-cpu-cache-maint.sh        |   46 +  115 files changed, 8970 insertions(+), 2435 deletions(-) 
+11 attempt 1 (concurrent with Jetson cell builds, load avg about 2.8 on 8 cores): [FAIL] batch: stress workload (4x8) completes + rejects bad args, then the 120 s timeout (signal 15); log 11-test-work-stealing-attempt1-concurrent-builds.log
+11 attempt 2 (alone): PASSED - All tests passed (exit code 0); [FAIL] lines: 0

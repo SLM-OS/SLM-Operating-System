@@ -1,0 +1,18 @@
+fixboot-59a85926 head=59a85926 vars="" banner="  SLM-OS v0.4.0 build 20261111040345 (59a85926)"
+  elf sha256=556bb72436a5f859594f2b9a6dbc8d38e124872a08d5e7a78aabfd64ba373a66 size=10953280
+  bin sha256=f5df040bcf3c4fd4fdb8cca7eb6afa1fe4223248c7b2978cb771b4fda93ff396 size=8995912
+nc-instr head=26063dfd vars="" banner="  SLM-OS v0.4.0 build 20261111040606 (26063dfd)"
+  elf sha256=824374bcb4cdf78671fc7d9a9cb4925c2043ed3377c7754c45b1ab4a6c3ca168 size=10953488
+  bin sha256=c4e6e1fc3586b01ae9f5d734adba2e5c369d81e89b4dfbc2c5b77a46d99b90c7 size=8995912
+ncoff-instr head=bac33823 vars="NC_AXIS=OFF" banner="  SLM-OS v0.4.0 build 20261111040806 (bac33823)"
+  elf sha256=7c0d8fd33c07b4e0d55a7c432a12afbdd33655cfa57b47f944ce763d7b95aa9f size=10870056
+  bin sha256=df548e95249a009b6b901cdec97a6aed819afd254336105ce9a740c780ef7074 size=8930376
+ncoff-instr-v1 head=231a68c0 vars="NC_AXIS=OFF" banner="  SLM-OS v0.4.0 build 20261111041007 (231a68c0)"
+  elf sha256=bc1ec5546fbe56fc2952b4bf85a3e260f4c9d6408be572bb067983a4bdb41933 size=10870056
+  bin sha256=4478a706c85ed51e5412be15db25a774e470050f4c53624d016a1c726cc83d87 size=8930376
+removal-instr head=2a3f9023 vars="" banner="  SLM-OS v0.4.0 build 20261111041212 (2a3f9023)"
+  elf sha256=bbf990fcc2e8bdbe3f73e70a1e672aeb026915584f3a61c4340ce6f6542f8cf0 size=11024664
+  bin sha256=555b8649b925d1b911af5f8dcdd4ccd1797f52f59a70c8a84e5788677de7326e size=9061448
+removal-instr-v1 head=c0b5e75c vars="" banner="  SLM-OS v0.4.0 build 20261111041412 (c0b5e75c)"
+  elf sha256=ed699a366e9b09a09a958acd5e174e04544fff992f9edb0714afab19b9b4ec79 size=11024664
+  bin sha256=2e3fafae3fd02f1bc6c194c947033157f6dd1ee652db5d4ec1a2394d8b44ceb6 size=9061448
