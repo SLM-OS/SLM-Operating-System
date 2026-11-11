@@ -388,3 +388,92 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   with the definition of done (bars and the Entry 1 rulings), the heads and
   image hashes, and the evidence path only; it reproduces 5 runs each of
   cells C and B by kexec.
+
+## Entry 11 (10:16 UTC): C2 critic verdict: pass
+
+- **C2 critic (`critic-3-C2.md`): pass.** Critic held jetson-nano-2 09:32
+  to 09:55Z, left it at SD Linux, powered on, ESP untouched; reproduction
+  `gauntlet-3-hw-jetson` @ 4e07dc57, `run3-hw/critic-c2/{C,B}-repro-run01..05.txt`.
+  Own counts and classifications saved at 10:06Z before any builder file
+  was opened.
+- Completeness: C, D, B, A, E, F each 20/20 complete files, banners
+  matching the cell heads, every c2t block complete (six CPUs, 48 fields).
+  Every nonzero `chk` (and one `att`/`diag_att` mismatch, B run08) is
+  off by 1, a snapshot artifact of per-CPU counters copied with plain
+  loads while thieves run; every file counts in every cell.
+- Question 1: C, D and E all "exposed by the removal" by the bar as
+  written; no non-owner CPU at 0 successes in any of their 60 runs.
+- Question 2: not shown. Clause 3 fails on A's CPU 3 under every
+  convention for 0-success runs (per-CPU reading). G not run; no fix C;
+  no fix A or B on any branch or PR.
+- Step 0: 10/10 kexec at 59a85926; the 30 minute cap was hit (the tenth
+  boot ran about 6 minutes over, disclosed); UEFI not run.
+- Reproduction: 5 C runs, question 1 "exposed" (CPU 2 0.344, CPU 3 0.610
+  of the best thief: CPU 3 misses the 0.60 share clause by 1.0 point, a
+  thin margin, recorded); 5 B runs meet clauses 1 to 3 on the B side. Same
+  classification as the 20.
+- Disagreement with the builder: its main B tables used 3 of 20 files
+  (dropped `chk=-1`, kept `+1`); the critic counts all 20. No answer
+  changes. The builder's entry below uses the critic's 20-file B values.
+- Disclosed critic breaks: no MCP resource reader, so the board IP came
+  from mDNS on the documented hostname after a failed attempt with an IP
+  grepped from scratchpad scripts; the first B boot capture was cut by a
+  `tail` argument, labelled TRUNCATED, unused; after its verdict it opened
+  the first lines of two scratchpad files (copies of run 2's log).
+  Disclosed builder breaks: one extra read-only ssh; the step-0 overrun;
+  the board IP from run 2's transcript.
+
+## Entry 12 (10:16 UTC, written after the C2 critic filed): C2 builder report
+
+- C2 held jetson-nano-2 07:31 to 09:29Z. Cells on the Entry 0 heads, 20
+  runs each, `gauntlet-3-hw-jetson` @ 68f5690e, `run3-hw/c2/`; tables in
+  `run3-hw/c2/analysis/` (B tables there use 3 files; the values below
+  are the critic's 20-file ones, `critic-3-C2.md` section 2).
+- Per cell, median share of CPUs 2, 3 against the best thief, and
+  preempt_disabled early-out as a fraction of CPUs 2 and 3's attempts:
+
+  | Cell | Kernel, path | CPU 2 / CPU 3 share (ratio to best thief) | f_pd CPU 2 / 3 | first success median CPU 2 / 3 | 0-success runs (non-owner) |
+  |---|---|---|---|---|---|
+  | C | NC, kexec | 13.0 / 15.2% (0.713 / 0.830 of 18.27%) | 70.8 / 63.2% | 5.5 / 5.5 ms | 0 of 20 |
+  | F | NC, UEFI | 8.1 / 11.3% (0.397 / 0.556 of 20.38%) | 75.5 / 68.7% | 6.2 / 6.2 ms | 0 of 20 |
+  | D | removal, UEFI | 16.8 / 16.4% (0.955 / 0.935 of 17.56%) | 11.5 / 15.3% | 4.4 / 5.5 ms | 0 of 20 |
+  | E | removal, kexec | 16.7 / 16.9% (0.990 / 1.000 of 16.85%) | 8.2 / 6.4% | 3.5 / 5.0 ms | 0 of 20 |
+  | A | NC_AXIS=OFF, kexec | 13.8 / 14.2% (0.748 / 0.767 of 18.47%) | 65.9 / 67.2% | 204.5 / 167.3 ms | CPU 3 in runs 06, 15, 20 |
+  | B | A + V1, kexec | 16.8 / 16.9% (CPUs 4, 5: 16.8, 16.9%) | 0.3 / 0.3% | 19 us / 29 us | 0 of 20 |
+
+  Files: `<cell>-runNN.txt` for NN 01..20 in each cell (C
+  `C-nc-instr-kexec`, F `F-nc-instr-uefi`, D `D-removal-instr-uefi`, E
+  `E-removal-instr-kexec`, A `A-ncoff-instr-kexec`, B
+  `B-ncoff-instr-v1-kexec`).
+- **Question 1, by the bar as written:**
+  - C: "exposed by the removal": CPU 2 at 0.713 and CPU 3 at 0.830 of the
+    best thief (CPU 5, 18.27%), and 0 of 20 runs with a non-owner CPU at 0
+    successes (`C-nc-instr-kexec-run01..20.txt`).
+  - D: "exposed by the removal": 0.955 and 0.935 of CPU 0's 17.56%, 0 of
+    20 (`D-removal-instr-uefi-run01..20.txt`).
+  - E: "exposed by the removal": 0.990 and 1.000 of CPU 3's 16.85%, 0 of
+    20 (`E-removal-instr-kexec-run01..20.txt`).
+  - Recorded, not reinterpreted: the stall is strongest in the NC kernel
+    (F, NC over UEFI, meets the share clause at 0.397 and 0.556; C carries
+    the signature below the bar: 43.6 and 38.8% of CPUs 2 and 3's attempts
+    start inside CPU 1's tick window, against 0.1% for CPUs 4 and 5) and
+    nearly absent under the removal on both paths (D, E). The label
+    "exposed by the removal" is the bar's output, not a finding that the
+    removal causes the stall.
+- **Question 2: not shown.** Clauses 1 and 4 hold; clause 2's B side
+  holds (0.3%) while A is 65.9 and 67.2%, not about 75%; clause 3 fails:
+  A's CPU 3 first-success median is 167.3 ms (195.4 ms with its three
+  0-success runs counted at 2.5 s or never), below 200 ms
+  (`A-ncoff-instr-kexec-run01..20.txt`). H3 stays a hypothesis; the
+  mechanism question is open. Recorded for the next run: B removes the
+  stall signature (shares within 0.1 point, early-out 0.3%, first
+  success 19 and 29 us), and in A 53.3 and 57.1% of CPUs 2 and 3's
+  attempts start inside CPU 1's T window with 98.5 and 99.0% of their
+  early-outs less than 10 us after CPU 1's tick. G not run; fix C not
+  started; fixes A and B: nothing landed.
+- Anomalies, unedited, from C2: boot lines in C, A and B (absent in D, E,
+  F): `[IRQ] Unhandled IRQ 102 — masking at GIC` and `[preempt] IRQ taken
+  pre-preempt_init (elr=0x8002xxxx spsr=0x60000009) — bail` (the quoted
+  text carries its own dash); the echoed command line is garbled in most F
+  replies, results intact.
+- Issues filed by C2: none.
