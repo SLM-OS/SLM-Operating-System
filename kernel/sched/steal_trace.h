@@ -185,4 +185,84 @@ void steal_pdwin_tick(uint32_t cpu);
 void steal_pdwin_set_tick_asm(uint32_t cpu);
 void steal_pdwin_clear_asm(uint32_t cpu);
 
+/*
+ * `bench stealing --sustain --assert-shares` decision (#1216).
+ *
+ * exec[c] is the number of tasks CPU c executed in the run, for the
+ * ncpu online CPUs. The owner is the CPU every task was pushed to;
+ * every other online CPU is a thief. A thief's share is exec[c] over
+ * the sum of exec[] over all CPUs, so comparing two thieves' shares is
+ * comparing their exec counts. The run fails when:
+ *   - it timed out (STEAL_SHARES_TIMEOUT), or
+ *   - there is no thief, or no thief executed a task
+ *     (STEAL_SHARES_NO_THIEF), or
+ *   - some thief's share is below half the best thief's share, that
+ *     is 2 * exec[c] < exec[best] (STEAL_SHARES_LOW). Exactly half
+ *     passes.
+ * The owner is never compared. best_cpu is the thief with the most
+ * tasks and worst_cpu the thief with the fewest (ties: the lowest CPU
+ * number). below_mask has bit c set for every thief below half the
+ * best (CPUs 0 to 31). Timeout takes precedence over the other
+ * failures; the CPU fields are filled in either way so the caller can
+ * print them. Pure: no globals, no side effects.
+ */
+#define STEAL_SHARES_PASS      0u
+#define STEAL_SHARES_LOW       1u
+#define STEAL_SHARES_TIMEOUT   2u
+#define STEAL_SHARES_NO_THIEF  3u
+#define STEAL_SHARES_MAX_CPUS  32u
+
+struct steal_shares_verdict {
+    uint32_t result;      /* STEAL_SHARES_*                          */
+    uint32_t best_cpu;    /* thief with the highest exec             */
+    uint32_t worst_cpu;   /* thief with the lowest exec              */
+    uint32_t below_mask;  /* bit c: thief c below half of best_cpu   */
+    uint32_t nthieves;    /* thieves compared                        */
+    uint32_t total;       /* sum of exec over all CPUs (the share
+                             denominator)                            */
+};
+
+static inline struct steal_shares_verdict
+steal_shares_check(const uint32_t *exec, uint32_t ncpu, uint32_t owner,
+                   int timed_out)
+{
+    struct steal_shares_verdict v = {
+        STEAL_SHARES_NO_THIEF, owner, owner, 0, 0, 0
+    };
+    if (ncpu > STEAL_SHARES_MAX_CPUS) {
+        ncpu = STEAL_SHARES_MAX_CPUS;
+    }
+    for (uint32_t c = 0; c < ncpu; c++) {
+        v.total += exec[c];
+        if (c == owner) {
+            continue;
+        }
+        if (v.nthieves == 0 || exec[c] > exec[v.best_cpu]) {
+            v.best_cpu = c;
+        }
+        if (v.nthieves == 0 || exec[c] < exec[v.worst_cpu]) {
+            v.worst_cpu = c;
+        }
+        v.nthieves++;
+    }
+    if (v.nthieves != 0) {
+        uint64_t best = exec[v.best_cpu];
+        for (uint32_t c = 0; c < ncpu; c++) {
+            if (c != owner && 2ULL * exec[c] < best) {
+                v.below_mask |= 1u << c;
+            }
+        }
+    }
+    if (timed_out) {
+        v.result = STEAL_SHARES_TIMEOUT;
+    } else if (v.nthieves == 0 || exec[v.best_cpu] == 0) {
+        v.result = STEAL_SHARES_NO_THIEF;
+    } else if (v.below_mask != 0) {
+        v.result = STEAL_SHARES_LOW;
+    } else {
+        v.result = STEAL_SHARES_PASS;
+    }
+    return v;
+}
+
 #endif /* SCHED_STEAL_TRACE_H */

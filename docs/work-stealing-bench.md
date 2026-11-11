@@ -3,7 +3,7 @@
 Load-imbalance numbers for the SLM-OS scheduler, driving the S4
 decision on whether `CONFIG_WORK_STEALING` should default to ON.
 
-**Last updated:** 2026-04-14 (Phase S3).
+**Last updated:** 2026-11-11 (sustained supply, `--assert-shares` and idle wakes, #1216; Phase S3 numbers from 2026-04-14).
 
 ---
 
@@ -148,6 +148,47 @@ idle time scanning for work that wasn't there. Non-zero `Stale` is
 expected under contention — the ABA mitigation in
 `scheduler_terminate_task` removes the terminating task from all
 deques but can race with in-flight steals.
+
+## Sustained supply, share assertion and idle wakes (#1203, #1216)
+
+The 16-task burst drains CPU 1's deque in a few milliseconds, so a
+thief that woke late fails every attempt whether or not anything is
+wrong. `bench stealing --sustain [ms] [--depth D] [--work W]` keeps D
+tasks (default 16) outstanding on CPU 1 for ms milliseconds (default
+2500): the shell on CPU 0 re-issues a task into each slot as soon as
+the slot reports done, and each task runs W (default 8) burst work
+units. Burst and sustained runs both print a `c2t-format v2` header and
+one `c2t cpu=` line per CPU with every failed attempt's reason, CPU 1's
+`preempt_disabled` windows and each thief's tick phase
+(`kernel/sched/steal_trace.h` documents the fields).
+
+**`--assert-shares`** (sustained runs only) turns the per-CPU
+distribution into a verdict. CPU 1 is the owner; every other online
+CPU is a thief. A thief's share is the tasks it executed over all
+tasks executed in the run. The run fails, printing one
+`ASSERT-SHARES: FAIL ...` line and returning a nonzero shell status,
+when any thief's share is below half the best thief's share (the line
+names the lowest thief, its share, the best thief and its share, and
+every thief below half), when no thief executed a task, or when the
+run timed out (30 s after the supply ended). Otherwise it prints
+`ASSERT-SHARES: PASS` with the lowest and best thief. The decision is
+`steal_shares_check()` in `kernel/sched/steal_trace.h`, covered by
+`kernel/tests/test_steal_shares.c`. On jetson-nano-2 the #1216 stall
+left CPUs 2 and 3 (the owner's cluster) at 0.40 to 0.83 of the best
+thief's median share, and at 0 tasks in some runs (coherency run 3,
+`critic-3-C2.md` section 3).
+
+**Idle wakes.** A sustained run also prints one `iw mode=sustained`
+line per CPU: the idle-loop passes (`sched_diag_idle_loops`) and timer
+ticks during the run, with their rates per second. `bench idle-wakes
+[ms]` measures the same at rest: it sleeps the shell for ms (default
+5000, range 100 to 60000) so CPU 0 idles as well and prints one
+`iw mode=rest` line per CPU. Each pass of the idle loop is one return
+from its wait instruction, so `idle_per_s` is the idle wake rate. On a
+100 Hz tick, a CPU that wakes only on its tick shows `idle_per_s` close
+to `ticks_per_s`; the excess is wakes from other events (SEV, device
+interrupts). This is the cost side of waiting in WFE instead of WFI,
+since every SEV any CPU issues wakes every CPU waiting in WFE.
 
 ## S4 status — default flipped (2026-04-14, Jetson follow-up 2026-04-15)
 

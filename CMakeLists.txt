@@ -1057,6 +1057,7 @@ set(TEST_SOURCES
     kernel/tests/test_ipc.c
     kernel/tests/test_pi_mutex.c
     kernel/tests/test_steal_deque.c
+    kernel/tests/test_steal_shares.c
     kernel/tests/test_sched_trace.c
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
