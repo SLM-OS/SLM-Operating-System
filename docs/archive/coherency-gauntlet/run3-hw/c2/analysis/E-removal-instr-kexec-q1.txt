@@ -1,0 +1,5 @@
+Q1: counted `E-removal-instr-kexec-run01.txt` .. `E-removal-instr-kexec-run20.txt` (20 files)
+  best thief CPU 3: median share 16.85%; 60% of it = 10.11%
+  CPU 2: median share 16.68% = 0.990 of best -> better than 60%
+  CPU 3: median share 16.85% = 1.000 of best -> better than 60%
+  runs with a non-owner CPU at ok=0: 0 of 20
