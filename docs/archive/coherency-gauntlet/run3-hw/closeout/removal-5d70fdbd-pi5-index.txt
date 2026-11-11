@@ -1,0 +1,132 @@
+# pi-5-1, close-out for the NC-axis removal 5d70fdbd (#1193): production boots 10/10 to slmos>, integration 10/10 complete and 10/10 pass by C1's rule (18 failures each, all the known #1109 ones), card restored. Method and counts below.
+
+===== method, card and file map
+# Head: coherency-remove-nc-axis @ 5d70fdbd (full NC-axis removal rebased onto main e4a33790).
+# Images (removal-5d70fdbd-image-manifest.txt), staged in the main checkout's build/kernel/:
+#   production  slmos-closeout-removal-prod-5d70fdbd.bin  7877272 B  sha256 172d8e8b...  banner build 20261111183243 (5d70fdbd)
+#   test kernel slmos-closeout-removal-test-5d70fdbd.bin  9097880 B  sha256 750174f8...  banner build 20261111183431 (5d70fdbd)
+# Claim: coherency-closeout-removal, 20:33:51Z to about 21:10Z (released). The board was found online at the SLM-OS
+# shell on its original card. bindings_list: none.
+# Card (partition 1, FAT32 label SLMOS): sdwire_info and sdwire_ls before every write, with the board powered off.
+#   Write 1 (about 20:35Z): production image copied to kernel_2712.img.new and kernel8.img.new; originals
+#     (kernel_2712.img and kernel8.img, 6935256 B, 2026-10-29T04:54:04Z) renamed to *.preclose; *.new renamed
+#     into place. sdwire_ls afterwards: both names 7877272 B, both .preclose 6935256 B.
+#   Write 2 (about 20:40Z): test image copied over kernel_2712.img and kernel8.img (both 9097880 B per the
+#     next sdwire_ls).
+#   Write 3 (restore, about 21:09Z): test images renamed to *.closeout-test, *.preclose renamed back to
+#     kernel_2712.img and kernel8.img, *.closeout-test deleted. sdwire_ls afterwards: both names 6935256 B,
+#     2026-10-29T04:54:04Z, no .preclose or .closeout-test file left.
+# Method: labctl boot_test, a fresh output_dir per call under /var/lib/labctl/output/, cycle delay 5 s. Each
+# evidence file is that call's run_NN.txt copied unchanged (cmp-verified); the banner is in each file.
+#   Step 7, production: expect "slmos>", timeout 90 s, runs=10, output_dir closeout-removal-5d70fdbd-pi5-prod:
+#     10/10 PASS (12.9 to 13.1 s). removal-5d70fdbd-pi5-boot-run01..10.txt <- run_01..10.
+#   Step 8, test kernel: expect "All test suites passed|total failure\(s\)|KERNEL PANIC", timeout 330 s,
+#     runs=5 per call: closeout-removal-5d70fdbd-pi5-int-a (5/5 matched, 149.6 to 159.4 s)
+#     -> removal-5d70fdbd-pi5-integration-run01..05.txt; closeout-removal-5d70fdbd-pi5-int-b (5/5 matched,
+#     146.5 to 154.9 s) -> run06..10.txt.
+#   Step 9, restore boot: expect "slmos>", runs=1, output_dir closeout-removal-5d70fdbd-pi5-restore: PASS
+#     (12.4 s), banner "SLM-OS v0.4.0 build 20261022005058 (b42b2c1d)" (the card's original kernel) ->
+#     removal-5d70fdbd-pi5-restore-boot.txt. Board left on at slmos>.
+# Counting rule (C1's, run 3 step6-boots.txt): a run passes when test_slm_stats_live_from_second_session,
+# test_component_cleanup_ctx_is_per_task and test_task_lifecycle print [PASS], no "[test_wait] ... TIMEOUT"
+# line appears, the suite completes and nothing panics. Known failures: the 18 (#1109) as listed in run 2's
+# nc-step6-run01.txt (20 "[FAIL] name" lines: 18 tests, plus the detail line "no help entry for built-in
+# 'emmc-bringup'" and the wrapper test_eviction_run_tests_passes). Tables produced by intcount.py from the
+# saved files alone.
+# This agent was the only labctl caller while it held pi-5-1.
+
+===== production boots: file | banner | slmos> lines
+| removal-5d70fdbd-pi5-boot-run01.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run02.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run03.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run04.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run05.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run06.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run07.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run08.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run09.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+| removal-5d70fdbd-pi5-boot-run10.txt | SLM-OS v0.4.0 build 20261111183243 (5d70fdbd) | 1 |
+
+===== integration runs (intcount.py)
+| file | banner | completed | total failures | 3 tests PASS | test_wait TIMEOUT | panic | beyond known | known missing | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| removal-5d70fdbd-pi5-integration-run01.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run02.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run03.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run04.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run05.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run06.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run07.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run08.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run09.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+| removal-5d70fdbd-pi5-integration-run10.txt | 5d70fdbd | True | 18 | 3/3 | 0 | False | none | 0 | pass |
+# 10/10 pass by C1's rule
+
+===== known failure list used (run 2 nc-step6-run01.txt)
+mlp_finish_nan_never_wins
+no help entry for built-in 'emmc-bringup'
+test_blob_autoload_accepts_max_length_paths_across_all_slots
+test_blob_autoload_fat_update_invalidates_lfs_fallback
+test_blob_autoload_init_creates_conf
+test_blob_autoload_init_marks_existing_fat_config_authoritative
+test_blob_autoload_init_migrates_lfs_entries_to_fat
+test_blob_autoload_init_recovers_missing_fat_blob_from_lfs
+test_blob_autoload_overwrites_existing_conf
+test_blob_autoload_recovers_from_backup_conf
+test_blob_autoload_rejects_malformed_metadata_suffix
+test_blob_autoload_set_get_clear_round_trip
+test_blob_autoload_set_ignores_unrelated_stale_lfs_entry
+test_blob_autoload_set_migrates_all_lfs_entries_to_fat
+test_blob_autoload_shell_commands
+test_blob_boot_autoload_skips_tampered_managed_blob
+test_builtin_commands_grouped_and_sorted
+test_every_command_has_help_entry
+test_eviction_run_tests_passes
+test_timer_irq_is_physical
+
+===== counting script intcount.py
+#!/usr/bin/env python3
+"""intcount.py <known-list> <file>...
+
+Counts integration-suite runs as C1 counted them (run 3, step6-boots.txt):
+a run passes when test_slm_stats_live_from_second_session,
+test_component_cleanup_ctx_is_per_task and test_task_lifecycle each print
+[PASS], no '[test_wait]' TIMEOUT line appears, and the suite completed
+('All test suites passed' or 'total failure(s)'). Failures beyond the known
+list (the 18 #1109 tests plus the two detail/wrapper lines) are named.
+"""
+import re, sys
+
+THREE = ["test_slm_stats_live_from_second_session",
+         "test_component_cleanup_ctx_is_per_task",
+         "test_task_lifecycle"]
+known = set(l.strip() for l in open(sys.argv[1]) if l.strip())
+print("| file | banner | completed | total failures | 3 tests PASS | test_wait TIMEOUT | panic | beyond known | known missing | verdict |")
+print("|---|---|---|---|---|---|---|---|---|---|")
+npass = 0
+files = sys.argv[2:]
+for f in files:
+    t = open(f, encoding="utf-8", errors="replace").read()
+    ban = re.findall(r"SLM-OS v\S+ build \S+ \((\w+)\)", t)
+    tot = re.findall(r"\[FAIL\] (\d+) total failure", t)
+    allp = "All test suites passed" in t
+    completed = bool(tot) or allp
+    fails = set()
+    for m in re.finditer(r"^\s*\[FAIL\] (.+?)\s*$", t, re.M):
+        name = m.group(1)
+        if re.match(r"\d+ (test\(s\) failed|total failure)", name):
+            continue
+        fails.add(name)
+    three = {n: bool(re.search(r"\[PASS\] " + n + r"\s*$", t, re.M)) for n in THREE}
+    tw = len(re.findall(r"\[test_wait\].*TIMEOUT", t))
+    pan = bool(re.search(r"KERNEL PANIC|PAGE FAULT|System halted", t))
+    beyond = sorted(fails - known)
+    missing = sorted(known - fails)
+    ok = completed and all(three.values()) and tw == 0 and not pan
+    npass += ok
+    print(f"| {f.split('/')[-1]} | {','.join(sorted(set(ban))) or 'NONE'} | {completed} | "
+          f"{tot[-1] if tot else ('0' if allp else '-')} | "
+          f"{sum(three.values())}/3{'' if all(three.values()) else ' missing ' + ','.join(n for n, v in three.items() if not v)} | "
+          f"{tw} | {pan} | {'; '.join(beyond) or 'none'} | {len(missing)} | {'pass' if ok else 'FAIL'} |")
+print(f"# {npass}/{len(files)} pass by C1's rule")
+

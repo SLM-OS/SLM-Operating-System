@@ -1,0 +1,53 @@
+# Close-out hardware evidence for the full NC-axis removal (#1193): image manifest
+# Head: coherency-remove-nc-axis @ 5d70fdbd3b74a5d35f8035962ad47cd1d5242489 (the full removal
+# rebased onto main e4a33790). Built 2026-11-11 18:27 to 18:35 UTC in worktree agent-af0a2f4292a47b1e7,
+# detached at 5d70fdbd, `git status --porcelain` empty before and after the builds, one build at a
+# time, PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH, default flags for each target.
+# Banner = the "SLM-OS v... build ... (<hash>)" string read from the image with strings(1).
+
+## Jetson production: make kernel PLATFORM=JETSON_ORIN_NANO (build/kernel)
+slmos.elf (kexec; staged on the board as /root/slmos-closeout-removal-5d70fdbd.elf)
+  size   10959128 B
+  sha256 e2ad2300e81473fffa2065c8fffd75b5aa3a957c8ed98e8740d79d7615763735
+  banner SLM-OS v0.4.0 build 20261111182808 (5d70fdbd)
+slmos.bin (UEFI-direct, scripts/jetson-uefi-deploy.sh)
+  size   8995912 B
+  sha256 4de7aa7d86d827e5b6a4b55b88c08f3f25f23071d0e4cec13f56828786779985
+  banner SLM-OS v0.4.0 build 20261111182808 (5d70fdbd)
+
+## Jetson test kernel: make kernel-test PLATFORM=JETSON_ORIN_NANO (build/kernel-test)
+slmos.elf (kexec; staged on the board as /root/slmos-closeout-removal-test-5d70fdbd.elf)
+  size   12211344 B
+  sha256 a6db487ad6a20c3f91faf42dc5a6b2ffe3d5849d6a04a2d48244ea3e925cbd86
+  banner SLM-OS v0.4.0 build 20261111183016 (5d70fdbd)
+slmos.bin (UEFI-direct)
+  size   10241096 B
+  sha256 18fc982f5a0f202ac6d50b2d339599ba39162934fd74282d7b08fbe02e51a95e
+  banner SLM-OS v0.4.0 build 20261111183016 (5d70fdbd)
+
+## Pi 5 production: make kernel PLATFORM=RASPI5 (build/kernel/slmos.bin)
+staged as /home/john/projects/CS-496-Capstone-SLM-Operating-System/build/kernel/slmos-closeout-removal-prod-5d70fdbd.bin
+  size   7877272 B
+  sha256 172d8e8b19d4678a726239d4d66d7ba7748e281b77a148721bca77429d685508
+  banner SLM-OS v0.4.0 build 20261111183243 (5d70fdbd)
+
+## Pi 5 test kernel: make kernel-test PLATFORM=RASPI5 (build/kernel-test/slmos.bin)
+staged as /home/john/projects/CS-496-Capstone-SLM-Operating-System/build/kernel/slmos-closeout-removal-test-5d70fdbd.bin
+  size   9097880 B
+  sha256 750174f8eb28ed38454cbc08e66e140c5d24d04720ca62c2d07fe8e663799def
+  banner SLM-OS v0.4.0 build 20261111183431 (5d70fdbd)
+
+# Both staged Pi 5 files were copied under a temporary name, renamed with mv -n, and compared
+# byte for byte (cmp) with the build outputs.
+
+## Control (only used if a Jetson integration run does not complete): main e4a33790
+## make kernel-test PLATFORM=JETSON_ORIN_NANO, same worktree detached at e4a33790 (status empty),
+## built 18:37 UTC, then the worktree returned to 5d70fdbd.
+slmos.elf (kexec; staged as /root/slmos-closeout-control-test-e4a33790.elf)
+  size   12142200 B
+  sha256 9718c97edf8a9b2c32f63f2f8be0af096a3e4e2368aa1d017f5bbd239a69bad4
+  banner SLM-OS v0.4.0 build 20261111183726 (e4a33790)
+slmos.bin (UEFI-direct)
+  size   10175560 B
+  sha256 e178fd5f90d18141944429ce13560e9f39efd31e617e7b23a2d3725f08665635
+  banner SLM-OS v0.4.0 build 20261111183726 (e4a33790)
