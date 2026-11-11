@@ -2082,6 +2082,7 @@ struct s3_snap {
     uint32_t sched[MAX_CPUS];
     struct steal_trace_cpu tr[MAX_CPUS];
     struct steal_trace_dq dq[MAX_CPUS];
+    struct steal_pdwin_cpu pw[MAX_CPUS];   /* #1216 */
 };
 
 static struct s3_snap s3_pre;
@@ -2114,6 +2115,7 @@ static void s3_take_snap(struct s3_snap *s)
         s->sched[c] = sched_diag_schedule[c];
         s->tr[c] = *sched_steal_trace_cpu(c);
         s->dq[c] = *sched_steal_trace_dq(c);
+        s->pw[c] = *sched_steal_pdwin(c);
     }
 }
 
@@ -2154,10 +2156,89 @@ static void s3_append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
 /* One complete line per CPU, built in a buffer and written with a
  * single call so nothing interleaves inside it. Field meanings are in
  * kernel/sched/steal_trace.h. */
+/* Append `n` uint32 values as a comma list after " key=". */
+static void s3_append_u32s(char *buf, size_t cap, size_t *pos,
+                           const char *key, const volatile uint32_t *v,
+                           uint32_t n)
+{
+    s3_append(buf, cap, pos, " %s=", key);
+    for (uint32_t i = 0; i < n; i++) {
+        s3_append(buf, cap, pos, "%s%lu", i ? "," : "", (unsigned long)v[i]);
+    }
+}
+
+static const char s3_win_reason_ch[STEAL_WIN_NREASON] = {
+    'T', 'C', 'P', 'O', 'B' };
+
+/* #1216 fields, appended to a c2t line: the thief's attempts against
+ * the watched CPU's window and tick, this CPU's ticks and windows, and
+ * (watched CPU only) its first STEAL_WIN_LOG_LEN windows. */
+static void s3_append_pdwin(char *line, size_t cap, size_t *pos,
+                            uint32_t c, uint32_t run, uint64_t t0,
+                            uint64_t freq)
+{
+    const struct steal_trace_cpu *b = &s3_post.tr[c];
+    const struct steal_pdwin_cpu *w = &s3_post.pw[c];
+    bool tlive = (b->run == run);
+    bool wlive = (w->run == run);
+    if (tlive) {
+        s3_append_u32s(line, cap, pos, "w_in", b->w_in, STEAL_WIN_NREASON);
+        s3_append(line, cap, pos, " w_in_unk=%lu", (unsigned long)b->w_in_unk);
+        s3_append_u32s(line, cap, pos, "w_off", b->w_off, STEAL_WOFF_BINS);
+        s3_append_u32s(line, cap, pos, "ph_w", b->ph_w, STEAL_PH_BINS);
+        s3_append_u32s(line, cap, pos, "ph_w_pd", b->ph_w_pd, STEAL_PH_BINS);
+        s3_append_u32s(line, cap, pos, "ph_own", b->ph_own, STEAL_PH_BINS);
+    } else {
+        s3_append(line, cap, pos, " w_in=- w_in_unk=- w_off=- ph_w=-"
+                  " ph_w_pd=- ph_own=-");
+    }
+    if (!wlive) {
+        s3_append(line, cap, pos, " tick_n=- tick_first_us=- tick_last_us=-"
+                  " win_n=- win_sum_us=- win_max_us=- wph=- wlog=-");
+        return;
+    }
+    char t_tf[24], t_tl[24];
+    s3_fmt_us(t_tf, sizeof(t_tf), w->first_tick != 0, w->first_tick, t0, freq);
+    s3_fmt_us(t_tl, sizeof(t_tl), w->first_tick != 0, w->last_tick, t0, freq);
+    s3_append(line, cap, pos, " tick_n=%lu tick_first_us=%s tick_last_us=%s",
+              (unsigned long)w->tick_n, t_tf, t_tl);
+    s3_append_u32s(line, cap, pos, "win_n", w->n, STEAL_WIN_NREASON);
+    s3_append(line, cap, pos, " win_sum_us=");
+    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
+                  (unsigned long)(w->sum[r] * 1000000ULL / freq));
+    }
+    s3_append(line, cap, pos, " win_max_us=");
+    for (uint32_t r = 0; r < STEAL_WIN_NREASON; r++) {
+        s3_append(line, cap, pos, "%s%lu", r ? "," : "",
+                  (unsigned long)((uint64_t)w->max[r] * 1000000ULL / freq));
+    }
+    s3_append_u32s(line, cap, pos, "wph", w->wph, STEAL_PH_BINS);
+    s3_append(line, cap, pos, " wlog=");
+    uint32_t nlog = (c == sched_steal_trace_watch()) ? w->nlog : 0;
+    if (nlog > STEAL_WIN_LOG_LEN) {
+        nlog = STEAL_WIN_LOG_LEN;
+    }
+    if (nlog == 0) {
+        s3_append(line, cap, pos, "-");
+    }
+    /* entry as signed us from arm time : duration in ns : reason */
+    for (uint32_t k = 0; k < nlog; k++) {
+        int64_t e = (int64_t)w->log_entry[k];
+        uint64_t ae = (uint64_t)(e < 0 ? -e : e);
+        uint32_t r = w->log_reason[k];
+        s3_append(line, cap, pos, "%s%s%lu:%lu:%c", k ? "," : "",
+                  e < 0 ? "-" : "",
+                  (unsigned long)(ae * 1000000ULL / freq),
+                  (unsigned long)((uint64_t)w->log_dur[k] * 1000000000ULL / freq),
+                  r < STEAL_WIN_NREASON ? s3_win_reason_ch[r] : '?');
+    }
+}
+
 static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
                            const uint32_t *exec)
 {
-    static char line[1024];
+    static char line[4096];
     for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
         const struct steal_trace_cpu *a = &s3_pre.tr[c];
         const struct steal_trace_cpu *b = &s3_post.tr[c];
@@ -2230,6 +2311,7 @@ static void s3_print_trace(uint32_t run, uint64_t t0, uint64_t freq,
                 (unsigned long)((uint64_t)b->log_dt[k] * 1000000ULL / freq),
                 (char)b->log_out[k]);
         }
+        s3_append_pdwin(line, sizeof(line) - 2, &pos, c, run, t0, freq);
         /* Appends stop at sizeof(line) - 3, so the terminator fits. */
         line[pos++] = '\r';
         line[pos++] = '\n';
@@ -2242,7 +2324,7 @@ static void s3_print_trace_header(const char *mode, uint32_t run,
                                   uint64_t freq, uint32_t tasks,
                                   uint32_t depth, uint32_t work, uint32_t ms)
 {
-    shell_printf("\r\n  c2t-format v1 mode=%s run=%lu cntfrq=%lu cpus=%lu"
+    shell_printf("\r\n  c2t-format v2 mode=%s run=%lu cntfrq=%lu cpus=%lu"
                  " tasks=%lu depth=%lu work=%lu sustain_ms=%lu\r\n",
                  mode, (unsigned long)run, (unsigned long)freq,
                  (unsigned long)cpu_count, (unsigned long)tasks,
@@ -2251,6 +2333,15 @@ static void s3_print_trace_header(const char *mode, uint32_t run,
     shell_puts("  times in us from dispatch start; log = first 16 attempts"
                " as us-since-first-attempt + outcome (S ok, E empty,"
                " P preempt_disabled skip, X stale, I isolated, O other)\r\n");
+    shell_printf("  #1216 watch=cpu%lu; reasons T tick trampoline, C coop tick,"
+                 " P schedule() after a push, O other schedule(), B boot;"
+                 " w_in/win_n/win_sum_us/win_max_us in that order;"
+                 " w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched"
+                 " window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,"
+                 "<500 us,<1,<2,<5,<10,>=10 ms after the tick;"
+                 " wlog = entry_us:dur_ns:reason, first %lu windows\r\n",
+                 (unsigned long)sched_steal_trace_watch(),
+                 (unsigned long)STEAL_WIN_LOG_LEN);
 }
 
 /* bench stealing --sustain: keep `depth` tasks outstanding on CPU 1 for

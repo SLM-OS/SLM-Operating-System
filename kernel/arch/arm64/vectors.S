@@ -559,6 +559,10 @@ resched_trampoline:
     add     x5, x5, #:lo12:preempt_disabled
     mov     w6, #1
     str     w6, [x5, x0, lsl #2]
+    /* #1216 trace: open a 'T' window (x0 = cpu). Clobbers x0-x18 and
+     * x30, all saved in the frame above; nothing below reads them
+     * before bl schedule. */
+    bl      steal_pdwin_set_tick_asm
 
     STAGE25_TRACE_CHAR 'B'              /* Trace: trampoline before schedule */
     /* Unmask IRQs and call schedule(). If schedule() picks a different
@@ -578,6 +582,9 @@ resched_trampoline:
     adrp    x5, preempt_disabled
     add     x5, x5, #:lo12:preempt_disabled
     str     wzr, [x5, x0, lsl #2]
+    /* #1216 trace: close the window if one is still open (x0 = cpu).
+     * Every register it clobbers is reloaded from the frame below. */
+    bl      steal_pdwin_clear_asm
 
     /* Restore orig_elr/orig_spsr into the system registers. */
     ldp     x3, x4, [sp, #168]

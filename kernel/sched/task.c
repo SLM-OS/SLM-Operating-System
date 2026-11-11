@@ -12,6 +12,7 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "arch.h"
+#include "steal_trace.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #include "elf.h"
@@ -201,6 +202,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
         int hw_cpu = cpu_logical_id(mpidr);
         if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
             preempt_disabled[hw_cpu] = 0;
+            steal_pdwin_clear((uint32_t)hw_cpu);    /* #1216 trace */
         }
         __asm__ volatile("dsb sy" ::: "memory");
         if (hw_cpu >= 0 && task_entry_unmasks_irq((uint32_t)hw_cpu)) {
@@ -216,6 +218,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     {
         extern volatile int preempt_disabled[];
         preempt_disabled[cpu_id()] = 0;
+        steal_pdwin_clear(cpu_id());                /* #1216 trace */
         __asm__ volatile("mfence" ::: "memory");
     }
 #endif
