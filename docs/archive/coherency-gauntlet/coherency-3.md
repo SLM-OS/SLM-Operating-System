@@ -629,3 +629,151 @@ both paths at the PR head.**
   `esp-check.sh` ssh and an scp fetch of the as-found ESP image (run 2's
   restore recipe); opening the PR with Pi 5 at 7/10, because the gate's
   only no-PR condition was a Jetson failure.
+
+## Entry 18 (13:05 UTC): C3 critic row-2 re-check: C3 passes; lab state
+
+- **C3 critic re-check (`critic-3-C3.md`, "Row 2 re-check"): pass.** The
+  13 logs at `gauntlet-3-hw-jetson` @ 95e73982 are byte-identical to the
+  scratchpad copy; every step's decisive line agrees with `status.txt`
+  (rc=0). The logs print no commit line; the critic tied them to e5b24894
+  through `head.txt` and the diff-check stat (86 files, +8605/-444, the
+  stat of `origin/main...e5b24894`; 7acee1fc gives 84 files), labelled
+  reconstructed, not printed. Component verdict: pass (rows 1, 2, 3, 5,
+  6; row 4, no bar, 7/10 stated faithfully).
+- Lab at about 13:04Z (orchestrator, after the last critic released): no
+  active claims; pi-5-1 and jetson-nano-2 online, ping, serial, power on;
+  jetson-nano-2 `recovery_mode` desired released, relay channel 1 open,
+  cycle count 14 (as at 03:46Z).
+
+## Entry 19 (13:05 UTC): branches run 3 created or moved
+
+Heads as of this entry. "Archived" means the tip is under
+`run3-tools/deleted-branch-tips/`.
+
+| Branch | Head | Base | Purpose | Disposition |
+|---|---|---|---|---|
+| `gauntlet/coherency-3` | this commit | `gauntlet/coherency-2` @ b6f0beed | Run-3 log, rules, critic verdicts, tools, /ci logs | Keep |
+| `gauntlet-3-hw-pi5` | 6569a660 | main 85f51ffd | Pi 5 and QEMU raw evidence (c1, critic-c1) | Keep |
+| `gauntlet-3-hw-jetson` | 95e73982 | main 85f51ffd | Jetson raw evidence (c2, critic-c2, c3, critic-c3) | Keep |
+| `coherency-remove-nc-axis` | 79c10261 (moved from e94c251a: re-parented onto 638e297d, Entry 0 item 5) | `c1/boot-path-plus-helper` @ 638e297d | The full removal | Keep |
+| `c1/boot-path-plus-helper` | 638e297d (moved from 63eed0c4) | `fix/boot-path-1193` @ 59a85926 | #1209 + #1215's three commits; base of the removal | Keep until #1208, #1209, #1215 merge |
+| `fix/boot-path-1193` | fd2a361c (moved from 59a85926: ADR status line) | `fix-boot-1194-1197-1198` @ ad8e4fa7 | #1196; ADR 0007 home | PR #1209 |
+| `c2/steal-instrument-1203` | 1b27eea4 (moved from 983bddc9) | main 85f51ffd | Steal trace + victim-window instrumentation | PR #1217 |
+| `c2/wake-on-push-v1` | 292eee0a (new) | 1b27eea4 | V1 experiment (idle WFE) | Keep (cited in #1216; a next run starts here) |
+| `c1/instrument-1211-removal` | 9f375c19 (new) | 79c10261 | #1211 pre-conversion window, instrumented | Keep (cited in #1211) |
+| `c1/isolated-1s` | f8ff72d6 (new name for run 2's object) | a03fc75b | #1213 1 s variant | Keep (cited in #1213) |
+| `coherency-nc-axis-pi5` | e5b24894 (new) | 7acee1fc on 638e297d | The gate's split: Pi 5 off the NC axis, Jetson kept | PR #1222 (draft, blocked by #1223) |
+| `c2/cell-a-ncoff` | 6608cbd0 | cbab2fc6 | Cell A | Deleted; archived |
+| `c2/cell-b-ncoff-v1` | 579b155a | 6608cbd0 | Cell B | Deleted; archived |
+| `c2/cell-de-removal` | 8fc7c88a | 79c10261 | Cells D, E | Deleted; archived |
+| `c2/cell-g-removal-v1` | 0dfaae0c | 8fc7c88a | Cell G (not run) | Deleted; archived |
+
+Not created or moved by run 3: `fix-boot-1194-1197-1198` (ad8e4fa7, PR
+#1208, untouched), `c1/test-wait-helper` (a03fc75b, PR #1215),
+`docs/labctl-serializes-calls` (90f0d9e3, PR #1218), main 85f51ffd.
+Local-only: the orchestrator's scratchpad worktrees and local branches
+(`c2-instr-local`, `rb3-removal`), the critics' `critic3-c1-evidence`;
+never pushed except as recorded.
+
+## Close-out and final report (written 13:05 UTC)
+
+The run ended on the gate's row (Entry 13), within budget (started 03:46Z,
+limit 13:46Z). Every component has a critic verdict: C1 pass (`critic-3-C1.md`,
+after a row-3 re-check), C2 pass (`critic-3-C2.md`), C3 pass (after a row-2 re-check)
+(`critic-3-C3.md`).
+
+### The three questions
+
+1. **Does the NC kernel show #1216 (pre-existing or exposed)?** By the bar as
+   written, **"exposed by the removal"**: on the NC kernel over kexec (cell
+   C), CPUs 2 and 3 reached 0.713 and 0.830 of the best thief's median share
+   (bar 0.60) and no non-owner CPU had a 0-success run
+   (`run3-hw/c2/C-nc-instr-kexec-run01..20.txt`). The rows run the other way
+   from the label: the NC kernel carries the signature on both paths (C below
+   the bar; F, NC over UEFI-direct, 0.397 and 0.556,
+   `F-nc-instr-uefi-run01..20.txt`), and the removal shows almost none (D,
+   UEFI-direct, 0.955 and 0.935; E, kexec, 0.990 and 1.000;
+   `D-removal-instr-uefi-run01..20.txt`, `E-removal-instr-kexec-run01..20.txt`).
+   The bar was not reinterpreted.
+2. **Is the mechanism the wake path (H3)?** **Not shown.** V1 (idle WFE so the
+   push SEV wakes idle thieves) removed the signature in cell B (CPUs 2 to 5
+   at 16.8 to 16.9%, early-out 0.3% of CPUs 2 and 3's attempts, first success
+   19 and 29 us; `B-ncoff-instr-v1-kexec-run01..20.txt`), and in cell A the
+   stalled thieves' attempts clustered inside CPU 1's tick window (53.3 and
+   57.1% of attempts; 98.5 and 99.0% of their early-outs less than 10 us after
+   CPU 1's tick, against 0.05 to 0.07% for CPUs 4 and 5;
+   `A-ncoff-instr-kexec-run01..20.txt`). Clause 3 failed: A's CPU 3
+   first-success median was 167.3 ms (195.4 ms counting its three 0-success
+   runs), not above 200 ms. H3 stays a hypothesis.
+3. **Pi 5 bar and #1211.** **20 of 20 under both kernels**: NC (a03fc75b, run
+   2's 9 boots on the code-identical 30dc24bc plus 11) and the full removal
+   (79c10261), the three tests passing in every boot, no `[test_wait]`
+   timeout (`run2-hw/c1/nc-step6-run01..09.txt` on `gauntlet-2-hw-pi5`,
+   `run3-hw/c1/nc-step6-run10..20.txt`, `removal-step6-run01..20.txt`),
+   reproduced 5 + 5 by the critic. **#1211: not reproduced**, 0 of 20 with the
+   pre-conversion window under the removal (`run3-hw/c1/removal-1211-run01..20.txt`);
+   open, blocking nothing.
+
+### The PR, merge order, ADR
+
+- Gate row (Entry 13): C1 clear, exposed, H3 not shown: the Pi 5 split PR.
+  **Draft PR #1222** (`coherency-nc-axis-pi5` @ e5b24894, base main): the
+  removal branch's first 33 commits (7acee1fc) plus `PLATFORM_HAS_NC_MEMORY`
+  for Jetson only and the Pi 5 spinlock DRAM flush deleted. Jetson passed the
+  gate condition: 10/10 kexec and 10/10 UEFI-direct boots at the head;
+  `/ci` green. **Not ready for review:** Pi 5 at the head completed the
+  integration suite in 7 of 10 boots; 3 panicked on CPU 1 right after the
+  isolation phase (#1223). The full removal's Pi 5 code (79c10261) was 20 of
+  20 on the same board.
+- Merge order (if it becomes ready): #1208, #1209, #1215, then #1222. No fix C
+  PR exists.
+- ADR 0007 status on #1209 (fd2a361c): "accepted for Pi 5 and QEMU; deferred
+  for Jetson pending #1216; implementation in PR #1222."
+
+### Issues: end states
+
+| Issue | What was run | What the rows said | State |
+|---|---|---|---|
+| #1202 | 20 + 20 boots, #1215's wait | 20/20 per kernel | open; closes with #1215 |
+| #1205 | same | 20/20 per kernel | open; closes with #1215 |
+| #1211 | 20 boots, pre-conversion window, removal | 0/20 failed | open, not reproduced |
+| #1213 | QEMU, 15 + 15 + 10 runs with PC sampling | kernel fault on isolated CPU 1 under thread=multi (6/15 vs 0/15) | open; retitled as the kernel issue; priority left at P2 for the user |
+| #1216 | cells C, D, A, B, E, F, 20 runs each | Q1 exposed by the bar; Q2 not shown | open, independent scheduler defect |
+| #1203 | (via #1216) | re-scoped to #1216 | open, re-scoped |
+| #1193 | the gate and #1222 | split PR blocked by #1223 | open |
+
+### Tracker delta
+
+Opened 5, closed 0. Opened: #1219 (QEMU batch-stress flake), #1220 and #1221
+(run 2's two NC-only extras), #1223 (Pi 5 isolation-phase panic at the split
+head); all four file-don't-fix. Draft PR #1222 opened; PR #1217 updated (second
+commit 1b27eea4). #1213 retitled. Nothing merged; #1208 untouched.
+
+### What the run could not do
+
+- Step 0's UEFI-direct boots at #1209's head (cap hit after the kexec 10).
+- Cell G (question 2 not shown); fix C (same).
+- Pi 5 production-kernel bench smp, bench stealing and litmus at #1222's head
+  (lab time).
+- `bench stealing --sustain 2500` at #1222's head (the sustained bench is in
+  #1217, not in that tree).
+- A blind critic for #1219 to #1223's filings (filings, not counts).
+
+### Single most useful next experiment
+
+Boot-test the full removal 79c10261 on jetson-nano-2: `boot_test` 10 per path
+(kexec and UEFI-direct) and the integration suite, the evidence the gate's
+first two rows ask for, on the head whose Pi 5 code is already 20 of 20 and
+whose Jetson rows (D, E) show no #1216 signature. Whether that changes which
+PR is wanted is the user's decision; the run's gate rules did not allow it.
+
+### Branch table and evidence heads
+
+Entry 19. Evidence at final heads: **`gauntlet-3-hw-pi5` @ 6569a660**,
+**`gauntlet-3-hw-jetson` @ 95e73982**.
+
+### Lab state
+
+pi-5-1: SLM-OS shell on its original card, powered on, unclaimed.
+jetson-nano-2: SD Linux, ESP SLMOS.efi 789cba62 with no BootNext, recovery
+relay released, powered on, unclaimed. Both as found at 03:46Z.

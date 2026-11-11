@@ -256,3 +256,46 @@ the builder. Reproduction agrees: Jetson kexec 1/1 at e5b24894 (`run3-hw/critic-
 Pi 5 integration 1/1 complete with the 18 known failures (`run3-hw/critic-c3/pi5-integration-run01.txt`);
 UEFI-direct not reproduced. Both boards left powered on: jetson-nano-2 at SD Linux with no BootNext,
 pi-5-1 on its original card at `slmos>`. Claims released.
+
+## Row 2 re-check (13:03 to 13:06 UTC, offline, no labctl)
+
+Prompted by the orchestrator's note that the step logs were force-added at 95e73982 on
+`origin/gauntlet-3-hw-jetson`. Rows 1 and 3 to 6 stand as written above.
+
+- 95e73982 adds the 13 step logs under `run3-hw/c3/ci-e5b24894/` (13,663 lines). Extracted with
+  `git archive 95e73982`, the directory (13 logs, `head.txt`, `status.txt`) is byte-identical to the
+  scratchpad copy read at 13:00 (`diff -rq`: no differences).
+- Head identity. No log has a HEAD line: none of the 13 contains `e5b2489`; the only explicit head is
+  `head.txt` (e5b24894e740cf588e33a488da3e85a1ccd6dda6). The logs are tied to the head two ways:
+  - `10-diff-check.log` ends "runtime/src/msg_router.rs | 14 +-", "scripts/check-build-signatures.sh |
+    1 +", "86 files changed, 8605 insertions(+), 444 deletions(-)". These are the last three lines of
+    `git diff --stat origin/main...e5b24894` exactly. For 7acee1fc the same command gives "84 files
+    changed, 8576 insertions(+), 377 deletions(-)", so the log comes from e5b24894, not its parent.
+  - The build logs run in `.claude/worktrees/agent-aef1a3b83c9c1a03c`, the same worktree path that
+    appears in the Pi 5 test failure lines of `split-pi5-integration-run01.txt`, whose banner names
+    e5b24894.
+  Reconstructed, not printed: the logs carry no commit line of their own.
+- Decisive line per step (matching `status.txt`, all rc=0):
+  - 01-build-arm64, 02-build-x86_64, 03-build-jetson-real, 09-jetson-layout-build: 0 error lines;
+    each reaches "[100%] Built target slmos" and "Creating slmos.bin" (03 twice).
+  - 04-test-arm64, 05-test-ai-sched, 11-test-work-stealing: "PASSED - All tests passed (exit code 0)".
+  - 04b-test-x86_64: "PASSED - All tests passed (isa-debug-exit code 1 = success)".
+  - 06-runtime-test: "test result: ok. 308 passed; 0 failed; 10 ignored" and "test result: ok. 328
+    passed; 0 failed; 10 ignored".
+  - 07-check-braces: "All check-c-braces tests passed"; "check-braces: 0 violation(s), 0 file(s)
+    unparsed", 12 parse configurations.
+  - 08-build-order: "All build-order tests passed".
+  - 09-jetson-uefi-layout: "All checks passed.", 0 lines starting with `!`.
+  - 10-diff-check: the stat above.
+- Match with the 13:00 scratchpad reading and with the PR body's /ci row (308 and 328 passed,
+  0 violations, 0 unparsed, 12 configurations, layout "All checks passed."): identical. Those numbers
+  now have a pushed file behind them and are no longer struck.
+
+Row 2: pass. `/ci` is green at e5b24894, and its logs are on `origin/gauntlet-3-hw-jetson` @ 95e73982.
+The head is tied to the logs by `head.txt` and the diff-check stat, not by a line in each log.
+
+## Component verdict after the re-check
+
+**pass.** Rows 1, 2, 3, 5 and 6 pass; row 4 (no pass bar) is 7 of 10 complete at the PR head (8 of
+11 with the critic's boot), with the three panics in runs 01, 04 and 06 stated faithfully in every
+C3 summary. This supersedes the fail-on-completeness verdict above, which named row 2 only.
