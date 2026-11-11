@@ -1,0 +1,32 @@
+
+/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/10c489d6-554a-53cc-8bab-69cf599b9e5c/scratchpad/images/slmos-fixc-ncfix.elf:     file format elf64-littleaarch64
+
+
+Disassembly of section .text:
+
+000000008002c540 <idle_task_func>:
+    8002c540:	a9be7bfd 	stp	x29, x30, [sp, #-32]!
+    8002c544:	910003fd 	mov	x29, sp
+    8002c548:	a90153f3 	stp	x19, x20, [sp, #16]
+    8002c54c:	d0005654 	adrp	x20, 80af6000 <task_table_fallback+0xce30>
+    8002c550:	91280294 	add	x20, x20, #0xa00
+    8002c554:	d503201f 	nop
+    8002c558:	d503201f 	nop
+    8002c55c:	d503201f 	nop
+    8002c560:	f9432a93 	ldr	x19, [x20, #1616]
+    8002c564:	b4000133 	cbz	x19, 8002c588 <idle_task_func+0x48>
+    8002c568:	d53800a0 	mrs	x0, mpidr_el1
+    8002c56c:	94004f36 	bl	80040244 <cpu_logical_id>
+    8002c570:	7100001f 	cmp	w0, #0x0
+    8002c574:	1a9fa000 	csel	w0, w0, wzr, ge	// ge = tcont
+    8002c578:	937e7c00 	sbfiz	x0, x0, #2, #32
+    8002c57c:	b8606a61 	ldr	w1, [x19, x0]
+    8002c580:	11000421 	add	w1, w1, #0x1
+    8002c584:	b8206a61 	str	w1, [x19, x0]
+    8002c588:	d50342ff 	msr	daifclr, #0x2
+    8002c58c:	d5033fdf 	isb
+    8002c590:	d503205f 	wfe
+    8002c594:	97fffc73 	bl	8002b760 <schedule>
+    8002c598:	17fffff2 	b	8002c560 <idle_task_func+0x20>
+
+Disassembly of section .text.user:

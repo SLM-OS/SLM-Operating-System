@@ -1,0 +1,8 @@
+nc head=d7ede5d0 rc=0
+nc head=d7ede5d0 subject="bench stealing --assert-shares and bench idle-wakes (#1216)" elf_sha256=9272611bc364c879916cb4c13bd885f20c08255a24f1d1635bf31bd18e59cee6 banner_strings=d7ede5d083c6426f8e63a287d18b2537ece2c1bd|  SLM-OS v0.4.0 build 20261111182818 (d7ede5d0)|commit:  d7ede5d0|
+ncfix head=37939418 rc=0
+ncfix head=37939418 subject="Idle in WFE so the push SEV wakes idle thieves (#1216)" elf_sha256=9def416efe3cc150f563072ca6f3e4780f3bdf1d1e378698df3467ae2621aeb4 banner_strings=37939418044d652570b6b21154fdddb34b604dae|  SLM-OS v0.4.0 build 20261111182952 (37939418)|commit:  37939418|
+removal head=c77156b2 rc=0
+removal head=c77156b2 subject="bench stealing --assert-shares and bench idle-wakes (#1216)" elf_sha256=dad6ca01c554dd9b4e93095e2503bac163a1518bff8ebbb9a55f33887f4206c8 banner_strings=c77156b2aed85b6895a8fc9f3fe143bd0dcf62ec|  SLM-OS v0.4.0 build 20261111183134 (c77156b2)|commit:  c77156b2|
+removalfix head=5fe8c70b rc=0
+removalfix head=5fe8c70b subject="Idle in WFE so the push SEV wakes idle thieves (#1216)" elf_sha256=35a736096ba2ae47da312c09d817673e3f39deca61fefd4d3c1ec6d224450911 banner_strings=5fe8c70bd48222b453373b8002c1eada5a7bf2d9|  SLM-OS v0.4.0 build 20261111183309 (5fe8c70b)|commit:  5fe8c70b|
