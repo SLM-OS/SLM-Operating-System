@@ -926,3 +926,52 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   measured by this step. `kernel/CLAUDE.md` ("Idle Task DAIF") would need
   updating if B lands. Each sustained run is about 15 KB of serial output,
   so the fix C lab runs as one agent per image.
+
+## Entry 26 (21:15 UTC): removal hardware at 5d70fdbd; removal PR #1225; ADR on main
+
+- Lab agent `coherency-closeout-removal` (Jetson 18:50 to about 20:33Z,
+  Pi 5 20:33 to about 21:10Z; both released, powered on): evidence
+  `run3-hw/closeout/removal-5d70fdbd-*` on `gauntlet-3-hw-jetson` @
+  320a3c08 and `gauntlet-3-hw-pi5` @ 45c86b7f; images in
+  `removal-5d70fdbd-image-manifest.txt`; every counted banner 5d70fdbd.
+  - jetson-nano-2 production: kexec **10 of 10**
+    (`...-jetson-kexec-boot-run{01,02,04..11}.txt`; run03 reached the
+    shell but its capture was cut by a `tail` argument, filed
+    `-run03-truncated.txt`, not counted), UEFI-direct **10 of 10**
+    (`...-jetson-uefi-boot-run01..10.txt`, fsck clean after every write).
+  - jetson-nano-2 integration suite: did not complete on either path. kexec:
+    PAGE FAULT in the slm-runner tests after
+    `test_runner_parks_without_a_lock` (#1199's place); UEFI-direct:
+    `test_camera_open_mock` assert, then a PAGE FAULT on CPU 0 (filed as
+    #1224, bug, platform:jetson, sub:drivers, P3-low). **Controls on main
+    e4a33790 fail identically on both paths** (same place, same PASS and
+    FAIL counts; `...-control-e4a33790-integration-run01.txt`): both
+    failures are pre-existing, not the removal's.
+  - pi-5-1: production **10 of 10** (`...-pi5-boot-run01..10.txt`);
+    integration **10 of 10 complete and passing by C1's rule** (three named
+    tests pass, exactly the 18 known #1109 failures, no `[test_wait]`
+    timeout; `...-pi5-integration-run01..10.txt`, `...-pi5-index.txt`).
+    The earlier 20 of 20 was on 79c10261, before the rebase.
+  - Restores: ESP SLMOS.efi 789cba62, no BootNext, fsck clean; pi-5-1 card
+    originals, boot to `slmos>`. A `power_cycle` returned an error once and
+    left the Jetson off; one `power_on` recovered it (`...-jetson-power-cycle-error.txt`).
+  - Disclosed: separate power_cycle, trigger and capture calls; scripted
+    scp/sync/sha/kexec; three capture mistakes of the agent's own, none
+    counted; the shared-scratchpad overwrite (nothing lost).
+- **Orchestrator decision: "both boards clean" read as "the removal adds no
+  failure"**: the Jetson integration suite fails on main identically on
+  both paths, so it does not count against the removal. Stated first in
+  the PR's evidence section; the user may reverse it.
+- **Removal PR #1225** opened ready for review (not a draft), head
+  `coherency-remove-nc-axis` @ 5d70fdbd, base main, labels platform:pi5,
+  platform:jetson, sub:sched, Backlog; body: what it is, ADR link, run 1's
+  cost numbers as a table (from ADR 0007's Evidence), cells C, D, E, F with
+  filenames, /ci and the hardware table at the head, closes #1193 and
+  #1203 (re-scoped to #1216), the dead-text follow-up. GitHub reports it
+  mergeable, closing [1193, 1203]. Not merged.
+- **ADR 0007 on main: e73b9b61** (direct commit, authorized): status
+  "accepted; implementation in PR #1225", plus a "Run 3 (2026-11-11)"
+  paragraph saying the removal cleared #1216's signature on Jetson (with
+  the four ratios) and Pi 5 met its bar.
+- Fix C Jetson block 1 of 4 (nc) started on jetson-nano-2 after the
+  removal lab released it.
