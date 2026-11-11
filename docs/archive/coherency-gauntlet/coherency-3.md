@@ -534,3 +534,31 @@ both paths at the PR head.**
   is green. C3 claims as `coherency-3-C3`.
 - The bare removal image built in Entry 3 is not used (the gate's row does
   not boot-test 79c10261 on Jetson).
+
+## Entry 15 (12:41 UTC): C3 builder reported; C3 critic started; #1223 filed; cell branches deleted
+
+- C3 builder reported at 12:39Z (both boards released, Jetson at SD Linux
+  with the ESP restored, pi-5-1 at the SLM-OS shell on its original card,
+  both powered on, per the builder). Its counts go into the log after the
+  C3 critic files. It opened draft PR #1222 and set ADR 0007's status line
+  on #1209 (fd2a361c). It reported one blocker, which the orchestrator
+  filed at once because it is a defect, not a count:
+- **#1223** (bug, platform:pi5, sub:sched, P2-medium, Backlog;
+  file-don't-fix): Pi 5 KERNEL PANIC on CPU 1 right after the core-latency
+  isolation phase at the split head e5b24894, 3 of 10 integration boots
+  (`run3-hw/c3/split-pi5-integration-run01..10.txt` on
+  `gauntlet-3-hw-jetson` @ 71634eb2); same family as #1213; not seen on
+  the NC kernel or the full removal (20 of 20 each). Blocks #1222 being
+  ready for review.
+- #1199 (out of scope, not worked): one evidence comment for the Jetson
+  test-kernel Lua `memcmp` fault at e5b24894
+  (`run3-hw/c3/split-kexec-integration.txt`).
+- #1203: re-scope comment posted (issuecomment-6796095732).
+- 12:43Z: both boards to the blind C3 critic (`coherency-3-C3-critic`),
+  verdict due 13:25Z; reproduction is one Jetson kexec boot and one Pi 5
+  integration boot at the PR head (UEFI-direct skipped so the restored
+  ESP stays as found).
+- Deleted `c2/cell-a-ncoff` (6608cbd0), `c2/cell-b-ncoff-v1` (579b155a),
+  `c2/cell-de-removal` (8fc7c88a), `c2/cell-g-removal-v1` (0dfaae0c) after
+  archiving their tips under `run3-tools/deleted-branch-tips/` (README
+  gives bases and order).
