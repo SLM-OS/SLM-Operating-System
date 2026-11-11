@@ -520,3 +520,17 @@ both paths at the PR head.**
   was met on 79c10261, not on the PR head.
 - #1203: not closed by this row (the row that closes it as superseded is
   "pre-existing"); C3 re-scopes it in the PR description and the issue.
+
+## Entry 14 (10:17 UTC): C3 started; both boards to C3
+
+- C3 builder started about 10:25Z with Entry 13's construction
+  (`coherency-nc-axis-pi5` from 7acee1fc plus one commit defining
+  `PLATFORM_HAS_NC_MEMORY` for Jetson only), `/ci` on its head, and the
+  lab in order Jetson (10 kexec + 10 UEFI-direct boots at the PR head, one
+  bench and litmus set per path, the integration suite once, ESP restore
+  to SLMOS.efi 789cba62), then pi-5-1 (integration suite 10 boots at the
+  PR head, one production boot with bench and litmus, card restore). Hard
+  stop for lab work 12:50Z. No PR unless the Jetson 10 + 10 pass and `/ci`
+  is green. C3 claims as `coherency-3-C3`.
+- The bare removal image built in Entry 3 is not used (the gate's row does
+  not boot-test 79c10261 on Jetson).
