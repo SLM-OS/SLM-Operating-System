@@ -13,6 +13,10 @@
 #include "../include/smp.h"
 #include "../include/platform.h"
 #include "../include/uart.h"
+#include "../include/ncmem.h"
+#if !defined(PLATFORM_RASPI5)
+#include "../arch/arm64/efi.h"
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -1003,6 +1007,229 @@ static void test_mmu_enable_restores_caller_daif(void)
 }
 
 /* ============================================================================
+ * #1196: NC block clean+invalidate by VA
+ * ============================================================================ */
+
+/*
+ * ncmem_clean_inval_range() is driven here with a fake line operation
+ * that stands in for a dirty stale line being written back: for every
+ * eighth line it overwrites the line with STALE. QEMU has no caches to
+ * hold such a line, so this is how the counting and the restore of the
+ * handoff prefix are pinned. Three pages; the kept prefix is one page
+ * plus two lines, so it ends inside a page.
+ */
+#define NCT_PAGES       3U
+#define NCT_BYTES       (NCT_PAGES * 4096U)
+#define NCT_STALE       0x5747A1E0DEADD1E7ULL
+#define NCT_EVERY       8U
+
+alignas(4096) static uint64_t nct_buf[NCT_BYTES / sizeof(uint64_t)];
+static uint32_t nct_line;
+
+static uint64_t nct_orig(size_t i)
+{
+    return 0x0123456789ABCDEFULL ^ ((uint64_t)i * 0x9E3779B97F4A7C15ULL);
+}
+
+static bool nct_is_stale(uintptr_t a)
+{
+    return (((a - (uintptr_t)nct_buf) / nct_line) % NCT_EVERY) == 3U;
+}
+
+static void nct_fake_writeback(uintptr_t a)
+{
+    if (nct_is_stale(a)) {
+        volatile uint64_t *p = (volatile uint64_t *)a;
+        for (size_t k = 0; k < nct_line / sizeof(uint64_t); k++) {
+            p[k] = NCT_STALE;
+        }
+    }
+}
+
+static uint32_t nct_ctr_line(void)
+{
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    return 4U << ((ctr >> 16) & 0xF);
+}
+
+static void test_ncmem_clean_inval_keeps_prefix_counts_writebacks(void)
+{
+    nct_line = nct_ctr_line();
+    const size_t words = NCT_BYTES / sizeof(uint64_t);
+    const size_t keep = 4096U + 2U * nct_line;
+    const uint32_t lines = NCT_BYTES / nct_line;
+
+    for (size_t i = 0; i < words; i++) {
+        nct_buf[i] = nct_orig(i);
+    }
+
+    uint32_t stale = 0, stale_kept = 0;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (uint32_t l = 0; l < lines; l++) {
+        uintptr_t a = (uintptr_t)nct_buf + (uintptr_t)l * nct_line;
+        if (nct_is_stale(a)) {
+            stale++;
+            if (a < (uintptr_t)nct_buf + keep) {
+                stale_kept++;
+            }
+        }
+    }
+    for (size_t i = 0; i < keep / sizeof(uint64_t); i++) {
+        h = (h ^ nct_orig(i)) * 0x00000100000001b3ULL;
+    }
+
+    ncmem_maint_stats_t st;
+    int rc = ncmem_clean_inval_range((uintptr_t)nct_buf, NCT_BYTES, keep,
+                                     nct_fake_writeback, &st);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(lines, st.lines);
+    TEST_ASSERT_EQUAL_UINT32(stale, st.changed);
+    TEST_ASSERT_EQUAL_UINT32(stale_kept, st.restored);
+    TEST_ASSERT_MESSAGE(stale_kept > 0 && stale > stale_kept,
+                        "fixture must have stale lines on both sides");
+
+    for (size_t i = 0; i < words; i++) {
+        uintptr_t a = (uintptr_t)&nct_buf[i];
+        uint64_t a_line = a & ~(uintptr_t)(nct_line - 1);
+        uint64_t expect = (nct_is_stale(a_line) &&
+                           a >= (uintptr_t)nct_buf + keep)
+            ? NCT_STALE : nct_orig(i);
+        if (nct_buf[i] != expect) {
+            TEST_FAIL_MESSAGE(a < (uintptr_t)nct_buf + keep
+                ? "kept prefix lost its DRAM contents"
+                : "line outside the prefix was restored or corrupted");
+        }
+    }
+    TEST_ASSERT_EQUAL_HEX64(h, st.preserve_hash_before);
+    TEST_ASSERT_EQUAL_HEX64(h, st.preserve_hash_after);
+}
+
+/* The production line operation (DC CIVAC) on ordinary memory: every
+ * line maintained, nothing changes, nothing faults. */
+static void test_ncmem_clean_inval_dc_civac_changes_nothing(void)
+{
+    const size_t words = NCT_BYTES / sizeof(uint64_t);
+    for (size_t i = 0; i < words; i++) {
+        nct_buf[i] = nct_orig(i);
+    }
+
+    ncmem_maint_stats_t st;
+    int rc = ncmem_clean_inval_range((uintptr_t)nct_buf, NCT_BYTES, 4096U,
+                                     ncmem_dc_civac_line, &st);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(NCT_BYTES / nct_ctr_line(), st.lines);
+    TEST_ASSERT_EQUAL_UINT32(0, st.changed);
+    TEST_ASSERT_EQUAL_UINT32(0, st.restored);
+    TEST_ASSERT_EQUAL_HEX64(st.preserve_hash_before, st.preserve_hash_after);
+    for (size_t i = 0; i < words; i++) {
+        if (nct_buf[i] != nct_orig(i)) {
+            TEST_FAIL_MESSAGE("DC CIVAC changed ordinary memory");
+        }
+    }
+}
+
+static void test_ncmem_clean_inval_rejects_bad_args(void)
+{
+    ncmem_maint_stats_t st;
+    uintptr_t b = (uintptr_t)nct_buf;
+    uint32_t line = nct_ctr_line();
+
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b + 64, 4096U, 0,
+                                                      ncmem_dc_civac_line, &st));
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b, 4096U + 64U, 0,
+                                                      ncmem_dc_civac_line, &st));
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b, 4096U, 8192U,
+                                                      ncmem_dc_civac_line, &st));
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b, 4096U, line / 2U,
+                                                      ncmem_dc_civac_line, &st));
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b, 0, 0,
+                                                      ncmem_dc_civac_line, &st));
+    TEST_ASSERT_EQUAL_INT(-1, ncmem_clean_inval_range(b, 4096U, 0, NULL, &st));
+    TEST_ASSERT_EQUAL_UINT32(0, st.lines);
+}
+
+#if defined(NC_MEM_BASE)
+/*
+ * What ncmem_init actually did at boot: the whole NC block, every line,
+ * the handoff pages kept and unchanged. A shortened range, a skipped
+ * call or a lost handoff page fails here (Pi 5 and Jetson test kernels).
+ */
+static void test_ncmem_boot_maint_covers_nc_block(void)
+{
+    ncmem_maint_stats_t st;
+    ncmem_boot_maint_stats(&st);
+
+    TEST_ASSERT_EQUAL_HEX64(NC_MEM_BASE, st.base);
+    TEST_ASSERT_EQUAL_HEX64(NC_MEM_SIZE, st.size);
+    TEST_ASSERT_EQUAL_HEX64(NC_MEM_RESERVED_BYTES, st.preserve_bytes);
+    TEST_ASSERT_MESSAGE(st.lines > 0, "ncmem_init maintained no lines");
+    TEST_ASSERT_EQUAL_UINT32(NC_MEM_SIZE / nct_ctr_line(), st.lines);
+    TEST_ASSERT_EQUAL_HEX64(st.preserve_hash_before, st.preserve_hash_after);
+}
+#endif
+
+#if !defined(PLATFORM_RASPI5)
+/*
+ * efi_range_os_owned decides whether the EFI stub cleans the NC block
+ * with UEFI's map live (#1196). Maps follow the jetson-nano-2 layout
+ * (UEFI 36.4.7): ConventionalMemory 0x80000000-0xBE000000 holds the
+ * block, OP-TEE above it is not in the map.
+ */
+static efi_memory_desc_t nct_desc(uint32_t type, uint64_t start, uint64_t bytes)
+{
+    efi_memory_desc_t d = {
+        .type = type, .pad = 0, .phys_start = start,
+        .virt_start = 0, .num_pages = bytes / EFI_PAGE_SIZE, .attribute = 0,
+    };
+    return d;
+}
+
+static void test_efi_range_os_owned_nc_block(void)
+{
+    const uint64_t nc = 0xBDE00000ULL, len = 0x200000ULL;
+    efi_memory_desc_t jetson[] = {
+        nct_desc(EFI_CONVENTIONAL_MEMORY, 0x80000000ULL, 0x3E000000ULL),
+        nct_desc(EFI_CONVENTIONAL_MEMORY, 0xC2000000ULL, 0x3DFE0000ULL),
+    };
+    TEST_ASSERT_TRUE(efi_range_os_owned(jetson, sizeof(jetson),
+                                        sizeof(jetson[0]), nc, len));
+
+    /* Split over two OS-owned descriptors. */
+    efi_memory_desc_t split[] = {
+        nct_desc(EFI_BOOT_SERVICES_DATA, nc, 0x100000ULL),
+        nct_desc(EFI_CONVENTIONAL_MEMORY, nc + 0x100000ULL, 0x100000ULL),
+    };
+    TEST_ASSERT_TRUE(efi_range_os_owned(split, sizeof(split),
+                                        sizeof(split[0]), nc, len));
+
+    /* A hole: the last page is not described. */
+    efi_memory_desc_t hole[] = {
+        nct_desc(EFI_CONVENTIONAL_MEMORY, 0x80000000ULL, 0x3DFFF000ULL),
+    };
+    TEST_ASSERT_FALSE(efi_range_os_owned(hole, sizeof(hole),
+                                         sizeof(hole[0]), nc, len));
+
+    /* Firmware-owned memory inside the block. */
+    efi_memory_desc_t busy[] = {
+        nct_desc(EFI_CONVENTIONAL_MEMORY, 0x80000000ULL, 0x3DF00000ULL),
+        nct_desc(EFI_RESERVED_MEMORY_TYPE, 0xBDF00000ULL, 0x100000ULL),
+    };
+    TEST_ASSERT_FALSE(efi_range_os_owned(busy, sizeof(busy),
+                                         sizeof(busy[0]), nc, len));
+
+    /* Descriptor size below the spec's, empty range, wrapping range. */
+    TEST_ASSERT_FALSE(efi_range_os_owned(jetson, sizeof(jetson), 16,
+                                         nc, len));
+    TEST_ASSERT_FALSE(efi_range_os_owned(jetson, sizeof(jetson),
+                                         sizeof(jetson[0]), nc, 0));
+    TEST_ASSERT_FALSE(efi_range_os_owned(jetson, sizeof(jetson),
+                                         sizeof(jetson[0]),
+                                         UINT64_MAX - 0xFFFULL, len));
+}
+#endif
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1014,6 +1241,15 @@ int test_suite_vmm(void)
     RUN_TEST(test_virt_to_phys_accuracy);
     RUN_TEST(test_boot_caches_off_range_covers_caches_off_writes);
     RUN_TEST(test_mmu_enable_restores_caller_daif);
+    RUN_TEST(test_ncmem_clean_inval_keeps_prefix_counts_writebacks);
+    RUN_TEST(test_ncmem_clean_inval_dc_civac_changes_nothing);
+    RUN_TEST(test_ncmem_clean_inval_rejects_bad_args);
+#if defined(NC_MEM_BASE)
+    RUN_TEST(test_ncmem_boot_maint_covers_nc_block);
+#endif
+#if !defined(PLATFORM_RASPI5)
+    RUN_TEST(test_efi_range_os_owned_nc_block);
+#endif
     RUN_TEST(test_va_pa_coherency);
 
     /* Platform-specific mapping granularity */
