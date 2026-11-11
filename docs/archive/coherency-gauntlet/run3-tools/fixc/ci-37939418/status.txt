@@ -1,0 +1,27 @@
+18:38:02Z start 1-build-arm64
+18:39:24Z 1-build-arm64 rc=0
+18:39:24Z start 2-build-x86
+18:40:06Z 2-build-x86 rc=0
+18:40:06Z start 3-build-jetson-real
+18:43:28Z 3-build-jetson-real rc=0
+18:43:28Z start 4-test-arm64
+18:45:49Z 4-test-arm64 rc=0
+18:45:49Z start 4b-test-x86
+18:47:15Z 4b-test-x86 rc=0
+18:47:15Z start 5-test-aisched
+18:49:47Z 5-test-aisched rc=0
+18:49:47Z start 6-runtime-test
+18:52:24Z 6-runtime-test rc=0
+18:52:24Z start 7-braces
+18:53:26Z 7-braces rc=0
+18:53:26Z start 8-build-order
+18:54:12Z 8-build-order rc=0
+18:54:12Z start 9-jetson-layout
+18:55:47Z 9-jetson-layout rc=0
+18:55:47Z start 10-diff
+18:55:47Z 10-diff rc=0
+18:55:47Z start x-test-ws
+18:59:16Z x-test-ws rc=2
+DONE
+19:02:42Z x-test-ws-rerun rc=2 (corrected: the runner recorded rc=0 because $(date) reset $? before the echo; the log ends in TIMEOUT and make Error 1)
+ALLDONE

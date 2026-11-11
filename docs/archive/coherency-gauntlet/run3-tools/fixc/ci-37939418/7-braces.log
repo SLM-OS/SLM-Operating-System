@@ -1,0 +1,58 @@
+PASS: no changes
+PASS: older violation in a touched file is ignored
+PASS: single-line guard and braced code pass (untracked file)
+PASS: multi-line body is flagged
+PASS: chained if/else is flagged
+PASS: multi-line loop body is flagged
+PASS: edit to an older unbraced body is flagged
+PASS: diff.noprefix does not hide changes
+PASS: diff.mnemonicPrefix does not hide changes
+PASS: kernel/lib and .pb.c are exempt
+PASS: violation in a changed header is flagged
+PASS: changed header no parse reaches is reported
+PASS: clean header a parse reaches isn't listed
+PASS: unparsable file fails the check
+PASS: flag clang rejects fails the check
+PASS: clang-tidy crash fails the check
+PASS: misspelled check in the config fails
+PASS: malformed config fails
+PASS: unexpected exception exits 2
+PASS: --all reports older violations
+PASS: unknown base fails the check
+PASS: body using a generated macro is flagged
+PASS: undeclared name on a changed line fails
+PASS: syntax error on a changed line fails
+PASS: generated weight macros on changed lines pass
+PASS: body beside a tolerated error is flagged
+PASS: undeclared name on an unchanged line is tolerated
+PASS: added line starting with ++ keeps later hunks
+PASS: untracked unusual path is checked: kernel/src/sp ace.c
+PASS: changed unusual path is checked: kernel/src/sp ace.c
+PASS: untracked unusual path is checked: kernel/src/café.c
+PASS: changed unusual path is checked: kernel/src/café.c
+PASS: untracked unusual path is checked: kernel/src/back\slash.c
+PASS: changed unusual path is checked: kernel/src/back\slash.c
+PASS: untracked unusual path is checked: kernel/src/ctl.c
+PASS: changed unusual path is checked: kernel/src/ctl.c
+PASS: WarningsAsErrors does not hide violations
+PASS: non-UTF-8 text is tolerated
+PASS: --make-db builds main, test and wide databases
+PASS: --make-db failure fails the check
+PASS: required define that is present passes
+PASS: required define no C file tests fails
+PASS: required define only in a comment fails
+PASS: required define for an unknown database fails
+PASS: forbidden define for an unknown database fails
+PASS: forbidden define that is set fails
+PASS: forbidden define that isn't set passes
+PASS: required define that is missing fails
+PASS: required define must match the whole name
+PASS: no build change skips the define check
+PASS: build change alone checks required defines
+PASS: build change with defines intact passes
+PASS: committed build files don't count
+PASS: CMakeLists.txt change checks required defines
+PASS: cmake/ change checks required defines
+PASS: file outside the database is reported
+All check-c-braces tests passed
+check-braces: 0 violation(s), 0 file(s) unparsed; parses: JETSON_ORIN_NANO 286, JETSON_ORIN_NANO-test 288, JETSON_ORIN_NANO-wide 296, QEMU_VIRT 254, QEMU_VIRT-test 256, QEMU_VIRT-wide 275, RASPI5 262, RASPI5-test 264, RASPI5-wide 272, X86_64 205, X86_64-test 207, X86_64-wide 216

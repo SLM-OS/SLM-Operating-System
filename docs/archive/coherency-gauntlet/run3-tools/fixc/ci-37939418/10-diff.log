@@ -1,0 +1,14 @@
+ CMakeLists.txt                   |   1 +
+ docs/fact-sheets/preemption.md   |   1 +
+ docs/fact-sheets/shell.md        |   2 +-
+ docs/scheduler.md                |  13 +++
+ docs/work-stealing-bench.md      |  43 ++++++++-
+ kernel/sched/sched.c             |  25 ++++--
+ kernel/sched/smp.c               |  15 +++-
+ kernel/sched/steal_trace.h       |  80 +++++++++++++++++
+ kernel/src/help.c                |  10 ++-
+ kernel/src/shell_sys.c           | 189 +++++++++++++++++++++++++++++++++++++--
+ kernel/tests/test_harness.c      |   1 +
+ kernel/tests/test_harness.h      |   3 +
+ kernel/tests/test_steal_shares.c | 145 ++++++++++++++++++++++++++++++
+ 13 files changed, 507 insertions(+), 21 deletions(-)
