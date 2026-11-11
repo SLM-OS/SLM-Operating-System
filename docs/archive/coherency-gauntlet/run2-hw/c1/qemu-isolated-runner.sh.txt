@@ -1,0 +1,26 @@
+#!/bin/bash
+set -u
+B="$1"; W="$B/wt"; O="$B/out"; mkdir -p "$O"
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+for spec in f8ff72d6:1s a03fc75b:count; do
+  h=${spec%%:*}; v=${spec##*:}
+  git -C "$W" checkout -q --detach "$h" || exit 2
+  for n in 1 2 3 4 5; do
+    f="$O/qemu-isolated-$v-$h-run0$n.txt"
+    {
+      echo "# make test (QEMU ARM64 default), head $(git -C "$W" rev-parse HEAD), variant $v, run $n"
+      echo "# started $(date -u +%FT%TZ)"
+      echo "# ---- make output ----"
+    } > "$f"
+    ( cd "$W" && make test ) >> "$f" 2>&1
+    rc=$?
+    log=$(ls -t $(find "$W/build" -name test-output.log 2>/dev/null) 2>/dev/null | head -1)
+    {
+      echo "# make rc=$rc, finished $(date -u +%FT%TZ)"
+      echo "# ---- full QEMU serial output ($log) ----"
+      cat "$log"
+    } >> "$f"
+    echo "$v $h run$n rc=$rc $(date -u +%T)" >> "$O/progress.txt"
+  done
+done
+echo DONE >> "$O/progress.txt"

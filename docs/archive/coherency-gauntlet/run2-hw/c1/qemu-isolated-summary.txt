@@ -1,0 +1,25 @@
+#1213 reproduction, QEMU ARM64 `make test` (default config), 2026-11-11 01:28 to 01:43 UTC.
+No hardware. Runner: qemu-isolated-runner.sh.txt (5 runs per head, sequential).
+
+Heads:
+- f8ff72d6 = a03fc75b (PR #1215 head; code identical to 30dc24bc) + one TEMPORARY commit
+  (qemu-isolated-1s-f8ff72d6.patch) that replaces both 100 x (yield; test_delay(1000))
+  waits in test_isolated_core_latency with test_wait_task_terminated(..., TEST_WAIT_S(1)).
+  This reconstructs the C1 step-4 tree on which #1213 was seen; that tree was never
+  committed, so the exact original head cannot be named.
+- a03fc75b = PR #1215 head, original count bound (control).
+
+Per run (Samples line, helper timeouts, CPU-1 tests, make result), counted from the files:
+1s    run01  isolated=3/10 normal=0/10   17 iso timeouts  reposition FAIL, DAIF FAIL, msg FAIL  TIMEOUT (120 s cap)
+1s    run02  isolated=10/10 normal=10/10  0               PASS, PASS, PASS                    PASSED
+1s    run03  isolated=10/10 normal=10/10  0               PASS, PASS, PASS                    PASSED
+1s    run04  isolated=4/10 normal=0/10   16               FAIL, FAIL, FAIL                    TIMEOUT (120 s cap)
+1s    run05  isolated=7/10 normal=0/10   13               FAIL, FAIL, FAIL                    TIMEOUT (120 s cap)
+count run01  isolated=0/10 normal=0/10    0               PASS, PASS, PASS                    PASSED
+count run02  isolated=1/10 normal=0/10    0               PASS, PASS, PASS                    PASSED
+count run03-05 isolated=0/10 normal=0/10  0               PASS, PASS, PASS                    PASSED
+
+CPU 1 stopped scheduling: 1s 3 of 5 (run01, run04, run05); count 0 of 5.
+In each stalled run the first timed-out task was RUNNING (state 1) at the bound and for
+1 s of re-polls, every later one READY (state 0); the stall began in the ISOLATED phase
+(after 3, 4 and 7 completions) and the normal phase completed 0/10.
