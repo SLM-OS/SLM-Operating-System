@@ -326,3 +326,13 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   first verdict.
 - **C1 at the gate: clear** (the critic counted 20 of 20 under both
   kernels, and #1211 is not reproduced).
+
+## Entry 8 (07:57 UTC): C1 builder #1213 report received; critic check started
+
+- C1 builder finished #1213 at about 07:56Z (no labctl calls); evidence
+  `gauntlet-3-hw-pi5` @ 6569a660, `run3-hw/c1/qemu-1213-*`; branch
+  `c1/isolated-1s` @ f8ff72d6 (the original run-2 object, not a
+  reconstruction, per the builder). Its counts and outcome go into the log
+  after the C1 critic's offline check of the same files (assigned at about
+  08:00Z, not a gate input), so that #1213 is not updated on a builder
+  claim alone.
