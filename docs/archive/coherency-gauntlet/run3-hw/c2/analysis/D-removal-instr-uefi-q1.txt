@@ -1,0 +1,5 @@
+Q1: counted `D-removal-instr-uefi-run01.txt` .. `D-removal-instr-uefi-run20.txt` (20 files)
+  best thief CPU 0: median share 17.56%; 60% of it = 10.54%
+  CPU 2: median share 16.77% = 0.955 of best -> better than 60%
+  CPU 3: median share 16.43% = 0.935 of best -> better than 60%
+  runs with a non-owner CPU at ok=0: 0 of 20
