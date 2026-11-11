@@ -211,3 +211,12 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   instrumentation, so it is not the instrumentation's; filed (Entry 2).
   The `mp_weak_rows` failure occurred once in 3 on run 1's lineage only;
   recorded, not filed.
+
+## Entry 2 (04:50 UTC): filed #1219 (file-don't-fix)
+
+- #1219: QEMU `make test WORK_STEALING=ON`, `batch: stress workload
+  (4x8)` fails intermittently and the suite then hits the 120 s cap; two
+  occurrences (79c10261 /ci attempt 1; 6608cbd0 gate attempt 1), both
+  overlapping other host builds; same configurations passed without the
+  overlap. Labels bug, platform:qemu, sub:ai-runtime, P3-low; Backlog.
+  Not worked this run.
