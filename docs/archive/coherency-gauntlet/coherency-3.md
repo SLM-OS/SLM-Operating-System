@@ -477,3 +477,46 @@ table; #1216, #1213, #1211, #1202, #1205, #1203. Nothing is re-derived.
   text carries its own dash); the echoed command line is garbled in most F
   replies, results intact.
 - Issues filed by C2: none.
+
+## Entry 13 (10:16 UTC): decision gate
+
+Evaluated once, when both critic verdicts were in (C1 07:44Z after the
+row-3 re-check; C2 about 10:15Z), before the 12:16Z mark. Read from the
+verdicts and the rows they cite.
+
+| Input | Value | Source |
+|---|---|---|
+| C1 | **clear**: the critic counted 20/20 NC and 20/20 removal (three tests, no `[test_wait]` timeout), reproduced 5 + 5; #1211 not reproduced (0 of 20) | `critic-3-C1.md` sections 1, 2, 5, 7 |
+| C2, question 1 (cell C) | **exposed** (CPU 2 0.713, CPU 3 0.830 of the best thief; no non-owner 0-success run) | `critic-3-C2.md` section 3 |
+| C2, question 2 (cell B) | **not shown** (clause 3, A's CPU 3 167.3 ms) | `critic-3-C2.md` section 4 |
+
+**Row: C1 clear; exposed; H3 not shown. C3 opens the Pi 5 PR: removal on
+Pi 5 and QEMU, Jetson kept behind PLATFORM_HAS_NC_MEMORY in its platform
+header only; ADR "accepted for Pi 5 and QEMU; deferred for Jetson pending
+#1216"; only if the macro-kept Jetson passes `boot_test --count 10` on
+both paths at the PR head.**
+
+- No bar was redefined. The rows recorded alongside (not changing the
+  row): the removal did not show the signature on either Jetson path in
+  20 runs each (D 0.955 / 0.935, E 0.990 / 1.000, 0 non-owner 0-success
+  runs; `D-removal-instr-uefi-run01..20.txt`, `E-removal-instr-kexec-run01..20.txt`),
+  while the NC kernel did (F 0.397 / 0.556; C below the bar). Per the
+  brief, the PR description says this with the files.
+- How the row maps onto the code. The removal (79c10261) renames the
+  macro to `PLATFORM_HAS_NC_REGION` and deletes 212 of the 213 uses of
+  `PLATFORM_HAS_NC_MEMORY`, so "Jetson kept behind the macro" cannot be an
+  edit of 79c10261. The tree just before the removal commit, 7acee1fc on
+  the new base (the removal branch's first 33 commits: coherency verb and
+  litmus suite, the secondary-MMU fix, the NC_AXIS and SETWAY_INVAL
+  switches), already separates `PLATFORM_HAS_NC_MEMORY` (CPU-shared state
+  in the NC block) from `PLATFORM_HAS_NC_REGION` (device DMA). The split
+  PR is that tree plus one change: `PLATFORM_HAS_NC_MEMORY` defined for
+  Jetson only, so Pi 5 takes the cacheable branches and Jetson keeps the
+  NC axis.
+- Consequence stated now: the split head's Pi 5 code is not 79c10261's,
+  so C1's 20/20 removal count does not carry over to it. C3 boot-tests Pi
+  5 at the split head as well (integration suite, `boot_test` runs=10,
+  the minimum for a boot claim), and the PR body states that the 20/20 bar
+  was met on 79c10261, not on the PR head.
+- #1203: not closed by this row (the row that closes it as superseded is
+  "pre-existing"); C3 re-scopes it in the PR description and the issue.
