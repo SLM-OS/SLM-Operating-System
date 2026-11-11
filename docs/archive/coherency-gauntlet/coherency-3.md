@@ -798,3 +798,26 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   Jetson image at b849e2ee built (bin 87ab14e5); its UEFI-direct
   `boot_test --count 10` is running (lab agent `coherency-closeout-1209`).
 - /ci on main 8a27711d running.
+
+## Entry 21 (17:25 UTC): /ci on 8a27711d; #1209 Jetson UEFI 10/10; #1209 merged
+
+- /ci on main 8a27711d (`run3-tools/ci-main-8a27711d/`): the ci skill's
+  ten steps passed (builds; `make test` ARM64, x86-64, `AI_SCHED=ON`;
+  runtime-test; check-braces; build order; Jetson UEFI layout; diff
+  check). The extra step runs 2 and 3 add, `make test WORK_STEALING=ON`,
+  failed with #1219's signature (batch stress, then the 120 s cap) at load
+  average 0.5 to 0.9 with nothing else building: the load hypothesis is
+  weakened, and the failure predates #1208 (seen on 6608cbd0). Not a ci
+  skill step, so not a gate; recorded on #1219 (issuecomment-6802016458)
+  and run again after each merge.
+- #1209 head b849e2ee on jetson-nano-2, UEFI-direct: **10 of 10** to
+  `slmos>`, banner and `/sys/version` b849e2ee, no panic or fault line,
+  fsck clean after every ESP write
+  (`run3-hw/closeout/pr1209-uefi-boot01..10.txt` on `gauntlet-3-hw-jetson`
+  @ d3ba9c1e; lab agent `coherency-closeout-1209`). ESP restored to
+  SLMOS.efi 789cba62, no BootNext, fsck clean (`pr1209-esp-restore.txt`);
+  board at SD Linux, powered on, released. Disclosed: separate
+  power_cycle and capture; one read-only ssh sha check; board IP from run
+  3's record (mDNS did not resolve).
+- **#1209 marked ready and squash-merged as main cf34214d** (tree equals
+  b849e2ee). /ci on cf34214d running.
