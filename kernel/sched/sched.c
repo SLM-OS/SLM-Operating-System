@@ -631,8 +631,9 @@ static void idle_task_func(void *arg)
 #elif defined(PLATFORM_HAS_NC_MEMORY)
         /* Pi 5/Jetson idle loop.
          *
-         * With SECONDARY_PREEMPT: all CPUs unmask IRQs and WFI so
-         * timer-driven preemption works on secondary CPUs too.
+         * With SECONDARY_PREEMPT: all CPUs unmask IRQs and WFE so
+         * timer-driven preemption works on secondary CPUs too and a
+         * push's SEV wakes idle thieves (#1216).
          * The ELR trampoline handles the switch_to-in-ISR problem.
          *
          * Without SECONDARY_PREEMPT: only CPU 0 takes timer IRQs in
@@ -651,12 +652,24 @@ static void idle_task_func(void *arg)
         /* Pi 5 always (#742 landed the BL31 routing fix), or Jetson
          * when JETSON_HW_TICK=ON pairs with the patched BL31 from
          * tools/tfa-patches/0004-*. Both: per-CPU CNTHP fires Group
-         * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFI sleeps
-         * until the next tick. The ELR trampoline handles the
-         * switch_to-in-ISR problem on secondary CPUs. */
+         * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFE sleeps
+         * until the next tick or SEV. The ELR trampoline handles the
+         * switch_to-in-ISR problem on secondary CPUs.
+         *
+         * WFE, not WFI (#1216): smp_notify_cpu() issues SEV after
+         * every push to a steal deque, and SEV ends WFE but not WFI.
+         * With WFI an idle thief that skipped a busy victim slept
+         * until its own 100 Hz tick. On jetson-nano-2 the owner's
+         * cluster mates then lost much of their share of a sustained
+         * steal load, with most of their attempts landing just after
+         * the owner's tick; with WFE they matched the other thieves
+         * (coherency run 3, cells A and B). WFE still ends on every
+         * unmasked interrupt (IRQs are unmasked just above), so ticks
+         * wake idle exactly as before; the cost is a wake on every
+         * SEV any CPU issues (`bench idle-wakes` measures it). */
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
-        __asm__ volatile("wfi");
+        __asm__ volatile("wfe" ::: "memory");
 #elif defined(PLATFORM_JETSON_ORIN_NANO)
         /* Jetson without JETSON_HW_TICK (stock BL31): hardware timer
          * IRQs do not deliver to EL1/EL2 because the GIC group/route

@@ -168,10 +168,17 @@ int cpu_logical_id(uint64_t mpidr)
  * ARM64 backend for smp_notify_cpu() (see include/smp.h).
  *
  * Issues SEV. Any CPU currently in WFE falls through to its idle
- * loop, which re-checks its run queue. On ARM64 all secondary-CPU
- * idle paths use WFE (see idle_task_func in sched.c); the BSP uses
- * WFI. SEV wakes WFE but not WFI — that's fine because the BSP runs
- * schedule() on every local timer tick anyway.
+ * loop, which re-checks its run queue and tries to steal. SEV is a
+ * broadcast: it wakes every CPU waiting in WFE, not only
+ * logical_cpu. On Pi 5 and on Jetson with JETSON_HW_TICK (the
+ * SECONDARY_PREEMPT idle wait) every CPU idles in WFE, so a push
+ * wakes idle thieves within microseconds (#1216; that wait used to
+ * be WFI, which SEV does not end, so a thief waited for its next
+ * tick). WFI remains on CPU 0 in the cooperative Pi 5 build (the
+ * cooperative Jetson CPU 0 does not wait at all), in the
+ * experimental PI5_FIQ_TIMER build, and on every CPU in QEMU ARM64
+ * builds; those CPUs see new work at their next tick (see
+ * idle_task_func in sched.c).
  *
  * Platform-shared: the x86-64 backend is in kernel/arch/x86_64/platform_x86.c.
  * This definition only compiles when the target is not X86_64.

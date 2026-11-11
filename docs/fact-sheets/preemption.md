@@ -25,6 +25,7 @@ Timer-driven scheduler ticks, context switches, per-platform mode.
 | Work stealing | ON | ON | ON | ON |
 | `sched_rebalance_tick()` | Periodic | Periodic | Periodic | Periodic |
 | CPU-bound task monopolization | — | — under the HW default since #1047 (before it, running tasks were never timer-preempted); ✅ will monopolize under the cooperative build | — under HW default; ✅ will monopolize under `JETSON_HW_TICK=OFF` | — |
+| Idle wait instruction | `wfi` (SEV does not wake it) | `wfe` on every CPU, woken by ticks and by the SEV after every steal-deque push (#1216; default); `wfi` on CPU 0, `wfe` on secondaries (cooperative build) | `wfe` on every CPU, as Pi 5 (#1216; default); `wfe` on secondaries, no wait on CPU 0 (`JETSON_HW_TICK=OFF`) | `hlt` (LAPIC IPI wakes it) |
 | CPU 0 idle WFI safety | ✅ timer wakes | ✅ timer wakes (default); coop ticks at yield (cooperative build) | ✅ timer wakes (default); spin-yield under `JETSON_HW_TICK=OFF` | ✅ timer wakes |
 
 ## Build flags

@@ -1144,6 +1144,19 @@ they trust the caller.
   correctness requirement) to avoid contending a lock the victim is
   almost certainly about to take.
 
+**Waking idle thieves (#1216):** `scheduler_add_task_to_cpu()` pushes
+the task to the owner's steal deque and then calls `smp_notify_cpu()`,
+which issues SEV on ARM64. SEV ends WFE, not WFI, so on Pi 5 and on
+Jetson with `JETSON_HW_TICK` every CPU idles in WFE: an idle thief
+wakes on every push, and a thief that skipped a busy victim on the
+early-out above retries within microseconds instead of at its next
+10 ms tick. Before #1216 that wait was WFI; on jetson-nano-2 the
+owner's cluster mates (CPUs 2 and 3) woke in phase with the owner's
+tick, skipped it on the early-out and fell to 0.40 to 0.83 of the best
+thief's share (coherency run 3, `critic-3-C2.md`). The cost is a wake
+on every SEV any CPU issues; `bench idle-wakes` reports the idle wake
+rate per CPU (`docs/work-stealing-bench.md`).
+
 **Observability (sched_diag_steal_* counters):**
 
 Five per-CPU counters are exposed via the `cpu` shell command and
