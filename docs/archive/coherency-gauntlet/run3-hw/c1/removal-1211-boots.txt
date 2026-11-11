@@ -1,0 +1,124 @@
+# pi-5-1, coherency run 3, C1 step 2: #1211 (test_task_lifecycle "Memory leak detected") on the removal kernel
+#
+# Branch: c1/instrument-1211-removal @ 9f375c19 = coherency-remove-nc-axis 79c10261 + two test-only commits:
+#   edadfb2e  375ad4dd (step-1 instrumentation, c1/instrument-1202-1205-removal) re-applied onto 79c10261.
+#             Conflicts in test_slm_shell.c and test_component.c resolved to 375ad4dd's code, so
+#             test_slm_stats_live_from_second_session and test_component_cleanup_ctx_is_per_task run
+#             the step-1 code (original 100,000- and 1,000-yield bounds plus [C1-1202]/[C1-1205]
+#             lines), not #1215's wall-clock waits; the other #1215 conversions in those files stay.
+#   9f375c19  test_task_lifecycle only: 13cdb4ec's conversion reverted (window again
+#             50 x (yield(); delay(50000)), assert again final_free >= initial_free - 16 on the count
+#             read at the end of the window, as at f87d9e47), plus [C1-1211] lines: waiter CPU at the
+#             start and end of the window, dispatch and ran CPU of each of the 8 tasks with the time
+#             from dispatch, window and dispatch-to-bound wall time (CNTPCT), free pages at window
+#             start and at the bound, per-CPU schedule() counts at window start and at the bound; on
+#             a count below target at the bound, re-polls (yielding) at +1, +10, +100 and +1000 ms
+#             after the bound with the count and schedule() counts, and the first time it held.
+# QEMU: make test passed at that tree (agent worktree, banner edadfb2e-dirty = 9f375c19 content).
+# Image: make kernel-test PLATFORM=RASPI5 at 9f375c19, staged as slmos-r3-c1-removal1211-9f375c19.bin
+#   8782480 B, sha256 082933c9fefdc819c7db551cdcda75f7d3bb3dd5c4e67daa259b74e99fa756e4,
+#   banner "SLM-OS v0.4.0 build 20261111044659 (9f375c19)" in 20 of 20 files.
+# Card: copied to kernel_2712.img and kernel8.img (sdwire_info first, clean) at 05:51 UTC; still on
+#   the card at release. Originals are kernel_2712.img.prec3 and kernel8.img.prec3.
+# Method: labctl boot_test runs=3 per call (2 for the last), expect_pattern
+# "All test suites passed|total failure\(s\)", timeout 330 s, cycle delay 5 s; each file is the
+# call's run_NN.txt copied unchanged (cmp-verified). 20 of 20 runs "pattern matched".
+#   removal-1211-run01..03 <- c1-r3-1211-b01  05:51:47-06:00:25
+#   removal-1211-run04..06 <- c1-r3-1211-b02  06:00:37-06:09:13
+#   removal-1211-run07..09 <- c1-r3-1211-b03  06:09:22-06:17:45
+#   removal-1211-run10..12 <- c1-r3-1211-b04  06:17:45-06:26:28
+#   removal-1211-run13..15 <- c1-r3-1211-b05  06:26:28-06:35:07
+#   removal-1211-run16..18 <- c1-r3-1211-b06  06:35:07-06:43:56
+#   removal-1211-run19..20 <- c1-r3-1211-b07  06:43:56-06:49:47  (runs=2)
+#
+# Columns: output dir | run | banner | total failures | [C1-1211] result at the bound | waiter CPU
+#   start->end | ran CPU of tasks 0..7 (dispatched to 1,2,3,1,2,3,1,2) | window us | dispatch to all
+#   completed us | dispatch to bound us | free pages minus initial at window start / at the bound |
+#   schedule() calls in the window, CPU 0/1/2/3 | [C1-1211] FAIL repoll line | [C1-1202] result
+#   (count-bounded) | [C1-1205] result (count-bounded) | failures beyond the 18 | of the 18 missing
+| dir | run | banner | fails | 1211 | waiter | ran cpus | window_us | to_completed_us | to_bound_us | free start/bound | sched in window | 1211 repoll | 1202 | 1205 | extra failures | missing |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| c1-r3-1211-b01 | 01 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9813 | 11503 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b01 | 02 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9779 | 11469 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b01 | 03 | 9f375c19 | 19 | PASS | 0->0 | 11111111 | 1689 | 9816 | 11506 | -128/0 | 100/2/2/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b02 | 04 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1689 | 9782 | 11472 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b02 | 05 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9811 | 11501 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b02 | 06 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1689 | 9777 | 11467 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b03 | 07 | 9f375c19 | 19 | PASS | 0->0 | 11111111 | 1689 | 9781 | 11470 | -128/0 | 100/2/2/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b03 | 08 | 9f375c19 | 19 | PASS | 0->0 | 11111111 | 1688 | 9776 | 11465 | -128/0 | 100/2/2/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b03 | 09 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1689 | 9778 | 11468 | -128/0 | 100/1/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b04 | 10 | 9f375c19 | 19 | PASS | 0->0 | 11111111 | 1689 | 9777 | 11467 | -128/0 | 100/2/2/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b04 | 11 | 9f375c19 | 19 | PASS | 0->0 | 12312332 | 1689 | 9842 | 11532 | -320/0 | 100/0/1/1 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b04 | 12 | 9f375c19 | 19 | PASS | 0->0 | 11111111 | 1689 | 9789 | 11479 | -128/0 | 100/1/2/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b05 | 13 | 9f375c19 | 19 | PASS | 0->0 | 22222212 | 1690 | 9836 | 11527 | -64/0 | 100/1/0/0 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+| c1-r3-1211-b05 | 14 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9778 | 11469 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b05 | 15 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9776 | 11467 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b06 | 16 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9785 | 11475 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b06 | 17 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1689 | 9777 | 11467 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b06 | 18 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9777 | 11468 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b07 | 19 | 9f375c19 | 18 | PASS | 0->0 | 11111111 | 1690 | 9777 | 11468 | -128/0 | 100/2/2/2 | - | PASS | PASS | none | 0 |
+| c1-r3-1211-b07 | 20 | 9f375c19 | 19 | PASS | 0->0 | 22222222 | 1691 | 9811 | 11503 | -64/0 | 100/2/1/2 | - | FAIL | PASS | test_slm_stats_live_from_second_session | 0 |
+#
+# #1211 count: test_task_lifecycle failed in 0 of 20 boots (removal-1211-run01..20.txt); the
+# [C1-1211] line read PASS in 20 of 20 and no "[C1-1211] FAIL repoll" line was printed, so there are
+# no failure rows (helper CPU, waiter CPU, elapsed at the bound, re-polls) to give.
+# In 20 of 20 the free-page count at the bound equalled the initial count (deficit at window start
+# 64 to 320 pages); the window lasted 1688 to 1691 us; the 8 tasks completed 9776 to 9842 us after
+# dispatch and ran all on CPU 1 in 17 of 20, all on CPU 2 in 1 of 20 (run20), 7 on CPU 2 and
+# 1 on CPU 1 in 1 of 20 (run13) and on CPUs 1, 2 and 3 in 1 of 20 (run11); waiter CPU 0->0 in 20 of 20.
+# Classification: not reproduced (0 of 20); #1211 stays open and this blocks nothing.
+#
+# Side result, not part of the #1211 count: the re-applied count-bounded #1202 wait
+# (test_slm_stats_live_from_second_session, 100,000 yields) failed in 8 of 20
+# (run03, 07, 08, 10, 11, 12, 13, 20); in 8 of 8 the flag was observed after expiry
+# (first true 364 to 3032 us after expiry; true at the +10 ms and +100 ms re-polls in 8 of 8),
+# i.e. timing, as in run 2's removal-instr-test-run03 and run16. The count-bounded #1205 wait
+# passed in 20 of 20. Failure text, verbatim (test_slm_shell.c:1017 in every one):
+# removal-1211-run03.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..2 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9420 dispatch_to_end_us=13673 ns_per_yield=94 bare_ns_per_yield=74
+#   [C1-1202] live stages_us(from dispatch; loop at 4253, expiry at 13673) entry=55@0 saw=60@0 stats=82@0 y2000=4241@0 stop=4244@0 follow=14745@2 done=14745@2
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1072 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run07.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=10404 dispatch_to_end_us=14673 ns_per_yield=104 bare_ns_per_yield=74
+#   [C1-1202] live stages_us(from dispatch; loop at 4269, expiry at 14673) entry=56@0 saw=60@0 stats=82@0 y2000=4257@0 stop=4260@0 follow=15037@1 done=15037@1
+#   [C1-1202] live FAIL repoll 1ms=1 10ms=1 100ms=1 first_true_after_expiry_us=364 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run08.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=0 state=2 switches=2003 yields=100000/100000 loop_us=7432 dispatch_to_end_us=11692 ns_per_yield=74 bare_ns_per_yield=71
+#   [C1-1202] live stages_us(from dispatch; loop at 4260, expiry at 11692) entry=55@0 saw=59@0 stats=81@0 y2000=4248@0 stop=4251@0 follow=14484@1 done=14484@1
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=2791 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run10.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..2 assigned=0 state=2 switches=2003 yields=100000/100000 loop_us=7764 dispatch_to_end_us=12041 ns_per_yield=77 bare_ns_per_yield=70
+#   [C1-1202] live stages_us(from dispatch; loop at 4276, expiry at 12041) entry=55@0 saw=60@0 stats=82@0 y2000=4264@0 stop=4267@0 follow=15073@2 done=15073@2
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=3032 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run11.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9412 dispatch_to_end_us=13673 ns_per_yield=94 bare_ns_per_yield=72
+#   [C1-1202] live stages_us(from dispatch; loop at 4261, expiry at 13673) entry=56@0 saw=60@0 stats=82@0 y2000=4249@0 stop=4252@0 follow=14892@1 done=14892@1
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1219 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run12.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9487 dispatch_to_end_us=13737 ns_per_yield=94 bare_ns_per_yield=72
+#   [C1-1202] live stages_us(from dispatch; loop at 4250, expiry at 13737) entry=56@0 saw=60@0 stats=82@0 y2000=4238@0 stop=4241@0 follow=14708@1 done=14708@1
+#   [C1-1202] live FAIL repoll 1ms=1 10ms=1 100ms=1 first_true_after_expiry_us=971 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run13.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..1 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9369 dispatch_to_end_us=13640 ns_per_yield=93 bare_ns_per_yield=72
+#   [C1-1202] live stages_us(from dispatch; loop at 4270, expiry at 13640) entry=55@0 saw=60@0 stats=82@0 y2000=4258@0 stop=4262@0 follow=15064@1 done=15064@1
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1424 stats_rc=0 follow_rc=0 first=1 second=2001 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session
+# removal-1211-run20.txt:
+#   [C1-1202] live FAIL waiter_cpu=0->0 helper_cpu=0..2 assigned=2 state=0 switches=2003 yields=100000/100000 loop_us=9373 dispatch_to_end_us=13637 ns_per_yield=93 bare_ns_per_yield=71
+#   [C1-1202] live stages_us(from dispatch; loop at 4264, expiry at 13637) entry=56@0 saw=60@0 stats=82@0 y2000=4252@0 stop=4255@0 follow=14796@2 done=14796@2
+#   [C1-1202] live FAIL repoll 1ms=0 10ms=1 100ms=1 first_true_after_expiry_us=1159 stats_rc=0 follow_rc=0 first=1 second=2000 running=1 saw_header=1
+#       FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a112ea208bdc4334a/kernel/tests/test_slm_shell.c:1017 - done_at_bound
+#     [FAIL] test_slm_stats_live_from_second_session

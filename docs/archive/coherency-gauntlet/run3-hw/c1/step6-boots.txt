@@ -1,0 +1,92 @@
+# pi-5-1, coherency run 3, C1 step 6: NC and removal integration-suite boots (#1202, #1205, #1211)
+#
+# Images (make kernel-test PLATFORM=RASPI5, defaults, one build at a time in the C1 worktree;
+# build/kernel-test/slmos.bin staged in the main checkout's build/kernel with a temp name and mv -n):
+#   NC       c1/test-wait-helper a03fc75b (PR #1215)  slmos-r3-c1-nc-a03fc75b.bin       8733328 B
+#            sha256 5c10222e4774e48c2d5a0de69a534c2e6b0b15859d68f7b5ec13c6fcb115ac79
+#            banner "SLM-OS v0.4.0 build 20261111042036 (a03fc75b)"
+#            git diff 30dc24bc a03fc75b -- kernel/ runtime/ is empty (a03fc75b adds docs/testing.md
+#            only), so run 2's nc-step6-run01..09.txt (banner 30dc24bc, same code) count toward 20.
+#   removal  coherency-remove-nc-axis 79c10261         slmos-r3-c1-removal-79c10261.bin  8778384 B
+#            sha256 41e4319faea88fe8ad2d0ec2a9b1020356cb2390bb57af3dcf05c98a038cc563
+#            banner "SLM-OS v0.4.0 build 20261111042244 (79c10261)"; new head this run, count from 0.
+# Card: each image copied to kernel_2712.img and kernel8.img with sdwire_update, sdwire_info first
+# every time (clean). The card's originals (6935256 B, 2026-10-29) were renamed to
+# kernel_2712.img.prec3 and kernel8.img.prec3 at 04:23 UTC and are still on the card.
+# Method: labctl boot_test runs=3 per call (2 for the last block of each kernel), expect_pattern
+# "All test suites passed|total failure\(s\)", timeout 330 s, cycle delay 5 s, a fresh output_dir
+# per call under /var/lib/labctl/output/. Each capture is the call's run_NN.txt copied unchanged
+# (cmp-verified). Every call returned all of its runs "pattern matched" (31 of 31).
+#
+# Pass rule: test_slm_stats_live_from_second_session, test_component_cleanup_ctx_is_per_task and
+# test_task_lifecycle pass and no [test_wait] TIMEOUT line appears. Known failures: the 18 (#1109)
+# of run 2's nc-step6-run01.txt (20 "[FAIL] name" lines: 18 tests plus the detail line
+# "no help entry for built-in 'emmc-bringup'" and the wrapper test_eviction_run_tests_passes).
+#
+# File map and labctl call times (UTC; stamps taken by a shell command just before or after the call):
+#   nc-step6-run10..12      <- c1-r3-s6-b01-nc   04:23:41-04:30:32
+#   removal-step6-run01..03 <- c1-r3-s6-b02-rm   04:32:31-04:41:16
+#   nc-step6-run13..15      <- c1-r3-s6-b03-nc   04:42:00-04:48:41
+#   removal-step6-run04..06 <- c1-r3-s6-b04-rm   04:49:14-04:57:49
+#   nc-step6-run16..18      <- c1-r3-s6-b05-nc   04:58:24-05:05:05
+#   removal-step6-run07..09 <- c1-r3-s6-b06-rm   05:05:38-05:14:10
+#   nc-step6-run19..20      <- c1-r3-s6-b07-nc   05:14:46-05:19:21  (runs=2)
+#   removal-step6-run10..12 <- c1-r3-s6-b08-rm   05:19:54-05:28:27
+#   removal-step6-run13..15 <- c1-r3-s6-b09-rm   05:28:27-05:36:55
+#   removal-step6-run16..18 <- c1-r3-s6-b10-rm   05:36:55-05:45:23
+#   removal-step6-run19..20 <- c1-r3-s6-b11-rm   05:45:23-05:51:16  (runs=2)
+#   Each start stamp follows the card switch (power_off, sdwire_info, sdwire_update); blocks b09 to
+#   b11 reused the removal image already on the card. No other component made labctl calls in this
+#   window (the lab is a single lane, run3-rules.md).
+#
+# Columns (as run 2's force-and-step6-boots.txt, plus a pass column):
+#   output dir | run | banner | total failures | slm_live us (#1202) | c4_multi cleanups us (#1205)
+#   | task_lifecycle (free at start of wait minus initial pages / met after us) (#1211)
+#   | failures beyond the 18 | of the 18 missing | [test_wait] TIMEOUT lines | over-a-quarter lines
+#   | the three tests all [PASS]
+| dir | run | banner | fails | slm_live us | c4_multi us | lifecycle | extra failures | missing | TIMEOUT | over 1/4 | 3 tests pass |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| c1-r3-s6-b01-nc | 10 | a03fc75b | 18 | 0 | 3481 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b01-nc | 11 | a03fc75b | 18 | 5137 | 3481 | -128/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b01-nc | 12 | a03fc75b | 18 | 5181 | 3483 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b03-nc | 13 | a03fc75b | 18 | 0 | 3484 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b03-nc | 14 | a03fc75b | 18 | 5199 | 3481 | -128/7 | none | 0 | - | - | yes |
+| c1-r3-s6-b03-nc | 15 | a03fc75b | 18 | 9478 | 3482 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b05-nc | 16 | a03fc75b | 18 | 9424 | 3481 | -256/14 | none | 0 | - | - | yes |
+| c1-r3-s6-b05-nc | 17 | a03fc75b | 18 | 9458 | 3481 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b05-nc | 18 | a03fc75b | 18 | 5142 | 3481 | -128/12 | none | 0 | - | - | yes |
+| c1-r3-s6-b07-nc | 19 | a03fc75b | 18 | 9438 | 3483 | -192/13 | none | 0 | - | - | yes |
+| c1-r3-s6-b07-nc | 20 | a03fc75b | 18 | 9519 | 3481 | -128/6 | none | 0 | - | - | yes |
+| c1-r3-s6-b02-rm | 01 | 79c10261 | 18 | 2331 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b02-rm | 02 | 79c10261 | 18 | 10842 | 3480 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b02-rm | 03 | 79c10261 | 18 | 10364 | 10598 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b04-rm | 04 | 79c10261 | 18 | 10406 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b04-rm | 05 | 79c10261 | 18 | 2314 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b04-rm | 06 | 79c10261 | 18 | 2354 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b06-rm | 07 | 79c10261 | 18 | 0 | 10598 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b06-rm | 08 | 79c10261 | 18 | 1135 | 10598 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b06-rm | 09 | 79c10261 | 18 | 2343 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b08-rm | 10 | 79c10261 | 18 | 8031 | 3481 | -384/3 | none | 0 | - | - | yes |
+| c1-r3-s6-b08-rm | 11 | 79c10261 | 18 | 1070 | 10599 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b08-rm | 12 | 79c10261 | 18 | 8031 | 3481 | -128/3 | none | 0 | - | - | yes |
+| c1-r3-s6-b09-rm | 13 | 79c10261 | 18 | 2314 | 3480 | -192/9998 | none | 0 | - | - | yes |
+| c1-r3-s6-b09-rm | 14 | 79c10261 | 18 | 8034 | 10599 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b09-rm | 15 | 79c10261 | 18 | 2335 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b10-rm | 16 | 79c10261 | 18 | 2332 | 3480 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b10-rm | 17 | 79c10261 | 18 | 8040 | 10599 | -128/3 | none | 0 | - | - | yes |
+| c1-r3-s6-b10-rm | 18 | 79c10261 | 18 | 10656 | 3481 | -128/2 | none | 0 | - | - | yes |
+| c1-r3-s6-b11-rm | 19 | 79c10261 | 18 | 8038 | 10600 | -128/3 | none | 0 | - | - | yes |
+| c1-r3-s6-b11-rm | 20 | 79c10261 | 18 | 2341 | 3480 | -128/2 | none | 0 | - | - | yes |
+#
+# Counts for the three tests (pass in the boot and no [test_wait] TIMEOUT line):
+#   NC a03fc75b, this run: 11/11 (nc-step6-run10..20.txt). With run 2's 9/9 on 30dc24bc
+#   (run2-hw/c1/nc-step6-run01..09.txt on gauntlet-2-hw-pi5), NC: 20/20.
+#   removal 79c10261: 20/20 (removal-step6-run01..20.txt).
+# Failures beyond the 18: none in 31 of 31 boots of this run; none of the 18 missing in any boot;
+# 0 [test_wait] TIMEOUT lines and 0 over-a-quarter lines in 31 files.
+# Run 2's two NC-only extras (nc-step6-run04 test_slm_stop_from_second_session_during_prompt,
+# nc-step6-run06 test_proactive_load_balance_runtime_config_aggressive) did not recur in these
+# 11 NC or 20 removal boots.
+# Noted, not a failure: in removal-step6-run13.txt task_lifecycle met after 9998 us (deficit 192
+# pages at the start of the wait, bound 1000000 us); the other 19 removal boots met after 2 or
+# 3 us and the 11 NC boots after 6 to 14 us.
