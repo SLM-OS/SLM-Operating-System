@@ -25,8 +25,8 @@
 
 /* UART lock for thread-safe printf.
  *
- * Two locking strategies, selected by PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson,
- * unless built with NC_AXIS=OFF):
+ * Two locking strategies, selected by PLATFORM_HAS_NC_MEMORY (Jetson
+ * unless built with NC_AXIS=OFF; never Pi 5, ADR 0007):
  *
  *   PLATFORM_HAS_NC_MEMORY: IRQ-disable only, no cross-CPU lock.
  *     On these platforms per-core L2 caches are treated as incoherent, so
@@ -42,7 +42,7 @@
  *     If secondary CPU printing is needed beyond that, an NC-memory-
  *     based lock must be added.
  *
- *   Default (QEMU, x86-64, and Pi 5 / Jetson under NC_AXIS=OFF):
+ *   Default (QEMU, x86-64, Pi 5, and Jetson under NC_AXIS=OFF):
  *     standard cacheable spinlock with IRQ save/restore. It is a real
  *     cross-CPU lock once vmm_init sets spinlock_hw_enabled (barrier
  *     only before that, when only CPU 0 runs), so secondary CPUs may

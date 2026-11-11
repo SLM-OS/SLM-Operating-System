@@ -22,7 +22,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Stack size (per task) | 256 KB (`STACK_SIZE`, raised from 64 KB in #643 for SLM forward) | Same | Same | Same |
 | Stack overflow detection | Bottom-of-stack canary (64 B) + `schedule()`-time SP-range assert (#644) | Same | Same | Same (RSP-side) |
 | Kernel VA = PA? | Identity | Identity | Identity | Higher-half (not yet) |
-| Cache coherency (hardware) | ✅ | ❌ treated as incoherent (NC model) | ❌ treated as incoherent (NC model) | ✅ MESI |
+| Cache coherency (hardware) | ✅ | ✅ measured coherent (#1193, ADR 0007) | measured coherent (#1193); NC model kept pending #1216 | ✅ MESI |
 | Manual cache maintenance | — | DC CVAC/CIVAC + DSB SY | Same + DC CVAC before secondary boot | — |
 | Non-cacheable shared region | — | `0xFFE00000`, 2 MB, MAIR idx 2 | `0xBDE00000`, 2 MB, MAIR idx 2 | — (coherent BSS) |
 | NC allocator | — | `ncmem_alloc` (bump) | Same | — |
@@ -39,7 +39,7 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 
 - **Jetson OP-TEE carveout reclamation** — 64 MB at `0xBE000000–0xC2000000` is CBB-protected. Writes trigger RAS error and power off the CPU core. PMM skips the range.
 - **Jetson high-memory regions (>4 GB)** — mapped via 1-GB block descriptors L1 indices 4-8 (`0x100000000–0x23FFFFFFF`). Works; no issues noted.
-- **Pi 5 cross-CPU coherency**: handled with NC memory + manual DC CVAC/CIVAC + spinlock DRAM flush. Not an SMPEN issue: CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on Cortex-A78AE; neither core has an SMPEN or other coherency-enable bit (#1194). #1193 re-examines the model.
+- **Pi 5 cross-CPU coherency**: CPU-shared scheduler state is in cacheable memory and spinlocks take the generic path (ADR 0007, `docs/adr/0007-cross-cpu-coherency.md`); the NC block remains for device DMA. Jetson keeps CPU-shared state in NC memory pending #1216. Not an SMPEN issue: CPUECTLR_EL1 bit 6 is RES0 on Cortex-A76 and PF_MODE[0] on Cortex-A78AE; neither core has an SMPEN or other coherency-enable bit (#1194). #1193 re-examines the model.
 - **Larger Pi 5 RAM variants (8 GB)** — not regression-tested. PMM should Just Work; unverified.
 - **Higher-half kernel** — not implemented on any platform. All kernels use identity-mapped low memory.
 - **x86-64 EL0-equivalent (CPL=3) user mode** — syscall path present in tree but never wired into component or task execution. ARM64 has the full per-task TTBR0 + ASID + EL0 path; x86-64 lags.

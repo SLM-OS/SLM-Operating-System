@@ -151,9 +151,10 @@ make kernel AI_SCHED=ON                        # QEMU ARM64 with AI scheduler
 make test AI_SCHED=ON                          # Run tests with AI scheduler
 make kernel PLATFORM=X86_64 AI_SCHED=ON        # x86-64 with AI scheduler (SSE)
 
-# Coherency gauntlet switches (#1193, Pi 5 and Jetson only; default ON = current behavior):
-make kernel PLATFORM=RASPI5 NC_AXIS=OFF        # CPU-shared state in cacheable memory, real UART lock
-make kernel PLATFORM=RASPI5 SETWAY_INVAL=OFF   # no post-MMU set/way loop on secondaries
+# Coherency gauntlet switches (#1193; default ON = current behavior). Pi 5 keeps
+# CPU-shared state in cacheable memory in every build (ADR 0007); NC_AXIS is Jetson-only:
+make kernel PLATFORM=JETSON_ORIN_NANO NC_AXIS=OFF   # Jetson: CPU-shared state in cacheable memory, real UART lock
+make kernel PLATFORM=RASPI5 SETWAY_INVAL=OFF        # no post-MMU set/way loop on secondaries (Pi 5, Jetson)
 ```
 
 The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU machine settings based on `PLATFORM`. For x86-64, the test target creates a bootable GRUB ISO and uses `isa-debug-exit` for clean test termination.

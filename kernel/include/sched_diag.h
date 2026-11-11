@@ -3,10 +3,10 @@
  *
  * sched.c defines these counters in one of two ways:
  *
- *   PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson, default build): pointers into
- *     the NC block, assigned in scheduler_init().
- *   Otherwise (QEMU, x86-64, and Pi 5 / Jetson built with NC_AXIS=OFF):
- *     cacheable arrays of MAX_CPUS.
+ *   PLATFORM_HAS_NC_MEMORY (Jetson, default build): pointers into the
+ *     NC block, assigned in scheduler_init().
+ *   Otherwise (QEMU, x86-64, Pi 5 per ADR 0007, and Jetson built with
+ *     NC_AXIS=OFF): cacheable arrays of MAX_CPUS.
  *
  * Every user indexes them the same way (sched_diag_tick[cpu]), but an
  * extern declaration must match the definition: a pointer extern against

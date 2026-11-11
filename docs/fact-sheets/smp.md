@@ -10,11 +10,11 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 | CPU model | Cortex-A76 | Cortex-A76 | Cortex-A78AE (dual cluster) | Skylake+ x86-64 |
 | Boot mechanism | PSCI HVC | PSCI SMC | PSCI SMC (NS EL2) | INIT-SIPI-SIPI + ACPI MADT |
 | MPIDR encoding | linear | linear | dual-cluster Aff2.Aff1 (0x000,0x100,0x200,0x300,0x10200,0x10300) | APIC IDs |
-| Per-CPU run queues | NC memory | NC memory (`0xFFE00000`) | NC memory (`0xBDE00000`) | BSS (coherent) |
-| Per-CPU current-task ptr | NC | NC | NC | BSS |
+| Per-CPU run queues | BSS (coherent) | BSS (coherent, ADR 0007) | NC memory (`0xBDE00000`, pending #1216) | BSS (coherent) |
+| Per-CPU current-task ptr | BSS | BSS | NC | BSS |
 | Cross-CPU dispatch | ✅ full | ✅ full | ✅ full | ✅ full |
 | IPI / wake mechanism | SEV broadcast | SEV broadcast | SEV broadcast | LAPIC vector 49 |
-| Hardware cache coherency | ✅ automatic | ❌ treated as incoherent (NC model) | ❌ treated as incoherent (NC model) | ✅ MESI |
+| Hardware cache coherency | ✅ automatic | ✅ measured coherent (#1193, ADR 0007) | measured coherent (#1193); NC model kept pending #1216 | ✅ MESI |
 | Manual DC CVAC/CIVAC needed | — | ✅ | ✅ | — |
 | Spinlock model | LDAXR/STXR | Runtime `spinlock_hw_enabled`; barrier-only pre-MMU; DC CIVAC around LDAXR/STLR | Runtime `spinlock_hw_enabled`; same as Pi 5 | `lock cmpxchg` |
 | Work stealing | ON | ON | ON | ON |

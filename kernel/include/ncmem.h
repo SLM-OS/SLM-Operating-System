@@ -20,16 +20,21 @@
  *                           preemption state) lives in the block, and
  *                           the UART lock is IRQ-disable only. This is
  *                           the "NC axis" measured by #1193. Defined on
- *                           Pi 5 and Jetson unless the build passes
- *                           NC_AXIS=OFF (CMake defines NC_AXIS_OFF),
- *                           in which case every such user takes its
- *                           cacheable branch.
+ *                           Jetson only, unless the build passes
+ *                           NC_AXIS=OFF (CMake defines NC_AXIS_OFF).
+ *                           Never defined on Pi 5. Without it every
+ *                           such user takes its cacheable branch.
  *
  * The NC axis was introduced on the belief that the per-core L2 caches
  * are incoherent; the Cortex-A76 and Cortex-A78AE TRMs say they are
  * coherent in hardware and that the "SMPEN" bit SLM-OS checked does not
  * exist on these cores (docs/archive/coherency-gauntlet/c3-audit.md,
- * C0 facts Q1/Q4). NC_AXIS=OFF exists so that question can be measured.
+ * C0 facts Q1/Q4). Per ADR 0007 (docs/adr/0007-cross-cpu-coherency.md),
+ * Pi 5 keeps CPU-shared state in cacheable Normal Write-Back Inner
+ * Shareable memory, like QEMU. Jetson keeps the NC axis pending #1216
+ * (a work-stealing stall seen under sustained load, not yet explained);
+ * NC_AXIS=OFF still moves Jetson to the cacheable branches so that it
+ * can be measured.
  */
 
 #ifndef NCMEM_H
@@ -44,8 +49,9 @@
 #define PLATFORM_HAS_NC_REGION 1
 
 /* CPU-to-CPU shared state in the NC block: use this macro in
- * scheduler/SMP code instead of platform-specific guards. */
-#if !defined(NC_AXIS_OFF)
+ * scheduler/SMP code instead of platform-specific guards. Jetson only
+ * (ADR 0007; Jetson pending #1216). Pi 5 never defines it. */
+#if defined(PLATFORM_JETSON_ORIN_NANO) && !defined(NC_AXIS_OFF)
 #define PLATFORM_HAS_NC_MEMORY 1
 #endif
 

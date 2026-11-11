@@ -4,9 +4,9 @@
  * The NC_AXIS build switch decides whether run queues, the task table,
  * the current-task pointers, the sched_diag_* counters and the
  * SECONDARY_PREEMPT state live in the 2 MB Normal Non-Cacheable block
- * (PLATFORM_HAS_NC_MEMORY, default on Pi 5 and Jetson) or in cacheable
- * Normal Write-Back Inner Shareable memory (NC_AXIS=OFF, and always on
- * QEMU). These tests walk the live translation tables and check the
+ * (PLATFORM_HAS_NC_MEMORY, default on Jetson only) or in cacheable
+ * Normal Write-Back Inner Shareable memory (always on Pi 5 and QEMU per
+ * ADR 0007, and on Jetson under NC_AXIS=OFF). These tests walk the live translation tables and check the
  * MAIR attribute index, shareability and physical address of each
  * structure, so a build that silently keeps (or loses) the NC placement
  * fails here. They also check that the NC block itself stays mapped NC
@@ -35,8 +35,17 @@
 #if defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_HAS_NC_REGION)
 #error "PLATFORM_HAS_NC_MEMORY needs the NC region"
 #endif
-#if defined(NC_AXIS_OFF) && defined(SPINLOCK_DRAM_FLUSH)
-#error "NC_AXIS_OFF must drop the Pi 5 spinlock DC CIVAC path"
+#if defined(SPINLOCK_DRAM_FLUSH)
+#error "the Pi 5 spinlock DC CIVAC path is gone (ADR 0007)"
+#endif
+/* ADR 0007: Pi 5 keeps CPU-shared state in cacheable memory; only
+ * Jetson keeps the NC axis (pending #1216). */
+#if defined(PLATFORM_RASPI5) && defined(PLATFORM_HAS_NC_MEMORY)
+#error "Pi 5 must not define PLATFORM_HAS_NC_MEMORY (ADR 0007)"
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO) && !defined(NC_AXIS_OFF) && \
+    !defined(PLATFORM_HAS_NC_MEMORY)
+#error "Jetson keeps PLATFORM_HAS_NC_MEMORY unless NC_AXIS=OFF (#1216)"
 #endif
 #if (defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)) && \
     !defined(PLATFORM_HAS_NC_REGION)

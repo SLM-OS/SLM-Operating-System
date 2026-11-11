@@ -138,7 +138,7 @@ endif()
 #
 # Only applicable on platforms that have the exception-frame problem:
 # Pi 5 and Jetson. The trampoline's per-CPU state lives in the NC block
-# (or in cacheable BSS under NC_AXIS=OFF, see below). QEMU
+# on Jetson (cacheable BSS on Pi 5 and under NC_AXIS=OFF, see below). QEMU
 # virt does not need the trampoline (its emulated timer IRQ allows
 # schedule-from-ISR), and x86-64 has no ELR. If SECONDARY_PREEMPT=ON
 # is passed on a non-applicable platform it is silently ignored, with
@@ -168,19 +168,23 @@ endif()
 # Coherency gauntlet switches (#1193). Pi 5 and Jetson only; both ON by
 # default, which is the existing behaviour and adds no definition.
 #
-# NC_AXIS=OFF defines NC_AXIS_OFF. kernel/include/ncmem.h then leaves
-# PLATFORM_HAS_NC_MEMORY undefined, so run queues, the task table,
+# Pi 5 keeps CPU-shared state in cacheable memory in every build (ADR
+# 0007, docs/adr/0007-cross-cpu-coherency.md): kernel/include/ncmem.h
+# never defines PLATFORM_HAS_NC_MEMORY there, so NC_AXIS changes nothing
+# on Pi 5. Jetson keeps the NC axis pending #1216.
+#
+# NC_AXIS=OFF defines NC_AXIS_OFF. On Jetson, kernel/include/ncmem.h then
+# leaves PLATFORM_HAS_NC_MEMORY undefined, so run queues, the task table,
 # current-task pointers, steal deques, sched_diag_* counters, boot and
 # init flags and the SECONDARY_PREEMPT state take their cacheable
-# branches; the UART lock (kprintf.c) becomes a real spinlock; and the
-# Pi 5 DC CIVAC lock-word flush in spinlock.h is dropped.
+# branches, and the UART lock (kprintf.c) becomes a real spinlock.
 # PLATFORM_HAS_NC_REGION stays defined: the NC block is still mapped and
 # ncmem_alloc still serves device DMA (xHCI, MACB, CDC-ECM, USB, RCE).
 #
 # SETWAY_INVAL=OFF defines SETWAY_INVAL_OFF, which removes the post-MMU
 # DC ISW L1/L2 loop that Pi 5 and Jetson secondaries run in smp_boot.S,
 # so its necessity can be measured separately from the NC axis.
-option(NC_AXIS "Keep CPU-to-CPU shared state in the NC block (Pi 5, Jetson)" ON)
+option(NC_AXIS "Keep CPU-to-CPU shared state in the NC block (Jetson; Pi 5 never, ADR 0007)" ON)
 if(NOT NC_AXIS)
     if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
         add_compile_definitions(NC_AXIS_OFF=1)
