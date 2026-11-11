@@ -1,0 +1,13 @@
+01-build-arm64 rc=0 16:39:44
+02-build-x86_64 rc=0 16:40:27
+03-build-jetson-real rc=0 16:43:50
+04-test-arm64 rc=0 16:46:11
+04b-test-x86_64 rc=0 16:47:35
+05-test-ai-sched rc=0 16:50:02
+06-runtime-test rc=0 16:52:46
+07-check-braces rc=0 16:52:54
+08-build-order rc=0 16:53:39
+09-jetson-uefi-layout rc=0 16:55:11
+10-diff-check rc=0 16:55:11
+11-test-work-stealing rc=2 16:58:36
+FAILED
