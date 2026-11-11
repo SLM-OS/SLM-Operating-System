@@ -1,0 +1,17 @@
+# coherency run 3 C3 critic, jetson-nano-2 after the critic's kexec boot (kexec-boot01.txt, PR head e5b24894)
+# power_cycle jetson-nano-2 (delay 15 s, separate labctl call, critic was the only labctl caller), then ssh read-only checks:
+$ ssh root@192.168.4.5 'uptime; findmnt -n -o SOURCE /; cat /proc/cmdline | cut -c1-120'   (12:49:16Z)
+ 04:49:16 up 2 min,  0 users,  load average: 0.43, 0.49, 0.21
+/dev/mmcblk0p1
+root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 mminit_loglevel=4 console=ttyTCU0,115200 firmware_class.path=/etc/firmwa
+$ ssh root@192.168.4.5 'efibootmgr | head -4; systemctl is-active slmos-autokexec; systemctl is-enabled slmos-autokexec'
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+inactive
+enabled
+# No BootNext line: the board is at SD Linux with no one-shot UEFI entry pending. The ESP was not touched by the critic
+# (UEFI-direct reproduction skipped so the restored ESP stays as the builder left it); the ESP file hash was not re-read.
+# /root/slmos-r3-c3critic.elf (sha256 7a5ee64b...028cba) left on the board; /root/slmos.elf not touched.
+# Board left powered on at SD Linux. Claim coherency-3-C3-critic released after this check.
