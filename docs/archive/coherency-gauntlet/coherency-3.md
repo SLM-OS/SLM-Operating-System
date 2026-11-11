@@ -975,3 +975,28 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   the four ratios) and Pi 5 met its bar.
 - Fix C Jetson block 1 of 4 (nc) started on jetson-nano-2 after the
   removal lab released it.
+
+## Entry 27 (21:36 UTC): fix C Jetson block 1 of 4 (nc, without the fix)
+
+- Agent `coherency-closeout-fixc-nc`, image nc (d7ede5d0 = main e4a33790 +
+  `--assert-shares`, no fix; elf 9272611b, checked on host and board), one
+  kexec boot, no reboot; board back at SD Linux, released. Files
+  `run3-hw/fixc/nc-*.txt` on `gauntlet-3-hw-jetson` @ bc9303ee (45 files,
+  every one with `commit: d7ede5d0`).
+- `--assert-shares`: **FAIL 2 of 20** (run01: CPU 2 9.1% against best thief
+  CPU 0 18.9%; run12: CPU 2 6.7%, CPU 3 also below half, against CPU 5
+  21.9%), PASS 18 of 20 (`nc-sustain-run01..20.txt`). The required failing
+  run on main without the fix is shown.
+- Median share over 20 sustained runs: CPU 0 17.20%, 1 16.85%, 2 16.05%
+  (6.7 to 17.3), 3 15.95% (9.2 to 17.9), 4 17.40%, 5 17.40%. Burst
+  `bench stealing` median 10332 us (7303 to 13756), 20 of 20 completed
+  16/16 (`nc-burst-run01..20.txt`). `bench smp` 5/5 completed (`nc-smp.txt`).
+- Idle wakes per second, at rest (`bench idle-wakes 5000`, median of 3,
+  `nc-idlewakes-run01..03.txt`): 100.0 on every CPU (99.8 to 100.1), the
+  tick. During the sustained runs (`iw mode=sustained`, median of 20):
+  CPU 0 0.0, 1 2.3, 2 14.15, 3 12.25, 4 2.7, 5 3.7.
+- Disclosed: separate boot and login captures (only caller); one
+  `cat /sys/version` reply written at the top of every file; garbled
+  command echoes kept; five replies with a cut duplicate prompt, output
+  complete.
+- 21:3xZ: block 2 of 4 (ncfix) started.
