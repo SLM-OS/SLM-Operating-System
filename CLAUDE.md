@@ -391,6 +391,8 @@ NEVER bypass labctl to interact with hardware. This includes:
 
 If labctl lacks a needed capability, inform the user and request the feature. Do not work around it — workarounds cause device conflicts with other projects sharing the lab infrastructure.
 
+**One labctl server runs one call at a time, across boards.** A session's stdio labctl MCP server appears to serialize every call, whichever board it targets, so a long call on one board stalls every other labctl call in the session. Measured in coherency run 2 (#1193, `gauntlet/coherency-2:docs/archive/coherency-gauntlet/coherency-2.md` Entries 10 and 17): while a 10- and then a 20-boot `boot_test` ran on pi-5-1, jetson-nano-2 serial calls stalled 26 to 30 min; a 240 s Jetson `serial_capture` issued at 09:19:01Z returned at 09:31:19Z with 0 lines, having started after the boot it was meant to capture; and pi-5-1 switch phases that normally took 21 to 40 s took about 4 min twice while Jetson calls were in flight. When two boards are driven from one session, serialize board time, or keep every call short (`boot_test` count of 3 or fewer) and start a Jetson boot capture only when no other long labctl call is in flight.
+
 ---
 
 ## Issue Tracking
