@@ -1020,3 +1020,18 @@ relay released, powered on, unclaimed. Both as found at 03:46Z.
   almost at once: idle CPUs effectively poll. Hypothesis, untested: the
   generic-timer event stream (CNTKCTL_EL1.EVNTEN) or an event left
   pending by frequent SEVs. The cost is the user's decision.
+
+## Entry 29 (21:58 UTC): why WFE barely sleeps (hypothesis, from the code)
+
+- Not an event stream: `boot.S` writes `CNTHCTL_EL2` = 3 (EL0PCTEN and
+  EL0PCEN only; EVNTEN, bit 2, clear), main e4a33790 around line 710.
+- Likely source: `spin_unlock` issues `sev` on every unlock
+  (`kernel/include/spinlock.h` lines 281 and 289 on main), and SEV sets
+  the event register on every PE, including the issuer. The idle loop's
+  `yield()` enters `schedule()`, which takes and releases run-queue locks
+  on every pass, so an idle CPU re-arms its own event each pass and its
+  next WFE returns at once. Hypothesis, not tested. A cheaper variant
+  would clear the self-generated event before sleeping (for example
+  `sevl; wfe` to consume it, then `wfe`) or re-check the run queue and
+  the steal deques first; a design choice for the user, not made here.
+- Fix C block 3 of 4 (removal, no fix) started about 21:58Z.
