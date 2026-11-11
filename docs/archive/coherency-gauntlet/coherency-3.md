@@ -562,3 +562,70 @@ both paths at the PR head.**
   `c2/cell-de-removal` (8fc7c88a), `c2/cell-g-removal-v1` (0dfaae0c) after
   archiving their tips under `run3-tools/deleted-branch-tips/` (README
   gives bases and order).
+
+## Entry 16 (13:03 UTC): C3 critic verdict (first round); /ci logs pushed
+
+- **C3 critic (`critic-3-C3.md`), filed 13:02Z: fail-on-completeness,
+  row 2.** The /ci step logs at e5b24894 were not on the evidence branch:
+  `.gitignore` (`*.log`) dropped the 13 logs from 71634eb2, leaving
+  `head.txt` and `status.txt`. The critic read the scratchpad copies as
+  green (runtime-test 308 and 328 passed, 0 brace violations over 12
+  configurations, layout "All checks passed.", the four `make test` logs
+  PASSED). Rows 1, 3, 5, 6 pass; row 4 (no bar) counted 7/10 and stated
+  faithfully.
+  - Row 1: 16 files, +92/-130; code changes only in `ncmem.h` and
+    `spinlock.h` (the Pi 5 `SPINLOCK_DRAM_FLUSH`, which at 7acee1fc existed
+    only for Pi 5 on the NC axis, so it follows from the definition).
+  - Row 3: kexec 10/10, UEFI-direct 10/10, banner e5b24894 in every file,
+    "run queues in NC memory" in every boot; two captures noted (kexec
+    boot02 split during Linux boot before the trigger; boot09 starts 20 s
+    after the trigger but before Linux hands over).
+  - Row 4: complete runs 02, 03, 05, 07, 08, 09, 10 (18 known failures,
+    three tests pass, no timeout); runs 01, 04, 06 panic after
+    `test_rapid_task_exit_no_panic` and "CPU 1: returned to general
+    scheduling", inside `test_isolated_core_latency`. With the critic's
+    boot: 8 of 11 complete.
+  - Reproduction: Jetson kexec 1/1 (own build, ELF 7a5ee64b), Pi 5
+    integration 1/1 complete (own build 33d1ca71), `run3-hw/critic-c3/`
+    @ ef0caa43; UEFI-direct skipped to keep the restored ESP; card
+    restored. Both boards powered on, claims released.
+  - Disclosed: commit subject "(7/10)" seen before counting (count from
+    raw files agrees); separate power_cycle and capture; two read-only ssh
+    checks; a 10 s sleep before `slmos-kexec`; pi-5-1 powered off for
+    `sdwire_info`.
+  - Recorded by the critic: Entry 15's "same family as #1213" is the
+    orchestrator's hypothesis; it stays labelled so (#1223 says
+    "resembles").
+- 13:02Z: the orchestrator force-added the 13 logs from the scratchpad copy
+  to `gauntlet-3-hw-jetson` @ 95e73982 (`status.txt` byte-identical); no
+  result changes. The critic re-checks row 2 (Entry 17 or later).
+
+## Entry 17 (13:03 UTC, written after the C3 critic filed): C3 builder report
+
+- C3 held jetson-nano-2 10:23 to 11:54Z and pi-5-1 11:55 to about 12:35Z.
+  Branch `coherency-nc-axis-pi5` @ e5b24894 = 7acee1fc plus one commit
+  (`PLATFORM_HAS_NC_MEMORY` for Jetson only; the Pi 5 spinlock DRAM flush
+  deleted; `test_nc_axis.c` `#error` guards; docs). Draft PR #1222 opened
+  with the Pi 5 blocker stated first; ADR 0007 status line on #1209,
+  fd2a361c. Evidence `gauntlet-3-hw-jetson` @ 71634eb2 (logs @ 95e73982),
+  `run3-hw/c3/`.
+- Jetson at e5b24894: kexec 10/10 (`split-kexec-boot01..10.txt`),
+  UEFI-direct 10/10 (`split-uefi-boot01..10.txt`), ESP fsck clean after all
+  10 writes; coherency litmus PASS on both paths (0 forbidden, 0 timeouts,
+  0 weak rows); `bench smp` 5/5 and burst `bench stealing` 16/16 on both
+  paths (`split-{kexec,uefi}-bench-*.txt`); `--sustain` is not in this tree
+  (it comes with #1217). Test-kernel integration on kexec did not finish:
+  Lua `memcmp` page fault (`split-kexec-integration.txt`; #1199).
+- Pi 5 at e5b24894: integration 7/10 complete; 3/10 KERNEL PANIC (#1223).
+  Production-kernel benches and litmus not run (lab time).
+- /ci at e5b24894: 11 steps rc=0 (`run3-hw/c3/ci-e5b24894/status.txt`).
+- Restores: ESP SLMOS.efi 789cba62, no BootNext, fsck clean
+  (`esp-restore.txt`); pi-5-1 card originals, boot to `slmos>`
+  (`pi5-restore-boot.txt`). Left on the boards:
+  `/root/slmos-r3-c3-e5b24894.elf`, `/root/slmos-r3-c3-test-e5b24894.elf`
+  (Jetson); staged images in the main checkout's `build/kernel/`.
+- Disclosed: board IP by mDNS on the documented hostname (no resource
+  reader); separate power_cycle and capture throughout; read-only
+  `esp-check.sh` ssh and an scp fetch of the as-found ESP image (run 2's
+  restore recipe); opening the PR with Pi 5 at 7/10, because the gate's
+  only no-PR condition was a Jetson failure.
