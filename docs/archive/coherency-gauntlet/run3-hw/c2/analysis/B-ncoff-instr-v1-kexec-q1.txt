@@ -1,0 +1,22 @@
+Q1: counted `B-ncoff-instr-v1-kexec-run01.txt` .. `B-ncoff-instr-v1-kexec-run14.txt` (3 files)
+  left out `B-ncoff-instr-v1-kexec-run02.txt`: cpu2 chk=-1; cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run03.txt`: cpu3 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run05.txt`: cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run06.txt`: cpu1 chk=-1; cpu2 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run07.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run08.txt`: cpu1 chk=-1; cpu3 chk=-1; cpu4 att 9216 != diag_att 9215
+  left out `B-ncoff-instr-v1-kexec-run09.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run10.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run11.txt`: cpu1 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run12.txt`: cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run13.txt`: cpu1 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run15.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run16.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run17.txt`: cpu3 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run18.txt`: cpu1 chk=-1; cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run19.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run20.txt`: cpu2 chk=-1
+  best thief CPU 3: median share 16.89%; 60% of it = 10.13%
+  CPU 2: median share 16.81% = 0.995 of best -> better than 60%
+  CPU 3: median share 16.89% = 1.000 of best -> better than 60%
+  runs with a non-owner CPU at ok=0: 0 of 3

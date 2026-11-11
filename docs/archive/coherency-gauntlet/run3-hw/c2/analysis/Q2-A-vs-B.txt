@@ -1,0 +1,44 @@
+A: counted `A-ncoff-instr-kexec-run01.txt` .. `A-ncoff-instr-kexec-run20.txt` (20 files)
+B: counted `B-ncoff-instr-v1-kexec-run01.txt` .. `B-ncoff-instr-v1-kexec-run14.txt` (3 files)
+  left out `B-ncoff-instr-v1-kexec-run02.txt`: cpu2 chk=-1; cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run03.txt`: cpu3 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run05.txt`: cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run06.txt`: cpu1 chk=-1; cpu2 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run07.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run08.txt`: cpu1 chk=-1; cpu3 chk=-1; cpu4 att 9216 != diag_att 9215
+  left out `B-ncoff-instr-v1-kexec-run09.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run10.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run11.txt`: cpu1 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run12.txt`: cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run13.txt`: cpu1 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run15.txt`: cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run16.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run17.txt`: cpu3 chk=-1; cpu5 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run18.txt`: cpu1 chk=-1; cpu3 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run19.txt`: cpu1 chk=-1; cpu4 chk=-1
+  left out `B-ncoff-instr-v1-kexec-run20.txt`: cpu2 chk=-1
+  clause 1 (B: CPUs 2, 3 within 10 pp of CPUs 4, 5, median share):
+    CPU 2 16.81% vs CPU 4 16.71%: 0.10 pp
+    CPU 2 16.81% vs CPU 5 16.89%: 0.08 pp
+    CPU 3 16.89% vs CPU 4 16.71%: 0.18 pp
+    CPU 3 16.89% vs CPU 5 16.89%: 0.00 pp
+    largest gap 0.18 pp -> holds
+  clause 2 (f_pd share of attempts, A about 75% -> B under 10%):
+    CPU 2: A 5139/7797 = 65.9%, B 136/42869 = 0.3%
+    CPU 3: A 4904/7303 = 67.2%, B 73/18758 = 0.4%
+    CPU 4: A 201/4068 = 4.9%, B 155/40846 = 0.4%
+    CPU 5: A 230/4059 = 5.7%, B 82/20819 = 0.4%
+    B under 10% on CPUs 2 and 3 -> holds (A values above are for the "about 75%" context)
+  clause 3 (first-success median, A above 200 ms -> B under 1 ms):
+    CPU 2: A 204.5 ms (20 runs), B 0.0 ms (3 runs)
+    CPU 3: A 167.3 ms (17 runs), B 0.0 ms (3 runs)
+    CPU 4: A 5.5 ms (20 runs), B 0.0 ms (3 runs)
+    CPU 5: A 5.5 ms (20 runs), B 0.0 ms (3 runs)
+    CPUs 2 and 3 -> fails
+  clause 4 (A window data; CPU 1 tick period 10000.4 us; uniform phase puts 2.0% within 200 us):
+    CPU 0: inside window 43/55878 = 0.1%; within 200 us of CPU 1 tick 1155/55878 = 2.1%; modal ph_w bin <10ms (50.7%); tick offset to CPU 1 median 4502 us [45, 9836]
+    CPU 2: inside window 4160/7797 = 53.4%; within 200 us of CPU 1 tick 5505/7797 = 70.6%; modal ph_w bin <10us (69.9%); tick offset to CPU 1 median 0 us [0, 10000]
+    CPU 3: inside window 4167/7303 = 57.1%; within 200 us of CPU 1 tick 5025/7303 = 68.8%; modal ph_w bin <10us (68.4%); tick offset to CPU 1 median 0 us [0, 9995]
+    CPU 4: inside window 2/4068 = 0.0%; within 200 us of CPU 1 tick 48/4068 = 1.2%; modal ph_w bin <10ms (48.4%); tick offset to CPU 1 median 5401 us [932, 6546]
+    CPU 5: inside window 3/4059 = 0.1%; within 200 us of CPU 1 tick 50/4059 = 1.2%; modal ph_w bin <10ms (47.6%); tick offset to CPU 1 median 5402 us [932, 6547]
+    (clustered vs spread is read from these rows in the report)

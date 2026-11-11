@@ -1,0 +1,17 @@
+## Sensitivity view, labelled; not a bar. No chk filter.
+### A-ncoff-instr-kexec-run01..20 (20 files)
+files: 20, no chk filter
+CPU 0: median share 18.47%; f_pd 77/55878 = 0.1%; first success median (a) 0.1 ms over 20 runs, (b) 0.1 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [0]
+CPU 1: median share 17.65%; f_pd 141/329 = 42.9%; first success median (a) None ms over 0 runs, (b) none ms over 20 runs (ok=0 runs censored high); runs with ok=0: 20; chk values [0, 1]
+CPU 2: median share 13.82%; f_pd 5139/7797 = 65.9%; first success median (a) 204.5 ms over 20 runs, (b) 204.5 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [0]
+CPU 3: median share 14.17%; f_pd 4904/7303 = 67.2%; first success median (a) 167.3 ms over 17 runs, (b) 195.4 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 3; chk values [0]
+CPU 4: median share 18.30%; f_pd 201/4068 = 4.9%; first success median (a) 5.5 ms over 20 runs, (b) 5.5 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [0]
+CPU 5: median share 18.35%; f_pd 230/4059 = 5.7%; first success median (a) 5.5 ms over 20 runs, (b) 5.5 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [0]
+### B-ncoff-instr-v1-kexec-run01..20 (20 files)
+files: 20, no chk filter
+CPU 0: median share 16.40%; f_pd 81/27053 = 0.3%; first success median (a) 0.1 ms over 20 runs, (b) 0.1 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [0]
+CPU 1: median share 16.21%; f_pd 299/90674 = 0.3%; first success median (a) None ms over 0 runs, (b) none ms over 20 runs (ok=0 runs censored high); runs with ok=0: 20; chk values [-1, 0, 1]
+CPU 2: median share 16.83%; f_pd 872/299593 = 0.3%; first success median (a) 0.0 ms over 20 runs, (b) 0.0 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [-1, 0, 1]
+CPU 3: median share 16.86%; f_pd 637/183404 = 0.3%; first success median (a) 0.0 ms over 20 runs, (b) 0.0 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [-1, 0, 1]
+CPU 4: median share 16.84%; f_pd 844/198306 = 0.4%; first success median (a) 0.0 ms over 20 runs, (b) 0.0 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [-1, 0, 1]
+CPU 5: median share 16.87%; f_pd 715/193936 = 0.4%; first success median (a) 0.0 ms over 20 runs, (b) 0.0 ms over 20 runs (ok=0 runs censored high); runs with ok=0: 0; chk values [-1, 0]
