@@ -1,0 +1,60 @@
+# labctl serial_send reply 1 of 2
+# call 2026-11-11T22:25:32.332Z  reply 2026-11-11T22:25:32.554Z  tool_use_id toolu_019G7QXgMmGWJoeyJwoKKAT3
+# args {"capture_timeout": 10, "capture_until": "slmos>", "data": "cat /sys/version", "port_name": "jetson-nano-2"}
+[Captured 7 lines in 0.0s, pattern 'None' matched]
+cat /sys/version
+name:    SLM-OS
+version: 0.4.0
+build:   20261111183309
+commit:  5fe8c70b
+slmos>
+slmos>
+# labctl serial_send reply 2 of 2
+# call 2026-11-11T22:37:16.080Z  reply 2026-11-11T22:37:16.851Z  tool_use_id toolu_01KdQiLJuaXeuLZBPBUnTDqW
+# args {"capture_timeout": 60, "capture_until": "slmos>", "data": "bench stealing", "port_name": "jetson-nano-2"}
+[Captured 45 lines in 0.5s, pattern 'None' matched]
+se���stealing
+
+Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)
+=====================================================
+  Tasks dispatched:  16 (all to CPU 1)
+  Online CPUs:       6
+  CONFIG_WORK_STEALING: ON  (expect parallel completion)
+[INFO] Task 's3_5' (id=20949) exiting
+[INFO] Task 's3_11' (id=20955) exiting
+
+  Results:
+    Completed:    16 / 16
+    Wall-clock:   9 ms (9291 us)
+    Per-task avg: 580 us
+
+    Per-CPU execution distribution:
+      CPU 0: 2 tasks
+      CPU 1: 3 tasks
+      CPU 2: 3 tasks
+      CPU 3: 3 tasks
+      CPU 4: 2 tasks
+      CPU 5: 3 tasks
+
+    Steal counter deltas this run:
+    CPU  Attempts  Successes  PushFull
+    ---  --------  ---------  --------
+      0         4          2         0
+      1       177          0         0
+      2       143          3         0
+      3       193          3         0
+      4     16221          2         0
+      5     13201          3         0
+
+  c2t-format v2 mode=burst run=34 cntfrq=31250000 cpus=6 tasks=16 depth=0 work=1 sustain_ms=0
+  times in us from dispatch start; log = first 16 attempts as us-since-first-attempt + outcome (S ok, E empty, P preempt_disabled skip, X stale, I isolated, O other)
+  #1216 watch=cpu1; reasons T tick trampoline, C coop tick, P schedule() after a push, O other schedule(), B boot; w_in/win_n/win_sum_us/win_max_us in that order; w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,<500 us,<1,<2,<5,<10,>=10 ms after the tick; wlog = entry_us:dur_ns:reason, first 128 windows
+  c2t cpu=0 exec=2 att=2 diag_att=2 ok=2 diag_ok=2 iso=0 f_stale=0 f_pd=0 f_empty=0 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=0 v_empty=0 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=1080 first_ok_us=1080 last_att_us=3407 ticks=1 idle=0 sched=6 lk_hw=1 log=0S,2326S w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,0,0,2,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=0,0,0,0,0,0,0,0,1,1,0 tick_n=1 tick_first_us=9281 tick_last_us=9281 win_n=0,0,0,6,0 win_sum_us=0,0,0,2,0 win_max_us=0,0,0,1,0 wph=0,0,0,0,0,0,0,0,1,4,1 wlog=-
+  c2t cpu=1 exec=3 att=49 diag_att=49 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=1 f_empty=48 f_other=0 chk=0 v_pd=1 v_pd_work=0 v_busy=1 v_empty=244 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=16 dq_drains=6 dq_drain_us=4645 dq_last_push_us=1080 first_att_us=5001 first_ok_us=- last_att_us=9281 ticks=1 idle=47 sched=51 lk_hw=1 log=0E,1404E,1409E,1419E,1425E,1437E,1444E,1457E,1460E,1469E,1475E,1480E,1490E,1500E,1510E,1526E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,0,0,0,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=1,0,0,0,0,0,0,47,1,0,0 tick_n=1 tick_first_us=5001 tick_last_us=5001 win_n=1,0,2,2,0 win_sum_us=6,0,0,0,0 win_max_us=6,0,0,0,0 wph=1,0,0,0,0,0,0,1,0,3,0 wlog=1034:288:P,2822:256:P,4610:256:O,5001:6816:T,6411:224:O
+  c2t cpu=2 exec=3 att=42 diag_att=42 ok=3 diag_ok=3 iso=0 f_stale=0 f_pd=0 f_empty=39 f_other=0 chk=0 v_pd=1 v_pd_work=0 v_busy=4 v_empty=205 v_gen=0 v_state=1 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=2050 first_ok_us=2050 last_att_us=6733 ticks=1 idle=39 sched=43 lk_hw=1 log=0S,2563S,4352E,4358E,4365E,4372E,4376E,4387E,4394E,4398E,4408E,4418E,4424E,4431E,4441E,4447E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,40,0,2,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=1,0,0,0,0,0,0,0,41,0,0 tick_n=1 tick_first_us=2049 tick_last_us=2049 win_n=1,0,0,4,0 win_sum_us=3,0,0,0,0 win_max_us=3,0,0,0,0 wph=1,0,0,0,0,0,0,1,2,1,0 wlog=-
+  c2t cpu=3 exec=3 att=56 diag_att=56 ok=3 diag_ok=3 iso=0 f_stale=0 f_pd=0 f_empty=53 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=2 v_empty=272 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=2818 first_ok_us=2818 last_att_us=9281 ticks=1 idle=52 sched=56 lk_hw=1 log=0S,1787S,3576E,3578E,3581E,3583E,3586E,3591E,3597E,3601E,3607E,3611E,3621E,3627E,3638E,3646E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,53,1,2,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=1,0,0,0,0,0,0,0,1,54,0 tick_n=1 tick_first_us=9281 tick_last_us=9281 win_n=1,0,0,4,0 win_sum_us=4,0,0,0,0 win_max_us=4,0,0,0,0 wph=1,0,0,0,0,0,0,0,2,2,0 wlog=-
+  c2t cpu=4 exec=2 att=5467 diag_att=5467 ok=2 diag_ok=2 iso=0 f_stale=0 f_pd=6 f_empty=5459 f_other=0 chk=0 v_pd=6 v_pd_work=0 v_busy=2 v_empty=27322 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=4 first_ok_us=1059 last_att_us=9277 ticks=1 idle=5465 sched=5468 lk_hw=1 log=0E,4E,11E,17E,22E,30E,36E,46E,52E,57E,66E,74E,79E,85E,95E,99E w_in=4,0,0,0,0 w_in_unk=0 w_off=0,1,1,2,0,0,0,0 ph_w=9,27,79,137,276,780,1373,1147,454,1183,1 ph_w_pd=5,0,0,0,0,0,0,0,1,0,0 ph_own=1,0,0,0,0,0,0,0,4798,667,0 tick_n=1 tick_first_us=2047 tick_last_us=2047 win_n=1,0,0,3,0 win_sum_us=2,0,0,0,0 win_max_us=2,0,0,0,0 wph=1,0,0,0,0,0,0,1,1,1,0 wlog=-
+  c2t cpu=5 exec=3 att=693 diag_att=694 ok=3 diag_ok=3 iso=0 f_stale=1 f_pd=0 f_empty=689 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=17 v_empty=3452 v_gen=0 v_state=2 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=2 first_ok_us=1066 last_att_us=9279 ticks=1 idle=689 sched=693 lk_hw=1 log=0E,5E,10E,16E,21E,28E,30E,38E,41E,47E,52E,57E,61E,66E,73E,76E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,50,444,199,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=2,1,7,10,19,57,95,57,141,304,0 tick_n=1 tick_first_us=8298 tick_last_us=8298 win_n=1,0,0,4,0 win_sum_us=5,0,0,1,0 win_max_us=5,0,0,0,0 wph=1,0,0,0,0,0,0,0,2,2,0 wlog=-
+
+slmos>
+slmos>
