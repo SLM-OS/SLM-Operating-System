@@ -1,0 +1,464 @@
+# #1213 QEMU sampling scripts (coherency run 3, C1), archived unchanged as run.
+# Final versions. Earlier versions: see qemu-1213-summary.txt (sampler changes at 07:02 and 07:09 UTC).
+
+################################################################
+# FILE: run.sh
+################################################################
+#!/bin/bash
+# #1213 QEMU runner (coherency run 3, C1). One QEMU at a time.
+# usage: run.sh <single|multi> <first_run> <last_run>
+# QEMU command = the `make test` recipe (Makefile, `make -n test`) with
+#   -accel tcg,tb-size=128,thread=<mode> and a QMP socket added, wrapped in
+#   systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120.
+# The sampler (sampler.py) connects to the QMP socket and samples PCs at the first
+# isolated-phase TIMEOUT line, then reads system registers once through the gdbstub
+# (-gdb tcp:localhost:<port>; from single run04 on).
+set -u
+mode=$1; first=$2; last=$3
+D=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/a3f89c3b-b428-422e-83c3-16d5b1f3e49e/scratchpad/q1213
+W=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/agent-a14dc65deae5cae8b
+ELF=$D/slmos-f8ff72d6.elf
+HEAD=$(cat "$D/head.txt")
+CT=$(cat "$D/current_task_addr.txt")
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+for n in $(seq "$first" "$last"); do
+    rn=$(printf '%02d' "$n")
+    out=$D/out/qemu-1213-$mode-run$rn.txt
+    ser=$D/out/serial-$mode-$rn.log
+    smp=$D/out/samples-$mode-$rn.txt
+    sock=/tmp/claude-1000/q1213-$mode-$rn.sock
+    if [ "$mode" = single ]; then port=$((21300 + 10#$rn)); else port=$((21400 + 10#$rn)); fi
+    rm -f "$sock" "$ser" "$smp"
+    rm -f "$D/sd-run.img"; truncate -s 4G "$D/sd-run.img"   # fresh sparse 4G SD image per run, as make test creates it
+    cmd=(systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120
+         qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G
+         -accel tcg,tb-size=128,thread=$mode -nographic
+         -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0
+         -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=$D/sd-run.img
+         -device sdhci-pci -device sd-card,drive=slmos-sd
+         -semihosting -qmp unix:$sock,server=on,wait=off -gdb tcp:localhost:$port -kernel "$ELF")
+    start=$(date -u +%FT%TZ)
+    "${cmd[@]}" > "$ser" 2>&1 &
+    qpid=$!
+    python3 -I "$D/sampler.py" "$sock" "$ser" "$ELF" "$CT" "$smp" "$port" &
+    spid=$!
+    wait "$qpid"; rc=$?
+    wait "$spid"
+    end=$(date -u +%FT%TZ)
+    {
+        echo "# branch c1/isolated-1s head $HEAD (f8ff72d6 = a03fc75b + TEMPORARY 1 s isolated-latency waits), QEMU ARM64, accel tcg thread=$mode, run $rn"
+        echo "# ELF sha256 $(sha256sum "$ELF" | cut -d' ' -f1) (build/kernel-test/slmos.elf from make test at $HEAD)"
+        echo "# started $start, finished $end, QEMU exit code $rc (124 = timeout 120 s cap)"
+        echo "# command: ${cmd[*]}"
+        echo "# ---- complete QEMU output (serial, stdout+stderr) ----"
+        cat "$ser"
+        echo
+        echo "# ---- PC samples (sampler.py; QMP human-monitor-command; symbols: aarch64-none-elf-addr2line -f -i) ----"
+        cat "$smp"
+    } > "$out"
+    echo "$mode run$rn rc=$rc $(date -u +%T) $(grep -a -o 'Samples collected: isolated=[0-9]*/[0-9]*, normal=[0-9]*/[0-9]*' "$ser" | head -1)" >> "$D/out/progress.txt"
+    rm -f "$sock"
+done
+
+################################################################
+# FILE: all.sh
+################################################################
+#!/bin/bash
+# Interleaved: single 1, multi 1, single 2, ... (one QEMU at a time).
+D=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/a3f89c3b-b428-422e-83c3-16d5b1f3e49e/scratchpad/q1213
+for n in $(seq ${START:-1} ${END:-5}); do
+    bash "$D/run.sh" single "$n" "$n"
+    bash "$D/run.sh" multi "$n" "$n"
+done
+echo ALLDONE >> "$D/out/progress.txt"
+
+################################################################
+# FILE: sampler.py
+################################################################
+#!/usr/bin/env python3
+"""#1213 PC sampler (coherency run 3, C1).
+
+usage: sampler.py <qmp_socket> <serial_log> <elf> <current_task_addr_hex> <out_file>
+
+Waits for the QEMU QMP socket, then tails the serial log. At the first
+"[test_wait] iso_latency_isolated: TIMEOUT" (or, failing that,
+"iso_latency_normal: TIMEOUT") line it takes 10 samples, 200 ms apart
+(2 s), of every vCPU's PC (QMP human-monitor-command "info registers" per
+cpu-index) and of current_task[0..3] (the task pointer each CPU's scheduler
+has set as running) with that task's name and state. Each PC is
+symbolized with aarch64-none-elf-addr2line -f -i. Stops when QEMU exits.
+"""
+import json, os, re, socket, subprocess, sys, time
+
+sock_path, serial_log, elf, ct_addr_hex, out_path = sys.argv[1:6]
+GDB_PORT = sys.argv[6] if len(sys.argv) > 6 else None
+CT = int(ct_addr_hex, 16)
+NCPU = 4
+TASK_NAME_OFF = 4     # struct task: uint32_t id; char name[TASK_NAME_LEN]; ...
+TRIG = ["[test_wait] iso_latency_isolated: TIMEOUT",
+        "[test_wait] iso_latency_normal: TIMEOUT"]
+if os.environ.get("SAMPLER_TRIGGER"):      # sampler self-test only
+    TRIG = [os.environ["SAMPLER_TRIGGER"]]
+
+out = open(out_path, "w")
+def log(s=""):
+    out.write(s + "\n"); out.flush()
+
+class QMP:
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.connect(path)
+        self.f = self.s.makefile("rw")
+        self.f.readline()                      # greeting
+        self.cmd("qmp_capabilities")
+    def cmd(self, name, **args):
+        self.f.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+        self.f.flush()
+        while True:
+            r = json.loads(self.f.readline())
+            if "return" in r or "error" in r:
+                return r
+    def hmp(self, line, cpu=None):
+        a = {"command-line": line}
+        if cpu is not None:
+            a["cpu-index"] = cpu
+        r = self.cmd("human-monitor-command", **a)
+        return r.get("return", "ERROR " + json.dumps(r.get("error")))
+
+def sym(pc):
+    try:
+        o = subprocess.run(["aarch64-none-elf-addr2line", "-f", "-i", "-C", "-e", elf,
+                            hex(pc)], capture_output=True, text=True, timeout=10).stdout
+        lines = [l.strip() for l in o.splitlines() if l.strip()]
+        pairs = [lines[i] + " " + os.path.basename(lines[i + 1].split(" ")[0])
+                 for i in range(0, len(lines) - 1, 2)]
+        s = " <- ".join(pairs) if pairs else "?"
+        d = subprocess.run(["aarch64-none-elf-objdump", "-d", "--no-show-raw-insn",
+                            "--start-address=" + hex(pc - 4), "--stop-address=" + hex(pc + 4), elf],
+                           capture_output=True, text=True, timeout=10).stdout
+        ins = [l.split(":", 1)[1].strip() for l in d.splitlines()
+               if re.match(r"\s*[0-9a-f]+:\s", l)]
+        return s + " insn[pc-4]=[" + (ins[0] if len(ins) > 1 else "?") + "] insn[pc]=[" + (ins[-1] if ins else "?") + "]"
+    except Exception as e:
+        return "addr2line error %s" % e
+
+def read_u64(q, addr):
+    t = q.hmp("x /1gx 0x%x" % addr, cpu=0)
+    m = re.search(r":\s*0x([0-9a-fA-F]+)", t)
+    return int(m.group(1), 16) if m else None
+
+def read_bytes(q, addr, n):
+    t = q.hmp("x /%dxb 0x%x" % (n, addr), cpu=0)
+    # Each output line is "<address>: 0xNN 0xNN ..."; take the bytes after the colon.
+    bs = []
+    for line in t.splitlines():
+        if ":" not in line:
+            continue
+        bs += [int(v, 16) for v in re.findall(r"\b0x([0-9a-fA-F]{2})\b", line.split(":", 1)[1])]
+    return bytes(bs[:n])
+
+def task_info(q, tp):
+    if not tp:
+        return "NULL"
+    raw = read_bytes(q, tp, 4 + 16 + 4)
+    name = raw[4:20].split(b"\0")[0].decode("ascii", "replace")
+    st = int.from_bytes(raw[20:24], "little") if len(raw) >= 24 else -1
+    stn = {0: "READY", 1: "RUNNING", 2: "BLOCKED", 3: "TERMINATED", 4: "DESTROYED"}.get(st, "?")
+    return "task=0x%x id=%d name=%s state=%d(%s)" % (
+        tp, int.from_bytes(raw[0:4], "little"), name, st, stn)
+
+# Connect (QEMU creates the socket at startup).
+q = None
+for _ in range(300):
+    try:
+        q = QMP(sock_path); break
+    except Exception:
+        time.sleep(0.1)
+if q is None:
+    log("# sampler: could not connect to QMP socket %s" % sock_path); sys.exit(0)
+log("# sampler: connected to QMP %s" % time.strftime("%H:%M:%S", time.gmtime()))
+
+trig_line = None
+pos = 0
+t0 = time.time()
+while trig_line is None:
+    try:
+        with open(serial_log, "rb") as f:
+            f.seek(pos); chunk = f.read(); pos += len(chunk)
+        text = chunk.decode("utf-8", "replace")
+        for t in TRIG:
+            if t in text:
+                trig_line = [l for l in text.splitlines() if t in l][0]; break
+    except FileNotFoundError:
+        pass
+    if trig_line is None:
+        try:
+            r = q.cmd("query-status")
+        except Exception:
+            log("# sampler: QEMU exited before any isolated-phase TIMEOUT line (no stall, no samples)")
+            sys.exit(0)
+        time.sleep(0.05)
+
+log("# sampler: trigger at +%.1f s after connect: %s" % (time.time() - t0, trig_line.strip()))
+log("# sampler: 10 samples, 200 ms apart; per CPU: PC, EL/PSTATE line, symbol; current_task[cpu]")
+for k in range(10):
+    ts = time.strftime("%H:%M:%S", time.gmtime()) + ".%03d" % int((time.time() % 1) * 1000)
+    log("## sample %02d at %s" % (k + 1, ts))
+    for c in range(NCPU):
+        try:
+            regs = q.hmp("info registers", cpu=c)
+        except Exception as e:
+            log("#   QEMU gone: %s" % e); sys.exit(0)
+        m = re.search(r"PC=([0-9a-fA-F]+)", regs)
+        ps = re.search(r"PSTATE=(\S+ \S+ \S+)", regs)
+        pc = int(m.group(1), 16) if m else None
+        lr = re.search(r"X30=([0-9a-fA-F]+)", regs)
+        lr = int(lr.group(1), 16) if lr else None
+        if k == 0:
+            log("# full 'info registers' of cpu%d at sample 01:" % c)
+            for rl in regs.splitlines():
+                log("#   " + rl)
+        tp = read_u64(q, CT + 8 * c)
+        log("cpu%d pc=%s pstate=%s sym=%s | current_task[%d] %s" % (
+            c, ("0x%x" % pc) if pc is not None else "?",
+            ps.group(1) if ps else "?", sym(pc) if pc is not None else "?",
+            c, task_info(q, tp) if tp is not None else "read error"))
+        log("     cpu%d x30=%s sym=%s" % (c, ("0x%x" % lr) if lr is not None else "?",
+                                       sym(lr) if lr is not None else "?"))
+    time.sleep(0.2)
+if GDB_PORT:
+    log("# gdbstub (gdb-multiarch -batch; all vCPUs stop while attached, resume on detach):")
+    gcmd = ["gdb-multiarch", "-q", "-batch", "-nx", elf,
+            "-ex", "set pagination off", "-ex", "set confirm off",
+            "-ex", "target remote localhost:%s" % GDB_PORT,
+            "-ex", "info threads"]
+    for th in (1, 2, 3, 4):
+        gcmd += ["-ex", "thread %d" % th, "-ex", "echo ---- thread %d (cpu%d)\\n" % (th, th - 1),
+                 "-ex", "p/x $pc", "-ex", "p/x $sp", "-ex", "p/x $cpsr",
+                 "-ex", "p/x $ESR_EL1", "-ex", "p/x $FAR_EL1", "-ex", "p/x $ELR_EL1",
+                 "-ex", "p/x $SPSR_EL1", "-ex", "p/x $SP_EL1", "-ex", "p/x $SP_EL0",
+                 "-ex", "x/3i $pc", "-ex", "bt 12"]
+    gcmd += ["-ex", "thread 2", "-ex", "x/4i $ELR_EL1", "-ex", "detach"]
+    try:
+        g = subprocess.run(gcmd, capture_output=True, text=True, timeout=60)
+        for gl in (g.stdout + g.stderr).splitlines():
+            log("#   " + gl)
+    except Exception as e:
+        log("#   gdb error: %s" % e)
+log("# sampler: done")
+
+################################################################
+# FILE: trace.sh
+################################################################
+#!/bin/bash
+# #1213 trace runs (coherency run 3, C1): the run.sh QEMU command plus a gdb
+# attached from boot with a breakpoint on the current-EL/SPx synchronous
+# vector (gdbtrace.py), to catch the first fault of a CPU 1 exception loop.
+# usage: trace.sh <single|multi> <first_run> <last_run>; one QEMU at a time.
+set -u
+mode=$1; first=$2; last=$3
+D=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/a3f89c3b-b428-422e-83c3-16d5b1f3e49e/scratchpad/q1213
+ELF=$D/slmos-f8ff72d6.elf
+HEAD=$(cat "$D/head.txt")
+export PATH=/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH
+for n in $(seq "$first" "$last"); do
+    rn=$(printf '%02d' "$n")
+    out=$D/out/qemu-1213-$mode-trace-run$rn.txt
+    ser=$D/out/serial-$mode-trace-$rn.log
+    glog=$D/out/gdb-$mode-trace-$rn.txt
+    port=$((21500 + 10#$rn))
+    rm -f "$D/sd-run.img"; truncate -s 4G "$D/sd-run.img"
+    cmd=(systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120
+         qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G
+         -accel tcg,tb-size=128,thread=$mode -nographic
+         -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0
+         -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=$D/sd-run.img
+         -device sdhci-pci -device sd-card,drive=slmos-sd
+         -semihosting -gdb tcp:localhost:$port -kernel "$ELF")
+    start=$(date -u +%FT%TZ)
+    "${cmd[@]}" > "$ser" 2>&1 &
+    qpid=$!
+    sleep 1
+    timeout 130 gdb-multiarch -q -batch -nx "$ELF" -ex "target remote localhost:$port" \
+        -ex "source $D/gdbtrace.py" > "$glog" 2>&1 &
+    gpid=$!
+    wait "$qpid"; rc=$?
+    wait "$gpid"
+    end=$(date -u +%FT%TZ)
+    {
+        echo "# branch c1/isolated-1s head $HEAD (f8ff72d6 = a03fc75b + TEMPORARY 1 s isolated-latency waits), QEMU ARM64, accel tcg thread=$mode, TRACE run $rn (gdb breakpoint on exception_vectors+0x200)"
+        echo "# ELF sha256 $(sha256sum "$ELF" | cut -d' ' -f1)"
+        echo "# started $start, finished $end, QEMU exit code $rc (124 = timeout 120 s cap)"
+        echo "# command: ${cmd[*]}"
+        echo "# gdb: gdb-multiarch -q -batch -nx <elf> -ex 'target remote localhost:$port' -ex 'source gdbtrace.py'"
+        echo "# ---- complete QEMU output (serial, stdout+stderr) ----"
+        cat "$ser"
+        echo
+        echo "# ---- gdb trace output ----"
+        cat "$glog"
+    } > "$out"
+    echo "$mode trace-run$rn rc=$rc $(date -u +%T) $(grep -a -o 'Samples collected: isolated=[0-9]*/[0-9]*, normal=[0-9]*/[0-9]*' "$ser" | head -1) loophits=$(grep -c ' LOOP$' "$glog")" >> "$D/out/progress.txt"
+done
+
+################################################################
+# FILE: gdbtrace.py
+################################################################
+# gdb python script (#1213 trace runs, coherency run 3, C1).
+# Breaks at the current-EL/SPx synchronous vector (exception_vectors+0x200,
+# 0x40010a00 in this ELF). Each hit is logged with the hitting vCPU, ESR, FAR,
+# ELR, SP; a hit that starts or continues an exception loop (SP_EL1 below
+# 0x10000 or at/above 0xffff000000000000, or ELR = el1_sync+4) is logged in
+# full: registers and every vCPU's backtrace. After 3 full "loop" hits, or
+# 300 hits in all, the breakpoint is deleted and gdb detaches (QEMU continues).
+import gdb
+
+VEC = 0x40010a00
+EL1_SYNC_4 = 0x40010f94
+
+def out(s):
+    gdb.write(s + "\n")
+    gdb.flush()
+
+def rd(expr):
+    try:
+        return int(gdb.parse_and_eval(expr)) & 0xFFFFFFFFFFFFFFFF
+    except Exception:
+        return None
+
+def hx(v):
+    return "?" if v is None else "0x%x" % v
+
+gdb.execute("set pagination off")
+gdb.execute("set confirm off")
+gdb.execute("break *0x%x" % VEC)
+total = 0
+loop_hits = 0
+while True:
+    try:
+        gdb.execute("continue")
+    except Exception as e:
+        out("==== continue ended: %s" % e)
+        break
+    th = gdb.selected_thread()
+    if th is None:
+        out("==== inferior exited after %d hits" % total)
+        break
+    total += 1
+    sp = rd("$SP_EL1"); elr = rd("$ELR_EL1"); esr = rd("$ESR_EL1"); far = rd("$FAR_EL1")
+    loop = (sp is not None and (sp < 0x10000 or sp >= 0xffff000000000000)) or elr == EL1_SYNC_4
+    out("==== hit %d thread %d (%s) ESR=%s FAR=%s ELR=%s SP_EL1=%s %s" % (
+        total, th.num, th.name or "", hx(esr), hx(far), hx(elr), hx(sp),
+        "LOOP" if loop else ""))
+    if loop:
+        loop_hits += 1
+        for r in ("$pc", "$SPSR_EL1", "$sp", "$x0", "$x1", "$x2", "$x3",
+                  "$x19", "$x20", "$x29", "$x30"):
+            out("  %s = %s" % (r, hx(rd(r))))
+        for cmd in ("x/2i $ELR_EL1", "info symbol $ELR_EL1", "info symbol $x30",
+                    "thread apply all bt 8", "info threads"):
+            try:
+                out("  (gdb) " + cmd)
+                out(gdb.execute(cmd, to_string=True).rstrip())
+            except Exception as e:
+                out("  error %s" % e)
+    else:
+        try:
+            out("  " + gdb.execute("info symbol $ELR_EL1", to_string=True).rstrip())
+        except Exception:
+            pass
+    if loop_hits >= 3 or total >= 300:
+        out("==== stopping trace after %d hits (%d loop hits): delete, detach" % (total, loop_hits))
+        gdb.execute("delete")
+        gdb.execute("detach")
+        break
+
+################################################################
+# FILE: analyze.py
+################################################################
+#!/usr/bin/env python3
+"""Summarize a qemu-1213 run file: per-CPU PCs across the 10 samples, symbols,
+current_task, CPU 0 caller (x30), and the gdbstub CPU 1 syndrome."""
+import re, sys
+from collections import Counter, OrderedDict
+
+for path in sys.argv[1:]:
+    t = open(path, 'rb').read().decode('utf-8', 'replace')
+    name = path.rsplit('/', 1)[-1]
+    m = re.search(r'Samples collected: isolated=(\d+)/10, normal=(\d+)/10', t)
+    rc = re.search(r'QEMU exit code (\d+)', t).group(1)
+    iso = '%s/10 %s/10' % m.groups() if m else '?'
+    first_to = re.search(r'\[test_wait\] iso_latency_isolated: value at bound (\d+)', t)
+    print('== %s rc=%s isolated/normal=%s first-timeout state at bound=%s' % (
+        name, rc, iso, first_to.group(1) if first_to else '-'))
+    if '## sample 01' not in t:
+        print('   no samples (no stall)'); continue
+    pcs = {c: [] for c in range(4)}
+    syms = {c: Counter() for c in range(4)}
+    tasks = {c: Counter() for c in range(4)}
+    x30 = {c: Counter() for c in range(4)}
+    for l in t.splitlines():
+        mm = re.match(r'cpu(\d) pc=(\S+) pstate=(\S+) .*?sym=(\S+).*\| current_task\[\d\] (.*)$', l)
+        if mm:
+            c = int(mm.group(1)); pcs[c].append(mm.group(2)); syms[c][mm.group(4)] += 1
+            tk = re.sub(r'task=0x[0-9a-f]+ id=\d+ ', '', mm.group(5)); tasks[c][tk] += 1
+        mm = re.match(r'\s+cpu(\d) x30=(\S+) sym=(\S+)', l)
+        if mm:
+            x30[int(mm.group(1))][mm.group(2) + ' ' + mm.group(3)] += 1
+    for c in range(4):
+        d = list(OrderedDict.fromkeys(pcs[c]))
+        print('   cpu%d: %d samples, %d distinct PCs %s; syms %s; current_task %s%s' % (
+            c, len(pcs[c]), len(d), d, dict(syms[c]), dict(tasks[c]),
+            ('; x30 %s' % dict(x30[c])) if x30[c] else ''))
+    g = t.split('# gdbstub', 1)
+    if len(g) > 1:
+        gt = g[1]
+        th2 = gt.split('---- thread 2 (cpu1)', 1)[1].split('---- thread 3', 1)[0] if '---- thread 2 (cpu1)' in gt else ''
+        vals = re.findall(r'\$\d+ = (0x[0-9a-f]+)', th2)
+        if len(vals) >= 9:
+            print('   gdb cpu1: pc=%s sp=%s cpsr=%s ESR_EL1=%s FAR_EL1=%s ELR_EL1=%s SPSR_EL1=%s SP_EL1=%s' % tuple(vals[:8]))
+        th1 = gt.split('---- thread 1 (cpu0)', 1)[1].split('[Switching to thread 2', 1)[0] if '---- thread 1 (cpu0)' in gt else ''
+        bt = re.findall(r'#\d+\s+0x[0-9a-f]+ in (\S+)', th1)
+        print('   gdb cpu0 bt: %s' % ' <- '.join(bt))
+
+################################################################
+# FILE: table.py
+################################################################
+#!/usr/bin/env python3
+"""One row per qemu-1213 run file (summary table)."""
+import re, sys
+from collections import OrderedDict, Counter
+
+print('| file | QEMU rc | isolated | normal | stall | iso TIMEOUT lines | first timed-out task state at bound | CPU 1 PCs (distinct, in sample order) | CPU 1 function(s) | current_task[1] | CPU 0 PC / caller | CPU 1 ESR / SP_EL1 (gdbstub) |')
+print('|---|---|---|---|---|---|---|---|---|---|---|---|')
+for path in sys.argv[1:]:
+    t = open(path, 'rb').read().decode('utf-8', 'replace')
+    name = path.rsplit('/', 1)[-1]
+    rc = re.search(r'QEMU exit code (\d+)', t).group(1)
+    m = re.search(r'Samples collected: isolated=(\d+)/10, normal=(\d+)/10', t)
+    iso, nor = (m.group(1) + '/10', m.group(2) + '/10') if m else ('-', '-')
+    nto = len(re.findall(r'\[test_wait\] iso_latency_isolated: TIMEOUT', t))
+    f = re.search(r'\[test_wait\] iso_latency_isolated: value at bound (\d+)', t)
+    stall = 'yes' if nto else 'no'
+    pcs, syms, tasks, c0 = [], Counter(), Counter(), Counter()
+    for l in t.splitlines():
+        mm = re.match(r'cpu(\d) pc=(\S+) pstate=\S+ .*?sym=(\S+).*\| current_task\[\d\] (.*)$', l)
+        if mm and mm.group(1) == '1':
+            pcs.append(mm.group(2)); syms[mm.group(3)] += 1
+            tasks[re.sub(r'task=0x[0-9a-f]+ id=\d+ ', '', mm.group(4)).replace('name=', '')] += 1
+        if mm and mm.group(1) == '0':
+            c0[mm.group(2) + ' ' + mm.group(3)] += 1
+        mm = re.match(r'\s+cpu0 x30=(\S+) sym=(\S+)', l)
+        if mm:
+            c0['caller ' + mm.group(2)] += 1
+    gd = '-'
+    if '---- thread 2 (cpu1)' in t:
+        th2 = t.split('---- thread 2 (cpu1)', 1)[1].split('---- thread 3', 1)[0]
+        v = re.findall(r'\$\d+ = (0x[0-9a-f]+)', th2)
+        if len(v) >= 8:
+            gd = 'ESR %s, FAR %s, ELR %s, SP_EL1 %s' % (v[3], v[4], v[5], v[7])
+    d = ', '.join(OrderedDict.fromkeys(pcs)) if pcs else '-'
+    print('| %s | %s | %s | %s | %s | %d | %s | %s | %s | %s | %s | %s |' % (
+        name, rc, iso, nor, stall, nto, f.group(1) if f else '-', d,
+        ', '.join('%s x%d' % kv for kv in syms.items()) or '-',
+        ', '.join('%s x%d' % kv for kv in tasks.items()) or '-',
+        ', '.join('%s x%d' % kv for kv in c0.items()) or '-', gd))
