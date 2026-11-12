@@ -1,4 +1,4 @@
-# cell ws-main-6c1f4c9c (baseline, 1 QEMU at a time) run16: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.02 4.13 3.76] load_end=[4.70 4.34 3.86] (1/5/15 min loadavg, 8 cores), wall=61.72 s, rc=1, RESULT result=FAIL(rc=1), FAIL lines: test_litmus_patterns_pass
+# cell ws-main-6c1f4c9c (baseline, 1 QEMU at a time) run16: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets; no -accel flag, so TCG thread=multi (MTTCG), see accel-threads.txt), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.02 4.13 3.76] load_end=[4.70 4.34 3.86] (1/5/15 min loadavg, 8 cores), wall=61.72 s, rc=1, RESULT result=FAIL(rc=1), FAIL lines: test_litmus_patterns_pass
 # boot banner: SLM-OS v0.4.0 build 20261112013502 (6c1f4c9c)
 # meta: run16 rc=1 result=FAIL(rc=1) wall=61.723688547s load_start=[4.02 4.13 3.76] load_end=[4.70 4.34 3.86] loads=[4.02 4.13 3.76|20s:4.34|40s:4.87|60s:4.77] stress_lines=1
 S

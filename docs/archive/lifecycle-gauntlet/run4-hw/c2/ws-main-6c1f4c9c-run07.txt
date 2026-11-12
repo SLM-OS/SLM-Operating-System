@@ -1,4 +1,4 @@
-# cell ws-main-6c1f4c9c (baseline, 1 QEMU at a time) run07: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.95 4.56 3.44] load_end=[4.97 4.63 3.54] (1/5/15 min loadavg, 8 cores), wall=61.26 s, rc=0, RESULT result=PASS
+# cell ws-main-6c1f4c9c (baseline, 1 QEMU at a time) run07: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets; no -accel flag, so TCG thread=multi (MTTCG), see accel-threads.txt), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.95 4.56 3.44] load_end=[4.97 4.63 3.54] (1/5/15 min loadavg, 8 cores), wall=61.26 s, rc=0, RESULT result=PASS
 # boot banner: SLM-OS v0.4.0 build 20261112013502 (6c1f4c9c)
 # meta: run07 rc=0 result=PASS wall=61.262571627s load_start=[4.95 4.56 3.44] load_end=[4.97 4.63 3.54] loads=[4.95 4.56 3.44|20s:4.76|40s:4.96|60s:4.97] stress_lines=1
 S

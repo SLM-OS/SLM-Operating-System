@@ -9,7 +9,7 @@ WALL=$(echo "$M" | grep -o "wall=[0-9.]*" | cut -c1-10)
 FAILS=$(grep -F "[FAIL]" $D/$L.raw.log | grep -v "test(s) failed\|total failure\|tests had failures" | sed 's/^ *\[FAIL\] //' | paste -sd ';' -)
 BANNER=$(grep -m1 "SLM-OS v" $D/$L.raw.log | sed 's/^ *//')
 {
-echo "# $CELL $L: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets), head $HEAD, elf sha256 $SHA, $LOADS $LOADE (1/5/15 min loadavg, 8 cores), $WALL s, $RC, RESULT $RES${FAILS:+, FAIL lines: $FAILS}"
+echo "# $CELL $L: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets; no -accel flag, so TCG thread=multi (MTTCG), see accel-threads.txt), head $HEAD, elf sha256 $SHA, $LOADS $LOADE (1/5/15 min loadavg, 8 cores), $WALL s, $RC, RESULT $RES${FAILS:+, FAIL lines: $FAILS}"
 echo "# boot banner: $BANNER"
 echo "# meta: $M"
 cat $D/$L.raw.log

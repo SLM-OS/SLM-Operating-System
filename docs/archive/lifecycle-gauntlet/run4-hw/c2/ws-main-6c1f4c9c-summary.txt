@@ -1,4 +1,4 @@
-# C2 summary, head main 6c1f4c9c, make test WORK_STEALING=ON (QEMU ARM64 virt, 4 vCPUs), elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0; #1219 in 3 of 20 baseline runs (+1 in the instrumented trial t3); 7 of 20 runs failed in total across 3 failure classes
+# C2 summary, head main 6c1f4c9c, make test WORK_STEALING=ON (QEMU ARM64 virt, 4 vCPUs, TCG thread=multi: the Makefile passes no -accel flag, MTTCG confirmed in accel-threads.txt), elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0; #1219 in 3 of 20 baseline runs (+1 in the instrumented trial t3); 7 of 20 runs failed in total across 3 failure classes
 # boot banner: SLM-OS v0.4.0 build 20261112013502 (6c1f4c9c)
 
 Build: `make kernel-test-clean` then `make test WORK_STEALING=ON` once
@@ -150,10 +150,17 @@ issue.
 run03, run16, run17, t3: kernel/tests/test_coherency.c:594
 `TEST_ASSERT_EQUAL_UINT32(0, sum.mp_weak_rows)` fails with 1. run03: row
 "P2 2>1 100000 0 0 1 observed=0" (a reader observed nothing in a 1 ms
-row). forbidden and timeouts are 0 in every row. Not #1219. Hypothesis,
-untested: the MP progress check needs two vCPU threads to overlap within
-about 1 ms, which the host scheduler does not guarantee. Not worked
-here; reported to the orchestrator.
+row). forbidden and timeouts are 0 in every row. Not #1219. Weak rows
+(P1/P2/S1 rows at scale 10 with observed=0), all-or-nothing:
+- run03: P2 2>1, 1 ms
+- run16: P1 2>3, 4 ms
+- run17: P1 0>3, 6 ms; P1 1>2, 1 ms; P2 1>3, 0 ms
+- trial t3: S1 1>0, 5 ms
+In passing runs the lowest observed count is 16248 (run01) and 24235
+(run04). The pairs differ every time. Hypothesis, untested: a reader
+vCPU thread descheduled or throttled for the whole short row (MTTCG,
+4 vCPU threads under CPUQuota=200%). Separating cell (not run):
+CPUQuota=400%. Filed as #1230 (P3-low), not fixed.
 
 ## Load cell
 

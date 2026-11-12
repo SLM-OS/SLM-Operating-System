@@ -1,4 +1,4 @@
-# make test WORK_STEALING=ON via the Makefile (clean build of the test kernel), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, loadavg before/after build+run: 1.49 1.64 1.43 4/1261 2170745|5.38 3.17 2.05 6/1287 2181032, RESULT PASS (exit 0); CMakeCache: ENABLE_WORK_STEALING:BOOL=ON
+# make test WORK_STEALING=ON via the Makefile (clean build of the test kernel), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, loadavg before/after build+run: 1.49 1.64 1.43 4/1261 2170745|5.38 3.17 2.05 6/1287 2181032, RESULT PASS (exit 0); Makefile passes no -accel flag: TCG thread=multi (MTTCG), see accel-threads.txt; CMakeCache: ENABLE_WORK_STEALING:BOOL=ON
 # boot banner: (Makefile run; QEMU output in build/test-output.log not kept, make output follows)
 make: Entering directory '/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c2'
 == Required keys in deploy/pi5/config.txt ==

@@ -1,0 +1,7 @@
+# accel mode check: the Makefile test command (no -accel) plus -name c2acc,debug-threads=on, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, 12 s run, load 11.87 7.00 5.01, RESULT one host thread per vCPU (CPU 0/TCG .. CPU 3/TCG) = MTTCG, same as -accel tcg,thread=multi
+# boot banner: n/a (thread listing only, /proc/<qemu pid>/task/*/comm at 6 s)
+      1 CPU 0/TCG
+      1 CPU 1/TCG
+      1 CPU 2/TCG
+      1 CPU 3/TCG
+      2 qemu-system-aar

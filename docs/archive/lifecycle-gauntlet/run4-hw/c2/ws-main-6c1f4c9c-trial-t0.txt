@@ -1,4 +1,4 @@
-# cell ws-main-6c1f4c9c-trial (harness validation; t0-t2 probe at 15 s, t3 probe at 20 s) t0: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.27 3.51 2.30] load_end=[3.50 3.43 2.35] (1/5/15 min loadavg, 8 cores), wall=60.01 s, rc=0, RESULT result=PASS
+# cell ws-main-6c1f4c9c-trial (harness validation; t0-t2 probe at 15 s, t3 probe at 20 s) t0: make test WORK_STEALING=ON QEMU command (hand-run copy + qmp/gdb sockets; no -accel flag, so TCG thread=multi (MTTCG), see accel-threads.txt), head 6c1f4c9c, elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0, load_start=[4.27 3.51 2.30] load_end=[3.50 3.43 2.35] (1/5/15 min loadavg, 8 cores), wall=60.01 s, rc=0, RESULT result=PASS
 # boot banner: SLM-OS v0.4.0 build 20261112013502 (6c1f4c9c)
 # meta: t0 rc=0 result=PASS wall=60.012461876s load_start=[4.27 3.51 2.30] load_end=[3.50 3.43 2.35] loads=[4.27 3.51 2.30|s:4.27|20s:3.99|20s:3.99|40s:3.79|40s:3.79|60s:3.50] stress_lines=1
 S
