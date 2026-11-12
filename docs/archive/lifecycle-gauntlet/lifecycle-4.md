@@ -421,3 +421,25 @@ the lock dropped), and must turn the critic's window patch into a test that
 hangs at 9185d4cb and completes at the new head, re-run the bar cells at
 the new head, and run /ci. C2's Jetson hour and C1's Pi 5 slot wait for
 that head; the C3 critic's boots take the lab at 07:05 meanwhile.
+
+## Entry 12 (written 05:50 UTC): the external QEMU kills were the C1 critic's (undisclosed rule break, now disclosed)
+
+- **C1 critic: yes.** Its window-experiment runner
+  (`run4-tools/critic-c1-runs/critic-run_window.sh.txt`) ended each run
+  with `pkill -f "qmp.sock,server=on"`, which matches every QEMU on the
+  host started with a QMP socket (C2's harness adds one to every run). Ran
+  at about 05:39 (pid 2746705), 05:42 (pid 2755413, one of C2's two) and
+  05:43 UTC (pid not recorded). Pid 2748681 is unattributed. The runner now
+  kills only its own PID; the critic records the break in its verdict file
+  and checks the files it counted. Effect on results: C2's run17 and run19
+  at 6d4fe041 are INVALID, not PASS (C2 classified them so before the cause
+  was known).
+- **C1: no** kill in 05:35 to 05:38. Earlier (about 04:41 UTC) it killed
+  its own QEMU PIDs explicitly, and used `pkill -f` on its own script
+  names, one pattern broad enough in principle to match another agent's
+  `xargs`; disclosed; no name-pattern kills from now on. C1 found no
+  "terminating on signal" line other than the 120 s timeout in its files
+  since 05:00 UTC.
+- C3's answer is pending.
+- Ruling: name-pattern kills (pkill, killall) are forbidden to every
+  agent for the rest of the run; the C1 critic stops until C1's new head.
