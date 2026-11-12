@@ -1,0 +1,24 @@
+# Pi 5 fix-head integration suite: per-boot table (counts from the raw captures, excluding the header lines added in pi5-fix-5e5548a1-integration-runNN.txt); RESULT isolated=10/10 in 20 of 20 boots, no KERNEL PANIC, PAGE FAULT or Synchronous exception in any
+# boot banner: SLM-OS v0.4.0 build 20261112063405 (5e5548a1)
+| boot | Samples collected | iso TIMEOUT lines | stress | #1229 test | suite result | KERNEL PANIC | PAGE FAULT | Synchronous |
+|---|---|---|---|---|---|---|---|---|
+| 01 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=4/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 02 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 03 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 04 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=6/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 05 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 06 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=5 runs=6/6 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 07 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 08 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 09 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 10 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 11 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=7/7 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 12 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 13 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=7/8 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 14 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 15 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=6 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 16 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=8 runs=7/7 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 17 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=5 runs=4/4 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 18 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=4/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 19 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=7 runs=5/5 bad=0 | 18 total failure(s) | 0 | 0 | 0 |
+| 20 | isolated=10/10, normal=10/10 | 0 | bad=0 first_bad_token=0 timeouts=0 | moved=5 runs=6/6 bad=0 | 18 total failure(s) | 0 | 0 | 0 |

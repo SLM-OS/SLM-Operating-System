@@ -1,0 +1,20 @@
+ CMakeLists.txt                    |  13 ++
+ Makefile                          |   1 +
+ docs/scheduler.md                 |  56 ++++++
+ docs/smp.md                       |   4 +-
+ docs/testing.md                   |   4 +-
+ kernel/CLAUDE.md                  |   2 +
+ kernel/arch/arm64/context.S       |   5 +-
+ kernel/arch/arm64/exceptions.c    |  13 ++
+ kernel/arch/arm64/vectors.S       |  38 ++++
+ kernel/arch/x86_64/context.S      |  11 +-
+ kernel/arch/x86_64/platform_x86.c |  21 +-
+ kernel/include/sched.h            |  18 +-
+ kernel/include/slot_trace.h       |  98 +++++++++
+ kernel/include/task.h             |  23 ++-
+ kernel/sched/sched.c              |  99 +++++++++-
+ kernel/sched/slot_trace.c         | 295 ++++++++++++++++++++++++++++
+ kernel/sched/task.c               | 128 +++++++++++-
+ kernel/src/panic.c                |   6 +
+ kernel/tests/test_scheduler.c     | 404 +++++++++++++++++++++++++++++++++++---
+ 19 files changed, 1189 insertions(+), 50 deletions(-)

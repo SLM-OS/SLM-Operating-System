@@ -1,0 +1,1418 @@
+== Required keys in deploy/pi5/config.txt ==
+OK   arm_64bit=1
+OK   kernel_address=0x80000
+OK   kernel=kernel_2712.img
+OK   pciex4_reset=0
+OK   uart_2ndstage=1
+OK   os_check=0
+
+== Required keys in deploy/pi5/tryboot.txt ==
+OK   arm_64bit=1
+OK   kernel_address=0x80000
+OK   kernel=tryboot.img
+OK   pciex4_reset=0
+OK   uart_2ndstage=1
+OK   os_check=0
+
+== Forbidden patterns ==
+OK   deploy/pi5/config.txt: no [tryboot] filter section
+OK   deploy/pi5/tryboot.txt: no [tryboot] filter section
+
+== tryboot.txt mirrors config.txt's settings ==
+OK   non-kernel settings match between config.txt and tryboot.txt
+
+== kernel= filename per file ==
+OK   deploy/pi5/config.txt: kernel=kernel_2712.img
+OK   deploy/pi5/tryboot.txt: kernel=tryboot.img
+
+deploy/pi5/ config check: OK
+OK   <default> -> <none>
+OK   PLATFORM=RASPI5 -> -DSECONDARY_PREEMPT=1 
+OK   PLATFORM=RASPI5 SECONDARY_PREEMPT=OFF + -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -> -DCOOP_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO -> -DJETSON_HW_TICK=1 -DSECONDARY_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF -> -DCOOP_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO SECONDARY_PREEMPT=OFF -> -DCOOP_PREEMPT=1 -DJETSON_HW_TICK=1 
+All 6 preemption-config cases match
+All 23 build-signature options change their variants' signatures; AI scheduler defaults match
+check-cpu-cache-maint: OK (38 files)
+Building runtime... (cargo features: ai_eviction)
+cd runtime && SLM_DEFAULT_EVICTION_POLICY=lru RUSTFLAGS="$RUSTFLAGS -C lto=thin" cargo build --target x86_64-unknown-none --release --features ai_eviction
+    Finished `release` profile [optimized] target(s) in 0.01s
+Kernel test build options changed; reconfiguring build/kernel-test
+Configuring test kernel build...
+cmake -G "Unix Makefiles" -B build/kernel-test \
+	-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-x86_64-none-elf.cmake -DCMAKE_BUILD_TYPE=Release -DPLATFORM=X86_64   -DHAILO_TRACE_PHASE_DEFAULT=0 -DHAILO_TRACE_MECH_DEFAULT=0          -DEVICTION_DEFAULT_POLICY=lru     -DENABLE_BOOT_TESTS=ON  \
+	
+-- The C compiler identification is GNU 13.3.0
+-- The ASM compiler identification is GNU
+-- Found assembler: /usr/bin/gcc
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Embedding mock camera frame from: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/scripts/fixtures/mock_camera_digit.bin
+-- Embedding operator library: auto-detected /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/scripts/cuda/operator_library/MANIFEST.json (set OPLIB_BLOB to override)
+-- HAILO_FW_BLOB auto-detected: /usr/lib/firmware/hailo/hailo8_fw.4.23.0.bin
+--   Hailo firmware blob: /usr/lib/firmware/hailo/hailo8_fw.4.23.0.bin
+--   GSP firmware: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test/gsp_fw (chip ga107)
+--   AI Scheduler: disabled
+--   Eviction: ENABLED (default=lru, classical + stub ML policies)
+--   Rust lib:   /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/runtime/target/x86_64-unknown-none/release/libslm_runtime.a
+--   x86 disk:   make slmos-x86-disk → /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test/slmos-x86.img
+-- 
+-- SLM-OS Build Configuration
+--   Version:    0.1.0
+--   Platform:   X86_64
+--   C Compiler: /usr/bin/gcc
+--   Build Type: Release
+-- 
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test
+Building test kernel...
+cmake --build build/kernel-test
+[  1%] Building C object CMakeFiles/kprintf_float.dir/kernel/src/kprintf_float.c.obj
+[  1%] Linking C static library libkprintf_float.a
+[  1%] Built target kprintf_float
+[  1%] Generating build_info.h
+[  1%] Built target generate_build_info
+[  2%] Assembling trampoline32.S (32-bit → 64-bit)
+[  2%] Built target trampoline32
+[  3%] Generating generated/slm_kernels_gen.h
+[  3%] Built target slm_kernels_header
+[  3%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lapi.c.obj
+[  4%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lauxlib.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lauxlib.c: In function ‘luaL_fileresult’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lauxlib.c:255:23: warning: implicit declaration of function ‘strerror’ [-Wimplicit-function-declaration]
+  255 |     msg = (en != 0) ? strerror(en) : "(no extra info)";
+      |                       ^~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lauxlib.c:255:36: warning: pointer/integer type mismatch in conditional expression
+  255 |     msg = (en != 0) ? strerror(en) : "(no extra info)";
+      |                                    ^
+[  4%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lbaselib.c.obj
+[  4%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lcode.c.obj
+[  5%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lcorolib.c.obj
+[  5%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lctype.c.obj
+[  5%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ldblib.c.obj
+[  6%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ldebug.c.obj
+[  6%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ldo.c.obj
+[  6%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ldump.c.obj
+[  7%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lfunc.c.obj
+[  7%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lgc.c.obj
+[  7%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/linit.c.obj
+[  8%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/llex.c.obj
+[  8%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lmathlib.c.obj
+[  8%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lmem.c.obj
+[  9%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lobject.c.obj
+[  9%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lopcodes.c.obj
+[  9%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lparser.c.obj
+[ 10%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lstate.c.obj
+[ 10%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lstring.c.obj
+[ 10%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lstrlib.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c: In function ‘lmemfind’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:681:44: warning: implicit declaration of function ‘memchr’ [-Wimplicit-function-declaration]
+  681 |     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+      |                                            ^~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:27:1: note: ‘memchr’ is defined in header ‘<string.h>’; did you forget to ‘#include <string.h>’?
+   26 | #include "lualib.h"
+  +++ |+#include <string.h>
+   27 | 
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:681:30: warning: cast to pointer from integer of different size [-Wint-to-pointer-cast]
+  681 |     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+      |                              ^
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c: In function ‘add_s’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:877:15: warning: cast to pointer from integer of different size [-Wint-to-pointer-cast]
+  877 |   while ((p = (char *)memchr(news, L_ESC, l)) != NULL) {
+      |               ^
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c: In function ‘quotefloat’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:1163:31: warning: comparison between pointer and integer
+ 1163 |     if (memchr(buff, '.', nb) == NULL) {  /* no dot? */
+      |                               ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lstrlib.c:1165:22: warning: cast to pointer from integer of different size [-Wint-to-pointer-cast]
+ 1165 |       char *ppoint = (char *)memchr(buff, point, nb);
+      |                      ^
+[ 11%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ltable.c.obj
+[ 11%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ltablib.c.obj
+[ 11%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/ltm.c.obj
+[ 12%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lundump.c.obj
+[ 12%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lvm.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c: In function ‘l_strcmp’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:384:16: warning: implicit declaration of function ‘strcoll’; did you mean ‘strtoll’? [-Wimplicit-function-declaration]
+  384 |     int temp = strcoll(s1, s2);
+      |                ^~~~~~~
+      |                strtoll
+In file included from /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1158:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h: In function ‘luaV_execute’:
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:28:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   28 | &&L_OP_MOVE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:29:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   29 | &&L_OP_LOADI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:30:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   30 | &&L_OP_LOADF,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:31:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   31 | &&L_OP_LOADK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:32:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   32 | &&L_OP_LOADKX,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:33:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   33 | &&L_OP_LOADFALSE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:34:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   34 | &&L_OP_LFALSESKIP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:35:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   35 | &&L_OP_LOADTRUE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:36:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   36 | &&L_OP_LOADNIL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:37:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   37 | &&L_OP_GETUPVAL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:38:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   38 | &&L_OP_SETUPVAL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:39:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   39 | &&L_OP_GETTABUP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:40:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   40 | &&L_OP_GETTABLE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:41:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   41 | &&L_OP_GETI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:42:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   42 | &&L_OP_GETFIELD,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:43:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   43 | &&L_OP_SETTABUP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:44:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   44 | &&L_OP_SETTABLE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:45:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   45 | &&L_OP_SETI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:46:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   46 | &&L_OP_SETFIELD,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:47:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   47 | &&L_OP_NEWTABLE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:48:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   48 | &&L_OP_SELF,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:49:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   49 | &&L_OP_ADDI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:50:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   50 | &&L_OP_ADDK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:51:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   51 | &&L_OP_SUBK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:52:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   52 | &&L_OP_MULK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:53:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   53 | &&L_OP_MODK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:54:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   54 | &&L_OP_POWK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:55:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   55 | &&L_OP_DIVK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:56:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   56 | &&L_OP_IDIVK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:57:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   57 | &&L_OP_BANDK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:58:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   58 | &&L_OP_BORK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:59:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   59 | &&L_OP_BXORK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:60:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   60 | &&L_OP_SHRI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:61:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   61 | &&L_OP_SHLI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:62:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   62 | &&L_OP_ADD,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:63:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   63 | &&L_OP_SUB,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:64:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   64 | &&L_OP_MUL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:65:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   65 | &&L_OP_MOD,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:66:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   66 | &&L_OP_POW,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:67:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   67 | &&L_OP_DIV,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:68:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   68 | &&L_OP_IDIV,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:69:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   69 | &&L_OP_BAND,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:70:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   70 | &&L_OP_BOR,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:71:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   71 | &&L_OP_BXOR,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:72:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   72 | &&L_OP_SHL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:73:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   73 | &&L_OP_SHR,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:74:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   74 | &&L_OP_MMBIN,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:75:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   75 | &&L_OP_MMBINI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:76:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   76 | &&L_OP_MMBINK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:77:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   77 | &&L_OP_UNM,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:78:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   78 | &&L_OP_BNOT,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:79:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   79 | &&L_OP_NOT,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:80:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   80 | &&L_OP_LEN,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:81:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   81 | &&L_OP_CONCAT,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:82:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   82 | &&L_OP_CLOSE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:83:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   83 | &&L_OP_TBC,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:84:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   84 | &&L_OP_JMP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:85:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   85 | &&L_OP_EQ,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:86:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   86 | &&L_OP_LT,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:87:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   87 | &&L_OP_LE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:88:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   88 | &&L_OP_EQK,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:89:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   89 | &&L_OP_EQI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:90:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   90 | &&L_OP_LTI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:91:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   91 | &&L_OP_LEI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:92:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   92 | &&L_OP_GTI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:93:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   93 | &&L_OP_GEI,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:94:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   94 | &&L_OP_TEST,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:95:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   95 | &&L_OP_TESTSET,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:96:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   96 | &&L_OP_CALL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:97:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   97 | &&L_OP_TAILCALL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:98:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   98 | &&L_OP_RETURN,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:99:1: warning: taking the address of a label is non-standard [-Wpedantic]
+   99 | &&L_OP_RETURN0,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:100:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  100 | &&L_OP_RETURN1,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:101:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  101 | &&L_OP_FORLOOP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:102:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  102 | &&L_OP_FORPREP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:103:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  103 | &&L_OP_TFORPREP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:104:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  104 | &&L_OP_TFORCALL,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:105:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  105 | &&L_OP_TFORLOOP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:106:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  106 | &&L_OP_SETLIST,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:107:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  107 | &&L_OP_CLOSURE,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:108:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  108 | &&L_OP_VARARG,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:109:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  109 | &&L_OP_VARARGPREP,
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:110:1: warning: taking the address of a label is non-standard [-Wpedantic]
+  110 | &&L_OP_EXTRAARG
+      | ^~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1181:5: note: in expansion of macro ‘vmdispatch’
+ 1181 |     vmdispatch (GET_OPCODE(i)) {
+      |     ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1185:9: note: in expansion of macro ‘vmbreak’
+ 1185 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1191:9: note: in expansion of macro ‘vmbreak’
+ 1191 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1197:9: note: in expansion of macro ‘vmbreak’
+ 1197 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1203:9: note: in expansion of macro ‘vmbreak’
+ 1203 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1210:9: note: in expansion of macro ‘vmbreak’
+ 1210 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1215:9: note: in expansion of macro ‘vmbreak’
+ 1215 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1221:9: note: in expansion of macro ‘vmbreak’
+ 1221 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1226:9: note: in expansion of macro ‘vmbreak’
+ 1226 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1234:9: note: in expansion of macro ‘vmbreak’
+ 1234 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1240:9: note: in expansion of macro ‘vmbreak’
+ 1240 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1247:9: note: in expansion of macro ‘vmbreak’
+ 1247 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1260:9: note: in expansion of macro ‘vmbreak’
+ 1260 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1275:9: note: in expansion of macro ‘vmbreak’
+ 1275 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1290:9: note: in expansion of macro ‘vmbreak’
+ 1290 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1303:9: note: in expansion of macro ‘vmbreak’
+ 1303 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1316:9: note: in expansion of macro ‘vmbreak’
+ 1316 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1331:9: note: in expansion of macro ‘vmbreak’
+ 1331 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1346:9: note: in expansion of macro ‘vmbreak’
+ 1346 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1359:9: note: in expansion of macro ‘vmbreak’
+ 1359 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1378:9: note: in expansion of macro ‘vmbreak’
+ 1378 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1392:9: note: in expansion of macro ‘vmbreak’
+ 1392 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1396:9: note: in expansion of macro ‘vmbreak’
+ 1396 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1400:9: note: in expansion of macro ‘vmbreak’
+ 1400 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1404:9: note: in expansion of macro ‘vmbreak’
+ 1404 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1408:9: note: in expansion of macro ‘vmbreak’
+ 1408 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1413:9: note: in expansion of macro ‘vmbreak’
+ 1413 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1417:9: note: in expansion of macro ‘vmbreak’
+ 1417 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1421:9: note: in expansion of macro ‘vmbreak’
+ 1421 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1426:9: note: in expansion of macro ‘vmbreak’
+ 1426 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1430:9: note: in expansion of macro ‘vmbreak’
+ 1430 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1434:9: note: in expansion of macro ‘vmbreak’
+ 1434 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1438:9: note: in expansion of macro ‘vmbreak’
+ 1438 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1448:9: note: in expansion of macro ‘vmbreak’
+ 1448 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1458:9: note: in expansion of macro ‘vmbreak’
+ 1458 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1462:9: note: in expansion of macro ‘vmbreak’
+ 1462 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1466:9: note: in expansion of macro ‘vmbreak’
+ 1466 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1470:9: note: in expansion of macro ‘vmbreak’
+ 1470 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1475:9: note: in expansion of macro ‘vmbreak’
+ 1475 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1479:9: note: in expansion of macro ‘vmbreak’
+ 1479 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1483:9: note: in expansion of macro ‘vmbreak’
+ 1483 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1488:9: note: in expansion of macro ‘vmbreak’
+ 1488 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1492:9: note: in expansion of macro ‘vmbreak’
+ 1492 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1496:9: note: in expansion of macro ‘vmbreak’
+ 1496 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1500:9: note: in expansion of macro ‘vmbreak’
+ 1500 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1504:9: note: in expansion of macro ‘vmbreak’
+ 1504 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1508:9: note: in expansion of macro ‘vmbreak’
+ 1508 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1518:9: note: in expansion of macro ‘vmbreak’
+ 1518 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1528:9: note: in expansion of macro ‘vmbreak’
+ 1528 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1538:9: note: in expansion of macro ‘vmbreak’
+ 1538 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1553:9: note: in expansion of macro ‘vmbreak’
+ 1553 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1564:9: note: in expansion of macro ‘vmbreak’
+ 1564 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1573:9: note: in expansion of macro ‘vmbreak’
+ 1573 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1578:9: note: in expansion of macro ‘vmbreak’
+ 1578 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1586:9: note: in expansion of macro ‘vmbreak’
+ 1586 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1591:9: note: in expansion of macro ‘vmbreak’
+ 1591 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1597:9: note: in expansion of macro ‘vmbreak’
+ 1597 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1601:9: note: in expansion of macro ‘vmbreak’
+ 1601 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1609:9: note: in expansion of macro ‘vmbreak’
+ 1609 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1613:9: note: in expansion of macro ‘vmbreak’
+ 1613 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1617:9: note: in expansion of macro ‘vmbreak’
+ 1617 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1625:9: note: in expansion of macro ‘vmbreak’
+ 1625 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1638:9: note: in expansion of macro ‘vmbreak’
+ 1638 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1642:9: note: in expansion of macro ‘vmbreak’
+ 1642 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1646:9: note: in expansion of macro ‘vmbreak’
+ 1646 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1650:9: note: in expansion of macro ‘vmbreak’
+ 1650 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1654:9: note: in expansion of macro ‘vmbreak’
+ 1654 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1660:9: note: in expansion of macro ‘vmbreak’
+ 1660 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1671:9: note: in expansion of macro ‘vmbreak’
+ 1671 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1688:9: note: in expansion of macro ‘vmbreak’
+ 1688 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1801:9: note: in expansion of macro ‘vmbreak’
+ 1801 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1808:9: note: in expansion of macro ‘vmbreak’
+ 1808 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1843:9: note: in expansion of macro ‘vmbreak’
+ 1843 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1867:9: note: in expansion of macro ‘vmbreak’
+ 1867 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1874:9: note: in expansion of macro ‘vmbreak’
+ 1874 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1880:9: note: in expansion of macro ‘vmbreak’
+ 1880 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1889:9: note: in expansion of macro ‘vmbreak’
+ 1889 |         vmbreak;
+      |         ^~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:12:27: warning: ISO C forbids ‘goto *expr;’ [-Wpedantic]
+   12 | #define vmdispatch(x)     goto *disptab[x];
+      |                           ^~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/ljumptab.h:16:36: note: in expansion of macro ‘vmdispatch’
+   16 | #define vmbreak         vmfetch(); vmdispatch(GET_OPCODE(i));
+      |                                    ^~~~~~~~~~
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/lib/lua/src/lvm.c:1893:9: note: in expansion of macro ‘vmbreak’
+ 1893 |         vmbreak;
+      |         ^~~~~~~
+[ 12%] Building C object CMakeFiles/lua.dir/kernel/lib/lua/src/lzio.c.obj
+[ 13%] Building C object CMakeFiles/lua.dir/kernel/src/lua_stubs.c.obj
+[ 13%] Building C object CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/src/lua_slm.c:910:66: warning: "/*" within comment [-Wcomment]
+  910 |     uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
+      |                                                                   
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/src/lua_slm.c:985:44: warning: "/*" within comment [-Wcomment]
+  985 |  * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
+      |                                             
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/kernel/src/lua_slm.c:1081:32: warning: "/*" within comment [-Wcomment]
+ 1081 |  * messages. Topics ending in "/*" match any topic with that prefix.
+      |                                 
+[ 13%] Building C object CMakeFiles/lua.dir/kernel/src/lua_shell.c.obj
+[ 14%] Building C object CMakeFiles/lua.dir/kernel/tests/test_lua_stubs.c.obj
+[ 14%] Building ASM object CMakeFiles/lua.dir/kernel/arch/x86_64/setjmp.S.obj
+[ 14%] Linking C static library liblua.a
+[ 14%] Built target lua
+[ 15%] Building C object CMakeFiles/slm_shell.dir/kernel/src/slm_shell.c.obj
+[ 15%] Linking C static library libslm_shell.a
+[ 15%] Built target slm_shell
+[ 15%] Building C object CMakeFiles/slm_runner.dir/kernel/src/slm_runner.c.obj
+[ 15%] Linking C static library libslm_runner.a
+[ 15%] Built target slm_runner
+[ 15%] Generating operator_library.bin
+[gen] operator_library.bin (auto-detected SASS)
+[oplb] wrote /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test/operator_library.bin
+  op_count    : 33
+  payload_len : 308520 B (8 inner + 1056 entries + 307456 sass)
+  total       : 308544 B (24 outer + 308520 payload)
+  checksum    : 0x6abdc867
+[ 15%] Generating ga10b_eviction_mlp_weights_gen.h
+[ 15%] Extracting NVIDIA GSP firmware (ga107) from /lib/firmware
+GSP firmware extracted from /lib/firmware/nvidia/ga107/gsp → /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test/gsp_fw
+  booter_load.bin           59768 bytes
+  booter_unload.bin         39544 bytes
+  bootloader.bin            20588 bytes
+  gsp.bin                38061600 bytes
+[ 16%] Generating mock_camera_frame.bin
+[gen] mock_camera_frame.bin ← /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/scripts/fixtures/mock_camera_digit.bin
+[wrote] /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c1/build/kernel-test/mock_camera_frame.bin  2525600 bytes  (1640x1232 RAW10 RGGB)
+[ 16%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/entry64.S.obj
+[ 17%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/idt.S.obj
+[ 17%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/context.S.obj
+[ 17%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/idt.c.obj
+[ 18%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/acpi.c.obj
+[ 18%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/lapic.c.obj
+[ 18%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/ioapic.c.obj
+[ 19%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/pic.c.obj
+[ 19%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/timer_x86.c.obj
+[ 19%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/platform_x86.c.obj
+[ 20%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/pci.c.obj
+[ 20%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/nvidia_gpu.c.obj
+[ 20%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/ap_trampoline.S.obj
+[ 21%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/tss.c.obj
+[ 21%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/sse_kernels.c.obj
+[ 21%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/rng.c.obj
+[ 22%] Building C object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/nvidia_gsp_platform.c.obj
+[ 22%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/arch/x86_64/nvidia_gsp_firmware.S.obj
+[ 22%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/gsp.c.obj
+[ 23%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/nvidia_vbios.c.obj
+[ 23%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/falcon.c.obj
+[ 23%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/nvfw.c.obj
+[ 24%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/bringup.c.obj
+[ 24%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/rpc.c.obj
+[ 24%] Building C object CMakeFiles/slmos.elf.dir/kernel/mm/pmm.c.obj
+[ 25%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/task.c.obj
+[ 25%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/task_sleep.c.obj
+[ 25%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/sched.c.obj
+[ 26%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/sched_heuristic.c.obj
+[ 26%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/steal_deque.c.obj
+[ 26%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/slot_trace.c.obj
+[ 27%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/sched_trace.c.obj
+[ 27%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/latency_hist.c.obj
+[ 27%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/rate_ewma.c.obj
+[ 28%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/gpu_consumer.c.obj
+[ 28%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/gpu_tier.c.obj
+[ 28%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/operator_library.c.obj
+[ 29%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_netlist.c.obj
+[ 29%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_ctxsw_ucode.c.obj
+[ 29%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_acr_blob.c.obj
+[ 30%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_pmu.c.obj
+[ 30%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_chan.c.obj
+[ 30%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_grctx.c.obj
+[ 31%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_mnist_pipeline.c.obj
+[ 31%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_qmd.c.obj
+[ 31%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_prog.c.obj
+[ 32%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/slm_prog.c.obj
+[ 32%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/gpu_chan_state.c.obj
+[ 32%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_cold_pipelines.c.obj
+[ 33%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/nvidia/ga10b_eviction_weights.c.obj
+[ 33%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_pool.c.obj
+[ 33%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_weights_pool.c.obj
+[ 34%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/operator_dispatch.c.obj
+[ 34%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_dispatch.c.obj
+[ 34%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_probe.c.obj
+[ 35%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_gpu_as.c.obj
+[ 35%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/oplib_cold.c.obj
+[ 35%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/admin_telemetry.c.obj
+[ 36%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/model_engine.c.obj
+[ 36%] Building C object CMakeFiles/slmos.elf.dir/kernel/sched/cpu_supervisor.c.obj
+[ 36%] Building C object CMakeFiles/slmos.elf.dir/kernel/ipc/ipc.c.obj
+[ 37%] Building C object CMakeFiles/slmos.elf.dir/kernel/ipc/pi_mutex.c.obj
+[ 37%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/tegra_cpufreq.c.obj
+[ 37%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/tegra_fan.c.obj
+[ 38%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/emc_hold.c.obj
+[ 38%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/uart_x86.c.obj
+[ 38%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/bpmp/bpmp.c.obj
+[ 39%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/i2c/i2c_tegra.c.obj
+[ 39%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/gpio/gpio_tegra.c.obj
+[ 39%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/camera/imx219.c.obj
+[ 40%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/camera/nvcsi.c.obj
+[ 40%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/camrtc/camrtc.c.obj
+[ 40%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/camrtc/camrtc_ivc.c.obj
+[ 41%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/camrtc/camrtc_capture.c.obj
+[ 41%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/blkdev.c.obj
+[ 41%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/ramdisk.c.obj
+[ 42%] Building C object CMakeFiles/slmos.elf.dir/kernel/inference/inference_device.c.obj
+[ 42%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+[ 42%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/panic.c.obj
+[ 43%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kprintf.c.obj
+[ 43%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/string.c.obj
+[ 43%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell.c.obj
+[ 44%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_history.c.obj
+[ 44%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_io.c.obj
+[ 44%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_io_uart.c.obj
+[ 45%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_session.c.obj
+[ 45%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_sys.c.obj
+[ 45%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/timdiag_pi5_probes.c.obj
+[ 46%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_fs.c.obj
+[ 46%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/boot_models.c.obj
+[ 46%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_clocks.c.obj
+[ 47%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_exec.c.obj
+[ 47%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_component.c.obj
+[ 47%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_top.c.obj
+[ 48%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/component_runtime.c.obj
+[ 48%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/help.c.obj
+[ 48%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/demo_init.c.obj
+[ 49%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/blob_autoload.c.obj
+[ 49%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/runtime_blob_file.c.obj
+[ 49%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/src/demo_scripts.S.obj
+[ 50%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/sched_hef_init.c.obj
+[ 50%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/user_hef_init.c.obj
+[ 50%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/mnist_digit_init.c.obj
+[ 51%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/camera.c.obj
+[ 51%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/dtb_x86_stub.c.obj
+[ 51%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/elf.c.obj
+[ 52%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+[ 52%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/md5.c.obj
+[ 52%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/sha256.c.obj
+[ 53%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/littlefs/lfs.c.obj
+[ 53%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/littlefs/lfs_util.c.obj
+[ 53%] Building C object CMakeFiles/slmos.elf.dir/kernel/fs/littlefs_slm.c.obj
+[ 54%] Building C object CMakeFiles/slmos.elf.dir/kernel/fs/littlefs_vfs.c.obj
+[ 54%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/fatfs/ff.c.obj
+[ 54%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/fatfs/ffunicode.c.obj
+[ 55%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/fatfs/diskio.c.obj
+[ 55%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/sdhci.c.obj
+[ 55%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/persistent_lfs_store.c.obj
+[ 56%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/boot_media.c.obj
+[ 56%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+[ 56%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/slm_ffi.c.obj
+[ 57%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/semihosting.c.obj
+[ 57%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/gpu.c.obj
+[ 57%] Building C object CMakeFiles/slmos.elf.dir/kernel/gpu/gpu_stub.c.obj
+[ 58%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/virtio_net_pci.c.obj
+[ 58%] Building C object CMakeFiles/slmos.elf.dir/kernel/usb/core/usb_core.c.obj
+[ 58%] Building C object CMakeFiles/slmos.elf.dir/kernel/usb/class/cdc_ecm.c.obj
+[ 59%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/usb/xhci/xhci.c.obj
+[ 59%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/usb/xhci/xhci_device.c.obj
+[ 59%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/usb/xhci/xhci_ring.c.obj
+[ 60%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/usb/xhci/xhci_xfer.c.obj
+[ 60%] Building C object CMakeFiles/slmos.elf.dir/kernel/drivers/usb/xhci/xusb_t234_cold.c.obj
+[ 60%] Building C object CMakeFiles/slmos.elf.dir/kernel/net/sys_arch.c.obj
+[ 61%] Building C object CMakeFiles/slmos.elf.dir/kernel/net/lwip_slm.c.obj
+[ 61%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/net_http.c.obj
+[ 61%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/net_shell.c.obj
+[ 62%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/shell_io_tcp.c.obj
+[ 62%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/tcp_shell_server.c.obj
+[ 62%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/tcp_telemetry_server.c.obj
+[ 63%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/telnet.c.obj
+[ 63%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/telnetd_config.c.obj
+[ 63%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/telnetd_autostart.c.obj
+[ 64%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/rng.c.obj
+[ 64%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/rng_shell.c.obj
+[ 64%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/unity.c.obj
+[ 65%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_harness.c.obj
+[ 65%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_wait.c.obj
+[ 65%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ipc.c.obj
+[ 66%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_pi_mutex.c.obj
+[ 66%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_steal_deque.c.obj
+[ 66%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_steal_shares.c.obj
+[ 67%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_sched_trace.c.obj
+[ 67%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_latency_hist.c.obj
+[ 67%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_gpu_consumer.c.obj
+[ 68%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_gpu_tier.c.obj
+[ 68%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_operator_library.c.obj
+[ 68%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_oplib_pool.c.obj
+[ 69%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_oplib_weights_pool.c.obj
+[ 69%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_operator_dispatch.c.obj
+[ 69%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_oplib_probe.c.obj
+[ 70%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_gpu_dispatch_breaker.c.obj
+[ 70%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_admin_telemetry.c.obj
+[ 70%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_telemetry_feed.c.obj
+[ 71%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_model_engine.c.obj
+[ 71%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_gpu.c.obj
+[ 71%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_vfs.c.obj
+[ 72%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_shell.c.obj
+[ 72%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_shell_session.c.obj
+[ 72%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_shell_history.c.obj
+[ 73%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_blob_autoload.c.obj
+[ 73%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_boot_media.c.obj
+[ 73%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_telnet.c.obj
+[ 74%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_telnetd_config.c.obj
+[ 74%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_telnetd_cmd.c.obj
+[ 74%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_tcp_telemetry_server.c.obj
+[ 75%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_pmm.c.obj
+[ 75%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_littlefs.c.obj
+[ 75%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_x86_boot.c.obj
+[ 76%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_elf.c.obj
+[ 76%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_bcm_mailbox.c.obj
+[ 76%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_fat32.c.obj
+[ 77%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_camera.c.obj
+[ 77%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_sha256.c.obj
+[ 77%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_rng.c.obj
+[ 78%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_host_key.c.obj
+[ 78%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_passwd.c.obj
+[ 78%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_wolf_heap.c.obj
+[ 79%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_sshd_autostart.c.obj
+[ 79%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_model_mem_smoke.c.obj
+[ 79%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_slm_dispatch_stats.c.obj
+[ 80%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_net.c.obj
+[ 80%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_net_http.c.obj
+[ 80%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_usb_core.c.obj
+[ 81%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_cdc_ecm.c.obj
+[ 81%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_xhci_ring.c.obj
+[ 81%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_xhci_tegra.c.obj
+[ 82%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_xhci_device.c.obj
+[ 82%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_xhci_xfer.c.obj
+[ 82%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_tegra_cpufreq.c.obj
+[ 83%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_tegra_fan.c.obj
+[ 83%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_emc_hold.c.obj
+[ 83%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_netlist.c.obj
+[ 84%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_ctxsw_ucode.c.obj
+[ 84%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_acr_blob.c.obj
+[ 84%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_pmu.c.obj
+[ 85%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_chan.c.obj
+[ 85%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_grctx.c.obj
+[ 85%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_mnist_pipeline.c.obj
+[ 86%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_cold.c.obj
+[ 86%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_ga10b_cold_pipelines.c.obj
+[ 86%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_oplib_gpu_as.c.obj
+[ 87%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_gpu_chan_state.c.obj
+[ 87%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/altcp.c.obj
+[ 87%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/altcp_alloc.c.obj
+[ 88%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/altcp_tcp.c.obj
+[ 88%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/init.c.obj
+[ 88%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/def.c.obj
+[ 89%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/dns.c.obj
+[ 89%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/inet_chksum.c.obj
+[ 89%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ip.c.obj
+[ 90%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/mem.c.obj
+[ 90%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/memp.c.obj
+[ 90%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/netif.c.obj
+[ 91%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/pbuf.c.obj
+[ 91%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/raw.c.obj
+[ 91%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/stats.c.obj
+[ 92%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/sys.c.obj
+[ 92%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/tcp.c.obj
+[ 92%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/tcp_in.c.obj
+[ 93%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/tcp_out.c.obj
+[ 93%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/timeouts.c.obj
+[ 93%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/udp.c.obj
+[ 94%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/autoip.c.obj
+[ 94%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/dhcp.c.obj
+[ 94%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/etharp.c.obj
+[ 95%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/icmp.c.obj
+[ 95%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/igmp.c.obj
+[ 95%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/ip4.c.obj
+[ 96%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/ip4_addr.c.obj
+[ 96%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/core/ipv4/ip4_frag.c.obj
+[ 96%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/apps/http/http_client.c.obj
+[ 97%] Building C object CMakeFiles/slmos.elf.dir/kernel/lib/lwip/src/netif/ethernet.c.obj
+[ 97%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_slm_golden.c.obj
+[ 97%] Building C object CMakeFiles/slmos.elf.dir/kernel/tests/test_slm_prog.c.obj
+[ 98%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/tests/slm_golden_embed.S.obj
+[ 98%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/src/camera_mock_embed.S.obj
+[ 98%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/src/mnist_gpu_embed.S.obj
+[100%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/src/oplib_embed.S.obj
+[100%] Building ASM object CMakeFiles/slmos.elf.dir/kernel/ai_accel/hailo/hailo_fw.S.obj
+[100%] Linking C executable slmos.elf
+/usr/bin/ld: warning: slmos.elf has a LOAD segment with RWX permissions
+/usr/bin/ld: warning: .note.gnu.build-id section discarded, --build-id ignored
+Creating slmos.bin
+[100%] Built target slmos.elf
+flock: getting lock took 0.000003 seconds
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+TIMEOUT - Tests did not complete within 120s
+Last output:
+  [PASS] test_idt_double_fault_uses_ist1
+[INFO] Task 'preempt_spin' (id=33) exiting
+  [PASS] test_timer_preempts_cpu_bound_task
+  [PASS] test_tss_per_cpu_distinct
+  [PASS] test_resched_ipi_delivers
+  [PASS] test_resched_ipi_self_is_noop
+  [PASS] test_cross_cpu_dispatch_latency
+  [PASS] test_all_cpus_timer_preempt_under_load
+  [PASS] test_work_stealing_enabled
+  [PASS] test_cr4_osfxsr_enabled
+  [PASS] test_cr4_osxmmexcpt_enabled
+  [PASS] test_cr0_em_clear_mp_set
+  [PASS] test_sse_relu_matches_scalar
+  [PASS] test_sse_zero_matches_scalar
+  [PASS] test_sse_add_scalar_matches_scalar
+  [PASS] test_sse_fma_row_matches_scalar
+[INFO] Task 'd1_pinned' (id=38) exiting
+  [PASS] test_rebalance_respects_affinity
+  [PASS] test_rebalance_symbol_exposed
+qemu-system-x86_64: terminating on signal 15 from pid 2821342 (/usr/bin/timeout)
+make: *** [Makefile:1721: test] Error 1
