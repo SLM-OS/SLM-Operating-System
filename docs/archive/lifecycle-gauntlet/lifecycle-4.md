@@ -898,3 +898,134 @@ critic run; the critic's own rule break (Entry 12).
   traced second destroys freed nothing; sequence C frees an in-use stack, a
   plausible source, untested on Jetson); #1229 root-caused by trace and
   fixed. Evidence `gauntlet-4-hw-pi5` 2501fc6e, `run4-hw/c1/`.
+
+## Entry 36 (written 10:48 UTC): C2 step 3b; draft PR #1237; branches; lab
+
+- C2 on jetson-nano-2 10:36:41 to 10:45 UTC (`gauntlet-4-hw-pi5`
+  f8df3cdc, `run4-hw/c2/step3b-33f05c5a/`): the 33f05c5a production elf
+  (banner "build 20261112085853 (33f05c5a)"), --assert-shares **20 of 20
+  PASS**, every run's full capture in its own file, split unchanged from the
+  saved reply (`kexec-assert-loop-reply.json`); lowest/best thief ratio
+  0.777 to 0.960 (CPU 2 lowest in all 20, not investigated). The boot
+  capture itself came back inline and is cited, not reproduced. C2 critic's
+  row-3 re-check requested at 10:46 (result in its verdict file).
+- **Draft PR #1237** (c1/1213-fix 33f05c5a to main). closingIssuesReferences:
+  #1213, #1229. The PR body flags the TEMPORARY commit 01931af6 for a
+  squash-merge check and lists the open items.
+- Branches deleted (tips and patches archived in
+  `run4-tools/deleted-branch-tips/`): c1/1211-fix 2f043ffa,
+  c1/1211-trace-unfixed 8b0065ce, c1/1213-trace 884aab2d, c1/1229-trace
+  7e07b384, c1/isolated-1s-main 01931af6. Kept: c1/main-isolation-conversion
+  3f64f624 (the #1223 cell for the next run).
+- Lab 10:47 UTC: no active claims; pi-5-1 and jetson-nano-2 online, ping,
+  serial, power on.
+
+## Close-out and final report (written 10:48 UTC)
+
+### Dissent
+
+**C3 (Jetson suite): the bar withholds a PR the rows support.** The bar:
+the suite runs to its last test in 10 of 10 boots on both paths, running
+past any pre-existing defect. The rows: UEFI-direct 10 of 10; kexec 9 of 10
+at 8a3406ea, the tenth halting in test_pmm (pmm_alloc_pages, #1207), code C3
+never touched, at the rate seen before its fixes (d512f40b 1 of 10; main 1
+of 3 in the PMM family, #1228). The critic confirmed both root causes from
+its own builds, both tests fail on the old code, production boots 10 of 10
+per path, Pi 5 10 of 10, /ci 12 of 12 at 8a3406ea, and noted #1199 and #1224
+also affect the production kernel. The PMM halt is plausibly the #1213
+family (sequence C frees a stack in use; untested on Jetson). Files:
+`critic-4-C3.md`, `run4-hw/c3/final-8a3406ea-*` on gauntlet-4-hw-jetson.
+For the user: open c3/jetson-suite as a draft as is, or first run the kexec
+suite x10 on it rebased onto #1237.
+
+**C1 (#1237): opened, with two rows short of their letter.** The Jetson
+production boot rows are 10 of 10 per path, but 18 of the 20 captures are
+tail-only (the C2 critic's row 3b, INCOMPLETE): each records the prompt
+reached with panic and exception patterns as stop conditions, which is what
+labctl boot_test itself checks, but not a full log. The C1 critic's own Pi
+5 reproduction is 3 boots of the 5 the protocol asks. The orchestrator
+opened the draft because the C1 critic passed every C1 bar and every other
+required row is complete; if the user reads the boot rows by their letter,
+#1237 should stay a draft until 20 full-capture Jetson boots exist (about
+45 min of lab). Files: `critic-4-C2.md`, `critic-4-C1.md`,
+`run4-hw/c2/step3-5e5548a1/`.
+
+### Issues: end states
+
+- **#1213**: root-caused from three first-fault traces (sequences A, B, C)
+  and fixed in #1237. Stress test 20 of 20 fail unfixed, 0 faults at the
+  head; 1 s variant 6 of 20 unfixed, 17 of 17 fixed; isolated=10/10 in 20 of
+  20 QEMU and 20 of 20 Pi 5 boots.
+- **#1223**: QEMU side the same defect (sequence B signature, gone under the
+  fix); Pi 5 at the fix head 0 panics in 20 + 3 boots; Pi 5 on unfixed main
+  with the isolation path not run (time). Open.
+- **#1211**: not reproduced (20 of 20 unfixed, 20 of 20 fixed, with
+  SLOT_TRACE). Open.
+- **#1219**: a separate defect, #1229 (stuck preempt_disabled strands the
+  lock holder), root-caused by trace and fixed in #1237: main 3 of 20, fix
+  head 0 of 34 (5x met). Open until #1237 merges.
+- **#1199**, **#1224**: root-caused and fixed on c3/jetson-suite (no PR,
+  Dissent).
+- **#1228**: not reproduced; plausible link to sequence C (hypothesis).
+- **#1229**: fixed in #1237 (closes on merge). **#1236**: fixed in #1237.
+  **#1234**: open (P1), the switch-in window, pre-existing.
+
+### PRs and merge order
+
+#1237 (draft) only. C2 changed no test or /ci file (WORK_STEALING=ON is 16
+of 20 at the head: #1230, #1232, #1233), so no C2 PR. No C3 PR (Dissent).
+If c3/jetson-suite is opened later, it is independent of #1237 (no shared
+files) and either may land first.
+
+### Tracker delta
+
+Opened: #1228, #1229, #1230, #1231, #1232, #1233, #1234, #1235, #1236.
+Closed: none. File-don't-fix: #1228, #1230, #1231, #1232, #1233, #1234,
+#1235. Raised: #1228 to P1. Comments: #1199, #1207, #1211, #1213, #1219,
+#1223, #1224, #1228, #1229, #1230, #1234.
+
+### What the run could not do
+
+- #1223 on Pi 5 on unfixed main with the isolation path (image staged:
+  build/kernel/slmos-l4-c1-test-unfixedconv-3f64f624.bin, branch
+  c1/main-isolation-conversion): no lab time left.
+- Full-capture Jetson production boots at the PR head (tail-only, above);
+  the critic's last 2 Pi 5 boots.
+- A Jetson run of #1237 against #1207/#1228.
+- About an hour went to messages reaching builders late (Entries 17, 26,
+  28) and to the reverted switch-in wait.
+
+### Single most useful next step
+
+Run the Jetson kexec integration suite x10 on c3/jetson-suite rebased onto
+#1237: it decides at once whether the PMM halts (#1207, #1228) are the
+#1213 family and whether the C3 bar can be met, which opens the second PR.
+
+### Rule breaks and process notes (all disclosed in the entries cited)
+
+The C1 critic's name-pattern pkill killed C2's QEMU runs (Entry 12); C1
+read other sessions' labctl output files (Entry 13); two single-lane
+overlaps (Entries 20, 23); C2's one console root login (Entry 27);
+tail-only and retyped captures, the latter redone (Entries 30, 33, 36); the
+orchestrator's C0 logs were uncommitted until Entry 33 (.gitignore *.log);
+the C2 critic stopped on a usage limit and resumed on the same model
+(Entries 31, 32). All three critics ran on Fable 5.2.
+
+### Branch table
+
+| Branch | Tip | State |
+|---|---|---|
+| gauntlet/lifecycle-4 | this commit | log, verdicts, tools |
+| gauntlet-4-hw-pi5 | f8df3cdc | C1 and C2 evidence |
+| gauntlet-4-hw-jetson | e262a221 | C3 evidence |
+| c1/1213-fix | 33f05c5a | draft PR #1237 |
+| c3/jetson-suite | 8a3406ea | pushed, no PR (Dissent) |
+| c1/main-isolation-conversion | 3f64f624 | kept for the #1223 cell |
+| c2/ws-1219 | (local, at main) | no commits; not pushed |
+| deleted: c1/1211-fix, c1/1211-trace-unfixed, c1/1213-trace, c1/1229-trace, c1/isolated-1s-main | see run4-tools/deleted-branch-tips/ | archived |
+
+### Lab state
+
+10:47 UTC: no claims; pi-5-1 online, powered on, card restored to its
+as-found kernels (C1 and the C1 critic); jetson-nano-2 online, powered on,
+SD Linux, ESP SLMOS.efi 789cba62 as found, no BootNext.
