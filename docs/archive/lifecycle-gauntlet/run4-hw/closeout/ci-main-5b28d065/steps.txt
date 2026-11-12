@@ -1,0 +1,24 @@
+# /ci at 5b28d0654dc64acd210de5252fb7a02fb14cf844 (Task-slot reclaim after switch-out (#1213), post-switch flag on the ru), start 19:27:02
+== 01-arm64-build: make kernel-clean && make kernel PLATFORM=QEMU_VIRT (start 19:27:02)
+   rc=0 end 19:28:24
+== 02-x86-build: make kernel-clean && make kernel PLATFORM=X86_64 (start 19:28:24)
+   rc=0 end 19:29:02
+== 03-jetson-real: make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real (start 19:29:02)
+   rc=0 end 19:32:10
+== 04-test-arm64: make test; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/ci-main-5b28d065/04-test-output.log; exit $rc (start 19:32:10)
+   rc=0 end 19:34:54
+== 04b-test-x86: make test PLATFORM=X86_64; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/ci-main-5b28d065/04b-test-output.log; exit $rc (start 19:34:54)
+   rc=0 end 19:36:21
+== 05-test-aisched: make test AI_SCHED=ON; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/ci-main-5b28d065/05-test-output.log; exit $rc (start 19:36:21)
+   rc=0 end 19:39:15
+== 06-runtime-test: make runtime-test (start 19:39:15)
+   rc=0 end 19:41:52
+== 07-braces: make test-check-braces && make check-braces (start 19:41:52)
+   rc=0 end 19:42:00
+== 08-build-order: make test-build-order (start 19:42:00)
+   rc=0 end 19:42:46
+== 09-jetson-layout: make test-jetson-uefi-layout; rc=$?; cp build/jetson-layout-build.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/ci-main-5b28d065/09-jetson-layout-build.log 2>/dev/null; exit $rc (start 19:42:46)
+   rc=0 end 19:44:21
+== 10-diff: git diff origin/main...HEAD --stat; git status --short --untracked-files=all (start 19:44:21)
+   rc=0 end 19:44:21
+ALLDONE
