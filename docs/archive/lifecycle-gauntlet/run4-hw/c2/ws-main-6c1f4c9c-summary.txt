@@ -160,7 +160,7 @@ In passing runs the lowest observed count is 16248 (run01) and 24235
 (run04). The pairs differ every time. Hypothesis, untested: a reader
 vCPU thread descheduled or throttled for the whole short row (MTTCG,
 4 vCPU threads under CPUQuota=200%). Separating cell (not run):
-CPUQuota=400%. Filed as #1230 (P3-low), not fixed.
+CPUQuota=400%. Filed as #1230 (P2-medium per the orchestrator; filed P3-low), not fixed.
 
 ## Load cell
 
