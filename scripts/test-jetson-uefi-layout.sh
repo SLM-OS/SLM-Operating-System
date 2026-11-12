@@ -32,6 +32,13 @@
 #  10. Verifies the HCR_EL2 write is read-modify-write.
 #  11. Verifies boot.S sets SCTLR.SPAN and clears PSTATE.PAN after the
 #      E2H flip (#1079). QEMU can't produce the kexec state this guards.
+#  12. Verifies no section with file contents lies past __data_end, the
+#      end of what the UEFI-direct path loads and copies (#1224: an orphan
+#      .got there read as garbage after a UEFI-direct boot).
+#
+# LAYOUT_ELF=<elf> checks an existing ELF instead of building (used to show
+# a check failing on an older image); the PE ImageBase check then reads the
+# .bin next to it if there is one.
 #
 # The runtime behaviour of the same path (firmware load at a
 # non-preferred address, relocation, boot to the shell) is exercised
@@ -44,16 +51,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELF="$ROOT/build/kernel/slmos.elf"
+ELF="${LAYOUT_ELF:-$ROOT/build/kernel/slmos.elf}"
 BUILD_LOG="$ROOT/build/jetson-layout-build.log"
 NM="${NM:-aarch64-none-elf-nm}"
 OBJDUMP="${OBJDUMP:-aarch64-none-elf-objdump}"
+READELF="${READELF:-aarch64-none-elf-readelf}"
 
 fail=0
 pass() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 
+if [ -n "${LAYOUT_ELF:-}" ]; then
+    printf '\n== Checking %s (no build) ==\n' "$ELF"
+else
 printf '\n== Build Jetson kernel ==\n'
 make -C "$ROOT" kernel-clean >/dev/null 2>&1 || true
 mkdir -p "$ROOT/build"
@@ -63,6 +74,7 @@ else
     err "build failed — see $BUILD_LOG"
     tail -40 "$BUILD_LOG"
     exit 1
+fi
 fi
 
 if [ ! -f "$ELF" ]; then
@@ -273,7 +285,7 @@ fi
 
 # 8. PE ImageBase must equal the link address of _start, so firmware
 #    that honours it loads the image where it is linked.
-BIN="$ROOT/build/kernel/slmos.bin"
+BIN="${ELF%.elf}.bin"
 start_addr=$("$NM" "$ELF" | awk '$3 == "_start" {print $1}')
 if [ -f "$BIN" ] && [ -n "$start_addr" ]; then
     ib=$(python3 -I - "$BIN" <<'PY'
@@ -345,6 +357,27 @@ case "$models_sec" in
     D|d) pass "slmos_boot_models is in .data" ;;
     *)   err "slmos_boot_models has symbol type '$models_sec', expected .data" ;;
 esac
+
+# 12. Everything with file contents must end at or before __data_end:
+#     boot.S copies _kernel_file_size (= __data_end - _start) bytes and the
+#     PE .data section's raw data ends there too; past it only .bss is
+#     cleared. #1224: the orphan .got sat at __data_end, so the weak-symbol
+#     addresses in it were uninitialised RAM after a UEFI-direct boot.
+printf '\n== Loaded image covers every section with contents (#1224) ==\n'
+data_end=$("$NM" "$ELF" | awk '$3 == "__data_end" {print $1}')
+if [ -z "$data_end" ]; then
+    err "__data_end symbol missing"
+else
+    beyond=$("$READELF" -SW "$ELF" | sed 's/^ *\[ *[0-9]*\] *//' | awk -v lim=$((0x$data_end)) '
+        $2 != "NOBITS" && $2 != "NULL" && $7 ~ /A/ {
+            a = strtonum("0x" $3); z = a + strtonum("0x" $5)
+            if (z > lim) printf "%s [0x%x, 0x%x)\n", $1, a, z }')
+    if [ -z "$beyond" ]; then
+        pass "no section with contents past __data_end (0x$data_end)"
+    else
+        while read -r l; do err "section $l lies past __data_end 0x$data_end (not loaded on UEFI-direct)"; done <<<"$beyond"
+    fi
+fi
 
 printf '\n== Summary ==\n'
 if [ "$fail" -eq 0 ]; then
