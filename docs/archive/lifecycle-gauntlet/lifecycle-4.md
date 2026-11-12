@@ -627,3 +627,20 @@ covered other sessions' output directories. C3's /ci at 8a3406ea started
   boots, boot_test 10, the C1 critic's 5 boots, then the #1223 cell
   (unfixed main plus conversion) at 10 boots unless time allows 20. Lab
   ends by 10:25 UTC for the close-out.
+
+## Entry 23 (written 07:30 UTC): the C3 critic re-claimed the Jetson; schedule shifts
+
+- C2 found jetson-nano-2 claimed again by "lifecycle-4-c3-critic" at
+  07:24:15 UTC (reason "second UEFI boot with SASS-embedded test kernel at
+  8a3406ea", expiring 07:53:37), two minutes after the 07:22 hand-off to C2.
+  C2 did not claim, power-cycle or force anything. The critic is told to
+  finish that one boot, restore the ESP to SLMOS.efi 789cba62, release by
+  07:45 and explain the second boot in its verdict; no further claims
+  without asking.
+- C2's 5e5548a1 QEMU cell extended to 34 runs (`gauntlet-4-hw-pi5`
+  da45d363): class A 0 of 34 (5x = 33.3, met at the exact head), class B 0,
+  INVALID 0; failures #1230 x3, #1232 x1, test_task_pinned_to_cpu0 x1
+  (#1233). /ci decision unchanged (16 of 20).
+- Schedule: C2 jetson-nano-2 from the critic's release to 08:55 UTC hard;
+  C1 pi-5-1 08:55 to 10:40 UTC hard (item (4), the #1223 cell, first if
+  C1's guard head is not ready). Close-out 10:40 to 11:05.
