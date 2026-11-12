@@ -1041,3 +1041,29 @@ run=1..20). Truncated-capture failure cleared. Open: no banner,
 agree with its ELF-compare file). Row 3: PASS on count and completeness,
 banner unverified from captures. Row 3b (Jetson boots): unchanged,
 INCOMPLETE. The close-out's Dissent on #1237 stands as written.
+
+## Entry 38 (written 18:05 UTC, 2026-11-12): close-out session start; #1237 head and mergeability
+
+A single-agent lab session (no subagents, no critics) to finish run 4's
+open items. Boards pi-5-1 and jetson-nano-2, one at a time. Session start
+17:58 UTC.
+
+- #1237: head **33f05c5a** (unchanged), draft, mergeable CLEAN. main is
+  **6c1f4c9c** and is an ancestor of 33f05c5a (`git merge-base
+  --is-ancestor`), `git merge-tree` clean: no rebase needed, so the
+  critic's pass and every run 4 row stay tied to 33f05c5a.
+- /ci at 33f05c5a: green in run 4 (`gauntlet-4-hw-pi5`
+  `run4-hw/c1/ci-33f05c5a/`, all 10 steps rc=0, full logs). The head is
+  unchanged, so that run is the step-2 /ci condition; not re-run.
+- Lab 18:00 UTC: no claims; both boards online, powered on. jetson-nano-2
+  as found: SD Linux (BootCurrent 0001), ESP `SLMOS.efi` 789cba62, no
+  BootNext, recovery_mode binding released (last_state open).
+- Builds at 33f05c5a (l4-c1 worktree, one at a time): Pi 5 production and
+  test, Jetson production (elf for kexec, bin for UEFI).
+- Capture method, Jetson: boot_test cannot run kexec or set BootNext, so a
+  temporary systemd unit (`l4co-autoboot.service`, `/root/l4co/`) runs
+  `slmos-kexec`, or sets BootNext 000E and reboots, for a fixed count of
+  boots and then lets Linux boot normally. That lets one `boot_test` call
+  per batch record each boot from power-on (UEFI, Linux, handoff, SLM-OS
+  banner) to the prompt, in its own output_dir file. The unit and
+  `/root/l4co/` are removed at restore.
