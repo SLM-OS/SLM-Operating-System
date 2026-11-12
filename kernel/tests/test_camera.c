@@ -29,6 +29,7 @@
 #include "../include/nvcsi.h"
 #include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
+#include "../include/boot_source.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -718,7 +719,16 @@ static void test_tegra_i2c_dump_status_bounds(void)
     /* On Jetson the dump touches live MMIO — the imx219 shell command
      * already exercises that path on every CHIP_ID failure. Here we
      * just confirm the symbol resolves and the n-clamp logic doesn't
-     * write past the caller's buffer. */
+     * write past the caller's buffer.
+     *
+     * After a UEFI-direct boot nothing has powered the camera I2C
+     * controller (Linux does it on the kexec path), and reading an
+     * unpowered block stops the board with "Unhandled Exception in
+     * EL3" (seen once #1224 let the suite get this far). The imx219
+     * command powers it first; this test does not, so skip it there. */
+    if (boot_source_is_uefi()) {
+        TEST_IGNORE_MESSAGE("UEFI-direct boot: camera I2C controller not powered");
+    }
     tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 999u);
     /* At least the first entry should now have a name. */
     TEST_ASSERT_NOT_NULL(regs[0].name);
