@@ -644,3 +644,47 @@ covered other sessions' output directories. C3's /ci at 8a3406ea started
 - Schedule: C2 jetson-nano-2 from the critic's release to 08:55 UTC hard;
   C1 pi-5-1 08:55 to 10:40 UTC hard (item (4), the #1223 cell, first if
   C1's guard head is not ready). Close-out 10:40 to 11:05.
+
+## Entry 24 (written 07:49 UTC): C3 critic verdict: FAIL (kexec 9 of 10); C3 builder entry
+
+Verdict: [`critic-4-C3.md`](critic-4-C3.md) (Fable 5.2), captures
+`run4-tools/critic-c3-runs/`.
+
+| Row | Critic |
+|---|---|
+| #1199 root cause (implicit memchr, `sxtw` after `bl memchr`) | PASS, reproduced from critic builds |
+| #1224 root cause (.got at __data_end, not copied on UEFI-direct) | PASS, reproduced (readelf) |
+| Tests fail on old code | PASS: Lua test faults in QEMU on main (0xffffffffc00eabd1), passes at 8a3406ea; layout script rc 1 on main, rc 0 at 8a3406ea |
+| Suite to last test, kexec, 8a3406ea | **FAIL: 9 of 10** (run06 halted in test_pmm, pmm_alloc_pages, #1207; not C3's code) |
+| Suite to last test, UEFI-direct, 8a3406ea | PASS, 10 of 10 |
+| Failure accounting | 15 #1109 (kexec); 13 #1109 + 9 #1231 (UEFI); none unaccounted. Gap: no issue for the unpowered camera I2C controller after UEFI-direct |
+| Production boots | PASS: kexec 10 of 10, UEFI-direct 10 of 10 (separate calls, disclosed) |
+| Pi 5 boot_test 10 | PASS, 10 of 10, banner 8a3406ea |
+| /ci at the PR head | INCOMPLETE (ran at d512f40b; C3 rerunning at 8a3406ea) |
+| Critic boots | kexec 3033 PASS, last test reached; UEFI-direct (SASS image) 3021 PASS, last test reached; test lists identical to the builder's |
+
+Further critic findings: `csidiag` after UEFI-direct still reaches the
+camera I2C controller (code reading); test_camera_imx219_refused_after_uefi_boot
+asserts the generic -3 and cannot tell refusal from failure; a fresh-worktree
+`make kernel-test` embeds no SASS, so the builder's header command alone
+does not reproduce its UEFI image; #1199 and #1224 affect the production
+kernel too; the first critic kexec capture during the 06:57 overlap is not
+counted.
+
+**C3 builder entry** (written after its critic): head c3/jetson-suite
+8a3406ea (cfc17d2b, d512f40b, 12079f3d, 8e3d6cc2, 8a3406ea). #1199: Lua
+saw an implicit int-returning memchr; GCC sign-extended the returned
+pointer, which on Jetson (heap above 0x80000000) became 0xffffffff8...;
+fixed by prototypes in kernel/include/string.h and -Werror for implicit
+declarations in the Lua objects. #1224: .got/.got.plt orphaned past
+__data_end, loaded by kexec, not copied by the UEFI stub; fixed by placing
+them in .data (kernel-jetson.ld, kernel.ld) and a layout check. Two further
+UEFI-only board stops in camera code fixed (test skip, imx219 refusal).
+Filed #1228 and #1231; commented on #1207. Evidence
+`gauntlet-4-hw-jetson` c9c194fc, `run4-hw/c3/`.
+
+**Outcome under the bars: no C3 PR** (the kexec bar is 9 of 10). The branch
+stays pushed. The orchestrator's disagreement goes in the final report's
+Dissent section. C3 builder files the two gaps (camera I2C after UEFI-direct
+including csidiag; the refusal test's ambiguous code) as one issue after its
+/ci.
