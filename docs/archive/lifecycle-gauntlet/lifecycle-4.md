@@ -764,3 +764,16 @@ to its Round 2.
   identical sizes per function, byte differences from worktree paths in
   __FILE__ strings. /ci at 33f05c5a running since 08:37. C1's pi-5-1 slot
   starts on C2's release (about 09:08), end 10:40.
+
+## Entry 30 (written 08:58 UTC): C2 UEFI 10 of 10; pi-5-1 to C1
+
+- C2 third Jetson session, released 08:58:06 UTC: UEFI-direct boot 10 at
+  5e5548a1 PASS (full 1410-line capture, banner "SLM-OS v0.4.0 build
+  20261112063436 (5e5548a1)", slmos> 62.1 s); ESP restored to 789cba62.
+  Step 3 totals at 5e5548a1: --assert-shares 20 of 20, kexec boots 10 of
+  10, UEFI-direct boots 10 of 10. Disclosed: the session 1 and 2 boot
+  captures are tail-only (last 3 lines, with the failure patterns in
+  until_pattern); only kexec boot 01 and UEFI boot 10 are full logs.
+- **08:59 UTC: pi-5-1 to C1** (step 7), to 10:40 hard: suite 20 at the fix
+  head with isolated=10/10 per boot, boot_test 10, then the C1 critic's 5
+  boots, then the #1223 cell with the time left. jetson-nano-2 is idle.
