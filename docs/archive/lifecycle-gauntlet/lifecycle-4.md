@@ -545,3 +545,25 @@ C1 critic round 2 (in progress): the 9185d4cb to 5e5548a1 diff is only
 the revert plus docs; schedule() has no on_cpu spin at 5e5548a1 (ldapr 1
 to 0, yield 1 to 0); its growth (0x420 to 0x46c, QEMU build) is the
 compiler emitting the switch-in block three times.
+
+## Entry 18 (written 06:58 UTC): C3 builder done; lab to the C3 critic
+
+C3 builder reported (final; its builder entry is written after the C3
+critic files). Handover times: C3 first released jetson-nano-2 at 05:54,
+re-claimed it at 05:55:48 for the kexec x10, and released it at 06:56 UTC,
+powered on in SD Linux; pi-5-1 was never claimed by C3. C3 reports no QEMU
+kills by it (no QEMU after about 02:45 UTC). Recorded now because they bear
+on the lab plan: the kexec suite cell at 8a3406ea reads **9 of 10** (run06
+halted in test_pmm, recorded on #1207), so the bar as written is not met on
+kexec; /ci ran at d512f40b, not at 8a3406ea; the pi-5-1 boot_test was not
+run.
+
+Rulings: /ci and make test-qemu-uefi at 8a3406ea are required (C3 builder
+runs them now on the host); the Pi 5 boot_test 10 is required because the
+PR changes kernel/include/string.h and the Lua flags for every ARM64 build
+(kernel-raspi5.ld is untouched; kernel.ld is QEMU's), C3 builder gets
+pi-5-1 for about 15 min after the C3 critic. **C3 critic started** at 06:58
+UTC (Fable, blind), holding jetson-nano-2 to about 07:45 for one test-kernel
+boot per path at 8a3406ea. The lab sat idle from 06:56 to 06:58 UTC (the
+handover notice arrived late). The 07:05 and 07:32 reminders are deleted;
+a 07:47 reminder replaces them.
