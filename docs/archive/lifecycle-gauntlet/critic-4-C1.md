@@ -554,10 +554,16 @@ stop before any run at that head. State at the stop:
   9185d4cb`: `kernel/tests/test_scheduler.c` only. The kernel code at
   9185d4cb equals 6d4fe041's, so section 1 applies to it unchanged.
 - All critic runs in section 3 are at 6d4fe041 and stay labelled so. Four
-  runs at 9185d4cb were started: two were in progress when the stop arrived
-  and two more started before the runner itself was stopped. All four were
-  killed mid-suite by the critic (own PIDs), none finished, and none is
-  counted or kept in `critic-c1-runs/`.
+  runs at 9185d4cb were started before the stop. One finished on its own:
+  `critic-fix-9185d4cb-run02.txt` (banner 9185d4cb, elf 6eaaf069, load 3.70,
+  suite PASS, stress 2002 iterations bad=0 timeouts=0, isolated=10/10,
+  `pdm` moved=6 bad=0, no SIGTERM line). It is kept, labelled with its head,
+  and bears on no bar by itself. The other three (run01, run03, run04) were
+  killed mid-suite by the critic, by PID, selected by the critic's own elf
+  path; they are INVALID and not kept in `critic-c1-runs/`. Their line 1
+  reads `RESULT PASS; qemu rc 0` because QEMU exits 0 on SIGTERM: the
+  critic's runner has the defect the orchestrator described, and a run
+  without a final suite line must not be read from line 1.
 - Test changes in 9185d4cb, read but not run (redefined criterion check):
   `test_policy_custom_assign_cpu_called` and
   `test_proactive_load_balance_inert_when_light` accept `assigned_cpu != 0`
