@@ -18,7 +18,7 @@ doc is stale.
 
 assert-shares detail: every run's lowest thief was at 15.4% to 16.6%
 and the best at 16.8% to 17.7% (owner CPU 1 executes too). The
-lowest-to-best task ratio is 0.873 to 0.989 over 18 runs with shares (run02's verdict line was cut at the
+lowest-to-best task ratio is 0.873 to 0.989 (runs 03 to 20, plus run 01 at 174/176 = 0.989) (run02's verdict line was cut at the
 match, so its shares are not recorded). For comparison, the #1216
 stall left CPUs 2 and 3 at 0.40 to 0.83 of the best thief's median
 share on jetson-nano-2 (coherency run 3). Run 01: 1044 of 1044 tasks
