@@ -1,4 +1,4 @@
-# ws-on-5e5548a1 summary: make test QEMU command, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, WORK_STEALING=ON, TCG thread=multi (no -accel flag), elf sha256 694402d2060ad427437d544f3d28859102cca37796dbe6a39b2c78835bfbb2da, N=20; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass, INVALID=QEMU killed by another process before the suite summary
+# ws-on-5e5548a1 summary: make test QEMU command, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, WORK_STEALING=ON, TCG thread=multi (no -accel flag), elf sha256 694402d2060ad427437d544f3d28859102cca37796dbe6a39b2c78835bfbb2da, N=34; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass, INVALID=QEMU killed by another process before the suite summary
 # boot banner: SLM-OS v0.4.0 build 20261112063640 (5e5548a1)
 
 | File | load_start (1/5/15) | rc | Class |
@@ -23,36 +23,51 @@
 | ws-on-5e5548a1-run18.txt | 4.40 3.52 2.85 | 0 | PASS |
 | ws-on-5e5548a1-run19.txt | 2.74 3.18 2.79 | 1 | other(test_slm_stats_live_from_second_session) |
 | ws-on-5e5548a1-run20.txt | 2.44 2.97 2.75 | 1 | other(test_task_pinned_to_cpu0) |
+| ws-on-5e5548a1-run21.txt | 0.88 2.20 2.50 | 0 | PASS |
+| ws-on-5e5548a1-run22.txt | 2.22 2.26 2.49 | 0 | PASS |
+| ws-on-5e5548a1-run23.txt | 2.65 2.35 2.50 | 0 | PASS |
+| ws-on-5e5548a1-run24.txt | 3.78 2.80 2.65 | 0 | PASS |
+| ws-on-5e5548a1-run25.txt | 3.34 2.91 2.70 | 0 | PASS |
+| ws-on-5e5548a1-run26.txt | 3.18 2.96 2.74 | 1 | C |
+| ws-on-5e5548a1-run27.txt | 3.62 3.19 2.84 | 0 | PASS |
+| ws-on-5e5548a1-run28.txt | 3.65 3.26 2.90 | 0 | PASS |
+| ws-on-5e5548a1-run29.txt | 4.02 3.46 3.00 | 0 | PASS |
+| ws-on-5e5548a1-run30.txt | 3.50 3.45 3.03 | 0 | PASS |
+| ws-on-5e5548a1-run31.txt | 3.59 3.45 3.07 | 0 | PASS |
+| ws-on-5e5548a1-run32.txt | 3.63 3.47 3.10 | 0 | PASS |
+| ws-on-5e5548a1-run33.txt | 3.67 3.51 3.15 | 0 | PASS |
+| ws-on-5e5548a1-run34.txt | 4.24 3.74 3.26 | 0 | PASS |
 
-Class A: 0 of 20
-Class B: 0 of 20
-Class C: 2 of 20
-INVALID (externally killed, excluded from pass counts): 0 of 20
-PASS: 16 of 20; valid runs 20
-Load (1-min) at run start: min 1.25, max 4.53
+Class A: 0 of 34
+Class B: 0 of 34
+Class C: 3 of 34
+INVALID (externally killed, excluded from pass counts): 0 of 34
+PASS: 29 of 34; valid runs 34
+Load (1-min) at run start: min 0.88, max 4.53
 
 ## Analysis (final C1 head c1/1213-fix 5e5548a1: reverts schedule()'s switch-in wait on next->on_cpu; keeps the #1229 cpu_id() re-read, task_destroy's on_cpu wait, zombie_gen, claim-time READY and the 9185d4cb test fixes)
 
-- #1219 (class A): 0 of 20; all 20 print "[PASS] batch: stress workload
-  (4x8)". (The heads before this one, 364544c1, 6d4fe041 and 9185d4cb,
-  carried the switch-in wait this head reverts, so their 0 of 72 is
-  about different scheduler code. 20 clean runs at this head is 3.0x
-  the unfixed 6.67 runs per failure, below the 5x bar of 34.)
-- Class B: 0 of 20. INVALID: 0 (no "terminating on signal" line other
-  than from /usr/bin/timeout).
+Runs 01-20 are the /ci decision cell (06:36 to 07:04 UTC). Runs 21-34
+were added on the same elf (sha256 above, 07:06 to 07:25 UTC) at the
+orchestrator's request, for the 5x rule.
+
+- #1219 (class A): 0 of 34; all 34 print "[PASS] batch: stress workload
+  (4x8)". The unfixed WS=ON cell (ws-main-6c1f4c9c) averaged 20/3 =
+  6.67 runs per failure, so 5x = 33.3 and 34 fault-free runs meet it at
+  this exact head. Classification confirmed: #1219 was the #1229 stuck
+  preempt_disabled deadlock (dumps in ws-main-6c1f4c9c run17 and
+  trial-t3; same signature in ws-on-5be808c5 run05, run09, run14).
+- Class B: 0 of 34 (5x for B would be 50). INVALID: 0 of 34.
 - Failures:
-  - run15, run16: test_litmus_patterns_pass (#1230).
+  - run15, run16, run26: test_litmus_patterns_pass (#1230).
   - run19: test_slm_stats_live_from_second_session
     (test_slm_shell.c:906, live_saw_header), already #1232.
   - run20: test_task_pinned_to_cpu0 (test_scheduler.c:6099,
-    assigned_cpu 1, expected 0). Same shape as the three #1233 tests,
-    and not one of the three C1 fixed in 9185d4cb. Hypothesis, untested:
-    a thief steals the task off CPU 0's queue between
-    scheduler_add_task_to_cpu(t, 0) and the assert. Added to #1233 as a
-    comment.
-- The three tests fixed in 9185d4cb (test_benchmark_context_switch,
-  test_proactive_load_balance_inert_when_light,
-  test_policy_custom_assign_cpu_called): 0 failures in 20.
-- Step 4 (/ci): 16 of 20, not 20 of 20, so WORK_STEALING=ON is not added.
-  Excluding #1230 and INVALID: 18 of 20 clean; the two remaining are
-  #1232 and the fourth steal-sensitive test (#1233).
+    assigned_cpu 1, expected 0). Same shape as the #1233 tests, and not
+    one of the three C1 fixed. Hypothesis, untested: a thief steals the
+    task before the assert. Recorded under #1233 (comment).
+- The three tests fixed in 9185d4cb: 0 failures in 34.
+- Step 4 (/ci): the decision cell (runs 01-20) passed 16 of 20, not
+  20 of 20, so WORK_STEALING=ON is not added. Across all 34 runs: 29 of
+  34. Excluding #1230 and INVALID: 18 of 20 clean in the decision cell,
+  32 of 34 over all runs.
