@@ -500,3 +500,24 @@ analysis; its principled fix (an IRQ-masked switch window through the
 on_cpu release, as Linux does) is too large to be shown in this run. At the
 new head C1 re-runs x86 make test, the bar cells, the critic's window patch
 (must not hang), and /ci from step 1.
+
+## Entry 16 (written 06:34 UTC): C1 head 5e5548a1 (switch-in wait reverted); #1234 filed; C3 to 07:30
+
+- C1 pushed **c1/1213-fix 5e5548a1**: reverts only schedule()'s switch-in
+  wait on next->on_cpu (sched.c, docs/scheduler.md, kernel/CLAUDE.md);
+  keeps #1229's re-read and test, task_destroy's on_cpu wait, zombie_gen,
+  claim-time READY and the 9185d4cb test fixes. The x86 resched-IPI guard
+  was not committed; its patch and 3 + 3 runs stay as evidence
+  (`run4-hw/c1/ci-9185d4cb/`). C1 filed **#1234** (P1-high, sub:sched,
+  platform:all): the switch-in window and both deadlocks of a spin under
+  rq_lock. C1's /ci at 9185d4cb stopped at step 4b on its own (the x86
+  timeout); logs labelled.
+- Started at 5e5548a1: C1 x86 make test x3, the critic's window patch, Pi
+  5 image rebuild, bar re-runs, /ci, issue comments; C2 Jetson prep and the
+  20-run /ci decision cell; C1 critic round 2 (mechanism re-review, window
+  patch, spot runs, diff check).
+- labctl `list_claims` (06:33 UTC, after a 2-min wait behind a long
+  call): C3 re-claimed jetson-nano-2 at 05:55:48 for the kexec x10 at
+  8a3406ea (claim to 07:48). C3's hold is extended to 07:30 UTC hard
+  because C1's head is late; the C3 critic follows (about 40 min), then
+  C1 on pi-5-1 for item (4) and C2 on jetson-nano-2, one at a time.
