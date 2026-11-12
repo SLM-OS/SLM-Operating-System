@@ -1,0 +1,12 @@
+#!/bin/bash
+# Extend an existing cell with more runs on the same snapshotted elf.
+# usage: extend_cell.sh <cell> <from> <to>
+C=$1; FROM=$2; TO=$3; S=$(cd $(dirname "$0") && pwd); RD=$S/runs/$C
+export C2_OFFS=$S/elf/$C.offs.json; ELF=$S/elf/$C.elf
+echo "[$(date -u +%H:%M:%S)] extend $C runs $FROM..$TO elf sha256 $(sha256sum $ELF | cut -c1-64)" >> $RD/cell.log
+for i in $(seq -w $FROM $TO); do
+  [ -e $RD/run$i.meta ] && continue
+  $S/run_one.sh $ELF $RD run$i >> $RD/cell.log 2>&1
+  echo "[$(date -u +%H:%M:%S)] run$i $(cut -d' ' -f2-3 $RD/run$i.meta) class=$($S/classify.sh $RD run$i $ELF)" >> $RD/cell.log
+done
+echo "[$(date -u +%H:%M:%S)] extend $C done" >> $RD/cell.log
