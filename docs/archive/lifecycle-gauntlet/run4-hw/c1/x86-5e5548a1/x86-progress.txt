@@ -1,0 +1,4 @@
+run1 rc=0 load0=0.51 1.57 2.04 load1=3.66 2.19 2.21 PASSED - All tests passed (isa-debug-exit code 1 = success) signal=0
+run2 rc=2 load0=3.66 2.19 2.21 load1=4.49 2.66 2.37 FAILED - Test failu signal=0
+run3 rc=2 load0=4.49 2.66 2.37 load1=4.78 3.00 2.50 FAILED - Test failu signal=0
+DONE
