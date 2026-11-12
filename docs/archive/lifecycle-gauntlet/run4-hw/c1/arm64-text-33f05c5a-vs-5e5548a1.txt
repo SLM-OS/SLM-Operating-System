@@ -1,0 +1,23 @@
+# ARM64 .text at the x86 guard head 33f05c5a vs 5e5548a1; RESULT Pi 5 test and production kernels: .text byte-identical; QEMU_VIRT test kernel: same .text size and per-function nm sizes (0 diff lines), bytes differ only through the build path in __FILE__ strings (5e5548a1 built in worktree l4-c1, 33f05c5a in l4-c1-pi5), which moves .rodata addresses used by adrp/add
+# boot banner: (size check, no boot)
+# git diff --stat 5e5548a1 33f05c5a:  1 file changed, 18 insertions(+), 3 deletions(-)
+
+## pi5/elf-test-fix-5e5548a1.elf sha256 861b26cd83165ad92ed6fa9702080edc8a4644f0783b85b0ba9f6cd3d35dc4d2
+.text             2525336     524288
+## h6/elf-pi5-test-33f05c5a.elf sha256 df55f8bde8ff4e90f573c17c404b1ed0b86fb69de51744ffda54dab1930c55a4
+.text             2525336     524288
+.text bytes identical: yes
+
+## pi5/elf-prod-fix-5e5548a1.elf sha256 c5ce063be30d5164c3572935eb7005ef143de122e33a16b7b04187105e9f2adb
+.text             2454104     524288
+## h6/elf-pi5-prod-33f05c5a.elf sha256 ed73947ec4728efeb3b6378c639d1440d41ca7f03e22e992070808704cec18d3
+.text             2454104     524288
+.text bytes identical: yes
+
+## h5/elf-head-wsoff-5e5548a1.elf sha256 87357a3e0a8ea37dac557774b65b958460678451c2debf8a66cf30aba9351bf1
+.text             2499512   1073741824
+## h6/elf-qemu-test-33f05c5a.elf sha256 ae8d5262fe6cb91e7aa953aaa07785a53c14608ef64d89ba4ecc3ec9084203b6
+.text             2499512   1073741824
+.text bytes identical: no
+
+QEMU test kernel nm (function,size) diff lines: 0
