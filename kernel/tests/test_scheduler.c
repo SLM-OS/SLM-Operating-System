@@ -2183,6 +2183,7 @@ static void test_isolated_core_latency(void)
     uint64_t normal_max = 0;
     uint64_t normal_min = UINT64_MAX;
     int normal_count = 0;
+    int wait_timeouts = 0;
 
     /*
      * Phase 1: Measure latency on isolated core
@@ -2201,16 +2202,12 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* Wait for completion. Left as a count on purpose (#1213): a
-         * wall-clock bound lets these tasks run, and in QEMU CPU 1 then
-         * stops running tasks; on Pi 5 this short bound expires before
-         * the task runs in almost every iteration (isolated 0/10 in C1
-         * run 2), and the test asserts nothing about completion. */
-        int timeout = 100;
-        while (t->state != TASK_TERMINATED && timeout > 0) {
-            yield();
-            test_delay(1000);
-            timeout--;
+        /* Wall-clock wait (#1215 helper), 1 s; timeouts asserted after
+         * cleanup. Lifecycle run 4: unfixed main + only this conversion
+         * (the step-5 conversion of the #1213 fix head), for #1223. */
+        if (test_wait_task_terminated("iso_latency_isolated", t,
+                                      TEST_WAIT_S(1)) < 0) {
+            wait_timeouts++;
         }
 
         /* Record sample */
@@ -2252,12 +2249,10 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* Left as a count on purpose: see the isolated phase (#1213). */
-        int timeout = 100;
-        while (t->state != TASK_TERMINATED && timeout > 0) {
-            yield();
-            test_delay(1000);
-            timeout--;
+        /* Wall-clock wait, 1 s: see the isolated phase. */
+        if (test_wait_task_terminated("iso_latency_normal", t,
+                                      TEST_WAIT_S(1)) < 0) {
+            wait_timeouts++;
         }
 
         if (latency_sample_index > 0) {
@@ -2281,6 +2276,8 @@ static void test_isolated_core_latency(void)
      */
     uart_printf("  Samples collected: isolated=%d/%d, normal=%d/%d\n",
                 isolated_count, LATENCY_SAMPLES, normal_count, LATENCY_SAMPLES);
+    /* Every task must finish within its 1 s bound (#1213). */
+    TEST_ASSERT_EQUAL_INT(0, wait_timeouts);
 
     if (isolated_count > 0 && normal_count > 0) {
         uint64_t isolated_avg = isolated_sum / (uint64_t)isolated_count;
