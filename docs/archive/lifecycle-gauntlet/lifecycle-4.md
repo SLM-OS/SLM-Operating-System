@@ -214,3 +214,26 @@ sched_try_steal decisions to its trace ring and to own the #1229 fix
 decision; C2 writes no kernel patch, files class C (file-don't-fix),
 builds an unattended 20-run harness for C1's head, and measures a 20-run
 WORK_STEALING=OFF control cell on main.
+
+## Entry 4 (written 02:48 UTC): C2 interim 2; #1230 filed; C2 idle until C1's head
+
+Interim (not the builder entry). `gauntlet-4-hw-pi5` 0dfa07b7,
+`run4-hw/c2/`. Accel: the Makefile passes no `-accel`, so `make test`
+runs TCG thread=multi (`accel-threads.txt`). WORK_STEALING defaults OFF
+for QEMU in CMakeLists.txt (the Makefile comment says ON; noted on #1229),
+so /ci's `make test` does not exercise stealing.
+
+| Class on main 6c1f4c9c | WS=ON (load 2.74 to 5.67) | WS=OFF (load 3.46 to 6.75) |
+|---|---|---|
+| A: #1219 stress hang | 3 of 20 | 0 of 20 |
+| B: #1213 family task_exit panic | 2 of 20 | 0 of 20 |
+| C: litmus mp_weak_rows | 3 of 20 | 9 of 20 |
+
+Files: `ws-main-6c1f4c9c-summary.txt`, `ws-off-main-6c1f4c9c-summary.txt`
+and their run files. The WS=OFF zeros for A and B are below the 5x rule
+(3.0x and 2.0x); they are not used as a finding. Class C filed as
+**#1230** (sub:smp, platform:qemu, P2-medium, Backlog), file-don't-fix;
+hypothesis (untested): a reader vCPU thread starved under CPUQuota=200%.
+Ruling: no further C2 host cells (WS dependence is not a bar; C1 has the
+host); C2's unattended harness (`tools/v2/run_cell.sh`) waits for C1's
+head.
