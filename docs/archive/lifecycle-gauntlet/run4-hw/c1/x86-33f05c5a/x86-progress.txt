@@ -1,0 +1,11 @@
+run01 rc=0 load0=0.46 1.14 1.30 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run02 rc=0 load0=2.68 1.65 1.46 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run03 rc=0 load0=3.91 2.14 1.64 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run04 rc=0 load0=3.93 2.44 1.77 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run05 rc=0 load0=4.02 2.72 1.91 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run06 rc=0 load0=3.36 2.77 1.97 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run07 rc=0 load0=2.64 2.69 1.99 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run08 rc=0 load0=1.82 2.46 1.95 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run09 rc=0 load0=1.62 2.31 1.93 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+run10 rc=0 load0=1.34 2.12 1.88 PASSED - All tests passed (isa-debug-exit code 1 = success) leaks=0 signal=0
+DONE
