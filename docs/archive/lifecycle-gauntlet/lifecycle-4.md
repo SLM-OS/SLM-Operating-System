@@ -601,3 +601,14 @@ rule (my 06:57 "wait for the hand-off" message crossed C3's work). The
 critic is asked to check its captures from that window and redo any
 incomplete boot. C3 still owes /ci and make test-qemu-uefi at 8a3406ea
 (running now); C3 is asked whether it read /var/lib/labctl/output itself.
+
+## Entry 21 (written 07:09 UTC): C3's labctl output read (disclosed, ruled acceptable)
+
+C3 read and copied the ten per-run captures from
+/var/lib/labctl/output/l4c3-pi5-8a3406ea/, the output_dir its own
+boot_test call created, into `run4-hw/c3/pi5-boot-test-8a3406ea.txt`;
+nothing else under /var/lib/labctl, nothing written. Ruling: a boot_test
+call's own output_dir is the call's output, not labctl's database; kept,
+with a provenance line. This differs from C1's read (Entry 13), which
+covered other sessions' output directories. C3's /ci at 8a3406ea started
+07:08 UTC.
