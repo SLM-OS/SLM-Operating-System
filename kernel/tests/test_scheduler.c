@@ -2326,28 +2326,32 @@ static void test_preempt_flag_follows_migrated_task(void)
     scheduler_add_task_to_cpu(t[0], 2);
     scheduler_add_task_to_cpu(t[1], 2);
 
-    /* Move t[0] between CPUs 2 and 3: migrate it while it is READY, then
-     * wait (up to 100 ms) until it has run on the new CPU before moving it
-     * again. Up to 10 moves in at most 1 s. */
+    /* Migrate t[0] off CPU 2 while it is READY (retrying for up to 1 s),
+     * then give it up to 1 s to run on another CPU. One move is enough:
+     * before the fix the first resume on the new CPU left that CPU's flag
+     * at 1. Under WORK_STEALING a thief may take it from CPU 3 first;
+     * any CPU change counts. */
     uint64_t f = timer_get_frequency();
     uint64_t t0 = timer_get_count();
     uint32_t migrations = 0;
-    while (timer_get_count() - t0 < f && pdm_moved < 10) {
+    while (timer_get_count() - t0 < f && migrations == 0) {
         struct task *m = t[0];
-        uint32_t moved_before = pdm_moved;
         if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == TASK_READY &&
-            pdm_runs[0] > 0) {
-            uint32_t to = (m->assigned_cpu == 2) ? 3 : 2;
-            if (sched_migrate_task(m, to) == 0) {
-                migrations++;
-                uint64_t w0 = timer_get_count();
-                while (pdm_moved == moved_before &&
-                       timer_get_count() - w0 < f / 10) {
-                    yield();
-                }
-                continue;
-            }
+            pdm_runs[0] > 0 && m->assigned_cpu == 2 &&
+            sched_migrate_task(m, 3) == 0) {
+            migrations++;
+            break;
         }
+        yield();
+    }
+    t0 = timer_get_count();
+    while (pdm_moved == 0 && timer_get_count() - t0 < f) {
+        yield();
+    }
+    /* A few more resumes after the move, so the flag is checked again. */
+    uint32_t runs_after = pdm_runs[0];
+    t0 = timer_get_count();
+    while (pdm_runs[0] < runs_after + 100 && timer_get_count() - t0 < f / 10) {
         yield();
     }
 
