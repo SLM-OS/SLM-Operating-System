@@ -95,6 +95,8 @@ static void test_camera_open_unknown_returns_minus_one(void)
  * the board with a RAS error in TF-A. The boot source is forced to UEFI
  * here so the guard is exercised on the kexec path too; with the guard
  * in place no sensor access happens, so this is safe on either path.
+ * The refusal must also leave the RCE session alone: the camrtc
+ * "uninit" tests later in this suite fail if it brings RCE up.
  */
 static void test_camera_imx219_refused_after_uefi_boot(void)
 {

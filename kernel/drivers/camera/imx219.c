@@ -613,6 +613,12 @@ int imx219_capture_one_frame(struct camera_frame *out)
         WARN("imx219_capture: NULL out");
         return -1;
     }
+    /* imx219_power_on() refuses after a UEFI-direct boot; check here
+     * too so a refused capture leaves the RCE session untouched. */
+    if (boot_source_is_uefi()) {
+        WARN("imx219_capture: not supported after a UEFI-direct boot");
+        return -1;
+    }
 
     /* 1. RCE/HSP/IVC session. Truly idempotent — fast no-op once
      * the channel pair is up — so we always pre-touch it. */
