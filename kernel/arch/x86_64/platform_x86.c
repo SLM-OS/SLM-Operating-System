@@ -56,9 +56,24 @@ static void resched_ipi_handler(uint8_t irq)
     if (cpu < MAX_CPUS) {
         smp_resched_ipi_count[cpu]++;
     }
-    /* schedule() internally guards with preempt_disabled[cpu], so a
-     * nested call while schedule() is already in flight no-ops
-     * safely. */
+    /* Do not re-enter schedule() while this CPU is inside its switch
+     * window (#1236). preempt_disabled[cpu] is set from before switch_to
+     * until after sched_finish_switch has released the outgoing task;
+     * schedule() itself does not check it (only scheduler_tick does).
+     * x86 resumes a switched-in task with IF=1 and task_entry_wrapper
+     * does sti before the trampoline, so the IPI can land there; a
+     * nested schedule() then runs with task_current() already naming
+     * the incoming task and corrupts the switch (stuck on_cpu, lost
+     * tasks). x86 has no deferral path (reschedule_pending is ARM64
+     * SECONDARY_PREEMPT only), so the kick is dropped: this CPU is
+     * already in schedule(), and the task the kick announced stays on
+     * its queue until the CPU's next schedule(): its next timer tick
+     * (scheduler_tick schedules once the flag clears) or the running
+     * task's next yield. */
+    extern volatile int preempt_disabled[];
+    if (cpu < MAX_CPUS && preempt_disabled[cpu]) {
+        return;
+    }
     schedule();
 }
 
