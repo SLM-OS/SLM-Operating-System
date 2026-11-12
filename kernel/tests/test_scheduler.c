@@ -2124,6 +2124,140 @@ static void test_rapid_task_exit_no_panic(void)
 }
 
 /* ============================================================================
+ * Regression: task slot reuse while the exiting CPU is still switching out
+ * of the slot (#1213)
+ *
+ * The sequence the #1213 slot trace recorded (first-fault traces in
+ * docs/archive/lifecycle-gauntlet/run4-hw/c1/ on gauntlet-4-hw-pi5): a task
+ * pinned to CPU 1 calls task_exit, which publishes TASK_TERMINATED and then
+ * switches away; CPU 0 sees TERMINATED and task_destroy()s the slot while
+ * CPU 1 is still in schedule() for it; CPU 1 then records the slot as its
+ * rq->zombie and, from idle, reaps it with a second task_destroy() just as
+ * CPU 0's next task_create() claims the same slot. The reaper's state check
+ * still sees the old occupant's TERMINATED, so it clears the new task's id,
+ * stack_base and stack_top mid-construction; task_create copies the
+ * cleared stack_top into context.sp, and CPU 1 switches into a task whose
+ * saved SP is 0.
+ *
+ * This test runs that loop as fast as it can: no yield between the wait
+ * and the destroy, and the next create immediately after, so both the
+ * destroy and the create land inside CPU 1's switch-out and zombie-reap
+ * window as often as possible.
+ *
+ * Each task checks at entry that it is the task the loop just created
+ * (task id, argument token) and that its SP is inside its own stack, so a
+ * context or slot that was cleared or half written is reported rather
+ * than run. A wedge or fault on CPU 1 shows as a wait timeout here (or a
+ * fault/panic of the run).
+ * ============================================================================ */
+
+#define SLOT_REUSE_ITERS     3000
+#define SLOT_REUSE_CPU       1
+#define SLOT_REUSE_BUDGET_S  20
+
+static volatile uint32_t slot_reuse_expect_id;
+static volatile uint64_t slot_reuse_expect_tok;
+static volatile uint32_t slot_reuse_ran;
+static volatile uint32_t slot_reuse_bad;
+static volatile uint32_t slot_reuse_bad_first;   /* iteration+1 of first bad */
+
+static void slot_reuse_entry(void *arg)
+{
+    struct task *self = task_current();
+    uint64_t sp;
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+#else
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+#endif
+    uint32_t want_id = __atomic_load_n(&slot_reuse_expect_id, __ATOMIC_ACQUIRE);
+    uint64_t want_tok = slot_reuse_expect_tok;
+    bool ok = self && self->id == want_id && (uint64_t)(uintptr_t)arg == want_tok &&
+              sp >= (uint64_t)(uintptr_t)self->stack_base &&
+              sp <= (uint64_t)(uintptr_t)self->stack_top;
+    if (!ok) {
+        if (__atomic_fetch_add(&slot_reuse_bad, 1, __ATOMIC_RELAXED) == 0) {
+            slot_reuse_bad_first = (uint32_t)want_tok;
+        }
+    }
+    __atomic_fetch_add(&slot_reuse_ran, 1, __ATOMIC_RELEASE);
+    /* task_entry_trampoline calls task_exit() on return. */
+}
+
+static void test_task_slot_reuse_under_switch(void)
+{
+    if (cpu_count <= SLOT_REUSE_CPU) {
+        TEST_ASSERT(1);
+        return;
+    }
+
+    slot_reuse_ran = 0;
+    slot_reuse_bad = 0;
+    slot_reuse_bad_first = 0;
+    sched_isolate_core(SLOT_REUSE_CPU);
+
+    struct task *prev_slot = NULL;
+    uint32_t same_slot = 0;
+    uint32_t timeouts = 0;
+    uint32_t done = 0;
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint64_t budget = f * SLOT_REUSE_BUDGET_S;
+
+    for (uint32_t i = 0; i < SLOT_REUSE_ITERS; i++) {
+        if (timer_get_count() - t0 > budget) {
+            break;
+        }
+        struct task *t = task_create_with_priority("slot_reuse",
+            slot_reuse_entry, (void *)(uintptr_t)(i + 1), TASK_PRIORITY_HIGH);
+        TEST_ASSERT_NOT_NULL(t);
+        if (!t) {
+            break;
+        }
+        if (t == prev_slot) {
+            same_slot++;
+        }
+        prev_slot = t;
+        t->cpu_affinity = SLOT_REUSE_CPU;
+        slot_reuse_expect_tok = i + 1;
+        __atomic_store_n(&slot_reuse_expect_id, t->id, __ATOMIC_RELEASE);
+        SLOT_TRACE(ST_TEST, t, 0x401, i, 0);
+        scheduler_add_task(t);
+
+        /* Tight wait for TERMINATED (no yield), 1 s bound. */
+        uint64_t w0 = timer_get_count();
+        bool term = false;
+        while (timer_get_count() - w0 < f) {
+            if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED) {
+                term = true;
+                break;
+            }
+        }
+        if (!term) {
+            timeouts++;
+            uart_printf("  slot_reuse_stress: iteration %u: task id=%u state=%d "
+                        "not TERMINATED after 1 s\n", i, t->id, (int)t->state);
+            scheduler_terminate_task(t);
+            task_destroy(t);
+            break;
+        }
+        SLOT_TRACE(ST_TEST, t, 0x402, i, 0);
+        task_destroy(t);
+        done++;
+    }
+
+    sched_unisolate_core(SLOT_REUSE_CPU);
+
+    uart_printf("  slot_reuse_stress: iterations=%u same_slot=%u ran=%u bad=%u "
+                "first_bad_token=%u timeouts=%u\n",
+                done, same_slot, slot_reuse_ran, slot_reuse_bad,
+                slot_reuse_bad_first, timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0, timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0, slot_reuse_bad);
+    TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
+}
+
+/* ============================================================================
  * Latency and benchmark tests
  * ============================================================================ */
 
@@ -6057,6 +6191,9 @@ int test_suite_scheduler(void)
 
     /* Regression: task_exit race (runs on all platforms) */
     RUN_TEST(test_rapid_task_exit_no_panic);
+
+    /* Regression: slot reuse during switch-out (#1213) */
+    RUN_TEST(test_task_slot_reuse_under_switch);
 
     /* Latency and benchmark tests */
     RUN_TEST(test_isolated_core_latency);
