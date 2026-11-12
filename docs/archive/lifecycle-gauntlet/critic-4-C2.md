@@ -382,3 +382,39 @@ Housekeeping: the critic's worktree `.claude/worktrees/l4-c2-critic` was
 removed at 09:39 UTC; no QEMU of the critic's is left running; no branch
 was edited; only PIDs started by the critic's own `make test` ran, and
 none was killed by the critic.
+
+## Row 3 re-check (10:47 UTC, same critic, same model Fable 5.2)
+
+Scope: row 3 only, the builder's redo at the PR head. Evidence:
+`origin/gauntlet-4-hw-pi5` @ f8df3cdc,
+`run4-hw/c2/step3b-33f05c5a/` (`kexec-assert-run01..20.txt`,
+`kexec-assert-loop-reply.json`, `kexec-assert-preamble.txt`,
+`kexec-assert-tail.txt`, `step3b-summary-33f05c5a.txt`) and
+`tools/v2/split_assert_runs.py.txt`. The critic counted with its own
+script before reading the summary's table; the builder's splitter was
+not run.
+
+| Check | Result |
+|---|---|
+| Files | 20 per-run files, one saved reply (305944 characters after JSON decoding, 4300 lines, 20 `C2RUN n` markers, one `C2DONE`) |
+| Split changes no text | For all 20 files, the text after the two added header lines is byte-for-byte equal to the reply segment from its `C2RUN n` marker to the next marker (20 of 20 exact). Preamble and tail files match the reply's start and end |
+| `ASSERT-SHARES: PASS` lines counted from the captures | 20 of 20, one per file, each complete to "every thief at or above half the best"; 0 `ASSERT-SHARES: FAIL` lines; no "panic" in any file |
+| Completeness per file | 6 `CPU n: N tasks` lines, 6 `c2t cpu=` rows and 6 `iw` rows in every file; `Completed: N / N` in every file (972 to 1032) and the per-CPU counts sum to N in every file |
+| Distinct runs of one boot | `c2t-format ... run=` counts 1 to 20 in file order |
+| Criterion | The kernel's own verdict line; lowest thief 135 to 169 tasks against a best of 172 to 176, ratio 0.777 to 0.960 (the bar is 0.5). The lowest thief is CPU 2 in 20 of 20 runs, as the summary notes |
+| Builder's numbers | "20/20 PASS", "972 to 1032", "0.777 to 0.960", "lowest CPU 2 in all 20": all agree with the critic's count |
+| Banner and commit | **Not in any captured text.** The reply holds no banner and no `/sys/version` output. The header lines of each file claim `SLM-OS v0.4.0 build 20261112085853 (33f05c5a)` and elf sha256 836d00c5..., and the summary says the boot capture (344 lines) and the `/sys/version` reply came back inline and were not saved. The build stamp and elf hash agree with `jetson-elf-compare-5e5548a1-33f05c5a.txt` (33f05c5a build 20261112085853, sha256 836d00c5...), which is consistency between the builder's files, not a capture |
+
+Row 3 after the re-check: the truncated-capture failure is cleared. The
+count is **20 of 20 PASS from complete, unedited captures**, at the PR
+head as claimed. One item stays open under "banner hash mismatch": the
+kernel identity of that boot rests on the builder's header lines and
+summary, with no captured banner, `/sys/version` reply or on-board
+sha256 check in the step3b files. Row 3: **PASS on count and
+completeness; banner unverified from captures** (the orchestrator
+decides whether the header claim is enough; a saved `cat /sys/version`
+reply from the same boot would have closed it).
+
+Row 3b (Jetson boots) was not redone and stays INCOMPLETE as written
+above. The overall verdict line in section 7 is superseded for row 3 by
+this section; rows 1, 2 and 4 are unchanged.

@@ -1029,3 +1029,15 @@ the C2 critic stopped on a usage limit and resumed on the same model
 10:47 UTC: no claims; pi-5-1 online, powered on, card restored to its
 as-found kernels (C1 and the C1 critic); jetson-nano-2 online, powered on,
 SD Linux, ESP SLMOS.efi 789cba62 as found, no BootNext.
+
+## Entry 37 (written 10:48 UTC): C2 critic row-3 re-check (addendum to the close-out)
+
+`critic-4-C2.md`, "Row 3 re-check": at f8df3cdc, 20 of 20 ASSERT-SHARES:
+PASS counted from the per-run files, each byte-identical to its segment of
+the saved reply, each complete (6 CPU, c2t and iw rows, Completed N/N,
+run=1..20). Truncated-capture failure cleared. Open: no banner,
+/sys/version reply or on-board sha appears in captured text, so the
+33f05c5a identity of that boot rests on the builder's header lines (which
+agree with its ELF-compare file). Row 3: PASS on count and completeness,
+banner unverified from captures. Row 3b (Jetson boots): unchanged,
+INCOMPLETE. The close-out's Dissent on #1237 stands as written.
