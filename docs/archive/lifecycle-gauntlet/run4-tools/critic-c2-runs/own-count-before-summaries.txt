@@ -1,0 +1,189 @@
+ws-main-6c1f4c9c-run01.txt 6c1f4c9c 1a96044f rc=0 load=2.74 stress=PASS PASS | 
+ws-main-6c1f4c9c-run02.txt 6c1f4c9c 1a96044f rc=124 load=3.26 stress=ABSENT FAIL:B-panic+other-fail(2)+timeout | test_reposition_moves_task_queued_on_other_cpu;test_task_entry_unmasks_irq
+ws-main-6c1f4c9c-run03.txt 6c1f4c9c 1a96044f rc=1 load=5.25 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-main-6c1f4c9c-run04.txt 6c1f4c9c 1a96044f rc=0 load=5.67 stress=PASS PASS | 
+ws-main-6c1f4c9c-run05.txt 6c1f4c9c 1a96044f rc=124 load=4.97 stress=FAIL FAIL:A-stress+other-fail(1)+timeout | batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-main-6c1f4c9c-run06.txt 6c1f4c9c 1a96044f rc=0 load=5.17 stress=PASS PASS | 
+ws-main-6c1f4c9c-run07.txt 6c1f4c9c 1a96044f rc=0 load=4.95 stress=PASS PASS | 
+ws-main-6c1f4c9c-run08.txt 6c1f4c9c 1a96044f rc=124 load=4.97 stress=FAIL FAIL:A-stress+other-fail(1)+timeout | batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-main-6c1f4c9c-run09.txt 6c1f4c9c 1a96044f rc=0 load=3.27 stress=PASS PASS | 
+ws-main-6c1f4c9c-run10.txt 6c1f4c9c 1a96044f rc=0 load=3.37 stress=PASS PASS | 
+ws-main-6c1f4c9c-run11.txt 6c1f4c9c 1a96044f rc=0 load=3.84 stress=PASS PASS | 
+ws-main-6c1f4c9c-run12.txt 6c1f4c9c 1a96044f rc=0 load=3.91 stress=PASS PASS | 
+ws-main-6c1f4c9c-run13.txt 6c1f4c9c 1a96044f rc=124 load=3.86 stress=ABSENT FAIL:B-panic+timeout | 
+ws-main-6c1f4c9c-run14.txt 6c1f4c9c 1a96044f rc=0 load=4.79 stress=PASS PASS | 
+ws-main-6c1f4c9c-run15.txt 6c1f4c9c 1a96044f rc=0 load=3.94 stress=PASS PASS | 
+ws-main-6c1f4c9c-run16.txt 6c1f4c9c 1a96044f rc=1 load=4.02 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-main-6c1f4c9c-run17.txt 6c1f4c9c 1a96044f rc=124 load=4.70 stress=FAIL FAIL:A-stress+C-litmus+other-fail(1)+timeout | test_litmus_patterns_pass;batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-main-6c1f4c9c-run18.txt 6c1f4c9c 1a96044f rc=0 load=5.11 stress=PASS PASS | 
+ws-main-6c1f4c9c-run19.txt 6c1f4c9c 1a96044f rc=0 load=4.34 stress=PASS PASS | 
+ws-main-6c1f4c9c-run20.txt 6c1f4c9c 1a96044f rc=0 load=3.58 stress=PASS PASS | 
+  TOTAL 20 {'PASS': 13, 'FAIL:B-panic+other-fail': 1, 'FAIL:C-litmus+other-fail': 2, 'FAIL:A-stress+other-fail': 2, 'FAIL:B-panic+timeout': 1, 'FAIL:A-stress+C-litmus+other-fail': 1} 
+
+ws-off-main-6c1f4c9c-run01.txt 6c1f4c9c 2afbbf05 rc=1 load=5.11 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run02.txt 6c1f4c9c 2afbbf05 rc=0 load=5.41 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run03.txt 6c1f4c9c 2afbbf05 rc=0 load=4.62 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run04.txt 6c1f4c9c 2afbbf05 rc=0 load=5.00 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run05.txt 6c1f4c9c 2afbbf05 rc=1 load=4.22 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run06.txt 6c1f4c9c 2afbbf05 rc=1 load=5.77 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run07.txt 6c1f4c9c 2afbbf05 rc=1 load=5.68 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run08.txt 6c1f4c9c 2afbbf05 rc=1 load=5.76 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run09.txt 6c1f4c9c 2afbbf05 rc=0 load=6.75 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run10.txt 6c1f4c9c 2afbbf05 rc=0 load=6.64 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run11.txt 6c1f4c9c 2afbbf05 rc=1 load=4.68 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run12.txt 6c1f4c9c 2afbbf05 rc=0 load=3.71 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run13.txt 6c1f4c9c 2afbbf05 rc=0 load=3.98 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run14.txt 6c1f4c9c 2afbbf05 rc=0 load=4.02 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run15.txt 6c1f4c9c 2afbbf05 rc=1 load=3.80 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run16.txt 6c1f4c9c 2afbbf05 rc=1 load=3.46 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run17.txt 6c1f4c9c 2afbbf05 rc=0 load=4.44 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run18.txt 6c1f4c9c 2afbbf05 rc=0 load=4.32 stress=PASS PASS | 
+ws-off-main-6c1f4c9c-run19.txt 6c1f4c9c 2afbbf05 rc=1 load=4.55 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-off-main-6c1f4c9c-run20.txt 6c1f4c9c 2afbbf05 rc=0 load=4.98 stress=PASS PASS | 
+  TOTAL 20 {'FAIL:C-litmus+other-fail': 9, 'PASS': 11} 
+
+ws-on-5be808c5-run01.txt 5be808c5 8e596404 rc=0 load=1.00 stress=PASS PASS | 
+ws-on-5be808c5-run02.txt 5be808c5 8e596404 rc=0 load=1.38 stress=PASS PASS | 
+ws-on-5be808c5-run03.txt 5be808c5 8e596404 rc=0 load=1.77 stress=PASS PASS | 
+ws-on-5be808c5-run04.txt 5be808c5 8e596404 rc=1 load=2.08 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5be808c5-run05.txt 5be808c5 8e596404 rc=124 load=3.36 stress=FAIL FAIL:A-stress+other-fail(2)+timeout | test_proactive_load_balance_inert_when_light;batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-on-5be808c5-run06.txt 5be808c5 8e596404 rc=0 load=4.75 stress=PASS PASS | 
+ws-on-5be808c5-run07.txt 5be808c5 8e596404 rc=1 load=3.81 stress=PASS FAIL:other-fail(2) | test_benchmark_context_switch;1 total failure(s)
+ws-on-5be808c5-run08.txt 5be808c5 8e596404 rc=0 load=4.32 stress=PASS PASS | 
+ws-on-5be808c5-run09.txt 5be808c5 8e596404 rc=124 load=3.52 stress=FAIL FAIL:A-stress+other-fail(1)+timeout | batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-on-5be808c5-run10.txt 5be808c5 8e596404 rc=1 load=3.59 stress=PASS FAIL:other-fail(2) | test_benchmark_context_switch;1 total failure(s)
+ws-on-5be808c5-run11.txt 5be808c5 8e596404 rc=1 load=2.47 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5be808c5-run12.txt 5be808c5 8e596404 rc=1 load=3.26 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5be808c5-run13.txt 5be808c5 8e596404 rc=0 load=3.95 stress=PASS PASS | 
+ws-on-5be808c5-run14.txt 5be808c5 8e596404 rc=124 load=3.60 stress=FAIL FAIL:A-stress+other-fail(2)+timeout | test_benchmark_context_switch;batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+ws-on-5be808c5-run15.txt 5be808c5 8e596404 rc=0 load=6.06 stress=PASS PASS | 
+ws-on-5be808c5-run16.txt 5be808c5 8e596404 rc=0 load=5.30 stress=PASS PASS | 
+ws-on-5be808c5-run17.txt 5be808c5 8e596404 rc=0 load=3.95 stress=PASS PASS | 
+ws-on-5be808c5-run18.txt 5be808c5 8e596404 rc=0 load=2.66 stress=PASS PASS | 
+ws-on-5be808c5-run19.txt 5be808c5 8e596404 rc=1 load=1.95 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5be808c5-run20.txt 5be808c5 8e596404 rc=0 load=3.41 stress=PASS PASS | 
+  TOTAL 20 {'PASS': 11, 'FAIL:C-litmus+other-fail': 4, 'FAIL:A-stress+other-fail': 3, 'FAIL:other-fail': 2} 
+
+ws-on-364544c1-run01.txt 364544c1 f4020666 rc=0 load=3.14 stress=PASS PASS | 
+ws-on-364544c1-run02.txt 364544c1 f4020666 rc=0 load=2.96 stress=PASS PASS | 
+ws-on-364544c1-run03.txt 364544c1 f4020666 rc=1 load=3.30 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run04.txt 364544c1 f4020666 rc=0 load=3.32 stress=PASS PASS | 
+ws-on-364544c1-run05.txt 364544c1 f4020666 rc=0 load=3.55 stress=PASS PASS | 
+ws-on-364544c1-run06.txt 364544c1 f4020666 rc=0 load=3.15 stress=PASS PASS | 
+ws-on-364544c1-run07.txt 364544c1 f4020666 rc=0 load=3.23 stress=PASS PASS | 
+ws-on-364544c1-run08.txt 364544c1 f4020666 rc=0 load=3.67 stress=PASS PASS | 
+ws-on-364544c1-run09.txt 364544c1 f4020666 rc=1 load=3.54 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run10.txt 364544c1 f4020666 rc=0 load=3.45 stress=PASS PASS | 
+ws-on-364544c1-run11.txt 364544c1 f4020666 rc=0 load=3.56 stress=PASS PASS | 
+ws-on-364544c1-run12.txt 364544c1 f4020666 rc=0 load=3.61 stress=PASS PASS | 
+ws-on-364544c1-run13.txt 364544c1 f4020666 rc=0 load=3.54 stress=PASS PASS | 
+ws-on-364544c1-run14.txt 364544c1 f4020666 rc=0 load=3.44 stress=PASS PASS | 
+ws-on-364544c1-run15.txt 364544c1 f4020666 rc=0 load=3.17 stress=PASS PASS | 
+ws-on-364544c1-run16.txt 364544c1 f4020666 rc=0 load=3.50 stress=PASS PASS | 
+ws-on-364544c1-run17.txt 364544c1 f4020666 rc=1 load=2.76 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run18.txt 364544c1 f4020666 rc=1 load=2.07 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run19.txt 364544c1 f4020666 rc=1 load=2.20 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run20.txt 364544c1 f4020666 rc=0 load=2.16 stress=PASS PASS | 
+ws-on-364544c1-run21.txt 364544c1 f4020666 rc=1 load=2.20 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run22.txt 364544c1 f4020666 rc=0 load=2.89 stress=PASS PASS | 
+ws-on-364544c1-run23.txt 364544c1 f4020666 rc=1 load=3.20 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run24.txt 364544c1 f4020666 rc=0 load=3.31 stress=PASS PASS | 
+ws-on-364544c1-run25.txt 364544c1 f4020666 rc=0 load=3.21 stress=PASS PASS | 
+ws-on-364544c1-run26.txt 364544c1 f4020666 rc=1 load=2.97 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run27.txt 364544c1 f4020666 rc=0 load=2.75 stress=PASS PASS | 
+ws-on-364544c1-run28.txt 364544c1 f4020666 rc=1 load=2.28 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run29.txt 364544c1 f4020666 rc=1 load=2.36 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run30.txt 364544c1 f4020666 rc=1 load=2.72 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run31.txt 364544c1 f4020666 rc=0 load=3.36 stress=PASS PASS | 
+ws-on-364544c1-run32.txt 364544c1 f4020666 rc=1 load=3.41 stress=PASS FAIL:other-fail(2) | test_preempt_flag_follows_migrated_task;1 total failure(s)
+ws-on-364544c1-run33.txt 364544c1 f4020666 rc=1 load=3.36 stress=PASS FAIL:other-fail(3) | test_preempt_flag_follows_migrated_task;test_policy_custom_assign_cpu_called;2 total failure(s)
+ws-on-364544c1-run34.txt 364544c1 f4020666 rc=0 load=3.12 stress=PASS PASS | 
+  TOTAL 34 {'PASS': 21, 'FAIL:other-fail': 13} 
+
+ws-on-6d4fe041-run01.txt 6d4fe041 e9f5045b rc=0 load=1.01 stress=PASS PASS | 
+ws-on-6d4fe041-run02.txt 6d4fe041 e9f5045b rc=0 load=2.71 stress=PASS PASS | 
+ws-on-6d4fe041-run03.txt 6d4fe041 e9f5045b rc=0 load=3.50 stress=PASS PASS | 
+ws-on-6d4fe041-run04.txt 6d4fe041 e9f5045b rc=0 load=4.30 stress=PASS PASS | 
+ws-on-6d4fe041-run05.txt 6d4fe041 e9f5045b rc=1 load=4.29 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run06.txt 6d4fe041 e9f5045b rc=1 load=6.97 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run07.txt 6d4fe041 e9f5045b rc=1 load=6.94 stress=PASS FAIL:C-litmus+other-fail(2) | test_litmus_patterns_pass;test_net_burst_8_sends_async;2 total failure(s)
+ws-on-6d4fe041-run08.txt 6d4fe041 e9f5045b rc=1 load=5.78 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run09.txt 6d4fe041 e9f5045b rc=1 load=7.43 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run10.txt 6d4fe041 e9f5045b rc=1 load=8.28 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run11.txt 6d4fe041 e9f5045b rc=1 load=7.88 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run12.txt 6d4fe041 e9f5045b rc=1 load=8.39 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run13.txt 6d4fe041 e9f5045b rc=1 load=10.01 stress=PASS FAIL:C-litmus+other-fail(2) | test_policy_custom_assign_cpu_called;test_litmus_patterns_pass;2 total failure(s)
+ws-on-6d4fe041-run14.txt 6d4fe041 e9f5045b rc=1 load=7.85 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-6d4fe041-run15.txt 6d4fe041 e9f5045b rc=0 load=6.07 stress=PASS PASS | 
+ws-on-6d4fe041-run16.txt 6d4fe041 e9f5045b rc=0 load=5.38 stress=PASS PASS | 
+ws-on-6d4fe041-run17.txt 6d4fe041 e9f5045b rc=0 load=4.73 stress=ABSENT INVALID(ext-kill [('15', '')]) | 
+ws-on-6d4fe041-run18.txt 6d4fe041 e9f5045b rc=0 load=4.39 stress=PASS PASS | 
+ws-on-6d4fe041-run19.txt 6d4fe041 e9f5045b rc=0 load=2.78 stress=ABSENT INVALID(ext-kill [('15', '')]) | test_litmus_patterns_pass
+ws-on-6d4fe041-run20.txt 6d4fe041 e9f5045b rc=0 load=3.87 stress=PASS PASS | 
+  TOTAL 20 {'PASS': 8, 'FAIL:C-litmus+other-fail': 10, 'INVALID': 2} 
+
+ws-on-9185d4cb-run01.txt 9185d4cb 70826b52 rc=0 load=1.17 stress=PASS PASS | 
+ws-on-9185d4cb-run02.txt 9185d4cb 70826b52 rc=0 load=2.88 stress=PASS PASS | 
+ws-on-9185d4cb-run03.txt 9185d4cb 70826b52 rc=1 load=3.70 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-9185d4cb-run04.txt 9185d4cb 70826b52 rc=0 load=5.12 stress=PASS PASS | 
+ws-on-9185d4cb-run05.txt 9185d4cb 70826b52 rc=0 load=4.41 stress=PASS PASS | 
+ws-on-9185d4cb-run06.txt 9185d4cb 70826b52 rc=0 load=3.73 stress=PASS PASS | 
+ws-on-9185d4cb-run07.txt 9185d4cb 70826b52 rc=0 load=3.13 stress=PASS PASS | 
+ws-on-9185d4cb-run08.txt 9185d4cb 70826b52 rc=0 load=3.07 stress=PASS PASS | 
+ws-on-9185d4cb-run09.txt 9185d4cb 70826b52 rc=0 load=2.81 stress=PASS PASS | 
+ws-on-9185d4cb-run10.txt 9185d4cb 70826b52 rc=0 load=2.64 stress=PASS PASS | 
+ws-on-9185d4cb-run11.txt 9185d4cb 70826b52 rc=0 load=1.67 stress=PASS PASS | 
+ws-on-9185d4cb-run12.txt 9185d4cb 70826b52 rc=0 load=1.27 stress=PASS PASS | 
+ws-on-9185d4cb-run13.txt 9185d4cb 70826b52 rc=0 load=1.70 stress=PASS PASS | 
+ws-on-9185d4cb-run14.txt 9185d4cb 70826b52 rc=0 load=1.79 stress=PASS PASS | 
+ws-on-9185d4cb-run15.txt 9185d4cb 70826b52 rc=0 load=1.85 stress=PASS PASS | 
+ws-on-9185d4cb-run16.txt 9185d4cb 70826b52 rc=0 load=1.79 stress=PASS PASS | 
+ws-on-9185d4cb-run17.txt 9185d4cb 70826b52 rc=0 load=1.80 stress=PASS PASS | 
+ws-on-9185d4cb-run18.txt 9185d4cb 70826b52 rc=0 load=1.36 stress=PASS PASS | 
+ws-on-9185d4cb-run19.txt 9185d4cb 70826b52 rc=0 load=1.54 stress=PASS PASS | 
+ws-on-9185d4cb-run20.txt 9185d4cb 70826b52 rc=1 load=2.34 stress=PASS FAIL:other-fail(2) | test_runner_parks_without_a_lock;1 total failure(s)
+  TOTAL 20 {'PASS': 18, 'FAIL:C-litmus+other-fail': 1, 'FAIL:other-fail': 1} 
+
+ws-on-5e5548a1-run01.txt 5e5548a1 694402d2 rc=0 load=4.53 stress=PASS PASS | 
+ws-on-5e5548a1-run02.txt 5e5548a1 694402d2 rc=0 load=3.96 stress=PASS PASS | 
+ws-on-5e5548a1-run03.txt 5e5548a1 694402d2 rc=0 load=3.52 stress=PASS PASS | 
+ws-on-5e5548a1-run04.txt 5e5548a1 694402d2 rc=0 load=2.78 stress=PASS PASS | 
+ws-on-5e5548a1-run05.txt 5e5548a1 694402d2 rc=0 load=3.19 stress=PASS PASS | 
+ws-on-5e5548a1-run06.txt 5e5548a1 694402d2 rc=0 load=2.51 stress=PASS PASS | 
+ws-on-5e5548a1-run07.txt 5e5548a1 694402d2 rc=0 load=1.60 stress=PASS PASS | 
+ws-on-5e5548a1-run08.txt 5e5548a1 694402d2 rc=0 load=1.86 stress=PASS PASS | 
+ws-on-5e5548a1-run09.txt 5e5548a1 694402d2 rc=0 load=1.81 stress=PASS PASS | 
+ws-on-5e5548a1-run10.txt 5e5548a1 694402d2 rc=0 load=1.49 stress=PASS PASS | 
+ws-on-5e5548a1-run11.txt 5e5548a1 694402d2 rc=0 load=1.47 stress=PASS PASS | 
+ws-on-5e5548a1-run12.txt 5e5548a1 694402d2 rc=0 load=1.25 stress=PASS PASS | 
+ws-on-5e5548a1-run13.txt 5e5548a1 694402d2 rc=0 load=1.83 stress=PASS PASS | 
+ws-on-5e5548a1-run14.txt 5e5548a1 694402d2 rc=0 load=2.42 stress=PASS PASS | 
+ws-on-5e5548a1-run15.txt 5e5548a1 694402d2 rc=1 load=3.35 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5e5548a1-run16.txt 5e5548a1 694402d2 rc=1 load=4.33 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5e5548a1-run17.txt 5e5548a1 694402d2 rc=0 load=4.29 stress=PASS PASS | 
+ws-on-5e5548a1-run18.txt 5e5548a1 694402d2 rc=0 load=4.40 stress=PASS PASS | 
+ws-on-5e5548a1-run19.txt 5e5548a1 694402d2 rc=1 load=2.74 stress=PASS FAIL:other-fail(2) | test_slm_stats_live_from_second_session;1 total failure(s)
+ws-on-5e5548a1-run20.txt 5e5548a1 694402d2 rc=1 load=2.44 stress=PASS FAIL:other-fail(2) | test_task_pinned_to_cpu0;1 total failure(s)
+ws-on-5e5548a1-run21.txt 5e5548a1 694402d2 rc=0 load=0.88 stress=PASS PASS | 
+ws-on-5e5548a1-run22.txt 5e5548a1 694402d2 rc=0 load=2.22 stress=PASS PASS | 
+ws-on-5e5548a1-run23.txt 5e5548a1 694402d2 rc=0 load=2.65 stress=PASS PASS | 
+ws-on-5e5548a1-run24.txt 5e5548a1 694402d2 rc=0 load=3.78 stress=PASS PASS | 
+ws-on-5e5548a1-run25.txt 5e5548a1 694402d2 rc=0 load=3.34 stress=PASS PASS | 
+ws-on-5e5548a1-run26.txt 5e5548a1 694402d2 rc=1 load=3.18 stress=PASS FAIL:C-litmus+other-fail(1) | test_litmus_patterns_pass;1 total failure(s)
+ws-on-5e5548a1-run27.txt 5e5548a1 694402d2 rc=0 load=3.62 stress=PASS PASS | 
+ws-on-5e5548a1-run28.txt 5e5548a1 694402d2 rc=0 load=3.65 stress=PASS PASS | 
+ws-on-5e5548a1-run29.txt 5e5548a1 694402d2 rc=0 load=4.02 stress=PASS PASS | 
+ws-on-5e5548a1-run30.txt 5e5548a1 694402d2 rc=0 load=3.50 stress=PASS PASS | 
+ws-on-5e5548a1-run31.txt 5e5548a1 694402d2 rc=0 load=3.59 stress=PASS PASS | 
+ws-on-5e5548a1-run32.txt 5e5548a1 694402d2 rc=0 load=3.63 stress=PASS PASS | 
+ws-on-5e5548a1-run33.txt 5e5548a1 694402d2 rc=0 load=3.67 stress=PASS PASS | 
+ws-on-5e5548a1-run34.txt 5e5548a1 694402d2 rc=0 load=4.24 stress=PASS PASS | 
+  TOTAL 34 {'PASS': 29, 'FAIL:C-litmus+other-fail': 3, 'FAIL:other-fail': 2} 
+
+ws-main-6c1f4c9c-trial-t0.txt 6c1f4c9c 1a96044f rc=0 load=4.27 stress=PASS PASS | 
+ws-main-6c1f4c9c-trial-t1.txt 6c1f4c9c 1a96044f rc=0 load=3.35 stress=PASS PASS | 
+ws-main-6c1f4c9c-trial-t2.txt 6c1f4c9c 1a96044f rc=0 load=2.55 stress=PASS PASS | 
+ws-main-6c1f4c9c-trial-t3.txt 6c1f4c9c 1a96044f rc=124 load=2.24 stress=FAIL FAIL:A-stress+C-litmus+other-fail(1)+timeout | test_litmus_patterns_pass;batch: stress workload (4x8) completes + rejects bad args;Dynamic batching tests had failures
+  TOTAL 4 {'PASS': 3, 'FAIL:A-stress+C-litmus+other-fail': 1} 
+
+Thu Nov 12 09:01:10 AM UTC 2026

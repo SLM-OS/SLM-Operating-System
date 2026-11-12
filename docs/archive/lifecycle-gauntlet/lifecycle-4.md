@@ -802,3 +802,31 @@ The user reset the usage limit at about 09:21 UTC. The replacement critic
 before any verdict; the original Fable C2 critic was resumed with its
 context and run files, deadline 10:20 UTC. Its verdict records the
 interruption. The C1 critic (Fable) continues.
+
+## Entry 33 (written 09:41 UTC): C2 critic verdict; a correction to Entry 0a; the last lab hour
+
+C2 critic verdict: [`critic-4-C2.md`](critic-4-C2.md) (Fable 5.2,
+unchanged across the 09:17 interruption), runs `run4-tools/critic-c2-runs/`.
+Row 1 (#1219 rate) PASS: main 3 of 20, 5e5548a1 0 of 34, 5x met by the
+minimum count; pooling every main WORK_STEALING=ON run on file (41 runs, 5
+failures, including the C0 0 of 3 and the critic's 1 of 13) needs 41 clean
+runs, met only with the critic's own 10 fix-head runs added (44). Row 2
+(classification, #1229 mechanism) PASS, with the note that the stuck flag
+is read in 4 of 7 class-A hangs and in none of the 3 on main. Row 3
+(--assert-shares 20 of 20 and the Jetson boots) **INCOMPLETE**: 19 of the
+20 PASS rows are retyped verdict lines with no capture, run01 abridged;
+boot text exists for 2 of 20 boots. Row 4 (/ci decision) PASS. Row 5
+(reproduction): main 1 class A in 13; 5e5548a1 5 of 5 PASS; 33f05c5a 5 of
+5 PASS; ARM64 QEMU .text byte-identical 5e5548a1 vs 33f05c5a. Evidence
+errors flagged (not moving a #1219 number) are sent to C2 to fix.
+
+**Correction to Entry 0a.** The "logs" cited there
+(`run4-tools/ci-main-6c1f4c9c/*.log`) were not committed: .gitignore
+line 39 ignores *.log, so only summary.txt and run.sh were on the branch.
+They are force-added in this commit (15 files). Neither evidence branch
+tracks any .log file; C1 and C3 are asked to force-add the logs they cite.
+
+Last lab hour: C1 pi-5-1 items (1) and (2), then the C1 critic's 5 Pi 5
+boots, then C2 on jetson-nano-2 about 10:25 to 10:50 for a full-capture
+redo of --assert-shares 20 and as many full-capture kexec boots as fit.
+Item (4) (#1223 on unfixed main) is expected not to run.
