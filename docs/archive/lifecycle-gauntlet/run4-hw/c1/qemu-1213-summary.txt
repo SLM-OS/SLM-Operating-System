@@ -198,3 +198,11 @@ where it applies. Per-run rows: qemu-rates-table.txt.
 - Pi 5 production boot_test 10/10 (pi5/pi5-fix-5e5548a1-prod-boot_test10.txt), average 13.0 s.
 - Per-run Pi 5 captures were written by labctl boot_test to its output_dir (/var/lib/labctl/output/l4-c1-*,
   the only allowed write path) and copied here.
+- Per-boot isolated check: pi5/pi5-fix-5e5548a1-integration-table.txt (counted from the raw captures): isolated=10/10
+  20/20, 0 KERNEL PANIC, 0 PAGE FAULT, 0 Synchronous in every boot. boot_test output_dir use ruled fine by the
+  orchestrator (same ruling as C3).
+- Item (4), #1223 on unfixed main + only the step-5 conversion: NOT RUN (lab time went to the C1 critic and C2).
+  Staged image for the next run: slmos-l4-c1-test-unfixedconv-3f64f624.bin (branch c1/main-isolation-conversion
+  @ 3f64f624), sha256 3b2684edd15d767a93246cbda1f0fe745ac0fcf14170266eaac3c79667514820, in the main checkout's
+  build/kernel/.
+- /ci per-step .log files are force-added (the repo .gitignore ignores *.log).
