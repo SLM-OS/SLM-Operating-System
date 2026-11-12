@@ -1,0 +1,281 @@
+# QEMU dry run of the step-3b lua-admin loop (2 iterations) on the 33f05c5a QEMU production build (make kernel WORK_STEALING=ON), RESULT 2 C2RUN markers, 2 ASSERT-SHARES: PASS, C2DONE
+# boot banner: SLM-OS v0.4.0 build 20261112094450 (33f05c5a)
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261112094450 (33f05c5a)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x40257858
+  .data:   0x40660000 - 0x40684000
+  .bss:    0x40690000 - 0x41f54990
+  End:     0x41f60000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x406ec000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x406ea003 (covers VA 0x0)
+  L1[1]: 0x406eb003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x41f60000 - 0x80000000
+  Total pages:     254112 (1016448 KB)
+  Free pages:      254112 (1016448 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8032 pages (kernel)
+
+  Free list distribution:
+    Order  5 (  128 KB): 1 blocks
+    Order  7 (  512 KB): 1 blocks
+    Order 13 (32768 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x44000000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: qemu-gpex backend, 1 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] Task 'main' (id=5) exiting
+[INFO] cdc_ecm: no USB device — will retry on hot-plug
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 model preload(s) from /mnt/files/preload.conf
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos> lua-admin -e "for i=1,2 do print('C2RUN '..i) slm.shell_exec('bench stealing --sustain 2500 --assert-shares') end print('C2DONE')"
+C2RUN 1
+
+Work-Stealing Sustained-Supply Benchmark (#1203)
+================================================
+  Supply: 2500 ms, 16 tasks outstanding on CPU 1, work x8
+  Online CPUs:       4
+[INFO] Task 's3s_00' (id=9) exiting
+[INFO] Task 's3s_04' (id=13) exiting
+[INFO] Task 's3s_09' (id=18) exiting
+[INFO] Task 's3s_12' (id=21) exiting
+[INFO] Task 's3s_18' (id=27) exiting
+[INFO] Task 's3s_19' (id=28) exiting
+[INFO] Task 's3s_23' (id=32) exiting
+[INFO] Task 's3s_26' (id=35) exiting
+[INFO] Task 's3s_30' (id=39) exiting
+[INFO] Task 's3s_36' (id=45) exiting
+[INFO] Task 's3s_40' (id=49) exiting
+[INFO] Task 's3s_44' (id=53) exiting
+[INFO] Task 's3s_46' (id=55) exiting
+[INFO] Task 's3s_50' (id=59) exiting
+[INFO] Task 's3s_54' (id=63) exiting
+[INFO] Task 's3s_57' (id=66) exiting
+[INFO] Task 's3s_59' (id=68) exiting
+[INFO] Task 's3s_63' (id=72) exiting
+[INFO] Task 's3s_01' (id=74) exiting
+[INFO] Task 's3s_05' (id=78) exiting
+[INFO] Task 's3s_08' (id=81) exiting
+[INFO] Task 's3s_12' (id=85) exiting
+[INFO] Task 's3s_16' (id=89) exiting
+[INFO] Task 's3s_18' (id=91) exiting
+[INFO] Task 's3s_21' (id=94) exiting
+[INFO] Task 's3s_24' (id=97) exiting
+[INFO] Task 's3s_25' (id=98) exiting
+[INFO] Task 's3s_31' (id=104) exiting
+[INFO] Task 's3s_33' (id=106) exiting
+[INFO] Task 's3s_36' (id=109) exiting
+[INFO] Task 's3s_39' (id=112) exiting
+[INFO] Task 's3s_42' (id=115) exiting
+
+  Results:
+    Issued:       108 (create failures 0)
+    Completed:    108 / 108
+    Supply:       2457166 us (dispatch start to last issue)
+    Wall-clock:   2953555 us (dispatch start to last completion)
+    Polls:        4599, with nothing outstanding during supply: 0
+
+    Per-CPU execution distribution:
+      CPU 0: 32 tasks (29.6%)
+      CPU 1: 16 tasks (14.8%)
+      CPU 2: 28 tasks (25.9%)
+      CPU 3: 32 tasks (29.6%)
+
+  c2t-format v2 mode=sustained run=1 cntfrq=62500000 cpus=4 tasks=108 depth=16 work=8 sustain_ms=2500
+  times in us from dispatch start; log = first 16 attempts as us-since-first-attempt + outcome (S ok, E empty, P preempt_disabled skip, X stale, I isolated, O other)
+  #1216 watch=cpu1; reasons T tick trampoline, C coop tick, P schedule() after a push, O other schedule(), B boot; w_in/win_n/win_sum_us/win_max_us in that order; w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,<500 us,<1,<2,<5,<10,>=10 ms after the tick; wlog = entry_us:dur_ns:reason, first 128 windows
+  c2t cpu=0 exec=32 att=4569 diag_att=4569 ok=32 diag_ok=32 iso=0 f_stale=0 f_pd=3 f_empty=4534 f_other=0 chk=0 v_pd=3 v_pd_work=0 v_busy=1 v_empty=13608 v_gen=0 v_state=5 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=1 dq_drains=1 dq_drain_us=1857732 dq_last_push_us=1837982 first_att_us=563 first_ok_us=563 last_att_us=2953264 ticks=159 idle=0 sched=4824 lk_hw=1 log=0S,15321S,30346S,45794S,60924S,75889S,137374S,155370S,170757S,246521S,271792S,433574S,543035S,570697S,647325S,677297S w_in=0,0,0,1,0 w_in_unk=0 w_off=0,1,0,0,0,0,0,0 ph_w=0,0,0,3,27,148,273,574,1705,1833,6 ph_w_pd=0,0,0,0,0,2,0,0,1,0,0 ph_own=2,0,5,9,24,106,264,570,1710,1868,11 tick_n=159 tick_first_us=4078 tick_last_us=2947572 win_n=0,0,1,135,0 win_sum_us=0,0,20,934,0 win_max_us=0,0,20,145,0 wph=0,1,1,0,4,8,13,21,28,60,0 wlog=-
+  c2t cpu=1 exec=16 att=11 diag_att=11 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=1 f_empty=10 f_other=0 chk=0 v_pd=1 v_pd_work=0 v_busy=0 v_empty=32 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=108 dq_drains=2 dq_drain_us=2852346 dq_last_push_us=2457164 first_att_us=2857553 first_ok_us=- last_att_us=2947978 ticks=161 idle=4 sched=181 lk_hw=1 log=0E,10619E,20827E,26854E,26888E,69789E,69829E,79958P,80019E,90168E,90425E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,0,0,0,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=2,1,1,2,2,1,0,0,0,2,0 tick_n=161 tick_first_us=9306 tick_last_us=2947693 win_n=0,0,28,143,0 win_sum_us=0,0,392,3537,0 win_max_us=0,0,130,616,0 wph=20,52,49,22,9,3,3,2,6,4,1 wlog=9239:4208:P,19289:2928:P,29354:4976:O,39396:2848:P,49447:16656:P,59478:1952:O,69520:2800:P,126456:2784:P,136490:1808:O,144350:2160:P,146529:2368:O,156552:1632:O,156912:1008:O,157310:1216:O,159243:1808:O,166695:2240:O,169870:1488:O,175883:1376:P,176703:1888:O,226388:6144:O,236470:17104:O,246545:4192:O,256616:3504:P,266727:4000:O,326932:12528:P,337478:48032:O,347619:18928:O,357805:14704:O,367919:5936:O,426904:30016:O,437290:15728:P,447483:11472:O,457725:11216:O,467945:35344:O,527132:14352:O,537314:14624:O,547403:5616:P,557476:4544:O,568441:4816:O,626770:7104:P,627653:5344:O,636831:3088:O,646990:6368:O,657087:5056:P,667175:5648:O,726789:18048:P,737073:16880:O,747336:8080:O,757490:13264:O,767777:19760:O,827110:24336:O,837226:9376:O,838722:10480:O,847558:13616:O,857540:6080:P,867682:14384:O,877903:27776:O,926637:22016:O,936726:10384:O,937502:13680:O,946978:105056:O,957173:33008:O,967412:10352:P,977480:9504:O,1026900:20224:O,1031424:13008:O,1037334:11056:O,1047476:12016:O,1057614:13872:O,1067754:10800:O,1126761:22896:O,1136860:10128:P,1147202:9984:O,1157568:43168:O,1167616:56400:O,1226930:23184:O,1237892:16992:O,1248215:15568:O,1258475:13584:P,1268786:8832:O,1326233:616368:O,1326980:22416:O,1337132:21888:O,1347270:9248:O,1357504:12528:O,1367755:10624:O,1377856:10640:O,1426617:15584:O,1437438:15040:O,1447759:19696:P,1457970:15936:O,1468371:22112:O,1526785:12544:O,1536993:108800:O,1547189:12704:O,1557675:23456:P,1567726:26272:O,1577718:10992:O,1626517:23216:O,1636649:13824:O,1646816:9664:O,1656983:6048:O,1659690:23856:O,1667172:8864:O,1677331:8176:P,1726544:34928:O,1736836:74832:O,1743884:8000:O,1747222:14720:O,1757469:39872:O,1767623:29632:O,1777656:11568:O,1826737:16528:O,1836920:130544:P,1847156:13088:O,1857548:20288:O,1858949:7488:O,1867712:17808:O,1926948:22560:O,1937339:22192:O,1947309:14128:O,1957396:6384:P,1967541:8784:O,2026623:42848:O,2036851:23376:O,2046918:15360:O,2057145:12224:P,2067315:10896:O
+  c2t cpu=2 exec=28 att=44 diag_att=44 ok=28 diag_ok=28 iso=0 f_stale=1 f_pd=4 f_empty=11 f_other=0 chk=0 v_pd=6 v_pd_work=2 v_busy=0 v_empty=97 v_gen=0 v_state=7 v_cpu=1 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=9319 first_ok_us=9319 last_att_us=2948085 ticks=159 idle=7 sched=194 lk_hw=1 log=0S,10054S,46630S,50300S,127178S,145866S,147247S,227075S,247217S,328305S,458435S,563587S,617472S,848007S,917979S,1127460S w_in=0,0,0,0,0 w_in_unk=2 w_off=0,0,0,0,0,0,0,0 ph_w=2,1,0,3,10,5,2,0,2,10,9 ph_w_pd=0,0,0,2,2,0,0,0,0,0,0 ph_own=20,5,8,6,0,0,0,0,2,3,0 tick_n=159 tick_first_us=9316 tick_last_us=2948011 win_n=0,0,0,179,0 win_sum_us=0,0,0,2472,0 win_max_us=0,0,0,183,0 wph=14,57,40,23,13,5,4,1,3,19,0 wlog=-
+  c2t cpu=3 exec=32 att=34 diag_att=34 ok=32 diag_ok=32 iso=0 f_stale=0 f_pd=0 f_empty=2 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=0 v_empty=37 v_gen=0 v_state=4 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=8189 first_ok_us=8189 last_att_us=2953314 ticks=159 idle=1 sched=192 lk_hw=1 log=0S,9914S,30024S,45430S,50103S,124708S,128241S,158475S,218305S,238451S,258548S,328801S,538790S,560376S,628520S,648696S w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,1,2,0,4,5,0,0,2,18,2 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=21,3,2,1,0,1,0,0,1,5,0 tick_n=159 tick_first_us=8186 tick_last_us=2948155 win_n=0,0,0,191,0 win_sum_us=0,0,0,3673,0 win_max_us=0,0,0,313,0 wph=11,56,59,22,9,5,2,4,6,17,0 wlog=-
+
+  Idle wakes per CPU (sustained, 2953555 us; idle = idle-loop passes, ticks = timer ticks):
+  iw mode=sustained cpu=0 idle=0 ticks=159 us=2953555 idle_per_s=0.0 ticks_per_s=53.8
+  iw mode=sustained cpu=1 idle=4 ticks=161 us=2953555 idle_per_s=1.3 ticks_per_s=54.5
+  iw mode=sustained cpu=2 idle=7 ticks=159 us=2953555 idle_per_s=2.3 ticks_per_s=53.8
+  iw mode=sustained cpu=3 idle=1 ticks=159 us=2953555 idle_per_s=0.3 ticks_per_s=53.8
+
+  ASSERT-SHARES: PASS lowest thief cpu=2 share=25.9% (28 tasks), best thief cpu=0 share=29.6% (32 tasks); every thief at or above half the best
+C2RUN 2
+
+Work-Stealing Sustained-Supply Benchmark (#1203)
+================================================
+  Supply: 2500 ms, 16 tasks outstanding on CPU 1, work x8
+  Online CPUs:       4
+[INFO] Task 's3s_00' (id=117) exiting
+[INFO] Task 's3s_08' (id=125) exiting
+[INFO] Task 's3s_09' (id=126) exiting
+[INFO] Task 's3s_15' (id=132) exiting
+[INFO] Task 's3s_17' (id=134) exiting
+[INFO] Task 's3s_20' (id=137) exiting
+[INFO] Task 's3s_24' (id=141) exiting
+[INFO] Task 's3s_28' (id=145) exiting
+[INFO] Task 's3s_32' (id=149) exiting
+[INFO] Task 's3s_36' (id=153) exiting
+[INFO] Task 's3s_39' (id=156) exiting
+[INFO] Task 's3s_43' (id=160) exiting
+[INFO] Task 's3s_45' (id=162) exiting
+[INFO] Task 's3s_48' (id=165) exiting
+[INFO] Task 's3s_52' (id=169) exiting
+[INFO] Task 's3s_55' (id=172) exiting
+[INFO] Task 's3s_59' (id=176) exiting
+[INFO] Task 's3s_62' (id=179) exiting
+[INFO] Task 's3s_01' (id=182) exiting
+[INFO] Task 's3s_06' (id=187) exiting
+[INFO] Task 's3s_11' (id=192) exiting
+[INFO] Task 's3s_13' (id=194) exiting
+[INFO] Task 's3s_17' (id=198) exiting
+[INFO] Task 's3s_19' (id=200) exiting
+[INFO] Task 's3s_23' (id=204) exiting
+[INFO] Task 's3s_25' (id=206) exiting
+[INFO] Task 's3s_28' (id=209) exiting
+[INFO] Task 's3s_32' (id=213) exiting
+
+  Results:
+    Issued:       97 (create failures 0)
+    Completed:    97 / 97
+    Supply:       2395481 us (dispatch start to last issue)
+    Wall-clock:   2624496 us (dispatch start to last completion)
+    Polls:        3872, with nothing outstanding during supply: 0
+
+    Per-CPU execution distribution:
+      CPU 0: 28 tasks (28.8%)
+      CPU 1: 14 tasks (14.4%)
+      CPU 2: 27 tasks (27.8%)
+      CPU 3: 28 tasks (28.8%)
+
+  c2t-format v2 mode=sustained run=2 cntfrq=62500000 cpus=4 tasks=97 depth=16 work=8 sustain_ms=2500
+  times in us from dispatch start; log = first 16 attempts as us-since-first-attempt + outcome (S ok, E empty, P preempt_disabled skip, X stale, I isolated, O other)
+  #1216 watch=cpu1; reasons T tick trampoline, C coop tick, P schedule() after a push, O other schedule(), B boot; w_in/win_n/win_sum_us/win_max_us in that order; w_off bins <1,<2,<4,<8,<16,<32,<64,>=64 us into the watched window; ph_w/ph_w_pd/ph_own/wph bins <10,<20,<50,<100,<200,<500 us,<1,<2,<5,<10,>=10 ms after the tick; wlog = entry_us:dur_ns:reason, first 128 windows
+  c2t cpu=0 exec=28 att=3847 diag_att=3847 ok=28 diag_ok=28 iso=0 f_stale=0 f_pd=2 f_empty=3817 f_other=0 chk=0 v_pd=2 v_pd_work=0 v_busy=1 v_empty=11455 v_gen=0 v_state=4 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=299 first_ok_us=299 last_att_us=2624433 ticks=140 idle=0 sched=4065 lk_hw=1 log=0S,30051S,48872S,94588S,110997S,127311S,143572S,215079S,240358S,397065S,513365S,629400S,796329S,910140S,1024806S,1135893S w_in=0,0,0,1,0 w_in_unk=0 w_off=0,1,0,0,0,0,0,0 ph_w=3,2,15,23,56,80,151,272,849,2389,7 ph_w_pd=0,0,0,0,0,0,0,0,2,0,0 ph_own=1,0,5,11,51,98,148,273,850,2408,2 tick_n=140 tick_first_us=7725 tick_last_us=2624178 win_n=0,0,0,108,0 win_sum_us=0,0,0,547,0 win_max_us=0,0,0,20,0 wph=1,1,3,4,3,2,8,16,38,32,0 wlog=-
+  c2t cpu=1 exec=14 att=5 diag_att=5 ok=0 diag_ok=0 iso=0 f_stale=0 f_pd=0 f_empty=5 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=1 v_empty=15 v_gen=0 v_state=0 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=97 dq_drains=1 dq_drain_us=2608085 dq_last_push_us=2395480 first_att_us=2614138 first_ok_us=- last_att_us=2624255 ticks=142 idle=2 sched=158 lk_hw=1 log=0E,3882E,3900E,10108E,10117E w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,0,0,0,0,0,0,0 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=2,1,0,0,0,0,0,0,2,0,0 tick_n=142 tick_first_us=7718 tick_last_us=2624243 win_n=0,0,23,131,0 win_sum_us=0,0,787,2764,0 win_max_us=0,0,205,295,0 wph=14,49,56,10,5,10,0,1,5,4,0 wlog=7735:16016:P,17775:5392:O,27864:4560:O,37908:5744:P,47955:3280:O,94180:12592:P,104137:3536:P,114186:2320:O,123843:1712:O,124239:2768:O,132741:2944:P,134286:3056:O,193865:2864:O,202720:4848:O,203908:2688:O,213970:6912:O,224054:3504:P,234111:3600:O,234464:2256:O,236984:2800:O,293987:44160:P,304154:15696:O,314279:19472:O,324459:13440:O,334676:11536:O,344850:15184:O,394397:50320:O,404658:179552:P,414969:17168:O,425118:13760:O,435315:75120:O,494178:26144:O,504296:70752:O,505738:14288:O,514549:21776:P,524699:12960:O,534884:17712:O,593938:295056:O,604107:11184:O,614379:69504:O,624542:13168:O,634799:15184:P,694510:54112:O,704775:13184:O,714930:6480:O,725050:5664:O,735180:8784:O,745285:11536:O,794176:37280:O,804056:10240:P,814218:10608:O,824375:9504:O,834558:8480:O,894413:31840:O,904310:20448:O,907177:14000:O,914878:19840:P,924684:16240:O,934919:28944:O,945044:10464:O,994466:10352:O,1004959:32064:O,1015197:19648:O,1025451:10272:P,1035730:10992:O,1094632:22096:O,1104759:14864:O,1115014:13216:O,1125107:44304:O,1135338:10080:O,1194036:22944:P,1204038:10000:O,1214203:10208:O,1224392:9680:O,1234592:13760:O,1244757:12848:O,1294240:13296:O,1298393:12400:O,1304547:9904:P,1314658:15680:O,1324804:15232:O,1334952:9856:O,1394424:20544:O,1404824:25824:O,1410909:16688:O,1415187:27968:O,1425325:12688:P,1435486:14848:O,1445641:10256:O,1494366:22448:O,1504689:14208:O,1504937:11024:O,1514944:15440:O,1525289:17392:O,1535404:205888:P,1594452:10128:O,1604711:9696:O,1615012:19504:O,1625241:12272:O,1635443:12816:O,1645614:22736:O,1694265:29312:O,1704586:12512:O,1714833:11584:P,1724959:8736:O,1735094:7920:O,1738261:5600:O,1794875:16752:O,1804937:9456:O,1815070:14176:O,1825208:16400:O,1835475:14512:O,1894100:176560:O,1904272:13904:P,1914434:9456:O,1924581:5136:O,1934774:6000:O,1994574:31264:O,2004740:40016:O,2014965:34624:O,2025181:17008:P,2035406:14032:O,2094378:30464:O,2104493:55536:O,2114494:12624:O,2124679:9664:O,2134862:20592:P,2194228:14400:O
+  c2t cpu=2 exec=27 att=30 diag_att=30 ok=25 diag_ok=25 iso=0 f_stale=0 f_pd=2 f_empty=3 f_other=0 chk=0 v_pd=3 v_pd_work=2 v_busy=0 v_empty=62 v_gen=0 v_state=5 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=2 dq_drains=1 dq_drain_us=2610142 dq_last_push_us=2435947 first_att_us=8866 first_ok_us=8866 last_att_us=2624451 ticks=136 idle=1 sched=164 lk_hw=1 log=0S,10052S,44029S,85308P,95409S,115491S,132102S,184982S,229761S,285217S,606129S,805927S,916213S,1026790S,1205649S,1315760S w_in=0,0,0,0,0 w_in_unk=2 w_off=0,0,0,0,0,0,0,0 ph_w=1,0,0,0,7,5,4,2,2,5,4 ph_w_pd=0,0,0,0,2,0,0,0,0,0,0 ph_own=16,6,2,0,0,2,0,0,2,2,0 tick_n=136 tick_first_us=8860 tick_last_us=2624231 win_n=0,0,2,158,0 win_sum_us=0,0,19,1741,0 win_max_us=0,0,11,76,0 wph=12,61,33,21,3,5,2,3,9,11,0 wlog=-
+  c2t cpu=3 exec=28 att=32 diag_att=32 ok=28 diag_ok=28 iso=0 f_stale=0 f_pd=0 f_empty=4 f_other=0 chk=0 v_pd=0 v_pd_work=0 v_busy=1 v_empty=40 v_gen=0 v_state=7 v_cpu=0 v_aff=0 v_rm=0 pushfull=0 dq_push=0 dq_drains=0 dq_drain_us=- dq_last_push_us=- first_att_us=8640 first_ok_us=8640 last_att_us=2624243 ticks=142 idle=2 sched=172 lk_hw=1 log=0S,10044S,44221S,85583S,115703S,132970S,135831S,215371S,235506S,406556S,595596S,636333S,806257S,916186S,1095908S,1206088S w_in=0,0,0,0,0 w_in_unk=0 w_off=0,0,0,0,0,0,0,0 ph_w=0,0,0,0,6,3,6,0,1,8,8 ph_w_pd=0,0,0,0,0,0,0,0,0,0,0 ph_own=17,4,2,4,0,0,0,0,1,4,0 tick_n=142 tick_first_us=8635 tick_last_us=2624214 win_n=0,0,0,169,0 win_sum_us=0,0,0,3245,0 win_max_us=0,0,0,304,0 wph=10,71,29,24,6,3,1,4,5,16,0 wlog=-
+
+  Idle wakes per CPU (sustained, 2624496 us; idle = idle-loop passes, ticks = timer ticks):
+  iw mode=sustained cpu=0 idle=0 ticks=140 us=2624496 idle_per_s=0.0 ticks_per_s=53.3
+  iw mode=sustained cpu=1 idle=2 ticks=142 us=2624496 idle_per_s=0.7 ticks_per_s=54.1
+  iw mode=sustained cpu=2 idle=1 ticks=136 us=2624496 idle_per_s=0.3 ticks_per_s=51.8
+  iw mode=sustained cpu=3 idle=2 ticks=142 us=2624496 idle_per_s=0.7 ticks_per_s=54.1
+
+  ASSERT-SHARES: PASS lowest thief cpu=2 share=27.8% (27 tasks), best thief cpu=0 share=28.8% (28 tasks); every thief at or above half the best
+C2DONE

@@ -133,17 +133,34 @@ Not causal as far as these samples show.
 
 ## Class B (#1213 signature, on main without the 1 s test change)
 
-run02 and run13: CPU 1 (run02) or CPU 3 (run13) at panic+0x8/0xc, 10 of
-10 samples, called from task_exit (gdb bt in run02: panic <- task_exit
-<- task_entry_trampoline): `panic("task_exit: schedule returned!")`
-(kernel/sched/task.c:695). The panic text never reached the UART. The
-other CPUs: CPU 0 in uart_getc/schedule (shell), the rest in
-idle_task_func. run02: test_reposition_moves_task_queued_on_other_cpu
-and test_task_entry_unmasks_irq FAIL (CPU-1 tasks never run), CPU 1's
-current_task = coh_r1 with state READY and switches 0; isolated latency
-"Samples collected: isolated=0/10, normal=0/10". Both hang after
-test_iteration_counts. Same signature as #1213's sixth stall; C1's
-issue.
+Both runs stop with a kernel panic on one CPU and hang after
+test_iteration_counts. The two panics differ (corrected after the C2
+critic, critic-4-C2.md; the first version of this summary called both the
+task_exit panic and said the text never reached the UART, which was
+wrong for both):
+
+- run02: CPU 1 at panic+0x8/0xc, 10 of 10 samples, gdb bt panic <-
+  task_exit <- task_entry_trampoline. The UART has
+  "task_exit: schedule returned!" (run02 raw log line 6580;
+  kernel/sched/task.c:695). test_reposition_moves_task_queued_on_other_cpu
+  and test_task_entry_unmasks_irq FAIL (CPU-1 tasks never run); CPU 1's
+  current_task = coh_r1, state READY, switches 0; isolated latency
+  "Samples collected: isolated=0/10, normal=0/10".
+- run13: CPU 3 at panic+0x8/0xc. The UART has "stack overflow: SP is
+  outside current task's stack / current id=209 name='rr_test'
+  live_sp=0x42c3fed0 ... next id=3 name='idle_3'" and "stack overflow:
+  refusing to switch_to with SP outside current task's [stack_base,
+  stack_top]" (run13 raw log lines 6624 to 6634): the SP check in
+  schedule() (kernel/sched/sched.c) found the running CPU's SP outside the
+  task struct's stack. That is consistent with a task slot rebuilt under a
+  CPU still on it (#1213's hypothesis), but it is a different panic from
+  run02's. (run13's gdb dump failed, see the note above.)
+
+Other CPUs in both: CPU 0 in uart_getc/schedule (shell), the rest in
+idle_task_func. Both are #1213-class (a fault on a CPU switching through
+a reused or inconsistent task slot); C1's issue. Class B in the
+harness's classifier is "any sampled PC symbolizes to panic", which
+covers both.
 
 ## Class C (test_litmus_patterns_pass, mp_weak_rows)
 

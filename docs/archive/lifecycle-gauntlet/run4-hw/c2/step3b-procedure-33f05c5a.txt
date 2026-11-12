@@ -1,0 +1,50 @@
+# C2 step 3b procedure (jetson-nano-2, about 10:25 to 10:50 UTC): --assert-shares x20 redone with verbatim per-run captures, then full-capture kexec boots; head c1/1213-fix 33f05c5a00cee9e244349651b7a92c7abc84b9fd; written before the session, nothing run yet
+# boot banner: n/a (procedure)
+
+Artifact: the 33f05c5a Jetson production ELF, sha256
+836d00c5bbeb42d4307c9506a582aba81810061f71b125edbbd5d35f122f9fd7
+(jetson-build-33f05c5a.log.txt). Its .text and .data are byte-identical
+to the 5e5548a1 ELF used in step 3 (jetson-elf-compare-5e5548a1-33f05c5a.txt);
+only the embedded identity strings differ. Using the PR head ELF so the
+banner and /sys/version read the PR head.
+
+Why the method changed (C2 critic, critic-4-C2.md): in step 3, runs
+02-20 were captured tail-only and their verdicts retyped into a tally,
+and run01 was abridged. Extracting the replies from the agent transcript
+was refused by the permission classifier, so it is not used. New method:
+all 20 runs go in one labctl serial_send whose reply (about 200k
+characters) exceeds the tool's inline limit, so the harness saves the
+reply to a file unchanged. tools/v2/split_assert_runs.py.txt then cuts
+that file at the C2RUN markers into one file per run (header lines 1-2
+added, run text unchanged). Tested in QEMU on the 33f05c5a QEMU production
+build (2-run loop): both markers, both verdicts, C2DONE.
+
+1. Pre-flight: list_claims (board free), run_health_check (record power
+   state), actuation_status recovery_mode (released), claim_sbc 25 min.
+   IP 192.168.4.5 (lab://sbcs, per the orchestrator). ssh only; no
+   console login.
+2. j_stage.sh 192.168.4.5 <33f05c5a slmos.elf> slmos-c2-33f05c5a.elf
+   (on-board sha256 must match). The /root/slmos.elf default is never
+   touched.
+3. kexec boot 01: j_kexec.sh, and in the same tool batch
+   serial_capture(timeout 150, until "slmos>|PANIC|panic|Unhandled
+   Exception", no tail). If the harness saves the reply to a file, that
+   file becomes kexec-full-boot01.txt (headers prepended). If the reply
+   comes back inline (under the size limit), it is recorded as "inline
+   reply, not saved verbatim" and only its first and last lines are
+   cited.
+4. serial_send "cat /sys/version" (capture_until commit:), expected
+   commit 33f05c5a.
+5. serial_send data =
+     lua-admin -e "for i=1,20 do print('C2RUN '..i) slm.shell_exec('bench stealing --sustain 2500 --assert-shares') end print('C2DONE')"
+   capture_until "^C2DONE", capture_timeout 150. Expected about 70 s.
+   Then split_assert_runs.py <saved reply> step3b-33f05c5a kexec-assert
+   33f05c5a <sha> "<banner>" -> kexec-assert-run01..20.txt,
+   kexec-assert-preamble.txt, kexec-assert-tail.txt. Pass criterion per
+   run unchanged: its own "ASSERT-SHARES: PASS" line.
+6. Time left until 10:44: further kexec boots, each power_cycle ->
+   serial_capture "login:" -> j_kexec.sh -> serial_capture (no tail) as
+   in step 3, one file per boot.
+7. By 10:50: ssh rm /root/slmos-c2-33f05c5a.elf; sync. If SLM-OS is
+   running, power_cycle back to SD Linux (the board was at SD Linux,
+   powered on). The ESP is not touched in this session. release_sbc.

@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Split one labctl serial_send reply that the harness saved to a file
+(JSON {"result": text}) into one file per C2RUN marker, text unchanged.
+
+usage: split_assert_runs.py <saved-reply.json|.txt> <outdir> <prefix> <head> <elf_sha256> <banner>
+Each output file: line 1 '#' summary (run, head, elf sha256, RESULT taken
+from the run's own ASSERT-SHARES line), line 2 '# boot banner: ...', then
+the run's bytes exactly as captured (from its 'C2RUN N' line up to the
+next marker). Also writes <prefix>-preamble.txt (everything before
+C2RUN 1, i.e. the echoed command) and <prefix>-tail.txt (from C2DONE)."""
+import json, re, sys, os
+src, outdir, prefix, head, sha, banner = sys.argv[1:7]
+raw = open(src, encoding="utf-8", errors="surrogateescape").read()
+try:
+    text = json.loads(raw)["result"]
+except Exception:
+    text = raw
+marks = [m for m in re.finditer(r"(?m)^C2RUN (\d+)\r?$", text)]
+done = re.search(r"(?m)^C2DONE\r?$", text)
+os.makedirs(outdir, exist_ok=True)
+def w(name, summary, body):
+    with open(os.path.join(outdir, name), "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(summary + "\n# boot banner: " + banner + "\n" + body)
+w(prefix + "-preamble.txt", "# %s preamble: reply header and echoed command before C2RUN 1, head %s, elf sha256 %s, RESULT n/a" % (prefix, head, sha),
+  text[:marks[0].start()] if marks else text)
+results = []
+for i, m in enumerate(marks):
+    end = marks[i + 1].start() if i + 1 < len(marks) else (done.start() if done else len(text))
+    body = text[m.start():end]
+    v = re.search(r"ASSERT-SHARES: (PASS|FAIL)[^\r\n]*", body)
+    res = v.group(0) if v else "NO VERDICT LINE IN CAPTURE"
+    n = int(m.group(1))
+    results.append((n, res))
+    w("%s-run%02d.txt" % (prefix, n), "# %s run%02d: bench stealing --sustain 2500 --assert-shares (one of 20 in one lua-admin loop, one serial_send reply), head %s, elf sha256 %s, RESULT %s" % (prefix, n, head, sha, res), body)
+w(prefix + "-tail.txt", "# %s tail from C2DONE, head %s, elf sha256 %s, RESULT %d markers, %d PASS" % (prefix, head, sha, len(marks), sum(r.startswith("ASSERT-SHARES: PASS") for _, r in results)),
+  text[done.start():] if done else "(no C2DONE in capture)\n")
+for n, r in results: print("run%02d %s" % (n, r))
+print("markers %d, PASS %d, C2DONE %s" % (len(marks), sum(r.startswith("ASSERT-SHARES: PASS") for _, r in results), bool(done)))

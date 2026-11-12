@@ -45,7 +45,9 @@ Load (1-min) at run start: min 1.01, max 10.01
   have counted both as passes. Who sent it is not known; both pids were
   gone when checked. The earlier cells have no such kill (every
   truncated log there names /usr/bin/timeout).
-- Class C (#1230): 11 of 18 valid runs, at the highest load of any cell
+- Class C (#1230): 10 of 18 valid runs (11 of 20 counting run19, which
+  failed the litmus test and was then killed; corrected after the C2
+  critic, the first version said 11 of 18), at the highest load of any cell
   (1-min 4.29 to 10.01 for runs 05 to 14). Not WS-specific (9 of 20 with
   WS=OFF on main).
 - Other: test_net_burst_8_sends_async (run07, test_net.c:1729, "all 8

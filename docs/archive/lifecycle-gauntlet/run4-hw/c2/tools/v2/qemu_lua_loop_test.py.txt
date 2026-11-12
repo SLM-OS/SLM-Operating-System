@@ -1,0 +1,21 @@
+import subprocess, sys, time, select, os
+elf, n, out = sys.argv[1], sys.argv[2], sys.argv[3]
+cmd = ["systemd-run","--user","--scope","-q","-p","MemoryMax=3G","-p","CPUQuota=200%","timeout","150",
+       "qemu-system-aarch64","-machine","virt","-cpu","cortex-a76","-smp","cores=4","-m","1G","-nographic",
+       "-global","virtio-mmio.force-legacy=false","-device","virtio-net-device,netdev=net0","-netdev","user,id=net0",
+       "-kernel",elf]
+p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+buf = b""; sent = False; t0 = time.time()
+line = ("lua-admin -e \"for i=1,%s do print('C2RUN '..i) slm.shell_exec('bench stealing --sustain 2500 --assert-shares') end print('C2DONE')\"\r" % n).encode()
+while time.time() - t0 < 140:
+    r, _, _ = select.select([p.stdout], [], [], 0.5)
+    if r:
+        d = os.read(p.stdout.fileno(), 65536)
+        if not d: break
+        buf += d
+    if not sent and b"slmos>" in buf:
+        time.sleep(1); p.stdin.write(line); p.stdin.flush(); sent = True; mark = len(buf)
+    if sent and b"C2DONE\r\n" in buf[mark:] or (sent and b"\nC2DONE" in buf[mark:]):
+        time.sleep(1); break
+p.kill(); open(out, "wb").write(buf)
+print("sent", sent, "bytes", len(buf))
