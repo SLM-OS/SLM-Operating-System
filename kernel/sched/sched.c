@@ -2472,6 +2472,25 @@ void schedule(void)
     }
 
     /* Perform context switch */
+
+    /* next may still be switching out on another CPU (#1213): a task that
+     * schedule() put back on its run queue as READY becomes visible to
+     * thieves (sched_try_steal), sched_migrate_task and the rebalancer as
+     * soon as that CPU drops its rq_lock, before its switch_to has saved
+     * the task's context. The preempt_disabled[victim] early-out in
+     * sched_try_steal is read before the victim's lock and cannot close
+     * that window. Wait (load-acquire) until the other CPU's
+     * sched_finish_switch has released the task: its context save is
+     * then ordered before our switch_to's loads. The other CPU's
+     * release needs no lock, so spinning under our rq_lock cannot
+     * deadlock, and the window is a few hundred instructions. */
+    while (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
     next->state = TASK_RUNNING;
     next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;
@@ -2597,15 +2616,23 @@ void schedule(void)
 #endif
 
     /* Resumed on our stack after being switched back.
-     * Re-enable preemption so timer ticks can trigger scheduling. */
-    preempt_disabled[this_cpu] = 0;
-    SLOT_TRACE(ST_PD_CLEAR, task_current(), this_cpu, cpu_id(), 0);
-    steal_pdwin_clear(this_cpu);                    /* #1216 trace */
+     * Re-enable preemption so timer ticks can trigger scheduling.
+     *
+     * Re-read the CPU (#1229): this task may have been stolen or migrated
+     * while it was READY, so it can resume on a different CPU from the
+     * one it called schedule() on. this_cpu is the pre-switch id; using it
+     * cleared the old CPU's flag (possibly while that CPU was inside its
+     * own switch window) and left this CPU's flag at 1, so its ticks
+     * stopped preempting and thieves skipped it (#1219 deadlock). */
+    uint32_t now_cpu = cpu_id();
+    SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
+    preempt_disabled[now_cpu] = 0;
+    steal_pdwin_clear(now_cpu);                     /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
      * we were mid-switch — we just scheduled, so an immediate re-arm
      * after eret would be redundant. */
-    reschedule_pending[this_cpu] = 0;
+    reschedule_pending[now_cpu] = 0;
 #endif
 }
 

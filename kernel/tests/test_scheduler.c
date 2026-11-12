@@ -2261,6 +2261,117 @@ static void test_task_slot_reuse_under_switch(void)
     TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
 }
 
+/* ============================================================================
+ * Regression #1229: preempt_disabled follows a task that resumes on another
+ * CPU. Two yielding tasks share CPU 2; while one of them is READY in CPU 2's
+ * queue the test migrates it to CPU 3 (and back). When it resumes from
+ * schedule() on the new CPU, schedule() must clear the NEW CPU's
+ * preempt_disabled, not the CPU it yielded on. Each task checks its own
+ * CPU's flag right after every yield returns. Before the fix the flag of
+ * the CPU it moved to read 1 after the first migration, and that CPU
+ * stopped taking preemption ticks (#1219 deadlock under WORK_STEALING).
+ * ============================================================================ */
+
+static volatile uint32_t pdm_stop;
+static volatile uint32_t pdm_bad;
+static volatile uint32_t pdm_moved;
+static volatile uint32_t pdm_runs[2];
+static volatile uint32_t pdm_bad_cpu;
+
+static void pdm_task(void *arg)
+{
+    extern volatile int preempt_disabled[];
+    uint32_t idx = (uint32_t)(uintptr_t)arg;
+    uint32_t last = cpu_id();
+    while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
+        yield();
+        uint32_t c = cpu_id();
+        if (c != last) {
+            __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
+            last = c;
+        }
+        if (preempt_disabled[c] != 0) {
+            if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
+                pdm_bad_cpu = c;
+            }
+        }
+        __atomic_fetch_add(&pdm_runs[idx], 1, __ATOMIC_RELAXED);
+    }
+}
+
+static bool pdm_both_terminated(void *ctx)
+{
+    struct task **t = ctx;
+    return __atomic_load_n(&t[0]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
+           __atomic_load_n(&t[1]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED;
+}
+
+static void test_preempt_flag_follows_migrated_task(void)
+{
+    if (cpu_count < 4) {
+        TEST_ASSERT(1);
+        return;
+    }
+    pdm_stop = 0;
+    pdm_bad = 0;
+    pdm_moved = 0;
+    pdm_runs[0] = pdm_runs[1] = 0;
+    pdm_bad_cpu = 0;
+
+    struct task *t[2];
+    t[0] = task_create("pdm_a", pdm_task, (void *)(uintptr_t)0);
+    t[1] = task_create("pdm_b", pdm_task, (void *)(uintptr_t)1);
+    TEST_ASSERT_NOT_NULL(t[0]);
+    TEST_ASSERT_NOT_NULL(t[1]);
+    scheduler_add_task_to_cpu(t[0], 2);
+    scheduler_add_task_to_cpu(t[1], 2);
+
+    /* Move t[0] between CPUs 2 and 3: migrate it while it is READY, then
+     * wait (up to 100 ms) until it has run on the new CPU before moving it
+     * again. Up to 10 moves in at most 1 s. */
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint32_t migrations = 0;
+    while (timer_get_count() - t0 < f && pdm_moved < 10) {
+        struct task *m = t[0];
+        uint32_t moved_before = pdm_moved;
+        if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == TASK_READY &&
+            pdm_runs[0] > 0) {
+            uint32_t to = (m->assigned_cpu == 2) ? 3 : 2;
+            if (sched_migrate_task(m, to) == 0) {
+                migrations++;
+                uint64_t w0 = timer_get_count();
+                while (pdm_moved == moved_before &&
+                       timer_get_count() - w0 < f / 10) {
+                    yield();
+                }
+                continue;
+            }
+        }
+        yield();
+    }
+
+    __atomic_store_n(&pdm_stop, 1, __ATOMIC_RELEASE);
+    long long w = test_wait_until("pdm_done", pdm_both_terminated, t,
+                                  TEST_WAIT_S(1));
+    uart_printf("  pdm: migrations=%u moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
+                migrations, pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
+                pdm_bad_cpu);
+    if (w < 0) {
+        for (int i = 0; i < 2; i++) {
+            if (t[i]->state != TASK_TERMINATED) {
+                scheduler_terminate_task(t[i]);
+            }
+        }
+    }
+    task_destroy(t[0]);
+    task_destroy(t[1]);
+
+    TEST_ASSERT_TRUE(w >= 0);
+    TEST_ASSERT_TRUE(pdm_moved > 0);
+    TEST_ASSERT_EQUAL_UINT32(0, pdm_bad);
+}
+
 /*
  * Deterministic half of the #1213 fix: the zombie reaper's
  * task_destroy_gen() must leave a slot alone once its owner has destroyed
@@ -6262,6 +6373,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
+    RUN_TEST(test_preempt_flag_follows_migrated_task);   /* #1229 */
     migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
