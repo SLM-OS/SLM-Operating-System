@@ -2473,24 +2473,6 @@ void schedule(void)
 
     /* Perform context switch */
 
-    /* next may still be switching out on another CPU (#1213): a task that
-     * schedule() put back on its run queue as READY becomes visible to
-     * thieves (sched_try_steal), sched_migrate_task and the rebalancer as
-     * soon as that CPU drops its rq_lock, before its switch_to has saved
-     * the task's context. The preempt_disabled[victim] early-out in
-     * sched_try_steal is read before the victim's lock and cannot close
-     * that window. Wait (load-acquire) until the other CPU's
-     * sched_finish_switch has released the task: its context save is
-     * then ordered before our switch_to's loads. The other CPU's
-     * release needs no lock, so spinning under our rq_lock cannot
-     * deadlock, and the window is a few hundred instructions. */
-    while (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
-#if defined(PLATFORM_X86_64)
-        __asm__ volatile("pause" ::: "memory");
-#else
-        __asm__ volatile("yield" ::: "memory");
-#endif
-    }
     next->state = TASK_RUNNING;
     next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;

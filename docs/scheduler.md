@@ -363,13 +363,13 @@ keep a slot from being freed or reused under a CPU that still uses it:
   slot still has that generation. If the owner destroyed the task first,
   the generation has moved on and the slot, possibly already a new task,
   is left alone.
-- **Switch in only after the previous CPU let go.** A task that
-  `schedule()` puts back on its run queue as READY can be stolen, migrated
-  or rebalanced as soon as that CPU drops its `rq_lock`, before its
-  `switch_to` has saved the context (`sched_try_steal`'s
-  `preempt_disabled[victim]` early-out is read before the lock and does not
-  close this). `schedule()` therefore waits, under its own `rq_lock`, for
-  `next->on_cpu == 0` (load-acquire) before switching in.
+- **Known open window (#1234).** A task that `schedule()` puts back on its
+  run queue as READY is visible to thieves, `sched_migrate_task` and wake
+  placement once that CPU drops its `rq_lock`, before its `switch_to` has
+  saved the context. Spinning on `next->on_cpu` under `rq_lock` deadlocks
+  against a tick in the outgoing CPU's IRQ-open switch window (and against
+  x86's resched IPI), so it is not done; the fix needs an IRQ-masked switch
+  window.
 - **`preempt_disabled` follows the task (#1229).** After `switch_to`
   returns, `schedule()` re-reads the CPU id before clearing
   `preempt_disabled`, `reschedule_pending` and the #1216 window: a stolen
