@@ -1,0 +1,34 @@
+Thu Nov 12 08:54:53 PM UTC 2026
+running
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.KLh8aiW91e/EFI/SLMOS/SLMOS.efi
+total 8668
+drwxr-xr-x 2 root root    4096 Nov  7 19:43 .
+drwxr-xr-x 4 root root    4096 Nov  8 05:40 ..
+-rwxr-xr-x 1 root root 8864840 Nov 12 12:54 SLMOS.efi
+ls: cannot access '/root/slmos-l4co*': No such file or directory
+ls: cannot access '/root/slmos-l4co*': No such file or directory
+ls: cannot access '/root/l4co': No such file or directory
+ls: cannot access '/etc/systemd/system/l4co*': No such file or directory
+ls: cannot access '/tmp/slmos-asfound.efi': No such file or directory
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+Boot0001* UEFI SD Device
+Boot0002* UEFI PXEv4 (MAC:3C6D66B54908)
+Boot0003* UEFI PXEv6 (MAC:3C6D66B54908)
+Boot0004* UEFI HTTPv4 (MAC:3C6D66B54908)
+Boot0005* UEFI HTTPv6 (MAC:3C6D66B54908)
+Boot0006* BootManagerMenuApp
+Boot0007* UEFI Shell
+Boot0008* UEFI SPCC M.2 PCIe SSD AA000000000000003172 1
+Boot0009* SLM-OS Direct
+Boot000A* UEFI PXEv4 (MAC:A0CEC80E9A21)
+Boot000B* UEFI PXEv6 (MAC:A0CEC80E9A21)
+Boot000C* UEFI HTTPv4 (MAC:A0CEC80E9A21)
+Boot000D* UEFI HTTPv6 (MAC:A0CEC80E9A21)
+Boot000E* SLM-OS NVMe
+-rwxr-xr-x 1 root root 9796520 Oct 31 16:47 /root/slmos.elf
+098f316368baf94e
