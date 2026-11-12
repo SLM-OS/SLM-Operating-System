@@ -1,0 +1,11 @@
+# Board state at the end of C3's second jetson-nano-2 hold (05:55-06:56 UTC, kexec suite runs 02-10 at 8a3406ea). RESULT: SD Linux up, BootOrder unchanged, no BootNext, ESP not mounted and not written in this hold (esp-restore.txt still holds), /root/slmos.elf untouched (098f3163). Released 06:56 UTC. pi-5-1 was not claimed (no time left for boot_test --count 10 before 07:05).
+# boot banner: (none; SD Linux)
+
+final state check (2nd hold) 2026-11-12T06:55:56Z
+5.15.148-tegra
+ 22:49:32 up 0 min,  0 users,  load average: 0.42, 0.10, 0.03
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+0
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+released jetson-nano-2 (second hold) at 2026-11-12T06:56:27Z, powered on in SD Linux; ESP not written during this hold (kexec only)
