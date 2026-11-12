@@ -1,0 +1,16 @@
+== 08-build-order: make test-build-order (02:21:07)
+PASS: QEMU_VIRT kernel: configures after the Rust build
+PASS: QEMU_VIRT kernel: an unchanged rebuild stays configured and quiet
+PASS: QEMU_VIRT kernel: reconfigures after a flag change
+PASS: QEMU_VIRT kernel-test: configures after the Rust build
+PASS: QEMU_VIRT kernel-test: an unchanged rebuild stays configured and quiet
+PASS: QEMU_VIRT kernel-test: reconfigures after a flag change
+PASS: X86_64 kernel-kexec: configures after the Rust build
+PASS: X86_64 kernel-kexec: an unchanged rebuild stays configured and quiet
+PASS: X86_64 kernel-kexec: reconfigures after a flag change
+PASS: X86_64 kernel-bzimage: configures after the Rust build
+PASS: X86_64 kernel-bzimage: an unchanged rebuild stays configured and quiet
+PASS: X86_64 kernel-bzimage: reconfigures after a flag change
+PASS: SD test image: waits for the kernel
+PASS: GRUB ISO: waits for the kernel
+All build-order tests passed
