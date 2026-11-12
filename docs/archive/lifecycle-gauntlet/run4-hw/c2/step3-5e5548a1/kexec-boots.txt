@@ -1,4 +1,4 @@
-# jetson-nano-2 kexec boot test (power_cycle -> SD Linux login: -> slmos-kexec /root/slmos-c2-5e5548a1.elf -> serial_capture slmos>|PANIC|panic|Unhandled Exception, 150 s), head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, RESULT 5/5 PASS (boot 01 = the assert-shares boot from a fresh SD Linux; boots 02-05 after power_cycle). Planned 10; 5 not run, time limit
+# jetson-nano-2 kexec boot test (power_cycle -> SD Linux login: -> slmos-kexec /root/slmos-c2-5e5548a1.elf -> serial_capture slmos>|PANIC|panic|Unhandled Exception, 150 s), head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, RESULT 10/10 PASS. Boot 01 = the assert-shares boot (session 1, 07:41). Boots 02-05 session 1 (07:49-08:04). Boot 06 session 2 (claim 08:26:17, ELF re-staged, sha checked) from the SD Linux left by the session-1 restore power cycle. Boots 07-10 after power_cycle
 # boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1
 kboot01 PASS slmos> 94.0s (kexec-assert-boot.txt)
 kboot02 kexec fired 07:51:23
@@ -9,3 +9,13 @@ kboot04 kexec fired 07:58:40
 kboot04 PASS slmos> 93.8s
 kboot05 kexec fired 08:02:04
 kboot05 PASS slmos> 93.9s
+kboot06 kexec fired 08:26:29 (second session, re-staged)
+kboot06 PASS slmos> 88.4s
+kboot07 kexec fired 08:30:12
+kboot07 PASS slmos> 93.8s
+kboot08 kexec fired 08:34:13
+kboot08 PASS slmos> 93.8s
+kboot09 kexec fired 08:37:31
+kboot09 PASS slmos> 93.7s
+kboot10 kexec fired 08:40:53
+kboot10 PASS slmos> 93.8s
