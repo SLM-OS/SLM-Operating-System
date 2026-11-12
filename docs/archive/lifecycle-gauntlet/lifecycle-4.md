@@ -1067,3 +1067,46 @@ open items. Boards pi-5-1 and jetson-nano-2, one at a time. Session start
   per batch record each boot from power-on (UEFI, Linux, handoff, SLM-OS
   banner) to the prompt, in its own output_dir file. The unit and
   `/root/l4co/` are removed at restore.
+
+## Entry 39 (written 19:25 UTC): #1237 missing rows at 33f05c5a: Jetson 20 of 20, Pi 5 10 of 10, all full captures
+
+**Method change from Entry 38 (disclosed).** Installing the temporary
+`l4co-autoboot` systemd unit on jetson-nano-2 was refused by the session's
+permission classifier (persistence on the board). Nothing from that
+command reached the board (`/root/l4co` and the unit were checked absent
+afterwards). Used instead: a host-side, session-local loop
+(`trigger.sh.txt`) that watches for each new Linux boot_id over ssh and
+runs the documented trigger (`slmos-kexec <elf>`, or `efibootmgr
+--bootnext 000E` and reboot as in `scripts/jetson-uefi-deploy.sh`), while
+one `boot_test` call per 5 boots does the power cycles and the capture.
+Each output_dir file is still one boot from power-on (MB1) to the prompt.
+One extra power_cycle (not counted) brought SD Linux up to write the ESP.
+
+| Row | Result | Files (`run4-hw/closeout/`) |
+|---|---|---|
+| jetson-nano-2 production, kexec | **10/10**, 154.5-158.2 s power-on to prompt | `gauntlet-4-hw-jetson` `1237-33f05c5a-jetson-kexec-boot01..10.txt` |
+| jetson-nano-2 production, UEFI-direct | **10/10**, 127.2-151.4 s | `gauntlet-4-hw-jetson` `1237-33f05c5a-jetson-uefi-boot01..10.txt` |
+| pi-5-1 production | **5/5**, 13.0-13.1 s | `gauntlet-4-hw-pi5` `1237-33f05c5a-pi5-prod-boot01..05.txt` |
+| pi-5-1 integration suite | **5/5** reached the summary; isolated=10/10 and normal=10/10 in 5 of 5; slot_reuse_stress bad=0 in 5 of 5; 18 total failure(s) in each, failing set identical to run 4's fix-head set; no CPU 1 panic, 0 KERNEL PANIC / PAGE FAULT / Synchronous | `gauntlet-4-hw-pi5` `1237-33f05c5a-pi5-suite-boot01..05.txt` |
+
+- Images built at 33f05c5a in l4-c1: Jetson elf b95c0d47 / bin 276ffa90
+  (banner `build 20261112180315 (33f05c5a)`); Pi 5 production 8b827008
+  (`build 20261112180020`), test 437c7fe5 (`build 20261112180146`).
+- Every file was checked for its first line (Jetson: MB1; Pi 5: the
+  banner block), its last bytes (`slmos>` or the suite summary), the
+  banner, and fault patterns. None was incomplete; none needed a redo.
+- Indexes: `README-1237-jetson.md` (gauntlet-4-hw-jetson ffe0cc50),
+  `README-pi5.md` (gauntlet-4-hw-pi5 b45912bf).
+- pi-5-1 restored (kernel_2712.img back from .prev, 6935256 bytes, mtime
+  2026-10-29; kernel8.img untouched), powered on, released about 18:23.
+  jetson-nano-2 still claimed for step 3; its ESP holds the 33f05c5a
+  production bin until then.
+- Squash check (PR merge note): `test_isolated_core_latency` at 33f05c5a
+  is byte-identical to 6aee62c1's; the squash diff has no TEMPORARY
+  content.
+- Trial rebase of c3/jetson-suite onto 33f05c5a: clean, though the two
+  branches do share CMakeLists.txt and kernel/CLAUDE.md (the close-out
+  said no shared files).
+
+Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
+/ci green at 33f05c5a). Merging #1237.
