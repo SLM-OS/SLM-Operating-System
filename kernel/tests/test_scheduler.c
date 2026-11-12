@@ -16,6 +16,7 @@
 #include "uart.h"
 #include "string.h"
 #include "slot_trace.h"
+#include "sched_diag.h"
 #include "test_wait.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -2651,10 +2652,15 @@ static void bench_switch_task(void *arg)
     int task_id = (int)(uintptr_t)arg;  /* 0 or 1 */
 
     while (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+        /* Re-check under the lock: under WORK_STEALING one of the two
+         * tasks can be stolen to another CPU, and both can pass the
+         * unlocked loop test at 99 (count 101, run 4 C2). */
         irq_flags_t flags = spin_lock_irqsave(&test_lock);
-        bench_switch_count++;
-        if (bench_switch_count >= BENCH_CONTEXT_SWITCHES) {
-            bench_end_time = slm_get_time_ns();
+        if (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+            bench_switch_count++;
+            if (bench_switch_count >= BENCH_CONTEXT_SWITCHES) {
+                bench_end_time = slm_get_time_ns();
+            }
         }
         spin_unlock_irqrestore(&test_lock, flags);
 
@@ -4200,6 +4206,21 @@ static void test_policy_switch_calls_init_shutdown(void)
     TEST_ASSERT_EQUAL_INT(1, stub_shutdown_called);
 }
 
+/* Sum of sched_diag_steal_successes over all CPUs. The placement tests
+ * below add an unpinned task to CPU 0, which publishes it to CPU 0's
+ * steal deque; under WORK_STEALING an idle CPU may take it before the
+ * assert reads assigned_cpu (run 4 C2: assigned_cpu 1 in 2 of 54 runs).
+ * Those asserts accept a non-0 CPU only if a steal happened meanwhile;
+ * without work stealing the counter never moves and they stay exact. */
+static uint32_t steal_successes_total(void)
+{
+    uint32_t n = 0;
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        n += sched_diag_steal_successes[c];
+    }
+    return n;
+}
+
 /*
  * Test: Custom policy's assign_cpu callback is actually used.
  */
@@ -4218,9 +4239,14 @@ static void test_policy_custom_assign_cpu_called(void)
     for (int i = 0; i < 4; i++) {
         struct task *t = task_create("pol_test", nop_entry, NULL);
         TEST_ASSERT_NOT_NULL(t);
+        uint32_t steals0 = steal_successes_total();
         scheduler_add_task(t);
-        /* stub_assign_cpu always returns 0 */
-        TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+        /* stub_assign_cpu always returns 0 (or a thief took it since). */
+        uint32_t got = t->assigned_cpu;
+        if (got != 0) {
+            TEST_ASSERT_TRUE_MESSAGE(steal_successes_total() != steals0,
+                                     "placed off CPU 0 with no steal");
+        }
         scheduler_remove_task(t);
         t->id = 0;
     }
@@ -4441,8 +4467,13 @@ static void test_proactive_load_balance_inert_when_light(void)
      * have queued. */
     struct task *t = task_create("s5_light", nop_entry, NULL);
     TEST_ASSERT_NOT_NULL(t);
+    uint32_t steals0 = steal_successes_total();
     scheduler_add_task(t);
-    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    /* CPU 0, unless a thief took the task since (see steal_successes_total). */
+    if (t->assigned_cpu != 0) {
+        TEST_ASSERT_TRUE_MESSAGE(steal_successes_total() != steals0,
+                                 "placed off CPU 0 with no steal");
+    }
     scheduler_remove_task(t);
     t->id = 0;
 
