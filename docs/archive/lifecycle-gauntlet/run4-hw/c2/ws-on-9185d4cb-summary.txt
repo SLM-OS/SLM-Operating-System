@@ -1,0 +1,49 @@
+# ws-on-9185d4cb summary: make test QEMU command, head 9185d4cb3ac87dfade1b36a3b72008fa12341a21, WORK_STEALING=ON, TCG thread=multi (no -accel flag), elf sha256 70826b524b1216248abf835515762afde36368e5489c42085214d28a01e534ee, N=20; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass, INVALID=QEMU killed by another process before the suite summary
+# boot banner: SLM-OS v0.4.0 build 20261112054751 (9185d4cb)
+
+| File | load_start (1/5/15) | rc | Class |
+|---|---|---|---|
+| ws-on-9185d4cb-run01.txt | 1.17 2.54 3.99 | 0 | PASS |
+| ws-on-9185d4cb-run02.txt | 2.88 2.66 3.90 | 0 | PASS |
+| ws-on-9185d4cb-run03.txt | 3.70 2.99 3.91 | 1 | C |
+| ws-on-9185d4cb-run04.txt | 5.12 3.61 4.04 | 0 | PASS |
+| ws-on-9185d4cb-run05.txt | 4.41 3.82 4.08 | 0 | PASS |
+| ws-on-9185d4cb-run06.txt | 3.73 3.73 4.02 | 0 | PASS |
+| ws-on-9185d4cb-run07.txt | 3.13 3.53 3.93 | 0 | PASS |
+| ws-on-9185d4cb-run08.txt | 3.07 3.41 3.85 | 0 | PASS |
+| ws-on-9185d4cb-run09.txt | 2.81 3.38 3.81 | 0 | PASS |
+| ws-on-9185d4cb-run10.txt | 2.64 3.14 3.69 | 0 | PASS |
+| ws-on-9185d4cb-run11.txt | 1.67 2.68 3.48 | 0 | PASS |
+| ws-on-9185d4cb-run12.txt | 1.27 2.33 3.29 | 0 | PASS |
+| ws-on-9185d4cb-run13.txt | 1.70 2.18 3.15 | 0 | PASS |
+| ws-on-9185d4cb-run14.txt | 1.79 2.06 3.02 | 0 | PASS |
+| ws-on-9185d4cb-run15.txt | 1.85 2.02 2.93 | 0 | PASS |
+| ws-on-9185d4cb-run16.txt | 1.79 1.92 2.81 | 0 | PASS |
+| ws-on-9185d4cb-run17.txt | 1.80 1.87 2.71 | 0 | PASS |
+| ws-on-9185d4cb-run18.txt | 1.36 1.72 2.59 | 0 | PASS |
+| ws-on-9185d4cb-run19.txt | 1.54 1.68 2.49 | 0 | PASS |
+| ws-on-9185d4cb-run20.txt | 2.34 1.86 2.48 | 1 | other(test_runner_parks_without_a_lock) |
+
+Class A: 0 of 20
+Class B: 0 of 20
+Class C: 1 of 20
+INVALID (externally killed, excluded from pass counts): 0 of 20
+PASS: 18 of 20; valid runs 20
+Load (1-min) at run start: min 1.17, max 5.12
+
+## Analysis (final C1 head c1/1213-fix 9185d4cb; test-only since 364544c1: git diff --stat 364544c1 9185d4cb = kernel/tests/test_scheduler.c only)
+
+- #1219 (class A): 0 of 20; all 20 print "[PASS] batch: stress workload
+  (4x8)". With 364544c1 (34) and 6d4fe041 (18 valid), same scheduler
+  code: 0 of 72.
+- Class B: 0 of 20. No external kills in this cell.
+- The three steal-sensitive tests C1 reworked in 9185d4cb
+  (test_benchmark_context_switch, test_proactive_load_balance_inert_when_light,
+  test_policy_custom_assign_cpu_called): 0 failures in 20.
+  test_preempt_flag_follows_migrated_task: 0 failures in 20.
+- Failures: run03 test_litmus_patterns_pass (#1230); run20
+  test_runner_parks_without_a_lock (test_slm_runner.c:1425, "slm ask:
+  nobody took the prompt"), already #1184.
+- Step 4 (/ci): 18 of 20, not 20 of 20, so WORK_STEALING=ON is not added.
+  Both failures are open issues that do not depend on work stealing
+  (#1230 failed 9 of 20 with WS=OFF; #1184 is in the slm-runner bus test).
