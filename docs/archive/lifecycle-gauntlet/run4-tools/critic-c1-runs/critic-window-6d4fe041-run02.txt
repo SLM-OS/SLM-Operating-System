@@ -1,0 +1,83 @@
+# critic C1 window experiment (fix head 6d4fe041 + critic-window-experiment.patch, NOT a branch build); head 6d4fe041-dirty; elf sha256 fda5d8cabde1a9fc99993152e2b3b3d889679711615171c4696bae5496ac1a2e; accel tcg thread=multi; loadavg start 3.41 4.52 5.04 end 3.53 4.42 4.98; RESULT rc=0 phaseB-NOT-COMPLETED phaseA-COMPLETED HANG-SAMPLED
+# boot banner: SLM-OS v0.4.0 build 20261112054030 (6d4fe041-dirty)
+# command: systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G -accel tcg,tb-size=128,thread=multi -nographic -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0 -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=./tmp/win.sKixsW/sd.img -device sdhci-pci -device sd-card,drive=slmos-sd -qmp unix:./tmp/win.sKixsW/qmp.sock,server=on,wait=off -semihosting -kernel /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/elf/fix-6d4fe041-window.elf
+# ---- QEMU output: critic_window lines, then the last 15 lines ----
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=0: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=1: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=2: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=3: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=4: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=5: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=6: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=7: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=8: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=9: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=10: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=11: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=12: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=13: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=14: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=15: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=16: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=17: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=18: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=19: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=20: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=21: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=22: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=23: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=24: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=25: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=26: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=27: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=28: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=29: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3): COMPLETED iterations=30 migrations=30 no_window=0 sleeper_runs=540
+  critic_window B(sleepers on cpu3, T to cpu3) it=0: cpu0 in window, migrating T to cpu3
+  critic_window B(sleepers on cpu3, T to cpu3) it=1: cpu0 in window, migrating T to cpu3
+# ---- last 15 lines of serial ----
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=19: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=20: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=21: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=22: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=23: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=24: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=25: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=26: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=27: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=28: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=29: cpu0 in window, migrating T to cpu3
+  critic_window A-control(sleepers on cpu2, T to cpu3): COMPLETED iterations=30 migrations=30 no_window=0 sleeper_runs=540
+  critic_window B(sleepers on cpu3, T to cpu3) it=0: cpu0 in window, migrating T to cpu3
+  critic_window B(sleepers on cpu3, T to cpu3) it=1: cpu0 in window, migrating T to cpu3
+qemu-system-aarch64: terminating on signal 15 from pid 2757373 (/usr/bin/timeout)
+# ---- QMP 'info registers -a', 3 samples 0.5 s apart, after 8 s without output ----
+
+=== sample 0 === 
+  CPU#0 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#1 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#2 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#3 PC=000000004001aaac X30=000000004001ac04 PSTATE=800003c5 N--- EL1h 
+=== sample 1 === 
+  CPU#0 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#1 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#2 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#3 PC=000000004001aaac X30=000000004001ac04 PSTATE=800003c5 N--- EL1h 
+=== sample 2 === 
+  CPU#0 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#1 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#2 PC=0000000040019e08 X30=0000000040019398 PSTATE=200003c5 --C- EL1h 
+  CPU#3 PC=000000004001aaac X30=000000004001ac04 PSTATE=800003c5 N--- EL1h 
+# ---- critic symbolization (aarch64-none-elf-nm -n of the same elf; rq_lock at 0x407eb400, 4 bytes per CPU) ----
+sample 0 CPU0: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 0 CPU1: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 0 CPU2: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 0 CPU3: PC=0x4001aaac schedule+0x12c; X30=0x4001ac04 schedule+0x284; X19=0x407eb180 X01=0x1; IRQ masked
+sample 1 CPU0: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 1 CPU1: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 1 CPU2: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 1 CPU3: PC=0x4001aaac schedule+0x12c; X30=0x4001ac04 schedule+0x284; X19=0x407eb180 X01=0x1; IRQ masked
+sample 2 CPU0: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 2 CPU1: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 2 CPU2: PC=0x40019e08 scheduler_add_task_to_cpu+0x68; X30=0x40019398 task_wake_sleepers+0xd0; X19=0x3 X01=0x407eb40c; IRQ masked
+sample 2 CPU3: PC=0x4001aaac schedule+0x12c; X30=0x4001ac04 schedule+0x284; X19=0x407eb180 X01=0x1; IRQ masked

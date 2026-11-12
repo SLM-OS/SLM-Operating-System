@@ -1,0 +1,37 @@
+#!/bin/bash
+# critic C1 runner: usage run1.sh <outfile> <elf> <what> <head>
+# QEMU command = `make -n test` (ARM64 QEMU_VIRT) plus -accel tcg,tb-size=128,thread=multi
+set -u
+out=$1; elf=$2; what=$3; head=$4
+S=$(dirname "$(dirname "$0")")
+tmp=$(mktemp -d $S/tmp/run.XXXXXX)
+truncate -s 4G "$tmp/sd.img"
+load0=$(cut -d' ' -f1-3 /proc/loadavg); nq0=$(pgrep -c -f qemu-system-aarch64 || true)
+start=$(date -u +%FT%TZ)
+cmd=(systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120
+     qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G
+     -accel tcg,tb-size=128,thread=multi -nographic
+     -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0
+     -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=$tmp/sd.img
+     -device sdhci-pci -device sd-card,drive=slmos-sd
+     -semihosting -kernel "$elf")
+"${cmd[@]}" > "$tmp/serial.log" 2>&1
+rc=$?
+end=$(date -u +%FT%TZ); load1=$(cut -d' ' -f1-3 /proc/loadavg)
+ser=$tmp/serial.log
+banner=$(grep -a -m1 -o 'SLM-OS v[^)]*)' "$ser" || echo "(none)")
+samples=$(grep -a -o 'Samples collected: isolated=[0-9]*/[0-9]*, normal=[0-9]*/[0-9]*' "$ser" | head -1)
+nfail=$(grep -a -c '\[FAIL\]' "$ser")
+nfault=$(grep -a -c 'PAGE FAULT\|KERNEL PANIC\|SLOTTRACE-FAULT' "$ser")
+nto=$(grep -a -c 'TIMEOUT' "$ser")
+stress=$(grep -a -m1 -o 'slot_reuse_stress: [^\r]*' "$ser" || true)
+if [ "$rc" = 0 ]; then res=PASS; elif [ "$rc" = 124 ]; then res=TIMEOUT; else res="FAIL(rc=$rc)"; fi
+{
+  echo "# critic C1: $what; head $head; elf sha256 $(sha256sum "$elf" | cut -d' ' -f1); accel tcg thread=multi; loadavg start $load0 end $load1 (qemu procs at start $nq0); RESULT $res; qemu rc $rc; ${samples:-Samples collected: (not printed)}; [FAIL] lines $nfail; fault/panic lines $nfault; TIMEOUT lines $nto; ${stress:-}"
+  echo "# boot banner: $banner"
+  echo "# started $start, finished $end"
+  echo "# command: ${cmd[*]}"
+  echo "# ---- complete QEMU output ----"
+  cat "$ser"
+} > "$out"
+rm -rf "$tmp"

@@ -1,0 +1,50 @@
+#!/bin/bash
+# critic window experiment runner: usage run_window.sh <outfile> <elf>
+set -u
+out=$1; elf=$2
+S=$(dirname "$(dirname "$0")")
+tmp=$(mktemp -d $S/tmp/win.XXXXXX)
+truncate -s 4G "$tmp/sd.img"
+load0=$(cut -d' ' -f1-3 /proc/loadavg)
+cmd=(systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120
+     qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G
+     -accel tcg,tb-size=128,thread=multi -nographic
+     -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0
+     -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=$tmp/sd.img
+     -device sdhci-pci -device sd-card,drive=slmos-sd
+     -qmp unix:$tmp/qmp.sock,server=on,wait=off
+     -semihosting -kernel "$elf")
+"${cmd[@]}" > "$tmp/serial.log" 2>&1 &
+qpid=$!
+regs=""
+# wait for phase B to start, then for output to stall 8 s
+for i in $(seq 1 110); do
+  sleep 1
+  kill -0 $qpid 2>/dev/null || break
+  if grep -a -q 'critic_window B' "$tmp/serial.log" && ! grep -a -q 'PASS. test_critic_window' "$tmp/serial.log"; then
+    sz1=$(stat -c %s "$tmp/serial.log"); sleep 8; sz2=$(stat -c %s "$tmp/serial.log")
+    if [ "$sz1" = "$sz2" ] && kill -0 $qpid 2>/dev/null; then
+      python3 $S/tools/qmp_regs.py "$tmp/qmp.sock" 3 > "$tmp/regs.txt" 2>&1; regs=yes
+      qp=$(pgrep -f "qemu-system-aarch64.*$tmp/qmp.sock" | head -1); [ -n "$qp" ] && kill "$qp"; break   # only the QEMU this script started (unique tmp dir)
+    fi
+  fi
+done
+wait $qpid; rc=$?
+load1=$(cut -d' ' -f1-3 /proc/loadavg)
+ser=$tmp/serial.log
+res="rc=$rc"; grep -a -q 'critic_window B.*COMPLETED' "$ser" && res="$res phaseB-COMPLETED" || res="$res phaseB-NOT-COMPLETED"
+grep -a -q 'critic_window A.*COMPLETED' "$ser" && res="$res phaseA-COMPLETED" || res="$res phaseA-NOT-COMPLETED"
+[ -n "$regs" ] && res="$res HANG-SAMPLED"
+{
+  echo "# critic C1 window experiment (fix head 6d4fe041 + critic-window-experiment.patch, NOT a branch build); head 6d4fe041-dirty; elf sha256 $(sha256sum "$elf" | cut -d' ' -f1); accel tcg thread=multi; loadavg start $load0 end $load1; RESULT $res"
+  echo "# boot banner: $(grep -a -m1 -o 'SLM-OS v[^)]*)' "$ser")"
+  echo "# command: ${cmd[*]}"
+  echo "# ---- QEMU output: critic_window lines, then the last 15 lines ----"
+  grep -a 'critic_window\|test_critic_window' "$ser"
+  echo "# ---- last 15 lines of serial ----"
+  tail -15 "$ser"
+  if [ -n "$regs" ]; then echo "# ---- QMP 'info registers -a', 3 samples 0.5 s apart, after 8 s without output ----"; grep -a -o 'CPU#[0-9]\|PC=[0-9a-f]*\|X30=[0-9a-f]*\|ELR_EL1=[0-9a-f]*\|PSTATE=[0-9a-f]* [-NZCV]* EL[0-9a-z]*\|=== sample [0-9] ===' "$tmp/regs.txt" | tr '\n' ' ' | sed 's/=== sample/\n=== sample/g; s/CPU#/\n  CPU#/g'; echo; fi
+} > "$out"
+cp "$tmp/regs.txt" "${out%.txt}.regs-raw.txt" 2>/dev/null
+rm -rf "$tmp"
+head -1 "$out"

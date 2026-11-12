@@ -1,0 +1,26 @@
+# Blank out (keeping line count) every slot-trace hook so the kernel can be built with no trace-ring code at all.
+import re,sys
+names=['SLOT_TRACE_ONLY','SLOT_TRACE_RQ_LOCKED','SLOT_TRACE_RQ_UNLOCKING','SLOT_TRACE','slot_trace_pd_tick']
+def blank(s): return re.sub(r'[^\n]',' ',s)
+for p in sys.argv[1:]:
+    s=open(p).read(); out=[]; i=0; n=0
+    pat=re.compile(r'(?<![A-Za-z0-9_])('+'|'.join(names)+r')\(')
+    while True:
+        m=pat.search(s,i)
+        if not m: out.append(s[i:]); break
+        # skip matches inside comments on the same line (" * SLOT_TRACE(" style) by checking line prefix
+        ls=s.rfind('\n',0,m.start())+1
+        pre=s[ls:m.start()]
+        if pre.strip().startswith(('*','/*','//')) or '#define' in pre:
+            out.append(s[i:m.end()]); i=m.end(); continue
+        j=m.end(); d=1
+        while d:
+            ch=s[j]
+            if ch=='(': d+=1
+            elif ch==')': d-=1
+            j+=1
+        if s[j:j+1]==';': j+=1
+        out.append(s[i:m.start()]); out.append(blank(s[m.start():j])); i=j; n+=1
+    s=''.join(out)
+    s2=re.sub(r'#include "slot_trace.h"',lambda m:' '*len(m[0]),s)
+    open(p,'w').write(s2); print(p,'hooks blanked',n,'include removed',s2!=s)

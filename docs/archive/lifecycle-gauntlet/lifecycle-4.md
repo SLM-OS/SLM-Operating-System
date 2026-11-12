@@ -395,3 +395,29 @@ Whatever does not fit is recorded as not run.
   until its /ci is done. The answers go in the next entry.
 - C2's 20-run cell at 9185d4cb (the /ci decision) and the Jetson artifacts
   at 9185d4cb are next.
+
+## Entry 11 (written 05:50 UTC): C1 critic verdict, QEMU part: FAIL on the mechanism
+
+Verdict: [`critic-4-C1.md`](critic-4-C1.md) (Fable 5.2), run files
+`run4-tools/critic-c1-runs/`. Bars (a), (b), (c) for the stress test and
+the 1 s variant, the QEMU isolation bar, trace-ring zero cost and the
+#1229 regression test: PASS by the critic's own runs and counts. Overall
+**FAIL**: the mechanism review disagrees with 1ead6ef6's claim that
+schedule()'s wait on next->on_cpu under rq_lock "cannot deadlock". The
+outgoing CPU's switch window is open to IRQs; a tick there runs
+task_wake_sleepers / the policy tick, which take the waiter's rq_lock.
+Derived from code before the commit messages were read, then reproduced 2
+of 2 at 6d4fe041 with a critic-only patch holding the window 25 ms
+(`critic-window-6d4fe041-run01.txt`, `-run02.txt`; control 30 of 30).
+Natural rate unmeasured; on Pi 5 and Jetson all CPUs take ticks.
+INCOMPLETE rows: no run-4 end-state comments on #1213, #1223, #1211; no
+make test file at the final head. The critic also saw #1230 in 9 of 10 of
+its fix-head runs (load 2.8 to 8).
+
+Ruling: no C1 PR until the deadlock is fixed and re-checked. C1 is sent
+the cycle, the files and three fix shapes (keep the switch window
+IRQ-masked through the on_cpu release; never spin under rq_lock; spin with
+the lock dropped), and must turn the critic's window patch into a test that
+hangs at 9185d4cb and completes at the new head, re-run the bar cells at
+the new head, and run /ci. C2's Jetson hour and C1's Pi 5 slot wait for
+that head; the C3 critic's boots take the lab at 07:05 meanwhile.
