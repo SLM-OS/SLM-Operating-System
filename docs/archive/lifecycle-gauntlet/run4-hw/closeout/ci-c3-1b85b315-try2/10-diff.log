@@ -1,0 +1,11 @@
+ CMakeLists.txt                     |  13 +++-
+ docs/deploy/jetson-uefi-direct.md  |  19 ++++-
+ kernel/CLAUDE.md                   |  10 +++
+ kernel/drivers/camera/imx219.c     |  19 +++++
+ kernel/include/string.h            |  12 ++++
+ kernel/kernel-jetson.ld            |   8 +++
+ kernel/kernel.ld                   |   8 +++
+ kernel/tests/test_camera.c         |  36 +++++++++-
+ kernel/tests/test_lua.c            | 138 +++++++++++++++++++++++++++++++++++++
+ scripts/test-jetson-uefi-layout.sh |  37 +++++++++-
+ 10 files changed, 294 insertions(+), 6 deletions(-)
