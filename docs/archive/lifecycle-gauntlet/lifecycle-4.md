@@ -478,3 +478,25 @@ C1's branch merges. Jetson production artifacts built at 9185d4cb
 (`jetson-elf-compare-364544c1-9185d4cb.txt`: only test_scheduler.c
 functions change size). These cells are at the deadlocking head; C2's /ci
 cell and Jetson hour rerun at C1's next head.
+
+## Entry 15 (written 06:23 UTC): C1 /ci at 9185d4cb fails on x86-64; ruling: revert the switch-in wait
+
+C1's /ci at 9185d4cb: steps 1 to 4 passed; step 4b (`make test
+PLATFORM=X86_64`) hit the 120 s cap after "[PASS]
+test_rebalance_symbol_exposed" (x86 make test passed at 5be808c5, before
+1ead6ef6). C1's analysis from code, untested: x86's resched IPI handler
+calls schedule() unconditionally while the switch window is IF=1, so a
+nested schedule() can pick prev and spin forever on prev->on_cpu, which only
+this CPU clears. With the critic's ARM64 cycle (Entry 11) that is two
+deadlocks in the same wait. C1 proposed an x86-only IPI guard.
+
+Ruling: revert only the schedule() switch-in wait from 1ead6ef6; keep the
+#1229 cpu_id() re-read, its test, and the 9185d4cb test fixes; no x86 IPI
+change. The wait was added for a window found by code reading, not traced,
+and is not needed for the traced #1213 sequences (covered by task_destroy's
+on_cpu wait and zombie_gen) or for #1229. The window itself is filed as a
+new P1 issue with the critic's analysis and window patch and C1's x86
+analysis; its principled fix (an IRQ-masked switch window through the
+on_cpu release, as Linux does) is too large to be shown in this run. At the
+new head C1 re-runs x86 make test, the bar cells, the critic's window patch
+(must not hang), and /ci from step 1.
