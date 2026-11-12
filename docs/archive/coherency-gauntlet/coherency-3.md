@@ -1145,3 +1145,17 @@ open, cycle count 14), powered on, online. Both as found.
   (d7ede5d0) differs from the form that ran in image c77156b2 only by an
   `#if defined(PLATFORM_HAS_NC_MEMORY)` branch around two `extern` lines,
   dead after the removal. The split branch takes the c77156b2 form.
+
+## Entry 34 (00:06 UTC): item 1 done: #1225 merged as 98e17440; #1193, #1203 closed
+
+- /ci on #1225's head 0ae17e0f (`run3-tools/ci-removal-0ae17e0f/`): every ci
+  skill step passed (runtime-test 308 and 328 passed; check-braces 0
+  violations, 0 unparsed; layout "All checks passed."), and the extra
+  `WORK_STEALING=ON` passed. The API read `mergeable: true`,
+  `mergeable_state: clean` at head 0ae17e0f.
+- **#1225 squash-merged as main 98e17440** (`--match-head-commit`
+  0ae17e0f); main's tree equals 0ae17e0f's.
+- /ci on main 98e17440 (`run3-tools/ci-main-98e17440/`): every ci skill
+  step passed and the extra `WORK_STEALING=ON` passed (0 `[FAIL]` lines).
+- #1193 closed on merge (23:46:10Z); #1203 closed on merge about 20 s
+  later (CLOSED, COMPLETED). Neither needed a hand close.
