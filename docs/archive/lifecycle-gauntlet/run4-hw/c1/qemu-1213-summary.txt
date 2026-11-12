@@ -168,3 +168,20 @@ where it applies. Per-run rows: qemu-rates-table.txt.
   #1230; not caused by the test-only diff as far as these 8 runs show.
 - #1228 stack-free check: qemu-1228-stack-free-check.txt (0 double frees in 8 dumps; sequence C
   frees a stack in use).
+
+## Addendum 3: head 5e5548a1 (switch-in wait reverted; orchestrator ruling after the C1 critic's deadlock finding)
+- Per-boot Pi 5 times quoted earlier came from labctl output files (rule break, disclosed); use as an estimate only.
+- Default config (WS=OFF), 17 runs (qemu-5e5548a1-head-wsoff-multi-run01..17): stress clean 17/17, 1 s variant
+  isolated=10/10 and normal=10/10 with no iso TIMEOUT 17/17, litmus [FAIL] 1/17.
+- WS=ON, 20 runs (qemu-5e5548a1-head-wson-multi-run01..20): isolated=10/10 20/20, stress clean 20/20, no CPU 1
+  stop, no batch-stress hang; litmus [FAIL] 3/20 (runs 01, 12, 13; load 2.5, 2.1, 2.1).
+- #1230 pairing, WS=ON, alternated, 1 QEMU at a time: main 6c1f4c9c litmus [FAIL] 1/10 (qemu-1230-litpair-main-
+  wson-multi-run06) vs 5e5548a1 1/10 (head-wson-run01); load per run on line 3 of each file. Main also hung at the
+  cap twice (run02 batch-stress #1219; run05 panic 'stack overflow: refusing to switch_to', #1213 family), head 0/20.
+  The 20/20 at 9185d4cb (switch-in wait present, load 4.5 to 7.5) is not reproduced at 5e5548a1.
+- #1229 test against the old code: unchanged since 6d4fe041; the 6/6 FAIL in qemu-1229-pdunfixed*-multi-run01..03
+  stands.
+- Critic window patch on 5e5548a1: no hang 2/2, but the migrated task faults on CPU 3; same on main 2/2
+  (window-5e5548a1/), i.e. the #1234 window is pre-existing.
+- x86 make test at 5e5548a1: 2/3 FAILED (test_rebalance_after_burst, on_cpu leak warnings); main 3/3 PASS;
+  5e5548a1 + the uncommitted resched guard 3/3 PASS (x86-5e5548a1/). Guard decision pending with the orchestrator.
