@@ -1,0 +1,20 @@
+#!/bin/bash
+# usage: classify.sh <rundir> <label> <elf>  -> prints "A,B,C" style class list or PASS
+D=$1; L=$2; E=$3; LOG=$D/$L.raw.log; SMP=$D/$L.samples.txt
+M=$(cat $D/$L.meta); RC=$(echo "$M" | grep -o "rc=[0-9]*" | head -1 | cut -d= -f2)
+c=""
+grep -qF "[FAIL] batch: stress" $LOG && c="$c A"
+panic=0
+if [ -s $SMP ]; then
+  for a in $(grep PCSAMPLE $SMP | grep -o "pc=[0-9a-f]*" | cut -d= -f2 | sort -u); do
+    aarch64-none-elf-addr2line -f -e $E 0x$a | head -1 | grep -qx "panic" && panic=1
+  done
+fi
+grep -qF "schedule returned" $LOG && panic=1
+[ $panic -eq 1 ] && c="$c B"
+grep -qF "[FAIL] test_litmus_patterns_pass" $LOG && c="$c C"
+other=$(grep -F "[FAIL]" $LOG | grep -v "test(s) failed\|total failure\|tests had failures\|batch: stress\|test_litmus_patterns_pass" | sed 's/^ *\[FAIL\] //' | paste -sd';' -)
+if [ -n "$other" ]; then c="$c other($other)"; fi
+if [ -z "$c" ] && [ "$RC" != "0" ]; then c=" other(rc=$RC, no FAIL line, no panic PC)"; fi
+[ -z "$c" ] && c=" PASS"
+echo "${c# }"

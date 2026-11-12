@@ -1,0 +1,17 @@
+#include <stddef.h>
+#include <stdint.h>
+#include "task.h"
+#include "sched.h"
+#include "steal_deque.h"
+#define T(f) offsetof(struct task, f)
+#define R(f) offsetof(struct cpu_runqueue, f)
+#define E(name, val) const unsigned long C2OFF_##name = (val);
+E(task_size, sizeof(struct task)) E(id, T(id)) E(name, T(name)) E(state, T(state)) E(next, T(next))
+E(ctx_x29, T(context.x29)) E(ctx_x30, T(context.x30)) E(ctx_sp, T(context.sp))
+E(cpu_affinity, T(cpu_affinity)) E(assigned_cpu, T(assigned_cpu)) E(priority, T(priority))
+E(eprio, T(effective_priority)) E(wake, T(wake_time_ns)) E(switches, T(switches)) E(generation, T(generation))
+E(rq_size, sizeof(struct cpu_runqueue)) E(rq_head, R(head)) E(rq_tail, R(tail)) E(rq_idle, R(idle_task))
+E(rq_zombie, R(zombie)) E(rq_ready, R(ready_count))
+E(dq_size, sizeof(steal_deque_t)) E(dq_buf, offsetof(steal_deque_t, buf)) E(dq_gen, offsetof(steal_deque_t, gen_buf))
+E(dq_bottom, offsetof(steal_deque_t, bottom)) E(dq_top, offsetof(steal_deque_t, top)) E(dq_cap, STEAL_DEQUE_CAPACITY)
+E(max_tasks, MAX_TASKS)

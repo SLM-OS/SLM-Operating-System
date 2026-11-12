@@ -1,0 +1,56 @@
+#!/bin/bash
+# usage: C2_OFFS=<offs.json> run_one.sh <elf> <outdir> <label> [probe_at_s]
+# Runs the exact `make test` QEMU ARM64 command (QEMU_VIRT, 4 cores, 1G,
+# fresh 4G sparse sdhci image, systemd-run MemoryMax=3G CPUQuota=200%,
+# timeout 120) plus -qmp and -gdb unix sockets (no guest-visible change).
+# On "[FAIL] batch: stress" or at 100 s without completion: 10 QMP PC
+# samples over 2 s, then a gdb task-table dump.
+ELF=$1; OUT=$2; LABEL=$3; PROBE_AT=${4:-}; : "${C2_OFFS:?set C2_OFFS to the offsets json}"; export C2_OFFS
+S=$(dirname "$0")
+D=$(mktemp -d /tmp/claude-1000/c2run.XXXXXX)
+truncate -s 4G $D/sd.img
+LOG=$OUT/$LABEL.raw.log; SMP=$OUT/$LABEL.samples.txt
+: > $SMP
+LOAD0=$(cut -d' ' -f1-3 /proc/loadavg)
+T0=$(date +%s.%N)
+systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% \
+  timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G -nographic \
+  -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0 \
+  -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=$D/sd.img \
+  -device sdhci-pci -device sd-card,drive=slmos-sd -semihosting -kernel $ELF \
+  -qmp unix:$D/qmp.sock,server=on,wait=off \
+  -chardev socket,path=$D/gdb.sock,server=on,wait=off,id=gdb0 -gdb chardev:gdb0 \
+  > $LOG 2>&1 &
+QPID=$!
+sampled=0; hung=0; probed=0; lastl=0; loads="$LOAD0"
+while kill -0 $QPID 2>/dev/null; do
+  sleep 0.5
+  el=$(echo "$(date +%s.%N) - $T0" | bc); eli=$(printf "%.0f" "$el")
+  if [ $eli -ge $((lastl + 20)) ]; then lastl=$eli; loads="$loads|${eli}s:$(cut -d' ' -f1 /proc/loadavg)"; fi
+  if [ -n "$PROBE_AT" ] && [ $probed -eq 0 ] && [ $eli -ge $PROBE_AT ]; then
+    probed=1; python3 -I $S/qmp_sample.py $D/qmp.sock $SMP probe@${eli}s 2 0.2
+    timeout 20 gdb-multiarch -q -batch -ex "target remote $D/gdb.sock" -x $S/tasks.py -ex detach $ELF >> $SMP 2>&1
+  fi
+  if [ $sampled -eq 0 ] && grep -qF "[FAIL] batch: stress" $LOG; then
+    sampled=1; echo "=== stress FAIL seen at ${el}s ===" >> $SMP
+    python3 -I $S/qmp_sample.py $D/qmp.sock $SMP stressfail@${eli}s 10 0.2
+    echo "=== gdb task dump at stress FAIL ===" >> $SMP
+    timeout 30 gdb-multiarch -q -batch -ex "target remote $D/gdb.sock" -x $S/tasks.py -ex detach $ELF >> $SMP 2>&1
+  fi
+  if [ $hung -eq 0 ] && [ $eli -ge 100 ]; then
+    hung=1; echo "=== still running at ${el}s ===" >> $SMP
+    python3 -I $S/qmp_sample.py $D/qmp.sock $SMP hang@${eli}s 10 0.2
+    echo "=== gdb task dump at 100 s ===" >> $SMP
+    timeout 12 gdb-multiarch -q -batch -ex "target remote $D/gdb.sock" -x $S/tasks.py -ex detach $ELF >> $SMP 2>&1
+  fi
+done
+wait $QPID; RC=$?
+T1=$(date +%s.%N); LOAD1=$(cut -d' ' -f1-3 /proc/loadavg)
+if [ $RC -eq 0 ]; then R=PASS
+elif [ $RC -eq 124 ]; then R="TIMEOUT(124)"
+else R="FAIL(rc=$RC)"; fi
+grep -qF "[FAIL] batch: stress" $LOG && R="$R+STRESSFAIL"
+grep -qF "[FAIL]" $LOG && [ $RC -eq 0 ] && R="$R+FAILLINES"
+echo "$LABEL rc=$RC result=$R wall=$(echo "$T1 - $T0" | bc)s load_start=[$LOAD0] load_end=[$LOAD1] loads=[$loads] stress_lines=$(grep -c 'stress workload' $LOG)" > $OUT/$LABEL.meta
+rm -rf $D
+cat $OUT/$LABEL.meta

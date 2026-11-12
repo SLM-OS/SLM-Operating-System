@@ -1,0 +1,133 @@
+# gdb dump for C2 hangs. Struct offsets come from the JSON named by
+# $C2_OFFS (made by mkoffs.sh from the head's own headers and flags),
+# because the C objects carry no DWARF. Every section is guarded so a
+# missing symbol (e.g. cpu_steal_deques in a WS=OFF build) only skips
+# that section.
+import gdb, struct, json, os
+gdb.execute("set pagination off")
+O = json.load(open(os.environ["C2_OFFS"]))
+inf = gdb.selected_inferior()
+def mem(a, n): return bytes(inf.read_memory(a, n))
+def u32(a): return struct.unpack("<I", mem(a, 4))[0]
+def u64(a): return struct.unpack("<Q", mem(a, 8))[0]
+def addr(sym): return int(gdb.parse_and_eval("(unsigned long)&'%s'" % sym))
+def symof(a):
+    if not a: return "-"
+    return gdb.execute("info symbol 0x%x" % a, to_string=True).strip().split(" in section")[0]
+def section(name, fn):
+    try: fn()
+    except Exception as e: print("SKIP %s: %s" % (name, e))
+
+SZ = O["task_size"]; NT = O["max_tasks"]
+states = ["READY", "RUNNING", "BLOCKED", "TERMINATED", "DESTROYED"]
+tt = 0
+
+def stress():
+    for s in ["WORKERS_DONE", "GENERATION", "ITERS_PER_WORKER", "MODEL_INDEX"]:
+        print("STRESSVAR %s = %d" % (s, u32(addr("slm_runtime::STRESS_" + s))))
+    for s in ["SUCCESS", "ERROR"]:
+        print("STRESSVAR %s = %d" % (s, u64(addr("slm_runtime::STRESS_" + s))))
+    print("STRESSVAR BUSY = %d" % mem(addr("slm_runtime::STRESS_BUSY"), 1)[0])
+section("stress", stress)
+
+def locks():
+    print("ENGINE_LOCK byte = %d" % mem(addr("slm_runtime::inference::engine::ENGINE_LOCK"), 1)[0])
+    for s in ["SCHED_LOCK", "SCRATCH_LOCK"]:
+        print("BATCHLOCK %s = %d" % (s, mem(addr("slm_runtime::sched::inference::" + s), 1)[0]))
+section("locks", locks)
+
+def slot_of(p):
+    if p == 0: return "-"
+    if tt <= p < tt + NT * SZ: return "slot%d" % ((p - tt) // SZ)
+    return "0x%x" % p
+
+def tasks():
+    global tt
+    tt = u64(addr("task_table"))
+    cur = [u64(addr("current_task") + 8 * i) for i in range(4)]
+    print("CURRENT " + " ".join("cpu%d=0x%x(%s)" % (i, c, slot_of(c)) for i, c in enumerate(cur)))
+    for i in range(NT):
+        raw = mem(tt + i * SZ, SZ)
+        tid = struct.unpack_from("<I", raw, O["id"])[0]
+        name = raw[O["name"]:O["name"] + 16].split(b"\0")[0].decode(errors="replace")
+        if not name and tid == 0: continue
+        st = struct.unpack_from("<I", raw, O["state"])[0]
+        lr = struct.unpack_from("<Q", raw, O["ctx_x30"])[0]
+        sp = struct.unpack_from("<Q", raw, O["ctx_sp"])[0]
+        aff = struct.unpack_from("<I", raw, O["cpu_affinity"])[0]
+        cpu = struct.unpack_from("<I", raw, O["assigned_cpu"])[0]
+        print("TASK slot=%d id=%d name=%s state=%s aff=0x%x cpu=%d prio=%d eprio=%d sw=%d gen=%d wake=%d saved_lr=0x%x (%s) sp=0x%x" % (
+            i, tid, name, states[st] if st < 5 else st, aff, cpu, raw[O["priority"]], raw[O["eprio"]],
+            struct.unpack_from("<Q", raw, O["switches"])[0], struct.unpack_from("<I", raw, O["generation"])[0],
+            struct.unpack_from("<Q", raw, O["wake"])[0], lr, symof(lr), sp))
+section("tasks", tasks)
+
+def fpwalk():
+    for i in range(NT):
+        raw = mem(tt + i * SZ, SZ)
+        name = raw[O["name"]:O["name"] + 16].split(b"\0")[0].decode(errors="replace")
+        st = struct.unpack_from("<I", raw, O["state"])[0]
+        if not name or st == 1: continue
+        fp = struct.unpack_from("<Q", raw, O["ctx_x29"])[0]
+        chain = [struct.unpack_from("<Q", raw, O["ctx_x30"])[0]]
+        for _ in range(24):
+            if fp < 0x40000000 or fp > 0x80000000: break
+            try: nfp, nlr = struct.unpack("<QQ", mem(fp, 16))
+            except Exception: break
+            if nlr == 0: break
+            chain.append(nlr); fp = nfp
+        print("FPWALK slot=%d %s state=%s: %s" % (i, name, states[st] if st < 5 else st,
+              " <- ".join("0x%x %s" % (a, symof(a)) for a in chain)))
+section("fpwalk", fpwalk)
+
+def runqueues():
+    RQ = addr("sched")
+    for c in range(4):
+        b = RQ + O["rq_size"] * c
+        head, tail, idle, zombie = (u64(b + O[k]) for k in ["rq_head", "rq_tail", "rq_idle", "rq_zombie"])
+        walk = []; p = head; n = 0
+        while p and n < NT + 6:
+            walk.append(slot_of(p)); p = u64(p + O["next"]); n += 1
+        print("RQ cpu%d ready_count=%d head=%s tail=%s idle=%s zombie=%s list=[%s]" % (
+            c, u32(b + O["rq_ready"]), slot_of(head), slot_of(tail), slot_of(idle), slot_of(zombie), ",".join(walk)))
+section("runqueues", runqueues)
+
+def deques():
+    DQ = addr("cpu_steal_deques"); cap = O["dq_cap"]
+    for c in range(4):
+        b = DQ + O["dq_size"] * c
+        bottom, top = u32(b + O["dq_bottom"]), u32(b + O["dq_top"])
+        ents = ["%s/g%d" % (slot_of(u64(b + O["dq_buf"] + 8 * (i % cap))), u32(b + O["dq_gen"] + 4 * (i % cap)))
+                for i in range(top, min(bottom, top + cap))]
+        print("DEQUE cpu%d top=%d bottom=%d entries=[%s]" % (c, top, bottom, ",".join(ents)))
+section("deques", deques)
+
+def diag():
+    a = lambda s: [u32(addr(s) + 4 * i) for i in range(4)]
+    print("DIAG preempt_disabled=%s sched_diag_tick=%s sched_diag_schedule=%s timer_handler_count=%d" % (
+        a("preempt_disabled"), a("sched_diag_tick"), a("sched_diag_schedule"), u32(addr("timer_handler_count"))))
+section("diag", diag)
+
+def trapframes():
+    TEXT_END = addr("__text_end")
+    for i in range(NT):
+        raw = mem(tt + i * SZ, SZ)
+        name = raw[O["name"]:O["name"] + 16].split(b"\0")[0].decode(errors="replace")
+        st = struct.unpack_from("<I", raw, O["state"])[0]
+        if not name or st == 1 or name in ("idle",): continue
+        sp = struct.unpack_from("<Q", raw, O["ctx_sp"])[0]
+        lr = struct.unpack_from("<Q", raw, O["ctx_x30"])[0]
+        if "schedule" not in symof(lr): continue
+        try: blob = mem(sp, 0x1000)
+        except Exception: continue
+        for off in range(0, 0x1000 - 16, 8):
+            elr, spsr = struct.unpack_from("<QQ", blob, off)
+            if 0x40000000 <= elr < TEXT_END and (spsr & 0xf) == 5 and spsr < 0x100000000:
+                print("TRAPFRAME slot=%d %s cand@sp+0x%x ELR=0x%x (%s) SPSR=0x%x" % (i, name, off, elr, symof(elr), spsr))
+section("trapframes", trapframes)
+
+for th in inf.threads():
+    th.switch()
+    print("THREAD", th.num)
+    try: gdb.execute("bt 12")
+    except Exception as e: print("bt err", e)

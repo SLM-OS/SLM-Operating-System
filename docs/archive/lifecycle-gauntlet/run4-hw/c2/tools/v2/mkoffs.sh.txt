@@ -1,0 +1,22 @@
+#!/bin/bash
+# usage: mkoffs.sh <worktree> <build_dir> <out.json>
+# Compiles offs.c with the test build's own defines/includes and dumps
+# the C2OFF_* constants as JSON for tasks.py.
+WT=$1; BD=$2; OUT=$3; S=$(dirname "$0")
+f=$(find $BD -name flags.make -path "*slmos*" | head -1); [ -z "$f" ] && f=$(find $BD -name flags.make | head -1)
+DEF=$(grep "^C_DEFINES" $f | cut -d= -f2-); INC=$(grep "^C_INCLUDES" $f | cut -d= -f2-)
+eval aarch64-none-elf-gcc -ffreestanding -mcpu=cortex-a76 -O2 -std=c2x $DEF $INC -c $S/offs.c -o $S/offs.o || exit 1
+python3 - $S/offs.o $OUT <<'PY'
+import subprocess, sys, json, struct
+o, out = sys.argv[1], sys.argv[2]
+syms = subprocess.run(["aarch64-none-elf-nm", "-S", o], capture_output=True, text=True).stdout.split("\n")
+dump = subprocess.run(["aarch64-none-elf-objcopy", "-O", "binary", "--only-section=.rodata", o, o + ".bin"])
+data = open(o + ".bin", "rb").read()
+res = {}
+for l in syms:
+    p = l.split()
+    if len(p) == 4 and p[3].startswith("C2OFF_"):
+        off = int(p[0], 16); res[p[3][6:]] = struct.unpack_from("<Q", data, off)[0]
+json.dump(res, open(out, "w"), indent=1)
+print(json.dumps(res))
+PY

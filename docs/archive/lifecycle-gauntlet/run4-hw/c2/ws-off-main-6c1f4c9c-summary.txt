@@ -1,0 +1,54 @@
+# ws-off-main-6c1f4c9c summary: make test QEMU command, head 6c1f4c9c3b2ef59e49c0ea02c14827eebffe2989, WORK_STEALING=OFF (CMakeCache OFF), TCG thread=multi (no -accel flag), elf sha256 2afbbf05aacbefab4366958d4e8fb205725855ba1db6c46452ef5cd696aafefa, N=20; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass
+# boot banner: SLM-OS v0.4.0 build 20261112022340 (6c1f4c9c)
+
+| File | load_start (1/5/15) | rc | Class |
+|---|---|---|---|
+| ws-off-main-6c1f4c9c-run01.txt | 5.11 5.98 5.09 | 1 | C |
+| ws-off-main-6c1f4c9c-run02.txt | 5.41 5.89 5.12 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run03.txt | 4.62 5.61 5.07 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run04.txt | 5.00 5.55 5.09 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run05.txt | 4.22 5.19 4.99 | 1 | C |
+| ws-off-main-6c1f4c9c-run06.txt | 5.77 5.45 5.09 | 1 | C |
+| ws-off-main-6c1f4c9c-run07.txt | 5.68 5.42 5.11 | 1 | C |
+| ws-off-main-6c1f4c9c-run08.txt | 5.76 5.53 5.17 | 1 | C |
+| ws-off-main-6c1f4c9c-run09.txt | 6.75 5.79 5.28 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run10.txt | 6.64 6.05 5.41 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run11.txt | 4.68 5.56 5.28 | 1 | C |
+| ws-off-main-6c1f4c9c-run12.txt | 3.71 5.12 5.14 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run13.txt | 3.98 4.91 5.06 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run14.txt | 4.02 4.75 5.00 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run15.txt | 3.80 4.56 4.91 | 1 | C |
+| ws-off-main-6c1f4c9c-run16.txt | 3.46 4.34 4.82 | 1 | C |
+| ws-off-main-6c1f4c9c-run17.txt | 4.44 4.43 4.82 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run18.txt | 4.32 4.39 4.78 | 0 | PASS |
+| ws-off-main-6c1f4c9c-run19.txt | 4.55 4.44 4.77 | 1 | C |
+| ws-off-main-6c1f4c9c-run20.txt | 4.98 4.59 4.80 | 0 | PASS |
+
+Class A: 0 of 20
+Class B: 0 of 20
+Class C: 9 of 20
+Any failure: 9 of 20
+Load (1-min) at run start: min 3.46, max 6.75
+
+## Comparison with the WS=ON cell (ws-main-6c1f4c9c-summary.txt, same head)
+
+| Class | WS=ON (load 2.74 to 5.67) | WS=OFF (load 3.46 to 6.75) |
+|---|---|---|
+| A, #1219 batch stress hang | 3 of 20 | 0 of 20 |
+| B, panic PC (#1213-like) | 2 of 20 | 0 of 20 |
+| C, test_litmus_patterns_pass | 3 of 20 | 9 of 20 |
+
+- A and B: 0 of 20 with WS=OFF, at higher host load than the WS=ON
+  cell. This is consistent with both depending on CONFIG_WORK_STEALING,
+  but it does not meet the 5x rule: WS=ON averaged 6.7 runs per class A
+  failure and 10 per class B failure, so 5x needs 34 and 50 fault-free
+  WS=OFF runs. 20 runs is 3.0x for A and 2.0x for B.
+- C occurs without work stealing, so #1230 is not WS-specific. 9 of 20
+  against 3 of 20 is not a significant difference at these counts
+  (Fisher exact, two-sided, about 0.08). The 1-minute load at run start
+  does not separate failing from passing runs: WS=OFF failed at 3.46
+  and passed at 6.64 and 6.75.
+- The classes come from tools/v2/classify.sh.txt: A = a "[FAIL] batch:
+  stress" line; B = any sampled PC that symbolizes to panic, or
+  "schedule returned" in the log; C = a test_litmus_patterns_pass FAIL.
+  WS=OFF had no hang, so no QMP samples were taken.
