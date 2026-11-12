@@ -2384,6 +2384,7 @@ static void test_isolated_core_latency(void)
     uint64_t normal_max = 0;
     uint64_t normal_min = UINT64_MAX;
     int normal_count = 0;
+    int wait_timeouts = 0;
 
     /*
      * Phase 1: Measure latency on isolated core
@@ -2402,12 +2403,18 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
+        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
+         * this was a 100-iteration count: long enough waits let the
+         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
+         * on Pi 5 the count expired before the task ran in almost every
+         * iteration. Timeouts are counted and asserted after cleanup. */
         SLOT_TRACE(ST_TEST, t, 0x101, i, 0);       /* created + added */
-        long long st_rc = test_wait_task_terminated("iso_latency_isolated", t,
-                                                    TEST_WAIT_S(1));
-        (void)st_rc;
-        SLOT_TRACE(ST_TEST, t, 0x201, i, st_rc);   /* wait returned */
+        long long wait_rc = test_wait_task_terminated("iso_latency_isolated", t,
+                                                      TEST_WAIT_S(1));
+        if (wait_rc < 0) {
+            wait_timeouts++;
+        }
+        SLOT_TRACE(ST_TEST, t, 0x201, i, wait_rc); /* wait returned */
 
         /* Record sample */
         if (latency_sample_index > 0) {
@@ -2449,12 +2456,18 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
+        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
+         * this was a 100-iteration count: long enough waits let the
+         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
+         * on Pi 5 the count expired before the task ran in almost every
+         * iteration. Timeouts are counted and asserted after cleanup. */
         SLOT_TRACE(ST_TEST, t, 0x102, i, 0);       /* created + added */
-        long long st_rc = test_wait_task_terminated("iso_latency_normal", t,
-                                                    TEST_WAIT_S(1));
-        (void)st_rc;
-        SLOT_TRACE(ST_TEST, t, 0x202, i, st_rc);   /* wait returned */
+        long long wait_rc = test_wait_task_terminated("iso_latency_normal", t,
+                                                      TEST_WAIT_S(1));
+        if (wait_rc < 0) {
+            wait_timeouts++;
+        }
+        SLOT_TRACE(ST_TEST, t, 0x202, i, wait_rc); /* wait returned */
 
         if (latency_sample_index > 0) {
             uint64_t sample = latency_samples[0];
@@ -2478,6 +2491,8 @@ static void test_isolated_core_latency(void)
      */
     uart_printf("  Samples collected: isolated=%d/%d, normal=%d/%d\n",
                 isolated_count, LATENCY_SAMPLES, normal_count, LATENCY_SAMPLES);
+    /* Every task must finish within its 1 s bound (#1213). */
+    TEST_ASSERT_EQUAL_INT(0, wait_timeouts);
 
     if (isolated_count > 0 && normal_count > 0) {
         uint64_t isolated_avg = isolated_sum / (uint64_t)isolated_count;
