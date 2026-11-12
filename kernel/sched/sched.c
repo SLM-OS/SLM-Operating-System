@@ -1892,6 +1892,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * the steal race-free; this is belt-and-suspenders per the
          * cross-plan review (B3 / P2-3). */
         if (preempt_disabled[victim]) {
+            SLOT_TRACE(ST_STEAL_PD, NULL, victim, 1, 0);
             n_pd++;
             tr->v_pd++;
             /* Unlocked snapshot: did the skipped victim look like it
@@ -1969,6 +1970,13 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 stealable = 1;
             }
 
+            SLOT_TRACE(ST_STEAL_TRY, candidate, victim, preempt_disabled[victim],
+                       (stealable ? 1 :
+                        candidate->generation != captured_gen ? 2 :
+                        candidate->state != TASK_READY ? 3 :
+                        candidate->assigned_cpu != victim ? 4 :
+                        candidate->cpu_affinity != CPU_AFFINITY_ANY ? 5 : 6) |
+                       ((uint64_t)(task_current_on_cpu(victim) == candidate) << 8));
             rq_unlock_irqrestore(victim, flags);
 
             if (stealable) {
@@ -2509,6 +2517,7 @@ void schedule(void)
      * already closes the window.)
      */
     preempt_disabled[this_cpu] = 1;
+    SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
 
     rq_unlock_irqrestore(this_cpu, flags);
@@ -2590,6 +2599,7 @@ void schedule(void)
     /* Resumed on our stack after being switched back.
      * Re-enable preemption so timer ticks can trigger scheduling. */
     preempt_disabled[this_cpu] = 0;
+    SLOT_TRACE(ST_PD_CLEAR, task_current(), this_cpu, cpu_id(), 0);
     steal_pdwin_clear(this_cpu);                    /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
@@ -2780,6 +2790,7 @@ void scheduler_tick(void)
      * completion. Calling schedule() here would corrupt state because
      * task_set_current(next) has already been called but the actual
      * stack switch hasn't happened yet. */
+    slot_trace_pd_tick(cpu, preempt_disabled[cpu]);
     if (preempt_disabled[cpu]) {
         return;
     }

@@ -29,6 +29,7 @@ struct slot_trace_ent {
     uint32_t gen;
     uint32_t id;
     uint32_t holders;   /* rq lock holder per CPU, 4 bits each (0 = free, n+1 = CPU n) */
+    uint32_t rep;       /* identical consecutive records folded into this one */
     uint64_t a, b, c;
 };
 
@@ -87,6 +88,21 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
     __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(daif) :: "memory");
 
     uint32_t i = slot_trace_idx[cpu];
+    /* Fold an identical consecutive record (a yield loop's requeue ADDs,
+     * a thief's repeated preempt_disabled skips) into the previous one,
+     * so floods do not push the history out of the ring. */
+    if (i > 0) {
+        struct slot_trace_ent *p =
+            &slot_trace_ring[cpu][(i - 1) & (SLOT_TRACE_LEN - 1)];
+        if (p->ev == ev && p->slot == (int16_t)st_slot(t) &&
+            p->gen == (t ? t->generation : 0) && p->a == a && p->b == b &&
+            p->c == c && (ev == ST_ADD || ev == ST_STEAL_PD ||
+                          ev == ST_PD_SET || ev == ST_PD_CLEAR)) {
+            p->rep++;
+            __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+            return;
+        }
+    }
     struct slot_trace_ent *e = &slot_trace_ring[cpu][i & (SLOT_TRACE_LEN - 1)];
     e->ts = st_cntvct();
     e->seq = __atomic_fetch_add(&slot_trace_seq, 1, __ATOMIC_RELAXED);
@@ -101,6 +117,7 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
         h |= ((uint32_t)slot_trace_rq_holder[k] & 0xF) << (4 * k);
     }
     e->holders = h;
+    e->rep = 0;
     e->a = a;
     e->b = b;
     e->c = c;
@@ -126,6 +143,11 @@ static const char *st_name(uint32_t ev)
     case ST_FIRST_RUN:       return "FIRST_RUN";
     case ST_PICK_SAME:       return "PICK_SAME";
     case ST_TEST:            return "TEST";
+    case ST_PD_SET:          return "PD_SET";
+    case ST_PD_CLEAR:        return "PD_CLEAR";
+    case ST_STEAL_PD:        return "STEAL_PD";
+    case ST_STEAL_TRY:       return "STEAL_TRY";
+    case ST_PD_STUCK:        return "PD_STUCK";
     default:                 return "?";
     }
 }
@@ -190,19 +212,43 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
             const struct slot_trace_ent *e =
                 &slot_trace_ring[k][i & (SLOT_TRACE_LEN - 1)];
             uart_printf_unlocked("ST c%u #%u t=0x%lx %s slot=%d gen=%u id=%u st=%u "
-                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x\n",
+                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x rep=%u\n",
                                  (unsigned)e->cpu, e->seq,
                                  (unsigned long)e->ts, st_name(e->ev),
                                  (int)e->slot, e->gen, e->id,
                                  (unsigned)e->state,
                                  (unsigned long)e->a, (unsigned long)e->b,
-                                 (unsigned long)e->c, e->holders);
+                                 (unsigned long)e->c, e->holders, e->rep);
         }
     }
     uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
     semihosting_exit(3);
     for (;;) {
         __asm__ volatile("wfe");
+    }
+}
+
+#define SLOT_TRACE_PD_STUCK_TICKS 300U   /* 3 s at 100 Hz */
+static uint32_t slot_trace_pd_ticks[MAX_CPUS];
+
+void slot_trace_pd_tick(uint32_t cpu, int pd)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    if (!pd) {
+        slot_trace_pd_ticks[cpu] = 0;
+        return;
+    }
+    if (++slot_trace_pd_ticks[cpu] == SLOT_TRACE_PD_STUCK_TICKS) {
+        extern volatile int preempt_disabled[];
+        SLOT_TRACE(ST_PD_STUCK, task_current_on_cpu(cpu), cpu,
+                   slot_trace_pd_ticks[cpu], 0);
+        uart_printf_unlocked("\nSLOTTRACE-FAULT preempt_disabled[%u] stuck for %u ticks "
+                             "(pd=%d/%d/%d/%d)\n", cpu, slot_trace_pd_ticks[cpu],
+                             preempt_disabled[0], preempt_disabled[1],
+                             preempt_disabled[2], preempt_disabled[3]);
+        slot_trace_dump("pd_stuck", cpu, slot_trace_pd_ticks[cpu], 0);
     }
 }
 

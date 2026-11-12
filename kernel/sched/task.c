@@ -137,6 +137,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr,
         int hw_cpu = cpu_logical_id(mpidr);
         if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
             preempt_disabled[hw_cpu] = 0;
+            SLOT_TRACE(ST_PD_CLEAR, task_current(), hw_cpu, hw_cpu, 1);
             steal_pdwin_clear((uint32_t)hw_cpu);    /* #1216 trace */
         }
         __asm__ volatile("dsb sy" ::: "memory");

@@ -45,6 +45,15 @@
 #define ST_FIRST_RUN        12  /* task_entry_trampoline; a=live sp, b=ctx.sp  */
 #define ST_PICK_SAME        13  /* schedule() kept current; a=state at entry   */
 #define ST_TEST             14  /* test marker; a=tag, b, c                    */
+/* #1229 / #1219 events (lifecycle run 4, C1). */
+#define ST_PD_SET           15  /* preempt_disabled[a] = 1; task=next, b=cpu_id() */
+#define ST_PD_CLEAR         16  /* preempt_disabled[a] = 0; task=current, b=cpu_id() actually running */
+#define ST_STEAL_PD         17  /* thief skipped victim a on preempt_disabled (task NULL) */
+#define ST_STEAL_TRY        18  /* thief popped task from victim a; b=preempt_disabled[a] under rq_lock[a],
+                                   c=outcome | (task was victim's current)<<8;
+                                   outcome 1 stolen, 2 gen, 3 state, 4 cpu,
+                                   5 affinity, 6 not in queue                 */
+#define ST_PD_STUCK         19  /* scheduler_tick: preempt_disabled[a] set for b ticks */
 
 #if defined(CONFIG_SLOT_TRACE)
 
@@ -71,6 +80,9 @@ extern volatile uint8_t slot_trace_rq_holder[];
 #define SLOT_TRACE_ONLY(...)        __VA_ARGS__
 #define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)] = (uint8_t)(cpu_id() + 1))
 #define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)] = 0)
+/* Tick-side watchdog: dumps the rings once preempt_disabled[cpu] has
+ * stayed 1 for SLOT_TRACE_PD_STUCK_TICKS consecutive ticks (#1229). */
+void slot_trace_pd_tick(uint32_t cpu, int pd);
 
 #else
 
@@ -79,6 +91,7 @@ extern volatile uint8_t slot_trace_rq_holder[];
 #define SLOT_TRACE_ONLY(...)
 #define SLOT_TRACE_RQ_LOCKED(cpu)   ((void)0)
 #define SLOT_TRACE_RQ_UNLOCKING(cpu) ((void)0)
+#define slot_trace_pd_tick(cpu, pd) ((void)0)
 
 #endif /* CONFIG_SLOT_TRACE */
 
