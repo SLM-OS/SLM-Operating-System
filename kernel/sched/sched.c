@@ -36,6 +36,7 @@
 #if CONFIG_WORK_STEALING
 #include "steal_deque.h"
 #endif
+#include "slot_trace.h"
 /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
  * are referenced from schedule() in every configuration (they are
  * empty functions without work stealing). */
@@ -155,10 +156,13 @@ static volatile uint64_t steal_trace_t0_cnt;
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
 {
-    return spin_lock_irqsave(&rq_lock[cpu]);
+    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    SLOT_TRACE_RQ_LOCKED(cpu);
+    return f;
 }
 static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
+    SLOT_TRACE_RQ_UNLOCKING(cpu);
     spin_unlock_irqrestore(&rq_lock[cpu], flags);
 }
 
@@ -914,6 +918,7 @@ static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
 {
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
+    SLOT_TRACE(ST_ADD, task, cpu, __builtin_return_address(0), 0);
     task->assigned_cpu = cpu;
 
     /* Update effective priority based on deadline before insertion */
@@ -1362,7 +1367,9 @@ void scheduler_terminate_task(struct task *task)
 
         task->state = TASK_TERMINATED;
 
-        if (remove_from_cpu_queue_locked(task, cpu)) {
+        int st_removed = remove_from_cpu_queue_locked(task, cpu);
+        SLOT_TRACE(ST_TERMINATE, task, cpu, st_removed, 0);
+        if (st_removed) {
             sched.task_count--;
             DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
                         task->name, cpu, rq->ready_count);
@@ -2357,6 +2364,7 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
+        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), 0);
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
@@ -2367,6 +2375,7 @@ void schedule(void)
 
     struct task *current = task_current();
     struct task *next = pick_next_task(this_cpu);
+    SLOT_TRACE_ONLY(uint32_t st_state0 = current ? (uint32_t)current->state : 0xFFFF;)
 
     /* If current task is still running and ready, re-add to queue */
     if (current && current->state == TASK_RUNNING) {
@@ -2402,6 +2411,10 @@ void schedule(void)
      * If the current task is terminated, we MUST switch to a different task.
      */
     if (next == current) {
+        SLOT_TRACE_ONLY(
+            if (st_state0 != TASK_RUNNING) {
+                SLOT_TRACE(ST_PICK_SAME, current, st_state0, 0, 0);
+            })
         if (current && (current->state == TASK_TERMINATED ||
                         current->state == TASK_DESTROYED)) {
             rq_unlock_irqrestore(this_cpu, flags);
@@ -2434,6 +2447,7 @@ void schedule(void)
      */
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
+        SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
     }
 
     task_set_current(next);
@@ -2527,7 +2541,17 @@ void schedule(void)
     }
 #endif
 
+    SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
+               next->context.x19);
     switch_to(current, next);
+
+#if !defined(PLATFORM_X86_64)
+    SLOT_TRACE_ONLY({
+        uint64_t st_sp;
+        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
+        SLOT_TRACE(ST_SWITCH_RET, task_current(), st_sp, 0, 0);
+    })
+#endif
 
     /* Resumed on our stack after being switched back.
      * Re-enable preemption so timer ticks can trigger scheduling. */
@@ -2650,6 +2674,8 @@ void scheduler_start(uint32_t this_cpu)
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.
      * The trampoline clears preempt_disabled[this_cpu]. */
+    SLOT_TRACE(ST_SWITCH, first, SLOT_TRACE_PACK(NULL), first->context.sp,
+               first->context.x19);
     switch_to(NULL, first);
 
     /* Should never reach here */

@@ -294,6 +294,18 @@ endif()
 # higher-level logging is wedged. See `STAGE25_TRACE_CHAR` in
 # kernel/arch/arm64/vectors.S. Off by default; enable with
 # -DSTAGE25_TRACE_PI5=ON when debugging the trampoline path (#672).
+# Task-slot lifecycle trace (#1213): per-CPU rings of task_create /
+# task_destroy / switch_to / zombie events, dumped on the first EL1
+# synchronous exception or panic. ARM64 only, debug only; with it off the
+# kernel's .text is unchanged. See kernel/include/slot_trace.h.
+option(SLOT_TRACE "Per-CPU task-slot lifecycle trace (#1213, debug only)" OFF)
+if(SLOT_TRACE)
+    if(PLATFORM STREQUAL "X86_64")
+        message(FATAL_ERROR "SLOT_TRACE is ARM64-only")
+    endif()
+    add_compile_definitions(CONFIG_SLOT_TRACE=1)
+endif()
+
 option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
     add_compile_definitions(STAGE25_TRACE_PI5=1)
@@ -690,6 +702,7 @@ set(KERNEL_SOURCES
     kernel/sched/sched.c
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
+    kernel/sched/slot_trace.c
     kernel/src/sched_trace.c
     kernel/src/latency_hist.c
     kernel/src/rate_ewma.c

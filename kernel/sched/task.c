@@ -11,6 +11,7 @@
 #include "spinlock.h"
 #include "arch.h"
 #include "steal_trace.h"
+#include "slot_trace.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #include "elf.h"
@@ -149,6 +150,14 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     }
 #endif
 
+#if !defined(PLATFORM_X86_64)
+    SLOT_TRACE_ONLY({
+        uint64_t st_sp;
+        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
+        struct task *st_t = task_current();
+        SLOT_TRACE(ST_FIRST_RUN, st_t, st_sp, st_t ? st_t->context.sp : 0, 0);
+    })
+#endif
     entry(arg);
     task_exit();
 }
@@ -297,6 +306,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
 
     TASK_UNLOCK_IRQRESTORE();
 
+    SLOT_TRACE(ST_CREATE_ALLOC, task, stack, __builtin_return_address(0), 0);
+
     /* Initialize rest of task structure (slot is ours now) */
     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
     task->state = TASK_READY;
@@ -374,6 +385,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     /* Store entry point and arg in callee-saved registers for wrapper */
     task->context.x19 = (uint64_t)entry;
     task->context.x20 = (uint64_t)arg;
+    SLOT_TRACE(ST_CREATE_CTX_DONE, task, task->context.sp, task->context.x19,
+               task->context.x30);
 #endif /* PLATFORM_X86_64 */
 
     /* No cleanup callback by default */
@@ -684,6 +697,7 @@ void task_exit(void)
      * Without this, a scheduler on another CPU could observe the task
      * still in the queue after the state flip but before dequeue runs,
      * picking a terminated task and panicking. */
+    SLOT_TRACE(ST_EXIT, task, 0, 0, 0);
     scheduler_terminate_task(task);
 
     /* Context-switch away. schedule() -> spin_lock_irqsave saves our
@@ -782,6 +796,9 @@ void task_destroy(struct task *task)
         return;
     }
 
+    SLOT_TRACE(ST_DESTROY, task, __builtin_return_address(0), task->stack_base,
+               task->context.sp);
+
     /* Capture info before clearing */
     void *stack = task->stack_base;
     uint32_t task_id = task->id;
@@ -816,6 +833,7 @@ void task_destroy(struct task *task)
      * not reachable by a realistic workload.
      */
     task->generation++;
+    SLOT_TRACE(ST_DESTROY_DONE, task, task_id, 0, 0);
 
     TASK_UNLOCK_IRQRESTORE();
 

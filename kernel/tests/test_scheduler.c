@@ -15,6 +15,7 @@
 #include "platform.h"
 #include "uart.h"
 #include "string.h"
+#include "slot_trace.h"
 #include "test_wait.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -2202,8 +2203,11 @@ static void test_isolated_core_latency(void)
         scheduler_add_task(t);
 
         /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
-        (void)test_wait_task_terminated("iso_latency_isolated", t,
-                                        TEST_WAIT_S(1));
+        SLOT_TRACE(ST_TEST, t, 0x101, i, 0);       /* created + added */
+        long long st_rc = test_wait_task_terminated("iso_latency_isolated", t,
+                                                    TEST_WAIT_S(1));
+        (void)st_rc;
+        SLOT_TRACE(ST_TEST, t, 0x201, i, st_rc);   /* wait returned */
 
         /* Record sample */
         if (latency_sample_index > 0) {
@@ -2225,6 +2229,7 @@ static void test_isolated_core_latency(void)
         if (t->state != TASK_TERMINATED) {
             scheduler_terminate_task(t);
         }
+        SLOT_TRACE(ST_TEST, t, 0x301, i, 0);         /* about to destroy */
         task_destroy(t);
     }
 
@@ -2245,8 +2250,11 @@ static void test_isolated_core_latency(void)
         scheduler_add_task(t);
 
         /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
-        (void)test_wait_task_terminated("iso_latency_normal", t,
-                                        TEST_WAIT_S(1));
+        SLOT_TRACE(ST_TEST, t, 0x102, i, 0);       /* created + added */
+        long long st_rc = test_wait_task_terminated("iso_latency_normal", t,
+                                                    TEST_WAIT_S(1));
+        (void)st_rc;
+        SLOT_TRACE(ST_TEST, t, 0x202, i, st_rc);   /* wait returned */
 
         if (latency_sample_index > 0) {
             uint64_t sample = latency_samples[0];
@@ -2261,6 +2269,7 @@ static void test_isolated_core_latency(void)
         if (t->state != TASK_TERMINATED) {
             scheduler_terminate_task(t);
         }
+        SLOT_TRACE(ST_TEST, t, 0x302, i, 0);         /* about to destroy */
         task_destroy(t);
     }
 
