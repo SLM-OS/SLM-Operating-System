@@ -1,0 +1,199 @@
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 39f0f2bc..97d511d6 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -2340,6 +2340,9 @@ uint64_t sched_rebalance_get_migrations(void)
+     return rebalance_migrations;
+ }
+ 
++volatile int critic_widen_on;
++struct task *volatile critic_widen_task;
++volatile int critic_in_window;
+ /*
+  * Schedule - select next task and switch to it (per-CPU).
+  */
+@@ -2541,6 +2544,18 @@ void schedule(void)
+ 
+     rq_unlock_irqrestore(this_cpu, flags);
+ 
++    /* CRITIC EXPERIMENT (not part of any branch): hold the switch window
++     * open for 25 ms for one chosen outgoing task, with the IRQ state the
++     * caller had, so that a timer tick lands inside it. */
++    if (critic_widen_on && current && current == critic_widen_task &&
++        current->state == TASK_READY) {
++        __atomic_store_n(&critic_in_window, 1, __ATOMIC_RELEASE);
++        uint64_t cw_f = timer_get_frequency(), cw_t0 = timer_get_count();
++        while (timer_get_count() - cw_t0 < cw_f / 40) {
++        }
++        __atomic_store_n(&critic_in_window, 0, __ATOMIC_RELEASE);
++    }
++
+     /* Stack-overflow assertion. Validate the live SP register against
+      * `current`'s stack range BEFORE we save it via switch_to.
+      *
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index 30a0216e..109797c6 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -6302,12 +6302,161 @@ static void test_aitrace_dump_short_buffer_rejected(void)
+  * Test Suite Entry Point
+  * ============================================================================ */
+ 
++
++/* CRITIC EXPERIMENT (not part of any branch): a hardware tick inside
++ * CPU 0's switch window while CPU 3 waits on next->on_cpu under its
++ * rq_lock. On the QEMU test kernel (COOP_PREEMPT=ON, SECONDARY_PREEMPT=OFF)
++ * only CPU 0 takes hardware timer IRQs, so the window is CPU 0's. */
++extern volatile int critic_widen_on;
++extern struct task *volatile critic_widen_task;
++extern volatile int critic_in_window;
++static volatile uint32_t cw_stop_all, cw_stop_t, cw_s_runs;
++static volatile uint32_t cw_h_arm, cw_h_done, cw_h_it, cw_h_mig, cw_h_to;
++static struct task *volatile cw_h_task;
++static const char *volatile cw_h_name;
++static void cw_yielder(void *arg)
++{
++    volatile uint32_t *stop = arg;
++    while (!__atomic_load_n(stop, __ATOMIC_ACQUIRE)) {
++        yield();
++    }
++}
++static void cw_busy(void *arg)
++{
++    (void)arg;
++    while (!__atomic_load_n(&cw_stop_all, __ATOMIC_ACQUIRE)) {
++        __asm__ volatile("yield" ::: "memory");   /* CPU hint, not schedule() */
++    }
++}
++static void cw_sleeper(void *arg)
++{
++    uint32_t ms = (uint32_t)(uintptr_t)arg;
++    while (!__atomic_load_n(&cw_stop_all, __ATOMIC_ACQUIRE)) {
++        task_sleep_ms(ms);
++        __atomic_fetch_add(&cw_s_runs, 1, __ATOMIC_RELAXED);
++    }
++}
++/* Helper on CPU 1: never calls schedule() while armed, so CPU 1 takes no
++ * cooperative tick. When CPU 0 is inside the window, moves T to cw_h_to. */
++static void cw_helper(void *arg)
++{
++    (void)arg;
++    while (!__atomic_load_n(&cw_stop_all, __ATOMIC_ACQUIRE)) {
++        if (!__atomic_load_n(&cw_h_arm, __ATOMIC_ACQUIRE)) {
++            yield();
++            continue;
++        }
++        if (__atomic_load_n(&critic_in_window, __ATOMIC_ACQUIRE) == 1) {
++            critic_widen_on = 0;
++            uart_printf("  critic_window %s it=%u: cpu0 in window, migrating T to cpu%u\n",
++                        cw_h_name, cw_h_it, cw_h_to);
++            if (sched_migrate_task(cw_h_task, cw_h_to) == 0) {
++                __atomic_fetch_add(&cw_h_mig, 1, __ATOMIC_RELAXED);
++            }
++            while (__atomic_load_n(&critic_in_window, __ATOMIC_ACQUIRE) == 1) {
++                __asm__ volatile("yield" ::: "memory");
++            }
++            __atomic_store_n(&cw_h_arm, 0, __ATOMIC_RELEASE);
++            __atomic_store_n(&cw_h_done, 1, __ATOMIC_RELEASE);
++        }
++    }
++}
++static bool cw_terminated(void *ctx)
++{
++    struct task *t = ctx;
++    return __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED;
++}
++#define CW_SLEEPERS 6
++static void critic_window_phase(const char *name, uint32_t sleeper_cpu,
++                                uint32_t migrate_to, uint32_t busy_cpu,
++                                uint32_t iters)
++{
++    struct task *s[CW_SLEEPERS];
++    cw_stop_all = 0;
++    cw_s_runs = 0;
++    cw_h_arm = 0;
++    cw_h_mig = 0;
++    cw_h_to = migrate_to;
++    cw_h_name = name;
++    struct task *h = task_create("cw_H", cw_helper, NULL);
++    h->cpu_affinity = 1;
++    scheduler_add_task_to_cpu(h, 1);
++    struct task *b = task_create("cw_B", cw_busy, NULL);
++    b->cpu_affinity = busy_cpu;
++    scheduler_add_task_to_cpu(b, busy_cpu);
++    for (uint32_t i = 0; i < CW_SLEEPERS; i++) {
++        s[i] = task_create("cw_S", cw_sleeper, (void *)(uintptr_t)(1 + i));
++        s[i]->cpu_affinity = sleeper_cpu;
++        scheduler_add_task_to_cpu(s[i], sleeper_cpu);
++    }
++    uint32_t nowin = 0;
++    uint64_t f = timer_get_frequency();
++    for (uint32_t it = 0; it < iters; it++) {
++        cw_stop_t = 0;
++        struct task *t = task_create("cw_T", cw_yielder, (void *)&cw_stop_t);
++        cw_h_task = t;
++        cw_h_it = it;
++        cw_h_done = 0;
++        critic_widen_task = t;
++        critic_widen_on = 1;
++        __atomic_store_n(&cw_h_arm, 1, __ATOMIC_RELEASE);
++        scheduler_add_task_to_cpu(t, 0);
++        uint64_t t0 = timer_get_count();
++        while (!__atomic_load_n(&cw_h_done, __ATOMIC_ACQUIRE)) {
++            if (timer_get_count() - t0 > 3 * f) {
++                nowin++;
++                break;
++            }
++            yield();        /* lets T run on CPU 0; T's yield opens the window */
++        }
++        critic_widen_on = 0;
++        __atomic_store_n(&cw_h_arm, 0, __ATOMIC_RELEASE);
++        __atomic_store_n(&cw_stop_t, 1, __ATOMIC_RELEASE);
++        (void)test_wait_until("cw_T", cw_terminated, t, TEST_WAIT_S(2));
++        if (t->state != TASK_TERMINATED) {
++            scheduler_terminate_task(t);
++        }
++        task_destroy(t);
++    }
++    __atomic_store_n(&cw_stop_all, 1, __ATOMIC_RELEASE);
++    (void)test_wait_until("cw_H", cw_terminated, h, TEST_WAIT_S(2));
++    if (h->state != TASK_TERMINATED) scheduler_terminate_task(h);
++    task_destroy(h);
++    (void)test_wait_until("cw_B", cw_terminated, b, TEST_WAIT_S(2));
++    if (b->state != TASK_TERMINATED) scheduler_terminate_task(b);
++    task_destroy(b);
++    for (uint32_t i = 0; i < CW_SLEEPERS; i++) {
++        (void)test_wait_until("cw_S", cw_terminated, s[i], TEST_WAIT_S(2));
++        if (s[i]->state != TASK_TERMINATED) scheduler_terminate_task(s[i]);
++        task_destroy(s[i]);
++    }
++    uart_printf("  critic_window %s: COMPLETED iterations=%u migrations=%u no_window=%u sleeper_runs=%u\n",
++                name, iters, cw_h_mig, nowin, cw_s_runs);
++}
++static void test_critic_window(void)
++{
++    if (cpu_count < 4) {
++        TEST_ASSERT(1);
++        return;
++    }
++    /* A (control): sleepers pinned to CPU 2, T migrated to CPU 3, CPU 3's
++     * wait still happens; busy task on CPU 3 is not used (busy on CPU 2
++     * would starve the sleepers), so the busy task sits on CPU 1's
++     * neighbour: none. Sleepers on CPU 2, busy task on CPU 1 is the helper. */
++    critic_window_phase("A-control(sleepers on cpu2, T to cpu3)", 2, 3, 1, 30);
++    /* B: sleepers pinned to CPU 3, T migrated to CPU 3, CPU 2 kept busy
++     * without schedule() so it takes no cooperative tick. */
++    critic_window_phase("B(sleepers on cpu3, T to cpu3)", 3, 3, 2, 30);
++    TEST_ASSERT(1);
++}
++
+ int test_suite_scheduler(void)
+ {
+     UnityBegin("Scheduler Tests");
+ 
+     /* Regression tests: DAIF context preservation (ARM64 only) */
+ #if !defined(PLATFORM_X86_64)
++    RUN_TEST(test_critic_window);
+     RUN_TEST(test_daif_saved_in_context);
+     RUN_TEST(test_new_task_daif_irq_masked);
+     RUN_TEST(test_daif_not_zero_on_create);
