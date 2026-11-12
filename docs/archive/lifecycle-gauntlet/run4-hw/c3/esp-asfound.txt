@@ -1,0 +1,18 @@
+# ESP as found before any C3 write (jetson-nano-2 SD Linux, read-only check). RESULT: fsck clean, 2 files: EFI/L4T/l4t.efi 91db497c, EFI/SLMOS/SLMOS.efi 789cba62 (a copy saved to the C3 scratchpad for the restore).
+# boot banner: (none; SD Linux, no SLM-OS boot in this file)
+
+===== esp-check.sh 192.168.4.5 (adapted from run 3 c2/esp-check.sh: adds a listing and sha256 of every file)
+check at 2026-11-12T01:15:10Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
+--- listing
+    110592 ./EFI/L4T/l4t.efi
+   8864840 ./EFI/SLMOS/SLMOS.efi
+--- sha256
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  ./EFI/L4T/l4t.efi
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  ./EFI/SLMOS/SLMOS.efi
+ESP unmounted
