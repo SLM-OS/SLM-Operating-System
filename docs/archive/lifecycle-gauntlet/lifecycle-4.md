@@ -92,3 +92,60 @@ builders whose components cite them; the orchestrator does not re-derive.
    "critic-check ok, model: Fable 5.2 (claude-fable-5-2)". Critics run on
    Fable.
 8. **Milestone.** Backlog for new issues.
+
+## Entry 0a (written 01:34 UTC): hour-0 checks completed; C0 done
+
+1. **Reminder self-test: passed.** Job `001d9f0e` (due 01:07 UTC) fired
+   at about 01:10 UTC, delayed because the session was mid-turn; it fires
+   only into an idle session. `CronDelete 001d9f0e` afterwards returned "No
+   scheduled job" (one-shots delete themselves). Hour marks scheduled as
+   one-shot jobs: `c430dcc2` 04:35, `ad030618` 07:05, `0447d0e3` 08:05,
+   `94598cb0` 10:05, `d5060185` 10:57 UTC (budget warning). Session-only;
+   the orchestrator also keeps time from `date -u` and is woken by builder
+   completion notices.
+2. **Tool families, continued.** SendMessage used (01:2x UTC, rulings to
+   C3 and a hand-off to C1, Entry 1). Monitor loaded, not yet needed.
+4. **main 6c1f4c9c: /ci green, #1219 baseline 0 of 3.** Logs:
+   `run4-tools/ci-main-6c1f4c9c/` on this branch (`summary.txt` has
+   start, end and load per step; script `run.sh`). Builds ARM64, x86-64,
+   Jetson real weights main and test: rc 0. `make test` PASSED;
+   `make test PLATFORM=X86_64` PASSED; `make test AI_SCHED=ON` PASSED;
+   `make runtime-test` 308 and 328 passed, 0 failed; braces clean; build
+   order passed; Jetson layout "All checks passed." with no `!` line.
+   `make kernel-test-clean && make test WORK_STEALING=ON` three times
+   (`-DENABLE_WORK_STEALING=ON` confirmed in each configure line):
+   PASSED 3 of 3 (`10-ws-on-1.log` to `10-ws-on-3.log`), load average
+   1.71 to 2.07 at their ends. **The #1219 baseline for this run is 0
+   failures in 3 runs** (run 3 saw 2 of 6, `run3-tools/ci-main-*` on
+   `gauntlet/coherency-3`).
+   Side observation, matching C3's #1199 report (Entry 1): the ARM64 build
+   warns `implicit declaration of function` for `memchr` (lstrlib.c:681),
+   `strerror` (lauxlib.c:255) and `strcoll` (lvm.c:384),
+   `01-arm64-build.log`.
+
+C0 done at 01:34 UTC. C3 started 01:1x UTC and holds jetson-nano-2; C1
+started 01:1x UTC, QEMU held until this baseline finished (it did at
+01:32:20 UTC); C2 starts now, offline, with C1 sharing the host (at most
+2 QEMU instances each).
+
+## Entry 1 (written 01:34 UTC): C3 interim, two rulings, a hand-off to C1
+
+C3 reported at about 01:25 UTC (interim, not a builder entry; the C3
+builder entry is written after its critic files):
+
+- On main 6c1f4c9c, Jetson kexec test kernel, boot 1 of 2 so far: a new,
+  earlier crash, `PAGE FAULT (WRITE)` on CPU 0 task main, ELR in
+  `pmm_alloc_pages`, x30 in `task_create_with_priority`, x19
+  `isolation_bench_task`, right after "CPU 2: isolated from general
+  scheduling" in test_shell_cmd_bench. Outside C3's files. Ruling: C3 files
+  it as a new issue with the capture and does not debug it; C1 classifies
+  it with #1211 and #1223 in its step 6. Boot 2 showed #1199 and a broken
+  stack canary on idle_4.
+- #1199 and #1224 causes as reported by C3 (hypotheses until C3's critic
+  checks them): a missing `memchr` prototype truncates a pointer with bit
+  31 set (Jetson heap); an orphan `.got` outside the UEFI-copied range.
+  Ruling: `kernel/include/string.h` and the ARM64 linker scripts are inside
+  C3's scope for these fixes. Because the linker-script change reaches every
+  ARM64 board, C3's PR head also needs `boot_test --count 10` on pi-5-1;
+  C3 may claim pi-5-1 for that one boot test once its head is final (pi-5-1
+  is otherwise idle until 08:05 UTC), restoring the card as found.
