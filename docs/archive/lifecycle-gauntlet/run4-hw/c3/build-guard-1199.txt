@@ -1,0 +1,12 @@
+# Build-time guard for #1199: lstrlib.c compiled with the new Lua flags (-Werror=implicit-function-declaration -Werror=int-conversion -Werror=int-to-pointer-cast). With main 6c1f4c9c's kernel/include/string.h it fails (4 errors, rc=1); with d512f40b's string.h it compiles (rc=0). RESULT: guard fails on the old code.
+# boot banner: (none; host compile)
+
+== -I/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/oldinc first (string.h from main 6c1f4c9c)
+kernel/lib/lua/src/lstrlib.c:681:44: error: implicit declaration of function 'memchr' [-Werror=implicit-function-declaration]
+kernel/lib/lua/src/lstrlib.c:681:30: error: cast to pointer from integer of different size [-Werror=int-to-pointer-cast]
+kernel/lib/lua/src/lstrlib.c:877:15: error: cast to pointer from integer of different size [-Werror=int-to-pointer-cast]
+kernel/lib/lua/src/lstrlib.c:1165:22: error: cast to pointer from integer of different size [-Werror=int-to-pointer-cast]
+cc1: some warnings being treated as errors
+rc=1
+== -I/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-c3/kernel/include first (string.h from this branch)
+rc=0
