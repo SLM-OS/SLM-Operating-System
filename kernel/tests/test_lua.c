@@ -4123,7 +4123,10 @@ static void test_lua_string_find_above_2gb(void)
         "local s = string.rep('a', 40) .. 'needle' .. string.rep('b', 9)\n"
         "assert(string.find(s, 'needle', 1, true) == 41)\n"
         "assert(string.find(s, 'needlex', 1, true) == nil)\n"
-        "assert(string.find(s, 'ab', 1, true) == 40)\n"
+        /* memchr hits a first-byte match whose tail differs, so the loop
+         * calls memchr again from the next byte. */
+        "assert(string.find(s, 'aan', 1, true) == 39)\n"
+        "assert(string.find(s, 'eb', 1, true) == 46)\n"
         "local r = ('abc'):gsub('b', '[%0]')\n"
         "assert(r == 'a[b]c', r)\n");
     if (rc == LUA_OK) {
