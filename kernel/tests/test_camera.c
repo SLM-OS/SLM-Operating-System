@@ -88,6 +88,25 @@ static void test_camera_open_unknown_returns_minus_one(void)
     TEST_ASSERT_EQUAL_INT(-1, camera_open("nonsense", &frame));
 }
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/*
+ * Test: after a UEFI-direct boot, camera_open("imx219-0") fails with -3
+ * instead of touching the unpowered camera I2C controller, which stops
+ * the board with a RAS error in TF-A. The boot source is forced to UEFI
+ * here so the guard is exercised on the kexec path too; with the guard
+ * in place no sensor access happens, so this is safe on either path.
+ */
+static void test_camera_imx219_refused_after_uefi_boot(void)
+{
+    uint32_t saved = slmos_boot_source;
+    slmos_boot_source = BOOT_SOURCE_UEFI;
+    struct camera_frame frame;
+    int rc = camera_open("imx219-0", &frame);
+    slmos_boot_source = saved;
+    TEST_ASSERT_EQUAL_INT(-3, rc);
+}
+#endif
+
 /*
  * Test: camera_open rejects NULL inputs without dereferencing.
  */
@@ -1276,6 +1295,9 @@ int test_suite_camera(void)
     UnityBegin("Camera C-API tests");
     RUN_TEST(test_camera_open_mock);
     RUN_TEST(test_camera_open_unknown_returns_minus_one);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    RUN_TEST(test_camera_imx219_refused_after_uefi_boot);
+#endif
     RUN_TEST(test_camera_open_null_safe);
     RUN_TEST(test_camera_preprocess_bad_args);
     RUN_TEST(test_camera_preprocess_mock_first_pixel);
