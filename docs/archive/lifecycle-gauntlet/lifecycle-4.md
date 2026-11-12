@@ -521,3 +521,27 @@ new head C1 re-runs x86 make test, the bar cells, the critic's window patch
   8a3406ea (claim to 07:48). C3's hold is extended to 07:30 UTC hard
   because C1's head is late; the C3 critic follows (about 40 min), then
   C1 on pi-5-1 for item (4) and C2 on jetson-nano-2, one at a time.
+
+## Entry 17 (written 06:46 UTC): x86 still regresses at 5e5548a1; the IPI guard approved
+
+C1, `gauntlet-4-hw-pi5` f24e66cc, `run4-hw/c1/x86-5e5548a1/`, make test
+PLATFORM=X86_64, 3 runs each, 1 QEMU at a time: 5e5548a1 1 PASS 2 FAILED
+(test_rebalance_after_burst, 11/16 and 10/16 tasks; run 3 also warned
+"still on a CPU after 2 s; leaking the slot"), main 6c1f4c9c 3 PASS,
+5e5548a1 plus the uncommitted resched-IPI guard 3 PASS. Mechanism (C1's
+code reading, not traced): x86's resched IPI re-enters schedule() while
+preempt_disabled is set; the handler's comment says it is guarded and it is
+not; the on_cpu bookkeeping turns the nested switch into stuck on_cpu and
+lost tasks. ARM64's tick honours preempt_disabled.
+
+Ruling (reversing Entry 15's "no x86 change" for this reason): the guard is
+committed as its own commit, with its own issue, deferring rather than
+dropping the kick where x86 has a deferral path (or an argument that a
+dropped kick is re-raised), 10 x86 runs clean at the new head, and an
+identical ARM64 .text versus 5e5548a1 so the ARM64 QEMU, Pi 5 image and
+Jetson results at 5e5548a1 carry over.
+
+C1 critic round 2 (in progress): the 9185d4cb to 5e5548a1 diff is only
+the revert plus docs; schedule() has no on_cpu spin at 5e5548a1 (ldapr 1
+to 0, yield 1 to 0); its growth (0x420 to 0x46c, QEMU build) is the
+compiler emitting the switch-in block three times.
