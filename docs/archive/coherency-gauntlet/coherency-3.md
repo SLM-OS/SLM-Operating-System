@@ -1159,3 +1159,64 @@ open, cycle count 14), powered on, online. Both as found.
   step passed and the extra `WORK_STEALING=ON` passed (0 `[FAIL]` lines).
 - #1193 closed on merge (23:46:10Z); #1203 closed on merge about 20 s
   later (CLOSED, COMPLETED). Neither needed a hand close.
+
+## Entry 35 (00:29 UTC): item 2, the check split out and merged (#1227); #1226 closed
+
+- Branch `bench/assert-shares` from main 98e17440 with the
+  `--assert-shares` commit in the form that ran in image c77156b2: head
+  **d711cb39**. `git diff c77156b2 d711cb39` changes only
+  `docs/adr/0007-cross-cpu-coherency.md` (main's ADR update), 0 lines under
+  `kernel/`, `runtime/`, `CMakeLists.txt`, `Makefile`: the bench code is
+  identical to what ran in c77156b2 (20/20 PASS,
+  `run3-hw/fixc/removal-sustain-run01..20.txt`), so no lab time was used.
+  Against d7ede5d0 (the commit on `c2/wake-on-push-v1`) it differs only by
+  an `#if defined(PLATFORM_HAS_NC_MEMORY)` branch around two `extern`
+  lines, dead since #1225.
+- /ci on d711cb39 (`run3-tools/ci-check-d711cb39/`): every ci skill step
+  passed (runtime-test 308 and 328; check-braces 0 violations, 0 unparsed;
+  layout clean), the extra `WORK_STEALING=ON` passed, and
+  `test_steal_shares.c` ran.
+- **PR #1227** (ready; body: what the check asserts, FAIL 2/20 on the old
+  NC kernel `nc-sustain-run01..20.txt`, PASS 20/20 on the removal
+  `removal-sustain-run01..20.txt`, the identity with c77156b2, and that it
+  guards against #1216 coming back), API `mergeable: true, clean`,
+  **squash-merged as main 6c1f4c9c** (tree equals d711cb39's, where /ci was
+  green). Branch deleted.
+- **#1226 closed without merging** with the user's comment (on the removal
+  WFE buys nothing: 20/20 without it, burst 11.9 ms with it against 10.3
+  ms without and a wider range; its benefit was only on NC; as written WFE
+  polls, 53k to 77k idle passes/s on NC and about 205k/s on cluster 1 with
+  the removal, most likely the self-SEV of `spin_unlock`, Entry 29,
+  untested). Branch `c2/wake-on-push-v1` kept.
+
+## Entry 36 (00:29 UTC): item 3, #1216 closed; branch table (supersedes Entry 32's)
+
+- #1216: comment with the mechanism as measured (cell A clustering, 98.5 to
+  99.0% of CPUs 2 and 3's early-outs within 10 us of CPU 1's tick; removed
+  by waking idle thieves, cell B), the removal clearing the signature
+  (cells D and E; `--assert-shares` 20/20 on the removal, 2/20 failing on
+  NC), the regression check #1227, and the WFE fix not taken (#1226);
+  closed as completed, resolved by #1225 (issuecomment-6810695137).
+- No lab time in items 1 to 3. Boards untouched: no active claims;
+  pi-5-1 and jetson-nano-2 online, powered on, as found.
+
+| Branch | Head | Disposition |
+|---|---|---|
+| main | 6c1f4c9c | #1225 98e17440, #1227 6c1f4c9c (after #1208 8a27711d, #1209 cf34214d, #1215 73d8deb7, #1217 88b28c15, #1218 e4a33790, ADR e73b9b61) |
+| `c2/wake-on-push-v1` | 37939418 | Kept (closed PR #1226) |
+| `coherency-nc-axis-pi5` | e5b24894 | Kept (closed PR #1222) |
+| `c1/instrument-1211-removal` | 9f375c19 | Kept: cited in open #1211 |
+| `c1/isolated-1s` | f8ff72d6 | Kept: cited in open #1213 |
+| `gauntlet/coherency-3` | this commit | Keep |
+| `gauntlet-3-hw-pi5` | 45c86b7f | Keep |
+| `gauntlet-3-hw-jetson` | 20dbc30c | Keep |
+| `coherency-remove-nc-axis` | 0ae17e0f | Deleted after squash-merge (#1225); tip kept as the PR head |
+| `bench/assert-shares` | d711cb39 | Deleted after squash-merge (#1227) |
+| `c2/fixc-removal`, `c2/fixc-removal-fix`, `c1/boot-path-plus-helper`, and the five stack PR branches | (Entry 32) | Deleted earlier (Entry 32) |
+
+## Final addendum (written 00:29 UTC)
+
+Merged in this round: #1225 (main 98e17440) and #1227 (main 6c1f4c9c),
+nothing else. Issues closed: #1193 and #1203 (on #1225's merge), #1216 (by
+hand, resolved by #1225). PR #1226 closed unmerged. No lab time; both
+boards as found.
