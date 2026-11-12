@@ -587,3 +587,17 @@ a 07:47 reminder replaces them.
   runs in the Pi 5 integration suite (passed in run 3's
   split-pi5-integration-run02.txt). C1's x86 guard approval was resent
   (it had not reached C1).
+
+## Entry 20 (written 07:08 UTC): C3 Pi 5 boot test; a single-lane overlap
+
+C3 builder (status; builder entry after its critic): pi-5-1 claimed
+06:57:41, boot_test --count 10 at 8a3406ea (production RASPI5) 10 of 10
+PASS, banners 8a3406ea (`gauntlet-4-hw-jetson` 5833ae8d,
+`run4-hw/c3/pi5-boot-test-8a3406ea.txt`), card restored (the board booted
+its as-found kernel, banner b42b2c1d), released about 07:07 UTC, powered on.
+**Overlap:** the C3 critic claimed jetson-nano-2 at about 06:58, so two
+agents used labctl at once for about 9 minutes, against the single-lane
+rule (my 06:57 "wait for the hand-off" message crossed C3's work). The
+critic is asked to check its captures from that window and redo any
+incomplete boot. C3 still owes /ci and make test-qemu-uefi at 8a3406ea
+(running now); C3 is asked whether it read /var/lib/labctl/output itself.
