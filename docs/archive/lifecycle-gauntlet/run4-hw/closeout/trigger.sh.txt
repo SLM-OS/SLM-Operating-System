@@ -1,0 +1,27 @@
+#!/bin/bash
+# Host-side, session-local trigger for labctl boot_test on jetson-nano-2.
+# For each NEW Linux boot (new boot_id) it runs the documented ssh trigger:
+#   kexec: slmos-kexec <elf>   (detached, as in the deploy-and-test skill)
+#   uefi:  efibootmgr --bootnext 000E; reboot   (as in scripts/jetson-uefi-deploy.sh)
+# Stops after <count> triggers or <deadline_min> minutes. Leaves nothing on the board.
+mode=$1; n=$2; elf=$3; deadline_min=$4
+J=root@192.168.4.5
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2)
+end=$((SECONDS + deadline_min*60))
+seen=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+echo "$(date -u +%T) start mode=$mode n=$n elf=$elf skip_current_boot_id=${seen:-none}"
+done_n=0
+while [ $done_n -lt $n ] && [ $SECONDS -lt $end ]; do
+  id=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null) || { sleep 2; continue; }
+  case " $seen " in *" $id "*) sleep 3; continue;; esac
+  seen="$seen $id"; done_n=$((done_n+1))
+  st=$("${SSH[@]}" $J 'timeout 90 systemctl is-system-running --wait; cut -d" " -f1 /proc/uptime' 2>/dev/null | tr '\n' ' ')
+  if [ "$mode" = kexec ]; then
+    "${SSH[@]}" $J "sha256sum $elf | cut -c1-16; setsid nohup slmos-kexec $elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &" > /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/jetson/trig.tmp 2>&1
+  else
+    "${SSH[@]}" $J 'efibootmgr --bootnext 000E | grep -i bootnext; sync; (sleep 1; systemctl reboot) >/dev/null 2>&1 &' > /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/jetson/trig.tmp 2>&1
+  fi
+  echo "$(date -u +%T) trigger $done_n/$n boot_id=$id state+uptime=[$st] reply=[$(tr '\n' ' ' < /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/jetson/trig.tmp)]"
+  rm -f /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/f442e45d-5d87-4772-a92e-cbd5b41f65cf/scratchpad/jetson/trig.tmp
+done
+echo "$(date -u +%T) end triggers=$done_n"

@@ -1,0 +1,9 @@
+18:05:46
+running
+276ffa90ce2c135c9a5710f6a05a7d5d2977738e468c2d62327ce7c4d50392f3  /tmp/tmp.iE29wMws61/EFI/SLMOS/SLMOS.efi
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2244/130892 clusters
+276ffa90ce2c135c9a5710f6a05a7d5d2977738e468c2d62327ce7c4d50392f3  /tmp/tmp.iE29wMws61/EFI/SLMOS/SLMOS.efi
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
