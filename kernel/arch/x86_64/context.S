@@ -112,7 +112,11 @@ switch_to:
     jmp     *CTX_RIP(%rdx)
 
 .Lreturn:
-    /* Old task resumes here after being switched back */
+    /* Old task resumes here after being switched back. Return the task
+     * this CPU switched away from to get here (%rdi of the switch_to that
+     * jumped to .Lreturn, untouched by the restore half), so schedule()
+     * can complete its switch-out (sched_finish_switch, #1213). */
+    mov     %rdi, %rax
     ret
 
 .size switch_to, . - switch_to
@@ -138,7 +142,10 @@ task_entry_wrapper:
     /* Enable interrupts (new tasks start with IF=0) */
     sti
 
-    /* Tail-call task_entry_trampoline(entry=rbx, arg=r12) */
+    /* Tail-call task_entry_trampoline(entry=rbx, arg=r12, prev=rdi).
+     * %rdi still holds switch_to's `old` (the task being switched out),
+     * which the trampoline passes to sched_finish_switch (#1213). */
+    mov     %rdi, %rdx      /* prev  → third parameter */
     mov     %rbx, %rdi      /* entry → first parameter */
     mov     %r12, %rsi      /* arg   → second parameter */
     jmp     task_entry_trampoline

@@ -431,8 +431,27 @@ void sched_drain_cpu_runqueue(uint32_t cpu)
         rq->tail = NULL;
         rq->ready_count = 0;
         rq->zombie = NULL;
+        rq->zombie_gen = 0;
     }
     rq_unlock_irqrestore(cpu, flags);
+}
+
+/*
+ * Complete prev's switch-out on this CPU (#1213); see sched.h.
+ *
+ * Ordering: this store-release is executed by the CPU that ran prev,
+ * after switch_to() has written prev's callee-saved registers, SP and
+ * FP/SIMD state into prev->context and after the last access to prev's
+ * stack (switch_to has already moved SP to the incoming task). A
+ * destroyer that reads on_cpu == 0 with a load-acquire therefore sees
+ * all of those accesses complete before its own writes to the slot and
+ * the stack pages (see task_destroy).
+ */
+void sched_finish_switch(struct task *prev)
+{
+    if (prev) {
+        __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
+    }
 }
 
 /* ============================================================================
@@ -2363,12 +2382,21 @@ void schedule(void)
      */
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
+        uint32_t zombie_gen = rq->zombie_gen;
         rq->zombie = NULL;
-        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), 0);
+        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), zombie_gen);
         rq_unlock_irqrestore(this_cpu, flags);
 
-        /* Destroy outside lock - task_destroy may call pmm */
-        task_destroy(zombie);
+        /* Destroy outside lock - task_destroy may call pmm.
+         *
+         * Only if the slot still holds the task recorded below (#1213):
+         * the task's owner may already have destroyed it (it saw
+         * TERMINATED), and task_create may already have handed the slot
+         * to a new task. Before this check the reaper destroyed that new
+         * task mid-construction: its TERMINATED check still saw the old
+         * occupant's state, it cleared stack_top, and task_create copied
+         * the cleared value into context.sp (SP 0 on the next switch). */
+        (void)task_destroy_gen(zombie, zombie_gen);
 
         flags = rq_lock_irqsave(this_cpu);
     }
@@ -2437,6 +2465,7 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
+    next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;
     sched.context_switches++;  /* Racy but acceptable for stats */
 
@@ -2446,7 +2475,11 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current && current->state == TASK_TERMINATED) {
+        /* current->on_cpu is still 1 here, so no task_destroy can have
+         * bumped its generation yet (#1213): this is the generation of
+         * the occupant that is exiting. */
         rq->zombie = current;
+        rq->zombie_gen = current->generation;
         SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
     }
 
@@ -2543,7 +2576,8 @@ void schedule(void)
 
     SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
                next->context.x19);
-    switch_to(current, next);
+    struct task *prev = switch_to(current, next);
+    sched_finish_switch(prev);
 
 #if !defined(PLATFORM_X86_64)
     SLOT_TRACE_ONLY({
@@ -2607,6 +2641,7 @@ void scheduler_start(uint32_t this_cpu)
     }
 
     first->state = TASK_RUNNING;
+    first->on_cpu = 1;          /* cleared by sched_finish_switch (#1213) */
     first->switches++;
     sched.context_switches++;  /* Racy but acceptable for stats */
 

@@ -273,7 +273,17 @@ struct task {
      *
      * Placed after context to preserve TASK_CONTEXT_OFFSET. */
     uint32_t generation;
-    uint32_t _gen_pad;                  /* Alignment padding for next field */
+
+    /* Nonzero while a CPU is running this task or has not yet finished
+     * switching out of it (#1213). Set to 1 by the CPU that switches the
+     * task in (schedule()/scheduler_start(), under that CPU's rq_lock);
+     * cleared with a store-release by the same CPU right after switch_to()
+     * returns on the next task's stack (sched_finish_switch), i.e. after
+     * the last write to this task's context and the last use of its
+     * stack. task_destroy() waits for 0 with a load-acquire before it
+     * frees the stack or lets the slot be reused. Uses the former
+     * padding word, so the layout is unchanged. */
+    uint32_t on_cpu;
 
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler tracking (M5) */
@@ -673,6 +683,17 @@ uint64_t task_get_deadline(struct task *task);
  *       freeing the task's stack.
  */
 void task_destroy(struct task *task);
+
+/*
+ * task_destroy for a slot the caller recorded earlier: reclaim only if the
+ * slot still holds the same occupant, i.e. task->generation still equals
+ * `generation` (#1213). The run-queue zombie reaper uses it, so that a
+ * slot the task's owner has already destroyed, and that task_create may
+ * already have handed to a new task, is left alone. Returns 1 if it
+ * reclaimed the slot, 0 if the generation no longer matched (or the task
+ * was not TERMINATED).
+ */
+int task_destroy_gen(struct task *task, uint32_t generation);
 
 /*
  * Set task cleanup callback.

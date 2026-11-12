@@ -12,6 +12,7 @@
 #include "arch.h"
 #include "steal_trace.h"
 #include "slot_trace.h"
+#include "timer.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #include "elf.h"
@@ -106,12 +107,19 @@ bool task_entry_unmasks_irq(uint32_t cpu)
 
 /*
  * C trampoline called from assembly task_entry_wrapper.
- * Callee-saved registers hold the entry point and argument.
+ * Callee-saved registers hold the entry point and argument; `prev` is the
+ * task this CPU switched away from to start this one (switch_to's `old`,
+ * NULL from scheduler_start), whose switch-out is completed here (#1213).
  */
-void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr,
+                           struct task *prev)
 {
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
+
+    /* First thing on the new stack: the previous task's context is saved
+     * and its stack is no longer in use (#1213). */
+    sched_finish_switch(prev);
 
     /* Clear preempt_disabled for this CPU.
      * scheduler_start() sets it to 1 before switch_to(NULL, first),
@@ -166,13 +174,15 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 /*
  * ARM64 task entry wrapper (inline assembly).
  *
- * When switch_to restores a new task, x19 = entry, x20 = arg.
- * Passes them to task_entry_trampoline as function arguments.
+ * When switch_to restores a new task, x19 = entry, x20 = arg, and x0
+ * still holds switch_to's `old` argument (the task being switched out).
+ * Passes all three to task_entry_trampoline as function arguments.
  */
 __asm__(
     ".global task_entry_wrapper\n"
     ".type task_entry_wrapper, %function\n"
     "task_entry_wrapper:\n"
+    "    mov x2, x0\n"         /* prev: switch_to's x0 (old), untouched by its restore half */
     "    mov x0, x19\n"
     "    mov x1, x20\n"
     "    b task_entry_trampoline\n"
@@ -211,6 +221,12 @@ struct task *task_alloc(const char *name, uint8_t priority)
 
     /* Mark slot as used immediately (id != 0 means in use) */
     task->id = task_id;
+    /* Replace the previous occupant's TASK_TERMINATED in the same
+     * task_lock section (#1213), so a stale destroyer that takes
+     * task_lock after this cannot pass task_destroy's TERMINATED check
+     * on the new task. on_cpu is already 0 (task_destroy waited). */
+    task->state = TASK_READY;
+    task->on_cpu = 0;
 
     TASK_UNLOCK_IRQRESTORE();
 
@@ -303,6 +319,12 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
 
     /* Mark slot as used immediately (id != 0 means in use) */
     task->id = task_id;
+    /* Replace the previous occupant's TASK_TERMINATED in the same
+     * task_lock section (#1213), so a stale destroyer that takes
+     * task_lock after this cannot pass task_destroy's TERMINATED check
+     * on the new task. on_cpu is already 0 (task_destroy waited). */
+    task->state = TASK_READY;
+    task->on_cpu = 0;
 
     TASK_UNLOCK_IRQRESTORE();
 
@@ -766,10 +788,43 @@ struct task *task_slot(uint32_t idx)
  * for reuse. Must only be called after the task has been removed from
  * all run queues and is no longer running.
  */
-void task_destroy(struct task *task)
+/*
+ * Wait until no CPU is running `task` or still switching out of it
+ * (#1213). The CPU that ran the task clears on_cpu with a store-release
+ * after switch_to has saved the task's context and left its stack
+ * (sched_finish_switch). The load-acquire here orders every later access
+ * by this CPU (the slot clear below, pmm_free_pages of the stack, and a
+ * later task_create's writes to the same slot and pages) after that CPU's
+ * context save and stack use. Bounded: a CPU that never switches out
+ * (wedged, or a task force-terminated while still running) makes the
+ * caller leak the slot instead of freeing a stack in use.
+ * Returns true when on_cpu is 0.
+ */
+static bool task_wait_off_cpu(struct task *task)
+{
+    if (!__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE)) {
+        return true;
+    }
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    while (__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE)) {
+        if (timer_get_count() - t0 > 2 * f) {
+            return false;
+        }
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+    return true;
+}
+
+static int task_destroy_impl(struct task *task, bool check_gen,
+                             uint32_t generation)
 {
     if (!task) {
-        return;
+        return 0;
     }
 
     /* Idle-task guard (#200/#606 investigation, 2026-05-02 / 03).
@@ -784,16 +839,43 @@ void task_destroy(struct task *task)
               "(task='%s', cpu_affinity=%u)", task->name, task->cpu_affinity);
     }
 
+    /* A task cannot reclaim the stack it is running on (#1213). */
+    if (task == task_current()) {
+        WARN("task_destroy: task '%s' (id=%u) is the caller; not destroyed",
+             task->name, task->id);
+        return 0;
+    }
+
+    /* The state load-acquire orders the on_cpu read after it: a task
+     * reads TERMINATED only after the on_cpu = 1 of its switch-in (both
+     * were written by the CPU running it, separated by rq_lock
+     * release/acquire), so an on_cpu of 0 seen here is the switch-out's,
+     * not the stale 0 from before the task ever ran. */
+    if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
+        !task_wait_off_cpu(task)) {
+        WARN("task_destroy: task '%s' (id=%u) still on a CPU after 2 s; "
+             "leaking the slot (#1213)", task->name, task->id);
+        return 0;
+    }
+
     TASK_LOCK_IRQSAVE();
+
+    /* The run-queue zombie reaper passes the generation it recorded; a
+     * different generation means the owner destroyed the task first and
+     * the slot may already hold a new task (#1213). */
+    if (check_gen && task->generation != generation) {
+        TASK_UNLOCK_IRQRESTORE();
+        return 0;
+    }
 
     /* Verify task is terminated */
     if (task->state != TASK_TERMINATED) {
-        if (cpu_id() == 0) {
+        if (cpu_id() == 0 && !check_gen) {
             WARN("task_destroy: task '%s' not terminated (state=%d)",
                  task->name, task->state);
         }
         TASK_UNLOCK_IRQRESTORE();
-        return;
+        return 0;
     }
 
     SLOT_TRACE(ST_DESTROY, task, __builtin_return_address(0), task->stack_base,
@@ -877,6 +959,17 @@ void task_destroy(struct task *task)
      * Task lifecycle is well-tested; enable if debugging task issues. */
     (void)task_name;
     (void)task_id;
+    return 1;
+}
+
+void task_destroy(struct task *task)
+{
+    (void)task_destroy_impl(task, false, 0);
+}
+
+int task_destroy_gen(struct task *task, uint32_t generation)
+{
+    return task_destroy_impl(task, true, generation);
 }
 
 /*

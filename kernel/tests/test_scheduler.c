@@ -2257,6 +2257,72 @@ static void test_task_slot_reuse_under_switch(void)
     TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
 }
 
+/*
+ * Deterministic half of the #1213 fix: the zombie reaper's
+ * task_destroy_gen() must leave a slot alone once its owner has destroyed
+ * the recorded task and task_create has handed the slot to a new task,
+ * even when the new task is itself TERMINATED. Also checks that
+ * task_create replaces the previous occupant's TERMINATED inside its
+ * task_lock section (a claimed slot never reads TERMINATED).
+ */
+static void slot_gen_noop(void *arg)
+{
+    (void)arg;
+}
+
+static void test_task_destroy_gen_skips_reused_slot(void)
+{
+    struct task *a = task_create("gen_a", slot_gen_noop, NULL);
+    TEST_ASSERT_NOT_NULL(a);
+    if (!a) {
+        return;
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, a->on_cpu);
+    uint32_t gen_a = a->generation;
+    uint32_t id_a = a->id;
+
+    /* Never added to a run queue: terminate and destroy as an owner. */
+    a->state = TASK_TERMINATED;
+    task_destroy(a);
+    TEST_ASSERT_EQUAL_UINT32(0, a->id);
+    TEST_ASSERT_EQUAL_UINT32(gen_a + 1, a->generation);
+
+    /* The next create takes the first free slot, normally the same one.
+     * Another CPU's zombie reap can free a lower slot in between; then
+     * the reuse half is not exercised this time (logged). */
+    struct task *b = task_create("gen_b", slot_gen_noop, NULL);
+    TEST_ASSERT_NOT_NULL(b);
+    if (!b) {
+        return;
+    }
+    if (b != a) {
+        uart_printf("  gen test: slot not reused (a=%p b=%p); reuse half skipped\n",
+                    (void *)a, (void *)b);
+        b->state = TASK_TERMINATED;
+        task_destroy(b);
+        return;
+    }
+    TEST_ASSERT_TRUE(b->id != id_a);
+    TEST_ASSERT_EQUAL_INT(TASK_READY, b->state);
+    void *b_stack = b->stack_base;
+    uint64_t b_sp = b->context.sp;
+    TEST_ASSERT_NOT_NULL(b_stack);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)b->stack_top, b_sp);
+
+    /* A reaper holding the old generation must not touch b, READY or
+     * TERMINATED. */
+    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
+    b->state = TASK_TERMINATED;
+    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
+    TEST_ASSERT_TRUE(b->id != 0);
+    TEST_ASSERT_TRUE(b->stack_base == b_stack);
+    TEST_ASSERT_EQUAL_UINT64(b_sp, b->context.sp);
+
+    /* With b's own generation the reaper reclaims it. */
+    TEST_ASSERT_EQUAL_INT(1, task_destroy_gen(b, b->generation));
+    TEST_ASSERT_EQUAL_UINT32(0, b->id);
+}
+
 /* ============================================================================
  * Latency and benchmark tests
  * ============================================================================ */
@@ -6193,6 +6259,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_rapid_task_exit_no_panic);
 
     /* Regression: slot reuse during switch-out (#1213) */
+    RUN_TEST(test_task_destroy_gen_skips_reused_slot);
     RUN_TEST(test_task_slot_reuse_under_switch);
 
     /* Latency and benchmark tests */
