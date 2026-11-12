@@ -344,3 +344,27 @@ to 07:05 UTC.
   at `pdm_moved > 0`, every one with bad=0: a test defect under
   WORK_STEALING, relayed to C1 with the custom-assign race. WORK_STEALING=ON
   is not /ci-eligible at 364544c1 (21 of 34).
+
+## Entry 9 (written 05:14 UTC): C1 final fix head 6d4fe041; C1 critic started (QEMU part)
+
+C1 sent a report addendum (evidence `gauntlet-4-hw-pi5` 43b3af1c,
+`run4-hw/c1/`); content withheld until the C1 critic files. Recorded:
+final fix head **c1/1213-fix 6d4fe041** (scheduler code as d8b21ec3; the
+#1229 test reworked after C2's 13 of 34); C1 filed **#1232**
+(test_slm_stats_live_from_second_session, one run at the fix head,
+WORK_STEALING=ON). C1 states #1228 "not reproduced"; claim until checked.
+
+Actions: C2 runs 20 WORK_STEALING=ON at 6d4fe041 (the /ci decision and
+#1219 at the final head), rebuilds the Jetson artifacts at 6d4fe041 for its
+lab hour, and files one issue for the steal-sensitive scheduler test races
+(seen on unfixed main too, so pre-existing). C1 runs /ci at 6d4fe041 and
+prepares the Pi 5 images offline. **C1 critic started** at 05:14 UTC on model
+fable, blind (definition of done, bars, issues, heads, evidence paths; told
+not to read this log), QEMU and mechanism-review part; the Pi 5 part
+follows in C1's lab slot.
+
+Lab plan (revised): C3 to 07:05; C2 07:05 to about 08:35 (assert-shares
+20, boot tests 10 + 10 at 6d4fe041); C1 pi-5-1 from about 08:35 to 10:05,
+priority (1) fix-head suite 20 boots with isolated=10/10, (2) boot_test
+10, (3) critic's 5 boots, (4) unfixed main + conversion 20 boots (#1223).
+Whatever does not fit is recorded as not run.
