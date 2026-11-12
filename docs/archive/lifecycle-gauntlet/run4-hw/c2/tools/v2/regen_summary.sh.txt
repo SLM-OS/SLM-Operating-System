@@ -1,0 +1,28 @@
+#!/bin/bash
+# Rewrite <cell>-summary.txt from existing run files (no rebuild).
+# usage: regen_summary.sh <cell> <head> <WS> <N>
+CELL=$1; SHORT=$2; WS=$3; N=$4
+S=$(cd $(dirname "$0") && pwd); RD=$S/runs/$CELL; ELF=$S/elf/$CELL.elf
+EVD=/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/l4-ev-pi5-c2/docs/archive/lifecycle-gauntlet/run4-hw/c2
+FULL=$(grep -o "head [0-9a-f]\{40\}" $RD/cell.log | head -1 | cut -d' ' -f2)
+T=$EVD/$CELL-summary.txt
+{
+echo "# $CELL summary: make test QEMU command, head $FULL, WORK_STEALING=$WS, TCG thread=multi (no -accel flag), elf sha256 $(sha256sum $ELF | cut -c1-64), N=$N; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass, INVALID=QEMU killed by another process before the suite summary"
+echo "# boot banner: $(grep -m1 'SLM-OS v' $RD/run01.raw.log | sed 's/^ *//')"
+echo
+echo "| File | load_start (1/5/15) | rc | Class |"
+echo "|---|---|---|---|"
+for i in $(seq -w 1 $N); do
+  m=$(cat $RD/run$i.meta)
+  echo "| $CELL-run$i.txt | $(echo "$m" | grep -o 'load_start=\[[^]]*\]' | sed 's/load_start=\[\(.*\)\]/\1/') | $(echo "$m" | grep -o 'rc=[0-9]*' | head -1 | cut -d= -f2) | $($S/classify.sh $RD run$i $ELF) |"
+done
+echo
+CL=$(for i in $(seq -w 1 $N); do $S/classify.sh $RD run$i $ELF; done)
+INV=$(echo "$CL" | grep -c INVALID)
+for k in A B C; do echo "Class $k: $(echo "$CL" | grep -c "\b$k\b") of $N"; done
+echo "INVALID (externally killed, excluded from pass counts): $INV of $N"
+echo "PASS: $(echo "$CL" | grep -c '^PASS$') of $N; valid runs $((N-INV))"
+echo "Load (1-min) at run start: min $(cat $RD/run*.meta | grep -o 'load_start=\[[0-9.]*' | cut -d[ -f2 | sort -n | head -1), max $(cat $RD/run*.meta | grep -o 'load_start=\[[0-9.]*' | cut -d[ -f2 | sort -n | tail -1)"
+} > $T
+cp $S/classify.sh $EVD/tools/v2/classify.sh.txt; cp $0 $EVD/tools/v2/regen_summary.sh.txt
+tail -7 $T

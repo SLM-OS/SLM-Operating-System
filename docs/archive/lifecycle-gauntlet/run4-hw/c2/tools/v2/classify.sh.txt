@@ -16,5 +16,9 @@ grep -qF "[FAIL] test_litmus_patterns_pass" $LOG && c="$c C"
 other=$(grep -F "[FAIL]" $LOG | grep -v "test(s) failed\|total failure\|tests had failures\|batch: stress\|test_litmus_patterns_pass" | sed 's/^ *\[FAIL\] //' | paste -sd';' -)
 if [ -n "$other" ]; then c="$c other($other)"; fi
 if [ -z "$c" ] && [ "$RC" != "0" ]; then c=" other(rc=$RC, no FAIL line, no panic PC)"; fi
+if ! grep -qF "Test Suite Summary" $LOG && ! grep -qF "(/usr/bin/timeout)" $LOG; then
+  k=$(grep -o "terminating on signal [0-9]* from pid [0-9]* ([^)]*)" $LOG | head -1)
+  c="$c INVALID(no suite summary${k:+; $k})"
+fi
 [ -z "$c" ] && c=" PASS"
 echo "${c# }"

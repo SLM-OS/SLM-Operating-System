@@ -1,0 +1,60 @@
+# ws-on-6d4fe041 summary: make test QEMU command, head 6d4fe041e2ccd52d8eb851ec32b661df68ce5796, WORK_STEALING=ON, TCG thread=multi (no -accel flag), elf sha256 e9f5045b362f93ab8bcab87bb922315f2101db2bbaa6ece8c1b6011fdcbebdb9, N=20; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass, INVALID=QEMU killed by another process before the suite summary
+# boot banner: SLM-OS v0.4.0 build 20261112051337 (6d4fe041)
+
+| File | load_start (1/5/15) | rc | Class |
+|---|---|---|---|
+| ws-on-6d4fe041-run01.txt | 1.01 1.20 2.04 | 0 | PASS |
+| ws-on-6d4fe041-run02.txt | 2.71 1.64 2.13 | 0 | PASS |
+| ws-on-6d4fe041-run03.txt | 3.50 2.12 2.25 | 0 | PASS |
+| ws-on-6d4fe041-run04.txt | 4.30 2.71 2.45 | 0 | PASS |
+| ws-on-6d4fe041-run05.txt | 4.29 3.15 2.64 | 1 | C |
+| ws-on-6d4fe041-run06.txt | 6.97 4.27 3.08 | 1 | C |
+| ws-on-6d4fe041-run07.txt | 6.94 5.02 3.46 | 1 | C other(test_net_burst_8_sends_async) |
+| ws-on-6d4fe041-run08.txt | 5.78 5.17 3.65 | 1 | C |
+| ws-on-6d4fe041-run09.txt | 7.43 5.85 4.04 | 1 | C |
+| ws-on-6d4fe041-run10.txt | 8.28 6.40 4.40 | 1 | C |
+| ws-on-6d4fe041-run11.txt | 7.88 6.88 4.77 | 1 | C |
+| ws-on-6d4fe041-run12.txt | 8.39 7.41 5.16 | 1 | C |
+| ws-on-6d4fe041-run13.txt | 10.01 8.16 5.66 | 1 | C other(test_policy_custom_assign_cpu_called) |
+| ws-on-6d4fe041-run14.txt | 7.85 7.86 5.78 | 1 | C |
+| ws-on-6d4fe041-run15.txt | 6.07 7.30 5.77 | 0 | PASS |
+| ws-on-6d4fe041-run16.txt | 5.38 6.82 5.74 | 0 | PASS |
+| ws-on-6d4fe041-run17.txt | 4.73 6.30 5.64 | 0 | INVALID(no suite summary; terminating on signal 15 from pid 2748681 ()) |
+| ws-on-6d4fe041-run18.txt | 4.39 5.99 5.57 | 0 | PASS |
+| ws-on-6d4fe041-run19.txt | 2.78 5.10 5.29 | 0 | C INVALID(no suite summary; terminating on signal 15 from pid 2755413 ()) |
+| ws-on-6d4fe041-run20.txt | 3.87 4.81 5.17 | 0 | PASS |
+
+Class A: 0 of 20
+Class B: 0 of 20
+Class C: 11 of 20
+INVALID (externally killed, excluded from pass counts): 2 of 20
+PASS: 8 of 20; valid runs 18
+Load (1-min) at run start: min 1.01, max 10.01
+
+## Analysis (final C1 head c1/1213-fix 6d4fe041; scheduler code unchanged since d8b21ec3, so as at 364544c1)
+
+- #1219 (class A): 0 of 18 valid runs. All 18 print "[PASS] batch:
+  stress workload (4x8)". With 364544c1 (same scheduler code), 0 of 52
+  in all. 5x was already met at 364544c1 (34 against 33.3).
+- Class B: 0 of 18.
+- INVALID: run17 and run19 end mid-suite with "qemu-system-aarch64:
+  terminating on signal 15 from pid 2748681 ()" and "... pid 2755413 ()".
+  That SIGTERM came from another process on the host, not from this
+  harness's timeout (whose kills name /usr/bin/timeout). QEMU exits 0 on
+  SIGTERM, so `make test`, which treats exit 0 as PASSED, would also
+  have counted both as passes. Who sent it is not known; both pids were
+  gone when checked. The earlier cells have no such kill (every
+  truncated log there names /usr/bin/timeout).
+- Class C (#1230): 11 of 18 valid runs, at the highest load of any cell
+  (1-min 4.29 to 10.01 for runs 05 to 14). Not WS-specific (9 of 20 with
+  WS=OFF on main).
+- Other: test_net_burst_8_sends_async (run07, test_net.c:1729, "all 8
+  back-to-back sends should fit in the TX pool"), already tracked as
+  #1137 / #1163; test_policy_custom_assign_cpu_called (run13), #1233.
+- test_preempt_flag_follows_migrated_task (reworked): passed in all 18
+  valid runs that reached it, bad=0, moved 5 to 8.
+- Step 4 (/ci): WORK_STEALING=ON passed 8 of 20 (8 of 18 valid), not
+  20 of 20, so it is not added to /ci. None of the failures are #1219,
+  #1213 or #1229: they are #1230 (litmus, also without work stealing),
+  #1137 (net burst), #1233 (steal-sensitive scheduler tests) and two
+  external kills.
