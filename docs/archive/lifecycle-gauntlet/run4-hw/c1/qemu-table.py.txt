@@ -20,8 +20,12 @@ groups = [
     ("qemu-1229-pdunfixedws-8f4aaffd-multi-run", "8f4aaffd without the #1229 cpu re-read (local), WS=ON"),
     ("qemu-1229-pdunfixed-multi-run", "6d4fe041 without the #1229 cpu re-read (local), WS=OFF"),
     ("qemu-1229-pdunfixedws-multi-run", "6d4fe041 without the #1229 cpu re-read (local), WS=ON"),
-    ("qemu-1229-fix5wson-multi-run", "FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi"),
-    ("qemu-1229-fix5wsoff-multi-run", "FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi"),
+    ("qemu-1229-fix5wson-multi-run", "FIX 6d4fe041, WORK_STEALING=ON, thread=multi"),
+    ("qemu-1229-fix5wsoff-multi-run", "FIX 6d4fe041 , WORK_STEALING=OFF, thread=multi"),
+    ("qemu-1229-fix6wson-multi-run", "FIX 9185d4cb (final head; test-only after 364544c1), WORK_STEALING=ON, thread=multi"),
+    ("qemu-1229-fix6wsoff-multi-run", "FIX 9185d4cb (final head), WORK_STEALING=OFF, thread=multi"),
+    ("qemu-1230-lit-9185d4cb-wson-multi-run", "#1230 paired load check: 9185d4cb WS=ON (run alongside 6d4fe041)"),
+    ("qemu-1230-lit-6d4fe041-wson-multi-run", "#1230 paired load check: 6d4fe041 WS=ON (run alongside 9185d4cb)"),
 ]
 def g(pat, s, default='-'):
     m = re.search(pat, s)

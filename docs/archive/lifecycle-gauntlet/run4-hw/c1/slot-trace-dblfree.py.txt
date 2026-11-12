@@ -1,0 +1,19 @@
+import re,sys
+pat=re.compile(r'ST c(\d+) #(\d+) \S+ (\S+) slot=(-?\d+) gen=(\d+) id=(\d+) st=(\d+) a=0x([0-9a-f]+) b=0x([0-9a-f]+) c=0x([0-9a-f]+)')
+for path in sys.argv[1:]:
+    ev=[]; mins={}
+    for l in open(path,errors='replace'):
+        m=pat.search(l)
+        if m:
+            g=m.groups(); ev.append(g); c=g[0]; s=int(g[1]); mins[c]=min(mins.get(c,s),s)
+    cov=max(mins.values()); ev.sort(key=lambda e:int(e[1]))
+    last={}; found=[]
+    for c,seq,name,slot,gen,i,st,a,b,cc in ev:
+        if int(seq)<cov: continue
+        if name=='CREATE_ALLOC': last[a]=('alloc',seq)
+        elif name=='DESTROY' and b!='0':
+            p=last.get(b)
+            if p and p[0]=='free': found.append(f'stack 0x{b}: freed at #{p[1]} and again at #{seq} (cpu{c}, slot {slot} id {i}) with no CREATE_ALLOC between')
+            last[b]=('free',seq)
+    print(path.split('/')[-1], 'coverage from #%d'%cov, 'double frees:', len(found))
+    for f in found[:3]: print('   ',f)

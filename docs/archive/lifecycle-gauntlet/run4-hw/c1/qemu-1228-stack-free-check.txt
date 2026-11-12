@@ -1,0 +1,14 @@
+# #1228 check: does any traced first fault free a task stack twice? slot-trace-dblfree.py.txt over the 8 dumps that printed rings, counting only the window all four rings cover; RESULT 0 double frees in 8 of 8; stack freed while still in use: yes (sequence C, qemu-1229-wstrace-multi-run01 #358303-#358307)
+# boot banner: (analysis of the listed files; each has its banner on line 2)
+qemu-1213-trace-multi-run05.txt coverage from #16876095 double frees: 0
+qemu-1213-stresstrace-multi-run01.txt coverage from #16624958 double frees: 0
+qemu-1229-wstrace-multi-run01.txt coverage from #357829 double frees: 0
+qemu-1213-trace-multi-run06.txt coverage from #17937412 double frees: 0
+qemu-1213-stresstrace-multi-run02.txt coverage from #17566584 double frees: 0
+qemu-1213-trace-multi-run04.txt coverage from #19237366 double frees: 0
+qemu-1229-wstrace-multi-run16.txt coverage from #2300728 double frees: 0
+qemu-1229-wstrace-multi-run17.txt coverage from #309563 double frees: 0
+
+Sequence A's second destroyer read stack_base = 0x0 in every traced instance (DESTROY b=0x0: qemu-1213-trace-multi-run04 #19237412, run05 #16876137, run06 #17937761, qemu-1213-stresstrace-multi-run01 #16625884), so in the traces it cleared the new task's pointers without freeing anything. By code (not traced): if task_create has already stored stack_base when the reaper reads it, the reaper frees the new task's stack while that task will still run on it, and the owner's later destroy sees stack_base NULL: a use-after-free into the PMM, not a double free.
+
+Sequence C, qemu-1229-wstrace-multi-run01: #358303 CPU 1 FIRST_RUN id 183 on stack 0x42280000; #358305 CPU 0 DESTROY id 183 b=0x42280000 (stack returned to the PMM while CPU 1 runs on it); #358307 CPU 0 CREATE_ALLOC id 184 a=0x42280000 (same pages handed out again, 4.6 us later).

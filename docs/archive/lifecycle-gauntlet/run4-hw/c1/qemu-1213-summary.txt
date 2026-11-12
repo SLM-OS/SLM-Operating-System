@@ -152,3 +152,19 @@ where it applies. Per-run rows: qemu-rates-table.txt.
   test_stress_mixed_priorities once (qemu-1213-main-single-run14), test_slm_stats_live_from_second_session
   once at the fix head WS=ON (qemu-1229-fix5wson-multi-run06; #1202 closed; filed separately),
   litmus #1230 throughout.
+
+## Addendum 2 (orchestrator items of the C2 relays): final head 9185d4cb
+- 9185d4cb = 364544c1 + test-only commits (8f4aaffd, 6d4fe041, 9185d4cb; `git diff --stat
+  364544c1 9185d4cb` = kernel/tests/test_scheduler.c only). Kernel code is unchanged from d8b21ec3.
+- Steal-sensitive test races fixed in the tests (9185d4cb): test_benchmark_context_switch
+  (count re-checked under test_lock), test_proactive_load_balance_inert_when_light and
+  test_policy_custom_assign_cpu_called (a CPU other than 0 accepted only if
+  sched_diag_steal_successes moved). At 9185d4cb: 0 of 26 runs fail any of the three or the #1229
+  test (qemu-1229-fix6wson-multi-run01..20, fix6wsoff-multi-run01..06); CPU 1 stopped 0/26,
+  batch-stress (#1219) 0/26, #1229 test bad=0 26/26 with moved 6-8.
+- Litmus (#1230) failed 20/20 in fix6wson at load average 4.5 to 7.5 with C2's QEMUs also
+  running (line 3 of each file); a paired check at load 2.4 to 3.5, 9185d4cb and 6d4fe041
+  started together: 1/4 vs 0/4 (qemu-1230-lit-*-wson-multi-run01..04). Load-dependent, as in
+  #1230; not caused by the test-only diff as far as these 8 runs show.
+- #1228 stack-free check: qemu-1228-stack-free-check.txt (0 double frees in 8 dumps; sequence C
+  frees a stack in use).

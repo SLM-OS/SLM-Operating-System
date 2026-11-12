@@ -19,8 +19,12 @@
 #   8f4aaffd without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
 #   6d4fe041 without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
 #   6d4fe041 without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 1/3; litmus [FAIL] 1/3
-#   FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
-#   FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
+#   FIX 6d4fe041, WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
+#   FIX 6d4fe041 , WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
+#   FIX 9185d4cb (final head; test-only after 364544c1), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 20/20
+#   FIX 9185d4cb (final head), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 2/6
+#   #1230 paired load check: 9185d4cb WS=ON (run alongside 6d4fe041): CPU 1 stopped 0/4; preempt_disabled stuck dump 0/4; 120 s cap 0/4; litmus [FAIL] 1/4
+#   #1230 paired load check: 6d4fe041 WS=ON (run alongside 9185d4cb): CPU 1 stopped 0/4; preempt_disabled stuck dump 0/4; 120 s cap 0/4; litmus [FAIL] 0/4
 
 ## main + 1 s waits (01931af6), thread=multi: qemu-1213-main-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
@@ -350,7 +354,7 @@ RESULT 6d4fe041 without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3
 
 RESULT 6d4fe041 without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 1/3; litmus [FAIL] 1/3
 
-## FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: qemu-1229-fix5wson-multi-runNN.txt
+## FIX 6d4fe041, WORK_STEALING=ON, thread=multi: qemu-1229-fix5wson-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
 | qemu-1229-fix5wson-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2066 same_slot=2065 ran=2066 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5206 moved=7 runs=4/3 bad=0 | no |
@@ -374,9 +378,9 @@ RESULT 6d4fe041 without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3;
 | qemu-1229-fix5wson-multi-run19.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2163 same_slot=2162 ran=2163 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=23080 moved=6 runs=6/6 bad=0 | no |
 | qemu-1229-fix5wson-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2077 same_slot=2076 ran=2077 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=10027 moved=8 runs=4/4 bad=0 | no |
 
-RESULT FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
+RESULT FIX 6d4fe041, WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
 
-## FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: qemu-1229-fix5wsoff-multi-runNN.txt
+## FIX 6d4fe041 , WORK_STEALING=OFF, thread=multi: qemu-1229-fix5wsoff-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
 | qemu-1229-fix5wsoff-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2036 same_slot=2035 ran=2036 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=19429 moved=7 runs=5/4 bad=0 | no |
@@ -386,4 +390,62 @@ RESULT FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20;
 | qemu-1229-fix5wsoff-multi-run05.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=8802 moved=8 runs=5/5 bad=0 | no |
 | qemu-1229-fix5wsoff-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2009 same_slot=2008 ran=2009 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11890 moved=7 runs=4/4 bad=0 | no |
 
-RESULT FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
+RESULT FIX 6d4fe041 , WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
+
+## FIX 9185d4cb (final head; test-only after 364544c1), WORK_STEALING=ON, thread=multi: qemu-1229-fix6wson-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix6wson-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1980 same_slot=1979 ran=1980 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=5794 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1984 same_slot=1983 ran=1984 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=4275 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1990 same_slot=1989 ran=1990 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=30780 moved=8 runs=8/8 bad=0 | no |
+| qemu-1229-fix6wson-multi-run04.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=3811 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run05.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2055 same_slot=2054 ran=2055 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=7029 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run06.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2044 same_slot=2043 ran=2044 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=362988 moved=8 runs=45/45 bad=0 | no |
+| qemu-1229-fix6wson-multi-run07.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1986 same_slot=1985 ran=1986 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=4322 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run08.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1997 same_slot=1996 ran=1997 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=51593 moved=8 runs=15/15 bad=0 | no |
+| qemu-1229-fix6wson-multi-run09.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1970 same_slot=1969 ran=1970 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=1867 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1953 same_slot=1952 ran=1953 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_net_burst_8_sends_async migrations=3440 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run11.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1990 same_slot=1989 ran=1990 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=165387 moved=8 runs=27/27 bad=0 | no |
+| qemu-1229-fix6wson-multi-run12.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1997 same_slot=1996 ran=1997 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=4951 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1974 same_slot=1973 ran=1974 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=5668 moved=8 runs=5/5 bad=0 | no |
+| qemu-1229-fix6wson-multi-run14.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1972 same_slot=1971 ran=1972 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_net_burst_8_sends_async migrations=4468 moved=7 runs=5/5 bad=0 | no |
+| qemu-1229-fix6wson-multi-run15.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1967 same_slot=1966 ran=1967 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=1671 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run16.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1958 same_slot=1957 ran=1958 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=3851 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run17.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1991 same_slot=1990 ran=1991 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=4290 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run18.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1993 same_slot=1992 ran=1993 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_net_burst_8_sends_async migrations=3986 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wson-multi-run19.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2017 same_slot=2016 ran=2017 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=277102 moved=6 runs=36/36 bad=0 | no |
+| qemu-1229-fix6wson-multi-run20.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2023 same_slot=2022 ran=2023 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=2788 moved=8 runs=4/4 bad=0 | no |
+
+RESULT FIX 9185d4cb (final head; test-only after 364544c1), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 20/20
+
+## FIX 9185d4cb (final head), WORK_STEALING=OFF, thread=multi: qemu-1229-fix6wsoff-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix6wsoff-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1977 same_slot=1976 ran=1977 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=17869 moved=7 runs=5/5 bad=0 | no |
+| qemu-1229-fix6wsoff-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2000 same_slot=1999 ran=2000 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=8677 moved=7 runs=4/4 bad=0 | no |
+| qemu-1229-fix6wsoff-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2004 same_slot=2003 ran=2004 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=3904 moved=7 runs=4/6 bad=0 | no |
+| qemu-1229-fix6wsoff-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=1995 same_slot=1994 ran=1995 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=21490 moved=8 runs=5/5 bad=0 | no |
+| qemu-1229-fix6wsoff-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2015 same_slot=2014 ran=2015 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=16047 moved=8 runs=5/4 bad=0 | no |
+| qemu-1229-fix6wsoff-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2009 same_slot=2008 ran=2009 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=23117 moved=6 runs=5/5 bad=0 | no |
+
+RESULT FIX 9185d4cb (final head), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 2/6
+
+## #1230 paired load check: 9185d4cb WS=ON (run alongside 6d4fe041): qemu-1230-lit-9185d4cb-wson-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1230-lit-9185d4cb-wson-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2036 same_slot=2035 ran=2036 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=50996 moved=7 runs=9/9 bad=0 | no |
+| qemu-1230-lit-9185d4cb-wson-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=6083 moved=8 runs=5/5 bad=0 | no |
+| qemu-1230-lit-9185d4cb-wson-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2064 same_slot=2063 ran=2064 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5450 moved=8 runs=4/4 bad=0 | no |
+| qemu-1230-lit-9185d4cb-wson-multi-run04.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2010 same_slot=2009 ran=2010 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=48689 moved=6 runs=7/7 bad=0 | no |
+
+RESULT #1230 paired load check: 9185d4cb WS=ON (run alongside 6d4fe041): CPU 1 stopped 0/4; preempt_disabled stuck dump 0/4; 120 s cap 0/4; litmus [FAIL] 1/4
+
+## #1230 paired load check: 6d4fe041 WS=ON (run alongside 9185d4cb): qemu-1230-lit-6d4fe041-wson-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1230-lit-6d4fe041-wson-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2056 same_slot=2055 ran=2056 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=17543 moved=8 runs=5/5 bad=0 | no |
+| qemu-1230-lit-6d4fe041-wson-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2054 same_slot=2053 ran=2054 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=9266 moved=8 runs=4/4 bad=0 | no |
+| qemu-1230-lit-6d4fe041-wson-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2094 same_slot=2093 ran=2094 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=9779 moved=8 runs=4/4 bad=0 | no |
+| qemu-1230-lit-6d4fe041-wson-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2057 same_slot=2056 ran=2057 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5859 moved=8 runs=4/4 bad=0 | no |
+
+RESULT #1230 paired load check: 6d4fe041 WS=ON (run alongside 9185d4cb): CPU 1 stopped 0/4; preempt_disabled stuck dump 0/4; 120 s cap 0/4; litmus [FAIL] 0/4
