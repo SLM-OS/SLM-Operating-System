@@ -1110,3 +1110,24 @@ One extra power_cycle (not counted) brought SD Linux up to write the ESP.
 
 Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
 /ci green at 33f05c5a). Merging #1237.
+
+## Entry 40 (written 19:45 UTC): #1237 merged as 5b28d065; issues closed; C3 rebased to 1b85b315
+
+- PR comment with the rows table and filenames:
+  https://github.com/SLM-OS/SLM-Operating-System/pull/1237#issuecomment-6833645466.
+  Marked ready, squash-merged with `--match-head-commit 33f05c5a` as
+  **5b28d0654dc64acd210de5252fb7a02fb14cf844** (written message; the
+  branch log, with the TEMPORARY commit's text, was not used). main's tree
+  at 5b28d065 is identical to 33f05c5a (`git diff` empty).
+- Closed by the merge commit's keywords: **#1213, #1219, #1229, #1236**
+  (all CLOSED, COMPLETED). None needed closing by hand.
+- /ci on main 5b28d065: started 19:33 UTC in l4-main (`ci.sh`, one step
+  at a time, full logs); result in a later entry.
+- c3/jetson-suite 8a3406ea rebased onto main without conflicts: new head
+  **1b85b315** (5 commits), pushed with --force-with-lease against
+  8a3406ea. Jetson test kernel built at 1b85b315 (`make kernel-test
+  PLATFORM=JETSON_ORIN_NANO`, operator library embedded): elf 95acdf74,
+  bin 41081a40, banner `build 20261112192508 (1b85b315)`.
+- 19:38 UTC: kexec integration suite on jetson-nano-2 started (same
+  boot_test + host trigger method as Entry 39; elf staged as
+  /root/slmos-l4co-test-1b85b315.elf, sha checked).
