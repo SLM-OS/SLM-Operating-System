@@ -1,0 +1,15 @@
+# jetson-nano-2 UEFI-direct boot test, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, slmos.bin sha256 fa168ee5eaf61870b990d5d4636853d148bc6ae90e4566cebe1cb38e4daa1f50, RESULT 6/6 PASS (slmos> 61.0-62.5 s after reboot; no Unhandled Exception/ABORT/Powering off). Boot 01 via scripts/jetson-uefi-deploy.sh (only ESP write), boots 02-06 power_cycle + efibootmgr --bootnext 000E. Planned 10; 4 not run, time limit
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1 (boot 01)
+uboot01 deploy start 08:06:59
+staged sha256=fa168ee5eaf6 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+uboot01 PASS slmos> 62.0s after reboot; cat /sys/version commit 5e5548a1
+uboot02 bootnext 08:09:56
+uboot02 PASS slmos> 61.0s
+uboot03 bootnext 08:12:45
+uboot03 PASS slmos> 62.0s
+uboot04 bootnext 08:15:30
+uboot04 PASS slmos> 62.0s
+uboot05 bootnext 08:18:24
+uboot05 PASS slmos> 62.5s
+uboot06 bootnext 08:21:13
+uboot06 PASS slmos> 61.9s

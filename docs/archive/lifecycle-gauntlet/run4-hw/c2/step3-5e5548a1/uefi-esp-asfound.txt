@@ -1,0 +1,18 @@
+# jetson-nano-2 NVMe ESP as found, before step 3 (fsck -n, fresh ro mount, sha256; backup copied to the C2 scratchpad), RESULT SLMOS.efi 789cba62..., fsck clean, 2196 clusters
+# boot banner: n/a
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.pcYDbwmlxZ/EFI/SLMOS/SLMOS.efi
+ls: cannot access '/tmp/tmp.pcYDbwmlxZ/EFI/BOOT': No such file or directory
+/tmp/tmp.pcYDbwmlxZ/EFI:
+total 16
+drwxr-xr-x 4 root root 4096 Nov  8 05:40 .
+drwxr-xr-x 3 root root 4096 Dec 31  1969 ..
+drwxr-xr-x 2 root root 4096 Dec 31  1979 L4T
+drwxr-xr-x 2 root root 4096 Nov  7 19:43 SLMOS
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c2/jetson/lab/SLMOS.efi.asfound
+# after the boot-01 write (before boot 02):
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2244/130892 clusters
+fa168ee5eaf61870b990d5d4636853d148bc6ae90e4566cebe1cb38e4daa1f50  /tmp/tmp.GXqxfAdTlE/EFI/SLMOS/SLMOS.efi
+/tmp/tmp.GXqxfAdTlE/EFI:

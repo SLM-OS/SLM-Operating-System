@@ -1,0 +1,35 @@
+# C2 step 3 summary, jetson-nano-2, head c1/1213-fix 5e5548a1f8ef9ba3f38fa9c61317861749c34480, slmos.elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, slmos.bin sha256 fa168ee5eaf61870b990d5d4636853d148bc6ae90e4566cebe1cb38e4daa1f50; RESULT assert-shares 20/20 PASS, kexec boots 5/5, UEFI boots 6/6 (10 and 10 planned; time limit)
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1 on both boot paths
+
+Window: claimed 07:32:53 UTC (after the C3 critic released, 07:29 to
+07:32; its second claim, acquired 07:24:15, overlapped the hand-off),
+released about 08:24. Board found powered on at SD Linux; left the same.
+The board's IP (192.168.4.5) came from 'hostname -I' typed on the labctl
+console (root login, then logout), because no labctl tool in this
+session reads lab://sbcs. The 192.168.4.93 in the archived UEFI handoff
+doc is stale.
+
+| Row | Planned | Result | File |
+|---|---|---|---|
+| bench stealing --sustain 2500 --assert-shares, kexec, one boot | 20 | 20 PASS | kexec-assert-runs.txt, kexec-assert-run01.txt, kexec-assert-boot.txt |
+| kexec boots (slmos> within 150 s, no panic) | 10 | 5 of 5 PASS (5 not run) | kexec-boots.txt |
+| UEFI-direct boots (slmos> within 120 s, no Unhandled Exception/ABORT) | 10 | 6 of 6 PASS (4 not run) | uefi-boots.txt |
+| ESP as found / restored | - | 789cba62 -> fa168ee5 (one write) -> 789cba62, fsck clean each time | uefi-esp-asfound.txt, uefi-esp-restore.txt |
+
+assert-shares detail: every run's lowest thief was at 15.4% to 16.6%
+and the best at 16.8% to 17.7% (owner CPU 1 executes too). The
+lowest-to-best task ratio is 0.873 to 0.989 over 18 runs with shares (run02's verdict line was cut at the
+match, so its shares are not recorded). For comparison, the #1216
+stall left CPUs 2 and 3 at 0.40 to 0.83 of the best thief's median
+share on jetson-nano-2 (coherency run 3). Run 01: 1044 of 1044 tasks
+completed, wall 2.532 s, distribution 175/169/176/174/176/174 over
+CPUs 0 to 5.
+
+Timing: kexec boots reached slmos> 93.8 to 94.3 s after slmos-kexec;
+UEFI boots reached slmos> 61.0 to 62.5 s after the BootNext reboot.
+
+Not done (time limit, 08:35 hard end; the board came free about 10 min
+late): kexec boots 06 to 10 and UEFI boots 07 to 10. Evidence format:
+runs 02 to 20 keep only the verdict line, and run 01 drops its 182
+task-exit lines (counted). The full replies were not kept, so the bench
+time fit the window.

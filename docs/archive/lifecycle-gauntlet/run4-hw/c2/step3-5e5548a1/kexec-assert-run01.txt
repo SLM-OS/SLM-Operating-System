@@ -1,0 +1,40 @@
+# kexec-assert-run01: head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, RESULT ASSERT-SHARES: PASS
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1
+# labctl serial_send(jetson-nano-2, "bench stealing --sustain 2500 --assert-shares", capture_timeout=60, capture_until="ASSERT-SHARES: (PASS|FAIL)") ~07:45 UTC; reply "[Captured 216 lines in 3.3s]". The 182 "[INFO] Task 's3s_NN' (id=N) exiting" lines are elided here (counted only); every other line follows. Reply ends mid-line at the capture_until match.
+Work-Stealing Sustained-Supply Benchmark (#1203)
+================================================
+  Supply: 2500 ms, 16 tasks outstanding on CPU 1, work x8
+  Online CPUs:       6
+  [182 task-exit lines elided]
+
+  Results:
+    Issued:       1044 (create failures 0)
+    Completed:    1044 / 1044
+    Supply:       2496773 us (dispatch start to last issue)
+    Wall-clock:   2532468 us (dispatch start to last completion)
+    Polls:        45576, with nothing outstanding during supply: 0
+
+    Per-CPU execution distribution:
+      CPU 0: 175 tasks (16.7%)
+      CPU 1: 169 tasks (16.1%)
+      CPU 2: 176 tasks (16.8%)
+      CPU 3: 174 tasks (16.6%)
+      CPU 4: 176 tasks (16.8%)
+      CPU 5: 174 tasks (16.6%)
+
+  c2t-format v2 mode=sustained run=1 cntfrq=31250000 cpus=6 tasks=1044 depth=16 work=8 sustain_ms=2500
+  c2t cpu=0 exec=175 att=45398 ok=175 f_stale=0 f_pd=9 f_empty=45214 first_ok_us=20 ticks=253 idle=0 (line abridged)
+  c2t cpu=1 exec=169 att=9 ok=0 f_pd=1 f_empty=8 dq_push=1044 dq_drains=84 ticks=253 idle=3 (owner; line abridged)
+  c2t cpu=2 exec=176 att=206 ok=175 f_stale=1 f_pd=0 f_empty=30 first_ok_us=8020 ticks=253 idle=4 (line abridged)
+  c2t cpu=3 exec=174 att=202 ok=174 f_stale=0 f_pd=0 f_empty=28 first_ok_us=7844 ticks=253 idle=7 (line abridged)
+  c2t cpu=4 exec=176 att=222 ok=176 f_stale=5 f_pd=19 f_empty=22 first_ok_us=9031 ticks=253 idle=5 (line abridged)
+  c2t cpu=5 exec=174 att=228 ok=174 f_stale=5 f_pd=33 f_empty=16 first_ok_us=9031 ticks=253 idle=8 (line abridged)
+
+  iw mode=sustained cpu=0 idle=0 ticks=253 us=2532468 idle_per_s=0.0 ticks_per_s=99.9
+  iw mode=sustained cpu=1 idle=3 ticks=253 us=2532468 idle_per_s=1.1 ticks_per_s=99.9
+  iw mode=sustained cpu=2 idle=4 ticks=253 us=2532468 idle_per_s=1.5 ticks_per_s=99.9
+  iw mode=sustained cpu=3 idle=7 ticks=253 us=2532468 idle_per_s=2.7 ticks_per_s=99.9
+  iw mode=sustained cpu=4 idle=5 ticks=253 us=2532468 idle_per_s=1.9 ticks_per_s=99.9
+  iw mode=sustained cpu=5 idle=8 ticks=253 us=2532468 idle_per_s=3.1 ticks_per_s=99.9
+
+  ASSERT-SHARES: PASS lowest thief cpu=3 share=16.6% (174 tasks), best thief cpu=2 share=16.8% (176 tasks); every

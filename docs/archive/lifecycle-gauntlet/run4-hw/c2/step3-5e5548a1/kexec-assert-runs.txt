@@ -1,0 +1,23 @@
+# jetson-nano-2 kexec, 20 x bench stealing --sustain 2500 --assert-shares in one boot, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, RESULT 20/20 ASSERT-SHARES: PASS
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1
+# run01 reply is in kexec-assert-run01.txt (abridged as noted there). Runs 02-20: serial_send(data, capture_timeout=0.3) then serial_capture(until_pattern=<end of the verdict line>, tail=2); only the verdict line is kept (run02's capture stopped mid-line). Per-run verdicts:
+run01 PASS lowest cpu3 174 best cpu2 176
+run02 PASS lowest cpu=4 share=(cut at match) best=(cut); iw: idle 0/12/29/15/31/29 ticks 250/251x5
+run03 PASS lowest thief cpu=3 share=15.4% (151 tasks), best thief cpu=0 share=17.7% (173 tasks)
+run04 PASS lowest thief cpu=0 share=16.6% (172 tasks), best thief cpu=2 share=16.8% (174 tasks)
+run05 PASS lowest thief cpu=4 share=16.3% (168 tasks), best thief cpu=0 share=17.0% (175 tasks)
+run06 PASS lowest thief cpu=5 share=16.2% (164 tasks), best thief cpu=2 share=17.0% (173 tasks)
+run07 PASS lowest thief cpu=2 share=16.3% (165 tasks), best thief cpu=0 share=17.1% (173 tasks)
+run08 PASS lowest thief cpu=4 share=16.5% (167 tasks), best thief cpu=0 share=17.0% (172 tasks)
+run09 PASS lowest thief cpu=0 share=16.6% (172 tasks), best thief cpu=2 share=16.8% (174 tasks)
+run10 PASS lowest thief cpu=3 share=16.4% (166 tasks), best thief cpu=0 share=17.1% (173 tasks)
+run11 PASS lowest thief cpu=2 share=15.5% (156 tasks), best thief cpu=0 share=17.2% (173 tasks)
+run12 PASS lowest thief cpu=3 share=16.3% (166 tasks), best thief cpu=0 share=17.0% (173 tasks)
+run13 PASS lowest thief cpu=0 share=16.5% (171 tasks), best thief cpu=4 share=16.9% (175 tasks)
+run14 PASS lowest thief cpu=3 share=16.3% (167 tasks), best thief cpu=5 share=16.9% (173 tasks)
+run15 PASS lowest thief cpu=3 share=16.0% (164 tasks), best thief cpu=4 share=17.0% (174 tasks)
+run16 PASS lowest thief cpu=2 share=16.0% (165 tasks), best thief cpu=4 share=17.3% (178 tasks)
+run17 PASS lowest thief cpu=0 share=16.4% (170 tasks), best thief cpu=4 share=16.9% (175 tasks)
+run18 PASS lowest thief cpu=0 share=16.4% (171 tasks), best thief cpu=4 share=16.8% (175 tasks)
+run19 PASS lowest thief cpu=0 share=16.6% (172 tasks), best thief cpu=2 share=16.8% (175 tasks)
+run20 PASS lowest thief cpu=0 share=16.4% (170 tasks), best thief cpu=5 share=16.9% (176 tasks)

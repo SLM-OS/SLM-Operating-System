@@ -1,0 +1,50 @@
+# jetson-nano-2 kexec boot for the --assert-shares row (also kexec boot 01), head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, elf sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80, RESULT PASS (slmos> 94.0 s after slmos-kexec)
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1
+[INFO] xhci: ep 0x83 configured (dci=7, type=7, mps=16)
+[INFO] xhci: ep 0x81 configured (dci=3, type=6, mps=512)
+[INFO] xhci: ep 0x02 configured (dci=4, type=2, mps=512)
+[INFO] xhci: ep 0x81 already configured (dci=3)
+[INFO] xhci: ep 0x02 already configured (dci=4)
+[INFO] usb_core: device configured — vid=0x0bda pid=0x8153 class=0x00
+[INFO] usb_core: hub port 3: CDC-ECM device — binding (vid=0x0bda pid=0x8153)
+[INFO] xhci: hot-plug ready — waiting for USB device attach (see #309 for the re-plug requirement on kexec boots)
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'net_pump'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+[INFO] cdc_ecm: activated interface 1 alt 1
+[INFO] cdc_ecm: probed — mac=a0:ce:c8:0e:9a:21 mtu=1514 bulk_in=0x81 bulk_out=0x02
+Lua 5.4 scripting initialized
+Preloading 'mnist' in background (slot 0, task 'preload_0')
+[boot] Started 1 mode[INFO] cdc_ecm: notification endpoint 0x83 on ctrl iface 0
+l preload(s) from /mnt/files/preload.conf
+[INFO] Initializing network subsystem...
+[INFO] cdc_ecm: NC DMA pools ready (rx=4 tx=4 size=2048 notify=16)
+[INFO] lwIP 2.2.0 initialized
+[INFO] Network interface initialized: sl0
+[INFO]   MAC: a0:ce:c8:0e:9a:21
+[INFO] Network configured: IP=10.0.2.15 GW=10.0.2.2 Mask=255.255.255.0
+[INFO] DHCP auto-start deferred until link-ready (timeout 10000 ms)
+[INFO] cdc_ecm: network connection down (if=0)
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+[TELNETD] autostart: listening on port 2323
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos>
+
+# pre-flight: board at SD Linux (gradient-desktop, 192.168.4.5 from 'hostname -I' on the labctl console); staging:
+staged /root/slmos-c2-5e5548a1.elf want=2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80 got=2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80
+# linux check:
+gradient-desktop
+ 23:40:43 up 9 min,  0 users,  load average: 0.09, 0.08, 0.07
+-rwxr-xr-x 1 root root 10089968 Nov  5 04:10 /root/slmos-1079.elf
+3d5e19018e77fbae1d3da4e8d7c231d8e3fba86f69ece01e296d1e27766a245b  /usr/local/bin/slmos-kexec
