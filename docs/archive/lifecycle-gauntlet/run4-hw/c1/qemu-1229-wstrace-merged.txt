@@ -1,0 +1,121 @@
+# main 6c1f4c9c WORK_STEALING=ON + SLOT_TRACE=ON (c1/1229-trace 7e07b384; count-bounded test_isolated_core_latency waits, C2's configuration plus the trace), thread=multi: 3 dumps in 18 runs (qemu-1229-wstrace-multi-run01..18.txt), merged; elf sha256 fb3f2baf1efc161c11fafe25401ef141f30a3dd881ff8bcccc9e1277f3f636aa; RESULT run16 = #1229 (steal, then stale preempt_disabled clear, flag stuck 300 ticks); run01 and run17 = sequence C (#1213 family: count wait expires on a task already on CPU 1, force-terminate + destroy + rebuild of the slot under it), no steal involved
+# boot banner: SLM-OS v0.4.0 build 20261112035147 (7e07b384)
+# Earlier attempt with the first dump code (qemu-1229-wstrace-v1-multi-run01..04.txt, c1/1229-trace 6f405a76): run04 panicked 'task_exit: schedule returned!' on CPU 1, but the dump faulted on a corrupted run-queue pointer in its state printout before printing the rings (fixed in 7e07b384: rings first, task_table pointers only, other CPUs parked).
+# Format as qemu-1213-trace-merged.txt; STEAL_PD records omitted. PD_SET/PD_CLEAR: a = index written, b = CPU actually running (stale clear: a != b). STEAL_TRY: a = victim, b = preempt_disabled[victim] under its rq_lock, c = outcome (1 stolen, 2 gen, 3 not READY, 4 cpu, 5 affinity, 6 not queued) | (task was victim's current)<<8.
+
+## Stale preempt_disabled clears and steal outcomes per dump (slot-trace-wsscan.py.txt)
+wstrace-multi-run01.txt STEAL_TRY (outcome,was_victim_current): {(1, 0): 3, (2, 0): 5, (3, 1): 2, (3, 0): 2, (4, 0): 1} stale PD_CLEAR: 4
+    ST c2 #356786 t=0x9158f4f8 PD_CLEAR slot=7 gen=12 id=89 st=1 a=0x0 b=0x2 c=0x0 rq=1 rep=0
+    ST c3 #40575 t=0x86762f79 PD_CLEAR slot=6 gen=16 id=35 st=1 a=0x0 b=0x3 c=0x0 rq=0 rep=0
+    ST c3 #356769 t=0x9125dcaf PD_CLEAR slot=6 gen=60 id=88 st=1 a=0x0 b=0x3 c=0x0 rq=1 rep=0
+    ST c3 #356821 t=0x915fa5d1 PD_CLEAR slot=6 gen=62 id=90 st=1 a=0x0 b=0x3 c=0x0 rq=0 rep=0
+wstrace-multi-run16.txt STEAL_TRY (outcome,was_victim_current): {(1, 0): 3, (3, 1): 1} stale PD_CLEAR: 1
+    ST c1 #456332 t=0xd8c7dbcc PD_CLEAR slot=6 gen=388 id=651 st=1 a=0x3 b=0x1 c=0x0 rq=0 rep=0
+wstrace-multi-run17.txt STEAL_TRY (outcome,was_victim_current): {(1, 0): 7, (2, 0): 7, (3, 0): 3} stale PD_CLEAR: 4
+    ST c1 #40797 t=0x9654d4fe PD_CLEAR slot=6 gen=16 id=35 st=1 a=0x0 b=0x1 c=0x0 rq=0 rep=0
+    ST c1 #308558 t=0xa0ec1718 PD_CLEAR slot=6 gen=62 id=90 st=1 a=0x0 b=0x1 c=0x0 rq=0 rep=0
+    ST c2 #308507 t=0xa0aab89d PD_CLEAR slot=6 gen=60 id=88 st=1 a=0x0 b=0x2 c=0x0 rq=1 rep=0
+    ST c2 #308524 t=0xa0e4509b PD_CLEAR slot=7 gen=11 id=89 st=1 a=0x0 b=0x2 c=0x0 rq=1 rep=0
+
+## qemu-1229-wstrace-multi-run16.txt
+SLOTTRACE-DUMP-BEGIN why=pd_stuck cpu=1 a=0x1 b=0x12c c=0x0 seq=2301247 cntvct=0xed7c64aa
+SLOTTRACE-FAULT preempt_disabled[1] stuck for 300 ticks (pd=1/1/0/0)
+
+## qemu-1229-wstrace-multi-run01.txt
+SLOTTRACE-DUMP-BEGIN why=panic cpu=1 a=0x0 b=0x0 c=0x0 seq=358355 cntvct=0x91896f7f
+task_exit: schedule returned!
+
+## qemu-1229-wstrace-multi-run17.txt
+SLOTTRACE-DUMP-BEGIN why=panic cpu=1 a=0x0 b=0x0 c=0x0 seq=310082 cntvct=0xa11fa892
+task_exit: schedule returned!
+
+### run16: CPU 1 steals id 651 from CPU 3, resumes it in schedule(), clears preempt_disabled[3] (seq 456300..456340)
+#456316 +12271270640ns cpu1 STEAL_TRY       slot= 14 gen=    0 id=  653 st=    1 rq=200 a=0x2 b=0x0 c=0x103
+#456318 +12271279248ns cpu1 STEAL_TRY       slot=  6 gen=  388 id=  651 st=    0 rq=2001 a=0x3 b=0x0 c=0x1
+#456320 +12271282896ns cpu1 ADD             slot=  6 gen=  388 id=  651 st=    0 rq=20 a=0x1 b=0x4001bdfc c=0x0
+#456323 +12271286160ns cpu1 ADD             slot= 13 gen=    7 id=  652 st=    0 rq=20 a=0x1 b=0x4001b624 c=0x0
+#456325 +12271288480ns cpu1 PD_SET          slot=  6 gen=  388 id=  651 st=    1 rq=20 a=0x1 b=0x1 c=0x0
+#456327 +12271292144ns cpu1 SWITCH          slot=  6 gen=  388 id=  651 st=    1 rq=1 out=slot13/gen7/st0 in.ctx.sp=0x435bea50 in.ctx.x19=0x4083b40c
+#456330 +12271296368ns cpu1 SWITCH_RET      slot=  6 gen=  388 id=  651 st=    1 rq=0 a=0x435bea50 b=0x0 c=0x0
+#456332 +12271297808ns cpu1 PD_CLEAR        slot=  6 gen=  388 id=  651 st=    1 rq=0 a=0x3 b=0x1 c=0x0
+### run16: last 12 events (CPU 0 keeps switching; CPU 1's flag is 1 from seq 456325 to the dump)
+#2301235 +17828629152ns cpu0 SWITCH_RET      slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x4223dfd0 b=0x0 c=0x0
+#2301236 +17828629840ns cpu0 PD_CLEAR        slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#2301237 +17828631328ns cpu0 ADD             slot=  4 gen=    0 id=    5 st=    0 rq=1 a=0x0 b=0x4001b624 c=0x0
+#2301238 +17828632128ns cpu0 PD_SET          slot= 10 gen=   10 id=  644 st=    1 rq=1 a=0x0 b=0x0 c=0x0
+#2301239 +17828633136ns cpu0 SWITCH          slot= 10 gen=   10 id=  644 st=    1 rq=0 out=slot4/gen0/st0 in.ctx.sp=0x438bfe30 in.ctx.x19=0x4083b400
+#2301240 +17828634064ns cpu0 SWITCH_RET      slot= 10 gen=   10 id=  644 st=    1 rq=0 a=0x438bfe30 b=0x0 c=0x0
+#2301241 +17828634896ns cpu0 PD_CLEAR        slot= 10 gen=   10 id=  644 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#2301242 +17828637120ns cpu0 ADD             slot= 10 gen=   10 id=  644 st=    0 rq=1 a=0x0 b=0x4001b624 c=0x0
+#2301243 +17828638080ns cpu0 PD_SET          slot=  4 gen=    0 id=    5 st=    1 rq=1 a=0x0 b=0x0 c=0x0
+#2301244 +17828639216ns cpu0 SWITCH          slot=  4 gen=    0 id=    5 st=    1 rq=0 out=slot10/gen10/st0 in.ctx.sp=0x4223dfd0 in.ctx.x19=0x4083b400
+#2301245 +17828640176ns cpu0 SWITCH_RET      slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x4223dfd0 b=0x0 c=0x0
+#2301246 +17828640832ns cpu0 PD_CLEAR        slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+
+### run01: slot 6 sequence C (last 50, CPU 0 requeue ADDs of main omitted)
+# 358298 +16314659504ns cpu0 ADD             slot=  6 gen=  148 id=  183 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358300 +16314906080ns cpu1 PD_SET          slot=  6 gen=  148 id=  183 st=    1 rq=20 a=0x1 b=0x1 c=0x0
+# 358301 +16314910896ns cpu1 SWITCH          slot=  6 gen=  148 id=  183 st=    1 rq=0 out=slot4/gen0/st0 in.ctx.sp=0x422c0000 in.ctx.x19=0x4011ae40
+# 358302 +16314915392ns cpu1 PD_CLEAR        slot=  6 gen=  148 id=  183 st=    1 rq=0 a=0x1 b=0x1 c=0x1
+# 358303 +16314945568ns cpu1 FIRST_RUN       slot=  6 gen=  148 id=  183 st=    1 rq=0 a=0x422bffd0 b=0x422c0000 c=0x0
+# 358304 +16315007600ns cpu0 TERMINATE       slot=  6 gen=  148 id=  183 st=    3 rq=10 a=0x1 b=0x0 c=0x0
+# 358305 +16315009408ns cpu0 DESTROY         slot=  6 gen=  148 id=  183 st=    3 rq=0 a=0x401193a4 b=0x42280000 c=0x422c0000
+# 358306 +16315010192ns cpu0 DESTROY_DONE    slot=  6 gen=  149 id=    0 st=    3 rq=0 a=0xb7 b=0x0 c=0x0
+# 358307 +16315014032ns cpu0 CREATE_ALLOC    slot=  6 gen=  149 id=  184 st=    3 rq=0 a=0x42280000 b=0x40119308 c=0x0
+# 358308 +16315016816ns cpu0 CREATE_CTX_DONE slot=  6 gen=  149 id=  184 st=    0 rq=0 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358309 +16315018528ns cpu0 ADD             slot=  6 gen=  149 id=  184 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358311 +16315091392ns cpu1 EXIT            slot=  6 gen=  149 id=  184 st=    0 rq=0 a=0x0 b=0x0 c=0x0
+# 358312 +16315096848ns cpu1 TERMINATE       slot=  6 gen=  149 id=  184 st=    3 rq=20 a=0x1 b=0x1 c=0x0
+# 358313 +16315129584ns cpu0 DESTROY         slot=  6 gen=  149 id=  184 st=    3 rq=0 a=0x401193a4 b=0x42280000 c=0x422c0000
+# 358314 +16315130512ns cpu0 DESTROY_DONE    slot=  6 gen=  150 id=    0 st=    3 rq=0 a=0xb8 b=0x0 c=0x0
+# 358315 +16315133904ns cpu0 CREATE_ALLOC    slot=  6 gen=  150 id=  185 st=    3 rq=0 a=0x42280000 b=0x40119308 c=0x0
+# 358316 +16315136576ns cpu0 CREATE_CTX_DONE slot=  6 gen=  150 id=  185 st=    0 rq=20 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358317 +16315139872ns cpu1 PD_SET          slot=  4 gen=    0 id=    5 st=    1 rq=20 a=0x1 b=0x1 c=0x0
+# 358318 +16315142480ns cpu0 ADD             slot=  6 gen=  150 id=  185 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358319 +16315143264ns cpu1 SWITCH          slot=  4 gen=    0 id=    5 st=    1 rq=0 out=slot6/gen150/st0 in.ctx.sp=0x4223fba0 in.ctx.x19=0x4083b404
+# 358321 +16315146496ns cpu1 SWITCH_RET      slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x4223fba0 b=0x0 c=0x0
+# 358322 +16315148272ns cpu1 PD_CLEAR        slot=  4 gen=    0 id=    5 st=    1 rq=0 a=0x1 b=0x1 c=0x0
+# 358323 +16315155168ns cpu1 PD_SET          slot=  6 gen=  150 id=  185 st=    1 rq=20 a=0x1 b=0x1 c=0x0
+# 358324 +16315157728ns cpu1 SWITCH          slot=  6 gen=  150 id=  185 st=    1 rq=0 out=slot4/gen0/st0 in.ctx.sp=0x422bfec0 in.ctx.x19=0x4083b404
+# 358325 +16315160048ns cpu1 SWITCH_RET      slot=  6 gen=  150 id=  185 st=    1 rq=0 a=0x422bfec0 b=0x0 c=0x0
+# 358326 +16315161536ns cpu1 PD_CLEAR        slot=  6 gen=  150 id=  185 st=    1 rq=1 a=0x1 b=0x1 c=0x0
+# 358327 +16315427008ns cpu0 TERMINATE       slot=  6 gen=  150 id=  185 st=    3 rq=10 a=0x1 b=0x0 c=0x0
+# 358328 +16315436736ns cpu0 DESTROY         slot=  6 gen=  150 id=  185 st=    3 rq=0 a=0x401193a4 b=0x42280000 c=0x422bfec0
+# 358329 +16315452960ns cpu0 DESTROY_DONE    slot=  6 gen=  151 id=    0 st=    3 rq=0 a=0xb9 b=0x0 c=0x0
+# 358330 +16315457216ns cpu0 CREATE_ALLOC    slot=  6 gen=  151 id=  186 st=    3 rq=0 a=0x42280000 b=0x40119308 c=0x0
+# 358331 +16315459984ns cpu0 CREATE_CTX_DONE slot=  6 gen=  151 id=  186 st=    0 rq=0 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358332 +16315462592ns cpu0 ADD             slot=  6 gen=  151 id=  186 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358334 +16315913216ns cpu0 TERMINATE       slot=  6 gen=  151 id=  186 st=    3 rq=10 a=0x1 b=0x1 c=0x0
+# 358335 +16315914624ns cpu0 DESTROY         slot=  6 gen=  151 id=  186 st=    3 rq=0 a=0x401193a4 b=0x42280000 c=0x422c0000
+# 358336 +16315915360ns cpu0 DESTROY_DONE    slot=  6 gen=  152 id=    0 st=    3 rq=0 a=0xba b=0x0 c=0x0
+# 358337 +16316246032ns cpu0 CREATE_ALLOC    slot=  6 gen=  152 id=  187 st=    3 rq=0 a=0x42280000 b=0x401193ec c=0x0
+# 358338 +16316249040ns cpu0 CREATE_CTX_DONE slot=  6 gen=  152 id=  187 st=    0 rq=0 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358339 +16316332304ns cpu0 ADD             slot=  6 gen=  152 id=  187 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358341 +16316679632ns cpu0 TERMINATE       slot=  6 gen=  152 id=  187 st=    3 rq=10 a=0x1 b=0x1 c=0x0
+# 358342 +16316685984ns cpu0 DESTROY         slot=  6 gen=  152 id=  187 st=    3 rq=0 a=0x40119494 b=0x42280000 c=0x422c0000
+# 358343 +16316696112ns cpu0 DESTROY_DONE    slot=  6 gen=  153 id=    0 st=    3 rq=0 a=0xbb b=0x0 c=0x0
+# 358344 +16316719024ns cpu0 CREATE_ALLOC    slot=  6 gen=  153 id=  188 st=    3 rq=0 a=0x42280000 b=0x401193ec c=0x0
+# 358345 +16316722000ns cpu0 CREATE_CTX_DONE slot=  6 gen=  153 id=  188 st=    0 rq=0 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358346 +16316723824ns cpu0 ADD             slot=  6 gen=  153 id=  188 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+# 358348 +16317004704ns cpu0 TERMINATE       slot=  6 gen=  153 id=  188 st=    3 rq=10 a=0x1 b=0x1 c=0x0
+# 358349 +16317007168ns cpu0 DESTROY         slot=  6 gen=  153 id=  188 st=    3 rq=0 a=0x40119494 b=0x42280000 c=0x422c0000
+# 358350 +16317007952ns cpu0 DESTROY_DONE    slot=  6 gen=  154 id=    0 st=    3 rq=0 a=0xbc b=0x0 c=0x0
+# 358351 +16317011120ns cpu0 CREATE_ALLOC    slot=  6 gen=  154 id=  189 st=    3 rq=0 a=0x42280000 b=0x401193ec c=0x0
+# 358352 +16317013760ns cpu0 CREATE_CTX_DONE slot=  6 gen=  154 id=  189 st=    0 rq=0 a=0x422c0000 b=0x4011ae40 c=0x40017ea0
+# 358353 +16317015024ns cpu0 ADD             slot=  6 gen=  154 id=  189 st=    0 rq=10 a=0x1 b=0x40019750 c=0x0
+
+### run17: CPU 1 side of slot 6 (last 14 CPU 1 events)
+# 308758 +20557188320ns cpu1 PD_SET          slot=  1 gen=    0 id=    2 st=    1 rq=1020 a=0x1 b=0x1 c=0x0
+# 308759 +20557190928ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=1000 out=slot6/gen83/st3 in.ctx.sp=0x4217fba0 in.ctx.x19=0x4083b404
+# 308760 +20557193520ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=1000 a=0x4217fba0 b=0x0 c=0x0
+# 308761 +20557195264ns cpu1 PD_CLEAR        slot=  1 gen=    0 id=    2 st=    1 rq=1000 a=0x1 b=0x1 c=0x0
+# 308762 +20557212512ns cpu1 ZOMBIE_REAP     slot=  6 gen=   83 id=  108 st=    3 rq=20 a=0x1 b=0x4082e4b0 c=0x0
+# 308763 +20557214816ns cpu1 DESTROY         slot=  6 gen=   83 id=  108 st=    3 rq=0 a=0x4001b3ac b=0x42280000 c=0x422bfec0
+# 308764 +20557216224ns cpu1 DESTROY_DONE    slot=  6 gen=   84 id=    0 st=    3 rq=0 a=0x6c b=0x0 c=0x0
+# 310027 +20575256560ns cpu1 PD_SET          slot=  6 gen=  145 id=  179 st=    1 rq=20 a=0x1 b=0x1 c=0x0
+# 310028 +20575260720ns cpu1 SWITCH          slot=  6 gen=  145 id=  179 st=    1 rq=0 out=slot1/gen0/st0 in.ctx.sp=0x422c0000 in.ctx.x19=0x4011ae40
+# 310031 +20575276512ns cpu1 PD_CLEAR        slot=  6 gen=  146 id=    0 st=    3 rq=0 a=0x1 b=0x1 c=0x1
+# 310035 +20575294496ns cpu1 FIRST_RUN       slot=  6 gen=  146 id=  180 st=    0 rq=10 a=0x422bffd0 b=0x422c0000 c=0x0
+# 310038 +20575449136ns cpu1 EXIT            slot=  6 gen=  146 id=  180 st=    0 rq=0 a=0x0 b=0x0 c=0x0
+# 310039 +20575451904ns cpu1 TERMINATE       slot=  6 gen=  146 id=  180 st=    3 rq=20 a=0x1 b=0x1 c=0x0
+# 310046 +20575501808ns cpu1 PICK_SAME       slot=  6 gen=  147 id=  181 st=    0 rq=20 a=0x0 b=0x0 c=0x0

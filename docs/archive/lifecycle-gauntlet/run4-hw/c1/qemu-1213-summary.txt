@@ -98,3 +98,57 @@ No hardware and no labctl call was made.
   fix 8/20, step5 1/20, 1211-fix 3/20, 1211-unfixed 0/20. forbidden = 0 in every row.
 - test_net_burst_8_sends_async once (qemu-1213-fix-multi-run18, load average 9.47): #1137/#1163.
 - test_runner_parks_without_a_lock once (qemu-1211-unfixed-multi-run12): #1184.
+
+## Addendum (after the orchestrator's #1228 / #1229 relays): WORK_STEALING=ON, #1229, #1228
+Configuration of every rate above: QEMU default WORK_STEALING=OFF. The rows below say WS=ON
+where it applies. Per-run rows: qemu-rates-table.txt.
+
+- Trace extension (c1/1229-trace 6f405a76 + 7e07b384, also on c1/1213-fix): preempt_disabled
+  set/clear (index written vs CPU actually running), steal-deque pops (victim, flag under the
+  victim's rq_lock, outcome, whether the task was the victim's current), victims skipped on the
+  flag, and a 300-tick stuck-flag watchdog that dumps. Dump now prints rings first, dereferences
+  only task_table pointers, and parks the other CPUs (the v1 dump faulted on a corrupted
+  run-queue pointer: qemu-1229-wstrace-v1-multi-run04.txt).
+- main 6c1f4c9c WS=ON + SLOT_TRACE, count waits (C2's configuration): 3 dumps in 18 runs
+  (qemu-1229-wstrace-multi-run01, 16, 17; merged: qemu-1229-wstrace-merged.txt).
+  - run16 (#1229, traced): CPU 1 steals id 651 from CPU 3 (STEAL_TRY outcome 1), sets
+    preempt_disabled[1], switches into it (it resumes inside schedule()), then clears
+    preempt_disabled[3] (PD_CLEAR a=3 on CPU 1). CPU 1's flag stays 1; the watchdog fires
+    300 ticks later (pd=1/1/0/0).
+  - run01 and run17 (`task_exit: schedule returned!` on CPU 1): sequence C, not a steal. The
+    count-bounded wait in test_isolated_core_latency expires while the lat task is already
+    RUNNING on CPU 1 (pinned); CPU 0 force-terminates it, task_destroy()s it and builds the next
+    task in the same slot and stack pages while CPU 1 still runs on them; the old task's exit
+    terminates the new task and its switch_to save overwrites the next one's context.
+  - Stale preempt_disabled clears are in all three rings (4, 1, 4); none precedes a steal of a
+    task mid-switch: no successful steal took a victim's current (2 pops of a victim's current
+    were rejected as not READY). So at the first faults a stale clear did not lead to the
+    #1213-signature fault; #1229 is a separate defect in the same files.
+- Fix additions on c1/1213-fix: 1ead6ef6 (cpu re-read after switch_to, #1229; schedule() waits
+  for next->on_cpu == 0 before switching in, closing the steal/migrate-before-save window found by
+  code reading, not observed in a trace), 6d4fe041 (#1229 regression test blocks in
+  task_sleep_ms; the earlier yield-based versions are 1ead6ef6 and 8f4aaffd). Fix head 6d4fe041.
+- #1229 regression test without the cpu re-read (local builds of 6d4fe041 with it reverted):
+  FAIL 6/6 (qemu-1229-pdunfixed-multi-run01..03 WS=OFF, qemu-1229-pdunfixedws-multi-run01..03
+  WS=ON; bad = moved in every run). pdunfixedws-run03 also hung in `batch: stress workload (4x8)`
+  at the 120 s cap (#1219 signature).
+- Fix head, thread=multi: WS=ON 0/20 CPU 1 stopped, 0/20 batch-stress FAIL, 0/20 cap, #1229 test
+  bad=0 in 20/20, stress clean 20/20, 1 s variant 10/10+10/10 in 20/20
+  (qemu-1229-fix5wson-multi-run01..20); d8b21ec3 (same sched code, first test version) WS=ON
+  0/20 stopped, 0/20 batch-stress FAIL (qemu-1229-fix3wson-*; its 4 #1229-test failures there
+  were moved=0, bad=0, a test weakness fixed in 8f4aaffd/6d4fe041). WS=OFF 0/20 (fix3wsoff) and
+  0/6 (fix5wsoff).
+- #1228 (Jetson pmm_alloc_pages fault in test_shell_cmd_bench's isolation phase): not reproduced.
+  No QEMU run here showed a PMM fault or a broken canary. In C3's faulting boot
+  (repro-main-6c1f4c9c-kexec-run01.txt on gauntlet-4-hw-jetson) test_isolated_core_latency had not
+  run yet (no `Samples collected` line), so sequences A, B and C, all traced from that test or the
+  stress test, cannot be the immediate cause there; an earlier destroy of a task still on a CPU
+  freeing its stack (the A/B/C family) would fit a corrupted free-list link but is a hypothesis.
+  A Jetson SLOT_TRACE=ON test kernel builds (`make kernel-test PLATFORM=JETSON_ORIN_NANO
+  SLOT_TRACE=ON`); its dump would take about 20 s over UARTC at 115200.
+- Other failures, not #1213: test_proactive_load_balance_inert_when_light 2/18 and
+  test_benchmark_context_switch 1/18 (qemu-1229-wstrace-multi-run06/14, run13; unfixed main
+  WS=ON only), test_pi_floor_set_on_handoff_for_remaining_waiters once (wstrace-v1-run02),
+  test_stress_mixed_priorities once (qemu-1213-main-single-run14), test_slm_stats_live_from_second_session
+  once at the fix head WS=ON (qemu-1229-fix5wson-multi-run06; #1202 closed; filed separately),
+  litmus #1230 throughout.

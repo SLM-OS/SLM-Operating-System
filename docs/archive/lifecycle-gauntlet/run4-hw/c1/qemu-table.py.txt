@@ -12,6 +12,16 @@ groups = [
     ("qemu-1213-step5-multi-run", "FIX + permanent 1 s waits asserted (6aee62c1), thread=multi"),
     ("qemu-1211-unfixed-multi-run", "#1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi"),
     ("qemu-1211-fix-multi-run", "#1211 window, FIX (2f043ffa), thread=multi"),
+    ("qemu-1229-wstrace-v1-multi-run", "main WORK_STEALING=ON + SLOT_TRACE (6f405a76, first dump code), thread=multi"),
+    ("qemu-1229-wstrace-multi-run", "main WORK_STEALING=ON + SLOT_TRACE (7e07b384), thread=multi"),
+    ("qemu-1229-fix3wson-multi-run", "FIX d8b21ec3 (#1213+#1229, first #1229 test), WORK_STEALING=ON, thread=multi"),
+    ("qemu-1229-fix3wsoff-multi-run", "FIX d8b21ec3, WORK_STEALING=OFF, thread=multi"),
+    ("qemu-1229-pdunfixed-8f4aaffd-multi-run", "8f4aaffd without the #1229 cpu re-read (local), WS=OFF"),
+    ("qemu-1229-pdunfixedws-8f4aaffd-multi-run", "8f4aaffd without the #1229 cpu re-read (local), WS=ON"),
+    ("qemu-1229-pdunfixed-multi-run", "6d4fe041 without the #1229 cpu re-read (local), WS=OFF"),
+    ("qemu-1229-pdunfixedws-multi-run", "6d4fe041 without the #1229 cpu re-read (local), WS=ON"),
+    ("qemu-1229-fix5wson-multi-run", "FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi"),
+    ("qemu-1229-fix5wsoff-multi-run", "FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi"),
 ]
 def g(pat, s, default='-'):
     m = re.search(pat, s)
@@ -29,7 +39,7 @@ for prefix, desc in groups:
     out.append(f"## {desc}: {prefix}NN.txt")
     out.append("| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |")
     out.append("|---|---|---|---|---|---|---|---|---|---|")
-    n = stop = lit = lcf = lcn = 0
+    n = stop = lit = lcf = lcn = cap = pds = 0
     for f in files:
         s = open(f, errors='replace').read()
         rc = g(r'qemu rc (\d+)', s)
@@ -41,16 +51,19 @@ for prefix, desc in groups:
         panic = 'yes' if 'KERNEL PANIC' in s else '-'
         pmsg = g(r'(schedule returned!|stack overflow|terminated/destroyed task selected)', s, '')
         lc = g(r'\[C1-1211\] lifecycle (PASS|FAIL)', s)
+        pdm = g(r'pdm: (migrations=\d+ moved=\d+ runs=\d+/\d+ bad=\d+)', s, '')
         if lc != '-':
             lcn += 1
             lcf += lc == 'FAIL'
         fails = sorted(set(re.findall(r'\[FAIL\] (test_\w+)', s)))
         lit += 'test_litmus_patterns_pass' in fails
-        stopped = nto > 0 or 'timeouts=1' in st or dump not in ('-', 'lifecycle_leak_1211') or panic == 'yes'
+        stopped = nto > 0 or 'timeouts=1' in st or dump not in ('-', 'lifecycle_leak_1211', 'pd_stuck') or panic == 'yes'
         n += 1
         stop += stopped
-        out.append(f"| {os.path.basename(f)} | {rc} | {samples} | {nto} | {st} {stid} | {dump} | {panic} {pmsg} | {lc} | {' '.join(fails) or '-'} | {'YES' if stopped else 'no'} |")
-    line = f"{desc}: CPU 1 stopped {stop}/{n}; litmus [FAIL] {lit}/{n}"
+        cap += rc == '124'
+        pds += dump == 'pd_stuck'
+        out.append(f"| {os.path.basename(f)} | {rc} | {samples} | {nto} | {st} {stid} | {dump} | {panic} {pmsg} | {lc} | {' '.join(fails) or '-'} {pdm} | {'YES' if stopped else 'no'} |")
+    line = f"{desc}: CPU 1 stopped {stop}/{n}; preempt_disabled stuck dump {pds}/{n}; 120 s cap {cap}/{n}; litmus [FAIL] {lit}/{n}"
     if lcn:
         line += f"; #1211 lifecycle FAIL {lcf}/{lcn}"
     out.append("")

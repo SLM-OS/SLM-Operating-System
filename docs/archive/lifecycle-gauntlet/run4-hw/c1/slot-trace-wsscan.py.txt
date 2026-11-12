@@ -1,0 +1,11 @@
+import re,sys,collections
+for path in sys.argv[1:]:
+    st=collections.Counter(); stale=[]
+    for l in open(path,errors='replace'):
+        m=re.search(r'ST c(\d+) #(\d+) \S+ (\S+) slot=(-?\d+) gen=(\d+) id=(\d+) st=(\d+) a=0x([0-9a-f]+) b=0x([0-9a-f]+) c=0x([0-9a-f]+)',l)
+        if not m: continue
+        c,seq,ev,slot,gen,i,s,a,b,cc=m.groups(); a=int(a,16); b=int(b,16); cc=int(cc,16)
+        if ev=='PD_CLEAR' and a!=b: stale.append(l.strip())
+        if ev=='STEAL_TRY': st[(cc&0xff, (cc>>8)&1)]+=1
+    print(path.split('/')[-1], 'STEAL_TRY (outcome,was_victim_current):', dict(st), 'stale PD_CLEAR:', len(stale))
+    for x in stale[:5]: print('   ',x)

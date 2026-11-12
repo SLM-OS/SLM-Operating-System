@@ -2,214 +2,388 @@
 # boot banner: (table; each file's line 2 has its banner)
 # CPU 1 stopped = any `iso_latency_*: TIMEOUT` line, a stress-test timeout, a SLOTTRACE fault dump, or a panic on CPU 1. Litmus = test_litmus_patterns_pass [FAIL] (#1230, separate). 120 s cap: thread=single runs end at the cap before the suite finishes (the latency and stress tests run well before it).
 # Summary:
-#   main + 1 s waits (01931af6), thread=multi: CPU 1 stopped 6/20; litmus [FAIL] 3/20
-#   main + 1 s waits (01931af6), thread=single: CPU 1 stopped 0/20; litmus [FAIL] 0/20
-#   01931af6 + SLOT_TRACE=ON (b8df6f5f), thread=multi: CPU 1 stopped 3/6; litmus [FAIL] 0/6
-#   UNFIXED + stress test (884aab2d), thread=multi: CPU 1 stopped 20/20; litmus [FAIL] 0/20
-#   UNFIXED + stress test, SLOT_TRACE=ON (884aab2d), thread=multi: CPU 1 stopped 2/2; litmus [FAIL] 0/2
-#   FIX (912efbd0): stress + 1 s waits, thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 8/20
-#   FIX + permanent 1 s waits asserted (6aee62c1), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 1/20
-#   #1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 0/20; #1211 lifecycle FAIL 0/20
-#   #1211 window, FIX (2f043ffa), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 3/20; #1211 lifecycle FAIL 0/20
+#   main + 1 s waits (01931af6), thread=multi: CPU 1 stopped 6/20; preempt_disabled stuck dump 0/20; 120 s cap 6/20; litmus [FAIL] 3/20
+#   main + 1 s waits (01931af6), thread=single: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 20/20; litmus [FAIL] 0/20
+#   01931af6 + SLOT_TRACE=ON (b8df6f5f), thread=multi: CPU 1 stopped 3/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 0/6
+#   UNFIXED + stress test (884aab2d), thread=multi: CPU 1 stopped 20/20; preempt_disabled stuck dump 0/20; 120 s cap 20/20; litmus [FAIL] 0/20
+#   UNFIXED + stress test, SLOT_TRACE=ON (884aab2d), thread=multi: CPU 1 stopped 2/2; preempt_disabled stuck dump 0/2; 120 s cap 0/2; litmus [FAIL] 0/2
+#   FIX (912efbd0): stress + 1 s waits, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 8/20
+#   FIX + permanent 1 s waits asserted (6aee62c1), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 1/20
+#   #1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 0/20; #1211 lifecycle FAIL 0/20
+#   #1211 window, FIX (2f043ffa), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 3/20; #1211 lifecycle FAIL 0/20
+#   main WORK_STEALING=ON + SLOT_TRACE (6f405a76, first dump code), thread=multi: CPU 1 stopped 1/8; preempt_disabled stuck dump 0/8; 120 s cap 1/8; litmus [FAIL] 1/8
+#   main WORK_STEALING=ON + SLOT_TRACE (7e07b384), thread=multi: CPU 1 stopped 2/18; preempt_disabled stuck dump 1/18; 120 s cap 0/18; litmus [FAIL] 5/18
+#   FIX d8b21ec3 (#1213+#1229, first #1229 test), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 2/20
+#   FIX d8b21ec3, WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 3/20
+#   8f4aaffd without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 0/3
+#   8f4aaffd without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
+#   6d4fe041 without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
+#   6d4fe041 without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 1/3; litmus [FAIL] 1/3
+#   FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
+#   FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
 
 ## main + 1 s waits (01931af6), thread=multi: qemu-1213-main-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-main-multi-run01.txt | 124 | isolated=6/10, normal=0/10 | 14 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-main-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run09.txt | 124 | isolated=10/10, normal=5/10 | 5 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run10.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run11.txt | 124 | isolated=10/10, normal=6/10 | 4 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run12.txt | 124 | isolated=10/10, normal=2/10 | 8 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-main-multi-run14.txt | 124 | isolated=10/10, normal=5/10 | 5 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run16.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-main-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-multi-run19.txt | 124 | isolated=10/10, normal=2/10 | 8 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq | YES |
-| qemu-1213-main-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
+| qemu-1213-main-multi-run01.txt | 124 | isolated=6/10, normal=0/10 | 14 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-main-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run09.txt | 124 | isolated=10/10, normal=5/10 | 5 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run10.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run11.txt | 124 | isolated=10/10, normal=6/10 | 4 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run12.txt | 124 | isolated=10/10, normal=2/10 | 8 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-main-multi-run14.txt | 124 | isolated=10/10, normal=5/10 | 5 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run16.txt | 1 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-main-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-multi-run19.txt | 124 | isolated=10/10, normal=2/10 | 8 | -  | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1213-main-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
 
-RESULT main + 1 s waits (01931af6), thread=multi: CPU 1 stopped 6/20; litmus [FAIL] 3/20
+RESULT main + 1 s waits (01931af6), thread=multi: CPU 1 stopped 6/20; preempt_disabled stuck dump 0/20; 120 s cap 6/20; litmus [FAIL] 3/20
 
 ## main + 1 s waits (01931af6), thread=single: qemu-1213-main-single-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-main-single-run01.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run02.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run03.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run04.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run05.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run06.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run07.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run08.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run09.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run10.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run11.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run12.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run13.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run14.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_stress_mixed_priorities | no |
-| qemu-1213-main-single-run15.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run16.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run17.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run18.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run19.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-main-single-run20.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
+| qemu-1213-main-single-run01.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run02.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run03.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run04.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run05.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run06.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run07.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run08.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run09.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run10.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run11.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run12.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run13.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run14.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | test_stress_mixed_priorities  | no |
+| qemu-1213-main-single-run15.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run16.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run17.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run18.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run19.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-main-single-run20.txt | 124 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
 
-RESULT main + 1 s waits (01931af6), thread=single: CPU 1 stopped 0/20; litmus [FAIL] 0/20
+RESULT main + 1 s waits (01931af6), thread=single: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 20/20; litmus [FAIL] 0/20
 
 ## 01931af6 + SLOT_TRACE=ON (b8df6f5f), thread=multi: qemu-1213-trace-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-trace-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-trace-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-trace-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | - | no |
-| qemu-1213-trace-multi-run04.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | - | YES |
-| qemu-1213-trace-multi-run05.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | - | YES |
-| qemu-1213-trace-multi-run06.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | - | YES |
+| qemu-1213-trace-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-trace-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-trace-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1213-trace-multi-run04.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | -  | YES |
+| qemu-1213-trace-multi-run05.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | -  | YES |
+| qemu-1213-trace-multi-run06.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | -  | YES |
 
-RESULT 01931af6 + SLOT_TRACE=ON (b8df6f5f), thread=multi: CPU 1 stopped 3/6; litmus [FAIL] 0/6
+RESULT 01931af6 + SLOT_TRACE=ON (b8df6f5f), thread=multi: CPU 1 stopped 3/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 0/6
 
 ## UNFIXED + stress test (884aab2d), thread=multi: qemu-1213-stress-unfixed-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-stress-unfixed-multi-run01.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=74 same_slot=74 ran=74 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run02.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=31 same_slot=31 ran=31 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run03.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=28 same_slot=28 ran=28 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run04.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=5 same_slot=5 ran=5 bad=0 first_bad_token=0 timeouts=1 task id=182 state=1 | - | yes schedule returned! | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run05.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=156 same_slot=156 ran=156 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run06.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=2 same_slot=2 ran=2 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run07.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=35 same_slot=35 ran=35 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run08.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=94 same_slot=94 ran=94 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run09.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=41 same_slot=41 ran=41 bad=0 first_bad_token=0 timeouts=1 task id=218 state=1 | - | yes schedule returned! | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run10.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=116 same_slot=116 ran=116 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run11.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=28 same_slot=28 ran=28 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run12.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=49 same_slot=49 ran=49 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run13.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=124 same_slot=124 ran=124 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run14.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=45 same_slot=45 ran=45 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run15.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=26 same_slot=26 ran=26 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run16.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=17 same_slot=17 ran=17 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run17.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=25 same_slot=25 ran=25 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run18.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=5 same_slot=5 ran=5 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run19.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=189 same_slot=189 ran=189 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
-| qemu-1213-stress-unfixed-multi-run20.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=6 same_slot=6 ran=6 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch | YES |
+| qemu-1213-stress-unfixed-multi-run01.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=74 same_slot=74 ran=74 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run02.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=31 same_slot=31 ran=31 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run03.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=28 same_slot=28 ran=28 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run04.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=5 same_slot=5 ran=5 bad=0 first_bad_token=0 timeouts=1 task id=182 state=1 | - | yes schedule returned! | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run05.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=156 same_slot=156 ran=156 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run06.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=2 same_slot=2 ran=2 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run07.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=35 same_slot=35 ran=35 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run08.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=94 same_slot=94 ran=94 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run09.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=41 same_slot=41 ran=41 bad=0 first_bad_token=0 timeouts=1 task id=218 state=1 | - | yes schedule returned! | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run10.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=116 same_slot=116 ran=116 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run11.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=28 same_slot=28 ran=28 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run12.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=49 same_slot=49 ran=49 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run13.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=124 same_slot=124 ran=124 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run14.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=45 same_slot=45 ran=45 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run15.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=26 same_slot=26 ran=26 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run16.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=17 same_slot=17 ran=17 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run17.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=25 same_slot=25 ran=25 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run18.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=5 same_slot=5 ran=5 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run19.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=189 same_slot=189 ran=189 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
+| qemu-1213-stress-unfixed-multi-run20.txt | 124 | isolated=0/10, normal=0/10 | 20 | iterations=6 same_slot=6 ran=6 bad=0 first_bad_token=0 timeouts=1 task id=0 state=1 | - | -  | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq test_task_slot_reuse_under_switch  | YES |
 
-RESULT UNFIXED + stress test (884aab2d), thread=multi: CPU 1 stopped 20/20; litmus [FAIL] 0/20
+RESULT UNFIXED + stress test (884aab2d), thread=multi: CPU 1 stopped 20/20; preempt_disabled stuck dump 0/20; 120 s cap 20/20; litmus [FAIL] 0/20
 
 ## UNFIXED + stress test, SLOT_TRACE=ON (884aab2d), thread=multi: qemu-1213-stresstrace-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-stresstrace-multi-run01.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | - | YES |
-| qemu-1213-stresstrace-multi-run02.txt | 1 | - | 0 | -  | panic | yes schedule returned! | - | - | YES |
+| qemu-1213-stresstrace-multi-run01.txt | 1 | - | 0 | -  | el1_sync_bad_sp | -  | - | -  | YES |
+| qemu-1213-stresstrace-multi-run02.txt | 1 | - | 0 | -  | panic | yes schedule returned! | - | -  | YES |
 
-RESULT UNFIXED + stress test, SLOT_TRACE=ON (884aab2d), thread=multi: CPU 1 stopped 2/2; litmus [FAIL] 0/2
+RESULT UNFIXED + stress test, SLOT_TRACE=ON (884aab2d), thread=multi: CPU 1 stopped 2/2; preempt_disabled stuck dump 0/2; 120 s cap 0/2; litmus [FAIL] 0/2
 
 ## FIX (912efbd0): stress + 1 s waits, thread=multi: qemu-1213-fix-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-fix-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2051 same_slot=2050 ran=2051 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2046 same_slot=2045 ran=2046 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2018 same_slot=2017 ran=2018 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2027 same_slot=2026 ran=2027 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2015 same_slot=2014 ran=2015 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2068 same_slot=2067 ran=2068 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run09.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2056 same_slot=2055 ran=2056 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2004 same_slot=2003 ran=2004 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2029 same_slot=2028 ran=2029 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run15.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2018 same_slot=2017 ran=2018 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run17.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1992 same_slot=1991 ran=1992 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-fix-multi-run18.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1972 same_slot=1971 ran=1972 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_net_burst_8_sends_async | no |
-| qemu-1213-fix-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2024 same_slot=2023 ran=2024 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-fix-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2050 same_slot=2049 ran=2050 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
+| qemu-1213-fix-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2051 same_slot=2050 ran=2051 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2046 same_slot=2045 ran=2046 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2018 same_slot=2017 ran=2018 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2027 same_slot=2026 ran=2027 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2015 same_slot=2014 ran=2015 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2068 same_slot=2067 ran=2068 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run09.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2056 same_slot=2055 ran=2056 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2004 same_slot=2003 ran=2004 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2029 same_slot=2028 ran=2029 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run15.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2018 same_slot=2017 ran=2018 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run17.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1992 same_slot=1991 ran=1992 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-fix-multi-run18.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1972 same_slot=1971 ran=1972 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_net_burst_8_sends_async  | no |
+| qemu-1213-fix-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2024 same_slot=2023 ran=2024 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-fix-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2050 same_slot=2049 ran=2050 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
 
-RESULT FIX (912efbd0): stress + 1 s waits, thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 8/20
+RESULT FIX (912efbd0): stress + 1 s waits, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 8/20
 
 ## FIX + permanent 1 s waits asserted (6aee62c1), thread=multi: qemu-1213-step5-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1213-step5-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2008 same_slot=2007 ran=2008 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2038 same_slot=2037 ran=2038 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2037 same_slot=2036 ran=2037 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass | no |
-| qemu-1213-step5-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2022 same_slot=2021 ran=2022 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2057 same_slot=2056 ran=2057 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run10.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2076 same_slot=2075 ran=2076 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2053 same_slot=2052 ran=2053 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2024 same_slot=2023 ran=2024 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2091 same_slot=2090 ran=2091 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2075 same_slot=2074 ran=2075 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2056 same_slot=2055 ran=2056 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2054 same_slot=2053 ran=2054 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2104 same_slot=2103 ran=2104 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
-| qemu-1213-step5-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=1997 same_slot=1996 ran=1997 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - | no |
+| qemu-1213-step5-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2008 same_slot=2007 ran=2008 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2038 same_slot=2037 ran=2038 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2037 same_slot=2036 ran=2037 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1213-step5-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2022 same_slot=2021 ran=2022 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2057 same_slot=2056 ran=2057 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run10.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2076 same_slot=2075 ran=2076 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2053 same_slot=2052 ran=2053 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2024 same_slot=2023 ran=2024 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2091 same_slot=2090 ran=2091 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2075 same_slot=2074 ran=2075 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2056 same_slot=2055 ran=2056 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2054 same_slot=2053 ran=2054 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2104 same_slot=2103 ran=2104 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
+| qemu-1213-step5-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=1997 same_slot=1996 ran=1997 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | -  | no |
 
-RESULT FIX + permanent 1 s waits asserted (6aee62c1), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 1/20
+RESULT FIX + permanent 1 s waits asserted (6aee62c1), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 1/20
 
 ## #1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi: qemu-1211-unfixed-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1211-unfixed-multi-run01.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run02.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run03.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run04.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run05.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run06.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run07.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run08.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run09.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run10.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run11.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run12.txt | 1 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | test_runner_parks_without_a_lock | no |
-| qemu-1211-unfixed-multi-run13.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run14.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run15.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run16.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run17.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run18.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run19.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | - | no |
-| qemu-1211-unfixed-multi-run20.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | - | no |
+| qemu-1211-unfixed-multi-run01.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run02.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run03.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run04.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run05.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run06.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run07.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run08.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run09.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run10.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run11.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run12.txt | 1 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | test_runner_parks_without_a_lock  | no |
+| qemu-1211-unfixed-multi-run13.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run14.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run15.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run16.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run17.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run18.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run19.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | PASS | -  | no |
+| qemu-1211-unfixed-multi-run20.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | PASS | -  | no |
 
-RESULT #1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 0/20; #1211 lifecycle FAIL 0/20
+RESULT #1211 window, UNFIXED main + SLOT_TRACE=ON (8b0065ce), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 0/20; #1211 lifecycle FAIL 0/20
 
 ## #1211 window, FIX (2f043ffa), thread=multi: qemu-1211-fix-multi-runNN.txt
 | file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
 |---|---|---|---|---|---|---|---|---|---|
-| qemu-1211-fix-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2044 same_slot=2043 ran=2044 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass | no |
-| qemu-1211-fix-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2090 same_slot=2089 ran=2090 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2059 same_slot=2058 ran=2059 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2023 same_slot=2022 ran=2023 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass | no |
-| qemu-1211-fix-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2046 same_slot=2045 ran=2046 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2100 same_slot=2099 ran=2100 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2074 same_slot=2073 ran=2074 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2099 same_slot=2098 ran=2099 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2049 same_slot=2048 ran=2049 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2031 same_slot=2030 ran=2031 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | - | no |
-| qemu-1211-fix-multi-run20.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass | no |
+| qemu-1211-fix-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2044 same_slot=2043 ran=2044 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass  | no |
+| qemu-1211-fix-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2030 same_slot=2029 ran=2030 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2090 same_slot=2089 ran=2090 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2059 same_slot=2058 ran=2059 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2023 same_slot=2022 ran=2023 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass  | no |
+| qemu-1211-fix-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2046 same_slot=2045 ran=2046 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2100 same_slot=2099 ran=2100 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2047 same_slot=2046 ran=2047 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2074 same_slot=2073 ran=2074 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2099 same_slot=2098 ran=2099 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2049 same_slot=2048 ran=2049 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2031 same_slot=2030 ran=2031 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2040 same_slot=2039 ran=2040 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | -  | no |
+| qemu-1211-fix-multi-run20.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2034 same_slot=2033 ran=2034 bad=0 first_bad_token=0 timeouts=0  | - | -  | PASS | test_litmus_patterns_pass  | no |
 
-RESULT #1211 window, FIX (2f043ffa), thread=multi: CPU 1 stopped 0/20; litmus [FAIL] 3/20; #1211 lifecycle FAIL 0/20
+RESULT #1211 window, FIX (2f043ffa), thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 3/20; #1211 lifecycle FAIL 0/20
+
+## main WORK_STEALING=ON + SLOT_TRACE (6f405a76, first dump code), thread=multi: qemu-1229-wstrace-v1-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-wstrace-v1-multi-run01.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-v1-multi-run02.txt | 1 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | test_pi_floor_set_on_handoff_for_remaining_waiters  | no |
+| qemu-1229-wstrace-v1-multi-run03.txt | 1 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1229-wstrace-v1-multi-run04.txt | 124 | - | 0 | -  | panic | yes schedule returned! | - | test_reposition_moves_task_queued_on_other_cpu test_task_entry_unmasks_irq  | YES |
+| qemu-1229-wstrace-v1-multi-run05.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-v1-multi-run06.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-v1-multi-run07.txt | 0 | isolated=2/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-v1-multi-run08.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | -  | no |
+
+RESULT main WORK_STEALING=ON + SLOT_TRACE (6f405a76, first dump code), thread=multi: CPU 1 stopped 1/8; preempt_disabled stuck dump 0/8; 120 s cap 1/8; litmus [FAIL] 1/8
+
+## main WORK_STEALING=ON + SLOT_TRACE (7e07b384), thread=multi: qemu-1229-wstrace-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-wstrace-multi-run01.txt | 1 | - | 0 | -  | panic | yes schedule returned! | - | -  | YES |
+| qemu-1229-wstrace-multi-run02.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run03.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run04.txt | 1 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1229-wstrace-multi-run05.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run06.txt | 1 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | test_proactive_load_balance_inert_when_light  | no |
+| qemu-1229-wstrace-multi-run07.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run08.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run09.txt | 1 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1229-wstrace-multi-run10.txt | 0 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run11.txt | 0 | isolated=2/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run12.txt | 1 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1229-wstrace-multi-run13.txt | 1 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | test_benchmark_context_switch  | no |
+| qemu-1229-wstrace-multi-run14.txt | 1 | isolated=0/10, normal=1/10 | 0 | -  | - | -  | - | test_litmus_patterns_pass test_proactive_load_balance_inert_when_light  | no |
+| qemu-1229-wstrace-multi-run15.txt | 0 | isolated=1/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+| qemu-1229-wstrace-multi-run16.txt | 1 | isolated=0/10, normal=1/10 | 0 | -  | pd_stuck | -  | - | test_litmus_patterns_pass  | no |
+| qemu-1229-wstrace-multi-run17.txt | 1 | - | 0 | -  | panic | yes schedule returned! | - | -  | YES |
+| qemu-1229-wstrace-multi-run18.txt | 0 | isolated=0/10, normal=0/10 | 0 | -  | - | -  | - | -  | no |
+
+RESULT main WORK_STEALING=ON + SLOT_TRACE (7e07b384), thread=multi: CPU 1 stopped 2/18; preempt_disabled stuck dump 1/18; 120 s cap 0/18; litmus [FAIL] 5/18
+
+## FIX d8b21ec3 (#1213+#1229, first #1229 test), WORK_STEALING=ON, thread=multi: qemu-1229-fix3wson-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix3wson-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2105 same_slot=2104 ran=2105 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=10 moved=0 runs=287178/215363 bad=0 | no |
+| qemu-1229-fix3wson-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2100 same_slot=2099 ran=2100 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=224926/231607 bad=0 | no |
+| qemu-1229-fix3wson-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2106 same_slot=2105 ran=2106 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=10 moved=0 runs=252120/287726 bad=0 | no |
+| qemu-1229-fix3wson-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2024 same_slot=2023 ran=2024 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=219949/229493 bad=0 | no |
+| qemu-1229-fix3wson-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2065 same_slot=2064 ran=2065 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=192051/270373 bad=0 | no |
+| qemu-1229-fix3wson-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2099 same_slot=2098 ran=2099 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=213509/250772 bad=0 | no |
+| qemu-1229-fix3wson-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2081 same_slot=2080 ran=2081 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=201097/203496 bad=0 | no |
+| qemu-1229-fix3wson-multi-run08.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2026 same_slot=2025 ran=2026 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=11 moved=1 runs=222531/261285 bad=0 | no |
+| qemu-1229-fix3wson-multi-run09.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2095 same_slot=2094 ran=2095 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=11 moved=1 runs=198622/210989 bad=0 | no |
+| qemu-1229-fix3wson-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2045 same_slot=2044 ran=2045 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=10 moved=0 runs=259522/251018 bad=0 | no |
+| qemu-1229-fix3wson-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2062 same_slot=2061 ran=2062 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=195431/204728 bad=0 | no |
+| qemu-1229-fix3wson-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2052 same_slot=2051 ran=2052 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=222962/267078 bad=0 | no |
+| qemu-1229-fix3wson-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2066 same_slot=2065 ran=2066 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=244285/224932 bad=0 | no |
+| qemu-1229-fix3wson-multi-run14.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2096 same_slot=2095 ran=2096 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=10 moved=0 runs=242018/239913 bad=0 | no |
+| qemu-1229-fix3wson-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2046 same_slot=2045 ran=2046 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=259429/231556 bad=0 | no |
+| qemu-1229-fix3wson-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2059 same_slot=2058 ran=2059 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=216002/229350 bad=0 | no |
+| qemu-1229-fix3wson-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2057 same_slot=2056 ran=2057 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=230833/246420 bad=0 | no |
+| qemu-1229-fix3wson-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2096 same_slot=2095 ran=2096 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=263365/237341 bad=0 | no |
+| qemu-1229-fix3wson-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2089 same_slot=2088 ran=2089 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=224552/254705 bad=0 | no |
+| qemu-1229-fix3wson-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2072 same_slot=2071 ran=2072 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=283504/281627 bad=0 | no |
+
+RESULT FIX d8b21ec3 (#1213+#1229, first #1229 test), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 2/20
+
+## FIX d8b21ec3, WORK_STEALING=OFF, thread=multi: qemu-1229-fix3wsoff-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix3wsoff-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2004 same_slot=2003 ran=2004 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=675976/768335 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=11 moved=1 runs=547174/679563 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2020 same_slot=2019 ran=2020 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=864288/853027 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=1998 same_slot=1997 ran=1998 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=785803/838574 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2010 same_slot=2009 ran=2010 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=793117/757155 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run06.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1997 same_slot=1996 ran=1997 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=11 moved=1 runs=785442/820310 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run07.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2010 same_slot=2009 ran=2010 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=607173/669716 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2014 same_slot=2013 ran=2014 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=704991/656281 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2000 same_slot=1999 ran=2000 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=868701/617199 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run10.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2018 same_slot=2017 ran=2018 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=840326/743632 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2012 same_slot=2011 ran=2012 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=608082/725549 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2008 same_slot=2007 ran=2008 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=651645/757157 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run13.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=11 moved=1 runs=640464/672186 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=649308/749655 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2011 same_slot=2010 ran=2011 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=645535/727921 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2014 same_slot=2013 ran=2014 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=742548/798754 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=735829/722172 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2003 same_slot=2002 ran=2003 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=580229/669254 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run19.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=1989 same_slot=1988 ran=1989 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=733067/769782 bad=0 | no |
+| qemu-1229-fix3wsoff-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2010 same_slot=2009 ran=2010 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11 moved=1 runs=404122/438188 bad=0 | no |
+
+RESULT FIX d8b21ec3, WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 3/20
+
+## 8f4aaffd without the #1229 cpu re-read (local), WS=OFF: qemu-1229-pdunfixed-8f4aaffd-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-pdunfixed-8f4aaffd-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2008 same_slot=2007 ran=2008 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=1 moved=1 runs=136/2923 bad=128 | no |
+| qemu-1229-pdunfixed-8f4aaffd-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1998 same_slot=1997 ran=1998 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=1 moved=0 runs=327567/327565 bad=0 | no |
+| qemu-1229-pdunfixed-8f4aaffd-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1996 same_slot=1995 ran=1996 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=1 moved=1 runs=134/2314 bad=115 | no |
+
+RESULT 8f4aaffd without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 0/3
+
+## 8f4aaffd without the #1229 cpu re-read (local), WS=ON: qemu-1229-pdunfixedws-8f4aaffd-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-pdunfixedws-8f4aaffd-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2049 same_slot=2048 ran=2049 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_preempt_flag_follows_migrated_task migrations=1 moved=1 runs=116/716 bad=111 | no |
+| qemu-1229-pdunfixedws-8f4aaffd-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2032 same_slot=2031 ran=2032 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=0 moved=0 runs=344098/344099 bad=0 | no |
+| qemu-1229-pdunfixedws-8f4aaffd-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2026 same_slot=2025 ran=2026 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=0 moved=0 runs=546727/501150 bad=0 | no |
+
+RESULT 8f4aaffd without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
+
+## 6d4fe041 without the #1229 cpu re-read (local), WS=OFF: qemu-1229-pdunfixed-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-pdunfixed-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2002 same_slot=2001 ran=2002 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=12951 moved=6 runs=5/4 bad=6 | no |
+| qemu-1229-pdunfixed-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2017 same_slot=2016 ran=2017 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=11645 moved=7 runs=4/4 bad=7 | no |
+| qemu-1229-pdunfixed-multi-run03.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=1994 same_slot=1993 ran=1994 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_preempt_flag_follows_migrated_task migrations=5482 moved=7 runs=4/4 bad=7 | no |
+
+RESULT 6d4fe041 without the #1229 cpu re-read (local), WS=OFF: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 0/3; litmus [FAIL] 1/3
+
+## 6d4fe041 without the #1229 cpu re-read (local), WS=ON: qemu-1229-pdunfixedws-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-pdunfixedws-multi-run01.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2043 same_slot=2042 ran=2043 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass test_preempt_flag_follows_migrated_task migrations=3242 moved=8 runs=4/4 bad=8 | no |
+| qemu-1229-pdunfixedws-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2061 same_slot=2060 ran=2061 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=104367 moved=6 runs=19/19 bad=6 | no |
+| qemu-1229-pdunfixedws-multi-run03.txt | 124 | isolated=10/10, normal=10/10 | 0 | iterations=2045 same_slot=2044 ran=2045 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_preempt_flag_follows_migrated_task migrations=249222 moved=6 runs=31/31 bad=6 | no |
+
+RESULT 6d4fe041 without the #1229 cpu re-read (local), WS=ON: CPU 1 stopped 0/3; preempt_disabled stuck dump 0/3; 120 s cap 1/3; litmus [FAIL] 1/3
+
+## FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: qemu-1229-fix5wson-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix5wson-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2066 same_slot=2065 ran=2066 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5206 moved=7 runs=4/3 bad=0 | no |
+| qemu-1229-fix5wson-multi-run02.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2052 same_slot=2051 ran=2052 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=13565 moved=6 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2112 same_slot=2111 ran=2112 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=8179 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2059 same_slot=2058 ran=2059 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=10226 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run05.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2074 same_slot=2073 ran=2074 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=9478 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run06.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2106 same_slot=2105 ran=2106 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_slm_stats_live_from_second_session migrations=9896 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run07.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2043 same_slot=2042 ran=2043 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=6965 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run08.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2077 same_slot=2076 ran=2077 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=6601 moved=7 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run09.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2059 same_slot=2058 ran=2059 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=16045 moved=8 runs=8/8 bad=0 | no |
+| qemu-1229-fix5wson-multi-run10.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2057 same_slot=2056 ran=2057 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=6240 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run11.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2099 same_slot=2098 ran=2099 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=38252 moved=8 runs=18/18 bad=0 | no |
+| qemu-1229-fix5wson-multi-run12.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2074 same_slot=2073 ran=2074 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5255 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run13.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2064 same_slot=2063 ran=2064 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=2940 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run14.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2162 same_slot=2161 ran=2162 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=10571 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run15.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2146 same_slot=2145 ran=2146 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=16926 moved=6 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run16.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2127 same_slot=2126 ran=2127 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=2644 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run17.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2143 same_slot=2142 ran=2143 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=91565 moved=6 runs=11/11 bad=0 | no |
+| qemu-1229-fix5wson-multi-run18.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2149 same_slot=2148 ran=2149 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=5413 moved=8 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wson-multi-run19.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2163 same_slot=2162 ran=2163 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=23080 moved=6 runs=6/6 bad=0 | no |
+| qemu-1229-fix5wson-multi-run20.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2077 same_slot=2076 ran=2077 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=10027 moved=8 runs=4/4 bad=0 | no |
+
+RESULT FIX 6d4fe041 (final), WORK_STEALING=ON, thread=multi: CPU 1 stopped 0/20; preempt_disabled stuck dump 0/20; 120 s cap 0/20; litmus [FAIL] 4/20
+
+## FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: qemu-1229-fix5wsoff-multi-runNN.txt
+| file | rc | samples | iso TIMEOUT lines | stress | dump | panic | lifecycle (#1211) | other [FAIL] | CPU 1 stopped |
+|---|---|---|---|---|---|---|---|---|---|
+| qemu-1229-fix5wsoff-multi-run01.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2036 same_slot=2035 ran=2036 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=19429 moved=7 runs=5/4 bad=0 | no |
+| qemu-1229-fix5wsoff-multi-run02.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2054 same_slot=2053 ran=2054 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=4256 moved=7 runs=4/5 bad=0 | no |
+| qemu-1229-fix5wsoff-multi-run03.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2006 same_slot=2005 ran=2006 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=32576 moved=7 runs=4/5 bad=0 | no |
+| qemu-1229-fix5wsoff-multi-run04.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2008 same_slot=2007 ran=2008 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=2744 moved=7 runs=4/4 bad=0 | no |
+| qemu-1229-fix5wsoff-multi-run05.txt | 1 | isolated=10/10, normal=10/10 | 0 | iterations=2019 same_slot=2018 ran=2019 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | test_litmus_patterns_pass migrations=8802 moved=8 runs=5/5 bad=0 | no |
+| qemu-1229-fix5wsoff-multi-run06.txt | 0 | isolated=10/10, normal=10/10 | 0 | iterations=2009 same_slot=2008 ran=2009 bad=0 first_bad_token=0 timeouts=0  | - | -  | - | - migrations=11890 moved=7 runs=4/4 bad=0 | no |
+
+RESULT FIX 6d4fe041 (final), WORK_STEALING=OFF, thread=multi: CPU 1 stopped 0/6; preempt_disabled stuck dump 0/6; 120 s cap 0/6; litmus [FAIL] 1/6
