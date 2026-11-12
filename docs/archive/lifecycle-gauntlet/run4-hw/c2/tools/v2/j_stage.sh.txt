@@ -1,0 +1,12 @@
+#!/bin/bash
+# usage: j_stage.sh <ip> <local elf> <remote name>
+# Copies the ELF to /root/<remote name> (never touches /root/slmos.elf),
+# syncs, and checks the on-board sha256 against the local one.
+set -euo pipefail
+IP=$1; ELF=$2; RN=$3; SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 root@$IP)
+for i in $(seq 1 80); do "${SSH[@]}" true 2>/dev/null && break; sleep 3; done
+want=$(sha256sum "$ELF" | cut -c1-64)
+scp -q -o BatchMode=yes "$ELF" root@$IP:/root/$RN
+got=$("${SSH[@]}" "sync; sha256sum /root/$RN" | cut -c1-64)
+echo "staged /root/$RN want=$want got=$got"
+[ "$want" = "$got" ] || { echo "SHA MISMATCH"; exit 1; }

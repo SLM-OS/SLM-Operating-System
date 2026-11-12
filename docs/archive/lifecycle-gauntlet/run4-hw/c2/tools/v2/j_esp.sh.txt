@@ -1,0 +1,16 @@
+#!/bin/bash
+# usage: j_esp.sh <ip> check|backup <localdir>|restore <localfile>|bootnext
+# ESP hygiene per #1187: fsck.vfat -n, sha from a fresh read-only mount.
+set -euo pipefail
+IP=$1; OP=$2; SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 root@$IP)
+for i in $(seq 1 80); do "${SSH[@]}" true 2>/dev/null && break; sleep 3; done
+ESP=/dev/disk/by-partlabel/SLMOS-ESP
+case $OP in
+check)   "${SSH[@]}" "fsck.vfat -n $ESP; m=\$(mktemp -d); mount -o ro $ESP \$m; sha256sum \$m/EFI/SLMOS/SLMOS.efi; ls -la \$m/EFI \$m/EFI/BOOT 2>&1 | head; umount \$m; rmdir \$m" ;;
+backup)  "${SSH[@]}" "m=\$(mktemp -d); mount -o ro $ESP \$m; cp \$m/EFI/SLMOS/SLMOS.efi /tmp/SLMOS.efi.asfound; umount \$m; rmdir \$m"
+         scp -q -o BatchMode=yes root@$IP:/tmp/SLMOS.efi.asfound "$3/SLMOS.efi.asfound"; sha256sum "$3/SLMOS.efi.asfound" ;;
+restore) want=$(sha256sum "$3" | cut -c1-64); scp -q -o BatchMode=yes "$3" root@$IP:/tmp/SLMOS.efi.restore
+         "${SSH[@]}" "m=\$(mktemp -d); mount $ESP \$m; cp /tmp/SLMOS.efi.restore \$m/EFI/SLMOS/SLMOS.efi; sync; umount \$m; m2=\$(mktemp -d); mount -o ro $ESP \$m2; sha256sum \$m2/EFI/SLMOS/SLMOS.efi; umount \$m2; rmdir \$m \$m2; fsck.vfat -n $ESP"
+         echo "want $want" ;;
+bootnext) "${SSH[@]}" 'e=$(efibootmgr | awk "/SLM-OS NVMe/{print substr(\$1,5,4); exit}"); [ -n "$e" ] || exit 1; efibootmgr --bootnext $e >/dev/null; echo "BootNext=$e; rebooting"; sync; (sleep 1; systemctl reboot) >/dev/null 2>&1 &' ;;
+esac

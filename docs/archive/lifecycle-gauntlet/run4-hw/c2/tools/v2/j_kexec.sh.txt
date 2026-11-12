@@ -1,0 +1,10 @@
+#!/bin/bash
+# usage: j_kexec.sh <ip> <remote name>
+# Waits for SD Linux ssh, confirms the staged file, fires plain slmos-kexec
+# detached (default flags: cpufreq pin, channel-preserving helper).
+set -uo pipefail
+IP=$1; RN=$2; SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 root@$IP)
+for i in $(seq 1 80); do "${SSH[@]}" true 2>/dev/null && break; sleep 3; done
+"${SSH[@]}" "sha256sum /root/$RN" || { echo "staged file missing"; exit 1; }
+timeout 60 ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 root@$IP \
+  "setsid nohup slmos-kexec /root/$RN > /tmp/slmos-kexec.log 2>&1 < /dev/null &" ; echo "kexec fired (ssh exit $?)"
