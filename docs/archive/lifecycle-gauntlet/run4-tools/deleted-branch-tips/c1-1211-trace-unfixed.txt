@@ -1,0 +1,4 @@
+# branch c1/1211-trace-unfixed tip 8b0065ce0da4334672fd4cefb8ae844fa05bb6aa archived 2026-11-12T10:35:43Z
+8b0065ce0da4334672fd4cefb8ae844fa05bb6aa Debug: dump the slot trace on a #1211 test_task_lifecycle failure (SLOT_TRACE builds only)
+f33d4e9d91e74d812992c0593b5315f7af13705d Tests: test_task_lifecycle back to its loop-count window, instrumented (#1211)
+4d7df4b98e584eca93d93ad680537e4a9418e923 SLOT_TRACE option (from b8df6f5f) on main, without the 1 s reproduction waits

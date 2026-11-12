@@ -1,0 +1,1008 @@
+From 4d7df4b98e584eca93d93ad680537e4a9418e923 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 18:40:50 -0800
+Subject: [PATCH 1/3] SLOT_TRACE option (from b8df6f5f) on main, without the 1
+ s reproduction waits
+
+Debug-only branch for #1211 conditions (lifecycle gauntlet run 4, C1 step 6).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ CMakeLists.txt                 |  13 ++
+ Makefile                       |   1 +
+ kernel/arch/arm64/exceptions.c |  13 ++
+ kernel/arch/arm64/vectors.S    |  38 ++++++
+ kernel/include/slot_trace.h    |  85 ++++++++++++
+ kernel/sched/sched.c           |  30 ++++-
+ kernel/sched/slot_trace.c      | 232 +++++++++++++++++++++++++++++++++
+ kernel/sched/task.c            |  18 +++
+ kernel/src/panic.c             |   6 +
+ 9 files changed, 434 insertions(+), 2 deletions(-)
+ create mode 100644 kernel/include/slot_trace.h
+ create mode 100644 kernel/sched/slot_trace.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b39078a6..a4cb96cb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -294,6 +294,18 @@ endif()
+ # higher-level logging is wedged. See `STAGE25_TRACE_CHAR` in
+ # kernel/arch/arm64/vectors.S. Off by default; enable with
+ # -DSTAGE25_TRACE_PI5=ON when debugging the trampoline path (#672).
++# Task-slot lifecycle trace (#1213): per-CPU rings of task_create /
++# task_destroy / switch_to / zombie events, dumped on the first EL1
++# synchronous exception or panic. ARM64 only, debug only; with it off the
++# kernel's .text is unchanged. See kernel/include/slot_trace.h.
++option(SLOT_TRACE "Per-CPU task-slot lifecycle trace (#1213, debug only)" OFF)
++if(SLOT_TRACE)
++    if(PLATFORM STREQUAL "X86_64")
++        message(FATAL_ERROR "SLOT_TRACE is ARM64-only")
++    endif()
++    add_compile_definitions(CONFIG_SLOT_TRACE=1)
++endif()
++
+ option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
+ if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
+     add_compile_definitions(STAGE25_TRACE_PI5=1)
+@@ -690,6 +702,7 @@ set(KERNEL_SOURCES
+     kernel/sched/sched.c
+     kernel/sched/sched_heuristic.c
+     kernel/sched/steal_deque.c
++    kernel/sched/slot_trace.c
+     kernel/src/sched_trace.c
+     kernel/src/latency_hist.c
+     kernel/src/rate_ewma.c
+diff --git a/Makefile b/Makefile
+index 1344de7c..558aa712 100644
+--- a/Makefile
++++ b/Makefile
+@@ -299,6 +299,7 @@ KERNEL_COMMON_CMAKE_ARGS = \
+ 	$(KERNEL_PREEMPT_CMAKE_ARGS) \
+ 	$(if $(filter OFF,$(SETWAY_INVAL)),-DSETWAY_INVAL=OFF) \
+ 	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
++	$(if $(filter ON,$(SLOT_TRACE)),-DSLOT_TRACE=ON) \
+ 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+ 	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+ 	-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
+diff --git a/kernel/arch/arm64/exceptions.c b/kernel/arch/arm64/exceptions.c
+index 99eef6a3..56322903 100644
+--- a/kernel/arch/arm64/exceptions.c
++++ b/kernel/arch/arm64/exceptions.c
+@@ -15,6 +15,7 @@
+ #include "ncmem.h"
+ #include "trap.h"
+ #include "syscall.h"
++#include "slot_trace.h"
+ #include <stdint.h>
+ 
+ /* Timer IRQ numbers — Generic Timer PPIs.
+@@ -279,6 +280,18 @@ void el1_sync_handler(struct trap_frame *tf)
+ 
+     uint32_t ec = (esr >> 26) & 0x3F;
+ 
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace: the first EL1 synchronous exception dumps every
++     * CPU's ring before anything else runs (a normal test run takes
++     * none). */
++    uart_printf_unlocked("\nSLOTTRACE-FAULT EL1 sync: cpu=%u esr=0x%lx far=0x%lx "
++                         "elr=0x%lx x19=0x%lx x30=0x%lx\n",
++                         cpu_id(), (unsigned long)esr, (unsigned long)far,
++                         (unsigned long)tf->elr, (unsigned long)tf->x19,
++                         (unsigned long)tf->x30);
++    slot_trace_dump("el1_sync", esr, far, tf->elr);
++#endif
++
+     /* Handle page faults specially for better diagnostics */
+     if (is_data_abort(ec)) {
+         /* Disable interrupts */
+diff --git a/kernel/arch/arm64/vectors.S b/kernel/arch/arm64/vectors.S
+index c7e3e2cb..4fafc1ab 100644
+--- a/kernel/arch/arm64/vectors.S
++++ b/kernel/arch/arm64/vectors.S
+@@ -351,6 +351,44 @@ el1_serror_sp0:
+  * Could be: SVC, data abort, instruction abort, etc.
+  */
+ el1_sync:
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace (debug option, off by default): if SP is not a
++     * plausible kernel address (below 64 KB or at/above 2^40), nothing
++     * below may touch the stack. Move onto a per-CPU emergency stack,
++     * keep the original SP in TPIDR_EL0, and dump the trace rings.
++     * TPIDR_EL1 holds x0 meanwhile (the kernel uses neither register).
++     * CPU index = (Aff0 + Aff1) & 3: Aff0 on QEMU virt, Aff1 on Pi 5.
++     * Once SP is known bad it doubles as a scratch register. */
++    msr     tpidr_el1, x0
++    mov     x0, sp
++    msr     tpidr_el0, x0
++    cmp     x0, #0x10, lsl #12
++    b.lo    .Lst_bad_sp
++    lsr     x0, x0, #40
++    cbnz    x0, .Lst_bad_sp
++    mrs     x0, tpidr_el1
++    b       .Lst_sp_ok
++.Lst_bad_sp:
++    mrs     x0, mpidr_el1
++    and     x0, x0, #0xffff
++    mov     sp, x0
++    lsr     x0, x0, #8
++    add     x0, sp, x0
++    and     x0, x0, #3
++    add     x0, x0, #1
++    lsl     x0, x0, #14             /* (idx + 1) * 16 KB */
++    mov     sp, x0
++    adrp    x0, slot_trace_emerg
++    add     x0, x0, :lo12:slot_trace_emerg
++    add     sp, sp, x0
++    mrs     x0, tpidr_el1
++    save_regs
++    mov     x0, sp
++    mrs     x1, tpidr_el0
++    bl      slot_trace_bad_sp_fault
++    b       hang
++.Lst_sp_ok:
++#endif
+     STAGE25_TRACE_CHAR 'S'              /* Trace: sync exception (#672 probe) */
+     DIAG_BUMP_VEC 0x00
+     save_regs
+diff --git a/kernel/include/slot_trace.h b/kernel/include/slot_trace.h
+new file mode 100644
+index 00000000..b1d1eb46
+--- /dev/null
++++ b/kernel/include/slot_trace.h
+@@ -0,0 +1,85 @@
++/*
++ * slot_trace.h - Per-CPU task-slot lifecycle trace (#1213)
++ *
++ * Debug-only. Built with `make ... SLOT_TRACE=ON` (CMake -DSLOT_TRACE=ON,
++ * which defines CONFIG_SLOT_TRACE). With the option off every macro below
++ * expands to nothing and slot_trace.c compiles to an empty unit, so the
++ * kernel's .text is unchanged.
++ *
++ * What it records, per task_table slot: task_create (slot claimed, context
++ * written), task_destroy (entry and the generation bump), task_exit,
++ * scheduler_terminate_task, run-queue inserts, zombie set and reap,
++ * switch_to entry (outgoing and incoming slot, generation, the incoming
++ * context's saved sp/x19 as read just before the switch), switch_to return,
++ * a task's first instruction in C (task_entry_trampoline), and test markers.
++ * Every entry carries the CPU, CNTVCT, a global sequence number (one relaxed
++ * atomic increment, for a total order across CPUs) and the four run-queue
++ * lock holders at the time of the record.
++ *
++ * Writers: ring c is written only by CPU c, with local IRQs masked for the
++ * few stores of one entry. No locks and no prints on the record path.
++ *
++ * Dump: the first EL1 synchronous exception (including the bad-SP case,
++ * which the el1_sync vector moves onto a per-CPU emergency stack before
++ * anything touches memory) or the first panic freezes every ring and prints
++ * all of them, then exits QEMU through semihosting.
++ */
++
++#ifndef SLOT_TRACE_H
++#define SLOT_TRACE_H
++
++#include <stdint.h>
++
++/* Event codes. */
++#define ST_CREATE_ALLOC     1   /* a=stack base, b=caller                     */
++#define ST_CREATE_CTX_DONE  2   /* a=ctx.sp, b=ctx.x19, c=ctx.x30 (read back)  */
++#define ST_DESTROY          3   /* a=caller, b=stack base, c=ctx.sp            */
++#define ST_DESTROY_DONE     4   /* gen = new generation                       */
++#define ST_EXIT             5   /* task_exit on the running task               */
++#define ST_TERMINATE        6   /* a=rq cpu, b=removed from queue (0/1)        */
++#define ST_ADD              7   /* a=target cpu, b=caller                      */
++#define ST_ZOMBIE_SET       8   /* rq->zombie = task, a=cpu                    */
++#define ST_ZOMBIE_REAP      9   /* about to task_destroy(rq->zombie)          */
++#define ST_SWITCH           10  /* task=next; a=pack(current), b=next ctx.sp, c=next ctx.x19 */
++#define ST_SWITCH_RET       11  /* switch_to returned; task=current, a=live sp */
++#define ST_FIRST_RUN        12  /* task_entry_trampoline; a=live sp, b=ctx.sp  */
++#define ST_PICK_SAME        13  /* schedule() kept current; a=state at entry   */
++#define ST_TEST             14  /* test marker; a=tag, b, c                    */
++
++#if defined(CONFIG_SLOT_TRACE)
++
++struct task;
++
++void slot_trace_rec(uint32_t ev, const struct task *t,
++                    uint64_t a, uint64_t b, uint64_t c);
++/* slot(16) | generation(32) | state(16), for one task in an entry field. */
++uint64_t slot_trace_pack(const struct task *t);
++/* Freeze all rings and print them; first caller only (later callers spin).
++ * Exits QEMU through semihosting; does not return. */
++void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
++    __attribute__((noreturn));
++/* Called from the el1_sync vector on a bad SP (already on the emergency
++ * stack); orig_sp is the SP at exception entry. */
++void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
++    __attribute__((noreturn));
++
++extern volatile uint8_t slot_trace_rq_holder[];
++
++#define SLOT_TRACE(ev, t, a, b, c) \
++    slot_trace_rec((ev), (t), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c))
++#define SLOT_TRACE_PACK(t)          slot_trace_pack(t)
++#define SLOT_TRACE_ONLY(...)        __VA_ARGS__
++#define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)] = (uint8_t)(cpu_id() + 1))
++#define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)] = 0)
++
++#else
++
++#define SLOT_TRACE(ev, t, a, b, c)  ((void)0)
++#define SLOT_TRACE_PACK(t)          0
++#define SLOT_TRACE_ONLY(...)
++#define SLOT_TRACE_RQ_LOCKED(cpu)   ((void)0)
++#define SLOT_TRACE_RQ_UNLOCKING(cpu) ((void)0)
++
++#endif /* CONFIG_SLOT_TRACE */
++
++#endif /* SLOT_TRACE_H */
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 83dbfc5b..fc9b043e 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -36,6 +36,7 @@
+ #if CONFIG_WORK_STEALING
+ #include "steal_deque.h"
+ #endif
++#include "slot_trace.h"
+ /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
+  * are referenced from schedule() in every configuration (they are
+  * empty functions without work stealing). */
+@@ -155,10 +156,13 @@ static volatile uint64_t steal_trace_t0_cnt;
+ /* Lock helpers that use the correct lock for a given CPU */
+ static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
+ {
+-    return spin_lock_irqsave(&rq_lock[cpu]);
++    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
++    SLOT_TRACE_RQ_LOCKED(cpu);
++    return f;
+ }
+ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
+ {
++    SLOT_TRACE_RQ_UNLOCKING(cpu);
+     spin_unlock_irqrestore(&rq_lock[cpu], flags);
+ }
+ 
+@@ -914,6 +918,7 @@ static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
+ {
+     struct cpu_runqueue *rq = cpu_rq(cpu);
+ 
++    SLOT_TRACE(ST_ADD, task, cpu, __builtin_return_address(0), 0);
+     task->assigned_cpu = cpu;
+ 
+     /* Update effective priority based on deadline before insertion */
+@@ -1362,7 +1367,9 @@ void scheduler_terminate_task(struct task *task)
+ 
+         task->state = TASK_TERMINATED;
+ 
+-        if (remove_from_cpu_queue_locked(task, cpu)) {
++        int st_removed = remove_from_cpu_queue_locked(task, cpu);
++        SLOT_TRACE(ST_TERMINATE, task, cpu, st_removed, 0);
++        if (st_removed) {
+             sched.task_count--;
+             DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
+                         task->name, cpu, rq->ready_count);
+@@ -2357,6 +2364,7 @@ void schedule(void)
+     if (rq->zombie) {
+         struct task *zombie = rq->zombie;
+         rq->zombie = NULL;
++        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), 0);
+         rq_unlock_irqrestore(this_cpu, flags);
+ 
+         /* Destroy outside lock - task_destroy may call pmm */
+@@ -2367,6 +2375,7 @@ void schedule(void)
+ 
+     struct task *current = task_current();
+     struct task *next = pick_next_task(this_cpu);
++    SLOT_TRACE_ONLY(uint32_t st_state0 = current ? (uint32_t)current->state : 0xFFFF;)
+ 
+     /* If current task is still running and ready, re-add to queue */
+     if (current && current->state == TASK_RUNNING) {
+@@ -2402,6 +2411,10 @@ void schedule(void)
+      * If the current task is terminated, we MUST switch to a different task.
+      */
+     if (next == current) {
++        SLOT_TRACE_ONLY(
++            if (st_state0 != TASK_RUNNING) {
++                SLOT_TRACE(ST_PICK_SAME, current, st_state0, 0, 0);
++            })
+         if (current && (current->state == TASK_TERMINATED ||
+                         current->state == TASK_DESTROYED)) {
+             rq_unlock_irqrestore(this_cpu, flags);
+@@ -2434,6 +2447,7 @@ void schedule(void)
+      */
+     if (current && current->state == TASK_TERMINATED) {
+         rq->zombie = current;
++        SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
+     }
+ 
+     task_set_current(next);
+@@ -2527,8 +2541,18 @@ void schedule(void)
+     }
+ #endif
+ 
++    SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
++               next->context.x19);
+     switch_to(current, next);
+ 
++#if !defined(PLATFORM_X86_64)
++    SLOT_TRACE_ONLY({
++        uint64_t st_sp;
++        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
++        SLOT_TRACE(ST_SWITCH_RET, task_current(), st_sp, 0, 0);
++    })
++#endif
++
+     /* Resumed on our stack after being switched back.
+      * Re-enable preemption so timer ticks can trigger scheduling. */
+     preempt_disabled[this_cpu] = 0;
+@@ -2650,6 +2674,8 @@ void scheduler_start(uint32_t this_cpu)
+     /* Switch to first task (NULL = no previous context to save).
+      * switch_to never returns — it jumps to task_entry_wrapper.
+      * The trampoline clears preempt_disabled[this_cpu]. */
++    SLOT_TRACE(ST_SWITCH, first, SLOT_TRACE_PACK(NULL), first->context.sp,
++               first->context.x19);
+     switch_to(NULL, first);
+ 
+     /* Should never reach here */
+diff --git a/kernel/sched/slot_trace.c b/kernel/sched/slot_trace.c
+new file mode 100644
+index 00000000..f17d9ee2
+--- /dev/null
++++ b/kernel/sched/slot_trace.c
+@@ -0,0 +1,232 @@
++/*
++ * slot_trace.c - Per-CPU task-slot lifecycle trace (#1213). See slot_trace.h.
++ *
++ * Compiles to an empty unit unless CONFIG_SLOT_TRACE is defined.
++ */
++
++#include "slot_trace.h"
++
++#if defined(CONFIG_SLOT_TRACE)
++
++#include "config.h"
++#include "task.h"
++#include "sched.h"
++#include "smp.h"
++#include "uart.h"
++#include "semihosting.h"
++#include <stddef.h>
++
++#define SLOT_TRACE_LEN 512U     /* entries per CPU (power of two) */
++
++struct slot_trace_ent {
++    uint64_t ts;        /* CNTVCT_EL0 */
++    uint32_t seq;       /* global order */
++    uint16_t ev;
++    uint8_t  cpu;
++    uint8_t  pad0;
++    int16_t  slot;      /* task_table index, -1 if not a table task */
++    uint16_t state;
++    uint32_t gen;
++    uint32_t id;
++    uint32_t holders;   /* rq lock holder per CPU, 4 bits each (0 = free, n+1 = CPU n) */
++    uint64_t a, b, c;
++};
++
++static struct slot_trace_ent slot_trace_ring[MAX_CPUS][SLOT_TRACE_LEN];
++static volatile uint32_t slot_trace_idx[MAX_CPUS];
++static volatile uint32_t slot_trace_seq;
++static volatile uint32_t slot_trace_frozen;
++volatile uint8_t slot_trace_rq_holder[MAX_CPUS];
++
++/* Emergency stacks for the bad-SP vector path (vectors.S). */
++#define SLOT_TRACE_EMERG_STACK 16384
++__attribute__((aligned(16)))
++uint8_t slot_trace_emerg[4][SLOT_TRACE_EMERG_STACK];
++
++static inline uint64_t st_cntvct(void)
++{
++    uint64_t v;
++    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
++    return v;
++}
++
++static int st_slot(const struct task *t)
++{
++    const struct task *base = task_slot(0);
++    if (!t || !base) {
++        return -1;
++    }
++    if (t < base || t >= base + MAX_TASKS) {
++        return -1;
++    }
++    return (int)(t - base);
++}
++
++uint64_t slot_trace_pack(const struct task *t)
++{
++    if (!t) {
++        return 0xFFFFULL << 48;
++    }
++    int s = st_slot(t);
++    return ((uint64_t)(uint16_t)(int16_t)s << 48) |
++           ((uint64_t)t->generation << 16) |
++           (uint64_t)((uint16_t)t->state);
++}
++
++void slot_trace_rec(uint32_t ev, const struct task *t,
++                    uint64_t a, uint64_t b, uint64_t c)
++{
++    if (__atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED)) {
++        return;
++    }
++    uint32_t cpu = cpu_id();
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    uint64_t daif;
++    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(daif) :: "memory");
++
++    uint32_t i = slot_trace_idx[cpu];
++    struct slot_trace_ent *e = &slot_trace_ring[cpu][i & (SLOT_TRACE_LEN - 1)];
++    e->ts = st_cntvct();
++    e->seq = __atomic_fetch_add(&slot_trace_seq, 1, __ATOMIC_RELAXED);
++    e->ev = (uint16_t)ev;
++    e->cpu = (uint8_t)cpu;
++    e->slot = (int16_t)st_slot(t);
++    e->state = t ? (uint16_t)t->state : 0xFFFF;
++    e->gen = t ? t->generation : 0;
++    e->id = t ? t->id : 0;
++    uint32_t h = 0;
++    for (uint32_t k = 0; k < 4 && k < MAX_CPUS; k++) {
++        h |= ((uint32_t)slot_trace_rq_holder[k] & 0xF) << (4 * k);
++    }
++    e->holders = h;
++    e->a = a;
++    e->b = b;
++    e->c = c;
++    slot_trace_idx[cpu] = i + 1;
++
++    __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
++}
++
++static const char *st_name(uint32_t ev)
++{
++    switch (ev) {
++    case ST_CREATE_ALLOC:    return "CREATE_ALLOC";
++    case ST_CREATE_CTX_DONE: return "CREATE_CTX_DONE";
++    case ST_DESTROY:         return "DESTROY";
++    case ST_DESTROY_DONE:    return "DESTROY_DONE";
++    case ST_EXIT:            return "EXIT";
++    case ST_TERMINATE:       return "TERMINATE";
++    case ST_ADD:             return "ADD";
++    case ST_ZOMBIE_SET:      return "ZOMBIE_SET";
++    case ST_ZOMBIE_REAP:     return "ZOMBIE_REAP";
++    case ST_SWITCH:          return "SWITCH";
++    case ST_SWITCH_RET:      return "SWITCH_RET";
++    case ST_FIRST_RUN:       return "FIRST_RUN";
++    case ST_PICK_SAME:       return "PICK_SAME";
++    case ST_TEST:            return "TEST";
++    default:                 return "?";
++    }
++}
++
++static void st_print_task(const char *label, const struct task *t)
++{
++    if (!t) {
++        uart_printf_unlocked("    %s: (null)\n", label);
++        return;
++    }
++    uart_printf_unlocked("    %s: slot=%d id=%u gen=%u state=%u name='%s' "
++                         "ctx.sp=0x%lx ctx.x19=0x%lx ctx.x30=0x%lx stack=[0x%lx..0x%lx)\n",
++                         label, st_slot(t), t->id, t->generation,
++                         (unsigned)t->state, t->name,
++                         (unsigned long)t->context.sp,
++                         (unsigned long)t->context.x19,
++                         (unsigned long)t->context.x30,
++                         (unsigned long)(uintptr_t)t->stack_base,
++                         (unsigned long)(uintptr_t)t->stack_top);
++}
++
++void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
++{
++    __asm__ volatile("msr daifset, #0xF" ::: "memory");
++    uint32_t me = cpu_id();
++    uint32_t was = __atomic_exchange_n(&slot_trace_frozen, me + 1,
++                                       __ATOMIC_ACQ_REL);
++    if (was) {
++        for (;;) {
++            __asm__ volatile("wfe");
++        }
++    }
++    /* Let in-flight records on other CPUs finish their stores. */
++    for (volatile int d = 0; d < 100000; d++) {
++    }
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++
++    uart_printf_unlocked("\nSLOTTRACE-DUMP-BEGIN why=%s cpu=%u a=0x%lx b=0x%lx c=0x%lx "
++                         "seq=%u cntvct=0x%lx\n",
++                         why, me, (unsigned long)a, (unsigned long)b,
++                         (unsigned long)c, slot_trace_seq,
++                         (unsigned long)st_cntvct());
++    uint32_t ncpu = cpu_count < 4 ? cpu_count : 4;
++    uart_printf_unlocked("  state at dump:\n");
++    for (uint32_t k = 0; k < ncpu; k++) {
++        struct cpu_runqueue *rq = sched_cpu_rq(k);
++        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
++                             (unsigned)slot_trace_rq_holder[k]);
++        st_print_task("current", task_current_on_cpu(k));
++        if (rq) {
++            st_print_task("rq.head", rq->head);
++            st_print_task("rq.zombie", rq->zombie);
++        }
++    }
++    uart_printf_unlocked("  format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>\n");
++    for (uint32_t k = 0; k < ncpu; k++) {
++        uint32_t n = slot_trace_idx[k];
++        uint32_t first = n > SLOT_TRACE_LEN ? n - SLOT_TRACE_LEN : 0;
++        uart_printf_unlocked("SLOTTRACE-CPU %u entries=%u shown=%u\n",
++                             k, n, n - first);
++        for (uint32_t i = first; i < n; i++) {
++            const struct slot_trace_ent *e =
++                &slot_trace_ring[k][i & (SLOT_TRACE_LEN - 1)];
++            uart_printf_unlocked("ST c%u #%u t=0x%lx %s slot=%d gen=%u id=%u st=%u "
++                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x\n",
++                                 (unsigned)e->cpu, e->seq,
++                                 (unsigned long)e->ts, st_name(e->ev),
++                                 (int)e->slot, e->gen, e->id,
++                                 (unsigned)e->state,
++                                 (unsigned long)e->a, (unsigned long)e->b,
++                                 (unsigned long)e->c, e->holders);
++        }
++    }
++    uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
++    semihosting_exit(3);
++    for (;;) {
++        __asm__ volatile("wfe");
++    }
++}
++
++void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
++{
++    uint64_t esr, far, elr;
++    const uint64_t *x = (const uint64_t *)tf;  /* x0..x30 at 0..240 (trap.h) */
++    __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
++    __asm__ volatile("mrs %0, far_el1" : "=r"(far));
++    __asm__ volatile("mrs %0, elr_el1" : "=r"(elr));
++    uart_printf_unlocked("\nSLOTTRACE-FAULT bad SP at EL1 sync entry: cpu=%u sp=0x%lx "
++                         "esr=0x%lx far=0x%lx elr=0x%lx\n",
++                         cpu_id(), (unsigned long)orig_sp, (unsigned long)esr,
++                         (unsigned long)far, (unsigned long)elr);
++    for (int r = 0; r < 31; r += 2) {
++        if (r == 30) {
++            uart_printf_unlocked("  x30=0x%lx\n", (unsigned long)x[30]);
++        } else {
++            uart_printf_unlocked("  x%d=0x%lx x%d=0x%lx\n", r,
++                                 (unsigned long)x[r], r + 1,
++                                 (unsigned long)x[r + 1]);
++        }
++    }
++    slot_trace_dump("el1_sync_bad_sp", orig_sp, esr, elr);
++}
++
++#endif /* CONFIG_SLOT_TRACE */
+diff --git a/kernel/sched/task.c b/kernel/sched/task.c
+index fbebb788..f9ebb252 100644
+--- a/kernel/sched/task.c
++++ b/kernel/sched/task.c
+@@ -11,6 +11,7 @@
+ #include "spinlock.h"
+ #include "arch.h"
+ #include "steal_trace.h"
++#include "slot_trace.h"
+ #if !defined(PLATFORM_X86_64)
+ #include "vmm.h"
+ #include "elf.h"
+@@ -149,6 +150,14 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+     }
+ #endif
+ 
++#if !defined(PLATFORM_X86_64)
++    SLOT_TRACE_ONLY({
++        uint64_t st_sp;
++        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
++        struct task *st_t = task_current();
++        SLOT_TRACE(ST_FIRST_RUN, st_t, st_sp, st_t ? st_t->context.sp : 0, 0);
++    })
++#endif
+     entry(arg);
+     task_exit();
+ }
+@@ -297,6 +306,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
++    SLOT_TRACE(ST_CREATE_ALLOC, task, stack, __builtin_return_address(0), 0);
++
+     /* Initialize rest of task structure (slot is ours now) */
+     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
+     task->state = TASK_READY;
+@@ -374,6 +385,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
+     /* Store entry point and arg in callee-saved registers for wrapper */
+     task->context.x19 = (uint64_t)entry;
+     task->context.x20 = (uint64_t)arg;
++    SLOT_TRACE(ST_CREATE_CTX_DONE, task, task->context.sp, task->context.x19,
++               task->context.x30);
+ #endif /* PLATFORM_X86_64 */
+ 
+     /* No cleanup callback by default */
+@@ -684,6 +697,7 @@ void task_exit(void)
+      * Without this, a scheduler on another CPU could observe the task
+      * still in the queue after the state flip but before dequeue runs,
+      * picking a terminated task and panicking. */
++    SLOT_TRACE(ST_EXIT, task, 0, 0, 0);
+     scheduler_terminate_task(task);
+ 
+     /* Context-switch away. schedule() -> spin_lock_irqsave saves our
+@@ -782,6 +796,9 @@ void task_destroy(struct task *task)
+         return;
+     }
+ 
++    SLOT_TRACE(ST_DESTROY, task, __builtin_return_address(0), task->stack_base,
++               task->context.sp);
++
+     /* Capture info before clearing */
+     void *stack = task->stack_base;
+     uint32_t task_id = task->id;
+@@ -816,6 +833,7 @@ void task_destroy(struct task *task)
+      * not reachable by a realistic workload.
+      */
+     task->generation++;
++    SLOT_TRACE(ST_DESTROY_DONE, task, task_id, 0, 0);
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
+diff --git a/kernel/src/panic.c b/kernel/src/panic.c
+index cee3bf07..2e035b07 100644
+--- a/kernel/src/panic.c
++++ b/kernel/src/panic.c
+@@ -6,6 +6,7 @@
+ #include "debug.h"
+ #include "task.h"
+ #include "smp.h"
++#include "slot_trace.h"
+ #include "platform.h"     /* RAM_BASE / RAM_SIZE for stack-dump bounds */
+ #include <stdint.h>
+ #include <stdarg.h>
+@@ -171,6 +172,11 @@ void panic(const char *fmt, ...)
+     uart_puts_unlocked("\n\n");
+     dump_registers();
+ 
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace: a panic is a first fault too. */
++    slot_trace_dump("panic", 0, 0, 0);
++#endif
++
+     /* #601 Bug B diagnostic: dump task stack canary state + the
+      * stack contents around the current SP. If any task's canary
+      * is broken, the offset + corrupted bytes get logged. Even if
+-- 
+2.43.0
+
+
+From 6f405a76618cd11b83b3e679c0f06af3358aef83 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 19:41:00 -0800
+Subject: [PATCH 2/3] SLOT_TRACE: preempt_disabled set/clear, steal decisions,
+ stuck-flag watchdog (#1229, #1213)
+
+Debug option only (off by default; no code with it off). Records
+preempt_disabled[x] = 1 / = 0 with the index written and the CPU
+actually running, each steal-deque pop (victim, flag value under the
+victim's rq_lock, outcome, whether the task was the victim's current)
+and each victim skipped on preempt_disabled; identical consecutive
+records fold into one (rep count). scheduler_tick dumps the rings once
+preempt_disabled[cpu] has stayed 1 for 300 ticks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ kernel/include/slot_trace.h | 13 ++++++++++
+ kernel/sched/sched.c        | 11 ++++++++
+ kernel/sched/slot_trace.c   | 50 +++++++++++++++++++++++++++++++++++--
+ kernel/sched/task.c         |  1 +
+ 4 files changed, 73 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/include/slot_trace.h b/kernel/include/slot_trace.h
+index b1d1eb46..f6797fea 100644
+--- a/kernel/include/slot_trace.h
++++ b/kernel/include/slot_trace.h
+@@ -45,6 +45,15 @@
+ #define ST_FIRST_RUN        12  /* task_entry_trampoline; a=live sp, b=ctx.sp  */
+ #define ST_PICK_SAME        13  /* schedule() kept current; a=state at entry   */
+ #define ST_TEST             14  /* test marker; a=tag, b, c                    */
++/* #1229 / #1219 events (lifecycle run 4, C1). */
++#define ST_PD_SET           15  /* preempt_disabled[a] = 1; task=next, b=cpu_id() */
++#define ST_PD_CLEAR         16  /* preempt_disabled[a] = 0; task=current, b=cpu_id() actually running */
++#define ST_STEAL_PD         17  /* thief skipped victim a on preempt_disabled (task NULL) */
++#define ST_STEAL_TRY        18  /* thief popped task from victim a; b=preempt_disabled[a] under rq_lock[a],
++                                   c=outcome | (task was victim's current)<<8;
++                                   outcome 1 stolen, 2 gen, 3 state, 4 cpu,
++                                   5 affinity, 6 not in queue                 */
++#define ST_PD_STUCK         19  /* scheduler_tick: preempt_disabled[a] set for b ticks */
+ 
+ #if defined(CONFIG_SLOT_TRACE)
+ 
+@@ -71,6 +80,9 @@ extern volatile uint8_t slot_trace_rq_holder[];
+ #define SLOT_TRACE_ONLY(...)        __VA_ARGS__
+ #define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)] = (uint8_t)(cpu_id() + 1))
+ #define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)] = 0)
++/* Tick-side watchdog: dumps the rings once preempt_disabled[cpu] has
++ * stayed 1 for SLOT_TRACE_PD_STUCK_TICKS consecutive ticks (#1229). */
++void slot_trace_pd_tick(uint32_t cpu, int pd);
+ 
+ #else
+ 
+@@ -79,6 +91,7 @@ extern volatile uint8_t slot_trace_rq_holder[];
+ #define SLOT_TRACE_ONLY(...)
+ #define SLOT_TRACE_RQ_LOCKED(cpu)   ((void)0)
+ #define SLOT_TRACE_RQ_UNLOCKING(cpu) ((void)0)
++#define slot_trace_pd_tick(cpu, pd) ((void)0)
+ 
+ #endif /* CONFIG_SLOT_TRACE */
+ 
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index fc9b043e..a07564db 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -1873,6 +1873,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+          * the steal race-free; this is belt-and-suspenders per the
+          * cross-plan review (B3 / P2-3). */
+         if (preempt_disabled[victim]) {
++            SLOT_TRACE(ST_STEAL_PD, NULL, victim, 1, 0);
+             n_pd++;
+             tr->v_pd++;
+             /* Unlocked snapshot: did the skipped victim look like it
+@@ -1950,6 +1951,13 @@ static struct task *sched_try_steal(uint32_t this_cpu)
+                 stealable = 1;
+             }
+ 
++            SLOT_TRACE(ST_STEAL_TRY, candidate, victim, preempt_disabled[victim],
++                       (stealable ? 1 :
++                        candidate->generation != captured_gen ? 2 :
++                        candidate->state != TASK_READY ? 3 :
++                        candidate->assigned_cpu != victim ? 4 :
++                        candidate->cpu_affinity != CPU_AFFINITY_ANY ? 5 : 6) |
++                       ((uint64_t)(task_current_on_cpu(victim) == candidate) << 8));
+             rq_unlock_irqrestore(victim, flags);
+ 
+             if (stealable) {
+@@ -2476,6 +2484,7 @@ void schedule(void)
+      * already closes the window.)
+      */
+     preempt_disabled[this_cpu] = 1;
++    SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
+     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
+ 
+     rq_unlock_irqrestore(this_cpu, flags);
+@@ -2556,6 +2565,7 @@ void schedule(void)
+     /* Resumed on our stack after being switched back.
+      * Re-enable preemption so timer ticks can trigger scheduling. */
+     preempt_disabled[this_cpu] = 0;
++    SLOT_TRACE(ST_PD_CLEAR, task_current(), this_cpu, cpu_id(), 0);
+     steal_pdwin_clear(this_cpu);                    /* #1216 trace */
+ #if defined(SECONDARY_PREEMPT)
+     /* Clear any pending reschedule flag set by scheduler_tick while
+@@ -2745,6 +2755,7 @@ void scheduler_tick(void)
+      * completion. Calling schedule() here would corrupt state because
+      * task_set_current(next) has already been called but the actual
+      * stack switch hasn't happened yet. */
++    slot_trace_pd_tick(cpu, preempt_disabled[cpu]);
+     if (preempt_disabled[cpu]) {
+         return;
+     }
+diff --git a/kernel/sched/slot_trace.c b/kernel/sched/slot_trace.c
+index f17d9ee2..eb75be99 100644
+--- a/kernel/sched/slot_trace.c
++++ b/kernel/sched/slot_trace.c
+@@ -29,6 +29,7 @@ struct slot_trace_ent {
+     uint32_t gen;
+     uint32_t id;
+     uint32_t holders;   /* rq lock holder per CPU, 4 bits each (0 = free, n+1 = CPU n) */
++    uint32_t rep;       /* identical consecutive records folded into this one */
+     uint64_t a, b, c;
+ };
+ 
+@@ -87,6 +88,21 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
+     __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(daif) :: "memory");
+ 
+     uint32_t i = slot_trace_idx[cpu];
++    /* Fold an identical consecutive record (a yield loop's requeue ADDs,
++     * a thief's repeated preempt_disabled skips) into the previous one,
++     * so floods do not push the history out of the ring. */
++    if (i > 0) {
++        struct slot_trace_ent *p =
++            &slot_trace_ring[cpu][(i - 1) & (SLOT_TRACE_LEN - 1)];
++        if (p->ev == ev && p->slot == (int16_t)st_slot(t) &&
++            p->gen == (t ? t->generation : 0) && p->a == a && p->b == b &&
++            p->c == c && (ev == ST_ADD || ev == ST_STEAL_PD ||
++                          ev == ST_PD_SET || ev == ST_PD_CLEAR)) {
++            p->rep++;
++            __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
++            return;
++        }
++    }
+     struct slot_trace_ent *e = &slot_trace_ring[cpu][i & (SLOT_TRACE_LEN - 1)];
+     e->ts = st_cntvct();
+     e->seq = __atomic_fetch_add(&slot_trace_seq, 1, __ATOMIC_RELAXED);
+@@ -101,6 +117,7 @@ void slot_trace_rec(uint32_t ev, const struct task *t,
+         h |= ((uint32_t)slot_trace_rq_holder[k] & 0xF) << (4 * k);
+     }
+     e->holders = h;
++    e->rep = 0;
+     e->a = a;
+     e->b = b;
+     e->c = c;
+@@ -126,6 +143,11 @@ static const char *st_name(uint32_t ev)
+     case ST_FIRST_RUN:       return "FIRST_RUN";
+     case ST_PICK_SAME:       return "PICK_SAME";
+     case ST_TEST:            return "TEST";
++    case ST_PD_SET:          return "PD_SET";
++    case ST_PD_CLEAR:        return "PD_CLEAR";
++    case ST_STEAL_PD:        return "STEAL_PD";
++    case ST_STEAL_TRY:       return "STEAL_TRY";
++    case ST_PD_STUCK:        return "PD_STUCK";
+     default:                 return "?";
+     }
+ }
+@@ -190,13 +212,13 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
+             const struct slot_trace_ent *e =
+                 &slot_trace_ring[k][i & (SLOT_TRACE_LEN - 1)];
+             uart_printf_unlocked("ST c%u #%u t=0x%lx %s slot=%d gen=%u id=%u st=%u "
+-                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x\n",
++                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x rep=%u\n",
+                                  (unsigned)e->cpu, e->seq,
+                                  (unsigned long)e->ts, st_name(e->ev),
+                                  (int)e->slot, e->gen, e->id,
+                                  (unsigned)e->state,
+                                  (unsigned long)e->a, (unsigned long)e->b,
+-                                 (unsigned long)e->c, e->holders);
++                                 (unsigned long)e->c, e->holders, e->rep);
+         }
+     }
+     uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
+@@ -206,6 +228,30 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
+     }
+ }
+ 
++#define SLOT_TRACE_PD_STUCK_TICKS 300U   /* 3 s at 100 Hz */
++static uint32_t slot_trace_pd_ticks[MAX_CPUS];
++
++void slot_trace_pd_tick(uint32_t cpu, int pd)
++{
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    if (!pd) {
++        slot_trace_pd_ticks[cpu] = 0;
++        return;
++    }
++    if (++slot_trace_pd_ticks[cpu] == SLOT_TRACE_PD_STUCK_TICKS) {
++        extern volatile int preempt_disabled[];
++        SLOT_TRACE(ST_PD_STUCK, task_current_on_cpu(cpu), cpu,
++                   slot_trace_pd_ticks[cpu], 0);
++        uart_printf_unlocked("\nSLOTTRACE-FAULT preempt_disabled[%u] stuck for %u ticks "
++                             "(pd=%d/%d/%d/%d)\n", cpu, slot_trace_pd_ticks[cpu],
++                             preempt_disabled[0], preempt_disabled[1],
++                             preempt_disabled[2], preempt_disabled[3]);
++        slot_trace_dump("pd_stuck", cpu, slot_trace_pd_ticks[cpu], 0);
++    }
++}
++
+ void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
+ {
+     uint64_t esr, far, elr;
+diff --git a/kernel/sched/task.c b/kernel/sched/task.c
+index f9ebb252..f281ed8b 100644
+--- a/kernel/sched/task.c
++++ b/kernel/sched/task.c
+@@ -129,6 +129,7 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+         int hw_cpu = cpu_logical_id(mpidr);
+         if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
+             preempt_disabled[hw_cpu] = 0;
++            SLOT_TRACE(ST_PD_CLEAR, task_current(), hw_cpu, hw_cpu, 1);
+             steal_pdwin_clear((uint32_t)hw_cpu);    /* #1216 trace */
+         }
+         __asm__ volatile("dsb sy" ::: "memory");
+-- 
+2.43.0
+
+
+From 7e07b384da09aef107d296289e8bfe8a185dcb83 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 19:51:32 -0800
+Subject: [PATCH 3/3] SLOT_TRACE dump: rings first, dereference only task_table
+ pointers, park other CPUs
+
+A panic-path dump on main WORK_STEALING=ON faulted inside its own
+state printout on a corrupted pointer and never printed the rings
+(qemu-1229-wstrace-multi-run04.txt), while CPU 0 kept printing over it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ kernel/sched/slot_trace.c | 43 +++++++++++++++++++++++++++------------
+ 1 file changed, 30 insertions(+), 13 deletions(-)
+
+diff --git a/kernel/sched/slot_trace.c b/kernel/sched/slot_trace.c
+index eb75be99..9d24a444 100644
+--- a/kernel/sched/slot_trace.c
++++ b/kernel/sched/slot_trace.c
+@@ -77,10 +77,20 @@ uint64_t slot_trace_pack(const struct task *t)
+ void slot_trace_rec(uint32_t ev, const struct task *t,
+                     uint64_t a, uint64_t b, uint64_t c)
+ {
+-    if (__atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED)) {
++    uint32_t cpu = cpu_id();
++    uint32_t fz = __atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED);
++    if (fz) {
++        /* A dump is in progress on another CPU: park this one at its next
++         * trace point, so its console output does not interleave with the
++         * dump and its rings stay as captured. */
++        if (fz != cpu + 1) {
++            __asm__ volatile("msr daifset, #0xF" ::: "memory");
++            for (;;) {
++                __asm__ volatile("wfe");
++            }
++        }
+         return;
+     }
+-    uint32_t cpu = cpu_id();
+     if (cpu >= MAX_CPUS) {
+         return;
+     }
+@@ -158,6 +168,13 @@ static void st_print_task(const char *label, const struct task *t)
+         uart_printf_unlocked("    %s: (null)\n", label);
+         return;
+     }
++    /* Only dereference pointers into the task table: a corrupted run
++     * queue must not fault the dump itself. */
++    if (st_slot(t) < 0) {
++        uart_printf_unlocked("    %s: %p (not a task_table slot)\n", label,
++                             (const void *)t);
++        return;
++    }
+     uart_printf_unlocked("    %s: slot=%d id=%u gen=%u state=%u name='%s' "
+                          "ctx.sp=0x%lx ctx.x19=0x%lx ctx.x30=0x%lx stack=[0x%lx..0x%lx)\n",
+                          label, st_slot(t), t->id, t->generation,
+@@ -191,17 +208,6 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
+                          (unsigned long)c, slot_trace_seq,
+                          (unsigned long)st_cntvct());
+     uint32_t ncpu = cpu_count < 4 ? cpu_count : 4;
+-    uart_printf_unlocked("  state at dump:\n");
+-    for (uint32_t k = 0; k < ncpu; k++) {
+-        struct cpu_runqueue *rq = sched_cpu_rq(k);
+-        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
+-                             (unsigned)slot_trace_rq_holder[k]);
+-        st_print_task("current", task_current_on_cpu(k));
+-        if (rq) {
+-            st_print_task("rq.head", rq->head);
+-            st_print_task("rq.zombie", rq->zombie);
+-        }
+-    }
+     uart_printf_unlocked("  format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>\n");
+     for (uint32_t k = 0; k < ncpu; k++) {
+         uint32_t n = slot_trace_idx[k];
+@@ -221,6 +227,17 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
+                                  (unsigned long)e->c, e->holders, e->rep);
+         }
+     }
++    uart_printf_unlocked("  state at dump:\n");
++    for (uint32_t k = 0; k < ncpu; k++) {
++        struct cpu_runqueue *rq = sched_cpu_rq(k);
++        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
++                             (unsigned)slot_trace_rq_holder[k]);
++        st_print_task("current", task_current_on_cpu(k));
++        if (rq) {
++            st_print_task("rq.head", rq->head);
++            st_print_task("rq.zombie", rq->zombie);
++        }
++    }
+     uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
+     semihosting_exit(3);
+     for (;;) {
+-- 
+2.43.0
+

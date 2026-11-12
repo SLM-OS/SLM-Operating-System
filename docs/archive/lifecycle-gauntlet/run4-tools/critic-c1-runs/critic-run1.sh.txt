@@ -24,8 +24,8 @@ samples=$(grep -a -o 'Samples collected: isolated=[0-9]*/[0-9]*, normal=[0-9]*/[
 nfail=$(grep -a -c '\[FAIL\]' "$ser")
 nfault=$(grep -a -c 'PAGE FAULT\|KERNEL PANIC\|SLOTTRACE-FAULT' "$ser")
 nto=$(grep -a -c 'TIMEOUT' "$ser")
-stress=$(grep -a -m1 -o 'slot_reuse_stress: [^\r]*' "$ser" || true)
-if [ "$rc" = 0 ]; then res=PASS; elif [ "$rc" = 124 ]; then res=TIMEOUT; else res="FAIL(rc=$rc)"; fi
+stress=$(grep -a -m1 -o 'slot_reuse_stress: .*' "$ser" | tr -d '\r' || true)
+if grep -a 'terminating on signal' "$ser" | grep -v -q '/usr/bin/timeout'; then res="INVALID(killed externally, rc=$rc)"; elif [ "$rc" = 0 ] && ! grep -a -q 'All test suites passed' "$ser"; then res="INVALID(rc 0 without a suite summary)"; elif [ "$rc" = 0 ]; then res=PASS; elif [ "$rc" = 124 ]; then res=TIMEOUT; else res="FAIL(rc=$rc)"; fi
 {
   echo "# critic C1: $what; head $head; elf sha256 $(sha256sum "$elf" | cut -d' ' -f1); accel tcg thread=multi; loadavg start $load0 end $load1 (qemu procs at start $nq0); RESULT $res; qemu rc $rc; ${samples:-Samples collected: (not printed)}; [FAIL] lines $nfail; fault/panic lines $nfault; TIMEOUT lines $nto; ${stress:-}"
   echo "# boot banner: $banner"

@@ -847,3 +847,54 @@ running server-side and C1 tracked it through its own output_dir.
 
 10:18 UTC: pi-5-1 to the C1 critic (5 boots, to 10:33); then jetson-nano-2
 to C2 (to 10:50).
+
+## Entry 35 (written 10:36 UTC): C1 critic final verdict: PASS at 33f05c5a with open items; C1 builder entry
+
+Verdict: [`critic-4-C1.md`](critic-4-C1.md) (Fable 5.2), sections R2.1 to
+R2.7 and "Final overall verdict"; runs `run4-tools/critic-c1-runs/`
+(round 2 `critic-r2-*`, Pi 5 `pi5/`). Round 1 FAIL stands for 6d4fe041
+(the switch-in wait deadlock, reverted in 5e5548a1). Final: **PASS at
+c1/1213-fix 33f05c5a** for bars (a), (b), (c) and the isolation-path bar.
+Open items: #1234 pre-existing and open; 3 critic Pi 5 boots of the 5 asked
+(my request for 2 more arrived after the critic released at 10:30:20; no
+time remained); x86 at 33f05c5a rests on the builder's 10 of 10 and one
+critic run; the critic's own rule break (Entry 12).
+
+**C1 builder entry.**
+- Baseline on main (1 s reproducer c1/isolated-1s-main 01931af6): CPU 1
+  stopped 6 of 20 thread=multi, 0 of 20 thread=single.
+- First-fault traces (trace ring behind SLOT_TRACE, default off, .text
+  identical with it off): three dumps, all **sequence A**: CPU 1 runs
+  task_exit for slot 6; CPU 0 (the test) destroys slot 6; CPU 1 parks it as
+  rq->zombie and its idle reaps it; CPU 0's task_create claims slot 6 with
+  state still TERMINATED; the reaper's task_destroy passes the TERMINATED
+  check and clears stack_base/stack_top; task_create copies the cleared top,
+  ctx.sp = 0; CPU 1 switches in with sp 0 and faults. **Sequence B**
+  (stress-test trace): CPU 0 rebuilds the slot before CPU 1's switch_to
+  saves, so the old task's registers overwrite the new context ("task_exit:
+  schedule returned!"). **Sequence C** (WORK_STEALING=ON trace on main): the
+  count-bounded wait expires while the task is RUNNING on CPU 1, and CPU 0
+  destroys and rebuilds the slot and stack under it. Run 3's hypothesis (a
+  half-written context) is overruled by the traces.
+- Stress test test_task_slot_reuse_under_switch: 20 of 20 fail unfixed
+  (884aab2d); 0 faults at every fix head (17 of 17 default config at
+  5e5548a1; critic 10 of 10 unfixed, 5 of 5 fixed).
+- Fix: per-task on_cpu set on switch-in under rq_lock, cleared with STLR in
+  sched_finish_switch after switch_to; task_destroy waits on it with LDAPR
+  (2 s bound, then warns and leaks); rq->zombie_gen and task_destroy_gen so
+  the reaper never destroys a reused slot; READY set in the claim section.
+  #1229: schedule() re-reads cpu_id() after switch_to (test
+  test_preempt_flag_follows_migrated_task, fails 6 of 6 on the old code).
+  x86: resched_ipi_handler returns while preempt_disabled[cpu] (#1236).
+  The switch-in wait (1ead6ef6) was reverted (5e5548a1); its window is
+  #1234.
+- Isolation path: isolated=10/10 in 20 of 20 QEMU WORK_STEALING=ON, 17 of
+  17 default, and 20 of 20 Pi 5 boots (`run4-hw/c1/pi5/pi5-fix-5e5548a1-integration-table.txt`);
+  boot_test 10 of 10 on Pi 5; /ci 10 of 10 at 33f05c5a; x86 10 of 10.
+- End states: #1213 root-caused and fixed (QEMU and Pi 5); #1211 not
+  reproduced (20 of 20 unfixed and fixed); #1223 QEMU side the same defect
+  (sequence B), Pi 5 on unfixed main not run (item (4), time), Pi 5 fix
+  head 0 panics in 20; #1228 not reproduced (code-and-trace argument: the
+  traced second destroys freed nothing; sequence C frees an in-use stack, a
+  plausible source, untested on Jetson); #1229 root-caused by trace and
+  fixed. Evidence `gauntlet-4-hw-pi5` 2501fc6e, `run4-hw/c1/`.

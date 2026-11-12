@@ -1,0 +1,56 @@
+From 01931af6bed55dcc217fcc5ab5ec4b3e83635b8e Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Tue, 10 Nov 2026 17:25:56 -0800
+Subject: [PATCH] TEMPORARY #1213 reproduction: test_isolated_core_latency
+ waits 1 s (not for merge)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/tests/test_scheduler.c | 24 ++++++------------------
+ 1 file changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index 165d873c..e02f3a6d 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -2201,17 +2201,9 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* Wait for completion. Left as a count on purpose (#1213): a
+-         * wall-clock bound lets these tasks run, and in QEMU CPU 1 then
+-         * stops running tasks; on Pi 5 this short bound expires before
+-         * the task runs in almost every iteration (isolated 0/10 in C1
+-         * run 2), and the test asserts nothing about completion. */
+-        int timeout = 100;
+-        while (t->state != TASK_TERMINATED && timeout > 0) {
+-            yield();
+-            test_delay(1000);
+-            timeout--;
+-        }
++        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        (void)test_wait_task_terminated("iso_latency_isolated", t,
++                                        TEST_WAIT_S(1));
+ 
+         /* Record sample */
+         if (latency_sample_index > 0) {
+@@ -2252,13 +2244,9 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* Left as a count on purpose: see the isolated phase (#1213). */
+-        int timeout = 100;
+-        while (t->state != TASK_TERMINATED && timeout > 0) {
+-            yield();
+-            test_delay(1000);
+-            timeout--;
+-        }
++        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        (void)test_wait_task_terminated("iso_latency_normal", t,
++                                        TEST_WAIT_S(1));
+ 
+         if (latency_sample_index > 0) {
+             uint64_t sample = latency_samples[0];
+-- 
+2.43.0
+

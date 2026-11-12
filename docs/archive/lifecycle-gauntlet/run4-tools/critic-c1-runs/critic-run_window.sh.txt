@@ -3,7 +3,7 @@
 set -u
 out=$1; elf=$2
 S=$(dirname "$(dirname "$0")")
-tmp=$(mktemp -d $S/tmp/win.XXXXXX)
+tmp=$(mktemp -d /tmp/claude-1000/cwin.XXXXXX)   # short path: a unix socket path must be under 108 bytes
 truncate -s 4G "$tmp/sd.img"
 load0=$(cut -d' ' -f1-3 /proc/loadavg)
 cmd=(systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120
@@ -36,11 +36,13 @@ res="rc=$rc"; grep -a -q 'critic_window B.*COMPLETED' "$ser" && res="$res phaseB
 grep -a -q 'critic_window A.*COMPLETED' "$ser" && res="$res phaseA-COMPLETED" || res="$res phaseA-NOT-COMPLETED"
 [ -n "$regs" ] && res="$res HANG-SAMPLED"
 {
-  echo "# critic C1 window experiment (fix head 6d4fe041 + critic-window-experiment.patch, NOT a branch build); head 6d4fe041-dirty; elf sha256 $(sha256sum "$elf" | cut -d' ' -f1); accel tcg thread=multi; loadavg start $load0 end $load1; RESULT $res"
+  echo "# critic C1 window experiment (fix head ${HEADLBL:-6d4fe041} + critic-window-experiment.patch, NOT a branch build); head ${HEADLBL:-6d4fe041}-dirty; elf sha256 $(sha256sum "$elf" | cut -d' ' -f1); accel tcg thread=multi; loadavg start $load0 end $load1; RESULT $res"
   echo "# boot banner: $(grep -a -m1 -o 'SLM-OS v[^)]*)' "$ser")"
   echo "# command: ${cmd[*]}"
   echo "# ---- QEMU output: critic_window lines, then the last 15 lines ----"
   grep -a 'critic_window\|test_critic_window' "$ser"
+  echo "# ---- serial from the first critic_window line to 45 lines after it (panic or fault text, if any) ----"
+  grep -a -n -m1 'critic_window' "$ser" | cut -d: -f1 | { read l; [ -n "$l" ] && sed -n "${l},$((l+45))p" "$ser"; }
   echo "# ---- last 15 lines of serial ----"
   tail -15 "$ser"
   if [ -n "$regs" ]; then echo "# ---- QMP 'info registers -a', 3 samples 0.5 s apart, after 8 s without output ----"; grep -a -o 'CPU#[0-9]\|PC=[0-9a-f]*\|X30=[0-9a-f]*\|ELR_EL1=[0-9a-f]*\|PSTATE=[0-9a-f]* [-NZCV]* EL[0-9a-z]*\|=== sample [0-9] ===' "$tmp/regs.txt" | tr '\n' ' ' | sed 's/=== sample/\n=== sample/g; s/CPU#/\n  CPU#/g'; echo; fi

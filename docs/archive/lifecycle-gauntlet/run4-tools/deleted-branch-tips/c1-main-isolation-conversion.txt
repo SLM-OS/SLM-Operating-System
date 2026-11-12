@@ -1,0 +1,2 @@
+# branch c1/main-isolation-conversion tip 3f64f62461756c533a7ad02c3ca0e8b754d07daa archived 2026-11-12T10:35:43Z
+3f64f62461756c533a7ad02c3ca0e8b754d07daa EXPERIMENT (not for merge): main + only the #1213 step-5 isolation-wait conversion, for #1223 on Pi 5

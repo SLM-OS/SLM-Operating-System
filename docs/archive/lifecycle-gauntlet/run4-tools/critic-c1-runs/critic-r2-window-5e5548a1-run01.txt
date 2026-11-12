@@ -1,0 +1,21 @@
+# critic C1 window experiment (fix head 5e5548a1 + critic-window-experiment.patch, NOT a branch build); head 5e5548a1-dirty; elf sha256 18d012362d49886362662f7d1f6f000bd8e4d0b657c1f98feeda6db613b965fc; accel tcg thread=multi; loadavg start 1.45 1.35 1.32 end 3.02 1.87 1.51; RESULT rc=124 phaseB-NOT-COMPLETED phaseA-NOT-COMPLETED
+# boot banner: SLM-OS v0.4.0 build 20261112063710 (5e5548a1-dirty)
+# command: systemd-run --user --scope -q -p MemoryMax=3G -p CPUQuota=200% timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp cores=4 -m 1G -accel tcg,tb-size=128,thread=multi -nographic -global virtio-mmio.force-legacy=false -device virtio-net-device,netdev=net0 -netdev user,id=net0 -device virtio-rng-pci,bus=pcie.0 -drive id=slmos-sd,if=none,format=raw,file=/tmp/claude-1000/cwin.1t0FIR/sd.img -device sdhci-pci -device sd-card,drive=slmos-sd -qmp unix:/tmp/claude-1000/cwin.1t0FIR/qmp.sock,server=on,wait=off -semihosting -kernel /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/elf/fix-5e5548a1-window.elf
+# ---- QEMU output: critic_window lines, then the last 15 lines ----
+  critic_window A-control(sleepers on cpu2, T to cpu3) it=0: cpu0 in window, migrating T to cpu3
+# ---- last 15 lines of serial ----
+  id=6 name='shell' stack=[0x42180000..0x421c0000)
+  id=68 name='cw_H' stack=[0x421c0000..0x42200000)
+  id=69 name='cw_B' stack=[0x42c00000..0x42c40000)
+  id=70 name='cw_S' stack=[0x42c40000..0x42c80000)
+  id=71 name='cw_S' stack=[0x42c80000..0x42cc0000)
+  id=72 name='cw_S' stack=[0x42cc0000..0x42d00000)
+  id=73 name='cw_S' stack=[0x42d00000..0x42d40000)
+  id=74 name='cw_S' stack=[0x42d40000..0x42d80000)
+  id=75 name='cw_S' stack=[0x42d80000..0x42dc0000)
+  id=76 name='cw_T' stack=[0x42dc0000..0x42e00000)
+  (all task stacks intact)
+
+System halted.
+[test_wait] cw_T: TIMEOUT after 2000000 us; after the bound +1ms=0 +10ms=0 +100ms=0 +1000ms=0; first held -1 us after the bound (-1 = never)
+qemu-system-aarch64: terminating on signal 15 from pid 3333198 (/usr/bin/timeout)

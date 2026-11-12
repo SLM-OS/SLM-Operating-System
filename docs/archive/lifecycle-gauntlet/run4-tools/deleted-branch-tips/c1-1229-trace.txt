@@ -1,0 +1,4 @@
+# branch c1/1229-trace tip 7e07b384da09aef107d296289e8bfe8a185dcb83 archived 2026-11-12T10:35:43Z
+7e07b384da09aef107d296289e8bfe8a185dcb83 SLOT_TRACE dump: rings first, dereference only task_table pointers, park other CPUs
+6f405a76618cd11b83b3e679c0f06af3358aef83 SLOT_TRACE: preempt_disabled set/clear, steal decisions, stuck-flag watchdog (#1229, #1213)
+4d7df4b98e584eca93d93ad680537e4a9418e923 SLOT_TRACE option (from b8df6f5f) on main, without the 1 s reproduction waits

@@ -1,0 +1,2 @@
+# branch c1/isolated-1s-main tip 01931af6bed55dcc217fcc5ab5ec4b3e83635b8e archived 2026-11-12T10:35:43Z
+01931af6bed55dcc217fcc5ab5ec4b3e83635b8e TEMPORARY #1213 reproduction: test_isolated_core_latency waits 1 s (not for merge)

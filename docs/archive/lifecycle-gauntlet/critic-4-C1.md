@@ -614,3 +614,262 @@ Critic files:
 (25 run files with a `#` summary on line 1, two raw QMP files, two patches,
 the runner and helper scripts). This verdict is for 6d4fe041; the head has
 since moved (section 9) and a re-check at the next head is owed.
+
+# Round 2: re-check at c1/1213-fix 5e5548a1 and 33f05c5a (2026-11-12 UTC)
+
+Same critic, same model (Fable 5.2, `claude-fable-5-2`). Round 1 above is
+unchanged and is the verdict for 6d4fe041. Heads: 5e5548a1 (reverts
+`schedule()`'s switch-in wait) and 33f05c5a (one x86-only commit on top, the
+PR head named by the orchestrator). Read for this round: the two diffs, the
+two commit messages, #1234 and #1236, the builder's
+`c1/x86-5e5548a1/` files (evidence branch 20e6a076). One QEMU at a time, own
+PIDs only, no name-pattern kill.
+
+## R2 summary
+
+| Row | Verdict |
+|---|---|
+| Diff 9185d4cb..5e5548a1 is the revert plus docs | **PASS**: `kernel/sched/sched.c` (-18 lines, the wait loop and its comment), `docs/scheduler.md`, `kernel/CLAUDE.md` |
+| Diff 5e5548a1..33f05c5a is x86-only; ARM64 `.text` identical | **PASS**: `kernel/arch/x86_64/platform_x86.c` only; QEMU_VIRT `.text` 2443032 B, sha256 e58b110e81a05f73 at both heads (`cmp` identical), so the 5e5548a1 ARM64 runs count for 33f05c5a |
+| Mechanism (i), (ii), (iv) and the `task_destroy` wait | **PASS**, unchanged from round 1; the deadlock of round 1 is gone with the wait |
+| Mechanism (iii) | **OPEN, not guarded**: as on main. Agrees with the commit message and #1234. Not part of #1213 as traced (sequences A, B, C); belongs to #1234 |
+| Window patch at 5e5548a1 | **No deadlock; it faults instead**: 3 of 3 runs end in a page fault on CPU 3 in the migrated task (PC 0), in the control phase. This is #1234's window, forced open |
+| Spot runs, default config, 5e5548a1 | **PASS**: 5/5 stress clean, isolated=10/10, CPU 1 never faults |
+| #1229 test with the re-read reverted, 5e5548a1 | **PASS** (fails 3/3, bad = 6, 7, 6) |
+| `schedule()` growth at 5e5548a1 | explained: the switch-in block is emitted three times instead of once; no spin remains |
+| x86 guard argument (33f05c5a) | **PASS**: a kick dropped inside the window delays the woken task by at most one LAPIC tick (10 ms); it is not stranded |
+| x86 `make test` at 33f05c5a | **PASS** 1/1 (R2.7) |
+| Pi 5 | see "Pi 5 phase" below |
+
+Round 2 verdict for the QEMU part: **PASS for #1213, #1229 and the bars as
+measured, with (iii) left open under #1234 (P1-high)**. The open window is
+the one main has; the fix head neither closes nor widens it. Round 1's
+INCOMPLETE rows on the issues' end states are not re-checked here.
+
+## R2.1 Mechanism re-review at 5e5548a1
+
+What the head keeps: `task.on_cpu` set at switch-in and released by STLR in
+`sched_finish_switch`; `task_destroy`'s bounded load-acquire wait;
+`zombie_gen` and `task_destroy_gen`; `state = READY` in the claim section;
+the `cpu_id()` re-read after `switch_to`. What it removes: the unbounded
+wait on `next->on_cpu` in `schedule()`. Checked in the critic's build:
+`schedule()` contains no `ldapr` and no `yield` instruction.
+
+- (i) destroy only after switch-out: guarded, as in 1.1.
+- (ii) reaper against a reused slot: guarded, as in 1.2.
+- (iv) post-switch `preempt_disabled` clear: guarded, as in 1.4.
+- (iii) switch in only after the previous CPU has saved the context: not
+  guarded. A task re-queued READY, or blocked and then woken, is visible to
+  `sched_try_steal`, `sched_migrate_task`, the rebalancer and wake placement
+  once its CPU drops `rq_lock`; another CPU can load its context before the
+  first CPU's `switch_to` has stored it. Nothing orders the store before the
+  load. This is main's behaviour.
+- Coupling the critic notes: when that window is hit, `on_cpu` itself
+  becomes wrong. The new CPU sets `on_cpu = 1`, then the old CPU's
+  `sched_finish_switch` stores 0 while the task is running on the new CPU.
+  Until the task's next switch-in, (i)'s wait sees 0 for a task that is on a
+  CPU. So (i) holds on the condition that (iii)'s window was not hit for
+  that task. Once it is hit the task has already resumed from a stale
+  context, so this adds no new first fault; it is recorded because the
+  guard is not independent of #1234.
+- Scope: sequences A and B are an owner's destroy and the zombie reaper on a
+  slot whose task exits on its own CPU; sequence C is a force-terminate and
+  destroy of a task still RUNNING. In all three the task is pinned to CPU 1
+  and is never switched in elsewhere; they are closed by (i) and (ii). The
+  (iii) window was never seen in a trace (C1's summary and #1234 both say
+  so) and was added and removed inside this branch. It belongs to #1234.
+- Deadlock re-check: `task_destroy`'s wait is unchanged (holds no lock,
+  bounded at 2 s, then warns and leaks). With the `schedule()` wait gone no
+  CPU waits on another CPU's switch-out while holding an `rq_lock`. The
+  cycle of 1.5 and 1.6 cannot form.
+
+## R2.2 Window patch against 5e5548a1
+
+`critic-window-experiment.patch` applied unchanged to 5e5548a1 (elf
+18d01236, banner `5e5548a1-dirty`). Two earlier attempts did not start (the
+QMP socket path exceeded 108 bytes) and are not kept; the runner now puts
+its socket under `/tmp/claude-1000/cwin.*`.
+
+| File | Result |
+|---|---|
+| `critic-r2-window-5e5548a1-run01.txt` | control phase, iteration 0: `System halted` after a fault; phase A not completed; QEMU ended by the 120 s timeout |
+| `critic-r2-window-5e5548a1-run02.txt` | same, iteration 0 |
+| `critic-r2-window-5e5548a1-run03.txt` | control phase, iteration 1: `PAGE FAULT`, Instruction Abort, address 0x0, ELR 0x0, x30 0x0, task `cw_T` (id 77) on CPU 3 |
+
+No run deadlocks: there is no CPU left in `spin_lock` or in an `on_cpu`
+loop, and the kernel reaches its fault handler and halts. But the test does
+not complete either. CPU 3 switches into the migrated task while CPU 0 is
+still inside its (held-open) switch window out of it, and the task runs
+from a context that was not yet saved. That is the event #1234 describes as
+a hypothesis from code reading; here it is observed, under the same
+artificial 25 ms hold as in round 1 and through the public
+`sched_migrate_task`. The same patch on main was not run; main has the same
+code on this path. As in round 1, the hold says nothing about the natural
+rate.
+
+So the two heads fail the forced-window experiment in different ways:
+6d4fe041 stops the machine silently, 5e5548a1 faults in the moved task.
+Neither is a pass; the second is main's existing behaviour and is tracked.
+
+## R2.3 Spot runs at 5e5548a1 (default configuration, thread=multi, one at a time)
+
+| Set | Banner, elf | Runs | Result | Load at start |
+|---|---|---|---|---|
+| `critic-r2-fix-5e5548a1-run01..05.txt` | 5e5548a1, 16ab547a | 5 | stress clean 5/5 (2030 to 2067 iterations, bad=0, timeouts=0); isolated=10/10, normal=10/10 in 5/5; 0 iso TIMEOUT, 0 panic, 0 page fault; `pdm` moved 6 or 7, bad=0 in 5/5; suite rc 0 in 3, rc 1 in 2 on `test_litmus_patterns_pass` alone (#1230); every file ends with a suite summary, no SIGTERM line | 2.75 to 4.85 |
+| `critic-r2-pdrevert-5e5548a1-run01..03.txt` | 5e5548a1-dirty, 3c970314 (`critic-pdrevert.patch`) | 3 | `[FAIL] test_preempt_flag_follows_migrated_task` 3/3: moved=7, 7, 6 and bad=6, 7, 6, first on cpu 1 | 1.69 to 4.11 |
+
+## R2.4 `schedule()` grew although the wait was removed
+
+Critic's QEMU test builds, 6d4fe041 (kernel code of 9185d4cb) against
+5e5548a1: `schedule` is 0x420 bytes, then 0x46c. `ldapr` 1 then 0, `yield`
+instruction 1 then 0, identical set of called functions. The block
+`next->state = RUNNING; next->on_cpu = 1; next->switches++;
+sched.context_switches++` is emitted once before and three times after
+(three `str w, [x, #824]` stores to `on_cpu`, each followed by the same two
+increments): with the loop in front of it gone the compiler copied the
+block into its predecessors. Extra instructions: 8 `str`, 3 `ldr`, 4 `mov`,
+3 `add`, 2 `b`; no new atomics, barriers or loops. The Jetson build was not
+disassembled.
+
+## R2.5 33f05c5a: x86-only, ARM64 text unchanged
+
+`git diff --stat 5e5548a1 33f05c5a`: `kernel/arch/x86_64/platform_x86.c`,
+18 insertions, 3 deletions. `make kernel` (QEMU_VIRT) at both heads in the
+critic's worktree: `.text` 2443032 B at both, sha256 e58b110e81a05f73 at
+both, `cmp` reports no difference; `.data` identical; `.rodata` differs in
+84 bytes (the banner's hash and build time). elfs f86418d9 (5e5548a1),
+728d6697 (33f05c5a).
+
+## R2.6 The x86 guard: can a dropped kick strand a task?
+
+The handler now returns without `schedule()` while
+`preempt_disabled[cpu]` is set. Checked against the code at 33f05c5a:
+
+- The flag is set on a CPU only between `schedule()`'s decision to switch
+  and the clear after `switch_to` (or the trampoline), and in
+  `scheduler_start`. The IPI is taken on that CPU itself, so the read is
+  not racing another writer.
+- A kick is sent after the task is on the target's queue. If it is dropped,
+  the task is still queued when the target's switch completes.
+- Every x86 CPU runs its own LAPIC timer (`timer_percpu_init`,
+  `platform_x86.c:314`), whose handler calls `scheduler_tick`, which on x86
+  calls `schedule()` directly once the flag is clear.
+- The idle task is `sti; hlt; yield()`. If the target was switching to idle
+  when the kick was dropped, idle halts, the next LAPIC tick (at most 10 ms)
+  wakes it, and both the tick's `schedule()` and idle's `yield()` pick the
+  task. If it was switching to a busy task, the same tick preempts it.
+
+So the task is not stranded; the cost is a latency of up to one tick for a
+kick that lands in the window, where before it was a nested `schedule()`.
+The commit's statement that x86 has no deferral path is correct
+(`reschedule_pending` exists only under SECONDARY_PREEMPT). No other
+interrupt-context caller of `schedule()` exists under `kernel/arch` or
+`kernel/drivers` at 33f05c5a. Builder's files, counted: at 5e5548a1
+unpatched 2 of 3 fail `test_rebalance_after_burst` with two `still on a
+CPU` warnings each (`c1/x86-5e5548a1/x86-run02.txt`, `-run03.txt`); with
+the guard as an uncommitted patch 3 of 3 pass; main 3 of 3 pass. So without
+this commit the #1213 fix makes x86 `make test` fail where main passes.
+
+## R2.7 x86 `make test` at 33f05c5a
+
+One run of `make test PLATFORM=X86_64` in the critic's worktree at 33f05c5a
+(the Makefile's own guard and timeout):
+`critic-r2-x86-maketest-33f05c5a-run01.txt`, banner 33f05c5a, elf ed108b8b,
+load 2.70 at start. Result: make rc 0, `PASSED - All tests passed`, 0
+`[FAIL]` lines, `[PASS] test_rebalance_after_burst`, 0 `still on a CPU`
+warnings, no SIGTERM line. One run is a smoke check, not a rate: the
+builder's unpatched 5e5548a1 runs fail 2 of 3, so one pass has roughly a
+one-in-three chance of occurring without the guard. The builder's three
+guarded runs were on an uncommitted patch; no builder file at the committed
+33f05c5a was seen on the evidence branch at 2501fc6e.
+
+# Pi 5 phase (2026-11-12, 10:18 to 10:30 UTC)
+
+pi-5-1, claimed as `lifecycle-4-c1-critic`, labctl MCP tools only. The
+orchestrator gave a hard limit of 10:33 UTC and asked for 5 boots. Each boot
+took about 170 s, so the critic ran **3 boots, not 5**, and restored the
+board inside the limit.
+
+- Image: `build/kernel/slmos-l4-c1-test-fix-5e5548a1.bin` in the main
+  checkout, 8802968 B, sha256
+  6daa5111a4397cf20ec51b1669e9f23eb32655fd4731dc9de7631644d1009554 (matches
+  the value given), banner 5e5548a1. The critic did not build a RASPI5
+  kernel at 33f05c5a; 33f05c5a differs from 5e5548a1 only in
+  `kernel/arch/x86_64/platform_x86.c`, which no ARM64 build compiles, and
+  the QEMU_VIRT `.text` comparison is in R2.5.
+- Card as found (board powered off first, since `sdwire_info` refuses a
+  powered board): msdos label, one FAT32 partition `SLMOS` (29818 MiB,
+  clean), `kernel_2712.img` and `kernel8.img` 6935256 B each, mtime
+  2026-10-29, no leftover renamed kernels.
+- Deploy: one `sdwire_update` copying the image under two temporary names,
+  renaming the originals to `*.orig4c`, then the copies to
+  `kernel_2712.img` and `kernel8.img`.
+- `boot_test`, expect `All test suites passed|total failure\(s\)`, timeout
+  330 s: output_dir `/var/lib/labctl/output/l4-c1-critic-pi5-a` (2 runs) and
+  `-pi5-b` (1 run). Files copied unchanged to `critic-c1-runs/pi5/`.
+
+| File | Boot | Banner | Samples | Stress | #1229 test | Panic / page fault / leak warning | Total failures |
+|---|---|---|---|---|---|---|---|
+| `pi5/critic-pi5-5e5548a1-run01.txt` | PASS 167.8 s | 5e5548a1 | isolated=10/10, normal=10/10 | 2001 iterations, bad=0, timeouts=0 | moved=5, bad=0 | 0 / 0 / 0 | 18 |
+| `pi5/critic-pi5-5e5548a1-run02.txt` | PASS 168.1 s | 5e5548a1 | isolated=10/10, normal=10/10 | 2001, bad=0, timeouts=0 | moved=7, bad=0 | 0 / 0 / 0 | 18 |
+| `pi5/critic-pi5-5e5548a1-run03.txt` | PASS 176.3 s | 5e5548a1 | isolated=10/10, normal=10/10 | 2001, bad=0, timeouts=0 | moved=5, bad=0 | 0 / 0 / 0 | 18 |
+
+The 18 failing tests are the same set in all three boots and are #1109's
+Pi 5 list (14 `test_blob_autoload_*` / `test_blob_boot_autoload_*`,
+`test_builtin_commands_grouped_and_sorted`,
+`test_every_command_has_help_entry`, `test_eviction_run_tests_passes`,
+`test_timer_irq_is_physical`); none beyond it.
+
+- Restore: one `sdwire_update` renaming the originals back and deleting the
+  two test images; `sdwire_ls` afterwards shows `kernel_2712.img` and
+  `kernel8.img` at 6935256 B, mtime 2026-10-29, and no extra file. Then
+  `sdwire_to_dut`, `power_on`, `release_sbc` at about 10:30:20 UTC. The
+  critic did not wait for a boot to the shell or run a health check after
+  power-on.
+
+Builder's Pi 5 files, counted by the critic (evidence branch 2501fc6e,
+`c1/pi5/pi5-fix-5e5548a1-integration-run01..20.txt`): 20 files, banner
+5e5548a1 in 20, isolated=10/10 and normal=10/10 in 20, stress bad=0
+timeouts=0 in 20, #1229 test bad=0 in 20, no `KERNEL PANIC`, `PAGE FAULT`
+or `still on a CPU` line in the body of any (the string `KERNEL PANIC`
+occurs once per file, in the builder's line-1 summary), 18 total failures
+in 20, none beyond the #1109 list. The critic's 3 boots agree with them.
+The production `boot_test` file there (10/10 to `slmos>`) was not counted.
+
+Row "isolated=10/10 in 20 of 20 Pi 5 runs at the fix head": **PASS** on the
+builder's 20 files, reproduced by the critic in 3 of the 5 boots asked for.
+#1223 (panic on CPU 1 after the isolation phase) and #1211 (lifecycle leak
+check): 0 occurrences in 23 boots; the unfixed Pi 5 rate for either at this
+base was not measured in this run by the critic, so 23 clean boots are not
+set against a 5x threshold here.
+
+# Final overall verdict (after round 2 and the Pi 5 phase)
+
+**PASS at c1/1213-fix 33f05c5a for C1's definition of done as measured,
+with the items below left open.** Round 1's FAIL was for 6d4fe041 and stands
+for that head; the cause (the `schedule()` switch-in wait) is reverted.
+
+| Item | State at 33f05c5a |
+|---|---|
+| Three first-fault traces, mechanism | PASS (round 1, section 2) |
+| Stress test fails on main-based unfixed kernel, passes under the 5x rule | PASS: unfixed 20/20 (C1) and 10/10 (critic); fixed 0 faults in C1's sets, the critic's 10 runs at 6d4fe041 and 5 at 5e5548a1 |
+| Isolation path, QEMU | PASS (round 1 counts; 5/5 more at 5e5548a1) |
+| Isolation path, Pi 5 | PASS: builder 20/20, critic 3/3 |
+| Trace ring off by default, zero cost | PASS (round 1, section 5, at 6d4fe041; not redone at 33f05c5a, whose diff from there removes the wait and touches no trace hook) |
+| #1229 fix and regression test | PASS: fails without the re-read 3/3 at 6d4fe041 and 3/3 at 5e5548a1 |
+| x86-64 | PASS 1/1 at 33f05c5a (smoke check) |
+| Mechanism | (i), (ii), (iv) guarded and agreed. (iii) open, as on main: #1234 |
+
+Open, in order of weight:
+
+1. #1234 (P1-high): a task can be switched in on another CPU before its
+   old CPU has saved its context. Pre-existing on main, not closed by this
+   branch, and observed by the critic under a forced window at 5e5548a1
+   (page fault, 3 of 3). The `on_cpu` guard of the #1213 fix is accurate
+   only while this window is not hit.
+2. The critic ran 3 Pi 5 boots where 5 were asked for.
+3. Round 1's INCOMPLETE row on run-4 end-state comments for #1213, #1223 and
+   #1211 was not re-checked.
+4. x86 at the committed head rests on one critic run; the forced-window
+   experiment was not run on main or on x86.
+5. The rule break of section 8 (name-pattern kill) stands as recorded.

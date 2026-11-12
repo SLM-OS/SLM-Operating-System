@@ -1,0 +1,2045 @@
+From 01931af6bed55dcc217fcc5ab5ec4b3e83635b8e Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Tue, 10 Nov 2026 17:25:56 -0800
+Subject: [PATCH 1/6] TEMPORARY #1213 reproduction: test_isolated_core_latency
+ waits 1 s (not for merge)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/tests/test_scheduler.c | 24 ++++++------------------
+ 1 file changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index 165d873c..e02f3a6d 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -2201,17 +2201,9 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* Wait for completion. Left as a count on purpose (#1213): a
+-         * wall-clock bound lets these tasks run, and in QEMU CPU 1 then
+-         * stops running tasks; on Pi 5 this short bound expires before
+-         * the task runs in almost every iteration (isolated 0/10 in C1
+-         * run 2), and the test asserts nothing about completion. */
+-        int timeout = 100;
+-        while (t->state != TASK_TERMINATED && timeout > 0) {
+-            yield();
+-            test_delay(1000);
+-            timeout--;
+-        }
++        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        (void)test_wait_task_terminated("iso_latency_isolated", t,
++                                        TEST_WAIT_S(1));
+ 
+         /* Record sample */
+         if (latency_sample_index > 0) {
+@@ -2252,13 +2244,9 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* Left as a count on purpose: see the isolated phase (#1213). */
+-        int timeout = 100;
+-        while (t->state != TASK_TERMINATED && timeout > 0) {
+-            yield();
+-            test_delay(1000);
+-            timeout--;
+-        }
++        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        (void)test_wait_task_terminated("iso_latency_normal", t,
++                                        TEST_WAIT_S(1));
+ 
+         if (latency_sample_index > 0) {
+             uint64_t sample = latency_samples[0];
+-- 
+2.43.0
+
+
+From b8df6f5fd7f6bc6e034d415716acbc7658e0cb09 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 17:24:06 -0800
+Subject: [PATCH 2/6] Debug option SLOT_TRACE: per-CPU task-slot lifecycle
+ trace (#1213)
+
+Off by default (make ... SLOT_TRACE=ON). Per-CPU rings, written only by
+their own CPU with local IRQs masked for one entry, no locks or prints on
+the record path; CNTVCT timestamp plus one relaxed atomic sequence number
+for a total order. Records task_create (slot claimed, context written),
+task_destroy (entry, generation bump), task_exit,
+scheduler_terminate_task, run-queue inserts, zombie set and reap,
+switch_to entry and return, first run, and the four run-queue lock
+holders at each record. The first EL1 synchronous exception or panic
+freezes and prints every CPU's ring and exits QEMU; a bad SP at el1_sync
+entry is moved onto a per-CPU emergency stack before anything touches
+memory. With the option off every hook expands to nothing.
+
+test_isolated_core_latency gets trace markers (created, wait returned,
+about to destroy); no change with the option off.
+
+Refs #1213
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ CMakeLists.txt                 |  13 ++
+ Makefile                       |   1 +
+ kernel/arch/arm64/exceptions.c |  13 ++
+ kernel/arch/arm64/vectors.S    |  38 ++++++
+ kernel/include/slot_trace.h    |  85 ++++++++++++
+ kernel/sched/sched.c           |  30 ++++-
+ kernel/sched/slot_trace.c      | 232 +++++++++++++++++++++++++++++++++
+ kernel/sched/task.c            |  18 +++
+ kernel/src/panic.c             |   6 +
+ kernel/tests/test_scheduler.c  |  17 ++-
+ 10 files changed, 447 insertions(+), 6 deletions(-)
+ create mode 100644 kernel/include/slot_trace.h
+ create mode 100644 kernel/sched/slot_trace.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b39078a6..a4cb96cb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -294,6 +294,18 @@ endif()
+ # higher-level logging is wedged. See `STAGE25_TRACE_CHAR` in
+ # kernel/arch/arm64/vectors.S. Off by default; enable with
+ # -DSTAGE25_TRACE_PI5=ON when debugging the trampoline path (#672).
++# Task-slot lifecycle trace (#1213): per-CPU rings of task_create /
++# task_destroy / switch_to / zombie events, dumped on the first EL1
++# synchronous exception or panic. ARM64 only, debug only; with it off the
++# kernel's .text is unchanged. See kernel/include/slot_trace.h.
++option(SLOT_TRACE "Per-CPU task-slot lifecycle trace (#1213, debug only)" OFF)
++if(SLOT_TRACE)
++    if(PLATFORM STREQUAL "X86_64")
++        message(FATAL_ERROR "SLOT_TRACE is ARM64-only")
++    endif()
++    add_compile_definitions(CONFIG_SLOT_TRACE=1)
++endif()
++
+ option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
+ if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
+     add_compile_definitions(STAGE25_TRACE_PI5=1)
+@@ -690,6 +702,7 @@ set(KERNEL_SOURCES
+     kernel/sched/sched.c
+     kernel/sched/sched_heuristic.c
+     kernel/sched/steal_deque.c
++    kernel/sched/slot_trace.c
+     kernel/src/sched_trace.c
+     kernel/src/latency_hist.c
+     kernel/src/rate_ewma.c
+diff --git a/Makefile b/Makefile
+index 1344de7c..558aa712 100644
+--- a/Makefile
++++ b/Makefile
+@@ -299,6 +299,7 @@ KERNEL_COMMON_CMAKE_ARGS = \
+ 	$(KERNEL_PREEMPT_CMAKE_ARGS) \
+ 	$(if $(filter OFF,$(SETWAY_INVAL)),-DSETWAY_INVAL=OFF) \
+ 	$(if $(filter ON,$(STAGE25_TRACE_PI5)),-DSTAGE25_TRACE_PI5=ON) \
++	$(if $(filter ON,$(SLOT_TRACE)),-DSLOT_TRACE=ON) \
+ 	$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+ 	$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+ 	-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
+diff --git a/kernel/arch/arm64/exceptions.c b/kernel/arch/arm64/exceptions.c
+index 99eef6a3..56322903 100644
+--- a/kernel/arch/arm64/exceptions.c
++++ b/kernel/arch/arm64/exceptions.c
+@@ -15,6 +15,7 @@
+ #include "ncmem.h"
+ #include "trap.h"
+ #include "syscall.h"
++#include "slot_trace.h"
+ #include <stdint.h>
+ 
+ /* Timer IRQ numbers — Generic Timer PPIs.
+@@ -279,6 +280,18 @@ void el1_sync_handler(struct trap_frame *tf)
+ 
+     uint32_t ec = (esr >> 26) & 0x3F;
+ 
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace: the first EL1 synchronous exception dumps every
++     * CPU's ring before anything else runs (a normal test run takes
++     * none). */
++    uart_printf_unlocked("\nSLOTTRACE-FAULT EL1 sync: cpu=%u esr=0x%lx far=0x%lx "
++                         "elr=0x%lx x19=0x%lx x30=0x%lx\n",
++                         cpu_id(), (unsigned long)esr, (unsigned long)far,
++                         (unsigned long)tf->elr, (unsigned long)tf->x19,
++                         (unsigned long)tf->x30);
++    slot_trace_dump("el1_sync", esr, far, tf->elr);
++#endif
++
+     /* Handle page faults specially for better diagnostics */
+     if (is_data_abort(ec)) {
+         /* Disable interrupts */
+diff --git a/kernel/arch/arm64/vectors.S b/kernel/arch/arm64/vectors.S
+index c7e3e2cb..4fafc1ab 100644
+--- a/kernel/arch/arm64/vectors.S
++++ b/kernel/arch/arm64/vectors.S
+@@ -351,6 +351,44 @@ el1_serror_sp0:
+  * Could be: SVC, data abort, instruction abort, etc.
+  */
+ el1_sync:
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace (debug option, off by default): if SP is not a
++     * plausible kernel address (below 64 KB or at/above 2^40), nothing
++     * below may touch the stack. Move onto a per-CPU emergency stack,
++     * keep the original SP in TPIDR_EL0, and dump the trace rings.
++     * TPIDR_EL1 holds x0 meanwhile (the kernel uses neither register).
++     * CPU index = (Aff0 + Aff1) & 3: Aff0 on QEMU virt, Aff1 on Pi 5.
++     * Once SP is known bad it doubles as a scratch register. */
++    msr     tpidr_el1, x0
++    mov     x0, sp
++    msr     tpidr_el0, x0
++    cmp     x0, #0x10, lsl #12
++    b.lo    .Lst_bad_sp
++    lsr     x0, x0, #40
++    cbnz    x0, .Lst_bad_sp
++    mrs     x0, tpidr_el1
++    b       .Lst_sp_ok
++.Lst_bad_sp:
++    mrs     x0, mpidr_el1
++    and     x0, x0, #0xffff
++    mov     sp, x0
++    lsr     x0, x0, #8
++    add     x0, sp, x0
++    and     x0, x0, #3
++    add     x0, x0, #1
++    lsl     x0, x0, #14             /* (idx + 1) * 16 KB */
++    mov     sp, x0
++    adrp    x0, slot_trace_emerg
++    add     x0, x0, :lo12:slot_trace_emerg
++    add     sp, sp, x0
++    mrs     x0, tpidr_el1
++    save_regs
++    mov     x0, sp
++    mrs     x1, tpidr_el0
++    bl      slot_trace_bad_sp_fault
++    b       hang
++.Lst_sp_ok:
++#endif
+     STAGE25_TRACE_CHAR 'S'              /* Trace: sync exception (#672 probe) */
+     DIAG_BUMP_VEC 0x00
+     save_regs
+diff --git a/kernel/include/slot_trace.h b/kernel/include/slot_trace.h
+new file mode 100644
+index 00000000..b1d1eb46
+--- /dev/null
++++ b/kernel/include/slot_trace.h
+@@ -0,0 +1,85 @@
++/*
++ * slot_trace.h - Per-CPU task-slot lifecycle trace (#1213)
++ *
++ * Debug-only. Built with `make ... SLOT_TRACE=ON` (CMake -DSLOT_TRACE=ON,
++ * which defines CONFIG_SLOT_TRACE). With the option off every macro below
++ * expands to nothing and slot_trace.c compiles to an empty unit, so the
++ * kernel's .text is unchanged.
++ *
++ * What it records, per task_table slot: task_create (slot claimed, context
++ * written), task_destroy (entry and the generation bump), task_exit,
++ * scheduler_terminate_task, run-queue inserts, zombie set and reap,
++ * switch_to entry (outgoing and incoming slot, generation, the incoming
++ * context's saved sp/x19 as read just before the switch), switch_to return,
++ * a task's first instruction in C (task_entry_trampoline), and test markers.
++ * Every entry carries the CPU, CNTVCT, a global sequence number (one relaxed
++ * atomic increment, for a total order across CPUs) and the four run-queue
++ * lock holders at the time of the record.
++ *
++ * Writers: ring c is written only by CPU c, with local IRQs masked for the
++ * few stores of one entry. No locks and no prints on the record path.
++ *
++ * Dump: the first EL1 synchronous exception (including the bad-SP case,
++ * which the el1_sync vector moves onto a per-CPU emergency stack before
++ * anything touches memory) or the first panic freezes every ring and prints
++ * all of them, then exits QEMU through semihosting.
++ */
++
++#ifndef SLOT_TRACE_H
++#define SLOT_TRACE_H
++
++#include <stdint.h>
++
++/* Event codes. */
++#define ST_CREATE_ALLOC     1   /* a=stack base, b=caller                     */
++#define ST_CREATE_CTX_DONE  2   /* a=ctx.sp, b=ctx.x19, c=ctx.x30 (read back)  */
++#define ST_DESTROY          3   /* a=caller, b=stack base, c=ctx.sp            */
++#define ST_DESTROY_DONE     4   /* gen = new generation                       */
++#define ST_EXIT             5   /* task_exit on the running task               */
++#define ST_TERMINATE        6   /* a=rq cpu, b=removed from queue (0/1)        */
++#define ST_ADD              7   /* a=target cpu, b=caller                      */
++#define ST_ZOMBIE_SET       8   /* rq->zombie = task, a=cpu                    */
++#define ST_ZOMBIE_REAP      9   /* about to task_destroy(rq->zombie)          */
++#define ST_SWITCH           10  /* task=next; a=pack(current), b=next ctx.sp, c=next ctx.x19 */
++#define ST_SWITCH_RET       11  /* switch_to returned; task=current, a=live sp */
++#define ST_FIRST_RUN        12  /* task_entry_trampoline; a=live sp, b=ctx.sp  */
++#define ST_PICK_SAME        13  /* schedule() kept current; a=state at entry   */
++#define ST_TEST             14  /* test marker; a=tag, b, c                    */
++
++#if defined(CONFIG_SLOT_TRACE)
++
++struct task;
++
++void slot_trace_rec(uint32_t ev, const struct task *t,
++                    uint64_t a, uint64_t b, uint64_t c);
++/* slot(16) | generation(32) | state(16), for one task in an entry field. */
++uint64_t slot_trace_pack(const struct task *t);
++/* Freeze all rings and print them; first caller only (later callers spin).
++ * Exits QEMU through semihosting; does not return. */
++void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
++    __attribute__((noreturn));
++/* Called from the el1_sync vector on a bad SP (already on the emergency
++ * stack); orig_sp is the SP at exception entry. */
++void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
++    __attribute__((noreturn));
++
++extern volatile uint8_t slot_trace_rq_holder[];
++
++#define SLOT_TRACE(ev, t, a, b, c) \
++    slot_trace_rec((ev), (t), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c))
++#define SLOT_TRACE_PACK(t)          slot_trace_pack(t)
++#define SLOT_TRACE_ONLY(...)        __VA_ARGS__
++#define SLOT_TRACE_RQ_LOCKED(cpu)   (slot_trace_rq_holder[(cpu)] = (uint8_t)(cpu_id() + 1))
++#define SLOT_TRACE_RQ_UNLOCKING(cpu) (slot_trace_rq_holder[(cpu)] = 0)
++
++#else
++
++#define SLOT_TRACE(ev, t, a, b, c)  ((void)0)
++#define SLOT_TRACE_PACK(t)          0
++#define SLOT_TRACE_ONLY(...)
++#define SLOT_TRACE_RQ_LOCKED(cpu)   ((void)0)
++#define SLOT_TRACE_RQ_UNLOCKING(cpu) ((void)0)
++
++#endif /* CONFIG_SLOT_TRACE */
++
++#endif /* SLOT_TRACE_H */
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index 83dbfc5b..fc9b043e 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -36,6 +36,7 @@
+ #if CONFIG_WORK_STEALING
+ #include "steal_deque.h"
+ #endif
++#include "slot_trace.h"
+ /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
+  * are referenced from schedule() in every configuration (they are
+  * empty functions without work stealing). */
+@@ -155,10 +156,13 @@ static volatile uint64_t steal_trace_t0_cnt;
+ /* Lock helpers that use the correct lock for a given CPU */
+ static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
+ {
+-    return spin_lock_irqsave(&rq_lock[cpu]);
++    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
++    SLOT_TRACE_RQ_LOCKED(cpu);
++    return f;
+ }
+ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
+ {
++    SLOT_TRACE_RQ_UNLOCKING(cpu);
+     spin_unlock_irqrestore(&rq_lock[cpu], flags);
+ }
+ 
+@@ -914,6 +918,7 @@ static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
+ {
+     struct cpu_runqueue *rq = cpu_rq(cpu);
+ 
++    SLOT_TRACE(ST_ADD, task, cpu, __builtin_return_address(0), 0);
+     task->assigned_cpu = cpu;
+ 
+     /* Update effective priority based on deadline before insertion */
+@@ -1362,7 +1367,9 @@ void scheduler_terminate_task(struct task *task)
+ 
+         task->state = TASK_TERMINATED;
+ 
+-        if (remove_from_cpu_queue_locked(task, cpu)) {
++        int st_removed = remove_from_cpu_queue_locked(task, cpu);
++        SLOT_TRACE(ST_TERMINATE, task, cpu, st_removed, 0);
++        if (st_removed) {
+             sched.task_count--;
+             DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
+                         task->name, cpu, rq->ready_count);
+@@ -2357,6 +2364,7 @@ void schedule(void)
+     if (rq->zombie) {
+         struct task *zombie = rq->zombie;
+         rq->zombie = NULL;
++        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), 0);
+         rq_unlock_irqrestore(this_cpu, flags);
+ 
+         /* Destroy outside lock - task_destroy may call pmm */
+@@ -2367,6 +2375,7 @@ void schedule(void)
+ 
+     struct task *current = task_current();
+     struct task *next = pick_next_task(this_cpu);
++    SLOT_TRACE_ONLY(uint32_t st_state0 = current ? (uint32_t)current->state : 0xFFFF;)
+ 
+     /* If current task is still running and ready, re-add to queue */
+     if (current && current->state == TASK_RUNNING) {
+@@ -2402,6 +2411,10 @@ void schedule(void)
+      * If the current task is terminated, we MUST switch to a different task.
+      */
+     if (next == current) {
++        SLOT_TRACE_ONLY(
++            if (st_state0 != TASK_RUNNING) {
++                SLOT_TRACE(ST_PICK_SAME, current, st_state0, 0, 0);
++            })
+         if (current && (current->state == TASK_TERMINATED ||
+                         current->state == TASK_DESTROYED)) {
+             rq_unlock_irqrestore(this_cpu, flags);
+@@ -2434,6 +2447,7 @@ void schedule(void)
+      */
+     if (current && current->state == TASK_TERMINATED) {
+         rq->zombie = current;
++        SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
+     }
+ 
+     task_set_current(next);
+@@ -2527,8 +2541,18 @@ void schedule(void)
+     }
+ #endif
+ 
++    SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
++               next->context.x19);
+     switch_to(current, next);
+ 
++#if !defined(PLATFORM_X86_64)
++    SLOT_TRACE_ONLY({
++        uint64_t st_sp;
++        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
++        SLOT_TRACE(ST_SWITCH_RET, task_current(), st_sp, 0, 0);
++    })
++#endif
++
+     /* Resumed on our stack after being switched back.
+      * Re-enable preemption so timer ticks can trigger scheduling. */
+     preempt_disabled[this_cpu] = 0;
+@@ -2650,6 +2674,8 @@ void scheduler_start(uint32_t this_cpu)
+     /* Switch to first task (NULL = no previous context to save).
+      * switch_to never returns — it jumps to task_entry_wrapper.
+      * The trampoline clears preempt_disabled[this_cpu]. */
++    SLOT_TRACE(ST_SWITCH, first, SLOT_TRACE_PACK(NULL), first->context.sp,
++               first->context.x19);
+     switch_to(NULL, first);
+ 
+     /* Should never reach here */
+diff --git a/kernel/sched/slot_trace.c b/kernel/sched/slot_trace.c
+new file mode 100644
+index 00000000..f17d9ee2
+--- /dev/null
++++ b/kernel/sched/slot_trace.c
+@@ -0,0 +1,232 @@
++/*
++ * slot_trace.c - Per-CPU task-slot lifecycle trace (#1213). See slot_trace.h.
++ *
++ * Compiles to an empty unit unless CONFIG_SLOT_TRACE is defined.
++ */
++
++#include "slot_trace.h"
++
++#if defined(CONFIG_SLOT_TRACE)
++
++#include "config.h"
++#include "task.h"
++#include "sched.h"
++#include "smp.h"
++#include "uart.h"
++#include "semihosting.h"
++#include <stddef.h>
++
++#define SLOT_TRACE_LEN 512U     /* entries per CPU (power of two) */
++
++struct slot_trace_ent {
++    uint64_t ts;        /* CNTVCT_EL0 */
++    uint32_t seq;       /* global order */
++    uint16_t ev;
++    uint8_t  cpu;
++    uint8_t  pad0;
++    int16_t  slot;      /* task_table index, -1 if not a table task */
++    uint16_t state;
++    uint32_t gen;
++    uint32_t id;
++    uint32_t holders;   /* rq lock holder per CPU, 4 bits each (0 = free, n+1 = CPU n) */
++    uint64_t a, b, c;
++};
++
++static struct slot_trace_ent slot_trace_ring[MAX_CPUS][SLOT_TRACE_LEN];
++static volatile uint32_t slot_trace_idx[MAX_CPUS];
++static volatile uint32_t slot_trace_seq;
++static volatile uint32_t slot_trace_frozen;
++volatile uint8_t slot_trace_rq_holder[MAX_CPUS];
++
++/* Emergency stacks for the bad-SP vector path (vectors.S). */
++#define SLOT_TRACE_EMERG_STACK 16384
++__attribute__((aligned(16)))
++uint8_t slot_trace_emerg[4][SLOT_TRACE_EMERG_STACK];
++
++static inline uint64_t st_cntvct(void)
++{
++    uint64_t v;
++    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
++    return v;
++}
++
++static int st_slot(const struct task *t)
++{
++    const struct task *base = task_slot(0);
++    if (!t || !base) {
++        return -1;
++    }
++    if (t < base || t >= base + MAX_TASKS) {
++        return -1;
++    }
++    return (int)(t - base);
++}
++
++uint64_t slot_trace_pack(const struct task *t)
++{
++    if (!t) {
++        return 0xFFFFULL << 48;
++    }
++    int s = st_slot(t);
++    return ((uint64_t)(uint16_t)(int16_t)s << 48) |
++           ((uint64_t)t->generation << 16) |
++           (uint64_t)((uint16_t)t->state);
++}
++
++void slot_trace_rec(uint32_t ev, const struct task *t,
++                    uint64_t a, uint64_t b, uint64_t c)
++{
++    if (__atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED)) {
++        return;
++    }
++    uint32_t cpu = cpu_id();
++    if (cpu >= MAX_CPUS) {
++        return;
++    }
++    uint64_t daif;
++    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(daif) :: "memory");
++
++    uint32_t i = slot_trace_idx[cpu];
++    struct slot_trace_ent *e = &slot_trace_ring[cpu][i & (SLOT_TRACE_LEN - 1)];
++    e->ts = st_cntvct();
++    e->seq = __atomic_fetch_add(&slot_trace_seq, 1, __ATOMIC_RELAXED);
++    e->ev = (uint16_t)ev;
++    e->cpu = (uint8_t)cpu;
++    e->slot = (int16_t)st_slot(t);
++    e->state = t ? (uint16_t)t->state : 0xFFFF;
++    e->gen = t ? t->generation : 0;
++    e->id = t ? t->id : 0;
++    uint32_t h = 0;
++    for (uint32_t k = 0; k < 4 && k < MAX_CPUS; k++) {
++        h |= ((uint32_t)slot_trace_rq_holder[k] & 0xF) << (4 * k);
++    }
++    e->holders = h;
++    e->a = a;
++    e->b = b;
++    e->c = c;
++    slot_trace_idx[cpu] = i + 1;
++
++    __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
++}
++
++static const char *st_name(uint32_t ev)
++{
++    switch (ev) {
++    case ST_CREATE_ALLOC:    return "CREATE_ALLOC";
++    case ST_CREATE_CTX_DONE: return "CREATE_CTX_DONE";
++    case ST_DESTROY:         return "DESTROY";
++    case ST_DESTROY_DONE:    return "DESTROY_DONE";
++    case ST_EXIT:            return "EXIT";
++    case ST_TERMINATE:       return "TERMINATE";
++    case ST_ADD:             return "ADD";
++    case ST_ZOMBIE_SET:      return "ZOMBIE_SET";
++    case ST_ZOMBIE_REAP:     return "ZOMBIE_REAP";
++    case ST_SWITCH:          return "SWITCH";
++    case ST_SWITCH_RET:      return "SWITCH_RET";
++    case ST_FIRST_RUN:       return "FIRST_RUN";
++    case ST_PICK_SAME:       return "PICK_SAME";
++    case ST_TEST:            return "TEST";
++    default:                 return "?";
++    }
++}
++
++static void st_print_task(const char *label, const struct task *t)
++{
++    if (!t) {
++        uart_printf_unlocked("    %s: (null)\n", label);
++        return;
++    }
++    uart_printf_unlocked("    %s: slot=%d id=%u gen=%u state=%u name='%s' "
++                         "ctx.sp=0x%lx ctx.x19=0x%lx ctx.x30=0x%lx stack=[0x%lx..0x%lx)\n",
++                         label, st_slot(t), t->id, t->generation,
++                         (unsigned)t->state, t->name,
++                         (unsigned long)t->context.sp,
++                         (unsigned long)t->context.x19,
++                         (unsigned long)t->context.x30,
++                         (unsigned long)(uintptr_t)t->stack_base,
++                         (unsigned long)(uintptr_t)t->stack_top);
++}
++
++void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
++{
++    __asm__ volatile("msr daifset, #0xF" ::: "memory");
++    uint32_t me = cpu_id();
++    uint32_t was = __atomic_exchange_n(&slot_trace_frozen, me + 1,
++                                       __ATOMIC_ACQ_REL);
++    if (was) {
++        for (;;) {
++            __asm__ volatile("wfe");
++        }
++    }
++    /* Let in-flight records on other CPUs finish their stores. */
++    for (volatile int d = 0; d < 100000; d++) {
++    }
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++
++    uart_printf_unlocked("\nSLOTTRACE-DUMP-BEGIN why=%s cpu=%u a=0x%lx b=0x%lx c=0x%lx "
++                         "seq=%u cntvct=0x%lx\n",
++                         why, me, (unsigned long)a, (unsigned long)b,
++                         (unsigned long)c, slot_trace_seq,
++                         (unsigned long)st_cntvct());
++    uint32_t ncpu = cpu_count < 4 ? cpu_count : 4;
++    uart_printf_unlocked("  state at dump:\n");
++    for (uint32_t k = 0; k < ncpu; k++) {
++        struct cpu_runqueue *rq = sched_cpu_rq(k);
++        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
++                             (unsigned)slot_trace_rq_holder[k]);
++        st_print_task("current", task_current_on_cpu(k));
++        if (rq) {
++            st_print_task("rq.head", rq->head);
++            st_print_task("rq.zombie", rq->zombie);
++        }
++    }
++    uart_printf_unlocked("  format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>\n");
++    for (uint32_t k = 0; k < ncpu; k++) {
++        uint32_t n = slot_trace_idx[k];
++        uint32_t first = n > SLOT_TRACE_LEN ? n - SLOT_TRACE_LEN : 0;
++        uart_printf_unlocked("SLOTTRACE-CPU %u entries=%u shown=%u\n",
++                             k, n, n - first);
++        for (uint32_t i = first; i < n; i++) {
++            const struct slot_trace_ent *e =
++                &slot_trace_ring[k][i & (SLOT_TRACE_LEN - 1)];
++            uart_printf_unlocked("ST c%u #%u t=0x%lx %s slot=%d gen=%u id=%u st=%u "
++                                 "a=0x%lx b=0x%lx c=0x%lx rq=%x\n",
++                                 (unsigned)e->cpu, e->seq,
++                                 (unsigned long)e->ts, st_name(e->ev),
++                                 (int)e->slot, e->gen, e->id,
++                                 (unsigned)e->state,
++                                 (unsigned long)e->a, (unsigned long)e->b,
++                                 (unsigned long)e->c, e->holders);
++        }
++    }
++    uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
++    semihosting_exit(3);
++    for (;;) {
++        __asm__ volatile("wfe");
++    }
++}
++
++void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
++{
++    uint64_t esr, far, elr;
++    const uint64_t *x = (const uint64_t *)tf;  /* x0..x30 at 0..240 (trap.h) */
++    __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
++    __asm__ volatile("mrs %0, far_el1" : "=r"(far));
++    __asm__ volatile("mrs %0, elr_el1" : "=r"(elr));
++    uart_printf_unlocked("\nSLOTTRACE-FAULT bad SP at EL1 sync entry: cpu=%u sp=0x%lx "
++                         "esr=0x%lx far=0x%lx elr=0x%lx\n",
++                         cpu_id(), (unsigned long)orig_sp, (unsigned long)esr,
++                         (unsigned long)far, (unsigned long)elr);
++    for (int r = 0; r < 31; r += 2) {
++        if (r == 30) {
++            uart_printf_unlocked("  x30=0x%lx\n", (unsigned long)x[30]);
++        } else {
++            uart_printf_unlocked("  x%d=0x%lx x%d=0x%lx\n", r,
++                                 (unsigned long)x[r], r + 1,
++                                 (unsigned long)x[r + 1]);
++        }
++    }
++    slot_trace_dump("el1_sync_bad_sp", orig_sp, esr, elr);
++}
++
++#endif /* CONFIG_SLOT_TRACE */
+diff --git a/kernel/sched/task.c b/kernel/sched/task.c
+index fbebb788..f9ebb252 100644
+--- a/kernel/sched/task.c
++++ b/kernel/sched/task.c
+@@ -11,6 +11,7 @@
+ #include "spinlock.h"
+ #include "arch.h"
+ #include "steal_trace.h"
++#include "slot_trace.h"
+ #if !defined(PLATFORM_X86_64)
+ #include "vmm.h"
+ #include "elf.h"
+@@ -149,6 +150,14 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+     }
+ #endif
+ 
++#if !defined(PLATFORM_X86_64)
++    SLOT_TRACE_ONLY({
++        uint64_t st_sp;
++        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
++        struct task *st_t = task_current();
++        SLOT_TRACE(ST_FIRST_RUN, st_t, st_sp, st_t ? st_t->context.sp : 0, 0);
++    })
++#endif
+     entry(arg);
+     task_exit();
+ }
+@@ -297,6 +306,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
++    SLOT_TRACE(ST_CREATE_ALLOC, task, stack, __builtin_return_address(0), 0);
++
+     /* Initialize rest of task structure (slot is ours now) */
+     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
+     task->state = TASK_READY;
+@@ -374,6 +385,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
+     /* Store entry point and arg in callee-saved registers for wrapper */
+     task->context.x19 = (uint64_t)entry;
+     task->context.x20 = (uint64_t)arg;
++    SLOT_TRACE(ST_CREATE_CTX_DONE, task, task->context.sp, task->context.x19,
++               task->context.x30);
+ #endif /* PLATFORM_X86_64 */
+ 
+     /* No cleanup callback by default */
+@@ -684,6 +697,7 @@ void task_exit(void)
+      * Without this, a scheduler on another CPU could observe the task
+      * still in the queue after the state flip but before dequeue runs,
+      * picking a terminated task and panicking. */
++    SLOT_TRACE(ST_EXIT, task, 0, 0, 0);
+     scheduler_terminate_task(task);
+ 
+     /* Context-switch away. schedule() -> spin_lock_irqsave saves our
+@@ -782,6 +796,9 @@ void task_destroy(struct task *task)
+         return;
+     }
+ 
++    SLOT_TRACE(ST_DESTROY, task, __builtin_return_address(0), task->stack_base,
++               task->context.sp);
++
+     /* Capture info before clearing */
+     void *stack = task->stack_base;
+     uint32_t task_id = task->id;
+@@ -816,6 +833,7 @@ void task_destroy(struct task *task)
+      * not reachable by a realistic workload.
+      */
+     task->generation++;
++    SLOT_TRACE(ST_DESTROY_DONE, task, task_id, 0, 0);
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
+diff --git a/kernel/src/panic.c b/kernel/src/panic.c
+index cee3bf07..2e035b07 100644
+--- a/kernel/src/panic.c
++++ b/kernel/src/panic.c
+@@ -6,6 +6,7 @@
+ #include "debug.h"
+ #include "task.h"
+ #include "smp.h"
++#include "slot_trace.h"
+ #include "platform.h"     /* RAM_BASE / RAM_SIZE for stack-dump bounds */
+ #include <stdint.h>
+ #include <stdarg.h>
+@@ -171,6 +172,11 @@ void panic(const char *fmt, ...)
+     uart_puts_unlocked("\n\n");
+     dump_registers();
+ 
++#if defined(CONFIG_SLOT_TRACE)
++    /* #1213 slot trace: a panic is a first fault too. */
++    slot_trace_dump("panic", 0, 0, 0);
++#endif
++
+     /* #601 Bug B diagnostic: dump task stack canary state + the
+      * stack contents around the current SP. If any task's canary
+      * is broken, the offset + corrupted bytes get logged. Even if
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index e02f3a6d..bac38f6b 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -15,6 +15,7 @@
+ #include "platform.h"
+ #include "uart.h"
+ #include "string.h"
++#include "slot_trace.h"
+ #include "test_wait.h"
+ #include <stdint.h>
+ #include <stdbool.h>
+@@ -2202,8 +2203,11 @@ static void test_isolated_core_latency(void)
+         scheduler_add_task(t);
+ 
+         /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
+-        (void)test_wait_task_terminated("iso_latency_isolated", t,
+-                                        TEST_WAIT_S(1));
++        SLOT_TRACE(ST_TEST, t, 0x101, i, 0);       /* created + added */
++        long long st_rc = test_wait_task_terminated("iso_latency_isolated", t,
++                                                    TEST_WAIT_S(1));
++        (void)st_rc;
++        SLOT_TRACE(ST_TEST, t, 0x201, i, st_rc);   /* wait returned */
+ 
+         /* Record sample */
+         if (latency_sample_index > 0) {
+@@ -2225,6 +2229,7 @@ static void test_isolated_core_latency(void)
+         if (t->state != TASK_TERMINATED) {
+             scheduler_terminate_task(t);
+         }
++        SLOT_TRACE(ST_TEST, t, 0x301, i, 0);         /* about to destroy */
+         task_destroy(t);
+     }
+ 
+@@ -2245,8 +2250,11 @@ static void test_isolated_core_latency(void)
+         scheduler_add_task(t);
+ 
+         /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
+-        (void)test_wait_task_terminated("iso_latency_normal", t,
+-                                        TEST_WAIT_S(1));
++        SLOT_TRACE(ST_TEST, t, 0x102, i, 0);       /* created + added */
++        long long st_rc = test_wait_task_terminated("iso_latency_normal", t,
++                                                    TEST_WAIT_S(1));
++        (void)st_rc;
++        SLOT_TRACE(ST_TEST, t, 0x202, i, st_rc);   /* wait returned */
+ 
+         if (latency_sample_index > 0) {
+             uint64_t sample = latency_samples[0];
+@@ -2261,6 +2269,7 @@ static void test_isolated_core_latency(void)
+         if (t->state != TASK_TERMINATED) {
+             scheduler_terminate_task(t);
+         }
++        SLOT_TRACE(ST_TEST, t, 0x302, i, 0);         /* about to destroy */
+         task_destroy(t);
+     }
+ 
+-- 
+2.43.0
+
+
+From 884aab2d1bc0536dcfc860412b37bf09e6060e0f Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 18:11:59 -0800
+Subject: [PATCH 3/6] Tests: test_task_slot_reuse_under_switch (#1213 stress,
+ fails before the fix)
+
+Built from the sequence the #1213 first-fault slot traces recorded: CPU 0
+destroys a task pinned to CPU 1 as soon as TASK_TERMINATED is visible
+(CPU 1 is still in schedule() for it), then creates the next task, which
+takes the same slot while CPU 1's idle reaps the slot through rq->zombie.
+The loop runs up to 3000 iterations (20 s budget) with no yield between
+the wait and the destroy. Each task checks its id, its argument token and
+that its SP is inside its own stack; the test asserts no bad entry, no
+1 s wait timeout, and one run per created task.
+
+Refs #1213
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ kernel/tests/test_scheduler.c | 137 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 137 insertions(+)
+
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index bac38f6b..d15e7d1d 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -2123,6 +2123,140 @@ static void test_rapid_task_exit_no_panic(void)
+     TEST_ASSERT_EQUAL_UINT32(RAPID_EXIT_ITERATIONS, rapid_exit_count);
+ }
+ 
++/* ============================================================================
++ * Regression: task slot reuse while the exiting CPU is still switching out
++ * of the slot (#1213)
++ *
++ * The sequence the #1213 slot trace recorded (first-fault traces in
++ * docs/archive/lifecycle-gauntlet/run4-hw/c1/ on gauntlet-4-hw-pi5): a task
++ * pinned to CPU 1 calls task_exit, which publishes TASK_TERMINATED and then
++ * switches away; CPU 0 sees TERMINATED and task_destroy()s the slot while
++ * CPU 1 is still in schedule() for it; CPU 1 then records the slot as its
++ * rq->zombie and, from idle, reaps it with a second task_destroy() just as
++ * CPU 0's next task_create() claims the same slot. The reaper's state check
++ * still sees the old occupant's TERMINATED, so it clears the new task's id,
++ * stack_base and stack_top mid-construction; task_create copies the
++ * cleared stack_top into context.sp, and CPU 1 switches into a task whose
++ * saved SP is 0.
++ *
++ * This test runs that loop as fast as it can: no yield between the wait
++ * and the destroy, and the next create immediately after, so both the
++ * destroy and the create land inside CPU 1's switch-out and zombie-reap
++ * window as often as possible.
++ *
++ * Each task checks at entry that it is the task the loop just created
++ * (task id, argument token) and that its SP is inside its own stack, so a
++ * context or slot that was cleared or half written is reported rather
++ * than run. A wedge or fault on CPU 1 shows as a wait timeout here (or a
++ * fault/panic of the run).
++ * ============================================================================ */
++
++#define SLOT_REUSE_ITERS     3000
++#define SLOT_REUSE_CPU       1
++#define SLOT_REUSE_BUDGET_S  20
++
++static volatile uint32_t slot_reuse_expect_id;
++static volatile uint64_t slot_reuse_expect_tok;
++static volatile uint32_t slot_reuse_ran;
++static volatile uint32_t slot_reuse_bad;
++static volatile uint32_t slot_reuse_bad_first;   /* iteration+1 of first bad */
++
++static void slot_reuse_entry(void *arg)
++{
++    struct task *self = task_current();
++    uint64_t sp;
++#if defined(PLATFORM_X86_64)
++    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
++#else
++    __asm__ volatile("mov %0, sp" : "=r"(sp));
++#endif
++    uint32_t want_id = __atomic_load_n(&slot_reuse_expect_id, __ATOMIC_ACQUIRE);
++    uint64_t want_tok = slot_reuse_expect_tok;
++    bool ok = self && self->id == want_id && (uint64_t)(uintptr_t)arg == want_tok &&
++              sp >= (uint64_t)(uintptr_t)self->stack_base &&
++              sp <= (uint64_t)(uintptr_t)self->stack_top;
++    if (!ok) {
++        if (__atomic_fetch_add(&slot_reuse_bad, 1, __ATOMIC_RELAXED) == 0) {
++            slot_reuse_bad_first = (uint32_t)want_tok;
++        }
++    }
++    __atomic_fetch_add(&slot_reuse_ran, 1, __ATOMIC_RELEASE);
++    /* task_entry_trampoline calls task_exit() on return. */
++}
++
++static void test_task_slot_reuse_under_switch(void)
++{
++    if (cpu_count <= SLOT_REUSE_CPU) {
++        TEST_ASSERT(1);
++        return;
++    }
++
++    slot_reuse_ran = 0;
++    slot_reuse_bad = 0;
++    slot_reuse_bad_first = 0;
++    sched_isolate_core(SLOT_REUSE_CPU);
++
++    struct task *prev_slot = NULL;
++    uint32_t same_slot = 0;
++    uint32_t timeouts = 0;
++    uint32_t done = 0;
++    uint64_t f = timer_get_frequency();
++    uint64_t t0 = timer_get_count();
++    uint64_t budget = f * SLOT_REUSE_BUDGET_S;
++
++    for (uint32_t i = 0; i < SLOT_REUSE_ITERS; i++) {
++        if (timer_get_count() - t0 > budget) {
++            break;
++        }
++        struct task *t = task_create_with_priority("slot_reuse",
++            slot_reuse_entry, (void *)(uintptr_t)(i + 1), TASK_PRIORITY_HIGH);
++        TEST_ASSERT_NOT_NULL(t);
++        if (!t) {
++            break;
++        }
++        if (t == prev_slot) {
++            same_slot++;
++        }
++        prev_slot = t;
++        t->cpu_affinity = SLOT_REUSE_CPU;
++        slot_reuse_expect_tok = i + 1;
++        __atomic_store_n(&slot_reuse_expect_id, t->id, __ATOMIC_RELEASE);
++        SLOT_TRACE(ST_TEST, t, 0x401, i, 0);
++        scheduler_add_task(t);
++
++        /* Tight wait for TERMINATED (no yield), 1 s bound. */
++        uint64_t w0 = timer_get_count();
++        bool term = false;
++        while (timer_get_count() - w0 < f) {
++            if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED) {
++                term = true;
++                break;
++            }
++        }
++        if (!term) {
++            timeouts++;
++            uart_printf("  slot_reuse_stress: iteration %u: task id=%u state=%d "
++                        "not TERMINATED after 1 s\n", i, t->id, (int)t->state);
++            scheduler_terminate_task(t);
++            task_destroy(t);
++            break;
++        }
++        SLOT_TRACE(ST_TEST, t, 0x402, i, 0);
++        task_destroy(t);
++        done++;
++    }
++
++    sched_unisolate_core(SLOT_REUSE_CPU);
++
++    uart_printf("  slot_reuse_stress: iterations=%u same_slot=%u ran=%u bad=%u "
++                "first_bad_token=%u timeouts=%u\n",
++                done, same_slot, slot_reuse_ran, slot_reuse_bad,
++                slot_reuse_bad_first, timeouts);
++    TEST_ASSERT_EQUAL_UINT32(0, timeouts);
++    TEST_ASSERT_EQUAL_UINT32(0, slot_reuse_bad);
++    TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
++}
++
+ /* ============================================================================
+  * Latency and benchmark tests
+  * ============================================================================ */
+@@ -6058,6 +6192,9 @@ int test_suite_scheduler(void)
+     /* Regression: task_exit race (runs on all platforms) */
+     RUN_TEST(test_rapid_task_exit_no_panic);
+ 
++    /* Regression: slot reuse during switch-out (#1213) */
++    RUN_TEST(test_task_slot_reuse_under_switch);
++
+     /* Latency and benchmark tests */
+     RUN_TEST(test_isolated_core_latency);
+     RUN_TEST(test_benchmark_context_switch);
+-- 
+2.43.0
+
+
+From 912efbd0db554fe110bba2e080b5e2ab80d9a779 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 18:33:11 -0800
+Subject: [PATCH 4/6] Fix #1213: reclaim a task slot only after its CPU has
+ switched out, and only once
+
+Mechanism (three first-fault slot traces, QEMU thread=multi, SLOT_TRACE=ON,
+docs/archive/lifecycle-gauntlet/run4-hw/c1/qemu-1213-trace-multi-run04/05/06
+on gauntlet-4-hw-pi5; same order in all three, slot 6):
+ 1. CPU 1: the latency task (gen g) runs task_exit; scheduler_terminate_task
+    publishes TASK_TERMINATED.
+ 2. CPU 0 (test) sees TERMINATED and task_destroy()s the slot (gen g -> g+1)
+    while CPU 1 is still in schedule() for it.
+ 3. CPU 1 parks the slot as rq->zombie and switches to idle; idle's
+    schedule() reaps the zombie with a second task_destroy().
+ 4. CPU 0's next task_create() claims the same slot (id set under
+    task_lock, state still the old TERMINATED until after the unlock).
+ 5. The reaper's TERMINATED check passes; it clears the new task's id,
+    stack_base and stack_top (gen g+1 -> g+2).
+ 6. task_create copies the cleared stack_top into context.sp (read back
+    as 0), queues the task on CPU 1; CPU 1 switches in with SP 0 and takes
+    the EL1 translation fault at the first stack store in
+    task_entry_trampoline (ESR 0x96000045, FAR = SP - 0x30).
+Run 3's hypothesis (switch_to reading a half-written context) is not what
+the traces show: the context was complete, its sp field held 0 because
+the second destroyer had cleared stack_top.
+
+Fix:
+ - task->on_cpu (the former padding word after generation): set to 1 by
+   the CPU that switches the task in, under its rq_lock; cleared by the
+   same CPU with a store-release immediately after switch_to returns on
+   the next task's stack (sched_finish_switch). switch_to now returns its
+   `old` argument (x0 / %rdi are untouched by the restore half), and
+   task_entry_wrapper passes it to task_entry_trampoline, which calls
+   sched_finish_switch first. task_destroy reads state, then on_cpu, with
+   load-acquire and waits for 0 (2 s bound; on timeout it warns and leaks
+   the slot rather than free a stack in use).
+ - The zombie reaper records zombie_gen = current->generation when it
+   parks the exiting task (on_cpu is still 1, so no destroy has run) and
+   reclaims through task_destroy_gen(), which does nothing if the
+   generation has changed: the owner destroyed the task first and the
+   slot may already be a new task.
+ - task_create / task_alloc set state = TASK_READY (and on_cpu = 0) in
+   the task_lock section that claims the slot, so a stale destroyer can
+   no longer read the previous occupant's TERMINATED on a claimed slot.
+
+Ordering argument (Arm ARM DDI 0487, B2.3 "Definition of the Arm memory
+model": Barrier-ordered-before, Observed-by, Ordered-before; C6.2 STLR,
+LDAPR, LDAXR):
+ - On the exiting CPU, the stores of switch_to's save half (STP/STR of
+   x19-x30, SP, q0-q31, FPCR, FPSR, DAIF into prev->context) and every
+   access to prev's stack precede, in program order, the STLR of
+   prev->on_cpu = 0. A Store-Release is Barrier-ordered-after every
+   explicit memory effect before it in program order.
+ - The destroyer's on_cpu load is LDAPR (GCC's __ATOMIC_ACQUIRE with
+   FEAT_LRCPC); a Load-AcquirePC is Barrier-ordered-before every memory
+   effect after it in program order: the task_lock acquire, the slot
+   clear, the generation bump, pmm_free_pages of the stack and, later,
+   task_create's writes to the slot and to the reused stack pages.
+ - When that load reads 0 from the STLR, the STLR is Observed-by it, so
+   by Ordered-before transitivity the exiting CPU's context save and
+   stack use are ordered before the destroyer's writes: no late save can
+   overwrite a new occupant's context, and no freed stack is in use.
+ - The destroyer reads state (LDAPR) before on_cpu, so a TERMINATED it
+   observes comes with the on_cpu = 1 of the task's switch-in: that store
+   precedes, on the CPU running the task, the STLR of the rq_lock release
+   in schedule(), which is Barrier-ordered-before the LDAXR of the
+   rq_lock acquire in scheduler_terminate_task (Store-Release then
+   Load-Acquire in program order), which precedes the TERMINATED store.
+   So an on_cpu of 0 read after TERMINATED is the switch-out's.
+ - zombie_gen is read while on_cpu is 1 (no generation bump can have
+   happened), and both the bump and the reaper's comparison happen under
+   task_lock (LDAXR acquire / STLR release), so the reaper either sees
+   the old generation and is the first destroyer, or sees the bump and
+   leaves the slot alone.
+ - x86-64: the same C11 atomics compile to plain MOVs under TSO with
+   compiler ordering; switch_to returns %rdi in %rax.
+
+Tests: test_task_destroy_gen_skips_reused_slot (deterministic: a stale
+generation leaves a reused slot alone, READY or TERMINATED; a claimed
+slot reads TASK_READY); test_task_slot_reuse_under_switch (stress, failed
+before this change). Docs: docs/scheduler.md "Task Slot Reclaim",
+docs/smp.md, kernel/CLAUDE.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ docs/scheduler.md             |  38 ++++++++++++
+ docs/smp.md                   |   4 +-
+ kernel/CLAUDE.md              |   2 +
+ kernel/arch/arm64/context.S   |   5 +-
+ kernel/arch/x86_64/context.S  |  11 +++-
+ kernel/include/sched.h        |  18 +++++-
+ kernel/include/task.h         |  23 ++++++-
+ kernel/sched/sched.c          |  43 ++++++++++++--
+ kernel/sched/task.c           | 109 +++++++++++++++++++++++++++++++---
+ kernel/tests/test_scheduler.c |  67 +++++++++++++++++++++
+ 10 files changed, 301 insertions(+), 19 deletions(-)
+
+diff --git a/docs/scheduler.md b/docs/scheduler.md
+index 528273ef..54bb1359 100644
+--- a/docs/scheduler.md
++++ b/docs/scheduler.md
+@@ -333,12 +333,50 @@ struct cpu_runqueue {
+     struct task *tail;
+     struct task *idle_task;
+     struct task *zombie;
++    uint32_t zombie_gen;      /* zombie->generation when recorded (#1213) */
+     uint32_t ready_count;
+ };
+ /* Per-CPU spinlocks are separate (rq_lock[]) because ARM64 exclusive
+  * load/store requires cacheable memory. */
+ ```
+ 
++### Task Slot Reclaim (#1213)
++
++A terminated task can be reclaimed by two parties: its owner (code that
++waited for `TASK_TERMINATED` and calls `task_destroy`) and the run queue's
++zombie reaper (the next `schedule()` on the CPU it exited on). Three rules
++keep a slot from being freed or reused under a CPU that still uses it:
++
++- **`task->on_cpu`.** The CPU that switches a task in sets it to 1 (under
++  its `rq_lock`). The same CPU clears it with a store-release right after
++  `switch_to` returns on the next task's stack (`sched_finish_switch`, also
++  called first thing in `task_entry_trampoline` for a new task), that is,
++  after the outgoing task's context has been saved and its stack left.
++  `task_destroy` reads it with a load-acquire and waits for 0 (2 s bound,
++  then it warns and leaks the slot) before it frees the stack or clears
++  the slot. `TASK_TERMINATED` is published before the switch-out, so an
++  owner that sees it can be inside that window.
++- **Zombie generation.** `schedule()` records `zombie_gen =
++  current->generation` when it parks an exiting task as `rq->zombie`
++  (`on_cpu` is still 1, so no destroy can have run yet), and the reaper
++  calls `task_destroy_gen(zombie, zombie_gen)`, which reclaims only if the
++  slot still has that generation. If the owner destroyed the task first,
++  the generation has moved on and the slot, possibly already a new task,
++  is left alone.
++- **Claim publishes state.** `task_create` / `task_alloc` set
++  `state = TASK_READY` (and `on_cpu = 0`) in the same `task_lock` section
++  that claims the slot, so a stale destroyer can no longer see the previous
++  occupant's `TASK_TERMINATED` on a slot that already has a new id.
++
++Before these rules the reaper's second `task_destroy` raced the owner's
++next `task_create` on the same slot: it passed the TERMINATED check, cleared
++the new task's id and stack pointers mid-construction, and the new task ran
++with a saved SP of 0 (first-fault traces in
++`docs/archive/lifecycle-gauntlet/run4-hw/c1/` on `gauntlet-4-hw-pi5`). The
++debug build option `SLOT_TRACE=ON` (`kernel/include/slot_trace.h`) records
++these lifecycle events per CPU and dumps them on the first EL1 fault or
++panic.
++
+ **Lock strategy:**
+ - Single-queue operations (add, remove, schedule) use only that CPU's lock
+ - Cross-queue operations (migration) lock both queues in CPU ID order to prevent deadlock
+diff --git a/docs/smp.md b/docs/smp.md
+index 2a605be0..0d6abb75 100644
+--- a/docs/smp.md
++++ b/docs/smp.md
+@@ -433,10 +433,10 @@ Tasks with `deadline_ns > 0` get their `effective_priority` boosted as the deadl
+ ### Schedule Function
+ 
+ The `schedule()` function runs on each CPU independently:
+-1. Clean up zombie (terminated) task from previous cycle
++1. Clean up zombie (terminated) task from previous cycle, if its slot still has the generation recorded when it was parked (#1213; see `docs/scheduler.md` "Task Slot Reclaim")
+ 2. If current task is RUNNING, set to READY and re-insert in priority order
+ 3. Pick highest-priority task from queue (or idle task if empty)
+-4. Context switch via `switch_to()` (saves/restores callee-saved regs, FPU, DAIF)
++4. Context switch via `switch_to()` (saves/restores callee-saved regs, FPU, DAIF); the resumed side then clears the outgoing task's `on_cpu` with a store-release (`sched_finish_switch`)
+ 
+ ### Sleep/Delay
+ 
+diff --git a/kernel/CLAUDE.md b/kernel/CLAUDE.md
+index d44ac3fb..1e403650 100644
+--- a/kernel/CLAUDE.md
++++ b/kernel/CLAUDE.md
+@@ -132,6 +132,8 @@ Cortex-A76 (Pi 5) and Cortex-A78AE (Jetson) keep their L1 and L2 caches coherent
+ 
+ **Leaky tests that block CPU 1 (fixed April 16, 2026):** `task_destroy` silently refuses to reclaim tasks that are not in state `TASK_TERMINATED` (it warns and returns). Test loops that time out waiting for a task to run and then call `task_destroy` therefore LEAK the unterminated task into its target CPU's run queue. On Pi 5, `test_isolated_core_latency` was the worst offender — 10+ `lat_iso` tasks at `TASK_PRIORITY_HIGH` pinned to CPU 1 could accumulate and block every subsequent multi-CPU integration test. When writing or modifying a test that creates a task it expects to run to completion, ALWAYS `scheduler_terminate_task(t)` on the timeout branch before `task_destroy(t)`. The same pattern applies to any code that drops a task reference it expected to finish.
+ 
++**Task slot reclaim: `on_cpu` and the zombie generation (#1213):** `TASK_TERMINATED` is published before the exiting CPU switches out, so an owner that sees it and calls `task_destroy` can be inside that CPU's `schedule()`/`switch_to()`. `task_destroy` therefore waits (load-acquire, 2 s bound) for `task->on_cpu == 0`, which the CPU that ran the task stores with release semantics after `switch_to` returns on the next task's stack (`sched_finish_switch`; `switch_to` returns the task it switched away from, and `task_entry_wrapper` passes it to `task_entry_trampoline`). The run-queue zombie reaper reclaims only through `task_destroy_gen(zombie, rq->zombie_gen)`, so a slot its owner already destroyed (and `task_create` may have reused) is left alone; `task_create` sets `TASK_READY` in the same `task_lock` section that claims a slot. Without these, the reaper's second destroy cleared a brand-new task's stack pointers mid-`task_create` and CPU 1 switched in with SP 0. New code that reclaims or recycles task slots must keep all three. Details: `docs/scheduler.md` "Task Slot Reclaim"; debug trace: `SLOT_TRACE=ON` (`kernel/include/slot_trace.h`).
++
+ **Snapshot/lock/recheck pattern for `task->assigned_cpu` reads (April 2026):** Anywhere a function reads `task->assigned_cpu` outside `rq_lock` to choose which CPU's queue lock to take, follow the pattern below. A concurrent work-stealing thief or `sched_migrate_task` on another CPU can change `assigned_cpu` between the read and the lock acquire, causing the wrong CPU's lock to be taken silently. `sched_migrate_task`, `scheduler_remove_task`, and `scheduler_terminate_task` use this pattern; new code that touches `assigned_cpu` outside the lock must too.
+ 
+ ```c
+diff --git a/kernel/arch/arm64/context.S b/kernel/arch/arm64/context.S
+index 4963500c..e75fbfa1 100644
+--- a/kernel/arch/arm64/context.S
++++ b/kernel/arch/arm64/context.S
+@@ -188,7 +188,10 @@ switch_to:
+     ldr     x3, [x2, #CTX_DAIF]
+     msr     daif, x3
+ 
+-    /* Return to new task (x30 holds return address) */
++    /* Return to new task (x30 holds return address). x0 still holds
++     * this call's `old` argument (the restore half above uses only x1-x3),
++     * so a resumed task's switch_to returns the task this CPU just left,
++     * and a new task's task_entry_wrapper passes it on (#1213). */
+     ret
+ 
+ .size switch_to, . - switch_to
+diff --git a/kernel/arch/x86_64/context.S b/kernel/arch/x86_64/context.S
+index cfe4590d..2500765a 100644
+--- a/kernel/arch/x86_64/context.S
++++ b/kernel/arch/x86_64/context.S
+@@ -112,7 +112,11 @@ switch_to:
+     jmp     *CTX_RIP(%rdx)
+ 
+ .Lreturn:
+-    /* Old task resumes here after being switched back */
++    /* Old task resumes here after being switched back. Return the task
++     * this CPU switched away from to get here (%rdi of the switch_to that
++     * jumped to .Lreturn, untouched by the restore half), so schedule()
++     * can complete its switch-out (sched_finish_switch, #1213). */
++    mov     %rdi, %rax
+     ret
+ 
+ .size switch_to, . - switch_to
+@@ -138,7 +142,10 @@ task_entry_wrapper:
+     /* Enable interrupts (new tasks start with IF=0) */
+     sti
+ 
+-    /* Tail-call task_entry_trampoline(entry=rbx, arg=r12) */
++    /* Tail-call task_entry_trampoline(entry=rbx, arg=r12, prev=rdi).
++     * %rdi still holds switch_to's `old` (the task being switched out),
++     * which the trampoline passes to sched_finish_switch (#1213). */
++    mov     %rdi, %rdx      /* prev  → third parameter */
+     mov     %rbx, %rdi      /* entry → first parameter */
+     mov     %r12, %rsi      /* arg   → second parameter */
+     jmp     task_entry_trampoline
+diff --git a/kernel/include/sched.h b/kernel/include/sched.h
+index ca390d5f..af18f196 100644
+--- a/kernel/include/sched.h
++++ b/kernel/include/sched.h
+@@ -29,6 +29,7 @@ struct cpu_runqueue {
+     struct task *tail;
+     struct task *idle_task;
+     struct task *zombie;
++    uint32_t zombie_gen;        /* zombie->generation when it was recorded (#1213) */
+     uint32_t ready_count;
+ #ifdef CONFIG_AI_SCHEDULER
+     uint64_t running_ticks;     /* Ticks where current task is not idle */
+@@ -209,10 +210,25 @@ uint64_t sched_last_tick_cntpct(uint32_t cpu);
+  * Saves context of 'old' task, restores context of 'new' task.
+  * Returns to new task's saved PC.
+  *
++ * Return value (#1213): when a task resumes from its own earlier
++ * switch_to() call, the call returns the task this CPU switched away from
++ * to get here (the `old` argument of the switch_to that resumed it), so
++ * the resumed side can complete that task's switch-out with
++ * sched_finish_switch(). A brand-new task receives the same pointer as
++ * the third argument of task_entry_trampoline.
++ *
+  * @old: Task to save context from (may be NULL on first switch)
+  * @new: Task to restore context to
+  */
+-extern void switch_to(struct task *old, struct task *new);
++extern struct task *switch_to(struct task *old, struct task *new);
++
++/*
++ * Complete the switch-out of `prev` on this CPU (#1213): store-release
++ * prev->on_cpu = 0. Called on the incoming task's stack after switch_to;
++ * NULL is ignored. After it, this CPU no longer reads or writes prev's
++ * context or stack, and task_destroy() may reclaim prev.
++ */
++void sched_finish_switch(struct task *prev);
+ 
+ /*
+  * Core isolation for real-time / latency-sensitive workloads.
+diff --git a/kernel/include/task.h b/kernel/include/task.h
+index 0ea18515..aa95ceb8 100644
+--- a/kernel/include/task.h
++++ b/kernel/include/task.h
+@@ -273,7 +273,17 @@ struct task {
+      *
+      * Placed after context to preserve TASK_CONTEXT_OFFSET. */
+     uint32_t generation;
+-    uint32_t _gen_pad;                  /* Alignment padding for next field */
++
++    /* Nonzero while a CPU is running this task or has not yet finished
++     * switching out of it (#1213). Set to 1 by the CPU that switches the
++     * task in (schedule()/scheduler_start(), under that CPU's rq_lock);
++     * cleared with a store-release by the same CPU right after switch_to()
++     * returns on the next task's stack (sched_finish_switch), i.e. after
++     * the last write to this task's context and the last use of its
++     * stack. task_destroy() waits for 0 with a load-acquire before it
++     * frees the stack or lets the slot be reused. Uses the former
++     * padding word, so the layout is unchanged. */
++    uint32_t on_cpu;
+ 
+ #ifdef CONFIG_AI_SCHEDULER
+     /* AI scheduler tracking (M5) */
+@@ -674,6 +684,17 @@ uint64_t task_get_deadline(struct task *task);
+  */
+ void task_destroy(struct task *task);
+ 
++/*
++ * task_destroy for a slot the caller recorded earlier: reclaim only if the
++ * slot still holds the same occupant, i.e. task->generation still equals
++ * `generation` (#1213). The run-queue zombie reaper uses it, so that a
++ * slot the task's owner has already destroyed, and that task_create may
++ * already have handed to a new task, is left alone. Returns 1 if it
++ * reclaimed the slot, 0 if the generation no longer matched (or the task
++ * was not TERMINATED).
++ */
++int task_destroy_gen(struct task *task, uint32_t generation);
++
+ /*
+  * Set task cleanup callback.
+  *
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index fc9b043e..29689050 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -431,10 +431,29 @@ void sched_drain_cpu_runqueue(uint32_t cpu)
+         rq->tail = NULL;
+         rq->ready_count = 0;
+         rq->zombie = NULL;
++        rq->zombie_gen = 0;
+     }
+     rq_unlock_irqrestore(cpu, flags);
+ }
+ 
++/*
++ * Complete prev's switch-out on this CPU (#1213); see sched.h.
++ *
++ * Ordering: this store-release is executed by the CPU that ran prev,
++ * after switch_to() has written prev's callee-saved registers, SP and
++ * FP/SIMD state into prev->context and after the last access to prev's
++ * stack (switch_to has already moved SP to the incoming task). A
++ * destroyer that reads on_cpu == 0 with a load-acquire therefore sees
++ * all of those accesses complete before its own writes to the slot and
++ * the stack pages (see task_destroy).
++ */
++void sched_finish_switch(struct task *prev)
++{
++    if (prev) {
++        __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
++    }
++}
++
+ /* ============================================================================
+  * Policy registry and active policy
+  * ============================================================================ */
+@@ -2363,12 +2382,21 @@ void schedule(void)
+      */
+     if (rq->zombie) {
+         struct task *zombie = rq->zombie;
++        uint32_t zombie_gen = rq->zombie_gen;
+         rq->zombie = NULL;
+-        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), 0);
++        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), zombie_gen);
+         rq_unlock_irqrestore(this_cpu, flags);
+ 
+-        /* Destroy outside lock - task_destroy may call pmm */
+-        task_destroy(zombie);
++        /* Destroy outside lock - task_destroy may call pmm.
++         *
++         * Only if the slot still holds the task recorded below (#1213):
++         * the task's owner may already have destroyed it (it saw
++         * TERMINATED), and task_create may already have handed the slot
++         * to a new task. Before this check the reaper destroyed that new
++         * task mid-construction: its TERMINATED check still saw the old
++         * occupant's state, it cleared stack_top, and task_create copied
++         * the cleared value into context.sp (SP 0 on the next switch). */
++        (void)task_destroy_gen(zombie, zombie_gen);
+ 
+         flags = rq_lock_irqsave(this_cpu);
+     }
+@@ -2437,6 +2465,7 @@ void schedule(void)
+ 
+     /* Perform context switch */
+     next->state = TASK_RUNNING;
++    next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
+     next->switches++;
+     sched.context_switches++;  /* Racy but acceptable for stats */
+ 
+@@ -2446,7 +2475,11 @@ void schedule(void)
+      * safely switched to a different stack.
+      */
+     if (current && current->state == TASK_TERMINATED) {
++        /* current->on_cpu is still 1 here, so no task_destroy can have
++         * bumped its generation yet (#1213): this is the generation of
++         * the occupant that is exiting. */
+         rq->zombie = current;
++        rq->zombie_gen = current->generation;
+         SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
+     }
+ 
+@@ -2543,7 +2576,8 @@ void schedule(void)
+ 
+     SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
+                next->context.x19);
+-    switch_to(current, next);
++    struct task *prev = switch_to(current, next);
++    sched_finish_switch(prev);
+ 
+ #if !defined(PLATFORM_X86_64)
+     SLOT_TRACE_ONLY({
+@@ -2607,6 +2641,7 @@ void scheduler_start(uint32_t this_cpu)
+     }
+ 
+     first->state = TASK_RUNNING;
++    first->on_cpu = 1;          /* cleared by sched_finish_switch (#1213) */
+     first->switches++;
+     sched.context_switches++;  /* Racy but acceptable for stats */
+ 
+diff --git a/kernel/sched/task.c b/kernel/sched/task.c
+index f9ebb252..44449619 100644
+--- a/kernel/sched/task.c
++++ b/kernel/sched/task.c
+@@ -12,6 +12,7 @@
+ #include "arch.h"
+ #include "steal_trace.h"
+ #include "slot_trace.h"
++#include "timer.h"
+ #if !defined(PLATFORM_X86_64)
+ #include "vmm.h"
+ #include "elf.h"
+@@ -106,13 +107,20 @@ bool task_entry_unmasks_irq(uint32_t cpu)
+ 
+ /*
+  * C trampoline called from assembly task_entry_wrapper.
+- * Callee-saved registers hold the entry point and argument.
++ * Callee-saved registers hold the entry point and argument; `prev` is the
++ * task this CPU switched away from to start this one (switch_to's `old`,
++ * NULL from scheduler_start), whose switch-out is completed here (#1213).
+  */
+-void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
++void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr,
++                           struct task *prev)
+ {
+     task_entry_t entry = (task_entry_t)entry_addr;
+     void *arg = (void *)arg_addr;
+ 
++    /* First thing on the new stack: the previous task's context is saved
++     * and its stack is no longer in use (#1213). */
++    sched_finish_switch(prev);
++
+     /* Clear preempt_disabled for this CPU.
+      * scheduler_start() sets it to 1 before switch_to(NULL, first),
+      * but switch_to never returns — it jumps here.
+@@ -166,13 +174,15 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
+ /*
+  * ARM64 task entry wrapper (inline assembly).
+  *
+- * When switch_to restores a new task, x19 = entry, x20 = arg.
+- * Passes them to task_entry_trampoline as function arguments.
++ * When switch_to restores a new task, x19 = entry, x20 = arg, and x0
++ * still holds switch_to's `old` argument (the task being switched out).
++ * Passes all three to task_entry_trampoline as function arguments.
+  */
+ __asm__(
+     ".global task_entry_wrapper\n"
+     ".type task_entry_wrapper, %function\n"
+     "task_entry_wrapper:\n"
++    "    mov x2, x0\n"         /* prev: switch_to's x0 (old), untouched by its restore half */
+     "    mov x0, x19\n"
+     "    mov x1, x20\n"
+     "    b task_entry_trampoline\n"
+@@ -211,6 +221,12 @@ struct task *task_alloc(const char *name, uint8_t priority)
+ 
+     /* Mark slot as used immediately (id != 0 means in use) */
+     task->id = task_id;
++    /* Replace the previous occupant's TASK_TERMINATED in the same
++     * task_lock section (#1213), so a stale destroyer that takes
++     * task_lock after this cannot pass task_destroy's TERMINATED check
++     * on the new task. on_cpu is already 0 (task_destroy waited). */
++    task->state = TASK_READY;
++    task->on_cpu = 0;
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
+@@ -303,6 +319,12 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
+ 
+     /* Mark slot as used immediately (id != 0 means in use) */
+     task->id = task_id;
++    /* Replace the previous occupant's TASK_TERMINATED in the same
++     * task_lock section (#1213), so a stale destroyer that takes
++     * task_lock after this cannot pass task_destroy's TERMINATED check
++     * on the new task. on_cpu is already 0 (task_destroy waited). */
++    task->state = TASK_READY;
++    task->on_cpu = 0;
+ 
+     TASK_UNLOCK_IRQRESTORE();
+ 
+@@ -766,10 +788,43 @@ struct task *task_slot(uint32_t idx)
+  * for reuse. Must only be called after the task has been removed from
+  * all run queues and is no longer running.
+  */
+-void task_destroy(struct task *task)
++/*
++ * Wait until no CPU is running `task` or still switching out of it
++ * (#1213). The CPU that ran the task clears on_cpu with a store-release
++ * after switch_to has saved the task's context and left its stack
++ * (sched_finish_switch). The load-acquire here orders every later access
++ * by this CPU (the slot clear below, pmm_free_pages of the stack, and a
++ * later task_create's writes to the same slot and pages) after that CPU's
++ * context save and stack use. Bounded: a CPU that never switches out
++ * (wedged, or a task force-terminated while still running) makes the
++ * caller leak the slot instead of freeing a stack in use.
++ * Returns true when on_cpu is 0.
++ */
++static bool task_wait_off_cpu(struct task *task)
++{
++    if (!__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE)) {
++        return true;
++    }
++    uint64_t f = timer_get_frequency();
++    uint64_t t0 = timer_get_count();
++    while (__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE)) {
++        if (timer_get_count() - t0 > 2 * f) {
++            return false;
++        }
++#if defined(PLATFORM_X86_64)
++        __asm__ volatile("pause" ::: "memory");
++#else
++        __asm__ volatile("yield" ::: "memory");
++#endif
++    }
++    return true;
++}
++
++static int task_destroy_impl(struct task *task, bool check_gen,
++                             uint32_t generation)
+ {
+     if (!task) {
+-        return;
++        return 0;
+     }
+ 
+     /* Idle-task guard (#200/#606 investigation, 2026-05-02 / 03).
+@@ -784,16 +839,43 @@ void task_destroy(struct task *task)
+               "(task='%s', cpu_affinity=%u)", task->name, task->cpu_affinity);
+     }
+ 
++    /* A task cannot reclaim the stack it is running on (#1213). */
++    if (task == task_current()) {
++        WARN("task_destroy: task '%s' (id=%u) is the caller; not destroyed",
++             task->name, task->id);
++        return 0;
++    }
++
++    /* The state load-acquire orders the on_cpu read after it: a task
++     * reads TERMINATED only after the on_cpu = 1 of its switch-in (both
++     * were written by the CPU running it, separated by rq_lock
++     * release/acquire), so an on_cpu of 0 seen here is the switch-out's,
++     * not the stale 0 from before the task ever ran. */
++    if (__atomic_load_n(&task->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
++        !task_wait_off_cpu(task)) {
++        WARN("task_destroy: task '%s' (id=%u) still on a CPU after 2 s; "
++             "leaking the slot (#1213)", task->name, task->id);
++        return 0;
++    }
++
+     TASK_LOCK_IRQSAVE();
+ 
++    /* The run-queue zombie reaper passes the generation it recorded; a
++     * different generation means the owner destroyed the task first and
++     * the slot may already hold a new task (#1213). */
++    if (check_gen && task->generation != generation) {
++        TASK_UNLOCK_IRQRESTORE();
++        return 0;
++    }
++
+     /* Verify task is terminated */
+     if (task->state != TASK_TERMINATED) {
+-        if (cpu_id() == 0) {
++        if (cpu_id() == 0 && !check_gen) {
+             WARN("task_destroy: task '%s' not terminated (state=%d)",
+                  task->name, task->state);
+         }
+         TASK_UNLOCK_IRQRESTORE();
+-        return;
++        return 0;
+     }
+ 
+     SLOT_TRACE(ST_DESTROY, task, __builtin_return_address(0), task->stack_base,
+@@ -877,6 +959,17 @@ void task_destroy(struct task *task)
+      * Task lifecycle is well-tested; enable if debugging task issues. */
+     (void)task_name;
+     (void)task_id;
++    return 1;
++}
++
++void task_destroy(struct task *task)
++{
++    (void)task_destroy_impl(task, false, 0);
++}
++
++int task_destroy_gen(struct task *task, uint32_t generation)
++{
++    return task_destroy_impl(task, true, generation);
+ }
+ 
+ /*
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index d15e7d1d..7811a77e 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -2257,6 +2257,72 @@ static void test_task_slot_reuse_under_switch(void)
+     TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
+ }
+ 
++/*
++ * Deterministic half of the #1213 fix: the zombie reaper's
++ * task_destroy_gen() must leave a slot alone once its owner has destroyed
++ * the recorded task and task_create has handed the slot to a new task,
++ * even when the new task is itself TERMINATED. Also checks that
++ * task_create replaces the previous occupant's TERMINATED inside its
++ * task_lock section (a claimed slot never reads TERMINATED).
++ */
++static void slot_gen_noop(void *arg)
++{
++    (void)arg;
++}
++
++static void test_task_destroy_gen_skips_reused_slot(void)
++{
++    struct task *a = task_create("gen_a", slot_gen_noop, NULL);
++    TEST_ASSERT_NOT_NULL(a);
++    if (!a) {
++        return;
++    }
++    TEST_ASSERT_EQUAL_UINT32(0, a->on_cpu);
++    uint32_t gen_a = a->generation;
++    uint32_t id_a = a->id;
++
++    /* Never added to a run queue: terminate and destroy as an owner. */
++    a->state = TASK_TERMINATED;
++    task_destroy(a);
++    TEST_ASSERT_EQUAL_UINT32(0, a->id);
++    TEST_ASSERT_EQUAL_UINT32(gen_a + 1, a->generation);
++
++    /* The next create takes the first free slot, normally the same one.
++     * Another CPU's zombie reap can free a lower slot in between; then
++     * the reuse half is not exercised this time (logged). */
++    struct task *b = task_create("gen_b", slot_gen_noop, NULL);
++    TEST_ASSERT_NOT_NULL(b);
++    if (!b) {
++        return;
++    }
++    if (b != a) {
++        uart_printf("  gen test: slot not reused (a=%p b=%p); reuse half skipped\n",
++                    (void *)a, (void *)b);
++        b->state = TASK_TERMINATED;
++        task_destroy(b);
++        return;
++    }
++    TEST_ASSERT_TRUE(b->id != id_a);
++    TEST_ASSERT_EQUAL_INT(TASK_READY, b->state);
++    void *b_stack = b->stack_base;
++    uint64_t b_sp = b->context.sp;
++    TEST_ASSERT_NOT_NULL(b_stack);
++    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)b->stack_top, b_sp);
++
++    /* A reaper holding the old generation must not touch b, READY or
++     * TERMINATED. */
++    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
++    b->state = TASK_TERMINATED;
++    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
++    TEST_ASSERT_TRUE(b->id != 0);
++    TEST_ASSERT_TRUE(b->stack_base == b_stack);
++    TEST_ASSERT_EQUAL_UINT64(b_sp, b->context.sp);
++
++    /* With b's own generation the reaper reclaims it. */
++    TEST_ASSERT_EQUAL_INT(1, task_destroy_gen(b, b->generation));
++    TEST_ASSERT_EQUAL_UINT32(0, b->id);
++}
++
+ /* ============================================================================
+  * Latency and benchmark tests
+  * ============================================================================ */
+@@ -6193,6 +6259,7 @@ int test_suite_scheduler(void)
+     RUN_TEST(test_rapid_task_exit_no_panic);
+ 
+     /* Regression: slot reuse during switch-out (#1213) */
++    RUN_TEST(test_task_destroy_gen_skips_reused_slot);
+     RUN_TEST(test_task_slot_reuse_under_switch);
+ 
+     /* Latency and benchmark tests */
+-- 
+2.43.0
+
+
+From 6aee62c18111b55a4a5bbc0ab9f4f5c416106925 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 11 Nov 2026 18:37:42 -0800
+Subject: [PATCH 5/6] Tests: test_isolated_core_latency waits 1 s on the wall
+ clock and asserts completion (#1213)
+
+The two count-bounded waits (100 x yield + test_delay), left as counts
+because a longer wait exposed #1213, become test_wait_task_terminated
+with a 1 s bound (the #1215 helper) now that the slot-reuse fault is
+fixed. Timeouts are counted and asserted after cleanup, so a task that
+does not finish fails the test instead of being force-terminated
+silently. Replaces the TEMPORARY reproduction waits.
+
+Refs #1213
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014Q9arxoPZp5EFZqJquVraE
+---
+ docs/testing.md               |  4 +++-
+ kernel/tests/test_scheduler.c | 35 +++++++++++++++++++++++++----------
+ 2 files changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/docs/testing.md b/docs/testing.md
+index ecc9a5ec..74d1c2e0 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -343,7 +343,9 @@ Validates the deadline-aware scheduler with priority ordering, deadline boost, c
+ 
+ | Test | Description |
+ |------|-------------|
+-| test_isolated_core_latency | Compares wake-to-run latency on isolated vs non-isolated cores |
++| test_task_destroy_gen_skips_reused_slot | The zombie reaper's generation check leaves a reused slot alone (#1213) |
++| test_task_slot_reuse_under_switch | Destroy and re-create a CPU 1 task in the same slot as fast as possible while CPU 1 switches out and reaps (#1213 stress) |
++| test_isolated_core_latency | Compares wake-to-run latency on isolated vs non-isolated cores; each task must finish within a 1 s wall-clock wait (#1213) |
+ | test_benchmark_context_switch | Measures 100 context switches between two ping-pong tasks |
+ | test_benchmark_queue_operations | Measures add/remove latency for queue operations |
+ 
+diff --git a/kernel/tests/test_scheduler.c b/kernel/tests/test_scheduler.c
+index 7811a77e..0fc1dbaf 100644
+--- a/kernel/tests/test_scheduler.c
++++ b/kernel/tests/test_scheduler.c
+@@ -2384,6 +2384,7 @@ static void test_isolated_core_latency(void)
+     uint64_t normal_max = 0;
+     uint64_t normal_min = UINT64_MAX;
+     int normal_count = 0;
++    int wait_timeouts = 0;
+ 
+     /*
+      * Phase 1: Measure latency on isolated core
+@@ -2402,12 +2403,18 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
++         * this was a 100-iteration count: long enough waits let the
++         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
++         * on Pi 5 the count expired before the task ran in almost every
++         * iteration. Timeouts are counted and asserted after cleanup. */
+         SLOT_TRACE(ST_TEST, t, 0x101, i, 0);       /* created + added */
+-        long long st_rc = test_wait_task_terminated("iso_latency_isolated", t,
+-                                                    TEST_WAIT_S(1));
+-        (void)st_rc;
+-        SLOT_TRACE(ST_TEST, t, 0x201, i, st_rc);   /* wait returned */
++        long long wait_rc = test_wait_task_terminated("iso_latency_isolated", t,
++                                                      TEST_WAIT_S(1));
++        if (wait_rc < 0) {
++            wait_timeouts++;
++        }
++        SLOT_TRACE(ST_TEST, t, 0x201, i, wait_rc); /* wait returned */
+ 
+         /* Record sample */
+         if (latency_sample_index > 0) {
+@@ -2449,12 +2456,18 @@ static void test_isolated_core_latency(void)
+         latency_start_ns = slm_get_time_ns();
+         scheduler_add_task(t);
+ 
+-        /* #1213 reproduction variant: 1 s wall-clock wait (not for merge). */
++        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
++         * this was a 100-iteration count: long enough waits let the
++         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
++         * on Pi 5 the count expired before the task ran in almost every
++         * iteration. Timeouts are counted and asserted after cleanup. */
+         SLOT_TRACE(ST_TEST, t, 0x102, i, 0);       /* created + added */
+-        long long st_rc = test_wait_task_terminated("iso_latency_normal", t,
+-                                                    TEST_WAIT_S(1));
+-        (void)st_rc;
+-        SLOT_TRACE(ST_TEST, t, 0x202, i, st_rc);   /* wait returned */
++        long long wait_rc = test_wait_task_terminated("iso_latency_normal", t,
++                                                      TEST_WAIT_S(1));
++        if (wait_rc < 0) {
++            wait_timeouts++;
++        }
++        SLOT_TRACE(ST_TEST, t, 0x202, i, wait_rc); /* wait returned */
+ 
+         if (latency_sample_index > 0) {
+             uint64_t sample = latency_samples[0];
+@@ -2478,6 +2491,8 @@ static void test_isolated_core_latency(void)
+      */
+     uart_printf("  Samples collected: isolated=%d/%d, normal=%d/%d\n",
+                 isolated_count, LATENCY_SAMPLES, normal_count, LATENCY_SAMPLES);
++    /* Every task must finish within its 1 s bound (#1213). */
++    TEST_ASSERT_EQUAL_INT(0, wait_timeouts);
+ 
+     if (isolated_count > 0 && normal_count > 0) {
+         uint64_t isolated_avg = isolated_sum / (uint64_t)isolated_count;
+-- 
+2.43.0
+
+
+From 2f043ffa4cca1398559bd416809d58447814e110 Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Tue, 10 Nov 2026 20:46:46 -0800
+Subject: [PATCH 6/6] Tests: test_task_lifecycle back to its loop-count window,
+ instrumented (#1211)
+
+Test-only. Coherency run 3, C1 step 2 (#1211). Reverts only the
+test_task_lifecycle part of 13cdb4ec: the cleanup window is again
+50 x (yield + delay(50000)) and the assert is again
+final_free >= initial_free - 16 ("Memory leak detected") on the count
+read at the end of that window, so a failure means what it meant before
+#1215's conversion. The rest of 13cdb4ec stays.
+
+Instrumentation, lines prefixed [C1-1211], printed on every run: waiter
+CPU at the start and end of the window; for each of the 8 tasks the CPU it
+was dispatched to and the CPU it ran on, with the time from dispatch;
+wall time (CNTPCT) of the window, from dispatch to the bound and from
+dispatch to all tasks completed; free pages at the start of the window and
+at the bound, the initial count and the target; sched_diag_schedule for
+CPUs 0-3 at the start of the window and at the bound. When the count at
+the bound is below the target, the waiter keeps yielding and logs whether
+it is back, with the count and the schedule() counts, 1, 10, 100 and
+1000 ms after the bound, and when it first held (-1 never). The assert is
+taken after those lines.
+
+Refs #1211, #1193.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/tests/test_integration.c | 167 ++++++++++++++++++++++++--------
+ 1 file changed, 129 insertions(+), 38 deletions(-)
+
+diff --git a/kernel/tests/test_integration.c b/kernel/tests/test_integration.c
+index e5183c9a..1c39fd11 100644
+--- a/kernel/tests/test_integration.c
++++ b/kernel/tests/test_integration.c
+@@ -303,9 +303,19 @@ static void contention_task(void *arg)
+ /* Lifecycle task - completes immediately */
+ static volatile uint32_t lifecycle_completed = 0;
+ 
++/* #1211 instrumentation (coherency run 3, C1): CPU each lifecycle task ran
++ * on and when (CNTPCT). arg is the cycle index. */
++#define LC1211_MAX 8
++static volatile uint32_t lc1211_ran_cpu[LC1211_MAX];
++static volatile uint64_t lc1211_ran_ts[LC1211_MAX];
++
+ static void lifecycle_task_func(void *arg)
+ {
+-    (void)arg;
++    uint32_t idx = (uint32_t)(uintptr_t)arg;
++    if (idx < LC1211_MAX) {
++        lc1211_ran_ts[idx] = timer_get_count();
++        lc1211_ran_cpu[idx] = cpu_id();
++    }
+ 
+     /* Atomic increment using spinlock for reliability */
+     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
+@@ -513,16 +523,12 @@ static void test_lock_contention(void)
+         "Race condition detected in lock contention");
+ }
+ 
+-/* Lifecycle cleanup: the free-page count is back within the slack. */
+-static bool lifecycle_pages_back(void *ctx)
+-{
+-    return pmm_get_free_pages() >= *(uint64_t *)ctx;
+-}
+-
+-static long long lifecycle_free_pages(void *ctx)
++/* #1211: snapshot of the schedule() counts of CPUs 0-3 (0 past cpu_count). */
++static void lc1211_sched_snapshot(uint32_t out[4])
+ {
+-    (void)ctx;
+-    return (long long)pmm_get_free_pages();
++    for (uint32_t c = 0; c < 4; c++) {
++        out[c] = (c < cpu_count && c < MAX_CPUS) ? sched_diag_schedule[c] : 0;
++    }
+ }
+ 
+ /*
+@@ -536,12 +542,19 @@ static void test_task_lifecycle(void)
+ 
+     uint64_t initial_free = pmm_get_free_pages();
+     lifecycle_completed = 0;
++    for (int i = 0; i < LC1211_MAX; i++) {
++        lc1211_ran_cpu[i] = 0xFFu;
++        lc1211_ran_ts[i] = 0;
++    }
++    smp_mb();
+ 
++    uint64_t t_dispatch = timer_get_count();
+     for (int cycle = 0; cycle < LIFECYCLE_CYCLES; cycle++) {
+         char name[8];
+         name[0] = 'l'; name[1] = 'c'; name[2] = '0' + (char)cycle; name[3] = '\0';
+ 
+-        struct task *t = task_create(name, lifecycle_task_func, NULL);
++        struct task *t = task_create(name, lifecycle_task_func,
++                                     (void *)(uintptr_t)cycle);
+         TEST_ASSERT_NOT_NULL(t);
+         scheduler_add_task_to_cpu(t, (uint32_t)(cycle % 3) + 1);
+     }
+@@ -556,47 +569,125 @@ static void test_task_lifecycle(void)
+     }
+ 
+     smp_mb();
++    uint64_t t_completed = timer_get_count();
+     TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
+         "Timeout: not all lifecycle tasks completed");
+ 
+     /*
+-     * Give the scheduler time to clean up zombies. Under
++     * Give scheduler time to clean up zombies. Under
+      * CONFIG_WORK_STEALING=ON, lifecycle tasks get distributed
+      * across CPUs 1-3 (via the dispatch above) and each CPU's
+-     * `schedule()` cycle is what actually frees its zombies, so the
+-     * pages come back only after every owning CPU schedules again.
++     * `schedule()` cycle is what actually frees its zombies. A
++     * short sleep with only CPU 0 yielding can leave stacks
++     * allocated while the owning CPUs are idle. Yield in a long
++     * enough loop for every CPU to run schedule() several times
++     * after the last task terminates.
+      *
+-     * Then verify no major memory leak. Threshold is generous enough to
+-     * tolerate one full task stack (4 pages) lingering because its
+-     * owning CPU has not run schedule() again; this can happen when a
+-     * secondary CPU parks in WFE right after its test task exits and
+-     * doesn't wake until a timer tick. 16 pages (~64 KB) covers the
++     * #1211 (coherency run 3, C1): this is the window as it was before
++     * #1215 converted it, instrumented. Every run logs waiter CPU, the CPU
++     * each task ran on, the window's wall time, free pages and the
++     * per-CPU schedule() counts; when the count at the bound is short,
++     * the waiter keeps yielding and logs whether it is back 1, 10, 100
++     * and 1000 ms after the bound.
++     */
++    uint32_t waiter_cpu0 = cpu_id();
++    uint32_t sc_start[4], sc_bound[4];
++    lc1211_sched_snapshot(sc_start);
++    uint64_t free_at_start = pmm_get_free_pages();
++    uint64_t t_win = timer_get_count();
++    for (int i = 0; i < 50; i++) {
++        yield();
++        delay(50000);
++    }
++
++    /*
++     * Verify no major memory leak. Threshold is generous enough to
++     * tolerate one full task stack (4 pages) lingering after the
++     * cleanup window because its owning CPU has not run
++     * schedule() again — this can happen when a secondary CPU
++     * parks in WFE right after its test task exits and doesn't
++     * wake until a timer tick. 16 pages (~64 KB) covers the
+      * worst case of one stack per stealable CPU without hiding a
+      * real per-task leak. Every `LIFECYCLE_CYCLES` tasks would
+      * leak 32 pages, which this threshold would still catch.
+-     *
+-     * The window used to be 50 x (yield + delay(50000)), a loop count
+-     * (#1211: it failed in 2 of 20 Pi 5 boots of one kernel and 0 of 10
+-     * of another). It is now a wall-clock wait for the pages, 1 s (the
+-     * floor in test_wait.h; the old window's duration was not measured),
+-     * and a timeout logs the free-page count at the bound and 10, 100 and
+-     * 1000 ms after it: pages that come back late are a timing window,
+-     * pages that never come back are a leak. Every run logs the deficit
+-     * when the wait starts and how long it took.
+      */
++    uint64_t final_free = pmm_get_free_pages();
++    uint64_t t_bound = timer_get_count();
++    uint32_t waiter_cpu1 = cpu_id();
++    lc1211_sched_snapshot(sc_bound);
+     uint64_t target = initial_free - 16;
+-    uint64_t free_at_start = pmm_get_free_pages();
+-    long long lc_us = test_wait_until_v("task_lifecycle_pages",
+-                                        lifecycle_pages_back,
+-                                        lifecycle_free_pages, &target,
+-                                        TEST_WAIT_S(1));
+-    uart_printf("[test_wait] task_lifecycle: initial %llu, target %llu, "
+-                "free at start of wait %llu, met after %lld us "
+-                "(bound 1000000 us)\n",
++    bool ok_at_bound = final_free >= target;
++
++    uart_printf("[C1-1211] lifecycle %s waiter_cpu=%u->%u initial=%llu "
++                "target=%llu free_win_start=%llu free_at_bound=%llu "
++                "window_us=%lld dispatch_to_bound_us=%lld "
++                "dispatch_to_completed_us=%lld\n",
++                ok_at_bound ? "PASS" : "FAIL",
++                (unsigned)waiter_cpu0, (unsigned)waiter_cpu1,
+                 (unsigned long long)initial_free,
+                 (unsigned long long)target,
+-                (unsigned long long)free_at_start, lc_us);
+-    TEST_ASSERT_MESSAGE(lc_us >= 0, "Memory leak detected");
++                (unsigned long long)free_at_start,
++                (unsigned long long)final_free,
++                test_wait_us_between(t_win, t_bound),
++                test_wait_us_between(t_dispatch, t_bound),
++                test_wait_us_between(t_dispatch, t_completed));
++    uart_printf("[C1-1211] lifecycle ran(dispatch_cpu>ran_cpu@us_from_dispatch)"
++                " 0:%u>%u@%lld 1:%u>%u@%lld 2:%u>%u@%lld 3:%u>%u@%lld "
++                "4:%u>%u@%lld 5:%u>%u@%lld 6:%u>%u@%lld 7:%u>%u@%lld\n",
++                1u, (unsigned)lc1211_ran_cpu[0], test_wait_us_between(t_dispatch, lc1211_ran_ts[0]),
++                2u, (unsigned)lc1211_ran_cpu[1], test_wait_us_between(t_dispatch, lc1211_ran_ts[1]),
++                3u, (unsigned)lc1211_ran_cpu[2], test_wait_us_between(t_dispatch, lc1211_ran_ts[2]),
++                1u, (unsigned)lc1211_ran_cpu[3], test_wait_us_between(t_dispatch, lc1211_ran_ts[3]),
++                2u, (unsigned)lc1211_ran_cpu[4], test_wait_us_between(t_dispatch, lc1211_ran_ts[4]),
++                3u, (unsigned)lc1211_ran_cpu[5], test_wait_us_between(t_dispatch, lc1211_ran_ts[5]),
++                1u, (unsigned)lc1211_ran_cpu[6], test_wait_us_between(t_dispatch, lc1211_ran_ts[6]),
++                2u, (unsigned)lc1211_ran_cpu[7], test_wait_us_between(t_dispatch, lc1211_ran_ts[7]));
++    uart_printf("[C1-1211] lifecycle schedule() cpu0..3 win_start=%u/%u/%u/%u "
++                "bound=%u/%u/%u/%u\n",
++                (unsigned)sc_start[0], (unsigned)sc_start[1],
++                (unsigned)sc_start[2], (unsigned)sc_start[3],
++                (unsigned)sc_bound[0], (unsigned)sc_bound[1],
++                (unsigned)sc_bound[2], (unsigned)sc_bound[3]);
++
++    if (!ok_at_bound) {
++        static const long long marks_us[4] = { 1000, 10000, 100000, 1000000 };
++        int held[4] = { -1, -1, -1, -1 };
++        unsigned long long free_at[4] = { 0, 0, 0, 0 };
++        uint32_t sc_at[4][4];
++        long long first_true_us = -1;
++        int next = 0;
++        for (;;) {
++            long long dt = test_wait_us_between(t_bound, timer_get_count());
++            uint64_t f = pmm_get_free_pages();
++            bool c = f >= target;
++            if (c && first_true_us < 0) {
++                first_true_us = dt;
++            }
++            while (next < 4 && dt >= marks_us[next]) {
++                held[next] = c ? 1 : 0;
++                free_at[next] = (unsigned long long)f;
++                lc1211_sched_snapshot(sc_at[next]);
++                next++;
++            }
++            if (next >= 4) {
++                break;
++            }
++            yield();
++        }
++        uart_printf("[C1-1211] FAIL repoll +1ms=%d(%llu) +10ms=%d(%llu) "
++                    "+100ms=%d(%llu) +1000ms=%d(%llu) first_held_after_bound_us=%lld "
++                    "(-1 = never)\n",
++                    held[0], free_at[0], held[1], free_at[1],
++                    held[2], free_at[2], held[3], free_at[3], first_true_us);
++        for (int k = 0; k < 4; k++) {
++            uart_printf("[C1-1211] FAIL repoll +%lldus schedule() cpu0..3 "
++                        "%u/%u/%u/%u\n", marks_us[k],
++                        (unsigned)sc_at[k][0], (unsigned)sc_at[k][1],
++                        (unsigned)sc_at[k][2], (unsigned)sc_at[k][3]);
++        }
++    }
++
++    TEST_ASSERT_MESSAGE(final_free >= initial_free - 16, "Memory leak detected");
+ }
+ 
+ /*
+-- 
+2.43.0
+

@@ -1,0 +1,4 @@
+# branch c1/1213-trace tip 884aab2d1bc0536dcfc860412b37bf09e6060e0f archived 2026-11-12T10:35:43Z
+884aab2d1bc0536dcfc860412b37bf09e6060e0f Tests: test_task_slot_reuse_under_switch (#1213 stress, fails before the fix)
+b8df6f5fd7f6bc6e034d415716acbc7658e0cb09 Debug option SLOT_TRACE: per-CPU task-slot lifecycle trace (#1213)
+01931af6bed55dcc217fcc5ab5ec4b3e83635b8e TEMPORARY #1213 reproduction: test_isolated_core_latency waits 1 s (not for merge)

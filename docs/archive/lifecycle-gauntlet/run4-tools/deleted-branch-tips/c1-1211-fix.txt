@@ -1,0 +1,7 @@
+# branch c1/1211-fix tip 2f043ffa4cca1398559bd416809d58447814e110 archived 2026-11-12T10:35:43Z
+2f043ffa4cca1398559bd416809d58447814e110 Tests: test_task_lifecycle back to its loop-count window, instrumented (#1211)
+6aee62c18111b55a4a5bbc0ab9f4f5c416106925 Tests: test_isolated_core_latency waits 1 s on the wall clock and asserts completion (#1213)
+912efbd0db554fe110bba2e080b5e2ab80d9a779 Fix #1213: reclaim a task slot only after its CPU has switched out, and only once
+884aab2d1bc0536dcfc860412b37bf09e6060e0f Tests: test_task_slot_reuse_under_switch (#1213 stress, fails before the fix)
+b8df6f5fd7f6bc6e034d415716acbc7658e0cb09 Debug option SLOT_TRACE: per-CPU task-slot lifecycle trace (#1213)
+01931af6bed55dcc217fcc5ab5ec4b3e83635b8e TEMPORARY #1213 reproduction: test_isolated_core_latency waits 1 s (not for merge)
