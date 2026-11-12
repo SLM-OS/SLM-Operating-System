@@ -58,3 +58,23 @@ Load (1-min) at run start: min 1.01, max 10.01
   #1213 or #1229: they are #1230 (litmus, also without work stealing),
   #1137 (net burst), #1233 (steal-sensitive scheduler tests) and two
   external kills.
+
+## Attribution of the INVALID runs (orchestrator, after the cell)
+The C1 critic's window runner ran `pkill -f "qmp.sock,server=on"` at
+about 05:39, 05:42 and 05:43 UTC. That pattern matches any QEMU started
+with a QMP socket, including this harness's. Its recorded pids are
+2746705 and 2755413 (the third was not recorded).
+- run17: log ends 05:39:05 with "signal 15 from pid 2748681": in the
+  05:39 window, but the pid is not one of the recorded ones, so it is
+  unattributed.
+- run19: log ends 05:41:40 with "signal 15 from pid 2755413": the
+  critic's recorded pid.
+- run20 overlapped 05:43 and completed with a full suite summary.
+INVALID count: 2 of 20 (run17, run19). The host rule is now "kill only
+own PIDs".
+
+## Excluding #1230 and INVALID runs (for information; the /ci rule is 20/20)
+Valid runs 18. Failing for reasons other than #1230: 2 (run07
+test_net_burst_8_sends_async #1137, run13
+test_policy_custom_assign_cpu_called #1233). 16 of 18 valid runs have
+no failure other than #1230.

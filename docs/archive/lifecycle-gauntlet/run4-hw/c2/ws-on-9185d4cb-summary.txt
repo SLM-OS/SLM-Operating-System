@@ -47,3 +47,12 @@ Load (1-min) at run start: min 1.17, max 5.12
 - Step 4 (/ci): 18 of 20, not 20 of 20, so WORK_STEALING=ON is not added.
   Both failures are open issues that do not depend on work stealing
   (#1230 failed 9 of 20 with WS=OFF; #1184 is in the slm-runner bus test).
+
+## Excluding #1230 and INVALID runs (for information; the /ci rule is 20/20)
+INVALID: 0 (the cell started 05:47:51, after the C1 critic's pkill
+window, 05:39 to 05:43; no "terminating on signal" line other than from
+/usr/bin/timeout). Failing for reasons other than #1230: 1 (run20,
+#1184). 19 of 20 runs have no failure other than #1230.
+Status: per the orchestrator, 9185d4cb is no longer the /ci decision
+head (the C1 critic found a deadlock in schedule()'s on_cpu wait,
+present at 6d4fe041 and 9185d4cb). This cell is data only.
