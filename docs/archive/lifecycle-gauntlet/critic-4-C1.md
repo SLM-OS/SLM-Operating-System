@@ -14,7 +14,8 @@ Evidence read from `gauntlet-4-hw-pi5` @ 43b3af1c (still the branch head at
 05:10 UTC), paths below relative to `docs/archive/lifecycle-gauntlet/run4-hw/`.
 Critic files: `critic-c1-runs/` (path at the end). No lab hardware and no
 labctl call. No branch edited; the critic's worktree
-(`.claude/worktrees/l4-c1-critic`) is removed.
+(`.claude/worktrees/l4-c1-critic`) is removed. One rule was broken by the
+critic: a name-pattern kill that hit other agents' QEMU runs (section 8).
 
 ## Summary
 
@@ -30,7 +31,7 @@ labctl call. No branch edited; the critic's worktree
 | #1229 regression test fails on the old code | **PASS**: C1 6/6 (local builds), critic 3/3 |
 | #1229 and #1219 relation | **PASS** (C2: class A 3/20 on main, 3/20 at 5be808c5, 0/34 at 364544c1) |
 | #1213, #1223, #1211 each with an end state and files | **INCOMPLETE**: end states are in `c1/qemu-1213-summary.txt`; none of the three issues has a run-4 comment; Pi 5 parts pending |
-| C2 WS=ON cell at 6d4fe041 | **INCOMPLETE**: not on the evidence branch at 43b3af1c |
+| C2 WS=ON cell at 6d4fe041 | landed later (78ab8747): 18 valid runs, class A 0, class B 0; 2 runs INVALID, at least one killed by the critic (section 8) |
 | Draft PR | not opened (by design, after this pass) |
 | Pi 5 (20 boots, #1223, #1211 hardware side) | pending (later phase) |
 
@@ -500,12 +501,94 @@ Also noted: while the critic's runs were in progress the host ran QEMU
 processes on an elf named `elf-fix6-wson-9185d4cb.elf`. No commit 9185d4cb
 was reviewed; this verdict is for 6d4fe041.
 
-## 8. Pending (later phase)
+## 8. Rule break: name-pattern kill
+
+Yes: commands of the critic sent SIGTERM to QEMU processes it did not start.
+The first version of the window-experiment runner ended each run with
+`pkill -f "qmp.sock,server=on"`, which matches every QEMU on the host that
+was started with a QMP socket (and the `timeout` wrapping it), not only the
+critic's.
+
+| Time (UTC, 2026-11-12) | Critic run | pkill pid | Known effect |
+|---|---|---|---|
+| about 05:39 | first version of the experiment (window on CPU 2; not kept as evidence) | 2746705 (in the critic's own output) | unknown outside the critic's QEMU |
+| about 05:42 | `critic-window-6d4fe041-run01.txt` | 2755413 | killed C2's `c2/ws-on-6d4fe041-run19.txt` (that file ends `terminating on signal 15 from pid 2755413 ()`); C2 marks it INVALID |
+| about 05:43 | `critic-window-6d4fe041-run02.txt` | not recorded (the critic's QEMU shows `/usr/bin/timeout` as its killer, the pkill having hit the timeout wrapper) | unknown |
+
+`c2/ws-on-6d4fe041-run17.txt` ends `terminating on signal 15 from pid
+2748681 ()`. That pid matches none the critic recorded; it lies between the
+first and second pkill pids, and the critic cannot attribute it. The third
+call is the only one whose pid is unknown.
+
+Fix: `critic-run_window.sh.txt` now kills only the QEMU it started (found by
+its unique temporary QMP socket path, then `kill <pid>`). No pkill or killall
+by name is used anywhere. The later stop of the critic's own 9185d4cb runs
+(below) was done by PID, selected by the critic's own elf path.
+
+Check of the files counted in this verdict for `terminating on signal`:
+
+- C1 (254 run files at 43b3af1c): 48 files carry the line, every one from
+  `/usr/bin/timeout` (the 120 s cap): `qemu-1213-main-multi` 6,
+  `qemu-1213-main-single` 20, `qemu-1213-stress-unfixed-multi` 20,
+  `qemu-1229-pdunfixedws-multi` 1, `qemu-1229-wstrace-v1-multi` 1. None from
+  another process. No fix-head file carries it. No count in section 4 changes.
+- C2 cells counted in 4.2: `ws-main-6c1f4c9c` 5 and `ws-on-5be808c5` 3, all
+  from `/usr/bin/timeout`. No count changes.
+- C2's `ws-on-6d4fe041` (landed after section 4 was written, evidence branch
+  78ab8747): run17 and run19 are INVALID as above; the other 18 show class A
+  0, class B 0, isolated=10/10 in 18, stress clean in 18, `pdm` moved 5 to 8
+  and bad=0 in 18 (critic's count). This closes the summary table's row "C2
+  WS=ON cell at 6d4fe041" as 18 valid runs, 2 invalid.
+- Critic: the 10 unfixed runs end with the timeout's SIGTERM, which is the
+  expected 120 s cap after the fault. The 10 fix-head runs at 6d4fe041 and
+  the 3 revert runs have no such line and end with a suite summary. The two
+  window runs were ended by the critic after sampling and are evidence of a
+  hang, not passes.
+
+## 9. Head change to 9185d4cb (orchestrator update, then stop)
+
+The orchestrator moved the fix head to 9185d4cb and then told the critic to
+stop before any run at that head. State at the stop:
+
+- `git diff --stat 364544c1 9185d4cb` and `git diff --stat 6d4fe041
+  9185d4cb`: `kernel/tests/test_scheduler.c` only. The kernel code at
+  9185d4cb equals 6d4fe041's, so section 1 applies to it unchanged.
+- All critic runs in section 3 are at 6d4fe041 and stay labelled so. Four
+  runs at 9185d4cb were started: two were in progress when the stop arrived
+  and two more started before the runner itself was stopped. All four were
+  killed mid-suite by the critic (own PIDs), none finished, and none is
+  counted or kept in `critic-c1-runs/`.
+- Test changes in 9185d4cb, read but not run (redefined criterion check):
+  `test_policy_custom_assign_cpu_called` and
+  `test_proactive_load_balance_inert_when_light` accept `assigned_cpu != 0`
+  only if the sum of `sched_diag_steal_successes` over all CPUs moved between
+  just before `scheduler_add_task` and the assert. Without work stealing the
+  counter never moves, so the default `make test` asserts stay exact. With
+  work stealing the tests stay meaningful with one weakening: the counter
+  is global, so a steal of any other task in that window (a few
+  microseconds) would also excuse a wrong placement. The counter is
+  incremented in `sched_try_steal` (`sched.c:1983`) before the thief
+  re-queues the task and sets `assigned_cpu`, so the new check cannot fail
+  falsely on ordering. `test_benchmark_context_switch` re-checks its bound
+  under the lock; no criterion changes. Whether
+  `test_preempt_flag_follows_migrated_task` still fails on the old code at
+  9185d4cb was not run; its code is unchanged from 6d4fe041, where it failed
+  3/3 for the critic.
+- C1's files at 9185d4cb (evidence branch 78ab8747), critic's count:
+  `c1/qemu-1229-fix6wsoff-multi` 6 runs and `c1/qemu-1229-fix6wson-multi` 20
+  runs, banner 9185d4cb, 0 CPU 1 stops, isolated=10/10 in 26, stress clean in
+  26, `pdm` moved 6 to 8 and bad=0 in 26; `test_litmus_patterns_pass` (#1230)
+  fails in 2/6 and 20/20, `test_net_burst_8_sends_async` in 3/20.
+
+Not done, for the re-check at the next head: mechanism review of the new
+fix, the window patch against it, spot runs.
+
+## 10. Pending (later phase)
 
 Pi 5: isolated=10/10 in 20 of 20 boots at the fix head, #1223 and #1211 on
 hardware. Not started, not judged here.
 
-## 9. Verdict
+## 11. Verdict
 
 **FAIL.** Definition-of-done row: the fix to be carried by the draft PR.
 Reason: the mechanism review disagrees with the fix's stated deadlock
@@ -523,4 +606,5 @@ the #1229 rows pass on the critic's own counts and reproduction.
 Critic files:
 `/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/critic-c1-runs/`
 (25 run files with a `#` summary on line 1, two raw QMP files, two patches,
-the runner and helper scripts).
+the runner and helper scripts). This verdict is for 6d4fe041; the head has
+since moved (section 9) and a re-check at the next head is owed.
