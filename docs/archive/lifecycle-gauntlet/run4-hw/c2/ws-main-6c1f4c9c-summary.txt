@@ -1,0 +1,162 @@
+# C2 summary, head main 6c1f4c9c, make test WORK_STEALING=ON (QEMU ARM64 virt, 4 vCPUs), elf sha256 1a96044f68403f5e2362fd50bb4d06d159a98bce2a1f9c3a432c6e8cf5cc39d0; #1219 in 3 of 20 baseline runs (+1 in the instrumented trial t3); 7 of 20 runs failed in total across 3 failure classes
+# boot banner: SLM-OS v0.4.0 build 20261112013502 (6c1f4c9c)
+
+Build: `make kernel-test-clean` then `make test WORK_STEALING=ON` once
+(ws-main-6c1f4c9c-makefile-run.txt, PASS; CMakeCache
+ENABLE_WORK_STEALING:BOOL=ON). Every later run re-ran that one test elf
+(copied, sha256 above) with tools/run_one.sh.txt: the Makefile's exact
+QEMU ARM64 test command (systemd-run --user --scope MemoryMax=3G
+CPUQuota=200%, timeout 120, fresh 4G sparse sdhci image per run) plus a
+QMP socket and a gdbstub socket. Neither socket is guest-visible; gdb
+attaches only after a failure is seen. One C2 QEMU at a time; C1 ran
+QEMU on the same 8-core host throughout, so load is C1's plus mine.
+
+Sampling (tools/qmp_sample.py.txt, tools/tasks.py.txt,
+tools/tasks_extra.py.txt): at the first "[FAIL] batch: stress" line and
+again at 100 s, 10 samples of all 4 vCPUs 200 ms apart (QMP stop, `info
+registers -a`, cont), symbolized with aarch64-none-elf-addr2line against
+the elf; then one gdb read of the task table (raw offsets, the C objects
+carry no DWARF), per-CPU current task, the stress counters and the batch
+and engine lock bytes. From run09 on (after run05/run08), the dump also
+walks each non-running task's frame chain; from trial t3 on it also
+prints each CPU's run queue and steal deque, preempt_disabled[],
+sched_diag_tick[], sched_diag_schedule[], and a trap-frame ELR scan of
+non-running infer-stress tasks. run13's gdb read failed (a NUL byte in
+tasks.py at that moment, fixed before run14); its QMP samples are intact.
+
+## Per-run results (cell ws-main-6c1f4c9c, baseline)
+
+| File | load_start (1/5/15) | rc | Result | Class |
+|---|---|---|---|---|
+| ws-main-6c1f4c9c-run01.txt | 2.74 3.12 2.43 | 0 | PASS | |
+| ws-main-6c1f4c9c-run02.txt | 3.26 3.19 2.50 | 124 | TIMEOUT | B (#1213 signature) |
+| ws-main-6c1f4c9c-run03.txt | 5.25 3.91 2.85 | 1 | FAIL | C (litmus) |
+| ws-main-6c1f4c9c-run04.txt | 5.67 4.26 3.04 | 0 | PASS | |
+| ws-main-6c1f4c9c-run05.txt | 4.97 4.36 3.15 | 124 | TIMEOUT | A (#1219) |
+| ws-main-6c1f4c9c-run06.txt | 5.17 4.49 3.34 | 0 | PASS | |
+| ws-main-6c1f4c9c-run07.txt | 4.95 4.56 3.44 | 0 | PASS | |
+| ws-main-6c1f4c9c-run08.txt | 4.97 4.63 3.54 | 124 | TIMEOUT | A (#1219) |
+| ws-main-6c1f4c9c-run09.txt | 3.27 4.25 3.54 | 0 | PASS | |
+| ws-main-6c1f4c9c-run10.txt | 3.37 4.09 3.53 | 0 | PASS | |
+| ws-main-6c1f4c9c-run11.txt | 3.84 4.09 3.56 | 0 | PASS | |
+| ws-main-6c1f4c9c-run12.txt | 3.91 4.10 3.61 | 0 | PASS | |
+| ws-main-6c1f4c9c-run13.txt | 3.86 4.03 3.61 | 124 | TIMEOUT | B (#1213 signature) |
+| ws-main-6c1f4c9c-run14.txt | 4.79 4.28 3.75 | 0 | PASS | |
+| ws-main-6c1f4c9c-run15.txt | 3.94 4.14 3.74 | 0 | PASS | |
+| ws-main-6c1f4c9c-run16.txt | 4.02 4.13 3.76 | 1 | FAIL | C (litmus) |
+| ws-main-6c1f4c9c-run17.txt | 4.70 4.34 3.86 | 124 | TIMEOUT | A (#1219) + C |
+| ws-main-6c1f4c9c-run18.txt | 5.11 4.70 4.06 | 0 | PASS | |
+| ws-main-6c1f4c9c-run19.txt | 4.34 4.57 4.05 | 0 | PASS | |
+| ws-main-6c1f4c9c-run20.txt | 3.58 4.31 3.99 | 0 | PASS | |
+
+Separate cell ws-main-6c1f4c9c-trial (harness validation, same elf):
+trial-t0, t1, t2 PASS (load 4.27, 3.35, 2.55 at start);
+ws-main-6c1f4c9c-trial-t3.txt TIMEOUT, class A + C, load 2.24 at start.
+Not counted in the 20.
+
+Rates (baseline cell, 20 runs, load 1-min 2.74 to 5.67 at run start):
+- Class A, #1219 stress hang: 3 of 20 (run05, run08, run17).
+- Class B, #1213 signature: 2 of 20 (run02, run13).
+- Class C, test_litmus_patterns_pass mp_weak_rows: 3 of 20 (run03,
+  run16, run17).
+- Any failure: 7 of 20. PASS: 13 of 20.
+Class A also occurred in trial t3 at load 2.24, the lowest load of any
+failing run here, so a loaded host is not needed for #1219 (consistent
+with run 3's third occurrence at load 0.5 to 0.9).
+
+## Class A (#1219): mechanism from the samples
+
+What the stress test waits on: rust_infer_stress_run's join loop on
+main (CPU 0) waits for STRESS_WORKERS_DONE >= 4. At the FAIL line it is
+0 of 4 with STRESS_SUCCESS 0 and STRESS_ERROR 0 (run05, run08, run17,
+t3): no worker completed even one inference.
+
+PCs (all 4 vCPUs, both sample points, run05, run08, run17, t3): every
+vCPU is at 0x4023f794 / 79c / 7ac / 7b0, the ldaxrb/clrex/isb loop on
+ENGINE_LOCK (0x4203680c) inlined at the top of
+slm_runtime::inference::engine::run_inference_inner (engine_lock(),
+runtime/src/inference/engine.rs:469). CPUs 1 to 3 run three
+infer-stress workers; CPU 0 runs main, which by 100 s has moved on to
+"[TEST] Inference FFI Tests" and spins on the same lock (that is why the
+suite then hits the 120 s cap). The remaining samples are the EL1h IRQ
+vector (0x40010a80): the spinners take IRQs, PSTATE 0x60000005 (DAIF
+clear) in 16 to 19 of the 20 readings per CPU (run05, run08, run17).
+
+The holder (run17 and t3, which have the extended dump): ENGINE_LOCK
+byte = 1, SCHED_LOCK = 0, SCRATCH_LOCK = 0. The fourth infer-stress task
+is READY, never running again (sw=1), its frame chain is schedule+576
+<- el1_irq+164 (switched out by a timer IRQ, not by a yield). In t3 its
+trap frame holds ELR 0x4022cd2c (slm_runtime::inference::ops::conv2d +
+1000), SPSR 0x5: it was preempted inside an inference, holding
+ENGINE_LOCK. t3 RQ lines: it is the head of CPU 2's run queue
+(ready_count=1), not lost.
+
+Why CPU 2 never switches back to it (t3, two dumps 13 s apart, at 87 s and 100 s):
+`DIAG preempt_disabled=[0, 0, 1, 0]` in both;
+sched_diag_tick[2] 7209 -> 7941 while sched_diag_schedule[2] stays at
+15244. CPU 2 takes its 100 Hz ticks but scheduler_tick() returns at
+`if (preempt_disabled[cpu]) return;` (kernel/sched/sched.c:2722), so
+the spinner on CPU 2 is never preempted. sched_try_steal() skips a
+victim whose preempt_disabled is set (sched.c:1868), so no other CPU
+takes the holder either. preempt_disabled[2]=1 while CPU 2 runs a task
+outside schedule() is itself the defect: the flag is supposed to be set
+only inside schedule()'s switch window.
+
+Hypothesis (code reading, not yet tested): schedule() computes
+`this_cpu = cpu_id()` on entry (sched.c:2314), sets
+preempt_disabled[this_cpu] = 1 (:2464), calls switch_to (:2530), and
+after switch_to returns clears preempt_disabled[this_cpu] (:2534) with
+the pre-switch id. Under CONFIG_WORK_STEALING a READY task can be
+stolen and resumed on another CPU; when it returns from switch_to there,
+it clears the old CPU's flag and leaves its new CPU's flag set until
+that CPU's running task calls schedule() voluntarily. A spin-waiter that
+never yields (engine_lock) then deadlocks against a lock holder parked
+on that CPU's queue. In t3, CPU 2's current task (infer-stress slot 13,
+sw=2, last saved in schedule) is consistent with having resumed through
+that tail. The same stale store also clears another CPU's flag while
+that CPU may be inside its own switch window, which is the window
+#1216 says the early-out protects. Whether that contributes to #1213 is
+a separate hypothesis, not tested here. Confirming experiment: re-read
+the CPU id after switch_to (or record which CPU set the flag) and
+re-run this cell; rate to 0 under the 5x rule.
+
+Classification: not C1's mechanism as stated for #1213 (no fault, no
+slot reuse, no CPU wedged in an exception); a lock holder stranded on a
+CPU whose preempt_disabled flag is stuck at 1. Kernel code, not test
+code: filed, not fixed.
+
+The digit_classifier "Exiting (0 inferences)" line that precedes the
+FAIL in every class A run (and both run-3 failures) is that component's
+30 s inactivity timeout (kernel/src/component_runtime.c:415); the
+failed join itself waits 30.8 s, so the exit follows from elapsed time.
+Not causal as far as these samples show.
+
+## Class B (#1213 signature, on main without the 1 s test change)
+
+run02 and run13: CPU 1 (run02) or CPU 3 (run13) at panic+0x8/0xc, 10 of
+10 samples, called from task_exit (gdb bt in run02: panic <- task_exit
+<- task_entry_trampoline): `panic("task_exit: schedule returned!")`
+(kernel/sched/task.c:695). The panic text never reached the UART. The
+other CPUs: CPU 0 in uart_getc/schedule (shell), the rest in
+idle_task_func. run02: test_reposition_moves_task_queued_on_other_cpu
+and test_task_entry_unmasks_irq FAIL (CPU-1 tasks never run), CPU 1's
+current_task = coh_r1 with state READY and switches 0; isolated latency
+"Samples collected: isolated=0/10, normal=0/10". Both hang after
+test_iteration_counts. Same signature as #1213's sixth stall; C1's
+issue.
+
+## Class C (test_litmus_patterns_pass, mp_weak_rows)
+
+run03, run16, run17, t3: kernel/tests/test_coherency.c:594
+`TEST_ASSERT_EQUAL_UINT32(0, sum.mp_weak_rows)` fails with 1. run03: row
+"P2 2>1 100000 0 0 1 observed=0" (a reader observed nothing in a 1 ms
+row). forbidden and timeouts are 0 in every row. Not #1219. Hypothesis,
+untested: the MP progress check needs two vCPU threads to overlap within
+about 1 ms, which the host scheduler does not guarantee. Not worked
+here; reported to the orchestrator.
+
+## Load cell
+
+Not run. #1219 reproduced at the baseline (3 of 20) and at load 2.24
+(t3), and the samples give a load-independent mechanism, so a raised-load
+cell would not change the classification.

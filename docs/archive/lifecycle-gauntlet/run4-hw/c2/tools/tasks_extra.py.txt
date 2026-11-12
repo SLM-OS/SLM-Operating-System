@@ -1,0 +1,43 @@
+# Run-queue, steal-deque, per-CPU diag counters, and trap-frame ELR scan.
+# Layouts from kernel/include/sched.h (cpu_runqueue: head,tail,idle,zombie,
+# ready_count; 64-byte stride at &sched) and steal_deque.h (buf[32],
+# gen_buf[32], bottom, top; 0x188 stride).
+def slot_of(p):
+    return "-" if p == 0 else ("slot%d" % ((p - tt) // SZ) if tt <= p < tt + 64*SZ else "0x%x" % p)
+RQ = addr("sched")
+for c in range(4):
+    b = RQ + 64*c
+    head, tail, idle, zombie = struct.unpack("<QQQQ", mem(b, 32))
+    rc = u32(b + 32)
+    walk = []; p = head; n = 0
+    while p and n < 70:
+        walk.append(slot_of(p)); p = u64(p + 0x18); n += 1
+    print("RQ cpu%d ready_count=%d head=%s tail=%s idle=%s zombie=%s list=[%s]" % (
+        c, rc, slot_of(head), slot_of(tail), slot_of(idle), slot_of(zombie), ",".join(walk)))
+DQ = addr("cpu_steal_deques")
+for c in range(4):
+    b = DQ + 0x188*c
+    bottom, top = struct.unpack("<II", mem(b + 32*8 + 32*4, 8))
+    ents = []
+    for i in range(top, bottom):
+        j = i & 31
+        ents.append("%s/g%d" % (slot_of(u64(b + 8*j)), u32(b + 256 + 4*j)))
+    print("DEQUE cpu%d top=%d bottom=%d entries=[%s]" % (c, top, bottom, ",".join(ents)))
+def arr32(sym, n=4): return [u32(addr(sym) + 4*i) for i in range(n)]
+print("DIAG preempt_disabled=%s sched_diag_tick=%s sched_diag_schedule=%s timer_handler_count=%d" % (
+    arr32("preempt_disabled"), arr32("sched_diag_tick"), arr32("sched_diag_schedule"), u32(addr("timer_handler_count"))))
+TEXT_END = addr("__text_end")
+for i in range(64):
+    b = tt + i*SZ
+    raw = mem(b, 0x2c0)
+    name = raw[4:20].split(b"\0")[0].decode(errors="replace")
+    st = struct.unpack_from("<I", raw, 0x14)[0]
+    if not name.startswith("infer-stress") or st == 1: continue
+    sp = struct.unpack_from("<Q", raw, 0x80)[0]
+    try: blob = mem(sp, 0x1000)
+    except Exception: continue
+    for off in range(0, 0x1000 - 16, 8):
+        elr, spsr = struct.unpack_from("<QQ", blob, off)
+        if 0x40000000 <= elr < TEXT_END and (spsr & 0xf) == 5 and spsr < 0x100000000:
+            sy = gdb.execute("info symbol 0x%x" % elr, to_string=True).strip().split(" in section")[0]
+            print("TRAPFRAME slot=%d %s cand@sp+0x%x ELR=0x%x (%s) SPSR=0x%x" % (i, name, off, elr, sy, spsr))

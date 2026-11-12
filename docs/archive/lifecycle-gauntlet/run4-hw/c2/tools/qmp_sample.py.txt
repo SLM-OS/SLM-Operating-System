@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Sample all vCPU PCs over QMP: stop, info registers -a, cont; N times.
+
+usage: qmp_sample.py <qmp-socket> <out-file> <label> [n=10] [interval=0.2]
+Writes the raw register dumps plus a per-sample PC table.
+"""
+import json, re, socket, sys, time
+
+sock_path, out_path, label = sys.argv[1], sys.argv[2], sys.argv[3]
+n = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+interval = float(sys.argv[5]) if len(sys.argv) > 5 else 0.2
+
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sock_path)
+f = s.makefile("rw")
+
+
+def rd():
+    while True:
+        line = f.readline()
+        if not line:
+            raise SystemExit("qmp closed")
+        m = json.loads(line)
+        if "event" in m:
+            continue
+        return m
+
+
+def cmd(c, args=None):
+    msg = {"execute": c}
+    if args:
+        msg["arguments"] = args
+    f.write(json.dumps(msg) + "\n")
+    f.flush()
+    return rd()
+
+
+rd()  # greeting
+cmd("qmp_capabilities")
+
+
+def hmp(line):
+    return cmd("human-monitor-command", {"command-line": line}).get("return", "")
+
+
+with open(out_path, "a") as out:
+    out.write(f"=== QMP PC samples [{label}] {n} samples, {interval}s apart, "
+              f"VM stopped for each read ===\n")
+    for i in range(n):
+        t = time.time()
+        hmp("stop")
+        regs = hmp("info registers -a")
+        hmp("cont")
+        # Split per CPU: blocks start with "CPU#<n>"
+        blocks = re.split(r"(?m)^(?=CPU#\d+)", regs)
+        pcs = []
+        for b in blocks:
+            m = re.match(r"CPU#(\d+)", b)
+            if not m:
+                continue
+            pc = re.search(r"PC=([0-9a-f]+)", b)
+            x30 = re.search(r"X30=([0-9a-f]+)", b)
+            sp = re.search(r"SP=([0-9a-f]+)", b) or re.search(r"\bSP_EL1=([0-9a-f]+)", b)
+            pcs.append((m.group(1), pc.group(1) if pc else "?",
+                        x30.group(1) if x30 else "?"))
+        out.write(f"--- sample {i} t={t:.3f} ---\n")
+        for cpu, pc, lr in pcs:
+            out.write(f"PCSAMPLE {label} s{i} cpu{cpu} pc={pc} x30={lr}\n")
+        out.write(regs)
+        out.write("\n")
+        out.flush()
+        time.sleep(interval)

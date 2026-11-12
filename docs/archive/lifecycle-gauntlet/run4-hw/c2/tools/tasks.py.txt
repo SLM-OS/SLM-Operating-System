@@ -1,0 +1,67 @@
+# Raw-offset task dump (C objects carry no DWARF). Offsets from
+# offsetof() with the test build's flags: sizeof(struct task)=0x340.
+import gdb, struct
+gdb.execute("set pagination off")
+inf = gdb.selected_inferior()
+def mem(a, n): return bytes(inf.read_memory(a, n))
+def u32(a): return struct.unpack("<I", mem(a, 4))[0]
+def u64(a): return struct.unpack("<Q", mem(a, 8))[0]
+def addr(sym): return int(gdb.parse_and_eval("(unsigned long)&'%s'" % sym))
+for s in ["WORKERS_DONE","GENERATION","ITERS_PER_WORKER","MODEL_INDEX"]:
+    print("STRESSVAR %s = %d" % (s, u32(addr("slm_runtime::STRESS_"+s))))
+for s in ["SUCCESS","ERROR"]:
+    print("STRESSVAR %s = %d" % (s, u64(addr("slm_runtime::STRESS_"+s))))
+print("STRESSVAR BUSY = %d" % mem(addr("slm_runtime::STRESS_BUSY"),1)[0])
+SZ = 0x340
+tt = u64(addr("task_table"))
+cur = [u64(addr("current_task") + 8*i) for i in range(4)]
+print("CURRENT " + " ".join("cpu%d=0x%x(slot %s)" % (i, c, (c-tt)//SZ if c else "-") for i, c in enumerate(cur)))
+states = ["READY","RUNNING","BLOCKED","TERMINATED","DESTROYED"]
+for i in range(64):
+    b = tt + i*SZ
+    raw = mem(b, SZ)
+    tid = struct.unpack_from("<I", raw, 0)[0]
+    name = raw[4:20].split(b"\0")[0].decode(errors="replace")
+    if not name and tid == 0: continue
+    st = struct.unpack_from("<I", raw, 0x14)[0]
+    lr, sp = struct.unpack_from("<QQ", raw, 0x78)
+    aff, cpu = struct.unpack_from("<II", raw, 0x2c0)
+    pr, ep = raw[0x2c8], raw[0x2c9]
+    wake = struct.unpack_from("<Q", raw, 0x2d8)[0]
+    sw = struct.unpack_from("<Q", raw, 0x2e8)[0]
+    gen = struct.unpack_from("<I", raw, 0x334)[0]
+    sym = gdb.execute("info symbol 0x%x" % lr, to_string=True).strip() if lr else "-"
+    print("TASK slot=%d id=%d name=%s state=%s aff=0x%x cpu=%d prio=%d eprio=%d sw=%d gen=%d wake=%d saved_lr=0x%x (%s) sp=0x%x" % (
+        i, tid, name, states[st] if st < 5 else st, aff, cpu, pr, ep, sw, gen, wake, lr, sym, sp))
+print("ENGINE_LOCK byte = %d" % mem(addr("slm_runtime::inference::engine::ENGINE_LOCK"),1)[0]) if True else None
+for s_ in ["SCHED_LOCK","SCRATCH_LOCK"]:
+    try: print("BATCHLOCK %s = %d" % (s_, mem(addr("slm_runtime::sched::inference::"+s_),1)[0]))
+    except Exception as e: print("BATCHLOCK %s err %s" % (s_, e))
+# Frame-pointer walk of every task that is not running (saved x29 at ctx+0x50).
+for i in range(64):
+    b = tt + i*SZ
+    raw = mem(b, 0x2c0)
+    name = raw[4:20].split(b"\0")[0].decode(errors="replace")
+    st = struct.unpack_from("<I", raw, 0x14)[0]
+    if not name or st == 1: continue
+    fp = struct.unpack_from("<Q", raw, 0x70)[0]
+    lr = struct.unpack_from("<Q", raw, 0x78)[0]
+    chain = [lr]
+    for _ in range(24):
+        if fp < 0x40000000 or fp > 0x80000000: break
+        try:
+            nfp, nlr = struct.unpack("<QQ", mem(fp, 16))
+        except Exception: break
+        if nlr == 0: break
+        chain.append(nlr); fp = nfp
+    syms = []
+    for a in chain:
+        sy = gdb.execute("info symbol 0x%x" % a, to_string=True).strip().split(" in section")[0]
+        syms.append("0x%x %s" % (a, sy))
+    print("FPWALK slot=%d %s state=%s: %s" % (i, name, states[st] if st < 5 else st, " <- ".join(syms)))
+exec(open('/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c2/tasks_extra.py').read())
+for th in inf.threads():
+    th.switch()
+    print("THREAD", th.num)
+    try: gdb.execute("bt 12")
+    except Exception as e: print("bt err", e)
