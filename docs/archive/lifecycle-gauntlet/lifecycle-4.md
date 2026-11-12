@@ -699,3 +699,16 @@ controller after UEFI-direct, csidiag's path to it, and the refusal test's
 generic -3. `run4-hw/c3/README.md` notes the oplib-shader requirement.
 The C3 critic's /ci row is now satisfied by the builder's files; the kexec
 bar stays 9 of 10, so the outcome (no C3 PR) is unchanged. C3 is idle.
+
+## Entry 26 (written 08:06 UTC): C1 bar re-runs at 5e5548a1 (claims until the critic re-checks)
+
+C1, `gauntlet-4-hw-pi5` 70d4996b, `run4-hw/c1/qemu-rates-table.txt`:
+default config 17 runs: stress clean 17 of 17 (5x needs 5), 1 s variant
+isolated=10/10 and normal=10/10 in 17 of 17 (needs 17), litmus 1 of 17;
+WORK_STEALING=ON 20 runs: isolated=10/10 in 20 of 20, stress clean, no CPU
+1 stop, no #1219 hang, no cap, litmus 3 of 20. Litmus pairing,
+WORK_STEALING=ON, alternated: main 1 of 10, 5e5548a1 1 of 10 (load 0.9 to
+6.7); the 20 of 20 at 9185d4cb does not reproduce without the switch-in
+wait. In the same pairing main hit the cap twice (run02 #1219 hang, run05
+"stack overflow: refusing to switch_to", #1213 family); the fix head 0 of
+20. The x86 guard approval was sent a third time (C1 had not seen it).
