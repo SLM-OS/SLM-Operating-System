@@ -777,3 +777,20 @@ to its Round 2.
 - **08:59 UTC: pi-5-1 to C1** (step 7), to 10:40 hard: suite 20 at the fix
   head with isolated=10/10 per boot, boot_test 10, then the C1 critic's 5
   boots, then the #1223 cell with the time left. jetson-nano-2 is idle.
+
+## Entry 31 (written 09:20 UTC): C2's Jetson rows carry to 33f05c5a; the Fable C2 critic stopped; replaced on the session's model
+
+- C2 (`gauntlet-4-hw-pi5` 81c5aae2,
+  `run4-hw/c2/jetson-elf-compare-5e5548a1-33f05c5a.txt`): Jetson
+  production ELF at 33f05c5a vs the step-3 ELF at 5e5548a1: .text 2,696,600
+  bytes, 0 differ; .data 0 differ; .rodata 92 bytes in identity strings; no
+  function changed size. Step 3 totals: assert-shares 20 of 20, kexec 10 of
+  10, UEFI-direct 10 of 10. C2 is done.
+- C2 critic (Fable) started 08:59 UTC; stopped at 09:17 UTC with "You've
+  hit your weekly limit · resets Nov 14, 12pm (America/Los_Angeles)",
+  before writing a verdict. Its run set at 33f05c5a kept running in its
+  worktree. Per the brief, the replacement **c2-critic-2 runs on the
+  session's model** (started 09:20 UTC) and its verdict file says so; it may
+  adopt the first critic's complete run files after checking the script.
+  The C1 critic is also on Fable; asked for status in case it hits the
+  same limit.
