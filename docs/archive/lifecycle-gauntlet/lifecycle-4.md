@@ -283,3 +283,32 @@ locks held).
 C2 started its unattended 20-run WORK_STEALING=ON cell at 5be808c5
 (`run4-hw/c2/ws-on-5be808c5-*`). Lab unchanged: C3 holds both boards
 to 07:05 UTC.
+
+## Entry 7 (written 04:08 UTC): C1 head moves to 364544c1 (#1229); C2 cell at 5be808c5
+
+- C1 (interim) added a #1229 commit, 1ead6ef6, on c1/1213-fix; head
+  for C2 is 364544c1 (code as d8b21ec3, then docs). C1's description, a
+  claim until its critic files: schedule() re-reads cpu_id() after
+  switch_to for the three post-switch clears, and waits under its own
+  rq_lock for next->on_cpu == 0 (load-acquire) before switching in; new
+  test test_preempt_flag_follows_migrated_task.
+- C2 WORK_STEALING=ON at 5be808c5 (before the #1229 commit), 20 runs,
+  `gauntlet-4-hw-pi5` 24546abe, `run4-hw/c2/ws-on-5be808c5-summary.txt`:
+
+| Class | main 6c1f4c9c | 5be808c5 |
+|---|---|---|
+| A #1219 stress hang | 3 of 20 | 3 of 20 (run05, run09, run14) |
+| B #1213 family panic | 2 of 20 | 0 of 20 |
+| C litmus #1230 | 3 of 20 | 4 of 20 |
+| test_benchmark_context_switch 101 vs 100 | 0 of 20 | 3 of 20 (run07, run10, run14) |
+| test_proactive_load_balance_inert_when_light | 0 of 20 | 1 of 20 (run05) |
+
+  B at 0 of 20 is 2.0x the unfixed runs per failure, below 5x; not used
+  as a finding. Each class-A hang shows a CPU with preempt_disabled stuck
+  at 1 and the lock holder READY on its queue (the #1229 signature).
+  WORK_STEALING=ON is not /ci-eligible at this head (9 of 20 failing).
+- The two new failures are in kernel/tests/test_scheduler.c (C1's file).
+  Relayed to C1 to decide regression versus pre-existing test race (Fisher
+  p = 0.23 against main; not significant) before its head is final.
+- C2 next: 34 WORK_STEALING=ON runs at 364544c1 (the 5x count for class
+  A: 20 / 3 = 6.67 runs per failure on main).
