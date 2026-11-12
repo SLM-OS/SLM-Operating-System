@@ -185,3 +185,16 @@ where it applies. Per-run rows: qemu-rates-table.txt.
   (window-5e5548a1/), i.e. the #1234 window is pre-existing.
 - x86 make test at 5e5548a1: 2/3 FAILED (test_rebalance_after_burst, on_cpu leak warnings); main 3/3 PASS;
   5e5548a1 + the uncommitted resched guard 3/3 PASS (x86-5e5548a1/). Guard decision pending with the orchestrator.
+
+## Addendum 4: final head 33f05c5a (x86 resched guard, #1236) and Pi 5
+- 33f05c5a = 5e5548a1 + kernel/arch/x86_64/platform_x86.c only. ARM64 .text: Pi 5 test and production kernels
+  byte-identical to 5e5548a1, QEMU test kernel same size and per-function sizes
+  (arm64-text-33f05c5a-vs-5e5548a1.txt).
+- x86 make test 10/10 PASS, 0 'still on a CPU' warnings (x86-33f05c5a/).
+- /ci at 33f05c5a: all 10 steps pass (ci-33f05c5a/ci-summary.txt).
+- Pi 5 (pi-5-1), fix-head test kernel, integration suite 20 boots (pi5/pi5-fix-5e5548a1-integration-run01..20.txt):
+  isolated=10/10 and normal=10/10 20/20, stress bad=0 20/20, #1229 test bad=0 20/20, no KERNEL PANIC; each boot
+  18 failures, the same set in all 20 and equal to run 3's split-pi5 known #1109 list.
+- Pi 5 production boot_test 10/10 (pi5/pi5-fix-5e5548a1-prod-boot_test10.txt), average 13.0 s.
+- Per-run Pi 5 captures were written by labctl boot_test to its output_dir (/var/lib/labctl/output/l4-c1-*,
+  the only allowed write path) and copied here.
