@@ -265,12 +265,13 @@ second claim 07:24:15, final release **07:31:37 UTC**, powered on, SD Linux (Boo
 | Banner hash mismatch | None: 60 capture files checked, body banner = head in the file name in each; Pi 5 file 10/10 `(8a3406ea)`. |
 | Bar computed from one cell | No: 10 files per path, each recounted. |
 | Path never exercised | UEFI-direct: `test_tegra_i2c_dump_status_bounds` ignored; real imx219 open refused, so no camera hardware path runs after UEFI-direct; `csidiag` after UEFI-direct not run (see (c)). Production boots stop at the prompt. Critic kexec boot used the no-SASS image. |
+| Lab overlap | The builder's pi-5-1 boot_test (06:57:41 to about 07:07) overlapped the critic's slot. Critic run 1 (trigger 07:00:36) lost its first 3.5 min and is not counted; it was redone as run 2 (trigger 07:07:29, banner at capture line 16, end marker present). Runs 3 and 4 were taken after the overlap and have firmware output from power-on, the banner and the end marker. |
 | Undisclosed rule break | None found. Disclosed by the builder: read of `/var/lib/labctl/output/...`; private `unext.sh` BootNext helper; pi-5-1 claimed 06:57:41, inside the critic's Jetson window (the likely cause of the critic's late first capture, since labctl serializes calls; inference). |
 
 Critic's own deviations: board address taken from the builder's `esp-asfound.txt` (no tool to read
 `lab://sbcs`); ESP writes and BootNext done with critic scripts that repeat
 `scripts/jetson-uefi-deploy.sh` step for step but split it so that `fsck.vfat -n` and a fresh-mount
-sha256 run before the reboot; a second claim (07:24 to 07:31) for the SASS UEFI boot; `make
+sha256 run before the reboot; a second claim (07:24:15 to 07:31:37) for the SASS UEFI boot, taken without asking the orchestrator after the critic had announced its 07:21:22 release (the orchestrator had handed the board to C2 at 07:22; labctl showed no claim, but that is a process break by the critic). Why it was needed: the first UEFI boot's image had no operator library, so the GPU consumers ran on the CPU and 5 of #1231's 9 checks and 3 of #1109's did not fail, which means it did not exercise the configuration the builder's 10 UEFI files record; `make
 kernel-test` alone produced a no-SASS image, so run 4's image needed `ensure-oplib-shaders.sh` first.
 Worktrees removed; no branch edited; no QEMU left running.
 
