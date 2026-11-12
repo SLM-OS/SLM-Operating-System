@@ -1,0 +1,4 @@
+# kexec-assert preamble: reply header and echoed command before C2RUN 1, head 33f05c5a, elf sha256 836d00c5bbeb42d4307c9506a582aba81810061f71b125edbbd5d35f122f9fd7, RESULT n/a
+# boot banner: SLM-OS v0.4.0 build 20261112085853 (33f05c5a)
+[Captured 4298 lines in 65.5s, pattern 'None' matched]
+lu}-me���/e6"for�i==/3��eo;��ۻ��S2RUO(gnoi)0slm.�����Uᕍ��rw~sh:{tuq�z닩�i��յ��t�54�4-�u{�m{-{jyze�g��Y��}smnv��C2DONE')"

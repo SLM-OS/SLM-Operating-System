@@ -1,0 +1,44 @@
+# C2 step 3b summary, jetson-nano-2 kexec, head c1/1213-fix 33f05c5a00cee9e244349651b7a92c7abc84b9fd, slmos.elf sha256 836d00c5bbeb42d4307c9506a582aba81810061f71b125edbbd5d35f122f9fd7; RESULT bench stealing --sustain 2500 --assert-shares 20/20 PASS, every run's capture verbatim in its own file
+# boot banner: SLM-OS v0.4.0 build 20261112085853 (33f05c5a); /sys/version commit 33f05c5a
+
+Window: claimed 10:36:41 UTC, released 10:45 UTC (board left at SD
+Linux, powered on, /root/slmos-c2-33f05c5a.elf removed; the ESP was not
+touched). Pre-flight: no claims, power on, ping and serial up,
+recovery_mode released. ssh only (192.168.4.5); no console login.
+
+Method (step3b-procedure-33f05c5a.txt): one labctl serial_send ran
+  lua-admin -e "for i=1,20 do print('C2RUN '..i) slm.shell_exec('bench stealing --sustain 2500 --assert-shares') end print('C2DONE')"
+with capture_until ^C2DONE. The reply ("[Captured 4298 lines in 65.5s]",
+310,260 characters) exceeded the tool's inline limit, so the harness
+saved it to a file unchanged. That file is kexec-assert-loop-reply.json
+here, byte for byte ({"result": "<reply>"}). tools/v2/split_assert_runs.py.txt
+cut it at the C2RUN markers into kexec-assert-run01..20.txt (lines 1-2
+are added headers; everything after is the reply text unchanged, and
+each RESULT is copied from that run's own ASSERT-SHARES line), plus
+kexec-assert-preamble.txt (reply header and echoed command) and
+kexec-assert-tail.txt (from C2DONE). No run text was retyped.
+
+| Run | Verdict (from its own file) |
+|---|---|
+| 01 to 20 | ASSERT-SHARES: PASS, 20 of 20 |
+
+- Every run completed all its tasks (972 to 1032 per run, "Completed:
+  N / N" in each file).
+- Lowest-to-best thief task ratio: 0.777 to 0.960 over the 20 runs. The
+  lowest thief was CPU 2 in all 20 (13.7% to 16.3% share); the best was
+  CPU 0, 3 or 4 (16.9% to 17.7%). The pass bar is half the best
+  thief's share. For comparison: step 3 at 5e5548a1 had 0.873 to 0.989
+  with the lowest thief varying, and the #1216 stall in coherency run 3
+  left CPUs 2 and 3 at 0.40 to 0.83 of the median, with 0 tasks in some
+  runs. That CPU 2 is consistently lowest here is an observation, not
+  investigated; it stays well above the bar.
+
+Boot: kexec of the staged ELF (on-board sha256 checked) reached slmos>
+93.8 s after slmos-kexec, banner "SLM-OS v0.4.0 build 20261112085853
+(33f05c5a)". That serial_capture reply (344 lines, no tail) came back
+inline, not as a saved file, so it is not reproduced here (not
+retyped); only its banner and timing are cited. /sys/version (inline,
+6 lines) read build 20261112085853, commit 33f05c5a.
+
+Not done in this slot (by the orchestrator's priority): extra
+full-capture kexec boots.
