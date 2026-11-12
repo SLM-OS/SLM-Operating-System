@@ -567,3 +567,23 @@ UTC (Fable, blind), holding jetson-nano-2 to about 07:45 for one test-kernel
 boot per path at 8a3406ea. The lab sat idle from 06:56 to 06:58 UTC (the
 handover notice arrived late). The 07:05 and 07:32 reminders are deleted;
 a 07:47 reminder replaces them.
+
+## Entry 19 (written 07:06 UTC): C2 /ci cell at 5e5548a1; C1 status
+
+- C2, `gauntlet-4-hw-pi5` 7546694b,
+  `run4-hw/c2/ws-on-5e5548a1-summary.txt`: WORK_STEALING=ON, 20 runs,
+  load 1.25 to 4.53, 0 INVALID. Class A 0 of 20, class B 0 of 20.
+  Failures: run15 and run16 #1230; run19 #1232; run20
+  test_task_pinned_to_cpu0 (a fourth #1233-shape test, added to #1233).
+  /ci decision: 16 of 20, not added. Because 5e5548a1 reverts the
+  switch-in wait, the earlier 0 of 72 does not transfer; 14 more runs at
+  5e5548a1 are under way to reach 34 (5x for #1219).
+- C1 status (07:10 UTC): Pi 5 images rebuilt at 5e5548a1; the critic's
+  window patch at 5e5548a1 no longer hangs (2 of 2), but the migrated task
+  faults at switch-in, and the same patch faults identically on unmodified
+  main 6c1f4c9c (2 of 2), so the #1234 window predates the fix
+  (`run4-hw/c1/window-5e5548a1/`, `gauntlet-4-hw-pi5` 6a4c99ed; added to
+  #1234). End-state comments posted on #1213, #1223, #1211. The litmus test
+  runs in the Pi 5 integration suite (passed in run 3's
+  split-pi5-integration-run02.txt). C1's x86 guard approval was resent
+  (it had not reached C1).
