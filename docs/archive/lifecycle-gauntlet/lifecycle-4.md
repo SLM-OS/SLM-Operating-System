@@ -464,3 +464,17 @@ that head; the C3 critic's boots take the lab at 07:05 meanwhile.
   (#1223), which does not depend on the new head; then C2's Jetson hour and
   C1's Pi 5 items (1) to (3) at C1's new head. Items that do not fit by
   10:20 UTC are recorded as not run.
+
+## Entry 14 (written 06:21 UTC): C2 cell at 9185d4cb; /ci decision "no"
+
+C2, `gauntlet-4-hw-pi5` f4fe645c, `run4-hw/c2/ws-on-9185d4cb-summary.txt`:
+WORK_STEALING=ON, 20 runs, load 1.17 to 5.12, no external kills. Class A
+(#1219) 0 of 20 (0 of 72 across 364544c1, 6d4fe041, 9185d4cb, same
+scheduler code); class B 0 of 20; the three #1233 tests and the #1229 test
+0 of 20; failures: run03 #1230, run20 test_runner_parks_without_a_lock
+(#1184). Step 4: 18 of 20, so WORK_STEALING=ON is not added to /ci (rule
+as written; neither failure depends on stealing). #1233 stays open until
+C1's branch merges. Jetson production artifacts built at 9185d4cb
+(`jetson-elf-compare-364544c1-9185d4cb.txt`: only test_scheduler.c
+functions change size). These cells are at the deadlocking head; C2's /ci
+cell and Jetson hour rerun at C1's next head.
