@@ -1,5 +1,5 @@
-# jetson-nano-2 UEFI-direct boot test, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, slmos.bin sha256 fa168ee5eaf61870b990d5d4636853d148bc6ae90e4566cebe1cb38e4daa1f50, RESULT 9/9 PASS of 10 planned (slmos> 60.9-62.5 s after reboot; no Unhandled Exception/ABORT/Powering off). Boot 10 not run: it would have pushed the restore past the 08:55 hard end. Session 1: boot 01 via scripts/jetson-uefi-deploy.sh (ESP write 1), boots 02-06 BootNext 000E. Session 2: boot 07 via jetson-uefi-deploy.sh (ESP write 2, after the session-1 restore), boots 08-09 BootNext
-# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1); /sys/version commit 5e5548a1 (boot 01)
+# jetson-nano-2 UEFI-direct boot test, head 5e5548a1f8ef9ba3f38fa9c61317861749c34480, slmos.bin sha256 fa168ee5eaf61870b990d5d4636853d148bc6ae90e4566cebe1cb38e4daa1f50, RESULT 10/10 PASS (slmos> 60.9-62.5 s after reboot; no Unhandled Exception/ABORT/Powering off). Session 1: boot 01 via scripts/jetson-uefi-deploy.sh (ESP write 1), boots 02-06 BootNext 000E. Session 2: boot 07 via deploy (ESP write 2), 08-09 BootNext. Session 3: boot 10 via deploy (ESP write 3), full capture in uefi-boot10-full.txt. Boots 01-09 captured with tail=3 (pattern status and elapsed time only)
+# boot banner: SLM-OS v0.4.0 build 20261112063436 (5e5548a1)
 uboot01 deploy start 08:06:59
 staged sha256=fa168ee5eaf6 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
 uboot01 PASS slmos> 62.0s after reboot; cat /sys/version commit 5e5548a1
@@ -20,3 +20,6 @@ uboot08 bootnext 08:46:58
 uboot08 PASS slmos> 61.2s
 uboot09 bootnext 08:49:43
 uboot09 PASS slmos> 62.0s
+uboot10 deploy (session 3 ESP write) 08:54:34
+staged sha256=fa168ee5eaf6 on /dev/disk/by-partlabel/SLMOS-ESP; BootNext=000E; rebooting
+uboot10 PASS slmos> 62.1s (full capture: uefi-boot10-full.txt, 1410 lines)

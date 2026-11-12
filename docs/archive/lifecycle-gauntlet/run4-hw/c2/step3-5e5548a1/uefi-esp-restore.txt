@@ -1,4 +1,4 @@
-# jetson-nano-2 NVMe ESP restores after step 3, RESULT both sessions SLMOS.efi 789cba62... (= as found), fsck clean, 2196 clusters, no BootNext, /root/slmos-c2-5e5548a1.elf removed; board left at SD Linux, powered on (as found); release_sbc 08:24 (session 1) and 08:52:45 UTC (session 2)
+# jetson-nano-2 NVMe ESP restores after step 3, RESULT all three sessions SLMOS.efi 789cba62... (= as found), fsck clean, 2196 clusters, no BootNext; /root/slmos-c2-5e5548a1.elf removed; board left at SD Linux, powered on (as found); releases 08:24, 08:52:45, 08:58:06 UTC
 # boot banner: n/a
 08:24:00
 789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.0mSgYy1s6O/EFI/SLMOS/SLMOS.efi
@@ -17,3 +17,11 @@ ls: cannot access '/root/slmos-c2-*': No such file or directory
 BootCurrent: 0001
 BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
 08:52:43
+--- session 3 restore 08:57:55
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.eigN6RTTnN/EFI/SLMOS/SLMOS.efi
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+want 789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+08:57:59
