@@ -1131,3 +1131,43 @@ Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
 - 19:28:58 UTC: kexec integration suite on jetson-nano-2 started (same
   boot_test + host trigger method as Entry 39; elf staged as
   /root/slmos-l4co-test-1b85b315.elf, sha checked).
+
+## Entry 41 (written 20:31 UTC): /ci on main green; C3 /ci green on retry; a new CPU 4 fault in the #1229 test (#1238)
+
+- **/ci on main 5b28d065** (after the merge): all 10 steps rc=0, 19:27 to
+  19:44 UTC. make test ARM64, x86-64 and AI_SCHED PASSED; runtime-test 308
+  and 328 ok; check-braces "no changed C lines"; build order passed; Jetson
+  layout "All checks passed." Build warnings are the pre-existing Lua
+  (ljumptab.h, lstrlib.c, lauxlib.c, lvm.c, lua_slm.c) and x86 ld lines.
+  Logs: `gauntlet-4-hw-pi5` `run4-hw/closeout/ci-main-5b28d065/` (e37bfb6d).
+- **/ci on c3/jetson-suite 1b85b315**: try 1 stopped at make test (ARM64)
+  on `test_litmus_patterns_pass`, "MP weak rows ... 1" (#1230's known QEMU
+  signature; C3 touches no SMP or litmus code). Try 2, full rerun: all 10
+  steps rc=0; check-braces 0 violations, 12 configurations parsed. Plus
+  `make test-qemu-uefi` (linker-script change): PASS, in place, relocated
+  and the five model-delivery cases. Logs: `gauntlet-4-hw-jetson`
+  `run4-hw/closeout/ci-c3-1b85b315-try1/`, `-try2/` (9a91b7f1).
+- **Kexec suite at 1b85b315 so far: 5 of 7 reach the last test**
+  (`test_work_stealing_distributes_load`, "14 total failure(s)", 15 failing
+  checks, all #1109). **Boots 02 and 03 fault in an idle task on CPU 4**
+  right after `test_migrate_ready_task_updates_assigned_cpu`, during
+  `test_preempt_flag_follows_migrated_task` (new in #1237):
+  - boot 02: EL1 PC alignment fault, ESR 0x8a000000, FAR = ELR =
+    0xa00000003, task idle_3 (id 2), CPU 4; "System halted"; pdm_done
+    TIMEOUT;
+  - boot 03: data abort (read) at 0x3, ESR 0x96000006, ELR 0x8002c5a8,
+    task idle_3 (id 5), CPU 4, SPSR equal to x30 (a stack address); CPU 4
+    stays dead, the suite continues on 5 CPUs and times out at 720 s
+    (`test_regs_every_cpu_reports` 5 of 6, litmus rows to CPU 4 time out).
+  Not the #1207 PMM halt, which did not appear. The test had never run on
+  Jetson (run 4's Jetson #1237 rows were production kernels; run 4's
+  Jetson suite predates #1237); Pi 5 at 33f05c5a passed it 5 of 5. Filed
+  **#1238** (bug, platform:jetson, sub:sched, **P1-high**, Backlog);
+  hypothesis there, not established: the #1234 window
+  (`sched_migrate_task` has no on_cpu check), or a defect in #1237's own
+  changes exposed by Jetson's layout.
+- Files: `gauntlet-4-hw-jetson` `run4-hw/closeout/c3-1b85b315-jetson-kexec-suite-boot01..07.txt`
+  and trigger logs. Boots 08-10 running (from 20:30 UTC), then UEFI-direct
+  x3.
+- Step 4 (#1223) will not run: past the 3-hour mark by the time step 3
+  ends.
