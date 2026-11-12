@@ -312,3 +312,35 @@ to 07:05 UTC.
   p = 0.23 against main; not significant) before its head is final.
 - C2 next: 34 WORK_STEALING=ON runs at 364544c1 (the 5x count for class
   A: 20 / 3 = 6.67 runs per failure on main).
+
+## Entry 8 (written 04:57 UTC): C3 UEFI-direct 10 of 10; C2 cell at 364544c1
+
+- C3 (status, 04:36 UTC): the UEFI-direct suite reached "Test Suite
+  Summary" in 10 of 10 boots at 8a3406ea
+  (`gauntlet-4-hw-jetson` a3b06ff7,
+  `run4-hw/c3/final-8a3406ea-uefi-suite-run01..10.txt`), each 22 failing
+  checks: 13 under #1109 and 9 UEFI-only, filed as **#1231**. Ruling: the
+  kexec suite x10 at 8a3406ea is a bar and runs before the production boot
+  tests; all of it fits before 07:05.
+- C2 WORK_STEALING=ON at 364544c1 (with the #1229 commit), 34 runs, load
+  2.07 to 3.67, `gauntlet-4-hw-pi5` 4755264d,
+  `run4-hw/c2/ws-on-364544c1-summary.txt`:
+
+| Class | main (20) | 5be808c5 (20) | 364544c1 (34) |
+|---|---|---|---|
+| A #1219 stress hang | 3 | 3 | 0 |
+| B #1213 family panic | 2 | 0 | 0 |
+| C litmus #1230 | 3 | 4 | 0 |
+| test_benchmark_context_switch | 0 | 3 | 0 |
+| test_proactive_load_balance_inert_when_light | 0 | 1 | 0 |
+| test_policy_custom_assign_cpu_called | 0 | 0 | 1 |
+| test_preempt_flag_follows_migrated_task (new) | n/a | n/a | 13 |
+
+  #1219 under the 5x rule: 20 / 3 = 6.67 runs per failure on main, 5x =
+  33.3, 34 clean runs at 364544c1: met, pending the C2 critic. Class B at
+  0 of 54 across the two fixed heads is C1's to argue from its own cells
+  (bar (c) is on the stress test and the 1 s variant). Class C is not
+  claimed (load differs across cells). C1's new #1229 test fails 13 of 34
+  at `pdm_moved > 0`, every one with bad=0: a test defect under
+  WORK_STEALING, relayed to C1 with the custom-assign race. WORK_STEALING=ON
+  is not /ci-eligible at 364544c1 (21 of 34).
