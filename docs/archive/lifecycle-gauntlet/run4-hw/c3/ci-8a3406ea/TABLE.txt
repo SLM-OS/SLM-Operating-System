@@ -1,0 +1,17 @@
+# /ci (.claude/commands/ci.md) at c3/jetson-suite 8a3406ea (the PR head), host, 07:08-07:30 UTC, run by ci-run2.sh (each step logged in full to NN-*.log, continue-on-failure). RESULT: 12/12 steps rc=0, including make test-qemu-uefi. No "terminating on signal" in any log (no externally killed QEMU). Step 00 (the Jetson production build) was skipped because the 8a3406ea production images were already built and booted on hardware.
+# boot banner: (none; host)
+
+| Step | Status | Notes (from the logs in this directory) |
+|------|--------|-------|
+| ARM64 build | pass | 164 warning lines, all in vendored Lua (ljumptab.h 161, lua_slm.c 3); same count at d512f40b |
+| x86-64 build | pass | 166 warning lines, same Lua sources |
+| Jetson real-weights build (kernel + kernel-test) | pass | 328 warning lines, same Lua sources; same count at d512f40b |
+| Test suite (ARM64 QEMU) | pass | "PASSED - All tests passed (exit code 0)" |
+| x86-64 test suite | pass | "PASSED - All tests passed (isa-debug-exit code 1 = success)" |
+| AI scheduler test suite | pass | "PASSED - All tests passed (exit code 0)" (the #1230 litmus flake did not recur in this run) |
+| Runtime host tests | pass | 308 passed / 0 failed (default), 328 passed / 0 failed (slm,ai_eviction_models) |
+| Brace check | pass | 0 violations, 0 files unparsed |
+| Build order check | pass | All build-order tests passed |
+| Jetson layout check | pass | All checks passed, incl. the new "no section with contents past __data_end" (#1224); no "!" skips |
+| QEMU UEFI (test-qemu-uefi) | pass | in-place and relocated UEFI boots, model delivery (good, no-file, read-error, too-big, no-memory) |
+| Artifact check | pass | 10 source/doc files in git diff origin/main...HEAD, no build artifacts, worktree clean |
