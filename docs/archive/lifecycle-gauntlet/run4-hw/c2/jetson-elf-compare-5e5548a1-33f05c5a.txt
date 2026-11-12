@@ -1,0 +1,64 @@
+# Jetson production ELF compare: 5e5548a1 (sha256 2964ae29c0f780862c0e48e870e3438cb729285c9ad9d398c8e0325ede373b80) vs 33f05c5a (sha256 836d00c5bbeb42d4307c9506a582aba81810061f71b125edbbd5d35f122f9fd7), RESULT 0 functions changed size or appeared/disappeared; byte compare: .text and .data identical, .rodata differs only in the commit and build-stamp strings (92 bytes, 9 runs)
+# boot banner: n/a (static compare)
+## git diff --stat 5e5548a1 33f05c5a
+ kernel/arch/x86_64/platform_x86.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+## functions whose size differs (or exist in one only), with source file
+## section headers 5e5548a1
+  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            0000000000000000 000000 000000 00      0   0  0
+  [ 1] .text             PROGBITS        0000000080000000 010000 292598 00  AX  0   0 65536
+  [ 2] .rodata           PROGBITS        0000000080292600 2a2600 5dd5a2 00   A  0   0 256
+  [ 3] .text.user        PROGBITS        0000000080870000 880000 001000 00  AX  0   0 32
+  [ 4] .data             PROGBITS        0000000080880000 890000 024400 00  WA  0   0  8
+  [ 5] .got              PROGBITS        00000000808a4400 8b4400 000030 08  WA  0   0  8
+  [ 6] .got.plt          PROGBITS        00000000808a4430 8b4430 000018 08  WA  0   0  8
+  [ 7] .bss              NOBITS          00000000808b0000 8b4448 2330170 00  WA  0   0 65536
+  [ 8] .stack            NOBITS          0000000082be0170 8b4448 004000 00  WA  0   0  1
+  [ 9] .debug_abbrev     PROGBITS        0000000000000000 8b4448 010556 00      0   0  1
+  [10] .debug_info       PROGBITS        0000000000000000 8c499e 04b021 00      0   0  1
+  [11] .debug_aranges    PROGBITS        0000000000000000 90f9c0 007370 00      0   0 16
+  [12] .debug_ranges     PROGBITS        0000000000000000 916d30 0183a0 00      0   0  1
+  [13] .debug_str        PROGBITS        0000000000000000 92f0d0 0389e7 01  MS  0   0  1
+  [14] .debug_line       PROGBITS        0000000000000000 967ab7 05086f 00      0   0  1
+  [15] .debug_frame      PROGBITS        0000000000000000 9b8328 000780 00      0   0  8
+  [16] .debug_loc        PROGBITS        0000000000000000 9b8aa8 008557 00      0   0  1
+  [17] .symtab           SYMTAB          0000000000000000 9c1000 070128 18     18 15012  8
+  [18] .strtab           STRTAB          0000000000000000 a31128 05267c 00      0   0  1
+  [19] .shstrtab         STRTAB          0000000000000000 a837a4 0000ba 00      0   0  1
+## section headers 33f05c5a
+  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            0000000000000000 000000 000000 00      0   0  0
+  [ 1] .text             PROGBITS        0000000080000000 010000 292598 00  AX  0   0 65536
+  [ 2] .rodata           PROGBITS        0000000080292600 2a2600 5dd5a2 00   A  0   0 256
+  [ 3] .text.user        PROGBITS        0000000080870000 880000 001000 00  AX  0   0 32
+  [ 4] .data             PROGBITS        0000000080880000 890000 024400 00  WA  0   0  8
+  [ 5] .got              PROGBITS        00000000808a4400 8b4400 000030 08  WA  0   0  8
+  [ 6] .got.plt          PROGBITS        00000000808a4430 8b4430 000018 08  WA  0   0  8
+  [ 7] .bss              NOBITS          00000000808b0000 8b4448 2330170 00  WA  0   0 65536
+  [ 8] .stack            NOBITS          0000000082be0170 8b4448 004000 00  WA  0   0  1
+  [ 9] .debug_abbrev     PROGBITS        0000000000000000 8b4448 010556 00      0   0  1
+  [10] .debug_info       PROGBITS        0000000000000000 8c499e 04b021 00      0   0  1
+  [11] .debug_aranges    PROGBITS        0000000000000000 90f9c0 007370 00      0   0 16
+  [12] .debug_ranges     PROGBITS        0000000000000000 916d30 0183a0 00      0   0  1
+  [13] .debug_str        PROGBITS        0000000000000000 92f0d0 0389e7 01  MS  0   0  1
+  [14] .debug_line       PROGBITS        0000000000000000 967ab7 05086f 00      0   0  1
+  [15] .debug_frame      PROGBITS        0000000000000000 9b8328 000780 00      0   0  8
+  [16] .debug_loc        PROGBITS        0000000000000000 9b8aa8 008557 00      0   0  1
+  [17] .symtab           SYMTAB          0000000000000000 9c1000 070128 18     18 15012  8
+  [18] .strtab           STRTAB          0000000000000000 a31128 05267c 00      0   0  1
+  [19] .shstrtab         STRTAB          0000000000000000 a837a4 0000ba 00      0   0  1
+
+## Byte-level compare (objcopy section bytes, per-byte diff)
+.text   2696600 / 2696600 bytes, 0 differing (sha256 prefix 0afc152d119587c3 for both)
+.data    148480 /  148480 bytes, 0 differing
+.rodata 6149538 / 6149538 bytes, 92 differing in 9 runs, every run inside a
+        version string: the 40-hex SLMOS_GIT_SHA, "SLM-OS v0.4.0 build
+        <stamp> (<sha8>)", "/sys/version" build/commit lines, the
+        "(build <stamp>, sha <sha8>)" line, and the VERSION/BUILD_STAMP/
+        BUILD_SHA table. 5e5548a1 build 20261112063436, 33f05c5a build
+        20261112085853.
+Conclusion: the ARM64 Jetson production image at 33f05c5a runs the same
+code and data as the 5e5548a1 image used for step 3 (elf 2964ae29...);
+only the embedded identity strings differ. The step-3 Jetson rows carry
+to 33f05c5a. git diff --stat 5e5548a1 33f05c5a: kernel/arch/x86_64/platform_x86.c only.
