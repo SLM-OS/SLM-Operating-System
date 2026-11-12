@@ -1,0 +1,24 @@
+[FAIL] 14 test(s) failed
+[FAIL] 1 test(s) failed
+[FAIL] 1 test(s) failed
+[FAIL] 2 test(s) failed
+[FAIL] mlp_finish_nan_never_wins
+[FAIL] no help entry for built-in 'emmc-bringup'
+[FAIL] test_blob_autoload_accepts_max_length_paths_across_all_slots
+[FAIL] test_blob_autoload_fat_update_invalidates_lfs_fallback
+[FAIL] test_blob_autoload_init_creates_conf
+[FAIL] test_blob_autoload_init_marks_existing_fat_config_authoritative
+[FAIL] test_blob_autoload_init_migrates_lfs_entries_to_fat
+[FAIL] test_blob_autoload_init_recovers_missing_fat_blob_from_lfs
+[FAIL] test_blob_autoload_overwrites_existing_conf
+[FAIL] test_blob_autoload_recovers_from_backup_conf
+[FAIL] test_blob_autoload_rejects_malformed_metadata_suffix
+[FAIL] test_blob_autoload_set_get_clear_round_trip
+[FAIL] test_blob_autoload_set_ignores_unrelated_stale_lfs_entry
+[FAIL] test_blob_autoload_set_migrates_all_lfs_entries_to_fat
+[FAIL] test_blob_autoload_shell_commands
+[FAIL] test_blob_boot_autoload_skips_tampered_managed_blob
+[FAIL] test_builtin_commands_grouped_and_sorted
+[FAIL] test_every_command_has_help_entry
+[FAIL] test_eviction_run_tests_passes
+[FAIL] test_timer_irq_is_physical
