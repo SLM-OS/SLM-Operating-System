@@ -260,3 +260,26 @@ boot_test 10. A boot that halts before the last test does not count toward
 "runs to its last test", even with an issue number: the d512f40b kexec
 cell reads 9 of 10. The 04:35 and 06:15 reminders are deleted
 (`c430dcc2`, `6da641dc`); the 07:05 reminder stands.
+
+## Entry 6 (written 03:36 UTC): C1 reported steps 1 to 6; two follow-ups; C2 cell at C1's head
+
+C1 reported steps 1 to 6 (QEMU only, no labctl call), evidence
+`gauntlet-4-hw-pi5` 93a44428, `run4-hw/c1/`. Under the blind protocol
+the C1 builder entry (mechanism, rates, ordering argument) is written after
+the C1 critic files. Recorded here only: heads named by C1 (unfixed
+reproducer c1/isolated-1s-main 01931af6; trace c1/1213-trace b8df6f5f;
+fix c1/1213-fix 5be808c5), and that C1 claims bars (a), (b), (c) and the
+QEMU half of the isolation-path bar. Claims, not findings, until the critic
+reproduces them.
+
+Follow-ups sent to C1 before its head is final: (1) #1229 is in C1's files
+and its report did not address it: say whether the traces show a stale
+preempt_disabled clear, and fix it as a separate commit with its own
+failing-on-old-code test or say why not; (2) classify #1228 (step 6), with
+a code-and-trace argument labelled as such, since C1 has no Jetson time;
+(3) list task_destroy's callers against the new bounded wait (IRQs masked,
+locks held).
+
+C2 started its unattended 20-run WORK_STEALING=ON cell at 5be808c5
+(`run4-hw/c2/ws-on-5be808c5-*`). Lab unchanged: C3 holds both boards
+to 07:05 UTC.
