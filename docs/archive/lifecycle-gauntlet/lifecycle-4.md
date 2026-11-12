@@ -794,3 +794,11 @@ to its Round 2.
   adopt the first critic's complete run files after checking the script.
   The C1 critic is also on Fable; asked for status in case it hits the
   same limit.
+
+## Entry 32 (written 09:21 UTC): usage reset; the Fable C2 critic resumed
+
+The user reset the usage limit at about 09:21 UTC. The replacement critic
+(session model, Entry 31) was stopped within about a minute of starting,
+before any verdict; the original Fable C2 critic was resumed with its
+context and run files, deadline 10:20 UTC. Its verdict records the
+interruption. The C1 critic (Fable) continues.
