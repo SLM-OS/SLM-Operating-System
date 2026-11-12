@@ -368,11 +368,18 @@ keep a slot from being freed or reused under a CPU that still uses it:
   that claims the slot, so a stale destroyer can no longer see the previous
   occupant's `TASK_TERMINATED` on a slot that already has a new id.
 
-Before these rules the reaper's second `task_destroy` raced the owner's
-next `task_create` on the same slot: it passed the TERMINATED check, cleared
-the new task's id and stack pointers mid-construction, and the new task ran
-with a saved SP of 0 (first-fault traces in
-`docs/archive/lifecycle-gauntlet/run4-hw/c1/` on `gauntlet-4-hw-pi5`). The
+Before these rules two sequences were traced (first-fault traces in
+`docs/archive/lifecycle-gauntlet/run4-hw/c1/` on `gauntlet-4-hw-pi5`):
+
+- **A (SP 0 fault).** The reaper's second `task_destroy` raced the owner's
+  next `task_create` on the same slot: it passed the TERMINATED check,
+  cleared the new task's id and stack pointers mid-construction, and the
+  new task ran with a saved SP of 0.
+- **B (`task_exit: schedule returned!`).** The owner destroyed the slot
+  and built the next task in it while the exiting CPU was still in
+  `schedule()`; that CPU's `switch_to` then saved the old task's registers
+  over the new task's fresh context, and the new task resumed inside the
+  old task's `task_exit`. The
 debug build option `SLOT_TRACE=ON` (`kernel/include/slot_trace.h`) records
 these lifecycle events per CPU and dumps them on the first EL1 fault or
 panic.

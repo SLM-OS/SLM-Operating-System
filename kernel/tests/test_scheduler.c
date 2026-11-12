@@ -2137,7 +2137,11 @@ static void test_rapid_task_exit_no_panic(void)
  * still sees the old occupant's TERMINATED, so it clears the new task's id,
  * stack_base and stack_top mid-construction; task_create copies the
  * cleared stack_top into context.sp, and CPU 1 switches into a task whose
- * saved SP is 0.
+ * saved SP is 0. A second traced sequence ends in "task_exit: schedule
+ * returned!": CPU 0 destroys the slot and builds the next task in it
+ * before CPU 1 reaches switch_to, whose save half then writes the old
+ * task's registers over the new task's context; the new task resumes in
+ * the old task's task_exit.
  *
  * This test runs that loop as fast as it can: no yield between the wait
  * and the destroy, and the next create immediately after, so both the
