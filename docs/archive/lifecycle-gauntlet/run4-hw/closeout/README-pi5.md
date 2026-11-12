@@ -4,7 +4,7 @@ Each `*-bootNN.txt` is one labctl `boot_test` output_dir file, copied byte for b
 
 - Production: `make kernel PLATFORM=RASPI5` at 33f05c5a, slmos.bin sha256 8b827008c260d983, banner `build 20261112180020 (33f05c5a)`. boot_test runs=5, expect `slmos>`, timeout 120 s, output_dir /var/lib/labctl/output/l4co-pi5-prod-33f05c5a. **5/5**, 13.0-13.1 s each.
 - Integration suite: `make kernel-test PLATFORM=RASPI5` at 33f05c5a, slmos.bin sha256 437c7fe5d3ac8ac9, banner `build 20261112180146 (33f05c5a)`. boot_test runs=3 (output_dir ...-a) then runs=2 (...-b), expect `All test suites passed|total failure\(s\)`, timeout 400 s. **5/5** reached the summary, 168.8-177.7 s.
-- Deployed to kernel_2712.img only (config.txt has kernel=kernel_2712.img); original kept as .prev, restored after (6935256 bytes, mtime 2026-10-29); kernel8.img untouched. Board powered on and released 18:31 UTC.
+- Deployed to kernel_2712.img only (config.txt has kernel=kernel_2712.img); original kept as .prev, restored after (6935256 bytes, mtime 2026-10-29); kernel8.img untouched. Board powered on and released about 18:23 UTC.
 
 | File | Result | Lines | Samples collected | slot_reuse_stress | Summary | KERNEL PANIC / PAGE FAULT / Synchronous |
 |---|---|---|---|---|---|---|
