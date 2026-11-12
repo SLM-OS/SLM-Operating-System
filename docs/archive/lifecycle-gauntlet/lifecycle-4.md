@@ -368,3 +368,30 @@ Lab plan (revised): C3 to 07:05; C2 07:05 to about 08:35 (assert-shares
 priority (1) fix-head suite 20 boots with isolated=10/10, (2) boot_test
 10, (3) critic's 5 boots, (4) unfixed main + conversion 20 boots (#1223).
 Whatever does not fit is recorded as not run.
+
+## Entry 10 (written 05:48 UTC): C1 head 9185d4cb (test-only); C2 cell at 6d4fe041; external QEMU kills
+
+- C1 moved the head to **c1/1213-fix 9185d4cb**; C1 states everything
+  after 364544c1 touches only kernel/tests/test_scheduler.c (the reworked
+  #1229 test, and the three steal-sensitive test races). The critic is told
+  to verify that and to judge the loosened asserts under "redefined
+  criterion". 9185d4cb is final unless its /ci fails.
+- C2 WORK_STEALING=ON at 6d4fe041 (same scheduler code), 20 runs, load
+  1.01 to 10.01, `gauntlet-4-hw-pi5` 1fe6fcca,
+  `run4-hw/c2/ws-on-6d4fe041-summary.txt`: class A 0 of 18 valid, B 0 of
+  18, C (#1230) 11 of 18, #1137/#1163 1, the custom-assign race 1; 2 of 20
+  INVALID. C2 filed **#1233** (the steal-sensitive scheduler test races,
+  pre-existing under WORK_STEALING=ON); C1's 9185d4cb addresses them, so its
+  PR should reference #1233.
+- **External kills.** C2's run17 and run19 were ended by "terminating on
+  signal 15 from pid 2748681" and "pid 2755413", about 05:35 to 05:38 UTC,
+  not by C2's timeout. QEMU exits 0 on SIGTERM, so `make test` would have
+  reported both as PASSED. The user journal (`journalctl --user`, 05:30
+  to 05:40 UTC) shows five guarded QEMU scopes running at once (C1 critic
+  2, C1 2, C2 1), load up to 10, and no record of the sender. The Makefile
+  and scripts/ kill no QEMU by name. Every agent was asked whether it killed
+  QEMU it did not start, told to kill only its own PIDs, and to mark any
+  run with "terminating on signal" INVALID; C1 is held to 1 QEMU at a time
+  until its /ci is done. The answers go in the next entry.
+- C2's 20-run cell at 9185d4cb (the /ci decision) and the Jetson artifacts
+  at 9185d4cb are next.
