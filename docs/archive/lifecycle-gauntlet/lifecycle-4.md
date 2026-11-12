@@ -733,3 +733,17 @@ wait. In the same pairing main hit the cap twice (run02 #1219 hang, run05
   `gauntlet-4-hw-pi5` 8e72766c), but x86 make test is intermittent at this
   head (2 of 3 standalone runs failed, Entry 17), so the green /ci does not
   show x86 fixed. The guard commit (approved, Entry 17) is pending.
+
+## Entry 28 (written 08:27 UTC): C1 guard head 33f05c5a; #1236
+
+C1 pushed **c1/1213-fix 33f05c5a** (the approvals of 06:45, 07:10 and 08:06
+UTC reached C1 only at about 08:28). One commit after 5e5548a1, touching
+only kernel/arch/x86_64/platform_x86.c: resched_ipi_handler returns
+without calling schedule() while preempt_disabled[cpu] is set. x86 has no
+deferral path (reschedule_pending exists only under SECONDARY_PREEMPT,
+ARM64), so the kick is dropped; the commit argues it is re-raised by the
+CPU's next schedule() (tick or yield). Filed **#1236** (sub:sched,
+platform:x86-64, P1-high). Running: x86 make test 10 runs, the ARM64 .text
+comparison against 5e5548a1, then /ci at 33f05c5a. The C1 critic adds the
+guard (x86-only diff, .text identity, the re-raise argument, one x86 run)
+to its Round 2.
