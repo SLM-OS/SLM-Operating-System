@@ -300,6 +300,9 @@ int test_suite_pmu(void);
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 
+/* bench stealing --assert-shares decision (#1216) */
+int test_suite_steal_shares(void);
+
 /* Latency histogram + EWMA rate tests (admin & telemetry suite, M1) */
 int test_suite_latency_hist(void);
 

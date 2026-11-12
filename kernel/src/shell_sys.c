@@ -1989,6 +1989,78 @@ static void s3_steal_work_task(void *arg)
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
 }
 
+/* ---- bench idle-wakes (#1216): idle-task wake rate per CPU ----
+ *
+ * Measures what an idle CPU costs: how often each CPU's idle task
+ * returns from its wait instruction. `bench idle-wakes [ms]` snapshots
+ * the counters, sleeps the shell for ms (default 5000) so CPU 0 idles
+ * too, and prints wakes per second per CPU next to the timer tick rate
+ * for reference. At rest on a 100 Hz tick, a CPU that wakes only on
+ * its tick shows idle_per_s close to ticks_per_s; anything above it is
+ * wakes from other events (SEV, other interrupts). */
+extern volatile uint32_t sched_diag_idle_loops[];
+extern volatile uint32_t sched_diag_tick[];
+
+/* "123.4" for count per second over dt counter ticks at freq. */
+static void s3_fmt_rate(char *buf, size_t n, uint32_t count, uint64_t dt,
+                        uint64_t freq)
+{
+    uint64_t r10 = dt ? (uint64_t)count * 10ULL * freq / dt : 0;
+    uart_snprintf(buf, n, "%lu.%lu", (unsigned long)(r10 / 10),
+             (unsigned long)(r10 % 10));
+}
+
+/* Idle-loop wakes (#1216). Each pass of idle_task_func's loop is one
+ * return from its wait instruction (WFI or WFE) followed by a yield(),
+ * so the sched_diag_idle_loops delta over an interval counts the times
+ * that CPU's idle task woke. Prints one `iw` line per CPU with the
+ * idle and tick deltas and their rates over dt counter ticks. */
+static void s3_print_idle_wakes(const char *mode, const uint32_t *idle0,
+                                const uint32_t *idle1, const uint32_t *tick0,
+                                const uint32_t *tick1, uint64_t dt,
+                                uint64_t freq)
+{
+    shell_printf("\r\n  Idle wakes per CPU (%s, %lu us; idle = idle-loop"
+                 " passes, ticks = timer ticks):\r\n", mode,
+                 (unsigned long)(dt * 1000000ULL / freq));
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        char ir[24], tr[24];
+        uint32_t di = idle1[c] - idle0[c];
+        uint32_t dk = tick1[c] - tick0[c];
+        s3_fmt_rate(ir, sizeof(ir), di, dt, freq);
+        s3_fmt_rate(tr, sizeof(tr), dk, dt, freq);
+        shell_printf("  iw mode=%s cpu=%lu idle=%lu ticks=%lu us=%lu"
+                     " idle_per_s=%s ticks_per_s=%s\r\n", mode,
+                     (unsigned long)c, (unsigned long)di, (unsigned long)dk,
+                     (unsigned long)(dt * 1000000ULL / freq), ir, tr);
+    }
+}
+
+static int bench_idle_wakes(uint32_t ms)
+{
+    uint32_t idle0[MAX_CPUS] = {0}, idle1[MAX_CPUS] = {0};
+    uint32_t tick0[MAX_CPUS] = {0}, tick1[MAX_CPUS] = {0};
+    uint64_t freq = timer_get_frequency();
+
+    shell_puts("Idle Wake Rate (#1216)\r\n");
+    shell_puts("======================\r\n");
+    shell_printf("  Interval: %lu ms at rest (shell sleeping), %lu CPUs\r\n",
+                 (unsigned long)ms, (unsigned long)cpu_count);
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        idle0[c] = sched_diag_idle_loops[c];
+        tick0[c] = sched_diag_tick[c];
+    }
+    uint64_t t0 = timer_get_count();
+    task_sleep_ms(ms);
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        idle1[c] = sched_diag_idle_loops[c];
+        tick1[c] = sched_diag_tick[c];
+    }
+    uint64_t t1 = timer_get_count();
+    s3_print_idle_wakes("rest", idle0, idle1, tick0, tick1, t1 - t0, freq);
+    return 0;
+}
+
 #if CONFIG_WORK_STEALING
 /* ---- bench stealing: sustained variant and failure-reason trace (#1203)
  *
@@ -2293,9 +2365,79 @@ static void s3_print_trace_header(const char *mode, uint32_t run,
                  (unsigned long)STEAL_WIN_LOG_LEN);
 }
 
+/* "12.3%" for part/total (one decimal, truncated); "0.0%" when total
+ * is 0. */
+static void s3_fmt_pct(char *buf, size_t n, uint32_t part, uint32_t total)
+{
+    uint32_t pct10 = total ? (uint32_t)((uint64_t)part * 1000ULL / total) : 0;
+    uart_snprintf(buf, n, "%lu.%lu%%", (unsigned long)(pct10 / 10),
+             (unsigned long)(pct10 % 10));
+}
+
+/* bench stealing --sustain --assert-shares (#1216): print the verdict
+ * of steal_shares_check() for CPU 1 as the owner. Returns 0 on PASS,
+ * 1 on any FAIL. */
+static int s3_assert_shares(const uint32_t *exec, bool timed_out,
+                            uint32_t completed, uint32_t issued)
+{
+    struct steal_shares_verdict v =
+        steal_shares_check(exec, cpu_count, 1, timed_out ? 1 : 0);
+    char sb[16], sw[16], half[16];
+    s3_fmt_pct(sb, sizeof(sb), exec[v.best_cpu], v.total);
+    s3_fmt_pct(sw, sizeof(sw), exec[v.worst_cpu], v.total);
+    s3_fmt_pct(half, sizeof(half), exec[v.best_cpu] / 2, v.total);
+
+    switch (v.result) {
+    case STEAL_SHARES_PASS:
+        shell_printf("\r\n  ASSERT-SHARES: PASS lowest thief cpu=%lu share=%s"
+                     " (%lu tasks), best thief cpu=%lu share=%s (%lu tasks);"
+                     " every thief at or above half the best\r\n",
+                     (unsigned long)v.worst_cpu, sw,
+                     (unsigned long)exec[v.worst_cpu],
+                     (unsigned long)v.best_cpu, sb,
+                     (unsigned long)exec[v.best_cpu]);
+        return 0;
+    case STEAL_SHARES_LOW: {
+        char list[3 * STEAL_SHARES_MAX_CPUS + 1];
+        size_t pos = 0;
+        list[0] = '\0';
+        for (uint32_t c = 0; c < STEAL_SHARES_MAX_CPUS; c++) {
+            if ((v.below_mask & (1u << c)) && pos + 4 < sizeof(list)) {
+                pos += (size_t)uart_snprintf(list + pos, sizeof(list) - pos,
+                                        "%s%lu", pos ? "," : "",
+                                        (unsigned long)c);
+            }
+        }
+        shell_printf("\r\n  ASSERT-SHARES: FAIL cpu=%lu share=%s (%lu tasks)"
+                     " is below half of the best thief cpu=%lu share=%s"
+                     " (%lu tasks; half is %s); thieves below half: %s\r\n",
+                     (unsigned long)v.worst_cpu, sw,
+                     (unsigned long)exec[v.worst_cpu],
+                     (unsigned long)v.best_cpu, sb,
+                     (unsigned long)exec[v.best_cpu], half, list);
+        return 1;
+    }
+    case STEAL_SHARES_TIMEOUT:
+        shell_printf("\r\n  ASSERT-SHARES: FAIL timeout: %lu of %lu tasks"
+                     " completed; lowest thief cpu=%lu share=%s, best thief"
+                     " cpu=%lu share=%s\r\n",
+                     (unsigned long)completed, (unsigned long)issued,
+                     (unsigned long)v.worst_cpu, sw,
+                     (unsigned long)v.best_cpu, sb);
+        return 1;
+    default:
+        shell_printf("\r\n  ASSERT-SHARES: FAIL no thief executed a task"
+                     " (%lu thieves, %lu tasks)\r\n",
+                     (unsigned long)v.nthieves, (unsigned long)v.total);
+        return 1;
+    }
+}
+
 /* bench stealing --sustain: keep `depth` tasks outstanding on CPU 1 for
- * `ms` milliseconds, then wait for the outstanding ones to finish. */
-static void s3_bench_sustained(uint32_t ms, uint32_t depth, uint32_t work)
+ * `ms` milliseconds, then wait for the outstanding ones to finish.
+ * Returns 0, or with assert_shares the s3_assert_shares() verdict. */
+static int s3_bench_sustained(uint32_t ms, uint32_t depth, uint32_t work,
+                              bool assert_shares)
 {
     uint32_t exec[MAX_CPUS] = {0};
     uint64_t outstanding = 0;   /* bit j: slot j has a task in flight */
@@ -2404,6 +2546,12 @@ static void s3_bench_sustained(uint32_t ms, uint32_t depth, uint32_t work)
     }
     s3_print_trace_header("sustained", run, freq, issued, depth, work, ms);
     s3_print_trace(run, t0, freq, exec);
+    s3_print_idle_wakes("sustained", s3_pre.idle, s3_post.idle,
+                        s3_pre.ticks, s3_post.ticks, t1 - t0, freq);
+    if (assert_shares) {
+        return s3_assert_shares(exec, timed_out, completed, issued);
+    }
+    return 0;
 }
 #endif /* CONFIG_WORK_STEALING */
 
@@ -2529,7 +2677,7 @@ static int bench_eviction_e2e_cli(int argc, char *argv[])
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|infer-stress|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|idle-wakes|matmul|conv|quant|q4kdot|gpu|infer-stress|stats|all>\r\n");
         return 1;
     }
 
@@ -2660,6 +2808,18 @@ int cmd_bench(int argc, char *argv[])
             }
         }
         rust_conv_bench_fp32(iters);
+    } else if (strcmp(argv[1], "idle-wakes") == 0) {
+        uint32_t ms = 5000;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) != 0 || n < 100 || n > 60000) {
+                shell_puts("Usage: bench idle-wakes [ms]  (100..60000,"
+                           " default 5000)\r\n");
+                return 1;
+            }
+            ms = n;
+        }
+        return bench_idle_wakes(ms);
     } else if (strcmp(argv[1], "stealing") == 0) {
         /* S3: work-stealing Phase C load-imbalance benchmark.
          *
@@ -2679,14 +2839,18 @@ int cmd_bench(int argc, char *argv[])
          */
         uint32_t n_tasks = 16;
 #if CONFIG_WORK_STEALING
-        /* #1203 options: --sustain [ms] [--depth D] [--work W]. A bare
-         * number keeps its old meaning (burst task count). */
+        /* #1203 options: --sustain [ms] [--depth D] [--work W]
+         * [--assert-shares] (#1216). A bare number keeps its old
+         * meaning (burst task count). */
         uint32_t sustain_ms = 0;
         uint32_t depth = 16;
         uint32_t work = 8;
+        bool assert_shares = false;
         for (int ai = 2; ai < argc; ai++) {
             uint32_t n;
-            if (strcmp(argv[ai], "--sustain") == 0) {
+            if (strcmp(argv[ai], "--assert-shares") == 0) {
+                assert_shares = true;
+            } else if (strcmp(argv[ai], "--sustain") == 0) {
                 sustain_ms = 2500;
                 if (ai + 1 < argc &&
                     shell_parse_uint(argv[ai + 1], &n) == 0) {
@@ -2725,9 +2889,13 @@ int cmd_bench(int argc, char *argv[])
             return 0;
         }
 #if CONFIG_WORK_STEALING
+        if (assert_shares && sustain_ms == 0) {
+            shell_puts("  --assert-shares needs --sustain: the 16-task burst"
+                       " is too short for a share to mean anything\r\n");
+            return 1;
+        }
         if (sustain_ms != 0) {
-            s3_bench_sustained(sustain_ms, depth, work);
-            return 0;
+            return s3_bench_sustained(sustain_ms, depth, work, assert_shares);
         }
 #endif
         shell_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
