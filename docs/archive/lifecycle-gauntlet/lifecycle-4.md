@@ -443,3 +443,24 @@ that head; the C3 critic's boots take the lab at 07:05 meanwhile.
 - C3's answer is pending.
 - Ruling: name-pattern kills (pkill, killall) are forbidden to every
   agent for the rest of the run; the C1 critic stops until C1's new head.
+
+## Entry 13 (written 06:00 UTC): C1 Pi 5 prep; a second disclosed rule break; lab plan
+
+- C1 staged Pi 5 images under the main checkout's build/kernel (fix-head
+  test and production at 9185d4cb, unfixed main plus the step-5 conversion
+  at c1/main-isolation-conversion 3f64f624; sha256s in C1's evidence when
+  pushed). The fix-head images are rebuilt at C1's next head.
+- **Rule break (disclosed by C1):** C1 read labctl's output files under
+  /var/lib/labctl/output/ directly (no labctl call) to time Pi 5 boots:
+  about 163 s per completed integration boot, 339 s per hang, 23 s per
+  production boot. The rules forbid reading labctl's private state; C1 is
+  told not to repeat it, and the numbers are used only to size the slot.
+- C1 reports a zero-cost check at 9185d4cb by stripping every trace hook
+  (`slot-trace-size-check-9185d4cb.txt`, pending push): claim until
+  checked. C1's /ci at 9185d4cb is stopped (the head moves for the
+  deadlock fix, Entry 11).
+- Lab plan, revised: C3 to 07:05 (or earlier if done), C3 critic about 40
+  min; then C1 on pi-5-1 for item (4), unfixed main plus conversion
+  (#1223), which does not depend on the new head; then C2's Jetson hour and
+  C1's Pi 5 items (1) to (3) at C1's new head. Items that do not fit by
+  10:20 UTC are recorded as not run.
