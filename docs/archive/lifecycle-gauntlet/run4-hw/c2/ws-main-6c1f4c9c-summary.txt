@@ -123,7 +123,7 @@ re-run this cell; rate to 0 under the 5x rule.
 Classification: not C1's mechanism as stated for #1213 (no fault, no
 slot reuse, no CPU wedged in an exception); a lock holder stranded on a
 CPU whose preempt_disabled flag is stuck at 1. Kernel code, not test
-code: filed, not fixed.
+code: filed as #1229, not fixed.
 
 The digit_classifier "Exiting (0 inferences)" line that precedes the
 FAIL in every class A run (and both run-3 failures) is that component's
