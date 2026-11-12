@@ -1,0 +1,56 @@
+# SLOT_TRACE zero-cost check at the final head 9185d4cb: QEMU_VIRT production kernel (make kernel), option off, vs the same tree with every trace hook removed (strip_trace.py: SLOT_TRACE* calls, #if defined(CONFIG_SLOT_TRACE) blocks, includes, slot_trace.c dropped from CMakeLists); RESULT .text 2442936 B in both, per-function nm sizes identical (0 diff lines)
+# boot banner: (size check, no boot)
+# Method: 9185d4cb minus the trace commits by transformation, not by git revert (the fix commits edit lines next to trace hooks). The 16 B difference in the size 'text' column is .rodata (the stripped tree builds as a dirty tree, changing the build string), not .text.
+
+## zc-9185d4cb-traceoff.elf sha256 5562b2a948c9832d2be890110fda1c6de1221f6614c8abdebf3721f90309aa9b
+   text	   data	    bss	    dec	    hex	filename
+6330210	 147528	25921936	32399674	1ee613a	zc-9185d4cb-traceoff.elf
+.text             2442936   1073741824
+.rodata           3883178   1076184768
+
+## zc-9185d4cb-stripped.elf sha256 9ca1ee1ddbcfa70c07a3322fbd1d210b93a1d08ac6471579643f5ea20ca05b8f
+   text	   data	    bss	    dec	    hex	filename
+6330226	 147528	25921936	32399690	1ee614a	zc-9185d4cb-stripped.elf
+.text             2442936   1073741824
+.rodata           3883194   1076184768
+
+## diff of (function, size) lists: 0 lines
+
+## strip_trace.py
+import re,sys,glob
+def strip_calls(s, name):
+    out=[];i=0
+    pat=re.compile(r'\b'+name+r'\s*\(')
+    while True:
+        m=pat.search(s,i)
+        if not m: out.append(s[i:]); break
+        out.append(s[i:m.start()]); j=m.end(); d=1
+        while d: 
+            c=s[j]; d+= (c=='(') - (c==')'); j+=1
+        # swallow trailing ';' for statement macros
+        k=j
+        while k<len(s) and s[k] in ' \t': k+=1
+        if name!='SLOT_TRACE_PACK' and k<len(s) and s[k]==';': j=k+1
+        out.append('' if name!='SLOT_TRACE_PACK' else '0')
+        i=j
+    return ''.join(out)
+def strip_if(s):
+    # remove #if defined(CONFIG_SLOT_TRACE) ... #endif blocks (no nesting inside assumed)
+    return re.sub(r'#if defined\(CONFIG_SLOT_TRACE\)\n.*?#endif[^\n]*\n','',s,flags=re.S)
+for f in sys.argv[1:]:
+    s=open(f).read(); o=s
+    for n in ['SLOT_TRACE_ONLY','SLOT_TRACE_RQ_LOCKED','SLOT_TRACE_RQ_UNLOCKING','slot_trace_pd_tick','SLOT_TRACE_PACK','SLOT_TRACE']:
+        s=strip_calls(s,n)
+    s=s.replace('#include "slot_trace.h"\n','')
+    if not f.endswith('slot_trace.c'): s=strip_if(s)
+    if s!=o: open(f,'w').write(s); print('stripped',f)
+
+## diffstat of the stripped tree vs 9185d4cb
+ CMakeLists.txt                 |  1 -
+ kernel/arch/arm64/exceptions.c | 12 -----------
+ kernel/arch/arm64/vectors.S    | 38 ---------------------------------
+ kernel/sched/sched.c           | 48 ++++++++++++++----------------------------
+ kernel/sched/task.c            | 22 ++++++-------------
+ kernel/src/panic.c             |  5 -----
+ kernel/tests/test_scheduler.c  | 17 +++++++--------
+ 7 files changed, 31 insertions(+), 112 deletions(-)

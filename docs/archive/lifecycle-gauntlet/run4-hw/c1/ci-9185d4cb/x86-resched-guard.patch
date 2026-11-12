@@ -1,0 +1,28 @@
+diff --git a/kernel/arch/x86_64/platform_x86.c b/kernel/arch/x86_64/platform_x86.c
+index 48940266..2001a9f1 100644
+--- a/kernel/arch/x86_64/platform_x86.c
++++ b/kernel/arch/x86_64/platform_x86.c
+@@ -56,9 +56,20 @@ static void resched_ipi_handler(uint8_t irq)
+     if (cpu < MAX_CPUS) {
+         smp_resched_ipi_count[cpu]++;
+     }
+-    /* schedule() internally guards with preempt_disabled[cpu], so a
+-     * nested call while schedule() is already in flight no-ops
+-     * safely. */
++    /* Do not re-enter schedule() while this CPU is inside its switch
++     * window (preempt_disabled[cpu] is set from before switch_to until
++     * after sched_finish_switch has released the outgoing task). x86
++     * resumes a switched-in task with IF=1 and task_entry_wrapper does
++     * sti before the trampoline, so the IPI can land there; a nested
++     * schedule() could then pick the outgoing task, still on this CPU's
++     * queue with on_cpu = 1, and spin on it forever (#1213 fix, /ci
++     * x86 hang in test_rebalance_after_burst). The kick is redundant
++     * there: this CPU is already scheduling. scheduler_tick applies the
++     * same rule to timer ticks. */
++    extern volatile int preempt_disabled[];
++    if (cpu < MAX_CPUS && preempt_disabled[cpu]) {
++        return;
++    }
+     schedule();
+ }
+ 
