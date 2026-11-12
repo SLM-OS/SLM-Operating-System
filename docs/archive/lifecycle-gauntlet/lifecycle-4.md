@@ -1042,7 +1042,7 @@ agree with its ELF-compare file). Row 3: PASS on count and completeness,
 banner unverified from captures. Row 3b (Jetson boots): unchanged,
 INCOMPLETE. The close-out's Dissent on #1237 stands as written.
 
-## Entry 38 (written 18:05 UTC, 2026-11-12): close-out session start; #1237 head and mergeability
+## Entry 38 (written 18:02 UTC, 2026-11-12): close-out session start; #1237 head and mergeability
 
 A single-agent lab session (no subagents, no critics) to finish run 4's
 open items. Boards pi-5-1 and jetson-nano-2, one at a time. Session start
@@ -1068,7 +1068,7 @@ open items. Boards pi-5-1 and jetson-nano-2, one at a time. Session start
   banner) to the prompt, in its own output_dir file. The unit and
   `/root/l4co/` are removed at restore.
 
-## Entry 39 (written 19:25 UTC): #1237 missing rows at 33f05c5a: Jetson 20 of 20, Pi 5 10 of 10, all full captures
+## Entry 39 (written 19:23 UTC): #1237 missing rows at 33f05c5a: Jetson 20 of 20, Pi 5 10 of 10, all full captures
 
 **Method change from Entry 38 (disclosed).** Installing the temporary
 `l4co-autoboot` systemd unit on jetson-nano-2 was refused by the session's
@@ -1111,7 +1111,7 @@ One extra power_cycle (not counted) brought SD Linux up to write the ESP.
 Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
 /ci green at 33f05c5a). Merging #1237.
 
-## Entry 40 (written 19:45 UTC): #1237 merged as 5b28d065; issues closed; C3 rebased to 1b85b315
+## Entry 40 (written 19:32 UTC): #1237 merged as 5b28d065; issues closed; C3 rebased to 1b85b315
 
 - PR comment with the rows table and filenames:
   https://github.com/SLM-OS/SLM-Operating-System/pull/1237#issuecomment-6833645466.
@@ -1121,13 +1121,13 @@ Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
   at 5b28d065 is identical to 33f05c5a (`git diff` empty).
 - Closed by the merge commit's keywords: **#1213, #1219, #1229, #1236**
   (all CLOSED, COMPLETED). None needed closing by hand.
-- /ci on main 5b28d065: started 19:33 UTC in l4-main (`ci.sh`, one step
+- /ci on main 5b28d065: started 19:27:02 UTC in l4-main (`ci.sh`, one step
   at a time, full logs); result in a later entry.
 - c3/jetson-suite 8a3406ea rebased onto main without conflicts: new head
   **1b85b315** (5 commits), pushed with --force-with-lease against
   8a3406ea. Jetson test kernel built at 1b85b315 (`make kernel-test
   PLATFORM=JETSON_ORIN_NANO`, operator library embedded): elf 95acdf74,
   bin 41081a40, banner `build 20261112192508 (1b85b315)`.
-- 19:38 UTC: kexec integration suite on jetson-nano-2 started (same
+- 19:28:58 UTC: kexec integration suite on jetson-nano-2 started (same
   boot_test + host trigger method as Entry 39; elf staged as
   /root/slmos-l4co-test-1b85b315.elf, sha checked).
