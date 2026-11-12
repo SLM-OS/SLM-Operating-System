@@ -77,10 +77,20 @@ uint64_t slot_trace_pack(const struct task *t)
 void slot_trace_rec(uint32_t ev, const struct task *t,
                     uint64_t a, uint64_t b, uint64_t c)
 {
-    if (__atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED)) {
+    uint32_t cpu = cpu_id();
+    uint32_t fz = __atomic_load_n(&slot_trace_frozen, __ATOMIC_RELAXED);
+    if (fz) {
+        /* A dump is in progress on another CPU: park this one at its next
+         * trace point, so its console output does not interleave with the
+         * dump and its rings stay as captured. */
+        if (fz != cpu + 1) {
+            __asm__ volatile("msr daifset, #0xF" ::: "memory");
+            for (;;) {
+                __asm__ volatile("wfe");
+            }
+        }
         return;
     }
-    uint32_t cpu = cpu_id();
     if (cpu >= MAX_CPUS) {
         return;
     }
@@ -158,6 +168,13 @@ static void st_print_task(const char *label, const struct task *t)
         uart_printf_unlocked("    %s: (null)\n", label);
         return;
     }
+    /* Only dereference pointers into the task table: a corrupted run
+     * queue must not fault the dump itself. */
+    if (st_slot(t) < 0) {
+        uart_printf_unlocked("    %s: %p (not a task_table slot)\n", label,
+                             (const void *)t);
+        return;
+    }
     uart_printf_unlocked("    %s: slot=%d id=%u gen=%u state=%u name='%s' "
                          "ctx.sp=0x%lx ctx.x19=0x%lx ctx.x30=0x%lx stack=[0x%lx..0x%lx)\n",
                          label, st_slot(t), t->id, t->generation,
@@ -191,17 +208,6 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
                          (unsigned long)c, slot_trace_seq,
                          (unsigned long)st_cntvct());
     uint32_t ncpu = cpu_count < 4 ? cpu_count : 4;
-    uart_printf_unlocked("  state at dump:\n");
-    for (uint32_t k = 0; k < ncpu; k++) {
-        struct cpu_runqueue *rq = sched_cpu_rq(k);
-        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
-                             (unsigned)slot_trace_rq_holder[k]);
-        st_print_task("current", task_current_on_cpu(k));
-        if (rq) {
-            st_print_task("rq.head", rq->head);
-            st_print_task("rq.zombie", rq->zombie);
-        }
-    }
     uart_printf_unlocked("  format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>\n");
     for (uint32_t k = 0; k < ncpu; k++) {
         uint32_t n = slot_trace_idx[k];
@@ -219,6 +225,17 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
                                  (unsigned)e->state,
                                  (unsigned long)e->a, (unsigned long)e->b,
                                  (unsigned long)e->c, e->holders, e->rep);
+        }
+    }
+    uart_printf_unlocked("  state at dump:\n");
+    for (uint32_t k = 0; k < ncpu; k++) {
+        struct cpu_runqueue *rq = sched_cpu_rq(k);
+        uart_printf_unlocked("  cpu%u: rq_holder=%u\n", k,
+                             (unsigned)slot_trace_rq_holder[k]);
+        st_print_task("current", task_current_on_cpu(k));
+        if (rq) {
+            st_print_task("rq.head", rq->head);
+            st_print_task("rq.zombie", rq->zombie);
         }
     }
     uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
