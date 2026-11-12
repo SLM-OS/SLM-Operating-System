@@ -1,0 +1,7 @@
+18:24:11 start mode=kexec n=5 elf=/root/slmos-l4co-prod-33f05c5a.elf skip_current_boot_id=e08c377b-2bc4-4075-9c57-cc21cb8d8b61
+18:25:32 trigger 1/5 boot_id=0f69de32-47bb-4a61-aaf8-52a1ac86196a state+uptime=[running 23.95 ] reply=[b95c0d4774f69e5d ]
+18:28:28 trigger 2/5 boot_id=be61e6cf-3e11-4d56-9a8c-02dbdf2b7141 state+uptime=[running 25.65 ] reply=[b95c0d4774f69e5d ]
+18:31:24 trigger 3/5 boot_id=54d7f797-badc-4973-85a5-fe70b222179a state+uptime=[running 24.26 ] reply=[b95c0d4774f69e5d ]
+18:34:19 trigger 4/5 boot_id=b0d18394-88ac-4248-a61d-ae4cb4dae7ee state+uptime=[running 24.64 ] reply=[b95c0d4774f69e5d ]
+18:37:15 trigger 5/5 boot_id=ff7ffaff-3904-46d1-aeb7-a5585525b52f state+uptime=[running 23.73 ] reply=[b95c0d4774f69e5d ]
+18:37:15 end triggers=5

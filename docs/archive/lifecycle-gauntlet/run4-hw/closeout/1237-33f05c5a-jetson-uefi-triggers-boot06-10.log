@@ -1,0 +1,7 @@
+19:09:25 start mode=uefi n=5 elf=- skip_current_boot_id=none
+19:10:44 trigger 1/5 boot_id=2f341393-ccec-4567-935a-7f63bef4224a state+uptime=[running 22.46 ] reply=[BootNext: 000E ]
+19:13:13 trigger 2/5 boot_id=9f5eb97f-35c1-4593-a620-5e273a846a08 state+uptime=[running 21.29 ] reply=[BootNext: 000E ]
+19:15:56 trigger 3/5 boot_id=799e3cb6-3fb0-41c6-856b-4c71b3d13245 state+uptime=[running 21.78 ] reply=[BootNext: 000E ]
+19:18:23 trigger 4/5 boot_id=5cacbff1-4f91-43cc-926d-21283c8e6a57 state+uptime=[running 22.46 ] reply=[BootNext: 000E ]
+19:21:06 trigger 5/5 boot_id=760c01a4-a7d0-4f41-ab5c-fc4fc2ca3f62 state+uptime=[running 24.30 ] reply=[BootNext: 000E ]
+19:21:06 end triggers=5
