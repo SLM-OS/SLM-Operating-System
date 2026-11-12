@@ -237,3 +237,26 @@ hypothesis (untested): a reader vCPU thread starved under CPUQuota=200%.
 Ruling: no further C2 host cells (WS dependence is not a bar; C1 has the
 host); C2's unattended harness (`tools/v2/run_cell.sh`) waits for C1's
 head.
+
+## Entry 5 (written 03:33 UTC): C3 status; head moved to 8a3406ea; slot to 07:05
+
+C3 reported at 03:33 UTC (status, not the builder entry). Kexec suite 10
+boots at d512f40b: 9 of 10 reached "Test Suite Summary" with the same 15
+failing checks (#1109), 1 of 10 halted in test_pmm (pmm_alloc_pages_low;
+PMM family, #1207 / #1228, not C3's scope). With #1224 fixed, UEFI-direct
+reached two further UEFI-only board kills in camera code, both in C3's
+scope: test_tegra_i2c_dump_status_bounds reading an unpowered camera I2C
+controller (EL3 exception; test skip, 12079f3d), and
+imx219_power_on raising a TF-A RAS error (driver guard, 8e3d6cc2, then
+8a3406ea). At 8e3d6cc2 the UEFI-direct suite ran to the end for the first
+time. Because 8a3406ea changes production code (imx219.c), the d512f40b
+kexec cell is not at the final head and is rerun.
+
+Rulings: C3's hold on jetson-nano-2 (and pi-5-1 for its boot test) is
+extended to 07:05 UTC hard, because C1 has no fix head and the next
+handover is C2's at 07:05. Order at 8a3406ea: UEFI-direct suite x10,
+kexec suite x10, boot_test 10 kexec, boot_test 10 UEFI-direct, pi-5-1
+boot_test 10. A boot that halts before the last test does not count toward
+"runs to its last test", even with an issue number: the d512f40b kexec
+cell reads 9 of 10. The 04:35 and 06:15 reminders are deleted
+(`c430dcc2`, `6da641dc`); the 07:05 reminder stands.
