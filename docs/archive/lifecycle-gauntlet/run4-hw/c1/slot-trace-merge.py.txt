@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Merge the per-CPU SLOTTRACE rings of one run file into global sequence order.
+usage: merge.py <run file> [slot] [last_n]
+Prints the dump header/fault lines, then the last_n events (default 80) in
+seq order; with slot given, only events whose slot (or packed outgoing slot
+in SWITCH.a) matches."""
+import re, sys
+path = sys.argv[1]
+slot = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] != '-' else None
+last = int(sys.argv[3]) if len(sys.argv) > 3 else 80
+pat = re.compile(r'ST c(\d+) #(\d+) t=0x([0-9a-f]+) (\S+) slot=(-?\d+) gen=(\d+) id=(\d+) st=(\d+) a=0x([0-9a-f]+) b=0x([0-9a-f]+) c=0x([0-9a-f]+) rq=([0-9a-f]+)')
+ev = []
+hdr = []
+for line in open(path, errors='replace'):
+    if line.startswith('SLOTTRACE-FAULT') or line.startswith('SLOTTRACE-DUMP-BEGIN') or line.startswith('  x') or line.startswith('    ') or line.startswith('  cpu'):
+        hdr.append(line.rstrip())
+    m = pat.search(line)
+    if m:
+        c, seq, ts, name, s, g, i, st, a, b, cc, rq = m.groups()
+        ev.append((int(seq), int(c), int(ts, 16), name, int(s), int(g), int(i), int(st), int(a, 16), int(b, 16), int(cc, 16), rq))
+ev.sort()
+print('\n'.join(hdr[:40]))
+def outslot(e):
+    if e[3] == 'SWITCH':
+        v = e[8] >> 48
+        return v - 0x10000 if v & 0x8000 else v
+    return None
+sel = [e for e in ev if slot is None or e[4] == slot or outslot(e) == slot]
+t0 = sel[-last][2] if len(sel) >= last else (sel[0][2] if sel else 0)
+for e in sel[-last:]:
+    seq, c, ts, name, s, g, i, st, a, b, cc, rq = e
+    extra = ''
+    if name == 'SWITCH':
+        os_ = outslot(e); og = (a >> 16) & 0xffffffff; ost = a & 0xffff
+        extra = f' out=slot{os_}/gen{og}/st{ost} in.ctx.sp=0x{b:x} in.ctx.x19=0x{cc:x}'
+    else:
+        extra = f' a=0x{a:x} b=0x{b:x} c=0x{cc:x}'
+    print(f'#{seq:7d} +{(ts - t0) * 16:9d}ns cpu{c} {name:15s} slot={s:3d} gen={g:5d} id={i:5d} st={st:5d} rq={rq}{extra}')

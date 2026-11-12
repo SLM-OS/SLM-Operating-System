@@ -1,0 +1,114 @@
+# #1213 first-fault traces merged into global sequence order (slot 6 and its switch partners), from the three dumps qemu-1213-trace-multi-run04/05/06.txt; head c1/1213-trace b8df6f5f built SLOT_TRACE=ON (elf sha256 34f475d105b8439becb5db56f666b269c3990d0f06fd4a4489da49ca996985c0); accel tcg thread=multi; RESULT 3 of 3 dumps show the same sequence (zombie reaper's second task_destroy clears a slot that task_create is filling)
+# boot banner: SLM-OS v0.4.0 build 20261112013222 (b8df6f5f)
+# Produced by slot-trace-merge.py.txt <file> - 4000, filtered to drop CPU 0's schedule() requeue ADD records (caller 0x4001ad14), last 30 events. Times: +ns from the first event shown, CNTVCT at 62.5 MHz (16 ns/tick). Fields: slot gen id st (task state: 0 READY 1 RUNNING 3 TERMINATED); SWITCH shows the outgoing task (slot/gen/state) and the incoming context's saved sp and x19 as read just before switch_to; DESTROY a=caller (0x4001ab48 = schedule() zombie reap, 0x40116430/0x401162fc = test_isolated_core_latency), b=stack_base read, c=ctx.sp; CREATE_ALLOC b=caller; CREATE_CTX_DONE a=ctx.sp b=ctx.x19 c=ctx.x30 read back after task_create's stores; TEST a=0x10N created+added, 0x20N wait returned (c=us), 0x30N about to destroy (N=1 isolated phase, 2 normal phase).
+
+## qemu-1213-trace-multi-run04.txt
+SLOTTRACE-FAULT bad SP at EL1 sync entry: cpu=1 sp=0x0 esr=0x96000045 far=0xffffffffffffffd0 elr=0x40018a00
+  cpu1: rq_holder=0
+    current: slot=6 id=0 gen=161 state=1 name='' ctx.sp=0x0 ctx.x19=0x40117d60 ctx.x30=0x40017ea0 stack=[0x0..0x0)
+    rq.head: (null)
+    rq.zombie: (null)
+#19219086 +29342882208ns cpu1 DESTROY_DONE    slot=  6 gen=  157 id=    0 st=    3 rq=0 a=0x0 b=0x0 c=0x0
+#19228075 +29352852752ns cpu1 SWITCH          slot=  6 gen=  157 id=  187 st=    1 rq=0 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#19228079 +29352857600ns cpu1 FIRST_RUN       slot=  6 gen=  157 id=  187 st=    1 rq=0 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#19228082 +29352860528ns cpu1 EXIT            slot=  6 gen=  157 id=  187 st=    1 rq=1 a=0x0 b=0x0 c=0x0
+#19228085 +29352862160ns cpu1 TERMINATE       slot=  6 gen=  157 id=  187 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#19228086 +29352864464ns cpu1 ZOMBIE_SET      slot=  6 gen=  157 id=  187 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#19228087 +29352865952ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=0 out=slot6/gen157/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#19228088 +29352868144ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#19228089 +29352871952ns cpu1 ZOMBIE_REAP     slot=  6 gen=  157 id=  187 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#19228090 +29352873760ns cpu1 DESTROY         slot=  6 gen=  157 id=  187 st=    3 rq=0 a=0x4001ab48 b=0x42c00000 c=0x42c3ff50
+#19228092 +29352874848ns cpu1 DESTROY_DONE    slot=  6 gen=  158 id=    0 st=    3 rq=0 a=0xbb b=0x0 c=0x0
+#19237393 +29362882400ns cpu1 SWITCH          slot=  6 gen=  159 id=  188 st=    1 rq=0 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#19237397 +29362885744ns cpu1 FIRST_RUN       slot=  6 gen=  159 id=  188 st=    1 rq=0 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#19237400 +29362888864ns cpu1 EXIT            slot=  6 gen=  159 id=  188 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#19237402 +29362890464ns cpu1 TERMINATE       slot=  6 gen=  159 id=  188 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#19237403 +29362890800ns cpu0 TEST            slot=  6 gen=  159 id=  188 st=    3 rq=0 a=0x202 b=0x1 c=0x26a1
+#19237404 +29362891360ns cpu0 TEST            slot=  6 gen=  159 id=  188 st=    3 rq=0 a=0x302 b=0x1 c=0x0
+#19237405 +29362892192ns cpu0 DESTROY         slot=  6 gen=  159 id=  188 st=    3 rq=20 a=0x40116430 b=0x42c00000 c=0x42c40000
+#19237406 +29362892816ns cpu1 ZOMBIE_SET      slot=  6 gen=  160 id=    0 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#19237407 +29362893904ns cpu0 DESTROY_DONE    slot=  6 gen=  160 id=    0 st=    3 rq=0 a=0xbc b=0x0 c=0x0
+#19237408 +29362895568ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=0 out=slot6/gen160/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#19237409 +29362897680ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#19237410 +29362901376ns cpu1 ZOMBIE_REAP     slot=  6 gen=  160 id=    0 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#19237411 +29362902320ns cpu0 CREATE_ALLOC    slot=  6 gen=  160 id=  189 st=    3 rq=0 a=0x42c00000 b=0x40116358 c=0x0
+#19237412 +29362903040ns cpu1 DESTROY         slot=  6 gen=  160 id=  189 st=    0 rq=0 a=0x4001ab48 b=0x0 c=0x42c3ff50
+#19237413 +29362904080ns cpu1 DESTROY_DONE    slot=  6 gen=  161 id=    0 st=    0 rq=0 a=0xbd b=0x0 c=0x0
+#19237414 +29362904784ns cpu0 CREATE_CTX_DONE slot=  6 gen=  161 id=    0 st=    0 rq=0 a=0x0 b=0x40117d60 c=0x40017ea0
+#19237415 +29362921280ns cpu0 ADD             slot=  6 gen=  161 id=    0 st=    0 rq=10 a=0x1 b=0x40019c80 c=0x0
+#19237416 +29362922224ns cpu0 TEST            slot=  6 gen=  161 id=    0 st=    0 rq=0 a=0x102 b=0x2 c=0x0
+#19237425 +29362931184ns cpu1 SWITCH          slot=  6 gen=  161 id=    0 st=    1 rq=0 out=slot1/gen0/st0 in.ctx.sp=0x0 in.ctx.x19=0x40117d60
+
+## qemu-1213-trace-multi-run05.txt
+SLOTTRACE-FAULT bad SP at EL1 sync entry: cpu=1 sp=0x0 esr=0x96000045 far=0xffffffffffffffd0 elr=0x40018a00
+  cpu1: rq_holder=0
+    current: slot=6 id=0 gen=171 state=1 name='' ctx.sp=0x0 ctx.x19=0x40117d60 ctx.x30=0x40017ea0 stack=[0x0..0x0)
+    rq.head: (null)
+    rq.zombie: (null)
+#16863588 +14979110464ns cpu1 DESTROY_DONE    slot=  6 gen=  167 id=    0 st=    3 rq=0 a=0x0 b=0x0 c=0x0
+#16869447 +14989186624ns cpu1 SWITCH          slot=  6 gen=  167 id=  189 st=    1 rq=1 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#16869451 +14989191968ns cpu1 FIRST_RUN       slot=  6 gen=  167 id=  189 st=    1 rq=0 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#16869454 +14989195424ns cpu1 EXIT            slot=  6 gen=  167 id=  189 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#16869456 +14989197536ns cpu1 TERMINATE       slot=  6 gen=  167 id=  189 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#16869458 +14989200208ns cpu1 ZOMBIE_SET      slot=  6 gen=  167 id=  189 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#16869460 +14989201792ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=0 out=slot6/gen167/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#16869463 +14989204016ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#16869464 +14989207872ns cpu1 ZOMBIE_REAP     slot=  6 gen=  168 id=    0 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#16869465 +14989209632ns cpu1 DESTROY         slot=  6 gen=  168 id=    0 st=    3 rq=0 a=0x4001ab48 b=0x0 c=0x42c3ff50
+#16869466 +14989210544ns cpu1 DESTROY_DONE    slot=  6 gen=  169 id=    0 st=    3 rq=0 a=0x0 b=0x0 c=0x0
+#16876116 +14999227376ns cpu1 SWITCH          slot=  6 gen=  169 id=  190 st=    1 rq=1 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#16876121 +14999232112ns cpu1 FIRST_RUN       slot=  6 gen=  169 id=  190 st=    1 rq=0 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#16876125 +14999235376ns cpu1 EXIT            slot=  6 gen=  169 id=  190 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#16876127 +14999237200ns cpu1 TERMINATE       slot=  6 gen=  169 id=  190 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#16876128 +14999237664ns cpu0 TEST            slot=  6 gen=  169 id=  190 st=    3 rq=0 a=0x202 b=0x3 c=0x2715
+#16876129 +14999238240ns cpu0 TEST            slot=  6 gen=  169 id=  190 st=    3 rq=0 a=0x302 b=0x3 c=0x0
+#16876130 +14999239280ns cpu0 DESTROY         slot=  6 gen=  169 id=  190 st=    3 rq=20 a=0x40116430 b=0x42c00000 c=0x42c40000
+#16876131 +14999239616ns cpu1 ZOMBIE_SET      slot=  6 gen=  170 id=    0 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#16876132 +14999239872ns cpu0 DESTROY_DONE    slot=  6 gen=  170 id=    0 st=    3 rq=20 a=0xbe b=0x0 c=0x0
+#16876133 +14999241200ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=0 out=slot6/gen170/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#16876134 +14999243408ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#16876135 +14999247184ns cpu1 ZOMBIE_REAP     slot=  6 gen=  170 id=    0 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#16876136 +14999248368ns cpu0 CREATE_ALLOC    slot=  6 gen=  170 id=  191 st=    3 rq=0 a=0x42c00000 b=0x40116358 c=0x0
+#16876137 +14999248800ns cpu1 DESTROY         slot=  6 gen=  170 id=  191 st=    0 rq=0 a=0x4001ab48 b=0x0 c=0x42c3ff50
+#16876138 +14999249856ns cpu1 DESTROY_DONE    slot=  6 gen=  171 id=    0 st=    0 rq=0 a=0xbf b=0x0 c=0x0
+#16876139 +14999251024ns cpu0 CREATE_CTX_DONE slot=  6 gen=  171 id=    0 st=    0 rq=0 a=0x0 b=0x40117d60 c=0x40017ea0
+#16876140 +14999252688ns cpu0 ADD             slot=  6 gen=  171 id=    0 st=    0 rq=10 a=0x1 b=0x40019c80 c=0x0
+#16876141 +14999253808ns cpu0 TEST            slot=  6 gen=  171 id=    0 st=    0 rq=0 a=0x102 b=0x4 c=0x0
+#16876149 +14999262192ns cpu1 SWITCH          slot=  6 gen=  171 id=    0 st=    1 rq=0 out=slot1/gen0/st0 in.ctx.sp=0x0 in.ctx.x19=0x40117d60
+
+## qemu-1213-trace-multi-run06.txt
+SLOTTRACE-FAULT bad SP at EL1 sync entry: cpu=1 sp=0x0 esr=0x96000045 far=0xffffffffffffffd0 elr=0x40018a00
+  cpu1: rq_holder=0
+    current: slot=6 id=0 gen=155 state=1 name='' ctx.sp=0x0 ctx.x19=0x40117d60 ctx.x30=0x40017ea0 stack=[0x0..0x0)
+    rq.head: (null)
+    rq.zombie: (null)
+#17920752 +19978438096ns cpu1 DESTROY_DONE    slot=  6 gen=  151 id=    0 st=    3 rq=0 a=0x0 b=0x0 c=0x0
+#17928759 +19988422800ns cpu1 SWITCH          slot=  6 gen=  151 id=  180 st=    1 rq=1 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#17928760 +19988426144ns cpu1 FIRST_RUN       slot=  6 gen=  151 id=  180 st=    1 rq=1 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#17928762 +19988444736ns cpu1 EXIT            slot=  6 gen=  151 id=  180 st=    1 rq=0 a=0x0 b=0x0 c=0x0
+#17928763 +19988446288ns cpu1 TERMINATE       slot=  6 gen=  151 id=  180 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#17928764 +19988448528ns cpu1 ZOMBIE_SET      slot=  6 gen=  151 id=  180 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#17928766 +19988463984ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=1 out=slot6/gen151/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#17928767 +19988466048ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#17928768 +19988482016ns cpu1 ZOMBIE_REAP     slot=  6 gen=  151 id=  180 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#17928769 +19988483600ns cpu1 DESTROY         slot=  6 gen=  151 id=  180 st=    3 rq=0 a=0x4001ab48 b=0x42c00000 c=0x42c3ff50
+#17928770 +19988484672ns cpu1 DESTROY_DONE    slot=  6 gen=  152 id=    0 st=    3 rq=300 a=0xb4 b=0x0 c=0x0
+#17937744 +19998478496ns cpu1 SWITCH          slot=  6 gen=  153 id=  181 st=    1 rq=1 out=slot1/gen0/st0 in.ctx.sp=0x42c40000 in.ctx.x19=0x40117d60
+#17937747 +19998481760ns cpu1 FIRST_RUN       slot=  6 gen=  153 id=  181 st=    1 rq=0 a=0x42c3ffd0 b=0x42c40000 c=0x0
+#17937749 +19998484432ns cpu1 EXIT            slot=  6 gen=  153 id=  181 st=    1 rq=1 a=0x0 b=0x0 c=0x0
+#17937751 +19998503232ns cpu1 TERMINATE       slot=  6 gen=  153 id=  181 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#17937752 +19998517520ns cpu0 TEST            slot=  6 gen=  153 id=  181 st=    3 rq=20 a=0x201 b=0x4 c=0x2702
+#17937753 +19998520704ns cpu0 TEST            slot=  6 gen=  153 id=  181 st=    3 rq=20 a=0x301 b=0x4 c=0x0
+#17937754 +19998522992ns cpu0 DESTROY         slot=  6 gen=  153 id=  181 st=    3 rq=20 a=0x401162fc b=0x42c00000 c=0x42c40000
+#17937755 +19998524416ns cpu0 DESTROY_DONE    slot=  6 gen=  154 id=    0 st=    3 rq=20 a=0xb5 b=0x0 c=0x0
+#17937756 +19998523792ns cpu1 ZOMBIE_SET      slot=  6 gen=  154 id=    0 st=    3 rq=20 a=0x1 b=0x0 c=0x0
+#17937757 +19998530288ns cpu1 SWITCH          slot=  1 gen=    0 id=    2 st=    1 rq=0 out=slot6/gen154/st3 in.ctx.sp=0x420ffc30 in.ctx.x19=0x407eb180
+#17937758 +19998534880ns cpu1 SWITCH_RET      slot=  1 gen=    0 id=    2 st=    1 rq=0 a=0x420ffc30 b=0x0 c=0x0
+#17937759 +19998539312ns cpu1 ZOMBIE_REAP     slot=  6 gen=  154 id=  182 st=    3 rq=20 a=0x1 b=0x407de4b0 c=0x0
+#17937760 +19998540000ns cpu0 CREATE_ALLOC    slot=  6 gen=  154 id=  182 st=    3 rq=0 a=0x42c00000 b=0x40116238 c=0x0
+#17937761 +19998540928ns cpu1 DESTROY         slot=  6 gen=  154 id=  182 st=    0 rq=0 a=0x4001ab48 b=0x0 c=0x42c3ff50
+#17937762 +19998542016ns cpu1 DESTROY_DONE    slot=  6 gen=  155 id=    0 st=    0 rq=0 a=0xb6 b=0x0 c=0x0
+#17937763 +19998545040ns cpu0 CREATE_CTX_DONE slot=  6 gen=  155 id=    0 st=    0 rq=0 a=0x0 b=0x40117d60 c=0x40017ea0
+#17937764 +19998547808ns cpu0 ADD             slot=  6 gen=  155 id=    0 st=    0 rq=10 a=0x1 b=0x40019c80 c=0x0
+#17937765 +19998549952ns cpu0 TEST            slot=  6 gen=  155 id=    0 st=    0 rq=0 a=0x101 b=0x5 c=0x0
+#17937769 +19998564272ns cpu1 SWITCH          slot=  6 gen=  155 id=    0 st=    1 rq=1 out=slot1/gen0/st0 in.ctx.sp=0x0 in.ctx.x19=0x40117d60

@@ -1,0 +1,61 @@
+# SLOT_TRACE zero-cost check: aarch64-none-elf-size of QEMU_VIRT kernels, option off vs on; RESULT .text identical with option off (2439384 B at 01931af6 and b8df6f5f), +2464 B with it on
+# boot banner: (size check, no boot)
+# heads: main 6c1f4c9c; reproducer c1/isolated-1s-main 01931af6 (main + 1 s test waits); trace c1/1213-trace b8df6f5f (01931af6 + SLOT_TRACE option)
+
+## elf-kernel-main-6c1f4c9c.elf sha256 68ba805bd0ab4de81bf4b3a062ec675316b4911b459fc80702098b43c4a441cd
+   text	   data	    bss	    dec	    hex	filename
+6325458	 147528	25921936	32394922	1ee4eaa	elf-kernel-main-6c1f4c9c.elf
+.text             2439544   1073741824
+.text.user           4096   1080066048
+.bss             25905552   1080295424
+
+## elf-kernel-repro-01931af6.elf sha256 1e70bc84e823c3430a4884ead94f64464d6c2e334ec547a17e418ad83b57fe52
+   text	   data	    bss	    dec	    hex	filename
+6325346	 147528	25921936	32394810	1ee4e3a	elf-kernel-repro-01931af6.elf
+.text             2439384   1073741824
+.text.user           4096   1080066048
+.bss             25905552   1080295424
+
+## elf-kernel-b8df6f5f-off.elf sha256 31319cd84001037dc643ce7a4068c98b5ce31a43e933df43d3d033ebdf583d89
+   text	   data	    bss	    dec	    hex	filename
+6325346	 147528	25921936	32394810	1ee4e3a	elf-kernel-b8df6f5f-off.elf
+.text             2439384   1073741824
+.text.user           4096   1080066048
+.bss             25905552   1080295424
+
+## elf-kernel-b8df6f5f-on.elf sha256 44131009a70df0baacaa58f1a54594719d7e8f92ee26a547bb1608ae28950150
+   text	   data	    bss	    dec	    hex	filename
+6326194	 147528	26249616	32723338	1f3518a	elf-kernel-b8df6f5f-on.elf
+.text             2441848   1073741824
+.text.user           4096   1080066048
+.bss             26233232   1080295424
+
+## elf-repro-01931af6.elf sha256 f195bae34f4a5e283ba51b0e8c7cc826b83e8ac4a61cd10d99133fb21ead2325
+   text	   data	    bss	    dec	    hex	filename
+7528946	 147528	25939680	33616154	200f11a	elf-repro-01931af6.elf
+.text             2495864   1073741824
+.text.user           4096   1081270272
+.bss             25923296   1081475072
+
+## elf-test-traceoff-b8df6f5f.elf sha256 b680c12a465a9c267469d07683c00b1ec9d5ab6c2d4fbdd36c0d6b8a4d1b8e5e
+   text	   data	    bss	    dec	    hex	filename
+7528946	 147528	25939680	33616154	200f11a	elf-test-traceoff-b8df6f5f.elf
+.text             2495864   1073741824
+.text.user           4096   1081270272
+.bss             25923296   1081475072
+
+## elf-trace-wip.elf sha256 b834cc10a584cf5c50d240da38538606c27b436eca8f1ac9a6166399634fb8aa
+   text	   data	    bss	    dec	    hex	filename
+7529810	 147528	26267360	33944698	205f47a	elf-trace-wip.elf
+.text             2498328   1073741824
+.text.user           4096   1081270272
+.bss             26250976   1081475072
+
+## per-function size diff (nm -S, text symbols), main 6c1f4c9c vs trace-off b8df6f5f kernel:
+5260c5260
+< test_isolated_core_latency 00000000000003ec
+---
+> test_isolated_core_latency 0000000000000354
+(only the reproducer's test change, present in 01931af6, differs)
+## per-function size diff, reproducer 01931af6 vs trace-off b8df6f5f kernel: 0 lines
+Names: elf-repro-01931af6 / elf-test-traceoff-b8df6f5f / elf-trace-wip are the test kernels (make kernel-test) at 01931af6, b8df6f5f option off, b8df6f5f option on.

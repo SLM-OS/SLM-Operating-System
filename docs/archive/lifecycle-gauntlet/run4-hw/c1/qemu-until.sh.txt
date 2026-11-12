@@ -1,0 +1,23 @@
+#!/bin/bash
+# usage: until.sh <prefix> <elf> <what> <head> <outdir> <mode> <want_dumps> <max_runs>
+# Runs pairs (2 QEMU at once) of <prefix>-<mode>-runNN.txt until <want_dumps>
+# files contain SLOTTRACE-DUMP-BEGIN or <max_runs> runs are done.
+set -u
+prefix=$1; elf=$2; what=$3; head=$4; outdir=$5; mode=$6; want=$7; max=$8
+mkdir -p "$outdir"; D=$(dirname "$0")
+cp "$elf" "$outdir/.elf-$prefix"
+n=0
+while [ "$n" -lt "$max" ]; do
+  got=$(grep -l -a 'SLOTTRACE-DUMP-BEGIN' "$outdir/$prefix-$mode-run"*.txt 2>/dev/null | wc -l)
+  [ "$got" -ge "$want" ] && break
+  a=$(printf '%02d' $((n+1))); b=$(printf '%02d' $((n+2)))
+  bash "$D/run1.sh" "$outdir/$prefix-$mode-run$a.txt" "$outdir/.elf-$prefix" "$mode" "$what" "$head" >> "$outdir/progress.txt" &
+  if [ $((n+2)) -le "$max" ]; then
+    bash "$D/run1.sh" "$outdir/$prefix-$mode-run$b.txt" "$outdir/.elf-$prefix" "$mode" "$what" "$head" >> "$outdir/progress.txt" &
+    n=$((n+2))
+  else
+    n=$((n+1))
+  fi
+  wait
+done
+echo "SERIES-DONE $prefix runs=$n dumps=$(grep -l -a 'SLOTTRACE-DUMP-BEGIN' "$outdir/$prefix-$mode-run"*.txt 2>/dev/null | wc -l)" >> "$outdir/progress.txt"

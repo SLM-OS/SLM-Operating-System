@@ -1,0 +1,16 @@
+#!/bin/bash
+# usage: series.sh <prefix> <elf> <what> <head> <outdir> <first> <last> <par> <mode>...
+# Runs <prefix>-<mode>-runNN.txt for NN in first..last, modes interleaved,
+# at most <par> (<= 2) QEMU instances at once. Progress appended to <outdir>/progress.txt.
+set -u
+prefix=$1; elf=$2; what=$3; head=$4; outdir=$5; first=$6; last=$7; par=$8; shift 8
+[ "$par" -gt 2 ] && par=2
+mkdir -p "$outdir"
+D=$(dirname "$0")
+cp "$elf" "$outdir/.elf-$prefix"   # freeze the image for the series
+for n in $(seq "$first" "$last"); do
+  for m in "$@"; do
+    printf '%s %02d\n' "$m" "$n"
+  done
+done | xargs -P "$par" -L1 bash -c 'bash '"$D"'/run1.sh "'"$outdir"'/'"$prefix"'-$0-run$1.txt" "'"$outdir/.elf-$prefix"'" "$0" "'"$what"'" "'"$head"'" >> "'"$outdir"'/progress.txt"'
+echo "SERIES-DONE $prefix" >> "$outdir/progress.txt"
