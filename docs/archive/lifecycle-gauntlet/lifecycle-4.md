@@ -712,3 +712,24 @@ WORK_STEALING=ON, alternated: main 1 of 10, 5e5548a1 1 of 10 (load 0.9 to
 wait. In the same pairing main hit the cap twice (run02 #1219 hang, run05
 "stack overflow: refusing to switch_to", #1213 family); the fix head 0 of
 20. The x86 guard approval was sent a third time (C1 had not seen it).
+
+## Entry 27 (written 08:26 UTC): C2 step 3 at 5e5548a1; C1 /ci at 5e5548a1
+
+- C2 on jetson-nano-2 07:32:53 to about 08:24 UTC (`gauntlet-4-hw-pi5`
+  20e6a076, `run4-hw/c2/step3-5e5548a1/step3-summary-5e5548a1.txt`):
+  --assert-shares 20 of 20 PASS on kexec (lowest thief share 15.4 to 16.6
+  percent, lowest-to-best 0.873 to 0.989; run 3's #1216 stall was 0.40 to
+  0.83); kexec boots 5 of 5 run (5 not run); UEFI-direct boots 6 of 6 run
+  (4 not run); ESP 789cba62 to fa168ee5 and back, fsck clean. /sys/version
+  5e5548a1 on both paths. Disclosed: runs 02 to 20 of the assert-shares
+  keep only the verdict line (a truncated-capture deviation; run 02's
+  shares are not recorded); the board IP was read via a root login on the
+  console (`hostname -I`), because no tool in C2's session reads
+  lab://sbcs and an ssh probe was denied; the orchestrator later sent it
+  from lab://sbcs (192.168.4.5). C2 released 31 min before its 08:55 end;
+  it is given the board back to 08:55 to finish kexec 06 to 10 and UEFI 07
+  to 10.
+- C1 /ci at 5e5548a1: 10 of 10 steps green (`run4-hw/c1/ci-5e5548a1/`,
+  `gauntlet-4-hw-pi5` 8e72766c), but x86 make test is intermittent at this
+  head (2 of 3 standalone runs failed, Entry 17), so the green /ci does not
+  show x86 fixed. The guard commit (approved, Entry 17) is pending.
