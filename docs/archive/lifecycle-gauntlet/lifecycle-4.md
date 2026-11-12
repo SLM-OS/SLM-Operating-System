@@ -1171,3 +1171,50 @@ Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
   x3.
 - Step 4 (#1223) will not run: past the 3-hour mark by the time step 3
   ends.
+
+## Entry 42 (written 21:17 UTC): C3 suite 7 of 10 kexec, 3 of 3 UEFI; PMM halt again; PR #1239; boards restored; close-out session end
+
+- **Kexec suite at 1b85b315: 7 of 10** reached the last test (boots 01,
+  04, 05, 06, 07, 09, 10; each "14 total failure(s)", 15 checks, all
+  #1109, identical set). Stopped: boots 02 and 03 (#1238, Entry 41) and
+  **boot 08, the PMM halt again**: data abort (write) at
+  0x1000008096add7, ESR 0x96000044, ELR 0x80024b6c (pmm_alloc_pages),
+  x30 in test_exhaustion_recovery, task main (id 7), CPU 0, after
+  test_checkerboard_fragmentation; the same signature as run 4's run06 at
+  8a3406ea. Capture added to **#1207** (comment 6835411571). With
+  #1237's sequence-C fix in place the halt still occurs, so sequence C does
+  not explain it. kexec was not 10 of 10, so no "did not reproduce"
+  comment went to #1207 or #1228; #1228 is untouched and open.
+- **UEFI-direct suite at 1b85b315: 3 of 3** reached the last test (each
+  "21 total failure(s)", 22 checks = 13 #1109 + 9 #1231, identical set,
+  as in run 4).
+- Every suite file: full serial log from power-on (MB1), banner
+  `build 20261112192508 (1b85b315)`; first line and last bytes checked;
+  the three stopped boots end at their fault output or the boot_test
+  timeout. Index `README-c3-1b85b315.md` (`gauntlet-4-hw-jetson` 63f30a8c).
+- **PR #1239** (c3/jetson-suite 1b85b315 to main), ready for review,
+  closingIssuesReferences #1199 and #1224. The body has both root causes,
+  the tests that fail on the old code, this run's rows (7/10, 3/3, /ci),
+  the PMM halt with its file, #1238, and run 4's UEFI 10/10, production and
+  Pi 5 rows. Not merged.
+- #1238 comment 6835731856: final count 2 of 10; boot 03's ELR is in
+  scheduler_tick.
+- **Step 4 (#1223 on Pi 5) not run**: the session passed the 3-hour mark
+  (17:58 to about 21:20 UTC) before step 3 ended.
+- **Lab end state.** jetson-nano-2: ESP SLMOS.efi 789cba62 restored (fsck
+  clean, 2196 clusters), no BootNext, BootOrder unchanged, at SD Linux
+  (BootCurrent 0001), /root/slmos.elf untouched, staged elfs removed,
+  powered on, released (`jetson-restore.txt`). pi-5-1: kernel_2712.img
+  restored at 18:23, powered on, released. No active claims; both online.
+- Process notes (disclosed): the systemd-unit method was refused and
+  replaced (Entry 39). The first suite boot_test call (3 runs, 720 s
+  timeout) outlasted the 30-min MCP client limit; it completed server-side
+  and only its own output_dir was read; later batches used 2-3 runs at
+  600 s. One list_claims call queued behind a running boot_test (labctl
+  stdio serializes). Entry header times in 38-40 were corrected to commit
+  times (437400ad). The trigger and /ci logs were first left out by
+  .gitignore (*.log) and added with -f. Pi 5 was deployed to
+  kernel_2712.img only (config.txt kernel=), not both names as in run 4.
+  No QEMU process was killed; QEMU ran only under make test inside ci.sh.
+- Branch tips: `gauntlet-4-hw-jetson` 63f30a8c, `gauntlet-4-hw-pi5` e37bfb6d,
+  main 5b28d065, c3/jetson-suite 1b85b315 (PR #1239).
