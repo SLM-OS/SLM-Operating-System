@@ -830,3 +830,20 @@ Last lab hour: C1 pi-5-1 items (1) and (2), then the C1 critic's 5 Pi 5
 boots, then C2 on jetson-nano-2 about 10:25 to 10:50 for a full-capture
 redo of --assert-shares 20 and as many full-capture kexec boots as fit.
 Item (4) (#1223 on unfixed main) is expected not to run.
+
+## Entry 34 (written 10:18 UTC): C1 Pi 5 phase; pi-5-1 to the C1 critic
+
+C1 on pi-5-1 08:59 to about 10:17 UTC (claims, until its critic checks):
+item (1) fix-head suite 20 boots (test image at 5e5548a1, ARM64 .text
+identical to 33f05c5a): isolated=10/10 and normal=10/10 in 20 of 20,
+slot_reuse_stress 2001 iterations bad=0 in 20 of 20, #1229 test bad=0 in 20
+of 20, no KERNEL PANIC, every boot "18 total failure(s)" with an identical
+failing set (the #1109 list from run 3); item (2) production boot_test 10 of
+10 at the fix head; /ci at 33f05c5a 10 of 10 steps. Item (4) (#1223 on
+unfixed main plus conversion, image slmos-l4-c1-test-unfixedconv-3f64f624.bin)
+**not run, for time**. Card restored as found; board powered on. Disclosed:
+the 20-boot boot_test outlasted the 30-min MCP client limit; the call kept
+running server-side and C1 tracked it through its own output_dir.
+
+10:18 UTC: pi-5-1 to the C1 critic (5 boots, to 10:33); then jetson-nano-2
+to C2 (to 10:50).
