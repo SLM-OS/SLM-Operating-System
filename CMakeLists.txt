@@ -1918,7 +1918,8 @@ add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.
 target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src ${BUILD_INFO_DIR})
 add_dependencies(lua generate_build_info)
 
-# Lua-specific compile flags (relaxed warnings for C99 Lua code)
+# Lua-specific compile flags (relaxed warnings for C99 Lua code, except the
+# missing-prototype class below)
 if(PLATFORM STREQUAL "X86_64")
     # Lua needs SSE for double (x86-64 ABI returns doubles in xmm0).
     # Override the global -mno-sse flags; only -mno-red-zone for kernel safety.
@@ -1933,6 +1934,11 @@ if(PLATFORM STREQUAL "X86_64")
         -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
         -Wno-unused-but-set-variable -Wno-missing-field-initializers
         -Wno-float-conversion -Wno-conversion -Wno-error
+        # A call without a prototype returns int: on AArch64 the result is
+        # sign-extended into a pointer and faults on Jetson, whose heap is
+        # above 0x80000000 (#1199, memchr in lstrlib.c). Keep these errors.
+        -Werror=implicit-function-declaration -Werror=int-conversion
+        -Werror=int-to-pointer-cast
     )
     target_include_directories(lua PRIVATE ${CMAKE_SOURCE_DIR}/kernel/include/compat)
 else()
@@ -1946,6 +1952,11 @@ else()
         -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
         -Wno-unused-but-set-variable -Wno-missing-field-initializers
         -Wno-float-conversion -Wno-conversion -Wno-error
+        # A call without a prototype returns int: on AArch64 the result is
+        # sign-extended into a pointer and faults on Jetson, whose heap is
+        # above 0x80000000 (#1199, memchr in lstrlib.c). Keep these errors.
+        -Werror=implicit-function-declaration -Werror=int-conversion
+        -Werror=int-to-pointer-cast
     )
 endif()
 

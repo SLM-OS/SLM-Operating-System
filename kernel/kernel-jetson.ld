@@ -75,6 +75,14 @@ SECTIONS
     .data ALIGN(0x10000) : {
         __data_start = .;
         *(.data .data.*)
+        /* The GOT holds the addresses of weak symbols (mock_camera_frame_*,
+         * hailo_fw_*, hailo_control_signal_driver_shutdown). Left as an
+         * orphan, ld put it after __data_end: kexec loaded it (it is in
+         * the ELF segment), but the UEFI-direct path copies and loads only
+         * up to __data_end, so the GOT was whatever was in RAM there
+         * (#1224). scripts/test-jetson-uefi-layout.sh checks that nothing
+         * with file contents lies past __data_end. */
+        *(.got .got.plt .igot .igot.plt)
         /* Pad to PE FileAlignment (512 bytes) for SizeOfRawData compliance */
         . = ALIGN(0x200);
         __data_end = .;

@@ -22,12 +22,24 @@ char  *strstr(const char *haystack, const char *needle);
 char  *strpbrk(const char *s, const char *accept);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
+int    strcoll(const char *s1, const char *s2);
+char  *strerror(int errnum);
 
 /* Memory operations */
 void  *memcpy(void *dest, const void *src, size_t n);
 void  *memset(void *s, int c, size_t n);
 int    memcmp(const void *s1, const void *s2, size_t n);
 void  *memmove(void *dest, const void *src, size_t n);
+/*
+ * memchr, strcoll and strerror are defined in kernel/src/lua_stubs.c for
+ * the vendored Lua. They must be declared here: without a prototype, C
+ * treats a call as returning int, and on AArch64 GCC sign-extends the
+ * 32-bit result into the pointer (`sxtw`). On Jetson the kernel heap
+ * sits above 0x80000000, so memchr's result became 0xffffffff8xxxxxxx and
+ * Lua's string.find (lstrlib.c lmemfind) faulted in memcmp (#1199).
+ * The Lua build now makes an implicit declaration an error (CMakeLists.txt).
+ */
+void  *memchr(const void *s, int c, size_t n);
 
 /*
  * Zero `n` bytes at `p` in a way the compiler is not allowed to elide.

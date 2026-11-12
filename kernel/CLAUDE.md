@@ -58,6 +58,16 @@ In bare-metal code, only these standard headers are safe (no libc required):
 
 **NOT safe:** `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<math.h>` — these require libc.
 
+`#include <string.h>` in kernel code (and in the vendored Lua) resolves to
+`kernel/include/string.h`, SLM-OS's own declarations. A function used
+without a prototype there is implicitly `int`-returning: on AArch64 GCC
+sign-extends the result (`sxtw`), which turns a pointer above 0x80000000
+(all of Jetson's RAM) into `0xffffffff8xxxxxxx`. That was #1199 (`memchr`
+in Lua's `string.find`); QEMU's RAM is below 0x80000000, so it never
+showed there. Declare every libc-style function the stubs define, and keep
+`-Werror=implicit-function-declaration` on third-party code built with
+`-Wno-error` (the Lua target has it).
+
 ---
 
 ## C23 Strict Compliance
