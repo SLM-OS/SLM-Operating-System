@@ -174,3 +174,43 @@ builder entry is written after its critic files):
   linker-script boot_test) is extended to 06:15 UTC hard; C3 critic 06:15
   to about 06:50. The next handover (C2 at 07:05) is unchanged; C1 has no
   fix head yet, so no other component loses lab time.
+
+## Entry 3 (written 02:19 UTC): C2 interim (offline), #1229 filed, relayed to C1
+
+Interim, not the C2 builder entry (written after the C2 critic files).
+C2 reported at 02:18 UTC, evidence `gauntlet-4-hw-pi5` 4dd099b9,
+`run4-hw/c2/ws-main-6c1f4c9c-run01..20.txt` and
+`ws-main-6c1f4c9c-summary.txt`, one elf (sha256 1a96044f...39d0), one
+QEMU at a time, load 2.74 to 5.67 with C1 running alongside:
+
+| Class on main 6c1f4c9c, WORK_STEALING=ON | Runs | Files |
+|---|---|---|
+| A: #1219 batch stress hang, then the cap | 3 of 20 | run05, run08, run17 |
+| B: #1213 family, CPU 1 or 3 in panic("task_exit: schedule returned!") | 2 of 20 | run02, run13 |
+| C: test_litmus_patterns_pass mp_weak_rows=1 | 3 of 20 | run03, run16, run17 |
+| Any failure | 7 of 20 | |
+
+(The C0 baseline was 0 of 3, Entry 0a; both are this run's cells.)
+
+C2's samples at each class-A hang: all four vCPUs spin on ENGINE_LOCK in
+run_inference_inner; the holder is a READY worker preempted by a timer IRQ
+mid-inference, at the head of CPU 2's queue; preempt_disabled stays
+[0,0,1,0] for 13 s while CPU 2's tick count rises and its schedule()
+count does not. C2 filed **#1229** (P1-high, sub:sched) with the
+hypothesis, untested, that schedule() clears preempt_disabled for the CPU
+id read before switch_to. The orchestrator read main's code
+(`kernel/sched/sched.c`, schedule()): `this_cpu = cpu_id()` at entry,
+`switch_to(current, next)`, then `preempt_disabled[this_cpu] = 0` and
+`reschedule_pending[this_cpu] = 0` (line 2534 on 6c1f4c9c). A task that
+resumes on another CPU (stolen) therefore clears the CPU it left, not the
+one it runs on. That the code does this is read from the source; that it
+causes class A, and whether the stale clear of the old CPU's flag opens the
+#1216 steal window on a CPU still inside switch_to (a candidate path to
+#1213), are hypotheses until C1's trace and C2's confirmation run.
+
+Rulings: #1229 is in kernel/sched (C1's files). C1 is asked to add
+preempt_disabled set/clear (CPU written vs CPU running) and
+sched_try_steal decisions to its trace ring and to own the #1229 fix
+decision; C2 writes no kernel patch, files class C (file-don't-fix),
+builds an unattended 20-run harness for C1's head, and measures a 20-run
+WORK_STEALING=OFF control cell on main.
