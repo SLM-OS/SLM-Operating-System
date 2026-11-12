@@ -747,3 +747,20 @@ platform:x86-64, P1-high). Running: x86 make test 10 runs, the ARM64 .text
 comparison against 5e5548a1, then /ci at 33f05c5a. The C1 critic adds the
 guard (x86-only diff, .text identity, the re-raise argument, one x86 run)
 to its Round 2.
+
+## Entry 29 (written 08:54 UTC): C2 step 3 complete except one UEFI boot; C1 x86 10 of 10 and ARM64 .text proof
+
+- C2 second session on jetson-nano-2 08:26:17 to 08:52:45 UTC, ssh only
+  (`gauntlet-4-hw-pi5` 329d21dc, `run4-hw/c2/step3-5e5548a1/`):
+  --assert-shares 20 of 20; kexec boots 10 of 10 (slmos> 88.4 to 94.3 s);
+  UEFI-direct 9 of 9 run, boot 10 cut for the ESP restore by 08:55; ESP
+  789cba62 restored after each session, fsck clean. The denied command was a
+  LAN ssh sweep (auto-mode classifier, "Containment Escape"), not ssh to the
+  board. C2 gets jetson-nano-2 again to about 09:08 for UEFI boot 10.
+- C1: x86 make test at 33f05c5a 10 of 10 PASS, no leak warnings, no
+  external kills (`run4-hw/c1/x86-33f05c5a/`). ARM64 .text proof
+  (`arm64-text-33f05c5a-vs-5e5548a1.txt`, `gauntlet-4-hw-pi5` a30af259):
+  Pi 5 test and production kernels byte-identical in .text; QEMU test kernel
+  identical sizes per function, byte differences from worktree paths in
+  __FILE__ strings. /ci at 33f05c5a running since 08:37. C1's pi-5-1 slot
+  starts on C2's release (about 09:08), end 10:40.
