@@ -1,0 +1,38 @@
+# ESP restore after all C3 UEFI-direct boots: the as-found \EFI\SLMOS\SLMOS.efi (sha256 789cba62, copied off the ESP read-only before any C3 write) written back, then fsck.vfat -n and a fresh read-only mount. RESULT: listing and every sha256 identical to esp-asfound.txt (l4t.efi 91db497c, SLMOS.efi 789cba62), fsck clean, 2196/130892 clusters as found, ESP not mounted. C3 wrote the ESP 6 times in total (test bins 6c1f4c9c x1 for step 1, d512f40b, 12079f3d, 8e3d6cc2, 8a3406ea, production 8a3406ea), each via scripts/jetson-uefi-deploy.sh with its on-ESP sha check; the remaining UEFI boots used unext.sh (fsck -n + read-only sha check + BootNext, no write). BootOrder unchanged; no BootNext left set.
+# boot banner: (none; SD Linux)
+
+===== power_cycle before the restore
+power_cycle returned by 2026-11-12T05:05:12Z
+labctl power_cycle args={"sbc_name": "jetson-nano-2"} -> "Power cycled: jetson-nano-2 (delay: 15.0s)"
+
+===== esp-restore.sh output
+restore start 2026-11-12T05:05:12Z
+local as-found copy 789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d
+written sha256=789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d
+restore copy ok, unmounted
+restore rc=0
+--- fresh check (esp-check.sh)
+check at 2026-11-12T05:06:19Z
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+--- fsck.vfat -n
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+fsck rc=0
+--- listing
+    110592 ./EFI/L4T/l4t.efi
+   8864840 ./EFI/SLMOS/SLMOS.efi
+--- sha256
+91db497c6c0292ac59a434d251da13e640186af5fb62f23273cd81eea8696dcc  ./EFI/L4T/l4t.efi
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  ./EFI/SLMOS/SLMOS.efi
+ESP unmounted
+
+===== final board state before release
+final state check 2026-11-12T05:53:26Z
+5.15.148-tegra
+ 21:47:02 up 0 min,  0 users,  load average: 1.81, 0.42, 0.14
+BootCurrent: 0001
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+0
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+released jetson-nano-2 via labctl release_sbc at 2026-11-12T05:54:03Z (health: ping/serial/power on, online; recovery_mode relay open/released)

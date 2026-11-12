@@ -1,0 +1,27 @@
+# Production kexec boot 02, NOT COUNTED: jetson-nano-2 kexec, PRODUCTION kernel at 8a3406ea (elf sha256 92fdc3e8, staged sha256 matched). RESULT: reached slmos> (last 3 lines), but the capture was requested with tail 3 by mistake, so the evidence is incomplete (no banner); replaced by boot 11.
+# boot banner: (not captured: tail 3)
+
+===== 0. power_cycle to SD Linux
+power_cycle returned by 2026-11-12T05:09:10Z
+labctl power_cycle args={"sbc_name": "jetson-nano-2"} -> "Power cycled: jetson-nano-2 (delay: 15.0s)" (separate call; sole caller)
+
+===== 1a. staging
+staged at 2026-11-12T05:10:18Z
+local  92fdc3e8c818162d58589ed25570e534b3069e1305fb644c2eaa5e4315f62898
+remote 92fdc3e8c818162d58589ed25570e534b3069e1305fb644c2eaa5e4315f62898  /root/slmos-l4-prod-8a3406ea.elf
+STAGED OK
+
+===== 1b. kexec trigger
+remote sha ok 92fdc3e8c818162d
+kexec trigger at 2026-11-12T05:10:27Z
+ssh rc=0
+
+===== 2. capture call
+labctl serial_capture args={"port_name": "jetson-nano-2", "timeout": 400, "tail": 3, "until_pattern": "slmos>|KERNEL PANIC|PAGE FAULT|System halted|Unhandled Exception|Powering off|ABORT"}
+TAIL-ONLY by mistake (tail=3): only the last 3 lines were returned, so this file has no banner line and is NOT a complete capture. The staged sha256 matched (section 1a) so the kernel booted is 8a3406ea production, but this boot is not counted in the 10; boot 11 replaces it.
+
+===== 2. console capture, last 3 lines only (labctl reply, too large to return inline, saved by Claude Code to tool-results and decoded here)
+[Captured 3 lines in 171.2s, pattern 'slmos>|KERNEL PANIC|PAGE FAULT|System halted|Unhandled Exception|Powering off|ABORT' matched]
+Type 'help' for available commands.
+
+slmos>

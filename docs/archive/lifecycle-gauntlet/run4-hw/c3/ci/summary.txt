@@ -1,0 +1,17 @@
+00 prod jetson build rc=0
+PROD IMAGES READY d512f40b
+ci at d512f40be899b4cbefb5e18bc41ebb688b7086f2 start 02:03:05
+01-arm64 rc=0 (make kernel-clean && make kernel PLATFORM=QEMU_VIRT) 02:04:46
+02-x86 rc=0 (make kernel-clean && make kernel PLATFORM=X86_64) 02:05:39
+03-jetson-real rc=0 (make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real) 02:08:58
+04-test rc=0 (make test) 02:11:39
+04b-test-x86 rc=0 (make test PLATFORM=X86_64) 02:13:04
+05-test-aisched rc=2 (make test AI_SCHED=ON) 02:15:55
+06-runtime rc=0 (make runtime-test) 02:19:40
+07-braces rc=0 (make test-check-braces && make check-braces) 02:21:07
+08-build-order rc=0 (make test-build-order) 02:21:53
+09-layout rc=0 (make test-jetson-uefi-layout) 02:23:53
+09b-qemu-uefi rc=0 (make kernel-clean && make kernel PLATFORM=QEMU_VIRT && make test-qemu-uefi) 02:27:05
+10-diff rc=0 (git diff origin/main...HEAD --stat; git status --short) 02:27:05
+CI DONE 02:27:05
+05r rc=0 02:31:31
