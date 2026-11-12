@@ -6,6 +6,7 @@
 #include "debug.h"
 #include "task.h"
 #include "smp.h"
+#include "slot_trace.h"
 #include "platform.h"     /* RAM_BASE / RAM_SIZE for stack-dump bounds */
 #include <stdint.h>
 #include <stdarg.h>
@@ -170,6 +171,11 @@ void panic(const char *fmt, ...)
 
     uart_puts_unlocked("\n\n");
     dump_registers();
+
+#if defined(CONFIG_SLOT_TRACE)
+    /* #1213 slot trace: a panic is a first fault too. */
+    slot_trace_dump("panic", 0, 0, 0);
+#endif
 
     /* #601 Bug B diagnostic: dump task stack canary state + the
      * stack contents around the current SP. If any task's canary

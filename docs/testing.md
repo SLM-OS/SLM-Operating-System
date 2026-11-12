@@ -343,7 +343,9 @@ Validates the deadline-aware scheduler with priority ordering, deadline boost, c
 
 | Test | Description |
 |------|-------------|
-| test_isolated_core_latency | Compares wake-to-run latency on isolated vs non-isolated cores |
+| test_task_destroy_gen_skips_reused_slot | The zombie reaper's generation check leaves a reused slot alone (#1213) |
+| test_task_slot_reuse_under_switch | Destroy and re-create a CPU 1 task in the same slot as fast as possible while CPU 1 switches out and reaps (#1213 stress) |
+| test_isolated_core_latency | Compares wake-to-run latency on isolated vs non-isolated cores; each task must finish within a 1 s wall-clock wait (#1213) |
 | test_benchmark_context_switch | Measures 100 context switches between two ping-pong tasks |
 | test_benchmark_queue_operations | Measures add/remove latency for queue operations |
 

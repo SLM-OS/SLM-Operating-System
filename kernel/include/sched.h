@@ -29,6 +29,7 @@ struct cpu_runqueue {
     struct task *tail;
     struct task *idle_task;
     struct task *zombie;
+    uint32_t zombie_gen;        /* zombie->generation when it was recorded (#1213) */
     uint32_t ready_count;
 #ifdef CONFIG_AI_SCHEDULER
     uint64_t running_ticks;     /* Ticks where current task is not idle */
@@ -209,10 +210,25 @@ uint64_t sched_last_tick_cntpct(uint32_t cpu);
  * Saves context of 'old' task, restores context of 'new' task.
  * Returns to new task's saved PC.
  *
+ * Return value (#1213): when a task resumes from its own earlier
+ * switch_to() call, the call returns the task this CPU switched away from
+ * to get here (the `old` argument of the switch_to that resumed it), so
+ * the resumed side can complete that task's switch-out with
+ * sched_finish_switch(). A brand-new task receives the same pointer as
+ * the third argument of task_entry_trampoline.
+ *
  * @old: Task to save context from (may be NULL on first switch)
  * @new: Task to restore context to
  */
-extern void switch_to(struct task *old, struct task *new);
+extern struct task *switch_to(struct task *old, struct task *new);
+
+/*
+ * Complete the switch-out of `prev` on this CPU (#1213): store-release
+ * prev->on_cpu = 0. Called on the incoming task's stack after switch_to;
+ * NULL is ignored. After it, this CPU no longer reads or writes prev's
+ * context or stack, and task_destroy() may reclaim prev.
+ */
+void sched_finish_switch(struct task *prev);
 
 /*
  * Core isolation for real-time / latency-sensitive workloads.

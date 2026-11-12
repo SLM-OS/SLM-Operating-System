@@ -433,10 +433,10 @@ Tasks with `deadline_ns > 0` get their `effective_priority` boosted as the deadl
 ### Schedule Function
 
 The `schedule()` function runs on each CPU independently:
-1. Clean up zombie (terminated) task from previous cycle
+1. Clean up zombie (terminated) task from previous cycle, if its slot still has the generation recorded when it was parked (#1213; see `docs/scheduler.md` "Task Slot Reclaim")
 2. If current task is RUNNING, set to READY and re-insert in priority order
 3. Pick highest-priority task from queue (or idle task if empty)
-4. Context switch via `switch_to()` (saves/restores callee-saved regs, FPU, DAIF)
+4. Context switch via `switch_to()` (saves/restores callee-saved regs, FPU, DAIF); the resumed side then clears the outgoing task's `on_cpu` with a store-release (`sched_finish_switch`)
 
 ### Sleep/Delay
 

@@ -351,6 +351,44 @@ el1_serror_sp0:
  * Could be: SVC, data abort, instruction abort, etc.
  */
 el1_sync:
+#if defined(CONFIG_SLOT_TRACE)
+    /* #1213 slot trace (debug option, off by default): if SP is not a
+     * plausible kernel address (below 64 KB or at/above 2^40), nothing
+     * below may touch the stack. Move onto a per-CPU emergency stack,
+     * keep the original SP in TPIDR_EL0, and dump the trace rings.
+     * TPIDR_EL1 holds x0 meanwhile (the kernel uses neither register).
+     * CPU index = (Aff0 + Aff1) & 3: Aff0 on QEMU virt, Aff1 on Pi 5.
+     * Once SP is known bad it doubles as a scratch register. */
+    msr     tpidr_el1, x0
+    mov     x0, sp
+    msr     tpidr_el0, x0
+    cmp     x0, #0x10, lsl #12
+    b.lo    .Lst_bad_sp
+    lsr     x0, x0, #40
+    cbnz    x0, .Lst_bad_sp
+    mrs     x0, tpidr_el1
+    b       .Lst_sp_ok
+.Lst_bad_sp:
+    mrs     x0, mpidr_el1
+    and     x0, x0, #0xffff
+    mov     sp, x0
+    lsr     x0, x0, #8
+    add     x0, sp, x0
+    and     x0, x0, #3
+    add     x0, x0, #1
+    lsl     x0, x0, #14             /* (idx + 1) * 16 KB */
+    mov     sp, x0
+    adrp    x0, slot_trace_emerg
+    add     x0, x0, :lo12:slot_trace_emerg
+    add     sp, sp, x0
+    mrs     x0, tpidr_el1
+    save_regs
+    mov     x0, sp
+    mrs     x1, tpidr_el0
+    bl      slot_trace_bad_sp_fault
+    b       hang
+.Lst_sp_ok:
+#endif
     STAGE25_TRACE_CHAR 'S'              /* Trace: sync exception (#672 probe) */
     DIAG_BUMP_VEC 0x00
     save_regs

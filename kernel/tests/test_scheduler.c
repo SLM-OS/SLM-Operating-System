@@ -15,6 +15,8 @@
 #include "platform.h"
 #include "uart.h"
 #include "string.h"
+#include "slot_trace.h"
+#include "sched_diag.h"
 #include "test_wait.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -2123,6 +2125,318 @@ static void test_rapid_task_exit_no_panic(void)
 }
 
 /* ============================================================================
+ * Regression: task slot reuse while the exiting CPU is still switching out
+ * of the slot (#1213)
+ *
+ * The sequence the #1213 slot trace recorded (first-fault traces in
+ * docs/archive/lifecycle-gauntlet/run4-hw/c1/ on gauntlet-4-hw-pi5): a task
+ * pinned to CPU 1 calls task_exit, which publishes TASK_TERMINATED and then
+ * switches away; CPU 0 sees TERMINATED and task_destroy()s the slot while
+ * CPU 1 is still in schedule() for it; CPU 1 then records the slot as its
+ * rq->zombie and, from idle, reaps it with a second task_destroy() just as
+ * CPU 0's next task_create() claims the same slot. The reaper's state check
+ * still sees the old occupant's TERMINATED, so it clears the new task's id,
+ * stack_base and stack_top mid-construction; task_create copies the
+ * cleared stack_top into context.sp, and CPU 1 switches into a task whose
+ * saved SP is 0. A second traced sequence ends in "task_exit: schedule
+ * returned!": CPU 0 destroys the slot and builds the next task in it
+ * before CPU 1 reaches switch_to, whose save half then writes the old
+ * task's registers over the new task's context; the new task resumes in
+ * the old task's task_exit.
+ *
+ * This test runs that loop as fast as it can: no yield between the wait
+ * and the destroy, and the next create immediately after, so both the
+ * destroy and the create land inside CPU 1's switch-out and zombie-reap
+ * window as often as possible.
+ *
+ * Each task checks at entry that it is the task the loop just created
+ * (task id, argument token) and that its SP is inside its own stack, so a
+ * context or slot that was cleared or half written is reported rather
+ * than run. A wedge or fault on CPU 1 shows as a wait timeout here (or a
+ * fault/panic of the run).
+ * ============================================================================ */
+
+#define SLOT_REUSE_ITERS     3000
+#define SLOT_REUSE_CPU       1
+#define SLOT_REUSE_BUDGET_S  20
+
+static volatile uint32_t slot_reuse_expect_id;
+static volatile uint64_t slot_reuse_expect_tok;
+static volatile uint32_t slot_reuse_ran;
+static volatile uint32_t slot_reuse_bad;
+static volatile uint32_t slot_reuse_bad_first;   /* iteration+1 of first bad */
+
+static void slot_reuse_entry(void *arg)
+{
+    struct task *self = task_current();
+    uint64_t sp;
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+#else
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+#endif
+    uint32_t want_id = __atomic_load_n(&slot_reuse_expect_id, __ATOMIC_ACQUIRE);
+    uint64_t want_tok = slot_reuse_expect_tok;
+    bool ok = self && self->id == want_id && (uint64_t)(uintptr_t)arg == want_tok &&
+              sp >= (uint64_t)(uintptr_t)self->stack_base &&
+              sp <= (uint64_t)(uintptr_t)self->stack_top;
+    if (!ok) {
+        if (__atomic_fetch_add(&slot_reuse_bad, 1, __ATOMIC_RELAXED) == 0) {
+            slot_reuse_bad_first = (uint32_t)want_tok;
+        }
+    }
+    __atomic_fetch_add(&slot_reuse_ran, 1, __ATOMIC_RELEASE);
+    /* task_entry_trampoline calls task_exit() on return. */
+}
+
+static void test_task_slot_reuse_under_switch(void)
+{
+    if (cpu_count <= SLOT_REUSE_CPU) {
+        TEST_ASSERT(1);
+        return;
+    }
+
+    slot_reuse_ran = 0;
+    slot_reuse_bad = 0;
+    slot_reuse_bad_first = 0;
+    sched_isolate_core(SLOT_REUSE_CPU);
+
+    struct task *prev_slot = NULL;
+    uint32_t same_slot = 0;
+    uint32_t timeouts = 0;
+    uint32_t done = 0;
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint64_t budget = f * SLOT_REUSE_BUDGET_S;
+
+    for (uint32_t i = 0; i < SLOT_REUSE_ITERS; i++) {
+        if (timer_get_count() - t0 > budget) {
+            break;
+        }
+        struct task *t = task_create_with_priority("slot_reuse",
+            slot_reuse_entry, (void *)(uintptr_t)(i + 1), TASK_PRIORITY_HIGH);
+        TEST_ASSERT_NOT_NULL(t);
+        if (!t) {
+            break;
+        }
+        if (t == prev_slot) {
+            same_slot++;
+        }
+        prev_slot = t;
+        t->cpu_affinity = SLOT_REUSE_CPU;
+        slot_reuse_expect_tok = i + 1;
+        __atomic_store_n(&slot_reuse_expect_id, t->id, __ATOMIC_RELEASE);
+        SLOT_TRACE(ST_TEST, t, 0x401, i, 0);
+        scheduler_add_task(t);
+
+        /* Tight wait for TERMINATED (no yield), 1 s bound. */
+        uint64_t w0 = timer_get_count();
+        bool term = false;
+        while (timer_get_count() - w0 < f) {
+            if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED) {
+                term = true;
+                break;
+            }
+        }
+        if (!term) {
+            timeouts++;
+            uart_printf("  slot_reuse_stress: iteration %u: task id=%u state=%d "
+                        "not TERMINATED after 1 s\n", i, t->id, (int)t->state);
+            scheduler_terminate_task(t);
+            task_destroy(t);
+            break;
+        }
+        SLOT_TRACE(ST_TEST, t, 0x402, i, 0);
+        task_destroy(t);
+        done++;
+    }
+
+    sched_unisolate_core(SLOT_REUSE_CPU);
+
+    uart_printf("  slot_reuse_stress: iterations=%u same_slot=%u ran=%u bad=%u "
+                "first_bad_token=%u timeouts=%u\n",
+                done, same_slot, slot_reuse_ran, slot_reuse_bad,
+                slot_reuse_bad_first, timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0, timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0, slot_reuse_bad);
+    TEST_ASSERT_EQUAL_UINT32(done, slot_reuse_ran);
+}
+
+/* ============================================================================
+ * Regression #1229: preempt_disabled follows a task that resumes on another
+ * CPU. Two tasks sleep 1 ms in a loop (blocking inside schedule()); the test
+ * migrates one of them to another CPU while it is blocked, and wake-up
+ * placement moves them too. When a task resumes from schedule() on a new
+ * CPU, schedule() must clear the NEW CPU's preempt_disabled, not the CPU it
+ * blocked on. Each task checks its own CPU's flag after every wake-up. Before the fix the flag of
+ * the CPU it moved to read 1 after the first migration, and that CPU
+ * stopped taking preemption ticks (#1219 deadlock under WORK_STEALING).
+ * ============================================================================ */
+
+static volatile uint32_t pdm_stop;
+static volatile uint32_t pdm_bad;
+static volatile uint32_t pdm_moved;
+static volatile uint32_t pdm_runs[2];
+static volatile uint32_t pdm_bad_cpu;
+
+static void pdm_task(void *arg)
+{
+    extern volatile int preempt_disabled[];
+    uint32_t idx = (uint32_t)(uintptr_t)arg;
+    uint32_t last = cpu_id();
+    while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
+        /* Block inside schedule(); the wake-up (and the test's
+         * migration while blocked) can put the task on another CPU, so
+         * schedule() returns there. */
+        task_sleep_ms(1);
+        uint32_t c = cpu_id();
+        if (c != last) {
+            __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
+            last = c;
+        }
+        if (preempt_disabled[c] != 0) {
+            if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
+                pdm_bad_cpu = c;
+            }
+        }
+        __atomic_fetch_add(&pdm_runs[idx], 1, __ATOMIC_RELAXED);
+    }
+}
+
+static bool pdm_both_terminated(void *ctx)
+{
+    struct task **t = ctx;
+    return __atomic_load_n(&t[0]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
+           __atomic_load_n(&t[1]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED;
+}
+
+static void test_preempt_flag_follows_migrated_task(void)
+{
+    if (cpu_count < 4) {
+        TEST_ASSERT(1);
+        return;
+    }
+    pdm_stop = 0;
+    pdm_bad = 0;
+    pdm_moved = 0;
+    pdm_runs[0] = pdm_runs[1] = 0;
+    pdm_bad_cpu = 0;
+
+    struct task *t[2];
+    t[0] = task_create("pdm_a", pdm_task, (void *)(uintptr_t)0);
+    t[1] = task_create("pdm_b", pdm_task, (void *)(uintptr_t)1);
+    TEST_ASSERT_NOT_NULL(t[0]);
+    TEST_ASSERT_NOT_NULL(t[1]);
+    scheduler_add_task_to_cpu(t[0], 2);
+    scheduler_add_task_to_cpu(t[1], 2);
+
+    /* For up to 1 s, while t[0] is BLOCKED in task_sleep_ms, move it to
+     * the next of CPUs 1-3; wake-up placement may move either task too.
+     * Any CPU change counts. Stop after 5 observed moves. */
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint32_t migrations = 0;
+    while (timer_get_count() - t0 < f && pdm_moved < 5) {
+        struct task *m = t[0];
+        uint32_t cur = m->assigned_cpu;
+        if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED &&
+            pdm_runs[0] > 0 && cur < 4) {
+            uint32_t to = (cur % 3) + 1;     /* 1 -> 2 -> 3 -> 1 */
+            if (sched_migrate_task(m, to) == 0) {
+                migrations++;
+            }
+        }
+        yield();
+    }
+
+    __atomic_store_n(&pdm_stop, 1, __ATOMIC_RELEASE);
+    long long w = test_wait_until("pdm_done", pdm_both_terminated, t,
+                                  TEST_WAIT_S(1));
+    uart_printf("  pdm: migrations=%u moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
+                migrations, pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
+                pdm_bad_cpu);
+    if (w < 0) {
+        for (int i = 0; i < 2; i++) {
+            if (t[i]->state != TASK_TERMINATED) {
+                scheduler_terminate_task(t[i]);
+            }
+        }
+    }
+    task_destroy(t[0]);
+    task_destroy(t[1]);
+
+    TEST_ASSERT_TRUE(w >= 0);
+    TEST_ASSERT_TRUE(pdm_moved > 0);
+    TEST_ASSERT_EQUAL_UINT32(0, pdm_bad);
+}
+
+/*
+ * Deterministic half of the #1213 fix: the zombie reaper's
+ * task_destroy_gen() must leave a slot alone once its owner has destroyed
+ * the recorded task and task_create has handed the slot to a new task,
+ * even when the new task is itself TERMINATED. Also checks that
+ * task_create replaces the previous occupant's TERMINATED inside its
+ * task_lock section (a claimed slot never reads TERMINATED).
+ */
+static void slot_gen_noop(void *arg)
+{
+    (void)arg;
+}
+
+static void test_task_destroy_gen_skips_reused_slot(void)
+{
+    struct task *a = task_create("gen_a", slot_gen_noop, NULL);
+    TEST_ASSERT_NOT_NULL(a);
+    if (!a) {
+        return;
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, a->on_cpu);
+    uint32_t gen_a = a->generation;
+    uint32_t id_a = a->id;
+
+    /* Never added to a run queue: terminate and destroy as an owner. */
+    a->state = TASK_TERMINATED;
+    task_destroy(a);
+    TEST_ASSERT_EQUAL_UINT32(0, a->id);
+    TEST_ASSERT_EQUAL_UINT32(gen_a + 1, a->generation);
+
+    /* The next create takes the first free slot, normally the same one.
+     * Another CPU's zombie reap can free a lower slot in between; then
+     * the reuse half is not exercised this time (logged). */
+    struct task *b = task_create("gen_b", slot_gen_noop, NULL);
+    TEST_ASSERT_NOT_NULL(b);
+    if (!b) {
+        return;
+    }
+    if (b != a) {
+        uart_printf("  gen test: slot not reused (a=%p b=%p); reuse half skipped\n",
+                    (void *)a, (void *)b);
+        b->state = TASK_TERMINATED;
+        task_destroy(b);
+        return;
+    }
+    TEST_ASSERT_TRUE(b->id != id_a);
+    TEST_ASSERT_EQUAL_INT(TASK_READY, b->state);
+    void *b_stack = b->stack_base;
+    uint64_t b_sp = b->context.sp;
+    TEST_ASSERT_NOT_NULL(b_stack);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)b->stack_top, b_sp);
+
+    /* A reaper holding the old generation must not touch b, READY or
+     * TERMINATED. */
+    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
+    b->state = TASK_TERMINATED;
+    TEST_ASSERT_EQUAL_INT(0, task_destroy_gen(b, gen_a));
+    TEST_ASSERT_TRUE(b->id != 0);
+    TEST_ASSERT_TRUE(b->stack_base == b_stack);
+    TEST_ASSERT_EQUAL_UINT64(b_sp, b->context.sp);
+
+    /* With b's own generation the reaper reclaims it. */
+    TEST_ASSERT_EQUAL_INT(1, task_destroy_gen(b, b->generation));
+    TEST_ASSERT_EQUAL_UINT32(0, b->id);
+}
+
+/* ============================================================================
  * Latency and benchmark tests
  * ============================================================================ */
 
@@ -2183,6 +2497,7 @@ static void test_isolated_core_latency(void)
     uint64_t normal_max = 0;
     uint64_t normal_min = UINT64_MAX;
     int normal_count = 0;
+    int wait_timeouts = 0;
 
     /*
      * Phase 1: Measure latency on isolated core
@@ -2201,17 +2516,18 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* Wait for completion. Left as a count on purpose (#1213): a
-         * wall-clock bound lets these tasks run, and in QEMU CPU 1 then
-         * stops running tasks; on Pi 5 this short bound expires before
-         * the task runs in almost every iteration (isolated 0/10 in C1
-         * run 2), and the test asserts nothing about completion. */
-        int timeout = 100;
-        while (t->state != TASK_TERMINATED && timeout > 0) {
-            yield();
-            test_delay(1000);
-            timeout--;
+        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
+         * this was a 100-iteration count: long enough waits let the
+         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
+         * on Pi 5 the count expired before the task ran in almost every
+         * iteration. Timeouts are counted and asserted after cleanup. */
+        SLOT_TRACE(ST_TEST, t, 0x101, i, 0);       /* created + added */
+        long long wait_rc = test_wait_task_terminated("iso_latency_isolated", t,
+                                                      TEST_WAIT_S(1));
+        if (wait_rc < 0) {
+            wait_timeouts++;
         }
+        SLOT_TRACE(ST_TEST, t, 0x201, i, wait_rc); /* wait returned */
 
         /* Record sample */
         if (latency_sample_index > 0) {
@@ -2233,6 +2549,7 @@ static void test_isolated_core_latency(void)
         if (t->state != TASK_TERMINATED) {
             scheduler_terminate_task(t);
         }
+        SLOT_TRACE(ST_TEST, t, 0x301, i, 0);         /* about to destroy */
         task_destroy(t);
     }
 
@@ -2252,13 +2569,18 @@ static void test_isolated_core_latency(void)
         latency_start_ns = slm_get_time_ns();
         scheduler_add_task(t);
 
-        /* Left as a count on purpose: see the isolated phase (#1213). */
-        int timeout = 100;
-        while (t->state != TASK_TERMINATED && timeout > 0) {
-            yield();
-            test_delay(1000);
-            timeout--;
+        /* Wall-clock wait (#1215 helper), 1 s. Before #1213 was fixed
+         * this was a 100-iteration count: long enough waits let the
+         * tasks run, and CPU 1 then took the slot-reuse fault (#1213);
+         * on Pi 5 the count expired before the task ran in almost every
+         * iteration. Timeouts are counted and asserted after cleanup. */
+        SLOT_TRACE(ST_TEST, t, 0x102, i, 0);       /* created + added */
+        long long wait_rc = test_wait_task_terminated("iso_latency_normal", t,
+                                                      TEST_WAIT_S(1));
+        if (wait_rc < 0) {
+            wait_timeouts++;
         }
+        SLOT_TRACE(ST_TEST, t, 0x202, i, wait_rc); /* wait returned */
 
         if (latency_sample_index > 0) {
             uint64_t sample = latency_samples[0];
@@ -2273,6 +2595,7 @@ static void test_isolated_core_latency(void)
         if (t->state != TASK_TERMINATED) {
             scheduler_terminate_task(t);
         }
+        SLOT_TRACE(ST_TEST, t, 0x302, i, 0);         /* about to destroy */
         task_destroy(t);
     }
 
@@ -2281,6 +2604,8 @@ static void test_isolated_core_latency(void)
      */
     uart_printf("  Samples collected: isolated=%d/%d, normal=%d/%d\n",
                 isolated_count, LATENCY_SAMPLES, normal_count, LATENCY_SAMPLES);
+    /* Every task must finish within its 1 s bound (#1213). */
+    TEST_ASSERT_EQUAL_INT(0, wait_timeouts);
 
     if (isolated_count > 0 && normal_count > 0) {
         uint64_t isolated_avg = isolated_sum / (uint64_t)isolated_count;
@@ -2327,10 +2652,15 @@ static void bench_switch_task(void *arg)
     int task_id = (int)(uintptr_t)arg;  /* 0 or 1 */
 
     while (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+        /* Re-check under the lock: under WORK_STEALING one of the two
+         * tasks can be stolen to another CPU, and both can pass the
+         * unlocked loop test at 99 (count 101, run 4 C2). */
         irq_flags_t flags = spin_lock_irqsave(&test_lock);
-        bench_switch_count++;
-        if (bench_switch_count >= BENCH_CONTEXT_SWITCHES) {
-            bench_end_time = slm_get_time_ns();
+        if (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+            bench_switch_count++;
+            if (bench_switch_count >= BENCH_CONTEXT_SWITCHES) {
+                bench_end_time = slm_get_time_ns();
+            }
         }
         spin_unlock_irqrestore(&test_lock, flags);
 
@@ -3876,6 +4206,21 @@ static void test_policy_switch_calls_init_shutdown(void)
     TEST_ASSERT_EQUAL_INT(1, stub_shutdown_called);
 }
 
+/* Sum of sched_diag_steal_successes over all CPUs. The placement tests
+ * below add an unpinned task to CPU 0, which publishes it to CPU 0's
+ * steal deque; under WORK_STEALING an idle CPU may take it before the
+ * assert reads assigned_cpu (run 4 C2: assigned_cpu 1 in 2 of 54 runs).
+ * Those asserts accept a non-0 CPU only if a steal happened meanwhile;
+ * without work stealing the counter never moves and they stay exact. */
+static uint32_t steal_successes_total(void)
+{
+    uint32_t n = 0;
+    for (uint32_t c = 0; c < cpu_count && c < MAX_CPUS; c++) {
+        n += sched_diag_steal_successes[c];
+    }
+    return n;
+}
+
 /*
  * Test: Custom policy's assign_cpu callback is actually used.
  */
@@ -3894,9 +4239,14 @@ static void test_policy_custom_assign_cpu_called(void)
     for (int i = 0; i < 4; i++) {
         struct task *t = task_create("pol_test", nop_entry, NULL);
         TEST_ASSERT_NOT_NULL(t);
+        uint32_t steals0 = steal_successes_total();
         scheduler_add_task(t);
-        /* stub_assign_cpu always returns 0 */
-        TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+        /* stub_assign_cpu always returns 0 (or a thief took it since). */
+        uint32_t got = t->assigned_cpu;
+        if (got != 0) {
+            TEST_ASSERT_TRUE_MESSAGE(steal_successes_total() != steals0,
+                                     "placed off CPU 0 with no steal");
+        }
         scheduler_remove_task(t);
         t->id = 0;
     }
@@ -4117,8 +4467,13 @@ static void test_proactive_load_balance_inert_when_light(void)
      * have queued. */
     struct task *t = task_create("s5_light", nop_entry, NULL);
     TEST_ASSERT_NOT_NULL(t);
+    uint32_t steals0 = steal_successes_total();
     scheduler_add_task(t);
-    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    /* CPU 0, unless a thief took the task since (see steal_successes_total). */
+    if (t->assigned_cpu != 0) {
+        TEST_ASSERT_TRUE_MESSAGE(steal_successes_total() != steals0,
+                                 "placed off CPU 0 with no steal");
+    }
     scheduler_remove_task(t);
     t->id = 0;
 
@@ -6046,6 +6401,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
+    RUN_TEST(test_preempt_flag_follows_migrated_task);   /* #1229 */
     migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
@@ -6060,6 +6416,10 @@ int test_suite_scheduler(void)
 
     /* Regression: task_exit race (runs on all platforms) */
     RUN_TEST(test_rapid_task_exit_no_panic);
+
+    /* Regression: slot reuse during switch-out (#1213) */
+    RUN_TEST(test_task_destroy_gen_skips_reused_slot);
+    RUN_TEST(test_task_slot_reuse_under_switch);
 
     /* Latency and benchmark tests */
     RUN_TEST(test_isolated_core_latency);

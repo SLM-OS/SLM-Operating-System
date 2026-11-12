@@ -333,11 +333,67 @@ struct cpu_runqueue {
     struct task *tail;
     struct task *idle_task;
     struct task *zombie;
+    uint32_t zombie_gen;      /* zombie->generation when recorded (#1213) */
     uint32_t ready_count;
 };
 /* Per-CPU spinlocks are separate (rq_lock[]) because ARM64 exclusive
  * load/store requires cacheable memory. */
 ```
+
+### Task Slot Reclaim (#1213)
+
+A terminated task can be reclaimed by two parties: its owner (code that
+waited for `TASK_TERMINATED` and calls `task_destroy`) and the run queue's
+zombie reaper (the next `schedule()` on the CPU it exited on). Three rules
+keep a slot from being freed or reused under a CPU that still uses it:
+
+- **`task->on_cpu`.** The CPU that switches a task in sets it to 1 (under
+  its `rq_lock`). The same CPU clears it with a store-release right after
+  `switch_to` returns on the next task's stack (`sched_finish_switch`, also
+  called first thing in `task_entry_trampoline` for a new task), that is,
+  after the outgoing task's context has been saved and its stack left.
+  `task_destroy` reads it with a load-acquire and waits for 0 (2 s bound,
+  then it warns and leaks the slot) before it frees the stack or clears
+  the slot. `TASK_TERMINATED` is published before the switch-out, so an
+  owner that sees it can be inside that window.
+- **Zombie generation.** `schedule()` records `zombie_gen =
+  current->generation` when it parks an exiting task as `rq->zombie`
+  (`on_cpu` is still 1, so no destroy can have run yet), and the reaper
+  calls `task_destroy_gen(zombie, zombie_gen)`, which reclaims only if the
+  slot still has that generation. If the owner destroyed the task first,
+  the generation has moved on and the slot, possibly already a new task,
+  is left alone.
+- **Known open window (#1234).** A task that `schedule()` puts back on its
+  run queue as READY is visible to thieves, `sched_migrate_task` and wake
+  placement once that CPU drops its `rq_lock`, before its `switch_to` has
+  saved the context. Spinning on `next->on_cpu` under `rq_lock` deadlocks
+  against a tick in the outgoing CPU's IRQ-open switch window (and against
+  x86's resched IPI), so it is not done; the fix needs an IRQ-masked switch
+  window.
+- **`preempt_disabled` follows the task (#1229).** After `switch_to`
+  returns, `schedule()` re-reads the CPU id before clearing
+  `preempt_disabled`, `reschedule_pending` and the #1216 window: a stolen
+  or migrated task resumes on a different CPU from the one it yielded on.
+- **Claim publishes state.** `task_create` / `task_alloc` set
+  `state = TASK_READY` (and `on_cpu = 0`) in the same `task_lock` section
+  that claims the slot, so a stale destroyer can no longer see the previous
+  occupant's `TASK_TERMINATED` on a slot that already has a new id.
+
+Before these rules two sequences were traced (first-fault traces in
+`docs/archive/lifecycle-gauntlet/run4-hw/c1/` on `gauntlet-4-hw-pi5`):
+
+- **A (SP 0 fault).** The reaper's second `task_destroy` raced the owner's
+  next `task_create` on the same slot: it passed the TERMINATED check,
+  cleared the new task's id and stack pointers mid-construction, and the
+  new task ran with a saved SP of 0.
+- **B (`task_exit: schedule returned!`).** The owner destroyed the slot
+  and built the next task in it while the exiting CPU was still in
+  `schedule()`; that CPU's `switch_to` then saved the old task's registers
+  over the new task's fresh context, and the new task resumed inside the
+  old task's `task_exit`. The
+debug build option `SLOT_TRACE=ON` (`kernel/include/slot_trace.h`) records
+these lifecycle events per CPU and dumps them on the first EL1 fault or
+panic.
 
 **Lock strategy:**
 - Single-queue operations (add, remove, schedule) use only that CPU's lock

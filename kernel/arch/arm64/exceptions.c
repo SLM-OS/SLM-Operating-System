@@ -15,6 +15,7 @@
 #include "ncmem.h"
 #include "trap.h"
 #include "syscall.h"
+#include "slot_trace.h"
 #include <stdint.h>
 
 /* Timer IRQ numbers — Generic Timer PPIs.
@@ -278,6 +279,18 @@ void el1_sync_handler(struct trap_frame *tf)
     __asm__ volatile("mrs %0, far_el1" : "=r"(far));
 
     uint32_t ec = (esr >> 26) & 0x3F;
+
+#if defined(CONFIG_SLOT_TRACE)
+    /* #1213 slot trace: the first EL1 synchronous exception dumps every
+     * CPU's ring before anything else runs (a normal test run takes
+     * none). */
+    uart_printf_unlocked("\nSLOTTRACE-FAULT EL1 sync: cpu=%u esr=0x%lx far=0x%lx "
+                         "elr=0x%lx x19=0x%lx x30=0x%lx\n",
+                         cpu_id(), (unsigned long)esr, (unsigned long)far,
+                         (unsigned long)tf->elr, (unsigned long)tf->x19,
+                         (unsigned long)tf->x30);
+    slot_trace_dump("el1_sync", esr, far, tf->elr);
+#endif
 
     /* Handle page faults specially for better diagnostics */
     if (is_data_abort(ec)) {

@@ -36,6 +36,7 @@
 #if CONFIG_WORK_STEALING
 #include "steal_deque.h"
 #endif
+#include "slot_trace.h"
 /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
  * are referenced from schedule() in every configuration (they are
  * empty functions without work stealing). */
@@ -155,10 +156,13 @@ static volatile uint64_t steal_trace_t0_cnt;
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
 {
-    return spin_lock_irqsave(&rq_lock[cpu]);
+    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    SLOT_TRACE_RQ_LOCKED(cpu);
+    return f;
 }
 static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
+    SLOT_TRACE_RQ_UNLOCKING(cpu);
     spin_unlock_irqrestore(&rq_lock[cpu], flags);
 }
 
@@ -427,8 +431,27 @@ void sched_drain_cpu_runqueue(uint32_t cpu)
         rq->tail = NULL;
         rq->ready_count = 0;
         rq->zombie = NULL;
+        rq->zombie_gen = 0;
     }
     rq_unlock_irqrestore(cpu, flags);
+}
+
+/*
+ * Complete prev's switch-out on this CPU (#1213); see sched.h.
+ *
+ * Ordering: this store-release is executed by the CPU that ran prev,
+ * after switch_to() has written prev's callee-saved registers, SP and
+ * FP/SIMD state into prev->context and after the last access to prev's
+ * stack (switch_to has already moved SP to the incoming task). A
+ * destroyer that reads on_cpu == 0 with a load-acquire therefore sees
+ * all of those accesses complete before its own writes to the slot and
+ * the stack pages (see task_destroy).
+ */
+void sched_finish_switch(struct task *prev)
+{
+    if (prev) {
+        __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
+    }
 }
 
 /* ============================================================================
@@ -914,6 +937,7 @@ static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
 {
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
+    SLOT_TRACE(ST_ADD, task, cpu, __builtin_return_address(0), 0);
     task->assigned_cpu = cpu;
 
     /* Update effective priority based on deadline before insertion */
@@ -1362,7 +1386,9 @@ void scheduler_terminate_task(struct task *task)
 
         task->state = TASK_TERMINATED;
 
-        if (remove_from_cpu_queue_locked(task, cpu)) {
+        int st_removed = remove_from_cpu_queue_locked(task, cpu);
+        SLOT_TRACE(ST_TERMINATE, task, cpu, st_removed, 0);
+        if (st_removed) {
             sched.task_count--;
             DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
                         task->name, cpu, rq->ready_count);
@@ -1866,6 +1892,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * the steal race-free; this is belt-and-suspenders per the
          * cross-plan review (B3 / P2-3). */
         if (preempt_disabled[victim]) {
+            SLOT_TRACE(ST_STEAL_PD, NULL, victim, 1, 0);
             n_pd++;
             tr->v_pd++;
             /* Unlocked snapshot: did the skipped victim look like it
@@ -1943,6 +1970,13 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 stealable = 1;
             }
 
+            SLOT_TRACE(ST_STEAL_TRY, candidate, victim, preempt_disabled[victim],
+                       (stealable ? 1 :
+                        candidate->generation != captured_gen ? 2 :
+                        candidate->state != TASK_READY ? 3 :
+                        candidate->assigned_cpu != victim ? 4 :
+                        candidate->cpu_affinity != CPU_AFFINITY_ANY ? 5 : 6) |
+                       ((uint64_t)(task_current_on_cpu(victim) == candidate) << 8));
             rq_unlock_irqrestore(victim, flags);
 
             if (stealable) {
@@ -2356,17 +2390,28 @@ void schedule(void)
      */
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
+        uint32_t zombie_gen = rq->zombie_gen;
         rq->zombie = NULL;
+        SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), zombie_gen);
         rq_unlock_irqrestore(this_cpu, flags);
 
-        /* Destroy outside lock - task_destroy may call pmm */
-        task_destroy(zombie);
+        /* Destroy outside lock - task_destroy may call pmm.
+         *
+         * Only if the slot still holds the task recorded below (#1213):
+         * the task's owner may already have destroyed it (it saw
+         * TERMINATED), and task_create may already have handed the slot
+         * to a new task. Before this check the reaper destroyed that new
+         * task mid-construction: its TERMINATED check still saw the old
+         * occupant's state, it cleared stack_top, and task_create copied
+         * the cleared value into context.sp (SP 0 on the next switch). */
+        (void)task_destroy_gen(zombie, zombie_gen);
 
         flags = rq_lock_irqsave(this_cpu);
     }
 
     struct task *current = task_current();
     struct task *next = pick_next_task(this_cpu);
+    SLOT_TRACE_ONLY(uint32_t st_state0 = current ? (uint32_t)current->state : 0xFFFF;)
 
     /* If current task is still running and ready, re-add to queue */
     if (current && current->state == TASK_RUNNING) {
@@ -2402,6 +2447,10 @@ void schedule(void)
      * If the current task is terminated, we MUST switch to a different task.
      */
     if (next == current) {
+        SLOT_TRACE_ONLY(
+            if (st_state0 != TASK_RUNNING) {
+                SLOT_TRACE(ST_PICK_SAME, current, st_state0, 0, 0);
+            })
         if (current && (current->state == TASK_TERMINATED ||
                         current->state == TASK_DESTROYED)) {
             rq_unlock_irqrestore(this_cpu, flags);
@@ -2423,7 +2472,9 @@ void schedule(void)
     }
 
     /* Perform context switch */
+
     next->state = TASK_RUNNING;
+    next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;
     sched.context_switches++;  /* Racy but acceptable for stats */
 
@@ -2433,7 +2484,12 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current && current->state == TASK_TERMINATED) {
+        /* current->on_cpu is still 1 here, so no task_destroy can have
+         * bumped its generation yet (#1213): this is the generation of
+         * the occupant that is exiting. */
         rq->zombie = current;
+        rq->zombie_gen = current->generation;
+        SLOT_TRACE(ST_ZOMBIE_SET, current, this_cpu, 0, 0);
     }
 
     task_set_current(next);
@@ -2462,6 +2518,7 @@ void schedule(void)
      * already closes the window.)
      */
     preempt_disabled[this_cpu] = 1;
+    SLOT_TRACE(ST_PD_SET, next, this_cpu, cpu_id(), 0);
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
 
     rq_unlock_irqrestore(this_cpu, flags);
@@ -2527,17 +2584,37 @@ void schedule(void)
     }
 #endif
 
-    switch_to(current, next);
+    SLOT_TRACE(ST_SWITCH, next, SLOT_TRACE_PACK(current), next->context.sp,
+               next->context.x19);
+    struct task *prev = switch_to(current, next);
+    sched_finish_switch(prev);
+
+#if !defined(PLATFORM_X86_64)
+    SLOT_TRACE_ONLY({
+        uint64_t st_sp;
+        __asm__ volatile("mov %0, sp" : "=r"(st_sp));
+        SLOT_TRACE(ST_SWITCH_RET, task_current(), st_sp, 0, 0);
+    })
+#endif
 
     /* Resumed on our stack after being switched back.
-     * Re-enable preemption so timer ticks can trigger scheduling. */
-    preempt_disabled[this_cpu] = 0;
-    steal_pdwin_clear(this_cpu);                    /* #1216 trace */
+     * Re-enable preemption so timer ticks can trigger scheduling.
+     *
+     * Re-read the CPU (#1229): this task may have been stolen or migrated
+     * while it was READY, so it can resume on a different CPU from the
+     * one it called schedule() on. this_cpu is the pre-switch id; using it
+     * cleared the old CPU's flag (possibly while that CPU was inside its
+     * own switch window) and left this CPU's flag at 1, so its ticks
+     * stopped preempting and thieves skipped it (#1219 deadlock). */
+    uint32_t now_cpu = cpu_id();
+    SLOT_TRACE(ST_PD_CLEAR, task_current(), now_cpu, now_cpu, this_cpu);
+    preempt_disabled[now_cpu] = 0;
+    steal_pdwin_clear(now_cpu);                     /* #1216 trace */
 #if defined(SECONDARY_PREEMPT)
     /* Clear any pending reschedule flag set by scheduler_tick while
      * we were mid-switch — we just scheduled, so an immediate re-arm
      * after eret would be redundant. */
-    reschedule_pending[this_cpu] = 0;
+    reschedule_pending[now_cpu] = 0;
 #endif
 }
 
@@ -2583,6 +2660,7 @@ void scheduler_start(uint32_t this_cpu)
     }
 
     first->state = TASK_RUNNING;
+    first->on_cpu = 1;          /* cleared by sched_finish_switch (#1213) */
     first->switches++;
     sched.context_switches++;  /* Racy but acceptable for stats */
 
@@ -2650,6 +2728,8 @@ void scheduler_start(uint32_t this_cpu)
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.
      * The trampoline clears preempt_disabled[this_cpu]. */
+    SLOT_TRACE(ST_SWITCH, first, SLOT_TRACE_PACK(NULL), first->context.sp,
+               first->context.x19);
     switch_to(NULL, first);
 
     /* Should never reach here */
@@ -2719,6 +2799,7 @@ void scheduler_tick(void)
      * completion. Calling schedule() here would corrupt state because
      * task_set_current(next) has already been called but the actual
      * stack switch hasn't happened yet. */
+    slot_trace_pd_tick(cpu, preempt_disabled[cpu]);
     if (preempt_disabled[cpu]) {
         return;
     }

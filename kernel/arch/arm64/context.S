@@ -188,7 +188,10 @@ switch_to:
     ldr     x3, [x2, #CTX_DAIF]
     msr     daif, x3
 
-    /* Return to new task (x30 holds return address) */
+    /* Return to new task (x30 holds return address). x0 still holds
+     * this call's `old` argument (the restore half above uses only x1-x3),
+     * so a resumed task's switch_to returns the task this CPU just left,
+     * and a new task's task_entry_wrapper passes it on (#1213). */
     ret
 
 .size switch_to, . - switch_to
