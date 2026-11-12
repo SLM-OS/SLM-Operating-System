@@ -1,0 +1,25 @@
+# /ci at c1/1213-fix 5e5548a1 (all 10 steps, run serially, at most 1 QEMU); RESULT all steps rc=0: ARM64/x86/Jetson-real builds (only pre-existing Lua and ld warnings), make test ARM64 PASSED, x86 PASSED (1 run; standalone x86 2 of 3 failed earlier, x86-5e5548a1/), AI_SCHED PASSED, runtime-test 308 + 328 ok, check-braces 0 violations 12 configurations, build order passed, Jetson layout 'All checks passed.' (no '!' lines), no build artifacts in the diff; no 'terminating on signal' in any test output
+# boot banner: SLM-OS v0.4.0 build 20261112081131 (5e5548a1)
+== 01-arm64-build: bash -c make kernel-clean && make kernel PLATFORM=QEMU_VIRT (start 08:06:22, load 0.64)
+   rc=0 end 08:07:42
+== 02-x86-build: bash -c make kernel-clean && make kernel PLATFORM=X86_64 (start 08:07:42, load 1.03)
+   rc=0 end 08:08:20
+== 03-jetson-real: bash -c make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real (start 08:08:20, load 1.02)
+   rc=0 end 08:11:23
+== 04-test-arm64: bash -c make test; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c1/ci5/04-test-output.log; exit $rc (start 08:11:23, load 1.03)
+   rc=0 end 08:14:14
+== 04b-test-x86: bash -c make test PLATFORM=X86_64; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c1/ci5/04b-test-output.log; exit $rc (start 08:14:14, load 1.27)
+   rc=0 end 08:15:39
+== 05-test-aisched: bash -c make test AI_SCHED=ON; rc=$?; cp build/test-output.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c1/ci5/05-test-output.log; exit $rc (start 08:15:39, load 1.14)
+   rc=0 end 08:18:38
+== 06-runtime-test: make runtime-test (start 08:18:38, load 1.37)
+   rc=0 end 08:21:22
+== 07-braces: bash -c make test-check-braces && make check-braces (start 08:21:22, load 1.13)
+   rc=0 end 08:22:19
+== 08-build-order: make test-build-order (start 08:22:19, load 5.12)
+   rc=0 end 08:23:05
+== 09-jetson-layout: bash -c make test-jetson-uefi-layout; rc=$?; cp build/jetson-layout-build.log /tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System--claude-worktrees-bridge-cse-014Q9aryGYwccZqUzMHyre5U/eff61e97-fcbb-4f99-885f-81fd717f4885/scratchpad/c1/ci5/09-jetson-layout-build.log 2>/dev/null; exit $rc (start 08:23:05, load 2.50)
+   rc=0 end 08:24:39
+== 10-diff: bash -c git diff origin/main...HEAD --stat; git status --short --untracked-files=all (start 08:24:39, load 1.41)
+   rc=0 end 08:24:39
+ALLDONE
