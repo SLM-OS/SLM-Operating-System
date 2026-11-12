@@ -5978,6 +5978,114 @@ static void test_aitrace_dump_short_buffer_rejected(void)
  * Test Suite Entry Point
  * ============================================================================ */
 
+/* ============================================================================
+ * Regression #1229: preempt_disabled follows a task that resumes on another
+ * CPU. Two tasks sleep 1 ms in a loop (blocking inside schedule()); the test
+ * migrates one of them to another CPU while it is blocked, and wake-up
+ * placement moves them too. When a task resumes from schedule() on a new
+ * CPU, schedule() must clear the NEW CPU's preempt_disabled, not the CPU it
+ * blocked on. Each task checks its own CPU's flag after every wake-up. Before the fix the flag of
+ * the CPU it moved to read 1 after the first migration, and that CPU
+ * stopped taking preemption ticks (#1219 deadlock under WORK_STEALING).
+ * ============================================================================ */
+
+static volatile uint32_t pdm_stop;
+static volatile uint32_t pdm_bad;
+static volatile uint32_t pdm_moved;
+static volatile uint32_t pdm_runs[2];
+static volatile uint32_t pdm_bad_cpu;
+
+static void pdm_task(void *arg)
+{
+    extern volatile int preempt_disabled[];
+    uint32_t idx = (uint32_t)(uintptr_t)arg;
+    uint32_t last = cpu_id();
+    while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
+        /* Block inside schedule(); the wake-up (and the test's
+         * migration while blocked) can put the task on another CPU, so
+         * schedule() returns there. */
+        task_sleep_ms(1);
+        uint32_t c = cpu_id();
+        if (c != last) {
+            __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
+            last = c;
+        }
+        if (preempt_disabled[c] != 0) {
+            if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
+                pdm_bad_cpu = c;
+            }
+        }
+        __atomic_fetch_add(&pdm_runs[idx], 1, __ATOMIC_RELAXED);
+    }
+}
+
+static bool pdm_both_terminated(void *ctx)
+{
+    struct task **t = ctx;
+    return __atomic_load_n(&t[0]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED &&
+           __atomic_load_n(&t[1]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED;
+}
+
+static void test_preempt_flag_follows_migrated_task(void)
+{
+    if (cpu_count < 4) {
+        TEST_ASSERT(1);
+        return;
+    }
+    pdm_stop = 0;
+    pdm_bad = 0;
+    pdm_moved = 0;
+    pdm_runs[0] = pdm_runs[1] = 0;
+    pdm_bad_cpu = 0;
+
+    struct task *t[2];
+    t[0] = task_create("pdm_a", pdm_task, (void *)(uintptr_t)0);
+    t[1] = task_create("pdm_b", pdm_task, (void *)(uintptr_t)1);
+    TEST_ASSERT_NOT_NULL(t[0]);
+    TEST_ASSERT_NOT_NULL(t[1]);
+    scheduler_add_task_to_cpu(t[0], 2);
+    scheduler_add_task_to_cpu(t[1], 2);
+
+    /* For up to 1 s, while t[0] is BLOCKED in task_sleep_ms, move it to
+     * the next of CPUs 1-3; wake-up placement may move either task too.
+     * Any CPU change counts. Stop after 5 observed moves. */
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint32_t migrations = 0;
+    while (timer_get_count() - t0 < f && pdm_moved < 5) {
+        struct task *m = t[0];
+        uint32_t cur = m->assigned_cpu;
+        if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED &&
+            pdm_runs[0] > 0 && cur < 4) {
+            uint32_t to = (cur % 3) + 1;     /* 1 -> 2 -> 3 -> 1 */
+            if (sched_migrate_task(m, to) == 0) {
+                migrations++;
+            }
+        }
+        yield();
+    }
+
+    __atomic_store_n(&pdm_stop, 1, __ATOMIC_RELEASE);
+    long long w = test_wait_until("pdm_done", pdm_both_terminated, t,
+                                  TEST_WAIT_S(1));
+    uart_printf("  pdm: migrations=%u moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
+                migrations, pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
+                pdm_bad_cpu);
+    if (w < 0) {
+        for (int i = 0; i < 2; i++) {
+            if (t[i]->state != TASK_TERMINATED) {
+                scheduler_terminate_task(t[i]);
+            }
+        }
+    }
+    task_destroy(t[0]);
+    task_destroy(t[1]);
+
+    TEST_ASSERT_TRUE(w >= 0);
+    TEST_ASSERT_TRUE(pdm_moved > 0);
+    TEST_ASSERT_EQUAL_UINT32(0, pdm_bad);
+}
+
 int test_suite_scheduler(void)
 {
     UnityBegin("Scheduler Tests");
@@ -6046,6 +6154,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
+    RUN_TEST(test_preempt_flag_follows_migrated_task);   /* #1229 */
     migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
