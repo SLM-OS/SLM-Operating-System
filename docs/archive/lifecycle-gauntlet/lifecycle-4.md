@@ -688,3 +688,14 @@ stays pushed. The orchestrator's disagreement goes in the final report's
 Dissent section. C3 builder files the two gaps (camera I2C after UEFI-direct
 including csidiag; the refusal test's ambiguous code) as one issue after its
 /ci.
+
+## Entry 25 (written 07:51 UTC): C3 /ci green at 8a3406ea; #1235; C3 done
+
+C3's /ci at 8a3406ea: 12 of 12 steps pass plus make test-qemu-uefi
+(`gauntlet-4-hw-jetson` a09bfbde, `run4-hw/c3/ci-8a3406ea/TABLE.txt`
+and logs; 07:08 to 07:30 UTC, no external kill lines). Filed **#1235**
+(platform:jetson, sub:drivers, P2-medium): the unpowered camera I2C
+controller after UEFI-direct, csidiag's path to it, and the refusal test's
+generic -3. `run4-hw/c3/README.md` notes the oplib-shader requirement.
+The C3 critic's /ci row is now satisfied by the builder's files; the kexec
+bar stays 9 of 10, so the outcome (no C3 PR) is unchanged. C3 is idle.
