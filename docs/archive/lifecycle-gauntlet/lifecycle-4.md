@@ -149,3 +149,28 @@ builder entry is written after its critic files):
   ARM64 board, C3's PR head also needs `boot_test --count 10` on pi-5-1;
   C3 may claim pi-5-1 for that one boot test once its head is final (pi-5-1
   is otherwise idle until 08:05 UTC), restoring the card as found.
+
+## Entry 2 (written 02:09 UTC): #1228 filed; C2 interim; C3 lab slot extended to 06:15
+
+- C3 filed the Jetson isolation-phase fault as **#1228** (platform:jetson,
+  sub:mm). The orchestrator raised it from P2-medium to P1-high with a
+  comment (it halts the suite on main in the same phase as #1223). C3's
+  step-1 evidence: `gauntlet-4-hw-jetson` be03d006,
+  `run4-hw/c3/`: kexec 0 of 3 completed (run01 #1228, run02 and run03
+  #1199), UEFI-direct 0 of 3 (#1224). Handed to C1 for step-6
+  classification.
+- C2 interim (relayed to C1): on unmodified main 6c1f4c9c with
+  WORK_STEALING=ON, baseline run02 of 20 hung at the 120 s cap with CPU 1
+  in panic() from task_exit ("schedule returned!"), isolated=0/10: the
+  #1213 family signature without run 3's 1 s change. Run03 failed in
+  test_litmus_patterns_pass at load 5.5, recorded as its own row. Files
+  pending under `run4-hw/c2/` on `gauntlet-4-hw-pi5`; the counts are
+  written when C2 reports.
+- C3 reported both fixes working at d512f40b (kexec suite reaches "Test
+  Suite Summary", run 01) and a time estimate: about 8 min per suite boot,
+  so the required 10 + 10 suite runs and 10 + 10 production boot tests
+  finish about 05:40 UTC, not at the 04:35 mark. Ruling: no cut, because
+  both counts are bars. C3's hold on jetson-nano-2 (and pi-5-1 for the
+  linker-script boot_test) is extended to 06:15 UTC hard; C3 critic 06:15
+  to about 06:50. The next handover (C2 at 07:05) is unchanged; C1 has no
+  fix head yet, so no other component loses lab time.
