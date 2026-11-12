@@ -612,3 +612,18 @@ call's own output_dir is the call's output, not labctl's database; kept,
 with a provenance line. This differs from C1's read (Entry 13), which
 covered other sessions' output directories. C3's /ci at 8a3406ea started
 07:08 UTC.
+
+## Entry 22 (written 07:21 UTC): handover, jetson-nano-2 from the C3 critic to C2
+
+- C3 critic released jetson-nano-2 at 07:21:22 UTC (powered on, SD Linux,
+  BootCurrent 0001, ESP as found SLMOS.efi 789cba62, fsck clean, its elf
+  removed). Both critic boots at 8a3406ea reached the last test (verdict
+  pending).
+- **07:22 UTC: jetson-nano-2 to C2** for step 3 at 5e5548a1: --assert-shares
+  20 on kexec, kexec boots 10, UEFI-direct boots 10 (for C1's PR). Hard end
+  08:35 UTC. Carry-over to C1's PR head depends on C1 showing that its x86
+  guard commit leaves the ARM64 .text unchanged.
+- Next: pi-5-1 to C1 at about 08:35 for, in order, the fix-head suite 20
+  boots, boot_test 10, the C1 critic's 5 boots, then the #1223 cell
+  (unfixed main plus conversion) at 10 boots unless time allows 20. Lab
+  ends by 10:25 UTC for the close-out.
