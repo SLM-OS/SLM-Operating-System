@@ -1,0 +1,66 @@
+# ws-on-5be808c5 summary: make test QEMU command, head 5be808c5f8ed7c5c789b04a63259530e74ae7577, WORK_STEALING=ON (CMakeCache ON), TCG thread=multi (no -accel flag), elf sha256 8e5964043ae9fe807315eb798a44b89ea3c7a07d8190379a45a0917967bcff8c, N=20; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass
+# boot banner: SLM-OS v0.4.0 build 20261112033701 (5be808c5)
+
+| File | load_start (1/5/15) | rc | Class |
+|---|---|---|---|
+| ws-on-5be808c5-run01.txt | 1.00 1.25 1.93 | 0 | PASS |
+| ws-on-5be808c5-run02.txt | 1.38 1.29 1.89 | 0 | PASS |
+| ws-on-5be808c5-run03.txt | 1.77 1.47 1.90 | 0 | PASS |
+| ws-on-5be808c5-run04.txt | 2.08 1.63 1.92 | 1 | C |
+| ws-on-5be808c5-run05.txt | 3.36 2.07 2.05 | 124 | A other(test_proactive_load_balance_inert_when_light) |
+| ws-on-5be808c5-run06.txt | 4.75 2.93 2.36 | 0 | PASS |
+| ws-on-5be808c5-run07.txt | 3.81 3.10 2.47 | 1 | other(test_benchmark_context_switch) |
+| ws-on-5be808c5-run08.txt | 4.32 3.40 2.63 | 0 | PASS |
+| ws-on-5be808c5-run09.txt | 3.52 3.33 2.67 | 124 | A |
+| ws-on-5be808c5-run10.txt | 3.59 3.37 2.77 | 1 | other(test_benchmark_context_switch) |
+| ws-on-5be808c5-run11.txt | 2.47 3.05 2.70 | 1 | C |
+| ws-on-5be808c5-run12.txt | 3.26 3.10 2.75 | 1 | C |
+| ws-on-5be808c5-run13.txt | 3.95 3.36 2.87 | 0 | PASS |
+| ws-on-5be808c5-run14.txt | 3.60 3.38 2.92 | 124 | A other(test_benchmark_context_switch) |
+| ws-on-5be808c5-run15.txt | 6.06 4.22 3.28 | 0 | PASS |
+| ws-on-5be808c5-run16.txt | 5.30 4.35 3.40 | 0 | PASS |
+| ws-on-5be808c5-run17.txt | 3.95 4.13 3.40 | 0 | PASS |
+| ws-on-5be808c5-run18.txt | 2.66 3.73 3.32 | 0 | PASS |
+| ws-on-5be808c5-run19.txt | 1.95 3.20 3.16 | 1 | C |
+| ws-on-5be808c5-run20.txt | 3.41 3.35 3.22 | 0 | PASS |
+
+Class A: 3 of 20
+Class B: 0 of 20
+Class C: 4 of 20
+Any failure: 9 of 20
+Load (1-min) at run start: min 1.00, max 6.06
+
+## Comparison and analysis (C1 #1213 fix head c1/1213-fix 5be808c5, fix 912efbd0)
+
+| Class | main 6c1f4c9c WS=ON (ws-main-6c1f4c9c-summary.txt) | 5be808c5 WS=ON (this cell) |
+|---|---|---|
+| A, #1219 batch stress hang | 3 of 20 | 3 of 20 (run05, run09, run14) |
+| B, panic PC (#1213-like) | 2 of 20 | 0 of 20 |
+| C, test_litmus_patterns_pass (#1230) | 3 of 20 | 4 of 20 (run04, run11, run12, run19) |
+| other: test_benchmark_context_switch | 0 of 20 | 3 of 20 (run07, run10, run14) |
+| other: test_proactive_load_balance_inert_when_light | 0 of 20 | 1 of 20 (run05) |
+
+- B: 0 of 20, down from 2 of 20. This does not meet the 5x rule. The
+  unfixed WS=ON cell averaged 10 runs per class B failure, so 5x is 50
+  fault-free runs; 20 is 2.0x.
+- A: unchanged, with the #1229 signature in all 3 runs (gdb dump at the
+  stress FAIL): ENGINE_LOCK byte 1; the holder is the only READY task
+  on one CPU's queue, preempted inside ops::conv2d (trap-frame ELR
+  conv2d+1008 in run05 and run09, conv2d+1036 in run14); and that CPU's
+  preempt_disabled is stuck at 1 (CPU 2 in run05, CPU 3 in run09,
+  CPU 1 in run14). Expected: 5be808c5 does not touch #1229.
+- New at this head, 0 of 20 on main WS=ON:
+  - test_benchmark_context_switch, test_scheduler.c:2608, "Expected:
+    100 Actual: 101" in all 3 runs. Hypothesis, untested:
+    bench_switch_task checks `bench_switch_count < 100` without the lock
+    before taking it; if one of the two tasks is stolen off CPU 0, both
+    pass the check at 99 and the count ends at 101. Test-code race that
+    needs a steal.
+  - test_proactive_load_balance_inert_when_light, test_scheduler.c:4337,
+    assigned_cpu 1, expected 0. Hypothesis, untested: irq_save on CPU 0
+    does not stop another CPU stealing the new task from CPU 0's queue
+    before the assert.
+  - Why these appear at 5be808c5 and not on main is not measured. It
+    could be the fix's claim-time READY or on_cpu change making a task
+    stealable earlier, or chance (0 of 20 against 3 of 20; Fisher
+    two-sided p = 0.23).
