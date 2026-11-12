@@ -363,6 +363,17 @@ keep a slot from being freed or reused under a CPU that still uses it:
   slot still has that generation. If the owner destroyed the task first,
   the generation has moved on and the slot, possibly already a new task,
   is left alone.
+- **Switch in only after the previous CPU let go.** A task that
+  `schedule()` puts back on its run queue as READY can be stolen, migrated
+  or rebalanced as soon as that CPU drops its `rq_lock`, before its
+  `switch_to` has saved the context (`sched_try_steal`'s
+  `preempt_disabled[victim]` early-out is read before the lock and does not
+  close this). `schedule()` therefore waits, under its own `rq_lock`, for
+  `next->on_cpu == 0` (load-acquire) before switching in.
+- **`preempt_disabled` follows the task (#1229).** After `switch_to`
+  returns, `schedule()` re-reads the CPU id before clearing
+  `preempt_disabled`, `reschedule_pending` and the #1216 window: a stolen
+  or migrated task resumes on a different CPU from the one it yielded on.
 - **Claim publishes state.** `task_create` / `task_alloc` set
   `state = TASK_READY` (and `on_cpu = 0`) in the same `task_lock` section
   that claims the slot, so a stale destroyer can no longer see the previous
