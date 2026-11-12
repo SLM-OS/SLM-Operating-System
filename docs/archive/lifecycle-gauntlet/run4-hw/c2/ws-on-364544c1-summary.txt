@@ -1,0 +1,85 @@
+# ws-on-364544c1 summary: make test QEMU command, head 364544c1930df12b034a2b6519843f8760889458, WORK_STEALING=ON (CMakeCache ON), TCG thread=multi (no -accel flag), elf sha256 f4020666f58585a63d72e1969017207d992e16cf6de2547a6552994abfa5b409, N=34; classes A=#1219 batch stress, B=panic PC (#1213-like), C=test_litmus_patterns_pass
+# boot banner: SLM-OS v0.4.0 build 20261112040818 (364544c1)
+
+| File | load_start (1/5/15) | rc | Class |
+|---|---|---|---|
+| ws-on-364544c1-run01.txt | 3.14 3.15 3.16 | 0 | PASS |
+| ws-on-364544c1-run02.txt | 2.96 3.12 3.15 | 0 | PASS |
+| ws-on-364544c1-run03.txt | 3.30 3.18 3.17 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run04.txt | 3.32 3.20 3.18 | 0 | PASS |
+| ws-on-364544c1-run05.txt | 3.55 3.32 3.22 | 0 | PASS |
+| ws-on-364544c1-run06.txt | 3.15 3.26 3.20 | 0 | PASS |
+| ws-on-364544c1-run07.txt | 3.23 3.26 3.21 | 0 | PASS |
+| ws-on-364544c1-run08.txt | 3.67 3.39 3.26 | 0 | PASS |
+| ws-on-364544c1-run09.txt | 3.54 3.42 3.28 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run10.txt | 3.45 3.41 3.28 | 0 | PASS |
+| ws-on-364544c1-run11.txt | 3.56 3.46 3.30 | 0 | PASS |
+| ws-on-364544c1-run12.txt | 3.61 3.48 3.32 | 0 | PASS |
+| ws-on-364544c1-run13.txt | 3.54 3.51 3.35 | 0 | PASS |
+| ws-on-364544c1-run14.txt | 3.44 3.50 3.36 | 0 | PASS |
+| ws-on-364544c1-run15.txt | 3.17 3.39 3.33 | 0 | PASS |
+| ws-on-364544c1-run16.txt | 3.50 3.41 3.34 | 0 | PASS |
+| ws-on-364544c1-run17.txt | 2.76 3.21 3.28 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run18.txt | 2.07 2.87 3.15 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run19.txt | 2.20 2.74 3.08 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run20.txt | 2.16 2.59 3.00 | 0 | PASS |
+| ws-on-364544c1-run21.txt | 2.20 2.50 2.93 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run22.txt | 2.89 2.62 2.94 | 0 | PASS |
+| ws-on-364544c1-run23.txt | 3.20 2.79 2.97 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run24.txt | 3.31 2.94 3.01 | 0 | PASS |
+| ws-on-364544c1-run25.txt | 3.21 2.99 3.02 | 0 | PASS |
+| ws-on-364544c1-run26.txt | 2.97 2.99 3.01 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run27.txt | 2.75 2.88 2.97 | 0 | PASS |
+| ws-on-364544c1-run28.txt | 2.28 2.70 2.89 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run29.txt | 2.36 2.65 2.86 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run30.txt | 2.72 2.67 2.85 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run31.txt | 3.36 2.87 2.91 | 0 | PASS |
+| ws-on-364544c1-run32.txt | 3.41 3.04 2.97 | 1 | other(test_preempt_flag_follows_migrated_task) |
+| ws-on-364544c1-run33.txt | 3.36 3.19 3.03 | 1 | other(test_preempt_flag_follows_migrated_task;test_policy_custom_assign_cpu_called) |
+| ws-on-364544c1-run34.txt | 3.12 3.14 3.03 | 0 | PASS |
+
+Class A: 0 of 34
+Class B: 0 of 34
+Class C: 0 of 34
+Any failure: 13 of 34
+Load (1-min) at run start: min 2.07, max 3.67
+
+## Comparison and analysis (c1/1213-fix 364544c1: #1213 fix 912efbd0 + #1229 fix 1ead6ef6)
+
+| Class | main 6c1f4c9c (20) | 5be808c5, #1213 fix only (20) | 364544c1, + #1229 fix (34) |
+|---|---|---|---|
+| A, #1219 batch stress hang | 3 | 3 | 0 |
+| B, panic PC (#1213-like) | 2 | 0 | 0 |
+| C, test_litmus_patterns_pass (#1230) | 3 | 4 | 0 |
+| test_benchmark_context_switch | 0 | 3 | 0 |
+| test_proactive_load_balance_inert_when_light | 0 | 1 | 0 |
+| test_policy_custom_assign_cpu_called | 0 | 0 | 1 (run33) |
+| test_preempt_flag_follows_migrated_task (new at 364544c1) | n/a | n/a | 13 |
+| any failure | 7 | 9 | 13 |
+
+- 5x rule, class A (#1219): unfixed WS=ON averaged 20/3 = 6.67 runs per
+  failure; 5x = 33.3, so 34 fault-free runs meet it. Class A: 0 of 34.
+  All 34 runs print "[PASS] batch: stress workload (4x8)". Met.
+- 5x rule, class B (#1213-like): 10 runs per failure unfixed; 5x = 50.
+  0 of 34 at this head (plus 0 of 20 at 5be808c5, a different head) is
+  3.4x. Not met at this head alone.
+- Class C (#1230): 0 of 34 here, at load 2.07 to 3.67. Whether the fix
+  affects it or the lower load does is not separated; t3 failed class C
+  at 2.24 on main.
+- test_preempt_flag_follows_migrated_task, C1's #1229 regression test:
+  13 of 34 FAIL, all at the `pdm_moved > 0` assert
+  (test_scheduler.c:2371), and all with bad=0 (the #1229 property held
+  in 34 of 34). The "pdm:" lines: migrations=10 moved=0 in the 13
+  failures; migrations=10 or 11 moved=1 in the 21 passes. pdm_a was never
+  seen on a new CPU more than once in 34 runs, against the test's target
+  of 10. Hypothesis, untested: with WORK_STEALING=ON, after pdm_a is
+  migrated to CPU 3, pdm_b yields on CPU 2, finds CPU 2's queue empty,
+  and steals pdm_a back before CPU 3 runs it. The test does not
+  exercise its target path reliably under WORK_STEALING, and fails
+  falsely when it gets no move at all. ("first on cpu 0" in the line is
+  pdm_bad_cpu's initial value, printed even when bad=0.)
+- test_policy_custom_assign_cpu_called (run33, test_scheduler.c:4226,
+  assigned_cpu 1, expected 0) has the same shape as
+  test_proactive_load_balance_inert_when_light at 5be808c5. Hypothesis,
+  untested: irq_save on CPU 0 does not stop another CPU stealing the new
+  task off CPU 0's queue before the assert.
