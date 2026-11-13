@@ -63,6 +63,18 @@ _Static_assert(MAX_ORDER == PMM_MAX_ORDER,
 struct free_block {
     struct free_block *next;
     struct free_block *prev;
+#if defined(CONFIG_PMM_DEBUG)
+    /* PMM_DEBUG only (#1207). `tag` is PMM_DBG_TAG(order) while the
+     * block sits on a free list and 0 once it leaves; `check` seals
+     * next/prev/tag/address, recomputed by every PMM write to this
+     * header, so a header changed by anything other than the PMM fails
+     * the seal. `free_pc`/`free_info` record the PMM operation that
+     * last put this block on a list (caller PC; seq, CPU). */
+    uint64_t tag;
+    uint64_t check;
+    uint64_t free_pc;
+    uint64_t free_info;
+#endif
 };
 
 /*
@@ -103,6 +115,7 @@ static spinlock_t pmm_lock = SPINLOCK_INIT;
  */
 #define MAX_BLOCKS      (RAM_SIZE / PAGE_SIZE)
 static uint8_t block_state[MAX_BLOCKS];
+
 
 /* ==========================================================================
  * Helper Functions
@@ -179,6 +192,431 @@ static inline bool is_aligned_to_order(uintptr_t addr, unsigned int order)
 }
 
 /* ==========================================================================
+ * PMM_DEBUG: free-list validation and alloc/free ring (#1207)
+ *
+ * Built only with `make ... PMM_DEBUG=ON` (CMake -DPMM_DEBUG=ON, which
+ * defines CONFIG_PMM_DEBUG). With the option off none of this is
+ * compiled and every DBG_* hook below expands to nothing, so pmm.c's
+ * code is unchanged.
+ *
+ * With it on:
+ *  - every free-block header carries a tag and a seal (see struct
+ *    free_block); every PMM read of a header checks them, so a header
+ *    written by anything other than the PMM is reported at its first
+ *    touch, with the writer classified (not the PMM) and its suspects;
+ *  - every PMM_DEBUG_WALK_EVERY-th operation walks every free list
+ *    (seal, prev linkage, block_state, length against free_counts);
+ *  - a ring of the last PMM_DEBUG_RING alloc/free operations (seq,
+ *    CNTVCT, CPU, task id, op, address, order, caller PC) and a
+ *    per-page owner word (caller PC and order of the last allocation
+ *    that started at that page) give the history of a corrupt block:
+ *    who allocated it, who freed it, or that nothing has allocated it
+ *    since pmm_init (a non-CPU writer or a wild pointer);
+ *  - a free whose order differs from the recorded allocation order is
+ *    reported (a buddy-state desync source).
+ * On the first corruption it prints the report and panics with
+ * pmm_lock held, so the state is frozen for the dump.
+ * ========================================================================== */
+#if defined(CONFIG_PMM_DEBUG)
+#include "smp.h"
+#include "task.h"
+
+#ifndef CONFIG_PMM_DEBUG_RING
+#define CONFIG_PMM_DEBUG_RING        16384
+#endif
+#ifndef CONFIG_PMM_DEBUG_WALK_EVERY
+#define CONFIG_PMM_DEBUG_WALK_EVERY  1
+#endif
+
+#define PMM_DBG_TAG(order)  (0x504d4d4652454500ULL | (uint64_t)(order))
+#define PMM_DBG_TAG_ALLOCATED 0x504d4d414c4c4f43ULL  /* "PMMALLOC" */
+#define PMM_DBG_KEY         0x9e3779b97f4a7c15ULL
+
+#define PDO_ALLOC        1
+#define PDO_ALLOC_LOW    2
+#define PDO_FREE         3
+#define PDO_FREE_DOUBLE  4
+#define PDO_ALLOC_FAIL   5
+#define PDO_FREE_MISMATCH 6
+
+struct pmm_dbg_ev {
+    uint64_t  seq;
+    uint64_t  ts;
+    uintptr_t addr;
+    uintptr_t pc;
+    uint32_t  task;
+    uint8_t   op;
+    uint8_t   order;
+    uint8_t   cpu;
+    uint8_t   aux;      /* FREE_MISMATCH: recorded alloc order */
+};
+
+extern char __text_start;
+
+static struct pmm_dbg_ev pmm_dbg_ring[CONFIG_PMM_DEBUG_RING];
+static uint64_t  pmm_dbg_seq;            /* under pmm_lock */
+static uintptr_t pmm_dbg_cur_pc;         /* caller of the op in progress */
+static uint32_t  pmm_dbg_owner[MAX_BLOCKS];
+static int       pmm_dbg_report_only;    /* selftest: report, don't panic */
+static int       pmm_dbg_errors;
+static unsigned  pmm_dbg_mismatch_prints;
+
+#define OWNER_VALID      0x80000000u
+#define OWNER_ORDER(w)   (((w) >> 26) & 0x1fu)
+#define OWNER_PC(w)      ((uintptr_t)&__text_start + (((uintptr_t)(w) & 0x3ffffffu) << 2))
+
+static inline uint64_t dbg_cntvct(void)
+{
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+static inline uint32_t dbg_owner_pack(unsigned int order, uintptr_t pc)
+{
+    uintptr_t off = (pc - (uintptr_t)&__text_start) >> 2;
+    if (pc < (uintptr_t)&__text_start || off > 0x3ffffffu) {
+        off = 0x3ffffffu;
+    }
+    return OWNER_VALID | ((uint32_t)order << 26) | (uint32_t)off;
+}
+
+static inline uint64_t dbg_seal_of(const struct free_block *b)
+{
+    return (uint64_t)(uintptr_t)b->next ^
+           ((uint64_t)(uintptr_t)b->prev << 1) ^
+           (uint64_t)(uintptr_t)b ^ b->tag ^ PMM_DBG_KEY;
+}
+
+static inline void dbg_seal(struct free_block *b)
+{
+    b->check = dbg_seal_of(b);
+}
+
+static bool dbg_ptr_ok(uintptr_t p, unsigned int order)
+{
+    return p >= buddy_state.heap_start && p < buddy_state.heap_end &&
+           (p & (PAGE_SIZE - 1)) == 0 &&
+           (p & ((((uintptr_t)1 << order) * PAGE_SIZE) - 1)) == 0;
+}
+
+static void dbg_ring_rec(uint8_t op, uintptr_t addr, unsigned int order,
+                         uint8_t aux)
+{
+    struct pmm_dbg_ev *e = &pmm_dbg_ring[pmm_dbg_seq % CONFIG_PMM_DEBUG_RING];
+    struct task *t = task_current();
+    e->seq   = pmm_dbg_seq;
+    e->ts    = dbg_cntvct();
+    e->addr  = addr;
+    e->pc    = pmm_dbg_cur_pc;
+    e->task  = t ? t->id : 0xffffffffu;
+    e->op    = op;
+    e->order = (uint8_t)order;
+    e->cpu   = (uint8_t)cpu_id();
+    e->aux   = aux;
+}
+
+static const char *dbg_op_name(uint8_t op)
+{
+    switch (op) {
+    case PDO_ALLOC:         return "alloc";
+    case PDO_ALLOC_LOW:     return "alloc_low";
+    case PDO_FREE:          return "free";
+    case PDO_FREE_DOUBLE:   return "free(double)";
+    case PDO_ALLOC_FAIL:    return "alloc(fail)";
+    case PDO_FREE_MISMATCH: return "free(order!=alloc)";
+    default:                return "?";
+    }
+}
+
+static void dbg_print_ev(const struct pmm_dbg_ev *e)
+{
+    uart_printf("  #%lu ts=%lu cpu%u task=%u %-18s addr=0x%lx order=%u pc=0x%lx",
+                (unsigned long)e->seq, (unsigned long)e->ts,
+                (unsigned)e->cpu, (unsigned)e->task, dbg_op_name(e->op),
+                (unsigned long)e->addr, (unsigned)e->order,
+                (unsigned long)e->pc);
+    if (e->op == PDO_FREE_MISMATCH) {
+        uart_printf(" alloc_order=%u", (unsigned)e->aux);
+    }
+    uart_puts("\n");
+}
+
+/* Defined after the user-reserve table, below. */
+static void dbg_print_reserves(uintptr_t addr, unsigned int order);
+
+/* Print the history of [addr, addr + 2^order pages): owner words of
+ * every aligned block start that covers addr, the nearest user
+ * reserves, and every ring event that overlaps the range. */
+static void dbg_print_history(uintptr_t addr, unsigned int order)
+{
+    if (addr >= buddy_state.heap_start && addr < buddy_state.heap_end) {
+        bool any = false;
+        uart_puts(" owner words covering the block (last allocation starting at each aligned start):\n");
+        for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+            uintptr_t start = addr & ~((((uintptr_t)1 << o) * PAGE_SIZE) - 1);
+            if (start < buddy_state.heap_start) {
+                break;
+            }
+            uint32_t w = pmm_dbg_owner[(start - buddy_state.heap_start) >> PAGE_SHIFT];
+            if ((w & OWNER_VALID) && OWNER_ORDER(w) >= o) {
+                uart_printf("  start=0x%lx alloc_order=%u alloc_pc=0x%lx\n",
+                            (unsigned long)start, (unsigned)OWNER_ORDER(w),
+                            (unsigned long)OWNER_PC(w));
+                any = true;
+            }
+        }
+        if (!any) {
+            uart_puts("  none: no allocation has covered this block since pmm_init\n");
+        }
+    }
+
+    dbg_print_reserves(addr, order);
+
+    uart_puts(" ring events overlapping the block (newest first, up to 32):\n");
+    unsigned printed = 0;
+    uint64_t n = pmm_dbg_seq < CONFIG_PMM_DEBUG_RING ? pmm_dbg_seq : CONFIG_PMM_DEBUG_RING;
+    for (uint64_t k = 0; k < n && printed < 32; k++) {
+        const struct pmm_dbg_ev *e =
+            &pmm_dbg_ring[(pmm_dbg_seq - 1 - k) % CONFIG_PMM_DEBUG_RING];
+        uintptr_t es = e->addr;
+        uintptr_t ee = es + order_to_size(e->order);
+        if (es < addr + order_to_size(order) && ee > addr) {
+            dbg_print_ev(e);
+            printed++;
+        }
+    }
+    if (printed == 0) {
+        uart_printf("  none in the last %lu operations\n", (unsigned long)n);
+    }
+}
+
+static void dbg_dump_ring_tail(size_t last_n)
+{
+    uint64_t n = pmm_dbg_seq < CONFIG_PMM_DEBUG_RING ? pmm_dbg_seq : CONFIG_PMM_DEBUG_RING;
+    if (last_n < n) {
+        n = last_n;
+    }
+    uart_printf(" last %lu PMM operations (oldest first; %lu total):\n",
+                (unsigned long)n, (unsigned long)pmm_dbg_seq);
+    for (uint64_t k = n; k > 0; k--) {
+        dbg_print_ev(&pmm_dbg_ring[(pmm_dbg_seq - k) % CONFIG_PMM_DEBUG_RING]);
+    }
+}
+
+/* Report a corrupt free-list element. `node` is the element the bad
+ * state was found in (`deref_ok`: whether its header may be read),
+ * `order` the list it belongs to, `where` the PMM path that found it. */
+static void dbg_corrupt(const char *what, uintptr_t node, unsigned int order,
+                        const char *where, bool deref_ok)
+{
+    pmm_dbg_errors++;
+    uart_printf("\n[pmm-debug] CORRUPT FREE LIST: %s\n", what);
+    uart_printf(" found by %s, op #%lu on cpu%u, caller pc=0x%lx\n",
+                where, (unsigned long)pmm_dbg_seq, (unsigned)cpu_id(),
+                (unsigned long)pmm_dbg_cur_pc);
+    uart_printf(" list order=%u count=%lu head=0x%lx; element=0x%lx\n",
+                order, (unsigned long)buddy_state.free_counts[order],
+                (unsigned long)(uintptr_t)buddy_state.free_lists[order],
+                (unsigned long)node);
+    if (deref_ok) {
+        const struct free_block *b = (const struct free_block *)node;
+        const volatile uint64_t *raw = (const volatile uint64_t *)node;
+        bool tag_ok  = b->tag == PMM_DBG_TAG(order);
+        bool seal_ok = b->check == dbg_seal_of(b);
+        uart_printf(" header: next=0x%lx prev=0x%lx tag=0x%lx(%s) check=0x%lx(%s, expect 0x%lx)\n",
+                    (unsigned long)(uintptr_t)b->next,
+                    (unsigned long)(uintptr_t)b->prev,
+                    (unsigned long)b->tag, tag_ok ? "ok" : "BAD",
+                    (unsigned long)b->check, seal_ok ? "ok" : "BAD",
+                    (unsigned long)dbg_seal_of(b));
+        uart_printf(" last listed by pc=0x%lx (op #%lu, cpu%u)\n",
+                    (unsigned long)b->free_pc,
+                    (unsigned long)(b->free_info >> 8),
+                    (unsigned)(b->free_info & 0xffu));
+        uart_puts(" raw[0..15]:");
+        for (int i = 0; i < 16; i++) {
+            uart_printf("%s%016lx", (i % 4) ? " " : "\n  ", (unsigned long)raw[i]);
+        }
+        uart_puts("\n");
+        const char *writer;
+        if (!seal_ok) {
+            writer = "not the PMM (seal broken): something wrote this free block";
+        } else if (tag_ok) {
+            writer = "the PMM (seal intact, right order): allocator defect";
+        } else if (b->tag == PMM_DBG_TAG_ALLOCATED) {
+            writer = "the PMM took this block off the lists (allocated) but it is still linked: allocator defect";
+        } else if ((b->tag & ~0xffULL) == PMM_DBG_TAG(0)) {
+            writer = "the PMM listed this block at another order: allocator state desync";
+        } else {
+            writer = "unknown (seal intact, unknown tag)";
+        }
+        uart_printf(" writer: %s\n", writer);
+        if (node >= buddy_state.heap_start && node < buddy_state.heap_end) {
+            uart_printf(" block_state[page]=%u\n",
+                        (unsigned)block_state[(node - buddy_state.heap_start) >> PAGE_SHIFT]);
+        }
+    }
+    dbg_print_history(node, order);
+    dbg_dump_ring_tail(48);
+    if (pmm_dbg_report_only) {
+        return;
+    }
+    panic("pmm-debug: corrupt free list (%s) at 0x%lx order %u",
+          what, (unsigned long)node, order);
+}
+
+/* Check one list element before the PMM reads or writes through it.
+ * Returns false (after reporting) if it is bad. */
+static bool dbg_node_ok(struct free_block *b, unsigned int order,
+                        const char *where)
+{
+    uintptr_t a = (uintptr_t)b;
+    if (!dbg_ptr_ok(a, order)) {
+        dbg_corrupt("element pointer outside the heap or misaligned for its order",
+                    a, order, where, false);
+        return false;
+    }
+    if (b->tag != PMM_DBG_TAG(order) || b->check != dbg_seal_of(b)) {
+        dbg_corrupt("header tag/seal broken", a, order, where, true);
+        return false;
+    }
+    if (block_state[(a - buddy_state.heap_start) >> PAGE_SHIFT] != BLOCK_FREE) {
+        dbg_corrupt("listed block is not BLOCK_FREE", a, order, where, true);
+        return false;
+    }
+    if (b->next && !dbg_ptr_ok((uintptr_t)b->next, order)) {
+        dbg_corrupt("next link outside the heap or misaligned", a, order, where, true);
+        return false;
+    }
+    if (b->prev && !dbg_ptr_ok((uintptr_t)b->prev, order)) {
+        dbg_corrupt("prev link outside the heap or misaligned", a, order, where, true);
+        return false;
+    }
+    return true;
+}
+
+/* Walk every free list. Returns the number of errors found (0 or 1:
+ * the walk stops at the first). */
+static int dbg_walk(const char *where)
+{
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        size_t n = 0;
+        struct free_block *prev = NULL;
+        struct free_block *b = buddy_state.free_lists[o];
+        while (b) {
+            if (n >= buddy_state.free_counts[o]) {
+                dbg_corrupt("list longer than free_counts (cycle or lost count)",
+                            (uintptr_t)b, o, where, dbg_ptr_ok((uintptr_t)b, o));
+                return 1;
+            }
+            if (!dbg_node_ok(b, o, where)) {
+                return 1;
+            }
+            if (b->prev != prev) {
+                dbg_corrupt("prev link does not point at the previous element",
+                            (uintptr_t)b, o, where, true);
+                return 1;
+            }
+            prev = b;
+            b = b->next;
+            n++;
+        }
+        if (n != buddy_state.free_counts[o]) {
+            dbg_corrupt(prev ? "list shorter than free_counts: chain ends early at this element"
+                             : "list empty but free_counts > 0",
+                        prev ? (uintptr_t)prev : 0, o, where, prev != NULL);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Called at the start of every public op, under pmm_lock. */
+static void dbg_op_begin(uintptr_t pc)
+{
+    pmm_dbg_cur_pc = pc;
+    pmm_dbg_seq++;
+    if (CONFIG_PMM_DEBUG_WALK_EVERY != 0 &&
+        (pmm_dbg_seq % CONFIG_PMM_DEBUG_WALK_EVERY) == 0) {
+        (void)dbg_walk("periodic walk");
+    }
+}
+
+static void dbg_on_list(struct free_block *b, unsigned int order)
+{
+    b->tag = PMM_DBG_TAG(order);
+    b->free_pc = pmm_dbg_cur_pc;
+    b->free_info = (pmm_dbg_seq << 8) | (cpu_id() & 0xffu);
+    dbg_seal(b);
+}
+
+static void dbg_off_list(struct free_block *b)
+{
+    b->tag = PMM_DBG_TAG_ALLOCATED;
+    dbg_seal(b);
+}
+
+static void dbg_record_alloc(uint8_t op, uintptr_t addr, unsigned int order)
+{
+    if (addr == PMM_ALLOC_FAIL) {
+        dbg_ring_rec(PDO_ALLOC_FAIL, 0, order, 0);
+        return;
+    }
+    pmm_dbg_owner[(addr - buddy_state.heap_start) >> PAGE_SHIFT] =
+        dbg_owner_pack(order, pmm_dbg_cur_pc);
+    dbg_ring_rec(op, addr, order, 0);
+}
+
+/* A free whose order differs from the allocation recorded at that
+ * page (or of a page no allocation started at) leaves block_state and
+ * the free lists describing different blocks. Report it (bounded) and
+ * keep going: it is a suspect, not proof of the corruption. */
+static void dbg_check_free_order(uintptr_t addr, unsigned int order)
+{
+    uint32_t w = pmm_dbg_owner[(addr - buddy_state.heap_start) >> PAGE_SHIFT];
+    unsigned int ao = (w & OWNER_VALID) ? OWNER_ORDER(w) : 0xffu;
+    if (ao == order) {
+        return;
+    }
+    dbg_ring_rec(PDO_FREE_MISMATCH, addr, order, (uint8_t)ao);
+    if (pmm_dbg_mismatch_prints < 16) {
+        pmm_dbg_mismatch_prints++;
+        uart_printf("[pmm-debug] free order %u at 0x%lx (pc=0x%lx cpu%u) "
+                    "but recorded alloc order %s%u (alloc pc=0x%lx)\n",
+                    order, (unsigned long)addr,
+                    (unsigned long)pmm_dbg_cur_pc, (unsigned)cpu_id(),
+                    (w & OWNER_VALID) ? "" : "none/",
+                    ao == 0xffu ? 0u : ao,
+                    (unsigned long)((w & OWNER_VALID) ? OWNER_PC(w) : 0));
+    }
+}
+
+#define DBG_NODE_OK(b, o, where)      dbg_node_ok((b), (o), (where))
+#define DBG_ON_LIST(b, o)             dbg_on_list((b), (o))
+#define DBG_OFF_LIST(b)               dbg_off_list(b)
+#define DBG_RESEAL(b)                 dbg_seal(b)
+#define DBG_OP_BEGIN()                dbg_op_begin((uintptr_t)__builtin_return_address(0))
+#define DBG_RECORD_ALLOC(op, a, o)    dbg_record_alloc((op), (a), (o))
+#define DBG_RECORD_FREE(a, o)         dbg_ring_rec(PDO_FREE, (a), (o), 0)
+#define DBG_RECORD_DOUBLE_FREE(a, o)  dbg_ring_rec(PDO_FREE_DOUBLE, (a), (o), 0)
+#define DBG_CHECK_FREE_ORDER(a, o)    dbg_check_free_order((a), (o))
+#define DBG_POP_EMPTY(o)              dbg_corrupt("free_counts > 0 but list head is NULL", \
+                                                  0, (o), "buddy_alloc", false)
+#else
+#define DBG_NODE_OK(b, o, where)      (true)
+#define DBG_ON_LIST(b, o)             ((void)0)
+#define DBG_OFF_LIST(b)               ((void)0)
+#define DBG_RESEAL(b)                 ((void)0)
+#define DBG_OP_BEGIN()                ((void)0)
+#define DBG_RECORD_ALLOC(op, a, o)    ((void)0)
+#define DBG_RECORD_FREE(a, o)         ((void)0)
+#define DBG_RECORD_DOUBLE_FREE(a, o)  ((void)0)
+#define DBG_CHECK_FREE_ORDER(a, o)    ((void)0)
+#define DBG_POP_EMPTY(o)              ((void)0)
+#endif /* CONFIG_PMM_DEBUG */
+
+/* ==========================================================================
  * Free List Operations
  * ========================================================================== */
 
@@ -194,8 +632,11 @@ static void free_list_add(uintptr_t addr, unsigned int order)
     block->next = head;
 
     if (head) {
+        (void)DBG_NODE_OK(head, order, "free_list_add (old head)");
         head->prev = block;
+        DBG_RESEAL(head);
     }
+    DBG_ON_LIST(block, order);
 
     buddy_state.free_lists[order] = block;
     buddy_state.free_counts[order]++;
@@ -208,15 +649,28 @@ static void free_list_remove(uintptr_t addr, unsigned int order)
 {
     struct free_block *block = (struct free_block *)addr;
 
+    (void)DBG_NODE_OK(block, order, "free_list_remove");
+#if defined(CONFIG_PMM_DEBUG)
+    if (!block->prev && buddy_state.free_lists[order] != block) {
+        dbg_corrupt("removing an element with prev NULL that is not the list head",
+                    addr, order, "free_list_remove", true);
+    }
+#endif
+
     if (block->prev) {
+        (void)DBG_NODE_OK(block->prev, order, "free_list_remove (prev)");
         block->prev->next = block->next;
+        DBG_RESEAL(block->prev);
     } else {
         buddy_state.free_lists[order] = block->next;
     }
 
     if (block->next) {
+        (void)DBG_NODE_OK(block->next, order, "free_list_remove (next)");
         block->next->prev = block->prev;
+        DBG_RESEAL(block->next);
     }
+    DBG_OFF_LIST(block);
 
     buddy_state.free_counts[order]--;
 }
@@ -232,9 +686,12 @@ static uintptr_t free_list_pop(unsigned int order)
         return PMM_ALLOC_FAIL;
     }
 
+    (void)DBG_NODE_OK(block, order, "free_list_pop");
     buddy_state.free_lists[order] = block->next;
     if (block->next) {
+        (void)DBG_NODE_OK(block->next, order, "free_list_pop (next)");
         block->next->prev = NULL;
+        DBG_RESEAL(block->next);
     }
 
     /* Clear the popped block's link pointers. Callers (buddy_alloc /
@@ -244,6 +701,7 @@ static uintptr_t free_list_pop(unsigned int order)
      * free list as garbage and corrupt the doubly-linked list. */
     block->next = NULL;
     block->prev = NULL;
+    DBG_OFF_LIST(block);
 
     buddy_state.free_counts[order]--;
     return (uintptr_t)block;
@@ -314,6 +772,11 @@ static uintptr_t buddy_alloc(unsigned int order)
         if (buddy_state.free_counts[o] > 0) {
             /* Found a free block - pop it from the list */
             uintptr_t block = free_list_pop(o);
+#if defined(CONFIG_PMM_DEBUG)
+            if (block == PMM_ALLOC_FAIL) {
+                DBG_POP_EMPTY(o);
+            }
+#endif
 
             /* Split down to requested order if needed */
             while (o > order) {
@@ -561,6 +1024,37 @@ void pmm_user_reserve_reset(void)
     pmm_n_user_reserves = 0;
 }
 
+#if defined(CONFIG_PMM_DEBUG)
+/* PMM_DEBUG: print the user reserves nearest to [addr, addr + 2^order
+ * pages) and any that overlap it (GPU kexec handoff state, #1029). */
+static void dbg_print_reserves(uintptr_t addr, unsigned int order)
+{
+    uint64_t below_end = 0, below_start = 0, above_start = ~0ULL, above_end = 0;
+    for (size_t i = 0; i < pmm_n_user_reserves; i++) {
+        uint64_t s = pmm_user_reserves[i].addr;
+        uint64_t e = s + pmm_user_reserves[i].size;
+        if (e <= addr && e > below_end) {
+            below_end = e;
+            below_start = s;
+        }
+        if (s >= addr && s < above_start) {
+            above_start = s;
+            above_end = e;
+        }
+        if (s < addr + order_to_size(order) && e > addr) {
+            uart_printf("  !! overlaps user reserve [0x%lx, 0x%lx)\n",
+                        (unsigned long)s, (unsigned long)e);
+        }
+    }
+    uart_printf(" user reserves: %u; nearest below [0x%lx, 0x%lx), above [0x%lx, 0x%lx)\n",
+                (unsigned)pmm_n_user_reserves,
+                (unsigned long)below_start, (unsigned long)below_end,
+                (unsigned long)(above_start == ~0ULL ? 0 : above_start),
+                (unsigned long)above_end);
+
+}
+#endif
+
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
     /* The pmm_split_* scratch arrays are shared file-statics; the
@@ -806,7 +1300,9 @@ void *pmm_alloc_pages(size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    DBG_OP_BEGIN();
     uintptr_t addr = buddy_alloc(order);
+    DBG_RECORD_ALLOC(PDO_ALLOC, addr, order);
     spin_unlock_irqrestore(&pmm_lock, flags);
 
     if (addr == PMM_ALLOC_FAIL) {
@@ -842,6 +1338,7 @@ void *pmm_alloc_pages_low(size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    DBG_OP_BEGIN();
 
     /* Linear scan: find the lowest-address block at any order >= order.
      * Can't break early after finding a match at the requested order —
@@ -860,6 +1357,7 @@ void *pmm_alloc_pages_low(size_t count)
         for (struct free_block *blk = buddy_state.free_lists[o];
              blk != NULL;
              blk = blk->next) {
+            (void)DBG_NODE_OK(blk, o, "pmm_alloc_pages_low walk");
             uintptr_t a = (uintptr_t)blk;
             if (!found || a < best_addr) {
                 best_addr = a;
@@ -870,6 +1368,7 @@ void *pmm_alloc_pages_low(size_t count)
     }
 
     if (!found) {
+        DBG_RECORD_ALLOC(PDO_ALLOC_LOW, PMM_ALLOC_FAIL, order);
         spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: alloc_low: no block of order %u or higher", order);
         return NULL;
@@ -887,6 +1386,7 @@ void *pmm_alloc_pages_low(size_t count)
     set_block_state(best_addr, order, BLOCK_ALLOCATED);
     buddy_state.free_pages -= order_to_pages(order);
     buddy_state.alloc_count++;
+    DBG_RECORD_ALLOC(PDO_ALLOC_LOW, best_addr, order);
 
     spin_unlock_irqrestore(&pmm_lock, flags);
     return (void *)best_addr;
@@ -943,14 +1443,18 @@ void pmm_free_pages(void *page, size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    DBG_OP_BEGIN();
 
     /* Check for double-free */
     if (get_block_state(addr) == BLOCK_FREE) {
+        DBG_RECORD_DOUBLE_FREE(addr, order);
         spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: Double-free detected at 0x%lx", addr);
         return;
     }
 
+    DBG_CHECK_FREE_ORDER(addr, order);
+    DBG_RECORD_FREE(addr, order);
     buddy_free(addr, order, order);
 
     spin_unlock_irqrestore(&pmm_lock, flags);
@@ -1148,3 +1652,63 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats)
 
     spin_unlock_irqrestore(&pmm_lock, flags);
 }
+
+#if defined(CONFIG_PMM_DEBUG)
+/*
+ * PMM_DEBUG public entry points (pmm.h).
+ */
+int pmm_debug_validate(const char *where, int panic_on_error)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    pmm_dbg_report_only = panic_on_error ? 0 : 1;
+    int errs = dbg_walk(where ? where : "pmm_debug_validate");
+    pmm_dbg_report_only = 0;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return errs;
+}
+
+void pmm_debug_dump_ring(size_t last_n)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    dbg_dump_ring_tail(last_n);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+/*
+ * Self-test of the detector: break the seal of one free block the way
+ * a stray write would (zero its next link), check that a validation
+ * walk reports it, then put the original bytes back. Returns 0 when the
+ * corruption was detected and the lists validate clean afterwards.
+ */
+int pmm_debug_selftest(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    struct free_block *victim = NULL;
+    unsigned int vo = 0;
+    for (unsigned int o = 0; o <= MAX_ORDER && !victim; o++) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+            if (b->next) {          /* a mid-list element with a successor */
+                victim = b;
+                vo = o;
+                break;
+            }
+        }
+    }
+    if (!victim) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
+        return -1;
+    }
+    (void)vo;
+    struct free_block *saved_next = victim->next;
+    int errs_before = pmm_dbg_errors;
+    victim->next = NULL;                       /* the stray write */
+    pmm_dbg_report_only = 1;
+    int found = dbg_walk("pmm_debug_selftest (expected report)");
+    pmm_dbg_report_only = 0;
+    victim->next = saved_next;                 /* undo it */
+    int clean = dbg_walk("pmm_debug_selftest (after undo)");
+    pmm_dbg_errors = errs_before;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return (found == 1 && clean == 0) ? 0 : -2;
+}
+#endif /* CONFIG_PMM_DEBUG */

@@ -237,4 +237,33 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
  */
 void pmm_dump_free_list(unsigned int order, size_t max_blocks);
 
+/*
+ * PMM_DEBUG (#1207): free-list validation and alloc/free ring, built
+ * with `make ... PMM_DEBUG=ON`. See kernel/mm/pmm.c. With the option
+ * off these are empty inlines and PMM_DEBUG_ENABLED is 0.
+ *
+ * pmm_debug_validate: walk every free list now; on the first corrupt
+ *   element print the report (history, ring) and panic, or with
+ *   panic_on_error == 0 return 1 instead. Returns 0 when clean.
+ * pmm_debug_dump_ring: print the last `last_n` alloc/free operations.
+ * pmm_debug_selftest: corrupt one free block, check the walk reports
+ *   it, undo it. 0 on success.
+ */
+#if defined(CONFIG_PMM_DEBUG)
+#define PMM_DEBUG_ENABLED 1
+int pmm_debug_validate(const char *where, int panic_on_error);
+void pmm_debug_dump_ring(size_t last_n);
+int pmm_debug_selftest(void);
+#else
+#define PMM_DEBUG_ENABLED 0
+static inline int pmm_debug_validate(const char *where, int panic_on_error)
+{
+    (void)where;
+    (void)panic_on_error;
+    return 0;
+}
+static inline void pmm_debug_dump_ring(size_t last_n) { (void)last_n; }
+static inline int pmm_debug_selftest(void) { return 0; }
+#endif
+
 #endif /* PMM_H */

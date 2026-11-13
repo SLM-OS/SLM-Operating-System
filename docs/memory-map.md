@@ -342,6 +342,39 @@ void pmm_dump_stats(void);
 void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 ```
 
+### Debug build: PMM_DEBUG (#1207)
+
+`make kernel-test PLATFORM=... PMM_DEBUG=ON` (ARM64 only, default off)
+builds a checking PMM. With the option off, `pmm.c` compiles to the same
+instructions as without it.
+
+- Every free-block header carries a tag (its order) and a seal over its
+  links, recomputed by every PMM write to the header. Every PMM read of a
+  header checks both, so a free block written by anything other than the
+  PMM is reported at the first PMM touch, classified as "not the PMM"
+  (seal broken), "allocator defect" (seal intact) or "listed at another
+  order" (allocator state desync).
+- Every `PMM_DEBUG_WALK_EVERY`-th operation (default 1, every operation)
+  walks every free list: seal, prev links, `block_state`, and length
+  against `free_counts`. `free_counts > 0` with an empty list is reported
+  where it is found rather than as the later wild write from splitting
+  `PMM_ALLOC_FAIL`.
+- A ring of the last 16384 alloc/free calls (sequence, CNTVCT, CPU, task
+  id, operation, address, order, caller PC) and a per-page owner word (the
+  caller PC and order of the last allocation that started at that page)
+  give the corrupt block's history: who allocated it, who freed it, or
+  that no allocation has covered it since `pmm_init` (a writer outside the
+  CPU's allocations, such as DMA left running across kexec, or a wild
+  pointer). The report also lists the nearest user reserves.
+- A free whose order differs from the recorded allocation order is
+  printed (first 16) and recorded in the ring.
+
+On the first corruption the PMM prints the report and panics with
+`pmm_lock` held. The option adds about 9 MB of BSS on Jetson (the owner
+words, 4 bytes per page of `RAM_SIZE`), which moves the heap start up.
+`test_pmm` validates the lists on entry and exit and runs a self-test of
+the detector (`pmm_debug_selftest`).
+
 ### Design Considerations
 
 1. **Variable DRAM base** — Can't assume 0x40000000

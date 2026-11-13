@@ -1149,12 +1149,36 @@ static void test_user_reserve_table_full_rejects(void)
 }
 
 /* ============================================================================
+ * PMM_DEBUG validation (#1207). With PMM_DEBUG off these are no-ops that
+ * pass; with it on they check the free lists are consistent where the
+ * suite starts and ends, and that the detector reports a stray write.
+ * ============================================================================ */
+
+static void test_pmm_debug_lists_valid(void)
+{
+    /* Panics with the report (history, ring) if any list is corrupt. */
+    TEST_ASSERT_EQUAL_INT(0, pmm_debug_validate("test_pmm", 1));
+}
+
+static void test_pmm_debug_detects_stray_write(void)
+{
+    if (!PMM_DEBUG_ENABLED) {
+        TEST_IGNORE_MESSAGE("PMM_DEBUG off");
+    }
+    TEST_ASSERT_EQUAL_INT(0, pmm_debug_selftest());
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
 int test_suite_pmm(void)
 {
     UnityBegin("PMM Buddy Allocator Tests");
+
+    /* PMM_DEBUG: lists consistent on entry (state left by earlier suites) */
+    RUN_TEST(test_pmm_debug_lists_valid);
+    RUN_TEST(test_pmm_debug_detects_stray_write);
 
     /* Basic allocation */
     RUN_TEST(test_single_page_alloc);
@@ -1243,6 +1267,9 @@ int test_suite_pmm(void)
     RUN_TEST(test_user_reserve_zero_size_rejected);
     RUN_TEST(test_user_reserve_reset_zeros_count);
     RUN_TEST(test_user_reserve_table_full_rejects);
+
+    /* PMM_DEBUG: lists consistent after the PMM tests */
+    RUN_TEST(test_pmm_debug_lists_valid);
 
     return UnityEnd();
 }

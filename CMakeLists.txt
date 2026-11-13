@@ -306,6 +306,21 @@ if(SLOT_TRACE)
     add_compile_definitions(CONFIG_SLOT_TRACE=1)
 endif()
 
+# PMM free-list validation + alloc/free ring (#1207): seals every free
+# block header, walks the free lists every PMM_DEBUG_WALK_EVERY-th
+# operation, and keeps a ring of the last alloc/free calls plus a
+# per-page owner word, so the first corrupt link is reported with its
+# history. ARM64 only, debug only; with it off pmm.c's code is
+# unchanged. See kernel/mm/pmm.c and docs/testing.md.
+option(PMM_DEBUG "PMM free-list validation and alloc/free ring (#1207, debug only)" OFF)
+set(PMM_DEBUG_WALK_EVERY "1" CACHE STRING "PMM_DEBUG: walk every free list every Nth PMM operation (0 = never)")
+if(PMM_DEBUG)
+    if(PLATFORM STREQUAL "X86_64")
+        message(FATAL_ERROR "PMM_DEBUG is ARM64-only")
+    endif()
+    add_compile_definitions(CONFIG_PMM_DEBUG=1 CONFIG_PMM_DEBUG_WALK_EVERY=${PMM_DEBUG_WALK_EVERY})
+endif()
+
 option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
     add_compile_definitions(STAGE25_TRACE_PI5=1)
