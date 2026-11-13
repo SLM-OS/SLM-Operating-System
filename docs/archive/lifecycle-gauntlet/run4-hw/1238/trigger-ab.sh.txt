@@ -1,0 +1,25 @@
+#!/bin/bash
+# Host-side, session-local kexec trigger for labctl boot_test on jetson-nano-2
+# (#1238 arm A/B). Entry 39's loop (trigger.sh.txt), except that trigger k uses
+# the k-th elf given on the command line, so one boot_test call alternates arms.
+# For each NEW Linux boot (new boot_id): slmos-kexec <elf_k>, detached.
+# Stops after all elfs are triggered or <deadline_min> minutes. Leaves nothing on the board.
+# Usage: trigger-ab.sh <deadline_min> <elf1> [elf2 ...]
+deadline_min=$1; shift; elfs=("$@"); n=${#elfs[@]}
+J=root@192.168.4.5
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2)
+TMP=$(mktemp)
+end=$((SECONDS + deadline_min*60))
+seen=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+echo "$(date -u +%T) start n=$n elfs=[${elfs[*]}] skip_current_boot_id=${seen:-none}"
+done_n=0
+while [ $done_n -lt $n ] && [ $SECONDS -lt $end ]; do
+  id=$("${SSH[@]}" $J cat /proc/sys/kernel/random/boot_id 2>/dev/null) || { sleep 2; continue; }
+  case " $seen " in *" $id "*) sleep 3; continue;; esac
+  seen="$seen $id"; elf=${elfs[$done_n]}; done_n=$((done_n+1))
+  st=$("${SSH[@]}" $J 'timeout 90 systemctl is-system-running --wait; cut -d" " -f1 /proc/uptime' 2>/dev/null | tr '\n' ' ')
+  "${SSH[@]}" $J "sha256sum $elf | cut -c1-16; setsid nohup slmos-kexec $elf > /tmp/slmos-kexec.log 2>&1 < /dev/null &" > "$TMP" 2>&1
+  echo "$(date -u +%T) trigger $done_n/$n elf=$elf boot_id=$id state+uptime=[$st] reply=[$(tr '\n' ' ' < "$TMP")]"
+done
+rm -f "$TMP"
+echo "$(date -u +%T) end triggers=$done_n"
