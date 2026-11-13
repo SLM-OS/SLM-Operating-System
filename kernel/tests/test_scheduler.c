@@ -2678,16 +2678,25 @@ static bool swo_phase(uint32_t mode)
     return ok;
 }
 
+/* R3, migrate path: READY tasks moved by sched_migrate_task. */
 static void test_migrate_ready_during_switch_out(void)
 {
     if (cpu_count < 2) {
         TEST_ASSERT(1);
         return;
     }
-    bool a = swo_phase(SWO_MODE_MIGRATE);
-    bool b = swo_phase(SWO_MODE_WAKE);
-    TEST_ASSERT_TRUE_MESSAGE(a, "swo migrate phase");
-    TEST_ASSERT_TRUE_MESSAGE(b, "swo wake phase");
+    TEST_ASSERT_TRUE_MESSAGE(swo_phase(SWO_MODE_MIGRATE), "swo migrate phase");
+}
+
+/* R3, wake path: tasks woken onto another CPU before they switched out.
+ * A separate test so each path has its own rate. */
+static void test_wake_during_switch_out(void)
+{
+    if (cpu_count < 2) {
+        TEST_ASSERT(1);
+        return;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(swo_phase(SWO_MODE_WAKE), "swo wake phase");
 }
 
 #if defined(CONFIG_SWITCH_WINDOW_TEST)
@@ -6889,6 +6898,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
     RUN_TEST(test_preempt_flag_follows_migrated_task);   /* #1229 */
     RUN_TEST(test_migrate_ready_during_switch_out);      /* #1234 R3 */
+    RUN_TEST(test_wake_during_switch_out);               /* #1234 R3 */
     migrate_spin_cleanup();
     RUN_TEST(test_multiple_cores_isolated);
 
