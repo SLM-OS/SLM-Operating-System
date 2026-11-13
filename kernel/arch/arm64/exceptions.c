@@ -16,6 +16,7 @@
 #include "trap.h"
 #include "syscall.h"
 #include "slot_trace.h"
+#include "fault_dump.h"
 #include <stdint.h>
 
 /* Timer IRQ numbers — Generic Timer PPIs.
@@ -257,10 +258,13 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
                     "continue (see #216 for auto-resurrection plan).\n",
                     (unsigned long)current_cpu);
     }
+    /* The dump is complete: let another CPU's dump start. */
+    fault_dump_end();
     psci_cpu_off();
 #endif
 
     uart_puts("\nSystem halted.\n");
+    fault_dump_end();
 
     /* Fall-back halt: reached only if the platform doesn't support
      * PSCI CPU_OFF or PSCI returned unexpectedly. */
@@ -279,6 +283,12 @@ void el1_sync_handler(struct trap_frame *tf)
     __asm__ volatile("mrs %0, far_el1" : "=r"(far));
 
     uint32_t ec = (esr >> 26) & 0x3F;
+
+    /* Every EL1 synchronous exception ends in a dump and a halt. Mask
+     * IRQs and take the dump lock first, so the SLOT_TRACE lines below
+     * and the page-fault or panic dump stay together (fault_dump.h). */
+    __asm__ volatile("msr daifset, #0xF");
+    (void)fault_dump_begin();
 
 #if defined(CONFIG_SLOT_TRACE)
     /* #1213 slot trace: the first EL1 synchronous exception dumps every

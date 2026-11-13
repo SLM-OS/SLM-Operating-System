@@ -4,6 +4,7 @@
  * Compiles to an empty unit unless CONFIG_SLOT_TRACE is defined.
  */
 
+#include "fault_dump.h"
 #include "slot_trace.h"
 
 #if defined(CONFIG_SLOT_TRACE)
@@ -271,6 +272,8 @@ void slot_trace_pd_tick(uint32_t cpu, int pd)
 
 void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
 {
+    /* Serialized dump, every line tagged with this CPU (fault_dump.h). */
+    (void)fault_dump_begin();
     uint64_t esr, far, elr;
     const uint64_t *x = (const uint64_t *)tf;  /* x0..x30 at 0..240 (trap.h) */
     __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));

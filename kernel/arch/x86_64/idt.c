@@ -9,6 +9,7 @@
 
 /* Serial output wrappers — thin adapters onto uart.h. */
 #include "uart.h"
+#include "fault_dump.h"
 static void serial_puts(const char *s) { uart_puts(s); }
 static void serial_print_hex(uint64_t v) { uart_printf("0x%lx", v); }
 
@@ -199,6 +200,10 @@ void exception_handler(struct interrupt_frame *frame)
          * to run. */
         __asm__ volatile("cli");
 
+        /* One dump at a time, every line tagged with this CPU; the
+         * dumping CPU's uart_puts skips the UART lock (fault_dump.h). */
+        (void)fault_dump_begin();
+
         serial_puts("\n*** EXCEPTION: ");
         if (vec < sizeof(exception_names) / sizeof(exception_names[0])) {
             serial_puts(exception_names[vec]);
@@ -261,6 +266,7 @@ void exception_handler(struct interrupt_frame *frame)
         }
 
         serial_puts("*** HALT ***\n");
+        fault_dump_end();
         while (1) {
             __asm__ volatile("hlt");
         }

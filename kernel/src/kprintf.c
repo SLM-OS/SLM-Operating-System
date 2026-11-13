@@ -20,6 +20,8 @@
 #include "uart.h"
 #include "spinlock.h"
 #include "string.h"
+#include "fault_dump.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* UART lock for thread-safe printf: a cacheable spinlock with IRQ
@@ -29,11 +31,70 @@
  * the _unlocked variants and never take it. */
 static spinlock_t uart_lock = SPINLOCK_INIT;
 
+/* A CPU inside a fault dump (fault_dump.h) skips the lock: a holder that
+ * faulted must not block the dump, and the dump holds the lock itself
+ * when it can (uart_lock_try_hold). */
 #define UART_LOCK_IRQSAVE() \
-    irq_flags_t _uart_flags = spin_lock_irqsave(&uart_lock)
+    const bool _uart_skip = fault_dump_this_cpu_fast(); \
+    irq_flags_t _uart_flags = _uart_skip ? 0 : spin_lock_irqsave(&uart_lock)
 
 #define UART_UNLOCK_IRQRESTORE() \
-    spin_unlock_irqrestore(&uart_lock, _uart_flags)
+    do { \
+        if (!_uart_skip) { \
+            spin_unlock_irqrestore(&uart_lock, _uart_flags); \
+        } \
+    } while (0)
+
+static inline bool fault_dump_this_cpu_fast(void)
+{
+    return fault_dump_cpus != 0 && fault_dump_this_cpu();
+}
+
+/* Every character the kprintf layer prints goes through here, so a CPU
+ * inside a fault dump gets its "[cpuN] " line prefix on every path. */
+static inline void kputc(char c)
+{
+    if (fault_dump_cpus != 0) {
+        fault_dump_putc(c);
+    } else {
+        uart_putc(c);
+    }
+}
+
+/* Hold the UART lock for the length of a fault dump. IRQs are already
+ * masked. Gives up after wait_ticks of the counter (or if the counter
+ * stops moving), so a holder that faulted cannot block the dump. */
+bool uart_lock_try_hold(uint64_t wait_ticks, uint64_t (*now)(void));
+void uart_lock_hold_release(void);
+
+bool uart_lock_try_hold(uint64_t wait_ticks, uint64_t (*now)(void))
+{
+    const uint64_t t0 = now();
+    uint64_t last = t0;
+    uint32_t frozen = 0;
+    for (;;) {
+        if (spin_trylock(&uart_lock)) {
+            return true;
+        }
+        const uint64_t t = now();
+        if (t - t0 >= wait_ticks) {
+            return false;
+        }
+        if (t == last) {
+            if (++frozen >= 1000000u) {
+                return false;
+            }
+        } else {
+            frozen = 0;
+            last = t;
+        }
+    }
+}
+
+void uart_lock_hold_release(void)
+{
+    spin_unlock(&uart_lock);
+}
 
 /* ========================================================================
  * Output Abstraction
@@ -61,7 +122,7 @@ struct fmt_output {
 /* UART backend: write character to hardware UART */
 static void uart_out_putc(struct fmt_output *out, char c)
 {
-    uart_putc(c);
+    kputc(c);
     out->count++;
 }
 
@@ -114,9 +175,9 @@ void uart_puts_unlocked(const char *s)
 {
     while (*s) {
         if (*s == '\n') {
-            uart_putc('\r');
+            kputc('\r');
         }
-        uart_putc(*s++);
+        kputc(*s++);
     }
 }
 

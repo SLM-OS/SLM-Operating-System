@@ -960,6 +960,14 @@ void shell_init(void)
         kernel_cmd_register_shell();
     }
 
+#if defined(ENABLE_BOOT_TESTS)
+    /* `ktest`: filtered re-runs of boot tests (docs/testing.md). */
+    {
+        extern void test_harness_register_shell(void);
+        test_harness_register_shell();
+    }
+#endif
+
     /* Register platform-specific commands */
 #if defined(PLATFORM_X86_64)
     {

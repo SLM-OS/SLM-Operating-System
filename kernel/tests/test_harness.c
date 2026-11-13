@@ -9,6 +9,13 @@
 #include "../include/uart.h"
 #include "../include/semihosting.h"
 #include "../include/slm_ffi.h"
+#include "../include/timer.h"
+#include "../include/shell.h"
+#if !defined(PLATFORM_X86_64)
+#include "../include/dtb.h"
+#endif
+#include "test_filter.h"
+#include <stdbool.h>
 
 /* ============================================================================
  * Unity Output Functions
@@ -114,7 +121,60 @@ void test_harness_init(void)
 
 static int test_harness_finish(int total_failures);
 
-int test_harness_run_all(void)
+/* Enter a suite. Unfiltered (the default), every suite runs, exactly as
+ * before the filter existed. Filtered, only the suites that the generated
+ * index (scripts/gen-test-index.py) lists for a named test run, unless a
+ * name is missing from the index, in which case every suite is entered
+ * and RUN_TEST skips the unnamed tests. */
+#define RUN_SUITE(fn) \
+    do { \
+        if (harness_suite_selected(#fn)) { \
+            total_failures += fn(); \
+        } \
+    } while (0)
+
+/* Section banners printed between suites; omitted from filtered runs. */
+static void harness_banner(const char *title)
+{
+    if (test_filter_active()) {
+        return;
+    }
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts(title);
+    uart_puts("\n");
+    uart_puts("========================================\n");
+}
+
+static bool harness_walk_all;   /* a filtered name is not in the index */
+
+static bool streq(const char *a, const char *b)
+{
+    while (*a != '\0' && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static bool harness_suite_selected(const char *suite)
+{
+    if (!test_filter_active() || harness_walk_all) {
+        return true;
+    }
+    for (uint32_t i = 0; i < g_test_filter.count; i++) {
+        uint32_t cursor = 0;
+        const char *s;
+        while ((s = test_index_next_suite(g_test_filter.names[i], &cursor)) != NULL) {
+            if (streq(s, suite)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static int harness_run_suites(void)
 {
     int total_failures = 0;
 
@@ -124,258 +184,436 @@ int test_harness_run_all(void)
      * without the rest of the suite (whose known hardware failures,
      * #1109 / #1199, can halt the run before it gets here). */
     uart_puts("[INFO] BOOT_TESTS_HW_SET: coherency + integration suites only\n");
-    total_failures += test_suite_coherency();
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Integration Tests (Multi-Core)\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_integration();
-    return test_harness_finish(total_failures);
+    RUN_SUITE(test_suite_coherency);
+    harness_banner("Integration Tests (Multi-Core)");
+    RUN_SUITE(test_suite_integration);
+    return total_failures;
 #endif
 
     /* Run model_mem smoke test FIRST so an init regression (e.g.
      * silent PMM oversubscribe on a tight-RAM platform) surfaces
      * before downstream tests have a chance to silently no-op or
      * panic on the uninitialized allocator. Fast, side-effect free. */
-    total_failures += test_suite_model_mem_smoke();
+    RUN_SUITE(test_suite_model_mem_smoke);
 
     /* Run each test suite */
-    int ipc_failures = test_suite_ipc();
-    total_failures += ipc_failures;
-    if (ipc_failures == 0) {
-        uart_puts("[INFO] IPC tests passed\n");
+    if (harness_suite_selected("test_suite_ipc")) {
+        int ipc_failures = test_suite_ipc();
+        total_failures += ipc_failures;
+        if (ipc_failures == 0 && !test_filter_active()) {
+            uart_puts("[INFO] IPC tests passed\n");
+        }
     }
 
-    total_failures += test_suite_pi_mutex();
-    total_failures += test_suite_steal_deque();
-    total_failures += test_suite_steal_shares();
-    total_failures += test_suite_sched_trace();
-    total_failures += test_suite_latency_hist();
-    total_failures += test_suite_gpu_consumer();
-    total_failures += test_suite_gpu_tier();
-    total_failures += test_suite_operator_library();
-    total_failures += test_suite_oplib_pool();
-    total_failures += test_suite_oplib_weights_pool();
-    total_failures += test_suite_operator_dispatch();
-    total_failures += test_suite_oplib_probe();
-    total_failures += test_suite_gpu_dispatch_breaker();
-    total_failures += test_suite_admin_telemetry();
-    total_failures += test_suite_telemetry_feed();
-    total_failures += test_suite_model_engine();
+    RUN_SUITE(test_suite_pi_mutex);
+    RUN_SUITE(test_suite_steal_deque);
+    RUN_SUITE(test_suite_steal_shares);
+    RUN_SUITE(test_suite_test_filter);
+    RUN_SUITE(test_suite_fault_dump);
+    RUN_SUITE(test_suite_sched_trace);
+    RUN_SUITE(test_suite_latency_hist);
+    RUN_SUITE(test_suite_gpu_consumer);
+    RUN_SUITE(test_suite_gpu_tier);
+    RUN_SUITE(test_suite_operator_library);
+    RUN_SUITE(test_suite_oplib_pool);
+    RUN_SUITE(test_suite_oplib_weights_pool);
+    RUN_SUITE(test_suite_operator_dispatch);
+    RUN_SUITE(test_suite_oplib_probe);
+    RUN_SUITE(test_suite_gpu_dispatch_breaker);
+    RUN_SUITE(test_suite_admin_telemetry);
+    RUN_SUITE(test_suite_telemetry_feed);
+    RUN_SUITE(test_suite_model_engine);
 #if !defined(PLATFORM_X86_64)
-    total_failures += test_suite_msg_router();
-    total_failures += test_suite_gic();
-    total_failures += test_suite_coop_preempt();
-    total_failures += test_suite_cpu_supervisor();
-    total_failures += test_suite_mpidr_lookup();
-    total_failures += test_suite_pmu();
+    RUN_SUITE(test_suite_msg_router);
+    RUN_SUITE(test_suite_gic);
+    RUN_SUITE(test_suite_coop_preempt);
+    RUN_SUITE(test_suite_cpu_supervisor);
+    RUN_SUITE(test_suite_mpidr_lookup);
+    RUN_SUITE(test_suite_pmu);
 #endif
 #if !defined(PLATFORM_X86_64) && !defined(PLATFORM_RASPI5)
     /* UEFI-direct relocation decision (#26); efi_stub.c is built on
      * every ARM64 platform with a PE header (not Pi 5). */
-    total_failures += test_suite_efi_reloc();
-    total_failures += test_suite_boot_models();
+    RUN_SUITE(test_suite_efi_reloc);
+    RUN_SUITE(test_suite_boot_models);
 #endif
-    total_failures += test_suite_tegra_cpufreq();
-    total_failures += test_suite_tegra_fan();
-    total_failures += test_suite_emc_hold();
+    RUN_SUITE(test_suite_tegra_cpufreq);
+    RUN_SUITE(test_suite_tegra_fan);
+    RUN_SUITE(test_suite_emc_hold);
     /* GA10B ACR LS blob builders (#1088): pure, every platform. */
-    total_failures += test_suite_ga10b_netlist();
-    total_failures += test_suite_ga10b_ctxsw_ucode();
-    total_failures += test_suite_ga10b_acr_blob();
-    total_failures += test_suite_ga10b_pmu();
-    total_failures += test_suite_ga10b_chan();
-    total_failures += test_suite_gpu_chan_state();
-    total_failures += test_suite_ga10b_grctx();
-    total_failures += test_suite_ga10b_cold();
-    total_failures += test_suite_ga10b_mnist_pipeline();
-    total_failures += test_suite_ga10b_cold_pipelines(); /* #1092 sched/eviction */
-    total_failures += test_suite_oplib_gpu_as();   /* #1092 cold-channel oplib */
-    total_failures += test_suite_gpu();
-    total_failures += test_suite_vfs();
-    total_failures += test_suite_shell();
-    total_failures += test_suite_shell_session();
-    total_failures += test_suite_shell_history();
-    total_failures += test_suite_blob_autoload();
-    total_failures += test_suite_boot_media();
+    RUN_SUITE(test_suite_ga10b_netlist);
+    RUN_SUITE(test_suite_ga10b_ctxsw_ucode);
+    RUN_SUITE(test_suite_ga10b_acr_blob);
+    RUN_SUITE(test_suite_ga10b_pmu);
+    RUN_SUITE(test_suite_ga10b_chan);
+    RUN_SUITE(test_suite_gpu_chan_state);
+    RUN_SUITE(test_suite_ga10b_grctx);
+    RUN_SUITE(test_suite_ga10b_cold);
+    RUN_SUITE(test_suite_ga10b_mnist_pipeline);
+    RUN_SUITE(test_suite_ga10b_cold_pipelines); /* #1092 sched/eviction */
+    RUN_SUITE(test_suite_oplib_gpu_as);   /* #1092 cold-channel oplib */
+    RUN_SUITE(test_suite_gpu);
+    RUN_SUITE(test_suite_vfs);
+    RUN_SUITE(test_suite_shell);
+    RUN_SUITE(test_suite_shell_session);
+    RUN_SUITE(test_suite_shell_history);
+    RUN_SUITE(test_suite_blob_autoload);
+    RUN_SUITE(test_suite_boot_media);
 #if defined(ENABLE_NETWORKING)
-    total_failures += test_suite_telnet();
-    total_failures += test_suite_telnetd_config();
-    total_failures += test_suite_telnetd_cmd();
-    total_failures += test_suite_tcp_telemetry_server();
+    RUN_SUITE(test_suite_telnet);
+    RUN_SUITE(test_suite_telnetd_config);
+    RUN_SUITE(test_suite_telnetd_cmd);
+    RUN_SUITE(test_suite_tcp_telemetry_server);
 #endif
-    total_failures += test_suite_pmm();
+    RUN_SUITE(test_suite_pmm);
 #if !defined(PLATFORM_X86_64)
     {
         extern int test_suite_kbuf(void);
-        total_failures += test_suite_kbuf();
+        RUN_SUITE(test_suite_kbuf);
     }
-    total_failures += test_suite_pcie();
-    total_failures += test_suite_bpmp();
-    total_failures += test_suite_inference_device();
-    total_failures += test_suite_hailo();
-    total_failures += test_suite_hailo_trace();
-    total_failures += test_suite_hailo_replay();
-    total_failures += test_suite_hef();
-    total_failures += test_suite_hef_parser();
+    RUN_SUITE(test_suite_pcie);
+    RUN_SUITE(test_suite_bpmp);
+    RUN_SUITE(test_suite_inference_device);
+    RUN_SUITE(test_suite_hailo);
+    RUN_SUITE(test_suite_hailo_trace);
+    RUN_SUITE(test_suite_hailo_replay);
+    RUN_SUITE(test_suite_hef);
+    RUN_SUITE(test_suite_hef_parser);
 #endif
-    total_failures += test_suite_littlefs();
-    total_failures += test_suite_x86_boot();
-    total_failures += test_suite_elf();
+    RUN_SUITE(test_suite_littlefs);
+    RUN_SUITE(test_suite_x86_boot);
+    RUN_SUITE(test_suite_elf);
     /* Platform-neutral protocol-layout tests (no MMIO). */
-    total_failures += test_suite_bcm_mailbox();
+    RUN_SUITE(test_suite_bcm_mailbox);
     /* Camera C-API + Tegra234 clock-id static_assert pins (#396). */
-    total_failures += test_suite_camera();
+    RUN_SUITE(test_suite_camera);
     /* FatFs / FAT32 integration (uses ramdisk + PMM). */
-    total_failures += test_suite_fat32();
+    RUN_SUITE(test_suite_fat32);
 #if !defined(PLATFORM_X86_64)
     /* SDHCI driver against QEMU sdhci-pci (skips cleanly if absent). */
-    total_failures += test_suite_sdhci();
+    RUN_SUITE(test_suite_sdhci);
     /* SHA-256 vector tests (vendored library, no platform deps). */
-    total_failures += test_suite_sha256();
+    RUN_SUITE(test_suite_sha256);
     /* Crypto-quality RNG (jitter pool + injection coverage). #199a / #893. */
-    total_failures += test_suite_rng();
+    RUN_SUITE(test_suite_rng);
 #if defined(NET_SSHD)
     /* SSH daemon — public API + per-conn ring (#199a / #893). */
-    total_failures += test_suite_sshd();
+    RUN_SUITE(test_suite_sshd);
     /* SSH host-key persistence (#199b / #892). The TU only compiles
      * when NET_SSHD is on, so it stays inside the same gate. */
-    total_failures += test_suite_host_key();
+    RUN_SUITE(test_suite_host_key);
     /* Password DB + scrypt verify (#199d / #896). */
-    total_failures += test_suite_passwd();
+    RUN_SUITE(test_suite_passwd);
     /* Dedicated wolfssl heap (wolf_heap.c) — alloc/free/realloc paths. */
-    total_failures += test_suite_wolf_heap();
+    RUN_SUITE(test_suite_wolf_heap);
     /* /etc/sshd.conf parser (sshd_autostart.c). */
-    total_failures += test_suite_sshd_autostart();
+    RUN_SUITE(test_suite_sshd_autostart);
 #endif
     /* `kernel` admin command surface (also relies on sdhci-pci). */
-    total_failures += test_suite_kernel_cmd();
-    total_failures += test_suite_dtb();
-    total_failures += test_suite_fdt();
-    total_failures += test_suite_model_mem();
-    total_failures += test_suite_eviction();
-    total_failures += test_suite_slm_load();
-    total_failures += test_suite_slm_shell();
-    total_failures += test_suite_slm_runner();
+    RUN_SUITE(test_suite_kernel_cmd);
+    RUN_SUITE(test_suite_dtb);
+    RUN_SUITE(test_suite_fdt);
+    RUN_SUITE(test_suite_model_mem);
+    RUN_SUITE(test_suite_eviction);
+    RUN_SUITE(test_suite_slm_load);
+    RUN_SUITE(test_suite_slm_shell);
+    RUN_SUITE(test_suite_slm_runner);
     /* Dynamic-batching shell verbs (#55 / PR #917): `infer batch ...`
      * + `bench infer-stress` argument validation. Rust side is
      * covered by rust_batch_inference_test. */
-    total_failures += test_suite_infer_shell();
-    total_failures += test_suite_scheduler();
-    total_failures += test_suite_component();
-    total_failures += test_suite_vmm();
+    RUN_SUITE(test_suite_infer_shell);
+    RUN_SUITE(test_suite_scheduler);
+    RUN_SUITE(test_suite_component);
+    RUN_SUITE(test_suite_vmm);
     /* Coherency litmus + negative controls (#1193): runs pinned tasks on
      * every CPU, so it sits with the other scheduler-backed suites. */
-    total_failures += test_suite_coherency();
+    RUN_SUITE(test_suite_coherency);
     /* Run queues / task table / current_task stay cacheable (#1193). */
-    total_failures += test_suite_nc_axis();
-    total_failures += test_suite_lua();
+    RUN_SUITE(test_suite_nc_axis);
+    RUN_SUITE(test_suite_lua);
     /* libc-stub regression: strtol/strtod chain rewrite in lua_stubs.c. */
-    total_failures += test_suite_lua_stubs();
+    RUN_SUITE(test_suite_lua_stubs);
 #endif
     /* SLM GPU dispatch counter FFI tests — outside the !X86_64 gate
      * because the suite calls only `slm_runtime_dispatch_stats` /
      * `_reset`, which are defined on every platform (Jetson real
      * impl + non-Jetson stub in slm_ffi.c). No Rust deps. */
-    total_failures += test_suite_slm_dispatch_stats();
+    RUN_SUITE(test_suite_slm_dispatch_stats);
 #if defined(ENABLE_BOOT_TESTS)
     /* Boot-test kernels only: the suite embeds about 1.1 MB of fixtures. */
-    total_failures += test_suite_slm_golden();
-    total_failures += test_suite_slm_prog();
+    RUN_SUITE(test_suite_slm_golden);
+    RUN_SUITE(test_suite_slm_prog);
 #endif
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)
-    total_failures += test_suite_net();
-    total_failures += test_suite_net_http();
+    RUN_SUITE(test_suite_net);
+    RUN_SUITE(test_suite_net_http);
 #endif
 
     /* USB core tests (platform-neutral; mock HCD only). */
-    total_failures += test_suite_usb_core();
+    RUN_SUITE(test_suite_usb_core);
 
     /* CDC-ECM class driver tests (depend on net_driver, so ENABLE_NETWORKING gated). */
 #if defined(ENABLE_NETWORKING)
-    total_failures += test_suite_cdc_ecm();
+    RUN_SUITE(test_suite_cdc_ecm);
 #endif
 
     /* XHCI ring primitive tests (platform-neutral; mothballed Phase 3A code). */
-    total_failures += test_suite_xhci_ring();
+    RUN_SUITE(test_suite_xhci_ring);
 
     /* Tegra234 XHCI wrapper offset + CSB-paging tests (Phase 3A.2). */
-    total_failures += test_suite_xhci_tegra();
+    RUN_SUITE(test_suite_xhci_tegra);
 
     /* PORTSC decode + context layout (Phase 3A Step 5). */
-    total_failures += test_suite_xhci_device();
+    RUN_SUITE(test_suite_xhci_device);
 
     /* TRB builders for control / bulk (Phase 3A Step 6 + 7b). */
-    total_failures += test_suite_xhci_xfer();
+    RUN_SUITE(test_suite_xhci_xfer);
 
 #if !defined(PLATFORM_X86_64)
     /* Phase 5 test suites (ARM64 only — use Rust runtime + ARM assembly) */
 
     /* Model loader tests (Rust ONNX parser + registry) */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Model Loader Tests\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_model_loader();
+    harness_banner("Model Loader Tests");
+    RUN_SUITE(test_suite_model_loader);
 
     /* Inference engine tests (tensor ops + end-to-end MNIST) */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Inference Engine Tests\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_inference();
+    harness_banner("Inference Engine Tests");
+    RUN_SUITE(test_suite_inference);
 
     /* Model hot-swap tests (registry::swap_model + rust_model_swap) */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Model Hot-Swap Tests (#232)\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_model_swap();
+    harness_banner("Model Hot-Swap Tests (#232)");
+    RUN_SUITE(test_suite_model_swap);
 
     /* GPU compute integration tests */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("GPU Compute Tests\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_gpu_compute();
+    harness_banner("GPU Compute Tests");
+    RUN_SUITE(test_suite_gpu_compute);
 
     /* Component integration tests (M5) */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Component Integration Tests\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_components_m5();
+    harness_banner("Component Integration Tests");
+    RUN_SUITE(test_suite_components_m5);
 
     /* Syscall infrastructure tests */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Syscall Infrastructure Tests\n");
-    uart_puts("========================================\n");
-    total_failures += test_suite_syscall();
+    harness_banner("Syscall Infrastructure Tests");
+    RUN_SUITE(test_suite_syscall);
 #endif /* !PLATFORM_X86_64 */
 
     /* Rust FFI tests */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Rust FFI Tests\n");
-    uart_puts("========================================\n");
-    total_failures += rust_run_tests();
+    harness_banner("Rust FFI Tests");
+    if (!test_filter_active()) {
+        total_failures += rust_run_tests();
+    }
 
     /*
      * Integration tests run actual tasks across CPUs.
      * These must run after all unit tests because they exercise
      * the full scheduler infrastructure.
      */
-    uart_puts("\n");
-    uart_puts("========================================\n");
-    uart_puts("Integration Tests (Multi-Core)\n");
-    uart_puts("========================================\n");
+    harness_banner("Integration Tests (Multi-Core)");
 #if !defined(PLATFORM_X86_64)
-    total_failures += test_suite_integration();
+    RUN_SUITE(test_suite_integration);
 #endif
 
-    return test_harness_finish(total_failures);
+    return total_failures;
+}
+
+/* ============================================================================
+ * Filtered runs (docs/testing.md "Running selected tests")
+ * ============================================================================ */
+
+/* Build-time default: make kernel-test TEST_FILTER=a,b TEST_REPEAT=N. */
+#if defined(SLMOS_TEST_FILTER_DEFAULT)
+static const char harness_build_filter[] = SLMOS_TEST_FILTER_DEFAULT;
+#else
+static const char harness_build_filter[] = "";
+#endif
+#if defined(SLMOS_TEST_REPEAT_DEFAULT)
+static const char harness_build_repeat[] = SLMOS_TEST_REPEAT_DEFAULT;
+#else
+static const char harness_build_repeat[] = "";
+#endif
+
+static size_t cstrlen(const char *s)
+{
+    size_t n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+static void harness_print_filter_error(const char *where, int rc)
+{
+    uart_printf("[FILTER] [FAIL] %s: unparseable test filter (error %d); "
+                "running nothing\n", where, rc);
+}
+
+/* Set g_test_filter from (in order) the kernel command line and the
+ * build-time default. Returns 1 when a filter is active, 0 when none
+ * was given, or a negative error (the caller fails the run). */
+static int harness_filter_from_boot(void)
+{
+#if !defined(PLATFORM_X86_64)
+    const dtb_chosen_t *chosen = dtb_get_chosen();
+    if (chosen != NULL && chosen->bootargs[0] != '\0') {
+        int rc = test_filter_from_cmdline(&g_test_filter, chosen->bootargs);
+        if (rc < 0) {
+            harness_print_filter_error("kernel command line", rc);
+            return rc;
+        }
+        if (rc == 1) {
+            return 1;
+        }
+    }
+#endif
+    size_t nlen = cstrlen(harness_build_filter);
+    if (nlen == 0) {
+        return 0;
+    }
+    test_filter_t f = { 0 };
+    int rc = test_filter_parse_names(&f, harness_build_filter, nlen);
+    if (rc == TEST_FILTER_OK) {
+        f.repeat = 1;
+        size_t rlen = cstrlen(harness_build_repeat);
+        if (rlen != 0) {
+            rc = test_filter_parse_repeat(harness_build_repeat, rlen, &f.repeat);
+        }
+    }
+    if (rc != TEST_FILTER_OK) {
+        harness_print_filter_error("build-time TEST_FILTER/TEST_REPEAT", rc);
+        return rc;
+    }
+    f.active = true;
+    f.source = "build";
+    g_test_filter = f;
+    return 1;
+}
+
+/* Run the active filter: g_test_filter.repeat passes over the named
+ * tests, each pass entering the selected suites in the usual order, so
+ * "a,b" with repeat 3 runs a b a b a b. Returns the failure count:
+ * failed iterations plus one for each name that never ran. */
+static int harness_run_filtered(void)
+{
+    test_filter_t *f = &g_test_filter;
+    int total_failures = 0;
+
+    for (uint32_t i = 0; i < TEST_FILTER_MAX_NAMES; i++) {
+        g_test_filter_stats[i] = (test_filter_stats_t){ 0 };
+    }
+
+    harness_walk_all = false;
+    uart_puts("[FILTER] tests=");
+    for (uint32_t i = 0; i < f->count; i++) {
+        uart_printf("%s%s", i ? "," : "", f->names[i]);
+    }
+    uart_printf(" repeat=%u source=%s index=%u\n", f->repeat,
+                f->source ? f->source : "?", test_index_size());
+    for (uint32_t i = 0; i < f->count; i++) {
+        uint32_t cursor = 0;
+        if (test_index_next_suite(f->names[i], &cursor) == NULL) {
+            uart_printf("[FILTER] %s is not in the test index; entering every suite\n",
+                        f->names[i]);
+            harness_walk_all = true;
+        }
+    }
+
+    for (uint32_t pass = 1; pass <= f->repeat; pass++) {
+        g_test_filter_pass = pass;
+        total_failures += harness_run_suites();
+    }
+
+    uint64_t freq = timer_get_frequency();
+    uart_puts("\n[FILTER] Summary\n");
+    for (uint32_t i = 0; i < f->count; i++) {
+        const test_filter_stats_t *st = &g_test_filter_stats[i];
+        if (st->runs == 0) {
+            uart_printf("[FILTER] [FAIL] %s: not found (0 runs)\n", f->names[i]);
+            total_failures++;
+            continue;
+        }
+        uint64_t avg = st->total_ticks / st->runs;
+        uart_printf("[FILTER] %s %s: runs=%u passed=%u failed=%u ignored=%u "
+                    "us min=%lu avg=%lu max=%lu\n",
+                    st->failed ? "[FAIL]" : "[PASS]", f->names[i],
+                    st->runs, st->passed, st->failed, st->ignored,
+                    (unsigned long)(freq ? st->min_ticks * 1000000u / freq : 0),
+                    (unsigned long)(freq ? avg * 1000000u / freq : 0),
+                    (unsigned long)(freq ? st->max_ticks * 1000000u / freq : 0));
+    }
+    return total_failures;
+}
+
+int test_harness_run_all(void)
+{
+    int rc = harness_filter_from_boot();
+#if defined(FAULT_DUMP_SELFTEST) && !defined(PLATFORM_X86_64)
+    /* FAULT_DUMP_SELFTEST=ON: the forced double fault leaves CPUs 1 and 2
+     * halted, so run that test alone unless a filter was given. */
+    if (rc == 0) {
+        static const char selftest[] = "test_fault_dump_two_cpus_concurrent";
+        test_filter_t f = { 0 };
+        (void)test_filter_parse_names(&f, selftest, sizeof(selftest) - 1);
+        f.repeat = 1;
+        f.active = true;
+        f.source = "FAULT_DUMP_SELFTEST";
+        g_test_filter = f;
+        rc = 1;
+    }
+#endif
+    if (rc < 0) {
+        return test_harness_finish(1);
+    }
+    if (rc == 1) {
+        return test_harness_finish(harness_run_filtered());
+    }
+    return test_harness_finish(harness_run_suites());
+}
+
+/* `ktest <name[,name...]> [repeat]`: the same filtered run from the
+ * shell of a boot-test kernel, after the boot run has finished. */
+static int cmd_ktest(int argc, char *argv[])
+{
+    if (argc < 2 || argc > 3) {
+        uart_puts("usage: ktest <test[,test...]> [repeat]\n");
+        return 1;
+    }
+    test_filter_t f = { 0 };
+    int rc = test_filter_parse_names(&f, argv[1], cstrlen(argv[1]));
+    f.repeat = 1;
+    if (rc == TEST_FILTER_OK && argc == 3) {
+        rc = test_filter_parse_repeat(argv[2], cstrlen(argv[2]), &f.repeat);
+    }
+    if (rc != TEST_FILTER_OK) {
+        harness_print_filter_error("ktest", rc);
+        return 1;
+    }
+    f.active = true;
+    f.source = "shell";
+    g_test_filter = f;
+    int failures = harness_run_filtered();
+    g_test_filter.active = false;
+    uart_puts("\n[FILTER] ");
+    if (failures == 0) {
+        uart_puts("[PASS] ktest\n");
+    } else {
+        uart_printf("[FAIL] ktest: %d failure(s)\n", failures);
+    }
+    return failures == 0 ? 0 : 1;
+}
+
+static const shell_cmd_t ktest_cmd = {
+    .name = "ktest",
+    .handler = cmd_ktest,
+    .help = "Run named boot tests: ktest <test[,test...]> [repeat]",
+    .mutates = true,
+    .category = SHELL_CAT_PROCESS,
+};
+
+/* Called from shell_init() in boot-test images. */
+void test_harness_register_shell(void)
+{
+    (void)shell_register_command(&ktest_cmd);
 }
 
 static int test_harness_finish(int total_failures)
