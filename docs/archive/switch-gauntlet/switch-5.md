@@ -80,3 +80,32 @@ top.
    critic that cannot run on Fable is re-run on the session's model and the
    verdict says so.
 8. **Milestone.** Backlog (the user named none).
+
+## Entry 0a (written 23:31 UTC): C0 item 4 result; builders released
+
+- /ci on base **8ec0e330**, worktree s5-base, 23:01 to 23:19 UTC, one step at
+  a time, host otherwise idle (builders reading only; load 1.6 to 2.8):
+  ARM64 build, x86-64 build, Jetson real-weights main and test builds, `make
+  test`, `make test PLATFORM=X86_64`, `make test AI_SCHED=ON` (each "PASSED -
+  All tests passed (exit code 0)"), `make runtime-test` (308 and 328 passed,
+  0 failed), braces ("All check-c-braces tests passed"; "no changed C
+  lines"), build order ("All build-order tests passed"), Jetson layout ("All
+  checks passed.", no skipped `!` lines), diff check empty. All rc=0.
+- `make test WORK_STEALING=ON`: **3 of 3 passed** (23:19 to 23:28 UTC). This
+  is the run's #1230-family baseline: 0 failures in 3 runs.
+- Files: `gauntlet-5-hw-pi5` 4f86c880,
+  `docs/archive/switch-gauntlet/run5-hw/c0/ci-base-8ec0e330/` (summary.txt,
+  one log per step, run.sh).
+- Builders spawned at 23:10 UTC (C1 `c1-harness`, C2 `c2-window`, C3
+  `c3-pmm`, Opus 5.5), held to read/design/edit until this result, released
+  at 23:29 UTC.
+- C1 design note (23:24 UTC, disclosed deviation for the C1 critic): Jetson
+  kexec cannot carry the filter on the command line without a board change
+  (`slmos-kexec` passes Linux's /proc/cmdline and has no append option) and
+  UEFI-direct boots with the firmware DTB, so both Jetson paths use a
+  build-time filter (`TEST_FILTER=`, `TEST_REPEAT=`); Pi 5 and QEMU also take
+  `slmos.test=` / `slmos.test_repeat=` on the command line; the shell takes
+  `ktest <names> <N>`. The brief asked for a command line or boot argument
+  the kexec and UEFI paths can both pass.
+
+C0 definition of done met: Entry 0 and 0a pushed, base head in bold.
