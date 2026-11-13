@@ -2372,23 +2372,34 @@ static void test_preempt_flag_follows_migrated_task(void)
 }
 
 /* ============================================================================
- * R3 (#1234, #1238): READY tasks migrated between CPUs while the CPU they
- * last ran on is still switching out of them.
+ * R3 (#1234, #1238): a task made runnable on another CPU while the CPU it
+ * last ran on is still switching out of it.
  *
- * schedule() puts a running task back on its run queue as READY under
- * rq_lock and drops the lock before switch_to() has saved the task's
- * context. Workers (unpinned) loop on yield(); one mover per CPU (pinned)
- * scans the workers, migrates a READY one to its own CPU with
- * sched_migrate_task() and yields at once, so its CPU switches the worker
- * in while the worker's previous CPU may still be inside its switch
- * window. Checks, per worker:
- *  - generation: before each yield the worker stamps its private counter
- *    into swo_gen[i]; after the yield returns it compares the two. A
- *    context restored from a save older than the last stamp resumes with
- *    an old counter (restored before its save completed);
+ * Two phases, 300 ms each, the same checks:
+ *  - "migrate": schedule() puts a running task back on its run queue as
+ *    READY under rq_lock and drops the lock before switch_to() has saved
+ *    the task's context. Workers (unpinned) loop on yield(); one mover per
+ *    CPU (pinned) looks for a worker that is READY while its on_cpu is
+ *    still set, migrates it to its own CPU with sched_migrate_task() and
+ *    yields at once, so its CPU switches the worker in while the worker's
+ *    previous CPU may still be inside its switch window.
+ *  - "wake": workers block in task_sleep_ms(); one waker per CPU looks for
+ *    a worker that is BLOCKED while its on_cpu is still set (it has set
+ *    TASK_BLOCKED but not finished switching out), points its affinity at
+ *    its own CPU, wakes it with task_sleep_wake() (which queues it there)
+ *    and yields at once. Wake placement on another CPU is the same window
+ *    reached through the wake path (task_wake_sleepers, ipc wake_one).
+ * Reading on_cpu only aims the movers; nothing in the kernel changes.
+ *
+ * Checks, per worker:
+ *  - generation: before each yield or sleep the worker stamps its private
+ *    counter (kept in a callee-saved register) into swo_gen[i]; after it
+ *    resumes it compares the two. A context restored from a save older
+ *    than the last stamp resumes with an old counter (restored before its
+ *    save completed);
  *  - two CPUs: the worker marks itself in swo_in[i] (cpu + 1) with an
- *    atomic exchange while it runs test code and clears it before the
- *    yield; a nonzero previous value means another CPU runs it too.
+ *    atomic exchange while it runs test code and clears it before it
+ *    yields; a nonzero previous value means another CPU runs it too.
  * With SWITCH_CHECK=ON the kernel also checks every switch-in (saved
  * generation vs restored generation, and a per-slot owner), and those
  * counters must not move during the test.
@@ -2398,8 +2409,12 @@ static void test_preempt_flag_follows_migrated_task(void)
 #define SWO_MAX_CPUS        8
 #define SWO_MAX_WORKERS     (SWO_WORKERS_PER_CPU * SWO_MAX_CPUS)
 #define SWO_RUN_MS          300
+#define SWO_MODE_MIGRATE    0
+#define SWO_MODE_WAKE       1
 
-static volatile uint32_t swo_stop;
+static volatile uint32_t swo_mode;
+static volatile uint32_t swo_stop;          /* workers */
+static volatile uint32_t swo_stop_movers;
 static volatile uint32_t swo_bad_gen;
 static volatile uint32_t swo_bad_dual;
 static volatile uint32_t swo_first_kind;     /* 1 gen, 2 two CPUs */
@@ -2410,8 +2425,8 @@ static volatile uint64_t swo_first_want;
 static volatile uint64_t swo_gen[SWO_MAX_WORKERS];
 static volatile uint32_t swo_in[SWO_MAX_WORKERS];
 static volatile uint32_t swo_runs[SWO_MAX_WORKERS];
-static volatile uint32_t swo_migs;
-static volatile uint32_t swo_mig_fail;
+static volatile uint32_t swo_moves;
+static volatile uint32_t swo_move_fail;
 static struct task *volatile swo_task[SWO_MAX_WORKERS];
 static volatile uint32_t swo_nworkers;
 
@@ -2430,6 +2445,7 @@ static void swo_note(uint32_t kind, uint32_t i, uint64_t have, uint64_t want)
 static void swo_worker(void *arg)
 {
     uint32_t i = (uint32_t)(uintptr_t)arg;
+    uint32_t mode = swo_mode;
     uint64_t local = 0;     /* lives across yield() in a callee-saved register */
     while (!__atomic_load_n(&swo_stop, __ATOMIC_ACQUIRE)) {
         uint32_t me = cpu_id() + 1;
@@ -2450,35 +2466,75 @@ static void swo_worker(void *arg)
         uint32_t mine = me;
         (void)__atomic_compare_exchange_n(&swo_in[i], &mine, 0, false,
                                           __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
-        yield();
+        if (mode == SWO_MODE_WAKE) {
+            /* A waker pinned us to its CPU to wake us there; unpin
+             * (running, so this only sets the field). */
+            (void)sched_set_task_affinity(task_current(), CPU_AFFINITY_ANY);
+            task_sleep_ms(60000);   /* woken by a waker or at the end */
+        } else {
+            yield();
+        }
     }
 }
 
 static void swo_mover(void *arg)
 {
     uint32_t me = (uint32_t)(uintptr_t)arg;
+    uint32_t mode = swo_mode;
     uint32_t start = me;
-    while (!__atomic_load_n(&swo_stop, __ATOMIC_ACQUIRE)) {
+    uint32_t idle_scans = 0;
+    while (!__atomic_load_n(&swo_stop_movers, __ATOMIC_ACQUIRE)) {
         uint32_t n = swo_nworkers;
         bool moved = false;
         for (uint32_t k = 0; k < n && !moved; k++) {
             uint32_t i = (start + k) % n;
             struct task *t = swo_task[i];
-            if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != TASK_READY ||
-                t->assigned_cpu == me) {
+            uint32_t want = mode == SWO_MODE_WAKE ? TASK_BLOCKED : TASK_READY;
+            uint32_t st = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+            if (mode == SWO_MODE_WAKE && st == TASK_BLOCKED &&
+                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+                /* Fully switched out: wake it wherever placement puts
+                 * it, only to keep the workers cycling (not counted). */
+                task_sleep_wake(t);
                 continue;
             }
-            if (sched_migrate_task(t, me) == 0) {
-                __atomic_fetch_add(&swo_migs, 1, __ATOMIC_RELAXED);
+            /* Aim at the window: on_cpu still set means the CPU that ran
+             * the worker has not finished switching out of it, and (for
+             * a requeued READY task) no CPU names it as current any more,
+             * so its CPU is switching away from it rather than keeping
+             * it. */
+            uint32_t on = t->assigned_cpu;
+            if (st != want || !__atomic_load_n(&t->on_cpu, __ATOMIC_RELAXED) ||
+                on == me ||
+                (mode == SWO_MODE_MIGRATE && on < cpu_count &&
+                 task_current_on_cpu(on) == t)) {
+                continue;
+            }
+            int rc;
+            if (mode == SWO_MODE_WAKE) {
+                rc = sched_set_task_affinity(t, me);
+                if (rc == 0) {
+                    task_sleep_wake(t);
+                }
+            } else {
+                rc = sched_migrate_task(t, me);
+            }
+            if (rc == 0) {
+                __atomic_fetch_add(&swo_moves, 1, __ATOMIC_RELAXED);
                 moved = true;
             } else {
-                __atomic_fetch_add(&swo_mig_fail, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&swo_move_fail, 1, __ATOMIC_RELAXED);
             }
             start = i + 1;
         }
-        /* Switch the migrated worker in on this CPU at once (it is ahead
-         * of this mover in the queue at equal priority). */
-        yield();
+        /* Switch the moved worker in on this CPU at once (it is ahead of
+         * this mover in the queue at equal priority). Without a move keep
+         * scanning for a short while before yielding, so a window is seen
+         * while it is open. */
+        if (moved || ++idle_scans >= 64) {
+            idle_scans = 0;
+            yield();
+        }
     }
 }
 
@@ -2493,21 +2549,21 @@ static bool swo_all_terminated(void *ctx)
     return true;
 }
 
-static void test_migrate_ready_during_switch_out(void)
+/* One phase; returns false if its tasks did not all finish. */
+static bool swo_phase(uint32_t mode)
 {
-    if (cpu_count < 2) {
-        TEST_ASSERT(1);
-        return;
-    }
     uint32_t ncpu = cpu_count < SWO_MAX_CPUS ? cpu_count : SWO_MAX_CPUS;
     uint32_t nw = ncpu * SWO_WORKERS_PER_CPU;
     struct task *all[SWO_MAX_WORKERS + SWO_MAX_CPUS + 1];
     uint32_t nall = 0;
 
+    swo_mode = mode;
     swo_stop = 0;
+    swo_stop_movers = 0;
     swo_bad_gen = swo_bad_dual = 0;
     swo_first_kind = 0;
-    swo_migs = swo_mig_fail = 0;
+    swo_moves = swo_move_fail = 0;
+    swo_nworkers = 0;
     for (uint32_t i = 0; i < SWO_MAX_WORKERS; i++) {
         swo_gen[i] = 0;
         swo_in[i] = 0;
@@ -2522,9 +2578,9 @@ static void test_migrate_ready_during_switch_out(void)
     /* Create every task before any runs, so a mover never sees a NULL. */
     for (uint32_t i = 0; i < nw; i++) {
         struct task *t = task_create("swo_w", swo_worker, (void *)(uintptr_t)i);
-        TEST_ASSERT_NOT_NULL(t);
         if (!t) {
-            return;
+            uart_printf("  swo: task_create failed (worker %u)\n", i);
+            return false;   /* tasks created so far never ran; leaked */
         }
         swo_task[i] = t;
         all[nall++] = t;
@@ -2532,9 +2588,9 @@ static void test_migrate_ready_during_switch_out(void)
     swo_nworkers = nw;
     for (uint32_t c = 0; c < ncpu; c++) {
         struct task *m = task_create("swo_m", swo_mover, (void *)(uintptr_t)c);
-        TEST_ASSERT_NOT_NULL(m);
         if (!m) {
-            break;
+            uart_printf("  swo: task_create failed (mover %u)\n", c);
+            return false;
         }
         m->cpu_affinity = c;
         all[nall++] = m;
@@ -2552,16 +2608,45 @@ static void test_migrate_ready_during_switch_out(void)
     while (timer_get_count() - t0 < (f / 1000) * SWO_RUN_MS) {
         yield();
     }
+    /* Movers first, so none touches a worker that has exited. */
+    __atomic_store_n(&swo_stop_movers, 1, __ATOMIC_RELEASE);
+    long long wm = test_wait_until("swo_movers", swo_all_terminated, &all[nw],
+                                   TEST_WAIT_S(2));
     __atomic_store_n(&swo_stop, 1, __ATOMIC_RELEASE);
-    long long w = test_wait_until("swo_done", swo_all_terminated, all, TEST_WAIT_S(2));
+    /* Wake sleepers (wake phase) until every worker has exited. */
+    long long w = -1;
+    uint64_t t1 = timer_get_count();
+    while (timer_get_count() - t1 < 2 * f) {
+        for (uint32_t i = 0; i < nw; i++) {
+            if (__atomic_load_n(&swo_task[i]->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED) {
+                task_sleep_wake(swo_task[i]);
+            }
+        }
+        if (swo_all_terminated(all)) {
+            w = (long long)((timer_get_count() - t1) / (f / 1000000));
+            break;
+        }
+        yield();
+    }
+    if (wm < 0 || w < 0) {
+        for (uint32_t k = 0; k < nall; k++) {
+            struct task *t = all[k];
+            uart_printf("  swo: left %s id=%u state=%u on_cpu=%u assigned=%u aff=%u\n",
+                        t->name, t->id, (unsigned)t->state, t->on_cpu,
+                        t->assigned_cpu, t->cpu_affinity);
+        }
+        w = -1;
+    }
 
     uint32_t runs = 0;
     for (uint32_t i = 0; i < nw; i++) {
         runs += swo_runs[i];
     }
-    uart_printf("  swo: cpus=%u workers=%u migrations=%u mig_fail=%u runs=%u "
-                "bad_gen=%u two_cpus=%u",
-                ncpu, nw, swo_migs, swo_mig_fail, runs, swo_bad_gen, swo_bad_dual);
+    const char *name = mode == SWO_MODE_WAKE ? "wake" : "migrate";
+    uart_printf("  swo %s: cpus=%u workers=%u moves=%u move_fail=%u runs=%u "
+                "bad_gen=%u two_cpus=%u%s",
+                name, ncpu, nw, swo_moves, swo_move_fail, runs, swo_bad_gen,
+                swo_bad_dual, w < 0 ? " NOT-FINISHED" : "");
     if (swo_first_kind) {
         uart_printf(" first=%s worker=%u cpu=%u have=%lu want=%lu",
                     swo_first_kind == 1 ? "gen" : "two_cpus", swo_first_worker,
@@ -2571,32 +2656,38 @@ static void test_migrate_ready_during_switch_out(void)
     uart_printf("\n");
 #if defined(CONFIG_SWITCH_CHECK)
     switch_check_snapshot(&sc1);
-    uart_printf("  swo: switch_check switch_ins=%u bad_gen=%u bad_dual=%u "
-                "first kind=%u task=%u cpu=%u owner=%u\n",
+    uart_printf("  swo %s: switch_check switch_ins=%u bad_gen=%u bad_dual=%u "
+                "first kind=%u task=%u cpu=%u owner=%u\n", name,
                 sc1.switch_ins - sc0.switch_ins, sc1.bad_gen - sc0.bad_gen,
                 sc1.bad_dual - sc0.bad_dual, sc1.first_kind, sc1.first_task_id,
                 sc1.first_cpu, sc1.first_owner);
 #endif
 
-    if (w < 0) {
-        for (uint32_t k = 0; k < nall; k++) {
-            if (all[k]->state != TASK_TERMINATED) {
-                scheduler_terminate_task(all[k]);
-            }
+    /* A task that did not exit is leaked, not destroyed: it may still be
+     * on the sleep queue or a run queue. */
+    for (uint32_t k = 0; k < nall; k++) {
+        if (__atomic_load_n(&all[k]->state, __ATOMIC_ACQUIRE) == TASK_TERMINATED) {
+            task_destroy(all[k]);
         }
     }
-    for (uint32_t k = 0; k < nall; k++) {
-        task_destroy(all[k]);
-    }
 
-    TEST_ASSERT_TRUE(w >= 0);
-    TEST_ASSERT_TRUE(swo_migs > 0);
-    TEST_ASSERT_EQUAL_UINT32(0, swo_bad_gen);
-    TEST_ASSERT_EQUAL_UINT32(0, swo_bad_dual);
+    bool ok = w >= 0 && swo_moves > 0 && swo_bad_gen == 0 && swo_bad_dual == 0;
 #if defined(CONFIG_SWITCH_CHECK)
-    TEST_ASSERT_EQUAL_UINT32(0, sc1.bad_gen - sc0.bad_gen);
-    TEST_ASSERT_EQUAL_UINT32(0, sc1.bad_dual - sc0.bad_dual);
+    ok = ok && sc1.bad_gen == sc0.bad_gen && sc1.bad_dual == sc0.bad_dual;
 #endif
+    return ok;
+}
+
+static void test_migrate_ready_during_switch_out(void)
+{
+    if (cpu_count < 2) {
+        TEST_ASSERT(1);
+        return;
+    }
+    bool a = swo_phase(SWO_MODE_MIGRATE);
+    bool b = swo_phase(SWO_MODE_WAKE);
+    TEST_ASSERT_TRUE_MESSAGE(a, "swo migrate phase");
+    TEST_ASSERT_TRUE_MESSAGE(b, "swo wake phase");
 }
 
 #if defined(CONFIG_SWITCH_WINDOW_TEST)
