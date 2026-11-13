@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "boot_source.h"
 #include "bpmp.h"
 #include "cache.h"
 #include "camera.h"
@@ -63,6 +64,18 @@ static void imx219_dump_gpio(struct gpio_tegra_pin *pin)
 
 int imx219_power_on(void)
 {
+    /* After a UEFI-direct boot nothing has powered or clocked the
+     * camera I2C controller (0x03180000): Linux does that on the kexec
+     * path, and this driver has no cold bring-up for it. The first
+     * register access then ends in "RAS Uncorrectable Error in IOB ...
+     * ADDR = 0x8000000003180040" and TF-A powers the core off, which
+     * stops the board (seen in the Jetson test suite once #1224 let it
+     * get this far). Refuse cleanly instead. */
+    if (boot_source_is_uefi()) {
+        WARN("imx219: not supported after a UEFI-direct boot (camera I2C controller is not powered)");
+        return -1;
+    }
+
     /* Step 1: enable the XCLK source. extperiph1 sources from
      * pll_p; BPMP clk_enable is idempotent if Linux already left it
      * running (the normal post-kexec state when an IMX219 driver was
@@ -598,6 +611,12 @@ int imx219_capture_one_frame(struct camera_frame *out)
 {
     if (out == NULL) {
         WARN("imx219_capture: NULL out");
+        return -1;
+    }
+    /* imx219_power_on() refuses after a UEFI-direct boot; check here
+     * too so a refused capture leaves the RCE session untouched. */
+    if (boot_source_is_uefi()) {
+        WARN("imx219_capture: not supported after a UEFI-direct boot");
         return -1;
     }
 

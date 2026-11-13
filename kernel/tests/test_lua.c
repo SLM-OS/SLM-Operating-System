@@ -17,6 +17,12 @@
 #include "../include/sched.h"  /* yield() */
 #include "test_wait.h"
 #include "../lib/lua/src/lua.h"  /* lua_gettop, lua_settop — CORE-H2 test */
+#include "../include/string.h"      /* memcpy (#1199 arena) */
+#include "../lib/lua/src/lauxlib.h"  /* luaL_requiref, luaL_loadstring (#1199) */
+#include "../lib/lua/src/lualib.h"   /* luaopen_base, luaopen_string (#1199) */
+#if !defined(PLATFORM_X86_64)
+#include "../include/vmm.h"          /* high-address alias window (#1199) */
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -4013,6 +4019,137 @@ static void test_teardown_handles_no_open_states(void)
 }
 
 /* ============================================================================
+ * #1199: Lua string functions on a heap above 0x80000000
+ * ============================================================================
+ *
+ * lstrlib.c calls memchr (lmemfind for a plain string.find, add_s for a
+ * gsub replacement). kernel/include/string.h once had no memchr prototype,
+ * so the call was implicitly int-returning and GCC sign-extended the result
+ * (`sxtw`). Below 0x80000000 that is harmless, which is why QEMU passed; on
+ * Jetson the heap is at 0x8xxxxxxx and string.find faulted in memcmp at
+ * 0xffffffff8xxxxxxx.
+ *
+ * This test runs those paths on a Lua state whose allocator hands out
+ * memory with bit 31 set. On Jetson the static arena already is (the image
+ * is linked at 0x80000000). On QEMU (RAM 0x40000000..0x7fffffff) the arena
+ * is reached through an alias window mapped in [0x80000000, 4 GB). On the
+ * old code the test page-faults, so the suite halts there. */
+#define HI_ARENA_SIZE (512u * 1024u)
+static uint8_t hi_arena_buf[HI_ARENA_SIZE] __attribute__((aligned(4096)));
+
+struct hi_arena {
+    uint8_t *base;   /* address Lua sees (bit 31 set) */
+    size_t   used;
+    size_t   allocs_high; /* allocations whose address has bit 31 set */
+};
+
+static void *hi_arena_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+    struct hi_arena *a = (struct hi_arena *)ud;
+    if (nsize == 0) {
+        return NULL;  /* bump allocator: frees are no-ops */
+    }
+    size_t off = (a->used + 15u) & ~(size_t)15u;
+    if (off + nsize > HI_ARENA_SIZE) {
+        return NULL;
+    }
+    uint8_t *p = a->base + off;
+    a->used = off + nsize;
+    if (((uintptr_t)p & 0x80000000u) != 0) {
+        a->allocs_high++;
+    }
+    if (ptr) {
+        memcpy(p, ptr, osize < nsize ? osize : nsize);
+    }
+    return p;
+}
+
+#define HI_BLOCK (2u * 1024u * 1024u)
+
+/* Returns the alias window base, 0 when the arena is used in place, or
+ * UINT64_MAX when no window could be mapped (the test is then ignored). */
+static uint64_t hi_arena_place(struct hi_arena *a)
+{
+    uintptr_t buf = (uintptr_t)hi_arena_buf;
+    if ((buf & 0x80000000u) != 0 && buf + HI_ARENA_SIZE <= 0x100000000ull) {
+        a->base = hi_arena_buf;
+        return 0;
+    }
+#if !defined(PLATFORM_X86_64)
+    static const uint64_t windows[] = {
+        0xC0000000ull, 0xA0000000ull, 0xE0000000ull, 0x90000000ull,
+    };
+    uint64_t pa = vmm_virt_to_phys((uint64_t)buf);
+    uint64_t pa_block = pa & ~(uint64_t)(HI_BLOCK - 1u);
+    for (unsigned i = 0; i < sizeof(windows) / sizeof(windows[0]); i++) {
+        uint64_t w = windows[i];
+        if (vmm_is_mapped(w) || vmm_is_mapped(w + HI_BLOCK)) {
+            continue;
+        }
+        if (vmm_ensure_kernel_l2_table(w) != 0) {
+            continue;
+        }
+        if (vmm_map_block(w, pa_block, VMM_FLAGS_KERNEL_DATA) != 0) {
+            continue;
+        }
+        /* The arena may straddle a 2 MB boundary: map the next block too. */
+        if (vmm_map_block(w + HI_BLOCK, pa_block + HI_BLOCK,
+                          VMM_FLAGS_KERNEL_DATA) != 0) {
+            vmm_unmap_block(w);
+            continue;
+        }
+        a->base = (uint8_t *)(uintptr_t)(w + (pa - pa_block));
+        return w;
+    }
+#endif
+    return UINT64_MAX;
+}
+
+static void test_lua_string_find_above_2gb(void)
+{
+    struct hi_arena a = { 0 };
+    uint64_t window = hi_arena_place(&a);
+    if (window == UINT64_MAX) {
+        TEST_IGNORE_MESSAGE("no address window with bit 31 set on this platform");
+    }
+    TEST_ASSERT_TRUE(((uintptr_t)a.base & 0x80000000u) != 0);
+
+    lua_State *L = lua_newstate(hi_arena_alloc, &a);
+    TEST_ASSERT_NOT_NULL(L);
+    luaL_requiref(L, LUA_GNAME, luaopen_base, 1);      /* assert */
+    luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
+    lua_settop(L, 0);
+    int rc = luaL_loadstring(L,
+        "local s = string.rep('a', 40) .. 'needle' .. string.rep('b', 9)\n"
+        "assert(string.find(s, 'needle', 1, true) == 41)\n"
+        "assert(string.find(s, 'needlex', 1, true) == nil)\n"
+        /* memchr hits a first-byte match whose tail differs, so the loop
+         * calls memchr again from the next byte. */
+        "assert(string.find(s, 'aan', 1, true) == 39)\n"
+        "assert(string.find(s, 'eb', 1, true) == 46)\n"
+        "local r = ('abc'):gsub('b', '[%0]')\n"
+        "assert(r == 'a[b]c', r)\n");
+    if (rc == LUA_OK) {
+        rc = lua_pcall(L, 0, 0, 0);
+    }
+    const char *msg = (rc == LUA_OK) ? "" : lua_tostring(L, -1);
+    if (rc != LUA_OK) {
+        uart_puts("    lua error: ");
+        uart_puts(msg ? msg : "(null)");
+        uart_puts("\n");
+    }
+    lua_close(L);
+#if !defined(PLATFORM_X86_64)
+    if (window != 0) {
+        vmm_unmap_block(window + HI_BLOCK);
+        vmm_unmap_block(window);
+    }
+#endif
+    TEST_ASSERT_EQUAL_INT(LUA_OK, rc);
+    TEST_ASSERT_TRUE(a.allocs_high > 0);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -4028,6 +4165,7 @@ int test_suite_lua(void)
     /* Basic execution */
     RUN_TEST(test_lua_arithmetic);
     RUN_TEST(test_lua_strings);
+    RUN_TEST(test_lua_string_find_above_2gb);
     RUN_TEST(test_lua_tables);
     RUN_TEST(test_lua_functions);
     RUN_TEST(test_lua_loops);

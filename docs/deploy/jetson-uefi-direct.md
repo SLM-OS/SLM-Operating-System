@@ -53,7 +53,7 @@ boot.S .Lefi_continue                              (no stack use)
   7. mask IRQ/FIQ/SError
   8. MMU + caches off in the regime UEFI left active
      (E2H=0 → SCTLR_EL2 / TLBI ALLE2)
-  9. copy code + .data to the link address, IC IALLU
+  9. copy code + .data (+ .got) to the link address, IC IALLU
  10. br into the copy ──► normal Jetson EL2 setup (VHE on),
                           primary_cpu, kernel_main
 ```
@@ -336,7 +336,7 @@ to the next boot option.
 |---|---|
 | `make test` | `kernel/tests/test_efi_reloc.c`: relocation decisions on synthetic memory maps, boot-source default. `kernel/tests/test_boot_models.c`: the model loader against a fake firmware (every failure path), range picking, kernel checks, reservation, `/boot/models`, zero-copy load |
 | `make test-qemu-uefi` | Boots the QEMU_VIRT `slmos.bin` under QEMU's AArch64 UEFI (AAVMF) twice: in place, and with ImageBase forced to a non-RAM address so the stub must relocate. Then `scripts/test-qemu-uefi-models.sh` boots with a small GGUF on the virtual disk and with no file, a read error (QEMU blkdebug), a file too big and no memory. Needs `qemu-efi-aarch64` and `mtools` |
-| `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address, HCR_EL2 read-modify-write, inherited PAN cleared after the E2H flip (#1079) |
+| `make test-jetson-uefi-layout` | Structural checks on the Jetson ELF: early VBAR table, MMU-off arms, VA cleaning (no set/way), ImageBase == link address, HCR_EL2 read-modify-write, inherited PAN cleared after the E2H flip (#1079), nothing with file contents past `__data_end` (#1224) |
 
 `scripts/qemu-uefi-boot.sh` is the script behind `test-qemu-uefi`; it
 accepts `FORCE_IMAGE_BASE=` and `QEMU_ACPI=` for manual runs, and the
@@ -806,6 +806,21 @@ where the two disagree.
     post-request hook in `bpmp.c` that reads EMC back after every BPMP
     request at boot (`kernel/drivers/emc_hold.c`; build with
     `EMC_HOLD_BISECT` set to 1 in that file to log every request).
+19. **Only what ends by `__data_end` survives the hand-off** (#1224).
+    Step 9 copies `_kernel_file_size` (`__data_end - _start`) bytes, the
+    PE `.data` raw data ends at the same place, and `primary_cpu` clears
+    only `.bss`. The linker scripts had no rule for `.got`, so `ld` placed
+    it as an orphan right after `__data_end`. The kexec path loaded it
+    (it is in the ELF's RW segment), but after a UEFI-direct boot it held
+    whatever was in RAM there. GCC reaches weak symbols through the GOT,
+    so `camera_open("mock")` computed the frame size from two garbage
+    pointers and the test kernel faulted in `camera_preprocess_mnist`;
+    `cmd_reboot`'s weak `hailo_control_signal_driver_shutdown` and
+    `cmd_hailo`'s `hailo_fw_*` read the same table. `.got`/`.got.plt` now
+    sit inside `.data` in `kernel-jetson.ld` and `kernel.ld`, and
+    `make test-jetson-uefi-layout` fails if any section with file
+    contents lies past `__data_end` (`LAYOUT_ELF=<elf>` runs the checks
+    on an existing image).
 
 ## Troubleshooting
 

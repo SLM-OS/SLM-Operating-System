@@ -29,6 +29,7 @@
 #include "../include/nvcsi.h"
 #include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
+#include "../include/boot_source.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -86,6 +87,27 @@ static void test_camera_open_unknown_returns_minus_one(void)
     TEST_ASSERT_EQUAL_INT(-1, camera_open("",         &frame));
     TEST_ASSERT_EQUAL_INT(-1, camera_open("nonsense", &frame));
 }
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/*
+ * Test: after a UEFI-direct boot, camera_open("imx219-0") fails with -3
+ * instead of touching the unpowered camera I2C controller, which stops
+ * the board with a RAS error in TF-A. The boot source is forced to UEFI
+ * here so the guard is exercised on the kexec path too; with the guard
+ * in place no sensor access happens, so this is safe on either path.
+ * The refusal must also leave the RCE session alone: the camrtc
+ * "uninit" tests later in this suite fail if it brings RCE up.
+ */
+static void test_camera_imx219_refused_after_uefi_boot(void)
+{
+    uint32_t saved = slmos_boot_source;
+    slmos_boot_source = BOOT_SOURCE_UEFI;
+    struct camera_frame frame;
+    int rc = camera_open("imx219-0", &frame);
+    slmos_boot_source = saved;
+    TEST_ASSERT_EQUAL_INT(-3, rc);
+}
+#endif
 
 /*
  * Test: camera_open rejects NULL inputs without dereferencing.
@@ -718,7 +740,16 @@ static void test_tegra_i2c_dump_status_bounds(void)
     /* On Jetson the dump touches live MMIO — the imx219 shell command
      * already exercises that path on every CHIP_ID failure. Here we
      * just confirm the symbol resolves and the n-clamp logic doesn't
-     * write past the caller's buffer. */
+     * write past the caller's buffer.
+     *
+     * After a UEFI-direct boot nothing has powered the camera I2C
+     * controller (Linux does it on the kexec path), and reading an
+     * unpowered block stops the board with "Unhandled Exception in
+     * EL3" (seen once #1224 let the suite get this far). The imx219
+     * command powers it first; this test does not, so skip it there. */
+    if (boot_source_is_uefi()) {
+        TEST_IGNORE_MESSAGE("UEFI-direct boot: camera I2C controller not powered");
+    }
     tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 999u);
     /* At least the first entry should now have a name. */
     TEST_ASSERT_NOT_NULL(regs[0].name);
@@ -1266,6 +1297,9 @@ int test_suite_camera(void)
     UnityBegin("Camera C-API tests");
     RUN_TEST(test_camera_open_mock);
     RUN_TEST(test_camera_open_unknown_returns_minus_one);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    RUN_TEST(test_camera_imx219_refused_after_uefi_boot);
+#endif
     RUN_TEST(test_camera_open_null_safe);
     RUN_TEST(test_camera_preprocess_bad_args);
     RUN_TEST(test_camera_preprocess_mock_first_pixel);
