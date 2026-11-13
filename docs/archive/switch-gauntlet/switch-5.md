@@ -109,3 +109,15 @@ top.
   the kexec and UEFI paths can both pass.
 
 C0 definition of done met: Entry 0 and 0a pushed, base head in bold.
+
+## Entry 1 (written 23:36 UTC): C1 filter pushed; lab handover to C3
+
+- C1 pushed `c1/harness` at 6e39f425 (23:34 UTC): test filter and repeat
+  (build-time `TEST_FILTER=` / `TEST_REPEAT=` on every platform including
+  QEMU; Pi 5 `slmos.test=` in cmdline.txt parser-tested only), plus fault-dump
+  code whose proofs are still to come. C1's own QEMU check (50 of 50 with the
+  filter) is a builder claim until its evidence file is pushed and the critic
+  reproduces it.
+- **Handover 23:35 UTC: jetson-nano-2 to C3** (#1207 reproduction and
+  capture), until 01:45 UTC at the latest. pi-5-1 unheld. C2 told its window
+  is 01:45 to 03:15 UTC.
