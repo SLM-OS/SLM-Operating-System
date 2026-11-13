@@ -1218,3 +1218,91 @@ Step 2 conditions hold (20 Jetson + 10 Pi 5 boots clean and complete,
   No QEMU process was killed; QEMU ran only under make test inside ci.sh.
 - Branch tips: `gauntlet-4-hw-jetson` 63f30a8c, `gauntlet-4-hw-pi5` e37bfb6d,
   main 5b28d065, c3/jetson-suite 1b85b315 (PR #1239).
+
+## Entry 43 (written 00:24 UTC, 2026-11-13): #1238 arm A vs arm B: faults on both arms; pre-existing, exposed by the test
+
+Single-agent lab session, jetson-nano-2 only, 22:07 to 00:25 UTC. No subagents,
+no critics. Nothing merged.
+
+**Arms.** A (with #1237) = **1b85b315** (`c3/jetson-suite`, main 5b28d065 +
+#1239's five commits). B (without #1237) = **fcf91277** (`c1/1238-arm-b`, pushed):
+6c1f4c9c + #1239's five commits (cherry-picked cleanly as 22041ace..dbeaf02c) + one
+test-only commit that copies `test_preempt_flag_follows_migrated_task`, its pdm_*
+statics and helper task, and its RUN_TEST line verbatim from 5b28d065. Every added
+line in that commit appears in #1237's test_scheduler.c additions. The test needs
+no #1237 kernel code (`test_wait_until`, `sched_migrate_task`, `preempt_disabled`
+all exist at 6c1f4c9c). Diff against 6c1f4c9c: 11 files, +403/-6 (CMakeLists.txt,
+docs/deploy/jetson-uefi-direct.md, kernel/CLAUDE.md, imx219.c, string.h,
+kernel-jetson.ld, kernel.ld, test_camera.c, test_lua.c, test_scheduler.c +109,
+test-jetson-uefi-layout.sh), with nothing under kernel/sched or kernel/arch.
+**QEMU `make test` on arm B: 1 failure, this test** (`pdm: migrations=22471 moved=6
+bad=6 (first on cpu 1)`). That is the #1229 bug the test was written for: without
+#1237's post-switch `cpu_id()` re-read, the CPU a migrated task resumes on keeps
+`preempt_disabled` = 1. Jetson elfs (both after `make kernel-test-clean`, operator
+library embedded from the same SASS + MANIFEST as run 3): A 61a42e9d, B 8dfaf538,
+banners `build 20261112222231 (1b85b315)` / `(fcf91277)`. Run 3's elf 95acdf74 was
+gone (l4-c3's build dir rebuilt for QEMU by /ci), so A was rebuilt.
+
+**Design (weaker than asked).** The test harness has no test filter or repeat
+option, so the loop design was not possible. Full kexec suite boots, alternating A
+and B boot by boot through one host-side trigger loop (`trigger-ab.sh.txt`, Entry
+39's loop with one elf per trigger, nothing installed on the board), 2-3 boots per
+boot_test call. Deviation, disclosed: 15 full-suite boots per arm (6.5 min each,
+about 3.3 h) did not fit the 2.5 h cap, so each capture stops shortly after the
+test of interest (expect `\] test_multiple_cores_isolated`, then from boot 15
+`\] test_priority_ordering_multiple_levels`, two tests later, because boot 10's
+capture stopped inside an interleaved third fault dump). Captures are from power-on
+(MB1), banner included, about 3.5 min each. 20 boots done (10 per arm), not 15.
+
+**Counts** (boots that reached the test):
+- **Arm A (with #1237): 3 of 8** fault in the test (boots 09, 13, 19).
+- **Arm B (without #1237): 5 of 9** fault in the test (boots 10, 12, 16, 18, 20).
+- Run 3 at A's head, for reference: 2 of 10.
+- Excluded: 3 boots stopped earlier by the **#1207 PMM halt** (06 B, 11 A, 15 A;
+  ESR 0x96000044, write at 0x1000008096ad97, `pmm_alloc_pages`, x30
+  `test_exhaustion_recovery`, main, CPU 0). Boot 06 is that halt on a tree without
+  #1237.
+
+**The faults** (full list and symbols in the README). They are the same family on both arms:
+- a task resumed from a saved context that is not its own. Idle tasks show **PC 0x0
+  instruction aborts with the same task on two CPUs at once** (B 10: idle_2 on CPUs 0
+  and 5; B 12: idle_1 on CPUs 1 and 4; A 13: idle_1 on CPU 4). That is the #1234
+  window experiment's signature ("Instruction Abort at 0x0").
+- pdm tasks take a wild PC out of the tick path with **an identical frame on both
+  arms**: A 09 (ELR 0x80c26c84 = `rq_lock`+4, EC 0x0e) and B 16 (PC alignment, ELR
+  0x1) share SP low bits 0x…7fa80, the `el1_sync_handler` return at 0x80013230,
+  `rq_lock`+0x10/+0x14 on the stack, and a return at **`scheduler_tick`+0xa8** in
+  each arm's elf. A 13 repeats 09's ELR (`rq_lock`+4, pdm_b, CPU 3).
+- SPSR holding an address rather than a PSTATE, as in run 3's boot 03: B 12 (SPSR =
+  `sched`+0x80), B 18 and B 20 (SPSR and FAR are stack addresses, ELR 0x80049f20
+  `timer_handler`).
+- Run 3's boot 03 ELR 0x8002c5a8 is `scheduler_tick`+0x44, the return address of
+  `bl task_wake_sleepers` (an `add`, which cannot data-abort), so that dump was also
+  a wrong frame.
+- **CPUs: 0, 1, 2, 3, 4 and 5**, not cluster 1 only.
+
+**Conclusion.** The fault is pre-existing and the test exposes it: it occurs at a
+similar rate without #1237 (B 5 of 9) as with it (A 3 of 8, run 3 2 of 10), with the
+same signatures, so #1237 did not introduce it (files: `gauntlet-4-hw-jetson`
+804ad107 `docs/archive/lifecycle-gauntlet/run4-hw/1238/1238-boot01..20-*.txt`,
+README.md). The signature matches #1234's window (a context switched in on another
+CPU from a stale save). No bisection (not needed under this branch of the plan).
+
+**Caveat.** Arm B is not "#1237 off, all else equal": its #1229 bug sticks
+`preempt_disabled` at 1 on the CPUs that receive a migrated task, which suppresses
+preemptive switches there. That would bias B toward *fewer* faults, so it does not
+weaken the conclusion. The counts are small (8 and 9), so the rates are not
+distinguished from each other, only shown to be both non-zero. This is the weaker
+full-suite design.
+
+**Lab end state.** Trigger loop stopped by PID (88684, mine) after 20 triggers. One
+power_cycle to SD Linux. Staged elfs removed. `/root/slmos.elf` untouched. ESP not
+written: SLMOS.efi **789cba62** before and after (read-only mount), no BootNext,
+BootOrder unchanged, BootCurrent 0001. jetson-nano-2 powered on and released. No
+QEMU process killed (QEMU ran only inside `make test`). Only this session's
+output_dir (`/var/lib/labctl/output/l5-1238-20261112/`) was read.
+
+**Process notes.** boot_test output_dir must be under /var/lib/labctl/output (the
+scratchpad was refused). The A build ran alongside B's QEMU `make test` (separate
+worktrees, separate cargo targets). Dumps from two CPUs interleave on UARTC, so
+boots 18 and 19 are partly garbled; 18's values were read through the interleaving.
