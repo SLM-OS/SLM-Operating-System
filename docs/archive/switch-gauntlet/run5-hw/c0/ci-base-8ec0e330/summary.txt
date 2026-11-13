@@ -1,0 +1,15 @@
+head 8ec0e330dca4d8db5053e0bf2ed2101699a9ff4c
+01-arm64-build rc=0 start=23:01:24 end=23:02:54 load=2.77 2.13 1.54
+02-x86-build rc=0 start=23:02:54 end=23:03:38 load=2.76 2.24 1.62
+03-jetson-real rc=0 start=23:03:38 end=23:07:12 load=2.08 2.17 1.73
+04-test rc=0 start=23:07:12 end=23:10:00 load=2.09 2.13 1.79
+04b-test-x86 rc=0 start=23:10:00 end=23:11:28 load=2.07 2.11 1.82
+05-test-aisched rc=0 start=23:11:28 end=23:14:26 load=2.11 2.12 1.88
+06-runtime-test rc=0 start=23:14:26 end=23:17:16 load=2.25 2.17 1.95
+07-braces rc=0 start=23:17:16 end=23:17:24 load=2.14 2.14 1.94
+08-build-order rc=0 start=23:17:24 end=23:18:09 load=1.64 2.01 1.91
+09-jetson-layout rc=0 start=23:18:09 end=23:19:46 load=2.09 2.07 1.94
+10-ws-on-1 rc=0 start=23:19:46 end=23:22:34 load=2.59 2.26 2.03
+10-ws-on-2 rc=0 start=23:22:34 end=23:25:24 load=2.22 2.31 2.09
+10-ws-on-3 rc=0 start=23:25:24 end=23:28:12 load=2.13 2.27 2.11
+DONE
