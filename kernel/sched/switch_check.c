@@ -10,6 +10,7 @@
 #include "config.h"
 #include "task.h"
 #include "timer.h"
+#include "uart.h"
 #include <stdbool.h>
 #endif
 
@@ -57,6 +58,14 @@ void switch_check_in(struct task *next, uint32_t cpu)
             sc_stats.first_task_id = next->id;
             sc_stats.first_cpu = cpu;
             sc_stats.first_owner = expect;
+            /* Print at once: the stale context about to run may wedge or
+             * fault the system before any test can report. */
+            uart_printf_unlocked("\n[switch_check] FIRST: task id=%u '%s' switched in on "
+                                 "cpu %u: %s%s (restored_gen=%u saved_gen=%u owner=%u)\n",
+                                 next->id, next->name, cpu,
+                                 bad ? "previous save not complete" : "",
+                                 dual ? (bad ? ", owned by another CPU" : "owned by another CPU") : "",
+                                 g, s, expect);
         }
         if (dual) {
             /* Take ownership anyway so the next switch-out releases it. */
