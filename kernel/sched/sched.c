@@ -37,6 +37,7 @@
 #include "steal_deque.h"
 #endif
 #include "slot_trace.h"
+#include "switch_check.h"
 /* Unconditional: the #1216 window hooks and their STEAL_WIN_* reasons
  * are referenced from schedule() in every configuration (they are
  * empty functions without work stealing). */
@@ -450,6 +451,7 @@ void sched_drain_cpu_runqueue(uint32_t cpu)
 void sched_finish_switch(struct task *prev)
 {
     if (prev) {
+        SWITCH_CHECK_OUT(prev);
         __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     }
 }
@@ -2473,6 +2475,7 @@ void schedule(void)
 
     /* Perform context switch */
 
+    SWITCH_CHECK_IN(next, this_cpu);
     next->state = TASK_RUNNING;
     next->on_cpu = 1;           /* cleared by sched_finish_switch (#1213) */
     next->switches++;
@@ -2522,6 +2525,8 @@ void schedule(void)
     steal_pdwin_set_sched(this_cpu);                /* #1216 trace */
 
     rq_unlock_irqrestore(this_cpu, flags);
+
+    SWITCH_WINDOW_HOLD(current);    /* R1 test hook; empty unless SWITCH_WINDOW_TEST */
 
     /* Stack-overflow assertion. Validate the live SP register against
      * `current`'s stack range BEFORE we save it via switch_to.
@@ -2659,6 +2664,7 @@ void scheduler_start(uint32_t this_cpu)
         rq->ready_count--;
     }
 
+    SWITCH_CHECK_IN(first, this_cpu);
     first->state = TASK_RUNNING;
     first->on_cpu = 1;          /* cleared by sched_finish_switch (#1213) */
     first->switches++;

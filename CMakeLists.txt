@@ -306,6 +306,21 @@ if(SLOT_TRACE)
     add_compile_definitions(CONFIG_SLOT_TRACE=1)
 endif()
 
+# Switch-in window instruments (#1234). SWITCH_CHECK: per-task generation
+# check at switch-in (restored before its save completed, or switched in
+# while another CPU owns it), read by the R3 test. SWITCH_WINDOW_TEST: the
+# run-4 critic's window patch as a test hook (R1), holds the outgoing
+# switch window open 25 ms. Debug only; with both off the kernel's .text is
+# unchanged. See kernel/include/switch_check.h.
+option(SWITCH_CHECK "Switch-in generation/owner check (#1234, debug only)" OFF)
+if(SWITCH_CHECK)
+    add_compile_definitions(CONFIG_SWITCH_CHECK=1)
+endif()
+option(SWITCH_WINDOW_TEST "Hold the switch window open 25 ms for the R1 test (#1234, test only)" OFF)
+if(SWITCH_WINDOW_TEST)
+    add_compile_definitions(CONFIG_SWITCH_WINDOW_TEST=1)
+endif()
+
 option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
     add_compile_definitions(STAGE25_TRACE_PI5=1)
@@ -711,6 +726,7 @@ set(KERNEL_SOURCES
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
     kernel/sched/slot_trace.c
+    kernel/sched/switch_check.c
     kernel/src/sched_trace.c
     kernel/src/latency_hist.c
     kernel/src/rate_ewma.c
