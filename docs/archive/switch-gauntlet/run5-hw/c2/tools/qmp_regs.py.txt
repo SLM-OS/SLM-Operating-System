@@ -1,0 +1,13 @@
+import socket,json,sys,time
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); f=s.makefile('rw')
+def cmd(c,**a):
+    f.write(json.dumps({"execute":c,"arguments":a} if a else {"execute":c})+"\n"); f.flush()
+    while True:
+        r=json.loads(f.readline())
+        if 'return' in r or 'error' in r: return r
+f.readline(); cmd("qmp_capabilities")
+for i in range(int(sys.argv[2])):
+    cmd("stop")
+    r=cmd("human-monitor-command",**{"command-line":"info registers -a"})
+    print(f"=== sample {i} ==="); print(r.get('return',r))
+    cmd("cont"); time.sleep(0.5)

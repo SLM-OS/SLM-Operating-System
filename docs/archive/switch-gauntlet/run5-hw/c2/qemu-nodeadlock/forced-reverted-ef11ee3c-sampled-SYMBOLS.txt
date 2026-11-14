@@ -1,0 +1,14 @@
+# Register samples of two forced-tick hangs on the reverted design (c2/reverted-wait ef11ee3c).
+# Raw: forced-reverted-ef11ee3c-sampled-run0{1,2}.txt.regs-raw.txt (QMP 'info registers -a', 3 samples 0.5 s apart,
+# taken after the serial log stopped growing for 8 s; all 4 CPUs in every sample; the 3 samples are identical per run).
+# Symbols from aarch64-none-elf-addr2line/objdump on the run-02 elf (893f5ce3...; run 01's elf ca569f33... is the same
+# head rebuilt, the build banner timestamp differs; PCs are identical in both runs). rq_lock at 0x407cb400, 4 bytes per CPU.
+# Both runs, every sample:
+CPU0 PC=0x4001a8a4 sched_rebalance_tick (wfe inside spin_lock's ldaxr loop), X0=0x407cb40c = &rq_lock[3], PSTATE 0x800003c5 (DAIF masked: in the tick)
+CPU1 PC=0x400f9fc0 cw_helper (waits for CPU 0's window to end), IRQs enabled
+CPU2 PC=0x400f8dfc cw_busy (busy without schedule())
+CPU3 PC=0x4001aacc schedule+0x12c (yield; ldapr w1,[x0] loop on next->on_cpu, the reverted switch-in wait), PSTATE 0x800003c5 (holds rq_lock[3], IRQs masked)
+# Reading: CPU 3 holds rq_lock[3] and spins on cw_T->on_cpu, which only CPU 0 can clear after its window; CPU 0 is in
+# its window, took the tick, and the heuristic policy tick (sched_rebalance_tick, CPU 0 only, every 100 ticks) spins on
+# rq_lock[3]. The run-4 cycle, through the rebalance tick rather than task_wake_sleepers. The rebalance period (100 ticks)
+# would explain why the hang lands at iteration 1 to 28 rather than iteration 0 (hypothesis, not tested).
