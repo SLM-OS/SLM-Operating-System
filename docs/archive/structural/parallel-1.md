@@ -447,3 +447,35 @@ before: 241 (`gh issue list --state open --limit 1000 --json number`).
 
 Open at the end of this entry: **198** = 191 + 3 (#1256-#1258) + 4
 filed by Entry 8 (#1252-#1255).
+
+## Entry 10: #1245 updated with the user's answers
+
+- #1245 head is now 91e3e210 (Track B report). `grep -rn "unknown, ask
+  the user" docs/` returns nothing on that head.
+- Other changes in this round:
+  - ADR 0016 is "accepted (backfilled), regretted" and has a Position
+    section.
+  - ADR 0017 is "deprecated" and has a "Which part is fitted" section.
+  - 0010 links #1252 and 0014 links #1255.
+  - `architecture.md` has a "Planned direction" section.
+  - The ADR README statuses are updated.
+  - The `docs/deploy/jetson-uefi-direct.md` GPU row now says the GPU
+    consumers run on the cold channel (#1092, PR #1095).
+- Hailo 8 versus 8L. The code cannot tell the two parts apart, and every
+  part-specific choice in the tree is the 8L one. From the Track B
+  report, not yet checked by a critic:
+  - Both parts enumerate as `1e60:2864` (`hailo.h:56-57`) and boot the
+    same `hailo8_fw.bin` (`hailo_fw.S:2`).
+  - `hailo_cs_actions.h:251` says the code targets the Hailo-8L (AI HAT+).
+  - The translator emits the 8L PRELIMINARY form
+    (`hailo_cs_translator.c:749`; HailoRT picks FETCH_CCW_BURSTS on a
+    Hailo-8, `hailo_cs_actions.h:242-244`).
+  - `compile_hef.sh` defaults to `--arch hailo8l`.
+  - `docs/hailo-inference-wedge.md:1,5` names the "AI HAT+ 13 TOPS
+    (Hailo-8L)", and 13 TOPS is the 8L part.
+- `architecture.md` and ADR 0017 now name the Hailo 8 (user, 2026-11-14)
+  and record the mismatch. The Hailo docs and code comments are
+  unchanged.
+- Not settled: which part is physically fitted on pi-5-1. Under this
+  run's limits it can't be checked: no labctl, and no IDENTIFY decode on
+  hardware.
