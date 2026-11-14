@@ -479,3 +479,11 @@ filed by Entry 8 (#1252-#1255).
 - Not settled: which part is physically fitted on pi-5-1. Under this
   run's limits it can't be checked: no labctl, and no IDENTIFY decode on
   hardware.
+
+## Entry 11: #1255 closed as a duplicate
+
+- #1255 closed as a duplicate of #1258 (user decision, 2026-11-14;
+  `gh issue close 1255 --duplicate-of 1258`; state CLOSED, reason
+  DUPLICATE).
+- ADR 0014, `architecture.md` and the #1245 body still link #1255. They
+  move to #1258 together with the fixes from the ADR critic.
