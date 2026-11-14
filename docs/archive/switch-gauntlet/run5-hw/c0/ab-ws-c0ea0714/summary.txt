@@ -1,0 +1,6 @@
+base-ws-1 rc=0 start=07:49:13 end=07:52:23 PASSED fails=
+fix-ws-1 rc=0 start=07:52:23 end=07:55:08 PASSED fails=
+base-ws-2 rc=0 start=07:55:08 end=07:58:16 PASSED fails=
+fix-ws-2 rc=0 start=07:58:16 end=08:01:07 PASSED fails=
+base-ws-3 rc=0 start=08:01:07 end=08:04:09 PASSED fails=
+fix-ws-3 rc=2 start=08:04:09 end=08:07:40  fails=
