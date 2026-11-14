@@ -103,3 +103,142 @@ host.
   "Critic pass" section.
 - Still open: the 8 "ADR 0009 to 0017 records X" claims. No critic has
   checked them.
+
+## Entry 5: Track A result (Rec 7)
+
+Source: the Track A pass, snapshot 2026-11-13 about 23:25 PT. The data
+came from `gh issue list --state open --limit 500 --json
+number,title,body,labels,milestone,createdAt,comments`, `gh issue list
+--state all --limit 2000` and `gh pr list --state merged --limit 2000`.
+Months are UTC calendar months. UTC reproduces the review's figures
+exactly; PT months differ slightly.
+
+### Labels and milestones applied
+
+- Open issues: 236 (the review counted 214 on 2026-11-08 13:15 PT).
+- Before the pass, 138 issues had no milestone and 64 had no type label
+  (the review counted 63).
+- Applied: 472 origin and kind labels (one of each on all 236 issues), 64
+  type labels, and 138 milestones (77 Backlog, 61 Icebox). Seven labels
+  were created: origin:{agent-followup, golden, review, hardware, user}
+  and kind:{gap, regression}. A query after the pass found 0 open issues
+  missing any of the four fields. No issue was closed, commented on or
+  had a label removed.
+- Classification: 183 valid, 35 fixed, 13 not-worth-doing, 5 duplicate.
+  Origin: 71 review, 58 agent-followup, 57 hardware, 47 user, 3 golden.
+  Kind: 224 gap, 12 regression. Confidence: 99 high, 110 medium, 27 low.
+  Origin is judged from the text alone, because every issue was filed from
+  one account.
+
+### Opened per PR merged (UTC)
+
+| Month | Issues opened | PRs merged | Ratio | Review |
+|---|---|---|---|---|
+| 2026-04 | 288 | 284 | 1.01 | 1.01 |
+| 2026-05 | 145 | 260 | 0.56 | 0.56 |
+| 2026-06 to 09 | 0 | 0 | n/a | n/a |
+| 2026-10 | 13 | 14 | 0.93 | 0.93 |
+| 2026-11, 1st to 8th 21:15Z | 91 | 45 | 2.02 | 2.02 |
+| 2026-11, to the 13th | 131 | 64 | 2.05 | n/a |
+| Since the review cut | 40 | 19 | 2.11 | n/a |
+
+### Hub share of open issues
+
+The review did not record its keyword patterns, so Track A wrote its own:
+
+- NC: `\bNC\b|non-?cacheable|coheren|cache[ -]maintenance|\bDC\s+(CVAC|CIVAC|IVAC|CISW|CSW|ISW)\b|set/way|cache_(clean|inval|flush)\w*|cache\.h\b`
+- Configuration: `\b[A-Z][A-Z0-9_]{2,}=(ON|OFF)\b|build (flag|option|variant)s?|config(uration)? (variant|matrix|flag|option)s?|CMake option|feature flag|#ifdef|\bAI_SCHED\b|JETSON_HW_TICK|SECONDARY_PREEMPT|COOP_PREEMPT|WORK_STEALING`
+- FFI: `\bFFI\b|\brust_[a-z0-9_]+|extern\s+"C"|no_mangle|cbindgen|bindgen`
+- Shell: the `sub:shell` label, plus a separate count of issues that name
+  `shell_sys\.c`.
+
+The patterns match against title and body. They were applied to the
+review-time open set rebuilt from the data (exactly 214) and to the open
+set now. Columns 3 and 4 are the like-for-like comparison.
+
+| Hub | Review, own patterns (of 214) | Track A patterns, review set (of 214) | Now (of 236) |
+|---|---|---|---|
+| NC, coherency, cache maintenance | 21 (9.8%) | 24 (11.2%) | 34 (14.4%) |
+| Build flags and configuration | 20 (9.3%) | 21 (9.8%) | 31 (13.1%) |
+| FFI, rust_*, extern "C" | 30 (14.0%) | 23 (10.7%) | 23 (9.7%) |
+| Shell (`sub:shell` label) | 12 (5.6%) | 12 (5.6%) | 13 (5.5%) |
+| Names `shell_sys.c` | n/a | 6 (2.8%) | 8 (3.4%) |
+
+The coherency and build-flag counts grew by about 10 issues each. Most of
+that is the #1193 work, and some of those issues are close candidates
+(for example #1131).
+
+### Origin of open issues created since 2026-11-01
+
+131 issues were created since Nov 1. 77 are still open and were
+labelled; 54 were already closed and were not labelled.
+
+| Origin | Count (of 77) | Share |
+|---|---|---|
+| hardware | 32 | 41.6% |
+| review | 32 | 41.6% |
+| agent-followup | 12 | 15.6% |
+| golden | 1 | 1.3% |
+| user | 0 | 0% |
+
+The same 77 split into 70 gaps and 7 regressions. For contrast, the 159
+open issues created before November split: user 47, agent-followup 46,
+review 39, hardware 25, golden 2.
+
+### Close candidates (53, for approval; none closed)
+
+| Issue | Title | Proposed resolution | Evidence |
+|---|---|---|---|
+| #44 | Network console (telnet/SSH alternative) | fixed (medium confidence) | telnet multi-session shell db204cd7 (PR #259), per-session history (#434), sshd 904fa48d (PR #915) + 5a67cc7e (PR #918); kernel/src/telnet.c, shell_session.c on origin/main |
+| #45 | CI: coverage tracking | not-worth-doing (low confidence) | premise is .github/workflows/ci.yml, deleted in aff136a5 ("Delete .github/workflows directory"); CI now runs locally via the ci skill |
+| #46 | CI: real hardware test farm (Pi 5 + Jetson) | not-worth-doing (low confidence) | GitHub Actions workflows deleted (aff136a5); a self-hosted runner driving the shared labctl lab conflicts with the lab-sharing policy |
+| #47 | EFI stub: boot services integration (memory map, ACPI/DTB, exit BS) | fixed (medium confidence) | eb094b73 (PR #1085, #26): efi_stub_entry uses GetMemoryMap + ExitBootServices and passes the DTB; make test-qemu-uefi covers it |
+| #71 | Cache tiling assumes 64KB L1D — verify for Cortex-A55 (32KB) | not-worth-doing (medium confidence) | issue itself concludes impact nil (12KB fits 32KB L1D) and no A55 target exists; rationale comment already at ops.rs:901 |
+| #72 | x86-64 SIMD: SSE intrinsics disabled due to LLVM crash on soft-float target | fixed (medium confidence) | 49ce3ae1 added kernel/arch/x86_64/sse_kernels.c (slm_sse_* C kernels called from ops.rs x86_64 cfg blocks); docs/benchmarks.md:622 |
+| #199 | Phase 3: SSH server for remote shell access | fixed (medium confidence) | sshd shipped: wolfSSH vendored (kernel/lib/wolfssh), 904fa48d (PR #915) channel->shell_session + autostart, 5a67cc7e (PR #918) hardening/default-on, 983cb0cc (PR #1000) tests; sub-tickets #891/#893/#895/#896 also still open |
+| #202 | Pi 5 networking: BCM GENET driver (networking Phase 3) | fixed (medium confidence) | kernel/drivers/macb.c: cf60be14 stages 4-5 RX + DHCP + ping, PR #248/#257; ENABLE_NETWORKING ON for RASPI5 (CMakeLists.txt:402); only optional IRQ stage left |
+| #220 | Jetson UEFI doc: rewrite first-person plural to SLM-OS voice for advisor submission | not-worth-doing (medium confidence) | doc moved to docs/archive/investigations/ (archived, superseded by working UEFI boot, PR #1085) |
+| #221 | Jetson UEFI doc: clarify 'str w12, [0x0C280000]' shorthand (not valid AArch64 syntax) | not-worth-doing (medium confidence) | same archived doc; superseded by docs/deploy/jetson-uefi-direct.md |
+| #222 | Jetson UEFI doc: sharpen crash-PC analysis at 0x10070 (add I-cache staleness hypothesis) | not-worth-doing (medium confidence) | crash analysis moot: UEFI direct boot works (eb094b73, PR #1085); doc archived |
+| #223 | CLAUDE.md: refresh 'UEFI direct boot (WIP)' summary to reflect deeper blockers | fixed (high confidence) | CLAUDE.md on origin/main now documents working UEFI direct boot (#26, eb094b73 PR #1085) with a deploy guide pointer |
+| #246 | Jetson UEFI-direct: Device-nGnRnE DRAM access raises CBB Interface Error | fixed (high confidence) | UEFI-direct boot works: eb094b73 (PR #1085, #26) moves MMU-off copy/relocation into boot.S; CLAUDE.md UEFI-direct section |
+| #266 | Jetson: USB networking (CDC-ECM via XHCI host + dongle; XUDC gadget as fallback) | fixed (high confidence) | Jetson USB CDC-ECM networking shipped: ed15f3dd/PR #326 (kexec path), e7f9aa51/PR #1087 (UEFI-direct); #385 body confirms working; follow-ups in #384/#385/#386/#387 |
+| #286 | Jetson xHCI: investigate standalone Tegra XUSB Falcon firmware load (replace Linux cooperation model) | fixed (medium confidence) | e7f9aa51 (PR #1087, #1084) xusb_t234_cold.c brings XUSB up from cold without Linux; falcon boots from IFR firmware, no firmware load needed |
+| #334 | Tegra xHCI: full PHY / padctl re-init at SLM-OS xhci_init (#309 option A) | fixed (medium confidence) | e7f9aa51 (PR #1087): xusb_t234_cold.c does BPMP clocks/resets/power + padctl from fuses (UEFI-direct path); kexec path still inherits |
+| #380 | Jetson: restore hardware timer IRQ delivery on secondary CPUs (cooperative preemption is the workaround) | fixed (high confidence) | 72728b77 (PR #746) TF-A patch + HW-tick wire-up; ad905eed (#755) JETSON_HW_TICK=ON default; needs patched BL31 |
+| #381 | Jetson: UARTA (40-pin header, 0x03100000) blocked by CBB firewall even at EL2 | not-worth-doing (low confidence) | CBB firewall blocks UARTA in fabric; only out-of-band fixes (NVIDIA-unpublished MB2 BCT or custom signed bootloader); UARTC console works on both boot paths |
+| #412 | test_blob_validate/stage_rejects_invalid_*_headers fail on main (payload_len > 0) | fixed (high confidence) | afa7e765 "test_eviction: fix MLP payload buffer undersize (long-standing 2 failures)" sizes buffers to EVICTION_MLP_PAYLOAD_BYTES |
+| #475 | SLM integration on Jetson Orin Nano — Qwen2.5-1.5B end-to-end (umbrella) | fixed (medium confidence) | c69438a2 (PR #1164) Qwen2.5-1.5B end-to-end on Jetson GPU; 2026-11-07 comment: remaining follow-ups (#1165-#1172) do not block the DoD as amended by ADR 0005; umbrella left open with "Refs #475" |
+| #522 | Sampler hot-path allocation pressure (M9) | fixed (high confidence) | 5ef4e69a (#1179, 2026-11-08) SamplerWorkspace + one max reduction, no per-token allocation |
+| #535 | Jetson: ai_mlp+gpu-use-sched dispatch wedges box under task burst (sync IRQ-off cliff) | duplicate (high confidence) | duplicate of #651 (same sched-MLP GPU dispatch IRQ-off wedge), closed by 87849d5f rate-limit + try-lock |
+| #539 | SLM M6.A-2..6: pre-kexec L4T loader + bare-metal pushbuffer dispatch + smoke-test gate + cache coherency + PTIMER | fixed (medium confidence) | superseded: GPU SLM dispatch delivered on an SLM-OS-built channel via c69438a2 (PR #1164) instead of a pre-kexec loader; kexec retest tracked in #1169 |
+| #540 | SLM M6.B / M6.C / M6.D: SASS kernel authoring (HMMA tensor cores + CUDA-core fallback + element-wise) | fixed (medium confidence) | kernels landed (#540 PRs #699-#712: q4k dequant/dot, rmsnorm, swiglu, rope, gqa, embedding) + HMMA Q4_K/Q6_K in c69438a2; 49.5 tok/s >= 25; utilization target retired by ADR 0005; #1167 closed |
+| #546 | SLM M5.3.3: multi-block weight-pool allocation for real GGUFs > 2 MB | duplicate (high confidence) | practical blocker fixed by 09bc6c89 (PMM bypass); remaining multi-block model_mem allocator is exactly #550 (per 2026-10-18 comment) |
+| #563 | slmos-kexec: helper logs in /tmp aren't rotated across runs | not-worth-doing (medium confidence) | script still writes /tmp/$bin.log truncated per run on tmpfs; issue itself says no operational pain and only matters if run from a long-lived context, which it is not (interactive pre-kexec helper) |
+| #606 | parse_onnx intermittent translation fault on test_model_loader (1/10 on QEMU ARM64) | duplicate (medium confidence) | Duplicate of #200 (closed 2026-05-05): own 2026-05-03 comment calls the parse_onnx fault a victim symptom of the #200 scheduler teardown race |
+| #618 | net_poll page fault (NULL +0xd8) crashes kernel during slm prompt | duplicate (medium confidence) | Duplicate of #633: 8b941478 (2026-05-05) records the #618 x19 probe did not fire; root cause reassigned to Rust heap fragmentation tracked in #633, mitigated by RUST_HEAP_MB bump |
+| #633 | msg_router publish path fragments Rust heap; bigger heap masks but doesn't cure it | not-worth-doing (medium confidence) | Premise no longer holds: msg_router publish path on origin/main is allocation-free (static Mailbox arrays + stack target array, runtime/src/msg_router.rs publish_internal_nowait); heap bump 8b941478 mitigated symptom. Re-file with a fresh repro if alloc failure recurs |
+| #635 | Pi 5 / Jetson: extend COOP_PREEMPT to cover pure CPU-bound loops via slm_preempt_point() | fixed (medium confidence) | slm_preempt_point() shipped in 495bce31 (PR #636) with tests; only unchecked box is Pi 5 HW verify of COOP_PREEMPT, which is no longer the default (Pi 5 #777, Jetson #1050 use HW preemption) |
+| #655 | Parallel matmul: drop NC-memory + cache mgmt once SMPEN lands | not-worth-doing (high confidence) | Parallel-matmul code (chore/matmul-multithread) never merged to origin/main (no matmul_par/ncmem in runtime/src); NC-memory axis removed by 98e17440 (PR #1225, #1193) |
+| #658 | [meta] Tensor-core (HMMA) GPU dispatch path | fixed (high confidence) | All six stage issues #659-#664 closed 2026-05-07; HMMA dispatch verified on jetson-nano-2 per 2026-05-15 comment (d28dcde0 + PR #828); HMMA Q4_K kernels in GPU program c69438a2 (#475) |
+| #665 | GPU runtime loader prereq B: shader-page executable mapping + DMA coherence | fixed (low confidence) | SLM-OS-mapped shader/scratch pages dispatch on GPU: ga10b_gmmu_map used by oplib_pool_stage_to_gpu slow path (#832, closed) and cold-channel pipelines (#1088/#1092 closed) |
+| #666 | GPU runtime loader prereq A: GMMU virtual-address allocator + page mapper | fixed (high confidence) | GMMU walker/alloc/map/free + TLB invalidate on origin/main ga10b_gmmu.c: fbb30233 (PR #679, Milestone A), 0577c301 (PR #681, C), 4ef64eb8 (PR #687, D) |
+| #675 | Jetson Cortex-A78AE: NEON SDOT Q4_K kernel is compute-bound at Qwen2.5 prefill shapes — batched matmul yields no win | not-worth-doing (high confidence) | Negative result: measured 0.99x, theoretical ceiling 1.013x; batched kernel (matmul_q4k_rows_batch/forward_batch) never merged to origin/main |
+| #678 | Validate ga10b_gmmu_walk against real handoff data (#666 Milestone A follow-up) | fixed (medium confidence) | Walker validated against real inherited VMs on HW: ga10b_gmmu_enum walks handoff PDBs, 10/10 GPU fastpath boots on jetson-nano-2 (b9de6824, PR #1032); SLM-OS GMMU mappings dispatch in #832 path |
+| #691 | GMMU walker: Tegra MC SMMU layer breaks the FECS-CURRENT-CTX-as-phys assumption (#678 deeper finding) | fixed (low confidence) | Path 2 (SLM-OS-owned channel) delivered by UEFI cold bring-up #1088/#1092 (closed); inherited-VM walk from handoff PDB works on HW (b9de6824, PR #1032) |
+| #714 | GPU dispatch: register the remaining 6 ops + session-launch probe (B follow-on to A) | fixed (high confidence) | B.1 02248142 (PR #756), B.2 e00af77b (PR #758), smoke all ops 9fa6c40c (PR #759), B.3 RMSNORM hybrid c0359733 (PR #762); remainder tracked in #763/#764 |
+| #764 | GPU weights pool: persistent GPU-VA staging for SLM weight tensors (#714 §B.3 architecture) | not-worth-doing (medium confidence) | Superseded: SLM-on-GPU shipped via prebuilt per-session GPU program with HMMA Q4_K/Q6_K on SLM-OS-built channel (c69438a2, #475), not the Linux-helper weights-pool design |
+| #891 | SSH 199c: session abstraction integration + sshd autostart | fixed (high confidence) | PR #915 (904fa48d) sshd 199c channel->shell_session + autostart |
+| #892 | SSH 199b: littlefs VFS hooks + Ed25519 host key generation and persistence | fixed (high confidence) | PR #992 (4989faec) Ed25519 host key + VFS persistence; kernel/net/ssh/host_key.c |
+| #893 | SSH 199a: wolfSSH/wolfCrypt vendoring + lwIP IO hooks + crypto RNG | fixed (high confidence) | PR #902 (358d6358) RNG + vendoring; kernel/lib/wolfssh, wolfcrypt present |
+| #895 | SSH 199e: hardening + interop matrix + entropy audit | fixed (medium confidence) | PR #918 (5a67cc7e) 199e hardening docs + autostart default-on; interop matrix scope not separately verified |
+| #896 | SSH 199d: password authentication + user management | fixed (high confidence) | PR #916 (3b446bdf) scrypt password auth + passwd shell cmds |
+| #950 | make test-ga10b-bringup fails to link: ga10b_phys_in_dram undefined | fixed (high confidence) | PR #972 (73404e9e) test-ga10b-bringup link gap fixed; host stub ga10b_phys_in_dram in test_ga10b_bringup.c |
+| #1028 | build-mnist-shaders.sh fails with host CUDA 12.0: cuobjdump names cubins tmpxft_* | fixed (high confidence) | PR #1097 (5f1b3c77) fixed MNIST shader build on CUDA 12.0; script picks cubin by content (tmpxft handled) |
+| #1131 | pi_mutex_t fields on Pi 5 / Jetson: cacheable state read across CPUs, untested under contention | fixed (medium confidence) | question answered: ADR 0007 (e73b9b61) measured cacheable IS-WB memory coherent across CPUs on Pi 5 + Jetson; NC axis removed in PR #1225 (98e17440) |
+| #1169 | Jetson kexec: retest the SLM path after the UEFI-direct GPU program (#1164) | fixed (medium confidence) | retest done and recorded as Step 4b in docs/deploy/jetson-kexec.md by 5483fbdf (PR #1190); --gpu on refusal meets done-when; PBDMA failure split to #1189 |
+| #1171 | SLM GPU program: small follow-ups from the #1164 reviews | fixed (high confidence) | every item fixed: ecd8057a (PR #1183) message says every item is done, left open for manual close; VM writes via 28a4b108 (PR #1177); wrong race result tracked in #1186 |
+| #1204 | Jetson UEFI-direct: cross-cluster litmus rows about 2x slower under the #1193 removal build than under NC_AXIS=OFF | not-worth-doing (low confidence) | slow rows only on pre-rebase image 072bd707 (1/5 boots); merged removal 98e17440 is the rebased tree, fast 3/3; deliverable (raw rows) produced and comment leaves it for the user to close |
+| #1206 | Jetson UEFI-direct: .got is never copied by the relocation and holds stale DRAM (6 live entries) | fixed (high confidence) | 8ec0e330 (#1224 fix) puts .got/.got.plt inside .data in kernel-jetson.ld and kernel.ld; test-jetson-uefi-layout.sh checks nothing lies past __data_end; same defect as closed #1224 |
+| #1211 | test_task_lifecycle memory-leak check failed in 2/20 Pi 5 removal test boots vs 0/10 NC (#1193 run 2) | fixed (medium confidence) | 73d8deb7 (PR #1215) converted the cleanup window to a wall-clock wait; 20/20 NC and 20/20 removal in run 3; old window 0/20 in run 3 |
+| #1223 | Pi 5: KERNEL PANIC on CPU 1 right after the core-latency isolation phase at the split head (NC axis off on Pi 5), 3 of 10 integration boots | duplicate (medium confidence) | duplicate of #1213 (closed, fixed 5b28d065 / PR #1237): run-4 C1 traced the same signature to #1213 sequence B; seen only on the unmerged split head e5b24894 (draft PR #1222); Pi 5 suite 5/5 isolated=10/10 at the fix head |
