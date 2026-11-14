@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed, round 2 (switch gauntlet run 5, C2). Design checkpoint before any
+Proposed, round 2, design PASS with four text corrections applied
+(`critic-5-C2-design.md` round-2 section R6, `gauntlet/switch-5` e7670dae);
+stays proposed until the fix verdict (switch gauntlet run 5, C2). Design checkpoint before any
 fix code. Round 1 (d73604f7) failed its blind design critic
 (`critic-5-C2-design.md` on `gauntlet/switch-5`, section 7): the decision
 depended on a CPU id `schedule()` reads with interrupts open (#1242), the
@@ -224,7 +226,19 @@ steal trace's per-CPU writers all take the id inside the pinned region. The
 zombie path unpins for the destroy (it can take PMM locks and wait up to
 2 s) and re-reads the id with interrupts masked before it touches anything
 per-CPU again. After `switch_to` the task re-reads the id as today (#1229).
-`scheduler_start()` runs on its own CPU with interrupts masked from entry.
+In `scheduler_start(this_cpu)` the id is a parameter passed by the boot
+context of that CPU, which is not a task and cannot be moved, so it is
+valid there whatever the interrupt state (the Jetson primary unmasks early,
+#1198); round 2's "masked from entry" is withdrawn.
+
+x86. The resched IPI is masked during the prelude now as well as under the
+lock. A kick that arrives there stays pending and is taken at the unmask
+that opens the switch window, where the #1236 guard drops it, as it already
+drops a kick that arrives under `rq_lock`; the announced task then waits
+for this CPU's next tick or the running task's next yield, at most one tick
+on the x86 build (periodic tick). The prelude makes that case somewhat more
+frequent; round 2's "unchanged" is withdrawn. The x86 `make test` row of
+the fix verdict measures whether it matters.
 
 Cost. The steal prelude now runs with interrupts masked: at most
 `(cpu_count - 1) * STEAL_DEQUE_CAPACITY` pop-and-check pairs, each a short
@@ -281,14 +295,20 @@ if (next != rq->idle_task && !switch_in_ready(next, current)) {
   `on_cpu` is therefore 0 or it is `current` (item 7). Without part 1 the
   exemption is unsafe (#1242 run 04 above).
 - `switch_in_waiting[c]` is written only under `rq_lock[c]` by CPU c (part
-  1) and read only by c's idle loop.
+  1) and read only by c's idle loop. Idle reads it, and dereferences it to
+  read `w->on_cpu`, outside the lock. Meanwhile the task may be stolen,
+  migrated, destroyed and its slot reused. That is safe: tasks live in the
+  static `task_table`, so `w` always points at mapped memory; the value read
+  is only a hint for how long to poll; the poll is bounded (about 50 us);
+  and the `schedule()` that follows decides under `rq_lock[c]` from the
+  queue as it then is. Idle never writes through `w`.
 
 **Idle loop.** Only the wait instruction is skipped, never the interrupt
 unmask; and the check is atomic with the wait (item 3, item 5):
 
 ```c
-/* ARM64 branches that unmask and WFI (QEMU CPU 0, Pi 5 / Jetson with
- * SECONDARY_PREEMPT or JETSON_HW_TICK, PI5_FIQ_TIMER): */
+/* Every idle branch that unmasks before its wait (the rule is by code
+ * shape, see below): */
 msr daifset, #2 (#3 for FIQ);  isb;
 struct task *w = switch_in_waiting[cpu];        /* read with the tick masked */
 if (!w) {
@@ -305,19 +325,30 @@ if (w) {
 yield();
 ```
 
-The flag can be set only by a `schedule()` on this CPU. On these branches
-such a `schedule()` can come asynchronously (tick ISR on QEMU CPU 0 and
-x86; the trampoline, which runs at the interrupted PC's `eret`, on Pi 5 and
-Jetson), but not between the masked read and the `wfi`, because the tick is
+The rule, by the shape of each branch of `idle_task_func`: every branch
+that unmasks before its wait gets the masked check-then-wait above; every
+branch that never unmasks keeps check-then-`wfe`. At 6bc60aa3 the branches
+that unmask are: x86 (`sti; hlt`); Pi 5 `PI5_FIQ_TIMER`; Pi 5 and Jetson
+with `SECONDARY_PREEMPT` (Jetson only with `JETSON_HW_TICK`); CPU 0 of the
+Pi 5 / Jetson branch without `SECONDARY_PREEMPT`; and the final `#else`,
+which is QEMU on every CPU. The branches that never unmask are the Jetson
+`JETSON_HW_TICK=OFF` secondaries (its CPU 0 does not wait at all) and CPUs
+1 to 3 of the Pi 5 branch without `SECONDARY_PREEMPT`. (Round 2 listed
+"QEMU CPU 0" and "QEMU CPUs 1 to 3" and classed all of Pi 5 without
+`SECONDARY_PREEMPT` as never unmasking; that was wrong: every QEMU CPU
+unmasks and takes the tick into `schedule()`.)
+
+The flag can be set only by a `schedule()` on this CPU. On an unmasking
+branch such a `schedule()` can come asynchronously (the tick ISR on QEMU
+and x86; the trampoline, which runs at the interrupted PC's `eret`, on Pi 5
+and Jetson), but not between the masked read and the `wfi`, because the tick is
 masked there; WFI's wake-up events include a pending physical IRQ or FIQ
 whatever PSTATE.I and PSTATE.F hold (Arm ARM DDI 0487, "Wait for Interrupt",
 wake-up events; the same property Linux's `cpu_do_idle` relies on with
 interrupts disabled), and the interrupt is taken at the unmask. So the idle CPU never sleeps with a task waiting on its queue.
 x86 uses `cli; read; if (!w) { sti; hlt } else sti` (the `sti` interrupt
-shadow covers the `hlt`). Branches that WFE and never unmask in idle
-(cooperative secondaries: QEMU CPUs 1 to 3, Jetson `JETSON_HW_TICK=OFF`,
-Pi 5 without `SECONDARY_PREEMPT`) take no interrupt into `schedule()` in
-idle at all, so the only writer is idle's own `yield()`, which runs before
+shadow covers the `hlt`). The branches that WFE and never unmask take no
+interrupt into `schedule()` in idle at all, so the only writer is idle's own `yield()`, which runs before
 the read: check-then-`wfe` is race-free there, and the IRQ state of those
 CPUs is unchanged (masked, as today; round 1 wrongly said "IRQs
 unmasked").
