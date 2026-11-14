@@ -29,7 +29,7 @@ is `docs/architecture.md`.
 | [0014](0014-vendored-lwip-wolfssl.md) | Vendor lwIP for TCP/IP and wolfSSH with wolfCrypt for SSH | accepted (backfilled) |
 | [0015](0015-gguf-model-format.md) | GGUF v3 is the SLM model format, checked against llama.cpp goldens | accepted (backfilled) |
 | [0016](0016-compiled-c-model-weights.md) | Policy model weights are compiled into the image, runtime blobs override (runtime loading preferred, #1253) | accepted (backfilled), regretted |
-| [0017](0017-hailo-path.md) | Drive the Pi 5 Hailo-8L NPU from a native bare-metal driver, without HailoRT | deprecated (#1254) |
+| [0017](0017-hailo-path.md) | Drive the Pi 5 Hailo-8L NPU from a native bare-metal driver, without HailoRT | deprecated; frozen (#1254) |
 
 ## Format
 

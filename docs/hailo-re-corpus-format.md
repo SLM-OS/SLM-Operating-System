@@ -1,5 +1,7 @@
 # Hailo RE Corpus Format
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Status:** Specification, anchored to issue [#795](https://github.com/SLM-OS/SLM-Operating-System/issues/795) Phase 0 Task 0.1. Defines the shared on-disk schema used by all five Phase 0 components: QEMU stub device (Task 0.2), HailoRT-in-VM driver (0.3), SLM-OS `hailo replay-step` shell command (0.4), and the diff + driver script (0.5).
 
 This document is the interface contract between those components. Changes here ripple to every consumer — bump the corpus header `format_version` field on any non-additive change.

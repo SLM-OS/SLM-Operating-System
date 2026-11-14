@@ -1,5 +1,7 @@
 # Hailo-8L Lifecycle Reference (Pi 5 / SLM-OS)
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 End-to-end reference for everything SLM-OS does to get a Hailo-8L NPU
 on the Raspberry Pi 5 AI HAT+ from cold-boot to running inference.
 Every section cites the source files / line ranges that implement

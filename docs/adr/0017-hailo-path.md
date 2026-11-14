@@ -1,8 +1,8 @@
 # ADR 0017: Drive the Pi 5 Hailo-8L NPU from a native bare-metal driver, without HailoRT
 
-Status: deprecated. The Hailo-8L cannot do useful work for SLM-OS and
-the integration does not work (user, 2026-11-14). Whether to delete or freeze the code is
-decided in #1254. A Hailo-10 offload path is a possible far-future item
+Status: deprecated; frozen (user, 2026-11-14, #1254). The Hailo-8L
+cannot do useful work for SLM-OS and the integration does not work
+(user, 2026-11-14). A Hailo-10 offload path is a possible far-future item
 (user, 2026-11-14).
 
 ## Which part is fitted
@@ -70,6 +70,14 @@ not train `pcie1`, and SLM-OS had no ARM64 PCIe host driver.
   only when `HAILO_FW_BLOB` is set (`hailo_fw.S`).
 - HailoRT on Linux is used as the reference and for wire captures, not as
   code (`docs/hailo-protocol-architecture.md`).
+
+## Freeze (user, 2026-11-14, #1254)
+
+The Hailo code stays in the tree and keeps building. Its cells in the CI
+build matrix stay in #1251, so a build break shows up rather than the
+code rotting silently. No new Hailo work is done and no new Hailo issues
+are opened; the open Hailo issues stay in the Icebox milestone. Deletion
+is not planned. The Hailo-10 item stays far-future.
 
 ## Alternatives considered
 

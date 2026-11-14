@@ -257,7 +257,7 @@ added as options rather than replacements.
 | `ai_mlp` | `kernel/sched/ai/sched_ai.c`, weights `ai_weights_mlp.c` | `AI_SCHED=ON` |
 | `ai_ppo` | `sched_ai.c`, weights `ai_weights_ppo.c` | `AI_SCHED=ON` |
 | `ai_xgb` | `kernel/sched/ai/sched_xgb.c` | `AI_SCHED=ON` |
-| `ai_hailo` | `sched_ai.c` (Hailo backend, deprecated with ADR 0017) | `AI_SCHED=ON`, not on x86-64 |
+| `ai_hailo` | `sched_ai.c` (Hailo backend, frozen with ADR 0017) | `AI_SCHED=ON`, not on x86-64 |
 
 `AI_SCHED` maps to the CMake option `ENABLE_AI_SCHEDULER` and is ON by
 default for Pi 5 and Jetson (`Makefile`). `AI_WEIGHTS=synthetic|real`
@@ -349,7 +349,7 @@ status is in `docs/x86-64-gpu-inference-status.md`. Pi 5 and QEMU have no
 compute GPU. Detail: `docs/gpu.md`, `docs/gpu-compute.md`,
 `docs/nvidia-gsp.md`, `docs/fact-sheets/gpu-inference.md`.
 
-### Hailo NPU (Pi 5 AI HAT+), deprecated
+### Hailo NPU (Pi 5 AI HAT+), frozen
 
 The fitted part is a Hailo-8L (user, 2026-11-14), and the driver and the
 Hailo docs target it: the translator emits the 8L variant
@@ -357,8 +357,8 @@ Hailo docs target it: the translator emits the 8L variant
 wrapper defaults to `hailo8l`. One mismatch remains: the HEF fixture
 fetched by `scripts/tools/fetch-hef-fixtures.sh` is a Hailo-8 build,
 meant for `hailo load` on the device (ADR 0017). The integration does not
-work and the path is deprecated (ADR 0017); whether to delete or freeze
-it is #1254.
+work, and the path is deprecated and frozen (ADR 0017, #1254): the code
+stays and keeps building, and it is not developed further.
 
 `kernel/ai_accel/hailo/`: PCIe bring-up on the Pi 5 (`hailo_pi5.c`,
 `kernel/drivers/pcie/pcie_bcm2712.c`), firmware control RPCs
@@ -432,7 +432,7 @@ GPIO and I2C. Board notes and solved hardware issues are in the project
 kernel/
   arch/arm64/      boot.S, smp_boot.S, vectors, MMU, UEFI stub, EFI model delivery
   arch/x86_64/     Multiboot2 + bzImage entry, IDT, APIC, ACPI, PCI, SSE kernels
-  ai_accel/hailo/  Hailo NPU driver (deprecated), HEF parser, VDMA, trace
+  ai_accel/hailo/  Hailo NPU driver (frozen), HEF parser, VDMA, trace
   drivers/         UARTs, GIC, timer, SDHCI, MACB, virtio, PCIe, BPMP,
                    camera, camrtc, GPIO, I2C, usb/xhci, Tegra cpufreq/fan/EMC
   fs/              littlefs glue
@@ -481,14 +481,17 @@ host unit tests, run twice by `make runtime-test` (`--features slm`, then
 
 Recorded with the user's answers to the backfilled ADRs (2026-11-14):
 
-- **User/kernel separation.** Per-process address spaces under the EL2
-  kernel. The first kernel was deliberately small and limited, and
-  splitting user and kernel space is an intended direction. ELF user
-  programs are its first consumer, with shell verbs moving to user space
-  (ADR 0012). Builds on the existing EL0 syscall path
+- **User/kernel separation.** The first kernel was deliberately small
+  and limited, and splitting user and kernel space is an intended
+  direction (user, 2026-11-14). Per-task user address spaces with ASIDs
+  already exist for EL0 tasks (`kernel/mm/vmm.c:640-726`,
+  `kernel/sched/task.c:615-660`), as does the EL0 syscall path
   (`kernel/src/syscall.c`; trap side in `kernel/arch/arm64/vectors.S`,
-  `kernel/arch/arm64/exceptions.c` and `kernel/arch/arm64/user_entry.S`)
-  (user, 2026-11-14).
+  `exceptions.c`, `user_entry.S`). What is planned is the split itself:
+  the kernel moved out of the user tables to a high-VA TTBR1_EL2 mapping,
+  PAN on with checked user copies (#29), and the shell verbs moved to
+  user-space ELF programs (ADR 0012). Today the only EL0 ELF consumer is
+  the `userelf` verb (`kernel/src/shell_sys.c:712`).
 - **Retire kexec.** UEFI-direct becomes the only boot path on Jetson and
   x86-64, including both x86 kexec loader variants (ADR 0010, #1252).
 - **Replace third-party stacks.** Move SSH and crypto from GPL wolfSSH and
@@ -496,8 +499,9 @@ Recorded with the user's answers to the backfilled ADRs (2026-11-14):
   project-written replacements are acceptable later.
 - **Runtime weight loading.** Load model weights at run time instead of
   compiling them into the image (ADR 0016, #1253).
-- **Hailo.** The Hailo path is deprecated; delete or freeze is decided in
-  #1254 (ADR 0017).
+- **Hailo.** Frozen (#1254, ADR 0017): the code keeps building, with no
+  new work; deletion is not planned, and a Hailo-10 path stays a
+  far-future item.
 
 ---
 

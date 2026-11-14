@@ -1,5 +1,7 @@
 # Hailo-8L Inference Wedge — Investigation Write-up
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Status:** Closed as a documented limitation (2026-10-18). No further
 host-side work is scheduled.
 **Hardware:** Raspberry Pi 5 (`pi-5-1`) + AI HAT+ 13 TOPS (Hailo-8L),

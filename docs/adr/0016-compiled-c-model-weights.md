@@ -59,9 +59,11 @@ scheduler in the sibling `slm-os-scheduler-ai` project ("Plan A",
 The user disagrees with compiling model weights into the image (the
 MNIST model, embedded as an ONNX file through `include_bytes!` and
 `.incbin`). Runtime loading is the preferred direction, tracked in
-#1253. Whether this position extends to the scheduler and eviction
-policy weights compiled in as C and Rust `const` arrays is not
-recorded. This ADR records how the build works now;
+#1253. The position extends to the scheduler and eviction policy
+weights compiled in as C and Rust `const` arrays: runtime-loaded
+parameters are to become the default path, and the generated weight
+sources are to be removed once nothing depends on them (user,
+2026-11-14). This ADR records how the build works now;
 it is not an endorsement.
 
 ## Consequences
