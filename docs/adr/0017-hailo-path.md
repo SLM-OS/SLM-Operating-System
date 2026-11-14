@@ -1,21 +1,21 @@
-# ADR 0017: Drive the Pi 5 Hailo NPU from a native bare-metal driver, without HailoRT
+# ADR 0017: Drive the Pi 5 Hailo-8L NPU from a native bare-metal driver, without HailoRT
 
-Status: deprecated. The Hailo 8 cannot do useful work for SLM-OS and the
-integration does not work (user, 2026-11-14). Whether to delete or freeze the code is
+Status: deprecated. The Hailo-8L cannot do useful work for SLM-OS and
+the integration does not work (user, 2026-11-14). Whether to delete or freeze the code is
 decided in #1254. A Hailo-10 offload path is a possible far-future item
 (user, 2026-11-14).
 
 ## Which part is fitted
 
-The device in use is a Hailo 8 (user, 2026-11-14). The code and the Hailo docs name a
-Hailo-8L instead. The driver reads and logs the IDENTIFY
-`device_architecture` field (`kernel/ai_accel/hailo/hailo_core.c:626-641`)
-but does not branch on it; the line it prints in a `hailo boot` log
-would settle Hailo-8 against Hailo-8L. Other evidence:
+The device in use is a Hailo-8L (user, 2026-11-14). The code and the Hailo docs
+target the Hailo-8L, so they match the device:
 
 - Both enumerate as `1e60:2864` (`kernel/ai_accel/hailo/hailo.h:56-57`,
   "Hailo-8 and Hailo-8L") and boot the same `hailo8_fw.bin`
-  (`kernel/ai_accel/hailo/hailo_fw.S:2`, `docs/hailo-inference-wedge.md:7-8`).
+  (`kernel/ai_accel/hailo/hailo_fw.S:2`, `docs/hailo-inference-wedge.md:7-8`),
+  so the PCI ID does not distinguish them. The driver reads and logs the
+  IDENTIFY `device_architecture` field
+  (`kernel/ai_accel/hailo/hailo_core.c:626-641`) but does not branch on it.
 - The context-switch translator states "SLM-OS targets Hailo-8L (AI HAT+)
   today" and emits the Hailo-8L PRELIMINARY variant,
   FETCH_CFG_CHANNEL_DESCRIPTORS; HailoRT selects FETCH_CCW_BURSTS on a
@@ -23,17 +23,25 @@ would settle Hailo-8 against Hailo-8L. Other evidence:
   (`kernel/ai_accel/hailo/hailo_cs_actions.h:242-254`,
   `hailo_cs_translator.c:749`). The translator was matched to HailoRT
   wire captures taken on the same board (`docs/hailo-protocol-architecture.md:7`).
-- The HEF compile wrapper `scripts/hailo/compile_hef.sh` defaults to `--arch hailo8l`
-  (`docs/hailo-toolchain.md:116`). The test fixtures fetched by
-  `scripts/tools/fetch-hef-fixtures.sh:20` are Model Zoo v2.18.0
-  `hailo8` builds, that is Hailo-8; one HEF parsed during bring-up was an
-  8L build (`hef_parser.h:48-55`, `resnet_v1_18_8L.hef`).
+- The HEF compile wrapper `scripts/hailo/compile_hef.sh` defaults to
+  `--arch hailo8l` (`docs/hailo-toolchain.md:116`), and one HEF parsed
+  during bring-up was an 8L build (`hef_parser.h:48-55`,
+  `resnet_v1_18_8L.hef`).
 - `docs/hailo-inference-wedge.md:1,5` names the hardware "AI HAT+ 13 TOPS
   (Hailo-8L)"; `docs/hailo-lifecycle.md:1-3` and
   `docs/hailo-protocol-architecture.md:3` also say Hailo-8L.
 
-The text below keeps the record's "Hailo-8L" where it quotes or cites it.
-The mismatch is not investigated further, because the path is deprecated.
+One mismatch remains. `scripts/tools/fetch-hef-fixtures.sh:20` fetches
+`yolov5s.hef` from Model Zoo v2.18.0 `hailo8`, a Hailo-8 build, while
+the fitted part is a Hailo-8L. No QEMU or host test reads that fixture:
+`kernel/tests/test_hef_parser.c:5-10` builds synthetic protobuf bytes
+instead and says the real `yolov5s.hef` "is exercised on hardware by the
+`hailo load /mnt/files/yolov5s.hef` shell command". So the fixture is
+meant to be loaded on the device. Plain `hailo load` parses the HEF and
+prints its metadata; the `upload` and `sched` options also send it to
+the NPU (`kernel/ai_accel/hailo/hailo_shell.c:1076-1110`). Whether the
+Hailo-8 fixture was ever uploaded to the 8L is not recorded. It is not
+investigated further, because the path is deprecated.
 
 ## Context
 

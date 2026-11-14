@@ -31,7 +31,7 @@ that SLM-OS brings up itself.
 ├────────────────────────── C/Rust FFI ────────────────────────────────┤
 │  C kernel (kernel/)                                                  │
 │  PMM/VMM  Scheduler + policies  SMP  IPC  VFS/littlefs/FAT  lwIP     │
-│  GPU HAL + GA10B driver   Hailo 8 driver   USB/xHCI   BPMP   Camera  │
+│  GPU HAL + GA10B driver   Hailo-8L driver  USB/xHCI   BPMP   Camera  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  QEMU_VIRT        RASPI5           JETSON_ORIN_NANO        X86_64    │
 │  Cortex-A76       Cortex-A76       Cortex-A78AE            x86-64    │
@@ -351,15 +351,14 @@ compute GPU. Detail: `docs/gpu.md`, `docs/gpu-compute.md`,
 
 ### Hailo NPU (Pi 5 AI HAT+), deprecated
 
-The fitted part is a Hailo 8 (user, 2026-11-14). The driver and the Hailo
-docs say Hailo-8L: both parts enumerate as `1e60:2864`
-(`kernel/ai_accel/hailo/hailo.h:57`), the translator targets the 8L
-variant (`hailo_cs_actions.h:251`), and the compile wrapper defaults to
-`hailo8l`, while the fetched test HEFs are Hailo-8 builds. The driver
-logs the IDENTIFY `device_architecture` field without branching on it
-(`hailo_core.c:626-641`), so a `hailo boot` log would settle the part.
-ADR 0017 lists the evidence. The path
-is deprecated (ADR 0017); whether to delete or freeze it is #1254.
+The fitted part is a Hailo-8L (user, 2026-11-14), and the driver and the
+Hailo docs target it: the translator emits the 8L variant
+(`kernel/ai_accel/hailo/hailo_cs_actions.h:251`) and the HEF compile
+wrapper defaults to `hailo8l`. One mismatch remains: the HEF fixture
+fetched by `scripts/tools/fetch-hef-fixtures.sh` is a Hailo-8 build,
+meant for `hailo load` on the device (ADR 0017). The integration does not
+work and the path is deprecated (ADR 0017); whether to delete or freeze
+it is #1254.
 
 `kernel/ai_accel/hailo/`: PCIe bring-up on the Pi 5 (`hailo_pi5.c`,
 `kernel/drivers/pcie/pcie_bcm2712.c`), firmware control RPCs
