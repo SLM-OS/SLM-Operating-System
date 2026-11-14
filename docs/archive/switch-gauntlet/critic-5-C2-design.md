@@ -391,3 +391,204 @@ Corrections to the argument (the design does not change):
    check is safe once change 1 is in.
 
 Nothing to change in the ordering argument.
+
+---
+
+# Round 2 (ADR 0008 at `origin/c2/switch-window-r2` 6bc60aa3)
+
+Critic: `critic-c2-design`, blind. Model: **Fable 5.2** (`claude-fable-5-2`).
+Written 05:50 UTC 2026-11-14. Last allowed design round.
+
+**Verdict: PASS, with four text corrections to the ADR (section R6) that
+change no mechanism, bound or argument step.** No lock cycle and no wait
+under a lock; the publishing store and acquiring load are unchanged and
+correct; every deferral case has a stated bound; the two named sequences and
+the stale-CPU sequence (#1242) are closed. A critic prototype of the revised
+decision ran 300 of 300 filtered iterations with 0 stale-CPU reports
+(section R4). The orchestrator's rule for this verdict fails a design whose
+ADR argument has gaps. The four corrections are factual slips beside the
+argument, each decidable from the code; the critic does not count them as
+gaps and says so here so that the ruling can be reversed if the orchestrator
+reads the rule more strictly.
+
+## R1. Order of work
+
+1. ADR Status, "#1242 evidence", and the Decision (parts 1 and 2 with the
+   idle loop and the bounds). The Decision mixes description with its own
+   justification ("Why it pins", "Coverage of every use"), so those
+   paragraphs were seen before the derivation; the ADR's lock graph, "Why no
+   deadlock", ordering argument, invariant, consequences and change list
+   were not.
+2. Derivation of the three new mechanisms from the code (R2).
+3. The remaining ADR sections, compared (R3).
+4. Prototype runs and a count of the builder's #1242 files (R4, R5).
+
+No process killed, no labctl call, one QEMU of the critic's at a time (other
+agents' QEMUs were running on the host).
+
+## R2. The new mechanisms, derived
+
+**CPU-id pin (part 1).** `irq_save` is `mrs daif; msr daifset, #2` (x86
+`pushfq; cli`), `irq_restore` writes the whole of DAIF back, so a variant
+that also masks F is restored correctly by the existing
+`rq_unlock_irqrestore`. With the tick's class masked from before the
+`cpu_id()` read, the ways `current` can leave the CPU are: the tick ISR's
+direct `schedule()` (QEMU, x86), the trampoline (armed only from an IRQ
+exit), the x86 resched IPI, and a synchronous `schedule()` in the pinned
+code. The first three are interrupts. For the fourth: the COOP tick calls
+`scheduler_tick` with `preempt_disabled[cpu]` saved, set and restored
+(`coop_preempt_maybe_tick`), which suppresses its `schedule()`;
+`sched_try_steal` takes `steal_deque_lock[v]` then `rq_lock[v]`, one at a
+time, no wait on any `on_cpu`; the locked body calls nothing that schedules.
+The zombie destroy is outside the pin and the id is re-read under the mask
+after it. After the unlock, `preempt_disabled[this_cpu]` (set while masked,
+for the right CPU) covers the window as before. Locks taken while masked are
+the ones the tick ISR already takes while masked; their holders never wait.
+No new edge, no new wait.
+
+Longer masked spans: the steal prelude (at most `(cpu_count - 1) * 32`
+pop-and-check pairs) and, on COOP builds, one `scheduler_tick`. Both already
+run masked elsewhere (the prelude's inner sections, the hardware tick ISR).
+ARM64 has no IPI that needs delivery (`smp_notify_cpu` is `sev`, latched in
+the event register). x86's resched IPI stays pending and is taken at the
+unmask; when that unmask opens a switch window the #1236 guard drops it, as
+it already does for an IPI that arrives under `rq_lock`. The prelude now
+feeds that case too, so slightly more kicks wait for the next tick. Bounded
+by one tick; not in the ADR ("unchanged"); the x86 /ci row will show whether
+it matters.
+
+Masking F. Only under `PI5_FIQ_TIMER`, where the tick is an FIQ; correct
+there, and restored by the whole-DAIF write. On every other build F is not
+touched and no FIQ path reaches `schedule()`. The ADR's own caveat stands:
+in that build every other `rq_lock_irqsave` section is still open to the
+tick. That is a hazard of the experimental build, not of this decision.
+
+**Next ready task (part 2).** The walk runs under `rq_lock[this_cpu]`, one
+acquire load per candidate, no wait. A task's `on_cpu` can become 1 only by
+a CPU that picked it from its own queue under its own lock, so a candidate
+that reads 0 stays restorable until this CPU's own store of 1. A deferred
+task can be deferred once per window: nothing sets its `on_cpu` again until
+some CPU picks it. Ordering change: a ready lower-priority task R can run
+while a higher-priority deferred T waits; T is then picked at this CPU's
+next `schedule()`: the next tick (10 ms) on ticking CPUs, R's next yield or
+block on cooperative ones. Round 1's idle choice gave T microseconds and
+stalled everything else; round 2 gives T up to a tick and stalls nothing.
+The ADR states this bound. Removal from the middle of the queue must keep
+`tail` and `ready_count` right; `remove_from_cpu_queue_locked` does.
+
+`switch_in_waiting[c]` is a task pointer read by idle outside the lock. The
+task can be stolen, destroyed and its slot reused meanwhile. Tasks live in
+the static `task_table`, so the read of `w->on_cpu` is always of mapped
+memory and is only a hint: the poll is bounded (about 50 us) and the
+following `schedule()` decides under the lock. Safe; the ADR does not say
+why.
+
+**Masked check-then-WFI.** With I (and F where the tick is an FIQ) masked,
+no `schedule()` can run on the CPU between the read and the `wfi`, and a
+pending IRQ or FIQ is a WFI wake-up event whatever the PSTATE masks hold, so
+the tick that would have set the flag ends the wait instead and is taken at
+the unmask. x86 `cli; read; sti; hlt` with the `sti` shadow is the standard
+form. The poll then reads one word lock-free and calls `schedule()` at most
+once per poll period, which answers the unfair-lock point of round 1.
+
+Which idle branches unmask before waiting, from `idle_task_func`: x86; Pi 5
+`PI5_FIQ_TIMER`; Pi 5 and Jetson with `SECONDARY_PREEMPT` (and
+`JETSON_HW_TICK`); CPU 0 of the Pi 5 branch without `SECONDARY_PREEMPT`;
+and the final `#else`, which is QEMU, on every CPU. Branches that never
+unmask: Jetson `JETSON_HW_TICK=OFF` secondaries (CPU 0 does not wait at
+all) and CPUs 1 to 3 of the Pi 5 branch without `SECONDARY_PREEMPT`.
+
+## R3. Comparison with the ADR
+
+Agreed: the pin argument; coverage of the per-CPU uses; the idle exemption
+resting on part 1; the lock table (the rows asked for in round 1 are there);
+the no-deadlock argument in its new form (no lock holder waits on an
+`on_cpu`; `task_destroy`'s callers listed with the stated limit of the
+check; the poll's one `schedule()` per period); the ordering argument,
+unchanged; both invariants; the bounds for the idle case, the running-R
+case and the never-released case.
+
+Round-1 checklist: items 1, 2, 4, 5, 6, 7 answered. Item 3 answered in
+mechanism, with the branch list wrong (R6.1).
+
+Builder evidence for item 2, counted by the critic from
+`gauntlet-5-hw-pi5`, `run5-hw/c2/qemu-1242-base/r3m-proto-1f58b249-run01..05.txt`
+(banners 1f58b249): reported iterations 2 + 40 + 39 + 40 + 7 = 128;
+iterations with `stale_cpu` above 0: 1 + 7 + 7 + 10 + 1 = 26; first at
+iterations 1, 1, 4, 1, 5; faults in runs 01, 03 and 05; run 04 has
+`[switch_check] FIRST: task id=3 'idle_2' switched in on cpu 2: previous
+save not complete, owned by another CPU (... owner=3)`. All as the ADR
+states. The `qemu-nodeadlock/` files were listed, not counted: the
+forced-tick bar belongs to the fix verdict.
+
+## R4. Prototype of the revised decision
+
+`critic-proto-adr0008-r2.patch` on d73604f7: `irq_save` before the
+`cpu_id()` read, the lock taken under it, the id re-read under the mask
+after the zombie destroy, the walk for the next ready task with removal from
+anywhere in the queue, the masked check-then-WFI with a 50 us poll in the
+QEMU idle branch (all four CPUs), and the round-1 stale probe at the first
+lock plus one after the zombie relock.
+
+| Run | Banner build | What | Result |
+|---|---|---|---|
+| r2proto-run01 | 20261114053527 | R3 migrate, R3 wake, R2, x100 each, `SWITCH_CHECK=ON` | 300 of 300 PASS; 0 STALE lines; 200 of 200 `swo` lines `bad_gen=0 two_cpus=0`; mean 307 ms per R3 iteration (the tests' own 300 ms phases), longest 350 ms |
+| r2proto-full01 | 20261114053819 | full `make test SWITCH_CHECK=ON`, once | 1 failure, `test_litmus_patterns_pass` (`MP weak rows ... : 1`, the #1230 signature, with two other agents' QEMUs on the host); every other suite passed; 0 STALE lines |
+
+Against round 1 on the same tree: the round-1 prototype reported the stale
+id within 20 iterations and panicked; the builder's base rate is a first
+stale lock after a mean of 2.4 iterations. 100 clean R3 migrate iterations
+is more than 5 times either.
+
+Limits. The critic's implementation, QEMU ARM64 only; `WORK_STEALING` off,
+so the masked steal prelude did not run; no COOP build, no x86, no
+hardware; one full-suite run, so the litmus failure is not attributed.
+
+Files (local; the orchestrator places them):
+`/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-crit-c2d/critic-evidence/`.
+sha256 prefixes: `r2proto-run01.test-output.log` 764b728008dad64b,
+`r2proto-full01.test-output.log` e40b941b5dfa3533,
+`critic-proto-adr0008-r2.patch` 6c5bdaa2c1dfa97a; the matching
+`*.make.log` files are beside them.
+
+## R5. Failure modes checked by name
+
+- Critic reading the claim first: partly unavoidable (R1, step 1), disclosed.
+- "Cannot deadlock", tick in the window: graph re-derived for the three new
+  mechanisms; no cycle. The forced-tick run is the fix verdict's.
+- Hypothesis stated as finding: the ADR keeps #1238 as a hypothesis with a
+  Jetson trace pending. Not checked further here.
+- Number without a file: R3 and R4 name theirs.
+- Bar computed from one cell, stale base: the #1242 base rate is five runs
+  on 1f58b249, which is the rebased base plus the round-1 prototype.
+
+## R6. Corrections required in the ADR text (no design change)
+
+1. The idle branch list is wrong against `idle_task_func`. QEMU is the
+   final `#else`: every QEMU CPU unmasks, waits in `wfi` and takes the tick
+   into `schedule()` (round 1's panic was cpu 3's tick). "QEMU CPU 0" and
+   "QEMU CPUs 1 to 3 ... take no interrupt into `schedule()`" are both
+   wrong. CPU 0 of the Pi 5 branch without `SECONDARY_PREEMPT` unmasks and
+   waits in `wfi`, and the ADR classes that whole build as never unmasking.
+   State the rule by code shape: every branch that unmasks before its wait
+   gets the masked check; every branch that never unmasks keeps
+   check-then-`wfe`. The fix verdict will check the implementation branch by
+   branch.
+2. "`scheduler_start()` runs on its own CPU with interrupts masked from
+   entry" was not verified by the critic and should not carry the argument
+   (#1198 unmasks the Jetson primary before `scheduler_init`). The reason
+   the id is valid there is that the caller is the boot context, which is
+   not a task and cannot be moved, and that the id is a parameter.
+3. Say why idle may dereference `switch_in_waiting[c]` outside the lock
+   (static `task_table`, the value is a hint, the poll is bounded).
+4. x86: say that kicks arriving during the now-masked prelude are taken in
+   the switch window and dropped by the #1236 guard like those arriving
+   under the lock, bounded by one tick, instead of "unchanged".
+
+Not required, for the builder's judgement: when a ready task is run ahead of
+a deferred higher-priority one on a ticking CPU, requesting a reschedule
+would cut the deferred task's wait from a tick to the window.
+
+For the fix verdict: the masked steal prelude under `WORK_STEALING=ON`, a
+COOP build, x86, and the `PI5_FIQ_TIMER` caveat are untested by this
+prototype and need rows.
