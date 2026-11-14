@@ -657,3 +657,23 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
   on three paths, --assert-shares, bench smp base vs fix; full-suite boots
   only if time remains. QEMU regression rows run between boots. /ci at the
   final head by the orchestrator on a quiet host.
+
+## Entry 25 (written 06:16 UTC, from date): C3 final report; C3 critic started
+
+- C3 final head `c3/pmm-halt` **321a91be** (c1/harness 2196deb5 + one C3
+  commit, PMM_DEBUG instrument). Hardware rows ran at diagnosis head 5069e658
+  (c1/harness 6e39f425 + the same commit); none at 321a91be. Proposed end
+  state: **#1207 open, #1228 the same defect** (decoded from run 4 captures:
+  buddy_alloc split from PMM_ALLOC_FAIL because a free list held fewer blocks
+  than free_counts; FAR bit 52 is index wraparound). Next experiment with
+  images ready: about 20 PMM_DEBUG-off full-suite kexec boots (cc9a9cd7) for
+  the rate, then WALK_EVERY=64 (7baa72d5), then a --no-helper arm for H1 once
+  a build reproduces. Open check: the ELR instruction class is not verified
+  against a matching ELF.
+- No C3 PR: the brief opens one only for a fix. C3 suggests a diagnostics PR
+  ("Refs #1207"); the orchestrator leaves it as a branch for the user to
+  decide (final report), since the brief's PR table has no row for it.
+- C3 critic `critic-c3` spawned on Fable at 06:16 UTC, blind, QEMU only: the
+  brief's hardware reproduction (filtered loop, one Jetson boot per head) has
+  no lab time while C2 holds the boards; recorded as not done unless time
+  remains after 08:45.
