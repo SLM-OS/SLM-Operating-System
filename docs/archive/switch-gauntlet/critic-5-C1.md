@@ -382,3 +382,58 @@ once per pass; an iteration line carries two spaces before `[PASS]`.
 Not required, recorded: a self-test case for the `build/` exemption in
 `scripts/check-c-braces.py`; exercising `slmos.test=` on Pi 5 when a
 component next holds the board; the double space in the `[ITER]` line.
+
+## Addendum 1 (about 03:05 UTC 2026-11-14): builder evidence at 48bb1be3
+
+The builder added `c1/litmus-ab/base3.*`, `head3.*`, `head3ai.*` and
+`TALLY.md` (commit 48bb1be3). That commit is an ancestor of the critic's
+evidence commit 985c7a8b, so the files were on the branch when the
+critic pushed; they were not counted in section 6. The C1 code head is
+unchanged (165cb992). The verdict is unchanged: **FAIL**, same fix list.
+The raw logs were counted before `TALLY.md` was opened.
+
+Counted from the raw logs:
+
+| File (c1/litmus-ab/) | Banner | Config | `[PASS]` | `test_litmus_patterns_pass` | MP weak rows | Load at start, as recorded in the file's own header |
+|---|---|---|---|---|---|---|
+| `base3.log.txt` | 8ec0e330 | default | 3019 | pass | 0 | 2.96 |
+| `head3.log.txt` | 165cb992 | default | 3040 | pass | 0 | 1.46 |
+| `head3ai.log.txt` | 165cb992 | AI_SCHED | 3128 | pass | 0 | 2.75 |
+
+All three are complete (banner to the semihosting exit line), 0 `[FAIL]`.
+
+Section 6's rates, updated. Default configuration: base 3 failures of 7
+(adds `base3`), head 3 of 7 (adds `head3`). AI_SCHED: base 0 of 1, head
+2 of 4 (adds `head3ai`). `c1/pre-commit-try1-unfiltered.log` (a failure
+on the uncommitted tree before 6e39f425) is not in the head count.
+
+`TALLY.md` checked as a claim:
+
+- Its 16 PASS/FAIL results and its MP-weak-row counts agree with the
+  logs. The two rows marked "see file" are the two largest counts on
+  file: `ci-165cb992/04r` 9 weak rows and `05r` 6, both on the head; the
+  largest on the base is 4 (`unfiltered-base-8ec0e330-run1-1230.log`).
+- Its statement that each load is "recorded in each file's header" holds
+  for 6 of the 14 rows that give a load: 3.05, 3.74, 2.05 (the three
+  `unfiltered-*` logs) and 1.46, 2.75, 2.96 (the three new runs). The
+  other 8 loads (try1 3.71; 04r 5.70; 05r 6.93; 05r2 2.56; base1 4.09;
+  head1 3.79; base2 4.67; head2 5.67) appear in no log, make file or
+  header on the branch (`grep` finds them in `TALLY.md` only). They are
+  numbers without a file.
+- Its conclusion "under 3.1 all pass, 3.7 and above all but one fail, on
+  both trees" therefore rests on file-backed loads for 6 runs only: 5
+  passes at 1.46 to 3.05 (head 3, base 2) and 1 failure at 3.74 (base).
+  The critic's own runs add 2 passes with recorded loads (head 2.73,
+  base 2.66). On file-backed loads the head has passed at low load and
+  has no high-load run with a recorded load at all; "the failure tracks
+  host load on both trees" stays a hypothesis for the head. It is
+  consistent with everything counted, and nothing on file contradicts
+  "no change in rate from C1".
+
+Effect on row 3a. Step 4 now has three passing runs at 165cb992 on file
+(`head1`, `head3`, critic `unfiltered-run1`) and step 5 two (`05r2`,
+`head3ai`). The judgment stands: every step has passed at the head's
+kernel sources, the only failing test is #1230 at the base's rate, and
+there is still no single /ci sequence at the PR head on a clean tree.
+Fix 5 is unchanged; when it is run, the load at the start of every step
+belongs in the step's own log.
