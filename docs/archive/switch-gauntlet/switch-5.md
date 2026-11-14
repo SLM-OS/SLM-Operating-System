@@ -1167,3 +1167,7 @@ clean), `/root/slmos.elf` 098f3163; this session's 4 staged ELFs deleted.
 `/root` holds 48 `*.elf*` files (not 68): deletion of old ELFs awaits the
 user's choice of list. pi-5-1: released, powered on, original
 `kernel_2712.img` restored and booted (banner b42b2c1d).
+
+## Entry 40 (written 22:42 UTC, from date): Jetson /root cleanup
+
+On the user's choice (48 `*.elf*` found, not 68): deleted the 34 ELFs dated 2026-11-08 to 11-11 (runs 3 and 4: `slmos-1193*` x10, `slmos-1194*` x3, `slmos-main85f5-test`, `slmos-r3-*` x8, `slmos-closeout-*` x3, `slmos-fixc-*` x4, `slmos-l4-*` x5). Kept `/root/slmos.elf` (098f3163) and the 13 older files. Both boards released and powered on.
