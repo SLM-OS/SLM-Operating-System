@@ -1,0 +1,27 @@
+#!/bin/bash
+# /ci steps 1-10 at the PR head, one log per step, continuing past failures.
+set -u
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/adfb340d-9b33-4cdc-873e-6e48cf0322cb/scratchpad
+export PATH="$HOME/.cargo/bin:$PATH"
+H=$(git rev-parse --short=8 HEAD)
+L=$S/ci-$H; mkdir -p $L
+st() { # id, cmd
+  id=$1; shift
+  echo "# step $id at $H ($(git rev-parse HEAD)); start $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg)" > $L/$id.log
+  echo "# cmd: $*" >> $L/$id.log
+  SECONDS=0; bash -c "$*" >> $L/$id.log 2>&1; rc=$?
+  echo "# end $(date -u +%FT%TZ) rc=$rc elapsed=${SECONDS}s" >> $L/$id.log
+  echo "$(date -u +%T) step $id rc=$rc ${SECONDS}s"
+}
+st 01-build-qemu  "make kernel-clean && make kernel PLATFORM=QEMU_VIRT"
+st 02-build-x86   "make kernel-clean && make kernel PLATFORM=X86_64"
+st 03-build-jetson-real "make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real && make kernel-test-clean && make kernel-test PLATFORM=JETSON_ORIN_NANO AI_WEIGHTS=real"
+st 04-test        "make test"
+st 04b-test-x86   "make test PLATFORM=X86_64"
+st 05-test-ai     "make test AI_SCHED=ON"
+st 06-runtime     "make runtime-test"
+st 07-braces      "make test-check-braces && make check-braces"
+st 08-build-order "make test-build-order"
+st 09-jetson-layout "make test-jetson-uefi-layout"
+st 10-diff        "git diff origin/main...HEAD --stat; git status --porcelain"
+echo "$(date -u +%T) CI DONE $L"

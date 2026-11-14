@@ -1,0 +1,12 @@
+#!/bin/bash
+# Three more plain `make test` runs at the head, one at a time (#1230 litmus count).
+S=/tmp/claude-1000/-home-john-projects-CS-496-Capstone-SLM-Operating-System/adfb340d-9b33-4cdc-873e-6e48cf0322cb/scratchpad
+export PATH="$HOME/.cargo/bin:$PATH"
+H=$(git rev-parse --short=8 HEAD); L=$S/ci-$H
+for i in 1 2 3; do
+  f=$L/04r$i-test.log
+  echo "# make test rerun $i at $H ($(git rev-parse HEAD)); start $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg)" > $f
+  SECONDS=0; make test >> $f 2>&1; rc=$?
+  echo "# end $(date -u +%FT%TZ) rc=$rc elapsed=${SECONDS}s" >> $f
+  echo "rerun $i rc=$rc $(grep -a -E '^  \[FAIL\]|^PASSED' $f | tr '\n' ' ')"
+done

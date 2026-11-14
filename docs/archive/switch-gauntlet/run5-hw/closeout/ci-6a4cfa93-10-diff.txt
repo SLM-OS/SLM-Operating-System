@@ -1,0 +1,17 @@
+# step 10-diff at 6a4cfa93 (6a4cfa9308e5dafec8676e8c4e22dce406920760); start 2026-11-14T18:44:45Z; load 2.48 2.56 2.32
+# cmd: git diff origin/main...HEAD --stat; git status --porcelain
+ CMakeLists.txt                    |  16 ++
+ Makefile                          |   2 +
+ docs/adr/0008-switch-in-window.md | 575 ++++++++++++++++++++++++++++++++++++++
+ docs/adr/README.md                |   7 +-
+ docs/architecture.md              |  26 +-
+ docs/scheduler.md                 |  35 ++-
+ kernel/CLAUDE.md                  |   4 +-
+ kernel/include/sched_diag.h       |   1 +
+ kernel/include/switch_check.h     |  78 ++++++
+ kernel/sched/sched.c              | 242 ++++++++++++++--
+ kernel/sched/switch_check.c       | 173 ++++++++++++
+ kernel/tests/test_scheduler.c     | 528 ++++++++++++++++++++++++++++++++++
+ scripts/check-build-signatures.sh |   2 +-
+ 13 files changed, 1645 insertions(+), 44 deletions(-)
+# end 2026-11-14T18:44:45Z rc=0 elapsed=0s
