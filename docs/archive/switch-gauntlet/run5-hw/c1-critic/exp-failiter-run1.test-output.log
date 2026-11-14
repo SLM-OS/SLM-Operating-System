@@ -1,0 +1,167 @@
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114023717 (165cb992-dirty)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022ba98
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4207aee0
+  End:     0x42080000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42080000 - 0x80000000
+  Total pages:     253824 (1015296 KB)
+  Free pages:      253824 (1015296 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8320 pages (kernel)
+
+  Free list distribution:
+    Order  7 (  512 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_fault_dump_idle_state,test_fault_dump_lock_frozen_counter_cannot_hang repeat=3 source=build index=2892
+  [ITER 1/3]  [PASS] test_fault_dump_lock_frozen_counter_cannot_hang (102473 us)
+  [ITER 1/3]  [PASS] test_fault_dump_idle_state (237 us)
+  [ITER 2/3]  [PASS] test_fault_dump_lock_frozen_counter_cannot_hang (53815 us)
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-crit-c1/kernel/tests/test_fault_dump.c:151 - g_test_filter_pass != 2
+  [ITER 2/3]  [FAIL] test_fault_dump_idle_state (596 us)
+  [ITER 3/3]  [PASS] test_fault_dump_lock_frozen_counter_cannot_hang (54686 us)
+  [ITER 3/3]  [PASS] test_fault_dump_idle_state (172 us)
+
+[FILTER] Summary
+[FILTER] [FAIL] test_fault_dump_idle_state: runs=3 passed=2 failed=1 ignored=0 us min=172 avg=335 max=596
+[FILTER] [PASS] test_fault_dump_lock_frozen_counter_cannot_hang: runs=3 passed=3 failed=0 ignored=0 us min=53815 avg=70325 max=102473
+
+========================================
+Test Suite Summary
+========================================
+[FAIL] 1 total failure(s)
+[INFO] Exiting via semihosting...

@@ -1,0 +1,9 @@
+C1 critic reproduction logs (switch gauntlet run 5). Verdict and reading: docs/archive/switch-gauntlet/critic-5-C1.md on gauntlet/switch-5.
+Every *.make.log starts with one line: head, arguments, /proc/loadavg at start, UTC time; it ends with make's rc and the load at the end.
+Every *.test-output.log is the unedited build/test-output.log (QEMU serial from start) of the run with the same name.
+All runs: make test (systemd-run MemoryMax=3G CPUQuota=200%, timeout), except exp-ktest-run1 and exp-cmdline-run1, which use the CLAUDE.md systemd-run wrapper directly.
+Clean tree at 165cb992: filter-x50-run1, unfiltered-run1, double-fault-run1..4, filter-pmm-pair-x3, filter-bogus, filter-badrepeat, x86-filter-x3, x86-unfiltered.
+Clean tree at 8ec0e330: unfiltered-base-run1.
+165cb992 plus a critic patch (never committed to any code branch): exp-badsp (critic-exp-badsp.patch, SLOT_TRACE=ON), exp-holder1 and exp-holder2 (critic-exp-holder.patch, CRITIC_EXP=1 holder stops mid-dump, =2 holder faults mid-dump), exp-failiter (critic-exp-failiter.patch), exp-ktest (critic-exp-nosemi.patch).
+exp-cmdline-run1.first300.log: first 300 lines of a 213519-line log (slmos.bin booted with -kernel/-append; unsupported load path, void).
+own-count-before-readme.txt: the critic's count of the builder's c1/ logs, written before c1/README.md was opened.

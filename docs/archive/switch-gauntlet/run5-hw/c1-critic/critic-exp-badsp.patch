@@ -1,0 +1,18 @@
+diff --git a/kernel/tests/test_fault_dump.c b/kernel/tests/test_fault_dump.c
+index 676a2f6c..bd45cf51 100644
+--- a/kernel/tests/test_fault_dump.c
++++ b/kernel/tests/test_fault_dump.c
+@@ -170,9 +170,11 @@ static void fd_fault_task(void *arg)
+     }
+     if (which == 0) {
+         /* Data abort: page-fault dump. */
+-        volatile uint64_t *bad = (volatile uint64_t *)(uintptr_t)0x00007F0000000000ULL;
+-        (void)*bad;
++        /* CRITIC EXPERIMENT: fault with a bad SP (SLOT_TRACE bad-SP dump path). */
++        __asm__ volatile("mov x9, #0x100\n mov sp, x9\n mov x10, #0x7f0000000000\n ldr x11, [x10]");
+     } else {
++        /* CRITIC EXPERIMENT: fault ~5 ms after the other CPU so it holds the lock. */
++        { uint64_t f = timer_get_frequency(), t = timer_get_count(); while (timer_get_count() - t < f / 200) { } }
+         /* BRK: panic() dump. */
+         __asm__ volatile("brk #0x7");
+     }
