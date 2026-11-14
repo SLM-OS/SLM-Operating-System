@@ -1,0 +1,45 @@
+head c0ea07148e8bbf48590c204c6e51eb37af0d5e05 step 09-jetson-layout start 06:49:20 load 7.70 6.53 5.49
+
+== Build Jetson kernel ==
+  [32m✓[0m build succeeded
+
+== Early VBAR_EL2 table ==
+  [32m✓[0m jetson_early_vbar_el2 at 0x0000000080010800 (2KB-aligned)
+  [32m✓[0m 16 vector entries, each a single branch
+  [32m✓[0m all vectors funnel to single handler
+
+== Fault scratch slot ==
+  [32m✓[0m jetson_early_fault_slot in .bss at 0x0000000080870000
+  [32m✓[0m scratch slot size: 64 bytes
+
+== Install site reachability ==
+  [32m✓[0m efi_stub_entry has 'msr vbar_el2' instruction
+  [32m✓[0m install site computes 0x80010800 (matches jetson_early_vbar_el2)
+
+== Late VBAR_EL1 install (primary_cpu) ==
+  [32m✓[0m 2 'msr vbar_el1' instructions in image
+  [32m✓[0m exception_vectors symbol exists (VBAR_EL1 target)
+
+== UEFI hand-off: cache clean, MMU off, relocation (#26) ==
+  [32m✓[0m EFI entry has 'tlbi alle2' (EL2, E2H=0 MMU-off)
+  [32m✓[0m EFI entry has 'tlbi vmalle1' (EL1 / VHE MMU-off)
+  [32m✓[0m EFI entry invalidates the I-cache after the copy
+  [32m✓[0m EFI entry branches into the relocated copy
+  [32m✓[0m efi_stub_entry cleans by VA (dc civac)
+  [32m✓[0m no set/way 'dc cisw' in EFI stub code
+  [32m✓[0m PE ImageBase 0x80000000 == link address of _start
+  [32m✓[0m kernel reads HCR_EL2 before writing it (6 sites — RMW pattern)
+
+== Inherited PAN cleared at boot (#1079) ==
+  [32m✓[0m SPAN is written to SCTLR_EL1
+  [32m✓[0m SPAN write comes after the E2H flip
+  [32m✓[0m PSTATE.PAN is cleared after the E2H flip
+
+== Boot model table (ADR 0002) ==
+  [32m✓[0m slmos_boot_models is in .data
+
+== Loaded image covers every section with contents (#1224) ==
+  [32m✓[0m no section with contents past __data_end (0x0000000080864400)
+
+== Summary ==
+  [32mAll checks passed.[0m

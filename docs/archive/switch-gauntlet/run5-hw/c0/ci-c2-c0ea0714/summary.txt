@@ -1,0 +1,32 @@
+head c0ea07148e8bbf48590c204c6e51eb37af0d5e05
+01-arm64-build rc=0 start=06:29:47 end=06:31:25 load=6.73 5.48 4.61
+02-x86-build rc=0 start=06:31:25 end=06:32:20 load=5.29 5.34 4.61
+03-jetson-real rc=0 start=06:32:20 end=06:36:14 load=5.92 5.74 4.94
+04-test rc=2 start=06:36:14 end=06:39:09 load=4.80 5.33 4.92
+04b-test-x86 rc=0 start=06:39:09 end=06:40:47 load=3.83 4.96 4.84
+05-test-aisched rc=2 start=06:40:47 end=06:43:47 load=4.95 4.79 4.78
+06-runtime-test rc=0 start=06:43:47 end=06:47:16 load=3.96 4.81 4.83
+07-braces rc=0 start=06:47:16 end=06:48:34 load=10.73 6.74 5.50
+08-build-order rc=0 start=06:48:34 end=06:49:20 load=7.70 6.53 5.49
+09-jetson-layout rc=0 start=06:49:20 end=06:51:00 load=4.99 6.08 5.45
+10-ws-on-01 rc=0 start=06:51:00 end=06:53:50 load=4.97 5.36 5.25
+10-ws-on-02 rc=0 start=06:53:50 end=06:56:44 load=4.60 4.94 5.10
+10-ws-on-03 rc=0 start=06:56:44 end=06:59:32 load=3.70 4.40 4.86
+10-ws-on-04 rc=0 start=06:59:32 end=07:02:20 load=4.93 4.63 4.87
+10-ws-on-05 rc=0 start=07:02:20 end=07:05:09 load=3.64 4.13 4.63
+10-ws-on-06 rc=0 start=07:05:09 end=07:07:54 load=3.44 3.83 4.43
+10-ws-on-07 rc=2 start=07:07:54 end=07:10:51 load=5.64 4.62 4.63
+10-ws-on-08 rc=0 start=07:10:51 end=07:13:46 load=4.29 4.39 4.54
+10-ws-on-09 rc=2 start=07:13:46 end=07:16:41 load=5.84 5.11 4.80
+10-ws-on-10 rc=2 start=07:16:41 end=07:19:45 load=5.23 5.23 4.92
+10-ws-on-11 rc=2 start=07:19:45 end=07:22:39 load=5.79 5.60 5.12
+10-ws-on-12 rc=2 start=07:22:39 end=07:25:35 load=4.35 5.14 5.04
+10-ws-on-13 rc=0 start=07:25:35 end=07:28:30 load=4.91 4.98 4.99
+10-ws-on-14 rc=0 start=07:28:30 end=07:31:15 load=4.48 4.43 4.75
+10-ws-on-15 rc=0 start=07:31:15 end=07:33:56 load=3.19 3.81 4.46
+10-ws-on-16 rc=0 start=07:33:56 end=07:36:43 load=3.46 3.62 4.27
+10-ws-on-17 rc=0 start=07:36:43 end=07:39:31 load=4.65 4.01 4.30
+10-ws-on-18 rc=2 start=07:39:31 end=07:42:31 load=5.49 4.69 4.52
+10-ws-on-19 rc=2 start=07:42:31 end=07:45:26 load=6.13 4.93 4.61
+10-ws-on-20 rc=0 start=07:45:26 end=07:48:20 load=3.94 4.73 4.61
+DONE
