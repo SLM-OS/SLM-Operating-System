@@ -1,0 +1,27 @@
+critic-c2 lock graph, written 08:21 UTC 2026-11-14 from kernel/sched/sched.c at c0ea0714,
+before reading ADR 0008's lock graph, the commit messages or any C2 README.
+
+Locks: rq_lock[c] (per CPU), steal_deque_lock[c] (per CPU). on_cpu is not a lock: store-release in
+sched_finish_switch (no lock held), load-acquire in pick_ready_locked (under rq_lock[this]) and in
+idle_poll_waiting (no lock).
+
+schedule(): mask tick class -> read cpu id -> [COOP tick: scheduler_tick with preempt_disabled set;
+  takes rq_lock[x] singly via task_wake_sleepers/scheduler_add_task] ->
+  [steal prelude: steal_deque_lock[v] alone, released; rq_lock[v] alone, released; then rq_lock[this] alone]
+  -> rq_lock[this]: zombie? unlock, restore caller mask, task_destroy_gen (no rq lock held), mask, re-read id, relock.
+  -> pick_next_task, pick_ready_locked: non-blocking loads of on_cpu of queued tasks; no second lock, no wait.
+  -> next->on_cpu = 1, task_set_current, preempt_disabled[this]=1, unlock+restore.
+  -> window (no lock, caller's IRQ state, preempt_disabled=1) -> switch_to -> sched_finish_switch(prev): release store.
+tick in the window: task_wake_sleepers -> scheduler_add_task -> rq_lock[x] irqsave, steal_deque_lock[x] after
+  rq_lock released; policy tick; returns at preempt_disabled. Needs rq_lock[x]; every holder of an rq_lock holds it
+  with the tick class masked and never waits on anything but (migrate only) a second rq_lock in id order.
+migrate: rq_lock[min] -> rq_lock[max]; the only nested pair, ordered by CPU id.
+steal: steal_deque_lock[v] then (after release) rq_lock[v]; add path: rq_lock[c] released, then steal_deque_lock[c].
+idle: no lock; mask, read switch_in_waiting[c], wait if NULL, unmask; bounded poll on w->on_cpu; yield().
+Wait-for edges: rq_lock[a] -> rq_lock[b] with a < b only. No edge from any lock to "on_cpu of T clears".
+The run-4 cycle (B holds rq_lock[B] and waits for A's window; A's tick in the window wants rq_lock[B]) needs the
+edge rq_lock[B] -> on_cpu; the fix has none: B reads once and defers. No cycle.
+Windows the fix opens to a tick: (1) idle between its unmask and yield(), including the poll: a nested schedule()
+runs on the idle task, picks under the lock; the poll's `w` is a hint into the static task table. (2) the zombie
+destroy, unmasked, id re-read after. (3) a deferred T queued on B while A's window is still open and A ticks: A's
+tick takes rq_lock[B] only momentarily (wake/add). Forced by test_switch_window_tick_forced.

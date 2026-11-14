@@ -1,0 +1,2250 @@
+# critic-c2 QEMU run: base 3b369aef, WS=ON, regs+litmus x15
+# head 3b369aef dirty=0; elf sha256 db2022c88ce53ebb0bbf8c832c2015e63398be78f7004bf0eab3ea735c1a0bf6
+# banner: build 20261114084225 (3b369aef)
+# make test WORK_STEALING=ON TEST_FILTER=test_regs_every_cpu_reports,test_litmus_patterns_pass TEST_REPEAT=15 TEST_TIMEOUT=500
+# start 2026-11-14T08:40:57Z load 4.95 4.17 4.00; end 2026-11-14T08:42:45Z load 3.98 4.01 3.96; make rc=2; make-test process tree (QEMU) cpu: user=34.18 sys=3.28 elapsed=28.02
+# ---- full serial log ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114084225 (3b369aef)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022f7f8
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4208aee0
+  End:     0x42090000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42090000 - 0x80000000
+  Total pages:     253808 (1015232 KB)
+  Free pages:      253808 (1015232 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8336 pages (kernel)
+
+  Free list distribution:
+    Order  4 (   64 KB): 1 blocks
+    Order  5 (  128 KB): 1 blocks
+    Order  6 (  256 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_regs_every_cpu_reports,test_litmus_patterns_pass repeat=15 source=build index=2898
+Lua 5.4 scripting initialized
+
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
+slmos> cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 1/15]  [PASS] test_regs_every_cpu_reports (16174 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=15353
+P1      0>2          100000         0        0       2 observed=23581
+P1      0>3          100000         0        0       4 observed=49304
+P1      1>0          100000         0        0       1 observed=15322
+P1      1>2          100000         0        0       1 observed=15556
+P1      1>3          100000         0        0       1 observed=14818
+P1      2>0          100000         0        0       2 observed=21154
+P1      2>1          100000         0        0       2 observed=31369
+P1      2>3          100000         0        0       3 observed=31322
+P1      3>0          100000         0        0       1 observed=15193
+P1      3>1          100000         0        0       4 observed=52843
+P1      3>2          100000         0        0       2 observed=16959
+P2      0>1          100000         0        0       2 observed=41157
+P2      0>2          100000         0        0       1 observed=18616
+P2      0>3          100000         0        0       1 observed=25511
+P2      1>0          100000         0        0       7 observed=215597
+P2      1>2          100000         0        0       2 observed=33350
+P2      1>3          100000         0        0       1 observed=25016
+P2      2>0          100000         0        0       2 observed=36666
+P2      2>1          100000         0        0       3 observed=56882
+P2      2>3          100000         0        0       3 observed=58850
+P2      3>0          100000         0        0       3 observed=51035
+P2      3>1          100000         0        0       1 observed=27504
+P2      3>2          100000         0        0       1 observed=21812
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       3
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       3
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       5
+P3      3>2           10000         0        0       5
+P4      w0/0-3      1511424         0        0      11 pairs=79936,113408,90560 straddles=599,46294,501 coverage=ok
+P4      w1/0-3      1675264         0        0      14 pairs=170304,163392,133248 straddles=3327,63105,519 coverage=ok
+P4      w2/0-3       933888         0        0       8 pairs=73984,91776,90816 straddles=504,36757,969 coverage=ok
+P4      w3/0-3      2629632         0        0      24 pairs=268608,269888,247680 straddles=506,81817,972 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       0
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       0
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      37
+S1      0>1          100000         0        0       2 observed=43078
+S1      0>2          100000         0        0       1 observed=28567
+S1      0>3          100000         0        0      18 observed=24638
+S1      1>0          100000         0        0       2 observed=36641
+S1      1>2          100000         0        0       2 observed=33408
+S1      1>3          100000         0        0       3 observed=50109
+S1      2>0          100000         0        0       1 observed=8799
+S1      2>1          100000         0        0       2 observed=32325
+S1      2>3          100000         0        0       3 observed=34812
+S1      3>0          100000         0        0       2 observed=37914
+S1      3>1          100000         0        0       3 observed=46419
+S1      3>2          100000         0        0       2 observed=30128
+S2      0>1           10000        18        0       2
+S2      0>2           10000         0        0       2
+S2      0>3           10000         0        0       7
+S2      1>0           10000         0        0       1
+S2      1>2           10000         2        0       5
+S2      1>3           10000        18        0       5
+S2      2>0           10000         6        0       2
+S2      2>1           10000         8        0       4
+S2      2>3           10000         0        0       4
+S2      3>0           10000         6        0       3
+S2      3>1           10000         9        0       6
+S2      3>2           10000         0        0       4
+SENS cpus=0>1 S1=0 S2=18 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=18 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=6 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>1 S1=0 S2=8 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=6 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=9 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 67 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 1203 ms
+[INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 67, timeouts 0 (not judged)
+  [ITER 1/15]  [PASS] test_litmus_patterns_pass (1204273 us)
+[INFO] test_coherency.c: 1221 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 2/15]  [PASS] test_regs_every_cpu_reports (17533 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=20511
+P1      0>2          100000         0        0       1 observed=17028
+P1      0>3          100000         0        0       3 observed=15862
+P1      1>0          100000         0        0       1 observed=14334
+P1      1>2          100000         0        0       2 observed=19476
+P1      1>3          100000         0        0       2 observed=20295
+P1      2>0          100000         0        0       2 observed=39311
+P1      2>1          100000         0        0       1 observed=14278
+P1      2>3          100000         0        0       2 observed=16927
+P1      3>0          100000         0        0       3 observed=35466
+P1      3>1          100000         0        0       3 observed=29727
+P1      3>2          100000         0        0       3 observed=30522
+P2      0>1          100000         0        0       2 observed=35420
+P2      0>2          100000         0        0       3 observed=45880
+P2      0>3          100000         0        0       2 observed=38095
+P2      1>0          100000         0        0       1 observed=25296
+P2      1>2          100000         0        0       1 observed=24448
+P2      1>3          100000         0        0       2 observed=25783
+P2      2>0          100000         0        0       2 observed=45460
+P2      2>1          100000         0        0       2 observed=35668
+P2      2>3          100000         0        0       1 observed=24001
+P2      3>0          100000         0        0       1 observed=28094
+P2      3>1          100000         0        0       1 observed=21646
+P2      3>2          100000         0        0       1 observed=24242
+P3      0>1           10000         0        0       2
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       4
+P3      2>1           10000         0        0       5
+P3      2>3           10000         0        0       4
+P3      3>0           10000         0        0       3
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       4
+P4      w0/0-3       540672         0        0       5 pairs=49728,49792,47232 straddles=794,711,506 coverage=ok
+P4      w1/0-3      1224704         0        0      10 pairs=102400,93696,89408 straddles=38820,2644,513 coverage=ok
+P4      w2/0-3      1220608         0        0      10 pairs=96320,113408,94208 straddles=501,44322,544 coverage=ok
+P4      w3/0-3      2736128         0        0      53 pairs=142400,115008,263168 straddles=503,1051,1068 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       1
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      26
+S1      0>1          100000         0        0       1 observed=20172
+S1      0>2          100000         0        0       1 observed=28181
+S1      0>3          100000         0        0       2 observed=35986
+S1      1>0          100000         0        0       2 observed=27119
+S1      1>2          100000         0        0       2 observed=45006
+S1      1>3          100000         0        0       2 observed=28650
+S1      2>0          100000         0        0       1 observed=17966
+S1      2>1          100000         0        0       1 observed=27110
+S1      2>3          100000         0        0       2 observed=48019
+S1      3>0          100000         0        0       2 observed=33263
+S1      3>1          100000         0        0       2 observed=37928
+S1      3>2          100000         0        0       2 observed=31966
+S2      0>1           10000         0        0       2
+S2      0>2           10000        11        0       2
+S2      0>3           10000        23        0       3
+S2      1>0           10000         5        0       2
+S2      1>2           10000         2        0       5
+S2      1>3           10000        13        0       3
+S2      2>0           10000         0        0       2
+S2      2>1           10000         3        0       5
+S2      2>3           10000         0        0       4
+S2      3>0           10000         0        0       2
+S2      3>1           10000         1        0       5
+S2      3>2           10000         0        0       7
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=11 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>3 S1=0 S2=23 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=13 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 58 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 912 ms
+[INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 58, timeouts 0 (not judged)
+  [ITER 2/15]  [PASS] test_litmus_patterns_pass (913486 us)
+[INFO] test_coherency.c: 931 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 3/15]  [PASS] test_regs_every_cpu_reports (21131 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       3 observed=42731
+P1      0>2          100000         0        0       3 observed=39077
+P1      0>3          100000         0        0       1 observed=16405
+P1      1>0          100000         0        0       3 observed=42925
+P1      1>2          100000         0        0       1 observed=15508
+P1      1>3          100000         0        0       1 observed=15132
+P1      2>0          100000         0        0       3 observed=44179
+P1      2>1          100000         0        0       2 observed=18085
+P1      2>3          100000         0        0       2 observed=34266
+P1      3>0          100000         0        0       1 observed=0
+P1      3>1          100000         0        0       2 observed=32872
+P1      3>2          100000         0        0       3 observed=26760
+P2      0>1          100000         0        0       2 observed=31484
+P2      0>2          100000         0        0       2 observed=32270
+P2      0>3          100000         0        0       2 observed=29264
+P2      1>0          100000         0        0       2 observed=36847
+P2      1>2          100000         0        0       1 observed=0
+P2      1>3          100000         0        0       1 observed=0
+P2      2>0          100000         0        0       2 observed=42404
+P2      2>1          100000         0        0       1 observed=24001
+P2      2>3          100000         0        0       1 observed=23723
+P2      3>0          100000         0        0       3 observed=55872
+P2      3>1          100000         0        0       1 observed=23680
+P2      3>2          100000         0        0       1 observed=23307
+P3      0>1           10000         0        0       2
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       1
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       3
+P3      2>0           10000         0        0       2
+P3      2>1           10000         0        0       3
+P3      2>3           10000         0        0       7
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       9
+P4      w0/0-3      1040384         0        0       6 pairs=43840,61824,61632 straddles=17803,614,503 coverage=ok
+P4      w1/0-3      1056768         0        0       6 pairs=57984,62080,64704 straddles=22967,595,512 coverage=ok
+P4      w2/0-3      1937408         0        0      12 pairs=118976,80192,121216 straddles=1786,506,38417 coverage=ok
+P4      w3/0-3      1306624         0        0      38 pairs=73920,82048,65600 straddles=937,1079,930 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      30
+S1      0>1          100000         0        0       1 observed=28288
+S1      0>2          100000         0        0       2 observed=34307
+S1      0>3          100000         0        0       1 observed=27694
+S1      1>0          100000         0        0       1 observed=28664
+S1      1>2          100000         0        0       2 observed=30740
+S1      1>3          100000         0        0       2 observed=22877
+S1      2>0          100000         0        0       2 observed=40384
+S1      2>1          100000         0        0       1 observed=15802
+S1      2>3          100000         0        0       2 observed=27443
+S1      3>0          100000         0        0       1 observed=28717
+S1      3>1          100000         0        0       1 observed=26504
+S1      3>2          100000         0        0       1 observed=22941
+S2      0>1           10000         0        0       1
+S2      0>2           10000         3        0       2
+S2      0>3           10000         0        0       1
+S2      1>0           10000         0        0       1
+S2      1>2           10000         1        0       5
+S2      1>3           10000         2        0       5
+S2      2>0           10000         0        0       1
+S2      2>1           10000         0        0       4
+S2      2>3           10000         1        0       5
+S2      3>0           10000         0        0       3
+S2      3>1           10000         5        0       4
+S2      3>2           10000         1        0       4
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 13 (reported, not judged)
+# MP weak rows (a reader observed nothing): 3
+# P4 weak rows: 0, fewest straddles of any reader: 503 (target 500)
+coherency: FAIL (3 rows)
+[INFO] coherency litmus scale 10: 77 rows in 983 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   3
+  [ITER 3/15]  [FAIL] test_litmus_patterns_pass (985002 us)
+[INFO] test_coherency.c: 1006 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 4/15]  [PASS] test_regs_every_cpu_reports (16273 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=23788
+P1      0>2          100000         0        0       3 observed=15758
+P1      0>3          100000         0        0       2 observed=17698
+P1      1>0          100000         0        0       1 observed=14486
+P1      1>2          100000         0        0       2 observed=20355
+P1      1>3          100000         0        0       3 observed=46928
+P1      2>0          100000         0        0       2 observed=17575
+P1      2>1          100000         0        0       2 observed=17309
+P1      2>3          100000         0        0       2 observed=32990
+P1      3>0          100000         0        0       2 observed=19386
+P1      3>1          100000         0        0       2 observed=19554
+P1      3>2          100000         0        0       2 observed=14682
+P2      0>1          100000         0        0       2 observed=24828
+P2      0>2          100000         0        0       3 observed=51665
+P2      0>3          100000         0        0       1 observed=21541
+P2      1>0          100000         0        0       1 observed=20286
+P2      1>2          100000         0        0       1 observed=22135
+P2      1>3          100000         0        0       2 observed=29964
+P2      2>0          100000         0        0       2 observed=44682
+P2      2>1          100000         0        0       1 observed=19195
+P2      2>3          100000         0        0       1 observed=23886
+P2      3>0          100000         0        0       2 observed=40684
+P2      3>1          100000         0        0       1 observed=23875
+P2      3>2          100000         0        0       2 observed=41952
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       3
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       1
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       1
+P3      3>1           10000         0        0       7
+P3      3>2           10000         0        0       4
+P4      w0/0-3      4218880         0        0      21 pairs=188352,249920,187520 straddles=2197,518,1446 coverage=ok
+P4      w1/0-3      1691648         0        0      39 pairs=225600,153664,165440 straddles=502,503,42196 coverage=ok
+P4      w2/0-3      1679360         0        0      10 pairs=94144,94528,122944 straddles=575,508,974 coverage=ok
+P4      w3/0-3      4046848         0        0      71 pairs=304384,301888,364672 straddles=1529,1559,516 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       0
+P5      0>3           10000         0        0       2
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       4
+P5      1>3           10000         0        0       6
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       0
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      30
+S1      0>1          100000         0        0       1 observed=28844
+S1      0>2          100000         0        0       1 observed=16065
+S1      0>3          100000         0        0       2 observed=28438
+S1      1>0          100000         0        0       8 observed=0
+S1      1>2          100000         0        0       2 observed=47317
+S1      1>3          100000         0        0       3 observed=38610
+S1      2>0          100000         0        0       2 observed=34735
+S1      2>1          100000         0        0       2 observed=28501
+S1      2>3          100000         0        0       2 observed=42374
+S1      3>0          100000         0        0       2 observed=45567
+S1      3>1          100000         0        0       2 observed=28553
+S1      3>2          100000         0        0       1 observed=26933
+S2      0>1           10000         0        0       2
+S2      0>2           10000         0        0       1
+S2      0>3           10000         1        0       3
+S2      1>0           10000         0        0       1
+S2      1>2           10000         0        0       4
+S2      1>3           10000         0        0       4
+S2      2>0           10000         1        0       3
+S2      2>1           10000         4        0       5
+S2      2>3           10000         1        0       7
+S2      3>0           10000         0        0       4
+S2      3>1           10000         6        0       5
+S2      3>2           10000         0        0       5
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>0 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>1 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=6 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 13 (reported, not judged)
+# MP weak rows (a reader observed nothing): 1
+# P4 weak rows: 0, fewest straddles of any reader: 502 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 984 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   1
+  [ITER 4/15]  [FAIL] test_litmus_patterns_pass (985449 us)
+[INFO] test_coherency.c: 1002 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 5/15]  [PASS] test_regs_every_cpu_reports (20336 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=21354
+P1      0>2          100000         0        0       2 observed=30001
+P1      0>3          100000         0        0       2 observed=19827
+P1      1>0          100000         0        0       2 observed=21352
+P1      1>2          100000         0        0       2 observed=14224
+P1      1>3          100000         0        0       1 observed=14081
+P1      2>0          100000         0        0       2 observed=18183
+P1      2>1          100000         0        0       2 observed=24279
+P1      2>3          100000         0        0       2 observed=20341
+P1      3>0          100000         0        0       1 observed=0
+P1      3>1          100000         0        0       2 observed=18623
+P1      3>2          100000         0        0       3 observed=31932
+P2      0>1          100000         0        0       1 observed=23660
+P2      0>2          100000         0        0       1 observed=25878
+P2      0>3          100000         0        0       1 observed=22147
+P2      1>0          100000         0        0       1 observed=23486
+P2      1>2          100000         0        0       2 observed=16627
+P2      1>3          100000         0        0       2 observed=31325
+P2      2>0          100000         0        0       2 observed=25407
+P2      2>1          100000         0        0       2 observed=22271
+P2      2>3          100000         0        0       1 observed=24223
+P2      3>0          100000         0        0       1 observed=21404
+P2      3>1          100000         0        0       2 observed=30527
+P2      3>2          100000         0        0       2 observed=27827
+P3      0>1           10000         0        0       1
+P3      0>2           10000         0        0      10
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0      14
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       2
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       5
+P4      w0/0-3      2465792         0        0      18 pairs=168384,127488,97728 straddles=646,980,753 coverage=ok
+P4      w1/0-3      3194880         0        0      25 pairs=204416,218496,186496 straddles=9854,1630,500 coverage=ok
+P4      w2/0-3      1855488         0        0      14 pairs=122432,131328,149632 straddles=1285,1258,509 coverage=ok
+P4      w3/0-3       782336         0        0       8 pairs=92480,75840,80832 straddles=1178,506,564 coverage=ok
+P5      0>1           10000         0        0       2
+P5      0>2           10000         0        0       0
+P5      0>3           10000         0        0       2
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       1
+P5      2>3           10000         0        0       1
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      30
+S1      0>1          100000         0        0       2 observed=29312
+S1      0>2          100000         0        0       1 observed=28543
+S1      0>3          100000         0        0       3 observed=28482
+S1      1>0          100000         0        0       1 observed=28568
+S1      1>2          100000         0        0       2 observed=29184
+S1      1>3          100000         0        0       3 observed=57302
+S1      2>0          100000         0        0       2 observed=24945
+S1      2>1          100000         0        0       1 observed=27059
+S1      2>3          100000         0        0       1 observed=27273
+S1      3>0          100000         0        0       1 observed=24575
+S1      3>1          100000         0        0       2 observed=27552
+S1      3>2          100000         0        0       2 observed=28837
+S2      0>1           10000         0        0       4
+S2      0>2           10000         0        0       1
+S2      0>3           10000         1        0       4
+S2      1>0           10000         1        0       3
+S2      1>2           10000         0        0       3
+S2      1>3           10000         4        0       5
+S2      2>0           10000        16        0       4
+S2      2>1           10000         3        0       4
+S2      2>3           10000         4        0       6
+S2      3>0           10000         2        0       4
+S2      3>1           10000         1        0       4
+S2      3>2           10000         0        0       9
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=16 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>1 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 32 (reported, not judged)
+# MP weak rows (a reader observed nothing): 1
+# P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+coherency: FAIL (1 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1038 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   1
+  [ITER 5/15]  [FAIL] test_litmus_patterns_pass (1039402 us)
+[INFO] test_coherency.c: 1060 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 6/15]  [PASS] test_regs_every_cpu_reports (18453 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       1 observed=14442
+P1      0>2          100000         0        0       2 observed=16289
+P1      0>3          100000         0        0       1 observed=16000
+P1      1>0          100000         0        0       2 observed=17877
+P1      1>2          100000         0        0       2 observed=19566
+P1      1>3          100000         0        0       5 observed=18431
+P1      2>0          100000         0        0       1 observed=10430
+P1      2>1          100000         0        0       1 observed=0
+P1      2>3          100000         0        0       2 observed=11869
+P1      3>0          100000         0        0       2 observed=21520
+P1      3>1          100000         0        0       3 observed=39817
+P1      3>2          100000         0        0       2 observed=26732
+P2      0>1          100000         0        0       2 observed=24767
+P2      0>2          100000         0        0       3 observed=16539
+P2      0>3          100000         0        0       2 observed=32380
+P2      1>0          100000         0        0       1 observed=25485
+P2      1>2          100000         0        0       2 observed=31684
+P2      1>3          100000         0        0       3 observed=0
+P2      2>0          100000         0        0       3 observed=46527
+P2      2>1          100000         0        0       2 observed=38489
+P2      2>3          100000         0        0       5 observed=28031
+P2      3>0          100000         0        0       2 observed=37089
+P2      3>1          100000         0        0       1 observed=24655
+P2      3>2          100000         0        0       1 observed=27583
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       6
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0      22
+P3      1>3           10000         0        0       2
+P3      2>0           10000         0        0       5
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       6
+P3      3>2           10000         0        0       4
+P4      w0/0-3      1478656         0        0       9 pairs=49792,62656,75904 straddles=12414,12702,501 coverage=ok
+P4      w1/0-3      2916352         0        0      47 pairs=155456,217152,251840 straddles=30642,511,10860 coverage=ok
+P4      w2/0-3      2457600         0        0      21 pairs=171072,182080,183808 straddles=500,1616,2732 coverage=ok
+P4      w3/0-3      1720320         0        0      13 pairs=107392,93888,104576 straddles=15846,516,512 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       0
+P5      0>3           10000         0        0      19
+P5      1>0           10000         0        0       2
+P5      1>2           10000         0        0       3
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       0
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       0
+P5      3>0           10000         0        0       2
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      30
+S1      0>1          100000         0        0       1 observed=28544
+S1      0>2          100000         0        0       1 observed=28022
+S1      0>3          100000         0        0       1 observed=16782
+S1      1>0          100000         0        0       2 observed=70873
+S1      1>2          100000         0        0       2 observed=30505
+S1      1>3          100000         0        0       1 observed=23778
+S1      2>0          100000         0        0       2 observed=26715
+S1      2>1          100000         0        0       2 observed=29135
+S1      2>3          100000         0        0       2 observed=32844
+S1      3>0          100000         0        0       3 observed=62531
+S1      3>1          100000         0        0       2 observed=31006
+S1      3>2          100000         0        0       1 observed=18487
+S2      0>1           10000        18        0       2
+S2      0>2           10000         0        0       3
+S2      0>3           10000         0        0       1
+S2      1>0           10000         9        0       2
+S2      1>2           10000         0        0       4
+S2      1>3           10000         0        0       5
+S2      2>0           10000         0        0       1
+S2      2>1           10000        15        0       5
+S2      2>3           10000         3        0       5
+S2      3>0           10000        16        0       4
+S2      3>1           10000        30        0       4
+S2      3>2           10000         0        0       5
+SENS cpus=0>1 S1=0 S2=18 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=9 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=15 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=16 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=30 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 91 (reported, not judged)
+# MP weak rows (a reader observed nothing): 2
+# P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+coherency: FAIL (2 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1041 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   2
+  [ITER 6/15]  [FAIL] test_litmus_patterns_pass (1042608 us)
+[INFO] test_coherency.c: 1061 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 7/15]  [PASS] test_regs_every_cpu_reports (20649 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       3 observed=37225
+P1      0>2          100000         0        0       2 observed=25610
+P1      0>3          100000         0        0       4 observed=50712
+P1      1>0          100000         0        0       1 observed=0
+P1      1>2          100000         0        0       3 observed=35311
+P1      1>3          100000         0        0       1 observed=14179
+P1      2>0          100000         0        0       1 observed=13822
+P1      2>1          100000         0        0       1 observed=0
+P1      2>3          100000         0        0       2 observed=21732
+P1      3>0          100000         0        0       3 observed=44089
+P1      3>1          100000         0        0       2 observed=37715
+P1      3>2          100000         0        0       1 observed=14729
+P2      0>1          100000         0        0       2 observed=40703
+P2      0>2          100000         0        0       1 observed=20306
+P2      0>3          100000         0        0       1 observed=25310
+P2      1>0          100000         0        0       1 observed=25580
+P2      1>2          100000         0        0       2 observed=29289
+P2      1>3          100000         0        0       1 observed=24398
+P2      2>0          100000         0        0       2 observed=47593
+P2      2>1          100000         0        0       2 observed=45888
+P2      2>3          100000         0        0       3 observed=51187
+P2      3>0          100000         0        0       2 observed=51724
+P2      3>1          100000         0        0       1 observed=23810
+P2      3>2          100000         0        0       1 observed=18969
+P3      0>1           10000         0        0       1
+P3      0>2           10000         0        0       1
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       3
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       3
+P3      2>1           10000         0        0      15
+P3      2>3           10000         0        0       4
+P3      3>0           10000         0        0       1
+P3      3>1           10000         0        0       6
+P3      3>2           10000         0        0       5
+P4      w0/0-3      4214784         0        0      35 pairs=413824,395136,314432 straddles=515,176003,1501 coverage=ok
+P4      w1/0-3      3198976         0        0      70 pairs=310080,349312,536256 straddles=45817,501,3974 coverage=ok
+P4      w2/0-3      3887104         0        0      73 pairs=222400,229440,246848 straddles=1057,1056,506 coverage=ok
+P4      w3/0-3      1462272         0        0      12 pairs=116608,115968,123968 straddles=546,575,507 coverage=ok
+P5      0>1           10000         0        0       0
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       0
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      45
+S1      0>1          100000         0        0       1 observed=22253
+S1      0>2          100000         0        0       2 observed=38904
+S1      0>3          100000         0        0       1 observed=19807
+S1      1>0          100000         0        0       3 observed=52992
+S1      1>2          100000         0        0       1 observed=26935
+S1      1>3          100000         0        0       1 observed=22607
+S1      2>0          100000         0        0       2 observed=38792
+S1      2>1          100000         0        0       2 observed=25534
+S1      2>3          100000         0        0       1 observed=26248
+S1      3>0          100000         0        0       1 observed=15014
+S1      3>1          100000         0        0       2 observed=2432
+S1      3>2          100000         0        0       1 observed=21631
+S2      0>1           10000         1        0       2
+S2      0>2           10000        19        0       2
+S2      0>3           10000        44        0       2
+S2      1>0           10000         1        0       3
+S2      1>2           10000         3        0       4
+S2      1>3           10000         8        0       5
+S2      2>0           10000         0        0       1
+S2      2>1           10000        37        0       4
+S2      2>3           10000         1        0       4
+S2      3>0           10000        19        0       3
+S2      3>1           10000         0        0       5
+S2      3>2           10000         1        0       4
+SENS cpus=0>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=19 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>3 S1=0 S2=44 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=8 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=37 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=19 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 134 (reported, not judged)
+# MP weak rows (a reader observed nothing): 2
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: FAIL (2 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1072 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   2
+  [ITER 7/15]  [FAIL] test_litmus_patterns_pass (1073580 us)
+[INFO] test_coherency.c: 1094 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 8/15]  [PASS] test_regs_every_cpu_reports (16133 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       1 observed=14895
+P1      0>2          100000         0        0       3 observed=36378
+P1      0>3          100000         0        0       1 observed=16120
+P1      1>0          100000         0        0       1 observed=0
+P1      1>2          100000         0        0       5 observed=84593
+P1      1>3          100000         0        0       2 observed=29482
+P1      2>0          100000         0        0       1 observed=13702
+P1      2>1          100000         0        0       1 observed=11587
+P1      2>3          100000         0        0       3 observed=39914
+P1      3>0          100000         0        0       3 observed=39632
+P1      3>1          100000         0        0       1 observed=13265
+P1      3>2          100000         0        0       1 observed=13860
+P2      0>1          100000         0        0       2 observed=41807
+P2      0>2          100000         0        0       1 observed=25982
+P2      0>3          100000         0        0       3 observed=58664
+P2      1>0          100000         0        0       1 observed=23984
+P2      1>2          100000         0        0       1 observed=27577
+P2      1>3          100000         0        0       1 observed=23300
+P2      2>0          100000         0        0       2 observed=28991
+P2      2>1          100000         0        0       1 observed=23316
+P2      2>3          100000         0        0       1 observed=23255
+P2      3>0          100000         0        0       2 observed=41088
+P2      3>1          100000         0        0       1 observed=20580
+P2      3>2          100000         0        0       1 observed=23705
+P3      0>1           10000         0        0       1
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       3
+P3      1>2           10000         0        0       5
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       2
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       2
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       4
+P4      w0/0-3      4804608         0        0      80 pairs=490304,462144,404544 straddles=12445,177907,505 coverage=ok
+P4      w1/0-3       557056         0        0       5 pairs=44288,46144,43008 straddles=502,518,899 coverage=ok
+P4      w2/0-3      1097728         0        0       8 pairs=75904,83072,75968 straddles=509,24487,566 coverage=ok
+P4      w3/0-3      1175552         0        0      10 pairs=115648,114560,91328 straddles=49803,721,516 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0      16
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       2
+P5      2>1           10000         0        0       1
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       0
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       0
+P6      0-3          100000         0        0      32
+S1      0>1          100000         0        0       2 observed=32700
+S1      0>2          100000         0        0      14 observed=29523
+S1      0>3          100000         0        0       2 observed=46562
+S1      1>0          100000         0        0       3 observed=50199
+S1      1>2          100000         0        0       2 observed=33659
+S1      1>3          100000         0        0       1 observed=28968
+S1      2>0          100000         0        0       2 observed=37064
+S1      2>1          100000         0        0       1 observed=18166
+S1      2>3          100000         0        0       2 observed=28780
+S1      3>0          100000         0        0       1 observed=28648
+S1      3>1          100000         0        0       2 observed=40652
+S1      3>2          100000         0        0       2 observed=26485
+S2      0>1           10000         1        0       2
+S2      0>2           10000         0        0       2
+S2      0>3           10000        31        0       2
+S2      1>0           10000        16        0       3
+S2      1>2           10000         0        0       4
+S2      1>3           10000         4        0       5
+S2      2>0           10000         8        0       2
+S2      2>1           10000         0        0       4
+S2      2>3           10000        21        0       3
+S2      3>0           10000         0        0       3
+S2      3>1           10000         5        0       5
+S2      3>2           10000         0        0       5
+SENS cpus=0>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=31 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=16 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=8 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>3 S1=0 S2=21 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 86 (reported, not judged)
+# MP weak rows (a reader observed nothing): 1
+# P4 weak rows: 0, fewest straddles of any reader: 502 (target 500)
+coherency: FAIL (1 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1033 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   1
+  [ITER 8/15]  [FAIL] test_litmus_patterns_pass (1034482 us)
+[INFO] test_coherency.c: 1051 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 9/15]  [PASS] test_regs_every_cpu_reports (20544 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       3 observed=50550
+P1      0>2          100000         0        0       3 observed=32973
+P1      0>3          100000         0        0       1 observed=16612
+P1      1>0          100000         0        0       1 observed=0
+P1      1>2          100000         0        0       2 observed=23452
+P1      1>3          100000         0        0       1 observed=15468
+P1      2>0          100000         0        0       2 observed=20335
+P1      2>1          100000         0        0       1 observed=16634
+P1      2>3          100000         0        0       2 observed=37831
+P1      3>0          100000         0        0       2 observed=18409
+P1      3>1          100000         0        0       1 observed=15278
+P1      3>2          100000         0        0       1 observed=14664
+P2      0>1          100000         0        0       1 observed=22883
+P2      0>2          100000         0        0       2 observed=42670
+P2      0>3          100000         0        0       2 observed=34071
+P2      1>0          100000         0        0       2 observed=33036
+P2      1>2          100000         0        0       2 observed=32335
+P2      1>3          100000         0        0       2 observed=34682
+P2      2>0          100000         0        0       2 observed=33405
+P2      2>1          100000         0        0       2 observed=27248
+P2      2>3          100000         0        0       3 observed=57792
+P2      3>0          100000         0        0       2 observed=52629
+P2      3>1          100000         0        0       2 observed=24677
+P2      3>2          100000         0        0       1 observed=26036
+P3      0>1           10000         0        0       2
+P3      0>2           10000         0        0       1
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       5
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       5
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       1
+P3      3>1           10000         0        0      26
+P3      3>2           10000         0        0       5
+P4      w0/0-3      7389184         0        0      58 pairs=515328,362240,375168 straddles=508,3194,2758 coverage=ok
+P4      w1/0-3      3313664         0        0      28 pairs=299584,325696,253056 straddles=80554,512,1104 coverage=ok
+P4      w2/0-3      5308416         0        0      93 pairs=458432,547904,413888 straddles=1722,161130,500 coverage=ok
+P4      w3/0-3       598016         0        0      52 pairs=74368,67584,66880 straddles=592,519,508 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       2
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      30
+S1      0>1          100000         0        0       2 observed=36730
+S1      0>2          100000         0        0       1 observed=28153
+S1      0>3          100000         0        0       2 observed=38301
+S1      1>0          100000         0        0       3 observed=58047
+S1      1>2          100000         0        0       2 observed=32351
+S1      1>3          100000         0        0       2 observed=31743
+S1      2>0          100000         0        0       1 observed=15804
+S1      2>1          100000         0        0       1 observed=17348
+S1      2>3          100000         0        0       1 observed=20389
+S1      3>0          100000         0        0       2 observed=38111
+S1      3>1          100000         0        0       2 observed=28514
+S1      3>2          100000         0        0       2 observed=35078
+S2      0>1           10000        17        0       2
+S2      0>2           10000         0        0       2
+S2      0>3           10000         0        0       1
+S2      1>0           10000         0        0       1
+S2      1>2           10000         1        0       5
+S2      1>3           10000        24        0       4
+S2      2>0           10000        39        0       2
+S2      2>1           10000         2        0       4
+S2      2>3           10000         0        0       3
+S2      3>0           10000        22        0       1
+S2      3>1           10000         0        0       4
+S2      3>2           10000         1        0      12
+SENS cpus=0>1 S1=0 S2=17 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=24 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=39 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>1 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=22 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 106 (reported, not judged)
+# MP weak rows (a reader observed nothing): 1
+# P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+coherency: FAIL (1 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1183 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   1
+  [ITER 9/15]  [FAIL] test_litmus_patterns_pass (1184393 us)
+[INFO] test_coherency.c: 1205 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 10/15]  [PASS] test_regs_every_cpu_reports (15402 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       4 observed=49622
+P1      0>2          100000         0        0       4 observed=49407
+P1      0>3          100000         0        0       4 observed=58270
+P1      1>0          100000         0        0       2 observed=21517
+P1      1>2          100000         0        0       2 observed=16692
+P1      1>3          100000         0        0       1 observed=13666
+P1      2>0          100000         0        0       1 observed=14286
+P1      2>1          100000         0        0       3 observed=35634
+P1      2>3          100000         0        0       1 observed=16154
+P1      3>0          100000         0        0       1 observed=15989
+P1      3>1          100000         0        0       2 observed=19482
+P1      3>2          100000         0        0       4 observed=49827
+P2      0>1          100000         0        0       2 observed=49470
+P2      0>2          100000         0        0       2 observed=43780
+P2      0>3          100000         0        0       2 observed=42624
+P2      1>0          100000         0        0       2 observed=38555
+P2      1>2          100000         0        0       2 observed=29424
+P2      1>3          100000         0        0       1 observed=20739
+P2      2>0          100000         0        0       2 observed=27819
+P2      2>1          100000         0        0       3 observed=58400
+P2      2>3          100000         0        0       1 observed=19737
+P2      3>0          100000         0        0       2 observed=26873
+P2      3>1          100000         0        0       1 observed=23971
+P2      3>2          100000         0        0       2 observed=24851
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       3
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       2
+P3      2>1           10000         0        0       5
+P3      2>3           10000         0        0       4
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       4
+P4      w0/0-3      1519616         0        0      13 pairs=154176,116800,142848 straddles=14139,508,49732 coverage=ok
+P4      w1/0-3      1658880         0        0      13 pairs=144512,118016,120000 straddles=60874,500,2731 coverage=ok
+P4      w2/0-3      1052672         0        0      32 pairs=78464,82368,86656 straddles=520,506,2973 coverage=ok
+P4      w3/0-3      1175552         0        0      11 pairs=102016,101376,136448 straddles=532,575,564 coverage=ok
+P5      0>1           10000         0        0       0
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       0
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       0
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       0
+P6      0-3          100000         0        0      27
+S1      0>1          100000         0        0       2 observed=42160
+S1      0>2          100000         0        0       2 observed=36417
+S1      0>3          100000         0        0       2 observed=48063
+S1      1>0          100000         0        0       2 observed=38020
+S1      1>2          100000         0        0       3 observed=63742
+S1      1>3          100000         0        0       1 observed=21547
+S1      2>0          100000         0        0       2 observed=29333
+S1      2>1          100000         0        0       2 observed=34790
+S1      2>3          100000         0        0       2 observed=25787
+S1      3>0          100000         0        0       1 observed=28802
+S1      3>1          100000         0        0       2 observed=32368
+S1      3>2          100000         0        0       1 observed=26716
+S2      0>1           10000         1        0       3
+S2      0>2           10000         0        0       3
+S2      0>3           10000         0        0       3
+S2      1>0           10000         3        0       1
+S2      1>2           10000         1        0       4
+S2      1>3           10000         0        0       4
+S2      2>0           10000         0        0       1
+S2      2>1           10000         0        0       5
+S2      2>3           10000        43        0       4
+S2      3>0           10000         4        0       1
+S2      3>1           10000        10        0       4
+S2      3>2           10000         1        0       5
+SENS cpus=0>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>3 S1=0 S2=43 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=10 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 63 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 976 ms
+[INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 63, timeouts 0 (not judged)
+  [ITER 10/15]  [PASS] test_litmus_patterns_pass (976995 us)
+[INFO] test_coherency.c: 992 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 11/15]  [PASS] test_regs_every_cpu_reports (16803 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       3 observed=46666
+P1      0>2          100000         0        0       1 observed=14090
+P1      0>3          100000         0        0       1 observed=15167
+P1      1>0          100000         0        0       3 observed=37599
+P1      1>2          100000         0        0       1 observed=14227
+P1      1>3          100000         0        0       3 observed=42522
+P1      2>0          100000         0        0       3 observed=40832
+P1      2>1          100000         0        0       1 observed=14222
+P1      2>3          100000         0        0       1 observed=14658
+P1      3>0          100000         0        0       1 observed=14383
+P1      3>1          100000         0        0       1 observed=0
+P1      3>2          100000         0        0       2 observed=21213
+P2      0>1          100000         0        0       1 observed=25277
+P2      0>2          100000         0        0       3 observed=0
+P2      0>3          100000         0        0       2 observed=39359
+P2      1>0          100000         0        0       2 observed=38747
+P2      1>2          100000         0        0       3 observed=52055
+P2      1>3          100000         0        0       4 observed=36287
+P2      2>0          100000         0        0       1 observed=25438
+P2      2>1          100000         0        0       1 observed=0
+P2      2>3          100000         0        0       3 observed=23238
+P2      3>0          100000         0        0       1 observed=20342
+P2      3>1          100000         0        0       2 observed=38847
+P2      3>2          100000         0        0       1 observed=17765
+P3      0>1           10000         0        0       2
+P3      0>2           10000         0        0       3
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       1
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       2
+P3      2>1           10000         0        0       5
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       3
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0      14
+P4      w0/0-3      4837376         0        0      32 pairs=265600,364608,279296 straddles=753,500,7726 coverage=ok
+P4      w1/0-3      1970176         0        0      58 pairs=141952,144576,175424 straddles=725,513,21231 coverage=ok
+P4      w2/0-3      1617920         0        0      12 pairs=110912,105728,101568 straddles=527,529,525 coverage=ok
+P4      w3/0-3      5980160         0        0      90 pairs=577408,643200,629056 straddles=689,519,210152 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      32
+S1      0>1          100000         0        0       1 observed=28726
+S1      0>2          100000         0        0       1 observed=22401
+S1      0>3          100000         0        0       2 observed=38423
+S1      1>0          100000         0        0       2 observed=44807
+S1      1>2          100000         0        0       1 observed=18773
+S1      1>3          100000         0        0       1 observed=15564
+S1      2>0          100000         0        0       1 observed=28089
+S1      2>1          100000         0        0       3 observed=43948
+S1      2>3          100000         0        0       1 observed=23091
+S1      3>0          100000         0        0       2 observed=36997
+S1      3>1          100000         0        0       2 observed=27686
+S1      3>2          100000         0        0       1 observed=18590
+S2      0>1           10000         1        0       2
+S2      0>2           10000        57        0       2
+S2      0>3           10000         0        0       4
+S2      1>0           10000        26        0       1
+S2      1>2           10000         0        0       5
+S2      1>3           10000         0        0       5
+S2      2>0           10000         0        0       2
+S2      2>1           10000         1        0       4
+S2      2>3           10000         1        0       4
+S2      3>0           10000        28        0       2
+S2      3>1           10000         2        0       9
+S2      3>2           10000         0        0       4
+SENS cpus=0>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=57 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=26 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=28 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 116 (reported, not judged)
+# MP weak rows (a reader observed nothing): 3
+# P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+coherency: FAIL (3 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1242 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   3
+  [ITER 11/15]  [FAIL] test_litmus_patterns_pass (1243694 us)
+[INFO] test_coherency.c: 1260 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 12/15]  [PASS] test_regs_every_cpu_reports (25465 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       4 observed=60955
+P1      0>2          100000         0        0       2 observed=23933
+P1      0>3          100000         0        0       2 observed=22922
+P1      1>0          100000         0        0       1 observed=14286
+P1      1>2          100000         0        0       1 observed=0
+P1      1>3          100000         0        0       3 observed=34509
+P1      2>0          100000         0        0       2 observed=21430
+P1      2>1          100000         0        0       3 observed=46918
+P1      2>3          100000         0        0       1 observed=17464
+P1      3>0          100000         0        0       2 observed=16919
+P1      3>1          100000         0        0       1 observed=15020
+P1      3>2          100000         0        0       2 observed=21903
+P2      0>1          100000         0        0       2 observed=29064
+P2      0>2          100000         0        0       1 observed=32339
+P2      0>3          100000         0        0       1 observed=29375
+P2      1>0          100000         0        0       2 observed=45571
+P2      1>2          100000         0        0       2 observed=31011
+P2      1>3          100000         0        0       2 observed=44547
+P2      2>0          100000         0        0       3 observed=64078
+P2      2>1          100000         0        0       1 observed=23190
+P2      2>3          100000         0        0       2 observed=35951
+P2      3>0          100000         0        0       2 observed=38208
+P2      3>1          100000         0        0       1 observed=14922
+P2      3>2          100000         0        0       1 observed=18211
+P3      0>1           10000         0        0       2
+P3      0>2           10000         0        0       3
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       5
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       1
+P3      2>1           10000         0        0       5
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       3
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       5
+P4      w0/0-3      3870720         0        0      26 pairs=222336,233408,276736 straddles=4318,6757,501 coverage=ok
+P4      w1/0-3      1118208         0        0       7 pairs=64512,52352,76928 straddles=528,508,27339 coverage=ok
+P4      w2/0-3      6131712         0        0      93 pairs=652416,593984,592768 straddles=155590,501,4368 coverage=ok
+P4      w3/0-3      2912256         0        0      65 pairs=176384,219712,220288 straddles=505,2108,2058 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       0
+P5      3>0           10000         0        0       2
+P5      3>1           10000         0        0       5
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      29
+S1      0>1          100000         0        0       2 observed=28807
+S1      0>2          100000         0        0       2 observed=40518
+S1      0>3          100000         0        0       4 observed=18926
+S1      1>0          100000         0        0       2 observed=34477
+S1      1>2          100000         0        0       2 observed=0
+S1      1>3          100000         0        0       1 observed=22808
+S1      2>0          100000         0        0       2 observed=39211
+S1      2>1          100000         0        0       1 observed=20481
+S1      2>3          100000         0        0       5 observed=82496
+S1      3>0          100000         0        0       1 observed=0
+S1      3>1          100000         0        0       2 observed=46913
+S1      3>2          100000         0        0       1 observed=17018
+S2      0>1           10000        83        0       4
+S2      0>2           10000         0        0       3
+S2      0>3           10000         8        0       4
+S2      1>0           10000         3        0       2
+S2      1>2           10000         3        0       4
+S2      1>3           10000         2        0       4
+S2      2>0           10000         0        0       3
+S2      2>1           10000         9        0       4
+S2      2>3           10000         0        0       3
+S2      3>0           10000         0        0       3
+S2      3>1           10000        17        0       4
+S2      3>2           10000        26        0       4
+SENS cpus=0>1 S1=0 S2=83 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=8 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=9 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=17 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=26 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 151 (reported, not judged)
+# MP weak rows (a reader observed nothing): 3
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: FAIL (1 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1181 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   3
+  [ITER 12/15]  [FAIL] test_litmus_patterns_pass (1182072 us)
+[INFO] test_coherency.c: 1207 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 13/15]  [PASS] test_regs_every_cpu_reports (15580 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=36916
+P1      0>2          100000         0        0       1 observed=18463
+P1      0>3          100000         0        0       2 observed=19287
+P1      1>0          100000         0        0       3 observed=50271
+P1      1>2          100000         0        0       4 observed=48140
+P1      1>3          100000         0        0       3 observed=48253
+P1      2>0          100000         0        0       1 observed=15896
+P1      2>1          100000         0        0       2 observed=18944
+P1      2>3          100000         0        0       2 observed=18176
+P1      3>0          100000         0        0       2 observed=25009
+P1      3>1          100000         0        0       2 observed=17877
+P1      3>2          100000         0        0       2 observed=19124
+P2      0>1          100000         0        0       1 observed=24927
+P2      0>2          100000         0        0       2 observed=47999
+P2      0>3          100000         0        0       1 observed=25925
+P2      1>0          100000         0        0       1 observed=20646
+P2      1>2          100000         0        0       1 observed=20800
+P2      1>3          100000         0        0       1 observed=13321
+P2      2>0          100000         0        0       3 observed=49728
+P2      2>1          100000         0        0       2 observed=46751
+P2      2>3          100000         0        0       1 observed=23228
+P2      3>0          100000         0        0       3 observed=71693
+P2      3>1          100000         0        0       1 observed=19456
+P2      3>2          100000         0        0       2 observed=24860
+P3      0>1           10000         0        0       1
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       2
+P3      1>0           10000         0        0       3
+P3      1>2           10000         0        0       5
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       3
+P3      2>1           10000         0        0       5
+P3      2>3           10000         0        0       4
+P3      3>0           10000         0        0       1
+P3      3>1           10000         0        0       5
+P3      3>2           10000         0        0       5
+P4      w0/0-3      1650688         0        0      16 pairs=183872,169152,142208 straddles=891,509,1027 coverage=ok
+P4      w1/0-3      2560000         0        0      16 pairs=150528,168448,123200 straddles=576,1589,513 coverage=ok
+P4      w2/0-3      2150400         0        0      56 pairs=166912,213120,208128 straddles=713,503,5034 coverage=ok
+P4      w3/0-3      1236992         0        0       9 pairs=86080,85888,92608 straddles=504,932,40717 coverage=ok
+P5      0>1           10000         0        0       2
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       0
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      28
+S1      0>1          100000         0        0       2 observed=46565
+S1      0>2          100000         0        0       3 observed=52990
+S1      0>3          100000         0        0       1 observed=28623
+S1      1>0          100000         0        0       2 observed=45232
+S1      1>2          100000         0        0       2 observed=0
+S1      1>3          100000         0        0       1 observed=18858
+S1      2>0          100000         0        0       1 observed=28265
+S1      2>1          100000         0        0       1 observed=26670
+S1      2>3          100000         0        0       1 observed=26938
+S1      3>0          100000         0        0       2 observed=40608
+S1      3>1          100000         0        0       1 observed=21184
+S1      3>2          100000         0        0       2 observed=36295
+S2      0>1           10000        39        0       1
+S2      0>2           10000         0        0       2
+S2      0>3           10000         0        0       3
+S2      1>0           10000         0        0       1
+S2      1>2           10000         0        0       7
+S2      1>3           10000         5        0       5
+S2      2>0           10000         0        0       2
+S2      2>1           10000         3        0       5
+S2      2>3           10000         0        0       5
+S2      3>0           10000        41        0       2
+S2      3>1           10000         0        0       4
+S2      3>2           10000         0        0       5
+SENS cpus=0>1 S1=0 S2=39 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=3 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=41 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 88 (reported, not judged)
+# MP weak rows (a reader observed nothing): 1
+# P4 weak rows: 0, fewest straddles of any reader: 503 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 1002 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   1
+  [ITER 13/15]  [FAIL] test_litmus_patterns_pass (1003414 us)
+[INFO] test_coherency.c: 1019 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 14/15]  [PASS] test_regs_every_cpu_reports (19273 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       2 observed=22670
+P1      0>2          100000         0        0       1 observed=14591
+P1      0>3          100000         0        0       3 observed=44143
+P1      1>0          100000         0        0       4 observed=55128
+P1      1>2          100000         0        0       2 observed=19081
+P1      1>3          100000         0        0       2 observed=19149
+P1      2>0          100000         0        0       7 observed=26725
+P1      2>1          100000         0        0       2 observed=6825
+P1      2>3          100000         0        0       3 observed=3584
+P1      3>0          100000         0        0       1 observed=16576
+P1      3>1          100000         0        0       2 observed=17034
+P1      3>2          100000         0        0       3 observed=33442
+P2      0>1          100000         0        0       1 observed=25509
+P2      0>2          100000         0        0       2 observed=35121
+P2      0>3          100000         0        0       3 observed=52146
+P2      1>0          100000         0        0       2 observed=31574
+P2      1>2          100000         0        0       2 observed=36694
+P2      1>3          100000         0        0       2 observed=26418
+P2      2>0          100000         0        0       3 observed=43021
+P2      2>1          100000         0        0       2 observed=31175
+P2      2>3          100000         0        0       2 observed=32617
+P2      3>0          100000         0        0       3 observed=65019
+P2      3>1          100000         0        0       1 observed=20308
+P2      3>2          100000         0        0       1 observed=17844
+P3      0>1           10000         0        0       1
+P3      0>2           10000         0        0       1
+P3      0>3           10000         0        0       3
+P3      1>0           10000         0        0       4
+P3      1>2           10000         0        0       5
+P3      1>3           10000         0        0       4
+P3      2>0           10000         0        0       3
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       4
+P3      3>0           10000         0        0       2
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       4
+P4      w0/0-3      4341760         0        0      64 pairs=515328,561280,527808 straddles=1810,501,73712 coverage=ok
+P4      w1/0-3      1007616         0        0      14 pairs=137280,133888,201856 straddles=502,11939,658 coverage=ok
+P4      w2/0-3       798720         0        0       7 pairs=63872,90432,79552 straddles=1123,626,31820 coverage=ok
+P4      w3/0-3      1372160         0        0      41 pairs=49344,92544,94656 straddles=618,2325,29967 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       0
+P5      1>0           10000         0        0       1
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       2
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       2
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       1
+P5      3>2           10000         0        0       1
+P6      0-3          100000         0        0      38
+S1      0>1          100000         0        0       3 observed=60375
+S1      0>2          100000         0        0       3 observed=48207
+S1      0>3          100000         0        0       3 observed=53170
+S1      1>0          100000         0        0       1 observed=24380
+S1      1>2          100000         0        0       3 observed=50048
+S1      1>3          100000         0        0       1 observed=26695
+S1      2>0          100000         0        0       2 observed=37422
+S1      2>1          100000         0        0       1 observed=19200
+S1      2>3          100000         0        0       2 observed=34295
+S1      3>0          100000         0        0       2 observed=31572
+S1      3>1          100000         0        0       2 observed=35840
+S1      3>2          100000         0        0       2 observed=26102
+S2      0>1           10000         0        0       2
+S2      0>2           10000         0        0       1
+S2      0>3           10000        24        0       2
+S2      1>0           10000         0        0       7
+S2      1>2           10000         0        0       6
+S2      1>3           10000         0        0       4
+S2      2>0           10000         0        0       3
+S2      2>1           10000         5        0       3
+S2      2>3           10000         6        0       3
+S2      3>0           10000         0        0       3
+S2      3>1           10000         0        0       4
+S2      3>2           10000         6        0       4
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>3 S1=0 S2=24 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=1>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>3 S1=0 S2=6 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>2 S1=0 S2=6 P2_sensitive=no P3_sensitive=yes
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 41 (reported, not judged)
+# MP weak rows (a reader observed nothing): 0
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: PASS
+[INFO] coherency litmus scale 10: 77 rows in 1021 ms
+[INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 41, timeouts 0 (not judged)
+  [ITER 14/15]  [PASS] test_litmus_patterns_pass (1021978 us)
+[INFO] test_coherency.c: 1041 ms
+cpu0: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000000
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu1: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000001
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu2: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000002
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+cpu3: CurrentEL=EL1 MIDR=0x414fd0b1 MPIDR=0x80000003
+  SCTLR_EL1  0x0000000030c5183d (M=1 C=1 I=1)
+  TCR_EL1    0x00000012b5193519
+  MAIR_EL1   0x00000000ff440400
+  CLIDR_EL1  0x0000000082000023
+  CTR_EL0    0x000000008444c004
+  L1D CCSIDR 0x00000000701fe01a (64 B lines, 4-way, 256 sets, 64 KB)
+  L2  CCSIDR 0x00000000707fe03a (64 B lines, 8-way, 1024 sets, 512 KB)
+  CPUECTLR / CLUSTERECTLR not read on this platform or core
+  [ITER 15/15]  [PASS] test_regs_every_cpu_reports (21083 us)
+# coherency litmus: cpus=0-3 scale=10 timeout=1000ms caller=cpu0 p4_target=500 p4_budget_ms=2000
+# self-test run: patterns=0xff inject=none (not a spec run)
+pattern cpus          iters forbidden timeouts      ms
+P1      0>1          100000         0        0       1 observed=15294
+P1      0>2          100000         0        0       1 observed=15623
+P1      0>3          100000         0        0       2 observed=17076
+P1      1>0          100000         0        0       3 observed=47981
+P1      1>2          100000         0        0       3 observed=42361
+P1      1>3          100000         0        0       2 observed=27403
+P1      2>0          100000         0        0       2 observed=21337
+P1      2>1          100000         0        0       3 observed=47402
+P1      2>3          100000         0        0       1 observed=15591
+P1      3>0          100000         0        0       1 observed=15025
+P1      3>1          100000         0        0       2 observed=0
+P1      3>2          100000         0        0       4 observed=35018
+P2      0>1          100000         0        0       2 observed=48157
+P2      0>2          100000         0        0       1 observed=32590
+P2      0>3          100000         0        0       1 observed=25408
+P2      1>0          100000         0        0       2 observed=37746
+P2      1>2          100000         0        0       1 observed=22080
+P2      1>3          100000         0        0       1 observed=20317
+P2      2>0          100000         0        0       1 observed=25319
+P2      2>1          100000         0        0       3 observed=59829
+P2      2>3          100000         0        0       2 observed=25278
+P2      3>0          100000         0        0       3 observed=34600
+P2      3>1          100000         0        0       3 observed=50448
+P2      3>2          100000         0        0       3 observed=56831
+P3      0>1           10000         0        0       3
+P3      0>2           10000         0        0       2
+P3      0>3           10000         0        0       1
+P3      1>0           10000         0        0       2
+P3      1>2           10000         0        0       4
+P3      1>3           10000         0        0       5
+P3      2>0           10000         0        0       1
+P3      2>1           10000         0        0       4
+P3      2>3           10000         0        0       5
+P3      3>0           10000         0        0       3
+P3      3>1           10000         0        0       4
+P3      3>2           10000         0        0       5
+P4      w0/0-3      5656576         0        0      75 pairs=402688,484928,411712 straddles=502,6053,120411 coverage=ok
+P4      w1/0-3      2789376         0        0      24 pairs=273600,257088,221440 straddles=627,69659,536 coverage=ok
+P4      w2/0-3      3837952         0        0      52 pairs=150848,177792,133696 straddles=508,67376,2463 coverage=ok
+P4      w3/0-3      1286144         0        0      11 pairs=102464,57024,108480 straddles=501,565,692 coverage=ok
+P5      0>1           10000         0        0       1
+P5      0>2           10000         0        0       1
+P5      0>3           10000         0        0       1
+P5      1>0           10000         0        0       2
+P5      1>2           10000         0        0       2
+P5      1>3           10000         0        0       1
+P5      2>0           10000         0        0       1
+P5      2>1           10000         0        0       2
+P5      2>3           10000         0        0       1
+P5      3>0           10000         0        0       1
+P5      3>1           10000         0        0       2
+P5      3>2           10000         0        0       2
+P6      0-3          100000         0        0      32
+S1      0>1          100000         0        0       3 observed=65599
+S1      0>2          100000         0        0       9 observed=105023
+S1      0>3          100000         0        0       2 observed=34223
+S1      1>0          100000         0        0       2 observed=29386
+S1      1>2          100000         0        0       1 observed=17547
+S1      1>3          100000         0        0       1 observed=27193
+S1      2>0          100000         0        0       2 observed=40088
+S1      2>1          100000         0        0       2 observed=38336
+S1      2>3          100000         0        0       0 observed=0
+S1      3>0          100000         0        0       1 observed=27517
+S1      3>1          100000         0        0       3 observed=43053
+S1      3>2          100000         0        0       2 observed=31849
+S2      0>1           10000         0        0       1
+S2      0>2           10000         1        0       2
+S2      0>3           10000         1        0       2
+S2      1>0           10000         1        0       2
+S2      1>2           10000         5        0      15
+S2      1>3           10000         2        0       4
+S2      2>0           10000         0        0       1
+S2      2>1           10000         0        0       5
+S2      2>3           10000         0        0       5
+S2      3>0           10000        15        0       1
+S2      3>1           10000        20        0       4
+S2      3>2           10000         0        0       4
+SENS cpus=0>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=0>2 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=0>3 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>0 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>2 S1=0 S2=5 P2_sensitive=no P3_sensitive=yes
+SENS cpus=1>3 S1=0 S2=2 P2_sensitive=no P3_sensitive=yes
+SENS cpus=2>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>1 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=2>3 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+SENS cpus=3>0 S1=0 S2=15 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>1 S1=0 S2=20 P2_sensitive=no P3_sensitive=yes
+SENS cpus=3>2 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+# S1 relaxed outcomes: 0, S2 relaxed outcomes: 45 (reported, not judged)
+# MP weak rows (a reader observed nothing): 2
+# P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+coherency: FAIL (1 rows)
+[INFO] coherency litmus scale 10: 77 rows in 1039 ms
+    FAILED at /home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/critic5c2-base/kernel/tests/test_coherency.c:594
+      Expected: 0
+      Actual:   2
+  [ITER 15/15]  [FAIL] test_litmus_patterns_pass (1040509 us)
+[INFO] test_coherency.c: 1061 ms
+
+[FILTER] Summary
+[FILTER] [PASS] test_regs_every_cpu_reports: runs=15 passed=15 failed=0 ignored=0 us min=15402 avg=18722 max=25465
+[FILTER] [FAIL] test_litmus_patterns_pass: runs=15 passed=4 failed=11 ignored=0 us min=913486 avg=1062089 max=1243694
+
+========================================
+Test Suite Summary
+========================================
+[FAIL] 11 total failure(s)
+[INFO] Exiting via semihosting...

@@ -1,0 +1,31 @@
+A/B DONE seen 08:30:51
+jbuild 3b369aef r2 rc=0 08:32:30 head=3b369aef sha256=b2f2079354b720e47375f2c1a396eca733581500993df22e80b0997b372b6d29
+jbuild c0ea0714 r2 rc=0 08:32:30 head=c0ea0714 sha256=fc6ba8d202f194bcfb2af460225522d3f63493f5bd10cba5a4844b7dee9fb6dd
+jbuild 3b369aef r3m rc=0 08:33:57 head=3b369aef sha256=c18c74609b321f6ece72a02f0200cf73e78b88962b58480e2fbd257444289d1c
+jbuild c0ea0714 r3 rc=0 08:33:57 head=c0ea0714 sha256=96c0f7920a1004607e3cee410baa3fdf0966e048bbfad0bfb811875e11be5f10
+jbuild 3b369aef r3w rc=0 08:35:24 head=3b369aef sha256=5d876eab26ace7aa1053256ff481ba8bb6093b92c4a747007e82d76a61c1e40d
+JBUILD DONE 08:35:24
+lit-default-fix-c0ea0714-run01.txt cpu[user=36.09 sys=3.30 elapsed=28.68] rc=2 pass=28 fail=2 dump=0 summary=1 timeout=0 start=2026-11-14T08:35:24Z end=2026-11-14T08:37:14Z load=3.80 4.02 3.97
+lit-default-base-3b369aef-run01.txt cpu[user=36.11 sys=3.50 elapsed=29.26] rc=2 pass=25 fail=5 dump=0 summary=1 timeout=0 start=2026-11-14T08:37:14Z end=2026-11-14T08:39:06Z load=2.96 3.73 3.88
+lit-ws-fix-c0ea0714-run01.txt cpu[user=34.40 sys=3.40 elapsed=28.21] rc=2 pass=22 fail=8 dump=0 summary=1 timeout=0 start=2026-11-14T08:39:06Z end=2026-11-14T08:40:57Z load=3.94 3.76 3.87
+lit-ws-base-3b369aef-run01.txt cpu[user=34.18 sys=3.28 elapsed=28.02] rc=2 pass=19 fail=11 dump=0 summary=1 timeout=0 start=2026-11-14T08:40:57Z end=2026-11-14T08:42:45Z load=4.95 4.17 4.00
+all-fix-c0ea0714-run01.txt cpu[user=93.88 sys=10.99 elapsed=58.70] rc=0 pass=50 fail=0 dump=0 summary=1 timeout=0 start=2026-11-14T08:42:45Z end=2026-11-14T08:45:00Z load=3.98 4.01 3.96
+r1-base-3b369aef-run01.txt cpu[user=126.15 sys=2.82 elapsed=71.18] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T08:45:00Z end=2026-11-14T08:47:35Z load=5.76 4.49 4.13
+r1-base-3b369aef-run02.txt cpu[user=125.73 sys=2.48 elapsed=70.35] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T08:47:36Z end=2026-11-14T08:50:10Z load=7.13 5.34 4.49
+forced-reverted-ef11ee3c-run01.txt cpu[user=125.41 sys=2.82 elapsed=70.25] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T08:50:10Z end=2026-11-14T08:52:44Z load=3.19 4.64 4.38
+forced-reverted-ef11ee3c-run02.txt cpu[user=125.79 sys=2.43 elapsed=70.25] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T08:52:44Z end=2026-11-14T08:55:10Z load=2.73 3.81 4.10
+r3m-base-3b369aef-run01.txt cpu[user=108.57 sys=19.69 elapsed=70.35] rc=2 pass=1 fail=0 dump=2 summary=0 timeout=1 start=2026-11-14T08:55:11Z end=2026-11-14T08:57:37Z load=3.03 3.57 3.97
+r3m-base-3b369aef-run02.txt cpu[user=123.57 sys=4.33 elapsed=70.69] rc=2 pass=2 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T08:57:37Z end=2026-11-14T09:00:08Z load=6.05 4.24 4.14
+r3w-base-3b369aef-run01.txt cpu[user=125.29 sys=2.65 elapsed=69.98] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T09:00:08Z end=2026-11-14T09:02:34Z load=5.87 4.55 4.24
+r3w-base-3b369aef-run02.txt cpu[user=125.28 sys=2.30 elapsed=69.61] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=1 start=2026-11-14T09:02:34Z end=2026-11-14T09:04:55Z load=2.91 3.88 4.04
+r3-r2-default-fix-c0ea0714-run01.txt cpu[user=72.48 sys=6.05 elapsed=46.65] rc=0 pass=150 fail=0 dump=0 summary=1 timeout=0 start=2026-11-14T09:04:55Z end=2026-11-14T09:07:01Z load=2.97 3.52 3.88
+PLAN1 DONE 09:07:02
+regs-ws-fix-c0ea0714-run01.txt cpu[user=37.04 sys=4.59 elapsed=42.05] rc=0 pass=1000 fail=0 dump=0 summary=1 timeout=0 start=2026-11-14T09:08:17Z end=2026-11-14T09:10:17Z load=3.38 3.50 3.81
+regs-ws-base-3b369aef-run01.txt cpu[user=37.36 sys=4.56 elapsed=42.28] rc=0 pass=1000 fail=0 dump=0 summary=1 timeout=0 start=2026-11-14T09:10:17Z end=2026-11-14T09:12:20Z load=3.82 3.54 3.78
+full-ws-fix-c0ea0714-run01.txt cpu[user=91.30 sys=4.12 elapsed=90.25] rc=0 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:12:20Z end=2026-11-14T09:15:09Z load=3.68 3.56 3.76
+full-ws-fix-c0ea0714-run02.txt cpu[user=93.42 sys=4.11 elapsed=91.84] rc=0 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:15:10Z end=2026-11-14T09:17:58Z load=4.24 3.95 3.88
+full-ws-fix-c0ea0714-run03.txt cpu[user=91.05 sys=4.38 elapsed=90.09] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:17:58Z end=2026-11-14T09:20:47Z load=4.33 3.97 3.89
+full-ws-fix-c0ea0714-run04.txt cpu[user=93.45 sys=4.41 elapsed=92.22] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:20:47Z end=2026-11-14T09:23:43Z load=5.16 4.24 4.00
+full-ws-fix-c0ea0714-run05.txt cpu[user=96.74 sys=4.33 elapsed=95.54] rc=2 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:23:43Z end=2026-11-14T09:26:37Z load=3.99 4.10 3.99
+full-ws-fix-c0ea0714-run06.txt cpu[user=92.07 sys=3.91 elapsed=90.72] rc=0 pass=0 fail=0 dump=0 summary=0 timeout=0 start=2026-11-14T09:26:37Z end=2026-11-14T09:29:21Z load=3.71 3.97 3.97
+PLAN2 DONE 09:29:21
