@@ -678,3 +678,31 @@ User decisions, 2026-11-14. #1245 head: 50987fb3 (Track B report).
   no tests, so a "completed by #1251" comment would not be accurate. The
   question is left for the user.
 - The `structural/ci-matrix` branch was not deleted.
+
+## Entry 17: #1245 merged; stale-text issue #1261
+
+2026-11-14. User request: add the CI and test-filter sentences to the
+Testing section of `docs/architecture.md`, mark #1245 ready, squash-merge,
+and file the "Stale text found" items.
+
+- Commit 6e1f7242 on `structural/architecture-record` adds two sentences to
+  the Testing section of `docs/architecture.md`:
+  - CI is a report-only GitHub Actions build matrix (every platform ×
+    option, build only, on pull requests and nightly, #1251). Hardware
+    verification stays in lab sessions, through labctl. This replaces the
+    earlier sentence "Hardware runs go through labctl".
+  - The test kernel takes a test filter and a repeat count (#1243; see
+    `docs/testing.md`).
+- #1245 was marked ready. It had no closing references and was CLEAN and
+  MERGEABLE. It was squash-merged at 18:15:35Z as **dc51107c**.
+- #1261 (documentation, origin:review, kind:gap, P3-low, platform:all,
+  Backlog) lists the six stale-text items. Each was checked again against
+  main:
+  - `docs/shell.md` (SSH deferred);
+  - the `spinlock.h` Jetson comment;
+  - `docs/smp.md` and `spinlock.c`;
+  - the `smp_boot.S` HCR_EL2 comment;
+  - the CLAUDE.md `jetson-el2-bringup.md` citation;
+  - the CMakeLists `SECONDARY_PREEMPT`/`COOP_PREEMPT` "NC-memory" text.
+- The `LICENSES.md` item went as a comment on #1258.
+- No build, QEMU or labctl was used.
