@@ -437,3 +437,148 @@ kernel sources, the only failing test is #1230 at the base's rate, and
 there is still no single /ci sequence at the PR head on a clean tree.
 Fix 5 is unchanged; when it is run, the load at the start of every step
 belongs in the step's own log.
+
+## Addendum 2, round 2 (05:50 UTC 2026-11-14): head 2196deb5
+
+Critic: `c1-critic`, same session. Model: **Fable 5.2**
+(`claude-fable-5-2`).
+
+**Verdict: PASS for everything in this round's scope. Row 1b (boot
+argument) is unchanged and still fails as written; by the
+orchestrator's instruction it is judged here only as "disclosed and
+unchanged" and goes to the user as a Dissent item.** A PR opened on this
+verdict must state row 1b in its first paragraph.
+
+Head `2196deb5ac2a067adf434671bbf88f150a1bc769` (`origin/c1/harness`),
+two commits on 165cb992 (ef61c69c, 2196deb5); `origin/main` is still
+8ec0e330. Builder evidence: `c1/round2/` on `origin/gauntlet-5-hw-pi5`.
+/ci, run by the orchestrator: `c0/ci-c1-2196deb5/` (branch at f74c1ed5).
+Critic evidence: `c1-critic/round2/`, commit 0c3f26c8. The code diff was
+read first, then the critic's runs, then the critic's count of the raw
+files (`round2/own-count-round2.txt`, 05:43 UTC), then
+`selftest-summary.txt` and `summary.txt`.
+
+Disclosures. Two of the critic's seven runs started while another
+agent's QEMU was on the host (`exp-holder1-run1`: pid 2806179;
+`unfiltered`: pid 2819852); the other five did not. No process killed,
+no labctl call. The critic's patch was reverted after use.
+
+### Fix list from round 1
+
+| Fix | State | Basis |
+|---|---|---|
+| 1. End the dump on the SLOT_TRACE paths | **Done** | `slot_trace_dump()` calls `fault_dump_end()` on both exits (the parked "already frozen" branch and before `semihosting_exit`); the bad-SP path ends through the same function. Critic `round2/slot-trace-selftest.*` (`SLOT_TRACE=ON FAULT_DUMP_SELFTEST=ON`, clean tree, load 3.98): 71 lines, all `[cpu2] `, `SLOTTRACE-DUMP-END`, then `[cpu2] fault_dump: end, releasing the dump lock`, then the semihosting exit (make rc 2 is that exit, expected). Builder `c1/round2/slot-trace-selftest-2196deb5.log`: 68 dump lines, 0 unprefixed |
+| 2. A stopped holder must not silence the console | **Done** | See below |
+| 3. Boot argument | **Unchanged, disclosed** | `docs/testing.md` at 2196deb5 still carries the "Deviation from a boot argument" paragraph, untouched by this round's diff. Not judged further |
+| 4. `kernel/CLAUDE.md` "UART Lock" | **Done** | The section now describes the dump lock, the UART-lock skip and hold, the 50 ms rule for ordinary prints, and the duty to call `fault_dump_end()` |
+| 5. Full /ci at the new head | **Done, green on one retry of two steps** | See below |
+
+### Fix 2, from the code and from runs
+
+Code. An ordinary print now goes through `uart_lock_ordinary()`
+(`kprintf.c`): it masks IRQs, then loops on `spin_trylock`. While any
+dump is in progress it stops waiting and prints without the lock if this
+CPU is the dumper, or if the dump lock has an owner whose last line is
+at least 50 ms old (`fault_dump_holder_silent()`). With no dump in
+progress it waits without bound, as before. Lock graph: unchanged from
+round 1 (no path takes the dump lock while holding the UART lock); the
+one unbounded wait that remained in round 1 is now bounded whenever the
+dump lock is owned. Three notes, none blocking:
+
+- The wait is now a `yield`/`pause` poll on `spin_trylock`, where it was
+  the `wfe` spinlock. Uncontended cost is the same plus one load of
+  `fault_dump_cpus`.
+- Between a new holder's CAS and its first `progress` stamp, `progress`
+  still holds the previous dump's time, so a printer on another CPU that
+  looks in that instant sees "silent" and prints one line without the
+  lock. The window is a few instructions wide; the worst result is one
+  split line.
+- A CPU that faults while it holds the UART lock itself in an ordinary
+  print still leaves that lock held after its dump ends (no dump lock
+  owner then, so other printers wait). This was so before C1 and is not
+  a change.
+
+Runs.
+
+| Run | Files | Result | Load at start |
+|---|---|---|---|
+| Round 1's failing case again: holder stops mid-dump (critic patch, `CRITIC_EXP=1`), 2 runs | `round2/exp-holder1-run{1,2}.*` | 2 of 2: cpu2 dumps after 50 ms; CPU 0's `dumps completed: 1 of 2` line now prints (round 1: never); the run goes on to the second test and the summary and exits. The first test fails by construction (the patched dump never ends), so make rc is 2. After the stop, cpu3's stalled dump and CPU 0's lines interleave by character, which is the documented cost of a holder that never releases | 4.67, 5.26 |
+| Builder's own test, critic runs | `round2/selftest-run{1,2}.*` | 2 of 2: both tests PASS; 124 dump lines, 0 unprefixed, 2 blocks, 2 `fault_dump: end` lines; cpu3 stops after 12 lines; CPU 0's print took 387 and 664 us; exit 0 | 3.21, 3.50 |
+| Builder's 15 runs at 2196deb5 | `c1/round2/selftest-2196deb5-run{1..15}.log` | 15 of 15: both tests PASS, 124 lines, 0 unprefixed, 2 blocks, exit 0; the print took 350 to 668 us in 14 runs and 47632 us in run 14 (inside the 50 ms bound) | 1.89 to 2.60 |
+| Fails on the old code | `c1/round2/control-nobound-2196deb5.log` (banner 2196deb5-dirty, the bound removed by `control-nobound.patch`) | CPU 0 never prints after cpu3 stops; ends in the 60 s timeout | 2.05 |
+| First attempt | `c1/round2/selftest-ef61c69c-run2-wrap-failure.log` | 1 PASS, 1 FAIL at ef61c69c (a stamp newer than the reader's counter value read as a wrap); 2196deb5 treats it as progress and adds a unit-test case | 3.68 |
+
+The builder's `selftest-summary.txt` agrees with the critic's count on
+all 15 runs.
+
+### Regression checks at 2196deb5 (clean tree)
+
+- Filter x50 (`round2/filter-x50.*`): 50 of 50 PASS, 39412 to 70504 us
+  per iteration, exit 0, load 2.58 to 3.21.
+- Unfiltered (`round2/unfiltered.*`): 3041 `[PASS]` (one new unit test),
+  0 `[FAIL]`, 0 `FILTER` lines, exit 0, load 4.76 to 3.85. Against the
+  critic's base console (`unfiltered-base-run1.test-output.log`): the
+  summary-format lines differ only by the two added suites and by where
+  the shell prompt and one Rust task line land; the last 200 bytes are
+  identical (`round2/unfiltered-diff-normalized.txt`, 39 hunks).
+- `fault_dump_end()` now prints one line, `fault_dump: end, releasing
+  the dump lock`, at the end of every dump. It appears only inside
+  dumps.
+
+### /ci at 2196deb5 (`c0/ci-c1-2196deb5/`, counted from the step logs)
+
+| Step | Result | Load at start (log line 1) |
+|---|---|---|
+| 01 ARM64 build, 02 x86-64 build, 03 Jetson real | no error line; rc 0 in `summary.txt` | 4.26, 4.84, 4.81 |
+| 04 `make test` | **FAILED**: `test_litmus_patterns_pass` only | 7.42 |
+| 04r `make test` (rerun) | PASSED | 2.33 |
+| 04b x86-64 test | PASSED | 5.57 |
+| 05 `make test AI_SCHED=ON` | **FAILED**: `test_litmus_patterns_pass` only | 5.36 |
+| 05r (rerun) | PASSED | 2.79 |
+| 06 runtime-test | 308 and 328 passed, 0 failed | 4.38 |
+| 07 braces | 0 violations, 0 unparsed | 3.63 |
+| 08 build order, 09 Jetson layout | all passed | 9.44, 5.02 |
+
+`summary.txt` agrees on every rc (04 and 05 rc 2; reruns rc 0). Its
+`load=` column is the load at each step's end, not its start; the start
+loads above are from each log's first line. The step logs are make
+output and hold no kernel banner, so the head is the runner's statement
+on line 1, not something the critic could read from a console.
+
+Judgment. /ci is green at the PR head on a single sequence with one
+retry each of steps 4 and 5. Both failures are the one out-of-scope test
+(#1230), no other test failed, and this time the loads are in the files:
+the two failures started at 7.42 and 5.36, the two reruns at 2.33 and
+2.79. Every run on file with a recorded start load, both trees, all
+configurations: 12 passes at 1.46 to 4.76, 3 failures at 3.74 (base),
+5.36 and 7.42 (head). The load explanation now has file-backed runs on
+the head at both ends; it remains a correlation over 15 runs. Rates for
+`test_litmus_patterns_pass`, default configuration, all runs on file:
+base 3 of 7; head family 4 of 10 (165cb992 and before 3 of 7, 2196deb5
+1 of 3). The critic accepts row 3a as met, and records that "/ci green"
+here means "green except #1230, which fails on the base at a similar
+rate under load".
+
+### Failure modes, round 2
+
+Redefined criterion: row 1b, unchanged and disclosed; the 50 ms reading
+as in round 1. Path never exercised: SLOT_TRACE dump path and the
+stopped holder are now exercised by the builder and the critic; `ktest`
+and the command-line source are as in round 1 (critic's QEMU run only;
+parser tests only). Fix shown failing on the old code: yes
+(`control-nobound`). Uncommitted tree: the control only, labelled.
+Banner hash: every builder and critic console is 2196deb5 except the
+labelled first attempt. Number without a file: none found. Selective
+summary, truncated capture, stale base, kills by name, board claims:
+none found.
+
+### Carried forward, not blocking
+
+1. Row 1b for the user (Dissent): accept the build-time filter as the
+   Jetson mechanism, or have a boot argument added (an append option in
+   `scripts/jetson-kexec-slmos.sh`; load options or an ESP file for the
+   UEFI stub).
+2. `slmos.test=` and `ktest` have not run on hardware; the first
+   component to hold a board with a test kernel can run both.
+3. The stale-`progress` window and the self-held UART lock case noted
+   above.
