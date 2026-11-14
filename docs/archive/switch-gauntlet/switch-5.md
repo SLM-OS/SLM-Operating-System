@@ -557,3 +557,23 @@ prototype, for the #1242 base rate on base plus deferral).
   idle-loop check.
 - Lab: C3 still holds jetson-nano-2 past 05:30 (last activity 05:42); release
   requested twice.
+
+## Entry 20 (written 05:46 UTC, from date): C1 critic round 2 PASS; draft PR #1243
+
+- C1 critic round 2: **PASS** for everything in scope, Fable 5.2,
+  `critic-5-C1.md` Addendum 2 (gauntlet/switch-5 11c77871); reproduction
+  `gauntlet-5-hw-pi5` 0c3f26c8, `run5-hw/c1-critic/round2/`. Fixes 1, 2,
+  4, 5 done and reproduced (SLOT_TRACE fault run 71 lines, all prefixed, ends
+  the dump; round 1's stopped-holder case 2 of 2 now prints; filter x50 50 of
+  50; unfiltered 3041 pass, 0 fail, summary format matches the base). /ci
+  accepted as green except #1230 (one retry of steps 4 and 5 under load).
+  Row 1b (boot argument on the Jetson paths) unchanged and disclosed, still
+  failing as written: **Dissent item for the user.**
+- Not blocking, from the critic: ktest and `slmos.test=` have not run on
+  hardware; a window of a few instructions at dump start can let one ordinary
+  line print unlocked; summary.txt's load column is the end-of-step load (the
+  start load is in each log's first line); the /ci logs carry no kernel banner.
+- **Draft PR #1243** (head 2196deb5, base main, no closing keywords; checked
+  with closingIssuesReferences). Its description lists the deviation and says
+  every row is QEMU.
+- C1 builder's draft entries are in Entry 6 and Entry 17. C1 complete.
