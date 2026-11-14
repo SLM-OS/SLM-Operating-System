@@ -28,6 +28,11 @@ static bool dump_line_start[MAX_CPUS];
 static bool dump_uart_held[MAX_CPUS];
 static fault_dump_entry_t dump_entry[MAX_CPUS];
 
+#if defined(FAULT_DUMP_SELFTEST)
+volatile uint32_t fault_dump_selftest_stop_cpu;
+static uint32_t selftest_lines;
+#endif
+
 /* kprintf.c: hold the UART lock across a dump (bounded wait). */
 extern bool uart_lock_try_hold(uint64_t wait_ticks, uint64_t (*now)(void));
 extern void uart_lock_hold_release(void);
@@ -193,10 +198,12 @@ void fault_dump_end(void)
     if (!(fault_dump_cpus & bit)) {
         return;
     }
-    /* End the last line before the prefix stops. */
+    /* End the last line, then mark the end of this CPU's dump in the log
+     * (still prefixed) before the locks go. */
     if (!dump_line_start[me]) {
         uart_puts_unlocked("\n");
     }
+    uart_puts_unlocked("fault_dump: end, releasing the dump lock\n");
     if (dump_uart_held[me]) {
         dump_uart_held[me] = false;
         uart_lock_hold_release();
@@ -218,6 +225,25 @@ void fault_dump_end(void)
 uint32_t fault_dump_completed(void)
 {
     return __atomic_load_n(&dumps_completed, __ATOMIC_ACQUIRE);
+}
+
+bool fault_dump_lock_silent(const struct fault_dump_lock *l, uint64_t now,
+                            uint64_t stall_ticks)
+{
+    if (__atomic_load_n(&l->owner, __ATOMIC_ACQUIRE) == 0) {
+        return false;
+    }
+    return now - l->progress >= stall_ticks;
+}
+
+bool fault_dump_holder_silent(void)
+{
+    const uint64_t freq = timer_get_frequency();
+    if (freq == 0) {
+        return true;        /* no counter: never wait on a dump holder */
+    }
+    return fault_dump_lock_silent(&dump_lock, timer_get_count(),
+                                  freq * FAULT_DUMP_STALL_MS / 1000u);
 }
 
 bool fault_dump_this_cpu(void)
@@ -258,5 +284,13 @@ void fault_dump_putc(char c)
         if (dump_entry[me] == FAULT_DUMP_ACQUIRED) {
             dump_lock.progress = timer_get_count();
         }
+#if defined(FAULT_DUMP_SELFTEST)
+        if (fault_dump_selftest_stop_cpu == me + 1u &&
+            ++selftest_lines >= FAULT_DUMP_SELFTEST_STOP_LINES) {
+            for (;;) {
+                __asm__ volatile("wfe");
+            }
+        }
+#endif
     }
 }

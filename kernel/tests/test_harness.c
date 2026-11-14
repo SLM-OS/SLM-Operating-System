@@ -548,10 +548,12 @@ int test_harness_run_all(void)
 {
     int rc = harness_filter_from_boot();
 #if defined(FAULT_DUMP_SELFTEST) && !defined(PLATFORM_X86_64)
-    /* FAULT_DUMP_SELFTEST=ON: the forced double fault leaves CPUs 1 and 2
-     * halted, so run that test alone unless a filter was given. */
+    /* FAULT_DUMP_SELFTEST=ON: the forced faults leave CPUs 1, 2 and 3
+     * halted, so run those two tests alone unless a filter was given. */
     if (rc == 0) {
-        static const char selftest[] = "test_fault_dump_two_cpus_concurrent";
+        static const char selftest[] =
+            "test_fault_dump_two_cpus_concurrent,"
+            "test_fault_dump_holder_stops_console_continues";
         test_filter_t f = { 0 };
         (void)test_filter_parse_names(&f, selftest, sizeof(selftest) - 1);
         f.repeat = 1;

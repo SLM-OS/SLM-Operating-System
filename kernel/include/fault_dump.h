@@ -18,7 +18,10 @@
  *     faulted holder of that lock cannot block the dump), and the dump
  *     holds the UART lock itself when it can get it within
  *     FAULT_DUMP_UART_WAIT_MS, so other CPUs' ordinary prints do not
- *     split dump lines.
+ *     split dump lines. Those prints wait only while the holder keeps
+ *     printing: after FAULT_DUMP_STALL_MS of silence they go out without
+ *     the UART lock, so a holder that stops mid-dump cannot silence the
+ *     console.
  *
  * Callers run with IRQs masked. Before vmm_init sets spinlock_hw_enabled
  * (pre-MMU, only the boot CPU runs) the lock is skipped: exclusive
@@ -80,5 +83,23 @@ void fault_dump_putc(char c);
 
 /* True when this CPU is inside a dump (kprintf.c skips the UART lock). */
 bool fault_dump_this_cpu(void);
+
+/* True when lock l has an owner that has printed nothing for stall_ticks
+ * at counter value now. Pure; used by fault_dump_holder_silent(). */
+bool fault_dump_lock_silent(const struct fault_dump_lock *l, uint64_t now,
+                            uint64_t stall_ticks);
+
+/* True when a dump holds the dump lock and its holder has printed nothing
+ * for FAULT_DUMP_STALL_MS. kprintf.c then stops waiting for the UART lock
+ * the holder may still hold. */
+bool fault_dump_holder_silent(void);
+
+#if defined(FAULT_DUMP_SELFTEST)
+/* Selftest only: CPU (id + 1, 0 = off) that stops for good in the middle
+ * of its dump, after FAULT_DUMP_SELFTEST_STOP_LINES lines, without ending
+ * it (kernel/tests/test_fault_dump.c). */
+extern volatile uint32_t fault_dump_selftest_stop_cpu;
+#define FAULT_DUMP_SELFTEST_STOP_LINES 12u
+#endif
 
 #endif /* FAULT_DUMP_H */

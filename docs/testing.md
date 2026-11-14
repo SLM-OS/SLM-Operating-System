@@ -322,6 +322,12 @@ exception dump.
   lock. The dump takes the UART lock itself if it is free within 20 ms, so
   other CPUs' ordinary prints wait instead of splitting dump lines; if it is
   not (a CPU faulted while printing), the dump prints without it.
+- **A stopped dump cannot silence the console.** An ordinary print waits for
+  the UART lock only while the dump's holder keeps printing. Once the holder
+  has printed nothing for 50 ms (it hung, or parked without ending its
+  dump), prints from other CPUs go out without the lock. Every dump path
+  calls `fault_dump_end()` before it halts or parks, including both exits
+  of `slot_trace_dump()`.
 - **Early boot.** Before `vmm_init` sets `spinlock_hw_enabled` (MMU off, only
   the boot CPU running) the dump lock is skipped, because exclusive accesses
   to non-cacheable memory abort on Cortex-A78AE; the dump prints
@@ -338,9 +344,11 @@ nested, silent holder times out at the stall bound, printing holder holds
 until the cap, release hand-off, frozen counter). `make test
 FAULT_DUMP_SELFTEST=ON` (ARM64, default OFF, no code when OFF) builds a test
 kernel that faults CPU 1 (data abort) and CPU 2 (BRK) at the same instant
-and checks that both dumps complete; the harness runs only that test,
-because CPUs 1 and 2 stay halted, and the log shows the two dumps one after
-the other.
+and checks that both dumps complete, then faults CPU 3 and stops it for good
+12 lines into its dump (holding both locks) and checks that CPU 0 still
+prints within 1 s. The harness runs only those two tests, because CPUs 1 to
+3 stay halted. With `SLOT_TRACE=ON` as well, the first fault goes through
+`slot_trace_dump()`, which ends the run through semihosting.
 
 ---
 
