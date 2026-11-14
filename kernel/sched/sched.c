@@ -167,6 +167,35 @@ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
     spin_unlock_irqrestore(&rq_lock[cpu], flags);
 }
 
+/* For schedule(), which masks first and then reads its CPU id (#1242). */
+static inline void rq_lock_masked(uint32_t cpu)
+{
+    spin_lock(&rq_lock[cpu]);
+    SLOT_TRACE_RQ_LOCKED(cpu);
+}
+static inline void rq_unlock_masked(uint32_t cpu)
+{
+    SLOT_TRACE_RQ_UNLOCKING(cpu);
+    spin_unlock(&rq_lock[cpu]);
+}
+
+/*
+ * Mask every interrupt class that can reach scheduler_tick and so a nested
+ * schedule() (ADR 0008 part 1): IRQ, plus FIQ where the Pi 5 tick is an FIQ.
+ * The saved word is the whole DAIF (RFLAGS on x86), so irq_restore and
+ * rq_unlock_irqrestore restore it exactly.
+ */
+static inline irq_flags_t sched_irq_save(void)
+{
+#if defined(PI5_FIQ_TIMER) && !defined(PLATFORM_X86_64)
+    irq_flags_t f;
+    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(f) :: "memory");
+    return f;
+#else
+    return irq_save();
+#endif
+}
+
 /*
  * Per-CPU run queue access. The run queues live in cacheable BSS
  * (sched.cpu_fallback) on every platform.
@@ -374,6 +403,7 @@ uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
 /* Per-CPU diagnostic counters for cross-CPU dispatch debugging,
  * declared in sched_diag.h. */
 volatile uint32_t sched_diag_tick[MAX_CPUS];
+volatile uint32_t sched_diag_switch_defer[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
 volatile uint32_t sched_diag_picked[MAX_CPUS];
 volatile uint32_t sched_diag_idle_loops[MAX_CPUS];
@@ -549,6 +579,68 @@ const struct sched_policy_ops *sched_policy_get(int index)
  * Idle task - runs when no other tasks are ready.
  * Each CPU has its own idle task.
  */
+/*
+ * Switch-in deferral (#1234, ADR 0008 part 2). switch_in_waiting[c] is the
+ * task CPU c's last schedule() could not switch in because the CPU that ran
+ * it had not yet released it (on_cpu still set), when no other queued task
+ * was ready either; NULL otherwise. Written only by CPU c under rq_lock[c];
+ * read only by c's idle loop, outside the lock, as a hint: tasks live in the
+ * static task_table, the poll on w->on_cpu is bounded, and the schedule()
+ * that follows decides under the lock.
+ */
+static struct task *volatile switch_in_waiting[MAX_CPUS];
+
+/* Idle poll bound: about 50 us between schedule() calls while waiting. */
+#define SWITCH_IN_POLL_US   50U
+
+static void idle_poll_waiting(struct task *w)
+{
+    uint64_t f = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    uint64_t lim = (f / 1000000U) * SWITCH_IN_POLL_US;
+    while (__atomic_load_n(&w->on_cpu, __ATOMIC_ACQUIRE) &&
+           timer_get_count() - t0 < lim) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+}
+
+static inline struct task *idle_waiting(uint32_t cpu)
+{
+    return __atomic_load_n(&switch_in_waiting[cpu], __ATOMIC_RELAXED);
+}
+
+/*
+ * Choose what to switch in (ADR 0008 part 2), under rq_lock[cpu] with cpu
+ * pinned (part 1). `next` is the queue head (or idle). A task is ready to be
+ * switched in when it is `current` or its previous CPU has released it
+ * (on_cpu 0, load-acquire: the store-release in sched_finish_switch orders
+ * that CPU's save of its context before our switch_to's loads). If the head
+ * is not ready, run the highest-priority queued task that is, or idle when
+ * none is. The CPU's own idle task needs no check: only this CPU switches it
+ * in and out, so here it is current or fully switched out.
+ */
+static struct task *pick_ready_locked(struct cpu_runqueue *rq, uint32_t cpu,
+                                      struct task *next, struct task *current)
+{
+    switch_in_waiting[cpu] = NULL;
+    if (next == rq->idle_task || next == current ||
+        !__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
+        return next;
+    }
+    sched_diag_switch_defer[cpu]++;
+    for (struct task *t = next->next; t; t = t->next) {
+        if (t == current || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+            return t;
+        }
+    }
+    switch_in_waiting[cpu] = next;
+    return rq->idle_task;
+}
+
 static void idle_task_func(void *arg)
 {
     (void)arg;
@@ -558,7 +650,19 @@ static void idle_task_func(void *arg)
          * and `cpu` (shell) to distinguish "secondary never reached
          * idle" (counter==0) from "secondary is idling but SEV is not
          * reaching it" (counter frozen after initial iterations). */
-        sched_diag_idle_loops[cpu_id()]++;
+        uint32_t idle_cpu = cpu_id();
+        sched_diag_idle_loops[idle_cpu]++;
+        struct task *waiting;
+
+        /* ADR 0008: while a task waits on this CPU's queue for its previous
+         * CPU to release it (switch_in_waiting), skip only the wait
+         * instruction, never the unmask. On every branch that unmasks
+         * before its wait, read switch_in_waiting with the tick's interrupt
+         * class masked and wait only if it is NULL: no schedule() can then
+         * set it between the read and the wait, and WFI (and x86 sti;hlt)
+         * wakes on the masked pending interrupt, taken at the unmask. The
+         * branches that never unmask (WFE) are written only by this loop's
+         * own yield(), so check-then-WFE is race-free there. */
 
         /* Unmask IRQ so timer interrupts can fire.
          * This must be inside the loop because context switch saves/restores
@@ -566,8 +670,13 @@ static void idle_task_func(void *arg)
          * IRQ masked (hardware masks IRQ on exception entry). On resume,
          * the restored DAIF keeps IRQ masked — so we must re-clear it here. */
 #if defined(PLATFORM_X86_64)
-        __asm__ volatile("sti" ::: "memory");
-        __asm__ volatile("hlt");
+        __asm__ volatile("cli" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("sti; hlt" ::: "memory");  /* sti shadow covers hlt */
+        } else {
+            __asm__ volatile("sti" ::: "memory");
+        }
 #elif defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
         /* Pi 5/Jetson idle loop. Which CPUs may WFI is a timer-IRQ
          * delivery question, keyed on the platform.
@@ -584,9 +693,14 @@ static void idle_task_func(void *arg)
          * timer PPI remains in Group 0 and arrives as FIQ; masking F
          * would keep the interrupt line dead. (daifclr #3 clears I+F.) */
 #if defined(PI5_FIQ_TIMER)
+        __asm__ volatile("msr daifset, #3" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #3" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
-        __asm__ volatile("wfi");
 #elif defined(SECONDARY_PREEMPT) && \
       (!defined(PLATFORM_JETSON_ORIN_NANO) || defined(JETSON_HW_TICK))
         /* Pi 5 always (#742 landed the BL31 routing fix), or Jetson
@@ -595,9 +709,14 @@ static void idle_task_func(void *arg)
          * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFI sleeps
          * until the next tick. The ELR trampoline handles the
          * switch_to-in-ISR problem on secondary CPUs. */
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
-        __asm__ volatile("wfi");
 #elif defined(PLATFORM_JETSON_ORIN_NANO)
         /* Jetson without JETSON_HW_TICK (stock BL31): hardware timer
          * IRQs do not deliver to EL1/EL2 because the GIC group/route
@@ -622,21 +741,43 @@ static void idle_task_func(void *arg)
          * acceptable for stock-BL31 builds. The JETSON_HW_TICK build
          * path above is the long-term answer (#380 / PR with
          * tools/tfa-patches/0004-*). */
-        if (cpu_id() != 0) {
+        waiting = idle_waiting(idle_cpu);     /* never unmasks: WFE branch */
+        if (idle_cpu != 0 && !waiting) {
             __asm__ volatile("wfe" ::: "memory");
         }
 #else
-        if (cpu_id() == 0) {
+        if (idle_cpu == 0) {
+            __asm__ volatile("msr daifset, #2" ::: "memory");
+            __asm__ volatile("isb" ::: "memory");
+            waiting = idle_waiting(idle_cpu);
+            if (!waiting) {
+                __asm__ volatile("wfi" ::: "memory");
+            }
             __asm__ volatile("msr daifclr, #2" ::: "memory");
-            __asm__ volatile("wfi");
+            __asm__ volatile("isb" ::: "memory");
         } else {
-            __asm__ volatile("wfe" ::: "memory");
+            waiting = idle_waiting(idle_cpu); /* never unmasks: WFE branch */
+            if (!waiting) {
+                __asm__ volatile("wfe" ::: "memory");
+            }
         }
 #endif
 #else
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        waiting = idle_waiting(idle_cpu);
+        if (!waiting) {
+            __asm__ volatile("wfi" ::: "memory");
+        }
         __asm__ volatile("msr daifclr, #2" ::: "memory");
-        __asm__ volatile("wfi");
+        __asm__ volatile("isb" ::: "memory");
 #endif
+
+        /* A task waits here for its previous CPU: poll its on_cpu word
+         * (lock-free, bounded) before the schedule() that will pick it. */
+        if (waiting) {
+            idle_poll_waiting(waiting);
+        }
 
         /* Yield to check if other tasks are ready */
         yield();
@@ -2347,8 +2488,24 @@ uint64_t sched_rebalance_get_migrations(void)
  */
 void schedule(void)
 {
+    /*
+     * Pin the CPU id (#1242, ADR 0008 part 1). Mask the tick's interrupt
+     * class before reading cpu_id() and keep it masked through the
+     * cooperative tick, the steal prelude and the locked section, up to the
+     * unlock that opens the switch window. current leaves this CPU only by
+     * switching out, which needs a schedule(); with the tick masked no
+     * nested schedule() can run here (tick ISR, trampoline arming and the
+     * x86 resched IPI are interrupt paths, and nothing below calls
+     * schedule()), so from the read to the unlock this CPU is this_cpu and
+     * every per-CPU field below is this CPU's. Before this, a tick between
+     * an unmasked read and the lock let the task be preempted, moved and
+     * resumed elsewhere with the old id: it then worked on another CPU's
+     * run queue, idle task and preempt flag.
+     */
+    irq_flags_t flags = sched_irq_save();
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
+    uint32_t lock_site = 1;            /* SWITCH_CHECK probe site */
     sched_diag_schedule[this_cpu]++;
 
 #if defined(COOP_PREEMPT)
@@ -2369,15 +2526,16 @@ void schedule(void)
     if (!rq->head) {
         struct task *stolen = sched_try_steal(this_cpu);
         if (stolen) {
-            irq_flags_t sf = rq_lock_irqsave(this_cpu);
+            rq_lock_masked(this_cpu);
             add_to_cpu_queue_locked(stolen, this_cpu);
-            rq_unlock_irqrestore(this_cpu, sf);
+            rq_unlock_masked(this_cpu);
         }
     }
 #endif
 
-    irq_flags_t flags = rq_lock_irqsave(this_cpu);
-    SWITCH_CHECK_CPU(this_cpu, 1);  /* #1242 probe; empty unless SWITCH_CHECK */
+relock:
+    rq_lock_masked(this_cpu);
+    SWITCH_CHECK_CPU(this_cpu, lock_site);  /* #1242 probe; empty unless SWITCH_CHECK */
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -2396,7 +2554,8 @@ void schedule(void)
         uint32_t zombie_gen = rq->zombie_gen;
         rq->zombie = NULL;
         SLOT_TRACE(ST_ZOMBIE_REAP, zombie, this_cpu, task_current(), zombie_gen);
-        rq_unlock_irqrestore(this_cpu, flags);
+        rq_unlock_masked(this_cpu);
+        irq_restore(flags);             /* destroy with the caller's state */
 
         /* Destroy outside lock - task_destroy may call pmm.
          *
@@ -2409,8 +2568,13 @@ void schedule(void)
          * the cleared value into context.sp (SP 0 on the next switch). */
         (void)task_destroy_gen(zombie, zombie_gen);
 
-        flags = rq_lock_irqsave(this_cpu);
-        SWITCH_CHECK_CPU(this_cpu, 2);
+        /* Unpinned during the destroy: mask again and re-read the id
+         * before touching anything per-CPU (#1242). */
+        flags = sched_irq_save();
+        this_cpu = cpu_id();
+        rq = cpu_rq(this_cpu);
+        lock_site = 2;
+        goto relock;
     }
 
     struct task *current = task_current();
@@ -2436,14 +2600,22 @@ void schedule(void)
         next = pick_next_task(this_cpu);
     }
 
-    /* Remove next from front of queue */
-    if (next != rq->idle_task && rq->head == next) {
-        rq->head = next->next;
-        if (!rq->head) {
-            rq->tail = NULL;
+    /* #1234 (ADR 0008 part 2): never switch in a task whose previous CPU
+     * has not released it; run the next ready task, or idle. */
+    next = pick_ready_locked(rq, this_cpu, next, current);
+
+    /* Remove next from its queue (not always the head after a deferral) */
+    if (next != rq->idle_task) {
+        if (rq->head == next) {
+            rq->head = next->next;
+            if (!rq->head) {
+                rq->tail = NULL;
+            }
+            next->next = NULL;
+            rq->ready_count--;
+        } else {
+            (void)remove_from_cpu_queue_locked(next, this_cpu);
         }
-        next->next = NULL;
-        rq->ready_count--;
     }
 
     /*
@@ -2657,13 +2829,21 @@ void scheduler_start(uint32_t this_cpu)
         panic("scheduler_start: no tasks to run");
     }
 
+    /* #1234: as in schedule(); this_cpu is a parameter from this CPU's
+     * boot context, which cannot move. No current yet. */
+    first = pick_ready_locked(rq, this_cpu, first, NULL);
+
     /* Remove from queue */
-    if (first != rq->idle_task && rq->head == first) {
-        rq->head = first->next;
-        if (!rq->head) {
-            rq->tail = NULL;
+    if (first != rq->idle_task) {
+        if (rq->head == first) {
+            rq->head = first->next;
+            if (!rq->head) {
+                rq->tail = NULL;
+            }
+            rq->ready_count--;
+        } else {
+            (void)remove_from_cpu_queue_locked(first, this_cpu);
         }
-        rq->ready_count--;
     }
 
     SWITCH_CHECK_IN(first, this_cpu);

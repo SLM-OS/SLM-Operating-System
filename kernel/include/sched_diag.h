@@ -27,6 +27,7 @@ SCHED_DIAG_COUNTER(sched_diag_steal_successes);         /* live task returned */
 SCHED_DIAG_COUNTER(sched_diag_steal_stale);             /* stale pointer discarded */
 SCHED_DIAG_COUNTER(sched_diag_steal_empty_victim);      /* victim had nothing to take */
 SCHED_DIAG_COUNTER(sched_diag_steal_push_full);         /* push failed, deque full (#175) */
+SCHED_DIAG_COUNTER(sched_diag_switch_defer);            /* switch-in deferred: previous CPU had not released next (#1234) */
 
 #undef SCHED_DIAG_COUNTER
 
