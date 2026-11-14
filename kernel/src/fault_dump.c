@@ -233,7 +233,14 @@ bool fault_dump_lock_silent(const struct fault_dump_lock *l, uint64_t now,
     if (__atomic_load_n(&l->owner, __ATOMIC_ACQUIRE) == 0) {
         return false;
     }
-    return now - l->progress >= stall_ticks;
+    const uint64_t progress = __atomic_load_n(&l->progress, __ATOMIC_ACQUIRE);
+    /* The holder may stamp a counter value later than the caller's `now`
+     * (another CPU's line ended in between): that is progress, not an
+     * unsigned wrap to "silent for ages". */
+    if (now < progress) {
+        return false;
+    }
+    return now - progress >= stall_ticks;
 }
 
 bool fault_dump_holder_silent(void)
@@ -242,8 +249,17 @@ bool fault_dump_holder_silent(void)
     if (freq == 0) {
         return true;        /* no counter: never wait on a dump holder */
     }
-    return fault_dump_lock_silent(&dump_lock, timer_get_count(),
-                                  freq * FAULT_DUMP_STALL_MS / 1000u);
+    if (__atomic_load_n(&dump_lock.owner, __ATOMIC_ACQUIRE) == 0) {
+        return false;
+    }
+    /* Read the holder's stamp before the counter, so a stamp written
+     * after this point cannot be newer than `now`. */
+    const uint64_t progress = __atomic_load_n(&dump_lock.progress, __ATOMIC_ACQUIRE);
+    const uint64_t now = timer_get_count();
+    if (now < progress) {
+        return false;
+    }
+    return now - progress >= freq * FAULT_DUMP_STALL_MS / 1000u;
 }
 
 bool fault_dump_this_cpu(void)

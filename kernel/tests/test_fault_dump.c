@@ -157,6 +157,11 @@ static void test_fault_dump_lock_silent_needs_owner_and_silence(void)
     TEST_ASSERT_FALSE(fault_dump_lock_silent(&l, 1000, stall));
     TEST_ASSERT_FALSE(fault_dump_lock_silent(&l, 1000 + stall - 1, stall));
     TEST_ASSERT_TRUE(fault_dump_lock_silent(&l, 1000 + stall, stall));
+    /* A stamp newer than the caller's counter read is progress, not an
+     * unsigned wrap (seen in QEMU: the holder stamped a line between the
+     * printer's counter read and its stamp read). */
+    l.progress = 5000;
+    TEST_ASSERT_FALSE(fault_dump_lock_silent(&l, 4999, stall));
     /* A new line resets it. */
     l.progress = 1000 + stall;
     TEST_ASSERT_FALSE(fault_dump_lock_silent(&l, 1000 + stall + 1, stall));
