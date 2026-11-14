@@ -65,30 +65,15 @@ int UnityEnd(void);
  * Running Tests
  * ============================================================================ */
 
-#define RUN_TEST(func) \
-    do { \
-        Unity.current_test = #func; \
-        Unity.current_test_failed = 0; \
-        Unity.current_test_ignored = 0; \
-        Unity.ignore_message = NULL; \
-        Unity.test_count++; \
-        setUp(); \
-        func(); \
-        tearDown(); \
-        if (Unity.current_test_failed) { \
-            unity_output_string("  [FAIL] "); \
-        } else if (Unity.current_test_ignored) { \
-            unity_output_string("  [IGNORE] "); \
-        } else { \
-            unity_output_string("  [PASS] "); \
-        } \
-        unity_output_string(#func); \
-        if (Unity.ignore_message) { \
-            unity_output_string(" - "); \
-            unity_output_string(Unity.ignore_message); \
-        } \
-        unity_output_char('\n'); \
-    } while (0)
+typedef void (*UnityTestFunction)(void);
+
+/* Run one test. With no test filter active (the default) this prints
+ * exactly what the original inline RUN_TEST did. With a filter
+ * (kernel/tests/test_filter.h) it skips tests not named by it and prints
+ * one "[ITER k/N]" line, with the elapsed time, for each named test run. */
+void UnityRunTest(UnityTestFunction func, const char *name);
+
+#define RUN_TEST(func) UnityRunTest(func, #func)
 
 /* ============================================================================
  * Core Assertion Internals

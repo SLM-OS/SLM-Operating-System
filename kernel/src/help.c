@@ -1010,6 +1010,20 @@ static const struct help_entry help_entries[] = {
         "(policy swap, gpu_use_set, model_launch) drop into `lua-admin`.\n"
     ),
 
+    HELP_TEXT("ktest",
+        "ktest - Run named boot tests again (boot-test kernels only)\n"
+        "\n"
+        "Usage:\n"
+        "  ktest <test[,test...]> [repeat]\n"
+        "\n"
+        "Runs only the named RUN_TEST functions (exact names), repeat\n"
+        "passes (default 1), one [ITER k/N] line per run with its time,\n"
+        "then a per-test summary. See docs/testing.md.\n"
+        "\n"
+        "Examples:\n"
+        "  ktest test_preempt_flag_follows_migrated_task 200\n"
+    ),
+
     HELP_TEXT("bench",
         "bench - Performance benchmarks\n"
         "\n"

@@ -4,6 +4,7 @@
  * Compiles to an empty unit unless CONFIG_SLOT_TRACE is defined.
  */
 
+#include "fault_dump.h"
 #include "slot_trace.h"
 
 #if defined(CONFIG_SLOT_TRACE)
@@ -193,6 +194,10 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
     uint32_t was = __atomic_exchange_n(&slot_trace_frozen, me + 1,
                                        __ATOMIC_ACQ_REL);
     if (was) {
+        /* Another CPU owns the frozen ring and dumps it; this CPU parks.
+         * End its fault dump first so the dump lock and the UART lock
+         * are not held by a parked CPU (fault_dump.h). */
+        fault_dump_end();
         for (;;) {
             __asm__ volatile("wfe");
         }
@@ -239,6 +244,9 @@ void slot_trace_dump(const char *why, uint64_t a, uint64_t b, uint64_t c)
         }
     }
     uart_printf_unlocked("SLOTTRACE-DUMP-END\n");
+    /* This path never returns: end the fault dump (no-op if none is in
+     * progress on this CPU) so other CPUs' dumps and prints go on. */
+    fault_dump_end();
     semihosting_exit(3);
     for (;;) {
         __asm__ volatile("wfe");
@@ -271,6 +279,8 @@ void slot_trace_pd_tick(uint32_t cpu, int pd)
 
 void slot_trace_bad_sp_fault(void *tf, uint64_t orig_sp)
 {
+    /* Serialized dump, every line tagged with this CPU (fault_dump.h). */
+    (void)fault_dump_begin();
     uint64_t esr, far, elr;
     const uint64_t *x = (const uint64_t *)tf;  /* x0..x30 at 0..240 (trap.h) */
     __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
