@@ -206,3 +206,16 @@ Pushed heads: `c1/harness` 6e39f425, `c2/switch-window` 6ee2f16d (local
   function identical in address and size; differences are `__LINE__`
   immediates only.
 - Lab: C2 holds both boards (Entry 3) until 04:15 UTC.
+
+## Entry 5 (written 02:13 UTC): C1 final push; C1 critic started
+
+- C1 final head `c1/harness` **165cb992** (6e39f425 code; 165cb992
+  check-braces exemption for generated C under build/ plus docs, no kernel
+  source). Evidence `gauntlet-5-hw-pi5` 0068c5be, `run5-hw/c1/`. The
+  builder's report and draft entry are held until the critic files, per the
+  protocol.
+- C1 critic `critic-c1` spawned at 02:12 UTC on Fable, blind: definition of
+  done, the brief's C1, critic protocol and rules sections, heads 8ec0e330 and
+  165cb992, evidence paths, the C0 baseline path. No builder reasoning.
+  QEMU only, no lab. C1 is about 2 h behind its mark (critic was due by
+  01:45 UTC).
