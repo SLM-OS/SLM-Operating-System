@@ -219,3 +219,38 @@ Pushed heads: `c1/harness` 6e39f425, `c2/switch-window` 6ee2f16d (local
   165cb992, evidence paths, the C0 baseline path. No builder reasoning.
   QEMU only, no lab. C1 is about 2 h behind its mark (critic was due by
   01:45 UTC).
+
+## Entry 6 (written 02:55 UTC): C1 critic round 1, FAIL
+
+Correction to Entries 4 and 5: their write times were estimated; Entry 5 was
+written at about 02:08 UTC (heartbeat clock 02:08:48), Entry 4 shortly
+before.
+
+- Verdict: **FAIL**, Fable 5.2, `critic-5-C1.md` (gauntlet/switch-5
+  bff8e775); reproduction logs `gauntlet-5-hw-pi5` 985c7a8b,
+  `run5-hw/c1-critic/` (INDEX.txt). Reproduced at 165cb992: filter x50 50 of
+  50; forced double fault 4 of 4 readable, 0 unprefixed lines; unfiltered
+  summary format unchanged; holder faulting mid-dump completes; holder silent
+  50 ms lets the other CPU dump.
+- Fixes required: (1) SLOT_TRACE fault paths take the dump lock and never
+  release it; (2) a holder stopped mid-dump silences ordinary prints on every
+  other CPU forever (UART lock held for the whole dump); (4) kernel/CLAUDE.md
+  "UART Lock" stale; (5) /ci at one head on a clean tree with real exit codes
+  (step 4 failed in both /ci-form runs on #1230, step 5 passed on retry; the
+  runner recorded rc=0 for failed steps; several steps ran only at 6e39f425).
+- (3) Redefined criterion: neither Jetson path takes a boot argument; a
+  build-time filter is substituted, and `slmos.test=` has run on no target.
+  The orchestrator accepted the deviation at 23:29 UTC, but the critic is
+  right that the bar is the user's: carried to the final report's Dissent
+  section for the user to accept or reject, not fixed this round.
+- Round 2 sent to C1 at 02:54 UTC (fixes 1, 2, 4, 5). C2 warned that a
+  SLOT_TRACE capture must use C1's fixed head.
+- Builder entry for C1 (its draft, written now that the critic has filed):
+  c1/harness 165cb992 on 8ec0e330; filter and repeat (exact names,
+  pass-major, `[ITER k/N]` per run, build-time TEST_FILTER/TEST_REPEAT on both
+  Jetson paths, `slmos.test=` on Pi 5 cmdline.txt unit-tested only, `ktest`
+  in the shell); fault dumps serialized by a lock that gives up after 50 ms of
+  holder silence; builder counts filter x50 50/50, double fault 5/5, no-lock
+  control interleaved 3/3, #1230 litmus load tally (`litmus-ab/TALLY.md`,
+  48bb1be3: under load 3.1 head 4 of 4 and base 2 of 2 pass; 3.7 and up head
+  fails 5 of 6, base 3 of 3).
