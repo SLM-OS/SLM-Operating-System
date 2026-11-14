@@ -331,3 +331,5 @@ Each default cell carries 164 warning lines (87 unique), almost all
 | Issue | Title | Proposed resolution | Evidence |
 |---|---|---|---|
 | #27 | GPU model-handle mapping / SHM_GPU_ACCESSIBLE | fixed (found by the critic) | a4971f82 (2026-04-06): `runtime/src/mm/model_mem.rs:1554,1574`, `kernel/ipc/ipc.c:637,759`, `kernel/tests/test_ipc.c:161` |
+
+Correction to Entry 7: the exact title of #27 is "Jetson GPU Memory Integration (gpu_map, SHM_GPU_ACCESSIBLE)" (`gh issue view 27`).
