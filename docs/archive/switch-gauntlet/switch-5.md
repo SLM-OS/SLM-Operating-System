@@ -1072,3 +1072,98 @@ PR.
 
 Both boards online, powered on and released; jetson-nano-2 on SD Linux with ESP
 `SLMOS.efi` 789cba62 and no BootNext; pi-5-1 on its original kernels.
+
+## Entry 39 (written 22:40 UTC, from date): close-out session for #1234 rows; critic FAIL; no PR
+
+Single-agent session (2026-11-14, 17:50 to 22:40 UTC), the user's close-out
+request after the final report. Boards one at a time. Evidence
+`gauntlet-5-hw-jetson` aa080076 and `gauntlet-5-hw-pi5` 62a7bbe6, both
+`docs/archive/switch-gauntlet/run5-hw/closeout/`, one file per boot or run,
+banner at the top, written from this session's own labctl output only.
+
+### Head
+
+`c2/switch-window-r2` rebased onto main (dropping the four C1 commits that
+#1243 squash-merged): first onto 1c95b412 (cf16b53d), then, because #1245
+merged during the session, onto dc51107c; plus one docs commit (ADR 0008
+status "accepted", the 0008 row in `docs/adr/README.md`, rule 5 in the
+task-lifecycle section of `docs/architecture.md`). **Head 6a4cfa93**,
+pushed with lease over c0ea0714. Kernel code identical to c0ea0714 (critic:
+range-diff `=` on all 13 fix commits, empty diff outside docs/.github/
+scripts/ci). The docs commit was written before the rows so that every
+banner names the PR head; with no PR it stays on the branch, status
+"accepted" premature (user to decide: keep for a later PR or drop).
+
+### /ci at 6a4cfa93 (`gauntlet-5-hw-pi5` 56d54962, `closeout/ci-6a4cfa93-*.txt`)
+
+All steps pass except step 4 plain `make test`: failed on
+`test_litmus_patterns_pass` alone (#1230), load 2.08. Three more plain
+`make test` runs, one at a time, loads 1.35 to 2.28: **3 of 3 pass**.
+Plain `make test` at the head: 3 of 4, the one failure litmus-only.
+
+### Rows (all at 6a4cfa93; base bench rows at dc51107c)
+
+| Row | Files | Result |
+|---|---|---|
+| Jetson kexec production boot_test x10 | `kexec-prod-6a4cfa93-boot01..10.txt` | 10 of 10 |
+| Jetson UEFI production boot_test x10 | `uefi-prod-6a4cfa93-boot01..10.txt` | 10 of 10 (boot01 cold-booted on the deploy's armed BootNext, disclosed) |
+| `--assert-shares` x20, kexec | `assert-shares-kexec-6a4cfa93-x20.txt` | 20 of 20 PASS |
+| R3 wake x200, UEFI, 1 boot | `uefi-r3w-6a4cfa93-boot01.txt` | **199 of 200**: iteration 116 NOT-FINISHED, bad_gen=0, two_cpus=0; filed **#1262** (P1). 2 supplementary boots 400 of 400 (`-extra-boot01,02`) |
+| R2 x200, kexec | `kexec-r2-6a4cfa93-boot01.txt` | 200 of 200 |
+| Suite, Jetson kexec, 5 boots | `kexec-suite-6a4cfa93-boot01..05.txt` | 5 complete, 14 failures each, all #1109; 0 halts (one truncated capture labelled INCOMPLETE, not counted) |
+| Suite, Jetson UEFI, 5 boots | `uefi-suite-6a4cfa93-boot01..05.txt` | 5 complete, 21 each: #1109 plus the 9 of #1231; 0 halts |
+| Suite, Pi 5, 5 boots | `pi5-suite-6a4cfa93-boot01..05.txt` | 5 complete, 18/18/18/3/18, all #1109; 0 halts |
+| bench context, Jetson kexec | `bench-context-jetson-*`, `bench-context-summary.txt` | base 88.0 ns (sd 2.7), head 97.3 ns (sd 2.0), **+10.6%**; p50 96/96, p95 128/128 |
+| bench context, Pi 5 | `bench-context-pi5-*` | base 100.7 ns (sd 1.0), head 109.0 ns (sd 1.4), +8.3%; p50 93 to 111, p95 111.5 to 112 |
+
+Bench: 3 boots per side, alternating, 2 runs per boot (6 per side, 99
+round trips each). Counter resolution 32 ns (Jetson) and about 18.5 ns
+(Pi 5) per sample, so p50/p95 move only in whole steps; the run means
+differ by more than the run-to-run spread on both boards (no overlap;
+Welch t 6.9 and 11.7). The Jetson slowdown is measured, not noise, and is
+over the 10% bar.
+
+The migration test (#1238) and both R3 tests passed in all 15 suite boots.
+
+### #1207 / #1244 (code reading, comments posted)
+
+On kexec the DTB sits 0x5000 to 0x7000 below `__kernel_end`: the arm64
+header's `image_size` is the file size (`boot.S:48`,
+`kernel-jetson.ld:123`, `.bss`/`.stack` excluded), and kexec-tools places the
+DTB at the first free page above `image_base + image_size`
+(`kexec-arm64.c:766,820`). The PMM reserves only the blob's own
+memreserves and the GA10B/boot-model user reserves (`pmm.c:588-601`), and
+heap region 1 starts at `PAGE_ALIGN_UP(__kernel_end)` (`pmm.c:643,717`).
+The blob overlaps the heap by about 950 KB on every kexec boot (UEFI-path
+blob size; kexec size not printed); the first free-block heads lie inside
+it. Relation to #1207 is a hypothesis, untested. Comments: #1244, #1207.
+
+### Critic
+
+Fable 5.2, blind, `critic-5-closeout.md` (this commit). **VERDICT: FAIL**
+on two rows: R3 wake UEFI boot01 (1 failure in 200, bar 0) and Jetson
+bench context (+10.6%, 95% interval +6.6% to +14.6%, bar 10%). All other
+rows pass. It also notes that after iteration 116 the boot's `moves=`
+rose from about 5x10^4 to about 6x10^4 per iteration and `Cannot migrate
+running task` warnings went to 139 (4 in each extra boot). **No PR**
+(the user's rule: PR only on a critic pass).
+
+### Incidents
+
+- labctl stdio server failed every call from about 18:38 to 19:11 UTC (the
+  lab's labctl services restarted about 18:35 UTC, not by this session);
+  work paused until the user reconnected it. The reconnected session saw
+  this session's own claim as foreign; force-released (reason logged) and
+  re-claimed at 19:12 UTC, gap under a minute; the trigger loop was
+  stopped first. Kexec batch b's first, aborted trigger log was
+  overwritten by the rerun's (it had fired nothing).
+- Kasa plug timed out once on the Pi 5 restore; nothing written; retried.
+
+### Lab end state (22:35 UTC)
+
+jetson-nano-2: released, powered on, SD Linux (BootCurrent 0001), no
+BootNext, ESP `SLMOS.efi` 789cba62 (fresh read-only mount, `fsck.vfat -n`
+clean), `/root/slmos.elf` 098f3163; this session's 4 staged ELFs deleted.
+`/root` holds 48 `*.elf*` files (not 68): deletion of old ELFs awaits the
+user's choice of list. pi-5-1: released, powered on, original
+`kernel_2712.img` restored and booted (banner b42b2c1d).
