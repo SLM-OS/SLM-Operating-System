@@ -423,3 +423,37 @@ entry on, write times come from `date -u`.
   rq_lock[3]) hung 20 of 20 runs on `c2/reverted-wait` 653650d5, no dump,
   120 s timeout (files 09e691ec, `run5-hw/c2/qemu-nodeadlock/`). The spin
   is not yet register-sampled per run; requested.
+
+## Entry 15 (written 05:01 UTC, from date): C3 slot 1 results; handover to C3 again
+
+C3 held jetson-nano-2 03:55 to 04:59 UTC (64 min); board restored (ESP
+789cba62 by fresh read-only mount, fsck clean, no BootNext, SD Linux,
+powered on). Diagnosis head `c3/pmm-halt` 5069e658 (c1/harness 6e39f425 +
+PMM_DEBUG=ON), not a PR head. Files `gauntlet-5-hw-jetson` 27bc1096,
+`run5-hw/c3/` (builder report; the C3 critic counts):
+
+- Filtered `test_checkerboard_fragmentation,test_exhaustion_recovery` x100:
+  kexec 3 boots 600 of 600 pass, UEFI-direct 3 boots 600 of 600 pass, 0
+  PMM_DEBUG reports (`filt-kexec-a2916b76-boot01..03.txt`,
+  `filt-uefi-1fefbfdd-boot01..03.txt`). Finding: the halt does not appear
+  in isolation; it needs state from earlier suites.
+- Full suite, PMM_DEBUG walking every list on every operation, kexec 6
+  boots: test_pmm 48 pass, 2 fail (the known kexec-only coalescing tests), 1
+  ignored in each; test_exhaustion_recovery 6 of 6 pass; 0 free-list
+  corruption reports beyond the self-test's expected one
+  (`suite-kexec-60c548f3-boot01..06.txt`). #1207 not reproduced: 0 of 6
+  against 1 of 10 at 1b85b315, uninformative (0 of 6 at p = 0.1 has
+  probability 0.53). Hypothesis: the debug BSS moves the heap start and the
+  walk slows every PMM operation, either of which could hide the trigger.
+- For C2: 3 of 6 suite boots halted later in Scheduler Tests with #1238-family
+  faults (boot01 CPU 0 idle_4 data abort with ELR 0x80012180, a `mov x0,
+  sp`, not the fault site; boot02 CPU 1 idle_1 PC alignment fault ELR 0x0;
+  boot06 CPU 3 pdm_b EC 0xe). C1's CPU-tagged dumps were readable.
+- The order-10 alloc / order-9 free pattern also exists in gpu_nvidia.c;
+  added to #1240.
+
+**Handover 05:05 UTC: jetson-nano-2 to C3** until 06:30 UTC, for more
+PMM_DEBUG full-suite kexec boots (about 20 needed for 88% odds of a catch at p
+= 0.1; as many as fit). C2 is revising ADR 0008 (round 2) and has no lab need
+before 06:30; its Jetson R2 trace moves to 06:30 to 07:15 if still wanted,
+then fix-head lab.
