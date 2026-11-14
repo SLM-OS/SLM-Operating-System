@@ -1,0 +1,12 @@
+branch c2/trace-r2 tip 4812e82148c437afdb8434d4d79a7ccb32b0480c
+merge-base with origin/main: 8ec0e330dca4d8db5053e0bf2ed2101699a9ff4c
+4812e821 Debug (SLOT_TRACE only): on_cpu on every enqueue and dequeue, migrate event, dump at a busy switch-in (#1234, #1238)
+dac9e623 R1: forced-tick variant test_switch_window_tick_forced for the no-deadlock bar
+6549a20d ADR 0008 (proposed): a task is switched in only after its previous CPU has saved it (#1234, #1238)
+546db640 R3: migrate and wake paths as two tests, so each has its own rate
+dd979e54 R3: migrate and wake phases, aimed at on_cpu; movers stop first; switch_check prints its first failure
+43d0f19b Tests: switch-in window reproducers R1 (SWITCH_WINDOW_TEST) and R3, SWITCH_CHECK instrument (#1234)
+2196deb5 fault_dump_holder_silent: a stamp newer than the counter read is progress
+ef61c69c Fault dumps: end the dump on the SLOT_TRACE exits; a stopped holder cannot silence the console
+165cb992 check-braces: skip C generated into the build tree; testing.md corrections
+6e39f425 Boot-test filter and repeat; serialized fault dumps with CPU-tagged lines

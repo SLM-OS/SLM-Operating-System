@@ -1,0 +1,13 @@
+branch c2/proto-1242 tip 1f58b24908d1a4a9c353fbdaa56af8b005dc4cac
+merge-base with origin/main: 8ec0e330dca4d8db5053e0bf2ed2101699a9ff4c
+1f58b249 EXPERIMENT (not for merge): the design critic's ADR 0008 prototype (critic-proto-adr0008-v2.patch minus its probe hunk) on the C2 tests, for the #1242 base rate
+7a95c012 SWITCH_CHECK: stale-CPU probe in schedule() at the first lock and after the zombie relock (#1242)
+dac9e623 R1: forced-tick variant test_switch_window_tick_forced for the no-deadlock bar
+6549a20d ADR 0008 (proposed): a task is switched in only after its previous CPU has saved it (#1234, #1238)
+546db640 R3: migrate and wake paths as two tests, so each has its own rate
+dd979e54 R3: migrate and wake phases, aimed at on_cpu; movers stop first; switch_check prints its first failure
+43d0f19b Tests: switch-in window reproducers R1 (SWITCH_WINDOW_TEST) and R3, SWITCH_CHECK instrument (#1234)
+2196deb5 fault_dump_holder_silent: a stamp newer than the counter read is progress
+ef61c69c Fault dumps: end the dump on the SLOT_TRACE exits; a stopped holder cannot silence the console
+165cb992 check-braces: skip C generated into the build tree; testing.md corrections
+6e39f425 Boot-test filter and repeat; serialized fault dumps with CPU-tagged lines

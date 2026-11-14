@@ -1,0 +1,7 @@
+branch c2/trace tip 1b7410f11a34b74a92871b957ab66bcb8104b08d
+merge-base with origin/main: 8ec0e330dca4d8db5053e0bf2ed2101699a9ff4c
+1b7410f1 Debug (SLOT_TRACE only): on_cpu on every enqueue and dequeue, migrate event, dump at a busy switch-in (#1234, #1238)
+88d4d71b R3: migrate and wake paths as two tests, so each has its own rate
+6ee2f16d R3: migrate and wake phases, aimed at on_cpu; movers stop first; switch_check prints its first failure
+43179a8f Tests: switch-in window reproducers R1 (SWITCH_WINDOW_TEST) and R3, SWITCH_CHECK instrument (#1234)
+6e39f425 Boot-test filter and repeat; serialized fault dumps with CPU-tagged lines

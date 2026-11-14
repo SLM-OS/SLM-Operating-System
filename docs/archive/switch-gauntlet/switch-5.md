@@ -906,3 +906,18 @@ until 09:20 UTC at the latest). pi-5-1 unheld.
 - Decision experiment running (C2, until 09:40 UTC): `make test
   WORK_STEALING=ON TEST_TIMEOUT=300` at c0ea0714, about 8 runs, QEMU elapsed
   time recorded, QMP register samples if a run passes 120 s.
+
+## Entry 36 (written 09:03 UTC, from date): C2 final report
+
+C2 final head `c2/switch-window-r2` **c0ea0714** (unchanged since the
+orchestrator's /ci). New since Entry 35 (`gauntlet-5-hw-pi5` e1332e6e,
+`run5-hw/c2/qemu-regs-hang/`): regs x2000 WORK_STEALING=ON, fix 2000 of
+2000 and base 2196deb5 2000 of 2000 (max 27 and 28 ms); 3 full `make test
+WORK_STEALING=ON` at TEST_TIMEOUT=240 with a QMP sampler armed, 3 of 3 pass,
+never sampled. The fix-ws-3 timeout stays **open, not reproduced**: 1 of 26
+fix runs against 0 of 9 base runs at the 120 s limit. C2 proposes #1234 and
+#1242 fixed, and #1238 closed with #1234 on the R2 rows (kexec 200 of 200, UEFI
+200 of 200), noting the partial trace. Builder's draft entry, written after its
+critic files, follows in the close-out. Temporary branch tips archived (patch
+and log) under `run5-tools/deleted-branch-tips/` in this commit, for deletion
+after the fix critic files.

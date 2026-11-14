@@ -1,0 +1,8 @@
+branch c2/switch-window tip f1031790c70af288a7454ea6e3ea2f743104f18c
+merge-base with origin/main: 8ec0e330dca4d8db5053e0bf2ed2101699a9ff4c
+f1031790 R1: forced-tick variant test_switch_window_tick_forced for the no-deadlock bar
+d73604f7 ADR 0008 (proposed): a task is switched in only after its previous CPU has saved it (#1234, #1238)
+88d4d71b R3: migrate and wake paths as two tests, so each has its own rate
+6ee2f16d R3: migrate and wake phases, aimed at on_cpu; movers stop first; switch_check prints its first failure
+43179a8f Tests: switch-in window reproducers R1 (SWITCH_WINDOW_TEST) and R3, SWITCH_CHECK instrument (#1234)
+6e39f425 Boot-test filter and repeat; serialized fault dumps with CPU-tagged lines
