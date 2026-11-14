@@ -589,3 +589,33 @@ waiting for the orchestrator (a go, a handover, a verdict), report and end the
 turn, since a message wakes an idle agent. The 03:12 to 05:00 C1 stall and
 C3's 05:30 overrun both follow from this. C1 confirmed its 80
 `run5-hw/c1/` files are intact on origin and stood down.
+
+## Entry 22 (written 06:09 UTC, from date): C3 slot 2; handover to C2 for the rest
+
+- C3 held jetson-nano-2 05:01 to 06:08 UTC (67 min; 38 min past its 05:30
+  end, from the message-delivery problem of Entry 21). Restored: SD Linux,
+  ESP 789cba62 by fresh read-only mount, `fsck.vfat -n` clean, no BootNext,
+  BootCurrent 0001, staged elf removed. Disclosed slip: the ELF was copied to
+  the board a few seconds before `claim_sbc` at about 05:01, inside the
+  handover window, with no labctl action before the claim.
+- Diagnosis head 5069e658 PMM_DEBUG=ON (60c548f3), 10 more full-suite kexec
+  boots (07 to 16): test_pmm 48 pass, 2 fail (kexec coalescing), 1 ignored, and
+  test_exhaustion_recovery passed in each; 0 free-list corruption beyond the
+  self-test. Total **0 of 16** suite boots (`gauntlet-5-hw-jetson` 93cf0922,
+  `run5-hw/c3/suite-kexec-60c548f3-boot01..16.txt`), plus 0 of 1200 filtered
+  iterations. Against run 4's 1 of 10, P(0 of 16 | unchanged rate) = 0.19:
+  weak evidence of a lower rate in this build, not a fix. The WALK_EVERY=0 and
+  --no-helper arms were not run (no catch to discriminate).
+- 9 of 16 suite boots ended later in Scheduler Tests with #1238-family faults
+  (CPU-tagged dumps readable), several right after
+  test_migrate_ready_task_updates_assigned_cpu, with ELRs such as
+  0xa00000003, 0x500000003, 0xb00000001 (hypothesis: a packed value, not a
+  PC); boot10 a silent hang after [FAIL] test_preempt_flag_follows_migrated_task
+  and test_multiple_cores_isolated. Passed to C2.
+- **Handover 06:10 UTC: jetson-nano-2 and pi-5-1 to C2** for 1 or 2 R2 trace
+  boots (reduced from 3, disclosed) and then fix-head rows, release by about
+  08:45 for the fix critic's boots. C3's 06:15 slot deferred: no reproducing
+  build, and C2's rows are the run's main deliverable. C3 to finish offline and
+  report #1207 as open.
+- C2 pushed `c2/switch-window-r2` 4bfc15a5 at 05:51 UTC (ADR corrections or
+  fix; to be reported).
