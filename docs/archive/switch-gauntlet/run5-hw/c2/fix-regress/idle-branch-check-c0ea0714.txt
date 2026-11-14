@@ -1,0 +1,370 @@
+# C2 run 5: idle_task_func branch-by-branch check at fix head c0ea0714 (ADR 0008 rule: every branch that
+# unmasks before its wait reads switch_in_waiting with the tick masked and waits only if it is NULL;
+# every branch that never unmasks keeps check-then-WFE). Production `make kernel` builds of each
+# configuration, disassembly of idle_task_func (full listing below each summary).
+#
+# QEMU (final #else, every CPU): msr daifset,#2; isb; ldr waiting; cbnz -> skip; wfi; msr daifclr,#2  -> masked check, OK
+# Pi 5 default (SECONDARY_PREEMPT=ON): same sequence                                                   -> OK
+# Pi 5 SECONDARY_PREEMPT=OFF (COOP): CPU 0 masked check + wfi + unmask; CPUs 1-3 cbnz -> wfe, no unmask -> OK
+# Jetson default (JETSON_HW_TICK=ON, SECONDARY_PREEMPT=ON): masked check + wfi                         -> OK
+# Jetson JETSON_HW_TICK=OFF (COOP): CPUs 1-5 check -> wfe, no unmask; CPU 0 no wait                    -> OK
+# x86-64: cli; ldr waiting; (if NULL) sti; hlt adjacent (sti shadow covers hlt); else sti             -> OK
+# PI5_FIQ_TIMER: not built (experimental, OFF); source uses daifset/daifclr #3 around the same check.
+
+==== qemu (build log: idle-qemu.log rc=0)
+000000004001ade0 <idle_task_func>:
+    4001ade0:	stp	x29, x30, [sp, #-64]!
+    4001ade4:	mov	x29, sp
+    4001ade8:	stp	x23, x24, [sp, #48]
+    4001adec:	mov	x23, #0x34db                	// #13531
+    4001adf0:	movk	x23, #0xd7b6, lsl #16
+    4001adf4:	movk	x23, #0xde82, lsl #32
+    4001adf8:	stp	x21, x22, [sp, #32]
+    4001adfc:	adrp	x22, 406eb000 <task_table_fallback+0xce90>
+    4001ae00:	movk	x23, #0x431b, lsl #48
+    4001ae04:	add	x22, x22, #0x180
+    4001ae08:	add	x21, x22, #0x3d0
+    4001ae0c:	add	x22, x22, #0x260
+    4001ae10:	stp	x19, x20, [sp, #16]
+    4001ae14:	nop
+    4001ae18:	nop
+    4001ae1c:	nop
+    4001ae20:	mrs	x0, mpidr_el1
+    4001ae24:	bl	4002cbe0 <cpu_logical_id>
+    4001ae28:	cmp	w0, #0x0
+    4001ae2c:	csel	w2, w0, wzr, ge	// ge = tcont
+    4001ae30:	ldr	w1, [x21, x2, lsl #2]
+    4001ae34:	csel	w0, w0, wzr, ge	// ge = tcont
+    4001ae38:	add	w1, w1, #0x1
+    4001ae3c:	str	w1, [x21, x2, lsl #2]
+    4001ae40:	msr	daifset, #0x2
+    4001ae44:	isb
+    4001ae48:	add	x0, x22, w0, sxtw #3
+    4001ae4c:	ldr	x20, [x0]
+    4001ae50:	cbnz	x20, 4001ae68 <idle_task_func+0x88>
+    4001ae54:	wfi
+    4001ae58:	msr	daifclr, #0x2
+    4001ae5c:	isb
+    4001ae60:	bl	4001aa20 <schedule>
+    4001ae64:	b	4001ae20 <idle_task_func+0x40>
+    4001ae68:	msr	daifclr, #0x2
+    4001ae6c:	isb
+    4001ae70:	bl	400303d0 <timer_get_frequency>
+    4001ae74:	mov	x19, x0
+    4001ae78:	add	x20, x20, #0x338
+    4001ae7c:	bl	400303c8 <timer_get_count>
+    4001ae80:	umulh	x19, x19, x23
+    4001ae84:	mov	x24, x0
+    4001ae88:	lsr	x19, x19, #18
+    4001ae8c:	add	x19, x19, x19, lsl #2
+    4001ae90:	add	x19, x19, x19, lsl #2
+    4001ae94:	lsl	x19, x19, #1
+    4001ae98:	b	4001aeb0 <idle_task_func+0xd0>
+    4001ae9c:	bl	400303c8 <timer_get_count>
+    4001aea0:	sub	x0, x0, x24
+    4001aea4:	cmp	x19, x0
+    4001aea8:	b.ls	4001ae60 <idle_task_func+0x80>  // b.plast
+    4001aeac:	yield
+    4001aeb0:	ldapr	w0, [x20]
+    4001aeb4:	cbnz	w0, 4001ae9c <idle_task_func+0xbc>
+    4001aeb8:	bl	4001aa20 <schedule>
+    4001aebc:	b	4001ae20 <idle_task_func+0x40>
+
+
+==== pi5def (build log: idle-pi5def.log rc=0)
+000000000008ab64 <idle_task_func>:
+   8ab64:	stp	x29, x30, [sp, #-64]!
+   8ab68:	mov	x29, sp
+   8ab6c:	stp	x23, x24, [sp, #48]
+   8ab70:	mov	x23, #0x34db                	// #13531
+   8ab74:	movk	x23, #0xd7b6, lsl #16
+   8ab78:	movk	x23, #0xde82, lsl #32
+   8ab7c:	stp	x21, x22, [sp, #32]
+   8ab80:	adrp	x21, 8df000 <cpu_steal_deques+0x2a0>
+   8ab84:	adrp	x22, 8de000 <task_table_fallback+0xce40>
+   8ab88:	add	x21, x21, #0xb00
+   8ab8c:	add	x22, x22, #0xa00
+   8ab90:	add	x21, x21, #0xfd0
+   8ab94:	add	x22, x22, #0x260
+   8ab98:	movk	x23, #0x431b, lsl #48
+   8ab9c:	stp	x19, x20, [sp, #16]
+   8aba0:	mrs	x0, mpidr_el1
+   8aba4:	bl	9cb60 <cpu_logical_id>
+   8aba8:	cmp	w0, #0x0
+   8abac:	csel	w2, w0, wzr, ge	// ge = tcont
+   8abb0:	ldr	w1, [x21, x2, lsl #2]
+   8abb4:	csel	w0, w0, wzr, ge	// ge = tcont
+   8abb8:	add	w1, w1, #0x1
+   8abbc:	str	w1, [x21, x2, lsl #2]
+   8abc0:	msr	daifset, #0x2
+   8abc4:	isb
+   8abc8:	add	x0, x22, w0, sxtw #3
+   8abcc:	ldr	x20, [x0]
+   8abd0:	cbnz	x20, 8abe8 <idle_task_func+0x84>
+   8abd4:	wfi
+   8abd8:	msr	daifclr, #0x2
+   8abdc:	isb
+   8abe0:	bl	89dec <schedule>
+   8abe4:	b	8aba0 <idle_task_func+0x3c>
+   8abe8:	msr	daifclr, #0x2
+   8abec:	isb
+   8abf0:	bl	a0d70 <timer_get_frequency>
+   8abf4:	mov	x19, x0
+   8abf8:	add	x20, x20, #0x338
+   8abfc:	bl	a0d68 <timer_get_count>
+   8ac00:	umulh	x19, x19, x23
+   8ac04:	mov	x24, x0
+   8ac08:	lsr	x19, x19, #18
+   8ac0c:	add	x19, x19, x19, lsl #2
+   8ac10:	add	x19, x19, x19, lsl #2
+   8ac14:	lsl	x19, x19, #1
+   8ac18:	b	8ac30 <idle_task_func+0xcc>
+   8ac1c:	bl	a0d68 <timer_get_count>
+   8ac20:	sub	x0, x0, x24
+   8ac24:	cmp	x19, x0
+   8ac28:	b.ls	8abe0 <idle_task_func+0x7c>  // b.plast
+   8ac2c:	yield
+   8ac30:	ldapr	w0, [x20]
+   8ac34:	cbnz	w0, 8ac1c <idle_task_func+0xb8>
+   8ac38:	bl	89dec <schedule>
+   8ac3c:	b	8aba0 <idle_task_func+0x3c>
+
+
+==== pi5coop (build log: idle-pi5coop.log rc=0)
+000000000008a9e8 <idle_task_func>:
+   8a9e8:	stp	x29, x30, [sp, #-64]!
+   8a9ec:	mov	x29, sp
+   8a9f0:	stp	x23, x24, [sp, #48]
+   8a9f4:	mov	x23, #0x34db                	// #13531
+   8a9f8:	movk	x23, #0xd7b6, lsl #16
+   8a9fc:	movk	x23, #0xde82, lsl #32
+   8aa00:	stp	x21, x22, [sp, #32]
+   8aa04:	adrp	x21, 8df000 <cpu_steal_deques+0x2a0>
+   8aa08:	adrp	x22, 8de000 <task_table_fallback+0xce40>
+   8aa0c:	add	x21, x21, #0xb00
+   8aa10:	add	x22, x22, #0xa00
+   8aa14:	add	x21, x21, #0xfd0
+   8aa18:	add	x22, x22, #0x260
+   8aa1c:	movk	x23, #0x431b, lsl #48
+   8aa20:	stp	x19, x20, [sp, #16]
+   8aa24:	mrs	x0, mpidr_el1
+   8aa28:	bl	9ca00 <cpu_logical_id>
+   8aa2c:	cmp	w0, #0x0
+   8aa30:	csel	w2, w0, wzr, ge	// ge = tcont
+   8aa34:	ldr	w1, [x21, x2, lsl #2]
+   8aa38:	csel	w0, w0, wzr, ge	// ge = tcont
+   8aa3c:	add	w1, w1, #0x1
+   8aa40:	str	w1, [x21, x2, lsl #2]
+   8aa44:	b.gt	8aa6c <idle_task_func+0x84>
+   8aa48:	msr	daifset, #0x2
+   8aa4c:	isb
+   8aa50:	ldr	x20, [x22]
+   8aa54:	cbnz	x20, 8aa84 <idle_task_func+0x9c>
+   8aa58:	wfi
+   8aa5c:	msr	daifclr, #0x2
+   8aa60:	isb
+   8aa64:	bl	89c8c <schedule>
+   8aa68:	b	8aa24 <idle_task_func+0x3c>
+   8aa6c:	add	x0, x22, w0, sxtw #3
+   8aa70:	ldr	x20, [x0]
+   8aa74:	cbnz	x20, 8aa8c <idle_task_func+0xa4>
+   8aa78:	wfe
+   8aa7c:	bl	89c8c <schedule>
+   8aa80:	b	8aa24 <idle_task_func+0x3c>
+   8aa84:	msr	daifclr, #0x2
+   8aa88:	isb
+   8aa8c:	bl	a0a30 <timer_get_frequency>
+   8aa90:	mov	x19, x0
+   8aa94:	add	x20, x20, #0x338
+   8aa98:	bl	a0a28 <timer_get_count>
+   8aa9c:	umulh	x19, x19, x23
+   8aaa0:	mov	x24, x0
+   8aaa4:	lsr	x19, x19, #18
+   8aaa8:	add	x19, x19, x19, lsl #2
+   8aaac:	add	x19, x19, x19, lsl #2
+   8aab0:	lsl	x19, x19, #1
+   8aab4:	b	8aacc <idle_task_func+0xe4>
+   8aab8:	bl	a0a28 <timer_get_count>
+   8aabc:	sub	x0, x0, x24
+   8aac0:	cmp	x19, x0
+   8aac4:	b.ls	8aa64 <idle_task_func+0x7c>  // b.plast
+   8aac8:	yield
+   8aacc:	ldapr	w0, [x20]
+   8aad0:	cbnz	w0, 8aab8 <idle_task_func+0xd0>
+   8aad4:	bl	89c8c <schedule>
+   8aad8:	b	8aa24 <idle_task_func+0x3c>
+   8aadc:	nop
+
+
+==== jetdef (build log: idle-jetdef.log rc=0)
+000000008002c324 <idle_task_func>:
+    8002c324:	stp	x29, x30, [sp, #-64]!
+    8002c328:	mov	x29, sp
+    8002c32c:	stp	x23, x24, [sp, #48]
+    8002c330:	mov	x23, #0x34db                	// #13531
+    8002c334:	movk	x23, #0xd7b6, lsl #16
+    8002c338:	movk	x23, #0xde82, lsl #32
+    8002c33c:	stp	x21, x22, [sp, #32]
+    8002c340:	adrp	x21, 80ac7000 <cpu_steal_deques+0x2a0>
+    8002c344:	adrp	x22, 80ac6000 <task_table_fallback+0xce40>
+    8002c348:	add	x21, x21, #0xb00
+    8002c34c:	add	x22, x22, #0xa00
+    8002c350:	add	x21, x21, #0xfd0
+    8002c354:	add	x22, x22, #0x260
+    8002c358:	movk	x23, #0x431b, lsl #48
+    8002c35c:	stp	x19, x20, [sp, #16]
+    8002c360:	mrs	x0, mpidr_el1
+    8002c364:	bl	80040020 <cpu_logical_id>
+    8002c368:	cmp	w0, #0x0
+    8002c36c:	csel	w2, w0, wzr, ge	// ge = tcont
+    8002c370:	ldr	w1, [x21, x2, lsl #2]
+    8002c374:	csel	w0, w0, wzr, ge	// ge = tcont
+    8002c378:	add	w1, w1, #0x1
+    8002c37c:	str	w1, [x21, x2, lsl #2]
+    8002c380:	msr	daifset, #0x2
+    8002c384:	isb
+    8002c388:	add	x0, x22, w0, sxtw #3
+    8002c38c:	ldr	x20, [x0]
+    8002c390:	cbnz	x20, 8002c3a8 <idle_task_func+0x84>
+    8002c394:	wfi
+    8002c398:	msr	daifclr, #0x2
+    8002c39c:	isb
+    8002c3a0:	bl	8002b5ac <schedule>
+    8002c3a4:	b	8002c360 <idle_task_func+0x3c>
+    8002c3a8:	msr	daifclr, #0x2
+    8002c3ac:	isb
+    8002c3b0:	bl	8004a130 <timer_get_frequency>
+    8002c3b4:	mov	x19, x0
+    8002c3b8:	add	x20, x20, #0x338
+    8002c3bc:	bl	8004a128 <timer_get_count>
+    8002c3c0:	umulh	x19, x19, x23
+    8002c3c4:	mov	x24, x0
+    8002c3c8:	lsr	x19, x19, #18
+    8002c3cc:	add	x19, x19, x19, lsl #2
+    8002c3d0:	add	x19, x19, x19, lsl #2
+    8002c3d4:	lsl	x19, x19, #1
+    8002c3d8:	b	8002c3f0 <idle_task_func+0xcc>
+    8002c3dc:	bl	8004a128 <timer_get_count>
+    8002c3e0:	sub	x0, x0, x24
+    8002c3e4:	cmp	x19, x0
+    8002c3e8:	b.ls	8002c3a0 <idle_task_func+0x7c>  // b.plast
+    8002c3ec:	yield
+    8002c3f0:	ldapr	w0, [x20]
+    8002c3f4:	cbnz	w0, 8002c3dc <idle_task_func+0xb8>
+    8002c3f8:	bl	8002b5ac <schedule>
+    8002c3fc:	b	8002c360 <idle_task_func+0x3c>
+
+
+==== jetcoop (build log: idle-jetcoop.log rc=0)
+000000008002c824 <idle_task_func>:
+    8002c824:	stp	x29, x30, [sp, #-64]!
+    8002c828:	mov	x29, sp
+    8002c82c:	stp	x21, x22, [sp, #32]
+    8002c830:	mov	x22, #0x34db                	// #13531
+    8002c834:	adrp	x21, 80ac6000 <task_table_fallback+0xce40>
+    8002c838:	movk	x22, #0xd7b6, lsl #16
+    8002c83c:	add	x21, x21, #0xa00
+    8002c840:	movk	x22, #0xde82, lsl #32
+    8002c844:	add	x21, x21, #0x260
+    8002c848:	stp	x19, x20, [sp, #16]
+    8002c84c:	adrp	x20, 80ac7000 <cpu_steal_deques+0x2a0>
+    8002c850:	movk	x22, #0x431b, lsl #48
+    8002c854:	add	x20, x20, #0xb00
+    8002c858:	add	x20, x20, #0xf30
+    8002c85c:	stp	x23, x24, [sp, #48]
+    8002c860:	mrs	x0, mpidr_el1
+    8002c864:	bl	800400a0 <cpu_logical_id>
+    8002c868:	cmp	w0, #0x0
+    8002c86c:	csel	w2, w0, wzr, ge	// ge = tcont
+    8002c870:	ldr	w1, [x20, x2, lsl #2]
+    8002c874:	csel	w0, w0, wzr, ge	// ge = tcont
+    8002c878:	add	x3, x21, w0, sxtw #3
+    8002c87c:	add	w1, w1, #0x1
+    8002c880:	str	w1, [x20, x2, lsl #2]
+    8002c884:	ldr	x19, [x3]
+    8002c888:	cmp	w0, #0x0
+    8002c88c:	ccmp	x19, #0x0, #0x0, ne	// ne = any
+    8002c890:	b.ne	8002c8a0 <idle_task_func+0x7c>  // b.any
+    8002c894:	wfe
+    8002c898:	bl	8002b8d0 <schedule>
+    8002c89c:	b	8002c860 <idle_task_func+0x3c>
+    8002c8a0:	cbz	x19, 8002c898 <idle_task_func+0x74>
+    8002c8a4:	bl	80049ff0 <timer_get_frequency>
+    8002c8a8:	mov	x23, x0
+    8002c8ac:	add	x19, x19, #0x338
+    8002c8b0:	bl	80049fe8 <timer_get_count>
+    8002c8b4:	umulh	x23, x23, x22
+    8002c8b8:	mov	x24, x0
+    8002c8bc:	lsr	x23, x23, #18
+    8002c8c0:	add	x23, x23, x23, lsl #2
+    8002c8c4:	add	x23, x23, x23, lsl #2
+    8002c8c8:	lsl	x23, x23, #1
+    8002c8cc:	b	8002c8e4 <idle_task_func+0xc0>
+    8002c8d0:	bl	80049fe8 <timer_get_count>
+    8002c8d4:	sub	x0, x0, x24
+    8002c8d8:	cmp	x23, x0
+    8002c8dc:	b.ls	8002c898 <idle_task_func+0x74>  // b.plast
+    8002c8e0:	yield
+    8002c8e4:	ldapr	w0, [x19]
+    8002c8e8:	cbnz	w0, 8002c8d0 <idle_task_func+0xac>
+    8002c8ec:	bl	8002b8d0 <schedule>
+    8002c8f0:	b	8002c860 <idle_task_func+0x3c>
+    8002c8f4:	nop
+    8002c8f8:	nop
+    8002c8fc:	nop
+
+
+==== x86 (build log: idle-x86.log rc=0)
+000000000010e770 <idle_task_func>:
+  10e770:	endbr64
+  10e774:	push   %r14
+  10e776:	movabs $0x431bde82d7b634db,%r14
+  10e780:	push   %r13
+  10e782:	mov    $0xfee00020,%r13d
+  10e788:	push   %r12
+  10e78a:	push   %rbp
+  10e78b:	push   %rbx
+  10e78c:	jmp    10e797 <idle_task_func+0x27>
+  10e78e:	xchg   %ax,%ax
+  10e790:	sti
+  10e791:	hlt
+  10e792:	call   10da90 <schedule>
+  10e797:	mov    0x0(%r13),%edi
+  10e79b:	shr    $0x18,%edi
+  10e79e:	call   103f30 <cpu_logical_id>
+  10e7a3:	xor    %edx,%edx
+  10e7a5:	test   %eax,%eax
+  10e7a7:	cmovs  %edx,%eax
+  10e7aa:	mov    %eax,%ecx
+  10e7ac:	mov    0x3146d60(,%rcx,4),%edx
+  10e7b3:	add    $0x1,%edx
+  10e7b6:	mov    %edx,0x3146d60(,%rcx,4)
+  10e7bd:	cli
+  10e7be:	cltq
+  10e7c0:	mov    0x3146e80(,%rax,8),%rbx
+  10e7c8:	test   %rbx,%rbx
+  10e7cb:	je     10e790 <idle_task_func+0x20>
+  10e7cd:	sti
+  10e7ce:	call   1037e0 <timer_get_frequency>
+  10e7d3:	mov    %rax,%rbp
+  10e7d6:	call   1037b0 <timer_get_count>
+  10e7db:	mov    %rax,%r12
+  10e7de:	mov    %rbp,%rax
+  10e7e1:	mul    %r14
+  10e7e4:	shr    $0x12,%rdx
+  10e7e8:	lea    (%rdx,%rdx,4),%rax
+  10e7ec:	lea    (%rax,%rax,4),%rbp
+  10e7f0:	add    %rbp,%rbp
+  10e7f3:	jmp    10e807 <idle_task_func+0x97>
+  10e7f5:	nopl   (%rax)
+  10e7f8:	call   1037b0 <timer_get_count>
+  10e7fd:	sub    %r12,%rax
+  10e800:	cmp    %rbp,%rax
+  10e803:	jae    10e792 <idle_task_func+0x22>
+  10e805:	pause
+  10e807:	mov    0x2f8(%rbx),%eax
+  10e80d:	test   %eax,%eax
+  10e80f:	jne    10e7f8 <idle_task_func+0x88>
+  10e811:	jmp    10e792 <idle_task_func+0x22>
+  10e816:	cs nopw 0x0(%rax,%rax,1)
+
