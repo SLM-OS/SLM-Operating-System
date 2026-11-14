@@ -12,6 +12,10 @@ load0=$(cut -d' ' -f1-3 /proc/loadavg)
 t0=$(date -u +%FT%TZ)
 make -C "$wt" test QEMU_CPU='cortex-a76 -accel tcg,thread=multi' "$@" > "$out.make" 2>&1
 rc=$?
+# A failed build leaves the previous test-output.log: refuse to record it.
+if grep -q 'Error [0-9]' "$out.make" && ! grep -q 'Running kernel tests' "$out.make"; then
+  echo "# RESULT BUILD-FAILED (not recorded; see $out.make)"; exit 2
+fi
 load1=$(cut -d' ' -f1-3 /proc/loadavg)
 t1=$(date -u +%FT%TZ)
 ser="$wt/build/test-output.log"
