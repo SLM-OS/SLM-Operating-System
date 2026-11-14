@@ -93,3 +93,13 @@ host.
   boot path, and one the December 2025 document, which is not in the repo.
 - Action: the refuted claims and caveats went back to Track B to correct
   on #1245. The ADR bodies remain unchecked by any critic.
+
+## Entry 4: Track B corrections
+
+- #1245 updated to 6b00c3b3 (`git log -1 origin/structural/architecture-record`).
+- All 6 refuted claims are corrected, along with the 7 caveats and
+  unconfirmed claim #39. The Pi 5 boot row now names the TF-A BL31 loaded
+  as `armstub8-2712.bin`, per `deploy/pi5/config.txt`. The PR body has a
+  "Critic pass" section.
+- Still open: the 8 "ADR 0009 to 0017 records X" claims. No critic has
+  checked them.
