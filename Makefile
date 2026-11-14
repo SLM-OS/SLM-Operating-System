@@ -320,7 +320,17 @@ KERNEL_BLOB_CMAKE_ARGS = \
 KERNEL_CMAKE_ARGS         = $(KERNEL_COMMON_CMAKE_ARGS) $(KERNEL_BLOB_CMAKE_ARGS) $(EXTRA_KERNEL_CMAKE_ARGS)
 KERNEL_KEXEC_CMAKE_ARGS   = $(KERNEL_COMMON_CMAKE_ARGS) -DKEXEC_BUILD=1 $(EXTRA_KERNEL_CMAKE_ARGS)
 KERNEL_BZIMAGE_CMAKE_ARGS = $(KERNEL_COMMON_CMAKE_ARGS) -DBZIMAGE_BUILD=1 $(EXTRA_KERNEL_CMAKE_ARGS)
-KERNEL_TEST_CMAKE_ARGS    = $(KERNEL_COMMON_CMAKE_ARGS) -DENABLE_BOOT_TESTS=ON $(EXTRA_KERNEL_CMAKE_ARGS)
+# Boot-test filter (docs/testing.md "Running selected tests"):
+#   make kernel-test TEST_FILTER=test_a,test_b TEST_REPEAT=50
+# bakes the filter into the test kernel, for boot paths that cannot pass a
+# kernel command line. A change re-configures the build directory (the
+# signature below includes these flags), so an unfiltered build never
+# inherits a cached filter.
+KERNEL_TEST_FILTER_ARGS = \
+	$(if $(TEST_FILTER),-DTEST_FILTER=$(TEST_FILTER)) \
+	$(if $(TEST_REPEAT),-DTEST_REPEAT=$(TEST_REPEAT)) \
+	$(if $(filter ON,$(FAULT_DUMP_SELFTEST)),-DFAULT_DUMP_SELFTEST=ON)
+KERNEL_TEST_CMAKE_ARGS    = $(KERNEL_COMMON_CMAKE_ARGS) -DENABLE_BOOT_TESTS=ON $(KERNEL_TEST_FILTER_ARGS) $(EXTRA_KERNEL_CMAKE_ARGS)
 
 KERNEL_BUILD_SIGNATURE         = $(strip $(KERNEL_CMAKE_ARGS))
 KERNEL_KEXEC_BUILD_SIGNATURE   = $(strip $(KERNEL_KEXEC_CMAKE_ARGS))

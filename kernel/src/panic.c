@@ -7,6 +7,7 @@
 #include "task.h"
 #include "smp.h"
 #include "slot_trace.h"
+#include "fault_dump.h"
 #include "platform.h"     /* RAM_BASE / RAM_SIZE for stack-dump bounds */
 #include <stdint.h>
 #include <stdarg.h>
@@ -160,6 +161,9 @@ void panic(const char *fmt, ...)
     __asm__ volatile("msr daifset, #0xF");
 #endif
 
+    /* One dump at a time, every line tagged with this CPU (fault_dump.h). */
+    (void)fault_dump_begin();
+
     uart_puts_unlocked("\n\n");
     uart_puts_unlocked("*********************************\n");
     uart_puts_unlocked("***      KERNEL PANIC         ***\n");
@@ -252,6 +256,7 @@ void panic(const char *fmt, ...)
     }
 
     uart_puts_unlocked("\nSystem halted.\n");
+    fault_dump_end();
 
     /* Infinite loop - system is dead */
     while (1) {

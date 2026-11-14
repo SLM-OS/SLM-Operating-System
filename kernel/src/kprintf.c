@@ -20,20 +20,117 @@
 #include "uart.h"
 #include "spinlock.h"
 #include "string.h"
+#include "fault_dump.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* UART lock for thread-safe printf: a cacheable spinlock with IRQ
  * save/restore on every platform. It is a real cross-CPU lock once
  * vmm_init sets spinlock_hw_enabled (barrier only before that, when only
- * CPU 0 runs), so secondary CPUs may print. Panic and exception paths use
- * the _unlocked variants and never take it. */
+ * CPU 0 runs), so secondary CPUs may print. During a fault dump
+ * (fault_dump.h) the dumping CPU skips it and holds it for the dump's
+ * length, and an ordinary printer stops waiting for it once the dump's
+ * holder has printed nothing for FAULT_DUMP_STALL_MS. */
 static spinlock_t uart_lock = SPINLOCK_INIT;
 
+static irq_flags_t uart_lock_ordinary(bool *held);
+
 #define UART_LOCK_IRQSAVE() \
-    irq_flags_t _uart_flags = spin_lock_irqsave(&uart_lock)
+    bool _uart_held; \
+    irq_flags_t _uart_flags = uart_lock_ordinary(&_uart_held)
 
 #define UART_UNLOCK_IRQRESTORE() \
-    spin_unlock_irqrestore(&uart_lock, _uart_flags)
+    do { \
+        if (_uart_held) { \
+            spin_unlock(&uart_lock); \
+        } \
+        irq_restore(_uart_flags); \
+    } while (0)
+
+/* Every character the kprintf layer prints goes through here, so a CPU
+ * inside a fault dump gets its "[cpuN] " line prefix on every path. */
+static inline void kputc(char c)
+{
+    if (fault_dump_cpus != 0) {
+        fault_dump_putc(c);
+    } else {
+        uart_putc(c);
+    }
+}
+
+/* Hold the UART lock for the length of a fault dump. IRQs are already
+ * masked. Gives up after wait_ticks of the counter (or if the counter
+ * stops moving), so a holder that faulted cannot block the dump. */
+bool uart_lock_try_hold(uint64_t wait_ticks, uint64_t (*now)(void));
+void uart_lock_hold_release(void);
+
+bool uart_lock_try_hold(uint64_t wait_ticks, uint64_t (*now)(void))
+{
+    const uint64_t t0 = now();
+    uint64_t last = t0;
+    uint32_t frozen = 0;
+    for (;;) {
+        if (spin_trylock(&uart_lock)) {
+            return true;
+        }
+        const uint64_t t = now();
+        if (t - t0 >= wait_ticks) {
+            return false;
+        }
+        if (t == last) {
+            if (++frozen >= 1000000u) {
+                return false;
+            }
+        } else {
+            frozen = 0;
+            last = t;
+        }
+    }
+}
+
+void uart_lock_hold_release(void)
+{
+    spin_unlock(&uart_lock);
+}
+
+/* Test hook: is the UART lock held right now (by anyone)? */
+bool uart_lock_is_held(void);
+bool uart_lock_is_held(void)
+{
+    return spin_is_locked(&uart_lock) != 0;
+}
+
+/* Take the UART lock for an ordinary print. With no fault dump in
+ * progress this waits as long as it takes, like spin_lock_irqsave. While
+ * a dump is in progress:
+ *   - the dumping CPU does not take it (its dump may hold it);
+ *   - any other CPU waits only while the dump's holder keeps printing: a
+ *     holder that stopped mid-dump (hung, or parked without ending the
+ *     dump) would otherwise hold the lock for good, and every CPU's next
+ *     print would spin forever with IRQs masked. After
+ *     FAULT_DUMP_STALL_MS of silence the print goes out without the lock.
+ * *held says whether the lock was taken. */
+static irq_flags_t uart_lock_ordinary(bool *held)
+{
+    irq_flags_t flags = irq_save();
+    for (;;) {
+        if (fault_dump_cpus != 0) {
+            if (fault_dump_this_cpu() || fault_dump_holder_silent()) {
+                *held = false;
+                return flags;
+            }
+        }
+        if (spin_trylock(&uart_lock)) {
+            *held = true;
+            return flags;
+        }
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+}
 
 /* ========================================================================
  * Output Abstraction
@@ -61,7 +158,7 @@ struct fmt_output {
 /* UART backend: write character to hardware UART */
 static void uart_out_putc(struct fmt_output *out, char c)
 {
-    uart_putc(c);
+    kputc(c);
     out->count++;
 }
 
@@ -114,9 +211,9 @@ void uart_puts_unlocked(const char *s)
 {
     while (*s) {
         if (*s == '\n') {
-            uart_putc('\r');
+            kputc('\r');
         }
-        uart_putc(*s++);
+        kputc(*s++);
     }
 }
 

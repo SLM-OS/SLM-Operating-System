@@ -368,6 +368,14 @@ option(ENABLE_BOOT_TESTS "Run tests at boot instead of interactive shell" OFF)
 if(ENABLE_BOOT_TESTS)
     add_compile_definitions(ENABLE_BOOT_TESTS=1)
 endif()
+# Forced concurrent faults on CPUs 1 and 2, to show that two dumps stay
+# readable (kernel/tests/test_fault_dump.c). Boot-test kernels only; the
+# harness then runs that test alone. Default OFF; adds no code when OFF.
+#   make test FAULT_DUMP_SELFTEST=ON
+option(FAULT_DUMP_SELFTEST "Boot tests: force two concurrent faults and check both dumps" OFF)
+if(FAULT_DUMP_SELFTEST AND ENABLE_BOOT_TESTS)
+    add_compile_definitions(FAULT_DUMP_SELFTEST=1)
+endif()
 # Hardware measurement set for #1193: a boot-test kernel that runs only
 # the coherency and multi-core integration suites. Use with
 #   make kernel-test PLATFORM=<P> EXTRA_KERNEL_CMAKE_ARGS=-DBOOT_TESTS_HW_SET=ON
@@ -862,6 +870,7 @@ set(KERNEL_SOURCES
     kernel/src/main.c
     kernel/src/panic.c
     kernel/src/kprintf.c
+    kernel/src/fault_dump.c     # serialized exception/panic dumps
     kernel/src/string.c
 
     # Shell (core + command modules)
@@ -1065,6 +1074,11 @@ set(KERNEL_SOURCES
 set(TEST_SOURCES
     kernel/tests/unity.c
     kernel/tests/test_harness.c
+    # Boot-test filter and repeat (docs/testing.md "Running selected tests")
+    kernel/tests/test_filter.c
+    kernel/tests/test_test_filter.c
+    # Serialized fault dumps (kernel/include/fault_dump.h)
+    kernel/tests/test_fault_dump.c
     # Wall-clock bounded waits shared by the tests (#1202, #1205)
     kernel/tests/test_wait.c
     kernel/tests/test_ipc.c
@@ -1419,6 +1433,38 @@ else()
     # PIE causes GOT-relative symbol lookups that fail after kexec on
     # Jetson because the GOT page may not be cache-coherent.
     target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fno-pie)
+endif()
+
+# Boot-test filter (docs/testing.md "Running selected tests"): the test name
+# -> suite index, generated from the RUN_TEST lists, and the build-time
+# default filter. Boot-test kernels only; other images keep the weak empty
+# index in test_filter.c.
+if(ENABLE_BOOT_TESTS)
+    set(TEST_INDEX_GEN "${CMAKE_BINARY_DIR}/generated/test_index_gen.c")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+    # Every test file, compiled on this platform or not: a name indexed but
+    # not built simply never runs (the run reports it as not found).
+    file(GLOB TEST_INDEX_INPUTS CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/kernel/tests/*.c")
+    add_custom_command(
+        OUTPUT  "${TEST_INDEX_GEN}"
+        COMMAND python3 "${CMAKE_SOURCE_DIR}/scripts/gen-test-index.py"
+                "${TEST_INDEX_GEN}" ${TEST_INDEX_INPUTS}
+        DEPENDS "${CMAKE_SOURCE_DIR}/scripts/gen-test-index.py" ${TEST_INDEX_INPUTS}
+        COMMENT "Generating boot-test index"
+        VERBATIM)
+    target_sources(slmos.elf PRIVATE "${TEST_INDEX_GEN}")
+
+    set(TEST_FILTER "" CACHE STRING "Boot tests: run only these tests (comma-separated)")
+    set(TEST_REPEAT "" CACHE STRING "Boot tests: passes over TEST_FILTER")
+    if(NOT TEST_FILTER STREQUAL "")
+        target_compile_definitions(slmos.elf PRIVATE
+            "SLMOS_TEST_FILTER_DEFAULT=\"${TEST_FILTER}\"")
+    endif()
+    if(NOT TEST_REPEAT STREQUAL "")
+        target_compile_definitions(slmos.elf PRIVATE
+            "SLMOS_TEST_REPEAT_DEFAULT=\"${TEST_REPEAT}\"")
+    endif()
 endif()
 
 # SLM golden tests against llama.cpp (#475). On every platform, since the

@@ -303,6 +303,12 @@ int test_suite_sched_trace(void);
 /* bench stealing --assert-shares decision (#1216) */
 int test_suite_steal_shares(void);
 
+/* Boot-test filter parser + generated index (docs/testing.md) */
+int test_suite_test_filter(void);
+
+/* Fault-dump lock primitive; forced double fault under FAULT_DUMP_SELFTEST */
+int test_suite_fault_dump(void);
+
 /* Latency histogram + EWMA rate tests (admin & telemetry suite, M1) */
 int test_suite_latency_hist(void);
 

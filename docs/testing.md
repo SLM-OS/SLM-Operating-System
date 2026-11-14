@@ -200,6 +200,156 @@ Tests use consistent markers for pass/fail detection:
 
 The Makefile primarily uses the semihosting exit code to determine pass/fail, with fallback to output parsing for crash detection.
 
+### Running Selected Tests (Filter and Repeat)
+
+A boot-test kernel can run only some tests, many times. The filter is a
+comma-separated list of exact `RUN_TEST` names (letters, digits and `_`, at
+most 16 names of at most 95 characters); the repeat count is the number of
+passes over those names, 1 to 1000000 (default 1). Each pass enters the
+suites that hold the named tests in the usual suite order and runs each named
+test once, so `a,b` with repeat 3 runs `a b a b a b`. Tests that are not
+named are skipped without output; the Rust FFI tests are skipped.
+
+The filter comes from the first of these that is set:
+
+| Source | Syntax | Notes |
+|--------|--------|-------|
+| Kernel command line (`/chosen/bootargs`, ARM64) | `slmos.test=<a,b> slmos.test_repeat=<N>` | Pi 5 `cmdline.txt`. Tokens may sit anywhere in the line. QEMU boots the ELF with no device tree (`DTB parsing failed`), and x86-64 reads no command line: use the build-time filter there. |
+| Build time | `make kernel-test TEST_FILTER=<a,b> TEST_REPEAT=<N>` (also `make test ...`) | Baked into the image; used when the command line has no `slmos.test=`. The flags are part of the build signature, so a later build without them re-configures and drops the filter. |
+| Shell of a boot-test kernel | `ktest <a,b> [N]` | After the boot run has finished (hardware only; QEMU exits after the run). |
+
+A filtered run prints, in place of the per-suite `[TEST]` headers and
+counts:
+
+```
+[FILTER] tests=test_preempt_flag_follows_migrated_task repeat=50 source=cmdline index=2879
+  [ITER 1/50]  [PASS] test_preempt_flag_follows_migrated_task (41210 us)
+  ...
+  [ITER 50/50]  [PASS] test_preempt_flag_follows_migrated_task (40877 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=50 passed=50 failed=0 ignored=0 us min=... avg=... max=...
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+```
+
+One `[ITER k/N]` line is printed when each run of a test finishes, with its
+result and elapsed time (generic timer counter on ARM64, TSC on x86-64). A
+fault inside run k therefore shows `[ITER k-1/N]` as the last line before the
+dump. Assertion messages print as usual above the iteration line. A name
+that never ran (a typo, or a test compiled out on this platform) is a
+`[FAIL] ... not found (0 runs)` line and counts as a failure; an unparseable
+filter fails the run before any test (`[FILTER] [FAIL] ... unparseable`).
+With no filter, the output is unchanged.
+
+Suite selection uses an index from test name to suite, generated at build
+time from the `RUN_TEST` lists by `scripts/gen-test-index.py`
+(`build/kernel-test/generated/test_index_gen.c`). A name missing from the
+index makes the run enter every suite (slower, still correct) and says so.
+Suite code outside `RUN_TEST` (setup lines, `migrate_spin_cleanup()` at the
+end of the scheduler suite) runs once per pass in the selected suites.
+
+**How each hardware boot path passes it.** The Jetson boot paths cannot
+pass a command line without changing the board: `slmos-kexec` passes Linux's
+own `/proc/cmdline` (it has no option to append to it), and the UEFI-direct
+path boots `SLMOS.efi` with the firmware's device tree. Use the build-time
+filter on both, and on Pi 5 too unless the card's `cmdline.txt` is to be
+edited:
+
+```bash
+# Jetson kexec: build, then deploy and boot as usual (slmos-kexec <elf>).
+make kernel-test PLATFORM=JETSON_ORIN_NANO \
+    TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+#   -> build/kernel-test/slmos.elf
+
+# Jetson UEFI-direct: the same build (plus any flags the image needs, such
+# as the operator library); deploy build/kernel-test/slmos.bin with
+# scripts/jetson-uefi-deploy.sh and boot with BootNext as usual.
+make kernel-test PLATFORM=JETSON_ORIN_NANO \
+    TEST_FILTER=test_checkerboard_fragmentation,test_exhaustion_recovery TEST_REPEAT=100
+
+# Pi 5: the same build-time flags (deploy the test image as kernel_2712.img
+# and kernel8.img), or leave the image unfiltered and append to the single
+# line of cmdline.txt on the boot partition:
+#   slmos.test=test_preempt_flag_follows_migrated_task slmos.test_repeat=200
+make kernel-test PLATFORM=RASPI5 \
+    TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=200
+```
+
+The banner line `[FILTER] tests=... repeat=... source=build|cmdline|shell`
+records which filter the kernel ran. In QEMU:
+
+```bash
+make test TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=50
+make test TEST_TIMEOUT=600 TEST_FILTER=... TEST_REPEAT=...   # long runs
+```
+
+**Deviation from a boot argument (switch gauntlet run 5).** Run 5's brief
+asked for a filter passed as a kernel command line or boot argument on all
+three hardware paths. The command-line source exists and Pi 5 can use it
+(`cmdline.txt`), but neither Jetson path can carry it without changing the board (the
+installed `slmos-kexec` and the ESP boot entry), which run 5's rules
+forbid, so both Jetson paths use the build-time filter instead. The
+command-line parser is covered by `kernel/tests/test_test_filter.c`; it has
+not been exercised on hardware by run 5's C1.
+
+### Fault Dumps
+
+Exception and panic dumps are serialized (`kernel/include/fault_dump.h`,
+`kernel/src/fault_dump.c`). Each dump path calls `fault_dump_begin()` with
+IRQs masked and `fault_dump_end()` after its last line, right before the
+CPU halts: `panic()`, the ARM64 EL1 synchronous handler (page-fault dump,
+SLOT_TRACE fault lines), the SLOT_TRACE bad-SP dump, and the x86-64
+exception dump.
+
+- **One dump at a time.** A CPU that faults while another dumps waits for
+  the dump lock until the holder finishes, or until the holder has printed
+  nothing for 50 ms, measured on the generic timer counter (TSC on x86-64),
+  or 5 s in all. Then it dumps anyway and its first line says why
+  (`fault_dump: cpu1 holds the dump lock and printed nothing for 50 ms;
+  dumping without it`). A holder that faulted or hung mid-dump therefore
+  delays another dump by about 50 ms and never blocks it. A healthy dump
+  prints a line every few milliseconds, so a second dump waits for it to
+  finish instead of interleaving.
+- **Every line carries its CPU.** While a CPU dumps, every line it prints
+  through `uart_puts`/`uart_printf` (locked or not) starts with `[cpuN] `,
+  including lines printed by helpers such as the stack-canary check and the
+  SLOT_TRACE dump.
+- **No lock can block a dump.** The dumping CPU's own prints skip the UART
+  lock. The dump takes the UART lock itself if it is free within 20 ms, so
+  other CPUs' ordinary prints wait instead of splitting dump lines; if it is
+  not (a CPU faulted while printing), the dump prints without it.
+- **A stopped dump cannot silence the console.** An ordinary print waits for
+  the UART lock only while the dump's holder keeps printing. Once the holder
+  has printed nothing for 50 ms (it hung, or parked without ending its
+  dump), prints from other CPUs go out without the lock. Every dump path
+  calls `fault_dump_end()` before it halts or parks, including both exits
+  of `slot_trace_dump()`.
+- **Early boot.** Before `vmm_init` sets `spinlock_hw_enabled` (MMU off, only
+  the boot CPU running) the dump lock is skipped, because exclusive accesses
+  to non-cacheable memory abort on Cortex-A78AE; the dump prints
+  `fault_dump: no dump lock (MMU off or no timer)` and still prefixes lines.
+  A counter that stops moving cannot turn the wait into a hang: after 10^6
+  polls with no change the wait ends.
+- **x86-64.** The exception handler in `kernel/arch/x86_64/idt.c` and
+  `panic()` use the same lock and prefixes, with the TSC as the counter.
+  The lock-primitive tests run in the x86-64 suite; the forced double
+  fault below is ARM64 only, so concurrent x86-64 dumps are untested.
+
+`kernel/tests/test_fault_dump.c` tests the lock on private instances (free,
+nested, silent holder times out at the stall bound, printing holder holds
+until the cap, release hand-off, frozen counter). `make test
+FAULT_DUMP_SELFTEST=ON` (ARM64, default OFF, no code when OFF) builds a test
+kernel that faults CPU 1 (data abort) and CPU 2 (BRK) at the same instant
+and checks that both dumps complete, then faults CPU 3 and stops it for good
+12 lines into its dump (holding both locks) and checks that CPU 0 still
+prints within 1 s. The harness runs only those two tests, because CPUs 1 to
+3 stay halted. With `SLOT_TRACE=ON` as well, the first fault goes through
+`slot_trace_dump()`, which ends the run through semihosting.
+
 ---
 
 ## Current Test Suites

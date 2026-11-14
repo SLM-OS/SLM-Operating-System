@@ -68,7 +68,10 @@ def git(*args):
 
 
 def exempt(path):
-    return path.startswith("kernel/lib/") or path.endswith((".pb.c", ".pb.h"))
+    # Vendored code, generated protobuf code, and C generated into the build
+    # tree (the boot-test index, build/*/generated/test_index_gen.c).
+    return (path.startswith(("kernel/lib/", "build/"))
+            or path.endswith((".pb.c", ".pb.h")))
 
 
 def unescape(match):
