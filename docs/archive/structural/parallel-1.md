@@ -299,3 +299,35 @@ Each default cell carries 164 warning lines (87 unique), almost all
 - On Pi 5 and Jetson, `-DCOOP_PREEMPT=ON` on its own is silently dropped:
   the `PI5_COOP_PREEMPT` alias defaults OFF and forces it back off. Noted
   in the PR; no issue filed.
+
+## Entry 7: Track A critic (Fable), amendments to Entry 5
+
+- Fable critic, read-only. It checked 30 records drawn at random (seed
+  20261113, `random.sample` over the 236 in `classifications.jsonl`)
+  against each issue and against `origin/main` 8ec0e330. Full table:
+  `scratchpad/critic-A.md` (session scratch, not committed).
+- **Agreement: 27 of 30 (90%).** By field: origin 29/30, kind 30/30,
+  status 28/30.
+- The three disagreements, and what was done about each:
+  - **#27** was marked valid; the critic says fixed by a4971f82
+    (2026-04-06). `gpu_map` and `gpu_unmap` are at
+    `runtime/src/mm/model_mem.rs:1554,1574`, and `SHM_GPU_ACCESSIBLE` is
+    at `kernel/ipc/ipc.c:637,759`. **Added as close candidate 54**, below.
+  - **#896** was marked fixed by PR #916. The critic says it is only partly
+    done: per-IP auth-failure rate limiting (scope item 11) and the no-echo
+    password prompt are not delivered. `sshd.c:144` defers the rate
+    limiting to #895, but #895 treats it as specified elsewhere, so closing
+    #896 would leave it with no owner. **Withdrawn as a close candidate**
+    until those items move to #895. The count of candidates stays at 53.
+  - **#1240** had origin hardware; the critic says agent-followup, because
+    it was found in a QEMU `PMM_DEBUG` run during #1207. **The label was
+    changed on GitHub.**
+- Noted by the critic, with no action taken:
+  - #675 (not-worth-doing) is sound. A close should point to #669 and keep
+    the `origin/chore/batched-prefill` branch.
+  - #28 is valid, but its stated blockers are stale since #1088.
+  - #819's origin (user) is borderline.
+
+| Issue | Title | Proposed resolution | Evidence |
+|---|---|---|---|
+| #27 | GPU model-handle mapping / SHM_GPU_ACCESSIBLE | fixed (found by the critic) | a4971f82 (2026-04-06): `runtime/src/mm/model_mem.rs:1554,1574`, `kernel/ipc/ipc.c:637,759`, `kernel/tests/test_ipc.c:161` |
