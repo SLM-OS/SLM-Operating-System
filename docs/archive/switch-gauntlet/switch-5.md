@@ -390,3 +390,16 @@ entry on, write times come from `date -u`.
   force-push. Builders told to re-pull and check status before their next
   commit there. Process change: every orchestrator commit script stops if the
   pull fails, and the stale worktree is no longer used for evidence.
+
+## Entry 13 (written 04:41 UTC, from date): heartbeat; orphan QEMU; C1 /ci not started
+
+- An orphaned `qemu-system-aarch64` (PID 3381445, parent 1, elapsed 1 day
+  18 h 54 min at 04:40 UTC, about 101% CPU, cwd the orchestrator's worktree
+  bridge-cse_014Q9aryGYwccZqUzMHyre5U) predates this run. It was not started
+  by any run 5 agent, so it is not killed (rule: kill only your own PIDs);
+  reported to the user. It has used about one host core throughout, including
+  during C0's baseline, so every run 5 QEMU rate shares it.
+- C1's PR-head /ci at 2196deb5 had not started at 04:41 UTC (no make, cargo or
+  QEMU process in s5-c1), although ListAgents showed C1 running. Fourth go
+  sent with a request to confirm the start.
+- Host load 5.45 at 04:40 UTC: C2's QEMU (s5-c2-aux), the orphan, C3 builds.
