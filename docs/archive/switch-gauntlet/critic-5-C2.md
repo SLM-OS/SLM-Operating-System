@@ -470,3 +470,21 @@ three). The full test suite ran at c0ea0714 only in QEMU. **Not met.**
 Suggested, not required: a TERMINATED/DESTROYED check on the non-head
 candidate in `pick_ready_locked`; correct the `switch_to` comment about the
 caller's mask.
+
+## Addendum, 09:33 UTC: the builder's long-timeout runs
+
+Counted after the verdict above was pushed, from the serial text of
+`run5-hw/c2/qemu-regs-hang/full-ws-t300-c0ea0714-run01..13.txt`
+(`gauntlet-5-hw-pi5` c4416b8d): 13 full `make test WORK_STEALING=ON` runs
+at c0ea0714, banner checked in each. 0 timeouts;
+`test_regs_every_cpu_reports` passed in 13 of 13; 8 runs with no failing
+test and 5 failing `test_litmus_patterns_pass` only (runs 01, 02, 04, 11,
+13). They ran from 09:04 to 09:25 UTC, overlapping the critic's six full
+runs, so two QEMUs and the stray one shared the host throughout.
+
+The rate for the open row in section 7 becomes 1 timeout in 48 full WS=ON
+runs at the fix head (orchestrator 26, critic 6, builder 3 + 13) against 0
+in 9 on the base. Still not reproduced and still without a cause; fix 5
+stands, with 13 of its 50 runs done (these were not under the QMP sampler).
+The verdict and the other fixes are unchanged: no missing hardware row was
+added by this evidence.
