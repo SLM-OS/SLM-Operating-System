@@ -242,3 +242,60 @@ review 39, hardware 25, golden 2.
 | #1206 | Jetson UEFI-direct: .got is never copied by the relocation and holds stale DRAM (6 live entries) | fixed (high confidence) | 8ec0e330 (#1224 fix) puts .got/.got.plt inside .data in kernel-jetson.ld and kernel.ld; test-jetson-uefi-layout.sh checks nothing lies past __data_end; same defect as closed #1224 |
 | #1211 | test_task_lifecycle memory-leak check failed in 2/20 Pi 5 removal test boots vs 0/10 NC (#1193 run 2) | fixed (medium confidence) | 73d8deb7 (PR #1215) converted the cleanup window to a wall-clock wait; 20/20 NC and 20/20 removal in run 3; old window 0/20 in run 3 |
 | #1223 | Pi 5: KERNEL PANIC on CPU 1 right after the core-latency isolation phase at the split head (NC axis off on Pi 5), 3 of 10 integration boots | duplicate (medium confidence) | duplicate of #1213 (closed, fixed 5b28d065 / PR #1237): run-4 C1 traced the same signature to #1213 sequence B; seen only on the unmerged split head e5b24894 (draft PR #1222); Pi 5 suite 5/5 isolated=10/10 at the fix head |
+
+## Entry 6: Track C result (Rec 5, part 1)
+
+Sources: the Track C report, `gh pr view 1251`, `gh run list --branch
+structural/ci-matrix` and `gh issue view` for 1246 to 1250.
+
+- Draft PR #1251 on branch `structural/ci-matrix`, head 8c4ccff3. It adds
+  `.github/workflows/build-matrix.yml`, the scripts
+  `scripts/ci/{build_matrix.py,build_cell.sh,summarize.py}` and a section
+  in `docs/building.md`. No build option was retired, folded or changed,
+  and no source or build file was touched.
+- First run, 43571376728 (push, 61df7871): 93 ok and 26 failed. Every
+  X86_64 cell failed on missing host GSP firmware. That was a gap in the
+  runner setup, fixed by adding `linux-firmware-nvidia-graphics` to the
+  workflow.
+- Latest run, 43571998789 (push, 8c4ccff3): 112 ok and 7 failed, out of
+  119 built cells (28 QEMU, 34 Pi 5, 34 Jetson, 23 x86), with 35 cells
+  skipped. A skipped cell is an option that does not apply to that
+  platform; each has its reason in the PR. Every cell is report-only, so
+  the run concludes "success".
+- Run 43572707956 (pull_request, same SHA) was still queued when this
+  entry was written.
+
+### Failing cells (filed, not fixed; all origin:review, kind:gap, Backlog)
+
+| Issue | Prio | Cells | Error |
+|---|---|---|---|
+| #1246 | P3 | qemu, pi5, jetson, x86 with `ENABLE_NETWORKING=OFF` (4) | link: telemetry server symbols, plus the Pi 5 mailbox symbols |
+| #1247 | P2 | `x86-ENABLE_GSP_FIRMWARE=OFF` (1) | `#error` in `nvidia_gsp_firmware.S`; CMakeLists.txt:635 always compiles it, so the default x86 build needs a host firmware package |
+| #1248 | P3 | `x86-BUILD_TYPE=Debug` (1) | Rust: `-C lto=thin` is incompatible with Debug's `embed-bitcode=no` |
+| #1249 | P3 | `jetson-JETSON_EL1_SMOKE=ON` (1) | link: relocation truncated in `jetson_el1_smoke.S` |
+
+### New warnings (unique lines not in the platform's default cell)
+
+| Cells | New lines each | What |
+|---|---|---|
+| NET_SSHD on, autostart, demo-allow-all, and the wide cell, on qemu, pi5 and jetson (12) | 7 | implicit declarations in wolfssh and wolfcrypt; the `strtok_r` result is truncated to int (same class as #1199). Filed as #1250 (P3), although no cell fails |
+| `DISABLE_EVICTION=ON` on all 4 platforms | 3 | unused `eviction_blob_*` helpers in `lua_slm.c` |
+| `x86-AI_SCHED=ON`, `x86-AI_WEIGHTS=real`, `x86-wide` | 1 | linker: `fp_context.S` has no `.note.GNU-stack` |
+| `x86-SLM_GPU_GOLDEN=ON` | 1 | the same linker note, for `slm_gpu_golden_embed.S` |
+
+Each default cell carries 164 warning lines (87 unique), almost all
+`-Wpedantic` in Lua's `ljumptab.h`.
+
+### Limits and side findings
+
+- Jetson cells build without nvcc: the operator-library shaders are
+  missing, so GPU paths are CPU-only. The ga10b firmware ships only with
+  JetPack. Hailo blobs, `OPLIB_BLOB`, `MNIST_DIGITS_DIR` and
+  `SLM_GOLDEN_MODEL` all need files from outside the repo. The PR lists
+  all of these as not buildable in CI.
+- The per-platform defaults in `build_matrix.py` were copied by hand from
+  CMakeLists.txt and the Makefile at 8ec0e330. They will drift if those
+  files change.
+- On Pi 5 and Jetson, `-DCOOP_PREEMPT=ON` on its own is silently dropped:
+  the `PI5_COOP_PREEMPT` alias defaults OFF and forces it back off. Noted
+  in the PR; no issue filed.
