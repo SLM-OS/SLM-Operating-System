@@ -4,3 +4,12 @@ base-ws-2 rc=0 start=07:55:08 end=07:58:16 PASSED fails=
 fix-ws-2 rc=0 start=07:58:16 end=08:01:07 PASSED fails=
 base-ws-3 rc=0 start=08:01:07 end=08:04:09 PASSED fails=
 fix-ws-3 rc=2 start=08:04:09 end=08:07:40  fails=
+base-ws-4 rc=2 start=08:07:40 end=08:10:47 FAILED fails=[FAIL]test_litmus_patterns_pass,
+fix-ws-4 rc=2 start=08:10:47 end=08:13:37 FAILED fails=[FAIL]test_litmus_patterns_pass,
+base-ws-5 rc=0 start=08:13:37 end=08:16:44 PASSED fails=
+fix-ws-5 rc=0 start=08:16:44 end=08:19:27 PASSED fails=
+base-ws-6 rc=0 start=08:19:27 end=08:22:28 PASSED fails=
+fix-ws-6 rc=0 start=08:22:28 end=08:25:12 PASSED fails=
+fix-04r rc=2 start=08:25:12 end=08:27:56 FAILED fails=[FAIL]test_litmus_patterns_pass,
+fix-05r rc=0 start=08:27:56 end=08:30:47 PASSED fails=
+DONE
