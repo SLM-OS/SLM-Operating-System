@@ -457,3 +457,14 @@ PMM_DEBUG full-suite kexec boots (about 20 needed for 88% odds of a catch at p
 = 0.1; as many as fit). C2 is revising ADR 0008 (round 2) and has no lab need
 before 06:30; its Jetson R2 trace moves to 06:30 to 07:15 if still wanted,
 then fix-head lab.
+
+## Entry 16 (written 05:01 UTC, from date): lab schedule correction
+
+Correction to Entry 15: C2 held an earlier promise (Entry 8) of jetson-nano-2
+from 05:30 to 06:15 UTC for the Jetson R2 SLOT_TRACE capture (image at
+`c2/trace` 4812e821, rebased onto c1/harness 2196deb5). Lab now: **C3
+05:05 to 05:30**, **C2 05:30 to 06:15** (kexec, up to 3 trace boots, then bench
+smp on the base if time remains), **C3 06:15 to 07:15**. C2 heads:
+`c2/switch-window` 7a95c012 (adds the #1242 stale-CPU probe to SWITCH_CHECK
+and an R3 assertion), new temporary `c2/proto-1242` 1f58b249 (the critic's
+prototype, for the #1242 base rate on base plus deferral).
