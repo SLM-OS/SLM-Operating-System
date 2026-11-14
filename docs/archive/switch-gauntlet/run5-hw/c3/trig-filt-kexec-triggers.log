@@ -1,0 +1,5 @@
+03:55:37 start mode=kexec n=3 elf=/root/slmos-s5c3-a2916b76.elf skip_current_boot_id=87fe5330-ec8d-432c-8c35-1078fa6c7314
+03:57:12 trigger 1/3 boot_id=511dbcca-9bf4-463c-ba8c-dd71e91f1c39 state+uptime=[running 23.95 ] reply=[a2916b76ad2a9f89 ]
+04:00:26 trigger 2/3 boot_id=df50bf32-d2b7-4ae8-9821-f9b79005b0e9 state+uptime=[running 22.88 ] reply=[a2916b76ad2a9f89 ]
+04:03:43 trigger 3/3 boot_id=b5461ba3-13f1-4bc4-ac45-e888d1d78197 state+uptime=[running 25.81 ] reply=[a2916b76ad2a9f89 ]
+04:03:43 end triggers=3
