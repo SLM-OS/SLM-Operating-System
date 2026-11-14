@@ -935,3 +935,57 @@ full WORK_STEALING=ON runs. fix-ws-3 was at least 120 s of QEMU time against
 transient slowdown or a stall that recovered or did not; not decided, since it
 was not sampled. Stays an open row, reported, not filed as a defect without a
 reproduction.
+
+## Entry 38 (written 09:32 UTC, from date): C2 fix verdict FAIL; close-out
+
+### C2 fix verdict
+
+**FAIL** on the bars as written, not on the fix. Fable 5.2,
+`critic-5-C2.md` (gauntlet/switch-5 acb60dee). Holds: the code implements the
+round-2 design with all four corrections; every idle branch that unmasks before
+its wait masks, reads, waits if NULL and unmasks (source, and the Jetson
+disassembly); the critic's own lock graph, written first, has no wait under a
+lock and no cycle; no-deadlock bar met; R1, R2, R3 at 0 under the 5x rule on
+every cell run; the critic reproduced on both heads in QEMU and Jetson kexec (fix
+R2, R3m, R3w 200 of 200 each; base R2 and R3w fail). Fails: (1) missing
+production rows: Jetson boot_test x10 (kexec 3, UEFI 0), --assert-shares 20 of
+20, full-suite boots on all three paths; (2) Fixed cell missing: Jetson UEFI R3
+wake; (3) the bench row is `bench context` without raw capture, Jetson mean +10
+to +13%; (4) no green plain `make test` at c0ea0714 (0 of 3, #1230 litmus;
+the base fails it at least as often under equal load); (5) the timeout, open,
+1 in 48 full fix-head runs against 0 in 9 base, filed as **#1260**. Critic
+evidence placed: `gauntlet-5-hw-pi5` 904277d6 and `gauntlet-5-hw-jetson`
+33efdf51, `run5-hw/c2-fix-critic/` (ELFs listed by sha256, not committed).
+**No C2 PR** (the brief opens one only on a pass). ADR 0008 stays "proposed" on
+`c2/switch-window-r2`.
+
+C2 builder entry (its draft, written now that the critic has filed): see Entry
+36 and C2's final report; baselines and fix-head table as in Entries 8, 24, 34;
+disclosed bar failures as above.
+
+### Branch table
+
+| Branch | Head | State |
+|---|---|---|
+| gauntlet/switch-5 | this commit | log, brief, notes, critic files, run5-tools/ |
+| gauntlet-5-hw-pi5 | 904277d6 | evidence: Pi 5 and QEMU |
+| gauntlet-5-hw-jetson | 33efdf51 | evidence: Jetson |
+| c1/harness | 2196deb5 | **draft PR #1243** |
+| c2/switch-window-r2 | c0ea0714 | kept: fix candidate for #1234/#1242, critic FAIL on rows, no PR |
+| c3/pmm-halt | 321a91be | kept: PMM_DEBUG instrument, no fix, no PR; user to decide |
+| deleted: c2/proto-1242, c2/reverted-wait, c2/reverted-wait-r2, c2/switch-window, c2/trace, c2/trace-r2 | see run5-tools/deleted-branch-tips/ | archived (c90df115), deleted 09:32 UTC |
+
+Local worktrees from this run (s5-*, critic5-c3-*, critic5c2-*, s5-crit-*) are
+left in place for the user; none holds unpushed run-5 evidence except
+`s5-crit-c2d`, which is dirty with the design critic's probe (its evidence is
+placed). Two worktrees had `gauntlet-5-hw-pi5` checked out at once (s5-hw-pi5,
+s5-hw-pi5-c2): the likely cause of both stale-index deletions.
+
+### Lab end state (09:15 UTC check)
+
+jetson-nano-2: online, powered on, released; SD Linux (BootCurrent 0001); ESP
+`SLMOS.efi` **789cba62** (read-only mount); no BootNext; BootOrder unchanged;
+`/root/slmos.elf` 098f3163; no run-5 files in /root (68 older staged ELFs from
+runs 3 and 4 remain). pi-5-1: online, powered on, released; original kernels
+renamed back by C2 (boots b42b2c1d), not re-read by the orchestrator. An orphan
+QEMU (PID 3381445, about 46 h, not from this run) is still running.
