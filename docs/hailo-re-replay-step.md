@@ -1,5 +1,7 @@
 # `hailo replay-step` — Phase 0 Task 0.4 reference
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Status:** Shipped 2026-05-12 (#795 Phase 0). Pinned by `docs/hailo-re-corpus-format.md` §"Lookup rules / SLM-OS"; that spec is the contract this command implements.
 
 The command replays a prefix of an RE corpus against real Hailo NPU hardware and observes a single read, emitting one machine-parseable response line per invocation. It is the SLM-OS leg of the record-and-replay loop SLM-OS runs to reverse-engineer the Hailo BAR4 protocol.

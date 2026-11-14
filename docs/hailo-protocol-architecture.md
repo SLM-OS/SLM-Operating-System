@@ -1,5 +1,7 @@
 # Hailo NPU Protocol Architecture
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Status:** Reference document, anchored to empirical findings on Hailo-8L AI HAT+ with firmware v4.23 on Raspberry Pi 5. Initial capture 2026-05-12 (§"Empirical evidence" — Linux ftrace + kprobe on `hailo_pcie_write_firmware_control`). Extended 2026-05-28 (§"Update 2026-05-28" — host-side wire byte-diff + DMA-content byte-diff, [#1001](https://github.com/SLM-OS/SLM-Operating-System/issues/1001) closed exhausted). Re-validate before assuming the same shape for future firmware revisions or different Hailo SoCs. Corrected 2026-10-19: the 2026-05-12 "two protocols / BAR4-primary" framing was overturned and is retained below only as history (see §"Correction"). The advisor-readable summary of the whole investigation is [`hailo-inference-wedge.md`](hailo-inference-wedge.md).
 
 ## TL;DR

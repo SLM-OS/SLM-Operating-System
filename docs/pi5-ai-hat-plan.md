@@ -1,5 +1,7 @@
 # Pi 5 AI HAT+ (Hailo-8/8L) Support Plan
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Target:** GeeekPi AI HAT+ (Hailo-8L, 13 TOPS) and AI HAT+ 26 TOPS (Hailo-8) on Raspberry Pi 5, end-to-end to running AI inference workloads from SLM-OS.
 
 **Status (2026-10-19):** Phase 0–7 software-complete. **Phase 8 CLOSED
