@@ -2614,6 +2614,9 @@ static bool swo_phase(uint32_t mode)
                                    TEST_WAIT_S(2));
     __atomic_store_n(&swo_stop, 1, __ATOMIC_RELEASE);
     /* Wake sleepers (wake phase) until every worker has exited. */
+#if defined(CONFIG_SWO_DIAG)
+    bool swo_slow_dumped = false;
+#endif
     long long w = -1;
     uint64_t t1 = timer_get_count();
     while (timer_get_count() - t1 < 2 * f) {
@@ -2626,8 +2629,31 @@ static bool swo_phase(uint32_t mode)
             w = (long long)((timer_get_count() - t1) / (f / 1000000));
             break;
         }
+#if defined(CONFIG_SWO_DIAG)
+        /* #1262: a finish that takes over 30 ms (it normally takes a few)
+         * is dumped once, at the 30 ms mark, without failing the test: a
+         * shorter form of the stall leaves the same kind of state. */
+        if (!swo_slow_dumped && timer_get_count() - t1 > (f / 1000) * 30) {
+            struct task *slow[SWO_MAX_WORKERS + SWO_MAX_CPUS];
+            uint32_t nslow = 0;
+            for (uint32_t k = 0; k < nall; k++) {
+                if (__atomic_load_n(&all[k]->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED) {
+                    slow[nslow++] = all[k];
+                }
+            }
+            swo_slow_dumped = true;
+            sched_swo_diag_dump("slow-30ms", slow, nslow);
+        }
+#endif
         yield();
     }
+#if defined(CONFIG_SWO_DIAG)
+    if (swo_slow_dumped || wm > 15000 || w > 15000) {
+        uart_printf("  swo-diag: slow finish, workers %ld us, movers %ld us%s\n",
+                    (long)w, (long)wm,
+                    swo_slow_dumped ? " (includes the dump's UART time)" : "");
+    }
+#endif
 #if defined(CONFIG_SWO_DIAG)
     /* #1262: dump the tasks that did not finish and every CPU's scheduler
      * state, keep polling 1 s, then say whether they finished and dump
