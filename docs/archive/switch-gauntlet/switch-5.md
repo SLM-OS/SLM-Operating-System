@@ -254,3 +254,25 @@ before.
   control interleaved 3/3, #1230 litmus load tally (`litmus-ab/TALLY.md`,
   48bb1be3: under load 3.1 head 4 of 4 and base 2 of 2 pass; 3.7 and up head
   fails 5 of 6, base 3 of 3).
+
+## Entry 7 (written 03:16 UTC): hour mark 5:00; C2 hardware baselines in progress
+
+- C2 has held both boards since 01:46:08 UTC (labctl claim stamp). Entry 3
+  gave the handover as 01:47 UTC, an estimate written after the message was
+  sent; the claim followed the handover message.
+- C2 Jetson kexec baseline (builder report 02:54 UTC, test kernels at
+  88d4d71b, captures in /var/lib/labctl/output/s5-c2-kexec-base-b1..b3,
+  evidence files to be pushed): R2 3 of 3 boots fault in the first
+  iterations (EC 0xe illegal execution state on pdm tasks, EC 0 on idle_5:
+  #1238 signatures); R3 migrate 1 of 3 boots fail; R3 wake 3 of 3 boots hang
+  silently at iteration 1. Builder claims until files are pushed.
+- UEFI-direct reduced to what the brief asks: R2 only, 3 boots, one image,
+  one ESP write. R3 on UEFI only as an extra cell if time remains. Then
+  pi-5-1: R2, R3 migrate, R3 wake, 3 boots each. Stop 04:10, restore,
+  release by 04:15.
+- C2 is behind the 5:00 mark: ADR 0008 not drafted, because the hardware
+  baselines took the C3 slot's hour. Plan: ADR drafted 04:15 to 05:00 UTC,
+  design critic 05:00 to 06:00, fix from 06:00 if the design passes.
+- C1 round 2: fixes pushed (ef61c69c, then 2196deb5); its PR-head /ci running
+  on a quiet host since about 03:10 UTC (C3 holding QEMU and builds). C3:
+  rebases onto C1's head and rebuilds after that /ci, for its 04:15 slot.
