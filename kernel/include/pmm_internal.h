@@ -13,6 +13,8 @@
 
 #include "dtb.h"
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 
 /*
  * Pure carve helper: given a region [start, end) and a list of
@@ -38,5 +40,20 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
                        const dtb_memreserve_t *rsv, int n_rsv,
                        uintptr_t *out_starts, uintptr_t *out_ends,
                        int max_out);
+
+/*
+ * Page-aligned range holding a DTB blob of blob_size bytes at blob_addr
+ * (#1244). Pure. False for a zero-size or wrapping range.
+ */
+bool pmm_dtb_reserve_range(uint64_t blob_addr, uint64_t blob_size,
+                           dtb_memreserve_t *out);
+
+/*
+ * Number of free blocks overlapping [start, end). The unlocked form is for
+ * pmm_init; tests use the _locked form.
+ */
+size_t pmm_free_overlap_count(uintptr_t start, uintptr_t end,
+                              uintptr_t *first_addr, unsigned int *first_order);
+size_t pmm_free_overlap_count_locked(uintptr_t start, uintptr_t end);
 
 #endif /* PMM_INTERNAL_H */

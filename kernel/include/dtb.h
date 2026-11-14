@@ -205,6 +205,15 @@ int dtb_validate(const void *dtb);
 int dtb_get_memreserves(dtb_memreserve_t *out, int max);
 
 /*
+ * Physical range of the DTB blob itself: its address as handed over by the
+ * boot path and the header's totalsize. Returns false when no blob has been
+ * parsed (or on x86-64, which has none). The PMM reserves this range (#1244):
+ * nothing in the blob's own reserve map covers the blob, and a loader may
+ * put it anywhere in RAM, including right after the kernel image.
+ */
+bool dtb_get_blob_range(uint64_t *addr, uint64_t *size);
+
+/*
  * Get the firmware-supplied /chosen entropy + bootloader info. Returns
  * a stable pointer to a static struct populated by dtb_parse. All fields
  * are zero when the corresponding DTB property is absent.

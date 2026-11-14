@@ -561,6 +561,62 @@ void pmm_user_reserve_reset(void)
     pmm_n_user_reserves = 0;
 }
 
+/*
+ * Page-aligned range that holds the DTB blob (#1244): down to the page of
+ * its first byte, up to the page after its last. Pure.
+ */
+bool pmm_dtb_reserve_range(uint64_t blob_addr, uint64_t blob_size,
+                           dtb_memreserve_t *out)
+{
+    if (!out || blob_size == 0 || blob_addr + blob_size < blob_addr) {
+        return false;
+    }
+    uint64_t first = blob_addr & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t last = (blob_addr + blob_size + PAGE_SIZE - 1) &
+                    ~(uint64_t)(PAGE_SIZE - 1);
+    out->addr = first;
+    out->size = last - first;
+    return true;
+}
+
+/*
+ * Number of free blocks that overlap [start, end); the first one found is
+ * returned through first_addr/first_order (may be NULL). Walks every free
+ * list: boot-time and test use only. Caller holds pmm_lock or runs before
+ * any other CPU allocates.
+ */
+size_t pmm_free_overlap_count(uintptr_t start, uintptr_t end,
+                              uintptr_t *first_addr, unsigned int *first_order)
+{
+    size_t n = 0;
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        size_t bsize = order_to_size(o);
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+            uintptr_t a = (uintptr_t)b;
+            if (a < end && a + bsize > start) {
+                if (n == 0) {
+                    if (first_addr) {
+                        *first_addr = a;
+                    }
+                    if (first_order) {
+                        *first_order = o;
+                    }
+                }
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+size_t pmm_free_overlap_count_locked(uintptr_t start, uintptr_t end)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    size_t n = pmm_free_overlap_count(start, end, NULL, NULL);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return n;
+}
+
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
     /* The pmm_split_* scratch arrays are shared file-statics; the
@@ -758,6 +814,41 @@ void pmm_init(void)
                       "before pmm_init",
                       o, (unsigned long)haddr,
                       (unsigned long)naddr, (unsigned long)paddr);
+            }
+        }
+    }
+
+    /*
+     * #1244: no free block may overlap the DTB blob. The blob is read for
+     * the whole life of the kernel (FDT lookups by drivers), and a free
+     * block inside it has its list pointers written over the blob and its
+     * pages handed out. Warn, do not panic: the kernel has run this way,
+     * and the line is the evidence that names the cause.
+     */
+    {
+        uint64_t blob_addr, blob_size;
+        dtb_memreserve_t r;
+        if (dtb_get_blob_range(&blob_addr, &blob_size) &&
+            pmm_dtb_reserve_range(blob_addr, blob_size, &r)) {
+            uintptr_t first = 0;
+            unsigned int first_order = 0;
+            size_t n = pmm_free_overlap_count((uintptr_t)r.addr,
+                                              (uintptr_t)(r.addr + r.size),
+                                              &first, &first_order);
+            if (n) {
+                WARN("PMM: %u free block(s) overlap the DTB at 0x%lx-0x%lx "
+                     "(%u bytes; first block 0x%lx order %u; heap starts "
+                     "0x%lx) (#1244)",
+                     (unsigned)n, (unsigned long)r.addr,
+                     (unsigned long)(r.addr + r.size), (unsigned)blob_size,
+                     (unsigned long)first, first_order,
+                     (unsigned long)buddy_state.heap_start);
+            } else {
+                INFO("PMM: DTB at 0x%lx-0x%lx (%u bytes) is clear of every "
+                     "free block (heap starts 0x%lx)",
+                     (unsigned long)r.addr, (unsigned long)(r.addr + r.size),
+                     (unsigned)blob_size,
+                     (unsigned long)buddy_state.heap_start);
             }
         }
     }
