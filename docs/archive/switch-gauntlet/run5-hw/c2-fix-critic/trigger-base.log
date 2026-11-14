@@ -1,0 +1,5 @@
+08:52:51 start n=3 elfs=[/root/slmos-crit-r3m-3b369aef.elf /root/slmos-crit-r2-3b369aef.elf /root/slmos-crit-r3w-3b369aef.elf] skip_current_boot_id=none
+08:54:18 trigger 1/3 elf=/root/slmos-crit-r3m-3b369aef.elf boot_id=14a88f8a-3ed9-46b4-a2e1-c6bc9d109ccb state+uptime=[running 23.23 ] reply=[c18c74609b321f6e ]
+08:58:02 trigger 2/3 elf=/root/slmos-crit-r2-3b369aef.elf boot_id=d5e40592-a94c-466b-92dd-d6729f95895d state+uptime=[running 27.88 ] reply=[b2f2079354b720e4 ]
+09:01:39 trigger 3/3 elf=/root/slmos-crit-r3w-3b369aef.elf boot_id=9f705081-49cb-4ffe-a171-fdf93780a519 state+uptime=[running 25.36 ] reply=[5d876eab26ace7aa ]
+09:01:39 end triggers=3
