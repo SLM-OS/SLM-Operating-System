@@ -177,3 +177,32 @@ Pushed heads: `c1/harness` 6e39f425, `c2/switch-window` 6ee2f16d (local
 - Process change (all builders, 01:47 UTC): no ending a turn to wait on a
   background task; wait in the foreground or with Monitor. The orchestrator
   checks pushed heads every 30 min.
+
+## Entry 4 (written 02:05 UTC): C2 QEMU baselines; C1 and C3 status; litmus under load
+
+- C2 QEMU baselines (builder report; files on `gauntlet-5-hw-pi5` 87fadeb5,
+  `run5-hw/c2/qemu-base/`; head `c2/switch-window` 88d4d71b = base + C1
+  6e39f425 + tests only; `-accel tcg,thread=multi`; one QEMU at a time;
+  load average 1.2 to 10.0 at start of runs, recorded per file):
+  R3 migrate 20 of 20 failed, mean iterations to first failure 5.55 (each
+  iteration a 300 ms phase); R3 wake 20 of 20 failed, mean 1.1 (7 of 20 are
+  silent hangs, attributed to the window only by exclusion until the fix head
+  completes the same test); R1 11 of 11 failed so far (runs 12 to 20 in
+  progress). Critic to count from the files.
+- C1 (01:52 UTC): sat idle after its /ci finished at 00:06 UTC (same
+  notification failure as C3; disclosed). Head 165cb992. Its /ci at 6e39f425
+  had `make test` and `make test AI_SCHED=ON` each fail exactly one test,
+  `test_litmus_patterns_pass` (#1230 signature, MP weak rows); rerun at
+  165cb992 in progress with load recorded.
+- C3: `test_litmus_patterns_pass` also failed with PMM_DEBUG=OFF at 5069e658
+  (load 5.92 at start, C2 QEMU running), so it is not C3's instrument
+  (files: `gauntlet-5-hw-pi5` b8faefa0, `run5-hw/c3/qemu-pmmdebug-*`).
+  Hypothesis, untested: #1230's litmus rows fail under host load from
+  concurrent QEMU runs; C0's base /ci passed it at load about 2. Consequence
+  for the bars: every PR-head /ci and WORK_STEALING=ON row is run on a quiet
+  host (no other QEMU), scheduled by the orchestrator, with load recorded.
+  C3 filed **#1240** (gpu_stub order-10 alloc, order-9 free: leak, not list
+  corruption; P3-low, Backlog). C3's off-build size compare: every pmm.c
+  function identical in address and size; differences are `__LINE__`
+  immediates only.
+- Lab: C2 holds both boards (Entry 3) until 04:15 UTC.
