@@ -1,0 +1,360 @@
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114062007 (321a91be)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022bd98
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4207aee0
+  End:     0x42080000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42080000 - 0x80000000
+  Total pages:     253824 (1015296 KB)
+  Free pages:      253824 (1015296 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8320 pages (kernel)
+
+  Free list distribution:
+    Order  7 (  512 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_checkerboard_fragmentation,test_exhaustion_recovery repeat=100 source=build index=2896
+  [ITER 1/100]  [PASS] test_checkerboard_fragmentation (1102 us)
+  [ITER 1/100]  [PASS] test_exhaustion_recovery (7831 us)
+  [ITER 2/100]  [PASS] test_checkerboard_fragmentation (219 us)
+  [ITER 2/100]  [PASS] test_exhaustion_recovery (4183 us)
+  [ITER 3/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 3/100]  [PASS] test_exhaustion_recovery (3239 us)
+  [ITER 4/100]  [PASS] test_checkerboard_fragmentation (231 us)
+  [ITER 4/100]  [PASS] test_exhaustion_recovery (3280 us)
+  [ITER 5/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 5/100]  [PASS] test_exhaustion_recovery (3288 us)
+  [ITER 6/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 6/100]  [PASS] test_exhaustion_recovery (3201 us)
+  [ITER 7/100]  [PASS] test_checkerboard_fragmentation (424 us)
+  [ITER 7/100]  [PASS] test_exhaustion_recovery (6122 us)
+  [ITER 8/100]  [PASS] test_checkerboard_fragmentation (219 us)
+  [ITER 8/100]  [PASS] test_exhaustion_recovery (3317 us)
+  [ITER 9/100]  [PASS] test_checkerboard_fragmentation (219 us)
+  [ITER 9/100]  [PASS] test_exhaustion_recovery (3161 us)
+  [ITER 10/100]  [PASS] test_checkerboard_fragmentation (217 us)
+  [ITER 10/100]  [PASS] test_exhaustion_recovery (3944 us)
+  [ITER 11/100]  [PASS] test_checkerboard_fragmentation (274 us)
+  [ITER 11/100]  [PASS] test_exhaustion_recovery (3452 us)
+  [ITER 12/100]  [PASS] test_checkerboard_fragmentation (472 us)
+  [ITER 12/100]  [PASS] test_exhaustion_recovery (3733 us)
+  [ITER 13/100]  [PASS] test_checkerboard_fragmentation (317 us)
+  [ITER 13/100]  [PASS] test_exhaustion_recovery (3191 us)
+  [ITER 14/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 14/100]  [PASS] test_exhaustion_recovery (3299 us)
+  [ITER 15/100]  [PASS] test_checkerboard_fragmentation (336 us)
+  [ITER 15/100]  [PASS] test_exhaustion_recovery (4478 us)
+  [ITER 16/100]  [PASS] test_checkerboard_fragmentation (508 us)
+  [ITER 16/100]  [PASS] test_exhaustion_recovery (6758 us)
+  [ITER 17/100]  [PASS] test_checkerboard_fragmentation (409 us)
+  [ITER 17/100]  [PASS] test_exhaustion_recovery (6557 us)
+  [ITER 18/100]  [PASS] test_checkerboard_fragmentation (347 us)
+  [ITER 18/100]  [PASS] test_exhaustion_recovery (5387 us)
+  [ITER 19/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 19/100]  [PASS] test_exhaustion_recovery (3215 us)
+  [ITER 20/100]  [PASS] test_checkerboard_fragmentation (248 us)
+  [ITER 20/100]  [PASS] test_exhaustion_recovery (4158 us)
+  [ITER 21/100]  [PASS] test_checkerboard_fragmentation (252 us)
+  [ITER 21/100]  [PASS] test_exhaustion_recovery (3386 us)
+  [ITER 22/100]  [PASS] test_checkerboard_fragmentation (241 us)
+  [ITER 22/100]  [PASS] test_exhaustion_recovery (3569 us)
+  [ITER 23/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 23/100]  [PASS] test_exhaustion_recovery (3267 us)
+  [ITER 24/100]  [PASS] test_checkerboard_fragmentation (216 us)
+  [ITER 24/100]  [PASS] test_exhaustion_recovery (3259 us)
+  [ITER 25/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 25/100]  [PASS] test_exhaustion_recovery (3468 us)
+  [ITER 26/100]  [PASS] test_checkerboard_fragmentation (246 us)
+  [ITER 26/100]  [PASS] test_exhaustion_recovery (3280 us)
+  [ITER 27/100]  [PASS] test_checkerboard_fragmentation (231 us)
+  [ITER 27/100]  [PASS] test_exhaustion_recovery (3191 us)
+  [ITER 28/100]  [PASS] test_checkerboard_fragmentation (217 us)
+  [ITER 28/100]  [PASS] test_exhaustion_recovery (3162 us)
+  [ITER 29/100]  [PASS] test_checkerboard_fragmentation (217 us)
+  [ITER 29/100]  [PASS] test_exhaustion_recovery (4009 us)
+  [ITER 30/100]  [PASS] test_checkerboard_fragmentation (216 us)
+  [ITER 30/100]  [PASS] test_exhaustion_recovery (3153 us)
+  [ITER 31/100]  [PASS] test_checkerboard_fragmentation (518 us)
+  [ITER 31/100]  [PASS] test_exhaustion_recovery (3321 us)
+  [ITER 32/100]  [PASS] test_checkerboard_fragmentation (306 us)
+  [ITER 32/100]  [PASS] test_exhaustion_recovery (3760 us)
+  [ITER 33/100]  [PASS] test_checkerboard_fragmentation (223 us)
+  [ITER 33/100]  [PASS] test_exhaustion_recovery (3157 us)
+  [ITER 34/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 34/100]  [PASS] test_exhaustion_recovery (4036 us)
+  [ITER 35/100]  [PASS] test_checkerboard_fragmentation (232 us)
+  [ITER 35/100]  [PASS] test_exhaustion_recovery (3180 us)
+  [ITER 36/100]  [PASS] test_checkerboard_fragmentation (225 us)
+  [ITER 36/100]  [PASS] test_exhaustion_recovery (3274 us)
+  [ITER 37/100]  [PASS] test_checkerboard_fragmentation (224 us)
+  [ITER 37/100]  [PASS] test_exhaustion_recovery (3210 us)
+  [ITER 38/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 38/100]  [PASS] test_exhaustion_recovery (3216 us)
+  [ITER 39/100]  [PASS] test_checkerboard_fragmentation (306 us)
+  [ITER 39/100]  [PASS] test_exhaustion_recovery (3664 us)
+  [ITER 40/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 40/100]  [PASS] test_exhaustion_recovery (3361 us)
+  [ITER 41/100]  [PASS] test_checkerboard_fragmentation (225 us)
+  [ITER 41/100]  [PASS] test_exhaustion_recovery (3208 us)
+  [ITER 42/100]  [PASS] test_checkerboard_fragmentation (217 us)
+  [ITER 42/100]  [PASS] test_exhaustion_recovery (3326 us)
+  [ITER 43/100]  [PASS] test_checkerboard_fragmentation (236 us)
+  [ITER 43/100]  [PASS] test_exhaustion_recovery (3282 us)
+  [ITER 44/100]  [PASS] test_checkerboard_fragmentation (244 us)
+  [ITER 44/100]  [PASS] test_exhaustion_recovery (3382 us)
+  [ITER 45/100]  [PASS] test_checkerboard_fragmentation (226 us)
+  [ITER 45/100]  [PASS] test_exhaustion_recovery (3243 us)
+  [ITER 46/100]  [PASS] test_checkerboard_fragmentation (241 us)
+  [ITER 46/100]  [PASS] test_exhaustion_recovery (4287 us)
+  [ITER 47/100]  [PASS] test_checkerboard_fragmentation (225 us)
+  [ITER 47/100]  [PASS] test_exhaustion_recovery (3231 us)
+  [ITER 48/100]  [PASS] test_checkerboard_fragmentation (217 us)
+  [ITER 48/100]  [PASS] test_exhaustion_recovery (3324 us)
+  [ITER 49/100]  [PASS] test_checkerboard_fragmentation (499 us)
+  [ITER 49/100]  [PASS] test_exhaustion_recovery (4945 us)
+  [ITER 50/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 50/100]  [PASS] test_exhaustion_recovery (3192 us)
+  [ITER 51/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 51/100]  [PASS] test_exhaustion_recovery (3439 us)
+  [ITER 52/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 52/100]  [PASS] test_exhaustion_recovery (3218 us)
+  [ITER 53/100]  [PASS] test_checkerboard_fragmentation (242 us)
+  [ITER 53/100]  [PASS] test_exhaustion_recovery (3577 us)
+  [ITER 54/100]  [PASS] test_checkerboard_fragmentation (210 us)
+  [ITER 54/100]  [PASS] test_exhaustion_recovery (3302 us)
+  [ITER 55/100]  [PASS] test_checkerboard_fragmentation (405 us)
+  [ITER 55/100]  [PASS] test_exhaustion_recovery (4526 us)
+  [ITER 56/100]  [PASS] test_checkerboard_fragmentation (240 us)
+  [ITER 56/100]  [PASS] test_exhaustion_recovery (3280 us)
+  [ITER 57/100]  [PASS] test_checkerboard_fragmentation (218 us)
+  [ITER 57/100]  [PASS] test_exhaustion_recovery (3470 us)
+  [ITER 58/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 58/100]  [PASS] test_exhaustion_recovery (3305 us)
+  [ITER 59/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 59/100]  [PASS] test_exhaustion_recovery (3300 us)
+  [ITER 60/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 60/100]  [PASS] test_exhaustion_recovery (3460 us)
+  [ITER 61/100]  [PASS] test_checkerboard_fragmentation (260 us)
+  [ITER 61/100]  [PASS] test_exhaustion_recovery (3143 us)
+  [ITER 62/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 62/100]  [PASS] test_exhaustion_recovery (3552 us)
+  [ITER 63/100]  [PASS] test_checkerboard_fragmentation (262 us)
+  [ITER 63/100]  [PASS] test_exhaustion_recovery (3321 us)
+  [ITER 64/100]  [PASS] test_checkerboard_fragmentation (298 us)
+  [ITER 64/100]  [PASS] test_exhaustion_recovery (3738 us)
+  [ITER 65/100]  [PASS] test_checkerboard_fragmentation (299 us)
+  [ITER 65/100]  [PASS] test_exhaustion_recovery (3335 us)
+  [ITER 66/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 66/100]  [PASS] test_exhaustion_recovery (3369 us)
+  [ITER 67/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 67/100]  [PASS] test_exhaustion_recovery (3280 us)
+  [ITER 68/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 68/100]  [PASS] test_exhaustion_recovery (3503 us)
+  [ITER 69/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 69/100]  [PASS] test_exhaustion_recovery (3193 us)
+  [ITER 70/100]  [PASS] test_checkerboard_fragmentation (250 us)
+  [ITER 70/100]  [PASS] test_exhaustion_recovery (3262 us)
+  [ITER 71/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 71/100]  [PASS] test_exhaustion_recovery (4555 us)
+  [ITER 72/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 72/100]  [PASS] test_exhaustion_recovery (3422 us)
+  [ITER 73/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 73/100]  [PASS] test_exhaustion_recovery (3222 us)
+  [ITER 74/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 74/100]  [PASS] test_exhaustion_recovery (3085 us)
+  [ITER 75/100]  [PASS] test_checkerboard_fragmentation (372 us)
+  [ITER 75/100]  [PASS] test_exhaustion_recovery (3413 us)
+  [ITER 76/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 76/100]  [PASS] test_exhaustion_recovery (3513 us)
+  [ITER 77/100]  [PASS] test_checkerboard_fragmentation (216 us)
+  [ITER 77/100]  [PASS] test_exhaustion_recovery (3273 us)
+  [ITER 78/100]  [PASS] test_checkerboard_fragmentation (298 us)
+  [ITER 78/100]  [PASS] test_exhaustion_recovery (3762 us)
+  [ITER 79/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 79/100]  [PASS] test_exhaustion_recovery (3319 us)
+  [ITER 80/100]  [PASS] test_checkerboard_fragmentation (245 us)
+  [ITER 80/100]  [PASS] test_exhaustion_recovery (3205 us)
+  [ITER 81/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 81/100]  [PASS] test_exhaustion_recovery (3656 us)
+  [ITER 82/100]  [PASS] test_checkerboard_fragmentation (420 us)
+  [ITER 82/100]  [PASS] test_exhaustion_recovery (5459 us)
+  [ITER 83/100]  [PASS] test_checkerboard_fragmentation (400 us)
+  [ITER 83/100]  [PASS] test_exhaustion_recovery (5950 us)
+  [ITER 84/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 84/100]  [PASS] test_exhaustion_recovery (3255 us)
+  [ITER 85/100]  [PASS] test_checkerboard_fragmentation (213 us)
+  [ITER 85/100]  [PASS] test_exhaustion_recovery (3372 us)
+  [ITER 86/100]  [PASS] test_checkerboard_fragmentation (402 us)
+  [ITER 86/100]  [PASS] test_exhaustion_recovery (5527 us)
+  [ITER 87/100]  [PASS] test_checkerboard_fragmentation (216 us)
+  [ITER 87/100]  [PASS] test_exhaustion_recovery (3232 us)
+  [ITER 88/100]  [PASS] test_checkerboard_fragmentation (229 us)
+  [ITER 88/100]  [PASS] test_exhaustion_recovery (3322 us)
+  [ITER 89/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 89/100]  [PASS] test_exhaustion_recovery (3097 us)
+  [ITER 90/100]  [PASS] test_checkerboard_fragmentation (3233 us)
+  [ITER 90/100]  [PASS] test_exhaustion_recovery (9642 us)
+  [ITER 91/100]  [PASS] test_checkerboard_fragmentation (268 us)
+  [ITER 91/100]  [PASS] test_exhaustion_recovery (3350 us)
+  [ITER 92/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 92/100]  [PASS] test_exhaustion_recovery (3407 us)
+  [ITER 93/100]  [PASS] test_checkerboard_fragmentation (212 us)
+  [ITER 93/100]  [PASS] test_exhaustion_recovery (3118 us)
+  [ITER 94/100]  [PASS] test_checkerboard_fragmentation (214 us)
+  [ITER 94/100]  [PASS] test_exhaustion_recovery (3262 us)
+  [ITER 95/100]  [PASS] test_checkerboard_fragmentation (328 us)
+  [ITER 95/100]  [PASS] test_exhaustion_recovery (4269 us)
+  [ITER 96/100]  [PASS] test_checkerboard_fragmentation (401 us)
+  [ITER 96/100]  [PASS] test_exhaustion_recovery (7200 us)
+  [ITER 97/100]  [PASS] test_checkerboard_fragmentation (223 us)
+  [ITER 97/100]  [PASS] test_exhaustion_recovery (3839 us)
+  [ITER 98/100]  [PASS] test_checkerboard_fragmentation (220 us)
+  [ITER 98/100]  [PASS] test_exhaustion_recovery (3540 us)
+  [ITER 99/100]  [PASS] test_checkerboard_fragmentation (211 us)
+  [ITER 99/100]  [PASS] test_exhaustion_recovery (3128 us)
+  [ITER 100/100]  [PASS] test_checkerboard_fragmentation (260 us)
+  [ITER 100/100]  [PASS] test_exhaustion_recovery (3223 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_checkerboard_fragmentation: runs=100 passed=100 failed=0 ignored=0 us min=210 avg=296 max=3233
+[FILTER] [PASS] test_exhaustion_recovery: runs=100 passed=100 failed=0 ignored=0 us min=3085 avg=3773 max=9642
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Exiting via semihosting...

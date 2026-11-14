@@ -1,0 +1,1383 @@
+
+
+
+Disassembly of section .text:
+
+0000000000000000 <pmm_carve_reserves.part.0>:
+7100007f 	cmp	w3, #0x0
+1a9fc7f0 	cset	w16, le
+aa0003ec 	mov	x12, x0
+f100005f 	cmp	x2, #0x0
+1a9f17e7 	cset	w7, eq	// eq = none
+2a070208 	orr	w8, w16, w7
+2a0803f0 	mov	w16, w8
+35000608 	cbnz	w8, dc <pmm_carve_reserves.part.0+0xdc>
+52800000 	mov	w0, #0x0                   	// #0
+eb01019f 	cmp	x12, x1
+54000602 	b.cs	e8 <pmm_carve_reserves.part.0+0xe8>  // b.hs, b.nlast
+aa0203e9 	mov	x9, x2
+aa0103ef 	mov	x15, x1
+aa0103ee 	mov	x14, x1
+2a1003ea 	mov	w10, w16
+5280000b 	mov	w11, #0x0                   	// #0
+14000009 	b	64 <pmm_carve_reserves.part.0+0x64>
+eb08019f 	cmp	x12, x8
+9a88218e 	csel	x14, x12, x8, cs	// cs = hs, nlast
+eb07003f 	cmp	x1, x7
+9a87902f 	csel	x15, x1, x7, ls	// ls = plast
+1100056b 	add	w11, w11, #0x1
+91004129 	add	x9, x9, #0x10
+6b0b007f 	cmp	w3, w11
+5400024d 	b.le	a8 <pmm_carve_reserves.part.0+0xa8>
+a9401d28 	ldp	x8, x7, [x9]
+5200014d 	eor	w13, w10, #0x1
+8b070107 	add	x7, x8, x7
+eb07011f 	cmp	x8, x7
+54ffff02 	b.cs	54 <pmm_carve_reserves.part.0+0x54>  // b.hs, b.nlast
+eb07019f 	cmp	x12, x7
+fa483020 	ccmp	x1, x8, #0x0, cc	// cc = lo, ul, last
+54fffea9 	b.ls	54 <pmm_carve_reserves.part.0+0x54>  // b.plast
+eb0801df 	cmp	x14, x8
+1a9f97ea 	cset	w10, hi	// hi = pmore
+2a0d014a 	orr	w10, w10, w13
+3707fdaa 	tbnz	w10, #0, 44 <pmm_carve_reserves.part.0+0x44>
+1100056b 	add	w11, w11, #0x1
+5280002a 	mov	w10, #0x1                   	// #1
+91004129 	add	x9, x9, #0x10
+6b0b007f 	cmp	w3, w11
+54fffe0c 	b.gt	64 <pmm_carve_reserves.part.0+0x64>
+3600022a 	tbz	w10, #0, ec <pmm_carve_reserves.part.0+0xec>
+eb0e019f 	cmp	x12, x14
+540000e2 	b.cs	cc <pmm_carve_reserves.part.0+0xcc>  // b.hs, b.nlast
+6b0000df 	cmp	w6, w0
+5400018d 	b.le	e8 <pmm_carve_reserves.part.0+0xe8>
+937d7c07 	sbfiz	x7, x0, #3, #32
+11000400 	add	w0, w0, #0x1
+f827688c 	str	x12, [x4, x7]
+f82768ae 	str	x14, [x5, x7]
+eb0f003f 	cmp	x1, x15
+540000c9 	b.ls	e8 <pmm_carve_reserves.part.0+0xe8>  // b.plast
+aa0f03ec 	mov	x12, x15
+17ffffd5 	b	2c <pmm_carve_reserves.part.0+0x2c>
+52800020 	mov	w0, #0x1                   	// #1
+f900008c 	str	x12, [x4]
+f90000a1 	str	x1, [x5]
+d65f03c0 	ret
+6b0000df 	cmp	w6, w0
+54ffffcd 	b.le	e8 <pmm_carve_reserves.part.0+0xe8>
+937d7c02 	sbfiz	x2, x0, #3, #32
+11000400 	add	w0, w0, #0x1
+f822688c 	str	x12, [x4, x2]
+f82268a1 	str	x1, [x5, x2]
+d65f03c0 	ret
+
+0000000000000108 <pmm_free_pages.part.0>:
+90000007 	adrp	x7, 0 <pmm_carve_reserves.part.0>
+aa0003e3 	mov	x3, x0
+910000e7 	add	x7, x7, #0x0
+f940a0e0 	ldr	x0, [x7, #320]
+eb00007f 	cmp	x3, x0
+54000e63 	b.cc	2e8 <pmm_free_pages.part.0+0x1e0>  // b.lo, b.ul, b.last
+f940a4e0 	ldr	x0, [x7, #328]
+eb00007f 	cmp	x3, x0
+54000e02 	b.cs	2e8 <pmm_free_pages.part.0+0x1e0>  // b.hs, b.nlast
+f2402c7f 	tst	x3, #0xfff
+54000e81 	b.ne	300 <pmm_free_pages.part.0+0x1f8>  // b.any
+aa0303ee 	mov	x14, x3
+f100043f 	cmp	x1, #0x1
+54000289 	b.ls	18c <pmm_free_pages.part.0+0x84>  // b.plast
+52800004 	mov	w4, #0x0                   	// #0
+d2800020 	mov	x0, #0x1                   	// #1
+d37ff800 	lsl	x0, x0, #1
+11000484 	add	w4, w4, #0x1
+eb00003f 	cmp	x1, x0
+54ffffa8 	b.hi	148 <pmm_free_pages.part.0+0x40>  // b.pmore
+71004c9f 	cmp	w4, #0x13
+54001368 	b.hi	3c8 <pmm_free_pages.part.0+0x2c0>  // b.pmore
+d2820000 	mov	x0, #0x1000                	// #4096
+9ac42000 	lsl	x0, x0, x4
+d1000400 	sub	x0, x0, #0x1
+ea00007f 	tst	x3, x0
+54000100 	b.eq	190 <pmm_free_pages.part.0+0x88>  // b.none
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280b422 	mov	w2, #0x5a1                 	// #1441
+14000000 	b	0 <uart_printf>
+d2800004 	mov	x4, #0x0                   	// #0
+d53b422a 	mrs	x10, daif
+d50342df 	msr	daifset, #0x2
+9000000b 	adrp	x11, 0 <spinlock_hw_enabled>
+b9400160 	ldr	w0, [x11]
+34000bc0 	cbz	w0, 318 <pmm_free_pages.part.0+0x210>
+910640e0 	add	x0, x7, #0x190
+52800021 	mov	w1, #0x1                   	// #1
+d50320bf 	sevl
+d503205f 	wfe
+885ffc02 	ldaxr	w2, [x0]
+35ffffc2 	cbnz	w2, 1b0 <pmm_free_pages.part.0+0xa8>
+88027c01 	stxr	w2, w1, [x0]
+35ffff82 	cbnz	w2, 1b0 <pmm_free_pages.part.0+0xa8>
+f940a0ef 	ldr	x15, [x7, #320]
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+9100000d 	add	x13, x0, #0x0
+cb0f0061 	sub	x1, x3, x15
+d34cfc21 	lsr	x1, x1, #12
+386169a0 	ldrb	w0, [x13, x1]
+34000e20 	cbz	w0, 3a0 <pmm_free_pages.part.0+0x298>
+a9be7bfd 	stp	x29, x30, [sp, #-32]!
+d2800032 	mov	x18, #0x1                   	// #1
+910003fd 	mov	x29, sp
+9ac4224c 	lsl	x12, x18, x4
+71004c9f 	cmp	w4, #0x13
+54001060 	b.eq	400 <pmm_free_pages.part.0+0x2f8>  // b.none
+d2820011 	mov	x17, #0x1000                	// #4096
+aa0c03e5 	mov	x5, x12
+9ac42222 	lsl	x2, x17, x4
+ca020062 	eor	x2, x3, x2
+eb0201ff 	cmp	x15, x2
+54000348 	b.hi	274 <pmm_free_pages.part.0+0x16c>  // b.pmore
+f940c0e9 	ldr	x9, [x7, #384]
+2a0403fe 	mov	w30, w4
+52800010 	mov	w16, #0x0                   	// #0
+f9000bf3 	str	x19, [sp, #16]
+8b244ce6 	add	x6, x7, w4, uxtw #3
+f940a4f3 	ldr	x19, [x7, #328]
+9ac42245 	lsl	x5, x18, x4
+eb13005f 	cmp	x2, x19
+54000142 	b.cs	258 <pmm_free_pages.part.0+0x150>  // b.hs, b.nlast
+cb0f0043 	sub	x3, x2, x15
+d2800000 	mov	x0, #0x0                   	// #0
+8b4331a3 	add	x3, x13, x3, lsr #12
+14000003 	b	24c <pmm_free_pages.part.0+0x144>
+eb05001f 	cmp	x0, x5
+540006c2 	b.cs	320 <pmm_free_pages.part.0+0x218>  // b.hs, b.nlast
+38606861 	ldrb	w1, [x3, x0]
+91000400 	add	x0, x0, #0x1
+34ffff81 	cbz	w1, 244 <pmm_free_pages.part.0+0x13c>
+34000050 	cbz	w16, 260 <pmm_free_pages.part.0+0x158>
+f900c0e9 	str	x9, [x7, #384]
+aa0e03e3 	mov	x3, x14
+2a1e03e4 	mov	w4, w30
+f9400bf3 	ldr	x19, [sp, #16]
+cb0f0060 	sub	x0, x3, x15
+d34cfc01 	lsr	x1, x0, #12
+8b050025 	add	x5, x1, x5
+8b0101a1 	add	x1, x13, x1
+8b0501a0 	add	x0, x13, x5
+3800143f 	strb	wzr, [x1], #1
+eb01001f 	cmp	x0, x1
+54ffffc1 	b.ne	280 <pmm_free_pages.part.0+0x178>  // b.any
+f86478e0 	ldr	x0, [x7, x4, lsl #3]
+a9007c60 	stp	x0, xzr, [x3]
+b4000040 	cbz	x0, 29c <pmm_free_pages.part.0+0x194>
+f9000403 	str	x3, [x0, #8]
+91005085 	add	x5, x4, #0x14
+f940ace2 	ldr	x2, [x7, #344]
+f82478e3 	str	x3, [x7, x4, lsl #3]
+f86578e1 	ldr	x1, [x7, x5, lsl #3]
+f940b8e0 	ldr	x0, [x7, #368]
+8b0c0042 	add	x2, x2, x12
+b9400163 	ldr	w3, [x11]
+91000421 	add	x1, x1, #0x1
+f900ace2 	str	x2, [x7, #344]
+91000400 	add	x0, x0, #0x1
+f82578e1 	str	x1, [x7, x5, lsl #3]
+f900b8e0 	str	x0, [x7, #368]
+34000903 	cbz	w3, 3ec <pmm_free_pages.part.0+0x2e4>
+910640e0 	add	x0, x7, #0x190
+889ffc1f 	stlr	wzr, [x0]
+d503209f 	sev
+d51b422a 	msr	daif, x10
+a8c27bfd 	ldp	x29, x30, [sp], #32
+d65f03c0 	ret
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280b1c2 	mov	w2, #0x58e                 	// #1422
+14000000 	b	0 <uart_printf>
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280b262 	mov	w2, #0x593                 	// #1427
+14000000 	b	0 <uart_printf>
+d5033bbf 	dmb	ish
+17ffffaa 	b	1c4 <pmm_free_pages.part.0+0xbc>
+11000484 	add	w4, w4, #0x1
+eb0e005f 	cmp	x2, x14
+9a8e9043 	csel	x3, x2, x14, ls	// ls = plast
+9ac42228 	lsl	x8, x17, x4
+d1000501 	sub	x1, x8, #0x1
+ea03003f 	tst	x1, x3
+54fff901 	b.ne	258 <pmm_free_pages.part.0+0x150>  // b.any
+a9400440 	ldp	x0, x1, [x2]
+b40002c1 	cbz	x1, 398 <pmm_free_pages.part.0+0x290>
+f9000020 	str	x0, [x1]
+b4000040 	cbz	x0, 350 <pmm_free_pages.part.0+0x248>
+f9000401 	str	x1, [x0, #8]
+f94050c0 	ldr	x0, [x6, #160]
+91000529 	add	x9, x9, #0x1
+d1000400 	sub	x0, x0, #0x1
+f90050c0 	str	x0, [x6, #160]
+71004c9f 	cmp	w4, #0x13
+54000480 	b.eq	3f4 <pmm_free_pages.part.0+0x2ec>  // b.none
+ca080062 	eor	x2, x3, x8
+910020c6 	add	x6, x6, #0x8
+52800030 	mov	w16, #0x1                   	// #1
+eb0201ff 	cmp	x15, x2
+54000088 	b.hi	388 <pmm_free_pages.part.0+0x280>  // b.pmore
+aa0303ee 	mov	x14, x3
+2a0403fe 	mov	w30, w4
+17ffffa9 	b	228 <pmm_free_pages.part.0+0x120>
+d2800025 	mov	x5, #0x1                   	// #1
+f900c0e9 	str	x9, [x7, #384]
+9ac420a5 	lsl	x5, x5, x4
+17ffffb5 	b	268 <pmm_free_pages.part.0+0x160>
+f90000c0 	str	x0, [x6]
+17ffffeb 	b	348 <pmm_free_pages.part.0+0x240>
+b9400160 	ldr	w0, [x11]
+34000200 	cbz	w0, 3e4 <pmm_free_pages.part.0+0x2dc>
+910640e0 	add	x0, x7, #0x190
+889ffc1f 	stlr	wzr, [x0]
+d503209f 	sev
+d51b422a 	msr	daif, x10
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa0303e1 	mov	x1, x3
+91000000 	add	x0, x0, #0x0
+14000000 	b	0 <uart_printf>
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+2a0103e3 	mov	w3, w1
+91000000 	add	x0, x0, #0x0
+91000041 	add	x1, x2, #0x0
+5280b362 	mov	w2, #0x59b                 	// #1435
+14000000 	b	0 <uart_printf>
+d5033bbf 	dmb	ish
+17fffff3 	b	3b4 <pmm_free_pages.part.0+0x2ac>
+d5033bbf 	dmb	ish
+17ffffbb 	b	2dc <pmm_free_pages.part.0+0x1d4>
+d2a00105 	mov	x5, #0x80000               	// #524288
+f900c0e9 	str	x9, [x7, #384]
+17ffff9b 	b	268 <pmm_free_pages.part.0+0x160>
+d2a00105 	mov	x5, #0x80000               	// #524288
+17ffff9c 	b	274 <pmm_free_pages.part.0+0x16c>
+
+0000000000000408 <pmm_get_buddy_stats.part.0>:
+d53b4225 	mrs	x5, daif
+d50342df 	msr	daifset, #0x2
+90000004 	adrp	x4, 0 <spinlock_hw_enabled>
+b9400081 	ldr	w1, [x4]
+340003a1 	cbz	w1, 48c <pmm_get_buddy_stats.part.0+0x84>
+90000003 	adrp	x3, 0 <pmm_carve_reserves.part.0>
+52800022 	mov	w2, #0x1                   	// #1
+91000063 	add	x3, x3, #0x0
+91064061 	add	x1, x3, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc26 	ldaxr	w6, [x1]
+35ffffc6 	cbnz	w6, 430 <pmm_get_buddy_stats.part.0+0x28>
+88067c22 	stxr	w6, w2, [x1]
+35ffff86 	cbnz	w6, 430 <pmm_get_buddy_stats.part.0+0x28>
+d2800001 	mov	x1, #0x0                   	// #0
+8b010062 	add	x2, x3, x1
+f9405042 	ldr	x2, [x2, #160]
+f8216802 	str	x2, [x0, x1]
+91002021 	add	x1, x1, #0x8
+f102803f 	cmp	x1, #0xa0
+54ffff61 	b.ne	448 <pmm_get_buddy_stats.part.0+0x40>  // b.any
+a9569c61 	ldp	x1, x7, [x3, #360]
+a9578866 	ldp	x6, x2, [x3, #376]
+a90a1c01 	stp	x1, x7, [x0, #160]
+b9400081 	ldr	w1, [x4]
+a90b0806 	stp	x6, x2, [x0, #176]
+34000141 	cbz	w1, 49c <pmm_get_buddy_stats.part.0+0x94>
+91064063 	add	x3, x3, #0x190
+889ffc7f 	stlr	wzr, [x3]
+d503209f 	sev
+d51b4225 	msr	daif, x5
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+90000003 	adrp	x3, 0 <pmm_carve_reserves.part.0>
+91000063 	add	x3, x3, #0x0
+17ffffeb 	b	444 <pmm_get_buddy_stats.part.0+0x3c>
+d5033bbf 	dmb	ish
+d51b4225 	msr	daif, x5
+d65f03c0 	ret
+
+00000000000004a8 <pmm_carve_reserves>:
+f10000bf 	cmp	x5, #0x0
+fa411002 	ccmp	x0, x1, #0x2, ne	// ne = any
+1a9f37e7 	cset	w7, cs	// cs = hs, nlast
+710000df 	cmp	w6, #0x0
+fa40c884 	ccmp	x4, #0x0, #0x4, gt
+1a9f17e8 	cset	w8, eq	// eq = none
+2a0800e7 	orr	w7, w7, w8
+34000067 	cbz	w7, 4d0 <pmm_carve_reserves+0x28>
+52800000 	mov	w0, #0x0                   	// #0
+d65f03c0 	ret
+17fffecc 	b	0 <pmm_carve_reserves.part.0>
+d503201f 	nop
+d503201f 	nop
+d503201f 	nop
+
+00000000000004e0 <pmm_user_reserve_add>:
+aa0003e5 	mov	x5, x0
+b4000201 	cbz	x1, 524 <pmm_user_reserve_add+0x44>
+90000003 	adrp	x3, 0 <pmm_carve_reserves.part.0>
+91000063 	add	x3, x3, #0x0
+f940cc62 	ldr	x2, [x3, #408]
+f11ffc5f 	cmp	x2, #0x7ff
+54000168 	b.hi	524 <pmm_user_reserve_add+0x44>  // b.pmore
+90000004 	adrp	x4, 0 <pmm_carve_reserves.part.0>
+d37cec47 	lsl	x7, x2, #4
+91000084 	add	x4, x4, #0x0
+91000446 	add	x6, x2, #0x1
+8b021082 	add	x2, x4, x2, lsl #4
+52800000 	mov	w0, #0x0                   	// #0
+f8276885 	str	x5, [x4, x7]
+f900cc66 	str	x6, [x3, #408]
+f9000441 	str	x1, [x2, #8]
+d65f03c0 	ret
+12800000 	mov	w0, #0xffffffff            	// #-1
+d65f03c0 	ret
+
+000000000000052c <pmm_user_reserve_add_array>:
+a9be7bfd 	stp	x29, x30, [sp, #-32]!
+910003fd 	mov	x29, sp
+f9000bf3 	str	x19, [sp, #16]
+b4000440 	cbz	x0, 5c0 <pmm_user_reserve_add_array+0x94>
+aa0103e2 	mov	x2, x1
+b4000401 	cbz	x1, 5c0 <pmm_user_reserve_add_array+0x94>
+90000009 	adrp	x9, 0 <pmm_carve_reserves.part.0>
+90000007 	adrp	x7, 0 <pmm_carve_reserves.part.0>
+91000129 	add	x9, x9, #0x0
+910000e7 	add	x7, x7, #0x0
+f940cd26 	ldr	x6, [x9, #408]
+91002003 	add	x3, x0, #0x8
+52800001 	mov	w1, #0x0                   	// #0
+d2800013 	mov	x19, #0x0                   	// #0
+d37cecc5 	lsl	x5, x6, #4
+910020a5 	add	x5, x5, #0x8
+8b0700a5 	add	x5, x5, x7
+14000002 	b	578 <pmm_user_reserve_add_array+0x4c>
+aa0803f3 	mov	x19, x8
+a97f9c60 	ldp	x0, x7, [x3, #-8]
+91000668 	add	x8, x19, #0x1
+b40002a7 	cbz	x7, 5d4 <pmm_user_reserve_add_array+0xa8>
+f11ffcdf 	cmp	x6, #0x7ff
+54000268 	b.hi	5d4 <pmm_user_reserve_add_array+0xa8>  // b.pmore
+f81f80a0 	stur	x0, [x5, #-8]
+910004c6 	add	x6, x6, #0x1
+91004063 	add	x3, x3, #0x10
+f80104a7 	str	x7, [x5], #16
+52800021 	mov	w1, #0x1                   	// #1
+eb08005f 	cmp	x2, x8
+54fffe81 	b.ne	574 <pmm_user_reserve_add_array+0x48>  // b.any
+0b010273 	add	w19, w19, w1
+f900cd26 	str	x6, [x9, #408]
+2a1303e0 	mov	w0, w19
+f9400bf3 	ldr	x19, [sp, #16]
+a8c27bfd 	ldp	x29, x30, [sp], #32
+d65f03c0 	ret
+52800013 	mov	w19, #0x0                   	// #0
+2a1303e0 	mov	w0, w19
+f9400bf3 	ldr	x19, [sp, #16]
+a8c27bfd 	ldp	x29, x30, [sp], #32
+d65f03c0 	ret
+34000041 	cbz	w1, 5dc <pmm_user_reserve_add_array+0xb0>
+f900cd26 	str	x6, [x9, #408]
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa1303e4 	mov	x4, x19
+aa1303e1 	mov	x1, x19
+52810003 	mov	w3, #0x800                 	// #2048
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+2a1303e0 	mov	w0, w19
+f9400bf3 	ldr	x19, [sp, #16]
+a8c27bfd 	ldp	x29, x30, [sp], #32
+d65f03c0 	ret
+
+0000000000000604 <pmm_user_reserve_count>:
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+f9400000 	ldr	x0, [x0]
+d65f03c0 	ret
+
+0000000000000610 <pmm_user_reserve_reset>:
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+f900001f 	str	xzr, [x0]
+d65f03c0 	ret
+d503201f 	nop
+
+0000000000000620 <pmm_init>:
+a9bd7bfd 	stp	x29, x30, [sp, #-48]!
+910003fd 	mov	x29, sp
+d2b00004 	mov	x4, #0x80000000            	// #2147483648
+b26287e2 	mov	x2, #0xffffffffc0000000    	// #-1073741824
+a9025bf5 	stp	x21, x22, [sp, #32]
+90000015 	adrp	x21, 0 <__kernel_end>
+910002b5 	add	x21, x21, #0x0
+913ffeb5 	add	x21, x21, #0xfff
+9274ceb5 	and	x21, x21, #0xfffffffffffff000
+a90153f3 	stp	x19, x20, [sp, #16]
+90000013 	adrp	x19, 0 <pmm_carve_reserves.part.0>
+91000273 	add	x19, x19, #0x0
+cb150083 	sub	x3, x4, x21
+8b0202a2 	add	x2, x21, x2
+d34cfc63 	lsr	x3, x3, #12
+d34cfc42 	lsr	x2, x2, #12
+aa1303e0 	mov	x0, x19
+a9141275 	stp	x21, x4, [x19, #320]
+91028261 	add	x1, x19, #0xa0
+f900aa63 	str	x3, [x19, #336]
+f900b262 	str	x2, [x19, #352]
+d503201f 	nop
+d503201f 	nop
+d503201f 	nop
+91002000 	add	x0, x0, #0x8
+f81f801f 	stur	xzr, [x0, #-8]
+f9004c1f 	str	xzr, [x0, #152]
+eb01001f 	cmp	x0, x1
+54ffff81 	b.ne	680 <pmm_init+0x60>  // b.any
+90000014 	adrp	x20, 0 <pmm_carve_reserves.part.0>
+52800022 	mov	w2, #0x1                   	// #1
+91000294 	add	x20, x20, #0x0
+91410281 	add	x1, x20, #0x40, lsl #12
+aa1403e0 	mov	x0, x20
+38001402 	strb	w2, [x0], #1
+eb01001f 	cmp	x0, x1
+54ffffc1 	b.ne	6a8 <pmm_init+0x88>  // b.any
+39468260 	ldrb	w0, [x19, #416]
+f900ae7f 	str	xzr, [x19, #344]
+a916fe7f 	stp	xzr, xzr, [x19, #360]
+a917fe7f 	stp	xzr, xzr, [x19, #376]
+370010c0 	tbnz	w0, #0, 8dc <pmm_init+0x2bc>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+52800101 	mov	w1, #0x8                   	// #8
+91000016 	add	x22, x0, #0x0
+39068262 	strb	w2, [x19, #416]
+aa1603e0 	mov	x0, x22
+94000000 	bl	0 <dtb_get_memreserves>
+f940ce67 	ldr	x7, [x19, #408]
+2a0003e3 	mov	w3, w0
+b4000247 	cbz	x7, 730 <pmm_init+0x110>
+71201c1f 	cmp	w0, #0x807
+54000208 	b.hi	730 <pmm_init+0x110>  // b.pmore
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+d2800004 	mov	x4, #0x0                   	// #0
+8b23d2c1 	add	x1, x22, w3, sxtw #4
+91000000 	add	x0, x0, #0x0
+14000005 	b	718 <pmm_init+0xf8>
+91004000 	add	x0, x0, #0x10
+91004021 	add	x1, x1, #0x10
+7120207f 	cmp	w3, #0x808
+540000e0 	b.eq	730 <pmm_init+0x110>  // b.none
+a9401406 	ldp	x6, x5, [x0]
+91000484 	add	x4, x4, #0x1
+11000463 	add	w3, w3, #0x1
+a9001426 	stp	x6, x5, [x1]
+eb07009f 	cmp	x4, x7
+54fffee1 	b.ne	708 <pmm_init+0xe8>  // b.any
+b2407be1 	mov	x1, #0x7fffffff            	// #2147483647
+f940a272 	ldr	x18, [x19, #320]
+eb0102bf 	cmp	x21, x1
+54000828 	b.hi	840 <pmm_init+0x220>  // b.pmore
+90000005 	adrp	x5, 0 <pmm_carve_reserves.part.0>
+90000004 	adrp	x4, 0 <pmm_carve_reserves.part.0>
+910000a5 	add	x5, x5, #0x0
+91000084 	add	x4, x4, #0x0
+aa1603e2 	mov	x2, x22
+91000421 	add	x1, x1, #0x1
+aa1503e0 	mov	x0, x21
+52810126 	mov	w6, #0x809                 	// #2057
+97fffe28 	bl	0 <pmm_carve_reserves.part.0>
+7100001f 	cmp	w0, #0x0
+540006cd 	b.le	840 <pmm_init+0x220>
+937d7c0d 	sbfiz	x13, x0, #3, #32
+d280000b 	mov	x11, #0x0                   	// #0
+d2820007 	mov	x7, #0x1000                	// #4096
+d280002c 	mov	x12, #0x1                   	// #1
+f86b6883 	ldr	x3, [x4, x11]
+f86b68a6 	ldr	x6, [x5, x11]
+913ffc63 	add	x3, x3, #0xfff
+9274cc63 	and	x3, x3, #0xfffffffffffff000
+eb0300df 	cmp	x6, x3
+54000529 	b.ls	834 <pmm_init+0x214>  // b.plast
+f940ae6a 	ldr	x10, [x19, #344]
+d503201f 	nop
+d503201f 	nop
+52800260 	mov	w0, #0x13                  	// #19
+9ac020e1 	lsl	x1, x7, x0
+8b030022 	add	x2, x1, x3
+eb0200df 	cmp	x6, x2
+54000083 	b.cc	7c0 <pmm_init+0x1a0>  // b.lo, b.ul, b.last
+d1000421 	sub	x1, x1, #0x1
+ea03003f 	tst	x1, x3
+54000360 	b.eq	828 <pmm_init+0x208>  // b.none
+71000400 	subs	w0, w0, #0x1
+54ffff01 	b.ne	7a4 <pmm_init+0x184>  // b.any
+91400462 	add	x2, x3, #0x1, lsl #12
+d2800029 	mov	x9, #0x1                   	// #1
+cb120061 	sub	x1, x3, x18
+8b413281 	add	x1, x20, x1, lsr #12
+8b090028 	add	x8, x1, x9
+d503201f 	nop
+3800143f 	strb	wzr, [x1], #1
+eb01011f 	cmp	x8, x1
+54ffffc1 	b.ne	7e0 <pmm_init+0x1c0>  // b.any
+2a0003e0 	mov	w0, w0
+f8607a61 	ldr	x1, [x19, x0, lsl #3]
+a9007c61 	stp	x1, xzr, [x3]
+b4000041 	cbz	x1, 800 <pmm_init+0x1e0>
+f9000423 	str	x3, [x1, #8]
+91005001 	add	x1, x0, #0x14
+f8207a63 	str	x3, [x19, x0, lsl #3]
+8b09014a 	add	x10, x10, x9
+f8617a60 	ldr	x0, [x19, x1, lsl #3]
+91000400 	add	x0, x0, #0x1
+f8217a60 	str	x0, [x19, x1, lsl #3]
+eb0200df 	cmp	x6, x2
+540000a9 	b.ls	830 <pmm_init+0x210>  // b.plast
+aa0203e3 	mov	x3, x2
+17ffffdf 	b	7a0 <pmm_init+0x180>
+9ac02189 	lsl	x9, x12, x0
+17ffffe9 	b	7d0 <pmm_init+0x1b0>
+f900ae6a 	str	x10, [x19, #344]
+9100216b 	add	x11, x11, #0x8
+eb0b01bf 	cmp	x13, x11
+54fffa01 	b.ne	77c <pmm_init+0x15c>  // b.any
+f940a665 	ldr	x5, [x19, #328]
+d2800000 	mov	x0, #0x0                   	// #0
+3906827f 	strb	wzr, [x19, #416]
+14000009 	b	870 <pmm_init+0x250>
+eb12007f 	cmp	x3, x18
+54000243 	b.cc	89c <pmm_init+0x27c>  // b.lo, b.ul, b.last
+eb0300bf 	cmp	x5, x3
+54000209 	b.ls	89c <pmm_init+0x27c>  // b.plast
+b50001e4 	cbnz	x4, 89c <pmm_init+0x27c>
+91000400 	add	x0, x0, #0x1
+f100501f 	cmp	x0, #0x14
+540001e0 	b.eq	8a8 <pmm_init+0x288>  // b.none
+f8607a62 	ldr	x2, [x19, x0, lsl #3]
+2a0003e1 	mov	w1, w0
+b4ffff62 	cbz	x2, 864 <pmm_init+0x244>
+eb12005f 	cmp	x2, x18
+54000243 	b.cc	8c8 <pmm_init+0x2a8>  // b.lo, b.ul, b.last
+eb0200bf 	cmp	x5, x2
+54000209 	b.ls	8c8 <pmm_init+0x2a8>  // b.plast
+a9401043 	ldp	x3, x4, [x2]
+b5fffe03 	cbnz	x3, 850 <pmm_init+0x230>
+b4fffe84 	cbz	x4, 864 <pmm_init+0x244>
+d2800003 	mov	x3, #0x0                   	// #0
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <panic>
+52800021 	mov	w1, #0x1                   	// #1
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+a9425bf5 	ldp	x21, x22, [sp, #32]
+91000000 	add	x0, x0, #0x0
+39062261 	strb	w1, [x19, #392]
+a94153f3 	ldp	x19, x20, [sp, #16]
+a8c37bfd 	ldp	x29, x30, [sp], #48
+14000000 	b	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa0503e4 	mov	x4, x5
+aa1203e3 	mov	x3, x18
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <panic>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <panic>
+
+00000000000008e8 <pmm_alloc_pages>:
+90000007 	adrp	x7, 0 <pmm_carve_reserves.part.0>
+a9bf7bfd 	stp	x29, x30, [sp, #-16]!
+aa0003e1 	mov	x1, x0
+910000e7 	add	x7, x7, #0x0
+910003fd 	mov	x29, sp
+394620e0 	ldrb	w0, [x7, #392]
+36001040 	tbz	w0, #0, b08 <pmm_alloc_pages+0x220>
+b4000fc1 	cbz	x1, afc <pmm_alloc_pages+0x214>
+52800002 	mov	w2, #0x0                   	// #0
+f100043f 	cmp	x1, #0x1
+54000140 	b.eq	938 <pmm_alloc_pages+0x50>  // b.none
+d2800023 	mov	x3, #0x1                   	// #1
+d503201f 	nop
+d503201f 	nop
+d37ff863 	lsl	x3, x3, #1
+11000442 	add	w2, w2, #0x1
+eb03003f 	cmp	x1, x3
+54ffffa8 	b.hi	920 <pmm_alloc_pages+0x38>  // b.pmore
+71004c5f 	cmp	w2, #0x13
+54000de8 	b.hi	af0 <pmm_alloc_pages+0x208>  // b.pmore
+d53b422b 	mrs	x11, daif
+d50342df 	msr	daifset, #0x2
+9000000c 	adrp	x12, 0 <spinlock_hw_enabled>
+b9400180 	ldr	w0, [x12]
+34000900 	cbz	w0, a68 <pmm_alloc_pages+0x180>
+910640e0 	add	x0, x7, #0x190
+52800023 	mov	w3, #0x1                   	// #1
+d50320bf 	sevl
+d503205f 	wfe
+885ffc04 	ldaxr	w4, [x0]
+35ffffc4 	cbnz	w4, 958 <pmm_alloc_pages+0x70>
+88047c03 	stxr	w4, w3, [x0]
+35ffff84 	cbnz	w4, 958 <pmm_alloc_pages+0x70>
+2a0203e3 	mov	w3, w2
+14000004 	b	980 <pmm_alloc_pages+0x98>
+91000463 	add	x3, x3, #0x1
+7100507f 	cmp	w3, #0x14
+54000b00 	b.eq	adc <pmm_alloc_pages+0x1f4>  // b.none
+8b030ce4 	add	x4, x7, x3, lsl #3
+f9405084 	ldr	x4, [x4, #160]
+b4ffff64 	cbz	x4, 974 <pmm_alloc_pages+0x8c>
+2a0303e6 	mov	w6, w3
+f86678e0 	ldr	x0, [x7, x6, lsl #3]
+b4000d40 	cbz	x0, b3c <pmm_alloc_pages+0x254>
+f9400005 	ldr	x5, [x0]
+f82678e5 	str	x5, [x7, x6, lsl #3]
+b4000045 	cbz	x5, 9a8 <pmm_alloc_pages+0xc0>
+f90004bf 	str	xzr, [x5, #8]
+2a0303e5 	mov	w5, w3
+d1000484 	sub	x4, x4, #0x1
+a9007c1f 	stp	xzr, xzr, [x0]
+910050a5 	add	x5, x5, #0x14
+f82578e4 	str	x4, [x7, x5, lsl #3]
+f940a0ef 	ldr	x15, [x7, #320]
+d2800030 	mov	x16, #0x1                   	// #1
+9ac2220e 	lsl	x14, x16, x2
+cb0f0011 	sub	x17, x0, x15
+d34cfe31 	lsr	x17, x17, #12
+6b03005f 	cmp	w2, w3
+540004e2 	b.cs	a70 <pmm_alloc_pages+0x188>  // b.hs, b.nlast
+f940bced 	ldr	x13, [x7, #376]
+51000468 	sub	w8, w3, #0x1
+9000000a 	adrp	x10, 0 <pmm_carve_reserves.part.0>
+8b080ce8 	add	x8, x7, x8, lsl #3
+51000465 	sub	w5, w3, #0x1
+9100014a 	add	x10, x10, #0x0
+d2820012 	mov	x18, #0x1000                	// #4096
+d503201f 	nop
+d503201f 	nop
+d503201f 	nop
+9ac52246 	lsl	x6, x18, x5
+9ac52204 	lsl	x4, x16, x5
+8b0000c6 	add	x6, x6, x0
+8b040144 	add	x4, x10, x4
+cb0f00c9 	sub	x9, x6, x15
+910005ad 	add	x13, x13, #0x1
+d34cfd29 	lsr	x9, x9, #12
+8b090143 	add	x3, x10, x9
+8b090084 	add	x4, x4, x9
+f900bced 	str	x13, [x7, #376]
+3800147f 	strb	wzr, [x3], #1
+eb03009f 	cmp	x4, x3
+54ffffc1 	b.ne	a28 <pmm_alloc_pages+0x140>  // b.any
+f9400103 	ldr	x3, [x8]
+a9007cc3 	stp	x3, xzr, [x6]
+b4000043 	cbz	x3, a44 <pmm_alloc_pages+0x15c>
+f9000466 	str	x6, [x3, #8]
+f9405103 	ldr	x3, [x8, #160]
+d1002108 	sub	x8, x8, #0x8
+f9000506 	str	x6, [x8, #8]
+91000463 	add	x3, x3, #0x1
+f9005503 	str	x3, [x8, #168]
+6b05005f 	cmp	w2, w5
+54000120 	b.eq	a80 <pmm_alloc_pages+0x198>  // b.none
+510004a5 	sub	w5, w5, #0x1
+17ffffe7 	b	a00 <pmm_alloc_pages+0x118>
+d5033bbf 	dmb	ish
+17ffffc0 	b	96c <pmm_alloc_pages+0x84>
+9000000a 	adrp	x10, 0 <pmm_carve_reserves.part.0>
+9100014a 	add	x10, x10, #0x0
+d503201f 	nop
+d503201f 	nop
+8b11014a 	add	x10, x10, x17
+d2800003 	mov	x3, #0x0                   	// #0
+52800024 	mov	w4, #0x1                   	// #1
+38236944 	strb	w4, [x10, x3]
+91000463 	add	x3, x3, #0x1
+eb0e007f 	cmp	x3, x14
+54ffffa3 	b.cc	a8c <pmm_alloc_pages+0x1a4>  // b.lo, b.ul, b.last
+f940ace4 	ldr	x4, [x7, #344]
+f940b4e3 	ldr	x3, [x7, #360]
+cb0e0084 	sub	x4, x4, x14
+91000463 	add	x3, x3, #0x1
+f900ace4 	str	x4, [x7, #344]
+f900b4e3 	str	x3, [x7, #360]
+b9400183 	ldr	w3, [x12]
+34000183 	cbz	w3, ae8 <pmm_alloc_pages+0x200>
+910640e7 	add	x7, x7, #0x190
+889ffcff 	stlr	wzr, [x7]
+d503209f 	sev
+d51b422b 	msr	daif, x11
+b100041f 	cmn	x0, #0x1
+540002c0 	b.eq	b28 <pmm_alloc_pages+0x240>  // b.none
+a8c17bfd 	ldp	x29, x30, [sp], #16
+d65f03c0 	ret
+b9400183 	ldr	w3, [x12]
+92800000 	mov	x0, #0xffffffffffffffff    	// #-1
+35fffec3 	cbnz	w3, abc <pmm_alloc_pages+0x1d4>
+d5033bbf 	dmb	ish
+17fffff7 	b	ac8 <pmm_alloc_pages+0x1e0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+a8c17bfd 	ldp	x29, x30, [sp], #16
+d65f03c0 	ret
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280a0c2 	mov	w2, #0x506                 	// #1286
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+17fffff7 	b	b00 <pmm_alloc_pages+0x218>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+17fffff2 	b	b00 <pmm_alloc_pages+0x218>
+92800000 	mov	x0, #0xffffffffffffffff    	// #-1
+17ffff9f 	b	9bc <pmm_alloc_pages+0xd4>
+
+0000000000000b44 <pmm_alloc_page>:
+d2800020 	mov	x0, #0x1                   	// #1
+14000000 	b	8e8 <pmm_alloc_pages>
+
+0000000000000b4c <pmm_alloc_pages_low>:
+90000009 	adrp	x9, 0 <pmm_carve_reserves.part.0>
+a9bf7bfd 	stp	x29, x30, [sp, #-16]!
+910003fd 	mov	x29, sp
+91000129 	add	x9, x9, #0x0
+39462126 	ldrb	w6, [x9, #392]
+360012a6 	tbz	w6, #0, db4 <pmm_alloc_pages_low+0x268>
+b40010a0 	cbz	x0, d78 <pmm_alloc_pages_low+0x22c>
+52800001 	mov	w1, #0x0                   	// #0
+f100041f 	cmp	x0, #0x1
+54000140 	b.eq	b98 <pmm_alloc_pages_low+0x4c>  // b.none
+d2800022 	mov	x2, #0x1                   	// #1
+d503201f 	nop
+d503201f 	nop
+d37ff842 	lsl	x2, x2, #1
+11000421 	add	w1, w1, #0x1
+eb02001f 	cmp	x0, x2
+54ffffa8 	b.hi	b80 <pmm_alloc_pages_low+0x34>  // b.pmore
+71004c3f 	cmp	w1, #0x13
+54000fc8 	b.hi	d8c <pmm_alloc_pages_low+0x240>  // b.pmore
+d53b422a 	mrs	x10, daif
+d50342df 	msr	daifset, #0x2
+9000000b 	adrp	x11, 0 <spinlock_hw_enabled>
+b9400160 	ldr	w0, [x11]
+34000a40 	cbz	w0, cf0 <pmm_alloc_pages_low+0x1a4>
+91064120 	add	x0, x9, #0x190
+52800022 	mov	w2, #0x1                   	// #1
+d50320bf 	sevl
+d503205f 	wfe
+885ffc03 	ldaxr	w3, [x0]
+35ffffc3 	cbnz	w3, bb8 <pmm_alloc_pages_low+0x6c>
+88037c02 	stxr	w3, w2, [x0]
+35ffff83 	cbnz	w3, bb8 <pmm_alloc_pages_low+0x6c>
+2a0103e8 	mov	w8, w1
+52800003 	mov	w3, #0x0                   	// #0
+52800005 	mov	w5, #0x0                   	// #0
+92800004 	mov	x4, #0xffffffffffffffff    	// #-1
+d503201f 	nop
+f8687922 	ldr	x2, [x9, x8, lsl #3]
+2a0803e7 	mov	w7, w8
+b4000162 	cbz	x2, c14 <pmm_alloc_pages_low+0xc8>
+52000063 	eor	w3, w3, #0x1
+eb04005f 	cmp	x2, x4
+1a9f27e0 	cset	w0, cc	// cc = lo, ul, last
+2a030000 	orr	w0, w0, w3
+2a0603e3 	mov	w3, w6
+72000000 	ands	w0, w0, #0x1
+9a841044 	csel	x4, x2, x4, ne	// ne = any
+f9400042 	ldr	x2, [x2]
+1a8510e5 	csel	w5, w7, w5, ne	// ne = any
+b5fffee2 	cbnz	x2, bec <pmm_alloc_pages_low+0xa0>
+91000508 	add	x8, x8, #0x1
+7100511f 	cmp	w8, #0x14
+54fffe21 	b.ne	be0 <pmm_alloc_pages_low+0x94>  // b.any
+360009a3 	tbz	w3, #0, d54 <pmm_alloc_pages_low+0x208>
+a9401883 	ldp	x3, x6, [x4]
+aa0403e0 	mov	x0, x4
+2a0503e2 	mov	w2, w5
+b4000be6 	cbz	x6, dac <pmm_alloc_pages_low+0x260>
+f90000c3 	str	x3, [x6]
+b4000043 	cbz	x3, c40 <pmm_alloc_pages_low+0xf4>
+f9000466 	str	x6, [x3, #8]
+91005042 	add	x2, x2, #0x14
+f940a12f 	ldr	x15, [x9, #320]
+d2800030 	mov	x16, #0x1                   	// #1
+9ac1220e 	lsl	x14, x16, x1
+f8627923 	ldr	x3, [x9, x2, lsl #3]
+cb0f0091 	sub	x17, x4, x15
+d34cfe31 	lsr	x17, x17, #12
+d1000463 	sub	x3, x3, #0x1
+f8227923 	str	x3, [x9, x2, lsl #3]
+6b05003f 	cmp	w1, w5
+54000482 	b.cs	cf8 <pmm_alloc_pages_low+0x1ac>  // b.hs, b.nlast
+f940bd2d 	ldr	x13, [x9, #376]
+510004a7 	sub	w7, w5, #0x1
+9000000c 	adrp	x12, 0 <pmm_carve_reserves.part.0>
+8b070d27 	add	x7, x9, x7, lsl #3
+510004a5 	sub	w5, w5, #0x1
+9100018c 	add	x12, x12, #0x0
+d2820012 	mov	x18, #0x1000                	// #4096
+9ac52246 	lsl	x6, x18, x5
+9ac52203 	lsl	x3, x16, x5
+8b0400c6 	add	x6, x6, x4
+8b030183 	add	x3, x12, x3
+cb0f00c8 	sub	x8, x6, x15
+910005ad 	add	x13, x13, #0x1
+d34cfd08 	lsr	x8, x8, #12
+8b080182 	add	x2, x12, x8
+8b080063 	add	x3, x3, x8
+f900bd2d 	str	x13, [x9, #376]
+3800145f 	strb	wzr, [x2], #1
+eb02007f 	cmp	x3, x2
+54ffffc1 	b.ne	cb0 <pmm_alloc_pages_low+0x164>  // b.any
+f94000e2 	ldr	x2, [x7]
+a9007cc2 	stp	x2, xzr, [x6]
+b4000042 	cbz	x2, ccc <pmm_alloc_pages_low+0x180>
+f9000446 	str	x6, [x2, #8]
+f94050e2 	ldr	x2, [x7, #160]
+d10020e7 	sub	x7, x7, #0x8
+f90004e6 	str	x6, [x7, #8]
+91000442 	add	x2, x2, #0x1
+f90054e2 	str	x2, [x7, #168]
+6b05003f 	cmp	w1, w5
+540000e0 	b.eq	d00 <pmm_alloc_pages_low+0x1b4>  // b.none
+510004a5 	sub	w5, w5, #0x1
+17ffffe7 	b	c88 <pmm_alloc_pages_low+0x13c>
+d5033bbf 	dmb	ish
+17ffffb6 	b	bcc <pmm_alloc_pages_low+0x80>
+9000000c 	adrp	x12, 0 <pmm_carve_reserves.part.0>
+9100018c 	add	x12, x12, #0x0
+8b11018c 	add	x12, x12, x17
+d2800001 	mov	x1, #0x0                   	// #0
+52800022 	mov	w2, #0x1                   	// #1
+38216982 	strb	w2, [x12, x1]
+91000421 	add	x1, x1, #0x1
+eb0101df 	cmp	x14, x1
+54ffffa8 	b.hi	d0c <pmm_alloc_pages_low+0x1c0>  // b.pmore
+f940ad22 	ldr	x2, [x9, #344]
+f940b521 	ldr	x1, [x9, #360]
+b9400163 	ldr	w3, [x11]
+cb0e0042 	sub	x2, x2, x14
+91000421 	add	x1, x1, #0x1
+f900ad22 	str	x2, [x9, #344]
+f900b521 	str	x1, [x9, #360]
+34000363 	cbz	w3, da4 <pmm_alloc_pages_low+0x258>
+91064129 	add	x9, x9, #0x190
+889ffd3f 	stlr	wzr, [x9]
+d503209f 	sev
+d51b422a 	msr	daif, x10
+a8c17bfd 	ldp	x29, x30, [sp], #16
+d65f03c0 	ret
+b9400160 	ldr	w0, [x11]
+34000160 	cbz	w0, d84 <pmm_alloc_pages_low+0x238>
+91064129 	add	x9, x9, #0x190
+889ffd3f 	stlr	wzr, [x9]
+d503209f 	sev
+d51b422a 	msr	daif, x10
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+a8c17bfd 	ldp	x29, x30, [sp], #16
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+17fffff8 	b	d68 <pmm_alloc_pages_low+0x21c>
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+2a0003e1 	mov	w1, w0
+91000040 	add	x0, x2, #0x0
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+17fffff7 	b	d7c <pmm_alloc_pages_low+0x230>
+d5033bbf 	dmb	ish
+17ffffe8 	b	d48 <pmm_alloc_pages_low+0x1fc>
+f8227923 	str	x3, [x9, x2, lsl #3]
+17ffffa2 	b	c38 <pmm_alloc_pages_low+0xec>
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280a622 	mov	w2, #0x531                 	// #1329
+94000000 	bl	0 <uart_printf>
+d2800000 	mov	x0, #0x0                   	// #0
+17ffffeb 	b	d7c <pmm_alloc_pages_low+0x230>
+d503201f 	nop
+d503201f 	nop
+d503201f 	nop
+
+0000000000000de0 <pmm_free_page>:
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+39400022 	ldrb	w2, [x1]
+360000a2 	tbz	w2, #0, dfc <pmm_free_page+0x1c>
+b4000060 	cbz	x0, df8 <pmm_free_page+0x18>
+d2800021 	mov	x1, #0x1                   	// #1
+17fffcc5 	b	108 <pmm_free_pages.part.0>
+d65f03c0 	ret
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280b042 	mov	w2, #0x582                 	// #1410
+14000000 	b	0 <uart_printf>
+d503201f 	nop
+d503201f 	nop
+d503201f 	nop
+
+0000000000000e20 <pmm_free_pages>:
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+39400044 	ldrb	w4, [x2]
+360000c4 	tbz	w4, #0, e40 <pmm_free_pages+0x20>
+f100003f 	cmp	x1, #0x0
+fa401804 	ccmp	x0, #0x0, #0x4, ne	// ne = any
+54000040 	b.eq	e3c <pmm_free_pages+0x1c>  // b.none
+17fffcb4 	b	108 <pmm_free_pages.part.0>
+d65f03c0 	ret
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+91000000 	add	x0, x0, #0x0
+5280b042 	mov	w2, #0x582                 	// #1410
+14000000 	b	0 <uart_printf>
+d503201f 	nop
+d503201f 	nop
+
+0000000000000e60 <pmm_get_stats>:
+b40003a0 	cbz	x0, ed4 <pmm_get_stats+0x74>
+d53b4225 	mrs	x5, daif
+d50342df 	msr	daifset, #0x2
+90000003 	adrp	x3, 0 <spinlock_hw_enabled>
+b9400061 	ldr	w1, [x3]
+34000321 	cbz	w1, ed8 <pmm_get_stats+0x78>
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+52800024 	mov	w4, #0x1                   	// #1
+91000021 	add	x1, x1, #0x0
+91064022 	add	x2, x1, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc46 	ldaxr	w6, [x2]
+35ffffc6 	cbnz	w6, e8c <pmm_get_stats+0x2c>
+88067c44 	stxr	w6, w4, [x2]
+35ffff86 	cbnz	w6, e8c <pmm_get_stats+0x2c>
+a9551022 	ldp	x2, x4, [x1, #336]
+a9541827 	ldp	x7, x6, [x1, #320]
+a9001002 	stp	x2, x4, [x0]
+cb040042 	sub	x2, x2, x4
+f940b024 	ldr	x4, [x1, #352]
+a9021807 	stp	x7, x6, [x0, #32]
+a9011002 	stp	x2, x4, [x0, #16]
+b9400062 	ldr	w2, [x3]
+34000142 	cbz	w2, ee8 <pmm_get_stats+0x88>
+91064021 	add	x1, x1, #0x190
+889ffc3f 	stlr	wzr, [x1]
+d503209f 	sev
+d51b4225 	msr	daif, x5
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+91000021 	add	x1, x1, #0x0
+17ffffef 	b	ea0 <pmm_get_stats+0x40>
+d5033bbf 	dmb	ish
+17fffff9 	b	ed0 <pmm_get_stats+0x70>
+
+0000000000000ef0 <pmm_dump_stats>:
+a9b07bfd 	stp	x29, x30, [sp, #-256]!
+910003fd 	mov	x29, sp
+a90153f3 	stp	x19, x20, [sp, #16]
+a9025bf5 	stp	x21, x22, [sp, #32]
+a90363f7 	stp	x23, x24, [sp, #48]
+d53b4222 	mrs	x2, daif
+d50342df 	msr	daifset, #0x2
+90000001 	adrp	x1, 0 <spinlock_hw_enabled>
+b9400020 	ldr	w0, [x1]
+34000c20 	cbz	w0, 1098 <pmm_dump_stats+0x1a8>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+52800024 	mov	w4, #0x1                   	// #1
+91000000 	add	x0, x0, #0x0
+91064003 	add	x3, x0, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc65 	ldaxr	w5, [x3]
+35ffffc5 	cbnz	w5, f2c <pmm_dump_stats+0x3c>
+88057c64 	stxr	w5, w4, [x3]
+35ffff85 	cbnz	w5, f2c <pmm_dump_stats+0x3c>
+a9554c14 	ldp	x20, x19, [x0, #336]
+a9546017 	ldp	x23, x24, [x0, #320]
+cb130295 	sub	x21, x20, x19
+b9400021 	ldr	w1, [x1]
+f940b016 	ldr	x22, [x0, #352]
+34000b41 	cbz	w1, 10bc <pmm_dump_stats+0x1cc>
+91064000 	add	x0, x0, #0x190
+889ffc1f 	stlr	wzr, [x0]
+d503209f 	sev
+d51b4222 	msr	daif, x2
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_puts>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa1803e2 	mov	x2, x24
+aa1703e1 	mov	x1, x23
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+531e7682 	lsl	w2, w20, #2
+2a1403e1 	mov	w1, w20
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+531e7662 	lsl	w2, w19, #2
+2a1303e1 	mov	w1, w19
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+531e76a2 	lsl	w2, w21, #2
+2a1503e1 	mov	w1, w21
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+2a1603e1 	mov	w1, w22
+91000000 	add	x0, x0, #0x0
+90000015 	adrp	x21, 0 <pmm_carve_reserves.part.0>
+94000000 	bl	0 <uart_printf>
+910103e0 	add	x0, sp, #0x40
+910103f4 	add	x20, sp, #0x40
+97fffd0a 	bl	408 <pmm_get_buddy_stats.part.0>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+910002b5 	add	x21, x21, #0x0
+91000000 	add	x0, x0, #0x0
+52800013 	mov	w19, #0x0                   	// #0
+d2820016 	mov	x22, #0x1000                	// #4096
+94000000 	bl	0 <uart_puts>
+14000005 	b	1010 <pmm_dump_stats+0x120>
+11000673 	add	w19, w19, #0x1
+91002294 	add	x20, x20, #0x8
+7100527f 	cmp	w19, #0x14
+54000180 	b.eq	103c <pmm_dump_stats+0x14c>  // b.none
+f9400283 	ldr	x3, [x20]
+b4ffff63 	cbz	x3, 1000 <pmm_dump_stats+0x110>
+9ad322c2 	lsl	x2, x22, x19
+2a1303e1 	mov	w1, w19
+d34aa442 	ubfx	x2, x2, #10, #32
+aa1503e0 	mov	x0, x21
+11000673 	add	w19, w19, #0x1
+91002294 	add	x20, x20, #0x8
+94000000 	bl	0 <uart_printf>
+7100527f 	cmp	w19, #0x14
+54fffec1 	b.ne	1010 <pmm_dump_stats+0x120>  // b.any
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+b940e3e1 	ldr	w1, [sp, #224]
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+b940ebe1 	ldr	w1, [sp, #232]
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+b940f3e1 	ldr	w1, [sp, #240]
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+a94153f3 	ldp	x19, x20, [sp, #16]
+91000000 	add	x0, x0, #0x0
+a9425bf5 	ldp	x21, x22, [sp, #32]
+a94363f7 	ldp	x23, x24, [sp, #48]
+b940fbe1 	ldr	w1, [sp, #248]
+a8d07bfd 	ldp	x29, x30, [sp], #256
+14000000 	b	0 <uart_printf>
+d5033bbf 	dmb	ish
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+b9400021 	ldr	w1, [x1]
+91000000 	add	x0, x0, #0x0
+a9554c14 	ldp	x20, x19, [x0, #336]
+a9546017 	ldp	x23, x24, [x0, #320]
+cb130295 	sub	x21, x20, x19
+f940b016 	ldr	x22, [x0, #352]
+35fff501 	cbnz	w1, f58 <pmm_dump_stats+0x68>
+d5033bbf 	dmb	ish
+17ffffa9 	b	f64 <pmm_dump_stats+0x74>
+
+00000000000010c4 <pmm_dump_free_list>:
+71004c1f 	cmp	w0, #0x13
+540014e8 	b.hi	1364 <pmm_dump_free_list+0x2a0>  // b.pmore
+a9b87bfd 	stp	x29, x30, [sp, #-128]!
+910003fd 	mov	x29, sp
+a9025bf5 	stp	x21, x22, [sp, #32]
+aa0103f6 	mov	x22, x1
+a90363f7 	stp	x23, x24, [sp, #48]
+a9046bf9 	stp	x25, x26, [sp, #64]
+a90573fb 	stp	x27, x28, [sp, #80]
+d53b4224 	mrs	x4, daif
+d50342df 	msr	daifset, #0x2
+90000003 	adrp	x3, 0 <spinlock_hw_enabled>
+b9400061 	ldr	w1, [x3]
+34000d61 	cbz	w1, 12a4 <pmm_dump_free_list+0x1e0>
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+52800025 	mov	w5, #0x1                   	// #1
+91000042 	add	x2, x2, #0x0
+91064041 	add	x1, x2, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc26 	ldaxr	w6, [x1]
+35ffffc6 	cbnz	w6, 1110 <pmm_dump_free_list+0x4c>
+88067c25 	stxr	w6, w5, [x1]
+35ffff86 	cbnz	w6, 1110 <pmm_dump_free_list+0x4c>
+2a0003e1 	mov	w1, w0
+b9400063 	ldr	w3, [x3]
+91005025 	add	x5, x1, #0x14
+a9546859 	ldp	x25, x26, [x2, #320]
+f8657845 	ldr	x5, [x2, x5, lsl #3]
+f861785c 	ldr	x28, [x2, x1, lsl #3]
+f9003fe5 	str	x5, [sp, #120]
+34000c83 	cbz	w3, 12d0 <pmm_dump_free_list+0x20c>
+91064042 	add	x2, x2, #0x190
+889ffc5f 	stlr	wzr, [x2]
+d503209f 	sev
+d51b4224 	msr	daif, x4
+d2820017 	mov	x23, #0x1000                	// #4096
+90000006 	adrp	x6, 0 <pmm_carve_reserves.part.0>
+b9407be3 	ldr	w3, [sp, #120]
+9ac022f7 	lsl	x23, x23, x0
+2a0003e1 	mov	w1, w0
+d34aa6e2 	ubfx	x2, x23, #10, #32
+aa1c03e4 	mov	x4, x28
+910000c0 	add	x0, x6, #0x0
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa1a03e2 	mov	x2, x26
+aa1903e1 	mov	x1, x25
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+f100039f 	cmp	x28, #0x0
+1a9f07e0 	cset	w0, ne	// ne = any
+f10002df 	cmp	x22, #0x0
+7a401804 	ccmp	w0, #0x0, #0x4, ne	// ne = any
+54001000 	b.eq	139c <pmm_dump_free_list+0x2d8>  // b.none
+d10006e0 	sub	x0, x23, #0x1
+90000018 	adrp	x24, 0 <pmm_carve_reserves.part.0>
+a90153f3 	stp	x19, x20, [sp, #16]
+90000015 	adrp	x21, 0 <pmm_carve_reserves.part.0>
+90000013 	adrp	x19, 0 <pmm_carve_reserves.part.0>
+910002b5 	add	x21, x21, #0x0
+91000273 	add	x19, x19, #0x0
+f90037e0 	str	x0, [sp, #104]
+91000300 	add	x0, x24, #0x0
+d280001b 	mov	x27, #0x0                   	// #0
+d2800014 	mov	x20, #0x0                   	// #0
+f9003be0 	str	x0, [sp, #112]
+14000016 	b	1228 <pmm_dump_free_list+0x164>
+b5000ea7 	cbnz	x7, 13a8 <pmm_dump_free_list+0x2e4>
+94000000 	bl	0 <uart_printf>
+a9405f98 	ldp	x24, x23, [x28]
+f9403be0 	ldr	x0, [sp, #112]
+aa1803e1 	mov	x1, x24
+aa1703e2 	mov	x2, x23
+94000000 	bl	0 <uart_printf>
+f100037f 	cmp	x27, #0x0
+fa400ae4 	ccmp	x23, #0x0, #0x4, eq	// eq = none
+54000701 	b.ne	12d8 <pmm_dump_free_list+0x214>  // b.any
+f100037f 	cmp	x27, #0x0
+fa5412e4 	ccmp	x23, x20, #0x4, ne	// ne = any
+54000a41 	b.ne	134c <pmm_dump_free_list+0x288>  // b.any
+f100031f 	cmp	x24, #0x0
+9100077b 	add	x27, x27, #0x1
+1a9f07e0 	cset	w0, ne	// ne = any
+7100001f 	cmp	w0, #0x0
+aa1c03f4 	mov	x20, x28
+fa5b12c0 	ccmp	x22, x27, #0x0, ne	// ne = any
+aa1803fc 	mov	x28, x24
+54000709 	b.ls	1304 <pmm_dump_free_list+0x240>  // b.plast
+f94037e5 	ldr	x5, [sp, #104]
+eb1c033f 	cmp	x25, x28
+aa1303e4 	mov	x4, x19
+fa5c9340 	ccmp	x26, x28, #0x0, ls	// ls = plast
+aa1303e3 	mov	x3, x19
+aa1c03e2 	mov	x2, x28
+2a1b03e1 	mov	w1, w27
+aa1503e0 	mov	x0, x21
+2a1b03e8 	mov	w8, w27
+8a050387 	and	x7, x28, x5
+54fffc28 	b.hi	11d4 <pmm_dump_free_list+0x110>  // b.pmore
+b4000b47 	cbz	x7, 13bc <pmm_dump_free_list+0x2f8>
+90000004 	adrp	x4, 0 <pmm_carve_reserves.part.0>
+91000084 	add	x4, x4, #0x0
+aa0403e3 	mov	x3, x4
+aa1c03e2 	mov	x2, x28
+2a0803e1 	mov	w1, w8
+aa1503e0 	mov	x0, x21
+94000000 	bl	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_puts>
+a94153f3 	ldp	x19, x20, [sp, #16]
+eb1b02df 	cmp	x22, x27
+54000780 	b.eq	1378 <pmm_dump_free_list+0x2b4>  // b.none
+a9425bf5 	ldp	x21, x22, [sp, #32]
+a94363f7 	ldp	x23, x24, [sp, #48]
+a9446bf9 	ldp	x25, x26, [sp, #64]
+a94573fb 	ldp	x27, x28, [sp, #80]
+a8c87bfd 	ldp	x29, x30, [sp], #128
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+2a0003e1 	mov	w1, w0
+b9400063 	ldr	w3, [x3]
+91000042 	add	x2, x2, #0x0
+91005025 	add	x5, x1, #0x14
+f8657845 	ldr	x5, [x2, x5, lsl #3]
+a9546859 	ldp	x25, x26, [x2, #320]
+f9003fe5 	str	x5, [sp, #120]
+f861785c 	ldr	x28, [x2, x1, lsl #3]
+35fff3c3 	cbnz	w3, 1144 <pmm_dump_free_list+0x80>
+d5033bbf 	dmb	ish
+17ffff9f 	b	1150 <pmm_dump_free_list+0x8c>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+9100077b 	add	x27, x27, #0x1
+91000000 	add	x0, x0, #0x0
+aa1c03f4 	mov	x20, x28
+94000000 	bl	0 <uart_puts>
+f100031f 	cmp	x24, #0x0
+1a9f07e0 	cset	w0, ne	// ne = any
+aa1803fc 	mov	x28, x24
+7100001f 	cmp	w0, #0x0
+fa5b12c0 	ccmp	x22, x27, #0x0, ne	// ne = any
+54fff948 	b.hi	1228 <pmm_dump_free_list+0x164>  // b.pmore
+a94153f3 	ldp	x19, x20, [sp, #16]
+7100001f 	cmp	w0, #0x0
+fa5b12c0 	ccmp	x22, x27, #0x0, ne	// ne = any
+54000340 	b.eq	1378 <pmm_dump_free_list+0x2b4>  // b.none
+f9403fe1 	ldr	x1, [sp, #120]
+f100031f 	cmp	x24, #0x0
+fa5b0024 	ccmp	x1, x27, #0x4, eq	// eq = none
+54fffb60 	b.eq	128c <pmm_dump_free_list+0x1c8>  // b.none
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+a9425bf5 	ldp	x21, x22, [sp, #32]
+2a0103e2 	mov	w2, w1
+91000000 	add	x0, x0, #0x0
+2a1b03e1 	mov	w1, w27
+a94363f7 	ldp	x23, x24, [sp, #48]
+a9446bf9 	ldp	x25, x26, [sp, #64]
+a94573fb 	ldp	x27, x28, [sp, #80]
+a8c87bfd 	ldp	x29, x30, [sp], #128
+14000000 	b	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+aa1403e2 	mov	x2, x20
+aa1703e1 	mov	x1, x23
+91000000 	add	x0, x0, #0x0
+94000000 	bl	0 <uart_printf>
+17ffffaa 	b	1208 <pmm_dump_free_list+0x144>
+90000002 	adrp	x2, 0 <pmm_carve_reserves.part.0>
+2a0003e1 	mov	w1, w0
+91000040 	add	x0, x2, #0x0
+52800262 	mov	w2, #0x13                  	// #19
+14000000 	b	0 <uart_printf>
+90000000 	adrp	x0, 0 <pmm_carve_reserves.part.0>
+a94363f7 	ldp	x23, x24, [sp, #48]
+2a1603e1 	mov	w1, w22
+91000000 	add	x0, x0, #0x0
+a9425bf5 	ldp	x21, x22, [sp, #32]
+a9446bf9 	ldp	x25, x26, [sp, #64]
+a94573fb 	ldp	x27, x28, [sp, #80]
+a8c87bfd 	ldp	x29, x30, [sp], #128
+14000000 	b	0 <uart_printf>
+aa1c03f8 	mov	x24, x28
+d280001b 	mov	x27, #0x0                   	// #0
+17ffffd9 	b	1308 <pmm_dump_free_list+0x244>
+90000003 	adrp	x3, 0 <pmm_carve_reserves.part.0>
+90000004 	adrp	x4, 0 <pmm_carve_reserves.part.0>
+91000063 	add	x3, x3, #0x0
+91000084 	add	x4, x4, #0x0
+17ffffab 	b	1264 <pmm_dump_free_list+0x1a0>
+90000004 	adrp	x4, 0 <pmm_carve_reserves.part.0>
+90000003 	adrp	x3, 0 <pmm_carve_reserves.part.0>
+aa1c03e2 	mov	x2, x28
+aa1503e0 	mov	x0, x21
+91000084 	add	x4, x4, #0x0
+91000063 	add	x3, x3, #0x0
+2a1b03e1 	mov	w1, w27
+94000000 	bl	0 <uart_printf>
+17ffffa6 	b	1274 <pmm_dump_free_list+0x1b0>
+
+00000000000013e0 <pmm_get_free_pages>:
+d53b4222 	mrs	x2, daif
+d50342df 	msr	daifset, #0x2
+90000000 	adrp	x0, 0 <spinlock_hw_enabled>
+b9400001 	ldr	w1, [x0]
+34000261 	cbz	w1, 143c <pmm_get_free_pages+0x5c>
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+52800024 	mov	w4, #0x1                   	// #1
+91000021 	add	x1, x1, #0x0
+91064023 	add	x3, x1, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc65 	ldaxr	w5, [x3]
+35ffffc5 	cbnz	w5, 1408 <pmm_get_free_pages+0x28>
+88057c64 	stxr	w5, w4, [x3]
+35ffff85 	cbnz	w5, 1408 <pmm_get_free_pages+0x28>
+b9400003 	ldr	w3, [x0]
+f940ac20 	ldr	x0, [x1, #344]
+34000183 	cbz	w3, 1454 <pmm_get_free_pages+0x74>
+91064021 	add	x1, x1, #0x190
+889ffc3f 	stlr	wzr, [x1]
+d503209f 	sev
+d51b4222 	msr	daif, x2
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+b9400003 	ldr	w3, [x0]
+91000021 	add	x1, x1, #0x0
+f940ac20 	ldr	x0, [x1, #344]
+35fffec3 	cbnz	w3, 1428 <pmm_get_free_pages+0x48>
+d5033bbf 	dmb	ish
+d51b4222 	msr	daif, x2
+d65f03c0 	ret
+
+0000000000001460 <pmm_get_total_pages>:
+d53b4222 	mrs	x2, daif
+d50342df 	msr	daifset, #0x2
+90000000 	adrp	x0, 0 <spinlock_hw_enabled>
+b9400001 	ldr	w1, [x0]
+34000261 	cbz	w1, 14bc <pmm_get_total_pages+0x5c>
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+52800024 	mov	w4, #0x1                   	// #1
+91000021 	add	x1, x1, #0x0
+91064023 	add	x3, x1, #0x190
+d50320bf 	sevl
+d503205f 	wfe
+885ffc65 	ldaxr	w5, [x3]
+35ffffc5 	cbnz	w5, 1488 <pmm_get_total_pages+0x28>
+88057c64 	stxr	w5, w4, [x3]
+35ffff85 	cbnz	w5, 1488 <pmm_get_total_pages+0x28>
+b9400003 	ldr	w3, [x0]
+f940a820 	ldr	x0, [x1, #336]
+34000183 	cbz	w3, 14d4 <pmm_get_total_pages+0x74>
+91064021 	add	x1, x1, #0x190
+889ffc3f 	stlr	wzr, [x1]
+d503209f 	sev
+d51b4222 	msr	daif, x2
+d65f03c0 	ret
+d5033bbf 	dmb	ish
+90000001 	adrp	x1, 0 <pmm_carve_reserves.part.0>
+b9400003 	ldr	w3, [x0]
+91000021 	add	x1, x1, #0x0
+f940a820 	ldr	x0, [x1, #336]
+35fffec3 	cbnz	w3, 14a8 <pmm_get_total_pages+0x48>
+d5033bbf 	dmb	ish
+d51b4222 	msr	daif, x2
+d65f03c0 	ret
+
+00000000000014e0 <pmm_get_buddy_stats>:
+b4000040 	cbz	x0, 14e8 <pmm_get_buddy_stats+0x8>
+17fffbc9 	b	408 <pmm_get_buddy_stats.part.0>
+d65f03c0 	ret
