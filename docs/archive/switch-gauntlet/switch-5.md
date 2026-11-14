@@ -677,3 +677,24 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
   brief's hardware reproduction (filtered loop, one Jetson boot per head) has
   no lab time while C2 holds the boards; recorded as not done unless time
   remains after 08:45.
+
+## Entry 26 (written 06:29 UTC, from date): C2 fix head c0ea0714; orchestrator runs C2 /ci and WS=ON x20
+
+- C2 fix head `c2/switch-window-r2` **c0ea0714** = 4bfc15a5 fix +
+  68f0cb7b (the default build failed at 4bfc15a5 with -Werror: the off-build
+  SWITCH_CHECK_CPU left lock_site unused) + c0ea0714 docs (docs/scheduler.md,
+  kernel/CLAUDE.md). The 20 instrumented QEMU runs were at 4bfc15a5; C2 will
+  re-run the proof cells at the final head. Disclosed: C2's runner wrote 5
+  bogus "default config" files after that build failure (copying the
+  previous log); deleted before commit; runner now refuses a failed build
+  (919d4700).
+- Builder rows at the fix head so far (`gauntlet-5-hw-pi5` 919d4700,
+  `run5-hw/c2/qemu-fix/`, `fix-regress/`): default-config R3 migrate,
+  R3 wake, R2 x20, 5 runs at 68f0cb7b: 300 of 300 pass; full make test at
+  c0ea0714: 1 failure, #1230 litmus, load 4.42; x86 make test PASSED (load
+  4.58). COOP_PREEMPT exists only on Pi 5 and Jetson builds, so the COOP row
+  will be pi-5-1 with SECONDARY_PREEMPT=OFF in C2's lab slot.
+- The orchestrator runs /ci steps 1 to 9 plus diff and `make test
+  WORK_STEALING=ON` x20 at c0ea0714 in clean worktree s5-ci-c2, from 06:29 UTC
+  (about 75 min). C2 and the C3 critic are asked to hold QEMU for it. Load at
+  start 5.15 (their hold messages take effect when their turns end).
