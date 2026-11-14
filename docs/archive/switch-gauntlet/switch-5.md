@@ -340,3 +340,22 @@ pi-5-1 unheld.
   reads only the ADR's sequence, evidence and design sections, derives the
   lock graph and ordering from code, then reads the ADR's arguments and
   compares. Ahead of the original 5:00 to 6:00 mark despite the lab shift.
+
+## Entry 11 (written 04:14 UTC, from date): hour mark 6:00
+
+Correction to Entry 10: written at about 04:08 UTC, not 04:12. From this
+entry on, write times come from `date -u`.
+
+- C2: design critic running since 04:11 UTC; no verdict yet; C2 stopped on fix
+  code. Behind the 6:00 mark by the length of the critic.
+- C3: holds jetson-nano-2 since 03:58 UTC (Entry 9) until 05:30 UTC,
+  reproducing and capturing with its 5069e658 images. No handover at this
+  mark.
+- C1: my go for its PR-head /ci at 2196deb5 (sent about 03:17 and 03:20 UTC)
+  did not reach it: it waited in one long foreground loop and messages are
+  delivered only between tool calls. Third go sent at 04:13 UTC; /ci starts
+  now. C1 is about 2.5 h behind its mark; C2 and C3 already build on its
+  branch, so nothing else is blocked. Round-2 evidence:
+  `gauntlet-5-hw-pi5` 0d260e09, `run5-hw/c1/round2/`.
+- Process change: builders keep each foreground wait at 10 min or less so
+  messages are delivered between waits.
