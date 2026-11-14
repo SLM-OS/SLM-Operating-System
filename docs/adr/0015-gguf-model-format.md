@@ -1,0 +1,87 @@
+# ADR 0015: GGUF v3 is the SLM model format, checked against llama.cpp goldens
+
+Status: accepted (backfilled).
+
+## Context
+
+Phase 5 gave SLM-OS an ONNX loader and CPU engine for MNIST-class models
+(`runtime/src/loader/`, `docs/onnx-support.md`, aeee5120 "Implement Phase 5
+M1: ONNX model loader", 2026-04-07). The SLM work (#475, plan and spec in
+2c2bb90d "Plan/Spec for adding SLM support for SLM-OS", 2026-04-27) targets
+Qwen2.5-1.5B-Instruct, a decoder-only transformer with INT4 weights, a KV
+cache and a 152 K-entry BBPE tokenizer. The spec
+(`docs/design/slm-integration.md` §"Target SLM") lists first-party GGUFs at
+`Qwen/Qwen2.5-1.5B-Instruct-GGUF` as one of the reasons for the model
+choice, and the backup (Llama-3.2-1B) is also a Q4_K_M GGUF.
+
+## Decision
+
+- SLM models are GGUF v3 files. The format is taken from llama.cpp/ggml;
+  the code is not (spec §"Why not pull in llama.cpp wholesale": libc,
+  malloc, threads and POSIX I/O are not available in the kernel, and a
+  second inference stack would sit beside the Phase-5 one).
+- An in-house `no_std` zero-copy parser lives in `runtime/src/slm/gguf.rs`
+  (d7675293 "M1.1 + M1.2: no_std GGUF v3 parser with Q4_K block layout",
+  2026-04-27). A host twin with the same DoS gates is
+  `host-tools/gguf-inspect/` (e57fb21a, 2026-04-27). Both reached `main`
+  through PR #617 (merged 2026-05-05); PRs #497 and #492 carry different
+  commits of the same work (747f8f9b, fa1d84dd) on another branch. Only version 3
+  is accepted (`GGUF_VERSION`). The tokenizer vocabulary and merges are read
+  from GGUF metadata; there is no separate tokenizer file.
+- Shipped quant scheme: Q4_K_M (plan decision M3-D2, "Q4_K_M only"). The
+  parser and `ggml_type_byte_size` (`runtime/src/slm/registry.rs`) size
+  F32, F16, Q4_K, Q5_0, Q6_K and Q8_0, because Q4_K_M files mix Q6_K into
+  some tensors and other models use Q5_0/Q8_0. Q4_0, Q5_1, Q3_K and other
+  types return `None`. GGUF v1/v2 are out of scope (spec §"Skipped / Blocked / Out of Scope").
+- Correctness bar: Definition of Done item 7
+  (`docs/plans/slm-integration-plan.md:572`) requires the golden-vector
+  tokenizer and ops suites and an end-to-end greedy test to pass in `/ci`.
+  `scripts/fixtures/slm/PROVENANCE.md` sets the reference: upstream
+  llama.cpp and ggml, never SLM-OS code, with one exception, the real
+  model's exact CPU reference `qwen25_real_golden.rec` (ADR 0004).
+  `scripts/tools/slm-golden-driver.cpp` and `scripts/tools/slm-gen-goldens.py`
+  write `scripts/fixtures/slm/*.rec`; `scripts/fixtures/slm/PROVENANCE.md`
+  pins llama.cpp `ca89968a` and the source GGUF's sha256.
+  `runtime/src/slm/golden.rs` checks them on the host and, through
+  `kernel/tests/test_slm_golden.c` (fixtures embedded by `.incbin` in
+  `kernel/tests/slm_golden_embed.S`), in the kernel, because the
+  NEON Q4_K path exists only on aarch64. Tolerances follow ADR 0004.
+- The ONNX path stays for the Phase-5 models (spec §"See Also": "parallel
+  format, not replaced").
+
+Performance against llama.cpp is ADR 0001; delivery of `.gguf` files on
+the Jetson UEFI path is ADR 0002.
+
+## Alternatives considered
+
+- Linking llama.cpp/ggml into the kernel: rejected in the spec, for the
+  reasons above.
+- ONNX or safetensors for the SLM: any comparison with GGUF is not recorded.
+  GGUF was the agent's recommendation and the user saw no reason to
+  disagree (user, 2026-11-14).
+- Q4_0 alongside Q4_K_M: deferred by plan decision M3-D2, to be added only
+  if needed as a bring-up rung.
+- Token-exact parity with llama.cpp as the correctness bar: rejected
+  (ADR 0001, ADR 0004).
+
+## Consequences
+
+- The parser is SLM-OS code exposed to untrusted files; it carries
+  plausibility caps on counts and lengths (`MAX_PLAUSIBLE_TENSORS`).
+- A model whose tensors use an unsized quant type cannot run until that
+  type is added to the parser, the registry and the kernels.
+- Golden fixtures must be regenerated with the pinned llama.cpp commit
+  when a reference changes; they are not edited by hand.
+- The kernel carries two model loaders: ONNX (`model` commands) and GGUF
+  (`slm` commands).
+
+## Evidence
+
+- c69438a2 "Qwen2.5-1.5B end to end on Jetson after a UEFI-direct boot
+  (#475)", 2026-11-07: added `golden.rs`, the golden driver and generator,
+  and `kernel/tests/test_slm_golden.c`.
+- 96069010 "Q/K/V bias golden op vector in /ci; real-model golden as a
+  Jetson hardware target (#1176)", 2026-11-08 (#1165): `golden_qkv_bias.rec`,
+  `qwen25_real_golden.rec`, and the on-board `slm golden` check.
+- Fixtures: `tiny_qwen2.gguf` (seeded random weights quantized by
+  `llama-quantize` to Q4_K_M), `qwen_vocab.gguf`, `tokenizer_goldens.tsv`.

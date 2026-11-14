@@ -1,5 +1,7 @@
 # Hailo DMA buffer content diff plan (#1001 follow-up)
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 **Status (2026-05-28):** EXECUTED. SLM-OS side landed in PR
 [#1010](https://github.com/SLM-OS/SLM-Operating-System/pull/1010); the
 matching Linux `hailo_pci` patch landed cross-side during the same session.

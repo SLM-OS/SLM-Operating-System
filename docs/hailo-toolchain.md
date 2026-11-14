@@ -1,5 +1,7 @@
 # Hailo HEF Compilation Toolchain
 
+> **Frozen (2026-11-14, #1254, ADR 0017):** the Hailo integration is kept building but is not developed further.
+
 Compiling a model into Hailo's HEF (Hailo Executable Format) is a one-time
 step performed on the developer workstation. The resulting `.hef` file is
 then embedded into the SLM-OS kernel at build time via `USER_HEF_BLOB=` or
