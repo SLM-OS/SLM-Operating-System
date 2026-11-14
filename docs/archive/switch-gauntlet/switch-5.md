@@ -759,3 +759,11 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
 - C2's QEMU runs overlapped the orchestrator's /ci at c0ea0714 (started 06:29)
   because the hold message had not reached it either; /ci load is recorded per
   step.
+
+## Entry 29 (written 07:21 UTC, from date): C2 images built; lab window restated
+
+C2 reported at 07:21 UTC that all fix-head hardware images (c0ea0714) and the
+base production kernels are built, and went idle, so the queued messages
+reach it now. The lab window was restated as now to 08:45 UTC. Lab time unused
+since the 06:10 handover: about 72 min. No claims on either board at 07:08
+UTC.
