@@ -698,3 +698,46 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
   WORK_STEALING=ON` x20 at c0ea0714 in clean worktree s5-ci-c2, from 06:29 UTC
   (about 75 min). C2 and the C3 critic are asked to hold QEMU for it. Load at
   start 5.15 (their hold messages take effect when their turns end).
+
+## Entry 27 (written 06:35 UTC, from date): C3 critic PASS on "open"; corrections to Entries 15, 22, 25
+
+- C3 verdict: **PASS on the "open" branch** of the definition of done,
+  Fable 5.2, `critic-5-C3.md` (gauntlet/switch-5 3aaa604d); critic
+  evidence placed at `gauntlet-5-hw-pi5` 57cffa92, `run5-hw/c3-critic/`.
+  Counted from raw files: filtered loop 1200 of 1200 in 6 boots, 0 PMM_DEBUG
+  lines; 0 of 16 suite boots with a PMM halt; all 22 captures start at MB1 with
+  banner 5069e658; 5069e658 and 321a91be carry the same C3 commit
+  (range-diff). ELF check closed: the critic rebuilt 1b85b315, d512f40b and
+  6c1f4c9c; ELRs are `strb` at 0x80024b6c (boot08, run06), `strb` at
+  0x80024bcc (#1228) and `ldr` at 0x80024d48 (d512f40b), each matching
+  WnR. PMM_DEBUG off: pmm.c.obj identical in size, 8 `__LINE__` immediates
+  differ. QEMU at both heads: filtered loop 200 of 200 each; PMM_DEBUG=ON full
+  suite at 321a91be 3039 pass, 0 fail.
+- **Hardware reproduction by the critic: not done** (no lab time; C2 holds
+  the boards). The definition of done's "critic reproduced the filtered loop on
+  both heads" is met in QEMU only.
+- **Corrections (the critic's fix 2):**
+  - Entry 25 "#1228 the same defect" and Entry 15 "the halt needs state from
+    earlier suites" were hypotheses written as findings. Corrected: three
+    captures (1b85b315 boot08, 8a3406ea run06, 6c1f4c9c run01) share a
+    signature, list head NULL with a non-zero count; **d512f40b run05 is
+    different**, a next link in the order-12 list holding 0x0007000000000000,
+    which a count defect alone cannot produce. That #1228 is #1207 is a
+    hypothesis. Because the same instrumented build never halted in either
+    mode, the isolated-versus-suite comparison shows nothing.
+  - Entry 22 "weak evidence of a lower rate": at P = 0.19 it is no evidence
+    either way.
+  - Run 5 has no uninstrumented hardware row; all C3 hardware rows ran with
+    PMM_DEBUG=ON.
+  - 11 of 16 suite captures end mid-line after the PMM lines; the 4 cut fault
+    dumps are not complete dumps for C2's use.
+- The critic filed **#1244** (P2, Jetson kexec: the DTB blob lies inside the
+  PMM heap unreserved, and DTB lookups fail after pmm_init on every kexec boot;
+  not shown to cause #1207).
+- Issue updates posted: #1207 (decode correction, run-5 rows, next
+  experiment: about 29 PMM_DEBUG=OFF suite boots with a stop rule, a
+  DTB-reserved arm for #1244, --no-helper, a light option-off check), #1228
+  (signature match, labelled a hypothesis).
+- Not done this run (the critic's fixes 4 to 6): the instrument's extra self-tests,
+  the CMakeLists docs pointer, and the critic's Jetson boots. C3 ends **open**,
+  with no PR; `c3/pmm-halt` 321a91be kept for the user to decide.
