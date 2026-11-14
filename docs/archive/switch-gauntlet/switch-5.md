@@ -276,3 +276,43 @@ before.
 - C1 round 2: fixes pushed (ef61c69c, then 2196deb5); its PR-head /ci running
   on a quiet host since about 03:10 UTC (C3 holding QEMU and builds). C3:
   rebases onto C1's head and rebuilds after that /ci, for its 04:15 slot.
+
+## Entry 8 (written 03:57 UTC): C2 baseline table; lab released; schedule
+
+C2 lab session 01:46 to 03:53 UTC (2 h 7 min); both boards released at 03:53,
+powered on, online. Restore (builder report, to be checked by the C2 critic):
+Jetson ESP `SLMOS.efi` 789cba62 (fresh read-only mount sha, `fsck.vfat -n`
+clean), no BootNext, BootCurrent 0001, staged elfs removed; pi-5-1 originals
+renamed aside and back, boots its prior b42b2c1d kernel.
+
+Baseline rates (builder's table; heads c2/switch-window 88d4d71b = base +
+C1 6e39f425 + tests; x200 per boot, one test per image; critic to count):
+
+| Reproducer | Cell | Boots or runs failed | Iterations | Files |
+|---|---|---|---|---|
+| R1 window patch | QEMU thread=multi | 20 of 20 (14 fault, 6 hang), iteration 1 | | gauntlet-5-hw-pi5 105a3013 run5-hw/c2/qemu-base/r1-base-88d4d71b-run01..20.txt |
+| R3 migrate | QEMU | 20 of 20, mean first failure 5.55 | | same, r3m-base-* |
+| R3 wake | QEMU | 20 of 20, mean first failure 1.1 | | same, r3w-base-* |
+| R2 | Jetson kexec | 3 of 3, iteration 1 (2 dumps EC 0xe pdm_a/pdm_b and EC 0 idle_5, 1 hang) | | gauntlet-5-hw-jetson d3834651 run5-hw/c2/hw-base/kexec-r2-boot1..3.txt |
+| R3 migrate | Jetson kexec | 1 of 3 (hang at 54) | 454, 1 failure | kexec-r3m-boot1..3.txt |
+| R3 wake | Jetson kexec | 3 of 3, hang at iteration 1 | | kexec-r3w-boot1..3.txt |
+| R2 | Jetson UEFI (1 boot) | 38 of 200 iterations, first at 7 | 200 | uefi-r2-boot1.txt |
+| R3 wake | Jetson UEFI (1 boot) | 1 of 1, hang at 1 | | uefi-r3w-boot1.txt |
+| R3 migrate | Jetson UEFI | not run (time) | | |
+| R2 | pi-5-1 | **0 of 3, never failed** | 600 | gauntlet-5-hw-pi5 105a3013 run5-hw/c2/hw-base/pi5-r2-boot1..3.txt |
+| R3 migrate | pi-5-1 | **0 of 3, never failed** | 600 | pi5-r3m-boot1..3.txt |
+| R3 wake | pi-5-1 | 3 of 3, iteration 1 (1 dump, 2 hangs) | | pi5-r3w-boot1..3.txt |
+
+Never-failed cells (cannot claim a fix): Pi 5 R2, Pi 5 R3 migrate; they are
+still run at the fix head. UEFI cells are 1 boot, short of the brief's 3 for
+R2: disclosed. Process notes from C2: the UEFI deploy script boots SLM-OS once
+uncaptured per image before the captured boot; 10 min lost to a wait loop
+whose pgrep matched itself (own task, stopped by id); Pi 5 deployed
+`kernel_2712.img` only (config.txt names it). WARN flood measured at about 14
+lines per iteration on Jetson kexec R3 migrate.
+
+Schedule from here (UTC): C3 jetson-nano-2 04:00 to 05:30 (moved earlier,
+since the board is free and C3's rebuild follows C1's /ci); C2 QEMU traces
+of R3 and ADR 0008 draft now; C2 Jetson R2 SLOT_TRACE capture 05:30 to 06:15;
+C2 design critic from the ADR push, with the Jetson trace added when it
+lands; fix-head lab 06:15 onward.
