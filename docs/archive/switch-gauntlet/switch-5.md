@@ -845,3 +845,42 @@ on litmus alone (04r, load 3.51; 0 of 2 at this head), step 5 `AI_SCHED=ON`
 passed (05r, load 5.15). The "/ci green" and "WORK_STEALING=ON no worse"
 rows are therefore **not met as written**; whether #1230 under load excuses
 them goes to the fix critic and to Dissent.
+
+## Entry 34 (written 08:37 UTC, from date): C2 fix-head hardware rows; handover to the fix critic
+
+C2 held both boards 07:24 to 08:35 UTC (71 min of the 06:10 to 08:45 window;
+the 06:10 handover reached it at about 07:21). Restored: Jetson ESP 789cba62
+(fresh read-only mount, fsck clean), no BootNext, BootCurrent 0001; pi-5-1
+originals renamed back (boots b42b2c1d); both powered on. Head c0ea0714
+throughout. Files `gauntlet-5-hw-jetson` 1b017c7a and `gauntlet-5-hw-pi5`
+e6745ebe, `run5-hw/c2/hw-fix/`. Builder claims, for the critic:
+
+| Cell (fix head, test kernels) | Result | 5x threshold |
+|---|---|---|
+| Jetson kexec R3 migrate | 3 boots x800, 2400 of 2400 | 2270 |
+| Jetson kexec R2 | 1 boot, 200 of 200 | 5 |
+| Jetson kexec R3 wake | 1 boot, 200 of 200 | 5 |
+| Jetson UEFI R2 | 1 boot, 200 of 200 (capture began before the deploy reboot: Linux shutdown and MB1, not a cold power-on) | 27 |
+| Jetson UEFI R3 wake | **not run** (time) | 1-boot baseline |
+| Pi 5 R2, R3 migrate (never failed at baseline) | 200 of 200 each | cannot claim |
+| Pi 5 R3 wake | 200 of 200 | 5 |
+| Pi 5 COOP (SECONDARY_PREEMPT=OFF) R3m+R3w+R2 x100 | 300 of 300 | extra row |
+
+Regression rows (production kernels at c0ea0714): Pi 5 boot_test **10 of 10**;
+Jetson kexec boot_test **3 of 3 only** (10 required); Jetson UEFI boot_test and
+`--assert-shares` 20 of 20: **not run**. Full integration suite boots at the
+fix head: **not run**. Context-switch time (the shell's context bench; `bench
+smp` prints no time): Pi 5 base 106/106 ns, fix 110/112 ns (+4 to +6% mean,
+p50 111 both); **Jetson kexec base 87/88 ns, fix 96/98 ns (+10 to +13% mean,
+over the 10% bar)**, p50 96 and p95 128 identical, counter resolution 32 ns, 2
+runs on one boot each. Dissent material.
+
+Base R2 Jetson trace (1 boot, reduced from 3): dumped at the first busy
+switch-in, CPU 2 about to switch in pdm task id 10 with on_cpu=1 (the #1234
+precondition). Limitation: the SLOT_TRACE dump prints only CPUs 0 to 3
+(slot_trace.c caps at 4), so the CPU holding on_cpu (4 or 5) and the enqueue
+that queued the task are missing; the #1238 sequence is only partly traced.
+C3's 16 suite captures not yet classified by C2.
+
+**Handover 08:37 UTC: jetson-nano-2 to critic-c2-fix** (kexec only, 5 boots,
+until 09:20 UTC at the latest). pi-5-1 unheld.
