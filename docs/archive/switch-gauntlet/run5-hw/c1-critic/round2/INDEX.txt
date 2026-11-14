@@ -1,0 +1,7 @@
+C1 critic, round 2, at c1/harness 2196deb5. Reading: critic-5-C1.md "Addendum 2" on gauntlet/switch-5.
+Same layout as ../INDEX.txt: *.make.log line 1 = head, args, /proc/loadavg at start, UTC time; last line = make rc and load at end.
+*.test-output.log = unedited build/test-output.log of the same run.
+Clean tree: filter-x50, selftest-run1, selftest-run2, slot-trace-selftest (SLOT_TRACE=ON FAULT_DUMP_SELFTEST=ON), unfiltered.
+2196deb5 + ../critic-exp-holder.patch with CRITIC_EXP=1 (round 1's stopped-holder case, never committed): exp-holder1-run1, exp-holder1-run2.
+unfiltered-diff-normalized.txt: against ../unfiltered-base-run1.test-output.log (8ec0e330).
+own-count-round2.txt: critic's count of c1/round2/ and c0/ci-c1-2196deb5/ before their summary files were opened.

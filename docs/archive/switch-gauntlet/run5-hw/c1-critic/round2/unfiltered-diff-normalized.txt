@@ -1,0 +1,168 @@
+4c4
+<   SLM-OS vN.N.N build N (NecNeN)
+---
+>   SLM-OS vN.N.N build N (NdebN)
+54d53
+<     Order  N (  N KB): N blocks
+207,212c206
+< Lua N.N scripting initialized
+< 
+< SLM-OS Debug Shell
+< Type 'help' for available commands.
+< 
+< slmos>   [PASS] test_pi_boost_survives_requeue
+---
+>   [PASS] test_pi_boost_survives_requeue
+218c212,217
+<   [PASS] test_pi_boosted_holder_runs_before_medium
+---
+> Lua N.N scripting initialized
+> 
+> SLM-OS Debug Shell
+> Type 'help' for available commands.
+> 
+> slmos>   [PASS] test_pi_boosted_holder_runs_before_medium
+275a275,304
+> [TEST] Test Filter Tests
+>   [PASS] test_filter_parses_single_name
+>   [PASS] test_filter_parses_comma_list_in_order
+>   [PASS] test_filter_rejects_empty_elements
+>   [PASS] test_filter_rejects_bad_characters
+>   [PASS] test_filter_limits_count_and_length
+>   [PASS] test_filter_parses_repeat_bounds
+>   [PASS] test_filter_reads_cmdline_tokens
+>   [PASS] test_filter_cmdline_defaults_repeat_to_one
+>   [PASS] test_filter_cmdline_key_is_exact
+>   [PASS] test_filter_cmdline_errors_leave_filter_inactive
+>   [PASS] test_filter_match_is_exact
+>   [PASS] test_filter_index_maps_known_tests
+> 
+> ----------------------------------------
+> Tests: N  Passed: N  Failed: N
+> [PASS] All tests passed
+> [TEST] Fault Dump Lock Tests
+>   [PASS] test_fault_dump_lock_free_is_acquired_and_released
+>   [PASS] test_fault_dump_lock_owner_reenters_as_nested
+>   [PASS] test_fault_dump_lock_silent_holder_times_out_at_stall
+>   [PASS] test_fault_dump_lock_printing_holder_holds_until_cap
+>   [PASS] test_fault_dump_lock_waiter_gets_lock_after_release
+>   [PASS] test_fault_dump_lock_frozen_counter_cannot_hang
+>   [PASS] test_fault_dump_lock_silent_needs_owner_and_silence
+>   [PASS] test_fault_dump_idle_state
+> 
+> ----------------------------------------
+> Tests: N  Passed: N  Failed: N
+> [PASS] All tests passed
+975c1004
+< commit:  NecNeN
+---
+> commit:  NdebN
+1307a1337
+>        N-    Nus:    N ######
+1309,1311c1339,1340
+<        N-    Nus:     N 
+<        N-   Nus:     N 
+<       N-   Nus:     N 
+---
+>        N-   Nus:     N #
+>       N-   Nus:     N ##
+1362c1391,1392
+<      N- Nns:    N ########################################
+---
+>      N- Nns:     N 
+>        N-    Nus:    N ########################################
+1364d1393
+<        N-    Nus:     N 
+1366c1395
+<       N-   Nus:     N 
+---
+>       N-   Nus:     N #
+1501a1531
+>   ktest        Run named boot tests: ktest <test[,test...]> [repeat]
+2228a2259
+>   ktest        Run named boot tests: ktest <test[,test...]> [repeat]
+2353a2385
+>   ktest.txt  (N bytes)
+5330c5362
+< running kernel: SLM-OS N.N.N (build N, sha NecNeN)
+---
+> running kernel: SLM-OS N.N.N (build N, sha NdebN)
+6964,6966c6996,6998
+< PN      wN/N-N      N         N        N     N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N      N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+---
+> PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N       N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+6992,6993d7023
+< SN      N>N           N        N        N       N
+< SN      N>N           N         N        N       N
+6995d7024
+< SN      N>N           N       N        N       N
+7003a7033,7035
+> SN      N>N           N        N        N       N
+> SN      N>N           N        N        N       N
+> SN      N>N           N         N        N       N
+7007d7038
+< SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=yes
+7010c7041
+< SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=no
+---
+> SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=yes
+7014d7044
+< SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=no
+7015a7046,7047
+> SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=yes
+> SENS cpus=N>N SN=N SN=N PN_sensitive=no PN_sensitive=no
+7040c7072
+< PN      wN/N-N        N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+---
+> PN      wN/N-N         N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7070,7071d7101
+< PN      wN/N-N        N       N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N        N        N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7072a7103,7104
+> PN      wN/N-N        N        N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N        N        N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7134,7135c7166
+< PN      wN/N-N      N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+---
+> PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7137c7168,7169
+< PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+---
+> PN      wN/N-N       N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7155,7157d7186
+< PN      wN/N-N       N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+< PN      wN/N-N      N         N        N      N pairs=N,N,N straddles=N,N,N coverage=ok
+7158a7188,7190
+> PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+> PN      wN/N-N       N         N        N       N pairs=N,N,N straddles=N,N,N coverage=ok
+7586a7619
+> [counter] Count: N
+7589d7621
+< [counter] Count: N
+7722a7755
+> [INFO] DHCP bound: IP=N.N.N.N GW=N.N.N.N Mask=N.N.N.N
+7824a7858
+> [counter] Count: N
+7834d7867
+< [counter] Count: N
+7836a7870,7871
+> [counter] Done (count=N)
+> [INFO] Task 'counter' (id=N) exiting
+7845,7846d7879
+< [counter] Done (count=N)
+< [INFO] Task 'counter' (id=N) exiting
+8553,8554c8586
+<   [PASS] publish nonexistent topic returns N  [INFO] Rust task running!
+< 
+---
+>   [PASS] publish nonexistent topic returns N
+8555a8588
+>   [INFO] Rust task running!

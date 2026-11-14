@@ -1,0 +1,223 @@
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114053613 (2196deb5)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022cfb8
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x420caee0
+  End:     0x420d0000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x420d0000 - 0x80000000
+  Total pages:     253744 (1014976 KB)
+  Free pages:      253744 (1014976 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8400 pages (kernel)
+
+  Free list distribution:
+    Order  4 (   64 KB): 1 blocks
+    Order  5 (  128 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_fault_dump_two_cpus_concurrent,test_fault_dump_holder_stops_console_continues repeat=1 source=FAULT_DUMP_SELFTEST index=2894
+[fault_dump selftest] faulting cpu1 (data abort) and cpu2 (brk) now
+[cpu2] 
+[cpu2] SLOTTRACE-FAULT EL1 sync: cpu=2 esr=0xf2000007 far=0x0 elr=0x400857bc x19=0x1 x30=0x4008577c
+[cpu2] 
+[cpu2] SLOTTRACE-DUMP-BEGIN why=el1_sync cpu=2 a=0xf2000007 b=0x0 c=0x400857bc seq=43 cntvct=0x2f47ed8
+[cpu2]   format: ST c<cpu> #<seq> t=<cntvct> <ev> slot gen id st a b c rq=<holder nibbles cpu3..cpu0>
+[cpu2] SLOTTRACE-CPU 0 entries=18 shown=18
+[cpu2] ST c0 #0 t=0x2c7427a CREATE_ALLOC slot=0 gen=0 id=1 st=0 a=0x42100000 b=0x40019b20 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #1 t=0x2c7c0da CREATE_CTX_DONE slot=0 gen=0 id=1 st=0 a=0x42140000 b=0x4001b180 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c0 #4 t=0x2c83a51 CREATE_ALLOC slot=2 gen=0 id=3 st=0 a=0x42180000 b=0x40043ba4 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #5 t=0x2c83bc4 CREATE_CTX_DONE slot=2 gen=0 id=3 st=0 a=0x421c0000 b=0x400434c0 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c0 #8 t=0x2c88899 ADD slot=2 gen=0 id=3 st=0 a=0x0 b=0x40019de0 c=0x0 rq=1 rep=0
+[cpu2] ST c0 #9 t=0x2c8c45b CREATE_ALLOC slot=4 gen=0 id=5 st=0 a=0x42200000 b=0x40047248 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #10 t=0x2c8c54b CREATE_CTX_DONE slot=4 gen=0 id=5 st=0 a=0x42240000 b=0x40047100 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c0 #13 t=0x2c8db5b ADD slot=4 gen=0 id=5 st=0 a=0x0 b=0x40019de0 c=0x0 rq=1 rep=0
+[cpu2] ST c0 #23 t=0x2c9b211 SWITCH slot=2 gen=0 id=3 st=1 a=0xffff000000000000 b=0x421c0000 c=0x400434c0 rq=0 rep=0
+[cpu2] ST c0 #24 t=0x2c9b39d PD_CLEAR slot=2 gen=0 id=3 st=1 a=0x0 b=0x0 c=0x1 rq=0 rep=0
+[cpu2] ST c0 #25 t=0x2c9b42c FIRST_RUN slot=2 gen=0 id=3 st=1 a=0x421bffd0 b=0x421c0000 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #26 t=0x2cd1cd6 CREATE_ALLOC slot=6 gen=0 id=7 st=0 a=0x42280000 b=0x40086518 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #27 t=0x2cd1d87 CREATE_CTX_DONE slot=6 gen=0 id=7 st=0 a=0x422c0000 b=0x40085760 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c0 #28 t=0x2cd1f35 CREATE_ALLOC slot=7 gen=0 id=8 st=0 a=0x422c0000 b=0x40086534 c=0x0 rq=0 rep=0
+[cpu2] ST c0 #29 t=0x2cd1fc9 CREATE_CTX_DONE slot=7 gen=0 id=8 st=0 a=0x42300000 b=0x40085760 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c0 #30 t=0x2cd233a ADD slot=6 gen=0 id=7 st=0 a=0x1 b=0x40019de0 c=0x0 rq=10 rep=0
+[cpu2] ST c0 #31 t=0x2cd35c6 ADD slot=7 gen=0 id=8 st=0 a=0x2 b=0x40019de0 c=0x0 rq=100 rep=0
+[cpu2] ST c0 #32 t=0x2cd58f4 ADD slot=2 gen=0 id=3 st=0 a=0x0 b=0x4001aee8 c=0x0 rq=1 rep=3786
+[cpu2] SLOTTRACE-CPU 1 entries=10 shown=10
+[cpu2] ST c1 #2 t=0x2c81901 CREATE_ALLOC slot=1 gen=0 id=2 st=0 a=0x42140000 b=0x40019c3c c=0x0 rq=0 rep=0
+[cpu2] ST c1 #3 t=0x2c81af9 CREATE_CTX_DONE slot=1 gen=0 id=2 st=0 a=0x42180000 b=0x4001b180 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c1 #12 t=0x2c8d2ec SWITCH slot=1 gen=0 id=2 st=1 a=0xffff000000000000 b=0x42180000 c=0x4001b180 rq=0 rep=0
+[cpu2] ST c1 #17 t=0x2c95cf7 PD_CLEAR slot=1 gen=0 id=2 st=1 a=0x1 b=0x1 c=0x1 rq=1 rep=0
+[cpu2] ST c1 #22 t=0x2c97e1d FIRST_RUN slot=1 gen=0 id=2 st=1 a=0x4217ffd0 b=0x42180000 c=0x0 rq=0 rep=0
+[cpu2] ST c1 #34 t=0x2d3970f PD_SET slot=6 gen=0 id=7 st=1 a=0x1 b=0x1 c=0x0 rq=320 rep=0
+[cpu2] ST c1 #35 t=0x2f0ae10 SWITCH slot=6 gen=0 id=7 st=1 a=0x1000000000000 b=0x422c0000 c=0x40085760 rq=1 rep=0
+[cpu2] ST c1 #37 t=0x2f11293 PD_CLEAR slot=6 gen=0 id=7 st=1 a=0x1 b=0x1 c=0x1 rq=0 rep=0
+[cpu2] ST c1 #38 t=0x2f11b20 ADD slot=6 gen=0 id=7 st=0 a=0x1 b=0x4001aee8 c=0x0 rq=20 rep=0
+[cpu2] ST c1 #39 t=0x2f11d8f FIRST_RUN slot=6 gen=0 id=7 st=1 a=0x422bffd0 b=0x422c0000 c=0x0 rq=1 rep=0
+[cpu2] SLOTTRACE-CPU 2 entries=10 shown=10
+[cpu2] ST c2 #6 t=0x2c83df1 CREATE_ALLOC slot=3 gen=0 id=4 st=0 a=0x421c0000 b=0x40019c3c c=0x0 rq=0 rep=0
+[cpu2] ST c2 #7 t=0x2c83fe3 CREATE_CTX_DONE slot=3 gen=0 id=4 st=0 a=0x42200000 b=0x4001b180 c=0x40017ec0 rq=0 rep=0
+[cpu2] ST c2 #11 t=0x2c8cfee SWITCH slot=3 gen=0 id=4 st=1 a=0xffff000000000000 b=0x42200000 c=0x4001b180 rq=0 rep=0
+[cpu2] ST c2 #19 t=0x2c95ed9 PD_CLEAR slot=3 gen=0 id=4 st=1 a=0x2 b=0x2 c=0x1 rq=1 rep=0
+[cpu2] ST c2 #21 t=0x2c979fa FIRST_RUN slot=3 gen=0 id=4 st=1 a=0x421fffd0 b=0x42200000 c=0x0 rq=0 rep=0
+[cpu2] ST c2 #33 t=0x2d3942d PD_SET slot=7 gen=0 id=8 st=1 a=0x2 b=0x2 c=0x0 rq=320 rep=0
+[cpu2] ST c2 #36 t=0x2f0b550 SWITCH slot=7 gen=0 id=8 st=1 a=0x3000000000000 b=0x42300000 c=0x40085760 rq=0 rep=0
+[cpu2] ST c2 #40 t=0x2f152a3 PD_CLEAR slot=7 gen=0 id=8 st=1 a=0x2 b=0x2 c=0x1 rq=1 rep=0
+[cpu2] ST c2 #41 t=0x2f15eca ADD slot=7 gen=0 id=8 st=0 a=0x2 b=0x4001aee8 c=0x0 rq=300 rep=0
+[cpu2] ST c2 #42 t=0x2f15fc9 FIRST_RUN slot=7 gen=0 id=8 st=1 a=0x422fffd0 b=0x42300000 c=0x0 rq=0 rep=0
+[cpu2] SLOTTRACE-CPU 3 entries=5 shown=5
+[cpu2] ST c3 #14 t=0x2c946e1 CREATE_ALLOC slot=5 gen=0 id=6 st=0 a=0x42240000 b=0x40019c3c c=0x0 rq=1 rep=0
+[cpu2] ST c3 #15 t=0x2c948b3 CREATE_CTX_DONE slot=5 gen=0 id=6 st=0 a=0x42280000 b=0x4001b180 c=0x40017ec0 rq=1 rep=0
+[cpu2] ST c3 #16 t=0x2c94c16 SWITCH slot=5 gen=0 id=6 st=1 a=0xffff000000000000 b=0x42280000 c=0x4001b180 rq=1 rep=0
+[cpu2] ST c3 #18 t=0x2c95d33 PD_CLEAR slot=5 gen=0 id=6 st=1 a=0x3 b=0x3 c=0x1 rq=1 rep=0
+[cpu2] ST c3 #20 t=0x2c978c3 FIRST_RUN slot=5 gen=0 id=6 st=1 a=0x4227ffd0 b=0x42280000 c=0x0 rq=0 rep=0
+[cpu2]   state at dump:
+[cpu2]   cpu0: rq_holder=1
+[cpu2]     current: slot=2 id=3 gen=0 state=0 name='main' ctx.sp=0x421c0000 ctx.x19=0x400434c0 ctx.x30=0x40017ec0 stack=[0x42180000..0x421c0000)
+[cpu2]     rq.head: slot=4 id=5 gen=0 state=0 name='shell' ctx.sp=0x42240000 ctx.x19=0x40047100 ctx.x30=0x40017ec0 stack=[0x42200000..0x42240000)
+[cpu2]     rq.zombie: (null)
+[cpu2]   cpu1: rq_holder=0
+[cpu2]     current: slot=6 id=7 gen=0 state=1 name='fd_cpu1' ctx.sp=0x422c0000 ctx.x19=0x40085760 ctx.x30=0x40017ec0 stack=[0x42280000..0x422c0000)
+[cpu2]     rq.head: (null)
+[cpu2]     rq.zombie: (null)
+[cpu2]   cpu2: rq_holder=0
+[cpu2]     current: slot=7 id=8 gen=0 state=1 name='fd_cpu2' ctx.sp=0x42300000 ctx.x19=0x40085760 ctx.x30=0x40017ec0 stack=[0x422c0000..0x42300000)
+[cpu2]     rq.head: (null)
+[cpu2]     rq.zombie: (null)
+[cpu2]   cpu3: rq_holder=0
+[cpu2]     current: slot=5 id=6 gen=0 state=1 name='idle_3' ctx.sp=0x42280000 ctx.x19=0x4001b180 ctx.x30=0x40017ec0 stack=[0x42240000..0x42280000)
+[cpu2]     rq.head: (null)
+[cpu2]     rq.zombie: (null)
+[cpu2] SLOTTRACE-DUMP-END
+[cpu2] fault_dump: end, releasing the dump lock

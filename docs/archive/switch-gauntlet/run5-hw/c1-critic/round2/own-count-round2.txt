@@ -1,0 +1,33 @@
+# critic round-2 own count, 2026-11-14T05:43:30Z, before selftest-summary.txt or summary.txt was opened
+c1/round2/selftest-2196deb5-run10.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=442 us allpass=1 exit=1 load=load=2.37 2.57 2.81 . Unedited below.
+c1/round2/selftest-2196deb5-run11.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=668 us allpass=1 exit=1 load=load=2.31 2.55 2.80 . Unedited below.
+c1/round2/selftest-2196deb5-run12.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=431 us allpass=1 exit=1 load=load=2.34 2.55 2.80 . Unedited below.
+c1/round2/selftest-2196deb5-run13.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=411 us allpass=1 exit=1 load=load=2.29 2.53 2.79 . Unedited below.
+c1/round2/selftest-2196deb5-run14.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=47632 us allpass=1 exit=1 load=load=2.25 2.51 2.78 . Unedited below.
+c1/round2/selftest-2196deb5-run15.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=601 us allpass=1 exit=1 load=load=2.21 2.49 2.77 . Unedited below.
+c1/round2/selftest-2196deb5-run1.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=664 us allpass=1 exit=1 load=load=1.89 2.65 2.88 . Unedited below.
+c1/round2/selftest-2196deb5-run2.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=416 us allpass=1 exit=1 load=load=2.32 2.61 2.85 . Unedited below.
+c1/round2/selftest-2196deb5-run3.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=414 us allpass=1 exit=1 load=load=2.43 2.62 2.85 . Unedited below.
+c1/round2/selftest-2196deb5-run4.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=494 us allpass=1 exit=1 load=load=2.51 2.64 2.85 . Unedited below.
+c1/round2/selftest-2196deb5-run5.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=526 us allpass=1 exit=1 load=load=2.60 2.65 2.85 . Unedited below.
+c1/round2/selftest-2196deb5-run6.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=637 us allpass=1 exit=1 load=load=2.33 2.59 2.83 . Unedited below.
+c1/round2/selftest-2196deb5-run7.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=350 us allpass=1 exit=1 load=load=2.43 2.60 2.83 . Unedited below.
+c1/round2/selftest-2196deb5-run8.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=518 us allpass=1 exit=1 load=load=2.42 2.59 2.82 . Unedited below.
+c1/round2/selftest-2196deb5-run9.log | banner=(2196deb5) lines=306 body=124 unpref=0 blocks=2 ends=2 iterpass=2 iterfail=0 took=391 us allpass=1 exit=1 load=load=2.35 2.57 2.81 . Unedited below.
+c1/round2/selftest-ef61c69c-run2-wrap-failure.log | banner=(ef61c69c) lines=304 body=124 unpref=0 blocks=2 ends=2 iterpass=1 iterfail=1 took= allpass=0 exit=1 load=load 3.68
+c1/round2/control-nobound-2196deb5.log | banner=(2196deb5-dirty) lines=293 body=124 unpref=0 blocks=2 ends=2 iterpass=1 iterfail=0 took= allpass=0 exit=0 load=load 2.05. Expected and observed: TIMEOUT
+c1/round2/slot-trace-selftest-2196deb5.log | banner=(2196deb5) lines=222 body=68 unpref=0 blocks=1 ends=0 iterpass=0 iterfail=0 took= allpass=0 exit=1 load=load 2.24
+
+c0/ci-c1-2196deb5/01-arm64-build.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 01-arm64-build start 05:02:52 load 4.26 3.56 4.06 |  litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/02-x86-build.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 02-x86-build start 05:04:25 load 4.84 4.12 4.23 |  litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/03-jetson-real.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 03-jetson-real start 05:05:18 load 4.81 4.17 4.23 |  litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/04b-test-x86.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 04b-test-x86 start 05:12:03 load 5.57 5.45 4.81 | PASSED - All tests passed (isa-debug-exit code 1 = success)| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/04r-test.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 04r-test start 05:24:01 load 2.33 4.19 4.60 | PASSED - All tests passed (exit code 0)| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/04-test.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 04-test start 05:09:10 load 7.42 5.25 4.60 | FAILED - Test failures detected:|make: *** [Makefile:1724: test] Error 1| litmusfail=1 otherfail=0
+c0/ci-c1-2196deb5/05r-test-aisched.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 05r-test-aisched start 05:26:39 load 2.79 3.68 4.34 | PASSED - All tests passed (exit code 0)| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/05-test-aisched.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 05-test-aisched start 05:13:39 load 5.36 5.34 4.83 | FAILED - Test failures detected:|make: *** [Makefile:1724: test] Error 1| litmusfail=1 otherfail=0
+c0/ci-c1-2196deb5/06-runtime-test.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 06-runtime-test start 05:16:42 load 4.38 5.40 4.98 | test result: ok. 308 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 86.40s|test result: ok. 328 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 95.21s| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/07-braces.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 07-braces start 05:19:59 load 3.63 4.40 4.64 | PASS: WarningsAsErrors does not hide violations|All check-c-braces tests passed|check-braces: 0 violation(s), 0 file(s) unparsed; parses: JETSON_ORIN_NANO 294, JETSON_ORIN_NANO-test 296, JET| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/08-build-order.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 08-build-order start 05:21:19 load 9.44 5.89 5.14 | All build-order tests passed| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/09-jetson-layout.log | head 2196deb5ac2a067adf434671bbf88f150a1bc769 step 09-jetson-layout start 05:22:05 load 5.02 5.22 4.94 |   [32mAll checks passed.[0m| litmusfail=0 otherfail=0
+c0/ci-c1-2196deb5/11-diff.log |  CMakeLists.txt                  |  46 ++++ |  litmusfail=0 otherfail=0
