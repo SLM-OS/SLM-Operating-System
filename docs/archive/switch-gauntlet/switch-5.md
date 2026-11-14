@@ -486,3 +486,39 @@ prototype, for the #1242 base rate on base plus deferral).
   WORK_STEALING=ON runs are dropped from this C1 /ci (they are C2's
   regression rows). Host is not quiet: C2 runs one QEMU and the orphan QEMU
   (Entry 13) holds a core.
+
+## Entry 18 (written 05:32 UTC, from date): C1 /ci at 2196deb5; both critics round 2
+
+- /ci at `c1/harness` 2196deb5, run by the orchestrator in clean worktree
+  s5-ci-c1, 05:02 to 05:29 UTC. Files `gauntlet-5-hw-pi5` f74c1ed5,
+  `run5-hw/c0/ci-c1-2196deb5/` (each log's first line: head, step, start,
+  load; summary.txt: make's rc). Steps 1 to 3, 4b, 6 (308 and 328 passed),
+  7 (0 violations, 0 unparsed, all 12 configurations parsed), 8, 9 ("All
+  checks passed.", no skipped lines), diff: rc 0. Step 4 `make test`
+  rc 2 at start load 7.42 and step 5 `AI_SCHED=ON` rc 2 at 5.36, each with
+  exactly one failure, `test_litmus_patterns_pass` (#1230). Rerun once:
+  04r PASSED at 2.33, 05r PASSED at 2.79. "/ci green" is met only with one
+  retry of steps 4 and 5 under load; carried to the critic and, if it
+  matters to the verdict, to Dissent.
+- C1 critic round 2 sent at 05:33 UTC (head 2196deb5; fix 3 carried to
+  Dissent, judged only as disclosed and unchanged).
+- C2 ADR 0008 round 2 pushed on **new branch names**, because the rebase onto
+  2196deb5 needed a force push that the permission system denied:
+  `c2/switch-window-r2` 6bc60aa3, `c2/trace-r2` 4812e821,
+  `c2/reverted-wait-r2` ef11ee3c, `c2/proto-1242` 1f58b249; the old
+  names stay at their pre-rebase heads. Round-2 design (builder summary):
+  pin the CPU id by masking the tick's interrupt class before reading cpu_id()
+  through the locked section; idle checks with the tick masked, then WFI;
+  deferral runs the next ready task in queue order and idles only if none;
+  never-released case stated. #1242 base rate on base plus the deferral
+  prototype (`c2/proto-1242`): 5 of 5 QEMU runs, 26 of 128 iterations
+  stale, first at 1, 1, 4, 1, 5 (`gauntlet-5-hw-pi5` cdb60557,
+  `run5-hw/c2/qemu-1242-base/`). Register samples of 2 forced-tick hangs
+  on the reverted design: CPU 3 in the LDAPR loop on cw_T->on_cpu holding
+  rq_lock[3], CPU 0 in sched_rebalance_tick spinning on rq_lock[3] (91f0f36c,
+  `qemu-nodeadlock/forced-reverted-ef11ee3c-sampled-SYMBOLS.txt`).
+- C2 design critic round 2 (last allowed) sent at 05:33 UTC.
+- Lab: C3 has held jetson-nano-2 since 05:01:41 UTC (claim stamp; the
+  handover message of Entry 15 was sent at about that time, not 05:05) and
+  is past its 05:30 end; told to release after the current boot_test call.
+  Then C2 takes it for the R2 trace.
