@@ -1,0 +1,3 @@
+19:36:47 start mode=kexec n=1 elfs=[/root/slmos-s5co-jet-prod-base-dc51107c.elf] skip_current_boot_id=none
+19:38:15 trigger 1/1 elf=/root/slmos-s5co-jet-prod-base-dc51107c.elf boot_id=cc5a8c10-f38d-40a2-918d-ad0c09f3cc4f state+uptime=[running 25.25 ] reply=[87bf04ef8dc850b1 ]
+19:38:15 end triggers=1

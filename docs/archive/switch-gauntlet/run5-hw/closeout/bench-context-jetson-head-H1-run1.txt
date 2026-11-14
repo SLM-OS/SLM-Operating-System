@@ -1,0 +1,29 @@
+# jetson-nano-2 kexec, production head 6a4cfa93, bench boot H1 (= kexec-prod-6a4cfa93-boot10.txt), bench context run 1 of 2 on this boot
+# serial_send output of this session, verbatim (labctl result "Captured 27 lines"), 2026-11-14 ~19:34 UTC
+seosl context
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=12) exiting
+  Context switch: 99 round-trips
+    Average: 96 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 64 ns   Max: 192 ns   Mean: 96 ns
+  p50: 96 ns   p95: 128 ns   p99: 192 ns
+
+slmos>
+slmos>

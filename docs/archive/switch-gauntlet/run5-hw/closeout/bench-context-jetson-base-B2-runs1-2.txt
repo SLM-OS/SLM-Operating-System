@@ -1,0 +1,57 @@
+# jetson-nano-2 kexec, production base main dc51107c, bench boot B2 (= kexec-bench-base-dc51107c-B2-boot01.txt), bench context runs 1 and 2 on this boot
+# command: lua-admin -e "for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')"
+# serial_send output of this session, verbatim (labctl result "Captured 53 lines"; first line is the garbled echo), 2026-11-14 ~19:47 UTC
+lu}-m����-e6"fo�?i=1/��go�{����7RS-RUO(gnoi)0slm������Uᕍ�wsu{j8sootm�}/JKY��|����7Rs-�..'END')"
+BC-RUN 1
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=12) exiting
+  Context switch: 99 round-trips
+    Average: 87 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 64 ns   Max: 288 ns   Mean: 87 ns
+  p50: 96 ns   p95: 128 ns   p99: 288 ns
+
+BC-RUN 2
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=13) exiting
+  Context switch: 99 round-trips
+    Average: 85 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 64 ns   Max: 128 ns   Mean: 85 ns
+  p50: 96 ns   p95: 128 ns   p99: 128 ns
+
+BC-END
+slmos>
+slmos>
