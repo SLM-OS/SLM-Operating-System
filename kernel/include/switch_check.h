@@ -54,6 +54,13 @@ void switch_check_snapshot(struct switch_check_stats *out);
 extern volatile int switch_window_on;
 extern struct task *volatile switch_window_task;
 extern volatile int switch_window_in;
+/* Forced-tick mode (no-deadlock bar): when nonzero, after the test sets
+ * switch_window_moved the hold continues until this many hardware ticks
+ * have run on the holding CPU (bounded at 200 ms), so a tick lands in the
+ * window after the moved task's new CPU has picked it. */
+extern volatile int switch_window_ticks_after_move;
+extern volatile int switch_window_moved;
+extern volatile int switch_window_ticks_seen;
 void switch_window_hold(struct task *current);
 #define SWITCH_WINDOW_HOLD(cur)     switch_window_hold((cur))
 #else

@@ -11,6 +11,8 @@
 #include "task.h"
 #include "timer.h"
 #include "uart.h"
+#include "smp.h"
+#include "sched_diag.h"
 #include <stdbool.h>
 #endif
 
@@ -105,6 +107,9 @@ void switch_check_snapshot(struct switch_check_stats *out)
 volatile int switch_window_on;
 struct task *volatile switch_window_task;
 volatile int switch_window_in;
+volatile int switch_window_ticks_after_move;
+volatile int switch_window_moved;
+volatile int switch_window_ticks_seen;
 
 /* Run-4 critic window patch (critic-window-experiment.patch): in the
  * outgoing switch window, after rq_unlock and before switch_to, hold the
@@ -118,6 +123,23 @@ void switch_window_hold(struct task *current)
         uint64_t f = timer_get_frequency();
         uint64_t t0 = timer_get_count();
         while (timer_get_count() - t0 < f / 40) {
+        }
+        int want = switch_window_ticks_after_move;
+        if (want > 0) {
+            /* Hold until `want` ticks on this CPU after the move, so one
+             * lands while the moved task's new CPU is at its switch-in.
+             * A design that waits for this window under the new CPU's
+             * rq_lock wedges this CPU in the tick (it never returns
+             * here); a correct one lets the ticks through. */
+            uint32_t cpu = cpu_id();
+            while (!__atomic_load_n(&switch_window_moved, __ATOMIC_ACQUIRE) &&
+                   timer_get_count() - t0 < f / 5) {
+            }
+            uint32_t k0 = sched_diag_tick[cpu];
+            while (sched_diag_tick[cpu] - k0 < (uint32_t)want &&
+                   timer_get_count() - t0 < f / 5) {
+            }
+            switch_window_ticks_seen = (int)(sched_diag_tick[cpu] - k0);
         }
         __atomic_store_n(&switch_window_in, 0, __ATOMIC_RELEASE);
     }
