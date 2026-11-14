@@ -577,3 +577,15 @@ prototype, for the #1242 base rate on base plus deferral).
   with closingIssuesReferences). Its description lists the deviation and says
   every row is QEMU.
 - C1 builder's draft entries are in Entry 6 and Entry 17. C1 complete.
+
+## Entry 21 (written 05:51 UTC, from date): message delivery, corrected rule
+
+C1 reports that none of the orchestrator's go messages (about 03:17 to 05:47
+UTC) reached it until its turn ended, all at once. So teammate messages are
+delivered when the receiving agent's turn ends, not between tool calls (Entry
+11's rule of waits of 10 min or less did not help). Corrected rule, sent to
+C2 and C3: wait on the agent's own background work in the foreground, but when
+waiting for the orchestrator (a go, a handover, a verdict), report and end the
+turn, since a message wakes an idle agent. The 03:12 to 05:00 C1 stall and
+C3's 05:30 overrun both follow from this. C1 confirmed its 80
+`run5-hw/c1/` files are intact on origin and stood down.
