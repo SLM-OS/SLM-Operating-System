@@ -1,0 +1,4 @@
+05:52:04 start mode=kexec n=2 elf=/root/slmos-s5c3-60c548f3.elf skip_current_boot_id=none
+05:53:31 trigger 1/2 boot_id=c27c6674-d935-41fe-8330-f2f956571e91 state+uptime=[running 25.08 ] reply=[60c548f3eef34910 ]
+06:00:19 trigger 2/2 boot_id=7697c935-65b8-402a-bd91-09cb9a311d59 state+uptime=[running 26.66 ] reply=[60c548f3eef34910 ]
+06:00:19 end triggers=2
