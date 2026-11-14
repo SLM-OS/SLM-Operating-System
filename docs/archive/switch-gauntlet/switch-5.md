@@ -767,3 +767,26 @@ base production kernels are built, and went idle, so the queued messages
 reach it now. The lab window was restated as now to 08:45 UTC. Lab time unused
 since the 06:10 handover: about 72 min. No claims on either board at 07:08
 UTC.
+
+## Entry 30 (written 07:49 UTC, from date): /ci and WORK_STEALING=ON x20 at c0ea0714; A/B started
+
+Files: `gauntlet-5-hw-pi5` ef0bfa0e, `run5-hw/c0/ci-c2-c0ea0714/` (each
+log's first line gives head, step, start, load; make's rc in summary.txt).
+Run by the orchestrator in clean worktree s5-ci-c2, 06:29 to 07:39 UTC. The
+host was not quiet: C2's QEMU proof overlapped (the hold message had not
+reached it), plus the orphan QEMU.
+
+- Steps 1 to 3, 4b (x86 PASSED), 6 (308 and 328 passed), 7 (0 violations, 0
+  unparsed, 12 configurations), 8, 9 (all checks passed), diff: rc 0.
+- Step 4 `make test` rc 2 (start load 5.92) and step 5 `AI_SCHED=ON` rc 2
+  (3.83), each with exactly one failure, `test_litmus_patterns_pass`
+  (#1230). Reruns pending (A/B below).
+- **`make test WORK_STEALING=ON` x20: 13 passed, 7 failed.** All 7 failures
+  are `test_litmus_patterns_pass` alone, with 0 panics and no other failing
+  test, at start loads 3.44, 4.29, 5.84, 5.23, 5.79, 4.65, 5.49; passes ran at
+  3.19 to 6.13. C0's base baseline was 3 of 3 passing at load about 2.1. As
+  written, 7 of 20 failing is worse than 0 of 3; the loads are not comparable.
+  An interleaved A/B (base 8ec0e330 and fix c0ea0714, WORK_STEALING=ON, 6
+  each, alternating, same host conditions), plus reruns of steps 4 and 5 at the
+  fix head, started at 07:49 UTC so the bar can be judged on matched load. If
+  the A/B does not settle it, it goes to Dissent.
