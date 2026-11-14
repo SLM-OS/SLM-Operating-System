@@ -711,3 +711,12 @@ and file the "Stale text found" items.
 
 2026-11-14. The user decided to keep #45 (coverage measurement) open. No
 change was made to the issue.
+
+## Entry 19: merged branches deleted
+
+2026-11-14. At the user's request, the remote branches
+`structural/ci-matrix` (#1251) and `structural/architecture-record` (#1245)
+were deleted. Both PRs are merged. The local branches are still checked out
+in two subagent worktrees (`agent-affb90b4dae01efde`, locked, and
+`agent-a353244e22d9ee6e9`). This worktree-isolated session cannot remove
+them.
