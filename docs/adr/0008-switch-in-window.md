@@ -2,11 +2,14 @@
 
 ## Status
 
-Proposed, round 2, design PASS with four text corrections applied
-(`critic-5-C2-design.md` round-2 section R6, `gauntlet/switch-5` e7670dae);
-stays proposed until the fix verdict (switch gauntlet run 5, C2). Design checkpoint before any
-fix code. Round 1 (d73604f7) failed its blind design critic
-(`critic-5-C2-design.md` on `gauntlet/switch-5`, section 7): the decision
+Accepted (switch gauntlet run 5 close-out, 2026-11-14). The design passed
+its blind design critic in round 2 (`critic-5-C2-design.md`, round-2 section
+R6, `gauntlet/switch-5` e7670dae) with four text corrections, applied here.
+The fix critic (`critic-5-C2.md`) found the code implements this design and
+the no-deadlock bar met, and failed the run on missing regression rows; those
+rows were run at the rebased head in the close-out session and re-checked by a
+blind critic (`switch-5.md`, close-out entries). Round 1 (d73604f7) failed its
+blind design critic (`critic-5-C2-design.md`, section 7): the decision
 depended on a CPU id `schedule()` reads with interrupts open (#1242), the
 deferred task's bound was misstated, and the no-deadlock argument rested on
 a lock list. This revision answers items 1 to 7; "Changes from round 1" at
