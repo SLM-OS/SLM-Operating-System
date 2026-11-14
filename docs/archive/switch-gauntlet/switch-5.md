@@ -149,3 +149,31 @@ Pushed heads: `c1/harness` 6e39f425, `c2/switch-window` 6ee2f16d (local
   free list shorter than its free_counts, discovered rather than caused by
   test_exhaustion_recovery; all four on kexec boots, 0 of 13 UEFI suite boots.
 - Lab: no change. jetson-nano-2 with C3 to 01:45 UTC; pi-5-1 unheld.
+
+## Entry 3 (written 01:48 UTC): hour mark 3:30; C3 slot unused; lab to C2
+
+- C3's report (01:45 UTC): jetson-nano-2 claimed 23:36 UTC (pre-checks
+  run: health, bindings, recovery_mode released, no claims), then **nothing
+  ran on the board**. C3 ended its turn to wait on a background Jetson build
+  (finished 23:38 UTC); the completion notice did not reach the idle agent
+  until the orchestrator's 01:45 message. The claim expired 01:36:48 UTC. No
+  deploy, scp, power cycle, boot_test, ESP or BootNext change. Board as found;
+  health at 01:45 online. Process failure, disclosed by the builder; the
+  orchestrator also missed it, because it did not check pushed heads between
+  the 2:00 and 3:30 marks.
+- C3 QEMU (builder claim until its files are pushed): PMM_DEBUG=ON full
+  `make test` on base + C3 found no free-list corruption; it found two
+  mismatched-order frees in `kernel/gpu/gpu_stub.c` (aligned path allocates
+  order 10, frees order 9: a leak, not a list corruption; to be filed);
+  `test_litmus_patterns_pass` failed once, cause not yet separated from the
+  PMM_DEBUG instrument.
+- C1: no push since 6e39f425 (23:34 UTC); status requested. C1 critic not
+  started: C1 is behind its mark.
+- C2: no push since 6ee2f16d; QEMU baselines status requested.
+- **Handover 01:47 UTC: jetson-nano-2 and pi-5-1 to C2** for the R2 and R3
+  baselines, until 04:15 UTC (the 1 h C3 did not use is given to C2). C3 gets
+  jetson-nano-2 at 04:15 UTC for 2 h; C2's ADR critic overlaps it in QEMU
+  only.
+- Process change (all builders, 01:47 UTC): no ending a turn to wait on a
+  background task; wait in the foreground or with Monitor. The orchestrator
+  checks pushed heads every 30 min.
