@@ -810,3 +810,16 @@ reached it), plus the orphan QEMU.
   reproduce in QEMU (filter test_regs_every_cpu_reports,test_litmus_patterns_pass
   with WORK_STEALING=ON) after its lab slot; to be given to the fix critic as an
   open row.
+
+## Entry 32 (written 08:14 UTC, from date): hour mark 10:00; C2 fix critic started
+
+- C3 critic: done (Entry 27, PASS on "open").
+- C2 fix critic `critic-c2-fix` spawned on Fable at 08:14 UTC, blind, on fix head
+  c0ea0714. It started before C2's hardware rows were final (C2 holds the
+  boards until 08:45 UTC), because of the budget: the code head is final
+  unless the open hang (Entry 31) leads to a change, and the critic counts the
+  hardware rows as they land. Disclosed as a departure from "after the
+  builder's final push". It holds QEMU until the A/B ends (about 08:40) and
+  gets its Jetson boots (R2 and R3 x200, both heads) through an orchestrator
+  handover after 08:45. Verdict due by 09:50 UTC. The hang is given as an open
+  row for it to investigate independently.
