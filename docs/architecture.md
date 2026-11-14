@@ -472,7 +472,11 @@ suites in `kernel/tests/` under QEMU, together with host-side checks under
 `scripts/` (for example `check-cpu-cache-maint.py`,
 `check-gpu-shell-lock.py`, `check-emc-rate-path.py`). The Rust crate has
 host unit tests, run twice by `make runtime-test` (`--features slm`, then
-`--features slm,ai_eviction_models`; `Makefile`). Hardware runs go through labctl. Detail: `docs/testing.md`,
+`--features slm,ai_eviction_models`; `Makefile`). CI is a report-only
+GitHub Actions build matrix that builds every platform × option, build
+only, on pull requests and nightly (#1251); hardware verification stays in
+lab sessions, through labctl. The test kernel takes a test filter and a
+repeat count (#1243; see `docs/testing.md`). Detail: `docs/testing.md`,
 `docs/fact-sheets/testing.md`.
 
 ---
