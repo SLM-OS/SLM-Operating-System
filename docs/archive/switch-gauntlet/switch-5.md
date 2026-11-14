@@ -359,3 +359,34 @@ entry on, write times come from `date -u`.
   `gauntlet-5-hw-pi5` 0d260e09, `run5-hw/c1/round2/`.
 - Process change: builders keep each foreground wait at 10 min or less so
   messages are delivered between waits.
+
+## Entry 12 (written 04:40 UTC, from date): C2 design round 1 FAIL; #1242; evidence-branch incident
+
+- Design verdict round 1: **FAIL**, Fable 5.2, `critic-5-C2-design.md`
+  (gauntlet/switch-5 0170ef31). Holds: no lock cycle and no wait under a
+  lock by the critic's own graph; publishing STLR in sched_finish_switch and
+  acquiring LDAPR under rq_lock named and correct, LDAPR sufficient, x86 TSO
+  fine; both named sequences closed at the pick; critic prototype 40 of 40 on
+  R3 migrate, R3 wake and R2 in QEMU. Fails: (1, blocking, observed)
+  `schedule()` reads this_cpu before rq_lock with IRQs open, so a task
+  migrated in that gap acts on another CPU's rq_lock, idle_task and deferred
+  flag (probe: 5 STALE in 120 iterations in proto-run01; STALE then panic in
+  proto-run02); (2) no stated bound for the idle flag check vs the wait;
+  (3) never-released case unstated; (4) argument gaps and an incomplete lock
+  list. Seven required changes sent to C2 (round 2 of 2).
+- Filed **#1242** (P1-high, sub:sched, Backlog): the stale this_cpu in
+  schedule(), with the critic's files. Not shown to be #1238.
+- Critic evidence placed by the orchestrator on `gauntlet-5-hw-pi5` under
+  `run5-hw/c2-design-critic/` (the critic's own push was refused by the
+  permission layer).
+- **Incident (orchestrator):** placing those files, commit 9380bd31 on
+  `gauntlet-5-hw-pi5` recorded deletions of 205 evidence files (C1, C1
+  critic, C2, C3), because the s5-hw-pi5 worktree's branch ref had moved
+  under a stale index and the preceding `git pull --rebase` had failed
+  without stopping the script. Pushed at about 04:20 UTC; restored in
+  39f26650 about 3 min later: origin's tree now equals f49e67d1 plus the 10
+  intended files (checked with `git diff --no-renames --name-status
+  f49e67d1 origin/gauntlet-5-hw-pi5`). History keeps both commits; no
+  force-push. Builders told to re-pull and check status before their next
+  commit there. Process change: every orchestrator commit script stops if the
+  pull fails, and the stale worktree is no longer used for evidence.
