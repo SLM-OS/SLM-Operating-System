@@ -639,3 +639,42 @@ User decisions, 2026-11-14. #1245 head: 50987fb3 (Track B report).
   gone from #1253, and ADR 0016 now covers the scheduler and eviction
   arrays.
 - No critic checked this round; none was asked for.
+
+## Entry 16: #1251 triggers lightened and merged; #46 closed; #45 held
+
+- **Triggers.** f637fa82 on `structural/ci-matrix`:
+  - It runs on `pull_request` to `main`, nightly
+    (`schedule: '17 11 * * *'`, 11:17 UTC = 03:17 PST, 04:17 PDT) and on
+    `workflow_dispatch`. The `push` trigger is removed.
+  - Concurrency is now `${{ github.workflow }}-${{ github.ref }}` with
+    `cancel-in-progress: true`. Every job stays on `ubuntu-24.04`, and
+    there are no API-calling steps.
+  - The CI section of `docs/building.md` now says when the workflow runs,
+    and that hardware runs stay outside CI, with the #46 reason.
+  - Pushing f637fa82 started no push run, as intended
+    (`gh run list --branch structural/ci-matrix`).
+- **Verification run:**
+  https://github.com/SLM-OS/SLM-Operating-System/actions/runs/43579434235
+  (pull_request, f637fa82, success).
+  - Totals: 112 ok, 7 failed, 119 cells, taken from that run's
+    `build-matrix-summary` artifact (`summary.md`).
+  - Compared cell by cell with the earlier pull_request run 43572707956
+    (also 112 / 7 / 119): the same 119 cells, 0 status changes and 0
+    changes in new-warning counts.
+  - Failed cells: `{qemu,pi5,jetson,x86}-ENABLE_NETWORKING=OFF` (#1246),
+    `x86-ENABLE_GSP_FIRMWARE=OFF` (#1247), `x86-BUILD_TYPE=Debug` (#1248),
+    `jetson-JETSON_EL1_SMOKE=ON` (#1249).
+- **Merge.** #1251 was marked ready and squash-merged with
+  `--match-head-commit f637fa82`. Merge commit **a14e2341** on `main`,
+  2026-11-14T09:20:46Z. The PR had no closing references, so #1246 to
+  #1250 stay open.
+- **#46** closed as not planned, with the user's reason: two shared boards
+  and one serializing labctl server; hardware verification stays in lab
+  sessions under the lab-holder rule; a nightly smoke run when the lab is
+  free could be reconsidered later.
+- **#45 held, not closed.** Its scope is gcov/lcov coverage of the QEMU
+  test build: instrumenting it, uploading the report, posting a PR
+  coverage delta and setting a coverage floor. #1251 builds only and runs
+  no tests, so a "completed by #1251" comment would not be accurate. The
+  question is left for the user.
+- The `structural/ci-matrix` branch was not deleted.
