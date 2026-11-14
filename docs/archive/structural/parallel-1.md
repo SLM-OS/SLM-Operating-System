@@ -68,3 +68,28 @@ host.
   (commit message says 2.1.3, the tree is 2.2.0).
 - ADR citations were spot-checked only. The Fable critic checks
   `architecture.md` only, as the brief asks.
+
+## Entry 3: Track B critic (Fable)
+
+- Fable critic, blind, read-only. It checked `architecture.md` at f920c8d2
+  against `origin/main` 8ec0e330. Result: 170 claims, 154 CONFIRMED (7 of
+  them with caveats), 6 REFUTED, 10 UNCONFIRMED. All 335 backticked tokens
+  were matched against the tree. Full table:
+  `scratchpad/critic-B.md` (session scratch, not committed).
+- REFUTED:
+  - (1) "every path exists on main": the ADR README and 0009 to 0017 are
+    new in this PR.
+  - (2) "one toolchain file per platform": there are two.
+  - (3) the order of steps in `boot.S`: the EL2/VHE blocks run before
+    `msr daifset` at `primary_cpu`.
+  - (4) "the main task starts the shell": `kernel_main` calls
+    `shell_start()` itself.
+  - (5) "every platform runs LDAXR/STXR": x86-64 uses
+    `__atomic_exchange_n`.
+  - (6) "Hailo-8" should be Hailo-8L.
+- UNCONFIRMED: 8 claims of the form "ADR 0009 to 0017 records X". These
+  can't be checked against main because the ADRs exist only on the PR
+  branch. One concerns whether `armstub8-2712.S` is on the shipped Pi 5
+  boot path, and one the December 2025 document, which is not in the repo.
+- Action: the refuted claims and caveats went back to Track B to correct
+  on #1245. The ADR bodies remain unchecked by any critic.
