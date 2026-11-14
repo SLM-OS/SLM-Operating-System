@@ -364,3 +364,86 @@ Correction to Entry 7: the exact title of #27 is "Jetson GPU Memory Integration 
   SSH tickets), so it was filed.
 - The 114-file Hailo count comes from `git ls-tree -r --name-only
   origin/main | grep -i hailo | grep -v ^docs/archive | wc -l`.
+
+## Entry 9, 2026-11-14: approved closes, Track C side findings, licence inventory
+
+Base: `origin/main` 8ec0e330 (unchanged since Entry 1; `git log
+8ec0e330..origin/main` is empty). No code, QEMU or labctl. Open count
+before: 241 (`gh issue list --state open --limit 1000 --json number`).
+
+### Closes (approved list: Entry 5 table, plus #27, minus #896, per Entry 7)
+
+53 approved. The 6 low-confidence records in `classifications.jsonl`
+(#45, #46, #381, #665, #691, #1204) were re-checked against
+`origin/main` 8ec0e330 first.
+
+- **Closed: 50.** 35 completed, 10 not planned, 5 duplicates (via
+  `gh issue close --duplicate-of`: #535 of #651, #546 of #550, #606 of
+  #200, #618 of #633, #1223 of #1213). Each close comment gives the
+  resolution and the Entry 5 evidence (Entry 7's evidence for #27).
+- #675's comment points to #669, and `origin/chore/batched-prefill` is
+  kept. No branch was deleted.
+- The comments also record the re-checks:
+  - #665: delivered in a different form. There are no EXEC/NONCACHE
+    flags; SASS dispatches from pages mapped with flags 0
+    (`kernel/gpu/oplib_pool.c:394`), with `cache_clean_range` + `dsb sy`.
+  - #691: path 2 is #1088/#1092, both closed.
+  - #381: the issue's own step 3; UARTC works on both boot paths.
+  - #199 and #895: rate limiting stays with #896, which remains open.
+- **Skipped: 3.**
+
+| Issue | Why the evidence did not hold |
+|---|---|
+| #45 | Premise: GitHub CI was deleted (aff136a5). Draft PR #1251 adds `.github/workflows/build-matrix.yml`, so coverage in CI becomes possible again. Decide after #1251. |
+| #46 | Same premise as #45 (aff136a5). With #1251, a hardware stage becomes the natural next step. Decide after #1251. |
+| #1204 | The table says the slow rows appear only on the pre-rebase image, and that the merged rebased tree is fast. The issue's 2026-11-10 comments say the slow rows are a per-boot UEFI-direct state ("rebased 0 of 3 does not separate the builds"; pooled pre-rebase 2/6, rebased 0/4). The proposed next experiment (warm reboot vs power cycle) has not been run. |
+
+- Open after the closes: **191** (241 - 50).
+
+### New issues
+
+| Issue | Title | Labels |
+|---|---|---|
+| #1256 | Pi 5 / Jetson: `-DCOOP_PREEMPT=ON` alone is silently dropped (`PI5_COOP_PREEMPT` alias defaults OFF and forces it off) | bug, pi5, jetson, sub:build, sub:sched, P3, origin:review, kind:gap, Backlog |
+| #1257 | CI build matrix: derive per-platform option defaults from CMakeLists.txt/Makefile instead of a hand-copied table | tech-debt, all, sub:ci, sub:build, P3, origin:review, kind:gap, Backlog |
+| #1258 | Licence: replace GPL wolfCrypt (GPL-2.0+) and wolfSSH (GPL-3.0+) with an MIT/BSD-compatible SSH and crypto stack; complete LICENSES.md | tech-debt, pi5, jetson, qemu, sub:net, sub:build, sub:docs, P1, origin:review, kind:gap, Backlog |
+
+- #1256 cites `CMakeLists.txt:342-358`. The alias defaults to
+  `${_default_coop}` (line 350), and `if(NOT PI5_COOP_PREEMPT)` forces
+  COOP_PREEMPT off (lines 353-355), which contradicts the comment at
+  351-352. The matrix cells are `pi5-COOP_PREEMPT=ON` and
+  `jetson-COOP_PREEMPT=ON` (`build_matrix.py:119-123` at 8c4ccff3), which
+  add `-DPI5_COOP_PREEMPT=ON` to work around it. Three existing
+  workarounds are listed: `Makefile:1640,1645-1647`,
+  `check-preempt-config.sh:177-183`, and the preemption fact sheet with
+  `kernel/CLAUDE.md`.
+- #1257 counts 35 hand-written option entries, 8 of them with
+  per-platform defaults. It proposes reading the resolved values from a
+  configure-only `CMakeCache.txt` per platform, and a per-cell check that
+  the flip reached the compiler. #1256 and #1257 link to each other.
+- #1258 inventory findings:
+  - Default images link no wolf code (`NET_SSHD` unset, CMake default OFF).
+  - Uses: the SSH server, the Ed25519 host key, scrypt (`passwd.c`,
+    N=2^15) and the wolfCrypt DRBG.
+  - TLS for HTTP fetch is not a current use: `net_http.c` is plain HTTP,
+    rejects `https://` and uses SLM-OS's own `kernel/lib/sha256.c`.
+  - The source headers say GPL-2.0-or-later and GPL-3.0-or-later; the
+    VENDOR.md files say GPL-2.0 and GPL-3.0.
+  - #1251's CI uploads logs only, so it publishes no binary.
+  - Licences were read from each project's own file, saved under
+    `~/slmos-ref/{dropbear,tinyssh,bearssl,monocypher,mbedtls}/`: Dropbear
+    (mixed MIT/BSD-2/PuTTY/public domain; LibTom public domain or
+    WTFPL), TinySSH (CC0/0BSD/MIT-0/MIT), BearSSL (MIT), Monocypher
+    (BSD-2 or CC0), Mbed TLS and TF-PSA-Crypto (Apache-2.0 or
+    GPL-2.0-or-later; use Apache-2.0).
+  - TinySSH has no password authentication (its README). None of the
+    candidates has scrypt, and BearSSL and Mbed TLS have no Ed25519.
+  - Besides lwIP and Lua, `LICENSES.md` also lacks FatFs, littlefs and
+    nanopb.
+- **Overlap: #1258 duplicates #1255 (Entry 8)**, filed 90 s earlier by
+  the other session as a P2 placeholder. Both carry a cross-link comment
+  proposing to close #1255 as a duplicate of #1258. That is left for the
+  user, because #1255 was not on the approved list.
+
+Open at the end of this entry: **198** = 191 + 3 (#1256-#1258) + 4
+filed by Entry 8 (#1252-#1255).
