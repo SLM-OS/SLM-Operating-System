@@ -468,3 +468,21 @@ smp on the base if time remains), **C3 06:15 to 07:15**. C2 heads:
 `c2/switch-window` 7a95c012 (adds the #1242 stale-CPU probe to SWITCH_CHECK
 and an R3 assertion), new temporary `c2/proto-1242` 1f58b249 (the critic's
 prototype, for the #1242 base rate on base plus deferral).
+
+## Entry 17 (written 05:03 UTC, from date): C1 round 2 pushed; orchestrator runs C1's /ci
+
+- C1 round 2 at `c1/harness` **2196deb5** (165cb992 + ef61c69c fixes 1, 2,
+  4 + 2196deb5 wrap fix). Evidence `gauntlet-5-hw-pi5` 0d260e09,
+  `run5-hw/c1/round2/` (builder claims, for the critic: new selftest 15 of
+  15 at 2196deb5, CPU 0 printed in 414 to 664 us while a stopped holder kept
+  both locks; control without the bound timed out at 60 s; the ef61c69c
+  selftest failed 1 of 3 on a counter-wrap race, fixed in 2196deb5).
+- None of the orchestrator's four go messages (about 03:17, 03:20, 04:13,
+  04:41 UTC) reached C1, although C1's messages reached the orchestrator. To
+  end the stall, the orchestrator is running /ci at 2196deb5 itself, in a
+  fresh worktree (s5-ci-c1, clean at start), steps 1 to 9 plus the diff
+  check, with each log's first line giving head, step, start time and load,
+  and make's own rc in summary.txt. C1 told not to run it. The three
+  WORK_STEALING=ON runs are dropped from this C1 /ci (they are C2's
+  regression rows). Host is not quiet: C2 runs one QEMU and the orphan QEMU
+  (Entry 13) holds a core.
