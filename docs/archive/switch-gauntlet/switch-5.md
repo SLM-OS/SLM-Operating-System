@@ -823,3 +823,25 @@ reached it), plus the orphan QEMU.
   gets its Jetson boots (R2 and R3 x200, both heads) through an orchestrator
   handover after 08:45. Verdict due by 09:50 UTC. The hang is given as an open
   row for it to investigate independently.
+
+## Entry 33 (written 08:31 UTC, from date): A/B result
+
+Files `gauntlet-5-hw-pi5` 920a641a, `run5-hw/c0/ab-ws-c0ea0714/`
+(summary.txt plus one log per run; start load in each log's first line).
+Interleaved base 8ec0e330 and fix c0ea0714, `make test WORK_STEALING=ON`,
+07:49 to 08:25 UTC, one at a time, under the same host conditions:
+
+| Tree | Runs | Passed | Litmus-only failures | Timeouts |
+|---|---|---|---|---|
+| base 8ec0e330 | 6 | 5 | 1 (base-ws-4) | 0 |
+| fix c0ea0714 | 6 | 4 | 1 (fix-ws-4) | **1 (fix-ws-3, Entry 31)** |
+
+Combined with the /ci run (Entry 30): at the fix head, litmus-only failures are
+8 of 26 WORK_STEALING=ON runs; at the base, 1 of 9 (C0 3 at load about 2, A/B
+6). On matched load the litmus rates are equal (1 of 6 each), so no litmus
+regression is shown. The one timeout (1 of 26 fix runs, 0 of 9 base runs) is
+the open row. /ci step reruns at the fix head: step 4 `make test` failed again
+on litmus alone (04r, load 3.51; 0 of 2 at this head), step 5 `AI_SCHED=ON`
+passed (05r, load 5.15). The "/ci green" and "WORK_STEALING=ON no worse"
+rows are therefore **not met as written**; whether #1230 under load excuses
+them goes to the fix critic and to Dissent.
