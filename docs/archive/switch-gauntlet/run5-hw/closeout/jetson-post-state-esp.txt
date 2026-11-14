@@ -1,0 +1,9 @@
+Sat Nov 14 06:13:52 PM UTC 2026
+BootCurrent: 0001
+Timeout: 5 seconds
+BootOrder: 0008,0001,0007,0009,000D,000C,000B,000A,0003,0005,0002,0004,0000,0006
+Boot0000* Enter Setup
+098f316368baf94ef117195d30cda8e1f2124fc9e66fecef7bce4c15f815d6c5  /root/slmos.elf
+fsck.fat 4.2 (2021-01-31)
+/dev/disk/by-partlabel/SLMOS-ESP: 6 files, 2196/130892 clusters
+789cba626338af4713d0a46631c48cf2c75eb6af6bcea8a4398e6d79554a1f7d  /tmp/tmp.v79ntU6qFW/EFI/SLMOS/SLMOS.efi
