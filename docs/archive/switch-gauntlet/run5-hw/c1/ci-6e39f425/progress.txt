@@ -1,0 +1,26 @@
+# C1 /ci at c1/harness 6e39f425 (kernel sources identical to 165cb992; 165cb992 changes only scripts/check-c-braces.py and docs). Step log, unedited below.
+head 6e39f42571a395acc3ed16b9f003722d22c3b71b
+ 15:47:01 up 11 days, 16:24,  6 users,  load average: 4.31, 3.47, 2.96
+23:47:08 START 01-arm64-build
+23:48:24 END 01-arm64-build rc=0
+23:48:24 START 02-x86-build
+23:49:05 END 02-x86-build rc=0
+23:49:05 START 03-jetson-real
+23:52:06 END 03-jetson-real rc=0
+23:52:06 START 04-test-arm64
+23:54:44 END 04-test-arm64 rc=0
+23:54:44 START 04b-test-x86
+23:56:19 END 04b-test-x86 rc=0
+23:56:19 START 05-test-aisched
+23:59:08 END 05-test-aisched rc=0
+23:59:08 START 06-runtime-test
+00:02:23 END 06-runtime-test rc=0
+00:02:23 START 07-braces
+00:03:36 END 07-braces rc=2
+00:03:36 START 08-build-order
+00:04:22 END 08-build-order rc=0
+00:04:22 START 09-jetson-layout
+00:05:53 END 09-jetson-layout rc=0
+00:05:53 START 10-diff
+00:05:54 END 10-diff rc=0
+00:05:54 ALLDONE

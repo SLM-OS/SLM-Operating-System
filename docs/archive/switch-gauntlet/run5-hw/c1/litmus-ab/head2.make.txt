@@ -1,0 +1,82 @@
+# C1 interleaved A/B for #1230 (test_litmus_patterns_pass), base 8ec0e330 vs head 165cb992, order base1 head1 base2 head2. Unedited below.
+make: Entering directory '/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-c1'
+== Required keys in deploy/pi5/config.txt ==
+OK   arm_64bit=1
+OK   kernel_address=0x80000
+OK   kernel=kernel_2712.img
+OK   pciex4_reset=0
+OK   uart_2ndstage=1
+OK   os_check=0
+
+== Required keys in deploy/pi5/tryboot.txt ==
+OK   arm_64bit=1
+OK   kernel_address=0x80000
+OK   kernel=tryboot.img
+OK   pciex4_reset=0
+OK   uart_2ndstage=1
+OK   os_check=0
+
+== Forbidden patterns ==
+OK   deploy/pi5/config.txt: no [tryboot] filter section
+OK   deploy/pi5/tryboot.txt: no [tryboot] filter section
+
+== tryboot.txt mirrors config.txt's settings ==
+OK   non-kernel settings match between config.txt and tryboot.txt
+
+== kernel= filename per file ==
+OK   deploy/pi5/config.txt: kernel=kernel_2712.img
+OK   deploy/pi5/tryboot.txt: kernel=tryboot.img
+
+deploy/pi5/ config check: OK
+OK   <default> -> <none>
+OK   PLATFORM=RASPI5 -> -DSECONDARY_PREEMPT=1 
+OK   PLATFORM=RASPI5 SECONDARY_PREEMPT=OFF + -DCOOP_PREEMPT=ON -DPI5_COOP_PREEMPT=ON -> -DCOOP_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO -> -DJETSON_HW_TICK=1 -DSECONDARY_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF -> -DCOOP_PREEMPT=1 
+OK   PLATFORM=JETSON_ORIN_NANO SECONDARY_PREEMPT=OFF -> -DCOOP_PREEMPT=1 -DJETSON_HW_TICK=1 
+All 6 preemption-config cases match
+All 23 build-signature options change their variants' signatures; AI scheduler defaults match
+check-cpu-cache-maint: OK (38 files)
+Building runtime... (cargo features: ai_eviction)
+cd runtime && SLM_DEFAULT_EVICTION_POLICY=lru  cargo build  --release --features ai_eviction
+    Finished `release` profile [optimized] target(s) in 0.07s
+Building test kernel...
+cmake --build build/kernel-test
+[  0%] Generating build_info.h
+[  0%] Built target generate_build_info
+[  0%] Built target slm_shell
+[  1%] Built target slm_runner
+[  2%] Built target nanopb
+[  2%] Built target kprintf_float
+[  2%] Built target slm_kernels_header
+[  3%] Building C object CMakeFiles/lua.dir/kernel/src/lua_slm.c.obj
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-c1/kernel/src/lua_slm.c:910:66: warning: "/*" within comment [-Wcomment]
+  910 |     uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
+      |                                                                   
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-c1/kernel/src/lua_slm.c:985:44: warning: "/*" within comment [-Wcomment]
+  985 |  * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
+      |                                             
+/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-c1/kernel/src/lua_slm.c:1081:32: warning: "/*" within comment [-Wcomment]
+ 1081 |  * messages. Topics ending in "/*" match any topic with that prefix.
+      |                                 
+[  4%] Linking C static library liblua.a
+[ 12%] Built target lua
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/main.c.obj
+[ 12%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/vfs.c.obj
+[ 13%] Building C object CMakeFiles/slmos.elf.dir/kernel/src/kernel_cmd.c.obj
+[ 14%] Linking C executable slmos.elf
+Creating slmos.bin
+[100%] Built target slmos.elf
+flock: getting lock took 0.000002 seconds
+flock: executing make
+Creating sparse build/kernel-test/sdhci-test.img (4G, SDHC-sized)
+Running kernel tests...
+
+Test Results:
+=============
+FAILED - Test failures detected:
+  [FAIL] test_litmus_patterns_pass
+[FAIL] 1 test(s) failed
+[FAIL] 1 total failure(s)
+make: *** [Makefile:1724: test] Error 1
+make: Leaving directory '/home/john/projects/CS-496-Capstone-SLM-Operating-System/.claude/worktrees/s5-c1'

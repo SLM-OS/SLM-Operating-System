@@ -1,0 +1,1427 @@
+4c4
+<   SLM-OS v0.4.0 build 20261113234134 (8ec0e330)
+---
+>   SLM-OS v0.4.0 build 20261113233518 (6e39f425)
+14,17c14,17
+<   .text:   0x40000000 - 0x40262878
+<   .data:   0x40730000 - 0x40754000
+<   .bss:    0x40760000 - 0x4209aee0
+<   End:     0x420a0000
+---
+>   .text:   0x40000000 - 0x4022b958
+>   .data:   0x40710000 - 0x40734000
+>   .bss:    0x40740000 - 0x4207aee0
+>   End:     0x42080000
+26c26
+<   L1 table at: 0x407bc000
+---
+>   L1 table at: 0x4079c000
+29,30c29,30
+<   L1[0]: 0x407ba003 (covers VA 0x0)
+<   L1[1]: 0x407bb003 (covers VA 0x40000000)
+---
+>   L1[0]: 0x4079a003 (covers VA 0x0)
+>   L1[1]: 0x4079b003 (covers VA 0x40000000)
+46,48c46,48
+<   Heap range:      0x420a0000 - 0x80000000
+<   Total pages:     253792 (1015168 KB)
+<   Free pages:      253792 (1015168 KB)
+---
+>   Heap range:      0x42080000 - 0x80000000
+>   Total pages:     253824 (1015296 KB)
+>   Free pages:      253824 (1015296 KB)
+50c50
+<   Reserved:        8352 pages (kernel)
+---
+>   Reserved:        8320 pages (kernel)
+53,54c53
+<     Order  5 (  128 KB): 1 blocks
+<     Order  6 (  256 KB): 1 blocks
+---
+>     Order  7 (  512 KB): 1 blocks
+275a275,303
+> [TEST] Test Filter Tests
+>   [PASS] test_filter_parses_single_name
+>   [PASS] test_filter_parses_comma_list_in_order
+>   [PASS] test_filter_rejects_empty_elements
+>   [PASS] test_filter_rejects_bad_characters
+>   [PASS] test_filter_limits_count_and_length
+>   [PASS] test_filter_parses_repeat_bounds
+>   [PASS] test_filter_reads_cmdline_tokens
+>   [PASS] test_filter_cmdline_defaults_repeat_to_one
+>   [PASS] test_filter_cmdline_key_is_exact
+>   [PASS] test_filter_cmdline_errors_leave_filter_inactive
+>   [PASS] test_filter_match_is_exact
+>   [PASS] test_filter_index_maps_known_tests
+> 
+> ----------------------------------------
+> Tests: 12  Passed: 12  Failed: 0
+> [PASS] All tests passed
+> [TEST] Fault Dump Lock Tests
+>   [PASS] test_fault_dump_lock_free_is_acquired_and_released
+>   [PASS] test_fault_dump_lock_owner_reenters_as_nested
+>   [PASS] test_fault_dump_lock_silent_holder_times_out_at_stall
+>   [PASS] test_fault_dump_lock_printing_holder_holds_until_cap
+>   [PASS] test_fault_dump_lock_waiter_gets_lock_after_release
+>   [PASS] test_fault_dump_lock_frozen_counter_cannot_hang
+>   [PASS] test_fault_dump_idle_state
+> 
+> ----------------------------------------
+> Tests: 7  Passed: 7  Failed: 0
+> [PASS] All tests passed
+684c712
+< [slm] zero-copy from boot memory, 17 ms
+---
+> [slm] zero-copy from boot memory, 20 ms
+687,688c715,716
+< [slm] zero-copy from boot memory, 12 ms
+< [32.14] [ERROR] [slm] gguf parse: bad magicslm load: failed to parse /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf (not a GGUF or unsupported architecture)
+---
+> [slm] zero-copy from boot memory, 15 ms
+> [32.62] [ERROR] [slm] gguf parse: bad magicslm load: failed to parse /boot/models/qwen2.5-1.5b-instruct-q4_k_m.gguf (not a GGUF or unsupported architecture)
+974,975c1002,1003
+< build:   20261113234134
+< commit:  8ec0e330
+---
+> build:   20261113233518
+> commit:  6e39f425
+1037c1065
+< Memory: 435716 / 1015168 KB used (42%)
+---
+> Memory: 435716 / 1015296 KB used (42%)
+1039c1067
+< Context switches: 89   Timer ticks: 3401
+---
+> Context switches: 71   Timer ticks: 3442
+1052c1080
+< Memory: 435716 / 1015168 KB used (42%)
+---
+> Memory: 435716 / 1015296 KB used (42%)
+1054c1082
+< Context switches: 89   Timer ticks: 3401
+---
+> Context switches: 71   Timer ticks: 3442
+1104c1132
+< Final: 128 / 128 blocks used; 3 total evictions; policy decisions: 3 (fallbacks 0, avg 65786 ns)
+---
+> Final: 128 / 128 blocks used; 3 total evictions; policy decisions: 3 (fallbacks 0, avg 55130 ns)
+1112c1140
+<     Average: 659 ns (0 us)
+---
+>     Average: 633 ns (0 us)
+1128,1129c1156,1157
+<   Min: 624 ns   Max: 1248 ns   Mean: 659 ns
+<   p50: 656 ns   p95: 672 ns   p99: 1248 ns
+---
+>   Min: 608 ns   Max: 1104 ns   Mean: 633 ns
+>   p50: 624 ns   p95: 656 ns   p99: 1104 ns
+1152,1153c1180,1181
+<   Min: 608 ns   Max: 1136 ns   Mean: 636 ns
+<   p50: 624 ns   p95: 656 ns   p99: 1136 ns
+---
+>   Min: 608 ns   Max: 1072 ns   Mean: 636 ns
+>   p50: 624 ns   p95: 672 ns   p99: 1072 ns
+1262c1290
+<   0    mnist                    24008     0     yes  9368
+---
+>   0    mnist                    24008     0     yes  9414
+1303c1331
+<     Average: 1058 ns (1 us)
+---
+>     Average: 635 ns (0 us)
+1307,1308c1335,1336
+<      500- 1000ns:    59 ########################################
+<        1-    2us:    39 ###########################
+---
+>      500- 1000ns:    98 ########################################
+>        1-    2us:     1 #
+1310c1338
+<        5-   10us:     1 #
+---
+>        5-   10us:     0 
+1319,1320c1347,1348
+<   Min: 640 ns   Max: 7872 ns   Mean: 1058 ns
+<   p50: 656 ns   p95: 1504 ns   p99: 7872 ns
+---
+>   Min: 608 ns   Max: 1264 ns   Mean: 635 ns
+>   p50: 624 ns   p95: 656 ns   p99: 1264 ns
+1328,1331c1356,1359
+<     Min: 592 ns (0 us)
+<     Avg: 1949 ns (1 us)
+<     Max: 16544 ns (16 us)
+<     Jitter (max-min): 15 us
+---
+>     Min: 608 ns (0 us)
+>     Avg: 1815 ns (1 us)
+>     Max: 16944 ns (16 us)
+>     Jitter (max-min): 16 us
+1338,1339c1366,1367
+<     Total: 91600 ns
+<     Average: 916 ns (0 us)
+---
+>     Total: 85552 ns
+>     Average: 855 ns (0 us)
+1346,1349c1374,1377
+<     Tasks:            61
+<     Context switches: 105
+<     Timer ticks:      3513
+<     Switches/sec:     11
+---
+>     Tasks:            51
+>     Context switches: 87
+>     Timer ticks:      3558
+>     Switches/sec:     9
+1358c1386
+<     Average: 631 ns (0 us)
+---
+>     Average: 636 ns (0 us)
+1374,1375c1402,1403
+<   Min: 608 ns   Max: 1120 ns   Mean: 631 ns
+<   p50: 624 ns   p95: 640 ns   p99: 1120 ns
+---
+>   Min: 608 ns   Max: 1184 ns   Mean: 636 ns
+>   p50: 624 ns   p95: 672 ns   p99: 1184 ns
+1379,1382c1407,1410
+<     Min: 592 ns (0 us)
+<     Avg: 794 ns (0 us)
+<     Max: 3888 ns (3 us)
+<     Jitter (max-min): 3 us
+---
+>     Min: 608 ns (0 us)
+>     Avg: 1563 ns (1 us)
+>     Max: 15584 ns (15 us)
+>     Jitter (max-min): 14 us
+1385,1386c1413,1414
+<     Total: 71712 ns
+<     Average: 717 ns (0 us)
+---
+>     Total: 72112 ns
+>     Average: 721 ns (0 us)
+1401,1402c1429,1430
+<     Write: 15655 MB/s (249520 ns total)
+<     Read:  13549 MB/s (288304 ns total)
+---
+>     Write: 14267 MB/s (273792 ns total)
+>     Read:  12717 MB/s (307152 ns total)
+1405,1408c1433,1436
+<     Tasks:            62
+<     Context switches: 107
+<     Timer ticks:      3517
+<     Switches/sec:     11
+---
+>     Tasks:            52
+>     Context switches: 89
+>     Timer ticks:      3562
+>     Switches/sec:     9
+1443c1471
+< total_kb: 1015168
+---
+> total_kb: 1015296
+1445,1447c1473,1475
+< free_kb: 579452
+< total_pages: 253792
+< free_pages: 144863
+---
+> free_kb: 579580
+> total_pages: 253824
+> free_pages: 144895
+1501a1530
+>   ktest        Run named boot tests: ktest <test[,test...]> [repeat]
+1548c1577
+<   Total:     1015168 KB (253792 pages)
+---
+>   Total:     1015296 KB (253824 pages)
+1550c1579
+<   Free:      579452 KB (144863 pages)
+---
+>   Free:      579580 KB (144895 pages)
+1563,1567c1592,1596
+<    2  idle_2           RUNNING       4    2  2
+<    3  idle_1           RUNNING       4    1  2
+<    4  idle_3           RUNNING       4    3  1
+<    5  main             RUNNING       4    0  40
+<    6  shell            READY         0    0  30
+---
+>    2  idle_1           RUNNING       4    1  2
+>    3  idle_3           RUNNING       4    3  1
+>    4  idle_2           RUNNING       4    2  2
+>    5  main             RUNNING       4    0  30
+>    6  shell            READY         0    0  20
+1585,1591c1614,1620
+<   diag_tick ptr=0x407eb530 val[0]=0x374
+<     0       884   8717664  16899931        43690
+<     1       882      1763       2        44572
+<     2       882      1765       2        44573
+<     3       882      1763       0        44572
+<   timer_handler_count: 3530
+<   CPU 0 TTBR0: 0x407bc000
+---
+>   diag_tick ptr=0x407cb530 val[0]=0x380
+>     0       896   8765025  16986408        43690
+>     1       894      1789       2        44585
+>     2       894      1789       2        44585
+>     3       894      1788       0        44585
+>   timer_handler_count: 3578
+>   CPU 0 TTBR0: 0x4079c000
+1678c1707
+< [0x40f0423c] <- 0xcafebabe
+---
+> [0x40ee4b0c] <- 0xcafebabe
+1680,1681c1709,1710
+< [0x40f04240] <- 0x11223344
+< [0x40f04240] = 0x11223344
+---
+> [0x40ee4b08] <- 0x11223344
+> [0x40ee4b08] = 0x11223344
+1687c1716
+< [0x40f04244] <- 0xabcdef01
+---
+> [0x40ee4b04] <- 0xabcdef01
+1692,1693c1721,1722
+< timer_handler_count: 3534
+< pit_ticks: 3534
+---
+> timer_handler_count: 3582
+> pit_ticks: 3582
+1698c1727
+<   CNTPCT_EL0:    0x23e0ed05
+---
+>   CNTPCT_EL0:    0x2414e752
+1700,1701c1729,1730
+<   CNTP_CVAL_EL0: 0x23e5875f
+<   CNTP_TVAL_EL0: 300895
+---
+>   CNTP_CVAL_EL0: 0x241a6d8a
+>   CNTP_TVAL_EL0: 361228
+1714,1715c1743,1744
+< timer_handler_count: 3534
+< pit_ticks: 3534
+---
+> timer_handler_count: 3582
+> pit_ticks: 3582
+1720c1749
+<   CNTPCT_EL0:    0x23e26574
+---
+>   CNTPCT_EL0:    0x24166edb
+1722,1723c1751,1752
+<   CNTP_CVAL_EL0: 0x23e5875f
+<   CNTP_TVAL_EL0: 205247
+---
+>   CNTP_CVAL_EL0: 0x241a6d8a
+>   CNTP_TVAL_EL0: 261764
+1736,1737c1765,1766
+< timer_handler_count: 3534
+< pit_ticks: 3534
+---
+> timer_handler_count: 3582
+> pit_ticks: 3582
+1742c1771
+<   CNTPCT_EL0:    0x23e3d331
+---
+>   CNTPCT_EL0:    0x2417cbf7
+1744,1745c1773,1774
+<   CNTP_CVAL_EL0: 0x23e5875f
+<   CNTP_TVAL_EL0: 111620
+---
+>   CNTP_CVAL_EL0: 0x241a6d8a
+>   CNTP_TVAL_EL0: 172393
+1757,1758c1786,1787
+< timer_handler_count: 3534
+< pit_ticks: 3534
+---
+> timer_handler_count: 3582
+> pit_ticks: 3582
+1763c1792
+<   CNTPCT_EL0:    0x23e4ebf1
+---
+>   CNTPCT_EL0:    0x2418e2c1
+1765,1766c1794,1795
+<   CNTP_CVAL_EL0: 0x23e5875f
+<   CNTP_TVAL_EL0: 39757
+---
+>   CNTP_CVAL_EL0: 0x241a6d8a
+>   CNTP_TVAL_EL0: 101029
+1778,1779c1807,1808
+< timer_handler_count: 3536
+< pit_ticks: 3536
+---
+> timer_handler_count: 3582
+> pit_ticks: 3582
+1784c1813
+<   CNTPCT_EL0:    0x23e61439
+---
+>   CNTPCT_EL0:    0x2419f4ad
+1786,1787c1815,1816
+<   CNTP_CVAL_EL0: 0x23ef1cd5
+<   CNTP_TVAL_EL0: 591994
+---
+>   CNTP_CVAL_EL0: 0x241a6d8a
+>   CNTP_TVAL_EL0: 30914
+1800,1801c1829,1830
+< timer_handler_count: 3536
+< pit_ticks: 3536
+---
+> timer_handler_count: 3584
+> pit_ticks: 3584
+1806c1835
+<   CNTPCT_EL0:    0x23e77df6
+---
+>   CNTPCT_EL0:    0x241b6264
+1808,1809c1837,1838
+<   CNTP_CVAL_EL0: 0x23ef1cd5
+<   CNTP_TVAL_EL0: 499390
+---
+>   CNTP_CVAL_EL0: 0x24240089
+>   CNTP_TVAL_EL0: 564732
+1938c1967
+< total_kb: 1015168
+---
+> total_kb: 1015296
+1940,1942c1969,1971
+< free_kb: 579452
+< total_pages: 253792
+< free_pages: 144863
+---
+> free_kb: 579580
+> total_pages: 253824
+> free_pages: 144895
+2228a2258
+>   ktest        Run named boot tests: ktest <test[,test...]> [repeat]
+2353a2384
+>   ktest.txt  (336 bytes)
+2868c2899
+< [WARN] PMM: Double-free detected at 0x420a2000
+---
+> [WARN] PMM: Double-free detected at 0x42082000
+3019c3050
+< [INFO] hailo: fw upload + handshake = 112 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 103 us (Linux baseline: ~282000 us; we are ~2x faster)
+3051c3082
+< [INFO] hailo: fw upload + handshake = 174 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 130 us (Linux baseline: ~282000 us; we are ~2x faster)
+3056c3087
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3127c3158
+< [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3139c3170
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3175c3206
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3189c3220
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3201c3232
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+3225c3256
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3248c3279
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3260c3291
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3272c3303
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+3284c3315
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3296c3327
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3308c3339
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3320c3351
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3332c3363
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3344c3375
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3356c3387
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 6 us (Linux baseline: ~282000 us; we are ~2x faster)
+3368c3399
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3438c3469
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3450c3481
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3462c3493
+< [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3474c3505
+< [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3616c3647
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3628c3659
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3640c3671
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3664c3695
+< [INFO] hailo: fw upload + handshake = 6 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3676c3707
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3688c3719
+< [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3701c3732
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3714c3745
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3739c3770
+< [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+3751c3782
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3763c3794
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3775c3806
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 6 us (Linux baseline: ~282000 us; we are ~2x faster)
+3787c3818
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+3811c3842
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3823c3854
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3860c3891
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3982c4013
+< [INFO] hailo: fw upload + handshake = 18 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+3994c4025
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+4035c4066
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4049c4080
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+4074c4105
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+4127c4158
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+4151c4182
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+4163c4194
+< [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4189c4220
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4206c4237
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4219c4250
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4232c4263
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+4245c4276
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=27 us
+---
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=29 us
+4248c4279
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=12 us
+---
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+4267,4268c4298,4299
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=15 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+4270c4301
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+---
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+4278c4309
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4290c4321
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4302,4306c4333,4337
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=11 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=13 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=19 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=24 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=24 us
+4313c4344
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4325,4329c4356,4360
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=20 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=40 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=19 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=23 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=22 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=21 us
+4336c4367
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+4348c4379
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 6 us (Linux baseline: ~282000 us; we are ~2x faster)
+4360,4363c4391,4394
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=14 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=22 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=13 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+4371c4402
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+4394c4425
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4406c4437
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=11 us (Linux baseline: ~4400 us)
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+4408,4410c4439,4441
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=12 us
+---
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4420c4451
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+4428c4459
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4451c4482
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=9 us (Linux baseline: ~4400 us)
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=11 us (Linux baseline: ~4400 us)
+4455c4486
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=39 us
+4462c4493
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+4474,4478c4505,4509
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=15 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=17 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=16 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=19 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=19 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=20 us
+4485,4489c4516,4520
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=9 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=16 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=15 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=33 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=18 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=18 us
+4496,4500c4527,4531
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=9 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=12 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=17 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=17 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=18 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=18 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=18 us
+4507,4510c4538,4541
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=9 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=16 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=17 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=21 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=13 us
+4521c4552
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 4 us (Linux baseline: ~282000 us; we are ~2x faster)
+4533c4564
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4545c4576
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=11 us (Linux baseline: ~4400 us)
+4549c4580
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+---
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4571,4572c4602,4603
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=12 us
+---
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=11 us
+4579c4610
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4591,4595c4622,4626
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=18 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=18 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=19 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=19 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=19 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=49 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4604c4635
+< [INFO] hailo: fw upload + handshake = 5 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+4618,4619c4649,4650
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+4625c4656
+< [hailo] run: pre-submit CORE_IDENTIFY rc=0 resp_len=28 latency=29 us
+---
+> [hailo] run: pre-submit CORE_IDENTIFY rc=0 resp_len=28 latency=24 us
+4627c4658
+< [hailo] run: IN ok in 189 us
+---
+> [hailo] run: IN ok in 147 us
+4629c4660
+< [hailo] run: OUT ok in 130 us
+---
+> [hailo] run: OUT ok in 127 us
+4645c4676
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=9 us (Linux baseline: ~4400 us)
+4648,4649c4679,4680
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4684,4688c4715,4719
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=13 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=11 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4695c4726
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+4708,4711c4739,4742
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=16 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=34 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=13 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=16 us
+---
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4721,4722c4752,4753
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=17 us
+4734c4765
+< [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+4748,4750c4779,4781
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4757c4788
+< [INFO] hailo: fw upload + handshake = 2 us (Linux baseline: ~282000 us; we are ~2x faster)
+---
+> [INFO] hailo: fw upload + handshake = 3 us (Linux baseline: ~282000 us; we are ~2x faster)
+4769,4773c4800,4804
+< [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=10 us (Linux baseline: ~4400 us)
+< [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=11 us
+< [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=10 us
+< [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=10 us
+---
+> [hailo] CLEAR_CONFIGURED_APPS rc=0 latency=11 us (Linux baseline: ~4400 us)
+> [hailo] GET_HW_CONSTS [1/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [2/4] rc=0 resp_len=28 latency=10 us
+> [hailo] GET_HW_CONSTS [3/4] rc=0 resp_len=28 latency=9 us
+> [hailo] GET_HW_CONSTS [4/4] rc=0 resp_len=28 latency=9 us
+4778c4809
+< [hailo] run: pre-submit CORE_IDENTIFY rc=0 resp_len=28 latency=17 us
+---
+> [hailo] run: pre-submit CORE_IDENTIFY rc=0 resp_len=28 latency=14 us
+4780c4811
+< [hailo] run: IN ok in 96 us
+---
+> [hailo] run: IN ok in 108 us
+4782c4813
+< [hailo] run: OUT ok in 167 us
+---
+> [hailo] run: OUT ok in 134 us
+5330c5361
+< running kernel: SLM-OS 0.4.0 (build 20261113234134, sha 8ec0e330)
+---
+> running kernel: SLM-OS 0.4.0 (build 20261113233518, sha 6e39f425)
+5857,5863c5888,5894
+<   [BENCH] lru              avg 299 ns / call (1000 iterations)
+<   [BENCH] lfu              avg 354 ns / call (1000 iterations)
+<   [BENCH] arc              avg 4271 ns / call (1000 iterations)
+<   [BENCH] slm              avg 1918 ns / call (1000 iterations)
+<   [BENCH] xgboost          avg 25589 ns / call (1000 iterations)
+<   [BENCH] mlp              avg 38052 ns / call (1000 iterations)
+<   [BENCH] cacheus          avg 77947 ns / call (1000 iterations)
+---
+>   [BENCH] lru              avg 364 ns / call (1000 iterations)
+>   [BENCH] lfu              avg 404 ns / call (1000 iterations)
+>   [BENCH] arc              avg 4650 ns / call (1000 iterations)
+>   [BENCH] slm              avg 1251 ns / call (1000 iterations)
+>   [BENCH] xgboost          avg 26338 ns / call (1000 iterations)
+>   [BENCH] mlp              avg 28654 ns / call (1000 iterations)
+>   [BENCH] cacheus          avg 67737 ns / call (1000 iterations)
+5879c5910
+<   ev-smp: 126 evictions during run (n_workers=4)
+---
+>   ev-smp: 128 evictions during run (n_workers=4)
+5894c5925
+< [140.25] [ERROR] [slm] gguf parse: bad magic  [PASS] test_load_rejects_non_gguf_bytes
+---
+> [149.08] [ERROR] [slm] gguf parse: bad magic  [PASS] test_load_rejects_non_gguf_bytes
+5900c5931
+< [140.29] [ERROR] [slm] gguf parse: bad magic  [PASS] test_take_pages_caller_frees_on_failure
+---
+> [149.09] [ERROR] [slm] gguf parse: bad magic  [PASS] test_take_pages_caller_frees_on_failure
+6003,6004c6034,6035
+<   prefill  : 2 tokens, 0 ms, 45737.2 tok/s
+<   decode   : 1 tokens, 0 ms total, 54728.5 tok/s
+---
+>   prefill  : 2 tokens, 0 ms, 38651.8 tok/s
+>   decode   : 1 tokens, 0 ms total, 37091.9 tok/s
+6026c6057
+< [test_wait] slm_live: flag after 2887 us (bound 250000 us)
+---
+> [test_wait] slm_live: flag after 4280 us (bound 250000 us)
+6085d6115
+< [slm-runner] Started (component 0, session 0, model 0), subscribed to /slm/prompt
+6087c6117,6118
+< Component 'slm-runner' is already running (idx 0)
+---
+> Component 'slm-runner' is starting or stopping (idx 0)
+> [slm-runner] Started (component 0, session 0, model 0), subscribed to /slm/prompt
+6258c6289
+< [slm done] rc=0 stop=max tokens_in=2 tokens_out=8 msgs=8 dropped=0 ttft_ms=55 decode_ms=221 session=0 prompts=1
+---
+> [slm done] rc=0 stop=max tokens_in=2 tokens_out=8 msgs=8 dropped=0 ttft_ms=61 decode_ms=256 session=0 prompts=1
+6418,6420c6449,6451
+<   id=2 name='idle_2' stack=[0x42100000..0x42140000)
+<   id=3 name='idle_1' stack=[0x42140000..0x42180000)
+<   id=4 name='idle_3' stack=[0x42180000..0x421c0000)
+---
+>   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+>   id=3 name='idle_3' stack=[0x42140000..0x42180000)
+>   id=4 name='idle_2' stack=[0x42180000..0x421c0000)
+6427,6429c6458,6460
+<   id=2 name='idle_2' stack=[0x42100000..0x42140000)
+<   id=3 name='idle_1' stack=[0x42140000..0x42180000)
+<   id=4 name='idle_3' stack=[0x42180000..0x421c0000)
+---
+>   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+>   id=3 name='idle_3' stack=[0x42140000..0x42180000)
+>   id=4 name='idle_2' stack=[0x42180000..0x421c0000)
+6437,6439c6468,6470
+<   id=2 name='idle_2' stack=[0x42100000..0x42140000)
+<   id=3 name='idle_1' stack=[0x42140000..0x42180000)
+<   id=4 name='idle_3' stack=[0x42180000..0x421c0000)
+---
+>   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+>   id=3 name='idle_3' stack=[0x42140000..0x42180000)
+>   id=4 name='idle_2' stack=[0x42180000..0x421c0000)
+6483c6514
+<   pdm: migrations=5543 moved=7 runs=5/4 bad=0 (first on cpu 0)
+---
+>   pdm: migrations=26695 moved=7 runs=5/4 bad=0 (first on cpu 0)
+6567c6598
+<   slot_reuse_stress: iterations=2039 same_slot=2038 ran=2039 bad=0 first_bad_token=0 timeouts=0
+---
+>   slot_reuse_stress: iterations=2022 same_slot=2021 ran=2022 bad=0 first_bad_token=0 timeouts=0
+6572,6573c6603,6604
+<   Latency (isolated): avg=9919425 ns, range=1399856 ns (min=8706976, max=10106832)
+<   Latency (normal):   avg=10027684 ns, range=307024 ns (min=9799520, max=10106544)
+---
+>   Latency (isolated): avg=8937993 ns, range=10121872 ns (min=11184, max=10133056)
+>   Latency (normal):   avg=10011716 ns, range=306640 ns (min=9778816, max=10085456)
+6576,6579c6607,6610
+< [INFO] Task 'bench_b' (id=2241) exiting
+< [INFO] Task 'bench_a' (id=2240) exiting
+<   Context switch benchmark: 100 switches in 477392 ns
+<   Average: 4773 ns per switch (4 µs)
+---
+> [INFO] Task 'bench_b' (id=2224) exiting
+> [INFO] Task 'bench_a' (id=2223) exiting
+>   Context switch benchmark: 100 switches in 288208 ns
+>   Average: 2882 ns per switch (2 µs)
+6583,6584c6614,6615
+<     Add:    47616 ns total, 5952 ns per op
+<     Remove: 43648 ns total, 5456 ns per op
+---
+>     Add:    27776 ns total, 3472 ns per op
+>     Remove: 24208 ns total, 3026 ns per op
+6771c6802
+< [INFO] Task 'pin_test' (id=2297) exiting
+---
+> [INFO] Task 'pin_test' (id=2280) exiting
+6773c6804
+< [INFO] Task 'daif_probe' (id=2298) exiting
+---
+> [INFO] Task 'daif_probe' (id=2281) exiting
+6812c6843
+< [INFO] Task 'c4_payload' (id=2301) exiting
+---
+> [INFO] Task 'c4_payload' (id=2284) exiting
+6814,6817c6845,6848
+< [INFO] Task 'c4_multi' (id=2302) exiting
+< [INFO] Task 'c4_multi' (id=2303) exiting
+< [INFO] Task 'c4_multi' (id=2304) exiting
+< [test_wait] c4_multi: cleanups after 317 us (bound 2000000 us)
+---
+> [INFO] Task 'c4_multi' (id=2285) exiting
+> [INFO] Task 'c4_multi' (id=2286) exiting
+> [INFO] Task 'c4_multi' (id=2287) exiting
+> [test_wait] c4_multi: cleanups after 329 us (bound 2000000 us)
+6927,6954c6958,6985
+< P1      0>1          100000         0        0       3 observed=54788
+< P1      0>2          100000         0        0       3 observed=60898
+< P1      0>3          100000         0        0       3 observed=58516
+< P1      1>0          100000         0        0       4 observed=75633
+< P1      1>2          100000         0        0       3 observed=49166
+< P1      1>3          100000         0        0       1 observed=28416
+< P1      2>0          100000         0        0       5 observed=85215
+< P1      2>1          100000         0        0       4 observed=71018
+< P1      2>3          100000         0        0       4 observed=67050
+< P1      3>0          100000         0        0       5 observed=79884
+< P1      3>1          100000         0        0       3 observed=44288
+< P1      3>2          100000         0        0       3 observed=46789
+< P2      0>1          100000         0        0       1 observed=27261
+< P2      0>2          100000         0        0       2 observed=44082
+< P2      0>3          100000         0        0       2 observed=40465
+< P2      1>0          100000         0        0       1 observed=25549
+< P2      1>2          100000         0        0       3 observed=49971
+< P2      1>3          100000         0        0       3 observed=52734
+< P2      2>0          100000         0        0       2 observed=51852
+< P2      2>1          100000         0        0       1 observed=18982
+< P2      2>3          100000         0        0       1 observed=25009
+< P2      3>0          100000         0        0       2 observed=48019
+< P2      3>1          100000         0        0       1 observed=26062
+< P2      3>2          100000         0        0       1 observed=24633
+< P3      0>1           10000         0        0       2
+< P3      0>2           10000         0        0       1
+< P3      0>3           10000         0        0       1
+< P3      1>0           10000         0        0       2
+---
+> P1      0>1          100000         0        0       1 observed=15469
+> P1      0>2          100000         0        0       1 observed=15811
+> P1      0>3          100000         0        0       1 observed=17641
+> P1      1>0          100000         0        0       4 observed=59339
+> P1      1>2          100000         0        0       1 observed=15420
+> P1      1>3          100000         0        0       3 observed=47332
+> P1      2>0          100000         0        0       1 observed=17969
+> P1      2>1          100000         0        0       1 observed=18037
+> P1      2>3          100000         0        0       1 observed=16936
+> P1      3>0          100000         0        0       1 observed=15521
+> P1      3>1          100000         0        0       3 observed=38336
+> P1      3>2          100000         0        0       1 observed=17154
+> P2      0>1          100000         0        0       1 observed=18240
+> P2      0>2          100000         0        0       1 observed=28946
+> P2      0>3          100000         0        0       2 observed=40562
+> P2      1>0          100000         0        0       2 observed=40984
+> P2      1>2          100000         0        0       1 observed=22203
+> P2      1>3          100000         0        0       1 observed=25487
+> P2      2>0          100000         0        0       2 observed=44722
+> P2      2>1          100000         0        0       2 observed=28327
+> P2      2>3          100000         0        0       2 observed=29522
+> P2      3>0          100000         0        0       3 observed=49983
+> P2      3>1          100000         0        0       2 observed=28096
+> P2      3>2          100000         0        0       2 observed=28277
+> P3      0>1           10000         0        0       5
+> P3      0>2           10000         0        0       3
+> P3      0>3           10000         0        0       3
+> P3      1>0           10000         0        0       3
+6956,6957c6987,6988
+< P3      1>3           10000         0        0       6
+< P3      2>0           10000         0        0       1
+---
+> P3      1>3           10000         0        0       4
+> P3      2>0           10000         0        0       2
+6960,6961c6991,6992
+< P3      3>0           10000         0        0       1
+< P3      3>1           10000         0        0       6
+---
+> P3      3>0           10000         0        0       3
+> P3      3>1           10000         0        0       5
+6963,6967c6994,6998
+< P4      w0/0-3      1142784         0        0       9 pairs=126528,117184,116864 straddles=39393,507,537 coverage=ok
+< P4      w1/0-3       909312         0        0       6 pairs=100224,92544,92416 straddles=31632,507,509 coverage=ok
+< P4      w2/0-3      2162688         0        0      50 pairs=255104,312512,323456 straddles=514,502,5671 coverage=ok
+< P4      w3/0-3      3149824         0        0      94 pairs=821952,697664,1072320 straddles=2236,2247,501 coverage=ok
+< P5      0>1           10000         0        0       1
+---
+> P4      w0/0-3      3796992         0        0      78 pairs=481216,539968,516288 straddles=500,569,1465 coverage=ok
+> P4      w1/0-3      1163264         0        0       8 pairs=134208,133056,130944 straddles=501,568,22167 coverage=ok
+> P4      w2/0-3       798720         0        0      11 pairs=199872,153408,224896 straddles=516,1808,12413 coverage=ok
+> P4      w3/0-3      3969024         0        0     148 pairs=1118976,1151168,1048896 straddles=1682,507,33661 coverage=ok
+> P5      0>1           10000         0        0       2
+6969c7000
+< P5      0>3           10000         0        0       2
+---
+> P5      0>3           10000         0        0       1
+6973,6974c7004,7005
+< P5      2>0           10000         0        0       1
+< P5      2>1           10000         0        0       2
+---
+> P5      2>0           10000         0        0       2
+> P5      2>1           10000         0        0       1
+6976,6977c7007,7008
+< P5      3>0           10000         0        0       1
+< P5      3>1           10000         0        0       1
+---
+> P5      3>0           10000         0        0       0
+> P5      3>1           10000         0        0       2
+6979,6995c7010,7026
+< P6      0-3          100000         0        0      31
+< S1      0>1          100000         0        0       9 observed=90438
+< S1      0>2          100000         0        0       2 observed=28632
+< S1      0>3          100000         0        0       1 observed=27093
+< S1      1>0          100000         0        0       2 observed=41238
+< S1      1>2          100000         0        0       3 observed=53760
+< S1      1>3          100000         0        0       2 observed=38091
+< S1      2>0          100000         0        0       2 observed=41207
+< S1      2>1          100000         0        0       2 observed=30859
+< S1      2>3          100000         0        0       2 observed=29347
+< S1      3>0          100000         0        0       3 observed=53985
+< S1      3>1          100000         0        0       1 observed=25790
+< S1      3>2          100000         0        0       1 observed=26730
+< S2      0>1           10000         0        0       2
+< S2      0>2           10000        11        0       4
+< S2      0>3           10000        47        0       3
+< S2      1>0           10000         1        0       2
+---
+> P6      0-3          100000         0        0      41
+> S1      0>1          100000         0        0       2 observed=41010
+> S1      0>2          100000         0        0       2 observed=38029
+> S1      0>3          100000         0        0       2 observed=38461
+> S1      1>0          100000         0        0       1 observed=25752
+> S1      1>2          100000         0        0       2 observed=34004
+> S1      1>3          100000         0        0       2 observed=36669
+> S1      2>0          100000         0        0       1 observed=27809
+> S1      2>1          100000         0        0       1 observed=26484
+> S1      2>3          100000         0        0       3 observed=57019
+> S1      3>0          100000         0        0       3 observed=48473
+> S1      3>1          100000         0        0       2 observed=45533
+> S1      3>2          100000         0        0       1 observed=26038
+> S2      0>1           10000         0        0       3
+> S2      0>2           10000       120        0       2
+> S2      0>3           10000         4        0       2
+> S2      1>0           10000         0        0       1
+6997,6999c7028,7030
+< S2      1>3           10000         1        0       5
+< S2      2>0           10000         0        0       1
+< S2      2>1           10000        14        0       6
+---
+> S2      1>3           10000         1        0       4
+> S2      2>0           10000         0        0       5
+> S2      2>1           10000        28        0       6
+7001,7003c7032,7034
+< S2      3>0           10000        64        0       3
+< S2      3>1           10000         1        0       6
+< S2      3>2           10000        25        0       5
+---
+> S2      3>0           10000         0        0       1
+> S2      3>1           10000        33        0       5
+> S2      3>2           10000        39        0       5
+7005,7007c7036,7038
+< SENS cpus=0>2 S1=0 S2=11 P2_sensitive=no P3_sensitive=yes
+< SENS cpus=0>3 S1=0 S2=47 P2_sensitive=no P3_sensitive=yes
+< SENS cpus=1>0 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+---
+> SENS cpus=0>2 S1=0 S2=120 P2_sensitive=no P3_sensitive=yes
+> SENS cpus=0>3 S1=0 S2=4 P2_sensitive=no P3_sensitive=yes
+> SENS cpus=1>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+7011c7042
+< SENS cpus=2>1 S1=0 S2=14 P2_sensitive=no P3_sensitive=yes
+---
+> SENS cpus=2>1 S1=0 S2=28 P2_sensitive=no P3_sensitive=yes
+7013,7016c7044,7047
+< SENS cpus=3>0 S1=0 S2=64 P2_sensitive=no P3_sensitive=yes
+< SENS cpus=3>1 S1=0 S2=1 P2_sensitive=no P3_sensitive=yes
+< SENS cpus=3>2 S1=0 S2=25 P2_sensitive=no P3_sensitive=yes
+< # S1 relaxed outcomes: 0, S2 relaxed outcomes: 165 (reported, not judged)
+---
+> SENS cpus=3>0 S1=0 S2=0 P2_sensitive=no P3_sensitive=no
+> SENS cpus=3>1 S1=0 S2=33 P2_sensitive=no P3_sensitive=yes
+> SENS cpus=3>2 S1=0 S2=39 P2_sensitive=no P3_sensitive=yes
+> # S1 relaxed outcomes: 0, S2 relaxed outcomes: 226 (reported, not judged)
+7018c7049
+< # P4 weak rows: 0, fewest straddles of any reader: 501 (target 500)
+---
+> # P4 weak rows: 0, fewest straddles of any reader: 500 (target 500)
+7020,7021c7051,7052
+< [INFO] coherency litmus scale 10: 77 rows in 990 ms
+< [INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 165, timeouts 0 (not judged)
+---
+> [INFO] coherency litmus scale 10: 77 rows in 1211 ms
+> [INFO] coherency S1 relaxed outcomes: 0, timeouts 0; S2 relaxed outcomes: 226, timeouts 0 (not judged)
+7038,7041c7069,7072
+< P4      w0/0-3         8192         0        0       0 pairs=2368,2368,1728 straddles=2,177,1 coverage=ok
+< P4      w1/0-3        16384         0        0       0 pairs=2048,2112,2176 straddles=17,22,1 coverage=ok
+< P4      w2/0-3         8192         0        0       0 pairs=2176,1728,1856 straddles=78,10,7 coverage=ok
+< P4      w3/0-3        12288         0        0       0 pairs=1600,2112,1600 straddles=7,6,11 coverage=ok
+---
+> P4      w0/0-3        24576         0        0       0 pairs=5376,5504,8448 straddles=9,11,1 coverage=ok
+> P4      w1/0-3        53248         0        0       0 pairs=5312,5184,5184 straddles=4,21,12 coverage=ok
+> P4      w2/0-3        12288         0        0       0 pairs=2368,3072,3456 straddles=1,1,213 coverage=ok
+> P4      w3/0-3       118784         0        0       1 pairs=14464,14848,1152 straddles=10,2,106 coverage=ok
+7064c7095
+< [INFO] coherency inject 1: 12 rows, 12 failed, 128 ms
+---
+> [INFO] coherency inject 1: 12 rows, 12 failed, 139 ms
+7069,7072c7100,7103
+< P4      w0/0-3        32768       131        0       0 pairs=9216,9152,14912 straddles=74,54,3 coverage=ok
+< P4      w1/0-3        12288       177        0       0 pairs=1408,1408,1280 straddles=13,11,154 coverage=ok
+< P4      w2/0-3        45056       688        0       0 pairs=12224,12288,8576 straddles=5,682,1 coverage=ok
+< P4      w3/0-3        24576        61        0       0 pairs=5440,4096,4096 straddles=2,25,34 coverage=ok
+---
+> P4      w0/0-3        12288        99        0       0 pairs=5760,7232,5632 straddles=2,95,2 coverage=ok
+> P4      w1/0-3       155648        29        0       2 pairs=30400,38464,29376 straddles=1,18,10 coverage=ok
+> P4      w2/0-3        24576         6        0       0 pairs=4928,5312,4800 straddles=1,5,1 coverage=ok
+> P4      w3/0-3        24576        10        0       0 pairs=7488,5568,5632 straddles=5,3,2 coverage=ok
+7076c7107
+< [INFO] coherency inject 2: 4 rows, 4 failed, 41 ms
+---
+> [INFO] coherency inject 2: 4 rows, 4 failed, 50 ms
+7081,7084c7112,7115
+< P4      w0/0-3            0         0        0       0 pairs=1536,1536,1536 straddles=0,0,0 coverage=weak
+< P4      w1/0-3            0         0        0       0 pairs=64,192,64 straddles=0,0,0 coverage=weak
+< P4      w2/0-3            0         0        0       0 pairs=64,64,64 straddles=0,0,0 coverage=weak
+< P4      w3/0-3            0         0        0       0 pairs=384,320,384 straddles=0,0,0 coverage=weak
+---
+> P4      w0/0-3            0         0        0       0 pairs=2176,2432,2368 straddles=0,0,0 coverage=weak
+> P4      w1/0-3            0         0        0       0 pairs=64,64,64 straddles=0,0,0 coverage=weak
+> P4      w2/0-3            0         0        0       0 pairs=64,128,128 straddles=0,0,0 coverage=weak
+> P4      w3/0-3            0         0        0       0 pairs=64,64,64 straddles=0,0,0 coverage=weak
+7088c7119
+< [INFO] coherency inject 3: 4 rows, 4 failed, 38 ms
+---
+> [INFO] coherency inject 3: 4 rows, 4 failed, 39 ms
+7096c7127
+< [INFO] coherency inject 4: 1 rows, 1 failed, 9 ms
+---
+> [INFO] coherency inject 4: 1 rows, 1 failed, 11 ms
+7116c7147
+< [INFO] coherency inject 5: 12 rows, 12 failed, 684 ms
+---
+> [INFO] coherency inject 5: 12 rows, 12 failed, 676 ms
+7122,7124c7153,7155
+< P2      0>1             100         0        0       0 observed=0
+< P2      0>2             100         0        0       0 observed=25
+< P2      0>3             100         0        0       0 observed=33
+---
+> P2      0>1             100         0        0       0 observed=1
+> P2      0>2             100         0        0       0 observed=1
+> P2      0>3             100         0        0       0 observed=1
+7127c7158
+< P2      1>3             100         0        0       0 observed=34
+---
+> P2      1>3             100         0        0       0 observed=18
+7133,7137c7164,7168
+< P2      3>2             100         0        0       0 observed=21
+< P4      w0/0-3       774144         0        0       8 pairs=106880,106944,108480 straddles=405,167,515 coverage=ok
+< P4      w1/0-3       102400         0        0       0 pairs=11584,11584,12224 straddles=109,120,1516 coverage=ok
+< P4      w2/0-3        81920         0        0       0 pairs=9536,9344,9344 straddles=1313,116,115 coverage=ok
+< P4      w3/0-3       110592         0        0       0 pairs=11392,12672,11520 straddles=104,4091,142 coverage=ok
+---
+> P2      3>2             100         0        0       0 observed=0
+> P4      w0/0-3      1306624         0        0      19 pairs=232576,254400,310080 straddles=100,1642,3881 coverage=ok
+> P4      w1/0-3      1105920         0        0      16 pairs=220480,203904,184768 straddles=1207,102,1001 coverage=ok
+> P4      w2/0-3        73728         0        0      18 pairs=11904,39424,39232 straddles=253,129,112 coverage=ok
+> P4      w3/0-3       217088         0        0       1 pairs=12736,23936,24384 straddles=119,5024,193 coverage=ok
+7143,7145c7174,7176
+< P2      0>1             100         0        0       0 observed=43
+< P2      0>2             100         0        0       0 observed=55
+< P2      0>3             100         0        0       0 observed=51
+---
+> P2      0>1             100         0        0       0 observed=1
+> P2      0>2             100         0        0       0 observed=1
+> P2      0>3             100         0        0       0 observed=1
+7147,7148c7178,7179
+< P2      1>2             100         0        0       0 observed=0
+< P2      1>3             100         0        0       0 observed=0
+---
+> P2      1>2             100         0        0       0 observed=1
+> P2      1>3             100         0        0       0 observed=14
+7150,7151c7181,7182
+< P2      2>1             100         0        0       0 observed=0
+< P2      2>3             100         0        0       0 observed=51
+---
+> P2      2>1             100         0        0       0 observed=1
+> P2      2>3             100         0        0       0 observed=39
+7155,7158c7186,7189
+< P4      w0/0-3       696320         0        0      10 pairs=139456,141504,199616 straddles=406,105,19369 coverage=ok
+< P4      w1/0-3       753664         0        0      10 pairs=142976,202624,151872 straddles=1981,103,1957 coverage=ok
+< P4      w2/0-3      1683456         0        0      12 pairs=180224,168256,164352 straddles=1229,101,1155 coverage=ok
+< P4      w3/0-3       749568         0        0      43 pairs=232832,309504,208640 straddles=2210,2112,103 coverage=ok
+---
+> P4      w0/0-3       122880         0        0       1 pairs=23424,23104,23296 straddles=190,108,186 coverage=ok
+> P4      w1/0-3       376832         0        0       5 pairs=73408,71616,107712 straddles=100,300,14357 coverage=ok
+> P4      w2/0-3       274432         0        0       4 pairs=58944,56128,57536 straddles=101,646,741 coverage=ok
+> P4      w3/0-3       495616         0        0       6 pairs=86336,132672,85248 straddles=102,10825,121 coverage=ok
+7177c7208
+< [INFO] coherency neg scale 1000: 590 ms
+---
+> [INFO] coherency neg scale 1000: 618 ms
+7183c7214
+< [INFO] test_coherency.c: 3612 ms
+---
+> [INFO] test_coherency.c: 3893 ms
+7246c7277
+< Component 'counter' v1.0 started (idx=1, task=2683)
+---
+> Component 'counter' v1.0 started (idx=1, task=2666)
+7248c7279
+< Component 'echo' v1.0 started (idx=2, task=2684)
+---
+> Component 'echo' v1.0 started (idx=2, task=2667)
+7251,7253c7282,7283
+< [counter] Started (component 1)
+< Component 'listener' v1.0 started (idx=3, task=2685)
+< Component 'listener' v1.0 started (idx=3, task=2686)
+---
+> Component 'listener' v1.0 started (idx=3, task=2668)
+> Component 'listener' v1.0 started (idx=3, task=2669)
+7255a7286
+> [counter] Started (component 1)
+7261c7292
+< Uptime: 0:01:03
+---
+> Uptime: 0:01:05
+7280c7311
+< Component 'digit_classifier' v1.0 started (idx=4, task=2687)
+---
+> Component 'digit_classifier' v1.0 started (idx=4, task=2670)
+7283c7314
+< Component 'sensor_monitor' v1.0 started (idx=5, task=2688)
+---
+> Component 'sensor_monitor' v1.0 started (idx=5, task=2671)
+7285c7316
+< Component 'sensor_monitor' v1.0 started (idx=5, task=2689)
+---
+> Component 'sensor_monitor' v1.0 started (idx=5, task=2672)
+7311c7342
+<   [1/1] last=19523 us
+---
+>   [1/1] last=19240 us
+7314,7316c7345,7347
+<   Min latency:  19523 us
+<   Avg latency:  19523 us
+<   Max latency:  19523 us
+---
+>   Min latency:  19240 us
+>   Avg latency:  19240 us
+>   Max latency:  19240 us
+7403c7434
+< [HEAP] Corruption detected in free() at 0x41f0f5f0
+---
+> [HEAP] Corruption detected in free() at 0x41eef5f0
+7405c7436
+< [HEAP] Corruption detected in realloc() at 0x41f0f5f0
+---
+> [HEAP] Corruption detected in realloc() at 0x41eef5f0
+7727c7758
+< [WARN] DHCP timeout after 1 ms; falling back to static IP
+---
+> [WARN] DHCP timeout after 0 ms; falling back to static IP
+7786c7817
+< [WARN] lwIP raw API called without lwip_core_lock (cpu 0, irqs UNMASKED, caller 0x401a0cc4)
+---
+> [WARN] lwIP raw API called without lwip_core_lock (cpu 0, irqs UNMASKED, caller 0x4016b464)
+7827a7859
+> [counter] Count: 9
+7830d7861
+< [counter] Count: 9
+7838a7870,7871
+> [counter] Done (count=10)
+> [INFO] Task 'counter' (id=2666) exiting
+7842,7843d7874
+< [counter] Done (count=10)
+< [INFO] Task 'counter' (id=2683) exiting
+8363c8394
+< Inference on 'mnist' completed in 38706 us
+---
+> Inference on 'mnist' completed in 42406 us
+8383c8414
+< Inference on 'mnist' completed in 23310 us
+---
+> Inference on 'mnist' completed in 25421 us
+8468c8499
+<   [INFO] Pipeline latency: avg=48479 us, min=16486 us, max=178266 us (52 inferences)
+---
+>   [INFO] Pipeline latency: avg=64653 us, min=16995 us, max=183581 us (52 inferences)
+8476,8477c8507,8508
+< Component 'sensor_monitor' v1.0 started (idx=0, task=2698)
+< Component 'sensor_monitor' v1.0 started (idx=0, task=2699)
+---
+> Component 'sensor_monitor' v1.0 started (idx=0, task=2681)
+> Component 'sensor_monitor' v1.0 started (idx=0, task=2682)
+8511c8542
+< [INFO] Task 'pan_check' (id=2700) exiting
+---
+> [INFO] Task 'pan_check' (id=2683) exiting
+8549d8579
+<   [INFO] Rust task running!
+8554a8585
+>   [INFO] Rust task running!
+8590c8621
+< [test_wait] task_lifecycle: initial 139222, target 139206, free at start of wait 139222, met after 26 us (bound 1000000 us)
+---
+> [test_wait] task_lifecycle: initial 139254, target 139238, free at start of wait 139254, met after 51 us (bound 1000000 us)
