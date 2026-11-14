@@ -471,7 +471,7 @@ Suggested, not required: a TERMINATED/DESTROYED check on the non-head
 candidate in `pick_ready_locked`; correct the `switch_to` comment about the
 caller's mask.
 
-## Addendum, 09:33 UTC: the builder's long-timeout runs
+## Addendum, 09:31 UTC: the builder's long-timeout runs
 
 Counted after the verdict above was pushed, from the serial text of
 `run5-hw/c2/qemu-regs-hang/full-ws-t300-c0ea0714-run01..13.txt`
