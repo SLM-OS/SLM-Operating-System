@@ -1,0 +1,57 @@
+# pi-5-1, production head 6a4cfa93 (kernel_2712.img = s5co-pi5-prod-6a4cfa93.bin, sha256 8a33c7da), bench boot H1 (= pi5-bench-head-6a4cfa93-H1-boot01.txt), bench context runs 1 and 2 on this boot
+# command: lua-admin -e "for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')"
+# serial_send output of this session, verbatim (labctl result "Captured 53 lines"), 2026-11-14 ~22:23 UTC
+lua-admin -e "for i=1,2 do print('BC-RUN '..i) slm.shell_exec('bench context') end print('BC-'..'END')"
+BC-RUN 1
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=10) exiting
+  Context switch: 99 round-trips
+    Average: 109 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 92 ns   Max: 222 ns   Mean: 109 ns
+  p50: 111 ns   p95: 112 ns   p99: 222 ns
+
+BC-RUN 2
+
+Context Switch Benchmark
+========================
+[INFO] Task 'bench_ctx' (id=11) exiting
+  Context switch: 99 round-trips
+    Average: 108 ns (0 us)
+    Rating:  Excellent (< 10 us)
+  Latency distribution:
+       0-  500ns:    99 ########################################
+     500- 1000ns:     0
+       1-    2us:     0
+       2-    5us:     0
+       5-   10us:     0
+      10-   20us:     0
+      20-   50us:     0
+      50-  100us:     0
+     100-  200us:     0
+     200-  500us:     0
+     500- 1000us:     0
+    1000+    us :     0
+
+  Min: 92 ns   Max: 148 ns   Mean: 108 ns
+  p50: 111 ns   p95: 112 ns   p99: 148 ns
+
+BC-END
+slmos>
+slmos>

@@ -1,0 +1,32 @@
+== jetson
+  base bench-context-jetson-base-B1-run1.txt: mean 90 p50 96 p95 128
+  base bench-context-jetson-base-B1-run2.txt: mean 91 p50 96 p95 128
+  base bench-context-jetson-base-B2-runs1-2.txt: mean 87 p50 96 p95 128
+  base bench-context-jetson-base-B2-runs1-2.txt: mean 85 p50 96 p95 128
+  base bench-context-jetson-base-B3-runs1-2.txt: mean 90 p50 96 p95 128
+  base bench-context-jetson-base-B3-runs1-2.txt: mean 85 p50 96 p95 128
+  base: n=6 mean-of-means 88.00 ns sd 2.68 min 85 max 91; p50 values [96]; p95 values [128]; median of p50 96.0; median of p95 128.0
+  head bench-context-jetson-head-H1-run1.txt: mean 96 p50 96 p95 128
+  head bench-context-jetson-head-H1-run2.txt: mean 98 p50 96 p95 128
+  head bench-context-jetson-head-H2-runs1-2.txt: mean 97 p50 96 p95 128
+  head bench-context-jetson-head-H2-runs1-2.txt: mean 96 p50 96 p95 128
+  head bench-context-jetson-head-H3-runs1-2.txt: mean 101 p50 96 p95 128
+  head bench-context-jetson-head-H3-runs1-2.txt: mean 96 p50 96 p95 128
+  head: n=6 mean-of-means 97.33 ns sd 1.97 min 96 max 101; p50 values [96]; p95 values [128]; median of p50 96.0; median of p95 128.0
+  delta +9.33 ns (+10.6%), Welch t 6.9 (SE 1.36 ns); ranges overlap: False
+== pi5
+  base bench-context-pi5-base-B1-runs1-2.txt: mean 102 p50 93 p95 111
+  base bench-context-pi5-base-B1-runs1-2.txt: mean 101 p50 93 p95 112
+  base bench-context-pi5-base-B2-runs1-2.txt: mean 101 p50 93 p95 112
+  base bench-context-pi5-base-B2-runs1-2.txt: mean 99 p50 93 p95 111
+  base bench-context-pi5-base-B3-runs1-2.txt: mean 101 p50 93 p95 112
+  base bench-context-pi5-base-B3-runs1-2.txt: mean 100 p50 93 p95 111
+  base: n=6 mean-of-means 100.67 ns sd 1.03 min 99 max 102; p50 values [93]; p95 values [111, 112]; median of p50 93.0; median of p95 111.5
+  head bench-context-pi5-head-H1-runs1-2.txt: mean 109 p50 111 p95 112
+  head bench-context-pi5-head-H1-runs1-2.txt: mean 108 p50 111 p95 112
+  head bench-context-pi5-head-H2-runs1-2.txt: mean 110 p50 111 p95 112
+  head bench-context-pi5-head-H2-runs1-2.txt: mean 107 p50 111 p95 129
+  head bench-context-pi5-head-H3-runs1-2.txt: mean 111 p50 111 p95 129
+  head bench-context-pi5-head-H3-runs1-2.txt: mean 109 p50 111 p95 112
+  head: n=6 mean-of-means 109.00 ns sd 1.41 min 107 max 111; p50 values [111]; p95 values [112, 129]; median of p50 111.0; median of p95 112.0
+  delta +8.33 ns (+8.3%), Welch t 11.7 (SE 0.71 ns); ranges overlap: False
