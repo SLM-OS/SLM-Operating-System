@@ -121,3 +121,31 @@ C0 definition of done met: Entry 0 and 0a pushed, base head in bold.
 - **Handover 23:35 UTC: jetson-nano-2 to C3** (#1207 reproduction and
   capture), until 01:45 UTC at the latest. pi-5-1 unheld. C2 told its window
   is 01:45 to 03:15 UTC.
+
+## Entry 2 (written 00:15 UTC): hour mark 2:00
+
+Pushed heads: `c1/harness` 6e39f425, `c2/switch-window` 6ee2f16d (local
+88d4d71b splits R3), `c3/pmm-halt` a03aaa12 (rebasing onto c1/harness).
+
+- C1: on mark. Filter pushed at 23:34 UTC; running /ci, the unfiltered
+  byte-for-byte diff and the forced double-fault demo before its critic.
+- C2: ahead of mark. R1 and R3 written on top of c1/harness; R3 is split
+  into `test_migrate_ready_during_switch_out` and
+  `test_wake_during_switch_out` (the wake path reaches the same window:
+  `task_sleep_wake` on a task that set TASK_BLOCKED but has not switched
+  out). Disclosed strengthening: movers aim using the task's on_cpu field
+  (read only), because a plain migrate loop gave 0 hits in 60k migrations
+  per run. Builder claim, not yet evidence: one QEMU run with the
+  SWITCH_CHECK instrument flagged 29 switch-ins whose previous save was not
+  complete and 25 owned by another CPU, then a fault in schedule matching the
+  #1238 signature. The 20-run baselines (R3 migrate, R3 wake, R1, run one
+  after another, load recorded per run) are in progress.
+  Process notes from C2: one run discarded after a rebase in the worktree a
+  loop was building in (stopped by its own task id); branch surgery moved to
+  a separate worktree.
+- C3: on mark; holds jetson-nano-2 since 23:35 UTC (Entry 1), Jetson
+  capture build in progress. Its decode of four run-4 captures (labelled
+  hypothesis until the capture decides it): #1207 and #1228 are one defect, a
+  free list shorter than its free_counts, discovered rather than caused by
+  test_exhaustion_recovery; all four on kexec boots, 0 of 13 UEFI suite boots.
+- Lab: no change. jetson-nano-2 with C3 to 01:45 UTC; pi-5-1 unheld.
