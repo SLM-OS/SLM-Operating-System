@@ -535,3 +535,38 @@ filed by Entry 8 (#1252-#1255).
     It is merged with the earlier ELF and user-space-verbs item.
 - #1245 head: 34356998 (Track B report). A second Fable critic checks
   only additions A and B.
+
+## Entry 13: critic on the two user additions
+
+- Fable critic, blind and read-only. It checked only additions A (ADR
+  0009) and B (`architecture.md`, Planned direction) at 34356998.
+  Full table: `scratchpad/critic-additions.md`.
+- Result: 15 sub-claims; 10 CONFIRMED, 0 REFUTED, 5 UNCONFIRMED.
+  - A is word for word the user's text.
+  - B matches in substance, plus one citation the agent added.
+- The added citation named `elf_user.c`, which is the EL0 ELF loader and
+  not part of the syscall path. It now cites `kernel/src/syscall.c` and
+  the trap side (`vectors.S`, `exceptions.c`, `user_entry.S`). #1245 head:
+  c0f2b667 (`git log -1 origin/structural/architecture-record`).
+- UNCONFIRMED. These are user attestations or plans with no repository
+  source, left as the user wrote them:
+  - "E2H=0 pays off only with ..." (the word "only")
+  - the bare-metal intent
+  - "whether E2H=0 was tried is not recorded". The UEFI path enters at
+    E2H=0 and the kernel flips it to 1 (`boot.S:295-296`, `804-822`);
+    that is not a trial.
+  - the first kernel was deliberately small
+  - ELF programs are the first consumer. Today the only EL0 ELF consumer
+    is the `userelf` verb (`shell_sys.c:712`).
+- Wording the critic flags as misleading, left for the user because it is
+  their text:
+  - B's "per-process address spaces" reads as planned, but EL0 tasks
+    already have per-task L1 tables and ASIDs (`vmm.c:640-726`,
+    `task.c:615-660`). What is missing is the kernel/user split.
+  - A's "TTBR0_EL2 with ASIDs per process" is already implemented.
+    "TTBR1_EL2 for the kernel" is not how SLM-OS runs: the kernel is at
+    low VA with TTBR0=TTBR1 (`vmm.h:50-51`).
+  - "PAN/SPAN at EL2": SLM-OS runs with PAN off (`boot.S:854-870`, #1079;
+    hardening is #29).
+  - B cites ADR 0012 for the move of verbs to user space, but 0012's
+    sentence on that is itself the user's answer.
