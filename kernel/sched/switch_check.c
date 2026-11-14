@@ -89,6 +89,26 @@ void switch_check_out(struct task *prev)
                      __ATOMIC_RELEASE);
 }
 
+/* Under rq_lock[held_cpu] in schedule(): the CPU id the lock and every
+ * per-CPU field were taken from must be the CPU executing (#1242). */
+void switch_check_cpu(uint32_t held_cpu, uint32_t where)
+{
+    uint32_t real = cpu_id();
+    if (real == held_cpu) {
+        return;
+    }
+    if (__atomic_fetch_add(&sc_stats.stale_cpu, 1, __ATOMIC_RELAXED) == 0) {
+        struct task *t = task_current_on_cpu(real);
+        sc_stats.stale_first_task = t ? t->id : 0;
+        sc_stats.stale_first_held = held_cpu;
+        sc_stats.stale_first_real = real;
+        __atomic_store_n(&sc_stats.stale_first_where, where, __ATOMIC_RELEASE);
+        uart_printf_unlocked("\n[switch_check] FIRST STALE CPU: schedule() holds rq_lock[%u] "
+                             "but runs on cpu %u (task id=%u, site %u)\n",
+                             held_cpu, real, t ? t->id : 0, where);
+    }
+}
+
 void switch_check_snapshot(struct switch_check_stats *out)
 {
     out->switch_ins = __atomic_load_n(&sc_stats.switch_ins, __ATOMIC_RELAXED);
@@ -98,6 +118,11 @@ void switch_check_snapshot(struct switch_check_stats *out)
     out->first_task_id = sc_stats.first_task_id;
     out->first_cpu = sc_stats.first_cpu;
     out->first_owner = sc_stats.first_owner;
+    out->stale_cpu = __atomic_load_n(&sc_stats.stale_cpu, __ATOMIC_RELAXED);
+    out->stale_first_where = __atomic_load_n(&sc_stats.stale_first_where, __ATOMIC_ACQUIRE);
+    out->stale_first_task = sc_stats.stale_first_task;
+    out->stale_first_held = sc_stats.stale_first_held;
+    out->stale_first_real = sc_stats.stale_first_real;
 }
 
 #endif /* CONFIG_SWITCH_CHECK */

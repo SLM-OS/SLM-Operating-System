@@ -39,15 +39,23 @@ struct switch_check_stats {
     uint32_t first_cpu;         /* first failure: incoming CPU */
     uint32_t first_owner;       /* first failure: owner word (cpu + 1), 0 if none */
     uint32_t first_kind;        /* 1 = gen, 2 = dual, 3 = both */
+    uint32_t stale_cpu;         /* schedule() holds rq_lock[c] but runs on another CPU (#1242) */
+    uint32_t stale_first_task;  /* first stale: task id, held id, executing CPU, site */
+    uint32_t stale_first_held;
+    uint32_t stale_first_real;
+    uint32_t stale_first_where; /* 1 first lock, 2 after the zombie relock */
 };
 void switch_check_in(struct task *next, uint32_t cpu);
 void switch_check_out(struct task *prev);
 void switch_check_snapshot(struct switch_check_stats *out);
+void switch_check_cpu(uint32_t held_cpu, uint32_t where);
 #define SWITCH_CHECK_IN(next, cpu)  switch_check_in((next), (cpu))
 #define SWITCH_CHECK_OUT(prev)      switch_check_out((prev))
+#define SWITCH_CHECK_CPU(cpu, w)    switch_check_cpu((cpu), (w))
 #else
 #define SWITCH_CHECK_IN(next, cpu)  do { } while (0)
 #define SWITCH_CHECK_OUT(prev)      do { } while (0)
+#define SWITCH_CHECK_CPU(cpu, w)    do { } while (0)
 #endif
 
 #if defined(CONFIG_SWITCH_WINDOW_TEST)
