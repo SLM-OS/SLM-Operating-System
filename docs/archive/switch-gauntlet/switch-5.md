@@ -619,3 +619,16 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
   report #1207 as open.
 - C2 pushed `c2/switch-window-r2` 4bfc15a5 at 05:51 UTC (ADR corrections or
   fix; to be reported).
+
+## Entry 23 (written 06:14 UTC, from date): hour mark 8:00
+
+- Lab: already with C2 since 06:10 UTC (Entry 22); no change.
+- C3 asks that its 05:30 to 06:08 overrun be logged as a C3 rule break: it
+  started three boot batches (boots 11 to 16) at 05:32, 05:43 and 05:52, after
+  its slot had ended, chaining boot_test calls without ending a turn, so the
+  release messages could not reach it. Recorded as a C3 rule break; boots 11
+  to 16 are valid diagnosis rows run outside the slot. C3's 06:15 slot is
+  cancelled; C3 rebased to `c3/pmm-halt` 321a91be and is writing its final
+  report with #1207 open.
+- C2: fix in progress on `c2/switch-window-r2`; R2 trace boots then fix-head
+  rows. Behind the 8:00 mark (fix not yet reported); remaining budget 4 h.
