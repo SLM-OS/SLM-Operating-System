@@ -522,3 +522,38 @@ prototype, for the #1242 base rate on base plus deferral).
   handover message of Entry 15 was sent at about that time, not 05:05) and
   is past its 05:30 end; told to release after the current boot_test call.
   Then C2 takes it for the R2 trace.
+
+## Entry 19 (written 05:44 UTC, from date): C2 design verdict round 2, PASS
+
+- Verdict: **PASS**, Fable 5.2, `critic-5-C2-design.md` round-2 section
+  (gauntlet/switch-5 e7670dae), on ADR 0008 at `c2/switch-window-r2`
+  6bc60aa3. The critic checked: the CPU-id pin adds no lock edge and no wait,
+  and DAIF restore handles F under PI5_FIQ_TIMER; the next-ready walk is loads
+  under the lock; a higher-priority deferred task can wait up to one tick
+  behind a lower-priority one, as stated; masked check-then-WFI is sound and
+  the poll calls schedule() at most once per 50 us. The critic counted the
+  #1242 base rate itself: 26 of 128 iterations stale in 5 of 5 runs, first at
+  1, 1, 4, 1, 5. Its prototype of the revised decision ran 300 of 300 (R3
+  migrate, R3 wake, R2 x100 each) with 0 stale-CPU reports; one full make test
+  failed only on #1230 litmus with other QEMUs on the host (one run, not
+  attributed).
+- Four ADR text corrections required, none changing a mechanism or bound: (1)
+  the idle branch list is wrong against idle_task_func (every QEMU CPU and Pi 5
+  CPU 0 without SECONDARY_PREEMPT unmask and WFI); state the rule by code shape;
+  (2) do not rest on scheduler_start() running masked (#1198); (3) say why idle
+  may read switch_in_waiting[c] unlocked; (4) x86 kicks in the masked prelude
+  are dropped by the #1236 guard, bounded by one tick.
+- **Orchestrator ruling** (the critic left it open): the brief's rule fails a
+  design whose argument has gaps. These four are factual slips that can be
+  decided from the code, not gaps in the no-cycle or ordering argument, so the
+  PASS stands, on two conditions: C2 applies all four before fix code, and the
+  fix critic checks the idle loop branch by branch against correction 1. If
+  the user reads the rule more strictly, correction 1 is the point at issue;
+  recorded for the final report.
+- Critic round-2 evidence placed: `gauntlet-5-hw-pi5` 5a6d253f,
+  `run5-hw/c2-design-critic/r2proto-*`, `critic-proto-adr0008-r2.patch`.
+- C2 released to write the fix at 05:44 UTC. Extra fix-verdict rows requested by
+  the critic: WORK_STEALING=ON, a COOP build, x86, and a branch-by-branch
+  idle-loop check.
+- Lab: C3 still holds jetson-nano-2 past 05:30 (last activity 05:42); release
+  requested twice.
