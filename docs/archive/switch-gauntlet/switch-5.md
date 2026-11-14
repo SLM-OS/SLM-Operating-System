@@ -632,3 +632,28 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
   report with #1207 open.
 - C2: fix in progress on `c2/switch-window-r2`; R2 trace boots then fix-head
   rows. Behind the 8:00 mark (fix not yet reported); remaining budget 4 h.
+
+## Entry 24 (written 06:15 UTC, from date): C2 fix pushed; QEMU proof; lab plan to the end
+
+- ADR corrections applied at 253512a4; fix at `c2/switch-window-r2`
+  **4bfc15a5** (sched.c, sched_diag.h), plus test-only 3b369aef (R1 helper
+  migrates before it prints; at the fix tree 1 of 30 phase-A migrations had
+  been refused because a UART line outlasted the 25 ms window; disclosed; the
+  R1 base baseline failed by fault or hang before any assertion, so it stands).
+- QEMU at 4bfc15a5 (builder claim, files `gauntlet-5-hw-pi5` 9c8e5928,
+  `run5-hw/c2/qemu-fix/`; SWITCH_CHECK=ON SWITCH_WINDOW_TEST=ON, MTTCG):
+  20 of 20 runs, each running R1, tick-forced, R3 migrate, R3 wake, R2 x10:
+  1000 of 1000 iterations pass, 400 of 400 switch_check lines with
+  bad_gen=0 bad_dual=0 stale_cpu=0, 0 panics. 5x thresholds from this run's
+  baselines (iterations to first failure): R1 1 (5 needed), R3 migrate 5.55
+  (28), R3 wake 1.1 (6), #1242 2.4 (12), no-deadlock 20 runs; each exceeded
+  (200 per test).
+- Hardware 5x thresholds sent to C2: Jetson kexec R3 migrate 1 failure in 454
+  iterations, so at least 2270 clean; Jetson kexec R2 and R3 wake at least 5;
+  Jetson UEFI R2 (38 of 200, mean 5.3) at least 27; Pi 5 R3 wake at least 5;
+  Pi 5 R2 and R3 migrate never failed (run, cannot claim).
+- Lab order to C2 through 08:45 UTC: 1 Jetson R2 trace boot on the base
+  (reduced from 3, disclosed), fix-head reproducers, production boot_test x10
+  on three paths, --assert-shares, bench smp base vs fix; full-suite boots
+  only if time remains. QEMU regression rows run between boots. /ci at the
+  final head by the orchestrator on a quiet host.
