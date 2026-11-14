@@ -2,7 +2,7 @@
 
 Critic: `critic-c2`, blind. Model that wrote this verdict: **Fable 5.2**
 (model ID `claude-fable-5-2`). Brief received 08:14 UTC 2026-11-14; verdict
-written 09:32 UTC.
+written 09:30 UTC.
 
 **Verdict: FAIL, on the "No regression" bar and one "Fixed" cell, not on the
 fix.** The code implements the design the first verdict passed, with all four
