@@ -487,7 +487,9 @@ Recorded with the user's answers to the backfilled ADRs (2026-11-14):
   splitting user and kernel space is an intended direction. ELF user
   programs are its first consumer, with shell verbs moving to user space
   (ADR 0012). Builds on the existing EL0 syscall path
-  (`kernel/src/syscall.c`, `kernel/src/elf_user.c`) (user, 2026-11-14).
+  (`kernel/src/syscall.c`; trap side in `kernel/arch/arm64/vectors.S`,
+  `kernel/arch/arm64/exceptions.c` and `kernel/arch/arm64/user_entry.S`)
+  (user, 2026-11-14).
 - **Retire kexec.** UEFI-direct becomes the only boot path on Jetson and
   x86-64, including both x86 kexec loader variants (ADR 0010, #1252).
 - **Replace third-party stacks.** Move SSH and crypto from GPL wolfSSH and
