@@ -921,3 +921,17 @@ fix runs against 0 of 9 base runs at the 120 s limit. C2 proposes #1234 and
 critic files, follows in the close-out. Temporary branch tips archived (patch
 and log) under `run5-tools/deleted-branch-tips/` in this commit, for deletion
 after the fix critic files.
+
+## Entry 37 (written 09:26 UTC, from date): decision experiment on the fix-ws-3 timeout
+
+C2, `make test WORK_STEALING=ON TEST_TIMEOUT=300` at c0ea0714, 13 runs one at
+a time, 09:04 to 09:25 UTC, load 2.8 to 5.0 at start (`gauntlet-5-hw-pi5`
+c4416b8d, `run5-hw/c2/qemu-regs-hang/full-ws-t300-c0ea0714-run01..13.txt`,
+each ending with its elapsed line): QEMU elapsed 80 to 87 s in every run; none
+reached 120 s, so no register sample was taken. 8 of 13 passed; 5 of 13 failed
+only on #1230 litmus; 0 timeouts, 0 hangs. Fix head total: 1 timeout in 39
+full WORK_STEALING=ON runs. fix-ws-3 was at least 120 s of QEMU time against
+80 to 87 s in every measured run, so it was an outlier of 40% or more: a
+transient slowdown or a stall that recovered or did not; not decided, since it
+was not sampled. Stays an open row, reported, not filed as a defect without a
+reproduction.
