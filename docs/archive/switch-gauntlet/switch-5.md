@@ -989,3 +989,86 @@ jetson-nano-2: online, powered on, released; SD Linux (BootCurrent 0001); ESP
 runs 3 and 4 remain). pi-5-1: online, powered on, released; original kernels
 renamed back by C2 (boots b42b2c1d), not re-read by the orchestrator. An orphan
 QEMU (PID 3381445, about 46 h, not from this run) is still running.
+
+## Final report (written 09:32 UTC, from date)
+
+### Dissent
+
+1. **C2 fix: the bars fail, the rows support the fix.** The bar requires every
+   regression row at the fix head; the critic failed C2 on missing rows (Jetson
+   boot_test kexec 3 of 10 and UEFI 0 of 10, --assert-shares, suite boots, UEFI
+   R3 wake) and on a Jetson context-switch mean of +10 to +13%. The rows that
+   exist all favour the fix: every baseline-failing cell run at the fix head is
+   at 0 beyond 5x (QEMU 1000 instrumented iterations; Jetson kexec R3 migrate
+   2400 of 2400; R2 200 of 200 on kexec and UEFI; Pi 5 and COOP 200 to 300 of
+   300), reproduced by the critic on Jetson kexec, and the no-deadlock test hangs
+   the reverted design 20 of 20 and completes at the fix head. The Jetson bench
+   delta is 2 runs per side at 32 ns resolution with identical p50 and p95. Files:
+   `critic-5-C2.md`; `run5-hw/c2/hw-fix/`; `run5-hw/c2-fix-critic/`. For the
+   user: open a PR from `c2/switch-window-r2` now with those rows run first, or
+   accept the bench delta. Most of the missing rows were lost to message-delivery
+   delays (Entries 21, 28, 29: about 70 min of the C2 lab window).
+2. **/ci green and WORK_STEALING=ON "no worse".** Plain `make test` failed
+   only on `test_litmus_patterns_pass` (#1230) at every head under host load;
+   at matched load base and fix fail it equally (A/B 1 of 6 each; critic 5 of 15
+   base and 2 of 15 fix). As written, C1's /ci passed only on retry and C2's has
+   no green plain run. For the user: whether #1230 under load excuses "/ci
+   green". Files: `run5-hw/c0/ci-*`, `run5-hw/c0/ab-ws-c0ea0714/`.
+3. **C1 boot argument.** The brief asked for a filter on the command line or a
+   boot argument the kexec and UEFI paths can both pass; both Jetson paths use a
+   build-time filter instead (no board change possible). C1's critic passed
+   everything else and left this row failing as written. PR #1243 states it. The
+   user accepts or rejects.
+4. **Orchestrator ruling on design round 2** (Entry 19): four ADR text
+   corrections were treated as slips, not argument gaps; the fix critic later
+   confirmed the code follows correction 1 branch by branch.
+
+### Issues
+
+| Issue | End state | Deciding numbers |
+|---|---|---|
+| #1234 | **open**, fix candidate on `c2/switch-window-r2` c0ea0714, no PR | critic FAIL on missing rows; all run cells 0 under 5x |
+| #1238 | **open**, not split; closes with #1234 | R2 base kexec 3 of 3 boots fail, UEFI 38 of 200; fix 200 of 200 each; trace partial (#1259) |
+| #1242 (new) | **open**, fixed on the same branch | base+prototype 26 of 128 stale; fix 0 in 400 |
+| #1207 | **open**, capture build ready, no first fault | 0 of 16 instrumented suite boots, 0 of 1200 filtered (P = 0.19 under run 4's rate; no evidence either way) |
+| #1228 | **open**, matches #1207 by signature (hypothesis) | 3 of 4 run-4 captures share the signature |
+
+### Pull requests and merge order
+
+- **#1243** (C1, draft, head 2196deb5): merge first. No closing keywords.
+- C2: none (critic FAIL). C3: none (no fix). If C2's rows are completed and a PR
+  opened, rebase onto main after #1243 and re-run /ci and the Jetson R2 cell.
+
+### Context switch, base 8ec0e330 vs fix c0ea0714 (`bench context`, 2 runs each, one boot)
+
+Pi 5: 106/106 ns to 110/112 ns (+4 to +6%, p50 111 both). Jetson kexec: 87/88
+ns to 96/98 ns (+10 to +13%, p50 96 and p95 128 both). `bench smp` prints no
+time. Files: `run5-hw/c2/hw-fix/bench-context-*.txt`.
+
+### Tracker delta
+
+Opened: #1240 (gpu_stub/gpu_nvidia half-block leak), #1241 (migrate rewrites
+assigned_cpu), #1242 (stale this_cpu in schedule()), #1244 (Jetson kexec DTB
+inside the PMM heap), #1259 (SLOT_TRACE dumps only CPUs 0 to 3), #1260 (one
+WORK_STEALING=ON timeout at the fix head). Closed: #1199 and #1224 (by merging
+#1239 in C0, on the user's approval). Comments: #1207, #1228, #1234, #1238,
+#1242. File-don't-fix: all six opened.
+
+### What the run could not do
+
+C2: Jetson boot_test x10 on both paths, --assert-shares 20 of 20, full-suite
+boots, UEFI R3 wake at the fix head, R2 base trace beyond 1 partial boot. C3: a
+first fault, an uninstrumented rate, and the critic's Jetson reproduction. The
+fix-ws-3 timeout is unexplained.
+
+### Single most useful next step
+
+Run the missing C2 rows at c0ea0714 (Jetson boot_test x10 on kexec and UEFI,
+--assert-shares 20 of 20, UEFI R3 wake x200, 5 suite boots per path, bench smp
+with 5+ raw runs per side) in one uninterrupted lab session, then open the #1234
+PR.
+
+### Lab state
+
+Both boards online, powered on and released; jetson-nano-2 on SD Linux with ESP
+`SLMOS.efi` 789cba62 and no BootNext; pi-5-1 on its original kernels.
