@@ -116,10 +116,11 @@ SECTIONS
     . = ALIGN(0x10000);
     __kernel_end = .;
 
-    /* Kernel virtual size (includes BSS) for PE SizeOfImage */
+    /* Kernel virtual size (includes BSS) for PE SizeOfImage and the
+     * ARM64 header's image_size (#1244) */
     _kernel_size = __kernel_end - _start;
 
-    /* Kernel file size (excludes BSS) for ARM64 image_size */
+    /* Kernel file size (excludes BSS): boot.S's relocation copy length */
     _kernel_file_size = __data_end - _start;
 
     /* PE .text section: code + rodata (everything before .data).

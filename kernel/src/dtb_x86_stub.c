@@ -27,6 +27,13 @@ int dtb_get_memreserves(dtb_memreserve_t *out, int max)
     return 0;
 }
 
+bool dtb_get_blob_range(uint64_t *addr, uint64_t *size)
+{
+    (void)addr;
+    (void)size;
+    return false;       /* no DTB on x86-64 */
+}
+
 const dtb_chosen_t *dtb_get_chosen(void)
 {
     static const dtb_chosen_t empty = { 0 };

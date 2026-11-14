@@ -932,6 +932,98 @@ static void test_ncmem_overflow_rejected(void)
 #endif /* PLATFORM_HAS_NC_REGION */
 
 /* ============================================================================
+ * DTB blob reservation (#1244)
+ *
+ * The PMM carves the DTB blob's own range out of every region and checks at
+ * init that no free block overlaps it. On Jetson kexec the loader puts the
+ * blob in the first free pages after the kernel image, where the heap
+ * starts; on Pi 5 the firmware puts it in low RAM, also inside the heap.
+ * ============================================================================ */
+
+static void test_dtb_reserve_range_page_aligns(void)
+{
+    dtb_memreserve_t r = { 0, 0 };
+    /* Pi 5 style: unaligned start, unaligned size. */
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(0x2eff2e00ULL, 0x13a5c, &r));
+    TEST_ASSERT_EQUAL_HEX64(0x2eff2000ULL, r.addr);
+    TEST_ASSERT_EQUAL_HEX64(0x2f007000ULL - 0x2eff2000ULL, r.size);
+    /* Already aligned: unchanged. */
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(0x80a9b000ULL, 0x2000, &r));
+    TEST_ASSERT_EQUAL_HEX64(0x80a9b000ULL, r.addr);
+    TEST_ASSERT_EQUAL_HEX64(0x2000ULL, r.size);
+    /* One byte takes one page. */
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(0x1fffULL, 1, &r));
+    TEST_ASSERT_EQUAL_HEX64(0x1000ULL, r.addr);
+    TEST_ASSERT_EQUAL_HEX64(0x1000ULL, r.size);
+    /* Rejected: empty, wrapping, no output. */
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(0x1000, 0, &r));
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(~0ULL - 4, 16, &r));
+    TEST_ASSERT_FALSE(pmm_dtb_reserve_range(0x1000, 16, NULL));
+}
+
+/* The kexec layout of #1244: blob starts below the (64 KB aligned) end of
+ * the image and runs about 950 KB into the heap. */
+static void test_carve_dtb_straddling_heap_start(void)
+{
+    dtb_memreserve_t r;
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(0x80a9a000ULL, 0xe8000, &r));
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x80aa0000UL, 0xa1000000UL, &r, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_HEX64(0x80b82000UL, s[0]);     /* first page after the blob */
+    TEST_ASSERT_EQUAL_HEX64(0xa1000000UL, e[0]);
+}
+
+/* The list pmm_init carves holds the live blob's range. */
+static void test_collect_reserves_includes_live_dtb(void)
+{
+    uint64_t addr, size;
+    if (!dtb_get_blob_range(&addr, &size)) {
+        TEST_IGNORE_MESSAGE("no DTB blob on this platform or boot path");
+    }
+    dtb_memreserve_t want;
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(addr, size, &want));
+
+    static dtb_memreserve_t list[DTB_MAX_MEMRESERVES + 2048 + 1];
+    int n = pmm_collect_reserves(list, (int)(sizeof(list) / sizeof(list[0])));
+    bool found = false;
+    for (int i = 0; i < n; i++) {
+        if (list[i].addr == want.addr && list[i].size == want.size) {
+            found = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(found, "DTB blob range not in the PMM reserve list");
+    TEST_ASSERT_TRUE(want.addr <= addr && want.addr + want.size >= addr + size);
+}
+
+/* No free block overlaps the live blob (fails on a kernel without the
+ * reservation wherever the loader put the blob inside the heap: Jetson
+ * kexec, Pi 5). */
+static void test_no_free_block_overlaps_live_dtb(void)
+{
+    uint64_t addr, size;
+    if (!dtb_get_blob_range(&addr, &size)) {
+        TEST_IGNORE_MESSAGE("no DTB blob on this platform or boot path");
+    }
+    dtb_memreserve_t r;
+    TEST_ASSERT_TRUE(pmm_dtb_reserve_range(addr, size, &r));
+    TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(
+                                    (uintptr_t)r.addr,
+                                    (uintptr_t)(r.addr + r.size)));
+}
+
+/* The overlap walk sees a free block and stops seeing it once allocated. */
+static void test_free_overlap_count_sees_a_free_page(void)
+{
+    void *p = pmm_alloc_page();
+    TEST_ASSERT_NOT_NULL(p);
+    uintptr_t a = (uintptr_t)p;
+    TEST_ASSERT_EQUAL_UINT64(0, pmm_free_overlap_count_locked(a, a + PAGE_SIZE));
+    pmm_free_page(p);
+    TEST_ASSERT_TRUE(pmm_free_overlap_count_locked(a, a + PAGE_SIZE) >= 1);
+}
+
+/* ============================================================================
  * pmm_carve_reserves — pure carve helper (kernel/include/pmm_internal.h)
  *
  * Used by pmm_add_region_split to subtract firmware-supplied
@@ -1221,6 +1313,13 @@ int test_suite_pmm(void)
     RUN_TEST(test_carve_truncates_at_max_out);
     RUN_TEST(test_carve_zero_size_reserve_skipped);
     RUN_TEST(test_carve_null_output_returns_zero);
+
+    /* DTB blob reservation (#1244) */
+    RUN_TEST(test_dtb_reserve_range_page_aligns);
+    RUN_TEST(test_carve_dtb_straddling_heap_start);
+    RUN_TEST(test_collect_reserves_includes_live_dtb);
+    RUN_TEST(test_no_free_block_overlaps_live_dtb);
+    RUN_TEST(test_free_overlap_count_sees_a_free_page);
 
 #if defined(PLATFORM_HAS_NC_REGION)
     /* NC allocator (Pi 5 / Jetson only) */

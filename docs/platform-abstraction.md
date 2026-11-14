@@ -223,6 +223,22 @@ unit-tested in `kernel/tests/test_pmm.c`). Without this carve, the
 buddy could hand out reserved pages and a concurrent
 VPU/firmwarekms write would silently corrupt them.
 
+**The DTB blob itself (#1244).** Neither encoding covers the blob that
+carries it, and the loader decides where the blob sits: kexec-tools puts
+it in the first free pages after the kernel image (where the heap
+starts), Pi 5 firmware puts it in low RAM (inside the heap), UEFI leaves
+it above the managed RAM, QEMU puts it below the kernel. The PMM
+therefore appends the blob's own page-aligned range, taken from its
+address and the header's `totalsize` (`dtb_get_blob_range()`), to the
+carve list (`pmm_collect_reserves`), on every boot path. After the
+regions are added, `pmm_init` walks the free lists and prints one line:
+`PMM: DTB at ... is clear of every free block`, or a `[WARN]` naming the
+first overlapping block. The arm64 image header's `image_size` covers the
+image through `__kernel_end` (`.bss` and the boot stack included), as the
+boot protocol asks, so a loader does not place anything inside the
+kernel's own footprint; it cannot keep the blob out of the heap, which
+starts at `__kernel_end`, so the reservation is the fix.
+
 **RNG entropy:** Pi firmware supplies up to ~80 bytes per boot via
 `/chosen/{rng-seed, kaslr-seed}`. `dtb_parse` copies them into a
 static `dtb_chosen_t`; `kernel_main` calls `lwip_rand_seed()`
