@@ -55,7 +55,7 @@ void switch_check_cpu(uint32_t held_cpu, uint32_t where);
 #else
 #define SWITCH_CHECK_IN(next, cpu)  do { } while (0)
 #define SWITCH_CHECK_OUT(prev)      do { } while (0)
-#define SWITCH_CHECK_CPU(cpu, w)    do { } while (0)
+#define SWITCH_CHECK_CPU(cpu, w)    do { (void)(cpu); (void)(w); } while (0)
 #endif
 
 #if defined(CONFIG_SWITCH_WINDOW_TEST)
