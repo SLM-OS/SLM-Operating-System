@@ -363,13 +363,34 @@ keep a slot from being freed or reused under a CPU that still uses it:
   slot still has that generation. If the owner destroyed the task first,
   the generation has moved on and the slot, possibly already a new task,
   is left alone.
-- **Known open window (#1234).** A task that `schedule()` puts back on its
-  run queue as READY is visible to thieves, `sched_migrate_task` and wake
-  placement once that CPU drops its `rq_lock`, before its `switch_to` has
-  saved the context. Spinning on `next->on_cpu` under `rq_lock` deadlocks
-  against a tick in the outgoing CPU's IRQ-open switch window (and against
-  x86's resched IPI), so it is not done; the fix needs an IRQ-masked switch
-  window.
+- **Switch-in only after the release (#1234, #1242, ADR 0008).** A task can
+  become runnable on another CPU while the CPU that last ran it has not yet
+  saved it: requeued READY and then migrated, stolen or rebalanced, or woken
+  onto another CPU after it published `TASK_BLOCKED` but before it switched
+  out. `schedule()` therefore never switches in a `next` (other than
+  `current` and its own idle task) whose `on_cpu` it reads as 1 with a
+  load-acquire under its `rq_lock`: it runs the highest-priority queued task
+  that is ready, or idle, and records the waiting task in
+  `switch_in_waiting[cpu]`; idle then polls that task's `on_cpu` lock-free
+  (at most 50 us per pass) and skips only its wait instruction while a task
+  is waiting (on every branch that unmasks before waiting, the check is done
+  with the tick masked so a WFI or `hlt` cannot sleep through it). The
+  store-release in `sched_finish_switch` publishes the context save; the
+  load-acquire orders it before `switch_to`'s loads. Nothing waits on an
+  `on_cpu` while holding a lock (the run-4 spin under `rq_lock` deadlocked
+  against a tick in the outgoing window). This rests on a pinned CPU id:
+  `schedule()` masks the tick's interrupt class before it reads `cpu_id()`
+  and keeps it masked until the unlock before the switch window (the zombie
+  path re-reads the id after its destroy), so a task cannot be preempted,
+  moved and continue with another CPU's run queue, idle task and preempt
+  flag. A task whose previous CPU never releases it (that CPU powered off
+  or wedged) is never switched in; the deferring CPU keeps running its
+  other tasks. Counter: `sched_diag_switch_defer[cpu]`. Tests:
+  `test_migrate_ready_during_switch_out`, `test_wake_during_switch_out`
+  (both also check the `SWITCH_CHECK=ON` instrument), and with
+  `SWITCH_WINDOW_TEST=ON` `test_switch_window_held` and
+  `test_switch_window_tick_forced`. Design and arguments:
+  `docs/adr/0008-switch-in-window.md`.
 - **`preempt_disabled` follows the task (#1229).** After `switch_to`
   returns, `schedule()` re-reads the CPU id before clearing
   `preempt_disabled`, `reschedule_pending` and the #1216 window: a stolen
