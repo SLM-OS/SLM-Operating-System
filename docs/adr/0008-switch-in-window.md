@@ -420,7 +420,7 @@ task's `on_cpu` in the kernel after the change are:
    `schedule()` (after `rq_unlock` and, with part 1, with the caller's
    interrupt state restored), `cmd_kill` (shell), `l_task_kill` (Lua binding; what
    its Lua callers hold was not traced), `coh_remote_abandon`, `component_spawn_builtin`'s error path,
-   `bench_workload_run`, and test code. None holds a spinlock there. Even a
+   `bench_workload_run`, and test code. None of the code checked holds a spinlock at the call. Even a
    caller that did would wait at most 2 s, so this wait cannot be part of an
    unending cycle.
 
