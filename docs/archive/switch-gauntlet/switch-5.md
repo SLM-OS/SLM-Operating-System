@@ -790,3 +790,23 @@ reached it), plus the orphan QEMU.
   each, alternating, same host conditions), plus reruns of steps 4 and 5 at the
   fix head, started at 07:49 UTC so the bar can be judged on matched load. If
   the A/B does not settle it, it goes to Dissent.
+
+## Entry 31 (written 08:11 UTC, from date): possible regression at c0ea0714, a hang in coherency
+
+- In the interleaved A/B (`gauntlet-5-hw-pi5` 952b04e6,
+  `run5-hw/c0/ab-ws-c0ea0714/`), run fix-ws-3 (c0ea0714, `make test
+  WORK_STEALING=ON`, default config) hit **TIMEOUT at 120 s**, start load
+  4.22, with no dump. The serial (`fix-ws-3.test-output.log`, copied from
+  the build directory before the next run cleaned it) ends at `[PASS]
+  test_iteration_counts`, so it hung in `test_regs_every_cpu_reports`:
+  `coherency_regs_collect` starts a pinned task on each other CPU and waits in
+  `coh_wait_done`, capped at `COH_CAP_SECONDS` = 120 s. One CPU's pinned task
+  therefore did not run or finish within the remaining time.
+- Count so far: 1 timeout in 24 fix-head WORK_STEALING=ON full runs (20 in /ci,
+  4 in the A/B), against 0 in the base's 3 (C0) plus 3 (A/B). No timeout was seen
+  in the C0, C1 or C2 /ci default runs. Hypothesis, untested: a READY pinned
+  task left unrun by the deferral (for example deferred while its CPU's idle
+  read a NULL waiting pointer and waited in WFI). Sent to C2 to classify and to
+  reproduce in QEMU (filter test_regs_every_cpu_reports,test_litmus_patterns_pass
+  with WORK_STEALING=ON) after its lab slot; to be given to the fix critic as an
+  open row.
