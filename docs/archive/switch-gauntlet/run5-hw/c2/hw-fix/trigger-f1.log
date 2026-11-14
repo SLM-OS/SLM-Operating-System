@@ -1,0 +1,5 @@
+07:24:55 start n=3 elfs=[/root/slmos-s5c2-r2trace-4812e821.elf /root/slmos-s5c2-jet-r2.elf /root/slmos-s5c2-jet-r3w.elf] skip_current_boot_id=faf2f73b-18ea-47c2-8fa4-4e4d04bee674
+07:26:30 trigger 1/3 elf=/root/slmos-s5c2-r2trace-4812e821.elf boot_id=25bf71b4-de99-4fa3-891c-8b8784e6356b state+uptime=[running 23.85 ] reply=[7c2dae1d0489af49 ]
+07:29:30 trigger 2/3 elf=/root/slmos-s5c2-jet-r2.elf boot_id=0a74d4fe-80c8-44c0-b384-87add458f603 state+uptime=[running 25.46 ] reply=[3d6656a8e5d99e45 ]
+07:32:40 trigger 3/3 elf=/root/slmos-s5c2-jet-r3w.elf boot_id=251eb5f6-144b-4b72-b68f-32cb11e894cb state+uptime=[running 24.92 ] reply=[2cc9892d76aa1444 ]
+07:32:40 end triggers=3

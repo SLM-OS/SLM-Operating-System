@@ -1,0 +1,3 @@
+08:17:04 start n=1 elfs=[/root/slmos-s5c2-jet-prod-base.elf] skip_current_boot_id=e7beea24-78e5-4a66-ae4f-de728a71e57d
+08:18:37 trigger 1/1 elf=/root/slmos-s5c2-jet-prod-base.elf boot_id=a756bb8a-7a9d-456f-97e6-8ddbd54bd1cc state+uptime=[running 25.11 ] reply=[9b975e6ab45880bc ]
+08:18:37 end triggers=1

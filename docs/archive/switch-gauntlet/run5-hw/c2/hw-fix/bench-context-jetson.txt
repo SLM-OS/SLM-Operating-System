@@ -1,0 +1,9 @@
+# C2 run5: bench context (shell `bench context`, 99 round-trips each), jetson-nano-2 kexec, production kernels,
+# serial_send output transcribed verbatim from the labctl tool results of this session (2026-11-14 ~08:20-08:28 UTC).
+# base 8ec0e330 (boot: kexec-prod-base-8ec0e330-boot1.txt):
+#   run 1: Average 87 ns; Min 64 Max 128 Mean 87; p50 96 p95 128 p99 128
+#   run 2: Average 88 ns; Min 64 Max 128 Mean 88; p50 96 p95 128 p99 128
+# fix c0ea0714 (boot: kexec-prod-fix-c0ea0714-boot3.txt, after the 3-boot boot_test):
+#   run 1: Average 96 ns; Min 64 Max 160 Mean 96; p50 96 p95 128 p99 160
+#   run 2: Average 98 ns; Min 64 Max 160 Mean 98; p50 96 p95 128 p99 160
+# Mean +10% to +13% (87.5 -> 97 ns); p50 and p95 unchanged; counter resolution 32 ns.
