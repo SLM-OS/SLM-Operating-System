@@ -8,7 +8,10 @@ decided in #1254. A Hailo-10 offload path is a possible far-future item
 ## Which part is fitted
 
 The device in use is a Hailo 8 (user, 2026-11-14). The code and the Hailo docs name a
-Hailo-8L instead, and the driver cannot tell the two apart:
+Hailo-8L instead. The driver reads and logs the IDENTIFY
+`device_architecture` field (`kernel/ai_accel/hailo/hailo_core.c:626-641`)
+but does not branch on it; the line it prints in a `hailo boot` log
+would settle Hailo-8 against Hailo-8L. Other evidence:
 
 - Both enumerate as `1e60:2864` (`kernel/ai_accel/hailo/hailo.h:56-57`,
   "Hailo-8 and Hailo-8L") and boot the same `hailo8_fw.bin`
@@ -21,8 +24,10 @@ Hailo-8L instead, and the driver cannot tell the two apart:
   `hailo_cs_translator.c:749`). The translator was matched to HailoRT
   wire captures taken on the same board (`docs/hailo-protocol-architecture.md:7`).
 - The HEF compile wrapper `scripts/hailo/compile_hef.sh` defaults to `--arch hailo8l`
-  (`docs/hailo-toolchain.md:116`), and the test HEFs are 8L builds
-  (`hef_parser.h:48-55`, `resnet_v1_18_8L.hef`).
+  (`docs/hailo-toolchain.md:116`). The test fixtures fetched by
+  `scripts/tools/fetch-hef-fixtures.sh:20` are Model Zoo v2.18.0
+  `hailo8` builds, that is Hailo-8; one HEF parsed during bring-up was an
+  8L build (`hef_parser.h:48-55`, `resnet_v1_18_8L.hef`).
 - `docs/hailo-inference-wedge.md:1,5` names the hardware "AI HAT+ 13 TOPS
   (Hailo-8L)"; `docs/hailo-lifecycle.md:1-3` and
   `docs/hailo-protocol-architecture.md:3` also say Hailo-8L.

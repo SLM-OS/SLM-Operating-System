@@ -4,7 +4,7 @@ Status: accepted (backfilled).
 
 ## Context
 
-SLM-OS needs TCP/IP for the network shell (ADR 0012), DHCP, ping, HTTP fetch of runtime blobs and the telemetry daemon, on QEMU (VirtIO-Net), x86-64, Pi 5 (Cadence MACB/GEM, #202) and Jetson (USB networking). Telnet carries the shell without authentication or encryption, so `docs/ssh.md` ("Why") calls for an SSH server with encrypted transport, password login and a pinned host key (#199). Third-party stacks were chosen to save time; replacing them with project-written code later is acceptable (user, 2026-11-14).
+SLM-OS needs TCP/IP for the network shell (ADR 0012), DHCP, ping, HTTP fetch of runtime blobs and the telemetry daemon, on QEMU (VirtIO-Net), x86-64, Pi 5 (Cadence MACB/GEM, `kernel/drivers/macb.c`; #202's title says "BCM GENET driver", which does not match the code) and Jetson (USB networking). Telnet carries the shell without authentication or encryption, so `docs/ssh.md` ("Why") calls for an SSH server with encrypted transport, password login and a pinned host key (#199). Third-party stacks were chosen to save time; replacing them with project-written code later is acceptable (user, 2026-11-14).
 
 ## Decision
 
@@ -22,9 +22,9 @@ Other stacks were not evaluated (user, 2026-11-14). The record names no other TC
 
 - lwIP's raw API is not reentrant. After #1047 made tasks preemptible, every task-context lwIP call must hold `lwip_core_lock()`, valid only because all lwIP callers are pinned to CPU 0 (1e8183b1, #1065 / PR #1073; `kernel/CLAUDE.md`). `net_pump` runs under that IRQ-masking lock, which led to the #1093 CPU 0 deadlock.
 - Open defect in the lwIP integration: one pbuf leaked per telnet session close (#1107).
-- License: the SLM-OS repository is MIT (`LICENSE`); wolfCrypt is GPL-2.0 and wolfSSH GPL-3.0 per their `VENDOR.md` files, lwIP is BSD-style (`kernel/lib/lwip/COPYING`). None of the three is listed in `LICENSES.md`. Decision on the GPL terms: move to an MIT/BSD-compatible SSH and crypto stack, tracked in #1255 (user, 2026-11-14).
+- License: the SLM-OS repository is MIT (`LICENSE`); wolfCrypt is GPL-2.0 and wolfSSH GPL-3.0 per their `VENDOR.md` files, lwIP is BSD-style (`kernel/lib/lwip/COPYING`). None of the three is listed in `LICENSES.md`. Decision on the GPL terms: move to an MIT/BSD-compatible SSH and crypto stack, tracked in #1258 (user, 2026-11-14).
 - The wolfCrypt `VENDOR.md` refresh procedure names `scripts/refresh-wolfcrypt.sh` as a TODO; no such script exists.
-- #199 and #893 remain open although `docs/ssh.md` reports SSH shipped and hardware-validated on jetson-nano-1 and pi-5-2.
+- `docs/ssh.md` reports SSH shipped and hardware-validated on jetson-nano-1 and pi-5-2; #199 and #893 were closed on 2026-11-14.
 - `make test NET_SSHD=ON` raises `TEST_TIMEOUT` to 400 s for real scrypt under TCG (`Makefile`).
 
 ## Evidence

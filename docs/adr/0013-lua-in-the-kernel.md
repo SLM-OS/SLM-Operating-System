@@ -4,7 +4,7 @@ Status: accepted (backfilled).
 
 ## Context
 
-The shell (ADR 0012) runs one command per line with no control flow, variables or files of commands. Demos, multi-step hardware checks and policy experiments need sequencing and state. Before Lua landed, `FUTURE.md` listed "Lua Scripting Runtime" (effort 2 to 3 weeks; "Runtime configurability, rapid prototyping, user-defined automation") next to "Full POSIX Shell" (2 to 3 months, needs fork/exec and user/kernel separation), as of the parent of 653a5087. Lua was chosen as the best available option and as simpler than writing a scripting language (user, 2026-11-14).
+The shell (ADR 0012) runs one command per line with no control flow, variables or files of commands. Before Lua landed, `FUTURE.md` listed "Lua Scripting Runtime" (effort 2 to 3 weeks; "Runtime configurability, rapid prototyping, user-defined automation") next to "Full POSIX Shell" (2 to 3 months, needs fork/exec and user/kernel separation), as of the parent of 653a5087. Lua was chosen as the best available option and as simpler than writing a scripting language (user, 2026-11-14).
 
 ## Decision
 

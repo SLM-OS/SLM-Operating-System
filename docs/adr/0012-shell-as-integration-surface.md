@@ -4,13 +4,13 @@ Status: accepted (backfilled).
 
 ## Context
 
-Bring-up of each driver and subsystem (GPU, Hailo, camera, USB, PCIe, BPMP, clocks, thermal, scheduler, eviction, SLM inference) needs a way to trigger it, read its state and demonstrate it on hardware. The debug shell arrived in e9a5c41d "Implement debug shell, improve test verification, add Jetson prep" (2025-12-22). `docs/shell.md` describes it as "purely a development/demo tool": a table-driven command loop running as a kernel task pinned to CPU 0.
+The debug shell arrived in e9a5c41d "Implement debug shell, improve test verification, add Jetson prep" (2025-12-22). `docs/shell.md` describes it as "purely a development/demo tool": a table-driven command loop running as a kernel task pinned to CPU 0.
 
 ## Decision
 
 Subsystem bring-up, diagnostic and demo verbs are added as shell commands in the kernel image, compiled into `builtin_commands[]` (`kernel/src/shell.c`) or registered at run time through `shell_register_command()` (`kernel/include/shell.h`). The same REPL is reachable from three transports: the UART console, telnet on port 2323 (db204cd7, PR #259, 2026-04-17; per-session state in `kernel/include/shell_session.h`, up to `MAX_TCP_SHELL_SESSIONS` = 16) and SSH on port 2222 when built with `NET_SSHD=ON` (904fa48d, #891 / PR #915, 2026-05-25; see ADR 0014). Hardware verification drives the shell over serial through labctl `serial_send` / `serial_capture`, waiting for the `slmos>` prompt (`.claude/skills/deploy-and-test/SKILL.md`; root `CLAUDE.md` post-change checklist step 4). Lua (ADR 0013) is reached from the shell (`lua`, `lua-admin`).
 
-Motivation: a kernel-resident shell kept the first design simple, because SLM-OS could not run ELF programs at the start. Moving verbs into user-space programs is an intended direction (user, 2026-11-14).
+Motivation: a kernel-resident shell kept the first design simple, because SLM-OS could not run ELF programs at the start. Moving verbs into user-space programs is an intended direction (user, 2026-11-14). Note: `FUTURE.md` at 653a5087^ (2025-12-27) already lists an ELF loader (`kernel/src/elf.c`, kernel-mode tasks) as complete, and the record does not date "the start".
 
 Rules that have accumulated on shell verbs:
 
@@ -26,11 +26,11 @@ Rules that have accumulated on shell verbs:
 
 ## Consequences
 
-- The shell concentrates change. `kernel/src/shell_sys.c` is 13205 lines on 8ec0e330, the largest first-party source file (next: `runtime/src/lib.rs`, 10752; only vendored FatFs `ffunicode.c` is larger). It began at 395 lines when f7d308ee "Split shell.c into 5 focused modules (CORE-L9)" (2026-04-03) split a 2718-line `shell.c`. 235 of 1325 non-merge commits that touch `.c`/`.h`/`.rs`/`.S` files touch it (17.7 percent).
+- The shell concentrates change. `kernel/src/shell_sys.c` is 13205 lines on 8ec0e330, the largest hand-written first-party source file (next: `runtime/src/lib.rs`, 10752). Generated files (`kernel/sched/ai/ai_weights_*.c`, about 33000 lines each) and vendored wolfCrypt (`asn.c`, `sp_int.c`, `aes.c`), wolfSSH (`internal.c`) and FatFs (`ffunicode.c`) sources are larger. It began at 395 lines when f7d308ee "Split shell.c into 5 focused modules (CORE-L9)" (2026-04-03) split a 2718-line `shell.c`. 235 of 1325 non-merge commits that touch `.c`/`.h`/`.rs`/`.S` files touch it (17.7 percent).
 - 78 entries in `builtin_commands[]`, many platform-gated hardware probes (`peek`, `poke`, `nvgpu`, `bpmp`, `xhcidiag`, `rcediag`, `timdiag`).
 - The shell task and `net_pump` both run on CPU 0, so shell verbs share lock and IRQ constraints with the network path (#1093, #1104 open).
 - Telnet is unauthenticated; `docs/shell.md` limits it to trusted networks. Telnet stops serving after about 50 sessions (#1107, open).
-- `docs/shell.md` still says SSH (#199) is deferred, while `docs/ssh.md` reports it shipped in May 2026; #199 remains open.
+- `docs/shell.md` still says SSH (#199) is deferred, while `docs/ssh.md` reports it shipped in May 2026; #199 was closed on 2026-11-14.
 
 ## Evidence
 

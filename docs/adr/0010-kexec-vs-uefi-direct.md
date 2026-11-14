@@ -37,7 +37,7 @@ For x86-64, the bare-metal GRUB/multiboot2 build (`kernel/kernel-x86_64.ld`, `0x
 ## Consequences
 
 - Every Jetson driver that touches Linux-initialised hardware needs a `boot_source_is_uefi()` branch; on Tegra234 an access to an unpowered block stops the board in EL3.
-- The two paths diverge in features: the SLM GPU program and cold-channel recovery exist only on UEFI-direct; a retest of the kexec SLM path is open as #1169.
+- The two paths diverge in features: the SLM GPU program and cold-channel recovery exist only on UEFI-direct; a retest of the kexec SLM path was tracked as #1169, closed as completed on 2026-11-14.
 - `docs/deploy/jetson-uefi-direct.md` "What works" still says the sched and eviction GPU consumers need kexec helper channels; #1092 moved them to the cold channel, so that row is stale.
 - `docs/deploy/jetson-kexec.md` calls kexec the "primary deploy path".
 

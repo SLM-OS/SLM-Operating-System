@@ -8,8 +8,7 @@ The AI scheduler (MLP and PPO, 108 -> 256 -> 256 -> 128 -> 42) and the AI
 eviction policies (XGBoost, MLP) are trained outside this repository: the
 scheduler in the sibling `slm-os-scheduler-ai` project ("Plan A",
 `scripts/import_ai_weights.sh`), eviction in `slm-os-page-sim`
-(`scripts/import_eviction_weights.sh`). The kernel needs the trained values
-at the point a policy is registered, on every platform including QEMU.
+(`scripts/import_eviction_weights.sh`).
 
 ## Decision
 
@@ -29,8 +28,9 @@ at the point a policy is registered, on every platform including QEMU.
     Python in the build.
 - Build flags select the set: `AI_SCHED` (Makefile; ON for RASPI5 and
   JETSON_ORIN_NANO, OFF elsewhere; CMake `ENABLE_AI_SCHEDULER`),
-  `AI_WEIGHTS=synthetic|real` (#884; per #848 both are options and
-  "switching is build-time, not runtime"), and `EVICTION_MODELS`.
+  `AI_WEIGHTS=synthetic|real` (#884; per #848 both are options;
+  "switching is build-time, not runtime", `CMakeLists.txt:2317-2319`),
+  and `EVICTION_MODELS`.
 - Since d5304f5c "Add runtime-loaded policy model workflows" (2026-04-25)
   the policy code stays compiled in while parameters can also be loaded at
   run time (`kernel/sched/ai/runtime_model.c`, eviction blobs, autoload).
@@ -43,8 +43,8 @@ at the point a policy is registered, on every platform including QEMU.
 
 ## Alternatives considered
 
-- Why compiled-in weights were chosen over runtime loading in April 2026:
-  it was an agent decision that the user disagreed with; by the time it
+- Why compiled-in weights were chosen over runtime loading: compiling
+  weights into the image (the MNIST model) was an agent decision that the user disagreed with; by the time it
   was questioned the work was too far along to change (user, 2026-11-14). The phase
   records (12f6e307, 251d6745, `docs/archive/todos/TODO - PHASE
   AI-Sched.md`) describe the mechanism but give no reason.
@@ -56,11 +56,12 @@ at the point a policy is registered, on every platform including QEMU.
 
 ## Position (user, 2026-11-14)
 
-The user disagrees with compiling model weights into the image, in both
-forms present in the tree: the policy weights generated as C and Rust
-`const` arrays, and the MNIST model embedded as an ONNX file through
-`include_bytes!` and `.incbin`. Runtime loading is the preferred
-direction, tracked in #1253. This ADR records how the build works now;
+The user disagrees with compiling model weights into the image (the
+MNIST model, embedded as an ONNX file through `include_bytes!` and
+`.incbin`). Runtime loading is the preferred direction, tracked in
+#1253. Whether this position extends to the scheduler and eviction
+policy weights compiled in as C and Rust `const` arrays is not
+recorded. This ADR records how the build works now;
 it is not an endorsement.
 
 ## Consequences

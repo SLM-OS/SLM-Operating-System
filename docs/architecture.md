@@ -353,8 +353,12 @@ compute GPU. Detail: `docs/gpu.md`, `docs/gpu-compute.md`,
 
 The fitted part is a Hailo 8 (user, 2026-11-14). The driver and the Hailo
 docs say Hailo-8L: both parts enumerate as `1e60:2864`
-(`kernel/ai_accel/hailo/hailo.h:57`), and the translator targets the 8L
-variant (`hailo_cs_actions.h:251`); ADR 0017 lists the evidence. The path
+(`kernel/ai_accel/hailo/hailo.h:57`), the translator targets the 8L
+variant (`hailo_cs_actions.h:251`), and the compile wrapper defaults to
+`hailo8l`, while the fetched test HEFs are Hailo-8 builds. The driver
+logs the IDENTIFY `device_architecture` field without branching on it
+(`hailo_core.c:626-641`), so a `hailo boot` log would settle the part.
+ADR 0017 lists the evidence. The path
 is deprecated (ADR 0017); whether to delete or freeze it is #1254.
 
 `kernel/ai_accel/hailo/`: PCIe bring-up on the Pi 5 (`hailo_pi5.c`,
@@ -478,12 +482,16 @@ host unit tests, run twice by `make runtime-test` (`--features slm`, then
 
 Recorded with the user's answers to the backfilled ADRs (2026-11-14):
 
-- **ELF user programs and user-space verbs.** Shell verbs are to move into
-  user-space programs now that SLM-OS runs EL0 ELF tasks (ADR 0012).
+- **User/kernel separation.** Per-process address spaces under the EL2
+  kernel. The first kernel was deliberately small and limited, and
+  splitting user and kernel space is an intended direction. ELF user
+  programs are its first consumer, with shell verbs moving to user space
+  (ADR 0012). Builds on the existing EL0 syscall path
+  (`kernel/src/syscall.c`, `kernel/src/elf_user.c`) (user, 2026-11-14).
 - **Retire kexec.** UEFI-direct becomes the only boot path on Jetson and
   x86-64, including both x86 kexec loader variants (ADR 0010, #1252).
 - **Replace third-party stacks.** Move SSH and crypto from GPL wolfSSH and
-  wolfCrypt to an MIT/BSD-compatible stack (ADR 0014, #1255);
+  wolfCrypt to an MIT/BSD-compatible stack (ADR 0014, #1258);
   project-written replacements are acceptable later.
 - **Runtime weight loading.** Load model weights at run time instead of
   compiling them into the image (ADR 0016, #1253).
