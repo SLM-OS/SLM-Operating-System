@@ -249,6 +249,26 @@ aarch64-none-elf-gdb build/kernel/slmos.elf \
 | `x/10i $pc` | Disassemble 10 instructions at PC |
 | `x/10x $sp` | Examine 10 words at stack pointer |
 
+### CI build matrix (report-only)
+
+`.github/workflows/build-matrix.yml` builds, on GitHub Actions, every
+platform's default kernel, test kernel and the wide configuration that
+`make check-braces` configures, the x86-64 kexec and bzImage variants, and
+every build option flipped from its platform default one at a time. It only
+builds: nothing runs, and neither a failed cell nor a warning fails the
+workflow. The job summary lists each cell's result, its warning count and the
+warnings its platform's default cell does not have.
+
+The cells, the per-platform defaults and the skipped cells come from
+`scripts/ci/build_matrix.py`; `python3 scripts/ci/build_matrix.py markdown`
+prints them. A new option, or a changed default or platform gate, goes in that
+file too. One cell can be reproduced locally with its environment variables:
+
+```bash
+CELL_ID=pi5-SETWAY_INVAL=OFF CELL_PLATFORM=RASPI5 CELL_TARGET=kernel \
+CELL_MAKE_ARGS="SETWAY_INVAL=OFF" bash scripts/ci/build_cell.sh
+```
+
 ---
 
 ## Rust Runtime
