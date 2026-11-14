@@ -741,3 +741,21 @@ C3's 05:30 overrun both follow from this. C1 confirmed its 80
 - Not done this run (the critic's fixes 4 to 6): the instrument's extra self-tests,
   the CMakeLists docs pointer, and the critic's Jetson boots. C3 ends **open**,
   with no PR; `c3/pmm-halt` 321a91be kept for the user to decide.
+
+## Entry 28 (written 07:01 UTC, from date): C2 final-head QEMU proof; lab unused since 06:10
+
+- C2 at final head c0ea0714 (builder claim; `gauntlet-5-hw-pi5` 74fe1a0e,
+  `run5-hw/c2/qemu-fix/all-fix-c0ea0714-run01..20.txt`): 20 of 20 runs,
+  1000 of 1000 iterations pass (R1, tick-forced, R3 migrate, R3 wake, R2, 200
+  each), 400 of 400 switch_check lines with bad_gen, bad_dual and stale_cpu all
+  0, load 4.9 at start. Idle branch-by-branch check from the disassembly of 6
+  production builds (QEMU, Pi 5 default, Pi 5 SECONDARY_PREEMPT=OFF, Jetson
+  default, Jetson JETSON_HW_TICK=OFF, x86) at eb6088a2,
+  `fix-regress/idle-branch-check-c0ea0714.txt`. PI5_FIQ_TIMER not built.
+- The lab has been C2's since 06:10 UTC, but C2 has not used it: none of the
+  orchestrator's messages since 06:10 reached it, because it has not ended a
+  turn (Entry 21). Lab time lost so far: about 50 min of the 06:10 to 08:45
+  window. Superseding instruction sent at 07:02.
+- C2's QEMU runs overlapped the orchestrator's /ci at c0ea0714 (started 06:29)
+  because the hold message had not reached it either; /ci load is recorded per
+  step.
