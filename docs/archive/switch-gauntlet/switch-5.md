@@ -323,3 +323,20 @@ lands; fix-head lab 06:15 onward.
 images at 5069e658 (c1/harness 6e39f425 + C3) for reproduction and capture.
 Those are diagnosis rows; C3's proof rows will run at its rebased PR head.
 pi-5-1 unheld.
+
+## Entry 10 (written 04:12 UTC): ADR 0008 pushed; C2 design critic started
+
+- C2 pushed ADR 0008 (proposed) at `c2/switch-window` d73604f7 and stopped
+  before writing fix code. QEMU SLOT_TRACE first-fault dumps (builder claim;
+  `gauntlet-5-hw-pi5` f49e67d1, `run5-hw/c2/qemu-trace/`): 6 of 6 are the
+  #1234 window (3 requeue then migrate, 3 wake before switch-out). #1238 on
+  Jetson is not traced: it is labelled a hypothesis that it is the wake path;
+  Jetson R2 trace planned 05:30 to 06:15 UTC.
+- C2 filed **#1241** (sched_migrate_task rewrites assigned_cpu of a task
+  queued on another CPU; P2, Backlog).
+- Temporary branches pushed: `c2/trace` 1b7410f1, `c2/reverted-wait`
+  2f03c445 (1ead6ef6's spin on this base, for the no-deadlock bar).
+- C2 design critic `critic-c2-design` spawned 04:11 UTC on Fable, blind:
+  reads only the ADR's sequence, evidence and design sections, derives the
+  lock graph and ordering from code, then reads the ADR's arguments and
+  compares. Ahead of the original 5:00 to 6:00 mark despite the lab shift.
