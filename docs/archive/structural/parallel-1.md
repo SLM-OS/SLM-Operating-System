@@ -706,3 +706,8 @@ and file the "Stale text found" items.
   - the CMakeLists `SECONDARY_PREEMPT`/`COOP_PREEMPT` "NC-memory" text.
 - The `LICENSES.md` item went as a comment on #1258.
 - No build, QEMU or labctl was used.
+
+## Entry 18: #45 stays open
+
+2026-11-14. The user decided to keep #45 (coverage measurement) open. No
+change was made to the issue.
