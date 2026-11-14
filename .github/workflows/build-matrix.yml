@@ -9,17 +9,23 @@
 # one checkout would mix cargo features.
 name: build-matrix
 
+# When it runs: on pull requests to main, nightly, and by hand. Not on every
+# push. 11:17 UTC is 03:17 PST / 04:17 PDT, off the hour so it avoids the
+# top-of-hour scheduling crowd.
 on:
-  push:
-    branches: [structural/ci-matrix]
   pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 11 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer run for the same workflow and ref (for example a new push to a PR)
+# cancels the older one.
 concurrency:
-  group: build-matrix-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

@@ -251,13 +251,22 @@ aarch64-none-elf-gdb build/kernel/slmos.elf \
 
 ### CI build matrix (report-only)
 
-`.github/workflows/build-matrix.yml` builds, on GitHub Actions, every
+`.github/workflows/build-matrix.yml` runs on GitHub Actions for every pull
+request to `main`, nightly at 11:17 UTC (03:17 PST, 04:17 PDT), and on demand
+(`workflow_dispatch`). It does not run on every push, and a newer run for the
+same pull request cancels the older one. Every job uses the standard
+`ubuntu-24.04` runner. It builds every
 platform's default kernel, test kernel and the wide configuration that
 `make check-braces` configures, the x86-64 kexec and bzImage variants, and
 every build option flipped from its platform default one at a time. It only
 builds: nothing runs, and neither a failed cell nor a warning fails the
 workflow. The job summary lists each cell's result, its warning count and the
 warnings its platform's default cell does not have.
+
+Hardware runs stay outside CI. The lab has two shared boards and one labctl
+server that serializes calls, so a hardware stage would occupy half the lab
+while it runs and collide with gauntlets and lab sessions. Hardware
+verification is done in deliberate lab sessions instead (#46).
 
 The cells, the per-platform defaults and the skipped cells come from
 `scripts/ci/build_matrix.py`; `python3 scripts/ci/build_matrix.py markdown`
