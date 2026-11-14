@@ -1,0 +1,160 @@
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index cf18fafa..5d5038b8 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -549,6 +549,11 @@ const struct sched_policy_ops *sched_policy_get(int index)
+  * Idle task - runs when no other tasks are ready.
+  * Each CPU has its own idle task.
+  */
++/* CRITIC PROTOTYPE of ADR 0008 (critic-5-C2-design): per-CPU deferral flag. */
++static struct task *volatile crit_switch_in_waiting[MAX_CPUS] __attribute__((aligned(64)));
++volatile uint32_t crit_alt_count, crit_wait_count, crit_stale2;
++volatile uint32_t crit_defer_count, crit_defer_foreign_idle;
++
+ static void idle_task_func(void *arg)
+ {
+     (void)arg;
+@@ -634,8 +639,24 @@ static void idle_task_func(void *arg)
+         }
+ #endif
+ #else
+-        __asm__ volatile("msr daifclr, #2" ::: "memory");
+-        __asm__ volatile("wfi");
++        {   /* CRITIC PROTOTYPE of ADR 0008 round 2: masked check-then-WFI */
++            __asm__ volatile("msr daifset, #2" ::: "memory");
++            __asm__ volatile("isb" ::: "memory");
++            struct task *crit_w = crit_switch_in_waiting[cpu_id()];
++            if (!crit_w) {
++                __asm__ volatile("wfi");
++            }
++            __asm__ volatile("msr daifclr, #2" ::: "memory");
++            __asm__ volatile("isb" ::: "memory");
++            if (crit_w) {
++                uint64_t crit_t0 = timer_get_count();
++                uint64_t crit_lim = timer_get_frequency() / 20000;   /* 50 us */
++                while (__atomic_load_n(&crit_w->on_cpu, __ATOMIC_ACQUIRE) &&
++                       timer_get_count() - crit_t0 < crit_lim) {
++                    __asm__ volatile("yield" ::: "memory");
++                }
++            }
++        }
+ #endif
+ 
+         /* Yield to check if other tasks are ready */
+@@ -2347,6 +2368,7 @@ uint64_t sched_rebalance_get_migrations(void)
+  */
+ void schedule(void)
+ {
++    irq_flags_t crit_outer = irq_save();    /* CRITIC PROTOTYPE part 1 */
+     uint32_t this_cpu = cpu_id();
+     struct cpu_runqueue *rq = cpu_rq(this_cpu);
+     sched_diag_schedule[this_cpu]++;
+@@ -2376,7 +2398,26 @@ void schedule(void)
+     }
+ #endif
+ 
+-    irq_flags_t flags = rq_lock_irqsave(this_cpu);
++    irq_flags_t flags;
++    (void)rq_lock_irqsave(this_cpu);
++    flags = crit_outer;                     /* every unlock below restores the caller's state */
++
++    /* CRITIC PROBE (critic-5-C2-design): is this_cpu still the CPU we run on? */
++    {
++        uint32_t crit_real = cpu_id();
++        if (crit_real != this_cpu) {
++            static volatile uint32_t crit_stale;
++            uint32_t crit_n = __atomic_add_fetch(&crit_stale, 1, __ATOMIC_RELAXED);
++            if (crit_n <= 300) {
++                struct task *crit_t = task_current();
++                uart_printf_unlocked("\n[crit-c2d] STALE this_cpu=%u cpu_id=%u task id=%u '%s' state=%d rq_head=%s idle_of_stale=%s n=%u\n",
++                    this_cpu, crit_real, crit_t ? crit_t->id : 0, crit_t ? crit_t->name : "?",
++                    crit_t ? (int)crit_t->state : -1,
++                    rq->head ? rq->head->name : "(empty)",
++                    rq->idle_task ? rq->idle_task->name : "?", crit_n);
++            }
++        }
++    }
+ 
+     /*
+      * Clean up zombie task from previous schedule cycle.
+@@ -2390,7 +2431,7 @@ void schedule(void)
+      * there has passed, making the transition observable only after
+      * reclamation has started.
+      */
+-    if (rq->zombie) {
++    while (rq->zombie) {
+         struct task *zombie = rq->zombie;
+         uint32_t zombie_gen = rq->zombie_gen;
+         rq->zombie = NULL;
+@@ -2408,7 +2449,17 @@ void schedule(void)
+          * the cleared value into context.sp (SP 0 on the next switch). */
+         (void)task_destroy_gen(zombie, zombie_gen);
+ 
+-        flags = rq_lock_irqsave(this_cpu);
++        crit_outer = irq_save();
++        this_cpu = cpu_id();                /* re-read: we may have moved */
++        rq = cpu_rq(this_cpu);
++        (void)rq_lock_irqsave(this_cpu);
++        flags = crit_outer;
++    }
++    if (cpu_id() != this_cpu) {
++        uint32_t n2 = __atomic_add_fetch(&crit_stale2, 1, __ATOMIC_RELAXED);
++        if (n2 <= 50) {
++            uart_printf_unlocked("\n[crit-c2d] STALE2 this_cpu=%u cpu_id=%u n=%u\n", this_cpu, cpu_id(), n2);
++        }
+     }
+ 
+     struct task *current = task_current();
+@@ -2434,14 +2485,30 @@ void schedule(void)
+         next = pick_next_task(this_cpu);
+     }
+ 
+-    /* Remove next from front of queue */
+-    if (next != rq->idle_task && rq->head == next) {
+-        rq->head = next->next;
+-        if (!rq->head) {
+-            rq->tail = NULL;
++    /* CRITIC PROTOTYPE of ADR 0008 round 2, part 2. */
++    crit_switch_in_waiting[this_cpu] = NULL;
++    if (next != rq->idle_task && next != current &&
++        __atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
++        struct task *alt = NULL;
++        for (struct task *t = next->next; t; t = t->next) {
++            if (t == current || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
++                alt = t;
++                break;
++            }
+         }
+-        next->next = NULL;
+-        rq->ready_count--;
++        if (alt) {
++            __atomic_add_fetch(&crit_alt_count, 1, __ATOMIC_RELAXED);
++            next = alt;
++        } else {
++            __atomic_add_fetch(&crit_wait_count, 1, __ATOMIC_RELAXED);
++            crit_switch_in_waiting[this_cpu] = next;
++            next = rq->idle_task;
++        }
++    }
++
++    /* Remove next from the queue wherever it is */
++    if (next != rq->idle_task) {
++        (void)remove_from_cpu_queue_locked(next, this_cpu);
+     }
+ 
+     /*
+@@ -2655,6 +2722,14 @@ void scheduler_start(uint32_t this_cpu)
+         panic("scheduler_start: no tasks to run");
+     }
+ 
++    if (first != rq->idle_task &&
++        __atomic_load_n(&first->on_cpu, __ATOMIC_ACQUIRE)) {
++        crit_switch_in_waiting[this_cpu] = first;
++        first = rq->idle_task;
++    } else {
++        crit_switch_in_waiting[this_cpu] = NULL;
++    }
++
+     /* Remove from queue */
+     if (first != rq->idle_task && rq->head == first) {
+         rq->head = first->next;
