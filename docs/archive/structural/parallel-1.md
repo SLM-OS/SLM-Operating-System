@@ -487,3 +487,51 @@ filed by Entry 8 (#1252-#1255).
   DUPLICATE).
 - ADR 0014, `architecture.md` and the #1245 body still link #1255. They
   move to #1258 together with the fixes from the ADR critic.
+
+## Entry 12: ADR critic (Fable), corrections, user additions
+
+- Fable critic, blind and read-only. It checked ADRs 0009 to 0017 at
+  91e3e210 against `origin/main` 8ec0e330, gh, and the user's answers.
+  Full table: `scratchpad/critic-ADR.md` (session scratch).
+- Result: 222 claims; 208 CONFIRMED, 10 REFUTED, 4 UNCONFIRMED. All 64
+  cited SHAs exist on main and their subjects match.
+
+| ADR | Claims | Confirmed | Refuted | Unconfirmed |
+|---|---|---|---|---|
+| 0009 | 27 | 26 | 1 | 0 |
+| 0010 | 33 | 32 | 1 | 0 |
+| 0011 | 25 | 25 | 0 | 0 |
+| 0012 | 27 | 24 | 2 | 1 |
+| 0013 | 21 | 20 | 0 | 1 |
+| 0014 | 28 | 27 | 1 | 0 |
+| 0015 | 29 | 26 | 3 | 0 |
+| 0016 | 24 | 22 | 0 | 2 |
+| 0017 | 28 | 26 | 2 | 0 |
+
+- REFUTED, now corrected:
+  - Dates: the 0009 PR #239 date.
+  - Issue states: #1169, #199 and #893, which Entry 9's closes closed on
+    2026-11-14, were described as open.
+  - 0012: "only ffunicode.c is larger than shell_sys.c"; seven files are
+    larger.
+  - 0015: d7675293 and e57fb21a reached main through PR #617, not
+    #497/#492. DoD item 7 was confused with PROVENANCE.md, which has the
+    `qwen25_real_golden.rec` exception.
+  - 0017: the driver logs IDENTIFY `device_architecture`
+    (`hailo_core.c:626-641`), so a `hailo boot` log would settle 8 versus
+    8L. The fetched test HEFs are Model Zoo `hailo8` builds
+    (`fetch-hef-fixtures.sh:20`).
+- UNCONFIRMED: three uncited rationale sentences (0012, 0013, 0016) were
+  removed. The 0016 scope was narrowed to the user's answer as given: the
+  MNIST model, with no date. Whether the user's position extends to the
+  policy arrays is "not recorded". #1253's body was narrowed the same way:
+  two scope items are now marked "(to confirm)".
+- #1255 was replaced by #1258 in ADR 0014, `architecture.md` and the PR
+  body.
+- User additions (user, 2026-11-14):
+  - (A) ADR 0009, "Alternatives considered": the E2H=0 versus VHE
+    rationale.
+  - (B) `architecture.md`, "Planned direction": user/kernel separation.
+    It is merged with the earlier ELF and user-space-verbs item.
+- #1245 head: 34356998 (Track B report). A second Fable critic checks
+  only additions A and B.
