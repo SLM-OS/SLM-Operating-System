@@ -605,3 +605,37 @@ filed by Entry 8 (#1252-#1255).
   kernel-mode tasks. EL0 user programs first ran in May 2026, about
   four and a half months after the shell.
 - #1245 head: 450e305e.
+
+## Entry 15: wording corrected, Hailo frozen, #1253 confirmed
+
+User decisions, 2026-11-14. #1245 head: 50987fb3 (Track B report).
+
+- **Wording.** The two additions were reworded to match the code, keeping
+  the user's intent:
+  - ADR 0009 now says per-process TTBR0_EL2 with ASIDs already exists
+    (`vmm.c:699-726,772-828`, `sched.c:2581-2583`).
+  - A high-VA kernel in TTBR1_EL2 is what VHE makes available. Today the
+    kernel runs at low VA with TTBR0=TTBR1 (`vmm.h:50-51`).
+  - PAN is off today (`boot.S:854-870`, #1079), and PAN at EL2 is the #29
+    hardening.
+  - `architecture.md` now says what is planned is the split itself: a
+    high-VA kernel mapping, PAN with checked user copies, and the verbs
+    moved to user programs. Per-task address spaces and the EL0 syscall
+    path already exist.
+- **Hailo frozen.** #1254 was closed as completed with the decision.
+  - ADR 0017's status is "deprecated; frozen", with a Freeze section. The
+    code keeps building, the CI cells stay, and no new work starts.
+  - Eight docs got a frozen banner: `hailo-dma-content-diff-plan`,
+    `hailo-inference-wedge`, `hailo-lifecycle`,
+    `hailo-protocol-architecture`, `hailo-re-corpus-format`,
+    `hailo-re-replay-step`, `hailo-toolchain` and `pi5-ai-hat-plan`.
+  - The three Hailo-specific open issues (#337, #995, #996) were already
+    in Icebox and each got a freeze note. A body search for "hailo" finds
+    other open issues, but they mention Hailo only in passing and were
+    left as they are.
+- **#1253 confirmed.** Both items are confirmed: runtime-loaded policy
+  parameters become the default, and the generated weight sources are
+  removed once nothing depends on them. The "(to confirm)" markers are
+  gone from #1253, and ADR 0016 now covers the scheduler and eviction
+  arrays.
+- No critic checked this round; none was asked for.
