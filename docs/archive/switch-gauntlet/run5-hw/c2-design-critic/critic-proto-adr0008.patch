@@ -1,0 +1,91 @@
+diff --git a/kernel/sched/sched.c b/kernel/sched/sched.c
+index cf18fafa..ba72a2d7 100644
+--- a/kernel/sched/sched.c
++++ b/kernel/sched/sched.c
+@@ -549,6 +549,10 @@ const struct sched_policy_ops *sched_policy_get(int index)
+  * Idle task - runs when no other tasks are ready.
+  * Each CPU has its own idle task.
+  */
++/* CRITIC PROTOTYPE of ADR 0008 (critic-5-C2-design): per-CPU deferral flag. */
++static volatile uint32_t crit_switch_in_deferred[MAX_CPUS] __attribute__((aligned(64)));
++volatile uint32_t crit_defer_count, crit_defer_foreign_idle;
++
+ static void idle_task_func(void *arg)
+ {
+     (void)arg;
+@@ -635,7 +639,9 @@ static void idle_task_func(void *arg)
+ #endif
+ #else
+         __asm__ volatile("msr daifclr, #2" ::: "memory");
+-        __asm__ volatile("wfi");
++        if (!crit_switch_in_deferred[cpu_id()]) {   /* CRITIC PROTOTYPE of ADR 0008 */
++            __asm__ volatile("wfi");
++        }
+ #endif
+ 
+         /* Yield to check if other tasks are ready */
+@@ -2378,6 +2384,23 @@ void schedule(void)
+ 
+     irq_flags_t flags = rq_lock_irqsave(this_cpu);
+ 
++    /* CRITIC PROBE (critic-5-C2-design): is this_cpu still the CPU we run on? */
++    {
++        uint32_t crit_real = cpu_id();
++        if (crit_real != this_cpu) {
++            static volatile uint32_t crit_stale;
++            uint32_t crit_n = __atomic_add_fetch(&crit_stale, 1, __ATOMIC_RELAXED);
++            if (crit_n <= 5 || (crit_n % 1000) == 0) {
++                struct task *crit_t = task_current();
++                uart_printf_unlocked("\n[crit-c2d] STALE this_cpu=%u cpu_id=%u task id=%u '%s' state=%d rq_head=%s idle_of_stale=%s n=%u\n",
++                    this_cpu, crit_real, crit_t ? crit_t->id : 0, crit_t ? crit_t->name : "?",
++                    crit_t ? (int)crit_t->state : -1,
++                    rq->head ? rq->head->name : "(empty)",
++                    rq->idle_task ? rq->idle_task->name : "?", crit_n);
++            }
++        }
++    }
++
+     /*
+      * Clean up zombie task from previous schedule cycle.
+      * This is safe because we've already switched away from it.
+@@ -2434,6 +2457,25 @@ void schedule(void)
+         next = pick_next_task(this_cpu);
+     }
+ 
++    /* CRITIC PROTOTYPE of ADR 0008: defer a next whose previous CPU has
++     * not released it; exactly the ADR's code. */
++    if (next != current && next != rq->idle_task &&
++        __atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
++        crit_switch_in_deferred[this_cpu] = 1;
++        __atomic_add_fetch(&crit_defer_count, 1, __ATOMIC_RELAXED);
++        if (this_cpu != cpu_id()) {
++            uint32_t n = __atomic_add_fetch(&crit_defer_foreign_idle, 1, __ATOMIC_RELAXED);
++            if (n <= 5) {
++                uart_printf_unlocked("\n[crit-c2d] DEFER-TO-FOREIGN-IDLE on cpu %u: stale this_cpu=%u, deferred '%s', switching to '%s' (current '%s') n=%u\n",
++                    cpu_id(), this_cpu, next->name, rq->idle_task->name,
++                    current ? current->name : "?", n);
++            }
++        }
++        next = rq->idle_task;
++    } else {
++        crit_switch_in_deferred[this_cpu] = 0;
++    }
++
+     /* Remove next from front of queue */
+     if (next != rq->idle_task && rq->head == next) {
+         rq->head = next->next;
+@@ -2655,6 +2697,14 @@ void scheduler_start(uint32_t this_cpu)
+         panic("scheduler_start: no tasks to run");
+     }
+ 
++    if (first != rq->idle_task &&
++        __atomic_load_n(&first->on_cpu, __ATOMIC_ACQUIRE)) {
++        crit_switch_in_deferred[this_cpu] = 1;
++        first = rq->idle_task;
++    } else {
++        crit_switch_in_deferred[this_cpu] = 0;
++    }
++
+     /* Remove from queue */
+     if (first != rq->idle_task && rq->head == first) {
+         rq->head = first->next;
