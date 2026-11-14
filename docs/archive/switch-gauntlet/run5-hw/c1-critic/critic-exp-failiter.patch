@@ -1,0 +1,13 @@
+diff --git a/kernel/tests/test_fault_dump.c b/kernel/tests/test_fault_dump.c
+index 676a2f6c..4707bff0 100644
+--- a/kernel/tests/test_fault_dump.c
++++ b/kernel/tests/test_fault_dump.c
+@@ -147,6 +147,8 @@ static void test_fault_dump_lock_frozen_counter_cannot_hang(void)
+ /* Outside a dump nothing is prefixed and the UART lock is used normally. */
+ static void test_fault_dump_idle_state(void)
+ {
++    { extern uint32_t g_test_filter_pass; /* CRITIC EXPERIMENT: fail pass 2 */
++      TEST_ASSERT_TRUE(g_test_filter_pass != 2); }
+     TEST_ASSERT_EQUAL_UINT32(0, fault_dump_cpus);
+     TEST_ASSERT_FALSE(fault_dump_this_cpu());
+ }

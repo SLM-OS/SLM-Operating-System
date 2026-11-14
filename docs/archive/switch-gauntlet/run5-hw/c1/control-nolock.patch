@@ -1,0 +1,13 @@
+diff --git a/kernel/src/fault_dump.c b/kernel/src/fault_dump.c
+index d834abfc..65e0849b 100644
+--- a/kernel/src/fault_dump.c
++++ b/kernel/src/fault_dump.c
+@@ -131,7 +131,7 @@ fault_dump_entry_t fault_dump_begin(void)
+     fault_dump_entry_t entry;
+     uint32_t holder = 0;
+ 
+-    if (!hw || freq == 0) {
++    if (1 || !hw || freq == 0) {   /* CONTROL: lock disabled */
+         entry = FAULT_DUMP_NOLOCK;
+     } else {
+         holder = __atomic_load_n(&dump_lock.owner, __ATOMIC_RELAXED);

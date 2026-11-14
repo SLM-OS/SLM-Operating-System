@@ -1,0 +1,41 @@
+diff --git a/kernel/arch/arm64/exceptions.c b/kernel/arch/arm64/exceptions.c
+index bb53e45b..0b5e943d 100644
+--- a/kernel/arch/arm64/exceptions.c
++++ b/kernel/arch/arm64/exceptions.c
+@@ -156,6 +156,21 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
+     uart_printf("  Task Name: %s\n", task_name);
+     uart_printf("  CPU:       %lu\n", current_cpu);
+ 
++#if defined(FAULT_DUMP_SELFTEST) && defined(CRITIC_EXP)
++    /* CRITIC EXPERIMENT: the lock holder (cpu1) stops (1) or faults (2) mid-dump. */
++    {
++        static volatile int critic_once;
++        if (current_cpu == 1 && far == 0x00007F0000000000ULL && !critic_once) {
++            critic_once = 1;
++            if (CRITIC_EXP == 1) {
++                for (;;) { __asm__ volatile("wfe"); }
++            } else {
++                volatile uint64_t *bad2 = (volatile uint64_t *)(uintptr_t)0x00007E0000000000ULL;
++                (void)*bad2;
++            }
++        }
++    }
++#endif
+     /* Instruction that caused the fault */
+     uart_puts("\nFault Location:\n");
+     uart_printf("  ELR (PC):  0x%lx\n", tf->elr);
+diff --git a/kernel/tests/test_fault_dump.c b/kernel/tests/test_fault_dump.c
+index 676a2f6c..ff6054a5 100644
+--- a/kernel/tests/test_fault_dump.c
++++ b/kernel/tests/test_fault_dump.c
+@@ -173,6 +173,10 @@ static void fd_fault_task(void *arg)
+         volatile uint64_t *bad = (volatile uint64_t *)(uintptr_t)0x00007F0000000000ULL;
+         (void)*bad;
+     } else {
++#if defined(CRITIC_EXP)
++        /* CRITIC EXPERIMENT: fault ~5 ms after the other CPU so it holds the lock. */
++        { uint64_t f = timer_get_frequency(), t = timer_get_count(); while (timer_get_count() - t < f / 200) { } }
++#endif
+         /* BRK: panic() dump. */
+         __asm__ volatile("brk #0x7");
+     }

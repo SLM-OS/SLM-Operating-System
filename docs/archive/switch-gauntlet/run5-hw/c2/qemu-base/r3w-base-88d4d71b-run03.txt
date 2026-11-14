@@ -1,0 +1,367 @@
+# C2 run5 QEMU run: R3 wake baseline run 03 (base 8ec0e330 + c1/harness 6e39f425 + C2 tests 88d4d71b, default config)
+# head 88d4d71b (uncommitted tracked changes: 0); elf sha256 f79bee3e57ca179882548a67bf406809f517510b75af183feaf19e4dae250c88
+# banner: build 20261114004005 (88d4d71b)
+# make test TEST_FILTER=test_wake_during_switch_out TEST_REPEAT=50 QEMU_CPU='cortex-a76 -accel tcg,thread=multi'  (MemoryMax/CPUQuota/timeout guard from the Makefile)
+# start 2026-11-14T00:39:58Z load 1.86 3.54 3.96; end 2026-11-14T00:42:07Z load 1.23 2.70 3.60; make rc=2
+# RESULT PASS+TIMEOUT iter_pass=1 iter_fail=0 first_fail=[] last_iter=[[ITER 1/50]  [PASS] test_wake_during_switch_out]
+# ---- full serial log (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114004005 (88d4d71b)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022c3b8
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4207aee0
+  End:     0x42080000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42080000 - 0x80000000
+  Total pages:     253824 (1015296 KB)
+  Free pages:      253824 (1015296 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8320 pages (kernel)
+
+  Free list distribution:
+    Order  7 (  512 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_wake_during_switch_out repeat=50 source=build index=2895
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[INFO] Task 'swo_m' (id=15) exiting
+[INFO] Task 'swo_w' (id=11) exiting
+  swo wake: cpus=4 workers=8 moves=11467 move_fail=0 runs=36821 bad_gen=0 two_cpus=0
+  [ITER 1/50]  [PASS] test_wake_during_switch_out (345338 us)
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot migrate task 'swo_w' - affinity constraint
+[WARN] Cannot m[cpu3] 
+[cpu3] 
+[cpu3] *********************************
+[cpu3] ***       PAGE FAULT          ***
+[cpu3] *********************************
+[cpu3] 
+[cpu3] Type:    Instruction Abort (FETCH)
+[cpu3] Address: 0x2
+[cpu3] Reason:  Translation fault, level 2
+[cpu3] 
+[cpu3] Task Context:
+[cpu3]   Task ID:   2
+[cpu3] 
+[cpu3] *********************************
+[cpu3] ***       PAGE FAULT          ***
+[cpu3] *********************************
+[cpu3] 
+[cpu3] Type:    Data Abort (READ)
+[cpu3] Address: 0x4617a5c
+[cpu3] Reason:  Translation fault, level 2
+[cpu3] 
+[cpu3] Task Context:
+[cpu3]   Task ID:   23
+[cpu3]   Task Name: swo_w
+[cpu3]   CPU:       3
+[cpu3] 
+[cpu3] Fault Location:
+[cpu3]   ELR (PC):  0x400435f0
+[cpu3] 
+[cpu3] Raw Exception State:
+[cpu3]   ESR_EL1:   0x96000006
+[cpu3]   EC:        0x25 (Data Abort (same EL))
+[cpu3]   FSC:       0x6
+[cpu3]   WnR:       0 (read)
+[cpu3]   SPSR_EL1:  0x200003c5
+[cpu3] 
+[cpu3] General Purpose Registers:
+[cpu3]   x0 =0x000000000000000e  x1 =0x0000000000000033  x2 =0x0000000009000018  x3 =0x0000000000000003
+[cpu3]   x4 =0x0000000000000004  x5 =0x0000000000000002  x6 =0x0000000000000002  x7 =0x0000000000000002
+[cpu3]   x8 =0x0000000000000002  x9 =0x0000000000000000  x10=0x0000000000000002  x11=0x0000000040799000
+[cpu3]   x12=0x0000000000000040  x13=0x00000000407583b0  x14=0x0000000042800000  x15=0x0000000042080000
+[cpu3]   x16=0x0000000000000001  x17=0x0000000000001000  x18=0x0000000000000001  x19=0x0000000004617a5c
+[cpu3]   x20=0x000000004237fa09  x21=0x0000000000000000  x22=0x0000000000000000  x23=0x0000000000000030
+[cpu3]   x24=0x000000004237fb48  x25=0x0000000000000001  x26=0x0000000000000006  x27=0x0000000000000000
+[cpu3]   x28=0x0000000000000017  x29=0x000000004237f9c0  x30=0x00000000400435fc
+[cpu3] 
+[cpu3] Stack Canaries:
+[cpu3] [canary] Task stack inventory:
+[cpu3]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu3]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu3]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu3]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu3]   id=5 name='idle_2' stack=[0x421c0000..0x42200000)
+[cpu3]   id=6 name='idle_3' stack=[0x42200000..0x42240000)
+[cpu3]   id=19 name='swo_w' stack=[0x42240000..0x42280000)
+[cpu3]   id=20 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu3]   id=21 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu3]   id=22 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu3]   id=23 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu3]   id=24 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu3]   id=25 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu3]   id=26 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu3]   id=27 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu3]   id=28 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu3]   id=29 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu3]   id=30 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu3]   (all task stacks intact)
+[cpu3] 
+[cpu3] System halted.
+[cpu1] 
+[cpu1] 
+[cpu1] *********************************
+[cpu1] ***       PAGE FAULT          ***
+[cpu1] *********************************
+[cpu1] 
+[cpu1] Type:    Instruction Abort (FETCH)
+[cpu1] Address: 0x0
+[cpu1] Reason:  Translation fault, level 2
+[cpu1] 
+[cpu1] Task Context:
+[cpu1]   Task ID:   23
+[cpu1]   Task Name: swo_w
+[cpu1]   CPU:       1
+[cpu1] 
+[cpu1] Fault Location:
+[cpu1]   ELR (PC):  0x0
+[cpu1] 
+[cpu1] Raw Exception State:
+[cpu1]   ESR_EL1:   0x86000006
+[cpu1]   EC:        0x21 (Instruction Abort (same EL))
+[cpu1]   FSC:       0x6
+[cpu1]   SPSR_EL1:  0x200003c5
+[cpu1] 
+[cpu1] General Purpose Registers:
+[cpu1]   x0 =0x0000000000000000  x1 =0x00000000046d1df3  x2 =0x0000000000000000  x3 =0x00000000046d15c2
+[cpu1]   x4 =0x0000000000209059  x5 =0x0000000000001700  x6 =0x000000004237ff00  x7 =0x000000004237ff00
+[cpu1]   x8 =0x0000000100000000  x9 =0x0000000000000004  x10=0x0000000000000001  x11=0x0000000040799000
+[cpu1]   x12=0x0000000000000040  x13=0x00000000407583b0  x14=0x0000000042380000  x15=0x0000000042080000
+[cpu1]   x16=0x0000000000000000  x17=0x0000000000001000  x18=0x0000000000000001  x19=0x0000000000000000
+[cpu1]   x20=0x0000000000000000  x21=0x0000000000000000  x22=0x0000000000000000  x23=0x0000000000000000
+[cpu1]   x24=0x0000000000000000  x25=0x0000000000000000  x26=0x0000000000000000  x27=0x0000000000000000
+[cpu1]   x28=0x0000000000000000  x29=0x0000000000000000  x30=0x0000000000000000
+[cpu1] 
+[cpu1] Stack Canaries:
+[cpu1] [canary] Task stack inventory:
+[cpu1]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu1]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu1]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu1]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu1]   id=5 name='idle_2' stack=[0x421c0000..0x42200000)
+[cpu1]   id=6 name='idle_3' stack=[0x42200000..0x42240000)
+[cpu1]   id=19 name='swo_w' stack=[0x42240000..0x42280000)
+[cpu1]   id=20 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu1]   id=21 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu1]   id=22 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu1]   id=23 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu1]   id=24 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu1]   id=25 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu1]   id=26 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu1]   id=27 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu1]   id=28 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu1]   id=29 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu1]   id=30 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu1]   (all task stacks intact)
+[cpu1] 
+[cpu1] System halted.
+qemu-system-aarch64: terminating on signal 15 from pid 1989885 (/usr/bin/timeout)

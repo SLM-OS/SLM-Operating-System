@@ -1,0 +1,413 @@
+# C2 run5 QEMU run: R3 wake baseline run 10 (base 8ec0e330 + c1/harness 6e39f425 + C2 tests 88d4d71b, default config)
+# head 88d4d71b (uncommitted tracked changes: 0); elf sha256 4c5c8b3e69454891b6fded1f6918655751dfcf0c011e2b730ed31394aa6681dd
+# banner: build 20261114005514 (88d4d71b)
+# make test TEST_FILTER=test_wake_during_switch_out TEST_REPEAT=50 QEMU_CPU='cortex-a76 -accel tcg,thread=multi'  (MemoryMax/CPUQuota/timeout guard from the Makefile)
+# start 2026-11-14T00:55:07Z load 5.57 4.16 3.81; end 2026-11-14T00:57:17Z load 8.28 5.12 4.17; make rc=2
+# RESULT FAULT+TIMEOUT iter_pass=0 iter_fail=0 first_fail=[] last_iter=[]
+# ---- full serial log (build/test-output.log) ----
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114005514 (88d4d71b)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022c3b8
+  .data:   0x40710000 - 0x40734000
+  .bss:    0x40740000 - 0x4207aee0
+  End:     0x42080000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x4079c000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x4079a003 (covers VA 0x0)
+  L1[1]: 0x4079b003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x42080000 - 0x80000000
+  Total pages:     253824 (1015296 KB)
+  Free pages:      253824 (1015296 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8320 pages (kernel)
+
+  Free list distribution:
+    Order  7 (  512 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 32 B, op_count=0
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent â€” boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded â€” compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_wake_during_switch_out repeat=50 source=build index=2895
+[WARN] Cannot migrate running task 'ôÿÿý{¾©ý'
+[INFO] Task 'swo_w' (id=7) exiting
+[cpu1] 
+[cpu1] 
+[cpu1] *********************************
+[cpu1] ***       PAGE FAULT          ***
+[cpu1] *********************************
+[cpu1] 
+[cpu1] Type:    Instruction Abort (FETCH)
+[cpu1] Address: 0xffffffc8
+[cpu1] Reason:  Translation fault, level 1
+[cpu1] 
+[cpu1] Task Context:
+[cpu1]   Task ID:   0
+[cpu1]   Task Name: 
+[cpu1]   CPU:       1
+[cpu1] 
+[cpu1] Fault Location:
+[cpu1]   ELR (PC):  0xffffffc8
+[cpu1] 
+[cpu1] Raw Exception State:
+[cpu1]   ESR_EL1:   0x86000005
+[cpu1]   EC:        0x21 (Instruction Abort (same EL))
+[cpu1]   FSC:       0x5
+[cpu1]   SPSR_EL1:  0x60000005
+[cpu1] 
+[cpu1] General Purpose Registers:
+[cpu1]   x0 =0x00000000ffffffff  x1 =0x00000000409e1ea0  x2 =0x0000000009000018  x3 =0x00000000ffffffd0
+[cpu1]   x4 =0x000000004227ff00  x5 =0x000000004227ff00  x6 =0x0000000000000000  x7 =0x000000004227ff00
+[cpu1]   x8 =0x0000000100000000  x9 =0x0000000000000004  x10=0x0000000000000001  x11=0x00000000000003c0
+[cpu1]   x12=0x0000000040799000  x13=0x000000000000000a  x14=0x0000000000000040  x15=0x0000000042080000
+[cpu1]   x16=0x0000000000000001  x17=0x0000000000000080  x18=0x0000000000001000  x19=0x00000000407bf4f0
+[cpu1]   x20=0x000000004227ffc0  x21=0x0000000000000001  x22=0x000000004162d768  x23=0x000000004162d7e8
+[cpu1]   x24=0x0000000000000002  x25=0x0000000000000000  x26=0x000000004162d84c  x27=0x0000000000000001
+[cpu1]   x28=0x000000004162d510  x29=0x000000004227ff80  x30=0x00000000ffffffc8
+[cpu1] 
+[cpu1] Stack Canaries:
+[cpu1] [canary] Task stack inventory:
+[cpu1]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu1]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu1]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu1]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu1]   id=5 name='idle_3' stack=[0x421c0000..0x42200000)
+[cpu1]   id=6 name='idle_2' stack=[0x42200000..0x42240000)
+[cpu1]   id=8 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu1]   id=9 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu1]   id=10 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu1]   id=11 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu1]   id=12 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu1]   id=13 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu1]   id=14 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu1]   id=15 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu1]   id=16 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu1]   id=17 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu1]   id=18 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu1]   (all task stacks intact)
+[cpu1] 
+[cpu1] System halted.
+[cpu0] 
+[cpu0] 
+[cpu0] *********************************
+[cpu0] ***       PAGE FAULT          ***
+[cpu0] *********************************
+[cpu0] 
+[cpu0] Type:    Data Abort (READ)
+[cpu0] Address: 0x10e17c7580
+[cpu0] Reason:  Translation fault, level 1
+[cpu0] 
+[cpu0] Task Context:
+[cpu0]   Task ID:   14
+[cpu0]   Task Name: swo_w
+[cpu0]   CPU:       0
+[cpu0] 
+[cpu0] Fault Location:
+[cpu0]   ELR (PC):  0x400195bc
+[cpu0] 
+[cpu0] Raw Exception State:
+[cpu0]   ESR_EL1:   0x96000005
+[cpu0]   EC:        0x25 (Data Abort (same EL))
+[cpu0]   FSC:       0x5
+[cpu0]   WnR:       0 (read)
+[cpu0]   SPSR_EL1:  0x80000085
+[cpu0] 
+[cpu0] General Purpose Registers:
+[cpu0]   x0 =0x000000004283ff10  x1 =0x0000000000000000  x2 =0x000000004283ff10  x3 =0x00000010a0ffc400
+[cpu0]   x4 =0x00000000407cb180  x5 =0x000000000000001a  x6 =0x0000000040740128  x7 =0x00000000407400f8
+[cpu0]   x8 =0x0000000040799000  x9 =0x0000000000000000  x10=0x0000000000000000  x11=0x0000000040799000
+[cpu0]   x12=0x0000000000000040  x13=0x00000000407583b0  x14=0x0000000042240000  x15=0x0000000042080000
+[cpu0]   x16=0x0000000000000000  x17=0x0000000000001000  x18=0x0000000000000001  x19=0x00000000407cb180
+[cpu0]   x20=0x0000000000000051  x21=0x000000004283ff10  x22=0x000000004001ab20  x23=0x00000000407cb180
+[cpu0]   x24=0x0000000000000000  x25=0x00000000407c0bb0  x26=0x0000000000000000  x27=0x0000000000000001
+[cpu0]   x28=0x000000004162d510  x29=0x000000004283ff10  x30=0x000000004001aa88
+[cpu0] 
+[cpu0] Stack Canaries:
+[cpu0] [canary] Task stack inventory:
+[cpu0]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu0]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu0]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu0]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu0]   id=5 name='idle_3' stack=[0x421c0000..0x42200000)
+[cpu0]   id=6 name='idle_2' stack=[0x42200000..0x42240000)
+[cpu0]   id=8 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu0]   id=9 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu0]   id=10 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu0]   id=11 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu0]   id=12 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu0]   id=13 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu0]   id=14 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu0]   id=15 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu0]   id=16 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu0]   id=17 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu0]   id=18 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu0]   (all task stacks intact)
+[cpu0] 
+[cpu0] System halted.
+[cpu3] 
+[cpu3] ü?B
+[cpu3] 
+[cpu3] *********************************
+[cpu3] ***      KERNEL PANIC         ***
+[cpu3] *********************************
+[cpu3] 
+[cpu3] EL1 Synchronous Exception
+[cpu3] 
+[cpu3]   EC:    0x0 (Unknown)
+[cpu3]   ESR:   0x2000000
+[cpu3]   FAR:   0x146081620
+[cpu3]   ELR:   0x409e1ea8
+[cpu3]   SPSR:  0x200003c5
+[cpu3] 
+[cpu3] Task Context:
+[cpu3]   Task ID:   13
+[cpu3]   Task Name: swo_w
+[cpu3]   CPU:       3
+[cpu3] 
+[cpu3] Register Dump:
+[cpu3]   SP:       0x423ff750
+[cpu3]   ELR_EL1:  0x409e1ea8  (return address)
+[cpu3]   SPSR_EL1: 0x200003c5
+[cpu3]   ESR_EL1:  0x2000000
+[cpu3]   EC:       0x0 (Unknown reason)
+[cpu3]   FAR_EL1:  0x146081620  (fault address)
+[cpu3] 
+[cpu3] Stack canary check:
+[cpu3] [canary] Task stack inventory:
+[cpu3]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu3]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu3]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu3]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu3]   id=5 name='idle_3' stack=[0x421c0000..0x42200000)
+[cpu3]   id=6 name='idle_2' stack=[0x42200000..0x42240000)
+[cpu3]   id=8 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu3]   id=9 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu3]   id=10 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu3]   id=11 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu3]   id=12 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu3]   id=13 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu3]   id=14 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu3]   id=15 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu3]   id=16 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu3]   id=17 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu3]   id=18 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu3]   All task canaries intact.
+[cpu3] 
+[cpu3] Stack dump around SP=0x423ff750:
+[cpu3]   0x423ff710: 0x0000000002000000  "........"
+[cpu3]   0x423ff718: 0x00000000423ff710  "..?B...."
+[cpu3]   0x423ff720: 0x00000000423ff710  "..?B...."
+[cpu3]   0x423ff728: 0x00000000423ff7d0  "..?B...."
+[cpu3]   0x423ff730: 0x00000000406799c0  "..g@...."
+[cpu3]   0x423ff738: 0x0000000000000008  "........"
+[cpu3]   0x423ff740: 0x0000000000000000  "........"
+[cpu3]   0x423ff748: 0x0000000000000008  "........"
+[cpu3]   0x423ff750: 0x00000000423ff840  "@.?B...."  <- SP
+[cpu3]   0x423ff758: 0x0000000040012084  ". .@...."
+[cpu3]   0x423ff760: 0x0000000000000000  "........"
+[cpu3]   0x423ff768: 0x00000000423ff870  "p.?B...."
+[cpu3]   0x423ff770: 0x0000000002000000  "........"
+[cpu3]   0x423ff778: 0x0000000146081620  " ..F...."
+[cpu3]   0x423ff780: 0x000000004a817c80  ".|.J...."
+[cpu3]   0x423ff788: 0x0000000146081620  " ..F...."
+[cpu3]   0x423ff790: 0x0000000000000001  "........"
+[cpu3]   0x423ff798: 0x0000000000000005  "........"
+[cpu3]   0x423ff7a0: 0x0000000000000001  "........"
+[cpu3]   0x423ff7a8: 0x0000000000000000  "........"
+[cpu3]   0x423ff7b0: 0x00000000423ff840  "@.?B...."
+[cpu3]   0x423ff7b8: 0x00000000423ff840  "@.?B...."
+[cpu3]   0x423ff7c0: 0x00000000423ff800  "..?B...."
+[cpu3]   0x423ff7c8: 0x00000000ffffffc8  "........"
+[cpu3]   0x423ff7d0: 0x2e2e2e2e2e2e2e2e  "........"
+[cpu3]   0x423ff7d8: 0x0000000000000000  "........"
+[cpu3]   0x423ff7e0: 0x00000000423ff840  "@.?B...."
+[cpu3]   0x423ff7e8: 0x00000000423ff840  "@.?B...."
+[cpu3]   0x423ff7f0: 0x00000000423ff800  "..?B...."
+[cpu3]   0x423ff7f8: 0x00000000ffffffc8  "........"
+[cpu3]   0x423ff800: 0x0000000002000000  "........"
+[cpu3]   0x423ff808: 0x0000000000000000  "........"
+[cpu3] 
+[cpu3] System halted.
+[cpu2] 
+[cpu2] 
+[cpu2] *********************************
+[cpu2] ***       PAGE FAULT          ***
+[cpu2] *********************************
+[cpu2] 
+[cpu2] Type:    Instruction Abort (FETCH)
+[cpu2] Address: 0x0
+[cpu2] Reason:  Translation fault, level 2
+[cpu2] 
+[cpu2] Task Context:
+[cpu2]   Task ID:   13
+[cpu2]   Task Name: swo_w
+[cpu2]   CPU:       2
+[cpu2] 
+[cpu2] Fault Location:
+[cpu2]   ELR (PC):  0x0
+[cpu2] 
+[cpu2] Raw Exception State:
+[cpu2]   ESR_EL1:   0x86000006
+[cpu2]   EC:        0x21 (Instruction Abort (same EL))
+[cpu2]   FSC:       0x6
+[cpu2]   SPSR_EL1:  0x200003c5
+[cpu2] 
+[cpu2] General Purpose Registers:
+[cpu2]   x0 =0x0000000000000000  x1 =0x00000000052e2c1d  x2 =0x0000000000000000  x3 =0x00000000052e2ad1
+[cpu2]   x4 =0x00000000001a53ea  x5 =0x000000000000053c  x6 =0x0000000000000004  x7 =0x0000000000000003
+[cpu2]   x8 =0x0000000000000002  x9 =0x0000000000000004  x10=0x0000000000000002  x11=0x00000000000003c0
+[cpu2]   x12=0x0000000040799000  x13=0x000000000000000e  x14=0x0000000000000040  x15=0x0000000042080000
+[cpu2]   x16=0x0000000000000001  x17=0x0000000000000180  x18=0x0000000000001000  x19=0x0000000000000000
+[cpu2]   x20=0x0000000000000000  x21=0x0000000000000000  x22=0x0000000000000000  x23=0x0000000000000000
+[cpu2]   x24=0x0000000000000000  x25=0x0000000000000000  x26=0x0000000000000000  x27=0x00000000409e1eb0
+[cpu2]   x28=0x000000004162d510  x29=0x0000000000000000  x30=0x0000000000000000
+[cpu2] 
+[cpu2] Stack Canaries:
+[cpu2] [canary] Task stack inventory:
+[cpu2]   id=1 name='idle' stack=[0x420c0000..0x42100000)
+[cpu2]   id=2 name='idle_1' stack=[0x42100000..0x42140000)
+[cpu2]   id=3 name='main' stack=[0x42140000..0x42180000)
+[cpu2]   id=4 name='shell' stack=[0x42180000..0x421c0000)
+[cpu2]   id=5 name='idle_3' stack=[0x421c0000..0x42200000)
+[cpu2]   id=6 name='idle_2' stack=[0x42200000..0x42240000)
+[cpu2]   id=8 name='swo_w' stack=[0x42280000..0x422c0000)
+[cpu2]   id=9 name='swo_w' stack=[0x422c0000..0x42300000)
+[cpu2]   id=10 name='swo_w' stack=[0x42300000..0x42340000)
+[cpu2]   id=11 name='swo_w' stack=[0x42340000..0x42380000)
+[cpu2]   id=12 name='swo_w' stack=[0x42380000..0x423c0000)
+[cpu2]   id=13 name='swo_w' stack=[0x423c0000..0x42400000)
+[cpu2]   id=14 name='swo_w' stack=[0x42800000..0x42840000)
+[cpu2]   id=15 name='swo_m' stack=[0x42840000..0x42880000)
+[cpu2]   id=16 name='swo_m' stack=[0x42880000..0x428c0000)
+[cpu2]   id=17 name='swo_m' stack=[0x428c0000..0x42900000)
+[cpu2]   id=18 name='swo_m' stack=[0x42900000..0x42940000)
+[cpu2]   (all task stacks intact)
+[cpu2] 
+[cpu2] System halted.
+qemu-system-aarch64: terminating on signal 15 from pid 2021449 (/usr/bin/timeout)

@@ -1,0 +1,261 @@
+# C1 evidence. Kernel head 165cb992558855c858ef075ee7d57da0efe2eeeb. make test TEST_FILTER=test_preempt_flag_follows_migrated_task TEST_REPEAT=50, load avg 9.71 at start. Banner: SLM-OS v0.4.0 build 20261114014655 (165cb992). Full log, unedited below.
+S
+
+========================================
+  SLM-OS v0.4.0 build 20261114014655 (165cb992)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL1 on QEMU virt
+[WARN] DTB parsing failed (code=-5), using platform defaults
+
+Memory Layout:
+  .text:   0x40000000 - 0x4022ba58
+  .data:   0x40760000 - 0x40784000
+  .bss:    0x40790000 - 0x420caee0
+  End:     0x420d0000
+  RAM:     0x40000000 - 0x80000000 (1024 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0x407ec000
+  Blocks mapped: 1403
+  Bytes mapped: 2806 MB
+  L1[0]: 0x407ea003 (covers VA 0x0)
+  L1[1]: 0x407eb003 (covers VA 0x40000000)
+  L1[256]: 0x60004000000401 (covers VA 0xffffff8000000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x40000000) = 0x40000000
+  [PASS] virt_to_phys(0xffffff8040000000) = 0x40000000
+  [PASS] is_mapped(0x40000000) = true
+  [PASS] is_mapped(0xc0000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x420d0000 - 0x80000000
+  Total pages:     253744 (1014976 KB)
+  Free pages:      253744 (1014976 KB)
+  Used pages:      0 (0 KB)
+  Reserved:        8400 pages (kernel)
+
+  Free list distribution:
+    Order  4 (   64 KB): 1 blocks
+    Order  5 (  128 KB): 1 blocks
+    Order  8 ( 1024 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 1 blocks
+    Order 11 ( 8192 KB): 1 blocks
+    Order 12 (16384 KB): 1 blocks
+    Order 14 (65536 KB): 1 blocks
+    Order 15 (131072 KB): 1 blocks
+    Order 16 (262144 KB): 1 blocks
+    Order 17 (524288 KB): 1 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 30, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=0B kaslr_seed=0B
+[WARN] RNG firmware seed absent — boot entropy is jitter-only
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0x42400000 (4 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (256 MB weights, 128 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie: 00:01.0 BAR1 assigned 0x10010000 (size 0x1000)
+[INFO] pcie: 00:01.0 BAR4 assigned 0x10014000 (size 0x4000)
+[INFO] pcie: 00:02.0 BAR0 assigned 0x10018000 (size 0x100)
+[INFO] pcie: qemu-gpex backend, 3 device(s) enumerated
+
+[INFO] Scheduler initialized
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_preempt_flag_follows_migrated_task repeat=50 source=build index=2892
+  pdm: migrations=1139 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 1/50]  [PASS] test_preempt_flag_follows_migrated_task (41768 us)
+  pdm: migrations=2146 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 2/50]  [PASS] test_preempt_flag_follows_migrated_task (37573 us)
+  pdm: migrations=2420 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 3/50]  [PASS] test_preempt_flag_follows_migrated_task (38742 us)
+  pdm: migrations=11112 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 4/50]  [PASS] test_preempt_flag_follows_migrated_task (38066 us)
+  pdm: migrations=5231 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 5/50]  [PASS] test_preempt_flag_follows_migrated_task (31084 us)
+  pdm: migrations=12694 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 6/50]  [PASS] test_preempt_flag_follows_migrated_task (33943 us)
+  pdm: migrations=1640 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 7/50]  [PASS] test_preempt_flag_follows_migrated_task (38725 us)
+  pdm: migrations=14954 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 8/50]  [PASS] test_preempt_flag_follows_migrated_task (46310 us)
+  pdm: migrations=4391 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 9/50]  [PASS] test_preempt_flag_follows_migrated_task (36292 us)
+  pdm: migrations=13639 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 10/50]  [PASS] test_preempt_flag_follows_migrated_task (40263 us)
+  pdm: migrations=13130 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 11/50]  [PASS] test_preempt_flag_follows_migrated_task (39916 us)
+  pdm: migrations=4960 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 12/50]  [PASS] test_preempt_flag_follows_migrated_task (39951 us)
+  pdm: migrations=2959 moved=7 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 13/50]  [PASS] test_preempt_flag_follows_migrated_task (35613 us)
+  pdm: migrations=1920 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 14/50]  [PASS] test_preempt_flag_follows_migrated_task (31794 us)
+  pdm: migrations=5309 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 15/50]  [PASS] test_preempt_flag_follows_migrated_task (31827 us)
+  pdm: migrations=2633 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 16/50]  [PASS] test_preempt_flag_follows_migrated_task (32921 us)
+  pdm: migrations=5767 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 17/50]  [PASS] test_preempt_flag_follows_migrated_task (31389 us)
+  pdm: migrations=1697 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 18/50]  [PASS] test_preempt_flag_follows_migrated_task (32700 us)
+  pdm: migrations=4770 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 19/50]  [PASS] test_preempt_flag_follows_migrated_task (36388 us)
+  pdm: migrations=1517 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 20/50]  [PASS] test_preempt_flag_follows_migrated_task (36825 us)
+  pdm: migrations=4821 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 21/50]  [PASS] test_preempt_flag_follows_migrated_task (32787 us)
+  pdm: migrations=3031 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 22/50]  [PASS] test_preempt_flag_follows_migrated_task (34628 us)
+  pdm: migrations=2620 moved=5 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 23/50]  [PASS] test_preempt_flag_follows_migrated_task (40703 us)
+  pdm: migrations=1863 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 24/50]  [PASS] test_preempt_flag_follows_migrated_task (47942 us)
+  pdm: migrations=2402 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 25/50]  [PASS] test_preempt_flag_follows_migrated_task (32652 us)
+  pdm: migrations=1402 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 26/50]  [PASS] test_preempt_flag_follows_migrated_task (31873 us)
+  pdm: migrations=1988 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 27/50]  [PASS] test_preempt_flag_follows_migrated_task (31275 us)
+  pdm: migrations=9376 moved=6 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 28/50]  [PASS] test_preempt_flag_follows_migrated_task (61486 us)
+  pdm: migrations=3095 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 29/50]  [PASS] test_preempt_flag_follows_migrated_task (39752 us)
+  pdm: migrations=2574 moved=7 runs=4/6 bad=0 (first on cpu 0)
+  [ITER 30/50]  [PASS] test_preempt_flag_follows_migrated_task (42564 us)
+  pdm: migrations=2993 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 31/50]  [PASS] test_preempt_flag_follows_migrated_task (41816 us)
+  pdm: migrations=15988 moved=6 runs=3/6 bad=0 (first on cpu 0)
+  [ITER 32/50]  [PASS] test_preempt_flag_follows_migrated_task (42252 us)
+  pdm: migrations=8499 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 33/50]  [PASS] test_preempt_flag_follows_migrated_task (39089 us)
+  pdm: migrations=4529 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 34/50]  [PASS] test_preempt_flag_follows_migrated_task (28803 us)
+  pdm: migrations=9496 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 35/50]  [PASS] test_preempt_flag_follows_migrated_task (36791 us)
+  pdm: migrations=5468 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 36/50]  [PASS] test_preempt_flag_follows_migrated_task (36813 us)
+  pdm: migrations=7291 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 37/50]  [PASS] test_preempt_flag_follows_migrated_task (36587 us)
+  pdm: migrations=7337 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 38/50]  [PASS] test_preempt_flag_follows_migrated_task (29997 us)
+  pdm: migrations=7387 moved=6 runs=6/3 bad=0 (first on cpu 0)
+  [ITER 39/50]  [PASS] test_preempt_flag_follows_migrated_task (31706 us)
+  pdm: migrations=10050 moved=6 runs=6/3 bad=0 (first on cpu 0)
+  [ITER 40/50]  [PASS] test_preempt_flag_follows_migrated_task (38430 us)
+  pdm: migrations=8988 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 41/50]  [PASS] test_preempt_flag_follows_migrated_task (34709 us)
+  pdm: migrations=10536 moved=6 runs=6/3 bad=0 (first on cpu 0)
+  [ITER 42/50]  [PASS] test_preempt_flag_follows_migrated_task (37531 us)
+  pdm: migrations=5180 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 43/50]  [PASS] test_preempt_flag_follows_migrated_task (33012 us)
+  pdm: migrations=4685 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 44/50]  [PASS] test_preempt_flag_follows_migrated_task (36251 us)
+  pdm: migrations=5924 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 45/50]  [PASS] test_preempt_flag_follows_migrated_task (39263 us)
+  pdm: migrations=2299 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 46/50]  [PASS] test_preempt_flag_follows_migrated_task (51592 us)
+  pdm: migrations=7197 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 47/50]  [PASS] test_preempt_flag_follows_migrated_task (45038 us)
+  pdm: migrations=5936 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 48/50]  [PASS] test_preempt_flag_follows_migrated_task (34804 us)
+  pdm: migrations=2473 moved=6 runs=3/5 bad=0 (first on cpu 0)
+  [ITER 49/50]  [PASS] test_preempt_flag_follows_migrated_task (39430 us)
+  pdm: migrations=13936 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 50/50]  [PASS] test_preempt_flag_follows_migrated_task (54357 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=50 passed=50 failed=0 ignored=0 us min=28803 avg=37920 max=61486
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[INFO] Exiting via semihosting...

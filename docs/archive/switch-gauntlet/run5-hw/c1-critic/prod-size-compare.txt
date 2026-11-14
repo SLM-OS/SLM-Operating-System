@@ -1,0 +1,51 @@
+s5-crit-c1 rc=0 165cb992
+   text	   data	    bss	    dec	    hex	filename
+6117906	 147456	26454416	32719778	1f343a2	build/kernel/slmos.elf
+1
+00000000408b1ea8 0000000000000004 B fault_dump_cpus
+0000000040da5918 0000000000000004 B g_test_filter_pass
+00000000400445e0 000000000000000c T fault_dump_lock_release
+00000000400449e8 0000000000000014 T fault_dump_completed
+0000000040044a00 000000000000005c T fault_dump_this_cpu
+0000000040085090 0000000000000060 t test_fault_dump_idle_state
+000000004008316c 0000000000000070 T test_filter_index_of
+0000000040082d70 0000000000000070 T test_harness_run_all
+0000000040082f0c 0000000000000074 T test_filter_parse_repeat
+00000000400850f0 00000000000000a8 T test_suite_fault_dump
+00000000400840e0 00000000000000bc t test_filter_cmdline_defaults_repeat_to_one
+0000000040082f80 00000000000000f0 T test_filter_find_kv
+0000000040044a60 00000000000000fc T fault_dump_putc
+0000000040083070 00000000000000fc T test_filter_from_cmdline
+0000000040043ec0 00000000000000fc T uart_lock_try_hold
+00000000400847a8 0000000000000100 t test_fault_dump_lock_frozen_counter_cannot_hang
+0000000040082e00 000000000000010c T test_filter_parse_names
+0000000040084684 000000000000010c T test_suite_test_filter
+00000000400448c8 0000000000000120 T fault_dump_end
+0000000040083628 0000000000000128 t test_filter_rejects_bad_characters
+0000000040083e2c 000000000000012c t test_filter_cmdline_errors_leave_filter_inactive
+0000000040083ae0 0000000000000138 t test_filter_parses_single_name
+0000000040084a04 000000000000014c t test_fault_dump_lock_printing_holder_holds_until_cap
+0000000040044484 0000000000000150 T fault_dump_lock_acquire
+00000000400848a8 000000000000015c t test_fault_dump_lock_waiter_gets_lock_after_release
+0000000040084bf0 000000000000016c t test_fault_dump_lock_silent_holder_times_out_at_stall
+0000000040083f60 0000000000000174 t test_filter_cmdline_key_is_exact
+0000000040083750 0000000000000184 t test_filter_rejects_empty_elements
+0000000040084d64 000000000000018c t test_fault_dump_lock_owner_reenters_as_nested
+0000000040084ef0 00000000000001a0 t test_fault_dump_lock_free_is_acquired_and_released
+00000000400841a0 00000000000001dc t test_filter_reads_cmdline_tokens
+00000000400838e0 00000000000001f8 t test_filter_parses_comma_list_in_order
+0000000040081428 0000000000000204 T UnityRunTest
+0000000040083420 0000000000000208 t test_filter_limits_count_and_length
+0000000040083c20 000000000000020c t test_filter_match_is_exact
+0000000040083200 0000000000000220 t test_filter_index_maps_known_tests
+0000000040da5920 0000000000000280 B g_test_filter_stats
+0000000040082710 00000000000002bc t harness_run_filtered
+00000000400445ec 00000000000002dc T fault_dump_begin
+0000000040084380 0000000000000304 t test_filter_parses_repeat_bounds
+0000000040da5ba0 0000000000000618 B g_test_filter
+000000004008192c 0000000000000de4 t harness_run_suites
+s5-crit-c1-base rc=0 8ec0e330
+   text	   data	    bss	    dec	    hex	filename
+6332130	 147456	26454416	32934002	1f68872	build/kernel/slmos.elf
+0
+0000000040080dd0 0000000000000550 T test_harness_run_all

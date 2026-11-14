@@ -1,0 +1,15 @@
+# critic own count, written 2026-11-14T02:35:28Z before README.md or any summary was opened
+filter-x50-qemu-165cb992.log: lines=261 banner=SLM-OS v0.4.0 build 20261114014655 (165cb992) iter=50 iterpass=50 fail=0 summary=[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=50 passed=50 failed=0 ignored=0 us min=28803 avg=37920 max=61486 allpass=1 first=# C1 evidence. Kernel head 165cb992558855c858ef075ee7d57da0e
+filter-x50-qemu-precommit-dirty.log: lines=261 banner=SLM-OS v0.4.0 build 20261113233328 (8ec0e330-dirty) iter=50 iterpass=50 fail=0 summary=[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=50 passed=50 failed=0 ignored=0 us min=29094 avg=35506 max=49791 allpass=1 first=# C1 evidence. Kernel head: 6e39f42571a395acc3ed16b9f003722d
+double-fault-run1.log: lines=286 banner=SLM-OS v0.4.0 build 20261113234338 (6e39f425) body=122 unprefixed=0 order=2runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-run2.log: lines=286 banner=SLM-OS v0.4.0 build 20261113234526 (6e39f425) body=122 unprefixed=0 order=2runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-run3.log: lines=286 banner=SLM-OS v0.4.0 build 20261113234537 (6e39f425) body=122 unprefixed=0 order=2runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-run4.log: lines=286 banner=SLM-OS v0.4.0 build 20261113234547 (6e39f425) body=122 unprefixed=0 order=2runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-run5.log: lines=286 banner=SLM-OS v0.4.0 build 20261113234558 (6e39f425) body=122 unprefixed=0 order=2runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-control-nolock-run1.log: lines=288 banner=SLM-OS v0.4.0 build 20261113234621 (6e39f425-dirty) body=124 unprefixed=63 order=71runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-control-nolock-run2.log: lines=288 banner=SLM-OS v0.4.0 build 20261113234632 (6e39f425-dirty) body=124 unprefixed=62 order=78runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+double-fault-control-nolock-run3.log: lines=288 banner=SLM-OS v0.4.0 build 20261113234643 (6e39f425-dirty) body=124 unprefixed=70 order=98runs halted=2 completed=[fault_dump selftest] dumps completed: 2 of 2 allpass=1
+unfiltered-base-8ec0e330.log: lines=8613 banner=SLM-OS v0.4.0 build 20261113234134 (8ec0e330) pass=3019 fail=0 allpass=1 failing=
+unfiltered-base-8ec0e330-run1-1230.log: lines=8616 banner=SLM-OS v0.4.0 build 20261113233825 (8ec0e330) pass=3016 fail=3 allpass=0 failing=  [FAIL] test_litmus_patterns_pass;[FAIL] 1 test(s) failed;[FAIL] 1 total failure(s);
+unfiltered-c1-6e39f425.log: lines=8644 banner=SLM-OS v0.4.0 build 20261113233518 (6e39f425) pass=3040 fail=0 allpass=1 failing=
+pre-commit-try1-unfiltered.log: lines=8649 banner=SLM-OS v0.4.0 build 20261113233037 (8ec0e330-dirty) pass=3033 fail=8 allpass=0 failing=  [FAIL] test_filter_index_maps_known_tests;[FAIL] 1 test(s) failed;  [FAIL] no help entry for external 'ktest';
