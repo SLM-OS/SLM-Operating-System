@@ -550,9 +550,9 @@ retry each of steps 4 and 5. Both failures are the one out-of-scope test
 (#1230), no other test failed, and this time the loads are in the files:
 the two failures started at 7.42 and 5.36, the two reruns at 2.33 and
 2.79. Every run on file with a recorded start load, both trees, all
-configurations: 12 passes at 1.46 to 4.76, 3 failures at 3.74 (base),
+configurations (ARM64 full suites): 10 passes at 1.46 to 4.76, 3 failures at 3.74 (base),
 5.36 and 7.42 (head). The load explanation now has file-backed runs on
-the head at both ends; it remains a correlation over 15 runs. Rates for
+the head at both ends; it remains a correlation over 13 runs. Rates for
 `test_litmus_patterns_pass`, default configuration, all runs on file:
 base 3 of 7; head family 4 of 10 (165cb992 and before 3 of 7, 2196deb5
 1 of 3). The critic accepts row 3a as met, and records that "/ci green"
