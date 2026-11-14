@@ -333,3 +333,34 @@ Each default cell carries 164 warning lines (87 unique), almost all
 | #27 | GPU model-handle mapping / SHM_GPU_ACCESSIBLE | fixed (found by the critic) | a4971f82 (2026-04-06): `runtime/src/mm/model_mem.rs:1554,1574`, `kernel/ipc/ipc.c:637,759`, `kernel/tests/test_ipc.c:161` |
 
 Correction to Entry 7: the exact title of #27 is "Jetson GPU Memory Integration (gpu_map, SHM_GPU_ACCESSIBLE)" (`gh issue view 27`).
+
+## Entry 8, 2026-11-14: user answers to the ADR unknowns; new issues
+
+- The user answered the 19 "unknown, ask the user" points in ADRs 0009
+  to 0017 (user, 2026-11-14). The changes that affect decisions:
+  - 0016 is now "accepted (backfilled), regretted"; runtime loading is
+    the preferred direction.
+  - 0017 is now "deprecated". The user's part is a Hailo 8; the code is
+    to be checked for 8 versus 8L.
+  - Kexec is a fallback and is to be retired on Jetson and x86-64,
+    including both x86 loader variants.
+  - The GPL stack is to be replaced with an MIT- or BSD-compatible one.
+  - The shell verbs are to move to user-space programs.
+- These go back to Track B for #1245, together with a "Planned direction"
+  section in `architecture.md` and the correction of the stale "consumers
+  need kexec" line in `docs/deploy/jetson-uefi-direct.md`.
+- New issues (all origin:user, kind:gap, Backlog; `gh issue create`):
+
+| Issue | Title | Labels |
+|---|---|---|
+| #1252 | Epic: retire kexec on Jetson and x86-64 (UEFI-direct only). Gates: (a) UEFI-direct initializes XUSB, PCIe, GPU and camera RCE; (b) the lab and gauntlet tooling works on UEFI-direct only; (c) reliability matches kexec on the hardware suite | enhancement, jetson, x86-64, sub:boot, P2 |
+| #1253 | Runtime model-weight loading, replacing compiled-in weights (ADR 0016) | enhancement, all, sub:ai-runtime, P3 |
+| #1254 | Hailo: delete or freeze the integration? (decision for the user). Inventory: 114 tracked files outside docs/archive, 3 CMake and 3 Makefile options, the CI cells, 8 docs | investigation, pi5, sub:ai-runtime, P3 |
+| #1255 | Licensing: replace GPL wolfSSH/wolfCrypt with an MIT/BSD-compatible stack | tech-debt, all, sub:net, P2 |
+
+- #1255 was not in the request. ADR 0014 was to link "the licence issue",
+  and none existed (`gh issue list --state all --search "GPL OR licence
+  OR license OR wolfssl OR wolfssh in:title"` found only #1250 and older
+  SSH tickets), so it was filed.
+- The 114-file Hailo count comes from `git ls-tree -r --name-only
+  origin/main | grep -i hailo | grep -v ^docs/archive | wc -l`.
