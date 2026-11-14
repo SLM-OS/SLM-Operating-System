@@ -289,8 +289,8 @@ make test TEST_TIMEOUT=600 TEST_FILTER=... TEST_REPEAT=...   # long runs
 
 **Deviation from a boot argument (switch gauntlet run 5).** Run 5's brief
 asked for a filter passed as a kernel command line or boot argument on all
-three hardware paths. The command-line source exists and is used on Pi 5,
-but neither Jetson path can carry it without changing the board (the
+three hardware paths. The command-line source exists and Pi 5 can use it
+(`cmdline.txt`), but neither Jetson path can carry it without changing the board (the
 installed `slmos-kexec` and the ESP boot entry), which run 5's rules
 forbid, so both Jetson paths use the build-time filter instead. The
 command-line parser is covered by `kernel/tests/test_test_filter.c`; it has
@@ -329,8 +329,9 @@ exception dump.
   A counter that stops moving cannot turn the wait into a hang: after 10^6
   polls with no change the wait ends.
 - **x86-64.** The exception handler in `kernel/arch/x86_64/idt.c` and
-  `panic()` use the same lock and prefixes. x86-64 runs the boot-test suite
-  on one CPU, so the lock is never contended there.
+  `panic()` use the same lock and prefixes, with the TSC as the counter.
+  The lock-primitive tests run in the x86-64 suite; the forced double
+  fault below is ARM64 only, so concurrent x86-64 dumps are untested.
 
 `kernel/tests/test_fault_dump.c` tests the lock on private instances (free,
 nested, silent holder times out at the stall bound, printing holder holds
