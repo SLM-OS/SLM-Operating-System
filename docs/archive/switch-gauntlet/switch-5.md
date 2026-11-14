@@ -884,3 +884,25 @@ C3's 16 suite captures not yet classified by C2.
 
 **Handover 08:37 UTC: jetson-nano-2 to critic-c2-fix** (kexec only, 5 boots,
 until 09:20 UTC at the latest). pi-5-1 unheld.
+
+## Entry 35 (written 08:51 UTC, from date): the fix-ws-3 timeout, C2's reproduction and classification
+
+- C2 (builder; `gauntlet-5-hw-pi5` 41b2b495, `run5-hw/c2/qemu-regs-hang/`):
+  filter `test_regs_every_cpu_reports,test_litmus_patterns_pass` x200,
+  WORK_STEALING=ON, default config. Fix c0ea0714: regs 200 of 200 (max 25 ms),
+  litmus 149 of 200 (load 3.0 to 4.1). Base + C1 2196deb5: regs 200 of 200,
+  litmus 88 of 200 (load 3.6 to 3.9). No hang in 400 regs iterations; the
+  litmus failure rate is not higher at the fix head (one run each).
+- C2's classification from code: a fresh coh_remote_start task has on_cpu 0 and
+  is pinned, so it cannot be deferred; the masked read excludes idle sleeping
+  with switch_in_waiting set; an idle CPU in WFI misses a cross-CPU SEV until its
+  next tick, as on the base (bounded by one tick). No new path found; status
+  "not explained".
+- Correction to Entry 31: fix-ws-3 hit `make test`'s 120 s TEST_TIMEOUT, not
+  the coherency cap. Its wall time was 3:31 against 2:45 to 2:55 for the other
+  A/B runs, so "hung in test_regs_every_cpu_reports" is not established; it
+  may have been a slow run that was in that test at 120 s. Hypothesis either
+  way.
+- Decision experiment running (C2, until 09:40 UTC): `make test
+  WORK_STEALING=ON TEST_TIMEOUT=300` at c0ea0714, about 8 runs, QEMU elapsed
+  time recorded, QMP register samples if a run passes 120 s.
