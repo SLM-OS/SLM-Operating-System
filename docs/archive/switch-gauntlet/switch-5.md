@@ -403,3 +403,23 @@ entry on, write times come from `date -u`.
   QEMU process in s5-c1), although ListAgents showed C1 running. Fourth go
   sent with a request to confirm the start.
 - Host load 5.45 at 04:40 UTC: C2's QEMU (s5-c2-aux), the orphan, C3 builds.
+
+## Entry 14 (written 04:57 UTC, from date): second evidence deletion; restore; pre-push rule
+
+- C2's commit 09e691ec on `gauntlet-5-hw-pi5` (no-deadlock old-design
+  runs) deleted the 10 `run5-hw/c2-design-critic/` files, by the same
+  stale-index mechanism as 9380bd31 (Entry 12). Restored from a fresh
+  worktree in 9811702e; `git diff --no-renames --diff-filter=D
+  --name-only 39f26650 origin/gauntlet-5-hw-pi5` is empty.
+- Pre-push rule added to `run5-builder-notes.md` and sent to every
+  agent: rebase (not soft reset), add only the agent's own directory, and an
+  empty deleted-file diff against origin before pushing.
+- C2 (04:56 UTC): the design verdict of 04:22 had not reached it; resent at
+  04:57. C2 ran the old-design half of the no-deadlock bar: R1 as ported
+  completed 2 of 4 runs on `c2/reverted-wait` 2f03c445 (so R1 alone does
+  not reliably force the tick in), and a new
+  `test_switch_window_tick_forced` (CPU 0 holds its window until 2 more
+  hardware ticks on CPU 0, each waking sleepers pinned to CPU 3, which takes
+  rq_lock[3]) hung 20 of 20 runs on `c2/reverted-wait` 653650d5, no dump,
+  120 s timeout (files 09e691ec, `run5-hw/c2/qemu-nodeadlock/`). The spin
+  is not yet register-sampled per run; requested.

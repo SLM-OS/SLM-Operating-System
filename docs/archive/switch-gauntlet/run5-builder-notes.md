@@ -88,3 +88,16 @@ govern. Base: main **8ec0e330** (#1239 merged in C0).
   issues (label, milestone Backlog, evidence), not fixed in passing. Never
   write "fix/close/resolve #N" in commit text unless it truly closes #N. No
   PRs: the orchestrator opens draft PRs after the critic passes.
+
+## Evidence commits: required pre-push check (added 05:0x UTC)
+
+Two commits (9380bd31, orchestrator; 09e691ec, C2) deleted other agents'
+evidence because they were made on a stale index. Before every push to a
+`gauntlet-5-hw-*` branch:
+
+1. `git fetch origin` and `git rebase origin/<branch>` (never `reset --soft`
+   onto a newer ref; it keeps the old index).
+2. `git add` only your own `run5-hw/c<N>/` directory, never `-A` or `-a`.
+3. Before the push, this must print nothing:
+   `git diff --no-renames --diff-filter=D --name-only origin/<branch> HEAD`
+   If it lists any file, stop, do not push, and tell the orchestrator.
