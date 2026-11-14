@@ -2764,6 +2764,7 @@ static void cw_helper(void *arg)
             if (sched_migrate_task(cw_h_task, cw_h_to) == 0) {
                 __atomic_fetch_add(&cw_h_mig, 1, __ATOMIC_RELAXED);
             }
+            __atomic_store_n(&switch_window_moved, 1, __ATOMIC_RELEASE);
             while (__atomic_load_n(&switch_window_in, __ATOMIC_ACQUIRE) == 1) {
                 __asm__ volatile("yield" ::: "memory");
             }
@@ -2819,6 +2820,8 @@ static bool cw_phase(const char *name, uint32_t sleeper_cpu, uint32_t migrate_to
         cw_h_it = it;
         cw_h_done = 0;
         switch_window_task = t;
+        switch_window_moved = 0;
+        switch_window_ticks_seen = 0;
         switch_window_on = 1;
         __atomic_store_n(&cw_h_arm, 1, __ATOMIC_RELEASE);
         scheduler_add_task_to_cpu(t, 0);
@@ -2859,6 +2862,28 @@ static void test_switch_window_held(void)
     bool b = cw_phase("B(sleepers on cpu3, T to cpu3)", 3, 3, 2, 30);
     TEST_ASSERT_TRUE(a);
     TEST_ASSERT_TRUE(b);
+}
+
+/* No-deadlock bar (#1234): phase B of R1 with a tick forced into the
+ * window. After the helper has moved cw_T to CPU 3, CPU 0 stays in its
+ * window until 2 more hardware ticks have run on CPU 0; each tick wakes the
+ * sleepers pinned to CPU 3 and takes CPU 3's rq_lock while CPU 3 is at its
+ * switch-in of cw_T. Run 4's reverted design (spin on on_cpu under that
+ * rq_lock) wedges CPU 0 in the tick; a correct design completes. */
+static void test_switch_window_tick_forced(void)
+{
+    if (cpu_count < 4) {
+        TEST_ASSERT(1);
+        return;
+    }
+    switch_window_ticks_after_move = 2;
+    bool b = cw_phase("B-forced(sleepers on cpu3, T to cpu3, 2 ticks after the move)",
+                      3, 3, 2, 30);
+    switch_window_ticks_after_move = 0;
+    uart_printf("  switch_window B-forced: ticks seen after the last move=%d\n",
+                switch_window_ticks_seen);
+    TEST_ASSERT_TRUE(b);
+    TEST_ASSERT_TRUE(switch_window_ticks_seen >= 2);
 }
 #endif /* CONFIG_SWITCH_WINDOW_TEST */
 
@@ -6832,6 +6857,7 @@ int test_suite_scheduler(void)
     /* Regression tests: DAIF context preservation (ARM64 only) */
 #if defined(CONFIG_SWITCH_WINDOW_TEST)
     RUN_TEST(test_switch_window_held);                   /* #1234 R1 */
+    RUN_TEST(test_switch_window_tick_forced);            /* #1234 no-deadlock bar */
 #endif
 #if !defined(PLATFORM_X86_64)
     RUN_TEST(test_daif_saved_in_context);
