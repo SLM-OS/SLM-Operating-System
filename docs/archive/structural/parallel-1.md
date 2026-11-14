@@ -570,3 +570,38 @@ filed by Entry 8 (#1252-#1255).
     hardening is #29).
   - B cites ADR 0012 for the move of verbs to user space, but 0012's
     sentence on that is itself the user's answer.
+
+## Entry 14: Hailo-8L confirmed; ELF timeline
+
+- The user corrected the part (user, 2026-11-14): the fitted device is a
+  Hailo-8L, and the earlier "Hailo 8" was a slip.
+  - ADR 0017, `architecture.md`, the ADR README and the #1245 body now
+    name the Hailo-8L. The 8L-targeting code and docs match the device.
+    #1254's body was corrected the same way.
+  - The one remaining mismatch is that `scripts/tools/fetch-hef-fixtures.sh:20`
+    fetches a Hailo-8 build (`hailo8/yolov5s.hef`). No QEMU or host test
+    reads it: `test_hef_parser.c:5-10` builds synthetic bytes. The file
+    is meant for `hailo load` on the device. Plain `load` only parses it;
+    `upload` and `sched` send it to the NPU (`hailo_shell.c:1076-1110`).
+    Whether it was ever uploaded to the 8L is not recorded.
+- ELF (ADR 0012). The user's recollection, marked uncertain by the user:
+  the ELF loader may have existed early, but the infrastructure to use it
+  did not. Dates (`git log --no-walk --date=short`, checked in this
+  session):
+
+| Piece | Commit | Date |
+|---|---|---|
+| Debug shell | e9a5c41d | 2025-12-22 |
+| Kernel-mode ELF loader (`elf.c`) | 55626bb7 | 2025-12-23 |
+| Syscall layer, EL0 vectors, `user_entry.S` (no page had `VMM_FLAG_USER` yet) | 91c73f91 | 2026-04-08 |
+| EL0 execution plan (#697) | c447143c | 2026-05-07 |
+| Per-task user L1 tables | dc84d738 | 2026-05-07 |
+| Smoke EL0 task, verified on hardware | b1e21855 | 2026-05-08 |
+| EL0 ELF loader, `task_create_user_elf`, `userelf`, `user/hello` | 3d317248 | 2026-05-08 |
+| Per-task ASIDs | 8718cd09 | 2026-05-08 |
+
+- Verdict, recorded in ADR 0012: the record partly supports the
+  recollection. An ELF loader existed from December 2025, but only for
+  kernel-mode tasks. EL0 user programs first ran in May 2026, about
+  four and a half months after the shell.
+- #1245 head: 450e305e.
