@@ -2657,10 +2657,10 @@ static bool swo_phase(uint32_t mode)
 #if defined(CONFIG_SWITCH_CHECK)
     switch_check_snapshot(&sc1);
     uart_printf("  swo %s: switch_check switch_ins=%u bad_gen=%u bad_dual=%u "
-                "first kind=%u task=%u cpu=%u owner=%u\n", name,
+                "first kind=%u task=%u cpu=%u owner=%u stale_cpu=%u\n", name,
                 sc1.switch_ins - sc0.switch_ins, sc1.bad_gen - sc0.bad_gen,
                 sc1.bad_dual - sc0.bad_dual, sc1.first_kind, sc1.first_task_id,
-                sc1.first_cpu, sc1.first_owner);
+                sc1.first_cpu, sc1.first_owner, sc1.stale_cpu - sc0.stale_cpu);
 #endif
 
     /* A task that did not exit is leaked, not destroyed: it may still be
@@ -2673,7 +2673,8 @@ static bool swo_phase(uint32_t mode)
 
     bool ok = w >= 0 && swo_moves > 0 && swo_bad_gen == 0 && swo_bad_dual == 0;
 #if defined(CONFIG_SWITCH_CHECK)
-    ok = ok && sc1.bad_gen == sc0.bad_gen && sc1.bad_dual == sc0.bad_dual;
+    ok = ok && sc1.bad_gen == sc0.bad_gen && sc1.bad_dual == sc0.bad_dual &&
+         sc1.stale_cpu == sc0.stale_cpu;   /* #1242 */
 #endif
     return ok;
 }

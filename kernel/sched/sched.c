@@ -2377,6 +2377,7 @@ void schedule(void)
 #endif
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);
+    SWITCH_CHECK_CPU(this_cpu, 1);  /* #1242 probe; empty unless SWITCH_CHECK */
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -2409,6 +2410,7 @@ void schedule(void)
         (void)task_destroy_gen(zombie, zombie_gen);
 
         flags = rq_lock_irqsave(this_cpu);
+        SWITCH_CHECK_CPU(this_cpu, 2);
     }
 
     struct task *current = task_current();
