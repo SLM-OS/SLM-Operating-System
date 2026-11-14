@@ -42,3 +42,29 @@ host.
 - The December 2025 design document the review names is in the claude.ai
   Project, not in the repository: no tracked file matches it (search for
   its markers: microkernel, YAML component manifest, TensorRT plan).
+
+## Entry 2: Track B result (Rec 8)
+
+- Draft PR #1245, branch `structural/architecture-record`, commit
+  f920c8d2, based on 8ec0e330 (from the Track B report and `gh pr view 1245`).
+- 11 files: a rewritten `docs/architecture.md`, ADRs 0009 to 0017 (status
+  "accepted (backfilled)"), and a new `docs/adr/README.md` with 0008 listed
+  as reserved and the rule to reserve the number in the tracking issue.
+- 19 "unknown, ask the user" markers: 0009 1, 0010 3, 0011 2, 0012 2,
+  0013 3, 0014 3, 0015 1, 0016 1, 0017 1 (Track B's count). 0014 raises a
+  licence point: wolfCrypt is GPL-2.0 and wolfSSH GPL-3.0, and the repo is
+  MIT, so `NET_SSHD=ON` images need a decision.
+- Not done: the December 2025 design document is not in the repository,
+  so it can't be moved. `architecture.md` now says it is superseded and
+  held outside the repo.
+- Stale text found and left as it was (listed in the PR body):
+  `docs/shell.md` (SSH deferred), `docs/deploy/jetson-uefi-direct.md`
+  (consumers need kexec), the `spinlock.h` header comment (Jetson skips
+  locking), `docs/smp.md` (names `kernel/src/spinlock.c`, which does not
+  exist), an `smp_boot.S` HCR_EL2 comment, `LICENSES.md` (lwIP, wolfCrypt,
+  wolfSSH and Lua missing), the CLAUDE.md link to
+  `docs/jetson-el2-bringup.md` (file missing), the SECONDARY_PREEMPT CMake
+  help text (still says "NC-memory platforms"), and the lwIP version
+  (commit message says 2.1.3, the tree is 2.2.0).
+- ADR citations were spot-checked only. The Fable critic checks
+  `architecture.md` only, as the brief asks.
