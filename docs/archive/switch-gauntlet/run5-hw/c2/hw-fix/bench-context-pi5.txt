@@ -1,0 +1,9 @@
+# C2 run5: bench context (shell `bench context`, 99 round-trips each), pi-5-1 production kernels, serial_send output
+# transcribed verbatim from this session's labctl tool results (2026-11-14 ~08:07-08:12 UTC).
+# fix c0ea0714 (after boot 10 of pi5-prod-fix-c0ea0714-boottest):
+#   run 1: Average 110 ns; Min 92 Max 166 Mean 110; p50 111 p95 130 p99 166
+#   run 2: Average 112 ns; Min 111 Max 167 Mean 112; p50 111 p95 129 p99 167
+# base 8ec0e330 (pi5-prod-base-8ec0e330-boot1.txt):
+#   run 1: Average 106 ns; Min 92 Max 222 Mean 106; p50 111 p95 112 p99 222
+#   run 2: Average 106 ns; Min 92 Max 148 Mean 106; p50 111 p95 112 p99 148
+# Mean +3.8% to +5.7%; p50 unchanged. Order: fix measured first, then base (same session, both after a fresh boot).

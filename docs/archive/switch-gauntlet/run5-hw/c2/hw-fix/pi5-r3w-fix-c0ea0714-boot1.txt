@@ -1,0 +1,1045 @@
+# C2 run5: pi-5-1 fix head c0ea0714 R3 wake x200
+# source: /var/lib/labctl/output/s5-c2-pi5-fix-r3w/run_01.txt (labctl boot_test output, full serial from power-on)
+# banner: build 20261114070815 (c0ea0714)
+# filter: [FILTER] tests=test_wake_during_switch_out repeat=200 source=build
+# summary: [FILTER] [PASS] test_wake_during_switch_out: runs=200 passed=200 failed=0 ignored=0 us min=310280 avg=312465 max=320040 
+# ---- serial ----
+
+========================================
+  SLM-OS v0.4.0 build 20261114070815 (c0ea0714)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Raspberry Pi 5
+[INFO] DTB parsed successfully at 0x2efec700
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x0 - 0x100000000 (4096 MB)
+  UART:      0x1f00030000 (IRQ 185)
+  GIC dist:  0x107fff9000
+  GIC cpu:   0x107fffa000
+  CPUs:      4
+  Timer IRQ: 26
+  /memreserve/:
+    [0] 0x3fc00000 + 0x400000
+  Bootloader:
+    version:      2682625908f5585e5f4832bb82e74e7d757ec48f
+    capabilities: 0x7f
+    build-ts:     0x66f16700
+  Firmware entropy: rng-seed=64 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000 - 0x2b1798
+  .data:   0x8e5000 - 0x909250
+  .bss:    0x910000 - 0x2b9e7b0
+  End:     0x2ba3000
+  RAM:     0x0 - 0x100000000 (4096 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0xa2f000
+  Blocks mapped: 2057
+  Bytes mapped: 4114 MB
+  L1[0]: 0x4000000000070d (covers VA 0x0)
+  L1[1]: 0x4000004000070d (covers VA 0x40000000)
+  L1[2]: 0x4000008000070d (covers VA 0x80000000)
+  L1[3]: 0xa2b003 (covers VA 0xc0000000)
+  L1[64]: 0xa2e003 (covers VA 0x1000000000)
+  L1[65]: 0xa2d003 (covers VA 0x1040000000)
+  L1[110]: 0xa2a003 (covers VA 0x1b80000000)
+  L1[124]: 0xa2c003 (covers VA 0x1f00000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x0) = 0x0
+  [PASS] virt_to_phys(0xffffff8000000000) = 0x0
+  [PASS] is_mapped(0x0) = true
+  [PASS] is_mapped(0x140000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x2ba3000 - 0xffe00000
+  Total pages:     1036893 (4147572 KB)
+  Free pages:      1035869 (4143476 KB)
+  Used pages:      1024 (4096 KB)
+  Reserved:        11171 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 1 blocks
+    Order  2 (   16 KB): 1 blocks
+    Order  3 (   32 KB): 1 blocks
+    Order  4 (   64 KB): 1 blocks
+    Order  6 (  256 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 3 blocks
+    Order 11 ( 8192 KB): 2 blocks
+    Order 12 (16384 KB): 3 blocks
+    Order 13 (32768 KB): 2 blocks
+    Order 14 (65536 KB): 3 blocks
+    Order 15 (131072 KB): 3 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 17 (524288 KB): 1 blocks
+    Order 18 (1048576 KB): 2 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xffe00000 - 0x100000000 (2048 KB)
+[INFO] NC memory: clean+invalidate by VA, 32768 lines of 64 B, 6151 us; 0 changed, 0 restored in the first 4 KB (hash 0x1665006763620925 -> 0x1665006763620925)
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=64B kaslr_seed=8B
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] UART IRQ: post-init diag: MIS=0x0 INTSTAT=0x0 MIP_status=0x0 MIP_raised=0x0 GIC_ISPENDR=0x0
+[INFO] UART IRQ enabled (GIC IRQ 185 = SPI 153, RP1 vec 25)
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0xe0000000 (256 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (512 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie1: training link (status=0x1e08f before reset)
+[INFO] pcie1: link up (status=0x3e0bf) after 0 ms
+[INFO] pcie1: RC LNKCTL 0x0000 ASPM_L0S already off
+[INFO] pcie: 01:00.0 BAR0 assigned 0x80000000 (size 0x4000)
+[INFO] pcie: 01:00.0 BAR2 assigned 0x80004000 (size 0x1000)
+[INFO] pcie: 01:00.0 BAR4 assigned 0x80008000 (size 0x4000)
+[INFO] pcie: bcm2712-pcie1 backend, 2 device(s) enumerated
+[INFO] hailo: endpoint at 01:00.0
+[INFO] hailo: endpoint LNKCTL 0x0000 ASPM_L0S already off
+[INFO] hailo: endpoint DEVCTL=0x2910 MPS=128 MRRS=512 LNKSTA=0x1012 speed=Gen2 width=x1
+[INFO] hailo: platform 'pi5-pcie1' initialized
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_wake_during_switch_out repeat=200 source=build index=2898
+[INFO] Task 'swo_m' (id=15) exiting
+[INFO] Task 'swo_w' (id=10) exiting
+[INFO] Task 'swo_w' (id=14) exiting
+  swo wake: cpus=4 workers=8 moves=72602 move_fail=0 runs=456201 bad_gen=0 two_cpus=0
+  [ITER 1/200]  [PASS] test_wake_during_switch_out (314383 us)
+[INFO] Task 'swo_m' (id=27) exiting
+[INFO] Task 'swo_w' (id=22) exiting
+  swo wake: cpus=4 workers=8 moves=73722 move_fail=0 runs=460860 bad_gen=0 two_cpus=0
+  [ITER 2/200]  [PASS] test_wake_during_switch_out (311165 us)
+[INFO] Task 'swo_m' (id=39) exiting
+[INFO] Task 'swo_w' (id=34) exiting
+  swo wake: cpus=4 workers=8 moves=73417 move_fail=0 runs=460448 bad_gen=0 two_cpus=0
+  [ITER 3/200]  [PASS] test_wake_during_switch_out (311161 us)
+[INFO] Task 'swo_m' (id=51) exiting
+[INFO] Task 'swo_w' (id=48) exiting
+  swo wake: cpus=4 workers=8 moves=72796 move_fail=0 runs=459798 bad_gen=0 two_cpus=0
+  [ITER 4/200]  [PASS] test_wake_during_switch_out (311164 us)
+[INFO] Task 'swo_m' (id=63) exiting
+[INFO] Task 'swo_w' (id=58) exiting
+  swo wake: cpus=4 workers=8 moves=73263 move_fail=0 runs=460564 bad_gen=0 two_cpus=0
+  [ITER 5/200]  [PASS] test_wake_during_switch_out (311171 us)
+[INFO] Task 'swo_m' (id=75) exiting
+[INFO] Task 'swo_w' (id=71) exiting
+  swo wake: cpus=4 workers=8 moves=72952 move_fail=0 runs=460472 bad_gen=0 two_cpus=0
+  [ITER 6/200]  [PASS] test_wake_during_switch_out (311166 us)
+[INFO] Task 'swo_m' (id=87) exiting
+[INFO] Task 'swo_w' (id=82) exiting
+  swo wake: cpus=4 workers=8 moves=72303 move_fail=0 runs=461081 bad_gen=0 two_cpus=0
+  [ITER 7/200]  [PASS] test_wake_during_switch_out (311162 us)
+[INFO] Task 'swo_m' (id=99) exiting
+[INFO] Task 'swo_w' (id=94) exiting
+  swo wake: cpus=4 workers=8 moves=73320 move_fail=0 runs=461141 bad_gen=0 two_cpus=0
+  [ITER 8/200]  [PASS] test_wake_during_switch_out (311164 us)
+[INFO] Task 'swo_m' (id=111) exiting
+[INFO] Task 'swo_w' (id=106) exiting
+  swo wake: cpus=4 workers=8 moves=73711 move_fail=0 runs=461988 bad_gen=0 two_cpus=0
+  [ITER 9/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=123) exiting
+[INFO] Task 'swo_w' (id=119) exiting
+  swo wake: cpus=4 workers=8 moves=73573 move_fail=0 runs=461670 bad_gen=0 two_cpus=0
+  [ITER 10/200]  [PASS] test_wake_during_switch_out (315054 us)
+[INFO] Task 'swo_m' (id=135) exiting
+[INFO] Task 'swo_w' (id=130) exiting
+[INFO] Task 'swo_w' (id=134) exiting
+  swo wake: cpus=4 workers=8 moves=71753 move_fail=0 runs=454450 bad_gen=0 two_cpus=0
+  [ITER 11/200]  [PASS] test_wake_during_switch_out (314637 us)
+[INFO] Task 'swo_m' (id=147) exiting
+[INFO] Task 'swo_w' (id=142) exiting
+  swo wake: cpus=4 workers=8 moves=73176 move_fail=0 runs=459284 bad_gen=0 two_cpus=0
+  [ITER 12/200]  [PASS] test_wake_during_switch_out (311341 us)
+[INFO] Task 'swo_m' (id=159) exiting
+[INFO] Task 'swo_w' (id=154) exiting
+  swo wake: cpus=4 workers=8 moves=73665 move_fail=0 runs=459959 bad_gen=0 two_cpus=0
+  [ITER 13/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=171) exiting
+[INFO] Task 'swo_w' (id=166) exiting
+  swo wake: cpus=4 workers=8 moves=73633 move_fail=0 runs=460824 bad_gen=0 two_cpus=0
+  [ITER 14/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=183) exiting
+[INFO] Task 'swo_w' (id=179) exiting
+  swo wake: cpus=4 workers=8 moves=73768 move_fail=0 runs=460846 bad_gen=0 two_cpus=0
+  [ITER 15/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=195) exiting
+[INFO] Task 'swo_w' (id=190) exiting
+  swo wake: cpus=4 workers=8 moves=73770 move_fail=0 runs=461703 bad_gen=0 two_cpus=0
+  [ITER 16/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=207) exiting
+[INFO] Task 'swo_w' (id=203) exiting
+  swo wake: cpus=4 workers=8 moves=74637 move_fail=0 runs=462393 bad_gen=0 two_cpus=0
+  [ITER 17/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=219) exiting
+[INFO] Task 'swo_w' (id=216) exiting
+  swo wake: cpus=4 workers=8 moves=72451 move_fail=0 runs=461843 bad_gen=0 two_cpus=0
+  [ITER 18/200]  [PASS] test_wake_during_switch_out (314826 us)
+[INFO] Task 'swo_m' (id=231) exiting
+[INFO] Task 'swo_w' (id=226) exiting
+[INFO] Task 'swo_w' (id=230) exiting
+  swo wake: cpus=4 workers=8 moves=72832 move_fail=0 runs=454988 bad_gen=0 two_cpus=0
+  [ITER 19/200]  [PASS] test_wake_during_switch_out (314640 us)
+[INFO] Task 'swo_m' (id=243) exiting
+[INFO] Task 'swo_w' (id=240) exiting
+  swo wake: cpus=4 workers=8 moves=72793 move_fail=0 runs=458926 bad_gen=0 two_cpus=0
+  [ITER 20/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=255) exiting
+[INFO] Task 'swo_w' (id=250) exiting
+  swo wake: cpus=4 workers=8 moves=73387 move_fail=0 runs=459781 bad_gen=0 two_cpus=0
+  [ITER 21/200]  [PASS] test_wake_during_switch_out (311341 us)
+[INFO] Task 'swo_m' (id=267) exiting
+[INFO] Task 'swo_w' (id=264) exiting
+  swo wake: cpus=4 workers=8 moves=72946 move_fail=0 runs=460392 bad_gen=0 two_cpus=0
+  [ITER 22/200]  [PASS] test_wake_during_switch_out (311343 us)
+[INFO] Task 'swo_m' (id=279) exiting
+[INFO] Task 'swo_w' (id=276) exiting
+  swo wake: cpus=4 workers=8 moves=73591 move_fail=0 runs=461188 bad_gen=0 two_cpus=0
+  [ITER 23/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=291) exiting
+[INFO] Task 'swo_w' (id=286) exiting
+  swo wake: cpus=4 workers=8 moves=73271 move_fail=0 runs=461308 bad_gen=0 two_cpus=0
+  [ITER 24/200]  [PASS] test_wake_during_switch_out (311342 us)
+[INFO] Task 'swo_m' (id=303) exiting
+[INFO] Task 'swo_w' (id=299) exiting
+  swo wake: cpus=4 workers=8 moves=73746 move_fail=0 runs=461781 bad_gen=0 two_cpus=0
+  [ITER 25/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=315) exiting
+[INFO] Task 'swo_w' (id=312) exiting
+  swo wake: cpus=4 workers=8 moves=73900 move_fail=0 runs=462772 bad_gen=0 two_cpus=0
+  [ITER 26/200]  [PASS] test_wake_during_switch_out (314790 us)
+[INFO] Task 'swo_m' (id=327) exiting
+[INFO] Task 'swo_w' (id=322) exiting
+[INFO] Task 'swo_w' (id=326) exiting
+  swo wake: cpus=4 workers=8 moves=71397 move_fail=0 runs=454168 bad_gen=0 two_cpus=0
+  [ITER 27/200]  [PASS] test_wake_during_switch_out (314637 us)
+[INFO] Task 'swo_m' (id=339) exiting
+[INFO] Task 'swo_w' (id=334) exiting
+  swo wake: cpus=4 workers=8 moves=73021 move_fail=0 runs=459009 bad_gen=0 two_cpus=0
+  [ITER 28/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=351) exiting
+[INFO] Task 'swo_w' (id=348) exiting
+  swo wake: cpus=4 workers=8 moves=73159 move_fail=0 runs=460057 bad_gen=0 two_cpus=0
+  [ITER 29/200]  [PASS] test_wake_during_switch_out (311342 us)
+[INFO] Task 'swo_m' (id=363) exiting
+[INFO] Task 'swo_w' (id=360) exiting
+  swo wake: cpus=4 workers=8 moves=74335 move_fail=0 runs=461090 bad_gen=0 two_cpus=0
+  [ITER 30/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=375) exiting
+[INFO] Task 'swo_w' (id=372) exiting
+  swo wake: cpus=4 workers=8 moves=73676 move_fail=0 runs=460815 bad_gen=0 two_cpus=0
+  [ITER 31/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=387) exiting
+[INFO] Task 'swo_w' (id=383) exiting
+  swo wake: cpus=4 workers=8 moves=73187 move_fail=0 runs=460833 bad_gen=0 two_cpus=0
+  [ITER 32/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=399) exiting
+[INFO] Task 'swo_w' (id=394) exiting
+  swo wake: cpus=4 workers=8 moves=73725 move_fail=0 runs=461856 bad_gen=0 two_cpus=0
+  [ITER 33/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=411) exiting
+[INFO] Task 'swo_w' (id=408) exiting
+  swo wake: cpus=4 workers=8 moves=73318 move_fail=0 runs=461526 bad_gen=0 two_cpus=0
+  [ITER 34/200]  [PASS] test_wake_during_switch_out (314796 us)
+[INFO] Task 'swo_m' (id=423) exiting
+[INFO] Task 'swo_w' (id=418) exiting
+[INFO] Task 'swo_w' (id=422) exiting
+  swo wake: cpus=4 workers=8 moves=72426 move_fail=0 runs=454960 bad_gen=0 two_cpus=0
+  [ITER 35/200]  [PASS] test_wake_during_switch_out (314638 us)
+[INFO] Task 'swo_m' (id=435) exiting
+[INFO] Task 'swo_w' (id=430) exiting
+  swo wake: cpus=4 workers=8 moves=72971 move_fail=0 runs=458994 bad_gen=0 two_cpus=0
+  [ITER 36/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=447) exiting
+[INFO] Task 'swo_w' (id=444) exiting
+  swo wake: cpus=4 workers=8 moves=73011 move_fail=0 runs=459412 bad_gen=0 two_cpus=0
+  [ITER 37/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=459) exiting
+[INFO] Task 'swo_w' (id=454) exiting
+  swo wake: cpus=4 workers=8 moves=71969 move_fail=0 runs=459793 bad_gen=0 two_cpus=0
+  [ITER 38/200]  [PASS] test_wake_during_switch_out (311341 us)
+[INFO] Task 'swo_m' (id=471) exiting
+[INFO] Task 'swo_w' (id=467) exiting
+  swo wake: cpus=4 workers=8 moves=73208 move_fail=0 runs=460931 bad_gen=0 two_cpus=0
+  [ITER 39/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=483) exiting
+[INFO] Task 'swo_w' (id=478) exiting
+  swo wake: cpus=4 workers=8 moves=73645 move_fail=0 runs=461148 bad_gen=0 two_cpus=0
+  [ITER 40/200]  [PASS] test_wake_during_switch_out (311340 us)
+[INFO] Task 'swo_m' (id=495) exiting
+[INFO] Task 'swo_w' (id=490) exiting
+  swo wake: cpus=4 workers=8 moves=74023 move_fail=0 runs=461954 bad_gen=0 two_cpus=0
+  [ITER 41/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=507) exiting
+[INFO] Task 'swo_w' (id=503) exiting
+  swo wake: cpus=4 workers=8 moves=73197 move_fail=0 runs=461644 bad_gen=0 two_cpus=0
+  [ITER 42/200]  [PASS] test_wake_during_switch_out (314808 us)
+[INFO] Task 'swo_m' (id=519) exiting
+[INFO] Task 'swo_w' (id=516) exiting
+  swo wake: cpus=4 workers=8 moves=73243 move_fail=0 runs=455234 bad_gen=0 two_cpus=0
+  [ITER 43/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=531) exiting
+[INFO] Task 'swo_w' (id=527) exiting
+  swo wake: cpus=4 workers=8 moves=72057 move_fail=0 runs=454483 bad_gen=0 two_cpus=0
+  [ITER 44/200]  [PASS] test_wake_during_switch_out (311343 us)
+[INFO] Task 'swo_m' (id=543) exiting
+[INFO] Task 'swo_w' (id=540) exiting
+  swo wake: cpus=4 workers=8 moves=72504 move_fail=0 runs=455456 bad_gen=0 two_cpus=0
+  [ITER 45/200]  [PASS] test_wake_during_switch_out (311340 us)
+[INFO] Task 'swo_m' (id=555) exiting
+[INFO] Task 'swo_w' (id=550) exiting
+[INFO] Task 'swo_w' (id=554) exiting
+  swo wake: cpus=4 workers=8 moves=71855 move_fail=0 runs=455860 bad_gen=0 two_cpus=0
+  [ITER 46/200]  [PASS] test_wake_during_switch_out (314638 us)
+[INFO] Task 'swo_m' (id=567) exiting
+[INFO] Task 'swo_w' (id=563) exiting
+  swo wake: cpus=4 workers=8 moves=73426 move_fail=0 runs=460761 bad_gen=0 two_cpus=0
+  [ITER 47/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=579) exiting
+[INFO] Task 'swo_w' (id=574) exiting
+  swo wake: cpus=4 workers=8 moves=73033 move_fail=0 runs=460819 bad_gen=0 two_cpus=0
+  [ITER 48/200]  [PASS] test_wake_during_switch_out (311345 us)
+[INFO] Task 'swo_m' (id=591) exiting
+[INFO] Task 'swo_w' (id=586) exiting
+  swo wake: cpus=4 workers=8 moves=73893 move_fail=0 runs=462166 bad_gen=0 two_cpus=0
+  [ITER 49/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=603) exiting
+[INFO] Task 'swo_w' (id=600) exiting
+  swo wake: cpus=4 workers=8 moves=74193 move_fail=0 runs=462744 bad_gen=0 two_cpus=0
+  [ITER 50/200]  [PASS] test_wake_during_switch_out (314790 us)
+[INFO] Task 'swo_m' (id=615) exiting
+[INFO] Task 'swo_w' (id=610) exiting
+[INFO] Task 'swo_w' (id=614) exiting
+  swo wake: cpus=4 workers=8 moves=72846 move_fail=0 runs=454890 bad_gen=0 two_cpus=0
+  [ITER 51/200]  [PASS] test_wake_during_switch_out (314638 us)
+[INFO] Task 'swo_m' (id=627) exiting
+[INFO] Task 'swo_w' (id=622) exiting
+  swo wake: cpus=4 workers=8 moves=73202 move_fail=0 runs=459435 bad_gen=0 two_cpus=0
+  [ITER 52/200]  [PASS] test_wake_during_switch_out (311343 us)
+[INFO] Task 'swo_m' (id=639) exiting
+[INFO] Task 'swo_w' (id=634) exiting
+  swo wake: cpus=4 workers=8 moves=73691 move_fail=0 runs=459264 bad_gen=0 two_cpus=0
+  [ITER 53/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=651) exiting
+[INFO] Task 'swo_w' (id=646) exiting
+  swo wake: cpus=4 workers=8 moves=72502 move_fail=0 runs=459705 bad_gen=0 two_cpus=0
+  [ITER 54/200]  [PASS] test_wake_during_switch_out (311345 us)
+[INFO] Task 'swo_m' (id=663) exiting
+[INFO] Task 'swo_w' (id=658) exiting
+  swo wake: cpus=4 workers=8 moves=73586 move_fail=0 runs=461187 bad_gen=0 two_cpus=0
+  [ITER 55/200]  [PASS] test_wake_during_switch_out (311340 us)
+[INFO] Task 'swo_m' (id=675) exiting
+[INFO] Task 'swo_w' (id=670) exiting
+  swo wake: cpus=4 workers=8 moves=74482 move_fail=0 runs=461650 bad_gen=0 two_cpus=0
+  [ITER 56/200]  [PASS] test_wake_during_switch_out (311342 us)
+[INFO] Task 'swo_m' (id=687) exiting
+[INFO] Task 'swo_w' (id=683) exiting
+  swo wake: cpus=4 workers=8 moves=73812 move_fail=0 runs=461746 bad_gen=0 two_cpus=0
+  [ITER 57/200]  [PASS] test_wake_during_switch_out (311340 us)
+[INFO] Task 'swo_m' (id=699) exiting
+[INFO] Task 'swo_w' (id=695) exiting
+  swo wake: cpus=4 workers=8 moves=73740 move_fail=0 runs=462151 bad_gen=0 two_cpus=0
+  [ITER 58/200]  [PASS] test_wake_during_switch_out (314787 us)
+[INFO] Task 'swo_m' (id=711) exiting
+[INFO] Task 'swo_w' (id=707) exiting
+  swo wake: cpus=4 workers=8 moves=72675 move_fail=0 runs=455083 bad_gen=0 two_cpus=0
+  [ITER 59/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=723) exiting
+[INFO] Task 'swo_w' (id=718) exiting
+[INFO] Task 'swo_w' (id=722) exiting
+  swo wake: cpus=4 workers=8 moves=73008 move_fail=0 runs=455641 bad_gen=0 two_cpus=0
+  [ITER 60/200]  [PASS] test_wake_during_switch_out (314638 us)
+[INFO] Task 'swo_m' (id=735) exiting
+[INFO] Task 'swo_w' (id=730) exiting
+  swo wake: cpus=4 workers=8 moves=73200 move_fail=0 runs=459698 bad_gen=0 two_cpus=0
+  [ITER 61/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=747) exiting
+[INFO] Task 'swo_w' (id=742) exiting
+  swo wake: cpus=4 workers=8 moves=73357 move_fail=0 runs=460063 bad_gen=0 two_cpus=0
+  [ITER 62/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=759) exiting
+[INFO] Task 'swo_w' (id=755) exiting
+  swo wake: cpus=4 workers=8 moves=73825 move_fail=0 runs=460952 bad_gen=0 two_cpus=0
+  [ITER 63/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=771) exiting
+[INFO] Task 'swo_w' (id=766) exiting
+  swo wake: cpus=4 workers=8 moves=74131 move_fail=0 runs=461385 bad_gen=0 two_cpus=0
+  [ITER 64/200]  [PASS] test_wake_during_switch_out (311342 us)
+[INFO] Task 'swo_m' (id=783) exiting
+[INFO] Task 'swo_w' (id=780) exiting
+  swo wake: cpus=4 workers=8 moves=73360 move_fail=0 runs=461333 bad_gen=0 two_cpus=0
+  [ITER 65/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=795) exiting
+[INFO] Task 'swo_w' (id=790) exiting
+[INFO] Task 'swo_w' (id=794) exiting
+  swo wake: cpus=4 workers=8 moves=74093 move_fail=0 runs=462403 bad_gen=0 two_cpus=0
+  [ITER 66/200]  [PASS] test_wake_during_switch_out (314805 us)
+[INFO] Task 'swo_m' (id=807) exiting
+[INFO] Task 'swo_w' (id=804) exiting
+  swo wake: cpus=4 workers=8 moves=72920 move_fail=0 runs=455348 bad_gen=0 two_cpus=0
+  [ITER 67/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=819) exiting
+[INFO] Task 'swo_w' (id=814) exiting
+[INFO] Task 'swo_w' (id=818) exiting
+  swo wake: cpus=4 workers=8 moves=72443 move_fail=0 runs=454916 bad_gen=0 two_cpus=0
+  [ITER 68/200]  [PASS] test_wake_during_switch_out (314639 us)
+[INFO] Task 'swo_m' (id=831) exiting
+[INFO] Task 'swo_w' (id=828) exiting
+  swo wake: cpus=4 workers=8 moves=73768 move_fail=0 runs=460404 bad_gen=0 two_cpus=0
+  [ITER 69/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=843) exiting
+[INFO] Task 'swo_w' (id=838) exiting
+  swo wake: cpus=4 workers=8 moves=73518 move_fail=0 runs=460223 bad_gen=0 two_cpus=0
+  [ITER 70/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=855) exiting
+[INFO] Task 'swo_w' (id=850) exiting
+  swo wake: cpus=4 workers=8 moves=73832 move_fail=0 runs=460899 bad_gen=0 two_cpus=0
+  [ITER 71/200]  [PASS] test_wake_during_switch_out (311339 us)
+[INFO] Task 'swo_m' (id=867) exiting
+[INFO] Task 'swo_w' (id=863) exiting
+  swo wake: cpus=4 workers=8 moves=72546 move_fail=0 runs=460827 bad_gen=0 two_cpus=0
+  [ITER 72/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=879) exiting
+[INFO] Task 'swo_w' (id=876) exiting
+  swo wake: cpus=4 workers=8 moves=73270 move_fail=0 runs=461715 bad_gen=0 two_cpus=0
+  [ITER 73/200]  [PASS] test_wake_during_switch_out (311342 us)
+[INFO] Task 'swo_m' (id=891) exiting
+[INFO] Task 'swo_w' (id=886) exiting
+[INFO] Task 'swo_w' (id=890) exiting
+  swo wake: cpus=4 workers=8 moves=73333 move_fail=0 runs=462455 bad_gen=0 two_cpus=0
+  [ITER 74/200]  [PASS] test_wake_during_switch_out (314803 us)
+[INFO] Task 'swo_m' (id=903) exiting
+[INFO] Task 'swo_w' (id=898) exiting
+[INFO] Task 'swo_w' (id=902) exiting
+  swo wake: cpus=4 workers=8 moves=73120 move_fail=0 runs=455080 bad_gen=0 two_cpus=0
+  [ITER 75/200]  [PASS] test_wake_during_switch_out (314636 us)
+[INFO] Task 'swo_m' (id=915) exiting
+[INFO] Task 'swo_w' (id=911) exiting
+  swo wake: cpus=4 workers=8 moves=73259 move_fail=0 runs=459165 bad_gen=0 two_cpus=0
+  [ITER 76/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=927) exiting
+[INFO] Task 'swo_w' (id=923) exiting
+  swo wake: cpus=4 workers=8 moves=72797 move_fail=0 runs=459841 bad_gen=0 two_cpus=0
+  [ITER 77/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=939) exiting
+[INFO] Task 'swo_w' (id=934) exiting
+  swo wake: cpus=4 workers=8 moves=73268 move_fail=0 runs=460085 bad_gen=0 two_cpus=0
+  [ITER 78/200]  [PASS] test_wake_during_switch_out (311344 us)
+[INFO] Task 'swo_m' (id=951) exiting
+[INFO] Task 'swo_w' (id=947) exiting
+  swo wake: cpus=4 workers=8 moves=73810 move_fail=0 runs=460993 bad_gen=0 two_cpus=0
+  [ITER 79/200]  [PASS] test_wake_during_switch_out (311337 us)
+[INFO] Task 'swo_m' (id=963) exiting
+[INFO] Task 'swo_w' (id=958) exiting
+  swo wake: cpus=4 workers=8 moves=73528 move_fail=0 runs=460967 bad_gen=0 two_cpus=0
+  [ITER 80/200]  [PASS] test_wake_during_switch_out (311338 us)
+[INFO] Task 'swo_m' (id=975) exiting
+[INFO] Task 'swo_w' (id=972) exiting
+  swo wake: cpus=4 workers=8 moves=72871 move_fail=0 runs=461248 bad_gen=0 two_cpus=0
+  [ITER 81/200]  [PASS] test_wake_during_switch_out (311335 us)
+[INFO] Task 'swo_m' (id=987) exiting
+[INFO] Task 'swo_w' (id=982) exiting
+[INFO] Task 'swo_w' (id=986) exiting
+  swo wake: cpus=4 workers=8 moves=73530 move_fail=0 runs=462364 bad_gen=0 two_cpus=0
+  [ITER 82/200]  [PASS] test_wake_during_switch_out (314813 us)
+[INFO] Task 'swo_m' (id=999) exiting
+[INFO] Task 'swo_w' (id=995) exiting
+  swo wake: cpus=4 workers=8 moves=71963 move_fail=0 runs=454181 bad_gen=0 two_cpus=0
+  [ITER 83/200]  [PASS] test_wake_during_switch_out (311336 us)
+[INFO] Task 'swo_m' (id=1011) exiting
+[INFO] Task 'swo_w' (id=1006) exiting
+[INFO] Task 'swo_w' (id=1010) exiting
+  swo wake: cpus=4 workers=8 moves=71568 move_fail=0 runs=454377 bad_gen=0 two_cpus=0
+  [ITER 84/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=1023) exiting
+[INFO] Task 'swo_w' (id=1018) exiting
+  swo wake: cpus=4 workers=8 moves=73374 move_fail=0 runs=459640 bad_gen=0 two_cpus=0
+  [ITER 85/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1035) exiting
+[INFO] Task 'swo_w' (id=1030) exiting
+  swo wake: cpus=4 workers=8 moves=73940 move_fail=0 runs=461310 bad_gen=0 two_cpus=0
+  [ITER 86/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=1047) exiting
+[INFO] Task 'swo_w' (id=1042) exiting
+  swo wake: cpus=4 workers=8 moves=73200 move_fail=0 runs=461391 bad_gen=0 two_cpus=0
+  [ITER 87/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1059) exiting
+[INFO] Task 'swo_w' (id=1054) exiting
+[INFO] Task 'swo_w' (id=1058) exiting
+  swo wake: cpus=4 workers=8 moves=73186 move_fail=0 runs=462034 bad_gen=0 two_cpus=0
+  [ITER 88/200]  [PASS] test_wake_during_switch_out (314902 us)
+[INFO] Task 'swo_m' (id=1071) exiting
+[INFO] Task 'swo_w' (id=1068) exiting
+  swo wake: cpus=4 workers=8 moves=72529 move_fail=0 runs=455080 bad_gen=0 two_cpus=0
+  [ITER 89/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1083) exiting
+[INFO] Task 'swo_w' (id=1078) exiting
+[INFO] Task 'swo_w' (id=1082) exiting
+  swo wake: cpus=4 workers=8 moves=72183 move_fail=0 runs=455051 bad_gen=0 two_cpus=0
+  [ITER 90/200]  [PASS] test_wake_during_switch_out (314901 us)
+[INFO] Task 'swo_m' (id=1095) exiting
+[INFO] Task 'swo_w' (id=1090) exiting
+  swo wake: cpus=4 workers=8 moves=73034 move_fail=0 runs=459688 bad_gen=0 two_cpus=0
+  [ITER 91/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1107) exiting
+[INFO] Task 'swo_w' (id=1102) exiting
+  swo wake: cpus=4 workers=8 moves=74222 move_fail=0 runs=461092 bad_gen=0 two_cpus=0
+  [ITER 92/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=1119) exiting
+  swo wake: cpus=4 workers=8 moves=73562 move_fail=0 runs=461870 bad_gen=0 two_cpus=0
+  [ITER 93/200]  [PASS] test_wake_during_switch_out (310280 us)
+[INFO] Task 'swo_m' (id=1131) exiting
+[INFO] Task 'swo_w' (id=1128) exiting
+  swo wake: cpus=4 workers=8 moves=74067 move_fail=0 runs=461310 bad_gen=0 two_cpus=0
+  [ITER 94/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1143) exiting
+[INFO] Task 'swo_w' (id=1139) exiting
+  swo wake: cpus=4 workers=8 moves=73372 move_fail=0 runs=461332 bad_gen=0 two_cpus=0
+  [ITER 95/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=1155) exiting
+[INFO] Task 'swo_w' (id=1151) exiting
+  swo wake: cpus=4 workers=8 moves=73842 move_fail=0 runs=454285 bad_gen=0 two_cpus=0
+  [ITER 96/200]  [PASS] test_wake_during_switch_out (314676 us)
+[INFO] Task 'swo_m' (id=1167) exiting
+[INFO] Task 'swo_w' (id=1162) exiting
+[INFO] Task 'swo_w' (id=1166) exiting
+  swo wake: cpus=4 workers=8 moves=72783 move_fail=0 runs=455069 bad_gen=0 two_cpus=0
+  [ITER 97/200]  [PASS] test_wake_during_switch_out (314899 us)
+[INFO] Task 'swo_m' (id=1179) exiting
+[INFO] Task 'swo_w' (id=1174) exiting
+  swo wake: cpus=4 workers=8 moves=72923 move_fail=0 runs=459594 bad_gen=0 two_cpus=0
+  [ITER 98/200]  [PASS] test_wake_during_switch_out (311517 us)
+[INFO] Task 'swo_m' (id=1191) exiting
+[INFO] Task 'swo_w' (id=1187) exiting
+  swo wake: cpus=4 workers=8 moves=73493 move_fail=0 runs=460338 bad_gen=0 two_cpus=0
+  [ITER 99/200]  [PASS] test_wake_during_switch_out (311509 us)
+[INFO] Task 'swo_m' (id=1203) exiting
+[INFO] Task 'swo_w' (id=1198) exiting
+  swo wake: cpus=4 workers=8 moves=73008 move_fail=0 runs=461187 bad_gen=0 two_cpus=0
+  [ITER 100/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1215) exiting
+[INFO] Task 'swo_w' (id=1211) exiting
+  swo wake: cpus=4 workers=8 moves=73849 move_fail=0 runs=461898 bad_gen=0 two_cpus=0
+  [ITER 101/200]  [PASS] test_wake_during_switch_out (315136 us)
+[INFO] Task 'swo_m' (id=1227) exiting
+[INFO] Task 'swo_w' (id=1222) exiting
+[INFO] Task 'swo_w' (id=1226) exiting
+  swo wake: cpus=4 workers=8 moves=72089 move_fail=0 runs=455054 bad_gen=0 two_cpus=0
+  [ITER 102/200]  [PASS] test_wake_during_switch_out (314900 us)
+[INFO] Task 'swo_m' (id=1239) exiting
+[INFO] Task 'swo_w' (id=1234) exiting
+  swo wake: cpus=4 workers=8 moves=73066 move_fail=0 runs=460076 bad_gen=0 two_cpus=0
+  [ITER 103/200]  [PASS] test_wake_during_switch_out (311519 us)
+[INFO] Task 'swo_m' (id=1251) exiting
+[INFO] Task 'swo_w' (id=1246) exiting
+  swo wake: cpus=4 workers=8 moves=72774 move_fail=0 runs=459847 bad_gen=0 two_cpus=0
+  [ITER 104/200]  [PASS] test_wake_during_switch_out (311516 us)
+[INFO] Task 'swo_m' (id=1263) exiting
+[INFO] Task 'swo_w' (id=1258) exiting
+  swo wake: cpus=4 workers=8 moves=74057 move_fail=0 runs=461917 bad_gen=0 two_cpus=0
+  [ITER 105/200]  [PASS] test_wake_during_switch_out (311509 us)
+[INFO] Task 'swo_m' (id=1275) exiting
+[INFO] Task 'swo_w' (id=1272) exiting
+  swo wake: cpus=4 workers=8 moves=73338 move_fail=0 runs=462169 bad_gen=0 two_cpus=0
+  [ITER 106/200]  [PASS] test_wake_during_switch_out (314795 us)
+[INFO] Task 'swo_m' (id=1287) exiting
+[INFO] Task 'swo_w' (id=1282) exiting
+[INFO] Task 'swo_w' (id=1286) exiting
+  swo wake: cpus=4 workers=8 moves=72831 move_fail=0 runs=455600 bad_gen=0 two_cpus=0
+  [ITER 107/200]  [PASS] test_wake_during_switch_out (314900 us)
+[INFO] Task 'swo_m' (id=1299) exiting
+[INFO] Task 'swo_w' (id=1294) exiting
+  swo wake: cpus=4 workers=8 moves=73619 move_fail=0 runs=459940 bad_gen=0 two_cpus=0
+  [ITER 108/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=1311) exiting
+[INFO] Task 'swo_w' (id=1306) exiting
+  swo wake: cpus=4 workers=8 moves=73124 move_fail=0 runs=460791 bad_gen=0 two_cpus=0
+  [ITER 109/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1323) exiting
+[INFO] Task 'swo_w' (id=1318) exiting
+  swo wake: cpus=4 workers=8 moves=72917 move_fail=0 runs=461177 bad_gen=0 two_cpus=0
+  [ITER 110/200]  [PASS] test_wake_during_switch_out (311518 us)
+[INFO] Task 'swo_m' (id=1335) exiting
+[INFO] Task 'swo_w' (id=1331) exiting
+  swo wake: cpus=4 workers=8 moves=73464 move_fail=0 runs=462847 bad_gen=0 two_cpus=0
+  [ITER 111/200]  [PASS] test_wake_during_switch_out (314789 us)
+[INFO] Task 'swo_m' (id=1347) exiting
+[INFO] Task 'swo_w' (id=1342) exiting
+[INFO] Task 'swo_w' (id=1346) exiting
+  swo wake: cpus=4 workers=8 moves=71596 move_fail=0 runs=454437 bad_gen=0 two_cpus=0
+  [ITER 112/200]  [PASS] test_wake_during_switch_out (314899 us)
+[INFO] Task 'swo_m' (id=1359) exiting
+[INFO] Task 'swo_w' (id=1354) exiting
+  swo wake: cpus=4 workers=8 moves=72741 move_fail=0 runs=459475 bad_gen=0 two_cpus=0
+  [ITER 113/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1371) exiting
+[INFO] Task 'swo_w' (id=1367) exiting
+  swo wake: cpus=4 workers=8 moves=73257 move_fail=0 runs=460756 bad_gen=0 two_cpus=0
+  [ITER 114/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1383) exiting
+[INFO] Task 'swo_w' (id=1380) exiting
+  swo wake: cpus=4 workers=8 moves=73010 move_fail=0 runs=460833 bad_gen=0 two_cpus=0
+  [ITER 115/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1395) exiting
+[INFO] Task 'swo_w' (id=1390) exiting
+[INFO] Task 'swo_w' (id=1394) exiting
+  swo wake: cpus=4 workers=8 moves=73561 move_fail=0 runs=462109 bad_gen=0 two_cpus=0
+  [ITER 116/200]  [PASS] test_wake_during_switch_out (314894 us)
+[INFO] Task 'swo_m' (id=1407) exiting
+[INFO] Task 'swo_w' (id=1403) exiting
+  swo wake: cpus=4 workers=8 moves=71962 move_fail=0 runs=454903 bad_gen=0 two_cpus=0
+  [ITER 117/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1419) exiting
+[INFO] Task 'swo_w' (id=1416) exiting
+  swo wake: cpus=4 workers=8 moves=72216 move_fail=0 runs=455547 bad_gen=0 two_cpus=0
+  [ITER 118/200]  [PASS] test_wake_during_switch_out (311517 us)
+[INFO] Task 'swo_m' (id=1431) exiting
+[INFO] Task 'swo_w' (id=1428) exiting
+  swo wake: cpus=4 workers=8 moves=73124 move_fail=0 runs=456090 bad_gen=0 two_cpus=0
+  [ITER 119/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=1443) exiting
+[INFO] Task 'swo_w' (id=1440) exiting
+  swo wake: cpus=4 workers=8 moves=72439 move_fail=0 runs=457324 bad_gen=0 two_cpus=0
+  [ITER 120/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=1455) exiting
+[INFO] Task 'swo_w' (id=1450) exiting
+  swo wake: cpus=4 workers=8 moves=72634 move_fail=0 runs=458220 bad_gen=0 two_cpus=0
+  [ITER 121/200]  [PASS] test_wake_during_switch_out (311517 us)
+[INFO] Task 'swo_m' (id=1467) exiting
+[INFO] Task 'swo_w' (id=1464) exiting
+  swo wake: cpus=4 workers=8 moves=72699 move_fail=0 runs=459123 bad_gen=0 two_cpus=0
+  [ITER 122/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1479) exiting
+[INFO] Task 'swo_w' (id=1476) exiting
+  swo wake: cpus=4 workers=8 moves=73921 move_fail=0 runs=460590 bad_gen=0 two_cpus=0
+  [ITER 123/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=1491) exiting
+[INFO] Task 'swo_w' (id=1487) exiting
+  swo wake: cpus=4 workers=8 moves=73092 move_fail=0 runs=461011 bad_gen=0 two_cpus=0
+  [ITER 124/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=1503) exiting
+[INFO] Task 'swo_w' (id=1499) exiting
+  swo wake: cpus=4 workers=8 moves=74095 move_fail=0 runs=462073 bad_gen=0 two_cpus=0
+  [ITER 125/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1515) exiting
+[INFO] Task 'swo_w' (id=1510) exiting
+[INFO] Task 'swo_w' (id=1514) exiting
+  swo wake: cpus=4 workers=8 moves=72832 move_fail=0 runs=453779 bad_gen=0 two_cpus=0
+  [ITER 126/200]  [PASS] test_wake_during_switch_out (314896 us)
+[INFO] Task 'swo_m' (id=1527) exiting
+[INFO] Task 'swo_w' (id=1523) exiting
+  swo wake: cpus=4 workers=8 moves=71655 move_fail=0 runs=454765 bad_gen=0 two_cpus=0
+  [ITER 127/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1539) exiting
+[INFO] Task 'swo_w' (id=1536) exiting
+  swo wake: cpus=4 workers=8 moves=73098 move_fail=0 runs=456301 bad_gen=0 two_cpus=0
+  [ITER 128/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1551) exiting
+[INFO] Task 'swo_w' (id=1547) exiting
+  swo wake: cpus=4 workers=8 moves=72009 move_fail=0 runs=456465 bad_gen=0 two_cpus=0
+  [ITER 129/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1563) exiting
+[INFO] Task 'swo_w' (id=1559) exiting
+  swo wake: cpus=4 workers=8 moves=71796 move_fail=0 runs=456847 bad_gen=0 two_cpus=0
+  [ITER 130/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1575) exiting
+[INFO] Task 'swo_w' (id=1570) exiting
+  swo wake: cpus=4 workers=8 moves=73222 move_fail=0 runs=458261 bad_gen=0 two_cpus=0
+  [ITER 131/200]  [PASS] test_wake_during_switch_out (311518 us)
+[INFO] Task 'swo_m' (id=1587) exiting
+[INFO] Task 'swo_w' (id=1583) exiting
+  swo wake: cpus=4 workers=8 moves=73069 move_fail=0 runs=459183 bad_gen=0 two_cpus=0
+  [ITER 132/200]  [PASS] test_wake_during_switch_out (311516 us)
+[INFO] Task 'swo_m' (id=1599) exiting
+[INFO] Task 'swo_w' (id=1594) exiting
+  swo wake: cpus=4 workers=8 moves=73009 move_fail=0 runs=459803 bad_gen=0 two_cpus=0
+  [ITER 133/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=1611) exiting
+[INFO] Task 'swo_w' (id=1608) exiting
+  swo wake: cpus=4 workers=8 moves=74427 move_fail=0 runs=461127 bad_gen=0 two_cpus=0
+  [ITER 134/200]  [PASS] test_wake_during_switch_out (311518 us)
+[INFO] Task 'swo_m' (id=1623) exiting
+[INFO] Task 'swo_w' (id=1618) exiting
+  swo wake: cpus=4 workers=8 moves=74277 move_fail=0 runs=462040 bad_gen=0 two_cpus=0
+  [ITER 135/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1635) exiting
+[INFO] Task 'swo_w' (id=1630) exiting
+[INFO] Task 'swo_w' (id=1634) exiting
+  swo wake: cpus=4 workers=8 moves=72778 move_fail=0 runs=454796 bad_gen=0 two_cpus=0
+  [ITER 136/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=1647) exiting
+[INFO] Task 'swo_w' (id=1644) exiting
+  swo wake: cpus=4 workers=8 moves=72735 move_fail=0 runs=455555 bad_gen=0 two_cpus=0
+  [ITER 137/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1659) exiting
+[INFO] Task 'swo_w' (id=1654) exiting
+[INFO] Task 'swo_w' (id=1658) exiting
+  swo wake: cpus=4 workers=8 moves=73024 move_fail=0 runs=456578 bad_gen=0 two_cpus=0
+  [ITER 138/200]  [PASS] test_wake_during_switch_out (314901 us)
+[INFO] Task 'swo_m' (id=1671) exiting
+[INFO] Task 'swo_w' (id=1667) exiting
+  swo wake: cpus=4 workers=8 moves=73699 move_fail=0 runs=461083 bad_gen=0 two_cpus=0
+  [ITER 139/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1683) exiting
+[INFO] Task 'swo_w' (id=1678) exiting
+  swo wake: cpus=4 workers=8 moves=73774 move_fail=0 runs=461219 bad_gen=0 two_cpus=0
+  [ITER 140/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=1695) exiting
+[INFO] Task 'swo_w' (id=1690) exiting
+[INFO] Task 'swo_w' (id=1694) exiting
+  swo wake: cpus=4 workers=8 moves=70012 move_fail=0 runs=449777 bad_gen=0 two_cpus=0
+  [ITER 141/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=1707) exiting
+[INFO] Task 'swo_w' (id=1702) exiting
+[INFO] Task 'swo_w' (id=1706) exiting
+  swo wake: cpus=4 workers=8 moves=71611 move_fail=0 runs=455635 bad_gen=0 two_cpus=0
+  [ITER 142/200]  [PASS] test_wake_during_switch_out (314899 us)
+[INFO] Task 'swo_m' (id=1719) exiting
+[INFO] Task 'swo_w' (id=1716) exiting
+  swo wake: cpus=4 workers=8 moves=73006 move_fail=0 runs=460339 bad_gen=0 two_cpus=0
+  [ITER 143/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1731) exiting
+[INFO] Task 'swo_w' (id=1726) exiting
+  swo wake: cpus=4 workers=8 moves=73038 move_fail=0 runs=461162 bad_gen=0 two_cpus=0
+  [ITER 144/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1743) exiting
+[INFO] Task 'swo_w' (id=1738) exiting
+  swo wake: cpus=4 workers=8 moves=73326 move_fail=0 runs=461867 bad_gen=0 two_cpus=0
+  [ITER 145/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1755) exiting
+[INFO] Task 'swo_w' (id=1750) exiting
+[INFO] Task 'swo_w' (id=1754) exiting
+  swo wake: cpus=4 workers=8 moves=71217 move_fail=0 runs=449545 bad_gen=0 two_cpus=0
+  [ITER 146/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=1767) exiting
+[INFO] Task 'swo_w' (id=1763) exiting
+  swo wake: cpus=4 workers=8 moves=72393 move_fail=0 runs=455428 bad_gen=0 two_cpus=0
+  [ITER 147/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=1779) exiting
+[INFO] Task 'swo_w' (id=1774) exiting
+[INFO] Task 'swo_w' (id=1778) exiting
+  swo wake: cpus=4 workers=8 moves=72283 move_fail=0 runs=455822 bad_gen=0 two_cpus=0
+  [ITER 148/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=1791) exiting
+[INFO] Task 'swo_w' (id=1786) exiting
+  swo wake: cpus=4 workers=8 moves=72809 move_fail=0 runs=460552 bad_gen=0 two_cpus=0
+  [ITER 149/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=1803) exiting
+[INFO] Task 'swo_w' (id=1798) exiting
+[INFO] Task 'swo_w' (id=1802) exiting
+  swo wake: cpus=4 workers=8 moves=74390 move_fail=0 runs=462108 bad_gen=0 two_cpus=0
+  [ITER 150/200]  [PASS] test_wake_during_switch_out (315084 us)
+[INFO] Task 'swo_m' (id=1815) exiting
+[INFO] Task 'swo_w' (id=1812) exiting
+  swo wake: cpus=4 workers=8 moves=72069 move_fail=0 runs=454708 bad_gen=0 two_cpus=0
+  [ITER 151/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1827) exiting
+[INFO] Task 'swo_w' (id=1823) exiting
+  swo wake: cpus=4 workers=8 moves=72110 move_fail=0 runs=455460 bad_gen=0 two_cpus=0
+  [ITER 152/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1839) exiting
+[INFO] Task 'swo_w' (id=1836) exiting
+  swo wake: cpus=4 workers=8 moves=72400 move_fail=0 runs=456331 bad_gen=0 two_cpus=0
+  [ITER 153/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=1851) exiting
+[INFO] Task 'swo_w' (id=1846) exiting
+[INFO] Task 'swo_w' (id=1850) exiting
+  swo wake: cpus=4 workers=8 moves=72581 move_fail=0 runs=457103 bad_gen=0 two_cpus=0
+  [ITER 154/200]  [PASS] test_wake_during_switch_out (314897 us)
+[INFO] Task 'swo_m' (id=1863) exiting
+[INFO] Task 'swo_w' (id=1858) exiting
+[INFO] Task 'swo_w' (id=1862) exiting
+  swo wake: cpus=4 workers=8 moves=73651 move_fail=0 runs=462158 bad_gen=0 two_cpus=0
+  [ITER 155/200]  [PASS] test_wake_during_switch_out (314900 us)
+[INFO] Task 'swo_m' (id=1875) exiting
+[INFO] Task 'swo_w' (id=1870) exiting
+[INFO] Task 'swo_w' (id=1874) exiting
+  swo wake: cpus=4 workers=8 moves=71620 move_fail=0 runs=454842 bad_gen=0 two_cpus=0
+  [ITER 156/200]  [PASS] test_wake_during_switch_out (314903 us)
+[INFO] Task 'swo_m' (id=1887) exiting
+[INFO] Task 'swo_w' (id=1883) exiting
+  swo wake: cpus=4 workers=8 moves=73394 move_fail=0 runs=459949 bad_gen=0 two_cpus=0
+  [ITER 157/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=1899) exiting
+[INFO] Task 'swo_w' (id=1894) exiting
+  swo wake: cpus=4 workers=8 moves=73377 move_fail=0 runs=460760 bad_gen=0 two_cpus=0
+  [ITER 158/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=1911) exiting
+[INFO] Task 'swo_w' (id=1906) exiting
+  swo wake: cpus=4 workers=8 moves=74088 move_fail=0 runs=461751 bad_gen=0 two_cpus=0
+  [ITER 159/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=1923) exiting
+[INFO] Task 'swo_w' (id=1919) exiting
+  swo wake: cpus=4 workers=8 moves=72858 move_fail=0 runs=454143 bad_gen=0 two_cpus=0
+  [ITER 160/200]  [PASS] test_wake_during_switch_out (314704 us)
+[INFO] Task 'swo_m' (id=1935) exiting
+[INFO] Task 'swo_w' (id=1931) exiting
+  swo wake: cpus=4 workers=8 moves=71753 move_fail=0 runs=454596 bad_gen=0 two_cpus=0
+  [ITER 161/200]  [PASS] test_wake_during_switch_out (311509 us)
+[INFO] Task 'swo_m' (id=1947) exiting
+[INFO] Task 'swo_w' (id=1942) exiting
+[INFO] Task 'swo_w' (id=1946) exiting
+  swo wake: cpus=4 workers=8 moves=73475 move_fail=0 runs=456192 bad_gen=0 two_cpus=0
+  [ITER 162/200]  [PASS] test_wake_during_switch_out (314901 us)
+[INFO] Task 'swo_m' (id=1959) exiting
+[INFO] Task 'swo_w' (id=1955) exiting
+  swo wake: cpus=4 workers=8 moves=73533 move_fail=0 runs=460694 bad_gen=0 two_cpus=0
+  [ITER 163/200]  [PASS] test_wake_during_switch_out (311509 us)
+[INFO] Task 'swo_m' (id=1971) exiting
+[INFO] Task 'swo_w' (id=1966) exiting
+  swo wake: cpus=4 workers=8 moves=73596 move_fail=0 runs=461610 bad_gen=0 two_cpus=0
+  [ITER 164/200]  [PASS] test_wake_during_switch_out (311514 us)
+[INFO] Task 'swo_m' (id=1983) exiting
+[INFO] Task 'swo_w' (id=1978) exiting
+[INFO] Task 'swo_w' (id=1982) exiting
+  swo wake: cpus=4 workers=8 moves=74232 move_fail=0 runs=462895 bad_gen=0 two_cpus=0
+  [ITER 165/200]  [PASS] test_wake_during_switch_out (314897 us)
+[INFO] Task 'swo_m' (id=1995) exiting
+[INFO] Task 'swo_w' (id=1991) exiting
+  swo wake: cpus=4 workers=8 moves=72041 move_fail=0 runs=454954 bad_gen=0 two_cpus=0
+  [ITER 166/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=2007) exiting
+[INFO] Task 'swo_w' (id=2003) exiting
+  swo wake: cpus=4 workers=8 moves=72748 move_fail=0 runs=455411 bad_gen=0 two_cpus=0
+  [ITER 167/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=2019) exiting
+[INFO] Task 'swo_w' (id=2014) exiting
+[INFO] Task 'swo_w' (id=2018) exiting
+  swo wake: cpus=4 workers=8 moves=72115 move_fail=0 runs=456609 bad_gen=0 two_cpus=0
+  [ITER 168/200]  [PASS] test_wake_during_switch_out (314897 us)
+[INFO] Task 'swo_m' (id=2031) exiting
+[INFO] Task 'swo_w' (id=2026) exiting
+  swo wake: cpus=4 workers=8 moves=73427 move_fail=0 runs=461886 bad_gen=0 two_cpus=0
+  [ITER 169/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=2043) exiting
+[INFO] Task 'swo_w' (id=2039) exiting
+  swo wake: cpus=4 workers=8 moves=72873 move_fail=0 runs=454153 bad_gen=0 two_cpus=0
+  [ITER 170/200]  [PASS] test_wake_during_switch_out (314712 us)
+[INFO] Task 'swo_m' (id=2055) exiting
+[INFO] Task 'swo_w' (id=2051) exiting
+  swo wake: cpus=4 workers=8 moves=72695 move_fail=0 runs=454781 bad_gen=0 two_cpus=0
+  [ITER 171/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=2067) exiting
+[INFO] Task 'swo_w' (id=2064) exiting
+  swo wake: cpus=4 workers=8 moves=72653 move_fail=0 runs=456323 bad_gen=0 two_cpus=0
+  [ITER 172/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=2079) exiting
+[INFO] Task 'swo_w' (id=2074) exiting
+[INFO] Task 'swo_w' (id=2078) exiting
+  swo wake: cpus=4 workers=8 moves=73698 move_fail=0 runs=456699 bad_gen=0 two_cpus=0
+  [ITER 173/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=2091) exiting
+[INFO] Task 'swo_w' (id=2086) exiting
+  swo wake: cpus=4 workers=8 moves=72666 move_fail=0 runs=460753 bad_gen=0 two_cpus=0
+  [ITER 174/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=2103) exiting
+[INFO] Task 'swo_w' (id=2098) exiting
+[INFO] Task 'swo_w' (id=2102) exiting
+  swo wake: cpus=4 workers=8 moves=74076 move_fail=0 runs=462307 bad_gen=0 two_cpus=0
+  [ITER 175/200]  [PASS] test_wake_during_switch_out (314901 us)
+[INFO] Task 'swo_m' (id=2115) exiting
+[INFO] Task 'swo_w' (id=2111) exiting
+  swo wake: cpus=4 workers=8 moves=72691 move_fail=0 runs=455241 bad_gen=0 two_cpus=0
+  [ITER 176/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=2127) exiting
+[INFO] Task 'swo_w' (id=2122) exiting
+[INFO] Task 'swo_w' (id=2126) exiting
+  swo wake: cpus=4 workers=8 moves=72504 move_fail=0 runs=455850 bad_gen=0 two_cpus=0
+  [ITER 177/200]  [PASS] test_wake_during_switch_out (314896 us)
+[INFO] Task 'swo_m' (id=2139) exiting
+[INFO] Task 'swo_w' (id=2135) exiting
+  swo wake: cpus=4 workers=8 moves=72790 move_fail=0 runs=460504 bad_gen=0 two_cpus=0
+  [ITER 178/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=2151) exiting
+[INFO] Task 'swo_w' (id=2146) exiting
+  swo wake: cpus=4 workers=8 moves=73737 move_fail=0 runs=461877 bad_gen=0 two_cpus=0
+  [ITER 179/200]  [PASS] test_wake_during_switch_out (311516 us)
+[INFO] Task 'swo_m' (id=2163) exiting
+[INFO] Task 'swo_w' (id=2158) exiting
+[INFO] Task 'swo_w' (id=2162) exiting
+  swo wake: cpus=4 workers=8 moves=72404 move_fail=0 runs=454440 bad_gen=0 two_cpus=0
+  [ITER 180/200]  [PASS] test_wake_during_switch_out (314895 us)
+[INFO] Task 'swo_m' (id=2175) exiting
+[INFO] Task 'swo_w' (id=2171) exiting
+  swo wake: cpus=4 workers=8 moves=72499 move_fail=0 runs=455201 bad_gen=0 two_cpus=0
+  [ITER 181/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=2187) exiting
+[INFO] Task 'swo_w' (id=2182) exiting
+[INFO] Task 'swo_w' (id=2186) exiting
+  swo wake: cpus=4 workers=8 moves=72845 move_fail=0 runs=456042 bad_gen=0 two_cpus=0
+  [ITER 182/200]  [PASS] test_wake_during_switch_out (314901 us)
+[INFO] Task 'swo_m' (id=2199) exiting
+[INFO] Task 'swo_w' (id=2195) exiting
+  swo wake: cpus=4 workers=8 moves=73189 move_fail=0 runs=460528 bad_gen=0 two_cpus=0
+  [ITER 183/200]  [PASS] test_wake_during_switch_out (311510 us)
+[INFO] Task 'swo_m' (id=2211) exiting
+[INFO] Task 'swo_w' (id=2208) exiting
+  swo wake: cpus=4 workers=8 moves=73323 move_fail=0 runs=461397 bad_gen=0 two_cpus=0
+  [ITER 184/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=2223) exiting
+[INFO] Task 'swo_w' (id=2218) exiting
+[INFO] Task 'swo_w' (id=2222) exiting
+  swo wake: cpus=4 workers=8 moves=71643 move_fail=0 runs=450328 bad_gen=0 two_cpus=0
+  [ITER 185/200]  [PASS] test_wake_during_switch_out (314899 us)
+[INFO] Task 'swo_m' (id=2235) exiting
+[INFO] Task 'swo_w' (id=2232) exiting
+  swo wake: cpus=4 workers=8 moves=72867 move_fail=0 runs=454669 bad_gen=0 two_cpus=0
+  [ITER 186/200]  [PASS] test_wake_during_switch_out (320040 us)
+[INFO] Task 'swo_m' (id=2247) exiting
+[INFO] Task 'swo_w' (id=2242) exiting
+[INFO] Task 'swo_w' (id=2246) exiting
+  swo wake: cpus=4 workers=8 moves=72806 move_fail=0 runs=454474 bad_gen=0 two_cpus=0
+  [ITER 187/200]  [PASS] test_wake_during_switch_out (314896 us)
+[INFO] Task 'swo_m' (id=2259) exiting
+[INFO] Task 'swo_w' (id=2254) exiting
+  swo wake: cpus=4 workers=8 moves=72667 move_fail=0 runs=458797 bad_gen=0 two_cpus=0
+  [ITER 188/200]  [PASS] test_wake_during_switch_out (311515 us)
+[INFO] Task 'swo_m' (id=2271) exiting
+[INFO] Task 'swo_w' (id=2267) exiting
+  swo wake: cpus=4 workers=8 moves=73028 move_fail=0 runs=459912 bad_gen=0 two_cpus=0
+  [ITER 189/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=2283) exiting
+[INFO] Task 'swo_w' (id=2280) exiting
+  swo wake: cpus=4 workers=8 moves=73275 move_fail=0 runs=460750 bad_gen=0 two_cpus=0
+  [ITER 190/200]  [PASS] test_wake_during_switch_out (311509 us)
+[INFO] Task 'swo_m' (id=2295) exiting
+[INFO] Task 'swo_w' (id=2290) exiting
+  swo wake: cpus=4 workers=8 moves=73208 move_fail=0 runs=461699 bad_gen=0 two_cpus=0
+  [ITER 191/200]  [PASS] test_wake_during_switch_out (311511 us)
+[INFO] Task 'swo_m' (id=2307) exiting
+[INFO] Task 'swo_w' (id=2303) exiting
+  swo wake: cpus=4 workers=8 moves=73221 move_fail=0 runs=454306 bad_gen=0 two_cpus=0
+  [ITER 192/200]  [PASS] test_wake_during_switch_out (314654 us)
+[INFO] Task 'swo_m' (id=2319) exiting
+[INFO] Task 'swo_w' (id=2315) exiting
+  swo wake: cpus=4 workers=8 moves=71696 move_fail=0 runs=454570 bad_gen=0 two_cpus=0
+  [ITER 193/200]  [PASS] test_wake_during_switch_out (311512 us)
+[INFO] Task 'swo_m' (id=2331) exiting
+[INFO] Task 'swo_w' (id=2326) exiting
+[INFO] Task 'swo_w' (id=2330) exiting
+  swo wake: cpus=4 workers=8 moves=72653 move_fail=0 runs=455924 bad_gen=0 two_cpus=0
+  [ITER 194/200]  [PASS] test_wake_during_switch_out (314899 us)
+[INFO] Task 'swo_m' (id=2343) exiting
+[INFO] Task 'swo_w' (id=2340) exiting
+  swo wake: cpus=4 workers=8 moves=73892 move_fail=0 runs=460525 bad_gen=0 two_cpus=0
+  [ITER 195/200]  [PASS] test_wake_during_switch_out (311508 us)
+[INFO] Task 'swo_m' (id=2355) exiting
+[INFO] Task 'swo_w' (id=2351) exiting
+  swo wake: cpus=4 workers=8 moves=74138 move_fail=0 runs=462014 bad_gen=0 two_cpus=0
+  [ITER 196/200]  [PASS] test_wake_during_switch_out (311513 us)
+[INFO] Task 'swo_m' (id=2367) exiting
+[INFO] Task 'swo_w' (id=2364) exiting
+  swo wake: cpus=4 workers=8 moves=73402 move_fail=0 runs=461756 bad_gen=0 two_cpus=0
+  [ITER 197/200]  [PASS] test_wake_during_switch_out (314806 us)
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2379) exiting
+[INFO] Task 'swo_w' (id=2374) exiting
+[INFO] Task 'swo_w' (id=2378) exiting
+  swo wake: cpus=4 workers=8 moves=72182 move_fail=0 runs=455014 bad_gen=0 two_cpus=0
+  [ITER 198/200]  [PASS] test_wake_during_switch_out (314900 us)
+[INFO] Task 'swo_m' (id=2391) exiting
+[INFO] Task 'swo_w' (id=2387) exiting
+  swo wake: cpus=4 workers=8 moves=74437 move_fail=0 runs=460578 bad_gen=0 two_cpus=0
+  [ITER 199/200]  [PASS] test_wake_during_switch_out (311516 us)
+[INFO] Task 'swo_m' (id=2403) exiting
+[INFO] Task 'swo_w' (id=2398) exiting
+  swo wake: cpus=4 workers=8 moves=73875 move_fail=0 runs=460942 bad_gen=0 two_cpus=0
+  [ITER 200/200]  [PASS] test_wake_during_switch_out (311514 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_wake_during_switch_out: runs=200 passed=200 failed=0 ignored=0 us min=310280 avg=312465 max=320040
+
+========================================
+Test Suite Summary
+========================================
+[PASS] All test suites passed!
+[I

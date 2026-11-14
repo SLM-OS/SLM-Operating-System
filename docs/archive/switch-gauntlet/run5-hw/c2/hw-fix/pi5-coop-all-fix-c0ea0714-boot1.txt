@@ -1,0 +1,3501 @@
+# C2 run5: pi-5-1 fix head c0ea0714 COOP build (SECONDARY_PREEMPT=OFF): R3 migrate, R3 wake, R2 x100
+# source: /var/lib/labctl/output/s5-c2-pi5-fix-coop/run_01.txt (labctl boot_test output, full serial from power-on)
+# banner: build 20261114070959 (c0ea0714)
+# filter: [FILTER] tests=test_migrate_ready_during_switch_out,test_wake_during_switch_out,test_preempt_flag_follows_migrated_task repeat=100 source=build
+# summary: [FILTER] [PASS] test_migrate_ready_during_switch_out: runs=100 passed=100 failed=0 ignored=0 us min=308479 avg=315617 max=322339 [FILTER] [PASS] test_wake_during_switch_out: runs=100 passed=100 failed=0 ignored=0 us min=307956 avg=308097 max=308138 [FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=100 passed=100 failed=0 ignored=0 us min=36649 avg=42237 max=56662 
+# ---- serial ----
+
+========================================
+  SLM-OS v0.4.0 build 20261114070959 (c0ea0714)
+  Small Language Model Operating System
+========================================
+
+[INFO] Boot successful
+[INFO] Boot source: direct load
+[INFO] Running at EL2 (VHE) on Raspberry Pi 5
+[INFO] DTB parsed successfully at 0x2efec700
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x0 - 0x100000000 (4096 MB)
+  UART:      0x1f00030000 (IRQ 185)
+  GIC dist:  0x107fff9000
+  GIC cpu:   0x107fffa000
+  CPUs:      4
+  Timer IRQ: 26
+  /memreserve/:
+    [0] 0x3fc00000 + 0x400000
+  Bootloader:
+    version:      2682625908f5585e5f4832bb82e74e7d757ec48f
+    capabilities: 0x7f
+    build-ts:     0x66f16700
+  Firmware entropy: rng-seed=64 B, kaslr-seed=8 B
+
+Memory Layout:
+  .text:   0x80000 - 0x2b11d8
+  .data:   0x8e5000 - 0x909250
+  .bss:    0x910000 - 0x2b9e7b0
+  End:     0x2ba3000
+  RAM:     0x0 - 0x100000000 (4096 MB)
+
+[INFO] Initializing VMM...
+[INFO] Enabling MMU...
+[INFO] MMU enabled successfully
+[INFO] Spinlock hardware enabled (exclusive monitor active)
+
+VMM Page Table Dump:
+  L1 table at: 0xa2f000
+  Blocks mapped: 2057
+  Bytes mapped: 4114 MB
+  L1[0]: 0x4000000000070d (covers VA 0x0)
+  L1[1]: 0x4000004000070d (covers VA 0x40000000)
+  L1[2]: 0x4000008000070d (covers VA 0x80000000)
+  L1[3]: 0xa2b003 (covers VA 0xc0000000)
+  L1[64]: 0xa2e003 (covers VA 0x1000000000)
+  L1[65]: 0xa2d003 (covers VA 0x1040000000)
+  L1[110]: 0xa2a003 (covers VA 0x1b80000000)
+  L1[124]: 0xa2c003 (covers VA 0x1f00000000)
+
+VMM Validation Tests:
+  [PASS] virt_to_phys(0x0) = 0x0
+  [PASS] virt_to_phys(0xffffff8000000000) = 0x0
+  [PASS] is_mapped(0x0) = true
+  [PASS] is_mapped(0x140000000) = false
+  [PASS] Write via TTBR1, read via TTBR0 works
+  [SKIP] Dynamic map test: all RAM mapped at boot
+
+[INFO] VMM tests passed
+
+[INFO] PMM initialized (buddy allocator)
+
+PMM Statistics (Buddy Allocator):
+  Heap range:      0x2ba3000 - 0xffe00000
+  Total pages:     1036893 (4147572 KB)
+  Free pages:      1035869 (4143476 KB)
+  Used pages:      1024 (4096 KB)
+  Reserved:        11171 pages (kernel)
+
+  Free list distribution:
+    Order  0 (    4 KB): 1 blocks
+    Order  2 (   16 KB): 1 blocks
+    Order  3 (   32 KB): 1 blocks
+    Order  4 (   64 KB): 1 blocks
+    Order  6 (  256 KB): 1 blocks
+    Order  9 ( 2048 KB): 1 blocks
+    Order 10 ( 4096 KB): 3 blocks
+    Order 11 ( 8192 KB): 2 blocks
+    Order 12 (16384 KB): 3 blocks
+    Order 13 (32768 KB): 2 blocks
+    Order 14 (65536 KB): 3 blocks
+    Order 15 (131072 KB): 3 blocks
+    Order 16 (262144 KB): 3 blocks
+    Order 17 (524288 KB): 1 blocks
+    Order 18 (1048576 KB): 2 blocks
+
+  Operations:
+    Allocations: 0
+    Frees:       0
+    Splits:      0
+    Merges:      0
+[INFO] NC memory: 0xffe00000 - 0x100000000 (2048 KB)
+[INFO] NC memory: clean+invalidate by VA, 32768 lines of 64 B, 6161 us; 0 changed, 0 restored in the first 4 KB (hash 0x1665006763620925 -> 0x1665006763620925)
+[oplib] embedded blob: 308544 B, op_count=33
+
+[INFO] Initializing GIC...
+[INFO] Initializing GICv2
+[INFO] GIC initialized
+[INFO] Initializing timer...
+[INFO] Timer initializing
+[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)
+[INFO] Initializing RNG...
+[RNG] init: source=jitter rng_seed=64B kaslr_seed=8B
+
+[INFO] SMP: initializing
+
+Spinlock Validation Tests:
+  [PASS] Spinlock initialized unlocked
+  [PASS] spin_lock acquires lock
+  [PASS] spin_trylock returns 0 when lock held
+  [PASS] spin_unlock releases lock
+  [PASS] spin_trylock returns 1 when lock free
+  [PASS] Ticket lock acquire/release works
+  [PASS] IRQ save/restore works
+  [PASS] IRQ-safe spinlock works
+  [PASS] Memory barriers execute without fault
+[INFO] Spinlock tests passed
+[INFO] CPU map: 4 CPUs configured
+[INFO] SMP: 3/3 secondary CPUs online
+[INFO] SMP: total 4 CPUs active
+
+SMP Validation Tests:
+  [PASS] All 4 CPUs online
+  [PASS] CPU 0 online flag set
+  [PASS] CPU 1 online flag set
+  [PASS] CPU 2 online flag set
+  [PASS] CPU 3 online flag set
+  [PASS] CPU logical map valid
+  [PASS] Boot CPU MPIDR correct (0x0)
+[INFO] SMP tests passed
+[INFO] UART IRQ: post-init diag: MIS=0x0 INTSTAT=0x0 MIP_status=0x0 MIP_raised=0x0 GIC_ISPENDR=0x0
+[INFO] UART IRQ enabled (GIC IRQ 185 = SPI 153, RP1 vec 25)
+[INFO] Initializing VFS...
+[INFO] Initializing filesystem subsystems...
+[INFO] Block device subsystem initialized (max 8 devices)
+[INFO] LittleFS subsystem initialized
+[INFO] Created RAM disk 'ramdisk0': 32768 KB (8192 blocks x 4096 bytes)
+[INFO] Registered block device: ramdisk0 (8192 blocks x 4096 bytes = 32768 KB)
+[INFO] Formatted LittleFS on 'ramdisk0'
+[INFO] Mounted LittleFS on 'ramdisk0' (8192 blocks x 4096 bytes)
+[INFO] Mounted LittleFS at /mnt/files (device: ramdisk0)
+[INFO]   LittleFS mounted at /mnt/files (1 MB RAM fallback)
+[INFO]   Help system initialized (/mnt/files/help/)
+[INFO] Initializing Rust runtime...
+[INFO]   Rust heap: 0xe0000000 (256 MB)
+[INFO]   Rust init: OK (magic=42)
+Hello from Rust!
+[INFO] Initializing component system...
+[INFO]   Message router: OK
+[INFO] Initializing model memory...
+[INFO]   Model memory: OK (512 MB weights, 256 MB workspace)
+[INFO] Initializing GPU...
+[GPU] Registered driver: stub
+[GPU] Initializing stub driver...
+[GPU-STUB] Initializing stub driver (no GPU hardware)
+[GPU] Initialization complete
+[GPU] WARN: GA10B firmware not embedded — compute disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; see docs/troubleshooting.md "GPU acceleration silently disabled")
+[INFO] pcie1: training link (status=0x1e08f before reset)
+[INFO] pcie1: link up (status=0x3e0bf) after 0 ms
+[INFO] pcie1: RC LNKCTL 0x0000 ASPM_L0S already off
+[INFO] pcie: 01:00.0 BAR0 assigned 0x80000000 (size 0x4000)
+[INFO] pcie: 01:00.0 BAR2 assigned 0x80004000 (size 0x1000)
+[INFO] pcie: 01:00.0 BAR4 assigned 0x80008000 (size 0x4000)
+[INFO] pcie: bcm2712-pcie1 backend, 2 device(s) enumerated
+[INFO] hailo: endpoint at 01:00.0
+[INFO] hailo: endpoint LNKCTL 0x0000 ASPM_L0S already off
+[INFO] hailo: endpoint DEVCTL=0x2910 MPS=128 MRRS=512 LNKSTA=0x1012 speed=Gen2 width=x1
+[INFO] hailo: platform 'pi5-pcie1' initialized
+
+[INFO] Scheduler initialized
+[INFO] inference: registered 'cpu-mlp' (caps=0x1, id=0, default)
+[INFO] inference: registered 'hailo-8' (caps=0x1c, id=1)
+[INFO] IPC subsystem initialized
+[SHELL] Shell task started
+[INFO] Starting scheduler...
+[INFO] CPU 0: Starting scheduler
+[INFO] CPU 0: Switching to first task: 'main'
+[INFO] Starting timer (100 Hz)...
+[INFO] Enabling interrupts...
+
+########################################
+#    SLM-OS Test Suite (Unity)        #
+########################################
+
+[FILTER] tests=test_migrate_ready_during_switch_out,test_wake_during_switch_out,test_preempt_flag_follows_migrated_task repeat=100 source=build index=2898
+  pdm: migrations=37027 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 1/100]  [PASS] test_preempt_flag_follows_migrated_task (48077 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=17) exiting
+[INFO] Task 'swo_w' (id=13) exiting
+[INFO] Task 'swo_w' (id=9) exiting
+[INFO] Task 'swo_w' (id=11) exiting
+  swo migrate: cpus=4 workers=8 moves=285343 move_fail=22 runs=641599 bad_gen=0 two_cpus=0
+  [ITER 1/100]  [PASS] test_migrate_ready_during_switch_out (318044 us)
+[INFO] Task 'swo_m' (id=29) exiting
+  swo wake: cpus=4 workers=8 moves=76448 move_fail=0 runs=468000 bad_gen=0 two_cpus=0
+  [ITER 1/100]  [PASS] test_wake_during_switch_out (307956 us)
+  pdm: migrations=36969 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 2/100]  [PASS] test_preempt_flag_follows_migrated_task (47762 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=43) exiting
+[INFO] Task 'swo_w' (id=36) exiting
+[INFO] Task 'swo_w' (id=37) exiting
+  swo migrate: cpus=4 workers=8 moves=285199 move_fail=24 runs=640073 bad_gen=0 two_cpus=0
+  [ITER 2/100]  [PASS] test_migrate_ready_during_switch_out (314817 us)
+[INFO] Task 'swo_m' (id=55) exiting
+  swo wake: cpus=4 workers=8 moves=76626 move_fail=0 runs=468206 bad_gen=0 two_cpus=0
+  [ITER 2/100]  [PASS] test_wake_during_switch_out (307962 us)
+  pdm: migrations=24681 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 3/100]  [PASS] test_preempt_flag_follows_migrated_task (37759 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=69) exiting
+[INFO] Task 'swo_w' (id=64) exiting
+[INFO] Task 'swo_w' (id=62) exiting
+[INFO] Task 'swo_w' (id=68) exiting
+  swo migrate: cpus=4 workers=8 moves=284841 move_fail=25 runs=650619 bad_gen=0 two_cpus=0
+  [ITER 3/100]  [PASS] test_migrate_ready_during_switch_out (319850 us)
+[INFO] Task 'swo_m' (id=81) exiting
+  swo wake: cpus=4 workers=8 moves=75954 move_fail=0 runs=467521 bad_gen=0 two_cpus=0
+  [ITER 3/100]  [PASS] test_wake_during_switch_out (307957 us)
+  pdm: migrations=37127 moved=6 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 4/100]  [PASS] test_preempt_flag_follows_migrated_task (46741 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=95) exiting
+[INFO] Task 'swo_w' (id=94) exiting
+  swo migrate: cpus=4 workers=8 moves=285927 move_fail=19 runs=639184 bad_gen=0 two_cpus=0
+  [ITER 4/100]  [PASS] test_migrate_ready_during_switch_out (311605 us)
+[INFO] Task 'swo_m' (id=107) exiting
+  swo wake: cpus=4 workers=8 moves=76809 move_fail=0 runs=468609 bad_gen=0 two_cpus=0
+  [ITER 4/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=24788 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 5/100]  [PASS] test_preempt_flag_follows_migrated_task (37678 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=121) exiting
+[INFO] Task 'swo_w' (id=116) exiting
+[INFO] Task 'swo_w' (id=118) exiting
+  swo migrate: cpus=4 workers=8 moves=284785 move_fail=22 runs=641923 bad_gen=0 two_cpus=0
+  [ITER 5/100]  [PASS] test_migrate_ready_during_switch_out (315076 us)
+[INFO] Task 'swo_m' (id=133) exiting
+  swo wake: cpus=4 workers=8 moves=75857 move_fail=0 runs=467447 bad_gen=0 two_cpus=0
+  [ITER 5/100]  [PASS] test_wake_during_switch_out (308052 us)
+  pdm: migrations=36721 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 6/100]  [PASS] test_preempt_flag_follows_migrated_task (47667 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=147) exiting
+[INFO] Task 'swo_w' (id=143) exiting
+[INFO] Task 'swo_w' (id=145) exiting
+  swo migrate: cpus=4 workers=8 moves=285250 move_fail=12 runs=637395 bad_gen=0 two_cpus=0
+  [ITER 6/100]  [PASS] test_migrate_ready_during_switch_out (315077 us)
+[INFO] Task 'swo_m' (id=159) exiting
+  swo wake: cpus=4 workers=8 moves=77584 move_fail=0 runs=468776 bad_gen=0 two_cpus=0
+  [ITER 6/100]  [PASS] test_wake_during_switch_out (308050 us)
+  pdm: migrations=24314 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 7/100]  [PASS] test_preempt_flag_follows_migrated_task (36749 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=173) exiting
+[INFO] Task 'swo_w' (id=170) exiting
+[INFO] Task 'swo_w' (id=165) exiting
+  swo migrate: cpus=4 workers=8 moves=283929 move_fail=31 runs=653165 bad_gen=0 two_cpus=0
+  [ITER 7/100]  [PASS] test_migrate_ready_during_switch_out (317452 us)
+[INFO] Task 'swo_m' (id=185) exiting
+  swo wake: cpus=4 workers=8 moves=78742 move_fail=0 runs=469344 bad_gen=0 two_cpus=0
+  [ITER 7/100]  [PASS] test_wake_during_switch_out (308045 us)
+  pdm: migrations=24240 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 8/100]  [PASS] test_preempt_flag_follows_migrated_task (37677 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=199) exiting
+[INFO] Task 'swo_w' (id=193) exiting
+[INFO] Task 'swo_w' (id=197) exiting
+  swo migrate: cpus=4 workers=8 moves=284479 move_fail=26 runs=639796 bad_gen=0 two_cpus=0
+  [ITER 8/100]  [PASS] test_migrate_ready_during_switch_out (315080 us)
+[INFO] Task 'swo_m' (id=211) exiting
+  swo wake: cpus=4 workers=8 moves=77070 move_fail=0 runs=467553 bad_gen=0 two_cpus=0
+  [ITER 8/100]  [PASS] test_wake_during_switch_out (308041 us)
+  pdm: migrations=36252 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 9/100]  [PASS] test_preempt_flag_follows_migrated_task (47683 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=225) exiting
+[INFO] Task 'swo_w' (id=222) exiting
+[INFO] Task 'swo_w' (id=223) exiting
+  swo migrate: cpus=4 workers=8 moves=284270 move_fail=25 runs=660701 bad_gen=0 two_cpus=0
+  [ITER 9/100]  [PASS] test_migrate_ready_during_switch_out (319995 us)
+[INFO] Task 'swo_m' (id=237) exiting
+  swo wake: cpus=4 workers=8 moves=76050 move_fail=0 runs=467856 bad_gen=0 two_cpus=0
+  [ITER 9/100]  [PASS] test_wake_during_switch_out (308048 us)
+  pdm: migrations=24241 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 10/100]  [PASS] test_preempt_flag_follows_migrated_task (36746 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=251) exiting
+[INFO] Task 'swo_w' (id=243) exiting
+[INFO] Task 'swo_w' (id=248) exiting
+  swo migrate: cpus=4 workers=8 moves=284449 move_fail=22 runs=650761 bad_gen=0 two_cpus=0
+  [ITER 10/100]  [PASS] test_migrate_ready_during_switch_out (317661 us)
+[INFO] Task 'swo_m' (id=263) exiting
+  swo wake: cpus=4 workers=8 moves=77379 move_fail=0 runs=468123 bad_gen=0 two_cpus=0
+  [ITER 10/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=24289 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 11/100]  [PASS] test_preempt_flag_follows_migrated_task (36653 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=277) exiting
+  swo migrate: cpus=4 workers=8 moves=284163 move_fail=26 runs=641560 bad_gen=0 two_cpus=0
+  [ITER 11/100]  [PASS] test_migrate_ready_during_switch_out (308479 us)
+[INFO] Task 'swo_m' (id=289) exiting
+  swo wake: cpus=4 workers=8 moves=76367 move_fail=0 runs=467537 bad_gen=0 two_cpus=0
+  [ITER 11/100]  [PASS] test_wake_during_switch_out (308043 us)
+  pdm: migrations=48549 moved=8 runs=6/6 bad=0 (first on cpu 0)
+  [ITER 12/100]  [PASS] test_preempt_flag_follows_migrated_task (56649 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=303) exiting
+[INFO] Task 'swo_w' (id=299) exiting
+[INFO] Task 'swo_w' (id=297) exiting
+[INFO] Task 'swo_w' (id=296) exiting
+  swo migrate: cpus=4 workers=8 moves=284403 move_fail=23 runs=644169 bad_gen=0 two_cpus=0
+  [ITER 12/100]  [PASS] test_migrate_ready_during_switch_out (319276 us)
+[INFO] Task 'swo_m' (id=315) exiting
+  swo wake: cpus=4 workers=8 moves=77527 move_fail=0 runs=469169 bad_gen=0 two_cpus=0
+  [ITER 12/100]  [PASS] test_wake_during_switch_out (308049 us)
+  pdm: migrations=36435 moved=6 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 13/100]  [PASS] test_preempt_flag_follows_migrated_task (46651 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=329) exiting
+[INFO] Task 'swo_w' (id=327) exiting
+[INFO] Task 'swo_w' (id=323) exiting
+  swo migrate: cpus=4 workers=8 moves=285112 move_fail=28 runs=654944 bad_gen=0 two_cpus=0
+  [ITER 13/100]  [PASS] test_migrate_ready_during_switch_out (318717 us)
+[INFO] Task 'swo_m' (id=341) exiting
+  swo wake: cpus=4 workers=8 moves=78839 move_fail=0 runs=469132 bad_gen=0 two_cpus=0
+  [ITER 13/100]  [PASS] test_wake_during_switch_out (308045 us)
+  pdm: migrations=24168 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 14/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=355) exiting
+[INFO] Task 'swo_w' (id=348) exiting
+[INFO] Task 'swo_w' (id=351) exiting
+  swo migrate: cpus=4 workers=8 moves=284689 move_fail=24 runs=639348 bad_gen=0 two_cpus=0
+  [ITER 14/100]  [PASS] test_migrate_ready_during_switch_out (315078 us)
+[INFO] Task 'swo_m' (id=367) exiting
+  swo wake: cpus=4 workers=8 moves=78189 move_fail=0 runs=468714 bad_gen=0 two_cpus=0
+  [ITER 14/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=24302 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 15/100]  [PASS] test_preempt_flag_follows_migrated_task (36665 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=381) exiting
+[INFO] Task 'swo_w' (id=375) exiting
+[INFO] Task 'swo_w' (id=378) exiting
+  swo migrate: cpus=4 workers=8 moves=283787 move_fail=29 runs=640885 bad_gen=0 two_cpus=0
+  [ITER 15/100]  [PASS] test_migrate_ready_during_switch_out (315076 us)
+[INFO] Task 'swo_m' (id=393) exiting
+  swo wake: cpus=4 workers=8 moves=77350 move_fail=0 runs=468492 bad_gen=0 two_cpus=0
+  [ITER 15/100]  [PASS] test_wake_during_switch_out (308051 us)
+  pdm: migrations=24321 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 16/100]  [PASS] test_preempt_flag_follows_migrated_task (36652 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=407) exiting
+[INFO] Task 'swo_w' (id=405) exiting
+  swo migrate: cpus=4 workers=8 moves=284974 move_fail=22 runs=638314 bad_gen=0 two_cpus=0
+  [ITER 16/100]  [PASS] test_migrate_ready_during_switch_out (311777 us)
+[INFO] Task 'swo_m' (id=419) exiting
+  swo wake: cpus=4 workers=8 moves=78035 move_fail=0 runs=468323 bad_gen=0 two_cpus=0
+  [ITER 16/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=24102 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 17/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=433) exiting
+[INFO] Task 'swo_w' (id=430) exiting
+[INFO] Task 'swo_w' (id=427) exiting
+  swo migrate: cpus=4 workers=8 moves=284935 move_fail=19 runs=639530 bad_gen=0 two_cpus=0
+  [ITER 17/100]  [PASS] test_migrate_ready_during_switch_out (315077 us)
+[INFO] Task 'swo_m' (id=445) exiting
+  swo wake: cpus=4 workers=8 moves=76999 move_fail=0 runs=468129 bad_gen=0 two_cpus=0
+  [ITER 17/100]  [PASS] test_wake_during_switch_out (308048 us)
+  pdm: migrations=36400 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 18/100]  [PASS] test_preempt_flag_follows_migrated_task (46661 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=459) exiting
+[INFO] Task 'swo_w' (id=454) exiting
+[INFO] Task 'swo_w' (id=455) exiting
+  swo migrate: cpus=4 workers=8 moves=285079 move_fail=19 runs=652369 bad_gen=0 two_cpus=0
+  [ITER 18/100]  [PASS] test_migrate_ready_during_switch_out (318351 us)
+[INFO] Task 'swo_m' (id=471) exiting
+  swo wake: cpus=4 workers=8 moves=77521 move_fail=0 runs=468459 bad_gen=0 two_cpus=0
+  [ITER 18/100]  [PASS] test_wake_during_switch_out (308045 us)
+  pdm: migrations=24272 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 19/100]  [PASS] test_preempt_flag_follows_migrated_task (36662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=485) exiting
+[INFO] Task 'swo_w' (id=480) exiting
+[INFO] Task 'swo_w' (id=482) exiting
+[INFO] Task 'swo_w' (id=478) exiting
+  swo migrate: cpus=4 workers=8 moves=284627 move_fail=22 runs=639138 bad_gen=0 two_cpus=0
+  [ITER 19/100]  [PASS] test_migrate_ready_during_switch_out (318374 us)
+[INFO] Task 'swo_m' (id=497) exiting
+  swo wake: cpus=4 workers=8 moves=78124 move_fail=0 runs=468946 bad_gen=0 two_cpus=0
+  [ITER 19/100]  [PASS] test_wake_during_switch_out (308043 us)
+  pdm: migrations=24360 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 20/100]  [PASS] test_preempt_flag_follows_migrated_task (36655 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=511) exiting
+[INFO] Task 'swo_w' (id=506) exiting
+[INFO] Task 'swo_w' (id=507) exiting
+  swo migrate: cpus=4 workers=8 moves=284331 move_fail=23 runs=639468 bad_gen=0 two_cpus=0
+  [ITER 20/100]  [PASS] test_migrate_ready_during_switch_out (315080 us)
+[INFO] Task 'swo_m' (id=523) exiting
+  swo wake: cpus=4 workers=8 moves=77227 move_fail=0 runs=467975 bad_gen=0 two_cpus=0
+  [ITER 20/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=36304 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 21/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=537) exiting
+  swo migrate: cpus=4 workers=8 moves=285348 move_fail=22 runs=637654 bad_gen=0 two_cpus=0
+  [ITER 21/100]  [PASS] test_migrate_ready_during_switch_out (308480 us)
+[INFO] Task 'swo_m' (id=549) exiting
+  swo wake: cpus=4 workers=8 moves=77238 move_fail=0 runs=468504 bad_gen=0 two_cpus=0
+  [ITER 21/100]  [PASS] test_wake_during_switch_out (308052 us)
+  pdm: migrations=24363 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 22/100]  [PASS] test_preempt_flag_follows_migrated_task (36661 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=563) exiting
+[INFO] Task 'swo_w' (id=561) exiting
+[INFO] Task 'swo_w' (id=557) exiting
+  swo migrate: cpus=4 workers=8 moves=283781 move_fail=28 runs=640112 bad_gen=0 two_cpus=0
+  [ITER 22/100]  [PASS] test_migrate_ready_during_switch_out (315078 us)
+[INFO] Task 'swo_m' (id=575) exiting
+  swo wake: cpus=4 workers=8 moves=76536 move_fail=0 runs=467877 bad_gen=0 two_cpus=0
+  [ITER 22/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=36306 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 23/100]  [PASS] test_preempt_flag_follows_migrated_task (46671 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=589) exiting
+[INFO] Task 'swo_w' (id=584) exiting
+[INFO] Task 'swo_w' (id=585) exiting
+  swo migrate: cpus=4 workers=8 moves=284140 move_fail=17 runs=640299 bad_gen=0 two_cpus=0
+  [ITER 23/100]  [PASS] test_migrate_ready_during_switch_out (315081 us)
+[INFO] Task 'swo_m' (id=601) exiting
+  swo wake: cpus=4 workers=8 moves=78037 move_fail=0 runs=468684 bad_gen=0 two_cpus=0
+  [ITER 23/100]  [PASS] test_wake_during_switch_out (308041 us)
+  pdm: migrations=36330 moved=8 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 24/100]  [PASS] test_preempt_flag_follows_migrated_task (46658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=615) exiting
+[INFO] Task 'swo_w' (id=612) exiting
+[INFO] Task 'swo_w' (id=609) exiting
+[INFO] Task 'swo_w' (id=608) exiting
+  swo migrate: cpus=4 workers=8 moves=284581 move_fail=25 runs=639694 bad_gen=0 two_cpus=0
+  [ITER 24/100]  [PASS] test_migrate_ready_during_switch_out (318374 us)
+[INFO] Task 'swo_m' (id=627) exiting
+  swo wake: cpus=4 workers=8 moves=77725 move_fail=0 runs=468407 bad_gen=0 two_cpus=0
+  [ITER 24/100]  [PASS] test_wake_during_switch_out (308042 us)
+  pdm: migrations=24207 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 25/100]  [PASS] test_preempt_flag_follows_migrated_task (36649 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=641) exiting
+[INFO] Task 'swo_w' (id=635) exiting
+[INFO] Task 'swo_w' (id=633) exiting
+  swo migrate: cpus=4 workers=8 moves=284190 move_fail=23 runs=640738 bad_gen=0 two_cpus=0
+  [ITER 25/100]  [PASS] test_migrate_ready_during_switch_out (315079 us)
+[INFO] Task 'swo_m' (id=653) exiting
+  swo wake: cpus=4 workers=8 moves=77011 move_fail=0 runs=468215 bad_gen=0 two_cpus=0
+  [ITER 25/100]  [PASS] test_wake_during_switch_out (308041 us)
+  pdm: migrations=36308 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 26/100]  [PASS] test_preempt_flag_follows_migrated_task (46656 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=667) exiting
+[INFO] Task 'swo_w' (id=666) exiting
+  swo migrate: cpus=4 workers=8 moves=284994 move_fail=19 runs=648564 bad_gen=0 two_cpus=0
+  [ITER 26/100]  [PASS] test_migrate_ready_during_switch_out (313736 us)
+[INFO] Task 'swo_m' (id=679) exiting
+  swo wake: cpus=4 workers=8 moves=77105 move_fail=0 runs=468388 bad_gen=0 two_cpus=0
+  [ITER 26/100]  [PASS] test_wake_during_switch_out (308042 us)
+  pdm: migrations=24252 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 27/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=693) exiting
+[INFO] Task 'swo_w' (id=692) exiting
+[INFO] Task 'swo_w' (id=688) exiting
+  swo migrate: cpus=4 workers=8 moves=284767 move_fail=19 runs=655559 bad_gen=0 two_cpus=0
+  [ITER 27/100]  [PASS] test_migrate_ready_during_switch_out (318764 us)
+[INFO] Task 'swo_m' (id=705) exiting
+  swo wake: cpus=4 workers=8 moves=77033 move_fail=0 runs=467922 bad_gen=0 two_cpus=0
+  [ITER 27/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=36318 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 28/100]  [PASS] test_preempt_flag_follows_migrated_task (46655 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=719) exiting
+[INFO] Task 'swo_w' (id=712) exiting
+[INFO] Task 'swo_w' (id=716) exiting
+[INFO] Task 'swo_w' (id=713) exiting
+  swo migrate: cpus=4 workers=8 moves=284354 move_fail=27 runs=639805 bad_gen=0 two_cpus=0
+  [ITER 28/100]  [PASS] test_migrate_ready_during_switch_out (318378 us)
+[INFO] Task 'swo_m' (id=731) exiting
+  swo wake: cpus=4 workers=8 moves=77344 move_fail=0 runs=468615 bad_gen=0 two_cpus=0
+  [ITER 28/100]  [PASS] test_wake_during_switch_out (308047 us)
+  pdm: migrations=24339 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 29/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=745) exiting
+[INFO] Task 'swo_w' (id=743) exiting
+  swo migrate: cpus=4 workers=8 moves=284781 move_fail=21 runs=638871 bad_gen=0 two_cpus=0
+  [ITER 29/100]  [PASS] test_migrate_ready_during_switch_out (311777 us)
+[INFO] Task 'swo_m' (id=757) exiting
+  swo wake: cpus=4 workers=8 moves=77732 move_fail=0 runs=468912 bad_gen=0 two_cpus=0
+  [ITER 29/100]  [PASS] test_wake_during_switch_out (308049 us)
+  pdm: migrations=24211 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 30/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=771) exiting
+[INFO] Task 'swo_w' (id=767) exiting
+  swo migrate: cpus=4 workers=8 moves=284033 move_fail=25 runs=641059 bad_gen=0 two_cpus=0
+  [ITER 30/100]  [PASS] test_migrate_ready_during_switch_out (311778 us)
+[INFO] Task 'swo_m' (id=783) exiting
+  swo wake: cpus=4 workers=8 moves=77591 move_fail=0 runs=468499 bad_gen=0 two_cpus=0
+  [ITER 30/100]  [PASS] test_wake_during_switch_out (308045 us)
+  pdm: migrations=36403 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 31/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=797) exiting
+[INFO] Task 'swo_w' (id=795) exiting
+  swo migrate: cpus=4 workers=8 moves=284779 move_fail=23 runs=640095 bad_gen=0 two_cpus=0
+  [ITER 31/100]  [PASS] test_migrate_ready_during_switch_out (311776 us)
+[INFO] Task 'swo_m' (id=809) exiting
+  swo wake: cpus=4 workers=8 moves=77689 move_fail=0 runs=468571 bad_gen=0 two_cpus=0
+  [ITER 31/100]  [PASS] test_wake_during_switch_out (308044 us)
+  pdm: migrations=24226 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 32/100]  [PASS] test_preempt_flag_follows_migrated_task (36655 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=823) exiting
+[INFO] Task 'swo_w' (id=816) exiting
+[INFO] Task 'swo_w' (id=818) exiting
+[INFO] Task 'swo_w' (id=819) exiting
+  swo migrate: cpus=4 workers=8 moves=283879 move_fail=28 runs=638404 bad_gen=0 two_cpus=0
+  [ITER 32/100]  [PASS] test_migrate_ready_during_switch_out (318376 us)
+[INFO] Task 'swo_m' (id=835) exiting
+  swo wake: cpus=4 workers=8 moves=76462 move_fail=0 runs=467298 bad_gen=0 two_cpus=0
+  [ITER 32/100]  [PASS] test_wake_during_switch_out (308042 us)
+  pdm: migrations=24192 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 33/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=849) exiting
+[INFO] Task 'swo_w' (id=847) exiting
+[INFO] Task 'swo_w' (id=841) exiting
+  swo migrate: cpus=4 workers=8 moves=285282 move_fail=13 runs=637837 bad_gen=0 two_cpus=0
+  [ITER 33/100]  [PASS] test_migrate_ready_during_switch_out (315084 us)
+[INFO] Task 'swo_m' (id=861) exiting
+  swo wake: cpus=4 workers=8 moves=77013 move_fail=0 runs=467558 bad_gen=0 two_cpus=0
+  [ITER 33/100]  [PASS] test_wake_during_switch_out (308043 us)
+  pdm: migrations=36453 moved=8 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 34/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=875) exiting
+[INFO] Task 'swo_w' (id=872) exiting
+[INFO] Task 'swo_w' (id=874) exiting
+  swo migrate: cpus=4 workers=8 moves=284749 move_fail=28 runs=640149 bad_gen=0 two_cpus=0
+  [ITER 34/100]  [PASS] test_migrate_ready_during_switch_out (315077 us)
+[INFO] Task 'swo_m' (id=887) exiting
+  swo wake: cpus=4 workers=8 moves=77640 move_fail=0 runs=468618 bad_gen=0 two_cpus=0
+  [ITER 34/100]  [PASS] test_wake_during_switch_out (308047 us)
+  pdm: migrations=24237 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 35/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=901) exiting
+[INFO] Task 'swo_w' (id=899) exiting
+[INFO] Task 'swo_w' (id=895) exiting
+  swo migrate: cpus=4 workers=8 moves=284139 move_fail=23 runs=647744 bad_gen=0 two_cpus=0
+  [ITER 35/100]  [PASS] test_migrate_ready_during_switch_out (316722 us)
+[INFO] Task 'swo_m' (id=913) exiting
+  swo wake: cpus=4 workers=8 moves=78054 move_fail=0 runs=469220 bad_gen=0 two_cpus=0
+  [ITER 35/100]  [PASS] test_wake_during_switch_out (308046 us)
+  pdm: migrations=24268 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 36/100]  [PASS] test_preempt_flag_follows_migrated_task (36664 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=927) exiting
+[INFO] Task 'swo_w' (id=920) exiting
+[INFO] Task 'swo_w' (id=919) exiting
+  swo migrate: cpus=4 workers=8 moves=281363 move_fail=35 runs=642844 bad_gen=0 two_cpus=0
+  [ITER 36/100]  [PASS] test_migrate_ready_during_switch_out (315076 us)
+[INFO] Task 'swo_m' (id=939) exiting
+  swo wake: cpus=4 workers=8 moves=77651 move_fail=0 runs=468241 bad_gen=0 two_cpus=0
+  [ITER 36/100]  [PASS] test_wake_during_switch_out (308046 us)
+  pdm: migrations=24268 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 37/100]  [PASS] test_preempt_flag_follows_migrated_task (36660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=953) exiting
+[INFO] Task 'swo_w' (id=951) exiting
+[INFO] Task 'swo_w' (id=950) exiting
+  swo migrate: cpus=4 workers=8 moves=283996 move_fail=20 runs=636831 bad_gen=0 two_cpus=0
+  [ITER 37/100]  [PASS] test_migrate_ready_during_switch_out (315079 us)
+[INFO] Task 'swo_m' (id=965) exiting
+  swo wake: cpus=4 workers=8 moves=77684 move_fail=0 runs=468558 bad_gen=0 two_cpus=0
+  [ITER 37/100]  [PASS] test_wake_during_switch_out (308046 us)
+  pdm: migrations=24141 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 38/100]  [PASS] test_preempt_flag_follows_migrated_task (36660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=979) exiting
+[INFO] Task 'swo_w' (id=972) exiting
+[INFO] Task 'swo_w' (id=975) exiting
+  swo migrate: cpus=4 workers=8 moves=283864 move_fail=29 runs=661829 bad_gen=0 two_cpus=0
+  [ITER 38/100]  [PASS] test_migrate_ready_during_switch_out (319643 us)
+[INFO] Task 'swo_m' (id=991) exiting
+  swo wake: cpus=4 workers=8 moves=76584 move_fail=0 runs=468072 bad_gen=0 two_cpus=0
+  [ITER 38/100]  [PASS] test_wake_during_switch_out (308049 us)
+  pdm: migrations=36272 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 39/100]  [PASS] test_preempt_flag_follows_migrated_task (46658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1005) exiting
+[INFO] Task 'swo_w' (id=1004) exiting
+[INFO] Task 'swo_w' (id=998) exiting
+  swo migrate: cpus=4 workers=8 moves=282511 move_fail=30 runs=641610 bad_gen=0 two_cpus=0
+  [ITER 39/100]  [PASS] test_migrate_ready_during_switch_out (315251 us)
+[INFO] Task 'swo_m' (id=1017) exiting
+  swo wake: cpus=4 workers=8 moves=78402 move_fail=0 runs=469043 bad_gen=0 two_cpus=0
+  [ITER 39/100]  [PASS] test_wake_during_switch_out (308129 us)
+  pdm: migrations=24437 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 40/100]  [PASS] test_preempt_flag_follows_migrated_task (36654 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1031) exiting
+[INFO] Task 'swo_w' (id=1028) exiting
+[INFO] Task 'swo_w' (id=1026) exiting
+  swo migrate: cpus=4 workers=8 moves=285201 move_fail=19 runs=639685 bad_gen=0 two_cpus=0
+  [ITER 40/100]  [PASS] test_migrate_ready_during_switch_out (315339 us)
+[INFO] Task 'swo_m' (id=1043) exiting
+  swo wake: cpus=4 workers=8 moves=77298 move_fail=0 runs=468462 bad_gen=0 two_cpus=0
+  [ITER 40/100]  [PASS] test_wake_during_switch_out (308138 us)
+  pdm: migrations=36221 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 41/100]  [PASS] test_preempt_flag_follows_migrated_task (46653 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1057) exiting
+[INFO] Task 'swo_w' (id=1051) exiting
+  swo migrate: cpus=4 workers=8 moves=283249 move_fail=31 runs=643297 bad_gen=0 two_cpus=0
+  [ITER 41/100]  [PASS] test_migrate_ready_during_switch_out (311954 us)
+[INFO] Task 'swo_m' (id=1069) exiting
+  swo wake: cpus=4 workers=8 moves=77783 move_fail=0 runs=468140 bad_gen=0 two_cpus=0
+  [ITER 41/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=48368 moved=6 runs=6/6 bad=0 (first on cpu 0)
+  [ITER 42/100]  [PASS] test_preempt_flag_follows_migrated_task (56649 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1083) exiting
+[INFO] Task 'swo_w' (id=1075) exiting
+[INFO] Task 'swo_w' (id=1077) exiting
+[INFO] Task 'swo_w' (id=1082) exiting
+[INFO] Task 'swo_w' (id=1076) exiting
+  swo migrate: cpus=4 workers=8 moves=285135 move_fail=21 runs=639249 bad_gen=0 two_cpus=0
+  [ITER 42/100]  [PASS] test_migrate_ready_during_switch_out (322113 us)
+[INFO] Task 'swo_m' (id=1095) exiting
+  swo wake: cpus=4 workers=8 moves=77348 move_fail=0 runs=467750 bad_gen=0 two_cpus=0
+  [ITER 42/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=24199 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 43/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1109) exiting
+[INFO] Task 'swo_w' (id=1104) exiting
+[INFO] Task 'swo_w' (id=1107) exiting
+  swo migrate: cpus=4 workers=8 moves=283418 move_fail=33 runs=642764 bad_gen=0 two_cpus=0
+  [ITER 43/100]  [PASS] test_migrate_ready_during_switch_out (315337 us)
+[INFO] Task 'swo_m' (id=1121) exiting
+  swo wake: cpus=4 workers=8 moves=78181 move_fail=0 runs=468567 bad_gen=0 two_cpus=0
+  [ITER 43/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=24202 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 44/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1135) exiting
+[INFO] Task 'swo_w' (id=1131) exiting
+  swo migrate: cpus=4 workers=8 moves=284459 move_fail=23 runs=641005 bad_gen=0 two_cpus=0
+  [ITER 44/100]  [PASS] test_migrate_ready_during_switch_out (311953 us)
+[INFO] Task 'swo_m' (id=1147) exiting
+  swo wake: cpus=4 workers=8 moves=77324 move_fail=0 runs=467922 bad_gen=0 two_cpus=0
+  [ITER 44/100]  [PASS] test_wake_during_switch_out (308136 us)
+  pdm: migrations=36116 moved=5 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 45/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1161) exiting
+[INFO] Task 'swo_w' (id=1154) exiting
+[INFO] Task 'swo_w' (id=1159) exiting
+[INFO] Task 'swo_w' (id=1156) exiting
+  swo migrate: cpus=4 workers=8 moves=285058 move_fail=24 runs=639215 bad_gen=0 two_cpus=0
+  [ITER 45/100]  [PASS] test_migrate_ready_during_switch_out (318726 us)
+[INFO] Task 'swo_m' (id=1173) exiting
+  swo wake: cpus=4 workers=8 moves=77844 move_fail=0 runs=468641 bad_gen=0 two_cpus=0
+  [ITER 45/100]  [PASS] test_wake_during_switch_out (308128 us)
+  pdm: migrations=36311 moved=6 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 46/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1187) exiting
+[INFO] Task 'swo_w' (id=1181) exiting
+[INFO] Task 'swo_w' (id=1185) exiting
+[INFO] Task 'swo_w' (id=1183) exiting
+  swo migrate: cpus=4 workers=8 moves=284891 move_fail=20 runs=637413 bad_gen=0 two_cpus=0
+  [ITER 46/100]  [PASS] test_migrate_ready_during_switch_out (318727 us)
+[INFO] Task 'swo_m' (id=1199) exiting
+  swo wake: cpus=4 workers=8 moves=77596 move_fail=0 runs=468507 bad_gen=0 two_cpus=0
+  [ITER 46/100]  [PASS] test_wake_during_switch_out (308136 us)
+  pdm: migrations=36255 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 47/100]  [PASS] test_preempt_flag_follows_migrated_task (46650 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1213) exiting
+[INFO] Task 'swo_w' (id=1207) exiting
+[INFO] Task 'swo_w' (id=1208) exiting
+[INFO] Task 'swo_w' (id=1212) exiting
+  swo migrate: cpus=4 workers=8 moves=285397 move_fail=22 runs=644451 bad_gen=0 two_cpus=0
+  [ITER 47/100]  [PASS] test_migrate_ready_during_switch_out (319984 us)
+[INFO] Task 'swo_m' (id=1225) exiting
+  swo wake: cpus=4 workers=8 moves=77190 move_fail=0 runs=468008 bad_gen=0 two_cpus=0
+  [ITER 47/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=24167 moved=7 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 48/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1239) exiting
+[INFO] Task 'swo_w' (id=1238) exiting
+[INFO] Task 'swo_w' (id=1237) exiting
+  swo migrate: cpus=4 workers=8 moves=285431 move_fail=24 runs=641111 bad_gen=0 two_cpus=0
+  [ITER 48/100]  [PASS] test_migrate_ready_during_switch_out (315341 us)
+[INFO] Task 'swo_m' (id=1251) exiting
+  swo wake: cpus=4 workers=8 moves=77927 move_fail=0 runs=468622 bad_gen=0 two_cpus=0
+  [ITER 48/100]  [PASS] test_wake_during_switch_out (308137 us)
+  pdm: migrations=36392 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 49/100]  [PASS] test_preempt_flag_follows_migrated_task (46650 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1265) exiting
+[INFO] Task 'swo_w' (id=1259) exiting
+[INFO] Task 'swo_w' (id=1260) exiting
+[INFO] Task 'swo_w' (id=1264) exiting
+  swo migrate: cpus=4 workers=8 moves=284799 move_fail=20 runs=638654 bad_gen=0 two_cpus=0
+  [ITER 49/100]  [PASS] test_migrate_ready_during_switch_out (318725 us)
+[INFO] Task 'swo_m' (id=1277) exiting
+  swo wake: cpus=4 workers=8 moves=76924 move_fail=0 runs=468076 bad_gen=0 two_cpus=0
+  [ITER 49/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=48586 moved=6 runs=6/5 bad=0 (first on cpu 0)
+  [ITER 50/100]  [PASS] test_preempt_flag_follows_migrated_task (56658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1291) exiting
+[INFO] Task 'swo_w' (id=1290) exiting
+[INFO] Task 'swo_w' (id=1285) exiting
+  swo migrate: cpus=4 workers=8 moves=284359 move_fail=18 runs=639485 bad_gen=0 two_cpus=0
+  [ITER 50/100]  [PASS] test_migrate_ready_during_switch_out (315337 us)
+[INFO] Task 'swo_m' (id=1303) exiting
+  swo wake: cpus=4 workers=8 moves=77879 move_fail=0 runs=468673 bad_gen=0 two_cpus=0
+  [ITER 50/100]  [PASS] test_wake_during_switch_out (308136 us)
+  pdm: migrations=24349 moved=8 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 51/100]  [PASS] test_preempt_flag_follows_migrated_task (36656 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1317) exiting
+[INFO] Task 'swo_w' (id=1315) exiting
+[INFO] Task 'swo_w' (id=1313) exiting
+[INFO] Task 'swo_w' (id=1311) exiting
+  swo migrate: cpus=4 workers=8 moves=285256 move_fail=26 runs=640048 bad_gen=0 two_cpus=0
+  [ITER 51/100]  [PASS] test_migrate_ready_during_switch_out (318724 us)
+[INFO] Task 'swo_m' (id=1329) exiting
+  swo wake: cpus=4 workers=8 moves=77734 move_fail=0 runs=468449 bad_gen=0 two_cpus=0
+  [ITER 51/100]  [PASS] test_wake_during_switch_out (308136 us)
+  pdm: migrations=36618 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 52/100]  [PASS] test_preempt_flag_follows_migrated_task (46661 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1343) exiting
+[INFO] Task 'swo_w' (id=1340) exiting
+  swo migrate: cpus=4 workers=8 moves=284855 move_fail=16 runs=638909 bad_gen=0 two_cpus=0
+  [ITER 52/100]  [PASS] test_migrate_ready_during_switch_out (311953 us)
+[INFO] Task 'swo_m' (id=1355) exiting
+  swo wake: cpus=4 workers=8 moves=77400 move_fail=0 runs=468652 bad_gen=0 two_cpus=0
+  [ITER 52/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24194 moved=8 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 53/100]  [PASS] test_preempt_flag_follows_migrated_task (36661 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1369) exiting
+[INFO] Task 'swo_w' (id=1366) exiting
+  swo migrate: cpus=4 workers=8 moves=284497 move_fail=24 runs=640203 bad_gen=0 two_cpus=0
+  [ITER 53/100]  [PASS] test_migrate_ready_during_switch_out (311955 us)
+[INFO] Task 'swo_m' (id=1381) exiting
+  swo wake: cpus=4 workers=8 moves=77015 move_fail=0 runs=468121 bad_gen=0 two_cpus=0
+  [ITER 53/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24211 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 54/100]  [PASS] test_preempt_flag_follows_migrated_task (36660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1395) exiting
+[INFO] Task 'swo_w' (id=1389) exiting
+[INFO] Task 'swo_w' (id=1390) exiting
+  swo migrate: cpus=4 workers=8 moves=285002 move_fail=27 runs=638168 bad_gen=0 two_cpus=0
+  [ITER 54/100]  [PASS] test_migrate_ready_during_switch_out (315341 us)
+[INFO] Task 'swo_m' (id=1407) exiting
+  swo wake: cpus=4 workers=8 moves=77969 move_fail=0 runs=468938 bad_gen=0 two_cpus=0
+  [ITER 54/100]  [PASS] test_wake_during_switch_out (308137 us)
+  pdm: migrations=36270 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 55/100]  [PASS] test_preempt_flag_follows_migrated_task (46657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1421) exiting
+[INFO] Task 'swo_w' (id=1420) exiting
+[INFO] Task 'swo_w' (id=1414) exiting
+  swo migrate: cpus=4 workers=8 moves=284641 move_fail=26 runs=640894 bad_gen=0 two_cpus=0
+  [ITER 55/100]  [PASS] test_migrate_ready_during_switch_out (315335 us)
+[INFO] Task 'swo_m' (id=1433) exiting
+  swo wake: cpus=4 workers=8 moves=76827 move_fail=0 runs=468386 bad_gen=0 two_cpus=0
+  [ITER 55/100]  [PASS] test_wake_during_switch_out (308133 us)
+  pdm: migrations=24303 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 56/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1447) exiting
+[INFO] Task 'swo_w' (id=1440) exiting
+[INFO] Task 'swo_w' (id=1445) exiting
+  swo migrate: cpus=4 workers=8 moves=284331 move_fail=27 runs=650811 bad_gen=0 two_cpus=0
+  [ITER 56/100]  [PASS] test_migrate_ready_during_switch_out (317800 us)
+[INFO] Task 'swo_m' (id=1459) exiting
+  swo wake: cpus=4 workers=8 moves=77927 move_fail=0 runs=468597 bad_gen=0 two_cpus=0
+  [ITER 56/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=24281 moved=8 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 57/100]  [PASS] test_preempt_flag_follows_migrated_task (36662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1473) exiting
+[INFO] Task 'swo_w' (id=1471) exiting
+[INFO] Task 'swo_w' (id=1470) exiting
+  swo migrate: cpus=4 workers=8 moves=284187 move_fail=25 runs=639839 bad_gen=0 two_cpus=0
+  [ITER 57/100]  [PASS] test_migrate_ready_during_switch_out (315339 us)
+[INFO] Task 'swo_m' (id=1485) exiting
+  swo wake: cpus=4 workers=8 moves=78168 move_fail=0 runs=468280 bad_gen=0 two_cpus=0
+  [ITER 57/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24288 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 58/100]  [PASS] test_preempt_flag_follows_migrated_task (36652 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1499) exiting
+[INFO] Task 'swo_w' (id=1497) exiting
+[INFO] Task 'swo_w' (id=1492) exiting
+[INFO] Task 'swo_w' (id=1496) exiting
+  swo migrate: cpus=4 workers=8 moves=285042 move_fail=14 runs=642641 bad_gen=0 two_cpus=0
+  [ITER 58/100]  [PASS] test_migrate_ready_during_switch_out (319770 us)
+[INFO] Task 'swo_m' (id=1511) exiting
+  swo wake: cpus=4 workers=8 moves=77309 move_fail=0 runs=468045 bad_gen=0 two_cpus=0
+  [ITER 58/100]  [PASS] test_wake_during_switch_out (308138 us)
+  pdm: migrations=48528 moved=8 runs=6/6 bad=0 (first on cpu 0)
+  [ITER 59/100]  [PASS] test_preempt_flag_follows_migrated_task (56655 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1525) exiting
+[INFO] Task 'swo_w' (id=1523) exiting
+  swo migrate: cpus=4 workers=8 moves=283919 move_fail=30 runs=642165 bad_gen=0 two_cpus=0
+  [ITER 59/100]  [PASS] test_migrate_ready_during_switch_out (311953 us)
+[INFO] Task 'swo_m' (id=1537) exiting
+  swo wake: cpus=4 workers=8 moves=77514 move_fail=0 runs=467781 bad_gen=0 two_cpus=0
+  [ITER 59/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=36392 moved=6 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 60/100]  [PASS] test_preempt_flag_follows_migrated_task (46657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1551) exiting
+[INFO] Task 'swo_w' (id=1546) exiting
+[INFO] Task 'swo_w' (id=1548) exiting
+  swo migrate: cpus=4 workers=8 moves=284073 move_fail=22 runs=640241 bad_gen=0 two_cpus=0
+  [ITER 60/100]  [PASS] test_migrate_ready_during_switch_out (315346 us)
+[INFO] Task 'swo_m' (id=1563) exiting
+  swo wake: cpus=4 workers=8 moves=77706 move_fail=0 runs=468509 bad_gen=0 two_cpus=0
+  [ITER 60/100]  [PASS] test_wake_during_switch_out (308137 us)
+  pdm: migrations=36547 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 61/100]  [PASS] test_preempt_flag_follows_migrated_task (46651 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1577) exiting
+[INFO] Task 'swo_w' (id=1576) exiting
+  swo migrate: cpus=4 workers=8 moves=285040 move_fail=24 runs=640677 bad_gen=0 two_cpus=0
+  [ITER 61/100]  [PASS] test_migrate_ready_during_switch_out (311953 us)
+[INFO] Task 'swo_m' (id=1589) exiting
+  swo wake: cpus=4 workers=8 moves=77417 move_fail=0 runs=468260 bad_gen=0 two_cpus=0
+  [ITER 61/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=48420 moved=6 runs=5/6 bad=0 (first on cpu 0)
+  [ITER 62/100]  [PASS] test_preempt_flag_follows_migrated_task (56660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1603) exiting
+[INFO] Task 'swo_w' (id=1596) exiting
+[INFO] Task 'swo_w' (id=1595) exiting
+  swo migrate: cpus=4 workers=8 moves=284502 move_fail=21 runs=640043 bad_gen=0 two_cpus=0
+  [ITER 62/100]  [PASS] test_migrate_ready_during_switch_out (315347 us)
+[INFO] Task 'swo_m' (id=1615) exiting
+  swo wake: cpus=4 workers=8 moves=78187 move_fail=0 runs=468802 bad_gen=0 two_cpus=0
+  [ITER 62/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=36560 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 63/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1629) exiting
+[INFO] Task 'swo_w' (id=1622) exiting
+[INFO] Task 'swo_w' (id=1621) exiting
+  swo migrate: cpus=4 workers=8 moves=284707 move_fail=19 runs=639366 bad_gen=0 two_cpus=0
+  [ITER 63/100]  [PASS] test_migrate_ready_during_switch_out (315339 us)
+[INFO] Task 'swo_m' (id=1641) exiting
+  swo wake: cpus=4 workers=8 moves=76905 move_fail=0 runs=467845 bad_gen=0 two_cpus=0
+  [ITER 63/100]  [PASS] test_wake_during_switch_out (308135 us)
+  pdm: migrations=24296 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 64/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1655) exiting
+[INFO] Task 'swo_w' (id=1650) exiting
+[INFO] Task 'swo_w' (id=1654) exiting
+  swo migrate: cpus=4 workers=8 moves=284281 move_fail=26 runs=639261 bad_gen=0 two_cpus=0
+  [ITER 64/100]  [PASS] test_migrate_ready_during_switch_out (315342 us)
+[INFO] Task 'swo_m' (id=1667) exiting
+  swo wake: cpus=4 workers=8 moves=78051 move_fail=0 runs=468663 bad_gen=0 two_cpus=0
+  [ITER 64/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=24221 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 65/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1681) exiting
+[INFO] Task 'swo_w' (id=1678) exiting
+  swo migrate: cpus=4 workers=8 moves=284853 move_fail=18 runs=638144 bad_gen=0 two_cpus=0
+  [ITER 65/100]  [PASS] test_migrate_ready_during_switch_out (311957 us)
+[INFO] Task 'swo_m' (id=1693) exiting
+  swo wake: cpus=4 workers=8 moves=77612 move_fail=0 runs=468437 bad_gen=0 two_cpus=0
+  [ITER 65/100]  [PASS] test_wake_during_switch_out (308128 us)
+  pdm: migrations=36326 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 66/100]  [PASS] test_preempt_flag_follows_migrated_task (46653 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1707) exiting
+[INFO] Task 'swo_w' (id=1703) exiting
+[INFO] Task 'swo_w' (id=1699) exiting
+[INFO] Task 'swo_w' (id=1700) exiting
+  swo migrate: cpus=4 workers=8 moves=284609 move_fail=19 runs=639728 bad_gen=0 two_cpus=0
+  [ITER 66/100]  [PASS] test_migrate_ready_during_switch_out (318725 us)
+[INFO] Task 'swo_m' (id=1719) exiting
+  swo wake: cpus=4 workers=8 moves=77463 move_fail=0 runs=468524 bad_gen=0 two_cpus=0
+  [ITER 66/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=36469 moved=8 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 67/100]  [PASS] test_preempt_flag_follows_migrated_task (46662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1733) exiting
+[INFO] Task 'swo_w' (id=1730) exiting
+[INFO] Task 'swo_w' (id=1726) exiting
+  swo migrate: cpus=4 workers=8 moves=284880 move_fail=19 runs=638604 bad_gen=0 two_cpus=0
+  [ITER 67/100]  [PASS] test_migrate_ready_during_switch_out (315338 us)
+[INFO] Task 'swo_m' (id=1745) exiting
+  swo wake: cpus=4 workers=8 moves=77534 move_fail=0 runs=468554 bad_gen=0 two_cpus=0
+  [ITER 67/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=36407 moved=6 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 68/100]  [PASS] test_preempt_flag_follows_migrated_task (46659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1759) exiting
+[INFO] Task 'swo_w' (id=1753) exiting
+[INFO] Task 'swo_w' (id=1752) exiting
+  swo migrate: cpus=4 workers=8 moves=284457 move_fail=26 runs=639008 bad_gen=0 two_cpus=0
+  [ITER 68/100]  [PASS] test_migrate_ready_during_switch_out (315343 us)
+[INFO] Task 'swo_m' (id=1771) exiting
+  swo wake: cpus=4 workers=8 moves=76840 move_fail=0 runs=467852 bad_gen=0 two_cpus=0
+  [ITER 68/100]  [PASS] test_wake_during_switch_out (308138 us)
+  pdm: migrations=36490 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 69/100]  [PASS] test_preempt_flag_follows_migrated_task (46662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1785) exiting
+[INFO] Task 'swo_w' (id=1784) exiting
+  swo migrate: cpus=4 workers=8 moves=285101 move_fail=25 runs=640391 bad_gen=0 two_cpus=0
+  [ITER 69/100]  [PASS] test_migrate_ready_during_switch_out (311950 us)
+[INFO] Task 'swo_m' (id=1797) exiting
+  swo wake: cpus=4 workers=8 moves=78037 move_fail=0 runs=468594 bad_gen=0 two_cpus=0
+  [ITER 69/100]  [PASS] test_wake_during_switch_out (308129 us)
+  pdm: migrations=48324 moved=6 runs=6/6 bad=0 (first on cpu 0)
+  [ITER 70/100]  [PASS] test_preempt_flag_follows_migrated_task (56662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1811) exiting
+[INFO] Task 'swo_w' (id=1806) exiting
+[INFO] Task 'swo_w' (id=1808) exiting
+  swo migrate: cpus=4 workers=8 moves=283128 move_fail=25 runs=639576 bad_gen=0 two_cpus=0
+  [ITER 70/100]  [PASS] test_migrate_ready_during_switch_out (315341 us)
+[INFO] Task 'swo_m' (id=1823) exiting
+  swo wake: cpus=4 workers=8 moves=78162 move_fail=0 runs=468212 bad_gen=0 two_cpus=0
+  [ITER 70/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=48645 moved=7 runs=5/6 bad=0 (first on cpu 0)
+  [ITER 71/100]  [PASS] test_preempt_flag_follows_migrated_task (56660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1837) exiting
+[INFO] Task 'swo_w' (id=1831) exiting
+[INFO] Task 'swo_w' (id=1835) exiting
+[INFO] Task 'swo_w' (id=1829) exiting
+  swo migrate: cpus=4 workers=8 moves=284504 move_fail=18 runs=638149 bad_gen=0 two_cpus=0
+  [ITER 71/100]  [PASS] test_migrate_ready_during_switch_out (318724 us)
+[INFO] Task 'swo_m' (id=1849) exiting
+  swo wake: cpus=4 workers=8 moves=76427 move_fail=0 runs=467938 bad_gen=0 two_cpus=0
+  [ITER 71/100]  [PASS] test_wake_during_switch_out (308135 us)
+  pdm: migrations=36493 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 72/100]  [PASS] test_preempt_flag_follows_migrated_task (46664 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1863) exiting
+[INFO] Task 'swo_w' (id=1859) exiting
+[INFO] Task 'swo_w' (id=1858) exiting
+[INFO] Task 'swo_w' (id=1857) exiting
+  swo migrate: cpus=4 workers=8 moves=284945 move_fail=17 runs=639419 bad_gen=0 two_cpus=0
+  [ITER 72/100]  [PASS] test_migrate_ready_during_switch_out (318727 us)
+[INFO] Task 'swo_m' (id=1875) exiting
+  swo wake: cpus=4 workers=8 moves=77004 move_fail=0 runs=468197 bad_gen=0 two_cpus=0
+  [ITER 72/100]  [PASS] test_wake_during_switch_out (308127 us)
+  pdm: migrations=36403 moved=7 runs=4/5 bad=0 (first on cpu 0)
+  [ITER 73/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1889) exiting
+[INFO] Task 'swo_w' (id=1884) exiting
+[INFO] Task 'swo_w' (id=1881) exiting
+  swo migrate: cpus=4 workers=8 moves=285003 move_fail=16 runs=638645 bad_gen=0 two_cpus=0
+  [ITER 73/100]  [PASS] test_migrate_ready_during_switch_out (315340 us)
+[INFO] Task 'swo_m' (id=1901) exiting
+  swo wake: cpus=4 workers=8 moves=76854 move_fail=0 runs=467654 bad_gen=0 two_cpus=0
+  [ITER 73/100]  [PASS] test_wake_during_switch_out (308133 us)
+  pdm: migrations=24333 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 74/100]  [PASS] test_preempt_flag_follows_migrated_task (36656 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1915) exiting
+[INFO] Task 'swo_w' (id=1914) exiting
+[INFO] Task 'swo_w' (id=1912) exiting
+  swo migrate: cpus=4 workers=8 moves=284288 move_fail=27 runs=650423 bad_gen=0 two_cpus=0
+  [ITER 74/100]  [PASS] test_migrate_ready_during_switch_out (317856 us)
+[INFO] Task 'swo_m' (id=1927) exiting
+  swo wake: cpus=4 workers=8 moves=77459 move_fail=0 runs=468095 bad_gen=0 two_cpus=0
+  [ITER 74/100]  [PASS] test_wake_during_switch_out (308135 us)
+  pdm: migrations=24325 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 75/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1941) exiting
+[INFO] Task 'swo_w' (id=1939) exiting
+[INFO] Task 'swo_w' (id=1935) exiting
+  swo migrate: cpus=4 workers=8 moves=284503 move_fail=24 runs=640456 bad_gen=0 two_cpus=0
+  [ITER 75/100]  [PASS] test_migrate_ready_during_switch_out (315338 us)
+[INFO] Task 'swo_m' (id=1953) exiting
+  swo wake: cpus=4 workers=8 moves=77414 move_fail=0 runs=468231 bad_gen=0 two_cpus=0
+  [ITER 75/100]  [PASS] test_wake_during_switch_out (308135 us)
+  pdm: migrations=36266 moved=6 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 76/100]  [PASS] test_preempt_flag_follows_migrated_task (46665 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1967) exiting
+[INFO] Task 'swo_w' (id=1965) exiting
+[INFO] Task 'swo_w' (id=1966) exiting
+  swo migrate: cpus=4 workers=8 moves=284673 move_fail=18 runs=638572 bad_gen=0 two_cpus=0
+  [ITER 76/100]  [PASS] test_migrate_ready_during_switch_out (315340 us)
+[INFO] Task 'swo_m' (id=1979) exiting
+  swo wake: cpus=4 workers=8 moves=77912 move_fail=0 runs=468919 bad_gen=0 two_cpus=0
+  [ITER 76/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=24361 moved=5 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 77/100]  [PASS] test_preempt_flag_follows_migrated_task (36662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=1993) exiting
+[INFO] Task 'swo_w' (id=1988) exiting
+[INFO] Task 'swo_w' (id=1991) exiting
+  swo migrate: cpus=4 workers=8 moves=284807 move_fail=17 runs=638135 bad_gen=0 two_cpus=0
+  [ITER 77/100]  [PASS] test_migrate_ready_during_switch_out (315339 us)
+[INFO] Task 'swo_m' (id=2005) exiting
+  swo wake: cpus=4 workers=8 moves=77440 move_fail=0 runs=468400 bad_gen=0 two_cpus=0
+  [ITER 77/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24173 moved=7 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 78/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2019) exiting
+  swo migrate: cpus=4 workers=8 moves=284010 move_fail=25 runs=654580 bad_gen=0 two_cpus=0
+  [ITER 78/100]  [PASS] test_migrate_ready_during_switch_out (311708 us)
+[INFO] Task 'swo_m' (id=2031) exiting
+  swo wake: cpus=4 workers=8 moves=77699 move_fail=0 runs=468108 bad_gen=0 two_cpus=0
+  [ITER 78/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=36387 moved=8 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 79/100]  [PASS] test_preempt_flag_follows_migrated_task (46657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2045) exiting
+[INFO] Task 'swo_w' (id=2037) exiting
+[INFO] Task 'swo_w' (id=2044) exiting
+  swo migrate: cpus=4 workers=8 moves=284026 move_fail=27 runs=640869 bad_gen=0 two_cpus=0
+  [ITER 79/100]  [PASS] test_migrate_ready_during_switch_out (315339 us)
+[INFO] Task 'swo_m' (id=2057) exiting
+  swo wake: cpus=4 workers=8 moves=77881 move_fail=0 runs=468432 bad_gen=0 two_cpus=0
+  [ITER 79/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=36159 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 80/100]  [PASS] test_preempt_flag_follows_migrated_task (46654 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2071) exiting
+[INFO] Task 'swo_w' (id=2065) exiting
+[INFO] Task 'swo_w' (id=2069) exiting
+  swo migrate: cpus=4 workers=8 moves=284934 move_fail=22 runs=640274 bad_gen=0 two_cpus=0
+  [ITER 80/100]  [PASS] test_migrate_ready_during_switch_out (315337 us)
+[INFO] Task 'swo_m' (id=2083) exiting
+  swo wake: cpus=4 workers=8 moves=77041 move_fail=0 runs=468662 bad_gen=0 two_cpus=0
+  [ITER 80/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=36148 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 81/100]  [PASS] test_preempt_flag_follows_migrated_task (46657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2097) exiting
+[INFO] Task 'swo_w' (id=2096) exiting
+  swo migrate: cpus=4 workers=8 moves=283498 move_fail=27 runs=638712 bad_gen=0 two_cpus=0
+  [ITER 81/100]  [PASS] test_migrate_ready_during_switch_out (311955 us)
+[INFO] Task 'swo_m' (id=2109) exiting
+  swo wake: cpus=4 workers=8 moves=75982 move_fail=0 runs=467469 bad_gen=0 two_cpus=0
+  [ITER 81/100]  [PASS] test_wake_during_switch_out (308133 us)
+  pdm: migrations=36470 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 82/100]  [PASS] test_preempt_flag_follows_migrated_task (46659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2123) exiting
+  swo migrate: cpus=4 workers=8 moves=284732 move_fail=20 runs=639373 bad_gen=0 two_cpus=0
+  [ITER 82/100]  [PASS] test_migrate_ready_during_switch_out (308565 us)
+[INFO] Task 'swo_m' (id=2135) exiting
+  swo wake: cpus=4 workers=8 moves=76940 move_fail=0 runs=467529 bad_gen=0 two_cpus=0
+  [ITER 82/100]  [PASS] test_wake_during_switch_out (308133 us)
+  pdm: migrations=24233 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 83/100]  [PASS] test_preempt_flag_follows_migrated_task (36654 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2149) exiting
+[INFO] Task 'swo_w' (id=2144) exiting
+[INFO] Task 'swo_w' (id=2147) exiting
+[INFO] Task 'swo_w' (id=2145) exiting
+  swo migrate: cpus=4 workers=8 moves=283246 move_fail=24 runs=641192 bad_gen=0 two_cpus=0
+  [ITER 83/100]  [PASS] test_migrate_ready_during_switch_out (319241 us)
+[INFO] Task 'swo_m' (id=2161) exiting
+  swo wake: cpus=4 workers=8 moves=77874 move_fail=0 runs=468585 bad_gen=0 two_cpus=0
+  [ITER 83/100]  [PASS] test_wake_during_switch_out (308138 us)
+  pdm: migrations=24062 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 84/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2175) exiting
+[INFO] Task 'swo_w' (id=2170) exiting
+[INFO] Task 'swo_w' (id=2169) exiting
+  swo migrate: cpus=4 workers=8 moves=284865 move_fail=22 runs=638359 bad_gen=0 two_cpus=0
+  [ITER 84/100]  [PASS] test_migrate_ready_during_switch_out (315338 us)
+[INFO] Task 'swo_m' (id=2187) exiting
+  swo wake: cpus=4 workers=8 moves=77809 move_fail=0 runs=468479 bad_gen=0 two_cpus=0
+  [ITER 84/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=36508 moved=7 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 85/100]  [PASS] test_preempt_flag_follows_migrated_task (46657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2201) exiting
+[INFO] Task 'swo_w' (id=2193) exiting
+[INFO] Task 'swo_w' (id=2198) exiting
+[INFO] Task 'swo_w' (id=2196) exiting
+  swo migrate: cpus=4 workers=8 moves=284447 move_fail=23 runs=639426 bad_gen=0 two_cpus=0
+  [ITER 85/100]  [PASS] test_migrate_ready_during_switch_out (318727 us)
+[INFO] Task 'swo_m' (id=2213) exiting
+  swo wake: cpus=4 workers=8 moves=77645 move_fail=0 runs=468696 bad_gen=0 two_cpus=0
+  [ITER 85/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=24219 moved=6 runs=4/3 bad=0 (first on cpu 0)
+  [ITER 86/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2227) exiting
+[INFO] Task 'swo_w' (id=2226) exiting
+[INFO] Task 'swo_w' (id=2225) exiting
+  swo migrate: cpus=4 workers=8 moves=283587 move_fail=28 runs=640165 bad_gen=0 two_cpus=0
+  [ITER 86/100]  [PASS] test_migrate_ready_during_switch_out (315340 us)
+[INFO] Task 'swo_m' (id=2239) exiting
+  swo wake: cpus=4 workers=8 moves=77839 move_fail=0 runs=468476 bad_gen=0 two_cpus=0
+  [ITER 86/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=36392 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 87/100]  [PASS] test_preempt_flag_follows_migrated_task (46662 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2253) exiting
+[INFO] Task 'swo_w' (id=2249) exiting
+  swo migrate: cpus=4 workers=8 moves=285113 move_fail=18 runs=638079 bad_gen=0 two_cpus=0
+  [ITER 87/100]  [PASS] test_migrate_ready_during_switch_out (311955 us)
+[INFO] Task 'swo_m' (id=2265) exiting
+  swo wake: cpus=4 workers=8 moves=78391 move_fail=0 runs=468792 bad_gen=0 two_cpus=0
+  [ITER 87/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=24223 moved=6 runs=3/4 bad=0 (first on cpu 0)
+  [ITER 88/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2279) exiting
+[INFO] Task 'swo_w' (id=2278) exiting
+[INFO] Task 'swo_w' (id=2272) exiting
+  swo migrate: cpus=4 workers=8 moves=284902 move_fail=26 runs=639421 bad_gen=0 two_cpus=0
+  [ITER 88/100]  [PASS] test_migrate_ready_during_switch_out (315333 us)
+[INFO] Task 'swo_m' (id=2291) exiting
+  swo wake: cpus=4 workers=8 moves=77144 move_fail=0 runs=468074 bad_gen=0 two_cpus=0
+  [ITER 88/100]  [PASS] test_wake_during_switch_out (308133 us)
+  pdm: migrations=24206 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 89/100]  [PASS] test_preempt_flag_follows_migrated_task (36652 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2305) exiting
+  swo migrate: cpus=4 workers=8 moves=284466 move_fail=17 runs=650052 bad_gen=0 two_cpus=0
+  [ITER 89/100]  [PASS] test_migrate_ready_during_switch_out (310897 us)
+[INFO] Task 'swo_m' (id=2317) exiting
+  swo wake: cpus=4 workers=8 moves=77390 move_fail=0 runs=468204 bad_gen=0 two_cpus=0
+  [ITER 89/100]  [PASS] test_wake_during_switch_out (308134 us)
+  pdm: migrations=24259 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 90/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2331) exiting
+[INFO] Task 'swo_w' (id=2328) exiting
+[INFO] Task 'swo_w' (id=2326) exiting
+  swo migrate: cpus=4 workers=8 moves=283901 move_fail=22 runs=639451 bad_gen=0 two_cpus=0
+  [ITER 90/100]  [PASS] test_migrate_ready_during_switch_out (315338 us)
+[INFO] Task 'swo_m' (id=2343) exiting
+  swo wake: cpus=4 workers=8 moves=78159 move_fail=0 runs=468858 bad_gen=0 two_cpus=0
+  [ITER 90/100]  [PASS] test_wake_during_switch_out (308131 us)
+  pdm: migrations=36382 moved=7 runs=5/5 bad=0 (first on cpu 0)
+  [ITER 91/100]  [PASS] test_preempt_flag_follows_migrated_task (46659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2357) exiting
+[INFO] Task 'swo_w' (id=2355) exiting
+[INFO] Task 'swo_w' (id=2356) exiting
+  swo migrate: cpus=4 workers=8 moves=284832 move_fail=21 runs=647899 bad_gen=0 two_cpus=0
+  [ITER 91/100]  [PASS] test_migrate_ready_during_switch_out (317271 us)
+[INFO] Task 'swo_m' (id=2369) exiting
+  swo wake: cpus=4 workers=8 moves=77421 move_fail=0 runs=468151 bad_gen=0 two_cpus=0
+  [ITER 91/100]  [PASS] test_wake_during_switch_out (308136 us)
+  pdm: migrations=24150 moved=8 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 92/100]  [PASS] test_preempt_flag_follows_migrated_task (36655 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2383) exiting
+[INFO] Task 'swo_w' (id=2377) exiting
+  swo migrate: cpus=4 workers=8 moves=284741 move_fail=20 runs=638814 bad_gen=0 two_cpus=0
+  [ITER 92/100]  [PASS] test_migrate_ready_during_switch_out (311957 us)
+[INFO] Task 'swo_m' (id=2395) exiting
+  swo wake: cpus=4 workers=8 moves=78057 move_fail=0 runs=468505 bad_gen=0 two_cpus=0
+  [ITER 92/100]  [PASS] test_wake_during_switch_out (308129 us)
+  pdm: migrations=24191 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 93/100]  [PASS] test_preempt_flag_follows_migrated_task (36656 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2409) exiting
+[INFO] Task 'swo_w' (id=2403) exiting
+[INFO] Task 'swo_w' (id=2405) exiting
+[INFO] Task 'swo_w' (id=2402) exiting
+[INFO] Task 'swo_w' (id=2406) exiting
+  swo migrate: cpus=4 workers=8 moves=283672 move_fail=25 runs=639965 bad_gen=0 two_cpus=0
+  [ITER 93/100]  [PASS] test_migrate_ready_during_switch_out (322110 us)
+[INFO] Task 'swo_m' (id=2421) exiting
+  swo wake: cpus=4 workers=8 moves=77604 move_fail=0 runs=468567 bad_gen=0 two_cpus=0
+  [ITER 93/100]  [PASS] test_wake_during_switch_out (308135 us)
+  pdm: migrations=24340 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 94/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2435) exiting
+[INFO] Task 'swo_w' (id=2432) exiting
+  swo migrate: cpus=4 workers=8 moves=284629 move_fail=25 runs=639789 bad_gen=0 two_cpus=0
+  [ITER 94/100]  [PASS] test_migrate_ready_during_switch_out (311952 us)
+[INFO] Task 'swo_m' (id=2447) exiting
+  swo wake: cpus=4 workers=8 moves=77118 move_fail=0 runs=467854 bad_gen=0 two_cpus=0
+  [ITER 94/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24303 moved=7 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 95/100]  [PASS] test_preempt_flag_follows_migrated_task (36657 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2461) exiting
+[INFO] Task 'swo_w' (id=2454) exiting
+[INFO] Task 'swo_w' (id=2456) exiting
+[INFO] Task 'swo_w' (id=2455) exiting
+  swo migrate: cpus=4 workers=8 moves=284261 move_fail=20 runs=653988 bad_gen=0 two_cpus=0
+  [ITER 95/100]  [PASS] test_migrate_ready_during_switch_out (322339 us)
+[INFO] Task 'swo_m' (id=2473) exiting
+  swo wake: cpus=4 workers=8 moves=77970 move_fail=0 runs=468778 bad_gen=0 two_cpus=0
+  [ITER 95/100]  [PASS] test_wake_during_switch_out (308138 us)
+  pdm: migrations=24204 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 96/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2487) exiting
+[INFO] Task 'swo_w' (id=2483) exiting
+[INFO] Task 'swo_w' (id=2484) exiting
+[INFO] Task 'swo_w' (id=2479) exiting
+  swo migrate: cpus=4 workers=8 moves=284012 move_fail=22 runs=639594 bad_gen=0 two_cpus=0
+  [ITER 96/100]  [PASS] test_migrate_ready_during_switch_out (318727 us)
+[INFO] Task 'swo_m' (id=2499) exiting
+  swo wake: cpus=4 workers=8 moves=77298 move_fail=0 runs=468294 bad_gen=0 two_cpus=0
+  [ITER 96/100]  [PASS] test_wake_during_switch_out (308132 us)
+  pdm: migrations=24250 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 97/100]  [PASS] test_preempt_flag_follows_migrated_task (36658 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2513) exiting
+[INFO] Task 'swo_w' (id=2507) exiting
+[INFO] Task 'swo_w' (id=2508) exiting
+[INFO] Task 'swo_w' (id=2512) exiting
+  swo migrate: cpus=4 workers=8 moves=283456 move_fail=25 runs=639284 bad_gen=0 two_cpus=0
+  [ITER 97/100]  [PASS] test_migrate_ready_during_switch_out (318729 us)
+[INFO] Task 'swo_m' (id=2525) exiting
+  swo wake: cpus=4 workers=8 moves=78012 move_fail=0 runs=468150 bad_gen=0 two_cpus=0
+  [ITER 97/100]  [PASS] test_wake_during_switch_out (308130 us)
+  pdm: migrations=36393 moved=6 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 98/100]  [PASS] test_preempt_flag_follows_migrated_task (46660 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2539) exiting
+[INFO] Task 'swo_w' (id=2536) exiting
+  swo migrate: cpus=4 workers=8 moves=283726 move_fail=31 runs=652181 bad_gen=0 two_cpus=0
+  [ITER 98/100]  [PASS] test_migrate_ready_during_switch_out (313966 us)
+[INFO] Task 'swo_m' (id=2551) exiting
+  swo wake: cpus=4 workers=8 moves=76903 move_fail=0 runs=467829 bad_gen=0 two_cpus=0
+  [ITER 98/100]  [PASS] test_wake_during_switch_out (308137 us)
+  pdm: migrations=36308 moved=5 runs=5/4 bad=0 (first on cpu 0)
+  [ITER 99/100]  [PASS] test_preempt_flag_follows_migrated_task (46653 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2565) exiting
+[INFO] Task 'swo_w' (id=2560) exiting
+[INFO] Task 'swo_w' (id=2559) exiting
+  swo migrate: cpus=4 workers=8 moves=284182 move_fail=24 runs=640154 bad_gen=0 two_cpus=0
+  [ITER 99/100]  [PASS] test_migrate_ready_during_switch_out (315336 us)
+[INFO] Task 'swo_m' (id=2577) exiting
+  swo wake: cpus=4 workers=8 moves=78068 move_fail=0 runs=468727 bad_gen=0 two_cpus=0
+  [ITER 99/100]  [PASS] test_wake_during_switch_out (308137 us)
+  pdm: migrations=24102 moved=6 runs=4/4 bad=0 (first on cpu 0)
+  [ITER 100/100]  [PASS] test_preempt_flag_follows_migrated_task (36659 us)
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[WARN] Cannot migrate running task 'swo_w'
+[INFO] Task 'swo_m' (id=2591) exiting
+[INFO] Task 'swo_w' (id=2588) exiting
+[INFO] Task 'swo_w' (id=2584) exiting
+  swo migrate: cpus=4 workers=8 moves=284750 move_fail=20 runs=638676 bad_gen=0 two_cpus=0
+  [ITER 100/100]  [PASS] test_migrate_ready_during_switch_out (315336 us)
+[INFO] Task 'swo_m' (id=2603) exiting
+  swo wake: cpus=4 workers=8 moves=77319 move_fail=0 runs=468464 bad_gen=0 two_cpus=0
+  [ITER 100/100]  [PASS] test_wake_during_switch_out (308134 us)
+
+[FILTER] Summary
+[FILTER] [PASS] test_migrate_ready_during_switch_out: runs=100 passed=100 failed=0 ignored=0 us min=308479 avg=315617 max=322339
+[FILTER] [PASS] test_wake_during_switch_out: runs=100 passed=100 failed=0 ignored=0 us min=307956 avg=308097 max=308138
+[FILTER] [PASS] test_preempt_flag_follows_migrated_task: runs=100 passed=100 failed=0 ignored=0 us min=36649 avg=42237 max=56662
+
+========================================
+Test Suite Summary
+========================================
+[PASS
