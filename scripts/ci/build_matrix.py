@@ -178,7 +178,7 @@ NOT_BUILDABLE = [
     ("OPLIB_BLOB", "pre-built operator library (needs CUDA/nvcc output, not in repo)"),
     ("MNIST_DIGITS_DIR", "directory of fp32 digit fixtures outside the repo"),
     ("GA10B_FIRMWARE_DIR / GA10B_FW_DIR", "NVIDIA ga10b ucode fetched by scripts/tools/fetch-ga10b-firmware.sh (not redistributable)"),
-    ("ENABLE_GSP_FIRMWARE=ON (contents)", "the GSP blobs come from the build host's /lib/firmware; a runner without them builds the auto-disabled path"),
+    ("ENABLE_GSP_FIRMWARE=ON (contents)", "the GSP blobs come from the build host's /lib/firmware. X86_64 cells install Ubuntu's linux-firmware-nvidia-graphics (ga107). The ga10b blobs ship only in the JetPack BSP, so the Jetson ENABLE_GSP_FIRMWARE=ON cell builds the auto-disabled path"),
     ("Jetson operator-library SASS", "scripts/cuda/ensure-oplib-shaders.sh needs nvcc (CUDA 12.0); without it Jetson cells build CPU-only GPU paths and print a WARNING"),
     ("SLM_GOLDEN_MODEL", "a ~1 GB GGUF model under ~/models, only used by host golden targets"),
     ("MOCK_CAMERA_FRAME_DIGIT", "alternate digit path; the in-repo default is used"),

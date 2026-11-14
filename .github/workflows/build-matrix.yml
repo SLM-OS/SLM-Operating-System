@@ -114,6 +114,17 @@ jobs:
             ~/.cargo/registry/cache
           key: rust-${{ hashFiles('rust-toolchain.toml', 'runtime/Cargo.lock') }}
           fail-on-cache-miss: true
+      # X86_64 embeds the ga107 GSP firmware from /lib/firmware (Ubuntu's
+      # linux-firmware-nvidia-graphics, as on a developer host). Without it
+      # every X86_64 build stops in nvidia_gsp_firmware.S, whatever
+      # ENABLE_GSP_FIRMWARE says; the x86-ENABLE_GSP_FIRMWARE=OFF cell still
+      # exercises that path because the option, not the host, turns it off.
+      - name: GSP firmware (X86_64)
+        if: matrix.platform == 'X86_64'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends linux-firmware-nvidia-graphics zstd
+          ls /lib/firmware/nvidia/ga107/gsp/
       - name: Tool versions
         run: |
           echo "$ARM_TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
