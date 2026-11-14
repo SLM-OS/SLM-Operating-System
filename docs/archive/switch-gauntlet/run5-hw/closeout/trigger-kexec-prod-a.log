@@ -1,0 +1,5 @@
+18:28:31 start mode=kexec n=3 elfs=[/root/slmos-s5co-jet-prod-6a4cfa93.elf /root/slmos-s5co-jet-prod-6a4cfa93.elf /root/slmos-s5co-jet-prod-6a4cfa93.elf] skip_current_boot_id=169ebeda-75bc-414d-a832-91e04404aff6
+18:29:57 trigger 1/3 elf=/root/slmos-s5co-jet-prod-6a4cfa93.elf boot_id=88ed4f0c-13d7-483b-b09a-9772123ee1af state+uptime=[running 25.25 ] reply=[669d58d3753f28b2 ]
+18:32:56 trigger 2/3 elf=/root/slmos-s5co-jet-prod-6a4cfa93.elf boot_id=40dcd3a8-d4fc-4bcd-a7cf-1d3c324907f0 state+uptime=[running 26.71 ] reply=[669d58d3753f28b2 ]
+18:35:52 trigger 3/3 elf=/root/slmos-s5co-jet-prod-6a4cfa93.elf boot_id=4efde554-dea3-4361-805b-ef180bfc1df3 state+uptime=[running 24.67 ] reply=[669d58d3753f28b2 ]
+18:35:52 end triggers=3
