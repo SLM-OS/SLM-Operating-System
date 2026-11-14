@@ -316,3 +316,10 @@ since the board is free and C3's rebuild follows C1's /ci); C2 QEMU traces
 of R3 and ADR 0008 draft now; C2 Jetson R2 SLOT_TRACE capture 05:30 to 06:15;
 C2 design critic from the ADR push, with the Jetson trace added when it
 lands; fix-head lab 06:15 onward.
+
+## Entry 9 (written 03:59 UTC): handover to C3
+
+**Handover 03:58 UTC: jetson-nano-2 to C3** until 05:30 UTC, using C3's
+images at 5069e658 (c1/harness 6e39f425 + C3) for reproduction and capture.
+Those are diagnosis rows; C3's proof rows will run at its rebased PR head.
+pi-5-1 unheld.
