@@ -316,6 +316,14 @@ option(SWITCH_CHECK "Switch-in generation/owner check (#1234, debug only)" OFF)
 if(SWITCH_CHECK)
     add_compile_definitions(CONFIG_SWITCH_CHECK=1)
 endif()
+# SWO_DIAG (#1262): when an R3 iteration does not finish, dump the stuck
+# tasks and every CPU's scheduler state, poll 1 s more, and log each
+# "Cannot migrate running task" with ids (rate-limited). Debug only; off,
+# the kernel's .text is unchanged.
+option(SWO_DIAG "R3 NOT-FINISHED scheduler state dump (#1262, debug only)" OFF)
+if(SWO_DIAG)
+    add_compile_definitions(CONFIG_SWO_DIAG=1)
+endif()
 option(SWITCH_WINDOW_TEST "Hold the switch window open 25 ms for the R1 test (#1234, test only)" OFF)
 if(SWITCH_WINDOW_TEST)
     add_compile_definitions(CONFIG_SWITCH_WINDOW_TEST=1)

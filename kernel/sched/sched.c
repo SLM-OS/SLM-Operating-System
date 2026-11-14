@@ -1566,6 +1566,10 @@ void scheduler_terminate_task(struct task *task)
 #endif
 }
 
+#if defined(CONFIG_SWO_DIAG)
+static void swo_diag_migrate_running(struct task *task, uint32_t target_cpu);
+#endif
+
 /*
  * Migrate a task to a different CPU.
  *
@@ -1579,7 +1583,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     /* Cannot migrate running tasks */
     if (task->state == TASK_RUNNING) {
+#if defined(CONFIG_SWO_DIAG)
+        swo_diag_migrate_running(task, target_cpu);
+#else
         WARN("Cannot migrate running task '%s'", task->name);
+#endif
         return -1;
     }
 
@@ -3199,3 +3207,173 @@ int sched_set_task_affinity(struct task *task, uint32_t cpu)
 
     return 0;
 }
+
+#if defined(CONFIG_SWO_DIAG)
+/* ============================================================================
+ * SWO_DIAG (#1262): scheduler state dump for a task that is READY but not
+ * run. Debug only (SWO_DIAG=ON); with the option off nothing here is built.
+ *
+ * The state is read without locks into a static snapshot first and printed
+ * afterwards, so the UART time of the dump does not change what it shows.
+ * The queue walks are racy and bounded by 2 * MAX_TASKS steps. A second
+ * call prints the per-CPU counter deltas since the previous call.
+ * ============================================================================ */
+
+#define SWO_DIAG_QIDS   8
+
+struct swo_diag_cpu {
+    uint32_t cur_id, cur_state, cur_on_cpu, cur_is_idle;
+    uint32_t wait_id, wait_on_cpu, has_wait;
+    uint32_t ready_count, qlen, qids[SWO_DIAG_QIDS];
+    uint32_t zombie_id, has_zombie;
+    int      pd;
+    uint32_t tick, sched, idle, picked, defer;
+    uint32_t lock_word;
+};
+
+struct swo_diag_where {
+    uint32_t q_cpu, q_pos, waited_by, current_of;
+};
+
+static struct swo_diag_cpu swo_diag_now[MAX_CPUS];
+static struct swo_diag_cpu swo_diag_prev[MAX_CPUS];
+static struct swo_diag_where swo_diag_where[32];
+static bool swo_diag_have_prev;
+static volatile uint32_t swo_diag_mig_total;
+static volatile uint32_t swo_diag_mig_printed;
+static volatile uint64_t swo_diag_mig_window;
+
+/* "Cannot migrate running task": every event is counted; at most 4 lines
+ * per 100 ms are printed, with the id and the CPUs involved. */
+static void swo_diag_migrate_running(struct task *task, uint32_t target_cpu)
+{
+    uint32_t total = __atomic_add_fetch(&swo_diag_mig_total, 1, __ATOMIC_RELAXED);
+    uint64_t now = timer_get_count();
+    uint64_t f = timer_get_frequency();
+    if (now - swo_diag_mig_window > f / 10) {
+        swo_diag_mig_window = now;
+        swo_diag_mig_printed = 0;
+    }
+    if (__atomic_fetch_add(&swo_diag_mig_printed, 1, __ATOMIC_RELAXED) >= 4) {
+        return;
+    }
+    uint32_t cur_on = 0xFF;
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        if (task_current_on_cpu(c) == task) {
+            cur_on = c;
+        }
+    }
+    WARN("Cannot migrate running task '%s' id=%u by_cpu=%u target=%u "
+         "assigned=%u aff=%u on_cpu=%u current_of=%u total=%u",
+         task->name, task->id, cpu_id(), target_cpu, task->assigned_cpu,
+         task->cpu_affinity, task->on_cpu, cur_on, total);
+}
+
+void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
+{
+    uint64_t t_snap = timer_get_count();
+    struct swo_diag_where *where = swo_diag_where;
+
+    if (n > 32) {
+        n = 32;
+    }
+    /* Read everything before anything is printed. */
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct swo_diag_cpu *d = &swo_diag_now[c];
+        struct cpu_runqueue *rq = cpu_rq(c);
+        struct task *cur = task_current_on_cpu(c);
+        struct task *w = __atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED);
+        struct task *z = rq->zombie;
+        d->cur_id = cur ? cur->id : 0;
+        d->cur_state = cur ? (uint32_t)cur->state : 0xFF;
+        d->cur_on_cpu = cur ? cur->on_cpu : 0xFF;
+        d->cur_is_idle = cur == rq->idle_task;
+        d->has_wait = w != NULL;
+        d->wait_id = w ? w->id : 0;
+        d->wait_on_cpu = w ? w->on_cpu : 0xFF;
+        d->has_zombie = z != NULL;
+        d->zombie_id = z ? z->id : 0;
+        d->ready_count = rq->ready_count;
+        d->pd = preempt_disabled[c];
+        d->tick = sched_diag_tick[c];
+        d->sched = sched_diag_schedule[c];
+        d->idle = sched_diag_idle_loops[c];
+        d->picked = sched_diag_picked[c];
+        d->defer = sched_diag_switch_defer[c];
+        d->lock_word = *(volatile uint32_t *)&rq_lock[c];
+        d->qlen = 0;
+        uint32_t steps = 0;
+        for (struct task *t = rq->head; t && steps < 2 * MAX_TASKS;
+             t = t->next, steps++) {
+            if (d->qlen < SWO_DIAG_QIDS) {
+                d->qids[d->qlen] = t->id;
+            }
+            d->qlen++;
+        }
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        struct task *t = tasks[i];
+        where[i].q_cpu = where[i].waited_by = where[i].current_of = 0xFF;
+        where[i].q_pos = 0;
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uint32_t pos = 0;
+            for (struct task *q = cpu_rq(c)->head; q && pos < 2 * MAX_TASKS;
+                 q = q->next, pos++) {
+                if (q == t) {
+                    where[i].q_cpu = c;
+                    where[i].q_pos = pos;
+                    break;
+                }
+            }
+            if (__atomic_load_n(&switch_in_waiting[c], __ATOMIC_RELAXED) == t) {
+                where[i].waited_by = c;
+            }
+            if (task_current_on_cpu(c) == t) {
+                where[i].current_of = c;
+            }
+        }
+    }
+
+    uint64_t f = timer_get_frequency();
+    uart_printf("  swo-diag %s: t=%lu us by_cpu=%u migrate_running_total=%u "
+                "(255 = none)\n", tag,
+                (unsigned long)(t_snap / (f / 1000000U)), cpu_id(),
+                swo_diag_mig_total);
+    for (uint32_t i = 0; i < n; i++) {
+        struct task *t = tasks[i];
+        uart_printf("  swo-diag task id=%u '%s' state=%u on_cpu=%u assigned=%u "
+                    "aff=%u flags=0x%x wake_time=%lu prio=%u eff=%u | "
+                    "on_rq_of=%u pos=%u switch_in_waiting_of=%u current_of=%u\n",
+                    t->id, t->name, (unsigned)t->state, t->on_cpu,
+                    t->assigned_cpu, t->cpu_affinity, (unsigned)t->flags,
+                    (unsigned long)t->wake_time_ns, (unsigned)t->priority,
+                    (unsigned)t->effective_priority, where[i].q_cpu,
+                    where[i].q_pos, where[i].waited_by, where[i].current_of);
+    }
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct swo_diag_cpu *d = &swo_diag_now[c];
+        struct swo_diag_cpu *p = &swo_diag_prev[c];
+        uart_printf("  swo-diag cpu%u: current id=%u%s state=%u on_cpu=%u | "
+                    "switch_in_waiting=%s id=%u on_cpu=%u | pd=%d rq_lock=0x%x "
+                    "zombie=%u ready=%u qlen=%u q=[",
+                    c, d->cur_id, d->cur_is_idle ? "(idle)" : "", d->cur_state,
+                    d->cur_on_cpu, d->has_wait ? "SET" : "NULL", d->wait_id,
+                    d->wait_on_cpu, d->pd, d->lock_word,
+                    d->has_zombie ? d->zombie_id : 0, d->ready_count, d->qlen);
+        for (uint32_t k = 0; k < d->qlen && k < SWO_DIAG_QIDS; k++) {
+            uart_printf("%s%u", k ? "," : "", d->qids[k]);
+        }
+        uart_printf("] | tick=%u sched=%u idle=%u picked=%u defer=%u",
+                    d->tick, d->sched, d->idle, d->picked, d->defer);
+        if (swo_diag_have_prev) {
+            uart_printf(" | delta tick=%u sched=%u idle=%u picked=%u defer=%u",
+                        d->tick - p->tick, d->sched - p->sched,
+                        d->idle - p->idle, d->picked - p->picked,
+                        d->defer - p->defer);
+        }
+        uart_printf("\n");
+        *p = *d;
+    }
+    swo_diag_have_prev = true;
+}
+#endif /* CONFIG_SWO_DIAG */

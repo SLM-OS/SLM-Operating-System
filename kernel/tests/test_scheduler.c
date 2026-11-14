@@ -2628,6 +2628,43 @@ static bool swo_phase(uint32_t mode)
         }
         yield();
     }
+#if defined(CONFIG_SWO_DIAG)
+    /* #1262: dump the tasks that did not finish and every CPU's scheduler
+     * state, keep polling 1 s, then say whether they finished and dump
+     * again (with the counter deltas over that second). */
+    if (wm < 0 || w < 0) {
+        struct task *stuck[SWO_MAX_WORKERS + SWO_MAX_CPUS];
+        uint32_t ns = 0;
+        for (uint32_t k = 0; k < nall; k++) {
+            if (__atomic_load_n(&all[k]->state, __ATOMIC_ACQUIRE) != TASK_TERMINATED) {
+                stuck[ns++] = all[k];
+            }
+        }
+        sched_swo_diag_dump("at-bound", stuck, ns);
+        long long late = -1;
+        uint64_t t2 = timer_get_count();
+        while (timer_get_count() - t2 < f) {
+            for (uint32_t i = 0; i < nw; i++) {
+                if (__atomic_load_n(&swo_task[i]->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED) {
+                    task_sleep_wake(swo_task[i]);
+                }
+            }
+            if (swo_all_terminated(all)) {
+                late = (long long)((timer_get_count() - t2) / (f / 1000000));
+                break;
+            }
+            yield();
+        }
+        sched_swo_diag_dump("after-poll", stuck, ns);
+        if (late >= 0) {
+            uart_printf("  swo-diag: finished %ld us into the 1 s poll (wm=%ld)\n",
+                        (long)late, (long)wm);
+        } else {
+            uart_printf("  swo-diag: NEVER finished in 1 s more (wm=%ld)\n",
+                        (long)wm);
+        }
+    }
+#endif
     if (wm < 0 || w < 0) {
         for (uint32_t k = 0; k < nall; k++) {
             struct task *t = all[k];

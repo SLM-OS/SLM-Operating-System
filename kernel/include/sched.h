@@ -303,4 +303,14 @@ void sched_ai_set_priority_actions(bool enabled);
 bool sched_ai_priority_actions_enabled(void);
 #endif
 
+#if defined(CONFIG_SWO_DIAG)
+/*
+ * SWO_DIAG (#1262, debug only): print where each of `tasks` is (state,
+ * on_cpu, run queue, switch_in_waiting, current) and every CPU's current
+ * task, switch_in_waiting entry, queue and tick/schedule/idle counters. A
+ * later call also prints the counter deltas since the previous call.
+ */
+void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n);
+#endif
+
 #endif /* SCHED_H */
