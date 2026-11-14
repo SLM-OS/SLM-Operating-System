@@ -4,8 +4,9 @@ Each ADR records one decision: the situation that forced it, what was
 decided, what else was considered, and what follows from it. ADRs 0001 to
 0007 were written when the decision was made (from 2026-11-07 on). ADRs
 0009 to 0017 were backfilled in November 2026 from git history, issues,
-PRs and documentation; where that record does not settle a point, the
-text says "unknown, ask the user" instead of guessing. The system overview
+PRs and documentation. Points the record did not settle were answered
+by the user on 2026-11-14 and are cited as "(user, 2026-11-14)"; where
+the answer is that something was not recorded, the ADR says so. The system overview
 is `docs/architecture.md`.
 
 ## Index
@@ -27,8 +28,8 @@ is `docs/architecture.md`.
 | [0013](0013-lua-in-the-kernel.md) | Embed a Lua interpreter in the kernel for scripting | accepted (backfilled) |
 | [0014](0014-vendored-lwip-wolfssl.md) | Vendor lwIP for TCP/IP and wolfSSH with wolfCrypt for SSH | accepted (backfilled) |
 | [0015](0015-gguf-model-format.md) | GGUF v3 is the SLM model format, checked against llama.cpp goldens | accepted (backfilled) |
-| [0016](0016-compiled-c-model-weights.md) | Policy model weights are compiled into the image, runtime blobs override | accepted (backfilled) |
-| [0017](0017-hailo-path.md) | Drive the Pi 5 Hailo-8L from a native bare-metal driver, without HailoRT | accepted (backfilled) |
+| [0016](0016-compiled-c-model-weights.md) | Policy model weights are compiled into the image, runtime blobs override (runtime loading preferred, #1253) | accepted (backfilled), regretted |
+| [0017](0017-hailo-path.md) | Drive the Pi 5 Hailo NPU (a Hailo 8) from a native bare-metal driver, without HailoRT | deprecated (#1254) |
 
 ## Format
 

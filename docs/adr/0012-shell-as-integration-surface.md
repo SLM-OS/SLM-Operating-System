@@ -10,7 +10,7 @@ Bring-up of each driver and subsystem (GPU, Hailo, camera, USB, PCIe, BPMP, cloc
 
 Subsystem bring-up, diagnostic and demo verbs are added as shell commands in the kernel image, compiled into `builtin_commands[]` (`kernel/src/shell.c`) or registered at run time through `shell_register_command()` (`kernel/include/shell.h`). The same REPL is reachable from three transports: the UART console, telnet on port 2323 (db204cd7, PR #259, 2026-04-17; per-session state in `kernel/include/shell_session.h`, up to `MAX_TCP_SHELL_SESSIONS` = 16) and SSH on port 2222 when built with `NET_SSHD=ON` (904fa48d, #891 / PR #915, 2026-05-25; see ADR 0014). Hardware verification drives the shell over serial through labctl `serial_send` / `serial_capture`, waiting for the `slmos>` prompt (`.claude/skills/deploy-and-test/SKILL.md`; root `CLAUDE.md` post-change checklist step 4). Lua (ADR 0013) is reached from the shell (`lua`, `lua-admin`).
 
-Motivation for putting every verb in one kernel-resident shell instead of a user-space tool or a separate debug channel: unknown, ask the user.
+Motivation: a kernel-resident shell kept the first design simple, because SLM-OS could not run ELF programs at the start. Moving verbs into user-space programs is an intended direction (user, 2026-11-14).
 
 Rules that have accumulated on shell verbs:
 
@@ -22,7 +22,7 @@ Rules that have accumulated on shell verbs:
 
 ## Alternatives considered
 
-- A full POSIX shell (fork/exec, pipes, "Port BusyBox ash or dash shell") was listed as a future item in `FUTURE.md` before 653a5087 (2025-12-27); it was not built. Whether it was ever weighed against the in-kernel shell: unknown, ask the user.
+- A full POSIX shell (fork/exec, pipes, "Port BusyBox ash or dash shell") was listed as a future item in `FUTURE.md` before 653a5087 (2025-12-27); it was not built. It was not weighed against the in-kernel shell, to keep the OS simple (user, 2026-11-14).
 
 ## Consequences
 

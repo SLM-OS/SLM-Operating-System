@@ -1,6 +1,34 @@
-# ADR 0017: Drive the Pi 5 Hailo-8L from a native bare-metal driver, without HailoRT
+# ADR 0017: Drive the Pi 5 Hailo NPU from a native bare-metal driver, without HailoRT
 
-Status: accepted (backfilled).
+Status: deprecated. The Hailo 8 cannot do useful work for SLM-OS and the
+integration does not work (user, 2026-11-14). Whether to delete or freeze the code is
+decided in #1254. A Hailo-10 offload path is a possible far-future item
+(user, 2026-11-14).
+
+## Which part is fitted
+
+The device in use is a Hailo 8 (user, 2026-11-14). The code and the Hailo docs name a
+Hailo-8L instead, and the driver cannot tell the two apart:
+
+- Both enumerate as `1e60:2864` (`kernel/ai_accel/hailo/hailo.h:56-57`,
+  "Hailo-8 and Hailo-8L") and boot the same `hailo8_fw.bin`
+  (`kernel/ai_accel/hailo/hailo_fw.S:2`, `docs/hailo-inference-wedge.md:7-8`).
+- The context-switch translator states "SLM-OS targets Hailo-8L (AI HAT+)
+  today" and emits the Hailo-8L PRELIMINARY variant,
+  FETCH_CFG_CHANNEL_DESCRIPTORS; HailoRT selects FETCH_CCW_BURSTS on a
+  Hailo-8 (`support_pre_fetch = true`)
+  (`kernel/ai_accel/hailo/hailo_cs_actions.h:242-254`,
+  `hailo_cs_translator.c:749`). The translator was matched to HailoRT
+  wire captures taken on the same board (`docs/hailo-protocol-architecture.md:7`).
+- The HEF compile wrapper `scripts/hailo/compile_hef.sh` defaults to `--arch hailo8l`
+  (`docs/hailo-toolchain.md:116`), and the test HEFs are 8L builds
+  (`hef_parser.h:48-55`, `resnet_v1_18_8L.hef`).
+- `docs/hailo-inference-wedge.md:1,5` names the hardware "AI HAT+ 13 TOPS
+  (Hailo-8L)"; `docs/hailo-lifecycle.md:1-3` and
+  `docs/hailo-protocol-architecture.md:3` also say Hailo-8L.
+
+The text below keeps the record's "Hailo-8L" where it quotes or cites it.
+The mismatch is not investigated further, because the path is deprecated.
 
 ## Context
 
@@ -32,8 +60,7 @@ not train `pcie1`, and SLM-OS had no ARM64 PCIe host driver.
 
 ## Alternatives considered
 
-- Porting HailoRT or `hailo_pci` into the kernel: unknown, ask the user.
-  The record does not say whether a port was weighed.
+- Porting HailoRT or `hailo_pci` into the kernel: not weighed (user, 2026-11-14).
 - Pre-parsing HEF outside the kernel (sidecar): ruled out (plan §3, Phase 0), with no
   reason recorded.
 - After the wedge: firmware-memory inspection through the BAR4 window and

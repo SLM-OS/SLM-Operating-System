@@ -49,8 +49,9 @@ the Jetson UEFI path is ADR 0002.
 
 - Linking llama.cpp/ggml into the kernel: rejected in the spec, for the
   reasons above.
-- ONNX for the SLM: unknown, ask the user. No comparison of ONNX (or any
-  other format, such as safetensors) against GGUF for the SLM is recorded.
+- ONNX or safetensors for the SLM: any comparison with GGUF is not recorded.
+  GGUF was the agent's recommendation and the user saw no reason to
+  disagree (user, 2026-11-14).
 - Q4_0 alongside Q4_K_M: deferred by plan decision M3-D2, to be added only
   if needed as a bring-up rung.
 - Token-exact parity with llama.cpp as the correctness bar: rejected

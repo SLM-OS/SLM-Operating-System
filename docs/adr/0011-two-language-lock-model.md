@@ -6,7 +6,7 @@ Status: accepted (backfilled).
 
 The kernel (C) and the runtime (Rust, `runtime/`, a `no_std` static library) both guard shared state with spinlocks, and both are called from IRQs-off paths: `spin_lock_irqsave` sections, the IRQ-masking lwIP core lock, the GPU dispatch lock and ISRs (`runtime/CLAUDE.md`, "Locks reached from IRQs-off context").
 
-Until PR #1052 (`9f456e96` 2026-10-31) every task started with `DAIF.I=1` and nothing cleared it, so running tasks on Pi 5 and Jetson took no timer IRQ and were never preempted (#1047). `kernel/CLAUDE.md` records that the lwIP core lock "became necessary in #1065 once #1047 made running tasks preemptible". Whether #1052 is also what exposed the Rust lock deadlock in #1093 is not recorded: unknown, ask the user.
+Until PR #1052 (`9f456e96` 2026-10-31) every task started with `DAIF.I=1` and nothing cleared it, so running tasks on Pi 5 and Jetson took no timer IRQ and were never preempted (#1047). `kernel/CLAUDE.md` records that the lwIP core lock "became necessary in #1065 once #1047 made running tasks preemptible". Whether #1052 is also what exposed the Rust lock deadlock in #1093 is not recorded (user, 2026-11-14).
 
 ## Decision
 
@@ -21,7 +21,7 @@ Until PR #1052 (`9f456e96` 2026-10-31) every task started with `DAIF.I=1` and no
 
 ## Alternatives considered
 
-- **Rust calls the C `spinlock_t` through FFI, or the kernel uses one shared lock type.** unknown, ask the user.
+- **Rust calls the C `spinlock_t` through FFI, or the kernel uses one shared lock type.** Separate C and Rust lock implementations were an agent decision; the alternatives weighed are not recorded (user, 2026-11-14).
 - **`SPINLOCK_SKIP_LOCKING` on Jetson (barrier-only C locks after boot).** Used until #166: CPUs raced on the PMM free list during `bench stealing`. Removed in PR #184 (`4b6cda4a` 2026-04-15); Jetson now uses the `spinlock_hw_enabled` model introduced for Pi 5 in `03f6eda1` 2026-04-03.
 - **Make every Rust lock IRQ-saving.** Not adopted for long-held locks; the registry lock is held while a policy runs, so spinning on it with IRQs masked is never safe (PR #1106).
 

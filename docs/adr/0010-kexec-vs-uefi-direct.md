@@ -6,7 +6,7 @@ Status: accepted (backfilled).
 
 SLM-OS first ran on Jetson Orin Nano by kexec from L4T Linux, which hands over at EL2 (ADR 0009, `d37c1149` 2026-04-05). Linux has by then powered, clocked and configured XUSB, PCIe, the GPU and the camera RCE, and several drivers inherit that state (`kernel/include/boot_source.h`). Kexec also leaves residue that SLM-OS has had to undo: stale GPU DMA (#9), stale interrupts, a PAN/SPAN state that faulted EL0 syscalls (#1079), and a second CPU cluster at 115.2 MHz (#1053) (root `CLAUDE.md`, "Known Issues").
 
-UEFI-direct boot was tracked as #26. April 2026 work (PRs #226, #239, #245) did not reach the shell; PR #1085 traced the remaining "RAS Uncorrectable Error in IOB" blocker to set/way cache cleaning while C code ran off the stack with the MMU off. Why UEFI-direct was pursued, beyond booting without Linux in the chain, is not written down: unknown, ask the user.
+UEFI-direct boot was tracked as #26. April 2026 work (PRs #226, #239, #245) did not reach the shell; PR #1085 traced the remaining "RAS Uncorrectable Error in IOB" blocker to set/way cache cleaning while C code ran off the stack with the MMU off. UEFI-direct was pursued for three reasons: to remove Linux from the boot chain, to shorten boot, and to stop inheriting kexec state such as #9, #1079 and #1053 (user, 2026-11-14).
 
 ## Decision
 
@@ -31,8 +31,8 @@ For x86-64, the bare-metal GRUB/multiboot2 build (`kernel/kernel-x86_64.ld`, `0x
 
 - **Apply PE base relocations (`.reloc`, the original #26 scope).** Rejected in PR #1085: the kernel would still sit at a physical address its page tables, linker symbols and `smp_boot.S` literals do not expect.
 - **Ask BPMP whether a block is powered instead of recording the boot source.** Rejected: `MRQ_PG`/`MRQ_CLK` queries read "off" even for XUSB that Linux left running (`boot_source.h`, measured 2026-11-03).
-- **Retire kexec once UEFI-direct worked.** Not done; the reasons for keeping it beyond the PR #1085 note "kexec stays the primary path for that work" are unknown, ask the user.
-- **x86-64:** three kexec loaders were tried (multiboot2, elf-x86_64, bzImage); all were silent until `--console-serial` was added (`docs/x86-64-gpu-inference-status.md` §4.2.k). Why both the multiboot2 and bzImage variants are kept: unknown, ask the user.
+- **Retire kexec once UEFI-direct worked.** Not done yet. Kexec is kept only as a fallback, and the intent is to retire it on Jetson and x86-64 (user, 2026-11-14); the epic is #1252. PR #1085 had noted "kexec stays the primary path for that work".
+- **x86-64:** three kexec loaders were tried (multiboot2, elf-x86_64, bzImage); all were silent until `--console-serial` was added (`docs/x86-64-gpu-inference-status.md` §4.2.k). Both the multiboot2 and bzImage variants are kept only as fallbacks and are to be retired with kexec (#1252) (user, 2026-11-14).
 
 ## Consequences
 

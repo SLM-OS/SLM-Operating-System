@@ -31,7 +31,7 @@ that SLM-OS brings up itself.
 ├────────────────────────── C/Rust FFI ────────────────────────────────┤
 │  C kernel (kernel/)                                                  │
 │  PMM/VMM  Scheduler + policies  SMP  IPC  VFS/littlefs/FAT  lwIP     │
-│  GPU HAL + GA10B driver   Hailo-8L driver  USB/xHCI   BPMP   Camera  │
+│  GPU HAL + GA10B driver   Hailo 8 driver   USB/xHCI   BPMP   Camera  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  QEMU_VIRT        RASPI5           JETSON_ORIN_NANO        X86_64    │
 │  Cortex-A76       Cortex-A76       Cortex-A78AE            x86-64    │
@@ -257,7 +257,7 @@ added as options rather than replacements.
 | `ai_mlp` | `kernel/sched/ai/sched_ai.c`, weights `ai_weights_mlp.c` | `AI_SCHED=ON` |
 | `ai_ppo` | `sched_ai.c`, weights `ai_weights_ppo.c` | `AI_SCHED=ON` |
 | `ai_xgb` | `kernel/sched/ai/sched_xgb.c` | `AI_SCHED=ON` |
-| `ai_hailo` | `sched_ai.c` (Hailo-8L backend) | `AI_SCHED=ON`, not on x86-64 |
+| `ai_hailo` | `sched_ai.c` (Hailo backend, deprecated with ADR 0017) | `AI_SCHED=ON`, not on x86-64 |
 
 `AI_SCHED` maps to the CMake option `ENABLE_AI_SCHEDULER` and is ON by
 default for Pi 5 and Jetson (`Makefile`). `AI_WEIGHTS=synthetic|real`
@@ -330,7 +330,7 @@ ownership and opaque handles are in `docs/ffi.md`; crate conventions in
 - **ONNX.** `runtime/src/loader/` and `runtime/src/inference/`.
 - **Inference devices.** A registry with a vtable per backend,
   `kernel/inference/inference_device.c`; backends are the CPU
-  (`kernel/sched/ai/inference_cpu.c`) and Hailo-8L
+  (`kernel/sched/ai/inference_cpu.c`) and the Hailo NPU
   (`kernel/inference/inference_device_hailo.c`).
 - **Model engines.** `kernel/src/model_engine.c` reads `.meta` sidecars
   and dispatches launches by model kind.
@@ -349,7 +349,13 @@ status is in `docs/x86-64-gpu-inference-status.md`. Pi 5 and QEMU have no
 compute GPU. Detail: `docs/gpu.md`, `docs/gpu-compute.md`,
 `docs/nvidia-gsp.md`, `docs/fact-sheets/gpu-inference.md`.
 
-### Hailo-8L NPU (Pi 5 AI HAT+)
+### Hailo NPU (Pi 5 AI HAT+), deprecated
+
+The fitted part is a Hailo 8 (user, 2026-11-14). The driver and the Hailo
+docs say Hailo-8L: both parts enumerate as `1e60:2864`
+(`kernel/ai_accel/hailo/hailo.h:57`), and the translator targets the 8L
+variant (`hailo_cs_actions.h:251`); ADR 0017 lists the evidence. The path
+is deprecated (ADR 0017); whether to delete or freeze it is #1254.
 
 `kernel/ai_accel/hailo/`: PCIe bring-up on the Pi 5 (`hailo_pi5.c`,
 `kernel/drivers/pcie/pcie_bcm2712.c`), firmware control RPCs
@@ -423,7 +429,7 @@ GPIO and I2C. Board notes and solved hardware issues are in the project
 kernel/
   arch/arm64/      boot.S, smp_boot.S, vectors, MMU, UEFI stub, EFI model delivery
   arch/x86_64/     Multiboot2 + bzImage entry, IDT, APIC, ACPI, PCI, SSE kernels
-  ai_accel/hailo/  Hailo-8L NPU driver, HEF parser, VDMA, trace
+  ai_accel/hailo/  Hailo NPU driver (deprecated), HEF parser, VDMA, trace
   drivers/         UARTs, GIC, timer, SDHCI, MACB, virtio, PCIe, BPMP,
                    camera, camrtc, GPIO, I2C, usb/xhci, Tegra cpufreq/fan/EMC
   fs/              littlefs glue
@@ -465,6 +471,24 @@ suites in `kernel/tests/` under QEMU, together with host-side checks under
 host unit tests, run twice by `make runtime-test` (`--features slm`, then
 `--features slm,ai_eviction_models`; `Makefile`). Hardware runs go through labctl. Detail: `docs/testing.md`,
 `docs/fact-sheets/testing.md`.
+
+---
+
+## Planned direction
+
+Recorded with the user's answers to the backfilled ADRs (2026-11-14):
+
+- **ELF user programs and user-space verbs.** Shell verbs are to move into
+  user-space programs now that SLM-OS runs EL0 ELF tasks (ADR 0012).
+- **Retire kexec.** UEFI-direct becomes the only boot path on Jetson and
+  x86-64, including both x86 kexec loader variants (ADR 0010, #1252).
+- **Replace third-party stacks.** Move SSH and crypto from GPL wolfSSH and
+  wolfCrypt to an MIT/BSD-compatible stack (ADR 0014, #1255);
+  project-written replacements are acceptable later.
+- **Runtime weight loading.** Load model weights at run time instead of
+  compiling them into the image (ADR 0016, #1253).
+- **Hailo.** The Hailo path is deprecated; delete or freeze is decided in
+  #1254 (ADR 0017).
 
 ---
 

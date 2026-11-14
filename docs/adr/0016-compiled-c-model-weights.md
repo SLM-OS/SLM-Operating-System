@@ -1,6 +1,6 @@
 # ADR 0016: Policy model weights are compiled into the kernel image, with runtime blobs as an override
 
-Status: accepted (backfilled).
+Status: accepted (backfilled), regretted.
 
 ## Context
 
@@ -43,15 +43,25 @@ at the point a policy is registered, on every platform including QEMU.
 
 ## Alternatives considered
 
-- Why compiled-in arrays were chosen over runtime loading in April 2026:
-  unknown, ask the user. The phase records (12f6e307, 251d6745,
-  `docs/archive/todos/TODO - PHASE AI-Sched.md`) describe the mechanism
-  but give no reason.
+- Why compiled-in weights were chosen over runtime loading in April 2026:
+  it was an agent decision that the user disagreed with; by the time it
+  was questioned the work was too far along to change (user, 2026-11-14). The phase
+  records (12f6e307, 251d6745, `docs/archive/todos/TODO - PHASE
+  AI-Sched.md`) describe the mechanism but give no reason.
 - Runtime-loaded parameters only: not adopted. The dynamic loading plan
   (`docs/archive/plans/dynamic-policy-model-loading-plan.md`) added
   loadable parameters beside the compiled-in ones, with "safe fallback"
   as a stated requirement; the XGBoost scheduler cascade (~9 MB, #855) is
   the one model that is runtime-only (`runtime_model.h`).
+
+## Position (user, 2026-11-14)
+
+The user disagrees with compiling model weights into the image, in both
+forms present in the tree: the policy weights generated as C and Rust
+`const` arrays, and the MNIST model embedded as an ONNX file through
+`include_bytes!` and `.incbin`. Runtime loading is the preferred
+direction, tracked in #1253. This ADR records how the build works now;
+it is not an endorsement.
 
 ## Consequences
 
