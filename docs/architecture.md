@@ -3,8 +3,10 @@
 Overview of the system as it stands on `main` in November 2026 (written
 against commit `8ec0e330`). This page names the parts and how they connect,
 and links to the subsystem documents for the detail. Decisions and their
-reasons are in the ADRs (`docs/adr/README.md`). Every file path below
-exists on `main`; issue, PR and commit numbers point at the change that
+reasons are in the ADRs (`docs/adr/README.md`). Every source and
+document path below exists on `main` at `8ec0e330`, except
+`docs/adr/README.md` and ADRs 0009 to 0017, which were added together
+with this rewrite; issue, PR and commit numbers point at the change that
 established the behaviour described.
 
 ---
@@ -29,7 +31,7 @@ that SLM-OS brings up itself.
 ├────────────────────────── C/Rust FFI ────────────────────────────────┤
 │  C kernel (kernel/)                                                  │
 │  PMM/VMM  Scheduler + policies  SMP  IPC  VFS/littlefs/FAT  lwIP     │
-│  GPU HAL + GA10B driver   Hailo-8 driver   USB/xHCI   BPMP   Camera  │
+│  GPU HAL + GA10B driver   Hailo-8L driver  USB/xHCI   BPMP   Camera  │
 ├──────────────────────────────────────────────────────────────────────┤
 │  QEMU_VIRT        RASPI5           JETSON_ORIN_NANO        X86_64    │
 │  Cortex-A76       Cortex-A76       Cortex-A78AE            x86-64    │
@@ -43,12 +45,14 @@ that SLM-OS brings up itself.
 
 The platform is chosen at build time (`PLATFORM` in `Makefile` and
 `CMakeLists.txt`: `QEMU_VIRT`, `RASPI5`, `JETSON_ORIN_NANO`, `X86_64`).
-Each has its own linker script in `kernel/` and its own toolchain file in
-`cmake/`. Per-platform defaults that change behaviour:
+Each has its own linker script in `kernel/`; `cmake/` has two toolchain
+files, `toolchain-aarch64-none-elf.cmake` (shared by the three ARM64
+platforms) and `toolchain-x86_64-none-elf.cmake`. Per-platform defaults
+that change behaviour:
 
 | Platform | CPU (`CMakeLists.txt`) | Exception level | Preemption default | AI_SCHED default (`Makefile`) | Linker script |
 |---|---|---|---|---|---|
-| `QEMU_VIRT` | `cortex-a76`, 4 cores | EL1 (QEMU is not started with `virtualization=on`) | timer tick | OFF | `kernel.ld` |
+| `QEMU_VIRT` | `cortex-a76`, 4 cores (`QEMU_CORES` in `Makefile`) | EL1 (QEMU is not started with `virtualization=on`) | timer tick | OFF | `kernel.ld` |
 | `RASPI5` | `cortex-a76` | EL2 + VHE (`kernel/arch/arm64/boot.S`, Pi 5 block) | `SECONDARY_PREEMPT=ON`, `COOP_PREEMPT=OFF` (#777) | ON | `kernel-raspi5.ld` |
 | `JETSON_ORIN_NANO` | `cortex-a78ae`, 6 cores in 2 clusters | EL2 + VHE (`boot.S`, Jetson block) | `JETSON_HW_TICK=ON` implies `SECONDARY_PREEMPT=ON` (#755, #1050) | ON | `kernel-jetson.ld` |
 | `X86_64` | generic x86-64, `-mno-sse` in kernel C | long mode | LAPIC timer | OFF | `kernel-x86_64.ld` (and kexec variants) |
@@ -67,9 +71,12 @@ interrupt delivery to NS-EL1 does not work (comment in the Pi 5 block of
 
 ## Boot paths
 
-All ARM64 platforms enter `kernel/arch/arm64/boot.S`, which masks
-exceptions first (stale interrupts after kexec), sets up the exception
-level, and calls `kernel_main` in `kernel/src/main.c`. x86-64 enters
+All ARM64 platforms enter `kernel/arch/arm64/boot.S`. Code before the
+`primary_cpu` label runs first: UEFI detection, an early UART mark, and
+the Pi 5 and Jetson EL2/VHE setup blocks. The first instruction at
+`primary_cpu` masks all exceptions (`msr daifset, #0xF`, against stale
+interrupts after kexec) before stack, BSS and FPU setup; then `boot.S`
+calls `kernel_main` in `kernel/src/main.c`. x86-64 enters
 through `kernel/arch/x86_64/trampoline32.S` (Multiboot2) or
 `bzimage_entry.S` (Linux bzImage protocol) and reaches `entry64.S`.
 
@@ -77,7 +84,7 @@ through `kernel/arch/x86_64/trampoline32.S` (Multiboot2) or
 |---|---|---|---|
 | QEMU_VIRT | `-kernel slmos.elf` | `boot.S`, DTB in `x0` | `make run`, `make test` |
 | QEMU_VIRT | QEMU AArch64 UEFI | `kernel/arch/arm64/efi_stub.c` | host check `make test-qemu-uefi` |
-| RASPI5 | Pi firmware loads `kernel_2712.img` | `boot.S`, `armstub8-2712.S` | `docs/deploy/pi5-sdcard.md` |
+| RASPI5 | Pi firmware loads `kernel_2712.img`, with a custom TF-A BL31 as `armstub8-2712.bin` (`deploy/pi5/config.txt`) | `boot.S` | `docs/deploy/pi5-sdcard.md` |
 | JETSON_ORIN_NANO | kexec from L4T Linux | `boot.S` | `scripts/jetson-kexec-slmos.sh` (`slmos-kexec`), `docs/deploy/jetson-kexec.md` |
 | JETSON_ORIN_NANO | UEFI direct from the NVMe ESP (#26, PR #1085) | `efi_stub_entry` in `efi_stub.c`, then `boot.S` | `scripts/jetson-uefi-deploy.sh`, `docs/deploy/jetson-uefi-direct.md` |
 | X86_64 | GRUB Multiboot2 ISO | `trampoline32.S`, `entry64.S` | linked at `0x100000` (`kernel-x86_64.ld`) |
@@ -108,8 +115,10 @@ Initialisation order in `kernel_main` (`kernel/src/main.c`): UART, VMM and
 PMM, the NC DMA block (`ncmem_init`, Pi 5 and Jetson), GIC and timer, SMP
 (`smp_init`), VFS, block devices and littlefs, the Rust heap and
 `rust_init()`, platform devices (on Jetson: BPMP, fan, GPU), the
-scheduler, IPC, then `scheduler_start(0)`. The main task runs the test
-harness (`ENABLE_BOOT_TESTS`) or starts the shell. Detail:
+scheduler, IPC, the main task, the shell task (`shell_start()`, called
+unconditionally), then `scheduler_start(0)`. The main task runs the test
+harness when `ENABLE_BOOT_TESTS` is defined and otherwise calls
+`task_exit()` (`main_task_func`). Detail:
 `docs/boot-sequence.md`, `docs/jetson-boot.md`.
 
 ---
@@ -134,7 +143,10 @@ CPU-shared state (run queues, task table, `current_task`, steal deques,
 `sched_diag_*`, boot and init flags, preemption state) lives in ordinary
 Normal Write-Back Inner Shareable memory on every platform, protected by
 ordinary spinlocks, with ordering by barriers and acquire/release. There
-is no CPU-to-CPU cache maintenance.
+is no CPU-to-CPU cache maintenance on shared state. One boot-time set/way
+loop remains: with `SETWAY_INVAL=ON` (the default, `CMakeLists.txt`,
+#1193) Pi 5 and Jetson secondaries invalidate L1/L2 by set/way after
+their MMU comes on.
 
 This has been the design since PR #1225 (commit `98e17440`, 2026-11-11,
 "Remove the CPU-sharing NC axis on Pi 5 and Jetson"). From April 2026
@@ -169,7 +181,8 @@ Memory". The old design is described under `docs/archive/coherency-gauntlet/`.
   separate `rq_lock[]` arrays; work stealing through per-CPU deques
   (`steal_deque.c`, `steal_deque_lock[]`). Secondary CPUs start through
   PSCI `CPU_ON` (`kernel/arch/arm64/smp_boot.S`); CPU ids resolve through
-  `cpu_logical_map[]` / `cpu_logical_id()` (`kernel/include/preempt.h`),
+  `cpu_logical_map[]` (`kernel/include/smp.h`) and `cpu_logical_id()`
+  (`kernel/include/preempt.h`),
   which handles the Jetson two-cluster MPIDR layout.
 - **Preemption:** timer-driven on every CPU on Pi 5 and Jetson
   (`SECONDARY_PREEMPT`; `COOP_PREEMPT` is the CNTPCT-polled fallback).
@@ -212,10 +225,11 @@ lifecycle events. Detail: `docs/scheduler.md`, `docs/smp.md`.
 
 ## Locks in two languages
 
-C code uses `spinlock_t` from `kernel/include/spinlock.h`. Until `vmm_init`
-sets `spinlock_hw_enabled`, Pi 5 and Jetson take a barrier-only path
-(exclusives fault on pre-MMU memory on Cortex-A78AE); afterwards every
-platform runs real LDAXR/STXR. Cross-CPU sections use
+C code uses `spinlock_t` from `kernel/include/spinlock.h`. On ARM64
+(all three platforms) locks take a barrier-only path until `vmm_init`
+sets `spinlock_hw_enabled` (exclusives fault on pre-MMU memory on
+Cortex-A78AE) and run LDAXR/STXR afterwards. x86-64 uses
+`__atomic_exchange_n` with a `pause` spin loop. Cross-CPU sections use
 `spin_lock_irqsave`. The lwIP core lock (`kernel/net/sys_arch.c`) is
 IRQ-save based and relies on every lwIP caller being pinned to CPU 0.
 
@@ -243,7 +257,7 @@ added as options rather than replacements.
 | `ai_mlp` | `kernel/sched/ai/sched_ai.c`, weights `ai_weights_mlp.c` | `AI_SCHED=ON` |
 | `ai_ppo` | `sched_ai.c`, weights `ai_weights_ppo.c` | `AI_SCHED=ON` |
 | `ai_xgb` | `kernel/sched/ai/sched_xgb.c` | `AI_SCHED=ON` |
-| `ai_hailo` | `sched_ai.c` (Hailo-8 backend) | `AI_SCHED=ON`, not on x86-64 |
+| `ai_hailo` | `sched_ai.c` (Hailo-8L backend) | `AI_SCHED=ON`, not on x86-64 |
 
 `AI_SCHED` maps to the CMake option `ENABLE_AI_SCHEDULER` and is ON by
 default for Pi 5 and Jetson (`Makefile`). `AI_WEIGHTS=synthetic|real`
@@ -316,7 +330,7 @@ ownership and opaque handles are in `docs/ffi.md`; crate conventions in
 - **ONNX.** `runtime/src/loader/` and `runtime/src/inference/`.
 - **Inference devices.** A registry with a vtable per backend,
   `kernel/inference/inference_device.c`; backends are the CPU
-  (`kernel/sched/ai/inference_cpu.c`) and Hailo-8
+  (`kernel/sched/ai/inference_cpu.c`) and Hailo-8L
   (`kernel/inference/inference_device_hailo.c`).
 - **Model engines.** `kernel/src/model_engine.c` reads `.meta` sidecars
   and dispatches launches by model kind.
@@ -335,7 +349,7 @@ status is in `docs/x86-64-gpu-inference-status.md`. Pi 5 and QEMU have no
 compute GPU. Detail: `docs/gpu.md`, `docs/gpu-compute.md`,
 `docs/nvidia-gsp.md`, `docs/fact-sheets/gpu-inference.md`.
 
-### Hailo-8 NPU (Pi 5)
+### Hailo-8L NPU (Pi 5 AI HAT+)
 
 `kernel/ai_accel/hailo/`: PCIe bring-up on the Pi 5 (`hailo_pi5.c`,
 `kernel/drivers/pcie/pcie_bcm2712.c`), firmware control RPCs
@@ -383,7 +397,9 @@ The path is ADR 0017. Detail: `docs/hailo-protocol-architecture.md`,
   (`kernel/src/net_http.c`). NICs: virtio-net (QEMU MMIO, x86-64 PCI), Cadence
   MACB through RP1 (Pi 5, `kernel/drivers/macb.c`), USB CDC-ECM over the
   Tegra xHCI (Jetson, `kernel/usb/class/cdc_ecm.c`,
-  `kernel/drivers/usb/xhci/`). ADR 0014. Detail: `docs/networking.md`,
+  `kernel/drivers/usb/xhci/`). An RTL8168 driver for Jetson PCIe
+  (`kernel/drivers/eth_rtl8169.c`) is Stage-1 scaffolding whose init does
+  not set up rings (#25). ADR 0014. Detail: `docs/networking.md`,
   `docs/ssh.md`, `docs/security.md`.
 
 ---
@@ -407,7 +423,7 @@ GPIO and I2C. Board notes and solved hardware issues are in the project
 kernel/
   arch/arm64/      boot.S, smp_boot.S, vectors, MMU, UEFI stub, EFI model delivery
   arch/x86_64/     Multiboot2 + bzImage entry, IDT, APIC, ACPI, PCI, SSE kernels
-  ai_accel/hailo/  Hailo-8 NPU driver, HEF parser, VDMA, trace
+  ai_accel/hailo/  Hailo-8L NPU driver, HEF parser, VDMA, trace
   drivers/         UARTs, GIC, timer, SDHCI, MACB, virtio, PCIe, BPMP,
                    camera, camrtc, GPIO, I2C, usb/xhci, Tegra cpufreq/fan/EMC
   fs/              littlefs glue
@@ -446,18 +462,18 @@ docs/              documentation; docs/adr/ for decisions
 suites in `kernel/tests/` under QEMU, together with host-side checks under
 `scripts/` (for example `check-cpu-cache-maint.py`,
 `check-gpu-shell-lock.py`, `check-emc-rate-path.py`). The Rust crate has
-host unit tests (`cargo test` with `--features slm,ai_eviction_models`,
-`Makefile`). Hardware runs go through labctl. Detail: `docs/testing.md`,
+host unit tests, run twice by `make runtime-test` (`--features slm`, then
+`--features slm,ai_eviction_models`; `Makefile`). Hardware runs go through labctl. Detail: `docs/testing.md`,
 `docs/fact-sheets/testing.md`.
 
 ---
 
 ## History
 
-- This file was first written in December 2025 (`176f974d`, 2025-12-23)
-  and last rewritten before this version in April 2026, when it described
-  the system phase by phase (Phase 3 to Phase 6). That version is in git
-  history.
+- This file was first written in December 2025 (`176f974d`, 2025-12-23).
+  Before this rewrite it described the system phase by phase (Phase 3 to
+  Phase 6, status line dated April 2026) and was edited piecemeal through
+  2026-11-11 (`98e17440`). That version is in git history.
 - The December 2025 design document (a microkernel with two-level page
   tables, a YAML component manifest and TensorRT integration) is
   superseded by the system described here. It is not in this repository;
