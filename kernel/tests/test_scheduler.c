@@ -2760,12 +2760,16 @@ static void cw_helper(void *arg)
         }
         if (__atomic_load_n(&switch_window_in, __ATOMIC_ACQUIRE) == 1) {
             switch_window_on = 0;
-            uart_printf("  switch_window %s it=%u: cpu0 in window, migrating T to cpu%u\n",
-                        cw_h_name, cw_h_it, cw_h_to);
-            if (sched_migrate_task(cw_h_task, cw_h_to) == 0) {
+            /* Migrate first, print after: a UART line before the migrate
+             * can outlast the 25 ms window in QEMU, after which T is
+             * RUNNING again and the migrate is refused. */
+            int mrc = sched_migrate_task(cw_h_task, cw_h_to);
+            if (mrc == 0) {
                 __atomic_fetch_add(&cw_h_mig, 1, __ATOMIC_RELAXED);
             }
             __atomic_store_n(&switch_window_moved, 1, __ATOMIC_RELEASE);
+            uart_printf("  switch_window %s it=%u: cpu0 in window, migrated T to cpu%u (rc=%d)\n",
+                        cw_h_name, cw_h_it, cw_h_to, mrc);
             while (__atomic_load_n(&switch_window_in, __ATOMIC_ACQUIRE) == 1) {
                 __asm__ volatile("yield" ::: "memory");
             }
