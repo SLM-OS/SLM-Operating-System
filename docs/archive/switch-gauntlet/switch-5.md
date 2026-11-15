@@ -2214,3 +2214,120 @@ claims cannot be checked or released; a session hold whose server stopped
 expires 30 minutes later. Nothing on the lab can be done from this session
 until the server is reconnected: builder A's deciding experiment (A2b),
 powering pi-5-1 on, and the release are blocked.
+
+## Entry 49 (written 23:52 UTC, from date): critic round 1 on Part B (FAIL) and the builder's responses; labctl reconnected; lab to builder A for A2b
+
+### Corrections to Entry 48 (from critic B)
+
+- "The three earlier halts of this session have no bytes": two earlier
+  halts (f55c5293 boots 01 and 05).
+- Boots 06 to 10 of B1b started at 20:56:48 UTC by the trigger log, not
+  21:05 UTC.
+- **"The write happened during `test_suite_gpu`" and "that rules out the
+  xHCI hand-over window" are withdrawn** (finding 2 below).
+
+### Critic B, round 1: FAIL (`critic-B.md`, `stage1-derivation.md`)
+
+Fable 5.2, blind, nothing run. Reproduced from the captures, the code at
+647c2c33 and the ELFs: every x50 loop; the full-suite counts (base 4 of 20
+failing outside the PMM, e3c22600 8 of 20, f650b695 2 of 13, the A/B 0 of
+10 against 2 of 10, 647c2c33 0 of 5; no PMM test fails anywhere); the old
+code failing the new tests 5 of 5; the halt signature; both Jetson
+old-allocator boots; f55c5293 halts in boots 01 and 05 (2 in 10); 647c2c33
+halt in boot 04 (1 in 10) with every quoted line, address and byte; the
+coalescing pair failing 2 of 2 on the old allocator and passing 20 of 20
+on Jetson and 3 of 3 on Pi 5; the trigger logs (2 + 10 + 10 for 22 saved
+boots); Pi 5 3 of 3 with the same 18 names.
+
+Findings:
+
+1. Low. The wrong number above.
+2. HIGH. The boot 04 bracket is overstated. The capture shows the header
+   at 0x139580000 read intact at the walk after `test_suite_oplib_gpu_as`
+   and zero at the walk after `test_suite_gpu`: that bounds when the CPU's
+   view changed, not when anything wrote. A device that does not snoop the
+   CPU caches can write DRAM under a line the CPU still holds. And
+   `test_suite_gpu` is the suite that drops lines: `cache_invalidate_range`
+   (`kernel/gpu/cache.c:84-98`) is DC IVAC, discard without write-back; an
+   IVAC that reaches a still-dirty header would revert it to old DRAM
+   content, a lost CPU write with no writer. Neither is shown; both fit
+   every byte.
+3. Medium, code. `pmm_dump_block` / `pmm_dump_words` (`pmm.c:683-715`) can
+   read unmapped memory on Jetson (the OP-TEE carve-out, above
+   0x240000000).
+4. Medium, code. `free_list_pop` reports a NULL `next` with blocks still
+   counted and carries on, handing out the damaged block while the
+   orphaned tail points into it.
+5. Medium. In-tree overstatements: "about one suite boot in five" (3 in 20
+   this session); "the writer is somewhere else" as fact; the
+   `is_buddy_free` comment and `kernel/CLAUDE.md` attribute the hardware
+   abort to the merge defect.
+6. Low. No hardware row separates the test fix from the allocator change.
+7. Low. Litmus failures 3 of 30 at base against 11 of 48 at the fix heads;
+   647c2c33 has only 5 full-suite runs.
+8. Low. The verifier self-test has no repeat row.
+9. Low. Entry 45's "mechanisms 1 and 3 have no source at boot here" rests
+   on two non-halting boots.
+10. Low. `nvidia_alloc(GPU_MEM_ALIGN_2MB)` allocates order 10 and
+    `nvidia_free` returns order 9 (`gpu_nvidia.c:186-227`).
+11. Trivial. The start time above.
+
+The critic agrees with: the coalescing failures are a test defect, fixed;
+the merge defect is not what halts the board; 2 in 10 then 1 in 10 is not
+a fix and no evidence of a rate change; no closing keyword for #1207,
+#1228 or #1109.
+
+### Builder B's responses (`fix/pmm-coalesce` 02ebdad8 = 647c2c33 + one commit; `gauntlet-5-hw-jetson` 608ee693; QEMU rows only, the lab was down)
+
+- Finding 2: withdrawn in `B-finding-boot04.txt` and both drafts. The IVAC
+  lead read in code (`B-ivac-callers.txt`): two functions are named
+  `cache_invalidate_range`; `kernel/include/cache.h:64-74` is DC CIVAC
+  (used by the GSP platform layer and `ga10b_bringup.c`, writes back
+  first), `kernel/gpu/cache.c:84-98` is DC IVAC. True IVAC sites that can
+  run on Jetson: the three GPU tests (the range is the pages the test
+  holds, page-aligned, before `gpu_free`); `slm_ffi.c:753` (one line);
+  `slm_ffi.c:2102, 2209, 2283, 2462, 2535, 2384` (length rounded up to
+  4096 whatever the start offset; not traced to their buffers; may not
+  run in the suite); shell commands; boot-time lines. No site is shown to
+  reach a listed free block's first line; the last three groups are not
+  excluded. No code changed there. Proposed hardware experiment: DC CVAC
+  on the header's line after each link write plus a pattern in bytes 16 to
+  63 of each listed block's first line, about 30 kexec suite boots.
+- Finding 3: `pmm_dump_readable()` reads 64 bytes only inside one free
+  heap page; the unmapped holes are marked allocated; test
+  `test_verify_dump_reads_only_free_heap_pages`. Not exercised on Jetson.
+- Finding 4: the pop panics after the report in the NULL case too
+  (`B-qemu-verify-demo-02ebdad8.txt`).
+- Finding 5: wording corrected in `pmm.c`, `kernel/CLAUDE.md`,
+  `docs/memory-map.md`.
+- Finding 7: 15 more interleaved pairs (`B-qemu-ab2-base-661204e6-run01..15.txt`,
+  `B-qemu-ab2-fix-02ebdad8-run01..15.txt`): base 11 of 15 pass (4 litmus
+  failures), head 14 of 15 (1 litmus). With the earlier 10 pairs: base 4
+  of 25 litmus failures, head 2 of 25 plus one #1184. No evidence that the
+  change moves the #1230 rate.
+- Finding 8: `B-qemu-fix-02ebdad8-verify-x50.txt`, both verifier tests 50
+  of 50. Finding 10: comment added on #1240. Findings 6 and 9: stated in
+  the PR draft.
+- Other rows at 02ebdad8: the x50 loops 50 of 50; `PMM_CHECK=ON` suite 107
+  walks ok (the run fails on litmus only); x86-64 pass. **`/ci` did not
+  pass in one go:** step 4 (`make test`) failed once on
+  `test_litmus_patterns_pass` (`B-ci-02ebdad8-step04-test-arm64-attempt1-litmus.txt`),
+  then steps 4 to 11 passed on a resume (`B-ci3b.out.txt`).
+
+Round 2 of critic B was started at 23:50 UTC.
+
+### labctl
+
+The user ran `/mcp reconnect` at about 23:44 UTC. Found: no active claims
+(the session holds had lapsed); jetson-nano-2 online; pi-5-1 powered off,
+`sdwire_info` reads the card (one FAT32 partition `SLMOS`, clean);
+`recovery_mode` relay of jetson-nano-2 open. Both boards re-claimed at
+23:45 UTC (session hold, `lab-1263-1207`). Defect to report against
+labctl: an `sdwire_cat` of an 8.4 MB file (base64) closed the stdio
+connection for the whole session, and there is no tool that returns a
+checksum of a card file without returning its content.
+
+23:47 UTC: lab to builder A for A2b (the migration-test experiment on Pi 5
+and Jetson UEFI-direct, the changed test x200, one Jetson suite boot at
+d09b063b), with the user's `slmstore` rule applied before and after its
+Pi 5 boots (small files only; no full-suite boot on Pi 5).
