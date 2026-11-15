@@ -2265,19 +2265,28 @@ static void test_task_slot_reuse_under_switch(void)
 
 /* ============================================================================
  * Regression #1229: preempt_disabled follows a task that resumes on another
- * CPU. Two tasks sleep 1 ms in a loop (blocking inside schedule()); the test
- * migrates one of them to another CPU while it is blocked, and wake-up
- * placement moves them too. When a task resumes from schedule() on a new
- * CPU, schedule() must clear the NEW CPU's preempt_disabled, not the CPU it
- * blocked on. Each task checks its own CPU's flag after every wake-up. Before the fix the flag of
- * the CPU it moved to read 1 after the first migration, and that CPU
- * stopped taking preemption ticks (#1219 deadlock under WORK_STEALING).
+ * CPU. Two tasks sleep 1 ms in a loop (blocking inside schedule()). When a
+ * task resumes from schedule() on a new CPU, schedule() must clear the NEW
+ * CPU's preempt_disabled, not the CPU it blocked on. Each task checks its own
+ * CPU's flag after every wake-up. Before the fix the flag of the CPU it moved
+ * to read 1 after the first migration, and that CPU stopped taking preemption
+ * ticks (#1219 deadlock under WORK_STEALING).
  *
- * The CPU id and the flag are read as a pair with local interrupts masked
- * (#1284): with interrupts open a tick between the two reads could preempt
- * the task and another CPU could take it, and it would then read the flag
- * of the CPU it had left, which is 1 by design while that CPU is inside
- * schedule().
+ * The first task (pdm_a) makes every one of its wake-ups a cross-CPU resume:
+ * before each sleep it sets its own cpu_affinity to the next of CPUs 1-3, and
+ * scheduler_add_task() places a woken task on its affinity CPU ahead of the
+ * policy (a pinned task is not published to a steal deque either). The
+ * second task (pdm_b) stays unpinned, so the policy's placement and work
+ * stealing still move it when they happen to.
+ *
+ * History (#1263): the test used to rely on the wake-up placement landing a
+ * task on a different CPU by itself (the heuristic's round-robin cursor, or a
+ * steal), and "migrated" the blocked task with sched_migrate_task(), which
+ * for a BLOCKED task only rewrites assigned_cpu; the wake path does not read
+ * it. With the per-CPU cache-line layout a woken task came back to its
+ * previous CPU far more often (Pi 5: 2 to 4 moves in 100 wake-ups; one
+ * Jetson boot: 0 in 100, failing the coverage condition below with bad=0).
+ * The migration loop is gone because it never steered a wake-up.
  * ============================================================================ */
 
 static volatile uint32_t pdm_stop;
@@ -2286,38 +2295,31 @@ static volatile uint32_t pdm_moved;
 static volatile uint32_t pdm_runs[2];
 static volatile uint32_t pdm_bad_cpu;
 
-/* Mask every interrupt class that can deliver a tick (FIQ too where the
- * Pi 5 tick is an FIQ), as schedule() does (ADR 0008 part 1). */
-static inline irq_flags_t pdm_irq_save(void)
-{
-#if defined(PI5_FIQ_TIMER) && !defined(PLATFORM_X86_64)
-    irq_flags_t f;
-    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #3" : "=r"(f) :: "memory");
-    return f;
-#else
-    return irq_save();
-#endif
-}
-
 static void pdm_task(void *arg)
 {
     uint32_t idx = (uint32_t)(uintptr_t)arg;
     uint32_t last = cpu_id();
+    struct task *self = task_current();
     while (!__atomic_load_n(&pdm_stop, __ATOMIC_ACQUIRE)) {
-        /* Block inside schedule(); the wake-up (and the test's
-         * migration while blocked) can put the task on another CPU, so
-         * schedule() returns there. */
+        if (idx == 0 && self) {
+            /* Steer the next wake-up to another CPU: 1 -> 2 -> 3 -> 1.
+             * Only the field: task_set_affinity() also rewrites
+             * assigned_cpu, which for this running task would then
+             * disagree with the CPU it is on. The wake path sets
+             * assigned_cpu under the target's rq lock when it queues
+             * the task. */
+            self->cpu_affinity = (last % 3) + 1;
+        }
+        /* Block inside schedule(); the wake-up puts pdm_a on the CPU
+         * chosen above and may put pdm_b on another CPU, so schedule()
+         * returns there. */
         task_sleep_ms(1);
-        /* No migration between the two reads (#1284). */
-        irq_flags_t pf = pdm_irq_save();
         uint32_t c = cpu_id();
-        int pd = preempt_disabled[c].v;
-        irq_restore(pf);
         if (c != last) {
             __atomic_fetch_add(&pdm_moved, 1, __ATOMIC_RELAXED);
             last = c;
         }
-        if (pd != 0) {
+        if (preempt_disabled[c].v != 0) {
             if (__atomic_fetch_add(&pdm_bad, 1, __ATOMIC_RELAXED) == 0) {
                 pdm_bad_cpu = c;
             }
@@ -2353,30 +2355,20 @@ static void test_preempt_flag_follows_migrated_task(void)
     scheduler_add_task_to_cpu(t[0], 2);
     scheduler_add_task_to_cpu(t[1], 2);
 
-    /* For up to 1 s, while t[0] is BLOCKED in task_sleep_ms, move it to
-     * the next of CPUs 1-3; wake-up placement may move either task too.
-     * Any CPU change counts. Stop after 5 observed moves. */
+    /* For up to 1 s let the tasks sleep and resume; pdm_a changes CPU at
+     * every wake-up, and placement or a steal may move pdm_b. Any CPU
+     * change counts. Stop after 5 observed moves. */
     uint64_t f = timer_get_frequency();
     uint64_t t0 = timer_get_count();
-    uint32_t migrations = 0;
     while (timer_get_count() - t0 < f && pdm_moved < 5) {
-        struct task *m = t[0];
-        uint32_t cur = m->assigned_cpu;
-        if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED &&
-            pdm_runs[0] > 0 && cur < 4) {
-            uint32_t to = (cur % 3) + 1;     /* 1 -> 2 -> 3 -> 1 */
-            if (sched_migrate_task(m, to) == 0) {
-                migrations++;
-            }
-        }
         yield();
     }
 
     __atomic_store_n(&pdm_stop, 1, __ATOMIC_RELEASE);
     long long w = test_wait_until("pdm_done", pdm_both_terminated, t,
                                   TEST_WAIT_S(1));
-    uart_printf("  pdm: migrations=%u moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
-                migrations, pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
+    uart_printf("  pdm: moved=%u runs=%u/%u bad=%u (first on cpu %u)\n",
+                pdm_moved, pdm_runs[0], pdm_runs[1], pdm_bad,
                 pdm_bad_cpu);
     if (w < 0) {
         for (int i = 0; i < 2; i++) {
