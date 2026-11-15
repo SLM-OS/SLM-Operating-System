@@ -47,10 +47,19 @@ _Static_assert(MAX_ORDER == PMM_MAX_ORDER,
  * kernel image is placed above it, so 0 cannot be reused as "failure". */
 #define PMM_ALLOC_FAIL  ((uintptr_t)-1)
 
-/* Block states for tracking */
-#define BLOCK_FREE      0
+/*
+ * Per-page state (block_state[]).
+ *
+ * A free block is recorded twice: every page of it is "not allocated",
+ * and its first page carries BLOCK_FREE_HEAD | order while the block is on
+ * that order's free list. The merge test in buddy_free reads the head
+ * value, so a buddy is merged only when it is one listed block of exactly
+ * that order (#1207). The page-by-page state alone cannot tell one free
+ * block of order n from two free blocks of order n-1 lying side by side.
+ */
+#define BLOCK_FREE      0           /* Free page, not the first of a listed block */
 #define BLOCK_ALLOCATED 1
-#define BLOCK_SPLIT     2           /* Parent block that was split */
+#define BLOCK_FREE_HEAD 0x80        /* | order: first page of a listed free block */
 
 /* ==========================================================================
  * Data Structures
@@ -281,7 +290,9 @@ static void pmm_chk_fail(const char *what, uintptr_t addr, unsigned int order)
 }
 
 /* A listed element: in the heap, aligned for its order, tagged as listed
- * at that order, first page free. */
+ * at that order, first page not allocated. (The tag is the option's own
+ * record, kept apart from block_state[]'s head value so the two can
+ * disagree.) */
 static bool pmm_chk_listed(uintptr_t a, unsigned int order)
 {
     return pmm_chk_ptr_ok(a, order) &&
@@ -586,6 +597,12 @@ unsigned pmm_check_walk(const char *where)
 
 /* ==========================================================================
  * Free List Operations
+ *
+ * Callers mark every page of the block free (set_block_state) before
+ * free_list_add, which then writes the head value into the first page;
+ * free_list_remove and free_list_pop put the first page back to
+ * BLOCK_FREE, and the caller marks the block allocated or lists the block
+ * it became part of.
  * ========================================================================== */
 
 /*
@@ -606,6 +623,7 @@ static void free_list_add(uintptr_t addr, unsigned int order)
 
     buddy_state.free_lists[order] = block;
     buddy_state.free_counts[order]++;
+    block_state[addr_to_block_index(addr)] = (uint8_t)(BLOCK_FREE_HEAD | order);
 }
 
 /*
@@ -616,6 +634,10 @@ static void free_list_remove(uintptr_t addr, unsigned int order)
     struct free_block *block = (struct free_block *)addr;
 
     PMM_CHK_REMOVE(addr, order);
+    if (buddy_state.free_counts[order] == 0) {
+        panic("PMM: free_list_remove(0x%lx) on order %u with a zero count "
+              "(free-list corruption, #1207)", (unsigned long)addr, order);
+    }
     if (block->prev) {
         block->prev->next = block->next;
     } else {
@@ -627,6 +649,7 @@ static void free_list_remove(uintptr_t addr, unsigned int order)
     }
 
     buddy_state.free_counts[order]--;
+    block_state[addr_to_block_index(addr)] = BLOCK_FREE;
 }
 
 /*
@@ -655,6 +678,7 @@ static uintptr_t free_list_pop(unsigned int order)
     block->prev = NULL;
 
     buddy_state.free_counts[order]--;
+    block_state[addr_to_block_index((uintptr_t)block)] = BLOCK_FREE;
     return (uintptr_t)block;
 }
 
@@ -685,8 +709,19 @@ static uint8_t get_block_state(uintptr_t addr)
 }
 
 /*
- * Check if a buddy block is free and at the same order
- * (all pages in the buddy must be marked FREE)
+ * True when the buddy is one free block of exactly this order, on that
+ * order's free list.
+ *
+ * This used to test that every page of the buddy range was free. That is
+ * also true of a range made of smaller free blocks (two order-0 blocks
+ * side by side pass as an order-1 buddy), and merging with such a range
+ * unlinked its first page from a list it was not on: free_counts[order]
+ * went down for a block that list never held (an underflow at zero), the
+ * other blocks of the range stayed listed inside the merged block, and a
+ * later allocation found a non-zero count over an empty list and split
+ * from PMM_ALLOC_FAIL, writing block_state[] far outside the array
+ * (#1207). The head value is written only by free_list_add, so this is
+ * exact, and O(1).
  */
 static bool is_buddy_free(uintptr_t buddy_addr, unsigned int order)
 {
@@ -695,16 +730,31 @@ static bool is_buddy_free(uintptr_t buddy_addr, unsigned int order)
         return false;
     }
 
-    /* Check all pages in the buddy block are free */
-    size_t base_index = addr_to_block_index(buddy_addr);
+    return block_state[addr_to_block_index(buddy_addr)] ==
+           (uint8_t)(BLOCK_FREE_HEAD | order);
+}
+
+/*
+ * True when every page of [addr, addr + 2^order pages) is allocated and
+ * inside the heap: the precondition of a free. `bad` gets the first page
+ * that is not.
+ */
+static bool range_is_allocated(uintptr_t addr, unsigned int order, uintptr_t *bad)
+{
     size_t count = order_to_pages(order);
 
+    if (addr + order_to_size(order) > buddy_state.heap_end ||
+        addr + order_to_size(order) < addr) {
+        *bad = buddy_state.heap_end;
+        return false;
+    }
+    size_t base_index = addr_to_block_index(addr);
     for (size_t i = 0; i < count; i++) {
-        if (block_state[base_index + i] != BLOCK_FREE) {
+        if (block_state[base_index + i] != BLOCK_ALLOCATED) {
+            *bad = addr + (i << PAGE_SHIFT);
             return false;
         }
     }
-
     return true;
 }
 
@@ -723,6 +773,14 @@ static uintptr_t buddy_alloc(unsigned int order)
         if (buddy_state.free_counts[o] > 0) {
             /* Found a free block - pop it from the list */
             uintptr_t block = free_list_pop(o);
+            if (block == PMM_ALLOC_FAIL) {
+                /* A count without a list. Splitting from the sentinel
+                 * would write block_state[] at a wild index (the #1207
+                 * data abort); stop with the cause named instead. */
+                panic("PMM: order %u free list is empty but its count is "
+                      "%lu (free-list corruption, #1207)", o,
+                      (unsigned long)buddy_state.free_counts[o]);
+            }
 
             /* Split down to requested order if needed */
             while (o > order) {
@@ -1101,11 +1159,19 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 /*
  * Add a contiguous memory region to the buddy allocator.
  * Breaks it into the largest power-of-two aligned blocks possible.
+ *
+ * Only whole pages inside [start, end) are added: start rounds up and end
+ * rounds down. A carved subrange ends where a reservation begins, and a
+ * reservation that begins inside a page owns that page. The order-0 step
+ * of the loop below has no fit test, so without the rounding the page
+ * holding an unaligned end was listed, over the reservation, next to a
+ * free buddy it was never merged with (#1207).
  */
 static void pmm_add_region(uintptr_t start, uintptr_t end)
 {
     uintptr_t current = PAGE_ALIGN_UP(start);
     PMM_CHK_REGION(start, end);
+    end &= ~(uintptr_t)(PAGE_SIZE - 1);
     while (current < end) {
         unsigned int order = MAX_ORDER;
 
@@ -1511,9 +1577,21 @@ void pmm_free_pages(void *page, size_t count)
     PMM_CHK_ENTER();
 
     /* Check for double-free */
-    if (get_block_state(addr) == BLOCK_FREE) {
+    if (get_block_state(addr) != BLOCK_ALLOCATED) {
         spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: Double-free detected at 0x%lx", addr);
+        return;
+    }
+
+    /* Every page of the range must be allocated. A range that holds a
+     * free page (an over-sized count, or a free after part of the block
+     * was freed) would go onto a free list over the block already listed
+     * inside it; the two then share pages and each other's list links. */
+    uintptr_t bad;
+    if (!range_is_allocated(addr, order, &bad)) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
+        ERROR("PMM: free of %u pages at 0x%lx rejected: page 0x%lx is not "
+              "allocated", (unsigned)order_to_pages(order), addr, bad);
         return;
     }
     PMM_CHK_FREE(addr, order);

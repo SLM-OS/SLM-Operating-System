@@ -801,9 +801,22 @@ uintptr_t buddy_addr = block_addr ^ (PAGE_SIZE << order);
 
 **Freeing:**
 1. Round count up to power of 2 to find block order
-2. Check if buddy is free at same order (look it up in free list)
-3. If buddy is free, remove it and merge into parent (order + 1)
-4. Repeat until buddy is not free or MAX_ORDER reached
+2. Reject the free unless every page of the range is allocated (first page free: double free, WARN; a free page further in: ERROR)
+3. Check if the buddy is one free block of the same order: its first page's `block_state[]` byte is `BLOCK_FREE_HEAD | order`
+4. If it is, remove it and merge into parent (order + 1)
+5. Repeat until the buddy is not such a block or MAX_ORDER reached
+
+**Free-list consistency (#1207):** "every page of the buddy range is free"
+is not the merge test. Two smaller free blocks side by side satisfy it,
+and merging with them unlinks a block from a list it is not on: the
+count of that order goes down (underflows at zero), and a later
+allocation finds a count without a list and splits from `PMM_ALLOC_FAIL`
+(the #1207 data abort, FAR = `&block_state[huge]`, x0 = -1). The head byte
+is written only by `free_list_add` and cleared by `free_list_remove` /
+`free_list_pop`; keep it that way in new list code. `pmm_add_region` adds
+whole pages only (start up, end down). A count without a list now panics
+by name. `PMM_CHECK=ON` (debug option, `docs/testing.md`) asserts all of
+this per operation and walks the lists after every test suite.
 
 **Statistics API:**
 ```c
@@ -865,7 +878,8 @@ Tests in `kernel/tests/test_pmm.c` verify:
 - Basic alloc/free
 - Power-of-two rounding
 - Block splitting creates correct buddies
-- Coalescing enables larger allocations
+- Coalescing enables larger allocations (run with the order-0 list drained; a Jetson kexec boot has ~100 free single pages, which made the undrained proofs fail on every Jetson kexec suite boot, #1109)
+- Free-list consistency: no merge with a split buddy range, no listing of a partial page, no free over a free page (#1207)
 - Exhaustion and recovery
 - Mixed workload stress
 - `pmm_carve_reserves` (memreserve carve helper) — 11 cases including

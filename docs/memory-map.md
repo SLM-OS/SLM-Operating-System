@@ -309,7 +309,7 @@ The PMM uses a buddy allocator for O(log n) allocation and freeing:
 
 **Algorithm:**
 1. `pmm_alloc_pages(n)`: Find smallest free block >= 2^⌈log₂(n)⌉, split if needed
-2. `pmm_free_pages(addr, n)`: Free block, recursively merge with buddy if both free
+2. `pmm_free_pages(addr, n)`: Free block, recursively merge with buddy while the buddy is one free block of the same order
 
 **Buddy Address Calculation:**
 ```c
@@ -317,6 +317,36 @@ buddy_addr = block_addr XOR (block_size)
 ```
 
 Two blocks are buddies if they are the same size and XOR to produce their parent address.
+
+**Free-list consistency rules (#1207).** `block_state[]` holds one byte per
+page. Every page of a free block is "not allocated", and the first page of
+a block on a free list carries `BLOCK_FREE_HEAD | order`, written only by
+`free_list_add` and cleared by `free_list_remove` / `free_list_pop`.
+
+- **A merge needs one buddy block of exactly that order.** `is_buddy_free`
+  compares the buddy's first page with `BLOCK_FREE_HEAD | order`. It used
+  to test that every page of the buddy range was free, which is also true
+  of two smaller free blocks lying side by side; merging with such a range
+  unlinked a block from a list it was not on, counted that list down (an
+  underflow at zero) and left the rest of the range listed inside the
+  merged block. A later allocation then found a non-zero count over an
+  empty list, split from the failure sentinel and wrote `block_state[]`
+  far outside the array: the data abort of #1207.
+- **A free must cover allocated pages only.** `pmm_free_pages` rejects a
+  range whose first page is free (double free, WARN) and a range that
+  holds a free page further in (ERROR): an over-sized count, or a free
+  after part of the block was already freed. Freeing part of an allocated
+  block is allowed; the rest stays allocated.
+- **Regions are added in whole pages.** `pmm_add_region` rounds the start
+  up and the end down, so a page shared with a reservation is never
+  listed.
+- **A count without a list stops the kernel by name.** `buddy_alloc`
+  panics with `PMM: order N free list is empty but its count is M` instead
+  of splitting from the sentinel, and `free_list_remove` panics on a zero
+  count.
+
+The `PMM_CHECK=ON` build option adds per-operation assertions and a
+free-list walk after every test suite (`docs/testing.md`, "PMM_CHECK").
 
 ### Interface
 

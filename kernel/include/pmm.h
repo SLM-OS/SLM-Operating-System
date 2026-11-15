@@ -191,7 +191,12 @@ void pmm_free_page(void *page);
  * Free contiguous physical pages.
  *
  * @page: Physical address of first page to free.
- * @count: Number of pages to free.
+ * @count: Number of pages to free (rounded up to a power of two, as in
+ *         pmm_alloc_pages).
+ *
+ * Every page of the rounded range must be allocated. A range whose first
+ * page is free is a double free (WARN); a range that holds a free page
+ * further in is rejected with an ERROR. Nothing is freed in either case.
  */
 void pmm_free_pages(void *page, size_t count);
 

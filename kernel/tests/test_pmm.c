@@ -237,11 +237,60 @@ static void test_buddy_address_calculation(void)
  * ============================================================================ */
 
 /*
+ * The coalescing proofs below count splits and merges while single pages
+ * are allocated and freed, which only says something when those pages come
+ * out of one larger block. With free single pages already on the order-0
+ * list the allocator hands those out first: no split, and nothing to
+ * merge with when they are freed (their buddies are in use). A Jetson
+ * kexec boot has about a hundred such pages, left by the carve-outs for
+ * the GPU state it inherits, so both proofs failed on every Jetson kexec
+ * suite boot (#1109, #1207). They passed in QEMU (none), on Pi 5 (one)
+ * and after a Jetson UEFI-direct boot.
+ *
+ * order0_drain() takes every block off the order-0 list and holds it,
+ * chained through the first word of each page; order0_release() gives
+ * them back. Between the two, a single-page allocation has to split a
+ * larger block, and the page after it is that block's other half.
+ */
+struct held_page {
+    struct held_page *next;
+};
+
+static struct held_page *order0_drain(void)
+{
+    struct held_page *held = NULL;
+
+    for (unsigned int n = 0; n < 1000000u; n++) {
+        struct pmm_buddy_stats stats;
+        pmm_get_buddy_stats(&stats);
+        if (stats.free_counts[0] == 0) {
+            break;
+        }
+        struct held_page *p = pmm_alloc_page();
+        if (!p) {
+            break;
+        }
+        p->next = held;
+        held = p;
+    }
+    return held;
+}
+
+static void order0_release(struct held_page *held)
+{
+    while (held) {
+        struct held_page *next = held->next;
+        pmm_free_page(held);
+        held = next;
+    }
+}
+
+/*
  * Test: PROVE coalescing works by allocating a larger block after freeing buddies
  * This is the definitive test - if coalescing didn't happen, the large
  * allocation would fail due to fragmentation.
  */
-static void coalesce_enables_larger_allocation_body(void)
+static void coalesce_enables_larger_allocation_inner(void)
 {
     struct pmm_buddy_stats stats_before, stats_after;
     pmm_get_buddy_stats(&stats_before);
@@ -288,7 +337,7 @@ static void coalesce_enables_larger_allocation_body(void)
  * Test: Recursive coalescing - freeing should merge multiple levels
  * Free 4 adjacent order-0 blocks -> should become 1 order-2 block
  */
-static void recursive_coalescing_body(void)
+static void recursive_coalescing_inner(void)
 {
     struct pmm_buddy_stats stats_before, stats_after;
 
@@ -325,6 +374,23 @@ static void recursive_coalescing_body(void)
     pmm_free_pages(block8_again, 8);
 }
 
+/* The proofs run with the order-0 list empty (see order0_drain). An
+ * assertion that fails inside returns to here, so the held pages are
+ * given back either way. */
+static void coalesce_enables_larger_allocation_body(void)
+{
+    struct held_page *held = order0_drain();
+    coalesce_enables_larger_allocation_inner();
+    order0_release(held);
+}
+
+static void recursive_coalescing_body(void)
+{
+    struct held_page *held = order0_drain();
+    recursive_coalescing_inner();
+    order0_release(held);
+}
+
 static void test_coalesce_enables_larger_allocation(void)
 {
     coalesce_enables_larger_allocation_body();
@@ -336,10 +402,10 @@ static void test_recursive_coalescing(void)
 }
 
 /*
- * The state the two tests above meet on hardware (#1109, #1207): free
- * single pages on the order-0 list whose buddies are in use. On Jetson
- * and Pi 5 the reserve carve-outs leave about a hundred of them at boot;
- * QEMU has none, so the tests never saw them there. Make eight: take a
+ * The state the two tests above meet after a Jetson kexec boot (#1109,
+ * #1207): free single pages on the order-0 list whose buddies are in
+ * use. The reserve carve-outs leave about a hundred of them there; QEMU
+ * has none, so the tests never saw them. Make eight: take a
  * 16-page block and free its even pages one by one (each odd buddy stays
  * allocated, so none of them merges).
  */
@@ -366,8 +432,8 @@ static void lone_free_pages_release(void *block)
 
 /*
  * Test: the coalescing proof holds with free single pages on the order-0
- * list (the hardware state; regression test for the #1109 failures of
- * test_coalesce_enables_larger_allocation).
+ * list (the Jetson kexec state; regression test for the #1109 failures
+ * of test_coalesce_enables_larger_allocation).
  */
 static void test_coalesce_with_lone_free_pages(void)
 {
@@ -1039,13 +1105,15 @@ static void test_free_does_not_merge_with_split_buddy(void)
 
     /* Clean up only from the expected state: pages 0-1 one order-1 block,
      * pages 2 and 3 still two order-0 blocks. Take 3 and 2 back and free
-     * them as the order-1 block they are; it merges with pages 0-1. */
+     * them one by one, as they were allocated: the second free merges the
+     * pair, and the pair merges with pages 0-1. */
     bool back = false;
     if (order0 == 1 && order2 == 0 && order3 == 0) {
         back = retake_free_page(base + 3 * PAGE_SIZE) &&
                retake_free_page(base + 2 * PAGE_SIZE);
         if (back) {
-            pmm_free_pages((void *)(base + 2 * PAGE_SIZE), 2);
+            pmm_free_page((void *)(base + 2 * PAGE_SIZE));
+            pmm_free_page((void *)(base + 3 * PAGE_SIZE));
         }
     }
 
