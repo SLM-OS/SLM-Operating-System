@@ -96,10 +96,12 @@ volatile int preempt_disabled[MAX_CPUS];
 _Static_assert(CACHE_LINE_SIZE == 64,
                "SPINLOCK_ARRAY in spinlock.h hardcodes 64-byte alignment");
 
+#define LOCK_STRIDE 16U   /* EXPERIMENT (#1262): 16 * 4 bytes = one cache line per lock */
+
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks needs cacheable memory. */
-static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
+static SPINLOCK_ARRAY(rq_lock, MAX_CPUS * LOCK_STRIDE);  /* EXPERIMENT: one cache line per lock */
 
 #if CONFIG_WORK_STEALING
 /*
@@ -116,7 +118,7 @@ static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
  * Placement: cacheable BSS on every platform; the caches are coherent
  * (docs/adr/0007-cross-cpu-coherency.md, #1193).
  *
- * Locking: see `steal_deque_lock[MAX_CPUS]` below. The deque's own
+ * Locking: see `steal_deque_lock[(MAX_CPUS) * LOCK_STRIDE]` below. The deque's own
  * `steal_deque_*` functions are lockless and the callers in sched.c
  * are responsible for serializing access. The steal_deque_t used to
  * embed its own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` made
@@ -133,12 +135,12 @@ static steal_deque_t cpu_steal_deques[MAX_CPUS];
  * steal_deque_t which was neutered by SPINLOCK_SKIP_LOCKING on
  * Jetson. Acquire the victim's lock before any steal_deque_*
  * operation; never held across other locks. */
-static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
+static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS * LOCK_STRIDE);  /* EXPERIMENT: one cache line per lock */
 
 /* Failure-reason trace for `bench stealing` (#1203). Layout, writers
  * and the visibility argument are in steal_trace.h. Cacheable BSS on
  * every platform: steal_trace[c] is written only by CPU c inside
- * sched_try_steal, steal_trace_dq[v] only under steal_deque_lock[v]. */
+ * sched_try_steal, steal_trace_dq[v] only under steal_deque_lock[(v) * LOCK_STRIDE]. */
 static struct steal_trace_cpu steal_trace[MAX_CPUS];
 static struct steal_trace_dq steal_trace_dq[MAX_CPUS];
 static volatile uint32_t steal_trace_run;  /* 0 = never armed */
@@ -171,7 +173,7 @@ static volatile uint32_t swo_rq_owner[MAX_CPUS];
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave_l(uint32_t cpu, uint32_t line)
 {
-    irq_flags_t f = spin_lock_irqsave(&rq_lock[cpu]);
+    irq_flags_t f = spin_lock_irqsave(&rq_lock[(cpu) * LOCK_STRIDE]);
     (void)line;
     SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
@@ -182,13 +184,13 @@ static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
     SWO_RQ_DISOWN(cpu);
-    spin_unlock_irqrestore(&rq_lock[cpu], flags);
+    spin_unlock_irqrestore(&rq_lock[(cpu) * LOCK_STRIDE], flags);
 }
 
 /* For schedule(), which masks first and then reads its CPU id (#1242). */
 static inline void rq_lock_masked_l(uint32_t cpu, uint32_t line)
 {
-    spin_lock(&rq_lock[cpu]);
+    spin_lock(&rq_lock[(cpu) * LOCK_STRIDE]);
     (void)line;
     SWO_RQ_OWN(cpu, line);
     SLOT_TRACE_RQ_LOCKED(cpu);
@@ -198,7 +200,7 @@ static inline void rq_unlock_masked(uint32_t cpu)
 {
     SLOT_TRACE_RQ_UNLOCKING(cpu);
     SWO_RQ_DISOWN(cpu);
-    spin_unlock(&rq_lock[cpu]);
+    spin_unlock(&rq_lock[(cpu) * LOCK_STRIDE]);
 }
 
 /*
@@ -605,7 +607,7 @@ const struct sched_policy_ops *sched_policy_get(int index)
  * Switch-in deferral (#1234, ADR 0008 part 2). switch_in_waiting[c] is the
  * task CPU c's last schedule() could not switch in because the CPU that ran
  * it had not yet released it (on_cpu still set), when no other queued task
- * was ready either; NULL otherwise. Written only by CPU c under rq_lock[c];
+ * was ready either; NULL otherwise. Written only by CPU c under rq_lock[(c) * LOCK_STRIDE];
  * read only by c's idle loop, outside the lock, as a hint: tasks live in the
  * static task_table, the poll on w->on_cpu is bounded, and the schedule()
  * that follows decides under the lock.
@@ -684,7 +686,7 @@ static inline struct task *idle_waiting(uint32_t cpu)
 }
 
 /*
- * Choose what to switch in (ADR 0008 part 2), under rq_lock[cpu] with cpu
+ * Choose what to switch in (ADR 0008 part 2), under rq_lock[(cpu) * LOCK_STRIDE] with cpu
  * pinned (part 1). `next` is the queue head (or idle). A task is ready to be
  * switched in when it is `current` or its previous CPU has released it
  * (on_cpu 0, load-acquire: the store-release in sched_finish_switch orders
@@ -1037,12 +1039,12 @@ void scheduler_init(void)
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        spin_init(&rq_lock[i]);
+        spin_init(&rq_lock[(i) * LOCK_STRIDE]);
         /* Whole struct, not field by field: the AI tick counters were
          * missed that way and started from leftover data (#1045). */
         sched_runqueue_clear(cpu_rq(i));
 #if CONFIG_WORK_STEALING
-        spin_init(&steal_deque_lock[i]);
+        spin_init(&steal_deque_lock[(i) * LOCK_STRIDE]);
         steal_deque_init(&cpu_steal_deques[i]);
 #endif
     }
@@ -1253,21 +1255,21 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      * the task still runs on its owner, just not stealable. Idle tasks
      * are never stealable.
      *
-     * Serialized by steal_deque_lock[cpu] (cacheable, real exclusive
+     * Serialized by steal_deque_lock[(cpu) * LOCK_STRIDE] (cacheable, real exclusive
      * monitors on every platform). The embedded lock inside the
      * deque is a no-op on Jetson.
      */
     if (task->cpu_affinity == CPU_AFFINITY_ANY &&
         task != cpu_rq(cpu)->idle_task) {
-        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[(cpu) * LOCK_STRIDE]);
         int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
         if (rc == 0) {
-            /* #1203 trace: written under steal_deque_lock[cpu]. */
+            /* #1203 trace: written under steal_deque_lock[(cpu) * LOCK_STRIDE]. */
             steal_trace_dq[cpu].pushes++;
             steal_trace_dq[cpu].last_push = timer_get_count();
             steal_trace_dq[cpu].push_run = steal_trace_run;
         }
-        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+        spin_unlock_irqrestore(&steal_deque_lock[(cpu) * LOCK_STRIDE], sd_flags);
         if (rc < 0) {
             sched_diag_steal_push_full[cpu]++;
         }
@@ -1627,11 +1629,11 @@ void scheduler_terminate_task(struct task *task)
      * slot (ABA race). See docs/archive/plans/jetson-capstone-execution-plan.md S1
      * for the panic that surfaced this — became observable on Jetson
      * once stealing started succeeding reliably. Serialized by
-     * steal_deque_lock[cpu]. */
+     * steal_deque_lock[(cpu) * LOCK_STRIDE]. */
     {
-        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[(cpu) * LOCK_STRIDE]);
         steal_deque_remove(&cpu_steal_deques[cpu], task);
-        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+        spin_unlock_irqrestore(&steal_deque_lock[(cpu) * LOCK_STRIDE], sd_flags);
     }
 #endif
 }
@@ -1684,11 +1686,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     if (old_cpu < target_cpu) {
         flags = rq_lock_irqsave(old_cpu);
-        spin_lock(&rq_lock[target_cpu]);
+        spin_lock(&rq_lock[(target_cpu) * LOCK_STRIDE]);
         SWO_RQ_OWN(target_cpu, __LINE__);
     } else {
         flags = rq_lock_irqsave(target_cpu);
-        spin_lock(&rq_lock[old_cpu]);
+        spin_lock(&rq_lock[(old_cpu) * LOCK_STRIDE]);
         SWO_RQ_OWN(old_cpu, __LINE__);
     }
 
@@ -1732,11 +1734,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
         SWO_RQ_DISOWN(target_cpu);
-        spin_unlock(&rq_lock[target_cpu]);
+        spin_unlock(&rq_lock[(target_cpu) * LOCK_STRIDE]);
         rq_unlock_irqrestore(old_cpu, flags);
     } else {
         SWO_RQ_DISOWN(old_cpu);
-        spin_unlock(&rq_lock[old_cpu]);
+        spin_unlock(&rq_lock[(old_cpu) * LOCK_STRIDE]);
         rq_unlock_irqrestore(target_cpu, flags);
     }
 
@@ -2139,17 +2141,17 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 #endif
             /* #1203: was the lock held when this thief arrived? Plain
              * load; the acquisition below is unchanged. */
-            if (steal_deque_lock[victim].lock != 0) {
+            if (steal_deque_lock[(victim) * LOCK_STRIDE].lock != 0) {
                 tr->v_busy++;
             }
             /* Serialize this steal against owner's pushes / other
              * thieves' steals on the same victim's deque. Held
              * briefly (for the pop) and released before we take
-             * rq_lock[victim] — the two locks are never held
+             * rq_lock[(victim) * LOCK_STRIDE] — the two locks are never held
              * together so no ordering constraint exists between
              * them. */
             irq_flags_t sd_flags =
-                spin_lock_irqsave(&steal_deque_lock[victim]);
+                spin_lock_irqsave(&steal_deque_lock[(victim) * LOCK_STRIDE]);
             int was_nonempty =
                 !steal_deque_is_empty(&cpu_steal_deques[victim]);
             struct task *candidate =
@@ -2162,7 +2164,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 steal_trace_dq[victim].drain_ts = now;
                 steal_trace_dq[victim].drain_run = run;
             }
-            spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
+            spin_unlock_irqrestore(&steal_deque_lock[(victim) * LOCK_STRIDE], sd_flags);
             if (!candidate) {
                 break;  /* Empty — try next victim */
             }
@@ -2550,7 +2552,7 @@ void sched_rebalance_tick(uint32_t cpu)
      * and the `assigned_cpu = idle_cpu` write below there is a window
      * where a thief on a third CPU could pop the candidate's stale
      * deque entry on busy_cpu's deque. The thief then acquires
-     * rq_lock[busy_cpu], runs the validation in `sched_try_steal`,
+     * rq_lock[(busy_cpu) * LOCK_STRIDE], runs the validation in `sched_try_steal`,
      * and reaches `remove_from_cpu_queue_locked(candidate, busy_cpu)`
      * — which returns 0 because we already removed candidate from
      * busy_cpu's queue under the lock. The result is `stealable == 0`
@@ -2641,11 +2643,11 @@ relock:
     {
         uint64_t swo_l0 = timer_get_count();
         uint32_t spins = 0;
-        uint32_t word0 = *(volatile uint32_t *)&rq_lock[this_cpu];
+        uint32_t word0 = *(volatile uint32_t *)&rq_lock[(this_cpu) * LOCK_STRIDE];
         uint32_t own0 = swo_rq_owner[this_cpu];
         uint32_t own1 = 0;
         bool sampled = false;
-        while (!spin_trylock(&rq_lock[this_cpu])) {
+        while (!spin_trylock(&rq_lock[(this_cpu) * LOCK_STRIDE])) {
             spins++;
             if (!sampled && swo_diag_us(swo_l0) > 1000) {
                 own1 = swo_rq_owner[this_cpu];
@@ -3471,7 +3473,7 @@ void sched_swo_diag_dump(const char *tag, struct task *const *tasks, uint32_t n)
         d->idle = sched_diag_idle_loops[c];
         d->picked = sched_diag_picked[c];
         d->defer = sched_diag_switch_defer[c];
-        d->lock_word = *(volatile uint32_t *)&rq_lock[c];
+        d->lock_word = *(volatile uint32_t *)&rq_lock[(c) * LOCK_STRIDE];
         d->phase = swo_diag_phase[c];
         d->phase_arg = swo_diag_phase_arg[c];
         d->phase_age_us = (uint32_t)((t_snap - swo_diag_phase_t[c]) /
