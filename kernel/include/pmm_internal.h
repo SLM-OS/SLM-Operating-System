@@ -62,4 +62,21 @@ size_t pmm_free_overlap_count_locked(uintptr_t start, uintptr_t end);
  */
 int pmm_collect_reserves(dtb_memreserve_t *out, int max);
 
+#if defined(ENABLE_BOOT_TESTS)
+/*
+ * Test hooks, built into test kernels only (#1207).
+ *
+ * pmm_test_add_region() adds [start, end) to the allocator the way
+ * pmm_init adds a carved subrange. The caller must own every page the
+ * range touches (allocated from the PMM, not freed); ownership of the
+ * pages the allocator lists passes to the allocator.
+ *
+ * pmm_free_block_order() returns the order of the listed free block that
+ * starts at addr, or -1 when no listed block starts there. Walks the
+ * lists: tests only.
+ */
+void pmm_test_add_region(uintptr_t start, uintptr_t end);
+int pmm_free_block_order(uintptr_t addr);
+#endif
+
 #endif /* PMM_INTERNAL_H */

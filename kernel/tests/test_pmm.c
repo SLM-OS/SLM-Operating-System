@@ -241,7 +241,7 @@ static void test_buddy_address_calculation(void)
  * This is the definitive test - if coalescing didn't happen, the large
  * allocation would fail due to fragmentation.
  */
-static void test_coalesce_enables_larger_allocation(void)
+static void coalesce_enables_larger_allocation_body(void)
 {
     struct pmm_buddy_stats stats_before, stats_after;
     pmm_get_buddy_stats(&stats_before);
@@ -288,7 +288,7 @@ static void test_coalesce_enables_larger_allocation(void)
  * Test: Recursive coalescing - freeing should merge multiple levels
  * Free 4 adjacent order-0 blocks -> should become 1 order-2 block
  */
-static void test_recursive_coalescing(void)
+static void recursive_coalescing_body(void)
 {
     struct pmm_buddy_stats stats_before, stats_after;
 
@@ -323,6 +323,83 @@ static void test_recursive_coalescing(void)
     TEST_ASSERT_NOT_NULL_MESSAGE(block8_again,
         "8-page allocation failed after freeing 8 single pages");
     pmm_free_pages(block8_again, 8);
+}
+
+static void test_coalesce_enables_larger_allocation(void)
+{
+    coalesce_enables_larger_allocation_body();
+}
+
+static void test_recursive_coalescing(void)
+{
+    recursive_coalescing_body();
+}
+
+/*
+ * The state the two tests above meet on hardware (#1109, #1207): free
+ * single pages on the order-0 list whose buddies are in use. On Jetson
+ * and Pi 5 the reserve carve-outs leave about a hundred of them at boot;
+ * QEMU has none, so the tests never saw them there. Make eight: take a
+ * 16-page block and free its even pages one by one (each odd buddy stays
+ * allocated, so none of them merges).
+ */
+#define LONE_PAGES_BLOCK 16
+static void *lone_free_pages_make(void)
+{
+    void *block = pmm_alloc_pages(LONE_PAGES_BLOCK);
+    if (block) {
+        for (int i = 0; i < LONE_PAGES_BLOCK; i += 2) {
+            pmm_free_page((uint8_t *)block + (size_t)i * PAGE_SIZE);
+        }
+    }
+    return block;
+}
+
+/* Free the odd pages: each merges with its even buddy, and the block is
+ * whole again. */
+static void lone_free_pages_release(void *block)
+{
+    for (int i = 1; i < LONE_PAGES_BLOCK; i += 2) {
+        pmm_free_page((uint8_t *)block + (size_t)i * PAGE_SIZE);
+    }
+}
+
+/*
+ * Test: the coalescing proof holds with free single pages on the order-0
+ * list (the hardware state; regression test for the #1109 failures of
+ * test_coalesce_enables_larger_allocation).
+ */
+static void test_coalesce_with_lone_free_pages(void)
+{
+    size_t free_before = pmm_get_free_pages();
+    void *block = lone_free_pages_make();
+    TEST_ASSERT_NOT_NULL(block);
+
+    coalesce_enables_larger_allocation_body();
+
+    lone_free_pages_release(block);
+    if (!Unity.current_test_failed) {
+        TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+    }
+}
+
+/*
+ * Test: recursive coalescing holds with free single pages on the order-0
+ * list (regression test for the #1109 failures of
+ * test_recursive_coalescing).
+ */
+static void test_recursive_coalescing_with_lone_free_pages(void)
+{
+    size_t free_before = pmm_get_free_pages();
+    void *block = lone_free_pages_make();
+    TEST_ASSERT_NOT_NULL(block);
+
+    recursive_coalescing_body();
+
+    lone_free_pages_release(block);
+    if (!Unity.current_test_failed) {
+        TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+    }
 }
 
 /*
@@ -855,6 +932,168 @@ static void test_mixed_workload_stress(void)
 }
 
 /* ============================================================================
+ * Free-list consistency under states the allocator must tolerate (#1207)
+ * ============================================================================ */
+
+/*
+ * Take the free page at `want` back off the order-0 list. The list is
+ * LIFO, so it is normally the first page handed out; pages that are not
+ * `want` are held and returned. False if `want` did not come back.
+ */
+static bool retake_free_page(uintptr_t want)
+{
+    void *others[32];
+    int n = 0;
+    bool got = false;
+
+    while (n < 32) {
+        void *p = pmm_alloc_page();
+        if (!p) {
+            break;
+        }
+        if ((uintptr_t)p == want) {
+            got = true;
+            break;
+        }
+        others[n++] = p;
+    }
+    while (n > 0) {
+        pmm_free_page(others[--n]);
+    }
+    return got;
+}
+
+/*
+ * Test: a region whose end is not page-aligned does not list the page
+ * that holds the end. pmm_init carves reserved ranges out of each region
+ * and adds what is left; a reservation that starts inside a page ends the
+ * subrange before it inside that page, and the page belongs to the
+ * reservation. Listing it also leaves two free order-0 buddies that were
+ * never merged.
+ */
+static void test_add_region_leaves_out_partial_last_page(void)
+{
+    size_t free_before = pmm_get_free_pages();
+    void *x = pmm_alloc_pages(4);
+    TEST_ASSERT_NOT_NULL(x);
+    uintptr_t base = (uintptr_t)x;
+
+    /* [page 2, 0x100 bytes into page 3): one whole page. */
+    pmm_test_add_region(base + 2 * PAGE_SIZE, base + 3 * PAGE_SIZE + 0x100);
+
+    int order2 = pmm_free_block_order(base + 2 * PAGE_SIZE);
+    size_t over = pmm_free_overlap_count_locked(base + 3 * PAGE_SIZE,
+                                                base + 4 * PAGE_SIZE);
+
+    /* Put the block back together before asserting: take back whatever
+     * was listed, then free the block whole. */
+    bool back = true;
+    if (over) {
+        back = retake_free_page(base + 3 * PAGE_SIZE) && back;
+    }
+    if (order2 == 0) {
+        back = retake_free_page(base + 2 * PAGE_SIZE) && back;
+    }
+    if (back) {
+        pmm_free_pages(x, 4);
+    }
+
+    TEST_ASSERT_MESSAGE(order2 == 0,
+        "the whole page of the region was not listed at order 0");
+    TEST_ASSERT_MESSAGE(over == 0,
+        "the page holding the region's unaligned end was listed");
+    TEST_ASSERT_TRUE_MESSAGE(back, "could not take the test pages back");
+    TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+}
+
+/*
+ * Test: a free does not merge with a buddy range that is free page by
+ * page but is not one free block of that order (#1207).
+ *
+ * Pages 2 and 3 of a held 4-page block are added as two separate regions,
+ * so they sit on the order-0 list as two blocks, unmerged. Freeing pages
+ * 0-1 as an order-1 block then finds its order-1 buddy range (pages 2-3)
+ * free. Merging there would unlink page 2 from "the order-1 list", which
+ * it is not on: free_counts[1] is decremented for a block the list never
+ * held (an underflow when it is 0), page 3 stays on the order-0 list
+ * inside the merged block, and a later allocation finds a non-zero count
+ * over an empty list and splits from PMM_ALLOC_FAIL: the #1207 halt.
+ */
+static void test_free_does_not_merge_with_split_buddy(void)
+{
+    size_t free_before = pmm_get_free_pages();
+    void *x = pmm_alloc_pages(4);
+    TEST_ASSERT_NOT_NULL(x);
+    uintptr_t base = (uintptr_t)x;
+
+    pmm_test_add_region(base + 2 * PAGE_SIZE, base + 3 * PAGE_SIZE);
+    pmm_test_add_region(base + 3 * PAGE_SIZE, base + 4 * PAGE_SIZE);
+    TEST_ASSERT_EQUAL_INT(0, pmm_free_block_order(base + 2 * PAGE_SIZE));
+    TEST_ASSERT_EQUAL_INT(0, pmm_free_block_order(base + 3 * PAGE_SIZE));
+
+    pmm_free_pages(x, 2);
+
+    int order0 = pmm_free_block_order(base);
+    int order2 = pmm_free_block_order(base + 2 * PAGE_SIZE);
+    int order3 = pmm_free_block_order(base + 3 * PAGE_SIZE);
+
+    /* Clean up only from the expected state: pages 0-1 one order-1 block,
+     * pages 2 and 3 still two order-0 blocks. Take 3 and 2 back and free
+     * them as the order-1 block they are; it merges with pages 0-1. */
+    bool back = false;
+    if (order0 == 1 && order2 == 0 && order3 == 0) {
+        back = retake_free_page(base + 3 * PAGE_SIZE) &&
+               retake_free_page(base + 2 * PAGE_SIZE);
+        if (back) {
+            pmm_free_pages((void *)(base + 2 * PAGE_SIZE), 2);
+        }
+    }
+
+    TEST_ASSERT_MESSAGE(order0 == 1,
+        "pages 0-1 are not one order-1 free block: merged with a buddy "
+        "range that is not one block");
+    TEST_ASSERT_MESSAGE(order2 == 0, "page 2 left the order-0 list");
+    TEST_ASSERT_MESSAGE(order3 == 0, "page 3 left the order-0 list");
+    TEST_ASSERT_TRUE_MESSAGE(back, "could not take the test pages back");
+    TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+}
+
+/*
+ * Test: a free whose range holds a page that is already free is rejected
+ * (an over-sized free, or a free after part of the block was freed). The
+ * double-free check used to look at the first page only, so the range
+ * went onto a free list over the block already listed inside it.
+ */
+static void test_free_rejects_range_holding_a_free_page(void)
+{
+    size_t free_start = pmm_get_free_pages();
+    void *x = pmm_alloc_pages(4);
+    TEST_ASSERT_NOT_NULL(x);
+    uintptr_t base = (uintptr_t)x;
+
+    pmm_free_page((void *)(base + 2 * PAGE_SIZE));   /* page 2: order 0 */
+    size_t free_before = pmm_get_free_pages();
+
+    pmm_free_pages(x, 4);                            /* must be rejected */
+
+    size_t free_after = pmm_get_free_pages();
+    int order0 = pmm_free_block_order(base);
+    int order2 = pmm_free_block_order(base + 2 * PAGE_SIZE);
+
+    if (free_after == free_before && order0 < 0 && order2 == 0) {
+        pmm_free_pages(x, 2);                          /* pages 0-1 */
+        pmm_free_page((void *)(base + 3 * PAGE_SIZE)); /* merges all four */
+    }
+
+    TEST_ASSERT_MESSAGE(free_after == free_before,
+        "a free over an already-free page changed the free page count");
+    TEST_ASSERT_MESSAGE(order0 == -1,
+        "the rejected range was put on a free list");
+    TEST_ASSERT_MESSAGE(order2 == 0, "page 2 left the order-0 list");
+    TEST_ASSERT_EQUAL_UINT64(free_start, pmm_get_free_pages());
+}
+
+/* ============================================================================
  * NC Memory Allocator Tests (Pi 5 / Jetson only)
  * ============================================================================ */
 
@@ -1267,6 +1506,8 @@ int test_suite_pmm(void)
     /* CRITICAL: Coalescing verification */
     RUN_TEST(test_coalesce_enables_larger_allocation);
     RUN_TEST(test_recursive_coalescing);
+    RUN_TEST(test_coalesce_with_lone_free_pages);
+    RUN_TEST(test_recursive_coalescing_with_lone_free_pages);
     RUN_TEST(test_coalesce_any_free_order);
 
     /* Split verification */
@@ -1300,6 +1541,11 @@ int test_suite_pmm(void)
     /* Stress tests */
     RUN_TEST(test_no_memory_leak);
     RUN_TEST(test_mixed_workload_stress);
+
+    /* Free-list consistency (#1207) */
+    RUN_TEST(test_add_region_leaves_out_partial_last_page);
+    RUN_TEST(test_free_does_not_merge_with_split_buddy);
+    RUN_TEST(test_free_rejects_range_holding_a_free_page);
 
     /* /memreserve/ carve helper */
     RUN_TEST(test_carve_no_reserves_returns_full_region);

@@ -1128,6 +1128,40 @@ static void pmm_add_region(uintptr_t start, uintptr_t end)
     }
 }
 
+#if defined(ENABLE_BOOT_TESTS)
+/*
+ * Test hooks (kernel/include/pmm_internal.h); test kernels only.
+ *
+ * pmm_test_add_region() hands [start, end) to pmm_add_region() under
+ * pmm_lock, as pmm_init does for a carved subrange. The caller must own
+ * the whole pages of the range (allocated from the PMM and not freed).
+ * pmm_free_block_order() is the order of the listed free block that
+ * starts at addr, or -1 when no listed block starts there.
+ */
+void pmm_test_add_region(uintptr_t start, uintptr_t end)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    pmm_add_region(start, end);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+int pmm_free_block_order(uintptr_t addr)
+{
+    int found = -1;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    for (unsigned int o = 0; o <= MAX_ORDER && found < 0; o++) {
+        for (struct free_block *b = buddy_state.free_lists[o]; b; b = b->next) {
+            if ((uintptr_t)b == addr) {
+                found = (int)o;
+                break;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return found;
+}
+#endif /* ENABLE_BOOT_TESTS */
+
 void pmm_init(void)
 {
     uintptr_t kernel_end = (uintptr_t)&__kernel_end;
